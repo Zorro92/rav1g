@@ -1,0 +1,192 @@
+/*
+ * Copyright 2020 Google LLC
+ *
+ */
+
+/*
+ * Copyright (c) 2020, Alliance for Open Media. All rights reserved
+ *
+ * This source code is subject to the terms of the BSD 2 Clause License and
+ * the Alliance for Open Media Patent License 1.0. If the BSD 2 Clause License
+ * was not distributed with this source code in the LICENSE file, you can
+ * obtain it at www.aomedia.org/license/software. If the Alliance for Open
+ * Media Patent License 1.0 was not distributed with this source code in the
+ * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
+ */
+
+#include "cmd_parser.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <map>
+
+int CParameters::Parse(one_task& args, std::string& Err) {
+  const ParamStruct avaiting[] = {
+      {"i", atString, anAtLeastOne, "source file path", "", &params_.source_file_},
+      {"o", atString, anOptional, "target YUV file path", "output", &params_.target_file_},
+      {"dir", atString, anAtLeastOne, "source directory", "", &params_.source_dir_},
+      {"t", atInt, anOptional, "threads", "", &params_.threads_},
+      {"loop", atInt, anOptional, "loops", "", &params_.loops_},
+      {"limit", atInt, anOptional, "decoding frame limit", "", &params_.limit_},
+      {"progress", atSingle, anOptional, "show decoding time for each frame", "", &params_.progress_},
+      {"save_md5", atString, anOptional, "Save md5 for each frame", "", &params_.save_md5_},
+      {"md5_frame_check", atSingle, anOptional, "Calculate md5 for each frame & compare it with md5 file", "",
+       &params_.md5_frame_check_},
+      {"start", atInt, anOptional, "Start from frame No", "", &params_.start_frame_},
+      {"frate", atInt, anOptional,
+       "Frame rate. 0 - webm header framerate(for webm only), -1 - maximum frate, default 0", "", &params_.frate_},
+      {"dropinfo", atSingle, anOptional, "Show all drops", "", &params_.show_drops_},
+      {"queue_size", atInt, anOptional, "Player frame queue size. Default 16", "", &params_.player_queue_size_},
+      {"conformance", atSingle, anOptional, "Do conformance test for directory", "", &params_.conformance_},
+      {"try10x3", atSingle, anOptional, "Use 10_10_10_2 display mode. Default false", "", &params_.hdr10x3_},
+      {"r", atSingle, anOptional, "Recreate decoder for every file", "", &params_.recreate_}};
+  params_.command_line_ = args.command_line_;
+  const int list_length = sizeof(avaiting) / sizeof(ParamStruct);
+  bool has_value[list_length] = {false};
+  Err = "";
+  for (std::vector<std::string>::iterator iter = args.begin(); iter != args.end(); iter++) {
+    const char* cur = iter->c_str();
+    int par;
+    for (par = 0; par < list_length; par++) {
+      if (cur[0] != '-') {
+        int i = (int)(iter - args.begin());
+        GetHelp(i, iter->c_str(), Err, avaiting, list_length);
+        return i;
+      }
+      if (strcmp(&cur[1], avaiting[par].arg_name) == 0) {
+        switch (avaiting[par].type) {
+          case atString:
+            iter++;
+            *static_cast<std::string*>(avaiting[par].pValue) += *iter;
+            break;
+          case atSingle:
+            *static_cast<bool*>(avaiting[par].pValue) = true;
+            break;
+          case atInt:
+            iter++;
+            *static_cast<int*>(avaiting[par].pValue) = atoi(iter->c_str());
+            break;
+        }
+        has_value[par] = true;
+        break;
+      }
+    }
+    if (par == list_length) {
+      int i = (int)(iter - args.begin());
+      GetHelp(i, iter->c_str(), Err, avaiting, list_length);
+      return i;
+    }
+  }
+  int oneof = 0;
+  std::vector<int> idxs;
+  std::map<std::string, int> exclusives;
+  for (int i = 0; i < list_length; i++) {
+    if (avaiting[i].need == anMandatory && !has_value[i]) {
+      Err += "You MUST specify arg ";
+      Err += avaiting[i].arg_name;
+      Err += " value.\nUse \n";
+      GetHelp(0, 0, Err, avaiting, list_length);
+      return -1;
+    } else if (avaiting[i].need == anAtLeastOne) {
+      idxs.push_back(i);
+      if (has_value[i]) oneof++;
+    }
+    if (strlen(avaiting[i].exclusive) && has_value[i]) {
+      std::map<std::string, int>::iterator iter = exclusives.find(avaiting[i].exclusive);
+      if (iter != exclusives.end()) {
+        Err += "You can't use following args together: ";
+        Err += "\"";
+        Err += avaiting[iter->second].arg_name;
+        Err += "\" ";
+        Err += "\"";
+        Err += avaiting[i].arg_name;
+        Err += "\"";
+        return -1;
+      }
+      exclusives.insert(std::pair<std::string, int>(avaiting[i].exclusive, i));
+    }
+  }
+  if (!idxs.empty() && !oneof) {
+    Err += "You MUST specify at least one of the following args: ";
+    for (std::vector<int>::iterator iter = idxs.begin(); iter < idxs.end(); iter++) {
+      Err += avaiting[*iter].arg_name;
+      Err += ", ";
+    }
+    Err += "\nUse \n";
+    GetHelp(0, 0, Err, avaiting, list_length);
+    return -1;
+  }
+
+  params_.isDirectory_ = (params_.source_file_.empty() && !params_.source_dir_.empty());
+  params_.isSubList_ = (params_.source_file_.empty() && params_.source_dir_.empty() && !params_.view_list_.empty());
+  params_.needReadBack_ = !params_.target_file_.empty() || params_.md5_ || params_.md5_frame_check_ ||
+                          !params_.save_md5_.empty() || params_.conformance_ || params_.noninterop_;
+  if (!params_.source_file_.empty()) params_.source_file_ = read_root_path_ + params_.source_file_;
+  if (!params_.target_file_.empty()) params_.target_file_ = write_root_path_ + params_.target_file_;
+  if (!params_.source_dir_.empty()) params_.source_dir_ = read_root_path_ + params_.source_dir_;
+  if (!params_.save_md5_.empty()) params_.save_md5_ = write_root_path_ + params_.save_md5_;
+  if (params_.conformance_) {
+    params_.frate_ = -1;
+    params_.md5_ = true;
+  }
+  return 0;
+}
+
+void CParameters::Reset() {
+  params_.source_file_.clear();
+  params_.source_dir_.clear();
+  params_.bad_conform_dir_.clear();
+  params_.view_list_.clear();
+  params_.use_log_.clear();
+  params_.save_wrong_yuv_.clear();
+  params_.save_md5_.clear();
+  params_.isDirectory_ = false;
+  params_.isSubList_ = false;
+  params_.showIt_ = false;
+  params_.threads_ = 1;
+  params_.loops_ = 1;
+  params_.limit_ = -1;
+  params_.progress_ = false;
+  params_.start_frame_ = 0;
+  params_.frate_ = 0;
+  params_.needReadBack_ = false;
+  params_.md5_ = false;
+  params_.md5_frame_check_ = false;
+  params_.scheme_ = 0;
+  params_.player_queue_size_ = PLAYER_QUEUE_SIZE;
+  params_.extra_fb_num_ = 0;
+  params_.dec_task_queue_depth_ = 6;
+  params_.hdr10x3_ = 0;
+  params_.autoSyncAu_ = false;
+  params_.nonwait_sync_ = false;
+  params_.rawDecode_ = false;
+  params_.show_drops_ = false;
+  params_.conformance_ = false;
+  params_.noninterop_ = false;
+  params_.recreate_ = false;
+}
+
+void CParameters::GetHelp(int pos, const char* arg, std::string& errMsg, const ParamStruct* arr, int size) {
+  if (arg) {
+    char ss[128];
+    sprintf(ss, "Invalid command string.\nError in arg %d (%s).\nUse \n", pos, arg);
+    errMsg += ss;
+  }
+  errMsg += "{-i <source file path> | -dir <source directory>}\n";
+  for (int i = 2; i < size; i++) {
+    const ParamStruct& item = arr[i];
+    errMsg += " [-";
+    errMsg += item.arg_name;
+    if (item.type != atSingle) {
+      errMsg += " <";
+      errMsg += item.descr;
+      errMsg += ">";
+    }
+    errMsg += "]";
+    if (item.type == atSingle) {
+      errMsg += "\t";
+      errMsg += item.descr;
+    }
+    errMsg += "\n";
+  }
+  errMsg += "\n";
+}

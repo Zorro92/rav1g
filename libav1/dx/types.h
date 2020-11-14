@@ -1,0 +1,246 @@
+/*
+ * Copyright 2020 Google LLC
+ *
+ */
+
+/*
+ * Copyright (c) 2020, Alliance for Open Media. All rights reserved
+ *
+ * This source code is subject to the terms of the BSD 2 Clause License and
+ * the Alliance for Open Media Patent License 1.0. If the BSD 2 Clause License
+ * was not distributed with this source code in the LICENSE file, you can
+ * obtain it at www.aomedia.org/license/software. If the Alliance for Open
+ * Media Patent License 1.0 was not distributed with this source code in the
+ * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
+ */
+
+#pragma once
+#include "av1/common/blockd.h"
+#include "dx/av1_compute.h"
+#include "dx/av1_memory.h"
+#include "dx/av1_thread.h"
+#include "av1/common/onyxc_int.h"
+
+enum {
+  UsePipeline = 0,
+  PipelineSize = 2,
+  FrameThreadDataCount = 2,
+  EntropyThreadCount = 8,
+  ImagePoolSize = 16,
+};
+
+struct InterSortingInfo {
+  uint8_t bw_log2;
+  uint8_t bh_log2;
+  uint8_t type;
+  uint8_t type_index;
+  uint32_t index;
+};
+
+struct InterBlock {
+  uint16_t x, y;
+  uint32_t flags;
+  MV mv0;
+  MV mv1;
+  // uint32_t sorting_idx;
+};
+
+enum InterTypes {
+  // warp;
+  Warp = 0,
+
+  CasualInter,
+  CompoundAvrg,
+  CompoundDiff,
+  CompoundMasked,
+  CompoundGlobalWarp,
+  // Inter2x2, Inter2x2Comp here;
+  // sync
+  CompoundDiffUv,
+  CompoundDiffUvGlobalWarp,
+  ObmcAbove,
+  // sync
+  ObmcLeft,
+
+  // 2x2 only
+  Inter2x2,  //-> first pass
+  Inter2x2Comp,
+
+  Inter2x2CompP2,  //-> pass 2
+
+  InterSizesAllCommon = 24,
+  InterTypesNon2x2 = Inter2x2,
+  Inter2x2ArrOffset = InterSizesAllCommon * (InterTypesNon2x2 - 1),
+  Inter2x2Count = 3,
+  InterCountsAll = Inter2x2ArrOffset + Inter2x2Count,
+
+  CompoundTypeAvrg = 0,
+  CompoundTypeMasked = 1,
+  CompoundTypeDiffY = 2,
+  CompoundTypeDiffUv = 3,
+};
+
+enum {
+  IntraSizes = 9,                   // bw_log + bh_log = (0..4) + (0..4) = 0..8
+  ReconstructBlockSizes = 36,       //(0..5)*(0..5)
+  IntraTypeCount = IntraSizes + 1,  /// + filter_intra
+  IntraBlockOffset = InterTypes::InterCountsAll + ReconstructBlockSizes + IntraSizes,
+  ReconBlockOffset = InterTypes::InterCountsAll,
+};
+
+struct ScaleFactor {
+  int x_scale;
+  int x_step;
+  int y_scale;
+  int y_step;
+};
+
+struct ConstantBufferObject {
+  void* host_ptr;
+  D3D12_GPU_VIRTUAL_ADDRESS dev_address;
+  ConstantBufferObject(void* ptr, D3D12_GPU_VIRTUAL_ADDRESS addr) : host_ptr(ptr), dev_address(addr) {}
+};
+
+struct ComputeCommandBuffer {
+  Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator;
+  Microsoft::WRL::ComPtr<ID3D12Fence> fence;
+  HANDLE event;
+
+  GpuBufferObject* cb_alloc;
+  size_t cb_ptr;
+  uint32_t fence_value;
+
+  ConstantBufferObject Alloc(size_t size) {
+    size = (size + 255) & (~255);
+    assert(cb_ptr + size < cb_alloc->size);
+    size_t p = cb_ptr;
+    cb_ptr += size;
+    return ConstantBufferObject(reinterpret_cast<char*>(cb_alloc->host_ptr) + p,
+                                cb_alloc->dev->GetGPUVirtualAddress() + p);
+  }
+  void Reset() { cb_ptr = 0; }
+};
+
+struct av1_frame_thread_data {
+  ComputeCommandBuffer command_buffer;
+  bitdepth_dependent_shaders* shaders;
+  GpuBufferObject* mode_info_grid;
+  GpuBufferObject* idct_blocks_unordered;
+
+  GpuBufferObject* loop_rest_types;
+  GpuBufferObject* loop_rest_wiener;
+  GpuBufferObject* cdef_indexes;
+  GpuBufferObject* cdef_skips;
+  GpuBufferObject* filmgrain_rand_offset;
+
+  GpuBufferObject* gen_mi_block_indexes;
+  GpuBufferObject* gen_intra_inter_grid;
+  GpuBufferObject* gen_block_map;
+
+  GpuBufferObject* palette_buffer;
+
+  int* gen_intra_iter_y;
+  int* gen_intra_iter_uv;
+  int intra_iters;
+  int do_cdef;
+  int do_loop_rest;
+  int do_filmgrain;
+  int do_superres;
+  int is_hbd;
+
+  int ext_idct_buffer;
+  int iter_grid_stride;
+  int iter_grid_stride_uv;
+  int iter_grid_offset_uv;
+  int frame_number;
+  int bitdepth;
+  int thread_count;
+  int tile_count;
+  int mode_info_offset;
+  int mode_info_max;
+  int coef_buffer_offset;
+  av1_tile_data* tile_data;
+  HwFrameBuffer* frame_buffer;
+  HwFrameBuffer* back_buffer0;
+  HwFrameBuffer* dst_frame_buffer;
+  HwFrameBuffer* refs[8];
+
+  av1_frame_thread_data* sec_thread_data;
+  pthread_mutex_t sec_data_mutex;
+  int scale_enable;
+  ScaleFactor scale_factors[8];
+  volatile int64_t perf_markers[16];
+};
+
+typedef struct {
+  av1_frame_thread_data* data;
+  HwOutputImage* image;
+} GpuWorkItem;
+
+typedef struct Av1Core {
+  dx_compute_context compute;
+  av1_memory_allocator* memory;
+  compute_shader_lib* shader_lib;
+  av1_get_decoded_buffer_cb_fn_t cb_get_output_image;
+  av1_release_decoded_buffer_cb_fn_t cb_release_image;
+  aom_notify_frame_ready_cb_fn_t cb_notify_frame_ready;
+  void* image_alloc_priv;
+
+  void* ring_buf_host;
+  void* pbi_alloc;
+  void* buf_pool_alloc;
+  void** above_context_alloc[5];
+  void* restoration_info_alloc[3];
+  void* tplmvs_alloc;
+  GpuBufferObject* ring_buf_dev;
+  GpuBufferObject* idct_blocks;
+  GpuBufferObject* idct_residuals;
+  GpuBufferObject* frame_buffer_pool;
+  GpuBufferObject* inter_mask_lut;
+  GpuBufferObject* inter_warp_filter;
+  GpuBufferObject* mode_info_pool;
+  GpuBufferObject* idct_coefs;
+
+  GpuBufferObject* filmgrain_noise;
+  GpuBufferObject* filmgrain_gaus;
+  GpuBufferObject* filmgrain_random_luma;
+  GpuBufferObject* filmgrain_random_chroma;
+
+  GpuBufferObject* prediction_blocks;
+  GpuBufferObject* prediction_blocks_warp;
+  GpuBufferObject* loopfilter_blocks;
+
+  size_t fb_pool_alloc_ptr;
+  size_t fb_pool_alloc_reset;
+
+  int pred_map_size;
+  int block_count4x4;
+
+  av1_frame_thread_data frame_thread_data[FrameThreadDataCount];
+  av1_frame_thread_data* curr_frame_data;
+  int frame_number;
+  int thread_count;
+  int corrupted_seq;
+  HwFrameBuffer back_buffer1;
+  int fb_size;
+  int fb_offset;
+  int enable_superres;
+  int wedge_offsets[BLOCK_SIZES_ALL][2];
+
+  HwFrameBuffer fb_pool_src[16];
+  HwOutputImage image_pool_src[ImagePoolSize];
+  pthread_cond_t fb_pool_empty_cond;
+  pthread_mutex_t fb_pool_mutex;
+  DataPtrQueue fb_pool;
+  DataPtrQueueMT image_pool;
+  DataPtrQueueMT output_queue;
+  DataPtrQueueMT frame_data_pool;
+  GpuWorkItem gpu_item_pool_src[8];
+  DataPtrQueueMT gpu_item_pool;
+  DataPtrQueueMT gpu_waiting_queue;
+  pthread_t gpu_thread;
+  int tryhdr10x3;
+} Av1Core;
+
+Av1Core* Get(uint32_t may_be_null = 0);
+void PutPerfMarker(av1_frame_thread_data* td, volatile int64_t* marker);

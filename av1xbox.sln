@@ -1,0 +1,45 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio 15
+VisualStudioVersion = 15.0.26430.13
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{71E99F71-FAAA-4C20-9DC7-742F09A4F78E}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "libav1", "libav1\build\libav1.vcxproj", "{E68F3562-9876-4971-8D90-27035E27A825}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "uwp_dx12_player", "testing\uwp_dx12_player\uwp_dx12_player.vcxproj", "{634F5B60-2642-427E-902E-FF6A90965205}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "uwp_common", "testing\uwp_common\uwp_common.vcxproj", "{C7B73550-4CA4-45C1-8436-936AFD7F0CA5}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{E68F3562-9876-4971-8D90-27035E27A825}.Debug|x64.ActiveCfg = Debug|x64
+		{E68F3562-9876-4971-8D90-27035E27A825}.Debug|x64.Build.0 = Debug|x64
+		{E68F3562-9876-4971-8D90-27035E27A825}.Release|x64.ActiveCfg = Release|x64
+		{E68F3562-9876-4971-8D90-27035E27A825}.Release|x64.Build.0 = Release|x64
+		{634F5B60-2642-427E-902E-FF6A90965205}.Debug|x64.ActiveCfg = Debug|x64
+		{634F5B60-2642-427E-902E-FF6A90965205}.Debug|x64.Build.0 = Debug|x64
+		{634F5B60-2642-427E-902E-FF6A90965205}.Debug|x64.Deploy.0 = Debug|x64
+		{634F5B60-2642-427E-902E-FF6A90965205}.Release|x64.ActiveCfg = Release|x64
+		{634F5B60-2642-427E-902E-FF6A90965205}.Release|x64.Build.0 = Release|x64
+		{634F5B60-2642-427E-902E-FF6A90965205}.Release|x64.Deploy.0 = Release|x64
+		{C7B73550-4CA4-45C1-8436-936AFD7F0CA5}.Debug|x64.ActiveCfg = Debug|x64
+		{C7B73550-4CA4-45C1-8436-936AFD7F0CA5}.Debug|x64.Build.0 = Debug|x64
+		{C7B73550-4CA4-45C1-8436-936AFD7F0CA5}.Release|x64.ActiveCfg = Release|x64
+		{C7B73550-4CA4-45C1-8436-936AFD7F0CA5}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{634F5B60-2642-427E-902E-FF6A90965205} = {71E99F71-FAAA-4C20-9DC7-742F09A4F78E}
+		{C7B73550-4CA4-45C1-8436-936AFD7F0CA5} = {71E99F71-FAAA-4C20-9DC7-742F09A4F78E}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {67FED277-603A-4146-859C-9F01479D6253}
+	EndGlobalSection
+EndGlobal

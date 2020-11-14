@@ -1,0 +1,103 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Resource Files">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tga;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{31633f1f-9fde-41ec-b1e6-b7aed05a9e0d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="common">
+      <UniqueIdentifier>{c38ac1ea-4980-4198-b475-16fc598a70f9}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\..\third_party\libwebm\mkvparser\mkvparser.cc">
+      <Filter>common</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\third_party\libwebm\mkvparser\mkvreader.cc">
+      <Filter>common</Filter>
+    </ClCompile>
+    <ClCompile Include="..\common\frame_outs.cpp">
+      <Filter>common</Filter>
+    </ClCompile>
+    <ClCompile Include="..\common\ivfdec.c">
+      <Filter>common</Filter>
+    </ClCompile>
+    <ClCompile Include="..\common\log.cpp">
+      <Filter>common</Filter>
+    </ClCompile>
+    <ClCompile Include="..\common\md5_utils.c">
+      <Filter>common</Filter>
+    </ClCompile>
+    <ClCompile Include="..\common\mp4parser.cc">
+      <Filter>common</Filter>
+    </ClCompile>
+    <ClCompile Include="..\common\obudec.c">
+      <Filter>common</Filter>
+    </ClCompile>
+    <ClCompile Include="..\common\stream_reader.cpp">
+      <Filter>common</Filter>
+    </ClCompile>
+    <ClCompile Include="..\common\tools_common.c">
+      <Filter>common</Filter>
+    </ClCompile>
+    <ClCompile Include="..\common\webmdec.cc">
+      <Filter>common</Filter>
+    </ClCompile>
+    <ClCompile Include="..\player_common\cmd_parser.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\player_common\decoder.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="..\player_common\decoder_creator.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\common\frame_outs.h">
+      <Filter>common</Filter>
+    </ClInclude>
+    <ClInclude Include="..\common\frame_queue.h">
+      <Filter>common</Filter>
+    </ClInclude>
+    <ClInclude Include="..\common\ivfdec.h">
+      <Filter>common</Filter>
+    </ClInclude>
+    <ClInclude Include="..\common\log.h">
+      <Filter>common</Filter>
+    </ClInclude>
+    <ClInclude Include="..\common\md5_utils.h">
+      <Filter>common</Filter>
+    </ClInclude>
+    <ClInclude Include="..\common\mp4parser.h">
+      <Filter>common</Filter>
+    </ClInclude>
+    <ClInclude Include="..\common\obudec.h">
+      <Filter>common</Filter>
+    </ClInclude>
+    <ClInclude Include="..\common\stream_reader.h">
+      <Filter>common</Filter>
+    </ClInclude>
+    <ClInclude Include="..\common\tools_common.h">
+      <Filter>common</Filter>
+    </ClInclude>
+    <ClInclude Include="..\common\utils.h">
+      <Filter>common</Filter>
+    </ClInclude>
+    <ClInclude Include="..\common\webmdec.h">
+      <Filter>common</Filter>
+    </ClInclude>
+    <ClInclude Include="..\player_common\cmd_parser.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\player_common\decoder.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="..\player_common\decoder_creator.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>
