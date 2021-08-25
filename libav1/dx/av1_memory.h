@@ -40,6 +40,7 @@ enum MemoryType {
   HostRW = 2,
   ReadBack = 3,
   DeviceOnlyConst = 4,
+  UploadUAV = 5,
 };
 
 using Microsoft::WRL::ComPtr;

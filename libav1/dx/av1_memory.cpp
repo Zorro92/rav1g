@@ -91,25 +91,23 @@ GpuBufferObject *av1_memory_allocator::create_buffer(size_t size, MemoryType mem
   obj->size = (size + DeviceMemAlign1) & (~(DeviceMemAlign1));
 
   D3D12_HEAP_TYPE heapLut[] = {D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_TYPE_UPLOAD, D3D12_HEAP_TYPE_CUSTOM,
-                               D3D12_HEAP_TYPE_READBACK, D3D12_HEAP_TYPE_DEFAULT};
-  const D3D12_HEAP_TYPE heapType = heapLut[mem];
-  const D3D12_RESOURCE_STATES state = (mem == DeviceOnly) ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS
-                                                          : (mem == DeviceOnlyConst)
-                                                                ? D3D12_RESOURCE_STATE_COPY_DEST
-                                                                : (mem == ReadBack) ? D3D12_RESOURCE_STATE_COPY_DEST
-                                                                                    : D3D12_RESOURCE_STATE_GENERIC_READ;
+                               D3D12_HEAP_TYPE_READBACK, D3D12_HEAP_TYPE_DEFAULT, D3D12_HEAP_TYPE_CUSTOM };
+  D3D12_RESOURCE_STATES stateLut[] = { D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_RESOURCE_STATE_GENERIC_READ,
+                               D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS };
+  D3D12_CPU_PAGE_PROPERTY pagePropLut[] = { D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_CPU_PAGE_PROPERTY_WRITE_BACK,
+                              D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE };
 
   D3D12_HEAP_PROPERTIES heapProp;
-  heapProp.Type = heapType;
-  heapProp.CPUPageProperty = mem == HostRW ? D3D12_CPU_PAGE_PROPERTY_WRITE_BACK : D3D12_CPU_PAGE_PROPERTY_UNKNOWN;  //
-  heapProp.MemoryPoolPreference = mem == HostRW ? D3D12_MEMORY_POOL_L0 : D3D12_MEMORY_POOL_UNKNOWN;
+  heapProp.Type = heapLut[mem];
+  heapProp.CPUPageProperty = pagePropLut[mem];  //
+  heapProp.MemoryPoolPreference = (mem == HostRW || mem == UploadUAV) ? D3D12_MEMORY_POOL_L0 : D3D12_MEMORY_POOL_UNKNOWN;
   heapProp.CreationNodeMask = 0;
   heapProp.VisibleNodeMask = 0;
 
   const D3D12_RESOURCE_FLAGS flags =
-      (mem == DeviceOnly) ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE;
+      (mem == DeviceOnly || mem == UploadUAV) ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS : D3D12_RESOURCE_FLAG_NONE;
   HRESULT hr = context->device->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE,
-                                                        &CD3DX12_RESOURCE_DESC::Buffer(obj->size, flags), state, NULL,
+                                                        &CD3DX12_RESOURCE_DESC::Buffer(obj->size, flags), stateLut[mem], NULL,
                                                         __uuidof(*obj->dev), reinterpret_cast<void **>(&obj->dev));
 
   if (SUCCEEDED(hr) && mem != DeviceOnly && mem != DeviceOnlyConst) {

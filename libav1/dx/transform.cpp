@@ -96,9 +96,9 @@ void av1_idct_run(Av1Core *dec) {
   av1_tile_data *tdata = td->tile_data;
 
   command_list->SetComputeRootSignature(dec->shader_lib->sig_idct.Get());
-  command_list->SetComputeRootShaderResourceView(0, dec->idct_coefs->dev->GetGPUVirtualAddress());
-  command_list->SetComputeRootShaderResourceView(1, dec->idct_blocks->dev->GetGPUVirtualAddress());
-  command_list->SetComputeRootUnorderedAccessView(2, dec->idct_residuals->dev->GetGPUVirtualAddress());
+  command_list->SetComputeRootShaderResourceView(0, dec->idct_blocks->dev->GetGPUVirtualAddress());
+  command_list->SetComputeRootUnorderedAccessView(1, dec->idct_residuals->dev->GetGPUVirtualAddress());
+  command_list->SetComputeRootUnorderedAccessView(2, dec->idct_coefs->dev->GetGPUVirtualAddress());
   command_list->SetComputeRootConstantBufferView(4, cbo.dev_address);
   for (int type = 0; type <= TX_SIZES_ALL; ++type) {
     int offset = tdata->idct_blocks_sizes[type];

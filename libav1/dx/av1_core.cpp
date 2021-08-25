@@ -165,13 +165,14 @@ int av1_allocate_buffers(Av1Core *dec, av1_memory_manager_base *mem, const resou
   CHECK_RESULT(dec->loopfilter_blocks, mem->create_buffer(lf_blk_count * 32, MemoryType::DeviceOnly), do_assign);
   CHECK_RESULT(dec->mode_info_pool, mem->create_buffer(sizeof(MB_MODE_INFO) * mi_size, MemoryType::HostRW), do_assign);
   const int coef_buffer_size = target_width * target_height * 3 * IdctCoefCountNum / (IdctCoefCountDenum * 2);
-  CHECK_RESULT(dec->idct_coefs, mem->create_buffer(sizeof(int) * coef_buffer_size * 2, MemoryType::DeviceUpload),
+  CHECK_RESULT(dec->idct_coefs, mem->create_buffer(sizeof(int) * coef_buffer_size * 2, MemoryType::UploadUAV),
                do_assign);
   for (int i = 0; i < cfg.gpu_pipeline_depth; ++i) {
     av1_frame_thread_data *td = &dec->frame_thread_data[i];
     td->mode_info_max = mi_size >> 1;
     td->mode_info_offset = i * (mi_size >> 1);
     td->coef_buffer_offset = i * coef_buffer_size;
+    td->coef_buffer_size = coef_buffer_size * sizeof(int);
     CHECK_RESULT(td->command_buffer.cb_alloc, mem->create_buffer(1024 * 1024, MemoryType::DeviceUpload), do_assign);
     CHECK_RESULT(td->tile_data, (av1_tile_data *)mem->host_allocate(sizeof(av1_tile_data) * max_tiles), do_assign);
     CHECK_RESULT(td->gen_mi_block_indexes, mem->create_buffer(sizeof(int) * block_count_4x4 * 2, MemoryType::HostRW),
@@ -179,11 +180,8 @@ int av1_allocate_buffers(Av1Core *dec, av1_memory_manager_base *mem, const resou
     CHECK_RESULT(td->gen_intra_inter_grid, mem->create_buffer(grid_w * grid_h * 6, MemoryType::HostRW), do_assign);
     CHECK_RESULT(td->gen_block_map, mem->create_buffer(dec->pred_map_size * sizeof(int), MemoryType::HostRW),
                  do_assign);
-    // CHECK_RESULT(td->mode_info, mem->create_buffer(sizeof(MB_MODE_INFO) * mi_size, MemoryType::HostRW), do_assign);
     CHECK_RESULT(td->mode_info_grid, mem->create_buffer(sizeof(MB_MODE_INFO *) * mi_size, MemoryType::HostRW),
                  do_assign);
-    // CHECK_RESULT(td->idct_coefs, mem->create_buffer(sizeof(int) * target_width * target_height * 3 / 2,
-    // MemoryType::DeviceUpload), do_assign);
     CHECK_RESULT(td->idct_blocks_unordered,
                  mem->create_buffer(block_count_4x4 * IdctBlockSize, MemoryType::DeviceUpload), do_assign);
 
@@ -195,7 +193,9 @@ int av1_allocate_buffers(Av1Core *dec, av1_memory_manager_base *mem, const resou
     CHECK_RESULT(td->loop_rest_wiener, mem->create_buffer(64 * (block_count_4x4 >> 8), MemoryType::DeviceUpload),
                  do_assign);
     CHECK_RESULT(td->filmgrain_rand_offset,
-                 mem->create_buffer(sizeof(int) * (120 * (68 + 1)), MemoryType::DeviceUpload), do_assign);
+                 mem->create_buffer(sizeof(int) * ((target_width / 32 + 4) * (target_height / 32 + 1)),
+                                    MemoryType::DeviceUpload),
+                 do_assign);
 
     CHECK_RESULT(td->palette_buffer, mem->create_buffer(fb_size, MemoryType::DeviceUpload), do_assign);
   }
@@ -266,8 +266,7 @@ int create_device(dx_compute_context *context) {
   D3D12_COMMAND_QUEUE_DESC desc = {};
   if (!context->queue) {
     desc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
-    desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;  // enable_cpu_output == EnableHostOutput ?
-                                                 // D3D12_COMMAND_LIST_TYPE_DIRECT : D3D12_COMMAND_LIST_TYPE_COMPUTE;
+    desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
     hr = device->CreateCommandQueue(&desc, IID_PPV_ARGS(&context->queue));
     if (FAILED(hr)) return hr;
   }
@@ -295,9 +294,6 @@ extern "C" int av1_create_gpu_decoder(Av1Core **gpu_dec, aom_codec_dec_cfg_t *cf
   dx_compute_context *compute = &dec->compute;
   mem->set_dx_context(compute);
 
-  //    if (!cfg->out_buffers_cb.get_out_buffer_cb ||
-  //        !cfg->out_buffers_cb.release_out_buffer_cb)
-  //        return -1;
   dec->cb_get_output_image = cfg->out_buffers_cb.get_out_buffer_cb;
   dec->cb_release_image = cfg->out_buffers_cb.release_out_buffer_cb;
   dec->cb_notify_frame_ready = cfg->out_buffers_cb.notify_frame_ready_cb;
@@ -315,6 +311,7 @@ extern "C" int av1_create_gpu_decoder(Av1Core **gpu_dec, aom_codec_dec_cfg_t *cf
   rcfg.gpu_pipeline_depth = FrameThreadDataCount;
   rcfg.enable_superres = 1;
   if (av1_allocate_buffers(dec, mem, rcfg, 1)) return -1;
+  memset(dec->idct_coefs->host_ptr, 0, dec->idct_coefs->size);
 
   Microsoft::WRL::ComPtr<ID3D12Device> device = compute->device;
   dec->tryhdr10x3 = cfg->tryHDR10x3;
@@ -358,7 +355,6 @@ extern "C" int av1_create_gpu_decoder(Av1Core **gpu_dec, aom_codec_dec_cfg_t *cf
     img->size = 0;
     img->fb_ptr = NULL;
     img->is_valid = 0;
-    //        img->hw_buf = dec->output_frame_buffers[i];
     MTQueuePush(&dec->image_pool, img);
   }
 
@@ -368,8 +364,6 @@ extern "C" int av1_create_gpu_decoder(Av1Core **gpu_dec, aom_codec_dec_cfg_t *cf
   for (int i = 0; i < rcfg.ref_fb_count; ++i) {
     const int offset = dec->fb_offset + dec->fb_size * i;
     HwFrameBuffer *fb = &dec->fb_pool_src[i];
-    // fb->pool_ptr = pool;
-    // fb->fb_ptr = pool + offset;
     fb->size = dec->fb_size;
     fb->base_offset = offset;
     fb->ref_cnt = 0;
@@ -745,6 +739,8 @@ extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
       MTQueuePush(&dec->frame_data_pool, td->sec_thread_data);
     }
     MTQueuePush(&dec->frame_data_pool, td);
+    int * coef_buf = (int *)dec->idct_coefs->host_ptr;
+    memset(coef_buf + td->coef_buffer_offset, 0, td->coef_buffer_size);
     dec->curr_frame_data = NULL;
   }
 

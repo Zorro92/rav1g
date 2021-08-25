@@ -19,9 +19,9 @@
 
 #define IdctBlockSize 16
 
-ByteAddressBuffer buf_input : register(t0);
-ByteAddressBuffer buf_blocks : register(t1);
+ByteAddressBuffer buf_blocks : register(t0);
 RWByteAddressBuffer buf_dst : register(u0);
+RWByteAddressBuffer buf_input : register(u1);
 
 cbuffer cb_idct_frame_data : register(b1) {
   uint4 cb_planes[3];
@@ -32,6 +32,9 @@ cbuffer cb_idct_dispatch_data : register(b2) {
   uint cb_index_offset;
   uint cb_wicount;
 };
+
+int clamp_value(int value, int2 range) { return clamp(value, range.x, range.y); }
+
 
 #define NewSqrt2Bits 12
 #define NewSqrt2 5793
@@ -61,7 +64,13 @@ cbuffer cb_idct_dispatch_data : register(b2) {
     for (i = 0; i < COEF_LOOP; ++i) {                                                                                 \
       int4 coefs = int4(0, 0, 0, 0);                                                                                  \
       if ((wi + i * N) < coef_count) {                                                                                \
-        coefs = (int4)buf_input.Load4(input_offset * 4 + i * N * 16);                                                 \
+        const int addr = input_offset * 4 + i * N * 16;                                                               \
+        coefs = (int4)buf_input.Load4(addr);                                                                          \
+        buf_input.Store4(addr, uint4(0, 0, 0, 0));                                                                    \
+        coefs.x = clamp_value(coefs.x, row_clamp);                                                                    \
+        coefs.y = clamp_value(coefs.y, row_clamp);                                                                    \
+        coefs.z = clamp_value(coefs.z, row_clamp);                                                                    \
+        coefs.w = clamp_value(coefs.w, row_clamp);                                                                    \
         if (SCALE_COEF) {                                                                                             \
           coefs.x = round_shift(coefs.x * NewInvSqrt2, NewSqrt2Bits);                                                 \
           coefs.y = round_shift(coefs.y * NewInvSqrt2, NewSqrt2Bits);                                                 \
@@ -177,8 +186,6 @@ static const int cospi[] = {4096, 4095, 4091, 4085, 4076, 4065, 4052, 4036, 4017
                             1189, 1092, 995,  897,  799,  700,  601,  501,  401,  301,  201,  101};
 
 static const int sinpi[] = {0, 1321, 2482, 3344, 3803};
-
-int clamp_value(int value, int2 range) { return clamp(value, range.x, range.y); }
 
 int round_shift(int value, int bit) {
   if (bit == 0) return value;

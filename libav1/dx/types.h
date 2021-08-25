@@ -42,7 +42,6 @@ struct InterBlock {
   uint32_t flags;
   MV mv0;
   MV mv1;
-  // uint32_t sorting_idx;
 };
 
 enum InterTypes {
@@ -159,6 +158,7 @@ struct av1_frame_thread_data {
   int mode_info_offset;
   int mode_info_max;
   int coef_buffer_offset;
+  int coef_buffer_size;
   av1_tile_data* tile_data;
   HwFrameBuffer* frame_buffer;
   HwFrameBuffer* back_buffer0;
@@ -242,5 +242,4 @@ typedef struct Av1Core {
   int tryhdr10x3;
 } Av1Core;
 
-Av1Core* Get(uint32_t may_be_null = 0);
 void PutPerfMarker(av1_frame_thread_data* td, volatile int64_t* marker);

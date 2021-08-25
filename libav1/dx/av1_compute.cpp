@@ -194,7 +194,7 @@ void* av1_create_pipeline_cache_handle(void* d3d12device, int threads) {
   if (!shader_lib) return 0;
   ID3D12Device* _device = static_cast<ID3D12Device*>(d3d12device);
 
-  err |= (shader_lib->sig_idct = create_root_sig(_device, 2, 1, 2, 2)) == NULL;
+  err |= (shader_lib->sig_idct = create_root_sig(_device, 1, 2, 2, 2)) == NULL;
   err |= (shader_lib->sig_common111 = create_root_sig(_device, 1, 1, 1, 0)) == NULL;
   err |= (shader_lib->sig_common0102 = create_root_sig(_device, 0, 1, 0, 2)) == NULL;
   err |= (shader_lib->sig_common0110 = create_root_sig(_device, 0, 1, 1, 0)) == NULL;

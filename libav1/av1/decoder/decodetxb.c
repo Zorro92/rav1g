@@ -316,10 +316,10 @@ uint8_t av1_read_coeffs_txb(const AV1_COMMON *const cm, MACROBLOCKD *const xd,
       if (sign) {
         dq_coeff = -dq_coeff;
       }
-      tcoeffs_raw[c] = clamp(dq_coeff, min_value, max_value);
+    tcoeffs_raw[c] = dq_coeff;// clamp(dq_coeff, min_value, max_value);
     }
-    else
-        tcoeffs_raw[c] = 0;
+  //else
+  //  tcoeffs_raw[c] = 0;
 
   }
 
@@ -328,49 +328,49 @@ uint8_t av1_read_coeffs_txb(const AV1_COMMON *const cm, MACROBLOCKD *const xd,
   // DC value
   set_dc_sign(&cul_level, dc_val);
   {
-      const int tx_types_flags[] = {
-          0,        //    DCT_DCT,          
-          0x080000,    //    ADST_DCT,         
-          0x020000,    //    DCT_ADST,         
-          0x0A0000,    //    ADST_ADST,        
-          0x090000,    //    FLIPADST_DCT,     
-          0x028000,    //    DCT_FLIPADST,     
-          0x0B8000,    //    FLIPADST_FLIPADST,
-          0x0A8000,    //    ADST_FLIPADST,    
-          0x0B0000,    //    FLIPADST_ADST,    
-          0x140000,    //    IDTX,             
-          0x040000,    //    V_DCT,            
-          0x100000,    //    H_DCT,            
-          0x0C0000,    //    V_ADST,           
-          0x120000,    //    H_ADST,           
-          0x0D0000,    //    V_FLIPADST,       
-          0x128000    //    H_FLIPADST,       
-      };
+    const int tx_types_flags[] = {
+      0,    //  DCT_DCT,
+      0x080000,  //  ADST_DCT,
+      0x020000,  //  DCT_ADST,
+      0x0A0000,  //  ADST_ADST,
+      0x090000,  //  FLIPADST_DCT,
+      0x028000,  //  DCT_FLIPADST,
+      0x0B8000,  //  FLIPADST_FLIPADST,
+      0x0A8000,  //  ADST_FLIPADST,
+      0x0B0000,  //  FLIPADST_ADST,
+      0x140000,  //  IDTX,
+      0x040000,  //  V_DCT,
+      0x100000,  //  H_DCT,
+      0x0C0000,  //  V_ADST,
+      0x120000,  //  H_ADST,
+      0x0D0000,  //  V_FLIPADST,
+      0x128000  //  H_FLIPADST,
+    };
 
-      int mi_col = mbmi->mi_col;
-      int mi_row = mbmi->mi_row;
-      if (pd->subsampling_y && (mi_row & 0x01) && (mi_size_high[mbmi->sb_type] == 1))
-          mi_row -= 1;
-      if (pd->subsampling_x && (mi_col & 0x01) && (mi_size_wide[mbmi->sb_type] == 1))
-          mi_col -= 1;
-      const uint32_t x = ((mi_col * MI_SIZE) >> (pd->subsampling_x + 2)) + blk_col;
-      const uint32_t y = ((mi_row * MI_SIZE) >> (pd->subsampling_y + 2)) + blk_row;
-      tx_block_info_gpu * block = tile_data->idct_blocks_host + tile_data->idct_blocks_ptr;
-      const uint32_t coef_count = ((*eob) + 3) >> 2;
-      const int av1_idct_scans_lut[TX_TYPES] = {
-         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1, 2, 1, 2
-      };
+    int mi_col = mbmi->mi_col;
+    int mi_row = mbmi->mi_row;
+    if (pd->subsampling_y && (mi_row & 0x01) && (mi_size_high[mbmi->sb_type] == 1))
+      mi_row -= 1;
+    if (pd->subsampling_x && (mi_col & 0x01) && (mi_size_wide[mbmi->sb_type] == 1))
+      mi_col -= 1;
+    const uint32_t x = ((mi_col * MI_SIZE) >> (pd->subsampling_x + 2)) + blk_col;
+    const uint32_t y = ((mi_row * MI_SIZE) >> (pd->subsampling_y + 2)) + blk_row;
+    tx_block_info_gpu * block = tile_data->idct_blocks_host + tile_data->idct_blocks_ptr;
+    const uint32_t coef_count = ((*eob) + 3) >> 2;
+    const int av1_idct_scans_lut[TX_TYPES] = {
+     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1, 2, 1, 2
+    };
 
-      for (uint32_t c = *eob; c < (coef_count << 2); ++c)
-          tcoeffs_raw[c] = 0;
-      const int type_index = (xd->lossless[xd->mi[0]->segment_id] && tx_size == 0)? TX_SIZES_ALL : tx_size;
-      block->flags = coef_count | tx_types_flags[tx_type] | (plane << 21) | (av1_idct_scans_lut[tx_type] << 11);
-      block->input_offset = tile_data->dq_buffer_ptr;
-      block->output_pos = x | (y << 16);
-      block->sorting_idx = (tile_data->idct_blocks_sizes[type_index] << 8) + type_index;
-      ++tile_data->idct_blocks_sizes[type_index];
-      ++tile_data->idct_blocks_ptr;
-      tile_data->dq_buffer_ptr += coef_count << 2;
+    //for (uint32_t c = *eob; c < (coef_count << 2); ++c)
+    //  tcoeffs_raw[c] = 0;
+    const int type_index = (xd->lossless[xd->mi[0]->segment_id] && tx_size == 0)? TX_SIZES_ALL : tx_size;
+    block->flags = coef_count | tx_types_flags[tx_type] | (plane << 21) | (av1_idct_scans_lut[tx_type] << 11);
+    block->input_offset = tile_data->dq_buffer_ptr;
+    block->output_pos = x | (y << 16);
+    block->sorting_idx = (tile_data->idct_blocks_sizes[type_index] << 8) + type_index;
+    ++tile_data->idct_blocks_sizes[type_index];
+    ++tile_data->idct_blocks_ptr;
+    tile_data->dq_buffer_ptr += coef_count << 2;
   }
   return cul_level;
 }

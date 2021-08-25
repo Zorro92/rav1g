@@ -34,12 +34,18 @@ groupshared int shared_4x4_mem[4 * 64];
   const int coef_count = block.x & 0x7ff;
 
   const int input_offset = (block.y + wi * 4) << 2;
-  int4 coefs = (wi < coef_count) ? (int4)buf_input.Load4(input_offset) : int4(0, 0, 0, 0);
-
-  shared_4x4_mem[loc_mem_offset + cb_scans[scan_offset].x] = coefs.x;
-  shared_4x4_mem[loc_mem_offset + cb_scans[scan_offset].y] = coefs.y;
-  shared_4x4_mem[loc_mem_offset + cb_scans[scan_offset].z] = coefs.z;
-  shared_4x4_mem[loc_mem_offset + cb_scans[scan_offset].w] = coefs.w;
+  int4 coefs = int4(0, 0, 0, 0);
+  if (wi < coef_count)
+  {
+      coefs = (int4)buf_input.Load4(input_offset);
+      buf_input.Store4(input_offset, int4(0, 0, 0, 0));
+  }
+  const int coef_min = -(1 << (cb_bitdepth + 7));
+  const int coef_max = (1 << (cb_bitdepth + 7)) - 1;
+  shared_4x4_mem[loc_mem_offset + cb_scans[scan_offset].x] = clamp(coefs.x, coef_min, coef_max);
+  shared_4x4_mem[loc_mem_offset + cb_scans[scan_offset].y] = clamp(coefs.y, coef_min, coef_max);
+  shared_4x4_mem[loc_mem_offset + cb_scans[scan_offset].z] = clamp(coefs.z, coef_min, coef_max);
+  shared_4x4_mem[loc_mem_offset + cb_scans[scan_offset].w] = clamp(coefs.w, coef_min, coef_max);
 
   GroupMemoryBarrier();
 
