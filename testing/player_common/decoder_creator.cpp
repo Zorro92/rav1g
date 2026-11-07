@@ -157,8 +157,8 @@ Decoders::Decoders(int is_xbox, d3d_resources dx_resources, DisplayCallbacks* di
 
 void Decoders::GetAvailablePaths(std::string& read_path, std::string& write_path, std::string& root_path) {
 #if (WINAPI_FAMILY == WINAPI_FAMILY_APP)
-  write_path = "..\\data";
-  read_path = "..\\data";
+  // Packaged sideloads use Device Portal's LocalAppData/LocalState, not loose VS deployment data.
+  write_path = read_path = pstos(ApplicationData::Current->LocalFolder->Path);
 #else
   read_path = write_path = root_path.empty() ? "./" : root_path;
 #endif
