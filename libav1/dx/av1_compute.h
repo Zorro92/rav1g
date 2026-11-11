@@ -72,6 +72,7 @@ typedef struct {
   ComputeShader shader_idct_sort;
   ComputeShader shader_loop_rest;
   ComputeShader shader_cdef_filter;
+  ComputeShader shader_cdef_filter_v2;  // test player flag -cdefv2
   ComputeShader shader_filmgrain_luma_gen;
   ComputeShader shader_filmgrain_chroma_gen;
   ComputeShader shader_filmgrain_filter;

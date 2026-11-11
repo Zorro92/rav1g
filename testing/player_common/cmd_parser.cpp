@@ -41,7 +41,8 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"r", atSingle, anOptional, "Recreate decoder for every file", "", &params_.recreate_},
       {"gputime", atSingle, anOptional, "per-stage GPU/CPU timing, summary in the log", "", &params_.gputime_},
       {"nopresent", atSingle, anOptional, "release decoded frames without presenting them", "",
-       &params_.nopresent_}};
+       &params_.nopresent_},
+      {"cdefv2", atSingle, anOptional, "CDEF through cdef_filter_v2.hlsl (same output)", "", &params_.cdefv2_}};
   params_.command_line_ = args.command_line_;
   const int list_length = sizeof(avaiting) / sizeof(ParamStruct);
   bool has_value[list_length] = {false};
@@ -168,6 +169,7 @@ void CParameters::Reset() {
   params_.recreate_ = false;
   params_.gputime_ = false;
   params_.nopresent_ = false;
+  params_.cdefv2_ = false;
 }
 
 void CParameters::GetHelp(int pos, const char* arg, std::string& errMsg, const ParamStruct* arr, int size) {

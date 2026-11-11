@@ -49,6 +49,7 @@ extern "C" {
 #include "dx/shaders/h/gen_pred_blocks.h"
 #include "dx/shaders/h/loop_restoration.h"
 #include "dx/shaders/h/cdef_filter.h"
+#include "dx/shaders/h/cdef_filter_v2.h"
 #include "dx/shaders/h/film_grain_filter.h"
 #include "dx/shaders/h/film_grain_gen_luma.h"
 #include "dx/shaders/h/film_grain_gen_chroma.h"
@@ -247,6 +248,8 @@ void* av1_create_pipeline_cache_handle(void* d3d12device, int threads) {
       {_device, film_grain_gen_chroma, sizeof(film_grain_gen_chroma), shader_lib->sig_film_grain.Get(),
        &shader_lib->shader_filmgrain_chroma_gen},
       {_device, cdef_filter, sizeof(cdef_filter), shader_lib->sig_cdef_filter.Get(), &shader_lib->shader_cdef_filter},
+      {_device, cdef_filter_v2, sizeof(cdef_filter_v2), shader_lib->sig_cdef_filter.Get(),
+       &shader_lib->shader_cdef_filter_v2},
 
       {_device, gen_pred_blocks, sizeof(gen_pred_blocks), shader_lib->sig_pred_blocks.Get(),
        &shader_lib->shader_gen_pred_blocks},

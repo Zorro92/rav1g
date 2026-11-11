@@ -202,6 +202,9 @@ int AV1Decoder::DecodeOne() {
     XB_LOGI << "GPUTIME timing run: per-stage GPU timestamps and CPU timers on, summary follows the last frame";
   if (params_.nopresent_)
     XB_LOGI << "GPUTIME -nopresent: decoded frames go straight back to the pool, nothing is presented";
+  // -cdefv2: also set at a point where no frame is in flight; off again for a task without the flag.
+  av1_set_cdef_v2(params_.cdefv2_ ? 1 : 0);
+  XB_LOGI << "CDEF shader: " << (params_.cdefv2_ ? "cdef_filter_v2 (-cdefv2)" : "cdef_filter (original)");
 
   output_queue_ = std::unique_ptr<BufferLocker>(new BufferLocker(&params_, cur_frame, storage_));
   if (display_) display_->AddSource(this);

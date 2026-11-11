@@ -329,6 +329,12 @@ struct CDefData {
   int cdef_uv_strength[16][4];
 };
 
+// Test player switch (-cdefv2): run CDEF through cdef_filter_v2.hlsl, which writes the same bytes with a
+// different work split (one group per 64x64 luma block). Off unless av1_set_cdef_v2(1) was called.
+static int g_cdef_v2 = 0;
+
+extern "C" void av1_set_cdef_v2(int enable) { g_cdef_v2 = enable; }
+
 void av1_cdef_filter_run(Av1Core *dec, AV1_COMMON *cm, HwFrameBuffer *src, HwFrameBuffer *dst) {
   av1_frame_thread_data *td = dec->curr_frame_data;
   if (!td->do_cdef) {
@@ -403,14 +409,18 @@ void av1_cdef_filter_run(Av1Core *dec, AV1_COMMON *cm, HwFrameBuffer *src, HwFra
   data->dst_offset[2] = dst->planes[2].offset;
 
   Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> command_list = dec->compute.command_list;
-  ComputeShader *shader = &dec->shader_lib->shader_cdef_filter;
+  const int cdef_v2 = g_cdef_v2;
+  ComputeShader *shader = cdef_v2 ? &dec->shader_lib->shader_cdef_filter_v2 : &dec->shader_lib->shader_cdef_filter;
   command_list->SetPipelineState(shader->pso.Get());
   command_list->SetComputeRootSignature(shader->signaturePtr.Get());
   command_list->SetComputeRootShaderResourceView(0, td->cdef_indexes->dev->GetGPUVirtualAddress());
   command_list->SetComputeRootShaderResourceView(1, td->cdef_skips->dev->GetGPUVirtualAddress());
   command_list->SetComputeRootUnorderedAccessView(2, dec->frame_buffer_pool->dev->GetGPUVirtualAddress());
   command_list->SetComputeRootConstantBufferView(3, cbo.dev_address);
-  command_list->Dispatch((w + 31) >> 5, (h + 31) >> 5, 1);
+  if (cdef_v2)
+    command_list->Dispatch((w + 63) >> 6, (h + 63) >> 6, 1);  // same bindings, 64x64 luma per group
+  else
+    command_list->Dispatch((w + 31) >> 5, (h + 31) >> 5, 1);
   command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
   PutPerfMarker(td, &td->perf_markers[4]);
   av1_perf_gpu_mark(dec, AV1_PERF_GPU_CDEF);

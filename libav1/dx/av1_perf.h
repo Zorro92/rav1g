@@ -105,6 +105,11 @@ typedef void (*av1_perf_frame_cb_fn_t)(void *priv, const av1_perf_frame *frame);
  * is in flight (before the first decode call or after a drain). */
 void av1_set_perf_callback(av1_perf_frame_cb_fn_t cb, void *priv);
 
+/* Process-wide. Non-zero runs CDEF through cdef_filter_v2.hlsl instead of
+ * cdef_filter.hlsl; the decoded output is the same. Off by default. Change it
+ * only while no frame is in flight, like the callback above. */
+void av1_set_cdef_v2(int enable);
+
 #ifdef __cplusplus
 }
 #endif
