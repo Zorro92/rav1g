@@ -664,6 +664,7 @@ void av1_prediction_gen_blocks(AV1Decoder *pbi, Av1Core *dec) {
                                        CD3DX12_RESOURCE_BARRIER::UAV(dec->prediction_blocks_warp->dev)};
   command_list->ResourceBarrier(2, barriers);
   PutPerfMarker(td, &td->perf_markers[1]);
+  av1_perf_gpu_mark(dec, AV1_PERF_GPU_GEN_BLOCKS);
 }
 
 struct GlobalMotionWarp {
@@ -957,6 +958,7 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
     }
 
     command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
+    av1_perf_gpu_mark(dec, AV1_PERF_GPU_INTER);
   }
 
   const int recon_blocks =
@@ -1000,6 +1002,7 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
       }
 
       command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
+      av1_perf_gpu_mark(dec, AV1_PERF_GPU_RECON);
     }
 
     if (td->intra_iters >= 0) {
@@ -1052,6 +1055,7 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
           assert(0);
         }
       }
+      av1_perf_gpu_mark(dec, AV1_PERF_GPU_INTRA);
     }
   }
   PutPerfMarker(td, &td->perf_markers[3]);
@@ -1085,4 +1089,5 @@ void av1_inter_ext_borders(Av1Core *dec, AV1_COMMON *cm) {
   command_list->SetComputeRootConstantBufferView(1, cbo.dev_address);
   command_list->Dispatch((wi_count + 63) / 64, 1, 1);
   command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
+  av1_perf_gpu_mark(dec, AV1_PERF_GPU_EXT_BORDERS);
 }

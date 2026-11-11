@@ -21,6 +21,7 @@
 #include "aom/aom_frame_buffer.h"
 #include "av1\common\blockd.h"
 #include "av1\common\onyxc_int.h"
+#include "dx/av1_perf.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -49,6 +50,11 @@ void av1_show_frame(AV1Decoder *pbi, YV12_BUFFER_CONFIG *buf, int is_visible);
 void av1_decode_sef(AV1Decoder *pbi);
 int get_output_frame(AV1Decoder *pbi, aom_image_t *dst);
 void av1_setup_context_buffers(AV1Decoder *pbi);
+
+// Timing instrumentation. av1_perf_ticks() returns 0 while timing is off, and
+// av1_perf_cpu_add() ignores a zero start, so call sites need no checks.
+int64_t av1_perf_ticks(void);
+void av1_perf_cpu_add(AV1Decoder *pbi, int id, int64_t start_ticks);
 #ifdef __cplusplus
 }
 #endif

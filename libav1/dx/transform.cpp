@@ -58,6 +58,7 @@ void av1_idct_run(Av1Core *dec) {
   value[1] = 0;
   command_list->SetComputeRoot32BitConstants(1, 2, value, 0);
   command_list->Dispatch((value[0] + 63) / 64, 1, 1);
+  av1_perf_gpu_mark(dec, AV1_PERF_GPU_RESIDUAL_CLEAR);
 
   shader = &dec->shader_lib->shader_idct_sort;
   command_list->SetComputeRootSignature(shader->signaturePtr.Get());
@@ -84,6 +85,7 @@ void av1_idct_run(Av1Core *dec) {
   D3D12_RESOURCE_BARRIER barriers[] = {CD3DX12_RESOURCE_BARRIER::UAV(dec->idct_blocks->dev),
                                        CD3DX12_RESOURCE_BARRIER::UAV(dec->idct_residuals->dev)};
   command_list->ResourceBarrier(2, barriers);
+  av1_perf_gpu_mark(dec, AV1_PERF_GPU_IDCT_SORT);
   ConstantBufferObject cbo = cb->Alloc(sizeof(idct_frame_data));
   idct_frame_data *data = reinterpret_cast<idct_frame_data *>(cbo.host_ptr);
   data->planes[0][0] = td->frame_buffer->planes[0].res_stride;
@@ -134,4 +136,5 @@ void av1_idct_run(Av1Core *dec) {
     command_list->Dispatch((const_inline[1] + 63) / 64, 1, 1);
   }
   command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->idct_residuals->dev));
+  av1_perf_gpu_mark(dec, AV1_PERF_GPU_IDCT);
 }

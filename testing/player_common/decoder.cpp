@@ -189,6 +189,20 @@ int AV1Decoder::DecodeOne() {
   need_preload_ = params_.frate_ >= 0;
   preload_num_ = params_.player_queue_size_ < PRELOAD_SIZE ? params_.player_queue_size_ : PRELOAD_SIZE;
 
+  // Timing run (-gputime): the previous task has drained, so no frame is in flight here.
+  {
+    std::lock_guard<std::mutex> lock(perf_cs_);
+    perf_stats_.Reset();
+  }
+  av1_set_perf_callback(params_.gputime_ ? PerfFrame : NULL, this);
+  perf_installed_ = params_.gputime_ ? 1 : 0;
+  storage_->SetWaitLogging(params_.gputime_);
+  storage_->ResetWaitStats();
+  if (params_.gputime_)
+    XB_LOGI << "GPUTIME timing run: per-stage GPU timestamps and CPU timers on, summary follows the last frame";
+  if (params_.nopresent_)
+    XB_LOGI << "GPUTIME -nopresent: decoded frames go straight back to the pool, nothing is presented";
+
   output_queue_ = std::unique_ptr<BufferLocker>(new BufferLocker(&params_, cur_frame, storage_));
   if (display_) display_->AddSource(this);
 
@@ -207,11 +221,18 @@ int AV1Decoder::DecodeOne() {
   while (buffer && limit-- && !(*stop_) && !output_queue_->hasFatalError_) {
     XB_LOGD << cnt++ << " - " << buffer->Size();
     uint64_t user_priv = static_cast<uint64_t>(frame_in++ * framedur);
+    const std::chrono::steady_clock::time_point perf_call_start = std::chrono::steady_clock::now();
     if (aom_codec_decode(&decctx_, buffer->Data(), buffer->Size(), (void*)user_priv)) {
       XB_LOGE << "aom_codec_decode error " << aom_codec_error(&decctx_);
       has_error = 1;
       output_queue_->hasFatalError_ = 1;
       break;
+    }
+    if (params_.gputime_) {
+      const double call_ms =
+          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - perf_call_start).count();
+      std::lock_guard<std::mutex> lock(perf_cs_);
+      perf_stats_.AddDecodeCall(call_ms);
     }
     at_least_one = 1;
 #if (!ASYNC_OUTPUT && !CB_OUTPUT)
@@ -228,6 +249,8 @@ int AV1Decoder::DecodeOne() {
   }
   // drain
   aom_codec_decode(&decctx_, 0, 0, 0);
+  // The drain joins the decoder's GPU completion thread, so every frame record is in.
+  if (params_.gputime_ || params_.nopresent_) PerfReport();
 #if (!ASYNC_OUTPUT && !CB_OUTPUT)
   if (!output_queue_->hasFatalError_) {
     aom_codec_iter_t iter = NULL;
@@ -273,6 +296,32 @@ int AV1Decoder::DecodeOne() {
   return 0;
 }
 
+void AV1Decoder::PerfReport() {
+  if (params_.nopresent_ && output_queue_) {
+    const int released = output_queue_->released_;
+    const double span_ms = std::chrono::duration<double, std::milli>(output_queue_->released_last_ -
+                                                                     output_queue_->released_first_)
+                               .count();
+    XB_LOGI << "GPUTIME -nopresent: " << released << " frames released without presenting, "
+            << ((released > 1 && span_ms > 0.0) ? (double)(released - 1) * 1000.0 / span_ms : 0.0)
+            << " fps between the first and the last";
+  }
+  if (!params_.gputime_) return;
+  perfstats::OutputWaits waits = {0, 0.0, 0.0};
+  if (storage_) storage_->GetWaitStats(&waits.count, &waits.total_ms, &waits.max_ms);
+  std::vector<std::string> summary;
+  std::vector<std::string> frames;
+  {
+    std::lock_guard<std::mutex> lock(perf_cs_);
+    summary = perf_stats_.Summary(waits);
+    // Per-frame lines are kept in memory during the run and written only now,
+    // so the timing run adds no log I/O to the decode loop.
+    if (params_.progress_) frames = perf_stats_.FrameLines();
+  }
+  for (size_t i = 0; i < summary.size(); ++i) XB_LOGI << "GPUTIME " << summary[i];
+  for (size_t i = 0; i < frames.size(); ++i) XB_LOGI << "GPUTIME " << frames[i];
+}
+
 int AV1Decoder::FetchLoop() {
   aom_image_t* img;
   aom_codec_iter_t iter = NULL;
@@ -296,6 +345,11 @@ void AV1Decoder::FlushOutput() {
 
 std::shared_ptr<OutBufferWrapper> AV1Decoder::GetFrame(StreamStats* stats) {
   if (!output_queue_.get()) return 0;
+  if (params_.nopresent_) {
+    // Nothing to show. Sleep so the render loop does not spin a core next to the tile threads.
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    return 0;
+  }
   if (need_preload_) {
     if (output_queue_->Size() < preload_num_ && output_queue_->hasFreeBuffers())
       return 0;
@@ -320,6 +374,12 @@ void BufferLocker::Flush() {
 int BufferLocker::Push(aom_image_t* img) {
   if (!img) {
     std::lock_guard<std::mutex> lock(cs_);
+    if (params_->nopresent_) {
+      // Nothing is popped in this mode, so the end of the stream is seen here.
+      got_last_frame_ = 1;
+      cv_.notify_one();
+      return 0;
+    }
     queue_.push(0);
     return 0;
   }
@@ -355,6 +415,14 @@ int BufferLocker::Push(aom_image_t* img) {
     }
     frame_counter_++;
     if (params_->rawDecode_) return 0;
+  }
+  if (params_->nopresent_) {
+    // Hand the buffer straight back to the pool: no display queue, no Present.
+    buffers_pool_->ReleaseRentedBuffer(img->fb2_priv);
+    released_last_ = std::chrono::steady_clock::now();
+    if (!released_++) released_first_ = released_last_;
+    frame_no_++;
+    return 0;
   }
   std::shared_ptr<OutBufferWrapper> buffer = buffers_pool_->ReleaseRentedBuffer(img->fb2_priv);  //!!!!
   assert(buffer);

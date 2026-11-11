@@ -20,6 +20,7 @@
 #include "dx/av1_memory.h"
 #include "dx/av1_thread.h"
 #include "av1/common/onyxc_int.h"
+#include "dx/av1_perf.h"
 
 enum {
   UsePipeline = 0,
@@ -120,6 +121,38 @@ struct ComputeCommandBuffer {
   void Reset() { cb_ptr = 0; }
 };
 
+enum { Av1PerfMaxMarks = 32 };
+
+// CPU-side timing of the frame currently being built (QPC ticks).
+struct av1_perf_accum {
+  volatile LONG64 ticks[AV1_PERF_CPU_COUNT];
+  volatile LONG64 memset_bytes;
+  int64_t t_frame_start;
+  int64_t t_record_start;
+  int frame_number;
+  int show_frame;
+  int showable_frame;
+  int is_sef;
+  int intra_frame;
+  int used_sec_slot;
+  int intra_iters;
+  int tile_count;
+};
+
+// Per pipeline slot: GPU timestamp queries for the slot's command list and the
+// CPU-side snapshot taken at submit.
+struct av1_perf_td {
+  Microsoft::WRL::ComPtr<ID3D12QueryHeap> query_heap;
+  Microsoft::WRL::ComPtr<ID3D12Resource> readback;
+  int gpu_failed;
+  int gpu_active;
+  int collect;
+  int mark_count;
+  uint8_t mark_stage[Av1PerfMaxMarks];
+  int64_t t_submit;
+  av1_perf_accum acc;
+};
+
 struct av1_frame_thread_data {
   ComputeCommandBuffer command_buffer;
   bitdepth_dependent_shaders* shaders;
@@ -170,6 +203,7 @@ struct av1_frame_thread_data {
   int scale_enable;
   ScaleFactor scale_factors[8];
   volatile int64_t perf_markers[16];
+  av1_perf_td perf;
 };
 
 typedef struct {
@@ -240,6 +274,12 @@ typedef struct Av1Core {
   DataPtrQueueMT gpu_waiting_queue;
   pthread_t gpu_thread;
   int tryhdr10x3;
+  av1_perf_accum perf_cur;
+  uint64_t perf_gpu_freq;
+  uint64_t perf_gpu_last_end;
 } Av1Core;
 
 void PutPerfMarker(av1_frame_thread_data* td, volatile int64_t* marker);
+// Timing instrumentation (no-ops unless a perf callback is installed).
+void av1_perf_gpu_mark(Av1Core* dec, int stage);
+void av1_perf_add(Av1Core* dec, int id, int64_t start_ticks);

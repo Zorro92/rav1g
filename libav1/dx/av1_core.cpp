@@ -50,6 +50,172 @@ void av1_prediction_gen_blocks(AV1Decoder *pbi, Av1Core *dec);
 
 static THREADFN gpu_thread_hook(void *pdata);
 
+// ---------------------------------------------------------------------------
+// Timing instrumentation for the test player. Everything below is inert until
+// av1_set_perf_callback() installs a callback; it never changes decode output.
+// ---------------------------------------------------------------------------
+static av1_perf_frame_cb_fn_t g_perf_cb = NULL;
+static void *g_perf_priv = NULL;
+
+extern "C" void av1_set_perf_callback(av1_perf_frame_cb_fn_t cb, void *priv) {
+  g_perf_priv = priv;
+  g_perf_cb = cb;
+}
+
+static inline int perf_enabled() { return g_perf_cb != NULL; }
+
+static inline int64_t perf_now() {
+  LARGE_INTEGER t;
+  QueryPerformanceCounter(&t);
+  return t.QuadPart;
+}
+
+extern "C" int64_t av1_perf_ticks(void) { return perf_enabled() ? perf_now() : 0; }
+
+void av1_perf_add(Av1Core *dec, int id, int64_t start_ticks) {
+  if (!start_ticks) return;
+  InterlockedExchangeAdd64(&dec->perf_cur.ticks[id], perf_now() - start_ticks);
+}
+
+extern "C" void av1_perf_cpu_add(AV1Decoder *pbi, int id, int64_t start_ticks) {
+  if (!start_ticks || !pbi || !pbi->gpu_decoder) return;
+  av1_perf_add(pbi->gpu_decoder, id, start_ticks);
+}
+
+// Adds the time since |start| to |id| and returns the new lap start.
+static int64_t perf_lap(Av1Core *dec, int id, int64_t start_ticks) {
+  if (!start_ticks) return 0;
+  const int64_t now = perf_now();
+  InterlockedExchangeAdd64(&dec->perf_cur.ticks[id], now - start_ticks);
+  return now;
+}
+
+static void perf_add_memset(Av1Core *dec, int id, int64_t start_ticks, size_t bytes) {
+  if (!start_ticks) return;
+  InterlockedExchangeAdd64(&dec->perf_cur.ticks[id], perf_now() - start_ticks);
+  InterlockedExchangeAdd64(&dec->perf_cur.memset_bytes, (LONG64)bytes);
+}
+
+// Records a GPU timestamp at the current position of the frame's command list
+// and remembers which stage it closes.
+void av1_perf_gpu_mark(Av1Core *dec, int stage) {
+  av1_frame_thread_data *td = dec->curr_frame_data;
+  if (!td) return;
+  av1_perf_td *p = &td->perf;
+  if (!p->gpu_active || p->mark_count >= Av1PerfMaxMarks) return;
+  dec->compute.command_list->EndQuery(p->query_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, p->mark_count);
+  p->mark_stage[p->mark_count++] = (uint8_t)stage;
+}
+
+// Start of a frame's command list: decide whether this frame is timed and
+// create the slot's query heap and readback buffer on first use.
+static void perf_begin_command_buffer(Av1Core *dec, av1_frame_thread_data *td) {
+  av1_perf_td *p = &td->perf;
+  p->gpu_active = 0;
+  p->mark_count = 0;
+  p->collect = perf_enabled();
+  if (!p->collect) return;
+  dec->perf_cur.t_record_start = perf_now();
+  if (!dec->perf_cur.t_frame_start) dec->perf_cur.t_frame_start = dec->perf_cur.t_record_start;
+
+  if (!p->query_heap && !p->gpu_failed) {
+    dx_compute_context *compute = &dec->compute;
+    // Timestamp queries need a direct or compute queue; the frequency must
+    // come from the queue the decoder's lists execute on.
+    const D3D12_COMMAND_LIST_TYPE queue_type = compute->queue->GetDesc().Type;
+    UINT64 freq = 0;
+    int ok = (queue_type == D3D12_COMMAND_LIST_TYPE_DIRECT || queue_type == D3D12_COMMAND_LIST_TYPE_COMPUTE) &&
+             SUCCEEDED(compute->queue->GetTimestampFrequency(&freq)) && freq != 0;
+    if (ok) {
+      D3D12_QUERY_HEAP_DESC heap_desc = {};
+      heap_desc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+      heap_desc.Count = Av1PerfMaxMarks;
+      ok = SUCCEEDED(compute->device->CreateQueryHeap(&heap_desc, IID_PPV_ARGS(&p->query_heap)));
+    }
+    if (ok) {
+      D3D12_HEAP_PROPERTIES heap_props = {};
+      heap_props.Type = D3D12_HEAP_TYPE_READBACK;
+      D3D12_RESOURCE_DESC buf_desc = {};
+      buf_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+      buf_desc.Width = sizeof(UINT64) * Av1PerfMaxMarks;
+      buf_desc.Height = 1;
+      buf_desc.DepthOrArraySize = 1;
+      buf_desc.MipLevels = 1;
+      buf_desc.Format = DXGI_FORMAT_UNKNOWN;
+      buf_desc.SampleDesc.Count = 1;
+      buf_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+      ok = SUCCEEDED(compute->device->CreateCommittedResource(&heap_props, D3D12_HEAP_FLAG_NONE, &buf_desc,
+                                                              D3D12_RESOURCE_STATE_COPY_DEST, NULL,
+                                                              IID_PPV_ARGS(&p->readback)));
+    }
+    if (ok) {
+      dec->perf_gpu_freq = freq;
+    } else {
+      p->query_heap.Reset();
+      p->readback.Reset();
+      p->gpu_failed = 1;
+    }
+  }
+  if (p->query_heap) {
+    p->gpu_active = 1;
+    av1_perf_gpu_mark(dec, AV1_PERF_GPU_BEGIN);
+  }
+}
+
+// GPU completion thread, after the frame's fence: build the record from the
+// CPU snapshot taken at submit and the resolved GPU timestamps.
+static void perf_collect(Av1Core *dec, av1_frame_thread_data *td, int64_t wait_start, av1_perf_frame *rec) {
+  av1_perf_td *p = &td->perf;
+  const int64_t now = perf_now();
+  LARGE_INTEGER qpf;
+  QueryPerformanceFrequency(&qpf);
+  const double to_ms = 1000.0 / (double)qpf.QuadPart;
+
+  memset(rec, 0, sizeof(*rec));
+  rec->frame_number = p->acc.frame_number;
+  rec->show_frame = p->acc.show_frame;
+  rec->showable_frame = p->acc.showable_frame;
+  rec->is_sef = p->acc.is_sef;
+  rec->intra_frame = p->acc.intra_frame;
+  rec->used_sec_slot = p->acc.used_sec_slot;
+  rec->intra_iters = p->acc.intra_iters;
+  rec->tile_count = p->acc.tile_count;
+  for (int i = 0; i < AV1_PERF_CPU_COUNT; ++i) rec->cpu_ms[i] = (double)p->acc.ticks[i] * to_ms;
+  rec->cpu_ms[AV1_PERF_CPU_FENCE_WAIT] = (double)(now - wait_start) * to_ms;
+  rec->cpu_ms[AV1_PERF_CPU_GPU_LATENCY] = (double)(now - p->t_submit) * to_ms;
+  rec->memset_bytes = p->acc.memset_bytes;
+  rec->complete_ms = (double)now * to_ms;
+  rec->gpu_gap_ms = -1.0;
+
+  if (!p->gpu_active || p->mark_count <= 0 || !dec->perf_gpu_freq) return;
+  UINT64 ts[Av1PerfMaxMarks];
+  D3D12_RANGE read_range = {0, sizeof(UINT64) * (size_t)p->mark_count};
+  void *ptr = NULL;
+  if (FAILED(p->readback->Map(0, &read_range, &ptr)) || !ptr) return;
+  memcpy(ts, ptr, read_range.End);
+  D3D12_RANGE written = {0, 0};
+  p->readback->Unmap(0, &written);
+
+  const double gpu_to_ms = 1000.0 / (double)dec->perf_gpu_freq;
+  for (int i = 1; i < p->mark_count; ++i) {
+    const int stage = p->mark_stage[i];
+    const double ms = ts[i] > ts[i - 1] ? (double)(ts[i] - ts[i - 1]) * gpu_to_ms : 0.0;
+    if (stage < AV1_PERF_GPU_STAGE_COUNT) {
+      rec->gpu_stage_ms[stage] += ms;
+      ++rec->gpu_stage_hits[stage];
+    }
+    rec->gpu_sum_ms += ms;
+  }
+  const UINT64 first = ts[0];
+  const UINT64 last = ts[p->mark_count - 1];
+  rec->gpu_span_ms = last > first ? (double)(last - first) * gpu_to_ms : 0.0;
+  if (dec->perf_gpu_last_end)
+    rec->gpu_gap_ms = first > dec->perf_gpu_last_end ? (double)(first - dec->perf_gpu_last_end) * gpu_to_ms : 0.0;
+  dec->perf_gpu_last_end = last;
+  rec->gpu_marks = p->mark_count;
+  rec->gpu_valid = 1;
+}
+
 static int get_random_number_test(int val) {
   unsigned int bit;
   bit = ((val >> 0) ^ (val >> 1) ^ (val >> 3) ^ (val >> 12)) & 1;
@@ -456,6 +622,7 @@ void av1_prepare_command_buffer(Av1Core *dec) {
   td->command_buffer.Reset();
 
   PutPerfMarker(td, &td->perf_markers[0]);
+  perf_begin_command_buffer(dec, td);
 }
 
 void av1_commit_command_buffer(Av1Core *dec) {
@@ -465,6 +632,17 @@ void av1_commit_command_buffer(Av1Core *dec) {
   dx_compute_context *compute = &dec->compute;
   ComputeCommandBuffer *cb = &td->command_buffer;
 
+  av1_perf_td *perf = &td->perf;
+  int64_t perf_submit_start = 0;
+  if (perf->collect) {
+    // Resolve this frame's timestamps as the last command of its list; they
+    // are read back only after the frame's fence has completed.
+    if (perf->gpu_active && perf->mark_count > 0)
+      compute->command_list->ResolveQueryData(perf->query_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0,
+                                              perf->mark_count, perf->readback.Get(), 0);
+    perf_submit_start = perf_now();
+  }
+
   compute->command_list->Close();
   ID3D12CommandList *list[] = {compute->command_list.Get()};
 
@@ -472,6 +650,21 @@ void av1_commit_command_buffer(Av1Core *dec) {
   compute->queue->ExecuteCommandLists(1, list);
   compute->queue->Signal(cb->fence.Get(), cb->fence_value);
   cb->fence->SetEventOnCompletion(cb->fence_value, cb->event);
+
+  if (perf->collect) {
+    // Snapshot the CPU side of this frame. The GPU thread cannot see this slot
+    // until the caller queues its work item, so plain writes are safe here.
+    av1_perf_accum *acc = &dec->perf_cur;
+    const int64_t now = perf_now();
+    const int64_t waits = acc->ticks[AV1_PERF_CPU_WAIT_OUTPUT] + acc->ticks[AV1_PERF_CPU_WAIT_IMAGE];
+    const int64_t record = perf_submit_start - acc->t_record_start - waits;
+    acc->ticks[AV1_PERF_CPU_RECORD] = record > 0 ? record : 0;
+    acc->ticks[AV1_PERF_CPU_SUBMIT] = now - perf_submit_start;
+    acc->ticks[AV1_PERF_CPU_FRAME] = now - acc->t_frame_start;
+    memcpy(&perf->acc, acc, sizeof(*acc));
+    perf->t_submit = now;
+    memset(acc, 0, sizeof(*acc));
+  }
 }
 
 void PutPerfMarker(av1_frame_thread_data *td, volatile int64_t *marker) {}
@@ -562,9 +755,18 @@ THREADFN gpu_thread_hook(void *data) {
     }
 
     av1_frame_thread_data *td = item->data;
+    av1_perf_frame perf_rec = {};
+    int perf_have_rec = 0;
     if (td) {
       // sync gpu
+      const int64_t perf_wait_start = td->perf.collect ? perf_now() : 0;
       av1_sync_gpu(td);
+      if (perf_wait_start) {
+        // Read the frame's timestamps now: its fence is done and the slot has
+        // not gone back to the pool yet.
+        perf_collect(dec, td, perf_wait_start, &perf_rec);
+        perf_have_rec = 1;
+      }
       pthread_mutex_lock(&dec->fb_pool_mutex);
       int signal = 0;
       if (td->back_buffer0) signal |= release_fb(dec, td->back_buffer0);
@@ -593,10 +795,20 @@ THREADFN gpu_thread_hook(void *data) {
         aom_image_t *dst = &img;
         copy_to_img(dec, hw_img, dst);
         MTQueuePush(&dec->image_pool, hw_img);
+        const int64_t perf_notify_start = perf_have_rec ? perf_now() : 0;
         dec->cb_notify_frame_ready(dec->image_alloc_priv, dst);
+        if (perf_notify_start) {
+          LARGE_INTEGER qpf;
+          QueryPerformanceFrequency(&qpf);
+          perf_rec.cpu_ms[AV1_PERF_CPU_NOTIFY] = (double)(perf_now() - perf_notify_start) * 1000.0 / (double)qpf.QuadPart;
+        }
       } else {
         MTQueuePush(&dec->output_queue, hw_img);
       }
+    }
+    if (perf_have_rec) {
+      const av1_perf_frame_cb_fn_t perf_cb = g_perf_cb;
+      if (perf_cb) perf_cb(g_perf_priv, &perf_rec);
     }
     MTQueuePush(&dec->gpu_item_pool, item);
   }
@@ -713,7 +925,10 @@ void av1_drain_gpu_decoder(Av1Core *dec) {
 void get_sec_data(Av1Core *dec, av1_frame_thread_data *td) {
   pthread_mutex_lock(&td->sec_data_mutex);
   if (td->sec_thread_data == NULL) {
+    const int64_t perf_t = av1_perf_ticks();
     td->sec_thread_data = (av1_frame_thread_data *)MTQueueGet(&dec->frame_data_pool);
+    av1_perf_add(dec, AV1_PERF_CPU_WAIT_SEC_SLOT, perf_t);
+    if (perf_t) dec->perf_cur.used_sec_slot = 1;
     av1_frame_thread_data *sec = td->sec_thread_data;
     for (int i = 0; i < td->tile_count; ++i) sec->tile_data[i].mi_count = 0;
   }
@@ -722,6 +937,9 @@ void get_sec_data(Av1Core *dec, av1_frame_thread_data *td) {
 
 extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
   Av1Core *dec = pbi->gpu_decoder;
+  const int64_t perf_setup_start = av1_perf_ticks();
+  if (perf_setup_start) dec->perf_cur.t_frame_start = perf_setup_start;
+  int64_t perf_t = 0;
 
   av1_frame_thread_data *td = dec->curr_frame_data;
   if (td) {
@@ -744,7 +962,9 @@ extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
     dec->curr_frame_data = NULL;
   }
 
+  perf_t = av1_perf_ticks();
   td = (av1_frame_thread_data *)MTQueueGet(&dec->frame_data_pool);
+  av1_perf_add(dec, AV1_PERF_CPU_WAIT_SLOT, perf_t);
   td->sec_thread_data = NULL;
   dec->curr_frame_data = td;
   td->frame_number = dec->frame_number;
@@ -755,7 +975,9 @@ extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
   cm->mi_grid_base = (MB_MODE_INFO **)td->mode_info_grid->host_ptr;
   cm->mi_grid_visible = cm->mi_grid_base;
   cm->mi_alloc_size = cm->mi_stride * ((cm->mi_rows + 31) & ~31);
+  perf_t = av1_perf_ticks();
   memset(cm->mi_grid_base, 0, sizeof(MB_MODE_INFO **) * cm->mi_alloc_size);
+  perf_add_memset(dec, AV1_PERF_CPU_MEMSET, perf_t, sizeof(MB_MODE_INFO **) * cm->mi_alloc_size);
 
   const int grid_w = (((buf->y_width + 63) & (~63)) >> 2) + 2 + 128;
   const int grid_h = (((buf->y_height + 63) & (~63)) >> 2) + 2 + 128;
@@ -769,8 +991,10 @@ extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
   td->gen_intra_iter_y = (int *)td->gen_intra_inter_grid->host_ptr;
   td->iter_grid_offset_uv = grid_w * grid_h;
   td->gen_intra_iter_uv = td->gen_intra_iter_y + td->iter_grid_offset_uv;
+  perf_t = av1_perf_ticks();
   memset(td->gen_intra_iter_y, -1, td->iter_grid_offset_uv * 4);
   memset(td->gen_intra_iter_uv, -1, td->iter_grid_offset_uv);
+  perf_add_memset(dec, AV1_PERF_CPU_MEMSET, perf_t, (size_t)td->iter_grid_offset_uv * 5);
 
   td->is_hbd = buf->bit_depth > 8;
   td->shaders = td->is_hbd ? &dec->shader_lib->shaders_hbd : &dec->shader_lib->shaders_8bit;
@@ -791,7 +1015,9 @@ extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
   td->dst_frame_buffer = fb;
   td->back_buffer0 = NULL;
   if (td->do_loop_rest || td->do_cdef || td->do_superres) {
+    perf_t = av1_perf_ticks();
     HwFrameBuffer *new_buf = get_frame_buffer(dec);
+    av1_perf_add(dec, AV1_PERF_CPU_WAIT_FB, perf_t);
     td->back_buffer0 = new_buf;
     new_buf->width = fb->width;
     new_buf->height = fb->height;
@@ -858,6 +1084,7 @@ extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
       td->scale_enable |= av1_is_scaled(sf);
     }
   }
+  av1_perf_add(dec, AV1_PERF_CPU_SETUP, perf_setup_start);
 }
 
 extern "C" void av1_setup_ext_coef_buffer(AV1Decoder *pbi, AV1_COMMON *cm, ThreadData *thread_data) {
@@ -892,7 +1119,9 @@ extern "C" void av1_setup_macroblockd(AV1Decoder *pbi, AV1_COMMON *cm, ThreadDat
   const int tile_id = tile->tile_col + tile->tile_row * cm->tile_cols;
   av1_frame_thread_data *td = dec->curr_frame_data;
   av1_tile_data *t = &td->tile_data[tile_id];
+  int64_t perf_t = av1_perf_ticks();
   memset(t, 0, sizeof(*t));
+  perf_add_memset(dec, AV1_PERF_CPU_MEMSET_TILE, perf_t, sizeof(*t));
   thread_data->tile_data = t;
   xd->tile_data = t;
   const int mi_offset = tile->mi_row_start * ((cm->mi_cols + 15) & ~15) +
@@ -949,7 +1178,9 @@ extern "C" void av1_setup_macroblockd(AV1Decoder *pbi, AV1_COMMON *cm, ThreadDat
   t->gen_intra_iter_set = AOMMIN(t->gen_intra_max_iter - 16, 256);
   t->gen_iter_clear_offset = (t->gen_intra_iter_set + 16) * 10 + 256;
   t->gen_iter_clear_size = sizeof(int) * (256 + t->gen_intra_max_iter * 10 - t->gen_iter_clear_offset);
+  perf_t = av1_perf_ticks();
   memset(t->gen_block_map_wrp, 0, sizeof(int) * (32 + 16 + t->gen_iter_clear_offset));
+  perf_add_memset(dec, AV1_PERF_CPU_MEMSET_TILE, perf_t, sizeof(int) * (32 + 16 + t->gen_iter_clear_offset));
 }
 
 extern "C" void av1_intra_palette(AV1Decoder *pbi, MB_MODE_INFO *mi, Av1ColorMapParam *params, int plane) {
@@ -1005,12 +1236,23 @@ extern "C" void av1_decode_sef(AV1Decoder *pbi) {
   Av1Core *dec = pbi->gpu_decoder;
   AV1_COMMON *cm = &pbi->common;
   YV12_BUFFER_CONFIG *buf = &cm->cur_frame->buf;
+  int64_t perf_t = av1_perf_ticks();
   GpuWorkItem *item = (GpuWorkItem *)MTQueueGet(&dec->gpu_item_pool);
+  av1_perf_add(dec, AV1_PERF_CPU_WAIT_ITEM, perf_t);
   item->data = NULL;
   item->image = buf->hw_show_image;
 
   if (item->image == NULL && buf->hw_buffer) {
+    perf_t = av1_perf_ticks();
+    if (perf_t) {
+      dec->perf_cur.t_frame_start = perf_t;
+      dec->perf_cur.is_sef = 1;
+      dec->perf_cur.show_frame = 1;
+      dec->perf_cur.intra_iters = -1;
+      dec->perf_cur.frame_number = buf->hw_buffer->frame_number;
+    }
     av1_frame_thread_data *td = (av1_frame_thread_data *)MTQueueGet(&dec->frame_data_pool);
+    av1_perf_add(dec, AV1_PERF_CPU_WAIT_SLOT, perf_t);
     td->dst_frame_buffer = buf->hw_buffer;
     td->is_hbd = buf->bit_depth > 8;
     td->shaders = td->is_hbd ? &dec->shader_lib->shaders_hbd : &dec->shader_lib->shaders_8bit;
@@ -1034,16 +1276,36 @@ extern "C" void av1_decode_sef(AV1Decoder *pbi) {
 extern "C" int av1_decode_frame_gpu(AV1Decoder *pbi) {
   Av1Core *dec = pbi->gpu_decoder;
   AV1_COMMON *cm = &pbi->common;
+  int64_t perf_t = av1_perf_ticks();
   av1_prepare_command_buffer(dec);
   av1_prediction_gen_blocks(pbi, dec);
+  perf_t = perf_lap(dec, AV1_PERF_CPU_REC_GEN_BLOCKS, perf_t);
   av1_idct_run(dec);
+  perf_t = perf_lap(dec, AV1_PERF_CPU_REC_IDCT, perf_t);
   av1_prediction_run_all(dec, cm, NULL);
+  perf_t = perf_lap(dec, AV1_PERF_CPU_REC_PRED, perf_t);
   av1_loopfilter_gpu(dec, cm, &pbi->mb);
+  perf_t = perf_lap(dec, AV1_PERF_CPU_REC_LOOPFILTER, perf_t);
   av1_cdef_looprestoration(dec, cm, &pbi->lr_ctxt);
+  perf_t = perf_lap(dec, AV1_PERF_CPU_REC_CDEF_LR, perf_t);
   av1_inter_ext_borders(dec, cm);
+  perf_t = perf_lap(dec, AV1_PERF_CPU_REC_BORDERS, perf_t);
   av1_postprocess_copy_output(dec, cm);
+  perf_t = perf_lap(dec, AV1_PERF_CPU_REC_COPY, perf_t);
+  if (perf_t) {
+    const av1_frame_thread_data *td = dec->curr_frame_data;
+    av1_perf_accum *acc = &dec->perf_cur;
+    acc->frame_number = td->frame_number;
+    acc->show_frame = cm->show_frame;
+    acc->showable_frame = cm->showable_frame;
+    acc->intra_frame = frame_is_intra_only(cm);
+    acc->intra_iters = td->intra_iters;
+    acc->tile_count = td->tile_count;
+  }
   av1_commit_command_buffer(dec);
+  perf_t = av1_perf_ticks();
   GpuWorkItem *item = (GpuWorkItem *)MTQueueGet(&dec->gpu_item_pool);
+  av1_perf_add(dec, AV1_PERF_CPU_WAIT_ITEM, perf_t);
   item->data = dec->curr_frame_data;
   item->image = NULL;
   dec->curr_frame_data = NULL;

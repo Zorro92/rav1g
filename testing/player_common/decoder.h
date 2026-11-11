@@ -24,6 +24,8 @@
 #include <queue>
 #include <assert.h>
 #include <fstream>
+#include <chrono>
+#include <condition_variable>
 
 #include <wrl.h>
 #include <wrl/client.h>
@@ -39,6 +41,8 @@
 #include "common/frame_outs.h"
 
 #include "common/md5_utils.h"
+#include "dx/av1_perf.h"
+#include "perf_stats.h"
 
 #define DROP_TIME 8000
 #define DISPLAY_MIN_TIME (-10000)
@@ -191,6 +195,10 @@ class BufferLocker {
   int frame_no_ = 0;
   int frame_counter_ = 0;
   int got_last_frame_ = 0;
+  // -nopresent: frames handed straight back to the pool
+  int released_ = 0;
+  std::chrono::steady_clock::time_point released_first_;
+  std::chrono::steady_clock::time_point released_last_;
   const CParameters::Parameters* params_;
   uint32_t hasFatalError_ = 0;
   uint32_t width_ = 0;
@@ -212,6 +220,7 @@ class AV1Decoder {
     if (initialized_) {
       aom_codec_destroy(&decctx_);
     }
+    if (perf_installed_) av1_set_perf_callback(NULL, NULL);
   }
   void Start(CParameters* params) {
     need_reinit_ = params && (params->GetParams().threads_ != params_.threads_ ||
@@ -247,7 +256,15 @@ class AV1Decoder {
   static int NotifyFrameReady(void* priv, void* img) {
     if (!priv) return -1;
     AV1Decoder* This = static_cast<AV1Decoder*>(priv);
+    if (img && This->params_.gputime_) This->PerfOutput();
     return This->output_queue_->Push((aom_image_t*)img);
+  }
+  // -gputime: one record per decoded frame, from the decoder's GPU completion thread.
+  static void PerfFrame(void* priv, const av1_perf_frame* frame) {
+    if (!priv || !frame) return;
+    AV1Decoder* This = static_cast<AV1Decoder*>(priv);
+    std::lock_guard<std::mutex> lock(This->perf_cs_);
+    This->perf_stats_.AddFrame(*frame);
   }
 
  protected:
@@ -255,6 +272,13 @@ class AV1Decoder {
   static void RunFetchLoop(AV1Decoder* ptr) { ptr->FetchLoop(); }
   int DecodeLoop();
   int DecodeOne();
+  void PerfOutput() {
+    const double now_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    std::lock_guard<std::mutex> lock(perf_cs_);
+    perf_stats_.AddOutput(now_ms);
+  }
+  void PerfReport();
   int FetchLoop();
   void StartFetch() {
     stop_fetch_ = 0;
@@ -283,4 +307,7 @@ class AV1Decoder {
   std::shared_ptr<OutBufferStorage> storage_;
   int initialized_ = 0;
   int need_reinit_ = 0;
+  perfstats::PerfStats perf_stats_;
+  std::mutex perf_cs_;
+  int perf_installed_ = 0;
 };

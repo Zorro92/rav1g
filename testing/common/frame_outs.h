@@ -109,6 +109,21 @@ class OutBufferStorage {
   std::shared_ptr<OutBufferWrapper> ReleaseRentedBuffer(void* ptr);
   std::shared_ptr<OutBufferWrapper> FindRentedBuffer(void* ptr);
 
+  // Timing runs: log and count every time GetFreeBuffer finds the pool empty.
+  void SetWaitLogging(bool on) { wait_logging_ = on; }
+  void ResetWaitStats() {
+    std::unique_lock<std::mutex> lock(cs_);
+    wait_count_ = 0;
+    wait_total_ms_ = 0.0;
+    wait_max_ms_ = 0.0;
+  }
+  void GetWaitStats(int* count, double* total_ms, double* max_ms) {
+    std::unique_lock<std::mutex> lock(cs_);
+    *count = wait_count_;
+    *total_ms = wait_total_ms_;
+    *max_ms = wait_max_ms_;
+  }
+
  private:
   void Push(OutBuffer* frame);
   friend class OutBufferWrapper;
@@ -120,4 +135,8 @@ class OutBufferStorage {
   int queue_size_;
   std::mutex cs_;
   ComPtr<ID3D12Device> dx12_device_;
+  bool wait_logging_ = false;
+  int wait_count_ = 0;
+  double wait_total_ms_ = 0.0;
+  double wait_max_ms_ = 0.0;
 };

@@ -2526,6 +2526,8 @@ static int tile_worker_hook(void *arg1, void *arg2) {
   AV1_COMMON *cm = &pbi->common;
   ThreadData *const td = thread_data->td;
   uint8_t allow_update_cdf;
+  // Timing only: tile decode time of this worker (0 while timing is off).
+  const int64_t perf_t0 = av1_perf_ticks();
 
   // The jmp_buf is valid only for the duration of the function that calls
   // setjmp(). Therefore, this function must reset the 'setjmp' field to 0
@@ -2533,6 +2535,7 @@ static int tile_worker_hook(void *arg1, void *arg2) {
   if (setjmp(thread_data->error_info.jmp)) {
     thread_data->error_info.setjmp = 0;
     thread_data->td->xd.corrupted = 1;
+    av1_perf_cpu_add(pbi, AV1_PERF_CPU_ENTROPY_SUM, perf_t0);
     return 0;
   }
   thread_data->error_info.setjmp = 1;
@@ -2559,6 +2562,7 @@ static int tile_worker_hook(void *arg1, void *arg2) {
     }
   }
   thread_data->error_info.setjmp = 0;
+  av1_perf_cpu_add(pbi, AV1_PERF_CPU_ENTROPY_SUM, perf_t0);
   return !td->xd.corrupted;
 }
 
@@ -4203,7 +4207,11 @@ void av1_decode_tg_tiles_and_wrapup(AV1Decoder *pbi, const uint8_t *data,
     setup_frame_info(pbi);
     av1_setup_frame(pbi, cm);
   }
-  *p_data_end = decode_tiles_mt(pbi, data, data_end, start_tile, end_tile);
+  {
+    const int64_t perf_t0 = av1_perf_ticks();
+    *p_data_end = decode_tiles_mt(pbi, data, data_end, start_tile, end_tile);
+    av1_perf_cpu_add(pbi, AV1_PERF_CPU_ENTROPY_WALL, perf_t0);
+  }
 
   if (end_tile != cm->tile_rows * cm->tile_cols - 1) {
     return;

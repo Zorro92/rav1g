@@ -67,6 +67,8 @@ class CParameters {
     bool conformance_;
     bool noninterop_;
     bool recreate_;
+    bool gputime_;
+    bool nopresent_;
   };
   enum arg_type { atSingle, atInt, atString };
   enum arg_need { anOptional, anMandatory, anAtLeastOne };

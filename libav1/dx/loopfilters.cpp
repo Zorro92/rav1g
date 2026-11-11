@@ -164,6 +164,7 @@ void av1_loopfilter_gpu(Av1Core *dec, AV1_COMMON *cm, MACROBLOCKD *xd) {
     command_list->Dispatch((gen_srt.wicount + 63) >> 6, 1, 1);
   }
   command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->loopfilter_blocks->dev));
+  av1_perf_gpu_mark(dec, AV1_PERF_GPU_LF_GEN);
 
   cbo = cb->Alloc(sizeof(LoopfilterData));
   LoopfilterData *data = (LoopfilterData *)cbo.host_ptr;
@@ -207,6 +208,7 @@ void av1_loopfilter_gpu(Av1Core *dec, AV1_COMMON *cm, MACROBLOCKD *xd) {
   }
 
   command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
+  av1_perf_gpu_mark(dec, AV1_PERF_GPU_LF_VERT);
 
   shader = &td->shaders->loopfilter_h;
   command_list->SetPipelineState(shader->pso.Get());
@@ -222,6 +224,7 @@ void av1_loopfilter_gpu(Av1Core *dec, AV1_COMMON *cm, MACROBLOCKD *xd) {
     command_list->Dispatch((srt.wicount + 63) >> 6, 1, 1);
   }
   command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
+  av1_perf_gpu_mark(dec, AV1_PERF_GPU_LF_HORZ);
 }
 
 struct UpscaleData {
@@ -270,6 +273,7 @@ void av1_superres(Av1Core *dec, HwFrameBuffer *src, HwFrameBuffer *dst, int iter
   }
 
   command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
+  av1_perf_gpu_mark(dec, AV1_PERF_GPU_SUPERRES);
 }
 
 struct PlaneInfo1 {
@@ -409,6 +413,7 @@ void av1_cdef_filter_run(Av1Core *dec, AV1_COMMON *cm, HwFrameBuffer *src, HwFra
   command_list->Dispatch((w + 31) >> 5, (h + 31) >> 5, 1);
   command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
   PutPerfMarker(td, &td->perf_markers[4]);
+  av1_perf_gpu_mark(dec, AV1_PERF_GPU_CDEF);
 }
 
 void av1_looprestoration(Av1Core *dec, AV1_COMMON *cm, void *lr_ctxt) {
@@ -511,6 +516,7 @@ void av1_looprestoration(Av1Core *dec, AV1_COMMON *cm, void *lr_ctxt) {
     command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
   }
   PutPerfMarker(td, &td->perf_markers[5]);
+  av1_perf_gpu_mark(dec, AV1_PERF_GPU_LOOP_REST);
 }
 
 void av1_cdef_looprestoration(Av1Core *dec, AV1_COMMON *cm, void *lr_ctxt) {
@@ -916,6 +922,7 @@ void av1_filmgrain_run(Av1Core *dec, AV1_COMMON *cm, int enable_chorma) {
   command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
 
   PutPerfMarker(td, &td->perf_markers[7]);
+  av1_perf_gpu_mark(dec, AV1_PERF_GPU_FILM_GRAIN);
 }
 
 struct CopyPlaneData {
@@ -957,13 +964,17 @@ int av1_postprocess_copy_output(Av1Core *dec, AV1_COMMON *cm) {
 
   int err = 1;
   frame_buffer_type fb_type = td->is_hbd ? (is_10x3 ? fbt10x3 : fbt10bit) : fbt8bit;
+  int64_t perf_t = av1_perf_ticks();
   if (dec->cb_get_output_image)
     err = dec->cb_get_output_image(dec->image_alloc_priv, size, src->y_crop_width, src->y_crop_height, fb_type, &fb);
+  av1_perf_add(dec, AV1_PERF_CPU_WAIT_OUTPUT, perf_t);
   if (err || (fb.dx12_buffer == 0 && fb.dx12_texture[0] == 0)) {
     aom_internal_error(&cm->error, AOM_CODEC_MEM_ERROR, "Failed to allocate output frame.");
   }
 
+  perf_t = av1_perf_ticks();
   HwOutputImage *img = (HwOutputImage *)MTQueueGet(&dec->image_pool);
+  av1_perf_add(dec, AV1_PERF_CPU_WAIT_IMAGE, perf_t);
   img->fb_ptr = (uint8_t *)fb.buffer_host_ptr;
   img->alloc_priv = fb.priv;
   img->is_valid = 1;
@@ -1029,6 +1040,7 @@ int av1_postprocess_copy_output(Av1Core *dec, AV1_COMMON *cm) {
     command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
     PutPerfMarker(td, &td->perf_markers[6]);
     PutPerfMarker(td, &td->perf_markers[7]);
+    av1_perf_gpu_mark(dec, AV1_PERF_GPU_COPY_PLANE);
   }
 
   command_list->ResourceBarrier(
@@ -1061,5 +1073,6 @@ int av1_postprocess_copy_output(Av1Core *dec, AV1_COMMON *cm) {
   command_list->ResourceBarrier(
       1, &CD3DX12_RESOURCE_BARRIER::Transition(dec->frame_buffer_pool->dev, D3D12_RESOURCE_STATE_COPY_SOURCE,
                                                D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+  av1_perf_gpu_mark(dec, AV1_PERF_GPU_OUTPUT_COPY);
   return 0;
 }

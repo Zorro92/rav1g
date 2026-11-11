@@ -16,6 +16,7 @@
 
 #include "frame_outs.h"
 #include <assert.h>
+#include <chrono>
 #include "d3dx12.h"
 
 #if defined(_DEBUG)
@@ -63,6 +64,22 @@ std::shared_ptr<OutBufferWrapper> OutBufferStorage::GetFreeBuffer(uint32_t width
                                                                   uint32_t flags) {
   HRESULT hr;
   int has_errors = 0;
+  int wait_no = 0;
+  std::chrono::steady_clock::time_point wait_start;
+  if (wait_logging_ && queue_free_.IsEmpty()) {
+    size_t rented = 0;
+    {
+      std::unique_lock<std::mutex> lock(cs_);
+      wait_no = ++wait_count_;
+      rented = rented_.size();
+    }
+    wait_start = std::chrono::steady_clock::now();
+    // "held by decoder" buffers are rented and not yet handed back as a ready frame
+    // (frames in flight and hidden frames); the rest sit in the player's display queue.
+    XB_LOGI << "GPUTIME output-buffer wait #" << wait_no << " BLOCKED: pool " << queue_size_
+            << ", free 0, held by decoder " << rented << ", queued or on display "
+            << (queue_size_ - (int)rented);
+  }
   queue_free_.DoForAll(1, [&](OutBuffer* buffer) {
     if (flags & CBUFTEXTURE) {
       if (buffer->renderWidth != width || buffer->renderHeight != height || buffer->fb_type != fb_type) {
@@ -140,6 +157,16 @@ std::shared_ptr<OutBufferWrapper> OutBufferStorage::GetFreeBuffer(uint32_t width
     return 0;
   }
   OutBuffer* buffer = queue_free_.Pull();
+  if (wait_no) {
+    const double waited_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wait_start).count();
+    {
+      std::unique_lock<std::mutex> lock(cs_);
+      wait_total_ms_ += waited_ms;
+      if (waited_ms > wait_max_ms_) wait_max_ms_ = waited_ms;
+    }
+    XB_LOGI << "GPUTIME output-buffer wait #" << wait_no << " resumed after " << waited_ms << " ms";
+  }
   if (!(flags & CBUFREADBACK)) {
     buffer->d3d12buffer.Reset();
     buffer->pMem = 0;

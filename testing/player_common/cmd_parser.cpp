@@ -38,7 +38,10 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"queue_size", atInt, anOptional, "Player frame queue size. Default 16", "", &params_.player_queue_size_},
       {"conformance", atSingle, anOptional, "Do conformance test for directory", "", &params_.conformance_},
       {"try10x3", atSingle, anOptional, "Use 10_10_10_2 display mode. Default false", "", &params_.hdr10x3_},
-      {"r", atSingle, anOptional, "Recreate decoder for every file", "", &params_.recreate_}};
+      {"r", atSingle, anOptional, "Recreate decoder for every file", "", &params_.recreate_},
+      {"gputime", atSingle, anOptional, "per-stage GPU/CPU timing, summary in the log", "", &params_.gputime_},
+      {"nopresent", atSingle, anOptional, "release decoded frames without presenting them", "",
+       &params_.nopresent_}};
   params_.command_line_ = args.command_line_;
   const int list_length = sizeof(avaiting) / sizeof(ParamStruct);
   bool has_value[list_length] = {false};
@@ -163,6 +166,8 @@ void CParameters::Reset() {
   params_.conformance_ = false;
   params_.noninterop_ = false;
   params_.recreate_ = false;
+  params_.gputime_ = false;
+  params_.nopresent_ = false;
 }
 
 void CParameters::GetHelp(int pos, const char* arg, std::string& errMsg, const ParamStruct* arr, int size) {
