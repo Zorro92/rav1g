@@ -33,6 +33,7 @@
 #include "av1/common/frame_buffers.h"
 #include "av1/common/enums.h"
 #include "av1/common/obu_util.h"
+#include "av1/common/seq_header_peek.h"
 
 #include "av1/decoder/decoder.h"
 #include "av1/decoder/decodeframe.h"
@@ -215,37 +216,6 @@ static aom_codec_err_t decoder_destroy(aom_codec_alg_priv_t *ctx) {
   return AOM_CODEC_OK;
 }
 
-// Parses the operating points (including operating_point_idc, seq_level_idx,
-// and seq_tier) and then sets si->number_spatial_layers and
-// si->number_temporal_layers based on operating_point_idc[0].
-static aom_codec_err_t parse_operating_points(struct aom_read_bit_buffer *rb,
-                                              int is_reduced_header,
-                                              aom_codec_stream_info_t *si) {
-  int operating_point_idc0 = 0;
-
-  if (is_reduced_header) {
-    aom_rb_read_literal(rb, LEVEL_BITS);  // level
-  } else {
-    const uint8_t operating_points_cnt_minus_1 =
-        aom_rb_read_literal(rb, OP_POINTS_CNT_MINUS_1_BITS);
-    for (int i = 0; i < operating_points_cnt_minus_1 + 1; i++) {
-      int operating_point_idc;
-      operating_point_idc = aom_rb_read_literal(rb, OP_POINTS_IDC_BITS);
-      if (i == 0) operating_point_idc0 = operating_point_idc;
-      int seq_level_idx = aom_rb_read_literal(rb, LEVEL_BITS);  // level
-      if (seq_level_idx > 7) aom_rb_read_bit(rb);               // tier
-    }
-  }
-
-  if (aom_get_num_layers_from_operating_point_idc(
-          operating_point_idc0, &si->number_spatial_layers,
-          &si->number_temporal_layers) != AOM_CODEC_OK) {
-    return AOM_CODEC_ERROR;
-  }
-
-  return AOM_CODEC_OK;
-}
-
 static aom_codec_err_t decoder_peek_si_internal(const uint8_t *data,
                                                 size_t data_sz,
                                                 aom_codec_stream_info_t *si,
@@ -258,6 +228,7 @@ static aom_codec_err_t decoder_peek_si_internal(const uint8_t *data,
 
   si->w = 0;
   si->h = 0;
+  si->bit_depth = 0;
   si->is_kf = 0;  // is_kf indicates whether the current packet contains a RAP
 
   ObuHeader obu_header;
@@ -289,28 +260,26 @@ static aom_codec_err_t decoder_peek_si_internal(const uint8_t *data,
     if (obu_header.type == OBU_SEQUENCE_HEADER) {
       // Sanity check on sequence header size
       if (data_sz < 2) return AOM_CODEC_CORRUPT_FRAME;
-      // Read a few values from the sequence header payload
-      struct aom_read_bit_buffer rb = { data, data + data_sz, 0, NULL, NULL };
-
-      av1_read_profile(&rb);  // profile
-      const uint8_t still_picture = aom_rb_read_bit(&rb);
-      reduced_still_picture_hdr = aom_rb_read_bit(&rb);
-
-      if (!still_picture && reduced_still_picture_hdr) {
+      // Read a few values from the sequence header payload. The fields in
+      // front of the frame size (timing info, decoder model info, operating
+      // points) have a variable length; av1_peek_sequence_header() walks them
+      // as read_sequence_header_obu() does, and no further than this OBU.
+      Av1SeqHeaderPeek sh;
+      const int peek_status = av1_peek_sequence_header(data, payload_size, &sh);
+      if (peek_status == AV1_SEQ_PEEK_UNSUPPORTED)
         return AOM_CODEC_UNSUP_BITSTREAM;
-      }
+      if (peek_status != AV1_SEQ_PEEK_OK) return AOM_CODEC_CORRUPT_FRAME;
+      reduced_still_picture_hdr = (uint8_t)sh.reduced_still_picture_header;
 
-      if (parse_operating_points(&rb, reduced_still_picture_hdr, si) !=
-          AOM_CODEC_OK) {
+      if (aom_get_num_layers_from_operating_point_idc(
+              sh.operating_point_idc0, &si->number_spatial_layers,
+              &si->number_temporal_layers) != AOM_CODEC_OK) {
         return AOM_CODEC_ERROR;
       }
 
-      int num_bits_width = aom_rb_read_literal(&rb, 4) + 1;
-      int num_bits_height = aom_rb_read_literal(&rb, 4) + 1;
-      int max_frame_width = aom_rb_read_literal(&rb, num_bits_width) + 1;
-      int max_frame_height = aom_rb_read_literal(&rb, num_bits_height) + 1;
-      si->w = max_frame_width;
-      si->h = max_frame_height;
+      si->w = sh.max_frame_width;
+      si->h = sh.max_frame_height;
+      si->bit_depth = sh.bit_depth;
       got_sequence_header = 1;
     } else if (obu_header.type == OBU_FRAME_HEADER ||
                obu_header.type == OBU_FRAME) {

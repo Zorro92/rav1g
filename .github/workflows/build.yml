@@ -353,6 +353,15 @@ jobs:
           g++ -std=c++14 -Wall -Wextra -I libav1 -o perf_stats_test testing/player_common/perf_stats_test.cpp
           ./perf_stats_test
 
+      # The sequence header peek behind aom_codec_peek_stream_info and the player's -fitsize:
+      # headers written by hand from the specification's syntax must be read back with their
+      # values, cut headers must be reported, and five mutated copies of the peek must fail.
+      - name: Sequence header peek check
+        run: |
+          set -euo pipefail
+          sh testing/seq_header_check/run.sh --mutate | tee seq-header-check.log
+          { echo '## Sequence header peek check'; echo '```'; cat seq-header-check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Preserve the check log
         if: always()
         uses: actions/upload-artifact@v7

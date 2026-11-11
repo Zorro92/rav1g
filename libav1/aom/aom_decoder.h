@@ -80,6 +80,9 @@ typedef struct aom_codec_stream_info {
   unsigned int number_spatial_layers;  /**< Number of spatial layers */
   unsigned int number_temporal_layers; /**< Number of temporal layers */
   unsigned int is_annexb;              /**< Is Bitstream in Annex-B format */
+  unsigned int bit_depth;              /**< Bit depth of the sequence header a
+                                            peek has read: 8, 10 or 12 (0 when
+                                            there was none) */
 } aom_codec_stream_info_t;
 
 /* REQUIRED FUNCTIONS
