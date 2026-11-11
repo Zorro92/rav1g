@@ -121,6 +121,14 @@ void av1_set_cdef_v2(int enable);
  * default. Change it only while no frame is in flight. */
 void av1_set_intra_v2(int enable);
 
+/* Process-wide. Non-zero runs the original intra_main.hlsl (and its _hbd
+ * build) from a second pipeline state compiled with FXC optimisation enabled
+ * instead of the /Od build the project asks for; the shader source is the
+ * same. Applies wherever the original intra path runs, so with
+ * av1_set_intra_v2(1) only to the frames that keep it. Off by default. Change
+ * it only while no frame is in flight. */
+void av1_set_intra_opt(int enable);
+
 #ifdef __cplusplus
 }
 #endif

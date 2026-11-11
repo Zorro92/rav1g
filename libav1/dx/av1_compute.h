@@ -51,6 +51,7 @@ typedef struct {
   ComputeShader inter_warp_comp;
   ComputeShader intra_filter;
   ComputeShader intra_main;
+  ComputeShader intra_main_opt;  // test player flag -intraopt: intra_main built with FXC optimisation
   ComputeShader reconstruct_block;
   ComputeShader inter_ext_borders;
   ComputeShader loopfilter_v;

@@ -721,6 +721,12 @@
     <FxCompile Include="..\dx\shaders\intra_main_hbd.hlsl">
       <Filter>dx\shaders</Filter>
     </FxCompile>
+    <FxCompile Include="..\dx\shaders\intra_main_hbd_opt.hlsl">
+      <Filter>dx\shaders</Filter>
+    </FxCompile>
+    <FxCompile Include="..\dx\shaders\intra_main_opt.hlsl">
+      <Filter>dx\shaders</Filter>
+    </FxCompile>
     <FxCompile Include="..\dx\shaders\copy_plane.hlsl">
       <Filter>dx\shaders</Filter>
     </FxCompile>

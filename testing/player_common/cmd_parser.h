@@ -71,6 +71,7 @@ class CParameters {
     bool nopresent_;
     bool cdefv2_;
     bool intrav2_;
+    bool intraopt_;
   };
   enum arg_type { atSingle, atInt, atString };
   enum arg_need { anOptional, anMandatory, anAtLeastOne };

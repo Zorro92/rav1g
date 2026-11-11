@@ -44,7 +44,9 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        &params_.nopresent_},
       {"cdefv2", atSingle, anOptional, "CDEF through cdef_filter_v2.hlsl (same output)", "", &params_.cdefv2_},
       {"intrav2", atSingle, anOptional, "intra prediction through intra_v2.hlsl (same output)", "",
-       &params_.intrav2_}};
+       &params_.intrav2_},
+      {"intraopt", atSingle, anOptional, "original intra_main shader built with FXC optimisation (same source)", "",
+       &params_.intraopt_}};
   params_.command_line_ = args.command_line_;
   const int list_length = sizeof(avaiting) / sizeof(ParamStruct);
   bool has_value[list_length] = {false};
@@ -173,6 +175,7 @@ void CParameters::Reset() {
   params_.nopresent_ = false;
   params_.cdefv2_ = false;
   params_.intrav2_ = false;
+  params_.intraopt_ = false;
 }
 
 void CParameters::GetHelp(int pos, const char* arg, std::string& errMsg, const ParamStruct* arr, int size) {

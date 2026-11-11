@@ -85,6 +85,8 @@ extern "C" {
 #include "dx/shaders/h/intra_filter_hbd.h"
 #include "dx/shaders/h/intra_main.h"
 #include "dx/shaders/h/intra_main_hbd.h"
+#include "dx/shaders/h/intra_main_hbd_opt.h"
+#include "dx/shaders/h/intra_main_opt.h"
 #include "dx/shaders/h/intra_v2.h"
 #include "dx/shaders/h/intra_v2_hbd.h"
 
@@ -285,6 +287,7 @@ void* av1_create_pipeline_cache_handle(void* d3d12device, int threads) {
        &s8->inter_warp_comp},
       {_device, intra_filter, sizeof(intra_filter), shader_lib->sig_intra_pred.Get(), &s8->intra_filter},
       {_device, intra_main, sizeof(intra_main), shader_lib->sig_intra_pred.Get(), &s8->intra_main},
+      {_device, intra_main_opt, sizeof(intra_main_opt), shader_lib->sig_intra_pred.Get(), &s8->intra_main_opt},
       {_device, inter_ext_borders, sizeof(inter_ext_borders), shader_lib->sig_common0110.Get(), &s8->inter_ext_borders},
       {_device, reconstruct_block, sizeof(reconstruct_block), shader_lib->sig_intra_pred.Get(), &s8->reconstruct_block},
       {_device, loopfilter_vert, sizeof(loopfilter_vert), shader_lib->sig_lf.Get(), &s8->loopfilter_v},
@@ -310,6 +313,8 @@ void* av1_create_pipeline_cache_handle(void* d3d12device, int threads) {
       {_device, inter_warp_hbd, sizeof(inter_warp_hbd), shader_lib->sig_inter_pred.Get(), &hbd->inter_warp},
       {_device, intra_filter_hbd, sizeof(intra_filter_hbd), shader_lib->sig_intra_pred.Get(), &hbd->intra_filter},
       {_device, intra_main_hbd, sizeof(intra_main_hbd), shader_lib->sig_intra_pred.Get(), &hbd->intra_main},
+      {_device, intra_main_hbd_opt, sizeof(intra_main_hbd_opt), shader_lib->sig_intra_pred.Get(),
+       &hbd->intra_main_opt},
       {_device, inter_ext_borders_hbd, sizeof(inter_ext_borders_hbd), shader_lib->sig_common0110.Get(),
        &hbd->inter_ext_borders},
       {_device, reconstruct_block_hbd, sizeof(reconstruct_block_hbd), shader_lib->sig_intra_pred.Get(),

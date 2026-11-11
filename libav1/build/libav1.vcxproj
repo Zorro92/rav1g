@@ -971,6 +971,8 @@
       <DisableOptimizations Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">true</DisableOptimizations>
       <DisableOptimizations Condition="'$(Configuration)|$(Platform)'=='Release|x64'">true</DisableOptimizations>
     </FxCompile>
+    <FxCompile Include="..\dx\shaders\intra_main_hbd_opt.hlsl" />
+    <FxCompile Include="..\dx\shaders\intra_main_opt.hlsl" />
     <FxCompile Include="..\dx\shaders\loopfilter_hor.hlsl" />
     <FxCompile Include="..\dx\shaders\loopfilter_hor_hbd.hlsl" />
     <FxCompile Include="..\dx\shaders\loopfilter_vert.hlsl" />

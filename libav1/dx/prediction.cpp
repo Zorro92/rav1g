@@ -741,6 +741,13 @@ struct PSSLReconSRT {
   int r[5];
 };
 
+// Test player switch (-intraopt): the original intra path takes intra_main from the pipeline state built with
+// FXC optimisation (intra_main_opt.hlsl / intra_main_hbd_opt.hlsl, which only include the original source)
+// instead of the /Od build the project asks for. Off unless av1_set_intra_opt(1) was called.
+static int g_intra_opt = 0;
+
+extern "C" void av1_set_intra_opt(int enable) { g_intra_opt = enable; }
+
 void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
   av1_frame_thread_data *td = dec->curr_frame_data;
   const int tile_count = td->tile_count;
@@ -989,7 +996,9 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
   if (td->intra_iters >= 0 || recon_blocks) {
     ConstantBufferObject cbo = cb->Alloc(sizeof(PSSLIntraData));
     PSSLIntraData *data = (PSSLIntraData *)cbo.host_ptr;
-    ComputeShader *shader = &shaders->intra_main;
+    // The /Od build unless -intraopt asks for the optimised build of the same source (same root signature).
+    ComputeShader *const intra_main = g_intra_opt ? &shaders->intra_main_opt : &shaders->intra_main;
+    ComputeShader *shader = intra_main;
 
     data->flags[0] = cm->seq_params.enable_intra_edge_filter;
     memcpy(data->planes, td->frame_buffer->planes, sizeof(data->planes));
@@ -1092,8 +1101,8 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
                        (srt.counts0[4] << 6) + (srt.counts0[5] << 5) + (srt.counts0[6] << 4) + (srt.counts0[7] << 3) +
                        (counts8 << 2);
         if (srt.wi_count) {
-          if (shader != &shaders->intra_main) {
-            shader = &shaders->intra_main;
+          if (shader != intra_main) {
+            shader = intra_main;
             command_list->SetPipelineState(shader->pso.Get());
           }
           command_list->SetComputeRoot32BitConstants(5, 10, &srt, 0);

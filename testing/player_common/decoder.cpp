@@ -210,6 +210,10 @@ int AV1Decoder::DecodeOne() {
   XB_LOGI << "Intra shaders: "
           << (params_.intrav2_ ? "intra_v2 (-intrav2; frames with intra block copy keep the original shaders)"
                                : "intra_main + intra_filter (original)");
+  // -intraopt: which build of the original intra_main shader runs; independent of the two flags above.
+  av1_set_intra_opt(params_.intraopt_ ? 1 : 0);
+  XB_LOGI << "Intra main shader: "
+          << (params_.intraopt_ ? "intra_main_opt (FXC optimised, -intraopt)" : "intra_main (/Od, original)");
 
   output_queue_ = std::unique_ptr<BufferLocker>(new BufferLocker(&params_, cur_frame, storage_));
   if (display_) display_->AddSource(this);

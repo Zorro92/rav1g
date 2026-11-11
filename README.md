@@ -34,6 +34,9 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
 - **CDEF v2** (`-cdefv2`) is 7–9x faster than upstream and bit-exact.
 - **Intra v2** (`-intrav2`) is bit-exact but 2.3–2.4x slower. It is a negative result, off by
   default and kept for reference.
+- **Intra optimisation A/B** (`-intraopt`): upstream builds its `intra_main` shader with FXC
+  optimisation disabled; the flag runs a build of the same source with optimisation on. It is
+  being measured, there are no results yet.
 - On the SVT clip the CPU is now the limit: single-tile entropy decoding takes 34–38 ms per
   frame on one core, plus setup.
 - 1080p24/30 already decodes in real time.

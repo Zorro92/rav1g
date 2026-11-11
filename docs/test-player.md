@@ -34,6 +34,12 @@ one commit each:
   the default. It also adds intra dispatch counters to the `-gputime` output and a
   host-side comparison of the two paths (`testing/intra_check`), which is not part of the
   player build. It is bit-exact but slower than the original path.
+- **Intra optimisation A/B**: upstream builds `intra_main.hlsl` and `intra_main_hbd.hlsl`
+  with FXC optimisation disabled. Two wrapper files, `intra_main_opt.hlsl` and
+  `intra_main_hbd_opt.hlsl`, only `#include` those sources and are compiled with the
+  project's default (optimised) settings, and the player flag `-intraopt` selects them; see
+  [Intra optimisation A/B](#intra-optimisation-ab--intraopt). The upstream sources and
+  their `/Od` builds are not modified and stay the default.
 
 ## Build
 
@@ -41,8 +47,8 @@ one commit each:
 on demand. It builds `av1xbox.sln` (the player and its `uwp_common`/`libav1` dependencies)
 as Release x64 with MSBuild, the `v145` toolset and the `10.0.26100.0` Windows SDK. The
 minimum Windows version is overridden to `10.0.17763.0`. Upstream FXC/Shader Model 5.0
-compute shader settings are unchanged, and without `-cdefv2` and `-intrav2` the decoder
-runs exactly the upstream shaders. An appended compiler option `/wd4996` suppresses the
+compute shader settings are unchanged, and without `-cdefv2`, `-intrav2` and `-intraopt` the
+decoder runs exactly the upstream shaders. An appended compiler option `/wd4996` suppresses the
 newer SDK's deprecated `GetDesktopDpi` diagnostic (promoted to an error by upstream's
 `/sdl`), without changing the player source.
 
@@ -69,8 +75,10 @@ The artifact `rav1g-testplayer-x64-<run-id>` contains:
   `cdef_filter_v2.asm`) and `stats.txt`, a side-by-side count of what the listings
   declare; see [CDEF v2 run](#cdef-v2-run--cdefv2).
 - `intra-shaders/`: the same for the intra shaders: the four upstream ones
-  (`intra_main`, `intra_filter` and their `_hbd` builds) and `intra_v2`, `intra_v2_hbd`;
-  see [Intra v2 run](#intra-v2-run--intrav2).
+  (`intra_main`, `intra_filter` and their `_hbd` builds), `intra_main_opt` and
+  `intra_main_hbd_opt` (the optimised builds of the `intra_main` sources), and `intra_v2`,
+  `intra_v2_hbd`; see [Intra v2 run](#intra-v2-run--intrav2) and
+  [Intra optimisation A/B](#intra-optimisation-ab--intraopt).
 - `shader-survey/`: `survey.md` (and `survey.csv`), one line per shader of the project
   with the same counts, and `asm/` with the FXC listing of every shader; see
   [Shader survey](#shader-survey).
@@ -600,7 +608,95 @@ shaders); frames larger than about 380 pixels a side.
 `intra_v2`, `intra_v2_hbd`, compiled with the flags the Release build uses for each
 (`intra_main` and `intra_main_hbd` with `/Od`, as the project asks), and `stats.txt`
 with the same counts as for CDEF. After the build the workflow checks that each listing's
-bytecode is the one compiled into the package.
+bytecode is the one compiled into the package. The directory also has the listings of
+`intra_main_opt` and `intra_main_hbd_opt`, see
+[Intra optimisation A/B](#intra-optimisation-ab--intraopt).
+
+## Intra optimisation A/B (`-intraopt`)
+
+Upstream's project compiles `intra_main.hlsl` and `intra_main_hbd.hlsl` with FXC
+optimisation disabled (`DisableOptimizations` for these two items in
+`libav1/build/libav1.vcxproj`, FXC `/Od`). They are the only shaders built that way, and
+neither a comment nor upstream's history says why. This flag puts both builds of the same
+source into one install, so a console run can compare their timing and their output.
+
+| Flag | Effect |
+| --- | --- |
+| `-intraopt` | Where the decoder runs `intra_main` (`intra_main_hbd` for high bit depth), it uses the pipeline state built with FXC optimisation instead of the `/Od` one. The shader source is the same. |
+
+Off by default: without the flag the decoder uses the same pipeline states and issues
+the same dispatches as before. With the flag only the pipeline state of the `intra_main`
+dispatches changes; root signature, bindings, constants, dispatch sizes and
+`intra_filter` (which upstream already builds optimised) stay as they are.
+
+The flag is independent of `-cdefv2` and `-intrav2` and combines freely with both. With
+`-intrav2` it applies to the frames that keep the upstream path (frames that allow intra
+block copy); the other frames do not run `intra_main` at all.
+
+The task's log says which build is selected:
+
+```text
+Intra main shader: intra_main (/Od, original)
+Intra main shader: intra_main_opt (FXC optimised, -intraopt)
+```
+
+### How it is built
+
+`intra_main_opt.hlsl` and `intra_main_hbd_opt.hlsl` consist of the licence header and one
+`#include` of the upstream file. They are separate `FxCompile` items without the
+`DisableOptimizations` override, so the Release build compiles them with the project's
+default settings, like every other shader. The workflow stops if any shader other than
+`intra_main` and `intra_main_hbd` is built with `/Od`, or if the two `_opt` items are
+missing.
+
+Whether the optimised bytecode behaves like the `/Od` one on the GPU is not known from the
+build; that is what the md5 run below is for. The host-side check (`testing/intra_check`)
+runs the HLSL source as C++ and cannot tell the two builds apart.
+
+### Timing: `/Od` against optimised
+
+Both lines in `args_av1.txt`, same clip, same settings, both with `-cdefv2`; the only
+difference is the flag:
+
+```text
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -gputime -nopresent -cdefv2
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -gputime -nopresent -cdefv2 -intraopt
+```
+
+Compare the `gpu intra` row of the two summaries' stage tables, then `gpu busy` and the
+"per OUTPUT frame" line. The "intra stage per frame" line (dispatches, UAV barriers,
+thread groups) must be the same in both tasks, and every other GPU stage should be
+unchanged.
+
+### Same output: md5 of every frame
+
+As for [CDEF](#same-output-md5-of-every-frame), **in separate launches**. First launch,
+the reference from the `/Od` build (no `-intraopt`):
+
+```text
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -save_md5 /streams/<clip>.ivf.md5
+```
+
+Let the app exit, then a second launch with only the check task:
+
+```text
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -cdefv2 -intraopt -md5_frame_check
+```
+
+The rules of the CDEF section apply unchanged: the same `-limit` in both tasks, the
+`.md5` file next to the stream, no `-gputime`, no `-try10x3`. A reference file saved for
+the CDEF or intra v2 check of the same clip and `-limit` can be reused, since `-cdefv2`
+is md5-exact. The task ends with `MD5 is OK` or a list of bad frames. Run it on at least
+one 8-bit and one 10-bit clip (they use different shaders), and include a clip with
+chroma-from-luma blocks and a key frame of small blocks. A timing result of the
+optimised build counts only if its md5 check passes.
+
+### Shader listings in the artifact
+
+`intra-shaders/` has `intra_main_opt.asm` and `intra_main_hbd_opt.asm` next to the `/Od`
+listings `intra_main.asm` and `intra_main_hbd.asm`, and `stats.txt` gives the counts and
+the FXC compile time of all four. After the build the workflow checks that each of the
+four listings has the bytecode compiled into the package.
 
 ## Shader survey
 

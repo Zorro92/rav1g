@@ -62,7 +62,9 @@ jobs:
       # every shader of the project through the FXC, profile and flags of the Release x64 project
       # (cs_5_0, entry main, default optimization, /Od where the project disables it). The CDEF and
       # intra listings get a side-by-side count, all shaders a one-line survey. A shader that
-      # does not compile stops the run here.
+      # does not compile stops the run here. intra_main_opt and intra_main_hbd_opt are the
+      # upstream intra_main sources built with optimization (player flag -intraopt), listed next
+      # to the /Od builds the project asks for.
       - name: Disassemble the shaders (CDEF and intra listings, survey of all)
         shell: pwsh
         run: |
@@ -84,6 +86,14 @@ jobs:
           }
           $names = @($names | Sort-Object -Unique)
           if ($names.Count -lt 80) { throw "Only $($names.Count) shaders found in the project" }
+          # The -intraopt comparison needs exactly this: the two upstream intra_main builds without
+          # optimization, and their _opt items (the same source through an #include) with it.
+          if ((@($unoptimized.Keys | Sort-Object) -join ' ') -cne 'intra_main intra_main_hbd') {
+            throw "Shaders built with /Od in Release x64: $(@($unoptimized.Keys | Sort-Object) -join ' ')"
+          }
+          foreach ($name in @('intra_main_opt', 'intra_main_hbd_opt')) {
+            if ($names -notcontains $name) { throw "$name is not a shader of the project" }
+          }
           $asm = (New-Item -ItemType Directory -Force out/shader-survey/asm).FullName
           $headers = (New-Item -ItemType Directory -Force out/shader-survey/h).FullName
           $rows = @{}
@@ -163,7 +173,8 @@ jobs:
           $sets = @(
             @{ directory = 'cdef-shaders'; title = 'CDEF shader listings'; names = @('cdef_filter', 'cdef_filter_v2') },
             @{ directory = 'intra-shaders'; title = 'Intra shader listings';
-               names = @('intra_main', 'intra_main_hbd', 'intra_filter', 'intra_filter_hbd', 'intra_v2', 'intra_v2_hbd') })
+               names = @('intra_main', 'intra_main_opt', 'intra_main_hbd', 'intra_main_hbd_opt', 'intra_filter',
+                 'intra_filter_hbd', 'intra_v2', 'intra_v2_hbd') })
           foreach ($set in $sets) {
             $directory = (New-Item -ItemType Directory -Force "out/$($set.directory)").FullName
             $stats = @($intro)
@@ -243,7 +254,8 @@ jobs:
           # The listings describe the shipped shaders only if the build compiled the same bytecode.
           # The CDEF and intra listings must match; for the rest of the survey a difference is noted.
           $checked = @{ 'cdef-shaders' = @('cdef_filter', 'cdef_filter_v2')
-            'intra-shaders' = @('intra_main', 'intra_main_hbd', 'intra_filter', 'intra_filter_hbd', 'intra_v2', 'intra_v2_hbd') }
+            'intra-shaders' = @('intra_main', 'intra_main_opt', 'intra_main_hbd', 'intra_main_hbd_opt', 'intra_filter',
+              'intra_filter_hbd', 'intra_v2', 'intra_v2_hbd') }
           $different = @()
           $listed = @(Get-ChildItem out/shader-survey/h -Filter *.h)
           foreach ($header in $listed) {
