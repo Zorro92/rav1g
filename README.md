@@ -25,11 +25,11 @@ consoles in UWP app mode with the test player (`testing/uwp_dx12_player`).
 4K 10-bit, 1 tile, 40 Mbps, 300 frames, on the console, no presentation (ranges are over
 separate runs). 24 fps needs at most 41.7 ms per frame:
 
-| | Upstream | Now (`-cdefv2`) |
-| --- | --- | --- |
-| CDEF per frame | ~52 ms | 5.5–7.2 ms, md5-exact |
-| SVT-AV1 low-delay clip | 13.4 fps, GPU busy 66.5 ms | 21.3–23.1 fps, GPU busy 30.7–32.2 ms |
-| Jellyfin test clip | 10.5 fps, GPU busy 95.4 ms | 16.5–16.8 fps, GPU busy 50 ms (intra 21, inter 19) |
+| | Upstream | `-cdefv2` | `-cdefv2 -lowmem -fitsize -slots 3` |
+| --- | --- | --- | --- |
+| CDEF per frame | ~52 ms | 5.5–7.2 ms, md5-exact | same |
+| SVT-AV1 low-delay clip | 13.4 fps, GPU busy 66.5 ms | 21.0–23.1 fps, GPU busy 30.7–32.2 ms | 25.3–25.6 fps (27.3 with `-asyncclear`, one run) |
+| Jellyfin test clip | 10.5 fps, GPU busy 95.4 ms | 16.4–16.8 fps, GPU busy 50 ms (intra 21, inter 19) | 18.6–18.7 fps (19.2 with `-asyncclear`), GPU-bound at ~51 ms |
 
 - **CDEF v2** (`-cdefv2`) is 7–9x faster than upstream and bit-exact.
 - **Intra v2** (`-intrav2`) is bit-exact but 2.3–2.4x slower. It is a negative result, off by
@@ -37,24 +37,21 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
 - **Intra optimisation A/B** (`-intraopt`): upstream builds its `intra_main` shader with FXC
   optimisation disabled. With optimisation on it is no faster and decodes wrongly (a
   timing-dependent race), which is probably why upstream turned it off. Negative result.
-- On both clips the CPU decode thread is now the wall limit: single-tile entropy decoding
-  takes 34–44 ms per frame on one core, plus ~12–15 ms of setup and recording.
-- **Pipeline depth and clears** (`-slots`, `-asyncclear`): the number of frames in flight
-  between CPU and GPU can be raised from 2 to 3 or 4, and the per-frame buffer clears can
-  move off the decode thread. Both are off by default and are being measured.
-- **Memory**: a console app may use 1 GiB, and at 4K the decoder took about 880 MiB of it
-  (measured: the app's memory after creating a 4096x2176 10-bit decoder with two slots,
-  754.7 MiB of that in the decoder's D3D12 buffers), which also left no room for a third
-  slot. This is being reduced: computed from the allocation code, the same decoder is now
-  681.9 MiB of buffers, 639.7 MiB when created for a 3840x2160 stream (`-fitsize`) and
-  539.9 MiB with the reductions that are not on by default (`-lowmem -fitsize`). A decoder
-  that does not fit the app's limit is refused instead of losing the D3D12 device.
+- **A third frame in flight** (`-slots 3`) lets CPU and GPU overlap: the decode thread's wait
+  for a free slot drops from 5.6–8.3 ms to 0.3–0.6 ms per frame. It only fits in memory with
+  `-lowmem -fitsize`. All combinations are md5-exact. On the SVT clip the CPU (entropy decoding,
+  ~34 ms on one core) is now the limit; on the Jellyfin clip the GPU is.
+- **Memory**: a console app may use 1 GiB. At 4K the decoder took 882.7 MiB of it (app memory
+  after creation, 2 slots); it now takes 812.7 MiB by default, 663.4 MiB with
+  `-lowmem -fitsize` and 773.5 MiB with `-lowmem -fitsize -slots 3` (measured). A decoder that
+  does not fit is refused instead of losing the D3D12 device, and a destroyed decoder returns
+  its memory (in md5 runs about 75 MiB stays behind; under investigation).
 - 1080p24/30 already decodes in real time.
 - Known bug: some encodes with hidden frames (SVT-AV1 random access) deadlock on output
   buffer starvation.
 
-Next targets: intra prediction and inter prediction on the GPU, entropy decoding on the CPU,
-and the hidden-frame hang. The Rust port starts once 4K GPU and CPU time per frame are well
+Next targets: the hidden-frame hang, entropy decoding on the CPU (frame-parallel or a faster
+parser), and inter and intra prediction on the GPU. The Rust port starts once 4K GPU and CPU time per frame are well
 under 41.7 ms on heavy content.
 
 ## Documentation

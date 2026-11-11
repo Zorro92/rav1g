@@ -277,3 +277,37 @@ Same console, both with `-cdefv2`, 300 frames of 4K 10-bit:
 - **The CPU decode thread is the wall limit on both clips.** Per frame it is busy 45.7 ms (SVT) and
   58.6 ms (Jellyfin) against GPU busy 32 and 50 ms. Entropy is 34 and 44 ms of that; setup and
   command recording are the remaining ~12–15 ms, on the same thread.
+
+## Step 2: pipeline depth and memory (2026-11-11)
+rav1g commits 0cd36a3 to cf69c58 (packages 0.2.4.0 to 0.2.7.0) add `-slots N` (frames in flight
+between CPU and GPU, default 2), `-asyncclear` (per-frame clears on the GPU completion thread),
+`MEMORY` log lines, `-fitsize` (decoder sized to the stream), `-lowmem` (smaller worst-case shares
+and a shared back buffer) and a budget guard.
+
+**Memory is the constraint.** A UWP app on the console may use 1024 MiB. The default 2-slot 4K
+decoder took the app to 882.7 MiB, ~40 MiB short of the limit with the output pool; a third slot
+(+~198 MiB) pushed GPU usage past the budget and removed the D3D12 device for the rest of the
+process. After the reductions, app memory after creation is 812.7 MiB (default), 765.5 MiB
+(`-fitsize`), 663.4 MiB (`-lowmem -fitsize`) and 773.5 MiB (`-lowmem -fitsize -slots 3`). An embedding
+app has the same 1 GiB for everything, so this matters beyond the test player.
+
+Same console, `-cdefv2`, 300 frames of 4K 10-bit; every configuration below is md5-exact:
+
+| Configuration | SVT 40 Mbps fps | Jellyfin 40 Mbps fps | wait for a slot, ms |
+|---|---|---|---|
+| 2 slots (earlier packages / `-lowmem -fitsize`) | 21.0–22.8 / 21.9 | 16.4–16.7 / 16.4 | 5.6–8.3 |
+| 2 slots, `-asyncclear` | 21.0–21.4 | 16.4–16.6 | 7.6–12.0 |
+| 3 slots, `-lowmem -fitsize` (2 runs) | 25.6 / 25.3 | 18.7 / 18.6 | 0.3–0.6 |
+| 3 slots, `-lowmem -fitsize -asyncclear` (1 run) | 27.3 | 19.2 | 0.4–1.3 |
+
+**Reading:**
+- With two slots the CPU and GPU each waited for the other; moving the clears off the decode
+  thread only turned them into waiting. A third slot removes the waits: +17% on SVT, +13% on
+  Jellyfin. With three slots the moved clears help too (SVT 36.6 ms per frame).
+- **SVT now runs above 24 fps.** Its limit is the CPU: entropy decoding on one core, ~34 ms.
+- **Jellyfin is GPU-bound** at ~51 ms per frame (intra 21, inter 19); more pipelining cannot help.
+- `-lowmem` costs no measurable time. Run-to-run noise is about ±1 fps.
+- A destroyed decoder now returns its memory (app usage back to the launch baseline); in md5 runs
+  about 75 MiB stays behind, likely the readback buffers, so md5 tests run one configuration per
+  launch.
+
