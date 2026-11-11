@@ -253,3 +253,27 @@ maths.
 **The CPU limits the SVT clip anyway.** With `-cdefv2` alone the GPU is busy 30.7 ms per frame
 but the wall is 44 ms. The decode thread (entropy 34–38 ms on one tile, plus setup) sets the
 pace.
+
+## Step 1c: intra_main with FXC optimisation (2026-11-11, negative)
+rav1g commit f96ac20 (CI run 43008653829, package 0.2.3.0) adds `-intraopt`: the same `intra_main`
+source compiled with FXC optimisation on, next to upstream's `/Od` build. FXC compiles it without
+warnings; the listing is about half the instruction slots (854 against 1616).
+
+Same console, both with `-cdefv2`, 300 frames of 4K 10-bit:
+
+| Stream | Intra `/Od` ms | Intra optimised ms | GPU busy ms | Decode fps | md5 optimised |
+|---|---|---|---|---|---|
+| SVT 40 Mbps | 13.7 | 14.0 | 32.0 / 32.1 | 21.1 / 21.0 | wrong, all 300 frames |
+| Jellyfin 40 Mbps | 21.2 | 21.3 | 50.1 / 50.5 | 16.6 / 16.3 | wrong, all 300 frames |
+
+**Reading:**
+- **No gain.** The driver optimises the DXBC itself, so FXC's `/Od` costs nothing. Intra time is the
+  latency of its wavefront steps: about 0.11 ms per step on Jellyfin (189 steps per frame) and
+  0.16 ms on SVT (83 steps).
+- **Wrong and non-deterministic.** Two check runs of the same clip agree on no frame md5, from the
+  key frame on. The optimised bytecode exposes a race; the same build without the flag is md5-exact.
+  That is very likely why upstream disabled optimisation. Candidates from the listings: a group sync
+  FXC removes (`intra_main.hlsl:300`) and the CFL reduction's reliance on lockstep waves.
+- **The CPU decode thread is the wall limit on both clips.** Per frame it is busy 45.7 ms (SVT) and
+  58.6 ms (Jellyfin) against GPU busy 32 and 50 ms. Entropy is 34 and 44 ms of that; setup and
+  command recording are the remaining ~12–15 ms, on the same thread.

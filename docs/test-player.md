@@ -39,7 +39,8 @@ one commit each:
   `intra_main_hbd_opt.hlsl`, only `#include` those sources and are compiled with the
   project's default (optimised) settings, and the player flag `-intraopt` selects them; see
   [Intra optimisation A/B](#intra-optimisation-ab--intraopt). The upstream sources and
-  their `/Od` builds are not modified and stay the default.
+  their `/Od` builds are not modified and stay the default. **The optimised build decodes
+  wrongly and is not faster**; the flag is kept only to investigate why.
 
 ## Build
 
@@ -690,6 +691,31 @@ is md5-exact. The task ends with `MD5 is OK` or a list of bad frames. Run it on 
 one 8-bit and one 10-bit clip (they use different shaders), and include a clip with
 chroma-from-luma blocks and a key frame of small blocks. A timing result of the
 optimised build counts only if its md5 check passes.
+
+### Console result (2026-11-11): wrong output, no gain
+
+Package 0.2.3.0 (run 43008653829), 4K 10-bit, 1 tile, 300 frames, all tasks with `-cdefv2`:
+
+| Clip | `gpu intra` `/Od` ms | `gpu intra` `-intraopt` ms | md5 with `-intraopt` |
+| --- | --- | --- | --- |
+| SVT low-delay 40 Mbps | 13.68 | 13.95 | wrong on all 300 frames |
+| Jellyfin 40 Mbps | 21.21 | 21.30 | wrong on all 300 frames |
+
+- **No speed gain.** The intra stage time is the same within noise, as are dispatches,
+  barriers and thread groups. The driver compiles the DXBC to GPU code with its own
+  optimiser either way, so FXC's `/Od` costs nothing here. The stage is bound by the
+  latency of its wavefront steps (about 0.11–0.16 ms per step), not by instructions.
+- **Wrong output, and not deterministic.** Both clips fail from the first (key) frame. Two
+  check runs of the same clip agree on none of the 300 frame md5s, so the optimised
+  bytecode has a timing-dependent race rather than a fixed miscompile. A control task with
+  the same build and no `-intraopt` gives `MD5 is OK` on both clips.
+- The likely reason upstream disabled optimisation for this shader is this broken output.
+  The listings show two candidates: FXC drops the group sync at `intra_main.hlsl:300`
+  (between the left edge-filter stores and the above upsampling loads), and the CFL
+  reduction relies on 64 threads running in lockstep with only `GroupMemoryBarrier()`.
+  Neither is confirmed.
+- Only `intra_main_hbd_opt` ran on the console (both clips are 10-bit); the 8-bit
+  `intra_main_opt` was not tested.
 
 ### Shader listings in the artifact
 

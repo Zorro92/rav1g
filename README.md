@@ -35,10 +35,10 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
 - **Intra v2** (`-intrav2`) is bit-exact but 2.3–2.4x slower. It is a negative result, off by
   default and kept for reference.
 - **Intra optimisation A/B** (`-intraopt`): upstream builds its `intra_main` shader with FXC
-  optimisation disabled; the flag runs a build of the same source with optimisation on. It is
-  being measured, there are no results yet.
-- On the SVT clip the CPU is now the limit: single-tile entropy decoding takes 34–38 ms per
-  frame on one core, plus setup.
+  optimisation disabled. With optimisation on it is no faster and decodes wrongly (a
+  timing-dependent race), which is probably why upstream turned it off. Negative result.
+- On both clips the CPU decode thread is now the wall limit: single-tile entropy decoding
+  takes 34–44 ms per frame on one core, plus ~12–15 ms of setup and recording.
 - 1080p24/30 already decodes in real time.
 - Known bug: some encodes with hidden frames (SVT-AV1 random access) deadlock on output
   buffer starvation.
