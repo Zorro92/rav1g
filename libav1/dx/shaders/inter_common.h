@@ -275,22 +275,19 @@ int2 filter_line2_hbd(RWByteAddressBuffer ref, int offset, int4 fkernel0, int4 f
   return sum;
 }
 
-#if 0
-int scale_value(int val, int sf)
-{
-    const int off = (sf - (1 << REF_SCALE_SHIFT)) * (1 << (SUBPEL_BITS - 1));
-    long tval = (long)val * sf + off;
-    return (tval < 0) ? (int)(-((-tval + 128) >> 8)) : (int)((tval + 128) >> 8);
-}
-#else
+// The position val (1/16 sample) times the scale sf (1/16384), plus the offset of the scale, rounded to 1/1024
+// sample away from zero: scaled_x() and scaled_y() of av1/common/scale.c, which need 64 bits for the product.
+// HLSL 5.0 has no 64-bit integers, and double precision, which this function used before, is not executed by
+// every GPU the decoder runs on (the console returned 0 here: docs/gpu-av1-decoder.md, "Global motion"). So
+// the product is split: sf = (sf >> 8) * 256 + (sf & 255), and val * sf + off = 256 * hi + lo with both parts
+// well inside 32 bits (|val| < 2^21, sf <= 2^15). testing/warp_check compares it with libaom.
 int scale_value(int val, int sf) {
   const int off = (sf - (1 << REF_SCALE_SHIFT)) * (1 << (SUBPEL_BITS - 1));
-  double dval = (double)val * sf + off;
-  dval = (dval < 0) ? (dval - 128) : (dval + 128);
-  dval *= 0.00390625;
-  return (int)dval;
+  const int hi = val * (sf >> 8);
+  const int lo = val * (sf & 255) + off;
+  const int neg = (hi + (lo >> 8)) < 0;
+  return neg ? hi - ((128 - lo) >> 8) : hi + ((lo + 128) >> 8);
 }
-#endif
 
 int4 filter_line_warp(RWByteAddressBuffer ref, int offset, ByteAddressBuffer filter, int sx, int alpha) {
   uint4 l = ref.Load4(offset & (~3));

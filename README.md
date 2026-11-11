@@ -61,6 +61,10 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
   access, and most real-world AV1) used to stop after the first frames, because every hidden
   frame held an output buffer. An output buffer is now taken only for a frame that is output,
   when it is output. Fixed in the code; the console run against dav1d references is pending.
+- **Global motion**: frames with global motion were wrong on the console in upstream (a
+  shader computed block positions in double precision, which the console does not execute).
+  Fixed with integer arithmetic and checked on a host against libaom
+  (`testing/warp_check`); the console md5 check is pending.
 
 Next targets: entropy decoding on the CPU (frame-parallel or a faster
 parser), and inter and intra prediction on the GPU. The Rust port starts once 4K GPU and CPU time per frame are well

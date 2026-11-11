@@ -85,6 +85,14 @@ one commit each:
   moment it is output; see [Hidden frames](#hidden-frames-show_existing_frame). The change
   is in `libav1/dx`; no shader changes, and nothing changes for a stream in which every
   frame is shown.
+- **Global motion**: frames with global motion decoded wrongly on the console in upstream.
+  The shader for `GLOBAL_GLOBALMV` blocks took the position of the reference that is not
+  warped through `scale_value()` of `libav1/dx/shaders/inter_common.h`, which used double
+  precision; the console returned 0 from it. `scale_value()` is integer arithmetic now,
+  with the same results. A host-side check of the warp shaders against libaom's C code
+  lives in `testing/warp_check`. See [Global motion](#global-motion). Only the twenty
+  `inter_scale_*` shaders change: those for scaled references, and the one that predicts
+  `GLOBAL_GLOBALMV` blocks, which runs only in frames with global motion.
 
 ## Build
 
@@ -1890,6 +1898,161 @@ these streams and so cannot write one:
   never above the slots plus one, `frames decoded` and `output` as dav1d counts them, and
   the `show-existing copies` line (their GPU time should be the `copy_plane` and
   `output_copy` time of a shown frame).
+
+## Global motion
+
+**The bug (upstream; in every package before this change).** A 1080p 10-bit 4:2:0 stream (4 tile
+columns, many hidden frames, no film grain) decoded md5-identical to dav1d except in the
+frames with global motion and in the frames predicted from them. The first one is output
+frame 525: an inter frame with a rotzoom model on ALTREF (`is_global[7]`,
+`is_rot_zoom[7]`), the only frame with global motion among the first 600 decoded, and the
+only wrong output among them. Against dav1d, 584 luma samples differ (by up to 436 of
+1023), all inside x 1852..1890, y 620..644, and about 140 samples of each chroma plane in
+the same place. The same wrong md5 came out with `-cdefv1`, `-nofitsize`,
+`-lowmemparts 0`, and with two and three slots.
+
+**What the samples say.** The block there is a 32x16 `GLOBAL_GLOBALMV` block with a wedge
+mask, at x 1856, y 624: LAST, which has no global motion in that frame, and ALTREF with
+the rotzoom model. On one side of the wedge the decoder's output is the warped ALTREF
+prediction, as in dav1d. On the other side it is not the block of LAST at x 1856, y 624,
+but the top left corner of LAST, sample for sample: a run of 11 equal samples, then 4 one
+lower, then 4 one lower again, which is how every row of that corner runs. So the prediction of
+the reference that is not warped read `LAST[y - 624][x - 1856]`: the position of the block
+was lost, the step from sample to sample was not.
+
+**The cause.** `GLOBAL_GLOBALMV` blocks with at least one warped reference are predicted
+by `inter_scale_warp_compound.hlsl` (`_hbd` for 10-bit). For a reference without a warp
+that shader takes the path of the scaled-reference shaders, also when nothing is scaled:
+
+```hlsl
+int mvx = scale_value((mbx << SUBPEL_BITS) + (mv >> 16), scale.x) + SCALE_EXTRA_OFF;
+...
+mvx += (dx + wi) * scale.y;
+```
+
+`scale_value()` (`libav1/dx/shaders/inter_common.h`) multiplies a position by a scale, a
+product that needs more than 32 bits. HLSL 5.0 has no 64-bit integers, so upstream
+computed it in double precision (FXC emits `itod`, `dmul`, `dadd`, `dtoi` and marks the
+shader `enableDoublePrecisionFloatOps | enable11_1DoubleExtensions`). The console creates
+the pipeline state for such a shader without an error, but the result of `scale_value()`
+is 0 there: exactly what the samples show. No other shader path that runs on these
+streams uses double precision; all twenty `inter_scale_*` shaders do, and nineteen of them
+only run for scaled references, which the test streams do not have. That this is what the
+console does is concluded from its output, not measured on it: the md5 run below is the
+proof.
+
+**The fix.** `scale_value()` splits the scale into its upper bits and its lowest eight, so
+that both partial products fit 32 bits, and rounds the sum the way libaom's `scaled_x()`
+does (to 1/1024 sample, away from zero). The results are the same as with working double
+precision, for every position and scale a frame can have, so a GPU that executed the old
+code writes the same frames with the new one. Nothing else changes: the shaders of frames
+without global motion and without scaled references are byte for byte the ones of the
+build before.
+
+The decoder also logs once per launch what the device says about double precision
+(`GPU double precision shader operations: reported` or `not reported`), for the record;
+no shader depends on it any more.
+
+### Host-side check of the warp shaders
+
+`testing/warp_check` (not part of the player build) compiles the shaders that predict
+warped blocks as C++ (attributes, semantics and register bindings stripped with `sed`,
+`testing/warp_check/hlsl_shim.h` for the rest): `inter_warp` for a block with one
+reference and a local or a global warp, `inter_scale_warp_compound` for `GLOBAL_GLOBALMV`
+blocks, their `_hbd` builds, and `inter_ext_borders`, which extends the border of every
+reference frame. It runs them on generated frames laid out like the decoder's frame pool
+(16 samples of border of which the decoder extends 12, the padding to 128, garbage
+wherever the decoder defines nothing), with block records as `gen_pred_blocks.hlsl` writes
+them and constants as `prediction.cpp` sets them.
+
+The reference is libaom's C code of this tree, compiled as it is: `av1_make_inter_predictor`
+with `av1_allow_warp` and `av1_warp_plane` (`av1_warp_affine_c`,
+`av1_highbd_warp_affine_c`), the convolve functions, the difference weighted mask and the
+mask blend, called for each block the way libaom's decoder calls them
+(`testing/warp_check/ref_glue.c`; the two functions of libaom's block path that the fork
+removed are repeated there). The whole pool must be byte identical afterwards: the frame,
+the reference frames, the padding around them.
+
+What the generated frames cover:
+
+- 8-bit and 10-bit; frames from 8x8 to 1920x1080, with sizes that are multiples of 64,
+  multiples of 8 only, neither, and odd;
+- every block size that can be warped (8x8 to 128x128, the 1:2, 2:1, 1:4 and 4:1 shapes
+  included), at the first and the last position of a row and of a column and in between,
+  so also blocks that reach beyond the frame;
+- global motion models of every type: rotzoom and affine as warps, translation and
+  identity as the reference of a `GLOBAL_GLOBALMV` block that is not warped; local warp
+  models from `find_projection()` and random ones, with models that send the block far
+  outside the reference;
+- `GLOBAL_GLOBALMV` with both references warped or one of them, with every compound
+  type (average, distance weights, wedge, difference weights with the mask handed to
+  chroma), every interpolation filter, vectors that point beyond every edge;
+- with and without residual;
+- `scale_value()` on its own against libaom's `scaled_x()`, 400000 positions and scales;
+- one frame with the block of the console failure: 1920x1080 10-bit, the 32x16 wedge
+  block at x 1856, y 624, LAST plain, ALTREF with the model of that frame.
+
+Every frame runs twice: with double precision in the shaders working, and with every
+double precision operation yielding 0, which stands for the console. The check also
+counts the double precision operations the shaders execute, and fails if there is one.
+
+```sh
+sh testing/warp_check/run.sh             # the check
+sh testing/warp_check/run.sh --mutate    # and nine mutated shaders, which must all fail
+```
+
+Further arguments go to the check: `--cases N` (frames per common size, default 24), `--seed S`,
+`-v` (show every mismatch). It ends with
+
+```text
+warp_check: scale_value() against libaom's scaled_x(), 400000 values: identical with double precision, identical without
+warp_check: console case (1920x1080 10-bit, 32x16 GLOBAL_GLOBALMV wedge block at x 1856 y 624, LAST plain and ALTREF rotzoom): identical
+warp_check: 381 frames, 8-bit and 10-bit, 2748 blocks: 876 GLOBALMV with a global warp, 864 with a local warp, 1008 GLOBAL_GLOBALMV (596 of them with one reference not warped)
+warp_check: frames that differ from libaom: 0 with double precision, 0 without
+warp_check: double precision operations executed by the shaders: 0
+warp_check: the warp shaders and libaom write identical frames
+```
+
+and exit code 0. On the shaders before the fix it ended with
+
+```text
+MISMATCH console case, 1920x1080 10-bit, without double precision
+  769 bytes differ; first in the frame, plane 0, x 1856 y 624: shader 80, libaom 691
+  in the 32x16 block at x 1856 y 624, GLOBAL_GLOBALMV, ref 1 (identity, mv 0,0) + ref 7 (rotzoom warp), wedge, with residual
+...
+warp_check: frames that differ from libaom: 0 with double precision, 247 without
+warp_check: double precision operations executed by the shaders: 9860032 (the console does not execute them)
+warp_check: FAILED
+```
+
+so with working double precision the shaders were right in every case, edges included,
+and without it every `GLOBAL_GLOBALMV` block with a reference that is not warped was
+wrong. The mutants of `--mutate` each change one detail: the right, the left and the
+bottom edge clamp of the warp, the right edge clamp of the compound warp and of its
+reference that is not warped, a shear term, the centre of the 8x8 warp unit, and the
+offset and the rounding of `scale_value()`. The workflow runs the check with `--mutate`
+in the job `warp-check`.
+
+What the check does not run: `gen_pred_blocks.hlsl` and `av1_mi_push_block()`, which
+decide which blocks are warped (the records are written by the check, following them);
+the chroma of warped blocks smaller than 16x16, which the translation shaders predict;
+OBMC and inter-intra on top of a warped block; scaled references.
+
+### Console run
+
+**Not run on the console yet.** To check, against
+[dav1d references](#md5-references-from-dav1d), one md5 task per launch:
+
+```text
+-i /streams/<1080p clip with global motion>.ivf -t 6 -frate -1 -limit 1000 -queue_size 4 -progress -nopresent -md5_frame_check
+```
+
+- `MD5 is OK` over at least 1000 frames of the 1080p stream above (frames 525, 601, 613,
+  697 and 699 have global motion; errors used to spread from about frame 603 on).
+- Unchanged `MD5 is OK` on the four 4K clips, none of which has global motion.
+- The line `GPU double precision shader operations: ...` in the log, for the record.
+- If a stream with scaled references is at hand: it runs the other nineteen shaders that
+  used double precision, which no clip has exercised here.
 
 ## Shader survey
 

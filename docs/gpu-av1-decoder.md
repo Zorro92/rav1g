@@ -329,3 +329,35 @@ and the console checks are in [test-player.md](test-player.md#hidden-frames-show
 Written without a console; md5 references for these streams come from dav1d, since the original
 path cannot decode them.
 
+## Step 4: global motion (2026-11-11)
+
+**The bug.** A 1080p 10-bit stream (4 tile columns, many hidden frames) was md5-identical to
+dav1d except in the frames with global motion and those predicted from them; none of the four 4K
+test clips has global motion. First wrong output: frame 525, a rotzoom model on ALTREF, 584 luma
+samples off by up to 436 in one 32x16 block near the right edge (x 1856, y 624), about 140 per
+chroma plane. Upstream behaviour: the same md5 with `-cdefv1 -nofitsize -lowmemparts 0` and with
+two or three slots.
+
+**The cause.** Not the frame edge. The block is `GLOBAL_GLOBALMV` with a wedge: LAST without
+global motion, ALTREF warped. The warped half was right. The other half was the top left corner
+of LAST, sample for sample: the shader for these blocks (`inter_scale_warp_compound`) sends a
+reference that is not warped through `scale_value()`, which computed position times scale in
+double precision, and the console returned 0 from it, so the block position was lost and only
+the offset inside the block was left. The console accepts shaders with double precision without
+an error. All twenty `inter_scale_*` shaders used it; the other nineteen only run for scaled
+references.
+
+**The fix.** `scale_value()` in integers: the scale split into its upper bits and its lowest
+eight, so both partial products fit 32 bits, rounded like libaom's `scaled_x()`. Same results as
+working double precision, so nothing changes on a GPU that had it.
+
+**The check.** `testing/warp_check` runs the warp shaders (one reference with a local or global
+warp, `GLOBAL_GLOBALMV`, 8-bit and 10-bit) as C++ against libaom's C code of this tree on
+generated frames, whole pool compared, each frame with double precision working and with it
+yielding 0. Before the fix: 0 of 381 frames differ with double precision, 247 without, the block
+of the console failure among them. After: 0 and 0, and nine mutated shaders are rejected. With
+working double precision the upstream warp shaders match libaom in every case tried: edge clamps,
+border width, shear, rounding, masks.
+
+Written without a console. The md5 run against dav1d (1000 frames of the 1080p stream, the four
+4K clips unchanged) is in [test-player.md](test-player.md#console-run).

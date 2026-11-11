@@ -330,6 +330,24 @@ jobs:
           sh testing/cdef_check/run.sh --mutate | tee cdef-check.log
           { echo '## CDEF bit-exactness check'; echo '```'; tail -n 4 cdef-check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
+  # Host check of the warp prediction shaders (local warp, global motion, GLOBAL_GLOBALMV) against
+  # libaom's C code of this tree: the shaders, compiled as C++, and libaom must write byte-identical
+  # frames, with and without working double precision in the shaders, and nine mutated copies of the
+  # shaders must fail.
+  warp-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Compare the warp shaders with libaom
+        run: |
+          set -euo pipefail
+          sh testing/warp_check/run.sh --mutate | tee warp-check.log
+          { echo '## Warp check'; echo '```'; tail -n 15 warp-check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
   # Host proof for intra v2: the original intra shaders (intra_main + intra_filter, with the
   # wavefront iterations of the original host code) and intra_v2 with its scheduler, compiled as
   # C++, must write byte-identical frames on generated block layouts, 8-bit and 10-bit.
