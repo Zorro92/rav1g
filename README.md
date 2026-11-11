@@ -71,7 +71,7 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
 - **Other GPUs**: upstream's shaders are only right where the 64 threads of a thread group run
   in lockstep, as on the console; on the WARP software adapter every stream decoded wrong, and
   GPUs with waves of 32 would too. The shaders now wait for each other with group syncs, and
-  host checks keep it that way (`testing/sync_check`). On WARP 244 of 251 conformance streams
+  host checks keep it that way (`testing/sync_check`). On WARP 245 of 251 conformance streams
   are md5-identical to their reference (AOM's test vectors, dav1d); the rest are known bugs
   (super-resolution, spatial layers, a size change). Not yet run on the console.
 - **Known bug, 8-bit streams**: an 8-bit 4K stream decodes with luma off by ±1–2 on about 0.4%

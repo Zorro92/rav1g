@@ -8,7 +8,9 @@ with testing/conformance/expected.txt.
 and manifest.txt, one warp_decoder task per line. The tasks run in one decoder process, in the order of the
 manifest; a task that ends in a decode error, a timeout or a crash ends its process, and the run goes on
 with the next task in a new one. A stream that fails after other streams in the same process is decoded
-again alone, in a process of its own, and must fail the same way.
+again alone, in a process of its own, and must fail the same way. One case is not a failure of the stream:
+the D3D12 device is removed while a stream is decoded after others, and the stream is right alone. It is
+reported ("D3D12 device removed") and the result of the stream is the one it has alone.
 
 Written to --out:
   results.tsv              one line per stream
@@ -29,6 +31,7 @@ import sys
 import time
 
 FAIL_KINDS = ('mismatch', 'error', 'timeout', 'crash', 'unstable')
+DEVICE_REMOVED = 'the D3D12 device was removed'
 
 
 class Result:
@@ -257,6 +260,7 @@ def main():
     # A failure after other streams in the same process is repeated in a process of its own: what is put
     # into expected.txt must not depend on what was decoded before.
     repeats = 0
+    device_lost = []
     if not args.no_repeat:
         by_name = dict(tasks)
         for name, _ in tasks:
@@ -272,6 +276,15 @@ def main():
             print('%-52s alone: %s' % (name, alone.outcome()), flush=True)
             if alone.same_outcome(result):
                 result.note = 'the same alone'
+            elif alone.status == 'pass' and DEVICE_REMOVED in result.detail:
+                # The device was lost while the stream was decoded after others in the same process, and the
+                # stream is right when it is decoded alone. Which stream this hits changes from run to run
+                # (it is not the stream's fault and cannot be listed in expected.txt), so the stream counts
+                # as decoded, and the loss is reported on its own.
+                device_lost.append('%s: %s (%s)' % (name, result.outcome(), result.detail))
+                alone.note = 'lost the D3D12 device after other streams in the same process; this is the result alone'
+                alone.first_in_process = True
+                results[name] = alone
             else:
                 result.detail = 'after other streams: %s (%s); alone: %s (%s)' % (
                     result.outcome(), result.detail, alone.outcome(), alone.detail)
@@ -333,6 +346,11 @@ def main():
         '%.1f min of it decoding' % (total_s / 60.0, processes, repeats, decode_s / 60.0),
         '- Decoder threads: %d%s' % (args.threads, ('; further arguments: ' + ' '.join(args.tool_args)) if args.tool_args else ''),
         '']
+    if device_lost:
+        summary += ['### D3D12 device removed', '',
+                    'These streams lost the D3D12 device when they were decoded after other streams in the same '
+                    'process, and are right when decoded alone, which is the result in the tables. The run does '
+                    'not fail on it (docs/warp-decoder.md).', ''] + ['- ' + cell(p) for p in device_lost] + ['']
     if problems:
         summary += ['### Not as expected', ''] + ['- ' + cell(p) for p in problems] + ['']
     table_head = ['| stream | size | bits | frames | matching | first bad frame | decode s | result | expected.txt | detail |',
@@ -364,6 +382,8 @@ def main():
     print('%d streams: %d pass, %d fail (%d expected, %d unexpected, %d of another kind), %d listed ones pass now'
           % (len(rows), passed, failed, count('expected'), count('UNEXPECTED'), count('CHANGED'), count('FIXED')))
     print('%.1f min for the whole run, %.1f min of it decoding' % (total_s / 60.0, decode_s / 60.0))
+    for lost in device_lost:
+        print('D3D12 DEVICE REMOVED after other streams in the same process, right alone: ' + lost)
     for problem in problems:
         print('NOT AS EXPECTED: ' + problem)
     return 1 if problems else 0

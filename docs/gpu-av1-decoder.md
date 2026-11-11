@@ -465,7 +465,7 @@ all threads, no plain barrier, output independent of the thread order. As a proo
 can fail, each of the 113 group syncs is turned into a plain barrier in a copy of its shader: 111
 copies are rejected for a race, and 2 pass, which are syncs of upstream's `film_grain_filter`
 between passes that touch only a thread's own samples. On WARP the conformance run went from 0 to
-244 of 251 streams ([warp-decoder.md](warp-decoder.md#results)).
+245 of 251 streams ([warp-decoder.md](warp-decoder.md#results)).
 
 **Cost.** Static FXC counts of the 59 shaders that changed: 39545 instruction slots before,
 40485 after (+2.4%); the survey of every CI run has them per shader. The largest relative changes

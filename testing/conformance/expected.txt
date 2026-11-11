@@ -16,7 +16,8 @@
 av1-1-b8-03-sizeup.mkv error the decoder is created for the first sequence (352x288) and cannot allocate the 1280x720 frames of the second one ("Failed to allocate frame buffer" at temporal unit 10)
 
 # Two spatial layers, 640x360 and 1280x720. The decoder outputs the frame of each layer (16 frames for 8
-# temporal units; AOM's md5 has the 1280x720 frame of each temporal unit), and of its 1280x720 frames only
+# temporal units; AOM's md5 has the 1280x720 frame of each temporal unit, which is the frame to show by
+# section 7.18.1 of the specification), and of its 1280x720 frames only
 # the first is right (output frame 1 = reference frame 0): every later one, which predicts from the
 # 640x360 frame of its temporal unit and from earlier 1280x720 frames, differs. First bad 1280x720 frame:
 # output frame 3, the second temporal unit.
