@@ -50,7 +50,9 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"slots", atInt, anOptional, "decoder pipeline slots (frames in flight), 2..4. Default 2", "",
        &params_.slots_},
       {"asyncclear", atSingle, anOptional, "per-frame clears off the decode thread (same output)", "",
-       &params_.asyncclear_}};
+       &params_.asyncclear_},
+      {"fitsize", atSingle, anOptional, "create the decoder for the stream's size instead of 4096x2176", "",
+       &params_.fitsize_}};
   params_.command_line_ = args.command_line_;
   const int list_length = sizeof(avaiting) / sizeof(ParamStruct);
   bool has_value[list_length] = {false};
@@ -191,6 +193,7 @@ void CParameters::Reset() {
   params_.intraopt_ = false;
   params_.slots_ = PLAYER_SLOTS_DEFAULT;
   params_.asyncclear_ = false;
+  params_.fitsize_ = false;
 }
 
 void CParameters::GetHelp(int pos, const char* arg, std::string& errMsg, const ParamStruct* arr, int size) {

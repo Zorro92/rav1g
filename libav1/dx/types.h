@@ -291,6 +291,8 @@ typedef struct Av1Core {
   HwFrameBuffer back_buffer1;
   int fb_size;
   int fb_offset;
+  int max_width;   // the size the buffers were created for, a multiple of 128; larger frames are refused
+  int max_height;
   int enable_superres;
   int wedge_offsets[BLOCK_SIZES_ALL][2];
 

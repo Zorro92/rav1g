@@ -18,6 +18,7 @@
 #include "dx/av1_memory.h"
 #include "dx/av1_compute.h"
 #include <assert.h>
+#include <stdio.h>
 #include <new>
 #include "dx/types.h"
 #include "av1/decoder/decoder.h"
@@ -283,6 +284,8 @@ int av1_allocate_buffers(Av1Core *dec, av1_memory_manager_base *mem, const resou
   const int max_tile_cols = target_width >> 6;
   const int max_tile_rows = target_height >> 6;
   dec->block_count4x4 = block_count_4x4;
+  dec->max_width = target_width;
+  dec->max_height = target_height;
 
   CHECK_RESULT(dec->pbi_alloc, (void *)mem->host_allocate(sizeof(AV1Decoder)), do_assign);
   CHECK_RESULT(dec->buf_pool_alloc, (void *)mem->host_allocate(sizeof(BufferPool)), do_assign);
@@ -307,22 +310,22 @@ int av1_allocate_buffers(Av1Core *dec, av1_memory_manager_base *mem, const resou
 
   const int residuals_size = target_width * target_height +
                              2 * ((((target_width >> 1) + 127) & (~127)) * (((target_height >> 1) + 127) & (~127)));
-  CHECK_RESULT(dec->idct_residuals, mem->create_buffer(sizeof(short) * residuals_size, MemoryType::DeviceOnly),
+  CHECK_RESULT(dec->idct_residuals, mem->create_buffer(sizeof(short) * residuals_size, MemoryType::DeviceOnly, "idct_residuals", -1),
                do_assign);
-  CHECK_RESULT(dec->idct_blocks, mem->create_buffer(block_count_4x4 * IdctBlockSize, MemoryType::DeviceOnly),
+  CHECK_RESULT(dec->idct_blocks, mem->create_buffer(block_count_4x4 * IdctBlockSize, MemoryType::DeviceOnly, "idct_blocks", -1),
                do_assign);
-  CHECK_RESULT(dec->inter_mask_lut, mem->create_buffer(sizeof(wedge_mask_buf) * 2, MemoryType::DeviceOnlyConst),
+  CHECK_RESULT(dec->inter_mask_lut, mem->create_buffer(sizeof(wedge_mask_buf) * 2, MemoryType::DeviceOnlyConst, "inter_mask_lut", -1),
                do_assign);
-  CHECK_RESULT(dec->inter_warp_filter, mem->create_buffer(sizeof(warped_filter) * 2, MemoryType::DeviceOnlyConst),
+  CHECK_RESULT(dec->inter_warp_filter, mem->create_buffer(sizeof(warped_filter) * 2, MemoryType::DeviceOnlyConst, "inter_warp_filter", -1),
                do_assign);
 
-  CHECK_RESULT(dec->filmgrain_noise, mem->create_buffer(sizeof(int) * (96 * 96 + 48 * 48 * 2), MemoryType::DeviceOnly),
+  CHECK_RESULT(dec->filmgrain_noise, mem->create_buffer(sizeof(int) * (96 * 96 + 48 * 48 * 2), MemoryType::DeviceOnly, "filmgrain_noise", -1),
                do_assign);
-  CHECK_RESULT(dec->filmgrain_gaus, mem->create_buffer(sizeof(dx_gaussian_sequence), MemoryType::DeviceOnlyConst),
+  CHECK_RESULT(dec->filmgrain_gaus, mem->create_buffer(sizeof(dx_gaussian_sequence), MemoryType::DeviceOnlyConst, "filmgrain_gaus", -1),
                do_assign);
-  CHECK_RESULT(dec->filmgrain_random_luma, mem->create_buffer(sizeof(int) * (65536 + 1), MemoryType::DeviceOnlyConst),
+  CHECK_RESULT(dec->filmgrain_random_luma, mem->create_buffer(sizeof(int) * (65536 + 1), MemoryType::DeviceOnlyConst, "filmgrain_random_luma", -1),
                do_assign);
-  CHECK_RESULT(dec->filmgrain_random_chroma, mem->create_buffer(sizeof(int) * (65536 + 1), MemoryType::DeviceOnlyConst),
+  CHECK_RESULT(dec->filmgrain_random_chroma, mem->create_buffer(sizeof(int) * (65536 + 1), MemoryType::DeviceOnlyConst, "filmgrain_random_chroma", -1),
                do_assign);
 
   // frame buffer size:
@@ -338,7 +341,7 @@ int av1_allocate_buffers(Av1Core *dec, av1_memory_manager_base *mem, const resou
   dec->fb_offset = fb_size;
   dec->enable_superres = cfg.enable_superres;
   CHECK_RESULT(dec->frame_buffer_pool,
-               mem->create_buffer(fb_size * cfg.fb_count + dec->fb_offset, MemoryType::DeviceOnly), do_assign);
+               mem->create_buffer(fb_size * cfg.fb_count + dec->fb_offset, MemoryType::DeviceOnly, "frame_buffer_pool", -1), do_assign);
 
   const int grid_w = mi_cols + 2 + 128;
   const int grid_h = mi_rows + 2 + 128;
@@ -354,19 +357,19 @@ int av1_allocate_buffers(Av1Core *dec, av1_memory_manager_base *mem, const resou
   const int max_tiles = max_tile_cols * max_tile_rows;
 
   dec->pred_map_size = (256 + 32) * max_tiles + (mi_size >> 2) * 10;
-  CHECK_RESULT(dec->prediction_blocks, mem->create_buffer(block_count_4x4 * 16 * 2, MemoryType::DeviceOnly), do_assign);
-  CHECK_RESULT(dec->prediction_blocks_warp, mem->create_buffer(block_count_8x8 * 48, MemoryType::DeviceOnly),
+  CHECK_RESULT(dec->prediction_blocks, mem->create_buffer(block_count_4x4 * 16 * 2, MemoryType::DeviceOnly, "prediction_blocks", -1), do_assign);
+  CHECK_RESULT(dec->prediction_blocks_warp, mem->create_buffer(block_count_8x8 * 48, MemoryType::DeviceOnly, "prediction_blocks_warp", -1),
                do_assign);
-  CHECK_RESULT(dec->loopfilter_blocks, mem->create_buffer(lf_blk_count * 32, MemoryType::DeviceOnly), do_assign);
+  CHECK_RESULT(dec->loopfilter_blocks, mem->create_buffer(lf_blk_count * 32, MemoryType::DeviceOnly, "loopfilter_blocks", -1), do_assign);
   // One share of the mode info pool and of the coefficient buffer per slot (mode_info_offset and
   // coef_buffer_offset below). With the default two slots these are the sizes the code always had.
   const size_t slot_count = (size_t)cfg.gpu_pipeline_depth;
   CHECK_RESULT(dec->mode_info_pool,
-               mem->create_buffer(sizeof(MB_MODE_INFO) * (size_t)(mi_size >> 1) * slot_count, MemoryType::HostRW),
+               mem->create_buffer(sizeof(MB_MODE_INFO) * (size_t)(mi_size >> 1) * slot_count, MemoryType::HostRW, "mode_info_pool", -1),
                do_assign);
   const int coef_buffer_size = target_width * target_height * 3 * IdctCoefCountNum / (IdctCoefCountDenum * 2);
   CHECK_RESULT(dec->idct_coefs,
-               mem->create_buffer(sizeof(int) * (size_t)coef_buffer_size * slot_count, MemoryType::UploadUAV),
+               mem->create_buffer(sizeof(int) * (size_t)coef_buffer_size * slot_count, MemoryType::UploadUAV, "idct_coefs", -1),
                do_assign);
   for (int i = 0; i < cfg.gpu_pipeline_depth; ++i) {
     av1_frame_thread_data *td = &dec->frame_thread_data[i];
@@ -374,17 +377,17 @@ int av1_allocate_buffers(Av1Core *dec, av1_memory_manager_base *mem, const resou
     td->mode_info_offset = i * (mi_size >> 1);
     td->coef_buffer_offset = i * coef_buffer_size;
     td->coef_buffer_size = coef_buffer_size * sizeof(int);
-    CHECK_RESULT(td->command_buffer.cb_alloc, mem->create_buffer(1024 * 1024, MemoryType::DeviceUpload), do_assign);
+    CHECK_RESULT(td->command_buffer.cb_alloc, mem->create_buffer(1024 * 1024, MemoryType::DeviceUpload, "cb_alloc", i), do_assign);
     CHECK_RESULT(td->tile_data, (av1_tile_data *)mem->host_allocate(sizeof(av1_tile_data) * max_tiles), do_assign);
-    CHECK_RESULT(td->gen_mi_block_indexes, mem->create_buffer(sizeof(int) * block_count_4x4 * 2, MemoryType::HostRW),
+    CHECK_RESULT(td->gen_mi_block_indexes, mem->create_buffer(sizeof(int) * block_count_4x4 * 2, MemoryType::HostRW, "gen_mi_block_indexes", i),
                  do_assign);
-    CHECK_RESULT(td->gen_intra_inter_grid, mem->create_buffer(grid_w * grid_h * 6, MemoryType::HostRW), do_assign);
-    CHECK_RESULT(td->gen_block_map, mem->create_buffer(dec->pred_map_size * sizeof(int), MemoryType::HostRW),
+    CHECK_RESULT(td->gen_intra_inter_grid, mem->create_buffer(grid_w * grid_h * 6, MemoryType::HostRW, "gen_intra_inter_grid", i), do_assign);
+    CHECK_RESULT(td->gen_block_map, mem->create_buffer(dec->pred_map_size * sizeof(int), MemoryType::HostRW, "gen_block_map", i),
                  do_assign);
     // Test player flag -intrav2 (intra_v2_sched.h): 8 bytes per 4x4 cell of luma and chroma, then the region
     // list, which cannot have more entries than there are cells; two words per 64x64 region on the host.
     td->intra_v2_cells = mi_size + (mi_size >> 2);
-    CHECK_RESULT(td->intra_v2_buffer, mem->create_buffer((size_t)td->intra_v2_cells * 16, MemoryType::HostRW),
+    CHECK_RESULT(td->intra_v2_buffer, mem->create_buffer((size_t)td->intra_v2_cells * 16, MemoryType::HostRW, "intra_v2_buffer", i),
                  do_assign);
     CHECK_RESULT(td->intra_v2_regions, (unsigned int *)mem->host_allocate(sizeof(int) * 2 * (mi_size >> 8)),
                  do_assign);
@@ -397,24 +400,24 @@ int av1_allocate_buffers(Av1Core *dec, av1_memory_manager_base *mem, const resou
     td->clear_iter_bytes = 0;
     td->clean_mi_bytes = 0;
     td->clean_iter_bytes = 0;
-    CHECK_RESULT(td->mode_info_grid, mem->create_buffer(sizeof(MB_MODE_INFO *) * mi_size, MemoryType::HostRW),
+    CHECK_RESULT(td->mode_info_grid, mem->create_buffer(sizeof(MB_MODE_INFO *) * mi_size, MemoryType::HostRW, "mode_info_grid", i),
                  do_assign);
     CHECK_RESULT(td->idct_blocks_unordered,
-                 mem->create_buffer(block_count_4x4 * IdctBlockSize, MemoryType::DeviceUpload), do_assign);
+                 mem->create_buffer(block_count_4x4 * IdctBlockSize, MemoryType::DeviceUpload, "idct_blocks_unordered", i), do_assign);
 
-    CHECK_RESULT(td->cdef_indexes, mem->create_buffer(sizeof(int) * cdef_blocks, MemoryType::DeviceUpload), do_assign);
-    CHECK_RESULT(td->cdef_skips, mem->create_buffer(sizeof(int) * cdef_blocks * 16 * 16, MemoryType::DeviceUpload),
+    CHECK_RESULT(td->cdef_indexes, mem->create_buffer(sizeof(int) * cdef_blocks, MemoryType::DeviceUpload, "cdef_indexes", i), do_assign);
+    CHECK_RESULT(td->cdef_skips, mem->create_buffer(sizeof(int) * cdef_blocks * 16 * 16, MemoryType::DeviceUpload, "cdef_skips", i),
                  do_assign);
-    CHECK_RESULT(td->loop_rest_types, mem->create_buffer(16 * (block_count_4x4 >> 8), MemoryType::DeviceUpload),
+    CHECK_RESULT(td->loop_rest_types, mem->create_buffer(16 * (block_count_4x4 >> 8), MemoryType::DeviceUpload, "loop_rest_types", i),
                  do_assign);
-    CHECK_RESULT(td->loop_rest_wiener, mem->create_buffer(64 * (block_count_4x4 >> 8), MemoryType::DeviceUpload),
+    CHECK_RESULT(td->loop_rest_wiener, mem->create_buffer(64 * (block_count_4x4 >> 8), MemoryType::DeviceUpload, "loop_rest_wiener", i),
                  do_assign);
     CHECK_RESULT(td->filmgrain_rand_offset,
                  mem->create_buffer(sizeof(int) * ((target_width / 32 + 4) * (target_height / 32 + 1)),
-                                    MemoryType::DeviceUpload),
+                                    MemoryType::DeviceUpload, "filmgrain_rand_offset", i),
                  do_assign);
 
-    CHECK_RESULT(td->palette_buffer, mem->create_buffer(fb_size, MemoryType::DeviceUpload), do_assign);
+    CHECK_RESULT(td->palette_buffer, mem->create_buffer(fb_size, MemoryType::DeviceUpload, "palette_buffer", i), do_assign);
   }
 
   const int mvs_size = (target_width >> 3) * (target_height >> 3) * sizeof(MV_REF);
@@ -508,21 +511,147 @@ int create_device(dx_compute_context *context) {
   return hr;
 }
 
+static double to_mib(unsigned long long bytes) { return (double)bytes / (1024.0 * 1024.0); }
+
+// "MEMORY" lines about what the decoder holds: the buffers by memory type, the largest ones, the host pool,
+// and what one pipeline slot takes. After a creation, and at the point where a creation failed.
+static void log_memory_summary(int is_error, const char *label, const Av1Core *dec, const resource_config &rcfg) {
+  const av1_memory_allocator *mem = dec->memory;
+  const unsigned long long total = mem->device_bytes();
+  av1_log(is_error,
+          "MEMORY %s: %ux%u %u-bit, slots %d, frame buffers %d + 1 back buffer of %d bytes (%.1f MiB) each; "
+          "%d device buffers, %llu bytes (%.1f MiB); host pool %llu of %llu bytes (%.1f MiB) in use",
+          label, (unsigned)rcfg.width, (unsigned)rcfg.height, (unsigned)rcfg.bitdepth, rcfg.gpu_pipeline_depth,
+          rcfg.ref_fb_count, dec->fb_size, to_mib((unsigned long long)dec->fb_size), mem->buffer_count(), total,
+          to_mib(total), (unsigned long long)mem->host_bytes_used(), (unsigned long long)mem->host_bytes_total(),
+          to_mib(mem->host_bytes_used()));
+
+  char line[640];
+  int len = 0;
+  for (int t = 0; t < MemoryTypeCount && len < (int)sizeof(line); ++t) {
+    const MemoryType type = (MemoryType)t;
+    len += snprintf(line + len, sizeof(line) - len, "%s%s %d buffers %.1f MiB", t ? "; " : "",
+                    av1_memory_type_name(type), mem->device_buffers(type), to_mib(mem->device_bytes(type)));
+  }
+  // The decoder creates buffers only. The output images are textures of the application.
+  av1_log(is_error, "MEMORY %s by type: %s; textures 0", label, line);
+
+  // One slot: its own buffers and its share of the two buffers that are divided between the slots.
+  unsigned long long slot_own = 0;
+  int slot_buffers = 0;
+  unsigned long long pool_share = 0;
+  unsigned long long coef_share = 0;
+  for (int i = 0; i < mem->buffer_count(); ++i) {
+    const GpuBufferObject *obj = mem->buffer(i);
+    if (obj->slot == 0) {
+      slot_own += obj->size;
+      ++slot_buffers;
+    }
+    if (obj == dec->mode_info_pool) pool_share = obj->size / rcfg.gpu_pipeline_depth;
+    if (obj == dec->idct_coefs) coef_share = obj->size / rcfg.gpu_pipeline_depth;
+  }
+  const unsigned long long slot_share = slot_own + pool_share + coef_share;
+  av1_log(is_error,
+          "MEMORY %s per slot: %llu bytes (%.1f MiB) = %d own buffers %.1f MiB + mode_info_pool share %.1f MiB + "
+          "idct_coefs share %.1f MiB; a slot above %d also adds one frame buffer, %.1f MiB",
+          label, slot_share, to_mib(slot_share), slot_buffers, to_mib(slot_own), to_mib(pool_share),
+          to_mib(coef_share), (int)FrameThreadDataDefault, to_mib((unsigned long long)dec->fb_size));
+
+  // The largest buffers, one entry per name: the buffers of the slots are the same in every slot.
+  enum { Largest = 10 };
+  const GpuBufferObject *top[Largest] = {};
+  int top_count = 0;
+  for (int i = 0; i < mem->buffer_count(); ++i) {
+    const GpuBufferObject *obj = mem->buffer(i);
+    if (obj->slot > 0) continue;
+    int pos = top_count;
+    while (pos > 0 && top[pos - 1]->size < obj->size) --pos;
+    if (pos >= Largest) continue;
+    if (top_count < Largest) ++top_count;
+    for (int k = top_count - 1; k > pos; --k) top[k] = top[k - 1];
+    top[pos] = obj;
+  }
+  len = 0;
+  line[0] = 0;
+  for (int i = 0; i < top_count && len < (int)sizeof(line); ++i) {
+    const GpuBufferObject *obj = top[i];
+    len += snprintf(line + len, sizeof(line) - len, "%s%s %.1f MiB %s%s", i ? "; " : "", obj->name,
+                    to_mib(obj->size), av1_memory_type_name(obj->memtype), obj->slot == 0 ? " (per slot)" : "");
+  }
+  av1_log(is_error, "MEMORY %s largest: %s", label, line);
+}
+
+static void destroy_gpu_decoder(Av1Core *dec);
+
+// A step of the decoder creation failed. Says which one, what was allocated up to there and what the video
+// memory budget is, then releases everything the creation has built, so that nothing of it is left when the
+// application tries again: the caller never gets a decoder to destroy.
+static int create_failed(Av1Core *dec, const resource_config &rcfg, const av1_video_memory *before,
+                         const char *step, HRESULT hr) {
+  ID3D12Device *device = dec->compute.device.Get();
+  // An allocation of the decoder's allocator has logged itself already and is the reason kept for the
+  // application; this line is for every other step.
+  if (FAILED(hr))
+    av1_log_create_error("MEMORY FAILED decoder creation at: %s (hr 0x%08X)", step, (unsigned)hr);
+  else
+    av1_log_create_error("MEMORY FAILED decoder creation at: %s", step);
+  if (dec->memory) log_memory_summary(1, "FAILED decoder, allocated up to the failure", dec, rcfg);
+  if (device) {
+    av1_video_memory now;
+    av1_query_video_memory(device, &now);
+    if (before) av1_log_video_memory(1, "FAILED, before the creation", before);
+    av1_log_video_memory(1, "FAILED, at the failure", &now);
+    // Keep the device for the query after the release.
+    device->AddRef();
+  }
+  destroy_gpu_decoder(dec);
+  if (device) {
+    av1_video_memory released;
+    av1_query_video_memory(device, &released);
+    av1_log_video_memory(1, "FAILED, after releasing the failed decoder", &released);
+    device->Release();
+  }
+  return -1;
+}
+
 extern "C" int av1_create_gpu_decoder(Av1Core **gpu_dec, aom_codec_dec_cfg_t *cfg) {
-  if (cfg->host_size < sizeof(av1_memory_allocator)) return -1;
+  *gpu_dec = NULL;
+  av1_clear_create_error();
+  if (cfg->host_size < sizeof(av1_memory_allocator)) {
+    av1_log_create_error("MEMORY FAILED host pool: %llu bytes given, the allocator alone takes %llu",
+                         (unsigned long long)cfg->host_size, (unsigned long long)sizeof(av1_memory_allocator));
+    return -1;
+  }
 
   av1_memory_allocator *mem = new (cfg->host_memory) av1_memory_allocator;
   mem->setup((uint8_t *)cfg->host_memory, cfg->host_size);
   mem->host_allocate(sizeof(*mem));
   Av1Core *dec = (Av1Core *)mem->host_allocate(sizeof(Av1Core));
-  if (!dec) return -1;
+  if (!dec) return -1;  // logged by the allocator; nothing was created yet
 
   memset(dec, 0, sizeof(*dec));
   dec->memory = mem;
 
+  resource_config rcfg;
+  resource_config_from_cfg(&rcfg, cfg);
+  dec->frame_slots = rcfg.gpu_pipeline_depth;
+
+  // Everything that cannot fail comes first, so that destroy_gpu_decoder() is valid from here on, whichever
+  // step below fails.
+  MTQueueInit(&dec->frame_data_pool);
+  MTQueueInit(&dec->gpu_item_pool);
+  MTQueueInit(&dec->gpu_waiting_queue);
+  MTQueueInit(&dec->output_queue);
+  MTQueueInit(&dec->image_pool);
+  QueueInit(&dec->fb_pool);
+  pthread_cond_init(&dec->fb_pool_empty_cond, NULL);
+  pthread_mutex_init(&dec->fb_pool_mutex, NULL);
+  for (int i = 0; i < dec->frame_slots; ++i) pthread_mutex_init(&dec->frame_thread_data[i].sec_data_mutex, NULL);
+
   dec->compute.device = static_cast<ID3D12Device *>(cfg->dx12device);
   dec->compute.queue = static_cast<ID3D12CommandQueue *>(cfg->dx12command_queue);
-  if (FAILED(create_device(&dec->compute))) return -1;
+  HRESULT hr = create_device(&dec->compute);
+  if (FAILED(hr)) return create_failed(dec, rcfg, NULL, "D3D12 device or command queue", hr);
   dx_compute_context *compute = &dec->compute;
   mem->set_dx_context(compute);
 
@@ -530,55 +659,57 @@ extern "C" int av1_create_gpu_decoder(Av1Core **gpu_dec, aom_codec_dec_cfg_t *cf
   dec->cb_release_image = cfg->out_buffers_cb.release_out_buffer_cb;
   dec->cb_notify_frame_ready = cfg->out_buffers_cb.notify_frame_ready_cb;
   dec->image_alloc_priv = cfg->out_buffers_cb.out_buffers_priv;
-  dec->shader_lib = static_cast<compute_shader_lib *>(cfg->dxPsos);
-  if (!dec->shader_lib) return -1;
-  if (wait_shader_create_complete(dec->shader_lib)) return -1;
 
-  resource_config rcfg;
-  resource_config_from_cfg(&rcfg, cfg);
-  dec->frame_slots = rcfg.gpu_pipeline_depth;
-  if (av1_allocate_buffers(dec, mem, rcfg, 1)) return -1;
+  // What the adapter reports before the decoder takes anything.
+  av1_video_memory vm_before;
+  av1_query_video_memory(compute->device.Get(), &vm_before);
+
+  dec->shader_lib = static_cast<compute_shader_lib *>(cfg->dxPsos);
+  if (!dec->shader_lib) return create_failed(dec, rcfg, &vm_before, "no pipeline cache (dxPsos) given", E_POINTER);
+  const int shader_errors = wait_shader_create_complete(dec->shader_lib);
+  if (shader_errors)
+    return create_failed(dec, rcfg, &vm_before, "compute pipeline states (shaders)", (HRESULT)shader_errors);
+
+  if (av1_allocate_buffers(dec, mem, rcfg, 1))
+    return create_failed(dec, rcfg, &vm_before, "decoder buffers (the MEMORY FAILED line above names the one)", S_OK);
   memset(dec->idct_coefs->host_ptr, 0, dec->idct_coefs->size);
 
   Microsoft::WRL::ComPtr<ID3D12Device> device = compute->device;
   dec->tryhdr10x3 = cfg->tryHDR10x3;
-  HRESULT hr;
 
-  MTQueueInit(&dec->frame_data_pool);
   for (int i = 0; i < dec->frame_slots; ++i) {
     av1_frame_thread_data *td = &dec->frame_thread_data[i];
     ComputeCommandBuffer *cb = &td->command_buffer;
     hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cb->allocator));
-    if (FAILED(hr)) return -1;
+    if (FAILED(hr)) return create_failed(dec, rcfg, &vm_before, "command allocator of a slot", hr);
     cb->fence_value = 0;
     hr = device->CreateFence(cb->fence_value, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&cb->fence));
-    if (FAILED(hr)) return -1;
+    if (FAILED(hr)) return create_failed(dec, rcfg, &vm_before, "fence of a slot", hr);
     cb->event = CreateEvent(nullptr, false, false, nullptr);
+    if (!cb->event)
+      return create_failed(dec, rcfg, &vm_before, "event of a slot", HRESULT_FROM_WIN32(GetLastError()));
     td->frame_number = 0;
-    pthread_mutex_init(&td->sec_data_mutex, NULL);
     MTQueuePush(&dec->frame_data_pool, td);
   }
 
   hr = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
                                  dec->frame_thread_data[0].command_buffer.allocator.Get(), NULL,
                                  IID_PPV_ARGS(&compute->command_list));
-  if (FAILED(hr)) return -1;
-  if (FAILED(compute->command_list->Close())) return -1;
+  if (FAILED(hr)) return create_failed(dec, rcfg, &vm_before, "command list", hr);
+  hr = compute->command_list->Close();
+  if (FAILED(hr)) return create_failed(dec, rcfg, &vm_before, "command list Close", hr);
 
-  if (FAILED(av1_upload_luts(dec))) return -1;
+  hr = av1_upload_luts(dec);
+  if (FAILED(hr)) return create_failed(dec, rcfg, &vm_before, "upload of the lookup tables", hr);
 
   // Work items: one per frame in flight (at most FrameThreadDataCount, each holds a slot) and one per
   // show-existing frame that needs no slot. The decode thread waits when the pool is empty.
-  MTQueueInit(&dec->gpu_item_pool);
-  MTQueueInit(&dec->gpu_waiting_queue);
   for (int i = 0; i < 8; ++i) {
     dec->gpu_item_pool_src[i].data = NULL;
     dec->gpu_item_pool_src[i].image = NULL;
     MTQueuePush(&dec->gpu_item_pool, &dec->gpu_item_pool_src[i]);
   }
 
-  MTQueueInit(&dec->output_queue);
-  MTQueueInit(&dec->image_pool);
   for (int i = 0; i < ImagePoolSize; ++i) {
     HwOutputImage *img = &dec->image_pool_src[i];
     img->size = 0;
@@ -589,7 +720,6 @@ extern "C" int av1_create_gpu_decoder(Av1Core **gpu_dec, aom_codec_dec_cfg_t *cf
 
   dec->back_buffer1.size = dec->fb_offset;
   dec->back_buffer1.base_offset = 0;
-  QueueInit(&dec->fb_pool);
   for (int i = 0; i < rcfg.ref_fb_count; ++i) {
     const int offset = dec->fb_offset + dec->fb_size * i;
     HwFrameBuffer *fb = &dec->fb_pool_src[i];
@@ -599,8 +729,12 @@ extern "C" int av1_create_gpu_decoder(Av1Core **gpu_dec, aom_codec_dec_cfg_t *cf
     QueuePush(&dec->fb_pool, fb);
   }
 
-  pthread_cond_init(&dec->fb_pool_empty_cond, NULL);
-  pthread_mutex_init(&dec->fb_pool_mutex, NULL);
+  log_memory_summary(0, "decoder created", dec, rcfg);
+  av1_video_memory vm_after;
+  av1_query_video_memory(compute->device.Get(), &vm_after);
+  av1_log_video_memory(0, "before the decoder's allocations", &vm_before);
+  av1_log_video_memory(0, "after the decoder's allocations", &vm_after);
+
   *gpu_dec = dec;
   return 0;
 }
@@ -644,8 +778,8 @@ void frame_buffer_release(Av1Core *dec, HwFrameBuffer *fb) {
   pthread_mutex_unlock(&dec->fb_pool_mutex);
 }
 
-void av1_destroy_gpu_decoder(Av1Core *dec) {
-  if (!dec) return;
+// Also for a decoder whose creation stopped half way (create_failed): everything not built yet is zero.
+static void destroy_gpu_decoder(Av1Core *dec) {
   av1_drain_gpu_decoder(dec);
 
   if (dec->cb_release_image) {
@@ -659,7 +793,8 @@ void av1_destroy_gpu_decoder(Av1Core *dec) {
 
   for (int i = 0; i < dec->frame_slots; ++i) {
     av1_frame_thread_data *td = &dec->frame_thread_data[i];
-    CloseHandle(td->command_buffer.event);
+    if (td->command_buffer.event) CloseHandle(td->command_buffer.event);
+    td->command_buffer.event = NULL;
     pthread_mutex_destroy(&td->sec_data_mutex);
   }
 
@@ -674,6 +809,11 @@ void av1_destroy_gpu_decoder(Av1Core *dec) {
   if (dec->memory) dec->memory->release();
 
   dec->~Av1Core();
+}
+
+void av1_destroy_gpu_decoder(Av1Core *dec) {
+  if (!dec) return;
+  destroy_gpu_decoder(dec);
 }
 
 void av1_prepare_command_buffer(Av1Core *dec) {
@@ -916,7 +1056,11 @@ extern "C" int av1_reallocate_frame_buffer(void *priv, YV12_BUFFER_CONFIG *ybf, 
   const int superres_w = (upscaled_width + 127) & ~127;
   const int superres_size =
       (y_height * (superres_w + 2 * h_border) + 2 * (y_height >> 1) * ((superres_w >> 1) + 2 * h_border)) * (1 + hbd);
+  // The frame buffer is not the only buffer sized at creation: the per-column and per-row tables, the block
+  // lists and the grids are sized for the width and the height the decoder was created with. A frame that is
+  // wider or higher than that is refused even when its bytes would fit a frame buffer.
   if (ybf->hw_buffer->size < fb_size || ybf->hw_buffer->size < superres_size ||
+      aligned_width > dec->max_width || superres_w > dec->max_width || aligned_height > dec->max_height ||
       (width != upscaled_width && dec->enable_superres == 0)) {
     frame_buffer_release(dec, ybf->hw_buffer);
     ybf->hw_buffer = NULL;

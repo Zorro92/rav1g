@@ -260,6 +260,14 @@ class AV1Decoder {
     if (img && This->params_.gputime_) This->PerfOutput();
     return This->output_queue_->Push((aom_image_t*)img);
   }
+  // The decoder's log lines (av1_set_log_callback), from whatever thread the decoder is on.
+  static void LogLine(void* priv, int is_error, const char* line) {
+    (void)priv;
+    if (is_error)
+      XB_LOGE << line;
+    else
+      XB_LOGI << line;
+  }
   // -gputime: one record per decoded frame, from the decoder's GPU completion thread.
   static void PerfFrame(void* priv, const av1_perf_frame* frame) {
     if (!priv || !frame) return;
@@ -308,6 +316,13 @@ class AV1Decoder {
   std::shared_ptr<OutBufferStorage> storage_;
   int initialized_ = 0;
   int need_reinit_ = 0;
+  // What the decoder in decctx_ was created with (valid while initialized_). A task that needs anything else
+  // gets a new decoder, also when the task before it ended before it reached the decoder.
+  int created_threads_ = 0;
+  int created_queue_size_ = 0;
+  int created_slots_ = 0;
+  unsigned int created_width_ = 0;
+  unsigned int created_height_ = 0;
   perfstats::PerfStats perf_stats_;
   std::mutex perf_cs_;
   int perf_installed_ = 0;

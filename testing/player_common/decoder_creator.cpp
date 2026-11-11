@@ -179,6 +179,8 @@ int Decoders::DecodeLoop() {
     XB_LOGE << "No args were found";
     return -1;
   }
+  // The decoder's own log lines (MEMORY ...) go to the player's log, from the pipeline states on.
+  av1_set_log_callback(AV1Decoder::LogLine, NULL);
   dx_resources_.dx12_psos =
       av1_create_pipeline_cache_handle(dx_resources_.dx12_device.Get(), CREATE_SHADERS_THREAD_CNT);
   if (!dx_resources_.dx12_psos) {

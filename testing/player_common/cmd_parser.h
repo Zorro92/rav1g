@@ -28,6 +28,10 @@
 #define PLAYER_SLOTS_DEFAULT 2
 #define PLAYER_SLOTS_MIN 2
 #define PLAYER_SLOTS_MAX 4
+// The size the decoder is created for unless -fitsize takes the stream's.
+#define PLAYER_DECODER_WIDTH 4096
+#define PLAYER_DECODER_HEIGHT 2176
+#define PLAYER_DECODER_BITDEPTH 10
 
 struct one_task : public std::vector<std::string> {
   std::string command_line_;
@@ -78,6 +82,7 @@ class CParameters {
     bool intraopt_;
     int slots_;
     bool asyncclear_;
+    bool fitsize_;
   };
   enum arg_type { atSingle, atInt, atString };
   enum arg_need { anOptional, anMandatory, anAtLeastOne };

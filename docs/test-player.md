@@ -48,7 +48,9 @@ one commit each:
   completion thread; see
   [Pipeline slots and clears](#pipeline-slots-and-clears--slots--asyncclear). The changes
   are in `libav1/dx` and the test player. No shader changes. Without the flags the decoder
-  has two slots and clears on the decode thread, as upstream does.
+  has two slots and clears on the decode thread, as upstream does. The same section covers
+  the `MEMORY` log lines of a decoder creation (what was allocated, and which allocation
+  failed) and the player flag `-fitsize`, which sizes the decoder for the stream.
 
 ## Build
 
@@ -749,10 +751,11 @@ elsewhere shorten the wall time per frame. Neither changes the decoded output.
 | --- | --- |
 | `-slots N` | The decoder is created with `N` pipeline slots, `N` = 2, 3 or 4. Default 2. Any other value is refused: the task is skipped with `Invalid arguments string. -slots N is not allowed: the decoder takes 2 to 4 slots.` |
 | `-asyncclear` | The two large per-frame clears of a slot are done by the GPU completion thread after the fence of the frame that used the slot, before the slot goes back to the pool. The decode thread then finds the slot already cleared. |
+| `-fitsize` | The decoder is created for the stream's largest frame size instead of 4096x2176, which makes every buffer smaller; see [Decoder size](#decoder-size--fitsize). |
 
-Both are off by default: the decoder then has two slots and clears on the decode thread,
-as before. They are independent of each other and of `-cdefv2`, `-intrav2`, `-intraopt`,
-`-gputime`, `-nopresent` and the md5 flags.
+All are off by default: the decoder then has two slots, clears on the decode thread and
+is sized for 4096x2176, as before. They are independent of each other and of `-cdefv2`,
+`-intrav2`, `-intraopt`, `-gputime`, `-nopresent` and the md5 flags.
 
 Every task's log says what is in effect:
 
@@ -812,7 +815,132 @@ the same memory as the host's); the host-heap part of a slot is about 0.5 MB.
 | **each slot above two** | **198** | **186** |
 
 So `-slots 3` costs about 198 MiB more than the default and `-slots 4` about 397 MiB
-more. If the allocation fails, the task ends with `Failed to initialize decoder`.
+more. If the allocation fails, the task ends with `Failed to initialize decoder`, and the
+log says which allocation it was; see [Memory lines](#memory-lines-in-the-log-memory).
+
+**On the console in app mode, `-slots 3` and `-slots 4` failed to allocate** with package
+0.2.4.0: every such task ended with `Failed to initialize decoder: Memory allocation
+error`, and the tasks after it in the same launch failed too, also with the default two
+slots. That package did not say which allocation failed, and a failed creation did not
+release the buffers it had already created, which is what broke the later tasks. Both are
+changed after 0.2.4.0: the `MEMORY` lines below, and a failed creation that leaves nothing
+behind. Whether three slots fit is still open; the lines are there to find out.
+
+### Memory lines in the log (`MEMORY`)
+
+Every decoder creation writes lines that start with `MEMORY ` (`grep MEMORY`). The decoder
+writes them through `av1_set_log_callback` (`libav1/dx/av1_perf.h`), the player adds the
+ones about the app and its output pool. The numbers below are what the allocation code
+gives for the default 4096x2176, 10-bit and two slots; `N` stands for a value that depends
+on the run.
+
+Before the decoder is created (player):
+
+```text
+MEMORY decoder size: 4096x2176 10-bit (default), slots 2, host pool N.N MiB, output pool 4 images
+MEMORY app before the decoder: usage N.N MiB of limit N.N MiB, N.N MiB left
+```
+
+`app` is `Windows::System::MemoryManager`: the memory of the whole app and the limit the
+system gives it. On the console the D3D12 buffers are part of it.
+
+After a creation that worked (decoder, then player):
+
+```text
+MEMORY decoder created: 4096x2176 10-bit, slots 2, frame buffers 12 + 1 back buffer of 27017216 bytes (25.8 MiB) each; 40 device buffers, 791353600 bytes (754.7 MiB); host pool N of N bytes (N.N MiB) in use
+MEMORY decoder created by type: DeviceOnly 7 buffers 412.0 MiB; DeviceUpload 16 buffers 83.9 MiB; HostRW 11 buffers 185.8 MiB; ReadBack 0 buffers 0.0 MiB; DeviceOnlyConst 5 buffers 0.8 MiB; UploadUAV 1 buffers 72.2 MiB; textures 0
+MEMORY decoder created per slot: 179266304 bytes (171.0 MiB) = 13 own buffers 75.3 MiB + mode_info_pool share 59.5 MiB + idct_coefs share 36.1 MiB; a slot above 2 also adds one frame buffer, 25.8 MiB
+MEMORY decoder created largest: frame_buffer_pool 335.0 MiB DeviceOnly; mode_info_pool 119.0 MiB HostRW; idct_coefs 72.2 MiB UploadUAV; idct_residuals 26.0 MiB DeviceOnly; palette_buffer 25.8 MiB DeviceUpload (per slot); prediction_blocks 25.5 MiB DeviceOnly; idct_blocks 12.8 MiB DeviceOnly; idct_blocks_unordered 12.8 MiB DeviceUpload (per slot); intra_v2_buffer 10.6 MiB HostRW (per slot); prediction_blocks_warp 9.6 MiB DeviceOnly
+MEMORY dxgi before the decoder's allocations: local budget N.N MiB, usage N.N MiB, reserved N.N MiB of N.N MiB available; non-local budget N.N MiB, usage N.N MiB, reserved N.N MiB of N.N MiB available
+MEMORY dxgi after the decoder's allocations: local budget N.N MiB, usage N.N MiB, reserved N.N MiB of N.N MiB available; non-local budget N.N MiB, usage N.N MiB, reserved N.N MiB of N.N MiB available
+MEMORY app after the decoder: usage N.N MiB of limit N.N MiB, N.N MiB left
+```
+
+- **by type**: the decoder's memory types (`MemoryType` in `libav1/dx/av1_memory.h`).
+  `DeviceOnly` and `DeviceOnlyConst` are default-heap buffers the CPU never maps;
+  `DeviceUpload` is the upload heap; `HostRW` and `UploadUAV` are custom heaps the CPU
+  reads and writes. The decoder creates no textures and no readback buffers; those belong
+  to the player's output pool.
+- **per slot**: what one pipeline slot takes, the **slot** row of the table above. The
+  names are the fields in `libav1/dx/types.h`.
+- **largest**: the ten largest buffers; one that every slot has is listed once.
+- **dxgi**: `IDXGIAdapter3::QueryVideoMemoryInfo` for the adapter of the decoder's device,
+  local and non-local segment group. If the adapter or a query is not available the line
+  says so with the HRESULT and the creation goes on.
+- The host pool is ordinary memory of the player (`std::vector`), not D3D12 memory.
+
+The player's output images are allocated at the first frame of a size, all free images of
+the pool at once:
+
+```text
+MEMORY output pool: allocated for 3840x2160 10-bit frames: textures of 4 images, N.N MiB; 0 readback buffers, 0.0 MiB; pool of 4 images
+```
+
+A 3840x2160 10-bit image is three textures of about 23.7 MiB together, so the default
+`-queue_size 16` is about 380 MiB and `-queue_size 4` about 95 MiB; an md5 or file run
+adds a readback buffer per image.
+
+When an allocation fails, one line names it (the example is a third slot's last buffer): the buffer, the slot it belongs to, its size,
+memory type and heap, the HRESULT, and what had been allocated before it. Then follow the
+totals up to the failure, the video memory before the creation, at the failure and after
+the failed decoder was released, and the player's lines; the first `MEMORY FAILED` line
+is repeated as the detail of `Failed to initialize decoder`:
+
+```text
+MEMORY FAILED buffer palette_buffer of slot 2: 27017216 bytes (25.8 MiB), type DeviceUpload, heap UPLOAD, CreateCommittedResource hr 0x8007000E; allocated before it: 970619904 bytes (925.7 MiB) in 52 buffers
+MEMORY FAILED decoder creation at: decoder buffers (the MEMORY FAILED line above names the one)
+MEMORY FAILED decoder, allocated up to the failure: 4096x2176 10-bit, slots 3, frame buffers 13 + 1 back buffer of 27017216 bytes (25.8 MiB) each; 52 device buffers, 970619904 bytes (925.7 MiB); host pool N of N bytes (N.N MiB) in use
+MEMORY FAILED decoder, allocated up to the failure by type: ...
+MEMORY FAILED decoder, allocated up to the failure per slot: ...
+MEMORY FAILED decoder, allocated up to the failure largest: ...
+MEMORY dxgi FAILED, before the creation: local budget N.N MiB, usage N.N MiB, ...
+MEMORY dxgi FAILED, at the failure: local budget N.N MiB, usage N.N MiB, ...
+MEMORY dxgi FAILED, after releasing the failed decoder: local budget N.N MiB, usage N.N MiB, ...
+Failed to initialize decoder: Memory allocation error: MEMORY FAILED buffer palette_buffer of slot 2: 27017216 bytes (25.8 MiB), type DeviceUpload, heap UPLOAD, CreateCommittedResource hr 0x8007000E; allocated before it: 970619904 bytes (925.7 MiB) in 52 buffers
+MEMORY app after the failed decoder creation: usage N.N MiB of limit N.N MiB, N.N MiB left
+Unable to create decoder. Error 2
+```
+
+Other `MEMORY FAILED` lines: `host pool` (the pool the player allocated is too small for
+the configuration), `compute pipeline state N` (a shader), `decoder creation at: <step>`
+for the command allocators, fences, command list and the lookup table upload, and
+`output image texture` / `output image readback buffer` from the player's output pool.
+
+A creation that fails releases everything it had created before it returns, so the next
+task starts as it would after a fresh launch: `usage` in the `dxgi ... after releasing`
+line should be back at the value of `before the creation`. The player also releases the output
+pool of the decoder before, ahead of creating the new one.
+
+### Decoder size (`-fitsize`)
+
+The player creates the decoder for 4096x2176, 10-bit, whatever the stream is. With
+`-fitsize` it reads on to the stream's first key frame before it creates the decoder and
+uses the largest frame size the sequence header announces (`max_frame_width`,
+`max_frame_height`), rounded up to a multiple of 128 as the decoder rounds it: 3840x2176
+for a 3840x2160 stream, which is the second column of the table above (about 47 MiB less
+for two slots, 59 MiB less for three). Off by default. The decoded output is the same.
+
+```text
+MEMORY decoder size: 3840x2176 10-bit (-fitsize, the stream's largest frame is 3840x2160), slots 3, host pool N.N MiB, output pool 4 images
+Decoder size: 3840x2176 (-fitsize)
+```
+
+Without the flag the second line reads `Decoder size: 4096x2176 (default)`.
+
+- The bit depth stays 10: the peek at the sequence header does not read it, and 10-bit
+  buffers hold 8-bit frames.
+- A stream larger than 4096x2176 in either direction keeps the default size (and fails at
+  its first frame, as without the flag).
+- The player creates a new decoder when the size differs from the one it has, as for
+  `-slots`.
+- Every frame of a sequence is within the announced size (frame size override, superres
+  and reference scaling included), so the buffers fit. A later sequence header in the same
+  file may announce a larger size; the decoder now refuses a frame that is wider or higher
+  than it was created for (decode error `Failed to allocate frame buffer`) instead of
+  only comparing the byte size of a frame buffer. That check is on with and without the
+  flag.
+- Not verified on the console yet: the decoder has only ever run there at 4096x2176. Check
+  a `-fitsize` run with `-md5_frame_check` before using it for timing.
 
 ### Clears
 

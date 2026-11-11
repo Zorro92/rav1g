@@ -150,8 +150,15 @@ static aom_codec_err_t decoder_init(aom_codec_ctx_t *ctx,
     priv->flushed = 0;
     priv->cfg.host_size -= alg_priv_size;
     priv->cfg.host_memory = (uint8_t *)priv->cfg.host_memory + alg_priv_size;
-    if (av1_create_gpu_decoder(&priv->gpu_decoder, &priv->cfg))
+    // A failed creation is destroyed through decoder_destroy(): these must not be whatever the host memory held.
+    priv->gpu_decoder = NULL;
+    priv->pbi = NULL;
+    priv->buffer_pool = NULL;
+    if (av1_create_gpu_decoder(&priv->gpu_decoder, &priv->cfg)) {
+        // The creation has released everything it built. The line that names what failed is the detail.
+        set_error_detail(priv, av1_last_create_error());
         return AOM_CODEC_MEM_ERROR;
+    }
     av1_allocate_pbi(priv->gpu_decoder, &priv->pbi, &priv->buffer_pool);
 #if CONFIG_MULTITHREAD
     if (pthread_mutex_init(&priv->buffer_pool->pool_mutex, NULL)) {

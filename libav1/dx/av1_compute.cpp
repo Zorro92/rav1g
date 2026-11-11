@@ -170,7 +170,11 @@ THREADFN create_shader_thread_hook(void* data) {
     if (!task)
       break;
     else {
-      shader_lib->create_shader_errors |= create_shader(task->device, task->src, task->size, task->sig, task->dst);
+      const HRESULT hr = create_shader(task->device, task->src, task->size, task->sig, task->dst);
+      if (FAILED(hr))
+        av1_log(1, "MEMORY FAILED compute pipeline state %d (%d bytes of bytecode): hr 0x%08X",
+                (int)(task - shader_lib->create_shader_tasks), task->size, (unsigned)hr);
+      shader_lib->create_shader_errors |= hr;
       if (shader_lib->create_shader_errors) return THREAD_RETURN(1);
     }
   }
@@ -180,7 +184,9 @@ THREADFN create_shader_thread_hook(void* data) {
 int wait_shader_create_complete(compute_shader_lib* lib) {
   if (!lib) return -1;
   if (!lib->threads)
-    return 0;
+    // Joined before: the result of the creation stays what it was. A pipeline state that could not be
+    // created must fail every decoder creation, not only the first one.
+    return lib->create_shader_errors;
   else {
     for (int i = 0; i < lib->threads; i++) {
       pthread_join(lib->create_shader_threads[i], 0);
@@ -355,13 +361,24 @@ void* av1_create_pipeline_cache_handle(void* d3d12device, int threads) {
 
   const int size = sizeof(create_tasks) / sizeof(CreateShaderTask);
   shader_lib->threads = min(threads, MAX_CREATE_SHADER_THREADS);
-  assert((size + shader_lib->threads) <= BUFFERS_COUNT);
+  if (size + shader_lib->threads > BUFFERS_COUNT) {
+    // The task queue holds BUFFERS_COUNT entries: one per pipeline state and one end mark per thread. With
+    // more than that it would overwrite tasks, so the states are created on this thread instead.
+    av1_log(0, "MEMORY pipeline states: %d states and %d threads do not fit the task queue of %d, creating on one thread",
+            size, shader_lib->threads, (int)BUFFERS_COUNT);
+    shader_lib->threads = 0;
+    threads = 0;
+  }
 
   if (!threads) {
     // sync case
     for (int i = 0; i < size; i++) {
       CreateShaderTask* task = &create_tasks[i];
-      err |= create_shader(task->device, task->src, task->size, task->sig, task->dst) != S_OK;
+      const HRESULT hr = create_shader(task->device, task->src, task->size, task->sig, task->dst);
+      if (FAILED(hr))
+        av1_log(1, "MEMORY FAILED compute pipeline state %d (%d bytes of bytecode): hr 0x%08X", i, task->size,
+                (unsigned)hr);
+      err |= hr != S_OK;
     }
   } else {
     // async case
@@ -577,6 +594,7 @@ HRESULT av1_upload_luts(Av1Core* dec) {
   HANDLE event = CreateEvent(nullptr, false, false, nullptr);
   fence->SetEventOnCompletion(1, event);
   WaitForSingleObject(event, INFINITE);
+  CloseHandle(event);
   return hr;
 }
 

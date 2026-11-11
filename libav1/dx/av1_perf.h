@@ -142,6 +142,20 @@ void av1_set_intra_opt(int enable);
  * is in flight. */
 void av1_set_async_clear(int enable);
 
+/* Log lines of the decoder: the MEMORY lines of a decoder creation (what was
+ * allocated, the video memory budget, and the allocation that failed). One
+ * line per call, no line end. is_error is non-zero for a failure. */
+typedef void (*av1_log_cb_fn_t)(void *priv, int is_error, const char *line);
+
+/* Process-wide. Without a callback the lines go to the debugger output. Set it
+ * before the pipeline cache and the decoder are created. */
+void av1_set_log_callback(av1_log_cb_fn_t cb, void *priv);
+
+/* What made the last decoder creation of this process fail, as one line; ""
+ * when it did not fail. Valid until the next creation. The codec interface
+ * returns it as the error detail of aom_codec_dec_init. */
+const char *av1_last_create_error(void);
+
 #ifdef __cplusplus
 }
 #endif

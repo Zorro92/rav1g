@@ -26,6 +26,35 @@ using time_point = sys_clock::time_point;
 
 static const int direct_mem_align = 16 * 1024;
 
+static std::string MibString(uint64_t bytes) {
+  char ss[48];
+  sprintf_s(ss, sizeof(ss), "%.1f MiB", (double)bytes / (1024.0 * 1024.0));
+  return ss;
+}
+
+// "MEMORY app" line: the memory of the whole app and the limit the system gives it. In app mode on the
+// console that limit is what a decoder creation runs into; the decoder's buffers count against it.
+static void LogAppMemory(const char* label, bool is_error) {
+#if (WINAPI_FAMILY == WINAPI_FAMILY_APP)
+  std::string line = std::string("MEMORY app ") + label + ": ";
+  try {
+    const uint64_t usage = Windows::System::MemoryManager::AppMemoryUsage;
+    const uint64_t limit = Windows::System::MemoryManager::AppMemoryUsageLimit;
+    line += "usage " + MibString(usage) + " of limit " + MibString(limit) + ", " +
+            MibString(limit > usage ? limit - usage : 0) + " left";
+  } catch (Platform::Exception ^) {
+    line += "not available (Windows::System::MemoryManager failed)";
+  }
+  if (is_error)
+    XB_LOGE << line;
+  else
+    XB_LOGI << line;
+#else
+  (void)label;
+  (void)is_error;
+#endif
+}
+
 char* pdummy = 0;
 int AV1Decoder::DecodeLoop() {
   char dummy;
@@ -86,7 +115,58 @@ int AV1Decoder::DecodeOne() {
     }
   }
   int cur_frame = params_.start_frame_;
-  if (initialized_ && need_reinit_) {
+
+  // skip non-key frames (if start_frame_ != 0)
+  int is_key = 0;
+  aom_codec_stream_info_t si;
+  memset(&si, 0, sizeof(si));
+  // Reads on to the first key frame; its sequence header has the largest frame size of the stream.
+  auto find_key_frame = [&]() -> int {
+    buffer.Reset();
+    while (1) {
+      buffer = reader.GetData();
+      if (!buffer) {
+        XB_LOGE << "End of Stream reached looking for key frame ";
+        return -1;
+      }
+      aom_codec_err_t err = aom_codec_peek_stream_info(aom_codec_av1_dx(), buffer->Data(), buffer->Size(), &si);
+      if (AOM_CODEC_OK != err) {
+        XB_LOGE << "Failed to get stream info";
+        return -1;
+      }
+      is_key = si.is_kf;
+      if (is_key) break;
+      cur_frame++;
+    }
+    return 0;
+  };
+
+  // The size the decoder is created for. -fitsize: the stream's largest frame size (max_frame_width and
+  // max_frame_height of the sequence header, which bound every frame of the sequence, with superres and
+  // reference scaling), rounded up to 128 as the decoder does. The key frame is then looked for before the
+  // decoder exists. A stream that is larger than the default in either direction keeps the default, and the
+  // bit depth stays 10: the peek does not read it, and 10-bit buffers hold 8-bit frames.
+  unsigned int dec_width = PLAYER_DECODER_WIDTH;
+  unsigned int dec_height = PLAYER_DECODER_HEIGHT;
+  bool key_frame_found = false;
+  if (params_.fitsize_) {
+    if (find_key_frame()) return -1;
+    key_frame_found = true;
+    const unsigned int fit_width = (si.w + 127) & ~127u;
+    const unsigned int fit_height = (si.h + 127) & ~127u;
+    if (si.w && si.h && fit_width <= PLAYER_DECODER_WIDTH && fit_height <= PLAYER_DECODER_HEIGHT) {
+      dec_width = fit_width;
+      dec_height = fit_height;
+    }
+  }
+
+  // A decoder that was created with something else than this task asks for is replaced. need_reinit_ says
+  // so for the task before; the comparison also covers a task before that ended ahead of this point.
+  const bool other_decoder =
+      initialized_ && (created_threads_ != params_.threads_ || created_queue_size_ != params_.player_queue_size_ ||
+                       created_slots_ != params_.slots_ || created_width_ != dec_width ||
+                       created_height_ != dec_height);
+  if (initialized_ && (need_reinit_ || other_decoder)) {
     XB_LOGI << "Destroy decoder";
     aom_codec_destroy(&decctx_);
     memset(&decctx_, 0, sizeof(decctx_));
@@ -95,14 +175,17 @@ int AV1Decoder::DecodeOne() {
   if (params_.recreate_ || !initialized_) {
     XB_LOGI << "(Re)create decoder";
     try {
+      // No decoder exists here. The output pool of the one before goes first: its images are memory the new
+      // decoder may need, and the old output queue would keep them until after the creation.
+      output_queue_.reset();
       storage_.reset();
       host_mem_.clear();
       host_mem_.shrink_to_fit();
       aom_codec_dec_cfg_t cfg;
       memset(&cfg, 0, sizeof(aom_codec_dec_cfg_t));
-      cfg.width = 4096;
-      cfg.height = 2176;
-      cfg.bitdepth = 10;
+      cfg.width = dec_width;
+      cfg.height = dec_height;
+      cfg.bitdepth = PLAYER_DECODER_BITDEPTH;
       cfg.threads = params_.threads_;
       cfg.cfg.ext_partition = 1;  //?
       cfg.allow_lowbitdepth = CONFIG_LOWBITDEPTH;
@@ -129,15 +212,36 @@ int AV1Decoder::DecodeOne() {
         return 1;
       }
 
+      if (params_.fitsize_)
+        XB_LOGI << "MEMORY decoder size: " << dec_width << "x" << dec_height << " " << PLAYER_DECODER_BITDEPTH
+                << "-bit (-fitsize, the stream's largest frame is " << si.w << "x" << si.h << "), slots "
+                << params_.slots_ << ", host pool " << MibString(cfg.host_size) << ", output pool "
+                << params_.player_queue_size_ << " images";
+      else
+        XB_LOGI << "MEMORY decoder size: " << dec_width << "x" << dec_height << " " << PLAYER_DECODER_BITDEPTH
+                << "-bit (default), slots " << params_.slots_ << ", host pool " << MibString(cfg.host_size)
+                << ", output pool " << params_.player_queue_size_ << " images";
+      LogAppMemory("before the decoder", false);
       if (aom_codec_dec_init(&decctx_, aom_codec_av1_dx(), &cfg, dec_flags)) {
         host_mem_.clear();
         host_mem_.shrink_to_fit();
-        XB_LOGE << "Failed to initialize decoder: " << aom_codec_error(&decctx_);
+        // The detail is the decoder's MEMORY FAILED line for what could not be allocated. The decoder has
+        // released everything it had allocated up to there.
+        const char* detail = aom_codec_error_detail(&decctx_);
+        XB_LOGE << "Failed to initialize decoder: " << aom_codec_error(&decctx_)
+                << ((detail && detail[0]) ? ": " : "") << ((detail && detail[0]) ? detail : "");
+        LogAppMemory("after the failed decoder creation", true);
         throw 2;
       }
+      LogAppMemory("after the decoder", false);
       storage_ = std::unique_ptr<OutBufferStorage>(
           new OutBufferStorage(params_.player_queue_size_, dx_desources_.dx12_device.Get()));
       initialized_ = 1;
+      created_threads_ = params_.threads_;
+      created_queue_size_ = params_.player_queue_size_;
+      created_slots_ = params_.slots_;
+      created_width_ = dec_width;
+      created_height_ = dec_height;
     } catch (int error) {
       XB_LOGE << "Unable to create decoder. Error " << error;
       return -1;
@@ -149,26 +253,7 @@ int AV1Decoder::DecodeOne() {
       return -1;
     }
   }
-  // skip non-key frames (if start_frame_ != 0)
-  int is_key = 0;
-  buffer.Reset();
-  aom_codec_stream_info_t si;
-  memset(&si, 0, sizeof(si));
-  while (1) {
-    buffer = reader.GetData();
-    if (!buffer) {
-      XB_LOGE << "End of Stream reached looking for key frame ";
-      return -1;
-    }
-    aom_codec_err_t err = aom_codec_peek_stream_info(aom_codec_av1_dx(), buffer->Data(), buffer->Size(), &si);
-    if (AOM_CODEC_OK != err) {
-      XB_LOGE << "Failed to get stream info";
-      return -1;
-    }
-    is_key = si.is_kf;
-    if (is_key) break;
-    cur_frame++;
-  }
+  if (!key_frame_found && find_key_frame()) return -1;
   if (!buffer) {
     buffer = reader.GetData();
     if (!buffer) {
@@ -219,6 +304,9 @@ int AV1Decoder::DecodeOne() {
 
   // -slots: fixed when the decoder was created; Start() asks for a new decoder when the value changes.
   XB_LOGI << "Frame slots: " << params_.slots_;
+  // -fitsize: also fixed at creation; a decoder of another size is replaced.
+  XB_LOGI << "Decoder size: " << created_width_ << "x" << created_height_
+          << (params_.fitsize_ ? " (-fitsize)" : " (default)");
   // -asyncclear: the same rules as the shader flags above, independent of them and of -slots.
   av1_set_async_clear(params_.asyncclear_ ? 1 : 0);
   XB_LOGI << "Clears: " << (params_.asyncclear_ ? "off the decode thread (-asyncclear)" : "decode thread (original)");

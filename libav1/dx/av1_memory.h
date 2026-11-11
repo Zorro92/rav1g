@@ -41,6 +41,7 @@ enum MemoryType {
   ReadBack = 3,
   DeviceOnlyConst = 4,
   UploadUAV = 5,
+  MemoryTypeCount = 6,
 };
 
 using Microsoft::WRL::ComPtr;
@@ -51,7 +52,8 @@ struct GpuBufferObject {
   size_t size;
   size_t max_size;
   MemoryType memtype;
-  const char* name;
+  const char* name;  // what the buffer is, for the MEMORY log lines
+  int slot;          // pipeline slot that owns it, -1: shared by all slots
 };
 
 struct dx_compute_context {
@@ -61,9 +63,30 @@ struct dx_compute_context {
   Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> command_list;
 };
 
+// One line to the log callback of av1_set_log_callback() (the debugger output without one). printf format,
+// no line end. The lines about memory start with "MEMORY ".
+void av1_log(int is_error, const char* format, ...);
+// The same, and the line is kept as the reason the decoder creation failed (av1_last_create_error()). Only
+// the first reason of a creation is kept: it is the allocation that failed, later ones are consequences.
+void av1_log_create_error(const char* format, ...);
+void av1_clear_create_error();
+const char* av1_memory_type_name(MemoryType mem);
+
+// Video memory budget and usage of the adapter the device is on (IDXGIAdapter3::QueryVideoMemoryInfo).
+struct av1_video_memory {
+  HRESULT hr_adapter;    // getting the adapter of the device
+  HRESULT hr_local;      // DXGI_MEMORY_SEGMENT_GROUP_LOCAL
+  HRESULT hr_non_local;  // DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL
+  DXGI_QUERY_VIDEO_MEMORY_INFO local;
+  DXGI_QUERY_VIDEO_MEMORY_INFO non_local;
+};
+void av1_query_video_memory(ID3D12Device* device, av1_video_memory* info);
+// Logs it as one "MEMORY dxgi <label>: ..." line; says so when the query failed.
+void av1_log_video_memory(int is_error, const char* label, const av1_video_memory* info);
+
 class av1_memory_manager_base {
  public:
-  virtual GpuBufferObject* create_buffer(size_t size, MemoryType mem) = 0;
+  virtual GpuBufferObject* create_buffer(size_t size, MemoryType mem, const char* name = 0, int slot = -1) = 0;
   virtual void* host_allocate(size_t size, int align = 0) = 0;
 };
 
@@ -72,9 +95,19 @@ struct av1_memory_allocator : public av1_memory_manager_base {
   av1_memory_allocator() {}
   void setup(uint8_t* host_mem, size_t host_size);
   void set_dx_context(dx_compute_context* ctx) { context = ctx; }
-  virtual GpuBufferObject* create_buffer(size_t size, MemoryType mem);
+  // Both return NULL when the allocation fails, after logging a "MEMORY FAILED" line that names it.
+  virtual GpuBufferObject* create_buffer(size_t size, MemoryType mem, const char* name = 0, int slot = -1);
   virtual void* host_allocate(size_t size, int align = 0);
   void release();
+
+  // What was allocated so far, for the MEMORY log lines.
+  int buffer_count() const { return dev_obj_count; }
+  const GpuBufferObject* buffer(int index) const { return &dev_buffer_pool[index]; }
+  size_t device_bytes() const;
+  size_t device_bytes(MemoryType mem) const { return dev_bytes[mem]; }
+  int device_buffers(MemoryType mem) const { return dev_count[mem]; }
+  size_t host_bytes_used() const { return host_offset; }
+  size_t host_bytes_total() const { return host_max_size; }
 
  private:
   dx_compute_context* context;
@@ -83,6 +116,8 @@ struct av1_memory_allocator : public av1_memory_manager_base {
   int shader_obj_count;
   int host_obj_count;
   int dev_obj_count;
+  size_t dev_bytes[MemoryTypeCount];
+  int dev_count[MemoryTypeCount];
   uint8_t* host_base_addr;
   size_t host_max_size;
   size_t host_offset;
@@ -91,7 +126,7 @@ struct av1_memory_allocator : public av1_memory_manager_base {
 struct av1_memory_allocator_dummy : public av1_memory_manager_base {
  public:
   av1_memory_allocator_dummy() : host_ptr(0), device_ptr(0) {}
-  virtual GpuBufferObject* create_buffer(size_t size, MemoryType mem);
+  virtual GpuBufferObject* create_buffer(size_t size, MemoryType mem, const char* name = 0, int slot = -1);
   virtual void* host_allocate(size_t size, int align = 0);
   size_t get_host_size() { return host_ptr; }
   size_t get_device_size() { return device_ptr; }
