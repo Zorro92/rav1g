@@ -940,7 +940,8 @@ int main(int argc, char **argv) {
          "plain group memory barriers: %ld\n",
          gs_state.group_syncs, gs_state.races, gs_state.sync_errors, gs_state.plain_barriers);
   gs_print_races("  ");
-  ok &= gs_state.races == 0 && gs_state.sync_errors == 0 && gs_state.plain_barriers == 0 && gs_state.out_of_bounds == 0;
+  ok &= gs_state.races == 0 && gs_state.sync_errors == 0 && gs_state.plain_barriers == 0 && gs_state.out_of_bounds == 0 &&
+        gs_state.runaway_groups == 0;
   printf(ok ? "warp_check: the warp shaders and libaom write identical frames\n" : "warp_check: FAILED\n");
   return ok ? 0 : 1;
 }

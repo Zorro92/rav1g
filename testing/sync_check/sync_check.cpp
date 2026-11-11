@@ -6,7 +6,7 @@
  * A shader passes when
  *   - it has no race in its group memory: no thread reads what another thread wrote since the last
  *     group sync, and none overwrites what another read or wrote since then with another value;
- *   - all threads of a group reach every group sync;
+ *   - all threads of a group reach every group sync, and every group ends;
  *   - it does not call GroupMemoryBarrier(), which makes no thread wait (--allow-plain-barrier
  *     drops this, for the mutants of run.sh: their races must be found as races);
  *   - what it writes to its buffers does not depend on the order in which the threads of a group
@@ -137,10 +137,11 @@ int main(int argc, char **argv) {
       dispatch(api, d, garbage, 0x9e3779b97f4a7c15ull * (uint64_t)(n + 1));
       for (int i = 0; i < kRwBuffers; ++i) order_dependent += first[i] != rw[i];
       groups += 2L * d.groups_x * d.groups_y * d.groups_z;
+      if (gs_state.runaway_groups) break;  // its loop bounds are garbage: no point in more cases
     }
     total_groups += groups;
     const long plain = allow_plain ? 0 : gs_state.plain_barriers;
-    const int bad = gs_state.races || gs_state.sync_errors || plain || order_dependent;
+    const int bad = gs_state.races || gs_state.sync_errors || plain || order_dependent || gs_state.runaway_groups;
     printf("%-38s %s  %4d threads, %d group memory array(s), %ld groups, %ld group syncs", api->name, bad ? "FAIL" : "ok  ",
            api->threads_x * api->threads_y * api->threads_z, api->group_memory_arrays, groups, gs_state.group_syncs);
     if (gs_state.plain_barriers) printf(", %ld plain barriers", gs_state.plain_barriers);
@@ -148,6 +149,10 @@ int main(int argc, char **argv) {
     if (bad) {
       ++failed;
       if (plain) printf("    calls GroupMemoryBarrier(), which makes no thread wait\n");
+      if (gs_state.runaway_groups)
+        printf("    %ld thread groups did not end and were ended (more than %d group syncs, or more than %d group memory "
+               "accesses of a thread between two)\n",
+               gs_state.runaway_groups, (int)kGsMaxGroupSyncs, (int)kGsMaxTurnAccesses);
       if (gs_state.sync_errors) printf("    %ld group syncs were not reached by all threads of the group\n", gs_state.sync_errors);
       if (order_dependent) printf("    the output depends on the order of the threads in %ld runs\n", order_dependent);
       if (gs_state.races) printf("    %ld races in group memory:\n", gs_state.races);

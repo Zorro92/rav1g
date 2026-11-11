@@ -68,11 +68,17 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
   (`testing/warp_check`). Verified on the console: 1200 frames of a 1080p stream with global
   motion, and 1080p and 4K film-grain streams with global motion and show-existing frames,
   are md5-identical to dav1d.
+- **Other GPUs**: upstream's shaders are only right where the 64 threads of a thread group run
+  in lockstep, as on the console; on the WARP software adapter every stream decoded wrong, and
+  GPUs with waves of 32 would too. The shaders now wait for each other with group syncs, and
+  host checks keep it that way (`testing/sync_check`). On WARP 244 of 251 conformance streams
+  are md5-identical to their reference (AOM's test vectors, dav1d); the rest are known bugs
+  (super-resolution, spatial layers, a size change). Not yet run on the console.
 - **Known bug, 8-bit streams**: an 8-bit 4K stream decodes with luma off by ±1–2 on about 0.4%
   of the pixels from the first (key) frame on; chroma is exact. Upstream behaviour (the same
   with every new option switched off). 10-bit streams are not affected.
 
-Next targets: a conformance run on WARP in CI (AOM test vectors, dav1d references), the 8-bit
+Next targets: the console run of the shaders with group syncs (md5 and timing), the 8-bit
 bug, entropy decoding on the CPU (frame-parallel or a faster
 parser), and inter and intra prediction on the GPU. The Rust port starts once 4K GPU and CPU time per frame are well
 under 41.7 ms on heavy content.

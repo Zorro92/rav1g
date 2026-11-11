@@ -62,6 +62,8 @@ struct GsState {
   long plain_barriers = 0;  // calls of GroupMemoryBarrier()
   long out_of_bounds = 0;   // group memory accesses outside the array
   long group_syncs = 0;
+  long runaway_groups = 0;  // groups that were ended here because they would not end, see below
+  uint32_t turn_accesses = 0;  // group memory accesses of the running thread since it was last resumed
   int site_count = 0;
   GsRaceSite sites[kGsMaxRaceSites];
 };
@@ -71,6 +73,15 @@ void gs_record_race(int kind, int line, int other_line);
 // Prints the races recorded so far, one line per site, with the given indent.
 void gs_print_races(const char *indent);
 void gs_reset_report();
+
+// A thread group that does not end is ended: a shader with a race can take its loop bounds from garbage
+// (a mutant of the checks does), and then it would spin for hours. A group is a runaway when it makes
+// more group syncs than any shader of the decoder comes near, or when one thread makes more group memory
+// accesses between two group syncs than any does. It is counted in gs_state.runaway_groups, its threads
+// are dropped where they are, and the checks fail on it. (A thread that loops without touching group
+// memory cannot be caught from here; the scripts run the checks under a timeout for that.)
+enum { kGsMaxGroupSyncs = 20000, kGsMaxTurnAccesses = 20000000 };
+void gs_runaway_thread();
 
 // Runs threads 0 .. threads - 1 of one thread group to the end. 'order' is the state of the generator
 // that draws the order of the threads.
@@ -89,8 +100,9 @@ struct GsTag {
 };
 
 inline void gs_note_read(GsTag *tag, int line) {
-  const GsState &s = gs_state;
+  GsState &s = gs_state;
   if (!s.thread) return;
+  if (++s.turn_accesses > kGsMaxTurnAccesses) gs_runaway_thread();
   if (tag->w_epoch == s.epoch && tag->w_thread != s.thread) gs_record_race(GsReadAfterWrite, line, tag->w_line);
   if (tag->r_epoch != s.epoch) {
     tag->r_epoch = s.epoch;
@@ -102,8 +114,9 @@ inline void gs_note_read(GsTag *tag, int line) {
 }
 
 inline void gs_note_write(GsTag *tag, int line, bool changes) {
-  const GsState &s = gs_state;
+  GsState &s = gs_state;
   if (!s.thread) return;
+  if (++s.turn_accesses > kGsMaxTurnAccesses) gs_runaway_thread();
   if (changes) {
     if (tag->r_epoch == s.epoch && tag->r_thread != s.thread) gs_record_race(GsWriteAfterRead, line, tag->r_line);
     if (tag->w_epoch == s.epoch && tag->w_thread != s.thread) gs_record_race(GsWriteAfterWrite, line, tag->w_line);
@@ -353,14 +366,14 @@ void gs_print_races(const char *indent) {
 
 void gs_reset_report() {
   GsState &s = gs_state;
-  s.races = s.sync_errors = s.plain_barriers = s.out_of_bounds = s.group_syncs = 0;
+  s.races = s.sync_errors = s.plain_barriers = s.out_of_bounds = s.group_syncs = s.runaway_groups = 0;
   s.site_count = 0;
 }
 
 namespace gs_fibers {
 
 enum { kMaxThreads = 1024, kStackSize = 256 * 1024 };
-enum { StRun, StAtSync, StDone };
+enum { StRun, StAtSync, StDone, StRunaway };
 
 static void entry();
 
@@ -456,6 +469,14 @@ void gs_group_sync() {
   gs_fibers::suspend();
 }
 
+// The running thread has made more group memory accesses in one turn than any shader does: it is not
+// resumed again, and the scheduler ends its group.
+void gs_runaway_thread() {
+  gs_fibers::fibers[gs_fibers::current].state = gs_fibers::StRunaway;
+  gs_fibers::suspend();
+  abort();
+}
+
 void gs_run_group(int threads, void (*body)(int thread, void *context), void *context, uint64_t *order) {
   using namespace gs_fibers;
   if (threads > kMaxThreads) abort();
@@ -468,6 +489,7 @@ void gs_run_group(int threads, void (*body)(int thread, void *context), void *co
   gs_state.epoch++;
   for (int t = 0; t < threads; ++t) prepare(t);
   static int turn[kMaxThreads];
+  long syncs = 0;
   for (;;) {
     // From one group sync to the next: every thread alone, in an order drawn anew.
     for (int t = 0; t < threads; ++t) turn[t] = t;
@@ -483,6 +505,7 @@ void gs_run_group(int threads, void (*body)(int thread, void *context), void *co
       const int t = turn[n];
       if (fibers[t].state != StRun) continue;
       gs_state.thread = (uint32_t)t + 1;
+      gs_state.turn_accesses = 0;
       resume(t);
       ran = 1;
     }
@@ -490,9 +513,16 @@ void gs_run_group(int threads, void (*body)(int thread, void *context), void *co
     if (!ran) break;
     int at_sync = 0;
     int done = 0;
+    int runaway = 0;
     for (int t = 0; t < threads; ++t) {
       at_sync += fibers[t].state == StAtSync;
       done += fibers[t].state == StDone;
+      runaway += fibers[t].state == StRunaway;
+    }
+    if (runaway || ++syncs > kGsMaxGroupSyncs) {
+      // The group does not end: its threads are dropped where they are (their stacks are reused).
+      gs_state.runaway_groups++;
+      break;
     }
     if (!at_sync) break;
     // A group sync that some threads never reach: on a GPU the group would hang or the sync would not

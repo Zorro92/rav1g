@@ -12,7 +12,9 @@
  * Usage, flags and exit codes: docs/warp-decoder.md, or run it without arguments.
  */
 
+#define PSAPI_VERSION 2  // GetProcessMemoryInfo from kernel32
 #include <windows.h>
+#include <psapi.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
 #include <dxgi1_4.h>
@@ -626,6 +628,24 @@ static std::chrono::steady_clock::time_point g_current_start;
 static int g_current_timeout_s = 0;
 static HANDLE g_watchdog_stop = NULL;
 
+// One line with the memory of the process and of the machine: the tasks of a list run in one process, and a
+// D3D12 device that runs out of memory is removed.
+static void MemoryLine(const char* when) {
+  PROCESS_MEMORY_COUNTERS_EX pmc = {};
+  pmc.cb = sizeof(pmc);
+  MEMORYSTATUSEX status = {};
+  status.dwLength = sizeof(status);
+  if (!GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc)) ||
+      !GlobalMemoryStatusEx(&status)) {
+    return;
+  }
+  const double mib = 1024.0 * 1024.0;
+  Say("PROCESS %s: private %.0f MiB (peak page file use %.0f MiB), working set %.0f MiB; machine: %.0f MiB of "
+      "%.0f MiB physical memory free, %.0f MiB of %.0f MiB commit limit free",
+      when, pmc.PrivateUsage / mib, pmc.PeakPagefileUsage / mib, pmc.WorkingSetSize / mib, status.ullAvailPhys / mib,
+      status.ullTotalPhys / mib, status.ullAvailPageFile / mib, status.ullTotalPageFile / mib);
+}
+
 static void ResultLine(const std::string& name, const char* status, int frames, int matched, int first_bad,
                        int ref_frames, double decode_ms, double create_ms, unsigned int width, unsigned int height,
                        unsigned int bit_depth, const std::string& detail) {
@@ -787,6 +807,7 @@ static double MsSince(std::chrono::steady_clock::time_point start) {
 // One task, as the player's AV1Decoder::DecodeOne does it. Returns the exit code of the task.
 static int RunTask(const Task& task, Device* dev) {
   Say("BEGIN stream=%s", task.name.c_str());
+  MemoryLine("before the task");
   Run run;
   run.task = &task;
   {
@@ -948,6 +969,7 @@ static int RunTask(const Task& task, Device* dev) {
   aom_codec_destroy(&ctx);
 
   const HRESULT removed = dev->device->GetDeviceRemovedReason();
+  MemoryLine("after the task");
   std::lock_guard<std::mutex> lock(run.cs);
   if (run.out_file) {
     if (fclose(run.out_file)) run.io_error = "write error";

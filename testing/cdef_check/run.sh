@@ -13,6 +13,11 @@ here=$(cd "$(dirname "$0")" && pwd)
 shaders="$here/../../libav1/dx/shaders"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+trap 'exit 130' INT TERM HUP
+# No run of the check may hang: a thread group that does not end is ended by the scheduler
+# (testing/common/group_sched.h), anything else by these timeouts, in seconds.
+check_timeout=600
+mutant_timeout=600
 
 # HLSL to C++: drop attributes, semantics and register bindings, unwrap the
 # constant buffer, rename the entry point. The shader code itself is untouched.
@@ -34,7 +39,7 @@ build() {
 to_cpp "$shaders/cdef_filter.hlsl" > "$work/cdef_filter.gen.h"
 to_cpp "$shaders/cdef_filter_v2.hlsl" > "$work/cdef_filter_v2.gen.h"
 build "$work"
-"$work/cdef_check"
+timeout -k 10 "$check_timeout" "$work/cdef_check"
 
 if [ "${1:-}" = "--mutate" ]; then
   mkdir "$work/mutant"
@@ -45,7 +50,7 @@ if [ "${1:-}" = "--mutate" ]; then
     exit 1
   fi
   build "$work/mutant"
-  if "$work/mutant/cdef_check" > "$work/mutant/log" 2>&1; then
+  if timeout -k 10 "$mutant_timeout" "$work/mutant/cdef_check" > "$work/mutant/log" 2>&1; then
     echo "cdef_check: the mutated shader passed, the check is not sensitive" >&2
     exit 1
   fi
@@ -61,7 +66,7 @@ if [ "${1:-}" = "--mutate" ]; then
       exit 1
     fi
     build "$work/mutant"
-    if "$work/mutant/cdef_check" > "$work/mutant/log" 2>&1; then
+    if timeout -k 10 "$mutant_timeout" "$work/mutant/cdef_check" > "$work/mutant/log" 2>&1; then
       echo "cdef_check: $f with a group sync turned into a plain barrier passed" >&2
       exit 1
     fi

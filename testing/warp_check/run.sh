@@ -14,6 +14,11 @@ src="$here/../.."
 shaders="$src/libav1/dx/shaders"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+trap 'exit 130' INT TERM HUP
+# No run of the check may hang: a thread group that does not end is ended by the scheduler
+# (testing/common/group_sched.h), anything else by these timeouts, in seconds.
+check_timeout=1200
+mutant_timeout=600
 
 mutate=0
 if [ "${1:-}" = "--mutate" ]; then
@@ -88,7 +93,7 @@ build() {
 }
 
 build "$work"
-"$work/warp_check" "$@"
+timeout -k 10 "$check_timeout" "$work/warp_check" "$@"
 
 if [ "$mutate" = 1 ]; then
   # file @ sed expression @ what it breaks
@@ -112,7 +117,7 @@ inter_warp_comp_hbd.gen.h@/^  if (active \&\& compound_type == 2) {/,/GroupMemor
       exit 1
     fi
     build "$work/mutant"
-    if "$work/mutant/warp_check" "$@" > "$work/mutant/log" 2>&1; then
+    if timeout -k 10 "$mutant_timeout" "$work/mutant/warp_check" "$@" > "$work/mutant/log" 2>&1; then
       echo "warp_check: the mutant '$what' passed, the check is not sensitive to it" >&2
       exit 1
     fi

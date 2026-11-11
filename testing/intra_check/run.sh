@@ -17,6 +17,11 @@ src="$here/../.."
 shaders="$src/libav1/dx/shaders"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
+trap 'exit 130' INT TERM HUP
+# No run of the check may hang: a thread group that does not end is ended by the scheduler
+# (testing/common/group_sched.h), anything else by these timeouts, in seconds.
+check_timeout=2400
+mutant_timeout=900
 
 mutate=0
 if [ "${1:-}" = "--mutate" ]; then
@@ -95,14 +100,14 @@ build() {
 }
 
 build "$work"
-"$work/intra_check" "$@"
+timeout -k 10 "$check_timeout" "$work/intra_check" "$@"
 
 # Again with a limit of 6 passes per thread group instead of 250, which no
 # real region comes close to: regions then overflow into further steps all
 # the time, and that path gets checked too.
 build "$work" -DINTRA_V2_MAX_PASSES=6
 echo "With at most 6 passes per thread group:"
-"$work/intra_check" "$@" | grep -E 'intra_v2:|MISMATCH|FAILED|identical|reads|sync'
+timeout -k 10 "$check_timeout" "$work/intra_check" "$@" | grep -E 'intra_v2:|MISMATCH|FAILED|identical|reads|sync'
 build "$work"
 
 if [ "$mutate" = 1 ]; then
@@ -137,7 +142,7 @@ intra_v2.gen.h@0,/GroupMemoryBarrierWithGroupSync();/s//GroupMemoryBarrier();/@g
       exit 1
     fi
     build "$work/mutant"
-    if "$work/mutant/intra_check" "$@" > "$work/mutant/log" 2>&1; then
+    if timeout -k 10 "$mutant_timeout" "$work/mutant/intra_check" "$@" > "$work/mutant/log" 2>&1; then
       echo "intra_check: the mutant '$what' passed, the check is not sensitive to it" >&2
       exit 1
     fi

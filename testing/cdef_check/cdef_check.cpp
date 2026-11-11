@@ -342,7 +342,7 @@ int main() {
          gs_state.group_syncs, gs_state.races, gs_state.sync_errors, gs_state.plain_barriers);
   gs_print_races("  ");
   if (failed || g_out_of_bounds || !changed || gs_state.races || gs_state.sync_errors || gs_state.plain_barriers ||
-      gs_state.out_of_bounds) {
+      gs_state.out_of_bounds || gs_state.runaway_groups) {
     printf("cdef_check: FAILED\n");
     return 1;
   }

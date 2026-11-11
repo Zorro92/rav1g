@@ -149,12 +149,58 @@ A failed run can still upload diagnostics; only use a package from a successful 
 
 The run has more jobs. On Linux, `cdef-check`, `warp-check` and `intra-check` run the
 host-side comparisons of the CDEF shaders, of the warp shaders with libaom and of the intra
-paths; `intra-check` also runs the self-test of the timing summary and the sequence header
+paths, and `sync-check` runs every shader with group memory under an adversarial thread
+schedule ([below](#host-side-check-of-the-thread-groups)); `intra-check` also runs the self-test of the timing summary and the sequence header
 check, and uploads its log as `rav1g-intra-check-<run-id>`. `conformance-streams` (Linux)
 and `conformance` (Windows) are the conformance run: the decoder as a desktop program
 decodes AOM's test vectors and other streams on the WARP software adapter of the runner and
 compares the md5 of every frame; see [warp-decoder.md](warp-decoder.md). The run is green
 only if all jobs pass.
+
+### Host-side check of the thread groups
+
+Upstream's shaders counted on the 64 threads of a thread group running in lockstep, which is
+true on the console and nowhere else
+([gpu-av1-decoder.md](gpu-av1-decoder.md#lockstep-reliance-portability-2026-11-11)). The
+host checks therefore run a thread group the way D3D12 allows it to run
+(`testing/common/group_sched.h`): between two group syncs every thread runs alone, from the
+one to the other, in an order drawn anew every time; a plain `GroupMemoryBarrier()` does
+nothing and is counted; and the group memory records, element by element, who read and wrote
+it since the last group sync. A thread that reads what another thread wrote since then, or
+changes what another read or wrote since then, is a race, reported with the shader and the
+source line of both accesses, whatever order the threads were run in. A group sync that not
+all threads of the group reach is an error, and so is a group that does not end.
+
+`cdef_check`, `intra_check` and `warp_check` run their shaders this way and fail on a race, a
+plain barrier or a sync error as they do on a wrong frame. `testing/sync_check` does it for
+every shader with group memory that has no reference check (the transforms, inter prediction,
+deblocking, loop restoration, film grain): the shader sources are turned into C++ by
+`testing/sync_check/to_cpp.py` (line numbers are kept), and run on generated input (constants,
+block records and buffers shaped so that every path is taken and two groups never write the
+same words). Every case runs twice with two thread orders and must write the same bytes. It
+has no reference output: whether a picture is right is the business of the conformance run.
+
+```sh
+sh testing/sync_check/run.sh             # the check
+sh testing/sync_check/run.sh --mutate    # and, for every group sync, a copy of its shader with
+                                         # that sync turned into a plain barrier: all must be
+                                         # rejected for a race
+sh testing/sync_check/run.sh --shaders <dir>   # the shaders of another directory
+```
+
+On the shaders before the fix (`--shaders` with a checkout of rav1g 7ff22d5) 53 of 58 fail.
+The mutation run ends with
+
+```text
+sync_check: 58 shaders, 15660 thread groups: no race in group memory, every group sync reached by all threads,
+no plain group memory barrier, output independent of the thread order
+sync_check: 113 mutants, each with one group sync turned into a plain barrier: 111 rejected for a race, 0 because they did not end, 2 pass as listed (group syncs of upstream that order nothing)
+```
+
+No run can hang: the scheduler ends a thread group that makes more group syncs, or a thread
+that makes more group memory accesses between two, than any shader comes near (a shader with
+a race can take a loop bound from garbage), every run of a check has a timeout, and an
+interrupted script ends its processes and removes its files.
 
 ## Install with Device Portal
 
@@ -2014,7 +2060,7 @@ counts the double precision operations the shaders execute, and fails if there i
 
 ```sh
 sh testing/warp_check/run.sh             # the check
-sh testing/warp_check/run.sh --mutate    # and nine mutated shaders, which must all fail
+sh testing/warp_check/run.sh --mutate    # and eleven mutated shaders, which must all fail
 ```
 
 Further arguments go to the check: `--cases N` (frames per common size, default 24), `--seed S`,

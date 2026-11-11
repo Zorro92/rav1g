@@ -388,3 +388,96 @@ the original path cannot decode and replaces "same as upstream" with "same as da
   with the original CDEF, the old buffer sizes and 2 or 3 slots, so it is upstream behaviour. All
   earlier test clips were 10-bit.
 
+## Lockstep reliance (portability) (2026-11-11)
+
+The first conformance run on the WARP software adapter (`testing/warp_decoder`,
+[warp-decoder.md](warp-decoder.md)) had 0 of 250 streams right, with another md5 on every
+decode. The cause is in upstream's shaders, not in WARP.
+
+**What was found.** The threads of a compute shader thread group hand data to each other through
+group memory (`groupshared`). D3D12 promises one thing about them: at
+`GroupMemoryBarrierWithGroupSync()` all threads of the group have arrived before any goes on.
+`GroupMemoryBarrier()` makes writes visible and makes no thread wait. Upstream's shaders used the
+plain barrier, or none, wherever a thread reads what another thread wrote, and so counted on the
+64 threads of a group running in lockstep, instruction by instruction, as one wave of 64. That is
+how the console's GPU runs them. It is not how WARP runs them (one thread after the other), nor a
+GPU with waves of 32 (NVIDIA, Intel, AMD in wave32 mode): there a group of 64 is two or more waves
+and the hand-over is a race. Of the 92 shaders, 58 have group memory; 53 of them had such a race
+(`testing/sync_check` on the shaders of the commit before the fix reports them all). The other
+five use the memory as private scratch of a thread (`inter_warp`, `inter_warp_hbd`), not at all
+(`inter_2x2chroma_hbd`, `inter_compound_2x2_hbd`), or already had group syncs
+(`film_grain_filter`), as `cdef_filter`, `cdef_filter_v2` and `intra_v2` do.
+
+Lines are those of the upstream sources (rav1g 7ff22d5):
+
+| shaders | where | what relied on lockstep |
+| --- | --- | --- |
+| the 19 transforms `idct*x*` | `idct_shader_common.h:86, 94, 107` (macro `IDCT_GEN`) | Coefficients are placed by all threads of a block, rows are transformed by one thread each, then columns, then the block is stored: three plain barriers between the four passes. `:55`: a thread behind the last block returned before them. |
+| `idct_lossless` | `:50, 74, 92`, return at `:28` | the same, for the 4x4 Walsh-Hadamard transform |
+| `inter_scale`, `_obmc_above`, `_obmc_left`, `inter_scale_2x2chroma_hbd`, and their `_hbd` builds | one plain barrier each (`inter_scale.hlsl:92`) | The horizontally filtered lines of a column go from the thread that made them to the threads that filter vertically. |
+| `inter_scale_compound`, `_masked`, `_diff_chroma`, `_2x2_hbd`, and `_hbd` builds | three plain barriers each (`inter_scale_compound.hlsl:106, 128, 170`) | the same for two references, which reuse the same memory |
+| `inter_scale_2x2chroma`, `inter_scale_compound_2x2` | `:121, 123` and `:201, 203`, inside `if (block.y & DualWriteBlock)` | Two 2x2 blocks that share a word of the frame exchange their halves; the barriers were in a branch only some threads take. |
+| `inter_2x2chroma`, `inter_compound_2x2` | `:115`, `:173`, in the same branch | the same pair write, in the shaders for references of the frame's own size |
+| `inter_compound_diff_luma`, `_hbd` | `:252`, `:215` | The mask sums of a 4x2 go to the neighbouring thread, which stores both as the chroma mask. |
+| `inter_scale_compound_diff_luma`, `_hbd` | `:114, 136, 178, 223, 229` | two references and the mask sums |
+| `inter_scale_warp_compound`, `_hbd` (compound blocks with global motion) | `:119, 167, 188, 247, 295`, inside the branches for a warped and a plain reference; no barrier at `:382`–`:392` | two passes per reference; the mask sums of a difference weighted block were written to and read from the group memory with nothing between |
+| `inter_warp_compound`, `_hbd` (not used by the decoder) | `:94`–`:134` and three more places, `:345`–`:351` | the same, without any barrier |
+| `loopfilter_hor`, `_hbd` | `:154` in `filter_horizontal_edge`, called from a loop over the edges of the thread's own block (`:218`–`:231`); `:211` | The four threads of a block filter their columns, then put the lines together from all four. Every block has its own number of edges, so the loop had a trip count per thread, and an edge reads from the frame what the edge above it stored. |
+| `loopfilter_vert`, `_hbd` | `:182`, `:184` | the edge list of a block, loaded by its four threads |
+| `loop_restoration` | `:276`, and no barrier at `:297`–`:314` (Wiener rows to columns to stored words), in `box_filter0` and `box_filter1` (`:91`–`:200`: box sums of the self guided filter, read by their neighbours), at `:349`–`:350` | six passes, one plain barrier |
+| `film_grain_gen_luma` | `:81`–`:104` | The autoregressive filter of the grain template is a wavefront: the thread of a row starts four columns after the thread of the row above, by skipping loop iterations, with no barrier in the loop. |
+| `film_grain_gen_chroma` | `:94, 102`, and the same wavefront at `:118`–`:156` | |
+| `intra_main`, `_hbd` | `:424`–`:444` | The sum of the luma of a CFL block was a pairwise reduction with plain barriers in loops with a trip count per thread ("count ... up to 64 == wavefront size, => we can use GroupMemoryBarrier()"). |
+| `intra_filter`, `_hbd` | `:95, 111, 132, 156`; `:166`–`:180` | Filter intra is a wavefront over 4x2 units with plain barriers in a loop with a trip count per thread. And the residual was added by all 8 thread rows of the group to the same words: right only if all of them load before any stores. |
+
+The same assumption is behind the earlier `-intraopt` result ([step 1c](#step-1c-intra_main-with-fxc-optimisation-2026-11-11-negative)).
+
+**How it was fixed** (rav1g c35d97f and the commit after it). The arithmetic and its order are
+unchanged; only where threads wait for each other changed.
+
+- Every hand-over has a `GroupMemoryBarrierWithGroupSync()`. FXC only accepts a group sync that
+  all threads of the group reach (error X3663/X4026 otherwise), which shaped the rest.
+- A thread behind the last block of a dispatch used to return at once. It now takes part in the
+  group syncs and does nothing else: it loads nothing and stores nothing.
+- A group sync cannot be in a branch only some threads take. The pair write, the two branches of
+  the warp compound shaders and the film grain branches were split so that the sync is between
+  them; where the code before the sync is long (`inter_2x2chroma`, `inter_compound_2x2`,
+  `inter_compound_diff_luma`) it became a function, textually unchanged, and the sync follows the
+  call.
+- A loop with a trip count per thread cannot contain a group sync. The horizontal deblocking
+  filter now steps all blocks of a group through their edges together: every block counts its
+  edges, the largest count of the group is read behind a group sync, and a block with fewer edges
+  idles through the rest. The wavefronts of filter intra and of the film grain templates became
+  steps of the whole group in which a thread whose row has not begun or is done does nothing.
+- The CFL sum is made by the first thread of the block between two group syncs. The filter intra
+  residual is added to every word once.
+- Loop restoration takes its group from `SV_GroupID`, so that the filter type, which is the same
+  for a group, is not thread dependent for the compiler, and has a group sync between its passes.
+
+**Checked.** `testing/common/group_sched.h` runs the threads of a group on the host as fibers:
+between two group syncs every thread runs alone, in an order drawn anew every time, a plain
+barrier does nothing, and the group memory records who read and wrote each element since the
+last group sync, so that every race is reported with its source line, whatever order was drawn.
+`cdef_check`, `intra_check` and `warp_check` run their shaders this way (the warp compound shader
+still equals libaom, the fixed intra shaders still equal `intra_v2`), and `testing/sync_check`
+runs all 58 shaders with group memory on generated input: no race, every group sync reached by
+all threads, no plain barrier, output independent of the thread order. As a proof that the checks
+can fail, each of the 113 group syncs is turned into a plain barrier in a copy of its shader: 111
+copies are rejected for a race, and 2 pass, which are syncs of upstream's `film_grain_filter`
+between passes that touch only a thread's own samples. On WARP the conformance run went from 0 to
+244 of 251 streams ([warp-decoder.md](warp-decoder.md#results)).
+
+**Cost.** Static FXC counts of the 59 shaders that changed: 39545 instruction slots before,
+40485 after (+2.4%); the survey of every CI run has them per shader. The largest relative changes
+are in small shaders: `idct_lossless` +13%, the 20 shaders for scaled references +7 to +11%,
+`loopfilter_hor` +8 to +9%, the transforms -0.5 to +8%. What a group sync costs on the console is
+not known: a group of 64 threads is one wave there, where a sync should be free, and `intra_main`
+(256 threads, four waves), where it is not, has the twelve group syncs it had before. **Not
+measured yet**: the console md5 and timing run has to confirm that the output is unchanged there
+and what the frame time is.
+
+**Open questions for the console run.** Two things that were wrong on the console are right on
+WARP with the fixed shaders: the 8-bit 4K stream whose luma was off by ±1–2 (20 frames,
+md5-identical to dav1d) and the stream with scaled references (64 of 64 frames). Either they
+depend on the console itself, or the console does not run every group in lockstep after all and
+the fix repairs them there too.

@@ -174,7 +174,6 @@ groupshared int luma_grain_temp[70 * 76];
       GroupMemoryBarrierWithGroupSync();
     }
   }
-  GroupMemoryBarrierWithGroupSync();
   if (DTid.y == 0) {
     for (int j = GTid.x; j < chroma_block_size_y * chroma_block_size_x; j += WGH) {
       dst[dst_offset_u + j] = crcb_grain_temp[j];

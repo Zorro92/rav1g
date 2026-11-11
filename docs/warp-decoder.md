@@ -93,6 +93,10 @@ MISMATCH frame 12 (1920x1080 10-bit): expected 0f3a..., got 77c1...
 RESULT stream=clip.ivf status=mismatch frames=40 matched=12 first_bad=12 ref_frames=40 decode_ms=41250 create_ms=310 size=1920x1080 bitdepth=10 detail="40 temporal units in, 40 frames out"
 ```
 
+A `PROCESS before the task: ...` and a `PROCESS after the task: ...` line give the private bytes
+and working set of the process and the free memory of the machine: the tasks of a list run in one
+process, and a D3D12 device that runs out of memory is removed.
+
 `status` is `pass` (every frame matches and the number of frames is the reference's),
 `mismatch` (a frame differs, or the number of frames: without `-limit` the stream must give
 exactly the frames of the reference, with it no more than those), `error` (the decoder
@@ -170,6 +174,51 @@ matching frames, first bad frame, decode time, result. The artifact
 `rav1g-conformance-<run id>` has `results.tsv`, `summary.md`, the decoder's output for every
 stream (`logs/<stream>.log`) and the md5 of every output frame (`md5/<stream>.md5`, in the
 player's format).
+
+### Results
+
+On WARP the shaders run as D3D12 specifies them and not as the console's GPU happens to run
+them, which is what the run is for. Upstream's shaders had 0 of 250 streams right there, with
+another md5 on every decode: they counted on the 64 threads of a thread group running in lockstep
+([gpu-av1-decoder.md](gpu-av1-decoder.md#lockstep-reliance-portability-2026-11-11)). With group
+syncs where threads hand data to each other, 244 of 251 streams are md5-identical to their
+reference (run 43117733160):
+
+| streams | pass |
+| --- | --- |
+| quantizer 0..63, 8-bit (`av1-1-b8-00-*`) | 64 of 64 |
+| quantizer 0..63, 10-bit (`av1-1-b10-00-*`) | 64 of 64 |
+| frame sizes 16x16 to 226x226 (`av1-1-b8-01-*`) | 100 of 100 |
+| all intra, CDF update, motion vectors, motion field (`-02`, `-04`, `-05`, `-06`), intra-only frames (`-16`) | 5 of 5 |
+| size changes at key frames (`av1-1-b8-03-*`) | 1 of 2 |
+| temporal and spatial layers (`av1-1-b8-22-svc-*`) | 1 of 5 |
+| film grain, monochrome, 8 and 10 bit (`-23`, `-24`) | 4 of 4 |
+| Netflix Open Content cuts, 270p to 2160p, 8 and 10 bit | 4 of 5 |
+| SVT-AV1 reference scaling | 1 of 1 |
+| SVT-AV1 super-resolution | 0 of 1 |
+
+The seven that fail:
+
+- `av1-1-b8-03-sizeup.mkv`: frames 0 to 9 match, then the stream goes from 352x288 to 1280x720
+  with a new sequence header, and the decoder, which was created for the first one, cannot
+  allocate the larger frames (a decode error).
+- The four vectors with two spatial layers (`svc-L2T1`, `-L2T1-2`, `-L2T2`, `-L2T2-2`): the
+  decoder outputs the frame of each layer, 16 frames for 8 temporal units, where AOM's md5 has
+  the 1280x720 frame of each temporal unit. Its first 1280x720 frame is right (output frame 1 is
+  reference frame 0); every later one, which predicts from the 640x360 frame of its temporal unit
+  and from earlier 1280x720 frames, is wrong. First bad 1280x720 frame: output frame 3. What
+  differs in the samples is not known yet.
+- `syn-superres-10b-1080p.ivf`: super-resolution is wrong from the first frame on, as on the
+  console.
+- `nf-chimera-10b-1080p.ivf` passes when it is decoded in a process of its own (30 of 30 frames)
+  and fails as the 83rd stream of a process: the D3D12 device is removed (0x887A0005) as its
+  decoder starts, after the 4K stream and others. 0x887A0005 is what running out of memory gives
+  on the console. `warp_decoder` now prints the memory of the process and of the machine before
+  and after every task (`PROCESS ...` lines in the stream's log).
+
+Two streams that are wrong on the console pass here: the 8-bit 4K stream
+(`nf-dvbdash-a1-8b-2160p.ivf`, luma off by ±1–2 on the console) and the stream with scaled
+references (`syn-resize-10b-1080p.ivf`).
 
 ### expected.txt
 

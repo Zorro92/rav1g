@@ -732,7 +732,7 @@ static RunResult end_run() {
   r.races_group = g_tracker.races_group;
   r.races_thread = g_tracker.races_thread;
   g_total_group_syncs += gs_state.group_syncs;
-  r.sync_errors = gs_state.sync_errors;
+  r.sync_errors = gs_state.sync_errors + gs_state.runaway_groups;  // a group that does not end is no better
   r.memory_races = gs_state.races;
   r.plain_barriers = gs_state.plain_barriers;
   g_tracker.w_unit = nullptr;

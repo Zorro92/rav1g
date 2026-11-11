@@ -116,6 +116,5 @@ groupshared int luma_grain_temp[73 * 82];
       GroupMemoryBarrierWithGroupSync();
     }
   }
-  GroupMemoryBarrierWithGroupSync();
   for (j = thread.x; j < luma_block_size_x * luma_block_size_y; j += WGH) dst[j] = luma_grain_temp[j];
 }
