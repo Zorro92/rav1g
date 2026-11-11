@@ -28,13 +28,19 @@
 
 groupshared uint2 mem[64];
 
-[numthreads(64, 1, 1)] void main(uint3 thread
-                                 : SV_DispatchThreadID) {
-  if (thread.x >= cb_wi_count) return;
+// The prediction of the block of one thread: its record, its two lines as the halves of two words of the
+// frame, and where they go. False for a thread behind the last block of the dispatch, which has no block.
+bool predict(uint3 thread, out uint4 block, out int x, out uint2 output, out int output_offset, out int output_stride) {
+  block = uint4(0, 0, 0, 0);
+  x = 0;
+  output = uint2(0, 0);
+  output_offset = 0;
+  output_stride = 0;
+  if (thread.x >= cb_wi_count) return false;
 
-  uint4 block = pred_blocks.Load4((cb_pass_offset + thread.x) * 16);
+  block = pred_blocks.Load4((cb_pass_offset + thread.x) * 16);
 
-  int x = SubblockW * (block.x & 0xffff);
+  x = SubblockW * (block.x & 0xffff);
   int y = SubblockH * (block.x >> 16);
 
   const int2 dims = cb_dims[1].xy;
@@ -103,16 +109,34 @@ groupshared uint2 mem[64];
     tmp = clamp(tmp, 0, 255);
   }
 
-  uint2 output;
   output.x = (tmp.x | (tmp.y << 8)) << ((x & 2) * 8);
   output.y = (tmp.z | (tmp.w << 8)) << ((x & 2) * 8);
 
-  const int output_stride = cb_planes[plane].x;
-  const int output_offset = cb_planes[plane].y + (x & (~3)) + y * output_stride;
+  output_stride = cb_planes[plane].x;
+  output_offset = cb_planes[plane].y + (x & (~3)) + y * output_stride;
+  return true;
+}
+
+[numthreads(64, 1, 1)] void main(uint3 thread
+                                 : SV_DispatchThreadID) {
+  uint4 block;
+  int x;
+  uint2 output;
+  int output_offset;
+  int output_stride;
+  const bool active = predict(thread, block, x, output, output_offset, output_stride);
+
+  // Two 2x2 blocks that share a word of the frame and are predicted in this dispatch are written as one
+  // word: both put their half into the group memory, and the first of the pair stores the two. The threads
+  // of a group run in no particular order, so it takes a group sync to have the halves there before they
+  // are read, and a group sync has to be reached by all threads of the group, those without a block too.
+  // (Upstream had a plain group memory barrier inside the branch, which makes no thread wait: that held
+  // only where the 64 threads of a group ran in lockstep, as one wave.)
+  if (active && (block.y & DualWriteBlock)) mem[thread.x & 63] = output;
+  GroupMemoryBarrierWithGroupSync();
+  if (!active) return;
 
   if (block.y & DualWriteBlock) {
-    mem[thread.x & 63] = output;
-    GroupMemoryBarrier();
     if ((thread.x & 1) == 0) {
       int2 output1 = mem[(thread.x & 63) + 1];
       output.x |= output1.x;

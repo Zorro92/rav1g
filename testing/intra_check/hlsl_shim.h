@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../common/group_sched.h"
+
 typedef unsigned int uint;
 
 struct uint2 {
@@ -78,7 +80,7 @@ struct AccessTracker {
   uint32_t *w_group = nullptr;
   uint32_t *w_phase = nullptr;
   uint32_t *w_thread = nullptr;
-  uint32_t unit = 1, group = 0, phase = 1, thread = 0;
+  uint32_t unit = 1, group = 0;  // the phase and the thread are gs_state.epoch and gs_state.thread
   int track_phase = 0;
   long races_group = 0, races_thread = 0;
 };
@@ -113,8 +115,8 @@ struct RWByteAddressBuffer {
       const size_t word = address >> 2;
       if (g_tracker.w_unit[word] == g_tracker.unit && g_tracker.w_group[word] != g_tracker.group)
         g_tracker.races_group++;
-      else if (g_tracker.track_phase && g_tracker.w_phase[word] == g_tracker.phase &&
-               g_tracker.w_thread[word] != g_tracker.thread)
+      else if (g_tracker.track_phase && g_tracker.w_phase[word] == gs_state.epoch &&
+               g_tracker.w_thread[word] != gs_state.thread)
         g_tracker.races_thread++;
     }
     memcpy(&v, ptr + address, 4);
@@ -134,8 +136,8 @@ struct RWByteAddressBuffer {
       const size_t word = address >> 2;
       g_tracker.w_unit[word] = g_tracker.unit;
       g_tracker.w_group[word] = g_tracker.group;
-      g_tracker.w_phase[word] = g_tracker.phase;
-      g_tracker.w_thread[word] = g_tracker.thread;
+      g_tracker.w_phase[word] = gs_state.epoch;
+      g_tracker.w_thread[word] = gs_state.thread;
     }
     memcpy(ptr + address, &v, 4);
   }
@@ -146,18 +148,12 @@ struct RWByteAddressBuffer {
 };
 
 /*
- * Scheduling points of the emulated thread group, see intra_check.cpp.
- * GroupMemoryBarrier() has no ordering effect on a GPU; the original shaders
- * use it where they rely on the threads of a wave running in lockstep, so
- * here it lets every other runnable thread reach its next barrier. WaveJoin()
- * is inserted by run.sh where lockstep execution makes all threads meet (the
- * end of a loop some threads leave early).
+ * The thread group and its group memory: testing/common/group_sched.h. A group sync is where the threads
+ * of a group meet; GroupMemoryBarrier() makes no thread wait, here as on a GPU, and is counted. The group
+ * memory (GsArray, see run.sh) records every read of what another thread wrote since the last group sync.
  */
-void GroupMemoryBarrier();
-void GroupMemoryBarrierWithGroupSync();
-void AllMemoryBarrierWithGroupSync();
-void WaveJoin(int level);
-
-#define groupshared static
+static inline void GroupMemoryBarrier() { gs_state.plain_barriers++; }
+static inline void GroupMemoryBarrierWithGroupSync() { gs_group_sync(); }
+static inline void AllMemoryBarrierWithGroupSync() { gs_group_sync(); }
 
 #endif /* INTRA_CHECK_HLSL_SHIM_H_ */

@@ -28,7 +28,7 @@ fi
 to_cpp() {
   sed -E \
     -e 's/\[numthreads\([^]]*\)\]//' \
-    -e 's/\[(unroll|loop)\]//g' \
+    -e 's/\[(unroll|loop|branch)\]//g' \
     -e 's/: *SV_[A-Za-z]+//g' \
     -e 's/: *register\([a-z0-9]+\)//g' \
     -e 's/^cbuffer +[A-Za-z_0-9]+ *\{/namespace {/' \
@@ -38,37 +38,21 @@ to_cpp() {
     -e '/^int2 filter_line2_hbd\(/,/^}/ s/\bl1\.x\b/l1/g' \
     -e 's/\bdouble\b/gpu_double/g' \
     -e 's/#include "inter_common\.h"/#include "inter_common.gen.h"/' \
-    "$1"
-}
-
-# The compound shader relies on its threads running in lockstep (one wave):
-# it only has GroupMemoryBarrier() calls, which order nothing. The emulation
-# switches threads at barriers, so say where lockstep makes the threads meet:
-#   - all threads have read the filtered lines of the second reference before
-#     any of them reuses the group memory for the mask of a difference
-#     weighted block;
-#   - all threads have stored their part of that mask before any reads on.
-lockstep() {
-  sed -E \
-    -e 's/^  if \(compound_type == 2\) \{/  GroupMemoryBarrier(); \/\/ lockstep 1\n&/' \
-    -e 's/^    if \(\(wi & 10\) == 0\)/    GroupMemoryBarrier(); \/\/ lockstep 2\n&/'
+    "$1" | sed -E -f "$here/../common/gs_groupshared.sed"
 }
 
 to_cpp "$shaders/inter_common.h" > "$work/inter_common.gen.h"
 to_cpp "$shaders/inter_warp.hlsl" > "$work/inter_warp.gen.h"
 to_cpp "$shaders/inter_warp_hbd.hlsl" > "$work/inter_warp_hbd.gen.h"
-to_cpp "$shaders/inter_scale_warp_compound.hlsl" | lockstep > "$work/inter_warp_comp.gen.h"
-to_cpp "$shaders/inter_scale_warp_compound_hbd.hlsl" | lockstep > "$work/inter_warp_comp_hbd.gen.h"
+to_cpp "$shaders/inter_scale_warp_compound.hlsl" > "$work/inter_warp_comp.gen.h"
+to_cpp "$shaders/inter_scale_warp_compound_hbd.hlsl" > "$work/inter_warp_comp_hbd.gen.h"
 to_cpp "$shaders/inter_ext_borders.hlsl" > "$work/inter_ext_borders.gen.h"
 to_cpp "$shaders/inter_ext_borders_hbd.hlsl" > "$work/inter_ext_borders_hbd.gen.h"
-for f in inter_warp_comp inter_warp_comp_hbd; do
-  for marker in 'lockstep 1' 'lockstep 2'; do
-    if [ "$(grep -c "GroupMemoryBarrier(); // $marker" "$work/$f.gen.h")" != 1 ]; then
-      echo "warp_check: $marker not placed once in $f" >&2
-      exit 1
-    fi
-  done
-done
+# All group memory has to be the kind that is watched.
+if grep -q '^groupshared' "$work"/*.gen.h; then
+  echo "warp_check: a group memory declaration was not converted" >&2
+  exit 1
+fi
 
 # libaom's C code of this tree, built once: the reference.
 mkdir "$work/ref"
@@ -116,9 +100,11 @@ inter_warp_comp.gen.h@s/int x0 = clamp((mvx >> SCALE_SUBPEL_BITS) - 3, -11, ref_
 inter_warp_comp_hbd.gen.h@s/sy4 += info2.w \* (-4) + info2.z \* (-4);/sy4 += info2.w * (-4) + info2.z * (-3);/@shear of the compound warp
 inter_warp.gen.h@s/const int src_x = ((x \& (~7)) + 4) << subsampling;/const int src_x = ((x \& (~7)) + 3) << subsampling;/@centre of the 8x8 warp unit
 inter_common.gen.h@s/const int lo = val \* (sf \& 255) + off;/const int lo = val * (sf \& 255);/@scale_value offset
-inter_common.gen.h@s/return neg ? hi - ((128 - lo) >> 8) : hi + ((lo + 128) >> 8);/return neg ? hi - ((127 - lo) >> 8) : hi + ((lo + 128) >> 8);/@scale_value rounding of negative positions'
+inter_common.gen.h@s/return neg ? hi - ((128 - lo) >> 8) : hi + ((lo + 128) >> 8);/return neg ? hi - ((127 - lo) >> 8) : hi + ((lo + 128) >> 8);/@scale_value rounding of negative positions
+inter_warp_comp.gen.h@0,/^  GroupMemoryBarrierWithGroupSync();/s//  GroupMemoryBarrier();/@group sync between the two passes of the first reference as a plain barrier@races in group memory: [1-9]
+inter_warp_comp_hbd.gen.h@/^  if (active \&\& compound_type == 2) {/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/@group sync before the mask sums are read as a plain barrier@races in group memory: [1-9]'
   mkdir "$work/mutant"
-  echo "$mutants" | while IFS='@' read -r file expr what; do
+  echo "$mutants" | while IFS='@' read -r file expr what expect; do
     cp "$work"/*.gen.h "$work/mutant/"
     sed -e "$expr" "$work/$file" > "$work/mutant/$file"
     if cmp -s "$work/$file" "$work/mutant/$file"; then
@@ -128,6 +114,12 @@ inter_common.gen.h@s/return neg ? hi - ((128 - lo) >> 8) : hi + ((lo + 128) >> 8
     build "$work/mutant"
     if "$work/mutant/warp_check" "$@" > "$work/mutant/log" 2>&1; then
       echo "warp_check: the mutant '$what' passed, the check is not sensitive to it" >&2
+      exit 1
+    fi
+    # A mutant that takes a group sync away has to be caught as a race, not by chance.
+    if [ -n "$expect" ] && ! grep -q "$expect" "$work/mutant/log"; then
+      echo "warp_check: the mutant '$what' was rejected, but not for races in its group memory" >&2
+      tail -n 20 "$work/mutant/log" >&2
       exit 1
     fi
     echo "warp_check: mutant rejected as expected: $what"

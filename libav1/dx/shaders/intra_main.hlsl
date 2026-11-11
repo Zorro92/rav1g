@@ -421,27 +421,15 @@ int intra_inter_blend(int mask, int intra, int inter) {
 
   GroupMemoryBarrierWithGroupSync();
 
-  if (mode == MODE_CFL)  // reduce
-  {
-    int count = wi_count >> 2;
-    // max cfl block  32x32    /    4(pixels) = 256 wi (wi_count);
-    // count = 256wi / 4  = up to 64wi == wavefront size, => we can use GroupMemoryBarrier();
-    int ofs = loc_base + wi * 4;
-    if (wi < count) {
-      int sum = above[ofs + 0] + above[ofs + 1] + above[ofs + 2] + above[ofs + 3];
-      GroupMemoryBarrier();
-      above[loc_base + wi] = sum;
-      GroupMemoryBarrier();
-    }
-    ofs = loc_base + wi * 2;
-    count >>= 1;
-    while (wi < count) {
-      int sum = above[ofs + 0] + above[ofs + 1];
-      GroupMemoryBarrier();
-      above[loc_base + wi] = sum;
-      GroupMemoryBarrier();
-      count >>= 1;
-    }
+  if (mode == MODE_CFL && wi == 0) {
+    // The sum of the block's luma sums, into above[loc_base]. The first thread of the block adds them up
+    // between two group syncs: the sums are complete when it reads them, and the total is complete when
+    // the other threads of the block read it. (This was a pairwise reduction with one step per plain
+    // group memory barrier, which orders nothing: it gave the total only where the threads of a block ran
+    // in lockstep.)
+    int sum = 0;
+    for (int i = 0; i < wi_count; ++i) sum += above[loc_base + i];
+    above[loc_base] = sum;
   }
 
   GroupMemoryBarrierWithGroupSync();

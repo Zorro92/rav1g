@@ -2,14 +2,17 @@
  * Bit-exactness check of cdef_filter_v2.hlsl against cdef_filter.hlsl.
  *
  * Both shaders are compiled as C++ (see run.sh and hlsl_shim.h) and run over
- * the same random frames, one dispatch each, with the group threads emulated
- * as fibers that switch at GroupMemoryBarrierWithGroupSync(). The whole frame
- * pool, padding included, must be byte-identical afterwards.
+ * the same random frames, one dispatch each. The whole frame pool, padding
+ * included, must be byte-identical afterwards.
+ *
+ * The threads of a group run under an adversarial schedule and the group
+ * memory is watched for races (testing/common/group_sched.h): a race, a group
+ * sync that not all threads reach, or a plain GroupMemoryBarrier() fails the
+ * check, as a frame that differs does.
  *
  * Runs on a Linux host, no GPU:  sh testing/cdef_check/run.sh
  */
-#include <ucontext.h>
-
+#define GROUP_SCHED_IMPLEMENTATION
 #include <random>
 #include <vector>
 
@@ -25,51 +28,21 @@ namespace v2 {
 }
 
 // ---------------------------------------------------------------------------
-// Group threads as fibers.
+// Thread groups: testing/common/group_sched.h. Between two group syncs every thread runs alone, in an
+// order drawn anew at every sync, and the group memory records every read of what another thread wrote
+// since the last group sync: a shader passes only if it does not depend on how the threads of a group
+// are interleaved.
 // ---------------------------------------------------------------------------
-enum { kMaxThreads = 128, kStackSize = 256 * 1024 };
+static uint64_t g_order_state = 0x2545f4914f6cdd1dull;
 
-static ucontext_t g_scheduler;
-static ucontext_t g_fiber[kMaxThreads];
-static bool g_done[kMaxThreads];
-static int g_current = 0;
-static void (*g_body)(int thread) = nullptr;
-static std::vector<char> g_stacks(static_cast<size_t>(kMaxThreads) * kStackSize);
-static long g_uneven_barriers = 0;
-
-void GroupMemoryBarrierWithGroupSync() { swapcontext(&g_fiber[g_current], &g_scheduler); }
-
-static void fiber_entry() {
-  g_body(g_current);
-  g_done[g_current] = true;
-  swapcontext(&g_fiber[g_current], &g_scheduler);
+static void thread_body(int thread, void *context) {
+  void (*body)(int) = reinterpret_cast<void (*)(int)>(context);
+  body(thread);
 }
 
-// Runs body(thread) for every thread of one group, one barrier phase at a time.
+// Runs body(thread) for every thread of one group.
 static void run_group(int threads, void (*body)(int thread)) {
-  g_body = body;
-  for (int t = 0; t < threads; t++) {
-    getcontext(&g_fiber[t]);
-    g_fiber[t].uc_stack.ss_sp = &g_stacks[static_cast<size_t>(t) * kStackSize];
-    g_fiber[t].uc_stack.ss_size = kStackSize;
-    g_fiber[t].uc_link = nullptr;
-    makecontext(&g_fiber[t], fiber_entry, 0);
-    g_done[t] = false;
-  }
-  for (;;) {
-    int finished = 0;
-    for (int t = 0; t < threads; t++) {
-      g_current = t;
-      swapcontext(&g_scheduler, &g_fiber[t]);
-      finished += g_done[t];
-    }
-    if (finished == threads) break;
-    // A sync that only some threads reach is not valid in a real group.
-    if (finished != 0) {
-      g_uneven_barriers++;
-      break;
-    }
-  }
+  gs_run_group(threads, thread_body, reinterpret_cast<void *>(body), &g_order_state);
 }
 
 // ---------------------------------------------------------------------------
@@ -252,8 +225,8 @@ static uint3 g_group;
 template <typename T>
 static void scramble(T &shared) {
   // Group shared memory starts undefined.
-  uint32_t *p = reinterpret_cast<uint32_t *>(&shared);
-  for (size_t i = 0; i < sizeof(T) / 4; i++) p[i] = g_rng();
+  uint32_t *p = reinterpret_cast<uint32_t *>(shared.bytes());
+  for (size_t i = 0; i < shared.byte_size() / 4; i++) p[i] = g_rng();
 }
 
 static void v1_thread(int t) {
@@ -268,6 +241,7 @@ static void v2_thread(int t) {
 }
 
 static void run_v1(Frame &f) {
+  gs_state.shader = "cdef_filter.hlsl";
   v1::cdef_index.ptr = reinterpret_cast<const uint8_t *>(f.indexes.data());
   v1::cdef_index.size = f.indexes.size() * 4;
   v1::skips.ptr = reinterpret_cast<const uint8_t *>(f.skips.data());
@@ -289,6 +263,7 @@ static void run_v1(Frame &f) {
 }
 
 static void run_v2(Frame &f) {
+  gs_state.shader = "cdef_filter_v2.hlsl";
   v2::cdef_index.ptr = reinterpret_cast<const uint8_t *>(f.indexes.data());
   v2::cdef_index.size = f.indexes.size() * 4;
   v2::skips.ptr = reinterpret_cast<const uint8_t *>(f.skips.data());
@@ -361,9 +336,13 @@ int main() {
 
   printf("cdef_check: %ld frames, %ld bytes compared, %ld bytes written differently from the pool's initial content\n",
          cases, bytes, changed);
-  printf("cdef_check: out-of-bounds buffer accesses %ld, uneven barriers %ld, mismatching frames %ld\n",
-         g_out_of_bounds, g_uneven_barriers, failed);
-  if (failed || g_out_of_bounds || g_uneven_barriers || !changed) {
+  printf("cdef_check: out-of-bounds buffer accesses %ld, mismatching frames %ld\n", g_out_of_bounds, failed);
+  printf("cdef_check: %ld group syncs; races in group memory: %ld, group syncs not reached by all threads: %ld, "
+         "plain group memory barriers: %ld\n",
+         gs_state.group_syncs, gs_state.races, gs_state.sync_errors, gs_state.plain_barriers);
+  gs_print_races("  ");
+  if (failed || g_out_of_bounds || !changed || gs_state.races || gs_state.sync_errors || gs_state.plain_barriers ||
+      gs_state.out_of_bounds) {
     printf("cdef_check: FAILED\n");
     return 1;
   }

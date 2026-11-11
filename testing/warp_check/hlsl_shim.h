@@ -137,13 +137,13 @@ struct RWByteAddressBuffer {
 };
 
 /*
- * GroupMemoryBarrier() has no ordering effect on a GPU; the compound warp
- * shader uses it where it relies on the threads of a wave running in
- * lockstep. Here it lets every other runnable thread of the group reach its
- * next barrier (see warp_check.cpp).
+ * The thread group and its group memory: testing/common/group_sched.h. A group sync is where the threads
+ * of a group meet; GroupMemoryBarrier() makes no thread wait, here as on a GPU, and is counted. The group
+ * memory (GsArray, see run.sh) records every read of what another thread wrote since the last group sync.
  */
-void GroupMemoryBarrier();
+#include "../common/group_sched.h"
 
-#define groupshared static
+static inline void GroupMemoryBarrier() { gs_state.plain_barriers++; }
+static inline void GroupMemoryBarrierWithGroupSync() { gs_group_sync(); }
 
 #endif /* WARP_CHECK_HLSL_SHIM_H_ */

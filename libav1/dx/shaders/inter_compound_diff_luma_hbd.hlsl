@@ -44,9 +44,13 @@ int blend(int src0, int src1, int m) {
 
 groupshared int2 mem[64];
 
-[numthreads(64, 1, 1)] void main(uint3 thread
-                                 : SV_DispatchThreadID) {
-  if (thread.x >= cb_wi_count) return;
+// The prediction of the 4x2 of one thread, stored to the frame, and the two sums of its mask. False for a
+// thread behind the last block of the dispatch, which has nothing to do.
+bool predict(uint3 thread, out int x, out int y, out int2 m0) {
+  x = 0;
+  y = 0;
+  m0 = int2(0, 0);
+  if (thread.x >= cb_wi_count) return false;
 
   const int w_log = cb_width_log2;
   const int h_log = cb_height_log2;
@@ -62,8 +66,8 @@ groupshared int2 mem[64];
   //        1    skip
   //        3    ref1
   //
-  int x = SubblockW * ((block.x & 0xffff) + (subblock & ((1 << w_log) - 1)));
-  int y = SubblockH * (((block.x >> 16) << 1) + (subblock >> w_log));
+  x = SubblockW * ((block.x & 0xffff) + (subblock & ((1 << w_log) - 1)));
+  y = SubblockH * (((block.x >> 16) << 1) + (subblock >> w_log));
 
   const int plane = block.y & 3;
   const int2 dims = cb_dims[plane > 0].xy;
@@ -164,7 +168,6 @@ groupshared int2 mem[64];
   const int output_stride = cb_planes[plane].x;
   const int output_offset = cb_planes[plane].y + x + y * output_stride;
 
-  int2 m0;
   m0 = int2(0, 0);
   int inv = (block.y >> 17) & 1;
   const int res_stride = cb_planes[plane].z;
@@ -209,10 +212,26 @@ groupshared int2 mem[64];
 
   m0.x = (m0.x + 2) >> 2;
   m0.y = (m0.y + 2) >> 2;
+  return true;
+}
 
-  mem[thread.x & 63] = m0;
+[numthreads(64, 1, 1)] void main(uint3 thread
+                                 : SV_DispatchThreadID) {
+  int x;
+  int y;
+  int2 m0;
+  const bool active = predict(thread, x, y, m0);
 
-  GroupMemoryBarrier();
+  // The mask of the block goes to its chroma planes at half the size: every thread puts the sums of its
+  // 4x2 into the group memory, and every other thread stores its own and its neighbour's as one word. The
+  // threads of a group run in no particular order, so it takes a group sync to have the sums there before
+  // they are read, and a group sync has to be reached by all threads of the group, those behind the last
+  // block too. (Upstream had a plain group memory barrier, which makes no thread wait: that held only where
+  // the 64 threads of a group ran in lockstep, as one wave.)
+  if (active) mem[thread.x & 63] = m0;
+
+  GroupMemoryBarrierWithGroupSync();
+  if (!active) return;
 
   if ((thread.x & 1) == 0) {
     int2 m1 = mem[(thread.x & 63) + 1];

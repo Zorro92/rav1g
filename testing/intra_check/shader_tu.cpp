@@ -75,19 +75,19 @@ static void garbage(void *p, size_t size, uint64_t *state) {
 
 static void scramble(uint64_t *state) {
 #if SHADER_KIND == 0
-  garbage(above, sizeof(above), state);
-  garbage(left, sizeof(left), state);
+  garbage(above.bytes(), above.byte_size(), state);
+  garbage(left.bytes(), left.byte_size(), state);
 #elif SHADER_KIND == 1
-  garbage(mem, sizeof(mem), state);
-  garbage(loc_above, sizeof(loc_above), state);
-  garbage(loc_left, sizeof(loc_left), state);
-  garbage(loc_corner, sizeof(loc_corner), state);
+  garbage(mem.bytes(), mem.byte_size(), state);
+  garbage(loc_above.bytes(), loc_above.byte_size(), state);
+  garbage(loc_left.bytes(), loc_left.byte_size(), state);
+  garbage(loc_corner.bytes(), loc_corner.byte_size(), state);
 #else
-  garbage(gs_sum_above, sizeof(gs_sum_above), state);
-  garbage(gs_sum_left, sizeof(gs_sum_left), state);
-  garbage(gs_sum_luma, sizeof(gs_sum_luma), state);
-  garbage(gs_fi_bottom, sizeof(gs_fi_bottom), state);
-  garbage(gs_fi_right, sizeof(gs_fi_right), state);
+  garbage(gs_sum_above.bytes(), gs_sum_above.byte_size(), state);
+  garbage(gs_sum_left.bytes(), gs_sum_left.byte_size(), state);
+  garbage(gs_sum_luma.bytes(), gs_sum_luma.byte_size(), state);
+  garbage(gs_fi_bottom.bytes(), gs_fi_bottom.byte_size(), state);
+  garbage(gs_fi_right.bytes(), gs_fi_right.byte_size(), state);
 #endif
 }
 
@@ -95,7 +95,8 @@ static void run(uint32_t group, uint32_t thread) {
 #if SHADER_KIND == 0
   shader_main(uint3(group * 256 + thread, 0, 0)); /* numthreads(256, 1, 1), SV_DispatchThreadID */
 #elif SHADER_KIND == 1
-  shader_main(uint3(group * 8 + (thread & 7), thread >> 3, 0)); /* numthreads(8, 8, 1), SV_DispatchThreadID */
+  /* numthreads(8, 8, 1): SV_DispatchThreadID, SV_GroupID */
+  shader_main(uint3(group * 8 + (thread & 7), thread >> 3, 0), uint3(group, 0, 0));
 #else
   shader_main(uint3(group, 0, 0), uint3(thread, 0, 0)); /* SV_GroupID, SV_GroupThreadID */
 #endif

@@ -39,13 +39,16 @@ groupshared int intermediate_buffer[64 * LocalStride];
 
 [numthreads(64, 1, 1)] void main(uint3 thread
                                  : SV_DispatchThreadID) {
-  if (thread.x >= cb_wi_count) return;
+  // A thread behind the last block of the dispatch does nothing, but it takes part in the group syncs: a
+  // group sync has to be reached by all threads of the group.
+  const bool active = thread.x < cb_wi_count;
 
   const int w_log = cb_width_log2;
   const int h_log = cb_height_log2;
   const int subblock = (thread.x >> 2) & ((1 << (w_log + h_log)) - 1);
   const int block_index = cb_pass_offset + (thread.x >> (w_log + h_log + 2));
-  uint4 block = pred_blocks.Load4(block_index * 16);
+  uint4 block = uint4(0, 0, 0, 0);
+  [branch] if (active) block = pred_blocks.Load4(block_index * 16);
   // block.x - pos xy
   // block.y - flags:
   //        2    plane
@@ -86,7 +89,7 @@ groupshared int intermediate_buffer[64 * LocalStride];
   int4 kernel_h1 = cb_kernels[filter_h][1];
   int local_base = (thread.x & 63) * LocalStride;
   int i;
-  for (i = 0; i < lines; ++i) {
+  if (active) for (i = 0; i < lines; ++i) {
     int ref_addr = ref_offset + ref_stride * clamp(y0 + i, 0, ref_h) + x0;
     const uint shift = (ref_addr & 2) * 8;
     ref_addr &= ~3;
@@ -108,7 +111,13 @@ groupshared int intermediate_buffer[64 * LocalStride];
     intermediate_buffer[local_base + i] = (sum + FilterLineAdd10bit) >> FilterLineShift;
   }
 
-  GroupMemoryBarrier();
+  // The lines filtered horizontally are handed from the threads that made them to the threads that filter
+  // them vertically, through the group memory, once for each of the two references. The threads of a group
+  // run in no particular order, so it takes a group sync to have all lines there before any of them is
+  // read, and another to have all of them read before the memory is used again. (Upstream had plain group
+  // memory barriers, which make no thread wait: that held only where the 64 threads of a group ran in
+  // lockstep, as one wave.)
+  GroupMemoryBarrierWithGroupSync();
 
   mvy += wi * scale.w;
   int filter_v = (((block.y >> 9) & 15) << 4) + ((mvy & SCALE_SUBPEL_MASK) >> SCALE_EXTRA_BITS);
@@ -116,7 +125,7 @@ groupshared int intermediate_buffer[64 * LocalStride];
   int4 kernel_v1 = cb_kernels[filter_v][1];
   local_base = (mvy >> SCALE_SUBPEL_BITS) + (thread.x & 60) * LocalStride;
   int output[4];  /// int4???
-  for (i = 0; i < 4; ++i) {
+  if (active) for (i = 0; i < 4; ++i) {
     int sum = 0;
     int loc_addr = local_base + i * LocalStride;
     sum += kernel_v0.x * intermediate_buffer[loc_addr + 0];
@@ -130,7 +139,7 @@ groupshared int intermediate_buffer[64 * LocalStride];
     output[i] = sum;
   }
 
-  GroupMemoryBarrier();
+  GroupMemoryBarrierWithGroupSync();
 
   ref_frm = (block.y >> 14) & 7;
   refplane = ref_frm * 3 + plane;
@@ -154,7 +163,7 @@ groupshared int intermediate_buffer[64 * LocalStride];
   kernel_h1 = cb_kernels[filter_h][1];
   local_base = (thread.x & 63) * LocalStride;
 
-  for (i = 0; i < lines; ++i) {
+  if (active) for (i = 0; i < lines; ++i) {
     int ref_addr = ref_offset + ref_stride * clamp(y0 + i, 0, ref_h) + x0;
     const uint shift = (ref_addr & 2) * 8;
     ref_addr &= ~3;
@@ -176,7 +185,8 @@ groupshared int intermediate_buffer[64 * LocalStride];
     intermediate_buffer[local_base + i] = (sum + FilterLineAdd10bit) >> FilterLineShift;
   }
 
-  GroupMemoryBarrier();
+  GroupMemoryBarrierWithGroupSync();
+  if (!active) return;
 
   mvy += wi * scale.w;
   filter_v = (((block.y >> 9) & 15) << 4) + ((mvy & SCALE_SUBPEL_MASK) >> SCALE_EXTRA_BITS);

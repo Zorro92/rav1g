@@ -14,10 +14,14 @@
  * Every case runs twice: with shader double precision working, and with it
  * yielding 0 (hlsl_shim.h, g_double_model), which is how the console behaves.
  *
+ * The threads of a group run under an adversarial schedule and the group
+ * memory is watched for races (testing/common/group_sched.h): a race, a group
+ * sync that not all threads reach, or a plain GroupMemoryBarrier() fails the
+ * check, as a frame that differs does.
+ *
  * Runs on a Linux host, no GPU:  sh testing/warp_check/run.sh
  */
-#include <ucontext.h>
-
+#define GROUP_SCHED_IMPLEMENTATION
 #include <stdio.h>
 
 #include <algorithm>
@@ -35,51 +39,35 @@ int g_double_model = 1;
 long g_double_ops = 0;
 
 // ---------------------------------------------------------------------------
-// Group threads as fibers. GroupMemoryBarrier() lets the other threads of the
-// group catch up, which is what a wave running in lockstep does.
+// Thread groups: testing/common/group_sched.h. Between two group syncs every thread runs alone, in an
+// order drawn anew at every sync, and the group memory records every read of what another thread wrote
+// since the last group sync: a shader passes only if it does not depend on how the threads of a group
+// are interleaved (upstream's compound shader did: it counted on the 64 threads running in lockstep).
 // ---------------------------------------------------------------------------
-enum { kThreads = 64, kStackSize = 256 * 1024 };
+enum { kThreads = 64 };
 
-static ucontext_t g_scheduler;
-static ucontext_t g_fiber[kThreads];
-static bool g_done[kThreads];
-static int g_current = 0;
-static const ShaderApi *g_api = nullptr;
-static uint32_t g_first_thread = 0;
-static std::vector<char> g_stacks(static_cast<size_t>(kThreads) * kStackSize);
 static uint64_t g_scramble_state = 0x9e3779b97f4a7c15ull;
+static uint64_t g_order_state = 0x2545f4914f6cdd1dull;
 
-void GroupMemoryBarrier() { swapcontext(&g_fiber[g_current], &g_scheduler); }
+struct GroupContext {
+  const ShaderApi *api;
+  uint32_t first_thread;
+};
 
-static void fiber_entry() {
-  g_api->run(g_first_thread + static_cast<uint32_t>(g_current));
-  g_done[g_current] = true;
-  swapcontext(&g_fiber[g_current], &g_scheduler);
+static void thread_body(int thread, void *context) {
+  const GroupContext *c = static_cast<const GroupContext *>(context);
+  c->api->run(c->first_thread + static_cast<uint32_t>(thread));
 }
 
 static void run_group(const ShaderApi *api, uint32_t group) {
-  g_api = api;
-  g_first_thread = group * kThreads;
+  GroupContext context = { api, group * kThreads };
   api->scramble(&g_scramble_state);
-  for (int t = 0; t < kThreads; t++) {
-    getcontext(&g_fiber[t]);
-    g_fiber[t].uc_stack.ss_sp = &g_stacks[static_cast<size_t>(t) * kStackSize];
-    g_fiber[t].uc_stack.ss_size = kStackSize;
-    g_fiber[t].uc_link = nullptr;
-    makecontext(&g_fiber[t], fiber_entry, 0);
-    g_done[t] = false;
-  }
-  for (;;) {
-    int finished = 0;
-    for (int t = 0; t < kThreads; t++) {
-      if (!g_done[t]) {
-        g_current = t;
-        swapcontext(&g_scheduler, &g_fiber[t]);
-      }
-      finished += g_done[t];
-    }
-    if (finished == kThreads) break;
-  }
+  gs_state.shader = api == &inter_warp_api            ? "inter_warp.hlsl"
+                    : api == &inter_warp_hbd_api      ? "inter_warp_hbd.hlsl"
+                    : api == &inter_warp_comp_api     ? "inter_scale_warp_compound.hlsl"
+                    : api == &inter_warp_comp_hbd_api ? "inter_scale_warp_compound_hbd.hlsl"
+                                                      : "inter_ext_borders.hlsl";
+  gs_run_group(kThreads, thread_body, &context, &g_order_state);
 }
 
 // Dispatch((wi_count + 63) >> 6, 1, 1)
@@ -948,6 +936,11 @@ int main(int argc, char **argv) {
   ok &= stats.double_ops == 0;
   if (g_out_of_bounds) printf("warp_check: %ld accesses outside the buffers\n", g_out_of_bounds);
   ok &= g_out_of_bounds == 0;
+  printf("warp_check: %ld group syncs; races in group memory: %ld, group syncs not reached by all threads: %ld, "
+         "plain group memory barriers: %ld\n",
+         gs_state.group_syncs, gs_state.races, gs_state.sync_errors, gs_state.plain_barriers);
+  gs_print_races("  ");
+  ok &= gs_state.races == 0 && gs_state.sync_errors == 0 && gs_state.plain_barriers == 0 && gs_state.out_of_bounds == 0;
   printf(ok ? "warp_check: the warp shaders and libaom write identical frames\n" : "warp_check: FAILED\n");
   return ok ? 0 : 1;
 }

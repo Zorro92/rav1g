@@ -11,16 +11,23 @@
  * part of gen_pred_blocks.hlsl), the iteration grid of av1_mi_push_block,
  * the dispatch loops of av1_prediction_run_all, and the GPU itself.
  *
- * A thread group is emulated with one fiber per thread:
+ * A thread group is emulated with one fiber per thread (testing/common/group_sched.h):
  *   - a group sync blocks a thread until all threads of the group are there;
- *   - a plain GroupMemoryBarrier() lets all other runnable threads reach their
- *     next barrier first. The original shaders use it where they rely on the
- *     threads of a wave running in lockstep, and that is what this gives;
+ *   - between two group syncs every thread runs alone, from the one to the
+ *     other, and the threads take their turns in an order drawn anew at every
+ *     sync. A plain GroupMemoryBarrier() makes no thread wait, here as on a
+ *     GPU. So a shader passes only if it does not depend on how the threads of
+ *     a group are interleaved: not on lockstep execution of a wave (which
+ *     upstream's intra_main and intra_filter relied on), nor on any order;
+ *   - the group memory records its readers and writers: a thread that reads
+ *     what another thread wrote since the last group sync, or changes what
+ *     another read or wrote since then, is a race, and fails the check;
  *   - the group memory starts as garbage, different in every run.
  * Thread groups run one after the other, so the frame buffer is watched for
  * reads that would depend on the order of groups or threads on a GPU (see
  * AccessTracker in hlsl_shim.h).
  */
+#define GROUP_SCHED_IMPLEMENTATION
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -39,147 +46,32 @@ long g_out_of_bounds = 0;
 AccessTracker g_tracker;
 
 // ---------------------------------------------------------------------------
-// Fibers
+// Thread groups: testing/common/group_sched.h
 // ---------------------------------------------------------------------------
 
-enum { kMaxThreads = 384, kStackSize = 256 * 1024 };
-enum { StRun, StBlocked, StDone };
-enum { TagWave1 = 1, TagWave2 = 2, TagGroupSync = 3 };
-
-static void fiber_entry();
-
-#if defined(__x86_64__) && !defined(INTRA_CHECK_UCONTEXT)
-// Saves the callee-saved registers on the current stack and continues on
-// another one. swapcontext() does the same with two system calls per switch,
-// which is most of the run time of this check.
-extern "C" void intra_check_switch(void **save_sp, void *load_sp);
-__asm__(".text\n"
-        ".globl intra_check_switch\n"
-        ".type intra_check_switch,@function\n"
-        "intra_check_switch:\n"
-        "  pushq %rbp\n"
-        "  pushq %rbx\n"
-        "  pushq %r12\n"
-        "  pushq %r13\n"
-        "  pushq %r14\n"
-        "  pushq %r15\n"
-        "  movq %rsp, (%rdi)\n"
-        "  movq %rsi, %rsp\n"
-        "  popq %r15\n"
-        "  popq %r14\n"
-        "  popq %r13\n"
-        "  popq %r12\n"
-        "  popq %rbx\n"
-        "  popq %rbp\n"
-        "  ret\n"
-        ".size intra_check_switch,.-intra_check_switch\n");
-
-struct Fiber {
-  void *sp;
-  int state;
-  int tag;
+struct GroupContext {
+  const ShaderApi *api;
+  uint32_t group;
 };
-static Fiber g_fibers[kMaxThreads];
-static char *g_stacks;
-static void *g_scheduler_sp;
-static int g_current;
 
-static void fiber_prepare(int t) {
-  uintptr_t *top = (uintptr_t *)(((uintptr_t)(g_stacks + (size_t)(t + 1) * kStackSize)) & ~(uintptr_t)15);
-  *--top = 0;                        // keeps the stack of fiber_entry() aligned
-  *--top = (uintptr_t)&fiber_entry;  // where the first switch returns to
-  for (int i = 0; i < 6; ++i) *--top = 0;
-  g_fibers[t].sp = top;
-  g_fibers[t].state = StRun;
-  g_fibers[t].tag = 0;
-}
-static void fiber_resume(int t) {
-  g_current = t;
-  intra_check_switch(&g_scheduler_sp, g_fibers[t].sp);
-}
-static void fiber_suspend() { intra_check_switch(&g_fibers[g_current].sp, g_scheduler_sp); }
-#else
-#include <ucontext.h>
-struct Fiber {
-  ucontext_t context;
-  int state;
-  int tag;
-};
-static Fiber g_fibers[kMaxThreads];
-static char *g_stacks;
-static ucontext_t g_scheduler_context;
-static int g_current;
-
-static void fiber_prepare(int t) {
-  getcontext(&g_fibers[t].context);
-  g_fibers[t].context.uc_stack.ss_sp = g_stacks + (size_t)t * kStackSize;
-  g_fibers[t].context.uc_stack.ss_size = kStackSize;
-  g_fibers[t].context.uc_link = nullptr;
-  makecontext(&g_fibers[t].context, fiber_entry, 0);
-  g_fibers[t].state = StRun;
-  g_fibers[t].tag = 0;
-}
-static void fiber_resume(int t) {
-  g_current = t;
-  swapcontext(&g_scheduler_context, &g_fibers[t].context);
-}
-static void fiber_suspend() { swapcontext(&g_fibers[g_current].context, &g_scheduler_context); }
-#endif
-
-static const ShaderApi *g_api;
-static uint32_t g_group;
-static long g_sync_errors;
-
-__attribute__((noinline, used)) static void fiber_entry() {
-  g_api->run(g_group, (uint32_t)g_current);
-  g_fibers[g_current].state = StDone;
-  fiber_suspend();
-  abort();
+static void thread_body(int thread, void *context) {
+  const GroupContext *c = (const GroupContext *)context;
+  c->api->run(c->group, (uint32_t)thread);
 }
 
-static void fiber_wait(int state, int tag) {
-  g_fibers[g_current].state = state;
-  g_fibers[g_current].tag = tag;
-  fiber_suspend();
-}
-
-void GroupMemoryBarrier() { fiber_wait(StRun, 0); }
-void WaveJoin(int level) { fiber_wait(StBlocked, level); }
-void GroupMemoryBarrierWithGroupSync() { fiber_wait(StBlocked, TagGroupSync); }
-void AllMemoryBarrierWithGroupSync() { fiber_wait(StBlocked, TagGroupSync); }
-
-// Runs threads 0 .. threads - 1 of one thread group to the end.
+// Runs threads 0 .. threads - 1 of one thread group to the end. The order of the threads between two
+// group syncs is drawn from the same generator as the garbage.
 static void run_group(const ShaderApi *api, uint32_t group, int threads, uint64_t *garbage) {
   api->scramble(garbage);
-  g_api = api;
-  g_group = group;
   g_tracker.group++;
-  g_tracker.phase++;
-  for (int t = 0; t < threads; ++t) fiber_prepare(t);
-  for (;;) {
-    int ran = 0;
-    for (int t = 0; t < threads; ++t) {
-      if (g_fibers[t].state != StRun) continue;
-      g_tracker.thread = (uint32_t)t + 1;
-      fiber_resume(t);
-      ran = 1;
-    }
-    if (ran) continue;
-    // Nobody can run: release the threads waiting at the innermost point.
-    int tag = INT_MAX;
-    for (int t = 0; t < threads; ++t) {
-      if (g_fibers[t].state == StBlocked) tag = std::min(tag, g_fibers[t].tag);
-    }
-    if (tag == INT_MAX) break;
-    for (int t = 0; t < threads; ++t) {
-      if (g_fibers[t].state == StBlocked && g_fibers[t].tag == tag) {
-        g_fibers[t].state = StRun;
-      } else if (tag == TagGroupSync) {
-        g_sync_errors++;  // a group sync that not all threads of the group reach
-      }
-    }
-    if (tag == TagGroupSync) g_tracker.phase++;
-  }
+  gs_state.shader = api == &intra_main_api       ? "intra_main.hlsl"
+                    : api == &intra_main_hbd_api   ? "intra_main_hbd.hlsl"
+                    : api == &intra_filter_api     ? "intra_filter.hlsl"
+                    : api == &intra_filter_hbd_api ? "intra_filter_hbd.hlsl"
+                    : api == &intra_v2_hbd_api     ? "intra_v2.hlsl (10-bit)"
+                                                   : "intra_v2.hlsl";
+  GroupContext context = { api, group };
+  gs_run_group(threads, thread_body, &context, garbage);
 }
 
 // ---------------------------------------------------------------------------
@@ -814,8 +706,10 @@ static void order_records(const Geometry &g, Frame *f) {
 // The two paths
 // ---------------------------------------------------------------------------
 
+static long g_total_group_syncs = 0;
+
 struct RunResult {
-  long out_of_bounds, races_group, races_thread, sync_errors;
+  long out_of_bounds, races_group, races_thread, sync_errors, memory_races, plain_barriers;
 };
 
 static std::vector<uint32_t> g_tags[4];
@@ -829,7 +723,7 @@ static void begin_run(const Geometry &g, int track_phase) {
   g_tracker.w_thread = g_tags[3].data();
   g_tracker.track_phase = track_phase;
   g_out_of_bounds = 0;
-  g_sync_errors = 0;
+  gs_reset_report();
 }
 
 static RunResult end_run() {
@@ -837,7 +731,10 @@ static RunResult end_run() {
   r.out_of_bounds = g_out_of_bounds;
   r.races_group = g_tracker.races_group;
   r.races_thread = g_tracker.races_thread;
-  r.sync_errors = g_sync_errors;
+  g_total_group_syncs += gs_state.group_syncs;
+  r.sync_errors = gs_state.sync_errors;
+  r.memory_races = gs_state.races;
+  r.plain_barriers = gs_state.plain_barriers;
   g_tracker.w_unit = nullptr;
   return r;
 }
@@ -877,7 +774,7 @@ static RunResult run_original(const Geometry &g, const Frame &f, std::vector<uin
       main_api->set_srt(srt);
       const uint32_t groups = (wi_count + 255) >> 8;
       for (uint32_t group = 0; group < groups; ++group)
-        run_group(main_api, group, (int)std::min<uint32_t>(256, wi_count - group * 256), &garbage);
+        run_group(main_api, group, 256, &garbage);  // all threads of the group, as on a GPU
       if (cov) {
         cov->v1_dispatches++;
         cov->v1_groups += groups;
@@ -1019,8 +916,6 @@ int main(int argc, char **argv) {
       return 2;
     }
   }
-  g_stacks = (char *)malloc((size_t)kMaxThreads * kStackSize);
-  if (!g_stacks) return 2;
 
   int failures = 0;
   long garbage_dependent = 0;
@@ -1072,6 +967,12 @@ int main(int argc, char **argv) {
           at = first_difference(original, v2);
         } else if (r1.sync_errors || r1b.sync_errors || r2.sync_errors) {
           problem = "a group sync was not reached by all threads of a group";
+        } else if (r1.memory_races || r1b.memory_races) {
+          problem = "the original path has a race in its group memory";
+        } else if (r2.memory_races) {
+          problem = "intra_v2 has a race in its group memory";
+        } else if (r1.plain_barriers || r1b.plain_barriers || r2.plain_barriers) {
+          problem = "a shader calls GroupMemoryBarrier(), which makes no thread wait";
         } else if (r2.out_of_bounds) {
           problem = "intra_v2 reads or writes outside its buffers";
         } else if (r2.races_group) {
@@ -1091,6 +992,9 @@ int main(int argc, char **argv) {
           printf("  out of bounds %ld/%ld, group races %ld/%ld, thread races %ld, sync errors %ld/%ld\n",
                  r1.out_of_bounds, r2.out_of_bounds, r1.races_group, r2.races_group, r2.races_thread, r1.sync_errors,
                  r2.sync_errors);
+          printf("  races in group memory %ld/%ld/%ld (original, original again, intra_v2)\n", r1.memory_races,
+                 r1b.memory_races, r2.memory_races);
+          gs_print_races("    ");
         }
       }
     }
@@ -1120,6 +1024,8 @@ int main(int argc, char **argv) {
   }
   if (original_races) printf("note: %ld order-dependent reads between thread groups in the original path\n", original_races);
   if (garbage_dependent) printf("note: %ld frames where the original path depends on uninitialised memory\n", garbage_dependent);
+  printf("group memory: %ld group syncs%s\n", g_total_group_syncs,
+         failures ? "" : ", no race, every group sync reached by all threads, no plain group memory barrier");
   if (failures) {
     printf("intra_check: FAILED\n");
     return 1;

@@ -88,7 +88,9 @@ groupshared int A[WG_HEIGHT + 2][WG_WIDTH + 2];
 groupshared int B[WG_HEIGHT + 2][WG_WIDTH + 2];
 
 #define get_loaded_source_sample(x, y) input[y + 3][x + 4]
-int box_filter0(int w, int h, int r, int eps, int lx, int ly, int bit_depth) {
+// Self guided filter, pass 0, first half: the box sums A and B of the group (with a border of one), spread
+// over its threads.
+void box_sums0(int w, int h, int r, int eps, int lx, int ly, int bit_depth) {
   uint n = (2 * r + 1) * (2 * r + 1);
   int id = ly * WG_WIDTH + lx;
   for (int idx = id; idx < (h + 2)*(w + 2); idx += WG_HEIGHT * WG_WIDTH) {
@@ -120,6 +122,10 @@ int box_filter0(int w, int h, int r, int eps, int lx, int ly, int bit_depth) {
     A[1 + i][1 + j] = a2;
     B[1 + i][1 + j] = Round2(b2, SGRPROJ_RECIP_BITS);
   }
+}
+
+// Second half: the filtered sample of a thread, from the box sums around it.
+int box_filter0(int lx, int ly) {
   //for (int i = ly; i < h; i += WG_HEIGHT) {
   { int i = ly;
     int shift = 5;  // -((1 - stage) * (i & 1));
@@ -148,7 +154,9 @@ int box_filter0(int w, int h, int r, int eps, int lx, int ly, int bit_depth) {
   }
 }
 
-int box_filter1(int w, int h, int r, int eps, int lx, int ly, int bit_depth) {
+// Self guided filter, pass 1, first half: the box sums A and B of the group (with a border of one), spread
+// over its threads.
+void box_sums1(int w, int h, int r, int eps, int lx, int ly, int bit_depth) {
   uint n = (2 * r + 1) * (2 * r + 1);
   int id = ly * WG_WIDTH + lx;
   for (int idx = id; idx < (h + 2)*(w + 2); idx += WG_HEIGHT * WG_WIDTH) {
@@ -180,6 +188,10 @@ int box_filter1(int w, int h, int r, int eps, int lx, int ly, int bit_depth) {
     A[1 + i][1 + j] = a2;
     B[1 + i][1 + j] = Round2(b2, SGRPROJ_RECIP_BITS);
   }
+}
+
+// Second half: the filtered sample of a thread, from the box sums around it.
+int box_filter1(int lx, int ly) {
   //for (i = ly; i < h; i += WG_HEIGHT) {
   { int i = ly;
     int shift = 5;  // -((1 - stage) * (i & 1));
@@ -201,10 +213,20 @@ int box_filter1(int w, int h, int r, int eps, int lx, int ly, int bit_depth) {
   }
 }
 
+// One thread group restores 16x4 samples, one thread each. The work goes in passes, and a pass reads from
+// the group memory what all threads of the group wrote in the pass before: the samples around the group,
+// then the rows of the Wiener filter or the box sums of the self guided filter, then the restored samples,
+// which one thread in four stores as words. The threads of a group run in no particular order, so there is
+// a group sync between two passes. (Upstream had one plain group memory barrier, after the first pass,
+// which makes no thread wait, and nothing between the others: that held only where the 64 threads of a
+// group ran in lockstep, as one wave.) A group sync has to be reached by all threads of the group: which
+// filter a group runs, and whether it leaves early, depends on the group only (the restoration unit it is
+// in), not on the thread.
 [numthreads(WG_WIDTH, WG_HEIGHT, 1)] void main(uint3 thread
-                                               : SV_DispatchThreadID) {
-  const int gx = thread.x & (~(WG_WIDTH - 1));
-  const int gy = thread.y & (~(WG_HEIGHT - 1));
+                                               : SV_DispatchThreadID, uint3 group
+                                               : SV_GroupID) {
+  const int gx = group.x * WG_WIDTH;
+  const int gy = group.y * WG_HEIGHT;
   const int lx = thread.x & (WG_WIDTH - 1);
   const int ly = thread.y & (WG_HEIGHT - 1);
 
@@ -273,7 +295,7 @@ int box_filter1(int w, int h, int r, int eps, int lx, int ly, int bit_depth) {
       }
     }
 
-  GroupMemoryBarrier();
+  GroupMemoryBarrierWithGroupSync();
 
   if (rType.x == RESTORE_WIENER) {
     int limit = (1 << (bit_depth + 1 + FILTER_BITS - InterRound0)) - 1;
@@ -297,6 +319,8 @@ int box_filter1(int w, int h, int r, int eps, int lx, int ly, int bit_depth) {
       intermediate[r][lx] = clamp(v, 0, limit);
     }
 
+    GroupMemoryBarrierWithGroupSync();
+
     int4 vfilter0 = LrWiener.Load4(Lr_offset + 32);
     int4 vfilter1 = LrWiener.Load4(Lr_offset + 48);
 
@@ -311,6 +335,9 @@ int box_filter1(int w, int h, int r, int eps, int lx, int ly, int bit_depth) {
     s += vfilter1.z * intermediate[ly + 6][lx];
     int v = Round2(s, InterRound1);
     output[ly][lx] = clamp(v, 0, (1 << bit_depth) - 1);  // input[ly][lx + 4];//
+
+    GroupMemoryBarrierWithGroupSync();
+
     if (lx < WG_WIDTH / 4) {
       if (pl[plane_id].hbd) {
         dst.Store2(dst_offset + (gy + ly) * plane.stride + (gx + lx * 4) * 2,
@@ -334,19 +361,29 @@ int box_filter1(int w, int h, int r, int eps, int lx, int ly, int bit_depth) {
 
     int u = input[ly + 3][lx + 4] << SGRPROJ_RST_BITS;
     int v = w1 * u;
+    // The two passes use the same memory for their box sums: a group sync before the sums are read, and
+    // one before the next pass writes its own.
     if (r0) {
-        v += w0 * box_filter0(WG_WIDTH, WG_HEIGHT, r0, eps0, lx, ly, bit_depth);
+        box_sums0(WG_WIDTH, WG_HEIGHT, r0, eps0, lx, ly, bit_depth);
+        GroupMemoryBarrierWithGroupSync();
+        v += w0 * box_filter0(lx, ly);
+        GroupMemoryBarrierWithGroupSync();
     } else {
         v += w0 * u;
     }
     if (r1) {
-        v += w2 * box_filter1(WG_WIDTH, WG_HEIGHT, r1, eps1, lx, ly, bit_depth);
+        box_sums1(WG_WIDTH, WG_HEIGHT, r1, eps1, lx, ly, bit_depth);
+        GroupMemoryBarrierWithGroupSync();
+        v += w2 * box_filter1(lx, ly);
     } else {
         v += w2 * u;
     }
     
     int s = Round2(v, (SGRPROJ_RST_BITS + SGRPROJ_PRJ_BITS));
     output[ly][lx] = clamp(s, 0, (1 << bit_depth) - 1);
+
+    GroupMemoryBarrierWithGroupSync();
+
     if (lx < WG_WIDTH / 4) {
       if (pl[plane_id].hbd) {
         dst.Store2(dst_offset + (gy + ly) * plane.stride + (gx + lx * 4) * 2,

@@ -78,29 +78,42 @@ groupshared int luma_grain_temp[73 * 82];
         gauss_sec_shift;
   }
   GroupMemoryBarrierWithGroupSync();
-  for (i = data.top_pad + (thread.x); i < luma_block_size_y - data.bottom_pad; i += WGH) {
-    for (int j = data.left_pad - (thread.x) * (data.left_pad + 1); j < luma_block_size_x - data.right_pad; j++) {
-      if (j < data.left_pad) {
-        continue;
-      }
-      int wsum = 0;
-      int offset = (i - 3) * luma_grain_stride + j - 3;
-      if (data.params.ar_coeff_lag == 3) {
-        for (uint pos = 0; pos < 24; pos++) {
-          wsum += data.params.ar_coeffs[0][pos].x * luma_grain_temp[offset + (pos / 7) * luma_grain_stride + pos % 7];
+  // The filter of the grain template runs over its rows as a wavefront: a sample takes the samples to its
+  // left and those of the rows above it, up to three columns to its right. Every thread has a row, and
+  // starts on it four steps after the thread of the row above: in step n the thread t is at column
+  // n - 4 * t (left_pad + 1 is 4), so what it reads was written in an earlier step. The threads of a group
+  // run in no particular order, so the steps are kept apart by a group sync, which all threads of the group
+  // have to reach: every thread makes all steps of the group, also those in which its row has not begun or
+  // is done. (Upstream had every thread loop over its own row, the first columns skipped to make the
+  // delay, and no barrier: that held only where the 64 threads of a group ran in lockstep, as one wave.)
+  for (int first = data.top_pad; first < luma_block_size_y - data.bottom_pad; first += WGH) {
+    i = first + (thread.x);
+    // The rows of this round, and its steps: the last row begins 4 * (rows - 1) steps after the first.
+    const int rows = min(WGH, luma_block_size_y - data.bottom_pad - first);
+    const int steps = (rows - 1) * (data.left_pad + 1) + luma_block_size_x - data.right_pad - data.left_pad;
+    [loop] for (int step = 0; step < steps; ++step) {
+      const int j = data.left_pad - (thread.x) * (data.left_pad + 1) + step;
+      if (i < luma_block_size_y - data.bottom_pad && j >= data.left_pad && j < luma_block_size_x - data.right_pad) {
+        int wsum = 0;
+        int offset = (i - 3) * luma_grain_stride + j - 3;
+        if (data.params.ar_coeff_lag == 3) {
+          for (uint pos = 0; pos < 24; pos++) {
+            wsum += data.params.ar_coeffs[0][pos].x * luma_grain_temp[offset + (pos / 7) * luma_grain_stride + pos % 7];
+          }
+        } else {
+          for (int pos = 0; pos < num_pos_luma; pos++) {
+            wsum += data.params.ar_coeffs[0][pos].x *
+                    luma_grain_temp[(i + data.pred_pos[pos][0].x) * luma_grain_stride + j + data.pred_pos[pos][1].x];
+          }
         }
-      } else {
-        for (int pos = 0; pos < num_pos_luma; pos++) {
-          wsum += data.params.ar_coeffs[0][pos].x *
-                  luma_grain_temp[(i + data.pred_pos[pos][0].x) * luma_grain_stride + j + data.pred_pos[pos][1].x];
-        }
+
+        int val =
+            clamp(luma_grain_temp[i * luma_grain_stride + j] + ((wsum + rounding_offset) >> data.params.ar_coeff_shift),
+                  grain_min, grain_max);
+
+        luma_grain_temp[i * luma_grain_stride + j] = val;
       }
-
-      int val =
-          clamp(luma_grain_temp[i * luma_grain_stride + j] + ((wsum + rounding_offset) >> data.params.ar_coeff_shift),
-                grain_min, grain_max);
-
-      luma_grain_temp[i * luma_grain_stride + j] = val;
+      GroupMemoryBarrierWithGroupSync();
     }
   }
   GroupMemoryBarrierWithGroupSync();

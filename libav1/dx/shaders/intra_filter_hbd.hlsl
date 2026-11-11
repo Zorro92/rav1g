@@ -41,11 +41,21 @@ groupshared int4 loc_above[8];
 groupshared int loc_left[32];
 groupshared int loc_corner[18];
 
+// One thread group predicts one block: 8 threads in x, one per sample of a 4x2 unit, and 8 in y, one per
+// row of units. The units are predicted in a wavefront: a unit needs the unit to its left and the unit
+// above it. The thread row y takes column c in step c + y + 1 of a pass, one step after the row above took it. Every
+// step has a group sync after the samples of its units are computed and another after they are handed on,
+// so the steps follow each other on any GPU. (Upstream had plain group memory barriers in thread dependent
+// loops here, which order nothing: the wavefront held only where the 64 threads of the group ran in
+// lockstep.)
 [numthreads(8, ROWS, 1)] void main(uint3 thread
-                                   : SV_DispatchThreadID) {
-  if (thread.x >= cb_wi_count) return;
+                                   : SV_DispatchThreadID, uint3 gid
+                                   : SV_GroupID) {
+  // The block is the group's, so it and the loop bounds made from it are the same for all threads of the
+  // group: the group syncs below are not in thread dependent flow control.
+  if (gid.x * 8 >= cb_wi_count) return;
 
-  uint3 block = pred_blocks.Load3((cb_pass_offset + (thread.x >> 3)) << 4);
+  uint3 block = pred_blocks.Load3((cb_pass_offset + gid.x) << 4);
 
   const int wi = thread.x & 7;
   int x = 8 * (block.x & 0xffff);
@@ -100,7 +110,7 @@ groupshared int loc_corner[18];
     loc_above[wi].w = (pixels.y >> 16) & 1023;
   }
 
-  GroupMemoryBarrier();
+  GroupMemoryBarrierWithGroupSync();
 
   int row;
   for (row = wi; row < bh * 2; row += 8) {
@@ -116,29 +126,32 @@ groupshared int loc_corner[18];
                                                         : (left_available || above_available) ? loc_above[0].x : 512;
   }
 
-  GroupMemoryBarrier();
+  GroupMemoryBarrierWithGroupSync();
 
   int4 filter0 = cb_filter[mode][wi][0];
   int3 filter1 = cb_filter[mode][wi][1].xyz;
 
-  for (row = thread.y; row < bh; row += ROWS)
-    for (int col = -(int)thread.y - 1; col < bw; ++col) {
-      if (col < 0) {
-        continue;
+  for (int row0 = 0; row0 < bh; row0 += ROWS) {
+    row = row0 + thread.y;
+    for (int wave = 0; wave < bw + ROWS; ++wave) {
+      const int col = wave - (int)thread.y - 1;
+      const bool unit = row < bh && col >= 0 && col < bw;
+      int4 p14 = int4(0, 0, 0, 0);
+      if (unit) {
+        int p0 = loc_corner[row];
+        p14 = loc_above[col];
+        int p5 = loc_left[2 * row];
+        int p6 = loc_left[2 * row + 1];
+
+        int pixel = p0 * filter0.x + p14.x * filter0.y + p14.y * filter0.z + p14.z * filter0.w + p14.w * filter1.x +
+                    p5 * filter1.y + p6 * filter1.z;
+        pixel = clamp((pixel + 8) >> 4, 0, 1023);
+        mem[thread.y][wi] = pixel;
       }
 
-      int p0 = loc_corner[row];
-      int4 p14 = loc_above[col];
-      int p5 = loc_left[2 * row];
-      int p6 = loc_left[2 * row + 1];
-      int pixel = p0 * filter0.x + p14.x * filter0.y + p14.y * filter0.z + p14.z * filter0.w + p14.w * filter1.x +
-                  p5 * filter1.y + p6 * filter1.z;
-      pixel = clamp((pixel + 8) >> 4, 0, 1023);
-      mem[thread.y][wi] = pixel;
+      GroupMemoryBarrierWithGroupSync();
 
-      GroupMemoryBarrier();
-
-      if (wi < 2) {
+      if (unit && wi < 2) {
         int4 pix;
         pix.x = mem[thread.y][wi * 4 + 0];
         pix.y = mem[thread.y][wi * 4 + 1];
@@ -158,8 +171,10 @@ groupshared int loc_corner[18];
         const int addr = offset + col * 8 + (row * 2 + wi) * stride;
         dst_frame.Store2(addr, pixel4);
       }
-      GroupMemoryBarrier();
+
+      GroupMemoryBarrierWithGroupSync();
     }
+  }
 
   if (block.y & (1 << 5)) {
     const int res_stride = cb_planes[plane].z;

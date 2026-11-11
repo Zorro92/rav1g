@@ -29,9 +29,12 @@ groupshared int intermediate_buffer[64 * LocalStride];
 
 [numthreads(64, 1, 1)] void main(uint3 thread
                                  : SV_DispatchThreadID) {
-  if (thread.x >= cb_wi_count) return;
+  // A thread behind the last block of the dispatch does nothing, but it takes part in the group syncs: a
+  // group sync has to be reached by all threads of the group.
+  const bool active = thread.x < cb_wi_count;
 
-  uint4 block = pred_blocks.Load4((cb_pass_offset + (thread.x >> 1)) << 4);
+  uint4 block = uint4(0, 0, 0, 0);
+  [branch] if (active) block = pred_blocks.Load4((cb_pass_offset + (thread.x >> 1)) << 4);
   const int wi = thread.x & 1;
 
   const int plane = block.y & 3;
@@ -67,7 +70,7 @@ groupshared int intermediate_buffer[64 * LocalStride];
   int4 kernel_h1 = cb_kernels[filter_h][1];
   int local_base = (thread.x & 63) * LocalStride;
   int i;
-  for (i = 0; i < lines; ++i) {
+  if (active) for (i = 0; i < lines; ++i) {
     int ref_addr = ref_offset + ref_stride * clamp(y0 + i, 0, ref_h) + x0;
     uint3 l = dst_frame.Load3(ref_addr & (~3));
     const uint shift = (ref_addr & 3) * 8;
@@ -85,7 +88,12 @@ groupshared int intermediate_buffer[64 * LocalStride];
     intermediate_buffer[local_base + i] = (sum + FilterLineAdd8bit) >> FilterLineShift;
   }
 
-  GroupMemoryBarrier();
+  // The lines filtered horizontally are handed from the threads that made them to the threads that filter
+  // them vertically, through the group memory. The threads of a group run in no particular order, so it
+  // takes a group sync to have all lines there before any of them is read. (Upstream had plain group
+  // memory barriers, which make no thread wait: that held only where the 64 threads of a group ran in
+  // lockstep, as one wave.)
+  GroupMemoryBarrierWithGroupSync();
 
   mvy += wi * scale.w;
   const int filter_v = (((block.y >> 9) & 15) << 4) + ((mvy & SCALE_SUBPEL_MASK) >> SCALE_EXTRA_BITS);
@@ -93,7 +101,7 @@ groupshared int intermediate_buffer[64 * LocalStride];
   const int4 kernel_v1 = cb_kernels[filter_v][1];
   local_base = (mvy >> SCALE_SUBPEL_BITS) + (thread.x & 62) * LocalStride;
   int output[2];
-  for (i = 0; i < 2; ++i) {
+  if (active) for (i = 0; i < 2; ++i) {
     int sum = 0;
     int loc_addr = local_base + i * LocalStride;
     sum += kernel_v0.x * intermediate_buffer[loc_addr + 0];
@@ -107,7 +115,7 @@ groupshared int intermediate_buffer[64 * LocalStride];
     output[i] = clamp((int)(((sum + OutputRoundAdd) >> OutputShift) - OutputSub), 0, 255);
   }
 
-  if (noskip) {
+  if (active && noskip) {
     const int res_addr = cb_planes[plane].w + (mbx << 1) + mby * cb_planes[plane].z;
     int r = residuals.Load(res_addr);
     output[0] = clamp(output[0] + ((r << 16) >> 16), 0, 255);
@@ -117,10 +125,16 @@ groupshared int intermediate_buffer[64 * LocalStride];
   uint output4 = (output[0] | (output[1] << 8)) << ((mbx & 2) * 8);
   const int output_addr = cb_planes[plane].y + (mbx & ~3) + mby * cb_planes[plane].x;
 
+  // Two 2x2 blocks that share a word of the frame and are predicted in this dispatch are written as one
+  // word: both put their half into the group memory, and the first of the pair stores the two. A group
+  // sync before the memory is used again, and one before the halves are read. The syncs are outside the
+  // branch: a group sync has to be reached by all threads of the group.
+  GroupMemoryBarrierWithGroupSync();
+  if (active && (block.y & DualWriteBlock)) intermediate_buffer[thread.x & 63] = output4;
+  GroupMemoryBarrierWithGroupSync();
+  if (!active) return;
+
   if (block.y & DualWriteBlock) {
-    GroupMemoryBarrier();
-    intermediate_buffer[thread.x & 63] = output4;
-    GroupMemoryBarrier();
     if ((thread.x & 2) == 0) {
       output4 |= intermediate_buffer[(thread.x & 63) + 2];
       dst_frame.Store(output_addr, output4);

@@ -4,9 +4,11 @@
 #
 #   sh testing/intra_check/run.sh            the check; exit code 0 = identical
 #   sh testing/intra_check/run.sh --mutate   also proves the check can fail:
-#                                            copies of the new shader and of
-#                                            its scheduler with one detail
-#                                            changed must all be rejected
+#                                            copies of the shaders and of the
+#                                            scheduler with one detail changed
+#                                            must all be rejected, those with a
+#                                            group sync turned into a plain
+#                                            barrier for a race
 # Further arguments go to the check (--layouts N, --seed S, -v).
 set -eu
 
@@ -28,7 +30,7 @@ fi
 to_cpp() {
   sed -E \
     -e 's/\[numthreads\([^]]*\)\]//' \
-    -e 's/\[(unroll|loop)\]//g' \
+    -e 's/\[(unroll|loop|branch)\]//g' \
     -e 's/: *SV_[A-Za-z]+//g' \
     -e 's/: *register\([a-z0-9]+\)//g' \
     -e 's/^cbuffer +[A-Za-z_0-9]+ *\{/namespace {/' \
@@ -36,38 +38,21 @@ to_cpp() {
     -e 's/\.xyz;/.xyz();/' \
     -e 's/([a-z0-9_]+)\.zw = ([a-z0-9_]+)\.yy;/\1.z = \2.y; \1.w = \2.y;/' \
     -e 's/#include "intra_v2\.hlsl"/#include "intra_v2.gen.h"/' \
-    "$1"
-}
-
-# intra_filter relies on its 64 threads running in lockstep (one wave) and
-# only has GroupMemoryBarrier() calls, which order nothing. The emulation
-# switches threads at barriers, so say where lockstep makes the threads meet:
-#   - a thread that skips a column still takes the time of that column;
-#   - all threads leave the column loop and the row loop together;
-#   - in the residual pass all threads load before any of them stores.
-lockstep() {
-  sed -E \
-    -e 's/^( *)continue;/\1{ GroupMemoryBarrier(); GroupMemoryBarrier(); continue; }/' \
-    -e 's/row \+= ROWS\)/row += ROWS, WaveJoin(1))/' \
-    -e 's/^  if \(block\.y & \(1 << 5\)\) \{/  WaveJoin(2);\n&/' \
-    -e 's/dst_frame\.Store\(addr, result\);/GroupMemoryBarrier(); &/'
+    "$1" | sed -E -f "$here/../common/gs_groupshared.sed"
 }
 
 to_cpp "$shaders/intra_main.hlsl" > "$work/intra_main.gen.h"
 to_cpp "$shaders/intra_main_hbd.hlsl" > "$work/intra_main_hbd.gen.h"
-to_cpp "$shaders/intra_filter.hlsl" | lockstep > "$work/intra_filter.gen.h"
+to_cpp "$shaders/intra_filter.hlsl" > "$work/intra_filter.gen.h"
 # The 10-bit residual is declared int and read as r.x.
-to_cpp "$shaders/intra_filter_hbd.hlsl" | lockstep | sed -E 's/\br\.x\b/r/g' > "$work/intra_filter_hbd.gen.h"
+to_cpp "$shaders/intra_filter_hbd.hlsl" | sed -E 's/\br\.x\b/r/g' > "$work/intra_filter_hbd.gen.h"
 to_cpp "$shaders/intra_v2.hlsl" > "$work/intra_v2.gen.h"
 to_cpp "$shaders/intra_v2_hbd.hlsl" > "$work/intra_v2_hbd.gen.h"
-for f in intra_filter intra_filter_hbd; do
-  for marker in 'GroupMemoryBarrier(); continue;' 'WaveJoin(1)' 'WaveJoin(2)' 'GroupMemoryBarrier(); dst_frame.Store'; do
-    if [ "$(grep -cF "$marker" "$work/$f.gen.h")" != 1 ]; then
-      echo "intra_check: lockstep marker '$marker' not placed once in $f" >&2
-      exit 1
-    fi
-  done
-done
+# All group memory has to be the kind that is watched (testing/common/group_sched.h).
+if grep -q '^groupshared' "$work"/*.gen.h; then
+  echo "intra_check: a group memory declaration was not converted" >&2
+  exit 1
+fi
 
 # The lookup tables of the decoder, from its sources.
 {
@@ -131,9 +116,13 @@ intra_v2.gen.h@s/w_l0 = (diff_l <= diff_t \&\& diff_l <= diff_tl) ? 32 : 0;/w_l0
 intra_v2.gen.h@s/return clamp((intra \* mask + inter \* (64 - mask) + 32) >> 6, 0, PIXEL_MAX);/return clamp((intra * mask + inter * (64 - mask) + 31) >> 6, 0, PIXEL_MAX);/@inter-intra blend rounding
 intra_v2.gen.h@s/const int cell_active = mine \&\& (my_pass == (int)pass_i);/const int cell_active = mine \&\& (my_pass == 0 || my_pass == (int)pass_i);/@pass order inside a region
 intra_v2_sched.h@s/need_step = intra_v2_max(need_step, step + 1);/need_step = intra_v2_max(need_step, step);/@step order between regions
-intra_v2_sched.h@s/if (step == cur) need_pass = intra_v2_max(need_pass, ((d >> 16) \& 255) + 1);/if (step == cur) need_pass = intra_v2_max(need_pass, (d >> 16) \& 255);/@pass order inside a region (host)'
+intra_v2_sched.h@s/if (step == cur) need_pass = intra_v2_max(need_pass, ((d >> 16) \& 255) + 1);/if (step == cur) need_pass = intra_v2_max(need_pass, (d >> 16) \& 255);/@pass order inside a region (host)
+intra_filter.gen.h@0,/GroupMemoryBarrierWithGroupSync();/s//GroupMemoryBarrier();/@first group sync of intra_filter as a plain barrier@races in group memory .*[1-9]
+intra_filter_hbd.gen.h@/mem\[thread.y\]\[wi\] = pixel;/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/@group sync inside a wavefront step of intra_filter as a plain barrier@races in group memory .*[1-9]
+intra_main.gen.h@/above\[loc_base + wi\] = luma.x + luma.y + luma.z + luma.w;/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/@group sync before the CFL sum of intra_main as a plain barrier@races in group memory .*[1-9]
+intra_v2.gen.h@0,/GroupMemoryBarrierWithGroupSync();/s//GroupMemoryBarrier();/@group sync of a pass of intra_v2 as a plain barrier@races in group memory .*[1-9]'
   mkdir "$work/mutant"
-  echo "$mutants" | while IFS='@' read -r file expr what; do
+  echo "$mutants" | while IFS='@' read -r file expr what expect; do
     cp "$work"/*.gen.h "$work/mutant/"
     rm -f "$work/mutant/intra_v2_sched.h"
     if [ "$file" = intra_v2_sched.h ]; then
@@ -150,6 +139,12 @@ intra_v2_sched.h@s/if (step == cur) need_pass = intra_v2_max(need_pass, ((d >> 1
     build "$work/mutant"
     if "$work/mutant/intra_check" "$@" > "$work/mutant/log" 2>&1; then
       echo "intra_check: the mutant '$what' passed, the check is not sensitive to it" >&2
+      exit 1
+    fi
+    # A mutant that takes a group sync away has to be caught as a race, not by chance.
+    if [ -n "$expect" ] && ! grep -q "$expect" "$work/mutant/log"; then
+      echo "intra_check: the mutant '$what' was rejected, but not for a race in group memory" >&2
+      tail -n 20 "$work/mutant/log" >&2
       exit 1
     fi
     echo "intra_check: mutant rejected as expected: $what"

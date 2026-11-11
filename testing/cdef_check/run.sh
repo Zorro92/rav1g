@@ -4,7 +4,9 @@
 #   sh testing/cdef_check/run.sh            the check; exit code 0 = identical
 #   sh testing/cdef_check/run.sh --mutate   also proves the check can fail: a
 #                                           copy of the new shader with one tap
-#                                           weight changed must be rejected
+#                                           weight changed must be rejected, and
+#                                           so must each shader with a group sync
+#                                           turned into a plain barrier
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -22,7 +24,7 @@ to_cpp() {
     -e 's/: *register\([a-z0-9]+\)//g' \
     -e 's/^cbuffer +[A-Za-z_]+ *\{(.*)\}/\1/' \
     -e 's/void main\(/void shader_main(/' \
-    "$1"
+    "$1" | sed -E -f "$here/../common/gs_groupshared.sed"
 }
 
 build() {
@@ -48,4 +50,26 @@ if [ "${1:-}" = "--mutate" ]; then
     exit 1
   fi
   echo "cdef_check: mutated shader rejected as expected ($(grep -c MISMATCH "$work/mutant/log") mismatches shown)"
+  # And a group sync turned into a plain barrier, the first one of the entry point of each shader: it must
+  # be rejected for a race.
+  for f in cdef_filter cdef_filter_v2; do
+    cp "$work/cdef_filter.gen.h" "$work/cdef_filter_v2.gen.h" "$work/mutant/"
+    sed -e '/void shader_main(/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/' \
+      "$work/$f.gen.h" > "$work/mutant/$f.gen.h"
+    if cmp -s "$work/$f.gen.h" "$work/mutant/$f.gen.h"; then
+      echo "cdef_check: the group sync mutation of $f did not apply" >&2
+      exit 1
+    fi
+    build "$work/mutant"
+    if "$work/mutant/cdef_check" > "$work/mutant/log" 2>&1; then
+      echo "cdef_check: $f with a group sync turned into a plain barrier passed" >&2
+      exit 1
+    fi
+    if ! grep -q 'races in group memory: [1-9]' "$work/mutant/log"; then
+      echo "cdef_check: $f with a group sync turned into a plain barrier was rejected, but not for a race" >&2
+      tail -n 5 "$work/mutant/log" >&2
+      exit 1
+    fi
+    echo "cdef_check: $f with its first group sync turned into a plain barrier rejected for a race"
+  done
 fi

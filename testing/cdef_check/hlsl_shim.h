@@ -83,9 +83,14 @@ struct RWByteAddressBuffer {
   }
 };
 
-/* Yields to the next thread of the group; see cdef_check.cpp. */
-void GroupMemoryBarrierWithGroupSync();
+/*
+ * The thread group and its group memory: testing/common/group_sched.h. A group sync is where the threads
+ * of a group meet; GroupMemoryBarrier() makes no thread wait, here as on a GPU, and is counted. The group
+ * memory (GsArray, see run.sh) records every read of what another thread wrote since the last group sync.
+ */
+#include "../common/group_sched.h"
 
-#define groupshared static
+static inline void GroupMemoryBarrier() { gs_state.plain_barriers++; }
+static inline void GroupMemoryBarrierWithGroupSync() { gs_group_sync(); }
 
 #endif /* CDEF_CHECK_HLSL_SHIM_H_ */

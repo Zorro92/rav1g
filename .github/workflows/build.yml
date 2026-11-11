@@ -434,36 +434,6 @@ jobs:
           enableCrossOsArchive: true
           fail-on-cache-miss: true
 
-      # Diagnosis of the first run (every stream wrong, and not the same md5 twice): a few of AOM's
-      # vectors decoded several times and with other decoder settings, their first frames written as
-      # YUV, and once with the D3D12 debug layer when the runner can install it.
-      - name: Graphics Tools (D3D12 debug layer), if the runner has them
-        continue-on-error: true
-        timeout-minutes: 12
-        shell: pwsh
-        run: |
-          Add-WindowsCapability -Online -Name 'Tools.Graphics.DirectX~~~~0.0.1.0' | Out-String | Write-Host
-          Get-ChildItem "$env:windir\System32\d3d12SDKLayers.dll" -ErrorAction SilentlyContinue | Write-Host
-
-      - name: Diagnostic runs with other decoder settings
-        continue-on-error: true
-        timeout-minutes: 40
-        shell: pwsh
-        run: |
-          New-Item -ItemType File -Force out/no-expected.txt | Out-Null
-          $runs = [ordered]@{ intrav2 = '-intrav2'; 'intrav2-cdefv1' = '-intrav2 -cdefv1'; 'intrav2-lowmem0' = '-intrav2 -lowmemparts 0' }
-          foreach ($name in $runs.Keys) {
-            "=== whole set with $($runs[$name])"
-            python testing/conformance/run.py --tool out/warp_decoder/warp_decoder.exe --streams conformance-streams `
-              --out "out/diag/$name" --expected out/no-expected.txt --threads 4 --no-repeat --tool-args "$($runs[$name])" |
-              Where-Object { $_ -notmatch '^NOT AS EXPECTED' }
-          }
-          "=== whole set with -intrav2, one thread"
-          python testing/conformance/run.py --tool out/warp_decoder/warp_decoder.exe --streams conformance-streams `
-            --out out/diag/intrav2-t1 --expected out/no-expected.txt --threads 1 --no-repeat --tool-args "-intrav2" |
-            Where-Object { $_ -notmatch '^NOT AS EXPECTED' }
-          exit 0
-
       - name: Decode every stream on WARP and compare with expected.txt
         shell: pwsh
         run: |
@@ -478,7 +448,6 @@ jobs:
           name: rav1g-conformance-${{ github.run_id }}
           path: |
             out/conformance/
-            out/diag/
             out/msbuild.log
           if-no-files-found: warn
 
@@ -489,6 +458,27 @@ jobs:
           name: rav1g-warp-decoder-x64-${{ github.run_id }}
           path: out/warp_decoder/
           if-no-files-found: warn
+
+  # Host check of how the shaders hand data between the threads of a thread group. A GPU promises
+  # only that all threads of a group meet at a group sync; upstream's shaders counted on the 64
+  # threads of a group running in lockstep (one wave), which holds on the console and nowhere else.
+  # Every shader with group memory, compiled as C++, runs with its thread groups under an adversarial
+  # schedule and its group memory watched for races; a plain GroupMemoryBarrier() is rejected; and
+  # for every group sync a copy of the shader with that sync turned into a plain barrier must be
+  # rejected for a race. (The CDEF, intra and warp checks below run their shaders the same way.)
+  sync-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Group memory races, group syncs and plain barriers of all shaders
+        run: |
+          set -euo pipefail
+          sh testing/sync_check/run.sh --mutate | tee sync-check.log
+          { echo '## Thread group check'; echo '```'; cat sync-check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   # Host proof for CDEF v2: the original and the v2 CDEF shader source, compiled as C++,
   # must write byte-identical frames (random and edge-case input, 8-bit and high bit depth).

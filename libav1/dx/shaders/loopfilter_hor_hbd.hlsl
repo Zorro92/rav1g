@@ -23,7 +23,9 @@
 
 groupshared uint input_edges[16 * (64 / 4)];
 groupshared uint shared_mem[64 * 16];
+groupshared uint edge_count[64 / 4];
 
+// The first half of an edge: the column of one thread, loaded and filtered into the group memory.
 void filter_horizontal_edge(RWByteAddressBuffer buffer, uint offset, uint stride, int4 limits, uint type, int wi) {
   const int shift = (offset & 2) * 8;
   offset &= ~3;
@@ -155,9 +157,12 @@ void filter_horizontal_edge(RWByteAddressBuffer buffer, uint offset, uint stride
       shared_mem[Stride64 * 9 + wi] = clamp(qs1 - f0, SignedPixelMin, SignedPixelMax) + PixelGray;
     }
   }
+}
 
-  GroupMemoryBarrier();
-
+// The second half of an edge: the filtered columns of the four threads of a block, put together as words
+// of the frame. Every thread stores one line of each group of four.
+void store_horizontal_edge(RWByteAddressBuffer buffer, uint offset, uint stride, uint type, int wi) {
+  offset &= ~3;
   const int wi4 = wi & 3;
   const int base = (wi - wi4) + wi4 * Stride64;
   const int dst_offset = (offset & (~7)) + wi4 * stride;
@@ -202,27 +207,67 @@ cbuffer LoopfilterSRT : register(b1) {
 
 [numthreads(64, 1, 1)] void main(uint3 thread
                                  : SV_DispatchThreadID) {
-  if (thread.x >= cb_wicount) return;
+  // A thread behind the last block of the dispatch does nothing, but it takes part in the group syncs: a
+  // group sync has to be reached by all threads of the group.
+  const bool active = thread.x < cb_wicount;
   const int plane = cb_plane;
   const int wi = thread.x & 3;
   const uint block_id = thread.x >> 2;
-  uint2 data = lf_blocks.Load2((cb_offset_base + block_id) * BlockSize + (wi << 3));
   const int local_offset = (thread.x & (64 - 4)) << 2;
-  input_edges[local_offset + (wi << 2) + 0] = data.x & 0xffff;
-  input_edges[local_offset + (wi << 2) + 1] = (data.x >> 16);
-  input_edges[local_offset + (wi << 2) + 2] = data.y & 0xffff;
-  input_edges[local_offset + (wi << 2) + 3] = (data.y >> 16);
+  if (active) {
+    uint2 data = lf_blocks.Load2((cb_offset_base + block_id) * BlockSize + (wi << 3));
+    input_edges[local_offset + (wi << 2) + 0] = data.x & 0xffff;
+    input_edges[local_offset + (wi << 2) + 1] = (data.x >> 16);
+    input_edges[local_offset + (wi << 2) + 2] = data.y & 0xffff;
+    input_edges[local_offset + (wi << 2) + 3] = (data.y >> 16);
+  }
 
-  GroupMemoryBarrier();
+  // The sixteen edges of a block are loaded by its four threads, four each, and every thread walks all of
+  // them. The threads of a group run in no particular order, so it takes a group sync to have the edges
+  // there before they are read. (Upstream had a plain group memory barrier, which makes no thread wait:
+  // that held only where the 64 threads of a group ran in lockstep, as one wave.)
+  GroupMemoryBarrierWithGroupSync();
 
   const int block_x = block_id % cb_block_cols;
   const int block_y = block_id / cb_block_cols;
   const int stride = cb_planes[plane].x;
   const int addr = cb_planes[plane].y + block_x * 8 + wi * 2 + block_y * 64 * stride;
 
-  for (int row = 0; row < 16;) {
-    uint edge = input_edges[local_offset + row];
-    if (!edge) break;
+  // The edges of a block are filtered one after the other, from the top: an edge reads what the edge above
+  // it wrote. An edge is two halves. First every thread of the block filters its column into the group
+  // memory, then every thread puts one line of each group of four together from the four columns and
+  // stores it. So the four threads of a block have to be at the same edge and in the same half, and the
+  // only thing that makes threads meet is a group sync, which all threads of the group have to reach. So
+  // all blocks of the group go through their edges in step: every thread makes as many steps as the block
+  // of the group with the most edges has edges, and a block that is done, or whose edge is not filtered,
+  // idles through the two group syncs of the step. (Upstream had every thread loop over the edges of its
+  // own block, with a plain group memory barrier between the two halves, which makes no thread wait: that
+  // held only where the 64 threads of a group ran in lockstep, as one wave.)
+  //
+  // The number of steps: every block counts its edges, and the largest count of the group is read by all
+  // threads behind a group sync, so it is the same for all of them.
+  int row = 0;
+  if (wi == 0) {
+    uint count = 0;
+    if (active) {
+      while (row < 16) {
+        const uint edge = input_edges[local_offset + row];
+        if (!edge) break;
+        ++count;
+        row += edge >> 8;
+      }
+    }
+    edge_count[(thread.x & 63) >> 2] = count;
+  }
+  GroupMemoryBarrierWithGroupSync();
+  uint steps = 0;
+  for (int block = 0; block < 64 / 4; ++block) steps = max(steps, edge_count[block]);
+
+  row = 0;
+  [loop] for (uint n = 0; n < steps; ++n) {
+    // 0 behind the last edge of the block: nothing to filter, and no step to another row.
+    uint edge = 0;
+    if (active && row < 16) edge = input_edges[local_offset + row];
     int level = edge & 63;
     int filter = (edge >> 6) & 3;
     int step = edge >> 8;
@@ -231,6 +276,9 @@ cbuffer LoopfilterSRT : register(b1) {
       const int4 limits = cb_limits[level] << 2;
       filter_horizontal_edge(dst_frame, addr + row * 4 * stride, stride, limits, filter, thread.x & 63);
     }
+    GroupMemoryBarrierWithGroupSync();
+    if (level) store_horizontal_edge(dst_frame, addr + row * 4 * stride, stride, filter, thread.x & 63);
+    GroupMemoryBarrierWithGroupSync();
     row += step;
   }
 }

@@ -170,23 +170,33 @@ cbuffer LoopfilterSRT : register(b1) {
 
 [numthreads(64, 1, 1)] void main(uint3 thread
                                  : SV_DispatchThreadID) {
-  if (thread.x >= cb_wicount) return;
+  // A thread behind the last block of the dispatch does nothing, but it takes part in the group syncs: a
+  // group sync has to be reached by all threads of the group.
+  const bool active = thread.x < cb_wicount;
   const int plane = cb_plane;
   const int wi = thread.x & 3;
   const uint block_id = ((thread.x >> 2) << 1) + cb_block_id_offset;
-  uint2 data = lf_blocks.Load2((cb_offset_base + block_id) * BlockSize + (wi << 3));
   const int local_offset = (thread.x & (64 - 4)) << 2;
-  input_edges[local_offset + (wi << 2) + 0] = data.x & 0xffff;
-  input_edges[local_offset + (wi << 2) + 1] = (data.x >> 16);
-  input_edges[local_offset + (wi << 2) + 2] = data.y & 0xffff;
-  input_edges[local_offset + (wi << 2) + 3] = (data.y >> 16);
+  if (active) {
+    uint2 data = lf_blocks.Load2((cb_offset_base + block_id) * BlockSize + (wi << 3));
+    input_edges[local_offset + (wi << 2) + 0] = data.x & 0xffff;
+    input_edges[local_offset + (wi << 2) + 1] = (data.x >> 16);
+    input_edges[local_offset + (wi << 2) + 2] = data.y & 0xffff;
+    input_edges[local_offset + (wi << 2) + 3] = (data.y >> 16);
+  }
 
-  GroupMemoryBarrier();
+  // The sixteen edges of a block are loaded by its four threads, four each, and every thread walks all of
+  // them. The threads of a group run in no particular order, so it takes a group sync to have the edges
+  // there before they are read. (Upstream had a plain group memory barrier, which makes no thread wait:
+  // that held only where the 64 threads of a group ran in lockstep, as one wave.)
+  GroupMemoryBarrierWithGroupSync();
 
   const int block_x = block_id % cb_block_cols;
   const int block_y = block_id / cb_block_cols;
   const int stride = cb_planes[plane].x;
   const int addr = cb_planes[plane].y + block_x * 128 + (block_y * 4 + wi) * stride;
+
+  if (!active) return;
 
   for (int col = 0; col < 16;) {
     uint edge = input_edges[local_offset + col];

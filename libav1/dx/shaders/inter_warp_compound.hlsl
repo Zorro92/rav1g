@@ -38,14 +38,17 @@ int blend(int src0, int src1, int coef) {
 
 [numthreads(64, 1, 1)] void main(uint3 thread
                                  : SV_DispatchThreadID) {
-  if (thread.x >= cb_wi_count) return;
+  // A thread behind the last block of the dispatch does nothing, but it takes part in the group syncs: a
+  // group sync has to be reached by all threads of the group.
+  const bool active = thread.x < cb_wi_count;
 
   const int w_log = cb_width_log2;
   const int h_log = cb_height_log2;
   int wi = thread.x & 3;
   const int subblock = (thread.x >> 2) & ((1 << (w_log + h_log)) - 1);
   int block_index = cb_pass_offset + (thread.x >> (w_log + h_log + 2));
-  uint4 block = pred_blocks.Load4(block_index * 16);
+  uint4 block = uint4(0, 0, 0, 0);
+  [branch] if (active) block = pred_blocks.Load4(block_index * 16);
 
   int x = SubblockW * ((block.x & 0xffff) + (subblock & ((1 << w_log) - 1)));
   int y = SubblockH * ((block.x >> 16) + (subblock >> w_log));
@@ -62,11 +65,22 @@ int blend(int src0, int src1, int coef) {
   int ref_offset = cb_refplanes[refplane].y;
   int ref_stride = cb_refplanes[refplane].x;
   int4 info0 = cb_gm_warp[ref].info0;
-  int4 output0;
+  int4 output0 = int4(0, 0, 0, 0);
+  // The prediction from a reference is two passes: the four threads of a 4x4 filter its eleven lines
+  // horizontally into the group memory, three lines or two each, then every thread filters eight of them
+  // vertically. The threads of a group run in no particular order, so it takes a group sync to have all
+  // lines there before any of them is read, and another to have all of them read before the memory is used
+  // again; a group sync has to be reached by all threads of the group, so each pass is a branch of its own
+  // and the syncs are between them. (Upstream had no barrier here at all: that held only where the 64
+  // threads of a group ran in lockstep, as one wave.) What the vertical pass takes over from the
+  // horizontal one:
+  int4 info2 = int4(0, 0, 0, 0);
+  int sy4 = 0;
+  int filter_v = 0;
 
-  if (info0.x) {
+  if (active && info0.x) {
     int4 info1 = cb_gm_warp[ref].info1;
-    int4 info2 = cb_gm_warp[ref].info2;
+    info2 = cb_gm_warp[ref].info2;
     const int src_x = ((x & (~7)) + 4) << subsampling;
     const int src_y = ((y & (~7)) + 4) << subsampling;
     const int dst_x = info1.x * src_x + info1.y * src_y + (int)info0.z;
@@ -78,7 +92,7 @@ int blend(int src0, int src1, int coef) {
     int iy4 = (y4 >> WarpPrecBits) - 7 + (y & 7);
 
     int sx4 = x4 & ((1 << WarpPrecBits) - 1);
-    int sy4 = y4 & ((1 << WarpPrecBits) - 1);
+    sy4 = y4 & ((1 << WarpPrecBits) - 1);
 
     sx4 += info2.x * (-4) + info2.y * (-4);
     sy4 += info2.w * (-4) + info2.z * (-4);
@@ -95,7 +109,23 @@ int blend(int src0, int src1, int coef) {
       mem[local_ofs + i] = filter_line_warp(dst_frame, ref_offset + ref_stride * clamp(iy4 + i, 0, dims.y), warp_filter,
                                             sx4 + info2.y * i, info2.x);
     }
+  } else if (active) {
+    int mv = block.z;
+    int mvx = x + ((mv) >> (16 + SUBPEL_BITS)) - 3;
+    int mvy = y + ((mv << 16) >> (16 + SUBPEL_BITS)) - 3;
+    mvx = clamp(mvx, -11, dims.x);
+    int filter_h = (((block.y >> 5) & 15) << 4) + ((mv >> 16) & SUBPEL_MASK);
+    filter_v = (((block.y >> 9) & 15) << 4) + (mv & SUBPEL_MASK);
+    int4 kernel_h0 = cb_kernels[filter_h][0];
+    int4 kernel_h1 = cb_kernels[filter_h][1];
 
+    for (int i = wi; i < 11; i += 4) {
+      mem[local_ofs + i] =
+          filter_line(dst_frame, ref_offset + mvx + ref_stride * clamp(mvy + i, 0, dims.y), kernel_h0, kernel_h1);
+    }
+  }
+  GroupMemoryBarrierWithGroupSync();
+  if (active && info0.x) {
     int sy = sy4 + wi * info2.z;
 
     int filter_addr;
@@ -132,21 +162,7 @@ int blend(int src0, int src1, int coef) {
                 mem[local_ofs + wi + 2].w * filter0.z + mem[local_ofs + wi + 3].w * filter0.w +
                 mem[local_ofs + wi + 4].w * filter1.x + mem[local_ofs + wi + 5].w * filter1.y +
                 mem[local_ofs + wi + 6].w * filter1.z + mem[local_ofs + wi + 7].w * filter1.w;
-  } else {
-    int mv = block.z;
-    int mvx = x + ((mv) >> (16 + SUBPEL_BITS)) - 3;
-    int mvy = y + ((mv << 16) >> (16 + SUBPEL_BITS)) - 3;
-    mvx = clamp(mvx, -11, dims.x);
-    int filter_h = (((block.y >> 5) & 15) << 4) + ((mv >> 16) & SUBPEL_MASK);
-    int filter_v = (((block.y >> 9) & 15) << 4) + (mv & SUBPEL_MASK);
-    int4 kernel_h0 = cb_kernels[filter_h][0];
-    int4 kernel_h1 = cb_kernels[filter_h][1];
-
-    for (int i = wi; i < 11; i += 4) {
-      mem[local_ofs + i] =
-          filter_line(dst_frame, ref_offset + mvx + ref_stride * clamp(mvy + i, 0, dims.y), kernel_h0, kernel_h1);
-    }
-
+  } else if (active) {
     int4 kernel_v0 = cb_kernels[filter_v][0];
     int4 kernel_v1 = cb_kernels[filter_v][1];
 
@@ -167,6 +183,7 @@ int blend(int src0, int src1, int coef) {
                 mem[local_ofs + wi + 4].w * kernel_v1.x + mem[local_ofs + wi + 5].w * kernel_v1.y +
                 mem[local_ofs + wi + 6].w * kernel_v1.z + mem[local_ofs + wi + 7].w * kernel_v1.w;
   }
+  GroupMemoryBarrierWithGroupSync();
 
   // REF1
   ref = (block.y >> 14) & 7;
@@ -175,10 +192,10 @@ int blend(int src0, int src1, int coef) {
   ref_stride = cb_refplanes[refplane].x;
   info0 = cb_gm_warp[ref].info0;
 
-  int4 output1;
-  if (info0.x) {
+  int4 output1 = int4(0, 0, 0, 0);
+  if (active && info0.x) {
     int4 info1 = cb_gm_warp[ref].info1;
-    int4 info2 = cb_gm_warp[ref].info2;
+    info2 = cb_gm_warp[ref].info2;
     const int src_x = ((x & (~7)) + 4) << subsampling;
     const int src_y = ((y & (~7)) + 4) << subsampling;
     const int dst_x = info1.x * src_x + info1.y * src_y + (int)info0.z;
@@ -190,7 +207,7 @@ int blend(int src0, int src1, int coef) {
     int iy4 = (y4 >> WarpPrecBits) - 7 + (y & 7);
 
     int sx4 = x4 & ((1 << WarpPrecBits) - 1);
-    int sy4 = y4 & ((1 << WarpPrecBits) - 1);
+    sy4 = y4 & ((1 << WarpPrecBits) - 1);
 
     sx4 += info2.x * (-4) + info2.y * (-4);
     sy4 += info2.w * (-4) + info2.z * (-4);
@@ -207,7 +224,24 @@ int blend(int src0, int src1, int coef) {
       mem[local_ofs + i] = filter_line_warp(dst_frame, ref_offset + ref_stride * clamp(iy4 + i, 0, dims.y), warp_filter,
                                             sx4 + info2.y * i, info2.x);
     }
+  } else if (active) {
+    int mv = block.w;
+    int mvx = x + ((mv) >> (16 + SUBPEL_BITS)) - 3;
+    int mvy = y + ((mv << 16) >> (16 + SUBPEL_BITS)) - 3;
+    mvx = clamp(mvx, -11, dims.x);
 
+    int filter_h = (((block.y >> 5) & 15) << 4) + ((mv >> 16) & SUBPEL_MASK);
+    filter_v = (((block.y >> 9) & 15) << 4) + (mv & SUBPEL_MASK);
+    int4 kernel_h0 = cb_kernels[filter_h][0];
+    int4 kernel_h1 = cb_kernels[filter_h][1];
+
+    for (int i = wi; i < 11; i += 4) {
+      mem[local_ofs + i] =
+          filter_line(dst_frame, ref_offset + mvx + ref_stride * clamp(mvy + i, 0, dims.y), kernel_h0, kernel_h1);
+    }
+  }
+  GroupMemoryBarrierWithGroupSync();
+  if (active && info0.x) {
     int sy = sy4 + wi * info2.z;
     int filter_addr;
     int4 filter0, filter1;
@@ -243,22 +277,7 @@ int blend(int src0, int src1, int coef) {
                 mem[local_ofs + wi + 2].w * filter0.z + mem[local_ofs + wi + 3].w * filter0.w +
                 mem[local_ofs + wi + 4].w * filter1.x + mem[local_ofs + wi + 5].w * filter1.y +
                 mem[local_ofs + wi + 6].w * filter1.z + mem[local_ofs + wi + 7].w * filter1.w;
-  } else {
-    int mv = block.w;
-    int mvx = x + ((mv) >> (16 + SUBPEL_BITS)) - 3;
-    int mvy = y + ((mv << 16) >> (16 + SUBPEL_BITS)) - 3;
-    mvx = clamp(mvx, -11, dims.x);
-
-    int filter_h = (((block.y >> 5) & 15) << 4) + ((mv >> 16) & SUBPEL_MASK);
-    int filter_v = (((block.y >> 9) & 15) << 4) + (mv & SUBPEL_MASK);
-    int4 kernel_h0 = cb_kernels[filter_h][0];
-    int4 kernel_h1 = cb_kernels[filter_h][1];
-
-    for (int i = wi; i < 11; i += 4) {
-      mem[local_ofs + i] =
-          filter_line(dst_frame, ref_offset + mvx + ref_stride * clamp(mvy + i, 0, dims.y), kernel_h0, kernel_h1);
-    }
-
+  } else if (active) {
     int4 kernel_v0 = cb_kernels[filter_v][0];
     int4 kernel_v1 = cb_kernels[filter_v][1];
 
@@ -336,14 +355,21 @@ int blend(int src0, int src1, int coef) {
     output0.w += r.y >> 16;
     output0 = clamp(output0, 0, 255);
   }
-  dst_frame.Store(output_offset, output0.x | (output0.y << 8) | (output0.z << 16) | (output0.w << 24));
+  if (active) dst_frame.Store(output_offset, output0.x | (output0.y << 8) | (output0.z << 16) | (output0.w << 24));
 
-  if (compound_type == 2) {
+  // The mask of a difference weighted block goes to its chroma planes at half the size. The four threads of
+  // a 4x4 put the sums of their lines into the group memory, and one thread of every other 4x4 adds up its
+  // own and its neighbour's: a group sync before the memory is used again, and one before the sums are
+  // read.
+  GroupMemoryBarrierWithGroupSync();
+  if (active && compound_type == 2) {
     wi = thread.x & 63;
     coefs.x = coefs.x + coefs.y;
     coefs.y = coefs.z + coefs.w;
     mem[wi].xy = coefs.xy;
-
+  }
+  GroupMemoryBarrierWithGroupSync();
+  if (active && compound_type == 2) {
     if ((wi & 5) == 0)  // filter odd cols and lines
     {
       coefs.xy += mem[wi + 1].xy;  // next line

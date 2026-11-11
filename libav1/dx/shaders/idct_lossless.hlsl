@@ -25,9 +25,12 @@ groupshared int shared_4x4_mem[4 * 64];
 
 [numthreads(64, 1, 1)] void main(uint3 thread
                                  : SV_DispatchThreadID) {
-  if (thread.x >= cb_wicount) return;
+  // A thread behind the last block of the dispatch does nothing, but it takes part in the group syncs: a
+  // group sync has to be reached by all threads of the group.
+  const bool active = thread.x < cb_wicount;
   int wi = thread.x & 3;
-  uint4 block = buf_blocks.Load4((cb_index_offset + thread.x / 4) * IdctBlockSize);
+  uint4 block = uint4(0, 0, 0, 0);
+  [branch] if (active) block = buf_blocks.Load4((cb_index_offset + thread.x / 4) * IdctBlockSize);
   const int plane = (block.x >> 21) & 3;
   const int loc_mem_offset = 4 * (thread.x & (64 - 4));
   const int scan_offset = ScanSize * ((block.x >> ScanShift) & ScanMask) + wi;
@@ -35,68 +38,80 @@ groupshared int shared_4x4_mem[4 * 64];
 
   const int input_offset = (block.y + wi * 4) << 2;
   int4 coefs = int4(0, 0, 0, 0);
-  if (wi < coef_count)
+  if (active && wi < coef_count)
   {
       coefs = (int4)buf_input.Load4(input_offset);
       buf_input.Store4(input_offset, int4(0, 0, 0, 0));
   }
   const int coef_min = -(1 << (cb_bitdepth + 7));
   const int coef_max = (1 << (cb_bitdepth + 7)) - 1;
-  shared_4x4_mem[loc_mem_offset + cb_scans[scan_offset].x] = clamp(coefs.x, coef_min, coef_max);
-  shared_4x4_mem[loc_mem_offset + cb_scans[scan_offset].y] = clamp(coefs.y, coef_min, coef_max);
-  shared_4x4_mem[loc_mem_offset + cb_scans[scan_offset].z] = clamp(coefs.z, coef_min, coef_max);
-  shared_4x4_mem[loc_mem_offset + cb_scans[scan_offset].w] = clamp(coefs.w, coef_min, coef_max);
+  if (active) {
+    shared_4x4_mem[loc_mem_offset + cb_scans[scan_offset].x] = clamp(coefs.x, coef_min, coef_max);
+    shared_4x4_mem[loc_mem_offset + cb_scans[scan_offset].y] = clamp(coefs.y, coef_min, coef_max);
+    shared_4x4_mem[loc_mem_offset + cb_scans[scan_offset].z] = clamp(coefs.z, coef_min, coef_max);
+    shared_4x4_mem[loc_mem_offset + cb_scans[scan_offset].w] = clamp(coefs.w, coef_min, coef_max);
+  }
 
-  GroupMemoryBarrier();
+  // The coefficients of a block are placed by its four threads, a row is transformed by one, then a column
+  // by one. The threads of a group run in no particular order, so the three group syncs here are what makes
+  // one pass complete before the next one reads it. (Upstream had plain group memory barriers, which make no
+  // thread wait: that held only where the 64 threads of a group ran in lockstep, as one wave.)
+  GroupMemoryBarrierWithGroupSync();
 
   const int loc_offset_row = (thread.x & 63) * 4;
   const int loc_offset_col = loc_mem_offset + wi;
 
   int a1, b1, c1, d1, e1;
-  a1 = shared_4x4_mem[loc_offset_row + 0] >> QuantShift;
-  c1 = shared_4x4_mem[loc_offset_row + 1] >> QuantShift;
-  d1 = shared_4x4_mem[loc_offset_row + 2] >> QuantShift;
-  b1 = shared_4x4_mem[loc_offset_row + 3] >> QuantShift;
+  if (active) {
+    a1 = shared_4x4_mem[loc_offset_row + 0] >> QuantShift;
+    c1 = shared_4x4_mem[loc_offset_row + 1] >> QuantShift;
+    d1 = shared_4x4_mem[loc_offset_row + 2] >> QuantShift;
+    b1 = shared_4x4_mem[loc_offset_row + 3] >> QuantShift;
 
-  a1 += c1;
-  d1 -= b1;
-  e1 = (a1 - d1) >> 1;
-  b1 = e1 - b1;
-  c1 = e1 - c1;
-  a1 -= b1;
-  d1 += c1;
+    a1 += c1;
+    d1 -= b1;
+    e1 = (a1 - d1) >> 1;
+    b1 = e1 - b1;
+    c1 = e1 - c1;
+    a1 -= b1;
+    d1 += c1;
 
-  shared_4x4_mem[loc_offset_row + 0] = a1;
-  shared_4x4_mem[loc_offset_row + 1] = b1;
-  shared_4x4_mem[loc_offset_row + 2] = c1;
-  shared_4x4_mem[loc_offset_row + 3] = d1;
+    shared_4x4_mem[loc_offset_row + 0] = a1;
+    shared_4x4_mem[loc_offset_row + 1] = b1;
+    shared_4x4_mem[loc_offset_row + 2] = c1;
+    shared_4x4_mem[loc_offset_row + 3] = d1;
+  }
 
-  GroupMemoryBarrier();
+  GroupMemoryBarrierWithGroupSync();
 
-  a1 = shared_4x4_mem[loc_offset_col + 0];
-  c1 = shared_4x4_mem[loc_offset_col + 4];
-  d1 = shared_4x4_mem[loc_offset_col + 8];
-  b1 = shared_4x4_mem[loc_offset_col + 12];
-  a1 += c1;
-  d1 -= b1;
-  e1 = (a1 - d1) >> 1;
-  b1 = e1 - b1;
-  c1 = e1 - c1;
-  a1 -= b1;
-  d1 += c1;
-  shared_4x4_mem[loc_offset_col + 0] = a1;
-  shared_4x4_mem[loc_offset_col + 4] = b1;
-  shared_4x4_mem[loc_offset_col + 8] = c1;
-  shared_4x4_mem[loc_offset_col + 12] = d1;
+  if (active) {
+    a1 = shared_4x4_mem[loc_offset_col + 0];
+    c1 = shared_4x4_mem[loc_offset_col + 4];
+    d1 = shared_4x4_mem[loc_offset_col + 8];
+    b1 = shared_4x4_mem[loc_offset_col + 12];
+    a1 += c1;
+    d1 -= b1;
+    e1 = (a1 - d1) >> 1;
+    b1 = e1 - b1;
+    c1 = e1 - c1;
+    a1 -= b1;
+    d1 += c1;
+    shared_4x4_mem[loc_offset_col + 0] = a1;
+    shared_4x4_mem[loc_offset_col + 4] = b1;
+    shared_4x4_mem[loc_offset_col + 8] = c1;
+    shared_4x4_mem[loc_offset_col + 12] = d1;
+  }
 
-  GroupMemoryBarrier();
+  GroupMemoryBarrierWithGroupSync();
 
   const int stride = cb_planes[plane].x;
   const int offset =
       cb_planes[plane].y + 8 * ((block.z & 0xffff) + (wi >> 2)) + (4 * (block.z >> 16) + (wi & 3)) * stride;
 
   const int output_offset = loc_mem_offset + (wi & 3) * 4 + 4 * (wi >> 2);
-  buf_dst.Store2(offset,
-                 int2((shared_4x4_mem[output_offset + 0] & 0xffff) | (shared_4x4_mem[output_offset + 1] << 16),
-                      (shared_4x4_mem[output_offset + 2] & 0xffff) | (shared_4x4_mem[output_offset + 3] << 16)));
+  if (active) {
+    buf_dst.Store2(offset,
+                   int2((shared_4x4_mem[output_offset + 0] & 0xffff) | (shared_4x4_mem[output_offset + 1] << 16),
+                        (shared_4x4_mem[output_offset + 2] & 0xffff) | (shared_4x4_mem[output_offset + 3] << 16)));
+  }
 }

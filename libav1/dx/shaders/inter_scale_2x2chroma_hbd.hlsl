@@ -29,9 +29,12 @@ groupshared int intermediate_buffer[64 * LocalStride];
 
 [numthreads(64, 1, 1)] void main(uint3 thread
                                  : SV_DispatchThreadID) {
-  if (thread.x >= cb_wi_count) return;
+  // A thread behind the last block of the dispatch does nothing, but it takes part in the group syncs: a
+  // group sync has to be reached by all threads of the group.
+  const bool active = thread.x < cb_wi_count;
 
-  uint4 block = pred_blocks.Load4((cb_pass_offset + (thread.x >> 1)) << 4);
+  uint4 block = uint4(0, 0, 0, 0);
+  [branch] if (active) block = pred_blocks.Load4((cb_pass_offset + (thread.x >> 1)) << 4);
   const int wi = thread.x & 1;
 
   const int plane = block.y & 3;
@@ -68,7 +71,7 @@ groupshared int intermediate_buffer[64 * LocalStride];
   int4 kernel_h1 = cb_kernels[filter_h][1];
   int local_base = (thread.x & 63) * LocalStride;
   int i;
-  for (i = 0; i < lines; ++i) {
+  if (active) for (i = 0; i < lines; ++i) {
     int ref_addr = ref_offset + ref_stride * clamp(y0 + i, 0, ref_h) + x0;
     const uint shift = (ref_addr & 2) * 8;
     ref_addr &= ~3;
@@ -90,7 +93,13 @@ groupshared int intermediate_buffer[64 * LocalStride];
     intermediate_buffer[local_base + i] = (sum + FilterLineAdd10bit) >> FilterLineShift;
   }
 
-  GroupMemoryBarrier();
+  // The lines filtered horizontally are handed from the threads that made them to the threads that filter
+  // them vertically, through the group memory. The threads of a group run in no particular order, so it
+  // takes a group sync to have all lines there before any of them is read. (Upstream had plain group
+  // memory barriers, which make no thread wait: that held only where the 64 threads of a group ran in
+  // lockstep, as one wave.)
+  GroupMemoryBarrierWithGroupSync();
+  if (!active) return;
 
   mvy += wi * scale.w;
   const int filter_v = (((block.y >> 9) & 15) << 4) + ((mvy & SCALE_SUBPEL_MASK) >> SCALE_EXTRA_BITS);

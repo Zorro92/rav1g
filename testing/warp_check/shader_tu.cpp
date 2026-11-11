@@ -74,11 +74,11 @@ static void set_srt(const uint32_t *w) {
 
 static void scramble(uint64_t *state) {
 #if SHADER_KIND == 0
-  uint8_t *bytes = (uint8_t *)mem;
-  const size_t size = sizeof(mem);
+  uint8_t *bytes = (uint8_t *)mem.bytes();
+  const size_t size = mem.byte_size();
 #elif SHADER_KIND == 1
-  uint8_t *bytes = (uint8_t *)intermediate_buffer;
-  const size_t size = sizeof(intermediate_buffer);
+  uint8_t *bytes = (uint8_t *)intermediate_buffer.bytes();
+  const size_t size = intermediate_buffer.byte_size();
 #else
   uint8_t *bytes = nullptr;
   const size_t size = 0;

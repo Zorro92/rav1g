@@ -52,16 +52,19 @@ int clamp_value(int value, int2 range) { return clamp(value, range.x, range.y); 
 #define IDCT_GEN(N, COLS, ROWS, ROWS0, COEF_LOOP, SCALE_COEF, TRANSFORM_ROW, TRANSFORM_COL)                           \
   [numthreads(64, 1, 1)] void main(uint3 thread                                                                       \
                                    : SV_DispatchThreadID) {                                                           \
-    if (thread.x >= cb_wicount) return;                                                                               \
+    /* A thread behind the last block of the dispatch does nothing, but it takes part in the group syncs: */          \
+    /* a group sync has to be reached by all threads of the group. */                                                 \
+    const bool active = thread.x < cb_wicount;                                                                        \
     const uint wi = thread.x & (N - 1);                                                                               \
-    uint4 block = buf_blocks.Load4((cb_index_offset + thread.x / N) * IdctBlockSize);                                 \
+    uint4 block = uint4(0, 0, 0, 0);                                                                                  \
+    [branch] if (active) block = buf_blocks.Load4((cb_index_offset + thread.x / N) * IdctBlockSize);                  \
     const uint coef_count = block.x & 0x7ff;                                                                          \
     const uint scan_offset = ScanSize * ((block.x >> ScanShift) & ScanMask) + wi;                                     \
     const uint loc_mem_offset = COLS * ROWS * N * (thread.x & (64 - N));                                              \
     const uint input_offset = block.y + wi * 4;                                                                       \
     const int2 row_clamp = int2(-(1 << (cb_bitdepth + 7)), (1 << (cb_bitdepth + 7)) - 1);                             \
     uint i;                                                                                                           \
-    for (i = 0; i < COEF_LOOP; ++i) {                                                                                 \
+    if (active) for (i = 0; i < COEF_LOOP; ++i) {                                                                     \
       int4 coefs = int4(0, 0, 0, 0);                                                                                  \
       if ((wi + i * N) < coef_count) {                                                                                \
         const int addr = input_offset * 4 + i * N * 16;                                                               \
@@ -83,28 +86,32 @@ int clamp_value(int value, int2 range) { return clamp(value, range.x, range.y); 
       shared_mem[loc_mem_offset + cb_scans[scan_offset + i * N].z] = coefs.z;                                         \
       shared_mem[loc_mem_offset + cb_scans[scan_offset + i * N].w] = coefs.w;                                         \
     }                                                                                                                 \
-    GroupMemoryBarrier();                                                                                             \
+    /* The coefficients of a block are placed by all its threads, a row is transformed by one. The threads */         \
+    /* of a group run in no particular order, so the three group syncs here are what makes one pass */                \
+    /* complete before the next one reads it. (Upstream had plain group memory barriers, which make no */             \
+    /* thread wait: that held only where the 64 threads of a group ran in lockstep, as one wave.) */                  \
+    GroupMemoryBarrierWithGroupSync();                                                                                \
     const uint h_type = (block.x >> IdctType_H_Shift) & 3;                                                            \
     const uint loc_row_offset = /*(thread.x & 63) * N * ROWS0 * COLS;*/ loc_mem_offset + wi * ROWS0 * COLS * N;       \
-    for (int row = 0; row < ROWS0; ++row) {                                                                           \
+    if (active) for (int row = 0; row < ROWS0; ++row) {                                                               \
       const uint row_offset = loc_row_offset + row * N;                                                               \
       TRANSFORM_ROW(N* COLS, h_type, row_offset, 1, row_offset, 1, IdctOutputShiftH, row_clamp);                      \
     }                                                                                                                 \
                                                                                                                       \
-    GroupMemoryBarrier();                                                                                             \
+    GroupMemoryBarrierWithGroupSync();                                                                                \
                                                                                                                       \
     const int v_type = (block.x >> IdctType_V_Shift) & 3;                                                             \
     const int loc_out_offset = (block.x & IdctType_V_Flip) ? loc_mem_offset + wi * COLS + (N * ROWS - 1) * N * COLS   \
                                                            : loc_mem_offset + wi * COLS;                              \
     const int loc_out_stride = (block.x & IdctType_V_Flip) ? -N * COLS : N * COLS;                                    \
     const int2 col_clamp = int2(ClampMinValue16, ClampMaxValue16);                                                    \
-    for (int c = 0; c < COLS; ++c) {                                                                                  \
+    if (active) for (int c = 0; c < COLS; ++c) {                                                                      \
       const int in_offset = loc_mem_offset + wi * COLS + c;                                                           \
       const int out_offset = loc_out_offset + c;                                                                      \
       TRANSFORM_COL(N* ROWS, v_type, in_offset, (N * COLS), out_offset, loc_out_stride, IdctOutputShiftV, col_clamp); \
     }                                                                                                                 \
                                                                                                                       \
-    GroupMemoryBarrier();                                                                                             \
+    GroupMemoryBarrierWithGroupSync();                                                                                \
                                                                                                                       \
     const uint plane = (block.x >> 21) & 3;                                                                           \
     const uint stride = cb_planes[plane].x;                                                                           \
@@ -113,7 +120,7 @@ int clamp_value(int value, int2 range) { return clamp(value, range.x, range.y); 
     const uint col = wi & (N * COLS / 4 - 1);                                                                         \
     const int local_offset = loc_mem_offset + (wi / (N * COLS / 4)) * (N * COLS) +                                    \
                              ((block.x & IdctType_H_Flip) ? N * COLS - 4 - 4 * col : 4 * col);                        \
-    for (i = 0; i < N * COLS * ROWS / 4; ++i) {                                                                       \
+    if (active) for (i = 0; i < N * COLS * ROWS / 4; ++i) {                                                           \
       int4 sm;                                                                                                        \
       sm.x = shared_mem[local_offset + 0 + i * (4 * N)];                                                              \
       sm.y = shared_mem[local_offset + 1 + i * (4 * N)];                                                              \
