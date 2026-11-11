@@ -87,6 +87,7 @@ class CParameters {
     bool fitsize_;
     bool lowmem_;
     int lowmem_parts_;
+    bool noguard_;
   };
   enum arg_type { atSingle, atInt, atString };
   enum arg_need { anOptional, anMandatory, anAtLeastOne };

@@ -652,7 +652,7 @@ static void log_memory_summary(int is_error, const char *label, const Av1Core *d
   av1_log(is_error, "MEMORY %s largest: %s", label, line);
 }
 
-static void destroy_gpu_decoder(Av1Core *dec);
+static void destroy_gpu_decoder(Av1Core *dec, int log_steps);
 
 // A step of the decoder creation failed. Says which one, what was allocated up to there and what the video
 // memory budget is, then releases everything the creation has built, so that nothing of it is left when the
@@ -675,7 +675,7 @@ static int create_failed(Av1Core *dec, const resource_config &rcfg, const av1_vi
     // Keep the device for the query after the release.
     device->AddRef();
   }
-  destroy_gpu_decoder(dec);
+  destroy_gpu_decoder(dec, 0);
   if (device) {
     av1_video_memory released;
     av1_query_video_memory(device, &released);
@@ -749,8 +749,42 @@ extern "C" int av1_create_gpu_decoder(Av1Core **gpu_dec, aom_codec_dec_cfg_t *cf
     size_t planned = 0;
     size_t deferred = 0;
     planned_device_bytes(dec, rcfg, &planned, &deferred);
-    const int64_t available = dec->memory_available_cb ? dec->memory_available_cb(dec->memory_available_priv) : -1;
+    int64_t available = dec->memory_available_cb ? dec->memory_available_cb(dec->memory_available_priv) : -1;
     const unsigned long long needed = (unsigned long long)planned + AV1_MEMORY_GUARD_MARGIN;
+    if (available >= 0 && needed > (unsigned long long)available) {
+      // Not refused at once. The system gives the memory of released D3D12 buffers back some time after the
+      // release (a decoder that was destroyed just before this creation), so the answer is asked again for
+      // as long as it keeps growing. Bounded: AV1_MEMORY_GUARD_WAIT_MS, and AV1_MEMORY_GUARD_SETTLE_MS
+      // without a gain of 1 MiB ends it.
+      enum { PollMs = 20 };
+      const int64_t first = available;
+      int64_t best = available;
+      int waited_ms = 0;
+      int settle_ms = 0;
+      while (needed > (unsigned long long)available && waited_ms < AV1_MEMORY_GUARD_WAIT_MS &&
+             settle_ms < AV1_MEMORY_GUARD_SETTLE_MS) {
+        Sleep(PollMs);
+        waited_ms += PollMs;
+        available = dec->memory_available_cb(dec->memory_available_priv);
+        if (available < 0) break;
+        if (available >= best + (1 << 20)) {
+          best = available;
+          settle_ms = 0;
+        } else {
+          settle_ms += PollMs;
+        }
+      }
+      if (available >= 0)
+        av1_log(0,
+                "MEMORY budget: %.1f MiB needed and %.1f MiB left for the decoder, waited %d ms for memory the "
+                "system may still be returning: %.1f MiB left now (%s)",
+                to_mib(needed), to_mib((unsigned long long)first), waited_ms,
+                to_mib((unsigned long long)available),
+                needed <= (unsigned long long)available
+                    ? "enough"
+                    : (waited_ms >= AV1_MEMORY_GUARD_WAIT_MS ? "still growing at the end of the wait"
+                                                             : "no longer growing"));
+    }
     if (available >= 0 && needed > (unsigned long long)available) {
       av1_log_create_error(
           "MEMORY REFUSED decoder %ux%u %u-bit, slots %d: its device buffers take %llu bytes (%.1f MiB) and "
@@ -760,7 +794,7 @@ extern "C" int av1_create_gpu_decoder(Av1Core **gpu_dec, aom_codec_dec_cfg_t *cf
           (unsigned long long)planned, to_mib(planned), to_mib(AV1_MEMORY_GUARD_MARGIN), to_mib(needed),
           to_mib((unsigned long long)available));
       av1_log_video_memory(1, "REFUSED, nothing allocated", &vm_before);
-      destroy_gpu_decoder(dec);
+      destroy_gpu_decoder(dec, 0);
       return -1;
     }
     if (available >= 0)
@@ -889,8 +923,43 @@ void frame_buffer_release(Av1Core *dec, HwFrameBuffer *fb) {
   pthread_mutex_unlock(&dec->fb_pool_mutex);
 }
 
+// One "MEMORY destroy <step>: ..." line: what the adapter reports and what the application has left (its
+// budget callback) at a step of the release of a decoder. The differences between the lines say which step
+// gave how much back, to the video memory and to the application.
+static void log_destroy_step(ID3D12Device *device, int64_t (*available_cb)(void *), void *available_priv,
+                             const char *step) {
+  char dxgi[96];
+  char app[96];
+  av1_video_memory vm;
+  av1_query_video_memory(device, &vm);
+  if (SUCCEEDED(vm.hr_adapter) && SUCCEEDED(vm.hr_local))
+    snprintf(dxgi, sizeof(dxgi), "dxgi local usage %.1f MiB", to_mib(vm.local.CurrentUsage));
+  else
+    snprintf(dxgi, sizeof(dxgi), "dxgi local usage not available");
+  const int64_t left = available_cb ? available_cb(available_priv) : -1;
+  if (left >= 0)
+    snprintf(app, sizeof(app), "the application has %.1f MiB left for a decoder", to_mib((unsigned long long)left));
+  else
+    snprintf(app, sizeof(app), "what the application has left is not known (%s)",
+             available_cb ? "its callback does not know" : "no memory_available_cb");
+  av1_log(0, "MEMORY destroy %s: %s; %s", step, dxgi, app);
+}
+
 // Also for a decoder whose creation stopped half way (create_failed): everything not built yet is zero.
-static void destroy_gpu_decoder(Av1Core *dec) {
+// |log_steps|: the release of a decoder that was in use, logged step by step ("MEMORY destroy").
+static void destroy_gpu_decoder(Av1Core *dec, int log_steps) {
+  // The device stays with the application; it is held here for the lines after the decoder's own reference
+  // is gone. The budget callback is the application's.
+  ID3D12Device *device = log_steps ? dec->compute.device.Get() : NULL;
+  int64_t (*const available_cb)(void *) = dec->memory_available_cb;
+  void *const available_priv = dec->memory_available_priv;
+  if (device) {
+    device->AddRef();
+    log_destroy_step(device, available_cb, available_priv, "start");
+  }
+
+  // Joins the GPU completion thread: every frame that was submitted has completed on the GPU (the thread
+  // waits for the fence of each), so nothing on the queue uses the buffers that are released below.
   av1_drain_gpu_decoder(dec);
 
   if (dec->cb_release_image) {
@@ -917,14 +986,39 @@ static void destroy_gpu_decoder(Av1Core *dec) {
   MTQueueDestroy(&dec->gpu_item_pool);
   MTQueueDestroy(&dec->frame_data_pool);
 
-  if (dec->memory) dec->memory->release();
+  if (dec->memory) {
+    if (device) {
+      log_destroy_step(device, available_cb, available_priv, "GPU thread joined, buffers not yet released");
+      // The buffers the CPU maps first, the default-heap buffers the CPU never sees last: one line after
+      // each memory type.
+      static const MemoryType order[MemoryTypeCount] = {DeviceUpload, HostRW,          UploadUAV,
+                                                        ReadBack,     DeviceOnlyConst, DeviceOnly};
+      for (int t = 0; t < MemoryTypeCount; ++t) {
+        int count = 0;
+        const size_t bytes = dec->memory->release_type(order[t], &count);
+        if (!count) continue;
+        char step[96];
+        snprintf(step, sizeof(step), "released %s, %d buffers, %.1f MiB", av1_memory_type_name(order[t]), count,
+                 to_mib(bytes));
+        log_destroy_step(device, available_cb, available_priv, step);
+      }
+    }
+    dec->memory->release();
+  }
 
+  // The command list, the allocators and fences of the slots, the timing query heaps, the decoder's command
+  // queue (its own unless the application gave one) and its reference to the device.
   dec->~Av1Core();
+
+  if (device) {
+    log_destroy_step(device, available_cb, available_priv, "end, command queue, list and allocators released");
+    device->Release();
+  }
 }
 
 void av1_destroy_gpu_decoder(Av1Core *dec) {
   if (!dec) return;
-  destroy_gpu_decoder(dec);
+  destroy_gpu_decoder(dec, 1);
 }
 
 void av1_prepare_command_buffer(Av1Core *dec) {

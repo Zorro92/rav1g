@@ -83,6 +83,13 @@ class PerfStats {
     decode_calls_.clear();
     dropped_ = 0;
   }
+  // Reset, and the memory of the records goes back to the heap (end of a task).
+  void Release() {
+    std::vector<av1_perf_frame>().swap(frames_);
+    std::vector<double>().swap(outputs_);
+    std::vector<double>().swap(decode_calls_);
+    dropped_ = 0;
+  }
   // One record per decoded frame, in completion order.
   void AddFrame(const av1_perf_frame& f) {
     if (frames_.size() >= kMaxFrames) {

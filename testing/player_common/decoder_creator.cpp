@@ -181,12 +181,19 @@ int Decoders::DecodeLoop() {
   }
   // The decoder's own log lines (MEMORY ...) go to the player's log, from the pipeline states on.
   av1_set_log_callback(AV1Decoder::LogLine, NULL);
+  AV1Decoder::LogMemory(dx_resources_.dx12_device.Get(), "before the pipeline states");
   dx_resources_.dx12_psos =
       av1_create_pipeline_cache_handle(dx_resources_.dx12_device.Get(), CREATE_SHADERS_THREAD_CNT);
   if (!dx_resources_.dx12_psos) {
     XB_LOGE << "Unable to create compute shaders";
     return -1;
   }
+  // The pipeline states are created on threads and the first decoder creation waits for them. Waiting here
+  // puts their memory (about 84 MiB of the app's on the console, once per launch) in front of the first
+  // "MEMORY app before the decoder" line instead of inside that creation. A state that failed is reported
+  // by the decoder creation, as before.
+  av1_wait_pipeline_cache_handle(dx_resources_.dx12_psos);
+  AV1Decoder::LogMemory(dx_resources_.dx12_device.Get(), "after the pipeline states");
   decoder_ = std::shared_ptr<AV1Decoder>(new AV1Decoder(dx_resources_, display_, &stop_decode_));
   for (std::vector<one_task>::iterator iter = arg_lists.begin(); iter != arg_lists.end() && !stop_; iter++) {
     // check if line is not empty

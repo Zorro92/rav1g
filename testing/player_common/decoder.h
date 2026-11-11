@@ -26,6 +26,7 @@
 #include <fstream>
 #include <chrono>
 #include <condition_variable>
+#include <atomic>
 
 #include <wrl.h>
 #include <wrl/client.h>
@@ -171,7 +172,12 @@ class BufferLocker {
   void Finalize() {
     if (!finalized_) {
       if (out_file_) fclose(out_file_);
+      out_file_ = 0;
       if (md5_checker_) has_md5_errors_ = md5_checker_->ShowResult(hasFatalError_);
+      // The task's md5 state goes with the task: the reference list of the checker, and the saver, whose
+      // file is closed (and so complete on disk) here instead of when the next task replaces this queue.
+      md5_checker_.reset();
+      md5_saver_.reset();
       last_frame_.reset();
       // buffers_pool_.reset();
       finalized_ = true;
@@ -195,6 +201,8 @@ class BufferLocker {
   int frame_no_ = 0;
   int frame_counter_ = 0;
   int got_last_frame_ = 0;
+  // Frames the decoder has handed over so far, for the MEMORY lines of the decode loop.
+  std::atomic<int> pushed_{0};
   // -nopresent: frames handed straight back to the pool
   int released_ = 0;
   std::chrono::steady_clock::time_point released_first_;
@@ -222,6 +230,9 @@ class AV1Decoder {
     }
     if (perf_installed_) av1_set_perf_callback(NULL, NULL);
   }
+  // "MEMORY app <where>" and "MEMORY dxgi <where>": the memory of the app (Windows::System::MemoryManager)
+  // and the video memory of the device's adapter, at a step of the launch or of a task (decoder.cpp).
+  static void LogMemory(ID3D12Device* device, const char* where);
   void Start(CParameters* params) {
     need_reinit_ = params && (params->GetParams().threads_ != params_.threads_ ||
                               params->GetParams().player_queue_size_ != params_.player_queue_size_ ||
@@ -283,6 +294,12 @@ class AV1Decoder {
   static void RunFetchLoop(AV1Decoder* ptr) { ptr->FetchLoop(); }
   int DecodeLoop();
   int DecodeOne();
+  void LogMemory(const char* where) { LogMemory(dx_desources_.dx12_device.Get(), where); }
+  // aom_codec_destroy with the MEMORY lines before and after it.
+  void DestroyDecoder();
+  // After a decoder and its output pool were released: waits, bounded, until the app's memory is back at
+  // what it was without a decoder, and logs how long that took and what stays charged.
+  void SettleAppMemory();
   void PerfOutput() {
     const double now_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -328,6 +345,12 @@ class AV1Decoder {
   unsigned int created_bitdepth_ = 0;
   // Estimate of the output pool's textures for the stream, for MemoryAvailable.
   uint64_t output_pool_estimate_ = 0;
+  // The app's memory at the first task of the launch: pipeline states created, no decoder, no host pool, no
+  // output pool, no stream open. What a release should get back to. 0: not known.
+  uint64_t app_baseline_ = 0;
+  bool app_baseline_taken_ = false;
+  // A decoder was destroyed since the last creation: the next creation settles first (SettleAppMemory).
+  bool settle_pending_ = false;
   bool created_intrav2_ = false;
   int created_lowmem_ = 0;
   perfstats::PerfStats perf_stats_;

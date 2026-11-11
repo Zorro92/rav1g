@@ -121,6 +121,12 @@ void av1_log_video_memory(int is_error, const char *label, const av1_video_memor
   av1_log(is_error, "MEMORY dxgi %s: %s; %s", label, local, non_local);
 }
 
+extern "C" void av1_log_video_memory_now(void *d3d12device, const char *label) {
+  av1_video_memory info;
+  av1_query_video_memory(static_cast<ID3D12Device *>(d3d12device), &info);
+  av1_log_video_memory(0, label ? label : "", &info);
+}
+
 void av1_memory_allocator::setup(uint8_t *host_mem, size_t host_size) {
   size_t haddr = (size_t)host_mem;
   size_t hoffset = ((haddr + 255) & ~255) - haddr;
@@ -183,6 +189,7 @@ HRESULT upload_helper(dx_compute_context *context, ID3D12Resource *dst, void *in
   fence->SetEventOnCompletion(1, event);
 
   WaitForSingleObject(event, INFINITE);
+  CloseHandle(event);
   return hr;
 }
 
@@ -276,10 +283,12 @@ void *av1_memory_allocator::host_allocate(size_t size, int align) {
   return ptr;
 }
 
-void av1_memory_allocator::release() {
+size_t av1_memory_allocator::release_type(MemoryType mem, int *count) {
+  size_t bytes = 0;
+  int released = 0;
   for (int i = 0; i < dev_obj_count; ++i) {
     GpuBufferObject *obj = &dev_buffer_pool[i];
-    if (!obj->dev) continue;
+    if (!obj->dev || obj->memtype != mem) continue;
 
     if (obj->host_ptr) {
       obj->dev->Unmap(0, &CD3DX12_RANGE(0, 0));
@@ -288,10 +297,18 @@ void av1_memory_allocator::release() {
 
     obj->dev->Release();
     obj->dev = NULL;
+    bytes += obj->size;
+    ++released;
   }
+  dev_bytes[mem] = 0;
+  dev_count[mem] = 0;
+  if (count) *count = released;
+  return bytes;
+}
+
+void av1_memory_allocator::release() {
+  for (int t = 0; t < MemoryTypeCount; ++t) release_type((MemoryType)t, NULL);
   dev_obj_count = 0;
-  memset(dev_bytes, 0, sizeof(dev_bytes));
-  memset(dev_count, 0, sizeof(dev_count));
 }
 
 GpuBufferObject *av1_memory_allocator_dummy::create_buffer(size_t size, MemoryType mem, const char *name, int slot) {

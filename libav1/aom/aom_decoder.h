@@ -104,11 +104,28 @@ typedef struct av1_out_buffers_cb
 typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
 
 /*!\brief What a decoder creation guarded by memory_available_cb must leave
- * free. A creation takes more than its buffers: creating the 4096x2176 10-bit
- * decoder with two slots raised the memory of a console app by 805.7 MiB, 51
- * MiB more than the 754.7 MiB of its device buffers (the host pool was
- * allocated before). The margin is that and 32 MiB. */
-#define AV1_MEMORY_GUARD_MARGIN ((size_t)84 << 20)
+ * free: headroom for what decoding takes outside the decoder's buffers and
+ * the output images (command allocators, the application's stream buffers).
+ *
+ * Nothing is added for the creation itself. Measured in a console app (limit
+ * 1024 MiB): the pipeline states of av1_create_pipeline_cache_handle take
+ * about 84 MiB of the app's memory, once per process. The first decoder
+ * creation waits for them before it asks the callback, so they are in what
+ * the callback reports (77 MiB in use before that creation, 160.8 MiB when
+ * the callback was asked). Creating the 4096x2176 10-bit decoder with two
+ * slots, 681.9 MiB of device buffers, then raised the app's memory to 812.7
+ * MiB: by about 652 MiB, less than its buffers. The margin used to be 84 MiB,
+ * from reading the pipeline states as a cost of the creation (51 MiB) and
+ * adding 32 MiB; with a 4-image 4K output pool that refused the default
+ * decoder in a fresh launch by 3.6 MiB. */
+#define AV1_MEMORY_GUARD_MARGIN ((size_t)48 << 20)
+/*!\brief A creation that does not fit is not refused at once: the system
+ * returns the memory of a decoder that was just destroyed some time after
+ * the release, so the creation asks the callback again every 20 ms for as
+ * long as the answer keeps growing (by 1 MiB within
+ * AV1_MEMORY_GUARD_SETTLE_MS), at most AV1_MEMORY_GUARD_WAIT_MS. */
+#define AV1_MEMORY_GUARD_WAIT_MS 2000
+#define AV1_MEMORY_GUARD_SETTLE_MS 300
 /*!\brief The same for one buffer created after the creation (a slot's
  * palette buffer). */
 #define AV1_MEMORY_GUARD_MARGIN_BUFFER ((size_t)16 << 20)
@@ -182,7 +199,10 @@ typedef struct aom_codec_dec_cfg {
    * line. A refused creation fails, a frame without its palette buffer is a
    * decode error; nothing was allocated and the device is intact. Without a
    * callback nothing is checked. The callback is called on the thread that
-   * creates the decoder and on the thread that calls aom_codec_decode. */
+   * creates the decoder, on the thread that calls aom_codec_decode, and on
+   * the thread that destroys the decoder (aom_codec_destroy logs what the
+   * application has left after each step of the release, "MEMORY destroy"),
+   * so memory_available_priv must be valid until aom_codec_destroy returns. */
   av1_memory_available_cb_fn_t memory_available_cb;
   void *memory_available_priv;
   /* Filled by av1_codec_query_memory_requirements next to host_size: the
@@ -441,6 +461,16 @@ aom_codec_err_t av1_codec_query_memory_requirements(aom_codec_dec_cfg_t *cfg);
  */
 void* av1_create_pipeline_cache_handle(void* d3d12device, int threads);
 void av1_destroy_pipeline_cache_handle(void* handle);
+/*!\brief Wait until the pipeline states of the handle are created.
+ *
+ * With threads the creation above returns while they are still being
+ * created, and the first decoder creation waits for them. An application that
+ * measures its memory (aom_codec_dec_cfg_t::memory_available_cb, a log) waits
+ * here first: the pipeline states are memory of the process, not of a
+ * decoder, and stay until av1_destroy_pipeline_cache_handle. Returns 0 when
+ * all were created. Not to be called while a decoder is being created with
+ * the handle on another thread. */
+int av1_wait_pipeline_cache_handle(void* handle);
 #ifdef __cplusplus
 }
 #endif

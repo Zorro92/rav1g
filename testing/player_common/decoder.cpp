@@ -72,6 +72,67 @@ static int64_t AppMemoryLeft() {
 #endif
 }
 
+// The app's memory in use, 0 where that is not known.
+static uint64_t AppMemoryUsageNow() {
+#if (WINAPI_FAMILY == WINAPI_FAMILY_APP)
+  try {
+    return Windows::System::MemoryManager::AppMemoryUsage;
+  } catch (Platform::Exception ^) {
+    return 0;
+  }
+#else
+  return 0;
+#endif
+}
+
+// One step of the launch or of a task: "MEMORY app <where>: ..." and "MEMORY dxgi <where>: ...". The steps
+// are listed in docs/test-player.md; the difference between two lines is what the step in between took or
+// gave back.
+void AV1Decoder::LogMemory(ID3D12Device* device, const char* where) {
+  LogAppMemory(where, false);
+  if (device) av1_log_video_memory_now(device, where);
+}
+
+void AV1Decoder::DestroyDecoder() {
+  XB_LOGI << "Destroy decoder";
+  LogMemory("before the decoder is destroyed");
+  // The decoder logs its own release step by step ("MEMORY destroy ...").
+  aom_codec_destroy(&decctx_);
+  memset(&decctx_, 0, sizeof(decctx_));
+  initialized_ = 0;
+  settle_pending_ = true;
+  LogMemory("after the decoder was destroyed");
+}
+
+// The system gives the memory of released D3D12 buffers back to the app some time after the release
+// (D3D12 only queues the destruction), and the budget guard of the next creation looks at what the app has
+// left. So after a decoder and its output pool were released the player waits here until the app's memory
+// is back near what it was without a decoder, at most kSettleMaxMs, and logs what it saw: how long it took,
+// or how much was still charged at the end of the wait.
+void AV1Decoder::SettleAppMemory() {
+  static const int kSettlePollMs = 20;
+  static const int kSettleMaxMs = 2000;
+  static const uint64_t kSettleNear = (uint64_t)16 << 20;
+  const uint64_t start = AppMemoryUsageNow();
+  if (!start || !app_baseline_) {
+    XB_LOGI << "MEMORY app settle after the release: not done, the app's memory is not known here";
+    return;
+  }
+  uint64_t now = start;
+  int waited_ms = 0;
+  while (now > app_baseline_ + kSettleNear && waited_ms < kSettleMaxMs) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(kSettlePollMs));
+    waited_ms += kSettlePollMs;
+    now = AppMemoryUsageNow();
+  }
+  const uint64_t above = now > app_baseline_ ? now - app_baseline_ : 0;
+  XB_LOGI << "MEMORY app settle after the release: usage " << MibString(start) << " -> " << MibString(now) << " in "
+          << waited_ms << " ms; without a decoder the app used " << MibString(app_baseline_)
+          << " at the first task of the launch, " << MibString(above) << " more are charged now"
+          << (above > kSettleNear ? " (not returned within the wait)" : " (returned)");
+  LogMemory("after the settle wait");
+}
+
 // The textures the output pool creates when the first frame arrives (all its images at once): the samples of
 // a 4:2:0 image and a sixteenth for alignment. An estimate: 4 images of 3840x2160 10-bit come to 100.9 MiB,
 // the console reported 100.5 MiB. The readback buffers of an md5 or file run are not counted: with them the
@@ -105,7 +166,15 @@ int AV1Decoder::DecodeLoop() {
   for (int i = 0; i < params_.loops_; i++) {
     XB_LOGI << " ";
     XB_LOGI << "start loop " << i << " for " << params_.source_file_;
+    if (!app_baseline_taken_ && !initialized_ && host_mem_.empty()) {
+      // First task of the launch: the pipeline states exist, nothing of a decoder or a stream does.
+      app_baseline_ = AppMemoryUsageNow();
+      app_baseline_taken_ = true;
+    }
+    LogMemory("task start");
     DecodeOne();
+    // The stream reader of the task and its buffers are locals of DecodeOne: gone here.
+    LogMemory("task end, stream reader closed");
   }
   XB_LOGI << " ";
   XB_LOGI << "All works're done. Bye";
@@ -187,6 +256,8 @@ int AV1Decoder::DecodeOne() {
   // and the output images of the stream are (max_frame_width and max_frame_height bound every frame of the
   // sequence, with superres and reference scaling) and how many bits a sample has.
   if (find_key_frame()) return -1;
+  // The reader thread is open and reads ahead (up to 20 frames); the first key frame is in memory.
+  LogMemory("stream reader at the first key frame");
 
   // The size the decoder is created for. -fitsize: the stream's largest frame size, rounded up to 128 as the
   // decoder does, and 8-bit buffers for an 8-bit stream. A stream that is larger than the default in either
@@ -211,21 +282,29 @@ int AV1Decoder::DecodeOne() {
                        created_slots_ != params_.slots_ || created_width_ != dec_width ||
                        created_height_ != dec_height || created_bitdepth_ != dec_bitdepth ||
                        created_intrav2_ != params_.intrav2_ || created_lowmem_ != params_.lowmem_parts_);
-  if (initialized_ && (need_reinit_ || other_decoder)) {
-    XB_LOGI << "Destroy decoder";
-    aom_codec_destroy(&decctx_);
-    memset(&decctx_, 0, sizeof(decctx_));
-    initialized_ = 0;
-  }
+  if (initialized_ && (need_reinit_ || other_decoder)) DestroyDecoder();
   if (params_.recreate_ || !initialized_) {
     XB_LOGI << "(Re)create decoder";
     try {
       // No decoder exists here. The output pool of the one before goes first: its images are memory the new
       // decoder may need, and the old output queue would keep them until after the creation.
-      output_queue_.reset();
-      storage_.reset();
-      host_mem_.clear();
-      host_mem_.shrink_to_fit();
+      if (output_queue_ || storage_) {
+        LogMemory("before the output pool is released");
+        output_queue_.reset();
+        storage_.reset();
+        LogMemory("after the output pool was released");
+      }
+      if (!host_mem_.empty()) {
+        host_mem_.clear();
+        host_mem_.shrink_to_fit();
+        LogMemory("after the host pool was released");
+      }
+      // Everything of the decoder before is released. Give the system the time to hand it back before the
+      // host pool of the new decoder is allocated and its budget guard looks at what is left.
+      if (settle_pending_) {
+        SettleAppMemory();
+        settle_pending_ = false;
+      }
       aom_codec_dec_cfg_t cfg;
       memset(&cfg, 0, sizeof(aom_codec_dec_cfg_t));
       cfg.width = dec_width;
@@ -257,7 +336,10 @@ int AV1Decoder::DecodeOne() {
       const unsigned int out_bitdepth = si.bit_depth ? si.bit_depth : dec_bitdepth;
       const uint64_t output_pool = OutputPoolEstimate(params_, out_width, out_height, out_bitdepth);
       output_pool_estimate_ = output_pool;
-      cfg.memory_available_cb = MemoryAvailable;
+      // -noguard: no callback, the creation is not checked. For finding out whether memory that stays
+      // charged after a decoder was destroyed is reused by the next one; a creation that does not fit loses
+      // the D3D12 device for the rest of the launch.
+      cfg.memory_available_cb = params_.noguard_ ? NULL : MemoryAvailable;
       cfg.memory_available_priv = this;
       av1_codec_query_memory_requirements(&cfg);
       host_mem_.resize(cfg.host_size, 0);
@@ -282,7 +364,9 @@ int AV1Decoder::DecodeOne() {
               << out_width << "x" << out_height << " " << out_bitdepth << "-bit, " << MibString(output_pool)
               << (params_.needReadBack_ ? " (the readback buffers of this run are not counted)" : "")
               << "; held back from what the decoder may take until the pool has them. The decoder's budget "
-              << "guard keeps a margin of " << MibString(AV1_MEMORY_GUARD_MARGIN) << " at its creation";
+              << "guard keeps a margin of " << MibString(AV1_MEMORY_GUARD_MARGIN) << " at its creation"
+              << (params_.noguard_ ? "; -noguard: the guard is off for this creation" : "");
+      // The host pool of the new decoder is allocated; the decoder's own lines give the video memory.
       LogAppMemory("before the decoder", false);
       if (aom_codec_dec_init(&decctx_, aom_codec_av1_dx(), &cfg, dec_flags)) {
         host_mem_.clear();
@@ -393,6 +477,10 @@ int AV1Decoder::DecodeOne() {
   int limit = params_.limit_;
   int has_error = 0;
   int at_least_one = 0;
+  // MEMORY lines of the decode loop: once the first frame is out (the output pool has its images then) and
+  // once 30 are out, to tell memory that is taken once from memory that grows with the frames.
+  static const int kMemoryMarks[] = {1, 30};
+  int memory_mark = 0;
   while (buffer && limit-- && !(*stop_) && !output_queue_->hasFatalError_) {
     XB_LOGD << cnt++ << " - " << buffer->Size();
     uint64_t user_priv = static_cast<uint64_t>(frame_in++ * framedur);
@@ -420,10 +508,16 @@ int AV1Decoder::DecodeOne() {
       }
     }
 #endif  // ASYNC_OUTPUT
+    if (memory_mark < 2 && output_queue_->pushed_.load() >= kMemoryMarks[memory_mark]) {
+      LogMemory(memory_mark == 0 ? "decoding, first frame out" : "decoding, 30 frames out");
+      ++memory_mark;
+    }
     buffer = reader.GetData();
   }
+  LogMemory("before the drain");
   // drain
   aom_codec_decode(&decctx_, 0, 0, 0);
+  LogMemory("after the drain");
   // The drain joins the decoder's GPU completion thread, so every frame record is in.
   if (params_.gputime_ || params_.nopresent_) PerfReport();
 #if (!ASYNC_OUTPUT && !CB_OUTPUT)
@@ -447,13 +541,16 @@ int AV1Decoder::DecodeOne() {
     if (at_least_one) output_queue_->WaitLast();
     if (display_) display_->RemoveSource(this);
   }
-  if (has_error || params_.recreate_) {
-    XB_LOGI << "Destroy decoder";
-    aom_codec_destroy(&decctx_);
-    memset(&decctx_, 0, sizeof(decctx_));
-    initialized_ = 0;
-  }
+  LogMemory("after the last frame left the output queue");
+  if (has_error || params_.recreate_) DestroyDecoder();
+  // The task's own records: the md5 reference list and the md5 file being saved (Finalize), and the
+  // per-frame timing records, which the report above has printed.
   output_queue_->Finalize();
+  {
+    std::lock_guard<std::mutex> lock(perf_cs_);
+    perf_stats_.Release();
+  }
+  LogMemory("after the task's md5 and timing records were released");
   uint32_t has_md5_errors = output_queue_->has_md5_errors_;
   if (*stop_ == taskNext) *stop_ = TaskNone;
   if (params_.conformance_) {
@@ -559,6 +656,7 @@ int BufferLocker::Push(aom_image_t* img) {
     return 0;
   }
   if (got_last_frame_) got_last_frame_ = 0;
+  ++pushed_;
   if (img && (img->d_w != width_ || img->d_h != height_ || img->bit_depth != bpp_)) {
     width_ = img->d_w;
     height_ = img->d_h;
@@ -573,7 +671,7 @@ int BufferLocker::Push(aom_image_t* img) {
       int ret = md5_saver_->Put(img);
       if (ret) md5_saver_.reset(0);
     }
-    if ((params_->md5_frame_check_ || params_->md5_) && img) {
+    if ((params_->md5_frame_check_ || params_->md5_) && img && md5_checker_) {
       int err = md5_checker_->Put(img);
       if (err && !params_->save_wrong_yuv_.empty()) {
         SaveToFile(img, true);

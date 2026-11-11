@@ -98,7 +98,11 @@ struct av1_memory_allocator : public av1_memory_manager_base {
   // Both return NULL when the allocation fails, after logging a "MEMORY FAILED" line that names it.
   virtual GpuBufferObject* create_buffer(size_t size, MemoryType mem, const char* name = 0, int slot = -1);
   virtual void* host_allocate(size_t size, int align = 0);
+  // Releases every buffer. The descriptors are free again afterwards.
   void release();
+  // Releases the buffers of one memory type and returns their bytes (and their number in |count|). For a
+  // release that is logged type by type; release() must follow it before the allocator is used again.
+  size_t release_type(MemoryType mem, int* count);
 
   // What was allocated so far, for the MEMORY log lines.
   int buffer_count() const { return dev_obj_count; }

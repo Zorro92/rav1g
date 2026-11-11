@@ -62,6 +62,14 @@ one commit each:
   [What the decoder takes](#what-the-decoder-takes), [`-lowmem`](#smaller-decoder--lowmem)
   and [Budget guard](#budget-guard-memory-refused). A host-side check of the peek lives in
   `testing/seq_header_check`.
+- **Memory after a decoder is destroyed**: on the console about 350 MiB stayed charged to
+  the app after a decoder that had decoded frames was destroyed, and the budget guard then
+  refused every later decoder of the launch. The player and the decoder now log the app's
+  memory at every step of a task and of the release (`MEMORY app <where>`,
+  `MEMORY destroy <step>`), the player waits for the memory to come back before it creates
+  the next decoder, and the guard does the same before it refuses; the guard's margin was
+  also wrong (it refused the default decoder in a fresh launch) and is re-derived. See
+  [Memory after a decoder is destroyed](#memory-after-a-decoder-is-destroyed).
 
 ## Build
 
@@ -393,11 +401,14 @@ shader is checked against it.
   stream's name plus `.md5`, next to the stream.
 - Use the same `-limit` in both tasks. The checker does not guard against a reference
   file with fewer frames than it decodes.
-- **Save and check in separate launches.** The saver's file is not flushed when its
-  task ends, so a check task in the same `args_av1.txt` reads only the first ~8 KB
-  (about 210 frames). Past that point the checker either reports errors with an empty
-  expected value (`Avaiting  In real ...`) or crashes without a log line. Run the save
-  task, let the app exit, then launch again with only the check task.
+- **Save and check in separate launches.** Up to package 0.2.6.0 the saver's file was not
+  closed when its task ended, so a check task in the same `args_av1.txt` read only the
+  first ~8 KB (about 210 frames). Past that point the checker either reported errors with
+  an empty expected value (`Avaiting  In real ...`) or crashed without a log line. The
+  file is now closed at the end of its task (the task's md5 state is released there, see
+  [Memory after a decoder is destroyed](#memory-after-a-decoder-is-destroyed)); a save and
+  a check in one launch have not been run on the console yet, so until one has: run the
+  save task, let the app exit, then launch again with only the check task.
 - The result is in the log when the second task ends: `MD5 is OK`, or
   `MD5 checksum errors in N frames` with one `MD5 checksum error in <n> frame` line
   per bad frame. Later frames are predicted from earlier ones, so one wrong CDEF
@@ -765,6 +776,7 @@ elsewhere shorten the wall time per frame. Neither changes the decoded output.
 | `-fitsize` | The decoder is created for the stream's largest frame size and bit depth instead of 4096x2176 10-bit, which makes every buffer smaller; see [Decoder size](#decoder-size--fitsize). |
 | `-lowmem` | Three memory reductions that are not on by default: one back buffer shared by all frames, and smaller per-slot shares of the mode info pool and of the coefficient buffer; see [Smaller decoder](#smaller-decoder--lowmem). |
 | `-lowmemparts N` | Some of the three: `N` is the sum of 1 (shared back buffer), 2 (mode info shares) and 4 (coefficient shares). `-lowmem` is `-lowmemparts 7`. |
+| `-noguard` | The decoder of this task is created without the [budget guard](#budget-guard-memory-refused). Only for the test described under [Memory after a decoder is destroyed](#memory-after-a-decoder-is-destroyed): a creation that does not fit loses the D3D12 device for the rest of the launch. Has no effect on a task that reuses the decoder of the task before. |
 
 All are off by default: the decoder then has two slots, clears on the decode thread and
 is sized for 4096x2176 10-bit, as before. They are independent of each other and of
@@ -999,10 +1011,13 @@ an app container), nothing is checked.
 
 - **At the creation**: the decoder adds up the device buffers it is about to create, the
   same way it creates them, and is refused when they would leave less than
-  `AV1_MEMORY_GUARD_MARGIN`, 84 MiB. Most of the margin is not headroom: creating the
-  754.7 MiB decoder raised the app's memory from 77 to 882.7 MiB, 51 MiB more than its
-  buffers (the host pool is allocated before the creation and is part of the 77). The
-  margin is that and 32 MiB.
+  `AV1_MEMORY_GUARD_MARGIN`, 48 MiB: headroom for what decoding takes outside the
+  decoder's buffers and the output images. Nothing is added for the creation itself; see
+  [the margin](#the-margin) below for the numbers. A creation that does not fit is not
+  refused at once: the decoder asks the callback again every 20 ms for as long as the
+  answer keeps growing (the system returns the memory of a decoder that was just
+  destroyed some time after its release), at most 2 s, and stops after 300 ms without a
+  gain of 1 MiB (`AV1_MEMORY_GUARD_WAIT_MS`, `AV1_MEMORY_GUARD_SETTLE_MS`).
 - **For a palette buffer** created later: refused when it would leave less than
   `AV1_MEMORY_GUARD_MARGIN_BUFFER`, 16 MiB. The frame is then a decode error.
 
@@ -1011,9 +1026,10 @@ launch runs:
 
 ```text
 MEMORY decoder size: 4096x2176 10-bit (default, the stream's largest frame is 3840x2160 10-bit), slots 3, intra_v2 buffers no, low memory parts 0; device buffers 842.2 MiB and up to 77.3 MiB for palette buffers on first use, host pool N.N MiB
-MEMORY output pool estimate: textures of 4 images of 3840x2160 10-bit, 100.9 MiB; held back from what the decoder may take until the pool has them. The decoder's budget guard keeps a margin of 84.0 MiB at its creation
+MEMORY output pool estimate: textures of 4 images of 3840x2160 10-bit, 100.9 MiB; held back from what the decoder may take until the pool has them. The decoder's budget guard keeps a margin of 48.0 MiB at its creation
 MEMORY app before the decoder: usage N.N MiB of limit 1024.0 MiB, N.N MiB left
-MEMORY REFUSED decoder 4096x2176 10-bit, slots 3: its device buffers take 883162112 bytes (842.2 MiB) and the creation must leave a margin of 84.0 MiB, 926.2 MiB together; the application has N.N MiB left for the decoder. Nothing was allocated; the D3D12 device is intact
+MEMORY budget: 890.2 MiB needed and N.N MiB left for the decoder, waited 300 ms for memory the system may still be returning: N.N MiB left now (no longer growing)
+MEMORY REFUSED decoder 4096x2176 10-bit, slots 3: its device buffers take 883162112 bytes (842.2 MiB) and the creation must leave a margin of 48.0 MiB, 890.2 MiB together; the application has N.N MiB left for the decoder. Nothing was allocated; the D3D12 device is intact
 MEMORY dxgi REFUSED, nothing allocated: local budget N.N MiB, usage N.N MiB, ...
 Failed to initialize decoder: Memory allocation error: MEMORY REFUSED decoder 4096x2176 10-bit, slots 3: ...
 MEMORY app after the failed decoder creation: usage N.N MiB of limit 1024.0 MiB, N.N MiB left
@@ -1027,22 +1043,75 @@ MEMORY REFUSED palette buffer of slot 1 (frame 12 allows screen content tools): 
 A creation that is accepted says what was compared:
 
 ```text
-MEMORY budget: device buffers 681.9 MiB + margin 84.0 MiB = 765.9 MiB, the application has N.N MiB left for the decoder: accepted; palette buffers on first use would add up to 51.5 MiB
+MEMORY budget: device buffers 681.9 MiB + margin 48.0 MiB = 729.9 MiB, the application has N.N MiB left for the decoder: accepted; palette buffers on first use would add up to 51.5 MiB
 ```
 
-or `MEMORY budget: not checked (...)` with the reason.
+or `MEMORY budget: not checked (...)` with the reason (also with `-noguard`).
 
-With the console's numbers (limit 1024.0 MiB, 77 MiB used before the creation with the
-host pool in it, 4 output images of a 3840x2160 10-bit stream) the decoder may take about
-846 MiB, so the guard accepts buffers up to about 762 MiB: every two-slot decoder of the
-table above (also the 754.7 MiB one of package 0.2.5.0, which ran), the three-slot decoder
-with `-lowmem` (695.4) and with `-lowmem -fitsize` (652.4), and it refuses three slots
-without `-lowmem` (842.2, and 790.2 with `-fitsize`, which would end within a few MiB of
-the limit) and four slots. These are computed; the console has to confirm them.
+#### The margin
+
+Console, package 0.2.6.0, limit 1024.0 MiB, 4 output images of a 3840x2160 10-bit stream
+(estimate 100.9 MiB):
+
+- **The pipeline states take about 84 MiB of the app's memory, once per launch**, and
+  they were being created while the first task started. The first task of a fresh launch
+  logged `app before the decoder: usage 77.0 MiB`, the creation then waited for the
+  pipeline states, and the guard was asked with 160.8 MiB in use (it reported 762.3 MiB
+  left for the decoder: 1024.0 - 160.8 - 100.9). The next task of that launch, with no
+  decoder created in between, logged `app before the decoder: usage 160.8 MiB`. About 17
+  MiB of the 84 are video memory (`dxgi` usage 37.3 MiB before the first creation, 54.2
+  MiB with no decoder later in the launch). That the 84 MiB are the pipeline states is
+  derived: between the player's line and the guard's question the creation does nothing
+  else of any size (it creates a command queue and waits for them). The lines `MEMORY app
+  before the pipeline states` and `after the pipeline states` now measure it.
+- **The creation itself takes less than its device buffers.** In the launch where the
+  default decoder (681.9 MiB of device buffers) was created, the app's memory was 812.7
+  MiB after it: about 652 MiB above the 160.8, 30 MiB less than the buffers. `dxgi`
+  usage rose by 699.7 MiB in that creation, the 681.9 MiB of buffers and the pipeline
+  states' part.
+- The margin used to be 84 MiB, from the first line read as "the creation takes 51 MiB
+  more than its buffers" (882.7 - 77 - 754.7 in package 0.2.5.0) plus 32 MiB of headroom.
+  That counted the pipeline states twice: they are in what the guard sees when it asks,
+  and again in the margin. With it **the default decoder was refused in a fresh launch**:
+  681.9 + 84.0 = 765.9 MiB against 762.3 MiB left, 3.6 MiB short. An earlier launch had
+  accepted the same decoder.
+- The margin is now **48 MiB**, all of it headroom. With the numbers above the guard
+  accepts device buffers up to 714.3 MiB (762.3 - 48.0):
+
+| Decoder (device buffers, MiB) | 2 slots | 3 slots | 4 slots |
+| --- | --- | --- | --- |
+| default, 4096x2176 10-bit | 681.9 accepted, 32.4 to spare | 842.2 refused | 1002.6 refused |
+| `-intrav2` | 703.2 accepted | 874.1 refused | refused |
+| `-fitsize`, 3840x2160 10-bit stream | 639.7 accepted | 790.2 refused | 940.6 refused |
+| `-lowmem` | 575.4 accepted | 695.4 accepted | 815.3 refused |
+| `-lowmem -fitsize` | 539.9 accepted | 652.4 accepted | 765.0 refused |
+
+  What it protects: with the measured 30 MiB the creation stays under its buffers, a
+  decoder at the edge (714.3 MiB) ends at about 946 MiB with its 4 output images, 78 MiB
+  under the limit; if a creation took all of its buffers, 48 MiB. The three-slot decoder
+  with `-fitsize` (790.2) would end at about 1021 MiB and is refused; so is everything
+  larger. The 754.7 MiB decoder of package 0.2.5.0, which ran with about 40 MiB left, would
+  be refused too. On the console `-fitsize`, `-lowmem -fitsize` and `-lowmem -fitsize
+  -slots 3` were accepted (with the old margin, so with this one as well) and md5-exact.
+- The player now waits for the pipeline states before the first task, so `app before the
+  decoder` is about 161 MiB in a fresh launch, not 77, and the difference to `app after
+  the decoder` is the creation alone.
+
+One launch with three decoders, `default`, then `-fitsize`, then `-lowmem -fitsize
+-slots 3`, computed for the case that the memory of a destroyed decoder comes back (see
+[Memory after a decoder is destroyed](#memory-after-a-decoder-is-destroyed)): each
+creation starts at about 160 MiB (pipeline states and its own host pool), has about 763
+MiB for the decoder next to the 4-image pool, and needs 729.9, 687.7 and 700.4 MiB with
+the margin: all three accepted, with 32, 76 and 62 MiB to spare. After the creation and
+the pool's textures the app would be at about 913, 870 and 884 MiB (812.7 + 100.5 was
+measured for the first), and an md5 run adds 94.9 MiB of readback buffers to each. With
+the 350 MiB that stayed charged in package 0.2.6.0 the second and third had about 415 MiB
+and were refused, correctly for those numbers.
 
 What the guard does not see: the readback buffers of an md5 or file run are not in the
 player's estimate (the measured runs with them added up to more than the limit and still
-ran, so counting them would refuse runs that work), and a decoder that is reused for a
+ran, so counting them would refuse runs that work; the default decoder with a 4-image md5
+pool comes to 812.7 + 100.5 + 94.9 = 1008.1 MiB), and a decoder that is reused for a
 stream with larger output images does not ask again. The output pool estimate is a
 sixteenth above the samples of the images; the console reported 100.5 MiB for the 100.9
 estimated.
@@ -1059,14 +1128,15 @@ Before the decoder is created (player, then the decoder's budget line):
 
 ```text
 MEMORY decoder size: 4096x2176 10-bit (default, the stream's largest frame is 3840x2160 10-bit), slots 2, intra_v2 buffers no, low memory parts 0; device buffers 681.9 MiB and up to 51.5 MiB for palette buffers on first use, host pool N.N MiB
-MEMORY output pool estimate: textures of 4 images of 3840x2160 10-bit, 100.9 MiB; held back from what the decoder may take until the pool has them. The decoder's budget guard keeps a margin of 84.0 MiB at its creation
+MEMORY output pool estimate: textures of 4 images of 3840x2160 10-bit, 100.9 MiB; held back from what the decoder may take until the pool has them. The decoder's budget guard keeps a margin of 48.0 MiB at its creation
 MEMORY app before the decoder: usage N.N MiB of limit N.N MiB, N.N MiB left
-MEMORY budget: device buffers 681.9 MiB + margin 84.0 MiB = 765.9 MiB, the application has N.N MiB left for the decoder: accepted; palette buffers on first use would add up to 51.5 MiB
+MEMORY budget: device buffers 681.9 MiB + margin 48.0 MiB = 729.9 MiB, the application has N.N MiB left for the decoder: accepted; palette buffers on first use would add up to 51.5 MiB
 ```
 
 `app` is `Windows::System::MemoryManager`: the memory of the whole app and the limit the
 system gives it. On the console the D3D12 buffers are part of it. The host pool is
-allocated before the `app before the decoder` line, so it is in that usage. The player
+allocated before the `app before the decoder` line, so it is in that usage, and so are
+the pipeline states (the player waits for them before the first task). The player
 now reads on to the stream's first key frame before it creates the decoder, with or
 without `-fitsize`: the sequence header there gives the size and bit depth of the output
 images for the estimate. `budget` is the [budget guard](#budget-guard-memory-refused).
@@ -1161,7 +1231,158 @@ not fit a buffer; see [What the decoder takes](#what-the-decoder-takes) and
 A creation that fails releases everything it had created before it returns, so the next
 task starts as it would after a fresh launch: `usage` in the `dxgi ... after releasing`
 line should be back at the value of `before the creation`. The player also releases the output
-pool of the decoder before, ahead of creating the new one.
+pool of the decoder before, ahead of creating the new one. What the app is charged after a
+decoder that was in use is destroyed is a different matter, see the next section.
+
+### Memory after a decoder is destroyed
+
+**Console, package 0.2.6.0, app mode (2026-11-11).** One launch ran several tasks. The
+first two shared the default decoder (4096x2176 10-bit, two slots, md5 check, 300 frames
+each); the third needed another decoder (`-fitsize`), so the player destroyed the first
+and released its output pool:
+
+```text
+task 1  MEMORY app before the decoder: usage 76.6 MiB of limit 1024.0 MiB
+        MEMORY dxgi before the decoder's allocations: usage 37.3 MiB
+        MEMORY dxgi after the decoder's allocations: usage 737.0 MiB
+        MEMORY app after the decoder: usage 812.7 MiB
+        MEMORY output pool: textures of 4 images, 100.5 MiB; 4 readback buffers, 94.9 MiB
+task 3  (Re)create decoder
+        MEMORY app before the decoder: usage 507.7 MiB of limit 1024.0 MiB
+        MEMORY dxgi REFUSED, nothing allocated: usage 54.2 MiB
+        MEMORY REFUSED decoder ...
+        MEMORY app after the failed decoder creation: usage 485.9 MiB
+tasks 4 to 7: the same, app usage 486 to 508 MiB, dxgi usage 54.2 MiB
+```
+
+Package 0.2.5.0 showed the same without md5 and after only 30 frames: 503 MiB before the
+second decoder. So the video memory was back (54.2 MiB, the 37.3 MiB of the start and the
+pipeline states), and the app was still charged for much more than at the start. How much:
+without a decoder, a host pool and a stream the app uses about 138 MiB once the pipeline
+states exist (160.8 MiB with a 23.2 MiB host pool, see [the margin](#the-margin)); the
+485.9 MiB above are that state. **About 348 MiB stayed charged** (not 415: the pipeline
+states are 84 MiB of the difference to the 76.6 MiB of the launch's first line). The
+guard's refusals were right for these numbers; the numbers are the problem. It does not
+grow with the frames (30 or 600) and does not depend on md5.
+
+**What the code says.** Everything the decoder and the player allocate was followed to
+its release:
+
+| Candidate | Finding |
+| --- | --- |
+| The decoder's D3D12 buffers | All are in the allocator's list and released by `av1_memory_allocator::release()` when the decoder is destroyed; `dxgi` usage confirms it. Nothing else holds a reference to them. |
+| Command list, command allocators, fences, timing query heaps | `ComPtr` members of `Av1Core`, released by its destructor, which `av1_destroy_gpu_decoder` runs. The events of the slots are closed. |
+| Command queue | The player gives the decoder no queue, so every decoder creates its own and releases it when it is destroyed. |
+| D3D12 device | The player's, shared with its renderer by design; the decoder holds a reference and drops it. Destroying a decoder must not and does not release it. |
+| Pipeline states and root signatures | One set per launch (`av1_create_pipeline_cache_handle`), shared by all decoders by design, released by `av1_destroy_pipeline_cache_handle` at the end of the launch. About 84 MiB of the app's memory; this is what a first task "kept" after a refused creation (77.0 MiB before the decoder, 160.8 MiB before the next task's), not the stream reader. It is now logged (`app before` / `after the pipeline states`). |
+| Threads | The GPU completion thread is joined by the drain and again by the destroy; the tile workers are ended in `av1_decoder_remove`; the pipeline state threads are joined. |
+| libaom-side memory | The fork allocates none on the heap: the decoder structure, tile data, thread data, contexts, motion vectors and segment maps are in the host pool (`host_allocate`), the frame buffers are D3D12 buffers. `aom_malloc` has no caller left on the decode path (`cb_buffer_base`, the restoration and loop filter buffers of libaom are not allocated). |
+| Host pool | A `std::vector` of the player, 23.2 MiB; freed before the next decoder's is allocated. |
+| Stream reader | Reads on a thread, at most 20 frames ahead, each in a buffer of its own that is reused; it does not read the whole file. The reader, its buffers and the file are locals of the task and are gone when it returns. A few MiB while a task runs. |
+| Output pool | Textures and readback buffers are `ComPtr`s of the pool, released with it before the next decoder is created; `dxgi` usage confirms it. |
+| md5 lists, timing records | Small (32 bytes and about 0.5 KB a frame). They were kept until the next task replaced them; they are now released at the end of their task. |
+| An event handle in `upload_helper` | Never closed; the function has no caller. Closed now. |
+
+So nothing in the code keeps 348 MiB, and the adapter agrees that the buffers are gone.
+What is left is how the system charges the app:
+
+1. **The memory comes back late.** D3D12 does not free a buffer in `Release`: the
+   destruction is queued in the system's video memory manager, which finishes it later
+   ("the call may return prior to the underlying surface memory being fully reclaimed",
+   WDK, `D3DDDICB_DESTROYALLOCATION2FLAGS`). The player measured within milliseconds of the
+   release, and the refused tasks that followed took no time either. The new
+   `MEMORY app settle after the release` line says whether and after how long it comes
+   back. If this is it, the wait the player and the guard now do is the fix.
+2. **The system keeps it** for the process, for reuse or for good. The decoder's
+   default-heap buffers, which the CPU never maps, are 412.8 MiB (the frame buffer pool
+   alone 335.0); the buffers the CPU maps are 269.1 MiB. The `MEMORY destroy released
+   <type>` lines say which release does not raise what the app has left. A `-noguard`
+   task then tells reuse from loss: if the next decoder is created and `app after the
+   decoder` is about where it was after the first one, the memory was reused and the
+   guard must not count it; if the creation loses the device, it is lost.
+3. **It is taken while decoding**, by something outside the decoder's buffers, and not
+   given back. The `MEMORY app decoding, first frame out` and `30 frames out` lines say
+   so: they should be `app after the decoder` plus the output pool (100.5 MiB of textures,
+   and 94.9 MiB of readback buffers in an md5 run).
+
+**What changed.**
+
+- The player logs the app's memory and the video memory at every step (list below).
+- The decoder logs its own release: `MEMORY destroy <step>`, one line at the start, one
+  after the GPU thread is joined, one after the buffers of each memory type are released
+  (the mapped ones first, the default-heap ones last), one at the end. Each has the
+  `dxgi` usage and what the app's budget callback says is left.
+- After a decoder and its output pool are released, and before the next host pool is
+  allocated, the player waits until the app's memory is within 16 MiB of what it was at
+  the first task of the launch, at most 2 s, checking every 20 ms.
+- The budget guard no longer refuses at once (see [Budget guard](#budget-guard-memory-refused)).
+- The pipeline states are waited for before the first task
+  (`av1_wait_pipeline_cache_handle`, new in `aom/aom_decoder.h`).
+- The task's md5 state and timing records are released at the end of the task; the md5
+  file being saved is closed there.
+
+None of this touches a frame: the decoded output is the same.
+
+**The `MEMORY app <where>` lines.** Every `app` line is followed by a `MEMORY dxgi
+<where>` line with the same text; `grep "MEMORY app"` gives the app's memory along a
+launch. In the order they appear:
+
+| `<where>` | When |
+| --- | --- |
+| `before the pipeline states`, `after the pipeline states` | Once per launch, around the creation of the compute pipeline states. |
+| `task start` | Before the task opens its stream. |
+| `stream reader at the first key frame` | The reader thread runs, the first key frame is read. |
+| `before the decoder is destroyed`, `after the decoder was destroyed` | Around `aom_codec_destroy`, when the task needs another decoder, or at the end of a task that failed or had `-r`. The decoder's `MEMORY destroy` lines are in between. |
+| `before the output pool is released`, `after the output pool was released` | The textures and readback buffers of the decoder before. |
+| `after the host pool was released` | The player's host pool of the decoder before. |
+| `settle after the release` | A line of its own, see below; then `after the settle wait`. |
+| `before the decoder`, `after the decoder`, `after the failed decoder creation` | Around the creation, as before (no `dxgi` twin: the decoder's own `dxgi` lines are there). |
+| `decoding, first frame out`, `decoding, 30 frames out` | From the decode loop, after the decode call that follows the first and the 30th output frame. The output pool has its images at the first. |
+| `before the drain`, `after the drain` | Around the flush that waits for the last frames. |
+| `after the last frame left the output queue` | Nothing of the task is in flight or queued. |
+| `after the task's md5 and timing records were released` | |
+| `task end, stream reader closed` | The reader, its buffers and the file are gone. |
+
+```text
+MEMORY app before the decoder is destroyed: usage N.N MiB of limit 1024.0 MiB, N.N MiB left
+MEMORY dxgi before the decoder is destroyed: local budget N.N MiB, usage N.N MiB, ...
+MEMORY destroy start: dxgi local usage N.N MiB; the application has N.N MiB left for a decoder
+MEMORY destroy GPU thread joined, buffers not yet released: dxgi local usage N.N MiB; the application has N.N MiB left for a decoder
+MEMORY destroy released DeviceUpload, 14 buffers, 32.3 MiB: dxgi local usage N.N MiB; the application has N.N MiB left for a decoder
+MEMORY destroy released HostRW, 9 buffers, 164.6 MiB: ...
+MEMORY destroy released UploadUAV, 1 buffers, 72.2 MiB: ...
+MEMORY destroy released DeviceOnlyConst, 5 buffers, 0.8 MiB: ...
+MEMORY destroy released DeviceOnly, 7 buffers, 412.0 MiB: ...
+MEMORY destroy end, command queue, list and allocators released: dxgi local usage N.N MiB; the application has N.N MiB left for a decoder
+MEMORY app after the decoder was destroyed: usage N.N MiB of limit 1024.0 MiB, N.N MiB left
+MEMORY app before the output pool is released: ...
+MEMORY app after the output pool was released: ...
+MEMORY app after the host pool was released: ...
+MEMORY app settle after the release: usage N.N MiB -> N.N MiB in N ms; without a decoder the app used N.N MiB at the first task of the launch, N.N MiB more are charged now (returned)
+MEMORY app after the settle wait: ...
+```
+
+The settle line ends with `(returned)` or `(not returned within the wait)`. "What the
+application has left" in the `destroy` lines is the player's budget callback: the limit
+less the usage, less the output pool textures that do not exist yet. Outside an app
+container the `app` lines are missing and the `destroy` lines say that it is not known.
+
+The lines cost a few milliseconds each (a file append, and a DXGI factory for the `dxgi`
+one). All but two are outside the frames of a task; `decoding, first frame out` and `30
+frames out` delay the decode thread once each, the first inside the warm-up frames of a
+timing run.
+
+**The test for case 2** (`-noguard`), in one launch:
+
+```text
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 60 -queue_size 4 -nopresent -cdefv2
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 60 -queue_size 4 -nopresent -cdefv2 -fitsize -noguard
+```
+
+Only needed if the settle line of the second task says `not returned`. The second
+creation is then not checked: either `MEMORY app after the decoder` shows the app about
+where the first decoder left it (the memory was reused), or the creation fails with
+`0x887A0005` and the launch is over (it was not).
 
 ### Decoder size (`-fitsize`)
 

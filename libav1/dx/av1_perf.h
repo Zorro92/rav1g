@@ -151,6 +151,12 @@ typedef void (*av1_log_cb_fn_t)(void *priv, int is_error, const char *line);
  * before the pipeline cache and the decoder are created. */
 void av1_set_log_callback(av1_log_cb_fn_t cb, void *priv);
 
+/* One "MEMORY dxgi <label>: ..." line to the log callback: budget and usage
+ * of the video memory of the adapter the ID3D12Device is on
+ * (IDXGIAdapter3::QueryVideoMemoryInfo), as the decoder logs it around its
+ * creation. For an application that logs its memory step by step. */
+void av1_log_video_memory_now(void *d3d12device, const char *label);
+
 /* One error line to the log callback, for the decoder's C code. */
 void av1_log_error(const char *line);
 

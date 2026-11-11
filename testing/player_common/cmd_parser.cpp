@@ -58,7 +58,10 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        &params_.lowmem_},
       {"lowmemparts", atInt, anOptional,
        "parts of -lowmem to switch on: 1 shared back buffer + 2 mode info shares + 4 coefficient shares", "",
-       &params_.lowmem_parts_}};
+       &params_.lowmem_parts_},
+      {"noguard", atSingle, anOptional,
+       "create the decoder without the memory budget guard (a creation that does not fit loses the D3D12 device)",
+       "", &params_.noguard_}};
   params_.command_line_ = args.command_line_;
   const int list_length = sizeof(avaiting) / sizeof(ParamStruct);
   bool has_value[list_length] = {false};
@@ -212,6 +215,7 @@ void CParameters::Reset() {
   params_.fitsize_ = false;
   params_.lowmem_ = false;
   params_.lowmem_parts_ = 0;
+  params_.noguard_ = false;
 }
 
 void CParameters::GetHelp(int pos, const char* arg, std::string& errMsg, const ParamStruct* arr, int size) {

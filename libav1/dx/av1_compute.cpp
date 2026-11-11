@@ -397,6 +397,11 @@ void* av1_create_pipeline_cache_handle(void* d3d12device, int threads) {
   return err ? 0 : shader_lib;
 }
 
+int av1_wait_pipeline_cache_handle(void* handle) {
+  if (!handle) return -1;
+  return wait_shader_create_complete(static_cast<compute_shader_lib*>(handle));
+}
+
 void av1_destroy_pipeline_cache_handle(void* handle) {
   if (handle) {
     compute_shader_lib* shader_lib = static_cast<compute_shader_lib*>(handle);
