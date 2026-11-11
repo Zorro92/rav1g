@@ -361,3 +361,30 @@ border width, shear, rounding, masks.
 
 Written without a console. The md5 run against dav1d (1000 frames of the 1080p stream, the four
 4K clips unchanged) is in [test-player.md](test-player.md#console-run).
+
+## Step 3: correctness against dav1d (2026-11-11)
+Per-frame md5s from dav1d (`ffmpeg -c:v libdav1d -f framemd5`, field 6) are byte-identical to the
+test player's own, so dav1d is now the reference (`testing/md5ref/make_md5_ref.sh`); the dav1d
+reference of a 300-frame 4K clip equals the one saved from the original shaders. That covers streams
+the original path cannot decode and replaces "same as upstream" with "same as dav1d".
+
+- **Hidden frames** (rav1g 362713b): upstream rented an output buffer for every hidden showable
+  frame, so a random-access stream with four hidden frames per group deadlocked a pool of four.
+  Hidden frames now take no output buffer; a show-existing frame gets its copy (and film grain) in
+  its own small command list, ~2.3 ms of GPU at 4K. On the console the SVT-AV1 random-access 4K clip
+  is md5-identical to dav1d: 27.9 fps (2 slots) and 29.4 fps (3 slots) at 12.6 Mbps, against
+  26.0 / 29.8 fps for the low-delay encode of the same source.
+- **Global motion** (rav1g 51c7c15): in a 1080p stream every frame with global motion was wrong,
+  and frames predicted from them. The pixel diff of the first bad frame against dav1d
+  (`-save_wrong_yuv`) was one 32x16 GLOBAL_GLOBALMV block whose non-warped half came out as if at
+  position 0,0: `scale_value()` in the scaled/warp inter shaders computed in double precision, and
+  the console returned 0. It is integer arithmetic now, bit-identical to libaom
+  (`testing/warp_check`). On the console 1200 frames of that stream, and 1080p and 4K film-grain
+  streams with global motion and show-existing frames, are md5-identical to dav1d. The 20 scaled
+  inter shaders shared the double-precision code, so streams with scaled references were probably
+  wrong too; untested.
+- **8-bit, open**: an 8-bit 4K stream (no global motion, hidden frames) is wrong from the key frame:
+  luma only, ±1–2 on ~0.4% of the pixels across the frame, chroma exact. The wrong md5 is the same
+  with the original CDEF, the old buffer sizes and 2 or 3 slots, so it is upstream behaviour. All
+  earlier test clips were 10-bit.
+

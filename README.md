@@ -60,13 +60,20 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
 - **Hidden frames**: encodes with frames that are decoded but shown later (SVT-AV1 random
   access, and most real-world AV1) used to stop after the first frames, because every hidden
   frame held an output buffer. An output buffer is now taken only for a frame that is output,
-  when it is output. Fixed in the code; the console run against dav1d references is pending.
+  when it is output. Verified on the console: an SVT-AV1 random-access 4K clip decodes
+  md5-identical to dav1d (27.9 fps at 12.6 Mbps with 2 slots, 29.4 with 3).
 - **Global motion**: frames with global motion were wrong on the console in upstream (a
   shader computed block positions in double precision, which the console does not execute).
   Fixed with integer arithmetic and checked on a host against libaom
-  (`testing/warp_check`); the console md5 check is pending.
+  (`testing/warp_check`). Verified on the console: 1200 frames of a 1080p stream with global
+  motion, and 1080p and 4K film-grain streams with global motion and show-existing frames,
+  are md5-identical to dav1d.
+- **Known bug, 8-bit streams**: an 8-bit 4K stream decodes with luma off by ±1–2 on about 0.4%
+  of the pixels from the first (key) frame on; chroma is exact. Upstream behaviour (the same
+  with every new option switched off). 10-bit streams are not affected.
 
-Next targets: entropy decoding on the CPU (frame-parallel or a faster
+Next targets: a conformance run on WARP in CI (AOM test vectors, dav1d references), the 8-bit
+bug, entropy decoding on the CPU (frame-parallel or a faster
 parser), and inter and intra prediction on the GPU. The Rust port starts once 4K GPU and CPU time per frame are well
 under 41.7 ms on heavy content.
 
