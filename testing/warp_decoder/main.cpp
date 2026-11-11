@@ -14,6 +14,7 @@
 
 #include <windows.h>
 #include <d3d12.h>
+#include <d3d12sdklayers.h>
 #include <dxgi1_4.h>
 #include <wrl/client.h>
 
@@ -73,6 +74,7 @@ struct Task {
   std::string save_md5;       // -save_md5
   std::string out_yuv;        // -o
   std::string save_wrong_yuv; // -save_wrong_yuv <dir>
+  int wrong_limit = -1;       // -wrong_limit: at most this many frames per task for -save_wrong_yuv
   bool aom_md5 = false;       // -aom_md5: monochrome frames are hashed as aomdec --i420 writes them
   int threads = 1;
   int limit = -1;
@@ -93,6 +95,8 @@ struct Task {
 struct Globals {
   bool hardware = false;  // -hw
   bool verbose = false;   // -v
+  bool debug_layer = false;     // -debuglayer
+  bool gpu_validation = false;  // -gpuvalidation
   std::string list;       // -list
 };
 
@@ -122,6 +126,7 @@ static void Usage() {
   Say("                        (AOM's .md5 files); without it luma only, as the player and dav1d do");
   Say("  -o <file>             write the visible samples of every output frame (planar, as they are hashed)");
   Say("  -save_wrong_yuv <dir> with a reference: write each frame that differs to <dir>/<name>_<frame>.yuv");
+  Say("  -wrong_limit <n>      -save_wrong_yuv writes at most n frames per task");
   Say("  -limit <n>            decode only the first n temporal units of the stream");
   Say("  -t <n>                decoder threads (default 1)");
   Say("  -queue_size <n>       output images in the pool, 1..%d (default %d)", WD_QUEUE_SIZE_MAX,
@@ -133,6 +138,8 @@ static void Usage() {
   Say("  -list <file>          one task per line (the task flags above; # starts a comment line)");
   Say("  -hw                   the first hardware adapter instead of WARP");
   Say("  -v                    print the decoder's log lines (MEMORY ...) and the player-style task lines");
+  Say("  -debuglayer           switch the D3D12 debug layer on (needs the Graphics Tools feature of Windows)");
+  Say("                        and print its messages after every task; -gpuvalidation adds GPU-based validation");
   Say("");
   Say("Exit code: 0 all tasks decoded and matched, 1 a frame or a frame count differs, 2 a decode error,");
   Say("3 bad arguments or no device, 4 timeout. One 'RESULT ...' line per task on stdout.");
@@ -184,6 +191,8 @@ static bool ParseArgs(const std::vector<std::string>& args, Task* task, Globals*
       if (!value(&task->out_yuv)) return false;
     } else if (a == "-save_wrong_yuv") {
       if (!value(&task->save_wrong_yuv)) return false;
+    } else if (a == "-wrong_limit") {
+      if (!number(&task->wrong_limit)) return false;
     } else if (a == "-limit") {
       if (!number(&task->limit)) return false;
     } else if (a == "-t") {
@@ -216,6 +225,11 @@ static bool ParseArgs(const std::vector<std::string>& args, Task* task, Globals*
       globals->hardware = true;
     } else if (globals && a == "-v") {
       globals->verbose = true;
+    } else if (globals && a == "-debuglayer") {
+      globals->debug_layer = true;
+    } else if (globals && a == "-gpuvalidation") {
+      globals->debug_layer = true;
+      globals->gpu_validation = true;
     } else if (globals && a == "-list") {
       if (!value(&globals->list)) return false;
     } else {
@@ -424,6 +438,7 @@ struct Run {
   int matched = 0;
   int first_bad = -1;
   int mismatch_lines = 0;
+  int wrong_saved = 0;
   unsigned int width = 0;           // of the first output frame
   unsigned int height = 0;
   unsigned int bit_depth = 0;
@@ -559,7 +574,8 @@ static int NotifyFrameReady(void* priv, void* image) {
       }
     }
     if (run->out_file && run->io_error.empty()) WriteFrame(img, task.aom_md5, run->out_file, &run->io_error);
-    if (wrong && !task.save_wrong_yuv.empty()) {
+    if (wrong && !task.save_wrong_yuv.empty() && (task.wrong_limit < 0 || run->wrong_saved < task.wrong_limit)) {
+      ++run->wrong_saved;
       const std::string path = task.save_wrong_yuv + "/" + task.name + "_" + std::to_string(n) + ".yuv";
       FILE* f = fopen(path.c_str(), "wb");
       std::string error;
@@ -673,7 +689,41 @@ struct Device {
   void* psos = NULL;
 };
 
+// -debuglayer: what the debug layer has stored since the last call, at most 60 messages.
+static void PrintDebugMessages(ID3D12Device* device) {
+  ComPtr<ID3D12InfoQueue> queue;
+  if (FAILED(device->QueryInterface(IID_PPV_ARGS(&queue)))) return;
+  const UINT64 count = queue->GetNumStoredMessages();
+  const UINT64 dropped = queue->GetNumMessagesDiscardedByMessageCountLimit();
+  Say("DEBUGLAYER %llu messages stored, %llu discarded by the limit", (unsigned long long)count,
+      (unsigned long long)dropped);
+  for (UINT64 i = 0; i < count && i < 60; ++i) {
+    SIZE_T size = 0;
+    queue->GetMessage(i, NULL, &size);
+    if (!size) continue;
+    std::vector<unsigned char> storage(size);
+    D3D12_MESSAGE* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+    if (FAILED(queue->GetMessage(i, message, &size))) continue;
+    Say("DEBUGLAYER [severity %d, id %d] %s", (int)message->Severity, (int)message->ID,
+        message->pDescription ? message->pDescription : "");
+  }
+  queue->ClearStoredMessages();
+}
+
 static bool CreateDevice(const Globals& globals, Device* out) {
+  if (globals.debug_layer) {
+    ComPtr<ID3D12Debug> debug;
+    const HRESULT debug_hr = D3D12GetDebugInterface(IID_PPV_ARGS(&debug));
+    if (SUCCEEDED(debug_hr)) {
+      debug->EnableDebugLayer();
+      ComPtr<ID3D12Debug1> debug1;
+      if (globals.gpu_validation && SUCCEEDED(debug.As(&debug1))) debug1->SetEnableGPUBasedValidation(TRUE);
+      Say("DEBUGLAYER on%s", globals.gpu_validation ? ", with GPU-based validation" : "");
+    } else {
+      Say("DEBUGLAYER not available (hr %s): the Graphics Tools feature of Windows is not installed",
+          Hex32(debug_hr).c_str());
+    }
+  }
   ComPtr<IDXGIFactory4> factory;
   HRESULT hr = CreateDXGIFactory2(0, IID_PPV_ARGS(&factory));
   if (FAILED(hr)) {
@@ -1019,6 +1069,7 @@ int main(int argc, char** argv) {
     return kExitUsage;
   }
   Say("PIPELINE states created in %.0f ms", MsSince(pso_start));
+  if (globals.debug_layer) PrintDebugMessages(dev.device.Get());
 
   g_watchdog_stop = CreateEventA(NULL, TRUE, FALSE, NULL);
   HANDLE watchdog = CreateThread(NULL, 0, WatchdogThread, NULL, 0, NULL);
@@ -1026,6 +1077,7 @@ int main(int argc, char** argv) {
   int exit_code = kExitPass;
   for (size_t i = 0; i < tasks.size(); ++i) {
     const int code = RunTask(tasks[i], &dev);
+    if (globals.debug_layer) PrintDebugMessages(dev.device.Get());
     if (code == kExitError) {
       // The decoder was destroyed, but a failed decode may leave the device or the process in a state the
       // next task should not inherit: the run ends here and says what was not run.

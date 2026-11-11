@@ -434,6 +434,50 @@ jobs:
           enableCrossOsArchive: true
           fail-on-cache-miss: true
 
+      # Diagnosis of the first run (every stream wrong, and not the same md5 twice): a few of AOM's
+      # vectors decoded several times and with other decoder settings, their first frames written as
+      # YUV, and once with the D3D12 debug layer when the runner can install it.
+      - name: Graphics Tools (D3D12 debug layer), if the runner has them
+        continue-on-error: true
+        timeout-minutes: 12
+        shell: pwsh
+        run: |
+          Add-WindowsCapability -Online -Name 'Tools.Graphics.DirectX~~~~0.0.1.0' | Out-String | Write-Host
+          Get-ChildItem "$env:windir\System32\d3d12SDKLayers.dll" -ErrorAction SilentlyContinue | Write-Host
+
+      - name: Diagnostic decodes of a few vectors
+        continue-on-error: true
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          $tool = (Resolve-Path out/warp_decoder/warp_decoder.exe).Path
+          New-Item -ItemType Directory -Force out/diag | Out-Null
+          $vectors = @('av1-1-b8-01-size-16x16.ivf', 'av1-1-b8-01-size-66x66.ivf', 'av1-1-b10-00-quantizer-00.ivf',
+            'av1-1-b8-00-quantizer-00.ivf', 'av1-1-b10-24-monochrome.ivf', 'av1-1-b8-02-allintra.ivf',
+            'av1-1-b8-23-film_grain-50.ivf')
+          $variants = [ordered]@{ t1a = @('-t', '1'); t1b = @('-t', '1'); t1c = @('-t', '1'); t4 = @('-t', '4')
+            intrav2 = @('-t', '1', '-intrav2'); cdefv1 = @('-t', '1', '-cdefv1'); nofit = @('-t', '1', '-nofitsize')
+            slots3 = @('-t', '1', '-slots', '3'); lowmem0 = @('-t', '1', '-lowmemparts', '0')
+            intraopt = @('-t', '1', '-intraopt'); q1 = @('-t', '1', '-queue_size', '1') }
+          foreach ($vector in $vectors) {
+            foreach ($name in $variants.Keys) {
+              $flags = $variants[$name]
+              "=== $vector $name" | Tee-Object -Append out/diag/diag.log
+              & $tool -i "conformance-streams/aom/$vector" -check "conformance-streams/aom/$vector.md5" -aom_md5 `
+                -limit 2 -timeout 300 -o "out/diag/$vector.$name.yuv" -save_md5 "out/diag/$vector.$name.md5" @flags 2>&1 |
+                Tee-Object -Append out/diag/diag.log
+            }
+          }
+          foreach ($vector in @('av1-1-b8-01-size-16x16.ivf', 'av1-1-b10-00-quantizer-00.ivf')) {
+            foreach ($layer in @('-debuglayer', '-gpuvalidation')) {
+              "=== $vector $layer" | Tee-Object -Append out/diag/debuglayer.log
+              & $tool -i "conformance-streams/aom/$vector" -check "conformance-streams/aom/$vector.md5" -aom_md5 `
+                -limit 2 -timeout 600 -t 1 $layer 2>&1 | Tee-Object -Append out/diag/debuglayer.log
+            }
+          }
+          Get-ChildItem out/diag -Filter *.md5 | ForEach-Object { "$($_.Name) $((Get-Content $_.FullName -TotalCount 1))" }
+          exit 0
+
       - name: Decode every stream on WARP and compare with expected.txt
         shell: pwsh
         run: |
@@ -448,6 +492,7 @@ jobs:
           name: rav1g-conformance-${{ github.run_id }}
           path: |
             out/conformance/
+            out/diag/
             out/msbuild.log
           if-no-files-found: warn
 
