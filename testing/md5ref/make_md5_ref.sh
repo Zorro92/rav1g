@@ -11,6 +11,11 @@
 # above that. That is what ffmpeg's framemd5 muxer hashes for the frames libdav1d returns, so the sixth
 # field of its lines is the player's md5. dav1d applies film grain, as the player's decoder does.
 #
+# A stream whose frames change size (a new sequence at a key frame, or reference scaling: frames coded at
+# another size than the one before) is hashed frame by frame at the size each frame has, as the decoder
+# returns it. ffmpeg would otherwise scale every frame to the size of the first one (its -autoscale
+# default) and the md5 of a scaled frame matches no decoder; -noautoscale switches that off.
+#
 # [frames]: only the first N output frames, for a task with -limit N. Without it the whole clip.
 # Not for a task with -start (the reference then has to start at that frame) or -try10x3.
 #
@@ -44,14 +49,15 @@ out="$clip.md5"
 tmp="$out.tmp.$$"
 trap 'rm -f "$tmp" "$tmp.framemd5"' EXIT
 
-# One line per frame the decoder returns: no frame is dropped or repeated to fit a frame rate, and the
-# pixel format stays the decoder's.
+# One line per frame the decoder returns: no frame is dropped or repeated to fit a frame rate, no frame is
+# scaled to the size of the first one, and the pixel format stays the decoder's.
 run_ffmpeg() {
   if [ -n "$frames" ]; then
-    ffmpeg -nostdin -hide_banner -v error -c:v libdav1d -i "$clip" -map 0:v:0 "$@" -frames:v "$frames" \
-      -f framemd5 -y "$tmp.framemd5"
+    ffmpeg -nostdin -hide_banner -v error -c:v libdav1d -i "$clip" -map 0:v:0 -noautoscale "$@" \
+      -frames:v "$frames" -f framemd5 -y "$tmp.framemd5"
   else
-    ffmpeg -nostdin -hide_banner -v error -c:v libdav1d -i "$clip" -map 0:v:0 "$@" -f framemd5 -y "$tmp.framemd5"
+    ffmpeg -nostdin -hide_banner -v error -c:v libdav1d -i "$clip" -map 0:v:0 -noautoscale "$@" \
+      -f framemd5 -y "$tmp.framemd5"
   fi
 }
 # -fps_mode is the option of ffmpeg 5.1 and later, -vsync the one before it.
@@ -74,7 +80,10 @@ awk -F, '
 mv "$tmp" "$out"
 count=$(wc -l < "$out" | tr -d ' ')
 pix=$(grep -m1 '^#dimensions' "$tmp.framemd5" 2>/dev/null | sed 's/^#dimensions[^:]*: *//' || true)
-echo "$out: $count frames${pix:+, $pix}"
+# The fifth field of a framemd5 line is the size of the frame in bytes: more than one value means that the
+# frames of the clip do not all have the same size.
+sizes=$(awk -F, '!/^#/ && NF >= 6 { gsub(/[ \t]/, "", $5); print $5 }' "$tmp.framemd5" | sort -u | wc -l | tr -d ' ')
+echo "$out: $count frames${pix:+, $pix}$([ "$sizes" -gt 1 ] && echo ", $sizes frame sizes (first size shown)")"
 if [ -n "$frames" ] && [ "$count" -lt "$frames" ]; then
   echo "$0: the clip has only $count frames, fewer than the $frames asked for" >&2
 fi

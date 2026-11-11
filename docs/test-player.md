@@ -93,6 +93,12 @@ one commit each:
   lives in `testing/warp_check`. See [Global motion](#global-motion). Only the twenty
   `inter_scale_*` shaders change: those for scaled references, and the one that predicts
   `GLOBAL_GLOBALMV` blocks, which runs only in frames with global motion.
+- **Conformance run**: `testing/warp_decoder` is the decoder as a desktop console program
+  that decodes on the D3D12 WARP software adapter and writes or checks one md5 per output
+  frame, and `testing/conformance` runs it in CI over AOM's decoder test vectors, cuts of
+  open content and streams encoded in the job, against a list of the streams that are known
+  to fail. See [warp-decoder.md](warp-decoder.md). Nothing in the decoder or the player
+  changes; `testing/md5ref/make_md5_ref.sh` now hashes every frame at its own size.
 
 ## Build
 
@@ -141,10 +147,14 @@ The artifact `rav1g-testplayer-x64-<run-id>` contains:
 
 A failed run can still upload diagnostics; only use a package from a successful run.
 
-The run has two more jobs on Linux, `cdef-check` and `intra-check`. They run the
-host-side comparisons of the CDEF shaders and of the intra paths; `intra-check` also runs
-the self-test of the timing summary and uploads its log as `rav1g-intra-check-<run-id>`.
-The run is green only if all three jobs pass.
+The run has more jobs. On Linux, `cdef-check`, `warp-check` and `intra-check` run the
+host-side comparisons of the CDEF shaders, of the warp shaders with libaom and of the intra
+paths; `intra-check` also runs the self-test of the timing summary and the sequence header
+check, and uploads its log as `rav1g-intra-check-<run-id>`. `conformance-streams` (Linux)
+and `conformance` (Windows) are the conformance run: the decoder as a desktop program
+decodes AOM's test vectors and other streams on the WARP software adapter of the runner and
+compares the md5 of every frame; see [warp-decoder.md](warp-decoder.md). The run is green
+only if all jobs pass.
 
 ## Install with Device Portal
 
@@ -559,6 +569,12 @@ stream as `<stream name>.md5` and run only the check task:
   `-try10x3`.
 - Checked here for 8-bit and 10-bit 4:2:0 against a hash of ffmpeg's raw output. Only the
   10-bit case was compared with a file the player saved.
+- **A stream whose frames change size** (reference scaling, or a new size at a key frame) is
+  hashed frame by frame at the size each frame has: the script passes `-noautoscale` to
+  ffmpeg. Without it ffmpeg scales every frame to the size of the first one, and such a
+  reference reports every frame of another size as wrong whatever the decoder does. A
+  reference made by the script before it had `-noautoscale` is wrong for such a stream, and
+  only for such a stream: make it again.
 
 ### Host-side comparison of the two shaders
 

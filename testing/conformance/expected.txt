@@ -1,0 +1,12 @@
+# Streams of the conformance run that fail today, and why (docs/warp-decoder.md).
+#
+#   <stream> <mismatch|error|timeout|crash|unstable> <reason>
+#
+# mismatch: the stream decodes, but the md5 of a frame, or the number of frames, differs from the reference
+# error:    the decoder refuses the stream or stops with a decode error
+# timeout:  no result within the time the task has
+# crash:    the decoder process ends without a result
+# unstable: the result of the stream depends on what was decoded before it in the same process
+#
+# The run fails when a stream fails that is not listed here, when a listed stream fails in another way,
+# and when a listed stream passes: a fix has to take its streams off this list.

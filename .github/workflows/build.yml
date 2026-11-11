@@ -314,6 +314,151 @@ jobs:
           path: out/
           if-no-files-found: warn
 
+  # The streams of the conformance run: AOM's decoder test vectors with AOM's md5 files, cuts of
+  # Netflix Open Content and streams encoded here with SVT-AV1, both with md5 references from dav1d
+  # (testing/conformance/streams.txt, prepare_streams.sh). The streams are media: they are kept in
+  # the Actions cache, keyed by the list and the scripts that make them, and never in the repository
+  # or in an artifact. The artifact of this job has the md5 references and the task list only.
+  conformance-streams:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # warp_decoder compiles the library's sources itself; its list must be the library project's.
+      - name: Source list of the desktop decoder matches libav1.vcxproj
+        run: python3 testing/warp_decoder/sync_sources.py --check
+
+      - name: Cache key
+        id: key
+        run: echo "key=conformance-streams-v1-${{ hashFiles('testing/conformance/streams.txt', 'testing/conformance/prepare_streams.sh', 'testing/md5ref/make_md5_ref.sh') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Streams from the cache
+        id: streams
+        uses: actions/cache@v6
+        with:
+          path: conformance-streams
+          key: ${{ steps.key.outputs.key }}
+          enableCrossOsArchive: true
+
+      - name: Fetch and make the streams and their md5 references
+        if: steps.streams.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg
+          sh testing/conformance/prepare_streams.sh conformance-streams 2>&1 | grep -v '^Svt\[info\]' | tee prepare.log
+
+      - name: Collect the md5 references (no media)
+        run: |
+          set -euo pipefail
+          mkdir conformance-md5
+          cp conformance-streams/manifest.txt conformance-streams/SOURCES.txt conformance-md5/
+          (cd conformance-streams && find . -name '*.md5' | while read -r f; do
+            mkdir -p "../conformance-md5/$(dirname "$f")" && cp "$f" "../conformance-md5/$f"; done)
+          {
+            echo '## Conformance streams'
+            echo
+            echo "- $(grep -c . conformance-streams/manifest.txt) streams, $(du -sh conformance-streams | cut -f1) (cache \`${{ steps.key.outputs.key }}\`, hit: ${{ steps.streams.outputs.cache-hit == 'true' }})"
+            echo '```'
+            cat conformance-streams/SOURCES.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Preserve the md5 references and the task list
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-conformance-md5-${{ github.run_id }}
+          path: conformance-md5/
+          if-no-files-found: error
+
+  # Conformance run: warp_decoder (testing/warp_decoder), the decoder as a desktop console program,
+  # decodes every stream on the D3D12 WARP software adapter of the runner and compares the md5 of
+  # every output frame with the reference. testing/conformance/expected.txt lists the streams that
+  # fail today; the job fails on a failure that is not listed, on a failure of another kind than
+  # listed, on a crash or timeout that is not listed, and when a listed stream passes.
+  conformance:
+    needs: conformance-streams
+    runs-on: windows-latest
+    timeout-minutes: 150
+    env:
+      PLATFORM_TOOLSET: v145
+      WINDOWS_SDK: 10.0.26100.0
+    steps:
+      - name: Disable newline conversion
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: microsoft/setup-msbuild@v3
+
+      - name: Build warp_decoder (desktop, Release x64)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force out | Out-Null
+          $buildLog = Join-Path $env:GITHUB_WORKSPACE 'out/msbuild.log'
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          & MSBuild.exe testing/warp_decoder/warp_decoder.vcxproj /m /v:minimal /p:Configuration=Release /p:Platform=x64 `
+            "/p:PlatformToolset=$env:PLATFORM_TOOLSET" "/p:WindowsTargetPlatformVersion=$env:WINDOWS_SDK" `
+            /fl "/flp:logfile=$buildLog;verbosity=normal"
+          if ($LASTEXITCODE -ne 0) { throw 'warp_decoder build failed; see msbuild.log' }
+          $bin = 'testing/warp_decoder/bin/x64/Release'
+          if (-not (Test-Path "$bin/warp_decoder.exe")) { throw 'warp_decoder.exe was not produced' }
+          New-Item -ItemType Directory -Force out/warp_decoder | Out-Null
+          Get-ChildItem $bin -File | Where-Object { $_.Extension -in @('.exe', '.pdb', '.map') } |
+            Copy-Item -Destination out/warp_decoder/
+          # Binary redistribution retains the BSD notices and AOM patent license, including libwebm.
+          foreach ($license in @('LICENSE.txt', 'libav1/LICENSE', 'libav1/PATENTS',
+              'third_party/libwebm/LICENSE.TXT', 'third_party/libwebm/PATENTS.TXT')) {
+            $destination = Join-Path out/warp_decoder/licenses $license
+            New-Item -ItemType Directory -Force (Split-Path $destination) | Out-Null
+            Copy-Item $license $destination
+          }
+          "Commit: $env:GITHUB_SHA", "Run: https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID",
+            "Build: Release x64; PlatformToolset=$env:PLATFORM_TOOLSET; Windows SDK=$env:WINDOWS_SDK" |
+            Set-Content out/warp_decoder/SOURCES.txt -Encoding utf8
+          "## warp_decoder", '', "Built in $([math]::Round($clock.Elapsed.TotalMinutes, 1)) min.", '' >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Streams from the cache
+        uses: actions/cache/restore@v6
+        with:
+          path: conformance-streams
+          key: ${{ needs.conformance-streams.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Decode every stream on WARP and compare with expected.txt
+        shell: pwsh
+        run: |
+          python testing/conformance/run.py --tool out/warp_decoder/warp_decoder.exe --streams conformance-streams `
+            --out out/conformance --threads 4
+          if ($LASTEXITCODE -ne 0) { throw "conformance run: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
+
+      - name: Preserve the results, the per-stream logs and md5 files, and the build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-conformance-${{ github.run_id }}
+          path: |
+            out/conformance/
+            out/msbuild.log
+          if-no-files-found: warn
+
+      - name: Preserve warp_decoder.exe
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-warp-decoder-x64-${{ github.run_id }}
+          path: out/warp_decoder/
+          if-no-files-found: warn
+
   # Host proof for CDEF v2: the original and the v2 CDEF shader source, compiled as C++,
   # must write byte-identical frames (random and edge-case input, 8-bit and high bit depth).
   cdef-check:

@@ -1,0 +1,276 @@
+# The streams of the conformance run (.github/workflows/build.yml, job "conformance"; docs/warp-decoder.md).
+# testing/conformance/prepare_streams.sh reads this file, fetches or makes every stream and its md5
+# reference, and writes the task list the decoder runs. Nothing listed here is stored in the repository.
+#
+#   aom <file>
+#       A decoder test vector of the Alliance for Open Media, with the .md5 file published next to it:
+#       https://storage.googleapis.com/aom-test-data/<file> and <file>.md5. All av1-1-b8-* and av1-1-b10-*
+#       vectors of that bucket that have an .md5 file.
+#   cut <name> <start seconds> <frames> <path>
+#       The first <frames> frames from the key frame at or before <start seconds> of a Netflix Open Content
+#       stream, http://download.opencontent.netflix.com.s3.amazonaws.com/<path>, copied without re-encoding
+#       (ffmpeg -c copy); the reference is dav1d's output (testing/md5ref/make_md5_ref.sh).
+#   svt <name> <frames> <svtav1-params>
+#       A stream encoded at run time: ffmpeg's testsrc2 pattern, 1920x1080, 30 fps, 10-bit, libsvtav1
+#       -preset 10 -crf 35 with the given -svtav1-params; the reference is dav1d's output.
+#
+# <name> and <file> are what the results and testing/conformance/expected.txt call the stream.
+
+# 8-bit 3840x2160, one tile, frames that are decoded but not shown.
+cut nf-dvbdash-a1-8b-2160p.ivf 0 20 AV1/DVB-DASH/A_1.mp4
+# 8-bit 1280x720 and 480x270, global motion.
+cut nf-chimera-8b-720p.ivf 60 40 AV1/Chimera/Old/Chimera-AV1-8bit-1280x720-3363kbps.mp4
+cut nf-chimera-8b-270p.ivf 60 120 AV1/Chimera/Old/Chimera-AV1-8bit-480x270-552kbps.mp4
+# 10-bit 1920x1080.
+cut nf-chimera-10b-1080p.ivf 60 30 AV1/Chimera/Old/Chimera-AV1-10bit-1920x1080-6191kbps.mp4
+cut nf-sparks-10b-1080p.ivf 40 40 AV1/Sparks/Sparks-5994fps-AV1-10bit-1920x1080-2194kbps.mp4
+
+# Reference scaling: frames coded at other sizes than the frames they predict from.
+svt syn-resize-10b-1080p.ivf 64 resize-mode=2
+# Super-resolution: frames coded at a smaller width and upscaled, all denominators.
+svt syn-superres-10b-1080p.ivf 64 superres-mode=2
+
+aom av1-1-b8-00-quantizer-00.ivf
+aom av1-1-b8-00-quantizer-01.ivf
+aom av1-1-b8-00-quantizer-02.ivf
+aom av1-1-b8-00-quantizer-03.ivf
+aom av1-1-b8-00-quantizer-04.ivf
+aom av1-1-b8-00-quantizer-05.ivf
+aom av1-1-b8-00-quantizer-06.ivf
+aom av1-1-b8-00-quantizer-07.ivf
+aom av1-1-b8-00-quantizer-08.ivf
+aom av1-1-b8-00-quantizer-09.ivf
+aom av1-1-b8-00-quantizer-10.ivf
+aom av1-1-b8-00-quantizer-11.ivf
+aom av1-1-b8-00-quantizer-12.ivf
+aom av1-1-b8-00-quantizer-13.ivf
+aom av1-1-b8-00-quantizer-14.ivf
+aom av1-1-b8-00-quantizer-15.ivf
+aom av1-1-b8-00-quantizer-16.ivf
+aom av1-1-b8-00-quantizer-17.ivf
+aom av1-1-b8-00-quantizer-18.ivf
+aom av1-1-b8-00-quantizer-19.ivf
+aom av1-1-b8-00-quantizer-20.ivf
+aom av1-1-b8-00-quantizer-21.ivf
+aom av1-1-b8-00-quantizer-22.ivf
+aom av1-1-b8-00-quantizer-23.ivf
+aom av1-1-b8-00-quantizer-24.ivf
+aom av1-1-b8-00-quantizer-25.ivf
+aom av1-1-b8-00-quantizer-26.ivf
+aom av1-1-b8-00-quantizer-27.ivf
+aom av1-1-b8-00-quantizer-28.ivf
+aom av1-1-b8-00-quantizer-29.ivf
+aom av1-1-b8-00-quantizer-30.ivf
+aom av1-1-b8-00-quantizer-31.ivf
+aom av1-1-b8-00-quantizer-32.ivf
+aom av1-1-b8-00-quantizer-33.ivf
+aom av1-1-b8-00-quantizer-34.ivf
+aom av1-1-b8-00-quantizer-35.ivf
+aom av1-1-b8-00-quantizer-36.ivf
+aom av1-1-b8-00-quantizer-37.ivf
+aom av1-1-b8-00-quantizer-38.ivf
+aom av1-1-b8-00-quantizer-39.ivf
+aom av1-1-b8-00-quantizer-40.ivf
+aom av1-1-b8-00-quantizer-41.ivf
+aom av1-1-b8-00-quantizer-42.ivf
+aom av1-1-b8-00-quantizer-43.ivf
+aom av1-1-b8-00-quantizer-44.ivf
+aom av1-1-b8-00-quantizer-45.ivf
+aom av1-1-b8-00-quantizer-46.ivf
+aom av1-1-b8-00-quantizer-47.ivf
+aom av1-1-b8-00-quantizer-48.ivf
+aom av1-1-b8-00-quantizer-49.ivf
+aom av1-1-b8-00-quantizer-50.ivf
+aom av1-1-b8-00-quantizer-51.ivf
+aom av1-1-b8-00-quantizer-52.ivf
+aom av1-1-b8-00-quantizer-53.ivf
+aom av1-1-b8-00-quantizer-54.ivf
+aom av1-1-b8-00-quantizer-55.ivf
+aom av1-1-b8-00-quantizer-56.ivf
+aom av1-1-b8-00-quantizer-57.ivf
+aom av1-1-b8-00-quantizer-58.ivf
+aom av1-1-b8-00-quantizer-59.ivf
+aom av1-1-b8-00-quantizer-60.ivf
+aom av1-1-b8-00-quantizer-61.ivf
+aom av1-1-b8-00-quantizer-62.ivf
+aom av1-1-b8-00-quantizer-63.ivf
+aom av1-1-b8-01-size-16x16.ivf
+aom av1-1-b8-01-size-16x18.ivf
+aom av1-1-b8-01-size-16x32.ivf
+aom av1-1-b8-01-size-16x34.ivf
+aom av1-1-b8-01-size-16x64.ivf
+aom av1-1-b8-01-size-16x66.ivf
+aom av1-1-b8-01-size-18x16.ivf
+aom av1-1-b8-01-size-18x18.ivf
+aom av1-1-b8-01-size-18x32.ivf
+aom av1-1-b8-01-size-18x34.ivf
+aom av1-1-b8-01-size-18x64.ivf
+aom av1-1-b8-01-size-18x66.ivf
+aom av1-1-b8-01-size-32x16.ivf
+aom av1-1-b8-01-size-32x18.ivf
+aom av1-1-b8-01-size-32x32.ivf
+aom av1-1-b8-01-size-32x34.ivf
+aom av1-1-b8-01-size-32x64.ivf
+aom av1-1-b8-01-size-32x66.ivf
+aom av1-1-b8-01-size-34x16.ivf
+aom av1-1-b8-01-size-34x18.ivf
+aom av1-1-b8-01-size-34x32.ivf
+aom av1-1-b8-01-size-34x34.ivf
+aom av1-1-b8-01-size-34x64.ivf
+aom av1-1-b8-01-size-34x66.ivf
+aom av1-1-b8-01-size-64x16.ivf
+aom av1-1-b8-01-size-64x18.ivf
+aom av1-1-b8-01-size-64x32.ivf
+aom av1-1-b8-01-size-64x34.ivf
+aom av1-1-b8-01-size-64x64.ivf
+aom av1-1-b8-01-size-64x66.ivf
+aom av1-1-b8-01-size-66x16.ivf
+aom av1-1-b8-01-size-66x18.ivf
+aom av1-1-b8-01-size-66x32.ivf
+aom av1-1-b8-01-size-66x34.ivf
+aom av1-1-b8-01-size-66x64.ivf
+aom av1-1-b8-01-size-66x66.ivf
+aom av1-1-b8-01-size-196x196.ivf
+aom av1-1-b8-01-size-196x198.ivf
+aom av1-1-b8-01-size-196x200.ivf
+aom av1-1-b8-01-size-196x202.ivf
+aom av1-1-b8-01-size-196x208.ivf
+aom av1-1-b8-01-size-196x210.ivf
+aom av1-1-b8-01-size-196x224.ivf
+aom av1-1-b8-01-size-196x226.ivf
+aom av1-1-b8-01-size-198x196.ivf
+aom av1-1-b8-01-size-198x198.ivf
+aom av1-1-b8-01-size-198x200.ivf
+aom av1-1-b8-01-size-198x202.ivf
+aom av1-1-b8-01-size-198x208.ivf
+aom av1-1-b8-01-size-198x210.ivf
+aom av1-1-b8-01-size-198x224.ivf
+aom av1-1-b8-01-size-198x226.ivf
+aom av1-1-b8-01-size-200x196.ivf
+aom av1-1-b8-01-size-200x198.ivf
+aom av1-1-b8-01-size-200x200.ivf
+aom av1-1-b8-01-size-200x202.ivf
+aom av1-1-b8-01-size-200x208.ivf
+aom av1-1-b8-01-size-200x210.ivf
+aom av1-1-b8-01-size-200x224.ivf
+aom av1-1-b8-01-size-200x226.ivf
+aom av1-1-b8-01-size-202x196.ivf
+aom av1-1-b8-01-size-202x198.ivf
+aom av1-1-b8-01-size-202x200.ivf
+aom av1-1-b8-01-size-202x202.ivf
+aom av1-1-b8-01-size-202x208.ivf
+aom av1-1-b8-01-size-202x210.ivf
+aom av1-1-b8-01-size-202x224.ivf
+aom av1-1-b8-01-size-202x226.ivf
+aom av1-1-b8-01-size-208x196.ivf
+aom av1-1-b8-01-size-208x198.ivf
+aom av1-1-b8-01-size-208x200.ivf
+aom av1-1-b8-01-size-208x202.ivf
+aom av1-1-b8-01-size-208x208.ivf
+aom av1-1-b8-01-size-208x210.ivf
+aom av1-1-b8-01-size-208x224.ivf
+aom av1-1-b8-01-size-208x226.ivf
+aom av1-1-b8-01-size-210x196.ivf
+aom av1-1-b8-01-size-210x198.ivf
+aom av1-1-b8-01-size-210x200.ivf
+aom av1-1-b8-01-size-210x202.ivf
+aom av1-1-b8-01-size-210x208.ivf
+aom av1-1-b8-01-size-210x210.ivf
+aom av1-1-b8-01-size-210x224.ivf
+aom av1-1-b8-01-size-210x226.ivf
+aom av1-1-b8-01-size-224x196.ivf
+aom av1-1-b8-01-size-224x198.ivf
+aom av1-1-b8-01-size-224x200.ivf
+aom av1-1-b8-01-size-224x202.ivf
+aom av1-1-b8-01-size-224x208.ivf
+aom av1-1-b8-01-size-224x210.ivf
+aom av1-1-b8-01-size-224x224.ivf
+aom av1-1-b8-01-size-224x226.ivf
+aom av1-1-b8-01-size-226x196.ivf
+aom av1-1-b8-01-size-226x198.ivf
+aom av1-1-b8-01-size-226x200.ivf
+aom av1-1-b8-01-size-226x202.ivf
+aom av1-1-b8-01-size-226x208.ivf
+aom av1-1-b8-01-size-226x210.ivf
+aom av1-1-b8-01-size-226x224.ivf
+aom av1-1-b8-01-size-226x226.ivf
+aom av1-1-b8-02-allintra.ivf
+aom av1-1-b8-03-sizedown.mkv
+aom av1-1-b8-03-sizeup.mkv
+aom av1-1-b8-04-cdfupdate.ivf
+aom av1-1-b8-05-mv.ivf
+aom av1-1-b8-06-mfmv.ivf
+aom av1-1-b8-16-intra_only-intrabc-extreme-dv.ivf
+aom av1-1-b8-22-svc-L1T2.ivf
+aom av1-1-b8-22-svc-L2T1.ivf
+aom av1-1-b8-22-svc-L2T1-2.ivf
+aom av1-1-b8-22-svc-L2T2.ivf
+aom av1-1-b8-22-svc-L2T2-2.ivf
+aom av1-1-b8-23-film_grain-50.ivf
+aom av1-1-b8-24-monochrome.ivf
+aom av1-1-b10-00-quantizer-00.ivf
+aom av1-1-b10-00-quantizer-01.ivf
+aom av1-1-b10-00-quantizer-02.ivf
+aom av1-1-b10-00-quantizer-03.ivf
+aom av1-1-b10-00-quantizer-04.ivf
+aom av1-1-b10-00-quantizer-05.ivf
+aom av1-1-b10-00-quantizer-06.ivf
+aom av1-1-b10-00-quantizer-07.ivf
+aom av1-1-b10-00-quantizer-08.ivf
+aom av1-1-b10-00-quantizer-09.ivf
+aom av1-1-b10-00-quantizer-10.ivf
+aom av1-1-b10-00-quantizer-11.ivf
+aom av1-1-b10-00-quantizer-12.ivf
+aom av1-1-b10-00-quantizer-13.ivf
+aom av1-1-b10-00-quantizer-14.ivf
+aom av1-1-b10-00-quantizer-15.ivf
+aom av1-1-b10-00-quantizer-16.ivf
+aom av1-1-b10-00-quantizer-17.ivf
+aom av1-1-b10-00-quantizer-18.ivf
+aom av1-1-b10-00-quantizer-19.ivf
+aom av1-1-b10-00-quantizer-20.ivf
+aom av1-1-b10-00-quantizer-21.ivf
+aom av1-1-b10-00-quantizer-22.ivf
+aom av1-1-b10-00-quantizer-23.ivf
+aom av1-1-b10-00-quantizer-24.ivf
+aom av1-1-b10-00-quantizer-25.ivf
+aom av1-1-b10-00-quantizer-26.ivf
+aom av1-1-b10-00-quantizer-27.ivf
+aom av1-1-b10-00-quantizer-28.ivf
+aom av1-1-b10-00-quantizer-29.ivf
+aom av1-1-b10-00-quantizer-30.ivf
+aom av1-1-b10-00-quantizer-31.ivf
+aom av1-1-b10-00-quantizer-32.ivf
+aom av1-1-b10-00-quantizer-33.ivf
+aom av1-1-b10-00-quantizer-34.ivf
+aom av1-1-b10-00-quantizer-35.ivf
+aom av1-1-b10-00-quantizer-36.ivf
+aom av1-1-b10-00-quantizer-37.ivf
+aom av1-1-b10-00-quantizer-38.ivf
+aom av1-1-b10-00-quantizer-39.ivf
+aom av1-1-b10-00-quantizer-40.ivf
+aom av1-1-b10-00-quantizer-41.ivf
+aom av1-1-b10-00-quantizer-42.ivf
+aom av1-1-b10-00-quantizer-43.ivf
+aom av1-1-b10-00-quantizer-44.ivf
+aom av1-1-b10-00-quantizer-45.ivf
+aom av1-1-b10-00-quantizer-46.ivf
+aom av1-1-b10-00-quantizer-47.ivf
+aom av1-1-b10-00-quantizer-48.ivf
+aom av1-1-b10-00-quantizer-49.ivf
+aom av1-1-b10-00-quantizer-50.ivf
+aom av1-1-b10-00-quantizer-51.ivf
+aom av1-1-b10-00-quantizer-52.ivf
+aom av1-1-b10-00-quantizer-53.ivf
+aom av1-1-b10-00-quantizer-54.ivf
+aom av1-1-b10-00-quantizer-55.ivf
+aom av1-1-b10-00-quantizer-56.ivf
+aom av1-1-b10-00-quantizer-57.ivf
+aom av1-1-b10-00-quantizer-58.ivf
+aom av1-1-b10-00-quantizer-59.ivf
+aom av1-1-b10-00-quantizer-60.ivf
+aom av1-1-b10-00-quantizer-61.ivf
+aom av1-1-b10-00-quantizer-62.ivf
+aom av1-1-b10-00-quantizer-63.ivf
+aom av1-1-b10-23-film_grain-50.ivf
+aom av1-1-b10-24-monochrome.ivf
