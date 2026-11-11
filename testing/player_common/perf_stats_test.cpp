@@ -59,6 +59,10 @@ static av1_perf_frame MakeFrame(int n, double complete_ms, int show) {
   f.cpu_ms[AV1_PERF_CPU_WAIT_OUTPUT] = 3.0;
   f.cpu_ms[AV1_PERF_CPU_WAIT_SLOT] = 2.0;
   f.memset_bytes = 8 * 1024 * 1024;
+  f.cpu_ms[AV1_PERF_CPU_MEMSET] = 1.0;
+  f.cpu_ms[AV1_PERF_CPU_MEMSET_TILE] = 0.25;
+  f.cpu_ms[AV1_PERF_CPU_ASYNC_CLEAR] = 3.5;
+  f.async_clear_bytes = 6 * 1024 * 1024;
   f.complete_ms = complete_ms;
   return f;
 }
@@ -151,6 +155,15 @@ int main() {
     CHECK(Has(lines, "1.25 decoded frames each"));
     CHECK(Has(lines, "dispatches mean 12.0 max 12, UAV barriers mean 9.0 max 9, thread groups mean 300 max 300, "
                      "passes per group 8.0 (intra_v2 on 90 of 90 frames)"));
+    // The decode thread's memsets and the clears moved to the completion thread (-asyncclear), side by side.
+    CHECK(Has(lines, "cpu memsets (frame + tile)                 90    1.250    1.250    1.250    1.250   "
+                     "8.0 MB cleared per frame"));
+    CHECK(Has(lines, "cpu clears, completion thread              90    3.500    3.500    3.500    3.500   "
+                     "6.0 MB cleared per frame"));
+    CHECK(Has(lines, "cpu async_clear"));
+    CHECK(Has(lines, "cpu wait_slot"));
+    CHECK(Has(st.FrameLines(), " memset=1.00 memset_tile=0.25 "));
+    CHECK(Has(st.FrameLines(), " async_clear=3.50"));
     CHECK(st.FrameLines().size() == 100);
     CHECK(Has(st.FrameLines(), "iters=40 iv2=1 idisp=12 ibarr=9 igroups=300 ipasses=2400 tiles=4"));
     for (size_t i = 0; i < lines.size(); ++i) {

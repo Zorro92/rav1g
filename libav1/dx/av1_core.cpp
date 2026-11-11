@@ -221,6 +221,30 @@ static void perf_collect(Av1Core *dec, av1_frame_thread_data *td, int64_t wait_s
   rec->gpu_valid = 1;
 }
 
+// Test player switch (-asyncclear): the per-frame clears of a slot's grids move from the decode thread to the
+// GPU completion thread. Off unless av1_set_async_clear(1) was called. See av1_setup_frame for the rules.
+static int g_async_clear = 0;
+
+extern "C" void av1_set_async_clear(int enable) { g_async_clear = enable; }
+
+// GPU completion thread, -asyncclear: the frame that used |td| has completed on the GPU, so nothing reads the
+// slot's grids any more, and the slot is not in the pool, so the decode thread cannot have it. Clear what the
+// frame cleared at its setup; the next frame of the same size then starts on a slot that is already clean.
+// Returns the bytes cleared.
+static size_t async_clear_slot(av1_frame_thread_data *td) {
+  size_t bytes = 0;
+  if (td->clear_pending && td->async_clear) {
+    memset(td->mode_info_grid->host_ptr, 0, td->clear_mi_bytes);
+    // The luma grid and the chroma grid behind it, as one range (the two memsets of av1_setup_frame).
+    if (td->clear_iter_bytes) memset(td->gen_intra_inter_grid->host_ptr, -1, td->clear_iter_bytes);
+    td->clean_mi_bytes = td->clear_mi_bytes;
+    td->clean_iter_bytes = td->clear_iter_bytes;
+    bytes = td->clear_mi_bytes + td->clear_iter_bytes;
+  }
+  td->clear_pending = 0;
+  return bytes;
+}
+
 static int get_random_number_test(int val) {
   unsigned int bit;
   bit = ((val >> 0) ^ (val >> 1) ^ (val >> 3) ^ (val >> 12)) & 1;
@@ -334,9 +358,15 @@ int av1_allocate_buffers(Av1Core *dec, av1_memory_manager_base *mem, const resou
   CHECK_RESULT(dec->prediction_blocks_warp, mem->create_buffer(block_count_8x8 * 48, MemoryType::DeviceOnly),
                do_assign);
   CHECK_RESULT(dec->loopfilter_blocks, mem->create_buffer(lf_blk_count * 32, MemoryType::DeviceOnly), do_assign);
-  CHECK_RESULT(dec->mode_info_pool, mem->create_buffer(sizeof(MB_MODE_INFO) * mi_size, MemoryType::HostRW), do_assign);
+  // One share of the mode info pool and of the coefficient buffer per slot (mode_info_offset and
+  // coef_buffer_offset below). With the default two slots these are the sizes the code always had.
+  const size_t slot_count = (size_t)cfg.gpu_pipeline_depth;
+  CHECK_RESULT(dec->mode_info_pool,
+               mem->create_buffer(sizeof(MB_MODE_INFO) * (size_t)(mi_size >> 1) * slot_count, MemoryType::HostRW),
+               do_assign);
   const int coef_buffer_size = target_width * target_height * 3 * IdctCoefCountNum / (IdctCoefCountDenum * 2);
-  CHECK_RESULT(dec->idct_coefs, mem->create_buffer(sizeof(int) * coef_buffer_size * 2, MemoryType::UploadUAV),
+  CHECK_RESULT(dec->idct_coefs,
+               mem->create_buffer(sizeof(int) * (size_t)coef_buffer_size * slot_count, MemoryType::UploadUAV),
                do_assign);
   for (int i = 0; i < cfg.gpu_pipeline_depth; ++i) {
     av1_frame_thread_data *td = &dec->frame_thread_data[i];
@@ -361,6 +391,12 @@ int av1_allocate_buffers(Av1Core *dec, av1_memory_manager_base *mem, const resou
     td->intra_v2_sched.stamp = 0;
     td->intra_v2_cols = 0;
     td->intra_v2_rows = 0;
+    td->async_clear = 0;
+    td->clear_pending = 0;
+    td->clear_mi_bytes = 0;
+    td->clear_iter_bytes = 0;
+    td->clean_mi_bytes = 0;
+    td->clean_iter_bytes = 0;
     CHECK_RESULT(td->mode_info_grid, mem->create_buffer(sizeof(MB_MODE_INFO *) * mi_size, MemoryType::HostRW),
                  do_assign);
     CHECK_RESULT(td->idct_blocks_unordered,
@@ -391,6 +427,27 @@ int av1_allocate_buffers(Av1Core *dec, av1_memory_manager_base *mem, const resou
   return 0;
 }
 
+// Pipeline slots asked for by the decoder config: 0 is the default, anything else is clamped to what the
+// arrays are sized for.
+static int frame_slots_from_cfg(const aom_codec_dec_cfg_t *cfg) {
+  if (cfg->frame_slots == 0) return FrameThreadDataDefault;
+  return AOMMAX((int)FrameThreadDataDefault, AOMMIN((int)FrameThreadDataCount, cfg->frame_slots));
+}
+
+// The same for the memory query and for the creation: both must count the same allocations.
+static void resource_config_from_cfg(resource_config *rcfg, const aom_codec_dec_cfg_t *cfg) {
+  rcfg->bitdepth = cfg->bitdepth;
+  rcfg->width = cfg->width;
+  rcfg->height = cfg->height;
+  rcfg->gpu_pipeline_depth = frame_slots_from_cfg(cfg);
+  // The pool has to cover the reference map (8), the frame being decoded and its back buffer, and what the
+  // frames in flight still hold: a back buffer each, and references the map has dropped since. Twelve is the
+  // size for two slots; one more frame in flight needs one more buffer to leave the same margin.
+  rcfg->ref_fb_count = RefFrameBufferCount + rcfg->gpu_pipeline_depth - FrameThreadDataDefault;
+  rcfg->fb_count = rcfg->ref_fb_count;
+  rcfg->enable_superres = 1;
+}
+
 extern "C" int av1_query_memory_requirements(aom_codec_dec_cfg_t *cfg) {
   av1_memory_allocator_dummy mem;
 
@@ -398,13 +455,7 @@ extern "C" int av1_query_memory_requirements(aom_codec_dec_cfg_t *cfg) {
   mem.host_allocate(sizeof(av1_memory_allocator));
   mem.host_allocate(sizeof(Av1Core));
   resource_config rcfg;
-  rcfg.bitdepth = cfg->bitdepth;
-  rcfg.width = cfg->width;
-  rcfg.height = cfg->height;
-  rcfg.ref_fb_count = 12;
-  rcfg.fb_count = rcfg.ref_fb_count;
-  rcfg.gpu_pipeline_depth = FrameThreadDataCount;
-  rcfg.enable_superres = 1;
+  resource_config_from_cfg(&rcfg, cfg);
   Av1Core dec;
   av1_allocate_buffers(&dec, &mem, rcfg, 0);
   cfg->host_size = mem.get_host_size();
@@ -484,13 +535,8 @@ extern "C" int av1_create_gpu_decoder(Av1Core **gpu_dec, aom_codec_dec_cfg_t *cf
   if (wait_shader_create_complete(dec->shader_lib)) return -1;
 
   resource_config rcfg;
-  rcfg.bitdepth = cfg->bitdepth;
-  rcfg.width = cfg->width;
-  rcfg.height = cfg->height;
-  rcfg.ref_fb_count = 12;
-  rcfg.fb_count = rcfg.ref_fb_count;
-  rcfg.gpu_pipeline_depth = FrameThreadDataCount;
-  rcfg.enable_superres = 1;
+  resource_config_from_cfg(&rcfg, cfg);
+  dec->frame_slots = rcfg.gpu_pipeline_depth;
   if (av1_allocate_buffers(dec, mem, rcfg, 1)) return -1;
   memset(dec->idct_coefs->host_ptr, 0, dec->idct_coefs->size);
 
@@ -499,7 +545,7 @@ extern "C" int av1_create_gpu_decoder(Av1Core **gpu_dec, aom_codec_dec_cfg_t *cf
   HRESULT hr;
 
   MTQueueInit(&dec->frame_data_pool);
-  for (int i = 0; i < FrameThreadDataCount; ++i) {
+  for (int i = 0; i < dec->frame_slots; ++i) {
     av1_frame_thread_data *td = &dec->frame_thread_data[i];
     ComputeCommandBuffer *cb = &td->command_buffer;
     hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cb->allocator));
@@ -521,6 +567,8 @@ extern "C" int av1_create_gpu_decoder(Av1Core **gpu_dec, aom_codec_dec_cfg_t *cf
 
   if (FAILED(av1_upload_luts(dec))) return -1;
 
+  // Work items: one per frame in flight (at most FrameThreadDataCount, each holds a slot) and one per
+  // show-existing frame that needs no slot. The decode thread waits when the pool is empty.
   MTQueueInit(&dec->gpu_item_pool);
   MTQueueInit(&dec->gpu_waiting_queue);
   for (int i = 0; i < 8; ++i) {
@@ -609,7 +657,7 @@ void av1_destroy_gpu_decoder(Av1Core *dec) {
     }
   }
 
-  for (int i = 0; i < FrameThreadDataCount; ++i) {
+  for (int i = 0; i < dec->frame_slots; ++i) {
     av1_frame_thread_data *td = &dec->frame_thread_data[i];
     CloseHandle(td->command_buffer.event);
     pthread_mutex_destroy(&td->sec_data_mutex);
@@ -800,6 +848,18 @@ THREADFN gpu_thread_hook(void *data) {
       }
       pthread_mutex_unlock(&dec->fb_pool_mutex);
       td->sec_thread_data = NULL;
+      // -asyncclear: clear the slot's grids here instead of on the decode thread. A second slot went back
+      // above as it is: a frame uses only the coefficient and mode info shares of its second slot, not the
+      // grids, so that slot is as clean as it was.
+      const int64_t perf_clear_start = perf_have_rec ? perf_now() : 0;
+      const size_t cleared = async_clear_slot(td);
+      if (perf_clear_start && cleared) {
+        LARGE_INTEGER qpf;
+        QueryPerformanceFrequency(&qpf);
+        perf_rec.cpu_ms[AV1_PERF_CPU_ASYNC_CLEAR] =
+            (double)(perf_now() - perf_clear_start) * 1000.0 / (double)qpf.QuadPart;
+        perf_rec.async_clear_bytes = (int64_t)cleared;
+      }
       MTQueuePush(&dec->frame_data_pool, td);
     }
 
@@ -1016,7 +1076,13 @@ extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
     if (td->sec_thread_data) {
       MTQueuePush(&dec->frame_data_pool, td->sec_thread_data);
     }
+    // A frame that was set up but never submitted (decode error). Its grids stay dirty and are not marked
+    // clean, so the next frame on this slot clears them itself, with or without -asyncclear.
+    td->clear_pending = 0;
     MTQueuePush(&dec->frame_data_pool, td);
+    // The coefficients of a submitted frame are zeroed by the IDCT shaders as they read them (the entropy
+    // decoder writes only the non-zero ones and relies on the rest being zero). This frame never reached the
+    // GPU, so its share is cleared here.
     int * coef_buf = (int *)dec->idct_coefs->host_ptr;
     memset(coef_buf + td->coef_buffer_offset, 0, td->coef_buffer_size);
     dec->curr_frame_data = NULL;
@@ -1035,9 +1101,28 @@ extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
   cm->mi_grid_base = (MB_MODE_INFO **)td->mode_info_grid->host_ptr;
   cm->mi_grid_visible = cm->mi_grid_base;
   cm->mi_alloc_size = cm->mi_stride * ((cm->mi_rows + 31) & ~31);
-  perf_t = av1_perf_ticks();
-  memset(cm->mi_grid_base, 0, sizeof(MB_MODE_INFO **) * cm->mi_alloc_size);
-  perf_add_memset(dec, AV1_PERF_CPU_MEMSET, perf_t, sizeof(MB_MODE_INFO **) * cm->mi_alloc_size);
+  // Test player flag -asyncclear. The two per-frame clears of the slot (this grid and the intra iteration
+  // grid below) are sized from this frame, which the completion thread cannot know when it returns the slot.
+  // The rule: after a frame's fence the completion thread clears exactly the bytes that frame's setup
+  // cleared, and records the two sizes in the slot (clean_*). A frame skips a clear only when the recorded
+  // size is exactly the size it would clear itself; then every byte of the grid is what the clear on this
+  // thread would have left, inside the range and past it. Any other case (first use of the slot, another
+  // frame size, a slot that went back without a completed frame, the flag off) clears here as before. The
+  // marks are taken off at once: from here on the grids are being written.
+  const int async_clear = g_async_clear;
+  const size_t mi_grid_bytes = sizeof(MB_MODE_INFO **) * cm->mi_alloc_size;
+  if (!async_clear || td->clean_mi_bytes != mi_grid_bytes) {
+    perf_t = av1_perf_ticks();
+    memset(cm->mi_grid_base, 0, mi_grid_bytes);
+    perf_add_memset(dec, AV1_PERF_CPU_MEMSET, perf_t, mi_grid_bytes);
+  }
+  const size_t clean_iter_bytes = td->clean_iter_bytes;
+  td->clean_mi_bytes = 0;
+  td->clean_iter_bytes = 0;
+  td->async_clear = async_clear;
+  td->clear_mi_bytes = mi_grid_bytes;
+  td->clear_iter_bytes = 0;
+  td->clear_pending = 1;
 
   const int grid_w = (((buf->y_width + 63) & (~63)) >> 2) + 2 + 128;
   const int grid_h = (((buf->y_height + 63) & (~63)) >> 2) + 2 + 128;
@@ -1056,10 +1141,18 @@ extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
   if (!td->intra_v2) {
     // With -intrav2 nothing scans the iteration grid; av1_mi_push_block() writes the one entry per block
     // that gen_pred_blocks.hlsl reads.
-    perf_t = av1_perf_ticks();
-    memset(td->gen_intra_iter_y, -1, td->iter_grid_offset_uv * 4);
-    memset(td->gen_intra_iter_uv, -1, td->iter_grid_offset_uv);
-    perf_add_memset(dec, AV1_PERF_CPU_MEMSET, perf_t, (size_t)td->iter_grid_offset_uv * 5);
+    // The luma grid (4 bytes per entry) and the chroma grid right behind it: one range from the start of
+    // the buffer. -asyncclear: skipped when the completion thread left exactly this range cleared.
+    const size_t iter_grid_bytes = (size_t)td->iter_grid_offset_uv * 5;
+    if (!async_clear || clean_iter_bytes != iter_grid_bytes) {
+      perf_t = av1_perf_ticks();
+      memset(td->gen_intra_iter_y, -1, td->iter_grid_offset_uv * 4);
+      memset(td->gen_intra_iter_uv, -1, td->iter_grid_offset_uv);
+      perf_add_memset(dec, AV1_PERF_CPU_MEMSET, perf_t, iter_grid_bytes);
+    }
+    // With -intrav2 on, the frames that still come here (intra block copy) are the exception and the next
+    // frame on the slot most likely does not clear this grid, so it is not cleared ahead for it.
+    if (!g_intra_v2) td->clear_iter_bytes = iter_grid_bytes;
   }
 
   td->is_hbd = buf->bit_depth > 8;

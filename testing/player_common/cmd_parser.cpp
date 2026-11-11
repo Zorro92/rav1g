@@ -46,7 +46,11 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"intrav2", atSingle, anOptional, "intra prediction through intra_v2.hlsl (same output)", "",
        &params_.intrav2_},
       {"intraopt", atSingle, anOptional, "original intra_main shader built with FXC optimisation (same source)", "",
-       &params_.intraopt_}};
+       &params_.intraopt_},
+      {"slots", atInt, anOptional, "decoder pipeline slots (frames in flight), 2..4. Default 2", "",
+       &params_.slots_},
+      {"asyncclear", atSingle, anOptional, "per-frame clears off the decode thread (same output)", "",
+       &params_.asyncclear_}};
   params_.command_line_ = args.command_line_;
   const int list_length = sizeof(avaiting) / sizeof(ParamStruct);
   bool has_value[list_length] = {false};
@@ -124,6 +128,15 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     return -1;
   }
 
+  if (params_.slots_ < PLAYER_SLOTS_MIN || params_.slots_ > PLAYER_SLOTS_MAX) {
+    // Refused, not clamped: a timing run must not report numbers for a slot count nobody asked for.
+    char ss[96];
+    sprintf(ss, "-slots %d is not allowed: the decoder takes %d to %d slots.", params_.slots_, PLAYER_SLOTS_MIN,
+            PLAYER_SLOTS_MAX);
+    Err += ss;
+    return -1;
+  }
+
   params_.isDirectory_ = (params_.source_file_.empty() && !params_.source_dir_.empty());
   params_.isSubList_ = (params_.source_file_.empty() && params_.source_dir_.empty() && !params_.view_list_.empty());
   params_.needReadBack_ = !params_.target_file_.empty() || params_.md5_ || params_.md5_frame_check_ ||
@@ -176,6 +189,8 @@ void CParameters::Reset() {
   params_.cdefv2_ = false;
   params_.intrav2_ = false;
   params_.intraopt_ = false;
+  params_.slots_ = PLAYER_SLOTS_DEFAULT;
+  params_.asyncclear_ = false;
 }
 
 void CParameters::GetHelp(int pos, const char* arg, std::string& errMsg, const ParamStruct* arr, int size) {

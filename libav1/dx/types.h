@@ -26,7 +26,14 @@
 enum {
   UsePipeline = 0,
   PipelineSize = 2,
-  FrameThreadDataCount = 2,
+  // Pipeline slots (av1_frame_thread_data). The number in use is a decoder creation parameter
+  // (aom_codec_dec_cfg_t::frame_slots, Av1Core::frame_slots); arrays are sized for the maximum.
+  FrameThreadDataDefault = 2,
+  FrameThreadDataCount = 4,
+  // Reference frame buffers with the default number of slots. Every slot above the default adds one, because
+  // a frame in flight holds a back buffer until its GPU work is done.
+  RefFrameBufferCount = 12,
+  RefFrameBufferMax = RefFrameBufferCount + FrameThreadDataCount - FrameThreadDataDefault,
   EntropyThreadCount = 8,
   ImagePoolSize = 16,
 };
@@ -214,6 +221,17 @@ struct av1_frame_thread_data {
 
   av1_frame_thread_data* sec_thread_data;
   pthread_mutex_t sec_data_mutex;
+
+  // Test player flag -asyncclear (see av1_setup_frame). clear_*: what the frame that owns the slot cleared,
+  // or found cleared, at setup; the completion thread clears the same bytes again once the frame's fence is
+  // done. clean_*: bytes of the grids that are in the cleared state now. Written by the thread that holds the
+  // slot: the completion thread before it returns the slot to the pool, the decode thread after it took it.
+  int async_clear;          // the frame was set up with -asyncclear
+  int clear_pending;        // the grids were written by a frame and not cleared since
+  size_t clear_mi_bytes;    // mode_info_grid, from its start
+  size_t clear_iter_bytes;  // gen_intra_inter_grid, from its start; 0: the frame did not clear it
+  size_t clean_mi_bytes;
+  size_t clean_iter_bytes;
   int scale_enable;
   ScaleFactor scale_factors[8];
   volatile int64_t perf_markers[16];
@@ -265,6 +283,7 @@ typedef struct Av1Core {
   int block_count4x4;
 
   av1_frame_thread_data frame_thread_data[FrameThreadDataCount];
+  int frame_slots;  // slots in use: the first frame_slots entries of frame_thread_data
   av1_frame_thread_data* curr_frame_data;
   int frame_number;
   int thread_count;
@@ -275,7 +294,7 @@ typedef struct Av1Core {
   int enable_superres;
   int wedge_offsets[BLOCK_SIZES_ALL][2];
 
-  HwFrameBuffer fb_pool_src[16];
+  HwFrameBuffer fb_pool_src[RefFrameBufferMax];
   HwOutputImage image_pool_src[ImagePoolSize];
   pthread_cond_t fb_pool_empty_cond;
   pthread_mutex_t fb_pool_mutex;

@@ -115,6 +115,12 @@ typedef struct aom_codec_dec_cfg {
   void* dx12command_queue;
   void* dxPsos;
   int tryHDR10x3;
+  /* Pipeline slots: frames that can be between the start of their CPU decode
+   * and the end of their GPU work at the same time. 0 selects the default
+   * (2); other values are clamped to 2..4. Each slot has its own buffers, so
+   * the value must be the same for av1_codec_query_memory_requirements and
+   * aom_codec_dec_init. */
+  int frame_slots;
 } aom_codec_dec_cfg_t;            /**< alias for struct aom_codec_dec_cfg */
 
 /*!\brief Initialize a decoder instance

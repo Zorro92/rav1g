@@ -225,6 +225,7 @@ class AV1Decoder {
   void Start(CParameters* params) {
     need_reinit_ = params && (params->GetParams().threads_ != params_.threads_ ||
                               params->GetParams().player_queue_size_ != params_.player_queue_size_ ||
+                              params->GetParams().slots_ != params_.slots_ ||  // a decoder creation parameter
                               params->GetParams().recreate_);
     params_ = params->GetParams();
     stop_decode_ = 0;

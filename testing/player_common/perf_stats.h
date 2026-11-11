@@ -29,7 +29,8 @@ static const char* const kCpuNames[] = {
     "wait_slot",     "wait_sec_slot", "wait_fb",        "wait_output",    "wait_image",  "wait_item",
     "setup",         "memset",        "memset_tile",    "entropy_wall",   "entropy_sum", "record",
     "rec_gen_blocks", "rec_idct",     "rec_pred",       "rec_loopfilter", "rec_cdef_lr", "rec_borders",
-    "rec_copy",      "submit",        "frame",          "fence_wait",     "gpu_latency", "notify"};
+    "rec_copy",      "submit",        "frame",          "fence_wait",     "gpu_latency", "notify",
+    "async_clear"};
 static_assert(sizeof(kCpuNames) / sizeof(kCpuNames[0]) == AV1_PERF_CPU_COUNT,
               "CPU timer names out of step with av1_perf.h");
 
@@ -118,7 +119,7 @@ class PerfStats {
     const size_t ow = Warmup(outputs_.size());
 
     size_t shown = 0, hidden = 0, sef = 0, intra = 0, gpu_ok = 0, sec_slot = 0;
-    Series wall, busy, sum, gap, blocked, iters, mbytes, wall_out, calls;
+    Series wall, busy, sum, gap, blocked, iters, mbytes, abytes, wall_out, calls;
     Series intra_dispatches, intra_barriers, intra_groups, intra_passes;
     size_t intra_v2 = 0;
     Series gpu_stage[AV1_PERF_GPU_STAGE_COUNT];
@@ -158,6 +159,7 @@ class PerfStats {
         if (f.intra_v2) ++intra_v2;
       }
       mbytes.Add((double)f.memset_bytes / (1024.0 * 1024.0));
+      abytes.Add((double)f.async_clear_bytes / (1024.0 * 1024.0));
     }
     for (size_t i = (ow > 0 ? ow : 1); i < outputs_.size(); ++i) wall_out.Add(outputs_[i] - outputs_[i - 1]);
     for (size_t i = Warmup(decode_calls_.size()); i < decode_calls_.size(); ++i) calls.Add(decode_calls_[i]);
@@ -196,6 +198,9 @@ class PerfStats {
     Line(&out, "cpu command list record", cpu[AV1_PERF_CPU_RECORD], 0.0, 0);
     Line(&out, "cpu submit", cpu[AV1_PERF_CPU_SUBMIT], 0.0, 0);
     Line(&out, "cpu memsets (frame + tile)", SumOf(w, AV1_PERF_CPU_MEMSET, AV1_PERF_CPU_MEMSET_TILE), mbytes.Mean(),
+         "MB cleared per frame");
+    // -asyncclear: the clears moved to the completion thread. Zero without the flag.
+    Line(&out, "cpu clears, completion thread", cpu[AV1_PERF_CPU_ASYNC_CLEAR], abytes.Mean(),
          "MB cleared per frame");
     Line(&out, "blocked, decode thread, all waits", blocked, Pct(blocked.Sum(), wall.Sum()), "% of wall");
     Line(&out, "blocked on fence, completion thread", cpu[AV1_PERF_CPU_FENCE_WAIT], 0.0, 0);
@@ -245,7 +250,7 @@ class PerfStats {
              intra_groups.Sum() > 0.0 ? intra_passes.Sum() / intra_groups.Sum() : 0.0, (unsigned)intra_v2,
              (unsigned)iters.Count());
     out.push_back(b);
-    snprintf(b, sizeof(b), "frames that also took the second pipeline slot: %u of %u", (unsigned)sec_slot,
+    snprintf(b, sizeof(b), "frames that also took a second pipeline slot: %u of %u", (unsigned)sec_slot,
              (unsigned)measured);
     out.push_back(b);
     snprintf(b, sizeof(b), "output-buffer waits: %d, total %.1f ms, longest %.1f ms (whole run, warm-up included)",

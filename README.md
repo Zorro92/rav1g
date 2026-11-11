@@ -39,6 +39,9 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
   timing-dependent race), which is probably why upstream turned it off. Negative result.
 - On both clips the CPU decode thread is now the wall limit: single-tile entropy decoding
   takes 34–44 ms per frame on one core, plus ~12–15 ms of setup and recording.
+- **Pipeline depth and clears** (`-slots`, `-asyncclear`): the number of frames in flight
+  between CPU and GPU can be raised from 2 to 3 or 4, and the per-frame buffer clears can
+  move off the decode thread. Both are off by default and are being measured.
 - 1080p24/30 already decodes in real time.
 - Known bug: some encodes with hidden frames (SVT-AV1 random access) deadlock on output
   buffer starvation.

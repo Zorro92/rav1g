@@ -115,6 +115,8 @@ int AV1Decoder::DecodeOne() {
       cfg.out_buffers_cb.out_buffers_priv = this;
       cfg.host_size = 0;
       cfg.tryHDR10x3 = params_.hdr10x3_;
+      // -slots: set before the memory query, each slot has host memory of its own.
+      cfg.frame_slots = params_.slots_;
       av1_codec_query_memory_requirements(&cfg);
       host_mem_.resize(cfg.host_size, 0);
       cfg.host_memory = &host_mem_[0];  // onion_mem.Data();
@@ -214,6 +216,12 @@ int AV1Decoder::DecodeOne() {
   av1_set_intra_opt(params_.intraopt_ ? 1 : 0);
   XB_LOGI << "Intra main shader: "
           << (params_.intraopt_ ? "intra_main_opt (FXC optimised, -intraopt)" : "intra_main (/Od, original)");
+
+  // -slots: fixed when the decoder was created; Start() asks for a new decoder when the value changes.
+  XB_LOGI << "Frame slots: " << params_.slots_;
+  // -asyncclear: the same rules as the shader flags above, independent of them and of -slots.
+  av1_set_async_clear(params_.asyncclear_ ? 1 : 0);
+  XB_LOGI << "Clears: " << (params_.asyncclear_ ? "off the decode thread (-asyncclear)" : "decode thread (original)");
 
   output_queue_ = std::unique_ptr<BufferLocker>(new BufferLocker(&params_, cur_frame, storage_));
   if (display_) display_->AddSource(this);

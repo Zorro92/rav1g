@@ -45,15 +45,16 @@ enum {
 /* CPU timers. All values are milliseconds in the record. */
 enum {
   /* decode thread, blocked */
-  AV1_PERF_CPU_WAIT_SLOT = 0, /* waiting for a free pipeline slot (frame data) */
-  AV1_PERF_CPU_WAIT_SEC_SLOT, /* waiting for the second slot (extra coef buffer) */
+  AV1_PERF_CPU_WAIT_SLOT = 0, /* waiting for a free pipeline slot (frame data); with -asyncclear the
+                                 slot comes back only after its clears, so that time is in here too */
+  AV1_PERF_CPU_WAIT_SEC_SLOT, /* waiting for a second slot (extra coef buffer) */
   AV1_PERF_CPU_WAIT_FB,       /* waiting for a free reference frame buffer */
   AV1_PERF_CPU_WAIT_OUTPUT,   /* waiting in the player's output buffer callback */
   AV1_PERF_CPU_WAIT_IMAGE,    /* waiting for a free output image descriptor */
   AV1_PERF_CPU_WAIT_ITEM,     /* waiting for a free GPU work item */
   /* decode thread, working */
   AV1_PERF_CPU_SETUP,         /* av1_setup_frame, including its waits and memsets */
-  AV1_PERF_CPU_MEMSET,        /* per-frame memsets in av1_setup_frame */
+  AV1_PERF_CPU_MEMSET,        /* per-frame memsets in av1_setup_frame, on the decode thread */
   AV1_PERF_CPU_MEMSET_TILE,   /* per-tile memsets, summed across tile threads */
   AV1_PERF_CPU_ENTROPY_WALL,  /* tile decode, wall time on the decode thread */
   AV1_PERF_CPU_ENTROPY_SUM,   /* tile decode, summed across tile threads */
@@ -71,6 +72,7 @@ enum {
   AV1_PERF_CPU_FENCE_WAIT,    /* blocked on the frame's fence event */
   AV1_PERF_CPU_GPU_LATENCY,   /* submit done to fence seen */
   AV1_PERF_CPU_NOTIFY,        /* time inside the frame-ready callback */
+  AV1_PERF_CPU_ASYNC_CLEAR,   /* -asyncclear: the slot's clears, done here after the frame's fence */
   AV1_PERF_CPU_COUNT
 };
 
@@ -80,7 +82,7 @@ typedef struct av1_perf_frame {
   int showable_frame; /* hidden frame that may be shown later */
   int is_sef;         /* show-existing-frame that needed an output copy */
   int intra_frame;    /* key or intra-only frame */
-  int used_sec_slot;  /* frame also took the second pipeline slot */
+  int used_sec_slot;  /* frame also took a second pipeline slot */
   int intra_iters;    /* last intra wavefront iteration dispatched (-1: none); with -intrav2 the last step */
   int intra_v2;       /* intra went through intra_v2.hlsl (-intrav2) */
   int intra_dispatches; /* Dispatch calls of the intra stage */
@@ -98,7 +100,8 @@ typedef struct av1_perf_frame {
   double gpu_gap_ms;  /* previous frame's last timestamp to this frame's first; -1 unknown */
 
   double cpu_ms[AV1_PERF_CPU_COUNT];
-  int64_t memset_bytes; /* bytes cleared by the timed memsets */
+  int64_t memset_bytes; /* bytes cleared by the timed memsets on the decode and tile threads */
+  int64_t async_clear_bytes; /* bytes cleared on the completion thread (AV1_PERF_CPU_ASYNC_CLEAR) */
   double complete_ms;   /* host clock when the frame's fence was seen */
 } av1_perf_frame;
 
@@ -128,6 +131,16 @@ void av1_set_intra_v2(int enable);
  * av1_set_intra_v2(1) only to the frames that keep it. Off by default. Change
  * it only while no frame is in flight. */
 void av1_set_intra_opt(int enable);
+
+/* Process-wide. Non-zero moves the per-frame clears of a pipeline slot (the
+ * mode info grid and the intra iteration grid) from the decode thread to the
+ * GPU completion thread, which does them after the fence of the frame that
+ * used the slot and before the slot goes back to the pool. The decode thread
+ * then finds the slot already cleared; it still clears on its own when the
+ * cleared size does not match the frame (first use, frame size change). The
+ * decoded output is the same. Off by default. Change it only while no frame
+ * is in flight. */
+void av1_set_async_clear(int enable);
 
 #ifdef __cplusplus
 }

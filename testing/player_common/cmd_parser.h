@@ -24,6 +24,10 @@
 #include <vector>
 
 #define PLAYER_QUEUE_SIZE 16
+// -slots: the decoder's pipeline slots (aom_codec_dec_cfg_t::frame_slots).
+#define PLAYER_SLOTS_DEFAULT 2
+#define PLAYER_SLOTS_MIN 2
+#define PLAYER_SLOTS_MAX 4
 
 struct one_task : public std::vector<std::string> {
   std::string command_line_;
@@ -72,6 +76,8 @@ class CParameters {
     bool cdefv2_;
     bool intrav2_;
     bool intraopt_;
+    int slots_;
+    bool asyncclear_;
   };
   enum arg_type { atSingle, atInt, atString };
   enum arg_need { anOptional, anMandatory, anAtLeastOne };
