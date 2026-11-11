@@ -73,6 +73,8 @@ typedef struct {
   ComputeShader shader_loop_rest;
   ComputeShader shader_cdef_filter;
   ComputeShader shader_cdef_filter_v2;  // test player flag -cdefv2
+  ComputeShader shader_intra_v2;        // test player flag -intrav2
+  ComputeShader shader_intra_v2_hbd;
   ComputeShader shader_filmgrain_luma_gen;
   ComputeShader shader_filmgrain_chroma_gen;
   ComputeShader shader_filmgrain_filter;
@@ -93,6 +95,7 @@ typedef struct {
   Microsoft::WRL::ComPtr<ID3D12RootSignature> sig_common0110;
   Microsoft::WRL::ComPtr<ID3D12RootSignature> sig_pred_blocks;
   Microsoft::WRL::ComPtr<ID3D12RootSignature> sig_intra_pred;
+  Microsoft::WRL::ComPtr<ID3D12RootSignature> sig_intra_v2;
   Microsoft::WRL::ComPtr<ID3D12RootSignature> sig_inter_pred;
 
   Microsoft::WRL::ComPtr<ID3D12RootSignature> sig_lf;

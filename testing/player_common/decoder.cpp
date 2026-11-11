@@ -205,6 +205,11 @@ int AV1Decoder::DecodeOne() {
   // -cdefv2: also set at a point where no frame is in flight; off again for a task without the flag.
   av1_set_cdef_v2(params_.cdefv2_ ? 1 : 0);
   XB_LOGI << "CDEF shader: " << (params_.cdefv2_ ? "cdef_filter_v2 (-cdefv2)" : "cdef_filter (original)");
+  // -intrav2: the same rules, independent of -cdefv2.
+  av1_set_intra_v2(params_.intrav2_ ? 1 : 0);
+  XB_LOGI << "Intra shaders: "
+          << (params_.intrav2_ ? "intra_v2 (-intrav2; frames with intra block copy keep the original shaders)"
+                               : "intra_main + intra_filter (original)");
 
   output_queue_ = std::unique_ptr<BufferLocker>(new BufferLocker(&params_, cur_frame, storage_));
   if (display_) display_->AddSource(this);

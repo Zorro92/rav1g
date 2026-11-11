@@ -81,7 +81,12 @@ typedef struct av1_perf_frame {
   int is_sef;         /* show-existing-frame that needed an output copy */
   int intra_frame;    /* key or intra-only frame */
   int used_sec_slot;  /* frame also took the second pipeline slot */
-  int intra_iters;    /* intra wavefront iterations dispatched (-1: none) */
+  int intra_iters;    /* last intra wavefront iteration dispatched (-1: none); with -intrav2 the last step */
+  int intra_v2;       /* intra went through intra_v2.hlsl (-intrav2) */
+  int intra_dispatches; /* Dispatch calls of the intra stage */
+  int intra_barriers;   /* UAV barriers of the intra stage */
+  int intra_groups;     /* thread groups of the intra stage */
+  int intra_passes;     /* thread groups times their passes; a group of the original shaders has one */
   int tile_count;
 
   int gpu_valid;      /* GPU timestamps were read back for this frame */
@@ -109,6 +114,12 @@ void av1_set_perf_callback(av1_perf_frame_cb_fn_t cb, void *priv);
  * cdef_filter.hlsl; the decoded output is the same. Off by default. Change it
  * only while no frame is in flight, like the callback above. */
 void av1_set_cdef_v2(int enable);
+
+/* Process-wide. Non-zero runs intra prediction through intra_v2.hlsl instead
+ * of intra_main.hlsl + intra_filter.hlsl; the decoded output is the same.
+ * Frames that allow intra block copy keep the original shaders. Off by
+ * default. Change it only while no frame is in flight. */
+void av1_set_intra_v2(int enable);
 
 #ifdef __cplusplus
 }

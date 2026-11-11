@@ -36,6 +36,11 @@ static av1_perf_frame MakeFrame(int n, double complete_ms, int show) {
   f.frame_number = n;
   f.show_frame = show;
   f.intra_iters = 40;
+  f.intra_v2 = 1;
+  f.intra_dispatches = 12;
+  f.intra_barriers = 9;
+  f.intra_groups = 300;
+  f.intra_passes = 2400;
   f.tile_count = 4;
   f.gpu_valid = 1;
   f.gpu_marks = 4;
@@ -144,7 +149,10 @@ int main() {
     CHECK(Has(lines, "(not dispatched)"));
     CHECK(Has(lines, "output-buffer waits: 3, total 120.0 ms, longest 60.0 ms"));
     CHECK(Has(lines, "1.25 decoded frames each"));
+    CHECK(Has(lines, "dispatches mean 12.0 max 12, UAV barriers mean 9.0 max 9, thread groups mean 300 max 300, "
+                     "passes per group 8.0 (intra_v2 on 90 of 90 frames)"));
     CHECK(st.FrameLines().size() == 100);
+    CHECK(Has(st.FrameLines(), "iters=40 iv2=1 idisp=12 ibarr=9 igroups=300 ipasses=2400 tiles=4"));
     for (size_t i = 0; i < lines.size(); ++i) {
       CHECK(lines[i].find("nan") == std::string::npos);
       CHECK(lines[i].find("inf") == std::string::npos);

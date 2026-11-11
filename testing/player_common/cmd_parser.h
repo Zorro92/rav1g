@@ -70,6 +70,7 @@ class CParameters {
     bool gputime_;
     bool nopresent_;
     bool cdefv2_;
+    bool intrav2_;
   };
   enum arg_type { atSingle, atInt, atString };
   enum arg_need { anOptional, anMandatory, anAtLeastOne };

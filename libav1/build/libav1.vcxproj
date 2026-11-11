@@ -986,6 +986,12 @@
     <FxCompile Include="..\dx\shaders\cdef_filter_v2.hlsl">
       <FileType>Document</FileType>
     </FxCompile>
+    <FxCompile Include="..\dx\shaders\intra_v2.hlsl">
+      <FileType>Document</FileType>
+    </FxCompile>
+    <FxCompile Include="..\dx\shaders\intra_v2_hbd.hlsl">
+      <FileType>Document</FileType>
+    </FxCompile>
   </ItemGroup>
   <ItemGroup>
     <FxCompile Include="..\dx\shaders\loop_restoration.hlsl">

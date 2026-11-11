@@ -179,6 +179,11 @@ static void perf_collect(Av1Core *dec, av1_frame_thread_data *td, int64_t wait_s
   rec->intra_frame = p->acc.intra_frame;
   rec->used_sec_slot = p->acc.used_sec_slot;
   rec->intra_iters = p->acc.intra_iters;
+  rec->intra_v2 = p->acc.intra_v2;
+  rec->intra_dispatches = p->acc.intra_stats[0];
+  rec->intra_barriers = p->acc.intra_stats[1];
+  rec->intra_groups = p->acc.intra_stats[2];
+  rec->intra_passes = p->acc.intra_stats[3];
   rec->tile_count = p->acc.tile_count;
   for (int i = 0; i < AV1_PERF_CPU_COUNT; ++i) rec->cpu_ms[i] = (double)p->acc.ticks[i] * to_ms;
   rec->cpu_ms[AV1_PERF_CPU_FENCE_WAIT] = (double)(now - wait_start) * to_ms;
@@ -346,6 +351,16 @@ int av1_allocate_buffers(Av1Core *dec, av1_memory_manager_base *mem, const resou
     CHECK_RESULT(td->gen_intra_inter_grid, mem->create_buffer(grid_w * grid_h * 6, MemoryType::HostRW), do_assign);
     CHECK_RESULT(td->gen_block_map, mem->create_buffer(dec->pred_map_size * sizeof(int), MemoryType::HostRW),
                  do_assign);
+    // Test player flag -intrav2 (intra_v2_sched.h): 8 bytes per 4x4 cell of luma and chroma, then the region
+    // list, which cannot have more entries than there are cells; two words per 64x64 region on the host.
+    td->intra_v2_cells = mi_size + (mi_size >> 2);
+    CHECK_RESULT(td->intra_v2_buffer, mem->create_buffer((size_t)td->intra_v2_cells * 16, MemoryType::HostRW),
+                 do_assign);
+    CHECK_RESULT(td->intra_v2_regions, (unsigned int *)mem->host_allocate(sizeof(int) * 2 * (mi_size >> 8)),
+                 do_assign);
+    td->intra_v2_sched.stamp = 0;
+    td->intra_v2_cols = 0;
+    td->intra_v2_rows = 0;
     CHECK_RESULT(td->mode_info_grid, mem->create_buffer(sizeof(MB_MODE_INFO *) * mi_size, MemoryType::HostRW),
                  do_assign);
     CHECK_RESULT(td->idct_blocks_unordered,
@@ -935,6 +950,51 @@ void get_sec_data(Av1Core *dec, av1_frame_thread_data *td) {
   pthread_mutex_unlock(&td->sec_data_mutex);
 }
 
+// Test player switch (-intrav2): intra prediction through intra_v2.hlsl, which writes the same bytes with one
+// thread group per 64x64 region and far fewer dispatches. Off unless av1_set_intra_v2(1) was called.
+static int g_intra_v2 = 0;
+
+extern "C" void av1_set_intra_v2(int enable) { g_intra_v2 = enable; }
+
+// Decides whether the frame takes the -intrav2 path and gets its schedule ready. Returns 0 when the frame
+// stays on the original shaders: flag off, intra block copy (not ported), or a frame the buffers were not
+// sized for.
+static int intra_v2_setup_frame(Av1Core *dec, AV1_COMMON *cm, av1_frame_thread_data *td) {
+  if (!g_intra_v2 || cm->allow_intrabc) return 0;
+  const int cols = (cm->mi_cols + 31) & ~31;  // 4x4 cells, padded to 128 pixels: blocks may reach that far
+  const int rows = (cm->mi_rows + 31) & ~31;
+  const int cells = cols * rows;
+  if (cells + (cells >> 2) > td->intra_v2_cells || (cols >> 4) > IntraV2MaxRegions ||
+      (rows >> 4) > IntraV2MaxRegions)
+    return 0;
+  IntraV2Sched *s = &td->intra_v2_sched;
+  s->cells = (uint32_t *)td->intra_v2_buffer->host_ptr;
+  s->regions = td->intra_v2_regions;
+  s->list = (uint64_t *)(s->cells + 2 * (size_t)(cells + (cells >> 2)));
+  s->list_count = &td->intra_v2_list_count;
+  s->map_stride = cols;
+  s->map_uv_offset = cells;
+  s->regions_stride = cols >> 4;
+  // Entries of earlier frames stay in the cell map and are told apart by the stamp, so the map is only
+  // cleared when the 8-bit stamp starts over (every 255 frames of this slot) or the layout changes.
+  int clear = intra_v2_next_stamp(&s->stamp);
+  if (cols != td->intra_v2_cols || rows != td->intra_v2_rows) {
+    td->intra_v2_cols = cols;
+    td->intra_v2_rows = rows;
+    s->stamp = 1;
+    clear = 1;
+  }
+  if (clear) {
+    const int64_t perf_t = av1_perf_ticks();
+    const size_t bytes = (size_t)(cells + (cells >> 2)) * 8;
+    memset(s->cells, 0, bytes);
+    memset(s->regions, 0, sizeof(int) * 2 * (size_t)(cells >> 8));
+    perf_add_memset(dec, AV1_PERF_CPU_MEMSET, perf_t, bytes + sizeof(int) * 2 * (size_t)(cells >> 8));
+  }
+  td->intra_v2_list_count = 0;
+  return 1;
+}
+
 extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
   Av1Core *dec = pbi->gpu_decoder;
   const int64_t perf_setup_start = av1_perf_ticks();
@@ -991,10 +1051,16 @@ extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
   td->gen_intra_iter_y = (int *)td->gen_intra_inter_grid->host_ptr;
   td->iter_grid_offset_uv = grid_w * grid_h;
   td->gen_intra_iter_uv = td->gen_intra_iter_y + td->iter_grid_offset_uv;
-  perf_t = av1_perf_ticks();
-  memset(td->gen_intra_iter_y, -1, td->iter_grid_offset_uv * 4);
-  memset(td->gen_intra_iter_uv, -1, td->iter_grid_offset_uv);
-  perf_add_memset(dec, AV1_PERF_CPU_MEMSET, perf_t, (size_t)td->iter_grid_offset_uv * 5);
+  memset(td->intra_stats, 0, sizeof(td->intra_stats));
+  td->intra_v2 = intra_v2_setup_frame(dec, cm, td);
+  if (!td->intra_v2) {
+    // With -intrav2 nothing scans the iteration grid; av1_mi_push_block() writes the one entry per block
+    // that gen_pred_blocks.hlsl reads.
+    perf_t = av1_perf_ticks();
+    memset(td->gen_intra_iter_y, -1, td->iter_grid_offset_uv * 4);
+    memset(td->gen_intra_iter_uv, -1, td->iter_grid_offset_uv);
+    perf_add_memset(dec, AV1_PERF_CPU_MEMSET, perf_t, (size_t)td->iter_grid_offset_uv * 5);
+  }
 
   td->is_hbd = buf->bit_depth > 8;
   td->shaders = td->is_hbd ? &dec->shader_lib->shaders_hbd : &dec->shader_lib->shaders_8bit;
@@ -1300,6 +1366,8 @@ extern "C" int av1_decode_frame_gpu(AV1Decoder *pbi) {
     acc->showable_frame = cm->showable_frame;
     acc->intra_frame = frame_is_intra_only(cm);
     acc->intra_iters = td->intra_iters;
+    acc->intra_v2 = td->intra_v2;
+    memcpy(acc->intra_stats, td->intra_stats, sizeof(acc->intra_stats));
     acc->tile_count = td->tile_count;
   }
   av1_commit_command_buffer(dec);

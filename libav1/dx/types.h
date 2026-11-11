@@ -21,6 +21,7 @@
 #include "dx/av1_thread.h"
 #include "av1/common/onyxc_int.h"
 #include "dx/av1_perf.h"
+#include "dx/intra_v2_sched.h"
 
 enum {
   UsePipeline = 0,
@@ -136,6 +137,8 @@ struct av1_perf_accum {
   int intra_frame;
   int used_sec_slot;
   int intra_iters;
+  int intra_v2;
+  int intra_stats[4];
   int tile_count;
 };
 
@@ -170,6 +173,17 @@ struct av1_frame_thread_data {
   GpuBufferObject* gen_block_map;
 
   GpuBufferObject* palette_buffer;
+
+  // Test player flag -intrav2: the schedule of the frame for intra_v2.hlsl (intra_v2_sched.h).
+  GpuBufferObject* intra_v2_buffer;  // cell map, then region list
+  unsigned int* intra_v2_regions;    // host only: current list entry and step of each region
+  IntraV2Sched intra_v2_sched;
+  volatile long intra_v2_list_count;
+  int intra_v2;        // this frame takes the new path
+  int intra_v2_cells;  // cells the buffer was sized for
+  int intra_v2_cols;   // cell map layout of the frame before, in cells
+  int intra_v2_rows;
+  int intra_stats[4];  // intra stage: dispatches, UAV barriers, thread groups, groups times passes
 
   int* gen_intra_iter_y;
   int* gen_intra_iter_uv;

@@ -754,6 +754,12 @@
     <FxCompile Include="..\dx\shaders\cdef_filter_v2.hlsl">
       <Filter>dx\shaders</Filter>
     </FxCompile>
+    <FxCompile Include="..\dx\shaders\intra_v2.hlsl">
+      <Filter>dx\shaders</Filter>
+    </FxCompile>
+    <FxCompile Include="..\dx\shaders\intra_v2_hbd.hlsl">
+      <Filter>dx\shaders</Filter>
+    </FxCompile>
     <FxCompile Include="..\dx\shaders\loop_restoration.hlsl">
       <Filter>dx\shaders</Filter>
     </FxCompile>

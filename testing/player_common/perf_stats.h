@@ -119,6 +119,8 @@ class PerfStats {
 
     size_t shown = 0, hidden = 0, sef = 0, intra = 0, gpu_ok = 0, sec_slot = 0;
     Series wall, busy, sum, gap, blocked, iters, mbytes, wall_out, calls;
+    Series intra_dispatches, intra_barriers, intra_groups, intra_passes;
+    size_t intra_v2 = 0;
     Series gpu_stage[AV1_PERF_GPU_STAGE_COUNT];
     Series cpu[AV1_PERF_CPU_COUNT];
     double stage_total[AV1_PERF_GPU_STAGE_COUNT] = {0.0};
@@ -147,7 +149,14 @@ class PerfStats {
       }
       for (int c = 0; c < AV1_PERF_CPU_COUNT; ++c) cpu[c].Add(f.cpu_ms[c]);
       blocked.Add(Blocked(f));
-      if (f.intra_iters >= 0) iters.Add((double)f.intra_iters);
+      if (f.intra_iters >= 0) {
+        iters.Add((double)f.intra_iters);
+        intra_dispatches.Add((double)f.intra_dispatches);
+        intra_barriers.Add((double)f.intra_barriers);
+        intra_groups.Add((double)f.intra_groups);
+        intra_passes.Add((double)f.intra_passes);
+        if (f.intra_v2) ++intra_v2;
+      }
       mbytes.Add((double)f.memset_bytes / (1024.0 * 1024.0));
     }
     for (size_t i = (ow > 0 ? ow : 1); i < outputs_.size(); ++i) wall_out.Add(outputs_[i] - outputs_[i - 1]);
@@ -227,6 +236,15 @@ class PerfStats {
     snprintf(b, sizeof(b), "intra wavefront iterations per frame: mean %.1f, max %.0f (%u frames with intra)",
              iters.Mean(), iters.Max(), (unsigned)iters.Count());
     out.push_back(b);
+    // The cost drivers of the intra stage. With -intrav2 an "iteration" above is a step of the new schedule.
+    snprintf(b, sizeof(b),
+             "intra stage per frame with intra: dispatches mean %.1f max %.0f, UAV barriers mean %.1f max %.0f, "
+             "thread groups mean %.0f max %.0f, passes per group %.1f (intra_v2 on %u of %u frames)",
+             intra_dispatches.Mean(), intra_dispatches.Max(), intra_barriers.Mean(), intra_barriers.Max(),
+             intra_groups.Mean(), intra_groups.Max(),
+             intra_groups.Sum() > 0.0 ? intra_passes.Sum() / intra_groups.Sum() : 0.0, (unsigned)intra_v2,
+             (unsigned)iters.Count());
+    out.push_back(b);
     snprintf(b, sizeof(b), "frames that also took the second pipeline slot: %u of %u", (unsigned)sec_slot,
              (unsigned)measured);
     out.push_back(b);
@@ -244,8 +262,10 @@ class PerfStats {
     for (size_t i = 0; i < frames_.size(); ++i) {
       const av1_perf_frame& f = frames_[i];
       int len = snprintf(b, sizeof(b),
-                         "frame %u no=%d show=%d sef=%d intra=%d iters=%d tiles=%d sec=%d wall=%.2f busy=%.2f gap=%.2f |",
+                         "frame %u no=%d show=%d sef=%d intra=%d iters=%d iv2=%d idisp=%d ibarr=%d igroups=%d "
+                         "ipasses=%d tiles=%d sec=%d wall=%.2f busy=%.2f gap=%.2f |",
                          (unsigned)i, f.frame_number, f.show_frame, f.is_sef, f.intra_frame, f.intra_iters,
+                         f.intra_v2, f.intra_dispatches, f.intra_barriers, f.intra_groups, f.intra_passes,
                          f.tile_count, f.used_sec_slot, i > 0 ? f.complete_ms - frames_[i - 1].complete_ms : 0.0,
                          f.gpu_span_ms, f.gpu_gap_ms);
       for (int s = 0; s < AV1_PERF_GPU_STAGE_COUNT; ++s) {

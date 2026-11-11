@@ -318,21 +318,33 @@ void av1_mi_push_block(AV1Decoder *pbi, AV1_COMMON *cm, MACROBLOCKD *xd) {
               int iter = -1;
               int *iter_grid_blk = iter_grid + subblk_w * x + subblk_h * y * iter_grid_stride;
               const int above_left = have_top && have_left && need_aboveleft;
-              for (int it = 1 - above_left; it <= above_available; ++it) {
-                iter = AOMMAX(iter, iter_grid_blk[it]);
-              }
-              for (int it = 1; it <= left_available; ++it) {
-                iter = AOMMAX(iter, iter_grid_blk[it * iter_grid_stride]);
-              }
-              ++iter;
-              if (is_intrabc) iter = tile->gen_intra_iter_y + 1;
-              iter = AOMMIN(iter, tile->gen_intra_max_iter);
-              tile->gen_intra_iter_y = AOMMAX(iter, tile->gen_intra_iter_y);
-              for (int it = 1; it <= subblk_h; ++it) {
-                iter_grid_blk[it * iter_grid_stride + subblk_w] = iter;
-              }
-              for (int it = 1; it <= subblk_w; ++it) {
-                iter_grid_blk[it + subblk_h * iter_grid_stride] = iter;
+              if (td->intra_v2) {
+                // -intrav2: no wavefront iteration. The block gets a step and a pass from the same neighbours
+                // (intra_v2_sched.h) and counts as iteration 0; gen_pred_blocks.hlsl reads that from this entry.
+                intra_v2_place(&td->intra_v2_sched, tile->gen_block_map_offset + IntraBlockOffset - IntraSizes, 0,
+                               mi_col + col_off, mi_row + row_off, txw, txh, above_left, above_available,
+                               left_available, 0, type_idx_base - (IntraBlockOffset - IntraSizes),
+                               tile->gen_block_map[type_idx_base]);
+                iter = 0;
+                tile->gen_intra_iter_y = AOMMAX(iter, tile->gen_intra_iter_y);
+                iter_grid_blk[iter_grid_stride + subblk_w] = iter;
+              } else {
+                for (int it = 1 - above_left; it <= above_available; ++it) {
+                  iter = AOMMAX(iter, iter_grid_blk[it]);
+                }
+                for (int it = 1; it <= left_available; ++it) {
+                  iter = AOMMAX(iter, iter_grid_blk[it * iter_grid_stride]);
+                }
+                ++iter;
+                if (is_intrabc) iter = tile->gen_intra_iter_y + 1;
+                iter = AOMMIN(iter, tile->gen_intra_max_iter);
+                tile->gen_intra_iter_y = AOMMAX(iter, tile->gen_intra_iter_y);
+                for (int it = 1; it <= subblk_h; ++it) {
+                  iter_grid_blk[it * iter_grid_stride + subblk_w] = iter;
+                }
+                for (int it = 1; it <= subblk_w; ++it) {
+                  iter_grid_blk[it + subblk_h * iter_grid_stride] = iter;
+                }
               }
 
               if (iter > tile->gen_intra_iter_set) {
@@ -420,32 +432,43 @@ void av1_mi_push_block(AV1Decoder *pbi, AV1_COMMON *cm, MACROBLOCKD *xd) {
               int iter = -1;
               int *iter_grid_blk = iter_grid + subblk_w * x + subblk_h * y * iter_grid_stride_uv;
               const int above_left = need_aboveleft && have_top && have_left;
-              for (int it = 1 - above_left; it <= above_available; ++it) {
-                iter = AOMMAX(iter, iter_grid_blk[it]);
-              }
-              for (int it = 1; it <= left_available; ++it) {
-                iter = AOMMAX(iter, iter_grid_blk[it * iter_grid_stride_uv]);
-              }
-              if (mode == UV_CFL_PRED) {
-                int iter_grid_stride = td->iter_grid_stride;
-                int *y_grid = td->gen_intra_iter_y + ((mi_col_uv + col_off) << 1) +
-                              ((mi_row_uv + row_off) << 1) * iter_grid_stride;
-                for (int yit = 1; yit <= (subblk_h << 1); ++yit) {
-                  for (int xit = 1; xit <= (subblk_w << 1); ++xit) {
-                    iter = AOMMAX(iter, y_grid[xit + yit * iter_grid_stride]);
+              if (td->intra_v2) {
+                // -intrav2, as for luma. U and V share the place; CFL also waits for the luma under the block.
+                intra_v2_place(&td->intra_v2_sched, tile->gen_block_map_offset + IntraBlockOffset - IntraSizes, 1,
+                               mi_col_uv + col_off, mi_row_uv + row_off, txw, txh, above_left, above_available,
+                               left_available, mode == UV_CFL_PRED, IntraSizes - 1 - type_size,
+                               tile->gen_block_map[IntraBlockOffset - 1 - type_size]);
+                iter = 0;
+                tile->gen_intra_iter_uv = AOMMAX(iter, tile->gen_intra_iter_uv);
+                iter_grid_blk[iter_grid_stride_uv + subblk_w] = iter;
+              } else {
+                for (int it = 1 - above_left; it <= above_available; ++it) {
+                  iter = AOMMAX(iter, iter_grid_blk[it]);
+                }
+                for (int it = 1; it <= left_available; ++it) {
+                  iter = AOMMAX(iter, iter_grid_blk[it * iter_grid_stride_uv]);
+                }
+                if (mode == UV_CFL_PRED) {
+                  int iter_grid_stride = td->iter_grid_stride;
+                  int *y_grid = td->gen_intra_iter_y + ((mi_col_uv + col_off) << 1) +
+                                ((mi_row_uv + row_off) << 1) * iter_grid_stride;
+                  for (int yit = 1; yit <= (subblk_h << 1); ++yit) {
+                    for (int xit = 1; xit <= (subblk_w << 1); ++xit) {
+                      iter = AOMMAX(iter, y_grid[xit + yit * iter_grid_stride]);
+                    }
                   }
                 }
-              }
 
-              ++iter;
-              if (is_intrabc) iter = tile->gen_intra_iter_uv + 1;
-              iter = AOMMIN(iter, tile->gen_intra_max_iter);
-              tile->gen_intra_iter_uv = AOMMAX(iter, tile->gen_intra_iter_uv);
-              for (int it = 1; it <= subblk_h; ++it) {
-                iter_grid_blk[it * iter_grid_stride_uv + subblk_w] = iter;
-              }
-              for (int it = 1; it <= subblk_w; ++it) {
-                iter_grid_blk[it + subblk_h * iter_grid_stride_uv] = iter;
+                ++iter;
+                if (is_intrabc) iter = tile->gen_intra_iter_uv + 1;
+                iter = AOMMIN(iter, tile->gen_intra_max_iter);
+                tile->gen_intra_iter_uv = AOMMAX(iter, tile->gen_intra_iter_uv);
+                for (int it = 1; it <= subblk_h; ++it) {
+                  iter_grid_blk[it * iter_grid_stride_uv + subblk_w] = iter;
+                }
+                for (int it = 1; it <= subblk_w; ++it) {
+                  iter_grid_blk[it + subblk_h * iter_grid_stride_uv] = iter;
+                }
               }
 
               if (iter > tile->gen_intra_iter_set) {
@@ -1005,7 +1028,49 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
       av1_perf_gpu_mark(dec, AV1_PERF_GPU_RECON);
     }
 
-    if (td->intra_iters >= 0) {
+    if (td->intra_iters >= 0 && td->intra_v2) {
+      // -intrav2: one thread group per region entry (a 64x64 region in one step), the wavefront inside a region
+      // runs in the group. A UAV barrier is only needed between steps: groups of one step never read each
+      // other's pixels.
+      IntraV2Sched *sched = &td->intra_v2_sched;
+      const int entries = (int)td->intra_v2_list_count;
+      intra_v2_sort(sched->list, entries);
+      ComputeShader *v2_shader =
+          td->is_hbd ? &dec->shader_lib->shader_intra_v2_hbd : &dec->shader_lib->shader_intra_v2;
+      command_list->SetPipelineState(v2_shader->pso.Get());
+      command_list->SetComputeRootSignature(v2_shader->signaturePtr.Get());
+      command_list->SetComputeRootShaderResourceView(0, dec->prediction_blocks->dev->GetGPUVirtualAddress());
+      command_list->SetComputeRootShaderResourceView(1, dec->idct_residuals->dev->GetGPUVirtualAddress());
+      command_list->SetComputeRootShaderResourceView(2, dec->inter_mask_lut->dev->GetGPUVirtualAddress());
+      command_list->SetComputeRootShaderResourceView(3, td->intra_v2_buffer->dev->GetGPUVirtualAddress());
+      command_list->SetComputeRootShaderResourceView(4, td->gen_block_map->dev->GetGPUVirtualAddress());
+      command_list->SetComputeRootUnorderedAccessView(5, dec->frame_buffer_pool->dev->GetGPUVirtualAddress());
+      command_list->SetComputeRootConstantBufferView(6, cbo.dev_address);
+      const unsigned int list_offset = (unsigned int)((const char *)sched->list - (const char *)sched->cells);
+      int steps = 0;
+      IntraV2Dispatch d;
+      for (int first = 0; intra_v2_next_dispatch(sched->list, entries, first, &d); first += d.count) {
+        unsigned int v2_srt[8] = {0, d.step, d.passes, sched->stamp, (unsigned int)sched->map_stride,
+                                  (unsigned int)sched->map_uv_offset, 0, 0};
+        // A dispatch takes at most 65535 groups per dimension.
+        for (int done = 0; done < d.count; done += 65535) {
+          const int groups = AOMMIN(d.count - done, 65535);
+          v2_srt[0] = list_offset + 8 * (unsigned int)(d.first + done);
+          command_list->SetComputeRoot32BitConstants(7, 8, v2_srt, 0);
+          command_list->Dispatch(groups, 1, 1);
+          ++td->intra_stats[0];
+        }
+        td->intra_stats[2] += d.count;
+        td->intra_stats[3] += d.count * (int)d.passes;
+        if (d.last_of_step) {
+          command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
+          ++td->intra_stats[1];
+          ++steps;
+        }
+      }
+      td->intra_iters = steps - 1;  // for the timing record: the last step, like the last iteration
+      av1_perf_gpu_mark(dec, AV1_PERF_GPU_INTRA);
+    } else if (td->intra_iters >= 0) {
       PSSLIntraSRT srt;
       command_list->SetComputeRootShaderResourceView(2, dec->inter_mask_lut->dev->GetGPUVirtualAddress());
       const int *offsets = tiles->gen_block_map + InterTypes::InterCountsAll + ReconstructBlockSizes;
@@ -1033,6 +1098,8 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
           }
           command_list->SetComputeRoot32BitConstants(5, 10, &srt, 0);
           command_list->Dispatch((srt.wi_count + 255) >> 8, 1, 1);
+          ++td->intra_stats[0];
+          td->intra_stats[2] += (srt.wi_count + 255) >> 8;
         }
 
         offset = offsets[base + IntraSizes - 1];
@@ -1047,14 +1114,18 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
           }
           command_list->SetComputeRoot32BitConstants(5, 2, filt_srt, 0);
           command_list->Dispatch(count, 1, 1);
+          ++td->intra_stats[0];
+          td->intra_stats[2] += count;
         }
 
         if (count || srt.wi_count) {
           command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
+          ++td->intra_stats[1];
         } else {
           assert(0);
         }
       }
+      td->intra_stats[3] = td->intra_stats[2];  // one pass per thread group
       av1_perf_gpu_mark(dec, AV1_PERF_GPU_INTRA);
     }
   }

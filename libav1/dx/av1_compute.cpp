@@ -85,6 +85,8 @@ extern "C" {
 #include "dx/shaders/h/intra_filter_hbd.h"
 #include "dx/shaders/h/intra_main.h"
 #include "dx/shaders/h/intra_main_hbd.h"
+#include "dx/shaders/h/intra_v2.h"
+#include "dx/shaders/h/intra_v2_hbd.h"
 
 #include "dx/shaders/h/inter_scale.h"
 #include "dx/shaders/h/inter_scale_compound.h"
@@ -202,6 +204,8 @@ void* av1_create_pipeline_cache_handle(void* d3d12device, int threads) {
   err |= (shader_lib->sig_copy_plane = create_root_sig(_device, 0, 1, 0, 6)) == NULL;
   err |= (shader_lib->sig_pred_blocks = create_root_sig(_device, 5, 2, 1, 7)) == NULL;
   err |= (shader_lib->sig_intra_pred = create_root_sig(_device, 3, 1, 1, 10)) == NULL;
+  // intra_v2.hlsl: t0..t4, u0, b0 and 8 root constants in b1.
+  err |= (shader_lib->sig_intra_v2 = create_root_sig(_device, 5, 1, 1, 8)) == NULL;
   err |= (shader_lib->sig_inter_pred = create_root_sig(_device, 5, 1, 1, 4)) == NULL;
   err |= (shader_lib->sig_loop_rest = create_root_sig(_device, 3, 1, 2, 2)) == NULL;
   err |= (shader_lib->sig_cdef_filter = create_root_sig(_device, 2, 1, 1, 0)) == NULL;
@@ -250,6 +254,8 @@ void* av1_create_pipeline_cache_handle(void* d3d12device, int threads) {
       {_device, cdef_filter, sizeof(cdef_filter), shader_lib->sig_cdef_filter.Get(), &shader_lib->shader_cdef_filter},
       {_device, cdef_filter_v2, sizeof(cdef_filter_v2), shader_lib->sig_cdef_filter.Get(),
        &shader_lib->shader_cdef_filter_v2},
+      {_device, intra_v2, sizeof(intra_v2), shader_lib->sig_intra_v2.Get(), &shader_lib->shader_intra_v2},
+      {_device, intra_v2_hbd, sizeof(intra_v2_hbd), shader_lib->sig_intra_v2.Get(), &shader_lib->shader_intra_v2_hbd},
 
       {_device, gen_pred_blocks, sizeof(gen_pred_blocks), shader_lib->sig_pred_blocks.Get(),
        &shader_lib->shader_gen_pred_blocks},
