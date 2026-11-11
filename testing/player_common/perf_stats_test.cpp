@@ -175,6 +175,84 @@ int main() {
     CHECK(st.Frames() == 0 && st.Outputs() == 0);
   }
 
+  // A stream with hidden frames that are shown later: 100 decoded frames 50 ms apart, every fifth one hidden
+  // and output 5 ms later by a show_existing_frame, whose copy is a record of its own. The copies are outputs,
+  // not decoded frames: they must not change the per-frame lines, and they must be in the per-OUTPUT line.
+  {
+    PerfStats st;
+    for (int i = 0; i < 100; ++i) {
+      const int show = (i % 5) != 4;
+      st.AddFrame(MakeFrame(i, 1000.0 + 50.0 * i, show));
+      if (show) {
+        st.AddOutput(1000.0 + 50.0 * i);
+      } else {
+        av1_perf_frame sef;
+        memset(&sef, 0, sizeof(sef));
+        sef.frame_number = i;
+        sef.is_sef = 1;
+        sef.show_frame = 1;
+        sef.intra_iters = -1;
+        sef.gpu_valid = 1;
+        sef.gpu_marks = 3;
+        sef.gpu_stage_ms[AV1_PERF_GPU_OUTPUT_COPY] = 2.0;
+        sef.gpu_stage_hits[AV1_PERF_GPU_OUTPUT_COPY] = 1;
+        sef.gpu_sum_ms = 2.0;
+        sef.gpu_span_ms = 2.0;
+        sef.gpu_gap_ms = 1.0;
+        sef.cpu_ms[AV1_PERF_CPU_FRAME] = 1.0;
+        sef.cpu_ms[AV1_PERF_CPU_WAIT_SLOT] = 0.5;
+        sef.complete_ms = 1005.0 + 50.0 * i;
+        st.AddFrame(sef);
+        st.AddOutput(1005.0 + 50.0 * i);
+      }
+    }
+    CHECK(st.Frames() == 120);
+    CHECK(st.Outputs() == 100);
+    std::vector<std::string> lines = st.Summary(no_waits);
+    // The first ten records are nine decoded frames and one copy.
+    CHECK(Has(lines, "100 frames decoded, 100 output; warm-up 9 skipped, 91 measured"));
+    CHECK(Has(lines, "72 shown, 19 hidden, 19 show-existing copies"));
+    CHECK(Has(lines, "show-existing copies: 20 (19 measured): gpu busy mean 2.000 ms, cpu decode thread mean "
+                     "1.000 ms, blocked mean 0.500 ms"));
+    CHECK(Has(lines, "20.0 fps decoded"));  // 50 ms between decoded frames, the copies in between left out
+    CHECK(Has(lines, "20.0 fps output"));
+    CHECK(Has(lines, "40.0 % of wall"));
+    CHECK(Has(lines, "cpu memsets (frame + tile)                 91    1.250    1.250    1.250    1.250"));
+    CHECK(Has(lines, "cpu wait_slot                              91    2.000"));
+    CHECK(Has(lines, "(intra_v2 on 91 of 91 frames)"));
+    // One decoded frame and a fifth of a copy per output: 20 + 0.2 * 2, 25 + 0.2 * 1, 5 + 0.2 * 0.5.
+    CHECK(Has(lines, "1.00 decoded frames each"));
+    CHECK(Has(lines, "gpu busy 20.40 ms, cpu decode thread 25.20 ms"));
+    CHECK(Has(lines, "blocked 5.10 ms"));
+    CHECK(st.FrameLines().size() == 120);
+    CHECK(Has(st.FrameLines(), " sef=1 "));
+    for (size_t i = 0; i < lines.size(); ++i) {
+      CHECK(lines[i].find("nan") == std::string::npos);
+      CHECK(lines[i].find("inf") == std::string::npos);
+      CHECK(lines[i].size() < 300);
+    }
+  }
+
+  // Only copies in the statistics: no decoded frame to divide by.
+  {
+    PerfStats st;
+    av1_perf_frame sef;
+    memset(&sef, 0, sizeof(sef));
+    sef.is_sef = 1;
+    sef.show_frame = 1;
+    sef.intra_iters = -1;
+    sef.complete_ms = 10.0;
+    st.AddFrame(sef);
+    st.AddOutput(10.0);
+    std::vector<std::string> lines = st.Summary(no_waits);
+    CHECK(Has(lines, "0 frames decoded, 1 output"));
+    CHECK(Has(lines, "show-existing copies: 1 (1 measured)"));
+    for (size_t i = 0; i < lines.size(); ++i) {
+      CHECK(lines[i].find("nan") == std::string::npos);
+      CHECK(lines[i].find("inf") == std::string::npos);
+    }
+  }
+
   // The record limit holds.
   {
     PerfStats st;

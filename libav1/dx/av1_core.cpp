@@ -443,6 +443,18 @@ int av1_allocate_buffers(Av1Core *dec, av1_memory_manager_base *mem, const resou
     // No palette buffer here: palette_buffer_for_frame() creates the slot's on the first frame that can have
     // palette blocks.
   }
+  // Output contexts (av1_decode_sef): the constants of one output copy and the film grain offsets of a frame.
+  for (int i = 0; i < OutputThreadDataCount; ++i) {
+    av1_frame_thread_data *td = &dec->output_thread_data[i];
+    td->output_only = 1;
+    td->slot_index = -1;
+    CHECK_RESULT(td->command_buffer.cb_alloc,
+                 mem->create_buffer(OutputCbSize, MemoryType::DeviceUpload, "output_cb_alloc", -1), do_assign);
+    CHECK_RESULT(td->filmgrain_rand_offset,
+                 mem->create_buffer(sizeof(int) * ((target_width / 32 + 4) * (target_height / 32 + 1)),
+                                    MemoryType::DeviceUpload, "output_filmgrain_rand_offset", -1),
+                 do_assign);
+  }
   dec->palette_size = (size_t)fb_size;
 
   const int mvs_size = (target_width >> 3) * (target_height >> 3) * sizeof(MV_REF);
@@ -711,6 +723,7 @@ extern "C" int av1_create_gpu_decoder(Av1Core **gpu_dec, aom_codec_dec_cfg_t *cf
   // Everything that cannot fail comes first, so that destroy_gpu_decoder() is valid from here on, whichever
   // step below fails.
   MTQueueInit(&dec->frame_data_pool);
+  MTQueueInit(&dec->output_data_pool);
   MTQueueInit(&dec->gpu_item_pool);
   MTQueueInit(&dec->gpu_waiting_queue);
   MTQueueInit(&dec->output_queue);
@@ -834,6 +847,20 @@ extern "C" int av1_create_gpu_decoder(Av1Core **gpu_dec, aom_codec_dec_cfg_t *cf
     td->frame_number = 0;
     MTQueuePush(&dec->frame_data_pool, td);
   }
+  for (int i = 0; i < OutputThreadDataCount; ++i) {
+    av1_frame_thread_data *td = &dec->output_thread_data[i];
+    ComputeCommandBuffer *cb = &td->command_buffer;
+    hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&cb->allocator));
+    if (FAILED(hr)) return create_failed(dec, rcfg, &vm_before, "command allocator of an output context", hr);
+    cb->fence_value = 0;
+    hr = device->CreateFence(cb->fence_value, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&cb->fence));
+    if (FAILED(hr)) return create_failed(dec, rcfg, &vm_before, "fence of an output context", hr);
+    cb->event = CreateEvent(nullptr, false, false, nullptr);
+    if (!cb->event)
+      return create_failed(dec, rcfg, &vm_before, "event of an output context", HRESULT_FROM_WIN32(GetLastError()));
+    td->frame_number = 0;
+    MTQueuePush(&dec->output_data_pool, td);
+  }
 
   hr = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
                                  dec->frame_thread_data[0].command_buffer.allocator.Get(), NULL,
@@ -846,7 +873,8 @@ extern "C" int av1_create_gpu_decoder(Av1Core **gpu_dec, aom_codec_dec_cfg_t *cf
   if (FAILED(hr)) return create_failed(dec, rcfg, &vm_before, "upload of the lookup tables", hr);
 
   // Work items: one per frame in flight (at most FrameThreadDataCount, each holds a slot) and one per
-  // show-existing frame that needs no slot. The decode thread waits when the pool is empty.
+  // show_existing_frame copy in flight (at most OutputThreadDataCount, each holds an output context). The
+  // decode thread waits when the pool is empty.
   for (int i = 0; i < 8; ++i) {
     dec->gpu_item_pool_src[i].data = NULL;
     dec->gpu_item_pool_src[i].image = NULL;
@@ -978,6 +1006,11 @@ static void destroy_gpu_decoder(Av1Core *dec, int log_steps) {
     td->command_buffer.event = NULL;
     pthread_mutex_destroy(&td->sec_data_mutex);
   }
+  for (int i = 0; i < OutputThreadDataCount; ++i) {
+    av1_frame_thread_data *td = &dec->output_thread_data[i];
+    if (td->command_buffer.event) CloseHandle(td->command_buffer.event);
+    td->command_buffer.event = NULL;
+  }
 
   pthread_cond_destroy(&dec->fb_pool_empty_cond);
   pthread_mutex_destroy(&dec->fb_pool_mutex);
@@ -985,6 +1018,7 @@ static void destroy_gpu_decoder(Av1Core *dec, int log_steps) {
   MTQueueDestroy(&dec->image_pool);
   MTQueueDestroy(&dec->gpu_waiting_queue);
   MTQueueDestroy(&dec->gpu_item_pool);
+  MTQueueDestroy(&dec->output_data_pool);
   MTQueueDestroy(&dec->frame_data_pool);
 
   if (dec->memory) {
@@ -1206,7 +1240,8 @@ THREADFN gpu_thread_hook(void *data) {
             (double)(perf_now() - perf_clear_start) * 1000.0 / (double)qpf.QuadPart;
         perf_rec.async_clear_bytes = (int64_t)cleared;
       }
-      MTQueuePush(&dec->frame_data_pool, td);
+      // A pipeline slot, or the output context of a show_existing_frame copy.
+      MTQueuePush(td->output_only ? &dec->output_data_pool : &dec->frame_data_pool, td);
     }
 
     HwOutputImage *hw_img = item->image;
@@ -1436,42 +1471,54 @@ static int palette_buffer_for_frame(Av1Core *dec, const AV1_COMMON *cm, av1_fram
   return 0;
 }
 
+// A frame that was set up and never submitted (a decode error between its setup and its submit) still has
+// its slot, or its output context, in curr_frame_data, with the frame buffers it counted. They are taken back
+// here, before the next frame or show_existing_frame takes a slot or a context of its own. Decode thread.
+static void release_unsubmitted_frame(Av1Core *dec) {
+  av1_frame_thread_data *td = dec->curr_frame_data;
+  if (!td) return;
+  pthread_mutex_lock(&dec->fb_pool_mutex);
+  if (td->back_buffer0) release_fb(dec, td->back_buffer0);
+  if (td->dst_frame_buffer) release_fb(dec, td->dst_frame_buffer);
+  for (int r = 0; r < 7; ++r) {
+    if (td->refs[r]) release_fb(dec, td->refs[r]);
+    td->refs[r] = 0;
+  }
+  td->dst_frame_buffer = 0;
+  td->back_buffer0 = 0;
+  pthread_mutex_unlock(&dec->fb_pool_mutex);
+  dec->curr_frame_data = NULL;
+  if (td->output_only) {
+    // The output copy of a show_existing_frame: nothing but the reference to the frame it was to copy.
+    MTQueuePush(&dec->output_data_pool, td);
+    return;
+  }
+  // The coefficients of a submitted frame are zeroed by the IDCT shaders as they read them (the entropy
+  // decoder writes only the non-zero ones and relies on the rest being zero). This frame never reached the
+  // GPU, so its share is cleared here, and the share of its second slot, which it may have written too.
+  int *coef_buf = (int *)dec->idct_coefs->host_ptr;
+  memset(coef_buf + td->coef_buffer_offset, 0, td->coef_buffer_size);
+  if (td->sec_thread_data) {
+    memset(coef_buf + td->sec_thread_data->coef_buffer_offset, 0, td->sec_thread_data->coef_buffer_size);
+    MTQueuePush(&dec->frame_data_pool, td->sec_thread_data);
+    td->sec_thread_data = NULL;
+  }
+  // Its grids stay dirty and are not marked clean, so the next frame on this slot clears them itself, with or
+  // without -asyncclear.
+  td->clear_pending = 0;
+  MTQueuePush(&dec->frame_data_pool, td);
+}
+
 extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
   Av1Core *dec = pbi->gpu_decoder;
   const int64_t perf_setup_start = av1_perf_ticks();
   if (perf_setup_start) dec->perf_cur.t_frame_start = perf_setup_start;
   int64_t perf_t = 0;
 
-  av1_frame_thread_data *td = dec->curr_frame_data;
-  if (td) {
-    pthread_mutex_lock(&dec->fb_pool_mutex);
-    if (td->back_buffer0) release_fb(dec, td->back_buffer0);
-    release_fb(dec, td->dst_frame_buffer);
-    for (int r = 0; r < 7; ++r) {
-      if (td->refs[r]) release_fb(dec, td->refs[r]);
-      td->refs[r] = 0;
-    }
-    td->dst_frame_buffer = 0;
-    td->back_buffer0 = 0;
-    pthread_mutex_unlock(&dec->fb_pool_mutex);
-    // The coefficients of a submitted frame are zeroed by the IDCT shaders as they read them (the entropy
-    // decoder writes only the non-zero ones and relies on the rest being zero). This frame never reached the
-    // GPU, so its share is cleared here, and the share of its second slot, which it may have written too.
-    int * coef_buf = (int *)dec->idct_coefs->host_ptr;
-    memset(coef_buf + td->coef_buffer_offset, 0, td->coef_buffer_size);
-    if (td->sec_thread_data) {
-      memset(coef_buf + td->sec_thread_data->coef_buffer_offset, 0, td->sec_thread_data->coef_buffer_size);
-      MTQueuePush(&dec->frame_data_pool, td->sec_thread_data);
-    }
-    // A frame that was set up but never submitted (decode error). Its grids stay dirty and are not marked
-    // clean, so the next frame on this slot clears them itself, with or without -asyncclear.
-    td->clear_pending = 0;
-    MTQueuePush(&dec->frame_data_pool, td);
-    dec->curr_frame_data = NULL;
-  }
+  release_unsubmitted_frame(dec);
 
   perf_t = av1_perf_ticks();
-  td = (av1_frame_thread_data *)MTQueueGet(&dec->frame_data_pool);
+  av1_frame_thread_data *td = (av1_frame_thread_data *)MTQueueGet(&dec->frame_data_pool);
   av1_perf_add(dec, AV1_PERF_CPU_WAIT_SLOT, perf_t);
   td->sec_thread_data = NULL;
   dec->curr_frame_data = td;
@@ -1830,44 +1877,78 @@ extern "C" void av1_intra_palette(AV1Decoder *pbi, MB_MODE_INFO *mi, Av1ColorMap
   }
 }
 
+// show_existing_frame: the frame in cm->cur_frame (the frame to show; the header reader has put it there,
+// set cm->show_frame and loaded the frame's film grain parameters into cm->film_grain_params, the
+// load_grain_params of the specification) is output now. The frame was decoded earlier; it took no output
+// image then unless it was shown then, and that image went to the application. So the output is made here:
+// an output image from the application, and a command list of its own that copies the frame buffer into it,
+// with film grain.
+//
+// Order on the GPU: the command list of the frame's decode was submitted by this thread before this header
+// was read, and the lists run on the one queue in the order of their submission, so the copy reads the
+// finished frame. Nothing writes a frame buffer after the frame's own list.
+// Lifetime: the copy holds a reference to the frame buffer (frame_buffer_acquire, taken while the reference
+// map still holds the frame) until the completion thread has seen the fence of the copy, so the buffer
+// cannot go back to the pool and be written by a later frame before the copy has run, whatever the stream
+// does to the reference map in between.
+// Output order: the work item is queued behind those of the frames before it, and the completion thread
+// hands the images over in that order.
+//
+// The copy takes an output context, not a pipeline slot: a slot would be one frame less in flight for as
+// long as the copy waits behind the frames in front of it on the queue.
 extern "C" void av1_decode_sef(AV1Decoder *pbi) {
   Av1Core *dec = pbi->gpu_decoder;
   AV1_COMMON *cm = &pbi->common;
   YV12_BUFFER_CONFIG *buf = &cm->cur_frame->buf;
+  // A frame before this one that failed after its setup.
+  release_unsubmitted_frame(dec);
+  buf->hw_show_image = NULL;
+  // Nothing to show: no frame was ever decoded into this entry.
+  if (!buf->hw_buffer) return;
+
   int64_t perf_t = av1_perf_ticks();
+  if (perf_t) {
+    dec->perf_cur.t_frame_start = perf_t;
+    dec->perf_cur.is_sef = 1;
+    dec->perf_cur.show_frame = 1;
+    dec->perf_cur.intra_iters = -1;
+    dec->perf_cur.frame_number = buf->hw_buffer->frame_number;
+  }
+  // Waits when both contexts are in flight: until the copy of an earlier show_existing_frame has completed.
+  av1_frame_thread_data *td = (av1_frame_thread_data *)MTQueueGet(&dec->output_data_pool);
+  av1_perf_add(dec, AV1_PERF_CPU_WAIT_SLOT, perf_t);
+  td->sec_thread_data = NULL;
+  td->back_buffer0 = NULL;
+  memset(td->refs, 0, sizeof(td->refs));
+  td->clear_pending = 0;
+  td->frame_number = buf->hw_buffer->frame_number;
+  td->dst_frame_buffer = buf->hw_buffer;
+  td->frame_buffer = buf->hw_buffer;
+  td->is_hbd = buf->bit_depth > 8;
+  td->bitdepth = buf->bit_depth;
+  td->shaders = td->is_hbd ? &dec->shader_lib->shaders_hbd : &dec->shader_lib->shaders_8bit;
+  td->do_cdef = 0;
+  td->do_loop_rest = 0;
+  td->do_superres = 0;
+  td->do_filmgrain = cm->film_grain_params.apply_grain;
+  frame_buffer_acquire(dec, td->dst_frame_buffer);
+  // From here on release_unsubmitted_frame() can take the context back if the output image cannot be had.
+  dec->curr_frame_data = td;
+  // The completion thread ends with a drain; a show_existing_frame may be the first thing after one.
+  if (!dec->gpu_thread) pthread_create(&dec->gpu_thread, 0, (LPTHREAD_START_ROUTINE)gpu_thread_hook, dec);
+
+  av1_prepare_command_buffer(dec);
+  av1_postprocess_copy_output(dec, cm);
+  av1_commit_command_buffer(dec);
+
+  perf_t = av1_perf_ticks();
   GpuWorkItem *item = (GpuWorkItem *)MTQueueGet(&dec->gpu_item_pool);
   av1_perf_add(dec, AV1_PERF_CPU_WAIT_ITEM, perf_t);
-  item->data = NULL;
+  item->data = td;
   item->image = buf->hw_show_image;
-
-  if (item->image == NULL && buf->hw_buffer) {
-    perf_t = av1_perf_ticks();
-    if (perf_t) {
-      dec->perf_cur.t_frame_start = perf_t;
-      dec->perf_cur.is_sef = 1;
-      dec->perf_cur.show_frame = 1;
-      dec->perf_cur.intra_iters = -1;
-      dec->perf_cur.frame_number = buf->hw_buffer->frame_number;
-    }
-    av1_frame_thread_data *td = (av1_frame_thread_data *)MTQueueGet(&dec->frame_data_pool);
-    av1_perf_add(dec, AV1_PERF_CPU_WAIT_SLOT, perf_t);
-    td->dst_frame_buffer = buf->hw_buffer;
-    td->is_hbd = buf->bit_depth > 8;
-    td->shaders = td->is_hbd ? &dec->shader_lib->shaders_hbd : &dec->shader_lib->shaders_8bit;
-    td->do_filmgrain = cm->film_grain_params.apply_grain;
-    dec->curr_frame_data = td;
-    memset(td->refs, 0, sizeof(td->refs));
-    td->back_buffer0 = 0;
-    frame_buffer_acquire(dec, td->dst_frame_buffer);
-    av1_prepare_command_buffer(dec);
-    av1_postprocess_copy_output(dec, cm);
-    av1_commit_command_buffer(dec);
-    item->image = buf->hw_show_image;
-    item->data = td;
-  }
+  buf->hw_show_image = NULL;
   dec->curr_frame_data = NULL;
   if (item->image) item->image->user_priv = pbi->user_priv;
-  buf->hw_show_image = NULL;
   MTQueuePush(&dec->gpu_waiting_queue, item);
 }
 

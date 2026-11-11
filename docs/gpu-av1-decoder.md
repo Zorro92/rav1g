@@ -311,3 +311,21 @@ Same console, `-cdefv2`, 300 frames of 4K 10-bit; every configuration below is m
   about 75 MiB stays behind, likely the readback buffers, so md5 tests run one configuration per
   launch.
 
+## Step 3: defaults and hidden frames (2026-11-11)
+
+**Defaults.** What step 1a and step 2 proved is what the test player and the library run without
+flags: CDEF v2, a decoder sized for the stream, one back buffer shared by all frames. The 4K
+10-bit default decoder is 615.7 MiB of D3D12 buffers (computed), against 681.9 MiB before. Three
+slots, the smaller shares of `-lowmem`, `-asyncclear` and both intra experiments stay behind
+their flags.
+
+**Hidden frames.** The hang of phase 0 and of the timing spike had one cause: the decoder took an
+output buffer for every hidden frame that can be shown later, at the time it decoded the frame,
+and kept it until the frame was shown. A random-access stream starts with as many hidden frames
+as the test pool had buffers. An output buffer is now taken only for a frame that is output, at
+that moment: a shown frame at the end of its decode, a frame shown with `show_existing_frame` in
+a small command list of its own that copies it from its frame buffer (with film grain). Details
+and the console checks are in [test-player.md](test-player.md#hidden-frames-show_existing_frame).
+Written without a console; md5 references for these streams come from dav1d, since the original
+path cannot decode them.
+

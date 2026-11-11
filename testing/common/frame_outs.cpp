@@ -94,8 +94,9 @@ std::shared_ptr<OutBufferWrapper> OutBufferStorage::GetFreeBuffer(uint32_t width
       rented = rented_.size();
     }
     wait_start = std::chrono::steady_clock::now();
-    // "held by decoder" buffers are rented and not yet handed back as a ready frame
-    // (frames in flight and hidden frames); the rest sit in the player's display queue.
+    // "held by decoder" buffers are rented and not yet handed back as a ready frame: the frames that are
+    // output and still in flight on the GPU (a frame that is not shown rents none). At most one per
+    // pipeline slot and per show_existing_frame copy in flight. The rest sit in the player's display queue.
     XB_LOGI << "GPUTIME output-buffer wait #" << wait_no << " BLOCKED: pool " << queue_size_
             << ", free 0, held by decoder " << rented << ", queued or on display "
             << (queue_size_ - (int)rented);

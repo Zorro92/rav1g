@@ -39,6 +39,12 @@ enum {
   RefFrameBufferMax = RefFrameBufferCount + FrameThreadDataCount - FrameThreadDataDefault,
   EntropyThreadCount = 8,
   ImagePoolSize = 16,
+  // Output contexts (Av1Core::output_thread_data): what a show_existing_frame needs to copy a frame that was
+  // decoded earlier into an output image. A command allocator and a fence of its own, and room for the film
+  // grain constants and offsets; none of the buffers of a pipeline slot. Two, so that a second
+  // show_existing_frame does not wait for the copy of the one before it.
+  OutputThreadDataCount = 2,
+  OutputCbSize = 32 * 1024,  // constants of one output copy: two film grain blocks, under 10 KB together
 };
 
 struct InterSortingInfo {
@@ -229,6 +235,9 @@ struct av1_frame_thread_data {
 
   av1_frame_thread_data* sec_thread_data;
   pthread_mutex_t sec_data_mutex;
+  // An output context, not a pipeline slot: only command_buffer, filmgrain_rand_offset and perf exist, and it
+  // goes back to Av1Core::output_data_pool.
+  int output_only;
 
   // Test player flag -asyncclear (see av1_setup_frame). clear_*: what the frame that owns the slot cleared,
   // or found cleared, at setup; the completion thread clears the same bytes again once the frame's fence is
@@ -303,6 +312,8 @@ typedef struct Av1Core {
 
   av1_frame_thread_data frame_thread_data[FrameThreadDataCount];
   int frame_slots;  // slots in use: the first frame_slots entries of frame_thread_data
+  // show_existing_frame: the output copy of a frame that is already decoded (av1_decode_sef).
+  av1_frame_thread_data output_thread_data[OutputThreadDataCount];
   av1_frame_thread_data* curr_frame_data;
   int frame_number;
   int thread_count;
@@ -324,6 +335,7 @@ typedef struct Av1Core {
   DataPtrQueueMT image_pool;
   DataPtrQueueMT output_queue;
   DataPtrQueueMT frame_data_pool;
+  DataPtrQueueMT output_data_pool;
   GpuWorkItem gpu_item_pool_src[8];
   DataPtrQueueMT gpu_item_pool;
   DataPtrQueueMT gpu_waiting_queue;

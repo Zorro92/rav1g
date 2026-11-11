@@ -945,10 +945,20 @@ struct CopyPlaneData {
   unsigned int cb_dst_stride;
 };
 
+// The output of a frame: takes an output image from the application and records the copy of the frame
+// buffer into it, with film grain. Only for a frame that is output now: a frame with show_frame, at the end
+// of its own command list, or a frame shown with show_existing_frame, in the command list of that
+// show_existing_frame (av1_decode_sef; cm->show_frame is 1 there and cm->film_grain_params are the frame's).
+//
+// A frame that is decoded but not shown takes no output image. It used to take one when it was showable and
+// kept it until a show_existing_frame, or until the frame left the reference map; the output images of the
+// application were then held by frames that are not output, and a stream with as many hidden frames as the
+// application has images could not decode any further (the decode thread waits here for an image that only
+// a later show_existing_frame would hand over).
 int av1_postprocess_copy_output(Av1Core *dec, AV1_COMMON *cm) {
   av1_frame_thread_data *td = dec->curr_frame_data;
   cm->cur_frame->buf.hw_show_image = NULL;
-  if (!cm->showable_frame && !cm->show_frame) return 0;
+  if (!cm->show_frame) return 0;
 
   HwFrameBuffer *src = td->dst_frame_buffer;
   const int is_monochrome = cm->cur_frame->buf.monochrome;

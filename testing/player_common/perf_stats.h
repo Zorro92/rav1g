@@ -90,7 +90,8 @@ class PerfStats {
     std::vector<double>().swap(decode_calls_);
     dropped_ = 0;
   }
-  // One record per decoded frame, in completion order.
+  // One record per command list the decoder submitted, in completion order: a decoded frame, or the output
+  // copy of a show_existing_frame (is_sef), which decodes nothing.
   void AddFrame(const av1_perf_frame& f) {
     if (frames_.size() >= kMaxFrames) {
       ++dropped_;
@@ -125,8 +126,27 @@ class PerfStats {
     const size_t w = Warmup(n);
     const size_t ow = Warmup(outputs_.size());
 
+    // The records of show_existing_frame copies are kept out of the per-frame statistics: such a record is
+    // an output copy of a few milliseconds, not a decoded frame, and a stream that shows every second frame
+    // that way would halve every mean. They get a line of their own and are in the per-OUTPUT line.
+    size_t decoded_total = 0, decoded_warmup = 0;
+    for (size_t i = 0; i < n; ++i) {
+      if (frames_[i].is_sef) continue;
+      ++decoded_total;
+      if (i < w) ++decoded_warmup;
+    }
+    const size_t sef_total = n - decoded_total;
     size_t shown = 0, hidden = 0, sef = 0, intra = 0, gpu_ok = 0, sec_slot = 0;
     Series wall, busy, sum, gap, blocked, iters, mbytes, abytes, wall_out, calls;
+    Series sef_busy, sef_frame, sef_blocked;
+    // Completion time of the decoded frame before the current one, warm-up included.
+    double prev_complete = 0.0;
+    bool have_prev = false;
+    for (size_t i = 0; i < w && i < n; ++i) {
+      if (frames_[i].is_sef) continue;
+      prev_complete = frames_[i].complete_ms;
+      have_prev = true;
+    }
     Series intra_dispatches, intra_barriers, intra_groups, intra_passes;
     size_t intra_v2 = 0;
     Series gpu_stage[AV1_PERF_GPU_STAGE_COUNT];
@@ -134,15 +154,22 @@ class PerfStats {
     double stage_total[AV1_PERF_GPU_STAGE_COUNT] = {0.0};
     for (size_t i = w; i < n; ++i) {
       const av1_perf_frame& f = frames_[i];
-      if (f.is_sef)
+      if (f.is_sef) {
         ++sef;
-      else if (f.show_frame)
+        if (f.gpu_valid) sef_busy.Add(f.gpu_span_ms);
+        sef_frame.Add(f.cpu_ms[AV1_PERF_CPU_FRAME]);
+        sef_blocked.Add(Blocked(f));
+        continue;
+      }
+      if (f.show_frame)
         ++shown;
       else
         ++hidden;
       if (f.intra_frame) ++intra;
       if (f.used_sec_slot) ++sec_slot;
-      if (i > 0) wall.Add(f.complete_ms - frames_[i - 1].complete_ms);
+      if (have_prev) wall.Add(f.complete_ms - prev_complete);
+      prev_complete = f.complete_ms;
+      have_prev = true;
       if (f.gpu_valid) {
         ++gpu_ok;
         busy.Add(f.gpu_span_ms);
@@ -171,13 +198,21 @@ class PerfStats {
     for (size_t i = (ow > 0 ? ow : 1); i < outputs_.size(); ++i) wall_out.Add(outputs_[i] - outputs_[i - 1]);
     for (size_t i = Warmup(decode_calls_.size()); i < decode_calls_.size(); ++i) calls.Add(decode_calls_[i]);
 
-    const size_t measured = n - w;
+    const size_t measured = decoded_total - decoded_warmup;
     snprintf(b, sizeof(b),
              "==== summary: %u frames decoded, %u output; warm-up %u skipped, %u measured "
              "(%u shown, %u hidden, %u show-existing copies, %u intra), GPU timestamps on %u ====",
-             (unsigned)n, (unsigned)outputs_.size(), (unsigned)w, (unsigned)measured, (unsigned)shown,
-             (unsigned)hidden, (unsigned)sef, (unsigned)intra, (unsigned)gpu_ok);
+             (unsigned)decoded_total, (unsigned)outputs_.size(), (unsigned)decoded_warmup, (unsigned)measured,
+             (unsigned)shown, (unsigned)hidden, (unsigned)sef, (unsigned)intra, (unsigned)gpu_ok);
     out.push_back(b);
+    if (sef_total) {
+      // An output that is not a shown frame of its own: the copy of a frame decoded earlier (and hidden then).
+      snprintf(b, sizeof(b),
+               "show-existing copies: %u (%u measured): gpu busy mean %.3f ms, cpu decode thread mean %.3f ms, "
+               "blocked mean %.3f ms; not in the per-frame lines below",
+               (unsigned)sef_total, (unsigned)sef, sef_busy.Mean(), sef_frame.Mean(), sef_blocked.Mean());
+      out.push_back(b);
+    }
     if (n == 0) {
       out.push_back("no frame records: nothing was decoded, or the decoder never reached a GPU submit");
       return out;
@@ -213,14 +248,18 @@ class PerfStats {
     Line(&out, "blocked on fence, completion thread", cpu[AV1_PERF_CPU_FENCE_WAIT], 0.0, 0);
     Line(&out, "decode call (aom_codec_decode)", calls, 0.0, 0);
 
-    // What an output frame costs: hidden frames are paid for by the shown ones.
+    // What an output frame costs: hidden frames are paid for by the shown ones, and so are the copies of the
+    // frames shown with show_existing_frame.
     if (!outputs_.empty()) {
-      const double ratio = (double)n / (double)outputs_.size();
+      const double ratio = (double)decoded_total / (double)outputs_.size();
+      const double sef_ratio = (double)sef_total / (double)outputs_.size();
       snprintf(b, sizeof(b),
                "per OUTPUT frame (%.2f decoded frames each): wall %.2f ms, gpu busy %.2f ms, cpu decode thread %.2f ms, "
                "entropy wall %.2f ms, blocked %.2f ms (target %.2f)",
-               ratio, wall_out.Mean(), busy.Mean() * ratio, cpu[AV1_PERF_CPU_FRAME].Mean() * ratio,
-               cpu[AV1_PERF_CPU_ENTROPY_WALL].Mean() * ratio, blocked.Mean() * ratio, kTargetMs);
+               ratio, wall_out.Mean(), busy.Mean() * ratio + sef_busy.Mean() * sef_ratio,
+               cpu[AV1_PERF_CPU_FRAME].Mean() * ratio + sef_frame.Mean() * sef_ratio,
+               cpu[AV1_PERF_CPU_ENTROPY_WALL].Mean() * ratio, blocked.Mean() * ratio + sef_blocked.Mean() * sef_ratio,
+               kTargetMs);
       out.push_back(b);
     }
 
@@ -267,7 +306,8 @@ class PerfStats {
     return out;
   }
 
-  // One line per decoded frame, for the -progress dump after the summary.
+  // One line per record (a decoded frame, or a show_existing_frame copy with sef=1), for the -progress dump
+  // after the summary.
   std::vector<std::string> FrameLines() const {
     std::vector<std::string> out;
     char b[1536];
@@ -298,7 +338,10 @@ class PerfStats {
 
   Series SumOf(size_t from, int id_a, int id_b) const {
     Series s;
-    for (size_t i = from; i < frames_.size(); ++i) s.Add(frames_[i].cpu_ms[id_a] + frames_[i].cpu_ms[id_b]);
+    for (size_t i = from; i < frames_.size(); ++i) {
+      if (frames_[i].is_sef) continue;
+      s.Add(frames_[i].cpu_ms[id_a] + frames_[i].cpu_ms[id_b]);
+    }
     return s;
   }
 

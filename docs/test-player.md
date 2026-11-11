@@ -78,6 +78,13 @@ one commit each:
 - **md5 references from dav1d**: `testing/md5ref/make_md5_ref.sh` writes a reference in
   the player's format with ffmpeg and libdav1d; see
   [md5 references from dav1d](#md5-references-from-dav1d).
+- **Hidden frames** (package 0.2.9.0): a stream with frames that are decoded but not shown
+  at once (alt-refs, shown later with `show_existing_frame`: what most encoders produce)
+  stopped after its first frames, because every hidden frame held one of the player's
+  output buffers. An output buffer is now taken only for a frame that is output, at the
+  moment it is output; see [Hidden frames](#hidden-frames-show_existing_frame). The change
+  is in `libav1/dx`; no shader changes, and nothing changes for a stream in which every
+  frame is shown.
 
 ## Build
 
@@ -232,13 +239,15 @@ it is created for the `width`, `height` and `bitdepth` of the configuration, and
 **Budget guard with the default decoder**, a 3840x2160 10-bit stream, `-queue_size 4`
 (computed from the allocation code; the guard's numbers are under
 [Budget guard](#budget-guard-memory-refused)): the default decoder is 3840x2176 10-bit
-with two slots and the shared back buffer, **615.6 MiB of device buffers** (639.7 for the
+with two slots and the shared back buffer, **615.7 MiB of device buffers** (639.9 for the
 stream's size less one frame buffer of 24.2 MiB; up to 48.3 MiB more for palette buffers
-on first use). With the margin of 48 MiB the creation needs 663.6 MiB. In a fresh launch
+on first use). With the margin of 48 MiB the creation needs 663.7 MiB. In a fresh launch
 the app has about 762 MiB left for the decoder (1024.0 - 160.8 in use - 100.9 for the 4
 output images), so it is **accepted with about 99 MiB to spare**; before, the default was
-681.9 MiB and had 32 MiB to spare. Three slots are 766.0 MiB by default and still
-refused (814.0 needed); `-lowmem -slots 3` is 652.4 MiB and accepted. Not changed: with
+681.9 MiB and had 32 MiB to spare. Three slots are 766.1 MiB by default and still
+refused (814.1 needed); `-lowmem -slots 3` is 652.6 MiB and accepted. (Package 0.2.8.0
+logs 0.1 MiB less for each: the two output contexts of
+[Hidden frames](#hidden-frames-show_existing_frame) came with 0.2.9.0.) Not changed: with
 the player's default `-queue_size 16` the output pool of a 4K 10-bit stream is estimated
 at 403.4 MiB, which leaves about 460 MiB for the decoder, so a 4K task without
 `-queue_size` is refused, as it was before. 4K task lines need `-queue_size 4` (or
@@ -322,16 +331,26 @@ GPUTIME output-buffer wait #3 BLOCKED: pool 4, free 0, held by decoder 3, queued
 GPUTIME output-buffer wait #3 resumed after 41.7 ms
 ```
 
-The number is a running count. "Held by decoder" are buffers rented for frames in
-flight and hidden frames not shown yet. A `BLOCKED` line with no `resumed` line at
-the end of a log means the task hung right there; if "held by decoder" equals the
-pool size, nothing outside the decoder could free a buffer.
+The number is a running count. "Held by decoder" are buffers rented for frames that are
+output and still in flight: a frame takes its buffer when its output copy is recorded and
+hands it to the player when its GPU work is done. A frame that is not shown holds none
+(up to package 0.2.8.0 it did, which is how a stream with hidden frames hung; see
+[Hidden frames](#hidden-frames-show_existing_frame)). So the number is at most the
+pipeline slots plus two (the `show_existing_frame` copies in flight), less one for the
+frame that is waiting, and every buffer in it comes back without the decoder needing
+another one. "Queued or on display" is the rest of the pool, which the player returns as
+it presents (at once with `-nopresent`). A `BLOCKED` line with no `resumed` line at the
+end of a log means the task hung right there.
 
-After the last frame, the summary (first 10 decoded frames and first 10 output frames
-are left out as warm-up when the task has more than 20):
+After the last frame, the summary (the first 10 records and the first 10 output frames
+are left out as warm-up when the task has more than 20). A record is a decoded frame or
+the output copy of a `show_existing_frame`; the copies are counted and averaged in a line
+of their own, so that the per-frame lines stay per decoded frame, and they are part of
+the "per OUTPUT frame" line. A stream without `show_existing_frame` has no such line:
 
 ```text
-GPUTIME ==== summary: 300 frames decoded, 240 output; warm-up 10 skipped, 290 measured (...), GPU timestamps on 290 ====
+GPUTIME ==== summary: 300 frames decoded, 300 output; warm-up 10 skipped, 290 measured (232 shown, 58 hidden, 58 show-existing copies, 12 intra), GPU timestamps on 290 ====
+GPUTIME show-existing copies: 60 (58 measured): gpu busy mean N.NNN ms, cpu decode thread mean N.NNN ms, blocked mean N.NNN ms; not in the per-frame lines below
 GPUTIME target: 24 fps needs <= 41.67 ms per output frame
 GPUTIME -- per frame, ms --                          n     mean      p50      p95      max
 GPUTIME wall between output frames                ...                                        NN.N fps output
@@ -344,7 +363,7 @@ GPUTIME cpu entropy/tile decode, wall             ...
 GPUTIME cpu memsets (frame + tile)                ...                                        N.N MB cleared per frame
 GPUTIME cpu clears, completion thread             ...                                        N.N MB cleared per frame
 GPUTIME blocked, decode thread, all waits         ...                                        NN.N % of wall
-GPUTIME per OUTPUT frame (1.25 decoded frames each): wall .. ms, gpu busy .. ms, cpu decode thread .. ms, ...
+GPUTIME per OUTPUT frame (1.00 decoded frames each): wall .. ms, gpu busy .. ms, cpu decode thread .. ms, ...
 GPUTIME stage                    frames     mean      p50      p95      max      avg   share
 GPUTIME gpu intra                   290    ...
 GPUTIME cpu wait_output             290    ...
@@ -520,7 +539,7 @@ stream as `<stream name>.md5` and run only the check task:
   `-save_md5` reference only shows that two configurations of it agree), it needs no
   console run and no separate launch for the save task, and it exists for streams the
   original path cannot decode, such as the streams with hidden frames that hung the
-  player.
+  player (see [Hidden frames](#hidden-frames-show_existing_frame)).
 - It is one line per frame the stream outputs, in output order: a frame that is decoded
   but not shown has no line, a frame shown with `show_existing_frame` has one.
 - dav1d applies film grain, as the decoder does at output.
@@ -970,7 +989,9 @@ What else follows the slot count:
   player's output buffer pool (`-queue_size`). A frame that is shown holds one output
   buffer while it is in flight, so `-queue_size` still limits how many shown frames can
   be in the pipeline: with `-queue_size 4` and `-slots 4` the output pool, not the slot
-  count, is the limit (`wait_output`).
+  count, is the limit (`wait_output`). A frame that is not shown holds none, and the copy
+  of a frame shown with `show_existing_frame` takes an output context instead of a slot;
+  see [Hidden frames](#hidden-frames-show_existing_frame).
 
 Memory per slot. The player creates the decoder for 4096x2176, 10-bit with `-nofitsize`,
 and for a 3840x2160 10-bit stream as the other column says, which is what an added slot
@@ -1012,7 +1033,7 @@ accepts only the `-lowmem` ones next to a 4-image output pool (see the table und
 [budget guard](#budget-guard-memory-refused)). On the console (package 0.2.6.0)
 `-lowmem -fitsize -slots 3` was accepted and md5-exact. With the current defaults a
 three-slot decoder for a 3840x2160 10-bit stream is 766 MiB and refused; `-lowmem -slots
-3` is the 652 MiB one.
+3` is the 652 MiB one (652.6 now).
 
 ### What the decoder takes
 
@@ -1024,18 +1045,25 @@ pool (23.2 MiB at 4096x2176 with two slots) and the player's output pool come on
 | Decoder | 2 slots | 3 slots | 4 slots |
 | --- | --- | --- | --- |
 | package 0.2.5.0, 4096x2176 10-bit | 754.7 | 951.4 | 1148.1 |
-| **default now (package 0.2.8.0), 3840x2160 10-bit stream** | **615.6** | **766.0** | **916.4** |
-| default now, 1920x1080 8-bit stream | 128.0 | 165.7 | 203.5 |
-| `-lowmem`, 3840x2160 10-bit stream | 539.9 | 652.4 | 765.0 |
-| `-lowmemparts 0`, 3840x2160 10-bit stream (`-fitsize` of package 0.2.6.0 and 0.2.7.0) | 639.7 | 790.2 | 940.6 |
-| `-lowmemparts 0`, 1920x1080 8-bit stream | 131.2 | 169.0 | 206.7 |
-| `-nofitsize`, 4096x2176 10-bit | 656.1 | 816.5 | 976.8 |
-| `-nofitsize -lowmemparts 0` (the default of package 0.2.6.0 and 0.2.7.0) | 681.9 | 842.2 | 1002.6 |
-| `-nofitsize -lowmemparts 0 -intrav2` | 703.2 | 874.1 | 1045.1 |
-| `-nofitsize -lowmem` | 575.4 | 695.4 | 815.3 |
+| **default now, 3840x2160 10-bit stream** | **615.7** | **766.1** | **916.6** |
+| default now, 1920x1080 8-bit stream | 128.1 | 165.8 | 203.6 |
+| `-lowmem`, 3840x2160 10-bit stream | 540.0 | 652.6 | 765.2 |
+| `-lowmemparts 0`, 3840x2160 10-bit stream (`-fitsize` of package 0.2.6.0 and 0.2.7.0) | 639.9 | 790.3 | 940.7 |
+| `-lowmemparts 0`, 1920x1080 8-bit stream | 131.3 | 169.1 | 206.8 |
+| `-nofitsize`, 4096x2176 10-bit | 656.3 | 816.6 | 977.0 |
+| `-nofitsize -lowmemparts 0` (the default of package 0.2.6.0 and 0.2.7.0) | 682.0 | 842.4 | 1002.7 |
+| `-nofitsize -lowmemparts 0 -intrav2` | 703.3 | 874.3 | 1045.2 |
+| `-nofitsize -lowmem` | 575.5 | 695.5 | 815.5 |
 
-The parts of `-lowmem` alone, two slots at 4096x2176: `-lowmemparts 1` 656.1,
-`-lowmemparts 2` 622.4, `-lowmemparts 4` 660.7.
+The parts of `-lowmem` alone, two slots at 4096x2176: `-lowmemparts 1` 656.3,
+`-lowmemparts 2` 622.5, `-lowmemparts 4` 660.8.
+
+All rows but the first are for the current code (package 0.2.9.0), which has two output
+contexts for `show_existing_frame` copies in every decoder: four small buffers, 0.13 MiB
+together (see [Hidden frames](#hidden-frames-show_existing_frame)). Packages 0.2.6.0 to
+0.2.8.0 logged 0.1 to 0.2 MiB less for the same decoder (681.9 where the table says
+682.0, in 36 buffers instead of 40), and those are the numbers in the measurements and
+log lines quoted in this document.
 
 The rest of this section and the next ones describe the decoder at 4096x2176 without the
 shared back buffer (`-nofitsize -lowmemparts 0`), which is what was measured on the
@@ -1213,12 +1241,12 @@ Console, package 0.2.6.0, limit 1024.0 MiB, 4 output images of a 3840x2160 10-bi
 
 | Decoder (device buffers, MiB) | 2 slots | 3 slots | 4 slots |
 | --- | --- | --- | --- |
-| **default now**, 3840x2160 10-bit stream | **615.6 accepted, 98.7 to spare** | 766.0 refused | 916.4 refused |
-| `-lowmem`, 3840x2160 10-bit stream | 539.9 accepted | 652.4 accepted | 765.0 refused |
-| `-lowmemparts 0`, 3840x2160 10-bit stream | 639.7 accepted | 790.2 refused | 940.6 refused |
-| `-nofitsize -lowmemparts 0` (the default when this was measured) | 681.9 accepted, 32.4 to spare | 842.2 refused | 1002.6 refused |
-| `-nofitsize -lowmemparts 0 -intrav2` | 703.2 accepted | 874.1 refused | refused |
-| `-nofitsize -lowmem` | 575.4 accepted | 695.4 accepted | 815.3 refused |
+| **default now**, 3840x2160 10-bit stream | **615.7 accepted, 98.6 to spare** | 766.1 refused | 916.6 refused |
+| `-lowmem`, 3840x2160 10-bit stream | 540.0 accepted | 652.6 accepted | 765.2 refused |
+| `-lowmemparts 0`, 3840x2160 10-bit stream | 639.9 accepted | 790.3 refused | 940.7 refused |
+| `-nofitsize -lowmemparts 0` (the default when this was measured, 681.9 then) | 682.0 accepted, 32.3 to spare | 842.4 refused | 1002.7 refused |
+| `-nofitsize -lowmemparts 0 -intrav2` | 703.3 accepted | 874.3 refused | refused |
+| `-nofitsize -lowmem` | 575.5 accepted | 695.5 accepted | 815.5 refused |
 
   The 762.3 MiB were measured with the host pool of a 4096x2176 decoder in the app's
   usage; a smaller decoder has a smaller host pool, so the rows for a 3840x2160 stream
@@ -1279,9 +1307,9 @@ MEMORY budget: device buffers 681.9 MiB + margin 48.0 MiB = 729.9 MiB, the appli
 The default decoder, the same stream:
 
 ```text
-MEMORY decoder size: 3840x2176 10-bit (fit to the stream, the stream's largest frame is 3840x2160 10-bit), slots 2, intra_v2 buffers no, low memory parts 1; device buffers 615.6 MiB and up to 48.3 MiB for palette buffers on first use, host pool N.N MiB
-MEMORY budget: device buffers 615.6 MiB + margin 48.0 MiB = 663.6 MiB, the application has N.N MiB left for the decoder: accepted; palette buffers on first use would add up to 48.3 MiB
-MEMORY decoder created: 3840x2176 10-bit, slots 2, frame buffers 10 + 2 back buffers of 25346048 bytes (24.2 MiB) each; 36 device buffers, 645478144 bytes (615.6 MiB); host pool N of N bytes (N.N MiB) in use
+MEMORY decoder size: 3840x2176 10-bit (fit to the stream, the stream's largest frame is 3840x2160 10-bit), slots 2, intra_v2 buffers no, low memory parts 1; device buffers 615.7 MiB and up to 48.3 MiB for palette buffers on first use, host pool N.N MiB
+MEMORY budget: device buffers 615.7 MiB + margin 48.0 MiB = 663.7 MiB, the application has N.N MiB left for the decoder: accepted; palette buffers on first use would add up to 48.3 MiB
+MEMORY decoder created: 3840x2176 10-bit, slots 2, frame buffers 10 + 2 back buffers of 25346048 bytes (24.2 MiB) each; 40 device buffers, 645612288 bytes (615.7 MiB); host pool N of N bytes (N.N MiB) in use
 MEMORY decoder created options: intra_v2 buffers no (the decoder was not created for -intrav2); low memory 1 (shared back buffer yes, mode info share 1/2 of the worst case, coefficient share 17/24); palette buffers 0 of 2 created, 24.2 MiB each, a slot's on its first frame with screen content tools
 ```
 
@@ -1550,7 +1578,7 @@ before, it was the flag `-fitsize`, which is still accepted and changes nothing.
 upstream's player does.
 
 ```text
-MEMORY decoder size: 3840x2176 10-bit (fit to the stream, the stream's largest frame is 3840x2160 10-bit), slots 3, intra_v2 buffers no, low memory parts 1; device buffers 766.0 MiB and up to 72.5 MiB for palette buffers on first use, host pool N.N MiB
+MEMORY decoder size: 3840x2176 10-bit (fit to the stream, the stream's largest frame is 3840x2160 10-bit), slots 3, intra_v2 buffers no, low memory parts 1; device buffers 766.1 MiB and up to 72.5 MiB for palette buffers on first use, host pool N.N MiB
 Decoder size: 3840x2176 10-bit (fit to the stream, default)
 ```
 
@@ -1745,6 +1773,119 @@ reference: the default decoder, `-nofitsize`, `-lowmemparts 0`, `-lowmem`, and `
 parts apart if `-lowmem` fails. A clip with screen content (palette
 blocks) checks the palette buffer that is created on first use; the two 4K clips have
 none.
+
+## Hidden frames (`show_existing_frame`)
+
+Most AV1 encodes have frames that are decoded but not shown at once: alt-refs, and with a
+hierarchical (random-access) structure about half of all frames. Such a frame is shown
+later by a frame header with `show_existing_frame`, which decodes nothing and names the
+reference to output.
+
+**The hang (up to package 0.2.8.0).** The decoder made the output of a hidden frame while
+it decoded the frame: `av1_postprocess_copy_output` (`libav1/dx/loopfilters.cpp`) took an
+output buffer from the player for every frame with `show_frame` *or* `showable_frame` and
+recorded the copy into it, and the buffer stayed with the frame until its
+`show_existing_frame`, or until the frame left the reference map. An SVT-AV1
+random-access stream decodes, after its key frame, the hidden frames 16, 8, 4 and 2 of
+the first group before the first shown frame. With `-queue_size 4` those four held the
+whole pool, and the next frame waited in the player's callback for a buffer that only a
+later `show_existing_frame` could have handed over:
+
+```text
+Got first frame (0) 3840 x 2160 x 10
+GPUTIME output-buffer wait #1 BLOCKED: pool 4, free 0, held by decoder 4, queued or on display 0
+```
+
+A stream with fewer hidden frames at a time did not hang, but the buffers they held were
+missing from the pool (a 1080p stream with 207 hidden frames of 639 hit the limit 23
+times, with waits up to 25 ms). A larger `-queue_size` only moves the point where it
+stops.
+
+**The fix (package 0.2.9.0).** An output buffer is taken only for a frame that is output,
+when it is output:
+
+- A frame with `show_frame`: as before, at the end of its own command list.
+- A frame without `show_frame`: nothing. No output buffer, no output copy, no film
+  grain. Its frame buffer is in the reference map like any other reference.
+- `show_existing_frame` (`av1_decode_sef` in `libav1/dx/av1_core.cpp`): takes the output
+  buffer then and submits a command list of its own that copies the frame buffer of the
+  referenced frame into it, with film grain. Upstream had this path for a frame that is
+  shown a second time; it is now the only one.
+
+So the decoder never holds more output buffers than there are frames that are output and
+still in flight on the GPU, and each of those is handed to the player without the decoder
+needing another one. The player's pool can no longer be exhausted by the stream's
+structure; `-queue_size` limits how many output frames are in flight or queued for
+display, as it does for a stream without hidden frames.
+
+Why the copy is right:
+
+- **Order on the GPU.** The decode thread submits the command list of a frame before it
+  reads the next frame header, and all lists run on one command queue in the order they
+  were submitted. The copy of a `show_existing_frame` is submitted after the list that
+  decoded the frame, so it reads the finished frame. Nothing writes a frame buffer after
+  the frame's own list (borders included), so the copy reads what an output copy at the
+  end of the frame's decode would have read.
+- **Lifetime of the frame buffer.** The copy takes a reference to the frame buffer while
+  the reference map still holds the frame, and the completion thread gives it back after
+  the fence of the copy's list. Until then the buffer cannot return to the pool, so no
+  later frame can be decoded into it, whatever the frames that follow do to the reference
+  map. (A frame in flight holds its references the same way.)
+- **Film grain.** The header reader loads the film grain parameters that were stored with
+  the frame (`cm->film_grain_params = frame_to_show->film_grain_params`, the
+  `load_grain_params` of the specification, random seed included) before it calls the
+  copy, also when the frame shown is a key frame and the reference map is refreshed with
+  it. The copy applies those. A hidden frame that is showable carries its parameters in
+  its own header, so they are the ones an output copy at decode time would have used.
+- **Output order and timestamps.** The work item of the copy is queued behind those of
+  the frames before it, and the completion thread hands the images to the player in that
+  order: output is in the order in which the bitstream shows frames. An output carries
+  the `user_priv` of the `aom_codec_decode` call whose data contained the shown frame or
+  the `show_existing_frame` header.
+- **Staging buffer.** Every output copy goes through the one back buffer the filters
+  share; each list writes it and reads it back before it ends, and the lists do not
+  overlap on the queue.
+
+**Output contexts.** The copy does not take a pipeline slot: it would wait behind the
+frames in front of it on the queue, and for that time one frame less could be in flight,
+at every second frame of a random-access stream. The decoder has two output contexts
+instead (`OutputThreadDataCount` in `libav1/dx/types.h`): a command allocator and a fence
+each, 32 KiB for the film grain constants and a buffer for the film grain offsets, four
+buffers of 0.13 MiB together at 3840x2176. A third `show_existing_frame` while two copies
+are in flight waits for the first (`wait_slot` in its record). A copy in flight keeps the
+frame buffer it reads out of the frame buffer pool, like a reference of a frame in
+flight; that can cost a wait for a frame buffer (`wait_fb`), not a deadlock.
+
+**Timing lines.** A copy has a `-gputime` record of its own (`sef=1` in the frame lines,
+stages `film_grain`, `copy_plane`, `output_copy`). In the summary the copies have their
+own line and are not in the per-frame lines; see [Log lines](#log-lines). A hidden frame
+no longer has `copy_plane` and `output_copy` stages, so its GPU time is that much
+shorter and the copy's is that much longer: the work per output frame is the same.
+
+**What does not change.** A stream in which every frame is shown never reaches
+`av1_decode_sef` and its frames take the path they took: same command lists, same output
+buffers, same order. The only difference for it is the 0.13 MiB of the two idle output
+contexts.
+
+**Not run on the console yet** (the change was made without one). To check, each against
+a [dav1d reference](#md5-references-from-dav1d), since the original path cannot decode
+these streams and so cannot write one:
+
+```text
+-i /streams/<random-access 4K clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -md5_frame_check
+-i /streams/<random-access 4K clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -lowmem -slots 3 -md5_frame_check
+-i /streams/<random-access 4K clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -gputime -nopresent
+```
+
+- `MD5 is OK` on the random-access 4K clip (the one that hung), on a 1080p clip with
+  hidden frames, and unchanged on the two low-delay 4K clips; each with two slots and
+  with `-lowmem -slots 3`. One md5 task per launch.
+- A clip with film grain and hidden frames, if one is at hand: the grain of a frame shown
+  with `show_existing_frame` is the part of this that no clip has exercised here.
+- In the `-gputime` run: no `BLOCKED` line without its `resumed` line, "held by decoder"
+  never above the slots plus one, `frames decoded` and `output` as dav1d counts them, and
+  the `show-existing copies` line (their GPU time should be the `copy_plane` and
+  `output_copy` time of a shown frame).
 
 ## Shader survey
 
