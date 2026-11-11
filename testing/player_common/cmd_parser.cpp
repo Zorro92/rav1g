@@ -32,6 +32,9 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"md5_frame_check", atSingle, anOptional, "Calculate md5 for each frame & compare it with md5 file", "",
        &params_.md5_frame_check_},
       {"start", atInt, anOptional, "Start from frame No", "", &params_.start_frame_},
+      {"save_wrong_yuv", atString, anOptional,
+       "with -md5_frame_check: write each frame whose md5 differs to <dir>/<stream>_<frame>.yuv", "",
+       &params_.save_wrong_yuv_},
       {"frate", atInt, anOptional,
        "Frame rate. 0 - webm header framerate(for webm only), -1 - maximum frate, default 0", "", &params_.frate_},
       {"dropinfo", atSingle, anOptional, "Show all drops", "", &params_.show_drops_},
@@ -176,6 +179,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
   if (!params_.target_file_.empty()) params_.target_file_ = write_root_path_ + params_.target_file_;
   if (!params_.source_dir_.empty()) params_.source_dir_ = read_root_path_ + params_.source_dir_;
   if (!params_.save_md5_.empty()) params_.save_md5_ = write_root_path_ + params_.save_md5_;
+  if (!params_.save_wrong_yuv_.empty()) params_.save_wrong_yuv_ = write_root_path_ + params_.save_wrong_yuv_;
   if (params_.conformance_) {
     params_.frate_ = -1;
     params_.md5_ = true;

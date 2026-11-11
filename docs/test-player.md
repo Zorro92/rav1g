@@ -490,6 +490,10 @@ better where one can be made: see [md5 references from dav1d](#md5-references-fr
   stream's name plus `.md5`, next to the stream.
 - Use the same `-limit` in both tasks. The checker does not guard against a reference
   file with fewer frames than it decodes.
+- `-save_wrong_yuv <dir>` (with `-md5_frame_check`) writes every frame whose md5 differs
+  to `<dir>/<stream>_<frame>.yuv` below LocalState (planar, 16 bits per sample for
+  high bit depth, no header), for a pixel diff against the reference decoder. Create the
+  directory first.
 - **Save and check in separate launches.** Up to package 0.2.6.0 the saver's file was not
   closed when its task ended, so a check task in the same `args_av1.txt` read only the
   first ~8 KB (about 210 frames). Past that point the checker either reported errors with
