@@ -28,9 +28,11 @@
 #define PLAYER_SLOTS_DEFAULT 2
 #define PLAYER_SLOTS_MIN 2
 #define PLAYER_SLOTS_MAX 4
-// -lowmemparts: the largest value, all three reductions (AV1_LOW_MEMORY_ALL of aom/aom_decoder.h).
+// -lowmemparts: the largest value, all three reductions (AV1_LOW_MEMORY_ALL of aom/aom_decoder.h), and what
+// a task without -lowmem and -lowmemparts gets: part 1, the shared back buffer.
 #define PLAYER_LOWMEM_ALL 7
-// The size the decoder is created for unless -fitsize takes the stream's.
+#define PLAYER_LOWMEM_DEFAULT 1
+// The size the decoder is created for with -nofitsize, and for a stream that is larger than this.
 #define PLAYER_DECODER_WIDTH 4096
 #define PLAYER_DECODER_HEIGHT 2176
 #define PLAYER_DECODER_BITDEPTH 10
@@ -79,13 +81,18 @@ class CParameters {
     bool recreate_;
     bool gputime_;
     bool nopresent_;
+    // The effective choice after Parse(): true unless -cdefv1 was given.
     bool cdefv2_;
+    bool cdefv1_;
     bool intrav2_;
     bool intraopt_;
     int slots_;
     bool asyncclear_;
+    // The effective choice after Parse(): true unless -nofitsize was given.
     bool fitsize_;
+    bool nofitsize_;
     bool lowmem_;
+    // The parts in effect after Parse(): PLAYER_LOWMEM_DEFAULT, the value of -lowmemparts, or all with -lowmem.
     int lowmem_parts_;
     bool noguard_;
   };

@@ -469,7 +469,8 @@ static void resource_config_from_cfg(resource_config *rcfg, const aom_codec_dec_
   rcfg->height = cfg->height;
   rcfg->gpu_pipeline_depth = frame_slots_from_cfg(cfg);
   rcfg->intra_v2 = cfg->intra_v2 != 0;
-  rcfg->low_memory = cfg->low_memory & AV1_LOW_MEMORY_ALL;
+  // 0 is the default (the shared back buffer); AV1_LOW_MEMORY_NONE is how an application asks for none.
+  rcfg->low_memory = cfg->low_memory ? (cfg->low_memory & AV1_LOW_MEMORY_ALL) : AV1_LOW_MEMORY_DEFAULT;
   // Frame buffers in the pool. A buffer is out of the pool while the entropy decoder or a frame in flight
   // holds it:
   //   - the reference map: at most 8 different buffers;

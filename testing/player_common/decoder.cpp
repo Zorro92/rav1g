@@ -259,9 +259,9 @@ int AV1Decoder::DecodeOne() {
   // The reader thread is open and reads ahead (up to 20 frames); the first key frame is in memory.
   LogMemory("stream reader at the first key frame");
 
-  // The size the decoder is created for. -fitsize: the stream's largest frame size, rounded up to 128 as the
-  // decoder does, and 8-bit buffers for an 8-bit stream. A stream that is larger than the default in either
-  // direction keeps the default size.
+  // The size the decoder is created for: the stream's largest frame size, rounded up to 128 as the decoder
+  // does, and 8-bit buffers for an 8-bit stream. A stream that is larger than 4096x2176 in either direction
+  // gets that size, and so does every stream with -nofitsize.
   unsigned int dec_width = PLAYER_DECODER_WIDTH;
   unsigned int dec_height = PLAYER_DECODER_HEIGHT;
   unsigned int dec_bitdepth = PLAYER_DECODER_BITDEPTH;
@@ -325,9 +325,10 @@ int AV1Decoder::DecodeOne() {
       // -slots: set before the memory query, each slot has host memory of its own.
       cfg.frame_slots = params_.slots_;
       // The same for what else decides which buffers exist: -intrav2 needs buffers of its own, -lowmem and
-      // -lowmemparts leave some out or make them smaller.
+      // -lowmemparts leave some out or make them smaller. The player always says which parts it wants: 0 in
+      // the configuration would be the library's default (the shared back buffer), not "none".
       cfg.intra_v2 = params_.intrav2_ ? 1 : 0;
-      cfg.low_memory = params_.lowmem_parts_;
+      cfg.low_memory = params_.lowmem_parts_ ? params_.lowmem_parts_ : AV1_LOW_MEMORY_NONE;
       // Budget guard: the decoder refuses a creation, and later a palette buffer, that does not fit what
       // the app has left. The output pool takes its textures on the first frame; until then they are held
       // back from what the decoder may take (MemoryAvailable).
@@ -354,8 +355,9 @@ int AV1Decoder::DecodeOne() {
       }
 
       XB_LOGI << "MEMORY decoder size: " << dec_width << "x" << dec_height << " " << dec_bitdepth << "-bit ("
-              << (params_.fitsize_ ? "-fitsize" : "default") << ", the stream's largest frame is " << si.w << "x"
-              << si.h << " " << si.bit_depth << "-bit), slots " << params_.slots_ << ", intra_v2 buffers "
+              << (params_.fitsize_ ? "fit to the stream" : "-nofitsize") << ", the stream's largest frame is "
+              << si.w << "x" << si.h << " " << si.bit_depth << "-bit), slots " << params_.slots_
+              << ", intra_v2 buffers "
               << (params_.intrav2_ ? "yes (-intrav2)" : "no") << ", low memory parts " << params_.lowmem_parts_
               << "; device buffers " << MibString(cfg.device_size) << " and up to "
               << MibString(cfg.device_size_deferred) << " for palette buffers on first use, host pool "
@@ -437,10 +439,10 @@ int AV1Decoder::DecodeOne() {
     XB_LOGI << "GPUTIME timing run: per-stage GPU timestamps and CPU timers on, summary follows the last frame";
   if (params_.nopresent_)
     XB_LOGI << "GPUTIME -nopresent: decoded frames go straight back to the pool, nothing is presented";
-  // -cdefv2: also set at a point where no frame is in flight; off again for a task without the flag.
+  // CDEF shader: also set at a point where no frame is in flight. cdef_filter_v2 unless the task has -cdefv1.
   av1_set_cdef_v2(params_.cdefv2_ ? 1 : 0);
-  XB_LOGI << "CDEF shader: " << (params_.cdefv2_ ? "cdef_filter_v2 (-cdefv2)" : "cdef_filter (original)");
-  // -intrav2: the same rules, independent of -cdefv2.
+  XB_LOGI << "CDEF shader: " << (params_.cdefv2_ ? "cdef_filter_v2 (default)" : "cdef_filter (original, -cdefv1)");
+  // -intrav2: the same rules, independent of the CDEF shader.
   av1_set_intra_v2(params_.intrav2_ ? 1 : 0);
   XB_LOGI << "Intra shaders: "
           << (params_.intrav2_ ? "intra_v2 (-intrav2; frames with intra block copy keep the original shaders)"
@@ -452,12 +454,15 @@ int AV1Decoder::DecodeOne() {
 
   // -slots: fixed when the decoder was created; Start() asks for a new decoder when the value changes.
   XB_LOGI << "Frame slots: " << params_.slots_;
-  // -fitsize: also fixed at creation; a decoder of another size is replaced.
+  // The decoder's size: also fixed at creation; a decoder of another size is replaced.
   XB_LOGI << "Decoder size: " << created_width_ << "x" << created_height_ << " " << created_bitdepth_ << "-bit"
-          << (params_.fitsize_ ? " (-fitsize)" : " (default)");
+          << (params_.fitsize_ ? " (fit to the stream, default)" : " (fixed, -nofitsize)");
   // -lowmem, -lowmemparts: fixed at creation too.
   XB_LOGI << "Low memory parts: " << created_lowmem_
-          << (created_lowmem_ ? " (1 shared back buffer, 2 mode info shares, 4 coefficient shares)" : " (none)");
+          << (created_lowmem_ == PLAYER_LOWMEM_DEFAULT
+                  ? " (default: 1 shared back buffer)"
+                  : created_lowmem_ ? " (1 shared back buffer, 2 mode info shares, 4 coefficient shares)"
+                                    : " (none, -lowmemparts 0)");
   // -asyncclear: the same rules as the shader flags above, independent of them and of -slots.
   av1_set_async_clear(params_.asyncclear_ ? 1 : 0);
   XB_LOGI << "Clears: " << (params_.asyncclear_ ? "off the decode thread (-asyncclear)" : "decode thread (original)");

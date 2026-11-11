@@ -133,6 +133,12 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
 /*!\brief aom_codec_dec_cfg_t::low_memory. The decoded output is the same
  * with every combination.
  *
+ * 0 selects the default, AV1_LOW_MEMORY_DEFAULT: the shared back buffer and
+ * nothing else. Any other value is taken as it is: the sum of the parts
+ * wanted, or AV1_LOW_MEMORY_NONE for none of them (every frame takes its back
+ * buffer from the frame buffer pool, as the decoder did before the reductions
+ * existed).
+ *
  * AV1_LOW_MEMORY_SHARED_BACK_BUFFER: the frame that is filtered after its
  * reconstruction (CDEF, loop restoration, superres) is reconstructed into one
  * buffer shared by all frames instead of a buffer of its own from the frame
@@ -151,6 +157,8 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
 #define AV1_LOW_MEMORY_MODE_INFO 2
 #define AV1_LOW_MEMORY_COEFS 4
 #define AV1_LOW_MEMORY_ALL 7
+#define AV1_LOW_MEMORY_NONE 8
+#define AV1_LOW_MEMORY_DEFAULT AV1_LOW_MEMORY_SHARED_BACK_BUFFER
 
 /*!\brief Initialization Configurations
  *
@@ -183,8 +191,18 @@ typedef struct aom_codec_dec_cfg {
    * av1_codec_query_memory_requirements and aom_codec_dec_init, like every
    * field that changes what is allocated (frame_slots, low_memory). */
   int intra_v2;
-  /* Memory reductions that are not on by default: a combination of the
-   * AV1_LOW_MEMORY_* values below. 0: none. */
+  /* Memory reductions: a combination of the AV1_LOW_MEMORY_* values above.
+   * 0 selects the default (AV1_LOW_MEMORY_DEFAULT, the shared back buffer);
+   * AV1_LOW_MEMORY_NONE switches all of them off.
+   *
+   * What a zero-initialised configuration gets, next to the fields the
+   * application has to fill (width, height, bitdepth, host memory, device,
+   * pipeline cache, output buffer callbacks): two pipeline slots, the shared
+   * back buffer (10 frame buffers in the pool), no intra v2 buffers, no
+   * budget guard; CDEF runs through cdef_filter_v2.hlsl and intra prediction
+   * through the original shaders (process-wide switches in dx/av1_perf.h).
+   * The decoder is created for the width, height and bit depth given here;
+   * aom_codec_peek_stream_info gives those of a stream. */
   int low_memory;
   /* Memory budget guard, optional. On a console an application that goes over
    * its memory limit loses its D3D12 device for the rest of the process, so

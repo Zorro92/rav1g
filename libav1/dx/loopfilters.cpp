@@ -329,9 +329,10 @@ struct CDefData {
   int cdef_uv_strength[16][4];
 };
 
-// Test player switch (-cdefv2): run CDEF through cdef_filter_v2.hlsl, which writes the same bytes with a
-// different work split (one group per 64x64 luma block). Off unless av1_set_cdef_v2(1) was called.
-static int g_cdef_v2 = 0;
+// Which CDEF shader runs. cdef_filter_v2.hlsl writes the same bytes as cdef_filter.hlsl with a different work
+// split (one group per 64x64 luma block) and is 7 to 9 times faster on 4K 10-bit streams; it is the default.
+// av1_set_cdef_v2(0) selects the original shader (test player flag -cdefv1).
+static int g_cdef_v2 = 1;
 
 extern "C" void av1_set_cdef_v2(int enable) { g_cdef_v2 = enable; }
 

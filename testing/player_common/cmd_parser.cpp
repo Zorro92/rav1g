@@ -42,7 +42,10 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"gputime", atSingle, anOptional, "per-stage GPU/CPU timing, summary in the log", "", &params_.gputime_},
       {"nopresent", atSingle, anOptional, "release decoded frames without presenting them", "",
        &params_.nopresent_},
-      {"cdefv2", atSingle, anOptional, "CDEF through cdef_filter_v2.hlsl (same output)", "", &params_.cdefv2_},
+      {"cdefv2", atSingle, anOptional, "CDEF through cdef_filter_v2.hlsl (the default; same output)", "cdef",
+       &params_.cdefv2_},
+      {"cdefv1", atSingle, anOptional, "CDEF through the original cdef_filter.hlsl (same output)", "cdef",
+       &params_.cdefv1_},
       {"intrav2", atSingle, anOptional, "intra prediction through intra_v2.hlsl (same output)", "",
        &params_.intrav2_},
       {"intraopt", atSingle, anOptional, "original intra_main shader built with FXC optimisation (same source)", "",
@@ -52,13 +55,16 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"asyncclear", atSingle, anOptional, "per-frame clears off the decode thread (same output)", "",
        &params_.asyncclear_},
       {"fitsize", atSingle, anOptional,
-       "create the decoder for the stream's size and bit depth instead of 4096x2176 10-bit", "", &params_.fitsize_},
+       "create the decoder for the stream's size and bit depth (the default)", "fitsize", &params_.fitsize_},
+      {"nofitsize", atSingle, anOptional, "create the decoder for 4096x2176 10-bit whatever the stream's size is",
+       "fitsize", &params_.nofitsize_},
       {"lowmem", atSingle, anOptional,
        "smaller decoder: shared back buffer, smaller mode info and coefficient shares (same output)", "",
        &params_.lowmem_},
       {"lowmemparts", atInt, anOptional,
-       "parts of -lowmem to switch on: 1 shared back buffer + 2 mode info shares + 4 coefficient shares", "",
-       &params_.lowmem_parts_},
+       "memory reductions in effect: 1 shared back buffer + 2 mode info shares + 4 coefficient shares. Default 1, "
+       "0 for none",
+       "", &params_.lowmem_parts_},
       {"noguard", atSingle, anOptional,
        "create the decoder without the memory budget guard (a creation that does not fit loses the D3D12 device)",
        "", &params_.noguard_}};
@@ -155,8 +161,12 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     Err += ss;
     return -1;
   }
-  // -lowmem is all parts; -lowmemparts alone picks some of them.
+  // -lowmem is all parts; -lowmemparts alone says exactly which ones (0: none); neither: the default, part 1.
   if (params_.lowmem_) params_.lowmem_parts_ = PLAYER_LOWMEM_ALL;
+  // The defaults that have an opt-out flag. -cdefv2 and -fitsize are still accepted and change nothing;
+  // giving a flag together with its opposite was refused above.
+  params_.cdefv2_ = !params_.cdefv1_;
+  params_.fitsize_ = !params_.nofitsize_;
 
   params_.isDirectory_ = (params_.source_file_.empty() && !params_.source_dir_.empty());
   params_.isSubList_ = (params_.source_file_.empty() && params_.source_dir_.empty() && !params_.view_list_.empty());
@@ -207,14 +217,16 @@ void CParameters::Reset() {
   params_.recreate_ = false;
   params_.gputime_ = false;
   params_.nopresent_ = false;
-  params_.cdefv2_ = false;
+  params_.cdefv2_ = true;
+  params_.cdefv1_ = false;
   params_.intrav2_ = false;
   params_.intraopt_ = false;
   params_.slots_ = PLAYER_SLOTS_DEFAULT;
   params_.asyncclear_ = false;
-  params_.fitsize_ = false;
+  params_.fitsize_ = true;
+  params_.nofitsize_ = false;
   params_.lowmem_ = false;
-  params_.lowmem_parts_ = 0;
+  params_.lowmem_parts_ = PLAYER_LOWMEM_DEFAULT;
   params_.noguard_ = false;
 }
 
