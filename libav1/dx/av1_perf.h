@@ -151,6 +151,9 @@ typedef void (*av1_log_cb_fn_t)(void *priv, int is_error, const char *line);
  * before the pipeline cache and the decoder are created. */
 void av1_set_log_callback(av1_log_cb_fn_t cb, void *priv);
 
+/* One error line to the log callback, for the decoder's C code. */
+void av1_log_error(const char *line);
+
 /* What made the last decoder creation of this process fail, as one line; ""
  * when it did not fail. Valid until the next creation. The codec interface
  * returns it as the error detail of aom_codec_dec_init. */

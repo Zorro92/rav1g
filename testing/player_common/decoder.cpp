@@ -55,6 +55,48 @@ static void LogAppMemory(const char* label, bool is_error) {
 #endif
 }
 
+// What the app has left of its memory limit (Windows::System::MemoryManager), negative where that is not
+// known. On a console the D3D12 buffers of the decoder count against that limit, and an app that goes over
+// it loses its D3D12 device for the rest of the process.
+static int64_t AppMemoryLeft() {
+#if (WINAPI_FAMILY == WINAPI_FAMILY_APP)
+  try {
+    const uint64_t usage = Windows::System::MemoryManager::AppMemoryUsage;
+    const uint64_t limit = Windows::System::MemoryManager::AppMemoryUsageLimit;
+    return limit > usage ? (int64_t)(limit - usage) : 0;
+  } catch (Platform::Exception ^) {
+    return -1;
+  }
+#else
+  return -1;
+#endif
+}
+
+// The textures the output pool creates when the first frame arrives (all its images at once): the samples of
+// a 4:2:0 image and a sixteenth for alignment. An estimate: 4 images of 3840x2160 10-bit come to 100.9 MiB,
+// the console reported 100.5 MiB. The readback buffers of an md5 or file run are not counted: with them the
+// runs that were measured added up to more than the app's limit and still ran, so counting them would refuse
+// runs that work.
+static uint64_t OutputPoolEstimate(const CParameters::Parameters& params, unsigned int width, unsigned int height,
+                                   unsigned int bit_depth) {
+  if (params.needReadBack_ && params.noninterop_) return 0;  // readback buffers only
+  const uint64_t samples = (uint64_t)width * height + 2 * (uint64_t)((width + 1) / 2) * ((height + 1) / 2);
+  // 16 bits a sample, or three samples in 32 bits with -try10x3.
+  const uint64_t image = bit_depth > 8 ? (params.hdr10x3_ ? samples * 4 / 3 : samples * 2) : samples;
+  return (uint64_t)params.player_queue_size_ * image * 17 / 16;
+}
+
+// The decoder's budget guard (aom_codec_dec_cfg_t::memory_available_cb): what the decoder may still take is
+// what the app has left, less the part of the output pool that does not exist yet.
+int64_t AV1Decoder::MemoryAvailable(void* priv) {
+  AV1Decoder* This = static_cast<AV1Decoder*>(priv);
+  const int64_t left = AppMemoryLeft();
+  if (left < 0 || !This) return left;
+  const uint64_t created = This->storage_ ? This->storage_->TextureBytes() : 0;
+  const uint64_t pending = This->output_pool_estimate_ > created ? This->output_pool_estimate_ - created : 0;
+  return (uint64_t)left > pending ? (int64_t)((uint64_t)left - pending) : 0;
+}
+
 char* pdummy = 0;
 int AV1Decoder::DecodeLoop() {
   char dummy;
@@ -141,23 +183,25 @@ int AV1Decoder::DecodeOne() {
     return 0;
   };
 
-  // The size the decoder is created for. -fitsize: the stream's largest frame size (max_frame_width and
-  // max_frame_height of the sequence header, which bound every frame of the sequence, with superres and
-  // reference scaling), rounded up to 128 as the decoder does. The key frame is then looked for before the
-  // decoder exists. A stream that is larger than the default in either direction keeps the default, and the
-  // bit depth stays 10: the peek does not read it, and 10-bit buffers hold 8-bit frames.
+  // The key frame is looked for before the decoder exists: its sequence header says how large the frames
+  // and the output images of the stream are (max_frame_width and max_frame_height bound every frame of the
+  // sequence, with superres and reference scaling) and how many bits a sample has.
+  if (find_key_frame()) return -1;
+
+  // The size the decoder is created for. -fitsize: the stream's largest frame size, rounded up to 128 as the
+  // decoder does, and 8-bit buffers for an 8-bit stream. A stream that is larger than the default in either
+  // direction keeps the default size.
   unsigned int dec_width = PLAYER_DECODER_WIDTH;
   unsigned int dec_height = PLAYER_DECODER_HEIGHT;
-  bool key_frame_found = false;
+  unsigned int dec_bitdepth = PLAYER_DECODER_BITDEPTH;
   if (params_.fitsize_) {
-    if (find_key_frame()) return -1;
-    key_frame_found = true;
     const unsigned int fit_width = (si.w + 127) & ~127u;
     const unsigned int fit_height = (si.h + 127) & ~127u;
     if (si.w && si.h && fit_width <= PLAYER_DECODER_WIDTH && fit_height <= PLAYER_DECODER_HEIGHT) {
       dec_width = fit_width;
       dec_height = fit_height;
     }
+    if (si.bit_depth == 8) dec_bitdepth = 8;
   }
 
   // A decoder that was created with something else than this task asks for is replaced. need_reinit_ says
@@ -165,7 +209,8 @@ int AV1Decoder::DecodeOne() {
   const bool other_decoder =
       initialized_ && (created_threads_ != params_.threads_ || created_queue_size_ != params_.player_queue_size_ ||
                        created_slots_ != params_.slots_ || created_width_ != dec_width ||
-                       created_height_ != dec_height);
+                       created_height_ != dec_height || created_bitdepth_ != dec_bitdepth ||
+                       created_intrav2_ != params_.intrav2_ || created_lowmem_ != params_.lowmem_parts_);
   if (initialized_ && (need_reinit_ || other_decoder)) {
     XB_LOGI << "Destroy decoder";
     aom_codec_destroy(&decctx_);
@@ -185,7 +230,7 @@ int AV1Decoder::DecodeOne() {
       memset(&cfg, 0, sizeof(aom_codec_dec_cfg_t));
       cfg.width = dec_width;
       cfg.height = dec_height;
-      cfg.bitdepth = PLAYER_DECODER_BITDEPTH;
+      cfg.bitdepth = dec_bitdepth;
       cfg.threads = params_.threads_;
       cfg.cfg.ext_partition = 1;  //?
       cfg.allow_lowbitdepth = CONFIG_LOWBITDEPTH;
@@ -200,6 +245,20 @@ int AV1Decoder::DecodeOne() {
       cfg.tryHDR10x3 = params_.hdr10x3_;
       // -slots: set before the memory query, each slot has host memory of its own.
       cfg.frame_slots = params_.slots_;
+      // The same for what else decides which buffers exist: -intrav2 needs buffers of its own, -lowmem and
+      // -lowmemparts leave some out or make them smaller.
+      cfg.intra_v2 = params_.intrav2_ ? 1 : 0;
+      cfg.low_memory = params_.lowmem_parts_;
+      // Budget guard: the decoder refuses a creation, and later a palette buffer, that does not fit what
+      // the app has left. The output pool takes its textures on the first frame; until then they are held
+      // back from what the decoder may take (MemoryAvailable).
+      const unsigned int out_width = si.w ? si.w : dec_width;
+      const unsigned int out_height = si.h ? si.h : dec_height;
+      const unsigned int out_bitdepth = si.bit_depth ? si.bit_depth : dec_bitdepth;
+      const uint64_t output_pool = OutputPoolEstimate(params_, out_width, out_height, out_bitdepth);
+      output_pool_estimate_ = output_pool;
+      cfg.memory_available_cb = MemoryAvailable;
+      cfg.memory_available_priv = this;
       av1_codec_query_memory_requirements(&cfg);
       host_mem_.resize(cfg.host_size, 0);
       cfg.host_memory = &host_mem_[0];  // onion_mem.Data();
@@ -212,15 +271,18 @@ int AV1Decoder::DecodeOne() {
         return 1;
       }
 
-      if (params_.fitsize_)
-        XB_LOGI << "MEMORY decoder size: " << dec_width << "x" << dec_height << " " << PLAYER_DECODER_BITDEPTH
-                << "-bit (-fitsize, the stream's largest frame is " << si.w << "x" << si.h << "), slots "
-                << params_.slots_ << ", host pool " << MibString(cfg.host_size) << ", output pool "
-                << params_.player_queue_size_ << " images";
-      else
-        XB_LOGI << "MEMORY decoder size: " << dec_width << "x" << dec_height << " " << PLAYER_DECODER_BITDEPTH
-                << "-bit (default), slots " << params_.slots_ << ", host pool " << MibString(cfg.host_size)
-                << ", output pool " << params_.player_queue_size_ << " images";
+      XB_LOGI << "MEMORY decoder size: " << dec_width << "x" << dec_height << " " << dec_bitdepth << "-bit ("
+              << (params_.fitsize_ ? "-fitsize" : "default") << ", the stream's largest frame is " << si.w << "x"
+              << si.h << " " << si.bit_depth << "-bit), slots " << params_.slots_ << ", intra_v2 buffers "
+              << (params_.intrav2_ ? "yes (-intrav2)" : "no") << ", low memory parts " << params_.lowmem_parts_
+              << "; device buffers " << MibString(cfg.device_size) << " and up to "
+              << MibString(cfg.device_size_deferred) << " for palette buffers on first use, host pool "
+              << MibString(cfg.host_size);
+      XB_LOGI << "MEMORY output pool estimate: textures of " << params_.player_queue_size_ << " images of "
+              << out_width << "x" << out_height << " " << out_bitdepth << "-bit, " << MibString(output_pool)
+              << (params_.needReadBack_ ? " (the readback buffers of this run are not counted)" : "")
+              << "; held back from what the decoder may take until the pool has them. The decoder's budget "
+              << "guard keeps a margin of " << MibString(AV1_MEMORY_GUARD_MARGIN) << " at its creation";
       LogAppMemory("before the decoder", false);
       if (aom_codec_dec_init(&decctx_, aom_codec_av1_dx(), &cfg, dec_flags)) {
         host_mem_.clear();
@@ -242,6 +304,9 @@ int AV1Decoder::DecodeOne() {
       created_slots_ = params_.slots_;
       created_width_ = dec_width;
       created_height_ = dec_height;
+      created_bitdepth_ = dec_bitdepth;
+      created_intrav2_ = params_.intrav2_;
+      created_lowmem_ = params_.lowmem_parts_;
     } catch (int error) {
       XB_LOGE << "Unable to create decoder. Error " << error;
       return -1;
@@ -253,7 +318,6 @@ int AV1Decoder::DecodeOne() {
       return -1;
     }
   }
-  if (!key_frame_found && find_key_frame()) return -1;
   if (!buffer) {
     buffer = reader.GetData();
     if (!buffer) {
@@ -305,8 +369,11 @@ int AV1Decoder::DecodeOne() {
   // -slots: fixed when the decoder was created; Start() asks for a new decoder when the value changes.
   XB_LOGI << "Frame slots: " << params_.slots_;
   // -fitsize: also fixed at creation; a decoder of another size is replaced.
-  XB_LOGI << "Decoder size: " << created_width_ << "x" << created_height_
+  XB_LOGI << "Decoder size: " << created_width_ << "x" << created_height_ << " " << created_bitdepth_ << "-bit"
           << (params_.fitsize_ ? " (-fitsize)" : " (default)");
+  // -lowmem, -lowmemparts: fixed at creation too.
+  XB_LOGI << "Low memory parts: " << created_lowmem_
+          << (created_lowmem_ ? " (1 shared back buffer, 2 mode info shares, 4 coefficient shares)" : " (none)");
   // -asyncclear: the same rules as the shader flags above, independent of them and of -slots.
   av1_set_async_clear(params_.asyncclear_ ? 1 : 0);
   XB_LOGI << "Clears: " << (params_.asyncclear_ ? "off the decode thread (-asyncclear)" : "decode thread (original)");

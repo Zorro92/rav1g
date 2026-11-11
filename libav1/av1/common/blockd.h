@@ -430,6 +430,8 @@ typedef struct
     int dq_buffer_offset;
     int dq_buffer_ptr;
     int dq_buffer_max;
+    int dq_buffer_end;   // end of the part of the coefficient buffer the tile is writing
+    int dq_buffer_size;  // size of the tile's part of a slot's share
     int blocks_offset;
     int idct_blocks_ptr;
     int idct_blocks_sizes[TX_SIZES_ALL + 2];

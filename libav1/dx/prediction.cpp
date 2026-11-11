@@ -1016,7 +1016,11 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
     if (recon_blocks) {
       ComputeShader *shader = &shaders->reconstruct_block;
       command_list->SetPipelineState(shader->pso.Get());
-      command_list->SetComputeRootShaderResourceView(2, td->palette_buffer->dev->GetGPUVirtualAddress());
+      // A slot has a palette buffer once a frame that allows screen content tools has used it. Without one
+      // the frame has no palette block, and the shader loads from this buffer for palette blocks only; the
+      // binding still needs a buffer, so it gets another upload buffer of the slot.
+      const GpuBufferObject *palette = td->palette_buffer ? td->palette_buffer : td->idct_blocks_unordered;
+      command_list->SetComputeRootShaderResourceView(2, palette->dev->GetGPUVirtualAddress());
       PSSLReconSRT recon_srt;
       recon_srt.fb_base_offset = static_cast<int>(td->frame_buffer->base_offset);
       for (int i = 0; i < ReconstructBlockSizes; ++i) {

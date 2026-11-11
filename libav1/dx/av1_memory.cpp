@@ -65,6 +65,8 @@ void av1_log(int is_error, const char *format, ...) {
   log_line(is_error, line);
 }
 
+extern "C" void av1_log_error(const char *line) { log_line(1, line); }
+
 void av1_log_create_error(const char *format, ...) {
   char line[sizeof(g_create_error)];
   va_list args;

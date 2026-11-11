@@ -99,6 +99,42 @@ typedef struct av1_out_buffers_cb
     void* out_buffers_priv; /**< private pointer for functions above */
 } av1_out_buffers_cb_t;
 
+/*!\brief Bytes the decoder may still allocate, see
+ * aom_codec_dec_cfg_t::memory_available_cb. Negative: not known. */
+typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
+
+/*!\brief What a decoder creation guarded by memory_available_cb must leave
+ * free. A creation takes more than its buffers: creating the 4096x2176 10-bit
+ * decoder with two slots raised the memory of a console app by 805.7 MiB, 51
+ * MiB more than the 754.7 MiB of its device buffers (the host pool was
+ * allocated before). The margin is that and 32 MiB. */
+#define AV1_MEMORY_GUARD_MARGIN ((size_t)84 << 20)
+/*!\brief The same for one buffer created after the creation (a slot's
+ * palette buffer). */
+#define AV1_MEMORY_GUARD_MARGIN_BUFFER ((size_t)16 << 20)
+
+/*!\brief aom_codec_dec_cfg_t::low_memory. The decoded output is the same
+ * with every combination.
+ *
+ * AV1_LOW_MEMORY_SHARED_BACK_BUFFER: the frame that is filtered after its
+ * reconstruction (CDEF, loop restoration, superres) is reconstructed into one
+ * buffer shared by all frames instead of a buffer of its own from the frame
+ * buffer pool, and the pool has two buffers less. Covers every stream.
+ *
+ * AV1_LOW_MEMORY_MODE_INFO: a slot's share of the mode info pool holds a
+ * quarter of the worst case instead of half. A frame takes a second slot when
+ * a tile has more blocks than a quarter of its 4x4 units; a tile with more
+ * blocks than half of its 4x4 units is a decode error.
+ *
+ * AV1_LOW_MEMORY_COEFS: a slot's share of the coefficient buffer holds 12/24
+ * of the worst case instead of 17/24. A frame takes a second slot earlier; a
+ * tile whose coefficients come within one superblock of the worst case (every
+ * coefficient of every transform block coded) is a decode error. */
+#define AV1_LOW_MEMORY_SHARED_BACK_BUFFER 1
+#define AV1_LOW_MEMORY_MODE_INFO 2
+#define AV1_LOW_MEMORY_COEFS 4
+#define AV1_LOW_MEMORY_ALL 7
+
 /*!\brief Initialization Configurations
  *
  * This structure is used to pass init time configuration options to the
@@ -124,6 +160,37 @@ typedef struct aom_codec_dec_cfg {
    * the value must be the same for av1_codec_query_memory_requirements and
    * aom_codec_dec_init. */
   int frame_slots;
+  /* Non-zero creates the buffers of the optional intra path (intra_v2.hlsl,
+   * av1_set_intra_v2). Without them the decoder keeps the original intra
+   * shaders whatever av1_set_intra_v2 is set to. Must be the same for
+   * av1_codec_query_memory_requirements and aom_codec_dec_init, like every
+   * field that changes what is allocated (frame_slots, low_memory). */
+  int intra_v2;
+  /* Memory reductions that are not on by default: a combination of the
+   * AV1_LOW_MEMORY_* values below. 0: none. */
+  int low_memory;
+  /* Memory budget guard, optional. On a console an application that goes over
+   * its memory limit loses its D3D12 device for the rest of the process, so
+   * the decoder asks before it allocates: at the creation, and when it
+   * creates a palette buffer on first use. The callback returns the bytes the
+   * decoder may still take: what the application has left of its limit, less
+   * what the application is going to allocate itself (output images that do
+   * not exist yet), or a negative value when that is not known. The creation
+   * is refused when its device buffers would leave less than
+   * AV1_MEMORY_GUARD_MARGIN, a palette buffer when it would leave less than
+   * AV1_MEMORY_GUARD_MARGIN_BUFFER; both say so in a "MEMORY REFUSED" log
+   * line. A refused creation fails, a frame without its palette buffer is a
+   * decode error; nothing was allocated and the device is intact. Without a
+   * callback nothing is checked. The callback is called on the thread that
+   * creates the decoder and on the thread that calls aom_codec_decode. */
+  av1_memory_available_cb_fn_t memory_available_cb;
+  void *memory_available_priv;
+  /* Filled by av1_codec_query_memory_requirements next to host_size: the
+   * bytes of the D3D12 buffers the creation allocates, and of the buffers
+   * that are only created when a stream needs them (one palette buffer per
+   * slot, on the first frame of the slot that allows screen content tools). */
+  size_t device_size;
+  size_t device_size_deferred;
 } aom_codec_dec_cfg_t;            /**< alias for struct aom_codec_dec_cfg */
 
 /*!\brief Initialize a decoder instance

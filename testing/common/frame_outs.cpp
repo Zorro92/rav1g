@@ -188,6 +188,7 @@ std::shared_ptr<OutBufferWrapper> OutBufferStorage::GetFreeBuffer(uint32_t width
     }
     return 1;
   });
+  texture_bytes_total_ += texture_bytes;
   if (texture_images || readback_buffers)
     XB_LOGI << "MEMORY output pool: allocated for " << width << "x" << height << " "
             << (fb_type == fbt8bit ? "8-bit" : (fb_type == fbt10bit ? "10-bit" : "10-bit packed 10:10:10:2"))

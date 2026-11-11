@@ -21,6 +21,7 @@
 #include <list>
 #include <mutex>
 #include <memory>
+#include <atomic>
 #include "aom/aom_decoder.h"
 
 #include <wrl.h>
@@ -104,6 +105,8 @@ class OutBufferStorage {
   }
 
   size_t GetSize() { return queue_free_.Size(); }
+  // Bytes of the textures the pool has created so far (it creates them on the first frame of a size).
+  uint64_t TextureBytes() const { return texture_bytes_total_.load(); }
   std::shared_ptr<OutBufferWrapper> GetFreeBuffer(uint32_t width, uint32_t height, frame_buffer_type fb_type,
                                                   size_t buffer_size, uint32_t flags);
   std::shared_ptr<OutBufferWrapper> ReleaseRentedBuffer(void* ptr);
@@ -135,6 +138,7 @@ class OutBufferStorage {
   int queue_size_;
   std::mutex cs_;
   ComPtr<ID3D12Device> dx12_device_;
+  std::atomic<uint64_t> texture_bytes_total_{0};
   bool wait_logging_ = false;
   int wait_count_ = 0;
   double wait_total_ms_ = 0.0;

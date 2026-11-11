@@ -51,6 +51,17 @@ one commit each:
   has two slots and clears on the decode thread, as upstream does. The same section covers
   the `MEMORY` log lines of a decoder creation (what was allocated, and which allocation
   failed) and the player flag `-fitsize`, which sizes the decoder for the stream.
+- **Decoder memory**: the decoder took 754.7 MiB of D3D12 buffers at 4096x2176 10-bit,
+  most of a console app's 1 GiB. Two buffers per slot are now only created when they are
+  needed (the palette buffer on the first frame that allows screen content tools, the
+  intra v2 buffer for a decoder created for `-intrav2`), the player flag `-lowmem` makes
+  three more reductions that are not on by default, the sequence header peek behind
+  `-fitsize` and `aom_codec_peek_stream_info` reads the header correctly (and the bit
+  depth), and a decoder creation that does not fit the app's memory limit is refused
+  (`MEMORY REFUSED`) instead of losing the D3D12 device. See
+  [What the decoder takes](#what-the-decoder-takes), [`-lowmem`](#smaller-decoder--lowmem)
+  and [Budget guard](#budget-guard-memory-refused). A host-side check of the peek lives in
+  `testing/seq_header_check`.
 
 ## Build
 
@@ -751,11 +762,39 @@ elsewhere shorten the wall time per frame. Neither changes the decoded output.
 | --- | --- |
 | `-slots N` | The decoder is created with `N` pipeline slots, `N` = 2, 3 or 4. Default 2. Any other value is refused: the task is skipped with `Invalid arguments string. -slots N is not allowed: the decoder takes 2 to 4 slots.` |
 | `-asyncclear` | The two large per-frame clears of a slot are done by the GPU completion thread after the fence of the frame that used the slot, before the slot goes back to the pool. The decode thread then finds the slot already cleared. |
-| `-fitsize` | The decoder is created for the stream's largest frame size instead of 4096x2176, which makes every buffer smaller; see [Decoder size](#decoder-size--fitsize). |
+| `-fitsize` | The decoder is created for the stream's largest frame size and bit depth instead of 4096x2176 10-bit, which makes every buffer smaller; see [Decoder size](#decoder-size--fitsize). |
+| `-lowmem` | Three memory reductions that are not on by default: one back buffer shared by all frames, and smaller per-slot shares of the mode info pool and of the coefficient buffer; see [Smaller decoder](#smaller-decoder--lowmem). |
+| `-lowmemparts N` | Some of the three: `N` is the sum of 1 (shared back buffer), 2 (mode info shares) and 4 (coefficient shares). `-lowmem` is `-lowmemparts 7`. |
 
 All are off by default: the decoder then has two slots, clears on the decode thread and
-is sized for 4096x2176, as before. They are independent of each other and of `-cdefv2`,
-`-intrav2`, `-intraopt`, `-gputime`, `-nopresent` and the md5 flags.
+is sized for 4096x2176 10-bit, as before. They are independent of each other and of
+`-cdefv2`, `-intrav2`, `-intraopt`, `-gputime`, `-nopresent` and the md5 flags.
+
+**Console results so far (2026-11-11, package 0.2.5.0, app mode, both 4K 10-bit clips):**
+
+- A console app has a memory limit of **1024.0 MiB** (`Windows::System::MemoryManager`),
+  and the decoder's D3D12 buffers count against it. The app used 77 MiB before the
+  decoder and **882.7 MiB after the default two-slot decoder** (40 device buffers,
+  754.7 MiB; host pool 23.2 MiB), and the output pool of 4 images took another 100.5 MiB:
+  about 40 MiB were left. DXGI reported a local budget of 1209.6 MiB, with usage going
+  from 37 to 810 MiB.
+- **`-slots 3` did not fit and took the D3D12 device with it.** The buffers were created
+  (GPU usage 1006.9 MiB, the DXGI budget fell to 1053.9 MiB), then the creation failed at
+  `upload of the lookup tables` with `hr 0x887A0005` (`DXGI_ERROR_DEVICE_REMOVED`). The
+  failed decoder was released correctly (usage back at 53.6 MiB), but a removed device
+  stays removed for the life of the process: every later task of the launch failed at
+  `D3D12 device or command queue (hr 0x887A0005)`, the default ones too. The
+  [budget guard](#budget-guard-memory-refused) now refuses such a creation before it
+  allocates.
+- **`-asyncclear` is md5-exact on both clips and gives no gain with two slots.** The
+  decode thread's clears (3.3 to 4.3 ms per frame) go away, and `wait_slot` grows by 1.5
+  to 3.7 ms: with two slots the slot comes back just when the decode thread needs it, so
+  the decode thread waits for the clear instead of doing it. The completion thread spends
+  3.6 to 3.9 ms per frame on the clears. Two runs with the same settings differ by about
+  1 fps on the SVT-AV1 clip, which is more than what is left of the difference.
+- **`-fitsize` was wrong in that package**: it logged `the stream's largest frame is
+  32x128` for a 3840x2160 stream and created a 128x128 decoder. Fixed, see
+  [Decoder size](#decoder-size--fitsize).
 
 Every task's log says what is in effect:
 
@@ -785,46 +824,228 @@ does for `-t` and `-queue_size`.
 
 What else follows the slot count:
 
-- **Reference frame buffers**: 12 with two slots, one more per added slot (13, 14). A
-  frame in flight holds its back buffer and its references until its GPU work is done,
-  so a deeper pipeline with the same pool would only move the wait from `wait_slot` to
-  the frame buffer pool.
+- **Frame buffers in the pool**: 12 with two slots, one more per added slot (13, 14),
+  and one back buffer beside the pool. Where the 12 come from: the reference map holds at
+  most 8 different buffers; the frame being decoded takes one for itself and, when it is
+  filtered after reconstruction (CDEF, loop restoration, superres), one back buffer; a
+  frame in flight keeps its back buffer, and whatever the map has dropped since it started
+  (a reference it reads that a later frame replaced, or its own buffer if it is not a
+  reference), until its GPU work is done. 8 + 2 for the frame being decoded + 2 for the one
+  frame in flight next to it is 12: no wait in the common case of one map entry replaced
+  per frame. Taking a buffer waits until a frame in flight returns one, so a smaller pool
+  costs `wait_fb` time, not output, down to the count that must be there with nothing in
+  flight: 11, because a frame that failed after its setup keeps its buffer and its back
+  buffer until the next frame is set up, which is after that frame took its own (8 + 2 +
+  1). Below 11 the decode thread could wait for a buffer nobody returns. With the shared
+  back buffer of [`-lowmem`](#smaller-decoder--lowmem) the pool has 10 (and 11, 12).
 - **Unchanged**: the GPU work item pool (8), the output image descriptors (16), and the
   player's output buffer pool (`-queue_size`). A frame that is shown holds one output
   buffer while it is in flight, so `-queue_size` still limits how many shown frames can
   be in the pipeline: with `-queue_size 4` and `-slots 4` the output pool, not the slot
   count, is the limit (`wait_output`).
 
-Memory per slot. The player always creates the decoder for 4096x2176, 10-bit, so that
-column is what an added slot costs in the test player; the other column is a decoder
-created for 3840x2160, 10-bit. All of it is D3D12 buffer memory (on the console that is
-the same memory as the host's); the host-heap part of a slot is about 0.5 MB.
+Memory per slot. The player creates the decoder for 4096x2176, 10-bit unless `-fitsize`
+is given, so that column is what an added slot costs in the test player; the other column
+is a decoder created for 3840x2160, 10-bit. All of it is D3D12 buffer memory (on the
+console that is the same memory as the host's); the host-heap part of a slot is about
+0.5 MB. The numbers are computed from the allocation code.
 
 | Per slot, MiB | 4096x2176 (player) | 3840x2160 |
 | --- | --- | --- |
 | mode info pool share | 59.5 | 55.8 |
 | coefficient buffer share | 36.1 | 33.9 |
-| palette buffer | 25.8 | 24.2 |
 | transform block list | 12.8 | 12.0 |
-| intra v2 schedule buffer | 10.6 | 10.0 |
 | prediction block map and indexes | 14.1 | 13.2 |
 | mode info grid, intra iteration grid | 8.7 | 8.2 |
 | CDEF, loop restoration, film grain, command constants | 3.4 | 3.3 |
-| **slot** | **171.0** | **160.4** |
-| one more reference frame buffer (with its motion vectors and segment map) | 27.4 | 25.7 |
-| **each slot above two** | **198** | **186** |
+| **slot** | **134.6** | **126.2** |
+| one more frame buffer (with its motion vectors and segment map) | 27.4 | 25.7 |
+| **each slot above two** | **162** | **152** |
+| palette buffer, from the slot's first frame that allows screen content tools | +25.8 | +24.2 |
+| intra v2 schedule buffer, only in a decoder created for `-intrav2` | +10.6 | +10.0 |
 
-So `-slots 3` costs about 198 MiB more than the default and `-slots 4` about 397 MiB
-more. If the allocation fails, the task ends with `Failed to initialize decoder`, and the
-log says which allocation it was; see [Memory lines](#memory-lines-in-the-log-memory).
+A slot used to be 171.0 MiB (198 MiB with its frame buffer): the palette buffer and the
+intra v2 buffer were created with every decoder. With [`-lowmem`](#smaller-decoder--lowmem)
+a slot is 94.2 MiB at 4096x2176 (mode info share 29.7, coefficient share 25.5) and each
+slot above two costs about 120 MiB.
 
-**On the console in app mode, `-slots 3` and `-slots 4` failed to allocate** with package
-0.2.4.0: every such task ended with `Failed to initialize decoder: Memory allocation
-error`, and the tasks after it in the same launch failed too, also with the default two
-slots. That package did not say which allocation failed, and a failed creation did not
-release the buffers it had already created, which is what broke the later tasks. Both are
-changed after 0.2.4.0: the `MEMORY` lines below, and a failed creation that leaves nothing
-behind. Whether three slots fit is still open; the lines are there to find out.
+If the creation does not fit the app's memory it is refused before anything is allocated
+([budget guard](#budget-guard-memory-refused)); if an allocation fails all the same, the
+task ends with `Failed to initialize decoder`, and the log says which allocation it was;
+see [Memory lines](#memory-lines-in-the-log-memory).
+
+**On the console in app mode, `-slots 3` and `-slots 4` did not fit** with packages
+0.2.4.0 and 0.2.5.0 (4096x2176 decoder, 951 MiB of buffers for three slots); the second
+package's log is quoted at the top of this section. Whether three slots fit with the
+smaller decoder is open: computed, a three-slot decoder is 842 MiB by default, 790 MiB
+with `-fitsize` for a 3840x2160 stream and 652 MiB with `-lowmem -fitsize`, and the guard
+accepts only the `-lowmem` ones next to a 4-image output pool (see the table under
+[What the decoder takes](#what-the-decoder-takes) and the
+[budget guard](#budget-guard-memory-refused)).
+
+### What the decoder takes
+
+D3D12 buffers of the decoder in MiB, computed from the allocation code
+(`av1_allocate_buffers` in `libav1/dx/av1_core.cpp`); the first row is what package 0.2.5.0
+logged on the console for two slots, and the same formulas for three and four. The host
+pool (23.2 MiB at 4096x2176 with two slots) and the player's output pool come on top.
+
+| Decoder | 2 slots | 3 slots | 4 slots |
+| --- | --- | --- | --- |
+| package 0.2.5.0, 4096x2176 10-bit | 754.7 | 951.4 | 1148.1 |
+| default now, 4096x2176 10-bit | 681.9 | 842.2 | 1002.6 |
+| `-intrav2` | 703.2 | 874.1 | 1045.1 |
+| `-fitsize`, 3840x2160 10-bit stream | 639.7 | 790.2 | 940.6 |
+| `-lowmem` | 575.4 | 695.4 | 815.3 |
+| `-lowmem -fitsize`, 3840x2160 10-bit stream | 539.9 | 652.4 | 765.0 |
+| `-fitsize`, 1920x1080 8-bit stream | 131.2 | 169.0 | 206.7 |
+
+The parts of `-lowmem` alone, two slots at 4096x2176: `-lowmemparts 1` 656.1,
+`-lowmemparts 2` 622.4, `-lowmemparts 4` 660.7.
+
+What changed against package 0.2.5.0 without any flag (72.8 MiB with two slots):
+
+- **Palette buffer, 25.8 MiB per slot**: it holds the pixels of the frame's palette
+  blocks, which the entropy decoder writes in the layout of a frame buffer and
+  `reconstruct_block.hlsl` copies into the frame. Its worst case is a whole frame (every
+  block of a screen content frame can be a palette block), so it cannot be smaller, and
+  the frames in flight write and read their own, so the slots cannot share one. But a
+  block can only use a palette in a frame that allows screen content tools
+  (`allow_screen_content_tools`, which encoders set for screen content), so the buffer is
+  now created when the first such frame gets the slot, and kept. The log says so:
+
+  ```text
+  MEMORY palette buffer of slot 0 created for frame 12, the first on the slot that allows screen content tools: 25.8 MiB; device buffers now 707.7 MiB in 37 buffers
+  ```
+
+  A stream without screen content never creates them. If the buffer cannot be created
+  (the budget guard refuses it, or the allocation fails) the frame is a decode error, not
+  a lost device.
+- **Intra v2 buffer, 10.6 MiB per slot**: only the `-intrav2` path reads or writes it.
+  It is created when the decoder is created for that path
+  (`aom_codec_dec_cfg_t::intra_v2`; the player sets it for a task with `-intrav2` and
+  creates a new decoder when the flag differs from the task before). In a decoder without
+  it, `av1_set_intra_v2(1)` keeps the original intra shaders.
+
+What was looked at and left as it is:
+
+- **Frame buffers** (335.0 MiB: 12 in the pool and one back buffer of 25.8 MiB): the count
+  is derived under [Slots](#slots); 12 is what two slots need to not wait in the common
+  case. The buffers themselves are the pixels (16 bits a sample at 10-bit, a border of 16
+  on each side).
+- **Mode info pool** (59.5 MiB per slot): one entry is `MB_MODE_INFO`, 224 bytes, and the
+  GPU reads the entries as they are, so the entry cannot shrink without changing the
+  shaders. A frame can have one entry per 4x4 unit; a slot's share holds half of that and
+  a frame that needs more takes a second slot, so two shares are exactly the worst case
+  of one frame. Smaller shares are in `-lowmem` because they no longer cover every
+  stream.
+- **Coefficient buffer** (36.1 MiB per slot): 24 coefficients per 4x4 unit in the worst
+  case (16 luma, 8 chroma), four bytes each; a share holds 17/24 of that and a frame that
+  needs more continues in a second slot's share at a superblock boundary, which is why a
+  share is more than half. Smaller shares are in `-lowmem`.
+- **Residuals, prediction blocks, transform block lists, block maps** (26.0, 25.5 + 9.6,
+  12.8 + 12.8 per slot, 14.1 per slot): each is sized for the case that every block of
+  the frame is 4x4, which a legal frame can be.
+
+Two overruns were found on the way and are now decode errors or fixed, without changing
+what a stream that decoded before decodes to:
+
+- A frame with a tile of at most two superblocks lays its coefficients out for the worst
+  case, from its own slot's share on into the next share. When the frame's second slot was
+  the one in front of its own, the layout still started in its own share and ran over the
+  share behind it (another slot's, or the end of the buffer) for a frame larger than 71%
+  of the decoder's size. It now starts in the second slot's share then. With three or four
+  slots the two shares may not be neighbours; such a frame is then a decode error
+  (`MEMORY FAILED frame N: a tile of at most 2 superblocks ...`). On the default
+  4096x2176 decoder a frame has to be larger than 71% of that for either case, which
+  `-fitsize` makes the normal case for small streams.
+- The mode info entries and the coefficients of a tile are checked against the end of the
+  tile's part of the buffer as they are written (`MEMORY FAILED frame: the blocks of a
+  tile do not fit ...`, `... the coefficients of a tile do not fit ...`). With the default
+  shares neither can happen for a tile of more than two superblocks.
+
+### Smaller decoder (`-lowmem`)
+
+Three reductions that change sizes a stream may depend on, so they are not the default.
+The decoded output is the same with all of them; what is given up is listed for each.
+`-lowmem` switches on all three, `-lowmemparts N` the sum of the parts named (for finding
+out which one a result comes from). They are a decoder creation parameter
+(`aom_codec_dec_cfg_t::low_memory`, `AV1_LOW_MEMORY_*` in `libav1/aom/aom_decoder.h`), so
+the player creates a new decoder when the value differs from the task before.
+
+```text
+Low memory parts: 7 (1 shared back buffer, 2 mode info shares, 4 coefficient shares)
+```
+
+| Part | Saves, 4096x2176 10-bit, 2 / 3 slots | What it does | Not covered |
+| --- | --- | --- | --- |
+| 1, shared back buffer | 25.8 / 25.8 MiB | A frame that is filtered after its reconstruction is reconstructed into a back buffer. Instead of a buffer of its own from the pool, every frame uses the same one, beside the pool, and the pool has two buffers less (10 with two slots). | Nothing: only the frame's own command list reads or writes its back buffer, and the command lists of the frames run on the queue one after the other, as they already do for the second back buffer the filters share. Not yet verified on the console, which is why it is not the default. A stream without CDEF, loop restoration and superres whose frames replace several references at once may wait for a frame buffer (`wait_fb`) where it did not before. |
+| 2, mode info shares | 59.5 / 89.2 MiB | A slot's share of the mode info pool holds a quarter of the worst case instead of half. | A frame takes a second slot (and the pipeline loses a frame of depth for it) as soon as a tile has more blocks than a quarter of its 4x4 units, an average block smaller than 8x8. A tile with more blocks than half of its 4x4 units, an average block smaller than 8x4, is a decode error: `MEMORY FAILED frame: the blocks of a tile do not fit its part of the mode info pool`. |
+| 4, coefficient shares | 21.2 / 31.9 MiB | A slot's share of the coefficient buffer holds 12/24 of the worst case instead of 17/24. | A frame takes a second slot once a tile has used half of its worst case. Two shares are exactly the worst case, less what is left over in the first at the superblock boundary where the frame switches: a tile whose coefficients come within one superblock of the worst case (every coefficient of every transform block coded, as in lossless coding of noise) is a decode error: `MEMORY FAILED frame: the coefficients of a tile do not fit its part of the coefficient buffer`. |
+
+A decode error ends the task in the player (`aom_codec_decode error`), like any other.
+
+### Budget guard (`MEMORY REFUSED`)
+
+An app that goes over its memory limit on the console does not get a failed allocation: it
+loses its D3D12 device, for the rest of the process (see the `-slots 3` result above). So
+the decoder asks before it allocates. The application gives it a callback
+(`aom_codec_dec_cfg_t::memory_available_cb`) that returns the bytes the decoder may still
+take; the player's returns `AppMemoryUsageLimit - AppMemoryUsage` of
+`Windows::System::MemoryManager`, less the textures of its output pool for as long as the
+pool has not created them (it creates them at the first frame). Without a callback, or
+when the callback does not know (it returns a negative value, as the player's does outside
+an app container), nothing is checked.
+
+- **At the creation**: the decoder adds up the device buffers it is about to create, the
+  same way it creates them, and is refused when they would leave less than
+  `AV1_MEMORY_GUARD_MARGIN`, 84 MiB. Most of the margin is not headroom: creating the
+  754.7 MiB decoder raised the app's memory from 77 to 882.7 MiB, 51 MiB more than its
+  buffers (the host pool is allocated before the creation and is part of the 77). The
+  margin is that and 32 MiB.
+- **For a palette buffer** created later: refused when it would leave less than
+  `AV1_MEMORY_GUARD_MARGIN_BUFFER`, 16 MiB. The frame is then a decode error.
+
+A refusal allocates nothing and leaves the device as it was, so the next task of the
+launch runs:
+
+```text
+MEMORY decoder size: 4096x2176 10-bit (default, the stream's largest frame is 3840x2160 10-bit), slots 3, intra_v2 buffers no, low memory parts 0; device buffers 842.2 MiB and up to 77.3 MiB for palette buffers on first use, host pool N.N MiB
+MEMORY output pool estimate: textures of 4 images of 3840x2160 10-bit, 100.9 MiB; held back from what the decoder may take until the pool has them. The decoder's budget guard keeps a margin of 84.0 MiB at its creation
+MEMORY app before the decoder: usage N.N MiB of limit 1024.0 MiB, N.N MiB left
+MEMORY REFUSED decoder 4096x2176 10-bit, slots 3: its device buffers take 883162112 bytes (842.2 MiB) and the creation must leave a margin of 84.0 MiB, 926.2 MiB together; the application has N.N MiB left for the decoder. Nothing was allocated; the D3D12 device is intact
+MEMORY dxgi REFUSED, nothing allocated: local budget N.N MiB, usage N.N MiB, ...
+Failed to initialize decoder: Memory allocation error: MEMORY REFUSED decoder 4096x2176 10-bit, slots 3: ...
+MEMORY app after the failed decoder creation: usage N.N MiB of limit 1024.0 MiB, N.N MiB left
+Unable to create decoder. Error 2
+```
+
+```text
+MEMORY REFUSED palette buffer of slot 1 (frame 12 allows screen content tools): 27017216 bytes (25.8 MiB) and the margin of 16.0 MiB do not fit the N.N MiB the application has left for the decoder. The frame is a decode error; nothing was allocated and the D3D12 device is intact
+```
+
+A creation that is accepted says what was compared:
+
+```text
+MEMORY budget: device buffers 681.9 MiB + margin 84.0 MiB = 765.9 MiB, the application has N.N MiB left for the decoder: accepted; palette buffers on first use would add up to 51.5 MiB
+```
+
+or `MEMORY budget: not checked (...)` with the reason.
+
+With the console's numbers (limit 1024.0 MiB, 77 MiB used before the creation with the
+host pool in it, 4 output images of a 3840x2160 10-bit stream) the decoder may take about
+846 MiB, so the guard accepts buffers up to about 762 MiB: every two-slot decoder of the
+table above (also the 754.7 MiB one of package 0.2.5.0, which ran), the three-slot decoder
+with `-lowmem` (695.4) and with `-lowmem -fitsize` (652.4), and it refuses three slots
+without `-lowmem` (842.2, and 790.2 with `-fitsize`, which would end within a few MiB of
+the limit) and four slots. These are computed; the console has to confirm them.
+
+What the guard does not see: the readback buffers of an md5 or file run are not in the
+player's estimate (the measured runs with them added up to more than the limit and still
+ran, so counting them would refuse runs that work), and a decoder that is reused for a
+stream with larger output images does not ask again. The output pool estimate is a
+sixteenth above the samples of the images; the console reported 100.5 MiB for the 100.9
+estimated.
 
 ### Memory lines in the log (`MEMORY`)
 
@@ -834,27 +1055,41 @@ ones about the app and its output pool. The numbers below are what the allocatio
 gives for the default 4096x2176, 10-bit and two slots; `N` stands for a value that depends
 on the run.
 
-Before the decoder is created (player):
+Before the decoder is created (player, then the decoder's budget line):
 
 ```text
-MEMORY decoder size: 4096x2176 10-bit (default), slots 2, host pool N.N MiB, output pool 4 images
+MEMORY decoder size: 4096x2176 10-bit (default, the stream's largest frame is 3840x2160 10-bit), slots 2, intra_v2 buffers no, low memory parts 0; device buffers 681.9 MiB and up to 51.5 MiB for palette buffers on first use, host pool N.N MiB
+MEMORY output pool estimate: textures of 4 images of 3840x2160 10-bit, 100.9 MiB; held back from what the decoder may take until the pool has them. The decoder's budget guard keeps a margin of 84.0 MiB at its creation
 MEMORY app before the decoder: usage N.N MiB of limit N.N MiB, N.N MiB left
+MEMORY budget: device buffers 681.9 MiB + margin 84.0 MiB = 765.9 MiB, the application has N.N MiB left for the decoder: accepted; palette buffers on first use would add up to 51.5 MiB
 ```
 
 `app` is `Windows::System::MemoryManager`: the memory of the whole app and the limit the
-system gives it. On the console the D3D12 buffers are part of it.
+system gives it. On the console the D3D12 buffers are part of it. The host pool is
+allocated before the `app before the decoder` line, so it is in that usage. The player
+now reads on to the stream's first key frame before it creates the decoder, with or
+without `-fitsize`: the sequence header there gives the size and bit depth of the output
+images for the estimate. `budget` is the [budget guard](#budget-guard-memory-refused).
 
 After a creation that worked (decoder, then player):
 
 ```text
-MEMORY decoder created: 4096x2176 10-bit, slots 2, frame buffers 12 + 1 back buffer of 27017216 bytes (25.8 MiB) each; 40 device buffers, 791353600 bytes (754.7 MiB); host pool N of N bytes (N.N MiB) in use
-MEMORY decoder created by type: DeviceOnly 7 buffers 412.0 MiB; DeviceUpload 16 buffers 83.9 MiB; HostRW 11 buffers 185.8 MiB; ReadBack 0 buffers 0.0 MiB; DeviceOnlyConst 5 buffers 0.8 MiB; UploadUAV 1 buffers 72.2 MiB; textures 0
-MEMORY decoder created per slot: 179266304 bytes (171.0 MiB) = 13 own buffers 75.3 MiB + mode_info_pool share 59.5 MiB + idct_coefs share 36.1 MiB; a slot above 2 also adds one frame buffer, 25.8 MiB
-MEMORY decoder created largest: frame_buffer_pool 335.0 MiB DeviceOnly; mode_info_pool 119.0 MiB HostRW; idct_coefs 72.2 MiB UploadUAV; idct_residuals 26.0 MiB DeviceOnly; palette_buffer 25.8 MiB DeviceUpload (per slot); prediction_blocks 25.5 MiB DeviceOnly; idct_blocks 12.8 MiB DeviceOnly; idct_blocks_unordered 12.8 MiB DeviceUpload (per slot); intra_v2_buffer 10.6 MiB HostRW (per slot); prediction_blocks_warp 9.6 MiB DeviceOnly
+MEMORY decoder created: 4096x2176 10-bit, slots 2, frame buffers 12 + 1 back buffer of 27017216 bytes (25.8 MiB) each; 36 device buffers, 715036928 bytes (681.9 MiB); host pool N of N bytes (N.N MiB) in use
+MEMORY decoder created options: intra_v2 buffers no (the decoder was not created for -intrav2); low memory 0 (shared back buffer no, mode info share 1/2 of the worst case, coefficient share 17/24); palette buffers 0 of 2 created, 25.8 MiB each, a slot's on its first frame with screen content tools
+MEMORY decoder created by type: DeviceOnly 7 buffers 412.0 MiB; DeviceUpload 14 buffers 32.3 MiB; HostRW 9 buffers 164.6 MiB; ReadBack 0 buffers 0.0 MiB; DeviceOnlyConst 5 buffers 0.8 MiB; UploadUAV 1 buffers 72.2 MiB; textures 0
+MEMORY decoder created per slot: 141107968 bytes (134.6 MiB) = 11 own buffers 38.9 MiB + mode_info_pool share 59.5 MiB + idct_coefs share 36.1 MiB; a slot above 2 also adds one frame buffer, 25.8 MiB
+MEMORY decoder created largest: frame_buffer_pool 335.0 MiB DeviceOnly; mode_info_pool 119.0 MiB HostRW; idct_coefs 72.2 MiB UploadUAV; idct_residuals 26.0 MiB DeviceOnly; prediction_blocks 25.5 MiB DeviceOnly; idct_blocks 12.8 MiB DeviceOnly; idct_blocks_unordered 12.8 MiB DeviceUpload (per slot); prediction_blocks_warp 9.6 MiB DeviceOnly; gen_block_map 7.7 MiB HostRW (per slot); gen_mi_block_indexes 6.4 MiB HostRW (per slot)
 MEMORY dxgi before the decoder's allocations: local budget N.N MiB, usage N.N MiB, reserved N.N MiB of N.N MiB available; non-local budget N.N MiB, usage N.N MiB, reserved N.N MiB of N.N MiB available
 MEMORY dxgi after the decoder's allocations: local budget N.N MiB, usage N.N MiB, reserved N.N MiB of N.N MiB available; non-local budget N.N MiB, usage N.N MiB, reserved N.N MiB of N.N MiB available
 MEMORY app after the decoder: usage N.N MiB of limit N.N MiB, N.N MiB left
 ```
+
+Package 0.2.5.0 logged 40 device buffers and 754.7 MiB here (per slot 171.0 MiB in 13 own
+buffers); the difference is the palette and intra v2 buffers, see
+[What the decoder takes](#what-the-decoder-takes).
+
+- **options**: what the decoder was created with, and how many palette buffers exist at
+  that moment (none right after a creation).
 
 - **by type**: the decoder's memory types (`MemoryType` in `libav1/dx/av1_memory.h`).
   `DeviceOnly` and `DeviceOnlyConst` are default-heap buffers the CPU never maps;
@@ -887,24 +1122,41 @@ the failed decoder was released, and the player's lines; the first `MEMORY FAILE
 is repeated as the detail of `Failed to initialize decoder`:
 
 ```text
-MEMORY FAILED buffer palette_buffer of slot 2: 27017216 bytes (25.8 MiB), type DeviceUpload, heap UPLOAD, CreateCommittedResource hr 0x8007000E; allocated before it: 970619904 bytes (925.7 MiB) in 52 buffers
+MEMORY FAILED buffer filmgrain_rand_offset of slot 2: 36608 bytes (0.0 MiB), type DeviceUpload, heap UPLOAD, CreateCommittedResource hr 0x8007000E; allocated before it: N bytes (N.N MiB) in 46 buffers
 MEMORY FAILED decoder creation at: decoder buffers (the MEMORY FAILED line above names the one)
-MEMORY FAILED decoder, allocated up to the failure: 4096x2176 10-bit, slots 3, frame buffers 13 + 1 back buffer of 27017216 bytes (25.8 MiB) each; 52 device buffers, 970619904 bytes (925.7 MiB); host pool N of N bytes (N.N MiB) in use
+MEMORY FAILED decoder, allocated up to the failure: 4096x2176 10-bit, slots 3, frame buffers 13 + 1 back buffer of 27017216 bytes (25.8 MiB) each; 46 device buffers, N bytes (N.N MiB); host pool N of N bytes (N.N MiB) in use
+MEMORY FAILED decoder, allocated up to the failure options: ...
 MEMORY FAILED decoder, allocated up to the failure by type: ...
 MEMORY FAILED decoder, allocated up to the failure per slot: ...
 MEMORY FAILED decoder, allocated up to the failure largest: ...
 MEMORY dxgi FAILED, before the creation: local budget N.N MiB, usage N.N MiB, ...
 MEMORY dxgi FAILED, at the failure: local budget N.N MiB, usage N.N MiB, ...
 MEMORY dxgi FAILED, after releasing the failed decoder: local budget N.N MiB, usage N.N MiB, ...
-Failed to initialize decoder: Memory allocation error: MEMORY FAILED buffer palette_buffer of slot 2: 27017216 bytes (25.8 MiB), type DeviceUpload, heap UPLOAD, CreateCommittedResource hr 0x8007000E; allocated before it: 970619904 bytes (925.7 MiB) in 52 buffers
+Failed to initialize decoder: Memory allocation error: MEMORY FAILED buffer filmgrain_rand_offset of slot 2: 36608 bytes (0.0 MiB), type DeviceUpload, heap UPLOAD, CreateCommittedResource hr 0x8007000E; allocated before it: N bytes (N.N MiB) in 46 buffers
 MEMORY app after the failed decoder creation: usage N.N MiB of limit N.N MiB, N.N MiB left
 Unable to create decoder. Error 2
 ```
 
+On the console the failure that was seen is not a failed allocation but a removed device:
+all buffers of the three-slot decoder were created and the first GPU work after them
+failed.
+
+```text
+MEMORY FAILED decoder creation at: upload of the lookup tables (hr 0x887A0005)
+```
+
+`0x887A0005` is `DXGI_ERROR_DEVICE_REMOVED`. After it every creation in the same launch
+ends with `MEMORY FAILED decoder creation at: D3D12 device or command queue (hr
+0x887A0005)`: the player cannot get the device back, the app has to be started again.
+
 Other `MEMORY FAILED` lines: `host pool` (the pool the player allocated is too small for
 the configuration), `compute pipeline state N` (a shader), `decoder creation at: <step>`
-for the command allocators, fences, command list and the lookup table upload, and
-`output image texture` / `output image readback buffer` from the player's output pool.
+for the command allocators, fences, command list and the lookup table upload,
+`output image texture` / `output image readback buffer` from the player's output pool,
+and during decoding `buffer palette_buffer of slot N` and `frame ...` (a frame that does
+not fit a buffer; see [What the decoder takes](#what-the-decoder-takes) and
+[`-lowmem`](#smaller-decoder--lowmem)). A creation or a palette buffer that the
+[budget guard](#budget-guard-memory-refused) turns down is `MEMORY REFUSED`.
 
 A creation that fails releases everything it had created before it returns, so the next
 task starts as it would after a fresh launch: `usage` in the `dxgi ... after releasing`
@@ -914,25 +1166,47 @@ pool of the decoder before, ahead of creating the new one.
 ### Decoder size (`-fitsize`)
 
 The player creates the decoder for 4096x2176, 10-bit, whatever the stream is. With
-`-fitsize` it reads on to the stream's first key frame before it creates the decoder and
-uses the largest frame size the sequence header announces (`max_frame_width`,
-`max_frame_height`), rounded up to a multiple of 128 as the decoder rounds it: 3840x2176
-for a 3840x2160 stream, which is the second column of the table above (about 47 MiB less
-for two slots, 59 MiB less for three). Off by default. The decoded output is the same.
+`-fitsize` it uses what the sequence header at the stream's first key frame announces:
+the largest frame size (`max_frame_width`, `max_frame_height`), rounded up to a multiple
+of 128 as the decoder rounds it, and 8-bit buffers for an 8-bit stream. That is 3840x2176
+10-bit for a 3840x2160 10-bit stream, the second column of the slot table (about 42 MiB
+less for two slots, 52 MiB less for three), and 131 MiB instead of 682 for a 1920x1080
+8-bit stream. Off by default. The decoded output is the same.
 
 ```text
-MEMORY decoder size: 3840x2176 10-bit (-fitsize, the stream's largest frame is 3840x2160), slots 3, host pool N.N MiB, output pool 4 images
-Decoder size: 3840x2176 (-fitsize)
+MEMORY decoder size: 3840x2176 10-bit (-fitsize, the stream's largest frame is 3840x2160 10-bit), slots 3, intra_v2 buffers no, low memory parts 0; device buffers 790.2 MiB and up to 72.5 MiB for palette buffers on first use, host pool N.N MiB
+Decoder size: 3840x2176 10-bit (-fitsize)
 ```
 
-Without the flag the second line reads `Decoder size: 4096x2176 (default)`.
+Without the flag the second line reads `Decoder size: 4096x2176 10-bit (default)`.
 
-- The bit depth stays 10: the peek at the sequence header does not read it, and 10-bit
-  buffers hold 8-bit frames.
+**The flag was wrong in package 0.2.5.0**: for a 3840x2160 stream it logged `the stream's
+largest frame is 32x128` and created a 128x128 decoder. The cause was the sequence header
+reader behind `aom_codec_peek_stream_info` (`decoder_peek_si_internal` in
+`libav1/av1/av1_dx_iface.c`, from upstream): after `reduced_still_picture_header` it read
+the operating points at once and left out `timing_info_present_flag` (with the timing and
+decoder model info behind it), `initial_display_delay_present_flag`, and the per-operating-
+point decoder model and display delay fields. In a header without timing info that is two
+bits early: the size field widths and then the sizes were read from the middle of the
+level and of the fields before them, which gives exactly 32x128 for an SVT-AV1 4K header
+(level 5.1, 12-bit size fields). The decoder itself never used those two values; it reads
+the header with its own parser. The peek now walks the header the way that parser does
+(`libav1/av1/common/seq_header_peek.h`: timing info, decoder model info, every operating
+point, the frame size, and on to the bit depth), stays inside the sequence header OBU and
+reports a header that ends too early. `aom_codec_stream_info_t` has a `bit_depth` field
+for it.
+
+The decoder's own parser (`read_sequence_header_obu`) is not used for the peek: it writes
+into the decoder's state, reports errors with `longjmp` and needs a decoder to exist.
+
+- An 8-bit stream gets 8-bit buffers (frame buffers of half the size); a 10-bit or 12-bit
+  stream, or a header the peek cannot read, keeps 10-bit ones. An 8-bit decoder refuses a
+  10-bit frame that does not fit its buffers, as a decoder refuses a frame that is too
+  large.
 - A stream larger than 4096x2176 in either direction keeps the default size (and fails at
   its first frame, as without the flag).
-- The player creates a new decoder when the size differs from the one it has, as for
-  `-slots`.
+- The player creates a new decoder when the size or the bit depth differs from the one it
+  has, as for `-slots`.
 - Every frame of a sequence is within the announced size (frame size override, superres
   and reference scaling included), so the buffers fit. A later sequence header in the same
   file may announce a larger size; the decoder now refuses a frame that is wider or higher
@@ -941,6 +1215,28 @@ Without the flag the second line reads `Decoder size: 4096x2176 (default)`.
   flag.
 - Not verified on the console yet: the decoder has only ever run there at 4096x2176. Check
   a `-fitsize` run with `-md5_frame_check` before using it for timing.
+
+#### Host-side check of the peek
+
+`testing/seq_header_check` (not part of the player build) writes sequence headers bit by
+bit from the syntax tables of the AV1 specification, with known values, and checks what
+the peek returns: the header of an SVT-AV1 4K 10-bit encode (for which the reader before
+the fix is shown to return 32x128), timing info with and without decoder model info and
+with the shortest and longest `uvlc`, one, three and 32 operating points with their own
+decoder model and display delay fields, frame size fields from 1 to 16 bits wide, the
+reduced still picture header, the three profiles with 8, 10 and 12 bits, and
+4000 random combinations. Every header is also cut at every length (the peek must report
+it and not read past the end), and wrapped into OBUs that are found again with the
+decoder's OBU header reader (`libav1/av1/common/obu_util.c`), with an extension header and
+with payload sizes of one to three bytes.
+
+```sh
+sh testing/seq_header_check/run.sh --mutate
+```
+
+`--mutate` also builds five copies of the peek with one read of the syntax left out
+(among them the two flags the old reader did not know) and requires the check to reject
+each. The workflow runs it in the `intra-check` job.
 
 ### Clears
 
@@ -992,6 +1288,15 @@ needs a slot at the moment its frame completes, it waits for the clear instead o
 it, and nothing is gained for that frame. The gain is in the frames where the slot came
 back early.
 
+**Console result (2026-11-11, package 0.2.5.0, two slots, both 4K clips): md5-exact, no
+gain.** `cpu memsets` on the decode thread went down by the 3.3 to 4.3 ms per frame that
+moved, `cpu wait_slot` went up by 1.5 to 3.7 ms, and the completion thread spent 3.6 to
+3.9 ms per frame on the clears. With two slots and a decode thread that is the slower
+side, the slot a frame needs is the one that has just completed, so the decode thread
+waits for the clear it used to do itself. Runs with the same settings differ by about
+1 fps on the SVT-AV1 clip, so the remainder cannot be told from noise. The flag stays off
+by default; it can only pay with a slot to spare, which needs the third slot to fit.
+
 ### Timing: the four combinations
 
 All four lines in `args_av1.txt`, same clip, all with `-cdefv2`:
@@ -1017,6 +1322,19 @@ too, going back to two slots. Compare in the four summaries:
 `gpu busy` and the GPU stage table should not change: the flags do not touch what the
 GPU does.
 
+With package 0.2.5.0 the two `-slots 3` tasks did not run (the creation removed the
+device, and the tasks after them failed with it). A third slot needs the smaller decoder:
+
+```text
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -gputime -nopresent -cdefv2 -lowmem -fitsize
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -gputime -nopresent -cdefv2 -lowmem -fitsize -slots 3
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -gputime -nopresent -cdefv2 -lowmem -fitsize -slots 3 -asyncclear
+```
+
+The first line against the plain `-cdefv2` task shows what `-lowmem` costs with two slots
+(`cpu wait_fb`, `cpu wait_sec_slot` and the `sec=1` frames are where it would show). A
+task whose decoder does not fit is refused with `MEMORY REFUSED` and the next one runs.
+
 ### Same output: md5 of every frame
 
 As for [CDEF](#same-output-md5-of-every-frame), **in separate launches**. First launch,
@@ -1038,6 +1356,13 @@ another check of the same clip and `-limit` can be reused. The task ends with `M
 or a list of bad frames. Check `-slots 4 -asyncclear` the same way if it is to be timed,
 and include a clip that takes the second slot (`sec=1` in a `-gputime -progress` run of
 the same clip) and one whose frame size changes.
+
+The memory changes need the same check, each as its own launch against the same
+reference: the default decoder (no flag: the palette and intra v2 buffers are no longer
+created with it), `-fitsize`, `-lowmem`, and `-lowmem -fitsize`; `-lowmemparts 1`, `2`
+and `4` tell the parts apart if `-lowmem` fails. A clip with screen content (palette
+blocks) checks the palette buffer that is created on first use; the two 4K clips have
+none.
 
 ## Shader survey
 

@@ -30,9 +30,12 @@ enum {
   // (aom_codec_dec_cfg_t::frame_slots, Av1Core::frame_slots); arrays are sized for the maximum.
   FrameThreadDataDefault = 2,
   FrameThreadDataCount = 4,
-  // Reference frame buffers with the default number of slots. Every slot above the default adds one, because
-  // a frame in flight holds a back buffer until its GPU work is done.
+  // Frame buffers in the pool with the default number of slots (the count is derived at
+  // resource_config_from_cfg() in av1_core.cpp). Every slot above the default adds one.
   RefFrameBufferCount = 12,
+  // The same when the frames share one back buffer (AV1_LOW_MEMORY_SHARED_BACK_BUFFER): no frame takes its
+  // back buffer from the pool, which is one buffer per frame in flight.
+  RefFrameBufferCountSharedBack = 10,
   RefFrameBufferMax = RefFrameBufferCount + FrameThreadDataCount - FrameThreadDataDefault,
   EntropyThreadCount = 8,
   ImagePoolSize = 16,
@@ -179,9 +182,12 @@ struct av1_frame_thread_data {
   GpuBufferObject* gen_intra_inter_grid;
   GpuBufferObject* gen_block_map;
 
+  // Pixels of the palette blocks of the frame, in the layout of a frame buffer. Created on the first frame of
+  // the slot that allows screen content tools (no other frame has palette blocks); NULL until then.
   GpuBufferObject* palette_buffer;
 
   // Test player flag -intrav2: the schedule of the frame for intra_v2.hlsl (intra_v2_sched.h).
+  // Both NULL unless the decoder was created for it (aom_codec_dec_cfg_t::intra_v2).
   GpuBufferObject* intra_v2_buffer;  // cell map, then region list
   unsigned int* intra_v2_regions;    // host only: current list entry and step of each region
   IntraV2Sched intra_v2_sched;
@@ -202,6 +208,8 @@ struct av1_frame_thread_data {
   int is_hbd;
 
   int ext_idct_buffer;
+  int ext_coef_base;  // ext_idct_buffer: where the frame's coefficients start in idct_coefs, in coefficients
+  int slot_index;
   int iter_grid_stride;
   int iter_grid_stride_uv;
   int iter_grid_offset_uv;
@@ -215,7 +223,7 @@ struct av1_frame_thread_data {
   int coef_buffer_size;
   av1_tile_data* tile_data;
   HwFrameBuffer* frame_buffer;
-  HwFrameBuffer* back_buffer0;
+  HwFrameBuffer* back_buffer0;  // the frame's back buffer when it came from the pool, else NULL
   HwFrameBuffer* dst_frame_buffer;
   HwFrameBuffer* refs[8];
 
@@ -281,6 +289,17 @@ typedef struct Av1Core {
 
   int pred_map_size;
   int block_count4x4;
+  // Shares of a slot in the mode info pool and in the coefficient buffer (AV1_LOW_MEMORY_MODE_INFO, _COEFS):
+  // a tile of n 4x4 units has n >> mode_info_shift mode info entries and n * coef_count_num coefficients in
+  // the share of a slot.
+  int mode_info_shift;
+  int coef_count_num;
+  // AV1_LOW_MEMORY_SHARED_BACK_BUFFER: frames reconstruct into back_buffer0 instead of a pool buffer.
+  int shared_back_buffer;
+  int low_memory;
+  size_t palette_size;  // bytes of a slot's palette buffer
+  int64_t (*memory_available_cb)(void* priv);
+  void* memory_available_priv;
 
   av1_frame_thread_data frame_thread_data[FrameThreadDataCount];
   int frame_slots;  // slots in use: the first frame_slots entries of frame_thread_data
@@ -289,6 +308,7 @@ typedef struct Av1Core {
   int thread_count;
   int corrupted_seq;
   HwFrameBuffer back_buffer1;
+  HwFrameBuffer back_buffer0;  // shared_back_buffer only
   int fb_size;
   int fb_offset;
   int max_width;   // the size the buffers were created for, a multiple of 128; larger frames are refused

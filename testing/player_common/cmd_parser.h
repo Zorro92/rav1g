@@ -28,6 +28,8 @@
 #define PLAYER_SLOTS_DEFAULT 2
 #define PLAYER_SLOTS_MIN 2
 #define PLAYER_SLOTS_MAX 4
+// -lowmemparts: the largest value, all three reductions (AV1_LOW_MEMORY_ALL of aom/aom_decoder.h).
+#define PLAYER_LOWMEM_ALL 7
 // The size the decoder is created for unless -fitsize takes the stream's.
 #define PLAYER_DECODER_WIDTH 4096
 #define PLAYER_DECODER_HEIGHT 2176
@@ -83,6 +85,8 @@ class CParameters {
     int slots_;
     bool asyncclear_;
     bool fitsize_;
+    bool lowmem_;
+    int lowmem_parts_;
   };
   enum arg_type { atSingle, atInt, atString };
   enum arg_need { anOptional, anMandatory, anAtLeastOne };

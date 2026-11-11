@@ -16,6 +16,7 @@
 #include "av1/common/scan.h"
 #include "av1/common/txb_common.h"
 #include "av1/decoder/decodemv.h"
+#include "dx/av1_perf.h"
 
 #define ACCT_STR __func__
 
@@ -241,6 +242,16 @@ uint8_t av1_read_coeffs_txb(const AV1_COMMON *const cm, MACROBLOCKD *const xd,
     }
   }
   *eob = rec_eob_pos(eob_pt, eob_extra);
+
+  // The coefficients of the block go to tcoeffs_raw[0 .. eob), rounded up to four. The tile's part of the
+  // coefficient buffer is sized so that they fit; where it is sized smaller (AV1_LOW_MEMORY_COEFS) or a bound
+  // does not hold, the frame is a decode error instead of a write behind the tile's part.
+  if (tile_data->dq_buffer_ptr + (((int)*eob + 3) & ~3) > tile_data->dq_buffer_end) {
+    av1_log_error("MEMORY FAILED frame: the coefficients of a tile do not fit its part of the coefficient "
+                  "buffer (two slot shares); the frame is a decode error");
+    aom_internal_error(xd->error_info, AOM_CODEC_MEM_ERROR,
+                       "The coefficients of a tile do not fit the coefficient buffer");
+  }
 
   if (*eob > 1) {
     memset(levels_buf, 0,

@@ -34,6 +34,7 @@ enum {
   IdctBlockSize = 16,
   IdctCoefCountDenum = 4 * 4 + 2 * 2 * 2,
   IdctCoefCountNum = 17,  //~71%
+  IdctCoefCountNumLow = 12,  // AV1_LOW_MEMORY_COEFS: half; two shares are exactly the worst case
   TileSbSizeThreshold = 2,
 
   FbYStripe = 256,
@@ -272,6 +273,8 @@ struct resource_config {
   int ref_fb_count;
   int gpu_pipeline_depth;
   int enable_superres;
+  int intra_v2;    // create the buffers of the -intrav2 path
+  int low_memory;  // AV1_LOW_MEMORY_*
 };
 
 int av1_allocate_buffers(Av1Core *dec, av1_memory_manager_base *mem, const resource_config &cfg, int do_assign) {
@@ -337,11 +340,15 @@ int av1_allocate_buffers(Av1Core *dec, av1_memory_manager_base *mem, const resou
   const int bpp = cfg.bitdepth > 8 ? 2 : 1;
   const int fb_size = ((y_size + 2 * uv_size) * bpp + 255) & ~255;
 
+  // The pool buffer starts with the back buffers that are not handed out: back_buffer1, and behind it the
+  // back buffer the frames share when they do not take one from the pool.
+  dec->shared_back_buffer = (cfg.low_memory & AV1_LOW_MEMORY_SHARED_BACK_BUFFER) != 0;
+  dec->low_memory = cfg.low_memory;
   dec->fb_size = fb_size;
-  dec->fb_offset = fb_size;
+  dec->fb_offset = dec->shared_back_buffer ? 2 * fb_size : fb_size;
   dec->enable_superres = cfg.enable_superres;
   CHECK_RESULT(dec->frame_buffer_pool,
-               mem->create_buffer(fb_size * cfg.fb_count + dec->fb_offset, MemoryType::DeviceOnly, "frame_buffer_pool", -1), do_assign);
+               mem->create_buffer((size_t)fb_size * cfg.fb_count + dec->fb_offset, MemoryType::DeviceOnly, "frame_buffer_pool", -1), do_assign);
 
   const int grid_w = mi_cols + 2 + 128;
   const int grid_h = mi_rows + 2 + 128;
@@ -363,18 +370,29 @@ int av1_allocate_buffers(Av1Core *dec, av1_memory_manager_base *mem, const resou
   CHECK_RESULT(dec->loopfilter_blocks, mem->create_buffer(lf_blk_count * 32, MemoryType::DeviceOnly, "loopfilter_blocks", -1), do_assign);
   // One share of the mode info pool and of the coefficient buffer per slot (mode_info_offset and
   // coef_buffer_offset below). With the default two slots these are the sizes the code always had.
+  //
+  // A frame has at most one mode info entry per 4x4 unit and IdctCoefCountDenum (16 luma + 2 * 4 chroma)
+  // coefficients per 4x4 unit. A share holds half of the entries and 17/24 of the coefficients; a frame that
+  // needs more takes a second slot and continues in that slot's share (av1_setup_sec_data,
+  // av1_setup_ext_coef_buffer), so two shares cover the worst case. The low memory shares are a quarter and
+  // 12/24: two of them no longer cover every frame, and a frame that runs out is a decode error
+  // (decode_mbmi_block, av1_read_coeffs_txb).
+  dec->mode_info_shift = (cfg.low_memory & AV1_LOW_MEMORY_MODE_INFO) ? 2 : 1;
+  dec->coef_count_num = (cfg.low_memory & AV1_LOW_MEMORY_COEFS) ? (int)IdctCoefCountNumLow : (int)IdctCoefCountNum;
+  const int mi_share = mi_size >> dec->mode_info_shift;
   const size_t slot_count = (size_t)cfg.gpu_pipeline_depth;
   CHECK_RESULT(dec->mode_info_pool,
-               mem->create_buffer(sizeof(MB_MODE_INFO) * (size_t)(mi_size >> 1) * slot_count, MemoryType::HostRW, "mode_info_pool", -1),
+               mem->create_buffer(sizeof(MB_MODE_INFO) * (size_t)mi_share * slot_count, MemoryType::HostRW, "mode_info_pool", -1),
                do_assign);
-  const int coef_buffer_size = target_width * target_height * 3 * IdctCoefCountNum / (IdctCoefCountDenum * 2);
+  const int coef_buffer_size = target_width * target_height * 3 * dec->coef_count_num / (IdctCoefCountDenum * 2);
   CHECK_RESULT(dec->idct_coefs,
                mem->create_buffer(sizeof(int) * (size_t)coef_buffer_size * slot_count, MemoryType::UploadUAV, "idct_coefs", -1),
                do_assign);
   for (int i = 0; i < cfg.gpu_pipeline_depth; ++i) {
     av1_frame_thread_data *td = &dec->frame_thread_data[i];
-    td->mode_info_max = mi_size >> 1;
-    td->mode_info_offset = i * (mi_size >> 1);
+    td->slot_index = i;
+    td->mode_info_max = mi_share;
+    td->mode_info_offset = i * mi_share;
     td->coef_buffer_offset = i * coef_buffer_size;
     td->coef_buffer_size = coef_buffer_size * sizeof(int);
     CHECK_RESULT(td->command_buffer.cb_alloc, mem->create_buffer(1024 * 1024, MemoryType::DeviceUpload, "cb_alloc", i), do_assign);
@@ -386,11 +404,16 @@ int av1_allocate_buffers(Av1Core *dec, av1_memory_manager_base *mem, const resou
                  do_assign);
     // Test player flag -intrav2 (intra_v2_sched.h): 8 bytes per 4x4 cell of luma and chroma, then the region
     // list, which cannot have more entries than there are cells; two words per 64x64 region on the host.
-    td->intra_v2_cells = mi_size + (mi_size >> 2);
-    CHECK_RESULT(td->intra_v2_buffer, mem->create_buffer((size_t)td->intra_v2_cells * 16, MemoryType::HostRW, "intra_v2_buffer", i),
-                 do_assign);
-    CHECK_RESULT(td->intra_v2_regions, (unsigned int *)mem->host_allocate(sizeof(int) * 2 * (mi_size >> 8)),
-                 do_assign);
+    // Only for a decoder that was created for that path (aom_codec_dec_cfg_t::intra_v2): nothing else reads
+    // or writes them, and intra_v2_setup_frame() keeps the original shaders when they are not there.
+    td->intra_v2_cells = 0;
+    if (cfg.intra_v2) {
+      td->intra_v2_cells = mi_size + (mi_size >> 2);
+      CHECK_RESULT(td->intra_v2_buffer, mem->create_buffer((size_t)td->intra_v2_cells * 16, MemoryType::HostRW, "intra_v2_buffer", i),
+                   do_assign);
+      CHECK_RESULT(td->intra_v2_regions, (unsigned int *)mem->host_allocate(sizeof(int) * 2 * (mi_size >> 8)),
+                   do_assign);
+    }
     td->intra_v2_sched.stamp = 0;
     td->intra_v2_cols = 0;
     td->intra_v2_rows = 0;
@@ -417,8 +440,10 @@ int av1_allocate_buffers(Av1Core *dec, av1_memory_manager_base *mem, const resou
                                     MemoryType::DeviceUpload, "filmgrain_rand_offset", i),
                  do_assign);
 
-    CHECK_RESULT(td->palette_buffer, mem->create_buffer(fb_size, MemoryType::DeviceUpload, "palette_buffer", i), do_assign);
+    // No palette buffer here: palette_buffer_for_frame() creates the slot's on the first frame that can have
+    // palette blocks.
   }
+  dec->palette_size = (size_t)fb_size;
 
   const int mvs_size = (target_width >> 3) * (target_height >> 3) * sizeof(MV_REF);
   const int seg_size = (target_width >> 2) * (target_height >> 2);
@@ -443,12 +468,43 @@ static void resource_config_from_cfg(resource_config *rcfg, const aom_codec_dec_
   rcfg->width = cfg->width;
   rcfg->height = cfg->height;
   rcfg->gpu_pipeline_depth = frame_slots_from_cfg(cfg);
-  // The pool has to cover the reference map (8), the frame being decoded and its back buffer, and what the
-  // frames in flight still hold: a back buffer each, and references the map has dropped since. Twelve is the
-  // size for two slots; one more frame in flight needs one more buffer to leave the same margin.
-  rcfg->ref_fb_count = RefFrameBufferCount + rcfg->gpu_pipeline_depth - FrameThreadDataDefault;
+  rcfg->intra_v2 = cfg->intra_v2 != 0;
+  rcfg->low_memory = cfg->low_memory & AV1_LOW_MEMORY_ALL;
+  // Frame buffers in the pool. A buffer is out of the pool while the entropy decoder or a frame in flight
+  // holds it:
+  //   - the reference map: at most 8 different buffers;
+  //   - the frame being decoded: 1, taken while its header is read (av1_reallocate_frame_buffer);
+  //   - its back buffer, when the frame is filtered after its reconstruction (CDEF, loop restoration,
+  //     superres): 1, taken in av1_setup_frame();
+  //   - a frame that failed after av1_setup_frame(): its buffer and its back buffer stay with its slot until
+  //     the next av1_setup_frame(), which comes after the next frame has taken its own buffer: 2;
+  //   - every other frame in flight, until its GPU work is done: its back buffer, and what the map has
+  //     dropped since the frame started (its own buffer when it is not a reference, a reference it reads that
+  //     a later frame replaced): 1 + 1 when frames replace one map entry each.
+  // Both takes wait until a frame in flight returns a buffer, so what must never be undercut is the count
+  // with nothing in flight: 8 + 2 + 1 = 11 (map, failed frame, the next frame's buffer). Below that the
+  // decode thread waits for a buffer nobody returns. The 12 of the code before this is 8 for the map, 1 + 1
+  // for the frame being decoded and 1 + 1 for the one frame that is in flight next to it with two slots: no
+  // wait in the common case. It is kept, and so is the one buffer more for each slot above two.
+  // With the shared back buffer no frame takes a back buffer from the pool: the count with nothing in flight
+  // is 8 + 1 + 1 = 10 (map, failed frame, next frame), and the common case with two slots is also
+  // 8 + 1 + 1 = 10 (map, frame being decoded, one dropped reference of the frame in flight).
+  const int base_fb_count = (rcfg->low_memory & AV1_LOW_MEMORY_SHARED_BACK_BUFFER)
+                                ? (int)RefFrameBufferCountSharedBack
+                                : (int)RefFrameBufferCount;
+  rcfg->ref_fb_count = base_fb_count + rcfg->gpu_pipeline_depth - FrameThreadDataDefault;
   rcfg->fb_count = rcfg->ref_fb_count;
   rcfg->enable_superres = 1;
+}
+
+// The device bytes av1_allocate_buffers() creates for |rcfg|, and the bytes of the buffers that are created
+// later, when a stream needs them: one palette buffer per slot. |dec| is only written where the creation
+// writes the same values.
+static void planned_device_bytes(Av1Core *dec, const resource_config &rcfg, size_t *at_creation, size_t *deferred) {
+  av1_memory_allocator_dummy plan;
+  av1_allocate_buffers(dec, &plan, rcfg, 0);
+  *at_creation = plan.get_device_size();
+  *deferred = (size_t)rcfg.gpu_pipeline_depth * ((dec->palette_size + 255) & ~(size_t)255);
 }
 
 extern "C" int av1_query_memory_requirements(aom_codec_dec_cfg_t *cfg) {
@@ -462,6 +518,8 @@ extern "C" int av1_query_memory_requirements(aom_codec_dec_cfg_t *cfg) {
   Av1Core dec;
   av1_allocate_buffers(&dec, &mem, rcfg, 0);
   cfg->host_size = mem.get_host_size();
+  cfg->device_size = mem.get_device_size();
+  cfg->device_size_deferred = (size_t)rcfg.gpu_pipeline_depth * ((dec.palette_size + 255) & ~(size_t)255);
   return 0;
 }
 
@@ -519,12 +577,25 @@ static void log_memory_summary(int is_error, const char *label, const Av1Core *d
   const av1_memory_allocator *mem = dec->memory;
   const unsigned long long total = mem->device_bytes();
   av1_log(is_error,
-          "MEMORY %s: %ux%u %u-bit, slots %d, frame buffers %d + 1 back buffer of %d bytes (%.1f MiB) each; "
+          "MEMORY %s: %ux%u %u-bit, slots %d, frame buffers %d + %d back buffer%s of %d bytes (%.1f MiB) each; "
           "%d device buffers, %llu bytes (%.1f MiB); host pool %llu of %llu bytes (%.1f MiB) in use",
           label, (unsigned)rcfg.width, (unsigned)rcfg.height, (unsigned)rcfg.bitdepth, rcfg.gpu_pipeline_depth,
-          rcfg.ref_fb_count, dec->fb_size, to_mib((unsigned long long)dec->fb_size), mem->buffer_count(), total,
-          to_mib(total), (unsigned long long)mem->host_bytes_used(), (unsigned long long)mem->host_bytes_total(),
+          rcfg.ref_fb_count, dec->shared_back_buffer ? 2 : 1, dec->shared_back_buffer ? "s" : "", dec->fb_size,
+          to_mib((unsigned long long)dec->fb_size), mem->buffer_count(), total, to_mib(total),
+          (unsigned long long)mem->host_bytes_used(), (unsigned long long)mem->host_bytes_total(),
           to_mib(mem->host_bytes_used()));
+  // What was left out or made smaller, and what is still to come: a slot's palette buffer is created on the
+  // first frame of the slot that allows screen content tools.
+  int palette_buffers = 0;
+  for (int i = 0; i < rcfg.gpu_pipeline_depth; ++i) palette_buffers += dec->frame_thread_data[i].palette_buffer != NULL;
+  av1_log(is_error,
+          "MEMORY %s options: intra_v2 buffers %s; low memory %d (shared back buffer %s, mode info share 1/%d of "
+          "the worst case, coefficient share %d/%d); palette buffers %d of %d created, %.1f MiB each, a slot's on "
+          "its first frame with screen content tools",
+          label, rcfg.intra_v2 ? "yes" : "no (the decoder was not created for -intrav2)", rcfg.low_memory,
+          dec->shared_back_buffer ? "yes" : "no", 1 << dec->mode_info_shift, dec->coef_count_num,
+          (int)IdctCoefCountDenum, palette_buffers, rcfg.gpu_pipeline_depth,
+          to_mib((unsigned long long)dec->palette_size));
 
   char line[640];
   int len = 0;
@@ -670,6 +741,43 @@ extern "C" int av1_create_gpu_decoder(Av1Core **gpu_dec, aom_codec_dec_cfg_t *cf
   if (shader_errors)
     return create_failed(dec, rcfg, &vm_before, "compute pipeline states (shaders)", (HRESULT)shader_errors);
 
+  // Budget guard: an application over its memory limit loses the D3D12 device for the rest of the process,
+  // so with a budget callback the creation is refused before it allocates anything it cannot afford.
+  dec->memory_available_cb = cfg->memory_available_cb;
+  dec->memory_available_priv = cfg->memory_available_priv;
+  {
+    size_t planned = 0;
+    size_t deferred = 0;
+    planned_device_bytes(dec, rcfg, &planned, &deferred);
+    const int64_t available = dec->memory_available_cb ? dec->memory_available_cb(dec->memory_available_priv) : -1;
+    const unsigned long long needed = (unsigned long long)planned + AV1_MEMORY_GUARD_MARGIN;
+    if (available >= 0 && needed > (unsigned long long)available) {
+      av1_log_create_error(
+          "MEMORY REFUSED decoder %ux%u %u-bit, slots %d: its device buffers take %llu bytes (%.1f MiB) and "
+          "the creation must leave a margin of %.1f MiB, %.1f MiB together; the application has %.1f MiB left "
+          "for the decoder. Nothing was allocated; the D3D12 device is intact",
+          (unsigned)rcfg.width, (unsigned)rcfg.height, (unsigned)rcfg.bitdepth, rcfg.gpu_pipeline_depth,
+          (unsigned long long)planned, to_mib(planned), to_mib(AV1_MEMORY_GUARD_MARGIN), to_mib(needed),
+          to_mib((unsigned long long)available));
+      av1_log_video_memory(1, "REFUSED, nothing allocated", &vm_before);
+      destroy_gpu_decoder(dec);
+      return -1;
+    }
+    if (available >= 0)
+      av1_log(0,
+              "MEMORY budget: device buffers %.1f MiB + margin %.1f MiB = %.1f MiB, the application has %.1f "
+              "MiB left for the decoder: accepted; palette buffers on first use would add up to %.1f MiB",
+              to_mib(planned), to_mib(AV1_MEMORY_GUARD_MARGIN), to_mib(needed),
+              to_mib((unsigned long long)available), to_mib(deferred));
+    else
+      av1_log(0,
+              "MEMORY budget: not checked (%s); device buffers %.1f MiB, palette buffers on first use would add "
+              "up to %.1f MiB",
+              dec->memory_available_cb ? "the application's callback does not know what is left"
+                                       : "no memory_available_cb in the decoder configuration",
+              to_mib(planned), to_mib(deferred));
+  }
+
   if (av1_allocate_buffers(dec, mem, rcfg, 1))
     return create_failed(dec, rcfg, &vm_before, "decoder buffers (the MEMORY FAILED line above names the one)", S_OK);
   memset(dec->idct_coefs->host_ptr, 0, dec->idct_coefs->size);
@@ -718,8 +826,11 @@ extern "C" int av1_create_gpu_decoder(Av1Core **gpu_dec, aom_codec_dec_cfg_t *cf
     MTQueuePush(&dec->image_pool, img);
   }
 
-  dec->back_buffer1.size = dec->fb_offset;
+  dec->back_buffer1.size = dec->fb_size;
   dec->back_buffer1.base_offset = 0;
+  // Only used with shared_back_buffer; the pool buffer has the room for it only then.
+  dec->back_buffer0.size = dec->fb_size;
+  dec->back_buffer0.base_offset = dec->fb_size;
   for (int i = 0; i < rcfg.ref_fb_count; ++i) {
     const int offset = dec->fb_offset + dec->fb_size * i;
     HwFrameBuffer *fb = &dec->fb_pool_src[i];
@@ -1164,7 +1275,8 @@ extern "C" void av1_set_intra_v2(int enable) { g_intra_v2 = enable; }
 // stays on the original shaders: flag off, intra block copy (not ported), or a frame the buffers were not
 // sized for.
 static int intra_v2_setup_frame(Av1Core *dec, AV1_COMMON *cm, av1_frame_thread_data *td) {
-  if (!g_intra_v2 || cm->allow_intrabc) return 0;
+  // No buffers: the decoder was not created for this path (aom_codec_dec_cfg_t::intra_v2).
+  if (!g_intra_v2 || cm->allow_intrabc || !td->intra_v2_buffer || !td->intra_v2_regions) return 0;
   const int cols = (cm->mi_cols + 31) & ~31;  // 4x4 cells, padded to 128 pixels: blocks may reach that far
   const int rows = (cm->mi_rows + 31) & ~31;
   const int cells = cols * rows;
@@ -1199,6 +1311,36 @@ static int intra_v2_setup_frame(Av1Core *dec, AV1_COMMON *cm, av1_frame_thread_d
   return 1;
 }
 
+// The slot's palette buffer: the pixels of the frame's palette blocks, written by the entropy decoder in the
+// layout of a frame buffer and copied into the frame by reconstruct_block.hlsl. A block can use a palette only
+// in a frame that allows screen content tools (av1_allow_palette), so the buffer is created when the first
+// such frame gets the slot and kept from then on. Returns 0 when the frame has what it needs. Decode thread.
+static int palette_buffer_for_frame(Av1Core *dec, const AV1_COMMON *cm, av1_frame_thread_data *td) {
+  if (td->palette_buffer || !cm->allow_screen_content_tools) return 0;
+  const unsigned long long size = dec->palette_size;
+  if (dec->memory_available_cb) {
+    const int64_t available = dec->memory_available_cb(dec->memory_available_priv);
+    if (available >= 0 && size + AV1_MEMORY_GUARD_MARGIN_BUFFER > (unsigned long long)available) {
+      av1_log(1,
+              "MEMORY REFUSED palette buffer of slot %d (frame %d allows screen content tools): %llu bytes "
+              "(%.1f MiB) and the margin of %.1f MiB do not fit the %.1f MiB the application has left for the "
+              "decoder. The frame is a decode error; nothing was allocated and the D3D12 device is intact",
+              td->slot_index, td->frame_number, size, to_mib(size), to_mib(AV1_MEMORY_GUARD_MARGIN_BUFFER),
+              to_mib((unsigned long long)available));
+      return -1;
+    }
+  }
+  // A failure is logged by the allocator as "MEMORY FAILED buffer palette_buffer of slot n".
+  td->palette_buffer = dec->memory->create_buffer((size_t)size, MemoryType::DeviceUpload, "palette_buffer", td->slot_index);
+  if (!td->palette_buffer) return -1;
+  const unsigned long long total = dec->memory->device_bytes();
+  av1_log(0,
+          "MEMORY palette buffer of slot %d created for frame %d, the first on the slot that allows screen "
+          "content tools: %.1f MiB; device buffers now %.1f MiB in %d buffers",
+          td->slot_index, td->frame_number, to_mib(size), to_mib(total), dec->memory->buffer_count());
+  return 0;
+}
+
 extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
   Av1Core *dec = pbi->gpu_decoder;
   const int64_t perf_setup_start = av1_perf_ticks();
@@ -1217,18 +1359,19 @@ extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
     td->dst_frame_buffer = 0;
     td->back_buffer0 = 0;
     pthread_mutex_unlock(&dec->fb_pool_mutex);
+    // The coefficients of a submitted frame are zeroed by the IDCT shaders as they read them (the entropy
+    // decoder writes only the non-zero ones and relies on the rest being zero). This frame never reached the
+    // GPU, so its share is cleared here, and the share of its second slot, which it may have written too.
+    int * coef_buf = (int *)dec->idct_coefs->host_ptr;
+    memset(coef_buf + td->coef_buffer_offset, 0, td->coef_buffer_size);
     if (td->sec_thread_data) {
+      memset(coef_buf + td->sec_thread_data->coef_buffer_offset, 0, td->sec_thread_data->coef_buffer_size);
       MTQueuePush(&dec->frame_data_pool, td->sec_thread_data);
     }
     // A frame that was set up but never submitted (decode error). Its grids stay dirty and are not marked
     // clean, so the next frame on this slot clears them itself, with or without -asyncclear.
     td->clear_pending = 0;
     MTQueuePush(&dec->frame_data_pool, td);
-    // The coefficients of a submitted frame are zeroed by the IDCT shaders as they read them (the entropy
-    // decoder writes only the non-zero ones and relies on the rest being zero). This frame never reached the
-    // GPU, so its share is cleared here.
-    int * coef_buf = (int *)dec->idct_coefs->host_ptr;
-    memset(coef_buf + td->coef_buffer_offset, 0, td->coef_buffer_size);
     dec->curr_frame_data = NULL;
   }
 
@@ -1318,10 +1461,18 @@ extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
   td->dst_frame_buffer = fb;
   td->back_buffer0 = NULL;
   if (td->do_loop_rest || td->do_cdef || td->do_superres) {
-    perf_t = av1_perf_ticks();
-    HwFrameBuffer *new_buf = get_frame_buffer(dec);
-    av1_perf_add(dec, AV1_PERF_CPU_WAIT_FB, perf_t);
-    td->back_buffer0 = new_buf;
+    // The frame is reconstructed into a back buffer and filtered from there into its own buffer. Only its
+    // own command list reads or writes the back buffer, and the command lists of the frames run on the queue
+    // one after the other, so one buffer can serve all frames (shared_back_buffer), as back_buffer1 does for
+    // the filters: its description is rewritten here for every frame, after the frame before was recorded.
+    // Otherwise the frame takes a buffer from the pool and returns it when its GPU work is done.
+    HwFrameBuffer *new_buf = &dec->back_buffer0;
+    if (!dec->shared_back_buffer) {
+      perf_t = av1_perf_ticks();
+      new_buf = get_frame_buffer(dec);
+      av1_perf_add(dec, AV1_PERF_CPU_WAIT_FB, perf_t);
+      td->back_buffer0 = new_buf;
+    }
     new_buf->width = fb->width;
     new_buf->height = fb->height;
     new_buf->hbd = td->is_hbd;
@@ -1333,7 +1484,7 @@ extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
     new_buf->planes[0].offset += static_cast<int>(new_buf->base_offset - fb->base_offset);
     new_buf->planes[1].offset += static_cast<int>(new_buf->base_offset - fb->base_offset);
     new_buf->planes[2].offset += static_cast<int>(new_buf->base_offset - fb->base_offset);
-    td->frame_buffer = td->back_buffer0;
+    td->frame_buffer = new_buf;
     dec->back_buffer1.width = fb->width;
     dec->back_buffer1.height = fb->height;
     memcpy(dec->back_buffer1.planes, fb->planes, sizeof(fb->planes));
@@ -1356,15 +1507,53 @@ extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
   }
   pthread_mutex_unlock(&dec->fb_pool_mutex);
 
+  // From here on the slot is in a state the next av1_setup_frame() can take back (the frame's buffers and
+  // references are counted), so a failure below is reported as a decode error of this frame.
+  if (palette_buffer_for_frame(dec, cm, td))
+    aom_internal_error(&cm->error, AOM_CODEC_MEM_ERROR,
+                       "No palette buffer for a frame that allows screen content tools");
+
   td->ext_idct_buffer = 0;
-  if (IdctCoefCountNum != IdctCoefCountDenum) {
+  td->ext_coef_base = td->coef_buffer_offset;
+  {
+    // Worst-case layout of the coefficients (IdctCoefCountDenum per 4x4 unit, av1_setup_macroblockd) for a
+    // frame with a tile of at most TileSbSizeThreshold superblocks: such a tile is too small for the switch
+    // to a second share at a superblock boundary.
+    const int mib_log2 = cm->seq_params.mib_size_log2;
+    int coef_end = 0;
     for (int r = 0; r < cm->tile_rows; ++r)
       for (int c = 0; c < cm->tile_cols; ++c) {
         td->ext_idct_buffer |= ((cm->tile_col_start_sb[c + 1] - cm->tile_col_start_sb[c]) *
                                 (cm->tile_row_start_sb[r + 1] - cm->tile_row_start_sb[r])) <= TileSbSizeThreshold;
+        const int row_start = cm->tile_row_start_sb[r] << mib_log2;
+        const int col_start = cm->tile_col_start_sb[c] << mib_log2;
+        const int rows = ((AOMMIN(cm->tile_row_start_sb[r + 1] << mib_log2, cm->mi_rows) - row_start) + 15) & ~15;
+        const int cols = ((AOMMIN(cm->tile_col_start_sb[c + 1] << mib_log2, cm->mi_cols) - col_start) + 15) & ~15;
+        const int mi_offset = row_start * ((cm->mi_cols + 15) & ~15) + col_start * rows;
+        coef_end = AOMMAX(coef_end, (mi_offset + rows * cols) * IdctCoefCountDenum);
       }
     if (td->ext_idct_buffer) {
       get_sec_data(dec, td);
+      // The layout runs on from one share into the next. It starts in this slot's share, as it always did,
+      // when it fits that share alone or when the second slot's share is the one behind it; when the second
+      // slot's share is the one in front, it starts there (it used to start in this slot's share all the
+      // same and ran over the share behind it, which is another slot's or the end of the buffer).
+      const int share = td->coef_buffer_size / (int)sizeof(int);
+      const int sec_offset = td->sec_thread_data->coef_buffer_offset;
+      if (coef_end > share) {
+        if (coef_end <= 2 * share && sec_offset + share == td->coef_buffer_offset) {
+          td->ext_coef_base = sec_offset;
+        } else if (coef_end > 2 * share || td->coef_buffer_offset + share != sec_offset) {
+          av1_log(1,
+                  "MEMORY FAILED frame %d: a tile of at most %d superblocks needs the worst-case coefficient "
+                  "layout, %d coefficients, in two shares of %d that follow each other; the frame has the "
+                  "shares of slots %d and %d",
+                  td->frame_number, (int)TileSbSizeThreshold, coef_end, share, td->slot_index,
+                  td->sec_thread_data->slot_index);
+          aom_internal_error(&cm->error, AOM_CODEC_MEM_ERROR,
+                             "No room for the coefficients of a frame with very small tiles");
+        }
+      }
     }
   }
 
@@ -1396,7 +1585,9 @@ extern "C" void av1_setup_ext_coef_buffer(AV1Decoder *pbi, AV1_COMMON *cm, Threa
   av1_frame_thread_data *cur_td = dec->curr_frame_data;
   get_sec_data(dec, cur_td);
   av1_frame_thread_data *td = cur_td->sec_thread_data;
+  // The tile's part of the second slot's share: the same place and size as in the first.
   tile->dq_buffer_ptr = td->coef_buffer_offset + tile->dq_buffer_offset;
+  tile->dq_buffer_end = tile->dq_buffer_ptr + tile->dq_buffer_size;
 }
 
 extern "C" void av1_setup_sec_data(AV1Decoder *pbi, AV1_COMMON *cm, ThreadData *thread_data) {
@@ -1432,13 +1623,17 @@ extern "C" void av1_setup_macroblockd(AV1Decoder *pbi, AV1_COMMON *cm, ThreadDat
   const int mi_max =
       ((tile->mi_row_end - tile->mi_row_start + 15) & (~15)) * ((tile->mi_col_end - tile->mi_col_start + 15) & (~15));
 
-  t->dq_buffer_offset = mi_offset * (td->ext_idct_buffer ? IdctCoefCountDenum : IdctCoefCountNum);
-  t->dq_buffer_ptr = td->coef_buffer_offset + t->dq_buffer_offset;
+  const int coef_num = dec->coef_count_num;
+  t->dq_buffer_offset = mi_offset * (td->ext_idct_buffer ? (int)IdctCoefCountDenum : coef_num);
+  t->dq_buffer_ptr = (td->ext_idct_buffer ? td->ext_coef_base : td->coef_buffer_offset) + t->dq_buffer_offset;
   t->dq_buffer_base = (tran_low_t *)dec->idct_coefs->host_ptr;
   const int mib_sz = cm->seq_params.mib_size;
   const int sb_sz = mib_sz * mib_sz * IdctCoefCountDenum;
-  t->dq_buffer_max = t->dq_buffer_ptr + mi_max * IdctCoefCountNum - sb_sz;
-  assert(td->ext_idct_buffer || t->dq_buffer_max > t->dq_buffer_ptr);
+  t->dq_buffer_max = t->dq_buffer_ptr + mi_max * coef_num - sb_sz;
+  // The tile's part of a share, and where the part it is writing ends: av1_read_coeffs_txb() does not write
+  // behind it. With the worst-case layout the part is as large as the tile can need.
+  t->dq_buffer_size = mi_max * coef_num;
+  t->dq_buffer_end = t->dq_buffer_ptr + mi_max * (td->ext_idct_buffer ? (int)IdctCoefCountDenum : coef_num);
 
   const int blocks_4x4_count = (mi_offset * 3 + 1) >> 1;
   t->intra_iter_max = -1;
@@ -1450,11 +1645,13 @@ extern "C" void av1_setup_macroblockd(AV1Decoder *pbi, AV1_COMMON *cm, ThreadDat
   const int mi_offset_base =
       tile->mi_row_start * cm->mi_stride + tile->mi_col_start * (tile->mi_row_end - tile->mi_row_start);
   const int mi_max_base = (tile->mi_row_end - tile->mi_row_start) * (tile->mi_col_end - tile->mi_col_start);
-  t->mi_offset = (mi_offset_base >> 1) + td->mode_info_offset;
+  // The tile's part of the slot's share of the mode info pool: half of its 4x4 units, a quarter with
+  // AV1_LOW_MEMORY_MODE_INFO. The part in a second slot's share has the same place and size.
+  t->mi_offset = (mi_offset_base >> dec->mode_info_shift) + td->mode_info_offset;
   t->mi_count = 0;
   thread_data->tile_id = tile_id;
   thread_data->mi_count = 0;
-  thread_data->mi_count_max = mi_max_base >> 1;
+  thread_data->mi_count_max = mi_max_base >> dec->mode_info_shift;
   thread_data->mi_pool = ((MB_MODE_INFO *)dec->mode_info_pool->host_ptr) + t->mi_offset;
   thread_data->mi_count2 = 0;
   thread_data->mi_pool2 = NULL;
@@ -1493,6 +1690,9 @@ extern "C" void av1_intra_palette(AV1Decoder *pbi, MB_MODE_INFO *mi, Av1ColorMap
   const HwFrameBuffer *fb = td->frame_buffer;
   const int bsz = 4 >> plane;
   uint8_t *map = params->color_map;
+  // Palette blocks exist only in frames that allow screen content tools, and av1_setup_frame() has created
+  // the buffer for those.
+  if (!td->palette_buffer) return;
   uint8_t *palette_buf = (uint8_t *)td->palette_buffer->host_ptr;
   if (fb->hbd) {
     const int stride = fb->planes[plane].stride >> 1;

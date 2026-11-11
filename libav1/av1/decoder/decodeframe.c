@@ -317,6 +317,14 @@ static void decode_mbmi_block(AV1Decoder *const pbi, MACROBLOCKD *const xd,
 #endif
   if (td->mi_count >= td->mi_count_max && td->mi_pool2 == NULL) {
       av1_setup_sec_data(pbi, cm, td);
+  } else if (td->mi_pool2 != NULL && td->mi_count2 >= td->mi_count_max) {
+      // The tile's part of the second slot's share is full too. With the default shares (half of the tile's
+      // 4x4 units each) that cannot happen; with AV1_LOW_MEMORY_MODE_INFO (a quarter each) it is a tile with
+      // more blocks than half of its 4x4 units.
+      av1_log_error("MEMORY FAILED frame: the blocks of a tile do not fit its part of the mode info pool "
+                    "(two slot shares); the frame is a decode error");
+      aom_internal_error(xd->error_info, AOM_CODEC_MEM_ERROR,
+                         "The blocks of a tile do not fit the mode info pool");
   }
   set_offsets(cm, xd, bsize, mi_row, mi_col, bw, bh, x_mis, y_mis, td);
   xd->mi[0]->partition = partition;

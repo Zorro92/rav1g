@@ -42,6 +42,13 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
 - **Pipeline depth and clears** (`-slots`, `-asyncclear`): the number of frames in flight
   between CPU and GPU can be raised from 2 to 3 or 4, and the per-frame buffer clears can
   move off the decode thread. Both are off by default and are being measured.
+- **Memory**: a console app may use 1 GiB, and at 4K the decoder took about 880 MiB of it
+  (measured: the app's memory after creating a 4096x2176 10-bit decoder with two slots,
+  754.7 MiB of that in the decoder's D3D12 buffers), which also left no room for a third
+  slot. This is being reduced: computed from the allocation code, the same decoder is now
+  681.9 MiB of buffers, 639.7 MiB when created for a 3840x2160 stream (`-fitsize`) and
+  539.9 MiB with the reductions that are not on by default (`-lowmem -fitsize`). A decoder
+  that does not fit the app's limit is refused instead of losing the D3D12 device.
 - 1080p24/30 already decodes in real time.
 - Known bug: some encodes with hidden frames (SVT-AV1 random access) deadlock on output
   buffer starvation.

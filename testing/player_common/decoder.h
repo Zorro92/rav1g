@@ -260,6 +260,8 @@ class AV1Decoder {
     if (img && This->params_.gputime_) This->PerfOutput();
     return This->output_queue_->Push((aom_image_t*)img);
   }
+  // The decoder's budget guard: the bytes the decoder may still allocate (decoder.cpp).
+  static int64_t MemoryAvailable(void* priv);
   // The decoder's log lines (av1_set_log_callback), from whatever thread the decoder is on.
   static void LogLine(void* priv, int is_error, const char* line) {
     (void)priv;
@@ -323,6 +325,11 @@ class AV1Decoder {
   int created_slots_ = 0;
   unsigned int created_width_ = 0;
   unsigned int created_height_ = 0;
+  unsigned int created_bitdepth_ = 0;
+  // Estimate of the output pool's textures for the stream, for MemoryAvailable.
+  uint64_t output_pool_estimate_ = 0;
+  bool created_intrav2_ = false;
+  int created_lowmem_ = 0;
   perfstats::PerfStats perf_stats_;
   std::mutex perf_cs_;
   int perf_installed_ = 0;

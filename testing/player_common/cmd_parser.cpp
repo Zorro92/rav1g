@@ -51,8 +51,14 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        &params_.slots_},
       {"asyncclear", atSingle, anOptional, "per-frame clears off the decode thread (same output)", "",
        &params_.asyncclear_},
-      {"fitsize", atSingle, anOptional, "create the decoder for the stream's size instead of 4096x2176", "",
-       &params_.fitsize_}};
+      {"fitsize", atSingle, anOptional,
+       "create the decoder for the stream's size and bit depth instead of 4096x2176 10-bit", "", &params_.fitsize_},
+      {"lowmem", atSingle, anOptional,
+       "smaller decoder: shared back buffer, smaller mode info and coefficient shares (same output)", "",
+       &params_.lowmem_},
+      {"lowmemparts", atInt, anOptional,
+       "parts of -lowmem to switch on: 1 shared back buffer + 2 mode info shares + 4 coefficient shares", "",
+       &params_.lowmem_parts_}};
   params_.command_line_ = args.command_line_;
   const int list_length = sizeof(avaiting) / sizeof(ParamStruct);
   bool has_value[list_length] = {false};
@@ -139,6 +145,16 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     return -1;
   }
 
+  if (params_.lowmem_parts_ < 0 || params_.lowmem_parts_ > PLAYER_LOWMEM_ALL) {
+    char ss[96];
+    sprintf(ss, "-lowmemparts %d is not allowed: the sum of 1, 2 and 4, at most %d.", params_.lowmem_parts_,
+            PLAYER_LOWMEM_ALL);
+    Err += ss;
+    return -1;
+  }
+  // -lowmem is all parts; -lowmemparts alone picks some of them.
+  if (params_.lowmem_) params_.lowmem_parts_ = PLAYER_LOWMEM_ALL;
+
   params_.isDirectory_ = (params_.source_file_.empty() && !params_.source_dir_.empty());
   params_.isSubList_ = (params_.source_file_.empty() && params_.source_dir_.empty() && !params_.view_list_.empty());
   params_.needReadBack_ = !params_.target_file_.empty() || params_.md5_ || params_.md5_frame_check_ ||
@@ -194,6 +210,8 @@ void CParameters::Reset() {
   params_.slots_ = PLAYER_SLOTS_DEFAULT;
   params_.asyncclear_ = false;
   params_.fitsize_ = false;
+  params_.lowmem_ = false;
+  params_.lowmem_parts_ = 0;
 }
 
 void CParameters::GetHelp(int pos, const char* arg, std::string& errMsg, const ParamStruct* arr, int size) {
