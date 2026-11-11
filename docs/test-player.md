@@ -708,3 +708,11 @@ buffer entries and reads, group shared bytes, barriers (all, and those that wait
 whole group), loops and FXC compile time. `shader-survey/asm/` has all listings. The
 last line of `survey.md` says whether every listing matches the bytecode compiled into
 the package. The counts are static and are not a timing.
+
+The survey runs FXC on several shaders at a time (one per logical processor of the
+runner) and parses the listings afterwards in name order, so the files do not depend on
+which compile finishes first. A shader's FXC compile time is that of its own FXC process
+and includes contention with the compiles running beside it; `survey.md` and the
+`stats.txt` files say how many ran at a time. Compare compile times within one run only,
+and treat small differences as noise. A shader that fails to compile still stops the run,
+with its FXC output in the step log.

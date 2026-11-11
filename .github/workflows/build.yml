@@ -64,7 +64,7 @@ jobs:
       # intra listings get a side-by-side count, all shaders a one-line survey. A shader that
       # does not compile stops the run here. intra_main_opt and intra_main_hbd_opt are the
       # upstream intra_main sources built with optimization (player flag -intraopt), listed next
-      # to the /Od builds the project asks for.
+      # to the /Od builds the project asks for. FXC runs on several shaders at a time.
       - name: Disassemble the shaders (CDEF and intra listings, survey of all)
         shell: pwsh
         run: |
@@ -96,20 +96,41 @@ jobs:
           }
           $asm = (New-Item -ItemType Directory -Force out/shader-survey/asm).FullName
           $headers = (New-Item -ItemType Directory -Force out/shader-survey/h).FullName
+          # FXC first, several shaders at a time (one per logical processor of the runner); the
+          # listings are parsed afterwards, one by one and in name order. The time of a shader is
+          # that of its own FXC process, so it includes contention with the ones running beside it.
+          $root = (Get-Location).Path
+          $parallel = [Math]::Max(2, [Environment]::ProcessorCount)
+          $compiled = @{}
+          $names | ForEach-Object { [pscustomobject]@{ name = $_; od = [bool]$unoptimized[$_] } } |
+            ForEach-Object -ThrottleLimit $parallel -Parallel {
+              $ErrorActionPreference = 'Continue'
+              Set-Location -LiteralPath $using:root
+              $fxc = $using:fxc
+              $name = $_.name
+              $flags = @('/nologo', '/T', 'cs_5_0', '/E', 'main', '/Vn', $name)
+              if ($_.od) { $flags += '/Od' }
+              $clock = [Diagnostics.Stopwatch]::StartNew()
+              $output = @(& $fxc @flags /Fc (Join-Path $using:asm "$name.asm") /Fh (Join-Path $using:headers "$name.h") `
+                "src/libav1/dx/shaders/$name.hlsl" 2>&1 | ForEach-Object { "$_" })
+              [pscustomobject]@{ name = $name; exit = $LASTEXITCODE; output = $output
+                seconds = [math]::Round($clock.Elapsed.TotalSeconds, 1) }
+            } | ForEach-Object { $compiled[$_.name] = $_ }
+          $failed = @()
+          foreach ($name in $names) {
+            $result = $compiled[$name]
+            if (-not $result) { throw "No FXC result for $name.hlsl" }
+            if ($result.exit -ne 0) {
+              $failed += "$name.hlsl"
+              Write-Host "FXC failed for $name.hlsl (exit code $($result.exit)):"
+            }
+            if ($result.exit -ne 0 -or $name -match '^(cdef_filter|intra_)') { $result.output | Write-Host }
+          }
+          if ($failed.Count) { throw "FXC failed for $($failed -join ', ')" }
           $rows = @{}
           foreach ($name in $names) {
             $listing = Join-Path $asm "$name.asm"
-            $flags = @('/nologo', '/T', 'cs_5_0', '/E', 'main', '/Vn', $name)
-            if ($unoptimized[$name]) { $flags += '/Od' }
-            $clock = [Diagnostics.Stopwatch]::StartNew()
-            $ErrorActionPreference = 'Continue'
-            $output = & $fxc @flags /Fc $listing /Fh (Join-Path $headers "$name.h") `
-              "src/libav1/dx/shaders/$name.hlsl" 2>&1 | ForEach-Object { "$_" }
-            $exit = $LASTEXITCODE
-            $ErrorActionPreference = 'Stop'
-            $seconds = [math]::Round($clock.Elapsed.TotalSeconds, 1)
-            if ($exit -ne 0 -or $name -match '^(cdef_filter|intra_)') { $output | Write-Host }
-            if ($exit -ne 0) { throw "FXC failed for $name.hlsl" }
+            $seconds = $compiled[$name].seconds
             $text = @(Get-Content $listing)
             $code = @($text | Where-Object { $_ -notmatch '^\s*(//|$)' })
             $indexable = @($code | Where-Object { $_ -match '^\s*dcl_indexableTemp' } | ForEach-Object { $_.Trim() })
@@ -169,7 +190,8 @@ jobs:
             }
           }
           $intro = @("FXC of Windows SDK $($env:WINDOWS_SDK): /T cs_5_0 /E main with the Release x64 project settings (default optimization; /Od where marked).",
-            'Counts are static: instructions in the listing, not instructions executed.')
+            'Counts are static: instructions in the listing, not instructions executed.',
+            "FXC ran on up to $parallel shaders at a time, so the compile time of a shader includes contention with the others.")
           $sets = @(
             @{ directory = 'cdef-shaders'; title = 'CDEF shader listings'; names = @('cdef_filter', 'cdef_filter_v2') },
             @{ directory = 'intra-shaders'; title = 'Intra shader listings';
