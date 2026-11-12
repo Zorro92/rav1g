@@ -36,7 +36,7 @@ pub(crate) mod d3d12;
 
 pub use d3d12::{
     BufferLocation, BufferRef, CommandAllocator, Commands, Device, Event, Layout, LayoutRef, OwnedDevice, PipelineRef,
-    Queue, TextureRef, Upload, create_hardware_device,
+    Queue, Readback, TextureRef, TimestampQueries, Upload, create_hardware_device,
 };
 
 /// Who reads and writes a buffer. The numbers are the `MemoryType` of the C++ host.

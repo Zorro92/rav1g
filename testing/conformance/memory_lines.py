@@ -9,7 +9,8 @@ configurations (slots, low memory parts, the buffers of -intrav2 and -interfast)
 the decoder that start with "MEMORY" to <out>/<case>.txt: the budget line, what the created decoder holds
 (by type, per slot, the largest buffers, the host pool), and the steps of its release. Left out or made
 equal is what differs from run to run on one machine: the "MEMORY dxgi" lines (the video memory the adapter
-reports) and the usage number of the "MEMORY destroy" lines.
+reports), the usage number of the "MEMORY destroy" lines, and the size of the host pool (it counts from the
+first address of the application's memory that is a multiple of 256; what is in use of it is compared).
 
 compare: the files of two runs must be the same, line for line. That is how the Rust decoder (rav1g-dec) is
 held against the C++ decoder (warp_decoder) of the same commit: same buffers, same sizes, same decisions,
@@ -51,6 +52,9 @@ def memory_lines(text):
             continue
         if line.startswith('MEMORY destroy '):
             line = re.sub(r'dxgi local usage [0-9.]+ MiB', 'dxgi local usage <n> MiB', line)
+        # The host pool counts from the first address in the application's memory that is a multiple of
+        # 256, so its size is that of the configuration less what the program's allocator put in front.
+        line = re.sub(r'host pool (\d+) of \d+ bytes', r'host pool \1 of <n> bytes', line)
         lines.append(line)
     return lines
 

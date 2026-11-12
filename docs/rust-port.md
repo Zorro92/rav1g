@@ -687,6 +687,7 @@ The parts, each green on CI before the next:
 | Part | Out of the C++ rest | Rust | Notes |
 | --- | --- | --- | --- |
 | 1. Creation and release | the buffer plan (`av1_allocate_buffers`), the memory query, the budget guard and `av1_create_gpu_decoder`, the "MEMORY" summary, `av1_allocate_pbi`, the pool of frame buffers, `av1_destroy_gpu_decoder` (826 lines) | `host/create.rs` (1,424 with tests); `gpu/d3d12.rs` grows to 937 | see below |
+| 2. Timers and stage dumps | the timers, timestamps and the record of a frame of the timing run (`-gputime`, `-gputimedetail`), the switches `av1_set_perf_callback`, `av1_set_perf_detail`, `av1_set_inter_fast`; the stage dumps (`-dumpstages`) (505 lines) | `host/perf.rs` (471), `host/stage_dump.rs` (449); `host/core.rs` 242; `gpu/d3d12.rs` grows to 1,063 | see below |
 
 Part 1, creation and release:
 
@@ -707,11 +708,50 @@ Part 1, creation and release:
   configurations (sizes, bit depths, slots, low memory parts, the buffers of `-intrav2` and `-interfast`)
   with `-v` and keeps the decoder's "MEMORY" lines; the `conformance` job does it with `warp_decoder`, the
   `rust` job with `rav1g-dec`, and `rust-equal` wants the two sets equal line for line. Left out are the
-  lines about the adapter's video memory, which differ from run to run.
+  lines about the adapter's video memory, which differ from run to run, and one number: the size of the
+  host pool, which counts from the first address of the application's memory that is a multiple of 256
+  and so depends on where the program's allocator put that memory (32 bytes less in `rav1g-dec` than in
+  `warp_decoder`; what is in use of the pool is the same and is compared).
 - **`rav1g-dec -budget <MiB>`** gives the decoder a budget callback with a fixed answer, so the guard can be
   run on a desktop (`warp_decoder` has no such flag: its decoder is created without a callback).
 - Tests: the cut of a line as `snprintf` cuts it, the slots and frame buffer counts of a configuration,
   the guard margin against the header.
+
+Part 1 on CI (run 43319362547, commit 3358766): `rav1g-dec` 251 of 251 on WARP, the order check, 137 of
+137 with `-poisonmi` and with `-poisonbuf`, md5 of 1005 frames and the stage dumps of 7 streams equal to
+`warp_decoder` of the commit, 251 of 251 with the program of the Linux build; `D3D12 DEVICE REMOVALS: 0` in
+every pass of the three decoders. The run is red for one thing, the new comparison of the "MEMORY" lines:
+all ten cases were equal but for the size of the host pool named above, which the comparison leaves out
+since the next commit.
+
+**The budget guard against the C++** (run 43319488920 of a throwaway branch, where `warp_decoder` got the
+same `-budget` flag): four decoder configurations (1080p 10-bit with 2 and with 4 slots, 2160p 8-bit, 16x16)
+with eleven budgets each from 0 to 4000 MiB, 44 creations by each program. Every decision is the same,
+with the same lines: refused after the wait of 300 ms in which the answer did not grow ("no longer
+growing"), with the `MEMORY REFUSED` line and the task ending in an error; accepted with the same sum of
+device buffers and margin; and the decoder that was then created has the same buffers.
+
+Part 2, timers and stage dumps:
+
+- **Ahead of the frame setup and the completion thread**, which use both: with these two in Rust the
+  later parts call Rust, and the C++ rest calls them through `host/rest_calls.rs`, a module of `extern "C"`
+  names that goes with the rest file. The calls of the stages into `av1_core.cpp`
+  (`glue/av1_core_calls.cpp`) are gone: `host/core.rs` calls the Rust.
+- **Timers.** The CPU timers of the frame that is being built are counters the tile threads add to as
+  well; Rust uses them as atomics in place. The callback and the two switches are atomics. A frame's
+  record is put together as before: the snapshot of the CPU timers taken at submit, the timestamps read
+  back behind the frame's fence, each difference counted to its stage, and to its section and dispatch of
+  the inter breakdown.
+- **Stage dumps.** The callback and the frame list are behind a lock (the C++ had four globals that the
+  decode thread and the completion thread read without one). The text of a layout is a `CString`.
+- **The backend boundary** got timestamp queries (the heap, a timestamp at a point of the list, the
+  resolve into a readback buffer, the frequency of a queue) and readback buffers (creation, the copy
+  destination, a read of the first bytes).
+- Checked before the push on the local decoder: the 244 vectors; the stage dumps of the first four frames
+  of seven vectors (key and inter frames, 10-bit, film grain, two layers, a size change, intra-only
+  frames, a show-existing frame) written by the build before this part and by this one, equal by
+  `stage_dump.py compare`; the lines of `-gputime`, `-gputimedetail` and `-gputimeisolate -interfast`, the
+  same lines with other numbers.
 
 ## Estimate
 

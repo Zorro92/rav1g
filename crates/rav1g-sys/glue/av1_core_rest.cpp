@@ -14,7 +14,8 @@
 // shrinks with every part of step 4 and goes with the last.
 //
 // In Rust so far: the creation and the release of a decoder with the buffer plan and the budget guard, the
-// memory query, av1_allocate_pbi, and the pool of frame buffers (create.rs).
+// memory query, av1_allocate_pbi, and the pool of frame buffers (create.rs); the timers and timestamps of
+// the timing run (perf.rs); the stage dumps (stage_dump.rs).
 
 #include "dx/av1_core.h"
 #include "dx/av1_memory.h"
@@ -52,6 +53,7 @@ void av1_inter_ext_borders(Av1Core *dec, AV1_COMMON *cm);
 void av1_mi_push_block(AV1Decoder *pbi, AV1_COMMON *cm, MACROBLOCKD *xd);
 void av1_prediction_gen_blocks(AV1Decoder *pbi, Av1Core *dec);
 
+static THREADFN gpu_thread_hook(void *pdata);
 
 extern "C" {
 HwFrameBuffer *rav1g_get_frame_buffer(Av1Core *dec);
@@ -59,261 +61,43 @@ void rav1g_frame_buffer_acquire(Av1Core *dec, HwFrameBuffer *fb);
 void rav1g_frame_buffer_release(Av1Core *dec, HwFrameBuffer *fb);
 int rav1g_release_fb(Av1Core *dec, HwFrameBuffer *fb);
 
+int rav1g_perf_enabled(void);
+int rav1g_perf_detail_mode(void);
+int rav1g_inter_fast_mode(void);
+int64_t rav1g_perf_now(void);
+void rav1g_perf_add(Av1Core *dec, int id, int64_t start_ticks);
+int64_t rav1g_perf_lap(Av1Core *dec, int id, int64_t start_ticks);
+void rav1g_perf_add_memset(Av1Core *dec, int id, int64_t start_ticks, size_t bytes);
+void rav1g_perf_begin_command_buffer(Av1Core *dec, av1_frame_thread_data *td);
+void rav1g_perf_resolve(Av1Core *dec, const av1_frame_thread_data *td);
+void rav1g_perf_collect(Av1Core *dec, av1_frame_thread_data *td, int64_t wait_start, av1_perf_frame *rec);
+void rav1g_perf_deliver(const av1_perf_frame *rec);
+void rav1g_stage_dump_begin(av1_frame_thread_data *td, int is_sef);
+void rav1g_stage_dump_frame_info(Av1Core *dec, const AV1_COMMON *cm);
+void rav1g_stage_dump_deliver(av1_frame_thread_data *td);
+
 // The constructor of the allocator, for the Rust that creates the decoder: this file still calls the
 // allocator through its virtual functions (palette_buffer_for_frame).
 av1_memory_allocator *rav1g_cpp_new_allocator(void *memory) { return new (memory) av1_memory_allocator; }
 }
 
-static THREADFN gpu_thread_hook(void *pdata);
-
-// ---------------------------------------------------------------------------
-// Timing instrumentation for the test player. Everything below is inert until
-// av1_set_perf_callback() installs a callback; it never changes decode output.
-// ---------------------------------------------------------------------------
-static av1_perf_frame_cb_fn_t g_perf_cb = NULL;
-static void *g_perf_priv = NULL;
-
-extern "C" void av1_set_perf_callback(av1_perf_frame_cb_fn_t cb, void *priv) {
-  g_perf_priv = priv;
-  g_perf_cb = cb;
-}
-
-static inline int perf_enabled() { return g_perf_cb != NULL; }
-
-// Test player flag -gputimedetail (av1_perf.h): the inter prediction breakdown. 0 off, 1 timestamps behind
-// the sections of the inter stage and work counters, 2 also a UAV barrier and a timestamp behind every
-// dispatch. Nothing of it exists without a perf callback.
-static int g_perf_detail = 0;
-
-extern "C" void av1_set_perf_detail(int mode) { g_perf_detail = mode < 0 ? 0 : mode > 2 ? 2 : mode; }
-
-// Test flag -interfast (dx/av1_perf.h, av1_set_inter_fast; dx/types.h, InterFastLists): inter blocks listed
-// and predicted by the fraction of their motion vectors. A frame takes the path while this is set, in a
-// decoder that was created with room for the lists by class in its block maps
-// (aom_codec_dec_cfg_t::inter_fast), unless it has a scaled reference (av1_setup_frame).
-static int g_inter_fast = 0;
-
-// |mode|: 0 off, or AV1_INTER_FAST_ON with the bits that keep the original shader on the lists by class.
-extern "C" void av1_set_inter_fast(int mode) { g_inter_fast = (mode & AV1_INTER_FAST_ON) ? (mode & 7) : 0; }
-
-static inline int64_t perf_now() {
-  LARGE_INTEGER t;
-  QueryPerformanceCounter(&t);
-  return t.QuadPart;
-}
-
-extern "C" int64_t av1_perf_ticks(void) { return perf_enabled() ? perf_now() : 0; }
-
-void av1_perf_add(Av1Core *dec, int id, int64_t start_ticks) {
-  if (!start_ticks) return;
-  InterlockedExchangeAdd64(&dec->perf_cur.ticks[id], perf_now() - start_ticks);
-}
-
-extern "C" void av1_perf_cpu_add(AV1Decoder *pbi, int id, int64_t start_ticks) {
-  if (!start_ticks || !pbi || !pbi->gpu_decoder) return;
-  av1_perf_add(pbi->gpu_decoder, id, start_ticks);
-}
-
-// Adds the time since |start| to |id| and returns the new lap start.
-static int64_t perf_lap(Av1Core *dec, int id, int64_t start_ticks) {
-  if (!start_ticks) return 0;
-  const int64_t now = perf_now();
-  InterlockedExchangeAdd64(&dec->perf_cur.ticks[id], now - start_ticks);
-  return now;
-}
-
+// The timers and the stage dumps are Rust (perf.rs, stage_dump.rs).
+static inline int perf_enabled() { return rav1g_perf_enabled(); }
+static inline int64_t perf_now() { return rav1g_perf_now(); }
+void av1_perf_add(Av1Core *dec, int id, int64_t start_ticks) { rav1g_perf_add(dec, id, start_ticks); }
+static int64_t perf_lap(Av1Core *dec, int id, int64_t start_ticks) { return rav1g_perf_lap(dec, id, start_ticks); }
 static void perf_add_memset(Av1Core *dec, int id, int64_t start_ticks, size_t bytes) {
-  if (!start_ticks) return;
-  InterlockedExchangeAdd64(&dec->perf_cur.ticks[id], perf_now() - start_ticks);
-  InterlockedExchangeAdd64(&dec->perf_cur.memset_bytes, (LONG64)bytes);
+  rav1g_perf_add_memset(dec, id, start_ticks, bytes);
 }
-
-// Records a GPU timestamp at the current position of the frame's command list
-// and remembers which stage it closes.
-void av1_perf_gpu_mark(Av1Core *dec, int stage) {
-  av1_frame_thread_data *td = dec->curr_frame_data;
-  if (!td) return;
-  av1_perf_td *p = &td->perf;
-  if (!p->gpu_active || p->mark_count >= Av1PerfMaxMarks) return;
-  dec->compute.command_list->EndQuery(p->query_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, p->mark_count);
-  p->mark_sub[p->mark_count] = 0;
-  p->mark_stage[p->mark_count++] = (uint8_t)stage;
-}
-
-// Inter breakdown: the record of the frame of the current command list, cleared for the stage code to fill,
-// or NULL when the frame has none.
-av1_perf_inter_detail *av1_perf_inter_begin(Av1Core *dec) {
-  av1_frame_thread_data *td = dec->curr_frame_data;
-  if (!td) return NULL;
-  av1_perf_td *p = &td->perf;
-  if (!p->detail_mode) return NULL;
-  if (!p->detail) p->detail = (av1_perf_inter_detail *)malloc(sizeof(av1_perf_inter_detail));
-  if (!p->detail) {
-    p->detail_mode = 0;
-    return NULL;
-  }
-  memset(p->detail, 0, sizeof(*p->detail));
-  p->detail->mode = p->detail_mode;
-  p->detail_filled = 1;
-  return p->detail;
-}
-
-// Inter breakdown: a timestamp behind a section of the inter stage, or behind one of its dispatches. Its
-// time is counted to |stage| as well, so the stage keeps the time it has without the breakdown.
-void av1_perf_inter_mark(Av1Core *dec, int stage, int section, int list) {
-  av1_frame_thread_data *td = dec->curr_frame_data;
-  if (!td) return;
-  av1_perf_td *p = &td->perf;
-  if (!p->gpu_active || !p->detail_mode || !p->detail_filled || p->mark_count >= Av1PerfMaxMarks) return;
-  dec->compute.command_list->EndQuery(p->query_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, p->mark_count);
-  p->mark_sub[p->mark_count] = (uint16_t)((section + 1) | ((list + 1) << 8));
-  p->mark_stage[p->mark_count++] = (uint8_t)stage;
-  ++p->detail->marks;
-}
-
-// Start of a frame's command list: decide whether this frame is timed and
-// create the slot's query heap and readback buffer on first use.
 static void perf_begin_command_buffer(Av1Core *dec, av1_frame_thread_data *td) {
-  av1_perf_td *p = &td->perf;
-  p->gpu_active = 0;
-  p->mark_count = 0;
-  p->detail_mode = 0;
-  p->detail_filled = 0;
-  p->collect = perf_enabled();
-  if (!p->collect) return;
-  dec->perf_cur.t_record_start = perf_now();
-  if (!dec->perf_cur.t_frame_start) dec->perf_cur.t_frame_start = dec->perf_cur.t_record_start;
-
-  if (!p->query_heap && !p->gpu_failed) {
-    dx_compute_context *compute = &dec->compute;
-    // Timestamp queries need a direct or compute queue; the frequency must
-    // come from the queue the decoder's lists execute on.
-    const D3D12_COMMAND_LIST_TYPE queue_type = compute->queue->GetDesc().Type;
-    UINT64 freq = 0;
-    int ok = (queue_type == D3D12_COMMAND_LIST_TYPE_DIRECT || queue_type == D3D12_COMMAND_LIST_TYPE_COMPUTE) &&
-             SUCCEEDED(compute->queue->GetTimestampFrequency(&freq)) && freq != 0;
-    if (ok) {
-      D3D12_QUERY_HEAP_DESC heap_desc = {};
-      heap_desc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
-      heap_desc.Count = Av1PerfMaxMarks;
-      ok = SUCCEEDED(compute->device->CreateQueryHeap(&heap_desc, IID_PPV_ARGS(&p->query_heap)));
-    }
-    if (ok) {
-      D3D12_HEAP_PROPERTIES heap_props = {};
-      heap_props.Type = D3D12_HEAP_TYPE_READBACK;
-      D3D12_RESOURCE_DESC buf_desc = {};
-      buf_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-      buf_desc.Width = sizeof(UINT64) * Av1PerfMaxMarks;
-      buf_desc.Height = 1;
-      buf_desc.DepthOrArraySize = 1;
-      buf_desc.MipLevels = 1;
-      buf_desc.Format = DXGI_FORMAT_UNKNOWN;
-      buf_desc.SampleDesc.Count = 1;
-      buf_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-      ok = SUCCEEDED(compute->device->CreateCommittedResource(&heap_props, D3D12_HEAP_FLAG_NONE, &buf_desc,
-                                                              D3D12_RESOURCE_STATE_COPY_DEST, NULL,
-                                                              IID_PPV_ARGS(&p->readback)));
-    }
-    if (ok) {
-      dec->perf_gpu_freq = freq;
-    } else {
-      p->query_heap.Reset();
-      p->readback.Reset();
-      p->gpu_failed = 1;
-    }
-  }
-  // The inter breakdown of a decoded frame, in the mode its tiles were counted with (av1_setup_frame). Its
-  // counters need no timestamps.
-  if (!td->output_only) p->detail_mode = dec->perf_inter_mode;
-  if (p->query_heap) {
-    p->gpu_active = 1;
-    av1_perf_gpu_mark(dec, AV1_PERF_GPU_BEGIN);
-  }
+  rav1g_perf_begin_command_buffer(dec, td);
 }
-
-// GPU completion thread, after the frame's fence: build the record from the
-// CPU snapshot taken at submit and the resolved GPU timestamps.
 static void perf_collect(Av1Core *dec, av1_frame_thread_data *td, int64_t wait_start, av1_perf_frame *rec) {
-  av1_perf_td *p = &td->perf;
-  const int64_t now = perf_now();
-  LARGE_INTEGER qpf;
-  QueryPerformanceFrequency(&qpf);
-  const double to_ms = 1000.0 / (double)qpf.QuadPart;
-
-  memset(rec, 0, sizeof(*rec));
-  rec->frame_number = p->acc.frame_number;
-  rec->show_frame = p->acc.show_frame;
-  rec->showable_frame = p->acc.showable_frame;
-  rec->is_sef = p->acc.is_sef;
-  rec->intra_frame = p->acc.intra_frame;
-  rec->used_sec_slot = p->acc.used_sec_slot;
-  rec->intra_iters = p->acc.intra_iters;
-  rec->intra_v2 = p->acc.intra_v2;
-  rec->intra_dispatches = p->acc.intra_stats[0];
-  rec->intra_barriers = p->acc.intra_stats[1];
-  rec->intra_groups = p->acc.intra_stats[2];
-  rec->intra_passes = p->acc.intra_stats[3];
-  rec->tile_count = p->acc.tile_count;
-  for (int i = 0; i < AV1_PERF_CPU_COUNT; ++i) rec->cpu_ms[i] = (double)p->acc.ticks[i] * to_ms;
-  rec->cpu_ms[AV1_PERF_CPU_FENCE_WAIT] = (double)(now - wait_start) * to_ms;
-  rec->cpu_ms[AV1_PERF_CPU_GPU_LATENCY] = (double)(now - p->t_submit) * to_ms;
-  rec->memset_bytes = p->acc.memset_bytes;
-  rec->complete_ms = (double)now * to_ms;
-  rec->gpu_gap_ms = -1.0;
-
-  // The inter breakdown goes to the callback as a copy this thread owns: the slot goes back to the pool
-  // before the callback runs, and the decode thread may be recording the slot's next frame by then.
-  av1_perf_inter_detail *detail = NULL;
-  if (p->detail_mode && p->detail_filled && p->detail) {
-    if (!dec->perf_detail_out)
-      dec->perf_detail_out = (av1_perf_inter_detail *)malloc(sizeof(av1_perf_inter_detail));
-    detail = dec->perf_detail_out;
-    if (detail) memcpy(detail, p->detail, sizeof(*detail));
-  }
-  rec->inter = detail;
-
-  if (!p->gpu_active || p->mark_count <= 0 || !dec->perf_gpu_freq) return;
-  UINT64 ts[Av1PerfMaxMarks];
-  D3D12_RANGE read_range = {0, sizeof(UINT64) * (size_t)p->mark_count};
-  void *ptr = NULL;
-  if (FAILED(p->readback->Map(0, &read_range, &ptr)) || !ptr) return;
-  memcpy(ts, ptr, read_range.End);
-  D3D12_RANGE written = {0, 0};
-  p->readback->Unmap(0, &written);
-
-  const double gpu_to_ms = 1000.0 / (double)dec->perf_gpu_freq;
-  for (int i = 1; i < p->mark_count; ++i) {
-    const int stage = p->mark_stage[i];
-    const int sub = p->mark_sub[i];
-    const double ms = ts[i] > ts[i - 1] ? (double)(ts[i] - ts[i - 1]) * gpu_to_ms : 0.0;
-    if (stage < AV1_PERF_GPU_STAGE_COUNT) {
-      rec->gpu_stage_ms[stage] += ms;
-      if (!sub) ++rec->gpu_stage_hits[stage];
-    }
-    rec->gpu_sum_ms += ms;
-    if (detail) {
-      // A timestamp of the breakdown, or the one that closes the inter stage (behind its last barrier) or
-      // the reconstruction.
-      int section = sub ? (sub & 255) - 1
-                        : stage == AV1_PERF_GPU_INTER ? (int)AV1_PERF_INTER_SYNC2
-                                                      : stage == AV1_PERF_GPU_RECON ? (int)AV1_PERF_INTER_RECON : -1;
-      const int list = sub ? (sub >> 8) - 1 : -1;
-      if (section >= 0 && section < AV1_PERF_INTER_SECTION_COUNT) {
-        detail->sections[section].ms += ms;
-        detail->sections[section].timed = 1;
-        if (list >= 0 && list < AV1_PERF_INTER_LISTS) detail->sections[section].lists[list].ms += ms;
-      }
-    }
-  }
-  const UINT64 first = ts[0];
-  const UINT64 last = ts[p->mark_count - 1];
-  rec->gpu_span_ms = last > first ? (double)(last - first) * gpu_to_ms : 0.0;
-  if (dec->perf_gpu_last_end)
-    rec->gpu_gap_ms = first > dec->perf_gpu_last_end ? (double)(first - dec->perf_gpu_last_end) * gpu_to_ms : 0.0;
-  dec->perf_gpu_last_end = last;
-  rec->gpu_marks = p->mark_count;
-  rec->gpu_valid = 1;
+  rav1g_perf_collect(dec, td, wait_start, rec);
 }
+static void stage_dump_begin(av1_frame_thread_data *td, int is_sef) { rav1g_stage_dump_begin(td, is_sef); }
+static void stage_dump_frame_info(Av1Core *dec, AV1_COMMON *cm) { rav1g_stage_dump_frame_info(dec, cm); }
+static void stage_dump_deliver(av1_frame_thread_data *td) { rav1g_stage_dump_deliver(td); }
 
 // Test player switch (-asyncclear): the per-frame clears of a slot's grids move from the decode thread to the
 // GPU completion thread. Off unless av1_set_async_clear(1) was called. See av1_setup_frame for the rules.
@@ -349,292 +133,6 @@ static size_t async_clear_slot(av1_frame_thread_data *td) {
   return bytes;
 }
 
-// ---------------------------------------------------------------------------
-// Test program flag -dumpstages (av1_set_stage_dump in av1_perf.h): copies of the buffers behind the stages of
-// a frame's command list. Inert until a callback and a frame list are set.
-// ---------------------------------------------------------------------------
-enum { StageDumpFramesMax = 256 };
-static av1_stage_dump_cb_fn_t g_stage_dump_cb = NULL;
-static void *g_stage_dump_priv = NULL;
-static int g_stage_dump_frames[StageDumpFramesMax];
-static int g_stage_dump_count = 0;
-
-extern "C" void av1_set_stage_dump(av1_stage_dump_cb_fn_t cb, void *priv, const int *frames, int count) {
-  g_stage_dump_cb = NULL;
-  g_stage_dump_count = 0;
-  if (!cb || !frames || count <= 0) return;
-  if (count > StageDumpFramesMax) count = StageDumpFramesMax;
-  memcpy(g_stage_dump_frames, frames, sizeof(int) * (size_t)count);
-  g_stage_dump_count = count;
-  g_stage_dump_priv = priv;
-  g_stage_dump_cb = cb;
-}
-
-static int stage_dump_wanted(int frame_number) {
-  if (!g_stage_dump_cb) return 0;
-  for (int i = 0; i < g_stage_dump_count; ++i)
-    if (g_stage_dump_frames[i] == frame_number) return 1;
-  return 0;
-}
-
-// Start of a command list: is its frame dumped. Copies of a frame that was never submitted are dropped here.
-static void stage_dump_begin(av1_frame_thread_data *td, int is_sef) {
-  for (int i = 0; i < td->dump_count; ++i) {
-    td->dumps[i].readback.Reset();
-    free(td->dumps[i].layout);
-    td->dumps[i].layout = NULL;
-  }
-  td->dump_count = 0;
-  td->dump_is_sef = is_sef;
-  td->dump_info[0] = 0;
-  td->dump_active = stage_dump_wanted(td->frame_number);
-}
-
-// A new dump of the frame of the current command list: a readback buffer of |size| bytes for its copies.
-static av1_stage_dump_entry *stage_dump_new(Av1Core *dec, const char *stage, size_t size) {
-  av1_frame_thread_data *td = dec->curr_frame_data;
-  if (!td || !td->dump_active || !size) return NULL;
-  if (td->dump_count >= Av1StageDumpMax) {
-    av1_log(1, "DUMPSTAGES frame %d: no room for the dump of stage %s", td->frame_number, stage);
-    return NULL;
-  }
-  av1_stage_dump_entry *e = &td->dumps[td->dump_count];
-  D3D12_HEAP_PROPERTIES heap_props = {};
-  heap_props.Type = D3D12_HEAP_TYPE_READBACK;
-  D3D12_RESOURCE_DESC buf_desc = {};
-  buf_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-  buf_desc.Width = size;
-  buf_desc.Height = 1;
-  buf_desc.DepthOrArraySize = 1;
-  buf_desc.MipLevels = 1;
-  buf_desc.Format = DXGI_FORMAT_UNKNOWN;
-  buf_desc.SampleDesc.Count = 1;
-  buf_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-  const HRESULT hr = dec->compute.device->CreateCommittedResource(
-      &heap_props, D3D12_HEAP_FLAG_NONE, &buf_desc, D3D12_RESOURCE_STATE_COPY_DEST, NULL, IID_PPV_ARGS(&e->readback));
-  if (FAILED(hr)) {
-    av1_log(1, "DUMPSTAGES frame %d: no readback buffer of %llu bytes for stage %s (hr 0x%08X)", td->frame_number,
-            (unsigned long long)size, stage, (unsigned)hr);
-    e->readback.Reset();
-    return NULL;
-  }
-  memset(e->planes, 0, sizeof(e->planes));
-  e->stage = stage;
-  e->layout = NULL;
-  e->kind = 0;
-  e->bytes_per_sample = td->is_hbd ? 2 : 1;
-  e->bit_depth = td->bitdepth;
-  e->size = size;
-  ++td->dump_count;
-  return e;
-}
-
-// Records the copy of |size| bytes of |src| from |offset| to |dst_offset| of the dump's readback buffer.
-// |uav|: |src| is a buffer the shaders write (unordered access state), so it is a copy source for the length of
-// the copy. Otherwise it is a buffer in the generic read state (upload or host memory), which is a copy source
-// as it is.
-static void stage_dump_copy_region(Av1Core *dec, av1_stage_dump_entry *e, size_t dst_offset, ID3D12Resource *src,
-                                   size_t offset, size_t size, int uav) {
-  ID3D12GraphicsCommandList *command_list = dec->compute.command_list.Get();
-  if (uav)
-    command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(src, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                                                           D3D12_RESOURCE_STATE_COPY_SOURCE));
-  command_list->CopyBufferRegion(e->readback.Get(), dst_offset, src, offset, size);
-  if (uav)
-    command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(src, D3D12_RESOURCE_STATE_COPY_SOURCE,
-                                                                           D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
-}
-
-// Records the copy of |size| bytes of |src| from |offset| into a readback buffer of its own. |src| is a
-// buffer the shaders write (unordered access state).
-static av1_stage_dump_entry *stage_dump_copy(Av1Core *dec, const char *stage, ID3D12Resource *src, size_t offset,
-                                             size_t size) {
-  av1_stage_dump_entry *e = stage_dump_new(dec, stage, size);
-  if (e) stage_dump_copy_region(dec, e, 0, src, offset, size, 1);
-  return e;
-}
-
-int av1_stage_dump_active(Av1Core *dec) {
-  const av1_frame_thread_data *td = dec->curr_frame_data;
-  return td && td->dump_active;
-}
-
-void av1_stage_dump_data(Av1Core *dec, const char *stage, const char *layout, const av1_stage_dump_region *regions,
-                         int count) {
-  size_t size = 0;
-  for (int i = 0; i < count; ++i) size += regions[i].size;
-  av1_stage_dump_entry *e = stage_dump_new(dec, stage, size);
-  if (!e) return;
-  e->kind = 2;
-  e->bytes_per_sample = 0;
-  const size_t len = strlen(layout);
-  e->layout = (char *)malloc(len + 1);
-  if (e->layout) memcpy(e->layout, layout, len + 1);
-  size_t pos = 0;
-  for (int i = 0; i < count; ++i) {
-    if (!regions[i].size) continue;
-    stage_dump_copy_region(dec, e, pos, regions[i].src, regions[i].offset, regions[i].size, regions[i].uav);
-    pos += regions[i].size;
-  }
-}
-
-av1_stage_dump_region av1_stage_dump_cb_region(Av1Core *dec, const ConstantBufferObject &cbo, size_t size) {
-  const GpuBufferObject *cb = dec->curr_frame_data->command_buffer.cb_alloc;
-  av1_stage_dump_region region = {cb->dev, (size_t)((const char *)cbo.host_ptr - (const char *)cb->host_ptr), size, 0};
-  return region;
-}
-
-// The mode info the stages of the frame read: the grid (one pointer per 4x4 unit, rows of mi_stride) and the
-// records it points to. Of the pool only the records of the frame's tiles are copied, tile by tile: the
-// layout lists, per run of records, the pool index of its first record and the number of records.
-void av1_stage_dump_mode_info(Av1Core *dec, AV1_COMMON *cm) {
-  av1_frame_thread_data *td = dec->curr_frame_data;
-  if (!td || !td->dump_active) return;
-  char text[512];
-  size_t grid_bytes = sizeof(MB_MODE_INFO *) * (size_t)cm->mi_stride * (size_t)cm->mi_rows;
-  if (grid_bytes > td->mode_info_grid->size) grid_bytes = td->mode_info_grid->size;
-  snprintf(text, sizeof(text), "buffer=mi_grid entry=%d mi_stride=%d mi_cols=%d mi_rows=%d pool_base=%u record=%d\n",
-           (int)sizeof(MB_MODE_INFO *), cm->mi_stride, cm->mi_cols, cm->mi_rows,
-           static_cast<unsigned int>(reinterpret_cast<uint64_t>(dec->mode_info_pool->host_ptr)),
-           (int)sizeof(MB_MODE_INFO));
-  const av1_stage_dump_region grid = {td->mode_info_grid->dev, 0, grid_bytes, 0};
-  av1_stage_dump_data(dec, "mi_grid", text, &grid, 1);
-
-  const int tile_count = td->tile_count;
-  const int runs_max = tile_count * 2;
-  av1_stage_dump_region *regions = (av1_stage_dump_region *)malloc(sizeof(av1_stage_dump_region) * (size_t)runs_max);
-  const size_t text_max = 128 + (size_t)runs_max * 48;
-  char *layout = (char *)malloc(text_max);
-  if (regions && layout) {
-    const size_t pool_records = dec->mode_info_pool->size / sizeof(MB_MODE_INFO);
-    int runs = 0;
-    int len = snprintf(layout, text_max, "buffer=mi_pool record=%d\n", (int)sizeof(MB_MODE_INFO));
-    for (int pass = 0; pass < 2; ++pass) {
-      // The tiles of the frame's slot, then what they continued with in a second slot's share.
-      const av1_tile_data *tiles = pass ? (td->sec_thread_data ? td->sec_thread_data->tile_data : NULL) : td->tile_data;
-      for (int t = 0; tiles && t < tile_count; ++t) {
-        const int first = tiles[t].mi_offset;
-        const int records = tiles[t].mi_count;
-        if (records <= 0 || first < 0 || (size_t)first + (size_t)records > pool_records) continue;
-        regions[runs].src = dec->mode_info_pool->dev;
-        regions[runs].offset = sizeof(MB_MODE_INFO) * (size_t)first;
-        regions[runs].size = sizeof(MB_MODE_INFO) * (size_t)records;
-        regions[runs].uav = 0;
-        ++runs;
-        len += snprintf(layout + len, text_max - len, "run first=%d count=%d\n", first, records);
-      }
-    }
-    if (runs) av1_stage_dump_data(dec, "mi_pool", layout, regions, runs);
-  }
-  free(regions);
-  free(layout);
-}
-
-void av1_stage_dump_fb(Av1Core *dec, const char *stage, const HwFrameBuffer *fb, const HwFrameBuffer *dims) {
-  if (!dims) dims = fb;
-  // The whole buffer, borders and all, from its start in the pool.
-  av1_stage_dump_entry *e = stage_dump_copy(dec, stage, dec->frame_buffer_pool->dev, fb->base_offset, fb->size);
-  if (!e) return;
-  for (int p = 0; p < 3; ++p) {
-    e->planes[p].offset = (uint32_t)(fb->planes[p].offset - fb->base_offset);
-    e->planes[p].stride = (uint32_t)fb->planes[p].stride;
-    e->planes[p].width = (uint32_t)(p ? dims->uv_crop_width : dims->y_crop_width);
-    e->planes[p].height = (uint32_t)(p ? dims->uv_crop_height : dims->y_crop_height);
-  }
-}
-
-void av1_stage_dump_residuals(Av1Core *dec, const char *stage) {
-  av1_frame_thread_data *td = dec->curr_frame_data;
-  if (!td || !td->dump_active) return;
-  const HwFrameBuffer *fb = td->frame_buffer;
-  // The residual planes of the frame: rows of res_stride bytes from res_offset, 128-aligned in both directions.
-  size_t size = (size_t)fb->planes[2].res_offset + (size_t)fb->planes[2].res_stride * (((fb->height >> 1) + 127) & ~127);
-  if (size > dec->idct_residuals->size) size = dec->idct_residuals->size;
-  av1_stage_dump_entry *e = stage_dump_copy(dec, stage, dec->idct_residuals->dev, 0, size);
-  if (!e) return;
-  e->kind = 1;
-  e->bytes_per_sample = 2;
-  for (int p = 0; p < 3; ++p) {
-    e->planes[p].offset = (uint32_t)fb->planes[p].res_offset;
-    e->planes[p].stride = (uint32_t)fb->planes[p].res_stride;
-    e->planes[p].width = (uint32_t)(p ? fb->uv_crop_width : fb->y_crop_width);
-    e->planes[p].height = (uint32_t)(p ? fb->uv_crop_height : fb->y_crop_height);
-  }
-}
-
-void av1_stage_dump_output(Av1Core *dec, const char *stage, const HwOutputImage *img, size_t size) {
-  // The output image is put together at the start of back_buffer1, in the layout of the image.
-  av1_stage_dump_entry *e =
-      stage_dump_copy(dec, stage, dec->frame_buffer_pool->dev, dec->back_buffer1.base_offset, size);
-  if (!e) return;
-  for (int p = 0; p < (img->monochrome ? 1 : 3); ++p) {
-    e->planes[p].offset = (uint32_t)img->planes[p].offset;
-    e->planes[p].stride = (uint32_t)img->planes[p].stride;
-    e->planes[p].width = (uint32_t)(p ? img->uv_crop_width : img->y_crop_width);
-    e->planes[p].height = (uint32_t)(p ? img->uv_crop_height : img->y_crop_height);
-  }
-}
-
-// One line about the frame for its dumps: what a reader needs to know which stages ran and on what.
-static void stage_dump_frame_info(Av1Core *dec, AV1_COMMON *cm) {
-  av1_frame_thread_data *td = dec->curr_frame_data;
-  if (!td->dump_active) return;
-  static const char *const frame_types[] = {"key", "inter", "intra_only", "switch"};
-  const int type = cm->current_frame.frame_type;
-  // Short names: the line has to fit the 255 characters a dump file keeps of it, references included.
-  int len = snprintf(td->dump_info, sizeof(td->dump_info),
-                     "type=%s show=%d size=%dx%d upscaled_width=%d denom=%d bits=%d q=%d lf=%d,%d,%d,%d cdef=%d "
-                     "superres=%d lr=%d grain=%d tiles=%dx%d scaled=%d refs=",
-                     (type >= 0 && type < 4) ? frame_types[type] : "?", cm->show_frame, cm->width, cm->height,
-                     cm->superres_upscaled_width, cm->superres_scale_denominator, td->bitdepth, cm->base_qindex,
-                     cm->lf.filter_level[0], cm->lf.filter_level[1], cm->lf.filter_level_u, cm->lf.filter_level_v,
-                     td->do_cdef, td->do_superres, td->do_loop_rest, td->do_filmgrain, cm->tile_cols, cm->tile_rows,
-                     td->scale_enable);
-  for (int i = 0; i < 7 && len > 0 && len < (int)sizeof(td->dump_info); ++i) {
-    const HwFrameBuffer *ref = frame_is_intra_only(cm) ? NULL : td->refs[i];
-    if (ref)
-      len += snprintf(td->dump_info + len, sizeof(td->dump_info) - len, "%s%d:%dx%d", i ? "," : "",
-                      ref->frame_number, ref->y_crop_width, ref->y_crop_height);  // frame number : size
-    else
-      len += snprintf(td->dump_info + len, sizeof(td->dump_info) - len, "%s-", i ? "," : "");
-  }
-}
-
-// GPU completion thread, after the frame's fence: hand the copies over and release them.
-static void stage_dump_deliver(av1_frame_thread_data *td) {
-  const av1_stage_dump_cb_fn_t cb = g_stage_dump_cb;
-  for (int i = 0; i < td->dump_count; ++i) {
-    av1_stage_dump_entry *e = &td->dumps[i];
-    D3D12_RANGE read_range = {0, e->size};
-    void *ptr = NULL;
-    if (cb && e->readback && SUCCEEDED(e->readback->Map(0, &read_range, &ptr)) && ptr) {
-      av1_stage_dump dump = {};
-      dump.frame_number = td->frame_number;
-      dump.index = i;
-      dump.stage = e->stage;
-      dump.kind = e->kind;
-      dump.bytes_per_sample = e->bytes_per_sample;
-      dump.bit_depth = e->bit_depth;
-      dump.is_sef = td->dump_is_sef;
-      dump.info = td->dump_info;
-      memcpy(dump.planes, e->planes, sizeof(dump.planes));
-      dump.data = (const uint8_t *)ptr;
-      dump.size = e->size;
-      dump.layout = e->layout;
-      cb(g_stage_dump_priv, &dump);
-      D3D12_RANGE written = {0, 0};
-      e->readback->Unmap(0, &written);
-    } else if (cb) {
-      av1_log(1, "DUMPSTAGES frame %d: the dump of stage %s could not be read back", td->frame_number, e->stage);
-    }
-    e->readback.Reset();
-    free(e->layout);
-    e->layout = NULL;
-  }
-  td->dump_count = 0;
-  td->dump_active = 0;
-}
-
 static double to_mib(unsigned long long bytes) { return (double)bytes / (1024.0 * 1024.0); }
 
 // The pool of frame buffers is Rust (create.rs).
@@ -668,9 +166,7 @@ void av1_commit_command_buffer(Av1Core *dec) {
   if (perf->collect) {
     // Resolve this frame's timestamps as the last command of its list; they
     // are read back only after the frame's fence has completed.
-    if (perf->gpu_active && perf->mark_count > 0)
-      compute->command_list->ResolveQueryData(perf->query_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0,
-                                              perf->mark_count, perf->readback.Get(), 0);
+    rav1g_perf_resolve(dec, td);
     perf_submit_start = perf_now();
   }
 
@@ -844,8 +340,7 @@ THREADFN gpu_thread_hook(void *data) {
       }
     }
     if (perf_have_rec) {
-      const av1_perf_frame_cb_fn_t perf_cb = g_perf_cb;
-      if (perf_cb) perf_cb(g_perf_priv, &perf_rec);
+      rav1g_perf_deliver(&perf_rec);
     }
     MTQueuePush(&dec->gpu_item_pool, item);
   }
@@ -1156,7 +651,7 @@ extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
   dec->thread_count = AOMMIN(pbi->max_threads, td->tile_count);
   // Inter breakdown (-gputimedetail): the tile threads count the blocks they push, each tile into its own
   // counters, which av1_prediction_run_all() adds up when the frame is recorded.
-  dec->perf_inter_mode = perf_enabled() ? g_perf_detail : 0;
+  dec->perf_inter_mode = rav1g_perf_detail_mode();
   if (dec->perf_inter_mode) {
     if (dec->perf_inter_tiles_cap < td->tile_count) {
       free(dec->perf_inter_tiles);
@@ -1342,7 +837,7 @@ extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
     td->gm_warp[i] = gm->wmtype > TRANSLATION && !gm->invalid && !(sf && av1_is_scaled(sf));
   }
   // -interfast: not for a frame with a scaled reference, whose blocks all go through the inter_scale shaders.
-  td->inter_fast = (dec->inter_fast_tiles > 0 && !td->scale_enable) ? g_inter_fast : 0;
+  td->inter_fast = (dec->inter_fast_tiles > 0 && !td->scale_enable) ? rav1g_inter_fast_mode() : 0;
   av1_perf_add(dec, AV1_PERF_CPU_SETUP, perf_setup_start);
 }
 

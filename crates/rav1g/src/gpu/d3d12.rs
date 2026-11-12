@@ -935,3 +935,120 @@ impl Event {
         let _ = unsafe { CloseHandle(windows::Win32::Foundation::HANDLE(raw)) };
     }
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// Timestamps and readback: the timing run (-gputime) and the stage dumps (-dumpstages).
+// ---------------------------------------------------------------------------------------------------------
+
+/// The timestamps a command list can take: a query heap.
+#[repr(transparent)]
+pub struct TimestampQueries {
+    heap: ID3D12QueryHeap,
+}
+
+impl TimestampQueries {
+    /// Hands the reference over as a raw `ID3D12QueryHeap *`.
+    pub fn into_raw(self) -> *mut c_void {
+        self.heap.into_raw()
+    }
+}
+
+/// A buffer the GPU copies into and the CPU reads once the copy is done.
+#[repr(transparent)]
+pub struct Readback {
+    resource: ID3D12Resource,
+}
+
+impl Readback {
+    /// The buffer as the destination of a copy.
+    pub fn buffer(&self) -> BufferRef<'_> {
+        BufferRef { resource: &self.resource }
+    }
+
+    /// Reads the first `size` bytes. `None` when the buffer cannot be mapped.
+    pub fn read<R>(&self, size: usize, read: impl FnOnce(&[u8]) -> R) -> Option<R> {
+        let range = D3D12_RANGE { Begin: 0, End: size };
+        let mut mapped: *mut c_void = std::ptr::null_mut();
+        // SAFETY: a readback buffer of at least `size` bytes (the caller sized it); the mapping is used
+        // until Unmap, and nothing was written through it.
+        unsafe {
+            if self.resource.Map(0, Some(&range), Some(&mut mapped)).is_err() || mapped.is_null() {
+                return None;
+            }
+            let result = read(std::slice::from_raw_parts(mapped.cast::<u8>(), size));
+            self.resource.Unmap(0, Some(&D3D12_RANGE { Begin: 0, End: 0 }));
+            Some(result)
+        }
+    }
+
+    /// Hands the reference over as a raw `ID3D12Resource *`.
+    pub fn into_raw(self) -> *mut c_void {
+        self.resource.into_raw()
+    }
+}
+
+// SAFETY: each is `repr(transparent)` over its interface.
+unsafe impl Wrapped for TimestampQueries {}
+unsafe impl Wrapped for Readback {}
+
+impl Device<'_> {
+    /// Room for `count` timestamps of a command list.
+    pub fn create_timestamp_queries(&self, count: u32) -> Result<TimestampQueries, Error> {
+        let desc = D3D12_QUERY_HEAP_DESC { Type: D3D12_QUERY_HEAP_TYPE_TIMESTAMP, Count: count, NodeMask: 0 };
+        let mut heap: Option<ID3D12QueryHeap> = None;
+        // SAFETY: a valid description; the out value is checked.
+        unsafe { self.device.CreateQueryHeap(&desc, &mut heap) }.map_err(failed("CreateQueryHeap"))?;
+        Ok(TimestampQueries { heap: heap.ok_or(Error { step: "CreateQueryHeap", code: E_FAIL.0 })? })
+    }
+
+    /// A readback buffer of `size` bytes, ready as the destination of a copy.
+    pub fn create_readback(&self, size: u64) -> Result<Readback, Error> {
+        let heap = D3D12_HEAP_PROPERTIES { Type: D3D12_HEAP_TYPE_READBACK, ..Default::default() };
+        let mut resource: Option<ID3D12Resource> = None;
+        // SAFETY: valid heap properties and description; the out value is checked.
+        unsafe {
+            self.device.CreateCommittedResource(
+                &heap,
+                D3D12_HEAP_FLAG_NONE,
+                &buffer_desc(size, D3D12_RESOURCE_FLAG_NONE),
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                None,
+                &mut resource,
+            )
+        }
+        .map_err(failed("CreateCommittedResource"))?;
+        Ok(Readback { resource: resource.ok_or(Error { step: "CreateCommittedResource", code: E_FAIL.0 })? })
+    }
+}
+
+impl Queue<'_> {
+    /// Ticks per second of the timestamps of command lists that run on this queue; `None` when the queue
+    /// takes no timestamps (they need a direct or a compute queue).
+    pub fn timestamp_frequency(&self) -> Option<u64> {
+        // SAFETY: plain calls on a live queue.
+        unsafe {
+            let kind = self.queue.GetDesc().Type;
+            if kind != D3D12_COMMAND_LIST_TYPE_DIRECT && kind != D3D12_COMMAND_LIST_TYPE_COMPUTE {
+                return None;
+            }
+            self.queue.GetTimestampFrequency().ok().filter(|&frequency| frequency != 0)
+        }
+    }
+}
+
+impl Commands<'_> {
+    /// Takes timestamp `index` at this point of the list.
+    #[inline]
+    pub fn timestamp(&self, queries: &TimestampQueries, index: u32) {
+        // SAFETY: a plain call on a live list with a live heap.
+        unsafe { self.list.EndQuery(&queries.heap, D3D12_QUERY_TYPE_TIMESTAMP, index) };
+    }
+
+    /// Writes the first `count` timestamps to the start of `readback` when the list has run.
+    pub fn resolve_timestamps(&self, queries: &TimestampQueries, count: u32, readback: &Readback) {
+        // SAFETY: a plain call on a live list with a live heap and buffer.
+        unsafe {
+            self.list.ResolveQueryData(&queries.heap, D3D12_QUERY_TYPE_TIMESTAMP, 0, count, &readback.resource, 0);
+        }
+    }
+}
