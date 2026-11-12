@@ -1366,11 +1366,18 @@ runs it.
 
 - The removals of the D3D12 device on WARP ([warp-decoder.md](warp-decoder.md#results)): not this
   read. The constant record of the next section is the candidate for them.
-- The about 75 MiB that stay behind after a decoder is destroyed in md5 runs on the console.
-- Not run on the console. Whether the console hands a decoder the used memory of a destroyed one
-  as WARP does is not known. The changed instruction is of a kind `gen_pred_blocks` already has
-  there (`ibfe` with a literal width and offset); a console run of a package with the change is
-  still to do.
+- The about 75 MiB that stay behind after a decoder is destroyed in md5 runs on the console. In
+  one launch of many md5 tasks it was 36-187 MiB above the app's start, 187 MiB after an 8-bit 4K
+  task, enough that the memory guard refused the next 4K 10-bit decoder (2026-11-12).
+- On the console (package 0.2.75.0, CI run 43277284568, both fixes): two launches with 21 tasks,
+  8-bit and 10-bit streams alternating in one process, each with md5 checking: every one of the 19
+  decoders that was created is md5-identical to dav1d (8-bit 720p, 1080p and 4K; 10-bit 4K Jellyfin,
+  SVT low-delay and random access, film grain 1080p and 4K, Sparks, the two spatial-layer vectors,
+  superres, resize, 66x66). Two 4K 10-bit tasks of the first launch were refused by the memory
+  guard because the app still held memory of the tasks before them (the point above); both are
+  md5-identical in the second launch, behind 8-bit streams. Whether the console ever handed a
+  decoder memory with an earlier decoder's bytes in the padding is not known; nothing in its
+  earlier output pointed at it.
 
 ## Unwritten fields of a constant record (2026-11-12)
 
@@ -1582,5 +1589,8 @@ processes of the run's 21 passes.
   the fix lost no device, but a few runs without a removal prove little: they happened once or
   twice per run before the palette load was fixed and rarely since. The count line of the next
   runs is the test. The repeat stays until it has been 0 for long enough to say so.
-- **Not run on the console.** The console does not check root descriptors either. What a load at
-  such an address does there is not known; nothing in the console's output pointed at it.
+- **On the console** the fix is md5-identical (the runs above) and costs nothing: `loop_rest`
+  2.58 -> 2.53 ms per dispatching frame on the Jellyfin 4K clip and 4.32 -> 4.28 ms on the 4K film
+  grain clip, whole-run speed within the spread of earlier runs (17.6 and 12.4 fps; 17.1-17.8 and
+  12.4-13.6 before). The console does not check root descriptors either; what the old load did
+  there is not known, nothing in its output pointed at it.
