@@ -417,6 +417,11 @@ void av1_mi_push_block(AV1Decoder *pbi, AV1_COMMON *cm, MACROBLOCKD *xd) {
 
       const int type_size = txw + txh;
       const int type_idx_base = use_filter ? IntraBlockOffset : (IntraBlockOffset - 1 - type_size);
+      // The size of a transform block in 4x4 units, declared here and not inside the loops below: MSVC
+      // 14.51 at /O1 /Ot without /GL read subblk_w from a stack temporary it had not written yet when the
+      // declaration was in the innermost loop (a compiler bug; docs/rust-port.md on main has the listing).
+      const int subblk_w = 1 << txw;
+      const int subblk_h = 1 << txh;
 
       if (is_intrabc) {
         need_above = 0;
@@ -436,8 +441,6 @@ void av1_mi_push_block(AV1Decoder *pbi, AV1_COMMON *cm, MACROBLOCKD *xd) {
             for (int x = x_start; x < x_end; ++x) {
               const int col_off = x << txw;
               const int row_off = y << txh;
-              const int subblk_w = 1 << txw;
-              const int subblk_h = 1 << txh;
               const int have_top = y || xd->up_available;
               const int have_left = x || xd->left_available;
 
@@ -535,6 +538,9 @@ void av1_mi_push_block(AV1Decoder *pbi, AV1_COMMON *cm, MACROBLOCKD *xd) {
       const int cnt_x = 1 << (bw_log_uv - txw - unit_x_log);
 
       const int type_size = txw + txh;
+      // Outside the loops, as for luma above.
+      const int subblk_w = 1 << txw;
+      const int subblk_h = 1 << txh;
 
       if (is_intrabc) {
         need_above = 0;
@@ -550,8 +556,6 @@ void av1_mi_push_block(AV1Decoder *pbi, AV1_COMMON *cm, MACROBLOCKD *xd) {
               const int y = suby + unit_y * cnt_y;
               const int col_off = x << txw;
               const int row_off = y << txh;
-              const int subblk_w = 1 << txw;
-              const int subblk_h = 1 << txh;
               const int have_top = y || xd->chroma_up_available;
               const int have_left = x || xd->chroma_left_available;
               int above_available = have_top;
