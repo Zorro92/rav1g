@@ -20,7 +20,9 @@ use std::ptr::NonNull;
 use windows::Win32::Foundation::{CloseHandle, E_FAIL, E_POINTER};
 use windows::Win32::Graphics::Direct3D::ID3DBlob;
 use windows::Win32::Graphics::Direct3D12::*;
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{
+    DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
+};
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, DXGI_MEMORY_SEGMENT_GROUP, DXGI_MEMORY_SEGMENT_GROUP_LOCAL,
     DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO, IDXGIAdapter3, IDXGIFactory4,
@@ -497,6 +499,21 @@ impl<'a> LayoutRef<'a> {
     }
 }
 
+/// A texture of the application that an output image is copied into.
+#[derive(Clone, Copy)]
+pub struct TextureRef<'a> {
+    resource: &'a ID3D12Resource,
+}
+
+impl<'a> TextureRef<'a> {
+    /// # Safety
+    /// `raw` points to null or to an `ID3D12Resource *` of a texture that holds a reference for `'a`.
+    pub unsafe fn from_raw<P>(raw: &'a *mut P) -> Option<TextureRef<'a>> {
+        // SAFETY: the caller's contract.
+        unsafe { com_ref::<*mut P, ID3D12Resource>(raw) }.map(|resource| TextureRef { resource })
+    }
+}
+
 /// A place in a buffer, as a binding takes it: the GPU virtual address.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct BufferLocation {
@@ -533,6 +550,13 @@ unsafe fn write_barrier(buffer: BufferRef<'_>) -> D3D12_RESOURCE_BARRIER {
                 pResource: unsafe { std::mem::transmute_copy(buffer.resource) },
             }),
         },
+    }
+}
+
+fn resource_state(state: super::BufferState) -> D3D12_RESOURCE_STATES {
+    match state {
+        super::BufferState::ReadWrite => D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        super::BufferState::CopySource => D3D12_RESOURCE_STATE_COPY_SOURCE,
     }
 }
 
@@ -603,6 +627,56 @@ impl<'a> Commands<'a> {
     pub fn write_barrier2(&self, first: BufferRef<'_>, second: BufferRef<'_>) {
         // SAFETY: the barriers are used during the call, while the buffers are borrowed.
         unsafe { self.list.ResourceBarrier(&[write_barrier(first), write_barrier(second)]) };
+    }
+
+    /// Moves a buffer from one state to another, around a copy.
+    #[inline]
+    pub fn transition(&self, buffer: BufferRef<'_>, before: super::BufferState, after: super::BufferState) {
+        // SAFETY: the barrier is used during the call, while the buffer is borrowed.
+        unsafe {
+            self.list.ResourceBarrier(&[transition(buffer.resource, resource_state(before), resource_state(after))]);
+        }
+    }
+
+    /// Copies `size` bytes between buffers.
+    #[inline]
+    pub fn copy_buffer(&self, dst: BufferRef<'_>, dst_offset: u64, src: BufferRef<'_>, src_offset: u64, size: u64) {
+        // SAFETY: live buffers and list.
+        unsafe { self.list.CopyBufferRegion(dst.resource, dst_offset, src.resource, src_offset, size) };
+    }
+
+    /// Copies a plane of an image that lies in a buffer into a texture of the application.
+    #[inline]
+    pub fn copy_buffer_to_texture(&self, texture: TextureRef<'_>, src: BufferRef<'_>, source: &super::TextureSource) {
+        let footprint = D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
+            Offset: source.offset,
+            Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
+                Format: match source.format {
+                    super::TextureFormat::R8 => DXGI_FORMAT_R8_UNORM,
+                    super::TextureFormat::R16 => DXGI_FORMAT_R16_UNORM,
+                    super::TextureFormat::Rgb10A2 => DXGI_FORMAT_R10G10B10A2_UNORM,
+                },
+                Width: source.width,
+                Height: source.height,
+                Depth: 1,
+                RowPitch: source.row_pitch,
+            },
+        };
+        // SAFETY: the copy locations hold the pointers without a reference of their own (the fields are
+        // never dropped) for the length of the call, while both resources are borrowed.
+        unsafe {
+            let dst = D3D12_TEXTURE_COPY_LOCATION {
+                pResource: std::mem::transmute_copy(texture.resource),
+                Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
+            };
+            let src = D3D12_TEXTURE_COPY_LOCATION {
+                pResource: std::mem::transmute_copy(src.resource),
+                Type: D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { PlacedFootprint: footprint },
+            };
+            self.list.CopyTextureRegion(&dst, 0, 0, 0, &src, None);
+        }
     }
 }
 

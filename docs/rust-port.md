@@ -353,6 +353,7 @@ of AOM pass there in two minutes. CI on WARP stays the gate.
 | 2. Queues | `av1_thread.cpp` (151) | `host/thread.rs` (406) | `glue/av1_thread.cpp` (53) | see below |
 | 3. Shader library, constant tables | `av1_compute.cpp` (759) | `host/compute.rs` (729), `host/tables.rs` (167); `gpu/mod.rs` and `gpu/d3d12.rs` grow to 114 and 509 | `glue/av1_compute.cpp` (231, of which 93 includes and 93 table lines) | see below |
 | 4. Inverse transform stage | `transform.cpp` (141) | `host/transform.rs` (159), `host/core.rs` (123); `gpu/d3d12.rs` grows to 669 | `glue/transform.cpp` (18), `glue/av1_core_calls.cpp` (22) | see below |
+| 5. Loop filter, CDEF, superres, loop restoration, film grain, output copy | `loopfilters.cpp` (1,226) | `host/loopfilter.rs` (303), `host/postfilter.rs` (587), `host/film_grain.rs` (448), `host/output.rs` (327); `host/core.rs` grows to 236, `gpu/d3d12.rs` to 743, `gpu/mod.rs` to 152 | `glue/loopfilters.cpp` (42), `glue/av1_core_calls.cpp` grows to 37 | see below |
 
 Module 1, allocator and log lines:
 
@@ -450,6 +451,44 @@ Module 4, the inverse transform stage (`av1_idct_run`), the first stage that rec
   `glue/av1_core_calls.cpp`, which gives those C++ functions `extern "C"` names.
 - Tables: `tx_size_wide` and `tx_size_high` are copies with a test against the header; the scan orders
   (`av1_idct_scans`) are read where they are.
+
+Module 4 on CI (run 43294200425, commit 6018f42): the same gates, all met (251 of 251, md5 of 1005 frames
+and the stage dumps of 7 streams equal to `warp_decoder`); `D3D12 DEVICE REMOVALS: 0` in every pass.
+
+Module 5, everything of `loopfilters.cpp`, as four Rust modules:
+
+- `host/loopfilter.rs`: the deblocking filter (`av1_loopfilter_gpu`: the two shaders that list the edges,
+  the vertical edges in two passes, the horizontal ones in one, or split by `-lfhsplit`).
+- `host/postfilter.rs`: CDEF (`-cdefv1` or the default shader), superres, loop restoration, and
+  `av1_cdef_looprestoration`, which orders them and moves the frame between the slot's frame buffer, the
+  frame's own buffer and the back buffer.
+- `host/film_grain.rs`: the grain parameters, the scaling functions and the random offsets of the grain
+  blocks, and the three dispatches of the synthesis.
+- `host/output.rs`: the output image and the copy into it (`av1_postprocess_copy_output`).
+
+What is kept, call for call: the order of the dispatches and of the barriers, the fields written into
+every record of constants (and no others), the lists the CPU writes for CDEF and loop restoration, the
+layouts `-dumpstages` writes. In particular:
+
+- **The unit fields of loop restoration** (25c85ca): a plane without restoration still gets a unit grid
+  of one unit and the offset 0 in its record, so that no reader computes an address from what an earlier
+  frame left there. The comment that says why went along.
+- **Film grain copies its parameters from one record into the next** by reading them back from the upload
+  memory, bytes the stage did not write included, as the C++ did (`data->params = gen_data->params`). The
+  second record is part of what `-dumpstages` compares, so it has to hold the same bytes.
+- **The output of a frame is two Rust functions with the glue between them.** When the application gives
+  no output image the C++ raised the decoder's error with `aom_internal_error`, which leaves the decode
+  call with a `longjmp` when the caller has set one up. A `longjmp` must not pass a Rust function, so the
+  glue raises the error, between the call that asks for the image and the call that records the copy.
+  When the error returns, the frame goes on without an image, as before.
+- Unit tests hold the scaling function and the random register of film grain and the layout of the output
+  image against the C++ arithmetic as it was written.
+- The backend boundary got state transitions, copies between buffers, and the copy of a plane from a
+  buffer into a texture of the application (`TextureRef`, `TextureSource`).
+
+Checked before the push on the local decoder (wine, vkd3d, lavapipe): the 244 vectors of AOM plain, with
+`-poisonbuf`, with `-cdefv1`, with `-lfhsplit 1` and `-lfhsplit 2`; and two synthetic streams with frame
+size changes and with superres, 64 frames each, md5 equal to the C++ build of CI.
 
 ## Estimate
 

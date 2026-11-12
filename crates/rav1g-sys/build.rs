@@ -43,6 +43,7 @@ const REPLACED_BY_RUST: &[&str] = &[
     "libav1/dx/av1_compute.cpp",
     "libav1/dx/av1_memory.cpp",
     "libav1/dx/av1_thread.cpp",
+    "libav1/dx/loopfilters.cpp",
     "libav1/dx/transform.cpp",
     "libav1/dx/vp9dx_linear_allocator.cpp",
 ];
@@ -376,7 +377,7 @@ const HOST_TYPES: &[&str] = &["AV1Decoder", "AV1_COMMON", "MACROBLOCKD"];
 /// Tables and limits of the entropy decoder that the Rust host modules read: `extern` in its headers, so
 /// the bindings declare the C symbol.
 const HOST_VARS: &[&str] =
-    &["warped_filter", "wedge_params_lookup", "ii_weights1d", "ii_size_scales", "av1_idct_scans"];
+    &["warped_filter", "wedge_params_lookup", "ii_weights1d", "ii_size_scales", "av1_idct_scans", "sgr_params"];
 
 /// Tables that are `static` in a header of the decoder and that the Rust host modules have a copy of
 /// (`crates/rav1g/src/host/tables.rs`): name and the expression of its bytes. The C probe exports them so

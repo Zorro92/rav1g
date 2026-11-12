@@ -20,7 +20,9 @@
 //!   are those of the decoder where they are used.
 //! - [`Commands`]: the recording of a frame's commands: the layout and pipeline of the next dispatches,
 //!   the buffers ([`BufferLocation`]: a place in a buffer) and constants at the binding slots of the
-//!   layout, dispatches, and barriers between dispatches that write and read the same buffer.
+//!   layout, dispatches, barriers between dispatches that write and read the same buffer, state
+//!   transitions ([`BufferState`]) and copies, between buffers and from a buffer into a texture of the
+//!   application ([`TextureRef`], [`TextureSource`]).
 //!
 //! A binding slot is an index into the bindings of a layout in the order of [`LayoutDesc`]: the buffers
 //! the shader reads, the buffers it writes, the constant blocks, then the inline constants. D3D12 has
@@ -33,7 +35,7 @@
 pub(crate) mod d3d12;
 
 pub use d3d12::{
-    BufferLocation, BufferRef, Commands, Device, Layout, LayoutRef, OwnedDevice, PipelineRef, Queue, Upload,
+    BufferLocation, BufferRef, Commands, Device, Layout, LayoutRef, OwnedDevice, PipelineRef, Queue, TextureRef, Upload,
 };
 
 /// Who reads and writes a buffer. The numbers are the `MemoryType` of the C++ host.
@@ -86,6 +88,38 @@ pub struct LayoutDesc {
     pub constant_blocks: u32,
     /// 32-bit constants set inline, in the constant block behind the others; 0: none.
     pub inline_constants: u32,
+}
+
+/// The state a buffer is in between commands, for the transitions around copies.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BufferState {
+    /// Shaders read and write it.
+    ReadWrite,
+    CopySource,
+}
+
+/// The format of a plane of an output image as a texture.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TextureFormat {
+    /// One byte a sample.
+    R8,
+    /// Two bytes a sample.
+    R16,
+    /// Three samples of 10 bits in 32 bits.
+    Rgb10A2,
+}
+
+/// A plane of an image in a buffer, as the source of a copy into a texture.
+#[derive(Clone, Copy, Debug)]
+pub struct TextureSource {
+    /// Where the plane starts in the buffer, in bytes.
+    pub offset: u64,
+    pub format: TextureFormat,
+    /// Texels of a row and rows.
+    pub width: u32,
+    pub height: u32,
+    /// Bytes from one row to the next.
+    pub row_pitch: u32,
 }
 
 /// A call of the backend that failed: which one, and its code (an `HRESULT` in D3D12).

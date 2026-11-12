@@ -15,10 +15,17 @@
 //! are those of the C++ host (`rav1g_sys::host`), read and written in place, until the frame pipeline
 //! that owns them is Rust too (step 4).
 
+// The stages index several tables of the C structs with one index, as the C++ they come from does.
+#![allow(clippy::needless_range_loop)]
+
 mod compute;
 mod core;
+mod film_grain;
 pub(crate) mod log;
+mod loopfilter;
 mod memory;
+mod output;
+mod postfilter;
 mod tables;
 mod thread;
 mod transform;

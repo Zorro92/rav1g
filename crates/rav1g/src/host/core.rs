@@ -13,19 +13,39 @@
 //! list and the buffers, and calls a stage with pointers to them. The functions here turn those into the
 //! types of the GPU backend boundary (`crate::gpu`) and hand out the constants of a stage.
 
-use std::ffi::{CStr, c_int};
+use std::ffi::{CStr, c_char, c_int};
 
 use windows::Win32::Graphics::Direct3D12::ID3D12GraphicsCommandList;
 
 use super::memory::rav1g_poison_constants;
 use crate::gpu::d3d12::com_ref;
 use crate::gpu::{BufferLocation, BufferRef, Commands, LayoutRef, PipelineRef};
-use crate::sys::host::{Av1Core, ComputeCommandBuffer, ComputeShader, GpuBufferObject};
+use crate::sys::host::{
+    Av1Core, ComputeCommandBuffer, ComputeShader, GpuBufferObject, HwFrameBuffer, HwOutputImage, av1_stage_dump_region,
+};
 
 // The functions of av1_core.cpp the stages call, through crates/rav1g-sys/glue/av1_core_calls.cpp.
 unsafe extern "C" {
     fn rav1g_core_perf_gpu_mark(dec: *mut Av1Core, stage: c_int);
-    fn rav1g_core_stage_dump_residuals(dec: *mut Av1Core, stage: *const std::ffi::c_char);
+    fn rav1g_core_perf_add(dec: *mut Av1Core, id: c_int, start_ticks: i64);
+    fn rav1g_core_stage_dump_residuals(dec: *mut Av1Core, stage: *const c_char);
+    fn rav1g_core_stage_dump_fb(
+        dec: *mut Av1Core,
+        stage: *const c_char,
+        fb: *const HwFrameBuffer,
+        dims: *const HwFrameBuffer,
+    );
+    fn rav1g_core_stage_dump_output(dec: *mut Av1Core, stage: *const c_char, img: *const HwOutputImage, size: usize);
+    fn rav1g_core_stage_dump_data(
+        dec: *mut Av1Core,
+        stage: *const c_char,
+        layout: *const c_char,
+        regions: *const av1_stage_dump_region,
+        count: c_int,
+    );
+    /// `av1_perf_ticks` of av1_core.cpp (`dx/av1_core.h`): the clock of the timing run, 0 while timing is
+    /// off.
+    fn av1_perf_ticks() -> i64;
 }
 
 /// The recording of the frame the decoder is building.
@@ -120,4 +140,97 @@ pub(crate) unsafe fn perf_gpu_mark(dec: *mut Av1Core, stage: impl TryInto<c_int>
 pub(crate) unsafe fn stage_dump_residuals(dec: *mut Av1Core, stage: &'static CStr) {
     // SAFETY: the caller's contract.
     unsafe { rav1g_core_stage_dump_residuals(dec, stage.as_ptr()) };
+}
+
+/// `av1_perf_ticks`: the start of a CPU timer; 0 while timing is off.
+pub(crate) fn perf_ticks() -> i64 {
+    // SAFETY: reads a clock.
+    unsafe { av1_perf_ticks() }
+}
+
+/// `av1_perf_add`: adds the time since `start_ticks` to a CPU timer of the frame (nothing for a start of
+/// 0).
+///
+/// # Safety
+/// `dec` is the decoder.
+pub(crate) unsafe fn perf_add(dec: *mut Av1Core, id: impl TryInto<c_int>, start_ticks: i64) {
+    let Ok(id) = id.try_into() else { unreachable!("a timer number") };
+    // SAFETY: the caller's contract.
+    unsafe { rav1g_core_perf_add(dec, id, start_ticks) };
+}
+
+/// `av1_stage_dump_active`: -dumpstages wants the frame of the current command list.
+///
+/// # Safety
+/// `dec` is the decoder.
+pub(crate) unsafe fn stage_dump_active(dec: *const Av1Core) -> bool {
+    // SAFETY: the caller's contract.
+    unsafe { (*dec).curr_frame_data.as_ref().is_some_and(|td| td.dump_active != 0) }
+}
+
+/// `av1_stage_dump_fb`: -dumpstages, a frame buffer behind a stage, in its current layout. `dims`: the
+/// buffer whose visible size the copy has when `fb` is a back buffer that only has a layout; null: `fb`.
+///
+/// # Safety
+/// `dec` is the decoder while it records a frame; `fb` and `dims` are frame buffers of it.
+pub(crate) unsafe fn stage_dump_fb(
+    dec: *mut Av1Core,
+    stage: &'static CStr,
+    fb: *const HwFrameBuffer,
+    dims: *const HwFrameBuffer,
+) {
+    // SAFETY: the caller's contract.
+    unsafe { rav1g_core_stage_dump_fb(dec, stage.as_ptr(), fb, dims) };
+}
+
+/// `av1_stage_dump_output`: -dumpstages, the output image as it lies in the back buffer.
+///
+/// # Safety
+/// `dec` is the decoder while it records a frame; `img` is the image of the frame.
+pub(crate) unsafe fn stage_dump_output(
+    dec: *mut Av1Core,
+    stage: &'static CStr,
+    img: *const HwOutputImage,
+    size: usize,
+) {
+    // SAFETY: the caller's contract.
+    unsafe { rav1g_core_stage_dump_output(dec, stage.as_ptr(), img, size) };
+}
+
+/// `av1_stage_dump_cb_region`: the region of a record of constants of the frame's command buffer.
+///
+/// # Safety
+/// `dec` is the decoder while it records a frame; `constants` are of that frame.
+pub(crate) unsafe fn stage_dump_constants<T>(
+    dec: *const Av1Core,
+    constants: &Constants<T>,
+    size: usize,
+) -> av1_stage_dump_region {
+    // SAFETY: the caller's contract: the record lies in the constant memory of the frame.
+    unsafe {
+        let memory = &*(*(*dec).curr_frame_data).command_buffer.cb_alloc;
+        let offset = constants.data.cast::<u8>().offset_from(memory.host_ptr.cast::<u8>()) as usize;
+        av1_stage_dump_region { src: memory.dev, offset, size, uav: 0 }
+    }
+}
+
+/// `av1_stage_dump_data`: -dumpstages, the buffers a stage reads besides the frame. The regions are
+/// copied one behind the other into one dump; `layout` is the text that describes them, cut to what the
+/// C++ had room for (`limit` bytes with its end).
+///
+/// # Safety
+/// `dec` is the decoder while it records a frame; the regions are of buffers of it.
+pub(crate) unsafe fn stage_dump_data(
+    dec: *mut Av1Core,
+    stage: &'static CStr,
+    layout: &str,
+    limit: usize,
+    regions: &[av1_stage_dump_region],
+) {
+    let mut text: Vec<u8> = layout.bytes().take(limit - 1).collect();
+    text.push(0);
+    // SAFETY: the caller's contract; `text` ends with a 0.
+    unsafe {
+        rav1g_core_stage_dump_data(dec, stage.as_ptr(), text.as_ptr().cast(), regions.as_ptr(), regions.len() as c_int);
+    }
 }

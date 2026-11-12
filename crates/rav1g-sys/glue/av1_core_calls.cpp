@@ -17,6 +17,21 @@ extern "C" {
 
 void rav1g_core_perf_gpu_mark(Av1Core *dec, int stage) { av1_perf_gpu_mark(dec, stage); }
 
+void rav1g_core_perf_add(Av1Core *dec, int id, int64_t start_ticks) { av1_perf_add(dec, id, start_ticks); }
+
 void rav1g_core_stage_dump_residuals(Av1Core *dec, const char *stage) { av1_stage_dump_residuals(dec, stage); }
+
+void rav1g_core_stage_dump_fb(Av1Core *dec, const char *stage, const HwFrameBuffer *fb, const HwFrameBuffer *dims) {
+  av1_stage_dump_fb(dec, stage, fb, dims);
+}
+
+void rav1g_core_stage_dump_output(Av1Core *dec, const char *stage, const HwOutputImage *img, size_t size) {
+  av1_stage_dump_output(dec, stage, img, size);
+}
+
+void rav1g_core_stage_dump_data(Av1Core *dec, const char *stage, const char *layout,
+                                const av1_stage_dump_region *regions, int count) {
+  av1_stage_dump_data(dec, stage, layout, regions, count);
+}
 
 }  // extern "C"

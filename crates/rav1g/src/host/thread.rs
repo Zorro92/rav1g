@@ -229,7 +229,7 @@ pub unsafe extern "C" fn rav1g_mt_queue_push(queue: *mut DataPtrQueueMT, item: *
 /// # Safety
 /// See [`rav1g_mt_queue_push`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_mt_queue_get(queue: *mut DataPtrQueueMT) -> *mut c_void {
+pub(crate) unsafe extern "C" fn rav1g_mt_queue_get(queue: *mut DataPtrQueueMT) -> *mut c_void {
     // SAFETY: the caller's contract.
     let mut locked = unsafe { Locked::lock(queue) };
     while locked.inner().m_QueueNotEmpty == 0 {
