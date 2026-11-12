@@ -444,7 +444,7 @@
     <ClInclude Include="..\dx\types.h" />
     <ClInclude Include="..\dx\vp9dx_linear_allocator.h" />
   </ItemGroup>
-  <ItemGroup>
+  <ItemGroup Condition="'$(Rav1gPrebuiltShaders)'==''">
     <FxCompile Include="..\dx\shaders\copy_plane.hlsl" />
     <FxCompile Include="..\dx\shaders\copy_plane_10bit10x3.hlsl" />
     <FxCompile Include="..\dx\shaders\fill_buffer.hlsl">
@@ -1001,7 +1001,7 @@
     <FxCompile Include="..\dx\shaders\reconstruct_block_hbd.hlsl" />
     <FxCompile Include="..\dx\shaders\upscaling.hlsl" />
   </ItemGroup>
-  <ItemGroup>
+  <ItemGroup Condition="'$(Rav1gPrebuiltShaders)'==''">
     <FxCompile Include="..\dx\shaders\cdef_filter.hlsl">
       <FileType>Document</FileType>
     </FxCompile>
@@ -1015,7 +1015,7 @@
       <FileType>Document</FileType>
     </FxCompile>
   </ItemGroup>
-  <ItemGroup>
+  <ItemGroup Condition="'$(Rav1gPrebuiltShaders)'==''">
     <FxCompile Include="..\dx\shaders\loop_restoration.hlsl">
       <FileType>Document</FileType>
     </FxCompile>
@@ -1024,12 +1024,10 @@
     <None Include="..\LICENSE" />
     <None Include="..\PATENTS" />
   </ItemGroup>
-  <!-- /p:Rav1gPrebuiltShaders: no shader is compiled here (see the item definitions above). The items are
-       taken out, not marked as excluded: some of them carry an ExcludedFromBuild of their own, which would
-       win over a default. -->
-  <ItemGroup Condition="'$(Rav1gPrebuiltShaders)'!=''">
-    <FxCompile Remove="@(FxCompile)" />
-  </ItemGroup>
+  <!-- /p:Rav1gPrebuiltShaders: no shader is compiled here. The three item groups of the shaders are left out
+       by their condition; the headers come from the directory instead (see the item definitions above).
+       An <FxCompile Remove="@(FxCompile)" /> after them did not keep MSBuild's FxCompile target from running
+       in the solution build, so the items are never defined in that case. -->
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
