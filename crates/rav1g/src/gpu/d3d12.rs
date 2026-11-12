@@ -870,6 +870,14 @@ pub struct CommandAllocator {
 }
 
 impl CommandAllocator {
+    /// The memory is free for the commands of the next frame of its slot. The frame before has completed
+    /// on the GPU (its slot went back to the pool behind its fence), which is what makes the call valid;
+    /// what it returns has nothing to say then.
+    pub fn reset(&self) {
+        // SAFETY: a plain call on a live allocator.
+        let _ = unsafe { self.allocator.Reset() };
+    }
+
     /// Hands the reference over as a raw `ID3D12CommandAllocator *`.
     pub fn into_raw(self) -> *mut c_void {
         self.allocator.into_raw()
@@ -883,6 +891,19 @@ pub struct CommandList {
 }
 
 impl CommandList {
+    /// Starts the recording of a frame on the allocator of its slot. The list is closed between two
+    /// frames, so the call does not fail for a reason the decoder could act on.
+    pub fn reset(&self, allocator: &CommandAllocator) {
+        // SAFETY: a plain call on a live list with a live allocator.
+        let _ = unsafe { self.list.Reset(&allocator.allocator, None) };
+    }
+
+    /// Ends the recording of a frame. An error of the recording shows as the removal of the device.
+    pub fn close_quietly(&self) {
+        // SAFETY: a plain call on a live list.
+        let _ = unsafe { self.list.Close() };
+    }
+
     /// Ends the recording.
     pub fn close(&self) -> Result<(), Error> {
         // SAFETY: a plain call on a live list.
@@ -902,6 +923,12 @@ pub struct Fence {
 }
 
 impl Fence {
+    /// `event` is set when the fence reaches `value`.
+    pub fn set_event(&self, value: u64, event: &Event) {
+        // SAFETY: a plain call on a live fence with a live event.
+        let _ = unsafe { self.fence.SetEventOnCompletion(value, event.handle) };
+    }
+
     /// Hands the reference over as a raw `ID3D12Fence *`.
     pub fn into_raw(self) -> *mut c_void {
         self.fence.into_raw()
@@ -919,6 +946,15 @@ impl Event {
         // SAFETY: a plain call; the handle is closed by `close`.
         let handle = unsafe { CreateEventW(None, false, false, None) };
         Ok(Event { handle: handle.map_err(failed("CreateEvent"))? })
+    }
+
+    /// The event of a struct that keeps its handle as a pointer.
+    ///
+    /// # Safety
+    /// `raw` is the handle of a live event.
+    pub unsafe fn borrowed<P>(raw: &*mut P) -> &Event {
+        // SAFETY: an `Event` is the handle, which is the pointer (both `repr(transparent)`).
+        unsafe { &*std::ptr::from_ref(raw).cast::<Event>() }
     }
 
     /// The handle, for a struct that keeps it as one.
@@ -1022,6 +1058,22 @@ impl Device<'_> {
 }
 
 impl Queue<'_> {
+    /// Submits the commands of a frame.
+    pub fn execute(&self, list: &CommandList) {
+        // SAFETY: plain calls on a live queue with a closed list.
+        unsafe {
+            if let Ok(list) = list.list.cast::<ID3D12CommandList>() {
+                self.queue.ExecuteCommandLists(&[Some(list)]);
+            }
+        }
+    }
+
+    /// `fence` reaches `value` when the commands submitted so far are done.
+    pub fn signal(&self, fence: &Fence, value: u64) {
+        // SAFETY: a plain call on a live queue with a live fence.
+        let _ = unsafe { self.queue.Signal(&fence.fence, value) };
+    }
+
     /// Ticks per second of the timestamps of command lists that run on this queue; `None` when the queue
     /// takes no timestamps (they need a direct or a compute queue).
     pub fn timestamp_frequency(&self) -> Option<u64> {

@@ -72,9 +72,6 @@ const FILMGRAIN_RANDOM_INTS: usize = 65536 + 1;
 unsafe extern "C" {
     /// `av1_drain_gpu_decoder`: joins the completion thread.
     fn av1_drain_gpu_decoder(dec: *mut Av1Core);
-    /// The C++ constructor of the allocator, for the C++ that still calls it through its virtual functions
-    /// (crates/rav1g-sys/glue/av1_core_rest.cpp).
-    fn rav1g_cpp_new_allocator(memory: *mut c_void) -> *mut av1_memory_allocator;
     fn free(memory: *mut c_void);
 }
 
@@ -83,7 +80,7 @@ const fn size_of_table<T>(_: *const T) -> usize {
     size_of::<T>()
 }
 
-fn to_mib(bytes: u64) -> f64 {
+pub(crate) fn to_mib(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
 }
 
@@ -860,7 +857,9 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
             return -1;
         }
 
-        let mem = rav1g_cpp_new_allocator(cfg.host_memory);
+        // The allocator lies at the start of the application's memory, empty.
+        let mem = cfg.host_memory.cast::<av1_memory_allocator>();
+        mem.write_bytes(0, 1);
         rav1g_memory_setup(mem, cfg.host_memory.cast(), cfg.host_size);
         rav1g_memory_host_allocate(mem, size_of::<av1_memory_allocator>(), 0);
         let dec = rav1g_memory_host_allocate(mem, size_of::<Av1Core>(), 0).cast::<Av1Core>();

@@ -23,6 +23,7 @@ mod compute;
 mod core;
 mod create;
 mod film_grain;
+mod frame;
 mod intra_v2;
 pub(crate) mod log;
 mod loopfilter;

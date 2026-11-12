@@ -232,6 +232,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", manifest.join("shared.h").display());
     println!("cargo:rerun-if-changed={}", manifest.join("host.hpp").display());
     println!("cargo:rerun-if-changed={}", manifest.join("helpers.c").display());
+    println!("cargo:rerun-if-changed={}", manifest.join("host_entry.c").display());
 
     let shaders = shader_dir();
     let sources = read_sources(&props, &repo);
@@ -278,6 +279,9 @@ fn main() {
     }
     // The entry points that are macros in the C headers, as functions (helpers.c).
     c_size.include(&manifest).file(manifest.join("helpers.c"));
+    // The entry points of the host that can end with the decoder's error, which C has to raise
+    // (host_entry.c).
+    c_size.file(manifest.join("host_entry.c"));
     // The C++ side of the functions Rust has taken over (glue/): compiled with the host, as the files they
     // stand in for were.
     let glue = manifest.join("glue");

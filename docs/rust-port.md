@@ -687,7 +687,8 @@ The parts, each green on CI before the next:
 | Part | Out of the C++ rest | Rust | Notes |
 | --- | --- | --- | --- |
 | 1. Creation and release | the buffer plan (`av1_allocate_buffers`), the memory query, the budget guard and `av1_create_gpu_decoder`, the "MEMORY" summary, `av1_allocate_pbi`, the pool of frame buffers, `av1_destroy_gpu_decoder` (826 lines) | `host/create.rs` (1,424 with tests); `gpu/d3d12.rs` grows to 937 | see below |
-| 2. Timers and stage dumps | the timers, timestamps and the record of a frame of the timing run (`-gputime`, `-gputimedetail`), the switches `av1_set_perf_callback`, `av1_set_perf_detail`, `av1_set_inter_fast`; the stage dumps (`-dumpstages`) (505 lines) | `host/perf.rs` (471), `host/stage_dump.rs` (449); `host/core.rs` 242; `gpu/d3d12.rs` grows to 1,063 | see below |
+| 2. Timers and stage dumps | the timers, timestamps and the record of a frame of the timing run (`-gputime`, `-gputimedetail`), the switches `av1_set_perf_callback`, `av1_set_perf_detail`, `av1_set_inter_fast`; the stage dumps (`-dumpstages`) (505 lines) | `host/perf.rs` (507), `host/stage_dump.rs` (536), `host/rest_calls.rs` (126, until part 4); `host/core.rs` 242; `gpu/d3d12.rs` grows to 1,054 | see below |
+| 3. A frame on the decode thread | `av1_setup_frame` with the slot, the clears of `-asyncclear`, the back buffer, the references, the palette buffer and the coefficient layout; the other functions the entropy decoder calls (`av1_setup_macroblockd`, `av1_setup_sec_data`, `av1_setup_ext_coef_buffer`, `av1_intra_palette`, `av1_reallocate_frame_buffer`, `av1_release_fb_callback`, `av1_sequence_fits_decoder`, `av1_setup_context_buffers`); the command buffer from prepare to commit; `av1_decode_frame_gpu`; the switches `av1_set_async_clear`, `av1_set_intra_v2`, `av1_shader_variant` (825 lines) | `host/frame.rs` (1,341 with tests), `crates/rav1g-sys/host_entry.c` (47); `gpu/d3d12.rs` grows to 1,106 | see below |
 
 Part 1, creation and release:
 
@@ -752,6 +753,41 @@ Part 2, timers and stage dumps:
   frames, a show-existing frame) written by the build before this part and by this one, equal by
   `stage_dump.py compare`; the lines of `-gputime`, `-gputimedetail` and `-gputimeisolate -interfast`, the
   same lines with other numbers.
+
+Part 2 on CI (run 43321473278, commit 07e4930): all jobs green: `rav1g-dec` 251 of 251, the order check,
+137 of 137 with `-poisonmi` and with `-poisonbuf`, md5 of 1005 frames and the stage dumps of 7 streams
+equal to `warp_decoder`, the "MEMORY" lines of the ten configurations equal, the timing smoke test with
+its counter checks on the Rust timers, 251 of 251 with the program of the Linux build; `D3D12 DEVICE
+REMOVALS: 0` in every pass.
+
+Part 3, a frame on the decode thread:
+
+- **`aom_internal_error` is raised by C.** Two functions of this part can end with the decoder's error,
+  which leaves the decode call with a `longjmp` when the caller has set one up: `av1_setup_frame` (no
+  palette buffer; no room for the coefficients of a frame with very small tiles) and `av1_decode_frame_gpu`
+  (no output image). A `longjmp` must not pass a Rust function, so both are C functions now
+  (`crates/rav1g-sys/host_entry.c`) that call the Rust in parts (`rav1g_setup_frame_begin`, `_coefs`, `_end`;
+  `rav1g_decode_frame_record`, `_submit`) and raise the error between two parts. When the error returns
+  (no jump set up) the next part runs, as the C++ went on behind the call. The glue that did this for the
+  output copy alone is only used by `show_existing_frame` now, which is C++ until part 4.
+- **The functions the tile threads call** (`av1_setup_macroblockd` once per tile, `av1_intra_palette` per
+  palette block, the two that switch a tile to the share of a second slot) are `extern "C"` Rust
+  functions the C calls directly, with the integer arithmetic of the C++ for every cursor a tile gets.
+- **The frame setup** keeps its order: the slot, the clears (or the reason to skip one with `-asyncclear`),
+  the schedule of `-intrav2`, the back buffer, the counts of the frame's buffer and of its references
+  under the lock of the pool, then the palette buffer with its budget check and its "MEMORY" lines.
+- **The command buffer**: reset of the slot's allocator and of the list, the constants from the start of
+  the slot's upload memory; at commit the resolve of the timestamps, close, execute, the signal of the
+  slot's fence and its event, and the snapshot of the CPU timers. The backend boundary got those calls
+  (`CommandAllocator::reset`, `CommandList::reset` and `close_quietly`, `Queue::execute` and `signal`,
+  `Fence::set_event`).
+- The allocator no longer needs its C++ constructor: no C++ calls its virtual functions any more.
+- Tests: the stamp of the intra schedule, a scaled reference, and the constants that the bindings do not
+  carry over against the headers (`MAX_MB_PLANE`, `REF_INVALID_SCALE`, `TRANSLATION`,
+  `YV12_FLAG_HIGHBITDEPTH`, the guard margin of a buffer).
+- Checked before the push on the local decoder: the 244 vectors plain, with `-poisonbuf -t 4` and with
+  `-intrav2 -interfast -asyncclear -t 4`; the stage dumps of seven vectors equal to those of the build
+  before part 2; the unit tests of the crate under wine.
 
 ## Estimate
 
