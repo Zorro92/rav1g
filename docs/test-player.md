@@ -2495,7 +2495,7 @@ python3 testing/stage_dump/lf_model.py console/<clip>_f0.stages --lists warp/<cl
 A stage the model reproduces was computed as the shader is written. `--variant console-0.2.25` is the
 filter as the console ran it with the shaders before this change (package 0.2.25.0), with one step of the 8-tap branch of
 the vertical filter changed; that is how the cause of the 8-bit mismatch was found
-([gpu-av1-decoder.md](gpu-av1-decoder.md#a-paired-read-before-an-overlapping-in-place-write-2026-11-12-fix-not-yet-run-on-the-console)).
+([gpu-av1-decoder.md](gpu-av1-decoder.md#a-paired-read-before-an-overlapping-in-place-write-2026-11-12)).
 8-bit frames only; exit code 1 when a stage differs from the model.
 
 ## Shader survey
@@ -2531,7 +2531,7 @@ and a listing with a paired read before an overlapping in-place write ([Listings
 After the survey the workflow reads the listings of both variants with
 `testing/dxbc_scan/scan.py` and stops when it finds the pair of instructions that the console's
 driver compiled wrongly in the 8-bit vertical loop filter
-([gpu-av1-decoder.md](gpu-av1-decoder.md#a-paired-read-before-an-overlapping-in-place-write-2026-11-12-fix-not-yet-run-on-the-console)):
+([gpu-av1-decoder.md](gpu-av1-decoder.md#a-paired-read-before-an-overlapping-in-place-write-2026-11-12)):
 
 - an *overlapping in-place write*: an instruction that writes components of a temp register and
   reads, of the same register, for a written component, another component that it also writes

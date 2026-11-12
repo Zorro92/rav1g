@@ -79,11 +79,11 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
   from a width left over from an earlier frame (0 at first: every row of the frame became its
   first sample) in upstream, on every GPU. Fixed in the host code; the shader is checked on a
   host against libaom's normative upscale (`testing/superres_check`). On WARP an SVT-AV1
-  stream with all superres denominators is md5-identical to dav1d. Not yet run on the console.
+  stream with all superres denominators is md5-identical to dav1d, on the console too.
 - **Spatial layers**: of a temporal unit the frame of the highest spatial layer is output, as
   libaom and dav1d do by default (it was every layer's frame); `AV1D_SET_OUTPUT_ALL_LAYERS`
   and `AV1D_SET_OPERATING_POINT` choose otherwise. AOM's four vectors with two spatial layers
-  are md5-identical on WARP.
+  are md5-identical on WARP and on the console.
 - **A new sequence with larger frames** (or more bits) than the decoder was created for:
   `aom_codec_decode` returns `AOM_CODEC_NEEDS_RECONFIGURE` before it decodes anything of the
   sequence, and the application creates a decoder for it and passes the temporal unit again
@@ -91,9 +91,10 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
 - **References of different sizes in one frame**: a warped block was clamped to the size of
   the frame's first reference instead of its own, and a block with global motion was warped
   from a scaled reference, which libaom and the specification do not do. Both fixed and
-  checked on a host against libaom (`testing/warp_check`). Not yet run on the console.
-- **Known bug on the console only, 8-bit streams** (cause found, fix not yet run on the console):
-  md5-identical to dav1d on WARP, wrong on the console: luma off by ±1–2 on about 0.4% of the pixels
+  checked on a host against libaom (`testing/warp_check`); the console output is unchanged.
+- **8-bit streams on the console** (fixed, rav1g 709cf04; verified on the console with package
+  0.2.31.0: every 8-bit stream we have is md5-identical to dav1d, the 10-bit set unchanged, frame
+  times unchanged). Before the fix they were md5-identical to dav1d on WARP and wrong on the console: luma off by ±1–2 on about 0.4% of the pixels
   from the first (key) frame on, chroma exact, 10-bit streams not affected. The console's driver
   compiles one instruction of the 8-bit vertical loop filter wrongly: in the 8-tap branch FXC emitted
   `iadd r2.x, r3.w, -r3.y` and, four instructions later, `iadd r3.yw, r3.wwww, -r4.xxxy`, which
@@ -102,12 +103,14 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
   (40240 edges in that branch); the rest of the two 8-bit filters runs as written. The branch is
   rewritten so that FXC does not emit the pair, the workflow scans the listings of all shaders for
   such pairs (`testing/dxbc_scan`), and the output on WARP is unchanged
-  ([gpu-av1-decoder.md](docs/gpu-av1-decoder.md#a-paired-read-before-an-overlapping-in-place-write-2026-11-12-fix-not-yet-run-on-the-console)).
+  ([gpu-av1-decoder.md](docs/gpu-av1-decoder.md#a-paired-read-before-an-overlapping-in-place-write-2026-11-12)).
+- **Every stream we test is md5-identical to dav1d on the console and on WARP**: 251 conformance
+  streams on WARP; on the console the 8-bit and 10-bit clips from 66x66 to 4K, hidden frames, film
+  grain, global motion, spatial layers, size changes, scaled references and superres.
   The 10-bit stream with scaled references that stood here as wrong on the console is right: its md5
   references had been made with ffmpeg scaling every frame to the size of the first.
 
-Next targets: the console run of the 8-bit loop filter change (md5 of the 8-bit streams, the
-10-bit set unchanged), entropy decoding on the CPU (frame-parallel or a faster
+Next targets: entropy decoding on the CPU (frame-parallel or a faster
 parser), and inter and intra prediction on the GPU. The Rust port starts once 4K GPU and CPU time per frame are well
 under 41.7 ms on heavy content.
 

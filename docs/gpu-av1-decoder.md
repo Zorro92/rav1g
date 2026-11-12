@@ -495,7 +495,7 @@ stream on 53 of 64, as before. Something in those paths gives a different result
 than on WARP (as the double-precision helper did for global motion).
 
 *Correction, 2026-11-12:* that holds for the 8-bit streams only
-([the cause](#a-paired-read-before-an-overlapping-in-place-write-2026-11-12-fix-not-yet-run-on-the-console)). The scaled-reference stream was never wrong on the console: its md5 references were
+([the cause](#a-paired-read-before-an-overlapping-in-place-write-2026-11-12)). The scaled-reference stream was never wrong on the console: its md5 references were
 (see [below](#console-only-mismatches-located-by-stage-dumps-2026-11-12)).
 
 ## Bit fields of width 0 (2026-11-12, candidate fix, not yet run on the console)
@@ -535,7 +535,7 @@ only; WARP right; the same output with every option), but it is an inference fro
 **not confirmed on the console**.
 
 *Result, 2026-11-12:* it was not the cause. The console's output did not change with the table masks;
-the 8-bit mismatch is one instruction of the vertical loop filter ([below](#a-paired-read-before-an-overlapping-in-place-write-2026-11-12-fix-not-yet-run-on-the-console)), and the
+the 8-bit mismatch is one instruction of the vertical loop filter ([below](#a-paired-read-before-an-overlapping-in-place-write-2026-11-12)), and the
 scaled-reference stream was right all along (wrong md5 references). The table masks stay: the results
 are the same and the survey's rule costs nothing.
 
@@ -599,7 +599,7 @@ Not run on the console: everything in this section.
 ## Console-only mismatches located by stage dumps (2026-11-12)
 
 *Correction, 2026-11-12:* this section was written with two console-only mismatches in mind. There is
-one, the 8-bit loop filter ([its cause](#a-paired-read-before-an-overlapping-in-place-write-2026-11-12-fix-not-yet-run-on-the-console)). The other, a 10-bit stream with scaled references, was an
+one, the 8-bit loop filter ([its cause](#a-paired-read-before-an-overlapping-in-place-write-2026-11-12)). The other, a 10-bit stream with scaled references, was an
 error in the md5 references it was compared with (ffmpeg scaled every frame to the size of the first;
 [above](#layers-new-sequences-mixed-reference-sizes-all-conformance-streams-pass-on-warp-2026-11-12)):
 the console decodes that stream correctly.
@@ -690,7 +690,7 @@ sequence (each output from its own sum, as the 14-tap branch does), with the lis
 table: 152, 154, 167, 167. The step is the right one and so is the instruction. What that instruction
 read is not what is written above: fourteen edges cannot tell `p1.y - p1.z` from other small values,
 and a 3840x2160 frame can. The console ran `iadd r2.x, r3.w, -r3.y` as `r3.z - r3.x`
-([below](#a-paired-read-before-an-overlapping-in-place-write-2026-11-12-fix-not-yet-run-on-the-console)), which gives the same four values here.
+([below](#a-paired-read-before-an-overlapping-in-place-write-2026-11-12)), which gives the same four values here.
 
 ### The edge lists: read through, nothing unwritten
 
@@ -723,7 +723,7 @@ are not the difference either, and nothing was changed. `-dumpstages` now saves 
 constants and the mode info (format 2, [test-player.md](test-player.md#stage-dumps--dumpstages)), so
 that a console dump says which of the three inputs of `lf_vert` differs, if any.
 
-## A paired read before an overlapping in-place write (2026-11-12, fix not yet run on the console)
+## A paired read before an overlapping in-place write (2026-11-12)
 
 The 8-bit streams are wrong on the console because its driver, which compiles the shaders' DXBC again
 for its GPU, compiles one instruction of the 8-bit vertical loop filter wrongly. WARP runs the same
@@ -894,3 +894,12 @@ The change itself. Expected there: the 8-bit streams md5-identical to dav1d (the
 Chimera cut, `av1-1-b8-03-sizeup` and `-sizedown`, `av1-1-b8-01-size-66x66`), the 10-bit regression set
 unchanged. If an 8-bit stream is still wrong, `-dumpstages` of a wrong frame and `lf_model.py` on the
 dump say whether a loop filter stage is still not as written.
+
+**Console result (package 0.2.31.0, rav1g 709cf04).** md5-identical to dav1d: the 8-bit 4K, 720p and 1080p
+cuts, `av1-1-b8-03-sizeup` and `-sizedown` (with native-size references), `av1-1-b8-01-size-66x66`, the
+SVC vector, both resize streams, the superres stream, and the 10-bit set (4K low-delay and random access,
+Jellyfin 4K, 1080p and 4K film grain with global motion, 1200 frames of Sparks). Frame times unchanged
+within noise (`-gputime`, against package 0.2.25.0: GPU busy 30.3 vs 31.0 ms, 51.2 vs 51.1 ms and 35.7 vs
+35.8 ms on three 4K clips; the vertical loop filter 0.81 vs 0.83 ms). With this, no stream we test differs
+from dav1d on the console or on WARP.
+
