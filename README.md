@@ -73,8 +73,12 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
   GPUs with waves of 32 would too. The shaders now wait for each other with group syncs, and
   host checks keep it that way (`testing/sync_check`). On WARP 245 of 251 conformance streams
   are md5-identical to their reference (AOM's test vectors, dav1d); the rest are known bugs
-  (super-resolution, spatial layers, a size change). Not yet run on the console.
-- **Known bug, 8-bit streams**: an 8-bit 4K stream decodes with luma off by ±1–2 on about 0.4%
+  (super-resolution, spatial layers, a size change). On the console the output is unchanged
+  (md5-identical to dav1d on the 10-bit and film-grain clips) and the frame time is the same
+  within noise (e.g. 27.9 → 28.5 fps and 26.0 → 25.9 fps on two 12.6 Mbps 4K clips).
+- **Known bugs on the console only, 8-bit streams and scaled references**: md5-identical to dav1d on
+  WARP, still wrong on the console after the lockstep fix, so something in those paths depends on
+  the console's GPU. An 8-bit 4K stream decodes with luma off by ±1–2 on about 0.4%
   of the pixels from the first (key) frame on; chroma is exact. Upstream behaviour (the same
   with every new option switched off). 10-bit streams are not affected.
 

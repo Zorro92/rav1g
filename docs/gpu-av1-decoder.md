@@ -472,12 +472,24 @@ between passes that touch only a thread's own samples. On WARP the conformance r
 are in small shaders: `idct_lossless` +13%, the 20 shaders for scaled references +7 to +11%,
 `loopfilter_hor` +8 to +9%, the transforms -0.5 to +8%. What a group sync costs on the console is
 not known: a group of 64 threads is one wave there, where a sync should be free, and `intra_main`
-(256 threads, four waves), where it is not, has the twelve group syncs it had before. **Not
-measured yet**: the console md5 and timing run has to confirm that the output is unchanged there
-and what the frame time is.
+(256 threads, four waves), where it is not, has the twelve group syncs it had before.
+
+**Console (package 0.2.19.0, rav1g b9a9584).** Output unchanged: md5-identical to dav1d on the 4K
+10-bit clips (`c35d97f`), and on the final build on 1080p and 4K film-grain clips, a 4K low-delay clip
+and 600 frames of Sparks. Frame time unchanged within noise, `-gputime`, 300 frames of 4K 10-bit,
+same settings as package 0.2.9.0:
+
+| Clip | fps before → after | GPU busy ms | idct | inter | intra | lf_horz |
+|---|---|---|---|---|---|---|
+| SVT random access 12.6 Mbps | 27.9 → 28.5 | 34.24 → 33.57 | 0.668 → 0.669 | 10.46 → 10.23 | 12.42 → 12.24 | 0.380 → 0.344 |
+| SVT low-delay 12.6 Mbps | 26.0 → 25.9 | 33.40 → 33.36 | 0.649 → 0.653 | 7.77 → 7.74 | 14.17 → 14.15 | 0.408 → 0.395 |
+| Jellyfin 40 Mbps | 16.4 → 16.5 | 51.61 → 51.46 | 0.818 → 0.817 | 19.47 → 19.60 | 21.65 → 21.67 | – |
 
 **Open questions for the console run.** Two things that were wrong on the console are right on
 WARP with the fixed shaders: the 8-bit 4K stream whose luma was off by ±1–2 (20 frames,
 md5-identical to dav1d) and the stream with scaled references (64 of 64 frames). Either they
 depend on the console itself, or the console does not run every group in lockstep after all and
-the fix repairs them there too.
+the fix repairs them there too. **Answer:** they depend on the console. With the fixed shaders the console still gets the 8-bit
+4K stream wrong on 300 of 300 frames, two 8-bit Chimera cuts on 298 of 300, and the scaled-reference
+stream on 53 of 64, as before. Something in those paths gives a different result on the console's GPU
+than on WARP (as the double-precision helper did for global motion).
