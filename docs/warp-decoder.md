@@ -83,6 +83,7 @@ warp_decoder -sm6test
 | `-name <text>` | what the `BEGIN` and `RESULT` lines call the stream (default: its file name) |
 | `-cdefv1`, `-nofitsize`, `-lowmemparts <n>`, `-lowmem`, `-slots <n>`, `-intrav2`, `-intraopt`, `-asyncclear` | as in the [test player](test-player.md#defaults-and-opt-out-flags) |
 | `-lfhsplit <n>`, `-intraedgefix` | the [experiments](test-player.md#experiments) of the test player; the conformance job runs the whole set with each, and with a decoder built with `/p:Rav1gUavSync=1` (the shaders of the uavsync package; the program prints `SHADERS uavsync`) |
+| `-poisonmi`, `-poisonbuf` | debugging, off by default: the decoder fills the mode info pool (`-poisonmi`) or every buffer the CPU writes for the shaders (`-poisonbuf`) with the byte 0xA5 when it creates it, instead of leaving what the memory held. The output must be the same; a shader that reads bytes the CPU never wrote gives another one. The decoder passes `-poisonmi` and not yet `-poisonbuf`. See [Order check and poisoned buffers](#order-check-and-poisoned-buffers) |
 | `-interfast`, `-interfastlists` | the [inter fast path](test-player.md#inter-fast-path--interfast) of the test player: inter blocks listed by the fraction of their motion vectors (`inter_fast`, `inter_compound_fast`; with `-interfastlists` the original shaders on those lists), same output; the conformance job decodes the whole set once more with `-interfast` |
 | `-interfastmode <n>` | `av1_set_inter_fast(n)` for diagnosis: 1 is `-interfast`, +2 keeps `inter_main` on the lists of one reference, +4 `inter_compound` on those of two (7 is `-interfastlists`); 8 only makes room for the lists in the block maps and leaves the path off |
 | `-gputime`, `-gputimedetail`, `-gputimeisolate`, `-progress` | the [timing run](test-player.md#timing-run--gputime-and--nopresent) of the test player and its [inter breakdown](test-player.md#inter-prediction-breakdown--gputimedetail--gputimeisolate): the summary as `GPUTIME ...` lines on stdout, with `-progress` the per-frame lines too. On WARP the times are those of a CPU rasterizer; the counters are the stream's |
@@ -232,8 +233,9 @@ vectors in one decoder process, in the order of the list, with `-t 4`, and every
 decode error, a timeout or a crash ends its process (a failed decode may leave the device in
 a state the next stream should not inherit), and the run goes on with the next stream in a
 new process. A stream that fails after other streams in the same process is decoded again
-alone and must fail the same way; otherwise its result is `unstable` (with one exception, see
-[Results](#results): a run that lost the D3D12 device is repeated). Every task has a
+alone and must fail the same way; otherwise its result is `unstable`, which fails the run and
+cannot be listed in `expected.txt` (with one exception, see [Results](#results): a run that lost
+the D3D12 device is repeated). Every task has a
 timeout (300 s for a vector, 2400 s for the larger streams), so a hang ends that stream, not
 the job.
 
@@ -246,6 +248,40 @@ matching frames, first bad frame, decode time, result. The artifact
 `rav1g-conformance-<run id>` has `results.tsv`, `summary.md`, the decoder's output for every
 stream (`logs/<stream>.log`) and the md5 of every output frame (`md5/<stream>.md5`, in the
 player's format).
+
+### Order check and poisoned buffers
+
+A stream that is wrong behind other streams and right alone is not a flake of the runner: the
+decoder's output depends on what the process decoded before. That was the case until 2026-11-12
+([gpu-av1-decoder.md](gpu-av1-decoder.md#padding-of-the-mode-info-record-2026-11-12)): a shader
+read two bytes of struct padding in the mode info, and a decoder that got the memory of a
+destroyed one found other bytes there than zero. `av1-1-b8-22-svc-L2T1-2` failed that way now and
+then behind `svc-L2T1`, `av1-1-b10-00-quantizer-00` every time behind an 8-bit quantizer vector.
+The repeat alone showed the stream as `unstable`, the job was run again, and it passed. Two steps
+of the job now test for it directly, with `warp_decoder` and (on `main`) with `rav1g-dec`:
+
+- **`testing/conformance/order_check.py`** decodes five sequences, each in one decoder process and
+  in this order, every stream against its reference: `av1-1-b8-00-quantizer-00` then
+  `av1-1-b10-00-quantizer-00`, and the ten vectors `av1-1-b8-00-quantizer-00` to `-09` then the
+  10-bit one, both with `-t 1` and with `-t 4`; `svc-L2T1` then `svc-L2T1-2` with `-t 4`. The first
+  result counts: no stream is decoded again alone. Only a sequence in which the D3D12 device was
+  removed runs again, whole and in the same order, at most three times in all.
+- **A part of the set with `-poisonmi`** (`run.py --tool-args=-poisonmi --only ...`): 137 streams
+  (the quantizer vectors 00 to 09 of each bit depth, all other vectors, the 270p cut) against
+  `expected.txt`. With the mode info pool filled with 0xA5 at creation, a read of bytes the entropy
+  decoder never wrote shows in any stream, alone and at once, without the right decoder before it.
+  The whole set with the flag is one of the passes of the `experiments` input.
+
+Both pass (`cpp` 2bbfa69, run 43265811356: 5 of 5 sequences in 9 s, 137 of 137 streams in 24 s;
+`main` f561fbb, run 43267606808, on a slower runner: 14 s and 36 s, and 13 s and 36 s with
+`rav1g-dec`), and they add 33 to 50 s to the job.
+
+`-poisonbuf`, the same for every buffer the CPU writes for the shaders, is not part of the job: the
+decoder does not pass it. Poisoning one buffer at a time (run 43264623408) leaves the output right
+for 16 of the 17 buffers and breaks it for `cb_alloc`, the upload buffer of the constant buffers:
+wrong frames and, in 3 of 8 streams, the D3D12 device removed. Some shader reads a constant the
+host does not write; which one is open
+([gpu-av1-decoder.md](gpu-av1-decoder.md#-poisonbuf-the-constant-buffers-open)).
 
 ### Results
 
@@ -333,6 +369,11 @@ on, and only the stream behind that one found the device removed. Both streams a
 So the large streams (the cuts and the streams encoded in the job: a task with a `-timeout` of
 20 minutes or more) no longer share a process with what was decoded before them: each gets a
 decoder process of its own (`run.py --alone-timeout`), and the vectors share one as before.
+Frames that are wrong from the first one on, without an error, behind other decoders of the
+process and right alone: that is what the padding read fixed on 2026-11-12 looked like
+([Order check and poisoned buffers](#order-check-and-poisoned-buffers)), so these two streams may
+have been its doing and not the device's. That has not been tested: the large streams keep their
+own processes.
 
 Because the stream it hits changes, it cannot be listed in `expected.txt`. `run.py` decodes a
 stream whose run lost the device again alone, up to three times, and takes the result of a run
@@ -351,12 +392,15 @@ references (`syn-resize-10b-1080p.ivf`).
 per line:
 
 ```text
-<stream> <mismatch|error|timeout|crash|unstable> <reason>
+<stream> <mismatch|error|timeout|crash> <reason>
 ```
 
 The job fails when
 
 - a stream fails that is not listed (a regression, or a new stream that finds a bug),
+- a stream is `unstable`: wrong behind other streams and right alone, or the other way round. The
+  decoder's output then depends on what the process decoded before; that is a defect of the
+  decoder, cannot be listed, and is no reason to run the job again,
 - a listed stream fails in another way than listed,
 - a listed stream passes: the fix has to take the stream off the list in the same change, so
   the list can only shrink (a ratchet),
