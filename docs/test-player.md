@@ -2478,6 +2478,26 @@ list shader did; if those differ too, the difference is in what the decode threa
 If the frame is right with `-dumpstages` and wrong without, the copy itself changed the
 outcome: then the stage did not see what the stage before it wrote.
 
+### A model of the 8-bit loop filter on a dump
+
+`testing/stage_dump/lf_model.py` filters a dump's own frame in front of the loop filter (`intra`) with
+the arithmetic of `loopfilter_vert.hlsl`, compares the result with the dump's `lf_vert`, and does the
+same from `lf_vert` to `lf_horz` with `loopfilter_hor.hlsl`, per plane: the number of samples that
+differ and how many edges took which branch (4, 6, 8 or 14 taps). It reads the constants and the edge
+lists from the dump (format 2), or with `--lists` from another dump or digest of the same frame, for a
+dump of an older package; with a digest it also compares its own output with the digest's row hashes.
+
+```sh
+python3 testing/stage_dump/lf_model.py console/<clip>_f0.stages --lists warp/<clip>_f0.digest
+python3 testing/stage_dump/lf_model.py console/<clip>_f0.stages --lists warp/<clip>_f0.digest --variant console-0.2.25
+```
+
+A stage the model reproduces was computed as the shader is written. `--variant console-0.2.25` is the
+filter as the console ran it with the shaders before this change (package 0.2.25.0), with one step of the 8-tap branch of
+the vertical filter changed; that is how the cause of the 8-bit mismatch was found
+([gpu-av1-decoder.md](gpu-av1-decoder.md#a-paired-read-before-an-overlapping-in-place-write-2026-11-12-fix-not-yet-run-on-the-console)).
+8-bit frames only; exit code 1 when a stage differs from the model.
+
 ## Shader survey
 
 To pick the next shader to look at, the workflow writes `shader-survey/survey.md` (also
@@ -2503,7 +2523,45 @@ contention with the compiles running beside it; for a shader that came from the 
 the time of the run that compiled it. Compare compile times within one run only, and treat
 small differences as noise. A shader that fails to compile still stops the run, with its FXC
 output in the step log, and so does a bit field instruction with a run-time width
-([gpu-av1-decoder.md](gpu-av1-decoder.md#bit-fields-of-width-0-2026-11-12-candidate-fix-not-yet-run-on-the-console)).
+([gpu-av1-decoder.md](gpu-av1-decoder.md#bit-fields-of-width-0-2026-11-12-candidate-fix-not-yet-run-on-the-console)),
+and a listing with a paired read before an overlapping in-place write ([Listings scan](#listings-scan)).
+
+### Listings scan
+
+After the survey the workflow reads the listings of both variants with
+`testing/dxbc_scan/scan.py` and stops when it finds the pair of instructions that the console's
+driver compiled wrongly in the 8-bit vertical loop filter
+([gpu-av1-decoder.md](gpu-av1-decoder.md#a-paired-read-before-an-overlapping-in-place-write-2026-11-12-fix-not-yet-run-on-the-console)):
+
+- an *overlapping in-place write*: an instruction that writes components of a temp register and
+  reads, of the same register, for a written component, another component that it also writes
+  (`iadd r3.yw, r3.wwww, -r4.xxxy`: `r3.y` from `r3.w`). FXC emits about 1650 of them in the 92
+  shaders; they are counted;
+- with a *paired read before it*: the write is an arithmetic or logic instruction, and before it,
+  with no flow control instruction between the two, an instruction that does not write the
+  register reads two or more of the components the write replaces into one component of its
+  result (`iadd r2.x, r3.w, -r3.y`). This stops the run, unless the write is in
+  `testing/dxbc_scan/allow.txt`.
+
+```sh
+python3 testing/dxbc_scan/scan.py --self-test
+python3 testing/dxbc_scan/scan.py --listings shader-survey/asm --out listing-scan.txt
+```
+
+The step log names every pair with its shader, the line of the listing and both instructions; the
+artifact's `shader-survey/listing-scan.txt` also has every overlapping in-place write. `--self-test`
+checks the scan itself: it must find the pair in a copy of the old listing and must not find it in
+five sequences that differ from it in one property each. An opcode the scan does not know stops it,
+so no instruction goes unread.
+
+When the step fails after a shader change: find the HLSL of the two instructions and change its form,
+not its arithmetic, until FXC no longer emits the pair. What worked so far: every output from its own
+sum instead of a running sum (`loopfilter_vert.hlsl`), another order of the terms of one sum
+(`loopfilter_hor.hlsl`), addresses of rows written as explicit vectors of another width
+(`inter_warp.hlsl`, `inter_compound_masked_hbd.hlsl`), a `[branch]` in front of an `if` that FXC had
+turned into a select (`inter_2x2chroma_hbd.hlsl`). The order of statements does not matter to FXC. A
+line in `allow.txt` needs a proof that the console runs that pair correctly, written next to it; a
+line that matches no pair any more is an error.
 
 ### Shader cache of the workflow
 

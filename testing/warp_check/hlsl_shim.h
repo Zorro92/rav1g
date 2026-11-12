@@ -42,12 +42,25 @@ struct int4 {
   int2 xy() const { return int2(x, y); }
 };
 static inline int4 operator-(const int4 &a, const int4 &b) { return int4(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w); }
+// The row addresses of the warp shaders: a scalar plus a scalar times a clamped vector.
+struct int3 {
+  int x, y, z;
+  int3() : x(0), y(0), z(0) {}
+  int3(int a, int b, int c) : x(a), y(b), z(c) {}
+};
+static inline int4 operator+(int a, const int4 &b) { return int4(a + b.x, a + b.y, a + b.z, a + b.w); }
+static inline int4 operator*(int a, const int4 &b) { return int4(a * b.x, a * b.y, a * b.z, a * b.w); }
+static inline int3 operator+(int a, const int3 &b) { return int3(a + b.x, a + b.y, a + b.z); }
+static inline int3 operator*(int a, const int3 &b) { return int3(a * b.x, a * b.y, a * b.z); }
 
 static inline int min(int a, int b) { return a < b ? a : b; }
 static inline int max(int a, int b) { return a > b ? a : b; }
 static inline int clamp(int v, int lo, int hi) { return min(max(v, lo), hi); }
 static inline int4 clamp(const int4 &v, int lo, int hi) {
   return int4(clamp(v.x, lo, hi), clamp(v.y, lo, hi), clamp(v.z, lo, hi), clamp(v.w, lo, hi));
+}
+static inline int3 clamp(const int3 &v, int lo, int hi) {
+  return int3(clamp(v.x, lo, hi), clamp(v.y, lo, hi), clamp(v.z, lo, hi));
 }
 
 /* Counts accesses outside the bound buffer; any is a failure of the check. */

@@ -99,7 +99,7 @@ if [ "$mutate" = 1 ]; then
   # file @ sed expression @ what it breaks
   mutants='inter_warp_hbd.gen.h@s/int ix4 = clamp((x4 >> WarpPrecBits) - 7 + (x \& 7), -11, dims.x) << 1;/int ix4 = clamp((x4 >> WarpPrecBits) - 7 + (x \& 7), -11, dims.x + 8) << 1;/@right edge clamp of the warp (10-bit)
 inter_warp.gen.h@s/int ix4 = clamp((x4 >> WarpPrecBits) - 7 + (x \& 7), -11, dims.x);/int ix4 = clamp((x4 >> WarpPrecBits) - 7 + (x \& 7), -19, dims.x);/@left edge clamp of the warp (8-bit)
-inter_warp_hbd.gen.h@s/clamp(iy4 + 10, 0, dims.y)/clamp(iy4 + 10, 0, dims.y + 1)/@bottom edge clamp of the warp
+inter_warp_hbd.gen.h@s/clamp(iy4 + int4(7, 8, 9, 10), 0, dims.y)/clamp(iy4 + int4(7, 8, 9, 10), 0, dims.y + 1)/@bottom edge clamp of the warp
 inter_warp_comp_hbd.gen.h@s/int ix4 = clamp((x4 >> WarpPrecBits) - 7 + (x \& 7), -11, ref_w);/int ix4 = clamp((x4 >> WarpPrecBits) - 7 + (x \& 7), -11, ref_w + 8);/@right edge clamp of the compound warp
 inter_warp_comp.gen.h@s/int x0 = clamp((mvx >> SCALE_SUBPEL_BITS) - 3, -11, ref_w);/int x0 = clamp((mvx >> SCALE_SUBPEL_BITS) - 3, -11, ref_w + 8);/@right edge clamp of the reference that is not warped
 inter_warp_comp_hbd.gen.h@s/sy4 += info2.w \* (-4) + info2.z \* (-4);/sy4 += info2.w * (-4) + info2.z * (-3);/@shear of the compound warp

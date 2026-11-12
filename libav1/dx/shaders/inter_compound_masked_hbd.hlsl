@@ -125,32 +125,41 @@ int blend(int src0, int src1, int mask) {
   kernel_v0 = cb_kernels[filter_v][0];
   kernel_v1 = cb_kernels[filter_v][1];
 
+  // The addresses of the nine rows of the second reference, as two vectors and a scalar. Written row by
+  // row in the calls below, FXC made rows 2..5 one vector over the register that held mvy and two values
+  // read together just before it (iadd r4.xyzw, r4.zzzz, l(2, 3, 4, 5) after imad r3.x, ..., r4.w, r4.x):
+  // the pair that testing/dxbc_scan/scan.py refuses (docs/gpu-av1-decoder.md, "A paired read before an
+  // overlapping in-place write"). The values are the same.
+  const int4 rows_a = ref_offset + mvx + ref_stride * clamp(mvy + int4(0, 1, 2, 3), 0, dims.y);
+  const int4 rows_b = ref_offset + mvx + ref_stride * clamp(mvy + int4(4, 5, 6, 7), 0, dims.y);
+  const int row_8 = ref_offset + mvx + ref_stride * clamp(mvy + 8, 0, dims.y);
+
   int4 output1[2] = {{0, 0, 0, 0}, {0, 0, 0, 0}};
 
-  l = filter_line_hbd(dst_frame, ref_offset + mvx + ref_stride * clamp(mvy + 0, 0, dims.y), kernel_h0, kernel_h1);
+  l = filter_line_hbd(dst_frame, rows_a.x, kernel_h0, kernel_h1);
   output1[0] += l * kernel_v0.x;
-  l = filter_line_hbd(dst_frame, ref_offset + mvx + ref_stride * clamp(mvy + 1, 0, dims.y), kernel_h0, kernel_h1);
+  l = filter_line_hbd(dst_frame, rows_a.y, kernel_h0, kernel_h1);
   output1[1] += l * kernel_v0.x;
   output1[0] += l * kernel_v0.y;
-  l = filter_line_hbd(dst_frame, ref_offset + mvx + ref_stride * clamp(mvy + 2, 0, dims.y), kernel_h0, kernel_h1);
+  l = filter_line_hbd(dst_frame, rows_a.z, kernel_h0, kernel_h1);
   output1[1] += l * kernel_v0.y;
   output1[0] += l * kernel_v0.z;
-  l = filter_line_hbd(dst_frame, ref_offset + mvx + ref_stride * clamp(mvy + 3, 0, dims.y), kernel_h0, kernel_h1);
+  l = filter_line_hbd(dst_frame, rows_a.w, kernel_h0, kernel_h1);
   output1[1] += l * kernel_v0.z;
   output1[0] += l * kernel_v0.w;
-  l = filter_line_hbd(dst_frame, ref_offset + mvx + ref_stride * clamp(mvy + 4, 0, dims.y), kernel_h0, kernel_h1);
+  l = filter_line_hbd(dst_frame, rows_b.x, kernel_h0, kernel_h1);
   output1[1] += l * kernel_v0.w;
   output1[0] += l * kernel_v1.x;
-  l = filter_line_hbd(dst_frame, ref_offset + mvx + ref_stride * clamp(mvy + 5, 0, dims.y), kernel_h0, kernel_h1);
+  l = filter_line_hbd(dst_frame, rows_b.y, kernel_h0, kernel_h1);
   output1[1] += l * kernel_v1.x;
   output1[0] += l * kernel_v1.y;
-  l = filter_line_hbd(dst_frame, ref_offset + mvx + ref_stride * clamp(mvy + 6, 0, dims.y), kernel_h0, kernel_h1);
+  l = filter_line_hbd(dst_frame, rows_b.z, kernel_h0, kernel_h1);
   output1[1] += l * kernel_v1.y;
   output1[0] += l * kernel_v1.z;
-  l = filter_line_hbd(dst_frame, ref_offset + mvx + ref_stride * clamp(mvy + 7, 0, dims.y), kernel_h0, kernel_h1);
+  l = filter_line_hbd(dst_frame, rows_b.w, kernel_h0, kernel_h1);
   output1[1] += l * kernel_v1.z;
   output1[0] += l * kernel_v1.w;
-  l = filter_line_hbd(dst_frame, ref_offset + mvx + ref_stride * clamp(mvy + 8, 0, dims.y), kernel_h0, kernel_h1);
+  l = filter_line_hbd(dst_frame, row_8, kernel_h0, kernel_h1);
   output1[1] += l * kernel_v1.w;
 
   x <<= 1;
@@ -168,7 +177,11 @@ int blend(int src0, int src1, int mask) {
     output[i].y = blend(output[i].y, output1[i].y, (wedge >> 8) & 255);
     output[i].z = blend(output[i].z, output1[i].z, (wedge >> 16) & 255);
     output[i].w = blend(output[i].w, output1[i].w, (wedge >> 24) & 255);
-    if (noskip) {
+    // A branch, not a select: flattened, the select of the four samples went into the register that held
+    // noskip and two values read together just before it (movc r0.xyzw, r0.wwww, r2.xyzw, r4.xyzw after
+    // iadd r3.w, r0.z, r0.x), the pair that testing/dxbc_scan/scan.py refuses (docs/gpu-av1-decoder.md,
+    // "A paired read before an overlapping in-place write").
+    [branch] if (noskip) {
       int2 r = (int2)residuals.Load2(res_offset + i * res_stride);
       output[i].x += (r.x << 16) >> 16;
       output[i].y += r.x >> 16;

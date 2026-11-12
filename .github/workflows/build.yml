@@ -87,6 +87,25 @@ jobs:
           Copy-Item shader-build/normal/asm out/shader-survey/asm -Recurse
           Copy-Item shader-build/normal/report.json out/shader-survey/build.json
 
+      # The listings of both variants are scanned for the pair of instructions that the console's driver
+      # compiled wrongly in the 8-bit vertical loop filter: a vector instruction that rewrites components
+      # of a register from the same register across components, and before it, in the same run of
+      # instructions, an instruction that reads two of those components into one result
+      # (docs/gpu-av1-decoder.md, "A paired read before an overlapping in-place write"). A pair that
+      # testing/dxbc_scan/allow.txt does not have stops the run; the report with every overlapping
+      # in-place write goes into the artifact next to the survey.
+      - name: Listings scan, paired read before an overlapping in-place write
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python src/testing/dxbc_scan/scan.py --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'The listings scan does not find the known pair' }
+          python src/testing/dxbc_scan/scan.py --listings shader-build/normal/asm --listings shader-build/uavsync/asm `
+            --min-listings 92 --out out/shader-survey/listing-scan.txt
+          if ($LASTEXITCODE -ne 0) {
+            throw 'A listing has a paired read before an overlapping in-place write: rewrite the HLSL (see the scan output)'
+          }
+
       # MSBuild with the v145 toolset and Windows SDK 10.0.26100.0 (upstream targets v141/17763).
       - uses: microsoft/setup-msbuild@v3
 

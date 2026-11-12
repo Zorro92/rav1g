@@ -1,0 +1,19 @@
+# Paired reads before an overlapping in-place write that testing/dxbc_scan/scan.py accepts.
+# One line per write: "<shader>: <instruction as in the listing>". An entry needs a proof that the
+# console runs the pair correctly, and an entry that matches no pair in the listings is an error.
+#
+# The butterfly of the 16-point inverse DCT (IDCT16 of idct_shader_common.h),
+#     step0[0] = step1[0] + step1[3]    step0[1] = step1[1] + step1[2]
+#     step0[2] = step1[1] - step1[2]    step0[3] = step1[0] - step1[3]
+# with the four inputs in one register: FXC adds the two sums into another register and then writes
+# the two differences over two of the inputs. FXC's output does not depend on the order of the
+# statements, and in the other shaders with IDCT16 the same butterfly is not such a pair.
+# Proof: every column of a block with one of these three transforms and a DCT in the columns runs
+# the pair, and a wrong difference is a wrong residual. The console's output is md5-identical to
+# dav1d (packages 0.2.19.0 and 0.2.29.0; these shaders and their listings have not changed since
+# c35d97f) on 10-bit streams whose key frames have, with coefficients, by libaom's inspector:
+# 4x16 transforms in 2 of the streams (8 and 5 in the key frame), 32x16 in 5 (7 to 37), 64x16 in 1
+# (178). docs/gpu-av1-decoder.md, "A paired read before an overlapping in-place write".
+idct4x16: iadd r3.xy, -r3.yzyy, r3.xwxx
+idct32x16: iadd r3.xy, -r3.yzyy, r3.xwxx
+idct64x16: iadd r2.yz, -r2.zzwz, r2.yyyy

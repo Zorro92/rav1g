@@ -86,28 +86,38 @@ groupshared int4 mem[11 * 64];
   int ref_offset = cb_refplanes[refplane].y + ix4;
   int ref_stride = cb_refplanes[refplane].x;
 
+  // The addresses of the eleven reference rows, ref_offset + ref_stride * clamp(iy4 + k, 0, dims.y), as
+  // three vectors of rows 0..3, 4..6 and 7..10. Written row by row in the calls below, FXC put rows 9
+  // and 10 last and alone, and wrote their two addresses over the two values they are made of, which
+  // end there (imad r1.yz, cb0[r1.y + 3].xxxx, r4.yyzy, r1.zzzz), after the earlier rows had read both:
+  // the pair that testing/dxbc_scan/scan.py refuses (docs/gpu-av1-decoder.md, "A paired read before an
+  // overlapping in-place write"). A last vector of four does not fit over them. The values are the same.
+  const int4 rows_a = ref_offset + ref_stride * clamp(iy4 + int4(0, 1, 2, 3), 0, dims.y);
+  const int3 rows_b = ref_offset + ref_stride * clamp(iy4 + int3(4, 5, 6), 0, dims.y);
+  const int4 rows_c = ref_offset + ref_stride * clamp(iy4 + int4(7, 8, 9, 10), 0, dims.y);
+
   int local_ofs = (thread.x & 63) * 11;
-  mem[local_ofs + 0] = filter_line_warp(dst_frame, ref_offset + ref_stride * clamp(iy4 + 0, 0, dims.y), warp_filter,
+  mem[local_ofs + 0] = filter_line_warp(dst_frame, rows_a.x, warp_filter,
                                         sx4 + info2.y * 0, info2.x);
-  mem[local_ofs + 1] = filter_line_warp(dst_frame, ref_offset + ref_stride * clamp(iy4 + 1, 0, dims.y), warp_filter,
+  mem[local_ofs + 1] = filter_line_warp(dst_frame, rows_a.y, warp_filter,
                                         sx4 + info2.y * 1, info2.x);
-  mem[local_ofs + 2] = filter_line_warp(dst_frame, ref_offset + ref_stride * clamp(iy4 + 2, 0, dims.y), warp_filter,
+  mem[local_ofs + 2] = filter_line_warp(dst_frame, rows_a.z, warp_filter,
                                         sx4 + info2.y * 2, info2.x);
-  mem[local_ofs + 3] = filter_line_warp(dst_frame, ref_offset + ref_stride * clamp(iy4 + 3, 0, dims.y), warp_filter,
+  mem[local_ofs + 3] = filter_line_warp(dst_frame, rows_a.w, warp_filter,
                                         sx4 + info2.y * 3, info2.x);
-  mem[local_ofs + 4] = filter_line_warp(dst_frame, ref_offset + ref_stride * clamp(iy4 + 4, 0, dims.y), warp_filter,
+  mem[local_ofs + 4] = filter_line_warp(dst_frame, rows_b.x, warp_filter,
                                         sx4 + info2.y * 4, info2.x);
-  mem[local_ofs + 5] = filter_line_warp(dst_frame, ref_offset + ref_stride * clamp(iy4 + 5, 0, dims.y), warp_filter,
+  mem[local_ofs + 5] = filter_line_warp(dst_frame, rows_b.y, warp_filter,
                                         sx4 + info2.y * 5, info2.x);
-  mem[local_ofs + 6] = filter_line_warp(dst_frame, ref_offset + ref_stride * clamp(iy4 + 6, 0, dims.y), warp_filter,
+  mem[local_ofs + 6] = filter_line_warp(dst_frame, rows_b.z, warp_filter,
                                         sx4 + info2.y * 6, info2.x);
-  mem[local_ofs + 7] = filter_line_warp(dst_frame, ref_offset + ref_stride * clamp(iy4 + 7, 0, dims.y), warp_filter,
+  mem[local_ofs + 7] = filter_line_warp(dst_frame, rows_c.x, warp_filter,
                                         sx4 + info2.y * 7, info2.x);
-  mem[local_ofs + 8] = filter_line_warp(dst_frame, ref_offset + ref_stride * clamp(iy4 + 8, 0, dims.y), warp_filter,
+  mem[local_ofs + 8] = filter_line_warp(dst_frame, rows_c.y, warp_filter,
                                         sx4 + info2.y * 8, info2.x);
-  mem[local_ofs + 9] = filter_line_warp(dst_frame, ref_offset + ref_stride * clamp(iy4 + 9, 0, dims.y), warp_filter,
+  mem[local_ofs + 9] = filter_line_warp(dst_frame, rows_c.z, warp_filter,
                                         sx4 + info2.y * 9, info2.x);
-  mem[local_ofs + 10] = filter_line_warp(dst_frame, ref_offset + ref_stride * clamp(iy4 + 10, 0, dims.y), warp_filter,
+  mem[local_ofs + 10] = filter_line_warp(dst_frame, rows_c.w, warp_filter,
                                          sx4 + info2.y * 10, info2.x);
 
   const int output_stride = cb_planes[plane].x;

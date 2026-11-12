@@ -92,14 +92,22 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
   the frame's first reference instead of its own, and a block with global motion was warped
   from a scaled reference, which libaom and the specification do not do. Both fixed and
   checked on a host against libaom (`testing/warp_check`). Not yet run on the console.
-- **Known bugs on the console only, 8-bit streams and scaled references**: md5-identical to dav1d on
-  WARP, still wrong on the console after the lockstep fix, so something in those paths depends on
-  the console's GPU. An 8-bit 4K stream decodes with luma off by ±1–2 on about 0.4%
-  of the pixels from the first (key) frame on; chroma is exact. Upstream behaviour (the same
-  with every new option switched off). 10-bit streams are not affected.
+- **Known bug on the console only, 8-bit streams** (cause found, fix not yet run on the console):
+  md5-identical to dav1d on WARP, wrong on the console: luma off by ±1–2 on about 0.4% of the pixels
+  from the first (key) frame on, chroma exact, 10-bit streams not affected. The console's driver
+  compiles one instruction of the 8-bit vertical loop filter wrongly: in the 8-tap branch FXC emitted
+  `iadd r2.x, r3.w, -r3.y` and, four instructions later, `iadd r3.yw, r3.wwww, -r4.xxxy`, which
+  rewrites those two components in place, and the console ran the first as `r3.z - r3.x`. A model of
+  the filter with that one change gives the console's output of a 3840x2160 frame to the last sample
+  (40240 edges in that branch); the rest of the two 8-bit filters runs as written. The branch is
+  rewritten so that FXC does not emit the pair, the workflow scans the listings of all shaders for
+  such pairs (`testing/dxbc_scan`), and the output on WARP is unchanged
+  ([gpu-av1-decoder.md](docs/gpu-av1-decoder.md#a-paired-read-before-an-overlapping-in-place-write-2026-11-12-fix-not-yet-run-on-the-console)).
+  The 10-bit stream with scaled references that stood here as wrong on the console is right: its md5
+  references had been made with ffmpeg scaling every frame to the size of the first.
 
-Next targets: the console run of the shaders with group syncs (md5 and timing), the 8-bit
-bug, entropy decoding on the CPU (frame-parallel or a faster
+Next targets: the console run of the 8-bit loop filter change (md5 of the 8-bit streams, the
+10-bit set unchanged), entropy decoding on the CPU (frame-parallel or a faster
 parser), and inter and intra prediction on the GPU. The Rust port starts once 4K GPU and CPU time per frame are well
 under 41.7 ms on heavy content.
 

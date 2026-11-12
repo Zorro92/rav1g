@@ -91,7 +91,11 @@ groupshared uint2 mem[64];
   x <<= 1;
   const int res_stride = cb_planes[plane].z;
   const int res_offset = cb_planes[plane].w + x + y * res_stride;
-  if (noskip) {
+  // A branch, not a select: flattened, the select of the four samples went into the register that held
+  // noskip and two values read together before it (movc r1.xyzw, r1.wwww, r3.xyzw, r2.xyzw after
+  // iadd r0.yz, r1.yyyy, cb0[r1.z + 0].wwyw), the pair that testing/dxbc_scan/scan.py refuses
+  // (docs/gpu-av1-decoder.md, "A paired read before an overlapping in-place write").
+  [branch] if (noskip) {
     int r0 = residuals.Load(res_offset);
     int r1 = residuals.Load(res_offset + res_stride);
     tmp.x += (r0 << 16) >> 16;

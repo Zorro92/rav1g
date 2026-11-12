@@ -494,6 +494,10 @@ the fix repairs them there too. **Answer:** they depend on the console. With the
 stream on 53 of 64, as before. Something in those paths gives a different result on the console's GPU
 than on WARP (as the double-precision helper did for global motion).
 
+*Correction, 2026-11-12:* that holds for the 8-bit streams only
+([the cause](#a-paired-read-before-an-overlapping-in-place-write-2026-11-12-fix-not-yet-run-on-the-console)). The scaled-reference stream was never wrong on the console: its md5 references were
+(see [below](#console-only-mismatches-located-by-stage-dumps-2026-11-12)).
+
 ## Bit fields of width 0 (2026-11-12, candidate fix, not yet run on the console)
 
 What is wrong on the console and right on WARP: 8-bit streams (luma off by ±1–2 on about 0.4%
@@ -529,6 +533,11 @@ width of 0 does not give the D3D result on the console's GPU. It fits the observ
 only and luma only; errors of the size small residuals have at that quantizer; scaled references
 only; WARP right; the same output with every option), but it is an inference from the listings,
 **not confirmed on the console**.
+
+*Result, 2026-11-12:* it was not the cause. The console's output did not change with the table masks;
+the 8-bit mismatch is one instruction of the vertical loop filter ([below](#a-paired-read-before-an-overlapping-in-place-write-2026-11-12-fix-not-yet-run-on-the-console)), and the
+scaled-reference stream was right all along (wrong md5 references). The table masks stay: the results
+are the same and the survey's rule costs nothing.
 
 **Change.** The masks come from a table (`low_bits()` in `inter_common.h`, local tables in
 `intra_filter.hlsl` and the two border shaders), which FXC compiles to a table lookup and an
@@ -571,20 +580,29 @@ Also in this round:
   one FXC call per shader and variant, kept by content, instead of five compiles of every
   shader per run.
 
-**The scaled-reference stream that is wrong on the console** (`syn_resize-mode`, SVT-AV1
-`resize-mode=2`, 10-bit: 53 of 64 frames differ from dav1d there, none on WARP) is not touched
-by any of this. Its headers have `allow_warped_motion` 0 and `is_motion_mode_switchable` 0 on
-all 63 inter frames, no global motion model, and a sequence header with
-`enable_masked_compound` 0, `enable_jnt_comp` 0 and `enable_interintra_compound` 0: no warped
-block, no OBMC, no wedge and no difference weighted compound. What it does use, on frames of
-nine sizes from 960x540 to 1920x1080: single-reference and averaged
-compound prediction from scaled references (`inter_scale`, `inter_scale_compound`, the 2x2
-chroma shaders), with 31 hidden frames shown later. The cause on the console is still to be
-found there (the table masks of the section above, or the stage dumps).
+**The scaled-reference stream** (`syn_resize-mode`, SVT-AV1 `resize-mode=2`, 10-bit) stood here as
+wrong on the console on 53 of 64 frames and right on WARP. *Correction, 2026-11-12: the console decodes
+it correctly.* The md5 references the console's output was compared with had been made with ffmpeg's
+`-f framemd5` without `-noautoscale`, and ffmpeg then scales every frame to the size of the first one:
+the reference of a frame of another size was the hash of a scaled picture. The conformance run on WARP
+never had that problem (`make_md5_ref.sh` passes `-noautoscale`). Against dav1d at each frame's own size,
+every hash the console had logged as a mismatch is the right one (52 of 52 and 53 of 53 in the two
+logs). An independent review of the references found it. What the stream runs, and so what is right on
+the console: frames of nine sizes from 960x540 to 1920x1080, single-reference and averaged compound
+prediction from scaled references (`inter_scale`, `inter_scale_compound`, the 2x2 chroma shaders), 31
+hidden frames shown later; no warped block, no OBMC, no wedge and no difference weighted compound
+(`allow_warped_motion` 0, `is_motion_mode_switchable` 0, no global motion model,
+`enable_masked_compound` 0, `enable_jnt_comp` 0, `enable_interintra_compound` 0).
 
 Not run on the console: everything in this section.
 
 ## Console-only mismatches located by stage dumps (2026-11-12)
+
+*Correction, 2026-11-12:* this section was written with two console-only mismatches in mind. There is
+one, the 8-bit loop filter ([its cause](#a-paired-read-before-an-overlapping-in-place-write-2026-11-12-fix-not-yet-run-on-the-console)). The other, a 10-bit stream with scaled references, was an
+error in the md5 references it was compared with (ffmpeg scaled every frame to the size of the first;
+[above](#layers-new-sequences-mixed-reference-sizes-all-conformance-streams-pass-on-warp-2026-11-12)):
+the console decodes that stream correctly.
 
 The player and warp_decoder save the frame after every GPU stage (`-dumpstages`,
 `testing/stage_dump/stage_dump.py compare`). Console dumps (package 0.2.25.0) against CI's WARP dumps
@@ -600,11 +618,12 @@ of the same streams:
   entries at the right frame edge that are not written and hold whatever the buffer held (the console
   does not have to zero a new buffer; WARP's are fresh).
 - **Scaled references**: decoded frames 0-3 of CI's `syn-resize-10b-1080p` (three of them predicted
-  from references of another size) are identical on every stage; the first wrong output is decoded
-  frame 4 (1280x720, shown), which the CI dumps do not include yet.
-- **None of the console experiments changed either bug**: `-lfhsplit 1|2`, `-intraedgefix`, the uavsync
-  shaders and the bit-field table masks give the same wrong md5 (8-bit 4K frame 0 `537ee12a...` in every
-  build since 0.2.11.0). Super-resolution, fixed on WARP, is md5-identical on the console too.
+  from references of another size) are identical on every stage, and so is everything after them: the
+  "first wrong output" at decoded frame 4 (1280x720, the first shown frame of another size than the
+  first) was the first frame whose md5 reference was of a scaled picture.
+- **None of the console experiments changed the 8-bit output**: `-lfhsplit 1|2`, `-intraedgefix`, the
+  uavsync shaders and the bit-field table masks give the same wrong md5 (8-bit 4K frame 0 `537ee12a...`
+  in every build since 0.2.11.0). Super-resolution, fixed on WARP, is md5-identical on the console too.
 
 ### 8-bit: wrong exactly where the loop filter runs
 
@@ -627,7 +646,7 @@ whole words read and written back around an edge). The vectors differ from the 1
 more way: their vertical and horizontal levels differ (one of them can be 0), and their level varies
 with the reference of the block.
 
-### 66x66 frame 1: the four samples follow from one term of the 8-tap filter (to be checked on the console dump)
+### 66x66 frame 1: the four samples follow from one term of the 8-tap filter
 
 WARP's dump of frame 1 with the new buffers (run 43160403800) says what the odd pass does there. The
 left 64 columns are one 64x64 block with one transform, so the even pass filters nothing in luma
@@ -667,6 +686,12 @@ shader differently, every 8-bit frame with an 8-tap vertical edge in a flat plac
 candidate fix is to write the 8-tap branch of the 8-bit filters so that FXC does not produce that
 sequence (each output from its own sum, as the 14-tap branch does), with the listing checked for it.
 
+**Checked, 2026-11-12.** The console's dump (package 0.2.25.0) has exactly the four values of the
+table: 152, 154, 167, 167. The step is the right one and so is the instruction. What that instruction
+read is not what is written above: fourteen edges cannot tell `p1.y - p1.z` from other small values,
+and a 3840x2160 frame can. The console ran `iadd r2.x, r3.w, -r3.y` as `r3.z - r3.x`
+([below](#a-paired-read-before-an-overlapping-in-place-write-2026-11-12-fix-not-yet-run-on-the-console)), which gives the same four values here.
+
 ### The edge lists: read through, nothing unwritten
 
 What the loop filter reads of `loopfilter_blocks`, and what writes it:
@@ -698,3 +723,174 @@ are not the difference either, and nothing was changed. `-dumpstages` now saves 
 constants and the mode info (format 2, [test-player.md](test-player.md#stage-dumps--dumpstages)), so
 that a console dump says which of the three inputs of `lf_vert` differs, if any.
 
+## A paired read before an overlapping in-place write (2026-11-12, fix not yet run on the console)
+
+The 8-bit streams are wrong on the console because its driver, which compiles the shaders' DXBC again
+for its GPU, compiles one instruction of the 8-bit vertical loop filter wrongly. WARP runs the same
+bytecode as written.
+
+### What the console computes
+
+Frame 0 of the 8-bit 2160p cut, a key frame with loop filter level 1: the console's dump (package
+0.2.25.0) has the frame before the loop filter (`intra`), after the vertical edges (`lf_vert`) and after
+the horizontal ones (`lf_horz`); the digest of WARP's dump of the same frame (run 43160403800) has the
+filter's constants and edge lists as they are, and a hash of every row of every stage. The two agree in
+`idct` and `intra`, so the lists, which the list shaders make from the mode info, are the console's too.
+`testing/stage_dump/lf_model.py` filters a dump's own `intra` with the arithmetic of the two shaders:
+
+```
+lf_model.py console/<8-bit 2160p>_f0.stages --lists warp/<8-bit 2160p>_f0.digest
+  vertical edges, Y: model of intra against lf_vert: 31769 of 8294400 samples differ; against the row hashes of the digest: 0 of 2160 rows differ
+      edges of a row or column that were filtered: 14-tap 47970, 4-tap 52495, 8-tap 40240
+  vertical edges, U: ... 0 of 2073600 samples differ; ... 0 of 1080 rows differ        (V the same)
+  horizontal edges, Y: model of lf_vert against lf_horz: 0 of 8294400 samples differ
+      edges of a row or column that were filtered: 14-tap 34484, 4-tap 45225, 8-tap 31814
+  horizontal edges, U: ... 0 of 2073600 samples differ                                   (V the same)
+```
+
+So the model is the shader (it gives WARP's rows, all of them), the console's horizontal filter and its
+chroma are as written, and its vertical luma filter is not. Edge by edge, the console differs from the
+model in the 8-tap branch only (20656 of its 40240 edges), and there only in the three samples right
+of the edge (x, x + 1, x + 2 of an edge at x: 11129, 10174 and 10466 samples); the 47970 edges of the
+14-tap branch and the 52495 of the 4-tap branch are right, and so is every decision which branch an
+edge takes. The 8-tap branch keeps a running sum `v`; the sample at x is `(v + q0.x + 4) >> 3` after the
+step `v += -p1.x + q0.w`. Of all differences of two of the eight samples around the edge, one in place
+of `q0.w - p1.x` gives the console's sample at x on all 40240 edges: `p1.w - q0.x`. With that one change
+(`--variant console-0.2.25`) the model gives the console's whole `lf_vert`:
+
+```
+  vertical edges, Y: model of intra against lf_vert: 0 of 8294400 samples differ
+```
+
+The reading of the 66x66 section above (the step adds `p1.y - p1.z`, the two components read after they
+were rewritten) gives the four samples of the 66x66 frame as well, and leaves 16771 samples of this
+frame unexplained; `p1.w - q0.x` gives both frames.
+
+### The instructions
+
+FXC's listing of the branch (`loopfilter_vert.asm` of run 43160403800; `r3` holds `q0.x`, `p1.x`,
+`p1.w`, `q0.w` in x, y, z, w; `r4` holds `p1.y`, `p1.z`, `q0.y`, `q0.z`; `r1.w` is `v`):
+
+```
+353  iadd r2.x, r3.w, -r3.y            ; q0.w - p1.x
+354  iadd r1.w, r1.w, r2.x             ; v += ...
+355  iadd r2.x, r3.x, r1.w             ; v + q0.x
+356  iadd r2.x, r2.x, l(4)
+357  iadd r3.yw, r3.wwww, -r4.xxxy     ; r3.y = q0.w - p1.y, r3.w = q0.w - p1.z: the next two steps
+358  iadd r1.w, r1.w, r3.y
+```
+
+The console ran instruction 353 as `r3.z - r3.x`: each of the two components replaced by the one before
+it. Instruction 357 writes those two components of `r3`, and computes both from one of them. Nothing
+else about 353 is unusual, and the same shader shows what is not the cause, because the console runs it
+correctly:
+
+- an instruction that reads two components of one register into one result, one of them negated:
+  `iadd r5.w, -r3.z, r3.y`, `iadd r6.y, -r3.x, r3.w` and others in the flatness tests, which decide the
+  branch of every edge;
+- a vector instruction that rewrites components of a register from the same register across components
+  (an *overlapping in-place write*, below): `ige r5.yz, cb0[r1.x + 3].xxxx, r5.xxyx` and two more in the
+  mask, `iadd r3.xy, r3.xxxx, l(4, 3, 0, 0)` in the 4-tap branch, after `imad r3.x, l(3), r3.y, r3.x`
+  had read both components and rewritten one;
+- in the horizontal filter even the pair of the two, `imad r12.z, r13.y, l(3), r13.z` and 26
+  instructions later `iadd r13.yz, r13.zzwz, r13.yyzy`, in the 14-tap branch, which is right on all
+  34484 edges.
+
+What the driver does inside is not known. What is known is one sequence it gets wrong and that the
+sequences next to it are right, so the rule below is drawn around the one, widely enough to hold
+everything that looks like it, and is not a statement that every hit is wrong.
+
+### The pattern and the scan
+
+`testing/dxbc_scan/scan.py` reads the listings (every instruction; an opcode it does not know stops it):
+
+- **Overlapping in-place write**: an instruction that writes components of a temp register and reads,
+  of the same register, for at least one written component, another component that it also writes
+  (`r3.y` from `r3.w` in 357). These are the instructions whose result depends on the order in which
+  components are read and written. FXC emits them wherever a vector result fits over values that end
+  there: 1649 in 87 of the 92 shaders, most of them in paths that are md5-identical on the console.
+  Counted in the report, not refused.
+- **Paired read before it**: such a write by an arithmetic or logic instruction, and before it, with
+  no flow control instruction between the two, an instruction that does not write the register and
+  reads two or more of the components the write replaces into one component of its result, while they
+  still hold the values the write replaces (353 and 357). **Refused.** With a load as the write (the
+  address is a component the load replaces) it is listed and not refused: 6 before, 5 now.
+
+Before the change the scan found ten pairs:
+
+| Shader, line | The write | The read before it | Console | What was done |
+| --- | --- | --- | --- | --- |
+| `loopfilter_vert` 357 | `iadd r3.yw, r3.wwww, -r4.xxxy` | 353 `iadd r2.x, r3.w, -r3.y` | **wrong** | every output of the 8-tap branch from its own sum |
+| `loopfilter_hor` 360 | `iadd r13.yz, r13.zzwz, r13.yyzy` | 334 `imad r12.z, r13.y, l(3), r13.z` | right (model, above) | one sum of the 14-tap branch in another order |
+| `inter_warp` 706, `inter_warp_hbd` 802 | `imad r1.yz, cb0[r1.y + 3].xxxx, r4.yyzy, r1.zzzz` | the same `imad` of the rows before | 10-bit: right (md5, global motion clips) | the eleven row addresses as vectors of 4, 3 and 4 |
+| `inter_compound_masked_hbd` 880 | `iadd r4.xyzw, r4.zzzz, l(2, 3, 4, 5)` | 866 `imad r3.x, cb0[r3.w + 28].w, r4.w, r4.x` | not known | the row addresses of the second reference as vectors |
+| `inter_compound_masked_hbd` 1182 | `movc r0.xyzw, r0.wwww, r2.xyzw, r4.xyzw` | 1178 `iadd r3.w, r0.z, r0.x` | not known | the residual is added in a branch (`[branch]`), not selected |
+| `inter_2x2chroma_hbd` 455 | `movc r1.xyzw, r1.wwww, r3.xyzw, r2.xyzw` | 441 `iadd r0.yz, r1.yyyy, cb0[r1.z + 0].wwyw` | not known | the same |
+| `idct4x16` 331, `idct32x16` 361 | `iadd r3.xy, -r3.yzyy, r3.xwxx` | `iadd r9.zw, r3.zzzy, r3.wwwx` (`r24.xy`) | right (md5) | allow-list |
+| `idct64x16` 515 | `iadd r2.yz, -r2.zzwz, r2.yyyy` | 512 `iadd r41.xy, r2.wzww, r2.yyyy` | right (md5) | allow-list |
+
+The three on the allow-list (`testing/dxbc_scan/allow.txt`) are one butterfly of the 16-point inverse
+DCT, two sums and then the two differences over two of the four inputs. FXC's output for it does not
+depend on the order of the statements (four orders tried), and the same butterfly is not a pair in the
+other shaders with that transform. They are accepted because the console runs them correctly: every
+column of a block with one of these transforms and a DCT in the columns executes the pair, a wrong
+difference is a wrong residual, and the console is md5-identical to dav1d (packages 0.2.19.0 and
+0.2.29.0; the IDCT shaders have not changed since `c35d97f`) on 10-bit streams whose key frames have,
+with coefficients, 32x16 transforms in five of the streams (7 to 37 in the key frame), 4x16 in two (8
+and 5) and 64x16 in one (178), counted with libaom's inspector. An allow-list entry that matches no
+pair is an error, so a change to these shaders brings the question back.
+
+After the change: 1651 overlapping in-place writes in 87 shaders, three pairs, all on the allow-list,
+none refused; the same in the uavsync listings.
+
+### The change
+
+`loopfilter_vert.hlsl`, 8-tap branch: the six outputs each from its own sum, as the 14-tap branch has
+them, instead of from the running sum. The sums are those the running sum had at each output, so the
+arithmetic is the same:
+
+```
+x-3: (3 p1.x + 2 p1.y + p1.z + p1.w + q0.x + 4) >> 3        x:   (p1.y + p1.z + p1.w + 2 q0.x + q0.y + q0.z + q0.w + 4) >> 3
+x-2: (2 p1.x + p1.y + 2 p1.z + p1.w + q0.x + q0.y + 4) >> 3  x+1: (p1.z + p1.w + q0.x + 2 q0.y + q0.z + 2 q0.w + 4) >> 3
+x-1: (p1.x + p1.y + p1.z + 2 p1.w + q0.x + q0.y + q0.z + 4) >> 3   x+2: (p1.w + q0.x + q0.y + 2 q0.z + 3 q0.w + 4) >> 3
+```
+
+The listing of the q side now (402 → 414 instruction slots, 11 temps as before); no instruction of the
+branch writes a register from another component of itself:
+
+```
+360  iadd r1.w, r4.y, r4.x             ; p1.y + p1.z
+361  iadd r1.w, r3.z, r1.w             ; + p1.w
+362  iadd r1.w, r2.w, r1.w             ; + 2 q0.x
+363  iadd r1.w, r4.z, r1.w             ; + q0.y
+364  iadd r1.w, r4.w, r1.w             ; + q0.z
+365  iadd r1.w, r3.w, r1.w             ; + q0.w
+366  iadd r1.w, r1.w, l(4)
+367  ishr r1.w, r1.w, l(3)             ; the sample at x
+368  iadd r2.x, r3.z, r4.y             ; p1.z + p1.w ...
+...
+```
+
+The other five changes are there for the scan only; the console is not known to run any of them
+wrongly, and two of them it runs correctly. Slots before → after: `loopfilter_hor` 577 → 578,
+`inter_warp` 882 → 882, `inter_warp_hbd` 994 → 988, `inter_compound_masked_hbd` 1096 → 1122,
+`inter_2x2chroma_hbd` 387 → 393. The horizontal 8-bit filter and the two 10-bit filters keep their
+running sums: no pair there, and right on the console.
+
+On WARP the output is the same: all conformance streams are md5-identical to their references with
+the changed shaders, and the host checks pass (the run of the commit that made this change).
+
+### The check
+
+The workflow scans the listings of both variants after the survey (`Listings scan` step:
+`scan.py --self-test`, which must find the pair above in a copy of the old listing and must not find
+it in five sequences next to it, then the scan). A pair that is not on the allow-list stops the run;
+`shader-survey/listing-scan.txt` in the artifact has every overlapping in-place write, per shader, and
+the pairs. See [test-player.md](test-player.md#listings-scan).
+
+### Not run on the console
+
+The change itself. Expected there: the 8-bit streams md5-identical to dav1d (the 2160p cut, the 720p
+Chimera cut, `av1-1-b8-03-sizeup` and `-sizedown`, `av1-1-b8-01-size-66x66`), the 10-bit regression set
+unchanged. If an 8-bit stream is still wrong, `-dumpstages` of a wrong frame and `lf_model.py` on the
+dump say whether a loop filter stage is still not as written.

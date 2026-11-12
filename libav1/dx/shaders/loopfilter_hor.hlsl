@@ -96,8 +96,13 @@ void filter_horizontal_edge(RWByteAddressBuffer buffer, uint offset, uint stride
       shared_mem[Stride64 * 7 + wi] = (p0.y * 1 + p0.z * 1 + p0.w * 1 + p1.x * 1 + p1.y * 1 + p1.z * 2 + p1.w * 2 +
                                        q0.x * 2 + q0.y * 1 + q0.z * 1 + q0.w * 1 + q1.x * 1 + q1.y * 1 + 8) >>
                                       4;
-      shared_mem[Stride64 * 8 + wi] = (p0.z * 1 + p0.w * 1 + p1.x * 1 + p1.y * 1 + p1.z * 1 + p1.w * 2 + q0.x * 2 +
-                                       q0.y * 2 + q0.z * 1 + q0.w * 1 + q1.x * 1 + q1.y * 1 + q1.z * 1 + 8) >>
+      // p0.z and p0.w come last in this sum (they came first, as in the other sums): with them first FXC
+      // added the heads of this sum and of the one before in one instruction over p0.y and p0.z,
+      // iadd r13.yz, r13.zzwz, r13.yyzy, after imad r12.z, r13.y, l(3), r13.z had read the two: the pair
+      // that testing/dxbc_scan/scan.py refuses (docs/gpu-av1-decoder.md, "A paired read before an
+      // overlapping in-place write"). The console ran this one correctly; the sum is the same.
+      shared_mem[Stride64 * 8 + wi] = (p1.x * 1 + p1.y * 1 + p1.z * 1 + p1.w * 2 + q0.x * 2 + q0.y * 2 + q0.z * 1 +
+                                       q0.w * 1 + q1.x * 1 + q1.y * 1 + q1.z * 1 + p0.z * 1 + p0.w * 1 + 8) >>
                                       4;
       shared_mem[Stride64 * 9 + wi] = (p0.w * 1 + p1.x * 1 + p1.y * 1 + p1.z * 1 + p1.w * 1 + q0.x * 2 + q0.y * 2 +
                                        q0.z * 2 + q0.w * 1 + q1.x * 1 + q1.y * 1 + q1.z * 2 + 8) >>

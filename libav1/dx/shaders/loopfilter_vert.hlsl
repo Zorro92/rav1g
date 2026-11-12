@@ -99,20 +99,23 @@ void filter_vertical_edge(RWByteAddressBuffer buffer, uint offset, int4 limits, 
     pixels.w |= ((p1.w * 1 + q0.x * 1 + q0.y * 1 + q0.z * 1 + q0.w * 1 + q1.x * 2 + q1.y * 2 + q1.z * 7 + 8) >> 4) << 8;
     buffer.Store4(offset - 8, pixels);
   } else if (type >= 2 && flat) {
-    int v = p1.x * 3 + p1.y + p1.z + p1.w + q0.x;
+    // 8-tap filter. Every output from its own sum, as in the 14-tap branch, and not from a running sum
+    // v (v = p1.x * 3 + p1.y + p1.z + p1.w + q0.x, then v += -p1.x + q0.y and so on: the same values).
+    // FXC compiled the running sum to
+    //     iadd r2.x, r3.w, -r3.y          (q0.w - p1.x)
+    //     ...
+    //     iadd r3.yw, r3.wwww, -r4.xxxy   (q0.w - p1.y and q0.w - p1.z, over q0.w and p1.x)
+    // and the console's driver ran the first of the two as r3.z - r3.x (p1.w - q0.x): the three samples
+    // right of the edge came out wrong (docs/gpu-av1-decoder.md, "A paired read before an overlapping
+    // in-place write"; testing/dxbc_scan/scan.py refuses that pair in the listings).
     pixels.y = p1.x;
-    pixels.y |= ((v + p1.y + 4) >> 3) << 8;
-    v += -p1.x + q0.y;
-    pixels.y |= ((v + p1.z + 4) >> 3) << 16;
-    v += -p1.x + q0.z;
-    pixels.y |= ((v + p1.w + 4) >> 3) << 24;
+    pixels.y |= ((p1.x * 3 + p1.y * 2 + p1.z + p1.w + q0.x + 4) >> 3) << 8;
+    pixels.y |= ((p1.x * 2 + p1.y + p1.z * 2 + p1.w + q0.x + q0.y + 4) >> 3) << 16;
+    pixels.y |= ((p1.x + p1.y + p1.z + p1.w * 2 + q0.x + q0.y + q0.z + 4) >> 3) << 24;
 
-    v += -p1.x + q0.w;
-    pixels.z = (v + q0.x + 4) >> 3;
-    v += -p1.y + q0.w;
-    pixels.z |= ((v + q0.y + 4) >> 3) << 8;
-    v += -p1.z + q0.w;
-    pixels.z |= ((v + q0.z + 4) >> 3) << 16;
+    pixels.z = (p1.y + p1.z + p1.w + q0.x * 2 + q0.y + q0.z + q0.w + 4) >> 3;
+    pixels.z |= ((p1.z + p1.w + q0.x + q0.y * 2 + q0.z + q0.w * 2 + 4) >> 3) << 8;
+    pixels.z |= ((p1.w + q0.x + q0.y + q0.z * 2 + q0.w * 3 + 4) >> 3) << 16;
     pixels.z |= q0.w << 24;
     buffer.Store2(offset - 4, pixels.yz);
   } else if (type == 1 && flat_uv) {
