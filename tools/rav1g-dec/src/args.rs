@@ -189,7 +189,8 @@ pub fn usage() {
     say!("  -poisonmi             debugging: the mode info pool starts filled with the byte 0xA5 instead of with what");
     say!("                        the memory held, so a shader that reads bytes the decoder never wrote shows in");
     say!("                        the output of any stream (same output)");
-    say!("  -poisonbuf            the same for every buffer the CPU writes for the shaders (same output)");
+    say!("  -poisonbuf            the same for every buffer the CPU writes for the shaders, and the constants of");
+    say!("                        every stage filled again in every frame before the stage writes them (same output)");
     say!("  -interfast            inter prediction by the fraction of the motion vector: a copy, one filter pass, or");
     say!("                        both (inter_fast, inter_compound_fast; same output)");
     say!("  -interfastlists       the block lists of -interfast with the original shaders on them (same output)");

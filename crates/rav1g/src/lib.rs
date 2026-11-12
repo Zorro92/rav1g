@@ -346,7 +346,9 @@ pub mod switches {
     }
     /// Debugging: the decoders created after the call fill the mode info pool (`AV1_POISON_MODE_INFO`) or
     /// every buffer the CPU writes for the shaders (`AV1_POISON_BUFFERS`) with the byte 0xA5 when they
-    /// create it, instead of leaving what the memory held. The output must be the same. 0: off, the default.
+    /// create it, instead of leaving what the memory held. With `AV1_POISON_BUFFERS` they also fill the
+    /// constants of every stage again in every frame, right before the stage writes them. The output must be
+    /// the same. 0: off, the default.
     pub unsafe fn set_poison_buffers(level: i32) {
         unsafe { sys::av1_set_poison_buffers(level) }
     }

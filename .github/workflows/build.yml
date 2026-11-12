@@ -794,6 +794,34 @@ jobs:
             "--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)"
           if ($LASTEXITCODE -ne 0) { throw "conformance with -poisonmi with rav1g-dec: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
 
+      # The same part of the set with -poisonbuf, as the conformance job runs it with warp_decoder: every
+      # buffer the CPU writes filled with 0xA5 at creation, and the constants of every stage again in every
+      # frame before the stage writes them.
+      - name: Conformance of the vectors with poisoned buffers and constants (-poisonbuf) with rav1g-dec
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/conformance-poisonbuf --threads 4 "--tool-args=-poisonbuf" "--title=rav1g-dec, part of the set with -poisonbuf" `
+            "--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)"
+          if ($LASTEXITCODE -ne 0) { throw "conformance with -poisonbuf with rav1g-dec: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
+
+      # With the experiments input: the whole set with rav1g-dec on the fast inter path, with -poisonbuf,
+      # and with both (the conformance job decodes the same with warp_decoder).
+      - name: Conformance of the whole set with -interfast and with -poisonbuf with rav1g-dec
+        if: ${{ !cancelled() && inputs.experiments }}
+        shell: pwsh
+        run: |
+          $runs = @(@{ name = 'interfast'; args = '-interfast' }, @{ name = 'poisonbuf-all'; args = '-poisonbuf' },
+            @{ name = 'poisonbuf-interfast'; args = '-poisonbuf -interfast' })
+          $failed = @()
+          foreach ($run in $runs) {
+            python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+              --out "out/conformance-$($run.name)" --threads 4 "--tool-args=$($run.args)" "--title=rav1g-dec with $($run.args)"
+            if ($LASTEXITCODE -ne 0) { $failed += "$($run.args): exit code $LASTEXITCODE" }
+          }
+          if ($failed.Count) { throw "conformance with rav1g-dec: $($failed -join '; ')" }
+
       - name: Timing run with the inter breakdown on WARP with rav1g-dec (smoke test)
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -826,7 +854,7 @@ jobs:
           name: rav1g-dec-conformance-${{ github.run_id }}
           path: |
             out/conformance/
-            out/conformance-poisonmi/
+            out/conformance-*/
             out/order-check/
             out/gputime-smoke/
             out/sm6test/
