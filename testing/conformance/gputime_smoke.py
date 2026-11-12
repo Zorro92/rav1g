@@ -43,8 +43,8 @@ def check_run(name, mode, text, area_mpx, scaled, problems):
         problems.append('%s, %s: %s' % (name, mode, what))
 
     lines = gputime_lines(text)
-    result = re.search(r'^RESULT\s+(\S+)\s+(\S+)', text, re.M)
-    if not result or result.group(2) != 'pass':
+    result = re.search(r'^RESULT\s.*?\bstatus=(\S+)', text, re.M)
+    if not result or result.group(1) != 'pass':
         bad('the stream did not decode as its reference says: %s' % (result.group(0) if result else 'no RESULT line'))
     if not any(line.startswith('==== summary:') for line in lines):
         bad('no summary')
