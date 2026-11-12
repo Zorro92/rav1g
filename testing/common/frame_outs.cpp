@@ -149,6 +149,7 @@ std::shared_ptr<OutBufferWrapper> OutBufferStorage::GetFreeBuffer(uint32_t width
     }
     if (flags & CBUFREADBACK) {
       if (buffer->buffer_size < buffer_size) {
+        buffer->DropReadback();
         // Create readback buffer (if any)
         const D3D12_HEAP_TYPE heapType = D3D12_HEAP_TYPE_READBACK;
         const D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COPY_DEST;
@@ -172,7 +173,8 @@ std::shared_ptr<OutBufferWrapper> OutBufferStorage::GetFreeBuffer(uint32_t width
             has_errors = 1;
             return 0;
           }
-          buffer->d3d12buffer->Unmap(0, 0);
+          // Persistent mapping: the completion callback reads pMem after the GPU fence.
+          // DropReadback unmaps immediately before replacement or release.
           readback_bytes += buffer_size;
           ++readback_buffers;
         } else {
@@ -216,8 +218,7 @@ std::shared_ptr<OutBufferWrapper> OutBufferStorage::GetFreeBuffer(uint32_t width
     XB_LOGI << "GPUTIME output-buffer wait #" << wait_no << " resumed after " << waited_ms << " ms";
   }
   if (!(flags & CBUFREADBACK)) {
-    buffer->d3d12buffer.Reset();
-    buffer->pMem = 0;
+    buffer->DropReadback();
   }
   std::unique_lock<std::mutex> lock(cs_);
   OutBufferWrapper* bf = new (std::nothrow) OutBufferWrapper(buffer, this);
