@@ -1191,8 +1191,8 @@ read that took two bytes of C struct padding for part of a flag.
   vectors, it was right.
 - `av1-1-b8-22-svc-L2T1-2.ivf` now and then had 0 of 8 frames right behind `svc-L2T1` in the same
   process and was right alone. It failed in all passes of a job or in none, more often on the slow
-  runners (of 8 jobs, the 3 that failed decoded the set in 2.9 to 3.1 min, the 5 that passed in
-  1.5 to 2.7), and a rerun of the job passed sooner or later. `run.py` decodes a stream that fails
+  runners (the 3 jobs that failed on one day decoded the set in 2.9 to 3.1 min, the 6 that passed
+  in 1.5 to 2.7), and a rerun of the job passed sooner or later. `run.py` decodes a stream that fails
   behind others again alone, so the stream never came out as wrong, only as unstable, and the
   failure was taken for one of the runner.
 
