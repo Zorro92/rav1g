@@ -1,6 +1,6 @@
 # Rust port, phase 1: design
 
-Status: proposal (2026-11-12). Branch `main`. The C++ decoder at tag `v0.3.0` (branch `cpp`) is the
+Status: agreed (2026-11-12); not started. Branch `main`. The C++ decoder at tag `v0.3.0` (branch `cpp`) is the
 reference: every step below has to decode the conformance set md5-identically to it and to dav1d.
 
 ## Goal and scope
@@ -52,12 +52,34 @@ At the end no C++ remains in the decoder: the C parser, the HLSL and Rust.
 | --- | --- |
 | `crates/rav1g` | the decoder: Rust host modules, API, `capi` feature for the C ABI |
 | `crates/rav1g-sys` | builds the C parser (and, until step 4 ends, the remaining C++) with `cc`; `bindgen` bindings |
-| `crates/rav1g-shaders` | shader bytecode: `build.rs` runs FXC (Windows SDK) or takes the headers of the CI shader cache; embedded with `include_bytes!` |
+| `crates/rav1g-shaders` | shader bytecode: `build.rs` runs DXC (see Requirements) and embeds the DXIL with `include_bytes!` |
 | `tools/rav1g-dec` | command-line decoder for conformance, md5 and stage dumps |
 | `libav1/`, `testing/` | as today; C++ files leave `libav1/dx` as steps 3-4 replace them |
 
 Dependencies: `windows` (D3D12/DXGI bindings), `cc`, `bindgen`, `cbindgen`. Edition 2024, stable Rust.
 Target `x86_64-pc-windows-msvc`, and the UWP target for the console build of the test player.
+
+## Requirements
+
+Agreed on 2026-11-12, in addition to the steps above:
+
+- **Linux-native builds, no wine.** Everything except the UWP test player builds on Linux with ordinary
+  tools: `cargo xwin` (clang and lld with the Windows SDK and C runtime headers and libraries that `xwin`
+  fetches) for `x86_64-pc-windows-msvc`, the C parser through `cc` the same way, and the shaders with DXC's
+  native Linux release. The UWP test player is C++/CX and stays an MSVC build in CI, as does the MSIX
+  packaging. Running the decoder still needs D3D12 (WARP in CI, or the console).
+- **Shaders compiled with DXC, not FXC.** FXC exists only for Windows. The console takes DXIL signed by DXC
+  up to shader model 6.4, with waves of 64 lanes, no native 16-bit types and no `[WaveSize]`
+  ([gpu-av1-decoder.md](gpu-av1-decoder.md#shader-model-6-feasibility-2026-11-12)). Baseline `cs_6_0`; the
+  shaders must not assume a wave width (WARP has waves of 4). Before anything relies on it: the existing
+  HLSL compiled unchanged with DXC must give md5-identical output on WARP and on the console at the same
+  speed, and the Linux build of DXC must produce signed DXIL that the console accepts. The DXBC listing
+  scan (`testing/dxbc_scan`) does not read DXIL; a DXIL equivalent, or a reason why the pattern cannot
+  occur, comes with the switch.
+- **A GPU backend boundary.** The host talks to the GPU through one internal interface (buffers, pipeline
+  states, dispatch, barriers, fences, timestamps, readback). Phase 1 implements it for D3D12 only; a
+  Vulkan backend (SPIR-V from the same HLSL through DXC; Linux, Android, macOS via MoltenVK, and
+  conformance on Linux runners with Mesa's lavapipe) is a later phase and must not need a rewrite.
 
 ## Testing
 
@@ -90,10 +112,9 @@ Steps 1-2: about a day. Step 3: two to three days. Step 4: one to two days. Step
 About a working week to a Rust decoder that is md5-identical on WARP and the console, assuming no large
 surprises in step 4.
 
-## Open questions
+## Decisions
 
-1. Does the UWP test player stay C++ (linking `rav1g.h`), or does it move to Rust too? Proposal: stay C++ in
-   phase 1; it is test tooling.
-2. Should `rav1g-dec` keep the `-gputime` and `-dumpstages` diagnostics from step 1? Proposal: yes, through
-   the same C entry points until step 4 moves them.
-3. Minimum supported Rust version: proposal, latest stable at the time step 1 lands, raised freely.
+1. The UWP test player stays C++ in phase 1 and links `rav1g.h`; it is test tooling.
+2. `rav1g-dec` keeps the `-gputime` and `-dumpstages` diagnostics from step 1, through the same C entry
+   points until step 4 moves them.
+3. Minimum supported Rust version: the latest stable when step 1 lands, raised freely.
