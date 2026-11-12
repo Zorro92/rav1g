@@ -52,8 +52,9 @@ What differs from `warp_decoder`:
   line. The same for paths of plain ASCII.
 - Lines end with a line feed; `warp_decoder`, a C program writing to a redirected stdout, ends them with
   carriage return and line feed. The md5 files are the same bytes (`<md5>   <n>\r\n`).
-- The C and C++ are compiled without whole program optimisation, and with MSVC `prediction.cpp` without
-  `/Ot`: MSVC compiles one loop of it wrongly otherwise ([rust-port.md](rust-port.md#progress)).
+- The C and C++ are compiled without whole program optimisation. (That build is how a miscompilation of
+  `av1_mi_push_block` by MSVC was found; the loop it hit is rewritten:
+  [rust-port.md](rust-port.md#progress).)
 - CI runs the experiment passes (`-lfhsplit`, `-intraedgefix`, the uavsync shaders) and the `-interfast`
   pass with `warp_decoder` only.
 

@@ -125,9 +125,9 @@ How the C and C++ are built. `rav1g-sys` reads the list of sources and their per
 `testing/warp_decoder/libav1_sources.props`, the file `sync_sources.py` writes from `libav1.vcxproj` and CI
 checks, so the three builds (the library project, `warp_decoder`, cargo) compile the same files: 71 C files,
 8 C++ files, `/O1 /Ot`, `/O2` for the seven files the project marks, `/sdl`, no `NDEBUG` (the asserts of the
-library stay in, as in the player), `/EHsc` for the C++, whatever the cargo profile is. Two differences
-from the MSBuild projects: no whole program optimisation (`/GL`), which they switch on and a cargo build
-cannot use, and with MSVC `prediction.cpp` is compiled at `/O1` without `/Ot` (next paragraph).
+library stay in, as in the player), `/EHsc` for the C++, whatever the cargo profile is. One difference from
+the MSBuild projects: no whole program optimisation (`/GL`), which they switch on and a cargo build cannot
+use (the objects go through rustc's archives, and the Linux build links with lld).
 
 **MSVC compiles `av1_mi_push_block` wrongly without `/GL`.** The first cargo build with MSVC (toolset
 14.51.36231) decoded 2 of 251 streams right, with another md5 from run to run, while the same sources built
@@ -143,11 +143,17 @@ intra block (`for (int x = x_start; ...)`, luma) the compiler keeps `subblk_w = 
 temporary that it loads at the top of the loop and stores only after the load; nothing initialises it before
 the first iteration. The first transform block of every call therefore takes its width from whatever the
 stack holds, which decides how many neighbours above it are looked at and its top right flag. The source is
-well defined at that point (`const int subblk_w = 1 << txw;` in the loop body), so this is the compiler, and
-nothing in the source is changed: `rav1g-sys` compiles `prediction.cpp` without `/Ot` when the compiler is
-MSVC (`MSVC_WITHOUT_FAVOR_SPEED` in `build.rs`). The MSBuild builds are not affected as far as the
-conformance run can tell (251 of 251 with `/GL`). To be checked again with a new toolset; the file is
-replaced in step 3.
+well defined at that point (`const int subblk_w = 1 << txw;` in the loop body), so this is the compiler.
+A second, independent analysis of the same builds came to the same temporary and the same first differing
+buffer.
+
+The fix is in the source, because the MSBuild builds compile the same loop and only happen to get it right
+with `/GL`: `subblk_w` and `subblk_h`, which do not change inside the loops, are declared once per plane in
+front of them (`prediction.cpp`, luma and chroma; made on `cpp`, commit 1eebffe, and merged). The settings
+stay `/O1 /Ot` in every build. For one commit (eb69620) `rav1g-sys` instead compiled `prediction.cpp`
+without `/Ot` under MSVC, which decodes the set right as well (run 43244241029: 250 of 251, the one being
+`svc-L2T1-2`, which failed the same way in `warp_decoder` of that run and passes alone); that is gone again. To keep in mind with a new
+toolset: the conformance run is what found it, and it runs for every build.
 
 Shaders. The build takes the FXC bytecode headers the other builds take: `RAV1G_SHADER_DIR` names the
 directory whose `dx/shaders/h` has them (what MSBuild gets as `/p:Rav1gPrebuiltShaders`; in CI the `normal`
