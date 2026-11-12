@@ -2,9 +2,16 @@ name: Build
 
 on:
   push:
-    branches: [main]
+    branches: [main, cpp]
     paths-ignore: ['**.md', 'docs/**']
   workflow_dispatch:
+    inputs:
+      experiments:
+        description: >
+          Also build the uavsync package and decode the conformance set again with each experiment
+          flag and with the uavsync shaders (about 10 more minutes)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -194,6 +201,7 @@ jobs:
       # over the normal package of this run and keeps its LocalState, and the normal package of a
       # later run installs over it.
       - name: Stamp the uavsync package (same identity, revision 1)
+        if: ${{ inputs.experiments }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -203,6 +211,7 @@ jobs:
           $manifest.Save($path)
 
       - name: Build the signed uavsync package (all-memory group syncs)
+        if: ${{ inputs.experiments }}
         shell: pwsh
         env:
           CERT_THUMBPRINT: ${{ steps.cert.outputs.thumbprint }}
@@ -246,7 +255,7 @@ jobs:
             @($packages | ForEach-Object { $_.Name }) + @('```') >> $env:GITHUB_STEP_SUMMARY
 
       - name: Preserve the uavsync package
-        if: always()
+        if: ${{ always() && inputs.experiments }}
         uses: actions/upload-artifact@v7
         with:
           name: rav1g-testplayer-uavsync-x64-${{ github.run_id }}
@@ -420,9 +429,10 @@ jobs:
       # The experiments (docs/test-player.md, "Experiments"): on a device that follows D3D each of them
       # leaves the output as it is, so the whole set is decoded again with each flag and has to give the
       # results of expected.txt, and once more with a decoder whose shaders are those of the uavsync
-      # package.
+      # package. They answered their question (none changed the console's output), so they run only
+      # when the workflow is started by hand with the experiments input.
       - name: Conformance with each experiment flag
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && inputs.experiments }}
         shell: pwsh
         run: |
           $runs = @(@{ name = 'lfhsplit1'; args = '-lfhsplit 1' }, @{ name = 'lfhsplit2'; args = '-lfhsplit 2' },
@@ -436,7 +446,7 @@ jobs:
           if ($failed.Count) { throw "conformance with an experiment flag: $($failed -join '; ')" }
 
       - name: Build warp_decoder with the shaders of the uavsync package
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && inputs.experiments }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -456,7 +466,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'The uavsync warp_decoder was not built from the uavsync shader headers of this run' }
 
       - name: Conformance with the uavsync shaders
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && inputs.experiments }}
         shell: pwsh
         run: |
           python testing/conformance/run.py --tool out/warp_decoder_uavsync/warp_decoder.exe --streams conformance-streams `

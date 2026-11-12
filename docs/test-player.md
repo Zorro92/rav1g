@@ -2324,6 +2324,13 @@ Each is off by default, and on a device that follows D3D each leaves the output 
 conformance run decodes the whole set on WARP once more with each of them and gets the same
 results. The task's log has an `Experiments:` line that says what is in effect.
 
+None of them changed the console's output; the cause of the 8-bit mismatch was a different one (a
+paired read before an overlapping in-place write in the vertical loop filter), and the scaled-reference
+"bug" was a reference-file error. The flags stay in the player, but the workflow builds the uavsync
+package and decodes the set with each flag only when it is started by hand with the `experiments`
+input (`gh workflow run build.yml --ref <branch> -f experiments=true`); a push runs the conformance
+set once, which takes the job from about 15 to about 5 minutes.
+
 | | What it changes | Why |
 | --- | --- | --- |
 | `-lfhsplit 1` | The horizontal loop filter of a plane is no longer one dispatch: first the even rows of blocks (a block is 4 columns by 64 rows), a UAV barrier, then the odd rows. | The first edge of a block reads and writes the last rows of the block above it, which another thread group of the same dispatch filters; the vertical filter is two dispatches for the same reason. By the rules of the loop filter the rows two neighbouring edges write never overlap, and what one reads of the other's it does not use, so the single dispatch should be right; the flag tests that on the device. |
