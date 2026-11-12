@@ -12,7 +12,8 @@
 //! The files and their settings are those of `libav1/build/libav1.vcxproj` in Release x64, read from
 //! `testing/warp_decoder/libav1_sources.props` (written from that project by `sync_sources.py`; CI checks
 //! that it is up to date): `/O1 /Ot`, `/O2` for the files the project marks, no `NDEBUG` (the library's
-//! asserts are compiled in), `/sdl`. Whole program optimisation is not used.
+//! asserts are compiled in), `/sdl`. Whole program optimisation is not used, and with MSVC one file is
+//! compiled without `/Ot` (`MSVC_WITHOUT_FAVOR_SPEED`).
 //!
 //! The shaders are not compiled here. `RAV1G_SHADER_DIR` names the directory whose `dx/shaders/h` has the
 //! bytecode headers of the FXC build (`testing/shader_cache/shaders.py build --root <dir>`, or what a
@@ -100,6 +101,21 @@ fn shader_dir() -> PathBuf {
     dir
 }
 
+/// Files that MSVC compiles at `/O1` without `/Ot`, because it compiles them wrongly with it when the
+/// program is not built with whole program optimisation (`/GL`, which the MSBuild projects use and a cargo
+/// build cannot: the objects go through rustc's archives and lld). clang-cl is not affected.
+///
+/// `prediction.cpp`, seen with the MSVC toolset 14.51.36231 (x64) at `/O1 /Ot`: in `av1_mi_push_block` the
+/// loop over the transform blocks of an intra block (`for (int x = x_start; x < x_end; ++x)`) keeps
+/// `subblk_w = 1 << txw` in a stack temporary that it reads at the top of the loop and writes behind it, so
+/// the first block of a call takes whatever the stack holds for its width. The wavefront iteration of the
+/// block and its top right flag come out wrong, the block lands in the list of another iteration, and the
+/// frame is wrong, differently from run to run. 247 of 251 conformance streams mismatched; the listing
+/// (`/FAs`) shows the read of the temporary before any write. With `/O1`, `/Ob0` or no optimisation for
+/// this file the code is right and all streams pass. The source is well defined there; nothing is changed
+/// in it. To be checked again with every new toolset, and gone when the file is (step 3).
+const MSVC_WITHOUT_FAVOR_SPEED: &[&str] = &["prediction.cpp"];
+
 /// A compiler call with the settings every file of the library has.
 fn base_build(repo: &Path, shaders: &Path, cpp: bool) -> cc::Build {
     let mut build = cc::Build::new();
@@ -117,6 +133,10 @@ fn base_build(repo: &Path, shaders: &Path, cpp: bool) -> cc::Build {
         // No NDEBUG, whatever the profile: the asserts of the library stay, as in the player.
         .flag_if_supported("/sdl")
         .flag_if_supported("/wd4996");
+    if cpp {
+        // The exception model of the MSBuild projects; cc does not choose one.
+        build.flag_if_supported("/EHsc");
+    }
     if env::var_os("CARGO_FEATURE_UAVSYNC").is_some() {
         build.define("RAV1G_UAVSYNC", None);
     }
@@ -169,8 +189,23 @@ fn main() {
     c_speed.opt_level(2);
     let mut cpp = base_build(&repo, &shaders, true);
     cpp.opt_level(1).flag_if_supported("/Ot");
+    // The files of MSVC_WITHOUT_FAVOR_SPEED, when the compiler is MSVC itself: /O1 without /Ot.
+    let mut cpp_msvc_size = base_build(&repo, &shaders, true);
+    cpp_msvc_size.opt_level(1);
+    let compiler = cpp.get_compiler();
+    let is_msvc = compiler.is_like_msvc() && !compiler.is_like_clang_cl();
+    let mut msvc_size_files = 0;
     for source in &sources {
         let is_cpp = source.path.extension().is_some_and(|extension| extension != "c");
+        let name = source.path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        if is_msvc && MSVC_WITHOUT_FAVOR_SPEED.contains(&name.as_str()) {
+            if !is_cpp || source.max_speed {
+                fail(&format!("{name}: MSVC_WITHOUT_FAVOR_SPEED is for C++ files at /O1 /Ot"));
+            }
+            cpp_msvc_size.file(&source.path);
+            msvc_size_files += 1;
+            continue;
+        }
         match (is_cpp, source.max_speed) {
             (true, false) => {
                 cpp.file(&source.path);
@@ -189,6 +224,9 @@ fn main() {
     c_size.compile("rav1g_c");
     c_speed.compile("rav1g_c_speed");
     cpp.compile("rav1g_dx");
+    if msvc_size_files > 0 {
+        cpp_msvc_size.compile("rav1g_dx_msvc_size");
+    }
     println!("cargo:rustc-link-lib=d3d12");
     println!("cargo:rustc-link-lib=dxgi");
     println!("cargo:rustc-link-lib=dxguid");

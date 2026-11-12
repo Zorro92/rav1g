@@ -125,8 +125,29 @@ How the C and C++ are built. `rav1g-sys` reads the list of sources and their per
 `testing/warp_decoder/libav1_sources.props`, the file `sync_sources.py` writes from `libav1.vcxproj` and CI
 checks, so the three builds (the library project, `warp_decoder`, cargo) compile the same files: 71 C files,
 8 C++ files, `/O1 /Ot`, `/O2` for the seven files the project marks, `/sdl`, no `NDEBUG` (the asserts of the
-library stay in, as in the player), whatever the cargo profile is. One difference: no whole program
-optimisation (`/GL`), which `warp_decoder.vcxproj` switches on.
+library stay in, as in the player), `/EHsc` for the C++, whatever the cargo profile is. Two differences
+from the MSBuild projects: no whole program optimisation (`/GL`), which they switch on and a cargo build
+cannot use, and with MSVC `prediction.cpp` is compiled at `/O1` without `/Ot` (next paragraph).
+
+**MSVC compiles `av1_mi_push_block` wrongly without `/GL`.** The first cargo build with MSVC (toolset
+14.51.36231) decoded 2 of 251 streams right, with another md5 from run to run, while the same sources built
+by MSBuild (`warp_decoder`) and by clang-cl (the Linux build) decoded all of them. Found by building
+variants on a throwaway branch: everything at `/Od` passes; `prediction.cpp` alone at `/Od` passes; of its
+functions only `av1_mi_push_block` matters; for that file `/O1` without `/Ot` passes and so does `/Ob0`,
+while `/O1 /Ot`, `/O2`, `/Ob1`, without `/sdl`, with `/GS-`, `/Oy-` or `/d2SSAOptimizer-` fail. The stage
+dumps of a good and a bad build differ first in the prediction block records of a key frame, and a print of
+the block lists shows why: the wavefront iteration of the intra blocks comes out too high (23 instead of 13
+iterations for the first frame of the 66x66 vector), so blocks are counted into the lists of other
+iterations. The listing of the bad build (`/FAs`) has the cause: in the loop over the transform blocks of an
+intra block (`for (int x = x_start; ...)`, luma) the compiler keeps `subblk_w = 1 << txw` in a stack
+temporary that it loads at the top of the loop and stores only after the load; nothing initialises it before
+the first iteration. The first transform block of every call therefore takes its width from whatever the
+stack holds, which decides how many neighbours above it are looked at and its top right flag. The source is
+well defined at that point (`const int subblk_w = 1 << txw;` in the loop body), so this is the compiler, and
+nothing in the source is changed: `rav1g-sys` compiles `prediction.cpp` without `/Ot` when the compiler is
+MSVC (`MSVC_WITHOUT_FAVOR_SPEED` in `build.rs`). The MSBuild builds are not affected as far as the
+conformance run can tell (251 of 251 with `/GL`). To be checked again with a new toolset; the file is
+replaced in step 3.
 
 Shaders. The build takes the FXC bytecode headers the other builds take: `RAV1G_SHADER_DIR` names the
 directory whose `dx/shaders/h` has them (what MSBuild gets as `/p:Rav1gPrebuiltShaders`; in CI the `normal`
@@ -152,7 +173,8 @@ CI (`.github/workflows/build.yml`), next to the unchanged `conformance` job with
   must be in both runs with the same md5 file, byte for byte, and the stage dumps of the frames in
   `dump_tasks.txt` must compare equal.
 - `shader-headers` (Windows): the headers of the Shaders step as an artifact, for the Linux build.
-- `rust-cross` (Linux): `cargo xwin build --release --target x86_64-pc-windows-msvc`, that is clang-cl and
+- `rust-cross` (Linux, `ubuntu-26.04` like the other Linux jobs): `cargo xwin build --release --target
+  x86_64-pc-windows-msvc`, that is clang-cl and
   lld-link with the SDK and C runtime xwin fetches (kept in the Actions cache), and the shader check on the
   program it built.
 - `rust-cross-run` (Windows): the conformance set with the program of the Linux build.

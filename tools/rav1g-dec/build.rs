@@ -35,6 +35,10 @@ fn base_build(repo: &Path, shim: &Path, sm6: Option<&Path>, cpp: bool) -> cc::Bu
         .flag_if_supported("/wd4996");
     // warp_decoder.vcxproj, Release: /O1 /Ot, whatever the cargo profile.
     build.opt_level(1).flag_if_supported("/Ot");
+    if cpp {
+        // The exception model of the MSBuild projects; cc does not choose one.
+        build.flag_if_supported("/EHsc");
+    }
     if let Some(dir) = sm6 {
         build.include(dir).define("RAV1G_SM6TEST_SHADERS", None);
     }

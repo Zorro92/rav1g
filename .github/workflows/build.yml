@@ -295,7 +295,7 @@ jobs:
   # the Actions cache, keyed by the list and the scripts that make them, and never in the repository
   # or in an artifact. The artifact of this job has the md5 references and the task list only.
   conformance-streams:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     outputs:
       key: ${{ steps.key.outputs.key }}
@@ -763,7 +763,7 @@ jobs:
   # every stream of the set, and the same buffers behind every GPU stage of the dumped frames.
   rust-equal:
     needs: [conformance, rust]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -837,7 +837,7 @@ jobs:
   # shaders are the FXC headers of the shader-headers job.
   rust-cross:
     needs: shader-headers
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 45
     env:
       CARGO_XWIN_VERSION: 0.23.1
@@ -978,7 +978,7 @@ jobs:
   # for every group sync a copy of the shader with that sync turned into a plain barrier must be
   # rejected for a race. (The CDEF, intra and warp checks below run their shaders the same way.)
   sync-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -994,7 +994,7 @@ jobs:
   # Host proof for CDEF v2: the original and the v2 CDEF shader source, compiled as C++,
   # must write byte-identical frames (random and edge-case input, 8-bit and high bit depth).
   cdef-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -1013,7 +1013,7 @@ jobs:
   # has another size than the frame (reference scaling, spatial layers), and the mutated copies of the
   # shaders must fail, among them the shaders that took the size of reference 0 for every reference.
   warp-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -1033,7 +1033,7 @@ jobs:
   # and what libaom writes, for every block size, class, pair of classes, fraction and filter, 8-bit and
   # 10-bit, at the edges of the frame; seventeen mutated copies must fail.
   inter-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -1051,7 +1051,7 @@ jobs:
   # must write the same samples for every denominator, 8-bit and 10-bit, at widths that are and are
   # not multiples of 8, with one and with several tile columns, and six mutated copies must fail.
   superres-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -1068,7 +1068,7 @@ jobs:
   # wavefront iterations of the original host code) and intra_v2 with its scheduler, compiled as
   # C++, must write byte-identical frames on generated block layouts, 8-bit and 10-bit.
   intra-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
