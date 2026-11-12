@@ -36,5 +36,31 @@ pub mod host {
     include!(concat!(env!("OUT_DIR"), "/host.rs"));
 }
 
+unsafe extern "C" {
+    fn rav1g_c_tables(index: u32, name: *mut *const std::ffi::c_char, size: *mut u32) -> *const std::ffi::c_void;
+}
+
+/// The bytes of a table that is `static` in a header of the decoder, as the C compiler of the build has
+/// it: for the tests that hold the Rust copy of such a table against the header. `None` for a name the
+/// probe does not have (the list is `C_TABLES` in `build.rs`).
+pub fn c_table(name: &str) -> Option<&'static [u8]> {
+    for index in 0.. {
+        let mut entry_name = std::ptr::null();
+        let mut size = 0u32;
+        // SAFETY: the probe returns null behind its last entry, else a static table of `size` bytes and
+        // its static name.
+        unsafe {
+            let data = rav1g_c_tables(index, &mut entry_name, &mut size);
+            if data.is_null() {
+                break;
+            }
+            if std::ffi::CStr::from_ptr(entry_name).to_bytes() == name.as_bytes() {
+                return Some(std::slice::from_raw_parts(data.cast::<u8>(), size as usize));
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod layout_tests;

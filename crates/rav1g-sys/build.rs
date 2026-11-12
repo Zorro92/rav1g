@@ -39,8 +39,12 @@ struct Source {
 
 /// The C++ files of `libav1/dx` whose functions the `rav1g` crate has in Rust (`crates/rav1g/src/host`).
 /// This build does not compile them. `libav1_sources.props` still lists them, for the MSBuild projects.
-const REPLACED_BY_RUST: &[&str] =
-    &["libav1/dx/av1_memory.cpp", "libav1/dx/av1_thread.cpp", "libav1/dx/vp9dx_linear_allocator.cpp"];
+const REPLACED_BY_RUST: &[&str] = &[
+    "libav1/dx/av1_compute.cpp",
+    "libav1/dx/av1_memory.cpp",
+    "libav1/dx/av1_thread.cpp",
+    "libav1/dx/vp9dx_linear_allocator.cpp",
+];
 
 fn fail(message: &str) -> ! {
     eprintln!("rav1g-sys: {message}");
@@ -276,7 +280,10 @@ fn main() {
         .clang_arg(format!("-I{}", repo.join("libav1").display()))
         .clang_arg(format!("-I{}", repo.join("libav1").join("build").display()))
         .allowlist_file(r".*[/\\]libav1[/\\]dx[/\\][A-Za-z0-9_]+\.h")
+        // The enums and limits of the bitstream (block sizes, transform sizes, ...).
+        .allowlist_file(r".*[/\\]av1[/\\]common[/\\]enums\.h")
         .allowlist_type(HOST_TYPES.join("|"))
+        .allowlist_var(HOST_VARS.join("|"))
         // COM pointers and interfaces are handed to the `windows` crate as raw pointers.
         .opaque_type("Microsoft::WRL::.*|std::.*")
         .blocklist_type("ID3D12.*|IDXGI.*|IUnknown|ID3D10Blob")
@@ -364,6 +371,16 @@ const SHARED_TYPES: &[&str] = &[
 /// Types of the entropy decoder that the Rust host modules use and that no struct of `libav1/dx` holds
 /// (those come with the headers of `libav1/dx`, which are bound whole).
 const HOST_TYPES: &[&str] = &["AV1Decoder", "AV1_COMMON", "MACROBLOCKD"];
+
+/// Tables and limits of the entropy decoder that the Rust host modules read: `extern` in its headers, so
+/// the bindings declare the C symbol.
+const HOST_VARS: &[&str] =
+    &["warped_filter", "wedge_params_lookup", "ii_weights1d", "ii_size_scales", "WARPEDPIXEL_PREC_SHIFTS"];
+
+/// Tables that are `static` in a header of the decoder and that the Rust host modules have a copy of
+/// (`crates/rav1g/src/host/tables.rs`): name and the expression of its bytes. The C probe exports them so
+/// that a test can hold the copy against the header ([`table_source`]).
+const C_TABLES: &[&str] = &["block_size_wide", "block_size_high", "ss_size_lookup"];
 
 /// The structs of the C++ host whose layout the tests hold against the C++ compiler of the build
 /// (host_layout_probe.cpp): what the Rust host modules read or write in place.
@@ -475,6 +492,26 @@ fn probe_source_c(probes: &[Probe]) -> String {
          \x20 *count = (uint32_t)(sizeof(rav1g_layout_entries) / sizeof(rav1g_layout_entries[0]));\n\
          \x20 return rav1g_layout_entries;\n}\n",
     );
+    text.push_str(&table_source(C_TABLES, "rav1g_c_tables"));
+    text
+}
+
+/// The tables of a list as (name, address, bytes), behind a function that returns them.
+fn table_source(tables: &[&str], function: &str) -> String {
+    let mut text = format!(
+        "\ntypedef struct {{\n  const char *name;\n  const void *data;\n  uint32_t size;\n}} {function}_entry;\n\n\
+         static const {function}_entry {function}_entries[] = {{\n"
+    );
+    for table in tables {
+        text.push_str(&format!("  {{ \"{table}\", {table}, (uint32_t)sizeof({table}) }},\n"));
+    }
+    text.push_str(&format!(
+        "}};\n\nconst void *{function}(uint32_t index, const char **name, uint32_t *size) {{\n\
+         \x20 if (index >= sizeof({function}_entries) / sizeof({function}_entries[0])) return 0;\n\
+         \x20 *name = {function}_entries[index].name;\n\
+         \x20 *size = {function}_entries[index].size;\n\
+         \x20 return {function}_entries[index].data;\n}}\n"
+    ));
     text
 }
 

@@ -351,6 +351,7 @@ of AOM pass there in two minutes. CI on WARP stays the gate.
 | --- | --- | --- | --- | --- |
 | 1. Allocator and log lines | `av1_memory.cpp` (356 lines), `vp9dx_linear_allocator.cpp` (121) | `host/log.rs` (156), `host/memory.rs` (534), `gpu/mod.rs` (93), `gpu/d3d12.rs` (227); tests included | `glue/av1_memory.cpp` (98) | see below |
 | 2. Queues | `av1_thread.cpp` (151) | `host/thread.rs` (406) | `glue/av1_thread.cpp` (53) | see below |
+| 3. Shader library, constant tables | `av1_compute.cpp` (759) | `host/compute.rs` (729), `host/tables.rs` (167); `gpu/mod.rs` and `gpu/d3d12.rs` grow to 114 and 509 | `glue/av1_compute.cpp` (231, of which 93 includes and 93 table lines) | see below |
 
 Module 1, allocator and log lines:
 
@@ -390,6 +391,40 @@ Module 2, queues:
 - Same behaviour, including what is odd about it: the ring starts at its first slot again whenever it
   runs empty, `MTQueuePush` does not wait when the ring is full, and a pop of an empty queue does nothing.
 - Unit tests: the order of the ring across its wrap, and a thread that takes 1000 items another pushes.
+
+Module 2 on CI (run 43289148532, commit 8991bd0): the same gates as module 1, all met; `D3D12 DEVICE
+REMOVALS: 0` in every pass.
+
+Module 3, shader library and constant tables:
+
+- **The library** is still the C++ struct `compute_shader_lib`, because the frame pipeline reads its
+  pipeline states and root signatures. Rust creates it, zeroed as its constructor left it, as the first
+  field of a value of its own that also holds the threads; the handle of
+  `av1_create_pipeline_cache_handle` points to that value, and Rust releases its 97 pipeline fields and 16
+  layouts when the handle is destroyed. The 16 layouts and the 93 pipelines are created in the order of the
+  C++, so the number in the log line of a pipeline that fails is the same.
+- **The bytecode** is in the FXC headers, which a C++ file has to include: the glue does and hands them
+  over as a table by name. The program holds the same 93 of the 97 headers as before (CI checks the
+  bytes).
+- **The threads** are `std::thread`s at the priority the C++ gave them, and take their tasks by a shared
+  counter, not from a `DataPtrQueueMT`. With that the fallback of the C++ is gone (pipelines on the
+  calling thread when tasks and threads did not fit the queue of 100 entries; 93 and at most 6 did). A
+  thread count below 0 counts as 0 (the C++ started no thread and created nothing). A creation that fails
+  releases what it made (the C++ leaked the library).
+- **The constant tables** (`av1_upload_luts`: random register of the film grain for luma and chroma, the
+  Gaussian sequence, the wedge and inter-intra masks, the warp filter) are computed by the same
+  arithmetic; unit tests hold the random register against the C++ function as it was written. The staging
+  buffers are zeroed before they are filled. The C++ left the bytes it did not write as the heap gave
+  them: behind the Gaussian sequence, and behind chroma masks smaller than 64 bytes.
+- **Tables of the C and C++ sources** that Rust needs a copy of are in `host/tables.rs`, each with a test
+  against its source: `block_size_wide`, `block_size_high` and `ss_size_lookup`, which are `static` in a
+  header, against the bytes the C compiler of the build has (`rav1g_sys::c_table`, a table probe next to
+  the layout probe); the Gaussian sequence against the text of `av1_compute.cpp`, for as long as that file
+  is in the tree. Tables that are `extern` in the C headers (`warped_filter`, `wedge_params_lookup`,
+  `ii_weights1d`, `ii_size_scales`) are read where they are.
+- **The backend boundary** got the pipeline layouts (`LayoutDesc`: read buffers, written buffers,
+  constant blocks, inline constants), the compute pipelines, and `Device::upload`, the blocking copy of
+  constant data into buffers.
 
 ## Estimate
 

@@ -15,6 +15,8 @@
 //! are those of the C++ host (`rav1g_sys::host`), read and written in place, until the frame pipeline
 //! that owns them is Rust too (step 4).
 
+mod compute;
 pub(crate) mod log;
 mod memory;
+mod tables;
 mod thread;

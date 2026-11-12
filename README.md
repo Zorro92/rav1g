@@ -140,7 +140,7 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
 Next targets: the Rust host ([docs/rust-port.md](docs/rust-port.md), started 2026-11-12; steps 1 and 2 of
 5 are in: a Cargo workspace that builds the decoder, `rav1g-dec`, the conformance tool in Rust, and
 bindings with layout tests for the structs shared with the shaders; step 3, the host's leaf modules in
-Rust, is under way: the allocator and the queues are Rust), then
+Rust, is under way: the allocator, the queues and the shader library are Rust), then
 inter and intra prediction on the GPU (a measured `-interfast` prototype showed that inter time is per
 block and per dispatch, not filtering; see
 [gpu-av1-decoder.md](docs/gpu-av1-decoder.md)) and entropy decoding on the CPU (frame-parallel or a

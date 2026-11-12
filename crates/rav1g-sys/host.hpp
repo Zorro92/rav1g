@@ -20,4 +20,10 @@
 #include "dx/av1_compute.h"
 #include "dx/av1_thread.h"
 
+/* Tables of the entropy decoder the host reads. */
+extern "C" {
+#include "av1/common/reconinter.h"
+#include "av1/common/warped_motion.h"
+}
+
 #endif /* RAV1G_SYS_HOST_HPP_ */
