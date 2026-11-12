@@ -1,6 +1,6 @@
 # Rust port, phase 1: design
 
-Status: agreed (2026-11-12); not started. Branch `main`. The C++ decoder at tag `v0.3.0` (branch `cpp`) is the
+Status: started 2026-11-12 (step 1). Branch `main`. The C++ decoder at tag `v0.3.0` (branch `cpp`) is the
 reference: every step below has to decode the conformance set md5-identically to it and to dav1d.
 
 ## Goal and scope

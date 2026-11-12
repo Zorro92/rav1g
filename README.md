@@ -3,7 +3,8 @@
 A fast, open-source AV1 decoder on the GPU: entropy decoding on the CPU, everything after
 it (inverse transforms, intra and inter prediction, loop filter, CDEF, loop restoration,
 super-resolution, film grain) in D3D12 compute shaders. It runs on any D3D12 GPU. The name
-stands for Rust AV1 GPU; a Rust host is the plan once the shaders are fast enough.
+stands for Rust AV1 GPU: the C++ host is being ported to Rust on this branch
+([docs/rust-port.md](docs/rust-port.md)); the C++ decoder stays on branch `cpp` (release `v0.3.0`).
 
 rav1g is a fork of AOMedia's [av1-xbox-one](https://aomedia.googlesource.com/av1-xbox-one)
 (commit `b5c61563b48625c261a8d627cfa928896fd10b13`, August 2021), with upstream's history
@@ -110,9 +111,11 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
   The 10-bit stream with scaled references that stood here as wrong on the console is right: its md5
   references had been made with ffmpeg scaling every frame to the size of the first.
 
-Next targets: entropy decoding on the CPU (frame-parallel or a faster
-parser), and inter and intra prediction on the GPU. The Rust port starts once 4K GPU and CPU time per frame are well
-under 41.7 ms on heavy content.
+Next targets: the Rust host ([docs/rust-port.md](docs/rust-port.md), started 2026-11-12), then
+inter and intra prediction on the GPU (a measured `-interfast` prototype showed that inter time is per
+block and per dispatch, not filtering; see
+[gpu-av1-decoder.md](docs/gpu-av1-decoder.md)) and entropy decoding on the CPU (frame-parallel or a
+faster parser). The 41.7 ms budget for heavy 4K content is not met yet.
 
 ## Documentation
 
