@@ -223,9 +223,6 @@
     <ClCompile>
       <AdditionalIncludeDirectories>$(Rav1gPrebuiltShaders);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
-    <FxCompile>
-      <ExcludedFromBuild>true</ExcludedFromBuild>
-    </FxCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\aom\src\aom_codec.c" />
@@ -1026,6 +1023,12 @@
   <ItemGroup>
     <None Include="..\LICENSE" />
     <None Include="..\PATENTS" />
+  </ItemGroup>
+  <!-- /p:Rav1gPrebuiltShaders: no shader is compiled here (see the item definitions above). The items are
+       taken out, not marked as excluded: some of them carry an ExcludedFromBuild of their own, which would
+       win over a default. -->
+  <ItemGroup Condition="'$(Rav1gPrebuiltShaders)'!=''">
+    <FxCompile Remove="@(FxCompile)" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

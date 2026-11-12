@@ -128,9 +128,6 @@
     <ClCompile>
       <AdditionalIncludeDirectories>$(Rav1gPrebuiltShaders);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
-    <FxCompile>
-      <ExcludedFromBuild>true</ExcludedFromBuild>
-    </FxCompile>
   </ItemDefinitionGroup>
   <!-- The sources and shaders of libav1.vcxproj. -->
   <Import Project="libav1_sources.props" />
@@ -147,6 +144,12 @@
     <ClCompile Include="$(RepoRoot)testing\common\tools_common.c" />
     <ClCompile Include="$(RepoRoot)testing\common\webmdec.cc" />
     <ClCompile Include="main.cpp" />
+  </ItemGroup>
+  <!-- /p:Rav1gPrebuiltShaders: no shader is compiled here (see the item definitions above). The items are
+       taken out, not marked as excluded: some of them carry an ExcludedFromBuild of their own, which would
+       win over a default. -->
+  <ItemGroup Condition="'$(Rav1gPrebuiltShaders)'!=''">
+    <FxCompile Remove="@(FxCompile)" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Target Name="MakeShaderHeaderDirectory" BeforeTargets="FxCompile">

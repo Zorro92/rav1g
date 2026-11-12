@@ -160,6 +160,12 @@ def entry_complete(cache, key, name):
     return all(os.path.isfile(p) and os.path.getsize(p) > 0 for p in (header, listing, meta))
 
 
+def messages(lines):
+    """What FXC printed, without the lines that only say where it saved its output."""
+    return [line.rstrip() for line in lines
+            if line.strip() and not re.search(r'compilation \w+ save succeeded', line)]
+
+
 def compile_shader(fxc, cache, name, od, variant, key, shaders_dir):
     """One FXC call: the header and the listing of the shader, into a new cache entry."""
     os.makedirs(cache, exist_ok=True)
@@ -171,7 +177,7 @@ def compile_shader(fxc, cache, name, od, variant, key, shaders_dir):
     start = time.monotonic()
     done = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     seconds = round(time.monotonic() - start, 1)
-    output = [line.rstrip() for line in done.stdout.decode('utf-8', 'replace').splitlines() if line.strip()]
+    output = messages(done.stdout.decode('utf-8', 'replace').splitlines())
     ok = done.returncode == 0 and os.path.isfile(header) and os.path.isfile(listing)
     if not ok:
         shutil.rmtree(work, ignore_errors=True)
@@ -249,10 +255,10 @@ def command_build(args):
         if args.listings:
             shutil.copyfile(listing, os.path.join(args.listings, name + '.asm'))
         report['shaders'].append({'name': name, 'od': od, 'key': keys[name], 'compiled': name in results,
-                                  'seconds': meta['seconds'], 'output': meta['output'],
+                                  'seconds': meta['seconds'], 'output': messages(meta['output']),
                                   'header_sha256': sha256_file(header)})
         # What FXC said about the shader (warnings), also when its output came from the cache.
-        for line in meta['output']:
+        for line in messages(meta['output']):
             print('%s.hlsl%s: %s' % (name, '' if name in results else ' (cached)', line))
     report['wall_seconds'] = round(time.monotonic() - start, 1)
     if args.report:
