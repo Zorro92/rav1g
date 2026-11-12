@@ -33,10 +33,11 @@ use std::ffi::c_int;
 use super::core::{buffer, commands, perf_add, perf_gpu_mark, perf_ticks, pipeline, stage_dump_output};
 use super::film_grain::filmgrain_run;
 use super::thread::rav1g_mt_queue_get;
+use super::types::Av1Core;
 use crate::gpu::{BufferRef, BufferState, TextureFormat, TextureRef, TextureSource};
-use crate::sys::host::{
+use crate::sys::parser::{
     AV1_COMMON, AV1_PERF_CPU_WAIT_IMAGE, AV1_PERF_CPU_WAIT_OUTPUT, AV1_PERF_GPU_COPY_PLANE, AV1_PERF_GPU_OUTPUT_COPY,
-    Av1Core, HwFrameBuffer, HwOutputImage, av1_decoded_frame_buffer_t, fbt8bit, fbt10bit, fbt10x3,
+    HwFrameBuffer, HwOutputImage, av1_decoded_frame_buffer_t, fbt8bit, fbt10bit, fbt10x3,
 };
 
 /// The planes of an output image.

@@ -25,21 +25,23 @@ use super::tables::{
     QUANT_DIST_LOOKUP_TABLE, QUANT_DIST_WEIGHT, SM_WEIGHT_ARRAYS, SUB_PEL_FILTERS_4, SUB_PEL_FILTERS_4SMOOTH,
     SUB_PEL_FILTERS_8, SUB_PEL_FILTERS_8SHARP, SUB_PEL_FILTERS_8SMOOTH,
 };
+use super::types::{
+    Av1Core, CasualInter, CompoundDiffUv, CompoundDiffUvGlobalWarp, CompoundGlobalWarp, CompoundMasked, ComputeShader,
+    Inter2x2ArrOffset, InterCountsAll, InterFast2D, InterFastClasses, InterFastLists, InterSizesAllCommon, IntraSizes,
+    IntraTypeCount, ObmcAbove, ObmcLeft, ReconBlockOffset, ReconstructBlockSizes, ScaleFactor, Warp,
+    av1_frame_thread_data, av1_perf_inter_tile, av1_stage_dump_region,
+};
 use crate::gpu::{BufferRef, Commands};
-use crate::sys::host::{
+use crate::sys::parser::{
     ALTREF_FRAME, AV1_COMMON, AV1_INTER_FAST_COMPOUND_ORIGINAL, AV1_INTER_FAST_SINGLE_ORIGINAL,
     AV1_PERF_GPU_EXT_BORDERS, AV1_PERF_GPU_GEN_BLOCKS, AV1_PERF_GPU_INTER, AV1_PERF_GPU_INTRA, AV1_PERF_GPU_RECON,
     AV1_PERF_INTER_CHROMA_2X2, AV1_PERF_INTER_COMP_AVG, AV1_PERF_INTER_COMP_AVG_FAST, AV1_PERF_INTER_COMP_DIFF_UV,
     AV1_PERF_INTER_COMP_DIFF_Y, AV1_PERF_INTER_COMP_MASKED, AV1_PERF_INTER_COMP_WARP, AV1_PERF_INTER_COMP_WARP_DIFF_UV,
     AV1_PERF_INTER_LISTS, AV1_PERF_INTER_OBMC_ABOVE, AV1_PERF_INTER_OBMC_LEFT, AV1_PERF_INTER_RECON,
     AV1_PERF_INTER_SECTION_COUNT, AV1_PERF_INTER_SINGLE, AV1_PERF_INTER_SINGLE_COPY, AV1_PERF_INTER_SYNC0,
-    AV1_PERF_INTER_SYNC1, AV1_PERF_INTER_WARP, AV1Decoder, Av1Core, CasualInter, CompoundDiffUv,
-    CompoundDiffUvGlobalWarp, CompoundGlobalWarp, CompoundMasked, ComputeShader, EXTREF_FRAME, HwFrameBuffer,
-    INVALID_IDX, Inter2x2ArrOffset, InterCountsAll, InterFast2D, InterFastClasses, InterFastLists, InterSizesAllCommon,
-    IntraSizes, IntraTypeCount, LAST_FRAME, MAX_FRAME_DISTANCE, ObmcAbove, ObmcLeft, OrderHintInfo, ReconBlockOffset,
-    ReconstructBlockSizes, RefCntBuffer, SCALE_SUBPEL_BITS, ScaleFactor, TileInfo, Warp, WarpedMotionParams,
-    av1_filter_intra_taps, av1_frame_thread_data, av1_perf_inter_blocks, av1_perf_inter_detail, av1_perf_inter_tile,
-    av1_perf_inter_work, av1_stage_dump_region, av1_tile_data,
+    AV1_PERF_INTER_SYNC1, AV1_PERF_INTER_WARP, AV1Decoder, EXTREF_FRAME, HwFrameBuffer, INVALID_IDX, LAST_FRAME,
+    MAX_FRAME_DISTANCE, OrderHintInfo, RefCntBuffer, SCALE_SUBPEL_BITS, TileInfo, WarpedMotionParams,
+    av1_filter_intra_taps, av1_perf_inter_blocks, av1_perf_inter_detail, av1_perf_inter_work, av1_tile_data,
 };
 
 const SIZES: usize = InterSizesAllCommon as usize;

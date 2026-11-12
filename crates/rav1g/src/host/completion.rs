@@ -22,11 +22,10 @@ use super::stage_dump::{set_dump_info, stage_dump_deliver};
 use super::thread::{
     cond_signal, mutex_lock, mutex_unlock, rav1g_mt_queue_get, rav1g_mt_queue_is_empty, rav1g_mt_queue_push,
 };
+use super::types::{Av1Core, GpuWorkItem, av1_frame_thread_data};
 use crate::gpu::Event;
 use crate::sys;
-use crate::sys::host::{
-    AV1Decoder, Av1Core, GpuWorkItem, HwOutputImage, aom_image_t, av1_decoded_frame_buffer_t, av1_frame_thread_data,
-};
+use crate::sys::parser::{AV1Decoder, HwOutputImage, aom_image_t, av1_decoded_frame_buffer_t};
 
 unsafe extern "C" {
     /// `av1/decoder/obu.c`: the frame is the one of its temporal unit that is output.
@@ -101,7 +100,7 @@ unsafe fn copy_to_img(dec: *const Av1Core, hw_img: &mut HwOutputImage, dst: &mut
 pub unsafe extern "C" fn get_output_frame(pbi: *mut AV1Decoder, dst: *mut aom_image_t) -> c_int {
     // SAFETY: the caller's contract.
     unsafe {
-        let dec = (*pbi).gpu_decoder;
+        let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
         if rav1g_mt_queue_is_empty(&raw mut (*dec).output_queue) != 0 {
             return 1;
         }
@@ -291,7 +290,7 @@ pub unsafe extern "C" fn av1_drain_gpu_decoder(dec: *mut Av1Core) {
 pub unsafe extern "C" fn rav1g_decode_sef_begin(pbi: *mut AV1Decoder, fb: *mut av1_decoded_frame_buffer_t) -> c_int {
     // SAFETY: the caller's contract.
     unsafe {
-        let dec = (*pbi).gpu_decoder;
+        let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
         let cm = &raw mut (*pbi).common;
         let buf = &mut (*(*cm).cur_frame).buf;
         // A frame before this one that failed after its setup.
@@ -364,7 +363,7 @@ pub unsafe extern "C" fn rav1g_decode_sef_submit(
 ) {
     // SAFETY: the caller's contract.
     unsafe {
-        let dec = (*pbi).gpu_decoder;
+        let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
         let cm = &raw mut (*pbi).common;
         let buf = &mut (*(*cm).cur_frame).buf;
         if image_state != 0 {

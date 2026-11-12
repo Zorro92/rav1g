@@ -25,18 +25,20 @@ use super::tables::{
     INTER_BLOCK_SIZE_INDEX_LUT, INTERINTRA_TO_INTRA_MODE, MAX_NEIGHBOR_OBMC, MAX_TXSIZE_RECT_LOOKUP, MI_SIZE_HIGH_LOG2,
     MI_SIZE_WIDE_LOG2, SS_SIZE_LOOKUP, TX_SIZE_HIGH_LOG2, TX_SIZE_WIDE_LOG2,
 };
-use crate::sys::host::{
+use super::types::{
+    CompoundAvrg, CompoundDiff, CompoundDiffUv, CompoundDiffUvGlobalWarp, CompoundGlobalWarp, CompoundMasked,
+    Inter2x2ArrOffset, InterFastCompound, InterSizesAllCommon, IntraBlockOffset, IntraSizes, IntraTypeCount, ObmcAbove,
+    ObmcLeft, ReconBlockOffset, av1_frame_thread_data, av1_perf_inter_tile,
+};
+use crate::sys::parser::{
     AV1_COMMON, AV1_PERF_INTER_CHROMA_2X2, AV1_PERF_INTER_COMP_AVG, AV1_PERF_INTER_COMP_AVG_FAST,
     AV1_PERF_INTER_COMP_DIFF_UV, AV1_PERF_INTER_COMP_DIFF_Y, AV1_PERF_INTER_COMP_MASKED, AV1_PERF_INTER_COMP_WARP,
     AV1_PERF_INTER_COMP_WARP_DIFF_UV, AV1_PERF_INTER_OBMC_ABOVE, AV1_PERF_INTER_OBMC_LEFT, AV1_PERF_INTER_SINGLE,
     AV1_PERF_INTER_SINGLE_COPY, AV1_PERF_INTER_WARP, AV1Decoder, BILINEAR, BLOCK_4X4, BLOCK_4X8, BLOCK_4X16, BLOCK_8X4,
-    BLOCK_8X8, BLOCK_8X16, BLOCK_16X4, BLOCK_16X8, BLOCK_32X32, COMPOUND_DIFFWTD, COMPOUND_WEDGE, CompoundAvrg,
-    CompoundDiff, CompoundDiffUv, CompoundDiffUvGlobalWarp, CompoundGlobalWarp, CompoundMasked, GLOBAL_GLOBALMV,
-    GLOBALMV, INTRA_FRAME, Inter2x2ArrOffset, InterFastCompound, InterSizesAllCommon, IntraBlockOffset, IntraSizes,
-    IntraTypeCount, MACROBLOCKD, MB_MODE_INFO, OBMC_CAUSAL, ObmcAbove, ObmcLeft, REF_NO_SCALE, ReconBlockOffset,
-    SCALE_SUBPEL_BITS, SINGLE_INTER_MODE_END, SINGLE_INTER_MODE_START, TX_4X4, TX_16X32, TX_16X64, TX_32X16, TX_32X32,
-    TX_32X64, TX_64X16, TX_64X32, TX_64X64, UV_CFL_PRED, WARPED_CAUSAL, av1_frame_thread_data, av1_perf_inter_tile,
-    int_mv,
+    BLOCK_8X8, BLOCK_8X16, BLOCK_16X4, BLOCK_16X8, BLOCK_32X32, COMPOUND_DIFFWTD, COMPOUND_WEDGE, GLOBAL_GLOBALMV,
+    GLOBALMV, INTRA_FRAME, MACROBLOCKD, MB_MODE_INFO, OBMC_CAUSAL, REF_NO_SCALE, SCALE_SUBPEL_BITS,
+    SINGLE_INTER_MODE_END, SINGLE_INTER_MODE_START, TX_4X4, TX_16X32, TX_16X64, TX_32X16, TX_32X32, TX_32X64, TX_64X16,
+    TX_64X32, TX_64X64, UV_CFL_PRED, WARPED_CAUSAL, int_mv,
 };
 
 unsafe extern "C" {
@@ -320,7 +322,7 @@ pub unsafe extern "C" fn av1_mi_push_block(pbi: *mut AV1Decoder, cm: *mut AV1_CO
     // this thread. The mode info of the neighbours is read while the pointer to the block's own is not
     // written through.
     unsafe {
-        let dec = (*pbi).gpu_decoder;
+        let dec = (*pbi).gpu_decoder.cast::<super::types::Av1Core>();
         let td = &*(*dec).curr_frame_data.cast_const();
         let xd = &*xd.cast_const();
         let tile = &mut *xd.tile_data;

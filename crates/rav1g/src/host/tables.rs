@@ -324,15 +324,19 @@ mod tests {
 
     #[test]
     fn tables_of_the_cpp_header_are_those_of_the_header() {
-        let tables: [(&str, &[u8]); 5] = [
-            ("obmc_mask", bytes_of(&OBMC_MASK)),
-            ("InterBlockSizeIndexLUT", bytes_of(&INTER_BLOCK_SIZE_INDEX_LUT)),
-            ("InterBlockWidthLUT", bytes_of(&INTER_BLOCK_WIDTH_LUT)),
-            ("InterBlockHeightLUT", bytes_of(&INTER_BLOCK_HEIGHT_LUT)),
-            ("intra_mode_shader_params", bytes_of(&INTRA_MODE_SHADER_PARAMS)),
+        // The header is C++ (it has the shader library), so no C probe can include it: its text is read.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../libav1/dx/av1_compute.h");
+        let source = std::fs::read_to_string(path).expect("libav1/dx/av1_compute.h is in the tree until step 5");
+        let tables: [(&str, &[i32]); 5] = [
+            ("static const int obmc_mask[16 * 4] =", &OBMC_MASK),
+            ("static const int InterBlockSizeIndexLUT[6][6] =", &INTER_BLOCK_SIZE_INDEX_LUT),
+            ("const int InterBlockWidthLUT[] =", &INTER_BLOCK_WIDTH_LUT),
+            ("const int InterBlockHeightLUT[] =", &INTER_BLOCK_HEIGHT_LUT),
+            ("const int intra_mode_shader_params[16 * 7][4] =", &INTRA_MODE_SHADER_PARAMS),
         ];
-        for (name, copy) in tables {
-            assert_eq!(crate::sys::host_table(name), Some(copy), "{name}");
+        for (declaration, copy) in tables {
+            let numbers = c_initializer(&source, declaration);
+            assert_eq!(numbers, copy.iter().map(|&n| i64::from(n)).collect::<Vec<_>>(), "{declaration}");
         }
     }
 

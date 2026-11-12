@@ -18,10 +18,11 @@ use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12Device};
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
 use super::core::commands;
+use super::types::{Av1Core, Av1PerfMaxMarks, av1_frame_thread_data};
 use crate::gpu::d3d12::{com_ref, com_release, com_store, wrapped_ref};
 use crate::gpu::{Device, Queue, Readback, TimestampQueries};
 use crate::sys;
-use crate::sys::host::{AV1Decoder, Av1Core, Av1PerfMaxMarks, av1_frame_thread_data, av1_perf_inter_detail};
+use crate::sys::parser::{AV1Decoder, av1_perf_inter_detail};
 
 const MAX_MARKS: usize = Av1PerfMaxMarks as usize;
 const CPU_COUNT: usize = sys::AV1_PERF_CPU_COUNT as usize;
@@ -157,7 +158,7 @@ pub unsafe extern "C" fn av1_perf_cpu_add(pbi: *mut AV1Decoder, id: c_int, start
         if start_ticks == 0 || pbi.is_null() || (*pbi).gpu_decoder.is_null() {
             return;
         }
-        perf_add((*pbi).gpu_decoder, id as usize, start_ticks);
+        perf_add((*pbi).gpu_decoder.cast(), id as usize, start_ticks);
     }
 }
 

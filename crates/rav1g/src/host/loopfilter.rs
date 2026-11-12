@@ -17,10 +17,8 @@ use super::core::{
     alloc_constants, buffer, commands, perf_gpu_mark, pipeline, stage_dump_active, stage_dump_constants,
     stage_dump_data, stage_dump_fb,
 };
-use crate::sys::host::{
-    AV1_COMMON, AV1_PERF_GPU_LF_GEN, AV1_PERF_GPU_LF_HORZ, AV1_PERF_GPU_LF_VERT, Av1Core, MACROBLOCKD,
-    av1_stage_dump_region,
-};
+use super::types::{Av1Core, av1_stage_dump_region};
+use crate::sys::parser::{AV1_COMMON, AV1_PERF_GPU_LF_GEN, AV1_PERF_GPU_LF_HORZ, AV1_PERF_GPU_LF_VERT, MACROBLOCKD};
 
 unsafe extern "C" {
     /// `av1/common/av1_loopfilter.c`: the filter levels of the frame by segment, reference and mode.

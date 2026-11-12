@@ -15,9 +15,9 @@ use super::core::{
     alloc_constant_bytes, alloc_constants, buffer, commands, layout, perf_gpu_mark, pipeline, stage_dump_residuals,
 };
 use super::tables::{TX_SIZE_HIGH, TX_SIZE_WIDE};
-use crate::sys::host::{
-    AV1_PERF_GPU_IDCT, AV1_PERF_GPU_IDCT_SORT, AV1_PERF_GPU_RESIDUAL_CLEAR, Av1Core, TX_4X4, TX_SIZES_ALL,
-    av1_idct_scans,
+use super::types::Av1Core;
+use crate::sys::parser::{
+    AV1_PERF_GPU_IDCT, AV1_PERF_GPU_IDCT_SORT, AV1_PERF_GPU_RESIDUAL_CLEAR, TX_4X4, TX_SIZES_ALL, av1_idct_scans,
 };
 
 /// Transform types of the sort: the transform sizes and the lossless transform.

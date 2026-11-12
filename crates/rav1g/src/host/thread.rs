@@ -22,14 +22,14 @@ use windows::Win32::System::Threading::{
     WakeConditionVariable,
 };
 
-use crate::sys::host::{BUFFERS_COUNT, DataPtrQueue, DataPtrQueueMT};
+use super::types::{BUFFERS_COUNT, DataPtrQueue, DataPtrQueueMT};
 
 const CAPACITY: c_int = BUFFERS_COUNT as c_int;
 
 // The lock and the condition of the C++ struct are the ones of Windows.
 const _: () = {
-    assert!(size_of::<crate::sys::host::pthread_mutex_t>() == size_of::<CRITICAL_SECTION>());
-    assert!(size_of::<crate::sys::host::pthread_cond_t>() == size_of::<CONDITION_VARIABLE>());
+    assert!(size_of::<super::types::pthread_mutex_t>() == size_of::<CRITICAL_SECTION>());
+    assert!(size_of::<super::types::pthread_cond_t>() == size_of::<CONDITION_VARIABLE>());
 };
 
 fn slot(index: c_int) -> usize {
@@ -148,7 +148,7 @@ pub unsafe extern "C" fn rav1g_queue_is_empty(queue: *mut DataPtrQueue) -> c_int
 ///
 /// # Safety
 /// `mutex` is valid for writing and is not moved until [`mutex_destroy`].
-pub(crate) unsafe fn mutex_init(mutex: *mut crate::sys::host::pthread_mutex_t) {
+pub(crate) unsafe fn mutex_init(mutex: *mut super::types::pthread_mutex_t) {
     // SAFETY: the caller's contract.
     let _ = unsafe { InitializeCriticalSectionEx(mutex.cast(), 0, 0) };
 }
@@ -157,7 +157,7 @@ pub(crate) unsafe fn mutex_init(mutex: *mut crate::sys::host::pthread_mutex_t) {
 ///
 /// # Safety
 /// `mutex` was initialised and no thread holds it.
-pub(crate) unsafe fn mutex_destroy(mutex: *mut crate::sys::host::pthread_mutex_t) {
+pub(crate) unsafe fn mutex_destroy(mutex: *mut super::types::pthread_mutex_t) {
     // SAFETY: the caller's contract.
     unsafe { DeleteCriticalSection(mutex.cast()) };
 }
@@ -166,7 +166,7 @@ pub(crate) unsafe fn mutex_destroy(mutex: *mut crate::sys::host::pthread_mutex_t
 ///
 /// # Safety
 /// `mutex` is initialised.
-pub(crate) unsafe fn mutex_lock(mutex: *mut crate::sys::host::pthread_mutex_t) {
+pub(crate) unsafe fn mutex_lock(mutex: *mut super::types::pthread_mutex_t) {
     // SAFETY: the caller's contract.
     unsafe { EnterCriticalSection(mutex.cast()) };
 }
@@ -175,7 +175,7 @@ pub(crate) unsafe fn mutex_lock(mutex: *mut crate::sys::host::pthread_mutex_t) {
 ///
 /// # Safety
 /// `mutex` is held by this thread.
-pub(crate) unsafe fn mutex_unlock(mutex: *mut crate::sys::host::pthread_mutex_t) {
+pub(crate) unsafe fn mutex_unlock(mutex: *mut super::types::pthread_mutex_t) {
     // SAFETY: the caller's contract.
     unsafe { LeaveCriticalSection(mutex.cast()) };
 }
@@ -184,7 +184,7 @@ pub(crate) unsafe fn mutex_unlock(mutex: *mut crate::sys::host::pthread_mutex_t)
 ///
 /// # Safety
 /// `condition` is valid for writing and is not moved while a thread waits on it.
-pub(crate) unsafe fn cond_init(condition: *mut crate::sys::host::pthread_cond_t) {
+pub(crate) unsafe fn cond_init(condition: *mut super::types::pthread_cond_t) {
     // SAFETY: the caller's contract.
     unsafe { condition.cast::<CONDITION_VARIABLE>().write(InitializeConditionVariable()) };
 }
@@ -194,8 +194,8 @@ pub(crate) unsafe fn cond_init(condition: *mut crate::sys::host::pthread_cond_t)
 /// # Safety
 /// `condition` is initialised and `mutex` is held by this thread.
 pub(crate) unsafe fn cond_wait(
-    condition: *mut crate::sys::host::pthread_cond_t,
-    mutex: *mut crate::sys::host::pthread_mutex_t,
+    condition: *mut super::types::pthread_cond_t,
+    mutex: *mut super::types::pthread_mutex_t,
 ) {
     // SAFETY: the caller's contract. An infinite wait only returns with the lock held again.
     let _ = unsafe { SleepConditionVariableCS(condition.cast(), mutex.cast(), INFINITE) };
@@ -205,7 +205,7 @@ pub(crate) unsafe fn cond_wait(
 ///
 /// # Safety
 /// `condition` is initialised.
-pub(crate) unsafe fn cond_signal(condition: *mut crate::sys::host::pthread_cond_t) {
+pub(crate) unsafe fn cond_signal(condition: *mut super::types::pthread_cond_t) {
     // SAFETY: the caller's contract.
     unsafe { WakeConditionVariable(condition.cast()) };
 }

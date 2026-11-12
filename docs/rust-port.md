@@ -1,8 +1,8 @@
 # Rust port, phase 1: design
 
 Status: started 2026-11-12; steps 1 (build skeleton, `rav1g-dec`), 2 (bindings for the shared structs,
-layout tests) and 3 (leaf modules: every file of the host but `av1_core.cpp` is Rust in the cargo build)
-are in the tree, see [Progress](#progress).
+layout tests), 3 (leaf modules) and 4 (frame pipeline: the whole host is Rust in the cargo build, which
+compiles no C++ of the decoder any more) are in the tree, see [Progress](#progress). Step 5 is next.
 Branch `main`. The C++ decoder at tag `v0.3.0` (branch `cpp`) is the reference: every step below has to
 decode the conformance set md5-identically to it and to dav1d.
 
@@ -54,7 +54,7 @@ At the end no C++ remains in the decoder: the C parser, the HLSL and Rust.
 | Path | What |
 | --- | --- |
 | `crates/rav1g` | the decoder: Rust host modules, API, `capi` feature for the C ABI |
-| `crates/rav1g-sys` | builds the C parser (and, until step 4 ends, the remaining C++) with `cc`; `bindgen` bindings |
+| `crates/rav1g-sys` | builds the C parser with `cc` (with it three C files of its own: the macros of the C interface as functions, the host functions that raise the decoder's error, the shader bytecode table); `bindgen` bindings |
 | `crates/rav1g-shaders` | shader bytecode: `build.rs` runs DXC (see Requirements) and embeds the DXIL with `include_bytes!` |
 | `tools/rav1g-dec` | command-line decoder for conformance, md5 and stage dumps |
 | `libav1/`, `testing/` | as today; C++ files leave `libav1/dx` as steps 3-4 replace them |
@@ -690,6 +690,7 @@ The parts, each green on CI before the next:
 | 2. Timers and stage dumps | the timers, timestamps and the record of a frame of the timing run (`-gputime`, `-gputimedetail`), the switches `av1_set_perf_callback`, `av1_set_perf_detail`, `av1_set_inter_fast`; the stage dumps (`-dumpstages`) (505 lines) | `host/perf.rs` (507), `host/stage_dump.rs` (536), `host/rest_calls.rs` (126, until part 4); `host/core.rs` 242; `gpu/d3d12.rs` grows to 1,054 | see below |
 | 3. A frame on the decode thread | `av1_setup_frame` with the slot, the clears of `-asyncclear`, the back buffer, the references, the palette buffer and the coefficient layout; the other functions the entropy decoder calls (`av1_setup_macroblockd`, `av1_setup_sec_data`, `av1_setup_ext_coef_buffer`, `av1_intra_palette`, `av1_reallocate_frame_buffer`, `av1_release_fb_callback`, `av1_sequence_fits_decoder`, `av1_setup_context_buffers`); the command buffer from prepare to commit; `av1_decode_frame_gpu`; the switches `av1_set_async_clear`, `av1_set_intra_v2`, `av1_shader_variant` (825 lines) | `host/frame.rs` (1,341 with tests), `crates/rav1g-sys/host_entry.c` (47); `gpu/d3d12.rs` grows to 1,106 | see below |
 | 4. Behind the submission | the completion thread with the fences, the return of frame buffers and slots, the clear of `-asyncclear`, the output images and their queue (`get_output_frame`), `av1_drain_gpu_decoder`, `av1_decode_sef` (show-existing copies) (297 lines) | `host/completion.rs` (341); `host_entry.c` grows to 58 | see below |
+| 5. The structs | the glue file with the shader bytecode (222 lines of C++), the C++ bindings (`host.hpp`), the C++ layout, table and function probes | `host/types.rs` (509), `crates/rav1g-sys/shader_table.c` (217), `parser.h` and the module `rav1g_sys::parser` | see below |
 
 Part 1, creation and release:
 
@@ -813,6 +814,46 @@ Part 4, behind the submission:
   dumps of seven vectors (a show-existing frame among them) equal to those of the build before part 2; the
   lines of the three timing modes; a refused creation (`-budget 5`), which releases a decoder that never
   had a completion thread; the unit tests of both crates under wine.
+
+Part 4 on CI (run 43325739898, commit a53221e): all jobs green, the same gates; `D3D12 DEVICE REMOVALS:
+0` in every pass.
+
+Part 5, the structs:
+
+- **The structs of the host are Rust's own** (`host/types.rs`): the decoder, a pipeline slot, the command
+  buffer of a slot, the allocator with its buffer descriptors, the shader library, the queues, the
+  schedule of `-intrav2`, the records of the timing run and of the stage dumps, and the numbers of the
+  block lists. They keep the names and the fields they had, so the stages read them as before. A field
+  that was a COM pointer is the interface or the backend type that wraps it, or none (`Option`); the
+  locks and conditions are those of Windows that `aom_thread.h` made of pthread ones.
+- **Same layouts, on purpose** (`repr(C)`, and an assertion on the sizes of the decoder and of the
+  allocator, 67,384 and 7,296 bytes). Both lie in the host pool of the application, whose size the memory
+  query reports: with the sizes of the C++ structs a configuration takes the same host memory from both
+  decoders, an application's pool fits either, and the "MEMORY" lines of the two stay equal (CI holds
+  them against each other). And a decoder is created zeroed, which is a valid value of every field.
+- **What the entropy decoder shares with the host stays C and is bound as C**: `parser.h` and the module
+  `rav1g_sys::parser` (bindgen in C mode) have `AV1Decoder`, `AV1_COMMON`, `MACROBLOCKD`, the state of a
+  tile thread, the frame buffer descriptions (`YV12_BUFFER_CONFIG`, `HwFrameBuffer`, `HwOutputImage`), the
+  tile's cursors, the enums and limits of the bitstream and the tables the host reads. The layout probe of
+  step 2 covers them: 11 more structs, 34 in all with 619 fields, each size, alignment and offset as the
+  C compiler of the build has it. The decoder is a pointer the entropy decoder never looks behind
+  (`struct Av1Core *`).
+- **No C++ in the library.** The table of the shader bytecode is C (`shader_table.c`: the FXC headers need
+  one typedef). The build script compiles C only; the C++ files of `libav1/dx` are skipped by name, and a
+  C++ file of the project that is not one of them stops the build.
+- **Gone with the C++:** `rav1g_sys::host` and `host.hpp`, the C++ layout probe of 13 structs, the probe of
+  the `-intrav2` scheduler and its test against `dx/intra_v2_sched.h` (the header is C++; the Rust port is
+  held by the conformance runs with `-intrav2`), the C++ table probe. The five tables of `dx/av1_compute.h`
+  are still tested against the header, by reading its text, as the Gaussian sequence is.
+- **Left as it was:** the queues are still the ring of 100 pointers behind a critical section, and the
+  inter breakdown and the tile counters of the timing run are still memory of the C runtime. `extern "C"`
+  functions named `rav1g_*` that only Rust calls now (the allocator, the queues, the stages) keep that
+  form. All three are for the clean-up that comes with the Rust API of step 5, when `Decoder` owns the
+  state.
+- Checked before the push on the local decoder: the unit tests of the three crates under wine (29, 4 and
+  6 tests; the layout test with 34 structs and 619 fields), the 244 vectors plain and with the three
+  flag sets of part 4, the stage dumps of seven vectors equal to those of the build before part 2, the
+  "MEMORY" lines of five streams as before.
 
 ## Estimate
 

@@ -25,23 +25,24 @@ use super::completion::av1_drain_gpu_decoder;
 use super::compute::{rav1g_upload_luts, rav1g_wait_shader_create_complete};
 use super::log::{log, log_create_error, rav1g_clear_create_error};
 use super::memory::{
-    log_video_memory, rav1g_memory_create_buffer, rav1g_memory_dummy_create_buffer, rav1g_memory_dummy_host_allocate,
-    rav1g_memory_host_allocate, rav1g_memory_release, rav1g_memory_release_type, rav1g_memory_setup,
-    rav1g_memory_type_name,
+    Plan, log_video_memory, rav1g_memory_create_buffer, rav1g_memory_host_allocate, rav1g_memory_release,
+    rav1g_memory_release_type, rav1g_memory_setup, rav1g_memory_type_name,
 };
 use super::thread::{
     cond_init, cond_signal, cond_wait, mutex_destroy, mutex_init, mutex_lock, mutex_unlock, rav1g_mt_queue_destroy,
     rav1g_mt_queue_init, rav1g_mt_queue_push, rav1g_queue_get, rav1g_queue_init, rav1g_queue_push,
 };
+use super::types::{
+    ALLOCATOR_BYTES, Av1Core, CORE_BYTES, DeviceOnly, DeviceOnlyConst, DeviceUpload, FrameThreadDataCount,
+    FrameThreadDataDefault, GpuBufferObject, HostRW, ImagePoolSize, InterFastMapSize, MemoryType, OutputCbSize,
+    OutputThreadDataCount, ReadBack, RefFrameBufferCount, RefFrameBufferCountSharedBack, UploadUAV,
+    av1_frame_thread_data, av1_memory_allocator,
+};
 use crate::gpu::d3d12::{com_ref, com_release, com_store, wrapped_ref};
 use crate::gpu::{self, CommandAllocator, Device, Event, VideoMemory, create_hardware_device};
-use crate::sys::host::{
-    AV1Decoder, Av1Core, BufferPool, DeviceOnly, DeviceOnlyConst, DeviceUpload, FrameThreadDataCount,
-    FrameThreadDataDefault, GpuBufferObject, HostRW, HwFrameBuffer, ImagePoolSize, InterFastMapSize, MAX_MIB_SIZE,
-    MB_MODE_INFO, MV_REF, MemoryType, OutputCbSize, OutputThreadDataCount, ReadBack, RefFrameBufferCount,
-    RefFrameBufferCountSharedBack, RestorationUnitInfo, TPL_MV_REF, UploadUAV, aom_codec_dec_cfg_t,
-    av1_frame_thread_data, av1_memory_allocator, av1_memory_allocator_dummy, av1_tile_data, warped_filter,
-    wedge_mask_buf,
+use crate::sys::parser::{
+    AV1Decoder, BufferPool, HwFrameBuffer, MAX_MIB_SIZE, MB_MODE_INFO, MV_REF, RestorationUnitInfo, TPL_MV_REF,
+    aom_codec_dec_cfg_t, av1_tile_data, warped_filter, wedge_mask_buf,
 };
 use crate::sys::{
     AV1_LOW_MEMORY_ALL, AV1_LOW_MEMORY_COEFS, AV1_LOW_MEMORY_DEFAULT, AV1_LOW_MEMORY_MODE_INFO,
@@ -193,19 +194,18 @@ impl ResourceConfig {
 /// counts what the requests would take (`av1_memory_manager_base` of the C++).
 enum Requests {
     Allocator(*mut av1_memory_allocator),
-    Plan(av1_memory_allocator_dummy),
+    Plan(Plan),
 }
 
 impl Requests {
     fn plan() -> Requests {
-        // SAFETY: two counters, and the pointer to the virtual functions the Rust does not call.
-        Requests::Plan(unsafe { std::mem::zeroed() })
+        Requests::Plan(Plan::default())
     }
 
     /// The host and device bytes a plan has counted.
     fn planned(&self) -> (usize, usize) {
         match self {
-            Requests::Plan(plan) => (plan.host_ptr, plan.device_ptr),
+            Requests::Plan(plan) => (plan.host, plan.device),
             Requests::Allocator(_) => (0, 0),
         }
     }
@@ -218,8 +218,7 @@ impl Requests {
                 rav1g_memory_create_buffer(*memory, size, kind, name.as_ptr(), slot)
             },
             Requests::Plan(plan) => {
-                // SAFETY: the plan is this value.
-                unsafe { rav1g_memory_dummy_create_buffer(plan, size) };
+                plan.create_buffer(size);
                 std::ptr::null_mut()
             }
         }
@@ -231,8 +230,7 @@ impl Requests {
             // SAFETY: the allocator of the decoder that is being created.
             Requests::Allocator(memory) => unsafe { rav1g_memory_host_allocate(*memory, size, 0) },
             Requests::Plan(plan) => {
-                // SAFETY: the plan is this value.
-                unsafe { rav1g_memory_dummy_host_allocate(plan, size, 0) };
+                plan.host_allocate(size, 0);
                 std::ptr::null_mut()
             }
         }
@@ -578,8 +576,8 @@ pub unsafe extern "C" fn av1_query_memory_requirements(cfg: *mut aom_codec_dec_c
     let cfg = unsafe { &mut *cfg };
     let mut plan = Requests::plan();
     plan.host(32 * 1024); // the private data of the codec interface, about 20 KB
-    plan.host(size_of::<av1_memory_allocator>());
-    plan.host(size_of::<Av1Core>());
+    plan.host(ALLOCATOR_BYTES);
+    plan.host(CORE_BYTES);
     let rcfg = ResourceConfig::from_cfg(cfg);
     // A decoder for the sizes the plan writes; nothing else of it is used.
     let mut dec = Box::<Av1Core>::new_uninit();
@@ -847,11 +845,10 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
         *gpu_dec = std::ptr::null_mut();
         rav1g_clear_create_error();
         let cfg = &*cfg;
-        if cfg.host_size < size_of::<av1_memory_allocator>() {
+        if cfg.host_size < ALLOCATOR_BYTES {
             log_create_error(&format!(
                 "MEMORY FAILED host pool: {} bytes given, the allocator alone takes {}",
-                cfg.host_size,
-                size_of::<av1_memory_allocator>()
+                cfg.host_size, ALLOCATOR_BYTES
             ));
             return -1;
         }
@@ -860,8 +857,8 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
         let mem = cfg.host_memory.cast::<av1_memory_allocator>();
         mem.write_bytes(0, 1);
         rav1g_memory_setup(mem, cfg.host_memory.cast(), cfg.host_size);
-        rav1g_memory_host_allocate(mem, size_of::<av1_memory_allocator>(), 0);
-        let dec = rav1g_memory_host_allocate(mem, size_of::<Av1Core>(), 0).cast::<Av1Core>();
+        rav1g_memory_host_allocate(mem, ALLOCATOR_BYTES, 0);
+        let dec = rav1g_memory_host_allocate(mem, CORE_BYTES, 0).cast::<Av1Core>();
         if dec.is_null() {
             return -1; // logged by the allocator; nothing was created yet
         }
@@ -1126,7 +1123,7 @@ pub unsafe extern "C" fn av1_allocate_pbi(dec: *mut Av1Core, ppbi: *mut *mut AV1
         let bp = (*dec).buf_pool_alloc.cast::<BufferPool>();
         pbi.write_bytes(0, 1);
         bp.write_bytes(0, 1);
-        (*pbi).gpu_decoder = dec;
+        (*pbi).gpu_decoder = dec.cast();
         *ppbi = pbi;
         *pbp = bp;
     }

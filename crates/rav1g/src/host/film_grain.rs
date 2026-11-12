@@ -12,7 +12,8 @@
 use std::ffi::c_int;
 
 use super::core::{alloc_constants, buffer, commands, perf_gpu_mark, pipeline};
-use crate::sys::host::{AOM_CICP_MC_IDENTITY, AV1_COMMON, AV1_PERF_GPU_FILM_GRAIN, Av1Core, HwFrameBuffer};
+use super::types::Av1Core;
+use crate::sys::parser::{AOM_CICP_MC_IDENTITY, AV1_COMMON, AV1_PERF_GPU_FILM_GRAIN, HwFrameBuffer};
 
 /// The film grain parameters of a frame as the shaders read them.
 #[repr(C)]

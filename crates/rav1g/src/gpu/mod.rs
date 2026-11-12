@@ -29,8 +29,9 @@
 //! them as the root parameters of a root signature; a backend with descriptor sets has them as the
 //! bindings of one set, with the inline constants as push constants.
 //!
-//! There is one backend, D3D12 (`d3d12`). Fences, timestamp queries and readback are in the C++ of the
-//! frame pipeline (`av1_core.cpp`) and join this interface with step 4.
+//! There is one backend, D3D12 (`d3d12`). It has everything the host does with the GPU: the device and
+//! its queue, buffers, layouts and pipelines, the command list with its allocators, fences and their
+//! events, timestamp queries, and readback.
 
 pub(crate) mod d3d12;
 

@@ -17,13 +17,11 @@ use std::ffi::{CStr, c_int};
 use windows::Win32::Graphics::Direct3D12::ID3D12GraphicsCommandList;
 
 use super::memory::rav1g_poison_constants;
+use super::types::{Av1Core, ComputeCommandBuffer, ComputeShader, GpuBufferObject, av1_stage_dump_region};
 use super::{perf, stage_dump};
 use crate::gpu::d3d12::com_ref;
 use crate::gpu::{BufferLocation, BufferRef, Commands, LayoutRef, PipelineRef};
-use crate::sys::host::{
-    AV1_COMMON, Av1Core, ComputeCommandBuffer, ComputeShader, GpuBufferObject, HwFrameBuffer, HwOutputImage,
-    av1_perf_inter_detail, av1_stage_dump_region,
-};
+use crate::sys::parser::{AV1_COMMON, HwFrameBuffer, HwOutputImage, av1_perf_inter_detail};
 
 /// The recording of the frame the decoder is building.
 ///

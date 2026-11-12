@@ -6,20 +6,21 @@
 // License 1.0 was not distributed with this source code in the PATENTS file, you can obtain it at
 // www.aomedia.org/license/patent.
 
-//! Builds the decoder's C and C++ sources (the libaom-derived entropy decoder of `libav1/av1`, `libav1/aom*`
-//! and the D3D12 host of `libav1/dx`) into a static library, and writes the bindings.
+//! Builds the C of the decoder (the libaom-derived entropy decoder of `libav1/av1`, `libav1/aom*`) into
+//! static libraries, and writes the bindings. The D3D12 host of `libav1/dx` is Rust (`crates/rav1g`):
+//! its C++ files are not compiled here ([`REPLACED_BY_RUST`]); they stay in the tree for the MSBuild
+//! projects (the test player, `warp_decoder`), which compile all of them until step 5 of
+//! `docs/rust-port.md`.
 //!
 //! The files and their settings are those of `libav1/build/libav1.vcxproj` in Release x64, read from
 //! `testing/warp_decoder/libav1_sources.props` (written from that project by `sync_sources.py`; CI checks
 //! that it is up to date): `/O1 /Ot`, `/O2` for the files the project marks, no `NDEBUG` (the library's
-//! asserts are compiled in), `/sdl`, `/EHsc`, and link time optimisation as the project has it
-//! ([`Lto`]): `/GL` under MSVC, LTO under clang-cl.
+//! asserts are compiled in), `/sdl`, and link time optimisation as the project has it ([`Lto`]): `/GL`
+//! under MSVC, LTO under clang-cl.
 //!
-//! The C++ files of the host that Rust replaces (`crates/rav1g/src/host`, step 3 of `docs/rust-port.md`) are
-//! left out: [`REPLACED_BY_RUST`]. The C++ that remains calls the Rust through the files of `glue/`, which
-//! define the C++ functions of a replaced file as calls of `extern "C"` functions of the `rav1g` crate.
-//! The sources of `libav1/dx` stay as they are: the MSBuild projects (the test player, `warp_decoder`)
-//! compile all of them until step 5.
+//! Three C files of this crate are compiled with them: `helpers.c` (the entry points of the C interface
+//! that are macros), `host_entry.c` (the functions of the host that end with the decoder's error, which C
+//! has to raise) and `shader_table.c` (the bytecode of the shaders).
 //!
 //! The shaders are not compiled here. `RAV1G_SHADER_DIR` names the directory whose `dx/shaders/h` has the
 //! bytecode headers of the FXC build (`testing/shader_cache/shaders.py build --root <dir>`, or what a
@@ -37,8 +38,9 @@ struct Source {
     replaced: bool,
 }
 
-/// The C++ files of `libav1/dx` whose functions the `rav1g` crate has in Rust (`crates/rav1g/src/host`).
-/// This build does not compile them. `libav1_sources.props` still lists them, for the MSBuild projects.
+/// The C++ files of `libav1/dx`: the host, whose functions the `rav1g` crate has in Rust
+/// (`crates/rav1g/src/host`). This build does not compile them. `libav1_sources.props` still lists them,
+/// for the MSBuild projects; a C++ file of the project that is not in this list stops the build.
 const REPLACED_BY_RUST: &[&str] = &[
     "libav1/dx/av1_compute.cpp",
     "libav1/dx/av1_core.cpp",
@@ -50,7 +52,7 @@ const REPLACED_BY_RUST: &[&str] = &[
     "libav1/dx/vp9dx_linear_allocator.cpp",
 ];
 
-/// Link time optimisation of the C and C++ of the decoder, which the MSBuild projects have as whole
+/// Link time optimisation of the C of the decoder, which the MSBuild projects have as whole
 /// program optimisation (`/GL`, `/LTCG`). Without it the entropy decoder is 7 to 12 % slower in the tile
 /// threads than in those builds; the numbers are in docs/rust-port.md ("The entropy decoder with link
 /// time optimisation").
@@ -170,12 +172,11 @@ fn shader_dir() -> PathBuf {
 }
 
 /// A compiler call with the settings every file of the library has.
-fn base_build(repo: &Path, shaders: &Path, cpp: bool) -> cc::Build {
+fn base_build(repo: &Path, shaders: &Path) -> cc::Build {
     let mut build = cc::Build::new();
     build
-        .cpp(cpp)
         .warnings(false)
-        // The headers of this build first: av1_compute.cpp includes them as "dx/shaders/h/<name>.h".
+        // The headers of this build first: shader_table.c includes them as "dx/shaders/h/<name>.h".
         .include(shaders)
         .include(repo.join("libav1"))
         .include(repo.join("libav1").join("build"))
@@ -186,10 +187,6 @@ fn base_build(repo: &Path, shaders: &Path, cpp: bool) -> cc::Build {
         // No NDEBUG, whatever the profile: the asserts of the library stay, as in the player.
         .flag_if_supported("/sdl")
         .flag_if_supported("/wd4996");
-    if cpp {
-        // The exception model of the MSBuild projects; cc does not choose one.
-        build.flag_if_supported("/EHsc");
-    }
     if env::var_os("CARGO_FEATURE_UAVSYNC").is_some() {
         build.define("RAV1G_UAVSYNC", None);
     }
@@ -198,18 +195,13 @@ fn base_build(repo: &Path, shaders: &Path, cpp: bool) -> cc::Build {
 }
 
 /// clang-cl (the cross build from Linux, `cargo xwin`) rejects what MSVC compiles with a warning. The
-/// sources stay as they are; these are the diagnostics that are errors in clang by default:
-///
-/// - `-Wincompatible-function-pointer-types`: `aom_util/aom_thread.h` hands a
-///   `unsigned int __stdcall (void *)` to `CreateThread`, which wants a `DWORD` result. Both are 32 bits in
-///   the same register.
-/// - `-Waddress-of-temporary`: the host passes `&CD3DX12_RESOURCE_BARRIER::Transition(...)`,
-///   `&CD3DX12_RANGE(...)` and the like straight to a D3D12 call (an MSVC extension). The temporary lives
-///   to the end of the full expression, which is the call.
+/// sources stay as they are; this is the diagnostic that is an error in clang by default:
+/// `-Wincompatible-function-pointer-types`: `aom_util/aom_thread.h` hands a
+/// `unsigned int __stdcall (void *)` to `CreateThread`, which wants a `DWORD` result. Both are 32 bits in
+/// the same register.
 fn clang_cl_flags(build: &mut cc::Build) {
     if build.get_compiler().is_like_clang_cl() {
         build.flag("-Wno-error=incompatible-function-pointer-types");
-        build.flag("-Wno-error=address-of-temporary");
     }
 }
 
@@ -230,23 +222,22 @@ fn main() {
     println!("cargo:rerun-if-changed={}", repo.join("libav1").display());
     println!("cargo:rerun-if-changed={}", manifest.join("wrapper.h").display());
     println!("cargo:rerun-if-changed={}", manifest.join("shared.h").display());
-    println!("cargo:rerun-if-changed={}", manifest.join("host.hpp").display());
+    println!("cargo:rerun-if-changed={}", manifest.join("parser.h").display());
+    println!("cargo:rerun-if-changed={}", manifest.join("shader_table.c").display());
     println!("cargo:rerun-if-changed={}", manifest.join("helpers.c").display());
     println!("cargo:rerun-if-changed={}", manifest.join("host_entry.c").display());
 
     let shaders = shader_dir();
     let sources = read_sources(&props, &repo);
 
-    // Three calls, one static library each: the C files at /O1 /Ot, the C files the project marks at /O2,
-    // and the C++ host at /O1 /Ot. The optimisation is the project's and does not follow the cargo profile.
-    let mut c_size = base_build(&repo, &shaders, false);
+    // Two calls, one static library each: the C files at /O1 /Ot and the C files the project marks at
+    // /O2. The optimisation is the project's and does not follow the cargo profile.
+    let mut c_size = base_build(&repo, &shaders);
     c_size.opt_level(1).flag_if_supported("/Ot");
-    let mut c_speed = base_build(&repo, &shaders, false);
+    let mut c_speed = base_build(&repo, &shaders);
     c_speed.opt_level(2);
-    let mut cpp = base_build(&repo, &shaders, true);
-    cpp.opt_level(1).flag_if_supported("/Ot");
     let lto = lto();
-    for build in [&mut c_size, &mut c_speed, &mut cpp] {
+    for build in [&mut c_size, &mut c_speed] {
         match lto {
             Lto::Off => {}
             Lto::Msvc => {
@@ -262,13 +253,15 @@ fn main() {
         // The libraries go to the linker as they are, not through the .rlib of this crate (see Lto).
         build.cargo_metadata(false);
     }
-    for source in sources.iter().filter(|source| !source.replaced) {
+    for source in &sources {
         let is_cpp = source.path.extension().is_some_and(|extension| extension != "c");
         match (is_cpp, source.max_speed) {
-            (true, false) => {
-                cpp.file(&source.path);
-            }
-            (true, true) => fail(&format!("{}: a C++ file at /O2 is not carried over", source.path.display())),
+            // The host: Rust has it.
+            (true, _) if source.replaced => {}
+            (true, _) => fail(&format!(
+                "{}: a C++ file of the project that the Rust host does not replace",
+                source.path.display()
+            )),
             (false, false) => {
                 c_size.file(&source.path);
             }
@@ -282,23 +275,12 @@ fn main() {
     // The entry points of the host that can end with the decoder's error, which C has to raise
     // (host_entry.c).
     c_size.file(manifest.join("host_entry.c"));
-    // The C++ side of the functions Rust has taken over (glue/): compiled with the host, as the files they
-    // stand in for were.
-    let glue = manifest.join("glue");
-    println!("cargo:rerun-if-changed={}", glue.display());
-    let mut glue_files: Vec<PathBuf> = fs::read_dir(&glue)
-        .unwrap_or_else(|error| fail(&format!("cannot read {}: {error}", glue.display())))
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "cpp"))
-        .collect();
-    glue_files.sort();
-    cpp.files(&glue_files);
+    // The bytecode of the shaders, from the headers of RAV1G_SHADER_DIR (shader_table.c).
+    c_size.file(manifest.join("shader_table.c"));
     c_size.compile("rav1g_c");
     c_speed.compile("rav1g_c_speed");
-    cpp.compile("rav1g_dx");
     println!("cargo:rustc-link-search=native={}", out.display());
-    for library in ["rav1g_c", "rav1g_c_speed", "rav1g_dx"] {
+    for library in ["rav1g_c", "rav1g_c_speed"] {
         println!("cargo:rustc-link-lib=static:-bundle={library}");
     }
     if lto == Lto::Msvc {
@@ -342,57 +324,29 @@ fn main() {
         .write_to_file(out.join("shared.rs"))
         .unwrap_or_else(|error| fail(&format!("cannot write the bindings of shared.h: {error}")));
 
-    // The C++ host as the Rust host modules see it (host.hpp): the structs of libav1/dx and what they hold
-    // of the entropy decoder, read as C++ with the settings of the build. Types and constants only; the
+    // The entropy decoder as the Rust host sees it (parser.h): the structs the host reads and fills in
+    // place, the enums and limits of the bitstream, and a few tables. Types and constants only; the
     // functions the Rust calls are declared where they are called.
-    let host = bindgen::Builder::default()
-        .header(manifest.join("host.hpp").to_string_lossy())
-        .clang_args(["-x", "c++", "-std=c++17", "-fms-extensions", "-fms-compatibility"])
-        .clang_args(["-D_UNICODE", "-DUNICODE", "-D_CONSOLE", "-D_CRT_SECURE_NO_WARNINGS"])
-        // libclang may be older than the C++ standard library of the MSVC runtime asks for; nothing of
-        // that library is bound.
-        .clang_arg("-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH")
+    let parser = bindgen::Builder::default()
+        .header(manifest.join("parser.h").to_string_lossy())
         .clang_arg(format!("-I{}", repo.join("libav1").display()))
         .clang_arg(format!("-I{}", repo.join("libav1").join("build").display()))
-        .allowlist_file(r".*[/\\]libav1[/\\]dx[/\\][A-Za-z0-9_]+\.h")
-        // The enums and limits of the bitstream (block sizes, transform sizes, ...).
+        // The enums and limits of the bitstream (block sizes, transform sizes, ...), and the constants of
+        // the timing run and of the test switches.
         .allowlist_file(r".*[/\\]av1[/\\]common[/\\]enums\.h")
-        .allowlist_type(HOST_TYPES.join("|"))
-        .allowlist_var(HOST_VARS.join("|"))
-        // COM pointers and interfaces are handed to the `windows` crate as raw pointers.
-        .opaque_type("Microsoft::WRL::.*|std::.*")
-        .blocklist_type("ID3D12.*|IDXGI.*|IUnknown|ID3D10Blob")
-        .raw_line("pub type ID3D12Device = ::std::os::raw::c_void;")
-        .raw_line("pub type ID3D12Resource = ::std::os::raw::c_void;")
-        .raw_line("pub type ID3D12RootSignature = ::std::os::raw::c_void;")
-        // No functions: bindgen declares C++ functions by their mangled names, and the Rust host modules
-        // declare the C functions they call themselves.
+        .allowlist_file(r".*[/\\]dx[/\\]av1_perf\.h")
+        .allowlist_type(PARSER_TYPES.join("|"))
+        .allowlist_var(PARSER_VARS.join("|"))
         .blocklist_function(".*")
-        .ignore_methods()
         .prepend_enum_name(false)
         .layout_tests(true)
         .derive_default(false)
         .generate_comments(false)
         .generate()
-        .unwrap_or_else(|error| fail(&format!("bindgen (host.hpp): {error}")));
-    host.write_to_file(out.join("host.rs"))
-        .unwrap_or_else(|error| fail(&format!("cannot write the bindings of host.hpp: {error}")));
-
-    // The same probe for the structs of the C++ host: host_layout_probe.cpp, compiled by the C++ compiler
-    // of the build, against the table of the bindings of host.hpp.
-    let host_probes = read_probes(&host.to_string(), HOST_PROBED, "host::");
-    let host_probe_cpp = out.join("host_layout_probe.cpp");
-    fs::write(&host_probe_cpp, probe_source_cpp(&host_probes))
-        .unwrap_or_else(|error| fail(&format!("cannot write {}: {error}", host_probe_cpp.display())));
-    fs::write(out.join("host_layout_table.rs"), probe_source_rust(&host_probes, "host_rust_layouts"))
-        .unwrap_or_else(|error| fail(&format!("cannot write host_layout_table.rs: {error}")));
-    let mut host_probe = base_build(&repo, &shaders, true);
-    host_probe.opt_level(1).include(&manifest).file(&host_probe_cpp);
-    if host_probe.get_compiler().is_like_clang_cl() {
-        // offsetof of a struct with COM pointers or a base class: defined by both compilers, a warning in clang.
-        host_probe.flag("-Wno-invalid-offsetof");
-    }
-    host_probe.compile("rav1g_host_layout_probe");
+        .unwrap_or_else(|error| fail(&format!("bindgen (parser.h): {error}")));
+    parser
+        .write_to_file(out.join("parser.rs"))
+        .unwrap_or_else(|error| fail(&format!("cannot write the bindings of parser.h: {error}")));
 
     // The layout probe: for every struct of the two lists, its size and alignment and the offset and size
     // of each of its fields, once as the C compiler of this build has them (layout_probe.c, compiled into
@@ -400,12 +354,13 @@ fn main() {
     // crate, which compare the two). The fields are read from the bindings, so none is left out.
     let mut probes = read_probes(&bindings.to_string(), INTERFACE_TYPES, "");
     probes.extend(read_probes(&shared.to_string(), SHARED_TYPES, "shared::"));
+    probes.extend(read_probes(&parser.to_string(), PARSER_PROBED, "parser::"));
     let probe_c = out.join("layout_probe.c");
     fs::write(&probe_c, probe_source_c(&probes))
         .unwrap_or_else(|error| fail(&format!("cannot write {}: {error}", probe_c.display())));
     fs::write(out.join("layout_table.rs"), probe_source_rust(&probes, "rust_layouts"))
         .unwrap_or_else(|error| fail(&format!("cannot write layout_table.rs: {error}")));
-    let mut probe = base_build(&repo, &shaders, false);
+    let mut probe = base_build(&repo, &shaders);
     probe.opt_level(1).include(&manifest).file(&probe_c).compile("rav1g_layout_probe");
 }
 
@@ -443,13 +398,40 @@ const SHARED_TYPES: &[&str] = &[
     "av1_tile_data",
 ];
 
-/// Types of the entropy decoder that the Rust host modules use and that no struct of `libav1/dx` holds
-/// (those come with the headers of `libav1/dx`, which are bound whole).
-const HOST_TYPES: &[&str] = &["AV1Decoder", "AV1_COMMON", "MACROBLOCKD"];
+/// Types of the entropy decoder and of its interface that the Rust host uses (parser.h); what they hold
+/// comes along.
+const PARSER_TYPES: &[&str] = &[
+    "AV1Decoder",
+    "AV1_COMMON",
+    "MACROBLOCKD",
+    "ThreadData",
+    "TileInfo",
+    "Av1ColorMapParam",
+    "BufferPool",
+    "RefCntBuffer",
+    "YV12_BUFFER_CONFIG",
+    "HwFrameBuffer",
+    "HwOutputImage",
+    "av1_tile_data",
+    "tx_block_info_gpu",
+    "MV_REF",
+    "TPL_MV_REF",
+    "RestorationUnitInfo",
+    "AV1LrStruct",
+    "OrderHintInfo",
+    "WarpedMotionParams",
+    "scale_factors",
+    "int_mv",
+    "aom_codec_dec_cfg_t",
+    "aom_image_t",
+    "av1_decoded_frame_buffer_t",
+    "av1_perf_.*",
+    "av1_stage_dump.*",
+];
 
-/// Tables and limits of the entropy decoder that the Rust host modules read: `extern` in its headers, so
-/// the bindings declare the C symbol.
-const HOST_VARS: &[&str] = &[
+/// Tables and limits of the entropy decoder that the Rust host reads: `extern` in its headers, so the
+/// bindings declare the C symbol; and constants that are macros or enumerators outside `enums.h`.
+const PARSER_VARS: &[&str] = &[
     "warped_filter",
     "wedge_params_lookup",
     "wedge_mask_buf",
@@ -461,6 +443,32 @@ const HOST_VARS: &[&str] = &[
     "REF_NO_SCALE",
     "SCALE_SUBPEL_BITS",
     "INVALID_IDX",
+    "MAX_FRAME_DISTANCE",
+    "AOM_CICP_MC_IDENTITY",
+    "RESTORE_.*",
+    "COMPOUND_.*",
+    "fbt.*",
+    "BILINEAR",
+    "OBMC_CAUSAL",
+    "WARPED_CAUSAL",
+    "AV1_LOW_MEMORY_.*",
+    "AV1_MEMORY_GUARD_.*",
+];
+
+/// The structs of the entropy decoder that the Rust host reads or writes in place: the layout probe
+/// holds their bindings against the C compiler of the build.
+const PARSER_PROBED: &[&str] = &[
+    "AV1Decoder",
+    "AV1_COMMON",
+    "MACROBLOCKD",
+    "ThreadData",
+    "TileInfo",
+    "Av1ColorMapParam",
+    "BufferPool",
+    "RefCntBuffer",
+    "YV12_BUFFER_CONFIG",
+    "HwFrameBuffer",
+    "HwOutputImage",
 ];
 
 /// Tables that are `static` in a header of the decoder and that the Rust host modules have a copy of
@@ -490,10 +498,6 @@ const C_TABLES: &[&str] = &[
     "av1_sub_pel_filters_8sharp",
 ];
 
-/// The same for tables of the headers of the C++ host (`libav1/dx/av1_compute.h`), from the C++ probe.
-const HOST_TABLES: &[&str] =
-    &["obmc_mask", "InterBlockSizeIndexLUT", "InterBlockWidthLUT", "InterBlockHeightLUT", "intra_mode_shader_params"];
-
 /// Inline functions of the entropy decoder's headers that the Rust host modules have a port of, as
 /// functions of the C probe: the tests of the ports call them.
 const C_FUNCTION_PROBES: &str = r#"
@@ -521,40 +525,6 @@ int rav1g_probe_extract_interp_filter(unsigned int filters, int x_filter) {
   return av1_extract_interp_filter(filters, x_filter);
 }
 "#;
-
-/// The scheduler of -intrav2 (`libav1/dx/intra_v2_sched.h`, inline C++) as functions of the C++ probe,
-/// for the test of its Rust port.
-const HOST_FUNCTION_PROBES: &str = r#"
-extern "C" void rav1g_probe_intra_v2_place(const IntraV2Sched *s, uint32_t tile_base, int is_uv, int cx, int cy,
-                                           int w_log, int h_log, int above_left, int above_count, int left_count,
-                                           int cfl, uint32_t bucket, uint32_t index) {
-  intra_v2_place(s, tile_base, is_uv, cx, cy, w_log, h_log, above_left, above_count, left_count, cfl, bucket, index);
-}
-
-extern "C" void rav1g_probe_intra_v2_sort(uint64_t *list, int count) { intra_v2_sort(list, count); }
-
-extern "C" int rav1g_probe_intra_v2_next_dispatch(const uint64_t *list, int count, int first, IntraV2Dispatch *d) {
-  return intra_v2_next_dispatch(list, count, first, d);
-}
-"#;
-
-/// The structs of the C++ host whose layout the tests hold against the C++ compiler of the build
-/// (host_layout_probe.cpp): what the Rust host modules read or write in place.
-const HOST_PROBED: &[&str] = &[
-    "GpuBufferObject",
-    "dx_compute_context",
-    "av1_memory_allocator",
-    "av1_memory_allocator_dummy",
-    "av1_video_memory",
-    "ComputeCommandBuffer",
-    "ComputeShader",
-    "compute_shader_lib",
-    "DataPtrQueue",
-    "DataPtrQueueMT",
-    "HwFrameBuffer",
-    "av1_frame_thread_data",
-    "Av1Core",
-];
 
 /// A struct or union to probe: its C name, the path of its bindings and its fields.
 struct Probe {
@@ -599,12 +569,7 @@ fn read_probes(bindings: &str, types: &[&str], module: &str) -> Vec<Probe> {
             };
             // Bit fields and anonymous members have no name C could take an offset of; the size of the
             // struct still covers them.
-            // The same for the base class and the virtual function table of a C++ struct.
-            if field.starts_with("_bitfield")
-                || field.starts_with("__bindgen")
-                || field.starts_with("_base")
-                || field == "vtable_"
-            {
+            if field.starts_with("_bitfield") || field.starts_with("__bindgen") {
                 continue;
             }
             fields.push(field.to_string());
@@ -630,6 +595,7 @@ fn probe_source_c(probes: &[Probe]) -> String {
     let mut text = String::from(
         "/* Written by build.rs: the layouts as this compiler has them. */\n\
          #include <stddef.h>\n#include <stdint.h>\n\n#include \"wrapper.h\"\n#include \"shared.h\"\n\
+         #include \"parser.h\"\n\
          #include \"av1/common/onyxc_int.h\"\n#include \"av1/common/filter.h\"\n\
          #include \"av1/common/reconintra.h\"\n#include \"aom_dsp/intrapred_common.h\"\n\n\
          typedef struct {\n  const char *name;\n  uint32_t size;\n  uint32_t offset;\n  uint32_t align;\n\
@@ -671,41 +637,6 @@ fn table_source(tables: &[&str], function: &str) -> String {
          \x20 *size = {function}_entries[index].size;\n\
          \x20 return {function}_entries[index].data;\n}}\n"
     ));
-    text
-}
-
-/// The probe of the C++ host. The private members of the allocators are probed like the others; the
-/// system headers are read before `private` is a macro.
-fn probe_source_cpp(probes: &[Probe]) -> String {
-    let mut text = String::from(
-        "// Written by build.rs: the layouts of the C++ host as this compiler has them.\n\
-         #define _ALLOW_KEYWORD_MACROS\n\
-         #include <stddef.h>\n#include <stdint.h>\n#include <windows.h>\n#include <wrl.h>\n#include <d3d12.h>\n\
-         #include <dxgi1_4.h>\n#include <d3dx12.h>\n#include <queue>\n#include <algorithm>\n#include <cstring>\n\
-         #define private public\n#define protected public\n#include \"host.hpp\"\n\n\
-         struct rav1g_layout_entry {\n  const char *name;\n  uint32_t size;\n  uint32_t offset;\n  uint32_t align;\n\
-         };\n\nstatic const rav1g_layout_entry rav1g_host_layout_entries[] = {\n",
-    );
-    for probe in probes {
-        let t = &probe.c_type;
-        text.push_str(&format!("  {{ \"{t}\", (uint32_t)sizeof({t}), 0, (uint32_t)alignof({t}) }},\n"));
-        for field in &probe.fields {
-            let f = c_field(field);
-            text.push_str(&format!(
-                "  {{ \"{t}.{f}\", (uint32_t)sizeof((({t} *)0)->{f}), (uint32_t)offsetof({t}, {f}), 0 }},\n"
-            ));
-        }
-    }
-    text.push_str(
-        "};\n\nextern \"C\" const rav1g_layout_entry *rav1g_host_layout_table(uint32_t *count) {\n\
-         \x20 *count = (uint32_t)(sizeof(rav1g_host_layout_entries) / sizeof(rav1g_host_layout_entries[0]));\n\
-         \x20 return rav1g_host_layout_entries;\n}\n",
-    );
-    text.push_str(
-        &table_source(HOST_TABLES, "rav1g_host_tables")
-            .replace("\nconst void *rav1g_host_tables(", "\nextern \"C\" const void *rav1g_host_tables("),
-    );
-    text.push_str(HOST_FUNCTION_PROBES);
     text
 }
 

@@ -138,11 +138,11 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
   The 10-bit stream with scaled references that stood here as wrong on the console is right: its md5
   references had been made with ffmpeg scaling every frame to the size of the first.
 
-Next targets: the Rust host ([docs/rust-port.md](docs/rust-port.md), started 2026-11-12; steps 1 to 3 of
+Next targets: the Rust host ([docs/rust-port.md](docs/rust-port.md), started 2026-11-12; steps 1 to 4 of
 5 are in: a Cargo workspace that builds the decoder, `rav1g-dec`, the conformance tool in Rust,
-bindings with layout tests for the structs shared with the shaders, and the host's leaf modules in Rust
-(the allocator, the queues, the shader library and every stage; the frame pipeline of `av1_core.cpp` is
-step 4)), then
+bindings with layout tests for the structs shared with the shaders and with the entropy decoder, and the
+whole host in Rust, from the creation of a decoder to the completion thread; the cargo build compiles no
+C++ of the decoder. Step 5 is the Rust API and the C ABI the test player links), then
 inter and intra prediction on the GPU (a measured `-interfast` prototype showed that inter time is per
 block and per dispatch, not filtering; see
 [gpu-av1-decoder.md](docs/gpu-av1-decoder.md)) and entropy decoding on the CPU (frame-parallel or a

@@ -28,12 +28,13 @@ use windows::core::Interface;
 
 use super::log::log;
 use super::tables::{BLOCK_SIZE_HIGH, BLOCK_SIZE_WIDE, GAUSSIAN_SEQUENCE, SS_SIZE_420};
+use super::types::{Av1Core, ComputeShader, GpuBufferObject, compute_shader_lib};
 use crate::gpu::d3d12::{com_ref, com_release, com_store};
 use crate::gpu::{self, BufferRef, Device, Layout, LayoutDesc, OwnedDevice, Queue, Upload};
-use crate::sys::host::{
-    Av1Core, BLOCK_SIZES_ALL, ComputeShader, GpuBufferObject, TX_4X4, TX_4X8, TX_4X16, TX_8X4, TX_8X8, TX_8X16,
-    TX_8X32, TX_16X4, TX_16X8, TX_16X16, TX_16X32, TX_16X64, TX_32X8, TX_32X16, TX_32X32, TX_32X64, TX_64X16, TX_64X32,
-    TX_64X64, TX_SIZES_ALL, compute_shader_lib, ii_size_scales, ii_weights1d, warped_filter, wedge_params_lookup,
+use crate::sys::parser::{
+    BLOCK_SIZES_ALL, TX_4X4, TX_4X8, TX_4X16, TX_8X4, TX_8X8, TX_8X16, TX_8X32, TX_16X4, TX_16X8, TX_16X16, TX_16X32,
+    TX_16X64, TX_32X8, TX_32X16, TX_32X32, TX_32X64, TX_64X16, TX_64X32, TX_64X64, TX_SIZES_ALL, ii_size_scales,
+    ii_weights1d, warped_filter, wedge_params_lookup,
 };
 
 /// Threads that create pipelines at most (`MAX_CREATE_SHADER_THREADS` of the C++).
@@ -42,7 +43,7 @@ const MAX_CREATE_THREADS: c_int = 6;
 unsafe extern "C" {
     /// `av1/common/reconinter.c`: builds the wedge masks `wedge_params_lookup` points to.
     fn av1_init_wedge_masks();
-    /// The glue: the bytecode of the shaders, from the headers of the FXC build.
+    /// `crates/rav1g-sys/shader_table.c`: the bytecode of the shaders, from the headers of the FXC build.
     fn rav1g_shader_table(count: *mut u32) -> *const ShaderBytecode;
 }
 

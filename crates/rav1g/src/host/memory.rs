@@ -23,12 +23,10 @@ use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 use windows::core::Interface;
 
 use super::log::{log, log_create_error};
+use super::types::{DevMemPoolSize, GpuBufferObject, MemoryTypeCount, av1_memory_allocator};
 use crate::gpu::d3d12::com_ref;
 use crate::gpu::{self, BufferRef, Device, MemoryKind, MemorySegment, VideoMemory};
-use crate::sys::host::{
-    AV1_POISON_BUFFERS, AV1_POISON_MODE_INFO, AV1_POISON_OFF, DevMemPoolSize, GpuBufferObject, MemoryTypeCount,
-    av1_memory_allocator, av1_memory_allocator_dummy, av1_video_memory,
-};
+use crate::sys::parser::{AV1_POISON_BUFFERS, AV1_POISON_MODE_INFO, AV1_POISON_OFF};
 
 const HOST_MEM_ALIGN: usize = 32;
 const DEVICE_MEM_ALIGN: usize = 256;
@@ -52,32 +50,6 @@ pub extern "C" fn rav1g_memory_type_name(mem: c_int) -> *const c_char {
 // ---------------------------------------------------------------------------------------------------------
 // Video memory of the adapter (IDXGIAdapter3::QueryVideoMemoryInfo), for the MEMORY log lines.
 // ---------------------------------------------------------------------------------------------------------
-
-/// `av1_query_video_memory` of the C++: budget and usage of the adapter the device is on.
-///
-/// # Safety
-/// `device` is null or an `ID3D12Device *`; `info` is valid for writing.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_query_video_memory(device: *mut c_void, info: *mut av1_video_memory) {
-    // SAFETY: the caller's contract.
-    let memory = Device::video_memory(unsafe { ID3D12Device::from_raw_borrowed(&device) });
-    // SAFETY: `info` is valid for writing; all of it is plain numbers, zero where a query failed.
-    unsafe {
-        info.write_bytes(0, 1);
-        let info = &mut *info;
-        info.hr_adapter = memory.adapter_error;
-        for (segment, hr, raw) in [
-            (&memory.local, &mut info.hr_local, &mut info.local),
-            (&memory.non_local, &mut info.hr_non_local, &mut info.non_local),
-        ] {
-            *hr = segment.error;
-            raw.Budget = segment.budget;
-            raw.CurrentUsage = segment.usage;
-            raw.AvailableForReservation = segment.available_for_reservation;
-            raw.CurrentReservation = segment.reservation;
-        }
-    }
-}
 
 fn write_segment(line: &mut String, name: &str, segment: &MemorySegment) {
     if segment.error < 0 {
@@ -120,29 +92,6 @@ fn label_text(label: *const c_char) -> String {
         // SAFETY: a label is a C string (the callers' contract).
         unsafe { CStr::from_ptr(label) }.to_string_lossy().into_owned()
     }
-}
-
-/// `av1_log_video_memory` of the C++.
-///
-/// # Safety
-/// `label` is null or a C string; `info` was filled by [`rav1g_query_video_memory`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_log_video_memory(is_error: c_int, label: *const c_char, info: *const av1_video_memory) {
-    // SAFETY: the caller's contract.
-    let info = unsafe { &*info };
-    let segment = |hr: i32, raw: &crate::sys::host::DXGI_QUERY_VIDEO_MEMORY_INFO| MemorySegment {
-        error: hr,
-        budget: raw.Budget,
-        usage: raw.CurrentUsage,
-        available_for_reservation: raw.AvailableForReservation,
-        reservation: raw.CurrentReservation,
-    };
-    let memory = VideoMemory {
-        adapter_error: info.hr_adapter,
-        local: segment(info.hr_local, &info.local),
-        non_local: segment(info.hr_non_local, &info.non_local),
-    };
-    log_video_memory(is_error != 0, &label_text(label), &memory);
 }
 
 /// `av1_log_video_memory_now` (`dx/av1_perf.h`): the line for the device, now.
@@ -433,32 +382,25 @@ pub unsafe extern "C" fn rav1g_memory_release(this: *mut av1_memory_allocator) {
     this.dev_obj_count = 0;
 }
 
-/// `av1_memory_allocator_dummy::create_buffer`: counts what the buffer would take. The planning pass of
-/// the frame pipeline sizes the decoder with it.
-///
-/// # Safety
-/// `this` is the planning allocator.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_memory_dummy_create_buffer(this: *mut av1_memory_allocator_dummy, size: usize) {
-    // SAFETY: the caller's contract.
-    let this = unsafe { &mut *this };
-    let gap = align_up(this.device_ptr, DEVICE_MEM_ALIGN) - this.device_ptr;
-    this.device_ptr += align_up(size.wrapping_add(gap), DEVICE_MEM_ALIGN);
+/// The plan of a decoder's memory (`av1_memory_allocator_dummy` of the C++): counts what the requests of
+/// the creation would take of the host pool and of device memory, without allocating.
+#[derive(Default)]
+pub(crate) struct Plan {
+    pub host: usize,
+    pub device: usize,
 }
 
-/// `av1_memory_allocator_dummy::host_allocate`: counts what the request would take of the host pool.
-///
-/// # Safety
-/// `this` is the planning allocator.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_memory_dummy_host_allocate(
-    this: *mut av1_memory_allocator_dummy,
-    size: usize,
-    align: c_int,
-) {
-    // SAFETY: the caller's contract.
-    let this = unsafe { &mut *this };
-    this.host_ptr += host_request(this.host_ptr, size, align).1;
+impl Plan {
+    /// Counts a device buffer of `size` bytes.
+    pub(crate) fn create_buffer(&mut self, size: usize) {
+        let gap = align_up(self.device, DEVICE_MEM_ALIGN) - self.device;
+        self.device += align_up(size.wrapping_add(gap), DEVICE_MEM_ALIGN);
+    }
+
+    /// Counts a request of `size` bytes of the host pool.
+    pub(crate) fn host_allocate(&mut self, size: usize, align: c_int) {
+        self.host += host_request(self.host, size, align).1;
+    }
 }
 
 #[cfg(test)]
@@ -487,23 +429,19 @@ mod tests {
 
     #[test]
     fn planning_counts_like_the_allocator() {
-        // SAFETY: the planning allocator is numbers and a table pointer the functions do not use.
-        let mut plan: av1_memory_allocator_dummy = unsafe { std::mem::zeroed() };
+        let mut plan = Plan::default();
         let mut host = 0usize;
         let mut device = 0usize;
         for (size, align) in [(1usize, 0), (4096, 64), (100, 32), (65536, 4096), (7, 0)] {
-            // SAFETY: `plan` is a planning allocator.
-            unsafe {
-                rav1g_memory_dummy_host_allocate(&mut plan, size, align);
-                rav1g_memory_dummy_create_buffer(&mut plan, size);
-            }
+            plan.host_allocate(size, align);
+            plan.create_buffer(size);
             let (gap, taken) = host_request(host, size, align);
             assert_eq!((host + gap) % (align.max(32) as usize), 0);
             host += taken;
             device += align_up(size, 256);
         }
-        assert_eq!(plan.host_ptr, host);
-        assert_eq!(plan.device_ptr, device);
+        assert_eq!(plan.host, host);
+        assert_eq!(plan.device, device);
     }
 
     #[test]

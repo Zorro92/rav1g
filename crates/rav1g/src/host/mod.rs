@@ -6,14 +6,13 @@
 // License 1.0 was not distributed with this source code in the PATENTS file, you can obtain it at
 // www.aomedia.org/license/patent.
 
-//! The host of the decoder: what `libav1/dx` is in C++, module by module in Rust (step 3 of
-//! `docs/rust-port.md`).
+//! The host of the decoder: what `libav1/dx` is in C++, in Rust (steps 3 and 4 of `docs/rust-port.md`).
 //!
-//! Each module has the functions of one C++ file under the names the rest of the decoder calls them by:
-//! the `extern "C"` functions of the file as they were, and for its C++ functions an `extern "C"`
-//! function `rav1g_*` that the glue file of the same name in `crates/rav1g-sys/glue` calls. The structs
-//! are those of the C++ host (`rav1g_sys::host`), read and written in place, until the frame pipeline
-//! that owns them is Rust too (step 4).
+//! The entropy decoder (C) calls the host through the functions of `dx/av1_core.h`, which are `extern "C"`
+//! functions here under those names (`create`, `frame`, `completion`, `blocks`), or C functions of
+//! `crates/rav1g-sys/host_entry.c` where the decoder's error may have to be raised. The application's
+//! entry points (`aom/aom_decoder.h`, `dx/av1_perf.h`) are here as well. The structs of the host are
+//! Rust's own (`types`); what the entropy decoder shares with it is bound in `rav1g_sys::parser`.
 
 // The stages index several tables of the C structs with one index, as the C++ they come from does.
 #![allow(clippy::needless_range_loop)]
@@ -37,3 +36,4 @@ mod stage_dump;
 mod tables;
 mod thread;
 mod transform;
+mod types;

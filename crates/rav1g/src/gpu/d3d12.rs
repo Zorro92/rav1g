@@ -8,10 +8,11 @@
 
 //! The D3D12 backend of [`crate::gpu`].
 //!
-//! Until step 4 of the port the C++ frame pipeline owns the device, the queues and the command list, and
-//! its structs hold the buffers and pipeline states as raw COM pointers. The types here therefore borrow
-//! ([`Device`], [`BufferRef`]) or hand the pointer over ([`Buffer::into_raw`]) where a Rust owner would
-//! hold the interface.
+//! The structs of the host keep an interface the way the C++ kept a COM pointer: one pointer in a field
+//! (`crate::host::types`). The types here therefore come in two kinds: those that borrow ([`Device`],
+//! [`BufferRef`], [`Queue`]) and those that are the interface and nothing else ([`CommandList`],
+//! [`Fence`], [`Readback`] and the like), which such a field holds, or hands over as a raw pointer where a
+//! buffer descriptor keeps one ([`Buffer::into_raw`]).
 
 use std::ffi::c_void;
 use std::mem::ManuallyDrop;
@@ -32,8 +33,8 @@ use windows::core::{IUnknown, Interface};
 
 use super::{Error, LayoutDesc, MemoryKind, MemorySegment, VideoMemory};
 
-/// A COM pointer field of a struct of the C++ host (`Microsoft::WRL::ComPtr<I>`, eight bytes: the
-/// pointer) as a borrowed interface. `None` for a null pointer.
+/// A field of a struct of the host that holds an interface or none (eight bytes: the pointer) as a
+/// borrowed interface. `None` for a null pointer.
 ///
 /// # Safety
 /// `slot` is a `ComPtr<I>` (or an `I *`) that is null or holds a reference for `'a`.

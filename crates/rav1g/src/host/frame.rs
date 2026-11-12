@@ -38,14 +38,17 @@ use super::prediction::{rav1g_inter_ext_borders, rav1g_prediction_gen_blocks, ra
 use super::stage_dump::{stage_dump_begin, stage_dump_frame_info};
 use super::thread::{mutex_lock, mutex_unlock, rav1g_mt_queue_get, rav1g_mt_queue_push};
 use super::transform::rav1g_idct_run;
+use super::types::{
+    Av1Core, DeviceUpload, EntropyThreadCount, GpuWorkItem, InterFastMapSize, IntraV2MaxRegions, av1_frame_thread_data,
+    av1_perf_inter_tile,
+};
 use crate::gpu::d3d12::{com_ref, wrapped_ref};
 use crate::gpu::{CommandAllocator, CommandList, Event, Fence, Queue};
 use crate::sys;
-use crate::sys::host::{
-    ALTREF_FRAME, AV1_COMMON, AV1Decoder, Av1ColorMapParam, Av1Core, DeviceUpload, EntropyThreadCount, GpuWorkItem,
-    HwFrameBuffer, HwOutputImage, INVALID_IDX, InterFastMapSize, IntraV2MaxRegions, LAST_FRAME, MACROBLOCKD,
-    MB_MODE_INFO, REF_NO_SCALE, RESTORE_NONE, ThreadData, TileInfo, YV12_BUFFER_CONFIG, av1_decoded_frame_buffer_t,
-    av1_frame_thread_data, av1_perf_inter_tile, av1_tile_data, scale_factors,
+use crate::sys::parser::{
+    ALTREF_FRAME, AV1_COMMON, AV1Decoder, Av1ColorMapParam, HwFrameBuffer, HwOutputImage, INVALID_IDX, LAST_FRAME,
+    MACROBLOCKD, MB_MODE_INFO, REF_NO_SCALE, RESTORE_NONE, ThreadData, TileInfo, YV12_BUFFER_CONFIG,
+    av1_decoded_frame_buffer_t, av1_tile_data, scale_factors,
 };
 
 /// A tile of at most this many superblocks is too small for the switch to a second share of the
@@ -186,7 +189,7 @@ pub unsafe extern "C" fn av1_setup_context_buffers(pbi: *mut AV1Decoder) {
     // SAFETY: the caller's contract.
     unsafe {
         let cm = &mut (*pbi).common;
-        let dec = &*(*pbi).gpu_decoder;
+        let dec = &*(*pbi).gpu_decoder.cast::<Av1Core>();
         // The above context.
         let cols = (cm.mi_cols + 31) & !31;
         let rows = cm.tile_rows;
@@ -643,7 +646,7 @@ pub unsafe extern "C" fn rav1g_setup_frame_begin(
 ) -> c_int {
     // SAFETY: the caller's contract, for all of this function.
     unsafe {
-        let dec = (*pbi).gpu_decoder;
+        let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
         let perf_setup_start = super::perf::av1_perf_ticks();
         *perf_start = perf_setup_start;
         if perf_setup_start != 0 {
@@ -826,7 +829,7 @@ pub unsafe extern "C" fn rav1g_setup_frame_begin(
 pub unsafe extern "C" fn rav1g_setup_frame_coefs(pbi: *mut AV1Decoder, cm: *mut AV1_COMMON) -> c_int {
     // SAFETY: the caller's contract.
     unsafe {
-        let dec = (*pbi).gpu_decoder;
+        let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
         let td_ptr = (*dec).curr_frame_data;
         let td = &mut *td_ptr;
         let cm = &*cm;
@@ -890,7 +893,7 @@ pub unsafe extern "C" fn rav1g_setup_frame_coefs(pbi: *mut AV1Decoder, cm: *mut 
 pub unsafe extern "C" fn rav1g_setup_frame_end(pbi: *mut AV1Decoder, cm: *mut AV1_COMMON, perf_start: i64) {
     // SAFETY: the caller's contract.
     unsafe {
-        let dec = (*pbi).gpu_decoder;
+        let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
         let td = &mut *(*dec).curr_frame_data;
         let cm = &*cm;
         assert!((*dec).thread_count <= EntropyThreadCount as c_int, "more tile threads than the decoder has room for");
@@ -945,7 +948,7 @@ pub unsafe extern "C" fn av1_setup_ext_coef_buffer(
     // SAFETY: the caller's contract.
     unsafe {
         let tile = &mut *(*thread_data).tile_data;
-        let dec = (*pbi).gpu_decoder;
+        let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
         let cur_td = (*dec).curr_frame_data;
         get_sec_data(dec, cur_td);
         let td = &*(*cur_td).sec_thread_data;
@@ -967,7 +970,7 @@ pub unsafe extern "C" fn av1_setup_sec_data(pbi: *mut AV1Decoder, _cm: *mut AV1_
         let thread_data = &mut *thread_data;
         let prev_t = &*thread_data.tile_data;
         let tile_id = thread_data.tile_id as usize;
-        let dec = (*pbi).gpu_decoder;
+        let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
 
         let cur_td = (*dec).curr_frame_data;
         get_sec_data(dec, cur_td);
@@ -1000,7 +1003,7 @@ pub unsafe extern "C" fn av1_setup_macroblockd(
     unsafe {
         let thread_data = &mut *thread_data;
         let xd: *mut MACROBLOCKD = &raw mut thread_data.xd;
-        let dec = (*pbi).gpu_decoder;
+        let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
         let cm = &*cm;
         let tile = &*tile;
         let tile_id = tile.tile_col + tile.tile_row * cm.tile_cols;
@@ -1041,7 +1044,7 @@ pub unsafe extern "C" fn av1_setup_macroblockd(
         t.blocks_offset = blocks_4x4_count;
         t.idct_blocks_host = (*td.idct_blocks_unordered)
             .host_ptr
-            .cast::<sys::host::tx_block_info_gpu>()
+            .cast::<crate::sys::parser::tx_block_info_gpu>()
             .offset(blocks_4x4_count as isize);
 
         let mi_offset_base =
@@ -1134,7 +1137,7 @@ pub unsafe extern "C" fn av1_intra_palette(
 ) {
     // SAFETY: the caller's contract.
     unsafe {
-        let dec = (*pbi).gpu_decoder;
+        let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
         let td = &*(*dec).curr_frame_data;
         // Palette blocks exist only in frames that allow screen content tools, and the frame setup has
         // created the buffer for those.
@@ -1192,7 +1195,7 @@ pub unsafe extern "C" fn rav1g_decode_frame_record(
 ) -> c_int {
     // SAFETY: the caller's contract.
     unsafe {
-        let dec = (*pbi).gpu_decoder;
+        let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
         let cm = &raw mut (*pbi).common;
         let mut perf_t = super::perf::av1_perf_ticks();
         prepare_command_buffer(dec);
@@ -1230,7 +1233,7 @@ pub unsafe extern "C" fn rav1g_decode_frame_submit(
 ) {
     // SAFETY: the caller's contract.
     unsafe {
-        let dec = (*pbi).gpu_decoder;
+        let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
         let cm = &raw mut (*pbi).common;
         if image_state != 0 {
             rav1g_copy_output(dec, cm, fb);

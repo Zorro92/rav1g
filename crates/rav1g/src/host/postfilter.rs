@@ -16,9 +16,10 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use super::core::{
     alloc_constants, buffer, commands, perf_gpu_mark, pipeline, stage_dump_active, stage_dump_data, stage_dump_fb,
 };
-use crate::sys::host::{
-    AV1_COMMON, AV1_PERF_GPU_CDEF, AV1_PERF_GPU_LOOP_REST, AV1_PERF_GPU_SUPERRES, AV1LrStruct, Av1Core, HwFrameBuffer,
-    MI_SIZE_64X64, RESTORE_NONE, RESTORE_WIENER, YV12_BUFFER_CONFIG, av1_stage_dump_region, sgr_params,
+use super::types::{Av1Core, av1_stage_dump_region};
+use crate::sys::parser::{
+    AV1_COMMON, AV1_PERF_GPU_CDEF, AV1_PERF_GPU_LOOP_REST, AV1_PERF_GPU_SUPERRES, AV1LrStruct, HwFrameBuffer,
+    MI_SIZE_64X64, RESTORE_NONE, RESTORE_WIENER, YV12_BUFFER_CONFIG, sgr_params,
 };
 
 unsafe extern "C" {

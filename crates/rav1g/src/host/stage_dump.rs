@@ -19,13 +19,13 @@ use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 
 use super::core::commands;
 use super::log::log;
+use super::types::{
+    Av1Core, Av1StageDumpMax, ID3D12Resource, av1_frame_thread_data, av1_stage_dump_entry, av1_stage_dump_region,
+};
 use crate::gpu::d3d12::{com_ref, com_release, com_store, wrapped_ref};
 use crate::gpu::{BufferRef, BufferState, Device, Readback};
 use crate::sys;
-use crate::sys::host::{
-    AV1_COMMON, Av1Core, Av1StageDumpMax, HwFrameBuffer, HwOutputImage, ID3D12Resource, MB_MODE_INFO,
-    av1_frame_thread_data, av1_stage_dump_entry, av1_stage_dump_region, av1_tile_data,
-};
+use crate::sys::parser::{AV1_COMMON, HwFrameBuffer, HwOutputImage, MB_MODE_INFO, av1_tile_data};
 
 /// Frames a dump can be asked for (`StageDumpFramesMax`).
 const FRAMES_MAX: usize = 256;

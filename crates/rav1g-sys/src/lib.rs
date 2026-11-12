@@ -6,7 +6,7 @@
 // License 1.0 was not distributed with this source code in the PATENTS file, you can obtain it at
 // www.aomedia.org/license/patent.
 
-//! The decoder's C and C++ sources, built by `build.rs`, and their bindings.
+//! The C of the decoder (the entropy decoder), built by `build.rs`, and its bindings.
 //!
 //! Everything at the top level is the C interface as it is (`libav1/aom/aom_decoder.h`, `aom_codec.h`, `aomdx.h`,
 //! `libav1/dx/av1_perf.h`) plus the `rav1g_codec_*` functions of `helpers.c`, which stand in for the
@@ -26,27 +26,22 @@ pub mod shared {
     include!(concat!(env!("OUT_DIR"), "/shared.rs"));
 }
 
-/// The C++ host as the Rust host modules of the `rav1g` crate see it (`host.hpp`): the structs and
-/// constants of `libav1/dx` (`Av1Core`, the data of a pipeline slot, the allocator, the shader library)
-/// and the structs of the entropy decoder they hold, read as C++ with the settings of the build. A COM
-/// pointer (`Microsoft::WRL::ComPtr`) is eight opaque bytes: the pointer. The tests of this crate hold the
-/// structs the Rust reads or writes against the C++ compiler of the build. This module goes when the last
-/// C++ file of the host does (step 4 of `docs/rust-port.md`).
-pub mod host {
-    include!(concat!(env!("OUT_DIR"), "/host.rs"));
+/// The entropy decoder as the Rust host of the `rav1g` crate sees it (`parser.h`): the structs the host
+/// reads and fills in place (`AV1Decoder`, `AV1_COMMON`, `MACROBLOCKD`, the state of a tile thread, the
+/// frame buffer descriptions), the enums and limits of the bitstream, and the tables the host reads. The
+/// tests of this crate hold the structs against the C compiler of the build.
+pub mod parser {
+    include!(concat!(env!("OUT_DIR"), "/parser.rs"));
 }
 
 unsafe extern "C" {
     fn rav1g_c_tables(index: u32, name: *mut *const std::ffi::c_char, size: *mut u32) -> *const std::ffi::c_void;
-    fn rav1g_host_tables(index: u32, name: *mut *const std::ffi::c_char, size: *mut u32) -> *const std::ffi::c_void;
 }
 
-/// Inline functions of the C and C++ headers as the compiler of the build has them, for the tests of
-/// their Rust ports in the `rav1g` crate (`C_FUNCTION_PROBES` and `HOST_FUNCTION_PROBES` in `build.rs`).
+/// Inline functions of the C headers as the compiler of the build has them, for the tests of their Rust
+/// ports in the `rav1g` crate (`C_FUNCTION_PROBES` in `build.rs`).
 pub mod probe {
     use std::ffi::c_int;
-
-    use crate::host::{IntraV2Dispatch, IntraV2Sched};
 
     unsafe extern "C" {
         /// `scale_chroma_bsize` of `av1/common/onyxc_int.h`.
@@ -57,31 +52,6 @@ pub mod probe {
         pub fn rav1g_probe_is_interintra_pred(sb_type: c_int, mode: c_int, ref0: c_int, ref1: c_int) -> c_int;
         /// `av1_extract_interp_filter` of `av1/common/filter.h`.
         pub fn rav1g_probe_extract_interp_filter(filters: u32, x_filter: c_int) -> c_int;
-        /// `intra_v2_place` of `dx/intra_v2_sched.h`.
-        pub fn rav1g_probe_intra_v2_place(
-            s: *const IntraV2Sched,
-            tile_base: u32,
-            is_uv: c_int,
-            cx: c_int,
-            cy: c_int,
-            w_log: c_int,
-            h_log: c_int,
-            above_left: c_int,
-            above_count: c_int,
-            left_count: c_int,
-            cfl: c_int,
-            bucket: u32,
-            index: u32,
-        );
-        /// `intra_v2_sort` of `dx/intra_v2_sched.h`.
-        pub fn rav1g_probe_intra_v2_sort(list: *mut u64, count: c_int);
-        /// `intra_v2_next_dispatch` of `dx/intra_v2_sched.h`.
-        pub fn rav1g_probe_intra_v2_next_dispatch(
-            list: *const u64,
-            count: c_int,
-            first: c_int,
-            d: *mut IntraV2Dispatch,
-        ) -> c_int;
     }
 }
 
@@ -90,12 +60,6 @@ pub mod probe {
 /// probe does not have (the list is `C_TABLES` in `build.rs`).
 pub fn c_table(name: &str) -> Option<&'static [u8]> {
     probed_table(rav1g_c_tables, name)
-}
-
-/// The same for a table of a header of the C++ host (`HOST_TABLES` in `build.rs`), as the C++ compiler
-/// of the build has it.
-pub fn host_table(name: &str) -> Option<&'static [u8]> {
-    probed_table(rav1g_host_tables, name)
 }
 
 type TableProbe = unsafe extern "C" fn(u32, *mut *const std::ffi::c_char, *mut u32) -> *const std::ffi::c_void;
