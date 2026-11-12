@@ -265,6 +265,8 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
     const int allow_global_warp = allow_warp && (mode == GLOBALMV || mode == GLOBAL_GLOBALMV);
     const int is_global_warp0 = cb_global_warp[ref0 - 1].x && allow_global_warp;
     const int is_global_warp1 = (is_compound == 0 || allow_global_warp == 0) ? 0 : cb_global_warp[ref1 - 1].x;
+    // Bit 16 of the word is wm_params.invalid (0 or 1), which the entropy decoder writes for every
+    // WARPED_CAUSAL block. Bits 8..15 are padding of the C struct and stay out of the test.
     const int is_local_warp = motion_mode == WARPED_CAUSAL && (mi.wm_params.type & 0x10000) == 0;
     const int is_luma_warp = (is_local_warp || is_global_warp0) && allow_warp;
 
@@ -733,7 +735,11 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
       int need_above = (NeedAboveLut >> mode1) & 1;
       int need_left = (NeedLeftLut >> mode1) & 1;
 
-      const int use_filter = mi.filter_intra_mode_info >> 8;
+      // FILTER_INTRA_MODE_INFO of blockd.h is two bytes (filter_intra_mode, use_filter_intra). The upper 16
+      // bits of the word they are in are padding of the C struct: the entropy decoder never writes them, and
+      // the memory of the mode info pool is not cleared, so they hold what the memory held before (a decoder
+      // destroyed earlier in the process, for one). Only the byte of use_filter_intra counts.
+      const int use_filter = (mi.filter_intra_mode_info >> 8) & 255;
 
       const int mode_gpu = is_intrabc ? (12 << 6) : use_filter ? (13 << 6) : mode1 ? ((mode1 - 1) << 6) : (14 << 6);
 
