@@ -1,0 +1,87 @@
+name: Shaders
+description: >
+  The bytecode headers and the listings of the shaders of libav1, for the builds of a job: one FXC call per
+  shader and variant (normal, uavsync), taken from a cache by content (testing/shader_cache/shaders.py).
+
+# FXC takes about 40 s for the 92 shaders on the four processors of a runner, and MSBuild ran it on one
+# shader at a time: the test player, its uavsync variant, the survey, warp_decoder and its uavsync variant
+# each compiled every shader. Now every shader is compiled once per variant, the two jobs that build
+# programs share the result through the Actions cache, and a run whose shaders, FXC arguments and FXC are
+# those of an earlier run compiles none.
+#
+#   key of a shader   sha256 of the FXC binaries, the arguments that decide the output (profile, entry
+#                     point, variable name, /Od, the defines of the variant), the source file and every
+#                     file it includes, directly or not
+#   cache entry       the header (/Fh) and the listing (/Fc) of one FXC call, and what FXC printed
+#   Actions cache     the directory of entries under the digest of all keys; a run with another digest
+#                     starts from the newest cache (restore-keys), compiles the shaders whose keys are
+#                     not in it, drops the entries it did not use and saves the directory under its digest
+#
+# The programs are built from these headers: MSBuild gets /p:Rav1gPrebuiltShaders=<the directory of the
+# variant> and compiles no shader itself (libav1.vcxproj, warp_decoder.vcxproj).
+
+inputs:
+  repo:
+    description: The directory of the checkout, relative to the workspace
+    default: .
+  sdk:
+    description: The Windows SDK whose FXC compiles the shaders
+    required: true
+
+outputs:
+  normal:
+    description: Directory of the normal build; headers in dx/shaders/h, listings in asm, report.json
+    value: ${{ steps.build.outputs.normal }}
+  uavsync:
+    description: The same for the uavsync variant
+    value: ${{ steps.build.outputs.uavsync }}
+
+runs:
+  using: composite
+  steps:
+    - name: Keys of the shaders
+      id: key
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $fxc = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin\${{ inputs.sdk }}\x64\fxc.exe"
+        if (-not (Test-Path $fxc)) { throw "fxc.exe of Windows SDK ${{ inputs.sdk }} not found" }
+        "fxc=$fxc" >> $env:GITHUB_OUTPUT
+        python "${{ inputs.repo }}/testing/shader_cache/shaders.py" key --fxc $fxc
+        if ($LASTEXITCODE -ne 0) { throw 'The keys of the shaders could not be computed' }
+
+    - name: Shader cache
+      uses: actions/cache@v6
+      with:
+        path: shader-cache
+        key: rav1g-shaders-v1-${{ steps.key.outputs.digest }}
+        restore-keys: |
+          rav1g-shaders-v1-
+
+    - name: Headers and listings, compiling what the cache does not have
+      id: build
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $script = "${{ inputs.repo }}/testing/shader_cache/shaders.py"
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        '## Shaders' >> $env:GITHUB_STEP_SUMMARY
+        '' >> $env:GITHUB_STEP_SUMMARY
+        $reports = @()
+        foreach ($variant in @('normal', 'uavsync')) {
+          $directory = (New-Item -ItemType Directory -Force "shader-build/$variant").FullName
+          python $script build --fxc "${{ steps.key.outputs.fxc }}" --cache shader-cache --variant $variant `
+            --root $directory --listings (Join-Path $directory 'asm') --report (Join-Path $directory 'report.json')
+          if ($LASTEXITCODE -ne 0) { throw "The shaders of the $variant build could not be compiled" }
+          "$variant=$directory" >> $env:GITHUB_OUTPUT
+          $reports += (Join-Path $directory 'report.json')
+        }
+        # The variants are not the same bytecode: a group sync of every shader with one differs.
+        if ((Get-FileHash shader-build/normal/dx/shaders/h/loopfilter_hor.h).Hash -eq
+            (Get-FileHash shader-build/uavsync/dx/shaders/h/loopfilter_hor.h).Hash) {
+          throw 'The shaders of the uavsync build are those of the normal build'
+        }
+        # What is saved is what this run used.
+        python $script prune --cache shader-cache @reports
+        if ($LASTEXITCODE -ne 0) { throw 'The shader cache could not be pruned' }
+        "- key digest ``${{ steps.key.outputs.digest }}``; this step took $([math]::Round($clock.Elapsed.TotalSeconds, 1)) s" >> $env:GITHUB_STEP_SUMMARY

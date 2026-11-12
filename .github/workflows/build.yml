@@ -58,188 +58,34 @@ jobs:
             Copy-Item (Join-Path src $license) $destination
           }
 
-      # Codegen evidence for the CDEF and intra rewrites, which cannot be measured without a console:
-      # every shader of the project through the FXC, profile and flags of the Release x64 project
-      # (cs_5_0, entry main, default optimization, /Od where the project disables it). The CDEF and
-      # intra listings get a side-by-side count, all shaders a one-line survey. A shader that
-      # does not compile stops the run here. intra_main_opt and intra_main_hbd_opt are the
-      # upstream intra_main sources built with optimization (player flag -intraopt), listed next
-      # to the /Od builds the project asks for. FXC runs on several shaders at a time.
-      - name: Disassemble the shaders (CDEF and intra listings, survey of all)
+      # The shaders: the bytecode header and the listing of every shader from one FXC call per shader, with the
+      # FXC, profile and flags of the Release x64 project (cs_5_0, entry main, default optimization, /Od
+      # where the project disables it), for the normal build and for the uavsync variant, from a cache by
+      # content (.github/actions/shaders, testing/shader_cache/shaders.py). A shader that does not compile
+      # stops the run here.
+      - name: Shaders
+        id: shaders
+        uses: ./src/.github/actions/shaders
+        with:
+          repo: src
+          sdk: ${{ env.WINDOWS_SDK }}
+
+      # Codegen evidence for the CDEF and intra rewrites, which cannot be measured without a console: the
+      # CDEF and intra listings get a side-by-side count, all shaders a one-line survey.
+      # intra_main_opt and intra_main_hbd_opt are the upstream intra_main sources built with optimization
+      # (player flag -intraopt), listed next to the /Od builds the project asks for. A bit field
+      # instruction whose width is known only at run time stops the run (docs/gpu-av1-decoder.md, "Bit
+      # fields of width 0").
+      - name: Shader survey, CDEF and intra listings
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $fxc = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin\$env:WINDOWS_SDK\x64\fxc.exe"
-          if (-not (Test-Path $fxc)) { throw "fxc.exe of Windows SDK $env:WINDOWS_SDK not found" }
-          # The shader list, and the only per-shader setting of Release x64: DisableOptimizations.
-          [xml]$project = Get-Content src/libav1/build/libav1.vcxproj -Raw
-          $names = @()
-          $unoptimized = @{}
-          foreach ($item in @($project.Project.ItemGroup.FxCompile)) {
-            if (-not $item.Include) { continue }
-            $name = ($item.Include -replace '^.*[\\/]', '') -replace '\.hlsl$', ''
-            $names += $name
-            foreach ($node in @($item.ChildNodes)) {
-              if ($node.Name -eq 'DisableOptimizations' -and $node.Condition -match 'Release\|x64' -and
-                  $node.InnerText -eq 'true') { $unoptimized[$name] = $true }
-            }
-          }
-          $names = @($names | Sort-Object -Unique)
-          if ($names.Count -lt 80) { throw "Only $($names.Count) shaders found in the project" }
-          # The -intraopt comparison needs exactly this: the two upstream intra_main builds without
-          # optimization, and their _opt items (the same source through an #include) with it.
-          if ((@($unoptimized.Keys | Sort-Object) -join ' ') -cne 'intra_main intra_main_hbd') {
-            throw "Shaders built with /Od in Release x64: $(@($unoptimized.Keys | Sort-Object) -join ' ')"
-          }
-          foreach ($name in @('intra_main_opt', 'intra_main_hbd_opt')) {
-            if ($names -notcontains $name) { throw "$name is not a shader of the project" }
-          }
-          $asm = (New-Item -ItemType Directory -Force out/shader-survey/asm).FullName
-          $headers = (New-Item -ItemType Directory -Force out/shader-survey/h).FullName
-          # FXC first, several shaders at a time (one per logical processor of the runner); the
-          # listings are parsed afterwards, one by one and in name order. The time of a shader is
-          # that of its own FXC process, so it includes contention with the ones running beside it.
-          $root = (Get-Location).Path
-          $parallel = [Math]::Max(2, [Environment]::ProcessorCount)
-          $compiled = @{}
-          $names | ForEach-Object { [pscustomobject]@{ name = $_; od = [bool]$unoptimized[$_] } } |
-            ForEach-Object -ThrottleLimit $parallel -Parallel {
-              $ErrorActionPreference = 'Continue'
-              Set-Location -LiteralPath $using:root
-              $fxc = $using:fxc
-              $name = $_.name
-              $flags = @('/nologo', '/T', 'cs_5_0', '/E', 'main', '/Vn', $name)
-              if ($_.od) { $flags += '/Od' }
-              $clock = [Diagnostics.Stopwatch]::StartNew()
-              $output = @(& $fxc @flags /Fc (Join-Path $using:asm "$name.asm") /Fh (Join-Path $using:headers "$name.h") `
-                "src/libav1/dx/shaders/$name.hlsl" 2>&1 | ForEach-Object { "$_" })
-              [pscustomobject]@{ name = $name; exit = $LASTEXITCODE; output = $output
-                seconds = [math]::Round($clock.Elapsed.TotalSeconds, 1) }
-            } | ForEach-Object { $compiled[$_.name] = $_ }
-          $failed = @()
-          foreach ($name in $names) {
-            $result = $compiled[$name]
-            if (-not $result) { throw "No FXC result for $name.hlsl" }
-            if ($result.exit -ne 0) {
-              $failed += "$name.hlsl"
-              Write-Host "FXC failed for $name.hlsl (exit code $($result.exit)):"
-            }
-            if ($result.exit -ne 0 -or $name -match '^(cdef_filter|intra_)') { $result.output | Write-Host }
-          }
-          if ($failed.Count) { throw "FXC failed for $($failed -join ', ')" }
-          # No bit field instruction whose width is known only at run time, except ubfe at offset 0. FXC makes
-          # these out of x & ((1 << n) - 1) and of (x >> n) << n with a run-time n, and where n can be 0 the
-          # result depends on the GPU (docs/gpu-av1-decoder.md, "Bit fields of width 0"); the shaders take
-          # such masks from a table. ubfe at offset 0 is what the block index of every inter shader compiles
-          # to and is known to be right on the console. The two -intraopt builds are test builds of a source
-          # that is otherwise built with /Od and are not held to this.
-          $runtimeWidth = @()
-          foreach ($name in $names) {
-            if ($name -match '_opt$') { continue }
-            foreach ($line in @(Get-Content (Join-Path $asm "$name.asm"))) {
-              if ($line -notmatch '^\s*(bfi|ubfe|ibfe)\s+\S+,\s*(l\([^)]*\)|[^,]+),\s*(l\([^)]*\)|[^,]+),') { continue }
-              $op = $Matches[1]
-              $width = $Matches[2].Trim()
-              $offset = $Matches[3].Trim()
-              if ($width -match '^l\(') { continue }
-              if ($op -eq 'ubfe' -and $offset -match '^l\(0(, 0)*\)$') { continue }
-              $runtimeWidth += "$name.hlsl: $($line.Trim())"
-            }
-          }
-          if ($runtimeWidth.Count) {
-            $runtimeWidth | Write-Host
-            throw "Bit field instructions with a run-time width in $($runtimeWidth.Count) places: take the mask from a table"
-          }
-          $rows = @{}
-          foreach ($name in $names) {
-            $listing = Join-Path $asm "$name.asm"
-            $seconds = $compiled[$name].seconds
-            $text = @(Get-Content $listing)
-            $code = @($text | Where-Object { $_ -notmatch '^\s*(//|$)' })
-            $indexable = @($code | Where-Object { $_ -match '^\s*dcl_indexableTemp' } | ForEach-Object { $_.Trim() })
-            $indexableValues = 0
-            foreach ($declaration in $indexable) {
-              if ($declaration -match '\[(\d+)\],\s*(\d+)') { $indexableValues += [int]$Matches[1] * [int]$Matches[2] }
-            }
-            $shared = @($code | Where-Object { $_ -match '^\s*dcl_tgsm_' } | ForEach-Object { $_.Trim() })
-            $sharedBytes = 0
-            foreach ($declaration in $shared) {
-              $numbers = @([regex]::Matches(($declaration -replace '^\S+\s+g\d+', ''), '\d+') | ForEach-Object { [int]$_.Value })
-              $sharedBytes += if ($declaration -match 'structured') { $numbers[0] * $numbers[1] } else { $numbers[0] }
-            }
-            # Entries of the immediate constant buffer: one per line of its declaration.
-            $icbEntries = 0
-            for ($i = 0; $i -lt $code.Count; ++$i) {
-              if ($code[$i] -notmatch 'dcl_immediateConstantBuffer') { continue }
-              for ($j = $i; $j -lt $code.Count; ++$j) {
-                ++$icbEntries
-                if ($code[$j] -match '\}\s*\}') { break }
-              }
-              break
-            }
-            $group = ((@($code -match '^\s*dcl_thread_group') -join '').Trim()) -replace '^dcl_thread_group\s*', ''
-            $threads = 1
-            foreach ($n in @($group -split ',')) { if ($n.Trim()) { $threads *= [int]$n.Trim() } }
-            $slots = ($text | Select-String -Pattern 'Approximately (\d+) instruction slots used' | Select-Object -First 1).Matches.Groups[1].Value
-            $temps = ((@($code -match '^\s*dcl_temps') -join '').Trim()) -replace '^dcl_temps\s*', ''
-            $sync = @($code -match '^\s*sync').Count
-            $syncThreads = @($code -match '^\s*sync\S*_t\b').Count
-            $block = @('', "== $name.hlsl$(if ($unoptimized[$name]) { ' (/Od: the project disables optimization for this shader)' }) ==",
-              "thread group:                           dcl_thread_group $group",
-              "instruction slots:                      $slots",
-              "temp registers:                         dcl_temps $temps",
-              "indexable temps:                        $($indexable.Count)")
-            $block += @($indexable | ForEach-Object { "    $_" })
-            $block += @(
-              "instructions using an indexable temp:   $(@($code -match '\bx\d+\[').Count)",
-              "immediate constant buffer:              $(if ($icbEntries) { "yes, $icbEntries entries" } else { 'no' })",
-              "instructions reading it (icb):          $(@($code -match '\bicb\[').Count)",
-              "groupshared declarations:               $($shared.Count), $sharedBytes bytes")
-            $block += @($shared | ForEach-Object { "    $_" })
-            $block += @(
-              "group barriers (sync):                  $sync, $syncThreads of them wait for the whole thread group",
-              "groupshared loads / stores:             $(@($code -match '^\s*ld_(raw|structured)\S*\s.*\bg\d').Count) / $(@($code -match '^\s*store_(raw|structured)\S*\s+g\d').Count)",
-              "buffer loads / stores:                  $(@($code -match '^\s*ld_(raw|structured)\S*\s.*\b[tu]\d').Count) / $(@($code -match '^\s*store_(raw|structured)\S*\s+u\d').Count)",
-              "loops:                                  $(@($code -match '^\s*loop\b').Count)",
-              "FXC compile time:                       $seconds s")
-            $rows[$name] = [ordered]@{
-              block = $block
-              line = "| $name | $(if ($unoptimized[$name]) { '/Od' } else { '' }) | $group | $threads | $slots | $temps | " +
-                "$($indexable.Count) / $indexableValues | $(@($code -match '\bx\d+\[').Count) | $icbEntries | " +
-                "$(@($code -match '\bicb\[').Count) | $sharedBytes | $sync / $syncThreads | $(@($code -match '^\s*loop\b').Count) | $seconds |"
-              csv = "$name,$(if ($unoptimized[$name]) { 1 } else { 0 }),$($group -replace '[,\s]+', 'x'),$threads,$slots,$temps,$($indexable.Count)," +
-                "$indexableValues,$(@($code -match '\bx\d+\[').Count),$icbEntries,$(@($code -match '\bicb\[').Count),$sharedBytes,$sync,$syncThreads," +
-                "$(@($code -match '^\s*loop\b').Count),$seconds"
-            }
-          }
-          $intro = @("FXC of Windows SDK $($env:WINDOWS_SDK): /T cs_5_0 /E main with the Release x64 project settings (default optimization; /Od where marked).",
-            'Counts are static: instructions in the listing, not instructions executed.',
-            "FXC ran on up to $parallel shaders at a time, so the compile time of a shader includes contention with the others.")
-          $sets = @(
-            @{ directory = 'cdef-shaders'; title = 'CDEF shader listings'; names = @('cdef_filter', 'cdef_filter_v2') },
-            @{ directory = 'intra-shaders'; title = 'Intra shader listings';
-               names = @('intra_main', 'intra_main_opt', 'intra_main_hbd', 'intra_main_hbd_opt', 'intra_filter',
-                 'intra_filter_hbd', 'intra_v2', 'intra_v2_hbd') })
-          foreach ($set in $sets) {
-            $directory = (New-Item -ItemType Directory -Force "out/$($set.directory)").FullName
-            $stats = @($intro)
-            foreach ($name in $set.names) {
-              Copy-Item (Join-Path $asm "$name.asm") $directory
-              $stats += $rows[$name].block
-            }
-            $stats | Set-Content (Join-Path $directory 'stats.txt') -Encoding utf8
-            @("## $($set.title)", '```') + $stats + @('```') >> $env:GITHUB_STEP_SUMMARY
-          }
-          $survey = @('# Shader survey', '') + $intro + @('',
-            'Indexable temps: arrays the compiler keeps in addressable scratch memory, as count / total 32-bit components.',
-            'Barriers: all sync instructions / those that wait for the whole thread group.', '',
-            '| shader | opt | thread group | threads | instruction slots | temps | indexable temps | instructions on them | ICB entries | ICB reads | groupshared bytes | barriers | loops | FXC s |',
-            '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |')
-          $survey += @($names | ForEach-Object { $rows[$_].line })
-          $survey | Set-Content out/shader-survey/survey.md -Encoding utf8
-          @('shader,od,thread_group,threads,instruction_slots,temps,indexable_temps,indexable_components,indexable_instructions,icb_entries,icb_reads,groupshared_bytes,barriers,barriers_thread_sync,loops,fxc_seconds') +
-            @($names | ForEach-Object { $rows[$_].csv }) | Set-Content out/shader-survey/survey.csv -Encoding utf8
-          @('## Shader survey', '') + $survey[2..($survey.Count - 1)] >> $env:GITHUB_STEP_SUMMARY
+          python src/testing/shader_cache/shaders.py survey --report shader-build/normal/report.json `
+            --listings shader-build/normal/asm --out out --sdk $env:WINDOWS_SDK
+          if ($LASTEXITCODE -ne 0) { throw 'The shader survey failed' }
+          # All listings, and which key, compile time and header hash each shader of the build has.
+          Copy-Item shader-build/normal/asm out/shader-survey/asm -Recurse
+          Copy-Item shader-build/normal/report.json out/shader-survey/build.json
 
       # MSBuild with the v145 toolset and Windows SDK 10.0.26100.0 (upstream targets v141/17763).
       - uses: microsoft/setup-msbuild@v3
@@ -289,6 +135,7 @@ jobs:
             /p:AppxBundle=Never /p:AppxPackageExtension=.msix "/p:AppxPackageDir=$packageDirectory" `
             /p:AppxPackageSigningEnabled=true /p:PackageCertificateKeyFile= `
             "/p:PackageCertificateThumbprint=$env:CERT_THUMBPRINT" `
+            "/p:Rav1gPrebuiltShaders=${{ steps.shaders.outputs.normal }}" `
             /fl "/flp:logfile=$buildLog;verbosity=normal"
           if ($LASTEXITCODE -ne 0) { throw 'Release x64 player build/package failed; see msbuild.log' }
           $packages = @(Get-ChildItem out/packages -Recurse -File | Where-Object {
@@ -296,34 +143,16 @@ jobs:
             $_.FullName -notmatch '[\\/]Dependencies[\\/]'
           })
           if (-not $packages.Count) { throw 'No application sideload package was produced' }
-          # The listings describe the shipped shaders only if the build compiled the same bytecode.
-          # The CDEF and intra listings must match; for the rest of the survey a difference is noted.
-          $checked = @{ 'cdef-shaders' = @('cdef_filter', 'cdef_filter_v2')
-            'intra-shaders' = @('intra_main', 'intra_main_opt', 'intra_main_hbd', 'intra_main_hbd_opt', 'intra_filter',
-              'intra_filter_hbd', 'intra_v2', 'intra_v2_hbd') }
-          $different = @()
-          $listed = @(Get-ChildItem out/shader-survey/h -Filter *.h)
-          foreach ($header in $listed) {
-            $name = $header.BaseName
-            $bytecode = @($header.FullName, "src/libav1/dx/shaders/h/$name.h") | ForEach-Object {
-              $text = Get-Content $_ -Raw
-              $start = $text.IndexOf('const BYTE')
-              if ($start -lt 0) { throw "No bytecode array in $_" }
-              $text.Substring($start) -replace '\s+', ' '
-            }
-            $same = $bytecode[0] -ceq $bytecode[1]
-            if (-not $same) { $different += $name }
-            foreach ($directory in $checked.Keys) {
-              if ($checked[$directory] -notcontains $name) { continue }
-              if (-not $same) { throw "$name.asm does not match the shader in the build" }
-              "$name.asm: same bytecode header as the one compiled into the package" | Add-Content "out/$directory/stats.txt" -Encoding utf8
-            }
+          # The listings describe the shipped shaders: each comes from the FXC call that wrote the header the
+          # library was compiled from. MSBuild ran FXC on no shader of the library, and the bytecode of the
+          # headers is in the program of the package, byte for byte.
+          if (Select-String -Path $buildLog -Pattern 'fxc\.exe.*[\\/]dx[\\/]shaders[\\/]' -Quiet) {
+            throw 'MSBuild compiled shaders of the library itself: Rav1gPrebuiltShaders was not in effect'
           }
-          Remove-Item out/shader-survey/h -Recurse
-          $note = "All $($listed.Count) listings have the same bytecode as the headers compiled into the package."
-          if ($different.Count) { $note = "Listings that differ from the bytecode compiled into the package: $($different -join ', ')" }
-          @('', $note) | Add-Content out/shader-survey/survey.md -Encoding utf8
-          @('', $note) >> $env:GITHUB_STEP_SUMMARY
+          python src/testing/shader_cache/shaders.py verify --report shader-build/normal/report.json `
+            --root shader-build/normal --note out/cdef-shaders/stats.txt --note out/intra-shaders/stats.txt `
+            --note out/shader-survey/survey.md @($packages | ForEach-Object { $_.FullName })
+          if ($LASTEXITCODE -ne 0) { throw 'The package was not built from the shader headers of this run' }
           @('## rav1g test player', '', 'CI build only; console timings are taken separately.', '',
             '### Artifact files', '```') +
             @(Get-ChildItem out -Recurse -File | ForEach-Object { [IO.Path]::GetRelativePath((Resolve-Path out), $_.FullName) }) +
@@ -338,7 +167,8 @@ jobs:
           if-no-files-found: warn
 
       # The uavsync package: the same sources, with every group sync of the shaders compiled as a sync
-      # of all memory (AllMemoryBarrierWithGroupSync; /p:Rav1gUavSync=1 in libav1.vcxproj). An
+      # of all memory (AllMemoryBarrierWithGroupSync; /p:Rav1gUavSync=1 in libav1.vcxproj, and the
+      # shader headers of the uavsync variant from the Shaders step). An
       # experiment for a device on which a frame buffer store of one thread is not seen by another
       # thread of the group behind a sync of the group memory alone (docs/test-player.md,
       # "Experiments"). Same identity as the normal package and revision 1 instead of 0: it installs
@@ -363,8 +193,6 @@ jobs:
           New-Item -ItemType Directory -Force out-uavsync | Out-Null
           $packageDirectory = Join-Path $env:GITHUB_WORKSPACE 'out-uavsync/packages/'
           $buildLog = Join-Path $env:GITHUB_WORKSPACE 'out-uavsync/msbuild.log'
-          $probe = 'src/libav1/dx/shaders/h/loopfilter_hor.h'
-          $before = Get-Content $probe -Raw
           & MSBuild.exe src/av1xbox.sln /t:Rebuild /m /v:minimal /p:Configuration=Release /p:Platform=x64 `
             "/p:PlatformToolset=$env:PLATFORM_TOOLSET" "/p:WindowsTargetPlatformVersion=$env:WINDOWS_SDK" `
             /p:WindowsTargetPlatformMinVersion=10.0.17763.0 /p:TreatWarningAsError=false `
@@ -372,14 +200,22 @@ jobs:
             /p:AppxBundle=Never /p:AppxPackageExtension=.msix "/p:AppxPackageDir=$packageDirectory" `
             /p:AppxPackageSigningEnabled=true /p:PackageCertificateKeyFile= `
             "/p:PackageCertificateThumbprint=$env:CERT_THUMBPRINT" /p:Rav1gUavSync=1 `
+            "/p:Rav1gPrebuiltShaders=${{ steps.shaders.outputs.uavsync }}" `
             /fl "/flp:logfile=$buildLog;verbosity=normal"
           if ($LASTEXITCODE -ne 0) { throw 'uavsync player build/package failed; see out-uavsync/msbuild.log' }
-          if ((Get-Content $probe -Raw) -ceq $before) { throw 'The shaders of the uavsync build are those of the normal build' }
           $packages = @(Get-ChildItem out-uavsync/packages -Recurse -File | Where-Object {
             $_.Extension -in @('.msix', '.msixbundle', '.appx', '.appxbundle') -and
             $_.FullName -notmatch '[\\/]Dependencies[\\/]'
           })
           if (-not $packages.Count) { throw 'No uavsync sideload package was produced' }
+          # The package has the shaders of the uavsync build (the action has checked that they are not
+          # those of the normal build), and MSBuild compiled none of them.
+          if (Select-String -Path $buildLog -Pattern 'fxc\.exe.*[\\/]dx[\\/]shaders[\\/]' -Quiet) {
+            throw 'MSBuild compiled shaders of the library itself: Rav1gPrebuiltShaders was not in effect'
+          }
+          python src/testing/shader_cache/shaders.py verify --report shader-build/uavsync/report.json `
+            --root shader-build/uavsync --note out-uavsync/SHADERS.txt @($packages | ForEach-Object { $_.FullName })
+          if ($LASTEXITCODE -ne 0) { throw 'The uavsync package was not built from the uavsync shader headers of this run' }
           # The certificate, the notices and the record of the sources of the normal package apply.
           foreach ($item in @(Get-ChildItem out | Where-Object { $_.Name -notin @('packages', 'msbuild.log', 'shader-survey',
               'cdef-shaders', 'intra-shaders') })) {
@@ -482,6 +318,14 @@ jobs:
 
       - uses: microsoft/setup-msbuild@v3
 
+      # The shader headers of the normal build and of the uavsync variant, from the cache the player job
+      # uses: the same keys, so the same bytecode as in the packages.
+      - name: Shaders
+        id: shaders
+        uses: ./.github/actions/shaders
+        with:
+          sdk: ${{ env.WINDOWS_SDK }}
+
       - name: Build warp_decoder (desktop, Release x64)
         shell: pwsh
         run: |
@@ -491,10 +335,19 @@ jobs:
           $clock = [Diagnostics.Stopwatch]::StartNew()
           & MSBuild.exe testing/warp_decoder/warp_decoder.vcxproj /m /v:minimal /p:Configuration=Release /p:Platform=x64 `
             "/p:PlatformToolset=$env:PLATFORM_TOOLSET" "/p:WindowsTargetPlatformVersion=$env:WINDOWS_SDK" `
+            "/p:Rav1gPrebuiltShaders=${{ steps.shaders.outputs.normal }}" `
             /fl "/flp:logfile=$buildLog;verbosity=normal"
           if ($LASTEXITCODE -ne 0) { throw 'warp_decoder build failed; see msbuild.log' }
           $bin = 'testing/warp_decoder/bin/x64/Release'
           if (-not (Test-Path "$bin/warp_decoder.exe")) { throw 'warp_decoder.exe was not produced' }
+          # Built from the headers of the Shaders step: MSBuild ran FXC on no shader, and their bytecode
+          # is in the program.
+          if (Select-String -Path $buildLog -Pattern 'fxc\.exe.*[\\/]dx[\\/]shaders[\\/]' -Quiet) {
+            throw 'MSBuild compiled the shaders itself: Rav1gPrebuiltShaders was not in effect'
+          }
+          python testing/shader_cache/shaders.py verify --report shader-build/normal/report.json `
+            --root shader-build/normal "$bin/warp_decoder.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'warp_decoder was not built from the shader headers of this run' }
           New-Item -ItemType Directory -Force out/warp_decoder | Out-Null
           Get-ChildItem $bin -File | Where-Object { $_.Extension -in @('.exe', '.pdb', '.map') } |
             Copy-Item -Destination out/warp_decoder/
@@ -571,10 +424,17 @@ jobs:
           $buildLog = Join-Path $env:GITHUB_WORKSPACE 'out/msbuild-uavsync.log'
           & MSBuild.exe testing/warp_decoder/warp_decoder.vcxproj /t:Rebuild /m /v:minimal /p:Configuration=Release /p:Platform=x64 `
             "/p:PlatformToolset=$env:PLATFORM_TOOLSET" "/p:WindowsTargetPlatformVersion=$env:WINDOWS_SDK" /p:Rav1gUavSync=1 `
+            "/p:Rav1gPrebuiltShaders=${{ steps.shaders.outputs.uavsync }}" `
             /fl "/flp:logfile=$buildLog;verbosity=normal"
           if ($LASTEXITCODE -ne 0) { throw 'warp_decoder uavsync build failed; see msbuild-uavsync.log' }
           New-Item -ItemType Directory -Force out/warp_decoder_uavsync | Out-Null
           Copy-Item testing/warp_decoder/bin/x64/Release/warp_decoder.exe out/warp_decoder_uavsync/
+          if (Select-String -Path $buildLog -Pattern 'fxc\.exe.*[\\/]dx[\\/]shaders[\\/]' -Quiet) {
+            throw 'MSBuild compiled the shaders itself: Rav1gPrebuiltShaders was not in effect'
+          }
+          python testing/shader_cache/shaders.py verify --report shader-build/uavsync/report.json `
+            --root shader-build/uavsync out/warp_decoder_uavsync/warp_decoder.exe
+          if ($LASTEXITCODE -ne 0) { throw 'The uavsync warp_decoder was not built from the uavsync shader headers of this run' }
 
       - name: Conformance with the uavsync shaders
         if: ${{ !cancelled() }}

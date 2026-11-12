@@ -215,6 +215,18 @@
       <PreprocessorDefinitions>GroupMemoryBarrierWithGroupSync=AllMemoryBarrierWithGroupSync;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </FxCompile>
   </ItemDefinitionGroup>
+  <!-- /p:Rav1gPrebuiltShaders=<directory>: the bytecode headers of the shaders are in
+       <directory>\dx\shaders\h, written by testing/shader_cache/shaders.py from one FXC call per shader
+       that also wrote the shader's listing, and this project compiles no shader. The CI builds set it
+       (.github/actions/shaders); without it the project compiles its shaders itself, as it always did. -->
+  <ItemDefinitionGroup Condition="'$(Rav1gPrebuiltShaders)'!=''">
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(Rav1gPrebuiltShaders);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <FxCompile>
+      <ExcludedFromBuild>true</ExcludedFromBuild>
+    </FxCompile>
+  </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="..\aom\src\aom_codec.c" />
     <ClCompile Include="..\aom\src\aom_decoder.c" />
