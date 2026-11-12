@@ -903,7 +903,7 @@ within noise (`-gputime`, against package 0.2.25.0: GPU busy 30.3 vs 31.0 ms, 51
 35.8 ms on three 4K clips; the vertical loop filter 0.81 vs 0.83 ms). With this, no stream we test differs
 from dav1d on the console or on WARP.
 
-## Shader Model 6 feasibility (2026-11-12, results pending the console run)
+## Shader Model 6 feasibility (2026-11-12)
 
 All shaders are FXC shaders of Shader Model 5.0. Moving them to DXC and Shader Model 6 would give wave
 intrinsics (a sum or a prefix sum over the lanes of a wave without group memory and group syncs) and
@@ -931,4 +931,26 @@ which get 4 lanes whatever they prefer. The other 5 are the pipeline states with
 32 and 64, which WARP refuses (`0x80070057`): it has waves of 4 lanes only. Nothing computed a wrong
 value.
 
-**Console result:** pending. Task file with the single line `-sm6test`.
+**Console result** (package 0.2.34.0, rav1g e52e07a, single task line `-sm6test`): the device reports
+**shader model 6.4**, feature level 11_0, `WaveOps` with waves of **64 lanes, minimum and maximum**,
+`Native16BitShaderOpsSupported` **0**, no `[WaveSize]` (it needs 6.6), typed UAV loads only for 32-bit
+formats. DXIL signed by DXC 1.9 is accepted.
+
+| Test | Console |
+| --- | --- |
+| `basic` (cs_6_0 control) | PASS |
+| `wave_ops` | lane count 64; 4 waves of 64 consecutive threads in 4 groups of 64, no wave across groups; sum, prefix sum, ballot, first-lane reads right; `WaveReadLaneAt(lane ^ 1)` FAIL (188 mismatches, every thread got the same value) |
+| `reduce_groupshared`, `reduce_wave` | PASS, the same sums and prefix sums |
+| `native16_math`, `native16_load` (cs_6_2, `-enable-16bit-types`) | pipeline state refused (`0x80070057`) |
+| `wavesize*`, `reduce_wave64`, `wavesize_range_*` (cs_6_6/6_8) | pipeline state refused (`0x80070057`) |
+
+**Reading:**
+- **Wave intrinsics are available** with DXC up to `cs_6_4`, on waves of 64 lanes. A thread group of 64
+  is one wave on the console, which is why upstream's lockstep code worked there.
+- **The one failure is the test's, not the console's:** in Shader Model 6.0 `WaveReadLaneAt` needs a lane
+  index that is the same for the whole wave; a per-thread index is undefined, and the console reads one
+  lane for all. A per-lane exchange needs the quad operations or group memory instead.
+- **No native 16-bit arithmetic** and no requested wave size: 8- and 10-bit pixel maths stays in 32-bit
+  registers, and shaders can rely on waves of 64 (and should still not assume them).
+- So a move to DXC/SM 6.0-6.4 would bring wave reductions, broadcasts and ballots (useful for the CFL and
+  DC sums, the CDEF direction search, compaction of block lists) but not packed 16-bit throughput.
