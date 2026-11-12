@@ -33,6 +33,7 @@
 
 #include "common/stream_reader.h"
 #include "decoder_creator.h"
+#include "sm6test/sm6test.h"
 
 #if (WINAPI_FAMILY == WINAPI_FAMILY_APP)
 using namespace Platform;
@@ -77,6 +78,12 @@ const char* GetVpxErrorString(int err) {
     if (error_decripts[i].err == err) return error_decripts[i].err_string;
   }
   return "Unspecified error";
+}
+
+// The log callback of the capability report and the Shader Model 6 test (testing/sm6test).
+static void Sm6LogLine(void* priv, const char* line) {
+  (void)priv;
+  XB_LOGI << line;
 }
 
 static void parse_file(const std::string& str, std::vector<one_task>& list) {
@@ -173,11 +180,41 @@ int Decoders::DecodeLoop() {
   GetAvailablePaths(read_path, write_path, root_path_);
   write_path_ = write_path;
   read_path_ = read_path;
+  // What the device reports about itself ("CAPS ..."), once per launch, before anything of the decoder
+  // exists (testing/sm6test, docs/test-player.md "Shader Model 6 test").
+  Sm6LogCaps(dx_resources_.dx12_device.Get(), Sm6LogLine, NULL);
   std::string full_args_path = read_path + args_path;
   parse_file(full_args_path, arg_lists);
   if (arg_lists.size() == 0) {
     XB_LOGE << "No args were found";
     return -1;
+  }
+  // -sm6test: not a decoding flag. It may stand on a line of its own or on the line of a stream; the
+  // Shader Model 6 test shaders then run once, here, before the pipeline states of the decoder are created
+  // ("SM6TEST ..." lines). The flag is taken off the line, and a line that had nothing else is no task: a
+  // task file with only -sm6test runs the test and ends.
+  bool sm6test = false;
+  bool has_tasks = false;
+  for (std::vector<one_task>::iterator task = arg_lists.begin(); task != arg_lists.end(); task++) {
+    for (std::vector<std::string>::iterator arg = task->begin(); arg != task->end();) {
+      if (*arg == "-sm6test") {
+        sm6test = true;
+        arg = task->erase(arg);
+      } else {
+        arg++;
+      }
+    }
+    if (!task->empty()) has_tasks = true;
+  }
+  if (sm6test) {
+    AV1Decoder::LogMemory(dx_resources_.dx12_device.Get(), "before the Shader Model 6 test");
+    Sm6RunTests(dx_resources_.dx12_device.Get(), dx_resources_.dx12_command_queue.Get(), Sm6LogLine, NULL);
+    AV1Decoder::LogMemory(dx_resources_.dx12_device.Get(), "after the Shader Model 6 test");
+  }
+  if (!has_tasks) {
+    XB_LOGI << "No decoding tasks" << (sm6test ? " after -sm6test" : "") << ". Bye";
+    if (display_) display_->AllJobDoneNotify();
+    return 0;
   }
   // The decoder's own log lines (MEMORY ...) go to the player's log, from the pipeline states on.
   av1_set_log_callback(AV1Decoder::LogLine, NULL);

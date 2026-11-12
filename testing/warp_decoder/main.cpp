@@ -41,6 +41,7 @@
 #include "aom/aom_decoder.h"
 #include "aom/aomdx.h"
 #include "dx/av1_perf.h"
+#include "sm6test/sm6test.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -107,6 +108,7 @@ struct Globals {
   bool verbose = false;   // -v
   bool debug_layer = false;     // -debuglayer
   bool gpu_validation = false;  // -gpuvalidation
+  bool sm6test = false;         // -sm6test
   std::string list;       // -list
 };
 
@@ -119,11 +121,15 @@ static void Say(const char* fmt, ...) {
   fflush(stdout);
 }
 
+// The log callback of the Shader Model 6 test.
+static void SayLine(void*, const char* line) { Say("%s", line); }
+
 static void Usage() {
   Say("warp_decoder: decodes AV1 streams with libav1 on D3D12 (WARP by default), one md5 per output frame.");
   Say("");
   Say("  warp_decoder -i <stream> [task flags] [-hw] [-v]");
   Say("  warp_decoder -list <file> [task flags as defaults for every line] [-hw] [-v]");
+  Say("  warp_decoder -sm6test [-hw]");
   Say("");
   Say("Task flags:");
   Say("  -i <file>             the stream: .ivf, .mkv/.webm, .obu, .mp4");
@@ -161,9 +167,13 @@ static void Usage() {
   Say("  -v                    print the decoder's log lines (MEMORY ...) and the player-style task lines");
   Say("  -debuglayer           switch the D3D12 debug layer on (needs the Graphics Tools feature of Windows)");
   Say("                        and print its messages after every task; -gpuvalidation adds GPU-based validation");
+  Say("  -sm6test              run the Shader Model 6 test shaders on the device before the tasks, one 'SM6TEST ...'");
+  Say("                        line per shader (docs/test-player.md); needs no stream: without -i and -list the");
+  Say("                        program ends after the test");
   Say("");
-  Say("Exit code: 0 all tasks decoded and matched, 1 a frame or a frame count differs, 2 a decode error,");
-  Say("3 bad arguments or no device, 4 timeout. One 'RESULT ...' line per task on stdout.");
+  Say("Exit code: 0 all tasks decoded and matched, 1 a frame or a frame count differs, 2 a decode error (or");
+  Say("-sm6test could not run its test), 3 bad arguments or no device, 4 timeout. One 'RESULT ...' line per task");
+  Say("on stdout.");
 }
 
 static bool ParseInt(const std::string& s, int* v) {
@@ -263,6 +273,8 @@ static bool ParseArgs(const std::vector<std::string>& args, Task* task, Globals*
     } else if (globals && a == "-gpuvalidation") {
       globals->debug_layer = true;
       globals->gpu_validation = true;
+    } else if (globals && a == "-sm6test") {
+      globals->sm6test = true;
     } else if (globals && a == "-list") {
       if (!value(&globals->list)) return false;
     } else {
@@ -1209,6 +1221,8 @@ int main(int argc, char** argv) {
       Say("ERROR no tasks in the list %s", globals.list.c_str());
       return kExitUsage;
     }
+  } else if (globals.sm6test && base.input.empty()) {
+    // -sm6test alone: the test needs a device and no stream.
   } else {
     if (!CheckTask(&base, &err)) {
       Say("ERROR %s", err.c_str());
@@ -1223,6 +1237,16 @@ int main(int argc, char** argv) {
 
   Device dev;
   if (!CreateDevice(globals, &dev)) return kExitUsage;
+  // What the device reports about itself ("CAPS ..."), at every launch, and with -sm6test the Shader Model
+  // 6 test shaders ("SM6TEST ..."), before anything of the decoder exists (testing/sm6test). A shader the
+  // device refuses is a result of the test; the exit code changes only when the test itself broke.
+  Sm6LogCaps(dev.device.Get(), SayLine, NULL);
+  bool sm6_broken = false;
+  if (globals.sm6test) {
+    sm6_broken = Sm6RunTests(dev.device.Get(), dev.queue.Get(), SayLine, NULL) != 0;
+    if (globals.debug_layer) PrintDebugMessages(dev.device.Get());
+    if (tasks.empty()) return sm6_broken ? kExitError : kExitPass;
+  }
   const auto pso_start = std::chrono::steady_clock::now();
   dev.psos = av1_create_pipeline_cache_handle(dev.device.Get(), WD_PSO_THREADS);
   if (!dev.psos || av1_wait_pipeline_cache_handle(dev.psos)) {
@@ -1258,5 +1282,6 @@ int main(int argc, char** argv) {
   CloseHandle(g_watchdog_stop);
   av1_destroy_pipeline_cache_handle(dev.psos);
   dev.psos = NULL;
+  if (sm6_broken && exit_code == kExitPass) exit_code = kExitError;
   return exit_code;
 }

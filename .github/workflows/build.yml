@@ -77,6 +77,16 @@ jobs:
           repo: src
           sdk: ${{ env.WINDOWS_SDK }}
 
+      # The shaders of the Shader Model 6 test (player flag -sm6test, docs/test-player.md): DXC shaders of
+      # testing/sm6test/shaders, not shaders of the decoder and in none of the steps around this one that
+      # are about the decoder's shaders. The player gets their bytecode through /p:Rav1gSm6TestShaders.
+      - name: Shader Model 6 test shaders
+        id: sm6
+        uses: ./src/.github/actions/sm6test-shaders
+        with:
+          repo: src
+          sdk: ${{ env.WINDOWS_SDK }}
+
       # Codegen evidence for the CDEF and intra rewrites, which cannot be measured without a console: the
       # CDEF and intra listings get a side-by-side count, all shaders a one-line survey.
       # intra_main_opt and intra_main_hbd_opt are the upstream intra_main sources built with optimization
@@ -93,6 +103,10 @@ jobs:
           # All listings, and which key, compile time and header hash each shader of the build has.
           Copy-Item shader-build/normal/asm out/shader-survey/asm -Recurse
           Copy-Item shader-build/normal/report.json out/shader-survey/build.json
+          # The Shader Model 6 test shaders of the package: DXC's listings and the report of their build.
+          New-Item -ItemType Directory -Force out/sm6test-shaders | Out-Null
+          Copy-Item sm6test-build/asm out/sm6test-shaders/asm -Recurse
+          Copy-Item sm6test-build/report.json, sm6test-build/report.md out/sm6test-shaders/
 
       # The listings of both variants are scanned for the pair of instructions that the console's driver
       # compiled wrongly in the 8-bit vertical loop filter: a vector instruction that rewrites components
@@ -162,6 +176,7 @@ jobs:
             /p:AppxPackageSigningEnabled=true /p:PackageCertificateKeyFile= `
             "/p:PackageCertificateThumbprint=$env:CERT_THUMBPRINT" `
             "/p:Rav1gPrebuiltShaders=${{ steps.shaders.outputs.normal }}" `
+            "/p:Rav1gSm6TestShaders=${{ steps.sm6.outputs.dir }}" `
             /fl "/flp:logfile=$buildLog;verbosity=normal"
           if ($LASTEXITCODE -ne 0) { throw 'Release x64 player build/package failed; see msbuild.log' }
           $packages = @(Get-ChildItem out/packages -Recurse -File | Where-Object {
@@ -179,6 +194,9 @@ jobs:
             --root shader-build/normal --note out/cdef-shaders/stats.txt --note out/intra-shaders/stats.txt `
             --note out/shader-survey/survey.md @($packages | ForEach-Object { $_.FullName })
           if ($LASTEXITCODE -ne 0) { throw 'The package was not built from the shader headers of this run' }
+          # -sm6test needs its shaders in the player: the bytecode of each is in the program of the package.
+          python src/testing/sm6test/compile.py --verify sm6test-build @($packages | ForEach-Object { $_.FullName })
+          if ($LASTEXITCODE -ne 0) { throw 'The package does not have the Shader Model 6 test shaders of this run' }
           @('## rav1g test player', '', 'CI build only; console timings are taken separately.', '',
             '### Artifact files', '```') +
             @(Get-ChildItem out -Recurse -File | ForEach-Object { [IO.Path]::GetRelativePath((Resolve-Path out), $_.FullName) }) +
@@ -229,6 +247,7 @@ jobs:
             /p:AppxPackageSigningEnabled=true /p:PackageCertificateKeyFile= `
             "/p:PackageCertificateThumbprint=$env:CERT_THUMBPRINT" /p:Rav1gUavSync=1 `
             "/p:Rav1gPrebuiltShaders=${{ steps.shaders.outputs.uavsync }}" `
+            "/p:Rav1gSm6TestShaders=${{ steps.sm6.outputs.dir }}" `
             /fl "/flp:logfile=$buildLog;verbosity=normal"
           if ($LASTEXITCODE -ne 0) { throw 'uavsync player build/package failed; see out-uavsync/msbuild.log' }
           $packages = @(Get-ChildItem out-uavsync/packages -Recurse -File | Where-Object {
@@ -354,6 +373,13 @@ jobs:
         with:
           sdk: ${{ env.WINDOWS_SDK }}
 
+      # The shaders of the Shader Model 6 test (-sm6test), as in the player job.
+      - name: Shader Model 6 test shaders
+        id: sm6
+        uses: ./.github/actions/sm6test-shaders
+        with:
+          sdk: ${{ env.WINDOWS_SDK }}
+
       - name: Build warp_decoder (desktop, Release x64)
         shell: pwsh
         run: |
@@ -364,6 +390,7 @@ jobs:
           & MSBuild.exe testing/warp_decoder/warp_decoder.vcxproj /m /v:minimal /p:Configuration=Release /p:Platform=x64 `
             "/p:PlatformToolset=$env:PLATFORM_TOOLSET" "/p:WindowsTargetPlatformVersion=$env:WINDOWS_SDK" `
             "/p:Rav1gPrebuiltShaders=${{ steps.shaders.outputs.normal }}" `
+            "/p:Rav1gSm6TestShaders=${{ steps.sm6.outputs.dir }}" `
             /fl "/flp:logfile=$buildLog;verbosity=normal"
           if ($LASTEXITCODE -ne 0) { throw 'warp_decoder build failed; see msbuild.log' }
           $bin = 'testing/warp_decoder/bin/x64/Release'
@@ -376,6 +403,8 @@ jobs:
           python testing/shader_cache/shaders.py verify --report shader-build/normal/report.json `
             --root shader-build/normal "$bin/warp_decoder.exe"
           if ($LASTEXITCODE -ne 0) { throw 'warp_decoder was not built from the shader headers of this run' }
+          python testing/sm6test/compile.py --verify sm6test-build "$bin/warp_decoder.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'warp_decoder does not have the Shader Model 6 test shaders of this run' }
           New-Item -ItemType Directory -Force out/warp_decoder | Out-Null
           Get-ChildItem $bin -File | Where-Object { $_.Extension -in @('.exe', '.pdb', '.map') } |
             Copy-Item -Destination out/warp_decoder/
@@ -390,6 +419,34 @@ jobs:
             "Build: Release x64; PlatformToolset=$env:PLATFORM_TOOLSET; Windows SDK=$env:WINDOWS_SDK" |
             Set-Content out/warp_decoder/SOURCES.txt -Encoding utf8
           "## warp_decoder", '', "Built in $([math]::Round($clock.Elapsed.TotalMinutes, 1)) min.", '' >> $env:GITHUB_STEP_SUMMARY
+
+      # Shader Model 6 test (docs/test-player.md): what WARP reports about itself (CAPS lines) and the test
+      # shaders run on it (SM6TEST lines), for reference next to the console's. What WARP does with a shader
+      # is a result and never fails the job: a pipeline state it refuses (PSO FAILED) and values that differ
+      # (FAIL, with a warning on the run). The job fails when the test itself breaks: the program ends with
+      # an error, a test has no result line, the report is missing.
+      - name: Shader Model 6 test on WARP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force out/sm6test | Out-Null
+          & out/warp_decoder/warp_decoder.exe -sm6test > out/sm6test/warp.log
+          $code = $LASTEXITCODE
+          $lines = @(Get-Content out/sm6test/warp.log)
+          $shown = @($lines | Where-Object { $_ -match '^(ADAPTER|CAPS|SM6TEST) ' })
+          @('## Shader Model 6 test on WARP', '', '```') + $shown + @('```', '') >> $env:GITHUB_STEP_SUMMARY
+          $shown | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) { throw "warp_decoder -sm6test: exit code $code (2: the test could not run its shaders; see the SM6TEST lines)" }
+          $expected = @((Get-Content sm6test-build/report.json -Raw | ConvertFrom-Json).shaders).Count
+          $results = @($lines | Where-Object { $_ -match '^SM6TEST \S+: (PASS|FAIL|PSO FAILED|NOT BUILT)' })
+          if ($results.Count -ne $expected) { throw "$($results.Count) result lines for $expected test shaders" }
+          if (-not @($lines | Where-Object { $_ -match '^SM6TEST summary: ' }).Count) { throw 'No SM6TEST summary line' }
+          if (@($lines | Where-Object { $_ -match '^CAPS ' }).Count -lt 15) { throw 'The capability report is not complete' }
+          foreach ($needed in @('^CAPS shader model: ', '^CAPS options1: ', '^CAPS options4: ', '^CAPS wave size: ')) {
+            if (-not @($lines | Where-Object { $_ -match $needed }).Count) { throw "No line $needed in the capability report" }
+          }
+          $failed = @($results | Where-Object { $_ -match '^SM6TEST \S+: FAIL' })
+          foreach ($line in $failed) { Write-Host "::warning title=Shader Model 6 test on WARP::$line" }
 
       - name: Streams from the cache
         uses: actions/cache/restore@v6
@@ -454,6 +511,7 @@ jobs:
           & MSBuild.exe testing/warp_decoder/warp_decoder.vcxproj /t:Rebuild /m /v:minimal /p:Configuration=Release /p:Platform=x64 `
             "/p:PlatformToolset=$env:PLATFORM_TOOLSET" "/p:WindowsTargetPlatformVersion=$env:WINDOWS_SDK" /p:Rav1gUavSync=1 `
             "/p:Rav1gPrebuiltShaders=${{ steps.shaders.outputs.uavsync }}" `
+            "/p:Rav1gSm6TestShaders=${{ steps.sm6.outputs.dir }}" `
             /fl "/flp:logfile=$buildLog;verbosity=normal"
           if ($LASTEXITCODE -ne 0) { throw 'warp_decoder uavsync build failed; see msbuild-uavsync.log' }
           New-Item -ItemType Directory -Force out/warp_decoder_uavsync | Out-Null
@@ -485,6 +543,7 @@ jobs:
           path: |
             out/conformance/
             out/conformance-*/
+            out/sm6test/
             out/msbuild.log
             out/msbuild-uavsync.log
           if-no-files-found: warn
@@ -602,6 +661,14 @@ jobs:
           set -euo pipefail
           sh testing/seq_header_check/run.sh --mutate | tee seq-header-check.log
           { echo '## Sequence header peek check'; echo '```'; cat seq-header-check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      # The comparisons of the Shader Model 6 test (-sm6test): emulated outputs of its shaders must pass,
+      # outputs with one word changed must fail.
+      - name: Shader Model 6 test comparisons self-test
+        run: |
+          set -euo pipefail
+          sh testing/sm6test/run.sh | tee sm6test-checks.log
+          { echo '## Shader Model 6 test comparisons'; echo '```'; tail -n 1 sm6test-checks.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Preserve the check log
         if: always()

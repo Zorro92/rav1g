@@ -163,6 +163,8 @@ The artifact `rav1g-testplayer-x64-<run-id>` contains:
 - `shader-survey/`: `survey.md` (and `survey.csv`), one line per shader of the project
   with the same counts, and `asm/` with the FXC listing of every shader; see
   [Shader survey](#shader-survey).
+- `sm6test-shaders/`: DXC's listings of the Shader Model 6 test shaders and the report of
+  their build; see [Shader Model 6 test](#shader-model-6-test--sm6test).
 - `SOURCES.txt`: repository commit, fork point, run URL, toolset/SDK and the commits since
   the fork point.
 - `licenses/`: the upstream license and patent notices.
@@ -172,8 +174,8 @@ A failed run can still upload diagnostics; only use a package from a successful 
 The run has more jobs. On Linux, `cdef-check`, `warp-check` and `intra-check` run the
 host-side comparisons of the CDEF shaders, of the warp shaders with libaom and of the intra
 paths, and `sync-check` runs every shader with group memory under an adversarial thread
-schedule ([below](#host-side-check-of-the-thread-groups)); `intra-check` also runs the self-test of the timing summary and the sequence header
-check, and uploads its log as `rav1g-intra-check-<run-id>`. `conformance-streams` (Linux)
+schedule ([below](#host-side-check-of-the-thread-groups)); `intra-check` also runs the self-test of the timing summary, the sequence header
+check and the self-test of the [Shader Model 6 test](#shader-model-6-test--sm6test)'s comparisons, and uploads its log as `rav1g-intra-check-<run-id>`. `conformance-streams` (Linux)
 and `conformance` (Windows) are the conformance run: the decoder as a desktop program
 decodes AOM's test vectors and other streams on the WARP software adapter of the runner and
 compares the md5 of every frame; see [warp-decoder.md](warp-decoder.md). The run is green
@@ -2504,6 +2506,201 @@ filter as the console ran it with the shaders before this change (package 0.2.25
 the vertical filter changed; that is how the cause of the 8-bit mismatch was found
 ([gpu-av1-decoder.md](gpu-av1-decoder.md#a-paired-read-before-an-overlapping-in-place-write-2026-11-12)).
 8-bit frames only; exit code 1 when a stage differs from the model.
+
+## Shader Model 6 test (`-sm6test`)
+
+The decoder's shaders are FXC shaders of Shader Model 5.0 (`cs_5_0`). Whether they could become
+DXC shaders of Shader Model 6 (wave intrinsics, native 16-bit types) is a question about the
+device: what the console's D3D12 takes in app mode, and how wide its waves are. Two things in
+both players answer it, and neither touches the decoder: the test has its own shaders, root
+signature, pipeline states and buffers (`testing/sm6test`), and the decoder's shader set, its
+compilation and its output are what they were.
+
+### Capability report (`CAPS`)
+
+Every launch of the test player and of `warp_decoder` logs what the device reports about itself,
+before anything of the decoder exists, one `CAPS ...` line each:
+
+| Line | What it has |
+| --- | --- |
+| `CAPS adapter` | description, hardware or software, vendor, device, subsystem and revision ids, video and shared memory |
+| `CAPS driver` | version of the user mode driver (`IDXGIAdapter::CheckInterfaceSupport`) |
+| `CAPS feature level` | the highest of 11_0 to 12_2 |
+| `CAPS shader model` | the highest shader model (`D3D12_FEATURE_SHADER_MODEL`), asked from 6.9 down to 6.0: a runtime refuses a request for a shader model it does not know, so the line also says which request was answered |
+| `CAPS options` | `D3D12_FEATURE_D3D12_OPTIONS`: double precision, min precision, typed UAV load of additional formats, resource binding tier, resource heap tier, tiled resources tier, address bits |
+| `CAPS options1` | **wave operations**: `WaveOps`, `WaveLaneCountMin`, `WaveLaneCountMax`, `TotalLaneCount`; 64-bit integers |
+| `CAPS options3` | casting of fully typed formats, `WriteBufferImmediate` |
+| `CAPS options4` | **`Native16BitShaderOpsSupported`** |
+| `CAPS options9`, `options11` | 64-bit atomics on typed resources, group memory and descriptor heap resources; wave MMA tier |
+| `CAPS options12`, `options13`, `options16` | enhanced barriers, relaxed format casting, buffer/texture copy rules, GPU upload heaps |
+| `CAPS options21` | what Shader Model 6.8 added to the options (work graphs, extended command info) |
+| `CAPS wave size` | whether the device reports the shader models a wave size chosen by the shader needs: `[WaveSize(n)]` is part of Shader Model 6.6 and the range form `[WaveSize(min, max, preferred)]` of 6.8, and the size has to be one the device has. There is no member for it in the options; the `wavesize` tests below try it |
+| `CAPS architecture`, `gpu virtual address`, `shader cache`, `root signature` | UMA and cache-coherent UMA, address bits, shader cache flags, highest root signature version |
+| `CAPS typed UAV load/store` | for the sample formats (`R8_UNORM`, `R16_UNORM`, `R16_UINT`, `R10G10B10A2_UNORM`, ...): load/store through a typed UAV, `1/1` when both are reported |
+| `CAPS sm6test` | whether the test shaders are in this build, and the DXC that compiled them |
+
+A query the device refuses is logged with its HRESULT (`CAPS options21: query failed
+hr=0x80070057`) and the report goes on. The options structures are asked for by number and read
+as 32-bit words, so the report is the same whatever Windows SDK the program was built with.
+
+### The test shaders
+
+`testing/sm6test/shaders`, compiled with the DXC of the Windows SDK the workflow builds with
+(`dxc.exe` in the `10.0.26100.0` directory of the runner, DXC 1.9.2602.17 in run 43179921793, with
+`dxil.dll` next to it, which validates the bytecode and signs it: D3D12 takes no DXIL without the
+validator's hash). Each is one dispatch of 4 thread groups of 64 threads on known input; the
+output is read back and compared with what the host computes.
+
+| Test | Profile | What it checks |
+| --- | --- | --- |
+| `basic` | `cs_6_0` | the control: nothing of Shader Model 6 but the bytecode. When it does not run, the device takes no DXIL at all |
+| `wave_ops` | `cs_6_0` | `WaveGetLaneCount`, `WaveGetLaneIndex`, `WaveIsFirstLane`, `WaveActiveSum`, `WavePrefixSum`, `WaveReadLaneFirst`, `WaveReadLaneAt` (the first lane, and the neighbouring lane as a filter would read the sample next to its own), `WaveActiveBallot`, `WaveActiveCountBits`, `WavePrefixCountBits`, `WaveActiveMin`/`Max`, `WaveActiveBitOr`/`And`/`Xor`, `WaveActiveAllEqual`, `WaveActiveAnyTrue`/`AllTrue`, and a sum and a count inside a branch, where only the lanes that took it count |
+| `reduce_groupshared` | `cs_6_0` | the sum of the 64 values of a thread group and the sum before each thread, through group memory with six group syncs: what a Shader Model 5 shader does |
+| `reduce_wave` | `cs_6_0` | the same result with `WaveActiveSum` and `WavePrefixSum` inside the wave and one group sync to put the waves together; written for waves of any size |
+| `native16_math` | `cs_6_2`, `-enable-16bit-types` | `uint16_t`, `int16_t` and `float16_t` arithmetic on packed 8-bit and 10-bit samples: averages, weighted sums, differences, arithmetic shifts, clamps, a sum of absolute differences, products that wrap at 16 bits (also shifted afterwards, which is right only where the arithmetic really is 16 bits wide), a weighted sum in `float16_t` |
+| `native16_load` | `cs_6_2`, `-enable-16bit-types` | 16-bit loads and stores in a byte address buffer of 16-bit samples (`Load<uint16_t4>`, `Store<uint16_t>`), also at addresses that are a multiple of 2 and not of 4 |
+| `wavesize4`, `8`, `16`, `32`, `64` | `cs_6_6` | `wave_ops` with `[WaveSize(n)]`: the shader asks for waves of n lanes. A device without waves of that size refuses the pipeline state; where it runs, the lane count has to be n |
+| `reduce_wave64` | `cs_6_6` | the reduction with `[WaveSize(64)]`, `WaveActiveSum` and `WavePrefixSum` and nothing else: right only where the 64 threads of a group are the 64 lanes of one wave, in order |
+| `wavesize_range_pref32`, `_pref64` | `cs_6_8` | `wave_ops` with `[WaveSize(4, 128, 32)]` and `[WaveSize(4, 128, 64)]`: the lane count the device picks when the shader allows 4 to 128 and prefers 32 or 64 |
+
+How a device packs the threads of a dispatch into waves is its own business. So a thread of
+`wave_ops` also writes its lane and the thread number of the first lane of its wave; the host
+groups the threads by that and computes every other value from the values of the group. The test
+passes with any packing and says which one it saw.
+
+### Run it
+
+On the console, a task file `LocalState\args\args_av1.txt` with one line, and nothing else:
+
+```text
+-sm6test
+```
+
+The player logs the `CAPS` lines, runs the test, logs the `SM6TEST` lines and closes: no stream,
+no decoder, none of the decoder's pipeline states. `-sm6test` may also stand on the line of a
+stream (`-i /streams/sample.ivf -t 6 -frate -1 -limit 60 -sm6test`); the test then runs once,
+before the pipeline states of the decoder are created, and the tasks follow. For an answer about
+the device prefer the line on its own: a device that is removed by a test shader decodes nothing
+afterwards.
+
+On a desktop:
+
+```bat
+warp_decoder -sm6test
+warp_decoder -sm6test -hw
+```
+
+the first on WARP, the second on the first hardware adapter. The conformance job of the workflow
+runs the first and shows the `CAPS` and `SM6TEST` lines in its summary (`Shader Model 6 test on
+WARP`; the log is `sm6test/warp.log` in the artifact `rav1g-conformance-<run id>`). What WARP
+does with a shader never fails the job: a refused pipeline state is a result, and values that
+differ put a warning on the run. The job fails when the test itself breaks.
+
+### How to read it
+
+```text
+SM6TEST start: 14 tests, shaders compiled with dxcompiler.dll: 1.9(5184-21d28f72)(1.9.2602.17) - 1.9.2602.17 (21d28f727); the device reports shader model 6.8
+SM6TEST root signature, command list and buffers created
+SM6TEST basic: PASS | cs_6_0 -O3, 3248 bytes, validation hash present; 256 threads; 0 mismatches; pipeline state 3 ms, dispatch and readback 14 ms
+SM6TEST wave_ops: PASS | cs_6_0 -O3, 5376 bytes, validation hash present; lane count 4; 64 waves in 4 thread groups of 64: 64 of 4 threads; lanes are consecutive threads in order; no wave across thread groups; 0 mismatches; pipeline state 2 ms, dispatch and readback 6 ms
+SM6TEST wavesize64: PSO FAILED hr=0x80070057 | cs_6_6 -O3 -D WAVE_SIZE=64, 5980 bytes, validation hash present; CreateComputePipelineState refused the shader after 0 ms
+SM6TEST summary: 14 tests: 9 PASS, 0 FAIL, 5 PSO FAILED (wavesize8, wavesize16, wavesize32, wavesize64, reduce_wave64), 0 not built, 0 broken
+```
+
+(WARP, run 43179921793.)
+
+One line per test, `SM6TEST <name>: <result> | <details>`:
+
+- **`PASS`**: the pipeline state was created, the shader ran, and every value is the one the host
+  computed.
+- **`FAIL`**: it ran and values differ. The details count the mismatches by what was compared and
+  give the first three (`thread 5 WavePrefixSum got 0x.. expected 0x..`).
+- **`PSO FAILED hr=0x...`**: `CreateComputePipelineState` refused the shader. That is the answer
+  "this device does not take this" (a shader model above the device's, a wave size it does not
+  have), and the run goes on with the next test.
+- **`NOT BUILT`**: the DXC of the build could not compile the shader (only the `cs_6_8` ones may
+  be left out that way).
+- **`BROKEN`**: the test could not do its work: a dispatch that did not finish within 60 s, a
+  removed device. The remaining tests are not run.
+
+The details of the wave tests say what the device did: the lane count (`WaveGetLaneCount`), how
+many waves the 256 threads were in and of how many threads each, whether the lanes of a wave are
+consecutive threads in order (what a shader needs that takes `WavePrefixSum` for a prefix sum by
+thread), and whether a wave had threads of two thread groups. `native16_math` says whether a
+`float16_t` is a 16-bit float on the device or a wider one (reported, not judged). Every line has
+the profile and DXC arguments of the shader, the size of its bytecode and whether it carries the
+validator's hash, and the time of the pipeline state creation.
+
+What the lines answer:
+
+| Question | Lines |
+| --- | --- |
+| Does the device take DXC shaders at all? | `basic`; `CAPS shader model` |
+| Wave intrinsics, and how wide is a wave? | `wave_ops` (the lane count and the waves in its details); `CAPS options1` |
+| Is the wave path a replacement for the group memory path? | `reduce_wave` against `reduce_groupshared`: both `PASS` means the same sums and prefix sums |
+| Native 16-bit types? | `native16_math`, `native16_load`; `CAPS options4` |
+| Can a shader choose the wave size, and which sizes are there? | `wavesize4` to `wavesize64`: `PASS` where the device has the size, `PSO FAILED` where not; `CAPS wave size` |
+| Is a thread group of 64 one wave of 64? | `reduce_wave64`, and the waves in the details of `wavesize64` |
+| A range of sizes (Shader Model 6.8)? | `wavesize_range_pref32`, `_pref64`: the lane count the device picked |
+
+### Results
+
+**WARP** (the runner of run 43179921793; Microsoft Basic Render Driver, user mode driver
+10.0.26100.33648), for reference:
+
+| | |
+| --- | --- |
+| `CAPS shader model` | 6.8 (answer to a request for 6.9) |
+| `CAPS feature level` | 12_1 |
+| `CAPS options1` | `WaveOps 1, WaveLaneCountMin 4, WaveLaneCountMax 4, TotalLaneCount 16, ExpandedComputeResourceStates 1, Int64ShaderOps 1` |
+| `CAPS options4` | `Native16BitShaderOpsSupported 1` |
+| `CAPS options` | double precision 1, min precision 0x3, typed UAV load of additional formats 1, resource binding tier 3, resource heap tier 2 |
+| `CAPS options9`, `options11` | 64-bit atomics on typed, group shared and descriptor heap resources 1; wave MMA tier 0 |
+| `CAPS typed UAV load/store` | `1/1` for all fifteen formats asked |
+
+| Test | Result | |
+| --- | --- | --- |
+| `basic` | PASS | |
+| `wave_ops` | PASS | lane count 4; the 256 threads were in 64 waves of 4 threads, consecutive threads in order, none across thread groups |
+| `reduce_groupshared` | PASS | |
+| `reduce_wave` | PASS | lane count 4: the wave path gives the sums and prefix sums of the group memory path |
+| `native16_math` | PASS | `float16_t` is a 16-bit float |
+| `native16_load` | PASS | also the loads and stores at addresses that are 2 mod 4 |
+| `wavesize4` | PASS | lane count 4 |
+| `wavesize8`, `16`, `32`, `64` | PSO FAILED `hr=0x80070057` | WARP has waves of 4 lanes and no others; the pipeline state is refused at once (0 ms) |
+| `reduce_wave64` | PSO FAILED `hr=0x80070057` | `[WaveSize(64)]`, the same |
+| `wavesize_range_pref32`, `_pref64` | PASS | lane count 4 for both: of the range 4 to 128 WARP has 4 only, whatever the shader prefers |
+
+So on WARP DXIL up to `cs_6_8` runs, the wave intrinsics and the 16-bit types compute what the host
+computes, and a shader gets waves of 4 lanes or no pipeline state. The same output in all three
+attempts of the run.
+
+**Console**: pending.
+
+### How it is built
+
+The test shaders are compiled by `testing/sm6test/compile.py` and by nothing else: not by the
+project files, and they are not in the shader cache, the survey or the listings scan, which see the
+decoder's shaders only.
+
+```bat
+python testing\sm6test\compile.py --dxc "<Windows SDK>\bin\10.0.26100.0\x64\dxc.exe" --out sm6test-build
+msbuild testing\warp_decoder\warp_decoder.vcxproj /p:Configuration=Release /p:Platform=x64 ^
+  /p:Rav1gSm6TestShaders=%CD%\sm6test-build
+```
+
+The script writes the bytecode of every shader as a C array (`sm6test_generated/shaders.h`), DXC's
+listings (`asm/`) and a report, and fails when a shader does not compile or its bytecode has no
+validation hash. `/p:Rav1gSm6TestShaders=<directory>` puts the arrays into `warp_decoder` and into
+the player (`uwp_common`); a build without it has no test shaders, logs `CAPS sm6test: the test
+shaders are not built in`, and `-sm6test` says the same. The workflow compiles them in both
+Windows jobs (`.github/actions/sm6test-shaders`), checks that their bytecode is in the package
+and in `warp_decoder.exe` (`compile.py --verify`), and puts the listings and the report into the
+player artifact as `sm6test-shaders/`.
+
+The comparisons have a self-test on Linux (`sh testing/sm6test/run.sh`, part of the `intra-check`
+job): the shaders, emulated from their HLSL with waves of 1 to 64 threads, lanes in thread order
+and reversed, must pass, and every output with one word changed must fail.
 
 ## Shader survey
 

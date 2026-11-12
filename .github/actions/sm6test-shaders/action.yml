@@ -1,0 +1,46 @@
+name: Shader Model 6 test shaders
+description: >
+  The shaders of the Shader Model 6 test (testing/sm6test/shaders; player flag -sm6test), compiled with the
+  DXC of the Windows SDK (testing/sm6test/compile.py).
+
+# These are not shaders of the decoder. They are not in the shader cache, the survey or the listings scan
+# (.github/actions/shaders, testing/shader_cache, testing/dxbc_scan), which see the FXC shaders of
+# libav1/dx/shaders only; the programs get them through /p:Rav1gSm6TestShaders=<the directory>. DXC takes
+# a few seconds for all of them, so they are compiled in every job that builds a program, without a cache.
+#
+# The step fails when a shader does not compile (the Shader Model 6.8 ones may: compile.py marks them
+# optional, and the test then reports them as not built) or when the bytecode has no validation hash: DXC
+# signs it with the validator next to it (dxil.dll), and D3D12 takes no unsigned DXIL.
+
+inputs:
+  repo:
+    description: The directory of the checkout, relative to the workspace
+    default: .
+  sdk:
+    description: The Windows SDK whose DXC compiles the shaders
+    required: true
+
+outputs:
+  dir:
+    description: >
+      Directory with sm6test_generated/shaders.h (the bytecode, for /p:Rav1gSm6TestShaders), asm (DXC's
+      listings), dxil, report.json and report.md
+    value: ${{ steps.build.outputs.dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Compile with DXC
+      id: build
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $bin = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin\${{ inputs.sdk }}\x64"
+        $dxc = Join-Path $bin 'dxc.exe'
+        if (-not (Test-Path $dxc)) { throw "dxc.exe of Windows SDK ${{ inputs.sdk }} not found" }
+        if (-not (Test-Path (Join-Path $bin 'dxil.dll'))) { throw "dxil.dll (the validator) is not next to dxc.exe of Windows SDK ${{ inputs.sdk }}" }
+        $directory = (New-Item -ItemType Directory -Force sm6test-build).FullName
+        python "${{ inputs.repo }}/testing/sm6test/compile.py" --dxc $dxc --out $directory
+        if ($LASTEXITCODE -ne 0) { throw 'The Shader Model 6 test shaders did not all compile with a validation hash' }
+        "dir=$directory" >> $env:GITHUB_OUTPUT
+        @('## Shader Model 6 test shaders', '') + @(Get-Content (Join-Path $directory 'report.md')) + @('') >> $env:GITHUB_STEP_SUMMARY

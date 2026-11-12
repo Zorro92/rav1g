@@ -129,6 +129,16 @@
       <AdditionalIncludeDirectories>$(Rav1gPrebuiltShaders);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
   </ItemDefinitionGroup>
+  <!-- /p:Rav1gSm6TestShaders=<directory>: the shaders of the Shader Model 6 test (-sm6test), compiled with
+       DXC by testing/sm6test/compile.py into <directory>\sm6test_generated\shaders.h. They are not shaders
+       of the decoder and this project does not compile them: without the property -sm6test says that the
+       test shaders are not built in. The CI builds set it. -->
+  <ItemDefinitionGroup Condition="'$(Rav1gSm6TestShaders)'!=''">
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(Rav1gSm6TestShaders);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>RAV1G_SM6TEST_SHADERS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <!-- The sources and shaders of libav1.vcxproj. -->
   <Import Project="libav1_sources.props" />
   <!-- The stream readers and md5 of the test player (testing/uwp_common), and libwebm's parser. -->
@@ -143,6 +153,8 @@
     <ClCompile Include="$(RepoRoot)testing\common\stream_reader.cpp" />
     <ClCompile Include="$(RepoRoot)testing\common\tools_common.c" />
     <ClCompile Include="$(RepoRoot)testing\common\webmdec.cc" />
+    <!-- The capability report and the Shader Model 6 test (-sm6test), shared with the test player. -->
+    <ClCompile Include="$(RepoRoot)testing\sm6test\sm6test.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <!-- /p:Rav1gPrebuiltShaders: no shader is compiled here (see the item definitions above). The items are

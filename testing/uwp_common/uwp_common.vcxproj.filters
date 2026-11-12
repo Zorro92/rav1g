@@ -55,6 +55,9 @@
     <ClCompile Include="..\player_common\decoder_creator.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="..\sm6test\sm6test.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\common\frame_outs.h">
