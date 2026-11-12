@@ -88,4 +88,13 @@ fn main() {
         .file(repo.join("testing").join("sm6test").join("sm6test.cpp"))
         .file(shim.join("shim.cpp"));
     cpp.compile("rav1g_dec_shim");
+
+    // The decoder's C is compiled for link time optimisation (crates/rav1g-sys/build.rs, Lto): under MSVC
+    // the link of the program is where it is compiled, which link.exe is told here and would otherwise find
+    // out and start again.
+    println!("cargo:rerun-if-env-changed=RAV1G_C_LTO");
+    let msvc = !cc::Build::new().get_compiler().is_like_clang_cl();
+    if msvc && env::var("RAV1G_C_LTO").map_or(true, |choice| choice != "off") {
+        println!("cargo:rustc-link-arg=/LTCG");
+    }
 }

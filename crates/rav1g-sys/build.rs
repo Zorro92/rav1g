@@ -12,8 +12,8 @@
 //! The files and their settings are those of `libav1/build/libav1.vcxproj` in Release x64, read from
 //! `testing/warp_decoder/libav1_sources.props` (written from that project by `sync_sources.py`; CI checks
 //! that it is up to date): `/O1 /Ot`, `/O2` for the files the project marks, no `NDEBUG` (the library's
-//! asserts are compiled in), `/sdl`, `/EHsc`. Whole program optimisation (`/GL`) is not used: the objects
-//! go through rustc's archives, and the Linux build links with lld.
+//! asserts are compiled in), `/sdl`, `/EHsc`, and link time optimisation as the project has it
+//! ([`Lto`]): `/GL` under MSVC, LTO under clang-cl.
 //!
 //! The C++ files of the host that Rust replaces (`crates/rav1g/src/host`, step 3 of `docs/rust-port.md`) are
 //! left out: [`REPLACED_BY_RUST`]. The C++ that remains calls the Rust through the files of `glue/`, which
@@ -48,6 +48,48 @@ const REPLACED_BY_RUST: &[&str] = &[
     "libav1/dx/transform.cpp",
     "libav1/dx/vp9dx_linear_allocator.cpp",
 ];
+
+/// Link time optimisation of the C and C++ of the decoder, which the MSBuild projects have as whole
+/// program optimisation (`/GL`, `/LTCG`). Without it the entropy decoder is 7 to 12 % slower in the tile
+/// threads than in those builds; the numbers are in docs/rust-port.md ("The entropy decoder with link
+/// time optimisation").
+///
+/// The objects of such a build are not machine code: MSVC writes its intermediate language, clang LLVM
+/// bitcode, and the linker compiles them. Two things follow:
+///
+/// - The libraries are not copied into the `.rlib` of this crate (`static:-bundle`). rustc writes the
+///   symbol table of an archive itself and cannot read the objects of `/GL`, so the linker found none of
+///   their functions (LNK1120); and what it reads of bitcode depends on its LLVM being as new as clang's.
+///   The linker is given the libraries that `lib.exe` or `llvm-lib` wrote.
+/// - Under MSVC the link needs `/LTCG`. `link.exe` starts again with it when it meets such an object, so
+///   a program links without (the tests of the `rav1g` crate do); the build scripts of this crate and of
+///   `rav1g-dec` pass it so that it does not have to.
+///
+/// `RAV1G_C_LTO` chooses for a measurement: `off`, `thin` or `full` (clang-cl), `on` (the default: `/GL`
+/// under MSVC, full LTO under clang-cl, which was the faster of the two there).
+#[derive(Clone, Copy, PartialEq)]
+enum Lto {
+    Off,
+    /// MSVC: `/GL`.
+    Msvc,
+    /// clang-cl: `-flto=thin`.
+    Thin,
+    /// clang-cl: `-flto`.
+    Full,
+}
+
+fn lto() -> Lto {
+    println!("cargo:rerun-if-env-changed=RAV1G_C_LTO");
+    let choice = env::var("RAV1G_C_LTO").unwrap_or_default();
+    let clang_cl = cc::Build::new().get_compiler().is_like_clang_cl();
+    match (choice.as_str(), clang_cl) {
+        ("off", _) => Lto::Off,
+        ("" | "on", false) => Lto::Msvc,
+        ("thin", true) => Lto::Thin,
+        ("" | "on" | "full", true) => Lto::Full,
+        _ => fail(&format!("RAV1G_C_LTO={choice}: off, on, or with clang-cl thin or full")),
+    }
+}
 
 fn fail(message: &str) -> ! {
     eprintln!("rav1g-sys: {message}");
@@ -201,6 +243,23 @@ fn main() {
     c_speed.opt_level(2);
     let mut cpp = base_build(&repo, &shaders, true);
     cpp.opt_level(1).flag_if_supported("/Ot");
+    let lto = lto();
+    for build in [&mut c_size, &mut c_speed, &mut cpp] {
+        match lto {
+            Lto::Off => {}
+            Lto::Msvc => {
+                build.flag("/GL");
+            }
+            Lto::Thin => {
+                build.flag("-flto=thin");
+            }
+            Lto::Full => {
+                build.flag("-flto");
+            }
+        }
+        // The libraries go to the linker as they are, not through the .rlib of this crate (see Lto).
+        build.cargo_metadata(false);
+    }
     for source in sources.iter().filter(|source| !source.replaced) {
         let is_cpp = source.path.extension().is_some_and(|extension| extension != "c");
         match (is_cpp, source.max_speed) {
@@ -233,6 +292,14 @@ fn main() {
     c_size.compile("rav1g_c");
     c_speed.compile("rav1g_c_speed");
     cpp.compile("rav1g_dx");
+    println!("cargo:rustc-link-search=native={}", out.display());
+    for library in ["rav1g_c", "rav1g_c_speed", "rav1g_dx"] {
+        println!("cargo:rustc-link-lib=static:-bundle={library}");
+    }
+    if lto == Lto::Msvc {
+        // For the tests of this crate; a build script cannot give it to the programs of other crates.
+        println!("cargo:rustc-link-arg=/LTCG");
+    }
     println!("cargo:rustc-link-lib=d3d12");
     println!("cargo:rustc-link-lib=dxgi");
     println!("cargo:rustc-link-lib=dxguid");
