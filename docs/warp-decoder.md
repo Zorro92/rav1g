@@ -300,6 +300,31 @@ every run so far, also in the three with upstream's shaders (runs 43092362685, 4
 known**, and it is the open problem of the run: whether it is WARP, the runner, or the decoder on
 a slow device has to be found out.
 
+**One cause found and removed (2026-11-12): a load outside the buffer that stands in for the
+palette buffer.** `reconstruct_block` (the residuals of OBMC blocks and of palette blocks) read
+`if (do_palette) palette_buf.Load2(...) else dst_frame.Load2(...)`, which FXC compiled to both
+loads and a select: every thread loaded from `palette_buf` at the frame offset of its row. A slot
+has a palette buffer only once a frame with screen content tools has used it; until then another
+buffer of the slot is bound there (`idct_blocks_unordered`, 16 bytes per 4x4 unit: 3 317 760
+bytes for a 1920x1152 decoder), and a frame with its borders is larger than that: 3 391 488
+bytes with 8-bit samples (the last rows of V are behind the buffer's end), twice that with 16-bit
+samples (everything below the middle of the frame). The value was never used, but on WARP a load
+behind the end of a buffer reads whatever memory is there, and when there is none the device is
+lost. That fits what was seen: the streams it hit were the cuts encoded with OBMC, at 720p and
+1080p, another one from run to run.
+
+How it was found: the first run with `-interfast` (43196198862) lost the device in the two
+10-bit 1080p cuts every time, also alone. Frame dumps showed the frame before the loss byte
+identical with and without the flag, and only making room for the lists of the flag without
+using them (`-interfastmode 8`, 1 MiB more in one buffer of a slot) gave the same loss: the
+layout of the process, not the new path. With the debug layer and GPU-based validation
+(`-debuglayer -gpuvalidation`, which makes such a load harmless and reports it) the stream
+passed, 30 of 30 frames, with over 30 000 reports of `Root descriptor access out of bounds`, the
+stored ones all for this view: SRV, root parameter 2, 3 317 760 bytes available, offsets up to
+6 146 763. The load is now behind a real branch (`[branch]`), in both builds of the shader; with
+that the run decodes all 251 streams without and with `-interfast` and loses no device
+(43202750602), and the validation no longer reports that view.
+
 It also shows without a lost device: in run 43134793241 the super-resolution stream, the 247th
 of its process, came out wrong from its first frame on (64 frames, no error), the three 8-bit
 streams behind it were right, the 1080p 10-bit stream after those was wrong from its first frame
