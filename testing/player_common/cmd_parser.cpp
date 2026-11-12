@@ -88,6 +88,9 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"intraedgefix", atSingle, anOptional,
        "8-bit intra: the above edge filter stops where the 10-bit one does (same output)", "",
        &params_.intraedgefix_},
+      {"interfast", atSingle, anOptional,
+       "inter prediction by the fraction of the motion vector: a copy, one filter pass, or both (same output)", "",
+       &params_.interfast_},
       {"alllayers", atSingle, anOptional,
        "a stream with spatial layers: output the frame of every layer of a temporal unit (default: one frame "
        "per temporal unit, the highest layer it has)",
@@ -281,6 +284,7 @@ void CParameters::Reset() {
   params_.noguard_ = false;
   params_.lfhsplit_ = 0;
   params_.intraedgefix_ = false;
+  params_.interfast_ = false;
   params_.all_layers_ = false;
   params_.oppoint_ = 0;
 }

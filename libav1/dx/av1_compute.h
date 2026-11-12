@@ -66,6 +66,10 @@ typedef struct {
   ComputeShader inter_scale_obmc_above;
   ComputeShader inter_scale_obmc_left;
   ComputeShader inter_scale_warp_comp;
+  // Test flag -interfast: inter_base and inter_comp for the blocks whose motion vectors have no fraction
+  // in one direction or in both.
+  ComputeShader inter_fast;
+  ComputeShader inter_comp_fast;
 } bitdepth_dependent_shaders;
 
 // Named: a struct with default member initializers needs a name of its own, not only the typedef's
@@ -85,6 +89,7 @@ typedef struct compute_shader_lib {
   ComputeShader shader_copy_plane_10bit10x3;
   ComputeShader shader_fill_buffer;
   ComputeShader shader_gen_pred_blocks;
+  ComputeShader shader_gen_pred_blocks_fast;  // test flag -interfast: the lists by motion vector class
   ComputeShader shader_gen_lf_vert;
   ComputeShader shader_gen_lf_hor;
   ComputeShader shader_upscale;
@@ -97,6 +102,7 @@ typedef struct compute_shader_lib {
   Microsoft::WRL::ComPtr<ID3D12RootSignature> sig_common0102;
   Microsoft::WRL::ComPtr<ID3D12RootSignature> sig_common0110;
   Microsoft::WRL::ComPtr<ID3D12RootSignature> sig_pred_blocks;
+  Microsoft::WRL::ComPtr<ID3D12RootSignature> sig_pred_blocks_fast;
   Microsoft::WRL::ComPtr<ID3D12RootSignature> sig_intra_pred;
   Microsoft::WRL::ComPtr<ID3D12RootSignature> sig_intra_v2;
   Microsoft::WRL::ComPtr<ID3D12RootSignature> sig_inter_pred;

@@ -118,6 +118,8 @@ typedef struct av1_perf_frame {
  * before wrote:
  *   pass 1  warp, single, comp_avg, comp_diff_y, comp_masked, comp_warp,
  *           chroma_2x2                                      then sync0
+ *           (av1_set_inter_fast: single and comp_avg by motion vector class,
+ *           dispatched behind comp_masked)
  *   pass 2  comp_diff_uv, comp_warp_diff_uv, obmc_above     then sync1
  *   pass 3  obmc_left                                       then sync2
  * recon (the residuals of the blocks whose prediction is not final when their
@@ -137,7 +139,19 @@ typedef struct av1_perf_frame {
 enum {
   AV1_PERF_INTER_WARP = 0,          /* one reference, warped (local or global): inter_warp */
   AV1_PERF_INTER_SINGLE,            /* one reference: inter_main, inter_scale */
+  /* av1_set_inter_fast: one reference, by the fraction of the motion vector. A frame on that path has these
+   * four in place of AV1_PERF_INTER_SINGLE. */
+  AV1_PERF_INTER_SINGLE_COPY,       /* no fraction: inter_fast, a copy */
+  AV1_PERF_INTER_SINGLE_H,          /* a fraction in x only: inter_fast, one horizontal pass */
+  AV1_PERF_INTER_SINGLE_V,          /* a fraction in y only: inter_fast, one vertical pass */
+  AV1_PERF_INTER_SINGLE_2D,         /* both: inter_main */
   AV1_PERF_INTER_COMP_AVG,          /* two references, averaged or distance weighted: inter_compound */
+  /* av1_set_inter_fast: the same by the classes of the two references, AV1_PERF_INTER_COMP_AVG_FAST +
+   * (class of reference 0 | class of reference 1 << 2), class 0 copy, 1 x only, 2 y only, 3 both:
+   * inter_compound_fast, and inter_compound for the last one (both references of class 3). A frame on that
+   * path has these sixteen in place of AV1_PERF_INTER_COMP_AVG. */
+  AV1_PERF_INTER_COMP_AVG_FAST,
+  AV1_PERF_INTER_COMP_AVG_FAST_LAST = AV1_PERF_INTER_COMP_AVG_FAST + 15,
   AV1_PERF_INTER_COMP_DIFF_Y,       /* two references, difference weighted, luma: writes the mask the chroma reads */
   AV1_PERF_INTER_COMP_MASKED,       /* two references, wedge mask */
   AV1_PERF_INTER_COMP_WARP,         /* two references, one or both globally warped: inter_scale_warp_compound */
@@ -256,6 +270,15 @@ void av1_set_intra_v2(int enable);
  * av1_set_intra_v2(1) only to the frames that keep it. Off by default. Change
  * it only while no frame is in flight. */
 void av1_set_intra_opt(int enable);
+
+/* Process-wide. Non-zero predicts the inter blocks with one reference and the
+ * averaged compound blocks by the fraction of their motion vectors
+ * (inter_fast.hlsl, inter_compound_fast.hlsl: a copy, one filter pass, or
+ * the two passes of the original shaders); the decoded output is the same.
+ * Frames with a scaled reference keep the original path. Only in a decoder
+ * created with aom_codec_dec_cfg_t::inter_fast. Off by default. Change it
+ * only while no frame is in flight. */
+void av1_set_inter_fast(int enable);
 
 /* Process-wide experiments for a device whose output differs from the
  * reference (docs/gpu-av1-decoder.md). Both leave the decoded output as it

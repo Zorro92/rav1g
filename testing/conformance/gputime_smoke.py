@@ -5,9 +5,10 @@
                                               --stream <name>[:<temporal units>[:scaled]] [--stream ...]
                                               [--threads N]
 
-<dir> of --streams is what testing/conformance/prepare_streams.sh wrote. Each stream is decoded three times,
-with its reference check: with -gputime, with -gputimedetail and with -gputimeisolate. The times of a
-software rasterizer say nothing about a GPU and are not looked at beyond being there. What is checked:
+<dir> of --streams is what testing/conformance/prepare_streams.sh wrote. Each stream is decoded four times,
+with its reference check: with -gputime, with -gputimedetail, with -gputimeisolate, and with -gputimedetail
+-interfast (the inter blocks by motion vector class). The times of a software rasterizer say nothing about a
+GPU and are not looked at beyond being there. What is checked:
 
   - every run decodes the stream as its reference says (the barriers of -gputimeisolate change no sample);
   - the plain -gputime summary has no line of the breakdown;
@@ -19,7 +20,11 @@ software rasterizer say nothing about a GPU and are not looked at beyond being t
     loaded are not less than the footprint, the footprint by motion vector is not more than the footprint
     and not less than what is written;
   - the counters of the detail run and of the isolate run are the same (they do not depend on the mode);
-  - a stream given with ":scaled" has frames with scaled references, listed as <section>/scaled.
+  - a stream given with ":scaled" has frames with scaled references, listed as <section>/scaled;
+  - with -interfast the sections single and comp_avg are listed by class (single.copy, comp_avg.ch, ...) and
+    not at all without one, except for frames with scaled references, which keep the original path; the
+    reference bytes loaded are then not less than the footprint by motion vector (they are less than the
+    footprint: that is the point), and the block statistics are those of the run without the flag.
 
 Written to --out: <stream>.<mode>.log, and summary.md with the breakdown of every run (also appended to
 $GITHUB_STEP_SUMMARY when that is set). Exit code 1 when a check fails, 2 when a run could not be done.
@@ -30,7 +35,8 @@ import re
 import subprocess
 import sys
 
-MODES = (('gputime', '-gputime'), ('detail', '-gputimedetail'), ('isolate', '-gputimeisolate'))
+MODES = (('gputime', '-gputime'), ('detail', '-gputimedetail'), ('isolate', '-gputimeisolate'),
+         ('fast', '-gputimedetail -interfast'))
 
 
 def gputime_lines(text):
@@ -97,12 +103,26 @@ def check_run(name, mode, text, area_mpx, scaled, problems):
                                 r'samples written ([\d.]+) MB', stage[0])
     if match:
         loaded, foot, foot_mv, written = (float(x) for x in match.groups())
-        if not (loaded >= foot >= foot_mv >= written > 0.0):
+        if mode == 'fast':
+            if not (foot >= foot_mv >= written > 0.0 and loaded >= foot_mv):
+                bad('footprint >= footprint by motion vector >= written, loaded >= footprint by motion vector does '
+                    'not hold: %s' % stage[0])
+        elif not (loaded >= foot >= foot_mv >= written > 0.0):
             bad('loaded >= footprint >= footprint by motion vector >= written does not hold: %s' % stage[0])
     else:
         bad('no line of the bytes of the stage')
     if not any(re.match(r'frame \d+ inter mode=%d ' % (2 if mode == 'isolate' else 1), line) for line in lines):
         bad('no per-frame line of the breakdown')
+    # -interfast: the sections by class, and none of the two they replace outside frames with scaled references.
+    by_class = [line for line in lines if re.match(r'inter (single\.(copy|h|v|2d)|comp_avg\.[chv2]{2}) ', line)]
+    plain = [line for line in lines if re.match(r'inter (single|comp_avg) ', line)]
+    if mode == 'fast':
+        if not by_class:
+            bad('-interfast: no section by motion vector class')
+        if plain:
+            bad('-interfast: a section that is not by class on a frame without scaled references: %s' % plain[0])
+    elif by_class:
+        bad('a section by motion vector class without -interfast: %s' % by_class[0])
     # What does not depend on the mode: the work table without its last two columns (from the times), the
     # block lines, and the dispatch lines without their times.
     work = [' '.join(line.split()[:14]) for line in lines if re.match(r'inter \S+ +\d+ +[\d.]+ +\d+ +[\d.]+ +\d+ ', line)]
@@ -145,7 +165,7 @@ def main():
             return 2
         counters = {}
         for mode, flag in MODES:
-            command = [tool] + manifest[name] + ['-t', str(args.threads), flag, '-progress']
+            command = [tool] + manifest[name] + ['-t', str(args.threads)] + flag.split() + ['-progress']
             if limit:
                 command += ['-limit', limit]
             run = subprocess.run(command, cwd=args.streams, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -169,6 +189,14 @@ def main():
         if counters.get('detail') != counters.get('isolate'):
             differing = [a for a, b in zip(counters['detail'], counters['isolate']) if a != b][:1]
             problems.append('%s: the counters of -gputimedetail and -gputimeisolate differ%s' % (
+                name, ': ' + differing[0] if differing else ' in their number of lines'))
+        # The blocks of the stream do not depend on how they are listed.
+        stream_lines = [[line for line in counters.get(mode, [])
+                         if line.startswith(('inter blocks per frame', 'inter reference fetches', 'inter filter'))]
+                        for mode in ('detail', 'fast')]
+        if stream_lines[0] != stream_lines[1]:
+            differing = [a for a, b in zip(stream_lines[0], stream_lines[1]) if a != b][:1]
+            problems.append('%s: the block statistics with and without -interfast differ%s' % (
                 name, ': ' + differing[0] if differing else ' in their number of lines'))
     summary += ['Checks: ' + ('all passed.' if not problems else '%d failed.' % len(problems)), '']
     summary += ['- ' + problem for problem in problems]

@@ -127,6 +127,13 @@ static void perf_inter_count_block(av1_perf_inter_tile *pc, const av1_frame_thre
   if (scaled) b->area_scaled += area;
 }
 
+// -interfast: the class of a motion vector by its fraction (dx/types.h, InterFastCopy..InterFast2D), as
+// gen_pred_blocks_fast.hlsl takes it from the block record. |frac_mask|: 7 for luma, whose vector is in 1/8
+// sample, 15 for chroma (1/16 chroma sample).
+static inline int inter_fast_class(const int_mv *mv, int frac_mask) {
+  return ((mv->as_mv.col & frac_mask) ? 1 : 0) | ((mv->as_mv.row & frac_mask) ? 2 : 0);
+}
+
 void av1_mi_push_block(AV1Decoder *pbi, AV1_COMMON *cm, MACROBLOCKD *xd) {
   Av1Core *dec = pbi->gpu_decoder;
   av1_frame_thread_data *td = dec->curr_frame_data;
@@ -154,6 +161,8 @@ void av1_mi_push_block(AV1Decoder *pbi, AV1_COMMON *cm, MACROBLOCKD *xd) {
   const int is_obmc = is_inter && mi->motion_mode == OBMC_CAUSAL && (xd->up_available || xd->left_available);
   // Inter breakdown of the timing run (-gputimedetail): the tile's counters, NULL without it.
   av1_perf_inter_tile *const pc = (av1_perf_inter_tile *)tile->perf_inter;
+  // -interfast: the tile's lists by motion vector class, NULL on a frame that keeps the lists by type.
+  int *const fast_map = tile->gen_block_map_fast;
   if (is_inter) {
     tile->have_inter = 1;
     int is_global_warp[2] = {0, 0};
@@ -179,24 +188,32 @@ void av1_mi_push_block(AV1Decoder *pbi, AV1_COMMON *cm, MACROBLOCKD *xd) {
                                         ? CompoundMasked
                                         : mi->interinter_comp.type == COMPOUND_DIFFWTD ? CompoundDiff : CompoundAvrg;
       int type_index = (type - 1) * InterTypes::InterSizesAllCommon + block_size_id_y;
-      index_arr[tile->gen_index_ptr++] = tile->gen_block_map[type_index]++;
-      if (pc)
-        perf_inter_count(pc, td,
-                         type == CompoundGlobalWarp
-                             ? AV1_PERF_INTER_COMP_WARP
-                             : type == CompoundMasked
-                                   ? AV1_PERF_INTER_COMP_MASKED
-                                   : type == CompoundDiff ? AV1_PERF_INTER_COMP_DIFF_Y : AV1_PERF_INTER_COMP_AVG,
-                         0, 4 << bw_log, 4 << bh_log, 2, mi, is_warp_compound);
+      int section = type == CompoundGlobalWarp
+                        ? AV1_PERF_INTER_COMP_WARP
+                        : type == CompoundMasked
+                              ? AV1_PERF_INTER_COMP_MASKED
+                              : type == CompoundDiff ? AV1_PERF_INTER_COMP_DIFF_Y : AV1_PERF_INTER_COMP_AVG;
+      if (fast_map && type == CompoundAvrg) {
+        const int cls = inter_fast_class(&mi->mv[0], 7) | (inter_fast_class(&mi->mv[1], 7) << 2);
+        index_arr[tile->gen_index_ptr++] =
+            fast_map[InterFastCompound + cls * InterTypes::InterSizesAllCommon + block_size_id_y]++;
+        section = AV1_PERF_INTER_COMP_AVG_FAST + cls;
+      } else {
+        index_arr[tile->gen_index_ptr++] = tile->gen_block_map[type_index]++;
+      }
+      if (pc) perf_inter_count(pc, td, section, 0, 4 << bw_log, 4 << bh_log, 2, mi, is_warp_compound);
     } else {
+      int section = is_luma_warp ? AV1_PERF_INTER_WARP : AV1_PERF_INTER_SINGLE;
       if (is_luma_warp) {
         index_arr[tile->gen_index_ptr++] = tile->gen_block_map_wrp[block_size_id_y]++;
+      } else if (fast_map) {
+        const int cls = inter_fast_class(&mi->mv[0], 7);
+        index_arr[tile->gen_index_ptr++] = fast_map[cls * InterTypes::InterSizesAllCommon + block_size_id_y]++;
+        section = AV1_PERF_INTER_SINGLE_COPY + cls;
       } else {
         index_arr[tile->gen_index_ptr++] = tile->gen_block_map[block_size_id_y]++;
       }
-      if (pc)
-        perf_inter_count(pc, td, is_luma_warp ? AV1_PERF_INTER_WARP : AV1_PERF_INTER_SINGLE, 0, 4 << bw_log,
-                         4 << bh_log, 1, mi, is_luma_warp);
+      if (pc) perf_inter_count(pc, td, section, 0, 4 << bw_log, 4 << bh_log, 1, mi, is_luma_warp);
     }
     if (pc)
       perf_inter_count_block(pc, td, mi, bw_log, bh_log, is_compound, is_obmc,
@@ -263,30 +280,41 @@ void av1_mi_push_block(AV1Decoder *pbi, AV1_COMMON *cm, MACROBLOCKD *xd) {
                         ? CompoundMasked
                         : mi->interinter_comp.type == COMPOUND_DIFFWTD ? CompoundDiffUv : CompoundAvrg;
           int type_index = (type - 1) * InterTypes::InterSizesAllCommon + block_size_id_uv;
-          index_arr[tile->gen_index_ptr++] = tile->gen_block_map[type_index];
-          tile->gen_block_map[type_index] += 2;
-          if (pc)
-            perf_inter_count(
-                pc, td,
-                type == CompoundDiffUvGlobalWarp
-                    ? AV1_PERF_INTER_COMP_WARP_DIFF_UV
-                    : type == CompoundGlobalWarp
-                          ? AV1_PERF_INTER_COMP_WARP
-                          : type == CompoundMasked
-                                ? AV1_PERF_INTER_COMP_MASKED
-                                : type == CompoundDiffUv ? AV1_PERF_INTER_COMP_DIFF_UV : AV1_PERF_INTER_COMP_AVG,
-                1, 4 << plane_bw, 4 << plane_bh, 2, mi, is_warp_compound);
+          int section =
+              type == CompoundDiffUvGlobalWarp
+                  ? AV1_PERF_INTER_COMP_WARP_DIFF_UV
+                  : type == CompoundGlobalWarp
+                        ? AV1_PERF_INTER_COMP_WARP
+                        : type == CompoundMasked
+                              ? AV1_PERF_INTER_COMP_MASKED
+                              : type == CompoundDiffUv ? AV1_PERF_INTER_COMP_DIFF_UV : AV1_PERF_INTER_COMP_AVG;
+          if (fast_map && type == CompoundAvrg) {
+            const int cls = inter_fast_class(&mi->mv[0], 15) | (inter_fast_class(&mi->mv[1], 15) << 2);
+            int *const list = &fast_map[InterFastCompound + cls * InterTypes::InterSizesAllCommon + block_size_id_uv];
+            index_arr[tile->gen_index_ptr++] = *list;
+            *list += 2;
+            section = AV1_PERF_INTER_COMP_AVG_FAST + cls;
+          } else {
+            index_arr[tile->gen_index_ptr++] = tile->gen_block_map[type_index];
+            tile->gen_block_map[type_index] += 2;
+          }
+          if (pc) perf_inter_count(pc, td, section, 1, 4 << plane_bw, 4 << plane_bh, 2, mi, is_warp_compound);
         } else {
+          int section = is_chroma_warp ? AV1_PERF_INTER_WARP : AV1_PERF_INTER_SINGLE;
           if (is_chroma_warp) {
             index_arr[tile->gen_index_ptr++] = tile->gen_block_map_wrp[block_size_id_uv];
             tile->gen_block_map_wrp[block_size_id_uv] += 2;
+          } else if (fast_map) {
+            const int cls = inter_fast_class(&mi->mv[0], 15);
+            int *const list = &fast_map[cls * InterTypes::InterSizesAllCommon + block_size_id_uv];
+            index_arr[tile->gen_index_ptr++] = *list;
+            *list += 2;
+            section = AV1_PERF_INTER_SINGLE_COPY + cls;
           } else {
             index_arr[tile->gen_index_ptr++] = tile->gen_block_map[block_size_id_uv];
             tile->gen_block_map[block_size_id_uv] += 2;
           }
-          if (pc)
-            perf_inter_count(pc, td, is_chroma_warp ? AV1_PERF_INTER_WARP : AV1_PERF_INTER_SINGLE, 1,
-                             4 << plane_bw, 4 << plane_bh, 1, mi, is_chroma_warp);
+          if (pc) perf_inter_count(pc, td, section, 1, 4 << plane_bw, 4 << plane_bh, 1, mi, is_chroma_warp);
         }
       }
     }
@@ -655,6 +683,7 @@ struct GenBlockSRT {
   int row_srart;
   int index_offset;
   int index_offset_warp;
+  int index_offset_fast;  // gen_pred_blocks_fast.hlsl only (-interfast): the tile's lists by motion vector class
 };
 
 void av1_prediction_gen_blocks(AV1Decoder *pbi, Av1Core *dec) {
@@ -768,10 +797,28 @@ void av1_prediction_gen_blocks(AV1Decoder *pbi, Av1Core *dec) {
     }
   }
   const int pred_warp_count = offset;  // records of prediction_blocks_warp
+  // -interfast: the lists by motion vector class, behind the lists by type in prediction_blocks. The blocks
+  // in them are the ones the lists CasualInter and CompoundAvrg have without the flag, so the buffer holds
+  // as many records as it always did.
+  const int inter_fast = td->inter_fast && tiles[0].gen_block_map_fast;
+  int pred_block_total = pred_block_count;
+  if (inter_fast) {
+    for (int it = 0; it <= InterFastLists; ++it) {
+      for (int t = 0; t < tile_count; ++t) {
+        if (!tiles[t].gen_block_map_fast) continue;
+        const int cnt = tiles[t].gen_block_map_fast[it];
+        tiles[t].gen_block_map_fast[it] = pred_block_total;
+        pred_block_total += cnt;
+      }
+    }
+  }
   // -dumpstages: the mode info, where the first stage that reads it starts.
   av1_stage_dump_mode_info(dec, cm);
   Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> command_list = dec->compute.command_list;
-  ComputeShader *shader = &dec->shader_lib->shader_gen_pred_blocks;
+  // -interfast: the same shader with the lists by class and one more root constant, where they are.
+  ComputeShader *shader =
+      inter_fast ? &dec->shader_lib->shader_gen_pred_blocks_fast : &dec->shader_lib->shader_gen_pred_blocks;
+  const int srt_words = inter_fast ? 8 : 7;
   command_list->SetComputeRootSignature(shader->signaturePtr.Get());
   command_list->SetPipelineState(shader->pso.Get());
   command_list->SetComputeRootShaderResourceView(0, dec->mode_info_pool->dev->GetGPUVirtualAddress());
@@ -791,7 +838,8 @@ void av1_prediction_gen_blocks(AV1Decoder *pbi, Av1Core *dec) {
     srt.row_srart = tiles[i].mi_row_start;
     srt.index_offset = tiles[i].gen_block_map_offset;
     srt.index_offset_warp = tiles[i].gen_block_warp_offset;
-    command_list->SetComputeRoot32BitConstants(8, 7, &srt, 0);
+    srt.index_offset_fast = tiles[i].gen_block_fast_offset;
+    command_list->SetComputeRoot32BitConstants(8, srt_words, &srt, 0);
     command_list->Dispatch((srt.wi_count + 63) >> 6, 1, 1);
   }
 
@@ -806,7 +854,8 @@ void av1_prediction_gen_blocks(AV1Decoder *pbi, Av1Core *dec) {
         srt.row_srart = tiles[i].mi_row_start;
         srt.index_offset = tiles[i].gen_block_map_offset;
         srt.index_offset_warp = tiles[i].gen_block_warp_offset;
-        command_list->SetComputeRoot32BitConstants(8, 7, &srt, 0);
+        srt.index_offset_fast = tiles[i].gen_block_fast_offset;
+        command_list->SetComputeRoot32BitConstants(8, srt_words, &srt, 0);
         command_list->Dispatch((srt.wi_count + 63) >> 6, 1, 1);
       }
     }
@@ -820,7 +869,7 @@ void av1_prediction_gen_blocks(AV1Decoder *pbi, Av1Core *dec) {
   if (av1_stage_dump_active(dec)) {
     enum { PredBlockSize = 16, PredWarpBlockSize = 48 };
     char layout[160];
-    av1_stage_dump_region region = {dec->prediction_blocks->dev, 0, (size_t)pred_block_count * PredBlockSize, 1};
+    av1_stage_dump_region region = {dec->prediction_blocks->dev, 0, (size_t)pred_block_total * PredBlockSize, 1};
     if (region.size > dec->prediction_blocks->size) region.size = dec->prediction_blocks->size;
     snprintf(layout, sizeof(layout), "buffer=pred_blocks record=%d count=%d\n", (int)PredBlockSize,
              (int)(region.size / PredBlockSize));
@@ -935,6 +984,14 @@ struct InterDetailRec {
       thread_bytes[AV1_PERF_INTER_CHROMA_2X2] = 9 * (hbd ? 20 : 12);  // a 2x2: 9 rows of two samples
       thread_bytes[AV1_PERF_INTER_OBMC_ABOVE] = 11 * row;
       thread_bytes[AV1_PERF_INTER_OBMC_LEFT] = 11 * row;
+      // -interfast (inter_fast.hlsl, inter_compound_fast.hlsl): rows by the class of the reference, of four
+      // samples (inter_fast_row: one Load2, two for 16-bit samples) where the class has no horizontal pass.
+      const int row4 = hbd ? 16 : 8;
+      const int rows4x4[InterFastClasses] = {4 * row4, 4 * row, 11 * row4, 11 * row};
+      const int rows4x2[InterFastClasses] = {2 * row4, 2 * row, 9 * row4, 9 * row};
+      for (int c = 0; c < InterFastClasses; ++c) thread_bytes[AV1_PERF_INTER_SINGLE_COPY + c] = rows4x4[c];
+      for (int c = 0; c < InterFastClasses * InterFastClasses; ++c)
+        thread_bytes[AV1_PERF_INTER_COMP_AVG_FAST + c] = rows4x2[c & 3] + rows4x2[c >> 2];
     } else {
       int step = 1 << SCALE_SUBPEL_BITS;
       for (int i = LAST_FRAME; i <= ALTREF_FRAME; ++i) step = AOMMAX(step, td->scale_factors[i].y_step);
@@ -1151,6 +1208,42 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
                         4 << InterBlockHeightLUT[i], count, srt.wi_count);
       }
       detail.Section(kSectionOfType[t]);
+    }
+
+    // -interfast: the lists by motion vector class, which have the blocks of the types CasualInter and
+    // CompoundAvrg on such a frame (their lists by type are empty). One dispatch per class and block size.
+    // The class goes to the fast shaders in the bits 8 and up of width_log2; the lists of class 3 (both
+    // references of class 3 for a compound block) run the original shaders.
+    if (td->inter_fast && tiles->gen_block_map_fast) {
+      for (int list = 0; list < InterFastLists / InterTypes::InterSizesAllCommon; ++list) {
+        const int compound = list >= InterFastClasses;
+        const int cls = compound ? list - InterFastClasses : list;
+        const int original = cls == (compound ? InterFastClasses * InterFastClasses - 1 : (int)InterFast2D);
+        ComputeShader *const list_shader =
+            compound ? (original ? &shaders->inter_comp : &shaders->inter_comp_fast)
+                     : (original ? &shaders->inter_base : &shaders->inter_fast);
+        const int section = (compound ? AV1_PERF_INTER_COMP_AVG_FAST : AV1_PERF_INTER_SINGLE_COPY) + cls;
+        offsets = tiles->gen_block_map_fast + list * InterTypes::InterSizesAllCommon;
+        for (int i = 0; i < InterTypes::InterSizesAllCommon; ++i) {
+          const int offset = offsets[i];
+          const int count = offsets[i + 1] - offset;
+          if (!count) continue;
+          srt.pass_offset = offset;
+          srt.width_log2 = InterBlockWidthLUT[i];
+          srt.height_log2 = InterBlockHeightLUT[i] + compound;  // a thread of a compound shader: 4x2 samples
+          srt.wi_count = (1 << (srt.width_log2 + srt.height_log2)) * count;
+          if (!original) srt.width_log2 |= cls << 8;
+          if (shader != list_shader) {
+            shader = list_shader;
+            command_list->SetPipelineState(shader->pso.Get());
+          }
+          command_list->SetComputeRoot32BitConstants(7, 4, &srt, 0);
+          command_list->Dispatch((srt.wi_count + 63) >> 6, 1, 1);
+          detail.Dispatch(AV1_PERF_GPU_INTER, section, i, 4 << InterBlockWidthLUT[i], 4 << InterBlockHeightLUT[i],
+                          count, srt.wi_count);
+        }
+        detail.Section(section);
+      }
     }
 
     if (enable_gm_warp) {

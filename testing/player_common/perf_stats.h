@@ -36,9 +36,14 @@ static_assert(sizeof(kCpuNames) / sizeof(kCpuNames[0]) == AV1_PERF_CPU_COUNT,
               "CPU timer names out of step with av1_perf.h");
 
 // The sections of the inter breakdown (-gputimedetail), in the order of the command list.
+// -interfast: single.<class> and comp_avg.<class of reference 0><class of reference 1>, the classes by the
+// fraction of the motion vector: copy / c none, h in x only, v in y only, 2d / 2 both.
 static const char* const kInterSectionNames[] = {
-    "warp",         "single",            "comp_avg",   "comp_diff_y", "comp_masked", "comp_warp", "chroma_2x2", "sync0",
-    "comp_diff_uv", "comp_warp_diff_uv", "obmc_above", "sync1",       "obmc_left",   "sync2",     "recon"};
+    "warp",        "single",      "single.copy",  "single.h",          "single.v",    "single.2d",   "comp_avg",
+    "comp_avg.cc", "comp_avg.hc", "comp_avg.vc",  "comp_avg.2c",       "comp_avg.ch", "comp_avg.hh", "comp_avg.vh",
+    "comp_avg.2h", "comp_avg.cv", "comp_avg.hv",  "comp_avg.vv",       "comp_avg.2v", "comp_avg.c2", "comp_avg.h2",
+    "comp_avg.v2", "comp_avg.22", "comp_diff_y",  "comp_masked",       "comp_warp",   "chroma_2x2",  "sync0",
+    "comp_diff_uv", "comp_warp_diff_uv", "obmc_above", "sync1",        "obmc_left",   "sync2",       "recon"};
 static_assert(sizeof(kInterSectionNames) / sizeof(kInterSectionNames[0]) == AV1_PERF_INTER_SECTION_COUNT,
               "inter section names out of step with av1_perf.h");
 // The summary adds these up field by field.

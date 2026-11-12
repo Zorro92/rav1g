@@ -181,6 +181,11 @@
     </FxCompile>
     <FxCompile Include="$(RepoRoot)libav1\dx\shaders\intra_main_hbd_opt.hlsl" />
     <FxCompile Include="$(RepoRoot)libav1\dx\shaders\intra_main_opt.hlsl" />
+    <FxCompile Include="$(RepoRoot)libav1\dx\shaders\gen_pred_blocks_fast.hlsl" />
+    <FxCompile Include="$(RepoRoot)libav1\dx\shaders\inter_fast.hlsl" />
+    <FxCompile Include="$(RepoRoot)libav1\dx\shaders\inter_fast_hbd.hlsl" />
+    <FxCompile Include="$(RepoRoot)libav1\dx\shaders\inter_compound_fast.hlsl" />
+    <FxCompile Include="$(RepoRoot)libav1\dx\shaders\inter_compound_fast_hbd.hlsl" />
     <FxCompile Include="$(RepoRoot)libav1\dx\shaders\loopfilter_hor.hlsl" />
     <FxCompile Include="$(RepoRoot)libav1\dx\shaders\loopfilter_hor_hbd.hlsl" />
     <FxCompile Include="$(RepoRoot)libav1\dx\shaders\loopfilter_vert.hlsl" />

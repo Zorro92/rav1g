@@ -106,6 +106,12 @@ one commit each:
 - **Stage dumps**: `-dumpstages` writes the buffer behind every GPU stage of a frame, in the
   player and in `warp_decoder`, and `testing/stage_dump/stage_dump.py` compares two runs. See
   [Stage dumps](#stage-dumps--dumpstages). The decoded output does not change.
+- **Inter fast path**: `-interfast` lists the inter blocks with one reference and the averaged
+  compound blocks by the fraction of their motion vectors and predicts them with a copy or one
+  filter pass where the vector needs no more (`inter_fast.hlsl`, `inter_compound_fast.hlsl`,
+  `gen_pred_blocks_fast.hlsl`). See [Inter fast path](#inter-fast-path--interfast). Off by
+  default; the output does not change, and without the flag the lists and dispatches are the
+  ones that always ran.
 - **Experiments**: `-lfhsplit`, `-intraedgefix` and a second package whose shaders sync all
   memory at every group sync, for the bugs that show on the console only. See
   [Experiments](#experiments). Off by default; the output does not change.
@@ -303,6 +309,7 @@ the start of every task say what is in effect.
 | Pipeline slots | 2 | `Frame slots: 2` | `-slots 3`, `-slots 4` |
 | Clears | on the decode thread | `Clears: decode thread (original)` | `-asyncclear` |
 | Intra prediction | upstream's shaders, `/Od` build | `Intra shaders: intra_main + intra_filter (original)`, `Intra main shader: intra_main (/Od, original)` | `-intrav2`, `-intraopt` |
+| Inter prediction | upstream's shaders, lists by type and block size | `Inter shaders: inter_main, inter_compound (original)` | `-interfast`: see [Inter fast path](#inter-fast-path--interfast) |
 
 - **`-cdefv2` and `-fitsize` are still accepted** and change nothing: old task lines keep
   working. `-lowmem` is still all three parts. Parts 2 and 4 stay opt-in because they can
@@ -528,8 +535,11 @@ later pass reads what an earlier one wrote into the frame:
 `recon` is the GPU stage behind it and has a barrier of its own. A frame with a reference
 of another size runs every section but `warp` and `comp_warp*` through the shaders for
 scaled references (`inter_scale_*`); the summary lists those as `<section>/scaled`. Which
-shader a section is, and what one thread of it does, is in
-[gpu-av1-decoder.md](gpu-av1-decoder.md#inter-prediction-breakdown-2026-11-12).
+shader a section is, and what one thread of it does, is in the workflow artifact
+(`shader-survey/inter-static.md`) and, for `single` and `comp_avg`, in
+[gpu-av1-decoder.md](gpu-av1-decoder.md#inter-prediction-breakdown-and-fast-paths-2026-11-12).
+With `-interfast` those two sections are listed by motion vector class, see
+[Inter fast path](#inter-fast-path--interfast).
 
 **What a time means.** A timestamp says when the GPU reaches that point of the list. The
 dispatches of a pass have no barrier between them, so the GPU may run them side by side,
@@ -673,10 +683,9 @@ the counters are those of the stream. The conformance job decodes three streams 
 motion, and the stream with scaled references) and checks that the plain run has no line
 of the breakdown, that the breakdown is there, that the two sides of the counters agree on
 every frame, that the numbers are plausible, and that the counters of the two modes are the
-same. The breakdowns go into the job summary and the logs into the conformance artifact
-(`gputime-smoke/`).
-
-WARP_EXAMPLE_PLACEHOLDER
+same. A fourth run per stream, `-gputimedetail -interfast`, checks the sections by class of
+the [inter fast path](#inter-fast-path--interfast). The breakdowns go into the job summary
+and the logs into the conformance artifact (`gputime-smoke/`).
 
 **Console results:** pending.
 
@@ -1169,6 +1178,56 @@ Package 0.2.3.0 (run 43008653829), 4K 10-bit, 1 tile, 300 frames, all tasks with
 listings `intra_main.asm` and `intra_main_hbd.asm`, and `stats.txt` gives the counts and
 the FXC compile time of all four. After the build the workflow checks that each of the
 four listings has the bytecode compiled into the package.
+
+## Inter fast path (`-interfast`)
+
+Two thirds of the reference fetches of the 4K clips have a motion vector without a fraction,
+and the original inter shaders run both 8-tap passes for them all the same. With this flag
+the blocks with one reference and the averaged (or distance weighted) compound blocks are
+listed by the fraction of their motion vectors and predicted by `inter_fast.hlsl` and
+`inter_compound_fast.hlsl`, which copy, or run one pass, where that is all the vector needs.
+The decoded output is the same. Design, formulas and the console numbers behind it:
+[gpu-av1-decoder.md](gpu-av1-decoder.md#inter-prediction-breakdown-and-fast-paths-2026-11-12).
+
+| Flag | Effect |
+| --- | --- |
+| *(none)* | the original path: `inter_main`, `inter_compound`; lists by type and block size |
+| `-interfast` | lists by motion vector class and block size; `inter_fast` for the classes copy, h and v, `inter_compound_fast` for the pairs of classes of two references, the original shaders for the class with a fraction both ways. Frames with a scaled reference keep the original path. |
+
+- Log line of the task: `Inter shaders: by motion vector class: inter_fast, inter_compound_fast
+  (-interfast; frames with a scaled reference keep the original shaders)`, or `Inter shaders:
+  inter_main, inter_compound (original)`. `warp_decoder` prints `INTERFAST <task>: ...` with
+  the flag.
+- A decoder that was created without the flag is replaced when a task asks for it (the lists
+  by class need 1984 bytes per tile and pipeline slot in the block maps).
+- **In the breakdown** (`-gputimedetail`, `-gputimeisolate`) the sections `single` and
+  `comp_avg` are replaced by one section per class: `single.copy`, `single.h`, `single.v`,
+  `single.2d`, and `comp_avg.<r0><r1>` with a letter per reference (`c` copy, `h`, `v`, `2`
+  both), `comp_avg.cc` to `comp_avg.22`. They appear in the per-frame line, in the two
+  tables and in the `list` lines like any section; frames with scaled references still list
+  `single/scaled` and `comp_avg/scaled`. `loadMB` of these sections is what their class
+  loads, so it is below `footMB` for the classes copy and h.
+
+**Task lines** (per clip: the timing pair in one launch, the md5 check in a launch of its
+own, against a reference that is already next to the stream):
+
+```text
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputimedetail
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputimedetail -interfast
+```
+
+```text
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -interfast -md5_frame_check
+```
+
+Compare `gpu inter` and `gpu busy` of the pair, and per class the `ns/px` of `single.*`
+and `comp_avg.*` with the `single` and `comp_avg` rows of the run without the flag.
+
+**Checked without a console:** `testing/inter_check` (the fast shaders, the original shaders
+and libaom write the same frames; `sh testing/inter_check/run.sh --mutate`), and the
+conformance job, which decodes the whole set on WARP once more with `-interfast`.
+
+**Console results:** pending.
 
 ## Pipeline slots and clears (`-slots`, `-asyncclear`)
 

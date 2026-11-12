@@ -486,7 +486,7 @@ int main() {
       st.AddFrame(MakeInterFrame(i, 1000.0 + 50.0 * i, &d));
     }
     std::vector<std::string> lines = st.Summary(no_waits);
-    CHECK(Has(lines, "inter counters DISAGREE on 2 of 20 frames; first: record 22, section 2: 1001 records and 256000 "
+    CHECK(Has(lines, "inter counters DISAGREE on 2 of 20 frames; first: record 22, section 6: 1001 records and 256000 "
                      "samples dispatched, 1000 blocks (Y + 2 UV) and 256000 samples pushed"));
     InterFrame luma(*MakeDetail(1, 0));
     CHECK(luma.Mismatch().empty());
