@@ -105,8 +105,8 @@ Agreed on 2026-11-12, in addition to the steps above:
 ## Licence and naming
 
 The Rust code is derived from the BSD-2-Clause host and stays BSD-2-Clause with the AOMedia Patent
-License 1.0 notices. The crate name `rav1g` is reserved on crates.io at the end of step 1, when the crate
-contains working code; not earlier.
+License 1.0 notices. The crate name `rav1g` is published on crates.io once the Rust API of step 5 is
+usable, not earlier (decided 2026-11-12, after step 1: no placeholder release).
 
 ## Progress
 
@@ -269,7 +269,8 @@ Deviations from the design above, and why:
   `crates/rav1g-sys/helpers.c`.
 - **`rav1g-dec` still links test program C++** (see above). It leaves with the stages that replace it;
   decision 2 keeps the `-gputime` and `-dumpstages` entry points as they are until step 4.
-- **Nothing is published or reserved on crates.io**; the manifests say `publish = false`.
+- **Nothing is published or reserved on crates.io**; the manifests say `publish = false` until step 5
+  (see Licence and naming).
 
 ## Estimate
 
