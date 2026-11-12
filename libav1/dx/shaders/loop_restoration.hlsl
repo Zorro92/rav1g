@@ -94,8 +94,11 @@ void box_sums0(int w, int h, int r, int eps, int lx, int ly, int bit_depth) {
   uint n = (2 * r + 1) * (2 * r + 1);
   int id = ly * WG_WIDTH + lx;
   for (int idx = id; idx < (h + 2)*(w + 2); idx += WG_HEIGHT * WG_WIDTH) {
-    int i = idx / (w + 2) - 1;
-    int j = idx % (w + 2) - 1;
+    // Unsigned: idx counts up from the thread's place in the group and w + 2 is the width of the group
+    // with its border, so neither is negative, and the quotient and the remainder are those of the
+    // signed division. FXC makes the signed one out of several instructions (warning X3556).
+    int i = (int)((uint)idx / (uint)(w + 2)) - 1;
+    int j = (int)((uint)idx % (uint)(w + 2)) - 1;
     uint a = 0;
     uint b = 0;
     for (int dy = -2; dy <= 2; dy++) {
@@ -160,8 +163,8 @@ void box_sums1(int w, int h, int r, int eps, int lx, int ly, int bit_depth) {
   uint n = (2 * r + 1) * (2 * r + 1);
   int id = ly * WG_WIDTH + lx;
   for (int idx = id; idx < (h + 2)*(w + 2); idx += WG_HEIGHT * WG_WIDTH) {
-    int i = idx / (w + 2) - 1;
-    int j = idx % (w + 2) - 1;
+    int i = (int)((uint)idx / (uint)(w + 2)) - 1;  // unsigned, as in box_sums0
+    int j = (int)((uint)idx % (uint)(w + 2)) - 1;
     uint a = 0;
     uint b = 0;
     for (int dy = -1; dy <= 1; dy++) {

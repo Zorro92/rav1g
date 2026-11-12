@@ -68,7 +68,9 @@ typedef struct {
   ComputeShader inter_scale_warp_comp;
 } bitdepth_dependent_shaders;
 
-typedef struct {
+// Named: a struct with default member initializers needs a name of its own, not only the typedef's
+// (C5208).
+typedef struct compute_shader_lib {
   ComputeShader shader_idct[20];
   ComputeShader shader_idct_sort;
   ComputeShader shader_loop_rest;
