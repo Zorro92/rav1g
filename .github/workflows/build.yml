@@ -471,6 +471,36 @@ jobs:
             --out out/conformance --threads 4
           if ($LASTEXITCODE -ne 0) { throw "conformance run: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
 
+      # Order check (testing/conformance/order_check.py; docs/gpu-av1-decoder.md, "Padding of the mode info
+      # record"): what a decoder writes must not depend on what the process decoded before. The sequences that
+      # showed such a dependence, each in one decoder process and in this order, every stream against its
+      # reference: an 8-bit quantizer vector and then the first 10-bit one, the ten 8-bit ones and then the
+      # 10-bit one (-t 1 and -t 4), svc-L2T1 and then svc-L2T1-2. No stream is decoded again alone: that is
+      # what kept the dependence out of sight. Only a sequence that lost the D3D12 device runs again, whole.
+      - name: Order check, streams one after the other in one process
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/order_check.py --tool out/warp_decoder/warp_decoder.exe --streams conformance-streams `
+            --out out/order-check
+          if ($LASTEXITCODE -ne 0) { throw "order check: exit code $LASTEXITCODE (1: a stream is wrong behind other streams, 2: the check could not be done)" }
+
+      # The same dependence without waiting for the memory of an earlier decoder: with -poisonbuf the decoder
+      # fills every buffer the CPU writes for the shaders with the byte 0xA5 when it creates it (dx/av1_perf.h,
+      # av1_set_poison_buffers), so a shader that reads bytes the CPU never wrote (padding of a C struct, a
+      # field the block's kind does not have) gives another output at once. The output has to be the same:
+      # a part of the set, about half a minute (ten quantizer vectors of each bit depth, the other vectors,
+      # one cut), has to give the results of expected.txt. The whole set with the flag is one of the
+      # experiment passes below.
+      - name: Conformance of the vectors with poisoned buffers (-poisonbuf)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/run.py --tool out/warp_decoder/warp_decoder.exe --streams conformance-streams `
+            --out out/conformance-poisonbuf --threads 4 "--tool-args=-poisonbuf" "--title=part of the set with -poisonbuf" `
+            "--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)"
+          if ($LASTEXITCODE -ne 0) { throw "conformance with -poisonbuf: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
+
       # The fast inter path (-interfast; docs/gpu-av1-decoder.md, "Inter prediction: breakdown and fast
       # paths"): the blocks with one reference and the averaged compound blocks are listed by the fraction
       # of their motion vectors and predicted by inter_fast.hlsl and inter_compound_fast.hlsl. The output
@@ -528,7 +558,10 @@ jobs:
         shell: pwsh
         run: |
           $runs = @(@{ name = 'lfhsplit1'; args = '-lfhsplit 1' }, @{ name = 'lfhsplit2'; args = '-lfhsplit 2' },
-            @{ name = 'intraedgefix'; args = '-intraedgefix' })
+            @{ name = 'intraedgefix'; args = '-intraedgefix' },
+            # Not an experiment for a device: the whole set with every CPU-written buffer poisoned (see the
+            # step with -poisonbuf above, which decodes a part of the set on every push).
+            @{ name = 'poisonbuf-all'; args = '-poisonbuf' })
           $failed = @()
           foreach ($run in $runs) {
             python testing/conformance/run.py --tool out/warp_decoder/warp_decoder.exe --streams conformance-streams `
@@ -578,6 +611,7 @@ jobs:
           path: |
             out/conformance/
             out/conformance-*/
+            out/order-check/
             out/gputime-smoke/
             out/sm6test/
             out/msbuild.log

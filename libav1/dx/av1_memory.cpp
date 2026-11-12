@@ -21,6 +21,7 @@
 #include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 
 enum {
   HostMemAlign = 32,
@@ -125,6 +126,20 @@ extern "C" void av1_log_video_memory_now(void *d3d12device, const char *label) {
   av1_video_memory info;
   av1_query_video_memory(static_cast<ID3D12Device *>(d3d12device), &info);
   av1_log_video_memory(0, label ? label : "", &info);
+}
+
+// Debugging aid of the test programs (-poisonmi, -poisonbuf; dx/av1_perf.h): the buffers the CPU writes for
+// the shaders start filled with a byte that is not 0 instead of with what the memory held. 0 (the default):
+// nothing is filled.
+static int g_poison_buffers = AV1_POISON_OFF;
+
+extern "C" void av1_set_poison_buffers(int level) { g_poison_buffers = level; }
+
+static int poisoned(const GpuBufferObject *obj) {
+  if (!obj->host_ptr || g_poison_buffers == AV1_POISON_OFF) return 0;
+  if (g_poison_buffers == AV1_POISON_MODE_INFO) return strcmp(obj->name, "mode_info_pool") == 0;
+  // Written by the CPU, read by the GPU. A readback buffer goes the other way.
+  return obj->memtype == HostRW || obj->memtype == DeviceUpload || obj->memtype == UploadUAV;
 }
 
 void av1_memory_allocator::setup(uint8_t *host_mem, size_t host_size) {
@@ -259,6 +274,8 @@ GpuBufferObject *av1_memory_allocator::create_buffer(size_t size, MemoryType mem
         heap_names[mem], step, (unsigned)hr, total, to_mib(total), dev_obj_count);
     return NULL;
   }
+
+  if (poisoned(obj)) memset(obj->host_ptr, 0xA5, obj->size);
 
   ++dev_obj_count;
   dev_bytes[mem] += obj->size;

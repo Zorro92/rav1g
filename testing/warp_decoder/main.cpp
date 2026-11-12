@@ -96,6 +96,7 @@ struct Task {
   bool asyncclear = false;
   int lfhsplit = 0;           // -lfhsplit <0|1|2>
   bool intraedgefix = false;  // -intraedgefix
+  int poison = 0;             // -poisonmi (AV1_POISON_MODE_INFO), -poisonbuf (AV1_POISON_BUFFERS)
   int interfast = 0;          // -interfast (1), -interfastlists (7), -interfastmode <n>: av1_set_inter_fast
   bool all_layers = false;    // -alllayers: every shown frame of a temporal unit with spatial layers
   int oppoint = 0;            // -oppoint <n>: the operating point of a stream with layers
@@ -163,6 +164,10 @@ static void Usage() {
   Say("  -lfhsplit <n>         horizontal loop filter: 1 even rows of blocks, a UAV barrier, odd rows; 2 every");
   Say("                        row of blocks on its own (default 0: one dispatch per plane; same output)");
   Say("  -intraedgefix         8-bit intra: the above edge filter stops where the 10-bit one does (same output)");
+  Say("  -poisonmi             debugging: the mode info pool starts filled with the byte 0xA5 instead of with what");
+  Say("                        the memory held, so a shader that reads bytes the decoder never wrote shows in");
+  Say("                        the output of any stream (same output)");
+  Say("  -poisonbuf            the same for every buffer the CPU writes for the shaders (same output)");
   Say("  -interfast            inter prediction by the fraction of the motion vector: a copy, one filter pass, or");
   Say("                        both (inter_fast, inter_compound_fast; same output)");
   Say("  -interfastlists       the block lists of -interfast with the original shaders on them (same output)");
@@ -278,6 +283,10 @@ static bool ParseArgs(const std::vector<std::string>& args, Task* task, Globals*
       if (!number(&task->lfhsplit)) return false;
     } else if (a == "-intraedgefix") {
       task->intraedgefix = true;
+    } else if (a == "-poisonmi") {
+      task->poison = AV1_POISON_MODE_INFO;
+    } else if (a == "-poisonbuf") {
+      task->poison = AV1_POISON_BUFFERS;
     } else if (a == "-interfast") {
       task->interfast = AV1_INTER_FAST_ON;
     } else if (a == "-interfastlists") {
@@ -1069,6 +1078,13 @@ static int RunTask(const Task& task, Device* dev) {
     create_ms += MsSince(create_start);
     return std::string();
   };
+  // -poisonmi, -poisonbuf: the decoder fills these buffers when it creates them, so this switch is set before
+  // the decoder exists (also the one a new sequence creates later in the task).
+  av1_set_poison_buffers(task.poison);
+  if (task.poison)
+    Say("POISON %s: %s filled with 0xA5 when the decoder creates it", task.name.c_str(),
+        task.poison == AV1_POISON_MODE_INFO ? "the mode info pool (-poisonmi)"
+                                            : "every buffer the CPU writes for the shaders (-poisonbuf)");
   {
     const std::string create_error = create_decoder(si);
     if (!create_error.empty()) return fail(create_error);
