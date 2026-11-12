@@ -21,6 +21,12 @@ pub(crate) const BLOCK_SIZE_HIGH: [u8; 22] =
 /// half the width and half the height.
 pub(crate) const SS_SIZE_420: [u8; 22] = [0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 1, 2, 16, 17, 18, 19];
 
+/// `tx_size_wide` of `av1/common/common_data.h`: the width of a transform size in samples.
+pub(crate) const TX_SIZE_WIDE: [i32; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 32, 32, 64, 4, 16, 8, 32, 16, 64];
+
+/// `tx_size_high` of `av1/common/common_data.h`.
+pub(crate) const TX_SIZE_HIGH: [i32; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
+
 /// The random sequence of the film grain synthesis (`dx_gaussian_sequence` of `libav1/dx/av1_compute.cpp`,
 /// `gaussian_sequence` of the specification).
 pub(crate) const GAUSSIAN_SEQUENCE: [i32; 2048] = [
@@ -138,6 +144,18 @@ mod tests {
         for (bsize, &plane_bsize) in SS_SIZE_420.iter().enumerate() {
             assert_eq!(ss[bsize * 4 + 3], plane_bsize, "ss_size_lookup[{bsize}][1][1]");
         }
+    }
+
+    /// A table of 32-bit numbers of a header, from the probe.
+    fn c_ints(name: &str) -> Vec<i32> {
+        let bytes = crate::sys::c_table(name).unwrap_or_else(|| panic!("the probe has {name}"));
+        bytes.as_chunks::<4>().0.iter().map(|chunk| i32::from_ne_bytes(*chunk)).collect()
+    }
+
+    #[test]
+    fn transform_tables_are_those_of_the_header() {
+        assert_eq!(c_ints("tx_size_wide"), TX_SIZE_WIDE);
+        assert_eq!(c_ints("tx_size_high"), TX_SIZE_HIGH);
     }
 
     /// The numbers of a C initializer, for the tables whose C++ source is still in the tree.

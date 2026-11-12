@@ -352,6 +352,7 @@ of AOM pass there in two minutes. CI on WARP stays the gate.
 | 1. Allocator and log lines | `av1_memory.cpp` (356 lines), `vp9dx_linear_allocator.cpp` (121) | `host/log.rs` (156), `host/memory.rs` (534), `gpu/mod.rs` (93), `gpu/d3d12.rs` (227); tests included | `glue/av1_memory.cpp` (98) | see below |
 | 2. Queues | `av1_thread.cpp` (151) | `host/thread.rs` (406) | `glue/av1_thread.cpp` (53) | see below |
 | 3. Shader library, constant tables | `av1_compute.cpp` (759) | `host/compute.rs` (729), `host/tables.rs` (167); `gpu/mod.rs` and `gpu/d3d12.rs` grow to 114 and 509 | `glue/av1_compute.cpp` (231, of which 93 includes and 93 table lines) | see below |
+| 4. Inverse transform stage | `transform.cpp` (141) | `host/transform.rs` (159), `host/core.rs` (123); `gpu/d3d12.rs` grows to 669 | `glue/transform.cpp` (18), `glue/av1_core_calls.cpp` (22) | see below |
 
 Module 1, allocator and log lines:
 
@@ -425,6 +426,30 @@ Module 3, shader library and constant tables:
 - **The backend boundary** got the pipeline layouts (`LayoutDesc`: read buffers, written buffers,
   constant blocks, inline constants), the compute pipelines, and `Device::upload`, the blocking copy of
   constant data into buffers.
+
+Module 3 on CI (run 43292284538, commit 6b764d1, with the merge of `cpp` 4b92364 under it): the same
+gates, all met; `D3D12 DEVICE REMOVALS: 0` in every pass.
+
+Module 4, the inverse transform stage (`av1_idct_run`), the first stage that records commands:
+
+- **Order of the suggested list changed:** film grain is not a file of its own. `av1_filmgrain_run` is
+  part of `loopfilters.cpp` and is called by the output copy of the same file, so it moves with module 5,
+  as a Rust module of its own. Module 4 is `transform.cpp` alone.
+- **The recording of commands** joins the backend boundary: `Commands` (the layout and the pipeline of
+  the next dispatches, buffers and constant blocks at the binding slots, inline constants, dispatch, the
+  barrier behind dispatches that wrote a buffer the next ones read). A place in a buffer is a
+  `BufferLocation`, in D3D12 the GPU virtual address a root descriptor takes. The calls on the command
+  list are those of the C++, one for one and in its order.
+- **`host/core.rs`** has what the stages share: the command list, buffers, pipelines and layouts of the
+  C++ structs as the types of the boundary, and the constants of a stage
+  (`ComputeCommandBuffer::Alloc`: the next piece of the frame's upload memory, 256-byte steps, the fill of
+  `-poisonbuf` when it is handed out). A stage writes the fields of a record one by one through a
+  pointer, as the C++ did, and no others: what a record holds besides is part of what `-dumpstages`
+  compares between the two decoders.
+- **Calls into `av1_core.cpp`** (the timestamp behind a stage, the stage dumps) go the other way through
+  `glue/av1_core_calls.cpp`, which gives those C++ functions `extern "C"` names.
+- Tables: `tx_size_wide` and `tx_size_high` are copies with a test against the header; the scan orders
+  (`av1_idct_scans`) are read where they are.
 
 ## Estimate
 

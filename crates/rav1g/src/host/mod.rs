@@ -16,7 +16,9 @@
 //! that owns them is Rust too (step 4).
 
 mod compute;
+mod core;
 pub(crate) mod log;
 mod memory;
 mod tables;
 mod thread;
+mod transform;

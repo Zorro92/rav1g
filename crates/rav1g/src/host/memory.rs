@@ -180,7 +180,7 @@ pub extern "C" fn av1_set_poison_buffers(level: c_int) {
 /// # Safety
 /// `ptr` is valid for writing `size` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_poison_constants(ptr: *mut c_void, size: usize) {
+pub(crate) unsafe extern "C" fn rav1g_poison_constants(ptr: *mut c_void, size: usize) {
     if POISON_BUFFERS.load(Ordering::Relaxed) == AV1_POISON_BUFFERS {
         // SAFETY: the caller's contract.
         unsafe { ptr.cast::<u8>().write_bytes(POISON, size) };

@@ -16,21 +16,25 @@
 //!   ([`Device::upload`], a blocking copy on a [`Queue`]), and reports the video memory of its adapter.
 //!   [`OwnedDevice`] is the device for another thread.
 //! - `Buffer`, [`BufferRef`]: a buffer the caller owns, and a buffer of the decoder where it is used.
-//! - [`Layout`], `Pipeline`: what a dispatch needs besides its buffers.
+//! - [`Layout`], `Pipeline`: what a dispatch needs besides its buffers; [`LayoutRef`] and [`PipelineRef`]
+//!   are those of the decoder where they are used.
+//! - [`Commands`]: the recording of a frame's commands: the layout and pipeline of the next dispatches,
+//!   the buffers ([`BufferLocation`]: a place in a buffer) and constants at the binding slots of the
+//!   layout, dispatches, and barriers between dispatches that write and read the same buffer.
 //!
 //! A binding slot is an index into the bindings of a layout in the order of [`LayoutDesc`]: the buffers
 //! the shader reads, the buffers it writes, the constant blocks, then the inline constants. D3D12 has
 //! them as the root parameters of a root signature; a backend with descriptor sets has them as the
 //! bindings of one set, with the inline constants as push constants.
 //!
-//! There is one backend, D3D12 (`d3d12`). The interface grows with the modules of step 3 that need it:
-//! the recording of commands (bindings, dispatches, barriers, copies) comes with the stages. Fences,
-//! timestamp queries and readback are in the C++ of the frame pipeline (`av1_core.cpp`) and join with
-//! step 4.
+//! There is one backend, D3D12 (`d3d12`). Fences, timestamp queries and readback are in the C++ of the
+//! frame pipeline (`av1_core.cpp`) and join this interface with step 4.
 
 pub(crate) mod d3d12;
 
-pub use d3d12::{BufferRef, Device, Layout, OwnedDevice, Queue, Upload};
+pub use d3d12::{
+    BufferLocation, BufferRef, Commands, Device, Layout, LayoutRef, OwnedDevice, PipelineRef, Queue, Upload,
+};
 
 /// Who reads and writes a buffer. The numbers are the `MemoryType` of the C++ host.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

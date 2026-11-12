@@ -458,6 +458,159 @@ impl Pipeline {
     }
 }
 
+/// A pipeline of the decoder in a command: the pipeline state and the root signature a `ComputeShader`
+/// of the C++ host holds.
+#[derive(Clone, Copy)]
+pub struct PipelineRef<'a> {
+    state: &'a ID3D12PipelineState,
+    signature: &'a ID3D12RootSignature,
+}
+
+impl<'a> PipelineRef<'a> {
+    /// # Safety
+    /// `state` and `signature` are the COM pointers of a created pipeline (`ID3D12PipelineState`,
+    /// `ID3D12RootSignature`) and hold their references for `'a`.
+    pub unsafe fn from_com<S, L>(state: &'a S, signature: &'a L) -> Option<PipelineRef<'a>> {
+        // SAFETY: the caller's contract.
+        unsafe { Some(PipelineRef { state: com_ref(state)?, signature: com_ref(signature)? }) }
+    }
+
+    /// The layout of the pipeline.
+    pub fn layout(&self) -> LayoutRef<'a> {
+        LayoutRef { signature: self.signature }
+    }
+}
+
+/// A pipeline layout of the decoder in a command.
+#[derive(Clone, Copy)]
+pub struct LayoutRef<'a> {
+    signature: &'a ID3D12RootSignature,
+}
+
+impl<'a> LayoutRef<'a> {
+    /// # Safety
+    /// `signature` is the COM pointer of a created layout (`ID3D12RootSignature`) and holds its reference
+    /// for `'a`.
+    pub unsafe fn from_com<L>(signature: &'a L) -> Option<LayoutRef<'a>> {
+        // SAFETY: the caller's contract.
+        unsafe { Some(LayoutRef { signature: com_ref(signature)? }) }
+    }
+}
+
+/// A place in a buffer, as a binding takes it: the GPU virtual address.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BufferLocation {
+    address: u64,
+}
+
+impl BufferLocation {
+    /// The place `bytes` further on.
+    pub fn offset(self, bytes: u64) -> BufferLocation {
+        BufferLocation { address: self.address + bytes }
+    }
+}
+
+/// The recording of a frame's commands: the compute command list.
+///
+/// A binding slot is a root parameter index: the bindings of the layout in the order of
+/// [`LayoutDesc`](super::LayoutDesc).
+#[derive(Clone, Copy)]
+pub struct Commands<'a> {
+    list: &'a ID3D12GraphicsCommandList,
+}
+
+/// A barrier for a buffer shaders write: the next command sees what the commands before it wrote.
+///
+/// # Safety
+/// The buffer outlives every use of the barrier.
+unsafe fn write_barrier(buffer: BufferRef<'_>) -> D3D12_RESOURCE_BARRIER {
+    D3D12_RESOURCE_BARRIER {
+        Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
+        Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+        Anonymous: D3D12_RESOURCE_BARRIER_0 {
+            UAV: ManuallyDrop::new(D3D12_RESOURCE_UAV_BARRIER {
+                // SAFETY: a copy of the pointer in a field that is never dropped (the caller's contract).
+                pResource: unsafe { std::mem::transmute_copy(buffer.resource) },
+            }),
+        },
+    }
+}
+
+impl<'a> Commands<'a> {
+    pub fn new(list: &'a ID3D12GraphicsCommandList) -> Commands<'a> {
+        Commands { list }
+    }
+
+    /// The layout of the bindings that follow.
+    #[inline]
+    pub fn set_layout(&self, layout: LayoutRef<'_>) {
+        // SAFETY: a live list and root signature.
+        unsafe { self.list.SetComputeRootSignature(layout.signature) };
+    }
+
+    /// The pipeline of the dispatches that follow.
+    #[inline]
+    pub fn set_pipeline(&self, pipeline: PipelineRef<'_>) {
+        // SAFETY: a live list and pipeline state.
+        unsafe { self.list.SetPipelineState(pipeline.state) };
+    }
+
+    /// A buffer the shader reads, at a slot of the layout.
+    #[inline]
+    pub fn bind_read(&self, slot: u32, location: BufferLocation) {
+        // SAFETY: a live list; the address is one of a buffer of the decoder.
+        unsafe { self.list.SetComputeRootShaderResourceView(slot, location.address) };
+    }
+
+    /// A buffer the shader writes, at a slot of the layout.
+    #[inline]
+    pub fn bind_write(&self, slot: u32, location: BufferLocation) {
+        // SAFETY: as for bind_read.
+        unsafe { self.list.SetComputeRootUnorderedAccessView(slot, location.address) };
+    }
+
+    /// A constant block, at a slot of the layout.
+    #[inline]
+    pub fn bind_constants(&self, slot: u32, location: BufferLocation) {
+        // SAFETY: as for bind_read.
+        unsafe { self.list.SetComputeRootConstantBufferView(slot, location.address) };
+    }
+
+    /// The inline constants of the layout, from the `offset`th on.
+    #[inline]
+    pub fn set_inline_constants<T: InlineConstant>(&self, slot: u32, values: &[T], offset: u32) {
+        // SAFETY: a live list; `values` are 32-bit words.
+        unsafe {
+            self.list.SetComputeRoot32BitConstants(slot, values.len() as u32, values.as_ptr().cast(), offset);
+        }
+    }
+
+    #[inline]
+    pub fn dispatch(&self, x: u32, y: u32, z: u32) {
+        // SAFETY: a live list.
+        unsafe { self.list.Dispatch(x, y, z) };
+    }
+
+    /// The commands that follow see what the commands before wrote into `buffer`.
+    #[inline]
+    pub fn write_barrier(&self, buffer: BufferRef<'_>) {
+        // SAFETY: the barrier is used during the call, while the buffer is borrowed.
+        unsafe { self.list.ResourceBarrier(&[write_barrier(buffer)]) };
+    }
+
+    /// The same for two buffers, as one command.
+    #[inline]
+    pub fn write_barrier2(&self, first: BufferRef<'_>, second: BufferRef<'_>) {
+        // SAFETY: the barriers are used during the call, while the buffers are borrowed.
+        unsafe { self.list.ResourceBarrier(&[write_barrier(first), write_barrier(second)]) };
+    }
+}
+
+/// A 32-bit word that can be an inline constant.
+pub trait InlineConstant: Copy {}
+impl InlineConstant for i32 {}
+impl InlineConstant for u32 {}
+
 /// A buffer the caller owns.
 pub struct Buffer {
     resource: ID3D12Resource,
@@ -489,6 +642,13 @@ impl<'a> BufferRef<'a> {
     pub unsafe fn from_raw<P>(raw: &'a *mut P) -> Option<BufferRef<'a>> {
         // SAFETY: the caller's contract.
         unsafe { com_ref::<*mut P, ID3D12Resource>(raw) }.map(|resource| BufferRef { resource })
+    }
+
+    /// The start of the buffer as a binding takes it.
+    #[inline]
+    pub fn location(&self) -> BufferLocation {
+        // SAFETY: a live buffer.
+        BufferLocation { address: unsafe { self.resource.GetGPUVirtualAddress() } }
     }
 
     /// Ends the mapping of a mapped buffer.

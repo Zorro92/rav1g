@@ -23,6 +23,7 @@
 /* Tables of the entropy decoder the host reads. */
 extern "C" {
 #include "av1/common/reconinter.h"
+#include "av1/common/scan.h"
 #include "av1/common/warped_motion.h"
 }
 
