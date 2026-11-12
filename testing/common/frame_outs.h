@@ -58,11 +58,20 @@ typedef struct OutBuffer {
   uint32_t frame_no_offset;
   uint32_t shown;
   OutBuffer() { memset(this, 0, sizeof(OutBuffer)); }
-  ~OutBuffer() {}
+  ~OutBuffer() { DropReadback(); }
+  void DropReadback() {
+    if (d3d12buffer && pMem) {
+      const D3D12_RANGE written = {0, 0};
+      d3d12buffer->Unmap(0, &written);
+    }
+    d3d12buffer.Reset();
+    pMem = nullptr;
+    buffer_size = 0;
+  }
   void Reset() {
+    DropReadback();
     for (int i = 0; i < 3; i++) {
       d3d12textures[i].Reset();
-      d3d12buffer.Reset();
       planes[i] = 0;
       strides[i] = 0;
     }

@@ -204,6 +204,12 @@ int BufferLocker::ReleaseBufferInt(void* buffer_priv) {
 }
 
 int AV1Decoder::DecodeOne() {
+  // A completed -r task released all its pools below. Measure its settle before the
+  // next reader starts allocating compressed read-ahead buffers.
+  if (settle_pending_ && !initialized_ && !storage_ && host_mem_.empty()) {
+    SettleAppMemory();
+    settle_pending_ = false;
+  }
   // int res;
   int dec_flags = 0;
   StreamReader reader(srmodeAsync);
@@ -698,6 +704,14 @@ int AV1Decoder::DecodeOne() {
   }
   LogMemory("after the task's md5 and timing records were released");
   uint32_t has_md5_errors = output_queue_->has_md5_errors_;
+  if (!initialized_) {
+    // DestroyDecoder has joined the completion thread; RemoveSource and Finalize have
+    // released the displayed/last frame. A destroyed decoder no longer needs these.
+    output_queue_.reset();
+    storage_.reset();
+    std::vector<uint8_t>().swap(host_mem_);
+    LogMemory("after the destroyed task's host and output pools were released");
+  }
   if (*stop_ == taskNext) *stop_ = TaskNone;
   if (params_.conformance_) {
     if (has_md5_errors) {
