@@ -331,8 +331,16 @@ void av1_set_async_clear(int enable);
  * of any stream, alone and at once:
  *   AV1_POISON_MODE_INFO  the mode info pool
  *   AV1_POISON_BUFFERS    every buffer the CPU writes and a shader reads
- *                         (the mode info pool among them)
- * The decoded output must be the same with either. */
+ *                         (the mode info pool among them), and the constants
+ *                         of every stage again in every frame, right before
+ *                         the stage writes them: their memory is reused from
+ *                         frame to frame, so a field that a stage leaves
+ *                         unwritten otherwise holds what an earlier frame had
+ *                         there (docs/gpu-av1-decoder.md, "Unwritten fields of
+ *                         a constant record")
+ * What the decoder clears or initialises after the creation (the coefficient
+ * buffer, the grids of a frame) stays as it is. The decoded output must be
+ * the same with either. */
 enum { AV1_POISON_OFF = 0, AV1_POISON_MODE_INFO = 1, AV1_POISON_BUFFERS = 2 };
 void av1_set_poison_buffers(int level);
 

@@ -14,7 +14,10 @@ defect of the decoder and cannot be listed in expected.txt, so it fails the run 
 order_check.py is the check for it that repeats nothing). One case is not a failure of the stream:
 the D3D12 device is removed while the stream is decoded, which happens now and then on WARP, to another
 stream from run to run. Such a run is reported ("D3D12 device removed") and the stream is decoded alone
-again, up to three times; its result is the one of a run that kept its device.
+again, up to three times; its result is the one of a run that kept its device. Every run prints one line with
+the number of decoder processes that lost the device, also when it is 0 ("D3D12 DEVICE REMOVALS: ..."), and
+has it in the summary: the count over the runs of a branch is how to tell whether the removals are gone
+(docs/warp-decoder.md).
 
 Written to --out:
   results.tsv              one line per stream
@@ -44,6 +47,26 @@ DEVICE_REMOVED = ('the D3D12 device was removed', 'hr 0x887A0005')
 
 def device_removed(result):
     return any(text in result.detail for text in DEVICE_REMOVED)
+
+
+def removals_line(removals, processes, title=''):
+    """The line every run prints, with or without removals: removals is a list of (stream, where), one entry
+    per decoder process that lost the D3D12 device."""
+    text = 'D3D12 DEVICE REMOVALS: %d in %d decoder processes' % (len(removals), processes)
+    if title:
+        text += ' (%s)' % title
+    if removals:
+        text += ': ' + ', '.join('%s [%s]' % removal for removal in removals)
+    return text
+
+
+def report_removals(removals, processes, title=''):
+    """Prints the line, and on GitHub Actions a warning on the run when a device was removed."""
+    line = removals_line(removals, processes, title)
+    print(line)
+    if removals and os.environ.get('GITHUB_ACTIONS'):
+        print('::warning title=D3D12 device removed::' + line)
+    return line
 
 
 class Result:
@@ -269,6 +292,8 @@ def main():
     results = {}
     header = []
     processes = 0
+    # One entry per decoder process that lost the D3D12 device: (the first stream that says so, where).
+    removals = []
     for _, batch in batches:
         remaining = list(batch)
         while remaining:
@@ -277,6 +302,10 @@ def main():
             if fatal:
                 print(fatal)
                 return 2
+            lost_here = [r for r in got if device_removed(r)]
+            if lost_here:
+                removals.append((lost_here[0].name, 'first in its process' if lost_here[0].first_in_process
+                                 else 'stream %d of its process' % (got.index(lost_here[0]) + 1)))
             header = header or head
             if [r.name for r in got] != [name for name, _ in remaining[:len(got)]]:
                 print('the decoder did not run the tasks in the order of its list')
@@ -314,6 +343,8 @@ def main():
                     return 2
                 alone = got[0]
                 print('%-52s alone: %s' % (name, alone.outcome()), flush=True)
+                if device_removed(alone):
+                    removals.append((name, 'alone, repeat %d' % (lost_alone + 1)))
                 if not device_removed(alone) or lost_alone == 2:
                     break
                 lost_alone += 1
@@ -404,6 +435,7 @@ def main():
         '- Time: %.1f min for the whole run (%d decoder processes, %d failing streams decoded again alone); '
         '%.1f min of it decoding' % (total_s / 60.0, processes, repeats, decode_s / 60.0),
         '- Decoder threads: %d%s' % (args.threads, ('; further arguments: ' + ' '.join(args.tool_args)) if args.tool_args else ''),
+        '- ' + cell(removals_line(removals, processes + repeats)),
         '']
     if device_lost:
         summary += ['### D3D12 device removed', '',
@@ -443,6 +475,7 @@ def main():
     print('%.1f min for the whole run, %.1f min of it decoding' % (total_s / 60.0, decode_s / 60.0))
     for lost in device_lost:
         print('D3D12 DEVICE REMOVED: ' + lost)
+    report_removals(removals, processes + repeats, args.title)
     for problem in problems:
         print('NOT AS EXPECTED: ' + problem)
     return 1 if problems else 0
