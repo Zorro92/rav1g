@@ -319,6 +319,23 @@ const char *av1_shader_variant(void);
  * is in flight. */
 void av1_set_async_clear(int enable);
 
+/* Process-wide debugging aid of the test programs (-poisonmi, -poisonbuf),
+ * for the decoders created after the call; never on by default. The buffers
+ * the CPU writes for the shaders are not cleared when they are created, and
+ * D3D12 hands out memory that an earlier decoder of the process has used. A
+ * shader that reads bytes the CPU never wrote (padding of a C struct, a field
+ * the block's kind does not have) then depends on what was decoded before
+ * (docs/gpu-av1-decoder.md, "Padding of the mode info record"). With a
+ * non-zero level the decoder fills such buffers with the byte 0xA5 right
+ * after it has created them, so that a read of this kind shows in the output
+ * of any stream, alone and at once:
+ *   AV1_POISON_MODE_INFO  the mode info pool
+ *   AV1_POISON_BUFFERS    every buffer the CPU writes and a shader reads
+ *                         (the mode info pool among them)
+ * The decoded output must be the same with either. */
+enum { AV1_POISON_OFF = 0, AV1_POISON_MODE_INFO = 1, AV1_POISON_BUFFERS = 2 };
+void av1_set_poison_buffers(int level);
+
 /* Stage dumps: a debugging aid of the test programs (-dumpstages). For the
  * frames it is asked for, the decoder copies the buffer a stage of the frame's
  * command list has just written into a readback buffer, right behind the
