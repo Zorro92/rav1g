@@ -627,6 +627,46 @@ whole words read and written back around an edge). The vectors differ from the 1
 more way: their vertical and horizontal levels differ (one of them can be 0), and their level varies
 with the reference of the block.
 
+### 66x66 frame 1: the four samples follow from one term of the 8-tap filter (to be checked on the console dump)
+
+WARP's dump of frame 1 with the new buffers (run 43160403800) says what the odd pass does there. The
+left 64 columns are one 64x64 block with one transform, so the even pass filters nothing in luma
+(`lf_vert_even` equals `intra`), and the odd pass is one edge per row, at x 64, level 4, 8 taps (the
+block right of it is 8x16 with an 8x16 transform; `stage_dump.py edges ... --x 64 --y 41`). Samples x 66
+to 71 of these rows are outside the picture but inside the block, and the 8-tap filter reads x 60..67.
+
+A model of `filter_vertical_edge` of `loopfilter_vert.hlsl` in Python reproduces WARP's `lf_vert` from
+its `lf_vert_even` in all 68 rows. The filter applies its 8-tap branch in 14 of them. Changing the model
+one thing at a time (another level, another filter length, another `hev` threshold, any one input sample
+of x 56..71 off by up to 3, an operand of one of the three q-side steps replaced by another sample) and
+comparing with WARP gives the console's picture, four luma samples at x 64..65 in rows 41, 52 and 61 and
+nothing else, for one family only: the first q-side step of the 8-tap branch, `v += -p1.x + q0.w`, adds
+about nothing instead of `q0.w - p1.x`. The values that predicts for the console's `lf_vert`:
+
+| x, y | WARP | predicted for the console |
+| --- | --- | --- |
+| 65, 41 | 153 | 152 |
+| 65, 52 | 153 | 154 |
+| 64, 61 | 166 | 167 |
+| 65, 61 | 166 | 167 |
+
+with x 66 and 67 of every row as on WARP. In FXC's listing of the shader (`shader-survey/asm/
+loopfilter_vert.asm`) that step is `iadd r2.x, r3.w, -r3.y` (`r3.w` is `q0.w`, `r3.y` is `p1.x`), and
+four instructions further down the same two components are rewritten in place by one vector
+instruction, `iadd r3.yw, r3.wwww, -r4.xxxy` (`q0.w - p1.y` and `q0.w - p1.z`, the next two steps). If
+the first instruction reads `r3.w` and `r3.y` as they are after the second, it adds `p1.y - p1.z`, which
+is 0 or 1 where the 8-tap branch runs, and that gives exactly the four values of the table. The
+listing of `loopfilter_vert_hbd` has no instruction that writes components of a register from other
+written components of the same register; `loopfilter_vert` has five, `loopfilter_hor` three,
+`loopfilter_hor_hbd` two (so not every such instruction goes wrong there).
+
+This is a reading of WARP's data against the console's reported differences, not a console result. It
+is checked without a new run when the console's four samples have the values of the table. If they do,
+the edge lists and the frame are not what differs: the console runs that one sequence of the 8-bit
+shader differently, every 8-bit frame with an 8-tap vertical edge in a flat place is affected, and the
+candidate fix is to write the 8-tap branch of the 8-bit filters so that FXC does not produce that
+sequence (each output from its own sum, as the 14-tap branch does), with the listing checked for it.
+
 ### The edge lists: read through, nothing unwritten
 
 What the loop filter reads of `loopfilter_blocks`, and what writes it:
