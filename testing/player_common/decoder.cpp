@@ -16,6 +16,7 @@
 
 #include "decoder.h"
 #include "decoder_creator.h"
+#include <direct.h>
 
 #define PLANE_WIDTH_ALIGMENT 256
 #define PLANE_WIDTH_ALIGMENT1 (PLANE_WIDTH_ALIGMENT - 1)
@@ -467,6 +468,21 @@ int AV1Decoder::DecodeOne() {
   av1_set_async_clear(params_.asyncclear_ ? 1 : 0);
   XB_LOGI << "Clears: " << (params_.asyncclear_ ? "off the decode thread (-asyncclear)" : "decode thread (original)");
 
+  // -dumpstages: like the switches above, set while no frame is in flight.
+  if (!params_.dump_frames_.empty()) {
+    _mkdir(params_.dumpdir_.c_str());
+    const size_t name_pos = params_.source_file_.find_last_of("\\/");
+    stage_dumps_.Start(params_.dumpdir_,
+                       name_pos == std::string::npos ? params_.source_file_ : params_.source_file_.substr(name_pos + 1));
+    av1_set_stage_dump(StageDumpWriter::Callback, &stage_dumps_, params_.dump_frames_.data(),
+                       (int)params_.dump_frames_.size());
+    dumps_installed_ = 1;
+    XB_LOGI << "DUMPSTAGES frames " << params_.dumpstages_ << " (decoding order) to " << params_.dumpdir_;
+  } else {
+    av1_set_stage_dump(NULL, NULL, NULL, 0);
+    dumps_installed_ = 0;
+  }
+
   output_queue_ = std::unique_ptr<BufferLocker>(new BufferLocker(&params_, cur_frame, storage_));
   if (display_) display_->AddSource(this);
 
@@ -523,6 +539,16 @@ int AV1Decoder::DecodeOne() {
   // drain
   aom_codec_decode(&decctx_, 0, 0, 0);
   LogMemory("after the drain");
+  // The drain joins the decoder's GPU completion thread: every dump of the task is written.
+  if (dumps_installed_) {
+    av1_set_stage_dump(NULL, NULL, NULL, 0);
+    dumps_installed_ = 0;
+    const std::vector<std::string> lines = stage_dumps_.TakeLines();
+    for (size_t i = 0; i < lines.size(); ++i) XB_LOGI << lines[i];
+    XB_LOGI << "DUMPSTAGES " << stage_dumps_.Dumps() << " dumps, " << MibString(stage_dumps_.Bytes()) << ", in "
+            << params_.dumpdir_;
+    if (!stage_dumps_.Error().empty()) XB_LOGE << "DUMPSTAGES " << stage_dumps_.Error();
+  }
   // The drain joins the decoder's GPU completion thread, so every frame record is in.
   if (params_.gputime_ || params_.nopresent_) PerfReport();
 #if (!ASYNC_OUTPUT && !CB_OUTPUT)

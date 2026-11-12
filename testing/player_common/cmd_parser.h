@@ -55,6 +55,10 @@ class CParameters {
     std::string use_log_;
     std::string save_wrong_yuv_;
     std::string save_md5_;
+    // -dumpstages: the frame list as given and as numbers; -dumpdir: where the dumps go (under LocalState).
+    std::string dumpstages_;
+    std::string dumpdir_;
+    std::vector<int> dump_frames_;
     bool isDirectory_;
     bool isSubList_;
     bool showIt_;

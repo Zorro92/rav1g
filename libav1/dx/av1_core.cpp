@@ -247,6 +247,191 @@ static size_t async_clear_slot(av1_frame_thread_data *td) {
   return bytes;
 }
 
+// ---------------------------------------------------------------------------
+// Test program flag -dumpstages (av1_set_stage_dump in av1_perf.h): copies of the buffers behind the stages of
+// a frame's command list. Inert until a callback and a frame list are set.
+// ---------------------------------------------------------------------------
+enum { StageDumpFramesMax = 256 };
+static av1_stage_dump_cb_fn_t g_stage_dump_cb = NULL;
+static void *g_stage_dump_priv = NULL;
+static int g_stage_dump_frames[StageDumpFramesMax];
+static int g_stage_dump_count = 0;
+
+extern "C" void av1_set_stage_dump(av1_stage_dump_cb_fn_t cb, void *priv, const int *frames, int count) {
+  g_stage_dump_cb = NULL;
+  g_stage_dump_count = 0;
+  if (!cb || !frames || count <= 0) return;
+  if (count > StageDumpFramesMax) count = StageDumpFramesMax;
+  memcpy(g_stage_dump_frames, frames, sizeof(int) * (size_t)count);
+  g_stage_dump_count = count;
+  g_stage_dump_priv = priv;
+  g_stage_dump_cb = cb;
+}
+
+static int stage_dump_wanted(int frame_number) {
+  if (!g_stage_dump_cb) return 0;
+  for (int i = 0; i < g_stage_dump_count; ++i)
+    if (g_stage_dump_frames[i] == frame_number) return 1;
+  return 0;
+}
+
+// Start of a command list: is its frame dumped. Copies of a frame that was never submitted are dropped here.
+static void stage_dump_begin(av1_frame_thread_data *td, int is_sef) {
+  for (int i = 0; i < td->dump_count; ++i) td->dumps[i].readback.Reset();
+  td->dump_count = 0;
+  td->dump_is_sef = is_sef;
+  td->dump_info[0] = 0;
+  td->dump_active = stage_dump_wanted(td->frame_number);
+}
+
+// Records the copy of |size| bytes of |src| from |offset| into a readback buffer of its own. |src| is a
+// buffer the shaders write (unordered access state), so it is a copy source for the length of the copy.
+static av1_stage_dump_entry *stage_dump_copy(Av1Core *dec, const char *stage, ID3D12Resource *src, size_t offset,
+                                             size_t size) {
+  av1_frame_thread_data *td = dec->curr_frame_data;
+  if (!td || !td->dump_active || !size) return NULL;
+  if (td->dump_count >= Av1StageDumpMax) {
+    av1_log(1, "DUMPSTAGES frame %d: no room for the dump of stage %s", td->frame_number, stage);
+    return NULL;
+  }
+  av1_stage_dump_entry *e = &td->dumps[td->dump_count];
+  D3D12_HEAP_PROPERTIES heap_props = {};
+  heap_props.Type = D3D12_HEAP_TYPE_READBACK;
+  D3D12_RESOURCE_DESC buf_desc = {};
+  buf_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  buf_desc.Width = size;
+  buf_desc.Height = 1;
+  buf_desc.DepthOrArraySize = 1;
+  buf_desc.MipLevels = 1;
+  buf_desc.Format = DXGI_FORMAT_UNKNOWN;
+  buf_desc.SampleDesc.Count = 1;
+  buf_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  const HRESULT hr = dec->compute.device->CreateCommittedResource(
+      &heap_props, D3D12_HEAP_FLAG_NONE, &buf_desc, D3D12_RESOURCE_STATE_COPY_DEST, NULL, IID_PPV_ARGS(&e->readback));
+  if (FAILED(hr)) {
+    av1_log(1, "DUMPSTAGES frame %d: no readback buffer of %llu bytes for stage %s (hr 0x%08X)", td->frame_number,
+            (unsigned long long)size, stage, (unsigned)hr);
+    e->readback.Reset();
+    return NULL;
+  }
+  ID3D12GraphicsCommandList *command_list = dec->compute.command_list.Get();
+  command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(src, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                                         D3D12_RESOURCE_STATE_COPY_SOURCE));
+  command_list->CopyBufferRegion(e->readback.Get(), 0, src, offset, size);
+  command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(src, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                                                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
+  memset(e->planes, 0, sizeof(e->planes));
+  e->stage = stage;
+  e->kind = 0;
+  e->bytes_per_sample = td->is_hbd ? 2 : 1;
+  e->bit_depth = td->bitdepth;
+  e->size = size;
+  ++td->dump_count;
+  return e;
+}
+
+void av1_stage_dump_fb(Av1Core *dec, const char *stage, const HwFrameBuffer *fb, const HwFrameBuffer *dims) {
+  if (!dims) dims = fb;
+  // The whole buffer, borders and all, from its start in the pool.
+  av1_stage_dump_entry *e = stage_dump_copy(dec, stage, dec->frame_buffer_pool->dev, fb->base_offset, fb->size);
+  if (!e) return;
+  for (int p = 0; p < 3; ++p) {
+    e->planes[p].offset = (uint32_t)(fb->planes[p].offset - fb->base_offset);
+    e->planes[p].stride = (uint32_t)fb->planes[p].stride;
+    e->planes[p].width = (uint32_t)(p ? dims->uv_crop_width : dims->y_crop_width);
+    e->planes[p].height = (uint32_t)(p ? dims->uv_crop_height : dims->y_crop_height);
+  }
+}
+
+void av1_stage_dump_residuals(Av1Core *dec, const char *stage) {
+  av1_frame_thread_data *td = dec->curr_frame_data;
+  if (!td || !td->dump_active) return;
+  const HwFrameBuffer *fb = td->frame_buffer;
+  // The residual planes of the frame: rows of res_stride bytes from res_offset, 128-aligned in both directions.
+  size_t size = (size_t)fb->planes[2].res_offset + (size_t)fb->planes[2].res_stride * (((fb->height >> 1) + 127) & ~127);
+  if (size > dec->idct_residuals->size) size = dec->idct_residuals->size;
+  av1_stage_dump_entry *e = stage_dump_copy(dec, stage, dec->idct_residuals->dev, 0, size);
+  if (!e) return;
+  e->kind = 1;
+  e->bytes_per_sample = 2;
+  for (int p = 0; p < 3; ++p) {
+    e->planes[p].offset = (uint32_t)fb->planes[p].res_offset;
+    e->planes[p].stride = (uint32_t)fb->planes[p].res_stride;
+    e->planes[p].width = (uint32_t)(p ? fb->uv_crop_width : fb->y_crop_width);
+    e->planes[p].height = (uint32_t)(p ? fb->uv_crop_height : fb->y_crop_height);
+  }
+}
+
+void av1_stage_dump_output(Av1Core *dec, const char *stage, const HwOutputImage *img, size_t size) {
+  // The output image is put together at the start of back_buffer1, in the layout of the image.
+  av1_stage_dump_entry *e =
+      stage_dump_copy(dec, stage, dec->frame_buffer_pool->dev, dec->back_buffer1.base_offset, size);
+  if (!e) return;
+  for (int p = 0; p < (img->monochrome ? 1 : 3); ++p) {
+    e->planes[p].offset = (uint32_t)img->planes[p].offset;
+    e->planes[p].stride = (uint32_t)img->planes[p].stride;
+    e->planes[p].width = (uint32_t)(p ? img->uv_crop_width : img->y_crop_width);
+    e->planes[p].height = (uint32_t)(p ? img->uv_crop_height : img->y_crop_height);
+  }
+}
+
+// One line about the frame for its dumps: what a reader needs to know which stages ran and on what.
+static void stage_dump_frame_info(Av1Core *dec, AV1_COMMON *cm) {
+  av1_frame_thread_data *td = dec->curr_frame_data;
+  if (!td->dump_active) return;
+  static const char *const frame_types[] = {"key", "inter", "intra_only", "switch"};
+  const int type = cm->current_frame.frame_type;
+  int len = snprintf(td->dump_info, sizeof(td->dump_info),
+                     "type=%s show=%d showable=%d size=%dx%d upscaled_width=%d superres_denom=%d bit_depth=%d "
+                     "base_q_idx=%d lf=%d,%d,%d,%d cdef=%d superres=%d loop_rest=%d film_grain=%d tiles=%dx%d "
+                     "scaled_refs=%d refs=",
+                     (type >= 0 && type < 4) ? frame_types[type] : "?", cm->show_frame, cm->showable_frame, cm->width,
+                     cm->height, cm->superres_upscaled_width, cm->superres_scale_denominator, td->bitdepth,
+                     cm->base_qindex, cm->lf.filter_level[0], cm->lf.filter_level[1], cm->lf.filter_level_u,
+                     cm->lf.filter_level_v, td->do_cdef, td->do_superres, td->do_loop_rest, td->do_filmgrain,
+                     cm->tile_cols, cm->tile_rows, td->scale_enable);
+  for (int i = 0; i < 7 && len > 0 && len < (int)sizeof(td->dump_info); ++i) {
+    const HwFrameBuffer *ref = frame_is_intra_only(cm) ? NULL : td->refs[i];
+    if (ref)
+      len += snprintf(td->dump_info + len, sizeof(td->dump_info) - len, "%s%d:%dx%d", i ? "," : "",
+                      ref->frame_number, ref->y_crop_width, ref->y_crop_height);
+    else
+      len += snprintf(td->dump_info + len, sizeof(td->dump_info) - len, "%s-", i ? "," : "");
+  }
+}
+
+// GPU completion thread, after the frame's fence: hand the copies over and release them.
+static void stage_dump_deliver(av1_frame_thread_data *td) {
+  const av1_stage_dump_cb_fn_t cb = g_stage_dump_cb;
+  for (int i = 0; i < td->dump_count; ++i) {
+    av1_stage_dump_entry *e = &td->dumps[i];
+    D3D12_RANGE read_range = {0, e->size};
+    void *ptr = NULL;
+    if (cb && e->readback && SUCCEEDED(e->readback->Map(0, &read_range, &ptr)) && ptr) {
+      av1_stage_dump dump = {};
+      dump.frame_number = td->frame_number;
+      dump.index = i;
+      dump.stage = e->stage;
+      dump.kind = e->kind;
+      dump.bytes_per_sample = e->bytes_per_sample;
+      dump.bit_depth = e->bit_depth;
+      dump.is_sef = td->dump_is_sef;
+      dump.info = td->dump_info;
+      memcpy(dump.planes, e->planes, sizeof(dump.planes));
+      dump.data = (const uint8_t *)ptr;
+      dump.size = e->size;
+      cb(g_stage_dump_priv, &dump);
+      D3D12_RANGE written = {0, 0};
+      e->readback->Unmap(0, &written);
+    } else if (cb) {
+      av1_log(1, "DUMPSTAGES frame %d: the dump of stage %s could not be read back", td->frame_number, e->stage);
+    }
+    e->readback.Reset();
+  }
+  td->dump_count = 0;
+  td->dump_active = 0;
+}
+
 static int get_random_number_test(int val) {
   unsigned int bit;
   bit = ((val >> 0) ^ (val >> 1) ^ (val >> 3) ^ (val >> 12)) & 1;
@@ -1059,6 +1244,7 @@ void av1_destroy_gpu_decoder(Av1Core *dec) {
 void av1_prepare_command_buffer(Av1Core *dec) {
   av1_frame_thread_data *td = dec->curr_frame_data;
   dx_compute_context *compute = &dec->compute;
+  stage_dump_begin(td, td->output_only);
 
   td->command_buffer.allocator->Reset();
   compute->command_list->Reset(td->command_buffer.allocator.Get(), NULL);
@@ -1204,6 +1390,8 @@ THREADFN gpu_thread_hook(void *data) {
       // sync gpu
       const int64_t perf_wait_start = td->perf.collect ? perf_now() : 0;
       av1_sync_gpu(td);
+      // -dumpstages: the copies of the frame's stages, while the slot is still this frame's.
+      if (td->dump_count) stage_dump_deliver(td);
       if (perf_wait_start) {
         // Read the frame's timestamps now: its fence is done and the slot has
         // not gone back to the pool yet.
@@ -1938,6 +2126,8 @@ extern "C" void av1_decode_sef(AV1Decoder *pbi) {
   if (!dec->gpu_thread) pthread_create(&dec->gpu_thread, 0, (LPTHREAD_START_ROUTINE)gpu_thread_hook, dec);
 
   av1_prepare_command_buffer(dec);
+  if (td->dump_active)
+    snprintf(td->dump_info, sizeof(td->dump_info), "show_existing_frame film_grain=%d", td->do_filmgrain);
   av1_postprocess_copy_output(dec, cm);
   av1_commit_command_buffer(dec);
 
@@ -1957,6 +2147,7 @@ extern "C" int av1_decode_frame_gpu(AV1Decoder *pbi) {
   AV1_COMMON *cm = &pbi->common;
   int64_t perf_t = av1_perf_ticks();
   av1_prepare_command_buffer(dec);
+  stage_dump_frame_info(dec, cm);
   av1_prediction_gen_blocks(pbi, dec);
   perf_t = perf_lap(dec, AV1_PERF_CPU_REC_GEN_BLOCKS, perf_t);
   av1_idct_run(dec);

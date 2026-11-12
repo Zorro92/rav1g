@@ -71,6 +71,8 @@ warp_decoder -list tasks.txt -t 4
 | `-o <file>` | write the visible samples of every output frame, as they are hashed |
 | `-save_wrong_yuv <dir>` | with a reference: write each frame that differs to `<dir>/<name>_<frame>.yuv` |
 | `-limit <n>` | decode only the first n temporal units |
+| `-dumpstages <frames>` | write the buffers behind every GPU stage of these frames to `<dir>/<name>_f<n>.stages`; see [Stage dumps](#stage-dumps) |
+| `-dumpdir <dir>` | where `-dumpstages` writes (default `dumps`; created when it is not there) |
 | `-t <n>` | decoder threads (default 1) |
 | `-queue_size <n>` | output images in the pool (default 4) |
 | `-timeout <seconds>` | give up on a task after this time |
@@ -109,6 +111,40 @@ Exit code: 0 every task decoded and matched, 1 a frame or a frame count differs,
 error, 3 bad arguments or no D3D12 device, 4 timeout. A crash (an access violation, a failed
 assert of the library) ends the process without a `RESULT` line: a `CRASH exception 0x... at
 <module>+0x<offset>` line names the place, which `warp_decoder.map` resolves.
+
+## Stage dumps
+
+`-dumpstages <frames>` is the test player's flag
+([test-player.md](test-player.md#stage-dumps--dumpstages): the frame numbers, the stages, the
+file format's use): for the listed frames the buffer behind every GPU stage of the frame's
+command list is written to `<dumpdir>/<name>_f<n>.stages`. The player on a console and
+warp_decoder on WARP write the same files for the same stream, and
+`testing/stage_dump/stage_dump.py compare` says at which stage the two part and how.
+
+```bat
+warp_decoder -i clip.ivf -limit 2 -dumpstages 0,1 -dumpdir dumps
+python testing/stage_dump/stage_dump.py list dumps
+python testing/stage_dump/stage_dump.py compare console-dumps dumps
+```
+
+The conformance job writes such dumps on WARP for the streams and frames listed in
+`testing/conformance/dump_tasks.txt` (`<stream> <frames> [<temporal units>]`), after the
+run, and keeps them in the artifact `rav1g-stage-dumps-<run id>`, one directory per stream
+with the dumps, the task's log and its md5 file:
+
+- vectors (`aom`) and streams encoded in the job (`svt`): the `.stages` files. An `svt`
+  stream is ffmpeg's test pattern, and what the encoder makes of it depends on the encoder's
+  version, so the stream itself is in the artifact too (`streams/`): put that file on the
+  other device to compare the same frames.
+- cuts of published streams (`cut`): `.digest` files only, a hash per row and a CRC per 8x8
+  block of every plane of every stage. A digest has no samples; neither the streams nor
+  their decoded frames leave the job. `stage_dump.py compare` takes a digest on either side
+  and then reports which rows and 8x8 blocks differ, not by how much. The same cut can be
+  made anywhere with the line of `streams.txt` (`ffmpeg -ss <start> -i <url> -map 0:v:0
+  -frames:v <frames> -c copy -f ivf`).
+
+To get dumps of other frames, edit `dump_tasks.txt` and push; the job prints what it dumped
+(`stage_dump.py list`) in the step's log.
 
 ## AOM's md5 files
 

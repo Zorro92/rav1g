@@ -194,6 +194,7 @@ void av1_loopfilter_gpu(Av1Core *dec, AV1_COMMON *cm, MACROBLOCKD *xd) {
     command_list->Dispatch((srt.wicount + 63) >> 6, 1, 1);
   }
   command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
+  av1_stage_dump_fb(dec, "lf_vert_even", td->frame_buffer);
 
   srt.block_id_offset = 1;
   for (int p = 0; p < 3; ++p) {
@@ -209,6 +210,7 @@ void av1_loopfilter_gpu(Av1Core *dec, AV1_COMMON *cm, MACROBLOCKD *xd) {
 
   command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
   av1_perf_gpu_mark(dec, AV1_PERF_GPU_LF_VERT);
+  av1_stage_dump_fb(dec, "lf_vert", td->frame_buffer);
 
   shader = &td->shaders->loopfilter_h;
   command_list->SetPipelineState(shader->pso.Get());
@@ -225,6 +227,7 @@ void av1_loopfilter_gpu(Av1Core *dec, AV1_COMMON *cm, MACROBLOCKD *xd) {
   }
   command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
   av1_perf_gpu_mark(dec, AV1_PERF_GPU_LF_HORZ);
+  av1_stage_dump_fb(dec, "lf_horz", td->frame_buffer);
 }
 
 struct UpscaleData {
@@ -274,6 +277,7 @@ void av1_superres(Av1Core *dec, HwFrameBuffer *src, HwFrameBuffer *dst, int iter
 
   command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
   av1_perf_gpu_mark(dec, AV1_PERF_GPU_SUPERRES);
+  av1_stage_dump_fb(dec, iter == 2 ? "superres_lr" : "superres", dst);
 }
 
 struct PlaneInfo1 {
@@ -425,6 +429,7 @@ void av1_cdef_filter_run(Av1Core *dec, AV1_COMMON *cm, HwFrameBuffer *src, HwFra
   command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
   PutPerfMarker(td, &td->perf_markers[4]);
   av1_perf_gpu_mark(dec, AV1_PERF_GPU_CDEF);
+  av1_stage_dump_fb(dec, "cdef", dst, src);
 }
 
 void av1_looprestoration(Av1Core *dec, AV1_COMMON *cm, void *lr_ctxt) {
@@ -528,6 +533,7 @@ void av1_looprestoration(Av1Core *dec, AV1_COMMON *cm, void *lr_ctxt) {
   }
   PutPerfMarker(td, &td->perf_markers[5]);
   av1_perf_gpu_mark(dec, AV1_PERF_GPU_LOOP_REST);
+  av1_stage_dump_fb(dec, "loop_rest", dst_buffer);
 }
 
 void av1_cdef_looprestoration(Av1Core *dec, AV1_COMMON *cm, void *lr_ctxt) {
@@ -1095,5 +1101,6 @@ int av1_postprocess_copy_output(Av1Core *dec, AV1_COMMON *cm) {
       1, &CD3DX12_RESOURCE_BARRIER::Transition(dec->frame_buffer_pool->dev, D3D12_RESOURCE_STATE_COPY_SOURCE,
                                                D3D12_RESOURCE_STATE_UNORDERED_ACCESS));
   av1_perf_gpu_mark(dec, AV1_PERF_GPU_OUTPUT_COPY);
+  av1_stage_dump_output(dec, "output", img, (size_t)size);
   return 0;
 }

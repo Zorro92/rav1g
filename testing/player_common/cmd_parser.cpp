@@ -15,6 +15,7 @@
  */
 
 #include "cmd_parser.h"
+#include "common/stage_dump.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <map>
@@ -35,6 +36,12 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"save_wrong_yuv", atString, anOptional,
        "with -md5_frame_check: write each frame whose md5 differs to <dir>/<stream>_<frame>.yuv", "",
        &params_.save_wrong_yuv_},
+      {"dumpstages", atString, anOptional,
+       "frame list like 0,3,10-12 (decoding order, hidden frames count): write the buffers behind every GPU "
+       "stage of these frames to <dumpdir>/<stream>_f<n>.stages",
+       "", &params_.dumpstages_},
+      {"dumpdir", atString, anOptional, "directory of -dumpstages under LocalState, default /dumps", "",
+       &params_.dumpdir_},
       {"frate", atInt, anOptional,
        "Frame rate. 0 - webm header framerate(for webm only), -1 - maximum frate, default 0", "", &params_.frate_},
       {"dropinfo", atSingle, anOptional, "Show all drops", "", &params_.show_drops_},
@@ -164,6 +171,12 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     Err += ss;
     return -1;
   }
+  if (!params_.dumpstages_.empty() && !ParseStageDumpFrames(params_.dumpstages_, &params_.dump_frames_)) {
+    Err += "-dumpstages " + params_.dumpstages_ + " is not a frame list like 0,3,10-12 of at most 256 frames.";
+    return -1;
+  }
+  if (params_.dumpdir_.empty()) params_.dumpdir_ = "/dumps";
+  params_.dumpdir_ = write_root_path_ + params_.dumpdir_;
   // -lowmem is all parts; -lowmemparts alone says exactly which ones (0: none); neither: the default, part 1.
   if (params_.lowmem_) params_.lowmem_parts_ = PLAYER_LOWMEM_ALL;
   // The defaults that have an opt-out flag. -cdefv2 and -fitsize are still accepted and change nothing;
@@ -195,6 +208,9 @@ void CParameters::Reset() {
   params_.use_log_.clear();
   params_.save_wrong_yuv_.clear();
   params_.save_md5_.clear();
+  params_.dumpstages_.clear();
+  params_.dumpdir_.clear();
+  params_.dump_frames_.clear();
   params_.isDirectory_ = false;
   params_.isSubList_ = false;
   params_.showIt_ = false;

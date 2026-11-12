@@ -36,6 +36,7 @@
 
 #include "common/stream_reader.h"
 #include "common/md5_utils.h"
+#include "common/stage_dump.h"
 #include "aom/aom_codec.h"
 #include "aom/aom_decoder.h"
 #include "aom/aomdx.h"
@@ -92,6 +93,9 @@ struct Task {
   bool intraopt = false;
   bool asyncclear = false;
   int timeout_s = 0;          // -timeout: seconds for the task, 0 = none
+  std::string dumpstages;     // -dumpstages <frame list>
+  std::string dumpdir = "dumps";  // -dumpdir <dir>
+  std::vector<int> dump_frames;   // the frames of -dumpstages
 };
 
 struct Globals {
@@ -129,6 +133,10 @@ static void Usage() {
   Say("  -o <file>             write the visible samples of every output frame (planar, as they are hashed)");
   Say("  -save_wrong_yuv <dir> with a reference: write each frame that differs to <dir>/<name>_<frame>.yuv");
   Say("  -wrong_limit <n>      -save_wrong_yuv writes at most n frames per task");
+  Say("  -dumpstages <frames>  write the buffers behind every GPU stage of these frames (decoding order from");
+  Say("                        0, hidden frames count; a list like 0,3,10-12) to <dir>/<name>_f<n>.stages,");
+  Say("                        as the player does; compare two runs with testing/stage_dump/stage_dump.py");
+  Say("  -dumpdir <dir>        where -dumpstages writes (default dumps; created when it is not there)");
   Say("  -limit <n>            decode only the first n temporal units of the stream");
   Say("  -t <n>                decoder threads (default 1)");
   Say("  -queue_size <n>       output images in the pool, 1..%d (default %d)", WD_QUEUE_SIZE_MAX,
@@ -195,6 +203,10 @@ static bool ParseArgs(const std::vector<std::string>& args, Task* task, Globals*
       if (!value(&task->save_wrong_yuv)) return false;
     } else if (a == "-wrong_limit") {
       if (!number(&task->wrong_limit)) return false;
+    } else if (a == "-dumpstages") {
+      if (!value(&task->dumpstages)) return false;
+    } else if (a == "-dumpdir") {
+      if (!value(&task->dumpdir)) return false;
     } else if (a == "-limit") {
       if (!number(&task->limit)) return false;
     } else if (a == "-t") {
@@ -276,6 +288,10 @@ static bool CheckTask(Task* task, std::string* err) {
     return false;
   }
   if (task->threads < 1) task->threads = 1;
+  if (!task->dumpstages.empty() && !ParseStageDumpFrames(task->dumpstages, &task->dump_frames)) {
+    *err = "-dumpstages " + task->dumpstages + " is not a frame list like 0,3,10-12 of at most 256 frames";
+    return false;
+  }
   if (task->md5_frame_check && task->check.empty()) task->check = task->input + ".md5";
   if (task->name.empty()) {
     const size_t pos = task->input.find_last_of("\\/");
@@ -946,6 +962,16 @@ static int RunTask(const Task& task, Device* dev) {
   av1_set_intra_v2(task.intrav2 ? 1 : 0);
   av1_set_intra_opt(task.intraopt ? 1 : 0);
   av1_set_async_clear(task.asyncclear ? 1 : 0);
+  // -dumpstages: the writer outlives the decoder's completion thread, which the drain below joins.
+  StageDumpWriter stage_dumps;
+  if (!task.dump_frames.empty()) {
+    CreateDirectoryA(task.dumpdir.c_str(), NULL);
+    stage_dumps.Start(task.dumpdir, task.name);
+    av1_set_stage_dump(StageDumpWriter::Callback, &stage_dumps, task.dump_frames.data(),
+                       (int)task.dump_frames.size());
+  } else {
+    av1_set_stage_dump(NULL, NULL, NULL, 0);
+  }
 
   std::string decode_error;
   int units = 0;
@@ -967,6 +993,15 @@ static int RunTask(const Task& task, Device* dev) {
   decode_ms = MsSince(decode_start);
   buffer.Reset();
   aom_codec_destroy(&ctx);
+  av1_set_stage_dump(NULL, NULL, NULL, 0);
+  std::string dump_error;
+  if (!task.dump_frames.empty()) {
+    const std::vector<std::string> lines = stage_dumps.TakeLines();
+    for (size_t i = 0; i < lines.size(); ++i) Say("%s", lines[i].c_str());
+    Say("DUMPSTAGES %s: %d dumps, %.1f MiB, of frames %s in %s", task.name.c_str(), stage_dumps.Dumps(),
+        (double)stage_dumps.Bytes() / (1024.0 * 1024.0), task.dumpstages.c_str(), task.dumpdir.c_str());
+    dump_error = stage_dumps.Error();
+  }
 
   const HRESULT removed = dev->device->GetDeviceRemovedReason();
   MemoryLine("after the task");
@@ -985,6 +1020,7 @@ static int RunTask(const Task& task, Device* dev) {
     }
     if (!f && run.io_error.empty()) run.io_error = "cannot write " + task.save_md5;
   }
+  if (!dump_error.empty() && run.io_error.empty()) run.io_error = dump_error;
   if (!run.pool_error.empty() && !decode_error.empty()) decode_error += " (" + run.pool_error + ")";
   if (FAILED(removed)) {
     if (!decode_error.empty()) decode_error += "; ";

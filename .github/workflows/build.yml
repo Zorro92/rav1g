@@ -441,6 +441,26 @@ jobs:
             --out out/conformance --threads 4
           if ($LASTEXITCODE -ne 0) { throw "conformance run: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
 
+      # Stage dumps (testing/conformance/dump_tasks.txt): the buffers behind every GPU stage of a few
+      # frames, as WARP wrote them, to compare with the dumps of another device (the test player's
+      # -dumpstages) with testing/stage_dump/stage_dump.py. Dumps of the vectors and of the streams
+      # encoded here; of the cuts of published streams only digests (hashes), never samples.
+      - name: Stage dumps of the frames in dump_tasks.txt
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/stage_dump/ci_dumps.py --tool out/warp_decoder/warp_decoder.exe --streams conformance-streams `
+            --tasks testing/conformance/dump_tasks.txt --out out/stage-dumps --threads 4
+          if ($LASTEXITCODE -ne 0) { throw "stage dumps: exit code $LASTEXITCODE" }
+
+      - name: Preserve the stage dumps
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-stage-dumps-${{ github.run_id }}
+          path: out/stage-dumps/
+          if-no-files-found: warn
+
       - name: Preserve the results, the per-stream logs and md5 files, and the build log
         if: always()
         uses: actions/upload-artifact@v7

@@ -1,0 +1,26 @@
+# Stage dumps of the conformance job (.github/workflows/build.yml, job "conformance", after the run;
+# testing/stage_dump/ci_dumps.py; docs/warp-decoder.md, "Stage dumps").
+#
+#   <stream> <frames> [<temporal units>]
+#
+# <stream> is a name of testing/conformance/streams.txt; <frames> is a -dumpstages frame list (frames in
+# decoding order from 0, hidden frames included: 0,3,10-12); <temporal units> stops the decode after that
+# many temporal units of the stream (warp_decoder -limit; default: the whole stream).
+#
+# The job's artifact rav1g-stage-dumps-<run id> has, per stream, what warp_decoder wrote on WARP:
+#   aom and svt streams: the dumps themselves (<stream>_f<n>.stages). An svt stream is the encoder's test
+#     pattern, encoded in the job, and comes along in the artifact (streams/), so that another decoder can be
+#     given the very same file;
+#   cut streams: digests only (<stream>_f<n>.digest: a hash per row and per 8x8 block). They are published
+#     media, and neither the streams nor their decoded frames leave the job.
+# A dump of a frame is ten to twenty times the size of the frame: keep the lists short.
+
+# Super-resolution, wrong everywhere: the key frame (use_superres) and the frame after it.
+syn-superres-10b-1080p.ivf 0-1 2
+# Scaled references, wrong on the console only: the first frames.
+syn-resize-10b-1080p.ivf 0-5 6
+# 8-bit, wrong on the console only: key frames, and a small vector whose dumps are small.
+nf-dvbdash-a1-8b-2160p.ivf 0 1
+nf-chimera-8b-720p.ivf 0-1 2
+av1-1-b8-01-size-66x66.ivf 0-1 2
+av1-1-b8-00-quantizer-20.ivf 0-1 2

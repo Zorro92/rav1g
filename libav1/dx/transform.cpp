@@ -137,4 +137,5 @@ void av1_idct_run(Av1Core *dec) {
   }
   command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->idct_residuals->dev));
   av1_perf_gpu_mark(dec, AV1_PERF_GPU_IDCT);
+  av1_stage_dump_residuals(dec, "idct");
 }

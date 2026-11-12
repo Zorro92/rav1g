@@ -143,6 +143,58 @@ void av1_set_intra_opt(int enable);
  * is in flight. */
 void av1_set_async_clear(int enable);
 
+/* Stage dumps: a debugging aid of the test programs (-dumpstages). For the
+ * frames it is asked for, the decoder copies the buffer a stage of the frame's
+ * command list has just written into a readback buffer, right behind the
+ * stage, and hands the copies over after the frame's GPU work is done. The
+ * stages, in the order of the command list (a frame has only those that run):
+ *   idct          the residuals (kind 1: signed 16-bit samples)
+ *   inter         the frame buffer after inter prediction (all passes)
+ *   recon         after the residuals of the inter blocks were added
+ *   intra         after intra prediction: the frame before the loop filter
+ *   lf_vert_even  after the first of the two vertical loop filter passes
+ *   lf_vert       after the second
+ *   lf_horz       after the horizontal loop filter
+ *   cdef          the buffer CDEF wrote
+ *   superres_lr   the upscaled frame without CDEF, which loop restoration reads
+ *   superres      the upscaled frame
+ *   loop_rest     after loop restoration
+ *   borders       the finished frame with its borders: what later frames read
+ *   output        the output image (after film grain), as it is handed out
+ * A copy needs a UAV-to-copy-source transition of the buffer in front of it and
+ * the opposite one behind it, and the stages are a UAV barrier apart already,
+ * so a dump does not change what the stages of a frame see of each other.
+ * The decoded output is the same. */
+typedef struct av1_stage_dump_plane {
+  uint32_t offset; /* of the first visible sample, in bytes from the start of data */
+  uint32_t stride; /* bytes */
+  uint32_t width;  /* visible samples */
+  uint32_t height; /* visible rows; 0: the dump has no such plane */
+} av1_stage_dump_plane;
+
+typedef struct av1_stage_dump {
+  int frame_number;     /* decoder frame counter: frames in decoding order, hidden frames included,
+                           from 0; a show_existing_frame has the number of the frame it shows */
+  int index;            /* position of the dump in the command list, from 0 */
+  const char *stage;    /* see above */
+  int kind;             /* 0: samples of a frame buffer or an output image, 1: residuals */
+  int bytes_per_sample; /* 1 or 2 (low byte first) */
+  int bit_depth;
+  int is_sef;           /* the command list of a show_existing_frame (output only) */
+  const char *info;     /* one line about the frame: type, sizes, filters, references */
+  av1_stage_dump_plane planes[3];
+  const uint8_t *data;  /* the buffer as stored, valid during the call */
+  size_t size;
+} av1_stage_dump;
+
+/* Called on the GPU completion thread, once per dump, in command list order,
+ * after the frame's fence. */
+typedef void (*av1_stage_dump_cb_fn_t)(void *priv, const av1_stage_dump *dump);
+
+/* Process-wide. The frame numbers to dump (at most 256 are kept); cb NULL or
+ * count 0 switches the dumps off. Change it only while no frame is in flight. */
+void av1_set_stage_dump(av1_stage_dump_cb_fn_t cb, void *priv, const int *frames, int count);
+
 /* Log lines of the decoder: the MEMORY lines of a decoder creation (what was
  * allocated, the video memory budget, and the allocation that failed). One
  * line per call, no line end. is_error is non-zero for a failure. */

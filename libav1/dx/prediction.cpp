@@ -989,6 +989,7 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
 
     command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
     av1_perf_gpu_mark(dec, AV1_PERF_GPU_INTER);
+    av1_stage_dump_fb(dec, "inter", td->frame_buffer);
   }
 
   const int recon_blocks =
@@ -1039,6 +1040,7 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
 
       command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
       av1_perf_gpu_mark(dec, AV1_PERF_GPU_RECON);
+      av1_stage_dump_fb(dec, "recon", td->frame_buffer);
     }
 
     if (td->intra_iters >= 0 && td->intra_v2) {
@@ -1083,6 +1085,7 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
       }
       td->intra_iters = steps - 1;  // for the timing record: the last step, like the last iteration
       av1_perf_gpu_mark(dec, AV1_PERF_GPU_INTRA);
+      av1_stage_dump_fb(dec, "intra", td->frame_buffer);
     } else if (td->intra_iters >= 0) {
       PSSLIntraSRT srt;
       command_list->SetComputeRootShaderResourceView(2, dec->inter_mask_lut->dev->GetGPUVirtualAddress());
@@ -1140,6 +1143,7 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
       }
       td->intra_stats[3] = td->intra_stats[2];  // one pass per thread group
       av1_perf_gpu_mark(dec, AV1_PERF_GPU_INTRA);
+      av1_stage_dump_fb(dec, "intra", td->frame_buffer);
     }
   }
   PutPerfMarker(td, &td->perf_markers[3]);
@@ -1174,4 +1178,5 @@ void av1_inter_ext_borders(Av1Core *dec, AV1_COMMON *cm) {
   command_list->Dispatch((wi_count + 63) / 64, 1, 1);
   command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
   av1_perf_gpu_mark(dec, AV1_PERF_GPU_EXT_BORDERS);
+  av1_stage_dump_fb(dec, "borders", td->dst_frame_buffer);
 }

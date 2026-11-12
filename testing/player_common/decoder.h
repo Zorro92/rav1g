@@ -44,6 +44,7 @@
 #include "common/md5_utils.h"
 #include "dx/av1_perf.h"
 #include "perf_stats.h"
+#include "common/stage_dump.h"
 
 #define DROP_TIME 8000
 #define DISPLAY_MIN_TIME (-10000)
@@ -229,6 +230,7 @@ class AV1Decoder {
       aom_codec_destroy(&decctx_);
     }
     if (perf_installed_) av1_set_perf_callback(NULL, NULL);
+    if (dumps_installed_) av1_set_stage_dump(NULL, NULL, NULL, 0);
   }
   // "MEMORY app <where>" and "MEMORY dxgi <where>": the memory of the app (Windows::System::MemoryManager)
   // and the video memory of the device's adapter, at a step of the launch or of a task (decoder.cpp).
@@ -356,4 +358,7 @@ class AV1Decoder {
   perfstats::PerfStats perf_stats_;
   std::mutex perf_cs_;
   int perf_installed_ = 0;
+  // -dumpstages: the files of the task's stage dumps.
+  StageDumpWriter stage_dumps_;
+  int dumps_installed_ = 0;
 };

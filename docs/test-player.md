@@ -2116,6 +2116,79 @@ OBMC and inter-intra on top of a warped block; scaled references.
 - If a stream with scaled references is at hand: it runs the other nineteen shaders that
   used double precision, which no clip has exercised here.
 
+## Stage dumps (`-dumpstages`)
+
+For finding the stage of the frame pipeline where two devices stop agreeing (the console and
+WARP, say): `-dumpstages <frames>` copies, for the listed frames, the buffer every GPU stage
+of the frame's command list has just written, and writes the copies to files. The same flag
+exists in [warp_decoder](warp-decoder.md#stage-dumps), which writes the same files, and
+`testing/stage_dump/stage_dump.py` compares the two sets.
+
+```text
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 2 -queue_size 4 -nopresent -md5_frame_check -dumpstages 0,1
+```
+
+- `<frames>` is a list like `0,3,10-12` (at most 256 frames) of decoder frame numbers:
+  frames **in decoding order** from 0, frames that are decoded but not shown included. This
+  is not the output order of the md5 lines when the stream has hidden frames; a
+  `show_existing_frame` is not a frame of its own (its output dump is appended to the file of
+  the frame it shows). For the first frames of a stream the two orders agree up to the first
+  hidden frame; `stage_dump.py list` prints each dumped frame's type and `show` flag.
+- The files go to `LocalState\dumps\<stream file name>_f<n>.stages`, one per frame;
+  `-dumpdir /<dir>` names another directory below LocalState. The directory is created.
+- `-limit <n>` counts temporal units and ends the task after n of them: give the smallest
+  that covers the listed frames (a temporal unit has one shown frame and the hidden frames
+  in front of it).
+- **Size.** A dump is a whole frame buffer: an 8-bit 3840x2160 frame has about ten dumps of
+  13.5 MB plus the residuals, 27 MB (about 150 MB a frame); 10-bit 1920x1080 about ten of
+  7.2 MB plus 9 MB. The copies of a frame are readback buffers that live until the frame's
+  GPU work is done, on top of the decoder: list few frames of a 4K stream. A copy that
+  cannot be allocated is skipped with a `DUMPSTAGES ... no readback buffer` line.
+- **Log.** `DUMPSTAGES frames ... to ...` at the start of the task, one `DUMPSTAGES frame
+  <n> stage <i> <name>: ...` line per dump after the last frame, and a total.
+- **Cleanup.** Fetch the `.stages` files with Device Portal and delete them, or the
+  directory, afterwards: nothing else removes them, and the next run of the same stream and
+  frame overwrites its file.
+- The decoded output is the same with and without the flag: a dump is a copy between two
+  stages that are a UAV barrier apart already. It does add a state transition of the buffer
+  at each stage, so if a frame is wrong without the flag and right with it, that itself
+  says the stages overlap on that device; the md5 check in the same task shows it.
+
+The stages, in the order of a frame's command list (a frame has those that run for it):
+
+| Stage | What is dumped |
+| --- | --- |
+| `idct` | the residuals of the frame (signed 16-bit samples, 128-aligned planes) |
+| `inter` | the frame buffer after inter prediction, all passes |
+| `recon` | after the residuals of the inter blocks were added |
+| `intra` | after intra prediction: the frame before the loop filter |
+| `lf_vert_even`, `lf_vert` | after the first and the second pass of the vertical loop filter |
+| `lf_horz` | after the horizontal loop filter |
+| `cdef` | the buffer CDEF wrote |
+| `superres_lr`, `superres` | the upscaled frame without CDEF (which loop restoration reads), the upscaled frame |
+| `loop_rest` | after loop restoration |
+| `borders` | the finished frame with its borders: what later frames predict from |
+| `output` | the output image, after film grain, as it is handed to the application |
+
+A dump holds the buffer as stored (the whole frame buffer with its borders and padding) and
+the layout of its planes; the comparison looks at the visible samples.
+
+Compare on the host (Python 3, no packages):
+
+```sh
+python3 testing/stage_dump/stage_dump.py list console-dumps/
+python3 testing/stage_dump/stage_dump.py compare console-dumps/ warp-dumps/
+```
+
+`compare` pairs the files by frame number, prints per stage whether the planes are equal, and
+for the first stage that differs the pattern of the differences in each plane: how many
+samples, how large, rows and columns, the position in the 8x8 and 64x64 grid, which sample
+of a 32-bit word, runs, the first samples. `--all` prints the pattern of every stage. The
+other side can be a digest (hashes per row and per 8x8 block; see
+[warp_decoder](warp-decoder.md#stage-dumps)): then it names the rows and blocks, not the
+sizes. `compare-yuv` compares one stage with a frame of a planar file from a reference
+decoder, `extract` writes one stage as a planar file.
+
 ## Shader survey
 
 To pick the next shader to look at, the workflow compiles every shader of the project

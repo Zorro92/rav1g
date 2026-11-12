@@ -172,6 +172,19 @@ struct av1_perf_td {
   av1_perf_accum acc;
 };
 
+// Test program flag -dumpstages (av1_set_stage_dump): one copy of a buffer behind a stage of the frame's
+// command list.
+enum { Av1StageDumpMax = 20 };
+struct av1_stage_dump_entry {
+  Microsoft::WRL::ComPtr<ID3D12Resource> readback;
+  const char* stage;
+  int kind;
+  int bytes_per_sample;
+  int bit_depth;
+  size_t size;
+  av1_stage_dump_plane planes[3];
+};
+
 struct av1_frame_thread_data {
   ComputeCommandBuffer command_buffer;
   bitdepth_dependent_shaders* shaders;
@@ -253,6 +266,13 @@ struct av1_frame_thread_data {
   ScaleFactor scale_factors[8];
   volatile int64_t perf_markers[16];
   av1_perf_td perf;
+
+  // -dumpstages: the frame of this command list is dumped; its copies so far.
+  int dump_active;
+  int dump_count;
+  int dump_is_sef;
+  char dump_info[512];
+  av1_stage_dump_entry dumps[Av1StageDumpMax];
 };
 
 typedef struct {
@@ -347,6 +367,13 @@ typedef struct Av1Core {
 } Av1Core;
 
 void PutPerfMarker(av1_frame_thread_data* td, volatile int64_t* marker);
+// -dumpstages (no-ops unless the frame of the current command list is to be dumped): record a copy of what a
+// stage has just written. A frame buffer in its current layout; the residual buffer in the layout of the
+// frame; back_buffer1 in the layout of the output image.
+// |dims|: the buffer whose visible size the copy has, when |fb| is a back buffer that only has a layout.
+void av1_stage_dump_fb(Av1Core* dec, const char* stage, const HwFrameBuffer* fb, const HwFrameBuffer* dims = NULL);
+void av1_stage_dump_residuals(Av1Core* dec, const char* stage);
+void av1_stage_dump_output(Av1Core* dec, const char* stage, const HwOutputImage* img, size_t size);
 // Timing instrumentation (no-ops unless a perf callback is installed).
 void av1_perf_gpu_mark(Av1Core* dec, int stage);
 void av1_perf_add(Av1Core* dec, int id, int64_t start_ticks);
