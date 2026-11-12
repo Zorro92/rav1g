@@ -128,8 +128,8 @@ How the C and C++ are built. `rav1g-sys` reads the list of sources and their per
 checks, so the three builds (the library project, `warp_decoder`, cargo) compile the same files: 71 C files,
 8 C++ files, `/O1 /Ot`, `/O2` for the seven files the project marks, `/sdl`, no `NDEBUG` (the asserts of the
 library stay in, as in the player), `/EHsc` for the C++, whatever the cargo profile is. One difference from
-the MSBuild projects: no whole program optimisation (`/GL`), which they switch on and a cargo build cannot
-use (the objects go through rustc's archives, and the Linux build links with lld).
+the MSBuild projects at this step: no whole program optimisation (`/GL`), which they switch on. The build
+got it later: [The entropy decoder with link time optimisation](#the-entropy-decoder-with-link-time-optimisation-2026-11-12).
 
 **MSVC compiles `av1_mi_push_block` wrongly without `/GL`.** The first cargo build with MSVC (toolset
 14.51.36231) decoded 2 of 251 streams right, with another md5 from run to run, while the same sources built
@@ -589,7 +589,8 @@ commit before step 3 (a3719fc), the cargo build with the host in C++; "Rust host
   optimisation (`/GL`), which the MSBuild projects switch on and cargo cannot use. The test player links
   the MSBuild library today; when it links the Rust static library (step 5) this is what the console
   timing against `v0.3.0` will see, unless the C gets link time optimisation another way (clang-cl with
-  LTO, or the entropy decoder stays an MSBuild library). To decide before step 5.
+  LTO, or the entropy decoder stays an MSBuild library). Done since:
+  [The entropy decoder with link time optimisation](#the-entropy-decoder-with-link-time-optimisation-2026-11-12).
 - The console timing of the recording counters is the main session's.
 
 Step 3 in numbers: 4,344 lines of C++ in 7 files left the cargo build (`av1_core.cpp`, 2,453 lines, is
@@ -619,6 +620,98 @@ between the two until step 4.
   decoder calls and that raise it (`av1_setup_frame`: a frame the decoder was not created for, no frame
   buffer) need the same care as the output copy got in module 5: the error is raised from C, not from
   under a Rust frame.
+
+### The entropy decoder with link time optimisation (2026-11-12)
+
+The cargo build compiles the C of the entropy decoder (and the C++ that is left) for link time
+optimisation, as the MSBuild projects do with `/GL` and `/LTCG` (commit 1face0c):
+
+- **MSVC** (the build on Windows): `/GL` for every file, `/LTCG` at the link of `rav1g-dec` and of the
+  tests.
+- **clang-cl** (the build on Linux, `cargo xwin`): `-flto` (full LTO; `lld-link` compiles the bitcode).
+- `RAV1G_C_LTO=off` builds without, `thin` with ThinLTO under clang-cl: for measurements.
+
+Why the first attempt with `/GL` ended in LNK1120 (unresolved externals): cargo copies a static library
+of a build script into the `.rlib` of its crate, and rustc writes the symbol table of that archive
+itself. It cannot read an object of `/GL`, which is the compiler's intermediate language and not COFF, so
+the table had none of the C functions and the linker did not find them; `/LTCG` at the link changes
+nothing about that. The libraries now go to the linker as `lib.exe` (or `llvm-lib`) wrote them
+(`cargo:rustc-link-lib=static:-bundle=...` with the output directory as a search path), for both
+compilers: what rustc reads of clang's bitcode would depend on its LLVM being as new as clang's.
+`link.exe` restarts with `/LTCG` when it meets a `/GL` object, so a link without the flag works too (the
+tests of the `rav1g` crate link that way); the two build scripts pass it.
+
+The source fix for the MSVC miscompilation of `av1_mi_push_block` (1eebffe) is not touched by this: that
+function is Rust in the cargo build, and the set decodes right with `/GL` (251 of 251, below).
+
+**Tile decode time** (`entropy_sum` of `-gputime -t 4` on WARP, run 43312178597 of a throwaway branch: six
+programs from one checkout on one Windows runner, the three clang-cl programs built on a Linux runner of
+the same run; each stream decoded five times by each program in turn; microseconds per frame, the median
+frame of a run; first number the lowest of the five runs, in brackets the mean of the five; the percentage
+is of the lowest against `warp_decoder`):
+
+| Program | 2160p 8-bit, 20 frames | 1080p 10-bit, 16 frames | 720p 8-bit, 40 frames |
+| --- | ---: | ---: | ---: |
+| `warp_decoder` (MSBuild, `/GL`) | 3068 (3169) | 6855 (6986) | 4308 (4366) |
+| cargo, MSVC, no LTO (before) | 3436 (3508), +12.0 % | 7360 (7528), +7.4 % | 4664 (4724), +8.3 % |
+| cargo, MSVC, `/GL` and `/LTCG` | 3138 (3229), +2.3 % | 7091 (7154), +3.4 % | 4484 (4497), +4.1 % |
+| cargo, clang-cl, no LTO (before) | 3250 (3334), +5.9 % | 6860 (7024), +0.1 % | 4337 (4390), +0.7 % |
+| cargo, clang-cl, ThinLTO | 3157 (3204), +2.9 % | 6893 (6987), +0.6 % | 4321 (4383), +0.3 % |
+| cargo, clang-cl, full LTO | 3006 (3067), -2.0 % | 6607 (6763), -3.6 % | 4128 (4194), -4.2 % |
+
+- **MSVC:** `/GL` takes the gap from 7 to 12 % down to 2 to 4 % (2 to 3 % by the means). The rest has the
+  same sign on all three streams, so it is not noise, though the runs of one program differ by 2 to 3 %.
+  What the MSBuild program has and this one cannot: its whole program optimisation covers the host too,
+  where the function the tile threads call for every block (`av1_mi_push_block`) was C++ and is Rust
+  here, behind a boundary the optimiser does not cross. Not measured: how much of the rest that is.
+- **clang-cl:** without LTO it was already at the MSBuild program's speed on two of the three streams; with
+  full LTO it is 2 to 4 % faster than the MSBuild program on all three. ThinLTO gains little over none.
+  Full LTO is the default there: the C is 71 files and the link of the program takes a few seconds.
+- Conformance with the `/GL` program and with the ThinLTO program in that run: 251 of 251 each; the
+  layout and table tests pass against the `/GL` build of the C. The full LTO program runs the set in the
+  `rust-cross-run` job of every push.
+- For step 5 (the player links the Rust library and the C): objects of `/GL` are what `link.exe` of the
+  player's build takes (with the 2 to 4 % above); bitcode of clang needs `lld-link` for the link of the
+  player; a parser library built by MSBuild stays possible. The console timing decides.
+
+### Step 4: frame pipeline (2026-11-12)
+
+`av1_core.cpp` (2,453 lines) is one file, so the cargo build cannot leave it out part by part the way
+step 3 left out files. For the parts of this step it compiles `crates/rav1g-sys/glue/av1_core_rest.cpp`
+instead: the text of `av1_core.cpp` without what Rust has, with the Rust called through `extern "C"`
+functions. `libav1/dx/av1_core.cpp` itself stays whole and unchanged for the MSBuild projects. The rest
+file shrinks with every part and goes with the last; so do the glue, the C++ bindings and the C++ probes.
+
+The parts, each green on CI before the next:
+
+| Part | Out of the C++ rest | Rust | Notes |
+| --- | --- | --- | --- |
+| 1. Creation and release | the buffer plan (`av1_allocate_buffers`), the memory query, the budget guard and `av1_create_gpu_decoder`, the "MEMORY" summary, `av1_allocate_pbi`, the pool of frame buffers, `av1_destroy_gpu_decoder` (826 lines) | `host/create.rs` (1,424 with tests); `gpu/d3d12.rs` grows to 937 | see below |
+
+Part 1, creation and release:
+
+- **Same plan, same decisions, same lines.** The requests of the buffer plan are made in the order of
+  the C++ with its integer arithmetic, once for the plan that only counts and once for the allocator
+  (`CHECK_RESULT` is the macro `request!`). The budget guard asks the application's callback, waits for
+  memory the system may still be returning in steps of 20 ms for as long as the answer grows (2 s at
+  most, 300 ms without a gain of 1 MiB), and refuses or accepts with the text of the C++. The lines that
+  are put together in a buffer of 640 bytes in the C++ (`snprintf`) are cut where it cut them.
+- **The struct is still the C++ one** (`Av1Core` in the host pool of the application, zeroed). The C++
+  constructor of the allocator is called through the rest file as long as C++ calls its virtual functions;
+  what the destructor of `Av1Core` released (the interfaces of the slots and of the output contexts, the
+  command list, the queue and the device, in that order) is released by hand.
+- **The backend boundary** got what the pipeline owns: the device of a decoder that is given none (the
+  first hardware adapter), the direct queue, command allocators, the command list, fences and their
+  events.
+- **A check of the lines in CI.** `testing/conformance/memory_lines.py` decodes a few streams in ten decoder
+  configurations (sizes, bit depths, slots, low memory parts, the buffers of `-intrav2` and `-interfast`)
+  with `-v` and keeps the decoder's "MEMORY" lines; the `conformance` job does it with `warp_decoder`, the
+  `rust` job with `rav1g-dec`, and `rust-equal` wants the two sets equal line for line. Left out are the
+  lines about the adapter's video memory, which differ from run to run.
+- **`rav1g-dec -budget <MiB>`** gives the decoder a budget callback with a fixed answer, so the guard can be
+  run on a desktop (`warp_decoder` has no such flag: its decoder is created without a callback).
+- Tests: the cut of a line as `snprintf` cuts it, the slots and frame buffer counts of a configuration,
+  the guard margin against the header.
 
 ## Estimate
 

@@ -41,6 +41,7 @@ struct Source {
 /// This build does not compile them. `libav1_sources.props` still lists them, for the MSBuild projects.
 const REPLACED_BY_RUST: &[&str] = &[
     "libav1/dx/av1_compute.cpp",
+    "libav1/dx/av1_core.cpp",
     "libav1/dx/av1_memory.cpp",
     "libav1/dx/av1_thread.cpp",
     "libav1/dx/loopfilters.cpp",
@@ -447,6 +448,7 @@ const HOST_TYPES: &[&str] = &["AV1Decoder", "AV1_COMMON", "MACROBLOCKD"];
 const HOST_VARS: &[&str] = &[
     "warped_filter",
     "wedge_params_lookup",
+    "wedge_mask_buf",
     "ii_weights1d",
     "ii_size_scales",
     "av1_idct_scans",

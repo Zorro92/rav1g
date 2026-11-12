@@ -21,6 +21,7 @@
 mod blocks;
 mod compute;
 mod core;
+mod create;
 mod film_grain;
 mod intra_v2;
 pub(crate) mod log;

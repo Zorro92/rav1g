@@ -68,6 +68,31 @@ pub unsafe fn com_release<S>(slot: *mut S) {
     }
 }
 
+/// A type of this module that is one interface and nothing else, so that a COM pointer field of a struct
+/// of the C++ host can be read as it.
+///
+/// # Safety
+/// The type is `repr(transparent)` over one COM interface.
+pub unsafe trait Wrapped {}
+
+// SAFETY: each is `repr(transparent)` over its interface.
+unsafe impl Wrapped for CommandQueue {}
+unsafe impl Wrapped for CommandAllocator {}
+unsafe impl Wrapped for CommandList {}
+unsafe impl Wrapped for Fence {}
+
+/// A COM pointer field of a struct of the C++ host as the type of this module that wraps its interface.
+/// `None` for a null pointer.
+///
+/// # Safety
+/// `slot` is a `ComPtr` of the interface `T` wraps, null or with a reference for `'a`.
+pub unsafe fn wrapped_ref<S, T: Wrapped>(slot: &S) -> Option<&T> {
+    const { assert!(size_of::<S>() == size_of::<*mut c_void>() && size_of::<Option<T>>() == size_of::<*mut c_void>()) };
+    // SAFETY: the slot is one pointer, null or the interface (the caller's contract); `Option<T>` is that
+    // pointer with null as `None`.
+    unsafe { (*std::ptr::from_ref(slot).cast::<Option<T>>()).as_ref() }
+}
+
 fn failed(step: &'static str) -> impl Fn(windows::core::Error) -> Error {
     move |error| Error { step, code: error.code().0 }
 }
@@ -739,5 +764,174 @@ impl<'a> BufferRef<'a> {
     pub unsafe fn release(raw: *mut c_void) {
         // SAFETY: the caller's contract; dropping the interface releases the reference.
         drop(unsafe { ID3D12Resource::from_raw(raw) });
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// What the frame pipeline owns: the device and its queue, the command allocators and the command list,
+// the fences. Each type is the interface and nothing else, so a field of the pipeline's structs that holds
+// one (or none) is one pointer.
+// ---------------------------------------------------------------------------------------------------------
+
+/// The first hardware adapter that gives a D3D12 device (feature level 11.0), for a decoder that is
+/// created without a device.
+pub fn create_hardware_device() -> Result<OwnedDevice, Error> {
+    // SAFETY: DXGI and D3D12 calls with valid arguments; every out value is checked.
+    unsafe {
+        let factory =
+            CreateDXGIFactory2::<IDXGIFactory4>(DXGI_CREATE_FACTORY_FLAGS(0)).map_err(failed("CreateDXGIFactory2"))?;
+        let mut index = 0u32;
+        while let Ok(adapter) = factory.EnumAdapters1(index) {
+            index += 1;
+            let software = adapter.GetDesc1().is_ok_and(|desc| {
+                desc.Flags & (windows::Win32::Graphics::Dxgi::DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0
+            });
+            if software {
+                continue;
+            }
+            let mut device: Option<ID3D12Device> = None;
+            let created =
+                D3D12CreateDevice(&adapter, windows::Win32::Graphics::Direct3D::D3D_FEATURE_LEVEL_11_0, &mut device);
+            if let (Ok(()), Some(device)) = (created, device) {
+                return Ok(OwnedDevice { device });
+            }
+        }
+    }
+    Err(Error { step: "D3D12CreateDevice", code: E_FAIL.0 })
+}
+
+impl OwnedDevice {
+    /// Hands the reference over as a raw `ID3D12Device *`.
+    pub fn into_raw(self) -> *mut c_void {
+        self.device.into_raw()
+    }
+}
+
+impl Device<'_> {
+    /// A direct queue: the queue of a decoder that is given none.
+    pub fn create_queue(&self) -> Result<CommandQueue, Error> {
+        let desc = D3D12_COMMAND_QUEUE_DESC {
+            Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
+            Flags: D3D12_COMMAND_QUEUE_FLAG_NONE,
+            ..Default::default()
+        };
+        // SAFETY: a valid description.
+        let queue = unsafe { self.device.CreateCommandQueue::<ID3D12CommandQueue>(&desc) };
+        Ok(CommandQueue { queue: queue.map_err(failed("CreateCommandQueue"))? })
+    }
+
+    /// The memory of the commands of one frame in flight.
+    pub fn create_command_allocator(&self) -> Result<CommandAllocator, Error> {
+        // SAFETY: a plain call on a live device.
+        let allocator =
+            unsafe { self.device.CreateCommandAllocator::<ID3D12CommandAllocator>(D3D12_COMMAND_LIST_TYPE_DIRECT) };
+        Ok(CommandAllocator { allocator: allocator.map_err(failed("CreateCommandAllocator"))? })
+    }
+
+    /// A fence at the value 0.
+    pub fn create_fence(&self) -> Result<Fence, Error> {
+        // SAFETY: a plain call on a live device.
+        let fence = unsafe { self.device.CreateFence::<ID3D12Fence>(0, D3D12_FENCE_FLAG_NONE) };
+        Ok(Fence { fence: fence.map_err(failed("CreateFence"))? })
+    }
+
+    /// The command list of the decoder, open on `allocator`.
+    pub fn create_command_list(&self, allocator: &CommandAllocator) -> Result<CommandList, Error> {
+        // SAFETY: a plain call on a live device with a live allocator.
+        let list = unsafe {
+            self.device.CreateCommandList::<_, _, ID3D12GraphicsCommandList>(
+                0,
+                D3D12_COMMAND_LIST_TYPE_DIRECT,
+                &allocator.allocator,
+                None,
+            )
+        };
+        Ok(CommandList { list: list.map_err(failed("CreateCommandList"))? })
+    }
+}
+
+/// A queue the decoder holds a reference of.
+#[repr(transparent)]
+pub struct CommandQueue {
+    queue: ID3D12CommandQueue,
+}
+
+impl CommandQueue {
+    /// Hands the reference over as a raw `ID3D12CommandQueue *`.
+    pub fn into_raw(self) -> *mut c_void {
+        self.queue.into_raw()
+    }
+}
+
+/// The memory of the commands of one frame in flight.
+#[repr(transparent)]
+pub struct CommandAllocator {
+    allocator: ID3D12CommandAllocator,
+}
+
+impl CommandAllocator {
+    /// Hands the reference over as a raw `ID3D12CommandAllocator *`.
+    pub fn into_raw(self) -> *mut c_void {
+        self.allocator.into_raw()
+    }
+}
+
+/// The command list the frames are recorded with, one after the other.
+#[repr(transparent)]
+pub struct CommandList {
+    list: ID3D12GraphicsCommandList,
+}
+
+impl CommandList {
+    /// Ends the recording.
+    pub fn close(&self) -> Result<(), Error> {
+        // SAFETY: a plain call on a live list.
+        unsafe { self.list.Close() }.map_err(failed("Close"))
+    }
+
+    /// Hands the reference over as a raw `ID3D12GraphicsCommandList *`.
+    pub fn into_raw(self) -> *mut c_void {
+        self.list.into_raw()
+    }
+}
+
+/// A fence: the queue signals a value when the commands in front of the signal are done.
+#[repr(transparent)]
+pub struct Fence {
+    fence: ID3D12Fence,
+}
+
+impl Fence {
+    /// Hands the reference over as a raw `ID3D12Fence *`.
+    pub fn into_raw(self) -> *mut c_void {
+        self.fence.into_raw()
+    }
+}
+
+/// An event a thread waits on for a fence: set when the fence reaches a value, reset by the wait.
+#[repr(transparent)]
+pub struct Event {
+    handle: windows::Win32::Foundation::HANDLE,
+}
+
+impl Event {
+    pub fn new() -> Result<Event, Error> {
+        // SAFETY: a plain call; the handle is closed by `close`.
+        let handle = unsafe { CreateEventW(None, false, false, None) };
+        Ok(Event { handle: handle.map_err(failed("CreateEvent"))? })
+    }
+
+    /// The handle, for a struct that keeps it as one.
+    pub fn into_raw(self) -> *mut c_void {
+        self.handle.0
+    }
+
+    /// Closes an event of [`Event::into_raw`].
+    ///
+    /// # Safety
+    /// `raw` is the handle of an event nothing waits on any more.
+    pub unsafe fn close(raw: *mut c_void) {
+        // SAFETY: the caller's contract.
+        let _ = unsafe { CloseHandle(windows::Win32::Foundation::HANDLE(raw)) };
     }
 }

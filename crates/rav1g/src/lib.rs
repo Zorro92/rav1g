@@ -160,6 +160,10 @@ pub struct Config {
     pub inter_fast: bool,
     /// `AV1_LOW_MEMORY_*` parts; `AV1_LOW_MEMORY_NONE` for none, 0 for the default.
     pub low_memory: i32,
+    /// The budget callback and its context (`memory_available_cb` of `aom_codec_dec_cfg_t`): what the
+    /// application has left for the decoder, in bytes, or a negative value when it does not know. With it
+    /// a creation that would leave less than the guard margin is refused. `None`: nothing is checked.
+    pub memory_available: Option<(unsafe extern "C" fn(*mut c_void) -> i64, *mut c_void)>,
     /// The output buffer callbacks and their context (`av1_out_buffers_cb_t`).
     pub out_buffers: sys::av1_out_buffers_cb_t,
     /// `ID3D12Device*`.
@@ -197,9 +201,9 @@ impl Config {
         cfg.intra_v2 = self.intra_v2 as c_int;
         cfg.inter_fast = self.inter_fast as c_int;
         cfg.low_memory = self.low_memory;
-        // No budget guard: the caller has no app memory limit to report.
-        cfg.memory_available_cb = None;
-        cfg.memory_available_priv = std::ptr::null_mut();
+        // Without a callback there is no budget guard: the caller has no memory limit to report.
+        cfg.memory_available_cb = self.memory_available.map(|(callback, _)| callback);
+        cfg.memory_available_priv = self.memory_available.map_or(std::ptr::null_mut(), |(_, context)| context);
         cfg
     }
 

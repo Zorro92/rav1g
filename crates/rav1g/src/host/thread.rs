@@ -139,6 +139,77 @@ pub unsafe extern "C" fn rav1g_queue_is_empty(queue: *mut DataPtrQueue) -> c_int
     c_int::from(is_empty(unsafe { &*queue }))
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// The locks and conditions the frame pipeline has in its structs besides the queues: what aom_thread.h makes
+// of a pthread mutex and condition on Windows.
+// ---------------------------------------------------------------------------------------------------------
+
+/// `pthread_mutex_init`.
+///
+/// # Safety
+/// `mutex` is valid for writing and is not moved until [`mutex_destroy`].
+pub(crate) unsafe fn mutex_init(mutex: *mut crate::sys::host::pthread_mutex_t) {
+    // SAFETY: the caller's contract.
+    let _ = unsafe { InitializeCriticalSectionEx(mutex.cast(), 0, 0) };
+}
+
+/// `pthread_mutex_destroy`.
+///
+/// # Safety
+/// `mutex` was initialised and no thread holds it.
+pub(crate) unsafe fn mutex_destroy(mutex: *mut crate::sys::host::pthread_mutex_t) {
+    // SAFETY: the caller's contract.
+    unsafe { DeleteCriticalSection(mutex.cast()) };
+}
+
+/// `pthread_mutex_lock`.
+///
+/// # Safety
+/// `mutex` is initialised.
+pub(crate) unsafe fn mutex_lock(mutex: *mut crate::sys::host::pthread_mutex_t) {
+    // SAFETY: the caller's contract.
+    unsafe { EnterCriticalSection(mutex.cast()) };
+}
+
+/// `pthread_mutex_unlock`.
+///
+/// # Safety
+/// `mutex` is held by this thread.
+pub(crate) unsafe fn mutex_unlock(mutex: *mut crate::sys::host::pthread_mutex_t) {
+    // SAFETY: the caller's contract.
+    unsafe { LeaveCriticalSection(mutex.cast()) };
+}
+
+/// `pthread_cond_init`. A condition variable of Windows needs no release.
+///
+/// # Safety
+/// `condition` is valid for writing and is not moved while a thread waits on it.
+pub(crate) unsafe fn cond_init(condition: *mut crate::sys::host::pthread_cond_t) {
+    // SAFETY: the caller's contract.
+    unsafe { condition.cast::<CONDITION_VARIABLE>().write(InitializeConditionVariable()) };
+}
+
+/// `pthread_cond_wait`: waits for a signal, without the lock while it waits.
+///
+/// # Safety
+/// `condition` is initialised and `mutex` is held by this thread.
+pub(crate) unsafe fn cond_wait(
+    condition: *mut crate::sys::host::pthread_cond_t,
+    mutex: *mut crate::sys::host::pthread_mutex_t,
+) {
+    // SAFETY: the caller's contract. An infinite wait only returns with the lock held again.
+    let _ = unsafe { SleepConditionVariableCS(condition.cast(), mutex.cast(), INFINITE) };
+}
+
+/// `pthread_cond_signal`.
+///
+/// # Safety
+/// `condition` is initialised.
+pub(crate) unsafe fn cond_signal(condition: *mut crate::sys::host::pthread_cond_t) {
+    // SAFETY: the caller's contract.
+    unsafe { WakeConditionVariable(condition.cast()) };
+}
+
 /// The queue of a `DataPtrQueueMT` with its lock held.
 struct Locked {
     queue: *mut DataPtrQueueMT,

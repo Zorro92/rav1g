@@ -365,6 +365,11 @@ fn read_reference(path: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
+/// The budget callback of -budget: the bytes the flag names.
+unsafe extern "C" fn fixed_budget(bytes: *mut c_void) -> i64 {
+    bytes as usize as i64
+}
+
 /// One line with the memory of the process and of the machine: the tasks of a list run in one process, and
 /// a D3D12 device that runs out of memory is removed.
 fn memory_line(when: &str) {
@@ -462,6 +467,11 @@ fn create_decoder(
         intra_v2: task.intrav2,
         inter_fast: task.interfast != 0,
         low_memory: if task.lowmem_parts != 0 { task.lowmem_parts } else { sys::AV1_LOW_MEMORY_NONE as i32 },
+        // -budget: a callback that answers with the number of the flag, which travels as its context.
+        memory_available: (task.budget_mib >= 0).then_some((
+            fixed_budget as unsafe extern "C" fn(*mut c_void) -> i64,
+            (task.budget_mib << 20) as usize as *mut c_void,
+        )),
         out_buffers: sys::av1_out_buffers_cb_t {
             get_out_buffer_cb: Some(get_buffer),
             release_out_buffer_cb: Some(release_buffer),

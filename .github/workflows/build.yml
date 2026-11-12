@@ -558,6 +558,17 @@ jobs:
             --tasks testing/conformance/dump_tasks.txt --out out/stage-dumps --threads 4
           if ($LASTEXITCODE -ne 0) { throw "stage dumps: exit code $LASTEXITCODE" }
 
+      # The MEMORY lines of the decoder (testing/conformance/memory_lines.py): what a decoder of a few
+      # configurations holds, its budget line and the steps of its release, for the comparison with the
+      # lines of rav1g-dec in the rust-equal job.
+      - name: MEMORY log lines of a few decoder configurations
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/memory_lines.py run --tool out/warp_decoder/warp_decoder.exe `
+            --streams conformance-streams --out out/memory-lines
+          if ($LASTEXITCODE -ne 0) { throw "memory lines: exit code $LASTEXITCODE" }
+
       - name: Preserve the stage dumps
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
@@ -635,6 +646,7 @@ jobs:
             out/conformance-*/
             out/order-check/
             out/gputime-smoke/
+            out/memory-lines/
             out/sm6test/
             out/msbuild.log
             out/msbuild-uavsync.log
@@ -839,6 +851,14 @@ jobs:
             --tasks testing/conformance/dump_tasks.txt --out out/stage-dumps --threads 4
           if ($LASTEXITCODE -ne 0) { throw "stage dumps with rav1g-dec: exit code $LASTEXITCODE" }
 
+      - name: MEMORY log lines of a few decoder configurations with rav1g-dec
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/memory_lines.py run --tool out/rav1g-dec/rav1g-dec.exe `
+            --streams conformance-streams --out out/memory-lines
+          if ($LASTEXITCODE -ne 0) { throw "memory lines with rav1g-dec: exit code $LASTEXITCODE" }
+
       - name: Preserve the stage dumps of rav1g-dec
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
@@ -857,6 +877,7 @@ jobs:
             out/conformance-*/
             out/order-check/
             out/gputime-smoke/
+            out/memory-lines/
             out/sm6test/
           if-no-files-found: warn
 
@@ -910,6 +931,13 @@ jobs:
           set -euo pipefail
           python3 testing/conformance/compare_md5.py --reference warp-decoder/conformance --candidate rav1g-dec/conformance \
             --manifest conformance-md5/manifest.txt --reference-dumps warp-decoder-dumps --candidate-dumps rav1g-dec-dumps
+
+      # The decoder creation, the buffer plan and the release are Rust in rav1g-dec: the same buffers of
+      # the same sizes, and the same text about them.
+      - name: MEMORY log lines, rav1g-dec against warp_decoder
+        run: |
+          python3 testing/conformance/memory_lines.py compare --reference warp-decoder/memory-lines \
+            --candidate rav1g-dec/memory-lines
 
   # The shader headers of the normal build for the Linux build below, which has no FXC: the headers and
   # the report of the Shaders step, as an artifact.

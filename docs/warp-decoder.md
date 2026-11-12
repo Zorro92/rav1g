@@ -48,6 +48,10 @@ The shader headers come from a Windows build (FXC): CI keeps them as the artifac
 What differs from `warp_decoder`:
 
 - The usage text names `rav1g-dec`; the lines the scripts read are the same.
+- `-budget <MiB>` (a flag of `rav1g-dec` only): the decoder is created with a budget callback that says
+  the application has this much memory left for it, so the budget guard of the creation can be run on a
+  desktop: with `-v` the `MEMORY budget` line of an accepted creation, or the wait and the
+  `MEMORY REFUSED` line of a refused one (the task then fails at the creation of its decoder).
 - The stream path goes to the C stream reader as UTF-8; `warp_decoder` passes the bytes of its command
   line. The same for paths of plain ASCII.
 - Lines end with a line feed; `warp_decoder`, a C program writing to a redirected stdout, ends them with

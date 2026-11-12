@@ -95,7 +95,7 @@ fn write_segment(line: &mut String, name: &str, segment: &MemorySegment) {
 }
 
 /// One "MEMORY dxgi <label>: ..." line; says so when the query failed.
-fn log_video_memory(is_error: bool, label: &str, memory: &VideoMemory) {
+pub(crate) fn log_video_memory(is_error: bool, label: &str, memory: &VideoMemory) {
     if memory.adapter_error < 0 {
         log(
             is_error,

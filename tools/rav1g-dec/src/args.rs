@@ -65,6 +65,8 @@ pub struct Task {
     pub fitsize: bool,
     pub lowmem: bool,
     pub lowmem_parts: i32,
+    /// -budget: what the decoder is told the application has left, in MiB; negative: no budget callback.
+    pub budget_mib: i64,
     pub intrav2: bool,
     pub intraopt: bool,
     pub asyncclear: bool,
@@ -117,6 +119,7 @@ impl Default for Task {
             fitsize: false,
             lowmem: false,
             lowmem_parts: LOWMEM_DEFAULT,
+            budget_mib: -1,
             intrav2: false,
             intraopt: false,
             asyncclear: false,
@@ -183,6 +186,8 @@ pub fn usage() {
     say!("  -timeout <seconds>    give up on a task after this time (exit code {})", EXIT_TIMEOUT);
     say!("  -cdefv1 -nofitsize -lowmemparts <n> -lowmem -slots <n> -intrav2 -intraopt -asyncclear");
     say!("                        as in the test player (docs/test-player.md); -cdefv2 and -fitsize are accepted");
+    say!("  -budget <MiB>         the decoder is told the application has this much memory left for it: the budget");
+    say!("                        guard of the creation (MEMORY budget and MEMORY REFUSED lines, with -v)");
     say!("  -lfhsplit <n>         horizontal loop filter: 1 even rows of blocks, a UAV barrier, odd rows; 2 every");
     say!("                        row of blocks on its own (default 0: one dispatch per plane; same output)");
     say!("  -intraedgefix         8-bit intra: the above edge filter stops where the 10-bit one does (same output)");
@@ -286,6 +291,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-slots" => task.slots = number()?,
             "-lowmemparts" => task.lowmem_parts = number()?,
             "-lowmem" => task.lowmem = true,
+            "-budget" => task.budget_mib = i64::from(number()?),
             "-cdefv1" => task.cdefv1 = true,
             "-cdefv2" => task.cdefv2 = true,
             "-nofitsize" => task.nofitsize = true,
