@@ -157,11 +157,17 @@ without `/Ot` under MSVC, which decodes the set right as well (run 43244241029: 
 toolset: the conformance run is what found it, and it runs for every build.
 
 Seen on the way, and not part of the port: decoded as the eleventh stream of a process, behind the ten
-8-bit vectors `av1-1-b8-00-quantizer-00` to `-09`, the 10-bit vector `av1-1-b10-00-quantizer-00.ivf` comes
+8-bit vectors `av1-1-b8-00-quantizer-00` to `-09`, the 10-bit vector `av1-1-b10-00-quantizer-00.ivf` came
 out wrong from its first frame, with `warp_decoder` and with `rav1g-dec` alike, with one thread and with
-four, in seven of seven passes each (run 43245926770). In the order of the conformance manifest it is
-right. Like `svc-L2T1-2` behind `svc-L2T1`, it is something one decoder leaves behind for the next in the
-same process; the cause is open.
+four, in seven of seven passes each (run 43245926770). In the order of the conformance manifest it was
+right. Resolved on 2026-11-12 (dda14c7 on `cpp`, merged): `gen_pred_blocks.hlsl` read the filter-intra flag
+of a block together with two bytes of struct padding behind it in the mode info record, and a decoder that
+got the memory of a destroyed decoder found other bytes than 0 there. `svc-L2T1-2` behind `svc-L2T1`, the
+failure taken for one of slow runners, was the same read
+([gpu-av1-decoder.md](gpu-av1-decoder.md#padding-of-the-mode-info-record-2026-11-12)). The bindings of
+step 2 gave the audit its ground: the layout of `MB_MODE_INFO` as the C compiler has it, and since then a
+layout test (`mode_info_padding_is_where_the_shaders_mask_it`) that fails when the padding of the record
+moves (bytes 93 and 114 to 115 today).
 
 Shaders. The build takes the FXC bytecode headers the other builds take: `RAV1G_SHADER_DIR` names the
 directory whose `dx/shaders/h` has them (what MSBuild gets as `/p:Rav1gPrebuiltShaders`; in CI the `normal`
@@ -182,7 +188,9 @@ and `warp_decoder`'s crash line. `-sm6test` has its DXC shaders when the build i
 CI (`.github/workflows/build.yml`), next to the unchanged `conformance` job with `warp_decoder`:
 
 - `rust` (Windows, MSVC): `cargo build --release`, the shader check, `cargo test`, `-sm6test`, then the
-  conformance set, the timing smoke test and the stage dumps with `rav1g-dec`.
+  conformance set, the order check (`order_check.py`: streams one after the other in one process, nothing
+  decoded again alone), 137 streams with `-poisonmi`, the timing smoke test and the stage dumps with
+  `rav1g-dec`.
 - `rust-equal`: `compare_md5.py` on the artifacts of `conformance` and `rust`. Every stream of the manifest
   must be in both runs with the same md5 file, byte for byte, and the stage dumps of the frames in
   `dump_tasks.txt` must compare equal.
@@ -200,7 +208,7 @@ Result (run 43247143678, commit 0fde9ab; Rust 1.99.1 in both builds):
 | Gate: `rav1g-dec` (cargo, MSVC) on WARP | 251 of 251 streams pass, 2.0 min |
 | Gate: md5 per frame against `warp_decoder` | equal for 251 of 251 streams, 1005 frames |
 | Stage dumps against `warp_decoder` | equal for the 7 streams of `dump_tasks.txt` |
-| `rav1g-dec` of the Linux build on WARP | 251 of 251 on the second attempt; the first had `svc-L2T1-2` wrong behind `svc-L2T1` and right alone, the known failure of slow runners, which `warp_decoder` had in run 43244241029 |
+| `rav1g-dec` of the Linux build on WARP | 251 of 251 on the second attempt; the first had `svc-L2T1-2` wrong behind `svc-L2T1` and right alone, then known as the failure of slow runners, which `warp_decoder` had in run 43244241029; it was the padding read fixed in dda14c7 |
 | `-sm6test`, timing smoke test, stage dump script | pass with `rav1g-dec`; the Shader Model 6 lines are those of `warp_decoder` (9 pass, 5 pipeline states refused by WARP) |
 | Shader check | the bytecode of this run's headers is in both programs (93 of 97 headers, the count of `warp_decoder`) |
 | `cargo build --release` on the Windows runner | 70 s; the job 5.6 min |
