@@ -149,6 +149,12 @@ static aom_codec_err_t decoder_init(aom_codec_ctx_t *ctx,
     priv->last_show_frame = NULL;
     priv->need_resync = 1;
     priv->flushed = 0;
+    // The decoder lives in the application's memory, which need not be zero. The first operating point of
+    // the stream and one frame per temporal unit unless a control says otherwise; no Annex B stream (no
+    // control sets it).
+    priv->operating_point = 0;
+    priv->output_all_layers = 0;
+    priv->is_annexb = 0;
     priv->cfg.host_size -= alg_priv_size;
     priv->cfg.host_memory = (uint8_t *)priv->cfg.host_memory + alg_priv_size;
     // A failed creation is destroyed through decoder_destroy(): these must not be whatever the host memory held.
@@ -184,6 +190,7 @@ static aom_codec_err_t decoder_init(aom_codec_ctx_t *ctx,
     priv->pbi->dec_tile_row = priv->decode_tile_row;
     priv->pbi->dec_tile_col = priv->decode_tile_col;
     priv->pbi->operating_point = priv->operating_point;
+    priv->pbi->output_all_layers = priv->output_all_layers;
     priv->pbi->ext_tile_debug = priv->ext_tile_debug;
     priv->pbi->row_mt = priv->row_mt;
     priv->pbi->gpu_decoder = priv->gpu_decoder;
@@ -420,6 +427,10 @@ static aom_codec_err_t decoder_decode(aom_codec_alg_priv_t *ctx,
     data_end = data_start + temporal_unit_size;
   }
 
+  // The data of this call is one temporal unit, or what is left of one: where av1_frame_is_output() stops
+  // looking for the frames that follow a frame.
+  ctx->pbi->temporal_unit_end = data_end;
+
   // Decode in serial mode.
   while (data_start < data_end) {
     uint64_t frame_size;
@@ -645,14 +656,23 @@ static aom_codec_err_t ctrl_set_is_annexb(aom_codec_alg_priv_t *ctx,
     return AOM_CODEC_INCAPABLE;
 }
 
+// The operating point of a stream with layers: the index into the operating points of the sequence header
+// (0, the default, is the first one; an index the stream does not have selects 0, as in libaom). It takes
+// effect at the next sequence header.
 static aom_codec_err_t ctrl_set_operating_point(aom_codec_alg_priv_t *ctx,
                                                 va_list args) {
-    return AOM_CODEC_INCAPABLE;
+  ctx->operating_point = va_arg(args, int);
+  if (ctx->pbi) ctx->pbi->operating_point = ctx->operating_point;
+  return AOM_CODEC_OK;
 }
 
+// 0 (the default): one frame per temporal unit, the highest spatial layer of the operating point that the
+// temporal unit has (av1_frame_is_output() of obu.c). 1: every shown frame, one per spatial layer.
 static aom_codec_err_t ctrl_set_output_all_layers(aom_codec_alg_priv_t *ctx,
                                                   va_list args) {
-    return AOM_CODEC_INCAPABLE;
+  ctx->output_all_layers = va_arg(args, int) != 0;
+  if (ctx->pbi) ctx->pbi->output_all_layers = ctx->output_all_layers;
+  return AOM_CODEC_OK;
 }
 
 static aom_codec_err_t ctrl_set_inspection_callback(aom_codec_alg_priv_t *ctx,

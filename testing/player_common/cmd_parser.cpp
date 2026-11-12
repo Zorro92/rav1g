@@ -82,6 +82,12 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"intraedgefix", atSingle, anOptional,
        "8-bit intra: the above edge filter stops where the 10-bit one does (same output)", "",
        &params_.intraedgefix_},
+      {"alllayers", atSingle, anOptional,
+       "a stream with spatial layers: output the frame of every layer of a temporal unit (default: one frame "
+       "per temporal unit, the highest layer it has)",
+       "", &params_.all_layers_},
+      {"oppoint", atInt, anOptional, "a stream with layers: decode operating point n of its sequence header. Default 0",
+       "", &params_.oppoint_},
       {"noguard", atSingle, anOptional,
        "create the decoder without the memory budget guard (a creation that does not fit loses the D3D12 device)",
        "", &params_.noguard_}};
@@ -263,6 +269,8 @@ void CParameters::Reset() {
   params_.noguard_ = false;
   params_.lfhsplit_ = 0;
   params_.intraedgefix_ = false;
+  params_.all_layers_ = false;
+  params_.oppoint_ = 0;
 }
 
 void CParameters::GetHelp(int pos, const char* arg, std::string& errMsg, const ParamStruct* arr, int size) {

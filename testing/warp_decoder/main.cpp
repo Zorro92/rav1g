@@ -94,6 +94,8 @@ struct Task {
   bool asyncclear = false;
   int lfhsplit = 0;           // -lfhsplit <0|1|2>
   bool intraedgefix = false;  // -intraedgefix
+  bool all_layers = false;    // -alllayers: every shown frame of a temporal unit with spatial layers
+  int oppoint = 0;            // -oppoint <n>: the operating point of a stream with layers
   int timeout_s = 0;          // -timeout: seconds for the task, 0 = none
   std::string dumpstages;     // -dumpstages <frame list>
   std::string dumpdir = "dumps";  // -dumpdir <dir>
@@ -149,6 +151,9 @@ static void Usage() {
   Say("  -lfhsplit <n>         horizontal loop filter: 1 even rows of blocks, a UAV barrier, odd rows; 2 every");
   Say("                        row of blocks on its own (default 0: one dispatch per plane; same output)");
   Say("  -intraedgefix         8-bit intra: the above edge filter stops where the 10-bit one does (same output)");
+  Say("  -alllayers            a stream with spatial layers: output the frame of every layer of a temporal unit");
+  Say("                        (default: one frame per temporal unit, the highest layer it has)");
+  Say("  -oppoint <n>          a stream with layers: decode operating point n of its sequence header (default 0)");
   Say("Program flags:");
   Say("  -list <file>          one task per line (the task flags above; # starts a comment line)");
   Say("  -hw                   the first hardware adapter instead of WARP");
@@ -244,6 +249,10 @@ static bool ParseArgs(const std::vector<std::string>& args, Task* task, Globals*
       if (!number(&task->lfhsplit)) return false;
     } else if (a == "-intraedgefix") {
       task->intraedgefix = true;
+    } else if (a == "-alllayers") {
+      task->all_layers = true;
+    } else if (a == "-oppoint") {
+      if (!number(&task->oppoint)) return false;
     } else if (globals && a == "-hw") {
       globals->hardware = true;
     } else if (globals && a == "-v") {
@@ -982,6 +991,14 @@ static int RunTask(const Task& task, Device* dev) {
       const char* detail = aom_codec_error_detail(&ctx);
       return std::string("decoder creation failed: ") + (message ? message : "?") +
              ((detail && detail[0]) ? std::string(": ") + detail : std::string());
+    }
+    // The layers of a stream that has them: one frame per temporal unit unless -alllayers, operating point 0
+    // unless -oppoint.
+    if (aom_codec_control(&ctx, AV1D_SET_OUTPUT_ALL_LAYERS, task.all_layers ? 1 : 0) ||
+        aom_codec_control(&ctx, AV1D_SET_OPERATING_POINT, task.oppoint)) {
+      const std::string control_error = std::string("a layer control failed: ") + aom_codec_error(&ctx);
+      aom_codec_destroy(&ctx);
+      return control_error;
     }
     create_ms += MsSince(create_start);
     return std::string();

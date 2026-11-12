@@ -426,6 +426,16 @@ int AV1Decoder::DecodeOne() {
     const int create_error = create_decoder(false);
     if (create_error) return create_error;
   }
+  // The layers of a stream that has them: one frame per temporal unit unless -alllayers, the first operating
+  // point unless -oppoint. Set for every task (a decoder serves several) and for a decoder that replaces
+  // the task's in the middle of the stream.
+  auto apply_layer_options = [&]() {
+    if (aom_codec_control(&decctx_, AV1D_SET_OUTPUT_ALL_LAYERS, params_.all_layers_ ? 1 : 0))
+      XB_LOGE << "AV1D_SET_OUTPUT_ALL_LAYERS failed: " << aom_codec_error(&decctx_);
+    if (aom_codec_control(&decctx_, AV1D_SET_OPERATING_POINT, params_.oppoint_))
+      XB_LOGE << "AV1D_SET_OPERATING_POINT failed: " << aom_codec_error(&decctx_);
+  };
+  apply_layer_options();
   if (!buffer) {
     buffer = reader.GetData();
     if (!buffer) {
@@ -580,6 +590,7 @@ int AV1Decoder::DecodeOne() {
           output_queue_->Push(0);
           break;
         }
+        apply_layer_options();
         decode_err = aom_codec_decode(&decctx_, buffer->Data(), buffer->Size(), (void*)user_priv);
       }
     }

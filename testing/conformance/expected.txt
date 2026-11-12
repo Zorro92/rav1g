@@ -10,14 +10,3 @@
 #
 # The run fails when a stream fails that is not listed here, when a listed stream fails in another way,
 # and when a listed stream passes: a fix has to take its streams off this list.
-
-# Two spatial layers, 640x360 and 1280x720. The decoder outputs the frame of each layer (16 frames for 8
-# temporal units; AOM's md5 has the 1280x720 frame of each temporal unit, which is the frame to show by
-# section 7.18.1 of the specification), and of its 1280x720 frames only
-# the first is right (output frame 1 = reference frame 0): every later one, which predicts from the
-# 640x360 frame of its temporal unit and from earlier 1280x720 frames, differs. First bad 1280x720 frame:
-# output frame 3, the second temporal unit.
-av1-1-b8-22-svc-L2T1.ivf mismatch spatial layers: every layer's frame is output, and the 1280x720 frames after the first are wrong (prediction across the two frame sizes)
-av1-1-b8-22-svc-L2T1-2.ivf mismatch spatial layers: every layer's frame is output, and the 1280x720 frames after the first are wrong (prediction across the two frame sizes)
-av1-1-b8-22-svc-L2T2.ivf mismatch spatial layers: every layer's frame is output, and the 1280x720 frames after the first are wrong (prediction across the two frame sizes)
-av1-1-b8-22-svc-L2T2-2.ivf mismatch spatial layers: every layer's frame is output, and the 1280x720 frames after the first are wrong (prediction across the two frame sizes)

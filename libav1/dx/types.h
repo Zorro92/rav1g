@@ -225,6 +225,9 @@ struct av1_frame_thread_data {
   int do_filmgrain;
   int do_superres;
   int is_hbd;
+  // The frame of this command list is output: it is shown and it is the frame of its temporal unit that
+  // is output (av1_frame_is_output). Only such a frame takes an output image.
+  int output_frame;
 
   int ext_idct_buffer;
   int ext_coef_base;  // ext_idct_buffer: where the frame's coefficients start in idct_coefs, in coefficients

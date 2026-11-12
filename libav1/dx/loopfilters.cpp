@@ -995,6 +995,9 @@ struct CopyPlaneData {
 // of its own command list, or a frame shown with show_existing_frame, in the command list of that
 // show_existing_frame (av1_decode_sef; cm->show_frame is 1 there and cm->film_grain_params are the frame's).
 //
+// Of the shown frames of a temporal unit with spatial layers only the frame of the highest layer is output
+// (av1_frame_is_output() of obu.c; td->output_frame); the others are decoded like frames that are not shown.
+//
 // A frame that is decoded but not shown takes no output image. It used to take one when it was showable and
 // kept it until a show_existing_frame, or until the frame left the reference map; the output images of the
 // application were then held by frames that are not output, and a stream with as many hidden frames as the
@@ -1003,7 +1006,7 @@ struct CopyPlaneData {
 int av1_postprocess_copy_output(Av1Core *dec, AV1_COMMON *cm) {
   av1_frame_thread_data *td = dec->curr_frame_data;
   cm->cur_frame->buf.hw_show_image = NULL;
-  if (!cm->show_frame) return 0;
+  if (!td->output_frame) return 0;
 
   HwFrameBuffer *src = td->dst_frame_buffer;
   const int is_monochrome = cm->cur_frame->buf.monochrome;

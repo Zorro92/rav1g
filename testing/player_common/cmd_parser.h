@@ -102,6 +102,9 @@ class CParameters {
     // Experiments (docs/test-player.md): -lfhsplit 0|1|2, -intraedgefix.
     int lfhsplit_;
     bool intraedgefix_;
+    // Streams with layers: -alllayers (AV1D_SET_OUTPUT_ALL_LAYERS), -oppoint <n> (AV1D_SET_OPERATING_POINT).
+    bool all_layers_;
+    int oppoint_;
   };
   enum arg_type { atSingle, atInt, atString };
   enum arg_need { anOptional, anMandatory, anAtLeastOne };

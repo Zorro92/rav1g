@@ -71,7 +71,7 @@ aom_codec_err_t aom_get_num_layers_from_operating_point_idc(
   return AOM_CODEC_OK;
 }
 
-static int is_obu_in_current_operating_point(AV1Decoder *pbi,
+static int is_obu_in_current_operating_point(const AV1Decoder *pbi,
                                              ObuHeader obu_header) {
   if (!pbi->current_operating_point) {
     return 1;
@@ -83,6 +83,69 @@ static int is_obu_in_current_operating_point(AV1Decoder *pbi,
     return 1;
   }
   return 0;
+}
+
+// The output process of the specification (section 7.18.1) for a stream
+// with spatial layers. Every layer that has a frame in a temporal unit has
+// one shown frame there, and an application that displays the video shows
+// one frame of the temporal unit: the frame of the highest spatial layer
+// that is in the operating point and present in the temporal unit. That is
+// what libaom's decoder returns by default (output_all_layers 0: of the
+// shown frames of one decode call the last one is kept, and the layers of a
+// temporal unit come in rising order), and what the md5 files of AOM's
+// spatial layer vectors hold.
+//
+// The frame's output is recorded with its command list, before the next
+// frame of the temporal unit is read, so the answer is taken from the OBU
+// headers that follow the frame: a shown frame is output unless an OBU of a
+// frame of a higher spatial layer that is in the operating point follows in
+// the same temporal unit (up to the next temporal delimiter, or the end of
+// the data of the decode call). A stream without layers has no such OBU,
+// and each of its shown frames is output, as before.
+int av1_frame_is_output(const AV1Decoder *pbi) {
+  const AV1_COMMON *const cm = &pbi->common;
+  if (pbi->output_all_layers) return 1;
+  const uint8_t *data = pbi->next_obu;
+  const uint8_t *unit_end = pbi->obus_end;
+  if (!data || !unit_end) return 1;
+  for (;;) {
+    while (data < unit_end) {
+      ObuHeader obu_header;
+      size_t payload_size = 0;
+      size_t bytes_read = 0;
+      memset(&obu_header, 0, sizeof(obu_header));
+      // Data that cannot be read as an OBU (the zero bytes allowed behind a
+      // frame, a damaged stream) ends the search: nothing known follows.
+      if (aom_read_obu_header_and_size(data, (size_t)(unit_end - data),
+                                       cm->is_annexb, &obu_header,
+                                       &payload_size,
+                                       &bytes_read) != AOM_CODEC_OK)
+        return 1;
+      if ((size_t)(unit_end - data) - bytes_read < payload_size) return 1;
+      if (obu_header.type == OBU_TEMPORAL_DELIMITER) return 1;
+      if ((obu_header.type == OBU_FRAME ||
+           obu_header.type == OBU_FRAME_HEADER ||
+           obu_header.type == OBU_REDUNDANT_FRAME_HEADER ||
+           obu_header.type == OBU_TILE_GROUP) &&
+          obu_header.spatial_layer_id > cm->spatial_layer_id &&
+          is_obu_in_current_operating_point(pbi, obu_header))
+        return 0;
+      data += bytes_read + payload_size;
+    }
+    // Annex B: the temporal unit goes on with the next frame unit, which
+    // starts with its size.
+    if (!cm->is_annexb || !pbi->temporal_unit_end ||
+        unit_end >= pbi->temporal_unit_end)
+      return 1;
+    uint64_t frame_unit_size = 0;
+    size_t length_of_size = 0;
+    if (aom_uleb_decode(unit_end, (size_t)(pbi->temporal_unit_end - unit_end),
+                        &frame_unit_size, &length_of_size) != 0)
+      return 1;
+    data = unit_end + length_of_size;
+    if (frame_unit_size > (size_t)(pbi->temporal_unit_end - data)) return 1;
+    unit_end = data + frame_unit_size;
+  }
 }
 
 static int byte_alignment(AV1_COMMON *const cm,
@@ -770,6 +833,9 @@ int aom_decode_frame_from_obus(struct AV1Decoder *pbi, const uint8_t *data,
 
     cm->temporal_layer_id = obu_header.temporal_layer_id;
     cm->spatial_layer_id = obu_header.spatial_layer_id;
+    // For av1_frame_is_output(): what follows this OBU.
+    pbi->next_obu = data + payload_size;
+    pbi->obus_end = data_end;
 
     if (obu_header.type != OBU_TEMPORAL_DELIMITER &&
         obu_header.type != OBU_SEQUENCE_HEADER &&

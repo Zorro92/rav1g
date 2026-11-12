@@ -233,6 +233,17 @@ typedef struct AV1Decoder {
   int current_operating_point;
   int seen_frame_header;
 
+  // Which shown frames are output (av1_frame_is_output() of obu.c). 0, the default: of a temporal unit
+  // the frame of the highest spatial layer that is in the operating point and present in the temporal
+  // unit. 1 (AV1D_SET_OUTPUT_ALL_LAYERS): every shown frame.
+  int output_all_layers;
+  // Where the OBU that is being decoded ends, where the OBUs that follow it directly end (the data of
+  // the decode call, or the frame unit of an Annex B stream), and where the data of the decode call
+  // ends: what av1_frame_is_output() looks through for the frames that follow in the temporal unit.
+  const uint8_t *next_obu;
+  const uint8_t *obus_end;
+  const uint8_t *temporal_unit_end;
+
   // State if the camera frame header is already decoded while
   // large_scale_tile = 1.
   int camera_frame_header_ready;
@@ -290,6 +301,11 @@ void av1_dealloc_dec_jobs(struct AV1DecTileMTData *tile_mt_info);
 void av1_dec_row_mt_dealloc(AV1DecRowMTSync *dec_row_mt_sync);
 
 void av1_dec_free_cb_buf(AV1Decoder *pbi);
+
+// Whether the shown frame that is being decoded (a frame with show_frame, at
+// its last tile group, or a show_existing_frame, at its header) is a frame
+// to output: obu.c.
+int av1_frame_is_output(const AV1Decoder *pbi);
 
 static INLINE void decrease_ref_count(RefCntBuffer *const buf,
                                       BufferPool *const pool) {

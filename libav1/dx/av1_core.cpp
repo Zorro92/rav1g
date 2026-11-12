@@ -2132,6 +2132,8 @@ extern "C" void av1_decode_sef(AV1Decoder *pbi) {
   buf->hw_show_image = NULL;
   // Nothing to show: no frame was ever decoded into this entry.
   if (!buf->hw_buffer) return;
+  // Not the frame of its temporal unit that is output: a frame of a higher spatial layer follows.
+  if (!av1_frame_is_output(pbi)) return;
 
   int64_t perf_t = av1_perf_ticks();
   if (perf_t) {
@@ -2158,6 +2160,7 @@ extern "C" void av1_decode_sef(AV1Decoder *pbi) {
   td->do_loop_rest = 0;
   td->do_superres = 0;
   td->do_filmgrain = cm->film_grain_params.apply_grain;
+  td->output_frame = 1;
   frame_buffer_acquire(dec, td->dst_frame_buffer);
   // From here on release_unsubmitted_frame() can take the context back if the output image cannot be had.
   dec->curr_frame_data = td;
@@ -2199,6 +2202,8 @@ extern "C" int av1_decode_frame_gpu(AV1Decoder *pbi) {
   perf_t = perf_lap(dec, AV1_PERF_CPU_REC_CDEF_LR, perf_t);
   av1_inter_ext_borders(dec, cm);
   perf_t = perf_lap(dec, AV1_PERF_CPU_REC_BORDERS, perf_t);
+  // A shown frame is output, unless it is a lower spatial layer of its temporal unit.
+  dec->curr_frame_data->output_frame = cm->show_frame && av1_frame_is_output(pbi);
   av1_postprocess_copy_output(dec, cm);
   perf_t = perf_lap(dec, AV1_PERF_CPU_REC_COPY, perf_t);
   if (perf_t) {
@@ -2220,7 +2225,7 @@ extern "C" int av1_decode_frame_gpu(AV1Decoder *pbi) {
   item->data = dec->curr_frame_data;
   item->image = NULL;
   dec->curr_frame_data = NULL;
-  if (cm->show_frame) {
+  if (cm->cur_frame->buf.hw_show_image) {  // the frame is output: av1_postprocess_copy_output()
     item->image = cm->cur_frame->buf.hw_show_image;
     item->image->user_priv = pbi->user_priv;
     cm->cur_frame->buf.hw_show_image = NULL;
