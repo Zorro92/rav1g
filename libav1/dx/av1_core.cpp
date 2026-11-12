@@ -66,6 +66,13 @@ extern "C" void av1_set_perf_callback(av1_perf_frame_cb_fn_t cb, void *priv) {
 
 static inline int perf_enabled() { return g_perf_cb != NULL; }
 
+// Test player flag -gputimedetail (av1_perf.h): the inter prediction breakdown. 0 off, 1 timestamps behind
+// the sections of the inter stage and work counters, 2 also a UAV barrier and a timestamp behind every
+// dispatch. Nothing of it exists without a perf callback.
+static int g_perf_detail = 0;
+
+extern "C" void av1_set_perf_detail(int mode) { g_perf_detail = mode < 0 ? 0 : mode > 2 ? 2 : mode; }
+
 static inline int64_t perf_now() {
   LARGE_INTEGER t;
   QueryPerformanceCounter(&t);
@@ -106,7 +113,39 @@ void av1_perf_gpu_mark(Av1Core *dec, int stage) {
   av1_perf_td *p = &td->perf;
   if (!p->gpu_active || p->mark_count >= Av1PerfMaxMarks) return;
   dec->compute.command_list->EndQuery(p->query_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, p->mark_count);
+  p->mark_sub[p->mark_count] = 0;
   p->mark_stage[p->mark_count++] = (uint8_t)stage;
+}
+
+// Inter breakdown: the record of the frame of the current command list, cleared for the stage code to fill,
+// or NULL when the frame has none.
+av1_perf_inter_detail *av1_perf_inter_begin(Av1Core *dec) {
+  av1_frame_thread_data *td = dec->curr_frame_data;
+  if (!td) return NULL;
+  av1_perf_td *p = &td->perf;
+  if (!p->detail_mode) return NULL;
+  if (!p->detail) p->detail = (av1_perf_inter_detail *)malloc(sizeof(av1_perf_inter_detail));
+  if (!p->detail) {
+    p->detail_mode = 0;
+    return NULL;
+  }
+  memset(p->detail, 0, sizeof(*p->detail));
+  p->detail->mode = p->detail_mode;
+  p->detail_filled = 1;
+  return p->detail;
+}
+
+// Inter breakdown: a timestamp behind a section of the inter stage, or behind one of its dispatches. Its
+// time is counted to |stage| as well, so the stage keeps the time it has without the breakdown.
+void av1_perf_inter_mark(Av1Core *dec, int stage, int section, int list) {
+  av1_frame_thread_data *td = dec->curr_frame_data;
+  if (!td) return;
+  av1_perf_td *p = &td->perf;
+  if (!p->gpu_active || !p->detail_mode || !p->detail_filled || p->mark_count >= Av1PerfMaxMarks) return;
+  dec->compute.command_list->EndQuery(p->query_heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, p->mark_count);
+  p->mark_sub[p->mark_count] = (uint16_t)((section + 1) | ((list + 1) << 8));
+  p->mark_stage[p->mark_count++] = (uint8_t)stage;
+  ++p->detail->marks;
 }
 
 // Start of a frame's command list: decide whether this frame is timed and
@@ -115,6 +154,8 @@ static void perf_begin_command_buffer(Av1Core *dec, av1_frame_thread_data *td) {
   av1_perf_td *p = &td->perf;
   p->gpu_active = 0;
   p->mark_count = 0;
+  p->detail_mode = 0;
+  p->detail_filled = 0;
   p->collect = perf_enabled();
   if (!p->collect) return;
   dec->perf_cur.t_record_start = perf_now();
@@ -158,6 +199,9 @@ static void perf_begin_command_buffer(Av1Core *dec, av1_frame_thread_data *td) {
       p->gpu_failed = 1;
     }
   }
+  // The inter breakdown of a decoded frame, in the mode its tiles were counted with (av1_setup_frame). Its
+  // counters need no timestamps.
+  if (!td->output_only) p->detail_mode = dec->perf_inter_mode;
   if (p->query_heap) {
     p->gpu_active = 1;
     av1_perf_gpu_mark(dec, AV1_PERF_GPU_BEGIN);
@@ -194,6 +238,17 @@ static void perf_collect(Av1Core *dec, av1_frame_thread_data *td, int64_t wait_s
   rec->complete_ms = (double)now * to_ms;
   rec->gpu_gap_ms = -1.0;
 
+  // The inter breakdown goes to the callback as a copy this thread owns: the slot goes back to the pool
+  // before the callback runs, and the decode thread may be recording the slot's next frame by then.
+  av1_perf_inter_detail *detail = NULL;
+  if (p->detail_mode && p->detail_filled && p->detail) {
+    if (!dec->perf_detail_out)
+      dec->perf_detail_out = (av1_perf_inter_detail *)malloc(sizeof(av1_perf_inter_detail));
+    detail = dec->perf_detail_out;
+    if (detail) memcpy(detail, p->detail, sizeof(*detail));
+  }
+  rec->inter = detail;
+
   if (!p->gpu_active || p->mark_count <= 0 || !dec->perf_gpu_freq) return;
   UINT64 ts[Av1PerfMaxMarks];
   D3D12_RANGE read_range = {0, sizeof(UINT64) * (size_t)p->mark_count};
@@ -206,12 +261,26 @@ static void perf_collect(Av1Core *dec, av1_frame_thread_data *td, int64_t wait_s
   const double gpu_to_ms = 1000.0 / (double)dec->perf_gpu_freq;
   for (int i = 1; i < p->mark_count; ++i) {
     const int stage = p->mark_stage[i];
+    const int sub = p->mark_sub[i];
     const double ms = ts[i] > ts[i - 1] ? (double)(ts[i] - ts[i - 1]) * gpu_to_ms : 0.0;
     if (stage < AV1_PERF_GPU_STAGE_COUNT) {
       rec->gpu_stage_ms[stage] += ms;
-      ++rec->gpu_stage_hits[stage];
+      if (!sub) ++rec->gpu_stage_hits[stage];
     }
     rec->gpu_sum_ms += ms;
+    if (detail) {
+      // A timestamp of the breakdown, or the one that closes the inter stage (behind its last barrier) or
+      // the reconstruction.
+      int section = sub ? (sub & 255) - 1
+                        : stage == AV1_PERF_GPU_INTER ? (int)AV1_PERF_INTER_SYNC2
+                                                      : stage == AV1_PERF_GPU_RECON ? (int)AV1_PERF_INTER_RECON : -1;
+      const int list = sub ? (sub >> 8) - 1 : -1;
+      if (section >= 0 && section < AV1_PERF_INTER_SECTION_COUNT) {
+        detail->sections[section].ms += ms;
+        detail->sections[section].timed = 1;
+        if (list >= 0 && list < AV1_PERF_INTER_LISTS) detail->sections[section].lists[list].ms += ms;
+      }
+    }
   }
   const UINT64 first = ts[0];
   const UINT64 last = ts[p->mark_count - 1];
@@ -1308,6 +1377,16 @@ static void destroy_gpu_decoder(Av1Core *dec, int log_steps) {
     if (td->command_buffer.event) CloseHandle(td->command_buffer.event);
     td->command_buffer.event = NULL;
   }
+  // The inter breakdown of the timing run (-gputimedetail), where a frame was recorded with it.
+  for (int i = 0; i < dec->frame_slots; ++i) {
+    free(dec->frame_thread_data[i].perf.detail);
+    dec->frame_thread_data[i].perf.detail = NULL;
+  }
+  free(dec->perf_inter_tiles);
+  dec->perf_inter_tiles = NULL;
+  dec->perf_inter_tiles_cap = 0;
+  free(dec->perf_detail_out);
+  dec->perf_detail_out = NULL;
 
   pthread_cond_destroy(&dec->fb_pool_empty_cond);
   pthread_mutex_destroy(&dec->fb_pool_mutex);
@@ -1873,6 +1952,20 @@ extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
 
   td->tile_count = cm->tile_cols * cm->tile_rows;
   dec->thread_count = AOMMIN(pbi->max_threads, td->tile_count);
+  // Inter breakdown (-gputimedetail): the tile threads count the blocks they push, each tile into its own
+  // counters, which av1_prediction_run_all() adds up when the frame is recorded.
+  dec->perf_inter_mode = perf_enabled() ? g_perf_detail : 0;
+  if (dec->perf_inter_mode) {
+    if (dec->perf_inter_tiles_cap < td->tile_count) {
+      free(dec->perf_inter_tiles);
+      dec->perf_inter_tiles = (av1_perf_inter_tile *)malloc(sizeof(av1_perf_inter_tile) * (size_t)td->tile_count);
+      dec->perf_inter_tiles_cap = dec->perf_inter_tiles ? td->tile_count : 0;
+    }
+    if (dec->perf_inter_tiles)
+      memset(dec->perf_inter_tiles, 0, sizeof(av1_perf_inter_tile) * (size_t)td->tile_count);
+    else
+      dec->perf_inter_mode = 0;
+  }
 
   td->gen_intra_iter_y = (int *)td->gen_intra_inter_grid->host_ptr;
   td->iter_grid_offset_uv = grid_w * grid_h;
@@ -2088,6 +2181,7 @@ extern "C" void av1_setup_macroblockd(AV1Decoder *pbi, AV1_COMMON *cm, ThreadDat
   perf_add_memset(dec, AV1_PERF_CPU_MEMSET_TILE, perf_t, sizeof(*t));
   thread_data->tile_data = t;
   xd->tile_data = t;
+  if (dec->perf_inter_mode && tile_id < dec->perf_inter_tiles_cap) t->perf_inter = &dec->perf_inter_tiles[tile_id];
   const int mi_offset = tile->mi_row_start * ((cm->mi_cols + 15) & ~15) +
                         tile->mi_col_start * ((tile->mi_row_end - tile->mi_row_start + 15) & (~15));
   const int mi_max =

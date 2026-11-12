@@ -103,7 +103,131 @@ typedef struct av1_perf_frame {
   int64_t memset_bytes; /* bytes cleared by the timed memsets on the decode and tile threads */
   int64_t async_clear_bytes; /* bytes cleared on the completion thread (AV1_PERF_CPU_ASYNC_CLEAR) */
   double complete_ms;   /* host clock when the frame's fence was seen */
+  /* The inter prediction breakdown of the frame (av1_set_perf_detail), valid during the callback only;
+   * NULL without it and for a show-existing copy. */
+  const struct av1_perf_inter_detail *inter;
 } av1_perf_frame;
+
+/* ---------------------------------------------------------------------------
+ * Inter prediction breakdown (test flag -gputimedetail). Nothing here changes
+ * what is decoded.
+ *
+ * The inter stage of a frame's command list is a row of sections, each a list
+ * of dispatches of one shader (one dispatch per block size), in this order.
+ * Three UAV barriers divide it into passes whose shaders read what the pass
+ * before wrote:
+ *   pass 1  warp, single, comp_avg, comp_diff_y, comp_masked, comp_warp,
+ *           chroma_2x2                                      then sync0
+ *   pass 2  comp_diff_uv, comp_warp_diff_uv, obmc_above     then sync1
+ *   pass 3  obmc_left                                       then sync2
+ * recon (the residuals of the blocks whose prediction is not final when their
+ * inter shader ends: OBMC, and palette blocks) is the stage behind it
+ * (AV1_PERF_GPU_RECON) and ends with a barrier of its own.
+ *
+ * Mode 1 puts a timestamp behind every section that dispatched something and
+ * behind every barrier. The GPU runs the dispatches of a pass side by side, so
+ * a section's time is the time from the timestamp before it to its own: it
+ * follows the order of submission and overlaps with its neighbours in the
+ * pass. Exclusive are only the sums up to a barrier: the passes, and recon.
+ * Mode 2 also puts a UAV barrier and a timestamp behind every dispatch of the
+ * inter stage and of recon, so that each runs alone and has a time of its
+ * own; the decoded output is the same, the stage gets slower by what the
+ * barriers cost.
+ * ------------------------------------------------------------------------- */
+enum {
+  AV1_PERF_INTER_WARP = 0,          /* one reference, warped (local or global): inter_warp */
+  AV1_PERF_INTER_SINGLE,            /* one reference: inter_main, inter_scale */
+  AV1_PERF_INTER_COMP_AVG,          /* two references, averaged or distance weighted: inter_compound */
+  AV1_PERF_INTER_COMP_DIFF_Y,       /* two references, difference weighted, luma: writes the mask the chroma reads */
+  AV1_PERF_INTER_COMP_MASKED,       /* two references, wedge mask */
+  AV1_PERF_INTER_COMP_WARP,         /* two references, one or both globally warped: inter_scale_warp_compound */
+  AV1_PERF_INTER_CHROMA_2X2,        /* the chroma of blocks under 8x8, in 2x2 pieces: inter_2x2chroma */
+  AV1_PERF_INTER_SYNC0,             /* the UAV barrier behind pass 1 */
+  AV1_PERF_INTER_COMP_DIFF_UV,      /* difference weighted, chroma: reads the mask */
+  AV1_PERF_INTER_COMP_WARP_DIFF_UV, /* the same for globally warped blocks */
+  AV1_PERF_INTER_OBMC_ABOVE,        /* overlapped prediction from the blocks above, blended into the frame */
+  AV1_PERF_INTER_SYNC1,             /* the UAV barrier behind pass 2 */
+  AV1_PERF_INTER_OBMC_LEFT,         /* overlapped prediction from the blocks to the left */
+  AV1_PERF_INTER_SYNC2,             /* the UAV barrier behind pass 3: the end of the inter stage */
+  AV1_PERF_INTER_RECON,             /* reconstruct_block: the stage AV1_PERF_GPU_RECON */
+  AV1_PERF_INTER_SECTION_COUNT
+};
+
+enum { AV1_PERF_INTER_LISTS = 36 }; /* dispatches a section can have: one per block size */
+
+/* One dispatch: the blocks of one size of a section. */
+typedef struct av1_perf_inter_list {
+  int width;   /* of the block of one record, in samples */
+  int height;
+  int records; /* block records of the dispatch; a chroma block has two, U and V */
+  int groups;  /* thread groups of 64 threads */
+  int threads; /* threads with work (the rest of the last group has none) */
+  double ms;   /* mode 2: GPU time of the dispatch and its barrier; 0 otherwise */
+} av1_perf_inter_list;
+
+/* What a section predicted, counted where the tile threads push the blocks. recon has none of it. */
+typedef struct av1_perf_inter_work {
+  int64_t blocks_y;     /* luma prediction blocks */
+  int64_t blocks_uv;    /* chroma prediction blocks; U and V are one block here */
+  int64_t pixels_y;     /* luma samples predicted */
+  int64_t pixels_uv;    /* chroma samples predicted, both planes */
+  int64_t ref_blocks;   /* reference blocks fetched: one per prediction block, plane and reference */
+  int64_t footprint;    /* samples of the references those fetches cover with an 8-tap filter in both
+                           directions: (w + 7) * (h + 7) each (a scaled reference: the scaled size + 7) */
+  int64_t footprint_mv; /* the same with the 7 only in a direction in which the motion vector has a
+                           fraction: what a shader that looked at the vector would have to read */
+} av1_perf_inter_work;
+
+typedef struct av1_perf_inter_section {
+  double ms;            /* GPU time: the section's timestamp minus the one before it (see above) */
+  int timed;            /* the frame has a timestamp for the section */
+  int dispatches;
+  int groups;
+  int64_t threads;
+  int64_t records;
+  int64_t pixels;       /* samples the records cover: records * width * height */
+  int64_t loaded_bytes; /* reference bytes the threads load: threads times what one thread of the shader
+                           loads for its reference rows, whatever the motion vector (an estimate for the
+                           shaders of scaled references, whose row count depends on the block) */
+  av1_perf_inter_work work;
+  av1_perf_inter_list lists[AV1_PERF_INTER_LISTS];
+} av1_perf_inter_section;
+
+/* The inter blocks of the frame by what they use, in luma samples of the block (mode info blocks, whatever
+ * section their parts went to). ref_area counts a block once per reference. */
+typedef struct av1_perf_inter_blocks {
+  int64_t blocks;
+  int64_t area;
+  int64_t area_compound;   /* two references */
+  int64_t area_obmc;
+  int64_t area_warp;       /* luma warped, locally or globally */
+  int64_t area_wedge;      /* compound with a wedge mask */
+  int64_t area_diffwtd;    /* compound with a difference weighted mask */
+  int64_t area_interintra;
+  int64_t area_scaled;     /* a reference of another size than the frame */
+  int64_t ref_area;
+  int64_t ref_area_mv[4];  /* by the fraction of the luma motion vector: none, horizontal only, vertical
+                              only, both (a warped or scaled reference counts as both) */
+  int64_t ref_area_filter[2][3]; /* [horizontal, vertical] by the kernel the block asks for: 8-tap (regular,
+                                    smooth, sharp), 4-tap (the same for a side of 4), bilinear */
+} av1_perf_inter_blocks;
+
+typedef struct av1_perf_inter_detail {
+  int mode;             /* 1 or 2, see above */
+  int has_inter;        /* the frame has an inter stage; without one only recon can have numbers */
+  int scaled;           /* the frame has a reference of another size: all sections but warp run the shaders
+                           for scaled references (inter_scale_*) */
+  int bytes_per_sample; /* of the frame buffers: 1 or 2 */
+  int barriers_added;   /* mode 2: UAV barriers the mode added to the frame */
+  int marks;            /* timestamps the detail added to the frame */
+  av1_perf_inter_section sections[AV1_PERF_INTER_SECTION_COUNT];
+  av1_perf_inter_blocks blocks;
+} av1_perf_inter_detail;
+
+/* Process-wide. 0 (the default): no inter breakdown. 1: section timestamps and work counters. 2: also a UAV
+ * barrier and a timestamp behind every dispatch. Only with a perf callback installed. Change it only while
+ * no frame is in flight, like the callback. */
+void av1_set_perf_detail(int mode);
 
 /* Called on the GPU completion thread, once per decoded frame, after the
  * frame's fence has completed and its results were read back. */

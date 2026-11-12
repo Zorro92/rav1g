@@ -50,6 +50,12 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"try10x3", atSingle, anOptional, "Use 10_10_10_2 display mode. Default false", "", &params_.hdr10x3_},
       {"r", atSingle, anOptional, "Recreate decoder for every file", "", &params_.recreate_},
       {"gputime", atSingle, anOptional, "per-stage GPU/CPU timing, summary in the log", "", &params_.gputime_},
+      {"gputimedetail", atSingle, anOptional,
+       "-gputime with the inter prediction breakdown: a timestamp behind every section, work counters", "",
+       &params_.gputimedetail_},
+      {"gputimeisolate", atSingle, anOptional,
+       "-gputimedetail with a UAV barrier and a timestamp behind every inter dispatch (same output, slower)", "",
+       &params_.gputimeisolate_},
       {"nopresent", atSingle, anOptional, "release decoded frames without presenting them", "",
        &params_.nopresent_},
       {"cdefv2", atSingle, anOptional, "CDEF through cdef_filter_v2.hlsl (the default; same output)", "cdef",
@@ -194,6 +200,9 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     Err += "-dumpstages " + params_.dumpstages_ + " is not a frame list like 0,3,10-12 of at most 256 frames.";
     return -1;
   }
+  // The inter breakdown is part of the timing run.
+  params_.gputime_detail_ = params_.gputimeisolate_ ? 2 : params_.gputimedetail_ ? 1 : 0;
+  if (params_.gputime_detail_) params_.gputime_ = true;
   if (params_.dumpdir_.empty()) params_.dumpdir_ = "/dumps";
   params_.dumpdir_ = write_root_path_ + params_.dumpdir_;
   // -lowmem is all parts; -lowmemparts alone says exactly which ones (0: none); neither: the default, part 1.
@@ -255,6 +264,9 @@ void CParameters::Reset() {
   params_.noninterop_ = false;
   params_.recreate_ = false;
   params_.gputime_ = false;
+  params_.gputimedetail_ = false;
+  params_.gputimeisolate_ = false;
+  params_.gputime_detail_ = 0;
   params_.nopresent_ = false;
   params_.cdefv2_ = true;
   params_.cdefv1_ = false;

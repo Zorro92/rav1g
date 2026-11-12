@@ -465,10 +465,18 @@ int AV1Decoder::DecodeOne() {
   }
   av1_set_perf_callback(params_.gputime_ ? PerfFrame : NULL, this);
   perf_installed_ = params_.gputime_ ? 1 : 0;
+  // -gputimedetail, -gputimeisolate: the inter breakdown, set like the callback while no frame is in flight.
+  av1_set_perf_detail(params_.gputime_ ? params_.gputime_detail_ : 0);
   storage_->SetWaitLogging(params_.gputime_);
   storage_->ResetWaitStats();
   if (params_.gputime_)
     XB_LOGI << "GPUTIME timing run: per-stage GPU timestamps and CPU timers on, summary follows the last frame";
+  if (params_.gputime_detail_)
+    XB_LOGI << "GPUTIME inter breakdown: "
+            << (params_.gputime_detail_ == 2
+                    ? "a UAV barrier and a timestamp behind every dispatch of the inter stage and of the "
+                      "reconstruction (-gputimeisolate; same output, the stage is slower by what they cost)"
+                    : "a timestamp behind every section of the inter stage, work counters (-gputimedetail)");
   if (params_.nopresent_)
     XB_LOGI << "GPUTIME -nopresent: decoded frames go straight back to the pool, nothing is presented";
   // CDEF shader: also set at a point where no frame is in flight. cdef_filter_v2 unless the task has -cdefv1.

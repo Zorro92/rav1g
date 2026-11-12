@@ -41,6 +41,7 @@
 #include "aom/aom_decoder.h"
 #include "aom/aomdx.h"
 #include "dx/av1_perf.h"
+#include "player_common/perf_stats.h"
 #include "sm6test/sm6test.h"
 
 using Microsoft::WRL::ComPtr;
@@ -98,6 +99,9 @@ struct Task {
   bool all_layers = false;    // -alllayers: every shown frame of a temporal unit with spatial layers
   int oppoint = 0;            // -oppoint <n>: the operating point of a stream with layers
   int timeout_s = 0;          // -timeout: seconds for the task, 0 = none
+  bool gputime = false;       // -gputime: the timing run of the player, its summary on stdout
+  int gputime_detail = 0;     // -gputimedetail (1), -gputimeisolate (2): the inter breakdown; either sets gputime
+  bool progress = false;      // -progress: with -gputime, the per-frame lines behind the summary
   std::string dumpstages;     // -dumpstages <frame list>
   std::string dumpdir = "dumps";  // -dumpdir <dir>
   std::vector<int> dump_frames;   // the frames of -dumpstages
@@ -158,6 +162,14 @@ static void Usage() {
   Say("  -lfhsplit <n>         horizontal loop filter: 1 even rows of blocks, a UAV barrier, odd rows; 2 every");
   Say("                        row of blocks on its own (default 0: one dispatch per plane; same output)");
   Say("  -intraedgefix         8-bit intra: the above edge filter stops where the 10-bit one does (same output)");
+  Say("  -gputime              the timing run of the test player: GPU timestamps per stage and CPU timers, the");
+  Say("                        summary as 'GPUTIME ...' lines after the task (docs/test-player.md, \"Timing run\");");
+  Say("                        on WARP the times say nothing about a GPU, the counters are the stream's");
+  Say("  -gputimedetail        -gputime with the inter prediction breakdown: a timestamp behind every section of");
+  Say("                        the inter stage, work counters per section");
+  Say("  -gputimeisolate       -gputimedetail with a UAV barrier and a timestamp behind every dispatch of the inter");
+  Say("                        stage and of the reconstruction (same output)");
+  Say("  -progress             with -gputime: one 'GPUTIME frame ...' line per frame behind the summary");
   Say("  -alllayers            a stream with spatial layers: output the frame of every layer of a temporal unit");
   Say("                        (default: one frame per temporal unit, the highest layer it has)");
   Say("  -oppoint <n>          a stream with layers: decode operating point n of its sequence header (default 0)");
@@ -260,6 +272,16 @@ static bool ParseArgs(const std::vector<std::string>& args, Task* task, Globals*
       if (!number(&task->lfhsplit)) return false;
     } else if (a == "-intraedgefix") {
       task->intraedgefix = true;
+    } else if (a == "-gputime") {
+      task->gputime = true;
+    } else if (a == "-gputimedetail") {
+      task->gputime = true;
+      if (task->gputime_detail < 1) task->gputime_detail = 1;
+    } else if (a == "-gputimeisolate") {
+      task->gputime = true;
+      task->gputime_detail = 2;
+    } else if (a == "-progress") {
+      task->progress = true;
     } else if (a == "-alllayers") {
       task->all_layers = true;
     } else if (a == "-oppoint") {
@@ -499,6 +521,10 @@ struct Run {
   int monochrome = 0;
   int size_changes = 0;
   bool end_seen = false;            // the decoder said that no more frames come
+  // -gputime: the records of the decoder's completion thread, as the player keeps them.
+  perfstats::PerfStats perf;
+  std::mutex perf_cs;
+  std::chrono::steady_clock::time_point perf_start;
   std::string pool_error;
   FILE* out_file = NULL;
   std::string io_error;
@@ -579,6 +605,14 @@ static int ReleaseBuffer(void* priv, void* buffer_priv) {
   return 0;
 }
 
+// -gputime: one record per command list of the decoder, from its GPU completion thread.
+static void PerfFrame(void* priv, const av1_perf_frame* frame) {
+  Run* run = static_cast<Run*>(priv);
+  if (!run || !frame) return;
+  std::lock_guard<std::mutex> lock(run->perf_cs);
+  run->perf.AddFrame(*frame);
+}
+
 // The decoder's frame-ready callback: a frame whose GPU work is complete, or NULL after the last one.
 static int NotifyFrameReady(void* priv, void* image) {
   Run* run = static_cast<Run*>(priv);
@@ -590,6 +624,12 @@ static int NotifyFrameReady(void* priv, void* image) {
     return 0;
   }
   const Task& task = *run->task;
+  if (task.gputime) {
+    const double now_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - run->perf_start).count();
+    std::lock_guard<std::mutex> lock(run->perf_cs);
+    run->perf.AddOutput(now_ms);
+  }
   MD5Context ctx;
   unsigned char digest[16];
   MD5Init(&ctx);
@@ -1022,7 +1062,15 @@ static int RunTask(const Task& task, Device* dev) {
   }
 
   // Process-wide switches, set while no frame is in flight, as the player does at the start of a task.
-  av1_set_perf_callback(NULL, NULL);
+  // -gputime, -gputimedetail, -gputimeisolate: the timing run of the player.
+  run.perf_start = std::chrono::steady_clock::now();
+  av1_set_perf_callback(task.gputime ? PerfFrame : NULL, &run);
+  av1_set_perf_detail(task.gputime ? task.gputime_detail : 0);
+  if (task.gputime)
+    Say("GPUTIME %s: timing run%s; on WARP the times are those of a CPU rasterizer", task.name.c_str(),
+        task.gputime_detail == 2
+            ? ", inter breakdown with a UAV barrier and a timestamp behind every dispatch (-gputimeisolate)"
+            : task.gputime_detail == 1 ? ", inter breakdown (-gputimedetail)" : "");
   av1_set_cdef_v2(task.cdefv1 ? 0 : 1);
   av1_set_intra_v2(task.intrav2 ? 1 : 0);
   av1_set_intra_opt(task.intraopt ? 1 : 0);
@@ -1052,7 +1100,12 @@ static int RunTask(const Task& task, Device* dev) {
   bool have_decoder = true;
   const auto decode_start = std::chrono::steady_clock::now();
   while (buffer && limit--) {
+    const auto call_start = std::chrono::steady_clock::now();
     aom_codec_err_t err = aom_codec_decode(&ctx, buffer->Data(), buffer->Size(), NULL);
+    if (task.gputime) {
+      std::lock_guard<std::mutex> lock(run.perf_cs);
+      run.perf.AddDecodeCall(MsSince(call_start));
+    }
     if (err == AOM_CODEC_NEEDS_RECONFIGURE) {
       // A new sequence whose frames are larger, or have more bits, than the decoder was created for
       // (aom/aom_codec.h). Nothing of this temporal unit was decoded. The frames of the sequence before
@@ -1108,6 +1161,20 @@ static int RunTask(const Task& task, Device* dev) {
   buffer.Reset();
   if (have_decoder) aom_codec_destroy(&ctx);
   av1_set_stage_dump(NULL, NULL, NULL, 0);
+  // -gputime: the completion thread is joined, so the records are complete. The summary of the player, and
+  // with -progress its per-frame lines.
+  av1_set_perf_callback(NULL, NULL);
+  av1_set_perf_detail(0);
+  if (task.gputime) {
+    const perfstats::OutputWaits no_waits = {0, 0.0, 0.0};
+    std::lock_guard<std::mutex> lock(run.perf_cs);
+    const std::vector<std::string> summary = run.perf.Summary(no_waits);
+    for (size_t i = 0; i < summary.size(); ++i) Say("GPUTIME %s", summary[i].c_str());
+    if (task.progress) {
+      const std::vector<std::string> frames = run.perf.FrameLines();
+      for (size_t i = 0; i < frames.size(); ++i) Say("GPUTIME %s", frames[i].c_str());
+    }
+  }
   std::string dump_error;
   if (!task.dump_frames.empty()) {
     const std::vector<std::string> lines = stage_dumps.TakeLines();

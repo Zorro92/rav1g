@@ -138,7 +138,10 @@ struct ComputeCommandBuffer {
   void Reset() { cb_ptr = 0; }
 };
 
-enum { Av1PerfMaxMarks = 32 };
+// Timestamps a command list can take. The stages need about twenty; the inter breakdown
+// (av1_set_perf_detail) adds one per section, and in its mode 2 one per dispatch of the inter stage and of
+// the reconstruction (at most AV1_PERF_INTER_SECTION_COUNT * AV1_PERF_INTER_LISTS, far fewer in a frame).
+enum { Av1PerfMaxMarks = 640 };
 
 // CPU-side timing of the frame currently being built (QPC ticks).
 struct av1_perf_accum {
@@ -168,8 +171,23 @@ struct av1_perf_td {
   int collect;
   int mark_count;
   uint8_t mark_stage[Av1PerfMaxMarks];
+  // Inter breakdown: 0 for a timestamp that closes a stage; else (section + 1) | ((list + 1) << 8) of the
+  // section, and of the dispatch when the timestamp is behind one dispatch (list + 1 is 0 otherwise).
+  uint16_t mark_sub[Av1PerfMaxMarks];
   int64_t t_submit;
   av1_perf_accum acc;
+  // Inter breakdown of the frame of this command list: NULL until the slot records its first frame with
+  // av1_set_perf_detail() on (malloc, freed with the decoder). detail_mode: the mode of the frame, 0 none.
+  // detail_filled: the stage code has begun the record of this frame.
+  av1_perf_inter_detail* detail;
+  int detail_mode;
+  int detail_filled;
+};
+
+// Inter breakdown: what the tile threads count for one tile while they push its blocks (av1_mi_push_block).
+struct av1_perf_inter_tile {
+  av1_perf_inter_work work[AV1_PERF_INTER_SECTION_COUNT];
+  av1_perf_inter_blocks blocks;
 };
 
 // Test program flag -dumpstages (av1_set_stage_dump): one copy of a buffer behind a stage of the frame's
@@ -373,6 +391,14 @@ typedef struct Av1Core {
   av1_perf_accum perf_cur;
   uint64_t perf_gpu_freq;
   uint64_t perf_gpu_last_end;
+  // Inter breakdown (av1_set_perf_detail). perf_inter_tiles: the counters of the tiles of the frame the
+  // tile threads are decoding, one per tile (malloc; NULL until the first such frame); perf_inter_mode: the
+  // mode that frame was set up with. perf_detail_out: the completion thread's copy of a frame's breakdown,
+  // which the perf callback gets (the slot may be recording its next frame by then).
+  av1_perf_inter_tile* perf_inter_tiles;
+  int perf_inter_tiles_cap;
+  int perf_inter_mode;
+  av1_perf_inter_detail* perf_detail_out;
 } Av1Core;
 
 void PutPerfMarker(av1_frame_thread_data* td, volatile int64_t* marker);
@@ -402,4 +428,9 @@ void av1_stage_dump_mode_info(Av1Core* dec, struct AV1Common* cm);
 av1_stage_dump_region av1_stage_dump_cb_region(Av1Core* dec, const ConstantBufferObject& cbo, size_t size);
 // Timing instrumentation (no-ops unless a perf callback is installed).
 void av1_perf_gpu_mark(Av1Core* dec, int stage);
+// Inter breakdown (av1_set_perf_detail). av1_perf_inter_begin: the breakdown of the frame of the current
+// command list, cleared, or NULL when the frame has none; the stage code fills its dispatch counters.
+// av1_perf_inter_mark: a timestamp for |section| (and for its dispatch |list|, or -1), counted to |stage|.
+av1_perf_inter_detail* av1_perf_inter_begin(Av1Core* dec);
+void av1_perf_inter_mark(Av1Core* dec, int stage, int section, int list);
 void av1_perf_add(Av1Core* dec, int id, int64_t start_ticks);

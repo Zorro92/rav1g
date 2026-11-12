@@ -458,6 +458,9 @@ typedef struct
     int mi_count;
     int mi_col_start;
     int mi_row_start;
+    // Inter breakdown of the timing run (dx/av1_perf.h, av1_set_perf_detail): the tile's counters, an
+    // av1_perf_inter_tile; NULL without it.
+    void * perf_inter;
 } av1_tile_data;
 
 typedef struct tx_block_info {
