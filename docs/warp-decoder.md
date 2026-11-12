@@ -62,6 +62,7 @@ warp_decoder -i clip.ivf -save_md5 clip.ivf.md5
 warp_decoder -i clip.ivf -check clip.ivf.md5
 warp_decoder -i av1-1-b8-01-size-16x16.ivf -check av1-1-b8-01-size-16x16.ivf.md5 -aom_md5
 warp_decoder -list tasks.txt -t 4
+warp_decoder -sm6test
 ```
 
 | Flag | |
@@ -85,6 +86,7 @@ warp_decoder -list tasks.txt -t 4
 | `-alllayers` | a stream with spatial layers: output the frame of every layer of a temporal unit (`AV1D_SET_OUTPUT_ALL_LAYERS`); the default is one frame per temporal unit, the highest layer it has. See [Layers and new sequences](test-player.md#layers-and-new-sequences) |
 | `-oppoint <n>` | a stream with layers: decode operating point n of its sequence header (`AV1D_SET_OPERATING_POINT`, default 0) |
 | `-list <file>` | one task per line, with the flags above; flags on the command line are the defaults of every line. A decode error, a timeout or a crash ends the process at that task |
+| `-sm6test` | run the [Shader Model 6 test](test-player.md#shader-model-6-test--sm6test) shaders on the device before the tasks, one `SM6TEST ...` line per shader. Needs no stream: without `-i` and `-list` the program ends after the test, with exit code 0 whatever the device did with the shaders and 2 when the test could not run |
 | `-hw` | the first hardware adapter instead of WARP |
 | `-v` | print the decoder's log lines (`MEMORY ...`) |
 
@@ -100,6 +102,10 @@ TASK clip.ivf: stream 1920x1080 10-bit, decoder 1920x1152 10-bit (fit to the str
 MISMATCH frame 12 (1920x1080 10-bit): expected 0f3a..., got 77c1...
 RESULT stream=clip.ivf status=mismatch frames=40 matched=12 first_bad=12 ref_frames=40 decode_ms=41250 create_ms=310 size=1920x1080 bitdepth=10 detail="40 temporal units in, 40 frames out"
 ```
+
+After the `ADAPTER` line come the `CAPS ...` lines, at every launch: what the device reports about
+itself (shader model, wave operations, native 16-bit types and more; see the
+[Shader Model 6 test](test-player.md#capability-report-caps)).
 
 A `PROCESS before the task: ...` and a `PROCESS after the task: ...` line give the private bytes
 and working set of the process and the free memory of the machine: the tasks of a list run in one
@@ -121,7 +127,7 @@ that differs, counted from 0. At most 16 `MISMATCH` lines are printed per task; 
 every frame is in the `-save_md5` file.
 
 Exit code: 0 every task decoded and matched, 1 a frame or a frame count differs, 2 a decode
-error, 3 bad arguments or no D3D12 device, 4 timeout. A crash (an access violation, a failed
+error (or `-sm6test` could not run its test), 3 bad arguments or no D3D12 device, 4 timeout. A crash (an access violation, a failed
 assert of the library) ends the process without a `RESULT` line: a `CRASH exception 0x... at
 <module>+0x<offset>` line names the place, which `warp_decoder.map` resolves.
 
@@ -227,6 +233,10 @@ alone and must fail the same way; otherwise its result is `unstable` (with one e
 [Results](#results): a run that lost the D3D12 device is repeated). Every task has a
 timeout (300 s for a vector, 2400 s for the larger streams), so a hang ends that stream, not
 the job.
+
+Before the streams the job runs `warp_decoder -sm6test` and shows the `CAPS` and `SM6TEST` lines of
+WARP in its summary ([Shader Model 6 test](test-player.md#shader-model-6-test--sm6test)); the log is
+`sm6test/warp.log` in the artifact.
 
 The result is a table in the job summary, one row per stream: size, bit depth, frames,
 matching frames, first bad frame, decode time, result. The artifact

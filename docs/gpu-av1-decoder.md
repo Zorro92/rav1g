@@ -903,3 +903,24 @@ within noise (`-gputime`, against package 0.2.25.0: GPU busy 30.3 vs 31.0 ms, 51
 35.8 ms on three 4K clips; the vertical loop filter 0.81 vs 0.83 ms). With this, no stream we test differs
 from dav1d on the console or on WARP.
 
+## Shader Model 6 feasibility (2026-11-12, results pending the console run)
+
+All shaders are FXC shaders of Shader Model 5.0. Moving them to DXC and Shader Model 6 would give wave
+intrinsics (a sum or a prefix sum over the lanes of a wave without group memory and group syncs) and
+native 16-bit types (samples and coefficients as `uint16_t` and `int16_t` instead of 32-bit words). Whether that is open depends on the
+console: what its D3D12 takes in app mode, and how wide its waves are.
+
+Nothing of the decoder was changed to find out. Both players log what the device reports at every
+launch (`CAPS` lines: shader model, `WaveOps` with the lane counts, `Native16BitShaderOpsSupported`,
+and more), and with `-sm6test` they run 14 DXC test shaders, each on known input and compared with
+values computed on the host (`SM6TEST` lines): a `cs_6_0` control, the wave intrinsics, a 64-element
+sum and prefix sum through group memory and through the wave, `uint16_t`/`int16_t`/`float16_t`
+arithmetic and 16-bit loads and stores (`cs_6_2`), `[WaveSize(n)]` for 4 to 64 lanes (`cs_6_6`) and a
+range of wave sizes (`cs_6_8`). A pipeline state the device refuses is a result. See
+[test-player.md](test-player.md#shader-model-6-test--sm6test).
+
+The questions the console run answers: does the device take DXIL; is a wave 32 or 64 lanes, and is a
+thread group of 64 one wave; do the wave results match the group memory path; do 16-bit types work
+and wrap at 16 bits; can a shader ask for a wave size.
+
+**Console result:** pending. Task file with the single line `-sm6test`.
