@@ -214,17 +214,19 @@ The six that fail are listed in `expected.txt`:
 - `syn-superres-10b-1080p.ivf`: super-resolution is wrong from the first frame on, as on the
   console.
 
-**The D3D12 device is removed, now and then.** In most runs one of the last streams of the list
-(a 720p or 1080p cut of Netflix Open Content, another one from run to run) loses the D3D12 device
-during its first frames: its frames come back empty, the next allocation fails with 0x887A0005 and
-the task ends in a decode error. The same stream decoded alone, in a new process, is right, every
-frame. It happened with upstream's shaders too (run 43099052089), so it is not the group syncs,
-and it is not memory: the process holds 465 MiB at that point and the machine has 13 GiB free (the
-`PROCESS` lines). The cause is not known; what the cases share is that the stream follows other
-large streams in a process that has decoded 80 streams or more. Because the stream it hits
-changes, it cannot be listed in `expected.txt`: `run.py` takes the result the stream has alone,
-reports the loss under "D3D12 device removed" in the summary and on a line of its own in the log,
-and does not fail the run on it. A stream that also fails alone fails the run as before.
+**The D3D12 device is removed, once or twice in every run.** Somewhere in the list, mostly at one
+of the last, large streams (a 720p or 1080p cut of Netflix Open Content) but once at a 352x288
+vector, a stream loses the D3D12 device: its frames come back empty or wrong, an allocation or a
+`Map` fails with 0x887A0005 (`DXGI_ERROR_DEVICE_REMOVED`), and the task ends in a decode error,
+or it ends as a mismatch and the next stream cannot create its decoder. It is another stream from
+run to run, and the same stream decoded alone, in a new process, is right, every frame. It
+happened in every run so far, also in the three with upstream's shaders (runs 43092362685,
+43094607558, 43099052089), so it is not the group syncs, and it is not memory: the process holds
+465 MiB at that point and the machine has 13 GiB free (the `PROCESS` lines). The cause is not
+known. Because the stream it hits changes, it cannot be listed in `expected.txt`: `run.py` takes
+the result the stream has alone, reports the loss under "D3D12 device removed" in the summary and
+on a line of its own in the log, and does not fail the run on it. A stream that also fails alone
+fails the run as before.
 
 Two streams that are wrong on the console pass here: the 8-bit 4K stream
 (`nf-dvbdash-a1-8b-2160p.ivf`, luma off by ±1–2 on the console) and the stream with scaled

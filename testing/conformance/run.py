@@ -31,7 +31,13 @@ import sys
 import time
 
 FAIL_KINDS = ('mismatch', 'error', 'timeout', 'crash', 'unstable')
-DEVICE_REMOVED = 'the D3D12 device was removed'
+# What a task says when the D3D12 device is gone: the removal itself, or a call that fails with
+# DXGI_ERROR_DEVICE_REMOVED.
+DEVICE_REMOVED = ('the D3D12 device was removed', 'hr 0x887A0005')
+
+
+def device_removed(result):
+    return any(text in result.detail for text in DEVICE_REMOVED)
 
 
 class Result:
@@ -50,6 +56,7 @@ class Result:
         self.first_in_process = False
         self.done = False
         self.note = ''
+        self.before_device_loss = False
 
     def same_outcome(self, other):
         return (self.status, self.frames, self.matched, self.first_bad) == \
@@ -251,9 +258,13 @@ def main():
         if [r.name for r in got] != [name for name, _ in remaining[:len(got)]]:
             print('the decoder did not run the tasks in the order of its list')
             return 2
-        for result in got:
+        for index, result in enumerate(got):
             results[result.name] = result
             print('%-52s %s' % (result.name, result.outcome()), flush=True)
+            # The device can be on its way out before a task notices: frames come back wrong, the task ends
+            # as a mismatch, and the next task of the process finds the device removed.
+            if index + 1 < len(got) and device_removed(got[index + 1]) and result.status == 'mismatch':
+                result.before_device_loss = True
         # The process stops at the first task that does not end in pass or mismatch.
         remaining = remaining[len(got):]
 
@@ -276,12 +287,14 @@ def main():
             print('%-52s alone: %s' % (name, alone.outcome()), flush=True)
             if alone.same_outcome(result):
                 result.note = 'the same alone'
-            elif alone.status == 'pass' and DEVICE_REMOVED in result.detail:
-                # The device was lost while the stream was decoded after others in the same process, and the
-                # stream is right when it is decoded alone. Which stream this hits changes from run to run
-                # (it is not the stream's fault and cannot be listed in expected.txt), so the stream counts
-                # as decoded, and the loss is reported on its own.
-                device_lost.append('%s: %s (%s)' % (name, result.outcome(), result.detail))
+            elif alone.status == 'pass' and (device_removed(result) or result.before_device_loss):
+                # The device was lost while the stream was decoded after others in the same process (or right
+                # after it, with wrong frames before), and the stream is right when it is decoded alone. Which
+                # stream this hits changes from run to run (it is not the stream's fault and cannot be listed
+                # in expected.txt), so the stream counts as decoded, and the loss is reported on its own.
+                device_lost.append('%s: %s (%s)%s' % (
+                    name, result.outcome(), result.detail,
+                    '; the next stream of the process found the device removed' if result.before_device_loss else ''))
                 alone.note = 'lost the D3D12 device after other streams in the same process; this is the result alone'
                 alone.first_in_process = True
                 results[name] = alone
