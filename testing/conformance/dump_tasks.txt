@@ -15,7 +15,8 @@
 #     media, and neither the streams nor their decoded frames leave the job.
 # A dump of a frame is ten to twenty times the size of the frame: keep the lists short.
 
-# Super-resolution, wrong everywhere: the key frame (use_superres) and the frame after it.
+# Super-resolution: the key frame (use_superres) and the frame after it, which also predicts from a
+# reference of another width.
 syn-superres-10b-1080p.ivf 0-1 2
 # Scaled references, wrong on the console only: the first frames.
 syn-resize-10b-1080p.ivf 0-5 6

@@ -534,6 +534,24 @@ jobs:
           sh testing/warp_check/run.sh --mutate | tee warp-check.log
           { echo '## Warp check'; echo '```'; tail -n 15 warp-check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
+  # Host check of the super-resolution shader (upscaling.hlsl) against libaom's normative upscale of
+  # this tree, which is the upscaling process of the specification: the shader, compiled as C++,
+  # must write the same samples for every denominator, 8-bit and 10-bit, at widths that are and are
+  # not multiples of 8, with one and with several tile columns, and six mutated copies must fail.
+  superres-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Compare upscaling.hlsl with libaom
+        run: |
+          set -euo pipefail
+          sh testing/superres_check/run.sh --mutate | tee superres-check.log
+          { echo '## Super-resolution check'; echo '```'; cat superres-check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
   # Host proof for intra v2: the original intra shaders (intra_main + intra_filter, with the
   # wavefront iterations of the original host code) and intra_v2 with its scheduler, compiled as
   # C++, must write byte-identical frames on generated block layouts, 8-bit and 10-bit.

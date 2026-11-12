@@ -381,20 +381,20 @@ static void stage_dump_frame_info(Av1Core *dec, AV1_COMMON *cm) {
   if (!td->dump_active) return;
   static const char *const frame_types[] = {"key", "inter", "intra_only", "switch"};
   const int type = cm->current_frame.frame_type;
+  // Short names: the line has to fit the 255 characters a dump file keeps of it, references included.
   int len = snprintf(td->dump_info, sizeof(td->dump_info),
-                     "type=%s show=%d showable=%d size=%dx%d upscaled_width=%d superres_denom=%d bit_depth=%d "
-                     "base_q_idx=%d lf=%d,%d,%d,%d cdef=%d superres=%d loop_rest=%d film_grain=%d tiles=%dx%d "
-                     "scaled_refs=%d refs=",
-                     (type >= 0 && type < 4) ? frame_types[type] : "?", cm->show_frame, cm->showable_frame, cm->width,
-                     cm->height, cm->superres_upscaled_width, cm->superres_scale_denominator, td->bitdepth,
-                     cm->base_qindex, cm->lf.filter_level[0], cm->lf.filter_level[1], cm->lf.filter_level_u,
-                     cm->lf.filter_level_v, td->do_cdef, td->do_superres, td->do_loop_rest, td->do_filmgrain,
-                     cm->tile_cols, cm->tile_rows, td->scale_enable);
+                     "type=%s show=%d size=%dx%d upscaled_width=%d denom=%d bits=%d q=%d lf=%d,%d,%d,%d cdef=%d "
+                     "superres=%d lr=%d grain=%d tiles=%dx%d scaled=%d refs=",
+                     (type >= 0 && type < 4) ? frame_types[type] : "?", cm->show_frame, cm->width, cm->height,
+                     cm->superres_upscaled_width, cm->superres_scale_denominator, td->bitdepth, cm->base_qindex,
+                     cm->lf.filter_level[0], cm->lf.filter_level[1], cm->lf.filter_level_u, cm->lf.filter_level_v,
+                     td->do_cdef, td->do_superres, td->do_loop_rest, td->do_filmgrain, cm->tile_cols, cm->tile_rows,
+                     td->scale_enable);
   for (int i = 0; i < 7 && len > 0 && len < (int)sizeof(td->dump_info); ++i) {
     const HwFrameBuffer *ref = frame_is_intra_only(cm) ? NULL : td->refs[i];
     if (ref)
       len += snprintf(td->dump_info + len, sizeof(td->dump_info) - len, "%s%d:%dx%d", i ? "," : "",
-                      ref->frame_number, ref->y_crop_width, ref->y_crop_height);
+                      ref->frame_number, ref->y_crop_width, ref->y_crop_height);  // frame number : size
     else
       len += snprintf(td->dump_info + len, sizeof(td->dump_info) - len, "%s-", i ? "," : "");
   }
@@ -1815,8 +1815,17 @@ extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
     new_buf->planes[1].offset += static_cast<int>(new_buf->base_offset - fb->base_offset);
     new_buf->planes[2].offset += static_cast<int>(new_buf->base_offset - fb->base_offset);
     td->frame_buffer = new_buf;
+    // back_buffer1 gets the whole description of the frame, like the back buffer above: CDEF writes into it
+    // when the frame has superres and no loop restoration, and the upscale then reads its visible width as
+    // the width it scales from. (It used to get the layout only; the visible size was whatever an earlier
+    // frame had left there, zero at first, and the upscale of such a frame scaled from that width.)
     dec->back_buffer1.width = fb->width;
     dec->back_buffer1.height = fb->height;
+    dec->back_buffer1.hbd = td->is_hbd;
+    dec->back_buffer1.y_crop_width = fb->y_crop_width;
+    dec->back_buffer1.uv_crop_width = fb->uv_crop_width;
+    dec->back_buffer1.y_crop_height = fb->y_crop_height;
+    dec->back_buffer1.uv_crop_height = fb->uv_crop_height;
     memcpy(dec->back_buffer1.planes, fb->planes, sizeof(fb->planes));
     dec->back_buffer1.planes[0].offset += static_cast<int>(dec->back_buffer1.base_offset - fb->base_offset);
     dec->back_buffer1.planes[1].offset += static_cast<int>(dec->back_buffer1.base_offset - fb->base_offset);

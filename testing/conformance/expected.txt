@@ -25,6 +25,3 @@ av1-1-b8-22-svc-L2T1.ivf mismatch spatial layers: every layer's frame is output,
 av1-1-b8-22-svc-L2T1-2.ivf mismatch spatial layers: every layer's frame is output, and the 1280x720 frames after the first are wrong (prediction across the two frame sizes)
 av1-1-b8-22-svc-L2T2.ivf mismatch spatial layers: every layer's frame is output, and the 1280x720 frames after the first are wrong (prediction across the two frame sizes)
 av1-1-b8-22-svc-L2T2-2.ivf mismatch spatial layers: every layer's frame is output, and the 1280x720 frames after the first are wrong (prediction across the two frame sizes)
-
-# Super-resolution: wrong from the key frame on, every frame (on the console about 85% of the samples).
-syn-superres-10b-1080p.ivf mismatch super-resolution is wrong from the first frame on (upstream)
