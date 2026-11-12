@@ -348,6 +348,7 @@ typedef struct Av1Core {
   int fb_offset;
   int max_width;   // the size the buffers were created for, a multiple of 128; larger frames are refused
   int max_height;
+  int max_bitdepth;  // the bit depth the frame buffers were created for: 8, or more than 8 (two bytes a sample)
   int enable_superres;
   int wedge_offsets[BLOCK_SIZES_ALL][2];
 

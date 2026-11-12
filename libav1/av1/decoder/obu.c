@@ -24,6 +24,7 @@
 #include "av1/decoder/decoder.h"
 #include "av1/decoder/decodeframe.h"
 #include "av1/decoder/obu.h"
+#include "dx/av1_core.h"
 
 // Picture prediction structures (0-12 are predefined) in scalability metadata.
 enum {
@@ -267,6 +268,33 @@ static uint32_t read_sequence_header_obu(AV1Decoder *pbi,
   if (av1_check_trailing_bits(pbi, rb) != 0) {
     // cm->error.error_code is already set.
     return 0;
+  }
+
+  // The buffers of the decoder were created for a frame size and a bit depth
+  // (aom_codec_dec_cfg_t). A sequence that needs more is not taken: the
+  // application gets AOM_CODEC_NEEDS_RECONFIGURE (aom/aom_codec.h) before
+  // anything of the sequence is decoded, creates a decoder for it and passes
+  // the temporal unit again. Without this the first frame of the sequence
+  // failed with "Failed to allocate frame buffer", in a decoder that had
+  // taken the sequence header.
+  if (pbi->gpu_decoder) {
+    int dec_width = 0;
+    int dec_height = 0;
+    int dec_bitdepth = 0;
+    if (!av1_sequence_fits_decoder(pbi->gpu_decoder,
+                                   seq_params->max_frame_width,
+                                   seq_params->max_frame_height,
+                                   (int)seq_params->bit_depth, &dec_width,
+                                   &dec_height, &dec_bitdepth)) {
+      aom_internal_error(&cm->error, AOM_CODEC_NEEDS_RECONFIGURE,
+                         "Sequence of %dx%d %d-bit frames, decoder created "
+                         "for %dx%d %d-bit",
+                         seq_params->max_frame_width,
+                         seq_params->max_frame_height,
+                         (int)seq_params->bit_depth, dec_width, dec_height,
+                         dec_bitdepth);
+      return 0;
+    }
   }
 
   // If a sequence header has been decoded before, we check if the new

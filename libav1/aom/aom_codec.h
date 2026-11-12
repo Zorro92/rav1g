@@ -148,7 +148,27 @@ typedef enum {
   /*!\brief An iterator reached the end of list.
    *
    */
-  AOM_CODEC_LIST_END
+  AOM_CODEC_LIST_END,
+
+  /*!\brief The stream needs a decoder created for a larger frame or more bits
+   *
+   * aom_codec_decode() found a sequence header whose largest frame size or
+   * bit depth is more than the decoder was created for
+   * (aom_codec_dec_cfg_t::width, height, bitdepth): a new coded video
+   * sequence with larger frames, or a decoder that was created too small.
+   * Nothing of the data of the call was decoded and the decoder is as it was
+   * before the call. The application
+   *   - drains the decoder (aom_codec_decode() with NULL data): the frames of
+   *     the sequence before are handed over,
+   *   - destroys it,
+   *   - creates a decoder for the new sequence, sized as for the start of a
+   *     stream (aom_codec_peek_stream_info() on the same data),
+   *   - and passes the same data to the new decoder.
+   * A sequence starts with a key frame, so the new decoder needs nothing of
+   * the old one. aom_codec_error_detail() has the sizes. The code is behind
+   * AOM_CODEC_LIST_END so that the other codes keep their values.
+   */
+  AOM_CODEC_NEEDS_RECONFIGURE
 
 } aom_codec_err_t;
 

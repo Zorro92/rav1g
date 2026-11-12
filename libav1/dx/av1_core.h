@@ -34,6 +34,9 @@ void av1_drain_gpu_decoder(struct Av1Core *dec);
 
 int av1_decode_frame_gpu(AV1Decoder *pbi);
 
+// 1 when a sequence with this largest frame size and bit depth fits the buffers of the decoder.
+int av1_sequence_fits_decoder(struct Av1Core *dec, int max_frame_width, int max_frame_height, int bit_depth,
+                              int *dec_width, int *dec_height, int *dec_bitdepth);
 void av1_release_fb_callback(void *priv, YV12_BUFFER_CONFIG *ybf);
 int av1_reallocate_frame_buffer(void *priv, YV12_BUFFER_CONFIG *ybf, int width, int height, int upscaled_width,
                                 int hbd);

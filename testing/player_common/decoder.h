@@ -271,6 +271,8 @@ class AV1Decoder {
     if (!priv) return -1;
     AV1Decoder* This = static_cast<AV1Decoder*>(priv);
     if (img && This->params_.gputime_) This->PerfOutput();
+    // The drain of a decoder that is replaced in the middle of a stream: more frames follow.
+    if (!img && This->reconfiguring_) return 0;
     return This->output_queue_->Push((aom_image_t*)img);
   }
   // The decoder's budget guard: the bytes the decoder may still allocate (decoder.cpp).
@@ -337,6 +339,8 @@ class AV1Decoder {
   std::shared_ptr<OutBufferStorage> storage_;
   int initialized_ = 0;
   int need_reinit_ = 0;
+  // Set around the drain of a decoder that is replaced for a new, larger sequence of the same stream.
+  volatile int reconfiguring_ = 0;
   // What the decoder in decctx_ was created with (valid while initialized_). A task that needs anything else
   // gets a new decoder, also when the task before it ended before it reached the decoder.
   int created_threads_ = 0;

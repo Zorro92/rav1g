@@ -266,15 +266,22 @@ int AV1Decoder::DecodeOne() {
   unsigned int dec_width = PLAYER_DECODER_WIDTH;
   unsigned int dec_height = PLAYER_DECODER_HEIGHT;
   unsigned int dec_bitdepth = PLAYER_DECODER_BITDEPTH;
-  if (params_.fitsize_) {
-    const unsigned int fit_width = (si.w + 127) & ~127u;
-    const unsigned int fit_height = (si.h + 127) & ~127u;
-    if (si.w && si.h && fit_width <= PLAYER_DECODER_WIDTH && fit_height <= PLAYER_DECODER_HEIGHT) {
-      dec_width = fit_width;
-      dec_height = fit_height;
+  auto size_for_stream = [&](const aom_codec_stream_info_t& info, unsigned int* width, unsigned int* height,
+                             unsigned int* bitdepth) {
+    *width = PLAYER_DECODER_WIDTH;
+    *height = PLAYER_DECODER_HEIGHT;
+    *bitdepth = PLAYER_DECODER_BITDEPTH;
+    if (params_.fitsize_) {
+      const unsigned int fit_width = (info.w + 127) & ~127u;
+      const unsigned int fit_height = (info.h + 127) & ~127u;
+      if (info.w && info.h && fit_width <= PLAYER_DECODER_WIDTH && fit_height <= PLAYER_DECODER_HEIGHT) {
+        *width = fit_width;
+        *height = fit_height;
+      }
+      if (info.bit_depth == 8) *bitdepth = 8;
     }
-    if (si.bit_depth == 8) dec_bitdepth = 8;
-  }
+  };
+  size_for_stream(si, &dec_width, &dec_height, &dec_bitdepth);
 
   // A decoder that was created with something else than this task asks for is replaced. need_reinit_ says
   // so for the task before; the comparison also covers a task before that ended ahead of this point.
@@ -284,12 +291,16 @@ int AV1Decoder::DecodeOne() {
                        created_height_ != dec_height || created_bitdepth_ != dec_bitdepth ||
                        created_intrav2_ != params_.intrav2_ || created_lowmem_ != params_.lowmem_parts_);
   if (initialized_ && (need_reinit_ || other_decoder)) DestroyDecoder();
-  if (params_.recreate_ || !initialized_) {
+  // Creates the decoder for dec_width x dec_height, dec_bitdepth and the stream info in si. |new_sequence|:
+  // the decoder replaces the one of this task in the middle of the stream (a new sequence that did not fit
+  // it, in the decode loop below); the output queue and the output pool of the task stay, with the frames
+  // of the sequence before still in them. Returns 0 when the decoder exists.
+  auto create_decoder = [&](bool new_sequence) -> int {
     XB_LOGI << "(Re)create decoder";
     try {
       // No decoder exists here. The output pool of the one before goes first: its images are memory the new
       // decoder may need, and the old output queue would keep them until after the creation.
-      if (output_queue_ || storage_) {
+      if (!new_sequence && (output_queue_ || storage_)) {
         LogMemory("before the output pool is released");
         output_queue_.reset();
         storage_.reset();
@@ -302,8 +313,10 @@ int AV1Decoder::DecodeOne() {
       }
       // Everything of the decoder before is released. Give the system the time to hand it back before the
       // host pool of the new decoder is allocated and its budget guard looks at what is left.
+      // (Not in the middle of a stream: the output pool stays, so the app's memory does not come back to
+      // what it was without a decoder. The budget guard of the creation waits for what it needs.)
       if (settle_pending_) {
-        SettleAppMemory();
+        if (!new_sequence) SettleAppMemory();
         settle_pending_ = false;
       }
       aom_codec_dec_cfg_t cfg;
@@ -337,7 +350,9 @@ int AV1Decoder::DecodeOne() {
       const unsigned int out_height = si.h ? si.h : dec_height;
       const unsigned int out_bitdepth = si.bit_depth ? si.bit_depth : dec_bitdepth;
       const uint64_t output_pool = OutputPoolEstimate(params_, out_width, out_height, out_bitdepth);
-      output_pool_estimate_ = output_pool;
+      // A pool that stays (new_sequence) gets its images of the new size as the frames arrive, in place of
+      // the ones it has: the whole estimate is still to come, on top of what the pool has created so far.
+      output_pool_estimate_ = output_pool + ((new_sequence && storage_) ? storage_->TextureBytes() : 0);
       // -noguard: no callback, the creation is not checked. For finding out whether memory that stays
       // charged after a decoder was destroyed is reused by the next one; a creation that does not fit loses
       // the D3D12 device for the rest of the launch.
@@ -383,8 +398,9 @@ int AV1Decoder::DecodeOne() {
         throw 2;
       }
       LogAppMemory("after the decoder", false);
-      storage_ = std::unique_ptr<OutBufferStorage>(
-          new OutBufferStorage(params_.player_queue_size_, dx_desources_.dx12_device.Get()));
+      if (!new_sequence)
+        storage_ = std::unique_ptr<OutBufferStorage>(
+            new OutBufferStorage(params_.player_queue_size_, dx_desources_.dx12_device.Get()));
       initialized_ = 1;
       created_threads_ = params_.threads_;
       created_queue_size_ = params_.player_queue_size_;
@@ -404,6 +420,11 @@ int AV1Decoder::DecodeOne() {
       XB_LOGE << "Unable to create decoder. Unknown error";
       return -1;
     }
+    return 0;
+  };
+  if (params_.recreate_ || !initialized_) {
+    const int create_error = create_decoder(false);
+    if (create_error) return create_error;
   }
   if (!buffer) {
     buffer = reader.GetData();
@@ -515,7 +536,54 @@ int AV1Decoder::DecodeOne() {
     XB_LOGD << cnt++ << " - " << buffer->Size();
     uint64_t user_priv = static_cast<uint64_t>(frame_in++ * framedur);
     const std::chrono::steady_clock::time_point perf_call_start = std::chrono::steady_clock::now();
-    if (aom_codec_decode(&decctx_, buffer->Data(), buffer->Size(), (void*)user_priv)) {
+    aom_codec_err_t decode_err = aom_codec_decode(&decctx_, buffer->Data(), buffer->Size(), (void*)user_priv);
+    if (decode_err == AOM_CODEC_NEEDS_RECONFIGURE) {
+      // A new sequence whose frames are larger, or have more bits, than the decoder was created for
+      // (aom/aom_codec.h). Nothing of this temporal unit was decoded. The frames of the sequence before
+      // are drained into the output queue, which stays, the decoder is replaced by one for the new
+      // sequence, sized from this temporal unit as the first one was from the first key frame and never
+      // smaller than the one before, and the temporal unit is passed again.
+      const std::string why = aom_codec_error_detail(&decctx_) ? aom_codec_error_detail(&decctx_) : "";
+      aom_codec_stream_info_t new_si;
+      memset(&new_si, 0, sizeof(new_si));
+      unsigned int new_width = 0, new_height = 0, new_bitdepth = 0;
+      const bool new_key = aom_codec_peek_stream_info(aom_codec_av1_dx(), buffer->Data(), buffer->Size(), &new_si) ==
+                               AOM_CODEC_OK && new_si.is_kf;
+      if (new_key) {
+        size_for_stream(new_si, &new_width, &new_height, &new_bitdepth);
+        if (new_width < created_width_) new_width = created_width_;
+        if (new_height < created_height_) new_height = created_height_;
+        if (new_bitdepth < created_bitdepth_) new_bitdepth = created_bitdepth_;
+      }
+      if (!new_key || (new_width == created_width_ && new_height == created_height_ &&
+                       new_bitdepth == created_bitdepth_)) {
+        XB_LOGE << "aom_codec_decode: the temporal unit needs another decoder (" << why << ") "
+                << (new_key ? "and the player creates none that is larger" : "and does not start with a key frame");
+      } else {
+        XB_LOGI << "RECONFIGURE: a new sequence of " << new_si.w << "x" << new_si.h << " " << new_si.bit_depth
+                << "-bit frames (" << why << "); the decoder is replaced by one of " << new_width << "x"
+                << new_height << " " << new_bitdepth << "-bit";
+        // The drain joins the decoder's completion thread, which ends with the notice that no more frames
+        // come; the output queue must not take that for the end of the stream.
+        reconfiguring_ = 1;
+        aom_codec_decode(&decctx_, 0, 0, 0);
+        reconfiguring_ = 0;
+        DestroyDecoder();
+        si = new_si;
+        dec_width = new_width;
+        dec_height = new_height;
+        dec_bitdepth = new_bitdepth;
+        if (create_decoder(true)) {
+          // No decoder is left whose drain would tell the output queue that the stream has ended.
+          has_error = 1;
+          output_queue_->hasFatalError_ = 1;
+          output_queue_->Push(0);
+          break;
+        }
+        decode_err = aom_codec_decode(&decctx_, buffer->Data(), buffer->Size(), (void*)user_priv);
+      }
+    }
+    if (decode_err) {
       XB_LOGE << "aom_codec_decode error " << aom_codec_error(&decctx_);
       has_error = 1;
       output_queue_->hasFatalError_ = 1;
@@ -582,7 +650,7 @@ int AV1Decoder::DecodeOne() {
     if (display_) display_->RemoveSource(this);
   }
   LogMemory("after the last frame left the output queue");
-  if (has_error || params_.recreate_) DestroyDecoder();
+  if (initialized_ && (has_error || params_.recreate_)) DestroyDecoder();
   // The task's own records: the md5 reference list and the md5 file being saved (Finalize), and the
   // per-frame timing records, which the report above has printed.
   output_queue_->Finalize();

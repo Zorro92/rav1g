@@ -484,6 +484,7 @@ int av1_allocate_buffers(Av1Core *dec, av1_memory_manager_base *mem, const resou
   dec->block_count4x4 = block_count_4x4;
   dec->max_width = target_width;
   dec->max_height = target_height;
+  dec->max_bitdepth = cfg.bitdepth;
 
   CHECK_RESULT(dec->pbi_alloc, (void *)mem->host_allocate(sizeof(AV1Decoder)), do_assign);
   CHECK_RESULT(dec->buf_pool_alloc, (void *)mem->host_allocate(sizeof(BufferPool)), do_assign);
@@ -1468,6 +1469,18 @@ THREADFN gpu_thread_hook(void *data) {
   }
 
   return THREAD_RETURN(0);
+}
+
+// Whether the frames of a sequence fit the buffers the decoder was created with: its largest frame, rounded
+// up to 128 as the buffers are, and its bit depth (frame buffers of one byte a sample hold 8-bit frames only;
+// those of two bytes hold both). The sizes the decoder has go to |dec_*| for the message.
+extern "C" int av1_sequence_fits_decoder(Av1Core *dec, int max_frame_width, int max_frame_height, int bit_depth,
+                                         int *dec_width, int *dec_height, int *dec_bitdepth) {
+  if (dec_width) *dec_width = dec->max_width;
+  if (dec_height) *dec_height = dec->max_height;
+  if (dec_bitdepth) *dec_bitdepth = dec->max_bitdepth;
+  return ((max_frame_width + 127) & ~127) <= dec->max_width && ((max_frame_height + 127) & ~127) <= dec->max_height &&
+         (bit_depth <= 8 || dec->max_bitdepth > 8);
 }
 
 extern "C" int av1_reallocate_frame_buffer(void *priv, YV12_BUFFER_CONFIG *ybf, int width, int height,

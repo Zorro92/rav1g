@@ -49,6 +49,9 @@ const char *aom_codec_err_to_string(aom_codec_err_t err) {
     case AOM_CODEC_CORRUPT_FRAME: return "Corrupt frame detected";
     case AOM_CODEC_INVALID_PARAM: return "Invalid parameter";
     case AOM_CODEC_LIST_END: return "End of iterated list";
+    case AOM_CODEC_NEEDS_RECONFIGURE:
+      return "The sequence needs a decoder created for its frame size and bit "
+             "depth";
   }
 
   return "Unrecognized error code";

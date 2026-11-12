@@ -891,18 +891,29 @@ static int RunTask(const Task& task, Device* dev) {
 
   // The size the decoder is created for: the stream's largest frame size, rounded up to 128 as the decoder
   // does, and 8-bit buffers for an 8-bit stream; 4096x2176 10-bit with -nofitsize or for a larger stream.
-  unsigned int dec_width = WD_DECODER_WIDTH;
-  unsigned int dec_height = WD_DECODER_HEIGHT;
-  unsigned int dec_bitdepth = WD_DECODER_BITDEPTH;
-  if (!task.nofitsize) {
-    const unsigned int fit_width = (si.w + 127) & ~127u;
-    const unsigned int fit_height = (si.h + 127) & ~127u;
-    if (si.w && si.h && fit_width <= WD_DECODER_WIDTH && fit_height <= WD_DECODER_HEIGHT) {
-      dec_width = fit_width;
-      dec_height = fit_height;
+  // A decoder that follows another one of the task (a new sequence that did not fit, below) is at least
+  // as large as that one, so a stream that goes back and forth between two sizes gets one decoder.
+  unsigned int dec_width = 0;
+  unsigned int dec_height = 0;
+  unsigned int dec_bitdepth = 0;
+  auto size_for_stream = [&](const aom_codec_stream_info_t& info) {
+    unsigned int width = WD_DECODER_WIDTH;
+    unsigned int height = WD_DECODER_HEIGHT;
+    unsigned int bitdepth = WD_DECODER_BITDEPTH;
+    if (!task.nofitsize) {
+      const unsigned int fit_width = (info.w + 127) & ~127u;
+      const unsigned int fit_height = (info.h + 127) & ~127u;
+      if (info.w && info.h && fit_width <= WD_DECODER_WIDTH && fit_height <= WD_DECODER_HEIGHT) {
+        width = fit_width;
+        height = fit_height;
+      }
+      if (info.bit_depth == 8) bitdepth = 8;
     }
-    if (si.bit_depth == 8) dec_bitdepth = 8;
-  }
+    dec_width = width > dec_width ? width : dec_width;
+    dec_height = height > dec_height ? height : dec_height;
+    dec_bitdepth = bitdepth > dec_bitdepth ? bitdepth : dec_bitdepth;
+  };
+  size_for_stream(si);
 
   OutputPool pool(dev->device.Get(), task.queue_size);
   run.pool = &pool;
@@ -918,57 +929,67 @@ static int RunTask(const Task& task, Device* dev) {
     }
   } close_out = {&run};
 
-  const auto create_start = std::chrono::steady_clock::now();
-  aom_codec_dec_cfg_t cfg;
-  memset(&cfg, 0, sizeof(cfg));
-  cfg.width = dec_width;
-  cfg.height = dec_height;
-  cfg.bitdepth = dec_bitdepth;
-  cfg.threads = task.threads;
-  cfg.cfg.ext_partition = 1;
-  cfg.allow_lowbitdepth = CONFIG_LOWBITDEPTH;
-  cfg.out_buffers_cb.get_out_buffer_cb = GetBuffer;
-  cfg.out_buffers_cb.release_out_buffer_cb = ReleaseBuffer;
-  cfg.out_buffers_cb.notify_frame_ready_cb = NotifyFrameReady;
-  cfg.out_buffers_cb.out_buffers_priv = &run;
-  cfg.host_size = 0;
-  cfg.tryHDR10x3 = 0;
-  cfg.frame_slots = task.slots;
-  cfg.intra_v2 = task.intrav2 ? 1 : 0;
-  cfg.low_memory = task.lowmem_parts ? task.lowmem_parts : AV1_LOW_MEMORY_NONE;
-  // No budget guard: a desktop process has no app memory limit to run into.
-  cfg.memory_available_cb = NULL;
-  cfg.memory_available_priv = NULL;
-  av1_codec_query_memory_requirements(&cfg);
-  std::vector<uint8_t> host_mem;
-  try {
-    host_mem.resize(cfg.host_size, 0);
-  } catch (const std::bad_alloc&) {
-    return fail("no memory for the host pool of " + std::to_string(cfg.host_size) + " bytes");
-  }
-  cfg.host_memory = host_mem.data();
-  cfg.host_size = host_mem.size();
-  cfg.dx12device = dev->device.Get();
-  cfg.dx12command_queue = dev->queue.Get();
-  cfg.dxPsos = dev->psos;
-
-  Say("TASK %s: stream %ux%u %u-bit, decoder %ux%u %u-bit (%s), slots %d, low memory parts %d, CDEF %s, intra %s%s, "
-      "clears %s, threads %d, output pool %d; device buffers %.1f MiB, host pool %.1f MiB",
-      task.name.c_str(), si.w, si.h, si.bit_depth, dec_width, dec_height, dec_bitdepth,
-      task.nofitsize ? "-nofitsize" : "fit to the stream", task.slots, task.lowmem_parts,
-      task.cdefv1 ? "cdef_filter (-cdefv1)" : "cdef_filter_v2", task.intrav2 ? "intra_v2" : "intra_main + intra_filter",
-      task.intraopt ? " (intra_main_opt)" : "", task.asyncclear ? "-asyncclear" : "decode thread", task.threads,
-      task.queue_size, (double)cfg.device_size / (1024.0 * 1024.0), (double)cfg.host_size / (1024.0 * 1024.0));
-
+  // Creates the decoder for dec_width x dec_height, dec_bitdepth; |info| is the sequence it is for. Empty
+  // when the decoder exists, else what failed.
   aom_codec_ctx_t ctx;
   memset(&ctx, 0, sizeof(ctx));
-  if (aom_codec_dec_init(&ctx, aom_codec_av1_dx(), &cfg, 0)) {
-    const char* message = aom_codec_error(&ctx);
-    const char* detail = aom_codec_error_detail(&ctx);
-    return fail(std::string("decoder creation failed: ") + (message ? message : "?") +
-                ((detail && detail[0]) ? std::string(": ") + detail : std::string()));
+  std::vector<uint8_t> host_mem;
+  auto create_decoder = [&](const aom_codec_stream_info_t& info) -> std::string {
+    const auto create_start = std::chrono::steady_clock::now();
+    aom_codec_dec_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.width = dec_width;
+    cfg.height = dec_height;
+    cfg.bitdepth = dec_bitdepth;
+    cfg.threads = task.threads;
+    cfg.cfg.ext_partition = 1;
+    cfg.allow_lowbitdepth = CONFIG_LOWBITDEPTH;
+    cfg.out_buffers_cb.get_out_buffer_cb = GetBuffer;
+    cfg.out_buffers_cb.release_out_buffer_cb = ReleaseBuffer;
+    cfg.out_buffers_cb.notify_frame_ready_cb = NotifyFrameReady;
+    cfg.out_buffers_cb.out_buffers_priv = &run;
+    cfg.host_size = 0;
+    cfg.tryHDR10x3 = 0;
+    cfg.frame_slots = task.slots;
+    cfg.intra_v2 = task.intrav2 ? 1 : 0;
+    cfg.low_memory = task.lowmem_parts ? task.lowmem_parts : AV1_LOW_MEMORY_NONE;
+    // No budget guard: a desktop process has no app memory limit to run into.
+    cfg.memory_available_cb = NULL;
+    cfg.memory_available_priv = NULL;
+    av1_codec_query_memory_requirements(&cfg);
+    try {
+      host_mem.assign(cfg.host_size, 0);
+    } catch (const std::bad_alloc&) {
+      return "no memory for the host pool of " + std::to_string(cfg.host_size) + " bytes";
+    }
+    cfg.host_memory = host_mem.data();
+    cfg.host_size = host_mem.size();
+    cfg.dx12device = dev->device.Get();
+    cfg.dx12command_queue = dev->queue.Get();
+    cfg.dxPsos = dev->psos;
+
+    Say("TASK %s: stream %ux%u %u-bit, decoder %ux%u %u-bit (%s), slots %d, low memory parts %d, CDEF %s, intra %s%s, "
+        "clears %s, threads %d, output pool %d; device buffers %.1f MiB, host pool %.1f MiB",
+        task.name.c_str(), info.w, info.h, info.bit_depth, dec_width, dec_height, dec_bitdepth,
+        task.nofitsize ? "-nofitsize" : "fit to the stream", task.slots, task.lowmem_parts,
+        task.cdefv1 ? "cdef_filter (-cdefv1)" : "cdef_filter_v2", task.intrav2 ? "intra_v2" : "intra_main + intra_filter",
+        task.intraopt ? " (intra_main_opt)" : "", task.asyncclear ? "-asyncclear" : "decode thread", task.threads,
+        task.queue_size, (double)cfg.device_size / (1024.0 * 1024.0), (double)cfg.host_size / (1024.0 * 1024.0));
+
+    memset(&ctx, 0, sizeof(ctx));
+    if (aom_codec_dec_init(&ctx, aom_codec_av1_dx(), &cfg, 0)) {
+      const char* message = aom_codec_error(&ctx);
+      const char* detail = aom_codec_error_detail(&ctx);
+      return std::string("decoder creation failed: ") + (message ? message : "?") +
+             ((detail && detail[0]) ? std::string(": ") + detail : std::string());
+    }
+    create_ms += MsSince(create_start);
+    return std::string();
+  };
+  {
+    const std::string create_error = create_decoder(si);
+    if (!create_error.empty()) return fail(create_error);
   }
-  create_ms = MsSince(create_start);
 
   // Process-wide switches, set while no frame is in flight, as the player does at the start of a task.
   av1_set_perf_callback(NULL, NULL);
@@ -997,9 +1018,48 @@ static int RunTask(const Task& task, Device* dev) {
   std::string decode_error;
   int units = 0;
   int limit = task.limit;
+  int decoders = 1;
+  bool have_decoder = true;
   const auto decode_start = std::chrono::steady_clock::now();
   while (buffer && limit--) {
-    if (aom_codec_decode(&ctx, buffer->Data(), buffer->Size(), NULL)) {
+    aom_codec_err_t err = aom_codec_decode(&ctx, buffer->Data(), buffer->Size(), NULL);
+    if (err == AOM_CODEC_NEEDS_RECONFIGURE) {
+      // A new sequence whose frames are larger, or have more bits, than the decoder was created for
+      // (aom/aom_codec.h). Nothing of this temporal unit was decoded. The frames of the sequence before
+      // are drained, the decoder is replaced by one for the new sequence, sized from this temporal unit
+      // as the first one was from the first, and the temporal unit is passed again.
+      const std::string why = aom_codec_error_detail(&ctx) ? aom_codec_error_detail(&ctx) : "";
+      aom_codec_stream_info_t new_si;
+      memset(&new_si, 0, sizeof(new_si));
+      const unsigned int old_width = dec_width, old_height = dec_height, old_bitdepth = dec_bitdepth;
+      if (aom_codec_peek_stream_info(aom_codec_av1_dx(), buffer->Data(), buffer->Size(), &new_si) != AOM_CODEC_OK ||
+          !new_si.is_kf) {
+        decode_error = "temporal unit " + std::to_string(skipped + units) + " needs another decoder (" + why +
+                       ") and does not start a sequence with a key frame";
+        break;
+      }
+      size_for_stream(new_si);
+      if (dec_width == old_width && dec_height == old_height && dec_bitdepth == old_bitdepth) {
+        decode_error = "temporal unit " + std::to_string(skipped + units) + " needs a larger decoder (" + why +
+                       ") than this program creates" + (task.nofitsize ? " with -nofitsize" : "");
+        break;
+      }
+      aom_codec_decode(&ctx, NULL, 0, NULL);
+      aom_codec_destroy(&ctx);
+      const std::string create_error = create_decoder(new_si);
+      if (!create_error.empty()) {
+        have_decoder = false;  // nothing to drain or destroy below
+        decode_error = "temporal unit " + std::to_string(skipped + units) + ", new decoder for the sequence of " +
+                       std::to_string(new_si.w) + "x" + std::to_string(new_si.h) + ": " + create_error;
+        break;
+      }
+      ++decoders;
+      Say("RECONFIGURE %s: temporal unit %d starts a sequence of %ux%u %u-bit frames (%s); new decoder %ux%u %u-bit",
+          task.name.c_str(), skipped + units, new_si.w, new_si.h, new_si.bit_depth, why.c_str(), dec_width,
+          dec_height, dec_bitdepth);
+      err = aom_codec_decode(&ctx, buffer->Data(), buffer->Size(), NULL);
+    }
+    if (err) {
       const char* message = aom_codec_error(&ctx);
       const char* detail = aom_codec_error_detail(&ctx);
       decode_error = "aom_codec_decode failed on temporal unit " + std::to_string(skipped + units) + ": " +
@@ -1010,10 +1070,10 @@ static int RunTask(const Task& task, Device* dev) {
     buffer = reader.GetData();
   }
   // Drain: joins the decoder's GPU completion thread, so every frame that was submitted has been handed over.
-  aom_codec_decode(&ctx, NULL, 0, NULL);
+  if (have_decoder) aom_codec_decode(&ctx, NULL, 0, NULL);
   decode_ms = MsSince(decode_start);
   buffer.Reset();
-  aom_codec_destroy(&ctx);
+  if (have_decoder) aom_codec_destroy(&ctx);
   av1_set_stage_dump(NULL, NULL, NULL, 0);
   std::string dump_error;
   if (!task.dump_frames.empty()) {
@@ -1049,8 +1109,9 @@ static int RunTask(const Task& task, Device* dev) {
   }
   const int ref_frames = run.have_ref ? (int)run.ref.size() : 0;
   char sizes[96];
-  snprintf(sizes, sizeof(sizes), "%d temporal units in, %d frames out%s", units, frames,
-           run.size_changes ? ", frame size changes within the stream" : "");
+  snprintf(sizes, sizeof(sizes), "%d temporal units in, %d frames out%s%s", units, frames,
+           run.size_changes ? ", frame size changes within the stream" : "",
+           decoders > 1 ? ", a new decoder for a larger sequence" : "");
   if (!decode_error.empty()) {
     ResultLine(task.name, "error", frames, run.matched, run.first_bad, ref_frames, decode_ms, create_ms, run.width,
                run.height, run.bit_depth, decode_error + "; " + sizes);
