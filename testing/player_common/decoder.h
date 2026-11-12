@@ -357,6 +357,12 @@ class AV1Decoder {
   bool app_baseline_taken_ = false;
   // A decoder was destroyed since the last creation: the next creation settles first (SettleAppMemory).
   bool settle_pending_ = false;
+  // Memory still charged to the app after a decoder was destroyed and the settle wait, which the next
+  // decoder gets back (on the console the D3D12 runtime keeps it and reuses it). Counted as available by
+  // MemoryAvailable at the next creation, at most the device buffers of the largest decoder released in the
+  // launch; 0 once that creation is done.
+  uint64_t reusable_after_release_ = 0;
+  uint64_t largest_device_size_ = 0;
   bool created_intrav2_ = false;
   bool created_interfast_ = false;
   int created_lowmem_ = 0;
