@@ -109,7 +109,7 @@ pub(crate) fn perf_now() -> i64 {
 }
 
 /// Milliseconds per tick of [`perf_now`].
-fn ticks_to_ms() -> f64 {
+pub(crate) fn ticks_to_ms() -> f64 {
     let mut frequency = 0i64;
     // SAFETY: a valid out pointer.
     let _ = unsafe { QueryPerformanceFrequency(&mut frequency) };

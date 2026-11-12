@@ -113,15 +113,6 @@
 #include "dx/shaders/h/inter_scale_obmc_above_hbd.h"
 #include "dx/shaders/h/inter_scale_obmc_left_hbd.h"
 
-extern "C" {
-int rav1g_wait_shader_create_complete(compute_shader_lib *lib);
-HRESULT rav1g_upload_luts(Av1Core *dec);
-}
-
-int wait_shader_create_complete(compute_shader_lib *lib) { return rav1g_wait_shader_create_complete(lib); }
-
-HRESULT av1_upload_luts(Av1Core *dec) { return rav1g_upload_luts(dec); }
-
 struct rav1g_shader_bytecode {
   const char *name;
   const BYTE *code;

@@ -689,6 +689,7 @@ The parts, each green on CI before the next:
 | 1. Creation and release | the buffer plan (`av1_allocate_buffers`), the memory query, the budget guard and `av1_create_gpu_decoder`, the "MEMORY" summary, `av1_allocate_pbi`, the pool of frame buffers, `av1_destroy_gpu_decoder` (826 lines) | `host/create.rs` (1,424 with tests); `gpu/d3d12.rs` grows to 937 | see below |
 | 2. Timers and stage dumps | the timers, timestamps and the record of a frame of the timing run (`-gputime`, `-gputimedetail`), the switches `av1_set_perf_callback`, `av1_set_perf_detail`, `av1_set_inter_fast`; the stage dumps (`-dumpstages`) (505 lines) | `host/perf.rs` (507), `host/stage_dump.rs` (536), `host/rest_calls.rs` (126, until part 4); `host/core.rs` 242; `gpu/d3d12.rs` grows to 1,054 | see below |
 | 3. A frame on the decode thread | `av1_setup_frame` with the slot, the clears of `-asyncclear`, the back buffer, the references, the palette buffer and the coefficient layout; the other functions the entropy decoder calls (`av1_setup_macroblockd`, `av1_setup_sec_data`, `av1_setup_ext_coef_buffer`, `av1_intra_palette`, `av1_reallocate_frame_buffer`, `av1_release_fb_callback`, `av1_sequence_fits_decoder`, `av1_setup_context_buffers`); the command buffer from prepare to commit; `av1_decode_frame_gpu`; the switches `av1_set_async_clear`, `av1_set_intra_v2`, `av1_shader_variant` (825 lines) | `host/frame.rs` (1,341 with tests), `crates/rav1g-sys/host_entry.c` (47); `gpu/d3d12.rs` grows to 1,106 | see below |
+| 4. Behind the submission | the completion thread with the fences, the return of frame buffers and slots, the clear of `-asyncclear`, the output images and their queue (`get_output_frame`), `av1_drain_gpu_decoder`, `av1_decode_sef` (show-existing copies) (297 lines) | `host/completion.rs` (341); `host_entry.c` grows to 58 | see below |
 
 Part 1, creation and release:
 
@@ -788,6 +789,30 @@ Part 3, a frame on the decode thread:
 - Checked before the push on the local decoder: the 244 vectors plain, with `-poisonbuf -t 4` and with
   `-intrav2 -interfast -asyncclear -t 4`; the stage dumps of seven vectors equal to those of the build
   before part 2; the unit tests of the crate under wine.
+
+Part 3 on CI (run 43323944247, commit 76d8862): all jobs green, the same gates as part 2; `D3D12 DEVICE
+REMOVALS: 0` in every pass.
+
+Part 4, behind the submission:
+
+- **The completion thread** is a `std::thread` (the C++ had the `pthread_create` of `aom_thread.h`, a
+  `CreateThread`); its handle is kept in the decoder, and the drain pushes the item that ends the thread
+  and joins it. What the thread does per work item is unchanged, in its order: the wait for the frame's
+  fence, the stage dumps, the record of the timing run, the frame buffers back to the pool under its lock
+  with one wake of a waiting decode thread, the second slot and then the slot back to their pools (the
+  clear of `-asyncclear` in between), the output image to the application's notification or to the queue
+  that `get_output_frame` reads, the timing callback, the work item back to its pool.
+- **`av1_decode_sef`** is C that calls two Rust parts, like `av1_decode_frame_gpu`: the application is
+  asked for the output image in the first, the error for a missing image is raised by the C, and the copy
+  is recorded and submitted in the second.
+- **No C++ is left of the host in the cargo build** but one file of glue, `glue/av1_compute.cpp`, which is
+  the table of the shader bytecode (the FXC headers are C++ only in that they need a typedef). The rest
+  file, `host/rest_calls.rs` and four glue files are gone.
+- Checked before the push on the local decoder: the 244 vectors plain, with `-poisonbuf -t 4`, with
+  `-intrav2 -interfast -asyncclear -t 4 -slots 4` and with `-gputimedetail -slots 3 -poisonmi`; the stage
+  dumps of seven vectors (a show-existing frame among them) equal to those of the build before part 2; the
+  lines of the three timing modes; a refused creation (`-budget 5`), which releases a decoder that never
+  had a completion thread; the unit tests of both crates under wine.
 
 ## Estimate
 

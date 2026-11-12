@@ -957,6 +957,12 @@ impl Event {
         unsafe { &*std::ptr::from_ref(raw).cast::<Event>() }
     }
 
+    /// Waits until the event is set, and resets it.
+    pub fn wait(&self) {
+        // SAFETY: a plain call on a live event.
+        unsafe { WaitForSingleObjectEx(self.handle, INFINITE, false) };
+    }
+
     /// The handle, for a struct that keeps it as one.
     pub fn into_raw(self) -> *mut c_void {
         self.handle.0

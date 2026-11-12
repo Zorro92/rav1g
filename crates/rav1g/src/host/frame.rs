@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 use windows::Win32::Graphics::Direct3D12::ID3D12CommandQueue;
 
+use super::completion::start_completion_thread;
 use super::create::{
     IDCT_COEF_COUNT_DENUM, rav1g_frame_buffer_release, rav1g_get_frame_buffer, rav1g_release_fb, to_mib,
 };
@@ -65,9 +66,6 @@ const YV12_FLAG_HIGHBITDEPTH: c_int = 8;
 unsafe extern "C" {
     /// `av1/decoder/obu.c`: the frame is the one of its temporal unit that is output.
     fn av1_frame_is_output(pbi: *const AV1Decoder) -> c_int;
-    /// The completion thread is C++ still (crates/rav1g-sys/glue/av1_core_rest.cpp): starts it when it
-    /// does not run.
-    fn rav1g_cpp_start_gpu_thread(dec: *mut Av1Core);
     fn malloc(size: usize) -> *mut c_void;
     fn free(memory: *mut c_void);
 }
@@ -172,22 +170,6 @@ pub(crate) unsafe fn commit_command_buffer(dec: *mut Av1Core) {
             *acc = std::mem::zeroed();
         }
     }
-}
-
-/// # Safety
-/// As for [`prepare_command_buffer`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_prepare_command_buffer(dec: *mut Av1Core) {
-    // SAFETY: the caller's contract.
-    unsafe { prepare_command_buffer(dec) };
-}
-
-/// # Safety
-/// As for [`commit_command_buffer`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_commit_command_buffer(dec: *mut Av1Core) {
-    // SAFETY: the caller's contract.
-    unsafe { commit_command_buffer(dec) };
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -615,14 +597,6 @@ pub(crate) unsafe fn release_unsubmitted_frame(dec: *mut Av1Core) {
     }
 }
 
-/// # Safety
-/// As for [`release_unsubmitted_frame`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_release_unsubmitted_frame(dec: *mut Av1Core) {
-    // SAFETY: the caller's contract.
-    unsafe { release_unsubmitted_frame(dec) };
-}
-
 /// `get_ref_scale_factors` of `av1/common/onyxc_int.h`: the scale of a reference of the frame, or null.
 fn ref_scale_factors(cm: &AV1_COMMON, ref_frame: usize) -> Option<&scale_factors> {
     let map_idx = cm.remapped_ref_idx[ref_frame - LAST_FRAME as usize];
@@ -920,7 +894,7 @@ pub unsafe extern "C" fn rav1g_setup_frame_end(pbi: *mut AV1Decoder, cm: *mut AV
         let td = &mut *(*dec).curr_frame_data;
         let cm = &*cm;
         assert!((*dec).thread_count <= EntropyThreadCount as c_int, "more tile threads than the decoder has room for");
-        rav1g_cpp_start_gpu_thread(dec);
+        start_completion_thread(dec);
 
         td.scale_enable = 0;
         for i in LAST_FRAME as usize..=ALTREF_FRAME as usize {

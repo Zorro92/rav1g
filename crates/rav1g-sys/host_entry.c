@@ -10,7 +10,8 @@
 
 /* The functions of the host (dx/av1_core.h) that can end with the decoder's error. aom_internal_error leaves
  * the decode call with a longjmp when the caller has set one up, and a longjmp must not pass a Rust function.
- * So each of these is C: it calls the parts of the Rust function (crates/rav1g/src/host/frame.rs) one after
+ * So each of these is C: it calls the parts of the Rust function (crates/rav1g/src/host/frame.rs,
+ * completion.rs) one after
  * the other and raises the error between them. When the error returns (no jump set up), the function goes
  * on with its next part, as the C++ went on behind aom_internal_error. */
 
@@ -22,6 +23,8 @@ void rav1g_setup_frame_end(AV1Decoder *pbi, AV1_COMMON *cm, int64_t perf_start);
 int rav1g_decode_frame_record(AV1Decoder *pbi, av1_decoded_frame_buffer_t *fb, int64_t *perf_lap_start);
 void rav1g_decode_frame_submit(AV1Decoder *pbi, int image_state, const av1_decoded_frame_buffer_t *fb,
                                int64_t perf_lap_start);
+int rav1g_decode_sef_begin(AV1Decoder *pbi, av1_decoded_frame_buffer_t *fb);
+void rav1g_decode_sef_submit(AV1Decoder *pbi, int image_state, const av1_decoded_frame_buffer_t *fb);
 
 void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
   int64_t perf_start = 0;
@@ -32,6 +35,16 @@ void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
     aom_internal_error(&cm->error, AOM_CODEC_MEM_ERROR,
                        "No room for the coefficients of a frame with very small tiles");
   rav1g_setup_frame_end(pbi, cm, perf_start);
+}
+
+void av1_decode_sef(AV1Decoder *pbi) {
+  av1_decoded_frame_buffer_t fb = { 0 };
+  /* -1: nothing to output; else the state of the output image, as below. */
+  const int image_state = rav1g_decode_sef_begin(pbi, &fb);
+  if (image_state < 0) return;
+  if (image_state == 2)
+    aom_internal_error(&pbi->common.error, AOM_CODEC_MEM_ERROR, "Failed to allocate output frame.");
+  rav1g_decode_sef_submit(pbi, image_state, &fb);
 }
 
 int av1_decode_frame_gpu(AV1Decoder *pbi) {

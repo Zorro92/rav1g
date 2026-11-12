@@ -21,6 +21,7 @@ use windows::Win32::Foundation::E_POINTER;
 use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12Device};
 use windows::core::Interface;
 
+use super::completion::av1_drain_gpu_decoder;
 use super::compute::{rav1g_upload_luts, rav1g_wait_shader_create_complete};
 use super::log::{log, log_create_error, rav1g_clear_create_error};
 use super::memory::{
@@ -70,8 +71,6 @@ const GAUSSIAN_SEQUENCE_BYTES: usize = size_of::<[i32; 2048]>();
 const FILMGRAIN_RANDOM_INTS: usize = 65536 + 1;
 
 unsafe extern "C" {
-    /// `av1_drain_gpu_decoder`: joins the completion thread.
-    fn av1_drain_gpu_decoder(dec: *mut Av1Core);
     fn free(memory: *mut c_void);
 }
 

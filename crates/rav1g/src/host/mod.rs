@@ -19,6 +19,7 @@
 #![allow(clippy::needless_range_loop)]
 
 mod blocks;
+mod completion;
 mod compute;
 mod core;
 mod create;
@@ -32,7 +33,6 @@ mod output;
 mod perf;
 mod postfilter;
 mod prediction;
-mod rest_calls;
 mod stage_dump;
 mod tables;
 mod thread;
