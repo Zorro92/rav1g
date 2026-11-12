@@ -79,7 +79,8 @@ extern "C" void av1_set_perf_detail(int mode) { g_perf_detail = mode < 0 ? 0 : m
 // (aom_codec_dec_cfg_t::inter_fast), unless it has a scaled reference (av1_setup_frame).
 static int g_inter_fast = 0;
 
-extern "C" void av1_set_inter_fast(int enable) { g_inter_fast = enable ? 1 : 0; }
+// |mode|: 0 off, or AV1_INTER_FAST_ON with the bits that keep the original shader on the lists by class.
+extern "C" void av1_set_inter_fast(int mode) { g_inter_fast = (mode & AV1_INTER_FAST_ON) ? (mode & 7) : 0; }
 
 static inline int64_t perf_now() {
   LARGE_INTEGER t;
@@ -2154,7 +2155,7 @@ extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
     td->gm_warp[i] = gm->wmtype > TRANSLATION && !gm->invalid && !(sf && av1_is_scaled(sf));
   }
   // -interfast: not for a frame with a scaled reference, whose blocks all go through the inter_scale shaders.
-  td->inter_fast = g_inter_fast && dec->inter_fast_tiles > 0 && !td->scale_enable;
+  td->inter_fast = (dec->inter_fast_tiles > 0 && !td->scale_enable) ? g_inter_fast : 0;
   av1_perf_add(dec, AV1_PERF_CPU_SETUP, perf_setup_start);
 }
 

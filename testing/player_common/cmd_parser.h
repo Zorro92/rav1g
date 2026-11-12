@@ -108,8 +108,10 @@ class CParameters {
     // Experiments (docs/test-player.md): -lfhsplit 0|1|2, -intraedgefix.
     int lfhsplit_;
     bool intraedgefix_;
-    // -interfast: inter blocks by the fraction of their motion vectors (docs/test-player.md).
+    // -interfast: inter blocks by the fraction of their motion vectors (docs/test-player.md);
+    // -interfastlists: the same lists with the original shaders on them.
     bool interfast_;
+    bool interfastlists_;
     // Streams with layers: -alllayers (AV1D_SET_OUTPUT_ALL_LAYERS), -oppoint <n> (AV1D_SET_OPERATING_POINT).
     bool all_layers_;
     int oppoint_;

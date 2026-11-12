@@ -277,8 +277,19 @@ void av1_set_intra_opt(int enable);
  * the two passes of the original shaders); the decoded output is the same.
  * Frames with a scaled reference keep the original path. Only in a decoder
  * created with aom_codec_dec_cfg_t::inter_fast. Off by default. Change it
- * only while no frame is in flight. */
-void av1_set_inter_fast(int enable);
+ * only while no frame is in flight.
+ * |mode| is 0 or AV1_INTER_FAST_ON, plus, to tell the cost of the lists from
+ * that of the kernels, AV1_INTER_FAST_SINGLE_ORIGINAL and/or
+ * AV1_INTER_FAST_COMPOUND_ORIGINAL: the blocks are still listed and
+ * dispatched by class, but those with one reference, or with two, are
+ * predicted by the original shader whatever their class. */
+enum {
+  AV1_INTER_FAST_ON = 1,
+  AV1_INTER_FAST_SINGLE_ORIGINAL = 2,
+  AV1_INTER_FAST_COMPOUND_ORIGINAL = 4,
+  AV1_INTER_FAST_LISTS_ONLY = 7
+};
+void av1_set_inter_fast(int mode);
 
 /* Process-wide experiments for a device whose output differs from the
  * reference (docs/gpu-av1-decoder.md). Both leave the decoded output as it

@@ -96,7 +96,7 @@ struct Task {
   bool asyncclear = false;
   int lfhsplit = 0;           // -lfhsplit <0|1|2>
   bool intraedgefix = false;  // -intraedgefix
-  bool interfast = false;     // -interfast: inter blocks by the fraction of their motion vectors
+  int interfast = 0;          // -interfast (1), -interfastlists (7), -interfastmode <n>: av1_set_inter_fast
   bool all_layers = false;    // -alllayers: every shown frame of a temporal unit with spatial layers
   int oppoint = 0;            // -oppoint <n>: the operating point of a stream with layers
   int timeout_s = 0;          // -timeout: seconds for the task, 0 = none
@@ -165,6 +165,9 @@ static void Usage() {
   Say("  -intraedgefix         8-bit intra: the above edge filter stops where the 10-bit one does (same output)");
   Say("  -interfast            inter prediction by the fraction of the motion vector: a copy, one filter pass, or");
   Say("                        both (inter_fast, inter_compound_fast; same output)");
+  Say("  -interfastlists       the block lists of -interfast with the original shaders on them (same output)");
+  Say("  -interfastmode <n>    av1_set_inter_fast(n): 1 -interfast, +2 original shader for one reference, +4 for two;");
+  Say("                        8: only the room for the lists in the block maps, the path stays off (diagnostic)");
   Say("  -gputime              the timing run of the test player: GPU timestamps per stage and CPU timers, the");
   Say("                        summary as 'GPUTIME ...' lines after the task (docs/test-player.md, \"Timing run\");");
   Say("                        on WARP the times say nothing about a GPU, the counters are the stream's");
@@ -276,7 +279,11 @@ static bool ParseArgs(const std::vector<std::string>& args, Task* task, Globals*
     } else if (a == "-intraedgefix") {
       task->intraedgefix = true;
     } else if (a == "-interfast") {
-      task->interfast = true;
+      task->interfast = AV1_INTER_FAST_ON;
+    } else if (a == "-interfastlists") {
+      task->interfast = AV1_INTER_FAST_LISTS_ONLY;
+    } else if (a == "-interfastmode") {
+      if (!number(&task->interfast)) return false;
     } else if (a == "-gputime") {
       task->gputime = true;
     } else if (a == "-gputimedetail") {
@@ -1083,11 +1090,13 @@ static int RunTask(const Task& task, Device* dev) {
   av1_set_async_clear(task.asyncclear ? 1 : 0);
   av1_set_lf_h_split(task.lfhsplit);
   av1_set_intra_edge_fix(task.intraedgefix ? 1 : 0);
-  av1_set_inter_fast(task.interfast ? 1 : 0);
-  if (task.interfast)
-    Say("INTERFAST %s: inter blocks by motion vector class (inter_fast, inter_compound_fast); frames with a scaled "
-        "reference keep the original shaders",
-        task.name.c_str());
+  av1_set_inter_fast(task.interfast);
+  if (task.interfast & AV1_INTER_FAST_ON)
+    Say("INTERFAST %s: inter blocks by motion vector class, mode %d (one reference: %s; two: %s); frames with a "
+        "scaled reference keep the original lists and shaders",
+        task.name.c_str(), task.interfast & 7,
+        (task.interfast & AV1_INTER_FAST_SINGLE_ORIGINAL) ? "inter_main on every list" : "inter_fast",
+        (task.interfast & AV1_INTER_FAST_COMPOUND_ORIGINAL) ? "inter_compound on every list" : "inter_compound_fast");
   if (task.lfhsplit || task.intraedgefix)
     Say("EXPERIMENTS %s:%s%s", task.name.c_str(),
         task.lfhsplit == 1 ? " -lfhsplit 1 (horizontal loop filter: even rows of blocks, then odd)"

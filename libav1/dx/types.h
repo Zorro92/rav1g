@@ -305,7 +305,9 @@ struct av1_frame_thread_data {
   size_t clean_mi_bytes;
   size_t clean_iter_bytes;
   int scale_enable;
-  int inter_fast;  // -interfast: this frame lists its blocks by motion vector class (no scaled reference)
+  // -interfast: not 0 when this frame lists its blocks by motion vector class (no scaled reference): the mode
+  // of av1_set_inter_fast, AV1_INTER_FAST_ON and the bits that keep the original shaders on those lists.
+  int inter_fast;
   ScaleFactor scale_factors[8];
   // Entry LAST_FRAME..ALTREF_FRAME: a GLOBALMV or GLOBAL_GLOBALMV block of this frame is warped from that
   // reference. The reference has a global motion model libaom accepts and the size of the frame: a scaled

@@ -1193,13 +1193,17 @@ The decoded output is the same. Design, formulas and the console numbers behind 
 | --- | --- |
 | *(none)* | the original path: `inter_main`, `inter_compound`; lists by type and block size |
 | `-interfast` | lists by motion vector class and block size; `inter_fast` for the classes copy, h and v, `inter_compound_fast` for the pairs of classes of two references, the original shaders for the class with a fraction both ways. Frames with a scaled reference keep the original path. |
+| `-interfastlists` | the same lists and dispatches, but `inter_main` and `inter_compound` on every one of them: what the lists alone cost or gain (more and smaller dispatches, blocks of a class side by side), without the new kernels. |
 
 - Log line of the task: `Inter shaders: by motion vector class: inter_fast, inter_compound_fast
   (-interfast; frames with a scaled reference keep the original shaders)`, or `Inter shaders:
   inter_main, inter_compound (original)`. `warp_decoder` prints `INTERFAST <task>: ...` with
   the flag.
-- A decoder that was created without the flag is replaced when a task asks for it (the lists
-  by class need 1984 bytes per tile and pipeline slot in the block maps).
+- `-interfastlists` logs `Inter shaders: lists by motion vector class, inter_main and
+  inter_compound on them (-interfastlists; ...)`.
+- A decoder that was created without either flag is replaced when a task asks for one (the
+  lists by class need room in the block maps: 1984 bytes per tile the decoder size can have, one
+  per 64x64, and pipeline slot; 1.0 MiB per slot at 1080p, 3.9 MiB at 4K).
 - **In the breakdown** (`-gputimedetail`, `-gputimeisolate`) the sections `single` and
   `comp_avg` are replaced by one section per class: `single.copy`, `single.h`, `single.v`,
   `single.2d`, and `comp_avg.<r0><r1>` with a letter per reference (`c` copy, `h`, `v`, `2`
@@ -1216,6 +1220,9 @@ own, against a reference that is already next to the stream):
 -i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputimedetail -interfast
 ```
 
+Optional third line of the pair, to split a difference into lists and kernels: the same with
+`-interfastlists` in place of `-interfast`.
+
 ```text
 -i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -interfast -md5_frame_check
 ```
@@ -1225,7 +1232,8 @@ and `comp_avg.*` with the `single` and `comp_avg` rows of the run without the fl
 
 **Checked without a console:** `testing/inter_check` (the fast shaders, the original shaders
 and libaom write the same frames; `sh testing/inter_check/run.sh --mutate`), and the
-conformance job, which decodes the whole set on WARP once more with `-interfast`.
+conformance job, which decodes the whole set on WARP once more with `-interfast` (251 of 251
+streams) and three streams with `-gputimedetail -interfast` and `-gputimedetail -interfastlists`.
 
 **Console results:** pending.
 

@@ -993,7 +993,8 @@ the fetches of three of the clips are of that kind.
 ### The fast path (`-interfast`)
 
 Off by default. `av1_set_inter_fast()` and `aom_codec_dec_cfg_t::inter_fast` in the library, `-interfast`
-in the test player and in `warp_decoder`. Without the flag the block lists, the dispatches and the
+in the test player and in `warp_decoder`; `-interfastlists` keeps the original shaders on the new lists, to
+tell what the lists do from what the kernels do. Without the flag the block lists, the dispatches and the
 pipeline states that run are the ones that always ran (five more pipeline states are created at
 launch).
 
@@ -1014,8 +1015,9 @@ those are the expensive ones. On a frame that takes the path, the blocks that wo
 `CasualInter` (one reference, not warped) and `CompoundAvrg` (two references, averaged or distance
 weighted) are counted by the tile threads (`av1_mi_push_block`) into lists by class and block size
 instead: 4 classes times 24 sizes for one reference, 16 pairs of classes times 24 sizes for two. The lists
-live in a block map of their own per tile behind the existing ones (1984 bytes per tile and pipeline
-slot, only in a decoder created for the path), `av1_prediction_gen_blocks` gives them their place in
+live in a block map of their own per tile behind the existing ones (1984 bytes per tile the decoder size
+can have, one per 64x64, and pipeline slot: 1.0 MiB per slot at 1080p, 3.9 MiB at 4K; only in a decoder
+created for the path), `av1_prediction_gen_blocks` gives them their place in
 `prediction_blocks` behind the lists by type, and `gen_pred_blocks_fast.hlsl` (`gen_pred_blocks.hlsl`
 built with `INTER_FAST`: one more root constant, the class from the record's vector) writes the same
 16-byte records into them. `gen_pred_blocks.hlsl` itself compiles to the bytecode it had.
@@ -1126,10 +1128,18 @@ share a group); several blocks per group gain nothing further without group memo
   the fourth sample of a row, the class or the frame of the second reference, the class of a vector with
   half a sample) are all rejected.
 - **Conformance** (the gate of the feature, on every push): the conformance job decodes the whole set
-  on WARP once more with `-interfast` and must get the results of `expected.txt`. The smoke test of the
-  timing run decodes three streams with `-gputimedetail -interfast` and checks that the sections by class
-  are there, that no block went the original way on a frame without scaled references, and that the
-  dispatches and the tile threads agree on every frame.
+  on WARP once more with `-interfast` and must get the results of `expected.txt`: 251 of 251. The smoke
+  test of the timing run decodes three streams with `-gputimedetail -interfast` and with `-gputimedetail
+  -interfastlists` and checks that the sections by class are there, that no block went the original way on
+  a frame without scaled references, and that the dispatches and the tile threads agree on every frame.
+- **Frame dumps on WARP** (`-dumpstages`, a 10-bit 1080p cut with four tiles, warped blocks and OBMC): the
+  block records of a frame are the same set with and without the flag, and the frame behind the inter
+  stage and behind every later stage is byte identical, with the new kernels and with the original shaders
+  on the lists.
+- The first run of the gate failed, and not because of the path: the two 10-bit 1080p cuts lost the D3D12
+  device, as streams on WARP did now and then before. The cause was a load outside a buffer in
+  `reconstruct_block`, which the larger block map of the path made fatal every time; it is fixed
+  ([warp-decoder.md](warp-decoder.md), "The D3D12 device is removed").
 
 ### Timing attribution
 

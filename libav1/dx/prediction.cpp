@@ -989,9 +989,15 @@ struct InterDetailRec {
       const int row4 = hbd ? 16 : 8;
       const int rows4x4[InterFastClasses] = {4 * row4, 4 * row, 11 * row4, 11 * row};
       const int rows4x2[InterFastClasses] = {2 * row4, 2 * row, 9 * row4, 9 * row};
-      for (int c = 0; c < InterFastClasses; ++c) thread_bytes[AV1_PERF_INTER_SINGLE_COPY + c] = rows4x4[c];
+      // With the original shader on the lists (av1_set_inter_fast, the lists without the kernels) every
+      // class loads what the last one does.
+      const int single_original = (td->inter_fast & AV1_INTER_FAST_SINGLE_ORIGINAL) != 0;
+      const int compound_original = (td->inter_fast & AV1_INTER_FAST_COMPOUND_ORIGINAL) != 0;
+      for (int c = 0; c < InterFastClasses; ++c)
+        thread_bytes[AV1_PERF_INTER_SINGLE_COPY + c] = rows4x4[single_original ? (int)InterFast2D : c];
       for (int c = 0; c < InterFastClasses * InterFastClasses; ++c)
-        thread_bytes[AV1_PERF_INTER_COMP_AVG_FAST + c] = rows4x2[c & 3] + rows4x2[c >> 2];
+        thread_bytes[AV1_PERF_INTER_COMP_AVG_FAST + c] =
+            compound_original ? 2 * rows4x2[InterFast2D] : rows4x2[c & 3] + rows4x2[c >> 2];
     } else {
       int step = 1 << SCALE_SUBPEL_BITS;
       for (int i = LAST_FRAME; i <= ALTREF_FRAME; ++i) step = AOMMAX(step, td->scale_factors[i].y_step);
@@ -1213,12 +1219,16 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
     // -interfast: the lists by motion vector class, which have the blocks of the types CasualInter and
     // CompoundAvrg on such a frame (their lists by type are empty). One dispatch per class and block size.
     // The class goes to the fast shaders in the bits 8 and up of width_log2; the lists of class 3 (both
-    // references of class 3 for a compound block) run the original shaders.
+    // references of class 3 for a compound block) run the original shaders, which do the same for any class.
     if (td->inter_fast && tiles->gen_block_map_fast) {
       for (int list = 0; list < InterFastLists / InterTypes::InterSizesAllCommon; ++list) {
         const int compound = list >= InterFastClasses;
         const int cls = compound ? list - InterFastClasses : list;
-        const int original = cls == (compound ? InterFastClasses * InterFastClasses - 1 : (int)InterFast2D);
+        // The last class has the original shader anyway; so have all classes when the mode asks for it
+        // (av1_set_inter_fast: the lists without the kernels).
+        const int original =
+            cls == (compound ? InterFastClasses * InterFastClasses - 1 : (int)InterFast2D) ||
+            (td->inter_fast & (compound ? AV1_INTER_FAST_COMPOUND_ORIGINAL : AV1_INTER_FAST_SINGLE_ORIGINAL));
         ComputeShader *const list_shader =
             compound ? (original ? &shaders->inter_comp : &shaders->inter_comp_fast)
                      : (original ? &shaders->inter_base : &shaders->inter_fast);
