@@ -46,12 +46,12 @@ int blend(int src0, int src1, int coef) {
   const int w_log = cb_width_log2;
   const int h_log = cb_height_log2;
   int wi = thread.x & 3;
-  const int subblock = (thread.x >> 2) & ((1 << (w_log + h_log)) - 1);
+  const int subblock = low_bits(thread.x >> 2, w_log + h_log);
   int block_index = cb_pass_offset + (thread.x >> (w_log + h_log + 2));
   uint4 block = uint4(0, 0, 0, 0);
   [branch] if (active) block = pred_blocks.Load4(block_index * 16);
 
-  int x = SubblockW * ((block.x & 0xffff) + (subblock & ((1 << w_log) - 1)));
+  int x = SubblockW * ((block.x & 0xffff) + low_bits(subblock, w_log));
   int y = SubblockH * ((block.x >> 16) + (subblock >> w_log));
 
   const int plane = block.y & 3;
@@ -323,7 +323,7 @@ int blend(int src0, int src1, int coef) {
     coefs.yzw = coefs.xxx;
   } else if (compound_type == 1) {
     int wedge_stride = SubblockW << w_log;
-    int wedge_addr = (((block.y >> 17) & 0x1fff) << 6) + SubblockW * (subblock & ((1 << w_log) - 1)) +
+    int wedge_addr = (((block.y >> 17) & 0x1fff) << 6) + SubblockW * low_bits(subblock, w_log) +
                      (SubblockH * (subblock >> w_log) + wi) * wedge_stride;
     uint wedge = comp_mask.Load(wedge_addr);
     coefs.x = (wedge >> 0) & 255;

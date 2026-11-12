@@ -34,13 +34,13 @@ groupshared int intermediate_buffer[64 * LocalStride];
 
   const int w_log = cb_width_log2;
   const int h_log = cb_height_log2;
-  const int subblock = (thread.x >> 2) & ((1 << (w_log + h_log)) - 1);
+  const int subblock = low_bits(thread.x >> 2, w_log + h_log);
   const int block_index = cb_pass_offset + (thread.x >> (w_log + h_log + 2));
   uint4 block = uint4(0, 0, 0, 0);
   [branch] if (active) block = pred_blocks.Load4(block_index << 4);
 
   const int wi = thread.x & 3;
-  const int dx = SubblockW * (subblock & ((1 << w_log) - 1));
+  const int dx = SubblockW * low_bits(subblock, w_log);
   const int dy = SubblockH * (subblock >> w_log);
   const int plane = block.y & 3;
   const int ref_frm = (block.y >> 2) & 7;
@@ -119,7 +119,7 @@ groupshared int intermediate_buffer[64 * LocalStride];
     output[i] = clamp((int)(((sum + OutputRoundAdd) >> OutputShift) - OutputSub), 0, 255);
   }
 
-  int4 mask = cb_obmc_mask[(block.y >> 17) + (subblock & ((1 << w_log) - 1))];
+  int4 mask = cb_obmc_mask[(block.y >> 17) + low_bits(subblock, w_log)];
   const int output_addr = cb_planes[plane].y + mbx + mby * cb_planes[plane].x;
   uint src0 = dst_frame.Load(output_addr);
   output[0] = (((src0 >> 0) & 255) * mask.x + output[0] * (64 - mask.x) + 32) >> 6;

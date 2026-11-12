@@ -34,13 +34,13 @@ groupshared int intermediate_buffer[64 * LocalStride];
 
   const int w_log = cb_width_log2;
   const int h_log = cb_height_log2;
-  const int subblock = (thread.x >> 2) & ((1 << (w_log + h_log)) - 1);
+  const int subblock = low_bits(thread.x >> 2, w_log + h_log);
   const int block_index = cb_pass_offset + (thread.x >> (w_log + h_log + 2));
   uint4 block = uint4(0, 0, 0, 0);
   [branch] if (active) block = pred_blocks.Load4(block_index << 4);
 
   const int wi = thread.x & 3;
-  const int dx = SubblockW * (subblock & ((1 << w_log) - 1));
+  const int dx = SubblockW * low_bits(subblock, w_log);
   const int dy = SubblockH * (subblock >> w_log);
   const int plane = block.y & 3;
   const int noskip = block.y & NoSkipFlag;

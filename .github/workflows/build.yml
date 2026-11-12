@@ -127,6 +127,29 @@ jobs:
             if ($result.exit -ne 0 -or $name -match '^(cdef_filter|intra_)') { $result.output | Write-Host }
           }
           if ($failed.Count) { throw "FXC failed for $($failed -join ', ')" }
+          # No bit field instruction whose width is known only at run time, except ubfe at offset 0. FXC makes
+          # these out of x & ((1 << n) - 1) and of (x >> n) << n with a run-time n, and where n can be 0 the
+          # result depends on the GPU (docs/gpu-av1-decoder.md, "Bit fields of width 0"); the shaders take
+          # such masks from a table. ubfe at offset 0 is what the block index of every inter shader compiles
+          # to and is known to be right on the console. The two -intraopt builds are test builds of a source
+          # that is otherwise built with /Od and are not held to this.
+          $runtimeWidth = @()
+          foreach ($name in $names) {
+            if ($name -match '_opt$') { continue }
+            foreach ($line in @(Get-Content (Join-Path $asm "$name.asm"))) {
+              if ($line -notmatch '^\s*(bfi|ubfe|ibfe)\s+\S+,\s*(l\([^)]*\)|[^,]+),\s*(l\([^)]*\)|[^,]+),') { continue }
+              $op = $Matches[1]
+              $width = $Matches[2].Trim()
+              $offset = $Matches[3].Trim()
+              if ($width -match '^l\(') { continue }
+              if ($op -eq 'ubfe' -and $offset -match '^l\(0(, 0)*\)$') { continue }
+              $runtimeWidth += "$name.hlsl: $($line.Trim())"
+            }
+          }
+          if ($runtimeWidth.Count) {
+            $runtimeWidth | Write-Host
+            throw "Bit field instructions with a run-time width in $($runtimeWidth.Count) places: take the mask from a table"
+          }
           $rows = @{}
           foreach ($name in $names) {
             $listing = Join-Path $asm "$name.asm"

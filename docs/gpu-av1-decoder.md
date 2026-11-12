@@ -493,3 +493,47 @@ the fix repairs them there too. **Answer:** they depend on the console. With the
 4K stream wrong on 300 of 300 frames, two 8-bit Chimera cuts on 298 of 300, and the scaled-reference
 stream on 53 of 64, as before. Something in those paths gives a different result on the console's GPU
 than on WARP (as the double-precision helper did for global motion).
+
+## Bit fields of width 0 (2026-11-12, candidate fix, not yet run on the console)
+
+What is wrong on the console and right on WARP: 8-bit streams (luma off by ±1–2 on about 0.4%
+of the samples from the key frame on, chroma exact) and frames that predict from references of
+another size. The wrong output is the same with every option, with other buffer layouts and
+before and after the group syncs, so it is not a race: something computes another value on that
+GPU. No shader has floating point: the FXC listings of all shaders have no float or double
+instruction at all.
+
+What the listings do have is bit field instructions (`ubfe`, `bfi`) whose width is a run-time
+value. FXC makes them out of `x & ((1 << n) - 1)`, alone or multiplied by a power of two, and out
+of `(x >> n) << n`, when `n` is not a constant. D3D defines them for a width of 0 (`ubfe` gives
+0, `bfi` inserts nothing), and WARP does that. The shaders where such an instruction can meet a
+width of 0 and is not the plain `ubfe` at offset 0 are exactly the ones that are wrong on the
+console:
+
+| Shader | Source | Instruction | Width 0 when |
+|---|---|---|---|
+| `intra_filter` (8-bit only; `intra_filter_hbd` masks with `(bw << 1) - 1`) | `4 * (idx & (bw - 1))`, `8 * (idx & (bw - 1))`: the word of a block the residual is added to | `bfi` width `bw_log2`, offsets 2 and 3 | the filter intra block is 4 samples wide. Filter intra is luma only |
+| all `inter_scale_*`, 8-bit and 10-bit | `(thread.x >> 2) & ((1 << (w_log + h_log)) - 1)`, `4 * (subblock & ((1 << w_log) - 1))` | `ubfe` width `w_log + h_log` offset 2, `bfi` width `w_log` offset 2 | the block is 4x4, or 4 samples wide |
+| `inter_compound_masked(_hbd)`, `inter_warp_compound(_hbd)` | the same expressions | the same | chroma of an 8x16 or 8x32 wedge block (masked); never (warp: 8x8 and larger) |
+| `inter_ext_borders(_hbd)` | `(1 << shft) - 1` as the mask of the samples that stay in the last word of a row | `bfi` width `shft`, offset 0 | the plane's width is 4n + 1 (8-bit) or odd (10-bit): a chroma plane of the scaled-reference stream is 591 wide |
+
+The inter shaders of frames whose references have the frame's size use the same idiom at offset
+0 (`thread.x & ((1 << (w_log + h_log)) - 1)`, `ubfe` with a run-time width at offset 0), with a
+width of 0 for every 4x4 block, and are md5-identical to dav1d on the console: that form is
+right there. `intra_main` is built with `/Od` and has no bit field instruction at all; its
+optimised test build (`-intraopt`), which has `bfi` and `ubfe` with run-time widths at offsets 2
+and 3, was wrong on the console.
+
+So the working assumption is that a `bfi`, or a `ubfe` at a non-zero offset, with a run-time
+width of 0 does not give the D3D result on the console's GPU. It fits the observations (8-bit
+only and luma only; errors of the size small residuals have at that quantizer; scaled references
+only; WARP right; the same output with every option), but it is an inference from the listings,
+**not confirmed on the console**.
+
+**Change.** The masks come from a table (`low_bits()` in `inter_common.h`, local tables in
+`intra_filter.hlsl` and the two border shaders), which FXC compiles to a table lookup and an
+`and`: 23 shaders, same results (the conformance run on WARP and the host checks are unchanged).
+The workflow's shader survey now fails on a bit field instruction with a run-time width other
+than `ubfe` at offset 0. If the console decodes the 8-bit and the scaled-reference streams right
+with this build, the assumption holds; if not, the stage dumps
+([test-player.md](test-player.md#stage-dumps--dumpstages)) say which stage differs.

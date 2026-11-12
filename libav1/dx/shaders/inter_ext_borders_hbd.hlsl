@@ -40,7 +40,12 @@ RWByteAddressBuffer Dst : register(u0);
   uint right0 = Dst.Load(right_ptr);
   uint right = ((right0 >> shft) & 0xffff) * 0x00010001;
 
-  uint r0mask = (1 << shft) - 1;
+  // The samples of the last word that belong to the frame stay, the rest becomes the last sample. The mask
+  // of what stays comes from a table on purpose: FXC makes a bit field instruction of width shft out of
+  // (1 << shft) - 1 and the line below, and a bit field of width 0 (an odd width) is one of the things GPUs
+  // do not agree on.
+  static const uint keep_mask[2] = {0x00000000, 0x0000ffff};
+  uint r0mask = keep_mask[shft >> 4];
   right0 = (right0 & r0mask) | (right & (~r0mask));
 
   int i;

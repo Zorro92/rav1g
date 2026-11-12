@@ -275,6 +275,15 @@ int2 filter_line2_hbd(RWByteAddressBuffer ref, int offset, int4 fkernel0, int4 f
   return sum;
 }
 
+// The low |count| bits of |value|, for a count that is known only at run time and can be 0 (a block that is one
+// unit wide; count is at most 15 here). The mask comes from a table on purpose. FXC turns
+// value & ((1 << count) - 1), and (value >> count) << count as well, into a bit field instruction (ubfe, bfi)
+// whose width is |count|, and a bit field of width 0 is one of the things GPUs do not agree on (D3D says it
+// is empty). A table lookup and an AND are the same everywhere.
+static const uint low_bits_mask[16] = {0x0000, 0x0001, 0x0003, 0x0007, 0x000f, 0x001f, 0x003f, 0x007f,
+                                       0x00ff, 0x01ff, 0x03ff, 0x07ff, 0x0fff, 0x1fff, 0x3fff, 0x7fff};
+uint low_bits(uint value, uint count) { return value & low_bits_mask[count]; }
+
 // The position val (1/16 sample) times the scale sf (1/16384), plus the offset of the scale, rounded to 1/1024
 // sample away from zero: scaled_x() and scaled_y() of av1/common/scale.c, which need 64 bits for the product.
 // HLSL 5.0 has no 64-bit integers, and double precision, which this function used before, is not executed by

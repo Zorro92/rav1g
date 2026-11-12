@@ -176,7 +176,12 @@ groupshared int loc_corner[18];
     // over the 8 threads of a row and let all 8 rows do the same load, add and store, which is right only
     // where the rows run in lockstep: every row has to load before any row stores.)
     for (int idx = wi + thread.y * 8; idx < 2 * bw * bh; idx += 8 * ROWS) {
-      const int wx = (idx & (bw - 1));
+      // The column of the word: idx modulo the block's width in words. The mask comes from a table on
+      // purpose: FXC makes a bit field instruction of width bw_log2 out of idx & (bw - 1) and the
+      // multiplications below, and a bit field of width 0 (a block one word wide) is one of the things GPUs
+      // do not agree on.
+      static const int word_mask[4] = {0, 1, 3, 7};
+      const int wx = idx & word_mask[block.y & 3];
       const int wy = idx >> (block.y & 3);  //(block.y & 3) = bw_log2
       const int addr = offset + 4 * wx + stride * wy;
       uint pix = dst_frame.Load(addr);

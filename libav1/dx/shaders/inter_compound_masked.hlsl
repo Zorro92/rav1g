@@ -55,7 +55,7 @@ int blend(int src0, int src1, int mask) {
   //        1    skip
   //        3    ref1
   //
-  int x = SubblockW * ((block.x & 0xffff) + (subblock & ((1 << w_log) - 1)));
+  int x = SubblockW * ((block.x & 0xffff) + low_bits(subblock, w_log));
   int y = SubblockH * (((block.x >> 16) << 1) + (subblock >> w_log));
 
   const int plane = block.y & 3;
@@ -194,7 +194,7 @@ int blend(int src0, int src1, int mask) {
   const int output_offset = cb_planes[plane].y + x + y * output_stride;
 
   int wedge_stride = SubblockW << w_log;
-  int wedge_addr = (((block.y >> 17) & 0x1fff) << 6) + SubblockW * (subblock & ((1 << w_log) - 1)) +
+  int wedge_addr = (((block.y >> 17) & 0x1fff) << 6) + SubblockW * low_bits(subblock, w_log) +
                    SubblockH * (subblock >> w_log) * wedge_stride;
   const int res_stride = cb_planes[plane].z;
   const int res_offset = cb_planes[plane].w + (x << 1) + y * res_stride;
