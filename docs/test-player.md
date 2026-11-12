@@ -2545,7 +2545,8 @@ as 32-bit words, so the report is the same whatever Windows SDK the program was 
 
 ### The test shaders
 
-`testing/sm6test/shaders`, compiled with the DXC of the Windows SDK (`dxc.exe` 10.0.26100, with
+`testing/sm6test/shaders`, compiled with the DXC of the Windows SDK the workflow builds with
+(`dxc.exe` in the `10.0.26100.0` directory of the runner, DXC 1.9.2602.17 in run 43179921793, with
 `dxil.dll` next to it, which validates the bytecode and signs it: D3D12 takes no DXIL without the
 validator's hash). Each is one dispatch of 4 thread groups of 64 threads on known input; the
 output is read back and compared with what the host computes.
@@ -2598,13 +2599,15 @@ differ put a warning on the run. The job fails when the test itself breaks.
 ### How to read it
 
 ```text
-SM6TEST start: 14 tests, shaders compiled with <DXC version>; the device reports shader model 6.x
+SM6TEST start: 14 tests, shaders compiled with dxcompiler.dll: 1.9(5184-21d28f72)(1.9.2602.17) - 1.9.2602.17 (21d28f727); the device reports shader model 6.8
 SM6TEST root signature, command list and buffers created
-SM6TEST basic: PASS | cs_6_0 -O3, 3256 bytes, validation hash present; 256 threads; 0 mismatches; pipeline state 3 ms, dispatch and readback 1 ms
-SM6TEST wave_ops: PASS | cs_6_0 -O3, 5392 bytes, validation hash present; lane count 4; 64 waves in 4 thread groups of 64: 64 of 4 threads; lanes are consecutive threads in order; no wave across thread groups; 0 mismatches; ...
-SM6TEST wavesize64: PSO FAILED hr=0x80070057 | cs_6_6 -O3 -D WAVE_SIZE=64, 5996 bytes, validation hash present; CreateComputePipelineState refused the shader after 0 ms
-SM6TEST summary: 14 tests: 9 PASS, 0 FAIL, 5 PSO FAILED (wavesize8, ...), 0 not built, 0 broken
+SM6TEST basic: PASS | cs_6_0 -O3, 3248 bytes, validation hash present; 256 threads; 0 mismatches; pipeline state 3 ms, dispatch and readback 14 ms
+SM6TEST wave_ops: PASS | cs_6_0 -O3, 5376 bytes, validation hash present; lane count 4; 64 waves in 4 thread groups of 64: 64 of 4 threads; lanes are consecutive threads in order; no wave across thread groups; 0 mismatches; pipeline state 2 ms, dispatch and readback 6 ms
+SM6TEST wavesize64: PSO FAILED hr=0x80070057 | cs_6_6 -O3 -D WAVE_SIZE=64, 5980 bytes, validation hash present; CreateComputePipelineState refused the shader after 0 ms
+SM6TEST summary: 14 tests: 9 PASS, 0 FAIL, 5 PSO FAILED (wavesize8, wavesize16, wavesize32, wavesize64, reduce_wave64), 0 not built, 0 broken
 ```
+
+(WARP, run 43179921793.)
 
 One line per test, `SM6TEST <name>: <result> | <details>`:
 
@@ -2639,6 +2642,40 @@ What the lines answer:
 | Can a shader choose the wave size, and which sizes are there? | `wavesize4` to `wavesize64`: `PASS` where the device has the size, `PSO FAILED` where not; `CAPS wave size` |
 | Is a thread group of 64 one wave of 64? | `reduce_wave64`, and the waves in the details of `wavesize64` |
 | A range of sizes (Shader Model 6.8)? | `wavesize_range_pref32`, `_pref64`: the lane count the device picked |
+
+### Results
+
+**WARP** (the runner of run 43179921793; Microsoft Basic Render Driver, user mode driver
+10.0.26100.33648), for reference:
+
+| | |
+| --- | --- |
+| `CAPS shader model` | 6.8 (answer to a request for 6.9) |
+| `CAPS feature level` | 12_1 |
+| `CAPS options1` | `WaveOps 1, WaveLaneCountMin 4, WaveLaneCountMax 4, TotalLaneCount 16, ExpandedComputeResourceStates 1, Int64ShaderOps 1` |
+| `CAPS options4` | `Native16BitShaderOpsSupported 1` |
+| `CAPS options` | double precision 1, min precision 0x3, typed UAV load of additional formats 1, resource binding tier 3, resource heap tier 2 |
+| `CAPS options9`, `options11` | 64-bit atomics on typed, group shared and descriptor heap resources 1; wave MMA tier 0 |
+| `CAPS typed UAV load/store` | `1/1` for all fifteen formats asked |
+
+| Test | Result | |
+| --- | --- | --- |
+| `basic` | PASS | |
+| `wave_ops` | PASS | lane count 4; the 256 threads were in 64 waves of 4 threads, consecutive threads in order, none across thread groups |
+| `reduce_groupshared` | PASS | |
+| `reduce_wave` | PASS | lane count 4: the wave path gives the sums and prefix sums of the group memory path |
+| `native16_math` | PASS | `float16_t` is a 16-bit float |
+| `native16_load` | PASS | also the loads and stores at addresses that are 2 mod 4 |
+| `wavesize4` | PASS | lane count 4 |
+| `wavesize8`, `16`, `32`, `64` | PSO FAILED `hr=0x80070057` | WARP has waves of 4 lanes and no others; the pipeline state is refused at once (0 ms) |
+| `reduce_wave64` | PSO FAILED `hr=0x80070057` | `[WaveSize(64)]`, the same |
+| `wavesize_range_pref32`, `_pref64` | PASS | lane count 4 for both: of the range 4 to 128 WARP has 4 only, whatever the shader prefers |
+
+So on WARP DXIL up to `cs_6_8` runs, the wave intrinsics and the 16-bit types compute what the host
+computes, and a shader gets waves of 4 lanes or no pipeline state. The same output in all three
+attempts of the run.
+
+**Console**: pending.
 
 ### How it is built
 

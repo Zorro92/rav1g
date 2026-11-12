@@ -923,4 +923,12 @@ The questions the console run answers: does the device take DXIL; is a wave 32 o
 thread group of 64 one wave; do the wave results match the group memory path; do 16-bit types work
 and wrap at 16 bits; can a shader ask for a wave size.
 
+**WARP, for reference** (run 43179921793): shader model 6.8, `WaveOps` with 4 lanes (minimum and
+maximum), native 16-bit operations reported. 9 of the 14 tests pass: the control, the wave intrinsics
+(64 waves of 4 consecutive threads in the 256 threads of the dispatch), both reductions with the same
+sums, the 16-bit arithmetic and the 16-bit loads and stores, `[WaveSize(4)]`, and both range forms,
+which get 4 lanes whatever they prefer. The other 5 are the pipeline states with `[WaveSize]` of 8, 16,
+32 and 64, which WARP refuses (`0x80070057`): it has waves of 4 lanes only. Nothing computed a wrong
+value.
+
 **Console result:** pending. Task file with the single line `-sm6test`.
