@@ -50,7 +50,10 @@ The program is `testing\warp_decoder\bin\x64\Release\warp_decoder.exe` (statical
 runtime, no other files needed). The project is not part of `av1xbox.sln` and writes nothing
 into the directories that solution builds in: the shader headers go to
 `testing\warp_decoder\obj`. CI builds it with the `v145` toolset and the `10.0.26100.0`
-SDK and keeps it as the artifact `rav1g-warp-decoder-x64-<run id>`.
+SDK and keeps it as the artifact `rav1g-warp-decoder-x64-<run id>`. In CI the project does
+not compile the shaders: it gets the headers of the workflow's shader step through
+`/p:Rav1gPrebuiltShaders=<directory>` ([test-player.md](test-player.md#shader-cache-of-the-workflow)),
+the same bytecode the test player's package has.
 
 ## Run
 
@@ -79,6 +82,8 @@ warp_decoder -list tasks.txt -t 4
 | `-name <text>` | what the `BEGIN` and `RESULT` lines call the stream (default: its file name) |
 | `-cdefv1`, `-nofitsize`, `-lowmemparts <n>`, `-lowmem`, `-slots <n>`, `-intrav2`, `-intraopt`, `-asyncclear` | as in the [test player](test-player.md#defaults-and-opt-out-flags) |
 | `-lfhsplit <n>`, `-intraedgefix` | the [experiments](test-player.md#experiments) of the test player; the conformance job runs the whole set with each, and with a decoder built with `/p:Rav1gUavSync=1` (the shaders of the uavsync package; the program prints `SHADERS uavsync`) |
+| `-alllayers` | a stream with spatial layers: output the frame of every layer of a temporal unit (`AV1D_SET_OUTPUT_ALL_LAYERS`); the default is one frame per temporal unit, the highest layer it has. See [Layers and new sequences](test-player.md#layers-and-new-sequences) |
+| `-oppoint <n>` | a stream with layers: decode operating point n of its sequence header (`AV1D_SET_OPERATING_POINT`, default 0) |
 | `-list <file>` | one task per line, with the flags above; flags on the command line are the defaults of every line. A decode error, a timeout or a crash ends the process at that task |
 | `-hw` | the first hardware adapter instead of WARP |
 | `-v` | print the decoder's log lines (`MEMORY ...`) |
@@ -99,6 +104,13 @@ RESULT stream=clip.ivf status=mismatch frames=40 matched=12 first_bad=12 ref_fra
 A `PROCESS before the task: ...` and a `PROCESS after the task: ...` line give the private bytes
 and working set of the process and the free memory of the machine: the tasks of a list run in one
 process, and a D3D12 device that runs out of memory is removed.
+
+A `RECONFIGURE <stream>: temporal unit <n> starts a sequence of ...; new decoder ...` line
+says that the stream went on with a sequence that did not fit the decoder (larger frames, or
+more bits a sample) and that the program replaced the decoder, as an application has to
+([Layers and new sequences](test-player.md#layers-and-new-sequences)); a second `TASK` line
+describes the new one, and the `detail` of the result ends with `a new decoder for a larger
+sequence`.
 
 `status` is `pass` (every frame matches and the number of frames is the reference's),
 `mismatch` (a frame differs, or the number of frames: without `-limit` the stream must give
@@ -221,9 +233,9 @@ On WARP the shaders run as D3D12 specifies them and not as the console's GPU hap
 them, which is what the run is for. Upstream's shaders had 0 of 250 streams right there, with
 another md5 on every decode: they counted on the 64 threads of a thread group running in lockstep
 ([gpu-av1-decoder.md](gpu-av1-decoder.md#lockstep-reliance-portability-2026-11-11)). With group
-syncs where threads hand data to each other, and with the super-resolution fix
-([test-player.md](test-player.md#super-resolution)), 246 of 251 streams are md5-identical to
-their reference:
+syncs where threads hand data to each other, the super-resolution fix
+([test-player.md](test-player.md#super-resolution)) and the three fixes below, all 251 streams
+are md5-identical to their reference:
 
 | streams | pass |
 | --- | --- |
@@ -231,26 +243,30 @@ their reference:
 | quantizer 0..63, 10-bit (`av1-1-b10-00-*`) | 64 of 64 |
 | frame sizes 16x16 to 226x226 (`av1-1-b8-01-*`) | 100 of 100 |
 | all intra, CDF update, motion vectors, motion field (`-02`, `-04`, `-05`, `-06`), intra-only frames (`-16`) | 5 of 5 |
-| size changes at key frames (`av1-1-b8-03-*`) | 1 of 2 |
-| temporal and spatial layers (`av1-1-b8-22-svc-*`) | 1 of 5 |
+| size changes at key frames (`av1-1-b8-03-*`) | 2 of 2 |
+| temporal and spatial layers (`av1-1-b8-22-svc-*`) | 5 of 5 |
 | film grain, monochrome, 8 and 10 bit (`-23`, `-24`) | 4 of 4 |
 | Netflix Open Content cuts, 270p to 2160p, 8 and 10 bit | 5 of 5 |
 | SVT-AV1 reference scaling | 1 of 1 |
 | SVT-AV1 super-resolution | 1 of 1 |
 
-The five that fail are listed in `expected.txt`:
+`expected.txt` is empty. The five streams that were on it until run 43149171146:
 
-- `av1-1-b8-03-sizeup.mkv`: frames 0 to 9 match, then the stream goes from 352x288 to 1280x720
-  with a new sequence header, and the decoder, which was created for the first one, cannot
-  allocate the larger frames (a decode error).
-- The four vectors with two spatial layers (`svc-L2T1`, `-L2T1-2`, `-L2T2`, `-L2T2-2`): the
-  decoder outputs the frame of each layer, 16 frames for 8 temporal units, where AOM's md5 has
-  the 1280x720 frame of each temporal unit (the output process of the specification, section
-  7.18.1: of a temporal unit the highest spatial layer of the operating point is the frame to
-  show). Its first 1280x720 frame is right (output frame 1 is
-  reference frame 0); every later one, which predicts from the 640x360 frame of its temporal unit
-  and from earlier 1280x720 frames, is wrong. First bad 1280x720 frame: output frame 3. What
-  differs in the samples is not known yet.
+- `av1-1-b8-03-sizeup.mkv` goes from 352x288 to 1280x720 with a new sequence header at temporal
+  unit 10. The decoder, created for the first sequence, could not allocate the larger frames (a
+  decode error). The library now reports the sequence that does not fit before it decodes
+  anything of it (`AOM_CODEC_NEEDS_RECONFIGURE`), and the program creates a decoder for it and
+  passes the temporal unit again, as an application has to
+  ([test-player.md](test-player.md#layers-and-new-sequences)). 20 of 20 frames.
+- The four vectors with two spatial layers (`svc-L2T1`, `-L2T1-2`, `-L2T2`, `-L2T2-2`) had two
+  defects. The decoder output the frame of each layer, 16 frames for 8 temporal units, where
+  AOM's md5 has the 1280x720 frame of each temporal unit: it now outputs the highest layer a
+  temporal unit has, as libaom and dav1d do by default (the output process of the
+  specification, section 7.18.1; `-alllayers` for the frames of all layers). And of the
+  1280x720 frames only the first was right: a block with a local warp was clamped to the size
+  of reference 0 of the frame, which in those frames is the 640x360 frame of the lower layer,
+  instead of to the size of its own reference, the 1280x720 frame before
+  ([test-player.md](test-player.md#host-side-check-of-the-warp-shaders)). 8 of 8 frames each.
 
 **The D3D12 device is removed, once or twice in every run.** Somewhere in the list, mostly at one
 of the last, large streams (a 720p or 1080p cut of Netflix Open Content) but once at a 352x288
@@ -286,7 +302,8 @@ references (`syn-resize-10b-1080p.ivf`).
 
 ### expected.txt
 
-`testing/conformance/expected.txt` lists the streams that fail today, one per line:
+`testing/conformance/expected.txt` lists the streams that fail today (none at the moment), one
+per line:
 
 ```text
 <stream> <mismatch|error|timeout|crash|unstable> <reason>

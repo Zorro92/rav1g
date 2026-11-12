@@ -71,9 +71,8 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
 - **Other GPUs**: upstream's shaders are only right where the 64 threads of a thread group run
   in lockstep, as on the console; on the WARP software adapter every stream decoded wrong, and
   GPUs with waves of 32 would too. The shaders now wait for each other with group syncs, and
-  host checks keep it that way (`testing/sync_check`). On WARP 246 of 251 conformance streams
-  are md5-identical to their reference (AOM's test vectors, dav1d); the rest are known bugs
-  (spatial layers, a size change). On the console the output is unchanged
+  host checks keep it that way (`testing/sync_check`). On WARP all 251 conformance streams
+  are md5-identical to their reference (AOM's test vectors, dav1d). On the console the output is unchanged
   (md5-identical to dav1d on the 10-bit and film-grain clips) and the frame time is the same
   within noise (e.g. 27.9 → 28.5 fps and 26.0 → 25.9 fps on two 12.6 Mbps 4K clips).
 - **Super-resolution**: frames with superres and CDEF and without loop restoration were upscaled
@@ -81,6 +80,18 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
   first sample) in upstream, on every GPU. Fixed in the host code; the shader is checked on a
   host against libaom's normative upscale (`testing/superres_check`). On WARP an SVT-AV1
   stream with all superres denominators is md5-identical to dav1d. Not yet run on the console.
+- **Spatial layers**: of a temporal unit the frame of the highest spatial layer is output, as
+  libaom and dav1d do by default (it was every layer's frame); `AV1D_SET_OUTPUT_ALL_LAYERS`
+  and `AV1D_SET_OPERATING_POINT` choose otherwise. AOM's four vectors with two spatial layers
+  are md5-identical on WARP.
+- **A new sequence with larger frames** (or more bits) than the decoder was created for:
+  `aom_codec_decode` returns `AOM_CODEC_NEEDS_RECONFIGURE` before it decodes anything of the
+  sequence, and the application creates a decoder for it and passes the temporal unit again
+  ([test-player.md](docs/test-player.md#layers-and-new-sequences)). It was a decode error.
+- **References of different sizes in one frame**: a warped block was clamped to the size of
+  the frame's first reference instead of its own, and a block with global motion was warped
+  from a scaled reference, which libaom and the specification do not do. Both fixed and
+  checked on a host against libaom (`testing/warp_check`). Not yet run on the console.
 - **Known bugs on the console only, 8-bit streams and scaled references**: md5-identical to dav1d on
   WARP, still wrong on the console after the lockstep fix, so something in those paths depends on
   the console's GPU. An 8-bit 4K stream decodes with luma off by ±1–2 on about 0.4%

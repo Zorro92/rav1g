@@ -537,3 +537,72 @@ The workflow's shader survey now fails on a bit field instruction with a run-tim
 than `ubfe` at offset 0. If the console decodes the 8-bit and the scaled-reference streams right
 with this build, the assumption holds; if not, the stage dumps
 ([test-player.md](test-player.md#stage-dumps--dumpstages)) say which stage differs.
+
+## Layers, new sequences, mixed reference sizes; all conformance streams pass on WARP (2026-11-12)
+
+The last changes to the C++ decoder before the port: it is what the Rust decoder will be
+checked against, so the five conformance streams that still failed on WARP had to be right, or
+wrong for a known reason.
+
+| Stream | Was | Cause | Now |
+|---|---|---|---|
+| `av1-1-b8-22-svc-L2T1`, `-L2T1-2`, `-L2T2`, `-L2T2-2` (two spatial layers, 640x360 and 1280x720) | 16 frames for 8 temporal units | every shown frame was output; the output process (7.18.1) of a displaying application, libaom and dav1d output the highest spatial layer of a temporal unit | 8 frames |
+| the same | of the 1280x720 frames only the first right | `inter_warp(_hbd).hlsl` clamped a warped block to the size of reference 0 (here the 640x360 frame) instead of its own reference's | md5-identical |
+| `av1-1-b8-03-sizeup.mkv` (352x288, then 1280x720) | decode error at temporal unit 10 | the decoder is created for the first sequence and cannot grow | `AOM_CODEC_NEEDS_RECONFIGURE`; the application replaces the decoder; md5-identical |
+
+With these, **251 of 251 streams are md5-identical on WARP** (run 43149171146; before: 246),
+with each experiment flag and with the uavsync shaders too, and `expected.txt` is empty. The
+details are in [test-player.md](test-player.md#layers-and-new-sequences) (the output rule, the
+controls, the reconfiguration and why the application does it) and under
+[the warp check](test-player.md#host-side-check-of-the-warp-shaders) (the clamp, the rule
+against warping a scaled reference, and the hint about 4-wide difference weighted blocks that
+was not a defect).
+
+Also in this round:
+
+- **Global motion and scaled references.** A `GLOBALMV` block was warped whenever its reference
+  had a model; libaom and the specification do not warp a scaled reference. Fixed in the host
+  (`td->gm_warp`). No stream of the conformance run has both, so no output changed.
+- **Warnings.** C5208 (the unnamed `compute_shader_lib` struct) and the four X3556 of
+  `loop_restoration.hlsl` (signed division and remainder of values that are never negative):
+  505 → 490 instruction slots, same output. The warp shaders lost a few slots with the clamp
+  (`inter_warp` 885 → 882, `inter_warp_hbd` 995 → 994).
+- **Shader cache of the workflow** ([test-player.md](test-player.md#shader-cache-of-the-workflow)):
+  one FXC call per shader and variant, kept by content, instead of five compiles of every
+  shader per run.
+
+**The scaled-reference stream that is wrong on the console** (`syn_resize-mode`, SVT-AV1
+`resize-mode=2`, 10-bit: 53 of 64 frames differ from dav1d there, none on WARP) is not touched
+by any of this. Its headers have `allow_warped_motion` 0 and `is_motion_mode_switchable` 0 on
+all 63 inter frames, no global motion model, and a sequence header with
+`enable_masked_compound` 0, `enable_jnt_comp` 0 and `enable_interintra_compound` 0: no warped
+block, no OBMC, no wedge and no difference weighted compound. What it does use, on frames of
+nine sizes from 960x540 to 1920x1080: single-reference and averaged
+compound prediction from scaled references (`inter_scale`, `inter_scale_compound`, the 2x2
+chroma shaders), with 31 hidden frames shown later. The cause on the console is still to be
+found there (the table masks of the section above, or the stage dumps).
+
+Not run on the console: everything in this section.
+
+## Console-only mismatches located by stage dumps (2026-11-12)
+
+The player and warp_decoder save the frame after every GPU stage (`-dumpstages`,
+`testing/stage_dump/stage_dump.py compare`). Console dumps (package 0.2.25.0) against CI's WARP dumps
+of the same streams:
+
+- **8-bit**: AOM's tiny vector `av1-1-b8-01-size-66x66` reproduces the 8-bit bug on the console (frame 1
+  of 2 wrong; right on WARP). Every stage up to and including the even pass of the vertical loop filter
+  is byte-identical, border and padding included. The odd pass (`lf_vert`, the second column of 64x64
+  blocks) is the first stage that differs: 4 luma samples by 1, at x 64..65 (the last two columns of
+  the frame), y 41, 52, 61. `loopfilter_vert.hlsl` filters one row per thread with nothing shared
+  between threads, and its frame input is identical, so the suspect is its other input, the edge list
+  (`lf_blocks`, written by `gen_lf_blocks_vert`), which the dumps do not cover yet — for example
+  entries at the right frame edge that are not written and hold whatever the buffer held (the console
+  does not have to zero a new buffer; WARP's are fresh).
+- **Scaled references**: decoded frames 0-3 of CI's `syn-resize-10b-1080p` (three of them predicted
+  from references of another size) are identical on every stage; the first wrong output is decoded
+  frame 4 (1280x720, shown), which the CI dumps do not include yet.
+- **None of the console experiments changed either bug**: `-lfhsplit 1|2`, `-intraedgefix`, the uavsync
+  shaders and the bit-field table masks give the same wrong md5 (8-bit 4K frame 0 `537ee12a...` in every
+  build since 0.2.11.0). Super-resolution, fixed on WARP, is md5-identical on the console too.
+

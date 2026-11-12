@@ -104,6 +104,17 @@ one commit each:
 - **Experiments**: `-lfhsplit`, `-intraedgefix` and a second package whose shaders sync all
   memory at every group sync, for the bugs that show on the console only. See
   [Experiments](#experiments). Off by default; the output does not change.
+- **Layers, new sequences, references of different sizes**: of a temporal unit with spatial
+  layers the frame of the highest layer is output (`-alllayers` for every layer's frame,
+  `-oppoint <n>` for another operating point), a sequence that does not fit the decoder is
+  reported with `AOM_CODEC_NEEDS_RECONFIGURE` and the player replaces the decoder, a warped
+  block is clamped to its own reference and a scaled reference is never warped. See
+  [Layers and new sequences](#layers-and-new-sequences) and
+  [the warp check](#host-side-check-of-the-warp-shaders).
+- **Shader cache of the workflow**: the CI builds take the bytecode headers of the shaders
+  from one FXC call per shader, kept by content, instead of compiling every shader in every
+  build. See [Shader cache of the workflow](#shader-cache-of-the-workflow). A build without
+  `/p:Rav1gPrebuiltShaders` is unchanged.
 - **Conformance run**: `testing/warp_decoder` is the decoder as a desktop console program
   that decodes on the D3D12 WARP software adapter and writes or checks one md5 per output
   frame, and `testing/conformance` runs it in CI over AOM's decoder test vectors, cuts of
@@ -2061,9 +2072,16 @@ What the generated frames cover:
   type (average, distance weights, wedge, difference weights with the mask handed to
   chroma), every interpolation filter, vectors that point beyond every edge;
 - with and without residual;
+- frames whose references do not all have the frame's size (reference scaling, spatial
+  layers): reference 0 is a frame of half, twice, or 8/16 to 16/8 of the frame's size, and the
+  warped blocks have references of the frame's size, as they always do. The frames of the
+  pool have layouts of their own, in buffers of the largest frame's size, as in the decoder;
 - `scale_value()` on its own against libaom's `scaled_x()`, 400000 positions and scales;
 - one frame with the block of the console failure: 1920x1080 10-bit, the 32x16 wedge
-  block at x 1856, y 624, LAST plain, ALTREF with the model of that frame.
+  block at x 1856, y 624, LAST plain, ALTREF with the model of that frame;
+- one frame, 8-bit and 10-bit, with the block of the spatial layer vectors: a 1280x720 frame
+  whose LAST is a 640x360 frame and a 64x64 block with a local warp from GOLDEN, 1280x720,
+  at x 960, y 528.
 
 Every frame runs twice: with double precision in the shaders working, and with every
 double precision operation yielding 0, which stands for the console. The check also
@@ -2071,7 +2089,7 @@ counts the double precision operations the shaders execute, and fails if there i
 
 ```sh
 sh testing/warp_check/run.sh             # the check
-sh testing/warp_check/run.sh --mutate    # and eleven mutated shaders, which must all fail
+sh testing/warp_check/run.sh --mutate    # and fourteen mutated shaders, which must all fail
 ```
 
 Further arguments go to the check: `--cases N` (frames per common size, default 24), `--seed S`,
@@ -2080,7 +2098,10 @@ Further arguments go to the check: `--cases N` (frames per common size, default 
 ```text
 warp_check: scale_value() against libaom's scaled_x(), 400000 values: identical with double precision, identical without
 warp_check: console case (1920x1080 10-bit, 32x16 GLOBAL_GLOBALMV wedge block at x 1856 y 624, LAST plain and ALTREF rotzoom): identical
-warp_check: 381 frames, 8-bit and 10-bit, 2748 blocks: 876 GLOBALMV with a global warp, 864 with a local warp, 1008 GLOBAL_GLOBALMV (596 of them with one reference not warped)
+warp_check: spatial layer case (1280x720 8-bit, LAST a 640x360 frame, 64x64 block with a local warp from GOLDEN, 1280x720, at x 960 y 528): identical
+warp_check: spatial layer case (1280x720 10-bit, LAST a 640x360 frame, 64x64 block with a local warp from GOLDEN, 1280x720, at x 960 y 528): identical
+warp_check: 627 frames, 8-bit and 10-bit, 4399 blocks: 1449 GLOBALMV with a global warp, 1472 with a local warp, 1478 GLOBAL_GLOBALMV (866 of them with one reference not warped)
+warp_check: 246 of the frames, with 1831 of the blocks, have a reference 0 of another size than the frame
 warp_check: frames that differ from libaom: 0 with double precision, 0 without
 warp_check: double precision operations executed by the shaders: 0
 warp_check: the warp shaders and libaom write identical frames
@@ -2102,14 +2123,57 @@ so with working double precision the shaders were right in every case, edges inc
 and without it every `GLOBAL_GLOBALMV` block with a reference that is not warped was
 wrong. The mutants of `--mutate` each change one detail: the right, the left and the
 bottom edge clamp of the warp, the right edge clamp of the compound warp and of its
-reference that is not warped, a shear term, the centre of the 8x8 warp unit, and the
-offset and the rounding of `scale_value()`. The workflow runs the check with `--mutate`
-in the job `warp-check`.
+reference that is not warped, a shear term, the centre of the 8x8 warp unit, the
+offset and the rounding of `scale_value()`, two group syncs, and the size a block is
+clamped to (see below). The workflow runs the check with `--mutate` in the job
+`warp-check`.
+
+**The size of the block's own reference.** `inter_warp.hlsl` and `inter_warp_hbd.hlsl`
+clamped the coordinates of a warped block with `cb_dims`, which
+`av1_prediction_run_all()` fills with the size of reference 0, whatever reference the
+block has. In a frame whose references all have its size that is the same number. In the
+upper layer of a stream with two spatial layers it is not: LAST is the frame of the lower
+layer of the temporal unit, half the size, and a block with a local warp from an earlier
+frame of the upper layer was clamped to the lower layer's size. That made every 1280x720
+frame after the first of AOM's `av1-1-b8-22-svc-L2T*` vectors wrong (the first has the
+lower layer as its only reference, and a block with a scaled reference cannot be coded
+with a local warp). The shaders now clamp with `cb_refplanes[refplane]`, the block's own
+reference, as the shaders for frames with scaled references always did. Three mutants are
+the shaders as they were (8-bit, 10-bit, and the same mistake put into the compound warp),
+and the check rejects them:
+
+```text
+warp_check: mutant rejected as expected: size of reference 0, not of the reference of the block, as the clamp of the warp (8-bit; the code before the fix)
+```
+
+`inter_warp_compound(_hbd).hlsl` had the same clamp and got the same change; no pipeline
+state uses those two (`GLOBAL_GLOBALMV` blocks go through `inter_scale_warp_compound`).
+
+**No warp from a scaled reference.** libaom's `av1_allow_warp()` refuses the warp of a
+scaled reference before it looks at the model, and so does the specification (`useWarp` in
+section 7.11.3.1 needs `is_scaled(refFrame)` to be 0): a `GLOBALMV` or `GLOBAL_GLOBALMV`
+block whose reference is scaled is predicted from its motion vector, also when the
+reference has a rotzoom or affine model. The host and `gen_pred_blocks.hlsl` asked the
+model only. `av1_setup_frame()` now decides per reference (`td->gm_warp`), and the three
+places that asked the model read that: `av1_mi_push_block()`, the constants of
+`gen_pred_blocks.hlsl`, and the constants of the compound warp shader. A local warp needs
+no test: the motion mode of a block with a scaled reference cannot be a local warp
+(`motion_mode_allowed()`), so the bitstream has none. The check follows the rule (a
+reference frame of another size has no warp model there); the rule itself is host code,
+which the check does not run.
+
+**Looked at and not a defect**: `inter_scale_compound_diff_luma(_hbd).hlsl` hands the mask of
+a difference weighted block to chroma without a case for blocks 4 samples wide, and so does
+`inter_compound_diff_luma(_hbd).hlsl`. A block with two references is at least 8 luma
+samples wide and high (`is_comp_ref_allowed()`), so the thread that stores a word of the
+mask always finds its second half in a thread of the same block.
 
 What the check does not run: `gen_pred_blocks.hlsl` and `av1_mi_push_block()`, which
 decide which blocks are warped (the records are written by the check, following them);
 the chroma of warped blocks smaller than 16x16, which the translation shaders predict;
-OBMC and inter-intra on top of a warped block; scaled references.
+OBMC and inter-intra on top of a warped block; a `GLOBAL_GLOBALMV` block whose reference
+that is not warped is scaled (the shader scales it; the check has no reference code for
+that, and the conformance run's stream with scaled references has no global motion).
 
 ### Console run
 
@@ -2187,6 +2251,70 @@ superblocks, noise, extremes, ramps and spikes as content). The source rows are 
 the last column of the last mode info unit, which is where the specification clamps, not at
 the visible width. The check covers the shader, which was right; the bug was in the host
 code that the conformance run covers. It runs as the `superres-check` job of the workflow.
+
+## Layers and new sequences
+
+**One frame per temporal unit.** A stream with spatial layers has one shown frame per layer in
+a temporal unit. The decoder used to output all of them. The output process of the
+specification (section 7.18.1) leaves the choice to the application and says what one that
+displays the video does: one frame per temporal unit, the highest spatial layer that is in
+the operating point and present in the temporal unit. libaom does that by default
+(`output_all_layers` 0), and so do aomdec and dav1d; AOM's md5 files for the vectors with
+two layers have that frame only. It is the library's default now:
+
+- A frame's output (the copy into an output image, with film grain) is part of the frame's
+  own command list, recorded before the next frame of the temporal unit is read. So the
+  decision is taken from the OBU headers behind the frame (`av1_frame_is_output()` in
+  `libav1/av1/decoder/obu.c`): a shown frame is output unless an OBU of a frame of a higher
+  spatial layer that is in the operating point follows before the next temporal delimiter or
+  the end of the data of the `aom_codec_decode` call. A frame that is not output takes no
+  output image, like a frame that is not shown.
+- A stream without layers has no such OBU: every shown frame is output, as before.
+- `aom_codec_control(ctx, AV1D_SET_OUTPUT_ALL_LAYERS, 1)` gives every shown frame (the
+  behaviour before); `AV1D_SET_OPERATING_POINT` selects the operating point of the sequence
+  header by its index (default 0, the first; an index the stream does not have selects 0, as
+  in libaom; it takes effect at the next sequence header). Both controls were "incapable"
+  before. In the player and in `warp_decoder`: `-alllayers`, `-oppoint <n>`.
+- An application has to pass one temporal unit per `aom_codec_decode` call, or data that
+  keeps its temporal delimiters: with two temporal units in one call and no delimiter between
+  them the frames of the first would count as lower layers of the second.
+
+**A sequence that does not fit the decoder.** A decoder is created for a frame size and a bit
+depth, which the player takes from the sequence header at the first key frame. A later
+sequence can announce larger frames or more bits (`av1-1-b8-03-sizeup.mkv`: 352x288, then
+1280x720). Its first frame used to fail with `Failed to allocate frame buffer`. Now
+`aom_codec_decode` returns **`AOM_CODEC_NEEDS_RECONFIGURE`** (`libav1/aom/aom_codec.h`) when
+it finds a sequence header whose largest frame, rounded up to 128, or whose bit depth is more
+than the decoder was created for. It has decoded nothing of the call's data and the decoder
+is as it was; `aom_codec_error_detail` has both sizes. What an application does then, and
+what the player and `warp_decoder` do:
+
+1. `aom_codec_decode(ctx, NULL, 0, NULL)`: the frames of the sequence before are handed over.
+2. `aom_codec_destroy`.
+3. `aom_codec_peek_stream_info` on the same data, and a decoder for what it says, created as
+   for the start of a stream (the player never makes it smaller than the one before).
+4. `aom_codec_decode` with the same data.
+
+A sequence starts with a key frame, so the new decoder needs nothing of the old one. The
+library does not replace its buffers itself because nearly everything it would need comes
+from the application at creation: the host memory (which grows with the size, so the block
+the application gave is too small), the device, the queue, the pipeline cache and the budget
+callback; and the application has output images of its own to size and a memory limit under
+which the old decoder has to go before the new one fits. With the code an application keeps
+one path for creating a decoder and takes it a second time.
+
+In the player the output queue and the output pool of the task stay across the two decoders
+(the pool makes images of the new size as the frames arrive), so the md5 check and the
+presentation go on without a break. The log has
+
+```text
+RECONFIGURE: a new sequence of 1280x720 8-bit frames (Sequence of 1280x720 8-bit frames, decoder created for 384x384 8-bit); the decoder is replaced by one of 1280x768 8-bit
+```
+
+followed by the `MEMORY` lines of the destruction and of the new creation. A sequence that
+needs more than the player creates (`-nofitsize`, or more than 4096x2176) is a decode error
+that says so. Not run on the console yet; `warp_decoder` decodes the vector right on WARP
+([warp-decoder.md](warp-decoder.md#results)).
 
 ## Experiments
 
@@ -2285,19 +2413,69 @@ decoder, `extract` writes one stage as a planar file.
 
 ## Shader survey
 
-To pick the next shader to look at, the workflow compiles every shader of the project
-once more with its Release x64 flags and writes `shader-survey/survey.md` (also shown in
-the run summary) and `survey.csv`: thread group, instruction slots, temp registers,
-indexable temps (count and total size), instructions that touch them, immediate constant
-buffer entries and reads, group shared bytes, barriers (all, and those that wait for the
-whole group), loops and FXC compile time. `shader-survey/asm/` has all listings. The
-last line of `survey.md` says whether every listing matches the bytecode compiled into
-the package. The counts are static and are not a timing.
+To pick the next shader to look at, the workflow writes `shader-survey/survey.md` (also
+shown in the run summary) and `survey.csv` from the listings of all shaders, compiled with
+their Release x64 flags: thread group, instruction slots, temp registers, indexable temps
+(count and total size), instructions that touch them, immediate constant buffer entries and
+reads, group shared bytes, barriers (all, and those that wait for the whole group), loops
+and FXC compile time. `shader-survey/asm/` has all listings, and `shader-survey/build.json`
+the cache key, the compile time and the sha256 of the bytecode header of every shader. The
+counts are static and are not a timing.
 
-The survey runs FXC on several shaders at a time (one per logical processor of the
-runner) and parses the listings afterwards in name order, so the files do not depend on
-which compile finishes first. A shader's FXC compile time is that of its own FXC process
-and includes contention with the compiles running beside it; `survey.md` and the
-`stats.txt` files say how many ran at a time. Compare compile times within one run only,
-and treat small differences as noise. A shader that fails to compile still stops the run,
-with its FXC output in the step log.
+A listing and the bytecode header the package is built from come from the same FXC call
+(`/Fc` and `/Fh`). The build step then checks two things and writes the result under
+`survey.md` and the two `stats.txt` files: MSBuild ran FXC on no shader of the library, and
+the bytecode of the headers is in the program inside the package, byte for byte
+(`shaders.py verify`; of the 92 arrays the linker drops the ones no pipeline state uses, and
+the line names them).
+
+FXC runs on several shaders at a time (one per logical processor of the runner) and the
+listings are parsed afterwards in name order, so the files do not depend on which compile
+finishes first. A shader's FXC compile time is that of its own FXC process and includes
+contention with the compiles running beside it; for a shader that came from the cache it is
+the time of the run that compiled it. Compare compile times within one run only, and treat
+small differences as noise. A shader that fails to compile still stops the run, with its FXC
+output in the step log, and so does a bit field instruction with a run-time width
+([gpu-av1-decoder.md](gpu-av1-decoder.md#bit-fields-of-width-0-2026-11-12-candidate-fix-not-yet-run-on-the-console)).
+
+### Shader cache of the workflow
+
+FXC takes about 40 s for the 92 shaders on the four processors of a runner, and MSBuild ran
+it on one shader at a time. A workflow run compiled every shader five times: the survey, the
+package, the uavsync package, `warp_decoder` and its uavsync build. Now a shader is compiled
+once per variant (normal and uavsync), and not at all when an earlier run has compiled the
+same thing (`.github/actions/shaders`, `testing/shader_cache/shaders.py`).
+
+Measured on the player job: before the cache 3:42 for the job (run 43141191340); with a cold cache
+the shader step took 42 s for both variants (run 43150569680); with a warm cache 5 s, the package
+build 70 s and the whole job 2:18 (run 43153397292). How it works:
+
+- **Key of a shader**: sha256 over the FXC binaries (`fxc.exe` and the `d3dcompiler` DLL
+  beside it), the arguments that decide the output (`/T cs_5_0 /E main /Vn <name>`, `/Od`
+  for the two shaders the project builds without optimization, the define of the uavsync
+  variant), the source file and every file it includes, directly or not.
+- **Cache entry**: the header (`/Fh`) and the listing (`/Fc`) of one FXC call, and what FXC
+  printed (warnings are shown again when the entry is used).
+- **Actions cache**: the directory of entries is saved under the digest of all keys
+  (`rav1g-shaders-v1-<digest>`). A run with another digest starts from the newest saved
+  directory, compiles the shaders whose keys are not in it, on four at a time, drops the
+  entries it did not use and saves the directory under its own digest. So a change to one
+  shader compiles that shader, a change to `inter_common.h` the 42 that include it, and a
+  change to none compiles nothing.
+- **The builds**: MSBuild gets `/p:Rav1gPrebuiltShaders=<directory>`. With it,
+  `libav1.vcxproj` and `warp_decoder.vcxproj` put the directory first on the include path
+  (`av1_compute.cpp` includes `dx/shaders/h/<name>.h`) and leave their `FxCompile` items
+  out. Only the workflow sets the property: a build in Visual Studio or with plain
+  `msbuild` compiles the shaders itself, into `libav1/dx/shaders/h`, as before.
+- The player job and the conformance job each run the step; they have the same keys, so the
+  packages and `warp_decoder` get the same bytecode.
+
+To run it by hand (any FXC; `--jobs` defaults to the processor count):
+
+```bat
+python testing\shader_cache\shaders.py build --fxc "<path>\fxc.exe" --cache shader-cache ^
+  --variant normal --root shader-build\normal --listings shader-build\normal\asm ^
+  --report shader-build\normal\report.json
+msbuild testing\warp_decoder\warp_decoder.vcxproj /p:Configuration=Release /p:Platform=x64 ^
+  /p:Rav1gPrebuiltShaders=%CD%\shader-build\normal
+```
