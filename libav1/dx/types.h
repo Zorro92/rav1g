@@ -97,6 +97,25 @@ enum InterTypes {
   CompoundTypeDiffUv = 3,
 };
 
+// Test flag -interfast (av1_set_inter_fast; docs/gpu-av1-decoder.md, "Inter prediction: breakdown and fast
+// paths"). A reference fetch has a class by the fraction of its motion vector: 0 none (copy), 1 in x only,
+// 2 in y only, 3 both. On a frame that takes the fast path the blocks of the lists CasualInter and
+// CompoundAvrg are listed by class instead, in a block map of their own per tile (av1_tile_data::
+// gen_block_map_fast), one list per class and block size:
+//   class * InterSizesAllCommon + size                                        one reference
+//   InterFastCompound + (class0 | class1 << 2) * InterSizesAllCommon + size   two references
+// gen_pred_blocks_fast.hlsl places the records by the same numbers.
+enum {
+  InterFastCopy = 0,
+  InterFastH = 1,
+  InterFastV = 2,
+  InterFast2D = 3,
+  InterFastClasses = 4,
+  InterFastCompound = InterFastClasses * (int)InterTypes::InterSizesAllCommon,
+  InterFastLists = (InterFastClasses + InterFastClasses * InterFastClasses) * (int)InterTypes::InterSizesAllCommon,
+  InterFastMapSize = InterFastLists + 16,  // ints of a tile's map: the lists and the end mark behind them
+};
+
 enum {
   IntraSizes = 9,                   // bw_log + bh_log = (0..4) + (0..4) = 0..8
   ReconstructBlockSizes = 36,       //(0..5)*(0..5)
@@ -140,8 +159,9 @@ struct ComputeCommandBuffer {
 
 // Timestamps a command list can take. The stages need about twenty; the inter breakdown
 // (av1_set_perf_detail) adds one per section, and in its mode 2 one per dispatch of the inter stage and of
-// the reconstruction (at most AV1_PERF_INTER_SECTION_COUNT * AV1_PERF_INTER_LISTS, far fewer in a frame).
-enum { Av1PerfMaxMarks = 640 };
+// the reconstruction (at most AV1_PERF_INTER_SECTION_COUNT * AV1_PERF_INTER_LISTS, far fewer in a frame;
+// with av1_set_inter_fast a frame can have 20 lists by class of 22 block sizes each).
+enum { Av1PerfMaxMarks = 1280 };
 
 // CPU-side timing of the frame currently being built (QPC ticks).
 struct av1_perf_accum {
@@ -285,6 +305,9 @@ struct av1_frame_thread_data {
   size_t clean_mi_bytes;
   size_t clean_iter_bytes;
   int scale_enable;
+  // -interfast: not 0 when this frame lists its blocks by motion vector class (no scaled reference): the mode
+  // of av1_set_inter_fast, AV1_INTER_FAST_ON and the bits that keep the original shaders on those lists.
+  int inter_fast;
   ScaleFactor scale_factors[8];
   // Entry LAST_FRAME..ALTREF_FRAME: a GLOBALMV or GLOBAL_GLOBALMV block of this frame is warped from that
   // reference. The reference has a global motion model libaom accepts and the size of the frame: a scaled
@@ -343,6 +366,9 @@ typedef struct Av1Core {
   size_t fb_pool_alloc_reset;
 
   int pred_map_size;
+  // -interfast: tiles the block maps have room for behind their pred_map_size ints (InterFastMapSize ints
+  // each); 0 for a decoder that was created without the flag, which never takes the fast path.
+  int inter_fast_tiles;
   int block_count4x4;
   // Shares of a slot in the mode info pool and in the coefficient buffer (AV1_LOW_MEMORY_MODE_INFO, _COEFS):
   // a tile of n 4x4 units has n >> mode_info_shift mode info entries and n * coef_count_num coefficients in

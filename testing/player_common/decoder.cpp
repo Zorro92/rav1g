@@ -289,7 +289,9 @@ int AV1Decoder::DecodeOne() {
       initialized_ && (created_threads_ != params_.threads_ || created_queue_size_ != params_.player_queue_size_ ||
                        created_slots_ != params_.slots_ || created_width_ != dec_width ||
                        created_height_ != dec_height || created_bitdepth_ != dec_bitdepth ||
-                       created_intrav2_ != params_.intrav2_ || created_lowmem_ != params_.lowmem_parts_);
+                       created_intrav2_ != params_.intrav2_ ||
+                       created_interfast_ != (params_.interfast_ || params_.interfastlists_) ||
+                       created_lowmem_ != params_.lowmem_parts_);
   if (initialized_ && (need_reinit_ || other_decoder)) DestroyDecoder();
   // Creates the decoder for dec_width x dec_height, dec_bitdepth and the stream info in si. |new_sequence|:
   // the decoder replaces the one of this task in the middle of the stream (a new sequence that did not fit
@@ -342,6 +344,8 @@ int AV1Decoder::DecodeOne() {
       // -lowmemparts leave some out or make them smaller. The player always says which parts it wants: 0 in
       // the configuration would be the library's default (the shared back buffer), not "none".
       cfg.intra_v2 = params_.intrav2_ ? 1 : 0;
+      // -interfast: room in the block maps for the lists by motion vector class.
+      cfg.inter_fast = (params_.interfast_ || params_.interfastlists_) ? 1 : 0;
       cfg.low_memory = params_.lowmem_parts_ ? params_.lowmem_parts_ : AV1_LOW_MEMORY_NONE;
       // Budget guard: the decoder refuses a creation, and later a palette buffer, that does not fit what
       // the app has left. The output pool takes its textures on the first frame; until then they are held
@@ -409,6 +413,7 @@ int AV1Decoder::DecodeOne() {
       created_height_ = dec_height;
       created_bitdepth_ = dec_bitdepth;
       created_intrav2_ = params_.intrav2_;
+      created_interfast_ = params_.interfast_ || params_.interfastlists_;
       created_lowmem_ = params_.lowmem_parts_;
     } catch (int error) {
       XB_LOGE << "Unable to create decoder. Error " << error;
@@ -487,6 +492,17 @@ int AV1Decoder::DecodeOne() {
   XB_LOGI << "Intra shaders: "
           << (params_.intrav2_ ? "intra_v2 (-intrav2; frames with intra block copy keep the original shaders)"
                                : "intra_main + intra_filter (original)");
+  // -interfast: the same rules. The decoder was created with room for the lists (cfg.inter_fast above).
+  // -interfastlists: the same lists, the original shaders on every one of them (what the lists alone cost).
+  av1_set_inter_fast(params_.interfastlists_ ? AV1_INTER_FAST_LISTS_ONLY
+                                              : params_.interfast_ ? AV1_INTER_FAST_ON : 0);
+  XB_LOGI << "Inter shaders: "
+          << (params_.interfastlists_
+                  ? "lists by motion vector class, inter_main and inter_compound on them (-interfastlists; "
+                    "frames with a scaled reference keep the original lists)"
+                  : params_.interfast_ ? "by motion vector class: inter_fast, inter_compound_fast (-interfast; "
+                                         "frames with a scaled reference keep the original shaders)"
+                                       : "inter_main, inter_compound (original)");
   // -intraopt: which build of the original intra_main shader runs; independent of the two flags above.
   av1_set_intra_opt(params_.intraopt_ ? 1 : 0);
   XB_LOGI << "Intra main shader: "

@@ -954,3 +954,202 @@ formats. DXIL signed by DXC 1.9 is accepted.
   registers, and shaders can rely on waves of 64 (and should still not assume them).
 - So a move to DXC/SM 6.0-6.4 would bring wave reductions, broadcasts and ballots (useful for the CFL and
   DC sums, the CDEF direction search, compaction of block lists) but not packed 16-bit throughput.
+
+## Inter prediction: breakdown and fast paths (2026-11-12)
+
+### What the console measured
+
+Package 0.2.36.0, `-gputimedetail` and `-gputimeisolate`
+([test-player.md](test-player.md#inter-prediction-breakdown--gputimedetail--gputimeisolate)), 4K 10-bit, 300 frames
+per clip. Times are per frame.
+
+| Clip | GPU busy | inter | inter by section | fetches without a fraction | x only | y only | both | reference bytes loaded per byte written |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| SVT low-delay, 40 Mbps | 32 ms | 7.4 ms | single 100% | 67.9% | 14.6% | 14.2% | 3.3% | 8.2x |
+| SVT random access, 12.6 Mbps | 35 ms | 11.2 ms | single 47%, comp_avg 52% | 68.0% | 13.7% | 13.5% | 4.9% | 19.8x |
+| Jellyfin, 40 Mbps | 49 ms | 17.3 ms | single 94% | 60.4% | 19.4% | 17.2% | 3.0% | 8.5x |
+| Chimera with film grain (libaom, 8 tiles) | 68 ms | 47.1 ms | comp_avg 40%, difference weighted 22% (comp_diff_y 12.8 + comp_diff_uv 9.3), single 23%, OBMC 10% | 38.1% | 10.4% | 16.9% | 34.7% | 16.8x |
+
+- Every stream asks for the 8-tap (regular) kernels for 100% of its area. The fractions are those of
+  the motion vector of a reference fetch, by luma area.
+- A sample of a small block costs 5 to 9 times what a sample of a large block costs (Jellyfin clip,
+  `-gputimeisolate`: 4x4 10.3 ns, 8x8 9.9, 16x16 6.9, 32x32 2.3, 64x64 1.2 ns per sample).
+- The shaders load 75 to 400 MB of reference per frame for 8 to 24 MB written, at only a few GB/s. The
+  stage is bound by the latency and the count of its loads and by the arithmetic behind them, not by
+  memory bandwidth.
+- 24 fps needs at most 41.7 ms of GPU per frame. Three of the four clips are near or over it with inter
+  as a large part.
+
+### What the original shaders do with every block
+
+`inter_main` (one reference; a thread predicts 4x4 samples) loads 11 rows of 11 samples around its 4x4
+and runs both 8-tap passes: `filter_line()` along each of the 11 rows, then a vertical sum of 8 rows per
+output row. `inter_compound` (two references; a thread predicts 4x2) does the same with 9 rows of each
+reference and keeps four more bits per reference for the blend. Neither looks at the motion vector: a
+vector without a fraction selects the kernel `{0, 0, 0, 128, 0, 0, 0, 0}`, which every filter type has at
+fraction 0, and the two passes then multiply the sample by 128 twice and round it back. Two thirds of
+the fetches of three of the clips are of that kind.
+
+### The fast path (`-interfast`)
+
+Off by default. `av1_set_inter_fast()` and `aom_codec_dec_cfg_t::inter_fast` in the library, `-interfast`
+in the test player and in `warp_decoder`; `-interfastlists` keeps the original shaders on the new lists, to
+tell what the lists do from what the kernels do. Without the flag the block lists, the dispatches and the
+pipeline states that run are the ones that always ran (five more pipeline states are created at
+launch).
+
+**Classes.** A reference fetch has a class by the fraction of its motion vector, in the plane it is for
+(1/8 sample for luma, 1/16 for chroma, so the chroma of a block can have another class than its luma):
+
+| Class | Fraction | What it needs |
+| --- | --- | --- |
+| 0 `copy` | none | the samples |
+| 1 `h` | in x only | one 8-tap pass along the row |
+| 2 `v` | in y only | one 8-tap pass down the column |
+| 3 `2d` | both | the two passes of the original shaders |
+
+**Lists.** The classes are separated where the block lists are built, not inside a shader. A group of
+64 threads is one wave on the console and runs in lockstep, so a branch that the threads of a group take
+differently costs the group every side of it; with 4x4 and 8x8 blocks a group holds 16 to 64 blocks, and
+those are the expensive ones. On a frame that takes the path, the blocks that would go to the lists
+`CasualInter` (one reference, not warped) and `CompoundAvrg` (two references, averaged or distance
+weighted) are counted by the tile threads (`av1_mi_push_block`) into lists by class and block size
+instead: 4 classes times 24 sizes for one reference, 16 pairs of classes times 24 sizes for two. The lists
+live in a block map of their own per tile behind the existing ones (1984 bytes per tile the decoder size
+can have, one per 64x64, and pipeline slot: 1.0 MiB per slot at 1080p, 3.9 MiB at 4K; only in a decoder
+created for the path), `av1_prediction_gen_blocks` gives them their place in
+`prediction_blocks` behind the lists by type, and `gen_pred_blocks_fast.hlsl` (`gen_pred_blocks.hlsl`
+built with `INTER_FAST`: one more root constant, the class from the record's vector) writes the same
+16-byte records into them. `gen_pred_blocks.hlsl` itself compiles to the bytecode it had.
+
+**Dispatch.** One dispatch per class (or pair) and block size, in pass 1 behind `comp_masked`. The class
+goes to the shader in bits 8 and up of the `width_log2` root constant, so the choice of path is the same
+for every thread of a dispatch: three `if` in the listing of `inter_fast`, three per reference in
+`inter_compound_fast`, taken the same way by the whole wave. The list of class 3 runs `inter_main`, the
+list of the pair (3, 3) runs `inter_compound`.
+
+**Not on the path**, and exactly as before: frames with a scaled reference (all their blocks go through
+`inter_scale_*`), warped blocks, wedge and difference weighted compound blocks, OBMC, and the chroma of
+blocks under 8x8 (`inter_2x2chroma`).
+
+### The kernels and why they are exact
+
+`p` is a reference sample, `S` a plain sum of 8 taps times samples (the taps sum to 128), `b` is 14 for
+8-bit and 16 for 10-bit frames.
+
+*One reference.* `filter_line()` returns `l = (S + 4 + 2^b) >> 3 = ((S + 4) >> 3) + 2^(b-3)`; for
+fraction 0, `S = 128 p` and `l = 16 p + 2^(b-3)` exactly. `inter_main` then forms `V = sum of tap * l`
+over 8 rows and outputs `clamp(((V + 2^(b+5) + 1024) >> 11) - 2^(b-6) - 2^(b-7))` (8-bit: the `2^19` its
+sums start from; 10-bit: the `2^21` in its rounding term).
+
+| Class | What `inter_main` computes | `inter_fast` |
+| --- | --- | --- |
+| copy | `l = 16 p + 2^(b-3)`, `V = 128 l`: the brackets come to `p + 2^(b-6) + 2^(b-7)`, so the output is `p` | `p` |
+| h | `V = 128 l`: `((l + 8) >> 4) - 2^(b-7)`, which is `(((S + 4) >> 3) + 8) >> 4` | `filter_line()` unchanged, then `(l + 8 - 2^(b-3)) >> 4` |
+| v | every `l` is `16 p + 2^(b-3)`, so `V = 16 S + 128 * 2^(b-3)` and the output is `(S + 64) >> 7` | `(S + 64) >> 7` |
+
+These are libaom's `av1_convolve_2d_copy_sr`, `av1_convolve_x_sr` (`round_0 = 3`, then 4 more bits) and
+`av1_convolve_y_sr` (`FILTER_BITS = 7`). All shifts are arithmetic and no term overflows 32 bits (a tap
+is under 2^8 in magnitude, a sample under 2^16).
+
+*Two references.* `inter_compound` blends `src = (V + 64 + 2^(b+5)) >> 7` of each reference:
+`(((src0 * w0 + src1 * w1) >> 4) - OutputSub + 8) >> 4`, with `OutputSub = 2^(b-2) + 2^(b-3)` (6144 and
+24576). `inter_compound_fast` blends with the same expression and takes `src` per reference from its
+class:
+
+| Class | `src` |
+| --- | --- |
+| copy | `16 p + OutputSub` |
+| h | `((S + 4) >> 3) + OutputSub`, as `l + OutputSub - 2^(b-3)` from `filter_line()` |
+| v | `((S + 4) >> 3) + OutputSub` (the vertical sum is `16 S + 128 * 2^(b-3)`; `(16 S + 64) >> 7 = (S + 4) >> 3`) |
+| 2d | `(V + 64 + 2^(b+5)) >> 7`, the original expression |
+
+The positions are those of the original shaders: the same clamp of the first column to `[-11, width - 1]`
+and of every row to `[0, height - 1]`; a pass that is left out reads the sample under tap 3 of the pass
+that would have run.
+
+**What a thread loads** (bytes of one row times rows; a row of 4 samples is one load of 8 bytes, or two
+loads of 8 bytes for 16-bit samples, a row of 11 samples is 16 or 24 bytes as in `filter_line()`):
+
+| | original | copy | h | v |
+| --- | --- | --- | --- | --- |
+| one reference, 4x4, 10-bit | 11 x 24 = 264 | 4 x 16 = 64 | 4 x 24 = 96 | 11 x 16 = 176 |
+| one reference, 4x4, 8-bit | 11 x 16 = 176 | 4 x 8 = 32 | 4 x 16 = 64 | 11 x 8 = 88 |
+| per reference of a compound 4x2, 10-bit | 9 x 24 = 216 | 2 x 16 = 32 | 2 x 24 = 48 | 9 x 16 = 144 |
+| per reference of a compound 4x2, 8-bit | 9 x 16 = 144 | 2 x 8 = 16 | 2 x 16 = 32 | 9 x 8 = 72 |
+
+`copy` and `h` load the rows they write and no others; `v` keeps its rows and loads them narrower.
+
+**Shaders** (FXC, `cs_5_0`; instruction slots and temp registers of the listings):
+
+| Shader | Slots | Temps | For comparison |
+| --- | --- | --- | --- |
+| `inter_fast` | 676 | 20 | `inter_main` 691, 14 |
+| `inter_fast_hbd` | 625 | 23 | `inter_main_hbd` 707, 14 |
+| `inter_compound_fast` | 1729 | 22 | `inter_compound` 1016, 15 |
+| `inter_compound_fast_hbd` | 1743 | 28 | `inter_compound_hbd` 1041, 16 |
+| `gen_pred_blocks_fast` | 1557 | 23 | `gen_pred_blocks` 1522, 23 |
+
+The counts are static: a listing of a fast shader has every class, a thread runs one. No group memory,
+no group sync, no loop. The 16-bit row of four samples is put together from two loads one word apart,
+because shifting three loaded words in place compiled to the pair of instructions the listings scan
+refuses ([A paired read before an overlapping in-place write](#a-paired-read-before-an-overlapping-in-place-write-2026-11-12));
+the scan passes on all five.
+
+### Shared loading: not done
+
+The other idea, loading the footprint of a block of 16x16 or more once per thread group into group
+memory and filtering from there, is not in this prototype:
+
+- With the classes, `copy` and `h` have nothing left to share between rows: a thread loads only the rows
+  it writes. What neighbours still load twice is in `v` and `2d` (7 of a thread's 11 rows are also its
+  vertical neighbour's) and the 7 of 11 samples two `h` threads side by side have in common.
+- It is not a variant of these shaders. A group has to hold whole blocks and their margins in group
+  memory (a 16x16 block with margins is 23x23 samples, four of them per group; a 64x64 block spans four
+  groups), with a group sync between loading and filtering and a thread layout per block size.
+- Whether it is worth that is what the per-class times of the console run say: `single.v`, `single.2d`
+  and the `comp_avg` pairs with a `v` or a `2` by block size (`-gputimeisolate`).
+
+Small blocks are already predicted many per group (64 blocks of 4x4, in decode order, so neighbours
+share a group); several blocks per group gain nothing further without group memory.
+
+### Proof of equality
+
+- **Host check** (`testing/inter_check`, a job of the workflow): the four fast shaders and the four
+  original ones compiled as C++, generated frames laid out like the frame pool, records sorted into lists
+  with `inter_fast_class()` taken from `gen_pred_blocks.hlsl`. Every frame is predicted by libaom's
+  `av1_make_inter_predictor`, by the original shaders, and the way the fast path dispatches it; the three
+  pools must be byte identical. Covered, and checked to be covered: all 22 block sizes with every class
+  (luma and chroma), every pair of classes for two references, all 16x16 fractions of a vector with all
+  16 pairs of the four filters, distance weights, residuals, samples at both ends of the range, vectors
+  up to 168 samples outside the frame on every side, 8-bit and 10-bit; 232 frames, 68338 block records.
+  The class the host counts a block into is compared with the class the shader takes from the record for
+  1.3 million vectors. Seventeen mutated copies (a rounding term, a tap, a row, a column, an edge clamp,
+  the fourth sample of a row, the class or the frame of the second reference, the class of a vector with
+  half a sample) are all rejected.
+- **Conformance** (the gate of the feature, on every push): the conformance job decodes the whole set
+  on WARP once more with `-interfast` and must get the results of `expected.txt`: 251 of 251. The smoke
+  test of the timing run decodes three streams with `-gputimedetail -interfast` and with `-gputimedetail
+  -interfastlists` and checks that the sections by class are there, that no block went the original way on
+  a frame without scaled references, and that the dispatches and the tile threads agree on every frame.
+- **Frame dumps on WARP** (`-dumpstages`, a 10-bit 1080p cut with four tiles, warped blocks and OBMC): the
+  block records of a frame are the same set with and without the flag, and the frame behind the inter
+  stage and behind every later stage is byte identical, with the new kernels and with the original shaders
+  on the lists.
+- The first run of the gate failed, and not because of the path: the two 10-bit 1080p cuts lost the D3D12
+  device, as streams on WARP did now and then before. The cause was a load outside a buffer in
+  `reconstruct_block`, which the larger block map of the path made fatal every time; it is fixed
+  ([warp-decoder.md](warp-decoder.md), "The D3D12 device is removed").
+
+### Timing attribution
+
+With the flag the sections `single` and `comp_avg` of the breakdown are replaced by `single.copy`,
+`single.h`, `single.v`, `single.2d` and by `comp_avg.<class of reference 0><class of reference 1>` with
+the letters `c`, `h`, `v`, `2` (`comp_avg.cc` to `comp_avg.22`), each with its own time, block counts,
+dispatch lines by block size and loaded bytes. `single.2d` and `comp_avg.22` are the original shaders on
+the lists of that class.
+
+### Console results
+
+Pending. The run: per clip a `-gputimedetail` pair without and with `-interfast`, and an md5 check with
+`-interfast` in a launch of its own ([test-player.md](test-player.md#inter-fast-path--interfast)).

@@ -316,6 +316,10 @@ def main():
             lost = device_removed(result) or result.before_device_loss
             if alone.same_outcome(result) and not lost_alone:
                 result.note = 'the same alone'
+            elif alone.same_outcome(result) and device_removed(alone) and device_removed(result):
+                # Every run of the stream ended the same way and lost the device: that is the stream's
+                # result, not the chance loss of one run.
+                result.note = 'the same in %d more runs alone, the D3D12 device lost in every one' % (lost_alone + 1)
             elif (lost or lost_alone) and not device_removed(alone):
                 # The device was lost while the stream was decoded (or right after it, with wrong frames
                 # before): now and then a stream loses the D3D12 device on WARP, another one from run to run,
@@ -330,7 +334,8 @@ def main():
                 alone.first_in_process = True
                 results[name] = alone
             else:
-                result.detail = 'after other streams: %s (%s); alone: %s (%s)' % (
+                result.detail = '%s: %s (%s); alone: %s (%s)' % (
+                    'first in its process' if result.first_in_process else 'after other streams',
                     result.outcome(), result.detail, alone.outcome(), alone.detail)
                 result.status = 'unstable'
     total_s = time.time() - started

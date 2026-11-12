@@ -47,6 +47,7 @@ extern "C" {
 #include "dx/shaders/h/idct_sort_blocks.h"
 #include "dx/shaders/h/fill_buffer.h"
 #include "dx/shaders/h/gen_pred_blocks.h"
+#include "dx/shaders/h/gen_pred_blocks_fast.h"
 #include "dx/shaders/h/loop_restoration.h"
 #include "dx/shaders/h/cdef_filter.h"
 #include "dx/shaders/h/cdef_filter_v2.h"
@@ -60,6 +61,8 @@ extern "C" {
 #include "dx/shaders/h/inter_2x2chroma.h"
 #include "dx/shaders/h/inter_2x2chroma_hbd.h"
 #include "dx/shaders/h/inter_compound.h"
+#include "dx/shaders/h/inter_compound_fast.h"
+#include "dx/shaders/h/inter_compound_fast_hbd.h"
 #include "dx/shaders/h/inter_compound_2x2.h"
 #include "dx/shaders/h/inter_compound_2x2_hbd.h"
 #include "dx/shaders/h/inter_compound_diff_chroma.h"
@@ -71,6 +74,8 @@ extern "C" {
 #include "dx/shaders/h/inter_compound_masked_hbd.h"
 #include "dx/shaders/h/inter_ext_borders.h"
 #include "dx/shaders/h/inter_ext_borders_hbd.h"
+#include "dx/shaders/h/inter_fast.h"
+#include "dx/shaders/h/inter_fast_hbd.h"
 #include "dx/shaders/h/inter_main.h"
 #include "dx/shaders/h/inter_main_hbd.h"
 #include "dx/shaders/h/inter_obmc_above.h"
@@ -221,6 +226,8 @@ void* av1_create_pipeline_cache_handle(void* d3d12device, int threads) {
   err |= (shader_lib->sig_common0110 = create_root_sig(_device, 0, 1, 1, 0)) == NULL;
   err |= (shader_lib->sig_copy_plane = create_root_sig(_device, 0, 1, 0, 6)) == NULL;
   err |= (shader_lib->sig_pred_blocks = create_root_sig(_device, 5, 2, 1, 7)) == NULL;
+  // gen_pred_blocks_fast.hlsl (-interfast): one more root constant in b1.
+  err |= (shader_lib->sig_pred_blocks_fast = create_root_sig(_device, 5, 2, 1, 8)) == NULL;
   err |= (shader_lib->sig_intra_pred = create_root_sig(_device, 3, 1, 1, 10)) == NULL;
   // intra_v2.hlsl: t0..t4, u0, b0 and 8 root constants in b1.
   err |= (shader_lib->sig_intra_v2 = create_root_sig(_device, 5, 1, 1, 8)) == NULL;
@@ -277,6 +284,14 @@ void* av1_create_pipeline_cache_handle(void* d3d12device, int threads) {
 
       {_device, gen_pred_blocks, sizeof(gen_pred_blocks), shader_lib->sig_pred_blocks.Get(),
        &shader_lib->shader_gen_pred_blocks},
+      {_device, gen_pred_blocks_fast, sizeof(gen_pred_blocks_fast), shader_lib->sig_pred_blocks_fast.Get(),
+       &shader_lib->shader_gen_pred_blocks_fast},
+      {_device, inter_fast, sizeof(inter_fast), shader_lib->sig_inter_pred.Get(), &s8->inter_fast},
+      {_device, inter_compound_fast, sizeof(inter_compound_fast), shader_lib->sig_inter_pred.Get(),
+       &s8->inter_comp_fast},
+      {_device, inter_fast_hbd, sizeof(inter_fast_hbd), shader_lib->sig_inter_pred.Get(), &hbd->inter_fast},
+      {_device, inter_compound_fast_hbd, sizeof(inter_compound_fast_hbd), shader_lib->sig_inter_pred.Get(),
+       &hbd->inter_comp_fast},
       {_device, gen_lf_blocks_vert, sizeof(gen_lf_blocks_vert), shader_lib->sig_lf_gen.Get(),
        &shader_lib->shader_gen_lf_vert},
       {_device, gen_lf_blocks_hor, sizeof(gen_lf_blocks_hor), shader_lib->sig_lf_gen.Get(),

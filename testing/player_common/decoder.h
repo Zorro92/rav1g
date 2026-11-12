@@ -358,6 +358,7 @@ class AV1Decoder {
   // A decoder was destroyed since the last creation: the next creation settles first (SettleAppMemory).
   bool settle_pending_ = false;
   bool created_intrav2_ = false;
+  bool created_interfast_ = false;
   int created_lowmem_ = 0;
   perfstats::PerfStats perf_stats_;
   std::mutex perf_cs_;

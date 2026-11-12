@@ -223,6 +223,11 @@ def report(listings):
            'scale (the model has the count for a reference of the frame\'s size).', '',
            '| ' + ' | '.join(HEAD) + ' |', '|' + '---|' * len(HEAD)]
     out += ['| ' + ' | '.join(cells) + ' |' for cells in rows]
+    out += ['', 'No model columns for `inter_fast` and `inter_compound_fast` (test flag -interfast): a listing has '
+            'the loads of every motion vector class, and a thread runs one of them. Per thread and reference, rows '
+            'x bytes of a row, 8-bit / 10-bit: copy 4 x 8 / 4 x 16, h 4 x 16 / 4 x 24, v 11 x 8 / 11 x 16 for '
+            '`inter_fast` (a thread writes 4x4); copy 2 x 8 / 2 x 16, h 2 x 16 / 2 x 24, v 9 x 8 / 9 x 16, 2d 9 x 16 '
+            '/ 9 x 24 for `inter_compound_fast` (4x2, two references, each of its own class).']
     out += ['', '## How a thread maps to samples and reads its references', '']
     for name in sorted(MODEL):
         model = MODEL[name]

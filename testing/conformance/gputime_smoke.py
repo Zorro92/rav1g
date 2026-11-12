@@ -5,9 +5,11 @@
                                               --stream <name>[:<temporal units>[:scaled]] [--stream ...]
                                               [--threads N]
 
-<dir> of --streams is what testing/conformance/prepare_streams.sh wrote. Each stream is decoded three times,
-with its reference check: with -gputime, with -gputimedetail and with -gputimeisolate. The times of a
-software rasterizer say nothing about a GPU and are not looked at beyond being there. What is checked:
+<dir> of --streams is what testing/conformance/prepare_streams.sh wrote. Each stream is decoded five times,
+with its reference check: with -gputime, with -gputimedetail, with -gputimeisolate, with -gputimedetail
+-interfast (the inter blocks by motion vector class) and with -gputimedetail -interfastlists (the same lists,
+the original shaders on them). The times of a software rasterizer say nothing about a GPU and are not looked
+at beyond being there. What is checked:
 
   - every run decodes the stream as its reference says (the barriers of -gputimeisolate change no sample);
   - the plain -gputime summary has no line of the breakdown;
@@ -19,7 +21,13 @@ software rasterizer say nothing about a GPU and are not looked at beyond being t
     loaded are not less than the footprint, the footprint by motion vector is not more than the footprint
     and not less than what is written;
   - the counters of the detail run and of the isolate run are the same (they do not depend on the mode);
-  - a stream given with ":scaled" has frames with scaled references, listed as <section>/scaled.
+  - a stream given with ":scaled" has frames with scaled references, listed as <section>/scaled;
+  - with -interfast and with -interfastlists the sections single and comp_avg are listed by class
+    (single.copy, comp_avg.ch, ...) and not at all without one, except for frames with scaled references,
+    which keep the original path (a stream whose inter frames all have scaled references has no section by
+    class); with -interfast the reference bytes loaded are not less than the footprint by motion vector
+    (they are less than the footprint: that is the point), with -interfastlists not less than the footprint;
+    the block statistics are those of the run without the flag.
 
 Written to --out: <stream>.<mode>.log, and summary.md with the breakdown of every run (also appended to
 $GITHUB_STEP_SUMMARY when that is set). Exit code 1 when a check fails, 2 when a run could not be done.
@@ -30,14 +38,16 @@ import re
 import subprocess
 import sys
 
-MODES = (('gputime', '-gputime'), ('detail', '-gputimedetail'), ('isolate', '-gputimeisolate'))
+MODES = (('gputime', '-gputime'), ('detail', '-gputimedetail'), ('isolate', '-gputimeisolate'),
+         ('fast', '-gputimedetail -interfast'), ('lists', '-gputimedetail -interfastlists'))
+BY_CLASS = ('fast', 'lists')  # the modes that list single and comp_avg by motion vector class
 
 
 def gputime_lines(text):
     return [line[len('GPUTIME '):] for line in text.splitlines() if line.startswith('GPUTIME ')]
 
 
-def check_run(name, mode, text, area_mpx, scaled, problems):
+def check_run(name, mode, text, area_mpx, scaled, problems, plain_expected=True):
     """The checks of one run. Returns the counter lines of the breakdown, for the comparison between modes."""
     def bad(what):
         problems.append('%s, %s: %s' % (name, mode, what))
@@ -97,12 +107,28 @@ def check_run(name, mode, text, area_mpx, scaled, problems):
                                 r'samples written ([\d.]+) MB', stage[0])
     if match:
         loaded, foot, foot_mv, written = (float(x) for x in match.groups())
-        if not (loaded >= foot >= foot_mv >= written > 0.0):
+        if mode == 'fast':
+            if not (foot >= foot_mv >= written > 0.0 and loaded >= foot_mv):
+                bad('footprint >= footprint by motion vector >= written, loaded >= footprint by motion vector does '
+                    'not hold: %s' % stage[0])
+        elif not (loaded >= foot >= foot_mv >= written > 0.0):
             bad('loaded >= footprint >= footprint by motion vector >= written does not hold: %s' % stage[0])
     else:
         bad('no line of the bytes of the stage')
     if not any(re.match(r'frame \d+ inter mode=%d ' % (2 if mode == 'isolate' else 1), line) for line in lines):
         bad('no per-frame line of the breakdown')
+    # -interfast: the sections by class, and none of the two they replace outside frames with scaled references.
+    by_class = [line for line in lines if re.match(r'inter (single\.(copy|h|v|2d)|comp_avg\.[chv2]{2}) ', line)]
+    plain = [line for line in lines if re.match(r'inter (single|comp_avg) ', line)]
+    if mode in BY_CLASS:
+        # A stream whose inter frames all have scaled references never takes the path: by class only what
+        # the run without the flag lists as single or comp_avg outside such frames (plain_expected).
+        if plain_expected and not by_class:
+            bad('-interfast: no section by motion vector class')
+        if plain:
+            bad('-interfast: a section that is not by class on a frame without scaled references: %s' % plain[0])
+    elif by_class:
+        bad('a section by motion vector class without -interfast: %s' % by_class[0])
     # What does not depend on the mode: the work table without its last two columns (from the times), the
     # block lines, and the dispatch lines without their times.
     work = [' '.join(line.split()[:14]) for line in lines if re.match(r'inter \S+ +\d+ +[\d.]+ +\d+ +[\d.]+ +\d+ ', line)]
@@ -144,8 +170,9 @@ def main():
             print('ERROR %s is not a stream of the manifest' % name)
             return 2
         counters = {}
+        has_plain = True
         for mode, flag in MODES:
-            command = [tool] + manifest[name] + ['-t', str(args.threads), flag, '-progress']
+            command = [tool] + manifest[name] + ['-t', str(args.threads)] + flag.split() + ['-progress']
             if limit:
                 command += ['-limit', limit]
             run = subprocess.run(command, cwd=args.streams, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -157,7 +184,11 @@ def main():
             size = re.search(r'TASK \S+: stream (\d+)x(\d+)', text)
             # A block at the right or the lower edge is predicted whole: room for a superblock more each way.
             area = (int(size.group(1)) + 128) * (int(size.group(2)) + 128) / 1e6 if size else 0.0
-            counters[mode] = check_run(name, mode, text, area, expect == 'scaled', problems)
+            if mode == 'detail':
+                # The run without the flag: does it have single or comp_avg blocks on frames without scaled references?
+                has_plain = any(re.match(r'inter (single|comp_avg) ', line) for line in gputime_lines(text))
+            counters[mode] = check_run(name, mode, text, area, expect == 'scaled', problems,
+                                       has_plain if mode in BY_CLASS else True)
             lines = gputime_lines(text)
             shown = [line for line in lines if line.startswith(('-- inter', 'inter ', 'list ', 'excl', 'is from', 'isolate',
                                                                  'timestamps added', 'gpu inter', 'gpu recon'))]
@@ -170,6 +201,15 @@ def main():
             differing = [a for a, b in zip(counters['detail'], counters['isolate']) if a != b][:1]
             problems.append('%s: the counters of -gputimedetail and -gputimeisolate differ%s' % (
                 name, ': ' + differing[0] if differing else ' in their number of lines'))
+        # The blocks of the stream do not depend on how they are listed.
+        stream_lines = [[line for line in counters.get(mode, [])
+                         if line.startswith(('inter blocks per frame', 'inter reference fetches', 'inter filter'))]
+                        for mode in ('detail',) + BY_CLASS]
+        for mode, other in zip(BY_CLASS, stream_lines[1:]):
+            if stream_lines[0] != other:
+                differing = [a for a, b in zip(stream_lines[0], other) if a != b][:1]
+                problems.append('%s: the block statistics of -gputimedetail and of the %s run differ%s' % (
+                    name, mode, ': ' + differing[0] if differing else ' in their number of lines'))
     summary += ['Checks: ' + ('all passed.' if not problems else '%d failed.' % len(problems)), '']
     summary += ['- ' + problem for problem in problems]
     text = '\n'.join(summary) + '\n'

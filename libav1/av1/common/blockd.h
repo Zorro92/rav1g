@@ -454,6 +454,10 @@ typedef struct
     int gen_iter_clear_size;
     int gen_block_map_offset;
     int gen_block_warp_offset;
+    // Test flag -interfast (dx/types.h, InterFastLists): the tile's lists by motion vector class and
+    // where they are in the block map; NULL on a frame that does not take the fast path.
+    int * gen_block_map_fast;
+    int gen_block_fast_offset;
     int mi_offset;
     int mi_count;
     int mi_col_start;

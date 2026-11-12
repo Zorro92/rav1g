@@ -540,6 +540,9 @@
     <ClInclude Include="..\dx\shaders\inter_common.h">
       <Filter>dx\shaders</Filter>
     </ClInclude>
+    <ClInclude Include="..\dx\shaders\inter_fast_common.h">
+      <Filter>dx\shaders</Filter>
+    </ClInclude>
     <ClInclude Include="..\dx\types.h">
       <Filter>dx</Filter>
     </ClInclude>
@@ -725,6 +728,21 @@
       <Filter>dx\shaders</Filter>
     </FxCompile>
     <FxCompile Include="..\dx\shaders\intra_main_opt.hlsl">
+      <Filter>dx\shaders</Filter>
+    </FxCompile>
+    <FxCompile Include="..\dx\shaders\gen_pred_blocks_fast.hlsl">
+      <Filter>dx\shaders</Filter>
+    </FxCompile>
+    <FxCompile Include="..\dx\shaders\inter_fast.hlsl">
+      <Filter>dx\shaders</Filter>
+    </FxCompile>
+    <FxCompile Include="..\dx\shaders\inter_fast_hbd.hlsl">
+      <Filter>dx\shaders</Filter>
+    </FxCompile>
+    <FxCompile Include="..\dx\shaders\inter_compound_fast.hlsl">
+      <Filter>dx\shaders</Filter>
+    </FxCompile>
+    <FxCompile Include="..\dx\shaders\inter_compound_fast_hbd.hlsl">
       <Filter>dx\shaders</Filter>
     </FxCompile>
     <FxCompile Include="..\dx\shaders\copy_plane.hlsl">

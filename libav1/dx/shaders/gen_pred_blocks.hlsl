@@ -157,7 +157,23 @@ cbuffer GenBlockSRT : register(b1) {
   uint cb_row_srart;
   uint cb_index_offset;
   uint cb_index_offset_warp;
+#ifdef INTER_FAST
+  uint cb_index_offset_fast;
+#endif
 };
+
+#ifdef INTER_FAST
+// Test flag -interfast (gen_pred_blocks_fast.hlsl; docs/gpu-av1-decoder.md, "Inter prediction: breakdown and
+// fast paths"). The blocks with one reference that are not warped, and the compound blocks that are
+// averaged or distance weighted, are listed by the fraction of their motion vectors instead of by their
+// type: InterFastLists lists at cb_index_offset_fast of the block map, laid out as av1_mi_push_block()
+// counts them (dx/types.h):
+//   class * InterSizesAllCommon + size                                         one reference, class 0..3
+//   InterFastCompound + (class0 | class1 << 2) * InterSizesAllCommon + size    two references
+// The class of a vector as the block record has it (1/16 sample): 1 a fraction in x, 2 a fraction in y.
+#define InterFastCompound 96
+int inter_fast_class(uint mv) { return (((mv >> 16) & 15) != 0 ? 1 : 0) | ((mv & 15) != 0 ? 2 : 0); }
+#endif
 
 int intra_edge_filter_strength(int blk_wh, int d, int type) {
   int strength = 0;
@@ -287,7 +303,16 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
       const int pass_type = is_warp_compound ? 5 : ((0x3422 >> (comp_type * 4)) & 15);
       int pass_type_index = (pass_type - 1) * InterSizesAllCommon + block_size_id_y;
 
+#ifdef INTER_FAST
+      int list_addr = cb_index_offset + pass_type_index;
+      if (pass_type == CompoundAvrg)
+        list_addr = cb_index_offset_fast + InterFastCompound +
+                    (inter_fast_class(block.z) | (inter_fast_class(block.w) << 2)) * InterSizesAllCommon +
+                    block_size_id_y;
+      int dst_ptr = blocks_index_base.Load(4 * list_addr) + blocks_indexes.Load(index_addr);
+#else
       int dst_ptr = blocks_index_base.Load(4 * (cb_index_offset + pass_type_index)) + blocks_indexes.Load(index_addr);
+#endif
       index_addr += 4;
       pred_blocks.Store4(dst_ptr * 16, block);
     } else {
@@ -323,7 +348,13 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
         block.z = (mi.mv[0] << 1) & 0xfffeffff;
         block.w = 0;
 
+#ifdef INTER_FAST
+        int dst_ptr = blocks_index_base.Load(4 * (cb_index_offset_fast + inter_fast_class(block.z) * InterSizesAllCommon +
+                                                  block_size_id_y)) +
+                      blocks_indexes.Load(index_addr);
+#else
         int dst_ptr = blocks_index_base.Load(4 * (cb_index_offset + block_size_id_y)) + blocks_indexes.Load(index_addr);
+#endif
         index_addr += 4;
         pred_blocks.Store4(dst_ptr * 16, block);
       }
@@ -470,8 +501,17 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
           const int pass_type =
               is_warp_compound ? (comp_type == COMPOUND_DIFFWTD ? 7 : 5) : ((0x6422 >> (comp_type * 4)) & 15);
           int pass_type_index = (pass_type - 1) * InterSizesAllCommon + block_size_id_uv;
+#ifdef INTER_FAST
+          int list_addr = cb_index_offset + pass_type_index;
+          if (pass_type == CompoundAvrg)
+            list_addr = cb_index_offset_fast + InterFastCompound +
+                        (inter_fast_class(block.z) | (inter_fast_class(block.w) << 2)) * InterSizesAllCommon +
+                        block_size_id_uv;
+          int dst_ptr = blocks_index_base.Load(4 * list_addr) + blocks_indexes.Load(index_addr);
+#else
           int dst_ptr =
               blocks_index_base.Load(4 * (cb_index_offset + pass_type_index)) + blocks_indexes.Load(index_addr);
+#endif
           index_addr += 4;
           dst_ptr *= 16;
           pred_blocks.Store4(dst_ptr, block);
@@ -516,8 +556,14 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
             block.z = mi.mv[0];
             block.w = 0;
 
+#ifdef INTER_FAST
+            int dst_ptr = blocks_index_base.Load(4 * (cb_index_offset_fast +
+                                                      inter_fast_class(block.z) * InterSizesAllCommon + block_size_id_uv)) +
+                          blocks_indexes.Load(index_addr);
+#else
             int dst_ptr =
                 blocks_index_base.Load(4 * (cb_index_offset + block_size_id_uv)) + blocks_indexes.Load(index_addr);
+#endif
             index_addr += 4;
             dst_ptr *= 16;
             pred_blocks.Store4(dst_ptr, block);

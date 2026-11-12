@@ -73,6 +73,15 @@ static int g_perf_detail = 0;
 
 extern "C" void av1_set_perf_detail(int mode) { g_perf_detail = mode < 0 ? 0 : mode > 2 ? 2 : mode; }
 
+// Test flag -interfast (dx/av1_perf.h, av1_set_inter_fast; dx/types.h, InterFastLists): inter blocks listed
+// and predicted by the fraction of their motion vectors. A frame takes the path while this is set, in a
+// decoder that was created with room for the lists by class in its block maps
+// (aom_codec_dec_cfg_t::inter_fast), unless it has a scaled reference (av1_setup_frame).
+static int g_inter_fast = 0;
+
+// |mode|: 0 off, or AV1_INTER_FAST_ON with the bits that keep the original shader on the lists by class.
+extern "C" void av1_set_inter_fast(int mode) { g_inter_fast = (mode & AV1_INTER_FAST_ON) ? (mode & 7) : 0; }
+
 static inline int64_t perf_now() {
   LARGE_INTEGER t;
   QueryPerformanceCounter(&t);
@@ -639,6 +648,7 @@ struct resource_config {
   int gpu_pipeline_depth;
   int enable_superres;
   int intra_v2;    // create the buffers of the -intrav2 path
+  int inter_fast;  // room in the block maps for the lists of the -interfast path
   int low_memory;  // AV1_LOW_MEMORY_*
 };
 
@@ -730,6 +740,8 @@ int av1_allocate_buffers(Av1Core *dec, av1_memory_manager_base *mem, const resou
   const int max_tiles = max_tile_cols * max_tile_rows;
 
   dec->pred_map_size = (256 + 32) * max_tiles + (mi_size >> 2) * 10;
+  // -interfast: the lists by motion vector class of every tile, behind the block maps as they always were.
+  dec->inter_fast_tiles = cfg.inter_fast ? max_tiles : 0;
   CHECK_RESULT(dec->prediction_blocks, mem->create_buffer(block_count_4x4 * 16 * 2, MemoryType::DeviceOnly, "prediction_blocks", -1), do_assign);
   CHECK_RESULT(dec->prediction_blocks_warp, mem->create_buffer(block_count_8x8 * 48, MemoryType::DeviceOnly, "prediction_blocks_warp", -1),
                do_assign);
@@ -766,7 +778,9 @@ int av1_allocate_buffers(Av1Core *dec, av1_memory_manager_base *mem, const resou
     CHECK_RESULT(td->gen_mi_block_indexes, mem->create_buffer(sizeof(int) * block_count_4x4 * 2, MemoryType::HostRW, "gen_mi_block_indexes", i),
                  do_assign);
     CHECK_RESULT(td->gen_intra_inter_grid, mem->create_buffer(grid_w * grid_h * 6, MemoryType::HostRW, "gen_intra_inter_grid", i), do_assign);
-    CHECK_RESULT(td->gen_block_map, mem->create_buffer(dec->pred_map_size * sizeof(int), MemoryType::HostRW, "gen_block_map", i),
+    CHECK_RESULT(td->gen_block_map,
+                 mem->create_buffer((dec->pred_map_size + dec->inter_fast_tiles * (int)InterFastMapSize) * sizeof(int),
+                                    MemoryType::HostRW, "gen_block_map", i),
                  do_assign);
     // Test player flag -intrav2 (intra_v2_sched.h): 8 bytes per 4x4 cell of luma and chroma, then the region
     // list, which cannot have more entries than there are cells; two words per 64x64 region on the host.
@@ -847,6 +861,7 @@ static void resource_config_from_cfg(resource_config *rcfg, const aom_codec_dec_
   rcfg->height = cfg->height;
   rcfg->gpu_pipeline_depth = frame_slots_from_cfg(cfg);
   rcfg->intra_v2 = cfg->intra_v2 != 0;
+  rcfg->inter_fast = cfg->inter_fast != 0;
   // 0 is the default (the shared back buffer); AV1_LOW_MEMORY_NONE is how an application asks for none.
   rcfg->low_memory = cfg->low_memory ? (cfg->low_memory & AV1_LOW_MEMORY_ALL) : AV1_LOW_MEMORY_DEFAULT;
   // Frame buffers in the pool. A buffer is out of the pool while the entropy decoder or a frame in flight
@@ -2139,6 +2154,8 @@ extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
     const WarpedMotionParams *gm = &cm->global_motion[i];
     td->gm_warp[i] = gm->wmtype > TRANSLATION && !gm->invalid && !(sf && av1_is_scaled(sf));
   }
+  // -interfast: not for a frame with a scaled reference, whose blocks all go through the inter_scale shaders.
+  td->inter_fast = (dec->inter_fast_tiles > 0 && !td->scale_enable) ? g_inter_fast : 0;
   av1_perf_add(dec, AV1_PERF_CPU_SETUP, perf_setup_start);
 }
 
@@ -2231,6 +2248,12 @@ extern "C" void av1_setup_macroblockd(AV1Decoder *pbi, AV1_COMMON *cm, ThreadDat
   t->gen_block_map_offset = t->gen_block_warp_offset + 32;
   t->gen_block_map = ((int *)td->gen_block_map->host_ptr) + t->gen_block_map_offset;
   t->gen_block_map_wrp = ((int *)td->gen_block_map->host_ptr) + t->gen_block_warp_offset;
+  // -interfast: the tile's lists by motion vector class, behind the block maps of all tiles.
+  if (td->inter_fast && tile_id < dec->inter_fast_tiles) {
+    t->gen_block_fast_offset = dec->pred_map_size + tile_id * (int)InterFastMapSize;
+    t->gen_block_map_fast = ((int *)td->gen_block_map->host_ptr) + t->gen_block_fast_offset;
+    memset(t->gen_block_map_fast, 0, sizeof(int) * InterFastMapSize);
+  }
   t->gen_intra_iter_y = -1;
   t->gen_intra_iter_uv = -1;
   t->have_inter = 0;

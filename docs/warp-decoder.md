@@ -83,6 +83,8 @@ warp_decoder -sm6test
 | `-name <text>` | what the `BEGIN` and `RESULT` lines call the stream (default: its file name) |
 | `-cdefv1`, `-nofitsize`, `-lowmemparts <n>`, `-lowmem`, `-slots <n>`, `-intrav2`, `-intraopt`, `-asyncclear` | as in the [test player](test-player.md#defaults-and-opt-out-flags) |
 | `-lfhsplit <n>`, `-intraedgefix` | the [experiments](test-player.md#experiments) of the test player; the conformance job runs the whole set with each, and with a decoder built with `/p:Rav1gUavSync=1` (the shaders of the uavsync package; the program prints `SHADERS uavsync`) |
+| `-interfast`, `-interfastlists` | the [inter fast path](test-player.md#inter-fast-path--interfast) of the test player: inter blocks listed by the fraction of their motion vectors (`inter_fast`, `inter_compound_fast`; with `-interfastlists` the original shaders on those lists), same output; the conformance job decodes the whole set once more with `-interfast` |
+| `-interfastmode <n>` | `av1_set_inter_fast(n)` for diagnosis: 1 is `-interfast`, +2 keeps `inter_main` on the lists of one reference, +4 `inter_compound` on those of two (7 is `-interfastlists`); 8 only makes room for the lists in the block maps and leaves the path off |
 | `-gputime`, `-gputimedetail`, `-gputimeisolate`, `-progress` | the [timing run](test-player.md#timing-run--gputime-and--nopresent) of the test player and its [inter breakdown](test-player.md#inter-prediction-breakdown--gputimedetail--gputimeisolate): the summary as `GPUTIME ...` lines on stdout, with `-progress` the per-frame lines too. On WARP the times are those of a CPU rasterizer; the counters are the stream's |
 | `-alllayers` | a stream with spatial layers: output the frame of every layer of a temporal unit (`AV1D_SET_OUTPUT_ALL_LAYERS`); the default is one frame per temporal unit, the highest layer it has. See [Layers and new sequences](test-player.md#layers-and-new-sequences) |
 | `-oppoint <n>` | a stream with layers: decode operating point n of its sequence header (`AV1D_SET_OPERATING_POINT`, default 0) |
@@ -298,6 +300,31 @@ every run so far, also in the three with upstream's shaders (runs 43092362685, 4
 465 MiB at that point and the machine has 13 GiB free (the `PROCESS` lines). **The cause is not
 known**, and it is the open problem of the run: whether it is WARP, the runner, or the decoder on
 a slow device has to be found out.
+
+**One cause found and removed (2026-11-12): a load outside the buffer that stands in for the
+palette buffer.** `reconstruct_block` (the residuals of OBMC blocks and of palette blocks) read
+`if (do_palette) palette_buf.Load2(...) else dst_frame.Load2(...)`, which FXC compiled to both
+loads and a select: every thread loaded from `palette_buf` at the frame offset of its row. A slot
+has a palette buffer only once a frame with screen content tools has used it; until then another
+buffer of the slot is bound there (`idct_blocks_unordered`, 16 bytes per 4x4 unit: 3 317 760
+bytes for a 1920x1152 decoder), and a frame with its borders is larger than that: 3 391 488
+bytes with 8-bit samples (the last rows of V are behind the buffer's end), twice that with 16-bit
+samples (everything below the middle of the frame). The value was never used, but on WARP a load
+behind the end of a buffer reads whatever memory is there, and when there is none the device is
+lost. That fits what was seen: the streams it hit were the cuts encoded with OBMC, at 720p and
+1080p, another one from run to run.
+
+How it was found: the first run with `-interfast` (43196198862) lost the device in the two
+10-bit 1080p cuts every time, also alone. Frame dumps showed the frame before the loss byte
+identical with and without the flag, and only making room for the lists of the flag without
+using them (`-interfastmode 8`, 1 MiB more in one buffer of a slot) gave the same loss: the
+layout of the process, not the new path. With the debug layer and GPU-based validation
+(`-debuglayer -gpuvalidation`, which makes such a load harmless and reports it) the stream
+passed, 30 of 30 frames, with over 30 000 reports of `Root descriptor access out of bounds`, the
+stored ones all for this view: SRV, root parameter 2, 3 317 760 bytes available, offsets up to
+6 146 763. The load is now behind a real branch (`[branch]`), in both builds of the shader; with
+that the run decodes all 251 streams without and with `-interfast` and loses no device
+(43202750602), and the validation no longer reports that view.
 
 It also shows without a lost device: in run 43134793241 the super-resolution stream, the 247th
 of its process, came out wrong from its first frame on (64 frames, no error), the three 8-bit

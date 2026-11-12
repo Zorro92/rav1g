@@ -63,7 +63,13 @@ RWByteAddressBuffer dst_frame : register(u0);
   for (int i = 0; i < 4; ++i) {
     uint addr = output_offset + i * output_stride;
     uint pixels;
-    if (do_palette)
+    // A branch, not a select. Flattened, every thread loaded from palette_buf at the frame offset of its
+    // row, palette block or not. A slot without a palette buffer has another buffer bound there
+    // (av1_prediction_run_all), and that one is smaller than a frame: the load was outside it for the
+    // last rows of an 8-bit frame and for the lower half of a frame of 16-bit samples. A device may answer
+    // such a load with anything, and the value was not used; WARP reads the memory behind the buffer and
+    // loses the device when there is none (docs/warp-decoder.md, "The D3D12 device is removed").
+    [branch] if (do_palette)
       pixels = palette_buf.Load(addr - cb_fb_base_offset);
     else
       pixels = dst_frame.Load(addr);
