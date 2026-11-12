@@ -549,6 +549,77 @@ Checked before the push on the local decoder: the 244 vectors of AOM plain, with
 check there: with the optimised intra shader that D3D12 implementation gives other frames in every run,
 with the C++ build as with the Rust one (three runs of each on one stream, six different results).
 
+Module 6 on CI (run 43304735545, commit 63a9e5f, with the merge of `cpp` 3b469c0 under it): the same gates,
+all met: `rav1g-dec` 251 of 251 on WARP, the order check, 137 of 137 with `-poisonmi` and with
+`-poisonbuf`, md5 of 1005 frames and the stage dumps of 7 streams equal to `warp_decoder` of the commit,
+251 of 251 with the program of the Linux build, the timing smoke test with its counter checks, the test
+player builds; `D3D12 DEVICE REMOVALS: 0` in every pass of the three decoders. `-interfast` runs with
+`warp_decoder` in CI (251 of 251) and ran with `rav1g-dec` on the local decoder.
+
+**CPU time of the recording, Rust against C++** (run 43307000147 of a throwaway branch: three programs
+built from one checkout on one Windows runner, each stream decoded five times by each in turn with
+`-gputime -t 4` on WARP; microseconds per frame, the median frame of a run, the lowest of the five runs).
+`warp_decoder` is the MSBuild build with whole program optimisation; "C++ host" is `rav1g-dec` of the
+commit before step 3 (a3719fc), the cargo build with the host in C++; "Rust host" is `rav1g-dec` of
+63a9e5f.
+
+| Timer | 2160p 8-bit, 20 frames | | | 1080p 10-bit, 16 frames | | | 720p 8-bit, 40 frames | | |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| | `warp_decoder` | C++ host | Rust host | `warp_decoder` | C++ host | Rust host | `warp_decoder` | C++ host | Rust host |
+| record (all stages) | 43 | 44 | 42 | 264 | 265 | 219 | 160 | 157 | 134 |
+| rec_gen_blocks | 29 | 30 | 28 | 30 | 30 | 29 | 27 | 28 | 28 |
+| rec_idct | 6 | 5 | 6 | 21 | 20 | 21 | 15 | 13 | 14 |
+| rec_pred | 8 | 8 | 7 | 37 | 36 | 37 | 33 | 32 | 31 |
+| rec_loopfilter | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 8 |
+| rec_cdef_lr | 1 | 1 | 1 | 163 | 163 | 119 | 80 | 79 | 55 |
+| rec_borders | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 |
+| rec_copy | 7 | 6 | 7 | 19 | 18 | 13 | 6 | 5 | 6 |
+| entropy_sum (tile threads, with `av1_mi_push_block`) | 2922 | 3295 | 3310 | 6865 | 7327 | 7378 | 4264 | 4580 | 4571 |
+
+- The recording in Rust costs what it cost in C++, stage by stage, and less where the CPU writes lists
+  for a stage (CDEF and loop restoration: 119 against 163 microseconds at 1080p). The tile threads, which
+  call `av1_mi_push_block` for every block, take the same time with the Rust function as with the C++ one
+  (+0.5 %, +0.7 %, -0.2 %; the runs of one program differ by more).
+- The frame of the 2160p stream is intra coded with few blocks, which is why its recording is short; a
+  first run with 8 frames of it and means instead of medians (run 43304936153) had a single frame of
+  several milliseconds in most runs of all three programs and said nothing.
+- **Not from this step, but it shows here:** the cargo build of the entropy decoder is 7 to 13 % slower in
+  the tile threads than the MSBuild build (`entropy_sum`: 3295 against 2922, 7327 against 6865, 4580
+  against 4264), with the C++ host as with the Rust host. The C is compiled without whole program
+  optimisation (`/GL`), which the MSBuild projects switch on and cargo cannot use. The test player links
+  the MSBuild library today; when it links the Rust static library (step 5) this is what the console
+  timing against `v0.3.0` will see, unless the C gets link time optimisation another way (clang-cl with
+  LTO, or the entropy decoder stays an MSBuild library). To decide before step 5.
+- The console timing of the recording counters is the main session's.
+
+Step 3 in numbers: 4,344 lines of C++ in 7 files left the cargo build (`av1_core.cpp`, 2,453 lines, is
+what it still compiles of the host); the Rust host is 7,092 lines in 15 files of `crates/rav1g/src/host`
+and 895 in `crates/rav1g/src/gpu`, tests and comments included; 516 lines of glue in 7 files stand
+between the two until step 4.
+
+**What step 4 inherits.**
+
+- `av1_core.cpp` is the frame pipeline and everything that owns something: the creation of a decoder
+  with the budget guard and the plan of its buffers, the pipeline slots and the pool of frame buffers,
+  `av1_setup_frame` and the other functions the entropy decoder calls (`dx/av1_core.h`), the command buffer
+  of a frame from prepare to commit, the completion thread and its fences, the output images and
+  show-existing copies, the timestamps and CPU timers of `-gputime`, the stage dumps, `-asyncclear`.
+- With it go the glue (`crates/rav1g-sys/glue`), the C++ bindings (`rav1g_sys::host`, `host.hpp`) and the
+  C++ probes; the structs the stages read through pointers today (`Av1Core`, `av1_frame_thread_data`,
+  `ComputeCommandBuffer`, the allocator, the queues, the shader library) become Rust types that own their
+  buffers, pipelines and locks, and the `unsafe` of the stage functions shrinks to the calls of the C
+  entropy decoder and of D3D12. `av1_tile_data` and the mode info stay C structs: the entropy decoder
+  writes them.
+- The backend boundary still lacks what `av1_core.cpp` does with D3D12 itself: the device and queues,
+  command allocators and lists, fences, timestamp queries, readback and the copies of the stage dumps.
+- The functions that write a record of constants field by field can take a zeroed record once both
+  decoders are no longer compared stage dump by stage dump, or once the comparison leaves the unwritten
+  bytes out.
+- `aom_internal_error` leaves the decode call with a `longjmp`. The functions of step 4 that the entropy
+  decoder calls and that raise it (`av1_setup_frame`: a frame the decoder was not created for, no frame
+  buffer) need the same care as the output copy got in module 5: the error is raised from C, not from
+  under a Rust frame.
+
 ## Estimate
 
 Steps 1-2: about a day. Step 3: two to three days. Step 4: one to two days. Step 5: one to two days.
