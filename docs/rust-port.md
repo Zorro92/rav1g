@@ -193,6 +193,20 @@ CI (`.github/workflows/build.yml`), next to the unchanged `conformance` job with
   program it built.
 - `rust-cross-run` (Windows): the conformance set with the program of the Linux build.
 
+Result (run 43247143678, commit 0fde9ab; Rust 1.99.1 in both builds):
+
+| | |
+| --- | --- |
+| Gate: `rav1g-dec` (cargo, MSVC) on WARP | 251 of 251 streams pass, 2.0 min |
+| Gate: md5 per frame against `warp_decoder` | equal for 251 of 251 streams, 1005 frames |
+| Stage dumps against `warp_decoder` | equal for the 7 streams of `dump_tasks.txt` |
+| `rav1g-dec` of the Linux build on WARP | 251 of 251 on the second attempt; the first had `svc-L2T1-2` wrong behind `svc-L2T1` and right alone, the known failure of slow runners, which `warp_decoder` had in run 43244241029 |
+| `-sm6test`, timing smoke test, stage dump script | pass with `rav1g-dec`; the Shader Model 6 lines are those of `warp_decoder` (9 pass, 5 pipeline states refused by WARP) |
+| Shader check | the bytecode of this run's headers is in both programs (93 of 97 headers, the count of `warp_decoder`) |
+| `cargo build --release` on the Windows runner | 70 s; the job 5.6 min |
+| `cargo xwin build --release` on the Linux runner (`ubuntu-26.04`, clang 21.1.8) | 66 s; the job 1.6 min with the xwin cache (10 min for the first run, which fetched 1.2 GB) |
+| Time of a run | still set by the `conformance` job (8.5 to 11.5 min); `rust-equal` adds 20 s behind it. About 11 runner minutes more per push |
+
 The Linux build needed no change to the sources. clang-cl stops at two things MSVC compiles: the thread
 function `aom_thread.h` hands to `CreateThread` returns `unsigned int` where a `DWORD` is wanted
 (`-Wincompatible-function-pointer-types`), and the host takes the address of temporaries such as
@@ -232,6 +246,8 @@ MSVC):
   `tx_size`, `skip`, `skip_mode`, `segment_id`; and so on) those fields follow each other byte by byte.
   `ModeInfoSize` must be the size of the C struct.
 - **Record sizes**: the numbers above, which are also the record sizes of the stage dump format.
+
+All three pass on the Windows runner with MSVC (run 43247143678), and in the Linux build run under wine.
 
 Not bound: `libav1/dx/types.h`. It is the C++ host's own header (COM pointers, `std` containers, the frame
 and slot structures), not a C header that bindgen could read as one, and nothing outside the host includes
