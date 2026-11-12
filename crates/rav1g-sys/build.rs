@@ -39,7 +39,8 @@ struct Source {
 
 /// The C++ files of `libav1/dx` whose functions the `rav1g` crate has in Rust (`crates/rav1g/src/host`).
 /// This build does not compile them. `libav1_sources.props` still lists them, for the MSBuild projects.
-const REPLACED_BY_RUST: &[&str] = &["libav1/dx/av1_memory.cpp", "libav1/dx/vp9dx_linear_allocator.cpp"];
+const REPLACED_BY_RUST: &[&str] =
+    &["libav1/dx/av1_memory.cpp", "libav1/dx/av1_thread.cpp", "libav1/dx/vp9dx_linear_allocator.cpp"];
 
 fn fail(message: &str) -> ! {
     eprintln!("rav1g-sys: {message}");

@@ -350,6 +350,7 @@ of AOM pass there in two minutes. CI on WARP stays the gate.
 | Module | C++ out of the cargo build | Rust | Glue | Notes |
 | --- | --- | --- | --- | --- |
 | 1. Allocator and log lines | `av1_memory.cpp` (356 lines), `vp9dx_linear_allocator.cpp` (121) | `host/log.rs` (156), `host/memory.rs` (534), `gpu/mod.rs` (93), `gpu/d3d12.rs` (227); tests included | `glue/av1_memory.cpp` (98) | see below |
+| 2. Queues | `av1_thread.cpp` (151) | `host/thread.rs` (406) | `glue/av1_thread.cpp` (53) | see below |
 
 Module 1, allocator and log lines:
 
@@ -370,6 +371,25 @@ Module 1, allocator and log lines:
   Rust, as from the C runtime of the MSVC build; the runtime that `xwin` fetches prints it rounded up in
   the lines the C++ still writes. Seen in one line of the Linux build (`inter_mask_lut 0.3 MiB`), not a
   difference between Rust and C++.
+
+Module 1 on CI (run 43286946982, commit c76576f): `rav1g-dec` 251 of 251 on WARP, the order check and the
+137 streams with `-poisonmi` and with `-poisonbuf` pass, md5 per frame and stage dumps equal to
+`warp_decoder` of the commit (`rust-equal`), 251 of 251 with the program of the Linux build, the test player
+builds; `D3D12 DEVICE REMOVALS: 0` in every pass of the three decoders. The bindings of the C++ host are
+made on the Windows runner with the libclang it has, and the C++ layout probe, compiled by MSVC, agrees
+with them.
+
+Module 2, queues:
+
+- `DataPtrQueue` (a ring of 100 pointers) and `DataPtrQueueMT` (the ring behind a lock, with a condition
+  to wait on) stay the C++ structs: they sit inside `Av1Core` and the shader library, and `av1_core.cpp`
+  takes the lock of some of them itself. So the lock stays what `aom_thread.h` makes of a pthread mutex and
+  condition on Windows, a critical section and a condition variable inside the struct, and the Rust takes
+  and wakes them with the same calls. A Rust owner of the queues (channels, `Mutex` and `Condvar`) comes
+  with step 4.
+- Same behaviour, including what is odd about it: the ring starts at its first slot again whenever it
+  runs empty, `MTQueuePush` does not wait when the ring is full, and a pop of an empty queue does nothing.
+- Unit tests: the order of the ring across its wrap, and a thread that takes 1000 items another pushes.
 
 ## Estimate
 
