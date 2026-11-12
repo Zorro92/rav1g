@@ -246,12 +246,21 @@ int box_filter1(int lx, int ly) {
 
   const int dst_offset = pl[plane_id].dst_offset;
 
-  UnitsInfo units = pl[plane_id].units;
-  int unitCol = min(units.Cols - 1, uint(gx + 1) / units.Size);
-  int unitRow = min(units.Rows - 1, uint((gy + 1 + (8 >> subsampling))) / units.Size);
-  int unitId = unitRow * units.Stride + unitCol + pl[plane_id].Lr_buffer_offset;
+  // The restoration unit of the group and its entry of the type table, for a plane that is restored only.
+  // The branch is asked for: without it FXC computes the address and loads the entry for every plane and
+  // selects afterwards, and the table is a root SRV, which has no bounds checking. For a plane without
+  // restoration the unit fields are not those of a unit grid (the host writes one unit at entry 0 now; it
+  // used to leave them unwritten, with what an earlier frame had at this place of the constant memory), so
+  // that load could be anywhere, outside of mapped memory too, and that removes the device.
+  int unitId = 0;
   int4 rType = int4(RESTORE_NONE, 0, 0, 0);
-  if (do_restoration) rType = LrTypeSgr.Load4(unitId * 16);
+  [branch] if (do_restoration) {
+    UnitsInfo units = pl[plane_id].units;
+    int unitCol = min(units.Cols - 1, uint(gx + 1) / units.Size);
+    int unitRow = min(units.Rows - 1, uint((gy + 1 + (8 >> subsampling))) / units.Size);
+    unitId = unitRow * units.Stride + unitCol + pl[plane_id].Lr_buffer_offset;
+    rType = LrTypeSgr.Load4(unitId * 16);
+  }
 
   if (rType.x == RESTORE_NONE || !do_restoration) {
     if ((thread.x & 3) == 0) {

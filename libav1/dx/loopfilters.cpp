@@ -559,6 +559,20 @@ void av1_looprestoration(Av1Core *dec, AV1_COMMON *cm, void *lr_ctxt) {
     pl_data[p].bit_depth = td->bitdepth;
 
     if (cm->rst_info[p].frame_restoration_type == RESTORE_NONE) {
+      // A plane without restoration has no units, but its record still gets a valid unit grid (one unit, the
+      // first entry of the type table). The memory of the record is the frame's constant upload memory,
+      // which is only rewound between frames (ComputeCommandBuffer::Reset), so fields left unwritten here
+      // would keep what an earlier frame put at this place. A shader that computed the unit's address from
+      // them and loaded the type table without a branch (as FXC compiled loop_restoration.hlsl, the load
+      // flattened in front of a select) read at an address made of stale data: the table is a root SRV,
+      // without bounds checking, and the read can be outside of mapped memory, which removes the device.
+      // loop_restoration.hlsl now loads under a branch for a restored plane only; these defaults keep any
+      // other reader in range.
+      pl_data[p].units.Rows = 1;
+      pl_data[p].units.Cols = 1;
+      pl_data[p].units.Size = 1;
+      pl_data[p].units.Stride = 1;
+      pl_data[p].Lr_buffer_offset = 0;
       continue;
     }
 
