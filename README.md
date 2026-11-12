@@ -56,7 +56,8 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
   buffers for a 4K 10-bit stream). With `-lowmem` it is 663.4 MiB and with
   `-lowmem -slots 3` 773.5 MiB (measured). A decoder that
   does not fit is refused instead of losing the D3D12 device, and a destroyed decoder returns
-  its memory (in md5 runs about 75 MiB stays behind; under investigation).
+  its memory (what stays charged to the app afterwards, up to ~250 MiB, is reused by the next decoder, and the
+  player's guard counts it as available).
 - 1080p24/30 already decodes in real time.
 - **Hidden frames**: encodes with frames that are decoded but shown later (SVT-AV1 random
   access, and most real-world AV1) used to stop after the first frames, because every hidden

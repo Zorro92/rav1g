@@ -1516,9 +1516,25 @@ the decoder asks before it allocates. The application gives it a callback
 (`aom_codec_dec_cfg_t::memory_available_cb`) that returns the bytes the decoder may still
 take; the player's returns `AppMemoryUsageLimit - AppMemoryUsage` of
 `Windows::System::MemoryManager`, less the textures of its output pool for as long as the
-pool has not created them (it creates them at the first frame). Without a callback, or
+pool has not created them (it creates them at the first frame), plus the memory a destroyed
+decoder left charged to the app (see below). Without a callback, or
 when the callback does not know (it returns a negative value, as the player's does outside
 an app container), nothing is checked.
+
+**Memory a destroyed decoder leaves is reused (2026-11-12).** After a decoder is destroyed
+and the settle wait is over, the app is still charged 45-250 MiB above its start (more after
+a 4K decoder); the video memory is back. The next decoder gets it back: a 4K 10-bit decoder
+peaks at 912-916 MiB of app memory whether it starts from 148, 223 or 288 MiB (three
+launches of package 0.2.80.0, one with `-noguard`). A guard that took it as used refused
+4K 10-bit creations that fit, twice in a 15-task md5 launch. So the player records what is
+still charged above the launch's start after the settle wait (`MEMORY app settle ...;
+counted as available to the next decoder: <n> MiB`), at most the device buffers of the
+largest decoder released in the launch, and adds it to what its callback returns at the next
+creation (package 0.2.84.0, `cpp` ff68623). The same 15-task launch then created all 15
+decoders, md5-identical to dav1d, with a highest peak of 914.3 MiB of the 1024 MiB limit.
+An application with its own callback (Bale) should do the same: count what is still charged
+after a decoder it destroyed as available to the next one, or a switch from one 4K stream
+to another can be refused although it fits.
 
 - **At the creation**: the decoder adds up the device buffers it is about to create, the
   same way it creates them, and is refused when they would leave less than

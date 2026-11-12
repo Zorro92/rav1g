@@ -127,10 +127,12 @@ void AV1Decoder::SettleAppMemory() {
     now = AppMemoryUsageNow();
   }
   const uint64_t above = now > app_baseline_ ? now - app_baseline_ : 0;
+  reusable_after_release_ = above < largest_device_size_ ? above : largest_device_size_;
   XB_LOGI << "MEMORY app settle after the release: usage " << MibString(start) << " -> " << MibString(now) << " in "
           << waited_ms << " ms; without a decoder the app used " << MibString(app_baseline_)
           << " at the first task of the launch, " << MibString(above) << " more are charged now"
-          << (above > kSettleNear ? " (not returned within the wait)" : " (returned)");
+          << (above > kSettleNear ? " (not returned within the wait)" : " (returned)")
+          << "; counted as available to the next decoder: " << MibString(reusable_after_release_);
   LogMemory("after the settle wait");
 }
 
@@ -149,11 +151,16 @@ static uint64_t OutputPoolEstimate(const CParameters::Parameters& params, unsign
 }
 
 // The decoder's budget guard (aom_codec_dec_cfg_t::memory_available_cb): what the decoder may still take is
-// what the app has left, less the part of the output pool that does not exist yet.
+// what the app has left, less the part of the output pool that does not exist yet, plus what an earlier
+// decoder left charged to the app and the next one gets back. Measured on the console (2026-11-12): a 4K
+// 10-bit decoder peaks at 912-916 MiB of app memory whether it starts from 148, 223 or 288 MiB, because the
+// memory a destroyed decoder leaves charged (up to ~250 MiB) is reused; without this the guard refused
+// creations that fit.
 int64_t AV1Decoder::MemoryAvailable(void* priv) {
   AV1Decoder* This = static_cast<AV1Decoder*>(priv);
-  const int64_t left = AppMemoryLeft();
+  int64_t left = AppMemoryLeft();
   if (left < 0 || !This) return left;
+  left += (int64_t)This->reusable_after_release_;
   const uint64_t created = This->storage_ ? This->storage_->TextureBytes() : 0;
   const uint64_t pending = This->output_pool_estimate_ > created ? This->output_pool_estimate_ - created : 0;
   return (uint64_t)left > pending ? (int64_t)((uint64_t)left - pending) : 0;
@@ -396,7 +403,11 @@ int AV1Decoder::DecodeOne() {
               << (params_.noguard_ ? "; -noguard: the guard is off for this creation" : "");
       // The host pool of the new decoder is allocated; the decoder's own lines give the video memory.
       LogAppMemory("before the decoder", false);
-      if (aom_codec_dec_init(&decctx_, aom_codec_av1_dx(), &cfg, dec_flags)) {
+      const int init_failed = aom_codec_dec_init(&decctx_, aom_codec_av1_dx(), &cfg, dec_flags);
+      // The memory an earlier decoder left is this decoder's now.
+      reusable_after_release_ = 0;
+      if (!init_failed && cfg.device_size > largest_device_size_) largest_device_size_ = cfg.device_size;
+      if (init_failed) {
         host_mem_.clear();
         host_mem_.shrink_to_fit();
         // The detail is the decoder's MEMORY FAILED line for what could not be allocated. The decoder has

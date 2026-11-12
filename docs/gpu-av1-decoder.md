@@ -1368,7 +1368,13 @@ runs it.
   read. The constant record of the next section is the candidate for them.
 - The about 75 MiB that stay behind after a decoder is destroyed in md5 runs on the console. In
   one launch of many md5 tasks it was 36-187 MiB above the app's start, 187 MiB after an 8-bit 4K
-  task, enough that the memory guard refused the next 4K 10-bit decoder (2026-11-12).
+  task, enough that the memory guard refused the next 4K 10-bit decoder (2026-11-12). Resolved the
+  same day: it is not a leak of the decoder (CI run 43284110870: every decoder resource released,
+  no parser allocation left, most of it follows the D3D12 device and pipeline states), and the next
+  decoder reuses it (a 4K 10-bit decoder peaks at 912-916 MiB from any start). The player's guard
+  now counts it as available ([test-player.md](test-player.md#budget-guard-memory-refused)); the
+  15-task launch then created every decoder. Two defects of the player found on the way are fixed
+  too (4b92364: md5 read the readback buffers after they were unmapped).
 - On the console (package 0.2.75.0, CI run 43277284568, both fixes): two launches with 21 tasks,
   8-bit and 10-bit streams alternating in one process, each with md5 checking: every one of the 19
   decoders that was created is md5-identical to dav1d (8-bit 720p, 1080p and 4K; 10-bit 4K Jellyfin,
