@@ -133,6 +133,24 @@ void av1_set_intra_v2(int enable);
  * it only while no frame is in flight. */
 void av1_set_intra_opt(int enable);
 
+/* Process-wide experiments for a device whose output differs from the
+ * reference (docs/gpu-av1-decoder.md). Both leave the decoded output as it
+ * is on a device that follows D3D. Change them only while no frame is in
+ * flight.
+ * av1_set_lf_h_split: how the horizontal loop filter is dispatched. 0 (the
+ * default): one dispatch per plane. 1: the even rows of 64-row blocks, a UAV
+ * barrier, the odd rows. 2: every row of blocks on its own, top to bottom,
+ * with a UAV barrier behind each.
+ * av1_set_intra_edge_fix: non-zero makes the 8-bit intra shader stop the taps
+ * of the above edge filter where the 10-bit shader stops them. */
+void av1_set_lf_h_split(int mode);
+void av1_set_intra_edge_fix(int enable);
+
+/* What the shaders of this build were compiled as: "" for the normal build,
+ * "uavsync" for the build in which every group sync is a sync of all memory
+ * (AllMemoryBarrierWithGroupSync), for the log of a test program. */
+const char *av1_shader_variant(void);
+
 /* Process-wide. Non-zero moves the per-frame clears of a pipeline slot (the
  * mode info grid and the intra iteration grid) from the decode thread to the
  * GPU completion thread, which does them after the fence of the frame that

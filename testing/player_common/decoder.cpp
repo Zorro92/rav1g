@@ -468,6 +468,15 @@ int AV1Decoder::DecodeOne() {
   av1_set_async_clear(params_.asyncclear_ ? 1 : 0);
   XB_LOGI << "Clears: " << (params_.asyncclear_ ? "off the decode thread (-asyncclear)" : "decode thread (original)");
 
+  // The experiments: set like the switches above. The shader build is fixed when the package is built.
+  av1_set_lf_h_split(params_.lfhsplit_);
+  av1_set_intra_edge_fix(params_.intraedgefix_ ? 1 : 0);
+  XB_LOGI << "Experiments: shaders " << (av1_shader_variant()[0] ? av1_shader_variant() : "normal build")
+          << "; horizontal loop filter "
+          << (params_.lfhsplit_ == 1 ? "even rows of blocks, then odd (-lfhsplit 1)"
+                                     : params_.lfhsplit_ == 2 ? "row of blocks by row (-lfhsplit 2)"
+                                                              : "one dispatch per plane (default)")
+          << "; 8-bit above edge filter bound " << (params_.intraedgefix_ ? "filter_count (-intraedgefix)" : "above_count (default)");
   // -dumpstages: like the switches above, set while no frame is in flight.
   if (!params_.dump_frames_.empty()) {
     _mkdir(params_.dumpdir_.c_str());

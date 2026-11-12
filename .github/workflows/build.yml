@@ -337,6 +337,67 @@ jobs:
           path: out/
           if-no-files-found: warn
 
+      # The uavsync package: the same sources, with every group sync of the shaders compiled as a sync
+      # of all memory (AllMemoryBarrierWithGroupSync; /p:Rav1gUavSync=1 in libav1.vcxproj). An
+      # experiment for a device on which a frame buffer store of one thread is not seen by another
+      # thread of the group behind a sync of the group memory alone (docs/test-player.md,
+      # "Experiments"). Same identity as the normal package and revision 1 instead of 0: it installs
+      # over the normal package of this run and keeps its LocalState, and the normal package of a
+      # later run installs over it.
+      - name: Stamp the uavsync package (same identity, revision 1)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = Resolve-Path src/testing/uwp_dx12_player/Package.appxmanifest
+          [xml]$manifest = Get-Content $path -Raw
+          $manifest.Package.Identity.Version = "0.2.$env:GITHUB_RUN_NUMBER.1"
+          $manifest.Save($path)
+
+      - name: Build the signed uavsync package (all-memory group syncs)
+        shell: pwsh
+        env:
+          CERT_THUMBPRINT: ${{ steps.cert.outputs.thumbprint }}
+          _CL_: /wd4996
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force out-uavsync | Out-Null
+          $packageDirectory = Join-Path $env:GITHUB_WORKSPACE 'out-uavsync/packages/'
+          $buildLog = Join-Path $env:GITHUB_WORKSPACE 'out-uavsync/msbuild.log'
+          $probe = 'src/libav1/dx/shaders/h/loopfilter_hor.h'
+          $before = Get-Content $probe -Raw
+          & MSBuild.exe src/av1xbox.sln /t:Rebuild /m /v:minimal /p:Configuration=Release /p:Platform=x64 `
+            "/p:PlatformToolset=$env:PLATFORM_TOOLSET" "/p:WindowsTargetPlatformVersion=$env:WINDOWS_SDK" `
+            /p:WindowsTargetPlatformMinVersion=10.0.17763.0 /p:TreatWarningAsError=false `
+            /p:GenerateAppxPackageOnBuild=true /p:UapAppxPackageBuildMode=SideloadOnly `
+            /p:AppxBundle=Never /p:AppxPackageExtension=.msix "/p:AppxPackageDir=$packageDirectory" `
+            /p:AppxPackageSigningEnabled=true /p:PackageCertificateKeyFile= `
+            "/p:PackageCertificateThumbprint=$env:CERT_THUMBPRINT" /p:Rav1gUavSync=1 `
+            /fl "/flp:logfile=$buildLog;verbosity=normal"
+          if ($LASTEXITCODE -ne 0) { throw 'uavsync player build/package failed; see out-uavsync/msbuild.log' }
+          if ((Get-Content $probe -Raw) -ceq $before) { throw 'The shaders of the uavsync build are those of the normal build' }
+          $packages = @(Get-ChildItem out-uavsync/packages -Recurse -File | Where-Object {
+            $_.Extension -in @('.msix', '.msixbundle', '.appx', '.appxbundle') -and
+            $_.FullName -notmatch '[\\/]Dependencies[\\/]'
+          })
+          if (-not $packages.Count) { throw 'No uavsync sideload package was produced' }
+          # The certificate, the notices and the record of the sources of the normal package apply.
+          foreach ($item in @(Get-ChildItem out | Where-Object { $_.Name -notin @('packages', 'msbuild.log', 'shader-survey',
+              'cdef-shaders', 'intra-shaders') })) {
+            Copy-Item $item.FullName out-uavsync/ -Recurse
+          }
+          "Variant: uavsync (shaders compiled with GroupMemoryBarrierWithGroupSync=AllMemoryBarrierWithGroupSync), package version 0.2.$env:GITHUB_RUN_NUMBER.1" |
+            Add-Content out-uavsync/SOURCES.txt -Encoding utf8
+          @('## uavsync package', '', "Version 0.2.$env:GITHUB_RUN_NUMBER.1: installs over 0.2.$env:GITHUB_RUN_NUMBER.0.", '', '```') +
+            @($packages | ForEach-Object { $_.Name }) + @('```') >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Preserve the uavsync package
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-testplayer-uavsync-x64-${{ github.run_id }}
+          path: out-uavsync/
+          if-no-files-found: warn
+
   # The streams of the conformance run: AOM's decoder test vectors with AOM's md5 files, cuts of
   # Netflix Open Content and streams encoded here with SVT-AV1, both with md5 references from dav1d
   # (testing/conformance/streams.txt, prepare_streams.sh). The streams are media: they are kept in
@@ -484,6 +545,49 @@ jobs:
           path: out/stage-dumps/
           if-no-files-found: warn
 
+      # The experiments (docs/test-player.md, "Experiments"): on a device that follows D3D each of them
+      # leaves the output as it is, so the whole set is decoded again with each flag and has to give the
+      # results of expected.txt, and once more with a decoder whose shaders are those of the uavsync
+      # package.
+      - name: Conformance with each experiment flag
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $runs = @(@{ name = 'lfhsplit1'; args = '-lfhsplit 1' }, @{ name = 'lfhsplit2'; args = '-lfhsplit 2' },
+            @{ name = 'intraedgefix'; args = '-intraedgefix' })
+          $failed = @()
+          foreach ($run in $runs) {
+            python testing/conformance/run.py --tool out/warp_decoder/warp_decoder.exe --streams conformance-streams `
+              --out "out/conformance-$($run.name)" --threads 4 "--tool-args=$($run.args)" "--title=with $($run.args)"
+            if ($LASTEXITCODE -ne 0) { $failed += "$($run.args): exit code $LASTEXITCODE" }
+          }
+          if ($failed.Count) { throw "conformance with an experiment flag: $($failed -join '; ')" }
+
+      - name: Build warp_decoder with the shaders of the uavsync package
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $buildLog = Join-Path $env:GITHUB_WORKSPACE 'out/msbuild-uavsync.log'
+          & MSBuild.exe testing/warp_decoder/warp_decoder.vcxproj /t:Rebuild /m /v:minimal /p:Configuration=Release /p:Platform=x64 `
+            "/p:PlatformToolset=$env:PLATFORM_TOOLSET" "/p:WindowsTargetPlatformVersion=$env:WINDOWS_SDK" /p:Rav1gUavSync=1 `
+            /fl "/flp:logfile=$buildLog;verbosity=normal"
+          if ($LASTEXITCODE -ne 0) { throw 'warp_decoder uavsync build failed; see msbuild-uavsync.log' }
+          New-Item -ItemType Directory -Force out/warp_decoder_uavsync | Out-Null
+          Copy-Item testing/warp_decoder/bin/x64/Release/warp_decoder.exe out/warp_decoder_uavsync/
+
+      - name: Conformance with the uavsync shaders
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/run.py --tool out/warp_decoder_uavsync/warp_decoder.exe --streams conformance-streams `
+            --out out/conformance-uavsync --threads 4 "--title=uavsync shaders (all-memory group syncs)"
+          $code = $LASTEXITCODE
+          if (-not (Select-String -Path out/conformance-uavsync/lists/run001.log -Pattern '^SHADERS uavsync' -Quiet)) {
+            throw 'The decoder of this run does not report the uavsync shaders'
+          }
+          if ($code -ne 0) { throw "conformance with the uavsync shaders: exit code $code" }
+
       - name: Preserve the results, the per-stream logs and md5 files, and the build log
         if: always()
         uses: actions/upload-artifact@v7
@@ -491,7 +595,9 @@ jobs:
           name: rav1g-conformance-${{ github.run_id }}
           path: |
             out/conformance/
+            out/conformance-*/
             out/msbuild.log
+            out/msbuild-uavsync.log
           if-no-files-found: warn
 
       - name: Preserve warp_decoder.exe

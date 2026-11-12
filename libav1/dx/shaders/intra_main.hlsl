@@ -242,14 +242,18 @@ int intra_inter_blend(int mask, int intra, int inter) {
   if (edge_filter) {
     edge_filter <<= 2;
     const int base = loc_base - need_aboveleft;
-    const int last = above_count;
+    // The last entry a tap may reach. The 10-bit shader and the left edge below stop at filter_count, the
+    // last entry the filter writes; this one stops at above_count. The entries between the two are loaded
+    // and all hold the last available sample, so the two bounds give the same sums. cb_flags.y (test flag
+    // -intraedgefix) selects filter_count here as well, for a device on which they would not.
+    const int last = cb_flags.y ? filter_count : above_count;
     //{ 0, 4, 8, 4, 0 }, { 0, 5, 6, 5, 0 }, { 2, 4, 4, 4, 2 }
     sum0 += above[base + max(wi - 1, 0)] * ((0x2000 >> edge_filter) & 15);
     sum0 += above[base + (wi + 0)] * ((0x4540 >> edge_filter) & 15);
     sum0 += above[base + (wi + 1)] * ((0x4680 >> edge_filter) & 15);
     sum0 += above[base + min(wi + 2, last)] * ((0x4540 >> edge_filter) & 15);
     sum0 += above[base + min(wi + 3, last)] * ((0x2000 >> edge_filter) & 15);
-    if (wi1 < above_count)  // rare, some mods for 4x4, 8x4, 4x8 blocks
+    if (wi1 < last)  // rare, some mods for 4x4, 8x4, 4x8 blocks
     {
       sum1 += above[base + max(wi1 - 1, 0)] * ((0x2000 >> edge_filter) & 15);
       sum1 += above[base + (wi1 + 0)] * ((0x4540 >> edge_filter) & 15);

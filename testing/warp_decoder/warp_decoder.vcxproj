@@ -109,6 +109,17 @@
       <DisableOptimizations>false</DisableOptimizations>
     </FxCompile>
   </ItemDefinitionGroup>
+  <!-- /p:Rav1gUavSync=1: the experiment build in which every group sync of the shaders is a sync of all
+       memory (AllMemoryBarrierWithGroupSync), for a device on which a store to the frame buffer by one
+       thread is not seen by another thread of the group behind a sync of the group memory alone. -->
+  <ItemDefinitionGroup Condition="'$(Rav1gUavSync)'=='1'">
+    <ClCompile>
+      <PreprocessorDefinitions>RAV1G_UAVSYNC;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <FxCompile>
+      <PreprocessorDefinitions>GroupMemoryBarrierWithGroupSync=AllMemoryBarrierWithGroupSync;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </FxCompile>
+  </ItemDefinitionGroup>
   <!-- The sources and shaders of libav1.vcxproj. -->
   <Import Project="libav1_sources.props" />
   <!-- The stream readers and md5 of the test player (testing/uwp_common), and libwebm's parser. -->

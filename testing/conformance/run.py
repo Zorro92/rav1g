@@ -216,7 +216,11 @@ def main():
     parser.add_argument('--only', default='', help='only the streams whose name matches this regular expression')
     parser.add_argument('--default-timeout', type=int, default=600, help='seconds for a task without -timeout')
     parser.add_argument('--no-repeat', action='store_true', help='do not decode failing streams again alone')
+    parser.add_argument('--alone-timeout', type=int, default=1200,
+                        help='a task whose own -timeout is at least this many seconds gets a decoder process of '
+                             'its own (the large streams); 0: all tasks in one process')
     parser.add_argument('--tool-args', default='', help='further arguments for every task, e.g. "-cdefv1 -hw"')
+    parser.add_argument('--title', default='', help='what this run is, for the heading of the summary')
     args = parser.parse_args()
     args.tool = os.path.abspath(args.tool)
     args.streams = os.path.abspath(args.streams)
@@ -244,30 +248,43 @@ def main():
         return 2
     expected = read_expected(args.expected)
 
+    # The small streams (the vectors) share a decoder process, in the order of the list. A large stream gets
+    # a process of its own: after a few hundred decoders in one process WARP now and then hands a large
+    # decoder frames that are wrong from the first one on, with or without losing the device later
+    # (docs/warp-decoder.md), and a stream that is first in its process cannot depend on what was decoded
+    # before it.
+    batches = []
+    for task in tasks:
+        large = args.alone_timeout > 0 and task_timeout(task[1]) >= args.alone_timeout
+        if large or not batches or batches[-1][0]:
+            batches.append((large, []))
+        batches[-1][1].append(task)
+
     started = time.time()
     results = {}
     header = []
-    remaining = list(tasks)
     processes = 0
-    while remaining:
-        processes += 1
-        got, head, fatal = run_process(args, remaining, 'run%03d' % processes)
-        if fatal:
-            print(fatal)
-            return 2
-        header = header or head
-        if [r.name for r in got] != [name for name, _ in remaining[:len(got)]]:
-            print('the decoder did not run the tasks in the order of its list')
-            return 2
-        for index, result in enumerate(got):
-            results[result.name] = result
-            print('%-52s %s' % (result.name, result.outcome()), flush=True)
-            # The device can be on its way out before a task notices: frames come back wrong, the task ends
-            # as a mismatch, and the next task of the process finds the device removed.
-            if index + 1 < len(got) and device_removed(got[index + 1]) and result.status == 'mismatch':
-                result.before_device_loss = True
-        # The process stops at the first task that does not end in pass or mismatch.
-        remaining = remaining[len(got):]
+    for _, batch in batches:
+        remaining = list(batch)
+        while remaining:
+            processes += 1
+            got, head, fatal = run_process(args, remaining, 'run%03d' % processes)
+            if fatal:
+                print(fatal)
+                return 2
+            header = header or head
+            if [r.name for r in got] != [name for name, _ in remaining[:len(got)]]:
+                print('the decoder did not run the tasks in the order of its list')
+                return 2
+            for index, result in enumerate(got):
+                results[result.name] = result
+                print('%-52s %s' % (result.name, result.outcome()), flush=True)
+                # The device can be on its way out before a task notices: frames come back wrong, the task
+                # ends as a mismatch, and the next task of the process finds the device removed.
+                if index + 1 < len(got) and device_removed(got[index + 1]) and result.status == 'mismatch':
+                    result.before_device_loss = True
+            # The process stops at the first task that does not end in pass or mismatch.
+            remaining = remaining[len(got):]
 
     # A failure after other streams in the same process is repeated in a process of its own: what is put
     # into expected.txt must not depend on what was decoded before.
@@ -361,7 +378,7 @@ def main():
                 reason = listed[1] if listed and listed[0] == result.status else result.detail
                 f.write('%s %s %s\n' % (result.name, result.status, reason))
 
-    summary = ['## Conformance run', '']
+    summary = ['## Conformance run' + (': ' + args.title if args.title else ''), '']
     for line in header:
         if line.startswith(('ADAPTER', 'PIPELINE')):
             summary.append('- `%s`' % line)

@@ -207,7 +207,9 @@ cbuffer LoopfilterSRT : register(b1) {
   const bool active = thread.x < cb_wicount;
   const int plane = cb_plane;
   const int wi = thread.x & 3;
-  const uint block_id = thread.x >> 2;
+  // cb_block_id_offset: the first block of the dispatch. 0 when one dispatch filters the whole plane; the host
+  // can also dispatch the rows of blocks on their own (test flag -lfhsplit, libav1/dx/loopfilters.cpp).
+  const uint block_id = (thread.x >> 2) + cb_block_id_offset;
   const int local_offset = (thread.x & (64 - 4)) << 2;
   if (active) {
     uint2 data = lf_blocks.Load2((cb_offset_base + block_id) * BlockSize + (wi << 3));

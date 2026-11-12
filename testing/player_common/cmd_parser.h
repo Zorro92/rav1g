@@ -99,6 +99,9 @@ class CParameters {
     // The parts in effect after Parse(): PLAYER_LOWMEM_DEFAULT, the value of -lowmemparts, or all with -lowmem.
     int lowmem_parts_;
     bool noguard_;
+    // Experiments (docs/test-player.md): -lfhsplit 0|1|2, -intraedgefix.
+    int lfhsplit_;
+    bool intraedgefix_;
   };
   enum arg_type { atSingle, atInt, atString };
   enum arg_need { anOptional, anMandatory, anAtLeastOne };

@@ -63,6 +63,15 @@ struct GenLfSRT {
   int dst_stride;
 };
 
+// Test flag -lfhsplit: how the horizontal loop filter is dispatched. loopfilter_hor works on blocks of 4
+// columns by 64 rows; the first edge of a block reads and writes the last rows of the block above it, which
+// another thread group of the same dispatch filters. 0: one dispatch per plane, as upstream. 1: the even
+// rows of blocks, a UAV barrier, the odd rows. 2: every row of blocks on its own, top to bottom, a UAV
+// barrier behind each. Off unless av1_set_lf_h_split() was called.
+static int g_lf_h_split = 0;
+
+extern "C" void av1_set_lf_h_split(int mode) { g_lf_h_split = mode; }
+
 void av1_loopfilter_gpu(Av1Core *dec, AV1_COMMON *cm, MACROBLOCKD *xd) {
   if (!(cm->lf.filter_level[0] || cm->lf.filter_level[1])) {
     return;
@@ -214,18 +223,48 @@ void av1_loopfilter_gpu(Av1Core *dec, AV1_COMMON *cm, MACROBLOCKD *xd) {
 
   shader = &td->shaders->loopfilter_h;
   command_list->SetPipelineState(shader->pso.Get());
-  for (int p = 0; p < 3; ++p) {
-    if (p == 1 && !cm->lf.filter_level_u) continue;
-    if (p == 2 && !cm->lf.filter_level_v) continue;
-    int type = p + 3;
-    srt.plane = p;
-    srt.offset_base = blk_offsets[type];
-    srt.block_cols = blk_cols[type];
-    srt.wicount = blk_count[type] * 4;
-    command_list->SetComputeRoot32BitConstants(3, 5, &srt, 0);
-    command_list->Dispatch((srt.wicount + 63) >> 6, 1, 1);
+  const int lf_h_split = g_lf_h_split;
+  if (!lf_h_split) {
+    srt.block_id_offset = 0;
+    for (int p = 0; p < 3; ++p) {
+      if (p == 1 && !cm->lf.filter_level_u) continue;
+      if (p == 2 && !cm->lf.filter_level_v) continue;
+      int type = p + 3;
+      srt.plane = p;
+      srt.offset_base = blk_offsets[type];
+      srt.block_cols = blk_cols[type];
+      srt.wicount = blk_count[type] * 4;
+      command_list->SetComputeRoot32BitConstants(3, 5, &srt, 0);
+      command_list->Dispatch((srt.wicount + 63) >> 6, 1, 1);
+    }
+    command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
+  } else {
+    // -lfhsplit: one dispatch per row of blocks (64 rows of the plane). Mode 1 takes the even rows of all
+    // planes, then the odd ones; mode 2 takes the rows in order. The planes do not touch each other.
+    int block_rows = 0;
+    for (int p = 0; p < 3; ++p) block_rows = AOMMAX(block_rows, blk_count[p + 3] / AOMMAX(blk_cols[p + 3], 1));
+    const int passes = lf_h_split == 1 ? 2 : block_rows;
+    for (int pass = 0; pass < passes; ++pass) {
+      for (int p = 0; p < 3; ++p) {
+        if (p == 1 && !cm->lf.filter_level_u) continue;
+        if (p == 2 && !cm->lf.filter_level_v) continue;
+        const int type = p + 3;
+        const int rows = blk_cols[type] ? blk_count[type] / blk_cols[type] : 0;
+        srt.plane = p;
+        srt.offset_base = blk_offsets[type];
+        srt.block_cols = blk_cols[type];
+        srt.wicount = blk_cols[type] * 4;
+        // Mode 1: every second row from the pass's. Mode 2: the one row of the pass.
+        const int step = lf_h_split == 1 ? 2 : block_rows;
+        for (int row = pass; row < rows; row += step) {
+          srt.block_id_offset = row * blk_cols[type];
+          command_list->SetComputeRoot32BitConstants(3, 5, &srt, 0);
+          command_list->Dispatch((srt.wicount + 63) >> 6, 1, 1);
+        }
+      }
+      command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
+    }
   }
-  command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
   av1_perf_gpu_mark(dec, AV1_PERF_GPU_LF_HORZ);
   av1_stage_dump_fb(dec, "lf_horz", td->frame_buffer);
 }

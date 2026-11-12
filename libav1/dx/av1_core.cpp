@@ -229,6 +229,16 @@ static int g_async_clear = 0;
 
 extern "C" void av1_set_async_clear(int enable) { g_async_clear = enable; }
 
+// The build with /p:Rav1gUavSync=1 compiles the shaders with GroupMemoryBarrierWithGroupSync defined as
+// AllMemoryBarrierWithGroupSync and this file with RAV1G_UAVSYNC.
+extern "C" const char *av1_shader_variant(void) {
+#ifdef RAV1G_UAVSYNC
+  return "uavsync";
+#else
+  return "";
+#endif
+}
+
 // GPU completion thread, -asyncclear: the frame that used |td| has completed on the GPU, so nothing reads the
 // slot's grids any more, and the slot is not in the pool, so the decode thread cannot have it. Clear what the
 // frame cleared at its setup; the next frame of the same size then starts on a slot that is already clean.

@@ -748,6 +748,13 @@ static int g_intra_opt = 0;
 
 extern "C" void av1_set_intra_opt(int enable) { g_intra_opt = enable; }
 
+// Test flag -intraedgefix: intra_main.hlsl (8-bit) stops the taps of the above edge filter at filter_count,
+// as intra_main_hbd.hlsl does, instead of at above_count. The output is the same (see the shader). Off unless
+// av1_set_intra_edge_fix(1) was called.
+static int g_intra_edge_fix = 0;
+
+extern "C" void av1_set_intra_edge_fix(int enable) { g_intra_edge_fix = enable; }
+
 void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
   av1_frame_thread_data *td = dec->curr_frame_data;
   const int tile_count = td->tile_count;
@@ -1002,6 +1009,9 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
     ComputeShader *shader = intra_main;
 
     data->flags[0] = cm->seq_params.enable_intra_edge_filter;
+    data->flags[1] = g_intra_edge_fix;
+    data->flags[2] = 0;
+    data->flags[3] = 0;
     memcpy(data->planes, td->frame_buffer->planes, sizeof(data->planes));
     for (int m = 0; m < 5; ++m)
       for (int k = 0; k < 8; ++k)

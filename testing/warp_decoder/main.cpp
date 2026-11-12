@@ -92,6 +92,8 @@ struct Task {
   bool intrav2 = false;
   bool intraopt = false;
   bool asyncclear = false;
+  int lfhsplit = 0;           // -lfhsplit <0|1|2>
+  bool intraedgefix = false;  // -intraedgefix
   int timeout_s = 0;          // -timeout: seconds for the task, 0 = none
   std::string dumpstages;     // -dumpstages <frame list>
   std::string dumpdir = "dumps";  // -dumpdir <dir>
@@ -144,6 +146,9 @@ static void Usage() {
   Say("  -timeout <seconds>    give up on a task after this time (exit code %d)", kExitTimeout);
   Say("  -cdefv1 -nofitsize -lowmemparts <n> -lowmem -slots <n> -intrav2 -intraopt -asyncclear");
   Say("                        as in the test player (docs/test-player.md); -cdefv2 and -fitsize are accepted");
+  Say("  -lfhsplit <n>         horizontal loop filter: 1 even rows of blocks, a UAV barrier, odd rows; 2 every");
+  Say("                        row of blocks on its own (default 0: one dispatch per plane; same output)");
+  Say("  -intraedgefix         8-bit intra: the above edge filter stops where the 10-bit one does (same output)");
   Say("Program flags:");
   Say("  -list <file>          one task per line (the task flags above; # starts a comment line)");
   Say("  -hw                   the first hardware adapter instead of WARP");
@@ -235,6 +240,10 @@ static bool ParseArgs(const std::vector<std::string>& args, Task* task, Globals*
       task->intraopt = true;
     } else if (a == "-asyncclear") {
       task->asyncclear = true;
+    } else if (a == "-lfhsplit") {
+      if (!number(&task->lfhsplit)) return false;
+    } else if (a == "-intraedgefix") {
+      task->intraedgefix = true;
     } else if (globals && a == "-hw") {
       globals->hardware = true;
     } else if (globals && a == "-v") {
@@ -282,6 +291,11 @@ static bool CheckTask(Task* task, std::string* err) {
     return false;
   }
   if (task->lowmem) task->lowmem_parts = WD_LOWMEM_ALL;
+  if (task->lfhsplit < 0 || task->lfhsplit > 2) {
+    snprintf(ss, sizeof(ss), "-lfhsplit %d is not allowed: 0, 1 or 2", task->lfhsplit);
+    *err = ss;
+    return false;
+  }
   if (task->queue_size < 1 || task->queue_size > WD_QUEUE_SIZE_MAX) {
     snprintf(ss, sizeof(ss), "-queue_size %d is not allowed: 1 to %d", task->queue_size, WD_QUEUE_SIZE_MAX);
     *err = ss;
@@ -962,6 +976,13 @@ static int RunTask(const Task& task, Device* dev) {
   av1_set_intra_v2(task.intrav2 ? 1 : 0);
   av1_set_intra_opt(task.intraopt ? 1 : 0);
   av1_set_async_clear(task.asyncclear ? 1 : 0);
+  av1_set_lf_h_split(task.lfhsplit);
+  av1_set_intra_edge_fix(task.intraedgefix ? 1 : 0);
+  if (task.lfhsplit || task.intraedgefix)
+    Say("EXPERIMENTS %s:%s%s", task.name.c_str(),
+        task.lfhsplit == 1 ? " -lfhsplit 1 (horizontal loop filter: even rows of blocks, then odd)"
+                           : task.lfhsplit == 2 ? " -lfhsplit 2 (horizontal loop filter: row of blocks by row)" : "",
+        task.intraedgefix ? " -intraedgefix (8-bit above edge filter bound)" : "");
   // -dumpstages: the writer outlives the decoder's completion thread, which the drain below joins.
   StageDumpWriter stage_dumps;
   if (!task.dump_frames.empty()) {
@@ -1127,6 +1148,7 @@ int main(int argc, char** argv) {
     return kExitUsage;
   }
   Say("PIPELINE states created in %.0f ms", MsSince(pso_start));
+  Say("SHADERS %s", av1_shader_variant()[0] ? av1_shader_variant() : "normal build");
   if (globals.debug_layer) PrintDebugMessages(dev.device.Get());
 
   g_watchdog_stop = CreateEventA(NULL, TRUE, FALSE, NULL);

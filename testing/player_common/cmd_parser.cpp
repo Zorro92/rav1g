@@ -75,6 +75,13 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        "memory reductions in effect: 1 shared back buffer + 2 mode info shares + 4 coefficient shares. Default 1, "
        "0 for none",
        "", &params_.lowmem_parts_},
+      {"lfhsplit", atInt, anOptional,
+       "horizontal loop filter: 1 even rows of blocks, UAV barrier, odd rows; 2 every row of blocks on its "
+       "own. Default 0, one dispatch per plane (same output)",
+       "", &params_.lfhsplit_},
+      {"intraedgefix", atSingle, anOptional,
+       "8-bit intra: the above edge filter stops where the 10-bit one does (same output)", "",
+       &params_.intraedgefix_},
       {"noguard", atSingle, anOptional,
        "create the decoder without the memory budget guard (a creation that does not fit loses the D3D12 device)",
        "", &params_.noguard_}};
@@ -171,6 +178,12 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     Err += ss;
     return -1;
   }
+  if (params_.lfhsplit_ < 0 || params_.lfhsplit_ > 2) {
+    char ss[96];
+    sprintf(ss, "-lfhsplit %d is not allowed: 0, 1 or 2.", params_.lfhsplit_);
+    Err += ss;
+    return -1;
+  }
   if (!params_.dumpstages_.empty() && !ParseStageDumpFrames(params_.dumpstages_, &params_.dump_frames_)) {
     Err += "-dumpstages " + params_.dumpstages_ + " is not a frame list like 0,3,10-12 of at most 256 frames.";
     return -1;
@@ -248,6 +261,8 @@ void CParameters::Reset() {
   params_.lowmem_ = false;
   params_.lowmem_parts_ = PLAYER_LOWMEM_DEFAULT;
   params_.noguard_ = false;
+  params_.lfhsplit_ = 0;
+  params_.intraedgefix_ = false;
 }
 
 void CParameters::GetHelp(int pos, const char* arg, std::string& errMsg, const ParamStruct* arr, int size) {

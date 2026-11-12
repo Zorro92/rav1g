@@ -78,6 +78,7 @@ warp_decoder -list tasks.txt -t 4
 | `-timeout <seconds>` | give up on a task after this time |
 | `-name <text>` | what the `BEGIN` and `RESULT` lines call the stream (default: its file name) |
 | `-cdefv1`, `-nofitsize`, `-lowmemparts <n>`, `-lowmem`, `-slots <n>`, `-intrav2`, `-intraopt`, `-asyncclear` | as in the [test player](test-player.md#defaults-and-opt-out-flags) |
+| `-lfhsplit <n>`, `-intraedgefix` | the [experiments](test-player.md#experiments) of the test player; the conformance job runs the whole set with each, and with a decoder built with `/p:Rav1gUavSync=1` (the shaders of the uavsync package; the program prints `SHADERS uavsync`) |
 | `-list <file>` | one task per line, with the flags above; flags on the command line are the defaults of every line. A decode error, a timeout or a crash ends the process at that task |
 | `-hw` | the first hardware adapter instead of WARP |
 | `-v` | print the decoder's log lines (`MEMORY ...`) |
@@ -196,8 +197,10 @@ keeps them in the Actions cache, keyed by the list and the scripts, and the Wind
 restores them from there. The job's artifact `rav1g-conformance-md5-<run id>` has the md5
 references and the task list only.
 
-**`conformance`** (Windows) builds `warp_decoder` and runs `testing/conformance/run.py`: all
-streams in one decoder process, in the order of the list, with `-t 4`. A task that ends in a
+**`conformance`** (Windows) builds `warp_decoder` and runs `testing/conformance/run.py`: the
+vectors in one decoder process, in the order of the list, with `-t 4`, and every large stream
+(the cuts and the streams encoded in the job) in a process of its own (see
+[Results](#results) for why). A task that ends in a
 decode error, a timeout or a crash ends its process (a failed decode may leave the device in
 a state the next stream should not inherit), and the run goes on with the next stream in a
 new process. A stream that fails after other streams in the same process is decoded again
@@ -261,6 +264,14 @@ every run so far, also in the three with upstream's shaders (runs 43092362685, 4
 465 MiB at that point and the machine has 13 GiB free (the `PROCESS` lines). **The cause is not
 known**, and it is the open problem of the run: whether it is WARP, the runner, or the decoder on
 a slow device has to be found out.
+
+It also shows without a lost device: in run 43134793241 the super-resolution stream, the 247th
+of its process, came out wrong from its first frame on (64 frames, no error), the three 8-bit
+streams behind it were right, the 1080p 10-bit stream after those was wrong from its first frame
+on, and only the stream behind that one found the device removed. Both streams are right alone.
+So the large streams (the cuts and the streams encoded in the job: a task with a `-timeout` of
+20 minutes or more) no longer share a process with what was decoded before them: each gets a
+decoder process of its own (`run.py --alone-timeout`), and the vectors share one as before.
 
 Because the stream it hits changes, it cannot be listed in `expected.txt`. `run.py` decodes a
 stream whose run lost the device again alone, up to three times, and takes the result of a run

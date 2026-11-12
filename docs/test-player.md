@@ -101,6 +101,9 @@ one commit each:
 - **Stage dumps**: `-dumpstages` writes the buffer behind every GPU stage of a frame, in the
   player and in `warp_decoder`, and `testing/stage_dump/stage_dump.py` compares two runs. See
   [Stage dumps](#stage-dumps--dumpstages). The decoded output does not change.
+- **Experiments**: `-lfhsplit`, `-intraedgefix` and a second package whose shaders sync all
+  memory at every group sync, for the bugs that show on the console only. See
+  [Experiments](#experiments). Off by default; the output does not change.
 - **Conformance run**: `testing/warp_decoder` is the decoder as a desktop console program
   that decodes on the D3D12 WARP software adapter and writes or checks one md5 per output
   frame, and `testing/conformance` runs it in CI over AOM's decoder test vectors, cuts of
@@ -2184,6 +2187,28 @@ superblocks, noise, extremes, ramps and spikes as content). The source rows are 
 the last column of the last mode info unit, which is where the specification clamps, not at
 the visible width. The check covers the shader, which was right; the bug was in the host
 code that the conformance run covers. It runs as the `superres-check` job of the workflow.
+
+## Experiments
+
+For the two bugs that show on the console only (8-bit streams, references of another size;
+[gpu-av1-decoder.md](gpu-av1-decoder.md#bit-fields-of-width-0-2026-11-12-candidate-fix-not-yet-run-on-the-console)).
+Each is off by default, and on a device that follows D3D each leaves the output as it is: the
+conformance run decodes the whole set on WARP once more with each of them and gets the same
+results. The task's log has an `Experiments:` line that says what is in effect.
+
+| | What it changes | Why |
+| --- | --- | --- |
+| `-lfhsplit 1` | The horizontal loop filter of a plane is no longer one dispatch: first the even rows of blocks (a block is 4 columns by 64 rows), a UAV barrier, then the odd rows. | The first edge of a block reads and writes the last rows of the block above it, which another thread group of the same dispatch filters; the vertical filter is two dispatches for the same reason. By the rules of the loop filter the rows two neighbouring edges write never overlap, and what one reads of the other's it does not use, so the single dispatch should be right; the flag tests that on the device. |
+| `-lfhsplit 2` | Every row of blocks is a dispatch of its own, top to bottom, with a UAV barrier behind each: the order WARP comes closest to. Slower (34 dispatches and barriers per plane at 2160 rows). | The same, with nothing left in parallel between rows of blocks. |
+| `-intraedgefix` | `intra_main.hlsl` (8-bit) stops the taps of the above edge filter at the last entry the filter writes, as `intra_main_hbd.hlsl` and the left edge do, instead of at the last entry that was loaded. | The two shaders differ there. The entries between the two bounds are loaded and all hold the last available sample, so the sums are the same; `testing/intra_check` passes with either bound. The flag tests that on the device. |
+| the **uavsync package** (artifact `rav1g-testplayer-uavsync-x64-<run id>`) | Every group sync of every shader is compiled as `AllMemoryBarrierWithGroupSync()` instead of `GroupMemoryBarrierWithGroupSync()` (`/p:Rav1gUavSync=1`, an FXC define; no source differs). | A group sync of the group memory orders the group memory. Several shaders also store frame buffer words in one step and have another thread of the group load them in a later step (the horizontal loop filter from edge to edge, filter intra before its residuals are added); D3D asks for a sync of all memory for that. |
+
+The uavsync package has the identity of the normal one and version `0.2.<run>.1` where the
+normal one has `0.2.<run>.0`: it installs over the normal package of the same run and keeps
+LocalState (streams, references), and the normal package of any later run installs over it.
+Going back to the normal package of the same run needs an uninstall, which removes LocalState;
+so run the normal package first. Its log says `Experiments: shaders uavsync`. The flags work in
+it as well.
 
 ## Stage dumps (`-dumpstages`)
 
