@@ -1151,5 +1151,26 @@ the lists of that class.
 
 ### Console results
 
-Pending. The run: per clip a `-gputimedetail` pair without and with `-interfast`, and an md5 check with
-`-interfast` in a launch of its own ([test-player.md](test-player.md#inter-fast-path--interfast)).
+Package 0.2.45.0 (rav1g 0400bee), 4K, 300 frames, `-gputimedetail` without and with `-interfast` in one
+launch:
+
+| Clip | inter ms, base -> `-interfast` | GPU busy ms | decode fps |
+|---|---|---|---|
+| SVT-AV1 low-delay 40 Mbps | 7.2 -> **9.5** | 31.1 -> 34.4 | 21.4 -> 19.7 |
+| SVT-AV1 random access 12.6 Mbps | 11.0 -> **12.4** | 34.8 -> 36.4 | 26.0 -> 25.1 |
+| Jellyfin 40 Mbps | 19.2 -> 19.5 | 50.8 -> 51.1 | 16.5 -> 16.6 |
+| Chimera 4K film grain (libaom) | 54.0 -> **48.4** | 74.6 -> 69.1 | 12.8 -> 13.7 |
+
+md5-identical to dav1d with `-interfast` on all four, and without it on the Chimera and the 8-bit 4K
+clip (the `reconstruct_block` change of the default path).
+
+**Reading:** the fast path is correct but not the lever it was meant to be. On Jellyfin the copy class
+(60 % of the fetched area, no filter at all) still takes 7.6 ms of the 19.5 (`single.copy`, overlapping
+sections), h 5.2 and v 6.1 ms: skipping the filter arithmetic and the redundant rows changes the cost per
+block very little. The inter stage is not bound by filtering or reference loads but by something per
+block or per dispatch (thread-to-pixel mapping, small groups and occupancy, latency per dispatch, the
+prediction and residual writes). Splitting each block size into classes makes the dispatches smaller and
+more numerous, which is why the two SVT clips got slower; only the compound-heavy Chimera gains (10 %).
+`-interfast` stays off by default. The next step for the inter stage is a profile of what a block costs
+(a timestamp around a dispatch of a fixed size with copy-only blocks, the effect of more pixels per
+thread and of merging block sizes into fewer dispatches) rather than more filter specialisation.
