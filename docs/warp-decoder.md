@@ -83,7 +83,7 @@ warp_decoder -sm6test
 | `-name <text>` | what the `BEGIN` and `RESULT` lines call the stream (default: its file name) |
 | `-cdefv1`, `-nofitsize`, `-lowmemparts <n>`, `-lowmem`, `-slots <n>`, `-intrav2`, `-intraopt`, `-asyncclear` | as in the [test player](test-player.md#defaults-and-opt-out-flags) |
 | `-lfhsplit <n>`, `-intraedgefix` | the [experiments](test-player.md#experiments) of the test player; the conformance job runs the whole set with each, and with a decoder built with `/p:Rav1gUavSync=1` (the shaders of the uavsync package; the program prints `SHADERS uavsync`) |
-| `-poisonmi`, `-poisonbuf` | debugging, off by default: the decoder fills the mode info pool (`-poisonmi`) or every buffer the CPU writes for the shaders (`-poisonbuf`) with the byte 0xA5 when it creates it, instead of leaving what the memory held. The output must be the same; a shader that reads bytes the CPU never wrote gives another one. The decoder passes `-poisonmi` and not yet `-poisonbuf`. See [Order check and poisoned buffers](#order-check-and-poisoned-buffers) |
+| `-poisonmi`, `-poisonbuf` | debugging, off by default: the decoder fills the mode info pool (`-poisonmi`) or every buffer the CPU writes for the shaders (`-poisonbuf`) with the byte 0xA5 when it creates it, instead of leaving what the memory held. With `-poisonbuf` it also fills the constants of every stage again in every frame, right before the stage writes them (their memory is reused from frame to frame). What the decoder clears or initialises after the creation is as in a normal run. The output must be the same; a shader that reads bytes the CPU never wrote gives another one, or loses the device. The decoder passes both. See [Order check and poisoned buffers](#order-check-and-poisoned-buffers) |
 | `-interfast`, `-interfastlists` | the [inter fast path](test-player.md#inter-fast-path--interfast) of the test player: inter blocks listed by the fraction of their motion vectors (`inter_fast`, `inter_compound_fast`; with `-interfastlists` the original shaders on those lists), same output; the conformance job decodes the whole set once more with `-interfast` |
 | `-interfastmode <n>` | `av1_set_inter_fast(n)` for diagnosis: 1 is `-interfast`, +2 keeps `inter_main` on the lists of one reference, +4 `inter_compound` on those of two (7 is `-interfastlists`); 8 only makes room for the lists in the block maps and leaves the path off |
 | `-gputime`, `-gputimedetail`, `-gputimeisolate`, `-progress` | the [timing run](test-player.md#timing-run--gputime-and--nopresent) of the test player and its [inter breakdown](test-player.md#inter-prediction-breakdown--gputimedetail--gputimeisolate): the summary as `GPUTIME ...` lines on stdout, with `-progress` the per-frame lines too. On WARP the times are those of a CPU rasterizer; the counters are the stream's |
@@ -257,7 +257,7 @@ decoder's output depends on what the process decoded before. That was the case u
 read two bytes of struct padding in the mode info, and a decoder that got the memory of a
 destroyed one found other bytes there than zero. `av1-1-b8-22-svc-L2T1-2` failed that way now and
 then behind `svc-L2T1`, `av1-1-b10-00-quantizer-00` every time behind an 8-bit quantizer vector.
-The repeat alone showed the stream as `unstable`, the job was run again, and it passed. Two steps
+The repeat alone showed the stream as `unstable`, the job was run again, and it passed. Three steps
 of the job now test for it directly, with `warp_decoder` and (on `main`) with `rav1g-dec`:
 
 - **`testing/conformance/order_check.py`** decodes five sequences, each in one decoder process and
@@ -271,17 +271,27 @@ of the job now test for it directly, with `warp_decoder` and (on `main`) with `r
   `expected.txt`. With the mode info pool filled with 0xA5 at creation, a read of bytes the entropy
   decoder never wrote shows in any stream, alone and at once, without the right decoder before it.
   The whole set with the flag is one of the passes of the `experiments` input.
+- **The same part of the set with `-poisonbuf`** (`run.py --tool-args=-poisonbuf --only ...`): every
+  buffer the CPU writes for the shaders filled with 0xA5 at creation (17 kinds, the mode info pool
+  among them), and each constant record of a stage filled again when it is handed out, in every
+  frame. The constants of a frame are pieces of one upload buffer per slot that is only rewound
+  between frames, so a field that a stage does not write holds what an earlier frame had at that
+  place; filled, it has no plausible value. The `experiments` input adds the whole set with
+  `-poisonbuf`, with `-poisonbuf -interfast` and, with `warp_decoder`, with `-poisonbuf -intrav2`
+  (with `rav1g-dec` also the whole set with `-interfast`).
 
-Both pass (`cpp` 2bbfa69, run 43265811356: 5 of 5 sequences in 9 s, 137 of 137 streams in 24 s;
-`main` f561fbb, run 43267606808, on a slower runner: 14 s and 36 s, and 13 s and 36 s with
-`rav1g-dec`), and they add 33 to 50 s to the job.
+All three pass (`cpp` 15af3fb, run 43277284568: 5 of 5 sequences in 14 s, 137 of 137 streams in
+37 s with either flag; `main` 3271d43, run 43277284480: 12 s, 32 s and 30 s, and with `rav1g-dec`
+14 s, 38 s and 40 s). Together they add 1.2 to 1.5 min to the job, the step with `-poisonbuf` 30
+to 40 s of it. The whole set with these flags (run 43271723373, `experiments`): 251 of 251 in every
+pass.
 
-`-poisonbuf`, the same for every buffer the CPU writes for the shaders, is not part of the job: the
-decoder does not pass it. Poisoning one buffer at a time (run 43264623408) leaves the output right
-for 16 of the 17 buffers and breaks it for `cb_alloc`, the upload buffer of the constant buffers:
-wrong frames and, in 3 of 8 streams, the D3D12 device removed. Some shader reads a constant the
-host does not write; which one is open
-([gpu-av1-decoder.md](gpu-av1-decoder.md#-poisonbuf-the-constant-buffers-open)).
+`-poisonbuf` failed until 2026-11-12 (34 of 137 streams right, run 43262574427), because of one
+record: for a plane without loop restoration the host left the unit fields of the plane's constants
+unwritten, and `loop_restoration.hlsl` computed an address from them and loaded from it without a
+branch, from a root SRV, which has no bounds checking. That also happened in normal runs, with
+stale data in those fields
+([gpu-av1-decoder.md](gpu-av1-decoder.md#unwritten-fields-of-a-constant-record-2026-11-12)).
 
 ### Results
 
@@ -375,12 +385,39 @@ process and right alone: that is what the padding read fixed on 2026-11-12 looke
 have been its doing and not the device's. That has not been tested: the large streams keep their
 own processes.
 
+**A second cause found and removed (2026-11-12): a load at an address made of stale constants.**
+`loop_restoration.hlsl` loaded an entry of the table of restoration units for every plane, also
+for a plane that is not restored, and for such a plane the host had not written the fields the
+address is computed from: they held what an earlier frame had left at that place of the constant
+upload memory. The table is a root SRV, so the load went wherever those values pointed. In a run of
+136 streams, 110 of 346 such plane records held stale values (run 43269330205). The host now writes
+a valid unit grid for such a plane and the shader loads under a branch, for a restored plane only
+([gpu-av1-decoder.md](gpu-av1-decoder.md#unwritten-fields-of-a-constant-record-2026-11-12)). It
+is the candidate for the removals that were left after the palette load; whether they are gone is
+what the count below is for.
+
 Because the stream it hits changes, it cannot be listed in `expected.txt`. `run.py` decodes a
 stream whose run lost the device again alone, up to three times, and takes the result of a run
 that kept its device; every loss is reported under "D3D12 device removed" in the summary and on a
 `D3D12 DEVICE REMOVED` line of the log. The run does not fail on a lost device. It fails, as
 before, on a stream that fails with its device, and on one that loses the device three times
 alone.
+
+**The count.** Every run of `run.py` and of `order_check.py` ends with one line, also when nothing
+was removed:
+
+```
+D3D12 DEVICE REMOVALS: 0 in 6 decoder processes (with -interfast)
+D3D12 DEVICE REMOVALS: 1 in 8 decoder processes: nf-chimera-10b-1080p.ivf [first in its process]
+```
+
+One removal is one decoder process that lost the device (the first pass and the repeats alone
+count alike), with the first stream of the process that reported it and where it was. The line is
+in the step summary too, and a run with a removal gets a warning annotation
+(`D3D12 device removed`). With `gh run view <run> --log | grep 'DEVICE REMOVALS'` the passes of a
+run are one line each. The repeats stay until the count has been 0 over enough runs; since the fix
+of 2026-11-12: 0 in the 213 decoder processes of the first three runs (43271723373 with the
+`experiments` input, 43277284568 on `cpp`, 43277284480 on `main`).
 
 Two streams that are wrong on the console pass here: the 8-bit 4K stream
 (`nf-dvbdash-a1-8b-2160p.ivf`, luma off by ±1–2 on the console) and the stream with scaled

@@ -1296,7 +1296,8 @@ The other data the CPU writes for the shaders:
 - The transform block records (`tx_block_info_gpu`) and all constant buffers (`GenBlockData`,
   `GenLfData`, the inter, intra, loop filter, CDEF, restoration, film grain and transform structs)
   are made of 32-bit words only, so they have no padding. That says nothing about members the host
-  does not set; see `-poisonbuf` below.
+  does not set; see `-poisonbuf` below and
+  [Unwritten fields of a constant record](#unwritten-fields-of-a-constant-record-2026-11-12).
 - Buffers whose unwritten parts are read are cleared by the host: the coefficient buffer when
   the decoder is created and for every frame (the entropy decoder skips zero coefficients), the
   mode info grid and the intra iteration grid for every frame.
@@ -1337,10 +1338,10 @@ Results on WARP, commit 2bbfa69 on `cpp` (run 43265811356) and f561fbb on `main`
 
 The two steps add 33 to 50 s to the `conformance` job, which sets the time of a run.
 
-### `-poisonbuf`: the constant buffers (open)
+### `-poisonbuf`: the constant buffers
 
 `-poisonbuf` does the same for every buffer the CPU writes for the shaders, 17 kinds, the pool
-among them. The decoder does not pass it: of the 137 streams 34 were right (run 43262574427, the
+among them. The decoder did not pass it: of the 137 streams 34 were right (run 43262574427, the
 same with `warp_decoder` and `rav1g-dec`), the others were wrong from the first or the second
 frame, also alone, and many runs ended with the D3D12 device removed (`0x887A0005` at the next
 allocation). One buffer at a time (run 43264623408; 8 streams, each alone in a process:
@@ -1356,19 +1357,230 @@ allocation). One buffer at a time (run 43264623408; 8 streams, each alone in a p
 | all 17 | 0 of 8; the device removed in 4 |
 
 So the pool and 15 other buffers do not depend on what their memory held, and the constant buffers
-do: some shader reads a constant that the host does not write, and gets 0 from a first decoder's
-memory. Which constant is open. It matters beyond the flag: a wrong frame followed by a removed
-device is what the conformance run sees now and then on WARP
-([warp-decoder.md](warp-decoder.md#results)), and a decoder that gets used memory for `cb_alloc`
-would be in the state the flag makes. That is a lead, not a finding. `-poisonbuf` stays a flag and
-out of CI until the read is found.
+did: a shader read constants that the host did not write. Which ones, and the fix, are the next
+section, [Unwritten fields of a constant record](#unwritten-fields-of-a-constant-record-2026-11-12):
+the unit fields of a plane without loop restoration. The decoder passes `-poisonbuf` now and CI
+runs it.
 
 ### What it does not explain
 
 - The removals of the D3D12 device on WARP ([warp-decoder.md](warp-decoder.md#results)): not this
-  read. The constant buffers above are the lead for them.
+  read. The constant record of the next section is the candidate for them.
 - The about 75 MiB that stay behind after a decoder is destroyed in md5 runs on the console.
 - Not run on the console. Whether the console hands a decoder the used memory of a destroyed one
   as WARP does is not known. The changed instruction is of a kind `gen_pred_blocks` already has
   there (`ibfe` with a literal width and offset); a console run of a package with the change is
   still to do.
+
+## Unwritten fields of a constant record (2026-11-12)
+
+The decoder failed with `-poisonbuf`, and of the 17 kinds of buffer the flag fills only one
+mattered: `cb_alloc`, the upload memory of a slot's constant records
+([above](#-poisonbuf-the-constant-buffers)). The cause was one record of one stage, loop
+restoration, and it did not need the flag: the same read happened in normal runs, with whatever an
+earlier frame had left in the memory.
+
+### Symptom
+
+- With `-poisonbuf` 34 of 137 streams were right, the others wrong from the first or the second
+  frame, also alone, and many runs ended with the D3D12 device removed (run 43262574427). Filling
+  one buffer at a time, only `cb_alloc` did it: 0 of 8 streams right, the device removed in 3
+  (run 43264623408).
+- Without the flag nothing was wrong in the output. What there was, on WARP, is the device removed
+  once or twice in a conformance run, at another stream from run to run
+  ([warp-decoder.md](warp-decoder.md#results)): a wrong frame or the frame before, then
+  `0x887A0005`. That is what this read does when it lands outside of mapped memory, so it is the
+  candidate for those removals. It is not proven to be their cause; see "Open" below.
+
+### Cause
+
+`av1_looprestoration` (dx/loopfilters.cpp) writes one `PlaneRestorationData` per plane and
+dispatches `loop_restoration.hlsl` once per plane. For a plane whose restoration type is
+`RESTORE_NONE` (the frame restores another plane, this one is only copied) it wrote the plane's
+sizes and offsets and then went on to the next plane:
+
+```c++
+    if (cm->rst_info[p].frame_restoration_type == RESTORE_NONE) {
+      continue;
+    }
+    pl_data[p].units.Rows = ...;  pl_data[p].units.Cols = ...;
+    pl_data[p].units.Size = ...;  pl_data[p].units.Stride = ...;
+    pl_data[p].Lr_buffer_offset = lr_ptr;
+```
+
+So `units.Rows`, `units.Cols`, `units.Size`, `units.Stride` and `Lr_buffer_offset` of such a
+plane were never written. The shader computed the plane's restoration unit from them all the same:
+
+```hlsl
+  UnitsInfo units = pl[plane_id].units;
+  int unitCol = min(units.Cols - 1, uint(gx + 1) / units.Size);
+  int unitRow = min(units.Rows - 1, uint((gy + 1 + (8 >> subsampling))) / units.Size);
+  int unitId = unitRow * units.Stride + unitCol + pl[plane_id].Lr_buffer_offset;
+  int4 rType = int4(RESTORE_NONE, 0, 0, 0);
+  if (do_restoration) rType = LrTypeSgr.Load4(unitId * 16);
+```
+
+The `if` reads as if a plane without restoration loaded nothing. FXC compiled it without a
+branch, the load first and a select behind it:
+
+```
+ishl r0.z, r0.y, l(4)
+ld_raw_indexable(raw_buffer)(mixed,mixed,mixed,mixed) r1.xyzw, r0.z, t1.xyzw
+movc r1.xyzw, cb2[0].xxxx, r1.xyzw, l(0,0,0,0)
+```
+
+Every thread of every group of such a plane loaded 16 bytes of `LrTypeSgr` at `unitId * 16` and
+threw them away. `LrTypeSgr` (`loop_rest_types`, 16 bytes per entry: 12 960 bytes for a
+1920x1152 decoder) is bound as a root SRV, and a root descriptor has no bounds checking: the load
+goes wherever the address says, and when there is no memory there the device is removed. It is the
+second case of this kind; the first was the load from the palette placeholder in
+`reconstruct_block` ([warp-decoder.md](warp-decoder.md#results)).
+
+What the five fields held is what the memory held. The constant records of a frame are pieces of
+one upload buffer per slot, handed out one behind the other (`ComputeCommandBuffer::Alloc`,
+dx/types.h), and for the next frame of the slot the buffer is only rewound
+(`ComputeCommandBuffer::Reset`), not cleared. A record therefore starts with what an earlier frame
+of the slot wrote at the same place, which is another record whenever the frames do not have the
+same stages, tiles and transform sizes: a scan table, the loop filter's constants, a restoration
+record of a frame that did restore the plane.
+
+- With `-poisonbuf` at creation the fields are 0xA5A5A5A5 in the first frame: `Size` that large
+  makes the unit row and column 0, and `unitId` is `Lr_buffer_offset`, 0xA5A5A5A5; times 16 in 32
+  bits that is byte 0x5A5A5A50, 1.4 GiB behind the start of a table of a few KiB.
+- In a normal run (run 43269330205, the fields logged, nothing filled; 136 streams): of 346 plane
+  records without restoration 110 had unit fields that were not 0. Examples, `Rows, Cols, Size,
+  Stride` and `Lr_buffer_offset`: `0x101, 0x140, 0x140, 0x140` and `6`; `0xD2, 0xE1, 0xD3, 0xE2`
+  and `0xD5`; `0x74F, 0x710, 0x6D1, 0x692` and `0x5D5`; `0x10, 0x14, 0x18, 0x1C` and `9` (a scan
+  table). Most of these give an address inside or shortly behind the table, which is why the
+  output never showed anything and the device was lost rarely.
+
+### Evidence
+
+All on WARP, `warp_decoder`, diagnostic builds on throwaway branches (a switch for the host
+defaults of the fix, a switch to fill one kind of record when it is handed out).
+
+| run | what | result |
+| --- | --- | --- |
+| 43262574427 | 137 streams, `-poisonbuf` (17 buffers filled at creation) | 34 right; wrong frames, device removed |
+| 43264623408 | 8 streams, one buffer filled at a time | only `cb_alloc`: 0 of 8, device removed in 3 |
+| 43269330205 | 136 streams, nothing filled, the unwritten fields logged | 136 right; 110 of 346 records of a plane without restoration hold stale unit fields |
+| 43268279561 | 136 streams, host defaults, all buffers filled at creation | 136 of 136 |
+| 43268279561 | 136 streams, host defaults, every constant record filled when handed out | 136 of 136 |
+| 43268279561 | 7 streams, the same with `-intrav2`, and with `-interfast` | 7 of 7 each |
+| 43268279561, 43269330205 | 1 stream, only the `GenLfData` record filled when handed out | wrong without the host defaults, right with them |
+
+The last line looked like a second case in the loop filter and is the same one: the restoration
+record of a later frame was at the place where an earlier frame had its filled `GenLfData`, and the
+log shows it there with `Size`, `Stride` and `Lr_buffer_offset` 0xA5A5A5A5.
+
+### Fix
+
+Both sides (25c85ca on `cpp`):
+
+- **Host**: the record of a plane without restoration gets a valid unit grid of one unit at entry
+  0 of the table: `units = {1, 1, 1, 1}`, `Lr_buffer_offset = 0`. Whatever a shader computes from
+  the record is then inside the table.
+- **Shader**: the unit, its address and the load are inside `[branch] if (do_restoration)`. The
+  listing of `loop_restoration` (FXC, cs_5_0) now has
+
+  ```
+  if_nz cb2[0].x
+    ...
+    ishl r0.z, r0.y, l(4)
+    ld_raw_indexable(raw_buffer)(mixed,mixed,mixed,mixed) r1.xyzw, r0.z, t1.yzxw
+  else
+    mov r0.y, l(0)
+    mov r1.xyzw, l(0,0,0,0)
+  endif
+  ```
+
+  and no other load of `t1`; the loads of `t2` (the Wiener filters) were and are inside the branch
+  of a Wiener unit. 494 instruction slots instead of 490. The listing scan (`testing/dxbc_scan`)
+  finds no paired read in the new listing and its allow-list is unchanged; `sync_check` passes
+  (every group sync reached by all threads: the branch depends on a constant of the dispatch).
+
+A restored plane computes what it did and a plane without restoration only copies, so the output
+is the same: the conformance set gives the md5 of its references as before, 251 of 251 with both
+programs, without and with `-interfast` (results below).
+
+### Audit: the other constant records
+
+The stages hand out 15 kinds of record, all from the same memory:
+
+| stage | records |
+| --- | --- |
+| inverse transform (`av1_idct_run`) | `cb_sort_data` per tile, `idct_frame_data`, a scan table per transform size |
+| block lists (`av1_prediction_gen_blocks`) | `GenBlockData` |
+| inter and intra prediction (`av1_prediction_run_all`) | `PSSLInterData`, `PSSLIntraData` |
+| border extension (`av1_inter_ext_borders`) | its `CBData` |
+| loop filter (`av1_loopfilter_gpu`) | `GenLfData`, `LoopfilterData` |
+| super-resolution (`av1_superres`) | `UpscaleData` |
+| CDEF (`av1_cdef_filter_run`) | `CDefData` |
+| loop restoration (`av1_looprestoration`) | `RestorationData`, `PlaneRestorationData` of the 3 planes |
+| film grain (`av1_filmgrain_run`, also in the output contexts) | `FilmGrainGenData`, `FilmGrainData` |
+
+Two things say that the unit fields were the only case:
+
+- **By reading**: the fields of every record against what its stage writes and what the shaders
+  bound to it read. Records do have words that nobody writes: `reserved` and three of the four
+  words of each offset in `cb_sort_data`, two of the four words per plane in `idct_frame_data`,
+  `pad` of `PlaneRestorationData`, the rest of a piece behind its struct (pieces are multiples of
+  256 bytes). No shader reads those. The unit fields and `Lr_buffer_offset` of a plane without
+  restoration were the only unwritten ones that a shader read.
+- **By test**: with `-poisonbuf` every one of these records is now filled with 0xA5 when it is
+  handed out, in every frame, so an unwritten field never has a plausible value. The whole set
+  gives the same output that way, also on the fast inter path and with the second intra
+  scheduler (results below). In the diagnostic run 43264623408 filling each of the other 16
+  buffers at creation had already left the output right.
+
+### Checks that stay
+
+- **`-poisonbuf` now fills the constants in every frame** (`warp_decoder`, `rav1g-dec`;
+  `av1_set_poison_buffers(AV1_POISON_BUFFERS)`). As before, every buffer the CPU writes for the
+  shaders is filled with 0xA5 right after the decoder has created it; what the decoder clears or
+  initialises afterwards is as in a normal run (the coefficient buffer, which is cleared once and
+  has to stay 0 between frames, and the grids cleared per frame). New: each constant record is
+  filled again when it is handed out, right before its stage writes it
+  (`ComputeCommandBuffer::Alloc`), in the frame slots and in the output contexts. A fill at creation
+  alone covers the first frame of a slot only.
+- **CI**: the 137 streams that run with `-poisonmi` also run with `-poisonbuf` on every push, with
+  `warp_decoder` and (on `main`) with `rav1g-dec`. With the workflow's `experiments` input the
+  whole set runs with `-poisonbuf`, with `-poisonbuf -interfast` and (`warp_decoder`) with
+  `-poisonbuf -intrav2`.
+- **A count of the device removals**: `run.py` and `order_check.py` print one line per run, also
+  when the count is 0, `D3D12 DEVICE REMOVALS: <n> in <m> decoder processes`, with the streams
+  when there are any; the line is in the step summary, and a run with a removal gets a warning.
+  The repeat of a stream whose run lost the device is still there
+  ([warp-decoder.md](warp-decoder.md#results)).
+
+Results on WARP, 15af3fb on `cpp` (run 43277284568) and 3271d43 on `main` (run 43277284480):
+
+| | `cpp`, `warp_decoder` | `main`, `warp_decoder` | `main`, `rav1g-dec` |
+| --- | --- | --- | --- |
+| conformance set | 251 of 251, 2.5 min | 251 of 251, 2.0 min | 251 of 251, 2.5 min |
+| conformance set with `-interfast` | 251 of 251, 2.5 min | 251 of 251, 1.9 min | in the run below |
+| order check, 5 sequences, 28 streams | pass, 14 s | pass, 12 s | pass, 14 s |
+| 137 streams with `-poisonmi` | 137 of 137, 37 s | 137 of 137, 32 s | 137 of 137, 38 s |
+| 137 streams with `-poisonbuf` | 137 of 137, 37 s | 137 of 137, 30 s | 137 of 137, 40 s |
+| decoder processes that lost the device | 0 of 25 | 0 of 25 | 0 of 17 |
+
+The `rav1g-dec` of the Linux build (`main`, clang-cl): 251 of 251, no device lost in 8 processes.
+The step with `-poisonbuf` adds 30 to 40 s to the `conformance` and the `rust` job.
+
+The whole set, run 43271723373 (the workflow started by hand with the `experiments` input on the
+commit that is now 3271d43 on `main`): 251 of 251 in every pass. `warp_decoder`: plain, with
+`-interfast`, `-poisonmi`, `-poisonbuf`, `-poisonbuf -interfast`, `-poisonbuf -intrav2`,
+`-lfhsplit 1`, `-lfhsplit 2`, `-intraedgefix` and with the uavsync shaders. `rav1g-dec`: plain, with
+`-interfast`, `-poisonbuf` and `-poisonbuf -interfast`, and the Linux build plain. The order check
+and the two parts of 137 streams passed with both programs. No device was lost in the 138 decoder
+processes of the run's 21 passes.
+
+### Open
+
+- **Whether the removals on WARP are gone.** This read explains them (an unchecked load at an
+  address made of stale data, in normal runs, at another place from run to run) and the runs with
+  the fix lost no device, but a few runs without a removal prove little: they happened once or
+  twice per run before the palette load was fixed and rarely since. The count line of the next
+  runs is the test. The repeat stays until it has been 0 for long enough to say so.
+- **Not run on the console.** The console does not check root descriptors either. What a load at
+  such an address does there is not known; nothing in the console's output pointed at it.

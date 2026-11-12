@@ -116,9 +116,20 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
   decoding anything again alone, and 137 streams with the mode info filled with 0xA5 when the
   decoder is created (`-poisonmi`)
   ([gpu-av1-decoder.md](docs/gpu-av1-decoder.md#padding-of-the-mode-info-record-2026-11-12)).
-  Open: with every CPU-written buffer filled that way (`-poisonbuf`) the decoder fails, because of
-  the constant buffers alone; some shader reads a constant the host does not write. That is the
-  lead for the D3D12 device removals seen now and then on WARP.
+- **A load at an address made of stale constants** (fixed, rav1g 25c85ca; found and verified on
+  WARP, not yet run on the console). For a plane without loop restoration the host left the unit
+  fields of the plane's constants unwritten, and `loop_restoration.hlsl` computed the address of a
+  table entry from them and loaded it without a branch (FXC had turned the `if` into a load and a
+  select). The constants of a frame are in upload memory that is only rewound between frames, so
+  the fields held what an earlier frame had left there (110 of 346 such records in a run of 136
+  streams), and the table is a root SRV, without bounds checking: a load outside of mapped memory
+  removes the D3D12 device. The output was never wrong. The host now writes a valid unit grid and
+  the shader loads under a branch, for restored planes only. It showed with every CPU-written
+  buffer filled with 0xA5 (`-poisonbuf`), which the decoder failed and now passes; the flag also
+  fills the constants of every stage again in every frame, and CI decodes 137 streams with it on
+  every push. This read is the candidate for the D3D12 device removals seen now and then on WARP:
+  the conformance runs print a count of them to tell
+  ([gpu-av1-decoder.md](docs/gpu-av1-decoder.md#unwritten-fields-of-a-constant-record-2026-11-12)).
 - **Every stream we test is md5-identical to dav1d on the console and on WARP**: 251 conformance
   streams on WARP; on the console the 8-bit and 10-bit clips from 66x66 to 4K, hidden frames, film
   grain, global motion, spatial layers, size changes, scaled references and superres.
