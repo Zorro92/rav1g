@@ -21,7 +21,8 @@ use super::memory::rav1g_poison_constants;
 use crate::gpu::d3d12::com_ref;
 use crate::gpu::{BufferLocation, BufferRef, Commands, LayoutRef, PipelineRef};
 use crate::sys::host::{
-    Av1Core, ComputeCommandBuffer, ComputeShader, GpuBufferObject, HwFrameBuffer, HwOutputImage, av1_stage_dump_region,
+    AV1_COMMON, Av1Core, ComputeCommandBuffer, ComputeShader, GpuBufferObject, HwFrameBuffer, HwOutputImage,
+    av1_perf_inter_detail, av1_stage_dump_region,
 };
 
 // The functions of av1_core.cpp the stages call, through crates/rav1g-sys/glue/av1_core_calls.cpp.
@@ -43,6 +44,9 @@ unsafe extern "C" {
         regions: *const av1_stage_dump_region,
         count: c_int,
     );
+    fn rav1g_core_perf_inter_begin(dec: *mut Av1Core) -> *mut av1_perf_inter_detail;
+    fn rav1g_core_perf_inter_mark(dec: *mut Av1Core, stage: c_int, section: c_int, list: c_int);
+    fn rav1g_core_stage_dump_mode_info(dec: *mut Av1Core, cm: *mut AV1_COMMON);
     /// `av1_perf_ticks` of av1_core.cpp (`dx/av1_core.h`): the clock of the timing run, 0 while timing is
     /// off.
     fn av1_perf_ticks() -> i64;
@@ -233,4 +237,34 @@ pub(crate) unsafe fn stage_dump_data(
     unsafe {
         rav1g_core_stage_dump_data(dec, stage.as_ptr(), text.as_ptr().cast(), regions.as_ptr(), regions.len() as c_int);
     }
+}
+
+/// `av1_perf_inter_begin`: the inter breakdown of the frame of the current command list
+/// (-gputimedetail), cleared, or null when the frame has none; the stage fills its dispatch counters.
+///
+/// # Safety
+/// `dec` is the decoder while it records a frame.
+pub(crate) unsafe fn perf_inter_begin(dec: *mut Av1Core) -> *mut av1_perf_inter_detail {
+    // SAFETY: the caller's contract.
+    unsafe { rav1g_core_perf_inter_begin(dec) }
+}
+
+/// `av1_perf_inter_mark`: a timestamp for a section of the inter breakdown (and for its dispatch `list`,
+/// or -1), counted to `stage`.
+///
+/// # Safety
+/// `dec` is the decoder while it records a frame with a breakdown.
+pub(crate) unsafe fn perf_inter_mark(dec: *mut Av1Core, stage: c_int, section: c_int, list: c_int) {
+    // SAFETY: the caller's contract.
+    unsafe { rav1g_core_perf_inter_mark(dec, stage, section, list) };
+}
+
+/// `av1_stage_dump_mode_info`: -dumpstages, the frame's mode info as the stages read it: the grid, and
+/// the records of the frame's tiles.
+///
+/// # Safety
+/// `dec` is the decoder while it records a frame; `cm` is the frame's.
+pub(crate) unsafe fn stage_dump_mode_info(dec: *mut Av1Core, cm: *mut AV1_COMMON) {
+    // SAFETY: the caller's contract.
+    unsafe { rav1g_core_stage_dump_mode_info(dec, cm) };
 }

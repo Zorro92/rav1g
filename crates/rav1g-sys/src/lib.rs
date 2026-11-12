@@ -38,19 +38,76 @@ pub mod host {
 
 unsafe extern "C" {
     fn rav1g_c_tables(index: u32, name: *mut *const std::ffi::c_char, size: *mut u32) -> *const std::ffi::c_void;
+    fn rav1g_host_tables(index: u32, name: *mut *const std::ffi::c_char, size: *mut u32) -> *const std::ffi::c_void;
+}
+
+/// Inline functions of the C and C++ headers as the compiler of the build has them, for the tests of
+/// their Rust ports in the `rav1g` crate (`C_FUNCTION_PROBES` and `HOST_FUNCTION_PROBES` in `build.rs`).
+pub mod probe {
+    use std::ffi::c_int;
+
+    use crate::host::{IntraV2Dispatch, IntraV2Sched};
+
+    unsafe extern "C" {
+        /// `scale_chroma_bsize` of `av1/common/onyxc_int.h`.
+        pub fn rav1g_probe_scale_chroma_bsize(bsize: c_int, ss_x: c_int, ss_y: c_int) -> c_int;
+        /// `av1_get_max_uv_txsize` of `av1/common/blockd.h`.
+        pub fn rav1g_probe_max_uv_txsize(bsize: c_int, ss_x: c_int, ss_y: c_int) -> c_int;
+        /// `is_interintra_pred` of `av1/common/blockd.h` for a mode info with these four fields.
+        pub fn rav1g_probe_is_interintra_pred(sb_type: c_int, mode: c_int, ref0: c_int, ref1: c_int) -> c_int;
+        /// `av1_extract_interp_filter` of `av1/common/filter.h`.
+        pub fn rav1g_probe_extract_interp_filter(filters: u32, x_filter: c_int) -> c_int;
+        /// `intra_v2_place` of `dx/intra_v2_sched.h`.
+        pub fn rav1g_probe_intra_v2_place(
+            s: *const IntraV2Sched,
+            tile_base: u32,
+            is_uv: c_int,
+            cx: c_int,
+            cy: c_int,
+            w_log: c_int,
+            h_log: c_int,
+            above_left: c_int,
+            above_count: c_int,
+            left_count: c_int,
+            cfl: c_int,
+            bucket: u32,
+            index: u32,
+        );
+        /// `intra_v2_sort` of `dx/intra_v2_sched.h`.
+        pub fn rav1g_probe_intra_v2_sort(list: *mut u64, count: c_int);
+        /// `intra_v2_next_dispatch` of `dx/intra_v2_sched.h`.
+        pub fn rav1g_probe_intra_v2_next_dispatch(
+            list: *const u64,
+            count: c_int,
+            first: c_int,
+            d: *mut IntraV2Dispatch,
+        ) -> c_int;
+    }
 }
 
 /// The bytes of a table that is `static` in a header of the decoder, as the C compiler of the build has
 /// it: for the tests that hold the Rust copy of such a table against the header. `None` for a name the
 /// probe does not have (the list is `C_TABLES` in `build.rs`).
 pub fn c_table(name: &str) -> Option<&'static [u8]> {
+    probed_table(rav1g_c_tables, name)
+}
+
+/// The same for a table of a header of the C++ host (`HOST_TABLES` in `build.rs`), as the C++ compiler
+/// of the build has it.
+pub fn host_table(name: &str) -> Option<&'static [u8]> {
+    probed_table(rav1g_host_tables, name)
+}
+
+type TableProbe = unsafe extern "C" fn(u32, *mut *const std::ffi::c_char, *mut u32) -> *const std::ffi::c_void;
+
+fn probed_table(tables: TableProbe, name: &str) -> Option<&'static [u8]> {
     for index in 0.. {
         let mut entry_name = std::ptr::null();
         let mut size = 0u32;
         // SAFETY: the probe returns null behind its last entry, else a static table of `size` bytes and
         // its static name.
         unsafe {
-            let data = rav1g_c_tables(index, &mut entry_name, &mut size);
+            let data = tables(index, &mut entry_name, &mut size);
             if data.is_null() {
                 break;
             }

@@ -44,6 +44,7 @@ const REPLACED_BY_RUST: &[&str] = &[
     "libav1/dx/av1_memory.cpp",
     "libav1/dx/av1_thread.cpp",
     "libav1/dx/loopfilters.cpp",
+    "libav1/dx/prediction.cpp",
     "libav1/dx/transform.cpp",
     "libav1/dx/vp9dx_linear_allocator.cpp",
 ];
@@ -376,13 +377,93 @@ const HOST_TYPES: &[&str] = &["AV1Decoder", "AV1_COMMON", "MACROBLOCKD"];
 
 /// Tables and limits of the entropy decoder that the Rust host modules read: `extern` in its headers, so
 /// the bindings declare the C symbol.
-const HOST_VARS: &[&str] =
-    &["warped_filter", "wedge_params_lookup", "ii_weights1d", "ii_size_scales", "av1_idct_scans", "sgr_params"];
+const HOST_VARS: &[&str] = &[
+    "warped_filter",
+    "wedge_params_lookup",
+    "ii_weights1d",
+    "ii_size_scales",
+    "av1_idct_scans",
+    "sgr_params",
+    "av1_filter_intra_taps",
+    "REF_NO_SCALE",
+    "SCALE_SUBPEL_BITS",
+    "INVALID_IDX",
+];
 
 /// Tables that are `static` in a header of the decoder and that the Rust host modules have a copy of
 /// (`crates/rav1g/src/host/tables.rs`): name and the expression of its bytes. The C probe exports them so
 /// that a test can hold the copy against the header ([`table_source`]).
-const C_TABLES: &[&str] = &["block_size_wide", "block_size_high", "ss_size_lookup", "tx_size_wide", "tx_size_high"];
+const C_TABLES: &[&str] = &[
+    "block_size_wide",
+    "block_size_high",
+    "ss_size_lookup",
+    "tx_size_wide",
+    "tx_size_high",
+    "mi_size_wide_log2",
+    "mi_size_high_log2",
+    "max_txsize_rect_lookup",
+    "interintra_to_intra_mode",
+    "sm_weight_arrays",
+    "tx_size_wide_log2",
+    "tx_size_high_log2",
+    "max_neighbor_obmc",
+    "quant_dist_weight",
+    "quant_dist_lookup_table",
+    "av1_sub_pel_filters_4",
+    "av1_sub_pel_filters_4smooth",
+    "av1_bilinear_filters",
+    "av1_sub_pel_filters_8",
+    "av1_sub_pel_filters_8smooth",
+    "av1_sub_pel_filters_8sharp",
+];
+
+/// The same for tables of the headers of the C++ host (`libav1/dx/av1_compute.h`), from the C++ probe.
+const HOST_TABLES: &[&str] =
+    &["obmc_mask", "InterBlockSizeIndexLUT", "InterBlockWidthLUT", "InterBlockHeightLUT", "intra_mode_shader_params"];
+
+/// Inline functions of the entropy decoder's headers that the Rust host modules have a port of, as
+/// functions of the C probe: the tests of the ports call them.
+const C_FUNCTION_PROBES: &str = r#"
+#include <string.h>
+
+int rav1g_probe_scale_chroma_bsize(int bsize, int ss_x, int ss_y) {
+  return scale_chroma_bsize((BLOCK_SIZE)bsize, ss_x, ss_y);
+}
+
+int rav1g_probe_max_uv_txsize(int bsize, int ss_x, int ss_y) {
+  return av1_get_max_uv_txsize((BLOCK_SIZE)bsize, ss_x, ss_y);
+}
+
+int rav1g_probe_is_interintra_pred(int sb_type, int mode, int ref0, int ref1) {
+  MB_MODE_INFO mi;
+  memset(&mi, 0, sizeof(mi));
+  mi.sb_type = (BLOCK_SIZE)sb_type;
+  mi.mode = (PREDICTION_MODE)mode;
+  mi.ref_frame[0] = (MV_REFERENCE_FRAME)ref0;
+  mi.ref_frame[1] = (MV_REFERENCE_FRAME)ref1;
+  return is_interintra_pred(&mi);
+}
+
+int rav1g_probe_extract_interp_filter(unsigned int filters, int x_filter) {
+  return av1_extract_interp_filter(filters, x_filter);
+}
+"#;
+
+/// The scheduler of -intrav2 (`libav1/dx/intra_v2_sched.h`, inline C++) as functions of the C++ probe,
+/// for the test of its Rust port.
+const HOST_FUNCTION_PROBES: &str = r#"
+extern "C" void rav1g_probe_intra_v2_place(const IntraV2Sched *s, uint32_t tile_base, int is_uv, int cx, int cy,
+                                           int w_log, int h_log, int above_left, int above_count, int left_count,
+                                           int cfl, uint32_t bucket, uint32_t index) {
+  intra_v2_place(s, tile_base, is_uv, cx, cy, w_log, h_log, above_left, above_count, left_count, cfl, bucket, index);
+}
+
+extern "C" void rav1g_probe_intra_v2_sort(uint64_t *list, int count) { intra_v2_sort(list, count); }
+
+extern "C" int rav1g_probe_intra_v2_next_dispatch(const uint64_t *list, int count, int first, IntraV2Dispatch *d) {
+  return intra_v2_next_dispatch(list, count, first, d);
+}
+"#;
 
 /// The structs of the C++ host whose layout the tests hold against the C++ compiler of the build
 /// (host_layout_probe.cpp): what the Rust host modules read or write in place.
@@ -475,7 +556,9 @@ fn c_field(field: &str) -> &str {
 fn probe_source_c(probes: &[Probe]) -> String {
     let mut text = String::from(
         "/* Written by build.rs: the layouts as this compiler has them. */\n\
-         #include <stddef.h>\n#include <stdint.h>\n\n#include \"wrapper.h\"\n#include \"shared.h\"\n\n\
+         #include <stddef.h>\n#include <stdint.h>\n\n#include \"wrapper.h\"\n#include \"shared.h\"\n\
+         #include \"av1/common/onyxc_int.h\"\n#include \"av1/common/filter.h\"\n\
+         #include \"av1/common/reconintra.h\"\n#include \"aom_dsp/intrapred_common.h\"\n\n\
          typedef struct {\n  const char *name;\n  uint32_t size;\n  uint32_t offset;\n  uint32_t align;\n\
          } rav1g_layout_entry;\n\nstatic const rav1g_layout_entry rav1g_layout_entries[] = {\n",
     );
@@ -495,6 +578,7 @@ fn probe_source_c(probes: &[Probe]) -> String {
          \x20 return rav1g_layout_entries;\n}\n",
     );
     text.push_str(&table_source(C_TABLES, "rav1g_c_tables"));
+    text.push_str(C_FUNCTION_PROBES);
     text
 }
 
@@ -544,6 +628,11 @@ fn probe_source_cpp(probes: &[Probe]) -> String {
          \x20 *count = (uint32_t)(sizeof(rav1g_host_layout_entries) / sizeof(rav1g_host_layout_entries[0]));\n\
          \x20 return rav1g_host_layout_entries;\n}\n",
     );
+    text.push_str(
+        &table_source(HOST_TABLES, "rav1g_host_tables")
+            .replace("\nconst void *rav1g_host_tables(", "\nextern \"C\" const void *rav1g_host_tables("),
+    );
+    text.push_str(HOST_FUNCTION_PROBES);
     text
 }
 

@@ -18,14 +18,17 @@
 // The stages index several tables of the C structs with one index, as the C++ they come from does.
 #![allow(clippy::needless_range_loop)]
 
+mod blocks;
 mod compute;
 mod core;
 mod film_grain;
+mod intra_v2;
 pub(crate) mod log;
 mod loopfilter;
 mod memory;
 mod output;
 mod postfilter;
+mod prediction;
 mod tables;
 mod thread;
 mod transform;

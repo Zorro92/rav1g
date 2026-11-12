@@ -1,7 +1,8 @@
 # Rust port, phase 1: design
 
-Status: started 2026-11-12; steps 1 (build skeleton, `rav1g-dec`) and 2 (bindings for the shared structs,
-layout tests) are in the tree, step 3 (leaf modules) is under way, see [Progress](#progress).
+Status: started 2026-11-12; steps 1 (build skeleton, `rav1g-dec`), 2 (bindings for the shared structs,
+layout tests) and 3 (leaf modules: every file of the host but `av1_core.cpp` is Rust in the cargo build)
+are in the tree, see [Progress](#progress).
 Branch `main`. The C++ decoder at tag `v0.3.0` (branch `cpp`) is the reference: every step below has to
 decode the conformance set md5-identically to it and to dav1d.
 
@@ -281,7 +282,7 @@ Deviations from the design above, and why:
 - **Nothing is published or reserved on crates.io**; the manifests say `publish = false` until step 5
   (see Licence and naming).
 
-### Step 3: leaf modules (2026-11-12, under way)
+### Step 3: leaf modules (2026-11-12)
 
 How a module replaces a C++ file, the same for every module of this step:
 
@@ -354,6 +355,7 @@ of AOM pass there in two minutes. CI on WARP stays the gate.
 | 3. Shader library, constant tables | `av1_compute.cpp` (759) | `host/compute.rs` (729), `host/tables.rs` (167); `gpu/mod.rs` and `gpu/d3d12.rs` grow to 114 and 509 | `glue/av1_compute.cpp` (231, of which 93 includes and 93 table lines) | see below |
 | 4. Inverse transform stage | `transform.cpp` (141) | `host/transform.rs` (159), `host/core.rs` (123); `gpu/d3d12.rs` grows to 669 | `glue/transform.cpp` (18), `glue/av1_core_calls.cpp` (22) | see below |
 | 5. Loop filter, CDEF, superres, loop restoration, film grain, output copy | `loopfilters.cpp` (1,226) | `host/loopfilter.rs` (303), `host/postfilter.rs` (587), `host/film_grain.rs` (448), `host/output.rs` (327); `host/core.rs` grows to 236, `gpu/d3d12.rs` to 743, `gpu/mod.rs` to 152 | `glue/loopfilters.cpp` (42), `glue/av1_core_calls.cpp` grows to 37 | see below |
+| 6. Prediction | `prediction.cpp` (1,590) | `host/blocks.rs` (1,125), `host/prediction.rs` (1,285), `host/intra_v2.rs` (366); `host/tables.rs` grows to 363, `host/core.rs` to 270 | `glue/prediction.cpp` (29), `glue/av1_core_calls.cpp` grows to 45 | see below |
 
 Module 1, allocator and log lines:
 
@@ -489,6 +491,63 @@ layouts `-dumpstages` writes. In particular:
 Checked before the push on the local decoder (wine, vkd3d, lavapipe): the 244 vectors of AOM plain, with
 `-poisonbuf`, with `-cdefv1`, with `-lfhsplit 1` and `-lfhsplit 2`; and two synthetic streams with frame
 size changes and with superres, 64 frames each, md5 equal to the C++ build of CI.
+
+Module 5 on CI (run 43298091378, commit 3592709): the same gates, all met (251 of 251, md5 of 1005 frames
+and the stage dumps of 7 streams equal to `warp_decoder`, the constants and lists of the stages among
+them); `D3D12 DEVICE REMOVALS: 0` in every pass.
+
+Module 6, everything of `prediction.cpp`, as three Rust modules:
+
+- `host/blocks.rs`: `av1_mi_push_block`, which the tile threads call for every block the entropy decoder
+  has decoded: the prediction blocks of the block counted into the lists of its tile, their places in the
+  lists written behind the block's index base, the wavefront iteration of every intra transform block, the
+  work counters of `-gputimedetail`. It is an `extern "C"` function of the entropy decoder's interface, so
+  the C calls the Rust without glue.
+- `host/prediction.rs`: the shader that writes the block records (`av1_prediction_gen_blocks`: the counts
+  of the lists turned into where each list starts, the tile with the most iterations moved to the front),
+  the passes of inter prediction with the lists of `-interfast`, the reconstruction, intra prediction along
+  its wavefront or by the schedule of `-intrav2` (`av1_prediction_run_all`), the borders
+  (`av1_inter_ext_borders`), and the dispatch counters of the inter breakdown.
+- `host/intra_v2.rs`: the schedule of `-intrav2` (`intra_v2_place`, `intra_v2_sort`,
+  `intra_v2_next_dispatch` of `dx/intra_v2_sched.h`, which stays for the host check
+  `testing/intra_check`).
+
+What is kept: the lists and the order of every index a block writes, the dispatches with their inline
+constants and the barriers between the passes, the pipeline set only when it changes, the fields of the
+records. In particular:
+
+- **The loop the MSVC miscompilation hit** (1eebffe): the width and height of a transform block in 4x4
+  units are computed once per plane, in front of the loops over the transform blocks, in luma and in
+  chroma. In Rust that is where they would be written anyway; the comment says what happened to the C++.
+- The wavefront step that luma and chroma share (the highest iteration of the units a block reads, plus
+  one; the block's iteration written along its right and bottom edge) is one function, inlined into both.
+- The inline constants of the reconstruction have five words the shader does not read. The C++ passed
+  what its stack held there; Rust passes zeros.
+- Inline functions of the C headers that the hot path needs are ported, not called through a wrapper
+  (`is_interintra_pred`, `scale_chroma_bsize`, `av1_get_tx_size` with `av1_get_max_uv_txsize`,
+  `av1_extract_interp_filter`, `get_ref_frame_buf`); `has_top_right` and `has_bottom_left`, which are
+  functions of the entropy decoder, are called as before.
+
+Tests that came with it (21 unit tests in `rav1g` now, run by `cargo test` on Windows with MSVC):
+
+- **Function probes.** The C layout probe has the ported inline functions as real functions
+  (`rav1g_sys::probe`), and the tests call both sides over all block sizes, modes and references.
+- **The schedule of `-intrav2` against the C++ header.** The C++ probe has the three functions of
+  `intra_v2_sched.h`; a test places the same few thousand blocks through the Rust port and through the
+  header on frames of one and of several regions and compares the cell maps, the region lists, the sorted
+  lists and every dispatch cut from them.
+- **Tables.** 16 more tables that are `static` in the C headers (block and transform size tables, the
+  subpel filters, the distance weights, the smooth weights) and the five of `av1_compute.h` (the list
+  place of a block size, the overlapped prediction mask, the intra mode parameters) are Rust copies, each
+  compared byte for byte with what the C or C++ compiler of the build has. The copies were written by a
+  program that includes the headers, not by hand.
+- The distance weights of compound prediction and the relative distance of order hints against the C++
+  arithmetic as it was written.
+
+Checked before the push on the local decoder: the 244 vectors of AOM plain, with `-interfast`,
+`-interfastlists`, `-intrav2`, `-poisonbuf`, `-gputimedetail` and with four threads. `-intraopt` is no
+check there: with the optimised intra shader that D3D12 implementation gives other frames in every run,
+with the C++ build as with the Rust one (three runs of each on one stream, six different results).
 
 ## Estimate
 

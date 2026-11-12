@@ -27,6 +27,139 @@ pub(crate) const TX_SIZE_WIDE: [i32; 19] = [4, 8, 16, 32, 64, 4, 8, 8, 16, 16, 3
 /// `tx_size_high` of `av1/common/common_data.h`.
 pub(crate) const TX_SIZE_HIGH: [i32; 19] = [4, 8, 16, 32, 64, 8, 4, 16, 8, 32, 16, 64, 32, 16, 4, 32, 8, 64, 16];
 
+/// `mi_size_wide_log2` of `av1/common/common_data.h`: log2 of the width of a block size in 4x4 units.
+pub(crate) const MI_SIZE_WIDE_LOG2: [u8; 22] = [0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 0, 2, 1, 3, 2, 4];
+
+/// `mi_size_high_log2` of `av1/common/common_data.h`.
+pub(crate) const MI_SIZE_HIGH_LOG2: [u8; 22] = [0, 1, 0, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4, 5, 4, 5, 2, 0, 3, 1, 4, 2];
+
+/// `max_txsize_rect_lookup` of `av1/common/common_data.h`: the largest transform of a block size.
+pub(crate) const MAX_TXSIZE_RECT_LOOKUP: [u8; 22] =
+    [0, 5, 6, 1, 7, 8, 2, 9, 10, 3, 11, 12, 4, 4, 4, 4, 13, 14, 15, 16, 17, 18];
+
+/// `ss_size_lookup` of `av1/common/common_data.h`, `[bsize][ss_x][ss_y]` in one row: the block size of a subsampled plane.
+pub(crate) const SS_SIZE_LOOKUP: [u8; 88] = [
+    0, 0, 0, 0, 1, 0, 255, 0, 2, 255, 0, 0, 3, 2, 1, 0, 4, 3, 255, 1, 5, 255, 3, 2, 6, 5, 4, 3, 7, 6, 255, 4, 8, 255,
+    6, 5, 9, 8, 7, 6, 10, 9, 255, 7, 11, 255, 9, 8, 12, 11, 10, 9, 13, 12, 255, 10, 14, 255, 12, 11, 15, 14, 13, 12,
+    16, 1, 255, 1, 17, 255, 2, 2, 18, 4, 255, 16, 19, 255, 5, 17, 20, 7, 255, 18, 21, 255, 8, 19,
+];
+
+/// `interintra_to_intra_mode` of `av1/common/reconintra.h`.
+pub(crate) const INTERINTRA_TO_INTRA_MODE: [u8; 4] = [0, 1, 2, 9];
+
+/// `sm_weight_arrays` of `aom_dsp/intrapred_common.h`: the weights of the smooth intra modes.
+pub(crate) const SM_WEIGHT_ARRAYS: [u8; 128] = [
+    0, 0, 255, 128, 255, 149, 85, 64, 255, 197, 146, 105, 73, 50, 37, 32, 255, 225, 196, 170, 145, 123, 102, 84, 68,
+    54, 43, 33, 26, 20, 17, 16, 255, 240, 225, 210, 196, 182, 169, 157, 145, 133, 122, 111, 101, 92, 83, 74, 66, 59,
+    52, 45, 39, 34, 29, 25, 21, 17, 14, 12, 10, 9, 8, 8, 255, 248, 240, 233, 225, 218, 210, 203, 196, 189, 182, 176,
+    169, 163, 156, 150, 144, 138, 133, 127, 121, 116, 111, 106, 101, 96, 91, 86, 82, 77, 73, 69, 65, 61, 57, 54, 50,
+    47, 44, 41, 38, 35, 32, 29, 27, 25, 22, 20, 18, 16, 15, 13, 12, 10, 9, 8, 7, 6, 6, 5, 5, 4, 4, 4,
+];
+
+/// `tx_size_wide_log2` of `av1/common/common_data.h`: log2 of the width of a transform size in samples.
+pub(crate) const TX_SIZE_WIDE_LOG2: [i32; 19] = [2, 3, 4, 5, 6, 2, 3, 3, 4, 4, 5, 5, 6, 2, 4, 3, 5, 4, 6];
+
+/// `tx_size_high_log2` of `av1/common/common_data.h`.
+pub(crate) const TX_SIZE_HIGH_LOG2: [i32; 19] = [2, 3, 4, 5, 6, 3, 2, 4, 3, 5, 4, 6, 5, 4, 2, 5, 3, 6, 4];
+
+/// `max_neighbor_obmc` of `av1/common/blockd.h`: neighbours an overlapped block blends, by log2 of its side.
+pub(crate) const MAX_NEIGHBOR_OBMC: [i32; 6] = [0, 1, 2, 3, 4, 4];
+
+/// `quant_dist_weight` of `av1/common/common_data.h`, `[i][order]` in one row.
+pub(crate) const QUANT_DIST_WEIGHT: [i32; 8] = [2, 3, 2, 5, 2, 7, 1, 31];
+
+/// `quant_dist_lookup_table` of `av1/common/common_data.h`, `[index][i][order]` in one row.
+pub(crate) const QUANT_DIST_LOOKUP_TABLE: [i32; 16] = [9, 7, 11, 5, 12, 4, 13, 3, 7, 9, 5, 11, 4, 12, 3, 13];
+
+/// `av1_sub_pel_filters_4` of `av1/common/filter.h`: 16 kernels of 8 taps, as the five that follow.
+pub(crate) const SUB_PEL_FILTERS_4: [i16; 128] = [
+    0, 0, 0, 128, 0, 0, 0, 0, 0, 0, -4, 126, 8, -2, 0, 0, 0, 0, -8, 122, 18, -4, 0, 0, 0, 0, -10, 116, 28, -6, 0, 0, 0,
+    0, -12, 110, 38, -8, 0, 0, 0, 0, -12, 102, 48, -10, 0, 0, 0, 0, -14, 94, 58, -10, 0, 0, 0, 0, -12, 84, 66, -10, 0,
+    0, 0, 0, -12, 76, 76, -12, 0, 0, 0, 0, -10, 66, 84, -12, 0, 0, 0, 0, -10, 58, 94, -14, 0, 0, 0, 0, -10, 48, 102,
+    -12, 0, 0, 0, 0, -8, 38, 110, -12, 0, 0, 0, 0, -6, 28, 116, -10, 0, 0, 0, 0, -4, 18, 122, -8, 0, 0, 0, 0, -2, 8,
+    126, -4, 0, 0,
+];
+
+/// `av1_sub_pel_filters_4smooth` of `av1/common/filter.h`.
+pub(crate) const SUB_PEL_FILTERS_4SMOOTH: [i16; 128] = [
+    0, 0, 0, 128, 0, 0, 0, 0, 0, 0, 30, 62, 34, 2, 0, 0, 0, 0, 26, 62, 36, 4, 0, 0, 0, 0, 22, 62, 40, 4, 0, 0, 0, 0,
+    20, 60, 42, 6, 0, 0, 0, 0, 18, 58, 44, 8, 0, 0, 0, 0, 16, 56, 46, 10, 0, 0, 0, 0, 14, 54, 48, 12, 0, 0, 0, 0, 12,
+    52, 52, 12, 0, 0, 0, 0, 12, 48, 54, 14, 0, 0, 0, 0, 10, 46, 56, 16, 0, 0, 0, 0, 8, 44, 58, 18, 0, 0, 0, 0, 6, 42,
+    60, 20, 0, 0, 0, 0, 4, 40, 62, 22, 0, 0, 0, 0, 4, 36, 62, 26, 0, 0, 0, 0, 2, 34, 62, 30, 0, 0,
+];
+
+/// `av1_bilinear_filters` of `av1/common/filter.h`.
+pub(crate) const BILINEAR_FILTERS: [i16; 128] = [
+    0, 0, 0, 128, 0, 0, 0, 0, 0, 0, 0, 120, 8, 0, 0, 0, 0, 0, 0, 112, 16, 0, 0, 0, 0, 0, 0, 104, 24, 0, 0, 0, 0, 0, 0,
+    96, 32, 0, 0, 0, 0, 0, 0, 88, 40, 0, 0, 0, 0, 0, 0, 80, 48, 0, 0, 0, 0, 0, 0, 72, 56, 0, 0, 0, 0, 0, 0, 64, 64, 0,
+    0, 0, 0, 0, 0, 56, 72, 0, 0, 0, 0, 0, 0, 48, 80, 0, 0, 0, 0, 0, 0, 40, 88, 0, 0, 0, 0, 0, 0, 32, 96, 0, 0, 0, 0, 0,
+    0, 24, 104, 0, 0, 0, 0, 0, 0, 16, 112, 0, 0, 0, 0, 0, 0, 8, 120, 0, 0, 0,
+];
+
+/// `av1_sub_pel_filters_8` of `av1/common/filter.h`.
+pub(crate) const SUB_PEL_FILTERS_8: [i16; 128] = [
+    0, 0, 0, 128, 0, 0, 0, 0, 0, 2, -6, 126, 8, -2, 0, 0, 0, 2, -10, 122, 18, -4, 0, 0, 0, 2, -12, 116, 28, -8, 2, 0,
+    0, 2, -14, 110, 38, -10, 2, 0, 0, 2, -14, 102, 48, -12, 2, 0, 0, 2, -16, 94, 58, -12, 2, 0, 0, 2, -14, 84, 66, -12,
+    2, 0, 0, 2, -14, 76, 76, -14, 2, 0, 0, 2, -12, 66, 84, -14, 2, 0, 0, 2, -12, 58, 94, -16, 2, 0, 0, 2, -12, 48, 102,
+    -14, 2, 0, 0, 2, -10, 38, 110, -14, 2, 0, 0, 2, -8, 28, 116, -12, 2, 0, 0, 0, -4, 18, 122, -10, 2, 0, 0, 0, -2, 8,
+    126, -6, 2, 0,
+];
+
+/// `av1_sub_pel_filters_8smooth` of `av1/common/filter.h`.
+pub(crate) const SUB_PEL_FILTERS_8SMOOTH: [i16; 128] = [
+    0, 0, 0, 128, 0, 0, 0, 0, 0, 2, 28, 62, 34, 2, 0, 0, 0, 0, 26, 62, 36, 4, 0, 0, 0, 0, 22, 62, 40, 4, 0, 0, 0, 0,
+    20, 60, 42, 6, 0, 0, 0, 0, 18, 58, 44, 8, 0, 0, 0, 0, 16, 56, 46, 10, 0, 0, 0, -2, 16, 54, 48, 12, 0, 0, 0, -2, 14,
+    52, 52, 14, -2, 0, 0, 0, 12, 48, 54, 16, -2, 0, 0, 0, 10, 46, 56, 16, 0, 0, 0, 0, 8, 44, 58, 18, 0, 0, 0, 0, 6, 42,
+    60, 20, 0, 0, 0, 0, 4, 40, 62, 22, 0, 0, 0, 0, 4, 36, 62, 26, 0, 0, 0, 0, 2, 34, 62, 28, 2, 0,
+];
+
+/// `av1_sub_pel_filters_8sharp` of `av1/common/filter.h`.
+pub(crate) const SUB_PEL_FILTERS_8SHARP: [i16; 128] = [
+    0, 0, 0, 128, 0, 0, 0, 0, -2, 2, -6, 126, 8, -2, 2, 0, -2, 6, -12, 124, 16, -6, 4, -2, -2, 8, -18, 120, 26, -10, 6,
+    -2, -4, 10, -22, 116, 38, -14, 6, -2, -4, 10, -22, 108, 48, -18, 8, -2, -4, 10, -24, 100, 60, -20, 8, -2, -4, 10,
+    -24, 90, 70, -22, 10, -2, -4, 12, -24, 80, 80, -24, 12, -4, -2, 10, -22, 70, 90, -24, 10, -4, -2, 8, -20, 60, 100,
+    -24, 10, -4, -2, 8, -18, 48, 108, -22, 10, -4, -2, 6, -14, 38, 116, -22, 10, -4, -2, 6, -10, 26, 120, -18, 8, -2,
+    -2, 4, -6, 16, 124, -12, 6, -2, 0, 2, -2, 8, 126, -6, 2, -2,
+];
+
+/// `obmc_mask` of `libav1/dx/av1_compute.h`: the blend weights of overlapped prediction for sides of 2, 4, 8, 16 and 32 samples.
+pub(crate) const OBMC_MASK: [i32; 64] = [
+    45, 64, 64, 64, 39, 50, 59, 64, 36, 42, 48, 53, 57, 61, 64, 64, 34, 37, 40, 43, 46, 49, 52, 54, 56, 58, 60, 61, 64,
+    64, 64, 64, 33, 35, 36, 38, 40, 41, 43, 44, 45, 47, 48, 50, 51, 52, 53, 55, 56, 57, 58, 59, 60, 60, 61, 62, 64, 64,
+    64, 64, 64, 64, 64, 64,
+];
+
+/// `InterBlockSizeIndexLUT` of `libav1/dx/av1_compute.h`, `[log2 width][log2 height]` in 4x4 units in one row: the place of a block size in the lists of a type; -1 for a size no block has.
+pub(crate) const INTER_BLOCK_SIZE_INDEX_LUT: [i32; 36] = [
+    0, 1, 2, -1, -1, -1, 3, 4, 5, 6, -1, -1, 7, 8, 9, 10, 11, -1, -1, 12, 13, 14, 15, -1, -1, -1, 16, 17, 18, 19, -1,
+    -1, -1, -1, 20, 21,
+];
+
+/// `InterBlockWidthLUT` of `libav1/dx/av1_compute.h`: log2 of the width, in 4x4 units, of the block sizes in the order of the lists.
+pub(crate) const INTER_BLOCK_WIDTH_LUT: [i32; 22] = [0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5];
+
+/// `InterBlockHeightLUT` of `libav1/dx/av1_compute.h`.
+pub(crate) const INTER_BLOCK_HEIGHT_LUT: [i32; 22] = [0, 1, 2, 0, 1, 2, 3, 0, 1, 2, 3, 4, 1, 2, 3, 4, 2, 3, 4, 5, 4, 5];
+
+/// `intra_mode_shader_params` of `libav1/dx/av1_compute.h`, `[mode * 7 + angle delta][dx, dy, flags, bits]` in one row: what the intra shaders need of a mode.
+pub(crate) const INTRA_MODE_SHADER_PARAMS: [i32; 448] = [
+    11, 0, 305, 5, 7, 0, 305, 5, 3, 0, 305, 5, 0, 0, 273, 5, -3, -1023, 850, 5, -7, -547, 850, 5, -11, -372, 850, 5,
+    -372, -11, 850, 5, -547, -7, 850, 5, -1023, -3, 850, 5, 0, 0, 323, 5, 0, 3, 451, 5, 0, 7, 451, 5, 0, 11, 451, 5,
+    90, 0, 305, 5, 80, 0, 305, 5, 71, 0, 305, 5, 64, 0, 305, 5, 57, 0, 305, 5, 51, 0, 305, 5, 45, 0, 305, 5, -45, -90,
+    850, 5, -51, -80, 850, 5, -57, -71, 850, 5, -64, -64, 850, 5, -71, -57, 850, 5, -80, -51, 850, 5, -90, -45, 850, 5,
+    -15, -273, 850, 5, -19, -215, 850, 5, -23, -178, 850, 5, -27, -151, 850, 5, -31, -132, 850, 5, -35, -116, 850, 5,
+    -40, -102, 850, 5, -102, -40, 850, 5, -116, -35, 850, 5, -132, -31, 850, 5, -151, -27, 850, 5, -178, -23, 850, 5,
+    -215, -19, 850, 5, -273, -15, 850, 5, 0, 15, 451, 5, 0, 19, 451, 5, 0, 23, 451, 5, 0, 27, 451, 5, 0, 31, 451, 5, 0,
+    35, 451, 5, 0, 40, 451, 5, 40, 0, 305, 5, 35, 0, 305, 5, 31, 0, 305, 5, 27, 0, 305, 5, 23, 0, 305, 5, 19, 0, 305,
+    5, 15, 0, 305, 5, 0, 0, 92, 9, 0, 0, 92, 9, 0, 0, 92, 9, 0, 0, 92, 9, 0, 0, 92, 9, 0, 0, 92, 9, 0, 0, 92, 9, 0, 0,
+    84, 8, 0, 0, 84, 8, 0, 0, 84, 8, 0, 0, 84, 8, 0, 0, 84, 8, 0, 0, 84, 8, 0, 0, 84, 8, 0, 0, 88, 8, 0, 0, 88, 8, 0,
+    0, 88, 8, 0, 0, 88, 8, 0, 0, 88, 8, 0, 0, 88, 8, 0, 0, 88, 8, 0, 0, 336, 5, 0, 0, 336, 5, 0, 0, 336, 5, 0, 0, 336,
+    5, 0, 0, 336, 5, 0, 0, 336, 5, 0, 0, 336, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 80, 0, 0, 0, 80, 0, 0, 0, 80, 0, 0, 0, 80, 0, 0, 0, 80, 0, 0, 0, 80, 0, 0, 0, 80, 0, 0, 0, 80,
+    5, 0, 0, 80, 5, 0, 0, 80, 5, 0, 0, 80, 5, 0, 0, 80, 5, 0, 0, 80, 5, 0, 0, 80, 5, 0, 0, 80, 5, 0, 0, 80, 5, 0, 0,
+    80, 5, 0, 0, 80, 5, 0, 0, 80, 5, 0, 0, 80, 5, 0, 0, 80, 5,
+];
+
 /// The random sequence of the film grain synthesis (`dx_gaussian_sequence` of `libav1/dx/av1_compute.cpp`,
 /// `gaussian_sequence` of the specification).
 pub(crate) const GAUSSIAN_SEQUENCE: [i32; 2048] = [
@@ -156,6 +289,51 @@ mod tests {
     fn transform_tables_are_those_of_the_header() {
         assert_eq!(c_ints("tx_size_wide"), TX_SIZE_WIDE);
         assert_eq!(c_ints("tx_size_high"), TX_SIZE_HIGH);
+    }
+
+    fn bytes_of<T: Copy>(table: &[T]) -> &[u8] {
+        // SAFETY: a table of plain numbers, read as its bytes.
+        unsafe { std::slice::from_raw_parts(table.as_ptr().cast::<u8>(), size_of_val(table)) }
+    }
+
+    #[test]
+    fn tables_of_the_c_headers_are_those_of_the_headers() {
+        let tables: [(&str, &[u8]); 16] = [
+            ("mi_size_wide_log2", &MI_SIZE_WIDE_LOG2),
+            ("mi_size_high_log2", &MI_SIZE_HIGH_LOG2),
+            ("max_txsize_rect_lookup", &MAX_TXSIZE_RECT_LOOKUP),
+            ("ss_size_lookup", &SS_SIZE_LOOKUP),
+            ("interintra_to_intra_mode", &INTERINTRA_TO_INTRA_MODE),
+            ("sm_weight_arrays", &SM_WEIGHT_ARRAYS),
+            ("tx_size_wide_log2", bytes_of(&TX_SIZE_WIDE_LOG2)),
+            ("tx_size_high_log2", bytes_of(&TX_SIZE_HIGH_LOG2)),
+            ("max_neighbor_obmc", bytes_of(&MAX_NEIGHBOR_OBMC)),
+            ("quant_dist_weight", bytes_of(&QUANT_DIST_WEIGHT)),
+            ("quant_dist_lookup_table", bytes_of(&QUANT_DIST_LOOKUP_TABLE)),
+            ("av1_sub_pel_filters_4", bytes_of(&SUB_PEL_FILTERS_4)),
+            ("av1_sub_pel_filters_4smooth", bytes_of(&SUB_PEL_FILTERS_4SMOOTH)),
+            ("av1_bilinear_filters", bytes_of(&BILINEAR_FILTERS)),
+            ("av1_sub_pel_filters_8", bytes_of(&SUB_PEL_FILTERS_8)),
+            ("av1_sub_pel_filters_8smooth", bytes_of(&SUB_PEL_FILTERS_8SMOOTH)),
+        ];
+        for (name, copy) in tables {
+            assert_eq!(crate::sys::c_table(name), Some(copy), "{name}");
+        }
+        assert_eq!(crate::sys::c_table("av1_sub_pel_filters_8sharp"), Some(bytes_of(&SUB_PEL_FILTERS_8SHARP)));
+    }
+
+    #[test]
+    fn tables_of_the_cpp_header_are_those_of_the_header() {
+        let tables: [(&str, &[u8]); 5] = [
+            ("obmc_mask", bytes_of(&OBMC_MASK)),
+            ("InterBlockSizeIndexLUT", bytes_of(&INTER_BLOCK_SIZE_INDEX_LUT)),
+            ("InterBlockWidthLUT", bytes_of(&INTER_BLOCK_WIDTH_LUT)),
+            ("InterBlockHeightLUT", bytes_of(&INTER_BLOCK_HEIGHT_LUT)),
+            ("intra_mode_shader_params", bytes_of(&INTRA_MODE_SHADER_PARAMS)),
+        ];
+        for (name, copy) in tables {
+            assert_eq!(crate::sys::host_table(name), Some(copy), "{name}");
+        }
     }
 
     /// The numbers of a C initializer, for the tables whose C++ source is still in the tree.

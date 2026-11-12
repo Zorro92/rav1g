@@ -24,7 +24,9 @@
 extern "C" {
 #include "av1/common/av1_loopfilter.h"
 #include "av1/common/reconinter.h"
+#include "av1/common/reconintra.h"
 #include "av1/common/restoration.h"
+#include "av1/common/scale.h"
 #include "av1/common/scan.h"
 #include "av1/common/warped_motion.h"
 }
