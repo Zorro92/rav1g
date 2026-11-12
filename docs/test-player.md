@@ -2675,7 +2675,11 @@ So on WARP DXIL up to `cs_6_8` runs, the wave intrinsics and the 16-bit types co
 computes, and a shader gets waves of 4 lanes or no pipeline state. The same output in all three
 attempts of the run.
 
-**Console**: pending.
+**Console** (package 0.2.34.0): shader model 6.4, waves of 64 lanes, no native 16-bit operations, no
+`[WaveSize]`. 3 PASS (`basic`, `reduce_groupshared`, `reduce_wave`), `wave_ops` FAIL only in
+`WaveReadLaneAt(lane ^ 1)` (a per-thread lane index is undefined in Shader Model 6.0; the console reads one
+lane for all), 10 PSO FAILED (`0x80070057`): both 16-bit tests and every `[WaveSize]` test. Details and
+reading in [gpu-av1-decoder.md](gpu-av1-decoder.md#shader-model-6-feasibility-2026-11-12).
 
 ### How it is built
 
