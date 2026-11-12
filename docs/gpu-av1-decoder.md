@@ -1174,3 +1174,201 @@ more numerous, which is why the two SVT clips got slower; only the compound-heav
 `-interfast` stays off by default. The next step for the inter stage is a profile of what a block costs
 (a timestamp around a dispatch of a fixed size with copy-only blocks, the effect of more pixels per
 thread and of merging block sizes into fewer dispatches) rather than more filter specialisation.
+
+## Padding of the mode info record (2026-11-12)
+
+What a decoder wrote depended on what the process had decoded before it. The cause was one shader
+read that took two bytes of C struct padding for part of a flag.
+
+### Symptom
+
+- `av1-1-b10-00-quantizer-00.ivf` was wrong from frame 0 (0 of 2 frames) when it was decoded
+  behind 8-bit quantizer vectors in the same process, and right alone: behind the ten vectors
+  `av1-1-b8-00-quantizer-00` to `-09` with `warp_decoder` and with `rav1g-dec`, with 1 thread and
+  with 4, in 7 of 7 passes (run 43245926770); behind each single one of the ten, and behind the
+  first 1, 2, 4, 6, 8 and 9 of them (run 43257640361, `warp_decoder`). `-queue_size 1` and
+  `-slots 3` did not change it. In the order of the conformance manifest, behind all the 8-bit
+  vectors, it was right.
+- `av1-1-b8-22-svc-L2T1-2.ivf` now and then had 0 of 8 frames right behind `svc-L2T1` in the same
+  process and was right alone. It failed in all passes of a job or in none, more often on the slow
+  runners (the 3 jobs that failed on one day decoded the set in 2.9 to 3.1 min, the 6 that passed
+  in 1.5 to 2.7), and a rerun of the job passed sooner or later. `run.py` decodes a stream that fails
+  behind others again alone, so the stream never came out as wrong, only as unstable, and the
+  failure was taken for one of the runner.
+
+The stage dumps of the 10-bit vector behind an 8-bit one against the vector alone (run
+43258906582): the first buffer that differs is `pred_blocks` (the block records
+`gen_pred_blocks.hlsl` writes), the first stage whose pixels differ is `intra`.
+
+### Cause
+
+The entropy decoder writes a `MB_MODE_INFO` record (av1/common/blockd.h, 224 bytes) per block into
+the mode info pool, and three shaders read the pool as `StructuredBuffer<MB_MODE_INFO>` of 32-bit
+words (dx/shaders/mode_info.h). `FILTER_INTRA_MODE_INFO` is two bytes, `filter_intra_mode` and
+`use_filter_intra`, and the next field is aligned to four, so the word the shader reads is
+
+| bits | |
+| --- | --- |
+| 0..7 | `filter_intra_mode` |
+| 8..15 | `use_filter_intra` |
+| 16..31 | padding of the C struct |
+
+`gen_pred_blocks.hlsl` took the flag as `mi.filter_intra_mode_info >> 8`: the flag and the padding.
+Nothing writes the padding. The entropy decoder sets the record field by field, and the pool, a
+mapped D3D12 buffer, is not cleared when the decoder is created. A first decoder of a process gets
+zeroed memory. A later one can get the memory of a buffer that a destroyed decoder of the process
+has used, with its content: in the failing pair the word was `0x57560059` where the vector alone has
+`0x00000000`, and the bytes were data the 8-bit decoder had staged for its film grain tables.
+The shader then took an ordinary intra block for a filter-intra block and listed it for the filter
+intra pass, and the frame was wrong from the first intra block on.
+
+Which memory a new buffer gets is the allocator's business, which is why the failure followed the
+order and sizes of the decoders before it and, for the pair of layer vectors, the runner.
+
+### Evidence
+
+Run 43258906582 of a diagnostic branch (deleted since), `warp_decoder` on WARP. "Original" is the
+shader as it was, "masked" the one with the fix; the padding bytes were changed in every record of
+the frame right before the shader ran:
+
+| shader | padding bytes | streams | result |
+| --- | --- | --- | --- |
+| original | as they are | the 10-bit vector alone | right |
+| original | as they are | an 8-bit vector, then the 10-bit one | 10-bit vector: 0 of 2 frames |
+| original | set to 0 | an 8-bit vector, then the 10-bit one | right |
+| original | set to 0xA5 | the 10-bit vector alone | 0 of 2 frames |
+| original | set to 0xA5 | `svc-L2T1-2` alone; `svc-L2T1` then `svc-L2T1-2` | 0 of 8 frames, each stream: the failure of the slow runners |
+| masked | as they are | the 10-bit vector alone; behind an 8-bit one; behind the ten, `-t 1` and `-t 4`, twice each | right |
+| masked | set to 0xA5 | the 10-bit vector alone; behind an 8-bit one; the same with `-interfast` | right |
+| masked | set to 0xA5 | `svc-L2T1-2` alone; `svc-L2T1` then `svc-L2T1-2`, ten times | right, ten of ten |
+
+So the padding alone makes the difference in both directions, and the failure of `svc-L2T1-2` is
+the same read: its signature comes back with poisoned padding and is gone with the mask.
+
+### Fix
+
+`const int use_filter = (mi.filter_intra_mode_info >> 8) & 255;` (commit dda14c7 on `cpp`, merged
+into `main`). `gen_pred_blocks_fast.hlsl` includes the same source. In the listings of both, one
+instruction changes, `ushr r11.w, r2.w, l(8)` to `ubfe r11.w, l(8), l(8), r2.w`; the listings scan
+finds no pair in them and its allow list is unchanged. The output is the same on all 251 streams
+(the bits that are dropped were 0 whenever a stream was right).
+
+### Audit: the other reads
+
+Padding and unwritten bytes of `MB_MODE_INFO`, from the layout the layout tests of `rav1g-sys`
+check against the C compiler:
+
+| bytes | shader word | |
+| --- | --- | --- |
+| 93 | `wm_params.type`, bits 8..15 | padding between `wmtype` and `invalid` |
+| 114..115 | `filter_intra_mode_info`, bits 16..31 | padding behind `use_filter_intra` |
+| 202 | `tx_info`, bits 16..23 | `skip_mode`: a field, not written in intra frames |
+| 223 | `seg_cdef_flags`, bits 24..31 | `reserved`: a field nobody writes |
+
+Every read of the pool in the three shaders that have it, against these bytes and against what
+the entropy decoder writes for the kind of block the read is made for (decodemv.c,
+decodeframe.c):
+
+| shader | read | |
+| --- | --- | --- |
+| `gen_pred_blocks.hlsl` (and `_fast`) | `filter_intra_mode_info >> 8` | **took the padding; masked** |
+| | `filter_intra_mode_info & 255` | exact; only for a filter-intra block |
+| | `wm_params.type & 0x10000` | exact: bit 0 of `invalid`, written for every `WARPED_CAUSAL` block; the padding byte is not in the mask |
+| | `wm_params.mat`, `.angles` | whole 32-bit and 16-bit fields, only for a block with a valid local warp |
+| | `palette_mode_info.sizes & 0xffff`, `& 0xffff0000` | exact; written for every block |
+| | `block_type` (`& 255`, `<< 8 >> 24`, `>> 24`), also of neighbours | exact bytes; written for every block |
+| | `modes` (`& 255`, `& 15`, `>> 8`, `>> 16 & 255`, `>> 24`) | exact bytes; `interintra_mode` and `motion_mode` only for inter blocks, which write them |
+| | `intra_mode_flags` (`& 1`, `& 0x100`, `<< 8 >> 24`, `>> 24`), also of neighbours | exact bytes; `use_intrabc` is written for every block |
+| | `tx_info` (`& 255`, `& 0xff00`, `>> 24 & 7`) | exact bytes; `skip_mode` is not read |
+| | `interp_filters` (`& 15`, `>> 16 & 15`), `mv[0]`, `mv[1]` | whole fields, for inter and intra block copy blocks |
+| | `interinter_comp.type`, `.mask_type`, `.wedge_index`, `.wedge_sign` | 32-bit fields; `type` is written for every inter block, the others for the type that has them |
+| | `interintra_wedge_index`, `_sign`, `cfl_alpha_idx`, `cfl_alpha_signs`, `index_base`, `mi_row`, `mi_col` | 32-bit fields, read where they are written |
+| `gen_lf_blocks_hor.hlsl`, `gen_lf_blocks_vert.hlsl` | `tx_info` (`& 0xff00`, `& 255`, `>> 24 & 7`), `block_type`, `intra_mode_flags & 0x100`, `modes & 255` | exact bytes |
+| | `inter_tx_size[i] >> (8 * n) & 255` | exact bytes; only for inter and intra block copy blocks with coefficients, which write all 16 |
+| | `delta_lf_from_base`, `delta_lf[4]` | 32-bit fields, read only with `delta_lf_present_flag`, which makes every block write them |
+
+No shader reads `comp_idx`, `seg_cdef_flags`, `current_qindex` or `num_proj_ref`. One read was
+wrong; nothing else was changed. `mode_info.h` now names the bytes of every packed word and marks
+the padding.
+
+The other data the CPU writes for the shaders:
+
+- The transform block records (`tx_block_info_gpu`) and all constant buffers (`GenBlockData`,
+  `GenLfData`, the inter, intra, loop filter, CDEF, restoration, film grain and transform structs)
+  are made of 32-bit words only, so they have no padding. That says nothing about members the host
+  does not set; see `-poisonbuf` below.
+- Buffers whose unwritten parts are read are cleared by the host: the coefficient buffer when
+  the decoder is created and for every frame (the entropy decoder skips zero coefficients), the
+  mode info grid and the intra iteration grid for every frame.
+- The block records and the edge lists (`PredictionBlock`, `InterWarpBlock`, `lf_blocks`) are
+  written by shaders, not by the CPU.
+
+That is the reading. The test of it, for the pool, is `-poisonmi` below; the layout test
+`mode_info_padding_is_where_the_shaders_mask_it` of `rav1g-sys` (on `main`) fails when a change of
+the struct moves or adds padding.
+
+### Checks that stay
+
+- **Order check** (`testing/conformance/order_check.py`, on every push, with `warp_decoder` and
+  with `rav1g-dec`): the sequences above, each in one decoder process and in this order, every
+  stream against its reference: `b8-00-quantizer-00` then `b10-00-quantizer-00`, and the ten 8-bit
+  vectors then the 10-bit one, at `-t 1` and `-t 4`; `svc-L2T1` then `svc-L2T1-2` at `-t 4`. A
+  failure is final: no stream is decoded again alone. Only a sequence that lost the D3D12 device
+  runs again, whole and in the same order, at most three times.
+- **`-poisonmi`** (`warp_decoder`, `rav1g-dec`; `av1_set_poison_buffers` of dx/av1_perf.h; off by
+  default): the decoder fills the mode info pool with the byte 0xA5 when it creates it. A read of
+  bytes the entropy decoder never wrote then changes the output of any stream at once, without the
+  right decoder before it. On every push 137 streams of the set are decoded with it (ten quantizer
+  vectors of each bit depth, all other vectors, one cut of Netflix Open Content) and have to give
+  the results of `expected.txt`; the whole set with the flag is one of the passes of the
+  workflow's `experiments` input.
+- **`run.py`**: a stream that is wrong behind other streams and right alone (`unstable`) can no
+  longer be listed in `expected.txt`, and the run says what it is: a defect of the decoder, not a
+  reason to run the job again.
+
+Results on WARP, commit 2bbfa69 on `cpp` (run 43265811356) and f561fbb on `main`
+(run 43267606808, a slower runner):
+
+| | `cpp`, `warp_decoder` | `main`, `warp_decoder` | `main`, `rav1g-dec` |
+| --- | --- | --- | --- |
+| conformance set | 251 of 251, 1.6 min | 251 of 251, 2.6 min | 251 of 251, 2.5 min |
+| order check, 5 sequences, 28 streams | pass, 9 s | pass, 14 s | pass, 13 s |
+| 137 streams with `-poisonmi` | 137 of 137, 24 s | 137 of 137, 36 s | 137 of 137, 36 s |
+
+The two steps add 33 to 50 s to the `conformance` job, which sets the time of a run.
+
+### `-poisonbuf`: the constant buffers (open)
+
+`-poisonbuf` does the same for every buffer the CPU writes for the shaders, 17 kinds, the pool
+among them. The decoder does not pass it: of the 137 streams 34 were right (run 43262574427, the
+same with `warp_decoder` and `rav1g-dec`), the others were wrong from the first or the second
+frame, also alone, and many runs ended with the D3D12 device removed (`0x887A0005` at the next
+allocation). One buffer at a time (run 43264623408; 8 streams, each alone in a process:
+`b8-00-quantizer-03`, `b10-00-quantizer-01`, `b8-01-size-196x196`, `-66x66`, `b8-05-mv`,
+`b10-23-film_grain-50`, `b8-22-svc-L2T1`, the 270p cut):
+
+| poisoned at creation | streams right |
+| --- | --- |
+| nothing | 8 of 8 |
+| the mode info pool (`-poisonmi`) | 8 of 8 |
+| each one of `idct_coefs`, `gen_mi_block_indexes`, `gen_intra_inter_grid`, `gen_block_map`, `intra_v2_buffer`, `mode_info_grid`, `idct_blocks_unordered`, `cdef_indexes`, `cdef_skips`, `loop_rest_types`, `loop_rest_wiener`, `filmgrain_rand_offset`, `output_cb_alloc`, `output_filmgrain_rand_offset`, `palette_buffer` | 8 of 8 |
+| `cb_alloc`, the upload buffer of a slot's constant buffers | 0 of 8; the device removed in 3 |
+| all 17 | 0 of 8; the device removed in 4 |
+
+So the pool and 15 other buffers do not depend on what their memory held, and the constant buffers
+do: some shader reads a constant that the host does not write, and gets 0 from a first decoder's
+memory. Which constant is open. It matters beyond the flag: a wrong frame followed by a removed
+device is what the conformance run sees now and then on WARP
+([warp-decoder.md](warp-decoder.md#results)), and a decoder that gets used memory for `cb_alloc`
+would be in the state the flag makes. That is a lead, not a finding. `-poisonbuf` stays a flag and
+out of CI until the read is found.
+
+### What it does not explain
+
+- The removals of the D3D12 device on WARP ([warp-decoder.md](warp-decoder.md#results)): not this
+  read. The constant buffers above are the lead for them.
+- The about 75 MiB that stay behind after a decoder is destroyed in md5 runs on the console.
+- Not run on the console. Whether the console hands a decoder the used memory of a destroyed one
+  as WARP does is not known. The changed instruction is of a kind `gen_pred_blocks` already has
+  there (`ibfe` with a literal width and offset); a console run of a package with the change is
+  still to do.

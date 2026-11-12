@@ -105,6 +105,21 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
   rewritten so that FXC does not emit the pair, the workflow scans the listings of all shaders for
   such pairs (`testing/dxbc_scan`), and the output on WARP is unchanged
   ([gpu-av1-decoder.md](docs/gpu-av1-decoder.md#a-paired-read-before-an-overlapping-in-place-write-2026-11-12)).
+- **Output that depended on what the process had decoded before** (fixed, rav1g dda14c7; found and
+  verified on WARP, not yet run on the console). A decoder created behind another one in the same
+  process could be wrong from its first frame on and right alone: `av1-1-b10-00-quantizer-00` behind
+  any 8-bit quantizer vector every time, `av1-1-b8-22-svc-L2T1-2` behind `svc-L2T1` now and then,
+  which had passed for a flake of slow CI runners. `gen_pred_blocks.hlsl` read the filter-intra flag
+  of a block together with two bytes of struct padding next to it; a first decoder finds zeros
+  there, a later one what the memory of a destroyed decoder held. The read is masked (one
+  instruction of the shader changes), every other read of the mode info was checked against the
+  struct's layout (no second case), and CI now decodes these sequences in one process without
+  decoding anything again alone, and 137 streams with the mode info filled with 0xA5 when the
+  decoder is created (`-poisonmi`)
+  ([gpu-av1-decoder.md](docs/gpu-av1-decoder.md#padding-of-the-mode-info-record-2026-11-12)).
+  Open: with every CPU-written buffer filled that way (`-poisonbuf`) the decoder fails, because of
+  the constant buffers alone; some shader reads a constant the host does not write. That is the
+  lead for the D3D12 device removals seen now and then on WARP.
 - **Every stream we test is md5-identical to dav1d on the console and on WARP**: 251 conformance
   streams on WARP; on the console the 8-bit and 10-bit clips from 66x66 to 4K, hidden frames, film
   grain, global motion, spatial layers, size changes, scaled references and superres.
