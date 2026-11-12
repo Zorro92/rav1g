@@ -753,9 +753,9 @@ jobs:
             --out out/conformance --threads 4 "--title=rav1g-dec (cargo, MSVC)"
           if ($LASTEXITCODE -ne 0) { throw "conformance run with rav1g-dec: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
 
-      # The order check and the part of the set with -poisonbuf, as the conformance job runs them with
+      # The order check and the part of the set with -poisonmi, as the conformance job runs them with
       # warp_decoder: streams one after the other in one process without a repeat alone, and the decoder
-      # with every CPU-written buffer filled with 0xA5 at creation.
+      # with the mode info pool filled with 0xA5 at creation.
       - name: Order check with rav1g-dec
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -764,14 +764,14 @@ jobs:
             --out out/order-check "--title=rav1g-dec (cargo, MSVC)"
           if ($LASTEXITCODE -ne 0) { throw "order check with rav1g-dec: exit code $LASTEXITCODE (1: a stream is wrong behind other streams, 2: the check could not be done)" }
 
-      - name: Conformance of the vectors with poisoned buffers (-poisonbuf) with rav1g-dec
+      - name: Conformance of the vectors with a poisoned mode info pool (-poisonmi) with rav1g-dec
         if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/conformance-poisonbuf --threads 4 "--tool-args=-poisonbuf" "--title=rav1g-dec, part of the set with -poisonbuf" `
+            --out out/conformance-poisonmi --threads 4 "--tool-args=-poisonmi" "--title=rav1g-dec, part of the set with -poisonmi" `
             "--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)"
-          if ($LASTEXITCODE -ne 0) { throw "conformance with -poisonbuf with rav1g-dec: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
+          if ($LASTEXITCODE -ne 0) { throw "conformance with -poisonmi with rav1g-dec: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
 
       - name: Timing run with the inter breakdown on WARP with rav1g-dec (smoke test)
         if: ${{ !cancelled() }}
@@ -805,7 +805,7 @@ jobs:
           name: rav1g-dec-conformance-${{ github.run_id }}
           path: |
             out/conformance/
-            out/conformance-poisonbuf/
+            out/conformance-poisonmi/
             out/order-check/
             out/gputime-smoke/
             out/sm6test/

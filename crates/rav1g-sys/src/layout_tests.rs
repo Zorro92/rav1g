@@ -230,3 +230,39 @@ fn mode_info_as_the_shaders_read_it() {
         (offset_of!(shared::INTERINTER_COMPOUND_DATA, wedge_sign), 4)
     );
 }
+
+/// The bytes of `MB_MODE_INFO` that belong to no field. The entropy decoder writes the record field by
+/// field and nothing clears the mode info pool, so these bytes hold what the memory held before, and the
+/// shaders read the words they are in: `wm_params.type` (byte 93, between `wmtype` and `invalid`) and
+/// `filter_intra_mode_info` (bytes 114 and 115, behind `use_filter_intra`). A read of such a word must mask
+/// the padding out (docs/gpu-av1-decoder.md, "Padding of the mode info record"; the comments of
+/// `libav1/dx/shaders/mode_info.h` mark these bytes). A change of the struct that moves or adds padding
+/// fails here: then check every shader read of the word it is in, and update `mode_info.h` and this list.
+#[test]
+fn mode_info_padding_is_where_the_shaders_mask_it() {
+    let mut covered = vec![false; size_of::<MB_MODE_INFO>()];
+    let mut cover = |offset: usize, size: usize| covered[offset..offset + size].fill(true);
+    macro_rules! fields {
+        ($base:expr, $type:ty: $($field:ident),* $(,)?) => {
+            $( cover($base + offset_of!($type, $field), field_size(|s: &$type| &s.$field)); )*
+        };
+    }
+    fields!(0, MB_MODE_INFO:
+        mv, interp_filters, interintra_wedge_index, interintra_wedge_sign, current_qindex, delta_lf_from_base,
+        delta_lf, mi_row, mi_col, index_base, num_proj_ref, cfl_alpha_idx, cfl_alpha_signs, comp_group_idx,
+        compound_idx, sb_type, partition, ref_frame, mode, uv_mode, interintra_mode, motion_mode,
+        use_wedge_interintra, use_intrabc, angle_delta, tx_size, skip, skip_mode, segment_id, inter_tx_size,
+        seg_id_predicted, cdef_strength, ref_mv_idx, reserved,
+    );
+    // The structs inside it, by their own fields.
+    fields!(offset_of!(MB_MODE_INFO, palette_mode_info), shared::PALETTE_MODE_INFO: palette_colors, palette_size);
+    fields!(offset_of!(MB_MODE_INFO, wm_params), shared::WarpedMotionParams:
+        wmmat, alpha, beta, gamma, delta, wmtype, invalid);
+    fields!(offset_of!(MB_MODE_INFO, interinter_comp), shared::INTERINTER_COMPOUND_DATA:
+        type_, mask_type, wedge_index, wedge_sign);
+    fields!(offset_of!(MB_MODE_INFO, filter_intra_mode_info), shared::FILTER_INTRA_MODE_INFO:
+        filter_intra_mode, use_filter_intra);
+    let padding: Vec<usize> =
+        covered.iter().enumerate().filter(|(_, written)| !**written).map(|(byte, _)| byte).collect();
+    assert_eq!(padding, [93, 114, 115], "bytes of MB_MODE_INFO that no field covers");
+}
