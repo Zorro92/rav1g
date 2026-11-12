@@ -1924,6 +1924,13 @@ extern "C" void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
       td->scale_factors[i].y_scale = sf->y_scale_fp;
       td->scale_enable |= av1_is_scaled(sf);
     }
+    // Global motion warp from this reference: the model, and a reference that is not scaled. libaom's
+    // av1_allow_warp() refuses the warp of a scaled reference before it looks at the model, and so does the
+    // specification (useWarp, 7.11.3.1: is_scaled(refFrame) is 0); the block is then predicted from its
+    // motion vector, like a block of a frame without the model. A local warp needs no such test here: a
+    // block with a scaled reference cannot be coded as one (motion_mode_allowed of blockd.h).
+    const WarpedMotionParams *gm = &cm->global_motion[i];
+    td->gm_warp[i] = gm->wmtype > TRANSLATION && !gm->invalid && !(sf && av1_is_scaled(sf));
   }
   av1_perf_add(dec, AV1_PERF_CPU_SETUP, perf_setup_start);
 }

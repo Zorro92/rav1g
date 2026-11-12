@@ -106,6 +106,9 @@ inter_warp_comp_hbd.gen.h@s/sy4 += info2.w \* (-4) + info2.z \* (-4);/sy4 += inf
 inter_warp.gen.h@s/const int src_x = ((x \& (~7)) + 4) << subsampling;/const int src_x = ((x \& (~7)) + 3) << subsampling;/@centre of the 8x8 warp unit
 inter_common.gen.h@s/const int lo = val \* (sf \& 255) + off;/const int lo = val * (sf \& 255);/@scale_value offset
 inter_common.gen.h@s/return neg ? hi - ((128 - lo) >> 8) : hi + ((lo + 128) >> 8);/return neg ? hi - ((127 - lo) >> 8) : hi + ((lo + 128) >> 8);/@scale_value rounding of negative positions
+inter_warp.gen.h@s/const int2 dims = int2(cb_refplanes\[refplane\].z, cb_refplanes\[refplane\].w);/const int2 dims = cb_dims[subsampling].xy();/@size of reference 0, not of the reference of the block, as the clamp of the warp (8-bit; the code before the fix)
+inter_warp_hbd.gen.h@s/const int2 dims = int2(cb_refplanes\[refplane\].z, cb_refplanes\[refplane\].w);/const int2 dims = cb_dims[subsampling].xy();/@size of reference 0, not of the reference of the block, as the clamp of the warp (10-bit; the code before the fix)
+inter_warp_comp.gen.h@s/^  int ref_h = cb_refplanes\[refplane\].w;/  int ref_h = cb_dims[plane > 0].y;/@height of reference 0, not of the first reference, as the clamp of the compound warp
 inter_warp_comp.gen.h@0,/^  GroupMemoryBarrierWithGroupSync();/s//  GroupMemoryBarrier();/@group sync between the two passes of the first reference as a plain barrier@races in group memory: [1-9]
 inter_warp_comp_hbd.gen.h@/^  if (active \&\& compound_type == 2) {/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/@group sync before the mask sums are read as a plain barrier@races in group memory: [1-9]'
   mkdir "$work/mutant"

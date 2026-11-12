@@ -53,7 +53,11 @@ groupshared int4 mem[11 * 64];
 
   const int plane = info0.y & 3;
   const int subsampling = plane > 0;
-  const int2 dims = cb_dims[subsampling].xy;
+  // The reference of the block and its size: a frame can have references of different sizes (reference
+  // scaling, spatial layers), and a warped block always has a reference of the frame's own size. (This
+  // was cb_dims, the size of reference 0, whatever the block's reference.)
+  const int refplane = ((info0.y >> 2) & 7) * 3 + plane;
+  const int2 dims = int2(cb_refplanes[refplane].z, cb_refplanes[refplane].w);
   const int noskip = info0.y & NoSkipFlag;
 
   const int src_x = ((x & (~7)) + 4) << subsampling;
@@ -78,7 +82,6 @@ groupshared int4 mem[11 * 64];
   sx4 += info2.y * ((y & 7) - 3) + info2.x * (x & 7);
   sy4 += info2.z * (y & 7) + info2.w * (x & 7);
 
-  int refplane = ((info0.y >> 2) & 7) * 3 + plane;
   int ref_offset = cb_refplanes[refplane].y + ix4;
   int ref_stride = cb_refplanes[refplane].x;
 

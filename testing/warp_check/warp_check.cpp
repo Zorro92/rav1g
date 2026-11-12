@@ -11,6 +11,13 @@
  * whole pool, padding and neighbouring frames included, must be byte
  * identical.
  *
+ * The references of a frame need not have its size (reference scaling,
+ * spatial layers). A warped block always has a reference of the frame's size,
+ * as libaom refuses the warp of a scaled reference, but the other references
+ * of the frame, reference 0 among them, can be smaller or larger: a part of
+ * the cases has one reference frame of another size, which no warped block
+ * uses and which is reference 0.
+ *
  * Every case runs twice: with shader double precision working, and with it
  * yielding 0 (hlsl_shim.h, g_double_model), which is how the console behaves.
  *
@@ -104,18 +111,20 @@ enum {
   kRefBorder = 320  // the reference planes libaom reads are extended this far
 };
 
+// A frame in the pool. Every buffer of the pool has the size of the largest frame, as in the decoder (the
+// size it was created for), and a frame lays its planes out in its buffer by its own size.
 struct Layout {
   int w, h, hbd, bpp;
   int y_stride, uv_stride;  // in samples
   size_t y_size, uv_size, fb_size;
+  size_t base;  // of the frame's buffer in the pool
   int res_stride[3], res_offset[3];
   size_t res_size;
   int mi_cols, mi_rows;
   int plane_w(int p) const { return p ? (w + 1) >> 1 : w; }
   int plane_h(int p) const { return p ? (h + 1) >> 1 : h; }
   int stride(int p) const { return (p ? uv_stride : y_stride) * bpp; }  // in bytes
-  int offset(int frame, int p) const {
-    const size_t base = kGuard + static_cast<size_t>(frame) * fb_size;
+  int offset(int p) const {
     const size_t off = p == 0 ? base + 16 * bpp : base + (y_size + 16) * bpp + (p == 2 ? uv_size * bpp : 0);
     return static_cast<int>(off);
   }
@@ -181,13 +190,26 @@ struct Block {
 
 struct Case {
   std::string name;
-  Layout l;
+  Layout l;         // the frame that is predicted: frame 0 of the pool
+  Layout ref_l[3];  // the frames of the pool; [0] is l. Frame 2 has the size of the frame, frame 1 may not
+  size_t slot;      // bytes of a buffer of the pool
   int bit_depth;
   int content;
   Model gm[7];
   int ref_frame[7];  // which of the two reference frames of the pool a reference is: 1 or 2
   std::vector<Block> blocks;
+  bool mixed() const { return ref_l[1].w != l.w || ref_l[1].h != l.h; }
 };
+
+// The pool of a case: the frame and two reference frames, the first of them |w1| x |h1|.
+static void set_layouts(Case *c, int w, int h, int w1, int h1, int hbd) {
+  c->ref_l[0] = make_layout(w, h, hbd);
+  c->ref_l[1] = make_layout(w1, h1, hbd);
+  c->ref_l[2] = make_layout(w, h, hbd);
+  c->slot = std::max(c->ref_l[0].fb_size, c->ref_l[1].fb_size);
+  for (int frame = 0; frame < 3; frame++) c->ref_l[frame].base = kGuard + static_cast<size_t>(frame) * c->slot;
+  c->l = c->ref_l[0];
+}
 
 static std::string describe(const Case &c, const Block &b) {
   static const char *const kinds[] = {"GLOBALMV, global warp", "local warp", "GLOBAL_GLOBALMV"};
@@ -336,9 +358,16 @@ static void add_blocks(Case *c, int attempts) {
   for (const Block &b : c->blocks)
     for (int y = 0; y < (1 << b.bh_log); y++)
       for (int x = 0; x < (1 << b.bw_log); x++) used[static_cast<size_t>(b.mi_row + y) * grid_w + b.mi_col + x] = 1;
-  int warp_refs[7], n_warp = 0;
-  for (int r = 0; r < 7; r++)
+  // The references a block can have here: those of the frame's size. (The warp shaders also predict the
+  // reference of a GLOBAL_GLOBALMV block that is not warped, scaled or not; the check has no reference
+  // code for a scaled one.)
+  int warp_refs[7], n_warp = 0, same_refs[7], n_same = 0;
+  for (int r = 0; r < 7; r++) {
+    if (c->ref_frame[r] == 1 && c->mixed()) continue;
+    same_refs[n_same++] = r;
     if (c->gm[r].is_warp) warp_refs[n_warp++] = r;
+  }
+  if (!n_same) return;
   for (int i = 0; i < attempts; i++) {
     Block b = {};
     const int *size = kSizes[rnd(17)];
@@ -359,8 +388,8 @@ static void add_blocks(Case *c, int attempts) {
     if (pick < 4 && n_warp) {
       // GLOBAL_GLOBALMV: two references, at least one of them with a warp model.
       b.kind = kCompound;
-      b.ref[0] = rnd(7);
-      b.ref[1] = rnd(7);
+      b.ref[0] = same_refs[rnd(n_same)];
+      b.ref[1] = same_refs[rnd(n_same)];
       if (b.ref[0] == b.ref[1]) continue;
       if (!c->gm[b.ref[0]].is_warp && !c->gm[b.ref[1]].is_warp) b.ref[rnd(2)] = warp_refs[rnd(n_warp)];
       if (b.ref[0] == b.ref[1]) continue;
@@ -370,7 +399,7 @@ static void add_blocks(Case *c, int attempts) {
       b.ref[0] = warp_refs[rnd(n_warp)];
     } else {
       b.kind = kSingleLocal;
-      b.ref[0] = rnd(7);
+      b.ref[0] = same_refs[rnd(n_same)];
       if (!random_local_model(&b.local, b)) continue;
     }
     for (int y = 0; y < (1 << b.bh_log); y++)
@@ -389,6 +418,7 @@ static int g_kernels[8 * 16][8];
 
 struct Stats {
   long cases = 0, blocks = 0, single_global = 0, single_local = 0, compound = 0, compound_mv_side = 0;
+  long mixed_cases = 0, mixed_blocks = 0;  // frames with a reference frame of another size, and their blocks
   long mismatches[2] = {0, 0};  // cases that differ, by double model
   long shown = 0;
   long double_ops = 0;
@@ -404,7 +434,7 @@ static void put_sample(uint8_t *p, int hbd, int v) {
 }
 
 static int picture_sample(const Case &c, int frame, int p, int x, int y, int max) {
-  const int w = c.l.plane_w(p), h = c.l.plane_h(p);
+  const int w = c.ref_l[frame].plane_w(p), h = c.ref_l[frame].plane_h(p);
   switch (c.content) {
     case 0:
       return rnd(max + 1);
@@ -441,7 +471,7 @@ struct List {
 static bool run_case(const Case &c, Stats *stats, int verbose) {
   const Layout &l = c.l;
   const int hbd = l.hbd, bpp = l.bpp, max = (1 << c.bit_depth) - 1;
-  const size_t pool_size = kGuard * 2 + l.fb_size * 3;
+  const size_t pool_size = kGuard * 2 + c.slot * 3;
 
   // The pool: all garbage, then the pictures of the two reference frames. What lies beyond a picture inside
   // its buffer stays garbage, as nothing in the decoder defines it, except the border the decoder extends.
@@ -452,16 +482,17 @@ static bool run_case(const Case &c, Stats *stats, int verbose) {
   for (int frame = 1; frame <= 2; frame++) {
     padded16[frame].resize(3);
     padded8[frame].resize(3);
+    const Layout &fl = c.ref_l[frame];
     for (int p = 0; p < 3; p++) {
-      const int w = l.plane_w(p), h = l.plane_h(p);
+      const int w = fl.plane_w(p), h = fl.plane_h(p);
       const int pw = w + 2 * kRefBorder, ph = h + 2 * kRefBorder;
       std::vector<uint16_t> picture(static_cast<size_t>(w) * h);
       for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++) {
           const int v = picture_sample(c, frame, p, x, y, max);
           picture[static_cast<size_t>(y) * w + x] = static_cast<uint16_t>(v);
-          put_sample(&pool[l.offset(frame, p) + static_cast<size_t>(y) * l.stride(p) + static_cast<size_t>(x) * bpp],
-                     hbd, v);
+          put_sample(&pool[fl.offset(p) + static_cast<size_t>(y) * fl.stride(p) + static_cast<size_t>(x) * bpp], hbd,
+                     v);
         }
       // What libaom reads: the plane with its edges repeated.
       if (hbd)
@@ -580,18 +611,19 @@ static bool run_case(const Case &c, Stats *stats, int verbose) {
   // The border of the reference frames, extended by the decoder's own shader when a frame is done.
   const ShaderApi *border_api = hbd ? &inter_ext_borders_hbd_api : &inter_ext_borders_api;
   for (int frame = 1; frame <= 2; frame++) {
+    const Layout &fl = c.ref_l[frame];
     BorderConsts bc = {};
     for (int p = 0; p < 3; p++) {
-      bc.planes[p][0] = l.stride(p);
-      bc.planes[p][1] = l.offset(frame, p);
+      bc.planes[p][0] = fl.stride(p);
+      bc.planes[p][1] = fl.offset(p);
     }
-    bc.dims[0][0] = l.plane_w(0);
-    bc.dims[0][1] = l.plane_h(0);
-    bc.dims[1][0] = l.plane_w(1);
-    bc.dims[1][1] = l.plane_h(1);
+    bc.dims[0][0] = fl.plane_w(0);
+    bc.dims[0][1] = fl.plane_h(0);
+    bc.dims[1][0] = fl.plane_w(1);
+    bc.dims[1][1] = fl.plane_h(1);
     border_api->bind(&buffers);
     border_api->set_common(&bc);
-    dispatch(border_api, static_cast<uint32_t>(l.plane_h(0) + 2 * l.plane_h(1)));
+    dispatch(border_api, static_cast<uint32_t>(fl.plane_h(0) + 2 * fl.plane_h(1)));
   }
 
   // PSSLInterData, as av1_prediction_run_all() fills it. What it leaves unset is garbage here.
@@ -599,27 +631,31 @@ static bool run_case(const Case &c, Stats *stats, int verbose) {
   fill_garbage(reinterpret_cast<uint8_t *>(&consts), sizeof(consts));
   for (int p = 0; p < 3; p++) {
     consts.planes[p][0] = l.stride(p);
-    consts.planes[p][1] = l.offset(0, p);
+    consts.planes[p][1] = l.offset(p);
     consts.planes[p][2] = l.res_stride[p];
     consts.planes[p][3] = l.res_offset[p];
   }
   for (int r = 0; r < 7; r++)
     for (int p = 0; p < 3; p++) {
+      const Layout &fl = c.ref_l[c.ref_frame[r]];
       int *rp = consts.refplanes[r * 3 + p];
-      rp[0] = l.stride(p);
-      rp[1] = l.offset(c.ref_frame[r], p);
-      rp[2] = l.plane_w(p) - 1;
-      rp[3] = l.plane_h(p) - 1;
+      rp[0] = fl.stride(p);
+      rp[1] = fl.offset(p);
+      rp[2] = fl.plane_w(p) - 1;
+      rp[3] = fl.plane_h(p) - 1;
     }
-  consts.dims[0][0] = l.plane_w(0) - 1;
-  consts.dims[0][1] = l.plane_h(0) - 1;
-  consts.dims[1][0] = l.plane_w(1) - 1;
-  consts.dims[1][1] = l.plane_h(1) - 1;
+  // The size of reference 0, as av1_prediction_run_all() sets it: only the shaders for frames without a
+  // scaled reference may use it.
+  consts.dims[0][0] = consts.refplanes[0][2];
+  consts.dims[0][1] = consts.refplanes[0][3];
+  consts.dims[1][0] = consts.refplanes[1][2];
+  consts.dims[1][1] = consts.refplanes[1][3];
   memcpy(consts.kernels, g_kernels, sizeof(consts.kernels));
   for (int r = 1; r < 8; r++) {
-    // td->scale_factors of a frame whose references have its size: REF_NO_SCALE and a step of one sample.
-    consts.scale[r][0] = consts.scale[r][2] = 1 << 14;
-    consts.scale[r][1] = consts.scale[r][3] = 1 << 10;
+    // td->scale_factors: REF_NO_SCALE and a step of one sample for a reference of the frame's size, and
+    // for one of another size what av1_setup_scale_factors_for_frame() gives.
+    const Layout &fl = c.ref_l[c.ref_frame[r - 1]];
+    ref_scale_factors(fl.w, fl.h, l.w, l.h, consts.scale[r]);
   }
   for (int r = 0; r < 7; r++) {
     const Model &m = c.gm[r];
@@ -650,13 +686,14 @@ static bool run_case(const Case &c, Stats *stats, int verbose) {
       for (int r = 0; r < rb.refs; r++) {
         RefSide &s = rb.side[r];
         const int frame = c.ref_frame[b.ref[r]];
-        const int pw = l.plane_w(p) + 2 * kRefBorder;
+        const Layout &fl = c.ref_l[frame];
+        const int pw = fl.plane_w(p) + 2 * kRefBorder;
         const size_t origin = static_cast<size_t>(kRefBorder) * pw + kRefBorder;
         s.origin = hbd ? static_cast<const void *>(&padded16[frame][p][origin])
                        : static_cast<const void *>(&padded8[frame][p][origin]);
         s.stride = pw;
-        s.width = l.plane_w(p);
-        s.height = l.plane_h(p);
+        s.width = fl.plane_w(p);
+        s.height = fl.plane_h(p);
         const Model &m = b.kind == kSingleLocal ? b.local : c.gm[b.ref[r]];
         s.kind = b.kind == kSingleLocal ? REF_SIDE_LOCAL_WARP : m.is_warp ? REF_SIDE_GLOBAL_WARP : REF_SIDE_MV;
         memcpy(s.mat, m.mat, sizeof(s.mat));
@@ -691,7 +728,7 @@ static bool run_case(const Case &c, Stats *stats, int verbose) {
             v = std::min(max, std::max(0, v + r));
           }
           put_sample(
-              &expected[l.offset(0, p) + static_cast<size_t>(py + y) * l.stride(p) + static_cast<size_t>(px + x) * bpp],
+              &expected[l.offset(p) + static_cast<size_t>(py + y) * l.stride(p) + static_cast<size_t>(px + x) * bpp],
               hbd, v);
         }
       if (p == 0 && b.kind == kCompound && b.comp_type == REF_COMP_DIFFWTD) {
@@ -707,7 +744,7 @@ static bool run_case(const Case &c, Stats *stats, int verbose) {
               word |= static_cast<uint32_t>((m[0] + m[1] + m[w] + m[w + 1] + 2) >> 2) << (8 * i);
             }
             for (int cp = 1; cp < 3; cp++)
-              memcpy(&expected[l.offset(0, cp) + static_cast<size_t>((py + y) >> 1) * l.stride(cp) +
+              memcpy(&expected[l.offset(cp) + static_cast<size_t>((py + y) >> 1) * l.stride(cp) +
                                static_cast<size_t>((px + x) >> 1) * bpp],
                      &word, 4);
           }
@@ -740,8 +777,9 @@ static bool run_case(const Case &c, Stats *stats, int verbose) {
     stats->mismatches[model]++;
     if (stats->shown >= 12 && !verbose) continue;
     stats->shown++;
-    printf("MISMATCH %s, %dx%d %d-bit, %s double precision", c.name.c_str(), l.w, l.h, c.bit_depth,
-           model ? "with" : "without");
+    printf("MISMATCH %s, %dx%d %d-bit", c.name.c_str(), l.w, l.h, c.bit_depth);
+    if (c.mixed()) printf(", reference 0 of %dx%d", c.ref_l[1].w, c.ref_l[1].h);
+    printf(", %s double precision", model ? "with" : "without");
     if (g_out_of_bounds != oob_before) printf(", %ld accesses outside the buffers", g_out_of_bounds - oob_before);
     printf("\n");
     if (same) continue;
@@ -752,11 +790,12 @@ static bool run_case(const Case &c, Stats *stats, int verbose) {
     bool located = false;
     for (int frame = 0; frame < 3 && !located; frame++)
       for (int p = 0; p < 3 && !located; p++) {
-        const long rel = static_cast<long>(at) - (l.offset(frame, p) - 16 * bpp);
-        const long rows = static_cast<long>((p ? l.uv_size : l.y_size) / (p ? l.uv_stride : l.y_stride));
-        if (rel < 0 || rel >= rows * l.stride(p)) continue;
+        const Layout &fl = c.ref_l[frame];
+        const long rel = static_cast<long>(at) - (fl.offset(p) - 16 * bpp);
+        const long rows = static_cast<long>((p ? fl.uv_size : fl.y_size) / (p ? fl.uv_stride : fl.y_stride));
+        if (rel < 0 || rel >= rows * fl.stride(p)) continue;
         located = true;
-        const int y = static_cast<int>(rel / l.stride(p)), x = static_cast<int>(rel % l.stride(p)) / bpp - 16;
+        const int y = static_cast<int>(rel / fl.stride(p)), x = static_cast<int>(rel % fl.stride(p)) / bpp - 16;
         int got = result[at & ~static_cast<size_t>(bpp - 1)], want = expected[at & ~static_cast<size_t>(bpp - 1)];
         if (hbd) {
           got |= result[(at & ~static_cast<size_t>(1)) + 1] << 8;
@@ -775,8 +814,10 @@ static bool run_case(const Case &c, Stats *stats, int verbose) {
     if (!located) printf("  %ld bytes differ; first at pool offset %zu, outside the frames\n", wrong, at);
   }
   stats->cases++;
+  stats->mixed_cases += c.mixed();
   for (const Block &b : c.blocks) {
     stats->blocks++;
+    stats->mixed_blocks += c.mixed();
     stats->single_global += b.kind == kSingleGlobal;
     stats->single_local += b.kind == kSingleLocal;
     stats->compound += b.kind == kCompound;
@@ -816,25 +857,59 @@ static long check_scale_value(int model, long *checked) {
 // ---------------------------------------------------------------------------
 // The cases.
 // ---------------------------------------------------------------------------
-static void random_case(Case *c, int w, int h, int bit_depth, int index) {
-  c->l = make_layout(w, h, bit_depth > 8);
+// |w1| x |h1|: the size of reference frame 1. When it is not the size of the frame, reference 0 is that
+// frame (so the size of reference 0 is not the size of the references the blocks use), at least one
+// reference is the other frame, and a reference to frame 1 has no warp model: the decoder takes the
+// global motion warp of a scaled reference off (av1_setup_frame() of av1_core.cpp, as libaom's
+// av1_allow_warp() does).
+static void random_case(Case *c, int w, int h, int w1, int h1, int bit_depth, int index) {
+  set_layouts(c, w, h, w1, h1, bit_depth > 8);
   c->bit_depth = bit_depth;
   c->content = index % 5;
   c->name = "case " + std::to_string(index);
   const int spread = 1 << rnd_range(3, 12);
+  const int other = c->mixed() ? 1 + rnd(6) : -1;
   for (int r = 0; r < 7; r++) {
     static const int types[8] = {0, 0, 1, 2, 2, 2, 3, 3};
-    random_model(&c->gm[r], types[rnd(8)], spread);
     c->ref_frame[r] = 1 + rnd(2);
+    if (c->mixed() && r == 0) c->ref_frame[r] = 1;
+    if (r == other) c->ref_frame[r] = 2;
+    random_model(&c->gm[r], c->mixed() && c->ref_frame[r] == 1 ? 0 : types[rnd(8)], spread);
   }
   add_blocks(c, 6 + rnd(30));
+}
+
+// The frame of the spatial layer vectors that was wrong: a 1280x720 frame of the upper layer whose LAST is
+// the 640x360 frame of the lower layer of its temporal unit and whose GOLDEN is the 1280x720 frame of the
+// temporal unit before, and a block with a local warp from GOLDEN in the lower right quarter of the frame,
+// outside of what a 640x360 frame covers.
+static void layer_case(Case *c, int bit_depth) {
+  set_layouts(c, 1280, 720, 640, 360, bit_depth > 8);
+  c->bit_depth = bit_depth;
+  c->content = 4;
+  c->name = "spatial layer case";
+  for (int r = 0; r < 7; r++) {
+    random_model(&c->gm[r], 0, 0);
+    c->ref_frame[r] = r == 3 ? 2 : 1;
+  }
+  for (int tries = 0; tries < 64 && c->blocks.empty(); tries++) {
+    Block b = {};
+    b.kind = kSingleLocal;
+    b.mi_col = 960 / 4;
+    b.mi_row = 528 / 4;
+    b.bw_log = 3;
+    b.bh_log = 3;
+    b.ref[0] = 3;
+    b.noskip = 1;
+    if (random_local_model(&b.local, b)) c->blocks.push_back(b);
+  }
 }
 
 // The block of the console failure this check was written for: a 1080p 10-bit frame, a 32x16
 // GLOBAL_GLOBALMV wedge block 32 samples from the right frame edge, LAST without global motion and ALTREF
 // with a rotzoom model.
 static void console_case(Case *c) {
-  c->l = make_layout(1920, 1080, 1);
+  set_layouts(c, 1920, 1080, 1920, 1080, 1);
   c->bit_depth = 10;
   c->content = 4;
   c->name = "console case";
@@ -909,6 +984,17 @@ int main(int argc, char **argv) {
     ok &= same;
   }
 
+  for (int bit_depth = 8; bit_depth <= 10; bit_depth += 2) {
+    Case c;
+    layer_case(&c, bit_depth);
+    const bool same = !c.blocks.empty() && run_case(c, &stats, verbose);
+    printf(
+        "warp_check: spatial layer case (1280x720 %d-bit, LAST a 640x360 frame, 64x64 block with a local warp from "
+        "GOLDEN, 1280x720, at x 960 y 528): %s\n",
+        bit_depth, same ? "identical" : "DIFFERENT");
+    ok &= same;
+  }
+
   // Frame sizes: multiples of 64 and of 8, sizes that are neither, odd sizes, frames smaller than a block.
   static const int sizes[][3] = {{64, 64, 4},   {72, 40, 4},   {131, 67, 4},    {200, 120, 4},
                                  {256, 136, 4}, {176, 144, 4}, {16, 16, 2},     {33, 17, 2},
@@ -920,7 +1006,38 @@ int main(int argc, char **argv) {
       const int count = size[2] ? std::max(1, cases_per_size * size[2] / 4) : std::max(1, cases_per_size / 12);
       for (int i = 0; i < count; i++) {
         Case c;
-        random_case(&c, size[0], size[1], bit_depth, index++);
+        random_case(&c, size[0], size[1], size[0], size[1], bit_depth, index++);
+        ok &= run_case(c, &stats, verbose);
+      }
+    }
+  }
+  // The same with a reference frame of another size as reference 0: half and twice the frame (the two
+  // spatial layers of a stream, either way round), and the sizes reference scaling steps through (8/9 to
+  // 8/16 of the frame, and back).
+  static const int mixed_sizes[][3] = {{64, 64, 4}, {136, 72, 4}, {200, 120, 4}, {256, 136, 4},
+                                       {33, 17, 2}, {640, 360, 2}, {1280, 720, 0}};
+  for (int bit_depth = 8; bit_depth <= 10; bit_depth += 2) {
+    for (const auto &size : mixed_sizes) {
+      const int count = size[2] ? std::max(1, cases_per_size * size[2] / 4) : std::max(1, cases_per_size / 12);
+      for (int i = 0; i < count; i++) {
+        const int w = size[0], h = size[1];
+        int w1 = w, h1 = h;
+        switch (i % 4) {
+          case 0: w1 = (w + 1) / 2, h1 = (h + 1) / 2; break;
+          case 1: w1 = w * 2, h1 = h * 2; break;
+          case 2: {
+            const int denom = rnd_range(9, 16);
+            w1 = (w * 8 + denom / 2) / denom, h1 = (h * 8 + denom / 2) / denom;
+            break;
+          }
+          default: {
+            const int denom = rnd_range(9, 16);
+            w1 = (w * denom + 4) / 8, h1 = (h * denom + 4) / 8;
+            break;
+          }
+        }
+        Case c;
+        random_case(&c, w, h, std::max(w1, 1), std::max(h1, 1), bit_depth, index++);
         ok &= run_case(c, &stats, verbose);
       }
     }
@@ -929,6 +1046,9 @@ int main(int argc, char **argv) {
       "warp_check: %ld frames, 8-bit and 10-bit, %ld blocks: %ld GLOBALMV with a global warp, %ld with a local warp, "
       "%ld GLOBAL_GLOBALMV (%ld of them with one reference not warped)\n",
       stats.cases, stats.blocks, stats.single_global, stats.single_local, stats.compound, stats.compound_mv_side);
+  printf("warp_check: %ld of the frames, with %ld of the blocks, have a reference 0 of another size than the frame\n",
+         stats.mixed_cases, stats.mixed_blocks);
+  ok &= stats.mixed_cases > 0 && stats.mixed_blocks > 0;
   printf("warp_check: frames that differ from libaom: %ld with double precision, %ld without\n", stats.mismatches[1],
          stats.mismatches[0]);
   printf("warp_check: double precision operations executed by the shaders: %ld%s\n", stats.double_ops,

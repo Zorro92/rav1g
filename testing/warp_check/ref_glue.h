@@ -60,6 +60,9 @@ void ref_global_mv(const int *mat, int wmtype, int allow_hp, int luma_w, int lum
                    int *mv_row, int *mv_col);
 /* scaled_x() of scale.c for a position in 1/16 sample and a scale in 1/16384. */
 int ref_scale_value(int val, int scale);
+/* The scale factors of a reference of ref_w x ref_h for a frame of w x h (av1_setup_scale_factors_for_frame), as
+ * av1_setup_frame() of av1_core.cpp hands them to the shaders: x scale, x step, y scale, y step. */
+void ref_scale_factors(int ref_w, int ref_h, int w, int h, int *scale);
 
 /* Tables the decoder uploads: the warp filter (193 x 8), the interpolation kernels in the order of
  * prediction.cpp, and the wedge masks laid out like inter_mask_lut of av1_compute.cpp. */

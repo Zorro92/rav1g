@@ -264,6 +264,10 @@ struct av1_frame_thread_data {
   size_t clean_iter_bytes;
   int scale_enable;
   ScaleFactor scale_factors[8];
+  // Entry LAST_FRAME..ALTREF_FRAME: a GLOBALMV or GLOBAL_GLOBALMV block of this frame is warped from that
+  // reference. The reference has a global motion model libaom accepts and the size of the frame: a scaled
+  // reference is never warped (av1_allow_warp of libaom, useWarp of the specification).
+  int gm_warp[8];
   volatile int64_t perf_markers[16];
   av1_perf_td perf;
 

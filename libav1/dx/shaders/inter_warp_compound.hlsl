@@ -54,7 +54,6 @@ int blend(int src0, int src1, int coef) {
   int y = SubblockH * ((block.x >> 16) + (subblock >> w_log));
 
   const int plane = block.y & 3;
-  const int2 dims = cb_dims[plane > 0].xy;
   const int noskip = block.y & NoSkipFlag;
   const int subsampling = plane > 0;
   const int local_ofs = ((thread.x & 63) >> 2) * 11;
@@ -64,6 +63,8 @@ int blend(int src0, int src1, int coef) {
   int refplane = ref * 3 + plane;
   int ref_offset = cb_refplanes[refplane].y;
   int ref_stride = cb_refplanes[refplane].x;
+  // The size of the block's own reference, not of reference 0: the references of a frame can differ in size.
+  int2 dims = int2(cb_refplanes[refplane].z, cb_refplanes[refplane].w);
   int4 info0 = cb_gm_warp[ref].info0;
   int4 output0 = int4(0, 0, 0, 0);
   // The prediction from a reference is two passes: the four threads of a 4x4 filter its eleven lines
@@ -190,6 +191,7 @@ int blend(int src0, int src1, int coef) {
   refplane = ref * 3 + plane;
   ref_offset = cb_refplanes[refplane].y;
   ref_stride = cb_refplanes[refplane].x;
+  dims = int2(cb_refplanes[refplane].z, cb_refplanes[refplane].w);
   info0 = cb_gm_warp[ref].info0;
 
   int4 output1 = int4(0, 0, 0, 0);

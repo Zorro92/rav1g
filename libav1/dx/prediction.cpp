@@ -79,8 +79,9 @@ void av1_mi_push_block(AV1Decoder *pbi, AV1_COMMON *cm, MACROBLOCKD *xd) {
     if (xd->cur_frame_force_integer_mv == 0 && bsize >= BLOCK_8X8 &&
         (mi->mode == GLOBALMV || mi->mode == GLOBAL_GLOBALMV)) {
       for (int ref = 0; ref < 1 + is_compound; ++ref) {
-        is_global_warp[ref] = xd->global_motion[mi->ref_frame[ref]].wmtype > TRANSLATION &&
-                              !xd->global_motion[mi->ref_frame[ref]].invalid;
+        // As gen_pred_blocks.hlsl decides it from GenBlockData::global_warp: both count the block into the
+        // same list.
+        is_global_warp[ref] = td->gm_warp[mi->ref_frame[ref]];
       }
     }
     const int is_local_warp =
@@ -554,8 +555,7 @@ void av1_prediction_gen_blocks(AV1Decoder *pbi, Av1Core *dec) {
     data->wedge_offsets[bs][1] = dec->wedge_offsets[bs][1];
   }
   for (int i = 0; i < 8; ++i) data->lossless_seg[i][0] = xd->lossless[i];
-  for (int i = 0; i < 7; ++i)
-    data->global_warp[i][0] = cm->global_motion[i + 1].wmtype > TRANSLATION && !cm->global_motion[i + 1].invalid;
+  for (int i = 0; i < 7; ++i) data->global_warp[i][0] = td->gm_warp[i + 1];
   for (int r1 = 0; r1 < 7; ++r1) {
     for (int r0 = 0; r0 < 7; ++r0) {
       int fwd_offset = 8;
@@ -804,7 +804,7 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
     int enable_gm_warp = 0;
     for (int i = 0; i < 7; ++i) {
       WarpedMotionParams *wm = &cm->global_motion[i + 1];
-      const int is_gmwarp = wm->wmtype > TRANSLATION && !wm->invalid;
+      const int is_gmwarp = td->gm_warp[i + 1];  // not for a scaled reference: av1_setup_frame()
       enable_gm_warp |= is_gmwarp;
       inter_data->warp[i].is_warp = is_gmwarp;
       if (is_gmwarp) {

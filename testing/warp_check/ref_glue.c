@@ -114,6 +114,16 @@ int ref_scale_value(int val, int scale) {
   return sf.scale_value_x(val, &sf);
 }
 
+void ref_scale_factors(int ref_w, int ref_h, int w, int h, int *scale) {
+  struct scale_factors sf;
+  av1_setup_scale_factors_for_frame(&sf, ref_w, ref_h, w, h);
+  if (!av1_is_valid_scale(&sf)) abort(); /* the check only makes sizes a reference can have */
+  scale[0] = sf.x_scale_fp;
+  scale[1] = sf.x_step_q4;
+  scale[2] = sf.y_scale_fp;
+  scale[3] = sf.y_step_q4;
+}
+
 const int16_t *ref_warp_filter(void) { return &warped_filter[0][0]; }
 
 void ref_kernels(int kernels[8 * 16][8]) {
