@@ -189,8 +189,9 @@ CI (`.github/workflows/build.yml`), next to the unchanged `conformance` job with
 
 - `rust` (Windows, MSVC): `cargo build --release`, the shader check, `cargo test`, `-sm6test`, then the
   conformance set, the order check (`order_check.py`: streams one after the other in one process, nothing
-  decoded again alone), 137 streams with `-poisonmi`, the timing smoke test and the stage dumps with
-  `rav1g-dec`.
+  decoded again alone), 137 streams with `-poisonmi` and the same with `-poisonbuf`, the timing smoke test
+  and the stage dumps with `rav1g-dec`. With the workflow's `experiments` input also the whole set with
+  `-interfast`, with `-poisonbuf` and with both.
 - `rust-equal`: `compare_md5.py` on the artifacts of `conformance` and `rust`. Every stream of the manifest
   must be in both runs with the same md5 file, byte for byte, and the stage dumps of the frames in
   `dump_tasks.txt` must compare equal.
