@@ -606,3 +606,55 @@ of the same streams:
   shaders and the bit-field table masks give the same wrong md5 (8-bit 4K frame 0 `537ee12a...` in every
   build since 0.2.11.0). Super-resolution, fixed on WARP, is md5-identical on the console too.
 
+### 8-bit: wrong exactly where the loop filter runs
+
+Frame headers of AOM's vectors (`ffmpeg -bsf:v trace_headers`) against the console results of package
+0.2.29.0:
+
+| Stream (8-bit) | Console | `loop_filter_level[0]`, `[1]` (vertical, horizontal luma edges) |
+| --- | --- | --- |
+| `av1-1-b8-22-svc-L2T1`, `-L2T2` | all frames right | 0, 0 in every frame of both layers: no frame is loop filtered (CDEF is on) |
+| `av1-1-b8-01-size-66x66` | frame 0 right, frame 1 wrong | frame 0: 0, 0; frame 1: 4, 5 (U 0, V 4) |
+| `av1-1-b8-03-sizeup`, `-sizedown` | all frames wrong, both sizes | key frame 352x288: 5, 0 (U 3, V 2); key frame 1280x720: 38, 26 (U 20, V 14); the frames without loop filter predict from wrong references |
+| 8-bit 2160p cut | all frames wrong | frame 0, a key frame: level 1 |
+
+All of these have `loop_filter_delta_enabled` 1 with the default reference deltas, no segmentation and
+no `delta_lf`; sharpness 0. So on the console an 8-bit frame is wrong when, and as far as these streams
+tell only when, the loop filter runs on it, and the 10-bit streams with loop filter are right. The
+list shaders (`gen_lf_blocks_vert/hor`) are the same for both depths; the filters are not
+(`loopfilter_vert/hor.hlsl` against the `_hbd` files: four samples to a 32-bit word instead of two,
+whole words read and written back around an edge). The vectors differ from the 10-bit streams in one
+more way: their vertical and horizontal levels differ (one of them can be 0), and their level varies
+with the reference of the block.
+
+### The edge lists: read through, nothing unwritten
+
+What the loop filter reads of `loopfilter_blocks`, and what writes it:
+
+- The buffer is created once (`av1_core.cpp:656-667`), is shared by all frames and slots and is never
+  cleared. It does not have to be: every thread of a list shader first zeroes the 32 bytes of its own
+  block and then stores the block's edges (`gen_lf_blocks_vert.hlsl:146-147` and `:231`,
+  `gen_lf_blocks_hor.hlsl:146-147` and `:224`), so a record holds nothing of an earlier frame, and a
+  block that ends early (no mode info, `:162`, `:189`; an edge that is not on the transform grid,
+  `:178`) stays zero, which the filter takes as "no edge".
+- The list shaders write exactly the records the filters read. Vertical: `blk_cols * mi_rows` blocks
+  per plane (`loopfilters.cpp:92-102`, dispatched with that count at `:156`), read as the even block
+  numbers and then the odd ones (`:229`, `:243`), together all of them. Horizontal: `mi_cols *
+  ceil(mi_rows / 16)` blocks (`:172`), read at `:264`. A thread behind the count returns
+  (`gen_lf_blocks_*.hlsl:131`) or is inactive in the filter. A plane with level 0 is skipped by both.
+- Nothing outside the frame is read. A block at the right edge has `c_end = clamp(mi_cols - mi_col, 0,
+  16)` edges (`gen_lf_blocks_vert.hlsl:144`; `r_end` at the bottom, `gen_lf_blocks_hor.hlsl:143`), with
+  `mi_cols` the 4x4 columns that have a visible sample (`loopfilters.cpp:87-90`), and reads the mode
+  info of those columns and of the one to the left only; the entries behind the last edge are the
+  zeroes. For 66x66 the second block of a row has the one edge at x 64.
+- The filter walks a block from entry 0 by the step of each edge and stops at a zero or at sixteen
+  (`loopfilter_vert.hlsl:199-211`, `loopfilter_hor.hlsl:246-255`), so it reads only entries a list
+  shader wrote in this frame.
+
+Three places of the list shaders index a table with a value of the mode info without a bound
+(`tx_size_wide[tx_size]`, `gen_lf_blocks_vert.hlsl:121`; the block size tables, `:170-171`; the level
+table by reference and mode, `:95`); they are in range for every record a stream can produce, so they
+are not the difference either, and nothing was changed. `-dumpstages` now saves the lists, the
+constants and the mode info (format 2, [test-player.md](test-player.md#stage-dumps--dumpstages)), so
+that a console dump says which of the three inputs of `lf_vert` differs, if any.
+

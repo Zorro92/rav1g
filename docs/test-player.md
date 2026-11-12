@@ -2395,6 +2395,33 @@ The stages, in the order of a frame's command list (a frame has those that run f
 A dump holds the buffer as stored (the whole frame buffer with its borders and padding) and
 the layout of its planes; the comparison looks at the visible samples.
 
+Between the stages a file also has the **data buffers** the stages read besides the frame:
+lists and tables, no samples. Each is copied where the first stage that reads it starts, so
+it holds what that stage reads on the device, and comes with a text that says how it is laid
+out (the format is in `testing/common/stage_dump.h`):
+
+| Buffer | What it is | Read by |
+| --- | --- | --- |
+| `mi_grid`, `mi_pool` | the frame's mode info: one record address per 4x4 unit, and the records of the frame's tiles (block size, references, modes, transform sizes, skip, segment, ...) | `gen_pred_blocks`, `gen_lf_blocks_vert/hor` |
+| `pred_blocks`, `pred_blocks_warp` | the prediction block records `gen_pred_blocks` wrote | the prediction and reconstruction stages |
+| `lf_params` | the constants of the loop filter: the frame's levels and deltas, the level per plane, segment, reference and mode, and the three limits of every level | `gen_lf_blocks_vert/hor`, `loopfilter_vert/hor` |
+| `lf_blocks` | the six edge lists of the loop filter (vertical and horizontal edges of Y, U, V): per block sixteen edges, each a level, a filter length and the step to the next edge | `loopfilter_vert/hor` |
+| `cdef_info` | CDEF's strength index per 64x64 block and skip flag per 8x8 block | `cdef_filter` |
+| `lr_info` | loop restoration: type and coefficients per unit | `loop_restoration` |
+
+A frame has the buffers of the stages that run for it (no `lf_blocks` without loop filter).
+The buffers the shaders write (`pred_blocks*`, `lf_blocks`) are copied like a frame buffer,
+with a state transition in front of the copy and one behind it; the others are memory the
+GPU only reads, and are copied without one. They add little to a dump: the edge lists of a
+3840x2160 frame are 3 MB, the mode info as many records of 224 bytes as the frame has
+blocks.
+
+A stream that starts a new sequence the decoder cannot take (`RECONFIGURE` in the log) gets
+a new decoder, whose frame numbers start at 0 again: the frame list applies to every
+sequence, and the files of the frames behind the n-th such start are called
+`<stream file name>.seq<n>_f<n>.stages`. `-dumpstages 0` on a stream with one size change
+writes `<stream>_f0.stages` and `<stream>.seq1_f0.stages`, the first frame of each size.
+
 Compare on the host (Python 3, no packages):
 
 ```sh
@@ -2410,6 +2437,46 @@ other side can be a digest (hashes per row and per 8x8 block; see
 [warp_decoder](warp-decoder.md#stage-dumps)): then it names the rows and blocks, not the
 sizes. `compare-yuv` compares one stage with a frame of a planar file from a reference
 decoder, `extract` writes one stage as a planar file.
+
+The data buffers are compared as well, each where it stands in the frame, and a buffer that
+differs is printed decoded, both sides (`--samples N` lists more than twelve entries):
+
+- `lf_blocks`: per list the blocks that differ, where they are in the plane, and every edge
+  of the block on both sides. An edge of a vertical list is `x=<column> level <n> <taps>-tap
+  step <n>`, of a horizontal list `y=<row> ...`; `not filtered` is level 0, the step is the
+  distance to the next edge in 4-sample units. Entries of a record that differ but that the
+  filter does not reach (behind the last edge of the block) are named as such. A list of a
+  plane the frame does not filter is not written and not compared.
+- `mi_grid`: the 4x4 units whose mode info record differs, counted per field, with the first
+  units and the values on both sides. The fields the edge list shaders read are marked `*`,
+  and the line above says how many units differ in one of those. The record addresses, which
+  differ from run to run, are not compared; a field no stage reads for a block may hold what
+  an earlier block left in the record, so a difference in an unmarked field is not by itself
+  a wrong frame.
+- `lf_params`: the constants that differ, by name.
+- `cdef_info`, `lr_info`: the 64x64 and 8x8 blocks, or the units, that differ. Skip entries
+  outside the part that is written for the frame are counted in a `NOTE` and are not a
+  difference.
+- `pred_blocks`, `pred_blocks_warp`: the records that differ, as 32-bit words.
+
+A buffer that only one side has (dumps of an older package, format 1) is named and left out
+of the result. Two more commands print one side on its own:
+
+```sh
+python3 testing/stage_dump/stage_dump.py edges dumps/<clip>_f1.stages --dir vert --plane 0 --x 64 --y 41
+python3 testing/stage_dump/stage_dump.py mi dumps/<clip>_f1.stages 16 10
+```
+
+`edges` prints the edge list of the block that holds a sample of a plane (and the frame's
+levels), `mi` the mode info record of a 4x4 unit (column, row), field by field.
+
+What a comparison of a wrong frame says about the loop filter: if the first stage that
+differs is `lf_vert_even`, `lf_vert` or `lf_horz` and `lf_blocks`, `lf_params` and the frame
+in front of the stage are equal, the filter shader computed differently from the same
+input; if `lf_blocks` differs and `mi_grid` (its `*` fields) and `lf_params` are equal, the
+list shader did; if those differ too, the difference is in what the decode threads wrote.
+If the frame is right with `-dumpstages` and wrong without, the copy itself changed the
+outcome: then the stage did not see what the stage before it wrote.
 
 ## Shader survey
 

@@ -579,6 +579,9 @@ int AV1Decoder::DecodeOne() {
         aom_codec_decode(&decctx_, 0, 0, 0);
         reconfiguring_ = 0;
         DestroyDecoder();
+        // -dumpstages: the drain has handed over the dumps of the sequence before; the frame numbers of the
+        // new decoder start at 0 again, and its dumps go to files of their own.
+        if (dumps_installed_) stage_dumps_.NextSequence();
         si = new_si;
         dec_width = new_width;
         dec_height = new_height;

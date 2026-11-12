@@ -132,7 +132,11 @@ assert of the library) ends the process without a `RESULT` line: a `CRASH except
 file format's use): for the listed frames the buffer behind every GPU stage of the frame's
 command list is written to `<dumpdir>/<name>_f<n>.stages`. The player on a console and
 warp_decoder on WARP write the same files for the same stream, and
-`testing/stage_dump/stage_dump.py compare` says at which stage the two part and how.
+`testing/stage_dump/stage_dump.py compare` says at which stage the two part and how. A file
+also holds the buffers the stages read besides the frame (mode info, prediction block
+records, loop filter constants and edge lists, CDEF and loop restoration lists), which
+`compare` prints decoded where they differ. After a `RECONFIGURE` the frame numbers start
+again and the files are `<name>.seq<n>_f<n>.stages`.
 
 ```bat
 warp_decoder -i clip.ivf -limit 2 -dumpstages 0,1 -dumpdir dumps
@@ -151,13 +155,16 @@ with the dumps, the task's log and its md5 file:
   other device to compare the same frames.
 - cuts of published streams (`cut`): `.digest` files only, a hash per row and a CRC per 8x8
   block of every plane of every stage. A digest has no samples; neither the streams nor
-  their decoded frames leave the job. `stage_dump.py compare` takes a digest on either side
+  their decoded frames leave the job. Of the data buffers it keeps the loop filter, CDEF and
+  loop restoration lists as they are, and a CRC per 4x4 unit of the mode info and per
+  prediction block record. `stage_dump.py compare` takes a digest on either side
   and then reports which rows and 8x8 blocks differ, not by how much. The same cut can be
   made anywhere with the line of `streams.txt` (`ffmpeg -ss <start> -i <url> -map 0:v:0
   -frames:v <frames> -c copy -f ivf`).
 
 To get dumps of other frames, edit `dump_tasks.txt` and push; the job prints what it dumped
-(`stage_dump.py list`) in the step's log.
+(`stage_dump.py list`) in the step's log, and compares every directory with itself, which
+reads every buffer of every dump the way a comparison with another device does.
 
 ## AOM's md5 files
 

@@ -14,7 +14,7 @@
 
 Per line "<stream> <frames> [<temporal units>]" of the task list: decodes the stream (its line of
 <streams>/manifest.txt, without the reference check) with -dumpstages <frames> into <out>/<stream>/, prints
-what was dumped, and
+what was dumped, compares the dumps with themselves (a check of the reader), and
   - keeps the dumps of an aom or svt stream, and copies an svt stream (a test pattern encoded in the job)
     to <out>/streams/;
   - replaces the dumps of a cut stream (published media) by their digests.
@@ -89,6 +89,10 @@ def main():
             continue
         sys.stdout.flush()
         stage_dump.main_with(['list', target])
+        # Every buffer of every dump read the way a comparison with another device reads it.
+        if stage_dump.quiet_compare(target, target) != 0:
+            print('ERROR %s: the dumps do not compare equal with themselves' % name)
+            failed += 1
         if kind == 'cut':
             stage_dump.main_with(['digest', target, target])
             for n in dumps:

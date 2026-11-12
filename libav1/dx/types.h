@@ -174,10 +174,11 @@ struct av1_perf_td {
 
 // Test program flag -dumpstages (av1_set_stage_dump): one copy of a buffer behind a stage of the frame's
 // command list.
-enum { Av1StageDumpMax = 20 };
+enum { Av1StageDumpMax = 40 };
 struct av1_stage_dump_entry {
   Microsoft::WRL::ComPtr<ID3D12Resource> readback;
   const char* stage;
+  char* layout;  // kind 2: the text that describes the data (malloc), else NULL
   int kind;
   int bytes_per_sample;
   int bit_depth;
@@ -382,6 +383,23 @@ void PutPerfMarker(av1_frame_thread_data* td, volatile int64_t* marker);
 void av1_stage_dump_fb(Av1Core* dec, const char* stage, const HwFrameBuffer* fb, const HwFrameBuffer* dims = NULL);
 void av1_stage_dump_residuals(Av1Core* dec, const char* stage);
 void av1_stage_dump_output(Av1Core* dec, const char* stage, const HwOutputImage* img, size_t size);
+// -dumpstages, the buffers the stages read besides the frame (kind 2). The regions are copied one behind the
+// other into one dump; |layout| is the text that describes them (copied). |uav|: the region's buffer is one
+// the shaders write (unordered access state) and is a copy source for the length of the copy; a buffer the GPU
+// only reads (upload or host memory, generic read state) is copied as it is.
+struct av1_stage_dump_region {
+  ID3D12Resource* src;
+  size_t offset;
+  size_t size;
+  int uav;
+};
+int av1_stage_dump_active(Av1Core* dec);
+void av1_stage_dump_data(Av1Core* dec, const char* stage, const char* layout, const av1_stage_dump_region* regions,
+                         int count);
+// The frame's mode info as the stages read it: the grid, and the records of the frame's tiles.
+void av1_stage_dump_mode_info(Av1Core* dec, struct AV1Common* cm);
+// The region of a constant block of the frame's command buffer.
+av1_stage_dump_region av1_stage_dump_cb_region(Av1Core* dec, const ConstantBufferObject& cbo, size_t size);
 // Timing instrumentation (no-ops unless a perf callback is installed).
 void av1_perf_gpu_mark(Av1Core* dec, int stage);
 void av1_perf_add(Av1Core* dec, int id, int64_t start_ticks);

@@ -182,7 +182,27 @@ void av1_set_async_clear(int enable);
  * A copy needs a UAV-to-copy-source transition of the buffer in front of it and
  * the opposite one behind it, and the stages are a UAV barrier apart already,
  * so a dump does not change what the stages of a frame see of each other.
- * The decoded output is the same. */
+ * The decoded output is the same.
+ *
+ * Between them come the buffers the stages read besides the frame (kind 2,
+ * "data"): no samples but lists and tables, with a text that says how they are
+ * laid out (av1_stage_dump::layout: lines of key=value fields; the keys are
+ * listed in testing/common/stage_dump.h). Each is copied where the first
+ * stage that reads it starts, so it holds what that stage reads:
+ *   mi_grid          the frame's grid of mode info pointers (8 bytes per 4x4 unit)
+ *   mi_pool          the mode info records of the frame's tiles (the records the
+ *                    grid points to; gen_pred_blocks and gen_lf_blocks read them)
+ *   pred_blocks      the prediction block records gen_pred_blocks wrote
+ *   pred_blocks_warp the warped prediction block records
+ *   lf_params        the constants of the loop filter: levels, deltas, limits
+ *   lf_blocks        the edge lists gen_lf_blocks_vert/hor wrote, which
+ *                    loopfilter_vert/hor read: per plane and direction one
+ *                    record of sixteen edges per block
+ *   cdef_info        CDEF's strength index per 64x64 and skip flag per 8x8
+ *   lr_info          loop restoration: type and coefficients per unit
+ * The buffers the shaders write (pred_blocks*, lf_blocks) take the same
+ * transition as a frame buffer; the others are read-only for the GPU and are
+ * copied as they are. */
 typedef struct av1_stage_dump_plane {
   uint32_t offset; /* of the first visible sample, in bytes from the start of data */
   uint32_t stride; /* bytes */
@@ -195,7 +215,8 @@ typedef struct av1_stage_dump {
                            from 0; a show_existing_frame has the number of the frame it shows */
   int index;            /* position of the dump in the command list, from 0 */
   const char *stage;    /* see above */
-  int kind;             /* 0: samples of a frame buffer or an output image, 1: residuals */
+  int kind;             /* 0: samples of a frame buffer or an output image, 1: residuals,
+                           2: data (a list or table; no planes, see layout) */
   int bytes_per_sample; /* 1 or 2 (low byte first) */
   int bit_depth;
   int is_sef;           /* the command list of a show_existing_frame (output only) */
@@ -203,6 +224,7 @@ typedef struct av1_stage_dump {
   av1_stage_dump_plane planes[3];
   const uint8_t *data;  /* the buffer as stored, valid during the call */
   size_t size;
+  const char *layout;   /* kind 2: how data is laid out, as text; NULL otherwise */
 } av1_stage_dump;
 
 /* Called on the GPU completion thread, once per dump, in command list order,

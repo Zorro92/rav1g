@@ -14,14 +14,19 @@
 #   cut streams: digests only (<stream>_f<n>.digest: a hash per row and per 8x8 block). They are published
 #     media, and neither the streams nor their decoded frames leave the job.
 # A dump of a frame is ten to twenty times the size of the frame: keep the lists short.
+# A stream that starts a sequence which takes a new decoder (RECONFIGURE) has its frames numbered from 0
+# again behind it, in files <stream>.seq<n>_f<frame>: the frame list applies to every sequence.
 
 # Super-resolution: the key frame (use_superres) and the frame after it, which also predicts from a
 # reference of another width.
 syn-superres-10b-1080p.ivf 0-1 2
-# Scaled references, wrong on the console only: the first frames.
-syn-resize-10b-1080p.ivf 0-5 6
+# Scaled references, wrong on the console only: the first frames (the first wrong output there is frame 4).
+syn-resize-10b-1080p.ivf 0-7 8
 # 8-bit, wrong on the console only: key frames, and a small vector whose dumps are small.
 nf-dvbdash-a1-8b-2160p.ivf 0 1
 nf-chimera-8b-720p.ivf 0-1 2
 av1-1-b8-01-size-66x66.ivf 0-1 2
 av1-1-b8-00-quantizer-20.ivf 0-1 2
+# 8-bit, wrong on the console only at both sizes: the key frame of each of the two sequences, 352x288
+# (_f0) and, from temporal unit 10, 1280x720 (.seq1_f0).
+av1-1-b8-03-sizeup.mkv 0 11

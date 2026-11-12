@@ -634,6 +634,7 @@ void av1_prediction_gen_blocks(AV1Decoder *pbi, Av1Core *dec) {
       }
     }
   }
+  const int pred_block_count = offset;  // records of prediction_blocks the frame's lists take
   offset = 0;
   for (int it = 0; it <= InterTypes::InterSizesAllCommon; ++it) {
     for (int t = 0; t < tile_count; ++t) {
@@ -642,6 +643,9 @@ void av1_prediction_gen_blocks(AV1Decoder *pbi, Av1Core *dec) {
       offset += cnt;
     }
   }
+  const int pred_warp_count = offset;  // records of prediction_blocks_warp
+  // -dumpstages: the mode info, where the first stage that reads it starts.
+  av1_stage_dump_mode_info(dec, cm);
   Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> command_list = dec->compute.command_list;
   ComputeShader *shader = &dec->shader_lib->shader_gen_pred_blocks;
   command_list->SetComputeRootSignature(shader->signaturePtr.Get());
@@ -688,6 +692,22 @@ void av1_prediction_gen_blocks(AV1Decoder *pbi, Av1Core *dec) {
   command_list->ResourceBarrier(2, barriers);
   PutPerfMarker(td, &td->perf_markers[1]);
   av1_perf_gpu_mark(dec, AV1_PERF_GPU_GEN_BLOCKS);
+  // -dumpstages: the block records gen_pred_blocks has just written, as the prediction stages read them.
+  if (av1_stage_dump_active(dec)) {
+    enum { PredBlockSize = 16, PredWarpBlockSize = 48 };
+    char layout[160];
+    av1_stage_dump_region region = {dec->prediction_blocks->dev, 0, (size_t)pred_block_count * PredBlockSize, 1};
+    if (region.size > dec->prediction_blocks->size) region.size = dec->prediction_blocks->size;
+    snprintf(layout, sizeof(layout), "buffer=pred_blocks record=%d count=%d\n", (int)PredBlockSize,
+             (int)(region.size / PredBlockSize));
+    av1_stage_dump_data(dec, "pred_blocks", layout, &region, 1);
+    region.src = dec->prediction_blocks_warp->dev;
+    region.size = (size_t)pred_warp_count * PredWarpBlockSize;
+    if (region.size > dec->prediction_blocks_warp->size) region.size = dec->prediction_blocks_warp->size;
+    snprintf(layout, sizeof(layout), "buffer=pred_blocks_warp record=%d count=%d\n", (int)PredWarpBlockSize,
+             (int)(region.size / PredWarpBlockSize));
+    av1_stage_dump_data(dec, "pred_blocks_warp", layout, &region, 1);
+  }
 }
 
 struct GlobalMotionWarp {

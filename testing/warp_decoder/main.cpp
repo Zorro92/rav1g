@@ -138,7 +138,8 @@ static void Usage() {
   Say("  -save_wrong_yuv <dir> with a reference: write each frame that differs to <dir>/<name>_<frame>.yuv");
   Say("  -wrong_limit <n>      -save_wrong_yuv writes at most n frames per task");
   Say("  -dumpstages <frames>  write the buffers behind every GPU stage of these frames (decoding order from");
-  Say("                        0, hidden frames count; a list like 0,3,10-12) to <dir>/<name>_f<n>.stages,");
+  Say("                        0, hidden frames count; a list like 0,3,10-12) and the lists the stages read");
+  Say("                        (mode info, block records, loop filter edge lists) to <dir>/<name>_f<n>.stages,");
   Say("                        as the player does; compare two runs with testing/stage_dump/stage_dump.py");
   Say("  -dumpdir <dir>        where -dumpstages writes (default dumps; created when it is not there)");
   Say("  -limit <n>            decode only the first n temporal units of the stream");
@@ -1063,6 +1064,9 @@ static int RunTask(const Task& task, Device* dev) {
       }
       aom_codec_decode(&ctx, NULL, 0, NULL);
       aom_codec_destroy(&ctx);
+      // -dumpstages: the drain has handed over the dumps of the sequence before; the frame numbers of the new
+      // decoder start at 0 again, and its dumps go to files of their own.
+      stage_dumps.NextSequence();
       const std::string create_error = create_decoder(new_si);
       if (!create_error.empty()) {
         have_decoder = false;  // nothing to drain or destroy below

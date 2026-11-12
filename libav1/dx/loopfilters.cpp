@@ -106,6 +106,7 @@ void av1_loopfilter_gpu(Av1Core *dec, AV1_COMMON *cm, MACROBLOCKD *xd) {
   for (int i = 1; i < 6; ++i) blk_offsets[i] = blk_offsets[i - 1] + blk_count[i - 1];
 
   ConstantBufferObject cbo = cb->Alloc(sizeof(GenLfData));
+  const ConstantBufferObject gen_cbo = cbo;
   GenLfData *gen_data = (GenLfData *)cbo.host_ptr;
   gen_data->mi_stride = cm->mi_stride;
   gen_data->mi_addr_base = static_cast<int>((uint64_t)dec->mode_info_pool->host_ptr);
@@ -182,6 +183,33 @@ void av1_loopfilter_gpu(Av1Core *dec, AV1_COMMON *cm, MACROBLOCKD *xd) {
     data->limits[lvl][0] = cm->lf_info.lfthr[lvl].lim[0];
     data->limits[lvl][1] = cm->lf_info.lfthr[lvl].mblim[0];
     data->limits[lvl][2] = cm->lf_info.lfthr[lvl].hev_thr[0];
+  }
+
+  // -dumpstages: what the loop filter reads besides the frame, before its first pass. The constants (those of
+  // the list shaders, then those of the filters) and the edge lists as gen_lf_blocks_vert/hor have just
+  // written them: six lists, vertical edges of Y, U, V and horizontal edges of Y, U, V, each from its first
+  // block; a record of 32 bytes per block, sixteen edges of 16 bits. A list of a plane that is not filtered
+  // is not written for this frame (on=0) and holds what an earlier frame left there.
+  if (av1_stage_dump_active(dec)) {
+    char layout[1024];
+    const av1_stage_dump_region params[] = {av1_stage_dump_cb_region(dec, gen_cbo, sizeof(GenLfData)),
+                                            av1_stage_dump_cb_region(dec, cbo, sizeof(LoopfilterData))};
+    snprintf(layout, sizeof(layout), "buffer=lf_params gen_size=%d lf_size=%d bit_depth=%d\n", (int)sizeof(GenLfData),
+             (int)sizeof(LoopfilterData), td->bitdepth);
+    av1_stage_dump_data(dec, "lf_params", layout, params, 2);
+
+    int len = snprintf(layout, sizeof(layout), "buffer=lf_blocks record=32 lists=6\n");
+    for (int i = 0; i < 6; ++i) {
+      const int plane = i % 3;
+      const int on = plane == 0 || (plane == 1 && cm->lf.filter_level_u) || (plane == 2 && cm->lf.filter_level_v);
+      len += snprintf(layout + len, sizeof(layout) - len,
+                      "list dir=%s plane=%d first=%d cols=%d count=%d mi_cols=%d mi_rows=%d on=%d\n",
+                      i < 3 ? "vert" : "horz", plane, blk_offsets[i], blk_cols[i], blk_count[i],
+                      plane ? mi_cols_uv : mi_cols_y, plane ? mi_rows_uv : mi_rows_y, on);
+    }
+    av1_stage_dump_region lists = {dec->loopfilter_blocks->dev, 0, (size_t)(blk_offsets[5] + blk_count[5]) * 32, 1};
+    if (lists.size > dec->loopfilter_blocks->size) lists.size = dec->loopfilter_blocks->size;
+    av1_stage_dump_data(dec, "lf_blocks", layout, &lists, 1);
   }
 
   LoopfilterSRT srt;
@@ -452,6 +480,24 @@ void av1_cdef_filter_run(Av1Core *dec, AV1_COMMON *cm, HwFrameBuffer *src, HwFra
   data->dst_offset[1] = dst->planes[1].offset;
   data->dst_offset[2] = dst->planes[2].offset;
 
+  // -dumpstages: the two lists CDEF reads besides the frame. The strength index of every 64x64 block, rows
+  // of nhfb; behind them the skip flags of the 8x8 blocks, rows of skips_stride, of which the loops above
+  // write skip_cols by skip_rows for this frame.
+  if (av1_stage_dump_active(dec)) {
+    char layout[256];
+    const int skip_rows = AOMMIN(nvfb * 16, cm->mi_rows / 2);
+    const int skip_cols = AOMMIN(nhfb * 16, cm->mi_cols / 2);
+    av1_stage_dump_region regions[] = {
+        {td->cdef_indexes->dev, 0, sizeof(int) * (size_t)nvfb * nhfb, 0},
+        {td->cdef_skips->dev, 0, sizeof(int) * (size_t)nvfb * 16 * nhfb * 16, 0}};
+    if (regions[0].size > td->cdef_indexes->size) regions[0].size = td->cdef_indexes->size;
+    if (regions[1].size > td->cdef_skips->size) regions[1].size = td->cdef_skips->size;
+    snprintf(layout, sizeof(layout),
+             "buffer=cdef_info index_size=%d index_stride=%d index_rows=%d skips_stride=%d skip_cols=%d skip_rows=%d\n",
+             (int)regions[0].size, nhfb, nvfb, nhfb * 16, skip_cols, skip_rows);
+    av1_stage_dump_data(dec, "cdef_info", layout, regions, 2);
+  }
+
   Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> command_list = dec->compute.command_list;
   const int cdef_v2 = g_cdef_v2;
   ComputeShader *shader = cdef_v2 ? &dec->shader_lib->shader_cdef_filter_v2 : &dec->shader_lib->shader_cdef_filter;
@@ -539,6 +585,24 @@ void av1_looprestoration(Av1Core *dec, AV1_COMMON *cm, void *lr_ctxt) {
         for (int i = 0; i < 8; ++i) dst_wiener[i + 8] = unit->wiener_info.vfilter[i];
       }
     }
+  }
+
+  // -dumpstages: the two lists loop restoration reads besides the frames. Per unit, the planes one behind the
+  // other: four words (type, the two self guided weights, the self guided set), and behind all of them
+  // sixteen words per unit (the horizontal and the vertical Wiener filter), which are written for a Wiener
+  // unit only.
+  if (lr_ptr && av1_stage_dump_active(dec)) {
+    char layout[256];
+    int len = snprintf(layout, sizeof(layout), "buffer=lr_info units=%d type_size=16 wiener_size=64\n", lr_ptr);
+    for (int p = 0; p < 3; ++p)
+      if (cm->rst_info[p].frame_restoration_type != RESTORE_NONE)
+        len += snprintf(layout + len, sizeof(layout) - len, "units plane=%d first=%d cols=%d rows=%d unit_size=%d\n", p,
+                        pl_data[p].Lr_buffer_offset, pl_data[p].units.Cols, pl_data[p].units.Rows,
+                        pl_data[p].units.Size);
+    av1_stage_dump_region regions[] = {{td->loop_rest_types->dev, 0, (size_t)lr_ptr * 16, 0},
+                                       {td->loop_rest_wiener->dev, 0, (size_t)lr_ptr * 64, 0}};
+    if (regions[0].size <= td->loop_rest_types->size && regions[1].size <= td->loop_rest_wiener->size)
+      av1_stage_dump_data(dec, "lr_info", layout, regions, 2);
   }
 
   {
