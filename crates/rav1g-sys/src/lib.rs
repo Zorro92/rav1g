@@ -8,7 +8,7 @@
 
 //! The decoder's C and C++ sources, built by `build.rs`, and their bindings.
 //!
-//! Everything here is the C interface as it is (`libav1/aom/aom_decoder.h`, `aom_codec.h`, `aomdx.h`,
+//! Everything at the top level is the C interface as it is (`libav1/aom/aom_decoder.h`, `aom_codec.h`, `aomdx.h`,
 //! `libav1/dx/av1_perf.h`) plus the `rav1g_codec_*` functions of `helpers.c`, which stand in for the
 //! macros of that interface. The `rav1g` crate is the wrapper to use.
 
@@ -24,6 +24,16 @@ include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 /// compiler of the build and against the shader's header.
 pub mod shared {
     include!(concat!(env!("OUT_DIR"), "/shared.rs"));
+}
+
+/// The C++ host as the Rust host modules of the `rav1g` crate see it (`host.hpp`): the structs and
+/// constants of `libav1/dx` (`Av1Core`, the data of a pipeline slot, the allocator, the shader library)
+/// and the structs of the entropy decoder they hold, read as C++ with the settings of the build. A COM
+/// pointer (`Microsoft::WRL::ComPtr`) is eight opaque bytes: the pointer. The tests of this crate hold the
+/// structs the Rust reads or writes against the C++ compiler of the build. This module goes when the last
+/// C++ file of the host does (step 4 of `docs/rust-port.md`).
+pub mod host {
+    include!(concat!(env!("OUT_DIR"), "/host.rs"));
 }
 
 #[cfg(test)]

@@ -29,6 +29,9 @@ use std::ptr::NonNull;
 
 pub use rav1g_sys as sys;
 
+mod gpu;
+mod host;
+
 /// An `aom_codec_err_t`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ErrorCode(pub sys::aom_codec_err_t);

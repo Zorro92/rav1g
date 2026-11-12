@@ -27,6 +27,7 @@ fn field_size<T, F>(_: fn(&T) -> &F) -> usize {
 }
 
 include!(concat!(env!("OUT_DIR"), "/layout_table.rs"));
+include!(concat!(env!("OUT_DIR"), "/host_layout_table.rs"));
 
 #[repr(C)]
 struct LayoutEntry {
@@ -38,14 +39,26 @@ struct LayoutEntry {
 
 unsafe extern "C" {
     fn rav1g_layout_table(count: *mut u32) -> *const LayoutEntry;
+    fn rav1g_host_layout_table(count: *mut u32) -> *const LayoutEntry;
 }
 
 /// The table of layout_probe.c: (name, size, offset, alignment).
 fn c_layouts() -> Vec<(String, usize, usize, usize)> {
-    let mut count = 0u32;
     // SAFETY: returns a static table of `count` entries with static NUL-terminated names.
+    unsafe { probe_table(rav1g_layout_table) }
+}
+
+/// The table of a probe the build compiled.
+///
+/// # Safety
+/// `table` returns a static table, its length in the argument, with static NUL-terminated names.
+unsafe fn probe_table(
+    table: unsafe extern "C" fn(*mut u32) -> *const LayoutEntry,
+) -> Vec<(String, usize, usize, usize)> {
+    let mut count = 0u32;
+    // SAFETY: the caller's contract.
     unsafe {
-        let table = rav1g_layout_table(&mut count);
+        let table = table(&mut count);
         std::slice::from_raw_parts(table, count as usize)
             .iter()
             .map(|entry| {
@@ -74,6 +87,27 @@ fn bindings_and_c_compiler_agree() {
     assert_eq!(types, 23);
     assert!(c.len() - types >= 245, "{} fields", c.len() - types);
     println!("{types} structs, {} fields: sizes, alignments and offsets equal", c.len() - types);
+}
+
+/// The structs of the C++ host that the Rust host modules read or write in place (`crate::host`, from
+/// `host.hpp`): the bindings against the C++ compiler that built the rest of the host.
+#[test]
+fn host_bindings_and_cpp_compiler_agree() {
+    // SAFETY: returns a static table of `count` entries with static NUL-terminated names.
+    let cpp = unsafe { probe_table(rav1g_host_layout_table) };
+    let rust = host_rust_layouts();
+    assert_eq!(cpp.len(), rust.len(), "entries of the C++ table and of the table of the bindings");
+    let mut types = 0;
+    for (cpp, rust) in cpp.iter().zip(&rust) {
+        assert_eq!(
+            (cpp.0.as_str(), cpp.1, cpp.2, cpp.3),
+            *rust,
+            "(name, size, offset, alignment): the C++ compiler of the build, then the bindings"
+        );
+        types += usize::from(!cpp.0.contains('.'));
+    }
+    assert!(types >= 13, "{types} structs");
+    println!("{types} structs of the C++ host, {} fields: sizes, alignments and offsets equal", cpp.len() - types);
 }
 
 /// The record sizes the host and the shaders count in (libav1/dx/shaders: `ModeInfoSize`, the 16-byte

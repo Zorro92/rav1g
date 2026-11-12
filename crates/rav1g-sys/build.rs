@@ -15,6 +15,12 @@
 //! asserts are compiled in), `/sdl`, `/EHsc`. Whole program optimisation (`/GL`) is not used: the objects
 //! go through rustc's archives, and the Linux build links with lld.
 //!
+//! The C++ files of the host that Rust replaces (`crates/rav1g/src/host`, step 3 of `docs/rust-port.md`) are
+//! left out: [`REPLACED_BY_RUST`]. The C++ that remains calls the Rust through the files of `glue/`, which
+//! define the C++ functions of a replaced file as calls of `extern "C"` functions of the `rav1g` crate.
+//! The sources of `libav1/dx` stay as they are: the MSBuild projects (the test player, `warp_decoder`)
+//! compile all of them until step 5.
+//!
 //! The shaders are not compiled here. `RAV1G_SHADER_DIR` names the directory whose `dx/shaders/h` has the
 //! bytecode headers of the FXC build (`testing/shader_cache/shaders.py build --root <dir>`, or what a
 //! build of `libav1.vcxproj` left in `libav1`), the directory MSBuild gets as `/p:Rav1gPrebuiltShaders`.
@@ -27,7 +33,13 @@ use std::path::{Path, PathBuf};
 struct Source {
     path: PathBuf,
     max_speed: bool,
+    /// Rust has the functions of this file ([`REPLACED_BY_RUST`]).
+    replaced: bool,
 }
+
+/// The C++ files of `libav1/dx` whose functions the `rav1g` crate has in Rust (`crates/rav1g/src/host`).
+/// This build does not compile them. `libav1_sources.props` still lists them, for the MSBuild projects.
+const REPLACED_BY_RUST: &[&str] = &["libav1/dx/av1_memory.cpp", "libav1/dx/vp9dx_linear_allocator.cpp"];
 
 fn fail(message: &str) -> ! {
     eprintln!("rav1g-sys: {message}");
@@ -51,7 +63,7 @@ fn read_sources(props: &Path, repo: &Path) -> Vec<Source> {
             if !path.is_file() {
                 fail(&format!("{} lists {relative}, which is not there", props.display()));
             }
-            sources.push(Source { path, max_speed: false });
+            sources.push(Source { path, max_speed: false, replaced: REPLACED_BY_RUST.contains(&relative.as_str()) });
         } else if line.starts_with("<Optimization") {
             let Some(last) = sources.last_mut() else {
                 fail(&format!("{}: an Optimization line before any source", props.display()));
@@ -64,6 +76,11 @@ fn read_sources(props: &Path, repo: &Path) -> Vec<Source> {
     }
     if sources.len() < 70 {
         fail(&format!("{}: only {} sources found", props.display(), sources.len()));
+    }
+    for replaced in REPLACED_BY_RUST {
+        if !sources.iter().any(|source| source.replaced && source.path.ends_with(replaced)) {
+            fail(&format!("{} does not list {replaced}, which this build replaces", props.display()));
+        }
     }
     sources
 }
@@ -162,6 +179,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", repo.join("libav1").display());
     println!("cargo:rerun-if-changed={}", manifest.join("wrapper.h").display());
     println!("cargo:rerun-if-changed={}", manifest.join("shared.h").display());
+    println!("cargo:rerun-if-changed={}", manifest.join("host.hpp").display());
     println!("cargo:rerun-if-changed={}", manifest.join("helpers.c").display());
 
     let shaders = shader_dir();
@@ -175,7 +193,7 @@ fn main() {
     c_speed.opt_level(2);
     let mut cpp = base_build(&repo, &shaders, true);
     cpp.opt_level(1).flag_if_supported("/Ot");
-    for source in &sources {
+    for source in sources.iter().filter(|source| !source.replaced) {
         let is_cpp = source.path.extension().is_some_and(|extension| extension != "c");
         match (is_cpp, source.max_speed) {
             (true, false) => {
@@ -192,6 +210,18 @@ fn main() {
     }
     // The entry points that are macros in the C headers, as functions (helpers.c).
     c_size.include(&manifest).file(manifest.join("helpers.c"));
+    // The C++ side of the functions Rust has taken over (glue/): compiled with the host, as the files they
+    // stand in for were.
+    let glue = manifest.join("glue");
+    println!("cargo:rerun-if-changed={}", glue.display());
+    let mut glue_files: Vec<PathBuf> = fs::read_dir(&glue)
+        .unwrap_or_else(|error| fail(&format!("cannot read {}: {error}", glue.display())))
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "cpp"))
+        .collect();
+    glue_files.sort();
+    cpp.files(&glue_files);
     c_size.compile("rav1g_c");
     c_speed.compile("rav1g_c_speed");
     cpp.compile("rav1g_dx");
@@ -232,6 +262,55 @@ fn main() {
         .write_to_file(out.join("shared.rs"))
         .unwrap_or_else(|error| fail(&format!("cannot write the bindings of shared.h: {error}")));
 
+    // The C++ host as the Rust host modules see it (host.hpp): the structs of libav1/dx and what they hold
+    // of the entropy decoder, read as C++ with the settings of the build. Types and constants only; the
+    // functions the Rust calls are declared where they are called.
+    let host = bindgen::Builder::default()
+        .header(manifest.join("host.hpp").to_string_lossy())
+        .clang_args(["-x", "c++", "-std=c++17", "-fms-extensions", "-fms-compatibility"])
+        .clang_args(["-D_UNICODE", "-DUNICODE", "-D_CONSOLE", "-D_CRT_SECURE_NO_WARNINGS"])
+        // libclang may be older than the C++ standard library of the MSVC runtime asks for; nothing of
+        // that library is bound.
+        .clang_arg("-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH")
+        .clang_arg(format!("-I{}", repo.join("libav1").display()))
+        .clang_arg(format!("-I{}", repo.join("libav1").join("build").display()))
+        .allowlist_file(r".*[/\\]libav1[/\\]dx[/\\][A-Za-z0-9_]+\.h")
+        .allowlist_type(HOST_TYPES.join("|"))
+        // COM pointers and interfaces are handed to the `windows` crate as raw pointers.
+        .opaque_type("Microsoft::WRL::.*|std::.*")
+        .blocklist_type("ID3D12.*|IDXGI.*|IUnknown|ID3D10Blob")
+        .raw_line("pub type ID3D12Device = ::std::os::raw::c_void;")
+        .raw_line("pub type ID3D12Resource = ::std::os::raw::c_void;")
+        .raw_line("pub type ID3D12RootSignature = ::std::os::raw::c_void;")
+        // No functions: bindgen declares C++ functions by their mangled names, and the Rust host modules
+        // declare the C functions they call themselves.
+        .blocklist_function(".*")
+        .ignore_methods()
+        .prepend_enum_name(false)
+        .layout_tests(true)
+        .derive_default(false)
+        .generate_comments(false)
+        .generate()
+        .unwrap_or_else(|error| fail(&format!("bindgen (host.hpp): {error}")));
+    host.write_to_file(out.join("host.rs"))
+        .unwrap_or_else(|error| fail(&format!("cannot write the bindings of host.hpp: {error}")));
+
+    // The same probe for the structs of the C++ host: host_layout_probe.cpp, compiled by the C++ compiler
+    // of the build, against the table of the bindings of host.hpp.
+    let host_probes = read_probes(&host.to_string(), HOST_PROBED, "host::");
+    let host_probe_cpp = out.join("host_layout_probe.cpp");
+    fs::write(&host_probe_cpp, probe_source_cpp(&host_probes))
+        .unwrap_or_else(|error| fail(&format!("cannot write {}: {error}", host_probe_cpp.display())));
+    fs::write(out.join("host_layout_table.rs"), probe_source_rust(&host_probes, "host_rust_layouts"))
+        .unwrap_or_else(|error| fail(&format!("cannot write host_layout_table.rs: {error}")));
+    let mut host_probe = base_build(&repo, &shaders, true);
+    host_probe.opt_level(1).include(&manifest).file(&host_probe_cpp);
+    if host_probe.get_compiler().is_like_clang_cl() {
+        // offsetof of a struct with COM pointers or a base class: defined by both compilers, a warning in clang.
+        host_probe.flag("-Wno-invalid-offsetof");
+    }
+    host_probe.compile("rav1g_host_layout_probe");
+
     // The layout probe: for every struct of the two lists, its size and alignment and the offset and size
     // of each of its fields, once as the C compiler of this build has them (layout_probe.c, compiled into
     // the library) and once as the bindings have them (layout_table.rs, compiled into the tests of this
@@ -241,7 +320,7 @@ fn main() {
     let probe_c = out.join("layout_probe.c");
     fs::write(&probe_c, probe_source_c(&probes))
         .unwrap_or_else(|error| fail(&format!("cannot write {}: {error}", probe_c.display())));
-    fs::write(out.join("layout_table.rs"), probe_source_rust(&probes))
+    fs::write(out.join("layout_table.rs"), probe_source_rust(&probes, "rust_layouts"))
         .unwrap_or_else(|error| fail(&format!("cannot write layout_table.rs: {error}")));
     let mut probe = base_build(&repo, &shaders, false);
     probe.opt_level(1).include(&manifest).file(&probe_c).compile("rav1g_layout_probe");
@@ -279,6 +358,28 @@ const SHARED_TYPES: &[&str] = &[
     "tx_block_info_gpu",
     "tx_block_info",
     "av1_tile_data",
+];
+
+/// Types of the entropy decoder that the Rust host modules use and that no struct of `libav1/dx` holds
+/// (those come with the headers of `libav1/dx`, which are bound whole).
+const HOST_TYPES: &[&str] = &["AV1Decoder", "AV1_COMMON", "MACROBLOCKD"];
+
+/// The structs of the C++ host whose layout the tests hold against the C++ compiler of the build
+/// (host_layout_probe.cpp): what the Rust host modules read or write in place.
+const HOST_PROBED: &[&str] = &[
+    "GpuBufferObject",
+    "dx_compute_context",
+    "av1_memory_allocator",
+    "av1_memory_allocator_dummy",
+    "av1_video_memory",
+    "ComputeCommandBuffer",
+    "ComputeShader",
+    "compute_shader_lib",
+    "DataPtrQueue",
+    "DataPtrQueueMT",
+    "HwFrameBuffer",
+    "av1_frame_thread_data",
+    "Av1Core",
 ];
 
 /// A struct or union to probe: its C name, the path of its bindings and its fields.
@@ -324,7 +425,12 @@ fn read_probes(bindings: &str, types: &[&str], module: &str) -> Vec<Probe> {
             };
             // Bit fields and anonymous members have no name C could take an offset of; the size of the
             // struct still covers them.
-            if field.starts_with("_bitfield") || field.starts_with("__bindgen") {
+            // The same for the base class and the virtual function table of a C++ struct.
+            if field.starts_with("_bitfield")
+                || field.starts_with("__bindgen")
+                || field.starts_with("_base")
+                || field == "vtable_"
+            {
                 continue;
             }
             fields.push(field.to_string());
@@ -371,10 +477,40 @@ fn probe_source_c(probes: &[Probe]) -> String {
     text
 }
 
-fn probe_source_rust(probes: &[Probe]) -> String {
+/// The probe of the C++ host. The private members of the allocators are probed like the others; the
+/// system headers are read before `private` is a macro.
+fn probe_source_cpp(probes: &[Probe]) -> String {
     let mut text = String::from(
+        "// Written by build.rs: the layouts of the C++ host as this compiler has them.\n\
+         #define _ALLOW_KEYWORD_MACROS\n\
+         #include <stddef.h>\n#include <stdint.h>\n#include <windows.h>\n#include <wrl.h>\n#include <d3d12.h>\n\
+         #include <dxgi1_4.h>\n#include <d3dx12.h>\n#include <queue>\n#include <algorithm>\n#include <cstring>\n\
+         #define private public\n#define protected public\n#include \"host.hpp\"\n\n\
+         struct rav1g_layout_entry {\n  const char *name;\n  uint32_t size;\n  uint32_t offset;\n  uint32_t align;\n\
+         };\n\nstatic const rav1g_layout_entry rav1g_host_layout_entries[] = {\n",
+    );
+    for probe in probes {
+        let t = &probe.c_type;
+        text.push_str(&format!("  {{ \"{t}\", (uint32_t)sizeof({t}), 0, (uint32_t)alignof({t}) }},\n"));
+        for field in &probe.fields {
+            let f = c_field(field);
+            text.push_str(&format!(
+                "  {{ \"{t}.{f}\", (uint32_t)sizeof((({t} *)0)->{f}), (uint32_t)offsetof({t}, {f}), 0 }},\n"
+            ));
+        }
+    }
+    text.push_str(
+        "};\n\nextern \"C\" const rav1g_layout_entry *rav1g_host_layout_table(uint32_t *count) {\n\
+         \x20 *count = (uint32_t)(sizeof(rav1g_host_layout_entries) / sizeof(rav1g_host_layout_entries[0]));\n\
+         \x20 return rav1g_host_layout_entries;\n}\n",
+    );
+    text
+}
+
+fn probe_source_rust(probes: &[Probe], function: &str) -> String {
+    let mut text = format!(
         "// Written by build.rs: the layouts as the bindings have them (name, size, offset, alignment).\n\
-         pub fn rust_layouts() -> Vec<(&'static str, usize, usize, usize)> {\n    vec![\n",
+         pub fn {function}() -> Vec<(&'static str, usize, usize, usize)> {{\n    vec![\n"
     );
     for probe in probes {
         let (c, r) = (&probe.c_type, &probe.rust_type);

@@ -1,7 +1,7 @@
 # Rust port, phase 1: design
 
 Status: started 2026-11-12; steps 1 (build skeleton, `rav1g-dec`) and 2 (bindings for the shared structs,
-layout tests) are in the tree, see [Progress](#progress).
+layout tests) are in the tree, step 3 (leaf modules) is under way, see [Progress](#progress).
 Branch `main`. The C++ decoder at tag `v0.3.0` (branch `cpp`) is the reference: every step below has to
 decode the conformance set md5-identically to it and to dav1d.
 
@@ -280,6 +280,96 @@ Deviations from the design above, and why:
   decision 2 keeps the `-gputime` and `-dumpstages` entry points as they are until step 4.
 - **Nothing is published or reserved on crates.io**; the manifests say `publish = false` until step 5
   (see Licence and naming).
+
+### Step 3: leaf modules (2026-11-12, under way)
+
+How a module replaces a C++ file, the same for every module of this step:
+
+- **The cargo build leaves the file out** (`REPLACED_BY_RUST` in `crates/rav1g-sys/build.rs`) and has its
+  functions in Rust, in `crates/rav1g/src/host`, one module per file. The `extern "C"` functions of the
+  file are Rust functions of the same names (`#[unsafe(no_mangle)]`), so the entropy decoder and the
+  programs call them as before.
+- **Glue for the C++ callers.** Most of the host's functions have C++ linkage: member functions
+  (`av1_memory_allocator::create_buffer`), functions the other C++ files declare themselves
+  (`av1_idct_run(Av1Core *)`), functions with a printf format (`av1_log`). For those the cargo build compiles
+  a file of the same name in `crates/rav1g-sys/glue`, which defines each as a call of an `extern "C"`
+  function `rav1g_*` of the Rust module (the two log functions print their line first: stable Rust cannot
+  define a C function with a variable argument list). The glue goes with `av1_core.cpp` in step 4.
+- **The structs stay those of the C++ host until step 4**, which owns them (`Av1Core`, the data of a
+  pipeline slot, the allocator inside the host pool). Rust reads and writes them in place through a third
+  set of bindings, the module `host` of `rav1g-sys`: bindgen reads `host.hpp` (`dx/types.h` and the other
+  headers of `libav1/dx`) as C++ with the settings of the build. A `ComPtr` is eight opaque bytes there,
+  the pointer, which the `windows` crate borrows as an interface. The layout test of step 2 has a C++
+  twin: `build.rs` writes `host_layout_probe.cpp` with the size and alignment of every probed struct of the
+  host and the offset and size of each field (private members included), the C++ compiler of the build
+  compiles it, and `cargo test` compares it with the table of the bindings
+  (`host_bindings_and_cpp_compiler_agree`: 13 structs, among them `Av1Core`, `av1_frame_thread_data`,
+  `av1_memory_allocator`, `compute_shader_lib`, `HwFrameBuffer`).
+- **Nothing in `libav1/dx` changes.** See the next point.
+
+**The test player on `main` during steps 3 and 4 (decision).** The UWP test player and `warp_decoder` are
+MSBuild projects that compile the sources of `libav1.vcxproj`. They keep doing that until step 5: the C++
+files a Rust module replaces stay in `libav1/dx`, complete and unchanged, compiled by MSBuild and not by
+cargo. They are the C++ decoder of branch `cpp` (a merge of `cpp` reaches them without a conflict), not a
+second line of development: a fix to the host is made on `cpp`, merged, and ported by hand to the Rust
+module, as [Branches](#branches) says. The files leave the tree when the player links `rav1g.h` (step 5).
+
+The other way, linking the Rust static library into the player now, was not taken. What stands against
+it, none of it tried, because trying needs the console and this step has no console runs:
+
+- A UWP app links the DLL C runtime (the VCLibs framework package); this workspace links the static one
+  (`+crt-static`, as `warp_decoder` has it). The player would need a second build of the library and of
+  the C parser with the other runtime.
+- The standard library of `x86_64-pc-windows-msvc` imports Win32 functions without regard to what an app
+  container offers (`ntdll`, `userenv`, `ws2_32`, `bcryptprimitives`). The target made for that,
+  `x86_64-uwp-windows-msvc`, is tier 3 and needs a nightly compiler to build the standard library, which
+  the design rules out.
+- An import the console does not have shows only on the console.
+
+Consequences, both deviations from the design above:
+
+- The C++ files do not leave `libav1/dx` in steps 3 and 4 (the Layout table says they do). What step 3
+  removes is their part in the cargo build; the line counts below are of that.
+- The equality check keeps comparing with `warp_decoder` of the same commit, which stays the whole C++
+  decoder. The design had it move to `warp_decoder` of tag `v0.3.0` with the first replaced file; with the
+  C++ sources in the tree that is not needed, and the reference follows the fixes merged from `cpp`.
+
+**The GPU backend boundary** starts in `crates/rav1g/src/gpu`: the host modules do not call D3D12
+themselves, they use the types of that module (`Device`, `BufferRef`, later the pipeline layouts, the
+pipelines and the recording of commands), which the one backend, `gpu/d3d12.rs`, provides. No traits: a
+second backend would provide the same types and methods under the same names, chosen at build time, and a
+frame's recording costs no indirect call. The interface is written in terms a backend with descriptor
+sets can serve (who reads and writes a buffer instead of a heap type; binding slots in the order read
+buffers, written buffers, constant blocks, inline constants instead of root parameters). Fences,
+timestamp queries and readback stay in the C++ of `av1_core.cpp` and join in step 4.
+
+A local test loop came with this step: `rav1g-dec` of the Linux build decodes under wine with wine's
+D3D12 (vkd3d) on Mesa's lavapipe, the "third D3D12 implementation" of [Testing](#testing). The 244 vectors
+of AOM pass there in two minutes. CI on WARP stays the gate.
+
+| Module | C++ out of the cargo build | Rust | Glue | Notes |
+| --- | --- | --- | --- | --- |
+| 1. Allocator and log lines | `av1_memory.cpp` (356 lines), `vp9dx_linear_allocator.cpp` (121) | `host/log.rs` (156), `host/memory.rs` (534), `gpu/mod.rs` (93), `gpu/d3d12.rs` (227); tests included | `glue/av1_memory.cpp` (98) | see below |
+
+Module 1, allocator and log lines:
+
+- Same sizes and decisions: a device buffer is rounded up to 256 bytes, a request of the host pool to 32
+  with its offset a multiple of the alignment asked for, the planning allocator counts the same way (unit
+  tests hold the arithmetic against that of the C++), the descriptors are handed out in the same order, the
+  heap, flags and initial state of each memory type are those of the C++, and the "MEMORY ..." lines have
+  the same text.
+- `-poisonmi` and `-poisonbuf` fill where the C++ filled: a buffer right behind its creation, the
+  constants of a stage when they are handed out.
+- `vp9dx_linear_allocator.cpp` has no Rust: nothing calls it (`la_init`, `la_allocate`, `la_free` have no
+  caller in the decoder, the player or the tools). Neither has `upload_helper` of `av1_memory.cpp`, for the
+  same reason.
+- The budget guard (the decision of `av1_create_gpu_decoder` whether the decoder fits what the application
+  has left) is in `av1_core.cpp` and moves with step 4. It decides on the numbers of this module's planning
+  allocator, which are unchanged.
+- A number with one decimal that lies exactly between two (0.25 MiB) prints as the lower even one from
+  Rust, as from the C runtime of the MSVC build; the runtime that `xwin` fetches prints it rounded up in
+  the lines the C++ still writes. Seen in one line of the Linux build (`inter_mask_lut 0.3 MiB`), not a
+  difference between Rust and C++.
 
 ## Estimate
 
