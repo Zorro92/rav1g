@@ -1,0 +1,34 @@
+[package]
+name = "rav1g-dec"
+description = "Command-line decoder of rav1g: conformance runs, md5 per frame, stage dumps (WARP or a hardware adapter)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[features]
+# A decoder for the shaders of the uavsync package (RAV1G_SHADER_DIR must be that variant).
+uavsync = ["rav1g/uavsync"]
+
+[dependencies]
+rav1g = { workspace = true }
+
+[dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Security",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+]
+
+[build-dependencies]
+cc = { workspace = true, features = ["parallel"] }

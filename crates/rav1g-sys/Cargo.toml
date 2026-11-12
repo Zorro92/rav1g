@@ -1,0 +1,19 @@
+[package]
+name = "rav1g-sys"
+description = "Builds the C entropy decoder and the C++ D3D12 host of rav1g with cc; bindgen bindings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[features]
+# The experiment build of the C++ host for shaders whose group syncs are syncs of all memory
+# (RAV1G_UAVSYNC; docs/test-player.md, "Experiments"). RAV1G_SHADER_DIR must then be the uavsync variant.
+uavsync = []
+
+[build-dependencies]
+cc = { workspace = true, features = ["parallel"] }
+bindgen = { workspace = true }

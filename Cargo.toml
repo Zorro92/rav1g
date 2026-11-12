@@ -1,0 +1,23 @@
+# The Rust port (docs/rust-port.md). Build with the shader headers of the FXC build:
+#   RAV1G_SHADER_DIR=<directory with dx/shaders/h> cargo build --release
+[workspace]
+resolver = "3"
+members = ["crates/rav1g-sys", "crates/rav1g", "tools/rav1g-dec"]
+
+[workspace.package]
+version = "0.4.0-dev"
+edition = "2024"
+rust-version = "1.99"
+license = "BSD-2-Clause"
+repository = "https://github.com/Zorro92/rav1g"
+publish = false
+
+[workspace.dependencies]
+rav1g-sys = { path = "crates/rav1g-sys" }
+rav1g = { path = "crates/rav1g" }
+cc = "1.2"
+bindgen = "0.73"
+
+[profile.release]
+# Line tables only: enough for the crash line of rav1g-dec to be resolved with the .pdb.
+debug = "line-tables-only"

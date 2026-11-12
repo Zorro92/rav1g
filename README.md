@@ -111,7 +111,8 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
   The 10-bit stream with scaled references that stood here as wrong on the console is right: its md5
   references had been made with ffmpeg scaling every frame to the size of the first.
 
-Next targets: the Rust host ([docs/rust-port.md](docs/rust-port.md), started 2026-11-12), then
+Next targets: the Rust host ([docs/rust-port.md](docs/rust-port.md), started 2026-11-12; step 1 of 5 is
+in: a Cargo workspace that builds the decoder, and `rav1g-dec`, the conformance tool in Rust), then
 inter and intra prediction on the GPU (a measured `-interfast` prototype showed that inter time is per
 block and per dispatch, not filtering; see
 [gpu-av1-decoder.md](docs/gpu-av1-decoder.md)) and entropy decoding on the CPU (frame-parallel or a
@@ -123,6 +124,11 @@ faster parser). The 41.7 ms budget for heavy 4K content is not met yet.
   player, its defaults and flags, log lines, md5 checks (references can be made with dav1d:
   `testing/md5ref/make_md5_ref.sh`) and the host-side shader checks.
 - [docs/gpu-av1-decoder.md](docs/gpu-av1-decoder.md): history, measurements and reasoning.
+- [docs/warp-decoder.md](docs/warp-decoder.md): `warp_decoder` and `rav1g-dec`, the decoder as a
+  console program on the WARP software adapter, and the conformance run of every push.
+- [docs/rust-port.md](docs/rust-port.md): the Rust port, its steps, gates and progress. The workspace
+  builds with `RAV1G_SHADER_DIR=<shader headers> cargo build --release` on Windows and with
+  `cargo xwin build --target x86_64-pc-windows-msvc` on Linux.
 
 ## Licence
 

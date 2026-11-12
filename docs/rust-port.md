@@ -1,7 +1,8 @@
 # Rust port, phase 1: design
 
-Status: started 2026-11-12 (step 1). Branch `main`. The C++ decoder at tag `v0.3.0` (branch `cpp`) is the
-reference: every step below has to decode the conformance set md5-identically to it and to dav1d.
+Status: started 2026-11-12; step 1 (build skeleton, `rav1g-dec`) is in the tree, see [Progress](#progress).
+Branch `main`. The C++ decoder at tag `v0.3.0` (branch `cpp`) is the reference: every step below has to
+decode the conformance set md5-identically to it and to dav1d.
 
 ## Goal and scope
 
@@ -105,6 +106,78 @@ Agreed on 2026-11-12, in addition to the steps above:
 The Rust code is derived from the BSD-2-Clause host and stays BSD-2-Clause with the AOMedia Patent
 License 1.0 notices. The crate name `rav1g` is reserved on crates.io at the end of step 1, when the crate
 contains working code; not earlier.
+
+## Progress
+
+### Step 1: build skeleton (2026-11-12)
+
+What is in the tree:
+
+| Path | What |
+| --- | --- |
+| `Cargo.toml`, `Cargo.lock`, `.cargo/config.toml`, `rustfmt.toml` | the workspace: edition 2024, Rust 1.99 (the stable of that day), static C runtime as `warp_decoder` has it |
+| `crates/rav1g-sys` | `build.rs` compiles the 79 C and C++ files of `libav1.vcxproj` with `cc` into static libraries and runs `bindgen` on the C interface |
+| `crates/rav1g` | today's interface behind types that own what they create: `PipelineCache`, `peek_stream_info`, `Config`, `Decoder` (`decode`, `drain`, the two layer controls), and the process-wide switches of `av1_perf.h` as `unsafe` functions |
+| `tools/rav1g-dec` | the command-line decoder: `warp_decoder`'s flags, lines, files and exit codes ([warp-decoder.md](warp-decoder.md#rav1g-dec)) |
+| `testing/conformance/compare_md5.py` | the comparison of two conformance runs, md5 per frame and stage dumps |
+
+How the C and C++ are built. `rav1g-sys` reads the list of sources and their per-file optimisation from
+`testing/warp_decoder/libav1_sources.props`, the file `sync_sources.py` writes from `libav1.vcxproj` and CI
+checks, so the three builds (the library project, `warp_decoder`, cargo) compile the same files: 71 C files,
+8 C++ files, `/O1 /Ot`, `/O2` for the seven files the project marks, `/sdl`, no `NDEBUG` (the asserts of the
+library stay in, as in the player), whatever the cargo profile is. One difference: no whole program
+optimisation (`/GL`), which `warp_decoder.vcxproj` switches on.
+
+Shaders. The build takes the FXC bytecode headers the other builds take: `RAV1G_SHADER_DIR` names the
+directory whose `dx/shaders/h` has them (what MSBuild gets as `/p:Rav1gPrebuiltShaders`; in CI the `normal`
+output of `.github/actions/shaders`), and the build stops with a message when it is not set or has no headers.
+CI checks with `shaders.py verify` that `rav1g-dec.exe` holds the bytecode of this run's headers, byte for
+byte, as it does for the player and `warp_decoder`. The feature `uavsync` defines `RAV1G_UAVSYNC` for a build
+from the headers of that variant.
+
+`rav1g-dec` is Rust for what the program does itself: arguments and task lists, the D3D12 device (the `windows`
+crate), the pool of readback buffers behind the output callbacks, the md5 of a frame, the comparison with a
+reference, the decode loop with the change of decoder for a new sequence, the timeout, the `RESULT` lines. It
+calls the C++ that the test player uses for the rest, behind a C interface of its own
+(`tools/rav1g-dec/shim`): the stream readers of `testing/common` with libwebm, the summary of the timing run
+(`perf_stats.h`), the stage dump files (`stage_dump.h`), the capability report and the Shader Model 6 test,
+and `warp_decoder`'s crash line. `-sm6test` has its DXC shaders when the build is given
+`RAV1G_SM6TEST_SHADER_DIR`.
+
+CI (`.github/workflows/build.yml`), next to the unchanged `conformance` job with `warp_decoder`:
+
+- `rust` (Windows, MSVC): `cargo build --release`, the shader check, `cargo test`, `-sm6test`, then the
+  conformance set, the timing smoke test and the stage dumps with `rav1g-dec`.
+- `rust-equal`: `compare_md5.py` on the artifacts of `conformance` and `rust`. Every stream of the manifest
+  must be in both runs with the same md5 file, byte for byte, and the stage dumps of the frames in
+  `dump_tasks.txt` must compare equal.
+- `shader-headers` (Windows): the headers of the Shaders step as an artifact, for the Linux build.
+- `rust-cross` (Linux): `cargo xwin build --release --target x86_64-pc-windows-msvc`, that is clang-cl and
+  lld-link with the SDK and C runtime xwin fetches (kept in the Actions cache), and the shader check on the
+  program it built.
+- `rust-cross-run` (Windows): the conformance set with the program of the Linux build.
+
+The Linux build needed no change to the sources. clang-cl stops at two things MSVC compiles: the thread
+function `aom_thread.h` hands to `CreateThread` returns `unsigned int` where a `DWORD` is wanted
+(`-Wincompatible-function-pointer-types`), and the host takes the address of temporaries such as
+`&CD3DX12_RESOURCE_BARRIER::Transition(...)` in the argument list of a call (`-Waddress-of-temporary`, 47
+places). `rav1g-sys` turns both back into warnings for clang-cl only. The C++ standard library of the MSVC
+runtime wants Clang 19 or newer.
+
+Deviations from the design above, and why:
+
+- **No `crates/rav1g-shaders` yet.** The shaders stay FXC bytecode headers included by `av1_compute.cpp`
+  until the DXC switch, which has its own gate (console tests). The crate comes with that switch.
+- **The equality check compares with `warp_decoder` of the same commit**, not of tag `v0.3.0`: until step 3
+  the C++ on `main` is the reference (`v0.3.0` plus what was merged from `cpp` since), and the job that builds
+  it exists. Building the reference from the tag starts when the first C++ file is replaced.
+- **`bindgen` runs from step 1**, on the C interface (`aom_decoder.h`, `aom_codec.h`, `aomdx.h`,
+  `av1_perf.h`): the wrapper needs those types. Step 2 adds the layouts shared with the GPU and their tests.
+  Four entry points that are macros in C (`aom_codec_dec_init`, `aom_codec_control`) are functions in
+  `crates/rav1g-sys/helpers.c`.
+- **`rav1g-dec` still links test program C++** (see above). It leaves with the stages that replace it;
+  decision 2 keeps the `-gputime` and `-dumpstages` entry points as they are until step 4.
+- **Nothing is published or reserved on crates.io**; the manifests say `publish = false`.
 
 ## Estimate
 

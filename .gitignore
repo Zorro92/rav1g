@@ -1,3 +1,6 @@
 # Python caches (they record the path of the source file).
 __pycache__/
 *.pyc
+
+# Cargo build directory.
+/target/

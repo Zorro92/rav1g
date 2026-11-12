@@ -1,0 +1,473 @@
+// SPDX-License-Identifier: BSD-2-Clause
+//
+// This source code is subject to the terms of the BSD 2 Clause License and the Alliance for Open Media
+// Patent License 1.0. If the BSD 2 Clause License was not distributed with this source code in the LICENSE
+// file, you can obtain it at www.aomedia.org/license/software. If the Alliance for Open Media Patent
+// License 1.0 was not distributed with this source code in the PATENTS file, you can obtain it at
+// www.aomedia.org/license/patent.
+
+//! The arguments: warp_decoder's flags (docs/warp-decoder.md), a task per stream, a list file of tasks.
+
+use crate::say;
+use crate::shim;
+use rav1g::sys;
+
+// The player's values (testing/player_common/cmd_parser.h, decoder_creator.h).
+pub const SLOTS_DEFAULT: i32 = 2;
+pub const SLOTS_MIN: i32 = 2;
+pub const SLOTS_MAX: i32 = 4;
+pub const LOWMEM_ALL: i32 = 7;
+pub const LOWMEM_DEFAULT: i32 = 1;
+pub const DECODER_WIDTH: u32 = 4096;
+pub const DECODER_HEIGHT: u32 = 2176;
+pub const DECODER_BITDEPTH: u32 = 10;
+pub const PSO_THREADS: i32 = 4;
+pub const QUEUE_SIZE_DEFAULT: i32 = 4;
+pub const QUEUE_SIZE_MAX: i32 = 16;
+
+// Exit codes of the process.
+/// Every task decoded, and every frame of every task with a reference matched.
+pub const EXIT_PASS: i32 = 0;
+/// At least one task with a frame that differs from its reference, or a frame count.
+pub const EXIT_MISMATCH: i32 = 1;
+/// A task could not be decoded (the run stops at that task).
+pub const EXIT_ERROR: i32 = 2;
+/// Bad arguments, no D3D12 device, no pipeline states.
+pub const EXIT_USAGE: i32 = 3;
+/// A task ran longer than -timeout (the run stops at that task).
+pub const EXIT_TIMEOUT: i32 = 4;
+
+#[derive(Clone)]
+pub struct Task {
+    pub input: String,
+    /// -name, or the file name of the input: what the result line calls the stream.
+    pub name: String,
+    /// -check: reference md5 file.
+    pub check: String,
+    /// -md5_frame_check: the reference is <input>.md5, as in the player.
+    pub md5_frame_check: bool,
+    pub save_md5: String,
+    /// -o
+    pub out_yuv: String,
+    /// -save_wrong_yuv <dir>
+    pub save_wrong_yuv: String,
+    /// -wrong_limit: at most this many frames per task for -save_wrong_yuv.
+    pub wrong_limit: i32,
+    /// -aom_md5: monochrome frames are hashed as aomdec --i420 writes them.
+    pub aom_md5: bool,
+    pub threads: i32,
+    pub limit: i32,
+    pub queue_size: i32,
+    pub slots: i32,
+    pub cdefv1: bool,
+    pub cdefv2: bool,
+    pub nofitsize: bool,
+    pub fitsize: bool,
+    pub lowmem: bool,
+    pub lowmem_parts: i32,
+    pub intrav2: bool,
+    pub intraopt: bool,
+    pub asyncclear: bool,
+    /// -lfhsplit <0|1|2>
+    pub lfhsplit: i32,
+    pub intraedgefix: bool,
+    /// -interfast (1), -interfastlists (7), -interfastmode <n>: av1_set_inter_fast.
+    pub interfast: i32,
+    /// -alllayers: every shown frame of a temporal unit with spatial layers.
+    pub all_layers: bool,
+    /// -oppoint <n>: the operating point of a stream with layers.
+    pub oppoint: i32,
+    /// -timeout: seconds for the task, 0 = none.
+    pub timeout_s: i32,
+    /// -gputime: the timing run of the player, its summary on stdout.
+    pub gputime: bool,
+    /// -gputimedetail (1), -gputimeisolate (2): the inter breakdown; either sets gputime.
+    pub gputime_detail: i32,
+    /// -progress: with -gputime, the per-frame lines behind the summary.
+    pub progress: bool,
+    /// -dumpstages <frame list>
+    pub dumpstages: String,
+    /// -dumpdir <dir>
+    pub dumpdir: String,
+    /// The frames of -dumpstages.
+    pub dump_frames: Vec<i32>,
+}
+
+impl Default for Task {
+    fn default() -> Task {
+        Task {
+            input: String::new(),
+            name: String::new(),
+            check: String::new(),
+            md5_frame_check: false,
+            save_md5: String::new(),
+            out_yuv: String::new(),
+            save_wrong_yuv: String::new(),
+            wrong_limit: -1,
+            aom_md5: false,
+            threads: 1,
+            limit: -1,
+            queue_size: QUEUE_SIZE_DEFAULT,
+            slots: SLOTS_DEFAULT,
+            cdefv1: false,
+            cdefv2: false,
+            nofitsize: false,
+            fitsize: false,
+            lowmem: false,
+            lowmem_parts: LOWMEM_DEFAULT,
+            intrav2: false,
+            intraopt: false,
+            asyncclear: false,
+            lfhsplit: 0,
+            intraedgefix: false,
+            interfast: 0,
+            all_layers: false,
+            oppoint: 0,
+            timeout_s: 0,
+            gputime: false,
+            gputime_detail: 0,
+            progress: false,
+            dumpstages: String::new(),
+            dumpdir: "dumps".to_string(),
+            dump_frames: Vec::new(),
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct Globals {
+    /// -hw
+    pub hardware: bool,
+    /// -v
+    pub verbose: bool,
+    /// -debuglayer
+    pub debug_layer: bool,
+    /// -gpuvalidation
+    pub gpu_validation: bool,
+    /// -sm6test
+    pub sm6test: bool,
+    /// -list
+    pub list: String,
+}
+
+pub fn usage() {
+    say!("rav1g-dec: decodes AV1 streams with rav1g on D3D12 (WARP by default), one md5 per output frame.");
+    say!("");
+    say!("  rav1g-dec -i <stream> [task flags] [-hw] [-v]");
+    say!("  rav1g-dec -list <file> [task flags as defaults for every line] [-hw] [-v]");
+    say!("  rav1g-dec -sm6test [-hw]");
+    say!("");
+    say!("Task flags:");
+    say!("  -i <file>             the stream: .ivf, .mkv/.webm, .obu, .mp4");
+    say!("  -name <text>          what the BEGIN and RESULT lines call the stream (default: its file name)");
+    say!("  -check <file>         compare with this md5 file: the first 32 characters of each line are the md5 of");
+    say!("                        one output frame (the player's format and that of AOM's test vectors)");
+    say!("  -md5_frame_check      the same with <stream>.md5, as in the player");
+    say!("  -save_md5 <file>      write the md5 of every output frame in the player's format");
+    say!("  -aom_md5              hash a monochrome frame with two grey chroma planes, as aomdec --i420 does");
+    say!("                        (AOM's .md5 files); without it luma only, as the player and dav1d do");
+    say!("  -o <file>             write the visible samples of every output frame (planar, as they are hashed)");
+    say!("  -save_wrong_yuv <dir> with a reference: write each frame that differs to <dir>/<name>_<frame>.yuv");
+    say!("  -wrong_limit <n>      -save_wrong_yuv writes at most n frames per task");
+    say!("  -dumpstages <frames>  write the buffers behind every GPU stage of these frames (decoding order from");
+    say!("                        0, hidden frames count; a list like 0,3,10-12) and the lists the stages read");
+    say!("                        (mode info, block records, loop filter edge lists) to <dir>/<name>_f<n>.stages,");
+    say!("                        as the player does; compare two runs with testing/stage_dump/stage_dump.py");
+    say!("  -dumpdir <dir>        where -dumpstages writes (default dumps; created when it is not there)");
+    say!("  -limit <n>            decode only the first n temporal units of the stream");
+    say!("  -t <n>                decoder threads (default 1)");
+    say!("  -queue_size <n>       output images in the pool, 1..{} (default {})", QUEUE_SIZE_MAX, QUEUE_SIZE_DEFAULT);
+    say!("  -timeout <seconds>    give up on a task after this time (exit code {})", EXIT_TIMEOUT);
+    say!("  -cdefv1 -nofitsize -lowmemparts <n> -lowmem -slots <n> -intrav2 -intraopt -asyncclear");
+    say!("                        as in the test player (docs/test-player.md); -cdefv2 and -fitsize are accepted");
+    say!("  -lfhsplit <n>         horizontal loop filter: 1 even rows of blocks, a UAV barrier, odd rows; 2 every");
+    say!("                        row of blocks on its own (default 0: one dispatch per plane; same output)");
+    say!("  -intraedgefix         8-bit intra: the above edge filter stops where the 10-bit one does (same output)");
+    say!("  -interfast            inter prediction by the fraction of the motion vector: a copy, one filter pass, or");
+    say!("                        both (inter_fast, inter_compound_fast; same output)");
+    say!("  -interfastlists       the block lists of -interfast with the original shaders on them (same output)");
+    say!(
+        "  -interfastmode <n>    av1_set_inter_fast(n): 1 -interfast, +2 original shader for one reference, +4 for two;"
+    );
+    say!("                        8: only the room for the lists in the block maps, the path stays off (diagnostic)");
+    say!("  -gputime              the timing run of the test player: GPU timestamps per stage and CPU timers, the");
+    say!(
+        "                        summary as 'GPUTIME ...' lines after the task (docs/test-player.md, \"Timing run\");"
+    );
+    say!("                        on WARP the times say nothing about a GPU, the counters are the stream's");
+    say!("  -gputimedetail        -gputime with the inter prediction breakdown: a timestamp behind every section of");
+    say!("                        the inter stage, work counters per section");
+    say!(
+        "  -gputimeisolate       -gputimedetail with a UAV barrier and a timestamp behind every dispatch of the inter"
+    );
+    say!("                        stage and of the reconstruction (same output)");
+    say!("  -progress             with -gputime: one 'GPUTIME frame ...' line per frame behind the summary");
+    say!("  -alllayers            a stream with spatial layers: output the frame of every layer of a temporal unit");
+    say!("                        (default: one frame per temporal unit, the highest layer it has)");
+    say!("  -oppoint <n>          a stream with layers: decode operating point n of its sequence header (default 0)");
+    say!("Program flags:");
+    say!("  -list <file>          one task per line (the task flags above; # starts a comment line)");
+    say!("  -hw                   the first hardware adapter instead of WARP");
+    say!("  -v                    print the decoder's log lines (MEMORY ...) and the player-style task lines");
+    say!("  -debuglayer           switch the D3D12 debug layer on (needs the Graphics Tools feature of Windows)");
+    say!("                        and print its messages after every task; -gpuvalidation adds GPU-based validation");
+    say!(
+        "  -sm6test              run the Shader Model 6 test shaders on the device before the tasks, one 'SM6TEST ...'"
+    );
+    say!("                        line per shader (docs/test-player.md); needs no stream: without -i and -list the");
+    say!("                        program ends after the test");
+    say!("");
+    say!("Exit code: 0 all tasks decoded and matched, 1 a frame or a frame count differs, 2 a decode error (or");
+    say!("-sm6test could not run its test), 3 bad arguments or no device, 4 timeout. One 'RESULT ...' line per task");
+    say!("on stdout.");
+}
+
+/// A whole decimal number as C's `strtol(text, &end, 10)` with nothing behind it reads one: white space in
+/// front, a sign, digits.
+fn parse_int(text: &str) -> Option<i32> {
+    let trimmed = text.trim_start_matches(|c: char| c == ' ' || ('\t'..='\r').contains(&c));
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (negative, digits) = match trimmed.as_bytes()[0] {
+        b'-' => (true, &trimmed[1..]),
+        b'+' => (false, &trimmed[1..]),
+        _ => (false, trimmed),
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    // Out of range: strtol saturates at the limits of a 32-bit long, and the value is cut to an int.
+    let magnitude = digits.parse::<i64>().unwrap_or(i64::MAX);
+    let value = if negative { -magnitude } else { magnitude };
+    Some(value.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
+}
+
+/// Applies the arguments to the task (and to the globals when given).
+pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Globals>) -> Result<(), String> {
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        let mut value = || -> Result<String, String> {
+            if i + 1 >= args.len() {
+                return Err(format!("{a} needs a value"));
+            }
+            i += 1;
+            Ok(args[i].clone())
+        };
+        let mut number = || -> Result<i32, String> {
+            let text = value()?;
+            parse_int(&text).ok_or_else(|| format!("{a} needs a number, not '{text}'"))
+        };
+        match a {
+            "-i" => task.input = value()?,
+            "-name" => task.name = value()?,
+            "-check" => task.check = value()?,
+            "-md5_frame_check" => task.md5_frame_check = true,
+            "-save_md5" => task.save_md5 = value()?,
+            "-aom_md5" => task.aom_md5 = true,
+            "-o" => task.out_yuv = value()?,
+            "-save_wrong_yuv" => task.save_wrong_yuv = value()?,
+            "-wrong_limit" => task.wrong_limit = number()?,
+            "-dumpstages" => task.dumpstages = value()?,
+            "-dumpdir" => task.dumpdir = value()?,
+            "-limit" => task.limit = number()?,
+            "-t" => task.threads = number()?,
+            "-queue_size" => task.queue_size = number()?,
+            "-timeout" => task.timeout_s = number()?,
+            "-slots" => task.slots = number()?,
+            "-lowmemparts" => task.lowmem_parts = number()?,
+            "-lowmem" => task.lowmem = true,
+            "-cdefv1" => task.cdefv1 = true,
+            "-cdefv2" => task.cdefv2 = true,
+            "-nofitsize" => task.nofitsize = true,
+            "-fitsize" => task.fitsize = true,
+            "-intrav2" => task.intrav2 = true,
+            "-intraopt" => task.intraopt = true,
+            "-asyncclear" => task.asyncclear = true,
+            "-lfhsplit" => task.lfhsplit = number()?,
+            "-intraedgefix" => task.intraedgefix = true,
+            "-interfast" => task.interfast = sys::AV1_INTER_FAST_ON,
+            "-interfastlists" => task.interfast = sys::AV1_INTER_FAST_LISTS_ONLY,
+            "-interfastmode" => task.interfast = number()?,
+            "-gputime" => task.gputime = true,
+            "-gputimedetail" => {
+                task.gputime = true;
+                if task.gputime_detail < 1 {
+                    task.gputime_detail = 1;
+                }
+            }
+            "-gputimeisolate" => {
+                task.gputime = true;
+                task.gputime_detail = 2;
+            }
+            "-progress" => task.progress = true,
+            "-alllayers" => task.all_layers = true,
+            "-oppoint" => task.oppoint = number()?,
+            _ => {
+                let Some(globals) = globals.as_deref_mut() else {
+                    return Err(format!("unknown argument '{a}'"));
+                };
+                match a {
+                    "-hw" => globals.hardware = true,
+                    "-v" => globals.verbose = true,
+                    "-debuglayer" => globals.debug_layer = true,
+                    "-gpuvalidation" => {
+                        globals.debug_layer = true;
+                        globals.gpu_validation = true;
+                    }
+                    "-sm6test" => globals.sm6test = true,
+                    "-list" => globals.list = value()?,
+                    _ => return Err(format!("unknown argument '{a}'")),
+                }
+            }
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
+/// The checks the player's parser makes after reading a task line.
+pub fn check_task(task: &mut Task) -> Result<(), String> {
+    if task.input.is_empty() {
+        return Err("no stream (-i)".to_string());
+    }
+    if task.cdefv1 && task.cdefv2 {
+        return Err("-cdefv1 and -cdefv2 cannot be used together".to_string());
+    }
+    if task.nofitsize && task.fitsize {
+        return Err("-nofitsize and -fitsize cannot be used together".to_string());
+    }
+    if task.slots < SLOTS_MIN || task.slots > SLOTS_MAX {
+        return Err(format!(
+            "-slots {} is not allowed: the decoder takes {} to {} slots",
+            task.slots, SLOTS_MIN, SLOTS_MAX
+        ));
+    }
+    if task.lowmem_parts < 0 || task.lowmem_parts > LOWMEM_ALL {
+        return Err(format!(
+            "-lowmemparts {} is not allowed: the sum of 1, 2 and 4, at most {}",
+            task.lowmem_parts, LOWMEM_ALL
+        ));
+    }
+    if task.lowmem {
+        task.lowmem_parts = LOWMEM_ALL;
+    }
+    if task.lfhsplit < 0 || task.lfhsplit > 2 {
+        return Err(format!("-lfhsplit {} is not allowed: 0, 1 or 2", task.lfhsplit));
+    }
+    if task.queue_size < 1 || task.queue_size > QUEUE_SIZE_MAX {
+        return Err(format!("-queue_size {} is not allowed: 1 to {}", task.queue_size, QUEUE_SIZE_MAX));
+    }
+    if task.threads < 1 {
+        task.threads = 1;
+    }
+    if !task.dumpstages.is_empty() {
+        match shim::parse_dump_frames(&task.dumpstages) {
+            Some(frames) => task.dump_frames = frames,
+            None => {
+                return Err(format!(
+                    "-dumpstages {} is not a frame list like 0,3,10-12 of at most 256 frames",
+                    task.dumpstages
+                ));
+            }
+        }
+    }
+    if task.md5_frame_check && task.check.is_empty() {
+        task.check = format!("{}.md5", task.input);
+    }
+    if task.name.is_empty() {
+        task.name = match task.input.rfind(['\\', '/']) {
+            Some(position) => task.input[position + 1..].to_string(),
+            None => task.input.clone(),
+        };
+    }
+    // The name is one token of the result line.
+    task.name = task.name.chars().map(|c| if c == ' ' || c == '\t' || c == '"' { '_' } else { c }).collect();
+    Ok(())
+}
+
+/// A line of a list file into arguments: split at white space, double quotes keep a value together.
+pub fn split_line(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut have = false;
+    for c in line.chars() {
+        if c == '"' {
+            quoted = !quoted;
+            have = true;
+        } else if !quoted && (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            if have {
+                out.push(std::mem::take(&mut current));
+            }
+            current.clear();
+            have = false;
+        } else {
+            current.push(c);
+            have = true;
+        }
+    }
+    if have {
+        out.push(current);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strings(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn numbers_as_strtol() {
+        assert_eq!(parse_int("12"), Some(12));
+        assert_eq!(parse_int("-3"), Some(-3));
+        assert_eq!(parse_int("+7"), Some(7));
+        assert_eq!(parse_int(" 5"), Some(5));
+        assert_eq!(parse_int(""), None);
+        assert_eq!(parse_int("5x"), None);
+        assert_eq!(parse_int("5 "), None);
+        assert_eq!(parse_int("-"), None);
+        assert_eq!(parse_int("99999999999"), Some(i32::MAX));
+    }
+
+    #[test]
+    fn list_lines() {
+        assert_eq!(split_line("-i a.ivf  -name\tb\r"), strings(&["-i", "a.ivf", "-name", "b"]));
+        assert_eq!(split_line("-i \"a b.ivf\" -name \"\""), strings(&["-i", "a b.ivf", "-name", ""]));
+        assert_eq!(split_line("   "), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_task_of_the_conformance_manifest() {
+        let mut task = Task::default();
+        let mut globals = Globals::default();
+        let line = "-name av1-1-b8-01-size-16x16.ivf -i aom/av1-1-b8-01-size-16x16.ivf -check \
+                    aom/av1-1-b8-01-size-16x16.ivf.md5 -aom_md5 -timeout 300 -save_md5 \"out dir/x.md5\"";
+        parse_args(&split_line(line), &mut task, None).unwrap();
+        parse_args(&strings(&["-list", "tasks.list", "-t", "4", "-interfast"]), &mut task, Some(&mut globals)).unwrap();
+        assert_eq!(task.name, "av1-1-b8-01-size-16x16.ivf");
+        assert_eq!(task.save_md5, "out dir/x.md5");
+        assert_eq!((task.threads, task.timeout_s, task.interfast, task.aom_md5), (4, 300, 1, true));
+        assert_eq!(globals.list, "tasks.list");
+        // A program flag is not a task flag of a list line.
+        assert!(parse_args(&strings(&["-hw"]), &mut task, None).is_err());
+        assert!(parse_args(&strings(&["-t"]), &mut task, None).is_err());
+        assert!(parse_args(&strings(&["-t", "four"]), &mut task, None).is_err());
+    }
+
+    #[test]
+    fn the_name_is_the_file_name() {
+        let mut task = Task { input: "dir\\sub/a clip.ivf".to_string(), md5_frame_check: true, ..Task::default() };
+        // Not on a path that needs the frame list parser.
+        check_task(&mut task).unwrap();
+        assert_eq!(task.name, "a_clip.ivf");
+        assert_eq!(task.check, "dir\\sub/a clip.ivf.md5");
+        let mut bad = Task { input: "a.ivf".to_string(), slots: 5, ..Task::default() };
+        assert!(check_task(&mut bad).is_err());
+    }
+}

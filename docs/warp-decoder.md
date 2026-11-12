@@ -10,6 +10,58 @@ every frame with a reference (the [conformance run](#conformance-run)).
 It exists because decoder bugs were found only on the console, and only by luck. It does not
 measure speed: WARP rasterises on the CPU.
 
+## rav1g-dec
+
+`rav1g-dec` (`tools/rav1g-dec`) is the same program written in Rust on the Cargo workspace of the Rust
+port ([rust-port.md](rust-port.md)): the decoder comes from `crates/rav1g-sys`, which compiles the sources
+of `libav1.vcxproj` with the settings described [below](#what-it-shares-with-the-test-player), and the
+program reaches it through `crates/rav1g`. It takes the flags of the [table below](#run), prints the same
+lines, writes the same md5 and dump files and returns the same exit codes, so `run.py`, `gputime_smoke.py`
+and `ci_dumps.py` run with either program (`--tool`). It will replace `warp_decoder`; until the C++ host is
+gone both are built on every push and their output is compared.
+
+Build on Windows (Rust 1.99 or newer, the MSVC build tools, a Windows SDK, and LLVM for `bindgen`):
+
+```bat
+set RAV1G_SHADER_DIR=<directory whose dx\shaders\h has the shader headers>
+cargo build --release
+```
+
+The program is `target\release\rav1g-dec.exe` (statically linked runtime). The shader headers are those
+of the FXC build: the directory `testing/shader_cache/shaders.py build --root <dir>` writes, or `libav1`
+after a build of `libav1.vcxproj`; the build stops when the variable is not set. With
+`RAV1G_SM6TEST_SHADER_DIR=<dir>` (what `testing/sm6test/compile.py --out <dir>` writes) `-sm6test` has
+its test shaders; without it the test reports that they are not built in. `--features uavsync` builds
+the decoder for the headers of the uavsync variant.
+
+Build on Linux, for Windows (clang 19 or newer with `clang-cl`, `lld-link` and `llvm-lib` on the path,
+libclang, and `cargo-xwin`, which fetches the Windows SDK and the MSVC C runtime; no wine):
+
+```sh
+rustup target add x86_64-pc-windows-msvc
+RAV1G_SHADER_DIR=<dir> cargo xwin build --release --target x86_64-pc-windows-msvc
+```
+
+The shader headers come from a Windows build (FXC): CI keeps them as the artifact
+`rav1g-shader-headers-<run id>`.
+
+What differs from `warp_decoder`:
+
+- The usage text names `rav1g-dec`; the lines the scripts read are the same.
+- The stream path goes to the C stream reader as UTF-8; `warp_decoder` passes the bytes of its command
+  line. The same for paths of plain ASCII.
+- Lines end with a line feed; `warp_decoder`, a C program writing to a redirected stdout, ends them with
+  carriage return and line feed. The md5 files are the same bytes (`<md5>   <n>\r\n`).
+- The C and C++ are compiled without whole program optimisation.
+- CI runs the experiment passes (`-lfhsplit`, `-intraedgefix`, the uavsync shaders) and the `-interfast`
+  pass with `warp_decoder` only.
+
+CI: the job `rust` builds it with MSVC and runs the conformance set, the timing smoke test and the stage
+dumps with it (artifacts `rav1g-dec-x64-<run id>`, `rav1g-dec-conformance-<run id>`,
+`rav1g-dec-stage-dumps-<run id>`); `rust-equal` compares its md5 files and stage dumps with
+`warp_decoder`'s (`testing/conformance/compare_md5.py`); `rust-cross` builds it on Linux
+(`rav1g-dec-x64-xwin-<run id>`) and `rust-cross-run` decodes the conformance set with that program.
+
 ## What it shares with the test player
 
 - **The decoder**: the sources and shaders of `libav1/build/libav1.vcxproj`, compiled with

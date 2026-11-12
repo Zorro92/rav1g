@@ -1,0 +1,15 @@
+[package]
+name = "rav1g"
+description = "GPU AV1 decoder on D3D12 compute shaders: the decoder's interface for Rust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+uavsync = ["rav1g-sys/uavsync"]
+
+[dependencies]
+rav1g-sys = { workspace = true }

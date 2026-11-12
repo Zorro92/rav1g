@@ -1,0 +1,3 @@
+# The programs link the C runtime statically, as warp_decoder does (/MT): one file, nothing to install.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

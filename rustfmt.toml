@@ -1,0 +1,3 @@
+# The line width of the C and C++ of this repository.
+max_width = 120
+use_small_heuristics = "Max"

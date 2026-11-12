@@ -592,6 +592,384 @@ jobs:
           path: out/warp_decoder/
           if-no-files-found: warn
 
+  # The Rust port (docs/rust-port.md). Step 1: the Cargo workspace builds the C entropy decoder and the C++
+  # host with cc (crates/rav1g-sys) from the shader headers of the Shaders step, and rav1g-dec
+  # (tools/rav1g-dec) takes the place of warp_decoder. This job builds it with MSVC, decodes the conformance
+  # set with it on WARP against the same references and expected.txt, and runs the timing smoke test and the
+  # stage dumps with it; the rust-equal job then compares its md5 per frame with warp_decoder's.
+  rust:
+    needs: conformance-streams
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      WINDOWS_SDK: 10.0.26100.0
+    steps:
+      - name: Disable newline conversion
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # The same cache and keys as the player and conformance jobs: the same bytecode.
+      - name: Shaders
+        id: shaders
+        uses: ./.github/actions/shaders
+        with:
+          sdk: ${{ env.WINDOWS_SDK }}
+
+      - name: Shader Model 6 test shaders
+        id: sm6
+        uses: ./.github/actions/sm6test-shaders
+        with:
+          sdk: ${{ env.WINDOWS_SDK }}
+
+      # Stable Rust (the minimum supported version is the latest stable), and libclang for bindgen.
+      - name: Rust toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup toolchain install stable --profile minimal --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw 'rustup could not install stable' }
+          rustup default stable
+          rustc --version
+          cargo --version
+          $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
+          if (Test-Path (Join-Path $llvm 'libclang.dll')) { "LIBCLANG_PATH=$llvm" >> $env:GITHUB_ENV }
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build rav1g-dec (cargo, MSVC, release)
+        shell: pwsh
+        env:
+          RAV1G_SHADER_DIR: ${{ steps.shaders.outputs.normal }}
+          RAV1G_SM6TEST_SHADER_DIR: ${{ steps.sm6.outputs.dir }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force out/rav1g-dec | Out-Null
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          cargo build --release --locked
+          if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
+          $built = [math]::Round($clock.Elapsed.TotalMinutes, 1)
+          if (-not (Test-Path target/release/rav1g-dec.exe)) { throw 'rav1g-dec.exe was not produced' }
+          # Built from the headers of the Shaders step: their bytecode is in the program, byte for byte.
+          python testing/shader_cache/shaders.py verify --report shader-build/normal/report.json `
+            --root shader-build/normal target/release/rav1g-dec.exe
+          if ($LASTEXITCODE -ne 0) { throw 'rav1g-dec was not built from the shader headers of this run' }
+          python testing/sm6test/compile.py --verify sm6test-build target/release/rav1g-dec.exe
+          if ($LASTEXITCODE -ne 0) { throw 'rav1g-dec does not have the Shader Model 6 test shaders of this run' }
+          Copy-Item target/release/rav1g-dec.exe, target/release/rav1g_dec.pdb -Destination out/rav1g-dec/
+          # Binary redistribution retains the BSD notices and AOM patent license, including libwebm.
+          foreach ($license in @('LICENSE.txt', 'libav1/LICENSE', 'libav1/PATENTS',
+              'third_party/libwebm/LICENSE.TXT', 'third_party/libwebm/PATENTS.TXT')) {
+            $destination = Join-Path out/rav1g-dec/licenses $license
+            New-Item -ItemType Directory -Force (Split-Path $destination) | Out-Null
+            Copy-Item $license $destination
+          }
+          "Commit: $env:GITHUB_SHA", "Run: https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID",
+            "Build: cargo build --release, $(rustc --version), MSVC" |
+            Set-Content out/rav1g-dec/SOURCES.txt -Encoding utf8
+          "## rav1g-dec", '', "cargo build --release: $built min ($(rustc --version)).", '' >> $env:GITHUB_STEP_SUMMARY
+
+      # The unit tests of the workspace (the md5 of rav1g-dec, its argument parser).
+      - name: Tests (cargo test)
+        shell: pwsh
+        env:
+          RAV1G_SHADER_DIR: ${{ steps.shaders.outputs.normal }}
+          RAV1G_SM6TEST_SHADER_DIR: ${{ steps.sm6.outputs.dir }}
+        run: |
+          cargo test --release --locked
+          if ($LASTEXITCODE -ne 0) { throw 'cargo test failed' }
+
+      # The Shader Model 6 test through rav1g-dec, as the conformance job runs it through warp_decoder: the
+      # program ends without an error and every test shader has a result line.
+      - name: Shader Model 6 test on WARP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force out/sm6test | Out-Null
+          & out/rav1g-dec/rav1g-dec.exe -sm6test > out/sm6test/rav1g-dec.log
+          $code = $LASTEXITCODE
+          $lines = @(Get-Content out/sm6test/rav1g-dec.log)
+          $lines | Where-Object { $_ -match '^(ADAPTER|SM6TEST) ' } | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) { throw "rav1g-dec -sm6test: exit code $code" }
+          $expected = @((Get-Content sm6test-build/report.json -Raw | ConvertFrom-Json).shaders).Count
+          $results = @($lines | Where-Object { $_ -match '^SM6TEST \S+: (PASS|FAIL|PSO FAILED|NOT BUILT)' })
+          if ($results.Count -ne $expected) { throw "$($results.Count) result lines for $expected test shaders" }
+          if (@($lines | Where-Object { $_ -match '^CAPS ' }).Count -lt 15) { throw 'The capability report is not complete' }
+
+      - name: Streams from the cache
+        uses: actions/cache/restore@v6
+        with:
+          path: conformance-streams
+          key: ${{ needs.conformance-streams.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      # The gate of step 1: every stream of the set, against its reference and expected.txt.
+      - name: Decode every stream on WARP with rav1g-dec and compare with expected.txt
+        shell: pwsh
+        run: |
+          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/conformance --threads 4 "--title=rav1g-dec (cargo, MSVC)"
+          if ($LASTEXITCODE -ne 0) { throw "conformance run with rav1g-dec: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
+
+      - name: Timing run with the inter breakdown on WARP with rav1g-dec (smoke test)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/gputime_smoke.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/gputime-smoke --threads 4 --stream nf-chimera-10b-1080p.ivf:16 --stream syn-resize-10b-1080p.ivf:24:scaled `
+            --stream nf-chimera-8b-270p.ivf:40
+          if ($LASTEXITCODE -ne 0) { throw "inter breakdown smoke test with rav1g-dec: exit code $LASTEXITCODE (1: a check failed, 2: a run could not be done)" }
+
+      - name: Stage dumps of the frames in dump_tasks.txt with rav1g-dec
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/stage_dump/ci_dumps.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --tasks testing/conformance/dump_tasks.txt --out out/stage-dumps --threads 4
+          if ($LASTEXITCODE -ne 0) { throw "stage dumps with rav1g-dec: exit code $LASTEXITCODE" }
+
+      - name: Preserve the stage dumps of rav1g-dec
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-dec-stage-dumps-${{ github.run_id }}
+          path: out/stage-dumps/
+          if-no-files-found: warn
+
+      - name: Preserve the results, the per-stream logs and md5 files of rav1g-dec
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-dec-conformance-${{ github.run_id }}
+          path: |
+            out/conformance/
+            out/gputime-smoke/
+            out/sm6test/
+          if-no-files-found: warn
+
+      - name: Preserve rav1g-dec.exe
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-dec-x64-${{ github.run_id }}
+          path: out/rav1g-dec/
+          if-no-files-found: warn
+
+  # Equality with the C++ reference (docs/rust-port.md, "Testing"): rav1g-dec and warp_decoder, built in
+  # this run from the same sources and shader headers, must write the same md5 for every output frame of
+  # every stream of the set, and the same buffers behind every GPU stage of the dumped frames.
+  rust-equal:
+    needs: [conformance, rust]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: rav1g-conformance-${{ github.run_id }}
+          path: warp-decoder
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: rav1g-dec-conformance-${{ github.run_id }}
+          path: rav1g-dec
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: rav1g-stage-dumps-${{ github.run_id }}
+          path: warp-decoder-dumps
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: rav1g-dec-stage-dumps-${{ github.run_id }}
+          path: rav1g-dec-dumps
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: rav1g-conformance-md5-${{ github.run_id }}
+          path: conformance-md5
+
+      - name: md5 per frame and stage dumps, rav1g-dec against warp_decoder
+        run: |
+          set -euo pipefail
+          python3 testing/conformance/compare_md5.py --reference warp-decoder/conformance --candidate rav1g-dec/conformance \
+            --manifest conformance-md5/manifest.txt --reference-dumps warp-decoder-dumps --candidate-dumps rav1g-dec-dumps
+
+  # The shader headers of the normal build for the Linux build below, which has no FXC: the headers and
+  # the report of the Shaders step, as an artifact.
+  shader-headers:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      WINDOWS_SDK: 10.0.26100.0
+    steps:
+      - name: Disable newline conversion
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Shaders
+        id: shaders
+        uses: ./.github/actions/shaders
+        with:
+          sdk: ${{ env.WINDOWS_SDK }}
+
+      - name: Preserve the shader headers of the normal build
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-shader-headers-${{ github.run_id }}
+          path: |
+            shader-build/normal/dx/shaders/h/
+            shader-build/normal/report.json
+          if-no-files-found: error
+
+  # Linux-native build (docs/rust-port.md, "Requirements"): the workspace for x86_64-pc-windows-msvc on a
+  # Linux runner with cargo xwin, which is clang-cl and lld-link with the Windows SDK and C runtime that xwin
+  # fetches; no wine, no MSVC. The C entropy decoder and the C++ host are compiled by cc the same way. The
+  # shaders are the FXC headers of the shader-headers job.
+  rust-cross:
+    needs: shader-headers
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_XWIN_VERSION: 0.23.1
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: rav1g-shader-headers-${{ github.run_id }}
+          path: shader-headers
+
+      # clang-cl, lld-link, llvm-lib and libclang (bindgen). The C++ standard library of the MSVC runtime
+      # that xwin fetches wants Clang 19 or newer.
+      - name: Rust toolchain, LLVM and cargo-xwin
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustup target add x86_64-pc-windows-msvc
+          sudo apt-get update -qq
+          llvm=
+          for version in 21 20 19; do
+            if sudo apt-get install -y -qq --no-install-recommends clang-$version lld-$version llvm-$version libclang-$version-dev; then
+              llvm=$version
+              break
+            fi
+          done
+          if [ -z "$llvm" ]; then
+            # The distribution has none: the packages of apt.llvm.org.
+            llvm=20
+            curl -fsSL https://apt.llvm.org/llvm.sh -o llvm.sh
+            sudo bash llvm.sh $llvm
+            rm llvm.sh
+            sudo apt-get install -y -qq --no-install-recommends clang-$llvm lld-$llvm llvm-$llvm libclang-$llvm-dev
+          fi
+          echo "/usr/lib/llvm-$llvm/bin" >> "$GITHUB_PATH"
+          echo "LIBCLANG_PATH=/usr/lib/llvm-$llvm/lib" >> "$GITHUB_ENV"
+          pipx install "cargo-xwin==$CARGO_XWIN_VERSION"
+          rustc --version
+          "/usr/lib/llvm-$llvm/bin/clang-cl" --version | head -n 1
+          "/usr/lib/llvm-$llvm/bin/lld-link" --version | head -n 1
+
+      # The Windows SDK and the MSVC C runtime (headers and import libraries), about 1.2 GB unpacked.
+      - name: xwin cache (Windows SDK and C runtime)
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/cargo-xwin
+          key: cargo-xwin-${{ env.CARGO_XWIN_VERSION }}-v1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: xwin
+
+      - name: Build the workspace for x86_64-pc-windows-msvc (cargo xwin, release)
+        env:
+          RAV1G_SHADER_DIR: ${{ github.workspace }}/shader-headers
+        run: |
+          set -euo pipefail
+          start=$(date +%s)
+          cargo xwin build --release --locked --target x86_64-pc-windows-msvc
+          exe=target/x86_64-pc-windows-msvc/release/rav1g-dec.exe
+          test -f "$exe"
+          # Built from the headers of this run: their bytecode is in the program, byte for byte.
+          python3 testing/shader_cache/shaders.py verify --report shader-headers/report.json --root shader-headers "$exe"
+          mkdir -p out/rav1g-dec-xwin
+          cp "$exe" target/x86_64-pc-windows-msvc/release/rav1g_dec.pdb out/rav1g-dec-xwin/
+          for license in LICENSE.txt libav1/LICENSE libav1/PATENTS third_party/libwebm/LICENSE.TXT third_party/libwebm/PATENTS.TXT; do
+            mkdir -p "out/rav1g-dec-xwin/licenses/$(dirname "$license")"
+            cp "$license" "out/rav1g-dec-xwin/licenses/$license"
+          done
+          {
+            echo "Commit: $GITHUB_SHA"
+            echo "Run: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "Build: cargo xwin build --release --target x86_64-pc-windows-msvc on Linux, $(rustc --version), $(clang-cl --version | head -n 1)"
+          } > out/rav1g-dec-xwin/SOURCES.txt
+          {
+            echo '## rav1g-dec, built on Linux'
+            echo
+            echo "cargo xwin build --release: $(( $(date +%s) - start )) s ($(clang-cl --version | head -n 1)); $(stat -c %s "$exe") bytes."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Preserve rav1g-dec.exe of the Linux build
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-dec-x64-xwin-${{ github.run_id }}
+          path: out/rav1g-dec-xwin/
+          if-no-files-found: error
+
+  # The program of the Linux build is a Windows program like the other: it decodes the conformance set on
+  # WARP against the same references and expected.txt.
+  rust-cross-run:
+    needs: [rust-cross, conformance-streams]
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Disable newline conversion
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: rav1g-dec-x64-xwin-${{ github.run_id }}
+          path: rav1g-dec-xwin
+
+      - name: Streams from the cache
+        uses: actions/cache/restore@v6
+        with:
+          path: conformance-streams
+          key: ${{ needs.conformance-streams.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Decode every stream on WARP with the rav1g-dec of the Linux build
+        shell: pwsh
+        run: |
+          python testing/conformance/run.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
+            --out out/conformance --threads 4 "--title=rav1g-dec built on Linux (cargo xwin, clang-cl)"
+          if ($LASTEXITCODE -ne 0) { throw "conformance run with the rav1g-dec of the Linux build: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
+
+      - name: Preserve the results, the per-stream logs and md5 files
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-dec-xwin-conformance-${{ github.run_id }}
+          path: out/conformance/
+          if-no-files-found: warn
+
   # Host check of how the shaders hand data between the threads of a thread group. A GPU promises
   # only that all threads of a group meet at a group sync; upstream's shaders counted on the 64
   # threads of a group running in lockstep (one wave), which holds on the console and nowhere else.
