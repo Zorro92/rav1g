@@ -468,7 +468,7 @@ between passes that touch only a thread's own samples. On WARP the conformance r
 245 of 251 streams ([warp-decoder.md](warp-decoder.md#results)).
 
 **Cost.** Static FXC counts of the 59 shaders that changed: 39545 instruction slots before,
-40485 after (+2.4%); the survey of every CI run has them per shader. The largest relative changes
+40483 after (+2.4%); the survey of every CI run has them per shader. The largest relative changes
 are in small shaders: `idct_lossless` +13%, the 20 shaders for scaled references +7 to +11%,
 `loopfilter_hor` +8 to +9%, the transforms -0.5 to +8%. What a group sync costs on the console is
 not known: a group of 64 threads is one wave there, where a sync should be free, and `intra_main`
