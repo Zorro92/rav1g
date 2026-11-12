@@ -9,8 +9,9 @@ and manifest.txt, one warp_decoder task per line. The tasks run in one decoder p
 manifest; a task that ends in a decode error, a timeout or a crash ends its process, and the run goes on
 with the next task in a new one. A stream that fails after other streams in the same process is decoded
 again alone, in a process of its own, and must fail the same way. One case is not a failure of the stream:
-the D3D12 device is removed while a stream is decoded after others, and the stream is right alone. It is
-reported ("D3D12 device removed") and the result of the stream is the one it has alone.
+the D3D12 device is removed while the stream is decoded, which happens now and then on WARP, to another
+stream from run to run. Such a run is reported ("D3D12 device removed") and the stream is decoded alone
+again, up to three times; its result is the one of a run that kept its device.
 
 Written to --out:
   results.tsv              one line per stream
@@ -276,26 +277,39 @@ def main():
         by_name = dict(tasks)
         for name, _ in tasks:
             result = results[name]
-            if result.status == 'pass' or result.status == 'timeout' or result.first_in_process:
+            if result.status == 'pass' or result.status == 'timeout':
                 continue
-            repeats += 1
-            got, _, fatal = run_process(args, [(name, by_name[name])], 'alone%03d' % repeats)
-            if fatal:
-                print(fatal)
-                return 2
-            alone = got[0]
-            print('%-52s alone: %s' % (name, alone.outcome()), flush=True)
-            if alone.same_outcome(result):
+            if result.first_in_process and not device_removed(result):
+                continue
+            # The stream again, alone. A run that loses the D3D12 device says nothing about the stream (see
+            # below), so such a run is repeated, up to three runs in all.
+            lost_alone = 0
+            while True:
+                repeats += 1
+                got, _, fatal = run_process(args, [(name, by_name[name])], 'alone%03d' % repeats)
+                if fatal:
+                    print(fatal)
+                    return 2
+                alone = got[0]
+                print('%-52s alone: %s' % (name, alone.outcome()), flush=True)
+                if not device_removed(alone) or lost_alone == 2:
+                    break
+                lost_alone += 1
+                device_lost.append('%s, alone: %s (%s)' % (name, alone.outcome(), alone.detail))
+            lost = device_removed(result) or result.before_device_loss
+            if alone.same_outcome(result) and not lost_alone:
                 result.note = 'the same alone'
-            elif alone.status == 'pass' and (device_removed(result) or result.before_device_loss):
-                # The device was lost while the stream was decoded after others in the same process (or right
-                # after it, with wrong frames before), and the stream is right when it is decoded alone. Which
-                # stream this hits changes from run to run (it is not the stream's fault and cannot be listed
-                # in expected.txt), so the stream counts as decoded, and the loss is reported on its own.
-                device_lost.append('%s: %s (%s)%s' % (
-                    name, result.outcome(), result.detail,
-                    '; the next stream of the process found the device removed' if result.before_device_loss else ''))
-                alone.note = 'lost the D3D12 device after other streams in the same process; this is the result alone'
+            elif (lost or lost_alone) and not device_removed(alone):
+                # The device was lost while the stream was decoded (or right after it, with wrong frames
+                # before): now and then a stream loses the D3D12 device on WARP, another one from run to run,
+                # with upstream's shaders as well (docs/warp-decoder.md). It is not the stream's fault and
+                # cannot be listed in expected.txt, so the result of the stream is the one of a run that
+                # kept its device, and the loss is reported on its own.
+                if lost:
+                    device_lost.append('%s, after other streams: %s (%s)%s' % (
+                        name, result.outcome(), result.detail,
+                        '; the next stream of the process found the device removed' if result.before_device_loss else ''))
+                alone.note = 'lost the D3D12 device in another run of this stream; this is the result alone, with the device'
                 alone.first_in_process = True
                 results[name] = alone
             else:
@@ -361,9 +375,9 @@ def main():
         '']
     if device_lost:
         summary += ['### D3D12 device removed', '',
-                    'These streams lost the D3D12 device when they were decoded after other streams in the same '
-                    'process, and are right when decoded alone, which is the result in the tables. The run does '
-                    'not fail on it (docs/warp-decoder.md).', ''] + ['- ' + cell(p) for p in device_lost] + ['']
+                    'Runs of a stream in which the D3D12 device was lost. The result of the stream in the tables is '
+                    'the one of a run alone that kept its device. The run does not fail on a lost device '
+                    '(docs/warp-decoder.md).', ''] + ['- ' + cell(p) for p in device_lost] + ['']
     if problems:
         summary += ['### Not as expected', ''] + ['- ' + cell(p) for p in problems] + ['']
     table_head = ['| stream | size | bits | frames | matching | first bad frame | decode s | result | expected.txt | detail |',
@@ -396,7 +410,7 @@ def main():
           % (len(rows), passed, failed, count('expected'), count('UNEXPECTED'), count('CHANGED'), count('FIXED')))
     print('%.1f min for the whole run, %.1f min of it decoding' % (total_s / 60.0, decode_s / 60.0))
     for lost in device_lost:
-        print('D3D12 DEVICE REMOVED after other streams in the same process, right alone: ' + lost)
+        print('D3D12 DEVICE REMOVED: ' + lost)
     for problem in problems:
         print('NOT AS EXPECTED: ' + problem)
     return 1 if problems else 0

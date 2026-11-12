@@ -166,7 +166,7 @@ decode error, a timeout or a crash ends its process (a failed decode may leave t
 a state the next stream should not inherit), and the run goes on with the next stream in a
 new process. A stream that fails after other streams in the same process is decoded again
 alone and must fail the same way; otherwise its result is `unstable` (with one exception, see
-[Results](#results): a stream that lost the D3D12 device and is right alone). Every task has a
+[Results](#results): a run that lost the D3D12 device is repeated). Every task has a
 timeout (300 s for a vector, 2400 s for the larger streams), so a hang ends that stream, not
 the job.
 
@@ -216,17 +216,23 @@ The six that fail are listed in `expected.txt`:
 
 **The D3D12 device is removed, once or twice in every run.** Somewhere in the list, mostly at one
 of the last, large streams (a 720p or 1080p cut of Netflix Open Content) but once at a 352x288
-vector, a stream loses the D3D12 device: its frames come back empty or wrong, an allocation or a
-`Map` fails with 0x887A0005 (`DXGI_ERROR_DEVICE_REMOVED`), and the task ends in a decode error,
-or it ends as a mismatch and the next stream cannot create its decoder. It is another stream from
-run to run, and the same stream decoded alone, in a new process, is right, every frame. It
-happened in every run so far, also in the three with upstream's shaders (runs 43092362685,
-43094607558, 43099052089), so it is not the group syncs, and it is not memory: the process holds
-465 MiB at that point and the machine has 13 GiB free (the `PROCESS` lines). The cause is not
-known. Because the stream it hits changes, it cannot be listed in `expected.txt`: `run.py` takes
-the result the stream has alone, reports the loss under "D3D12 device removed" in the summary and
-on a line of its own in the log, and does not fail the run on it. A stream that also fails alone
-fails the run as before.
+vector, a stream loses the D3D12 device: its frames come back wrong or as the frame before, an
+allocation or a `Map` fails with 0x887A0005 (`DXGI_ERROR_DEVICE_REMOVED`), and the task ends in a
+decode error, or it ends as a mismatch and the next stream cannot create its decoder. It is
+another stream from run to run. Decoded again alone, in a new process, the stream is right, every
+frame, though once the run alone lost the device as well, at the second frame. It happened in
+every run so far, also in the three with upstream's shaders (runs 43092362685, 43094607558,
+43099052089), so it does not come from the group syncs, and it is not memory: the process holds
+465 MiB at that point and the machine has 13 GiB free (the `PROCESS` lines). **The cause is not
+known**, and it is the open problem of the run: whether it is WARP, the runner, or the decoder on
+a slow device has to be found out.
+
+Because the stream it hits changes, it cannot be listed in `expected.txt`. `run.py` decodes a
+stream whose run lost the device again alone, up to three times, and takes the result of a run
+that kept its device; every loss is reported under "D3D12 device removed" in the summary and on a
+`D3D12 DEVICE REMOVED` line of the log. The run does not fail on a lost device. It fails, as
+before, on a stream that fails with its device, and on one that loses the device three times
+alone.
 
 Two streams that are wrong on the console pass here: the 8-bit 4K stream
 (`nf-dvbdash-a1-8b-2160p.ivf`, luma off by ±1–2 on the console) and the stream with scaled
