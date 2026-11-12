@@ -93,6 +93,14 @@ one commit each:
   lives in `testing/warp_check`. See [Global motion](#global-motion). Only the twenty
   `inter_scale_*` shaders change: those for scaled references, and the one that predicts
   `GLOBAL_GLOBALMV` blocks, which runs only in frames with global motion.
+- **Super-resolution**: a frame with superres and CDEF and without loop restoration was
+  upscaled from the wrong width in upstream (the visible width of a buffer description that
+  nothing had set for the frame). One assignment block in `av1_setup_frame()`; the shader
+  is unchanged and has a host-side check against libaom, `testing/superres_check`. See
+  [Super-resolution](#super-resolution).
+- **Stage dumps**: `-dumpstages` writes the buffer behind every GPU stage of a frame, in the
+  player and in `warp_decoder`, and `testing/stage_dump/stage_dump.py` compares two runs. See
+  [Stage dumps](#stage-dumps--dumpstages). The decoded output does not change.
 - **Conformance run**: `testing/warp_decoder` is the decoder as a desktop console program
   that decodes on the D3D12 WARP software adapter and writes or checks one md5 per output
   frame, and `testing/conformance` runs it in CI over AOM's decoder test vectors, cuts of
@@ -2115,6 +2123,67 @@ OBMC and inter-intra on top of a warped block; scaled references.
 - The line `GPU double precision shader operations: ...` in the log, for the record.
 - If a stream with scaled references is at hand: it runs the other nineteen shaders that
   used double precision, which no clip has exercised here.
+
+## Super-resolution
+
+A frame with `use_superres` is coded at a smaller width and upscaled horizontally after CDEF
+(the upscaling process of the specification, in the decoding process chapter; libaom's
+`av1_upscale_normative_rows()`). Upstream decoded such frames wrong on every GPU: the
+SVT-AV1 stream of the conformance run (`superres-mode=2`, all denominators) had every frame
+wrong on WARP and on the console, the key frame with about 85% of its samples off by up to
+several hundred.
+
+**Cause.** Which buffers the filters of a frame use depends on which filters it has. With
+CDEF and superres and without loop restoration, CDEF writes into the back buffer the filters
+share (`back_buffer1`) and the upscale reads from there. `av1_superres()` takes the width it
+scales from out of the visible width of its source buffer, and `back_buffer1` got the
+frame's layout at the frame's setup but not its visible size: that was whatever an earlier
+frame had left there, 0 for the first frame. With a source width of 0 the step of the
+upscale is 0, and every row of the upscaled frame is its first sample. With loop
+restoration, or without CDEF, the source is a buffer whose description is complete, and
+those frames were right.
+
+**Fix.** `av1_setup_frame()` gives `back_buffer1` the frame's whole description (visible
+size and bit depth next to the layout), as it does for the frame's own back buffer. No
+shader changes; frames without superres never read these fields.
+
+**Proof.** The [stage dumps](#stage-dumps--dumpstages) of the key frame on WARP, before the
+fix: the dump behind CDEF, upscaled on a host as the specification says, is dav1d's frame,
+sample for sample; the dump behind the upscale was a frame of constant rows (84.7% of the
+luma samples differ from dav1d). After the fix the stream is md5-identical to dav1d on WARP,
+64 of 64 frames, and is off `testing/conformance/expected.txt`. The stream has not been run
+on the console since; its frames after the key frame also predict from references of
+another width, which is the console-only bug that is still open.
+
+**Host-side check of the shader.** `testing/superres_check` (not part of the player build)
+compiles `upscaling.hlsl` as C++ (the converter and the HLSL types of `testing/sync_check`)
+and runs it, with the constants `av1_superres()` gives it, over planes laid out like the
+decoder's frame buffers. The reference is `av1_upscale_normative_rows()` of libaom's C code
+in this tree, tile column by tile column as libaom does it. Every visible sample must be
+equal, and the shader may write nothing outside the rows of the destination plane.
+
+```sh
+sh testing/superres_check/run.sh             # the check
+sh testing/superres_check/run.sh --mutate    # and six mutated shaders, which must all fail
+```
+
+```text
+superres_check: 792 cases, 8195300 samples compared with libaom, 0 failed
+superres_check: mutant rejected as expected: the share of the rounding error in the initial subpixel position
+superres_check: mutant rejected as expected: right edge clamp: the visible width instead of the last mode info column
+superres_check: mutant rejected as expected: rounding of the step
+superres_check: mutant rejected as expected: one filter tap
+superres_check: mutant rejected as expected: left edge clamp
+superres_check: mutant rejected as expected: first source word of the four output samples
+```
+
+The cases: every denominator (9 to 16) at twelve widths from 17 to 1920, among them widths
+that are not a multiple of 8 or of 4 at either size, 8-bit and 10-bit, and 600 random cases
+(width 16 to 4100, one to eight tile columns of random widths, 64x64 and 128x128
+superblocks, noise, extremes, ramps and spikes as content). The source rows are filled up to
+the last column of the last mode info unit, which is where the specification clamps, not at
+the visible width. The check covers the shader, which was right; the bug was in the host
+code that the conformance run covers. It runs as the `superres-check` job of the workflow.
 
 ## Stage dumps (`-dumpstages`)
 

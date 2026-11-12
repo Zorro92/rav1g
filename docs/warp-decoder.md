@@ -218,8 +218,9 @@ On WARP the shaders run as D3D12 specifies them and not as the console's GPU hap
 them, which is what the run is for. Upstream's shaders had 0 of 250 streams right there, with
 another md5 on every decode: they counted on the 64 threads of a thread group running in lockstep
 ([gpu-av1-decoder.md](gpu-av1-decoder.md#lockstep-reliance-portability-2026-11-11)). With group
-syncs where threads hand data to each other, 245 of 251 streams are md5-identical to their
-reference:
+syncs where threads hand data to each other, and with the super-resolution fix
+([test-player.md](test-player.md#super-resolution)), 246 of 251 streams are md5-identical to
+their reference:
 
 | streams | pass |
 | --- | --- |
@@ -232,9 +233,9 @@ reference:
 | film grain, monochrome, 8 and 10 bit (`-23`, `-24`) | 4 of 4 |
 | Netflix Open Content cuts, 270p to 2160p, 8 and 10 bit | 5 of 5 |
 | SVT-AV1 reference scaling | 1 of 1 |
-| SVT-AV1 super-resolution | 0 of 1 |
+| SVT-AV1 super-resolution | 1 of 1 |
 
-The six that fail are listed in `expected.txt`:
+The five that fail are listed in `expected.txt`:
 
 - `av1-1-b8-03-sizeup.mkv`: frames 0 to 9 match, then the stream goes from 352x288 to 1280x720
   with a new sequence header, and the decoder, which was created for the first one, cannot
@@ -247,8 +248,6 @@ The six that fail are listed in `expected.txt`:
   reference frame 0); every later one, which predicts from the 640x360 frame of its temporal unit
   and from earlier 1280x720 frames, is wrong. First bad 1280x720 frame: output frame 3. What
   differs in the samples is not known yet.
-- `syn-superres-10b-1080p.ivf`: super-resolution is wrong from the first frame on, as on the
-  console.
 
 **The D3D12 device is removed, once or twice in every run.** Somewhere in the list, mostly at one
 of the last, large streams (a 720p or 1080p cut of Netflix Open Content) but once at a 352x288
