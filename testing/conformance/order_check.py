@@ -4,12 +4,12 @@ reference, and nothing is decoded again alone.
 
   python testing/conformance/order_check.py --tool <warp_decoder.exe|rav1g-dec.exe> --streams <dir> --out <dir>
 
-The conformance run (run.py) decodes a failing stream again in a process of its own and takes a stream that
-then passes for unstable. That is right for a list of failing streams and wrong as a test of the decoder: a
-decoder whose output depends on what the process decoded before is broken, and decoding the stream alone is
-exactly what hides it. A read of struct padding in gen_pred_blocks.hlsl stayed in the tree that way
-(docs/gpu-av1-decoder.md, "Padding of the mode info record"): the memory of a destroyed decoder went to the
-next one, and the shader read bytes of it that the new decoder never wrote.
+The conformance run (run.py) decodes a stream that fails behind other streams again in a process of its own
+and reports it as unstable when it then passes. Such a result was taken for a flake of the runner for months:
+the job was run again and passed. It was a decoder whose output depended on what the process had decoded
+before: a read of struct padding in gen_pred_blocks.hlsl (docs/gpu-av1-decoder.md, "Padding of the mode info
+record"). The memory of a destroyed decoder went to the next one, and the shader read bytes of it that the
+new decoder never wrote. This check runs the sequences that showed it and takes the first result.
 
 The sequences are the ones that showed it, each in a new process and in this order:
 

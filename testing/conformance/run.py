@@ -8,7 +8,10 @@ with testing/conformance/expected.txt.
 and manifest.txt, one warp_decoder task per line. The tasks run in one decoder process, in the order of the
 manifest; a task that ends in a decode error, a timeout or a crash ends its process, and the run goes on
 with the next task in a new one. A stream that fails after other streams in the same process is decoded
-again alone, in a process of its own, and must fail the same way. One case is not a failure of the stream:
+again alone, in a process of its own, and must fail the same way. A stream that fails behind others and
+passes alone is "unstable": the output of the decoder depends on what the process decoded before, which is a
+defect of the decoder and cannot be listed in expected.txt, so it fails the run (testing/conformance/
+order_check.py is the check for it that repeats nothing). One case is not a failure of the stream:
 the D3D12 device is removed while the stream is decoded, which happens now and then on WARP, to another
 stream from run to run. Such a run is reported ("D3D12 device removed") and the stream is decoded alone
 again, up to three times; its result is the one of a run that kept its device.
@@ -31,7 +34,9 @@ import subprocess
 import sys
 import time
 
-FAIL_KINDS = ('mismatch', 'error', 'timeout', 'crash', 'unstable')
+# The ways a stream fails that expected.txt can list. 'unstable' (wrong behind other streams, right alone, or
+# the other way round) is a result too, and never an expected one.
+FAIL_KINDS = ('mismatch', 'error', 'timeout', 'crash')
 # What a task says when the D3D12 device is gone: the removal itself, or a call that fails with
 # DXGI_ERROR_DEVICE_REMOVED.
 DEVICE_REMOVED = ('the D3D12 device was removed', 'hr 0x887A0005')
@@ -351,6 +356,11 @@ def main():
             if listed:
                 verdict = 'FIXED'
                 problems.append('%s passes but is listed in expected.txt as %s: remove it from the list' % (name, listed[0]))
+        elif result.status == 'unstable':
+            verdict = 'UNEXPECTED'
+            problems.append('%s: the result depends on what the process decoded before, which is a defect of the '
+                            'decoder and not a property of the stream or of the runner; do not rerun the job for '
+                            'it (%s)' % (name, result.detail))
         elif not listed:
             verdict = 'UNEXPECTED'
             problems.append('%s: %s, not listed in expected.txt (%s)' % (name, result.outcome(), result.detail))
