@@ -21,6 +21,11 @@ one commit each:
   (`testing/common`, `testing/player_common`) and the libav1 D3D12 host (`libav1/dx`,
   plus two timers in `libav1/av1/decoder/decodeframe.c`). No shader, no shader maths
   and no decoded output changes; without the flags the decoder runs as before.
+- **Inter breakdown of the timing run**: `-gputimedetail` and `-gputimeisolate` add GPU
+  timestamps inside the inter stage and work counters per kind of inter block; see
+  [Inter prediction breakdown](#inter-prediction-breakdown--gputimedetail--gputimeisolate).
+  `-gputimeisolate` also adds UAV barriers between the dispatches. No shader and no decoded
+  output changes; without the flags the command list is what it was.
 - **CDEF v2**: a second CDEF compute shader, `libav1/dx/shaders/cdef_filter_v2.hlsl`, and
   see [CDEF v2 run](#cdef-v2-run--cdefv2). It is the default since package 0.2.8.0; the
   player flag `-cdefv1` selects the upstream shader `cdef_filter.hlsl`, which is not
@@ -350,8 +355,10 @@ side alone ever fit in 41.67 ms (24 fps)?
 | --- | --- |
 | `-gputime` | Per-stage GPU timestamps and CPU timers for every decoded frame, a summary at the end of the task, and a live log line each time the decoder blocks on the player's output buffers. |
 | `-nopresent` | Decoded frames go straight back to the buffer pool. Nothing is queued for display and nothing is presented, so the picture stays blank. The render loop sleeps 10 ms per pass instead of spinning. |
+| `-gputimedetail` | `-gputime`, and the inter stage broken down: a timestamp behind every section of it, work counters per section. See [Inter prediction breakdown](#inter-prediction-breakdown--gputimedetail--gputimeisolate). |
+| `-gputimeisolate` | `-gputimedetail`, and a UAV barrier and a timestamp behind every dispatch of the inter stage and of the reconstruction, so that each has a time of its own. Same output; the stage is slower by what the barriers cost. |
 
-Both are off by default, and the player then behaves as before. `-progress` keeps its
+All are off by default, and the player then behaves as before. `-progress` keeps its
 existing per-frame lines.
 
 Put both lines in `args_av1.txt`, the `-nopresent` one first (it cannot stall on the
@@ -379,7 +386,7 @@ span exactly**, and any gap between two stages is counted in the later one.
 | `gen_blocks` | prediction block generation |
 | `residual_clear` | residual buffer fill (the whole buffer, every frame) |
 | `idct_sort`, `idct` | transform block sort, inverse transform (all types) |
-| `inter`, `recon` | inter prediction (all passes), inter residual reconstruction |
+| `inter`, `recon` | inter prediction (all passes); `recon` adds the residuals of the blocks whose prediction is not final when their inter shader ends (overlapped prediction) and of palette blocks. The other inter blocks get their residuals in the inter shader. |
 | `intra` | intra prediction, the whole wavefront loop |
 | `lf_gen`, `lf_vert`, `lf_horz` | loop filter: block generation, vertical edges (two passes), horizontal edges |
 | `cdef`, `superres`, `loop_rest` | CDEF, super-resolution, loop restoration |
@@ -499,6 +506,180 @@ and the last. If the queue refuses timestamp queries the summary says
   coupling (buffers held by the display queue, GPU time taken by the swap chain), since
   the decoder does not share a command queue with the swap chain in this player.
 
+### Inter prediction breakdown (`-gputimedetail`, `-gputimeisolate`)
+
+`gpu inter` is one number: 7.7 ms and 19.6 ms per frame on the two 4K clips of the timing
+spike. These two flags say what is in it. Both imply `-gputime`; `-gputimeisolate` implies
+`-gputimedetail`.
+
+**How the stage is recorded.** `av1_prediction_run_all()` walks the lists of prediction
+blocks `gen_pred_blocks` made, one list per kind of block and block size, and dispatches
+one shader per kind, one dispatch per size. Luma and chroma blocks of the same kind and
+size are in the same list, so there is no time per plane; the counters have the split.
+A kind is a *section* here. Three UAV barriers divide the stage into passes, because a
+later pass reads what an earlier one wrote into the frame:
+
+| Pass | Sections, in the order of the command list | Ends with |
+| --- | --- | --- |
+| 1 | `warp` (one reference, warped locally or globally), `single` (one reference), `comp_avg` (two references, averaged or distance weighted), `comp_diff_y` (difference weighted, luma; it writes its mask into the chroma planes), `comp_masked` (wedge), `comp_warp` (two references, one or both globally warped), `chroma_2x2` (the chroma of blocks under 8x8, in 2x2 pieces) | `sync0` |
+| 2 | `comp_diff_uv` (difference weighted, chroma: reads the mask), `comp_warp_diff_uv`, `obmc_above` (overlapped prediction from the blocks above, blended into what pass 1 wrote) | `sync1` |
+| 3 | `obmc_left` (the same from the left, over the result of pass 2) | `sync2` |
+
+`recon` is the GPU stage behind it and has a barrier of its own. A frame with a reference
+of another size runs every section but `warp` and `comp_warp*` through the shaders for
+scaled references (`inter_scale_*`); the summary lists those as `<section>/scaled`. Which
+shader a section is, and what one thread of it does, is in
+[gpu-av1-decoder.md](gpu-av1-decoder.md#inter-prediction-breakdown-2026-11-12).
+
+**What a time means.** A timestamp says when the GPU reaches that point of the list. The
+dispatches of a pass have no barrier between them, so the GPU may run them side by side,
+and a timestamp between two of them need not wait for the first to finish.
+
+- `-gputimedetail` puts a timestamp behind every section that dispatched something and
+  behind each barrier. A section's time is its timestamp minus the one before it: it
+  follows the order of submission and **overlaps** with its neighbours in the pass
+  (`ovl`). The time of a barrier (`sync`) is what was still running when the last section
+  of the pass had been submitted. **Exclusive** (`excl`) are the sums up to a barrier: the
+  three passes, and `recon`. No barrier is added; the cost is the timestamps (compare
+  `gpu inter` with a plain `-gputime` run).
+- `-gputimeisolate` also puts a UAV barrier and a timestamp behind **every dispatch** of
+  the inter stage and of `recon`. Each dispatch then runs alone, and every time is
+  exclusive, per section and per block size. A UAV barrier only orders, so the frame is
+  the same (CI decodes with it against the references). The stage gets slower by what the
+  barriers cost: the GPU can no longer overlap the dispatches, and a small dispatch pays
+  the fixed cost of a barrier. The summary says how many barriers and timestamps a frame
+  got; **the cost of the mode is `gpu inter` + `gpu recon` of the isolate run minus those
+  of a plain `-gputime` run of the same clip**, so run all three.
+
+If the sections of the `-gputimedetail` run have about the times of the `-gputimeisolate`
+run, the GPU does not overlap them much and the cheaper mode is enough from then on.
+
+**Lines.** After the stage and CPU tables of the summary:
+
+```text
+GPUTIME -- inter breakdown (-gputimedetail): 281 frames with an inter stage of 290 measured with the breakdown, 0 of them with scaled references --
+GPUTIME excl: between two UAV barriers, an exclusive time (the passes, recon). ovl: ...
+GPUTIME timestamps added per frame: mean 9.1 max 12 (no barriers added)
+GPUTIME inter counters: the dispatches and the tile threads agree on all 281 frames (block records, samples, luma area)
+GPUTIME -- inter times, ms (frames = frames timed; avg = spread over the frames with an inter stage; share = of the inter stage) --
+GPUTIME section                  kind   frames     mean      p50      p95      max      avg   share
+GPUTIME inter single             ovl       281    ...
+GPUTIME inter comp_avg           ovl       270    ...
+GPUTIME inter sync0              sync      281    ...
+GPUTIME inter pass 1 (to sync0)  excl      281    ...
+GPUTIME ...
+GPUTIME inter recon              excl      140    ...
+GPUTIME inter passes 1 to 3      excl      281    ...
+GPUTIME inter stage (gpu inter)  excl      281    ...
+GPUTIME -- inter work per frame that has the section (means); ... --
+GPUTIME section                  frames  disp  groups  full%  records blocksY blocksUV   kpxY  kpxUV refblk  loadMB footMB  mvMB  ns/px   GB/s
+GPUTIME inter single                281   ...
+GPUTIME inter blocks per frame: N blocks, N.NNN Mpx luma; of that area: compound N%, OBMC N%, warped N%, wedge mask N%, difference weighted N%, inter-intra N%, scaled reference N%
+GPUTIME inter reference fetches (luma area per reference, N.NNN Mpx per frame) by the fraction of the motion vector: none N%, horizontal only N%, vertical only N%, both N% (warped and scaled count as both)
+GPUTIME inter filter kernels asked for (same area): horizontal 8-tap N%, 4-tap N%, bilinear N%; vertical 8-tap N%, 4-tap N%, bilinear N%
+GPUTIME inter stage per frame: reference bytes loaded N MB, footprint N MB, footprint by motion vector N MB, samples written N MB; loaded/written N, footprint/written N
+GPUTIME -- inter dispatches by block size (...) --
+GPUTIME section                size     frames  records   groups  full%   ms mean    share  ns/px
+GPUTIME list single            4x4         281   ...
+```
+
+*Times.* `frames` is the number of frames in which the section has a timestamp, `mean` to
+`max` are over those, `avg` spreads the section over all frames with an inter stage (the
+`avg` column of the sections and barriers adds up to `gpu inter`), `share` is its part of
+the inter stage. `passes 1 to 3` and `stage (gpu inter)` are the same quantity from the
+breakdown's timestamps and from the stage's: they must agree. `recon` is not part of the
+inter stage and has no share; it is also timed in intra frames that have palette blocks.
+
+*Work*, per frame that has the section:
+
+| Column | Meaning |
+| --- | --- |
+| `disp`, `groups` | dispatches (one per block size), thread groups of 64 threads |
+| `full%` | threads with work of the threads dispatched. The last group of a dispatch is filled up to 64; a frame with many small dispatches wastes lanes here |
+| `records` | block records in the lists: one per luma block, two per chroma block (U and V) |
+| `blocksY`, `blocksUV` | prediction blocks of the section, counted by the tile threads where they push them; a chroma block is counted once |
+| `kpxY`, `kpxUV` | thousand samples predicted: luma, chroma of both planes |
+| `refblk` | reference blocks fetched: one per prediction block, plane and reference |
+| `loadMB` | reference bytes the threads of the section load: threads x what one thread of the shader loads for its reference rows. The shaders load the rows of an 8-tap filter in both directions whatever the motion vector and the filter are, and every thread loads its own rows. An estimate for the scaled shaders, whose row count depends on the scale |
+| `footMB` | the references' areas those fetches cover with 8 taps both ways: `(w + 7) x (h + 7)` samples per reference block. What a shader would load that read each reference sample of a block once |
+| `mvMB` | the same with the 7 extra only in a direction in which the motion vector has a fraction: what a shader that looked at the vector would have to read |
+| `ns/px` | the section's time per sample predicted |
+| `GB/s` | `loadMB` per second of the section's time |
+
+`ns/px` and `GB/s` use the section's time in the table above, so they are exclusive only
+where that is: for the passes as a whole in a `-gputimedetail` run, for every section and
+block size in a `-gputimeisolate` run.
+
+*Blocks.* The inter blocks of a frame by what they use, as shares of their luma area; the
+reference fetches by the fraction of the luma motion vector (a block with a vector without
+fraction needs no filter in that direction; the shaders filter anyway, with a kernel that
+has one tap); and the kernels the blocks ask for (a side of 4 samples takes the 4-tap form).
+
+*The counters line.* The dispatch counters come from the lists the recording walks, the
+block counters from the tile threads. They are independent, and they must agree: a luma
+block is one record and a chroma block two, the samples are the same, and every inter
+block has its luma in exactly one section that is not an overlapped prediction. The
+summary says `agree on all N frames` or `DISAGREE on K of N frames` with the first case.
+A disagreement means the breakdown is wrong, not the decoder.
+
+*Dispatches by block size.* One line per section and block size (of a record: the chroma
+block of a 16x16 is an 8x8), with the frames that had it, records and groups per such
+frame, and in a `-gputimeisolate` run its time, its share of the inter stage and its time
+per sample. An overlapped prediction's size is the overlap, not the block.
+
+With `-progress` every frame with the breakdown gets a second line behind its own:
+
+```text
+GPUTIME frame 57 inter mode=1 scaled=0 blocks=5123 p1=6.412 p2=0.731 p3=0.402 | single=3.102:813:4000 comp_avg=2.000:500:1000 sync0=1.310 obmc_above=0.511:4:100 sync1=0.220 obmc_left=0.251:4:100 sync2=0.151 recon=1.004:4:50
+```
+
+`p1` to `p3` are the passes; a section is `name=ms:thread groups:block records`, a barrier
+`name=ms`. `mode` is 1 for `-gputimedetail` and 2 for `-gputimeisolate`.
+
+**How to read it.**
+
+- **Which pass, then which section.** The pass times are exclusive in both modes. Inside a
+  pass, trust section times only from a `-gputimeisolate` run, or after the two modes
+  were seen to agree.
+- **`ns/px` across sections** says which shader is expensive for what it produces; **across
+  block sizes** (isolate run) whether small blocks cost more per sample than large ones.
+  With `full%` it separates "the shader is slow" from "the dispatches are small and
+  mostly empty".
+- **`loadMB` against `footMB` against `mvMB`** is the room for a shader that reads less:
+  the first step down is reuse between the threads of a block, the second is not reading
+  margins the vector does not need. `GB/s` says whether a section runs at the speed of
+  memory: sections with very different `ns/px` and the same `GB/s` are bound by their loads.
+- **`sync` times** well above zero in a `-gputimedetail` run mean the GPU was still working
+  through the pass when its last dispatch was submitted, which is overlap at work.
+- **The cost of the modes** is in the comparison of `gpu inter` across the three runs. Do
+  not take frame rates from a `-gputimeisolate` run.
+
+The counters cost the tile threads a few additions per block and the record of a frame is
+kept per frame, so use the flags for runs of a few hundred frames, not for long ones.
+
+**Task lines** (one clip; the plain run first, as the baseline of the same session):
+
+```text
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -gputime -nopresent
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -gputime -nopresent -gputimedetail
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -gputime -nopresent -gputimeisolate
+```
+
+**On WARP.** `warp_decoder` takes the same flags (and `-progress`) and prints the same
+`GPUTIME` lines on stdout. WARP is a CPU rasterizer: its times say nothing about a GPU, but
+the counters are those of the stream. The conformance job decodes three streams with
+`-gputime`, `-gputimedetail` and `-gputimeisolate` against their references
+(`testing/conformance/gputime_smoke.py`: a 10-bit 1080p cut, an 8-bit cut with global
+motion, and the stream with scaled references) and checks that the plain run has no line
+of the breakdown, that the breakdown is there, that the two sides of the counters agree on
+every frame, that the numbers are plausible, and that the counters of the two modes are the
+same. The breakdowns go into the job summary and the logs into the conformance artifact
+(`gputime-smoke/`).
+
+WARP_EXAMPLE_PLACEHOLDER
+
+**Console results:** pending.
+
 ### Host-side check of the summary maths
 
 The summary code is a plain header (`testing/player_common/perf_stats.h`). A small test,
@@ -508,6 +689,10 @@ not part of the player build, checks it:
 g++ -std=c++14 -Wall -Wextra -I libav1 -o perf_stats_test testing/player_common/perf_stats_test.cpp
 ./perf_stats_test
 ```
+
+It covers the inter breakdown as well: the tables of both modes, the frames with scaled
+references, a frame without an inter stage, a frame without GPU timestamps, and counters
+that do not fit together.
 
 ## CDEF v2 run (`-cdefv2`)
 

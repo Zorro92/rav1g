@@ -48,6 +48,85 @@ int get_relative_dist(const OrderHintInfo *oh, int a, int b) {
   return diff;
 }
 
+// ---------------------------------------------------------------------------
+// Inter breakdown of the timing run (-gputimedetail, dx/av1_perf.h): the work counters of the tile threads.
+// Nothing here runs unless the tile has counters (av1_tile_data::perf_inter).
+// ---------------------------------------------------------------------------
+
+// A reference of another size than the frame.
+static inline int perf_ref_scaled(const av1_frame_thread_data *td, int ref_frame) {
+  const ScaleFactor *sf = &td->scale_factors[ref_frame];
+  return td->scale_enable && sf->x_step > 0 && sf->y_step > 0 &&
+         (sf->x_scale != REF_NO_SCALE || sf->y_scale != REF_NO_SCALE);
+}
+
+// One prediction block of |section|: |w| x |h| samples of the luma plane, or of each chroma plane (|uv|),
+// from the first |nrefs| references of |mi| (a neighbour's mode info for an overlapped prediction and for
+// the chroma of a block under 8x8). |warp|: the block is warped, so the fraction of the vector says nothing.
+static void perf_inter_count(av1_perf_inter_tile *pc, const av1_frame_thread_data *td, int section, int uv, int w,
+                             int h, int nrefs, const MB_MODE_INFO *mi, int warp) {
+  av1_perf_inter_work *k = &pc->work[section];
+  const int planes = uv ? 2 : 1;
+  if (uv) {
+    ++k->blocks_uv;
+    k->pixels_uv += 2 * w * h;
+  } else {
+    ++k->blocks_y;
+    k->pixels_y += w * h;
+  }
+  k->ref_blocks += nrefs * planes;
+  const int frac_mask = uv ? 15 : 7;  // the vector is in 1/8 luma samples: 1/16 chroma samples
+  for (int r = 0; r < nrefs; ++r) {
+    int fw = w + 7;
+    int fh = h + 7;
+    int mw = fw;
+    int mh = fh;
+    if (perf_ref_scaled(td, mi->ref_frame[r])) {
+      const ScaleFactor *sf = &td->scale_factors[mi->ref_frame[r]];
+      mw = fw = (((w - 1) * sf->x_step) >> SCALE_SUBPEL_BITS) + 8;
+      mh = fh = (((h - 1) * sf->y_step) >> SCALE_SUBPEL_BITS) + 8;
+    } else if (!warp) {
+      if (!(mi->mv[r].as_mv.col & frac_mask)) mw = w;
+      if (!(mi->mv[r].as_mv.row & frac_mask)) mh = h;
+    }
+    k->footprint += planes * fw * fh;
+    k->footprint_mv += planes * mw * mh;
+  }
+}
+
+// One inter block (a mode info block) by what it uses, in luma samples.
+static void perf_inter_count_block(av1_perf_inter_tile *pc, const av1_frame_thread_data *td, const MB_MODE_INFO *mi,
+                                   int bw_log, int bh_log, int is_compound, int is_obmc, int is_warp,
+                                   int is_inter_intra) {
+  av1_perf_inter_blocks *b = &pc->blocks;
+  const int64_t area = (int64_t)16 << (bw_log + bh_log);
+  ++b->blocks;
+  b->area += area;
+  if (is_compound) b->area_compound += area;
+  if (is_obmc) b->area_obmc += area;
+  if (is_warp) b->area_warp += area;
+  if (is_compound && mi->interinter_comp.type == COMPOUND_WEDGE) b->area_wedge += area;
+  if (is_compound && mi->interinter_comp.type == COMPOUND_DIFFWTD) b->area_diffwtd += area;
+  if (is_inter_intra) b->area_interintra += area;
+  int scaled = 0;
+  for (int r = 0; r < 1 + is_compound; ++r) {
+    const int ref_scaled = perf_ref_scaled(td, mi->ref_frame[r]);
+    scaled |= ref_scaled;
+    b->ref_area += area;
+    const int frac = (is_warp || ref_scaled)
+                         ? 3
+                         : ((mi->mv[r].as_mv.col & 7) ? 1 : 0) | ((mi->mv[r].as_mv.row & 7) ? 2 : 0);
+    b->ref_area_mv[frac] += area;
+    // The kernels the block asks for (av1_get_interp_filter_params_with_block_size): the 4-tap form of the
+    // filter for a side of 4.
+    const int fx = av1_extract_interp_filter(mi->interp_filters, 1);
+    const int fy = av1_extract_interp_filter(mi->interp_filters, 0);
+    b->ref_area_filter[0][fx == BILINEAR ? 2 : bw_log == 0 ? 1 : 0] += area;
+    b->ref_area_filter[1][fy == BILINEAR ? 2 : bh_log == 0 ? 1 : 0] += area;
+  }
+  if (scaled) b->area_scaled += area;
+}
+
 void av1_mi_push_block(AV1Decoder *pbi, AV1_COMMON *cm, MACROBLOCKD *xd) {
   Av1Core *dec = pbi->gpu_decoder;
   av1_frame_thread_data *td = dec->curr_frame_data;
@@ -73,6 +152,8 @@ void av1_mi_push_block(AV1Decoder *pbi, AV1_COMMON *cm, MACROBLOCKD *xd) {
   const int is_inter_intra = is_interintra_pred(mi);
   const int is_compound = mi->ref_frame[1] > INTRA_FRAME;
   const int is_obmc = is_inter && mi->motion_mode == OBMC_CAUSAL && (xd->up_available || xd->left_available);
+  // Inter breakdown of the timing run (-gputimedetail): the tile's counters, NULL without it.
+  av1_perf_inter_tile *const pc = (av1_perf_inter_tile *)tile->perf_inter;
   if (is_inter) {
     tile->have_inter = 1;
     int is_global_warp[2] = {0, 0};
@@ -99,13 +180,28 @@ void av1_mi_push_block(AV1Decoder *pbi, AV1_COMMON *cm, MACROBLOCKD *xd) {
                                         : mi->interinter_comp.type == COMPOUND_DIFFWTD ? CompoundDiff : CompoundAvrg;
       int type_index = (type - 1) * InterTypes::InterSizesAllCommon + block_size_id_y;
       index_arr[tile->gen_index_ptr++] = tile->gen_block_map[type_index]++;
+      if (pc)
+        perf_inter_count(pc, td,
+                         type == CompoundGlobalWarp
+                             ? AV1_PERF_INTER_COMP_WARP
+                             : type == CompoundMasked
+                                   ? AV1_PERF_INTER_COMP_MASKED
+                                   : type == CompoundDiff ? AV1_PERF_INTER_COMP_DIFF_Y : AV1_PERF_INTER_COMP_AVG,
+                         0, 4 << bw_log, 4 << bh_log, 2, mi, is_warp_compound);
     } else {
       if (is_luma_warp) {
         index_arr[tile->gen_index_ptr++] = tile->gen_block_map_wrp[block_size_id_y]++;
       } else {
         index_arr[tile->gen_index_ptr++] = tile->gen_block_map[block_size_id_y]++;
       }
+      if (pc)
+        perf_inter_count(pc, td, is_luma_warp ? AV1_PERF_INTER_WARP : AV1_PERF_INTER_SINGLE, 0, 4 << bw_log,
+                         4 << bh_log, 1, mi, is_luma_warp);
     }
+    if (pc)
+      perf_inter_count_block(pc, td, mi, bw_log, bh_log, is_compound, is_obmc,
+                             is_luma_warp || (is_compound && (is_global_warp[0] || is_global_warp[1])),
+                             is_inter_intra);
 
     // UV:
     if (!is_chroma_ref) {
@@ -143,10 +239,18 @@ void av1_mi_push_block(AV1Decoder *pbi, AV1_COMMON *cm, MACROBLOCKD *xd) {
             if (type_index0 != type_index1) index_arr[tile->gen_index_ptr++] = tile->gen_block_map[type_index1];
             tile->gen_block_map[type_index0] += 2;
             tile->gen_block_map[type_index1] += 2;
+            if (pc) {
+              // Two 2x2 pieces in a row: the left one from the block to the left, the right one from this.
+              perf_inter_count(pc, td, AV1_PERF_INTER_CHROMA_2X2, 1, 2, 2, 1, sub_mi0, 0);
+              perf_inter_count(pc, td, AV1_PERF_INTER_CHROMA_2X2, 1, 2, 2, 1, sub_mi, 0);
+            }
           } else {
             const int type_index = Inter2x2ArrOffset + is_compound;
             index_arr[tile->gen_index_ptr++] = tile->gen_block_map[type_index];
             tile->gen_block_map[type_index] += 2 * bcols;
+            if (pc)
+              for (int col = 0; col < bcols; ++col)
+                perf_inter_count(pc, td, AV1_PERF_INTER_CHROMA_2X2, 1, 2, 2, 1, sub_mi, 0);
           }
         }
       } else {
@@ -161,6 +265,17 @@ void av1_mi_push_block(AV1Decoder *pbi, AV1_COMMON *cm, MACROBLOCKD *xd) {
           int type_index = (type - 1) * InterTypes::InterSizesAllCommon + block_size_id_uv;
           index_arr[tile->gen_index_ptr++] = tile->gen_block_map[type_index];
           tile->gen_block_map[type_index] += 2;
+          if (pc)
+            perf_inter_count(
+                pc, td,
+                type == CompoundDiffUvGlobalWarp
+                    ? AV1_PERF_INTER_COMP_WARP_DIFF_UV
+                    : type == CompoundGlobalWarp
+                          ? AV1_PERF_INTER_COMP_WARP
+                          : type == CompoundMasked
+                                ? AV1_PERF_INTER_COMP_MASKED
+                                : type == CompoundDiffUv ? AV1_PERF_INTER_COMP_DIFF_UV : AV1_PERF_INTER_COMP_AVG,
+                1, 4 << plane_bw, 4 << plane_bh, 2, mi, is_warp_compound);
         } else {
           if (is_chroma_warp) {
             index_arr[tile->gen_index_ptr++] = tile->gen_block_map_wrp[block_size_id_uv];
@@ -169,6 +284,9 @@ void av1_mi_push_block(AV1Decoder *pbi, AV1_COMMON *cm, MACROBLOCKD *xd) {
             index_arr[tile->gen_index_ptr++] = tile->gen_block_map[block_size_id_uv];
             tile->gen_block_map[block_size_id_uv] += 2;
           }
+          if (pc)
+            perf_inter_count(pc, td, is_chroma_warp ? AV1_PERF_INTER_WARP : AV1_PERF_INTER_SINGLE, 1,
+                             4 << plane_bw, 4 << plane_bh, 1, mi, is_chroma_warp);
         }
       }
     }
@@ -193,10 +311,12 @@ void av1_mi_push_block(AV1Decoder *pbi, AV1_COMMON *cm, MACROBLOCKD *xd) {
             const int type_index_y =
                 (ObmcAbove - 1) * InterTypes::InterSizesAllCommon + ((w << 2) | h);  // InterBlockSizeIndexLUT[w][h];
             index_arr[tile->gen_index_ptr++] = tile->gen_block_map[type_index_y]++;
+            if (pc) perf_inter_count(pc, td, AV1_PERF_INTER_OBMC_ABOVE, 0, 4 << w, 4 << h, 1, above[0], 0);
             if (obmc_chroma) {
               const int type_index_uv = (ObmcAbove - 1) * InterTypes::InterSizesAllCommon + (((w - 1) << 2) | huv);
               index_arr[tile->gen_index_ptr++] = tile->gen_block_map[type_index_uv];
               tile->gen_block_map[type_index_uv] += 2;
+              if (pc) perf_inter_count(pc, td, AV1_PERF_INTER_OBMC_ABOVE, 1, 4 << (w - 1), 4 << huv, 1, above[0], 0);
             }
           }
 
@@ -226,6 +346,10 @@ void av1_mi_push_block(AV1Decoder *pbi, AV1_COMMON *cm, MACROBLOCKD *xd) {
             index_arr[tile->gen_index_ptr++] = tile->gen_block_map[type_index_y]++;
             index_arr[tile->gen_index_ptr++] = tile->gen_block_map[type_index_uv];
             tile->gen_block_map[type_index_uv] += 2;
+            if (pc) {
+              perf_inter_count(pc, td, AV1_PERF_INTER_OBMC_LEFT, 0, 4 << w, 4 << h, 1, left[0], 0);
+              perf_inter_count(pc, td, AV1_PERF_INTER_OBMC_LEFT, 1, 4 << wuv, 4 << (h - 1), 1, left[0], 0);
+            }
           }
           assert(left[0]->use_intrabc == 0);
           row += 1 << h;
@@ -775,6 +899,117 @@ static int g_intra_edge_fix = 0;
 
 extern "C" void av1_set_intra_edge_fix(int enable) { g_intra_edge_fix = enable; }
 
+// ---------------------------------------------------------------------------
+// Inter breakdown of the timing run (-gputimedetail, dx/av1_perf.h): what the recording notes about the
+// dispatches of the inter stage and of the reconstruction. Without a record (d == NULL) every call returns
+// at once and the command list is the one it always was.
+// ---------------------------------------------------------------------------
+struct InterDetailRec {
+  Av1Core *dec;
+  av1_perf_inter_detail *d;
+  ID3D12GraphicsCommandList *command_list;
+  ID3D12Resource *frame_buffers;
+  // Reference bytes one thread of a section's shader loads, see Init().
+  int thread_bytes[AV1_PERF_INTER_SECTION_COUNT];
+
+  // The loads of the reference rows, from the shaders (docs/gpu-av1-decoder.md, "Inter prediction
+  // breakdown"): rows per thread and reference times the bytes of the Load4/Load3/Load2/Load of one row.
+  // They do not depend on the motion vector or the filter: every shader reads the rows of an 8-tap filter
+  // in both directions. A shader for scaled references reads 8 rows plus what its 4 output rows step over,
+  // which is 11 for a reference of the frame's size and more for a larger one: the estimate takes the
+  // largest step of the frame's references.
+  void Init(const av1_frame_thread_data *td) {
+    if (!d) return;
+    const int hbd = td->is_hbd;
+    d->scaled = td->scale_enable;
+    d->bytes_per_sample = hbd ? 2 : 1;
+    const int row = hbd ? 24 : 16;  // filter_line(_hbd): Load4 (+ Load2), four samples of a row
+    memset(thread_bytes, 0, sizeof(thread_bytes));
+    thread_bytes[AV1_PERF_INTER_WARP] = 11 * row;
+    if (!td->scale_enable) {
+      thread_bytes[AV1_PERF_INTER_SINGLE] = 11 * row;                 // a 4x4: 11 rows
+      thread_bytes[AV1_PERF_INTER_COMP_AVG] = 2 * 9 * row;            // a 4x2: 9 rows of each reference
+      thread_bytes[AV1_PERF_INTER_COMP_DIFF_Y] = 2 * 9 * row;
+      thread_bytes[AV1_PERF_INTER_COMP_MASKED] = 2 * 9 * row;
+      thread_bytes[AV1_PERF_INTER_COMP_DIFF_UV] = 2 * 9 * row;
+      thread_bytes[AV1_PERF_INTER_CHROMA_2X2] = 9 * (hbd ? 20 : 12);  // a 2x2: 9 rows of two samples
+      thread_bytes[AV1_PERF_INTER_OBMC_ABOVE] = 11 * row;
+      thread_bytes[AV1_PERF_INTER_OBMC_LEFT] = 11 * row;
+    } else {
+      int step = 1 << SCALE_SUBPEL_BITS;
+      for (int i = LAST_FRAME; i <= ALTREF_FRAME; ++i) step = AOMMAX(step, td->scale_factors[i].y_step);
+      const int col = hbd ? 20 : 12;  // one sample of a row: Load4 + Load, or Load3
+      const int lines4 = AOMMIN(20, 8 + ((3 * step) >> SCALE_SUBPEL_BITS));  // a column of a 4x4
+      const int lines2 = AOMMIN(16, 8 + (step >> SCALE_SUBPEL_BITS));        // a column of a 2x2
+      thread_bytes[AV1_PERF_INTER_SINGLE] = lines4 * col;
+      thread_bytes[AV1_PERF_INTER_COMP_AVG] = 2 * lines4 * col;
+      thread_bytes[AV1_PERF_INTER_COMP_DIFF_Y] = 2 * lines4 * col;
+      thread_bytes[AV1_PERF_INTER_COMP_MASKED] = 2 * lines4 * col;
+      thread_bytes[AV1_PERF_INTER_COMP_DIFF_UV] = 2 * lines4 * col;
+      thread_bytes[AV1_PERF_INTER_CHROMA_2X2] = lines2 * col;
+      thread_bytes[AV1_PERF_INTER_OBMC_ABOVE] = lines4 * col;
+      thread_bytes[AV1_PERF_INTER_OBMC_LEFT] = lines4 * col;
+    }
+    // inter_scale_warp_compound, with or without scaled references: a column of a 4x4, 11 rows of a warped
+    // reference (a reference that is not warped: the rows of the scaled form; 11 is taken for both).
+    thread_bytes[AV1_PERF_INTER_COMP_WARP] = 2 * 11 * (hbd ? 20 : 12);
+    thread_bytes[AV1_PERF_INTER_COMP_WARP_DIFF_UV] = 2 * 11 * (hbd ? 20 : 12);
+  }
+
+  // Behind a Dispatch of |records| blocks of |width| x |height| samples, |wi_count| threads with work.
+  void Dispatch(int stage, int section, int list, int width, int height, int records, unsigned int wi_count) {
+    if (!d) return;
+    av1_perf_inter_section *s = &d->sections[section];
+    const int groups = (int)((wi_count + 63) >> 6);
+    ++s->dispatches;
+    s->groups += groups;
+    s->threads += wi_count;
+    s->records += records;
+    s->pixels += (int64_t)records * width * height;
+    s->loaded_bytes += (int64_t)wi_count * thread_bytes[section];
+    if (list >= 0 && list < AV1_PERF_INTER_LISTS) {
+      av1_perf_inter_list *l = &s->lists[list];
+      l->width = width;
+      l->height = height;
+      l->records += records;
+      l->groups += groups;
+      l->threads += (int)wi_count;
+    }
+    if (d->mode == 2) {
+      // The dispatch alone: nothing behind the barrier starts before it is done, and the timestamp behind
+      // the barrier is its end. A barrier only orders, so the frame is the same.
+      command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(frame_buffers));
+      ++d->barriers_added;
+      av1_perf_inter_mark(dec, stage, section, list);
+    }
+  }
+
+  // Behind the last dispatch of a section of the inter stage (mode 1: its timestamp).
+  void Section(int section) {
+    if (d && d->mode == 1 && d->sections[section].dispatches) av1_perf_inter_mark(dec, AV1_PERF_GPU_INTER, section, -1);
+  }
+
+  // Behind a UAV barrier of the inter stage.
+  void Sync(int section) {
+    if (d) av1_perf_inter_mark(dec, AV1_PERF_GPU_INTER, section, -1);
+  }
+
+  // The counters of the tile threads, added up over the tiles of the frame.
+  void AddTiles(const av1_perf_inter_tile *tiles, int count) {
+    if (!d || !tiles) return;
+    for (int t = 0; t < count; ++t) {
+      for (int sct = 0; sct < AV1_PERF_INTER_SECTION_COUNT; ++sct) {
+        const int64_t *src = (const int64_t *)&tiles[t].work[sct];
+        int64_t *dst = (int64_t *)&d->sections[sct].work;
+        for (size_t i = 0; i < sizeof(av1_perf_inter_work) / sizeof(int64_t); ++i) dst[i] += src[i];
+      }
+      const int64_t *src = (const int64_t *)&tiles[t].blocks;
+      int64_t *dst = (int64_t *)&d->blocks;
+      for (size_t i = 0; i < sizeof(av1_perf_inter_blocks) / sizeof(int64_t); ++i) dst[i] += src[i];
+    }
+  }
+};
+
 void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
   av1_frame_thread_data *td = dec->curr_frame_data;
   const int tile_count = td->tile_count;
@@ -790,6 +1025,13 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
   }
 
   Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> command_list = dec->compute.command_list;
+  // -gputimedetail: the inter breakdown of the frame, NULL without it.
+  InterDetailRec detail = {dec, av1_perf_inter_begin(dec), command_list.Get(), dec->frame_buffer_pool->dev, {0}};
+  detail.Init(td);
+  if (detail.d) {
+    detail.d->has_inter = do_inter;
+    detail.AddTiles(dec->perf_inter_tiles, AOMMIN(tile_count, dec->perf_inter_tiles_cap));
+  }
   if (do_inter) {
     ConstantBufferObject cbo = cb->Alloc(sizeof(PSSLInterData));
     PSSLInterData *inter_data = (PSSLInterData *)cbo.host_ptr;
@@ -881,6 +1123,10 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
     PSSLInterSRT srt;
     int *offsets = NULL;
     shader = NULL;
+    // -gputimedetail: the section of the breakdown a type of pass 1 belongs to.
+    static const int kSectionOfType[InterTypes::CompoundMasked + 1] = {
+        AV1_PERF_INTER_WARP, AV1_PERF_INTER_SINGLE, AV1_PERF_INTER_COMP_AVG, AV1_PERF_INTER_COMP_DIFF_Y,
+        AV1_PERF_INTER_COMP_MASKED};
     for (int t = InterTypes::Warp; t <= InterTypes::CompoundMasked; ++t) {
       const int wi_per_subb = t == InterTypes::Warp ? 1 : wi_per_block;
       offsets = (t == InterTypes::Warp) ? tiles->gen_block_map_wrp
@@ -901,7 +1147,10 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
         }
         command_list->SetComputeRoot32BitConstants(7, 4, &srt, 0);
         command_list->Dispatch((srt.wi_count + 63) >> 6, 1, 1);
+        detail.Dispatch(AV1_PERF_GPU_INTER, kSectionOfType[t], i, 4 << InterBlockWidthLUT[i],
+                        4 << InterBlockHeightLUT[i], count, srt.wi_count);
       }
+      detail.Section(kSectionOfType[t]);
     }
 
     if (enable_gm_warp) {
@@ -921,7 +1170,10 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
         }
         command_list->SetComputeRoot32BitConstants(7, 4, &srt, 0);
         command_list->Dispatch((srt.wi_count + 63) >> 6, 1, 1);
+        detail.Dispatch(AV1_PERF_GPU_INTER, AV1_PERF_INTER_COMP_WARP, i, 4 << srt.width_log2, 4 << srt.height_log2,
+                        count, srt.wi_count);
       }
+      detail.Section(AV1_PERF_INTER_COMP_WARP);
     }
 
     if (tiles->gen_block_map[InterTypes::Inter2x2ArrOffset + 1] > tiles->gen_block_map[InterTypes::Inter2x2ArrOffset]) {
@@ -935,10 +1187,13 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
       command_list->SetPipelineState(shader->pso.Get());
       command_list->SetComputeRoot32BitConstants(7, 4, &srt, 0);
       command_list->Dispatch((srt.wi_count + 63) >> 6, 1, 1);
+      detail.Dispatch(AV1_PERF_GPU_INTER, AV1_PERF_INTER_CHROMA_2X2, 0, 2, 2, count, srt.wi_count);
+      detail.Section(AV1_PERF_INTER_CHROMA_2X2);
     }
 
     // sync 0
     command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
+    detail.Sync(AV1_PERF_INTER_SYNC0);
 
     offsets = tiles->gen_block_map + (InterTypes::CompoundDiffUv - 1) * InterTypes::InterSizesAllCommon;
     for (int i = 0; i < InterTypes::InterSizesAllCommon; ++i) {
@@ -955,7 +1210,10 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
       }
       command_list->SetComputeRoot32BitConstants(7, 4, &srt, 0);
       command_list->Dispatch((srt.wi_count + 63) >> 6, 1, 1);
+      detail.Dispatch(AV1_PERF_GPU_INTER, AV1_PERF_INTER_COMP_DIFF_UV, i, 4 << InterBlockWidthLUT[i],
+                      4 << InterBlockHeightLUT[i], count, srt.wi_count);
     }
+    detail.Section(AV1_PERF_INTER_COMP_DIFF_UV);
 
     if (enable_gm_warp) {
       offsets = tiles->gen_block_map + (InterTypes::CompoundDiffUvGlobalWarp - 1) * InterTypes::InterSizesAllCommon;
@@ -973,7 +1231,10 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
         }
         command_list->SetComputeRoot32BitConstants(7, 4, &srt, 0);
         command_list->Dispatch((srt.wi_count + 63) >> 6, 1, 1);
+        detail.Dispatch(AV1_PERF_GPU_INTER, AV1_PERF_INTER_COMP_WARP_DIFF_UV, i, 4 << srt.width_log2,
+                        4 << srt.height_log2, count, srt.wi_count);
       }
+      detail.Section(AV1_PERF_INTER_COMP_WARP_DIFF_UV);
     }
 
     offsets = tiles->gen_block_map + (InterTypes::ObmcAbove - 1) * InterTypes::InterSizesAllCommon;
@@ -991,10 +1252,14 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
       }
       command_list->SetComputeRoot32BitConstants(7, 4, &srt, 0);
       command_list->Dispatch((srt.wi_count + 63) >> 6, 1, 1);
+      detail.Dispatch(AV1_PERF_GPU_INTER, AV1_PERF_INTER_OBMC_ABOVE, i, 4 << srt.width_log2, 4 << srt.height_log2,
+                      count, srt.wi_count);
     }
+    detail.Section(AV1_PERF_INTER_OBMC_ABOVE);
 
     // sync 1
     command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
+    detail.Sync(AV1_PERF_INTER_SYNC1);
 
     // pass 2: Obmc-left
     offsets = tiles->gen_block_map + (ObmcLeft - 1) * InterTypes::InterSizesAllCommon;
@@ -1012,8 +1277,12 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
       }
       command_list->SetComputeRoot32BitConstants(7, 4, &srt, 0);
       command_list->Dispatch((srt.wi_count + 63) >> 6, 1, 1);
+      detail.Dispatch(AV1_PERF_GPU_INTER, AV1_PERF_INTER_OBMC_LEFT, i, 4 << srt.width_log2, 4 << srt.height_log2,
+                      count, srt.wi_count);
     }
+    detail.Section(AV1_PERF_INTER_OBMC_LEFT);
 
+    // sync 2: the timestamp of the stage is the one behind it.
     command_list->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(dec->frame_buffer_pool->dev));
     av1_perf_gpu_mark(dec, AV1_PERF_GPU_INTER);
     av1_stage_dump_fb(dec, "inter", td->frame_buffer);
@@ -1065,6 +1334,8 @@ void av1_prediction_run_all(Av1Core *dec, AV1_COMMON *cm, TileInfo *tile) {
 
           command_list->SetComputeRoot32BitConstants(5, 10, &recon_srt, 0);
           command_list->Dispatch((recon_srt.wi_count + 63) >> 6, 1, 1);
+          detail.Dispatch(AV1_PERF_GPU_RECON, AV1_PERF_INTER_RECON, i, 4 << recon_srt.width_log2,
+                          4 << recon_srt.height_log2, count, (unsigned int)recon_srt.wi_count);
         }
       }
 

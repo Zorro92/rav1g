@@ -84,6 +84,12 @@ class CParameters {
     bool noninterop_;
     bool recreate_;
     bool gputime_;
+    // -gputimedetail, -gputimeisolate: the inter prediction breakdown of the timing run. After Parse():
+    // gputime_detail_ is 0 (none), 1 (section timestamps and work counters) or 2 (also a UAV barrier and a
+    // timestamp behind every dispatch), and either flag switches gputime_ on.
+    bool gputimedetail_;
+    bool gputimeisolate_;
+    int gputime_detail_;
     bool nopresent_;
     // The effective choice after Parse(): true unless -cdefv1 was given.
     bool cdefv2_;

@@ -100,6 +100,14 @@ jobs:
           python src/testing/shader_cache/shaders.py survey --report shader-build/normal/report.json `
             --listings shader-build/normal/asm --out out --sdk $env:WINDOWS_SDK
           if ($LASTEXITCODE -ne 0) { throw 'The shader survey failed' }
+          # The static view of the inter prediction shaders (docs/gpu-av1-decoder.md, "Inter prediction
+          # breakdown"): the listings next to what a thread of each shader does, which is read from the
+          # source. A shader whose listing no longer has the loads the table says stops the run.
+          python src/testing/shader_cache/inter_static.py --self-test
+          if ($LASTEXITCODE -ne 0) { throw 'The self-test of the inter static view failed' }
+          python src/testing/shader_cache/inter_static.py --listings shader-build/normal/asm --strict `
+            --out out/shader-survey/inter-static.md
+          if ($LASTEXITCODE -ne 0) { throw 'An inter shader differs from the table in testing/shader_cache/inter_static.py: update the table and the docs' }
           # All listings, and which key, compile time and header hash each shader of the build has.
           Copy-Item shader-build/normal/asm out/shader-survey/asm -Recurse
           Copy-Item shader-build/normal/report.json out/shader-survey/build.json
@@ -463,6 +471,20 @@ jobs:
             --out out/conformance --threads 4
           if ($LASTEXITCODE -ne 0) { throw "conformance run: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
 
+      # The inter breakdown of the timing run (-gputimedetail, -gputimeisolate; docs/test-player.md, "Inter
+      # prediction breakdown") as a smoke test: a 10-bit stream and one with scaled references, each decoded
+      # with -gputime, -gputimedetail and -gputimeisolate against its reference. WARP's times say nothing;
+      # checked are the output, that the breakdown is there, that the dispatches the recording counts and
+      # the blocks the tile threads count agree on every frame, and that the numbers are plausible.
+      - name: Timing run with the inter breakdown on WARP (smoke test)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/gputime_smoke.py --tool out/warp_decoder/warp_decoder.exe --streams conformance-streams `
+            --out out/gputime-smoke --threads 4 --stream nf-chimera-10b-1080p.ivf:16 --stream syn-resize-10b-1080p.ivf:24:scaled `
+            --stream nf-chimera-8b-270p.ivf:40
+          if ($LASTEXITCODE -ne 0) { throw "inter breakdown smoke test: exit code $LASTEXITCODE (1: a check failed, 2: a run could not be done)" }
+
       # Stage dumps (testing/conformance/dump_tasks.txt): the buffers behind every GPU stage of a few
       # frames, as WARP wrote them, to compare with the dumps of another device (the test player's
       # -dumpstages) with testing/stage_dump/stage_dump.py. Dumps of the vectors and of the streams
@@ -543,6 +565,7 @@ jobs:
           path: |
             out/conformance/
             out/conformance-*/
+            out/gputime-smoke/
             out/sm6test/
             out/msbuild.log
             out/msbuild-uavsync.log
@@ -652,6 +675,7 @@ jobs:
           set -euo pipefail
           g++ -std=c++14 -Wall -Wextra -I libav1 -o perf_stats_test testing/player_common/perf_stats_test.cpp
           ./perf_stats_test
+          python3 testing/shader_cache/inter_static.py --self-test
 
       # The sequence header peek behind aom_codec_peek_stream_info and the player's -fitsize:
       # headers written by hand from the specification's syntax must be read back with their

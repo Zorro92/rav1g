@@ -67,6 +67,115 @@ static av1_perf_frame MakeFrame(int n, double complete_ms, int show) {
   return f;
 }
 
+// The inter breakdown of a frame (-gputimedetail), as the decoder hands it over. A 1920x1080 frame's worth of
+// work with round numbers: single blocks of 16x16 and 8x8, compound blocks of 16x16, overlapped prediction
+// from above and from the left, and a few reconstructed blocks.
+static void AddDispatch(av1_perf_inter_detail* d, int section, int list, int width, int height, int records,
+                        int threads, int thread_bytes, double ms) {
+  av1_perf_inter_section* s = &d->sections[section];
+  ++s->dispatches;
+  s->groups += (threads + 63) / 64;
+  s->threads += threads;
+  s->records += records;
+  s->pixels += (int64_t)records * width * height;
+  s->loaded_bytes += (int64_t)threads * thread_bytes;
+  s->lists[list].width = width;
+  s->lists[list].height = height;
+  s->lists[list].records = records;
+  s->lists[list].groups = (threads + 63) / 64;
+  s->lists[list].threads = threads;
+  if (d->mode == 2) {
+    s->lists[list].ms = ms;
+    s->ms += ms;
+    s->timed = 1;
+    ++d->barriers_added;
+    ++d->marks;
+  }
+}
+
+static void SectionTime(av1_perf_inter_detail* d, int section, double ms) {
+  d->sections[section].ms += ms;
+  d->sections[section].timed = 1;
+  ++d->marks;
+}
+
+static const av1_perf_inter_detail* MakeDetail(int mode, int scaled) {
+  static av1_perf_inter_detail d;
+  memset(&d, 0, sizeof(d));
+  d.mode = mode;
+  d.has_inter = 1;
+  d.scaled = scaled;
+  d.bytes_per_sample = 2;
+  // single: 3000 records of 16x16 (2000 luma blocks, 500 chroma blocks of two records), 16 threads each, and
+  // 1000 records of 8x8, 4 threads each: 52000 threads, 3 ms. 264 bytes a thread.
+  AddDispatch(&d, AV1_PERF_INTER_SINGLE, 4, 8, 8, 1000, 4000, 264, 0.5);
+  AddDispatch(&d, AV1_PERF_INTER_SINGLE, 9, 16, 16, 3000, 48000, 264, 2.5);
+  // comp_avg: 1000 records of 16x16, 32 threads of 4x2 each, 432 bytes a thread, 2 ms.
+  AddDispatch(&d, AV1_PERF_INTER_COMP_AVG, 9, 16, 16, 1000, 32000, 432, 2.0);
+  AddDispatch(&d, AV1_PERF_INTER_OBMC_ABOVE, 5, 8, 4, 100, 200, 264, 0.5);
+  AddDispatch(&d, AV1_PERF_INTER_OBMC_LEFT, 5, 4, 8, 100, 200, 264, 0.25);
+  AddDispatch(&d, AV1_PERF_INTER_RECON, 7, 8, 8, 50, 200, 0, 1.0);
+  if (mode == 1) {
+    SectionTime(&d, AV1_PERF_INTER_SINGLE, 3.0);
+    SectionTime(&d, AV1_PERF_INTER_COMP_AVG, 2.0);
+    SectionTime(&d, AV1_PERF_INTER_OBMC_ABOVE, 0.5);
+    SectionTime(&d, AV1_PERF_INTER_OBMC_LEFT, 0.25);
+    d.sections[AV1_PERF_INTER_RECON].ms = 1.0;
+    d.sections[AV1_PERF_INTER_RECON].timed = 1;
+  }
+  // The barriers: pass 1 waits 1 ms at its barrier, pass 2 a quarter, pass 3 half.
+  SectionTime(&d, AV1_PERF_INTER_SYNC0, 1.0);
+  SectionTime(&d, AV1_PERF_INTER_SYNC1, 0.25);
+  SectionTime(&d, AV1_PERF_INTER_SYNC2, 0.5);
+
+  av1_perf_inter_work* w = &d.sections[AV1_PERF_INTER_SINGLE].work;
+  w->blocks_y = 2500;  // 2000 of 16x16 and 500 of 8x8
+  w->blocks_uv = 750;  // 500 of 16x16 and 250 of 8x8, two records each
+  w->pixels_y = 2000 * 256 + 500 * 64;
+  w->pixels_uv = 2 * (500 * 256 + 250 * 64);
+  w->ref_blocks = 2500 + 2 * 750;
+  w->footprint = 2000 * 23 * 23 + 500 * 15 * 15 + 2 * (500 * 23 * 23 + 250 * 15 * 15);
+  w->footprint_mv = w->footprint / 2;
+  w = &d.sections[AV1_PERF_INTER_COMP_AVG].work;
+  w->blocks_y = 1000;
+  w->pixels_y = 1000 * 256;
+  w->ref_blocks = 2000;
+  w->footprint = 2000 * 23 * 23;
+  w->footprint_mv = w->footprint;
+  // The overlapped predictions: 50 luma blocks and 25 chroma blocks each.
+  w = &d.sections[AV1_PERF_INTER_OBMC_ABOVE].work;
+  w->blocks_y = 50;
+  w->blocks_uv = 25;
+  w->pixels_y = 50 * 32;
+  w->pixels_uv = 2 * 25 * 32;
+  w->ref_blocks = 100;
+  d.sections[AV1_PERF_INTER_OBMC_LEFT].work = *w;
+
+  d.blocks.blocks = 3500;
+  d.blocks.area = 2000 * 256 + 500 * 64 + 1000 * 256;  // 800000
+  d.blocks.area_compound = 1000 * 256;                 // 32 %
+  d.blocks.area_obmc = 80000;                          // 10 %
+  d.blocks.area_scaled = scaled ? d.blocks.area : 0;
+  d.blocks.ref_area = d.blocks.area + d.blocks.area_compound;  // 1056000
+  d.blocks.ref_area_mv[0] = 264000;                            // 25 %
+  d.blocks.ref_area_mv[3] = d.blocks.ref_area - 264000;
+  d.blocks.ref_area_filter[0][0] = d.blocks.ref_area;
+  d.blocks.ref_area_filter[1][0] = d.blocks.ref_area / 2;
+  d.blocks.ref_area_filter[1][2] = d.blocks.ref_area / 2;
+  return &d;
+}
+
+// A frame with an inter stage of 7.5 ms (the sections and barriers of MakeDetail) and 1 ms of reconstruction.
+static av1_perf_frame MakeInterFrame(int n, double complete_ms, const av1_perf_inter_detail* detail) {
+  av1_perf_frame f = MakeFrame(n, complete_ms, 1);
+  f.gpu_stage_ms[AV1_PERF_GPU_INTER] = 7.5;
+  f.gpu_stage_hits[AV1_PERF_GPU_INTER] = 1;
+  f.gpu_stage_ms[AV1_PERF_GPU_RECON] = 1.0;
+  f.gpu_stage_hits[AV1_PERF_GPU_RECON] = 1;
+  f.inter = detail;
+  return f;
+}
+
 int main() {
   using namespace perfstats;
   const OutputWaits no_waits = {0, 0.0, 0.0};
@@ -251,6 +360,160 @@ int main() {
       CHECK(lines[i].find("nan") == std::string::npos);
       CHECK(lines[i].find("inf") == std::string::npos);
     }
+  }
+
+  // Without the inter breakdown nothing of it is in the summary or in the frame lines.
+  {
+    PerfStats st;
+    for (int i = 0; i < 100; ++i) st.AddFrame(MakeFrame(i, 1000.0 + 50.0 * i, 1));
+    CHECK(!Has(st.Summary(no_waits), "inter breakdown"));
+    CHECK(!Has(st.Summary(no_waits), "inter single"));
+    CHECK(!Has(st.FrameLines(), " inter "));
+    CHECK(st.FrameLines().size() == 100);
+  }
+
+  // The inter breakdown, section timestamps only (-gputimedetail): 100 frames, every tenth an intra frame
+  // that has a reconstruction but no inter stage.
+  {
+    PerfStats st;
+    for (int i = 0; i < 100; ++i) {
+      if (i % 10 == 5) {
+        av1_perf_inter_detail intra;
+        memcpy(&intra, MakeDetail(1, 0), sizeof(intra));
+        for (int k = 0; k < AV1_PERF_INTER_RECON; ++k) memset(&intra.sections[k], 0, sizeof(intra.sections[k]));
+        memset(&intra.blocks, 0, sizeof(intra.blocks));
+        intra.has_inter = 0;
+        av1_perf_frame f = MakeFrame(i, 1000.0 + 50.0 * i, 1);
+        f.gpu_stage_ms[AV1_PERF_GPU_RECON] = 1.0;
+        f.gpu_stage_hits[AV1_PERF_GPU_RECON] = 1;
+        f.inter = &intra;
+        st.AddFrame(f);
+      } else {
+        st.AddFrame(MakeInterFrame(i, 1000.0 + 50.0 * i, MakeDetail(1, 0)));
+      }
+      // The record is valid during the call only: what the statistics keep is their own.
+      memset(const_cast<av1_perf_inter_detail*>(MakeDetail(1, 0)), 0xff, sizeof(av1_perf_inter_detail));
+      st.AddOutput(1000.0 + 50.0 * i);
+    }
+    std::vector<std::string> lines = st.Summary(no_waits);
+    CHECK(Has(lines, "inter breakdown (-gputimedetail): 81 frames with an inter stage of 90 measured with the "
+                     "breakdown, 0 of them with scaled references"));
+    CHECK(Has(lines, "timestamps added per frame: mean 7.0 max 7 (no barriers added)"));
+    CHECK(Has(lines, "inter counters: the dispatches and the tile threads agree on all 81 frames"));
+    // Times: per frame that has the section, the average over the frames with an inter stage, the share of it.
+    CHECK(Has(lines, "inter single             ovl        81    3.000    3.000    3.000    3.000    3.000   40.0%"));
+    CHECK(Has(lines, "inter comp_avg           ovl        81    2.000    2.000    2.000    2.000    2.000   26.7%"));
+    CHECK(Has(lines, "inter sync0              sync       81    1.000    1.000    1.000    1.000    1.000   13.3%"));
+    CHECK(Has(lines, "inter pass 1 (to sync0)  excl       81    6.000    6.000    6.000    6.000    6.000   80.0%"));
+    CHECK(Has(lines, "inter pass 2 (to sync1)  excl       81    0.750    0.750    0.750    0.750    0.750   10.0%"));
+    CHECK(Has(lines, "inter pass 3 (to sync2)  excl       81    0.750    0.750    0.750    0.750    0.750   10.0%"));
+    CHECK(Has(lines, "inter passes 1 to 3      excl       81    7.500    7.500    7.500    7.500    7.500  100.0%"));
+    CHECK(Has(lines, "inter stage (gpu inter)  excl       81    7.500    7.500    7.500    7.500    7.500  100.0%"));
+    // recon is a stage of its own, in the intra frames too: no share of the inter stage.
+    CHECK(Has(lines, "inter recon              excl       90    1.000    1.000    1.000    1.000    1.000"));
+    CHECK(!Has(lines, "inter warp "));
+    // Work: 52000 threads in 813 groups (63 + 750), 99.9 % of them with work; 3 ms for 832000 samples is 3.61
+    // ns each; 52000 * 264 bytes are 13.09 MB, in 3 ms 4.58 GB/s; 1812000 samples of footprint are 3.46 MB.
+    CHECK(Has(lines, "inter single                 81   2.0     813   99.9     4000    2500      750    544    288   4000 "
+                     "  13.09   3.46  1.73   3.61   4.58"));
+    CHECK(Has(lines, "inter comp_avg               81   1.0     500  100.0     1000    1000        0    256      0   2000 "
+                     "  13.18   2.02  2.02   7.81   6.91"));
+    CHECK(Has(lines, "inter recon                  90   1.0       4   78.1       50"));
+    CHECK(Has(lines, "reference bytes loaded 26.38 MB, footprint 5.47 MB, footprint by motion vector 3.75 MB, samples "
+                     "written 2.09 MB; loaded/written 12.6, footprint/written 2.6"));
+    CHECK(Has(lines, "inter blocks per frame: 3500 blocks, 0.800 Mpx luma; of that area: compound 32.0%, OBMC 10.0%, "
+                     "warped 0.0%"));
+    CHECK(Has(lines, "by the fraction of the motion vector: none 25.0%, horizontal only 0.0%, vertical only 0.0%, both "
+                     "75.0%"));
+    CHECK(Has(lines, "horizontal 8-tap 100.0%, 4-tap 0.0%, bilinear 0.0%; vertical 8-tap 50.0%, 4-tap 0.0%, bilinear "
+                     "50.0%"));
+    CHECK(Has(lines, "no times: run -gputimeisolate for those"));
+    CHECK(Has(lines, "list single            8x8          81     1000       63   99.2"));
+    CHECK(Has(lines, "list single            16x16        81     3000      750  100.0"));
+    CHECK(Has(lines, "list recon             8x8          90       50        4   78.1"));
+    // The stage lines are what they are without the breakdown.
+    CHECK(Has(lines, "gpu inter                    81    7.500"));
+    std::vector<std::string> frames = st.FrameLines();
+    CHECK(frames.size() == 200);
+    CHECK(Has(frames, "frame 12 inter mode=1 scaled=0 blocks=3500 p1=6.000 p2=0.750 p3=0.750 | single=3.000:813:4000 "
+                      "comp_avg=2.000:500:1000 sync0=1.000 obmc_above=0.500:4:100 sync1=0.250 obmc_left=0.250:4:100 "
+                      "sync2=0.500 recon=1.000:4:50"));
+    CHECK(Has(frames, "frame 15 inter mode=1 scaled=0 blocks=0 p1=0.000 p2=0.000 p3=0.000 | recon=1.000:4:50"));
+    for (size_t i = 0; i < lines.size(); ++i) {
+      CHECK(lines[i].find("nan") == std::string::npos);
+      CHECK(lines[i].find("inf") == std::string::npos);
+      CHECK(lines[i].size() < 300);
+    }
+  }
+
+  // The same with a barrier behind every dispatch (-gputimeisolate): every time is exclusive, the dispatches
+  // have times of their own, and the frames with scaled references are listed apart.
+  {
+    PerfStats st;
+    for (int i = 0; i < 100; ++i) {
+      st.AddFrame(MakeInterFrame(i, 1000.0 + 50.0 * i, MakeDetail(2, i >= 90)));
+      st.AddOutput(1000.0 + 50.0 * i);
+    }
+    std::vector<std::string> lines = st.Summary(no_waits);
+    CHECK(Has(lines, "inter breakdown (-gputimeisolate: a UAV barrier and a timestamp behind every dispatch): 90 "
+                     "frames with an inter stage of 90 measured with the breakdown, 10 of them with scaled references"));
+    CHECK(Has(lines, "isolate mode added per frame: UAV barriers mean 6.0 max 6, timestamps mean 9.0 max 9"));
+    CHECK(Has(lines, "inter single             excl       80    3.000    3.000    3.000    3.000    2.667   35.6%"));
+    CHECK(Has(lines, "inter single/scaled      excl       10    3.000    3.000    3.000    3.000    0.333    4.4%"));
+    CHECK(Has(lines, "inter pass 1 (to sync0)  excl       90    6.000"));
+    CHECK(Has(lines, "inter recon              excl       90    1.000    1.000    1.000    1.000    1.000"));
+    CHECK(Has(lines, "list single            8x8          80     1000       63   99.2    0.5000    5.93%   7.81"));
+    CHECK(Has(lines, "list single/scaled     16x16        10     3000      750  100.0    2.5000    3.70%   3.26"));
+    CHECK(Has(lines, "list recon             8x8          90       50        4   78.1    1.0000    0.00% 312.50"));
+    CHECK(Has(lines, "scaled reference 11.1%"));
+    CHECK(Has(st.FrameLines(), "frame 95 inter mode=2 scaled=1 "));
+    for (size_t i = 0; i < lines.size(); ++i) {
+      CHECK(lines[i].find("nan") == std::string::npos);
+      CHECK(lines[i].find("inf") == std::string::npos);
+      CHECK(lines[i].size() < 300);
+    }
+  }
+
+  // Counters that do not fit together are reported: a section with a record more than the blocks pushed, and
+  // luma that is in no section.
+  {
+    PerfStats st;
+    for (int i = 0; i < 30; ++i) {
+      av1_perf_inter_detail d;
+      memcpy(&d, MakeDetail(1, 0), sizeof(d));
+      if (i == 22) d.sections[AV1_PERF_INTER_COMP_AVG].records += 1;
+      if (i == 25) d.blocks.area += 16;
+      st.AddFrame(MakeInterFrame(i, 1000.0 + 50.0 * i, &d));
+    }
+    std::vector<std::string> lines = st.Summary(no_waits);
+    CHECK(Has(lines, "inter counters DISAGREE on 2 of 20 frames; first: record 22, section 2: 1001 records and 256000 "
+                     "samples dispatched, 1000 blocks (Y + 2 UV) and 256000 samples pushed"));
+    InterFrame luma(*MakeDetail(1, 0));
+    CHECK(luma.Mismatch().empty());
+    luma.blocks.area += 16;
+    CHECK(luma.Mismatch() == "800000 luma samples in the sections, 800016 in the inter blocks");
+  }
+
+  // A breakdown on a frame without GPU timestamps, and on too few frames for a warm-up: no division by zero.
+  {
+    PerfStats st;
+    av1_perf_frame f = MakeInterFrame(0, 10.0, MakeDetail(1, 0));
+    f.gpu_valid = 0;
+    st.AddFrame(f);
+    // The counters are there without timestamps, the passes have no times.
+    CHECK(Has(st.Summary(no_waits), "1 frames with an inter stage of 1 measured with the breakdown"));
+    CHECK(Has(st.Summary(no_waits), "inter pass 1 (to sync0)  excl        0    0.000"));
+    CHECK(Has(st.Summary(no_waits), "list single            16x16         1     3000"));
+    st.AddFrame(MakeInterFrame(1, 20.0, MakeDetail(2, 1)));
+    std::vector<std::string> lines = st.Summary(no_waits);
+    CHECK(Has(lines, "2 frames with an inter stage of 2 measured with the breakdown, 1 of them with scaled"));
+    for (size_t i = 0; i < lines.size(); ++i) {
+      CHECK(lines[i].find("nan") == std::string::npos);
+      CHECK(lines[i].find("inf") == std::string::npos);
+    }
+    st.Release();
+    CHECK(st.Frames() == 0);
+    CHECK(!Has(st.Summary(no_waits), "inter breakdown"));
   }
 
   // The record limit holds.
