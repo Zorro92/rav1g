@@ -20,7 +20,8 @@ The sequences are the ones that showed it, each in a new process and in this ord
 Every task of a sequence must pass. A failure is final: no stream is decoded again alone. One case is not a
 result of the decoder: the D3D12 device is removed while a sequence runs, which happens now and then on WARP
 (docs/warp-decoder.md). Then the whole sequence runs again in a new process, in the same order, up to three
-times in all; a sequence that loses the device every time fails.
+times in all; a sequence that loses the device every time fails. The check prints one line with the number of
+decoder processes that lost the device, also when it is 0 ("D3D12 DEVICE REMOVALS: ..."), as run.py does.
 
 Written to --out: <sequence>/lists, logs and md5 as run.py writes them, and summary.md (also appended to
 $GITHUB_STEP_SUMMARY when that is set).
@@ -49,8 +50,9 @@ SEQUENCES = [
 DEVICE_LOSS_RUNS = 3
 
 
-def run_sequence(args, name, threads, tasks):
-    """One process for the sequence. Returns (passed, lines for the summary, fatal message or None)."""
+def run_sequence(args, name, threads, tasks, counts):
+    """One process for the sequence. Returns (passed, lines for the summary, fatal message or None). counts:
+    'processes' (a number) and 'removals' (a list as conformance.removals_line takes it), added to here."""
     lines = []
     for attempt in range(1, DEVICE_LOSS_RUNS + 1):
         tag = name if attempt == 1 else '%s-run%d' % (name, attempt)
@@ -62,6 +64,10 @@ def run_sequence(args, name, threads, tasks):
         results, _, fatal = conformance.run_process(process_args, tasks, 'sequence')
         if fatal:
             return False, lines, fatal
+        counts['processes'] += 1
+        lost = [r.name for r in results if conformance.device_removed(r)]
+        if lost:
+            counts['removals'].append((lost[0], '%s, run %d' % (name, attempt)))
         for result in results:
             print('%-12s %-36s %s' % (tag, result.name, result.outcome()), flush=True)
         # The process ends at the first task that does not end in pass or mismatch.
@@ -112,8 +118,10 @@ def main():
     started = time.time()
     summary = []
     failed = 0
+    counts = {'processes': 0, 'removals': []}
     for name, threads, streams in SEQUENCES:
-        passed, lines, fatal = run_sequence(args, name, threads, [(stream, by_name[stream]) for stream in streams])
+        passed, lines, fatal = run_sequence(args, name, threads, [(stream, by_name[stream]) for stream in streams],
+                                            counts)
         if fatal:
             print(fatal)
             return 2
@@ -126,7 +134,8 @@ def main():
             'decoded again alone (testing/conformance/order_check.py).', '',
             '- %d sequences: **%d pass, %d fail**, %.0f s%s' % (
                 len(SEQUENCES), len(SEQUENCES) - failed, failed, total_s,
-                ('; further arguments: ' + ' '.join(args.tool_args)) if args.tool_args else '')]
+                ('; further arguments: ' + ' '.join(args.tool_args)) if args.tool_args else ''),
+            '- ' + conformance.cell(conformance.removals_line(counts['removals'], counts['processes']))]
     text += ['- ' + conformance.cell(line) for line in summary] + ['']
     text = '\n'.join(text)
     os.makedirs(args.out, exist_ok=True)
@@ -140,6 +149,7 @@ def main():
     for line in summary:
         print(line)
     print('%d sequences: %d pass, %d fail, %.0f s' % (len(SEQUENCES), len(SEQUENCES) - failed, failed, total_s))
+    conformance.report_removals(counts['removals'], counts['processes'], args.title or 'order check')
     return 1 if failed else 0
 
 

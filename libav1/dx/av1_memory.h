@@ -70,6 +70,9 @@ void av1_log(int is_error, const char* format, ...);
 // the first reason of a creation is kept: it is the allocation that failed, later ones are consequences.
 void av1_log_create_error(const char* format, ...);
 void av1_clear_create_error();
+// -poisonbuf (av1_set_poison_buffers(AV1_POISON_BUFFERS), dx/av1_perf.h): fills the constants a stage is
+// about to write (ComputeCommandBuffer::Alloc) with the byte 0xA5. Does nothing otherwise.
+void av1_poison_constants(void* ptr, size_t size);
 const char* av1_memory_type_name(MemoryType mem);
 
 // Video memory budget and usage of the adapter the device is on (IDXGIAdapter3::QueryVideoMemoryInfo).

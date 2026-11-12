@@ -130,10 +130,20 @@ extern "C" void av1_log_video_memory_now(void *d3d12device, const char *label) {
 
 // Debugging aid of the test programs (-poisonmi, -poisonbuf; dx/av1_perf.h): the buffers the CPU writes for
 // the shaders start filled with a byte that is not 0 instead of with what the memory held. 0 (the default):
-// nothing is filled.
+// nothing is filled. The fill is right behind the creation of a buffer (create_buffer), so everything the
+// decoder clears or initialises afterwards (the coefficients, which have to be 0 between two frames, the
+// grids cleared per frame) is as in a run without it.
 static int g_poison_buffers = AV1_POISON_OFF;
 
 extern "C" void av1_set_poison_buffers(int level) { g_poison_buffers = level; }
+
+// The constants of the stages are different: their memory is used again in every frame (types.h,
+// ComputeCommandBuffer), so a fill at creation is gone after the first frame, and what a record then starts
+// with is the record an earlier frame had at the same place, mostly a plausible one. With -poisonbuf every
+// record is filled again when it is handed out, before its writer has written anything.
+void av1_poison_constants(void *ptr, size_t size) {
+  if (g_poison_buffers == AV1_POISON_BUFFERS) memset(ptr, 0xA5, size);
+}
 
 static int poisoned(const GpuBufferObject *obj) {
   if (!obj->host_ptr || g_poison_buffers == AV1_POISON_OFF) return 0;

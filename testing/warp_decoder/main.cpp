@@ -167,7 +167,8 @@ static void Usage() {
   Say("  -poisonmi             debugging: the mode info pool starts filled with the byte 0xA5 instead of with what");
   Say("                        the memory held, so a shader that reads bytes the decoder never wrote shows in");
   Say("                        the output of any stream (same output)");
-  Say("  -poisonbuf            the same for every buffer the CPU writes for the shaders (same output)");
+  Say("  -poisonbuf            the same for every buffer the CPU writes for the shaders, and the constants of");
+  Say("                        every stage filled again in every frame before the stage writes them (same output)");
   Say("  -interfast            inter prediction by the fraction of the motion vector: a copy, one filter pass, or");
   Say("                        both (inter_fast, inter_compound_fast; same output)");
   Say("  -interfastlists       the block lists of -interfast with the original shaders on them (same output)");
@@ -1079,12 +1080,15 @@ static int RunTask(const Task& task, Device* dev) {
     return std::string();
   };
   // -poisonmi, -poisonbuf: the decoder fills these buffers when it creates them, so this switch is set before
-  // the decoder exists (also the one a new sequence creates later in the task).
+  // the decoder exists (also the one a new sequence creates later in the task). With -poisonbuf it also
+  // fills the constants of a stage whenever it hands them out (ComputeCommandBuffer::Alloc).
   av1_set_poison_buffers(task.poison);
-  if (task.poison)
-    Say("POISON %s: %s filled with 0xA5 when the decoder creates it", task.name.c_str(),
-        task.poison == AV1_POISON_MODE_INFO ? "the mode info pool (-poisonmi)"
-                                            : "every buffer the CPU writes for the shaders (-poisonbuf)");
+  if (task.poison == AV1_POISON_MODE_INFO)
+    Say("POISON %s: the mode info pool (-poisonmi) filled with 0xA5 when the decoder creates it", task.name.c_str());
+  else if (task.poison)
+    Say("POISON %s: every buffer the CPU writes for the shaders (-poisonbuf) filled with 0xA5 when the decoder "
+        "creates it, the constants of a stage again before the stage writes them",
+        task.name.c_str());
   {
     const std::string create_error = create_decoder(si);
     if (!create_error.empty()) return fail(create_error);

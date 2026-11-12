@@ -9,7 +9,8 @@ on:
       experiments:
         description: >
           Also build the uavsync package and decode the conformance set again with each experiment
-          flag and with the uavsync shaders (about 10 more minutes)
+          flag, with poisoned buffers (-poisonmi, -poisonbuf) and with the uavsync shaders (about 20
+          more minutes)
         type: boolean
         default: false
 
@@ -490,9 +491,7 @@ jobs:
       # so a shader that reads bytes of a record that the entropy decoder never wrote (padding of the C
       # struct, a field the block's kind does not have) gives another output at once. The output has to be
       # the same: a part of the set, about half a minute (ten quantizer vectors of each bit depth, the other
-      # vectors, one cut), has to give the results of expected.txt. -poisonbuf, the same for every buffer the
-      # CPU writes for the shaders, is not run here: the decoder does not pass it yet (the constant buffers,
-      # docs/gpu-av1-decoder.md, "Padding of the mode info record").
+      # vectors, one cut), has to give the results of expected.txt.
       - name: Conformance of the vectors with a poisoned mode info pool (-poisonmi)
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -501,6 +500,24 @@ jobs:
             --out out/conformance-poisonmi --threads 4 "--tool-args=-poisonmi" "--title=part of the set with -poisonmi" `
             "--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)"
           if ($LASTEXITCODE -ne 0) { throw "conformance with -poisonmi: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
+
+      # -poisonbuf, the same for every buffer the CPU writes for the shaders, and for the constants of the
+      # stages in every frame: their memory is reused from frame to frame, so the decoder fills each record
+      # with 0xA5 when it hands it out, right before the stage writes it (ComputeCommandBuffer::Alloc). A
+      # field that a stage does not write and a shader reads then has no plausible value left from an
+      # earlier frame. That was the case of loop restoration, whose shader computed an address from the unit
+      # fields of a plane without restoration and loaded from it, which could remove the device
+      # (docs/gpu-av1-decoder.md, "Unwritten fields of a constant record"). The same part of the set as with
+      # -poisonmi has to give the results of expected.txt; the whole set, also with -interfast and with
+      # -intrav2, is decoded with it when the workflow is started with the experiments input.
+      - name: Conformance of the vectors with poisoned buffers and constants (-poisonbuf)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/run.py --tool out/warp_decoder/warp_decoder.exe --streams conformance-streams `
+            --out out/conformance-poisonbuf --threads 4 "--tool-args=-poisonbuf" "--title=part of the set with -poisonbuf" `
+            "--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)"
+          if ($LASTEXITCODE -ne 0) { throw "conformance with -poisonbuf: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
 
       # The fast inter path (-interfast; docs/gpu-av1-decoder.md, "Inter prediction: breakdown and fast
       # paths"): the blocks with one reference and the averaged compound blocks are listed by the fraction
@@ -560,9 +577,13 @@ jobs:
         run: |
           $runs = @(@{ name = 'lfhsplit1'; args = '-lfhsplit 1' }, @{ name = 'lfhsplit2'; args = '-lfhsplit 2' },
             @{ name = 'intraedgefix'; args = '-intraedgefix' },
-            # Not an experiment for a device: the whole set with the mode info pool poisoned (the step with
-            # -poisonmi above decodes a part of the set on every push).
-            @{ name = 'poisonmi-all'; args = '-poisonmi' })
+            # Not experiments for a device: the whole set with the mode info pool poisoned, and with every
+            # buffer and the constants poisoned, also on the fast inter path and with the second intra
+            # scheduler (the steps with -poisonmi and -poisonbuf above decode a part of the set on every push).
+            @{ name = 'poisonmi-all'; args = '-poisonmi' },
+            @{ name = 'poisonbuf-all'; args = '-poisonbuf' },
+            @{ name = 'poisonbuf-interfast'; args = '-poisonbuf -interfast' },
+            @{ name = 'poisonbuf-intrav2'; args = '-poisonbuf -intrav2' })
           $failed = @()
           foreach ($run in $runs) {
             python testing/conformance/run.py --tool out/warp_decoder/warp_decoder.exe --streams conformance-streams `

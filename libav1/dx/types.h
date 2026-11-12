@@ -146,11 +146,17 @@ struct ComputeCommandBuffer {
   size_t cb_ptr;
   uint32_t fence_value;
 
+  // The constants of one record: the next piece of the upload memory, a multiple of 256 bytes. The memory
+  // is not cleared: Reset() only rewinds, so a record starts with what an earlier frame wrote at its place,
+  // and every field a shader reads has to be written by whoever fills the record. With -poisonbuf
+  // (av1_set_poison_buffers) the piece is filled with the byte 0xA5 here, right before it is written, in
+  // every frame: a field the writer leaves out then never has a plausible value.
   ConstantBufferObject Alloc(size_t size) {
     size = (size + 255) & (~255);
     assert(cb_ptr + size < cb_alloc->size);
     size_t p = cb_ptr;
     cb_ptr += size;
+    av1_poison_constants(reinterpret_cast<char*>(cb_alloc->host_ptr) + p, size);
     return ConstantBufferObject(reinterpret_cast<char*>(cb_alloc->host_ptr) + p,
                                 cb_alloc->dev->GetGPUVirtualAddress() + p);
   }
