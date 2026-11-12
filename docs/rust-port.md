@@ -1,6 +1,7 @@
 # Rust port, phase 1: design
 
-Status: started 2026-11-12; step 1 (build skeleton, `rav1g-dec`) is in the tree, see [Progress](#progress).
+Status: started 2026-11-12; steps 1 (build skeleton, `rav1g-dec`) and 2 (bindings for the shared structs,
+layout tests) are in the tree, see [Progress](#progress).
 Branch `main`. The C++ decoder at tag `v0.3.0` (branch `cpp`) is the reference: every step below has to
 decode the conformance set md5-identically to it and to dav1d.
 
@@ -155,6 +156,13 @@ without `/Ot` under MSVC, which decodes the set right as well (run 43244241029: 
 `svc-L2T1-2`, which failed the same way in `warp_decoder` of that run and passes alone); that is gone again. To keep in mind with a new
 toolset: the conformance run is what found it, and it runs for every build.
 
+Seen on the way, and not part of the port: decoded as the eleventh stream of a process, behind the ten
+8-bit vectors `av1-1-b8-00-quantizer-00` to `-09`, the 10-bit vector `av1-1-b10-00-quantizer-00.ivf` comes
+out wrong from its first frame, with `warp_decoder` and with `rav1g-dec` alike, with one thread and with
+four, in seven of seven passes each (run 43245926770). In the order of the conformance manifest it is
+right. Like `svc-L2T1-2` behind `svc-L2T1`, it is something one decoder leaves behind for the next in the
+same process; the cause is open.
+
 Shaders. The build takes the FXC bytecode headers the other builds take: `RAV1G_SHADER_DIR` names the
 directory whose `dx/shaders/h` has them (what MSBuild gets as `/p:Rav1gPrebuiltShaders`; in CI the `normal`
 output of `.github/actions/shaders`), and the build stops with a message when it is not set or has no headers.
@@ -191,6 +199,46 @@ function `aom_thread.h` hands to `CreateThread` returns `unsigned int` where a `
 `&CD3DX12_RESOURCE_BARRIER::Transition(...)` in the argument list of a call (`-Waddress-of-temporary`, 47
 places). `rav1g-sys` turns both back into warnings for clang-cl only. The C++ standard library of the MSVC
 runtime wants Clang 19 or newer.
+
+### Step 2: bindings for the shared structs (2026-11-12)
+
+`crates/rav1g-sys` has a second set of bindings, the module `shared`, from `av1/common/blockd.h` and
+`mv.h`: the structs that cross a boundary.
+
+| Struct | Bytes | Who shares it |
+| --- | --- | --- |
+| `MB_MODE_INFO` with `PALETTE_MODE_INFO`, `WarpedMotionParams`, `INTERINTER_COMPOUND_DATA`, `FILTER_INTRA_MODE_INFO`, `int_mv`, `MV` | 224 | the entropy decoder writes the mode info pool; `gen_pred_blocks.hlsl` and the loop filter shaders read it as `StructuredBuffer<MB_MODE_INFO>` (`dx/shaders/mode_info.h`, `ModeInfoSize`) |
+| `PredictionBlock` | 16 | the prediction block records `gen_pred_blocks.hlsl` writes and the prediction shaders read |
+| `InterWarpBlock` | 48 | the same for warped blocks |
+| `tx_block_info_gpu` | 16 | the transform block records the entropy decoder writes for the inverse transform shaders |
+| `PredictionBlockSortingInfo` | 8 | the sort keys of the block lists |
+| `tx_block_info`, `av1_tile_data` | 24, 264 | entropy decoder and host: a transform block on the host side, and a tile's cursors into the buffers of a pipeline slot (coefficients, block records, block index list, block maps) |
+
+Layout tests (`crates/rav1g-sys/src/layout_tests.rs`, run by `cargo test` in the `rust` job, on Windows with
+MSVC):
+
+- **Bindings against the C compiler of the build.** bindgen computes layouts with libclang and asserts them
+  when the bindings compile, which says that Rust agrees with clang. The decoder is compiled by MSVC, so
+  `build.rs` also writes a C file with `sizeof`, `__alignof` and `offsetof` of every probed struct and
+  field, compiles it into the library with the compiler that builds the decoder, and writes the same table
+  from the bindings; the test compares the two entry by entry. The fields are read from the bindings, so
+  none is left out: 23 structs (the 13 above and 10 of the C interface that `rav1g` and `rav1g-dec` fill or
+  read: `aom_codec_dec_cfg_t`, `aom_image_t`, `av1_decoded_frame_buffer_t`, `av1_perf_frame`,
+  `av1_stage_dump` and others) with 245 fields.
+- **The mode info record against the shaders' header.** The test reads `dx/shaders/mode_info.h`, lays its
+  structs out as a structured buffer does (32-bit words one behind the other) and checks every field of the
+  shader's `MB_MODE_INFO` against the C struct: same offset and size, and where the shader reads several C
+  fields as one word (`block_type` is `sb_type`, `partition` and the two `ref_frame`; `tx_info` is
+  `tx_size`, `skip`, `skip_mode`, `segment_id`; and so on) those fields follow each other byte by byte.
+  `ModeInfoSize` must be the size of the C struct.
+- **Record sizes**: the numbers above, which are also the record sizes of the stage dump format.
+
+Not bound: `libav1/dx/types.h`. It is the C++ host's own header (COM pointers, `std` containers, the frame
+and slot structures), not a C header that bindgen could read as one, and nothing outside the host includes
+it. Its records that reach the GPU are written by shaders (`InterBlock` is the 16-byte `PredictionBlock`
+record) or are constant buffer structs defined inside the `.cpp` files (`GenBlockData`, `GenLfData`,
+`LoopfilterData`). They get Rust definitions and tests against the C++ in step 3, with the module that
+owns each.
 
 Deviations from the design above, and why:
 

@@ -16,3 +16,15 @@
 #![allow(clippy::all)]
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+
+/// The layouts shared with the GPU and between the entropy decoder and the host
+/// (`libav1/av1/common/blockd.h`, `mv.h`): the mode info record that the shaders read as `MB_MODE_INFO`
+/// of `libav1/dx/shaders/mode_info.h`, the block records of the prediction and transform stages, and the
+/// tile's cursors into the buffers of a pipeline slot. The tests of this crate hold them against the C
+/// compiler of the build and against the shader's header.
+pub mod shared {
+    include!(concat!(env!("OUT_DIR"), "/shared.rs"));
+}
+
+#[cfg(test)]
+mod layout_tests;

@@ -161,6 +161,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", props.display());
     println!("cargo:rerun-if-changed={}", repo.join("libav1").display());
     println!("cargo:rerun-if-changed={}", manifest.join("wrapper.h").display());
+    println!("cargo:rerun-if-changed={}", manifest.join("shared.h").display());
     println!("cargo:rerun-if-changed={}", manifest.join("helpers.c").display());
 
     let shaders = shader_dir();
@@ -214,4 +215,178 @@ fn main() {
     bindings
         .write_to_file(out.join("bindings.rs"))
         .unwrap_or_else(|error| fail(&format!("cannot write the bindings: {error}")));
+
+    // The layouts shared with the GPU and between the entropy decoder and the host (shared.h): types only.
+    let shared = bindgen::Builder::default()
+        .header(manifest.join("shared.h").to_string_lossy())
+        .clang_arg(format!("-I{}", repo.join("libav1").display()))
+        .clang_arg(format!("-I{}", repo.join("libav1").join("build").display()))
+        .allowlist_type(SHARED_TYPES.join("|"))
+        .prepend_enum_name(false)
+        .layout_tests(true)
+        .derive_default(true)
+        .generate_comments(false)
+        .generate()
+        .unwrap_or_else(|error| fail(&format!("bindgen (shared.h): {error}")));
+    shared
+        .write_to_file(out.join("shared.rs"))
+        .unwrap_or_else(|error| fail(&format!("cannot write the bindings of shared.h: {error}")));
+
+    // The layout probe: for every struct of the two lists, its size and alignment and the offset and size
+    // of each of its fields, once as the C compiler of this build has them (layout_probe.c, compiled into
+    // the library) and once as the bindings have them (layout_table.rs, compiled into the tests of this
+    // crate, which compare the two). The fields are read from the bindings, so none is left out.
+    let mut probes = read_probes(&bindings.to_string(), INTERFACE_TYPES, "");
+    probes.extend(read_probes(&shared.to_string(), SHARED_TYPES, "shared::"));
+    let probe_c = out.join("layout_probe.c");
+    fs::write(&probe_c, probe_source_c(&probes))
+        .unwrap_or_else(|error| fail(&format!("cannot write {}: {error}", probe_c.display())));
+    fs::write(out.join("layout_table.rs"), probe_source_rust(&probes))
+        .unwrap_or_else(|error| fail(&format!("cannot write layout_table.rs: {error}")));
+    let mut probe = base_build(&repo, &shaders, false);
+    probe.opt_level(1).include(&manifest).file(&probe_c).compile("rav1g_layout_probe");
+}
+
+/// The structs of the C interface that `rav1g` and `rav1g-dec` fill or read (wrapper.h).
+const INTERFACE_TYPES: &[&str] = &[
+    "aom_codec_ctx_t",
+    "aom_codec_dec_cfg_t",
+    "aom_codec_stream_info_t",
+    "aom_image_t",
+    "av1_decoded_frame_buffer_t",
+    "av1_out_buffers_cb_t",
+    "av1_perf_frame",
+    "av1_perf_inter_detail",
+    "av1_stage_dump",
+    "av1_stage_dump_plane",
+];
+
+/// The structs of `av1/common/blockd.h` and `mv.h` that cross a boundary (shared.h): the mode info record,
+/// which the shaders read as `MB_MODE_INFO` of `dx/shaders/mode_info.h`, the block records of the
+/// prediction and transform stages, and the tile's cursors into the buffers of a pipeline slot, which the
+/// entropy decoder and the host both use.
+const SHARED_TYPES: &[&str] = &[
+    "MB_MODE_INFO",
+    "PALETTE_MODE_INFO",
+    "FILTER_INTRA_MODE_INFO",
+    "INTERINTER_COMPOUND_DATA",
+    "WarpedMotionParams",
+    "int_mv",
+    "MV",
+    "PredictionBlock",
+    "InterWarpBlock",
+    "PredictionBlockSortingInfo",
+    "tx_block_info_gpu",
+    "tx_block_info",
+    "av1_tile_data",
+];
+
+/// A struct or union to probe: its C name, the path of its bindings and its fields.
+struct Probe {
+    c_type: String,
+    rust_type: String,
+    is_union: bool,
+    /// The names of the fields in the bindings.
+    fields: Vec<String>,
+}
+
+/// The fields of the listed types, read from the text of the bindings: `pub struct <name> {`, then one
+/// `pub <field>: <type>,` per field. A name that is a type alias (`pub type <name> = <other>;`) is followed.
+fn read_probes(bindings: &str, types: &[&str], module: &str) -> Vec<Probe> {
+    let lines: Vec<&str> = bindings.lines().collect();
+    let mut probes = Vec::new();
+    for &c_type in types {
+        let mut name = c_type.to_string();
+        let found = loop {
+            let header = |kind: &str| format!("pub {kind} {name} {{");
+            if let Some(start) = lines.iter().position(|line| *line == header("struct") || *line == header("union")) {
+                break Some((start, lines[start].starts_with("pub union")));
+            }
+            let alias = format!("pub type {name} = ");
+            match lines.iter().find_map(|line| line.strip_prefix(alias.as_str())) {
+                Some(target) => name = target.trim_end_matches(';').to_string(),
+                None => break None,
+            }
+        };
+        let Some((start, is_union)) = found else {
+            fail(&format!("the bindings have no struct or union {c_type}"));
+        };
+        let mut fields = Vec::new();
+        for line in &lines[start + 1..] {
+            if *line == "}" {
+                break;
+            }
+            let Some(rest) = line.strip_prefix("    pub ") else {
+                continue;
+            };
+            let Some((field, _)) = rest.split_once(':') else {
+                continue;
+            };
+            // Bit fields and anonymous members have no name C could take an offset of; the size of the
+            // struct still covers them.
+            if field.starts_with("_bitfield") || field.starts_with("__bindgen") {
+                continue;
+            }
+            fields.push(field.to_string());
+        }
+        if fields.is_empty() {
+            fail(&format!("the bindings of {c_type} have no fields"));
+        }
+        probes.push(Probe { c_type: c_type.to_string(), rust_type: format!("{module}{c_type}"), is_union, fields });
+    }
+    probes
+}
+
+/// The C name of a field of the bindings: bindgen puts an underscore behind a name that is a Rust keyword.
+fn c_field(field: &str) -> &str {
+    const KEYWORDS: &[&str] = &["type", "priv", "impl", "ref", "match", "fn", "in", "use", "mod", "move", "loop"];
+    match field.strip_suffix('_') {
+        Some(stem) if KEYWORDS.contains(&stem) => stem,
+        _ => field,
+    }
+}
+
+fn probe_source_c(probes: &[Probe]) -> String {
+    let mut text = String::from(
+        "/* Written by build.rs: the layouts as this compiler has them. */\n\
+         #include <stddef.h>\n#include <stdint.h>\n\n#include \"wrapper.h\"\n#include \"shared.h\"\n\n\
+         typedef struct {\n  const char *name;\n  uint32_t size;\n  uint32_t offset;\n  uint32_t align;\n\
+         } rav1g_layout_entry;\n\nstatic const rav1g_layout_entry rav1g_layout_entries[] = {\n",
+    );
+    for probe in probes {
+        let t = &probe.c_type;
+        text.push_str(&format!("  {{ \"{t}\", (uint32_t)sizeof({t}), 0, (uint32_t)__alignof({t}) }},\n"));
+        for field in &probe.fields {
+            let f = c_field(field);
+            text.push_str(&format!(
+                "  {{ \"{t}.{f}\", (uint32_t)sizeof((({t} *)0)->{f}), (uint32_t)offsetof({t}, {f}), 0 }},\n"
+            ));
+        }
+    }
+    text.push_str(
+        "};\n\nconst rav1g_layout_entry *rav1g_layout_table(uint32_t *count) {\n\
+         \x20 *count = (uint32_t)(sizeof(rav1g_layout_entries) / sizeof(rav1g_layout_entries[0]));\n\
+         \x20 return rav1g_layout_entries;\n}\n",
+    );
+    text
+}
+
+fn probe_source_rust(probes: &[Probe]) -> String {
+    let mut text = String::from(
+        "// Written by build.rs: the layouts as the bindings have them (name, size, offset, alignment).\n\
+         pub fn rust_layouts() -> Vec<(&'static str, usize, usize, usize)> {\n    vec![\n",
+    );
+    for probe in probes {
+        let (c, r) = (&probe.c_type, &probe.rust_type);
+        text.push_str(&format!("        (\"{c}\", size_of::<{r}>(), 0, align_of::<{r}>()),\n"));
+        for field in &probe.fields {
+            let f = c_field(field);
+            let access = if probe.is_union { format!("unsafe {{ &s.{field} }}") } else { format!("&s.{field}") };
+            text.push_str(&format!(
+                "        (\"{c}.{f}\", field_size(|s: &{r}| {access}), ::core::mem::offset_of!({r}, {field}), 0),\n"
+            ));
+        }
+    }
+    text.push_str("    ]\n}\n");
+    text
 }

@@ -671,7 +671,11 @@ jobs:
             Set-Content out/rav1g-dec/SOURCES.txt -Encoding utf8
           "## rav1g-dec", '', "cargo build --release: $built min ($(rustc --version)).", '' >> $env:GITHUB_STEP_SUMMARY
 
-      # The unit tests of the workspace (the md5 of rav1g-dec, its argument parser).
+      # The unit tests of the workspace (the md5 of rav1g-dec, its argument parser) and the layout tests of
+      # the bindings (crates/rav1g-sys/src/layout_tests.rs): the size and alignment of every struct that
+      # Rust shares with the C interface, the entropy decoder or the shaders, and the offset and size of
+      # each of its fields, as the bindings have them against what the C compiler of this build says; and
+      # MB_MODE_INFO of blockd.h against the struct the shaders read it with (dx/shaders/mode_info.h).
       - name: Tests (cargo test)
         shell: pwsh
         env:
