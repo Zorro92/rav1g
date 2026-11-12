@@ -344,6 +344,12 @@ pub mod switches {
     pub unsafe fn set_intra_edge_fix(enable: bool) {
         unsafe { sys::av1_set_intra_edge_fix(enable as c_int) }
     }
+    /// Debugging: the decoders created after the call fill the mode info pool (`AV1_POISON_MODE_INFO`) or
+    /// every buffer the CPU writes for the shaders (`AV1_POISON_BUFFERS`) with the byte 0xA5 when they
+    /// create it, instead of leaving what the memory held. The output must be the same. 0: off, the default.
+    pub unsafe fn set_poison_buffers(level: i32) {
+        unsafe { sys::av1_set_poison_buffers(level) }
+    }
     /// The fast inter path: `AV1_INTER_FAST_*` bits.
     pub unsafe fn set_inter_fast(mode: i32) {
         unsafe { sys::av1_set_inter_fast(mode) }

@@ -71,6 +71,8 @@ pub struct Task {
     /// -lfhsplit <0|1|2>
     pub lfhsplit: i32,
     pub intraedgefix: bool,
+    /// -poisonmi (AV1_POISON_MODE_INFO), -poisonbuf (AV1_POISON_BUFFERS): av1_set_poison_buffers.
+    pub poison: i32,
     /// -interfast (1), -interfastlists (7), -interfastmode <n>: av1_set_inter_fast.
     pub interfast: i32,
     /// -alllayers: every shown frame of a temporal unit with spatial layers.
@@ -120,6 +122,7 @@ impl Default for Task {
             asyncclear: false,
             lfhsplit: 0,
             intraedgefix: false,
+            poison: 0,
             interfast: 0,
             all_layers: false,
             oppoint: 0,
@@ -183,6 +186,10 @@ pub fn usage() {
     say!("  -lfhsplit <n>         horizontal loop filter: 1 even rows of blocks, a UAV barrier, odd rows; 2 every");
     say!("                        row of blocks on its own (default 0: one dispatch per plane; same output)");
     say!("  -intraedgefix         8-bit intra: the above edge filter stops where the 10-bit one does (same output)");
+    say!("  -poisonmi             debugging: the mode info pool starts filled with the byte 0xA5 instead of with what");
+    say!("                        the memory held, so a shader that reads bytes the decoder never wrote shows in");
+    say!("                        the output of any stream (same output)");
+    say!("  -poisonbuf            the same for every buffer the CPU writes for the shaders (same output)");
     say!("  -interfast            inter prediction by the fraction of the motion vector: a copy, one filter pass, or");
     say!("                        both (inter_fast, inter_compound_fast; same output)");
     say!("  -interfastlists       the block lists of -interfast with the original shaders on them (same output)");
@@ -287,6 +294,8 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-asyncclear" => task.asyncclear = true,
             "-lfhsplit" => task.lfhsplit = number()?,
             "-intraedgefix" => task.intraedgefix = true,
+            "-poisonmi" => task.poison = sys::AV1_POISON_MODE_INFO,
+            "-poisonbuf" => task.poison = sys::AV1_POISON_BUFFERS,
             "-interfast" => task.interfast = sys::AV1_INTER_FAST_ON,
             "-interfastlists" => task.interfast = sys::AV1_INTER_FAST_LISTS_ONLY,
             "-interfastmode" => task.interfast = number()?,
@@ -454,6 +463,11 @@ mod tests {
         assert_eq!(task.save_md5, "out dir/x.md5");
         assert_eq!((task.threads, task.timeout_s, task.interfast, task.aom_md5), (4, 300, 1, true));
         assert_eq!(globals.list, "tasks.list");
+        assert_eq!(task.poison, 0);
+        parse_args(&strings(&["-poisonmi"]), &mut task, None).unwrap();
+        assert_eq!(task.poison, 1);
+        parse_args(&strings(&["-poisonbuf"]), &mut task, None).unwrap();
+        assert_eq!(task.poison, 2);
         // A program flag is not a task flag of a list line.
         assert!(parse_args(&strings(&["-hw"]), &mut task, None).is_err());
         assert!(parse_args(&strings(&["-t"]), &mut task, None).is_err());

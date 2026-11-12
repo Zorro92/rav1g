@@ -613,6 +613,22 @@ pub fn run_task(task: &Task, dev: &Device, psos: &PipelineCache) -> i32 {
         }
     }
 
+    // -poisonmi, -poisonbuf: the decoder fills these buffers when it creates them, so this switch is set before
+    // the decoder exists (also the one a new sequence creates later in the task).
+    // SAFETY: the task has no decoder yet and the one of the task before is destroyed: no frame is in flight.
+    unsafe { switches::set_poison_buffers(task.poison) };
+    if task.poison != 0 {
+        say!(
+            "POISON {}: {} filled with 0xA5 when the decoder creates it",
+            task.name,
+            if task.poison == sys::AV1_POISON_MODE_INFO {
+                "the mode info pool (-poisonmi)"
+            } else {
+                "every buffer the CPU writes for the shaders (-poisonbuf)"
+            }
+        );
+    }
+
     // -dumpstages: the writer outlives the decoder's completion thread, which the drain below joins.
     let stage_dumps = shim::Dumps::new();
     let mut decoder = match create_decoder(&run, dev, psos, size, &si, &mut create_ms) {
