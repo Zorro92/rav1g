@@ -404,8 +404,11 @@ int AV1Decoder::DecodeOne() {
       // The host pool of the new decoder is allocated; the decoder's own lines give the video memory.
       LogAppMemory("before the decoder", false);
       const int init_failed = aom_codec_dec_init(&decctx_, aom_codec_av1_dx(), &cfg, dec_flags);
-      // The memory an earlier decoder left is this decoder's now.
-      reusable_after_release_ = 0;
+      // The memory an earlier decoder left is this decoder's now. Only when it exists: a creation that
+      // failed or was refused has allocated nothing, the memory is still there for the next creation, and
+      // the budget guard of a smaller decoder has to count it (without it a refused creation made the
+      // guard refuse the next one as well, which would have fit).
+      if (!init_failed) reusable_after_release_ = 0;
       if (!init_failed && cfg.device_size > largest_device_size_) largest_device_size_ = cfg.device_size;
       if (init_failed) {
         host_mem_.clear();
