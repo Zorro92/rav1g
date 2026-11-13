@@ -40,8 +40,7 @@ fn to_mib(bytes: u64) -> f64 {
 }
 
 /// `av1_memory_type_name` of the C++.
-#[unsafe(no_mangle)]
-pub extern "C" fn rav1g_memory_type_name(mem: c_int) -> *const c_char {
+pub(crate) fn rav1g_memory_type_name(mem: c_int) -> *const c_char {
     const NAMES: [&CStr; MemoryKind::COUNT] =
         [c"DeviceOnly", c"DeviceUpload", c"HostRW", c"ReadBack", c"DeviceOnlyConst", c"UploadUAV"];
     usize::try_from(mem).ok().and_then(|mem| NAMES.get(mem)).map_or(c"unknown", |name| name).as_ptr()
@@ -170,8 +169,7 @@ fn host_request(offset: usize, size: usize, align: c_int) -> (usize, usize) {
 ///
 /// # Safety
 /// `this` is the allocator; `host_mem` is valid for `host_size` bytes for as long as the allocator is used.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_memory_setup(this: *mut av1_memory_allocator, host_mem: *mut u8, host_size: usize) {
+pub(crate) unsafe fn rav1g_memory_setup(this: *mut av1_memory_allocator, host_mem: *mut u8, host_size: usize) {
     // SAFETY: the caller's contract.
     let this = unsafe { &mut *this };
     let offset = align_up(host_mem as usize, 256) - host_mem as usize;
@@ -191,16 +189,6 @@ fn device_bytes(this: &av1_memory_allocator) -> usize {
     this.dev_bytes.iter().sum()
 }
 
-/// `av1_memory_allocator::device_bytes()`: the bytes of all device buffers.
-///
-/// # Safety
-/// `this` is the allocator.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_memory_device_bytes(this: *const av1_memory_allocator) -> usize {
-    // SAFETY: the caller's contract.
-    device_bytes(unsafe { &*this })
-}
-
 /// `av1_memory_allocator::create_buffer`: a device buffer of `size` bytes, rounded up to 256, with the
 /// next descriptor of the pool. Returns null when the allocation fails, after a "MEMORY FAILED" line that
 /// names it.
@@ -208,8 +196,7 @@ pub unsafe extern "C" fn rav1g_memory_device_bytes(this: *const av1_memory_alloc
 /// # Safety
 /// `this` is the allocator, set up, with the device context of the decoder; `name` is null or a C string
 /// that lives as long as the buffer.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_memory_create_buffer(
+pub(crate) unsafe fn rav1g_memory_create_buffer(
     this: *mut av1_memory_allocator,
     size: usize,
     mem: c_int,
@@ -297,8 +284,7 @@ pub unsafe extern "C" fn rav1g_memory_create_buffer(
 ///
 /// # Safety
 /// `this` is the allocator, set up.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_memory_host_allocate(
+pub(crate) unsafe fn rav1g_memory_host_allocate(
     this: *mut av1_memory_allocator,
     size: usize,
     align: c_int,
@@ -353,8 +339,7 @@ fn release_type(this: &mut av1_memory_allocator, mem: c_int) -> (usize, c_int) {
 ///
 /// # Safety
 /// `this` is the allocator; `count` is null or valid for writing. No buffer of the type is in use.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_memory_release_type(
+pub(crate) unsafe fn rav1g_memory_release_type(
     this: *mut av1_memory_allocator,
     mem: c_int,
     count: *mut c_int,
@@ -372,8 +357,7 @@ pub unsafe extern "C" fn rav1g_memory_release_type(
 ///
 /// # Safety
 /// `this` is the allocator. No buffer is in use.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_memory_release(this: *mut av1_memory_allocator) {
+pub(crate) unsafe fn rav1g_memory_release(this: *mut av1_memory_allocator) {
     // SAFETY: the caller's contract.
     let this = unsafe { &mut *this };
     for mem in 0..MemoryKind::COUNT as c_int {

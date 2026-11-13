@@ -104,22 +104,11 @@ pub unsafe extern "C" fn av1_log_error(line: *const c_char) {
     unsafe { log_line(1, line) };
 }
 
-/// A line the C++ host formatted (`av1_log` of the glue).
-///
-/// # Safety
-/// `line` is a C string.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_log_line(is_error: c_int, line: *const c_char) {
-    // SAFETY: the caller's contract.
-    unsafe { log_line(is_error, line) };
-}
-
 /// The same for `av1_log_create_error`.
 ///
 /// # Safety
 /// `line` is a C string.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_log_create_error_line(line: *const c_char) {
+pub(crate) unsafe fn rav1g_log_create_error_line(line: *const c_char) {
     // SAFETY: only this thread accesses its reason; `line` is the caller's C string.
     CREATE_ERROR.with(|reason| unsafe {
         let reason = &mut *reason.get();
@@ -135,8 +124,7 @@ pub unsafe extern "C" fn rav1g_log_create_error_line(line: *const c_char) {
 }
 
 /// `av1_clear_create_error` of the C++: a decoder creation starts.
-#[unsafe(no_mangle)]
-pub extern "C" fn rav1g_clear_create_error() {
+pub(crate) fn rav1g_clear_create_error() {
     // SAFETY: only this thread accesses its reason.
     CREATE_ERROR.with(|reason| unsafe { (*reason.get())[0] = 0 });
 }

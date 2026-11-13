@@ -138,8 +138,7 @@ struct GenBlockData {
 ///
 /// # Safety
 /// `dec` is the decoder while it records a frame whose tiles are decoded; `pbi` is its entropy decoder.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_prediction_gen_blocks(pbi: *mut AV1Decoder, dec: *mut Av1Core) {
+pub(crate) unsafe fn rav1g_prediction_gen_blocks(pbi: *mut AV1Decoder, dec: *mut Av1Core) {
     // SAFETY: the caller's contract: the frame data, its tiles and their block maps, the frame header and
     // the buffers and pipelines of the decoder are live, and only this thread records.
     unsafe {
@@ -650,8 +649,7 @@ unsafe fn list_range(offsets: *const c_int, i: usize) -> (c_int, c_int) {
 /// # Safety
 /// `dec` is the decoder while it records a frame whose block records are written
 /// ([`rav1g_prediction_gen_blocks`]); `cm` is the frame's.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, _tile: *mut TileInfo) {
+pub(crate) unsafe fn rav1g_prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, _tile: *mut TileInfo) {
     // SAFETY: the caller's contract: the frame data, its tiles and their block maps, the reference frame
     // buffers of a frame with inter blocks, and the buffers and pipelines of the decoder are live, and
     // only this thread records.
@@ -1194,8 +1192,7 @@ struct BordersData {
 ///
 /// # Safety
 /// `dec` is the decoder while it records a frame; `cm` is the frame's.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_inter_ext_borders(dec: *mut Av1Core, cm: *mut AV1_COMMON) {
+pub(crate) unsafe fn rav1g_inter_ext_borders(dec: *mut Av1Core, cm: *mut AV1_COMMON) {
     // SAFETY: the caller's contract.
     unsafe {
         let td = &mut *(*dec).curr_frame_data;

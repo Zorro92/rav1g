@@ -45,8 +45,7 @@ const _: () = assert!(TX_TYPES == 20);
 ///
 /// # Safety
 /// `dec` is the decoder while it records a frame whose tiles are decoded.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_idct_run(dec: *mut Av1Core) {
+pub(crate) unsafe fn rav1g_idct_run(dec: *mut Av1Core) {
     // SAFETY: the caller's contract: the frame data, its tiles, its frame buffer and the buffers and
     // pipelines of the decoder are live, and only this thread records.
     unsafe {

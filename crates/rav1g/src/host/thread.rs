@@ -82,61 +82,27 @@ fn get(queue: &mut DataPtrQueue) -> *mut c_void {
 ///
 /// # Safety
 /// `queue` is valid for writing, as for every function of this file that takes one.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_queue_init(queue: *mut DataPtrQueue) {
+pub(crate) unsafe fn rav1g_queue_init(queue: *mut DataPtrQueue) {
     // SAFETY: the caller's contract.
     init(unsafe { &mut *queue });
-}
-
-/// `QueuePop`: drops the oldest item, if there is one.
-///
-/// # Safety
-/// `queue` is an initialised queue that no other thread uses during the call; the same for the
-/// functions below that take a `DataPtrQueue`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_queue_pop(queue: *mut DataPtrQueue) {
-    // SAFETY: the caller's contract.
-    pop(unsafe { &mut *queue });
 }
 
 /// `QueuePush`.
 ///
 /// # Safety
 /// See [`rav1g_queue_pop`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_queue_push(queue: *mut DataPtrQueue, item: *mut c_void) {
+pub(crate) unsafe fn rav1g_queue_push(queue: *mut DataPtrQueue, item: *mut c_void) {
     // SAFETY: the caller's contract.
     push(unsafe { &mut *queue }, item);
-}
-
-/// `QueueFront`: the oldest item, or null.
-///
-/// # Safety
-/// See [`rav1g_queue_pop`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_queue_front(queue: *mut DataPtrQueue) -> *mut c_void {
-    // SAFETY: the caller's contract.
-    front(unsafe { &*queue })
 }
 
 /// `QueueGet`: takes the oldest item, or returns null.
 ///
 /// # Safety
 /// See [`rav1g_queue_pop`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_queue_get(queue: *mut DataPtrQueue) -> *mut c_void {
+pub(crate) unsafe fn rav1g_queue_get(queue: *mut DataPtrQueue) -> *mut c_void {
     // SAFETY: the caller's contract.
     get(unsafe { &mut *queue })
-}
-
-/// `QueueIsEmpty`.
-///
-/// # Safety
-/// See [`rav1g_queue_pop`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_queue_is_empty(queue: *mut DataPtrQueue) -> c_int {
-    // SAFETY: the caller's contract.
-    c_int::from(is_empty(unsafe { &*queue }))
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -263,8 +229,7 @@ fn condition(queue: *mut DataPtrQueueMT) -> *mut CONDITION_VARIABLE {
 ///
 /// # Safety
 /// `queue` is valid for writing and is not moved until `MTQueueDestroy`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_mt_queue_init(queue: *mut DataPtrQueueMT) {
+pub(crate) unsafe fn rav1g_mt_queue_init(queue: *mut DataPtrQueueMT) {
     // SAFETY: the caller's contract. The critical section is created as aom_thread.h creates a mutex.
     unsafe {
         init(&mut (*queue).int_queue);
@@ -277,8 +242,7 @@ pub unsafe extern "C" fn rav1g_mt_queue_init(queue: *mut DataPtrQueueMT) {
 ///
 /// # Safety
 /// `queue` was initialised and no thread uses it.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_mt_queue_destroy(queue: *mut DataPtrQueueMT) {
+pub(crate) unsafe fn rav1g_mt_queue_destroy(queue: *mut DataPtrQueueMT) {
     // SAFETY: the caller's contract. A condition variable needs no release.
     unsafe { DeleteCriticalSection(mutex(queue)) };
 }
@@ -287,8 +251,7 @@ pub unsafe extern "C" fn rav1g_mt_queue_destroy(queue: *mut DataPtrQueueMT) {
 ///
 /// # Safety
 /// `queue` is a queue between `MTQueueInit` and `MTQueueDestroy`; the same for the functions below.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_mt_queue_push(queue: *mut DataPtrQueueMT, item: *mut c_void) {
+pub(crate) unsafe fn rav1g_mt_queue_push(queue: *mut DataPtrQueueMT, item: *mut c_void) {
     // SAFETY: the caller's contract.
     let mut locked = unsafe { Locked::lock(queue) };
     push(locked.inner(), item);
@@ -299,8 +262,7 @@ pub unsafe extern "C" fn rav1g_mt_queue_push(queue: *mut DataPtrQueueMT, item: *
 ///
 /// # Safety
 /// See [`rav1g_mt_queue_push`].
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn rav1g_mt_queue_get(queue: *mut DataPtrQueueMT) -> *mut c_void {
+pub(crate) unsafe fn rav1g_mt_queue_get(queue: *mut DataPtrQueueMT) -> *mut c_void {
     // SAFETY: the caller's contract.
     let mut locked = unsafe { Locked::lock(queue) };
     while locked.inner().m_QueueNotEmpty == 0 {
@@ -309,90 +271,14 @@ pub(crate) unsafe extern "C" fn rav1g_mt_queue_get(queue: *mut DataPtrQueueMT) -
     get(locked.inner())
 }
 
-/// `MTQueuePushSafe`: adds an item, waiting while the ring is full.
-///
-/// # Safety
-/// See [`rav1g_mt_queue_push`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_mt_queue_push_safe(queue: *mut DataPtrQueueMT, item: *mut c_void) {
-    // SAFETY: the caller's contract.
-    let mut locked = unsafe { Locked::lock(queue) };
-    while locked.inner().m_head - locked.inner().m_tail >= CAPACITY {
-        locked.wait();
-    }
-    push(locked.inner(), item);
-    locked.signal();
-}
-
-/// `MTQueueGetSafe`: takes the oldest item, waiting for one, and wakes a thread that waits for room.
-///
-/// # Safety
-/// See [`rav1g_mt_queue_push`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_mt_queue_get_safe(queue: *mut DataPtrQueueMT) -> *mut c_void {
-    // SAFETY: the caller's contract.
-    let mut locked = unsafe { Locked::lock(queue) };
-    while locked.inner().m_QueueNotEmpty == 0 {
-        locked.wait();
-    }
-    let item = get(locked.inner());
-    locked.signal();
-    item
-}
-
 /// `MTQueueIsEmpty`.
 ///
 /// # Safety
 /// See [`rav1g_mt_queue_push`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_mt_queue_is_empty(queue: *mut DataPtrQueueMT) -> c_int {
+pub(crate) unsafe fn rav1g_mt_queue_is_empty(queue: *mut DataPtrQueueMT) -> c_int {
     // SAFETY: the caller's contract.
     let mut locked = unsafe { Locked::lock(queue) };
     c_int::from(is_empty(locked.inner()))
-}
-
-/// `MTQueueFront`: the oldest item, or null.
-///
-/// # Safety
-/// See [`rav1g_mt_queue_push`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_mt_queue_front(queue: *mut DataPtrQueueMT) -> *mut c_void {
-    // SAFETY: the caller's contract.
-    let mut locked = unsafe { Locked::lock(queue) };
-    front(locked.inner())
-}
-
-/// `MTQueuePop`: drops the oldest item, if there is one.
-///
-/// # Safety
-/// See [`rav1g_mt_queue_push`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_mt_queue_pop(queue: *mut DataPtrQueueMT) {
-    // SAFETY: the caller's contract.
-    let mut locked = unsafe { Locked::lock(queue) };
-    pop(locked.inner());
-}
-
-/// `MTQueueClear`: drops every item.
-///
-/// # Safety
-/// See [`rav1g_mt_queue_push`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_mt_queue_clear(queue: *mut DataPtrQueueMT) {
-    // SAFETY: the caller's contract.
-    let mut locked = unsafe { Locked::lock(queue) };
-    init(locked.inner());
-}
-
-/// `MTQueueGetCount`: the items in the queue.
-///
-/// # Safety
-/// See [`rav1g_mt_queue_push`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_mt_queue_get_count(queue: *mut DataPtrQueueMT) -> c_int {
-    // SAFETY: the caller's contract.
-    let mut locked = unsafe { Locked::lock(queue) };
-    locked.inner().m_head - locked.inner().m_tail
 }
 
 /// Starts a thread of the decoder (the pipeline workers, the completion thread). An error when the
@@ -479,21 +365,25 @@ mod tests {
             let shared = Shared(queue);
             let reader = std::thread::spawn(move || {
                 let shared = shared;
-                (0..1000).map(|_| rav1g_mt_queue_get_safe(shared.0) as usize).collect::<Vec<_>>()
+                (0..1000).map(|_| rav1g_mt_queue_get(shared.0) as usize).collect::<Vec<_>>()
             });
-            for number in 1..=1000 {
-                rav1g_mt_queue_push_safe(queue, item(number));
+            // The ring has room for 100 items and a push does not wait for room (the decoder's queues
+            // never hold more than their pools have): 50 at a time, the next 50 when the reader has them.
+            for batch in 0..20 {
+                for number in 1..=50 {
+                    rav1g_mt_queue_push(queue, item(batch * 50 + number));
+                }
+                while rav1g_mt_queue_is_empty(queue) == 0 {
+                    std::thread::yield_now();
+                }
             }
             assert_eq!(reader.join().unwrap(), (1..=1000).collect::<Vec<_>>());
-            assert_eq!(rav1g_mt_queue_get_count(queue), 0);
+            assert_eq!(rav1g_mt_queue_is_empty(queue), 1);
             rav1g_mt_queue_push(queue, item(7));
             rav1g_mt_queue_push(queue, item(8));
-            assert_eq!(rav1g_mt_queue_get_count(queue), 2);
-            assert_eq!(rav1g_mt_queue_front(queue), item(7));
-            rav1g_mt_queue_pop(queue);
+            assert_eq!(rav1g_mt_queue_is_empty(queue), 0);
+            assert_eq!(rav1g_mt_queue_get(queue), item(7));
             assert_eq!(rav1g_mt_queue_get(queue), item(8));
-            rav1g_mt_queue_push(queue, item(9));
-            rav1g_mt_queue_clear(queue);
             assert_eq!(rav1g_mt_queue_is_empty(queue), 1);
             rav1g_mt_queue_destroy(queue);
             drop(Box::from_raw(queue));

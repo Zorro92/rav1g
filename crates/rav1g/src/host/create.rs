@@ -1140,8 +1140,7 @@ pub unsafe extern "C" fn av1_allocate_pbi(dec: *mut Av1Core, ppbi: *mut *mut AV1
 ///
 /// # Safety
 /// `dec` is a decoder.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_get_frame_buffer(dec: *mut Av1Core) -> *mut HwFrameBuffer {
+pub(crate) unsafe fn rav1g_get_frame_buffer(dec: *mut Av1Core) -> *mut HwFrameBuffer {
     // SAFETY: the caller's contract; the pool is used under its lock.
     unsafe {
         let mutex = &raw mut (*dec).fb_pool_mutex;
@@ -1160,8 +1159,7 @@ pub unsafe extern "C" fn rav1g_get_frame_buffer(dec: *mut Av1Core) -> *mut HwFra
 ///
 /// # Safety
 /// `dec` is a decoder and `fb` a frame buffer of it.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_frame_buffer_acquire(dec: *mut Av1Core, fb: *mut HwFrameBuffer) {
+pub(crate) unsafe fn rav1g_frame_buffer_acquire(dec: *mut Av1Core, fb: *mut HwFrameBuffer) {
     // SAFETY: the caller's contract.
     unsafe {
         mutex_lock(&raw mut (*dec).fb_pool_mutex);
@@ -1175,8 +1173,7 @@ pub unsafe extern "C" fn rav1g_frame_buffer_acquire(dec: *mut Av1Core, fb: *mut 
 ///
 /// # Safety
 /// `dec` is a decoder whose pool lock this thread holds; `fb` is a frame buffer of it with a reference.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_release_fb(dec: *mut Av1Core, fb: *mut HwFrameBuffer) -> c_int {
+pub(crate) unsafe fn rav1g_release_fb(dec: *mut Av1Core, fb: *mut HwFrameBuffer) -> c_int {
     // SAFETY: the caller's contract.
     unsafe {
         (*fb).ref_cnt -= 1;
@@ -1193,8 +1190,7 @@ pub unsafe extern "C" fn rav1g_release_fb(dec: *mut Av1Core, fb: *mut HwFrameBuf
 ///
 /// # Safety
 /// `dec` is a decoder and `fb` a frame buffer of it with a reference.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_frame_buffer_release(dec: *mut Av1Core, fb: *mut HwFrameBuffer) {
+pub(crate) unsafe fn rav1g_frame_buffer_release(dec: *mut Av1Core, fb: *mut HwFrameBuffer) {
     // SAFETY: the caller's contract.
     unsafe {
         mutex_lock(&raw mut (*dec).fb_pool_mutex);

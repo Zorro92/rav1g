@@ -518,8 +518,7 @@ struct SuperresLayout {
 /// # Safety
 /// `dec` is the decoder while it records a frame; `cm` is the frame's and `lr_ctxt` the decoder's
 /// restoration context (`AV1LrStruct`).
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_cdef_looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON, lr_ctxt: *mut c_void) {
+pub(crate) unsafe fn rav1g_cdef_looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON, lr_ctxt: *mut c_void) {
     // SAFETY: the caller's contract; the frame buffers are those of the slot and the decoder's back
     // buffer, which only this thread touches while it records.
     unsafe {

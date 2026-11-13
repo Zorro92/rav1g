@@ -376,8 +376,7 @@ unsafe fn release(lib: *mut compute_shader_lib) {
 ///
 /// # Safety
 /// `lib` is null or a library of [`av1_create_pipeline_cache_handle`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_wait_shader_create_complete(lib: *mut compute_shader_lib) -> c_int {
+pub(crate) unsafe fn rav1g_wait_shader_create_complete(lib: *mut compute_shader_lib) -> c_int {
     let shader_lib = lib.cast::<ShaderLib>();
     if shader_lib.is_null() {
         return -1;
@@ -632,8 +631,7 @@ unsafe fn fill_mask_lut(ptr: &mut [u8], offsets: &mut [[c_int; 2]; BLOCK_SIZES_A
 /// # Safety
 /// `dec` is the decoder with its device, its direct queue and the five buffers, created as
 /// `DeviceOnlyConst`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_upload_luts(dec: *mut Av1Core) -> i32 {
+pub(crate) unsafe fn rav1g_upload_luts(dec: *mut Av1Core) -> i32 {
     // SAFETY: the caller's contract.
     let dec = unsafe { &mut *dec };
     // SAFETY: the COM pointers of the decoder's context.

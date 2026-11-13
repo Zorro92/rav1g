@@ -107,8 +107,7 @@ unsafe fn frame_layout(dec: *mut Av1Core, cm: *const AV1_COMMON) -> (bool, bool,
 /// # Safety
 /// `dec` is the decoder while it records a frame; `cm` is the frame's; `fb` is valid for writing and
 /// zeroed.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_output_image(
+pub(crate) unsafe fn rav1g_output_image(
     dec: *mut Av1Core,
     cm: *mut AV1_COMMON,
     fb: *mut av1_decoded_frame_buffer_t,
@@ -148,12 +147,7 @@ pub unsafe extern "C" fn rav1g_output_image(
 /// # Safety
 /// `dec` is the decoder while it records a frame that is output; `cm` is the frame's; `fb` is what
 /// [`rav1g_output_image`] got for it.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_copy_output(
-    dec: *mut Av1Core,
-    cm: *mut AV1_COMMON,
-    fb: *const av1_decoded_frame_buffer_t,
-) {
+pub(crate) unsafe fn rav1g_copy_output(dec: *mut Av1Core, cm: *mut AV1_COMMON, fb: *const av1_decoded_frame_buffer_t) {
     // SAFETY: the caller's contract; the image descriptors of the pool are the decoder's, and the
     // resources of `fb` are the application's until the image comes back.
     unsafe {
