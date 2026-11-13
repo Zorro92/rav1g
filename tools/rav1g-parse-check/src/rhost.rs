@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use rav1g_parse::options::ParseOptions;
 use rav1g_parse::rav1d::include::dav1d::headers::Rav1dPixelLayout;
 use rav1g_parse::rav1d::parse::{ParseFrame, ParsePalette, ParseSettings, ParseSuperblock, ParseTile, Parser};
 use rav1g_parse::sink::{FrameMemory, SecondModeInfo, Sink, SinkHost, TileMemory};
@@ -156,10 +157,13 @@ pub struct RustParser {
 }
 
 impl RustParser {
-    pub fn new(threads: u16) -> Result<Self, String> {
-        let sink =
-            Arc::new(Sink::new(PlainHost { side: UnsafeCell::new(Side::new()), arena_nanos: AtomicU64::new(0) }));
-        let settings = ParseSettings { threads, frames: 1, ..Default::default() };
+    pub fn new(threads: u16, options: ParseOptions) -> Result<Self, String> {
+        let sink = Arc::new(Sink::with_options(
+            PlainHost { side: UnsafeCell::new(Side::new()), arena_nanos: AtomicU64::new(0) },
+            options.sink(),
+        ));
+        let mut settings = ParseSettings { threads, frames: 1, ..Default::default() };
+        options.apply(&mut settings);
         let parser =
             Parser::new(&settings, sink.clone()).map_err(|error| format!("rav1d was not created: {error:?}"))?;
         Ok(Self { parser, sink })

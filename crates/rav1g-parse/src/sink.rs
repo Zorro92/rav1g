@@ -21,6 +21,12 @@
 //! The memory is the host's ([`SinkHost`]): for the D3D12 host the mapped buffers of a pipeline slot, for
 //! `tools/rav1g-parse-check` plain memory.
 //!
+//! Two of those buffers are write-combined memory with the D3D12 host (the coefficients and the
+//! transform block records: upload heaps, which the CPU must not read and should write in order). The
+//! sink writes them as the entropy decoder of libaom does: each record once, in order, and of the
+//! coefficients the ones that are not zero, in rising scan order. With [`SinkOptions::stage`] both go
+//! through memory of the sink first and reach the buffers in runs, whole and in order.
+//!
 //! Until the entropy decoder of libaom leaves the tree (docs/phase2-rav1d.md, step 6), the block lists are
 //! computed by the code that takes its block context from that decoder's structs. So the sink keeps such
 //! structs of its own, cleared, and sets the fields that code reads: an `AV1Decoder` for the frame (frame
@@ -38,7 +44,9 @@ use rav1d::include::dav1d::headers::{Rav1dFrameHeader, Rav1dPixelLayout};
 use rav1d::parse::{
     ParseBlock, ParseFrame, ParsePalette, ParseShowExisting, ParseSink, ParseSuperblock, ParseTile, ParseTxb,
 };
-use rav1g_sys::parser::{AV1_COMMON, AV1Decoder, MACROBLOCKD, MB_MODE_INFO, TileInfo, av1_tile_data};
+use rav1g_sys::parser::{
+    AV1_COMMON, AV1Decoder, MACROBLOCKD, MB_MODE_INFO, TileInfo, av1_tile_data, tx_block_info_gpu,
+};
 
 use crate::record::{self, BLOCK_SIZE_OF, MI_SIZE_HIGH_LOG2, MI_SIZE_WIDE_LOG2, RecordFrame};
 
@@ -62,6 +70,59 @@ const TX_TYPE_FLAGS: [u32; 16] = [
 /// The scan of a transform type (`av1_idct_scans_lut` of `av1_read_coeffs_txb`): 0 the default one, 1 and
 /// 2 the scans by row and by column.
 const TX_TYPE_SCAN: [u32; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1, 2, 1, 2];
+
+/// The largest number of coefficients a transform block has (32x32 coded).
+const MAX_COEFS: usize = 1024;
+/// The coefficients a tile stages before they go to their buffer ([`SinkOptions::stage`]): 32 KiB, which
+/// stays in the first-level cache next to what the parse reads.
+const STAGE_COEFS: usize = 8 * MAX_COEFS;
+/// The transform block records a tile stages: 8 KiB.
+const STAGE_BLOCKS: usize = 512;
+
+/// How the sink works. All off is the sink as it writes by default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SinkOptions {
+    /// The coefficients and the transform block records of a tile are collected in memory of the sink
+    /// and copied to their buffers in runs: every word of a run is written, in order, by one copy. The
+    /// buffers hold the same bytes afterwards (a coefficient that is zero is then written as zero, where
+    /// it is otherwise left as the zero the buffer has).
+    pub stage: bool,
+    /// The time inside the calls of a tile (block, transform block, palette, superblock) is measured
+    /// and given to the host ([`SinkTimer::Calls`]), when the host has a clock. Two readings of the
+    /// processor's time stamp counter a call.
+    pub time_calls: bool,
+}
+
+/// What the sink measures for a host with a clock ([`SinkHost::add_time`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SinkTimer {
+    /// The calls of a tile: the mode info record and the grid of a block, the record of a transform
+    /// block, the palette, the superblock; with [`SinkOptions::stage`] the copies of the staged runs too.
+    /// Only with [`SinkOptions::time_calls`]. The parse that makes the calls is not in it, and neither
+    /// are the coefficients the parse writes itself.
+    Calls,
+    /// The copies of the staged runs into their buffers ([`SinkOptions::stage`]).
+    Staged,
+    /// The block lists at the end of a tile.
+    Lists,
+}
+
+/// The processor's time stamp counter, or 0 where there is none to read.
+#[inline]
+fn time_stamp() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: the instruction is part of every x86-64 processor and reads a counter.
+        #[allow(unused_unsafe, reason = "safe to call from some toolchains on")]
+        unsafe {
+            core::arch::x86_64::_rdtsc()
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        0
+    }
+}
 
 /// The memory of a frame's parse that all its tiles share.
 pub struct FrameMemory {
@@ -113,6 +174,9 @@ pub trait SinkHost: Send + Sync {
 
     /// A superblock row of a tile was parsed since `start`, with the sink's part of it.
     fn tile_time(&self, _start: i64) {}
+
+    /// A part of the sink's work took `ticks` of the clock of [`Self::ticks`]. On a tile's thread.
+    fn add_time(&self, _timer: SinkTimer, _ticks: i64) {}
 
     /// A frame's parse starts (frames come one at a time). `Err` fails the frame.
     #[expect(clippy::result_unit_err, reason = "the error of ParseSink::frame_begin, which has no more to say")]
@@ -178,6 +242,67 @@ struct TileState {
     lossless: bool,
     /// The tile ran out of room: its frame fails.
     failed: bool,
+    /// [`SinkOptions::stage`]: what the tile has collected for its buffers.
+    stage: Option<Stage>,
+    /// [`SinkOptions::time_calls`]: the time stamps the calls of the tile took, and the clock and the
+    /// time stamp at the tile's begin, which give the length of a time stamp.
+    call_stamps: u64,
+    begin_ticks: i64,
+    begin_stamp: u64,
+}
+
+/// The coefficients and the transform block records a tile has collected ([`SinkOptions::stage`]): a run
+/// of each, which lies in the buffer from `coef_dst` and `block_dst` on.
+struct Stage {
+    /// Zero behind the run, as the buffer is where nothing was written.
+    coefs: Box<[i32; STAGE_COEFS]>,
+    coef_dst: *mut i32,
+    coef_count: usize,
+    blocks: Box<[tx_block_info_gpu; STAGE_BLOCKS]>,
+    block_dst: *mut tx_block_info_gpu,
+    block_count: usize,
+}
+
+impl Stage {
+    fn new() -> Stage {
+        Stage {
+            coefs: zeroed_box(),
+            coef_dst: std::ptr::null_mut(),
+            coef_count: 0,
+            blocks: zeroed_box(),
+            block_dst: std::ptr::null_mut(),
+            block_count: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.coef_count == 0 && self.block_count == 0
+    }
+
+    /// The runs go to their buffers.
+    ///
+    /// # Safety
+    /// The buffers the runs were collected for are still the tile's.
+    unsafe fn flush(&mut self) {
+        // SAFETY: a run lies inside the tile's part of its buffer (checked when it was collected), and
+        // the stage is memory of its own.
+        unsafe {
+            if self.coef_count != 0 {
+                std::ptr::copy_nonoverlapping(self.coefs.as_ptr(), self.coef_dst, self.coef_count);
+            }
+            if self.block_count != 0 {
+                std::ptr::copy_nonoverlapping(self.blocks.as_ptr(), self.block_dst, self.block_count);
+            }
+        }
+        self.forget();
+    }
+
+    /// The runs are dropped (a tile that begins anew, behind a frame that failed).
+    fn forget(&mut self) {
+        self.coefs[..self.coef_count].fill(0);
+        self.coef_count = 0;
+        self.block_count = 0;
+    }
 }
 
 /// A cleared struct of the entropy decoder on the heap.
@@ -205,6 +330,7 @@ pub struct Sink<H: SinkHost> {
     tiles: UnsafeCell<Vec<UnsafeCell<Option<TileState>>>>,
     /// Nanoseconds the tiles spent counting their block lists (`av1_mi_push_block`), for a timing run.
     block_list_nanos: AtomicU64,
+    options: SinkOptions,
 }
 
 // SAFETY: the calls of a `ParseSink` come as its contract says: `frame_begin` and `frame_end` while no
@@ -233,12 +359,59 @@ impl<H: SinkHost> Sink<H> {
     }
 
     pub fn new(host: H) -> Self {
+        Self::with_options(host, SinkOptions::default())
+    }
+
+    pub fn with_options(host: H, options: SinkOptions) -> Self {
         Self {
             host,
             frame: UnsafeCell::new(None),
             pbi: UnsafeCell::new(zeroed_box()),
             tiles: UnsafeCell::new(Vec::new()),
             block_list_nanos: AtomicU64::new(0),
+            options,
+        }
+    }
+
+    pub fn options(&self) -> SinkOptions {
+        self.options
+    }
+
+    /// The staged runs of a tile go to their buffers ([`SinkOptions::stage`]).
+    ///
+    /// # Safety
+    /// The tile's thread, inside the frame.
+    unsafe fn flush_stage(host: &H, state: &mut TileState) {
+        if let Some(stage) = &mut state.stage
+            && !stage.is_empty()
+        {
+            let start = host.ticks();
+            // SAFETY: the caller's contract: the runs were collected for the tile's buffers in this
+            // frame.
+            unsafe { stage.flush() };
+            if start != 0 {
+                host.add_time(SinkTimer::Staged, host.ticks() - start);
+            }
+        }
+    }
+
+    /// The start of a call of a tile that is timed ([`SinkOptions::time_calls`]), or 0.
+    #[inline]
+    fn call_begin(&self) -> u64 {
+        if self.options.time_calls { time_stamp() } else { 0 }
+    }
+
+    /// The end of the call that began at `begin`.
+    ///
+    /// # Safety
+    /// As [`Self::tile`].
+    #[inline]
+    unsafe fn call_end(&self, tile: usize, begin: u64) {
+        if begin != 0 {
+            // SAFETY: the caller's contract.
+            if let Some(state) = unsafe { self.tile(tile) } {
+                state.call_stamps += time_stamp().wrapping_sub(begin);
+            }
         }
     }
 
@@ -270,6 +443,174 @@ impl<H: SinkHost> Sink<H> {
         // SAFETY: the caller's contract: the vector is not written while tiles are in parse, and the
         // element is this thread's.
         unsafe { &mut *(&*self.tiles.get())[tile].get() }
+    }
+}
+
+/// The calls of a tile, without their timing.
+impl<H: SinkHost> Sink<H> {
+    fn block_call(&self, _frame: usize, tile: usize, block: &ParseBlock<'_>) {
+        // SAFETY: a call of the tile's thread between the frame's begin and end; the record is the next
+        // one of the tile's part of the pool, and the grid is written inside the tile.
+        unsafe {
+            let frame = self.frame();
+            let state = self.tile(tile).as_mut().expect("the tile has begun");
+            if state.failed {
+                return;
+            }
+            // The tile's part of the pool, and when it is full its second part (`decode_mbmi_block`,
+            // `set_offsets`).
+            if state.mi_count >= state.memory.mi_count_max && state.second.is_none() {
+                state.second = self.host.second_mode_info(tile, state.memory.tile_data);
+                if state.second.is_none() {
+                    state.failed = true;
+                    self.host.no_room(tile, true);
+                    return;
+                }
+            }
+            let mi = match &state.second {
+                Some(second) => {
+                    if state.mi_count2 >= state.memory.mi_count_max {
+                        state.failed = true;
+                        self.host.no_room(tile, true);
+                        return;
+                    }
+                    state.mi_count2 += 1;
+                    second.mi_pool.add(state.mi_count2 as usize - 1)
+                }
+                None => {
+                    state.mi_count += 1;
+                    state.memory.mi_pool.add(state.mi_count as usize - 1)
+                }
+            };
+            mi.write_bytes(0, 1);
+            let lossless = frame.hdr.segmentation.lossless[block.b.seg_id.get()];
+            state.lossless = lossless;
+            let record_frame = RecordFrame {
+                hdr: &frame.hdr,
+                mi_cols: frame.mi_cols,
+                mi_rows: frame.mi_rows,
+                has_chroma: frame.has_chroma,
+            };
+            record::fill(&mut *mi, &record_frame, block, lossless);
+
+            // The grid: the units of the block that are inside the frame.
+            let bsize = BLOCK_SIZE_OF[block.bs as usize] as usize;
+            let x_mis = (1 << MI_SIZE_WIDE_LOG2[bsize]).min(frame.mi_cols - block.x4) as usize;
+            let y_mis = (1 << MI_SIZE_HIGH_LOG2[bsize]).min(frame.mi_rows - block.y4) as usize;
+            let first = frame.mi_grid.add((block.y4 * frame.mi_stride + block.x4) as usize);
+            for y in 0..y_mis {
+                let row = first.add(y * frame.mi_stride as usize);
+                for x in 0..x_mis {
+                    row.add(x).write(mi);
+                }
+            }
+        }
+    }
+
+    fn txb_call(&self, _frame: usize, tile: usize, txb: &ParseTxb) -> *mut i32 {
+        // SAFETY: a call of the tile's thread between the frame's begin and end; the record and the
+        // coefficients are inside the tile's parts of their buffers (checked against their ends).
+        unsafe {
+            let state = self.tile(tile).as_mut().expect("the tile has begun");
+            if state.failed {
+                return std::ptr::null_mut();
+            }
+            let td = &mut *state.memory.tile_data;
+            // The coefficients up to the last one, rounded up to four.
+            let coef_count = (i32::from(txb.eob) + 4) >> 2;
+            if td.dq_buffer_ptr + (coef_count << 2) > td.dq_buffer_end {
+                state.failed = true;
+                self.host.no_room(tile, false);
+                return std::ptr::null_mut();
+            }
+            let tx_type = if txb.txtp == WHT_WHT { 0 } else { usize::from(txb.txtp) };
+            let tx_size = txb.tx as usize;
+            let type_index = if state.lossless && tx_size == 0 { TX_SIZES_ALL } else { tx_size };
+            let record = tx_block_info_gpu {
+                flags: coef_count as u32
+                    | TX_TYPE_FLAGS[tx_type]
+                    | (u32::from(txb.plane) << 21)
+                    | (TX_TYPE_SCAN[tx_type] << 11),
+                input_offset: td.dq_buffer_ptr as u32,
+                output_pos: txb.x4 as u32 | ((txb.y4 as u32) << 16),
+                sorting_idx: ((td.idct_blocks_sizes[type_index] << 8) + type_index as c_int) as u32,
+            };
+            let block = td.idct_blocks_host.add(td.idct_blocks_ptr as usize);
+            td.idct_blocks_sizes[type_index] += 1;
+            td.idct_blocks_ptr += 1;
+            let coefs = td.dq_buffer_base.add(td.dq_buffer_ptr as usize);
+            let count = (coef_count << 2) as usize;
+            td.dq_buffer_ptr += coef_count << 2;
+            let Some(stage) = &mut state.stage else {
+                block.write(record);
+                // The parser writes the coefficients that are not zero, as the entropy decoder of libaom
+                // does: the buffer is zero where a frame has not written it (the transform stage binds it
+                // for writing and clears what it has read).
+                return coefs;
+            };
+            // Staged: the record and the coefficients go on behind the runs, which go to the buffers
+            // first when they have no room left or the buffers do not go on where the runs end (the
+            // tile's second part).
+            let fits = stage.coef_count + count <= STAGE_COEFS && stage.block_count < STAGE_BLOCKS;
+            let goes_on = (stage.coef_count == 0 || stage.coef_dst.add(stage.coef_count) == coefs)
+                && (stage.block_count == 0 || stage.block_dst.add(stage.block_count) == block);
+            if !(fits && goes_on) {
+                Self::flush_stage(&self.host, state);
+            }
+            let stage = state.stage.as_mut().expect("the tile stages");
+            if stage.coef_count == 0 {
+                stage.coef_dst = coefs;
+            }
+            if stage.block_count == 0 {
+                stage.block_dst = block;
+            }
+            stage.blocks[stage.block_count] = record;
+            stage.block_count += 1;
+            let staged = stage.coefs.as_mut_ptr().add(stage.coef_count);
+            stage.coef_count += count;
+            staged
+        }
+    }
+
+    fn superblock_call(&self, _frame: usize, tile: usize, superblock: &ParseSuperblock<'_>) {
+        // SAFETY: a call of the tile's thread between the frame's begin and end; the grid is read inside
+        // the tile, whose blocks have their records.
+        unsafe {
+            let frame = self.frame();
+            if frame.cdef_coded {
+                // libaom keeps the CDEF index of a 64x64 area in the record its top left 4x4 unit points
+                // to (`read_cdef` of `av1/decoder/decodemv.c`); -1 when all its blocks are skipped.
+                let quadrants = if frame.sb128 { 0..4 } else { 0..1 };
+                for quadrant in quadrants {
+                    let (x4, y4, index) = if frame.sb128 {
+                        (superblock.x4 + (quadrant & 1) * 16, superblock.y4 + (quadrant >> 1) * 16, quadrant as usize)
+                    } else {
+                        let index = ((superblock.x4 >> 4) & 1) + ((superblock.y4 >> 4) & 1) * 2;
+                        (superblock.x4, superblock.y4, index as usize)
+                    };
+                    if x4 >= frame.mi_cols || y4 >= frame.mi_rows {
+                        continue;
+                    }
+                    let mi = *frame.mi_grid.add((y4 * frame.mi_stride + x4) as usize);
+                    if !mi.is_null() {
+                        (*mi).cdef_strength = superblock.cdef_idx[index];
+                    }
+                }
+            }
+        }
+        self.host.superblock(tile, superblock);
+        // The next superblock of the tile, if there is one (`decode_tile2`).
+        // SAFETY: as above.
+        unsafe {
+            let frame = self.frame();
+            let state = self.tile(tile).as_mut().expect("the tile has begun");
+            let side = if frame.sb128 { 32 } else { 16 };
+            let last =
+                superblock.x4 + side >= state.xd.tile.mi_col_end && superblock.y4 + side >= state.xd.tile.mi_row_end;
+            if !last {
+                Self::coefs_go_on(&self.host, tile, state);
+            }
+        }
     }
 }
 
@@ -344,7 +685,20 @@ impl<H: SinkHost> ParseSink for Sink<H> {
                 last_coefs: true,
                 lossless: false,
                 failed: false,
+                stage: None,
+                call_stamps: 0,
+                begin_ticks: 0,
+                begin_stamp: 0,
             });
+            if self.options.stage {
+                // What a frame that failed has left is not for this frame's buffers.
+                state.stage.get_or_insert_with(Stage::new).forget();
+            }
+            if self.options.time_calls {
+                state.call_stamps = 0;
+                state.begin_ticks = self.host.ticks();
+                state.begin_stamp = time_stamp();
+            }
             state.mi_count = 0;
             state.mi_count2 = 0;
             state.second = None;
@@ -375,146 +729,33 @@ impl<H: SinkHost> ParseSink for Sink<H> {
         }
     }
 
-    fn block(&self, _frame: usize, tile: usize, block: &ParseBlock<'_>) {
-        // SAFETY: a call of the tile's thread between the frame's begin and end; the record is the next
-        // one of the tile's part of the pool, and the grid is written inside the tile.
-        unsafe {
-            let frame = self.frame();
-            let state = self.tile(tile).as_mut().expect("the tile has begun");
-            if state.failed {
-                return;
-            }
-            // The tile's part of the pool, and when it is full its second part (`decode_mbmi_block`,
-            // `set_offsets`).
-            if state.mi_count >= state.memory.mi_count_max && state.second.is_none() {
-                state.second = self.host.second_mode_info(tile, state.memory.tile_data);
-                if state.second.is_none() {
-                    state.failed = true;
-                    self.host.no_room(tile, true);
-                    return;
-                }
-            }
-            let mi = match &state.second {
-                Some(second) => {
-                    if state.mi_count2 >= state.memory.mi_count_max {
-                        state.failed = true;
-                        self.host.no_room(tile, true);
-                        return;
-                    }
-                    state.mi_count2 += 1;
-                    second.mi_pool.add(state.mi_count2 as usize - 1)
-                }
-                None => {
-                    state.mi_count += 1;
-                    state.memory.mi_pool.add(state.mi_count as usize - 1)
-                }
-            };
-            mi.write_bytes(0, 1);
-            let lossless = frame.hdr.segmentation.lossless[block.b.seg_id.get()];
-            state.lossless = lossless;
-            let record_frame = RecordFrame {
-                hdr: &frame.hdr,
-                mi_cols: frame.mi_cols,
-                mi_rows: frame.mi_rows,
-                has_chroma: frame.has_chroma,
-            };
-            record::fill(&mut *mi, &record_frame, block, lossless);
-
-            // The grid: the units of the block that are inside the frame.
-            let bsize = BLOCK_SIZE_OF[block.bs as usize] as usize;
-            let x_mis = (1 << MI_SIZE_WIDE_LOG2[bsize]).min(frame.mi_cols - block.x4) as usize;
-            let y_mis = (1 << MI_SIZE_HIGH_LOG2[bsize]).min(frame.mi_rows - block.y4) as usize;
-            let first = frame.mi_grid.add((block.y4 * frame.mi_stride + block.x4) as usize);
-            for y in 0..y_mis {
-                let row = first.add(y * frame.mi_stride as usize);
-                for x in 0..x_mis {
-                    row.add(x).write(mi);
-                }
-            }
-        }
+    fn block(&self, frame: usize, tile: usize, block: &ParseBlock<'_>) {
+        let begin = self.call_begin();
+        self.block_call(frame, tile, block);
+        // SAFETY: a call of the tile's thread between the frame's begin and end.
+        unsafe { self.call_end(tile, begin) };
     }
 
-    fn txb(&self, _frame: usize, tile: usize, txb: &ParseTxb) -> *mut i32 {
-        // SAFETY: a call of the tile's thread between the frame's begin and end; the record and the
-        // coefficients are inside the tile's parts of their buffers (checked against their ends).
-        unsafe {
-            let state = self.tile(tile).as_mut().expect("the tile has begun");
-            if state.failed {
-                return std::ptr::null_mut();
-            }
-            let td = &mut *state.memory.tile_data;
-            // The coefficients up to the last one, rounded up to four.
-            let coef_count = (i32::from(txb.eob) + 4) >> 2;
-            if td.dq_buffer_ptr + (coef_count << 2) > td.dq_buffer_end {
-                state.failed = true;
-                self.host.no_room(tile, false);
-                return std::ptr::null_mut();
-            }
-            let tx_type = if txb.txtp == WHT_WHT { 0 } else { usize::from(txb.txtp) };
-            let tx_size = txb.tx as usize;
-            let type_index = if state.lossless && tx_size == 0 { TX_SIZES_ALL } else { tx_size };
-            let block = &mut *td.idct_blocks_host.add(td.idct_blocks_ptr as usize);
-            block.flags = coef_count as u32
-                | TX_TYPE_FLAGS[tx_type]
-                | (u32::from(txb.plane) << 21)
-                | (TX_TYPE_SCAN[tx_type] << 11);
-            block.input_offset = td.dq_buffer_ptr as u32;
-            block.output_pos = txb.x4 as u32 | ((txb.y4 as u32) << 16);
-            block.sorting_idx = ((td.idct_blocks_sizes[type_index] << 8) + type_index as c_int) as u32;
-            td.idct_blocks_sizes[type_index] += 1;
-            td.idct_blocks_ptr += 1;
-            let coefs = td.dq_buffer_base.add(td.dq_buffer_ptr as usize);
-            td.dq_buffer_ptr += coef_count << 2;
-            // The parser writes the coefficients that are not zero, as the entropy decoder of libaom
-            // does: the buffer is zero where a frame has not written it (the transform stage binds it for
-            // writing and clears what it has read).
-            coefs
-        }
+    fn txb(&self, frame: usize, tile: usize, txb: &ParseTxb) -> *mut i32 {
+        let begin = self.call_begin();
+        let coefs = self.txb_call(frame, tile, txb);
+        // SAFETY: as above.
+        unsafe { self.call_end(tile, begin) };
+        coefs
     }
 
     fn palette(&self, _frame: usize, tile: usize, palette: &ParsePalette<'_>) {
+        let begin = self.call_begin();
         self.host.palette(tile, palette);
+        // SAFETY: as above.
+        unsafe { self.call_end(tile, begin) };
     }
 
-    fn superblock(&self, _frame: usize, tile: usize, superblock: &ParseSuperblock<'_>) {
-        // SAFETY: a call of the tile's thread between the frame's begin and end; the grid is read inside
-        // the tile, whose blocks have their records.
-        unsafe {
-            let frame = self.frame();
-            if frame.cdef_coded {
-                // libaom keeps the CDEF index of a 64x64 area in the record its top left 4x4 unit points
-                // to (`read_cdef` of `av1/decoder/decodemv.c`); -1 when all its blocks are skipped.
-                let quadrants = if frame.sb128 { 0..4 } else { 0..1 };
-                for quadrant in quadrants {
-                    let (x4, y4, index) = if frame.sb128 {
-                        (superblock.x4 + (quadrant & 1) * 16, superblock.y4 + (quadrant >> 1) * 16, quadrant as usize)
-                    } else {
-                        let index = ((superblock.x4 >> 4) & 1) + ((superblock.y4 >> 4) & 1) * 2;
-                        (superblock.x4, superblock.y4, index as usize)
-                    };
-                    if x4 >= frame.mi_cols || y4 >= frame.mi_rows {
-                        continue;
-                    }
-                    let mi = *frame.mi_grid.add((y4 * frame.mi_stride + x4) as usize);
-                    if !mi.is_null() {
-                        (*mi).cdef_strength = superblock.cdef_idx[index];
-                    }
-                }
-            }
-        }
-        self.host.superblock(tile, superblock);
-        // The next superblock of the tile, if there is one (`decode_tile2`).
+    fn superblock(&self, frame: usize, tile: usize, superblock: &ParseSuperblock<'_>) {
+        let begin = self.call_begin();
+        self.superblock_call(frame, tile, superblock);
         // SAFETY: as above.
-        unsafe {
-            let frame = self.frame();
-            let state = self.tile(tile).as_mut().expect("the tile has begun");
-            let side = if frame.sb128 { 32 } else { 16 };
-            let last =
-                superblock.x4 + side >= state.xd.tile.mi_col_end && superblock.y4 + side >= state.xd.tile.mi_row_end;
-            if !last {
-                Self::coefs_go_on(&self.host, tile, state);
-            }
-        }
+        unsafe { self.call_end(tile, begin) };
     }
 
     fn tile_end(&self, _frame: usize, tile: usize) {
@@ -525,6 +766,17 @@ impl<H: SinkHost> ParseSink for Sink<H> {
         unsafe {
             let frame = self.frame();
             let state = self.tile(tile).as_mut().expect("the tile has begun");
+            // What the tile has staged, and the time of its calls.
+            Self::flush_stage(&self.host, state);
+            if self.options.time_calls && state.begin_ticks != 0 {
+                let stamps = time_stamp().wrapping_sub(state.begin_stamp);
+                let ticks = self.host.ticks() - state.begin_ticks;
+                if stamps != 0 {
+                    let calls = state.call_stamps as f64 * ticks as f64 / stamps as f64;
+                    self.host.add_time(SinkTimer::Calls, calls as i64);
+                }
+            }
+            let lists_start = self.host.ticks();
             let td = state.memory.tile_data;
             (*td).mi_count = state.mi_count;
             if let Some(second) = &state.second {
@@ -559,6 +811,9 @@ impl<H: SinkHost> ParseSink for Sink<H> {
                 av1_mi_push_block(pbi, cm, xd);
             }
             self.block_list_nanos.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            if lists_start != 0 {
+                self.host.add_time(SinkTimer::Lists, self.host.ticks() - lists_start);
+            }
         }
         self.host.tile_end(tile);
     }

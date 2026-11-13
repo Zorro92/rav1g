@@ -22,6 +22,8 @@ use rav1g_parse::rav1d::parse::{
     ParseBlock, ParseFrame, ParsePalette, ParseSettings, ParseSink, ParseSuperblock, ParseTile, ParseTxb, Parser,
 };
 
+use rav1g_parse::options::ParseOptions;
+
 use crate::container;
 use crate::rhost::RustParser;
 
@@ -83,7 +85,7 @@ fn milliseconds(duration: Duration, frames: u64) -> f64 {
     duration.as_secs_f64() * 1000.0 / frames.max(1) as f64
 }
 
-pub fn run(path: &Path, threads: u16) -> ExitCode {
+pub fn run(path: &Path, threads: u16, options: ParseOptions) -> ExitCode {
     let data = match std::fs::read(path) {
         Ok(data) => data,
         Err(error) => {
@@ -111,7 +113,8 @@ pub fn run(path: &Path, threads: u16) -> ExitCode {
             width: AtomicU64::new(0),
             height: AtomicU64::new(0),
         });
-        let settings = ParseSettings { threads, frames: 1, ..Default::default() };
+        let mut settings = ParseSettings { threads, frames: 1, ..Default::default() };
+        options.apply(&mut settings);
         let Ok(parser) = Parser::new(&settings, sink.clone()) else {
             eprintln!("rav1g-parse-check: rav1d was not created");
             return ExitCode::FAILURE;
@@ -130,7 +133,7 @@ pub fn run(path: &Path, threads: u16) -> ExitCode {
     let mut with_sink = Duration::MAX;
     let mut block_lists = Duration::MAX;
     for _ in 0..RUNS {
-        let mut parser = match RustParser::new(threads) {
+        let mut parser = match RustParser::new(threads, options) {
             Ok(parser) => parser,
             Err(error) => {
                 eprintln!("rav1g-parse-check: {error}");
@@ -158,10 +161,11 @@ pub fn run(path: &Path, threads: u16) -> ExitCode {
 
     let sink = with_sink.saturating_sub(parse);
     println!(
-        "PARSE TIME {}: {frames} frames {width}x{height}, {threads} thread(s), best of {RUNS}: parse {:.3} ms/frame, with \
+        "PARSE TIME {}: {frames} frames {width}x{height}, {threads} thread(s), switches {}, best of {RUNS}: parse {:.3} ms/frame, with \
          the sink {:.3} ms/frame, the sink {:.3} ms/frame, of which the block lists {:.3} ms/frame (CPU time of all \
          threads for the block lists)",
         path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
+        options.words(),
         milliseconds(parse, frames),
         milliseconds(with_sink, frames),
         milliseconds(sink, frames),

@@ -396,6 +396,7 @@ int AV1Decoder::DecodeOne() {
                        created_intrav2_ != params_.intrav2_ ||
                        created_interfast_ != (params_.interfast_ || params_.interfastlists_) ||
                        created_parser_rav1d_ != params_.parser_rav1d_ ||
+                       created_parser_options_ != params_.parser_options_ ||
                        created_lowmem_ != params_.lowmem_parts_ || created_packed_10x3_ != params_.hdr10x3_ ||
                        created_noguard_ != params_.noguard_);
   if (initialized_ && (need_reinit_ || other_decoder)) DestroyDecoder();
@@ -444,6 +445,13 @@ int AV1Decoder::DecodeOne() {
       cfg.inter_fast = params_.interfast_ || params_.interfastlists_;
       // -parser rav1d: the parse pass of rav1d reads the bitstream of this decoder.
       cfg.parser = params_.parser_rav1d_ ? RAV1G_PARSER_RAV1D : RAV1G_PARSER_LIBAOM;
+      // -parseopt: the switches of that parser.
+      static_assert(PLAYER_PARSEOPT_STAGE == RAV1G_PARSER_OPTION_STAGE &&
+                        PLAYER_PARSEOPT_NO_LF_MASKS == RAV1G_PARSER_OPTION_NO_LF_MASKS &&
+                        PLAYER_PARSEOPT_TILE_KEEPS_THREAD == RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD &&
+                        PLAYER_PARSEOPT_TIME_CALLS == RAV1G_PARSER_OPTION_TIME_CALLS,
+                    "the bits of -parseopt out of step with rav1g.h");
+      cfg.parser_options = params_.parser_options_;
       cfg.low_memory = params_.lowmem_parts_;
       // Budget guard: the decoder refuses a creation, and later a palette buffer, that does not fit what
       // the app has left. The output pool takes its textures on the first frame; until then they are held
@@ -517,6 +525,7 @@ int AV1Decoder::DecodeOne() {
       created_intrav2_ = params_.intrav2_;
       created_interfast_ = params_.interfast_ || params_.interfastlists_;
       created_parser_rav1d_ = params_.parser_rav1d_;
+      created_parser_options_ = params_.parser_options_;
       created_lowmem_ = params_.lowmem_parts_;
       created_packed_10x3_ = params_.hdr10x3_;
       created_noguard_ = params_.noguard_;
@@ -612,6 +621,15 @@ int AV1Decoder::DecodeOne() {
   XB_LOGI << "Parser: "
           << (params_.parser_rav1d_ ? "the parse pass of rav1d (-parser rav1d)"
                                     : "the entropy decoder of libaom (default; -parser rav1d selects rav1d's)");
+  // -parseopt: fixed with the parser.
+  if (params_.parser_rav1d_) {
+    XB_LOGI << "Parser switches (-parseopt): "
+            << (params_.parser_options_ == 0 ? "none" : "")
+            << (params_.parser_options_ & PLAYER_PARSEOPT_STAGE ? "stage " : "")
+            << (params_.parser_options_ & PLAYER_PARSEOPT_NO_LF_MASKS ? "nolfmask " : "")
+            << (params_.parser_options_ & PLAYER_PARSEOPT_TILE_KEEPS_THREAD ? "tilethread " : "")
+            << (params_.parser_options_ & PLAYER_PARSEOPT_TIME_CALLS ? "time " : "");
+  }
   // -intraopt: which build of the original intra_main shader runs; independent of the two flags above.
   rav1g_set_intra_opt(params_.intraopt_ != 0);
   XB_LOGI << "Intra main shader: "

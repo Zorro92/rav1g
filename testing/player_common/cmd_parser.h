@@ -32,6 +32,11 @@
 // a task without -lowmem and -lowmemparts gets: part 1, the shared back buffer.
 #define PLAYER_LOWMEM_ALL 7
 #define PLAYER_LOWMEM_DEFAULT 1
+// -parseopt: the words as bits (RAV1G_PARSER_OPTION_* of rav1g.h, which decoder.cpp holds them against).
+#define PLAYER_PARSEOPT_STAGE 1
+#define PLAYER_PARSEOPT_NO_LF_MASKS 2
+#define PLAYER_PARSEOPT_TILE_KEEPS_THREAD 4
+#define PLAYER_PARSEOPT_TIME_CALLS 8
 // The size the decoder is created for with -nofitsize, and for a stream that is larger than this.
 #define PLAYER_DECODER_WIDTH 4096
 #define PLAYER_DECODER_HEIGHT 2176
@@ -113,6 +118,11 @@ class CParameters {
     // pass of rav1d (docs/phase2-rav1d.md). parser_rav1d_ is the choice after Parse().
     std::string parser_;
     bool parser_rav1d_;
+    // -parseopt <list>: with -parser rav1d, ways of doing the same parse, separated by commas: stage,
+    // nolfmask, tilethread, time; all (the first three); none. parser_options_ is the sum of the
+    // PLAYER_PARSEOPT_* values after Parse().
+    std::string parseopt_;
+    unsigned parser_options_;
     // -continue_on_error: a decode call that fails does not end the task; the next temporal units go to
     // the same decoder.
     bool continue_on_error_;

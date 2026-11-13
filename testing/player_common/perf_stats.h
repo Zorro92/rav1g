@@ -31,7 +31,7 @@ static const char* const kCpuNames[] = {
     "setup",         "memset",        "memset_tile",    "entropy_wall",   "entropy_sum", "record",
     "rec_gen_blocks", "rec_idct",     "rec_pred",       "rec_loopfilter", "rec_cdef_lr", "rec_borders",
     "rec_copy",      "submit",        "frame",          "fence_wait",     "gpu_latency", "notify",
-    "async_clear"};
+    "async_clear",   "sink_lists",    "sink_staged",    "sink_calls"};
 static_assert(sizeof(kCpuNames) / sizeof(kCpuNames[0]) == AV1_PERF_CPU_COUNT,
               "CPU timer names out of step with av1_perf.h");
 
@@ -354,6 +354,25 @@ class PerfStats {
          "% of wall");
     Line(&out, "cpu entropy/tile decode, wall", cpu[AV1_PERF_CPU_ENTROPY_WALL], 0.0, 0);
     Line(&out, "cpu entropy/tile decode, thread sum", cpu[AV1_PERF_CPU_ENTROPY_SUM], 0.0, 0);
+    // -parser rav1d: parts of the thread sum. The block lists; with -parseopt stage the copies of the staged
+    // coefficients and transform block records; with -parseopt time the calls of the sink, the copies among
+    // them. What is left of the thread sum is rav1d and, without stage, the coefficients it writes itself.
+    // All zero with the entropy decoder of libaom, which has no timers for them.
+    Line(&out, "cpu parse: block lists", cpu[AV1_PERF_CPU_SINK_LISTS], 0.0, 0);
+    Line(&out, "cpu parse: staged copies (-parseopt stage)", cpu[AV1_PERF_CPU_SINK_STAGED], 0.0, 0);
+    Line(&out, "cpu parse: sink calls (-parseopt time)", cpu[AV1_PERF_CPU_SINK_CALLS], 0.0, 0);
+    {
+      // The thread sum less the three: only with -parseopt time is this rav1d by itself.
+      Series rest;
+      for (size_t i = w; i < n; ++i) {
+        const av1_perf_frame& f = frames_[i];
+        if (f.is_sef) continue;
+        rest.Add(f.cpu_ms[AV1_PERF_CPU_ENTROPY_SUM] - f.cpu_ms[AV1_PERF_CPU_SINK_LISTS] -
+                 (f.cpu_ms[AV1_PERF_CPU_SINK_CALLS] > 0.0 ? f.cpu_ms[AV1_PERF_CPU_SINK_CALLS]
+                                                          : f.cpu_ms[AV1_PERF_CPU_SINK_STAGED]));
+      }
+      Line(&out, "cpu parse: thread sum less the above", rest, 0.0, 0);
+    }
     Line(&out, "cpu command list record", cpu[AV1_PERF_CPU_RECORD], 0.0, 0);
     Line(&out, "cpu submit", cpu[AV1_PERF_CPU_SUBMIT], 0.0, 0);
     Line(&out, "cpu memsets (frame + tile)", SumOf(w, AV1_PERF_CPU_MEMSET, AV1_PERF_CPU_MEMSET_TILE), mbytes.Mean(),

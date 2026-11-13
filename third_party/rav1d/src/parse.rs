@@ -218,6 +218,14 @@ pub struct ParseSettings {
     pub operating_point: u8,
     /// Largest frame size in samples, 0 for no limit.
     pub frame_size_limit: u32,
+    /// The parse pass fills the loop filter masks and levels of upstream's filters, block by block, as
+    /// upstream does. Nothing of the parse reads them and no sink is given them: `false` leaves them out.
+    pub lf_masks: bool,
+    /// A tile whose next superblock row waits for nothing goes on with it on the thread it is on.
+    /// `false` is upstream: after every superblock row the tile goes back to the task queue, and the
+    /// thread that takes it next may be another one. With one frame in parse nothing waits for the
+    /// progress of a tile row by row, so the other threads are not woken for it either.
+    pub tile_keeps_thread: bool,
 }
 
 impl Default for ParseSettings {
@@ -227,6 +235,8 @@ impl Default for ParseSettings {
             frames: 1,
             operating_point: 0,
             frame_size_limit: 0,
+            lf_masks: true,
+            tile_keeps_thread: false,
         }
     }
 }
@@ -255,7 +265,7 @@ impl Parser {
             decode_frame_type: Rav1dDecodeFrameType::All,
         };
         Ok(Self {
-            c: rav1d_open(&s, sink)?,
+            c: rav1d_open(&s, sink, settings.lf_masks, settings.tile_keeps_thread)?,
         })
     }
 

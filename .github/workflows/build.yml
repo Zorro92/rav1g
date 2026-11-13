@@ -1135,21 +1135,62 @@ jobs:
             "--reference-name=rav1g-dec -parser c" "--candidate-name=rav1g-dec -parser rav1d"
           if ($LASTEXITCODE -ne 0) { throw "the two parsers: the MEMORY lines differ (exit code $LASTEXITCODE)" }
 
+      # The switches of the parser of phase 2 (-parseopt, docs/phase2-rav1d.md "Where the time goes"): ways
+      # of doing the same parse. With all of them on, and the calls of the sink timed: the whole set against
+      # its references and expected.txt, the part of the set with -poisonbuf (the staged coefficients are
+      # written whole into a buffer that starts filled), the stage dumps and the md5 of every frame against
+      # those of -parser c, and the decoder code of the test player with its -parseopt flag.
+      - name: The same with the switches of the parser (-parseopt)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $failed = @()
+          $switches = '-parser rav1d -parseopt all,time'
+          $part = '--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)'
+          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/conformance-switches-rav1d --threads 4 "--tool-args=$switches" "--title=rav1g-dec (cargo, MSVC) with $switches"
+          if ($LASTEXITCODE -ne 0) { $failed += "conformance with ${switches}: exit code $LASTEXITCODE" }
+          if (-not (Select-String -Path out/conformance-switches-rav1d/lists/run001.log -Pattern '^PARSER .*switches stage,nolfmask,tilethread,time' -Quiet)) {
+            $failed += 'the decoder of the run does not report the switches of the parser'
+          }
+          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/conformance-poisonbuf-switches-rav1d --threads 4 "--tool-args=-poisonbuf $switches" `
+            "--title=rav1g-dec (cargo, MSVC) with -poisonbuf $switches" $part
+          if ($LASTEXITCODE -ne 0) { $failed += "conformance with -poisonbuf ${switches}: exit code $LASTEXITCODE" }
+          python testing/stage_dump/ci_dumps.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --tasks testing/conformance/dump_tasks.txt --out out/stage-dumps-switches-rav1d --threads 4 "--tool-args=$switches"
+          if ($LASTEXITCODE -ne 0) { $failed += "stage dumps with ${switches}: exit code $LASTEXITCODE" }
+          python testing/conformance/compare_md5.py --reference out/conformance --candidate out/conformance-switches-rav1d `
+            --manifest conformance-streams/manifest.txt --reference-dumps out/stage-dumps --candidate-dumps out/stage-dumps-switches-rav1d `
+            "--reference-name=rav1g-dec -parser c" "--candidate-name=rav1g-dec $switches" --two-parsers
+          if ($LASTEXITCODE -ne 0) { $failed += "-parser c against ${switches}: md5 per frame or stage dumps differ (exit code $LASTEXITCODE)" }
+          python testing/conformance/player_smoke.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/player-smoke-switches-rav1d "--player-args=$switches" "--title=the Rust library (cargo, MSVC), the player with $switches"
+          if ($LASTEXITCODE -ne 0) { $failed += "the player's decoder code with ${switches}: exit code $LASTEXITCODE" }
+          if ($failed.Count) { throw "the switches of the parser: $($failed -join '; ')" }
+
       # The two parsers timed in pairs on this runner (testing/conformance/parser_timing.py): the CPU
-      # timers of the decode thread with -parser c and with -parser rav1d, in turns, three rounds each;
-      # the 2160p stream first. One parser thread for the streams with one tile; four for the stream with
-      # eight tiles. The numbers of a runner say how the two compare on it; the console's decide.
+      # timers of the decode thread with -parser c, with -parser rav1d and with rav1d and its switches, in
+      # turns, three rounds each; the 2160p stream first. One parser thread for the streams with one tile;
+      # four for the stream with eight tiles; and the 2160p stream once more with four threads and each
+      # switch by itself (one tile: what further threads cost a parse that cannot use them). The numbers of
+      # a runner say how the decoders compare on it, and WARP's upload memory is ordinary memory, so the
+      # staging shows only its cost here; the console's numbers decide.
       - name: The two parsers, timed in pairs
         if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           python testing/conformance/parser_timing.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/parser-timing --rounds 3 --threads 1 `
+            --out out/parser-timing --rounds 3 --threads 1 --switches all `
             --stream nf-dvbdash-a1-8b-2160p.ivf --stream nf-chimera-10b-1080p.ivf --stream nf-sparks-10b-1080p.ivf
           if ($LASTEXITCODE -ne 0) { throw "paired timing of the parsers: exit code $LASTEXITCODE" }
           python testing/conformance/parser_timing.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/parser-timing-t4 --rounds 3 --threads 4 --stream syn-tiles-10b-1080p.ivf
+            --out out/parser-timing-t4 --rounds 3 --threads 4 --switches all --stream syn-tiles-10b-1080p.ivf
           if ($LASTEXITCODE -ne 0) { throw "paired timing of the parsers with four threads: exit code $LASTEXITCODE" }
+          python testing/conformance/parser_timing.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/parser-timing-switches --rounds 3 --threads 4 --stream nf-dvbdash-a1-8b-2160p.ivf `
+            --switches nolfmask --switches tilethread --switches stage --switches all --switches all,time
+          if ($LASTEXITCODE -ne 0) { throw "paired timing of the switches of the parser: exit code $LASTEXITCODE" }
 
       - name: Preserve the stage dumps of rav1g-dec
         if: ${{ !cancelled() }}
@@ -1177,6 +1218,7 @@ jobs:
             out/*-rav1d/
             out/parser-timing/
             out/parser-timing-t4/
+            out/parser-timing-switches/
           if-no-files-found: warn
 
       - name: Preserve rav1g-dec.exe
@@ -1604,6 +1646,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { $failed += "the player's decoder code: exit code $LASTEXITCODE" }
           if ($failed.Count) { throw "with -parser rav1d: $($failed -join '; ')" }
 
+      # The switches of that parser, all on (-parseopt, docs/phase2-rav1d.md "Where the time goes"): the
+      # whole set, and the decoder code of the test player.
+      - name: The same with the switches of the parser, the rav1g-dec of the Linux build
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $failed = @()
+          $switches = '-parser rav1d -parseopt all,time'
+          python testing/conformance/run.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
+            --out out/conformance-switches-rav1d --threads 4 "--tool-args=$switches" "--title=rav1g-dec built on Linux with $switches"
+          if ($LASTEXITCODE -ne 0) { $failed += "conformance with ${switches}: exit code $LASTEXITCODE" }
+          if (-not (Select-String -Path out/conformance-switches-rav1d/lists/run001.log -Pattern '^PARSER .*switches stage,nolfmask,tilethread,time' -Quiet)) {
+            $failed += 'the decoder of the run does not report the switches of the parser'
+          }
+          python testing/conformance/player_smoke.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
+            --out out/player-smoke-switches-rav1d "--player-args=$switches" "--title=the Rust library built on Linux, the player with $switches"
+          if ($LASTEXITCODE -ne 0) { $failed += "the player's decoder code with ${switches}: exit code $LASTEXITCODE" }
+          if ($failed.Count) { throw "the switches of the parser: $($failed -join '; ')" }
+
       - name: Preserve the results, the per-stream logs and md5 files
         if: always()
         uses: actions/upload-artifact@v7
@@ -1792,6 +1853,30 @@ jobs:
           grep '^PARSE SUMMARY' out/parse-check/check-threads4.txt || true
           exit "$status"
 
+      # The switches of the parser (-parseopt, docs/phase2-rav1d.md "Where the time goes"): the buffers are
+      # the same with all of them on, with one thread and with four.
+      - name: The same with the switches of the parser
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          status=0
+          {
+            echo '## Parse check with the switches of the parser (-parseopt all)'
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          for threads in 1 4; do
+            target/release/rav1g-parse-check -threads "$threads" -parseopt all -root conformance-streams \
+              -manifest conformance-streams/manifest.txt > "out/parse-check/check-switches-threads$threads.txt" \
+              || status=$?
+            {
+              grep '^PARSE SUMMARY' "out/parse-check/check-switches-threads$threads.txt" || true
+              grep -A 6 ' DIFFERENT \| ERROR ' "out/parse-check/check-switches-threads$threads.txt" | head -n 60 || true
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
       - name: Parse digest of every stream on Linux
         if: ${{ !cancelled() }}
         run: |
@@ -1800,18 +1885,24 @@ jobs:
             -manifest conformance-streams/manifest.txt > out/parse-check/digest.txt
           grep -c '^PARSEDIGEST ' out/parse-check/digest.txt
 
-      # What the sink costs on the CPU of this runner: the 4K stream and a 1080p stream of the set, one
-      # thread. A measurement for docs/phase2-rav1d.md, not a gate.
-      - name: CPU time of the sink
+      # What the sink costs on the CPU of this runner, and what the switches of the parser change: the 4K
+      # stream and a 1080p stream of the set, with one thread and with four (one tile each, so the three
+      # further threads have nothing to parse). A measurement for docs/phase2-rav1d.md, not a gate.
+      - name: CPU time of the parse and of the sink
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           {
-            echo '## CPU time of the sink (one thread, this runner)'
+            echo '## CPU time of the parse and of the sink (this runner)'
             echo
             echo '```'
             for stream in cut/nf-dvbdash-a1-8b-2160p.ivf cut/nf-chimera-10b-1080p.ivf; do
-              target/release/rav1g-parse-check -time "conformance-streams/$stream" || true
+              for threads in 1 4; do
+                for switches in none nolfmask tilethread stage all; do
+                  target/release/rav1g-parse-check -time -threads "$threads" -parseopt "$switches" \
+                    "conformance-streams/$stream" || true
+                done
+              done
             done
             echo '```'
           } | tee out/parse-check/time.txt >> "$GITHUB_STEP_SUMMARY"

@@ -376,7 +376,7 @@ the start of every task say what is in effect.
 | Decoder size | the stream's largest frame size, rounded up to 128, and 8-bit buffers for an 8-bit stream; see [Decoder size](#decoder-size--nofitsize) | `Decoder size: 3840x2176 10-bit (fit to the stream, default)` | `-nofitsize`: 4096x2176 10-bit for every stream, `Decoder size: 4096x2176 10-bit (fixed, -nofitsize)` |
 | Memory reductions | part 1, one back buffer shared by all frames (frame buffer pool 12 → 10, no measurable time cost); see [Smaller decoder](#smaller-decoder--lowmem) | `Low memory parts: 1 (default: 1 shared back buffer)` | `-lowmemparts 0`: none, every frame takes its back buffer from the pool (`Low memory parts: 0 (none, -lowmemparts 0)`); `-lowmemparts N`: exactly the parts in `N`; `-lowmem`: all three (`-lowmemparts 7`) |
 | Pipeline slots | 2 | `Frame slots: 2` | `-slots 3`, `-slots 4` |
-| Parser | the entropy decoder of libaom (C) | `Parser: the entropy decoder of libaom (default; -parser rav1d selects rav1d's)` | `-parser rav1d`: the parse pass of rav1d, `Parser: the parse pass of rav1d (-parser rav1d)`; see [Parser](#parser--parser) |
+| Parser | the entropy decoder of libaom (C) | `Parser: the entropy decoder of libaom (default; -parser rav1d selects rav1d's)` | `-parser rav1d`: the parse pass of rav1d, `Parser: the parse pass of rav1d (-parser rav1d)`; see [Parser](#parser--parser), and its switches `-parseopt` |
 | Clears | on the decode thread | `Clears: decode thread (original)` | `-asyncclear` |
 | Intra prediction | upstream's shaders, `/Od` build | `Intra shaders: intra_main + intra_filter (original)`, `Intra main shader: intra_main (/Od, original)` | `-intrav2`, `-intraopt` |
 | Inter prediction | upstream's shaders, lists by type and block size | `Inter shaders: inter_main, inter_compound (original)` | `-interfast`: see [Inter fast path](#inter-fast-path--interfast) |
@@ -483,6 +483,7 @@ CPU timers (QueryPerformanceCounter, all in ms per frame):
 | Timer | Meaning |
 | --- | --- |
 | `entropy_wall`, `entropy_sum` | tile (entropy) decode: wall time on the decode thread, and the sum over the tile threads. `sum / wall` is the parallelism actually reached. |
+| `sink_lists`, `sink_staged`, `sink_calls` | with `-parser rav1d`, parts of `entropy_sum`: see [Switches of the parser](#switches-of-the-parser--parseopt) |
 | `record` | recording the frame's command list, waits excluded. `rec_gen_blocks`, `rec_idct`, `rec_pred`, `rec_loopfilter`, `rec_cdef_lr`, `rec_borders`, `rec_copy` split it by host function (`rec_copy` still contains `wait_output` and `wait_image`). |
 | `submit` | `Close`, `ExecuteCommandLists`, `Signal` |
 | `memset`, `memset_tile` | the per-frame and per-tile memsets on the decode and tile threads; the summary also gives the MB cleared per frame |
@@ -1285,6 +1286,44 @@ time both on the same stream:
   parser decodes such frames from the references it has, with wrong pictures until the key frame.
 - A task with the other parser than the task before gets a new decoder, like a task with other
   `-slots`.
+
+### Switches of the parser (`-parseopt`)
+
+With `-parser rav1d`, `-parseopt <word>[,<word>...]` turns on ways of doing the same parse, so that
+one launch can time them against each other on the same stream. The output is the same with every
+one of them. Why each exists and what it changed where it was measured:
+[phase2-rav1d.md](phase2-rav1d.md#where-the-time-goes).
+
+| Word | Effect |
+| --- | --- |
+| `stage` | The coefficients and the transform block records of a tile are collected in ordinary memory (32 KiB and 8 KiB a tile) and copied to their buffers in runs. The two buffers are upload heaps, write-combined memory on the console; without the word the parser writes each record and each coefficient that is not zero straight into them, as the C parser does. |
+| `nolfmask` | rav1d does not fill the masks and levels of its own loop filter, which nothing here reads. |
+| `tilethread` | A tile stays on the thread it is on between its superblock rows. Without the word rav1d puts the tile back into its task queue after every superblock row and wakes a waiting thread, and the next row runs on whichever of the `-t` threads takes it. |
+| `all` | The three above. |
+| `time` | With `-gputime`: the calls of the sink are timed (`sink_calls`, below). Two readings of the processor's time stamp counter per block and per transform block. |
+| `none` | No switch, the same as no flag. |
+
+```text
+-i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parser c
+-i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parser rav1d
+-i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parser rav1d -parseopt tilethread
+-i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parser rav1d -parseopt all
+-i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parser rav1d -parseopt all,time
+```
+
+The log has `Parser switches (-parseopt): ...` behind the `Parser:` line. A task with other switches
+than the task before gets a new decoder.
+
+With `-parser rav1d` the `-gputime` summary splits the tile decode further. All four lines are parts
+of `cpu entropy/tile decode, thread sum`, summed over the tile threads, and zero with `-parser c`
+(the C parser does the same work without timers of its own):
+
+| Line (timer) | Meaning |
+| --- | --- |
+| `cpu parse: block lists` (`sink_lists`) | the block lists of the prediction stages, counted at the end of each tile from its mode info records (the C parser counts them at the same place) |
+| `cpu parse: staged copies (-parseopt stage)` (`sink_staged`) | with `stage`: the copies of the collected coefficients and transform block records into their buffers, which is all the parser then writes into write-combined memory |
+| `cpu parse: sink calls (-parseopt time)` (`sink_calls`) | with `time`: the calls of the sink, which write the mode info record and the grid of a block, the record of a transform block, the palette, and the per-superblock values; the staged copies are inside |
+| `cpu parse: thread sum less the above` | the thread sum less the block lists and less the sink calls (without `time`: less the staged copies). With `time` this is rav1d by itself, and without `stage` it includes the coefficients rav1d writes straight into their buffer; `stage` moves those writes into `sink_staged` |
 
 ## Inter fast path (`-interfast`)
 

@@ -86,6 +86,8 @@ pub struct Task {
     pub oppoint: i32,
     /// -parser c|rav1d: what reads the bitstream; true is rav1d's parse pass.
     pub parser_rav1d: bool,
+    /// -parseopt <list>: the switches of rav1d's parse pass (`rav1g::ParserOptions`).
+    pub parser_options: rav1g::ParserOptions,
     /// -timeout: seconds for the task, 0 = none.
     pub timeout_s: i32,
     /// -gputime: the timing run of the player, its summary on stdout.
@@ -135,6 +137,7 @@ impl Default for Task {
             continue_on_error: false,
             all_layers: false,
             parser_rav1d: false,
+            parser_options: rav1g::ParserOptions::default(),
             oppoint: 0,
             timeout_s: 0,
             gputime: false,
@@ -216,6 +219,13 @@ pub fn usage() {
     say!("                        every stage filled again in every frame before the stage writes them (same output)");
     say!("  -parser c|rav1d       what reads the bitstream: the entropy decoder of libaom (c, the default) or the");
     say!("                        parse pass of rav1d (same output; docs/phase2-rav1d.md)");
+    say!(
+        "  -parseopt <list>      with -parser rav1d, ways of doing the same parse, separated by commas (same output):"
+    );
+    say!("                        stage: the coefficients and the transform block records are collected in ordinary");
+    say!("                        memory and copied to their buffers in runs; nolfmask: rav1d leaves out the masks of");
+    say!("                        its own loop filter; tilethread: a tile stays on its thread between its superblock");
+    say!("                        rows; all: these three; time: with -gputime, the calls of the sink are timed; none");
     say!("  -interfast            inter prediction by the fraction of the motion vector: a copy, one filter pass, or");
     say!("                        both (inter_fast, inter_compound_fast; same output)");
     say!("  -interfastlists       the block lists of -interfast with the original shaders on them (same output)");
@@ -365,6 +375,11 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
                     "rav1d" => true,
                     other => return Err(format!("-parser {other}: c or rav1d")),
                 }
+            }
+            "-parseopt" => {
+                let list = value()?;
+                task.parser_options = rav1g::ParserOptions::from_words(&list)
+                    .ok_or_else(|| format!("-parseopt {list}: stage, nolfmask, tilethread, time, all or none"))?;
             }
             _ => {
                 let Some(globals) = globals.as_deref_mut() else {

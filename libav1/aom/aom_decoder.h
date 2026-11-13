@@ -164,6 +164,14 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
 #define AV1_PARSER_LIBAOM 0
 #define AV1_PARSER_RAV1D 1
 
+/* aom_codec_dec_cfg_t::parser_options, values to add up: ways of doing the
+ * parse of AV1_PARSER_RAV1D that give the same frames and are there to be
+ * timed against each other (docs/phase2-rav1d.md, "Where the time goes"). */
+#define AV1_PARSER_OPTION_STAGE 1             /* coefficients and transform block records reach their buffers in runs */
+#define AV1_PARSER_OPTION_NO_LF_MASKS 2       /* rav1d leaves out the masks of its own loop filter */
+#define AV1_PARSER_OPTION_TILE_KEEPS_THREAD 4 /* a tile stays on its thread between its superblock rows */
+#define AV1_PARSER_OPTION_TIME_CALLS 8        /* the calls of the sink are timed (AV1_PERF_CPU_SINK_CALLS) */
+
 /*!\brief Initialization Configurations
  *
  * This structure is used to pass init time configuration options to the
@@ -221,6 +229,8 @@ typedef struct aom_codec_dec_cfg {
    * Both give the same frames; they differ in speed and in what a damaged
    * stream does (the document says how). */
   int parser;
+  /* AV1_PARSER_OPTION_* values added up, for AV1_PARSER_RAV1D; 0 for none. */
+  int parser_options;
   /* Memory budget guard, optional. On a console an application that goes over
    * its memory limit loses its D3D12 device for the rest of the process, so
    * the decoder asks before it allocates: at the creation, and when it

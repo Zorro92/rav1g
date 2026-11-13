@@ -143,6 +143,16 @@ pub(crate) unsafe fn perf_add(dec: *mut Av1Core, id: usize, start_ticks: i64) {
     unsafe { counter(&raw mut (*dec).perf_cur.ticks[id]) }.fetch_add(perf_now() - start_ticks, Ordering::SeqCst);
 }
 
+/// Adds a time that was measured elsewhere, in ticks of [`perf_now`], to a CPU timer of the frame that is
+/// being built.
+///
+/// # Safety
+/// `dec` is the decoder.
+pub(crate) unsafe fn perf_add_ticks(dec: *mut Av1Core, id: usize, ticks: i64) {
+    // SAFETY: the caller's contract.
+    unsafe { counter(&raw mut (*dec).perf_cur.ticks[id]) }.fetch_add(ticks, Ordering::SeqCst);
+}
+
 /// `av1_perf_cpu_add` (`dx/av1_core.h`): [`perf_add`] for the entropy decoder.
 ///
 /// # Safety

@@ -67,6 +67,11 @@ pub enum Parser {
     Rav1d,
 }
 
+/// The switches of [`Parser::Rav1d`] ([`Settings::parser_options`]): the coefficients and the transform
+/// block records staged before they reach their buffers, rav1d without the masks of its own loop filter,
+/// a tile kept on its thread, the calls of the sink timed. The frames are the same with every one.
+pub use rav1g_parse::options::ParseOptions as ParserOptions;
+
 /// What the application has left for the decoder, in bytes: its memory limit less what it uses and less
 /// what it is going to allocate itself (output images that do not exist yet). `None` when it does not
 /// know. Called on the threads that create, use and drop the decoder.
@@ -100,6 +105,8 @@ pub struct Settings {
     pub output_all_layers: bool,
     /// What reads the bitstream.
     pub parser: Parser,
+    /// The switches of [`Parser::Rav1d`]: ways of doing the same parse, to be timed against each other.
+    pub parser_options: ParserOptions,
     /// The budget guard. On a console an application that goes over its memory limit loses its D3D12
     /// device, so with this callback the decoder asks before it allocates: a creation whose device buffers
     /// would leave less than 48 MiB is refused ([`ErrorCode::Memory`], with a "MEMORY REFUSED" line in the
@@ -124,6 +131,7 @@ impl Default for Settings {
             operating_point: 0,
             output_all_layers: false,
             parser: Parser::default(),
+            parser_options: ParserOptions::default(),
             memory_available: None,
         }
     }
@@ -163,6 +171,7 @@ impl Settings {
             Parser::Libaom => sys::AV1_PARSER_LIBAOM,
             Parser::Rav1d => sys::AV1_PARSER_RAV1D,
         } as c_int;
+        cfg.parser_options = self.parser_options.bits() as c_int;
         cfg
     }
 

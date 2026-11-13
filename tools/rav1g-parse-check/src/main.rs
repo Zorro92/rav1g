@@ -18,10 +18,13 @@
 //! (`crates/rav1g/src/host/blocks.rs`), which is compiled into this program as it is (`host`).
 //!
 //! ```text
-//! rav1g-parse-check [-threads <n>] [-details <n>] [-root <dir>] [-manifest <task list>] [<stream>...]
-//! rav1g-parse-check -time [-threads <n>] <stream>
+//! rav1g-parse-check [-threads <n>] [-parseopt <list>] [-details <n>] [-root <dir>] [-manifest <task list>] [<stream>...]
+//! rav1g-parse-check -time [-threads <n>] [-parseopt <list>] <stream>
 //! rav1g-parse-check -digest [-threads <n>] [-root <dir>] [-manifest <task list>] [<stream>...]
 //! ```
+//!
+//! `-parseopt` takes the switches of the parser of phase 2 (`rav1g_parse::options`: `stage`, `nolfmask`,
+//! `tilethread`, or `all`), separated by commas: the buffers have to be the same with each of them.
 //!
 //! `-digest` prints for every stream the line `rav1g-dec -parsedigest` prints on Windows: what rav1d's
 //! parse pass reads from it, folded into one number (`rav1g_parse::digest`).
@@ -52,9 +55,12 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use compare::Report;
+use rav1g_parse::options::ParseOptions;
 
 struct Options {
     threads: u16,
+    /// -parseopt: the switches of rav1d's side.
+    parse: ParseOptions,
     details: usize,
     time: bool,
     digest: bool,
@@ -63,8 +69,9 @@ struct Options {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: rav1g-parse-check [-threads <n>] [-details <n>] [-root <dir>] [-manifest <task list>] [<stream>...]\n       \
-         rav1g-parse-check -time [-threads <n>] <stream>"
+        "usage: rav1g-parse-check [-threads <n>] [-parseopt <list>] [-details <n>] [-root <dir>] [-manifest <task list>] \
+         [<stream>...]\n       rav1g-parse-check -time [-threads <n>] [-parseopt <list>] <stream>\n-parseopt: the \
+         switches of the parser, separated by commas: stage, nolfmask, tilethread; all; none"
     );
     std::process::exit(2);
 }
@@ -88,7 +95,14 @@ fn manifest(file: &Path, root: &Path) -> Vec<(String, PathBuf)> {
 }
 
 fn options() -> Options {
-    let mut options = Options { threads: 1, details: 8, time: false, digest: false, streams: Vec::new() };
+    let mut options = Options {
+        threads: 1,
+        parse: ParseOptions::default(),
+        details: 8,
+        time: false,
+        digest: false,
+        streams: Vec::new(),
+    };
     let mut root = PathBuf::from(".");
     let mut manifests = Vec::new();
     let mut args = std::env::args().skip(1);
@@ -100,6 +114,7 @@ fn options() -> Options {
             "-root" => root = PathBuf::from(value()),
             "-manifest" => manifests.push(PathBuf::from(value())),
             "-time" => options.time = true,
+            "-parseopt" => options.parse = ParseOptions::from_words(&value()).unwrap_or_else(|| usage()),
             "-digest" => options.digest = true,
             _ if arg.starts_with('-') => usage(),
             _ => {
@@ -123,8 +138,9 @@ fn check(path: &Path, options: &Options) -> Result<Report, String> {
     let data = std::fs::read(path).map_err(|error| format!("cannot read the file: {error}"))?;
     let units = container::read(&data)?;
     let mut c = chost::CParser::new()?;
-    let mut r = rhost::RustParser::new(options.threads)?;
+    let mut r = rhost::RustParser::new(options.threads, options.parse)?;
     let mut report = Report::new(options.details);
+    report.staged = options.parse.stage;
     let mut number = 0;
     for (unit, data) in units.iter().enumerate() {
         let c_result = c.send(data);
@@ -187,7 +203,7 @@ fn digest(options: &Options) -> ExitCode {
 fn main() -> ExitCode {
     let options = options();
     if options.time {
-        return timing::run(&options.streams[0].1, options.threads);
+        return timing::run(&options.streams[0].1, options.threads, options.parse);
     }
     if options.digest {
         return digest(&options);

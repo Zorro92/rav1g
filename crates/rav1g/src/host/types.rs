@@ -163,7 +163,8 @@ pub struct ComputeCommandBuffer {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct av1_perf_accum {
-    pub ticks: [i64; 25],
+    /// One counter per CPU timer (`AV1_PERF_CPU_*` of `dx/av1_perf.h`).
+    pub ticks: [i64; crate::sys::AV1_PERF_CPU_COUNT as usize],
     pub memset_bytes: i64,
     pub t_frame_start: i64,
     pub t_record_start: i64,
@@ -397,6 +398,8 @@ pub struct Av1Core {
     pub rav1d: Option<Box<super::rav1d_host::Rav1dHost>>,
     /// The threads the parser may use for the tiles of a frame (`aom_codec_dec_cfg_t::threads`).
     pub parser_threads: c_int,
+    /// The switches of that parser (`aom_codec_dec_cfg_t::parser_options`).
+    pub parser_options: c_int,
 }
 
 impl Av1Core {

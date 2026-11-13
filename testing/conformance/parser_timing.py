@@ -1,7 +1,9 @@
 """The two parsers of the decoder, timed in pairs on one machine (docs/phase2-rav1d.md, step 3).
 
 rav1g-dec decodes each stream with -gputime, once with -parser c and once with -parser rav1d, the two
-in turns and each several times, and the CPU timers of the decode thread are read from the summaries:
+in turns and each several times, and the CPU timers of the decode thread are read from the summaries.
+Every --switches adds a third, fourth, ... decoder to the turns: -parser rav1d with that -parseopt list
+(docs/phase2-rav1d.md, "Where the time goes"). The timers:
 
 - entropy_sum, entropy_wall: the parse of the tiles, summed over the tile threads and as wall time. With
   rav1d the sink is inside (the mode info records, the grid, the block lists), and so is rav1d's set-up
@@ -9,13 +11,15 @@ in turns and each several times, and the CPU timers of the decode thread are rea
 - setup: the frame set-up of the host (a slot, the clears);
 - record: the recording of the command list;
 - frame: the decode thread from the set-up to the submission, which is what the parser is part of;
-- decode call: the whole call for a temporal unit, with the headers.
+- decode call: the whole call for a temporal unit, with the headers;
+- sink_lists, sink_staged, sink_calls: parts of entropy_sum with rav1d: the block lists at the end of a
+  tile, the copies of the staged coefficients (-parseopt stage), the calls of the sink (-parseopt time).
 
 A run is a pair on one runner: the numbers of other runs are not comparable, the ratio of a pair is. On
 WARP the GPU is a CPU rasteriser that competes with the decode thread; the console's numbers decide.
 
 usage: python parser_timing.py --tool <rav1g-dec.exe> --streams <conformance streams> --out <directory>
-           --stream <name> [--stream <name> ...] [--rounds N] [--threads N]
+           --stream <name> [--stream <name> ...] [--rounds N] [--threads N] [--switches <list> ...]
 
 Exit code: 0 both parsers gave timers for every stream, 1 a run failed, 2 the check could not be done.
 """
@@ -27,7 +31,8 @@ import subprocess
 import sys
 
 TIMERS = ['entropy_sum', 'entropy_wall', 'setup', 'record', 'frame']
-PARSERS = ['c', 'rav1d']
+# Timers of the parser of phase 2: in the table, not required of a run.
+SINK_TIMERS = ['sink_lists', 'sink_staged', 'sink_calls']
 
 
 def timers_of(text):
@@ -35,7 +40,7 @@ def timers_of(text):
     out = {}
     for line in text.splitlines():
         found = re.match(r'GPUTIME cpu (\w+)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+[\d.]+', line)
-        if found and found.group(1) in TIMERS:
+        if found and found.group(1) in TIMERS + SINK_TIMERS:
             out[found.group(1)] = (int(found.group(2)), float(found.group(3)), float(found.group(4)),
                                    float(found.group(5)))
         found = re.match(r'GPUTIME decode call \(aom_codec_decode\)\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)', line)
@@ -53,7 +58,13 @@ def main():
     parser.add_argument('--stream', action='append', required=True, help='a stream of the manifest, by name')
     parser.add_argument('--rounds', type=int, default=3)
     parser.add_argument('--threads', type=int, default=1)
+    parser.add_argument('--switches', action='append', default=[],
+                        help='a -parseopt list: one more decoder in the turns, -parser rav1d with it')
     args = parser.parse_args()
+    # The decoders that take turns: a name for the table and the arguments.
+    variants = [('-parser c', ['-parser', 'c']), ('-parser rav1d', ['-parser', 'rav1d'])]
+    variants += [('rav1d, -parseopt %s' % switches, ['-parser', 'rav1d', '-parseopt', switches])
+                 for switches in args.switches]
     os.makedirs(args.out, exist_ok=True)
     inputs = {}
     try:
@@ -71,56 +82,62 @@ def main():
     lines = ['## The two parsers, timed in pairs (rav1g-dec -gputime -t %d, %d rounds each, WARP)' % (
         args.threads, args.rounds), '',
         'Milliseconds a frame: the mean over the rounds of the means, and the smallest and largest mean of a '
-        'round. entropy_sum and entropy_wall with rav1d have the sink inside.', '']
+        'round. entropy_sum and entropy_wall with rav1d have the sink inside. The ratios are to -parser c.', '']
     for stream in args.stream:
         if stream not in inputs:
             print('parser_timing.py: the manifest has no stream %s' % stream)
             return 2
-        means = {parser_name: {} for parser_name in PARSERS}
+        means = [{} for _ in variants]
         frames = 0
         for round_number in range(args.rounds):
-            # In turns, and the first of a pair in turns too: neither parser always runs on the warmer
+            # In turns, and the first of a round in turns too: no decoder always runs on the warmer
             # machine.
-            order = PARSERS if round_number % 2 == 0 else PARSERS[::-1]
-            for parser_name in order:
+            order = list(range(len(variants)))
+            if round_number % 2:
+                order.reverse()
+            for index in order:
+                parser_name, parser_args = variants[index]
                 command = [tool, '-name', stream, '-i', inputs[stream], '-gputime', '-t', str(args.threads),
-                           '-parser', parser_name, '-timeout', '1200']
+                           '-timeout', '1200'] + parser_args
                 try:
                     done = subprocess.run(command, cwd=args.streams, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                           stdin=subprocess.DEVNULL, timeout=1800)
                 except subprocess.TimeoutExpired:
-                    print('ERROR %s -parser %s: no end within 30 minutes' % (stream, parser_name))
+                    print('ERROR %s %s: no end within 30 minutes' % (stream, parser_name))
                     failed = True
                     continue
                 text = done.stdout.decode('utf-8', 'replace').replace('\r', '')
-                with open(os.path.join(args.out, '%s-%s-%d.log' % (stream, parser_name, round_number)), 'w',
-                          encoding='utf-8') as f:
+                log = '%s-%s-%d.log' % (stream, re.sub(r'[^A-Za-z0-9]+', '-', parser_name).strip('-'), round_number)
+                with open(os.path.join(args.out, log), 'w', encoding='utf-8') as f:
                     f.write(text)
                 timers = timers_of(text)
                 if done.returncode != 0 or any(timer not in timers for timer in TIMERS + ['decode call']):
-                    print('ERROR %s -parser %s: exit code %d, timers %s' % (
+                    print('ERROR %s %s: exit code %d, timers %s' % (
                         stream, parser_name, done.returncode, ', '.join(sorted(timers)) or 'none'))
                     failed = True
                     continue
                 frames = timers['frame'][0]
                 for timer, (_, mean, _, _) in timers.items():
-                    means[parser_name].setdefault(timer, []).append(mean)
+                    means[index].setdefault(timer, []).append(mean)
         lines += ['### %s (%d frames timed)' % (stream, frames), '',
-                  '| Timer | -parser c | -parser rav1d | rav1d / c |', '| --- | ---: | ---: | ---: |']
-        for timer in TIMERS + ['decode call']:
+                  '| Timer | ' + ' | '.join(name for name, _ in variants) + ' |',
+                  '| --- |' + ' ---: |' * len(variants)]
+        for timer in TIMERS + ['decode call'] + SINK_TIMERS:
             cells = []
-            averages = []
-            for parser_name in PARSERS:
-                values = means[parser_name].get(timer, [])
+            first = None
+            for index in range(len(variants)):
+                values = means[index].get(timer, [])
                 if not values:
                     cells.append('none')
-                    averages.append(None)
                     continue
                 average = sum(values) / len(values)
-                averages.append(average)
-                cells.append('%.3f (%.3f to %.3f)' % (average, min(values), max(values)))
-            ratio = '%.2f' % (averages[1] / averages[0]) if averages[0] and averages[1] is not None else '-'
-            lines.append('| %s | %s | %s | %s |' % (timer, cells[0], cells[1], ratio))
+                cell = '%.3f (%.3f to %.3f)' % (average, min(values), max(values))
+                if index == 0:
+                    first = average
+                elif first and timer not in SINK_TIMERS:
+                    cell += ', %.2f' % (average / first)
+                cells.append(cell)
+            lines.append('| %s | %s |' % (timer, ' | '.join(cells)))
         lines.append('')
     text = '\n'.join(lines)
     print(text)

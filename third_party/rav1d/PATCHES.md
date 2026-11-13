@@ -14,13 +14,15 @@ Group); `doc/PATENTS` is the patent licence of the Alliance for Open Media that 
 ## The rule
 
 Changes only take away, or route what the parse pass reads to the application. Nothing here changes how
-a syntax element is read. An update to a newer upstream is then: copy the files again, apply the list
+a syntax element is read. Two changes are switches of `ParseSettings` that are off unless the application
+sets them, and the parse is upstream's without them: the loop filter masks left out, and a tile kept on
+its thread (the rows of `decode.rs` and `thread_task.rs` below). An update to a newer upstream is then: copy the files again, apply the list
 below again, run the two checks at the end.
 
 `upstream_diff.sh <checkout of rav1d at the commit>` holds the directory against upstream: every file
-is upstream's byte for byte, or one of the twelve changed files below, or one of the four files of
+is upstream's byte for byte, or one of the thirteen changed files below, or one of the four files of
 rav1g (`PATCHES.md`, `UPSTREAM`, `upstream_diff.sh`, `src/parse.rs`). It writes the diff of the changed
-files (+549 −4852 lines at this commit) for a review. CI runs it (job `rav1d`).
+files (+626 −4855 lines at this commit) for a review. CI runs it (job `rav1d`).
 
 Size: 67 files, 1.4 MB, 39,100 lines here; upstream has 1,364 files (296 under `src`, 329,000 lines
 there).
@@ -46,19 +48,20 @@ there).
 | `src/msac.rs`, `src/refmvs.rs` | The names of the assembly functions with that prefix. |
 | `src/cpu.rs` | Without `dav1d_set_cpu_flags_mask` (C API) and without the number of processors (see `lib.rs`). |
 | `src/tables.rs` | Without the nine `#[no_mangle] dav1d_*` tables of the pixel assembly. |
-| `src/lib.rs` | Without the C API (the 19 `dav1d_*` functions) and the modules above; no film grain. `rav1d_open` takes the sink. The number of threads and of frames in parse is what the application says (0 is 1): upstream takes the number of processors and its square root, which on Windows are two imports the library does not have otherwise. A crate-level `allow` for the code the removals leave unused, so that the files stay close to upstream. `pub mod parse`, `pub mod levels`. |
-| `src/internal.rs` | Without the pixel DSP tables, the film grain task data and the buffers of the reconstruction pass (blocks, coefficients, palette indexes and colours per frame; CDEF and loop restoration line buffers). The context has the sink; a frame has its number at the sink. |
+| `src/lib.rs` | Without the C API (the 19 `dav1d_*` functions) and the modules above; no film grain. `rav1d_open` takes the sink and the two switches of `ParseSettings`. The number of threads and of frames in parse is what the application says (0 is 1): upstream takes the number of processors and its square root, which on Windows are two imports the library does not have otherwise. A crate-level `allow` for the code the removals leave unused, so that the files stay close to upstream. `pub mod parse`, `pub mod levels`. |
+| `src/internal.rs` | Without the pixel DSP tables, the film grain task data and the buffers of the reconstruction pass (blocks, coefficients, palette indexes and colours per frame; CDEF and loop restoration line buffers). The context has the sink and the two switches; a frame has its number at the sink. |
 | `src/obu.rs` | The sink sees a sequence header before the parser takes it and can refuse it, and it is told when a frame header shows the frame of a reference slot (`show_existing_frame`), before the slots are updated. Nothing of the reading changes. |
-| `src/decode.rs` | The parse pass only. A block is handed to the sink when its mode info is read, and its coefficients are read right behind it (upstream stores the block and reads the coefficients in the same pass; the second pass reconstructs). The palette index map goes to the sink as it is read (upstream packs it for the second pass). The sink is told when a frame, a tile and a superblock begin and end; the loop restoration units of a superblock are collected for it. No reconstruction, no bookkeeping of the lowest pixel a block predicts from, no pixel buffers. The reference handling, the CDF updates and the motion vector storage are upstream's. The sink says at the end of a frame whether the frame stands: a frame it could not take fails like a frame with damaged data (its reference slots are emptied, as upstream empties them). The parse of a superblock row of a tile is timed for the sink, when the sink has a clock. |
+| `src/decode.rs` | The parse pass only. A block is handed to the sink when its mode info is read, and its coefficients are read right behind it (upstream stores the block and reads the coefficients in the same pass; the second pass reconstructs). The palette index map goes to the sink as it is read (upstream packs it for the second pass). The sink is told when a frame, a tile and a superblock begin and end; the loop restoration units of a superblock are collected for it. No reconstruction, no bookkeeping of the lowest pixel a block predicts from, no pixel buffers. The reference handling, the CDF updates and the motion vector storage are upstream's. The sink says at the end of a frame whether the frame stands: a frame it could not take fails like a frame with damaged data (its reference slots are emptied, as upstream empties them). The parse of a superblock row of a tile is timed for the sink, when the sink has a clock. With `ParseSettings::lf_masks` off, the two calls that fill the masks and levels of upstream's loop filter for a block (`rav1d_create_lf_mask_intra`, `rav1d_create_lf_mask_inter`) are left out: the parse reads neither, and they are a quarter of the parse of a 4K frame with few coefficients. |
 | `src/recon.rs` | Reading of the coefficients and of the palette colours only (1,990 of 4,190 lines). `decode_coefs` asks the sink where the coefficients of a transform block go and writes them there: dequantised, 32 bits each, in scan order (upstream writes them at their position in the block, clamped to the range of the bit depth; the inverse scan tables for that are built once). The values and the context are computed as upstream computes them. |
-| `src/thread_task.rs` | Without the film grain tasks; the filter tasks do nothing. The scheduler, its task order and its progress signals are upstream's: the reconstruction task of a tile returns at once. The same timer around the parse of a superblock row as in `decode.rs`. |
+| `src/thread_task.rs` | Without the film grain tasks; the filter tasks do nothing. The scheduler, its task order and its progress signals are upstream's: the reconstruction task of a tile returns at once. The same timer around the parse of a superblock row as in `decode.rs`. With `ParseSettings::tile_keeps_thread`, a tile whose next superblock row waits for nothing goes on with it on its thread. Upstream has that path and never takes it: it asks `check_tile` before it stores the progress of the row that has just ended, so the answer is "not yet", the tile goes back to the queue after every row, a waiting thread is woken, and the next row runs on whichever thread takes it. With the switch the progress is stored first; with one frame in parse no thread is woken for the row either (the filter tasks of a row do nothing here and run when the tile is through), with more than one the signal is upstream's. |
 | `src/picture.rs` | A picture has no samples: each plane is the smallest piece of memory a plane can be. Pictures remain the handles of the reference bookkeeping. |
 
 ## Added
 
 - `src/parse.rs`: the interface to the application. `ParseSink` is called per sequence header, frame,
   shown reference slot, tile, block, coded transform block, palette plane and superblock; `Parser` takes
-  the temporal units of a stream. A frame and a shown slot come with the place of their OBU in the data
+  the temporal units of a stream; `ParseSettings` has its threads, the frames in parse and the two
+  switches above. A frame and a shown slot come with the place of their OBU in the data
   that was sent (`data_left`, which `lib.rs` and `internal.rs` keep per OBU), for an application that
   decides itself which frame of a temporal unit is output. After an error `Parser::send` leaves nothing
   of the data with the parser: upstream keeps unread data when a picture is ready, which would be read

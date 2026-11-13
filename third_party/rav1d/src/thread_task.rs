@@ -972,6 +972,30 @@ pub fn rav1d_worker_task(task_thread: Arc<Rav1dTaskContextTaskThread>) {
                         if (sby + 1) << f.sb_shift < ts.tiling.row_end {
                             t.sby += 1;
                             t.deps_skip = 0.into();
+                            // rav1g: the tile goes on with its next superblock row on this thread
+                            // when nothing it waits for is missing. Upstream asks `check_tile` before
+                            // the progress of this row is stored, which says "not yet" every time,
+                            // so the tile goes back to the queue after every row and the thread that
+                            // takes it next is any of them. With one frame in parse the filter tasks
+                            // of a row do nothing and no frame waits for the row, so no thread is
+                            // woken for it: they run when the tile is through.
+                            if c.parse_tile_keeps_thread {
+                                ts.progress[p_1 as usize].store(progress, Ordering::SeqCst);
+                                if check_tile(&f, &fc.task_thread, &t, uses_2pass) == 0 {
+                                    reset_task_cur_async(ttd, t.frame_idx, c.fc.len() as u32);
+                                    if uses_2pass != 0
+                                        && ttd.cond_signaled.fetch_or(1, Ordering::SeqCst) == 0
+                                    {
+                                        ttd.cond.notify_one();
+                                    }
+                                    continue 'found_unlocked;
+                                }
+                                fc.task_thread.tasks.add_pending(t);
+                                assert!(task_thread_lock.is_none(), "thread lock should not be held");
+                                drop(f);
+                                task_thread_lock = Some(ttd.lock.lock());
+                                continue 'outer;
+                            }
                             if check_tile(&f, &fc.task_thread, &t, uses_2pass) == 0 {
                                 ts.progress[p_1 as usize].store(progress, Ordering::SeqCst);
                                 reset_task_cur_async(ttd, t.frame_idx, c.fc.len() as u32);

@@ -221,6 +221,9 @@ pub struct Rav1dState {
 pub struct Rav1dContext {
     /// rav1g: what takes the parse (`crate::parse`).
     pub(crate) sink: Arc<dyn crate::parse::ParseSink>,
+    /// rav1g: the switches of `crate::parse::ParseSettings`.
+    pub(crate) parse_lf_masks: bool,
+    pub(crate) parse_tile_keeps_thread: bool,
 
     pub(crate) state: Mutex<Rav1dState>,
 

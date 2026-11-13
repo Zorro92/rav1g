@@ -1516,7 +1516,8 @@ fn decode_b(
         parse_block(c, f, t, bs, b, false, seg_pred);
         (bd_fn.read_coef_blocks)(c, f, t, ts_c, bs, b)?;
 
-        if f.frame_hdr().loopfilter.level_y != [0, 0] {
+        // rav1g: the masks of upstream's loop filter, which a sink can do without.
+        if c.parse_lf_masks && f.frame_hdr().loopfilter.level_y != [0, 0] {
             let lflvl = match ts.lflvl.get() {
                 TileStateRef::Frame => &f.lf.lvl,
                 TileStateRef::Local => &*ts.lflvlmem.try_read().unwrap(),
@@ -2639,7 +2640,8 @@ fn decode_b(
         (bd_fn.read_coef_blocks)(c, f, t, ts_c, bs, b)?;
 
         let frame_hdr = f.frame_hdr();
-        if frame_hdr.loopfilter.level_y != [0, 0] {
+        // rav1g: as for an intra block.
+        if c.parse_lf_masks && frame_hdr.loopfilter.level_y != [0, 0] {
             let is_globalmv =
                 (inter_mode == if is_comp { GLOBALMV_GLOBALMV } else { GLOBALMV }) as c_int;
             let tx_split = [tx_split0 as u16, tx_split1];

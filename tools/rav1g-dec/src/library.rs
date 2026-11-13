@@ -64,6 +64,8 @@ pub struct Spec {
     pub all_layers: bool,
     /// -parser rav1d: the parse pass of rav1d reads the bitstream.
     pub parser_rav1d: bool,
+    /// -parseopt: the switches of that parser.
+    pub parser_options: rav1g::ParserOptions,
     /// -budget: what the budget callback answers, in bytes.
     pub budget: Option<u64>,
 }
@@ -252,6 +254,7 @@ impl Library {
             operating_point: spec.operating_point,
             output_all_layers: spec.all_layers,
             parser: if spec.parser_rav1d { rav1g::Parser::Rav1d } else { rav1g::Parser::Libaom },
+            parser_options: spec.parser_options,
             memory_available: spec.budget.map(|bytes| -> MemoryAvailable { Arc::new(move || Some(bytes)) }),
         }
     }
@@ -272,6 +275,7 @@ impl Library {
         settings.operating_point = spec.operating_point;
         settings.output_all_layers = spec.all_layers;
         settings.parser = if spec.parser_rav1d { capi::RAV1G_PARSER_RAV1D } else { capi::RAV1G_PARSER_LIBAOM };
+        settings.parser_options = spec.parser_options.bits();
         if let Some(bytes) = spec.budget {
             // The number travels as the context of its callback.
             settings.memory_available = Some(c_budget);

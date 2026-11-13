@@ -13,6 +13,7 @@
 //!   transform block records and the coefficients, and counts the block lists, in the layouts the
 //!   shaders read today. The memory comes from a [`sink::SinkHost`].
 //! - [`record`] turns a block of rav1d into a mode info record.
+//! - [`options`] has the switches of this parser.
 //! - [`digest`] folds what the parser reads from a stream into one number, the same on every platform:
 //!   what a build of the library has of this parser until the decoder runs it.
 //!
@@ -20,6 +21,7 @@
 //! libaom on the same streams and holds every buffer of one against the other's.
 
 pub mod digest;
+pub mod options;
 pub mod record;
 pub mod sink;
 

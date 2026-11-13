@@ -874,6 +874,7 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
 
         let rcfg = ResourceConfig::from_cfg(cfg);
         (*dec).parser_threads = c_int::try_from(cfg.threads).unwrap_or(1);
+        (*dec).parser_options = cfg.parser_options;
         (*dec).frame_slots = rcfg.gpu_pipeline_depth;
         let frame_slots = rcfg.gpu_pipeline_depth as usize;
 

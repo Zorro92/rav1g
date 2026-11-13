@@ -152,6 +152,9 @@ pub struct Report {
     /// The first differences in words.
     pub details: Vec<String>,
     pub detail_limit: usize,
+    /// rav1d's side staged its coefficients (`-parseopt stage`): it has written a zero for every
+    /// coefficient of a transform block that libaom leaves unwritten.
+    pub staged: bool,
 }
 
 impl Report {
@@ -482,7 +485,22 @@ pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
                     )
             };
             let show = |value: i32| if value == COEF_PATTERN { String::from("not written") } else { value.to_string() };
+            // With the coefficients staged, every coefficient of a transform block is written: a zero
+            // where libaom writes nothing (the buffer of the decoder is zero there).
+            let mut in_block = Vec::new();
+            if report.staged {
+                in_block.resize(coef_c.len(), false);
+                for block in tx_c {
+                    let count = (block.flags & 0x7FF) as usize * 4;
+                    let from = (block.input_offset as usize).min(in_block.len());
+                    let to = (from + count).min(in_block.len());
+                    in_block[from..to].fill(true);
+                }
+            }
             for (at, (a, b)) in coef_c.iter().zip(coef_r).enumerate() {
+                if report.staged && *a == COEF_PATTERN && *b == 0 && in_block[at] {
+                    continue;
+                }
                 if a != b {
                     report.difference("coefficient", || {
                         format!(

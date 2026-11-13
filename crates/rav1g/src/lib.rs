@@ -83,7 +83,7 @@ pub use rav1g_sys as sys;
 /// into one number (docs/phase2-rav1d.md). `rav1g-dec -parsedigest` prints it.
 pub use rav1g_parse::digest as parse_digest;
 
-pub use decoder::{Decoder, LowMemory, MemoryAvailable, MemoryRequirements, Parser, Settings};
+pub use decoder::{Decoder, LowMemory, MemoryAvailable, MemoryRequirements, Parser, ParserOptions, Settings};
 pub use device::Device;
 pub use error::{Error, ErrorCode};
 pub use output::{Frame, ImageFormat, ImageRequest, Output, OutputImage, Plane};

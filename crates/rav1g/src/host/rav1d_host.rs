@@ -36,6 +36,7 @@ use std::cell::UnsafeCell;
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::sync::Arc;
 
+use rav1g_parse::options::ParseOptions;
 use rav1g_parse::rav1d::include::dav1d::headers::{
     Rav1dFilmGrainData, Rav1dFrameHeader, Rav1dFrameType, Rav1dMatrixCoefficients, Rav1dPixelLayout,
     Rav1dRestorationType, Rav1dSequenceHeader,
@@ -43,7 +44,7 @@ use rav1g_parse::rav1d::include::dav1d::headers::{
 use rav1g_parse::rav1d::parse::{
     ParseFrame, ParsePalette, ParseSettings, ParseShowExisting, ParseSuperblock, ParseTile, Parser,
 };
-use rav1g_parse::sink::{FrameMemory, SecondModeInfo, Sink, SinkHost, TileMemory};
+use rav1g_parse::sink::{FrameMemory, SecondModeInfo, Sink, SinkHost, SinkTimer, TileMemory};
 
 use super::completion::{rav1g_decode_sef_begin, rav1g_decode_sef_submit};
 use super::frame::{
@@ -52,7 +53,7 @@ use super::frame::{
     rav1g_setup_frame_end, release_unsubmitted_frame, second_coefs, second_mode_info, setup_tile, write_palette,
 };
 use super::log::log;
-use super::perf::{av1_perf_ticks, perf_add};
+use super::perf::{av1_perf_ticks, perf_add, perf_add_ticks};
 use super::types::Av1Core;
 use crate::sys;
 use crate::sys::parser::{
@@ -724,6 +725,16 @@ impl SinkHost for SlotHost {
         unsafe { perf_add(self.dec, sys::AV1_PERF_CPU_ENTROPY_SUM as usize, start) };
     }
 
+    fn add_time(&self, timer: SinkTimer, ticks: i64) {
+        let id = match timer {
+            SinkTimer::Calls => sys::AV1_PERF_CPU_SINK_CALLS,
+            SinkTimer::Staged => sys::AV1_PERF_CPU_SINK_STAGED,
+            SinkTimer::Lists => sys::AV1_PERF_CPU_SINK_LISTS,
+        };
+        // SAFETY: as above.
+        unsafe { perf_add_ticks(self.dec, id as usize, ticks) };
+    }
+
     fn frame_begin(&self, frame: &ParseFrame<'_>) -> Result<FrameMemory, ()> {
         // SAFETY: the thread of the decode call, while no tile is in parse; the functions of the frame
         // setup are called as the entropy decoder calls them, with the header filled in.
@@ -963,17 +974,19 @@ pub(crate) struct Rav1dHost {
 }
 
 impl Rav1dHost {
-    fn new(dec: *mut Av1Core, threads: c_int, operating_point: c_int) -> Option<Box<Rav1dHost>> {
+    fn new(dec: *mut Av1Core, threads: c_int, options: ParseOptions, operating_point: c_int) -> Option<Box<Rav1dHost>> {
         let mut state = State::new(dec);
         state.pbi.max_threads = threads.clamp(1, MAX_THREADS);
         state.pbi.operating_point = operating_point;
-        let sink = Arc::new(Sink::new(SlotHost { dec, state: UnsafeCell::new(state) }));
-        let settings = ParseSettings {
+        let sink = Arc::new(Sink::with_options(SlotHost { dec, state: UnsafeCell::new(state) }, options.sink()));
+        let mut settings = ParseSettings {
             threads: threads.clamp(1, MAX_THREADS) as u16,
             frames: 1,
             operating_point: u8::try_from(operating_point).ok().filter(|&point| point < 32).unwrap_or(0),
             frame_size_limit: 0,
+            ..Default::default()
         };
+        options.apply(&mut settings);
         let parser = Parser::new(&settings, sink.clone()).ok()?;
         Some(Box::new(Rav1dHost { parser, sink, detail: CString::default(), broken: false }))
     }
@@ -999,7 +1012,8 @@ pub unsafe extern "C" fn rav1g_rav1d_decode(
     // SAFETY: the caller's contract, for all of this function.
     unsafe {
         if (*dec).rav1d.is_none() {
-            (*dec).rav1d = Rav1dHost::new(dec, (*dec).parser_threads, operating_point);
+            let options = ParseOptions::from_bits((*dec).parser_options as u32);
+            (*dec).rav1d = Rav1dHost::new(dec, (*dec).parser_threads, options, operating_point);
         }
         let Some(host) = (*dec).rav1d.as_mut() else {
             *detail = c"The parser could not be created".as_ptr();

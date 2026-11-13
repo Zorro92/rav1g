@@ -63,7 +63,7 @@ def main():
     parser.add_argument('--tool', required=True, help='rav1g-dec.exe')
     parser.add_argument('--tool-args', default='', help='further arguments for it, e.g. "-hw"')
     parser.add_argument('--player-args', default='', help='further flags for every task of the player, e.g. '
-                        '"-parser rav1d"')
+                        '"-parser rav1d" or "-parser rav1d -parseopt all"')
     parser.add_argument('--streams', required=True, help='the directory of the conformance streams')
     parser.add_argument('--out', required=True, help='the logs')
     parser.add_argument('--title', default='the Rust library')
@@ -95,6 +95,8 @@ def main():
         problems.append('a task lost the D3D12 device')
     if '-parser rav1d' in args.player_args and 'Parser: the parse pass of rav1d' not in text:
         problems.append('the log does not say that the parse pass of rav1d reads the streams')
+    if '-parseopt all' in args.player_args and 'Parser switches (-parseopt): stage nolfmask tilethread' not in text:
+        problems.append('the log does not say that the switches of the parser are on')
     ok = text.count('MD5 is OK')
     if ok != len(TASKS):
         problems.append('%d of %d tasks of the player ended with "MD5 is OK"' % (ok, len(TASKS)))
