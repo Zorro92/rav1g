@@ -971,6 +971,217 @@ file and copies it into the `licenses` directory of every package.
 **The test player** logs its lifecycle events, one `LIFECYCLE ...` line each
 ([test-player.md](test-player.md#inputs-and-logs-in-localstate)).
 
+### Where the time goes
+
+2026-11-13. The console timed step 3, the ratio was not the one the design measured, and this section
+is the search for the reason: what the console said, what was looked at, what was found, and the
+switches and timers that are in the tree so that the console can say which of it counts.
+
+**The console on step 3.** Package 0.2.136.0, `-t 6 -queue_size 4 -nopresent -gputime`, two runs
+each, milliseconds a frame, means. The md5 set is 15 of 15 with `-parser rav1d`; the GPU is as busy
+with either parser.
+
+| Clip | Timer | `-parser c` | `-parser rav1d` | Ratio |
+| --- | --- | ---: | ---: | ---: |
+| `j4k40` (4K 10-bit, 1 tile) | tile decode, wall | 40.99 | 30.53 | 0.74 |
+| | tile decode, thread sum | 40.95 | 29.19 | 0.71 |
+| | decode thread | 48.27 | 39.53 | 0.82 |
+| | wall between frames | 50.47 (19.8 fps) | 41.12 (24.3 fps) | |
+| `t40x1ld` (4K 10-bit, 1 tile) | tile decode, wall | 33.88 | 23.77 | 0.70 |
+| | decode thread | 42.35 | 32.64 | 0.77 |
+| | frames per second | 22.6 | 29.3 | |
+| `fg4k_300` (8 tiles) | tile decode, wall | 6.50 | 6.38 | 0.98 |
+| | tile decode, thread sum | 28.70 | 27.78 | 0.97 |
+| `a1_8b4k_300` (4K 8-bit, light) | tile decode, wall | 10.09 | 13.70 | 1.36 |
+| | tile decode, thread sum | 10.06 | 12.71 | 1.26 |
+| | decode thread | 16.81 | 20.87 | 1.24 |
+
+So 0.71 to 0.74 on the heavy clips, where the design measured 0.42 to 0.44 for the parse pass alone,
+and slower than the C parser on the light clip. What the decode thread does besides the parse stayed
+at 7 to 9 ms. The eight-tile clip is bound by the GPU and says nothing here.
+
+**The first suspicion: scattered writes into write-combined memory.** Not confirmed by the code. What
+the parse writes into mapped buffers of the D3D12 host, with either parser:
+
+| Buffer | Kind of the buffer (`gpu/d3d12.rs`) | Memory for the CPU | Written by | How |
+| --- | --- | --- | --- | --- |
+| `idct_coefs`, the coefficients | `UploadUAV`: custom heap, pool L0, `WRITE_COMBINE`, unordered access | write-combined | rav1d's `decode_coefs` (C: `av1_read_coeffs_txb`) | the coefficients that are not zero, 32 bits each, in rising scan order within a transform block, the blocks in decode order; never read |
+| `idct_blocks_unordered`, the transform block records | `DeviceUpload`: `D3D12_HEAP_TYPE_UPLOAD` | write-combined | the sink's `txb` (C: the same function) | 16 bytes a record, one after the other, every field once; never read |
+| `mode_info_pool`, the mode info records | `HostRW`: custom heap, pool L0, `WRITE_BACK` | cached | the sink's `block`, 224 bytes a record, cleared and filled (the C parser fills without clearing) | read again for the CDEF index of a superblock and for the block lists |
+| `mode_info_grid` | `HostRW` | cached | the sink's `block`: a pointer at every 4x4 unit of the block | read by the block lists |
+| `gen_mi_block_indexes`, `gen_block_map`, `gen_intra_inter_grid` | `HostRW` | cached | `av1_mi_push_block` at the end of a tile, the host's function, for both parsers | counted up |
+| `palette_buffer` | `DeviceUpload` | write-combined | the host's palette writer, for both parsers; screen content only | each sample once; never read |
+
+- rav1d's second loop over a transform block walks the coefficients that are not zero from the lowest
+  scan index up (the token loop links them that way), and the patch of step 2 stores each at its scan
+  index: the addresses rise, with gaps where a coefficient is zero. That is what the C parser writes,
+  in the same order. Nothing is written twice, nothing is read back, there is no `|=` on mapped memory
+  and no clear of a record in write-combined memory.
+- The block lists are counted at the end of a tile from the records by both parsers (`decode_tile2`
+  of libaom does the same loop), so that pass over cold records is not new either.
+- What differs in the write-combined buffers is only what runs between two stores. Whether that
+  matters on the console cannot be seen on a machine whose upload memory is ordinary memory (WARP,
+  lavapipe), so there is a switch for it (`stage`, below).
+
+**What was found instead**, on the development machine and on CI:
+
+1. *rav1d hands a tile from thread to thread.* With more than one worker thread the scheduler of
+   upstream puts a tile back into its task queue after every superblock row, wakes a waiting thread,
+   and the next row is parsed by whichever thread takes the task first. (Upstream has a path that goes
+   on with the next row at once. It is never taken: `check_tile` is asked before the progress of the
+   row that has just ended is stored, and says "not yet".) For upstream this interleaves the parse with
+   the filters of the rows; here the filter tasks do nothing. With `-t 6` on a stream with one tile that
+   is 34 hand-overs a 4K frame between six threads of which five have nothing else to do. Parse and
+   sink of `j4k40` on the idle development machine: 15.1 ms a frame with one thread, 19.6 ms with six.
+   The console was timed with `-t 6`.
+2. *rav1d fills the masks of its own loop filter.* The parse pass of upstream computes, block by
+   block, the edge masks and the filter levels of every 4x4 unit for its loop filter
+   (`rav1d_create_lf_mask_intra`, `_inter`). The loop filter here is a GPU stage with its own lists;
+   nothing reads the masks. Their cost goes with the area of the frame and not with its bits, so it is
+   what a light 4K frame mostly consists of: 27 % of the parse of `a1_8b4k_300` without the sink (4.09
+   to 2.99 ms a frame), and under wine the median frame of that clip takes rav1d 4.0 ms where the C
+   parser takes 2.1 ms (below).
+3. *The sink is not it.* It costs what step 2 measured: on `j4k40` under wine 1.9 ms a frame for the
+   block lists and 1.4 ms for all other calls of the sink, of 20.5.
+
+**The switches.** Three ways of doing the same parse, each a switch of the decoder so that one package
+can time them against each other, all off unless asked for:
+
+| `-parseopt` word | `ParserOptions` field, `RAV1G_PARSER_OPTION_*` | What it does |
+| --- | --- | --- |
+| `stage` | `stage`, `_STAGE` | The sink collects the coefficients and the transform block records of a tile in memory of its own (32 KiB and 8 KiB a tile, so they stay in the first-level cache) and copies them to their buffers in runs: a run ends when the stage is full, when the buffer does not go on where the run ends (the tile's second share), and at the end of the tile. The parser then writes write-combined memory only through those copies: every word of a run, in order. A coefficient that is zero is then written as zero; without the switch it is left as the zero the buffer has. The bytes of the buffers are the same. |
+| `nolfmask` | `no_lf_masks`, `_NO_LF_MASKS` | rav1d leaves out the two calls of point 2 (`ParseSettings::lf_masks` off). |
+| `tilethread` | `tile_keeps_thread`, `_TILE_KEEPS_THREAD` | The progress of a superblock row is stored before `check_tile` is asked, so a tile whose next row waits for nothing goes on with it on its thread (`ParseSettings::tile_keeps_thread`). With one frame in parse no thread is woken for the row; the filter tasks, which do nothing, run when the tile is through. With more than one frame in parse (step 4) the signal stays upstream's, because other frames wait for rows. |
+| `all` | | The three. |
+| `time` | `time_calls`, `_TIME_CALLS` | The calls of the sink are timed, see below. |
+
+`Settings::parser_options` (Rust), `Rav1gSettings::parser_options` (`rav1g.h`), `rav1g-dec -parseopt`
+and the test player's `-parseopt` ([test-player.md](test-player.md#switches-of-the-parser--parseopt));
+`rav1g-parse-check -parseopt` for the oracle and for `-time`. The two switches inside rav1d are in
+`PATCHES.md`: the parse is upstream's with both off.
+
+**The timers.** A timing run (`-gputime`) with `-parser rav1d` has three more CPU timers, all parts of
+`entropy_sum` and summed over the tile threads:
+
+| Timer | What |
+| --- | --- |
+| `sink_lists` | the block lists at the end of a tile. Always on in a timing run: two clock readings a tile. |
+| `sink_staged` | with `stage`: the copies of the staged runs into the buffers. Two clock readings a run. |
+| `sink_calls` | with `time`: the time inside the calls of the sink for a block, a transform block, a palette and a superblock, from the processor's time stamp counter (two readings a call; the counter's length is taken from the clock over the tile). `sink_staged` is inside. |
+
+`entropy_sum - sink_lists - sink_calls` is then rav1d by itself, and without `stage` it still has the
+coefficient stores into the mapped buffer in it; with `stage` those stores go to ordinary memory and
+the write into the buffer is `sink_staged`. So `stage` against no `stage`, both with `time`, says what
+the direct stores cost. The summary prints the three and that difference. The C parser has no such
+timers: it does the same work inside its tile decode.
+
+**Measured.**
+
+Parse and sink alone, no GPU (`rav1g-parse-check -time -parseopt ...`, the development machine, idle,
+300 frames, the best of three, milliseconds a frame):
+
+| Clip | Threads | No switch | `nolfmask` | `tilethread` | `stage` | `all` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `a1_8b4k_300` | 1 | 4.76 | 3.49 | 4.88 | 4.97 | 3.70 |
+| | 6 | 5.39 | 4.00 | 5.16 | 5.60 | 3.96 |
+| `j4k40` | 1 | 15.07 | 15.47 | 15.39 | 15.75 | 15.81 |
+| | 6 | 19.58 | 19.86 | 14.89 | 20.42 | 15.18 |
+| `t40x1ld` | 1 | 12.48 | 11.78 | 12.42 | 12.43 | 12.04 |
+| | 6 | 14.23 | 16.69 | 12.12 | 17.02 | 11.92 |
+
+- Six threads without `tilethread` cost 4.5 ms a frame on `j4k40` and vary from run to run (14.2 to
+  17.0 on `t40x1ld`); with `tilethread` six threads are as fast as one, or faster (the parse then has a
+  thread of its own next to the one that sends the data).
+- `nolfmask` takes a quarter off the light clip and nothing off `j4k40`, whose time is coefficients.
+- `stage` costs 0.2 to 0.7 ms here, where the buffers are ordinary memory: it is a second pass over
+  the coefficients.
+
+The decoder under wine on the same machine (`rav1g-dec -hw -gputime -t 6`, the first 80 frames, two
+runs, `entropy_sum` in milliseconds a frame; lavapipe renders on the same cores):
+
+| Clip | `-parser c` | `-parser rav1d` | `-t 1` | `nolfmask` | `tilethread` | `stage` | `all` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `a1_8b4k_300`, mean | 5.7, 7.2 | 6.3, 6.8 | 6.4, 6.6 | 4.7, 4.6 | 6.8, 7.2 | 6.9, 7.0 | 4.6, 4.8 |
+| `a1_8b4k_300`, median | 2.1, 2.4 | 4.0, 4.2 | 3.4, 5.0 | 2.3, 2.2 | 5.2, 5.3 | 4.4, 4.4 | 2.6, 2.7 |
+| `j4k40`, mean | 35.6, 34.5 | 20.6, 20.5 | 19.3, 19.8 | 20.1, 20.7 | 21.2, 21.5 | 20.5, 20.1 | 21.7, 22.2 |
+
+- The light clip reproduces the console: without the switches the median frame takes rav1d twice the
+  C parser's time, and `nolfmask` brings it to the C parser's.
+- `tilethread` gains nothing here and `entropy_sum` rises by 0.7 ms on `j4k40`, while the time around
+  the tile rows falls by as much (`entropy_wall - entropy_sum`: 0.85 ms without, 0.23 ms with). The
+  machine is oversubscribed in this run (the rasteriser's threads), and a tile that hops between
+  threads that have just slept is placed on an idle core each time. This is not the console's
+  situation, where the GPU is not on the CPU; the table above is the idle case.
+
+CI, run 43468494277 on a throwaway branch (WARP, the runner's four processors shared with WARP;
+`parser_timing.py`, three rounds, `entropy_sum` in milliseconds a frame and its ratio to `-parser c`):
+
+| Stream | Threads | `-parser c` | `-parser rav1d` | `nolfmask` | `tilethread` | `stage` | `all` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2160p 8-bit (`nf-dvbdash-a1-8b-2160p`) | 1 | 9.20 | 8.16, 0.89 | | | | 5.40, 0.59 |
+| | 4 | 9.62 | 7.32, 0.76 | 4.74, 0.49 | 7.74, 0.80 | 7.28, 0.76 | 5.06, 0.53 |
+| 1080p 10-bit (`nf-chimera-10b-1080p`) | 1 | 7.14 | 5.40, 0.76 | | | | 4.34, 0.61 |
+| 1080p 10-bit (`nf-sparks-10b-1080p`) | 1 | 4.15 | 3.29, 0.79 | | | | 2.62, 0.63 |
+| 1080p 10-bit, 8 tiles (`syn-tiles-10b-1080p`) | 4 | 6.70 | 4.02, 0.60 | | | | 3.86, 0.58 |
+
+- With four threads on the eight tiles the wall time of the parse goes from 3.49 to 2.83 ms with the
+  switches (0.83 to 0.68 of the C parser's 4.18).
+- With `time`, the calls of the sink are 0.83 ms of the 2160p frame, the block lists 0.22 ms, the
+  staged copies 0.02 ms.
+- With more than one thread `entropy_wall` is 2.5 to 4.8 ms above `entropy_sum` on the 2160p stream on
+  this runner, with and without the switches: a frame's parse starts on a worker thread, and a thread
+  that wakes on a runner whose processors WARP keeps busy waits for one. The console measured 1.0 to
+  1.3 ms there with `-t 6` and 0.04 ms with the C parser.
+
+**Gates** (run 43468494277, all 17 jobs green): the parse check against the entropy decoder of libaom
+with `-parseopt all`, one thread and four: 252 of 252 streams equal (with `stage` a zero inside a
+transform block where libaom writes nothing is the one accepted difference); `rav1g-dec -parser rav1d
+-parseopt all,time` on WARP: 252 of 252 md5, MSVC build and cross build; md5 of every frame and the
+stage dumps of the seven dump streams against `-parser c`; the part of the set with `-poisonbuf`, 137
+of 137; the player's decoder code with `-parser rav1d -parseopt all,time`, 4 of 4. Everything that
+existed is unchanged, with both parsers and no switch. Locally the 244 AOM vectors under wine with
+`all,time` and with `stage`.
+
+**For the console.** The switches are off by default and the C parser stays the default: the console
+decides. One launch, the same clip, two runs each:
+
+```text
+-parser c
+-parser rav1d
+-parser rav1d -t 1
+-parser rav1d -parseopt tilethread
+-parser rav1d -parseopt nolfmask
+-parser rav1d -parseopt stage,time
+-parser rav1d -parseopt time
+-parser rav1d -parseopt all
+-parser rav1d -parseopt all,time
+```
+
+- `-t 1` parses on the thread that sends the data, without rav1d's scheduler: on a clip with one tile
+  it is what `tilethread` should reach with `-t 6`.
+- `stage,time` against `time`: `entropy_sum - sink_lists - sink_calls` is rav1d with and without the
+  stores into write-combined memory, and `sink_staged` is what the copies cost.
+- `sink_lists` and `sink_calls` say what the sink is on the console.
+
+**What follows from which answer.**
+
+- `tilethread` and `nolfmask` are meant to become the way the parser works, and `nolfmask` then a
+  removal in the copy of rav1d instead of a switch.
+- If `stage` wins on the console, it stays and becomes the default; if not, it goes.
+- If `entropy_wall - entropy_sum` stays near 1 ms with `tilethread`: a frame with one tile can be
+  parsed on the thread that sends the data, also when there are worker threads (rav1d does that only
+  when it has one thread). Not done.
+- If `sink_lists` is large on the console: the lists of a superblock can be counted when the superblock
+  ends, while its records are in the cache, in the same order. Not done; the C parser has the same
+  pass.
+- If the ratio is still far from the design's after that: `-parseopt time` gives rav1d by itself on the
+  console, and the comparison to make is that number against the C parser's tile decode.
+
+**Seen on the way.** A panic on a worker thread of rav1d ends nothing: the decode call waits for the
+frame for ever (it happened here with an index one past an array of timers; step 4 has the item).
+rav1d clears and makes anew its loop filter masks for every frame (700 KB at 4K) also with `nolfmask`,
+because the CDEF indexes of a superblock live in them; that is frame set-up, outside `entropy_sum`.
+
 ## Licence
 
 rav1d is BSD-2-Clause (copyright VideoLAN and the dav1d authors, and the rav1d contributors); the
