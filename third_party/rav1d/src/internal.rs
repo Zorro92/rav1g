@@ -12,13 +12,11 @@ use strum::FromRepr;
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 use crate::align::{Align16, Align64, AlignedVec2, AlignedVec64};
-use crate::cdef::Rav1dCdefDSPContext;
 use crate::cdf::{CdfContext, CdfThreadContext};
 use crate::cpu::{rav1d_get_cpu_flags, CpuFlags};
 use crate::disjoint_mut::{DisjointImmutGuard, DisjointMut, DisjointMutArcSlice, DisjointMutGuard};
 use crate::env::BlockContext;
 use crate::error::Rav1dError;
-use crate::filmgrain::{Rav1dFilmGrainDSPContext, GRAIN_HEIGHT, GRAIN_WIDTH};
 use crate::include::common::bitdepth::{BitDepth, BitDepth16, BitDepth8, BPC};
 use crate::include::dav1d::common::Rav1dDataProps;
 use crate::include::dav1d::data::Rav1dData;
@@ -28,25 +26,15 @@ use crate::include::dav1d::headers::{
     Rav1dITUTT35, Rav1dMasteringDisplay, Rav1dSequenceHeader, Rav1dWarpedMotionParams,
 };
 use crate::include::dav1d::picture::{Rav1dPicAllocator, Rav1dPicture};
-use crate::ipred::Rav1dIntraPredDSPContext;
-use crate::itx::Rav1dInvTxfmDSPContext;
 use crate::levels::{Av1Block, Filter2d, SegmentId, TxfmType, WHT_WHT};
 use crate::lf_mask::{Av1Filter, Av1FilterLUT, Av1Restoration, Av1RestorationUnit};
 use crate::log::Rav1dLogger;
-use crate::loopfilter::Rav1dLoopFilterDSPContext;
-use crate::looprestoration::Rav1dLoopRestorationDSPContext;
-use crate::lr_apply::LrRestorePlanes;
-use crate::mc::Rav1dMCDSPContext;
 use crate::msac::{MsacContext, Rav1dMsacDSPContext};
-use crate::pal::Rav1dPalDSPContext;
 use crate::picture::{PictureFlags, Rav1dThreadPicture};
 use crate::pool::MemPool;
 use crate::recon::{
-    rav1d_backup_ipred_edge, rav1d_copy_pal_block_uv, rav1d_copy_pal_block_y, rav1d_filter_sbrow,
-    rav1d_filter_sbrow_cdef, rav1d_filter_sbrow_deblock_cols, rav1d_filter_sbrow_deblock_rows,
-    rav1d_filter_sbrow_lr, rav1d_filter_sbrow_resize, rav1d_read_coef_blocks, rav1d_read_pal_plane,
-    rav1d_read_pal_uv, rav1d_recon_b_inter, rav1d_recon_b_intra, BackupIpredEdgeFn, CopyPalBlockFn,
-    FilterSbrowFn, ReadCoefBlocksFn, ReadPalPlaneFn, ReadPalUVFn, ReconBInterFn, ReconBIntraFn,
+    rav1d_copy_pal_block_uv, rav1d_copy_pal_block_y, rav1d_read_coef_blocks, rav1d_read_pal_plane,
+    rav1d_read_pal_uv, CopyPalBlockFn, ReadCoefBlocksFn, ReadPalPlaneFn, ReadPalUVFn,
 };
 use crate::refmvs::{Rav1dRefmvsDSPContext, RefMvsFrame, RefMvsTemporalBlock, RefmvsTile};
 use crate::relaxed_atomic::RelaxedAtomic;
@@ -54,7 +42,6 @@ use crate::thread_task::{Rav1dTaskIndex, Rav1dTasks};
 
 #[derive(Default)]
 pub struct Rav1dDSPContext {
-    pub pal: Rav1dPalDSPContext,
     pub refmvs: Rav1dRefmvsDSPContext,
     pub msac: Rav1dMsacDSPContext,
 }
@@ -62,7 +49,6 @@ pub struct Rav1dDSPContext {
 impl Rav1dDSPContext {
     pub const fn default() -> Self {
         Self {
-            pal: Rav1dPalDSPContext::default(),
             refmvs: Rav1dRefmvsDSPContext::default(),
             msac: Rav1dMsacDSPContext::default(),
         }
@@ -70,7 +56,6 @@ impl Rav1dDSPContext {
 
     pub const fn new(flags: CpuFlags) -> Self {
         Self {
-            pal: Rav1dPalDSPContext::new(flags),
             refmvs: Rav1dRefmvsDSPContext::new(flags),
             msac: Rav1dMsacDSPContext::new(flags),
         }
@@ -91,70 +76,6 @@ impl Default for &'static Rav1dDSPContext {
     }
 }
 
-pub(crate) struct Rav1dBitDepthDSPContext {
-    pub fg: Rav1dFilmGrainDSPContext,
-    pub ipred: Rav1dIntraPredDSPContext,
-    pub mc: Rav1dMCDSPContext,
-    pub itx: Rav1dInvTxfmDSPContext,
-    pub lf: Rav1dLoopFilterDSPContext,
-    pub cdef: Rav1dCdefDSPContext,
-    pub lr: Rav1dLoopRestorationDSPContext,
-}
-
-impl Rav1dBitDepthDSPContext {
-    pub const fn _default<BD: BitDepth>() -> Self {
-        Self {
-            fg: Rav1dFilmGrainDSPContext::default::<BD>(),
-            ipred: Rav1dIntraPredDSPContext::default::<BD>(),
-            mc: Rav1dMCDSPContext::default::<BD>(),
-            itx: Rav1dInvTxfmDSPContext::default::<BD>(),
-            lf: Rav1dLoopFilterDSPContext::default::<BD>(),
-            cdef: Rav1dCdefDSPContext::default::<BD>(),
-            lr: Rav1dLoopRestorationDSPContext::default::<BD>(),
-        }
-    }
-
-    pub const fn new<BD: BitDepth>(flags: CpuFlags, bpc: u8) -> Self {
-        Self {
-            fg: Rav1dFilmGrainDSPContext::new::<BD>(flags),
-            ipred: Rav1dIntraPredDSPContext::new::<BD>(flags),
-            mc: Rav1dMCDSPContext::new::<BD>(flags),
-            itx: Rav1dInvTxfmDSPContext::new::<BD>(flags, bpc),
-            lf: Rav1dLoopFilterDSPContext::new::<BD>(flags),
-            cdef: Rav1dCdefDSPContext::new::<BD>(flags),
-            lr: Rav1dLoopRestorationDSPContext::new::<BD>(flags, bpc),
-        }
-    }
-
-    pub fn get(bpc: u8) -> Option<&'static Self> {
-        static BPC8: OnceLock<Rav1dBitDepthDSPContext> = OnceLock::new();
-        static BPC10: OnceLock<Rav1dBitDepthDSPContext> = OnceLock::new();
-        static BPC12: OnceLock<Rav1dBitDepthDSPContext> = OnceLock::new();
-        Some(match bpc {
-            8 => BPC8.get_or_init(|| {
-                let flags = rav1d_get_cpu_flags();
-                Self::new::<BitDepth8>(flags, bpc)
-            }),
-            10 => BPC10.get_or_init(|| {
-                let flags = rav1d_get_cpu_flags();
-                Self::new::<BitDepth16>(flags, bpc)
-            }),
-            12 => BPC12.get_or_init(|| {
-                let flags = rav1d_get_cpu_flags();
-                Self::new::<BitDepth16>(flags, bpc)
-            }),
-            _ => return None,
-        })
-    }
-}
-
-impl Default for &'static Rav1dBitDepthDSPContext {
-    fn default() -> Self {
-        // Just need to choose one for default initialization, not an actual default,
-        // but it doesn't hurt to initialize this slightly early.
-        Rav1dBitDepthDSPContext::get(8).unwrap()
-    }
-}
 
 #[derive(Clone, Default)]
 pub(crate) struct Rav1dTileGroupHeader {
@@ -198,61 +119,6 @@ pub(crate) struct Rav1dContextFrameThread {
     pub next: c_uint,
 }
 
-pub type GrainLut<Entry> = [[Entry; GRAIN_WIDTH]; GRAIN_HEIGHT + 1];
-
-pub struct GrainBD<BD: BitDepth> {
-    pub grain_lut: Align16<[GrainLut<BD::Entry>; 3]>,
-    // TODO(kkysen) can use `BD::SCALING_LEN` directly with `#![feature(generic_const_exprs)]` when stabilized
-    pub scaling: Align64<[BD::Scaling; 3]>,
-}
-
-// Implemented manually since we don't require `BD: Default`.
-impl<BD: BitDepth> Default for GrainBD<BD> {
-    fn default() -> Self {
-        Self {
-            grain_lut: Default::default(),
-            scaling: Default::default(),
-        }
-    }
-}
-
-pub enum Grain {
-    #[cfg(feature = "bitdepth_8")]
-    Bpc8(GrainBD<BitDepth8>),
-    #[cfg(feature = "bitdepth_16")]
-    Bpc16(GrainBD<BitDepth16>),
-}
-
-impl Default for Grain {
-    fn default() -> Self {
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "bitdepth_8")] {
-                Self::Bpc8(Default::default())
-            } else if #[cfg(feature = "bitdepth_16")] {
-                Self::Bpc16(Default::default())
-            } else {
-                compile_error!("No bitdepths enabled");
-            }
-        }
-    }
-}
-
-#[derive(Default)]
-#[repr(C)]
-pub(crate) struct TaskThreadDataDelayedFg {
-    pub in_0: Rav1dPicture,
-    pub out: Rav1dPicture,
-    pub type_0: TaskType,
-    pub grain: Grain,
-}
-
-// SAFETY:
-// See discussion in https://github.com/memorysafety/rav1d/pull/1329
-unsafe impl Send for TaskThreadDataDelayedFg {}
-// SAFETY:
-// See discussion in https://github.com/memorysafety/rav1d/pull/1329
-unsafe impl Sync for TaskThreadDataDelayedFg {}
-
 #[derive(Default)]
 #[repr(C)]
 pub(crate) struct TaskThreadData {
@@ -266,10 +132,6 @@ pub(crate) struct TaskThreadData {
     /// See [`crate::thread_task::reset_task_cur`].
     pub reset_task_cur: AtomicU32,
     pub cond_signaled: AtomicI32,
-    pub delayed_fg_exec: RelaxedAtomic<i32>,
-    pub delayed_fg_cond: Condvar,
-    pub delayed_fg_progress: [AtomicI32; 2], /* [0]=started, [1]=completed */
-    pub delayed_fg: RwLock<TaskThreadDataDelayedFg>,
 }
 
 #[derive(Default)]
@@ -350,10 +212,12 @@ pub struct Rav1dState {
     pub(crate) cached_error: Option<Rav1dError>,
 }
 
-#[derive(Default)]
 #[repr(C)]
 #[repr(align(64))]
 pub struct Rav1dContext {
+    /// rav1g: what takes the parse (`crate::parse`).
+    pub(crate) sink: Arc<dyn crate::parse::ParseSink>,
+
     pub(crate) state: Mutex<Rav1dState>,
 
     pub(crate) fc: Box<[Rav1dFrameContext]>,
@@ -454,15 +318,6 @@ pub struct ScalableMotionParams {
 }
 
 pub(crate) struct Rav1dFrameContextBdFn {
-    pub recon_b_intra: ReconBIntraFn,
-    pub recon_b_inter: ReconBInterFn,
-    pub filter_sbrow: FilterSbrowFn,
-    pub filter_sbrow_deblock_cols: FilterSbrowFn,
-    pub filter_sbrow_deblock_rows: FilterSbrowFn,
-    pub filter_sbrow_cdef: fn(&Rav1dContext, &Rav1dFrameData, &mut Rav1dTaskContext, c_int) -> (),
-    pub filter_sbrow_resize: FilterSbrowFn,
-    pub filter_sbrow_lr: FilterSbrowFn,
-    pub backup_ipred_edge: BackupIpredEdgeFn,
     pub read_coef_blocks: ReadCoefBlocksFn,
     pub copy_pal_block_y: CopyPalBlockFn,
     pub copy_pal_block_uv: CopyPalBlockFn,
@@ -473,15 +328,6 @@ pub(crate) struct Rav1dFrameContextBdFn {
 impl Rav1dFrameContextBdFn {
     pub const fn new<BD: BitDepth>() -> Self {
         Self {
-            recon_b_inter: rav1d_recon_b_inter::<BD>,
-            recon_b_intra: rav1d_recon_b_intra::<BD>,
-            filter_sbrow: rav1d_filter_sbrow::<BD>,
-            filter_sbrow_deblock_cols: rav1d_filter_sbrow_deblock_cols::<BD>,
-            filter_sbrow_deblock_rows: rav1d_filter_sbrow_deblock_rows::<BD>,
-            filter_sbrow_cdef: rav1d_filter_sbrow_cdef::<BD>,
-            filter_sbrow_resize: rav1d_filter_sbrow_resize::<BD>,
-            filter_sbrow_lr: rav1d_filter_sbrow_lr::<BD>,
-            backup_ipred_edge: rav1d_backup_ipred_edge::<BD>,
             read_coef_blocks: rav1d_read_coef_blocks::<BD>,
             copy_pal_block_y: rav1d_copy_pal_block_y::<BD>,
             copy_pal_block_uv: rav1d_copy_pal_block_uv::<BD>,
@@ -569,22 +415,8 @@ pub struct Rav1dFrameContextFrameThread {
     /// Indices: 0: reconstruction, 1: entropy.
     pub next_tile_row: [RelaxedAtomic<i32>; 2],
 
-    /// Indexed using `t.b.y * f.b4_stride + t.b.x`.
-    pub b: DisjointMut<Vec<Av1Block>>,
-
-    pub cbi: Vec<RelaxedAtomic<CodedBlockInfo>>,
-
-    /// Indexed using `(t.b.y >> 1) * (f.b4_stride >> 1) + (t.b.x >> 1)`.
-    /// Inner indices are `[3 plane][8 idx]`.
-    /// Allocated as a flat array. `pal.as_slice` and `pal.as_slice_mut` should be
-    /// used to access elements of type `[[BitDepth::Pixel; 8]; 3]`
-    pub pal: Pal,
-
-    /// Iterated over inside tile state.
-    pub pal_idx: DisjointMut<AlignedVec64<u8>>,
-
-    /// [`AlignedVec64`]`<`[`DynCoef`]`>`
-    pub cf: DisjointMut<AlignedVec64<u8>>,
+    // rav1g: `b`, `cbi`, `pal`, `pal_idx` and `cf` of upstream are not here: what the parse pass
+    // reads goes to the sink.
 
     /// Start offsets per tile
     pub tile_start_off: Vec<u32>,
@@ -650,18 +482,22 @@ pub struct Rav1dFrameContextLf {
     pub lvl: [Align16<[[[u8; 2]; 8]; 4]>; 8], /* [8 seg_id][4 dir][8 ref][2 is_gmv] */
     pub last_sharpness: u8,
     pub tx_lpf_right_edge: TxLpfRightEdge,
-    // cdef_line_buf was originally aligned to 32 bytes, but we need to pass
-    // both cdef_line_buf and lr_line_buf as the same parameter type to
-    // backup2lines.
-    pub cdef_line_buf: DisjointMut<AlignedVec64<u8>>, /* AlignedVec32<DynPixel> */
-    pub lr_line_buf: DisjointMut<AlignedVec64<u8>>,
-    pub cdef_line: [[usize; 3]; 2], /* [2 pre/post][3 plane] */
-    pub cdef_lpf_line: [usize; 3],  /* plane */
-    pub lr_lpf_line: [usize; 3],    /* plane */
 
     // in-loop filter per-frame state keeping
     pub start_of_tile_row: Vec<u8>,
     pub restore_planes: LrRestorePlanes,
+}
+
+bitflags::bitflags! {
+    /// The planes with loop restoration (rav1g: from `lr_apply.rs` of upstream).
+    #[derive(Clone, Copy, Default)]
+    pub struct LrRestorePlanes: u8 {
+        const Y = 1 << 0;
+        const U = 1 << 1;
+        const V = 1 << 2;
+
+        const UV = Self::U.bits() | Self::V.bits();
+    }
 }
 
 #[derive(Default)]
@@ -750,14 +586,10 @@ pub(crate) struct Rav1dFrameData {
     pub resize_start: [c_int; 2],            /* y, uv */
 
     pub ts: Vec<Rav1dTileState>,
-    pub dsp: &'static Rav1dBitDepthDSPContext,
 
-    // `ipred_edge` contains 3 arrays of size `ipred_edge_off`. Use `index *
-    // ipred_edge_off` to access one of the sub-arrays. Note that `ipred_edge_off`
-    // is in pixel units (not bytes), so use `slice_as`/`mut_slice_as` and an offset
-    // in pixel units when slicing.
-    pub ipred_edge: DisjointMut<AlignedVec64<u8>>, // DynPixel
-    pub ipred_edge_off: usize,
+    /// rav1g: the number the sink gave the frame (`ParseSink::frame_begin`), and whether it has.
+    pub sink_frame: usize,
+    pub sink_begun: bool,
 
     pub b4_stride: ptrdiff_t,
     pub w4: c_int,

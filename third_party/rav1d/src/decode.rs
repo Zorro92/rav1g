@@ -25,6 +25,10 @@ use crate::env::{
 use crate::error::{Rav1dError, Rav1dResult};
 use crate::extensions::OptionError as _;
 use crate::include::common::attributes::ctz;
+#[cfg(feature = "bitdepth_16")]
+use crate::include::common::bitdepth::BitDepth16;
+#[cfg(feature = "bitdepth_8")]
+use crate::include::common::bitdepth::BitDepth8;
 use crate::include::common::bitdepth::BPC;
 use crate::include::common::intops::{apply_sign64, clip, clip_u8, iclip};
 use crate::include::dav1d::common::Rav1dDataProps;
@@ -34,8 +38,11 @@ use crate::include::dav1d::headers::{
     Rav1dWarpedMotionType, SgrIdx, RAV1D_PRIMARY_REF_NONE,
 };
 use crate::include::dav1d::picture::Rav1dPicture;
+use crate::parse::{
+    ParseBlock, ParseFrame, ParseLrUnit, ParsePalette, ParseSuperblock, ParseTile,
+};
 use crate::internal::{
-    Bxy, Rav1dBitDepthDSPContext, Rav1dContext, Rav1dContextTaskType, Rav1dFrameContext,
+    Bxy, Rav1dContext, Rav1dContextTaskType, Rav1dFrameContext,
     Rav1dFrameContextFrameThread, Rav1dFrameContextLf, Rav1dFrameData, Rav1dState,
     Rav1dTaskContext, Rav1dTileState, Rav1dTileStateContext, ScalableMotionParams, ScratchPal,
     TileStateRef,
@@ -54,14 +61,12 @@ use crate::lf_mask::{
     Av1RestorationUnit,
 };
 use crate::log::Rav1dLog as _;
-use crate::lr_apply::LrRestorePlanes;
 use crate::msac::{
     rav1d_msac_decode_bool, rav1d_msac_decode_bool_adapt, rav1d_msac_decode_bool_equi,
     rav1d_msac_decode_bools, rav1d_msac_decode_subexp, rav1d_msac_decode_symbol_adapt16,
     rav1d_msac_decode_symbol_adapt4, rav1d_msac_decode_symbol_adapt8, rav1d_msac_decode_uniform,
     MsacContext,
 };
-use crate::pal::Rav1dPalDSPContext;
 use crate::picture::{rav1d_picture_alloc_copy, rav1d_thread_picture_alloc, Rav1dThreadPicture};
 use crate::qm::DAV1D_QM_TBL;
 use crate::recon::debug_block_info;
@@ -627,20 +632,19 @@ fn order_palette(
     }
 }
 
+/// rav1g: the index map stays in `pal_tmp`, one byte per sample, for the sink (`parse_palette`);
+/// upstream packs it into `pal_idx` here (`pal_idx_finish`).
 fn read_pal_indices(
     ts_c: &mut Rav1dTileStateContext,
-    pal_dsp: &Rav1dPalDSPContext,
     scratch_pal: &mut ScratchPal,
     pal_tmp: &mut [u8],
-    pal_idx: Option<&mut [u8]>, // if None, use pal_tmp instead of pal_idx
     pal_sz: u8,
     pl: bool,
     w4: c_int,
     h4: c_int,
     bw4: c_int,
-    bh4: c_int,
 ) {
-    let [w4, h4, bw4, bh4] = [w4, h4, bw4, bh4].map(|n| usize::try_from(n).unwrap());
+    let [w4, h4, bw4] = [w4, h4, bw4].map(|n| usize::try_from(n).unwrap());
     let pli = pl as usize;
 
     let stride = bw4 * 4;
@@ -664,7 +668,7 @@ fn read_pal_indices(
             pal_tmp[(i - j) * stride + j] = order[m][color_idx];
         }
     }
-    // fill invisible edges and pack to 4-bit (2 pixels per byte)
+    // fill invisible edges
     if bw4 > w4 {
         for y in 0..4 * h4 {
             let offset = y * stride + (4 * w4);
@@ -673,10 +677,6 @@ fn read_pal_indices(
             pal_tmp[offset..][..len].fill(filler);
         }
     }
-
-    pal_dsp
-        .pal_idx_finish
-        .call(pal_idx, pal_tmp, bw4 * 4, bh4 * 4, w4 * 4, h4 * 4);
 }
 
 struct VarTx {
@@ -892,155 +892,6 @@ fn splat_intraref(
     c.dsp.refmvs.splat_mv.call(rf, &t.rt, &tmpl, t.b, bw4, bh4);
 }
 
-fn mc_lowest_px(
-    dst: &mut c_int,
-    by4: c_int,
-    bh4: c_int,
-    mvy: i16,
-    ss_ver: c_int,
-    smp: &ScalableMotionParams,
-) {
-    let mvy = mvy as c_int;
-
-    let v_mul = 4 >> ss_ver;
-    if smp.scale == 0 {
-        let my = mvy >> 3 + ss_ver;
-        let dy = mvy & 15 >> (ss_ver == 0) as c_int;
-        *dst = cmp::max(*dst, (by4 + bh4) * v_mul + my + 4 * (dy != 0) as c_int);
-    } else {
-        let mut y = (by4 * v_mul << 4) + mvy * (1 << (ss_ver == 0) as c_int);
-        let tmp = y as i64 * smp.scale as i64 + ((smp.scale - 0x4000) * 8) as i64;
-        y = apply_sign64((tmp.abs() + 128 >> 8) as c_int, tmp) + 32;
-        let bottom = (y + (bh4 * v_mul - 1) * smp.step >> 10) + 1 + 4;
-        *dst = cmp::max(*dst, bottom);
-    };
-}
-
-#[inline(always)]
-fn affine_lowest_px(
-    t: &Rav1dTaskContext,
-    dst: &mut c_int,
-    b_dim: &[u8; 4],
-    wmp: &Rav1dWarpedMotionParams,
-    ss_ver: c_int,
-    ss_hor: c_int,
-) {
-    let h_mul = 4 >> ss_hor;
-    let v_mul = 4 >> ss_ver;
-    assert!(b_dim[0] as c_int * h_mul & 7 == 0 && b_dim[1] as c_int * v_mul & 7 == 0);
-    let mat = &wmp.matrix;
-    let y = b_dim[1] as c_int * v_mul - 8;
-    let src_y = t.b.y * 4 + ((y + 4) << ss_ver);
-    let mat5_y = mat[5] as i64 * src_y as i64 + mat[1] as i64;
-    let mut x = 0;
-    while x < b_dim[0] as c_int * h_mul {
-        let src_x = t.b.x * 4 + ((x + 4) << ss_hor);
-        let mvy = mat[4] as i64 * src_x as i64 + mat5_y >> ss_ver;
-        let dy = (mvy >> 16) as c_int - 4;
-        *dst = cmp::max(*dst, dy + 4 + 8);
-        x += cmp::max(8, b_dim[0] as c_int * h_mul - 8);
-    }
-}
-
-#[inline(never)]
-fn affine_lowest_px_luma(
-    t: &Rav1dTaskContext,
-    dst: &mut c_int,
-    b_dim: &[u8; 4],
-    wmp: &Rav1dWarpedMotionParams,
-) {
-    affine_lowest_px(t, dst, b_dim, wmp, 0, 0);
-}
-
-#[inline(never)]
-fn affine_lowest_px_chroma(
-    t: &Rav1dTaskContext,
-    layout: Rav1dPixelLayout,
-    dst: &mut c_int,
-    b_dim: &[u8; 4],
-    wmp: &Rav1dWarpedMotionParams,
-) {
-    assert!(layout != Rav1dPixelLayout::I400);
-    if layout == Rav1dPixelLayout::I444 {
-        affine_lowest_px_luma(t, dst, b_dim, wmp);
-    } else {
-        affine_lowest_px(
-            t,
-            dst,
-            b_dim,
-            wmp,
-            (layout & Rav1dPixelLayout::I420) as c_int,
-            1,
-        );
-    };
-}
-
-fn obmc_lowest_px(
-    r: &DisjointMut<AlignedVec64<RefMvsBlock>>,
-    t: &mut Rav1dTaskContext,
-    ts: &Rav1dTileState,
-    layout: Rav1dPixelLayout,
-    svc: &[[ScalableMotionParams; 2]; 7],
-    dst: &mut [[c_int; 2]; 7],
-    is_chroma: bool,
-    b_dim: &[u8; 4],
-    _bx4: c_int,
-    _by4: c_int,
-    w4: c_int,
-    h4: c_int,
-) {
-    assert!(t.b.x & 1 == 0 && t.b.y & 1 == 0);
-    let ri = &t.rt.r[(t.b.y as usize & 31) + 5 - 1..];
-    let ss_ver = (is_chroma && layout == Rav1dPixelLayout::I420) as c_int;
-    let ss_hor = (is_chroma && layout != Rav1dPixelLayout::I444) as c_int;
-    let h_mul = 4 >> ss_hor;
-    let v_mul = 4 >> ss_ver;
-    if t.b.y > ts.tiling.row_start
-        && (!is_chroma || b_dim[0] as c_int * h_mul + b_dim[1] as c_int * v_mul >= 16)
-    {
-        let mut i = 0;
-        let mut x = 0;
-        while x < w4 && i < cmp::min(b_dim[2] as c_int, 4) {
-            let a_r = *r.index(ri[0] + t.b.x as usize + x as usize + 1);
-            let a_b_dim = a_r.bs.dimensions();
-            if a_r.r#ref.r#ref[0] as c_int > 0 {
-                let oh4 = cmp::min(b_dim[1] as c_int, 16) >> 1;
-                mc_lowest_px(
-                    &mut dst[a_r.r#ref.r#ref[0] as usize - 1][is_chroma as usize],
-                    t.b.y,
-                    oh4 * 3 + 3 >> 2,
-                    a_r.mv.mv[0].y,
-                    ss_ver,
-                    &svc[a_r.r#ref.r#ref[0] as usize - 1][1],
-                );
-                i += 1;
-            }
-            x += cmp::max(a_b_dim[0] as c_int, 2);
-        }
-    }
-    if t.b.x > ts.tiling.col_start {
-        let mut i = 0;
-        let mut y = 0;
-        while y < h4 && i < cmp::min(b_dim[3] as c_int, 4) {
-            let l_r = *r.index(ri[y as usize + 1 + 1] + t.b.x as usize - 1);
-            let l_b_dim = l_r.bs.dimensions();
-            if l_r.r#ref.r#ref[0] as c_int > 0 {
-                let oh4 = iclip(l_b_dim[1] as c_int, 2, b_dim[1] as c_int);
-                mc_lowest_px(
-                    &mut dst[l_r.r#ref.r#ref[0] as usize - 1][is_chroma as usize],
-                    t.b.y + y,
-                    oh4,
-                    l_r.mv.mv[0].y,
-                    ss_ver,
-                    &svc[l_r.r#ref.r#ref[0] as usize - 1][1],
-                );
-                i += 1;
-            }
-            y += cmp::max(l_b_dim[1] as c_int, 2);
-        }
-    }
-}
-
 fn decode_b(
     c: &Rav1dContext,
     t: &mut Rav1dTaskContext,
@@ -1064,15 +915,9 @@ fn decode_b(
         }
     }
 
+    // rav1g: the block goes to the sink, not to `f.frame_thread.b`.
     let mut b_mem = Av1Block::default();
-    let b = if t.frame_thread.pass != 0 {
-        &mut *f
-            .frame_thread
-            .b
-            .index_mut((t.b.y as isize * f.b4_stride + t.b.x as isize) as usize)
-    } else {
-        &mut b_mem
-    };
+    let b = &mut b_mem;
 
     let ts = &f.ts[t.ts];
     let ta = &f.a[t.a];
@@ -1097,135 +942,7 @@ fn decode_b(
         && (bh4 > ss_ver || t.b.y & 1 != 0);
     let frame_type = f.frame_hdr.as_ref().unwrap().frame_type;
 
-    let FrameThreadPassState::First(ts_c) = pass else {
-        match &b.ii {
-            Av1BlockIntraInter::Intra(intra) => {
-                (bd_fn.recon_b_intra)(f, t, None, bs, intra_edge_flags, b, intra);
-
-                let y_mode = intra.y_mode;
-                let y_mode_nofilt = if y_mode == FILTER_PRED {
-                    DC_PRED
-                } else {
-                    y_mode
-                };
-                CaseSet::<32, false>::many(
-                    [&t.l, ta],
-                    [bh4 as usize, bw4 as usize],
-                    [by4 as usize, bx4 as usize],
-                    |case, dir| {
-                        case.set_disjoint(&dir.mode, y_mode_nofilt);
-                        case.set_disjoint(&dir.intra, 1);
-                    },
-                );
-                if frame_type.is_inter_or_switch() {
-                    let ri = t.rt.r[(t.b.y as usize & 31) + 5 + bh4 as usize - 1] + t.b.x as usize;
-                    let r = &mut *f.rf.r.index_mut(ri..ri + bw4 as usize);
-                    for block in r {
-                        block.r#ref.r#ref[0] = 0;
-                        block.bs = bs;
-                    }
-                    let rr = &t.rt.r[(t.b.y as usize & 31) + 5..][..bh4 as usize - 1];
-                    for r in rr {
-                        let block = &mut f.rf.r.index_mut(r + t.b.x as usize + bw4 as usize - 1);
-                        block.r#ref.r#ref[0] = 0;
-                        block.bs = bs;
-                    }
-                }
-
-                if has_chroma {
-                    CaseSet::<32, false>::many(
-                        [&t.l, ta],
-                        [cbh4 as usize, cbw4 as usize],
-                        [cby4 as usize, cbx4 as usize],
-                        |case, dir| {
-                            case.set_disjoint(&dir.uvmode, intra.uv_mode);
-                        },
-                    );
-                }
-            }
-            Av1BlockIntraInter::Inter(inter) => {
-                if frame_type.is_inter_or_switch() /* not intrabc */
-                && inter.comp_type.is_none()
-                && inter.motion_mode == MotionMode::Warp
-                {
-                    let two_d = inter.nd.two_d();
-                    if two_d.matrix[0] == i16::MIN {
-                        t.warpmv.r#type = Rav1dWarpedMotionType::Identity;
-                    } else {
-                        t.warpmv.r#type = Rav1dWarpedMotionType::Affine;
-                        t.warpmv.matrix[2] = two_d.matrix[0] as i32 + 0x10000;
-                        t.warpmv.matrix[3] = two_d.matrix[1] as i32;
-                        t.warpmv.matrix[4] = two_d.matrix[2] as i32;
-                        t.warpmv.matrix[5] = two_d.matrix[3] as i32 + 0x10000;
-                        rav1d_set_affine_mv2d(bw4, bh4, two_d.mv2d, &mut t.warpmv, t.b.x, t.b.y);
-                        rav1d_get_shear_params(&mut t.warpmv);
-                        if debug_block_info!(f, t.b) {
-                            println!(
-                                "[ {} {} {}\n  {} {} {} ]\n\
-                            alpha={}, beta={}, gamma={}, deta={}, mv=y:{},x:{}",
-                                SignAbs(t.warpmv.matrix[0]),
-                                SignAbs(t.warpmv.matrix[1]),
-                                SignAbs(t.warpmv.matrix[2]),
-                                SignAbs(t.warpmv.matrix[3]),
-                                SignAbs(t.warpmv.matrix[4]),
-                                SignAbs(t.warpmv.matrix[5]),
-                                SignAbs(t.warpmv.alpha().into()),
-                                SignAbs(t.warpmv.beta().into()),
-                                SignAbs(t.warpmv.gamma().into()),
-                                SignAbs(t.warpmv.delta().into()),
-                                two_d.mv2d.y,
-                                two_d.mv2d.x,
-                            );
-                        }
-                    }
-                }
-
-                (bd_fn.recon_b_inter)(f, t, None, bs, b, inter)?;
-
-                let filter = &DAV1D_FILTER_DIR[inter.filter2d as usize];
-                CaseSet::<32, false>::many(
-                    [&t.l, ta],
-                    [bh4 as usize, bw4 as usize],
-                    [by4 as usize, bx4 as usize],
-                    |case, dir| {
-                        case.set_disjoint(&dir.filter[0], filter[0].into());
-                        case.set_disjoint(&dir.filter[1], filter[1].into());
-                        case.set_disjoint(&dir.intra, 0);
-                    },
-                );
-
-                if frame_type.is_inter_or_switch() {
-                    let ri = t.rt.r[(t.b.y as usize & 31) + 5 + bh4 as usize - 1] + t.b.x as usize;
-                    let r = &mut *f.rf.r.index_mut(ri..ri + bw4 as usize);
-                    for block in r {
-                        block.r#ref.r#ref[0] = inter.r#ref[0] + 1;
-                        block.mv.mv[0] = inter.nd.one_d.mv[0];
-                        block.bs = bs;
-                    }
-                    let rr = &t.rt.r[(t.b.y as usize & 31) + 5..][..bh4 as usize - 1];
-                    for r in rr {
-                        let block = &mut f.rf.r.index_mut(r + t.b.x as usize + bw4 as usize - 1);
-                        block.r#ref.r#ref[0] = inter.r#ref[0] + 1;
-                        block.mv.mv[0] = inter.nd.one_d.mv[0];
-                        block.bs = bs;
-                    }
-                }
-
-                if has_chroma {
-                    CaseSet::<32, false>::many(
-                        [&t.l, ta],
-                        [cbh4 as usize, cbw4 as usize],
-                        [cby4 as usize, cbx4 as usize],
-                        |case, dir| {
-                            case.set_disjoint(&dir.uvmode, DC_PRED);
-                        },
-                    );
-                }
-            }
-        }
-
-        return Ok(());
-    };
+    let FrameThreadPassState::First(ts_c) = pass;
 
     let ts_c = &mut **ts_c;
 
@@ -1722,31 +1439,17 @@ fn decode_b(
 
         if pal_sz[0] != 0 {
             let scratch = t.scratch.inter_intra_mut();
-            let pal_idx = if t.frame_thread.pass != 0 {
-                let p = t.frame_thread.pass & 1;
-                let frame_thread = &ts.frame_thread[p as usize];
-                let len = (bw4 * bh4 * 8) as u32;
-                let pal_idx = frame_thread.pal_idx.get_update(|i| i + len);
-                &mut *f
-                    .frame_thread
-                    .pal_idx
-                    .index_mut((pal_idx as usize.., ..len as usize))
-            } else {
-                &mut scratch.pal_idx_y
-            };
             read_pal_indices(
                 ts_c,
-                &c.dsp.pal,
                 scratch.levels_pal.pal_mut(),
                 &mut scratch.pal_idx_uv,
-                Some(pal_idx),
                 pal_sz[0],
                 false,
                 w4,
                 h4,
                 bw4,
-                bh4,
             );
+            parse_palette(c, f, t, bs, 0, pal_sz[0], w4, h4, bw4, bh4);
             if debug_block_info!(f, t.b) {
                 println!("Post-y-pal-indices: r={}", ts_c.msac.rng);
             }
@@ -1754,33 +1457,17 @@ fn decode_b(
 
         if has_chroma && pal_sz[1] != 0 {
             let scratch = t.scratch.inter_intra_mut();
-            let mut pal_idx = if t.frame_thread.pass != 0 {
-                let p = t.frame_thread.pass & 1;
-                let frame_thread = &ts.frame_thread[p as usize];
-                let len = (cbw4 * cbh4 * 8) as u32;
-                let pal_idx = frame_thread.pal_idx.get_update(|i| i + len);
-                Some(
-                    f.frame_thread
-                        .pal_idx
-                        .index_mut((pal_idx as usize.., ..len as usize)),
-                )
-            } else {
-                None
-            };
-            let pal_idx = pal_idx.as_deref_mut();
             read_pal_indices(
                 ts_c,
-                &c.dsp.pal,
                 scratch.levels_pal.pal_mut(),
                 &mut scratch.pal_idx_uv,
-                pal_idx,
                 pal_sz[1],
                 true,
                 cw4,
                 ch4,
                 cbw4,
-                cbh4,
             );
+            parse_palette(c, f, t, bs, 1, pal_sz[1], cw4, ch4, cbw4, cbh4);
             if debug_block_info!(f, t.b) {
                 println!("Post-uv-pal-indices: r={}", ts_c.msac.rng);
             }
@@ -1826,11 +1513,8 @@ fn decode_b(
         b.ii = Av1BlockIntraInter::Intra(intra.clone()); // cheap 9-byte clone
 
         // reconstruction
-        if t.frame_thread.pass == 1 {
-            (bd_fn.read_coef_blocks)(f, t, ts_c, bs, b);
-        } else {
-            (bd_fn.recon_b_intra)(f, t, Some(ts_c), bs, intra_edge_flags, b, &intra);
-        }
+        parse_block(c, f, t, bs, b, false, seg_pred);
+        (bd_fn.read_coef_blocks)(c, f, t, ts_c, bs, b)?;
 
         if f.frame_hdr().loopfilter.level_y != [0, 0] {
             let lflvl = match ts.lflvl.get() {
@@ -2044,11 +1728,7 @@ fn decode_b(
             tx_split1,
         } = read_vartx_tree(t, f, ts_c, b, bs, bx4, by4);
 
-        let filter2d = if t.frame_thread.pass == 1 {
-            Filter2d::Bilinear
-        } else {
-            Default::default()
-        };
+        let filter2d = Filter2d::Bilinear;
 
         b.uvtx = uvtx;
         let inter = Av1BlockInter {
@@ -2071,11 +1751,8 @@ fn decode_b(
         b.ii = Av1BlockIntraInter::Inter(inter.clone()); // Cheap 24-byte clone
 
         // reconstruction
-        if t.frame_thread.pass == 1 {
-            (bd_fn.read_coef_blocks)(f, t, ts_c, bs, b);
-        } else {
-            (bd_fn.recon_b_inter)(f, t, Some(ts_c), bs, b, &inter)?;
-        }
+        parse_block(c, f, t, bs, b, true, seg_pred);
+        (bd_fn.read_coef_blocks)(c, f, t, ts_c, bs, b)?;
 
         splat_intrabc_mv(c, t, &f.rf, bs, r#ref, bw4 as usize, bh4 as usize);
 
@@ -2829,7 +2506,7 @@ fn decode_b(
                             mv1d0.x,
                         );
                     }
-                    if t.frame_thread.pass != 0 {
+                    {
                         matrix = Some(if t.warpmv.r#type == Rav1dWarpedMotionType::Affine {
                             [
                                 t.warpmv.matrix[2] - 0x10000,
@@ -2958,11 +2635,8 @@ fn decode_b(
         b.ii = Av1BlockIntraInter::Inter(inter.clone());
 
         // reconstruction
-        if t.frame_thread.pass == 1 {
-            (bd_fn.read_coef_blocks)(f, t, ts_c, bs, b);
-        } else {
-            (bd_fn.recon_b_inter)(f, t, Some(ts_c), bs, b, &inter)?;
-        }
+        parse_block(c, f, t, bs, b, false, seg_pred);
+        (bd_fn.read_coef_blocks)(c, f, t, ts_c, bs, b)?;
 
         let frame_hdr = f.frame_hdr();
         if frame_hdr.loopfilter.level_y != [0, 0] {
@@ -3084,251 +2758,143 @@ fn decode_b(
         }
     }
 
-    match &b.ii {
-        Av1BlockIntraInter::Inter(inter)
-            if t.frame_thread.pass == 1 && frame_hdr.frame_type.is_inter_or_switch() =>
-        {
-            let sby = t.b.y - ts.tiling.row_start >> f.sb_shift;
-            let mut lowest_px = f.lowest_pixel_mem.index_mut(ts.lowest_pixel + sby as usize);
-            // keep track of motion vectors for each reference
-            if inter.comp_type.is_none() {
-                // y
-                if cmp::min(bw4, bh4) > 1
-                    && (inter.inter_mode == GLOBALMV
-                        && f.gmv_warp_allowed[inter.r#ref[0] as usize] != 0
-                        || inter.motion_mode == MotionMode::Warp
-                            && t.warpmv.r#type > Rav1dWarpedMotionType::Translation)
-                {
-                    affine_lowest_px_luma(
-                        t,
-                        &mut lowest_px[inter.r#ref[0] as usize][0],
-                        b_dim,
-                        if inter.motion_mode == MotionMode::Warp {
-                            &t.warpmv
-                        } else {
-                            &frame_hdr.gmv[inter.r#ref[0] as usize]
-                        },
-                    );
-                } else {
-                    mc_lowest_px(
-                        &mut lowest_px[inter.r#ref[0] as usize][0],
-                        t.b.y,
-                        bh4,
-                        inter.nd.one_d.mv[0].y,
-                        0,
-                        &f.svc[inter.r#ref[0] as usize][1],
-                    );
-                    if inter.motion_mode == MotionMode::Obmc {
-                        obmc_lowest_px(
-                            &f.rf.r,
-                            t,
-                            &f.ts[t.ts],
-                            f.cur.p.layout,
-                            &f.svc,
-                            &mut lowest_px,
-                            false,
-                            b_dim,
-                            bx4,
-                            by4,
-                            w4,
-                            h4,
-                        );
-                    }
-                }
-
-                // uv
-                if has_chroma {
-                    // sub8x8 derivation
-                    let mut is_sub8x8 = bw4 == ss_hor || bh4 == ss_ver;
-                    let r = if is_sub8x8 {
-                        assert!(ss_hor == 1);
-                        let r = <[_; 2]>::try_from(&t.rt.r[(t.b.y as usize & 31) + 5 - 1..][..2])
-                            .unwrap();
-
-                        if bw4 == 1 {
-                            is_sub8x8 &= f.rf.r.index(r[1] + t.b.x as usize - 1).r#ref.r#ref[0] > 0;
-                        }
-                        if bh4 == ss_ver {
-                            is_sub8x8 &= f.rf.r.index(r[0] + t.b.x as usize).r#ref.r#ref[0] > 0;
-                        }
-                        if bw4 == 1 && bh4 == ss_ver {
-                            is_sub8x8 &= f.rf.r.index(r[0] + t.b.x as usize - 1).r#ref.r#ref[0] > 0;
-                        }
-
-                        r
-                    } else {
-                        Default::default() // Never actually used.
-                    };
-
-                    // chroma prediction
-                    if is_sub8x8 {
-                        if bw4 == 1 && bh4 == ss_ver {
-                            let rr = *f.rf.r.index(r[0] + t.b.x as usize - 1);
-                            mc_lowest_px(
-                                &mut lowest_px[rr.r#ref.r#ref[0] as usize - 1][1],
-                                t.b.y - 1,
-                                bh4,
-                                rr.mv.mv[0].y,
-                                ss_ver,
-                                &f.svc[rr.r#ref.r#ref[0] as usize - 1][1],
-                            );
-                        }
-                        if bw4 == 1 {
-                            let rr = *f.rf.r.index(r[1] + t.b.x as usize - 1);
-                            mc_lowest_px(
-                                &mut lowest_px[rr.r#ref.r#ref[0] as usize - 1][1],
-                                t.b.y,
-                                bh4,
-                                rr.mv.mv[0].y,
-                                ss_ver,
-                                &f.svc[rr.r#ref.r#ref[0] as usize - 1][1],
-                            );
-                        }
-                        if bh4 == ss_ver {
-                            let rr = *f.rf.r.index(r[0] + t.b.x as usize);
-                            mc_lowest_px(
-                                &mut lowest_px[rr.r#ref.r#ref[0] as usize - 1][1],
-                                t.b.y - 1,
-                                bh4,
-                                rr.mv.mv[0].y,
-                                ss_ver,
-                                &f.svc[rr.r#ref.r#ref[0] as usize - 1][1],
-                            );
-                        }
-                        mc_lowest_px(
-                            &mut lowest_px[inter.r#ref[0] as usize][1],
-                            t.b.y,
-                            bh4,
-                            inter.nd.one_d.mv[0].y,
-                            ss_ver,
-                            &f.svc[inter.r#ref[0] as usize][1],
-                        );
-                    } else if cmp::min(cbw4, cbh4) > 1
-                        && (inter.inter_mode == GLOBALMV
-                            && f.gmv_warp_allowed[inter.r#ref[0] as usize] != 0
-                            || inter.motion_mode == MotionMode::Warp
-                                && t.warpmv.r#type > Rav1dWarpedMotionType::Translation)
-                    {
-                        affine_lowest_px_chroma(
-                            t,
-                            f.cur.p.layout,
-                            &mut lowest_px[inter.r#ref[0] as usize][1],
-                            b_dim,
-                            if inter.motion_mode == MotionMode::Warp {
-                                &t.warpmv
-                            } else {
-                                &frame_hdr.gmv[inter.r#ref[0] as usize]
-                            },
-                        );
-                    } else {
-                        mc_lowest_px(
-                            &mut lowest_px[inter.r#ref[0] as usize][1],
-                            t.b.y & !ss_ver,
-                            bh4 << (bh4 == ss_ver) as c_int,
-                            inter.nd.one_d.mv[0].y,
-                            ss_ver,
-                            &f.svc[inter.r#ref[0] as usize][1],
-                        );
-                        if inter.motion_mode == MotionMode::Obmc {
-                            obmc_lowest_px(
-                                &f.rf.r,
-                                t,
-                                &f.ts[t.ts],
-                                f.cur.p.layout,
-                                &f.svc,
-                                &mut lowest_px,
-                                true,
-                                b_dim,
-                                bx4,
-                                by4,
-                                w4,
-                                h4,
-                            );
-                        }
-                    }
-                }
-            } else {
-                // y
-                let refmvs = || {
-                    std::iter::zip(inter.r#ref, inter.nd.one_d.mv)
-                        .map(|(r#ref, mv)| (r#ref as usize, mv))
-                };
-                for (r#ref, mv) in refmvs() {
-                    if inter.inter_mode == GLOBALMV_GLOBALMV && f.gmv_warp_allowed[r#ref] != 0 {
-                        affine_lowest_px_luma(
-                            t,
-                            &mut lowest_px[r#ref][0],
-                            b_dim,
-                            &frame_hdr.gmv[r#ref],
-                        );
-                    } else {
-                        mc_lowest_px(
-                            &mut lowest_px[r#ref][0],
-                            t.b.y,
-                            bh4,
-                            mv.y,
-                            0,
-                            &f.svc[r#ref][1],
-                        );
-                    }
-                }
-                for (r#ref, mv) in refmvs() {
-                    if inter.inter_mode == GLOBALMV_GLOBALMV && f.gmv_warp_allowed[r#ref] != 0 {
-                        affine_lowest_px_luma(
-                            t,
-                            &mut lowest_px[r#ref][0],
-                            b_dim,
-                            &frame_hdr.gmv[r#ref],
-                        );
-                    } else {
-                        mc_lowest_px(
-                            &mut lowest_px[r#ref][0],
-                            t.b.y,
-                            bh4,
-                            mv.y,
-                            0,
-                            &f.svc[r#ref][1],
-                        );
-                    }
-                }
-
-                // uv
-                if has_chroma {
-                    for (r#ref, mv) in refmvs() {
-                        if inter.inter_mode == GLOBALMV_GLOBALMV
-                            && cmp::min(cbw4, cbh4) > 1
-                            && f.gmv_warp_allowed[r#ref] != 0
-                        {
-                            affine_lowest_px_chroma(
-                                t,
-                                f.cur.p.layout,
-                                &mut lowest_px[r#ref][1],
-                                b_dim,
-                                &frame_hdr.gmv[r#ref],
-                            );
-                        } else {
-                            mc_lowest_px(
-                                &mut lowest_px[r#ref][1],
-                                t.b.y,
-                                bh4,
-                                mv.y,
-                                ss_ver,
-                                &f.svc[r#ref][1],
-                            );
-                        }
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-
     Ok(())
+}
+
+/// rav1g: the palette colours of the task's block, widened to 16 bits.
+fn task_palette(f: &Rav1dFrameData, t: &Rav1dTaskContext) -> [[u16; 8]; 3] {
+    let pal = &t.scratch.inter_intra().interintra_edge_pal.pal;
+    match f.cur.p.bpc {
+        #[cfg(feature = "bitdepth_8")]
+        8 => pal.buf::<BitDepth8>().map(|plane| plane.map(u16::from)),
+        #[cfg(feature = "bitdepth_16")]
+        _ => *pal.buf::<BitDepth16>(),
+        #[allow(unreachable_patterns)]
+        _ => Default::default(),
+    }
+}
+
+/// rav1g: a block, with its mode info read, goes to the sink before its coefficients are read.
+fn parse_block(
+    c: &Rav1dContext,
+    f: &Rav1dFrameData,
+    t: &Rav1dTaskContext,
+    bs: BlockSize,
+    b: &Av1Block,
+    intrabc: bool,
+    seg_pred: bool,
+) {
+    let ts = &f.ts[t.ts];
+    let has_pal = matches!(&b.ii, Av1BlockIntraInter::Intra(intra) if intra.pal_sz != [0, 0]);
+    let pal = if has_pal {
+        task_palette(f, t)
+    } else {
+        Default::default()
+    };
+    c.sink.block(
+        f.sink_frame,
+        t.ts,
+        &ParseBlock {
+            x4: t.b.x,
+            y4: t.b.y,
+            bs,
+            b,
+            intrabc,
+            warpmv: &t.warpmv,
+            delta_lf: ts.last_delta_lf.get(),
+            qidx: ts.last_qidx.get(),
+            pal: &pal,
+            seg_pred,
+        },
+    );
+}
+
+/// rav1g: the colour index map of a palette block's plane (`plane` 0: luma, 1: chroma), as
+/// `read_pal_indices` left it in the task's scratch, goes to the sink.
+fn parse_palette(
+    c: &Rav1dContext,
+    f: &Rav1dFrameData,
+    t: &Rav1dTaskContext,
+    bs: BlockSize,
+    plane: u8,
+    pal_sz: u8,
+    w4: c_int,
+    h4: c_int,
+    bw4: c_int,
+    bh4: c_int,
+) {
+    let pal = task_palette(f, t);
+    let [w4, h4, bw4, bh4] = [w4, h4, bw4, bh4].map(|n| n as usize);
+    c.sink.palette(
+        f.sink_frame,
+        t.ts,
+        &ParsePalette {
+            x4: t.b.x,
+            y4: t.b.y,
+            bs,
+            plane,
+            pal: &pal,
+            pal_sz,
+            map: &t.scratch.inter_intra().pal_idx_uv[..],
+            stride: bw4 * 4,
+            w: w4 * 4,
+            h: h4 * 4,
+            bw: bw4 * 4,
+            bh: bh4 * 4,
+        },
+    );
+}
+
+/// rav1g: a loop restoration unit as it was read, for the sink.
+fn parse_lr_unit(lr: &Av1RestorationUnit, plane: usize, unit_x: c_int, unit_y: c_int) -> ParseLrUnit {
+    let (r#type, sgr_idx) = match lr.r#type {
+        Rav1dRestorationType::None => (0, 0),
+        Rav1dRestorationType::Switchable => (1, 0),
+        Rav1dRestorationType::Wiener => (2, 0),
+        Rav1dRestorationType::SgrProj(idx) => (3, idx as u8),
+    };
+    ParseLrUnit {
+        plane: plane as u8,
+        unit_x: unit_x as u16,
+        unit_y: unit_y as u16,
+        r#type,
+        sgr_idx,
+        filter_v: lr.filter_v,
+        filter_h: lr.filter_h,
+        sgr_weights: lr.sgr_weights,
+    }
+}
+
+/// rav1g: a superblock is parsed: its CDEF indexes and the loop restoration units read with it.
+fn parse_superblock(
+    c: &Rav1dContext,
+    f: &Rav1dFrameData,
+    t: &Rav1dTaskContext,
+    root_bl: BlockLevel,
+    lr: &[ParseLrUnit],
+) {
+    let cdef_idx = &f.lf.mask[t.lf_mask.unwrap()].cdef_idx;
+    let cdef_idx = if root_bl == BlockLevel::Bl128x128 {
+        array::from_fn(|i| cdef_idx[i].get())
+    } else {
+        let mut idx = [-1; 4];
+        idx[t.cur_sb_cdef_idx] = cdef_idx[t.cur_sb_cdef_idx].get();
+        idx
+    };
+    c.sink.superblock(
+        f.sink_frame,
+        t.ts,
+        &ParseSuperblock {
+            x4: t.b.x,
+            y4: t.b.y,
+            cdef_idx,
+            lr,
+        },
+    );
 }
 
 enum FrameThreadPassState<'a> {
     First(&'a mut Rav1dTileStateContext),
-    Second,
 }
 
 fn decode_sb(
@@ -3383,7 +2949,6 @@ fn decode_sb(
                 &mut **ts_c,
             ))
         }
-        FrameThreadPassState::Second => None,
     };
 
     if have_h_split && have_v_split {
@@ -3413,15 +2978,8 @@ fn decode_sb(
                 );
             }
         } else {
-            let b = f
-                .frame_thread
-                .b
-                .index((t.b.y as isize * f.b4_stride + t.b.x as isize) as usize);
-            bp = if b.bl == bl {
-                b.bp
-            } else {
-                BlockPartition::Split
-            };
+            // rav1g: only the reconstruction pass of upstream comes here.
+            unreachable!();
         }
         let b = &DAV1D_BLOCK_SIZES[bl as usize][bp as usize];
 
@@ -3470,16 +3028,6 @@ fn decode_sb(
                         decode_b(c, t, f, pass, bl, BlockSize::Bs4x4, bp, tip.split[2])?;
                         t.b.x -= 1;
                         t.b.y -= 1;
-                        if cfg!(target_arch = "x86_64") && t.frame_thread.pass != 0 {
-                            // In 8-bit mode with 2-pass decoding the coefficient buffer
-                            // can end up misaligned due to skips here.
-                            // Work around the issue by explicitly realigning the buffer.
-                            //
-                            // In 8-bit mode coef is 2 bytes wide, so we align to 32
-                            // elements to get 64 byte alignment.
-                            let p = (t.frame_thread.pass & 1) as usize;
-                            ts.frame_thread[p].cf.update(|cf| (cf + 31) & !31);
-                        }
                     }
                     Some(next_bl) => {
                         let branch = intra_edge.branch(sb128, edge_index);
@@ -3587,11 +3135,8 @@ fn decode_sb(
                 );
             }
         } else {
-            let b = &f
-                .frame_thread
-                .b
-                .index((t.b.y as isize * f.b4_stride + t.b.x as isize) as usize);
-            is_split = b.bl != bl;
+            // rav1g: only the reconstruction pass of upstream comes here.
+            unreachable!();
         }
 
         let next_bl = bl
@@ -3645,11 +3190,8 @@ fn decode_sb(
                 );
             }
         } else {
-            let b = &f
-                .frame_thread
-                .b
-                .index((t.b.y as isize * f.b4_stride + t.b.x as isize) as usize);
-            is_split = b.bl != bl;
+            // rav1g: only the reconstruction pass of upstream comes here.
+            unreachable!();
         }
 
         let next_bl = bl
@@ -3754,12 +3296,10 @@ fn setup_tile(
     ts: &mut Rav1dTileState,
     seq_hdr: &Rav1dSequenceHeader,
     frame_hdr: &Rav1dFrameHeader,
-    bitdepth_max: i32,
     sb_shift: i32,
     cur: &Rav1dPicture,
     bw: i32,
     bh: i32,
-    frame_thread: &Rav1dFrameContextFrameThread,
     sr_sb128w: i32,
     sb128w: i32,
     lf: &mut Rav1dFrameContextLf,
@@ -3767,7 +3307,6 @@ fn setup_tile(
     data: CArc<[u8]>,
     tile_row: usize,
     tile_col: usize,
-    tile_start_off: u32,
 ) {
     let col_sb_start = frame_hdr.tiling.col_start_sb[tile_col] as c_int;
     let col_sb128_start = col_sb_start >> (seq_hdr.sb128 == 0) as c_int;
@@ -3775,29 +3314,6 @@ fn setup_tile(
     let row_sb_start = frame_hdr.tiling.row_start_sb[tile_row] as c_int;
     let row_sb_end = frame_hdr.tiling.row_start_sb[tile_row + 1] as c_int;
 
-    let size_mul = &SS_SIZE_MUL[cur.p.layout];
-    for p in 0..2 {
-        ts.frame_thread[p]
-            .pal_idx
-            .set(if !frame_thread.pal_idx.is_empty() {
-                tile_start_off * size_mul[1] as u32 / 8
-            } else {
-                0
-            });
-        ts.frame_thread[p]
-            .cbi_idx
-            .set(if !frame_thread.cbi.is_empty() {
-                tile_start_off * size_mul[0] as u32 / 64
-            } else {
-                0
-            });
-        ts.frame_thread[p].cf.set(if !frame_thread.cf.is_empty() {
-            let bpc = BPC::from_bitdepth_max(bitdepth_max);
-            bpc.coef_stride(tile_start_off * size_mul[0] as u32 >> (seq_hdr.hbd == 0) as c_int)
-        } else {
-            0
-        });
-    }
 
     let ts_c = &mut *ts.context.try_lock().unwrap();
     ts_c.cdf = rav1d_cdf_thread_copy(in_cdf);
@@ -4042,32 +3558,21 @@ pub(crate) fn rav1d_decode_tile_sbrow(
         frame_hdr.frame_type.is_key_or_intra(),
         t.frame_thread.pass,
     );
+    // rav1g: there is no reconstruction pass. The scheduler still runs its task (thread_task.rs).
     if t.frame_thread.pass == 2 {
-        let off_2pass = if c.tc.len() > 1 {
-            f.sb128w * frame_hdr.tiling.rows as c_int
-        } else {
-            0
-        };
-        t.a = (off_2pass + col_sb128_start + tile_row * f.sb128w) as usize;
-        for bx in (ts.tiling.col_start..ts.tiling.col_end).step_by(sb_step as usize) {
-            t.b.x = bx;
-            if c.flush.load(Ordering::Acquire) {
-                return Err(());
-            }
-            decode_sb(
-                c,
-                t,
-                f,
-                &mut FrameThreadPassState::Second,
-                root_bl,
-                EdgeIndex::root(),
-            )?;
-            if t.b.x & 16 != 0 || f.seq_hdr().sb128 != 0 {
-                t.a += 1;
-            }
-        }
-        (f.bd_fn().backup_ipred_edge)(f, t);
         return Ok(());
+    }
+    if t.b.y == ts.tiling.row_start {
+        c.sink.tile_begin(
+            f.sink_frame,
+            &ParseTile {
+                index: t.ts,
+                col_start: ts.tiling.col_start,
+                col_end: ts.tiling.col_end,
+                row_start: ts.tiling.row_start,
+                row_end: ts.tiling.row_end,
+            },
+        );
     }
 
     if c.tc.len() > 1 && frame_hdr.use_ref_frame_mvs != 0 {
@@ -4103,6 +3608,9 @@ pub(crate) fn rav1d_decode_tile_sbrow(
             cdef_idx[0].set(-1);
         }
         let frame_hdr = &***f.frame_hdr.as_ref().unwrap();
+        // rav1g: the units read with this superblock, for the sink.
+        let mut lr_units = [ParseLrUnit::default(); 3 * 8];
+        let mut n_lr_units = 0;
         // Restoration filter
         for p in 0..3 {
             if (f.lf.restore_planes.bits() >> p) & 1 == 0 {
@@ -4148,6 +3656,10 @@ pub(crate) fn rav1d_decode_tile_sbrow(
                         .unwrap();
 
                     read_restoration_info(ts, &mut lr, p, frame_type, debug_block_info!(f, t.b));
+                    if n_lr_units < lr_units.len() {
+                        lr_units[n_lr_units] = parse_lr_unit(&lr, p, x, y >> unit_size_log2);
+                        n_lr_units += 1;
+                    }
                 }
             } else {
                 let x = 4 * t.b.x >> ss_hor;
@@ -4167,6 +3679,11 @@ pub(crate) fn rav1d_decode_tile_sbrow(
                     .unwrap();
 
                 read_restoration_info(ts, &mut lr, p, frame_type, debug_block_info!(f, t.b));
+                if n_lr_units < lr_units.len() {
+                    lr_units[n_lr_units] =
+                        parse_lr_unit(&lr, p, x >> unit_size_log2, y >> unit_size_log2);
+                    n_lr_units += 1;
+                }
             }
         }
         decode_sb(
@@ -4177,6 +3694,7 @@ pub(crate) fn rav1d_decode_tile_sbrow(
             root_bl,
             EdgeIndex::root(),
         )?;
+        parse_superblock(c, f, t, root_bl, &lr_units[..n_lr_units]);
         if t.b.x & 16 != 0 || f.seq_hdr().sb128 != 0 {
             t.a += 1;
             t.lf_mask = t.lf_mask.map(|i| i + 1);
@@ -4196,11 +3714,6 @@ pub(crate) fn rav1d_decode_tile_sbrow(
             t.b.y >> 1,
             t.b.y + sb_step >> 1,
         );
-    }
-
-    // backup pre-loopfilter pixels for intra prediction of the next sbrow
-    if t.frame_thread.pass != 1 {
-        (f.bd_fn().backup_ipred_edge)(f, t);
     }
 
     // backup t->a/l.tx_lpf_y/uv at tile boundaries to use them to "fix"
@@ -4226,6 +3739,9 @@ pub(crate) fn rav1d_decode_tile_sbrow(
     // error out on symbol decoder overread
     if ts.context.try_lock().unwrap().msac.cnt <= -15 {
         return Err(());
+    }
+    if t.b.y + sb_step >= ts.tiling.row_end {
+        c.sink.tile_end(f.sink_frame, t.ts);
     }
 
     if c.strict_std_compliance
@@ -4308,132 +3824,6 @@ pub(crate) fn rav1d_decode_frame_init(c: &Rav1dContext, fc: &Rav1dFrameContext) 
             }
         }
 
-        let cbi_sz = num_sb128 * size_mul[0] as c_int;
-        // TODO: Fallible allocation
-        f.frame_thread
-            .cbi
-            .resize_with(cbi_sz as usize * 32 * 32 / 4, Default::default);
-
-        let cf_sz = (num_sb128 * size_mul[0] as c_int) << hbd;
-        // TODO: Fallible allocation
-        f.frame_thread
-            .cf
-            .get_mut()
-            .resize(cf_sz as usize * 128 * 128 / 2, 0);
-
-        if frame_hdr.allow_screen_content_tools {
-            // TODO: Fallible allocation
-            f.frame_thread
-                .pal
-                .resize(num_sb128 as usize * 16 * 16 << hbd);
-
-            let pal_idx_sz = num_sb128 * size_mul[1] as c_int;
-            // TODO: Fallible allocation
-            f.frame_thread
-                .pal_idx
-                .resize(pal_idx_sz as usize * 128 * 128 / 8, Default::default());
-        } else if !f.frame_thread.pal.is_empty() {
-            let _ = mem::take(&mut f.frame_thread.pal);
-            let _ = mem::take(&mut f.frame_thread.pal_idx);
-        }
-    }
-
-    // update allocation of block contexts for above
-    let mut y_stride = f.cur.stride[0];
-    let mut uv_stride = f.cur.stride[1];
-    let has_resize = (frame_hdr.size.width[0] != frame_hdr.size.width[1]) as c_int;
-    let need_cdef_lpf_copy = (c.tc.len() > 1 && has_resize != 0) as c_int;
-    let mut alloc_sz: usize = 64;
-    alloc_sz += (y_stride.unsigned_abs() * 4 * f.sbh as usize) << need_cdef_lpf_copy;
-    alloc_sz += (uv_stride.unsigned_abs() * 8 * f.sbh as usize) << need_cdef_lpf_copy;
-    // TODO: Fallible allocation.
-    f.lf.cdef_line_buf.resize(alloc_sz, 0);
-
-    let bpc = BPC::from_bitdepth_max(f.bitdepth_max);
-    let y_stride_px = bpc.pxstride(f.cur.stride[0]);
-    let uv_stride_px = bpc.pxstride(f.cur.stride[1]);
-
-    let mut offset = bpc.pxstride(32usize);
-    if y_stride < 0 {
-        f.lf.cdef_line[0][0] =
-            offset.wrapping_add_signed(-(y_stride_px * (f.sbh as isize * 4 - 1)));
-        f.lf.cdef_line[1][0] =
-            offset.wrapping_add_signed(-(y_stride_px * (f.sbh as isize * 4 - 3)));
-    } else {
-        f.lf.cdef_line[0][0] = offset.wrapping_add_signed(y_stride_px * 0);
-        f.lf.cdef_line[1][0] = offset.wrapping_add_signed(y_stride_px * 2);
-    }
-    offset = offset.wrapping_add_signed(y_stride_px.abs() * f.sbh as isize * 4);
-    if uv_stride < 0 {
-        f.lf.cdef_line[0][1] =
-            offset.wrapping_add_signed(-(uv_stride_px * (f.sbh as isize * 8 - 1)));
-        f.lf.cdef_line[0][2] =
-            offset.wrapping_add_signed(-(uv_stride_px * (f.sbh as isize * 8 - 3)));
-        f.lf.cdef_line[1][1] =
-            offset.wrapping_add_signed(-(uv_stride_px * (f.sbh as isize * 8 - 5)));
-        f.lf.cdef_line[1][2] =
-            offset.wrapping_add_signed(-(uv_stride_px * (f.sbh as isize * 8 - 7)));
-    } else {
-        f.lf.cdef_line[0][1] = offset.wrapping_add_signed(uv_stride_px * 0);
-        f.lf.cdef_line[0][2] = offset.wrapping_add_signed(uv_stride_px * 2);
-        f.lf.cdef_line[1][1] = offset.wrapping_add_signed(uv_stride_px * 4);
-        f.lf.cdef_line[1][2] = offset.wrapping_add_signed(uv_stride_px * 6);
-    }
-
-    if need_cdef_lpf_copy != 0 {
-        offset = offset.wrapping_add_signed(uv_stride_px.abs() * f.sbh as isize * 8);
-        if y_stride < 0 {
-            f.lf.cdef_lpf_line[0] =
-                offset.wrapping_add_signed(-(y_stride_px * (f.sbh as isize * 4 - 1)));
-        } else {
-            f.lf.cdef_lpf_line[0] = offset;
-        }
-        offset = offset.wrapping_add_signed(y_stride_px.abs() * f.sbh as isize * 4);
-        if uv_stride < 0 {
-            f.lf.cdef_lpf_line[1] =
-                offset.wrapping_add_signed(-(uv_stride_px * (f.sbh as isize * 4 - 1)));
-            f.lf.cdef_lpf_line[2] =
-                offset.wrapping_add_signed(-(uv_stride_px * (f.sbh as isize * 8 - 1)));
-        } else {
-            f.lf.cdef_lpf_line[1] = offset;
-            f.lf.cdef_lpf_line[2] = offset.wrapping_add_signed(uv_stride_px * f.sbh as isize * 4);
-        }
-    }
-
-    let sb128 = seq_hdr.sb128;
-    let num_lines = if c.tc.len() > 1 {
-        (f.sbh * 4) << sb128
-    } else {
-        12
-    };
-    y_stride = f.sr_cur.p.stride[0];
-    uv_stride = f.sr_cur.p.stride[1];
-
-    // lr simd may overread the input, so slightly over-allocate the lpf buffer
-    let mut alloc_sz: usize = 128;
-    alloc_sz += y_stride.unsigned_abs() * num_lines as usize;
-    alloc_sz += uv_stride.unsigned_abs() * num_lines as usize * 2;
-    // TODO: Fallible allocation
-    f.lf.lr_line_buf.resize(alloc_sz, 0);
-
-    let y_stride_px = bpc.pxstride(y_stride);
-    let uv_stride_px = bpc.pxstride(uv_stride);
-
-    let mut offset = bpc.pxstride(64usize);
-    if y_stride < 0 {
-        f.lf.lr_lpf_line[0] = offset.wrapping_add_signed(-(y_stride_px * (num_lines as isize - 1)));
-    } else {
-        f.lf.lr_lpf_line[0] = offset;
-    }
-    offset = offset.wrapping_add_signed(y_stride_px.abs() * num_lines as isize);
-    if uv_stride < 0 {
-        f.lf.lr_lpf_line[1] =
-            offset.wrapping_add_signed(-(uv_stride_px * (num_lines as isize * 1 - 1)));
-        f.lf.lr_lpf_line[2] =
-            offset.wrapping_add_signed(-(uv_stride_px * (num_lines as isize * 2 - 1)));
-    } else {
-        f.lf.lr_lpf_line[1] = offset;
-        f.lf.lr_lpf_line[2] = offset.wrapping_add_signed(uv_stride_px * num_lines as isize);
     }
 
     // update allocation for loopfilter masks
@@ -4444,19 +3834,13 @@ pub(crate) fn rav1d_decode_frame_init(c: &Rav1dContext, fc: &Rav1dFrameContext) 
     // over-allocate by 3 bytes since some of the SIMD implementations
     // index this from the level type and can thus over-read by up to 3 bytes.
     f.lf.level.resize(4 * num_sb128 as usize * 32 * 32 + 3, 0); // TODO: Fallible allocation
-    if c.fc.len() > 1 {
-        // TODO: Fallible allocation
-        f.frame_thread
-            .b
-            .resize_with(num_sb128 as usize * 32 * 32, Default::default);
-    }
 
     f.sr_sb128w = f.sr_cur.p.p.w + 127 >> 7;
     let lr_mask_sz = f.sr_sb128w * f.sb128h;
     // TODO: Fallible allocation
     f.lf.lr_mask
         .resize_with(lr_mask_sz as usize, Default::default);
-    f.lf.restore_planes = LrRestorePlanes::from_bits_truncate(
+    f.lf.restore_planes = crate::internal::LrRestorePlanes::from_bits_truncate(
         frame_hdr
             .restoration
             .r#type
@@ -4470,11 +3854,6 @@ pub(crate) fn rav1d_decode_frame_init(c: &Rav1dContext, fc: &Rav1dFrameContext) 
         f.lf.last_sharpness = frame_hdr.loopfilter.sharpness;
     }
     rav1d_calc_lf_values(&mut f.lf.lvl, &frame_hdr, &[0, 0, 0, 0]);
-
-    let ipred_edge_sz = f.sbh * f.sb128w << hbd;
-    // TODO: Fallible allocation
-    f.ipred_edge.resize(ipred_edge_sz as usize * 128 * 3, 0);
-    f.ipred_edge_off = bpc.pxstride(ipred_edge_sz as usize * 128);
 
     let re_sz = f.sb128h as usize * frame_hdr.tiling.cols as usize;
     // TODO: Fallible allocation
@@ -4575,20 +3954,7 @@ pub(crate) fn rav1d_decode_frame_init_cdf(
         let end: usize = tile.hdr.end.try_into().unwrap();
 
         let mut data = tile.data.data.clone().unwrap();
-        for (j, (ts, tile_start_off)) in iter::zip(
-            &mut f.ts[..end + 1],
-            if uses_2pass {
-                &f.frame_thread.tile_start_off[..end + 1]
-            } else {
-                &[]
-            }
-            .into_iter()
-            .copied()
-            .chain(iter::repeat(0)),
-        )
-        .enumerate()
-        .skip(start)
-        {
+        for (j, ts) in f.ts[..end + 1].iter_mut().enumerate().skip(start) {
             let tile_sz = if j == end {
                 data.len()
             } else {
@@ -4615,12 +3981,10 @@ pub(crate) fn rav1d_decode_frame_init_cdf(
                 ts,
                 &***f.seq_hdr.as_ref().unwrap(),
                 frame_hdr,
-                f.bitdepth_max,
                 f.sb_shift,
                 &f.cur,
                 f.bw,
                 f.bh,
-                &f.frame_thread,
                 f.sr_sb128w,
                 f.sb128w,
                 &mut f.lf,
@@ -4628,7 +3992,6 @@ pub(crate) fn rav1d_decode_frame_init_cdf(
                 cur_data,
                 tile_row,
                 tile_col,
-                tile_start_off,
             );
             tile_col += 1;
 
@@ -4718,7 +4081,6 @@ fn rav1d_decode_frame_main(c: &Rav1dContext, f: &mut Rav1dFrameData) -> Rav1dRes
             }
 
             // loopfilter + cdef + restoration
-            (f.bd_fn().filter_sbrow)(c, f, &mut t, sby);
         }
     }
 
@@ -4737,9 +4099,9 @@ pub(crate) fn rav1d_decode_frame_exit(
     if f.sr_cur.p.data.is_some() {
         task_thread.error.store(0, Ordering::Relaxed);
     }
-    let cf = f.frame_thread.cf.get_mut();
-    if c.fc.len() > 1 && retval.is_err() {
-        cf.fill_with(Default::default);
+    // rav1g: the sink is told that the parse of the frame has ended.
+    if mem::take(&mut f.sink_begun) {
+        c.sink.frame_end(f.sink_frame, retval.is_ok());
     }
 
     if retval.is_ok() && c.fc.len() > 1 && c.strict_std_compliance {
@@ -4920,20 +4282,6 @@ pub fn rav1d_submit_frame(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResu
     }
 
     let bpc = 8 + 2 * seq_hdr.hbd;
-    match Rav1dBitDepthDSPContext::get(bpc) {
-        Some(dsp) => f.dsp = dsp,
-        None => {
-            writeln!(c.logger, "Compiled without support for {bpc}-bit decoding",);
-            on_error(
-                fc,
-                &mut f,
-                out,
-                &mut state.cached_error_props,
-                &state.in_0.m,
-            );
-            return Err(Rav1dError::UnsupportedBitstream);
-        }
-    };
 
     fn scale_fac(ref_sz: i32, this_sz: i32) -> i32 {
         ((ref_sz << 14) + (this_sz >> 1)) / this_sz
@@ -5205,6 +4553,49 @@ pub fn rav1d_submit_frame(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResu
     }
 
     // update references etc.
+    // rav1g: the sink gets the frame before its tiles are parsed.
+    {
+        let is_inter = frame_hdr.frame_type.is_inter_or_switch();
+        let parse_frame = ParseFrame {
+            seq_hdr: &**seq_hdr,
+            frame_hdr: &**frame_hdr,
+            bw: f.bw,
+            bh: f.bh,
+            bpc,
+            gmv_warp_allowed: if is_inter { f.gmv_warp_allowed } else { [0; 7] },
+            ref_scale: array::from_fn(|i| {
+                if is_inter {
+                    [f.svc[i][0].scale, f.svc[i][1].scale]
+                } else {
+                    [0; 2]
+                }
+            }),
+            ref_step: array::from_fn(|i| {
+                if is_inter {
+                    [f.svc[i][0].step, f.svc[i][1].step]
+                } else {
+                    [0; 2]
+                }
+            }),
+        };
+        match c.sink.frame_begin(&parse_frame) {
+            Ok(sink_frame) => {
+                f.sink_frame = sink_frame;
+                f.sink_begun = true;
+            }
+            Err(()) => {
+                on_error(
+                    fc,
+                    &mut f,
+                    out,
+                    &mut state.cached_error_props,
+                    &state.in_0.m,
+                );
+                return Err(Rav1dError::InvalidArgument);
+            }
+        }
+    }
+
     let refresh_frame_flags = frame_hdr.refresh_frame_flags as c_uint;
     for i in 0..8 {
         if refresh_frame_flags & (1 << i) != 0 {

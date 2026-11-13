@@ -1,21 +1,19 @@
-[workspace]
-members = [".", "tools"]
-default-members = [".", "tools"]
-
+# rav1d (https://github.com/memorysafety/rav1d) at the commit of UPSTREAM, with the changes of rav1g: the
+# parse pass only, behind a sink (src/parse.rs). PATCHES.md lists every change against upstream;
+# docs/phase2-rav1d.md of the repository is the design.
 [package]
 name = "rav1d"
 authors = ["Rav1d Developers", "Prossimo"]
 version = "1.1.1"
 edition = "2021"
 rust-version = "1.85"
-description = "Rust port of the dav1d AV1 decoder"
+description = "Rust port of the dav1d AV1 decoder; here its parse pass only, as vendored by rav1g"
 license = "BSD-2-Clause"
 repository = "https://github.com/memorysafety/rav1d"
-# The arm `.S` files `#include` `src/arm/asm-offsets.h`, so keep it despite `*.h`.
-exclude = ["*.c", "*.h", "!src/arm/asm-offsets.h", "*.in", "meson*", "tests/", "doc/", "package/"]
+publish = false
 
 [lib]
-crate-type = ["staticlib", "rlib"]
+crate-type = ["rlib"]
 
 [dependencies]
 assert_matches = "1.5.0"
@@ -37,34 +35,9 @@ cc = "1.0.79"
 nasm-rs = { version = "0.3", features = ["parallel"] }
 
 [features]
-default = ["asm", "asm_arm64_dotprod", "asm_arm64_i8mm", "asm_arm64_sve2", "bitdepth_8", "bitdepth_16"]
+# asm: the two x86-64 assembly files of the parse pass (entropy decoder, motion vector lists), assembled
+# with nasm by build.rs. On another architecture, build without it.
+default = ["asm", "bitdepth_8", "bitdepth_16"]
 asm = []
-asm_arm64_dotprod = ["asm"]
-asm_arm64_i8mm = ["asm"]
-asm_arm64_sve2 = ["asm"]
 bitdepth_8 = []
 bitdepth_16 = []
-
-[profile.dev]
-panic = "abort"
-
-[profile.opt-dev]
-# The debug builds run tests very slowly so this profile keeps debug assertions
-# while enabling basic optimizations. The profile is not suitable for debugging.
-inherits = "dev"
-opt-level = 1
-
-[profile.release]
-codegen-units = 1
-panic = "abort"
-lto = "fat"
-
-[profile.release-with-debug]
-inherits = "release"
-debug = "line-tables-only"
-
-[profile.checked-release]
-# Close to a release build, but with all checks enabled.
-inherits = "dev"
-opt-level = 2
-codegen-units = 16

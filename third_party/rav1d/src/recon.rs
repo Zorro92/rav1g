@@ -3,13 +3,13 @@
 use std::ffi::{c_int, c_uint};
 use std::hint::assert_unchecked;
 use std::ops::BitOr;
-use std::{array, cmp, ptr};
+use std::cmp;
+use std::sync::OnceLock;
 
 use assert_matches::debug_assert_matches;
 use libc::intptr_t;
 use to_method::To as _;
 
-use crate::cdef_apply::rav1d_cdef_brow;
 use crate::ctx::CaseSet;
 use crate::env::get_uv_inter_txtp;
 use crate::in_range::InRange;
@@ -26,15 +26,12 @@ use crate::internal::{
     ScratchEmuEdge, TaskContextScratch, TileStateRef,
 };
 use crate::intra_edge::EdgeFlags;
-use crate::ipred_prepare::{rav1d_prepare_intra_edges, sm_flag, sm_uv_flag};
 use crate::levels::{
     Av1Block, Av1BlockInter, Av1BlockIntra, Av1BlockIntraInter, BlockSize, CompInterType, Filter2d,
     InterIntraPredMode, InterIntraType, IntraPredMode, MotionMode, Mv, TxClass, TxfmSize, TxfmType,
     CFL_PRED, DCT_DCT, DC_PRED, FILTER_PRED, GLOBALMV, GLOBALMV_GLOBALMV, IDTX, SMOOTH_PRED,
     WHT_WHT,
 };
-use crate::lf_apply::{rav1d_copy_lpf, rav1d_loopfilter_sbrow_cols, rav1d_loopfilter_sbrow_rows};
-use crate::lr_apply::rav1d_lr_sbrow;
 use crate::msac::{
     rav1d_msac_decode_bool_adapt, rav1d_msac_decode_bool_equi, rav1d_msac_decode_bools,
     rav1d_msac_decode_hi_tok, rav1d_msac_decode_symbol_adapt16, rav1d_msac_decode_symbol_adapt4,
@@ -42,6 +39,7 @@ use crate::msac::{
 };
 use crate::picture::Rav1dThreadPicture;
 use crate::pixels::Pixels as _;
+use crate::parse::ParseTxb;
 use crate::scan::DAV1D_SCANS;
 use crate::strided::Strided as _;
 use crate::tables::{
@@ -49,7 +47,6 @@ use crate::tables::{
     DAV1D_SKIP_CTX, DAV1D_TXFM_DIMENSIONS, DAV1D_TXTP_FROM_UVMODE, DAV1D_TX_TYPES_PER_SET,
     DAV1D_TX_TYPE_CLASS,
 };
-use crate::wedge::{DAV1D_II_MASKS, DAV1D_WEDGE_MASKS};
 use crate::with_offset::WithOffset;
 
 impl Bxy {
@@ -81,37 +78,14 @@ pub(crate) use debug_block_info;
 
 const DEBUG_B_PIXELS: bool = false;
 
-pub(crate) type ReconBIntraFn = fn(
-    &Rav1dFrameData,
-    &mut Rav1dTaskContext,
-    Option<&mut Rav1dTileStateContext>,
-    BlockSize,
-    EdgeFlags,
-    &Av1Block,
-    &Av1BlockIntra,
-) -> ();
-
-pub(crate) type ReconBInterFn = fn(
-    &Rav1dFrameData,
-    &mut Rav1dTaskContext,
-    Option<&mut Rav1dTileStateContext>,
-    BlockSize,
-    &Av1Block,
-    &Av1BlockInter,
-) -> Result<(), ()>;
-
-pub(crate) type FilterSbrowFn =
-    fn(&Rav1dContext, &Rav1dFrameData, &mut Rav1dTaskContext, c_int) -> ();
-
-pub(crate) type BackupIpredEdgeFn = fn(&Rav1dFrameData, &mut Rav1dTaskContext) -> ();
-
 pub(crate) type ReadCoefBlocksFn = fn(
+    &Rav1dContext,
     &Rav1dFrameData,
     &mut Rav1dTaskContext,
     &mut Rav1dTileStateContext,
     BlockSize,
     &Av1Block,
-) -> ();
+) -> Result<(), ()>;
 
 pub(crate) type CopyPalBlockFn = fn(
     t: &mut Rav1dTaskContext,
@@ -503,7 +477,48 @@ fn get_lo_ctx(
     LoCdfIndex::new(lo_ctx).unwrap() // Elided
 }
 
+/// rav1g: for a transform size and class, the scan index of the coefficient at each position `rc` of
+/// the block as `decode_coefs` numbers them: the inverse of what its token loop does with `i`.
+fn inverse_scan(tx: TxfmSize, tx_class: TxClass) -> &'static [u16] {
+    static TABLES: OnceLock<Vec<Box<[u16]>>> = OnceLock::new();
+    let tables = TABLES.get_or_init(|| {
+        let mut tables = Vec::with_capacity(DAV1D_SCANS.len() * 3);
+        for (tx, scan) in DAV1D_SCANS.iter().enumerate() {
+            let t_dim = &DAV1D_TXFM_DIMENSIONS[tx];
+            let slw = cmp::min(t_dim.lw, TxfmSize::S32x32 as u8) as u32;
+            let slh = cmp::min(t_dim.lh, TxfmSize::S32x32 as u8) as u32;
+            let n = (4usize << slw) * (4usize << slh);
+            for tx_class in [TxClass::TwoD, TxClass::H, TxClass::V] {
+                let mut inverse = vec![0u16; n].into_boxed_slice();
+                for i in 0..n {
+                    let rc = match tx_class {
+                        TxClass::TwoD => scan[i].get() as usize,
+                        TxClass::H => i,
+                        TxClass::V => {
+                            let x = i & ((4 << slw) - 1);
+                            let y = i >> (slw + 2);
+                            x << (slh + 2) | y
+                        }
+                    };
+                    inverse[rc] = i as u16;
+                }
+                tables.push(inverse);
+            }
+        }
+        tables
+    });
+    &tables[tx as usize * 3 + tx_class as usize]
+}
+
+/// rav1g: the coefficients do not stay in the task's or the frame's block (`cf` of upstream). The token
+/// loop uses the task's block as before; the loop that reads signs and remainders writes each
+/// dequantised coefficient where the sink says, at its index in scan order, 32 bits wide and not
+/// clamped to the range of the bit depth, and leaves the task's block zero. `pos` is the position of
+/// the transform block in 4x4 units of its plane. The result is the index of the last coefficient, -1
+/// for a block without one; `Err` when the sink has no room.
 fn decode_coefs<BD: BitDepth>(
+    c: &Rav1dContext,
+    pos: (c_int, c_int),
     f: &Rav1dFrameData,
     ts: usize,
     ts_c: &mut Rav1dTileStateContext,
@@ -516,10 +531,10 @@ fn decode_coefs<BD: BitDepth>(
     bs: BlockSize,
     b: &Av1Block,
     plane: usize,
-    cf: CfSelect,
     txtp: &mut TxfmType,
     res_ctx: &mut u8,
-) -> c_int {
+) -> Result<c_int, ()> {
+    let ts_idx = ts;
     let dc_sign_ctx;
     let dc_sign;
     let mut dc_dq;
@@ -550,7 +565,7 @@ fn decode_coefs<BD: BitDepth>(
     if all_skip {
         *res_ctx = 0x40;
         *txtp = if lossless { WHT_WHT } else { DCT_DCT };
-        return -1;
+        return Ok(-1);
     }
 
     // transform type (chroma: derived, luma: explicitly coded)
@@ -730,17 +745,33 @@ fn decode_coefs<BD: BitDepth>(
         }
     }
 
-    let sw = cmp::min(1 << t_dim.lw, 8) as usize;
-    let sh = cmp::min(1 << t_dim.lh, 8) as usize;
-    let cf_len = sw * 4 * sh * 4;
-    let cf = match cf {
-        CfSelect::Frame(offset) => &mut *f
-            .frame_thread
-            .cf
-            .mut_slice_as((offset as usize.., ..cf_len)),
-        CfSelect::Task => t_cf.select_mut::<BD>(),
-    };
+    let cf = t_cf.select_mut::<BD>();
     let mut cf = Cf::<BD>(cf);
+
+    // rav1g: the transform block goes to the sink, which says where its coefficients go.
+    let dst = c.sink.txb(
+        f.sink_frame,
+        ts_idx,
+        &ParseTxb {
+            plane: plane as u8,
+            tx,
+            txtp: *txtp,
+            eob,
+            x4: pos.0,
+            y4: pos.1,
+        },
+    );
+    if dst.is_null() {
+        return Err(());
+    }
+    let inverse = inverse_scan(tx, tx_class);
+    // The coefficient at `rc` of the task's block: written to the sink's buffer, zero in the block.
+    let put = |cf: &mut Cf<BD>, rc: u16, value: c_int| {
+        cf.set(rc, 0);
+        // SAFETY: the sink's buffer has room for the coefficients up to `eob` (`ParseSink::txb`), and
+        // the coefficient at `rc` is one of them: `inverse` has the scan index of every position.
+        unsafe { dst.add(inverse[rc as usize & (inverse.len() - 1)] as usize).write(value) };
+    };
 
     // base tokens
     let mut rc;
@@ -1176,8 +1207,7 @@ fn decode_coefs<BD: BitDepth>(
             }
             cul_level = dc_tok;
             dc_dq >>= dq_shift;
-            dc_dq = cmp::min(dc_dq, cf_max + dc_sign);
-            cf.set(0, if dc_sign != 0 { -dc_dq } else { dc_dq });
+            put(&mut cf, 0, if dc_sign != 0 { -dc_dq } else { dc_dq });
 
             ac = if rc != 0 { Some(Ac::Qm(qm_tbl)) } else { None };
         } else {
@@ -1197,13 +1227,12 @@ fn decode_coefs<BD: BitDepth>(
                 dc_dq = (((dc_dq as c_uint).wrapping_mul(dc_tok as c_uint)
                     & 0xffffff as c_int as c_uint)
                     >> dq_shift) as c_int;
-                dc_dq = cmp::min(dc_dq, cf_max + dc_sign);
             } else {
                 dc_dq = ((dc_dq as c_uint).wrapping_mul(dc_tok as c_uint) >> dq_shift) as c_int;
                 assert!(dc_dq <= cf_max);
             }
             cul_level = dc_tok;
-            cf.set(0, if dc_sign != 0 { -dc_dq } else { dc_dq });
+            put(&mut cf, 0, if dc_sign != 0 { -dc_dq } else { dc_dq });
 
             ac = if rc != 0 { Some(Ac::NoQm) } else { None };
         }
@@ -1245,8 +1274,8 @@ fn decode_coefs<BD: BitDepth>(
                 }
                 cul_level = cul_level.wrapping_add(tok);
                 dq >>= dq_shift;
-                dq_sat = cmp::min(dq as c_int, cf_max + sign as i32);
-                cf.set(rc, if sign { -dq_sat } else { dq_sat });
+                dq_sat = dq as c_int;
+                put(&mut cf, rc, if sign { -dq_sat } else { dq_sat });
 
                 rc = rc_tok as u16 & 0x3ff;
                 if !(rc != 0) {
@@ -1283,7 +1312,6 @@ fn decode_coefs<BD: BitDepth>(
 
                     // dequant, see 7.12.3
                     dq = ((ac_dq.wrapping_mul(tok) & 0xffffff) >> dq_shift) as c_int;
-                    dq = cmp::min(dq, cf_max + sign);
                 } else {
                     // cannot exceed `cf_max`, so we can avoid the clipping
                     tok = rc_tok >> 11;
@@ -1291,7 +1319,7 @@ fn decode_coefs<BD: BitDepth>(
                     assert!(dq <= cf_max);
                 }
                 cul_level = cul_level.wrapping_add(tok);
-                cf.set(rc, if sign != 0 { -dq } else { dq });
+                put(&mut cf, rc, if sign != 0 { -dq } else { dq });
 
                 rc = rc_tok as u16 & 0x3ff; // next non-zero `rc`, zero if `eob`
                 if !(rc != 0) {
@@ -1305,22 +1333,14 @@ fn decode_coefs<BD: BitDepth>(
     // context
     *res_ctx = (cmp::min(cul_level, 63) | dc_sign_level) as u8;
 
-    eob as i32
-}
-
-#[derive(Clone, Copy)]
-enum CfSelect {
-    /// Use `f.frame_thread.cf` at the specified offset.
-    Frame(u32),
-
-    /// Use `t.cf`.
-    Task,
+    Ok(eob as i32)
 }
 
 fn read_coef_tree<BD: BitDepth>(
+    c: &Rav1dContext,
     f: &Rav1dFrameData,
     t: &mut Rav1dTaskContext,
-    mut ts_c: Option<&mut Rav1dTileStateContext>,
+    ts_c: &mut Rav1dTileStateContext,
     bs: BlockSize,
     b: &Av1Block,
     ytx: TxfmSize,
@@ -1328,11 +1348,7 @@ fn read_coef_tree<BD: BitDepth>(
     tx_split: [u16; 2],
     x_off: c_int,
     y_off: c_int,
-    mut y_dst: Option<Rav1dPictureDataComponentOffset>,
-) {
-    let bd = BD::from_c(f.bitdepth_max);
-
-    let ts = &f.ts[t.ts];
+) -> Result<(), ()> {
     let t_dim = &DAV1D_TXFM_DIMENSIONS[ytx as usize];
     let txw = t_dim.w;
     let txh = t_dim.h;
@@ -1347,9 +1363,10 @@ fn read_coef_tree<BD: BitDepth>(
         let txsh = sub_t_dim.h;
 
         read_coef_tree::<BD>(
+            c,
             f,
             t,
-            ts_c.as_deref_mut(),
+            ts_c,
             bs,
             b,
             sub,
@@ -1357,14 +1374,14 @@ fn read_coef_tree<BD: BitDepth>(
             tx_split,
             x_off * 2 + 0,
             y_off * 2 + 0,
-            y_dst,
-        );
+        )?;
         t.b.x += txsw as c_int;
         if txw >= txh && t.b.x < f.bw {
             read_coef_tree::<BD>(
+                c,
                 f,
                 t,
-                ts_c.as_deref_mut(),
+                ts_c,
                 bs,
                 b,
                 sub,
@@ -1372,17 +1389,16 @@ fn read_coef_tree<BD: BitDepth>(
                 tx_split,
                 x_off * 2 + 1,
                 y_off * 2 + 0,
-                y_dst.map(|dst| dst + (4 * txsw as usize)),
-            );
+            )?;
         }
         t.b.x -= txsw as c_int;
         t.b.y += txsh as c_int;
         if txh >= txw && t.b.y < f.bh {
-            y_dst = y_dst.map(|dst| dst + (4 * txsh as isize * dst.pixel_stride::<BD>()));
             read_coef_tree::<BD>(
+                c,
                 f,
                 t,
-                ts_c.as_deref_mut(),
+                ts_c,
                 bs,
                 b,
                 sub,
@@ -1390,14 +1406,14 @@ fn read_coef_tree<BD: BitDepth>(
                 tx_split,
                 x_off * 2 + 0,
                 y_off * 2 + 1,
-                y_dst,
-            );
+            )?;
             t.b.x += txsw as c_int;
             if txw >= txh && t.b.x < f.bw {
                 read_coef_tree::<BD>(
+                    c,
                     f,
                     t,
-                    ts_c.as_deref_mut(),
+                    ts_c,
                     bs,
                     b,
                     sub,
@@ -1405,8 +1421,7 @@ fn read_coef_tree<BD: BitDepth>(
                     tx_split,
                     x_off * 2 + 1,
                     y_off * 2 + 1,
-                    y_dst.map(|dst| dst + (4 * txsw as usize)),
-                );
+                )?;
             }
             t.b.x -= txsw as c_int;
         }
@@ -1416,106 +1431,62 @@ fn read_coef_tree<BD: BitDepth>(
         let by4 = t.b.y as usize & 31;
         let mut txtp = DCT_DCT;
         let mut cf_ctx = 0;
-        let eob;
 
-        let cf =
-            if t.frame_thread.pass != 0 {
-                let p = t.frame_thread.pass & 1;
-                CfSelect::Frame(ts.frame_thread[p as usize].cf.get_update(|i| {
-                    i + cmp::min(t_dim.w, 8) as u32 * cmp::min(t_dim.h, 8) as u32 * 16
-                }))
-            } else {
-                CfSelect::Task
-            };
-        if t.frame_thread.pass != 2 {
-            let ts_c = ts_c.as_deref_mut().unwrap();
-            eob = decode_coefs::<BD>(
-                f,
-                t.ts,
-                ts_c,
-                debug_block_info!(f, t.b),
-                &mut t.scratch,
-                &mut t.cf,
-                &mut f.a[t.a].lcoef.index_mut(bx4..bx4 + txw as usize),
-                &mut t.l.lcoef.index_mut(by4..by4 + txh as usize),
-                ytx,
-                bs,
-                b,
-                0,
-                cf,
-                &mut txtp,
-                &mut cf_ctx,
+        // rav1g: the parse of upstream's first pass; the coefficients go to the sink.
+        let eob = decode_coefs::<BD>(
+            c,
+            (t.b.x, t.b.y),
+            f,
+            t.ts,
+            ts_c,
+            debug_block_info!(f, t.b),
+            &mut t.scratch,
+            &mut t.cf,
+            &mut f.a[t.a].lcoef.index_mut(bx4..bx4 + txw as usize),
+            &mut t.l.lcoef.index_mut(by4..by4 + txh as usize),
+            ytx,
+            bs,
+            b,
+            0,
+            &mut txtp,
+            &mut cf_ctx,
+        )?;
+        if debug_block_info!(f, t.b) {
+            println!(
+                "Post-y-cf-blk[tx={:?},txtp={},eob={}]: r={}",
+                ytx, txtp, eob, ts_c.msac.rng,
             );
-            if debug_block_info!(f, t.b) {
-                println!(
-                    "Post-y-cf-blk[tx={:?},txtp={},eob={}]: r={}",
-                    ytx, txtp, eob, ts_c.msac.rng,
-                );
-            }
-            CaseSet::<16, true>::many(
-                [&t.l.lcoef, &f.a[t.a].lcoef],
-                [
-                    cmp::min(txh as c_int, f.bh - t.b.y) as usize,
-                    cmp::min(txw as c_int, f.bw - t.b.x) as usize,
-                ],
-                [by4, bx4],
-                |case, dir| {
-                    case.set_disjoint(dir, cf_ctx);
-                },
-            );
-            let txtp_map =
-                &mut t.scratch.inter_intra_mut().ac_txtp_map.txtp_map_mut()[by4 * 32 + bx4..];
-            CaseSet::<16, false>::one((), txw as usize, 0, |case, ()| {
-                for txtp_map in txtp_map.chunks_mut(32).take(txh as usize) {
-                    case.set(txtp_map, txtp);
-                }
-            });
-            if t.frame_thread.pass == 1 {
-                let cbi_idx = ts.frame_thread[1].cbi_idx.get_update(|i| i + 1);
-                f.frame_thread.cbi[cbi_idx as usize].set(CodedBlockInfo::new(eob as i16, txtp));
-            }
-        } else {
-            let cbi_idx = ts.frame_thread[0].cbi_idx.get_update(|i| i + 1);
-            let cbi = f.frame_thread.cbi[cbi_idx as usize].get();
-            eob = cbi.eob().into();
-            txtp = cbi.txtp();
         }
-        if t.frame_thread.pass & 1 == 0 {
-            let y_dst = y_dst.unwrap();
-            if eob >= 0 {
-                let cf = match cf {
-                    CfSelect::Frame(offset) => {
-                        let len =
-                            cmp::min(t_dim.h as usize, 8) * 4 * cmp::min(t_dim.w as usize, 8) * 4;
-                        &mut *f.frame_thread.cf.mut_slice_as((offset as usize.., ..len))
-                    }
-                    CfSelect::Task => t.cf.select_mut::<BD>(),
-                };
-                if debug_block_info!(f, t.b) && DEBUG_B_PIXELS {
-                    coef_dump(
-                        cf,
-                        cmp::min(t_dim.h as usize, 8) * 4,
-                        cmp::min(t_dim.w as usize, 8) * 4,
-                        3,
-                        "dq",
-                    );
-                }
-                f.dsp.itx.itxfm_add[ytx as usize][txtp as usize].call::<BD>(y_dst, cf, eob, bd);
-                if debug_block_info!(f, t.b) && DEBUG_B_PIXELS {
-                    hex_dump_pic::<BD>(y_dst, t_dim.w as usize * 4, t_dim.h as usize * 4, "recon");
-                }
+        CaseSet::<16, true>::many(
+            [&t.l.lcoef, &f.a[t.a].lcoef],
+            [
+                cmp::min(txh as c_int, f.bh - t.b.y) as usize,
+                cmp::min(txw as c_int, f.bw - t.b.x) as usize,
+            ],
+            [by4, bx4],
+            |case, dir| {
+                case.set_disjoint(dir, cf_ctx);
+            },
+        );
+        let txtp_map =
+            &mut t.scratch.inter_intra_mut().ac_txtp_map.txtp_map_mut()[by4 * 32 + bx4..];
+        CaseSet::<16, false>::one((), txw as usize, 0, |case, ()| {
+            for txtp_map in txtp_map.chunks_mut(32).take(txh as usize) {
+                case.set(txtp_map, txtp);
             }
-        }
+        });
     };
+    Ok(())
 }
 
 pub(crate) fn rav1d_read_coef_blocks<BD: BitDepth>(
+    c: &Rav1dContext,
     f: &Rav1dFrameData,
     t: &mut Rav1dTaskContext,
     ts_c: &mut Rav1dTileStateContext,
     bs: BlockSize,
     b: &Av1Block,
-) {
+) -> Result<(), ()> {
     let ss_ver = (f.cur.p.layout == Rav1dPixelLayout::I420) as u8;
     let ss_hor = (f.cur.p.layout != Rav1dPixelLayout::I444) as u8;
     let bx4 = t.b.x as usize & 31;
@@ -1552,15 +1523,13 @@ pub(crate) fn rav1d_read_coef_blocks<BD: BitDepth>(
                 },
             );
         }
-        return;
+        return Ok(());
     }
 
-    let ts = &f.ts[t.ts];
     let w4 = cmp::min(bw4 as c_int, f.bw - t.b.x) as u8;
     let h4 = cmp::min(bh4 as c_int, f.bh - t.b.y) as u8;
     let cw4 = w4 + ss_hor >> ss_hor;
     let ch4 = h4 + ss_ver >> ss_ver;
-    assert!(t.frame_thread.pass == 1);
     assert!(b.skip == 0);
     let uv_t_dim = &DAV1D_TXFM_DIMENSIONS[b.uvtx as usize];
     let t_dim = &DAV1D_TXFM_DIMENSIONS[match &b.ii {
@@ -1586,9 +1555,10 @@ pub(crate) fn rav1d_read_coef_blocks<BD: BitDepth>(
                         Av1BlockIntraInter::Inter(inter) => {
                             let tx_split = [inter.tx_split0 as u16, inter.tx_split1];
                             read_coef_tree::<BD>(
+                                c,
                                 f,
                                 t,
-                                Some(ts_c),
+                                ts_c,
                                 bs,
                                 b,
                                 inter.max_ytx,
@@ -1596,8 +1566,7 @@ pub(crate) fn rav1d_read_coef_blocks<BD: BitDepth>(
                                 tx_split,
                                 x_off,
                                 y_off,
-                                None,
-                            );
+                            )?;
                         }
                         Av1BlockIntraInter::Intra(intra) => {
                             let mut cf_ctx = 0x40;
@@ -1606,13 +1575,9 @@ pub(crate) fn rav1d_read_coef_blocks<BD: BitDepth>(
                             let a_len = t_dim.w as usize;
                             let l_start = by4 + y as usize;
                             let l_len = t_dim.h as usize;
-                            // Increment moved up from after `decode_coefs` call in C.
-                            // This is fine since `decode_coefs` does not access `cf`.
-                            // `decode_coefs` must not be changed to access `cf`.
-                            let cf = CfSelect::Frame(ts.frame_thread[1].cf.get_update(|i| {
-                                i + cmp::min(t_dim.w, 8) as u32 * cmp::min(t_dim.h, 8) as u32 * 16
-                            }));
                             let eob = decode_coefs::<BD>(
+                                c,
+                                (t.b.x, t.b.y),
                                 f,
                                 t.ts,
                                 ts_c,
@@ -1625,19 +1590,15 @@ pub(crate) fn rav1d_read_coef_blocks<BD: BitDepth>(
                                 bs,
                                 b,
                                 0,
-                                cf,
                                 &mut txtp,
                                 &mut cf_ctx,
-                            );
+                            )?;
                             if debug_block_info!(f, t.b) {
                                 println!(
                                     "Post-y-cf-blk[tx={:?},txtp={},eob={}]: r={}",
                                     intra.tx, txtp, eob, ts_c.msac.rng,
                                 );
                             }
-                            let cbi_idx = ts.frame_thread[1].cbi_idx.get_update(|i| i + 1);
-                            f.frame_thread.cbi[cbi_idx as usize]
-                                .set(CodedBlockInfo::new(eob as i16, txtp));
                             CaseSet::<16, true>::many(
                                 [&t.l.lcoef, &f.a[t.a].lcoef],
                                 [
@@ -1692,8 +1653,9 @@ pub(crate) fn rav1d_read_coef_blocks<BD: BitDepth>(
                         let l_start = cby4 + y as usize;
                         let l_len = uv_t_dim.h as usize;
                         let l_ccoef = &t.l.ccoef[pl];
-                        let cf_idx = ts.frame_thread[1].cf.get();
                         let eob = decode_coefs::<BD>(
+                            c,
+                            (t.b.x >> ss_hor, t.b.y >> ss_ver),
                             f,
                             t.ts,
                             ts_c,
@@ -1706,22 +1668,15 @@ pub(crate) fn rav1d_read_coef_blocks<BD: BitDepth>(
                             bs,
                             b,
                             1 + pl,
-                            CfSelect::Frame(cf_idx),
                             &mut txtp,
                             &mut cf_ctx,
-                        );
+                        )?;
                         if debug_block_info!(f, t.b) {
                             println!(
                                 "Post-uv-cf-blk[pl={},tx={:?},txtp={},eob={}]: r={}",
                                 pl, b.uvtx, txtp, eob, ts_c.msac.rng,
                             );
                         }
-                        let cbi_idx = ts.frame_thread[1].cbi_idx.get_update(|i| i + 1);
-                        f.frame_thread.cbi[cbi_idx as usize]
-                            .set(CodedBlockInfo::new(eob as i16, txtp));
-                        ts.frame_thread[1]
-                            .cf
-                            .set(cf_idx + uv_t_dim.w as u32 * uv_t_dim.h as u32 * 16);
                         CaseSet::<16, true>::many(
                             [l_ccoef, a_ccoef],
                             [
@@ -1751,2145 +1706,7 @@ pub(crate) fn rav1d_read_coef_blocks<BD: BitDepth>(
             }
         }
     }
-}
-
-enum MaybeTempPixels<'a, TmpStride> {
-    NonTemp {
-        dst: Rav1dPictureDataComponentOffset<'a>,
-    },
-    Temp {
-        tmp: &'a mut [i16],
-        tmp_stride: TmpStride,
-    },
-}
-
-fn mc<BD: BitDepth>(
-    f: &Rav1dFrameData,
-    emu_edge: &mut ScratchEmuEdge,
-    b: Bxy,
-    dst: MaybeTempPixels<()>,
-    bw4: c_int,
-    bh4: c_int,
-    bx: c_int,
-    by: c_int,
-    pl: usize,
-    mv: Mv,
-    refp: &Rav1dThreadPicture,
-    refidx: usize,
-    filter_2d: Filter2d,
-) -> Result<(), ()> {
-    let bd = BD::from_c(f.bitdepth_max);
-    let ref_data = &refp.p.data.as_ref().unwrap().data;
-    let cur_data = &f.cur.data.as_ref().unwrap().data;
-
-    let ss_ver = (pl != 0 && f.cur.p.layout == Rav1dPixelLayout::I420) as c_int;
-    let ss_hor = (pl != 0 && f.cur.p.layout != Rav1dPixelLayout::I444) as c_int;
-    let h_mul = 4 >> ss_hor;
-    let v_mul = 4 >> ss_ver;
-    let mvx = mv.x as c_int;
-    let mvy = mv.y as c_int;
-    let mx = mvx & 15 >> (ss_hor == 0) as c_int;
-    let my = mvy & 15 >> (ss_ver == 0) as c_int;
-
-    if refp.p.p.w == f.cur.p.w && refp.p.p.h == f.cur.p.h {
-        let dx = bx * h_mul + (mvx >> 3 + ss_hor);
-        let dy = by * v_mul + (mvy >> 3 + ss_ver);
-        let w;
-        let h;
-
-        if !ref_data[0].ref_eq(&cur_data[0]) {
-            w = f.cur.p.w + ss_hor >> ss_hor;
-            h = f.cur.p.h + ss_ver >> ss_ver;
-        } else {
-            w = f.bw * 4 >> ss_hor;
-            h = f.bh * 4 >> ss_ver;
-        }
-        let r#ref = if dx < (mx != 0) as c_int * 3
-            || dy < (my != 0) as c_int * 3
-            || dx + bw4 * h_mul + (mx != 0) as c_int * 4 > w
-            || dy + bh4 * v_mul + (my != 0) as c_int * 4 > h
-        {
-            let emu_edge_buf = emu_edge.buf_mut::<BD>();
-            f.dsp.mc.emu_edge.call::<BD>(
-                (bw4 * h_mul + (mx != 0) as c_int * 7) as intptr_t,
-                (bh4 * v_mul + (my != 0) as c_int * 7) as intptr_t,
-                w as intptr_t,
-                h as intptr_t,
-                (dx - (mx != 0) as c_int * 3) as intptr_t,
-                (dy - (my != 0) as c_int * 3) as intptr_t,
-                emu_edge_buf,
-                192,
-                &ref_data[pl],
-            );
-            let stride = 192;
-            Rav1dPictureDataComponentOffset {
-                data: &Rav1dPictureDataComponent::wrap_buf::<BD>(emu_edge_buf, stride),
-                offset: stride * (my != 0) as usize * 3 + (mx != 0) as usize * 3,
-            }
-        } else {
-            let r#ref = &ref_data[pl];
-            r#ref.with_offset::<BD>() + (dy as isize * r#ref.pixel_stride::<BD>()) + dx as usize
-        };
-
-        let w = bw4 * h_mul;
-        let h = bh4 * v_mul;
-        let mx = mx << (ss_hor == 0) as u8;
-        let my = my << (ss_ver == 0) as u8;
-        match dst {
-            MaybeTempPixels::NonTemp { dst } => {
-                f.dsp.mc.mc[filter_2d].call::<BD>(dst, r#ref, w, h, mx, my, bd);
-            }
-            MaybeTempPixels::Temp { tmp, tmp_stride: _ } => {
-                f.dsp.mc.mct[filter_2d].call::<BD>(tmp, r#ref, w, h, mx, my, bd);
-            }
-        }
-    } else {
-        assert!(!ptr::eq(refp, &f.sr_cur));
-
-        let orig_pos_y = (by * v_mul << 4) + mvy * (1 << (ss_ver == 0) as c_int);
-        let orig_pos_x = (bx * h_mul << 4) + mvx * (1 << (ss_hor == 0) as c_int);
-
-        let scale_mv = |val, scale| {
-            let tmp = val as i64 * scale as i64 + ((scale - 0x4000) * 8) as i64;
-            apply_sign64(((tmp.abs() + 128) >> 8) as c_int, tmp) + 32
-        };
-
-        let pos_x = scale_mv(orig_pos_x, f.svc[refidx][0].scale);
-        let pos_y = scale_mv(orig_pos_y, f.svc[refidx][1].scale);
-        let left = pos_x >> 10;
-        let top = pos_y >> 10;
-        let right = (pos_x + (bw4 * h_mul - 1) * (*f).svc[refidx][0].step >> 10) + 1;
-        let bottom = (pos_y + (bh4 * v_mul - 1) * (*f).svc[refidx][1].step >> 10) + 1;
-
-        if debug_block_info!(f, b) {
-            println!(
-                "Off {}x{} [{},{},{}], size {}x{} [{},{}]",
-                left,
-                top,
-                orig_pos_x,
-                f.svc[refidx][0].scale,
-                refidx,
-                right - left,
-                bottom - top,
-                f.svc[refidx][0].step,
-                f.svc[refidx][1].step,
-            );
-        }
-
-        let w = refp.p.p.w + ss_hor >> ss_hor;
-        let h = refp.p.p.h + ss_ver >> ss_ver;
-        let r#ref = if left < 3 || top < 3 || right + 4 > w || bottom + 4 > h {
-            let emu_edge_buf = emu_edge.buf_mut::<BD>();
-            f.dsp.mc.emu_edge.call::<BD>(
-                (right - left + 7) as intptr_t,
-                (bottom - top + 7) as intptr_t,
-                w as intptr_t,
-                h as intptr_t,
-                (left - 3) as intptr_t,
-                (top - 3) as intptr_t,
-                emu_edge_buf,
-                320,
-                &ref_data[pl],
-            );
-            if debug_block_info!(f, b) {
-                println!("Emu");
-            }
-            let stride = 320;
-            Rav1dPictureDataComponentOffset {
-                data: &Rav1dPictureDataComponent::wrap_buf::<BD>(emu_edge_buf, stride),
-                offset: stride * 3 + 3,
-            }
-        } else {
-            let r#ref = &ref_data[pl];
-            r#ref.with_offset::<BD>() + (top as isize * r#ref.pixel_stride::<BD>()) + left as isize
-        };
-
-        let w = bw4 * h_mul;
-        let h = bh4 * v_mul;
-        let mx = pos_x & 0x3ff;
-        let my = pos_y & 0x3ff;
-        let dx = f.svc[refidx][0].step;
-        let dy = f.svc[refidx][1].step;
-        match dst {
-            MaybeTempPixels::NonTemp { dst } => {
-                f.dsp.mc.mc_scaled[filter_2d].call::<BD>(dst, r#ref, w, h, mx, my, dx, dy, bd);
-            }
-            MaybeTempPixels::Temp { tmp, tmp_stride: _ } => {
-                f.dsp.mc.mct_scaled[filter_2d].call::<BD>(tmp, r#ref, w, h, mx, my, dx, dy, bd);
-            }
-        }
-    }
-
     Ok(())
-}
-
-fn obmc<BD: BitDepth>(
-    f: &Rav1dFrameData,
-    t: &mut Rav1dTaskContext,
-    dst: Rav1dPictureDataComponentOffset,
-    b_dim: &[u8; 4],
-    pl: usize,
-    bx4: c_int,
-    by4: c_int,
-    w4: c_int,
-    h4: c_int,
-) -> Result<(), ()> {
-    assert!(t.b.x & 1 == 0 && t.b.y & 1 == 0);
-    let r = &t.rt.r[(t.b.y as usize & 31) + 5 - 1..];
-    let scratch = t.scratch.inter_mut();
-    let lap = scratch.lap_inter.lap_mut::<BD>();
-    let ss_ver = (pl != 0 && f.cur.p.layout == Rav1dPixelLayout::I420) as c_int;
-    let ss_hor = (pl != 0 && f.cur.p.layout != Rav1dPixelLayout::I444) as c_int;
-    let h_mul = 4 >> ss_hor;
-    let v_mul = 4 >> ss_ver;
-    let ts = &f.ts[t.ts];
-
-    if t.b.y > ts.tiling.row_start
-        && (pl == 0 || b_dim[0] as c_int * h_mul + b_dim[1] as c_int * v_mul >= 16)
-    {
-        let mut i = 0;
-        let mut x = 0;
-        while x < w4 && i < cmp::min(b_dim[2], 4) {
-            // only odd blocks are considered for overlap handling, hence +1
-            let a_r = *f.rf.r.index(r[0] + t.b.x as usize + x as usize + 1);
-            let a_b_dim = a_r.bs.dimensions();
-            let step4 = clip(a_b_dim[0], 2, 16);
-
-            if a_r.r#ref.r#ref[0] > 0 {
-                let ow4 = cmp::min(step4, b_dim[0]);
-                let oh4 = cmp::min(b_dim[1], 16) >> 1;
-                mc::<BD>(
-                    f,
-                    &mut scratch.emu_edge,
-                    t.b,
-                    MaybeTempPixels::NonTemp {
-                        dst: Rav1dPictureDataComponentOffset {
-                            data: &Rav1dPictureDataComponent::wrap_buf::<BD>(
-                                lap,
-                                ow4 as usize * h_mul as usize,
-                            ),
-                            offset: 0,
-                        },
-                    },
-                    ow4 as c_int,
-                    oh4 as c_int * 3 + 3 >> 2,
-                    t.b.x + x,
-                    t.b.y,
-                    pl,
-                    a_r.mv.mv[0],
-                    &f.refp[a_r.r#ref.r#ref[0] as usize - 1],
-                    a_r.r#ref.r#ref[0] as usize - 1,
-                    DAV1D_FILTER_2D[*f.a[t.a].filter[1].index((bx4 + x + 1) as usize) as usize]
-                        [*f.a[t.a].filter[0].index((bx4 + x + 1) as usize) as usize],
-                )?;
-                f.dsp.mc.blend_h.call::<BD>(
-                    dst + (x * h_mul) as usize,
-                    lap,
-                    h_mul * ow4 as c_int,
-                    v_mul * oh4 as c_int,
-                );
-                i += 1;
-            }
-            x += step4 as c_int;
-        }
-    }
-
-    if t.b.x > ts.tiling.col_start {
-        let mut i = 0;
-        let mut y = 0;
-        while y < h4 && i < cmp::min(b_dim[3], 4) {
-            // only odd blocks are considered for overlap handling, hence +1
-            let l_r = *f.rf.r.index(r[y as usize + 1 + 1] + t.b.x as usize - 1);
-            let l_b_dim = l_r.bs.dimensions();
-            let step4 = clip(l_b_dim[1], 2, 16);
-
-            if l_r.r#ref.r#ref[0] > 0 {
-                let ow4 = cmp::min(b_dim[0], 16) >> 1;
-                let oh4 = cmp::min(step4, b_dim[1]);
-                mc::<BD>(
-                    f,
-                    &mut scratch.emu_edge,
-                    t.b,
-                    MaybeTempPixels::NonTemp {
-                        dst: Rav1dPictureDataComponentOffset {
-                            data: &Rav1dPictureDataComponent::wrap_buf::<BD>(
-                                lap,
-                                ow4 as usize * h_mul as usize,
-                            ),
-                            offset: 0,
-                        },
-                    },
-                    ow4 as c_int,
-                    oh4 as c_int,
-                    t.b.x,
-                    t.b.y + y,
-                    pl,
-                    l_r.mv.mv[0],
-                    &f.refp[l_r.r#ref.r#ref[0] as usize - 1],
-                    l_r.r#ref.r#ref[0] as usize - 1,
-                    DAV1D_FILTER_2D[*t.l.filter[1].index((by4 + y + 1) as usize) as usize]
-                        [*t.l.filter[0].index((by4 + y + 1) as usize) as usize],
-                )?;
-                f.dsp.mc.blend_v.call::<BD>(
-                    dst + (y * v_mul) as isize * dst.pixel_stride::<BD>(),
-                    lap,
-                    h_mul * ow4 as c_int,
-                    v_mul * oh4 as c_int,
-                );
-                i += 1;
-            }
-            y += step4 as c_int;
-        }
-    }
-    Ok(())
-}
-
-fn warp_affine<BD: BitDepth>(
-    f: &Rav1dFrameData,
-    emu_edge: &mut ScratchEmuEdge,
-    b: Bxy,
-    mut dst: MaybeTempPixels<usize>,
-    b_dim: &[u8; 4],
-    pl: usize,
-    refp: &Rav1dThreadPicture,
-    wmp: &Rav1dWarpedMotionParams,
-) -> Result<(), ()> {
-    let abcd = &wmp.abcd.get();
-    let bd = BD::from_c(f.bitdepth_max);
-    let ref_data = &refp.p.data.as_ref().unwrap().data;
-
-    let ss_ver = (pl != 0 && f.cur.p.layout == Rav1dPixelLayout::I420) as c_int;
-    let ss_hor = (pl != 0 && f.cur.p.layout != Rav1dPixelLayout::I444) as c_int;
-    let h_mul = 4 >> ss_hor;
-    let v_mul = 4 >> ss_ver;
-    assert!(b_dim[0] as c_int * h_mul & 7 == 0 && b_dim[1] as c_int * v_mul & 7 == 0);
-    let mat = &wmp.matrix;
-    let width = refp.p.p.w + ss_hor >> ss_hor;
-    let height = refp.p.p.h + ss_ver >> ss_ver;
-
-    for y in (0..b_dim[1] as c_int * v_mul).step_by(8) {
-        let src_y = b.y * 4 + ((y + 4) << ss_ver);
-        let mat3_y = mat[3] as i64 * src_y as i64 + mat[0] as i64;
-        let mat5_y = mat[5] as i64 * src_y as i64 + mat[1] as i64;
-        for x in (0..b_dim[0] as c_int * h_mul).step_by(8) {
-            // Calculate transformation relative to
-            // center of 8x8 block in luma pixel units.
-            let src_x = b.x * 4 + ((x + 4) << ss_hor);
-            let mvx = mat[2] as i64 * src_x as i64 + mat3_y >> ss_hor;
-            let mvy = mat[4] as i64 * src_x as i64 + mat5_y >> ss_ver;
-
-            let dx = (mvx >> 16) as i32 - 4;
-            let mx = (mvx as i32 & 0xffff) - wmp.alpha() as i32 * 4 - wmp.beta() as i32 * 7 & !0x3f;
-
-            let dy = (mvy >> 16) as i32 - 4;
-            let my =
-                (mvy as i32 & 0xffff) - wmp.gamma() as i32 * 4 - wmp.delta() as i32 * 4 & !0x3f;
-
-            let r#ref = if dx < 3 || dx + 8 + 4 > width || dy < 3 || dy + 8 + 4 > height {
-                let emu_edge_buf = emu_edge.buf_mut::<BD>();
-                f.dsp.mc.emu_edge.call::<BD>(
-                    15,
-                    15,
-                    width as intptr_t,
-                    height as intptr_t,
-                    (dx - 3) as intptr_t,
-                    (dy - 3) as intptr_t,
-                    emu_edge_buf,
-                    32,
-                    &ref_data[pl],
-                );
-                let stride = 32;
-                Rav1dPictureDataComponentOffset {
-                    data: &Rav1dPictureDataComponent::wrap_buf::<BD>(emu_edge_buf, stride),
-                    offset: stride * 3 + 3,
-                }
-            } else {
-                let r#ref = &ref_data[pl];
-                r#ref.with_offset::<BD>() + (dy as isize * r#ref.pixel_stride::<BD>()) + dx as usize
-            };
-            let x = x as usize;
-            match dst {
-                MaybeTempPixels::Temp {
-                    ref mut tmp,
-                    tmp_stride,
-                } => {
-                    f.dsp
-                        .mc
-                        .warp8x8t
-                        .call(&mut tmp[x..], tmp_stride, r#ref, abcd, mx, my, bd);
-                }
-                MaybeTempPixels::NonTemp { dst } => {
-                    f.dsp.mc.warp8x8.call(dst + x, r#ref, abcd, mx, my, bd);
-                }
-            }
-        }
-        dst = match dst {
-            MaybeTempPixels::NonTemp { dst } => MaybeTempPixels::NonTemp {
-                dst: dst + 8 * dst.pixel_stride::<BD>(),
-            },
-            MaybeTempPixels::Temp { tmp, tmp_stride } => MaybeTempPixels::Temp {
-                tmp: &mut tmp[8 * tmp_stride..],
-                tmp_stride,
-            },
-        };
-    }
-    Ok(())
-}
-
-pub(crate) fn rav1d_recon_b_intra<BD: BitDepth>(
-    f: &Rav1dFrameData,
-    t: &mut Rav1dTaskContext,
-    mut ts_c: Option<&mut Rav1dTileStateContext>,
-    bs: BlockSize,
-    intra_edge_flags: EdgeFlags,
-    b: &Av1Block,
-    intra: &Av1BlockIntra,
-) {
-    let bd = BD::from_c(f.bitdepth_max);
-    let cur_data = &f.cur.data.as_ref().unwrap().data;
-    let ts = &f.ts[t.ts];
-
-    let bx4 = t.b.x & 31;
-    let by4 = t.b.y & 31;
-    let ss_ver = (f.cur.p.layout == Rav1dPixelLayout::I420) as c_int;
-    let ss_hor = (f.cur.p.layout != Rav1dPixelLayout::I444) as c_int;
-    let cbx4 = bx4 >> ss_hor;
-    let cby4 = by4 >> ss_ver;
-    let b_dim = bs.dimensions();
-    let bw4 = b_dim[0] as c_int;
-    let bh4 = b_dim[1] as c_int;
-    let w4 = cmp::min(bw4, f.bw - t.b.x);
-    let h4 = cmp::min(bh4, f.bh - t.b.y);
-    let cw4 = w4 + ss_hor >> ss_hor;
-    let ch4 = h4 + ss_ver >> ss_ver;
-    let has_chroma = f.cur.p.layout != Rav1dPixelLayout::I400
-        && (bw4 > ss_hor || t.b.x & 1 != 0)
-        && (bh4 > ss_ver || t.b.y & 1 != 0);
-    let t_dim = &DAV1D_TXFM_DIMENSIONS[intra.tx as usize];
-    let uv_t_dim = &DAV1D_TXFM_DIMENSIONS[b.uvtx as usize];
-
-    // coefficient coding
-    let cbw4 = bw4 + ss_hor >> ss_hor;
-    let cbh4 = bh4 + ss_ver >> ss_ver;
-
-    let intra_edge_filter = f.seq_hdr.as_ref().unwrap().intra_edge_filter;
-    let intra_edge_filter_flag = (intra_edge_filter as c_int) << 10;
-
-    for init_y in (0..h4).step_by(16) {
-        let sub_h4 = cmp::min(h4, 16 + init_y);
-        let sub_ch4 = cmp::min(ch4, init_y + 16 >> ss_ver);
-        for init_x in (0..w4).step_by(16) {
-            if intra.pal_sz[0] != 0 {
-                let y_dst = &cur_data[0];
-                let y_dst = y_dst.with_offset::<BD>()
-                    + 4 * (t.b.y as isize * y_dst.pixel_stride::<BD>() + t.b.x as isize);
-                let scratch = t.scratch.inter_intra_mut();
-                let pal_idx = if t.frame_thread.pass != 0 {
-                    let p = (t.frame_thread.pass & 1) as usize;
-                    let frame_thread = &ts.frame_thread[p];
-                    let len = (bw4 * bh4 * 8) as u32;
-                    let pal_idx = frame_thread.pal_idx.get_update(|i| i + len);
-                    &*f.frame_thread
-                        .pal_idx
-                        .index((pal_idx as usize.., ..len as usize))
-                } else {
-                    &scratch.pal_idx_y
-                };
-                let pal = if t.frame_thread.pass != 0 {
-                    let x = t.b.x as usize;
-                    let y = t.b.y as usize;
-                    let index =
-                        ((y >> 1) + (x & 1)) * (f.b4_stride as usize >> 1) + (x >> 1) + (y & 1);
-                    &*f.frame_thread.pal.index::<BD>(index)
-                } else {
-                    scratch.interintra_edge_pal.pal.buf::<BD>()
-                };
-                f.dsp
-                    .ipred
-                    .pal_pred
-                    .call::<BD>(y_dst, &pal[0], pal_idx, bw4 * 4, bh4 * 4);
-                if debug_block_info!(f, t.b) && DEBUG_B_PIXELS {
-                    hex_dump_pic::<BD>(y_dst, bw4 as usize * 4, bh4 as usize * 4, "y-pal-pred");
-                }
-            }
-
-            let intra_flags = sm_flag(&f.a[t.a], bx4 as usize)
-                | sm_flag(&mut t.l, by4 as usize)
-                | intra_edge_filter_flag;
-            let sb_has_tr = if (init_x + 16) < w4 {
-                true
-            } else if init_y != 0 {
-                false
-            } else {
-                intra_edge_flags.contains(EdgeFlags::I444_TOP_HAS_RIGHT)
-            };
-            let sb_has_bl = if init_x != 0 {
-                false
-            } else if (init_y + 16) < h4 {
-                true
-            } else {
-                intra_edge_flags.contains(EdgeFlags::I444_LEFT_HAS_BOTTOM)
-            };
-            let mut y;
-            let mut x;
-            let sub_w4 = cmp::min(w4, init_x + 16);
-            y = init_y;
-            t.b.y += init_y;
-            while y < sub_h4 {
-                let y_dst = &cur_data[0];
-                let mut y_dst = y_dst.with_offset::<BD>()
-                    + 4 * (t.b.y as isize * y_dst.pixel_stride::<BD>()
-                        + t.b.x as isize
-                        + init_x as isize);
-                x = init_x;
-                t.b.x += init_x;
-                while x < sub_w4 {
-                    let mut angle;
-                    let edge_flags;
-                    let m;
-                    if !(intra.pal_sz[0] != 0) {
-                        angle = intra.y_angle as c_int;
-                        edge_flags = EdgeFlags::union_all([
-                            EdgeFlags::I444_TOP_HAS_RIGHT.select(
-                                !((y > init_y || !sb_has_tr) && x + t_dim.w as c_int >= sub_w4),
-                            ),
-                            EdgeFlags::I444_LEFT_HAS_BOTTOM.select(
-                                !(x > init_x || (!sb_has_bl && y + t_dim.h as c_int >= sub_h4)),
-                            ),
-                        ]);
-                        let top_sb_edge_slice = if t.b.y & f.sb_step - 1 == 0 {
-                            let sby = t.b.y >> f.sb_shift;
-                            let offset = f.ipred_edge_off as isize * 0
-                                + (f.sb128w * 128 * (sby - 1)) as isize;
-                            Some((&f.ipred_edge, offset))
-                        } else {
-                            None
-                        };
-                        let edge_array = t
-                            .scratch
-                            .inter_intra_mut()
-                            .interintra_edge_pal
-                            .edge
-                            .buf_mut::<BD>();
-                        let edge_offset = 128;
-                        m = rav1d_prepare_intra_edges(
-                            t.b.x,
-                            t.b.x > ts.tiling.col_start,
-                            t.b.y,
-                            t.b.y > ts.tiling.row_start,
-                            ts.tiling.col_end,
-                            ts.tiling.row_end,
-                            edge_flags,
-                            y_dst,
-                            top_sb_edge_slice,
-                            intra.y_mode as IntraPredMode,
-                            &mut angle,
-                            t_dim.w as c_int,
-                            t_dim.h as c_int,
-                            intra_edge_filter,
-                            edge_array,
-                            edge_offset,
-                            bd,
-                        );
-                        f.dsp.ipred.intra_pred[m as usize].call(
-                            y_dst,
-                            edge_array,
-                            edge_offset,
-                            t_dim.w as c_int * 4,
-                            t_dim.h as c_int * 4,
-                            angle | intra_flags,
-                            4 * f.bw - 4 * t.b.x,
-                            4 * f.bh - 4 * t.b.y,
-                            bd,
-                        );
-
-                        if debug_block_info!(f, t.b) && DEBUG_B_PIXELS {
-                            hex_dump::<BD>(
-                                &edge_array[edge_offset - t_dim.h as usize * 4..],
-                                t_dim.h as usize * 4,
-                                t_dim.h as usize * 4,
-                                2,
-                                "l",
-                            );
-                            hex_dump::<BD>(&edge_array[edge_offset..], 0, 1, 1, "tl");
-                            hex_dump::<BD>(
-                                &edge_array[edge_offset + 1..],
-                                t_dim.w as usize * 4,
-                                t_dim.w as usize * 4,
-                                2,
-                                "t",
-                            );
-                            hex_dump_pic::<BD>(
-                                y_dst,
-                                t_dim.w as usize * 4,
-                                t_dim.h as usize * 4,
-                                "y-intra-pred",
-                            );
-                        }
-                    }
-
-                    if b.skip == 0 {
-                        let mut cf_guard;
-                        let cf;
-                        let eob;
-                        let mut txtp = DCT_DCT;
-                        if t.frame_thread.pass != 0 {
-                            let p = (t.frame_thread.pass & 1) as usize;
-                            let len =
-                                cmp::min(t_dim.h, 8) as u32 * 4 * cmp::min(t_dim.w, 8) as u32 * 4;
-                            let cf_idx = ts.frame_thread[p].cf.get_update(|i| i + len);
-                            cf_guard = f
-                                .frame_thread
-                                .cf
-                                .mut_slice_as((cf_idx as usize.., ..len as usize));
-                            cf = &mut *cf_guard;
-                            let cbi_idx = ts.frame_thread[p].cbi_idx.get_update(|i| i + 1);
-                            let cbi = f.frame_thread.cbi[cbi_idx as usize].get();
-                            eob = cbi.eob().into();
-                            txtp = cbi.txtp();
-                        } else {
-                            let mut cf_ctx = 0;
-                            let a_start = (bx4 + x) as usize;
-                            let l_start = (by4 + y) as usize;
-                            eob = decode_coefs::<BD>(
-                                f,
-                                t.ts,
-                                ts_c.as_deref_mut().unwrap(),
-                                debug_block_info!(f, t.b),
-                                &mut t.scratch,
-                                &mut t.cf,
-                                &mut f.a[t.a]
-                                    .lcoef
-                                    .index_mut(a_start..a_start + t_dim.w as usize),
-                                &mut t.l.lcoef.index_mut(l_start..l_start + t_dim.h as usize),
-                                intra.tx,
-                                bs,
-                                b,
-                                0,
-                                CfSelect::Task,
-                                &mut txtp,
-                                &mut cf_ctx,
-                            );
-                            cf = t.cf.select_mut::<BD>();
-                            if debug_block_info!(f, t.b) {
-                                println!(
-                                    "Post-y-cf-blk[tx={:?},txtp={},eob={}]: r={}",
-                                    intra.tx,
-                                    txtp,
-                                    eob,
-                                    ts_c.as_deref().unwrap().msac.rng,
-                                );
-                            }
-                            CaseSet::<16, true>::many(
-                                [&t.l, &f.a[t.a]],
-                                [
-                                    cmp::min(t_dim.h as i32, f.bh - t.b.y) as usize,
-                                    cmp::min(t_dim.w as i32, f.bw - t.b.x) as usize,
-                                ],
-                                [(by4 + y) as usize, (bx4 + x) as usize],
-                                |case, dir| {
-                                    case.set_disjoint(&dir.lcoef, cf_ctx);
-                                },
-                            );
-                        }
-                        if eob >= 0 {
-                            if debug_block_info!(f, t.b) && DEBUG_B_PIXELS {
-                                coef_dump(
-                                    cf,
-                                    cmp::min(t_dim.h as usize, 8) * 4,
-                                    cmp::min(t_dim.w as usize, 8) * 4,
-                                    3,
-                                    "dq",
-                                );
-                            }
-                            f.dsp.itx.itxfm_add[intra.tx as usize][txtp as usize]
-                                .call::<BD>(y_dst, cf, eob, bd);
-                            if debug_block_info!(f, t.b) && DEBUG_B_PIXELS {
-                                hex_dump_pic::<BD>(
-                                    y_dst,
-                                    t_dim.w as usize * 4,
-                                    t_dim.h as usize * 4,
-                                    "recon",
-                                );
-                            }
-                        }
-                    } else if t.frame_thread.pass == 0 {
-                        CaseSet::<16, false>::many(
-                            [&t.l, &f.a[t.a]],
-                            [t_dim.h as usize, t_dim.w as usize],
-                            [(by4 + y) as usize, (bx4 + x) as usize],
-                            |case, dir| {
-                                case.set_disjoint(&dir.lcoef, 0x40);
-                            },
-                        );
-                    }
-                    y_dst += 4 * t_dim.w as usize;
-                    x += t_dim.w as c_int;
-                    t.b.x += t_dim.w as c_int;
-                }
-                t.b.x -= x;
-                y += t_dim.h as c_int;
-                t.b.y += t_dim.h as c_int;
-            }
-            t.b.y -= y;
-
-            if !has_chroma {
-                continue;
-            }
-
-            let stride = f.cur.stride[1];
-
-            if intra.uv_mode == CFL_PRED {
-                assert!(init_x == 0 && init_y == 0);
-
-                let scratch = t.scratch.inter_intra_mut();
-                let ac = scratch.ac_txtp_map.ac_mut();
-                let y_src = &cur_data[0];
-                let y_src = y_src.with_offset::<BD>()
-                    + 4 * (t.b.x & !ss_hor) as usize
-                    + 4 * (t.b.y & !ss_ver) as isize * y_src.pixel_stride::<BD>();
-                let uv_off = 4
-                    * ((t.b.x >> ss_hor) as isize
-                        + (t.b.y >> ss_ver) as isize * BD::pxstride(stride));
-
-                let furthest_r = (cw4 << ss_hor) + t_dim.w as c_int - 1 & !(t_dim.w as c_int - 1);
-                let furthest_b = (ch4 << ss_ver) + t_dim.h as c_int - 1 & !(t_dim.h as c_int - 1);
-                let layout = f.cur.p.layout.try_into().unwrap();
-                f.dsp.ipred.cfl_ac[layout].call::<BD>(
-                    ac,
-                    y_src,
-                    cbw4 - (furthest_r >> ss_hor),
-                    cbh4 - (furthest_b >> ss_ver),
-                    cbw4 * 4,
-                    cbh4 * 4,
-                );
-                for pl in 0..2 {
-                    if intra.cfl_alpha[pl] == 0 {
-                        continue;
-                    }
-                    let mut angle = 0;
-                    let top_sb_edge_slice = if t.b.y & !ss_ver & f.sb_step - 1 == 0 {
-                        let sby = t.b.y >> f.sb_shift;
-                        let offset = (f.ipred_edge_off * (pl + 1)) as isize
-                            + (f.sb128w * 128 * (sby - 1)) as isize;
-                        Some((&f.ipred_edge, offset))
-                    } else {
-                        None
-                    };
-                    let xpos = t.b.x >> ss_hor;
-                    let ypos = t.b.y >> ss_ver;
-                    let xstart = ts.tiling.col_start >> ss_hor;
-                    let ystart = ts.tiling.row_start >> ss_ver;
-                    let edge_array = scratch.interintra_edge_pal.edge.buf_mut::<BD>();
-                    let edge_offset = 128;
-                    let uv_dst = &cur_data[1 + pl];
-                    let uv_dst = uv_dst.with_offset::<BD>()
-                        + 4 * ((t.b.x >> ss_hor) as isize
-                            + (t.b.y >> ss_ver) as isize * uv_dst.pixel_stride::<BD>());
-                    let m: IntraPredMode = rav1d_prepare_intra_edges(
-                        xpos,
-                        xpos > xstart,
-                        ypos,
-                        ypos > ystart,
-                        ts.tiling.col_end >> ss_hor,
-                        ts.tiling.row_end >> ss_ver,
-                        EdgeFlags::empty(),
-                        uv_dst,
-                        top_sb_edge_slice,
-                        DC_PRED,
-                        &mut angle,
-                        uv_t_dim.w as c_int,
-                        uv_t_dim.h as c_int,
-                        0,
-                        edge_array,
-                        edge_offset,
-                        bd,
-                    );
-                    f.dsp.ipred.cfl_pred[m as usize].call(
-                        uv_dst,
-                        edge_array,
-                        edge_offset,
-                        uv_t_dim.w as c_int * 4,
-                        uv_t_dim.h as c_int * 4,
-                        ac,
-                        intra.cfl_alpha[pl] as c_int,
-                        bd,
-                    );
-                }
-                if debug_block_info!(&*f, t.b) && DEBUG_B_PIXELS {
-                    ac_dump(ac, 4 * cbw4 as usize, 4 * cbh4 as usize, "ac");
-                    for pl in 1..3 {
-                        let uv_dst = cur_data[pl].with_offset::<BD>() + uv_off;
-                        hex_dump_pic::<BD>(
-                            uv_dst,
-                            cbw4 as usize * 4,
-                            cbh4 as usize * 4,
-                            ["", "u-cfl-pred", "v-cfl-pred"][pl],
-                        );
-                    }
-                }
-            } else if intra.pal_sz[1] != 0 {
-                let uv_dstoff = 4
-                    * ((t.b.x >> ss_hor) as isize
-                        + (t.b.y >> ss_ver) as isize * BD::pxstride(f.cur.stride[1]));
-                let (pal, pal_idx) = if t.frame_thread.pass != 0 {
-                    let p = (t.frame_thread.pass & 1) as usize;
-                    let x = t.b.x as usize;
-                    let y = t.b.y as usize;
-                    let index =
-                        ((y >> 1) + (x & 1)) * (f.b4_stride as usize >> 1) + (x >> 1) + (y & 1);
-                    let len = (cbw4 * cbh4 * 8) as u32;
-                    let pal_idx_offset = ts.frame_thread[p].pal_idx.get_update(|i| i + len);
-                    (
-                        &*f.frame_thread.pal.index::<BD>(index),
-                        &*f.frame_thread
-                            .pal_idx
-                            .index((pal_idx_offset as usize.., ..len as usize)),
-                    )
-                } else {
-                    let scratch = t.scratch.inter_intra_mut();
-                    (
-                        scratch.interintra_edge_pal.pal.buf::<BD>(),
-                        scratch.pal_idx_uv.as_slice(),
-                    )
-                };
-
-                for pl in 1..3 {
-                    let uv = cur_data[pl].with_offset::<BD>() + uv_dstoff;
-                    f.dsp
-                        .ipred
-                        .pal_pred
-                        .call::<BD>(uv, &pal[pl], pal_idx, cbw4 * 4, cbh4 * 4);
-                    if debug_block_info!(f, t.b) && DEBUG_B_PIXELS {
-                        hex_dump_pic::<BD>(
-                            uv,
-                            cbw4 as usize * 4,
-                            cbh4 as usize * 4,
-                            ["", "u-pal-pred", "v-pal-pred"][pl],
-                        );
-                    }
-                }
-            }
-
-            let sm_uv_fl =
-                sm_uv_flag(&f.a[t.a], cbx4 as usize) | sm_uv_flag(&mut t.l, cby4 as usize);
-            let uv_sb_has_tr = if init_x + 16 >> ss_hor < cw4 {
-                true
-            } else if init_y != 0 {
-                false
-            } else {
-                intra_edge_flags.contains(EdgeFlags::I420_TOP_HAS_RIGHT >> f.cur.p.layout)
-            };
-            let uv_sb_has_bl = if init_x != 0 {
-                false
-            } else if init_y + 16 >> ss_ver < ch4 {
-                true
-            } else {
-                intra_edge_flags.contains(EdgeFlags::I420_LEFT_HAS_BOTTOM >> f.cur.p.layout)
-            };
-            let sub_cw4 = cmp::min(cw4, init_x + 16 >> ss_hor);
-            for pl in 0..2 {
-                y = init_y >> ss_ver;
-                t.b.y += init_y;
-                while y < sub_ch4 {
-                    let uv_dst = &cur_data[1 + pl];
-                    let mut uv_dst = uv_dst.with_offset::<BD>()
-                        + 4 * ((t.b.y >> ss_ver) as isize * uv_dst.pixel_stride::<BD>()
-                            + (t.b.x + init_x >> ss_hor) as isize);
-                    x = init_x >> ss_hor;
-                    t.b.x += init_x;
-                    while x < sub_cw4 {
-                        let mut angle;
-                        let edge_flags;
-                        let uv_mode;
-                        let xpos;
-                        let ypos;
-                        let xstart;
-                        let ystart;
-                        let m;
-                        if !(intra.uv_mode == CFL_PRED && intra.cfl_alpha[pl] != 0
-                            || intra.pal_sz[1] != 0)
-                        {
-                            angle = intra.uv_angle as c_int;
-                            // This probably looks weird because we're using
-                            // luma flags in a chroma loop, but that's because
-                            // `rav1d_prepare_intra_edges` expects luma flags as input.
-                            edge_flags = EdgeFlags::I444_TOP_HAS_RIGHT.select(
-                                !((y > init_y >> ss_ver || !uv_sb_has_tr)
-                                    && x + uv_t_dim.w as c_int >= sub_cw4),
-                            ) | EdgeFlags::I444_LEFT_HAS_BOTTOM.select(
-                                !(x > init_x >> ss_hor
-                                    || !uv_sb_has_bl && y + uv_t_dim.h as c_int >= sub_ch4),
-                            );
-                            let top_sb_edge_slice = if t.b.y & !ss_ver & f.sb_step - 1 == 0 {
-                                let sby = t.b.y >> f.sb_shift;
-                                let offset = (f.ipred_edge_off * (1 + pl)) as isize
-                                    + (f.sb128w * 128 * (sby - 1)) as isize;
-                                Some((&f.ipred_edge, offset))
-                            } else {
-                                None
-                            };
-                            uv_mode = if intra.uv_mode == CFL_PRED {
-                                DC_PRED
-                            } else {
-                                intra.uv_mode
-                            };
-                            xpos = t.b.x >> ss_hor;
-                            ypos = t.b.y >> ss_ver;
-                            xstart = ts.tiling.col_start >> ss_hor;
-                            ystart = ts.tiling.row_start >> ss_ver;
-                            let edge_array = t
-                                .scratch
-                                .inter_intra_mut()
-                                .interintra_edge_pal
-                                .edge
-                                .buf_mut::<BD>();
-                            let edge_offset = 128;
-                            m = rav1d_prepare_intra_edges(
-                                xpos,
-                                xpos > xstart,
-                                ypos,
-                                ypos > ystart,
-                                ts.tiling.col_end >> ss_hor,
-                                ts.tiling.row_end >> ss_ver,
-                                edge_flags,
-                                uv_dst,
-                                top_sb_edge_slice,
-                                uv_mode,
-                                &mut angle,
-                                uv_t_dim.w as c_int,
-                                uv_t_dim.h as c_int,
-                                intra_edge_filter,
-                                edge_array,
-                                edge_offset,
-                                bd,
-                            );
-                            angle |= intra_edge_filter_flag;
-                            f.dsp.ipred.intra_pred[m as usize].call(
-                                uv_dst,
-                                edge_array,
-                                edge_offset,
-                                uv_t_dim.w as c_int * 4,
-                                uv_t_dim.h as c_int * 4,
-                                angle | sm_uv_fl,
-                                4 * f.bw + ss_hor - 4 * (t.b.x & !ss_hor) >> ss_hor,
-                                4 * f.bh + ss_ver - 4 * (t.b.y & !ss_ver) >> ss_ver,
-                                bd,
-                            );
-                            if debug_block_info!(f, t.b) && DEBUG_B_PIXELS {
-                                hex_dump::<BD>(
-                                    &edge_array[edge_offset - uv_t_dim.h as usize * 4..],
-                                    uv_t_dim.h as usize * 4,
-                                    uv_t_dim.h as usize * 4,
-                                    2,
-                                    "l",
-                                );
-                                hex_dump::<BD>(&edge_array[edge_offset..], 0, 1, 1, "tl");
-                                hex_dump::<BD>(
-                                    &edge_array[edge_offset + 1..],
-                                    uv_t_dim.w as usize * 4,
-                                    uv_t_dim.w as usize * 4,
-                                    2,
-                                    "t",
-                                );
-                                hex_dump_pic::<BD>(
-                                    uv_dst,
-                                    uv_t_dim.w as usize * 4,
-                                    uv_t_dim.h as usize * 4,
-                                    ["u-intra-pred", "v-intra-pred"][pl],
-                                );
-                            }
-                        }
-
-                        if b.skip == 0 {
-                            let mut txtp = DCT_DCT;
-                            let eob;
-                            let mut cf_guard;
-                            let cf;
-                            if t.frame_thread.pass != 0 {
-                                let p = (t.frame_thread.pass & 1) as usize;
-                                let len = uv_t_dim.w as u32 * 4 * uv_t_dim.h as u32 * 4;
-                                let cf_idx = ts.frame_thread[p].cf.get_update(|i| i + len);
-                                cf_guard = f
-                                    .frame_thread
-                                    .cf
-                                    .mut_slice_as((cf_idx as usize.., ..len as usize));
-                                cf = &mut *cf_guard;
-                                let cbi_idx = ts.frame_thread[p].cbi_idx.get_update(|i| i + 1);
-                                let cbi = f.frame_thread.cbi[cbi_idx as usize].get();
-                                eob = cbi.eob().into();
-                                txtp = cbi.txtp();
-                            } else {
-                                let mut cf_ctx: u8 = 0;
-                                let a_start = (cbx4 + x) as usize;
-                                let a_ccoef = &f.a[t.a].ccoef[pl];
-                                let l_start = (cby4 + y) as usize;
-                                let l_ccoef = &t.l.ccoef[pl];
-                                eob = decode_coefs::<BD>(
-                                    f,
-                                    t.ts,
-                                    ts_c.as_deref_mut().unwrap(),
-                                    debug_block_info!(f, t.b),
-                                    &mut t.scratch,
-                                    &mut t.cf,
-                                    &mut a_ccoef.index_mut(a_start..a_start + uv_t_dim.w as usize),
-                                    &mut l_ccoef.index_mut(l_start..l_start + uv_t_dim.h as usize),
-                                    b.uvtx,
-                                    bs,
-                                    b,
-                                    1 + pl,
-                                    CfSelect::Task,
-                                    &mut txtp,
-                                    &mut cf_ctx,
-                                );
-                                cf = t.cf.select_mut::<BD>();
-                                if debug_block_info!(f, t.b) {
-                                    println!(
-                                            "Post-uv-cf-blk[pl={},tx={:?},txtp={},eob={}]: r={} [x={},cbx4={}]",
-                                            pl,
-                                            b.uvtx,
-                                            txtp,
-                                            eob,
-                                            ts_c.as_deref().unwrap().msac.rng,
-                                            x,
-                                            cbx4,
-                                        );
-                                }
-                                CaseSet::<16, true>::many(
-                                    [l_ccoef, a_ccoef],
-                                    [
-                                        cmp::min(uv_t_dim.h as i32, f.bh - t.b.y + ss_ver >> ss_ver)
-                                            as usize,
-                                        cmp::min(uv_t_dim.w as i32, f.bw - t.b.x + ss_hor >> ss_hor)
-                                            as usize,
-                                    ],
-                                    [(cby4 + y) as usize, (cbx4 + x) as usize],
-                                    |case, dir| {
-                                        case.set_disjoint(dir, cf_ctx);
-                                    },
-                                );
-                            }
-                            if eob >= 0 {
-                                if debug_block_info!(f, t.b) && DEBUG_B_PIXELS {
-                                    coef_dump(
-                                        cf,
-                                        uv_t_dim.h as usize * 4,
-                                        uv_t_dim.w as usize * 4,
-                                        3,
-                                        "dq",
-                                    );
-                                }
-                                f.dsp.itx.itxfm_add[b.uvtx as usize][txtp as usize]
-                                    .call::<BD>(uv_dst, cf, eob, bd);
-                                if debug_block_info!(f, t.b) && DEBUG_B_PIXELS {
-                                    hex_dump_pic::<BD>(
-                                        uv_dst,
-                                        uv_t_dim.w as usize * 4,
-                                        uv_t_dim.h as usize * 4,
-                                        "recon",
-                                    );
-                                }
-                            }
-                        } else if t.frame_thread.pass == 0 {
-                            CaseSet::<16, false>::many(
-                                [&t.l, &f.a[t.a]],
-                                [uv_t_dim.h as usize, uv_t_dim.w as usize],
-                                [(cby4 + y) as usize, (cbx4 + x) as usize],
-                                |case, dir| {
-                                    case.set_disjoint(&dir.ccoef[pl], 0x40);
-                                },
-                            );
-                        }
-                        uv_dst += uv_t_dim.w as usize * 4;
-                        x += uv_t_dim.w as c_int;
-                        t.b.x += (uv_t_dim.w as c_int) << ss_hor;
-                    }
-                    t.b.x -= x << ss_hor;
-                    y += uv_t_dim.h as c_int;
-                    t.b.y += (uv_t_dim.h as c_int) << ss_ver;
-                }
-                t.b.y -= y << ss_ver;
-            }
-        }
-    }
-}
-
-pub(crate) fn rav1d_recon_b_inter<BD: BitDepth>(
-    f: &Rav1dFrameData,
-    t: &mut Rav1dTaskContext,
-    mut ts_c: Option<&mut Rav1dTileStateContext>,
-    bs: BlockSize,
-    b: &Av1Block,
-    inter: &Av1BlockInter,
-) -> Result<(), ()> {
-    let bd = BD::from_c(f.bitdepth_max);
-    let cur_data = &f.cur.data.as_ref().unwrap().data;
-
-    let ts = &f.ts[t.ts];
-    let bx4 = t.b.x & 31;
-    let by4 = t.b.y & 31;
-    let ss_ver = (f.cur.p.layout == Rav1dPixelLayout::I420) as c_int;
-    let ss_hor = (f.cur.p.layout != Rav1dPixelLayout::I444) as c_int;
-    let cbx4 = bx4 >> ss_hor;
-    let cby4 = by4 >> ss_ver;
-    let b_dim = bs.dimensions();
-    let bw4 = b_dim[0] as c_int;
-    let bh4 = b_dim[1] as c_int;
-    let w4 = cmp::min(bw4, f.bw - t.b.x);
-    let h4 = cmp::min(bh4, f.bh - t.b.y);
-    let has_chroma = f.cur.p.layout != Rav1dPixelLayout::I400
-        && (bw4 > ss_hor || t.b.x & 1 != 0)
-        && (bh4 > ss_ver || t.b.y & 1 != 0);
-    let chr_layout_idx = if f.cur.p.layout == Rav1dPixelLayout::I400 {
-        Rav1dPixelLayout::I400
-    } else {
-        Rav1dPixelLayout::I444 - f.cur.p.layout
-    } as usize;
-    let chr_layout_idx_w_mask = f
-        .cur
-        .p
-        .layout
-        .try_into()
-        .unwrap_or(Rav1dPixelLayoutSubSampled::I444);
-
-    // prediction
-    let cbh4 = bh4 + ss_ver >> ss_ver;
-    let cbw4 = bw4 + ss_hor >> ss_hor;
-    let y_dst = &cur_data[0];
-    let mut y_dst = y_dst.with_offset::<BD>()
-        + 4 * (t.b.y as isize * y_dst.pixel_stride::<BD>() + t.b.x as isize);
-    let uvdstoff = 4
-        * ((t.b.x >> ss_hor) as isize + (t.b.y >> ss_ver) as isize * BD::pxstride(f.cur.stride[1]));
-    let frame_hdr = &***f.frame_hdr.as_ref().unwrap();
-    if frame_hdr.frame_type.is_key_or_intra() {
-        // intrabc
-        assert!(!frame_hdr.size.super_res.enabled);
-        let scratch = t.scratch.inter_mut();
-        mc::<BD>(
-            f,
-            &mut scratch.emu_edge,
-            t.b,
-            MaybeTempPixels::NonTemp { dst: y_dst },
-            bw4,
-            bh4,
-            t.b.x,
-            t.b.y,
-            0,
-            inter.nd.one_d.mv[0],
-            &f.sr_cur,
-            0, // unused
-            Filter2d::Bilinear,
-        )?;
-        if has_chroma {
-            for pl in 1..3 {
-                mc::<BD>(
-                    f,
-                    &mut scratch.emu_edge,
-                    t.b,
-                    MaybeTempPixels::NonTemp {
-                        dst: cur_data[pl].with_offset::<BD>() + uvdstoff,
-                    },
-                    bw4 << (bw4 == ss_hor) as c_int,
-                    bh4 << (bh4 == ss_ver) as c_int,
-                    t.b.x & !ss_hor,
-                    t.b.y & !ss_ver,
-                    pl,
-                    inter.nd.one_d.mv[0],
-                    &f.sr_cur,
-                    0, // unused
-                    Filter2d::Bilinear,
-                )?;
-            }
-        }
-    } else if let Some(comp_inter_type) = inter.comp_type {
-        let filter_2d = inter.filter2d;
-        // Maximum super block size is 128x128
-        let scratch = t.scratch.inter_mut();
-        let scratch_inter = scratch.lap_inter.inter_mut();
-        let tmp = &mut scratch_inter.compinter;
-        let mut jnt_weight = 0;
-        let seg_mask = &mut scratch_inter.seg_mask;
-
-        for i in 0..2 {
-            let refp = &f.refp[inter.r#ref[i] as usize];
-
-            if inter.inter_mode == GLOBALMV_GLOBALMV
-                && f.gmv_warp_allowed[inter.r#ref[i] as usize] != 0
-            {
-                warp_affine::<BD>(
-                    f,
-                    &mut scratch.emu_edge,
-                    t.b,
-                    MaybeTempPixels::Temp {
-                        tmp: &mut tmp[i],
-                        tmp_stride: bw4 as usize * 4,
-                    },
-                    b_dim,
-                    0,
-                    refp,
-                    &frame_hdr.gmv[inter.r#ref[i] as usize],
-                )?;
-            } else {
-                mc::<BD>(
-                    f,
-                    &mut scratch.emu_edge,
-                    t.b,
-                    MaybeTempPixels::Temp {
-                        tmp: &mut tmp[i],
-                        tmp_stride: (),
-                    },
-                    bw4,
-                    bh4,
-                    t.b.x,
-                    t.b.y,
-                    0,
-                    inter.nd.one_d.mv[i],
-                    refp,
-                    inter.r#ref[i] as usize,
-                    filter_2d,
-                )?;
-            }
-        }
-
-        let mut mask = &[][..];
-        match comp_inter_type {
-            CompInterType::Avg => {
-                f.dsp
-                    .mc
-                    .avg
-                    .call::<BD>(y_dst, &tmp[0], &tmp[1], bw4 * 4, bh4 * 4, bd);
-            }
-            CompInterType::WeightedAvg => {
-                jnt_weight =
-                    f.jnt_weights[inter.r#ref[0] as usize][inter.r#ref[1] as usize] as c_int;
-                f.dsp.mc.w_avg.call::<BD>(
-                    y_dst,
-                    &tmp[0],
-                    &tmp[1],
-                    bw4 * 4,
-                    bh4 * 4,
-                    jnt_weight,
-                    bd,
-                );
-            }
-            CompInterType::Seg => {
-                f.dsp.mc.w_mask[chr_layout_idx_w_mask].call(
-                    y_dst,
-                    &tmp[inter.nd.one_d.mask_sign() as usize],
-                    &tmp[!inter.nd.one_d.mask_sign() as usize],
-                    bw4 * 4,
-                    bh4 * 4,
-                    seg_mask,
-                    inter.nd.one_d.mask_sign() as c_int,
-                    bd,
-                );
-                mask = &seg_mask[..];
-            }
-            CompInterType::Wedge => {
-                mask = DAV1D_WEDGE_MASKS[bs as usize][0][0][inter.nd.one_d.wedge_idx as usize];
-                f.dsp.mc.mask.call::<BD>(
-                    y_dst,
-                    &tmp[inter.nd.one_d.mask_sign() as usize],
-                    &tmp[!inter.nd.one_d.mask_sign() as usize],
-                    bw4 * 4,
-                    bh4 * 4,
-                    mask,
-                    bd,
-                );
-                if has_chroma {
-                    mask = DAV1D_WEDGE_MASKS[bs as usize][chr_layout_idx]
-                        [inter.nd.one_d.mask_sign() as usize]
-                        [inter.nd.one_d.wedge_idx as usize];
-                }
-            }
-        }
-
-        // chroma
-        if has_chroma {
-            for pl in 0..2 {
-                for i in 0..2 {
-                    let refp = &f.refp[inter.r#ref[i] as usize];
-                    if inter.inter_mode == GLOBALMV_GLOBALMV
-                        && cmp::min(cbw4, cbh4) > 1
-                        && f.gmv_warp_allowed[inter.r#ref[i] as usize] != 0
-                    {
-                        warp_affine::<BD>(
-                            f,
-                            &mut scratch.emu_edge,
-                            t.b,
-                            MaybeTempPixels::Temp {
-                                tmp: &mut tmp[i],
-                                tmp_stride: bw4 as usize * 4 >> ss_hor,
-                            },
-                            b_dim,
-                            1 + pl,
-                            refp,
-                            &frame_hdr.gmv[inter.r#ref[i] as usize],
-                        )?;
-                    } else {
-                        mc::<BD>(
-                            f,
-                            &mut scratch.emu_edge,
-                            t.b,
-                            MaybeTempPixels::Temp {
-                                tmp: &mut tmp[i],
-                                tmp_stride: (),
-                            },
-                            bw4,
-                            bh4,
-                            t.b.x,
-                            t.b.y,
-                            1 + pl,
-                            inter.nd.one_d.mv[i],
-                            refp,
-                            inter.r#ref[i] as usize,
-                            filter_2d,
-                        )?;
-                    }
-                }
-
-                let uv_dst = cur_data[1 + pl].with_offset::<BD>() + uvdstoff;
-                match comp_inter_type {
-                    CompInterType::Avg => {
-                        f.dsp.mc.avg.call::<BD>(
-                            uv_dst,
-                            &tmp[0],
-                            &tmp[1],
-                            bw4 * 4 >> ss_hor,
-                            bh4 * 4 >> ss_ver,
-                            bd,
-                        );
-                    }
-                    CompInterType::WeightedAvg => {
-                        f.dsp.mc.w_avg.call::<BD>(
-                            uv_dst,
-                            &tmp[0],
-                            &tmp[1],
-                            bw4 * 4 >> ss_hor,
-                            bh4 * 4 >> ss_ver,
-                            jnt_weight,
-                            bd,
-                        );
-                    }
-                    CompInterType::Seg | CompInterType::Wedge => {
-                        f.dsp.mc.mask.call::<BD>(
-                            uv_dst,
-                            &tmp[inter.nd.one_d.mask_sign() as usize],
-                            &tmp[!inter.nd.one_d.mask_sign() as usize],
-                            bw4 * 4 >> ss_hor,
-                            bh4 * 4 >> ss_ver,
-                            mask,
-                            bd,
-                        );
-                    }
-                }
-            }
-        }
-    } else {
-        let refp = &f.refp[inter.r#ref[0] as usize];
-        let filter_2d = inter.filter2d;
-
-        if cmp::min(bw4, bh4) > 1
-            && (inter.inter_mode == GLOBALMV && f.gmv_warp_allowed[inter.r#ref[0] as usize] != 0
-                || inter.motion_mode == MotionMode::Warp
-                    && t.warpmv.r#type > Rav1dWarpedMotionType::Translation)
-        {
-            warp_affine::<BD>(
-                f,
-                &mut t.scratch.inter_mut().emu_edge,
-                t.b,
-                MaybeTempPixels::NonTemp { dst: y_dst },
-                b_dim,
-                0,
-                refp,
-                if inter.motion_mode == MotionMode::Warp {
-                    &t.warpmv
-                } else {
-                    &frame_hdr.gmv[inter.r#ref[0] as usize]
-                },
-            )?;
-        } else {
-            mc::<BD>(
-                f,
-                &mut t.scratch.inter_mut().emu_edge,
-                t.b,
-                MaybeTempPixels::NonTemp { dst: y_dst },
-                bw4,
-                bh4,
-                t.b.x,
-                t.b.y,
-                0,
-                inter.nd.one_d.mv[0],
-                refp,
-                inter.r#ref[0] as usize,
-                filter_2d,
-            )?;
-            if inter.motion_mode == MotionMode::Obmc {
-                obmc::<BD>(f, t, y_dst, b_dim, 0, bx4, by4, w4, h4)?;
-            }
-        }
-        if let Some(interintra_type) = inter.interintra_type {
-            let interintra_edge_pal = &mut t.scratch.inter_intra_mut().interintra_edge_pal;
-            let tl_edge_array = interintra_edge_pal.edge.buf_mut::<BD>();
-            let tl_edge_offset = 32;
-            let mut m = match inter.nd.one_d.interintra_mode.get() {
-                InterIntraPredMode::Smooth => SMOOTH_PRED,
-                mode => mode as IntraPredMode,
-            };
-            let mut angle = 0;
-            let top_sb_edge_slice = if t.b.y & f.sb_step - 1 == 0 {
-                let sby = t.b.y >> f.sb_shift;
-                let offset =
-                    (f.ipred_edge_off * 0) as isize + (f.sb128w * 128 * (sby - 1)) as isize;
-                Some((&f.ipred_edge, offset))
-            } else {
-                None
-            };
-            m = rav1d_prepare_intra_edges(
-                t.b.x,
-                t.b.x > ts.tiling.col_start,
-                t.b.y,
-                t.b.y > ts.tiling.row_start,
-                ts.tiling.col_end,
-                ts.tiling.row_end,
-                EdgeFlags::empty(),
-                y_dst,
-                top_sb_edge_slice,
-                m,
-                &mut angle,
-                bw4,
-                bh4,
-                0,
-                tl_edge_array,
-                tl_edge_offset,
-                bd,
-            );
-            let tmp = interintra_edge_pal.interintra.buf_mut::<BD>();
-            f.dsp.ipred.intra_pred[m as usize].call(
-                Rav1dPictureDataComponentOffset {
-                    data: &Rav1dPictureDataComponent::wrap_buf::<BD>(tmp, 4 * bw4 as usize),
-                    offset: 0,
-                },
-                tl_edge_array,
-                tl_edge_offset,
-                bw4 * 4,
-                bh4 * 4,
-                0,
-                0,
-                0,
-                bd,
-            );
-            let ii_mask = match interintra_type {
-                InterIntraType::Blend => {
-                    DAV1D_II_MASKS[bs as usize][0][inter.nd.one_d.interintra_mode.get() as usize]
-                }
-                InterIntraType::Wedge => {
-                    DAV1D_WEDGE_MASKS[bs as usize][0][0][inter.nd.one_d.wedge_idx as usize]
-                }
-            };
-            f.dsp
-                .mc
-                .blend
-                .call::<BD>(y_dst, tmp, bw4 * 4, bh4 * 4, ii_mask);
-        }
-
-        if has_chroma {
-            // sub8x8 derivation
-            let mut is_sub8x8 = bw4 == ss_hor || bh4 == ss_ver;
-            let r = if is_sub8x8 {
-                assert!(ss_hor == 1);
-                let r = &t.rt.r[(t.b.y as usize & 31) + 5 - 1..];
-                if bw4 == 1 {
-                    is_sub8x8 &= f.rf.r.index(r[1] + t.b.x as usize - 1).r#ref.r#ref[0] > 0;
-                }
-                if bh4 == ss_ver {
-                    is_sub8x8 &= f.rf.r.index(r[0] + t.b.x as usize).r#ref.r#ref[0] > 0;
-                }
-                if bw4 == 1 && bh4 == ss_ver {
-                    is_sub8x8 &= f.rf.r.index(r[0] + t.b.x as usize - 1).r#ref.r#ref[0] > 0;
-                }
-                r
-            } else {
-                &[] // Never actually used.
-            };
-
-            // chroma prediction
-            if is_sub8x8 {
-                let mut h_off = 0isize;
-                let mut v_off = 0isize;
-                if bw4 == 1 && bh4 == ss_ver {
-                    for pl in 0..2 {
-                        let r = *f.rf.r.index(r[0] + t.b.x as usize - 1);
-                        mc::<BD>(
-                            f,
-                            &mut t.scratch.inter_mut().emu_edge,
-                            t.b,
-                            MaybeTempPixels::NonTemp {
-                                dst: cur_data[1 + pl].with_offset::<BD>() + uvdstoff,
-                            },
-                            bw4,
-                            bh4,
-                            t.b.x - 1,
-                            t.b.y - 1,
-                            1 + pl,
-                            r.mv.mv[0],
-                            &f.refp[r.r#ref.r#ref[0] as usize - 1],
-                            r.r#ref.r#ref[0] as usize - 1,
-                            if t.frame_thread.pass != 2 {
-                                t.tl_4x4_filter
-                            } else {
-                                f.frame_thread
-                                    .b
-                                    .index(
-                                        (t.b.y as usize - 1) * f.b4_stride as usize
-                                            + t.b.x as usize
-                                            - 1,
-                                    )
-                                    .ii
-                                    .filter2d()
-                            },
-                        )?;
-                    }
-                    v_off = 2 * BD::pxstride(f.cur.stride[1]);
-                    h_off = 2;
-                }
-                if bw4 == 1 {
-                    let left_filter_2d = DAV1D_FILTER_2D
-                        [*t.l.filter[1].index(by4 as usize) as usize]
-                        [*t.l.filter[0].index(by4 as usize) as usize];
-                    for pl in 0..2 {
-                        let r = *f.rf.r.index(r[1] + t.b.x as usize - 1);
-                        mc::<BD>(
-                            f,
-                            &mut t.scratch.inter_mut().emu_edge,
-                            t.b,
-                            MaybeTempPixels::NonTemp {
-                                dst: cur_data[1 + pl].with_offset::<BD>() + uvdstoff + v_off,
-                            },
-                            bw4,
-                            bh4,
-                            t.b.x - 1,
-                            t.b.y,
-                            1 + pl,
-                            r.mv.mv[0],
-                            &f.refp[r.r#ref.r#ref[0] as usize - 1],
-                            r.r#ref.r#ref[0] as usize - 1,
-                            if t.frame_thread.pass != 2 {
-                                left_filter_2d
-                            } else {
-                                f.frame_thread
-                                    .b
-                                    .index(
-                                        t.b.y as usize * f.b4_stride as usize + t.b.x as usize - 1,
-                                    )
-                                    .ii
-                                    .filter2d()
-                            },
-                        )?;
-                    }
-                    h_off = 2;
-                }
-                if bh4 == ss_ver {
-                    let top_filter_2d = DAV1D_FILTER_2D
-                        [*f.a[t.a].filter[1].index(bx4 as usize) as usize]
-                        [*f.a[t.a].filter[0].index(bx4 as usize) as usize];
-                    for pl in 0..2 {
-                        let r = *f.rf.r.index(r[0] + t.b.x as usize);
-                        mc::<BD>(
-                            f,
-                            &mut t.scratch.inter_mut().emu_edge,
-                            t.b,
-                            MaybeTempPixels::NonTemp {
-                                dst: cur_data[1 + pl].with_offset::<BD>() + uvdstoff + h_off,
-                            },
-                            bw4,
-                            bh4,
-                            t.b.x,
-                            t.b.y - 1,
-                            1 + pl,
-                            r.mv.mv[0],
-                            &f.refp[r.r#ref.r#ref[0] as usize - 1],
-                            r.r#ref.r#ref[0] as usize - 1,
-                            if t.frame_thread.pass != 2 {
-                                top_filter_2d
-                            } else {
-                                f.frame_thread
-                                    .b
-                                    .index(
-                                        (t.b.y as usize - 1) * f.b4_stride as usize
-                                            + t.b.x as usize,
-                                    )
-                                    .ii
-                                    .filter2d()
-                            },
-                        )?;
-                    }
-                    v_off = 2 * BD::pxstride(f.cur.stride[1]);
-                }
-                for pl in 0..2 {
-                    mc::<BD>(
-                        f,
-                        &mut t.scratch.inter_mut().emu_edge,
-                        t.b,
-                        MaybeTempPixels::NonTemp {
-                            dst: cur_data[1 + pl].with_offset::<BD>() + uvdstoff + h_off + v_off,
-                        },
-                        bw4,
-                        bh4,
-                        t.b.x,
-                        t.b.y,
-                        1 + pl,
-                        inter.nd.one_d.mv[0],
-                        refp,
-                        inter.r#ref[0] as usize,
-                        filter_2d,
-                    )?;
-                }
-            } else {
-                if cmp::min(cbw4, cbh4) > 1
-                    && (inter.inter_mode == GLOBALMV
-                        && f.gmv_warp_allowed[inter.r#ref[0] as usize] != 0
-                        || inter.motion_mode == MotionMode::Warp
-                            && t.warpmv.r#type > Rav1dWarpedMotionType::Translation)
-                {
-                    for pl in 0..2 {
-                        warp_affine::<BD>(
-                            f,
-                            &mut t.scratch.inter_mut().emu_edge,
-                            t.b,
-                            MaybeTempPixels::NonTemp {
-                                dst: cur_data[1 + pl].with_offset::<BD>() + uvdstoff,
-                            },
-                            b_dim,
-                            1 + pl,
-                            refp,
-                            if inter.motion_mode == MotionMode::Warp {
-                                &t.warpmv
-                            } else {
-                                &frame_hdr.gmv[inter.r#ref[0] as usize]
-                            },
-                        )?;
-                    }
-                } else {
-                    for pl in 0..2 {
-                        mc::<BD>(
-                            f,
-                            &mut t.scratch.inter_mut().emu_edge,
-                            t.b,
-                            MaybeTempPixels::NonTemp {
-                                dst: cur_data[1 + pl].with_offset::<BD>() + uvdstoff,
-                            },
-                            bw4 << (bw4 == ss_hor) as c_int,
-                            bh4 << (bh4 == ss_ver) as c_int,
-                            t.b.x & !ss_hor,
-                            t.b.y & !ss_ver,
-                            1 + pl,
-                            inter.nd.one_d.mv[0],
-                            refp,
-                            inter.r#ref[0] as usize,
-                            filter_2d,
-                        )?;
-                        let uv_dst = cur_data[1 + pl].with_offset::<BD>() + uvdstoff;
-                        if inter.motion_mode == MotionMode::Obmc {
-                            obmc::<BD>(f, t, uv_dst, b_dim, 1 + pl, bx4, by4, w4, h4)?;
-                        }
-                    }
-                }
-                if let Some(interintra_type) = inter.interintra_type {
-                    // FIXME for 8x32 with 4:2:2 subsampling, this probably does
-                    // the wrong thing since it will select 4x16, not 4x32, as a
-                    // transform size...
-                    let ii_mask = match interintra_type {
-                        InterIntraType::Blend => {
-                            DAV1D_II_MASKS[bs as usize][chr_layout_idx]
-                                [inter.nd.one_d.interintra_mode.get() as usize]
-                        }
-                        InterIntraType::Wedge => {
-                            DAV1D_WEDGE_MASKS[bs as usize][chr_layout_idx][0]
-                                [inter.nd.one_d.wedge_idx as usize]
-                        }
-                    };
-
-                    for pl in 0..2 {
-                        let interintra_edge_pal =
-                            &mut t.scratch.inter_intra_mut().interintra_edge_pal;
-                        let tl_edge_array = interintra_edge_pal.edge.buf_mut::<BD>();
-                        let tl_edge_offset = 32;
-                        let mut m = match inter.nd.one_d.interintra_mode.get() {
-                            InterIntraPredMode::Smooth => SMOOTH_PRED,
-                            mode => mode as IntraPredMode,
-                        };
-                        let mut angle = 0;
-                        let uv_dst = cur_data[1 + pl].with_offset::<BD>() + uvdstoff;
-                        let top_sb_edge_slice = if t.b.y & f.sb_step - 1 == 0 {
-                            let sby = t.b.y >> f.sb_shift;
-                            let offset = (f.ipred_edge_off * (pl + 1)) as isize
-                                + (f.sb128w * 128 * (sby - 1)) as isize;
-                            Some((&f.ipred_edge, offset))
-                        } else {
-                            None
-                        };
-                        m = rav1d_prepare_intra_edges(
-                            t.b.x >> ss_hor,
-                            (t.b.x >> ss_hor) > (ts.tiling.col_start >> ss_hor),
-                            t.b.y >> ss_ver,
-                            (t.b.y >> ss_ver) > (ts.tiling.row_start >> ss_ver),
-                            ts.tiling.col_end >> ss_hor,
-                            ts.tiling.row_end >> ss_ver,
-                            EdgeFlags::empty(),
-                            uv_dst,
-                            top_sb_edge_slice,
-                            m,
-                            &mut angle,
-                            cbw4,
-                            cbh4,
-                            0,
-                            tl_edge_array,
-                            tl_edge_offset,
-                            bd,
-                        );
-                        let tmp = interintra_edge_pal.interintra.buf_mut::<BD>();
-                        f.dsp.ipred.intra_pred[m as usize].call(
-                            Rav1dPictureDataComponentOffset {
-                                data: &Rav1dPictureDataComponent::wrap_buf::<BD>(
-                                    tmp,
-                                    4 * cbw4 as usize,
-                                ),
-                                offset: 0,
-                            },
-                            tl_edge_array,
-                            tl_edge_offset,
-                            cbw4 * 4,
-                            cbh4 * 4,
-                            0,
-                            0,
-                            0,
-                            bd,
-                        );
-                        f.dsp
-                            .mc
-                            .blend
-                            .call::<BD>(uv_dst, tmp, cbw4 * 4, cbh4 * 4, ii_mask);
-                    }
-                }
-            }
-        }
-        t.tl_4x4_filter = filter_2d;
-    }
-
-    if debug_block_info!(f, t.b) && DEBUG_B_PIXELS {
-        hex_dump_pic::<BD>(
-            y_dst,
-            b_dim[0] as usize * 4,
-            b_dim[1] as usize * 4,
-            "y-pred",
-        );
-        if has_chroma {
-            for pl in 1..3 {
-                let uv_dst = cur_data[pl].with_offset::<BD>() + uvdstoff;
-                hex_dump_pic::<BD>(
-                    uv_dst,
-                    cbw4 as usize * 4,
-                    cbh4 as usize * 4,
-                    ["", "u-pred", "v-pred"][pl],
-                );
-            }
-        }
-    }
-
-    let cw4 = w4 + ss_hor >> ss_hor;
-    let ch4 = h4 + ss_ver >> ss_ver;
-
-    if b.skip != 0 {
-        // reset coef contexts
-        CaseSet::<32, false>::many(
-            [&t.l, &f.a[t.a]],
-            [bh4 as usize, bw4 as usize],
-            [by4 as usize, bx4 as usize],
-            |case, dir| {
-                case.set_disjoint(&dir.lcoef, 0x40);
-            },
-        );
-        if has_chroma {
-            CaseSet::<32, false>::many(
-                [&t.l, &f.a[t.a]],
-                [cbh4 as usize, cbw4 as usize],
-                [cby4 as usize, cbx4 as usize],
-                |case, dir| {
-                    for ccoef in &dir.ccoef {
-                        case.set_disjoint(ccoef, 0x40);
-                    }
-                },
-            );
-        }
-        return Ok(());
-    }
-
-    let uvtx = &DAV1D_TXFM_DIMENSIONS[b.uvtx as usize];
-    let ytx = &DAV1D_TXFM_DIMENSIONS[inter.max_ytx as usize];
-    let tx_split = [inter.tx_split0 as u16, inter.tx_split1];
-
-    for init_y in (0..bh4).step_by(16) {
-        for init_x in (0..bw4).step_by(16) {
-            // coefficient coding & inverse transforms
-            let mut y_off = (init_y != 0) as c_int;
-            let mut y;
-            y_dst += y_dst.pixel_stride::<BD>() * 4 * init_y as isize;
-            y = init_y;
-            t.b.y += init_y;
-            while y < cmp::min(h4, init_y + 16) {
-                let mut x;
-                let mut x_off = (init_x != 0) as c_int;
-                x = init_x;
-                t.b.x += init_x;
-                while x < cmp::min(w4, init_x + 16) {
-                    read_coef_tree::<BD>(
-                        f,
-                        t,
-                        ts_c.as_deref_mut(),
-                        bs,
-                        b,
-                        inter.max_ytx,
-                        0,
-                        tx_split,
-                        x_off,
-                        y_off,
-                        Some(y_dst + (x as usize * 4)),
-                    );
-                    t.b.x += ytx.w as c_int;
-                    x += ytx.w as c_int;
-                    x_off += 1;
-                }
-                y_dst += y_dst.pixel_stride::<BD>() * 4 * ytx.h as isize;
-                t.b.x -= x;
-                t.b.y += ytx.h as c_int;
-                y += ytx.h as c_int;
-                y_off += 1;
-            }
-            y_dst -= y_dst.pixel_stride::<BD>() * 4 * y as isize;
-            t.b.y -= y;
-
-            // chroma coefs and inverse transform
-            if has_chroma {
-                for pl in 0..2 {
-                    let uv_dst = &cur_data[1 + pl];
-                    let mut uv_dst = uv_dst.with_offset::<BD>()
-                        + uvdstoff
-                        + (uv_dst.pixel_stride::<BD>() * init_y as isize * 4 >> ss_ver);
-                    y = init_y >> ss_ver;
-                    t.b.y += init_y;
-                    while y < cmp::min(ch4, init_y + 16 >> ss_ver) {
-                        let mut x;
-                        x = init_x >> ss_hor;
-                        t.b.x += init_x;
-                        while x < cmp::min(cw4, init_x + 16 >> ss_hor) {
-                            let mut cf_guard;
-                            let cf;
-                            let eob;
-                            let mut txtp;
-                            if t.frame_thread.pass != 0 {
-                                let p = t.frame_thread.pass as usize & 1;
-                                let len = uvtx.h as u32 * 4 * uvtx.w as u32 * 4;
-                                let cf_idx = ts.frame_thread[p].cf.get_update(|i| i + len);
-                                cf_guard = f
-                                    .frame_thread
-                                    .cf
-                                    .mut_slice_as((cf_idx as usize.., ..len as usize));
-                                cf = &mut *cf_guard;
-                                let cbi_idx = ts.frame_thread[p].cbi_idx.get_update(|i| i + 1);
-                                let cbi = f.frame_thread.cbi[cbi_idx as usize].get();
-                                eob = cbi.eob().into();
-                                txtp = cbi.txtp();
-                            } else {
-                                let mut cf_ctx = 0;
-                                txtp = t.scratch.inter_intra().ac_txtp_map.txtp_map()
-                                    [((by4 + (y << ss_ver)) * 32 + bx4 + (x << ss_hor)) as usize];
-                                let a_ccoef = &f.a[t.a].ccoef[pl];
-                                let a_start = (cbx4 + x) as usize;
-                                let l_ccoef = &t.l.ccoef[pl];
-                                let l_start = (cby4 + y) as usize;
-                                eob = decode_coefs::<BD>(
-                                    f,
-                                    t.ts,
-                                    ts_c.as_deref_mut().unwrap(),
-                                    debug_block_info!(f, t.b),
-                                    &mut t.scratch,
-                                    &mut t.cf,
-                                    &mut a_ccoef.index_mut((a_start.., ..uvtx.w as usize)),
-                                    &mut l_ccoef.index_mut((l_start.., ..uvtx.h as usize)),
-                                    b.uvtx,
-                                    bs,
-                                    b,
-                                    1 + pl,
-                                    CfSelect::Task,
-                                    &mut txtp,
-                                    &mut cf_ctx,
-                                );
-                                cf = t.cf.select_mut::<BD>();
-                                if debug_block_info!(f, t.b) {
-                                    println!(
-                                        "Post-uv-cf-blk[pl={},tx={:?},txtp={},eob={}]: r={}",
-                                        pl,
-                                        b.uvtx,
-                                        txtp,
-                                        eob,
-                                        ts_c.as_deref().unwrap().msac.rng,
-                                    );
-                                }
-                                CaseSet::<16, true>::many(
-                                    [l_ccoef, a_ccoef],
-                                    [
-                                        cmp::min(uvtx.h as i32, f.bh - t.b.y + ss_ver >> ss_ver)
-                                            as usize,
-                                        cmp::min(uvtx.w as i32, f.bw - t.b.x + ss_hor >> ss_hor)
-                                            as usize,
-                                    ],
-                                    [(cby4 + y) as usize, (cbx4 + x) as usize],
-                                    |case, dir| {
-                                        case.set_disjoint(dir, cf_ctx);
-                                    },
-                                );
-                            }
-                            if eob >= 0 {
-                                if debug_block_info!(f, t.b) && DEBUG_B_PIXELS {
-                                    coef_dump(
-                                        cf,
-                                        uvtx.h as usize * 4,
-                                        uvtx.w as usize * 4,
-                                        3,
-                                        "dq",
-                                    );
-                                }
-                                f.dsp.itx.itxfm_add[b.uvtx as usize][txtp as usize].call::<BD>(
-                                    uv_dst + 4 * x as usize,
-                                    cf,
-                                    eob,
-                                    bd,
-                                );
-                                if debug_block_info!(f, t.b) && DEBUG_B_PIXELS {
-                                    let uv_dst = uv_dst + (4 * x as usize);
-                                    hex_dump_pic::<BD>(
-                                        uv_dst,
-                                        uvtx.w as usize * 4,
-                                        uvtx.h as usize * 4,
-                                        "recon",
-                                    );
-                                }
-                            }
-                            t.b.x += (uvtx.w as c_int) << ss_hor;
-                            x += uvtx.w as c_int;
-                        }
-                        uv_dst += uv_dst.pixel_stride::<BD>() * 4 * uvtx.h as isize;
-                        t.b.x -= x << ss_hor;
-                        t.b.y += (uvtx.h as c_int) << ss_ver;
-                        y += uvtx.h as c_int;
-                    }
-                    t.b.y -= y << ss_ver;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn rav1d_filter_sbrow_deblock_cols<BD: BitDepth>(
-    c: &Rav1dContext,
-    f: &Rav1dFrameData,
-    _t: &mut Rav1dTaskContext,
-    sby: c_int,
-) {
-    if !c.inloop_filters.contains(Rav1dInloopFilterType::DEBLOCK) {
-        return;
-    }
-
-    let frame_hdr = &***f.frame_hdr.as_ref().unwrap();
-    if frame_hdr.loopfilter.level_y == [0; 2] {
-        return;
-    }
-
-    let y = sby * f.sb_step * 4;
-    let p = f.cur.lf_offsets::<BD>(y);
-    let seq_hdr = &***f.seq_hdr.as_ref().unwrap();
-    let mask_offset = (sby >> (seq_hdr.sb128 == 0) as c_int) * f.sb128w;
-    rav1d_loopfilter_sbrow_cols::<BD>(
-        f,
-        p,
-        mask_offset as usize,
-        sby,
-        f.lf.start_of_tile_row[sby as usize] as c_int,
-    );
-}
-
-pub(crate) fn rav1d_filter_sbrow_deblock_rows<BD: BitDepth>(
-    c: &Rav1dContext,
-    f: &Rav1dFrameData,
-    _t: &mut Rav1dTaskContext,
-    sby: c_int,
-) {
-    let y = sby * f.sb_step * 4;
-    let p = f.cur.lf_offsets::<BD>(y);
-    let seq_hdr = &***f.seq_hdr.as_ref().unwrap();
-    let sb128 = seq_hdr.sb128;
-    let cdef = seq_hdr.cdef;
-    let mask_offset = (sby >> (sb128 == 0) as c_int) * f.sb128w;
-    let frame_hdr = &***f.frame_hdr.as_ref().unwrap();
-    if c.inloop_filters.contains(Rav1dInloopFilterType::DEBLOCK)
-        && (frame_hdr.loopfilter.level_y != [0; 2])
-    {
-        rav1d_loopfilter_sbrow_rows::<BD>(f, p, mask_offset as usize, sby);
-    }
-    if cdef != 0 || !f.lf.restore_planes.is_empty() {
-        // Store loop filtered pixels required by CDEF / LR.
-        rav1d_copy_lpf::<BD>(c, f, p, sby);
-    }
-}
-
-pub(crate) fn rav1d_filter_sbrow_cdef<BD: BitDepth>(
-    c: &Rav1dContext,
-    f: &Rav1dFrameData,
-    tc: &mut Rav1dTaskContext,
-    sby: c_int,
-) {
-    if !c.inloop_filters.contains(Rav1dInloopFilterType::CDEF) {
-        return;
-    }
-
-    let sbsz = f.sb_step;
-    let y = sby * sbsz * 4;
-    let p = f.cur.lf_offsets::<BD>(y);
-    let seq_hdr = &***f.seq_hdr.as_ref().unwrap();
-    let prev_mask = (sby - 1 >> (seq_hdr.sb128 == 0) as c_int) * f.sb128w;
-    let mask_offset = (sby >> (seq_hdr.sb128 == 0) as c_int) * f.sb128w;
-    let start = sby * sbsz;
-    if sby != 0 {
-        let p_up = array::from_fn(|i| {
-            let ss_ver = f.cur.p.layout == Rav1dPixelLayout::I420 && i != 0;
-            p[i] - ((8 * p[i].pixel_stride::<BD>()) >> ss_ver as u8)
-        });
-        rav1d_cdef_brow::<BD>(c, tc, f, p_up, prev_mask, start - 2, start, true, sby);
-    }
-
-    let n_blks = sbsz - 2 * ((sby + 1) < f.sbh) as c_int;
-    let end = cmp::min(start + n_blks, f.bh);
-    rav1d_cdef_brow::<BD>(c, tc, f, p, mask_offset, start, end, false, sby);
-}
-
-pub(crate) fn rav1d_filter_sbrow_resize<BD: BitDepth>(
-    _c: &Rav1dContext,
-    f: &Rav1dFrameData,
-    _t: &mut Rav1dTaskContext,
-    sby: c_int,
-) {
-    let bd = BD::from_c(f.bitdepth_max);
-
-    let sbsz = f.sb_step;
-    let y = sby * sbsz * 4;
-    let p = f.cur.lf_offsets::<BD>(y);
-    let sr_p = f.sr_cur.p.lf_offsets::<BD>(y);
-    let has_chroma = (f.cur.p.layout != Rav1dPixelLayout::I400) as usize;
-    for pl in 0..1 + 2 * has_chroma {
-        let ss_ver = (pl != 0 && f.cur.p.layout == Rav1dPixelLayout::I420) as c_int;
-        let h_start = 8 * (sby != 0) as c_int >> ss_ver;
-        let dst = sr_p[pl];
-        let dst = dst - (h_start as isize * dst.pixel_stride::<BD>());
-        let src = p[pl];
-        let src = src - (h_start as isize * src.pixel_stride::<BD>());
-        let h_end = 4 * (sbsz - 2 * ((sby + 1) < f.sbh) as c_int) >> ss_ver;
-        let ss_hor = (pl != 0 && f.cur.p.layout != Rav1dPixelLayout::I444) as c_int;
-        let dst_w = f.sr_cur.p.p.w + ss_hor >> ss_hor;
-        let src_w = 4 * f.bw + ss_hor >> ss_hor;
-        let img_h = f.cur.p.h - sbsz * 4 * sby + ss_ver >> ss_ver;
-
-        f.dsp.mc.resize.call::<BD>(
-            WithOffset::pic(dst),
-            src,
-            dst_w as usize,
-            (cmp::min(img_h, h_end) + h_start) as usize,
-            src_w as usize,
-            f.resize_step[(pl != 0) as usize],
-            f.resize_start[(pl != 0) as usize],
-            bd,
-        );
-    }
-}
-
-pub(crate) fn rav1d_filter_sbrow_lr<BD: BitDepth>(
-    c: &Rav1dContext,
-    f: &Rav1dFrameData,
-    _t: &mut Rav1dTaskContext,
-    sby: c_int,
-) {
-    if !c
-        .inloop_filters
-        .contains(Rav1dInloopFilterType::RESTORATION)
-    {
-        return;
-    }
-    let y = sby * f.sb_step * 4;
-    let sr_p = f.sr_cur.p.lf_offsets::<BD>(y);
-    rav1d_lr_sbrow::<BD>(c, f, sr_p, sby);
-}
-
-pub(crate) fn rav1d_filter_sbrow<BD: BitDepth>(
-    c: &Rav1dContext,
-    f: &Rav1dFrameData,
-    t: &mut Rav1dTaskContext,
-    sby: c_int,
-) {
-    rav1d_filter_sbrow_deblock_cols::<BD>(c, f, t, sby);
-    rav1d_filter_sbrow_deblock_rows::<BD>(c, f, t, sby);
-    let seq_hdr = &***f.seq_hdr.as_ref().unwrap();
-    if seq_hdr.cdef != 0 {
-        rav1d_filter_sbrow_cdef::<BD>(c, f, t, sby);
-    }
-    let frame_hdr = &***f.frame_hdr.as_ref().unwrap();
-    if frame_hdr.size.width[0] != frame_hdr.size.width[1] {
-        rav1d_filter_sbrow_resize::<BD>(c, f, t, sby);
-    }
-    if !f.lf.restore_planes.is_empty() {
-        rav1d_filter_sbrow_lr::<BD>(c, f, t, sby);
-    }
-}
-
-pub(crate) fn rav1d_backup_ipred_edge<BD: BitDepth>(f: &Rav1dFrameData, t: &mut Rav1dTaskContext) {
-    let cur_data = &f.cur.data.as_ref().unwrap().data;
-
-    let ts = &f.ts[t.ts];
-    let sby = t.b.y >> f.sb_shift;
-    let sby_off = f.sb128w * 128 * sby;
-    let x_off = ts.tiling.col_start;
-
-    let y = &cur_data[0];
-    let y = y.with_offset::<BD>()
-        + x_off as usize * 4
-        + ((t.b.y + f.sb_step) * 4 - 1) as isize * y.pixel_stride::<BD>();
-    let ipred_edge_off = (f.ipred_edge_off * 0) + (sby_off + x_off * 4) as usize;
-    let n = 4 * (ts.tiling.col_end - x_off) as usize;
-    BD::pixel_copy(
-        &mut f.ipred_edge.mut_slice_as((ipred_edge_off.., ..n)),
-        &y.slice::<BD>(n),
-        n,
-    );
-
-    if f.cur.p.layout != Rav1dPixelLayout::I400 {
-        let ss_ver = (f.cur.p.layout == Rav1dPixelLayout::I420) as c_int;
-        let ss_hor = (f.cur.p.layout != Rav1dPixelLayout::I444) as c_int;
-
-        let uv_off = (x_off * 4 >> ss_hor) as isize
-            + (((t.b.y + f.sb_step) * 4 >> ss_ver) - 1) as isize * BD::pxstride(f.cur.stride[1]);
-        for pl in 1..3 {
-            let ipred_edge_off =
-                (f.ipred_edge_off * pl) + (sby_off + (x_off * 4 >> ss_hor)) as usize;
-            let n = 4 * (ts.tiling.col_end - x_off) as usize >> ss_hor;
-            let uv = &cur_data[pl];
-            let uv = uv.with_offset::<BD>() + uv_off;
-            BD::pixel_copy(
-                &mut f.ipred_edge.mut_slice_as((ipred_edge_off.., ..n)),
-                &uv.slice::<BD>(n),
-                n,
-            );
-        }
-    }
 }
 
 pub(crate) fn rav1d_copy_pal_block_y<BD: BitDepth>(
@@ -3900,14 +1717,9 @@ pub(crate) fn rav1d_copy_pal_block_y<BD: BitDepth>(
     bw4: usize,
     bh4: usize,
 ) {
-    let pal = if t.frame_thread.pass != 0 {
-        let x = t.b.x as usize;
-        let y = t.b.y as usize;
-        let index = ((y >> 1) + (x & 1)) * (f.b4_stride as usize >> 1) + (x >> 1) + (y & 1);
-        &f.frame_thread.pal.index::<BD>(index)[0]
-    } else {
-        &t.scratch.inter_intra().interintra_edge_pal.pal.buf::<BD>()[0]
-    };
+    // rav1g: the colours are the task's; `f.frame_thread.pal` of upstream is not here.
+    let _ = f;
+    let pal = &t.scratch.inter_intra().interintra_edge_pal.pal.buf::<BD>()[0];
     let al_pal = t.al_pal.select_mut::<BD>();
     for al_pal in &mut al_pal[0][bx4..][..bw4] {
         al_pal[0] = *pal;
@@ -3925,14 +1737,8 @@ pub(crate) fn rav1d_copy_pal_block_uv<BD: BitDepth>(
     bw4: usize,
     bh4: usize,
 ) {
-    let pal = if t.frame_thread.pass != 0 {
-        let x = t.b.x as usize;
-        let y = t.b.y as usize;
-        let index = ((y >> 1) + (x & 1)) * (f.b4_stride as usize >> 1) + (x >> 1) + (y & 1);
-        &*f.frame_thread.pal.index::<BD>(index)
-    } else {
-        t.scratch.inter_intra().interintra_edge_pal.pal.buf::<BD>()
-    };
+    let _ = f;
+    let pal = t.scratch.inter_intra().interintra_edge_pal.pal.buf::<BD>();
     // see aomedia bug 2183 for why we use luma coordinates here
     let al_pal = t.al_pal.select_mut::<BD>();
     for pl in 1..3 {
@@ -4051,18 +1857,12 @@ pub(crate) fn rav1d_read_pal_plane<BD: BitDepth>(
     let used_cache = &used_cache[..i];
 
     // parse new entries
-    let pal = if t.frame_thread.pass != 0 {
-        let pal_start = (((t.b.y >> 1) + (t.b.x & 1)) as isize * (f.b4_stride >> 1)
-            + ((t.b.x >> 1) + (t.b.y & 1)) as isize) as usize;
-        &mut f.frame_thread.pal.index_mut::<BD>(pal_start)[pli]
-    } else {
-        &mut t
-            .scratch
-            .inter_intra_mut()
-            .interintra_edge_pal
-            .pal
-            .buf_mut::<BD>()[pli]
-    };
+    let pal = &mut t
+        .scratch
+        .inter_intra_mut()
+        .interintra_edge_pal
+        .pal
+        .buf_mut::<BD>()[pli];
     let pal = &mut pal[..pal_sz];
     if i < pal.len() {
         let mut prev = rav1d_msac_decode_bools(&mut ts_c.msac, f.cur.p.bpc) as u16;
@@ -4148,19 +1948,12 @@ pub(crate) fn rav1d_read_pal_uv<BD: BitDepth>(
     let pal_sz = rav1d_read_pal_plane::<BD>(t, f, ts_c, true, sz_ctx, bx4, by4);
 
     // V pal coding
-    let pal = if t.frame_thread.pass != 0 {
-        &mut f.frame_thread.pal.index_mut::<BD>(
-            (((t.b.y >> 1) + (t.b.x & 1)) as isize * (f.b4_stride >> 1)
-                + ((t.b.x >> 1) + (t.b.y & 1)) as isize) as usize,
-        )[2]
-    } else {
-        &mut t
-            .scratch
-            .inter_intra_mut()
-            .interintra_edge_pal
-            .pal
-            .buf_mut::<BD>()[2]
-    };
+    let pal = &mut t
+        .scratch
+        .inter_intra_mut()
+        .interintra_edge_pal
+        .pal
+        .buf_mut::<BD>()[2];
     let pal = &mut pal[..pal_sz as usize];
     if rav1d_msac_decode_bool_equi(&mut ts_c.msac) {
         let bits = f.cur.p.bpc + rav1d_msac_decode_bools(&mut ts_c.msac, 2) as u8 - 4;

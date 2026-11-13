@@ -15,8 +15,6 @@ use crate::decode::{
     rav1d_decode_tile_sbrow,
 };
 use crate::error::{Rav1dError, Rav1dResult};
-use crate::fg_apply::{rav1d_apply_grain_row, rav1d_prep_grain};
-use crate::filmgrain::FG_BLOCK_SIZE;
 #[cfg(feature = "bitdepth_16")]
 use crate::include::common::bitdepth::BitDepth16;
 #[cfg(feature = "bitdepth_8")]
@@ -25,7 +23,7 @@ use crate::include::common::intops::iclip;
 use crate::include::dav1d::headers::Rav1dPixelLayout;
 use crate::include::dav1d::picture::Rav1dPicture;
 use crate::internal::{
-    Grain, Rav1dBitDepthDSPContext, Rav1dContext, Rav1dFrameContext, Rav1dFrameContextTaskThread,
+    Rav1dContext, Rav1dFrameContext, Rav1dFrameContextTaskThread,
     Rav1dFrameData, Rav1dTask, Rav1dTaskContext, Rav1dTaskContextTaskThread, TaskThreadData,
     TaskType,
 };
@@ -464,39 +462,6 @@ pub(crate) fn rav1d_task_frame_init(c: &Rav1dContext, fc: &Rav1dFrameContext) {
     fc.task_thread.insert_task(c, init_task, 1);
 }
 
-pub(crate) fn rav1d_task_delayed_fg(c: &Rav1dContext, out: &mut Rav1dPicture, in_0: &Rav1dPicture) {
-    let ttd = &*c.task_thread;
-    {
-        let mut delayed_fg = ttd.delayed_fg.try_write().unwrap();
-        delayed_fg.in_0 = in_0.clone();
-        delayed_fg.out = out.clone();
-        delayed_fg.type_0 = TaskType::FgPrep;
-
-        // This initialization is done once per call to [`dav1d_apply_grain`].
-        // Nevertheless, it is a 48 KB zero initialization that C avoids,
-        // so we avoid reinitializing here if it already has the correct variant.
-        //
-        // NOTE: If only one bitdepth is enabled `grain` will already be
-        // initialzed to the correct variant, so no update here is needed.
-        #[cfg(all(feature = "bitdepth_8", feature = "bitdepth_16"))]
-        match (out.p.bpc, &delayed_fg.grain) {
-            (8, Grain::Bpc8(_)) | (10 | 12, Grain::Bpc16(_)) => {}
-            (8, _) => delayed_fg.grain = Grain::Bpc8(Default::default()),
-            (10 | 12, _) => delayed_fg.grain = Grain::Bpc16(Default::default()),
-            _ => unreachable!(),
-        }
-    }
-    let mut task_thread_lock = ttd.lock.lock();
-    ttd.delayed_fg_exec.set(1);
-    ttd.cond.notify_one();
-    ttd.delayed_fg_cond.wait(&mut task_thread_lock);
-    drop(task_thread_lock);
-    ttd.delayed_fg_progress[0].store(0, Ordering::SeqCst);
-    ttd.delayed_fg_progress[1].store(0, Ordering::SeqCst);
-    // Release reference to in and out pictures
-    let _ = mem::take(&mut *ttd.delayed_fg.try_write().unwrap());
-}
-
 #[inline]
 fn ensure_progress<'l, 'ttd: 'l>(
     ttd: &'ttd TaskThreadData,
@@ -646,117 +611,6 @@ fn abort_frame(c: &Rav1dContext, fc: &Rav1dFrameContext, error: Rav1dResult) {
     fc.task_thread.cond.notify_one();
 }
 
-#[inline]
-fn delayed_fg_task<'l, 'ttd: 'l>(
-    ttd: &'ttd TaskThreadData,
-    task_thread_lock: &'l mut Option<MutexGuard<'ttd, ()>>,
-) {
-    let delayed_fg_type = ttd.delayed_fg.try_read().unwrap().type_0;
-    let mut row;
-    let mut progmax;
-    let mut done;
-    match delayed_fg_type {
-        TaskType::FgPrep => {
-            ttd.delayed_fg_exec.set(0);
-            if ttd.cond_signaled.load(Ordering::SeqCst) != 0 {
-                ttd.cond.notify_one();
-            }
-            // re-borrow to allow independent field borrows
-            let delayed_fg = &mut *ttd.delayed_fg.try_write().unwrap();
-            let dsp = &Rav1dBitDepthDSPContext::get(delayed_fg.out.p.bpc)
-                .as_ref()
-                .unwrap()
-                .fg;
-            match &mut delayed_fg.grain {
-                #[cfg(feature = "bitdepth_8")]
-                Grain::Bpc8(grain) => {
-                    rav1d_prep_grain::<BitDepth8>(
-                        dsp,
-                        &mut delayed_fg.out,
-                        &delayed_fg.in_0,
-                        grain,
-                    );
-                }
-                #[cfg(feature = "bitdepth_16")]
-                Grain::Bpc16(grain) => {
-                    rav1d_prep_grain::<BitDepth16>(
-                        dsp,
-                        &mut delayed_fg.out,
-                        &delayed_fg.in_0,
-                        grain,
-                    );
-                }
-            }
-            delayed_fg.type_0 = TaskType::FgApply;
-            ttd.delayed_fg_exec.set(1);
-        }
-        TaskType::FgApply => {}
-        _ => {
-            abort();
-        }
-    }
-    row = ttd.delayed_fg_progress[0].fetch_add(1, Ordering::SeqCst);
-    let _ = task_thread_lock.take();
-    let delayed_fg = ttd.delayed_fg.try_read().unwrap();
-    progmax = (delayed_fg.out.p.h + FG_BLOCK_SIZE as i32 - 1) / FG_BLOCK_SIZE as i32;
-    loop {
-        if (row + 1) < progmax {
-            ttd.cond.notify_one();
-        } else if row + 1 >= progmax {
-            *task_thread_lock = Some(ttd.lock.lock());
-            ttd.delayed_fg_exec.set(0);
-            if row >= progmax {
-                break;
-            }
-            let _ = task_thread_lock.take();
-        }
-        {
-            let dsp = &Rav1dBitDepthDSPContext::get(delayed_fg.out.p.bpc)
-                .as_ref()
-                .unwrap()
-                .fg;
-            match &delayed_fg.grain {
-                #[cfg(feature = "bitdepth_8")]
-                Grain::Bpc8(grain) => {
-                    rav1d_apply_grain_row::<BitDepth8>(
-                        dsp,
-                        &delayed_fg.out,
-                        &delayed_fg.in_0,
-                        grain,
-                        row as usize,
-                    );
-                }
-                #[cfg(feature = "bitdepth_16")]
-                Grain::Bpc16(grain) => {
-                    rav1d_apply_grain_row::<BitDepth16>(
-                        dsp,
-                        &delayed_fg.out,
-                        &delayed_fg.in_0,
-                        grain,
-                        row as usize,
-                    );
-                }
-            }
-        }
-        row = ttd.delayed_fg_progress[0].fetch_add(1, Ordering::SeqCst);
-        #[allow(unused_assignments)]
-        // TODO(kkysen) non-trivial due to the atomics, so leaving for later
-        {
-            done = ttd.delayed_fg_progress[1].fetch_add(1, Ordering::SeqCst) + 1;
-        }
-        if row < progmax {
-            continue;
-        }
-        *task_thread_lock = Some(ttd.lock.lock());
-        ttd.delayed_fg_exec.set(0);
-        break;
-    }
-    done = ttd.delayed_fg_progress[1].fetch_add(1, Ordering::SeqCst) + 1;
-    progmax = ttd.delayed_fg_progress[0].load(Ordering::SeqCst);
-    if !(done < progmax) {
-        ttd.delayed_fg_cond.notify_one();
-    }
-}
 
 pub fn rav1d_worker_task(task_thread: Arc<Rav1dTaskContextTaskThread>) {
     // The main thread will unpark us once `task_thread.c` is set.
@@ -792,11 +646,6 @@ pub fn rav1d_worker_task(task_thread: Arc<Rav1dTaskContextTaskThread>) {
         }
 
         merge_pending(c);
-        if ttd.delayed_fg_exec.get() != 0 {
-            // run delayed film grain first
-            delayed_fg_task(ttd, &mut task_thread_lock);
-            continue 'outer;
-        }
 
         let (fc, t_idx, prev_t) = 'found: {
             if c.fc.len() > 1 {
@@ -1194,12 +1043,7 @@ pub fn rav1d_worker_task(task_thread: Arc<Rav1dTaskContextTaskThread>) {
                         continue 'outer;
                     }
                     TaskType::DeblockCols => {
-                        {
-                            let f = fc.data.try_read().unwrap();
-                            if fc.task_thread.error.load(Ordering::SeqCst) == 0 {
-                                (f.bd_fn().filter_sbrow_deblock_cols)(c, &f, &mut tc, sby);
-                            }
-                        }
+                        // rav1g: no filter runs here; the task is a step of the scheduler only.
                         if ensure_progress(
                             ttd,
                             fc,
@@ -1216,9 +1060,6 @@ pub fn rav1d_worker_task(task_thread: Arc<Rav1dTaskContextTaskThread>) {
                     }
                     TaskType::DeblockRows => {
                         let f = fc.data.try_read().unwrap();
-                        if fc.task_thread.error.load(Ordering::SeqCst) == 0 {
-                            (f.bd_fn().filter_sbrow_deblock_rows)(c, &f, &mut tc, sby);
-                        }
                         // signal deblock progress
                         let seq_hdr = &***f.seq_hdr.as_ref().unwrap();
                         let frame_hdr = &***f.frame_hdr.as_ref().unwrap();
@@ -1264,9 +1105,6 @@ pub fn rav1d_worker_task(task_thread: Arc<Rav1dTaskContextTaskThread>) {
                         let f = fc.data.try_read().unwrap();
                         let seq_hdr = &***f.seq_hdr.as_ref().unwrap();
                         if seq_hdr.cdef != 0 {
-                            if fc.task_thread.error.load(Ordering::SeqCst) == 0 {
-                                (f.bd_fn().filter_sbrow_cdef)(c, &f, &mut tc, sby);
-                            }
                             drop(f);
                             reset_task_cur_async(ttd, t.frame_idx, c.fc.len() as u32);
                             if ttd.cond_signaled.fetch_or(1, Ordering::SeqCst) == 0 {
@@ -1277,23 +1115,10 @@ pub fn rav1d_worker_task(task_thread: Arc<Rav1dTaskContextTaskThread>) {
                         continue 'fallthrough;
                     }
                     TaskType::SuperResolution => {
-                        let f = fc.data.try_read().unwrap();
-                        let frame_hdr = &***f.frame_hdr.as_ref().unwrap();
-                        if frame_hdr.size.width[0] != frame_hdr.size.width[1] {
-                            if fc.task_thread.error.load(Ordering::SeqCst) == 0 {
-                                (f.bd_fn().filter_sbrow_resize)(c, &f, &mut tc, sby);
-                            }
-                        }
                         task_type = TaskType::LoopRestoration;
                         continue 'fallthrough;
                     }
                     TaskType::LoopRestoration => {
-                        let f = fc.data.try_read().unwrap();
-                        if fc.task_thread.error.load(Ordering::SeqCst) == 0
-                            && !f.lf.restore_planes.is_empty()
-                        {
-                            (f.bd_fn().filter_sbrow_lr)(c, &f, &mut tc, sby);
-                        }
                         task_type = TaskType::ReconstructionProgress;
                         continue 'fallthrough;
                     }

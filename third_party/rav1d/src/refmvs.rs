@@ -1757,13 +1757,13 @@ impl Rav1dRefmvsDSPContext {
             return self;
         }
 
-        self.splat_mv = splat_mv::decl_fn!(fn dav1d_splat_mv_sse2);
+        self.splat_mv = splat_mv::decl_fn!(fn rav1g_dav1d_splat_mv_sse2);
 
         if !flags.contains(CpuFlags::SSSE3) {
             return self;
         }
 
-        self.save_tmvs = save_tmvs::decl_fn!(fn dav1d_save_tmvs_ssse3);
+        self.save_tmvs = save_tmvs::decl_fn!(fn rav1g_dav1d_save_tmvs_ssse3);
 
         if !flags.contains(CpuFlags::SSE41) {
             return self;
@@ -1771,21 +1771,21 @@ impl Rav1dRefmvsDSPContext {
 
         #[cfg(target_arch = "x86_64")]
         {
-            self.load_tmvs = load_tmvs::decl_fn!(fn dav1d_load_tmvs_sse4);
+            self.load_tmvs = load_tmvs::decl_fn!(fn rav1g_dav1d_load_tmvs_sse4);
 
             if !flags.contains(CpuFlags::AVX2) {
                 return self;
             }
 
-            self.save_tmvs = save_tmvs::decl_fn!(fn dav1d_save_tmvs_avx2);
-            self.splat_mv = splat_mv::decl_fn!(fn dav1d_splat_mv_avx2);
+            self.save_tmvs = save_tmvs::decl_fn!(fn rav1g_dav1d_save_tmvs_avx2);
+            self.splat_mv = splat_mv::decl_fn!(fn rav1g_dav1d_splat_mv_avx2);
 
             if !flags.contains(CpuFlags::AVX512ICL) {
                 return self;
             }
 
-            self.save_tmvs = save_tmvs::decl_fn!(fn dav1d_save_tmvs_avx512icl);
-            self.splat_mv = splat_mv::decl_fn!(fn dav1d_splat_mv_avx512icl);
+            self.save_tmvs = save_tmvs::decl_fn!(fn rav1g_dav1d_save_tmvs_avx512icl);
+            self.splat_mv = splat_mv::decl_fn!(fn rav1g_dav1d_splat_mv_avx512icl);
         }
 
         self

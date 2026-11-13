@@ -73,12 +73,11 @@ struct MemPoolBuf<T> {
 }
 
 impl Rav1dPictureParameters {
-    pub fn pic_len(&self, [y_stride, uv_stride]: [isize; 2]) -> [usize; 2] {
-        let ss_ver = (self.layout == Rav1dPixelLayout::I420) as u8;
-        let aligned_h = self.h as usize + 127 & !127;
-        let y_sz = y_stride.unsigned_abs() * aligned_h;
-        let uv_sz = uv_stride.unsigned_abs() * (aligned_h >> ss_ver);
-        [y_sz, uv_sz]
+    /// rav1g: a picture has no samples here. Each plane is the smallest piece of memory a plane can be
+    /// (`RAV1D_PICTURE_MULTIPLE`, 64 rows of 64 bytes), so that a picture is the handle the reference
+    /// bookkeeping needs and nothing more; upstream returns the size of the planes with their padding.
+    pub fn pic_len(&self, _strides: [isize; 2]) -> [usize; 2] {
+        [RAV1D_PICTURE_ALIGNMENT * 64; 2]
     }
 }
 

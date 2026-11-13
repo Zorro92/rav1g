@@ -1,0 +1,3 @@
+# The upstream this directory is a copy of (PATCHES.md). upstream_diff.sh reads the two values.
+repository https://github.com/memorysafety/rav1d
+commit 2e7216c20ac2a75de204d6c8d7268b75a45959b4

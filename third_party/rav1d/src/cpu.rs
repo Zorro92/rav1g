@@ -1,7 +1,5 @@
 use std::ffi::c_uint;
-use std::num::NonZero;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::thread::available_parallelism;
 
 use bitflags::bitflags;
 
@@ -249,13 +247,3 @@ pub fn rav1d_set_cpu_flags_mask(mask: c_uint) {
     RAV1D_CPU_FLAGS_MASK.store(mask, Ordering::SeqCst);
 }
 
-#[no_mangle]
-#[cold]
-pub extern "C" fn dav1d_set_cpu_flags_mask(mask: c_uint) {
-    rav1d_set_cpu_flags_mask(mask)
-}
-
-#[cold]
-pub(crate) fn rav1d_num_logical_processors() -> NonZero<usize> {
-    available_parallelism().unwrap_or(NonZero::new(1).unwrap())
-}
