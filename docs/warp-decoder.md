@@ -395,8 +395,9 @@ them, which is what the run is for. Upstream's shaders had 0 of 250 streams righ
 another md5 on every decode: they counted on the 64 threads of a thread group running in lockstep
 ([gpu-av1-decoder.md](gpu-av1-decoder.md#lockstep-reliance-portability-2026-11-11)). With group
 syncs where threads hand data to each other, the super-resolution fix
-([test-player.md](test-player.md#super-resolution)) and the three fixes below, all 251 streams
-are md5-identical to their reference:
+([test-player.md](test-player.md#super-resolution)) and the three fixes below, all streams of the set
+(251 then; 252 with the eight-tile stream added on 2026-11-12, run 43366744476) are md5-identical to
+their reference:
 
 | streams | pass |
 | --- | --- |
@@ -410,6 +411,7 @@ are md5-identical to their reference:
 | Netflix Open Content cuts, 270p to 2160p, 8 and 10 bit | 5 of 5 |
 | SVT-AV1 reference scaling | 1 of 1 |
 | SVT-AV1 super-resolution | 1 of 1 |
+| SVT-AV1 eight tiles, three key frames | 1 of 1 |
 
 `expected.txt` is empty. The five streams that were on it until run 43149171146:
 

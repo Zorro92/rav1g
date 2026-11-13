@@ -1401,6 +1401,17 @@ three key frames for it (`syn-tiles-10b-1080p.ivf`), its first with more than on
 - **`rav1g-dec -keep_going`**: a task that ended with a decode error is followed by the next task in
   the same process, for these checks.
 
+On CI (run 43366744476, commit c70c031; `cpp` df73d8c in run 43365079589): all jobs green. 252 of 252
+streams in every pass of the three decoders (the set has the eight-tile stream now), 0 device removals.
+The decode error checks on WARP give what the local decoder gave, with `rav1g-dec` through the Rust
+interface, through `rav1g.h`, and with the player's decoder code on the C++ library: the one-tile
+vector fails with `Failed to decode tile data` behind 1 right frame, the eight-tile stream with
+`Truncated packet or corrupt tile size` behind 5; the stream behind each is right; with
+`-continue_on_error` 38 of 40 frames come out of the eight-tile stream (2 decode errors), the 5 before
+the damage and the 24 from the next key frame on right, and the appended whole stream is right behind
+6 decode errors of the vector. The three new unit tests run in the `rust` job. The packages of the run
+are 0.2.121.0, 0.2.121.2 and 0.2.121.3.
+
 **What was asked of the console test** (the parent's, for the record): first whether the two Rust
 packages start at all (the two imports from `ntdll.dll`; the `LIBRARY` line is the first sign of life of
 the library), then the md5 set with each, then `-gputime` on the 2160p clips, the three packages one
