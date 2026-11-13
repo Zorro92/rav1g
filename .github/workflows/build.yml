@@ -1139,7 +1139,8 @@ jobs:
       # of doing the same parse. With all of them on, and the calls of the sink timed: the whole set against
       # its references and expected.txt, the part of the set with -poisonbuf (the staged coefficients are
       # written whole into a buffer that starts filled), the stage dumps and the md5 of every frame against
-      # those of -parser c, and the decoder code of the test player with its -parseopt flag.
+      # those of -parser c, the decoder code of the test player with its -parseopt flag, and the decode
+      # errors in cut streams (a tile that keeps its thread ends as one that does not).
       - name: The same with the switches of the parser (-parseopt)
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -1167,6 +1168,9 @@ jobs:
           python testing/conformance/player_smoke.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
             --out out/player-smoke-switches-rav1d "--player-args=$switches" "--title=the Rust library (cargo, MSVC), the player with $switches"
           if ($LASTEXITCODE -ne 0) { $failed += "the player's decoder code with ${switches}: exit code $LASTEXITCODE" }
+          python testing/conformance/cut_tile_check.py --tool out/rav1g-dec/rav1g-dec.exe "--tool-args=-parseopt all" --parser rav1d `
+            --streams conformance-streams --out out/cut-tile
+          if ($LASTEXITCODE -ne 0) { $failed += "decode error check with -parseopt all: exit code $LASTEXITCODE" }
           if ($failed.Count) { throw "the switches of the parser: $($failed -join '; ')" }
 
       # The two parsers timed in pairs on this runner (testing/conformance/parser_timing.py): the CPU

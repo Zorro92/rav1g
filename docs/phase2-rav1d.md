@@ -1133,14 +1133,16 @@ CI, run 43468494277 on a throwaway branch (WARP, the runner's four processors sh
   that wakes on a runner whose processors WARP keeps busy waits for one. The console measured 1.0 to
   1.3 ms there with `-t 6` and 0.04 ms with the C parser.
 
-**Gates** (run 43468494277, all 17 jobs green): the parse check against the entropy decoder of libaom
+**Gates** (run 43468494277 on a throwaway branch, all 17 jobs green; the same on `main` with the
+decode error check added): the parse check against the entropy decoder of libaom
 with `-parseopt all`, one thread and four: 252 of 252 streams equal (with `stage` a zero inside a
 transform block where libaom writes nothing is the one accepted difference); `rav1g-dec -parser rav1d
 -parseopt all,time` on WARP: 252 of 252 md5, MSVC build and cross build; md5 of every frame and the
 stage dumps of the seven dump streams against `-parser c`; the part of the set with `-poisonbuf`, 137
-of 137; the player's decoder code with `-parser rav1d -parseopt all,time`, 4 of 4. Everything that
-existed is unchanged, with both parsers and no switch. Locally the 244 AOM vectors under wine with
-`all,time` and with `stage`.
+of 137; the player's decoder code with `-parser rav1d -parseopt all,time`, 4 of 4; the decode error check
+(cut streams) with `-parseopt all`. Everything that existed is unchanged, with both parsers and no
+switch. Locally the 244 AOM vectors under wine with `all,time` and with `stage`, and four cut streams,
+whose errors and frames are the same with and without the switches.
 
 **For the console.** The switches are off by default and the C parser stays the default: the console
 decides. One launch, the same clip, two runs each:
