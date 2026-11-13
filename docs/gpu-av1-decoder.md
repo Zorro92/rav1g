@@ -6,6 +6,13 @@ It moved here with the decoder. References to `gpu-film-grain.md` and `player-pl
 documents. The test player changes named "patch 0001-0004" below are now the first four commits
 after the fork point; see [test-player.md](test-player.md).
 
+Most of it was written while the decoder's D3D12 host was C++. The C++ files it names
+(`libav1/dx/av1_core.cpp`, `prediction.cpp`, `loopfilters.cpp`, `av1_compute.cpp`, `types.h`, ...) and
+`warp_decoder` are in branch `cpp` since 2026-11-13; on `main` the same code is Rust, in the modules of
+`crates/rav1g/src/host` that name those files as their origin, and the desktop program is `rav1g-dec`
+([rust-port.md](rust-port.md), [warp-decoder.md](warp-decoder.md)). The shaders and the C parser, which
+most of the findings are about, are the same files on both branches.
+
 ## Scoping (2026-11-08)
 
 Goal: make 4K AV1 play smoothly on Xbox Series in app mode. Software dav1d can't: it reaches only

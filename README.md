@@ -3,8 +3,10 @@
 A fast, open-source AV1 decoder on the GPU: entropy decoding on the CPU, everything after
 it (inverse transforms, intra and inter prediction, loop filter, CDEF, loop restoration,
 super-resolution, film grain) in D3D12 compute shaders. It runs on any D3D12 GPU. The name
-stands for Rust AV1 GPU: the C++ host is being ported to Rust on this branch
-([docs/rust-port.md](docs/rust-port.md)); the C++ decoder stays on branch `cpp` (release `v0.3.0`).
+stands for Rust AV1 GPU: the decoder on this branch is Rust (the D3D12 host and the interface,
+`crates/rav1g`), the C parser and entropy decoder it took over from upstream (`libav1`), and HLSL
+(`libav1/dx/shaders`). There is no C++ host on `main` any more ([docs/rust-port.md](docs/rust-port.md));
+the C++ decoder it was ported from lives on in branch `cpp` (release `v0.3.0`).
 
 rav1g is a fork of AOMedia's [av1-xbox-one](https://aomedia.googlesource.com/av1-xbox-one)
 (commit `b5c61563b48625c261a8d627cfa928896fd10b13`, August 2021), with upstream's history
@@ -144,18 +146,22 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
   The 10-bit stream with scaled references that stood here as wrong on the console is right: its md5
   references had been made with ffmpeg scaling every frame to the size of the first.
 
-Next targets: the Rust host ([docs/rust-port.md](docs/rust-port.md), started 2026-11-12; steps 1 to 4 of
-5 are in: a Cargo workspace that builds the decoder, `rav1g-dec`, the conformance tool in Rust,
-bindings with layout tests for the structs shared with the shaders and with the entropy decoder, and the
-whole host in Rust, from the creation of a decoder to the completion thread; the cargo build compiles no
-C++ of the decoder. Step 5 is in: the Rust interface of the `rav1g` crate, its interface for C,
-`crates/rav1g/include/rav1g.h`, and the test player on it, in three packages per run: with the C++
-library as the reference, and with the Rust library built two ways. On the console the Rust library
-decodes the md5 set and is as fast as the C++ one or faster; the C++ sources leave the tree next), then
+**The Rust port, phase 1, is complete** ([docs/rust-port.md](docs/rust-port.md), 2026-11-12 to
+2026-11-13): the whole D3D12 host is Rust, from the creation of a decoder to the completion thread, with
+a Rust interface (the `rav1g` crate) and an interface for C (`crates/rav1g/include/rav1g.h`, which the
+test player uses). On the console it decodes the md5 set byte-identically and is as fast as the C++
+decoder or faster (1.5 to 4 % in the tile threads with the C of the parser compiled by clang, 7 to 14 %
+in the recording). The C++ host was removed from this branch after that; CI still holds every frame,
+the stage dumps and the memory lines of the Rust decoder against the C++ decoder of branch `cpp`, for as
+long as the two have the same shaders. The test player comes in two packages per run: the default with
+the library as `rav1g.dll` (C of clang), and a static build with the C of MSVC
+([docs/test-player.md](docs/test-player.md)).
+
+Next targets: phase 2, the parser of rav1d in place of the C parser, which is the CPU limit at 4K
+([docs/phase2-rav1d.md](docs/phase2-rav1d.md) has the design and the measurements behind it), and
 inter and intra prediction on the GPU (a measured `-interfast` prototype showed that inter time is per
-block and per dispatch, not filtering; see
-[gpu-av1-decoder.md](docs/gpu-av1-decoder.md)) and entropy decoding on the CPU (frame-parallel or a
-faster parser). The goals, in order: heavy 4K at 30 fps in real time (at most 33.3 ms per frame; not met
+block and per dispatch, not filtering; see [gpu-av1-decoder.md](docs/gpu-av1-decoder.md)).
+The goals, in order: heavy 4K at 30 fps in real time (at most 33.3 ms per frame; not met
 yet, nor the 41.7 ms of 24 fps), then faster still, then decoding with as much of the CPU, GPU and
 memory as possible left to the application.
 
@@ -165,11 +171,15 @@ memory as possible left to the application.
   player, its defaults and flags, log lines, md5 checks (references can be made with dav1d:
   `testing/md5ref/make_md5_ref.sh`) and the host-side shader checks.
 - [docs/gpu-av1-decoder.md](docs/gpu-av1-decoder.md): history, measurements and reasoning.
-- [docs/warp-decoder.md](docs/warp-decoder.md): `warp_decoder` and `rav1g-dec`, the decoder as a
-  console program on the WARP software adapter, and the conformance run of every push.
-- [docs/rust-port.md](docs/rust-port.md): the Rust port, its steps, gates and progress. The workspace
-  builds with `RAV1G_SHADER_DIR=<shader headers> cargo build --release` on Windows and with
+- [docs/warp-decoder.md](docs/warp-decoder.md): `rav1g-dec`, the decoder as a console program on the
+  WARP software adapter, the conformance run of every push, and the comparison with `warp_decoder`,
+  the same program of the C++ decoder.
+- [docs/rust-port.md](docs/rust-port.md): the Rust port, phase 1: its steps, gates and progress, what
+  was removed at its end and what is open. The workspace builds with
+  `RAV1G_SHADER_DIR=<shader headers> cargo build --release` on Windows and with
   `cargo xwin build --target x86_64-pc-windows-msvc` on Linux.
+- [docs/phase2-rav1d.md](docs/phase2-rav1d.md): the design of phase 2, rav1d's parser in place of the
+  C parser.
 
 ## Licence
 

@@ -1,40 +1,43 @@
-# warp_decoder and the conformance run
+# rav1g-dec, warp_decoder and the conformance run
 
-`warp_decoder` (`testing/warp_decoder`) is the decoder as a desktop console program. It
-decodes AV1 streams with libav1 on a D3D12 device, by default the **WARP software adapter**,
-reads every output frame back and computes one md5 per output frame, the way the test player
-does. It needs no GPU, no window and nothing of UWP, so it runs on a CI runner: every push
-decodes AOM's decoder test vectors and a few other streams with it and compares the md5 of
-every frame with a reference (the [conformance run](#conformance-run)).
+`rav1g-dec` (`tools/rav1g-dec`) is the decoder as a desktop console program. It decodes AV1 streams
+with the `rav1g` crate on a D3D12 device, by default the **WARP software adapter**, reads every
+output frame back and computes one md5 per output frame, the way the test player does. It needs no
+GPU, no window and nothing of UWP, so it runs on a CI runner: every push decodes AOM's decoder test
+vectors and a few other streams with it and compares the md5 of every frame with a reference (the
+[conformance run](#conformance-run)).
 
 It exists because decoder bugs were found only on the console, and only by luck. It does not
 measure speed: WARP rasterises on the CPU.
 
-## rav1g-dec
+**`warp_decoder`** is the same program of the C++ decoder: C++, an MSBuild project,
+`testing/warp_decoder` in branch `cpp`. It came first, and `rav1g-dec` was written to take its flags,
+print its lines, write its files and return its exit codes, so that every script of
+`testing/conformance` and `testing/stage_dump` runs with either (`--tool`). When the C++ host left
+`main` (2026-11-13, [rust-port.md](rust-port.md)) `warp_decoder` left with it. CI still builds it,
+from branch `cpp` at a pinned commit, as the second decoder that `rav1g-dec` has to agree with: see
+[Equality with the C++ decoder](#equality-with-the-c-decoder). Where this document says
+`warp_decoder` in a result or a measurement, that run was made with it; the flags and lines are
+those of both.
 
-`rav1g-dec` (`tools/rav1g-dec`) is the same program written in Rust on the Cargo workspace of the Rust
-port ([rust-port.md](rust-port.md)): the decoder comes from `crates/rav1g-sys`, which compiles the sources
-of `libav1.vcxproj` with the settings described [below](#what-it-shares-with-the-test-player), and the
-program reaches it through `crates/rav1g`. It takes the flags of the [table below](#run), prints the same
-lines, writes the same md5 and dump files and returns the same exit codes, so `run.py`, `gputime_smoke.py`
-and `ci_dumps.py` run with either program (`--tool`). It will replace `warp_decoder`; until the C++ host is
-gone both are built on every push and their output is compared.
+## Build
 
-Build on Windows (Rust 1.99 or newer, the MSVC build tools, a Windows SDK, and LLVM for `bindgen`):
+On Windows (stable Rust, the MSVC build tools, a Windows SDK, and LLVM for `bindgen`):
 
 ```bat
 set RAV1G_SHADER_DIR=<directory whose dx\shaders\h has the shader headers>
 cargo build --release
 ```
 
-The program is `target\release\rav1g-dec.exe` (statically linked runtime). The shader headers are those
-of the FXC build: the directory `testing/shader_cache/shaders.py build --root <dir>` writes, or `libav1`
-after a build of `libav1.vcxproj`; the build stops when the variable is not set. With
-`RAV1G_SM6TEST_SHADER_DIR=<dir>` (what `testing/sm6test/compile.py --out <dir>` writes) `-sm6test` has
-its test shaders; without it the test reports that they are not built in. `--features uavsync` builds
-the decoder for the headers of the uavsync variant.
+The program is `target\release\rav1g-dec.exe` (statically linked runtime, no other files needed).
+The shader headers are those of the FXC build: the directory
+`testing/shader_cache/shaders.py build --root <dir>` writes
+([test-player.md](test-player.md#shader-cache-of-the-workflow)); the build stops when the variable is
+not set. With `RAV1G_SM6TEST_SHADER_DIR=<dir>` (what `testing/sm6test/compile.py --out <dir>` writes)
+`-sm6test` has its test shaders; without it the test reports that they are not built in.
+`--features uavsync` builds the decoder for the headers of the uavsync variant.
 
-Build on Linux, for Windows (clang 19 or newer with `clang-cl`, `lld-link` and `llvm-lib` on the path,
+On Linux, for Windows (clang 19 or newer with `clang-cl`, `lld-link` and `llvm-lib` on the path,
 libclang, and `cargo-xwin`, which fetches the Windows SDK and the MSVC C runtime; no wine):
 
 ```sh
@@ -45,53 +48,18 @@ RAV1G_SHADER_DIR=<dir> cargo xwin build --release --target x86_64-pc-windows-msv
 The shader headers come from a Windows build (FXC): CI keeps them as the artifact
 `rav1g-shader-headers-<run id>`.
 
-What differs from `warp_decoder`:
-
-- The usage text names `rav1g-dec`; the lines the scripts read are the same.
-- `-continue_on_error` (a flag of `rav1g-dec` only, and of the test player): a decode call that
-  fails does not end the task. The error is counted and the next temporal units go to the same
-  decoder, which is what an application does with a damaged stream; one `CONTINUE <stream>: decode
-  error <n> at temporal unit <u>: <text>` line per error, and `CONTINUE <stream>: <n> decode errors,
-  <m> temporal units decoded behind the first, <f> frames out` behind the task. The result line is
-  that of the frames (`nocheck` without a reference), with the errors in its detail.
-- `-keep_going` (a flag of `rav1g-dec` only): a task that ends with a decode error does not end the
-  run; the tasks behind it run in the same process, and the exit code is still 2.
-- `-playersmoke <directory>` (a flag of `warp_decoder` only): runs the decoder code of the test player
-  (`testing/player_common`) through `rav1g.h` on the C++ library, on the tasks of
-  `<directory>/args/args_av1.txt`, as the player does with its LocalState; the player's log goes to
-  stdout. CI runs four tasks with it (docs/rust-port.md, step 5, part 3).
-- `-capi` (a flag of `rav1g-dec` only): the decoder is used through its interface for C, the functions
-  of `rav1g.h`, instead of the Rust interface (docs/rust-port.md, step 5); the output is the same, and
-  the program says so in an `INTERFACE` line. CI decodes the whole set once more with it.
-- `-budget <MiB>` (a flag of `rav1g-dec` only): the decoder is created with a budget callback that says
-  the application has this much memory left for it, so the budget guard of the creation can be run on a
-  desktop: with `-v` the `MEMORY budget` line of an accepted creation, or the wait and the
-  `MEMORY REFUSED` line of a refused one (the task then fails at the creation of its decoder).
-- The stream path goes to the C stream reader as UTF-8; `warp_decoder` passes the bytes of its command
-  line. The same for paths of plain ASCII.
-- Lines end with a line feed; `warp_decoder`, a C program writing to a redirected stdout, ends them with
-  carriage return and line feed. The md5 files are the same bytes (`<md5>   <n>\r\n`).
-- The C and C++ are compiled without whole program optimisation. (That build is how a miscompilation of
-  `av1_mi_push_block` by MSVC was found; the loop it hit is rewritten:
-  [rust-port.md](rust-port.md#progress).)
-- CI runs the experiment passes (`-lfhsplit`, `-intraedgefix`, the uavsync shaders) and the `-interfast`
-  pass with `warp_decoder` only.
-
-CI: the job `rust` builds it with MSVC and runs the conformance set, the timing smoke test and the stage
-dumps with it (artifacts `rav1g-dec-x64-<run id>`, `rav1g-dec-conformance-<run id>`,
-`rav1g-dec-stage-dumps-<run id>`); `rust-equal` compares its md5 files and stage dumps with
-`warp_decoder`'s (`testing/conformance/compare_md5.py`); `rust-cross` builds it on Linux
-(`rav1g-dec-x64-xwin-<run id>`) and `rust-cross-run` decodes the conformance set with that program.
+CI: the job `rust` builds the program with MSVC and runs every check of this document with it
+(artifacts `rav1g-dec-x64-<run id>`, `rav1g-dec-conformance-<run id>`,
+`rav1g-dec-stage-dumps-<run id>`); `rust-cross` builds it on Linux (`rav1g-dec-x64-xwin-<run id>`)
+and `rust-cross-run` decodes the conformance set with that program and runs the player's decoder code
+with it; `cpp-reference` and `rust-equal` are the comparison with the C++ decoder.
 
 ## What it shares with the test player
 
-- **The decoder**: the sources and shaders of `libav1/build/libav1.vcxproj`, compiled with
-  the settings that project gives them in Release x64 (the same FXC profile and flags, the
-  same per-file compiler optimisation, asserts compiled in). The library project itself is a
-  Windows Store static library, which a desktop program cannot reference, so `warp_decoder`
-  compiles the files itself; `testing/warp_decoder/libav1_sources.props` lists them and is
-  written from `libav1.vcxproj` by `testing/warp_decoder/sync_sources.py` (CI checks that it
-  is up to date). Nothing in the library is UWP-only.
+- **The decoder**: the Rust library of the workspace (`crates/rav1g`) with the C of the parser and
+  entropy decoder (`crates/rav1g-sys`: the files of `c_sources.txt` at `/O1 /Ot`, the marked ones at
+  `/O2`, asserts compiled in, link time optimisation), built from the same shader headers as the
+  libraries of the player's packages.
 - **The decoder configuration** of `AV1Decoder::DecodeOne` in
   `testing/player_common/decoder.cpp`: the first key frame is looked for with
   `aom_codec_peek_stream_info`, the decoder is created for the stream's largest frame size
@@ -101,41 +69,106 @@ dumps with it (artifacts `rav1g-dec-x64-<run id>`, `rav1g-dec-conformance-<run i
   `-intraopt`, `-asyncclear`, `-t <threads>`, `-limit <n>`.
 - **The output path**: the decoder asks for an output image for every frame that is output
   and hands it back through the frame-ready callback; the frame is hashed there.
-- **The stream readers** of `testing/common` (IVF, WebM/Matroska, OBU, MP4) and the md5 code.
+- **The stream readers** of `testing/common` (IVF, WebM/Matroska, OBU, MP4), compiled into the program
+  (`tools/rav1g-dec/shim`), with the timing summary, the stage dump writer and the Shader Model 6 test.
 - **The hash**: the visible samples of the luma plane, then of U, then of V; one byte a sample
   for 8-bit, two bytes (low byte first) above that; luma only for a monochrome stream; each
   frame at the size it has.
+- **The player's decoder code itself**, for `-playersmoke` ([below](#the-test-players-decoder-code)).
 
 What differs: the output images are readback buffers only (the player also creates the
-textures it presents), there is no budget guard (`memory_available_cb` is not set: a desktop
+textures it presents), there is no budget guard unless `-budget` asks for one (a desktop
 process has no app memory limit), the stream is read on the decoding thread, and every task
-gets a new decoder.
+gets a new decoder. The program uses the decoder through the Rust interface of the crate; with
+`-capi` through the functions of `rav1g.h`, as the player does.
 
-## Build
+## Flags of rav1g-dec that warp_decoder does not have
 
-Windows, Visual Studio 2022 or later with the C++ desktop workload and a Windows 10/11 SDK:
+- `-capi`: the decoder is used through its interface for C, the functions of `rav1g.h`, instead of
+  the Rust interface (docs/rust-port.md, step 5); the output is the same, and the program says so in
+  an `INTERFACE` line. CI decodes the whole set once more with it.
+- `-continue_on_error` (also a flag of the test player): a decode call that fails does not end the
+  task. The error is counted and the next temporal units go to the same decoder, which is what an
+  application does with a damaged stream; one `CONTINUE <stream>: decode error <n> at temporal unit
+  <u>: <text>` line per error, and `CONTINUE <stream>: <n> decode errors, <m> temporal units decoded
+  behind the first, <f> frames out` behind the task. The result line is that of the frames (`nocheck`
+  without a reference), with the errors in its detail.
+- `-keep_going`: a task that ends with a decode error does not end the run; the tasks behind it run
+  in the same process, and the exit code is still 2.
+- `-budget <MiB>`: the decoder is created with a budget callback that says the application has this
+  much memory left for it, so the budget guard of the creation can be run on a desktop: with `-v` the
+  `MEMORY budget` line of an accepted creation, or the wait and the `MEMORY REFUSED` line of a refused
+  one (the task then fails at the creation of its decoder).
+- `-playersmoke <directory>`: see the next section. (`warp_decoder` has the flag too, on the C++
+  library.)
+
+Other differences: the usage text names `rav1g-dec`; the stream path goes to the C stream reader as
+UTF-8 where `warp_decoder` passes the bytes of its command line (the same for plain ASCII); lines end
+with a line feed where `warp_decoder`, a C program writing to a redirected stdout, ends them with
+carriage return and line feed. The md5 files are the same bytes (`<md5>   <n>\r\n`).
+
+## The test player's decoder code
+
+The test player is a UWP app and cannot run on a CI runner, and a path that CI only compiles is not
+tested: two bugs of the player's port to `rav1g.h` were found on the console that way
+([rust-port.md](rust-port.md), step 5). So the part of the player that uses the decoder
+(`testing/player_common`: the task file, the decoder creation with a device and no queue, the output
+pool, the md5 check, the timing run, `-continue_on_error`) is compiled into `rav1g-dec` from the same
+files, and
 
 ```bat
-msbuild testing\warp_decoder\warp_decoder.vcxproj /m /p:Configuration=Release /p:Platform=x64
+rav1g-dec -playersmoke <directory>
 ```
 
-The program is `testing\warp_decoder\bin\x64\Release\warp_decoder.exe` (statically linked
-runtime, no other files needed). The project is not part of `av1xbox.sln` and writes nothing
-into the directories that solution builds in: the shader headers go to
-`testing\warp_decoder\obj`. CI builds it with the `v145` toolset and the `10.0.26100.0`
-SDK and keeps it as the artifact `rav1g-warp-decoder-x64-<run id>`. In CI the project does
-not compile the shaders: it gets the headers of the workflow's shader step through
-`/p:Rav1gPrebuiltShaders=<directory>` ([test-player.md](test-player.md#shader-cache-of-the-workflow)),
-the same bytecode the test player's package has.
+runs it as the player runs it: the tasks are the lines of `<directory>/args/args_av1.txt`, as in the
+player's LocalState, stream paths are relative to `<directory>`, and the player's log goes to stdout.
+It calls the functions of `rav1g.h` that the `rav1g` crate of the program has, which are the functions
+the libraries of the packages have; nothing of the C++ decoder is involved. The exit code is 0 when
+the player ended its launch (what its tasks did is in its log) and 2 when it did not within 25
+minutes.
+
+`testing/conformance/player_smoke.py --tool <rav1g-dec.exe> --streams <dir> --out <dir>` is the check
+of CI: four tasks (a small 8-bit vector; 10-bit with four threads and three frame slots; a stream
+whose frames change size, from Matroska, with `-r -lowmem`; spatial layers with `-gputime
+-asyncclear`), each of which has to end with `MD5 is OK`; the log has to name the Rust library
+(`LIBRARY rav1g ... the Rust host`) and have no error line; the launch has to end, and so does a
+launch without a task file, which says `No args were found`. The `rust` job runs it with the MSVC
+build and `rust-cross-run` with the build of Linux, whose C and C++ are compiled by clang as in the
+default package of the player. The cases with a decode error are in
+[A decode error in the middle of a stream](#a-decode-error-in-the-middle-of-a-stream).
+
+## Equality with the C++ decoder
+
+Phase 1 of the Rust port kept the output of the decoder byte for byte, and CI goes on checking that
+against the C++ decoder, which is no longer in this branch:
+
+- The job **`cpp-reference`** checks out branch `cpp` at the commit that `CPP_REFERENCE_COMMIT` of
+  `.github/workflows/build.yml` names (df73d8c, the head of `cpp` on 2026-11-13), builds its
+  `warp_decoder` with its own shaders, and runs it with the scripts, streams and task lists of this
+  commit: the whole set (`run.py`; it has to give the results of `expected.txt` too), the stage dumps
+  of `dump_tasks.txt`, and the MEMORY lines of ten decoder configurations (`memory_lines.py`).
+  Artifacts `rav1g-cpp-reference-<run id>` and `rav1g-cpp-reference-stage-dumps-<run id>`.
+- The job **`rust-equal`** first checks that the shaders of this commit are those of the pinned
+  commit (`shaders.py same`, on the reports of the two shader builds), then compares, `rav1g-dec`
+  against `warp_decoder`: the md5 of every output frame of every stream, the bytes of every stage
+  dump (`compare_md5.py`), and the MEMORY lines (`memory_lines.py compare`; the size of the host pool
+  is left out, it depends on where the program's allocator puts it).
+
+The pin is bumped on purpose, in the workflow and here, when a change both decoders have (a shader,
+the C of the parser) is on both branches. The comparison is between two hosts that run the same
+shaders; it **ends when the shaders of the branches diverge**, which is planned for the switch to DXC
+and for phase 2 ([rust-port.md](rust-port.md#equality-reference)). `rust-equal` then fails at its
+first step and says so, and the jobs `cpp-reference` and `rust-equal` are removed; the references of
+dav1d and AOM, which every pass of the set is held against, stay.
 
 ## Run
 
 ```bat
-warp_decoder -i clip.ivf -save_md5 clip.ivf.md5
-warp_decoder -i clip.ivf -check clip.ivf.md5
-warp_decoder -i av1-1-b8-01-size-16x16.ivf -check av1-1-b8-01-size-16x16.ivf.md5 -aom_md5
-warp_decoder -list tasks.txt -t 4
-warp_decoder -sm6test
+rav1g-dec -i clip.ivf -save_md5 clip.ivf.md5
+rav1g-dec -i clip.ivf -check clip.ivf.md5
+rav1g-dec -i av1-1-b8-01-size-16x16.ivf -check av1-1-b8-01-size-16x16.ivf.md5 -aom_md5
+rav1g-dec -list tasks.txt -t 4
+rav1g-dec -sm6test
 ```
 
 | Flag | |
@@ -155,9 +188,9 @@ warp_decoder -sm6test
 | `-timeout <seconds>` | give up on a task after this time |
 | `-name <text>` | what the `BEGIN` and `RESULT` lines call the stream (default: its file name) |
 | `-cdefv1`, `-nofitsize`, `-lowmemparts <n>`, `-lowmem`, `-slots <n>`, `-intrav2`, `-intraopt`, `-asyncclear` | as in the [test player](test-player.md#defaults-and-opt-out-flags) |
-| `-lfhsplit <n>`, `-intraedgefix` | the [experiments](test-player.md#experiments) of the test player; the conformance job runs the whole set with each, and with a decoder built with `/p:Rav1gUavSync=1` (the shaders of the uavsync package; the program prints `SHADERS uavsync`) |
+| `-lfhsplit <n>`, `-intraedgefix` | the [experiments](test-player.md#experiments) of the test player; with the `experiments` input the `rust` job runs the whole set with each, and with a program built with `--features uavsync` from the shaders of the uavsync package (it prints `SHADERS uavsync`) |
 | `-poisonmi`, `-poisonbuf` | debugging, off by default: the decoder fills the mode info pool (`-poisonmi`) or every buffer the CPU writes for the shaders (`-poisonbuf`) with the byte 0xA5 when it creates it, instead of leaving what the memory held. With `-poisonbuf` it also fills the constants of every stage again in every frame, right before the stage writes them (their memory is reused from frame to frame). What the decoder clears or initialises after the creation is as in a normal run. The output must be the same; a shader that reads bytes the CPU never wrote gives another one, or loses the device. The decoder passes both. See [Order check and poisoned buffers](#order-check-and-poisoned-buffers) |
-| `-interfast`, `-interfastlists` | the [inter fast path](test-player.md#inter-fast-path--interfast) of the test player: inter blocks listed by the fraction of their motion vectors (`inter_fast`, `inter_compound_fast`; with `-interfastlists` the original shaders on those lists), same output; the conformance job decodes the whole set once more with `-interfast` |
+| `-interfast`, `-interfastlists` | the [inter fast path](test-player.md#inter-fast-path--interfast) of the test player: inter blocks listed by the fraction of their motion vectors (`inter_fast`, `inter_compound_fast`; with `-interfastlists` the original shaders on those lists), same output; the `rust` job decodes the whole set once more with `-interfast` on every push |
 | `-interfastmode <n>` | `av1_set_inter_fast(n)` for diagnosis: 1 is `-interfast`, +2 keeps `inter_main` on the lists of one reference, +4 `inter_compound` on those of two (7 is `-interfastlists`); 8 only makes room for the lists in the block maps and leaves the path off |
 | `-gputime`, `-gputimedetail`, `-gputimeisolate`, `-progress` | the [timing run](test-player.md#timing-run--gputime-and--nopresent) of the test player and its [inter breakdown](test-player.md#inter-prediction-breakdown--gputimedetail--gputimeisolate): the summary as `GPUTIME ...` lines on stdout, with `-progress` the per-frame lines too. On WARP the times are those of a CPU rasterizer; the counters are the stream's |
 | `-alllayers` | a stream with spatial layers: output the frame of every layer of a temporal unit (`AV1D_SET_OUTPUT_ALL_LAYERS`); the default is one frame per temporal unit, the highest layer it has. See [Layers and new sequences](test-player.md#layers-and-new-sequences) |
@@ -206,7 +239,8 @@ every frame is in the `-save_md5` file.
 Exit code: 0 every task decoded and matched, 1 a frame or a frame count differs, 2 a decode
 error (or `-sm6test` could not run its test), 3 bad arguments or no D3D12 device, 4 timeout. A crash (an access violation, a failed
 assert of the library) ends the process without a `RESULT` line: a `CRASH exception 0x... at
-<module>+0x<offset>` line names the place, which `warp_decoder.map` resolves.
+<module>+0x<offset>` line names the place, which the program's `.pdb` resolves (`rav1g_dec.pdb` in
+the artifact `rav1g-dec-x64-<run id>`).
 
 ## Stage dumps
 
@@ -222,14 +256,15 @@ records, loop filter constants and edge lists, CDEF and loop restoration lists),
 again and the files are `<name>.seq<n>_f<n>.stages`.
 
 ```bat
-warp_decoder -i clip.ivf -limit 2 -dumpstages 0,1 -dumpdir dumps
+rav1g-dec -i clip.ivf -limit 2 -dumpstages 0,1 -dumpdir dumps
 python testing/stage_dump/stage_dump.py list dumps
 python testing/stage_dump/stage_dump.py compare console-dumps dumps
 ```
 
-The conformance job writes such dumps on WARP for the streams and frames listed in
+The `rust` job writes such dumps on WARP for the streams and frames listed in
 `testing/conformance/dump_tasks.txt` (`<stream> <frames> [<temporal units>]`), after the
-run, and keeps them in the artifact `rav1g-stage-dumps-<run id>`, one directory per stream
+run, and keeps them in the artifact `rav1g-dec-stage-dumps-<run id>` (those of the C++ decoder
+are in `rav1g-cpp-reference-stage-dumps-<run id>`), one directory per stream
 with the dumps, the task's log and its md5 file:
 
 - vectors (`aom`) and streams encoded in the job (`svt`): the `.stages` files. An `svt`
@@ -274,7 +309,8 @@ vectors, and for the two monochrome vectors once the grey planes are added.
 
 ## Conformance run
 
-`.github/workflows/build.yml` runs it on every push, in two jobs.
+`.github/workflows/build.yml` runs it on every push, in two jobs (and a third time with the program
+built on Linux, `rust-cross-run`).
 
 **`conformance-streams`** (Linux) runs `testing/conformance/prepare_streams.sh`, which reads
 `testing/conformance/streams.txt` and fetches or makes:
@@ -301,7 +337,8 @@ keeps them in the Actions cache, keyed by the list and the scripts, and the Wind
 restores them from there. The job's artifact `rav1g-conformance-md5-<run id>` has the md5
 references and the task list only.
 
-**`conformance`** (Windows) builds `warp_decoder` and runs `testing/conformance/run.py`: the
+**`rust`** (Windows; it was `conformance`, with `warp_decoder`, while the C++ host was in this
+branch) builds `rav1g-dec` and runs `testing/conformance/run.py`: the
 vectors in one decoder process, in the order of the list, with `-t 4`, and every large stream
 (the cuts and the streams encoded in the job) in a process of its own (see
 [Results](#results) for why). A task that ends in a
@@ -314,13 +351,13 @@ the D3D12 device is repeated). Every task has a
 timeout (300 s for a vector, 2400 s for the larger streams), so a hang ends that stream, not
 the job.
 
-Before the streams the job runs `warp_decoder -sm6test` and shows the `CAPS` and `SM6TEST` lines of
+Before the streams the job runs `rav1g-dec -sm6test` and shows the `CAPS` and `SM6TEST` lines of
 WARP in its summary ([Shader Model 6 test](test-player.md#shader-model-6-test--sm6test)); the log is
 `sm6test/warp.log` in the artifact.
 
 The result is a table in the job summary, one row per stream: size, bit depth, frames,
 matching frames, first bad frame, decode time, result. The artifact
-`rav1g-conformance-<run id>` has `results.tsv`, `summary.md`, the decoder's output for every
+`rav1g-dec-conformance-<run id>` has `results.tsv`, `summary.md`, the decoder's output for every
 stream (`logs/<stream>.log`) and the md5 of every output frame (`md5/<stream>.md5`, in the
 player's format).
 
@@ -333,7 +370,8 @@ read two bytes of struct padding in the mode info, and a decoder that got the me
 destroyed one found other bytes there than zero. `av1-1-b8-22-svc-L2T1-2` failed that way now and
 then behind `svc-L2T1`, `av1-1-b10-00-quantizer-00` every time behind an 8-bit quantizer vector.
 The repeat alone showed the stream as `unstable`, the job was run again, and it passed. Three steps
-of the job now test for it directly, with `warp_decoder` and (on `main`) with `rav1g-dec`:
+of the `rust` job now test for it directly (the workflow of branch `cpp` has the same steps with
+`warp_decoder`):
 
 - **`testing/conformance/order_check.py`** decodes five sequences, each in one decoder process and
   in this order, every stream against its reference: `av1-1-b8-00-quantizer-00` then
@@ -352,8 +390,7 @@ of the job now test for it directly, with `warp_decoder` and (on `main`) with `r
   frame. The constants of a frame are pieces of one upload buffer per slot that is only rewound
   between frames, so a field that a stage does not write holds what an earlier frame had at that
   place; filled, it has no plausible value. The `experiments` input adds the whole set with
-  `-poisonbuf`, with `-poisonbuf -interfast` and, with `warp_decoder`, with `-poisonbuf -intrav2`
-  (with `rav1g-dec` also the whole set with `-interfast`).
+  `-poisonbuf`, with `-poisonbuf -interfast` and with `-poisonbuf -intrav2`.
 
 All three pass (`cpp` 15af3fb, run 43277284568: 5 of 5 sequences in 14 s, 137 of 137 streams in
 37 s with either flag; `main` 3271d43, run 43277284480: 12 s, 32 s and 30 s, and with `rav1g-dec`
@@ -379,9 +416,8 @@ where the cut takes a later tile. `--then-whole` lets the undamaged stream follo
 
 `testing/conformance/cut_tile_check.py` does that to two streams of the set (a vector with one tile,
 the stream with eight) and runs them, each time followed by an undamaged stream in the same process:
-with `rav1g-dec` through the Rust interface and through `rav1g.h` (the `rust` job), and with the
-decoder code of the test player on the C++ library (`warp_decoder -playersmoke`, the `conformance`
-job). It wants: the task of a damaged stream ends with that error and has the frames before the
+with `rav1g-dec` through the Rust interface and through `rav1g.h`, and with the decoder code of
+the test player on the same library (`rav1g-dec -playersmoke`), all in the `rust` job. It wants: the task of a damaged stream ends with that error and has the frames before the
 damage right; the stream behind it is right; with `-continue_on_error` the decoder goes on, and the
 frames before the damage and from the next key frame on are those of the reference (in the stream
 with eight tiles the key frame 11 temporal units behind the damage; for the vector, which has one
@@ -553,14 +589,14 @@ sh testing/conformance/prepare_streams.sh conformance-streams
 On Windows, with that directory and Python 3:
 
 ```bat
-python testing\conformance\run.py --tool testing\warp_decoder\bin\x64\Release\warp_decoder.exe ^
+python testing\conformance\run.py --tool target\release\rav1g-dec.exe ^
   --streams conformance-streams --out conformance-out
 ```
 
 `--only <regular expression>` runs the streams whose name matches, `--tool-args "-cdefv1"`
 adds flags to every task (`-hw` for a hardware adapter), `--no-repeat` skips the repeat of
 failing streams. One stream by hand: take its line from `conformance-streams\manifest.txt`,
-run `warp_decoder` with those arguments from inside `conformance-streams`, and add `-o` or
+run `rav1g-dec` with those arguments from inside `conformance-streams`, and add `-o` or
 `-save_wrong_yuv` for the samples.
 
 ### References for streams whose frames change size

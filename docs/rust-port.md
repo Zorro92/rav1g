@@ -1,13 +1,16 @@
 # Rust port, phase 1: design
 
-Status: started 2026-11-12; steps 1 (build skeleton, `rav1g-dec`), 2 (bindings for the shared structs,
-layout tests), 3 (leaf modules) and 4 (frame pipeline: the whole host is Rust in the cargo build, which
-compiles no C++ of the decoder any more) are in the tree, and of step 5 the Rust interface and the
-interface for C (`rav1g.h`) and the UWP test player on the Rust library, in three packages that were
-checked and timed on the console: the md5 set passes with all three, the Rust library is as fast as the
-C++ one or faster; see [Progress](#progress). Left: the C++ sources leave the tree.
-Branch `main`. The C++ decoder at tag `v0.3.0` (branch `cpp`) is the reference: every step below has to
-decode the conformance set md5-identically to it and to dav1d.
+Status: **complete** (2026-11-12 to 2026-11-13). All five steps are in the tree: the build skeleton and
+`rav1g-dec`, the bindings for the shared structs with layout tests, the leaf modules, the frame pipeline,
+and the Rust interface with the interface for C (`rav1g.h`) and the UWP test player on it. The Rust
+decoder was checked and timed on the console: it decodes the md5 set byte-identically and is as fast as
+the C++ decoder or faster. After that the C++ host was removed from `main`
+([Phase 1 complete](#phase-1-complete-the-c-host-leaves-main-2026-11-13)): the decoder on this branch is
+Rust, the C parser and HLSL. The record of every step is under [Progress](#progress).
+Branch `main`. The C++ decoder at tag `v0.3.0` (branch `cpp`) was the reference: every step below had to
+decode the conformance set md5-identically to it and to dav1d, and CI still holds the Rust decoder
+against it ([Equality reference](#equality-reference)). What is left open is listed at the end of
+Progress; phase 2 is designed in [phase2-rav1d.md](phase2-rav1d.md).
 
 ## Goal and scope
 
@@ -65,10 +68,11 @@ At the end no C++ remains in the decoder: the C parser, the HLSL and Rust.
 | --- | --- |
 | `crates/rav1g` | the decoder: Rust host modules, API, `capi` feature for the C ABI (`include/rav1g.h`) |
 | `crates/rav1g-sys` | builds the C parser with `cc` (with it three C files of its own: the macros of the C interface as functions, the host functions that raise the decoder's error, the shader bytecode table); `bindgen` bindings |
-| `crates/rav1g-shaders` | shader bytecode: `build.rs` runs DXC (see Requirements) and embeds the DXIL with `include_bytes!` |
+| `crates/rav1g-shaders` | planned, with the switch to DXC: shader bytecode, `build.rs` runs DXC (see Requirements) and embeds the DXIL with `include_bytes!`. Today the bytecode is the FXC headers of `RAV1G_SHADER_DIR`, in `crates/rav1g-sys/shader_table.c` |
 | `tools/rav1g-dec` | command-line decoder for conformance, md5 and stage dumps |
 | `tools/rav1g-header` | writes `rav1g.h` from `crates/rav1g/src/capi.rs` with `cbindgen`, or checks it |
-| `libav1/`, `testing/` | as today; C++ files leave `libav1/dx` as steps 3-4 replace them |
+| `libav1/` | the C parser and entropy decoder (`av1`, `aom*`), the shaders (`dx/shaders`) and three headers of `dx` (`av1_core.h` and `av1_perf.h`, the C interface between the parser, the host and the applications; `intra_v2_sched.h`, for the intra check). No C++ |
+| `testing/` | the test player (C++, on `rav1g.h`), the conformance scripts, the host checks of the shaders |
 
 Dependencies: `windows` (D3D12/DXGI bindings), `cc`, `bindgen`, `cbindgen`. Edition 2024, stable Rust.
 Target `x86_64-pc-windows-msvc`, and the UWP target for the console build of the test player.
@@ -100,19 +104,50 @@ Agreed on 2026-11-12, in addition to the steps above:
 - **Every push:** the existing workflow plus `cargo build`/`cargo test` on Windows, the conformance set
   decoded by `rav1g-dec` on WARP (md5 against dav1d/AOM), the host shader checks unchanged, the listings
   scan unchanged (the shaders do not change).
-- **Equality with the C++ reference:** until step 4, CI also builds `warp_decoder` from tag `v0.3.0` and
-  checks that both produce the same md5 per frame.
+- **Equality with the C++ reference:** CI also builds `warp_decoder`, the desktop program of the C++
+  decoder, and checks that both produce the same md5 per frame, the same stage dumps and the same MEMORY
+  lines. Through step 5 it was built from the same commit; since the C++ host left `main` it is built
+  from branch `cpp` at a pinned commit ([Equality reference](#equality-reference)).
 - **Console:** after steps 4 and 5, the md5 set (8-bit and 10-bit, hidden frames, film grain, global
   motion, layers, size changes, scaled references, superres) and `-gputime` timing against `v0.3.0`.
 - **Local (optional):** `cargo xwin` cross-builds for Windows from Linux; running under wine with
   vkd3d-proton gives a third D3D12 implementation for quick checks, not a replacement for WARP in CI.
 
+## Equality reference
+
+The gate of phase 1 was byte-identical output, and the C++ decoder is the second implementation the Rust
+decoder is held against, beyond the md5 references of dav1d and AOM: two hosts that feed the same shaders
+have to write the same bytes at every stage, not only the same frames.
+
+- **What is compared** (job `rust-equal`): `rav1g-dec` of the pushed commit against `warp_decoder` of the
+  C++ decoder, both on WARP, with the same scripts, streams and task lists: the md5 of every output frame
+  of the 252 streams of the set, the bytes of every stage dump of `testing/conformance/dump_tasks.txt`,
+  and the MEMORY lines of ten decoder configurations (the size of the host pool left out).
+- **Where the C++ decoder comes from** (job `cpp-reference`): branch `cpp` at the commit that
+  `CPP_REFERENCE_COMMIT` of `.github/workflows/build.yml` names, built with its own project files and
+  its own shaders. **The pin is `df73d8c2aeaa95d31a6c603e57a0c92cccbd7ed9`** (the head of `cpp` on
+  2026-11-13: the player's review fixes; its `libav1` is the one `main` had when the C++ host was removed).
+- **The pin is bumped on purpose**, in the workflow and in this section, when a change that both decoders
+  have (a shader, the C of the parser) has landed on both branches. A change on `main` alone that leaves
+  the output as it is needs no bump.
+- **The comparison holds only while both branches have the same shaders.** `rust-equal` checks that
+  first (`testing/shader_cache/shaders.py same`, on the reports of the two shader builds: the same
+  compiler, arguments and sources, shader by shader) and fails there when they differ. Then either the
+  change goes to `cpp` as well and the pin moves, or the branches diverge and the comparison **ends**:
+  the jobs `cpp-reference` and `rust-equal` are removed, and the references of dav1d and AOM, the host
+  checks of the shaders and the console md5 set carry on alone. That end is planned: the shaders of
+  `main` switch from FXC to DXC ([Requirements](#requirements)), and phase 2 replaces the C parser
+  ([phase2-rav1d.md](phase2-rav1d.md)), where the C parser of this branch, not the C++ decoder, is the
+  oracle.
+
 ## Branches
 
-- `main`: the port. `cpp`: C++ fixes and experiments. `original`: upstream, frozen.
-- A fix to something both branches share (shaders, the C parser, the conformance set, the CI scripts) is
-  made on `cpp` and merged into `main`. A fix to the C++ host after its Rust replacement exists is ported
-  by hand; the conformance set catches a missed one.
+- `main`: the Rust decoder. `cpp`: the C++ decoder (tag `v0.3.0`), C++ fixes and experiments. `original`:
+  upstream, frozen.
+- A fix to something both branches share (shaders, the C parser, the test player, the conformance set,
+  the CI scripts) is made on `cpp` and merged into `main`, and the pin of the equality reference moves to
+  it. The C++ host exists on `cpp` only; a fix to it is ported to the Rust host by hand, and the
+  conformance set and the equality reference catch a missed one.
 
 ## Licence and naming
 
@@ -1416,6 +1451,123 @@ are 0.2.121.0, 0.2.121.2 and 0.2.121.3.
 packages start at all (the two imports from `ntdll.dll`; the `LIBRARY` line is the first sign of life of
 the library), then the md5 set with each, then `-gputime` on the 2160p clips, the three packages one
 after the other with the same tasks: the tile threads (`entropy_sum`) and the decode thread first.
+
+### Phase 1 complete: the C++ host leaves `main` (2026-11-13)
+
+The console had confirmed step 5 (the md5 set 15 of 15 with every package, the Rust library at the speed
+of the C++ one or faster, the fix of the memory credit, decode errors ending their tasks cleanly, and
+`-continue_on_error` on package 0.2.121.3: the frames before a cut and all frames of an appended
+undamaged stream are those of the reference, no hangs). So the C++ of the decoder was removed from this
+branch, in two commits (2a15694, 27fe25d) and a third for the first part of the clean-up (f7aafaa).
+
+**Removed** (23 files, 13,576 lines):
+
+| What | Files | Lines |
+| --- | --- | ---: |
+| The D3D12 host: `libav1/dx/av1_core.cpp`, `prediction.cpp`, `loopfilters.cpp`, `av1_compute.cpp`, `av1_memory.cpp`, `av1_thread.cpp`, `transform.cpp`, `vp9dx_linear_allocator.cpp` | 8 | 6,797 |
+| The headers only they used: `libav1/dx/av1_compute.h`, `av1_memory.h`, `av1_thread.h`, `types.h`, `vp9dx_linear_allocator.h`, and `libav1/d3dx12.h` | 6 | 2,513 |
+| The MSBuild library project: `libav1/build/libav1.vcxproj` and its filters | 2 | 1,934 |
+| `testing/warp_decoder`: the desktop program on that library, its project, its source list and the script that wrote it | 6 | 1,974 |
+| `testing/player_common/rav1g_libav1.cpp`: `rav1g.h` on the C++ library | 1 | 358 |
+
+With them went the reference package of the player, the `conformance` job as it was, the check that
+`libav1_sources.props` matches the project, and the two unit tests that held Rust tables against the text
+of `av1_compute.h` and `av1_compute.cpp`.
+
+**Kept in `libav1/dx`:** `av1_core.h` and `av1_perf.h` (C: the functions between the parser and the host
+and the switches and records of the applications; the parser, the bindings and the test programs include
+them), `intra_v2_sched.h` (the C++ model of the schedule of `intra_v2.hlsl` that the intra check runs the
+shader with; the decoder's schedule is `host/intra_v2.rs`, ported from it), and the shaders.
+
+**What read the removed files reads something else:**
+
+- `crates/rav1g-sys/c_sources.txt` lists the 71 C files and the 7 compiled at `/O2`; `build.rs` read
+  them from `libav1_sources.props`. The same files with the same settings.
+- `testing/shader_cache/shaders.py` takes every `.hlsl` file of `libav1/dx/shaders` as a shader and
+  builds `intra_main` and `intra_main_hbd` with `/Od`, which is what the `FxCompile` items of the project
+  said (checked: the same 97 names and flags). The keys of the shader cache, and so the bytecode, did
+  not change: `rust-equal` finds the 97 shaders of this branch and of `cpp` the same.
+- `testing/intra_check/run.sh` writes the table of the intra modes and the masks of the neighbours a
+  mode reads from the Rust host (`host/tables.rs`, `host/blocks.rs`) instead of from the C++.
+- The tables that came from `av1_compute.h` and `av1_compute.cpp` (`OBMC_MASK`, the `INTER_BLOCK_*`
+  tables, `INTRA_MODE_SHADER_PARAMS`, `GAUSSIAN_SEQUENCE`) have their only copy in `host/tables.rs`.
+- The solution has the player and `uwp_common`; the player project links the Rust library that
+  `/p:Rav1gRustDll` or `/p:Rav1gRustLib` names and stops with a message without one.
+
+**The equality reference** is `warp_decoder` of branch `cpp` at the pinned commit df73d8c
+([Equality reference](#equality-reference)); it replaces the `warp_decoder` of the same commit.
+
+**The player's code on the Rust library in CI.** `warp_decoder -playersmoke` ran the decoder code of the
+test player on the C++ library only. That code (`testing/player_common`) is compiled into `rav1g-dec` now
+and `rav1g-dec -playersmoke <directory>` runs it through the functions of `rav1g.h` that the `rav1g`
+crate has: the files and functions of the packages, on WARP, with nothing of the C++ host
+([warp-decoder.md](warp-decoder.md#the-test-players-decoder-code)). `testing/conformance/player_smoke.py`
+has the four tasks and the launch without a task file, `cut_tile_check.py --player-smoke` the decode
+errors and `-continue_on_error`. Two addresses of temporaries in `frame_outs.cpp`, an extension of MSVC
+that clang refuses, are named variables, so the build on Linux compiles the player's code as well.
+
+**Packages.** Two per run ([test-player.md](test-player.md#the-packages-of-a-run)):
+`rav1g-testplayer-x64-<run>`, version `0.2.<run>.0`, is the default: the Rust library as `rav1g.dll`
+with the C compiled by clang-cl with full link time optimisation
+(`testing/uwp_dx12_player/build_rav1g_dll.ps1`). `rav1g-testplayer-msvc-x64-<run>`, `0.2.<run>.2`, is the
+static build with the C of MSVC. Revision 1 stays the uavsync package of the `experiments` input: it was
+not a thing of the C++ host (a shader variant), and is now the default build with the uavsync shader
+headers and the `uavsync` feature of the crates. The check of the imports runs on each.
+
+**The jobs of a push now:** `player` (the two packages), `conformance-streams`, `rust` (`rav1g-dec` with
+MSVC: the set through the Rust interface, through `rav1g.h` and with `-interfast`, the player's decoder
+code, the decode errors, the order check, `-poisonmi`, `-poisonbuf`, the timing smoke test, the stage
+dumps, the MEMORY lines, the Shader Model 6 test; with the `experiments` input the experiment flags, the
+whole set with poisoned buffers and a build with the uavsync shaders), `cpp-reference`, `rust-equal`,
+`shader-headers`, `rust-cross`, `rust-cross-run` (the set and the player's decoder code with the program
+built on Linux), and the host checks of the shaders. The `-interfast` pass of the whole set, which ran
+with `warp_decoder` only, runs with `rav1g-dec` on every push.
+
+**On CI** (run 43371188041, commit 27fe25d, all 14 jobs green at the first attempt):
+
+- 252 of 252 streams with `rav1g-dec` of the MSVC build through the Rust interface, through `rav1g.h`
+  and with `-interfast`, and with the program built on Linux; 137 of 137 with `-poisonmi` and with
+  `-poisonbuf`; the order check; `D3D12 DEVICE REMOVALS: 0` in every pass.
+- Equality with the C++ decoder of `cpp` at df73d8c: the 97 shaders are the same; the md5 of every
+  output frame is equal for 252 of 252 streams (1,045 frames); the stage dumps are equal for the 7
+  dumped streams; the MEMORY lines are the same in all 10 cases.
+- The player's decoder code on the Rust library, MSVC build and Linux build: 4 of 4 tasks `MD5 is OK`,
+  the launch ended, also without a task file (`LIBRARY rav1g 0.4.0-dev, the Rust host; entropy decoder:
+  MSVC, /GL, static runtime`). The decode errors with it: the tasks of the two cut streams end with
+  their errors and the stream behind each is right; with `-continue_on_error` the frames before the
+  damage and from the next key frame on are right.
+- The packages 0.2.122.0 (`rav1g.dll` and the player: every import from an allowed DLL) and 0.2.122.2.
+
+**The host-pool clean-up, first part** (f7aafaa). The host kept 41 functions of the step-by-step port
+as exported C functions (`#[no_mangle] extern "C" rav1g_*`) that only Rust calls; they were symbols of
+`rav1g.lib` and exports of `rav1g.dll` next to the functions of `rav1g.h`. 30 are plain `pub(crate)`
+functions now, 11 had no caller left and are removed (two helpers and nine queue functions). What C
+calls stays exported: the `av1_*` functions of `dx/av1_core.h` and `dx/av1_perf.h` and the `rav1g_*`
+parts of `host_entry.c`. No layout changed, so the host pool and the MEMORY lines are as they were and
+the comparison with the C++ decoder still holds line for line. `rav1g.dll` is 12 KiB smaller
+(3,670,528 bytes). On CI (run 43372543824, commit f7aafaa): all 14 jobs green; against the C++ decoder
+again 252 of 252 streams and 1,045 frames with equal md5, 7 of 7 stage dumps equal, the MEMORY lines the
+same in all 10 cases; the player's decoder code 4 of 4 in both builds; 0 device removals; the packages
+0.2.123.0 (`rav1g.dll` and the player) and 0.2.123.2, every import from an allowed DLL. **These are the
+packages for the console.**
+
+**Open after phase 1:**
+
+- **The rest of the host-pool clean-up.** The queues are still the ring of 100 pointers behind a
+  critical section, laid out as the C++ struct, inside `Av1Core`; the inter breakdown and the tile
+  counters are still allocations of the C runtime; `Av1Core` still has the size of the C++ struct
+  (67,384 bytes) and lies in the host pool the application sizes by the memory query. Making the queues
+  Rust queues and the counters Rust allocations changes the size of the host pool and with it the
+  "host pool" MEMORY lines: `memory_lines.py` then has to leave those lines out of the comparison with
+  the C++ decoder (it leaves out the pool's total today), or the comparison of the MEMORY lines ends
+  before the rest does. Not done here because it changes what a decoder allocates and should be
+  checked on the console (15 decoders in a row through the budget guard) on its own.
+- **The switch from FXC to DXC** ([Requirements](#requirements)), and with it `crates/rav1g-shaders` and
+  the end of the equality reference.
+- **crates.io.** Nothing is published; the crates are `publish = false`.
+- **The names of the remaining plain functions** (`rav1g_mt_queue_push`, `rav1g_memory_setup`, ...) are
+  those of the port; they go with the queues and the allocator when those become Rust types.
+- Phase 2: [phase2-rav1d.md](phase2-rav1d.md).
 
 ## Estimate
 

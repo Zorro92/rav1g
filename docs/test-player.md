@@ -5,6 +5,16 @@ this repository's decoder changes. It decodes AV1 files listed in a plain-text a
 logs timings, and can write or check one md5 per frame. It has been run on Xbox Series
 consoles in UWP app mode; nothing in it is console-specific beyond the UWP packaging.
 
+The player is C++ and uses the decoder through the functions of `crates/rav1g/include/rav1g.h`; the
+decoder behind them is the Rust library of this branch ([rust-port.md](rust-port.md)). Much of this
+document was written while the decoder's D3D12 host was C++: where a section names a C++ file of the
+host (`libav1/dx/av1_core.cpp`, `prediction.cpp`, `loopfilters.cpp`, `types.h`, `av1_memory.h`, ...), that
+file is in branch `cpp`, and the same code is in the module of `crates/rav1g/src/host` that names it as
+its origin. The flags, the log lines and the numbers are those of both. In the same way `warp_decoder`
+is the desktop program of the C++ decoder; on this branch that program is `rav1g-dec`
+(`tools/rav1g-dec`), which takes the same flags and prints the same lines
+([warp-decoder.md](warp-decoder.md)).
+
 ## What this repository changes in upstream
 
 Forked from <https://aomedia.googlesource.com/av1-xbox-one> at
@@ -124,31 +134,47 @@ one commit each:
   [the warp check](#host-side-check-of-the-warp-shaders).
 - **Shader cache of the workflow**: the CI builds take the bytecode headers of the shaders
   from one FXC call per shader, kept by content, instead of compiling every shader in every
-  build. See [Shader cache of the workflow](#shader-cache-of-the-workflow). A build without
-  `/p:Rav1gPrebuiltShaders` is unchanged.
-- **Conformance run**: `testing/warp_decoder` is the decoder as a desktop console program
-  that decodes on the D3D12 WARP software adapter and writes or checks one md5 per output
-  frame, and `testing/conformance` runs it in CI over AOM's decoder test vectors, cuts of
-  open content and streams encoded in the job, against a list of the streams that are known
-  to fail. See [warp-decoder.md](warp-decoder.md). Nothing in the decoder or the player
-  changes; `testing/md5ref/make_md5_ref.sh` now hashes every frame at its own size.
+  build. See [Shader cache of the workflow](#shader-cache-of-the-workflow).
+- **Conformance run**: `rav1g-dec` (`tools/rav1g-dec`; `warp_decoder` in the C++ decoder) is
+  the decoder as a desktop console program that decodes on the D3D12 WARP software adapter
+  and writes or checks one md5 per output frame, and `testing/conformance` runs it in CI over
+  AOM's decoder test vectors, cuts of open content and streams encoded in the job, against a
+  list of the streams that are known to fail. See [warp-decoder.md](warp-decoder.md).
+  `testing/md5ref/make_md5_ref.sh` hashes every frame at its own size.
+- **The Rust library** (2026-11-12/13): the D3D12 host of the decoder is Rust, the player
+  uses it through `rav1g.h`, and the C++ host is gone from this branch
+  ([rust-port.md](rust-port.md)).
 
 ## Build
 
 `.github/workflows/build.yml` runs on every push to `main` that touches more than docs, and
-on demand. It builds `av1xbox.sln` (the player and its `uwp_common`/`libav1` dependencies;
-the player uses the decoder through `crates/rav1g/include/rav1g.h`)
-as Release x64 with MSBuild, the `v145` toolset and the `10.0.26100.0` Windows SDK. The
-minimum Windows version is overridden to `10.0.17763.0`. Upstream FXC/Shader Model 5.0
-compute shader settings are unchanged, and with `-cdefv1` and without `-intrav2` and
-`-intraopt` the decoder runs exactly the upstream shaders. An appended compiler option `/wd4996` suppresses the
-newer SDK's deprecated `GetDesktopDpi` diagnostic (promoted to an error by upstream's
-`/sdl`), without changing the player source.
+on demand. Its `player` job builds the Rust library of the Cargo workspace (`crates/rav1g` with its
+interface for C and the C of the parser, for an app container and the DLL runtime) and then
+`av1xbox.sln` (the player and `uwp_common`; the player uses the decoder through
+`crates/rav1g/include/rav1g.h`) as Release x64 with MSBuild, the `v145` toolset and the
+`10.0.26100.0` Windows SDK. The minimum Windows version is overridden to `10.0.17763.0`. The
+decoder's shaders are FXC/Shader Model 5.0 compute shaders as in upstream, and with `-cdefv1` and
+without `-intrav2` and `-intraopt` the decoder runs exactly the upstream shaders. An appended
+compiler option `/wd4996` suppresses the newer SDK's deprecated `GetDesktopDpi` diagnostic (promoted
+to an error by upstream's `/sdl`), without changing the player source.
+
+The solution has no decoder project: the player project links a library that was built before it,
+named by one of two properties, and stops with a message when neither is given.
+
+| Property | Library | How it is built |
+| --- | --- | --- |
+| `/p:Rav1gRustDll=<dir>` | `rav1g.dll` with its import library `rav1g.dll.lib`; the DLL is in the package next to the program | `testing/uwp_dx12_player/build_rav1g_dll.ps1 -Shaders <shader headers> -Out <dir>`: `cargo rustc --crate-type cdylib` with clang-cl (full link time optimisation for the C) and lld-link |
+| `/p:Rav1gRustLib=<dir>` | `rav1g.lib`, `rav1g_c.lib`, `rav1g_c_speed.lib`, linked statically | `cargo build -p rav1g --lib --features capi,app-container` with MSVC (`RAV1G_C_LIB_DIR=<dir>`), then `testing/uwp_imports/prune_import_members.py` on `rav1g.lib`; the commands are in the workflow |
+
+Both need `RAV1G_SHADER_DIR`, the directory with the bytecode headers of the shaders
+(`testing/shader_cache/shaders.py build`), and the DLL runtime
+(`CARGO_ENCODED_RUSTFLAGS=-Ctarget-feature=-crt-static`, with `--cfg windows_slim_errors`); the
+reasons for every part are in [rust-port.md](rust-port.md), step 5.
 
 Before building, the workflow stamps the package identity: name `Av1GpuTestPlayer`,
 publisher `CN=Bale Development` (kept from the builds made before this repository existed,
 so updates keep the same package family and its LocalState), display name
-**rav1g Test Player**, version `0.2.<run number>.0`. A throwaway certificate is created per
+**rav1g Test Player**, version `0.2.<run number>.<revision>`. A throwaway certificate is created per
 run; the upstream committed temporary PFX is not used. Only the public `.cer` is exported.
 
 ```sh
@@ -158,23 +184,38 @@ gh run watch <run-id> --exit-status
 gh run download <run-id> --name rav1g-testplayer-x64-<run-id> --dir rav1g-testplayer
 ```
 
-Since 2026-11-12 a run builds three packages of the same player and the same identity, which
-differ in the decoder library behind the player ([rust-port.md](rust-port.md), step 5, part 3):
-`rav1g-testplayer-x64-<run-id>` (version `0.2.<run number>.0`, the C++ library: the reference),
-`rav1g-testplayer-rust-msvc-x64-<run-id>` (`.2`, the Rust library with the C of MSVC) and
-`rav1g-testplayer-rust-clang-x64-<run-id>` (`.3`, the Rust library as `rav1g.dll` with the C of
-clang). A higher revision installs over a lower one and keeps LocalState. The log of a launch
-names its library in a `LIBRARY` line before the pipeline states. The two Rust artifacts have the
-package, the certificate, `SOURCES.txt` (with a `Variant:` line), the licences, the build log and
-`imports/` (the DLLs the programs of the package import from, checked against
-`testing/uwp_imports/player-dlls-allow.txt`); the listings and the survey are in the first only.
+### The packages of a run
 
-On the console (2026-11-12) all three decode the md5 set of 15 clips with matching md5; the Rust
-library with the C of MSVC is at the speed of the C++ library, the one with the C of clang 1.5 to
-4 % faster in the tile threads, and the command recording is 7 to 14 % faster in Rust
-([rust-port.md](rust-port.md), "Console results of step 5"). The package to use is the clang build
-(`rav1g-testplayer-rust-clang-x64-<run-id>`); the MSVC build is the alternative, and the C++
-package is the reference for as long as the C++ library is in the tree.
+A run builds two packages of the same player and the same identity. They differ in what compiled
+the C of the parser and entropy decoder, which is where the tile threads spend their time, and in
+how the library is linked:
+
+| Artifact | Version | Library | Use |
+| --- | --- | --- | --- |
+| `rav1g-testplayer-x64-<run-id>` | `0.2.<run number>.0` | `rav1g.dll`: Rust, the C compiled by clang-cl with full link time optimisation, linked by lld-link | **the default: use this one** |
+| `rav1g-testplayer-msvc-x64-<run-id>` | `0.2.<run number>.2` | linked statically: Rust, the C compiled by MSVC with `/GL` and by the player's link (`/LTCG:incremental`) | the alternative: one program without a DLL of its own; for a comparison of the two compilers |
+| `rav1g-testplayer-uavsync-x64-<run-id>` | `0.2.<run number>.1` | the default build with the uavsync shaders | only with the `experiments` input; see [Experiments](#experiments) |
+
+A higher revision installs over a lower one and keeps LocalState; the default package of a later
+run installs over all of them. The log of a launch names its library in a `LIBRARY` line before the
+pipeline states (`LIBRARY rav1g <version>, the Rust host; entropy decoder: clang-cl, full LTO, DLL
+runtime`, or `MSVC, /GL`). Every artifact has the package, the certificate, `SOURCES.txt` (with a
+`Variant:` line), the licences, the build log and `imports/` (the DLLs the programs of the package
+import from, checked against `testing/uwp_imports/player-dlls-allow.txt`: no `kernel32.dll`); the
+shader listings and the survey are in the default artifact only, which also has `rav1g.pdb`.
+
+Which to use: the default. On the console (2026-11-12, [rust-port.md](rust-port.md), "Console
+results of step 5") both decode the md5 set of 15 clips with matching md5; the build with the C of
+MSVC is at the speed of the C++ decoder (-0.8 % and +0.2 % in the tile threads at 4K), the build
+with the C of clang 1.5 to 4 % faster than either, and the command recording is 7 to 14 % faster in
+Rust with both. The MSVC package is kept so that a difference between the two compilers of the C, in
+speed or in behaviour, can be told from a difference in the decoder.
+
+Up to run 121 the revisions meant something else: `.0` was a package with the C++ decoder behind
+`rav1g.h` (the reference of the port, artifact `rav1g-testplayer-x64`), `.2` the Rust library with the
+C of MSVC (`rav1g-testplayer-rust-msvc-x64`) and `.3` the Rust library as `rav1g.dll`
+(`rav1g-testplayer-rust-clang-x64`), which is the default `.0` now. A package with the C++ decoder is
+built by the workflow of branch `cpp`.
 
 The artifact `rav1g-testplayer-x64-<run-id>` contains:
 
@@ -206,10 +247,12 @@ host-side comparisons of the CDEF shaders, of the warp shaders with libaom and o
 paths, and `sync-check` runs every shader with group memory under an adversarial thread
 schedule ([below](#host-side-check-of-the-thread-groups)); `intra-check` also runs the self-test of the timing summary, the sequence header
 check and the self-test of the [Shader Model 6 test](#shader-model-6-test--sm6test)'s comparisons, and uploads its log as `rav1g-intra-check-<run-id>`. `conformance-streams` (Linux)
-and `conformance` (Windows) are the conformance run: the decoder as a desktop program
+and `rust` (Windows) are the conformance run: `rav1g-dec`, the decoder as a desktop program,
 decodes AOM's test vectors and other streams on the WARP software adapter of the runner and
-compares the md5 of every frame; see [warp-decoder.md](warp-decoder.md). The run is green
-only if all jobs pass.
+compares the md5 of every frame, and runs the decoder code of this player on the same library
+(`rav1g-dec -playersmoke`); `rust-cross` and `rust-cross-run` build the same program on Linux and
+run it; `cpp-reference` and `rust-equal` hold its output against the C++ decoder of branch `cpp`.
+See [warp-decoder.md](warp-decoder.md). The run is green only if all jobs pass.
 
 ### Host-side check of the thread groups
 
@@ -2642,9 +2685,10 @@ set once, which takes the job from about 15 to about 5 minutes.
 | `-lfhsplit 1` | The horizontal loop filter of a plane is no longer one dispatch: first the even rows of blocks (a block is 4 columns by 64 rows), a UAV barrier, then the odd rows. | The first edge of a block reads and writes the last rows of the block above it, which another thread group of the same dispatch filters; the vertical filter is two dispatches for the same reason. By the rules of the loop filter the rows two neighbouring edges write never overlap, and what one reads of the other's it does not use, so the single dispatch should be right; the flag tests that on the device. |
 | `-lfhsplit 2` | Every row of blocks is a dispatch of its own, top to bottom, with a UAV barrier behind each: the order WARP comes closest to. Slower (34 dispatches and barriers per plane at 2160 rows). | The same, with nothing left in parallel between rows of blocks. |
 | `-intraedgefix` | `intra_main.hlsl` (8-bit) stops the taps of the above edge filter at the last entry the filter writes, as `intra_main_hbd.hlsl` and the left edge do, instead of at the last entry that was loaded. | The two shaders differ there. The entries between the two bounds are loaded and all hold the last available sample, so the sums are the same; `testing/intra_check` passes with either bound. The flag tests that on the device. |
-| the **uavsync package** (artifact `rav1g-testplayer-uavsync-x64-<run id>`) | Every group sync of every shader is compiled as `AllMemoryBarrierWithGroupSync()` instead of `GroupMemoryBarrierWithGroupSync()` (`/p:Rav1gUavSync=1`, an FXC define; no source differs). | A group sync of the group memory orders the group memory. Several shaders also store frame buffer words in one step and have another thread of the group load them in a later step (the horizontal loop filter from edge to edge, filter intra before its residuals are added); D3D asks for a sync of all memory for that. |
+| the **uavsync package** (artifact `rav1g-testplayer-uavsync-x64-<run id>`) | Every group sync of every shader is compiled as `AllMemoryBarrierWithGroupSync()` instead of `GroupMemoryBarrierWithGroupSync()` (an FXC define, no source differs; the library of the package is built from those headers with the `uavsync` feature of the crates). | A group sync of the group memory orders the group memory. Several shaders also store frame buffer words in one step and have another thread of the group load them in a later step (the horizontal loop filter from edge to edge, filter intra before its residuals are added); D3D asks for a sync of all memory for that. |
 
-The uavsync package has the identity of the normal one and version `0.2.<run>.1` where the
+The uavsync package is the default package (`rav1g.dll`, the C of clang) with these shaders. It
+has the identity of the normal one and version `0.2.<run>.1` where the
 normal one has `0.2.<run>.0`: it installs over the normal package of the same run and keeps
 LocalState (streams, references), and the normal package of any later run installs over it.
 Going back to the normal package of the same run needs an uninstall, which removes LocalState;
@@ -2890,13 +2934,13 @@ afterwards.
 On a desktop:
 
 ```bat
-warp_decoder -sm6test
-warp_decoder -sm6test -hw
+rav1g-dec -sm6test
+rav1g-dec -sm6test -hw
 ```
 
-the first on WARP, the second on the first hardware adapter. The conformance job of the workflow
+the first on WARP, the second on the first hardware adapter. The `rust` job of the workflow
 runs the first and shows the `CAPS` and `SM6TEST` lines in its summary (`Shader Model 6 test on
-WARP`; the log is `sm6test/warp.log` in the artifact `rav1g-conformance-<run id>`). What WARP
+WARP`; the log is `sm6test/warp.log` in the artifact `rav1g-dec-conformance-<run id>`). What WARP
 does with a shader never fails the job: a refused pipeline state is a result, and values that
 differ put a warning on the run. The job fails when the test itself breaks.
 
@@ -2993,17 +3037,18 @@ decoder's shaders only.
 
 ```bat
 python testing\sm6test\compile.py --dxc "<Windows SDK>\bin\10.0.26100.0\x64\dxc.exe" --out sm6test-build
-msbuild testing\warp_decoder\warp_decoder.vcxproj /p:Configuration=Release /p:Platform=x64 ^
-  /p:Rav1gSm6TestShaders=%CD%\sm6test-build
+set RAV1G_SM6TEST_SHADER_DIR=%CD%\sm6test-build
+cargo build --release
 ```
 
 The script writes the bytecode of every shader as a C array (`sm6test_generated/shaders.h`), DXC's
 listings (`asm/`) and a report, and fails when a shader does not compile or its bytecode has no
-validation hash. `/p:Rav1gSm6TestShaders=<directory>` puts the arrays into `warp_decoder` and into
-the player (`uwp_common`); a build without it has no test shaders, logs `CAPS sm6test: the test
-shaders are not built in`, and `-sm6test` says the same. The workflow compiles them in both
-Windows jobs (`.github/actions/sm6test-shaders`), checks that their bytecode is in the package
-and in `warp_decoder.exe` (`compile.py --verify`), and puts the listings and the report into the
+validation hash. `RAV1G_SM6TEST_SHADER_DIR=<directory>` puts the arrays into `rav1g-dec`,
+`/p:Rav1gSm6TestShaders=<directory>` into the player (`uwp_common`); a build without it has no test
+shaders, logs `CAPS sm6test: the test shaders are not built in`, and `-sm6test` says the same. The
+workflow compiles them in both Windows jobs (`.github/actions/sm6test-shaders`), checks that their
+bytecode is in the packages and in `rav1g-dec.exe` (`compile.py --verify`), and puts the listings and
+the report into the
 player artifact as `sm6test-shaders/`.
 
 The comparisons have a self-test on Linux (`sh testing/sm6test/run.sh`, part of the `intra-check`
@@ -3077,11 +3122,11 @@ line that matches no pair any more is an error.
 
 ### Shader cache of the workflow
 
-FXC takes about 40 s for the 92 shaders on the four processors of a runner, and MSBuild ran
-it on one shader at a time. A workflow run compiled every shader five times: the survey, the
-package, the uavsync package, `warp_decoder` and its uavsync build. Now a shader is compiled
-once per variant (normal and uavsync), and not at all when an earlier run has compiled the
-same thing (`.github/actions/shaders`, `testing/shader_cache/shaders.py`).
+FXC takes about 40 s for the shaders on the four processors of a runner, and MSBuild, which
+compiled them while the decoder was an MSBuild library, ran it on one shader at a time: a workflow
+run compiled every shader five times. Now a shader is compiled once per variant (normal and uavsync),
+and not at all when an earlier run has compiled the same thing (`.github/actions/shaders`,
+`testing/shader_cache/shaders.py`). The shaders are the `.hlsl` files of `libav1/dx/shaders`.
 
 Measured on the player job: before the cache 3:42 for the job (run 43141191340); with a cold cache
 the shader step took 42 s for both variants (run 43150569680); with a warm cache 5 s, the package
@@ -3099,13 +3144,12 @@ build 70 s and the whole job 2:18 (run 43153397292). How it works:
   entries it did not use and saves the directory under its own digest. So a change to one
   shader compiles that shader, a change to `inter_common.h` the 42 that include it, and a
   change to none compiles nothing.
-- **The builds**: MSBuild gets `/p:Rav1gPrebuiltShaders=<directory>`. With it,
-  `libav1.vcxproj` and `warp_decoder.vcxproj` put the directory first on the include path
-  (`av1_compute.cpp` includes `dx/shaders/h/<name>.h`) and leave their `FxCompile` items
-  out. Only the workflow sets the property: a build in Visual Studio or with plain
-  `msbuild` compiles the shaders itself, into `libav1/dx/shaders/h`, as before.
-- The player job and the conformance job each run the step; they have the same keys, so the
-  packages and `warp_decoder` get the same bytecode.
+- **The builds**: the Rust library gets `RAV1G_SHADER_DIR=<directory>`
+  (`crates/rav1g-sys/shader_table.c` includes `dx/shaders/h/<name>.h` from it); nothing else compiles
+  a shader of the decoder, and a build without the variable stops and says so.
+- Every job that builds a program runs the step or takes its headers as an artifact; they have the
+  same keys, so the packages and `rav1g-dec` get the same bytecode, and so does `warp_decoder` of the
+  C++ decoder in the `cpp-reference` job for as long as the shaders of the two branches are the same.
 
 To run it by hand (any FXC; `--jobs` defaults to the processor count):
 
@@ -3113,6 +3157,6 @@ To run it by hand (any FXC; `--jobs` defaults to the processor count):
 python testing\shader_cache\shaders.py build --fxc "<path>\fxc.exe" --cache shader-cache ^
   --variant normal --root shader-build\normal --listings shader-build\normal\asm ^
   --report shader-build\normal\report.json
-msbuild testing\warp_decoder\warp_decoder.vcxproj /p:Configuration=Release /p:Platform=x64 ^
-  /p:Rav1gPrebuiltShaders=%CD%\shader-build\normal
+set RAV1G_SHADER_DIR=%CD%\shader-build\normal
+cargo build --release
 ```
