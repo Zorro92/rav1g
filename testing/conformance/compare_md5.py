@@ -58,6 +58,8 @@ def main():
     parser.add_argument('--manifest', help='manifest.txt of the streams: every stream must be in both runs')
     parser.add_argument('--reference-dumps')
     parser.add_argument('--candidate-dumps')
+    parser.add_argument('--two-parsers', action='store_true',
+                        help='the two runs are of the two parsers of the decoder: stage_dump.py compare --two-parsers')
     args = parser.parse_args()
     a_name, b_name = args.reference_name, args.candidate_name
 
@@ -132,7 +134,8 @@ def main():
             text = io.StringIO()
             with contextlib.redirect_stdout(text):
                 code = stage_dump.main_with(['compare', os.path.join(args.reference_dumps, name),
-                                             os.path.join(args.candidate_dumps, name)])
+                                             os.path.join(args.candidate_dumps, name)] +
+                                            (['--two-parsers'] if args.two_parsers else []))
             lines = text.getvalue().splitlines()
             print('== stage dumps of %s: %s' % (name, 'differ' if code else (lines[-1] if lines else 'nothing')))
             if code:

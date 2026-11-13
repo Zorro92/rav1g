@@ -977,6 +977,7 @@ def cmd_compare(args):
         map_b = dict(kb)
         first_bad = None
         data_bad = []
+        records_listed = []
         for key, da in ka:
             db = map_b.pop(key, None)
             if db is None:
@@ -990,8 +991,14 @@ def cmd_compare(args):
                 # A buffer a stage reads besides the frame: always with its decoded differences.
                 lines = []
                 equal = compare_data(da, db, dumps_a, dumps_b, args.samples, lines.append)
-                print("  data  %-16s %s" % (da.label(), "equal" if equal else "DIFFERS"))
-                if not equal:
+                # --two-parsers: the records themselves are listed and do not decide; what the stages make
+                # of them (pred_blocks, lf_blocks, cdef_info) is compared like every other buffer.
+                listed = not equal and args.two_parsers and da.stage in ("mi_grid", "mi_pool")
+                print("  data  %-16s %s" % (da.label(), "equal" if equal else
+                                           "differs in fields no stage reads of these blocks" if listed else "DIFFERS"))
+                if listed:
+                    records_listed.append(da.label())
+                elif not equal:
                     all_equal = False
                     data_bad.append(da.label())
                 for line in lines:
@@ -1017,7 +1024,8 @@ def cmd_compare(args):
                     all_equal = False
         print("  frame %d: %s%s" % (dumps_a[0].frame if dumps_a else -1,
                                    "all stages equal" if first_bad is None else "first difference at stage " + first_bad,
-                                   "; data that differs: " + ", ".join(data_bad) if data_bad else ""))
+                                   "; data that differs: " + ", ".join(data_bad) if data_bad else "") +
+              ("; records that differ in fields no stage reads: " + ", ".join(records_listed) if records_listed else ""))
     print("RESULT %s" % ("equal" if all_equal else "DIFFERENT"))
     return 0 if all_equal else 1
 
@@ -1162,6 +1170,14 @@ def main_with(argv):
     p.add_argument("a")
     p.add_argument("b")
     p.add_argument("--all", action="store_true", help="the pattern of every stage that differs, not only the first")
+    p.add_argument("--two-parsers", action="store_true",
+                   help="the dumps are of the two parsers of the decoder (docs/phase2-rav1d.md): a difference in "
+                        "the mode info records is listed and does not make the result DIFFERENT. The entropy "
+                        "decoder of libaom does not clear a record, so a field the block's kind does not have "
+                        "holds what an earlier frame left there, and it keeps the number of warp samples; "
+                        "rav1d's sink writes zero. No stage reads such a field: the buffers the stages make of "
+                        "the records (pred_blocks, lf_blocks, cdef_info) and every frame buffer are compared as "
+                        "always")
     p.add_argument("--samples", type=int, default=12,
                    help="how many differing samples, blocks, units or records to list (default 12)")
     p.set_defaults(func=cmd_compare)

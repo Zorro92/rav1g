@@ -439,8 +439,11 @@ unsafe fn fill_header(state: &mut State, dec: *mut Av1Core, frame: &ParseFrame<'
     cm.height = hdr.size.height;
     cm.superres_upscaled_width = hdr.size.width[1];
     cm.superres_upscaled_height = hdr.size.height;
-    cm.superres_scale_denominator =
-        if hdr.size.super_res.enabled { hdr.size.super_res.width_scale_denominator } else { SCALE_NUMERATOR };
+    // `setup_superres`: a sequence without superres does not write the denominator.
+    if seq.super_res != 0 {
+        cm.superres_scale_denominator =
+            if hdr.size.super_res.enabled { hdr.size.super_res.width_scale_denominator } else { SCALE_NUMERATOR };
+    }
     cm.mi_cols = frame.bw;
     cm.mi_rows = frame.bh;
     cm.mi_stride = (frame.bw + 31) & !31;

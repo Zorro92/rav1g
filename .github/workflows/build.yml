@@ -1112,9 +1112,11 @@ jobs:
           if ($failed.Count) { throw "with -parser rav1d: $($failed -join '; ')" }
 
       # The two parsers against each other: the md5 of every output frame of every stream, the buffers
-      # behind every GPU stage of the frames of dump_tasks.txt (the mode info, the block lists, the
-      # coefficients as the stages read them, every frame buffer), and the MEMORY lines of a few decoder
-      # configurations.
+      # behind every GPU stage of the frames of dump_tasks.txt (the block lists, the loop filter lists and
+      # parameters, the CDEF and loop restoration lists, every frame buffer), and the MEMORY lines of a few
+      # decoder configurations. The mode info records themselves are listed, not held equal: the entropy
+      # decoder of libaom leaves in a field a block's kind does not have what an earlier frame had there,
+      # rav1d's sink writes zero (stage_dump.py compare --two-parsers).
       - name: The two parsers give the same frames, stage dumps and MEMORY lines
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -1124,7 +1126,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "stage dumps with -parser rav1d: exit code $LASTEXITCODE" }
           python testing/conformance/compare_md5.py --reference out/conformance --candidate out/conformance-rav1d `
             --manifest conformance-streams/manifest.txt --reference-dumps out/stage-dumps --candidate-dumps out/stage-dumps-rav1d `
-            "--reference-name=rav1g-dec -parser c" "--candidate-name=rav1g-dec -parser rav1d"
+            "--reference-name=rav1g-dec -parser c" "--candidate-name=rav1g-dec -parser rav1d" --two-parsers
           if ($LASTEXITCODE -ne 0) { throw "the two parsers: md5 per frame or stage dumps differ (exit code $LASTEXITCODE)" }
           python testing/conformance/memory_lines.py run --tool out/rav1g-dec/rav1g-dec.exe `
             --streams conformance-streams --out out/memory-lines-rav1d "--tool-args=-parser rav1d"
