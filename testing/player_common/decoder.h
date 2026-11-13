@@ -92,7 +92,7 @@ class Md5Checker {
   int Put(aom_image_t* img);
   void Finalize();
   uint32_t ShowResult(uint32_t fatal_error);
-  static void Unpack10x3(uint8_t* ptr_src, uint8_t* ptr_trg, int width_in_pix);
+  static void Unpack10x3(const uint8_t* ptr_src, uint8_t* ptr_trg, int width_in_pix);
 
  private:
   int ParseMd5File(const char* md5_file);
@@ -366,6 +366,8 @@ class AV1Decoder {
   bool created_intrav2_ = false;
   bool created_interfast_ = false;
   int created_lowmem_ = 0;
+  bool created_packed_10x3_ = false;
+  bool created_noguard_ = false;
   perfstats::PerfStats perf_stats_;
   std::mutex perf_cs_;
   int perf_installed_ = 0;

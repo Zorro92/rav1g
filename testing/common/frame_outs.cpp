@@ -178,13 +178,14 @@ std::shared_ptr<OutBufferWrapper> OutBufferStorage::GetFreeBuffer(uint32_t width
           readback_bytes += buffer_size;
           ++readback_buffers;
         } else {
-          // As before, the frame goes on without a readback buffer; the line says why md5 or a file dump of
-          // it then has nothing to read.
+          // CPU output was requested: without its buffer the frame cannot be read safely.
           XB_LOGE << "MEMORY FAILED output image readback buffer: " << buffer_size << " bytes ("
                   << MibText(buffer_size) << "), heap READBACK, hr " << HresultText(hr)
                   << "; allocated before it in this pool of " << queue_size_ << " images: textures of "
                   << texture_images << " images, " << MibText(texture_bytes) << ", and " << readback_buffers
                   << " readback buffers, " << MibText(readback_bytes);
+          has_errors = 1;
+          return 0;
         }
         buffer->buffer_size = buffer_size;
       }

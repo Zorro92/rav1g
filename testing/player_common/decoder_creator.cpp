@@ -187,6 +187,7 @@ int Decoders::DecodeLoop() {
   parse_file(full_args_path, arg_lists);
   if (arg_lists.size() == 0) {
     XB_LOGE << "No args were found";
+    if (display_) display_->AllJobDoneNotify();
     return -1;
   }
   // -sm6test: not a decoding flag. It may stand on a line of its own or on the line of a stream; the

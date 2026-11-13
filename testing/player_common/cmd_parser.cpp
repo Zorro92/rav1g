@@ -102,7 +102,11 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        "", &params_.oppoint_},
       {"noguard", atSingle, anOptional,
        "create the decoder without the memory budget guard (a creation that does not fit loses the D3D12 device)",
-       "", &params_.noguard_}};
+       "", &params_.noguard_},
+      {"continue_on_error", atSingle, anOptional,
+       "after a decode call that fails, go on with the next temporal unit in the same decoder instead of "
+       "ending the task, as an application does with a damaged stream; the log counts the errors",
+       "", &params_.continue_on_error_}};
   params_.command_line_ = args.command_line_;
   const int list_length = sizeof(avaiting) / sizeof(ParamStruct);
   bool has_value[list_length] = {false};
@@ -180,6 +184,13 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     return -1;
   }
 
+  // A displayed frame stays held until its replacement arrives. Headless output needs only one.
+  const int min_queue = params_.nopresent_ ? 1 : 2;
+  if (params_.player_queue_size_ < min_queue) {
+    Err += "-queue_size must be at least " + std::to_string(min_queue) +
+           (params_.nopresent_ ? " with -nopresent." : " when presenting frames.");
+    return -1;
+  }
   if (params_.slots_ < PLAYER_SLOTS_MIN || params_.slots_ > PLAYER_SLOTS_MAX) {
     // Refused, not clamped: a timing run must not report numbers for a slot count nobody asked for.
     char ss[96];
@@ -285,6 +296,7 @@ void CParameters::Reset() {
   params_.lowmem_ = false;
   params_.lowmem_parts_ = PLAYER_LOWMEM_DEFAULT;
   params_.noguard_ = false;
+  params_.continue_on_error_ = false;
   params_.lfhsplit_ = 0;
   params_.intraedgefix_ = false;
   params_.interfast_ = false;
