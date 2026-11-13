@@ -166,6 +166,13 @@ typedef struct Rav1gDecoder Rav1gDecoder;
 typedef struct Rav1gDevice Rav1gDevice;
 
 /*
+ The parser of phase 2 on a stream, without a decoder or a device: rav1d's parse pass, with what it
+ reads from the stream folded into one number (docs/phase2-rav1d.md). For tests: the number of a
+ stream is the same on every platform and for any number of threads.
+ */
+typedef struct Rav1gParseDigest Rav1gParseDigest;
+
+/*
  What the sequence header of a temporal unit says about the stream.
  */
 typedef struct Rav1gStreamInfo {
@@ -393,6 +400,27 @@ typedef struct Rav1gMemoryRequirements {
    */
   size_t device_size_deferred;
 } Rav1gMemoryRequirements;
+
+/*
+ What `rav1g_parse_digest_result` writes.
+ */
+typedef struct Rav1gParseDigestResult {
+  /*
+   Frames parsed without an error, and with one.
+   */
+  uint64_t frames;
+  uint64_t failed_frames;
+  /*
+   Blocks, coded transform blocks and coefficients (up to the last one of each transform block).
+   */
+  uint64_t blocks;
+  uint64_t tx_blocks;
+  uint64_t coefs;
+  /*
+   The number of the stream.
+   */
+  uint64_t hash;
+} Rav1gParseDigestResult;
 
 /*
  A record of the timing run (`av1_perf_frame` of `dx/av1_perf.h` in the decoder's sources).
@@ -635,6 +663,36 @@ void rav1g_set_poison_buffers(uint32_t level);
  The inter breakdown of the timing records: 0 off, 1 sections, 2 every dispatch alone.
  */
 void rav1g_set_perf_detail(uint32_t mode);
+
+/*
+ A parser for one stream. `threads`: its threads (0 or 1: the thread that sends the data). Null when
+ it could not be created.
+ */
+struct Rav1gParseDigest *rav1g_parse_digest_create(uint32_t threads);
+
+/*
+ Parses the frames of a temporal unit. False when a frame of it could not be parsed.
+
+ # Safety
+ `digest` is a parser of `rav1g_parse_digest_create`; `data` is valid for `size` bytes.
+ */
+bool rav1g_parse_digest_send(struct Rav1gParseDigest *digest, const uint8_t *data, size_t size);
+
+/*
+ What the stream came to so far.
+
+ # Safety
+ `digest` is a parser of `rav1g_parse_digest_create`; `result` is valid for writing.
+ */
+void rav1g_parse_digest_result(const struct Rav1gParseDigest *digest, struct Rav1gParseDigestResult *result);
+
+/*
+ Ends a parser. Null does nothing.
+
+ # Safety
+ `digest` is null or a parser of `rav1g_parse_digest_create` that is not used afterwards.
+ */
+void rav1g_parse_digest_destroy(struct Rav1gParseDigest *digest);
 
 /*
  An empty string for the normal build of the shaders, "uavsync" for the experiment build.

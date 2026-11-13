@@ -21,6 +21,12 @@
 //! The shaders are not compiled here. `RAV1G_SHADER_DIR` names the directory whose `dx/shaders/h` has the
 //! bytecode headers of the FXC build (`testing/shader_cache/shaders.py build --root <dir>`; in CI the
 //! `normal` output of `.github/actions/shaders`).
+//!
+//! For a target that is not Windows the crate is the entropy decoder alone: the files of `c_sources.txt`
+//! and `helpers.c`, the bindings and the layout probe. The D3D12 host does not build there, so there is
+//! no shader table and none of the host's entry points (`host_entry.c`); a program supplies the functions
+//! of `dx/av1_core.h` itself. `tools/rav1g-parse-check` is that program: it holds the entropy decoder
+//! against the parser of phase 2 on Linux (docs/phase2-rav1d.md).
 
 use std::env;
 use std::fs;
@@ -120,6 +126,33 @@ fn read_sources(list: &Path, repo: &Path) -> Vec<Source> {
     sources
 }
 
+/// Writes bindings. The Rust of the host is written against the bindings of the Windows targets, where
+/// the type behind a C enum is `int`. Elsewhere the compiler takes `unsigned int` for an enum without
+/// negative values; the bindings are written with `int` there too, so that the same Rust compiles (the
+/// size is the same, and no enumerator of the decoder is out of the range of `int`).
+fn write_bindings(bindings: &bindgen::Bindings, path: &Path, windows: bool) {
+    let mut text = bindings.to_string();
+    if !windows {
+        // The types of the enumerators: `pub const NAME: TYPE = value;` with a type that is an enum's.
+        let mut enums: Vec<String> = Vec::new();
+        for line in text.lines() {
+            let Some(rest) = line.strip_prefix("pub const ") else { continue };
+            let Some((_, rest)) = rest.split_once(": ") else { continue };
+            let Some((name, _)) = rest.split_once(" = ") else { continue };
+            if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !enums.iter().any(|known| known == name) {
+                enums.push(String::from(name));
+            }
+        }
+        for name in enums {
+            text = text.replace(
+                &format!("pub type {name} = ::std::os::raw::c_uint;"),
+                &format!("pub type {name} = ::std::os::raw::c_int;"),
+            );
+        }
+    }
+    fs::write(path, text).unwrap_or_else(|error| fail(&format!("cannot write {}: {error}", path.display())));
+}
+
 /// The directory with `dx/shaders/h/<shader>.h`, from `RAV1G_SHADER_DIR`.
 fn shader_dir() -> PathBuf {
     println!("cargo:rerun-if-env-changed=RAV1G_SHADER_DIR");
@@ -154,12 +187,14 @@ fn shader_dir() -> PathBuf {
 }
 
 /// A compiler call with the settings every file of the library has.
-fn base_build(repo: &Path, shaders: &Path) -> cc::Build {
+fn base_build(repo: &Path, shaders: Option<&Path>) -> cc::Build {
     let mut build = cc::Build::new();
-    build
-        .warnings(false)
+    build.warnings(false);
+    if let Some(shaders) = shaders {
         // The headers of this build first: shader_table.c includes them as "dx/shaders/h/<name>.h".
-        .include(shaders)
+        build.include(shaders);
+    }
+    build
         .include(repo.join("libav1"))
         .include(repo.join("libav1").join("build"))
         .define("_CRT_SECURE_NO_WARNINGS", None)
@@ -194,11 +229,10 @@ fn clang_cl_flags(build: &mut cc::Build) {
 
 fn main() {
     let target = env::var("TARGET").unwrap_or_default();
-    if !target.ends_with("-windows-msvc") {
-        fail(&format!(
-            "target {target}: the decoder host is D3D12 code and builds for *-windows-msvc only \
-             (on Linux: cargo xwin build --target x86_64-pc-windows-msvc)"
-        ));
+    // The decoder is for Windows. Elsewhere the crate is the entropy decoder alone (see the top).
+    let windows = target.ends_with("-windows-msvc");
+    if !windows && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        fail(&format!("target {target}: of the Windows targets the decoder builds for *-windows-msvc only"));
     }
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     // Two levels up, without canonicalize: on Windows that gives a \\?\ path, which cl does not take.
@@ -214,21 +248,38 @@ fn main() {
     println!("cargo:rerun-if-changed={}", manifest.join("helpers.c").display());
     println!("cargo:rerun-if-changed={}", manifest.join("host_entry.c").display());
 
-    let shaders = shader_dir();
+    let shaders = windows.then(shader_dir);
+    let shaders = shaders.as_deref();
     let sources = read_sources(&list, &repo);
 
     // Two calls, one static library each: the C files at /O1 /Ot and the C files the list marks at /O2.
     // The optimisation is the list's and does not follow the cargo profile.
-    let mut c_size = base_build(&repo, &shaders);
+    let mut c_size = base_build(&repo, shaders);
     c_size.opt_level(1).flag_if_supported("/Ot");
-    let mut c_speed = base_build(&repo, &shaders);
+    let mut c_speed = base_build(&repo, shaders);
     c_speed.opt_level(2);
-    let lto = lto();
+    let lto = if windows { lto() } else { Lto::Off };
+    if !windows {
+        // What the Microsoft compilers take as they come: a function that is called before its
+        // declaration (the entry points of dx/av1_core.h in a few files).
+        for build in [&mut c_size, &mut c_speed] {
+            build.flag_if_supported("-Wno-error=implicit-function-declaration");
+            build.flag_if_supported("-Wno-error=incompatible-pointer-types");
+            build.flag_if_supported("-Wno-error=int-conversion");
+            build.pic(true);
+        }
+    }
     // What built the C, for the version text of the library (rav1g_version of rav1g.h): the logs of a
     // timing run then say which build of the entropy decoder they are of.
     println!(
         "cargo:rustc-env=RAV1G_C_BUILD={}, {}, {} runtime",
-        if c_size.get_compiler().is_like_clang_cl() { "clang-cl" } else { "MSVC" },
+        if !windows {
+            "the C compiler of the target"
+        } else if c_size.get_compiler().is_like_clang_cl() {
+            "clang-cl"
+        } else {
+            "MSVC"
+        },
         match lto {
             Lto::Off => "no link time optimisation",
             Lto::Msvc => "/GL",
@@ -266,11 +317,13 @@ fn main() {
     }
     // The entry points that are macros in the C headers, as functions (helpers.c).
     c_size.include(&manifest).file(manifest.join("helpers.c"));
-    // The entry points of the host that can end with the decoder's error, which C has to raise
-    // (host_entry.c).
-    c_size.file(manifest.join("host_entry.c"));
-    // The bytecode of the shaders, from the headers of RAV1G_SHADER_DIR (shader_table.c).
-    c_size.file(manifest.join("shader_table.c"));
+    if windows {
+        // The entry points of the host that can end with the decoder's error, which C has to raise
+        // (host_entry.c).
+        c_size.file(manifest.join("host_entry.c"));
+        // The bytecode of the shaders, from the headers of RAV1G_SHADER_DIR (shader_table.c).
+        c_size.file(manifest.join("shader_table.c"));
+    }
     c_size.compile("rav1g_c");
     c_speed.compile("rav1g_c_speed");
     println!("cargo:rustc-link-search=native={}", out.display());
@@ -292,9 +345,15 @@ fn main() {
         // For the tests of this crate; a build script cannot give it to the programs of other crates.
         println!("cargo:rustc-link-arg=/LTCG:incremental");
     }
-    println!("cargo:rustc-link-lib=d3d12");
-    println!("cargo:rustc-link-lib=dxgi");
-    println!("cargo:rustc-link-lib=dxguid");
+    if windows {
+        println!("cargo:rustc-link-lib=d3d12");
+        println!("cargo:rustc-link-lib=dxgi");
+        println!("cargo:rustc-link-lib=dxguid");
+    } else {
+        // The entropy decoder's threads and its math.
+        println!("cargo:rustc-link-lib=pthread");
+        println!("cargo:rustc-link-lib=m");
+    }
 
     let bindings = bindgen::Builder::default()
         .header(manifest.join("wrapper.h").to_string_lossy())
@@ -309,9 +368,7 @@ fn main() {
         .generate_comments(false)
         .generate()
         .unwrap_or_else(|error| fail(&format!("bindgen: {error}")));
-    bindings
-        .write_to_file(out.join("bindings.rs"))
-        .unwrap_or_else(|error| fail(&format!("cannot write the bindings: {error}")));
+    write_bindings(&bindings, &out.join("bindings.rs"), windows);
 
     // The layouts shared with the GPU and between the entropy decoder and the host (shared.h): types only.
     let shared = bindgen::Builder::default()
@@ -325,9 +382,7 @@ fn main() {
         .generate_comments(false)
         .generate()
         .unwrap_or_else(|error| fail(&format!("bindgen (shared.h): {error}")));
-    shared
-        .write_to_file(out.join("shared.rs"))
-        .unwrap_or_else(|error| fail(&format!("cannot write the bindings of shared.h: {error}")));
+    write_bindings(&shared, &out.join("shared.rs"), windows);
 
     // The entropy decoder as the Rust host sees it (parser.h): the structs the host reads and fills in
     // place, the enums and limits of the bitstream, and a few tables. Types and constants only; the
@@ -349,9 +404,7 @@ fn main() {
         .generate_comments(false)
         .generate()
         .unwrap_or_else(|error| fail(&format!("bindgen (parser.h): {error}")));
-    parser
-        .write_to_file(out.join("parser.rs"))
-        .unwrap_or_else(|error| fail(&format!("cannot write the bindings of parser.h: {error}")));
+    write_bindings(&parser, &out.join("parser.rs"), windows);
 
     // The layout probe: for every struct of the two lists, its size and alignment and the offset and size
     // of each of its fields, once as the C compiler of this build has them (layout_probe.c, compiled into
@@ -365,7 +418,7 @@ fn main() {
         .unwrap_or_else(|error| fail(&format!("cannot write {}: {error}", probe_c.display())));
     fs::write(out.join("layout_table.rs"), probe_source_rust(&probes, "rust_layouts"))
         .unwrap_or_else(|error| fail(&format!("cannot write layout_table.rs: {error}")));
-    let mut probe = base_build(&repo, &shaders);
+    let mut probe = base_build(&repo, shaders);
     probe.opt_level(1).include(&manifest).file(&probe_c).compile("rav1g_layout_probe");
 }
 

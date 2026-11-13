@@ -25,6 +25,9 @@ uavsync = ["rav1g-sys/uavsync"]
 
 [dependencies]
 rav1g-sys = { workspace = true }
+# The parser of phase 2 (docs/phase2-rav1d.md): rav1d's parse pass and its sink. The decoder does not run
+# it yet; the library has its digest of a stream (`parse_digest`, `rav1g_parse_digest_*` of rav1g.h).
+rav1g-parse = { workspace = true }
 
 [dependencies.windows]
 version = "0.62"

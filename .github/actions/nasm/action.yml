@@ -1,0 +1,68 @@
+name: nasm
+description: >
+  nasm on a Windows runner, for the assembly of third_party/rav1d (the entropy decoder and the motion
+  vector lists of rav1d's parse pass, which its build script assembles through nasm-rs).
+
+# The Windows image of the runners has no nasm. The release of nasm.us is fetched once, checked against
+# its SHA-256 and kept in the Actions cache; a run with the cache does not need nasm.us. If the download
+# fails four times, the package of Chocolatey is the second source.
+
+inputs:
+  version:
+    description: The release of nasm
+    default: 2.16.03
+  sha256:
+    description: SHA-256 of nasm-<version>-win64.zip
+    default: 3ee4782247bcb874378d02f7eab4e294a84d3d15f3f6ee2de2f47a46aa7226e6
+
+runs:
+  using: composite
+  steps:
+    - name: nasm from the cache
+      id: cache
+      uses: actions/cache@v6
+      with:
+        path: ${{ runner.temp }}\nasm
+        key: nasm-win64-${{ inputs.version }}-v1
+
+    - name: Fetch nasm
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $version = '${{ inputs.version }}'
+        $directory = Join-Path $env:RUNNER_TEMP 'nasm'
+        New-Item -ItemType Directory -Force $directory | Out-Null
+        $zip = Join-Path $env:RUNNER_TEMP 'nasm.zip'
+        $url = "https://www.nasm.us/pub/nasm/releasebuilds/$version/win64/nasm-$version-win64.zip"
+        $fetched = $false
+        foreach ($attempt in 1..4) {
+          try {
+            Invoke-WebRequest -Uri $url -OutFile $zip -TimeoutSec 60
+            $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($hash -ne '${{ inputs.sha256 }}') { throw "SHA-256 of the download is $hash" }
+            $fetched = $true
+            break
+          } catch {
+            Write-Host "nasm.us, attempt ${attempt}: $_"
+            Start-Sleep -Seconds (5 * $attempt)
+          }
+        }
+        if ($fetched) {
+          Expand-Archive $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'nasm-unpacked') -Force
+          Copy-Item (Join-Path $env:RUNNER_TEMP "nasm-unpacked/nasm-$version/*") $directory -Recurse -Force
+        } else {
+          choco install nasm --version $version --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'nasm could be fetched neither from nasm.us nor from Chocolatey' }
+          Copy-Item (Join-Path $env:ProgramFiles 'NASM/*') $directory -Recurse -Force
+        }
+        if (-not (Test-Path (Join-Path $directory 'nasm.exe'))) { throw "no nasm.exe in $directory" }
+
+    - name: nasm on the path
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $directory = Join-Path $env:RUNNER_TEMP 'nasm'
+        $directory >> $env:GITHUB_PATH
+        & (Join-Path $directory 'nasm.exe') -v
+        if ($LASTEXITCODE -ne 0) { throw 'nasm does not run' }

@@ -162,6 +162,8 @@ pub struct Globals {
     pub keep_going: bool,
     /// -memstate
     pub memstate: bool,
+    /// -parsedigest
+    pub parse_digest: bool,
     /// -list
     pub list: String,
     /// -playersmoke
@@ -245,6 +247,9 @@ pub fn usage() {
     say!("  -memstate             'MEMSTATE ...' lines with the memory of the process and the video memory the");
     say!("                        adapter reports, in bytes: before a task, with its decoder still there, and when");
     say!("                        everything of the task is released (testing/conformance/memory_check.py)");
+    say!("  -parsedigest          no decode: the parser of phase 2 (rav1d's parse pass, docs/phase2-rav1d.md) on the");
+    say!("                        stream of every task, one 'PARSEDIGEST ...' line per stream with what it read and");
+    say!("                        a number that is the same on every platform; -t sets its threads. Needs no device");
     say!("  -capi                 use the decoder through its interface for C, the functions of rav1g.h, instead of");
     say!("                        the Rust interface: what an application that is not Rust links (same output)");
     say!(
@@ -365,6 +370,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
                     "-capi" => globals.capi = true,
                     "-keep_going" => globals.keep_going = true,
                     "-memstate" => globals.memstate = true,
+                    "-parsedigest" => globals.parse_digest = true,
                     "-list" => globals.list = value()?,
                     "-playersmoke" => globals.player_smoke = value()?,
                     _ => return Err(format!("unknown argument '{a}'")),

@@ -867,6 +867,89 @@ pub extern "C" fn rav1g_set_perf_detail(mode: u32) {
     switches::set_perf_detail(mode);
 }
 
+/// The parser of phase 2 on a stream, without a decoder or a device: rav1d's parse pass, with what it
+/// reads from the stream folded into one number (docs/phase2-rav1d.md). For tests: the number of a
+/// stream is the same on every platform and for any number of threads.
+pub struct Rav1gParseDigest {
+    parser: crate::parse_digest::DigestParser,
+}
+
+/// What `rav1g_parse_digest_result` writes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Rav1gParseDigestResult {
+    /// Frames parsed without an error, and with one.
+    pub frames: u64,
+    pub failed_frames: u64,
+    /// Blocks, coded transform blocks and coefficients (up to the last one of each transform block).
+    pub blocks: u64,
+    pub tx_blocks: u64,
+    pub coefs: u64,
+    /// The number of the stream.
+    pub hash: u64,
+}
+
+/// A parser for one stream. `threads`: its threads (0 or 1: the thread that sends the data). Null when
+/// it could not be created.
+#[unsafe(no_mangle)]
+pub extern "C" fn rav1g_parse_digest_create(threads: u32) -> *mut Rav1gParseDigest {
+    match crate::parse_digest::DigestParser::new(threads.clamp(1, 255) as u16) {
+        Ok(parser) => Box::into_raw(Box::new(Rav1gParseDigest { parser })),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Parses the frames of a temporal unit. False when a frame of it could not be parsed.
+///
+/// # Safety
+/// `digest` is a parser of `rav1g_parse_digest_create`; `data` is valid for `size` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rav1g_parse_digest_send(digest: *mut Rav1gParseDigest, data: *const u8, size: usize) -> bool {
+    if digest.is_null() || data.is_null() || size == 0 {
+        return false;
+    }
+    // SAFETY: the caller's contract.
+    unsafe { (*digest).parser.send(std::slice::from_raw_parts(data, size)).is_ok() }
+}
+
+/// What the stream came to so far.
+///
+/// # Safety
+/// `digest` is a parser of `rav1g_parse_digest_create`; `result` is valid for writing.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rav1g_parse_digest_result(
+    digest: *const Rav1gParseDigest,
+    result: *mut Rav1gParseDigestResult,
+) {
+    if digest.is_null() || result.is_null() {
+        return;
+    }
+    // SAFETY: the caller's contract.
+    unsafe {
+        let digest = (*digest).parser.digest();
+        result.write(Rav1gParseDigestResult {
+            frames: digest.frames,
+            failed_frames: digest.failed_frames,
+            blocks: digest.blocks,
+            tx_blocks: digest.tx_blocks,
+            coefs: digest.coefs,
+            hash: digest.hash,
+        });
+    }
+}
+
+/// Ends a parser. Null does nothing.
+///
+/// # Safety
+/// `digest` is null or a parser of `rav1g_parse_digest_create` that is not used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rav1g_parse_digest_destroy(digest: *mut Rav1gParseDigest) {
+    if !digest.is_null() {
+        // SAFETY: the caller's contract.
+        drop(unsafe { Box::from_raw(digest) });
+    }
+}
+
 /// An empty string for the normal build of the shaders, "uavsync" for the experiment build.
 #[unsafe(no_mangle)]
 pub extern "C" fn rav1g_shader_variant() -> *const c_char {

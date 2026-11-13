@@ -4,3 +4,6 @@ __pycache__/
 
 # Cargo build directory.
 /target/
+
+# The build directory of the tool that is not part of the workspace (testing/rav1d_md5).
+/testing/rav1d_md5/target/

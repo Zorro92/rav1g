@@ -23,6 +23,7 @@ mod args;
 mod device;
 mod library;
 mod md5;
+mod parse_digest;
 mod pool;
 mod run;
 mod shim;
@@ -147,6 +148,10 @@ fn real_main() -> i32 {
     }
 
     shim::set_log_verbose(globals.verbose);
+    // -parsedigest: the parser of phase 2 on the streams of the tasks. No device and no decoder.
+    if globals.parse_digest {
+        return parse_digest::run(&tasks);
+    }
     library::set_log(globals.capi, decoder_log_line);
 
     let Some(dev) = device::create(&globals) else {

@@ -62,9 +62,11 @@ jobs:
           $sources += @(git -C src log --format='%h %s' "$env:UPSTREAM_COMMIT..HEAD")
           if ($LASTEXITCODE -ne 0) { throw 'git log failed' }
           $sources | Set-Content out/SOURCES.txt -Encoding utf8
-          # Binary redistribution retains the BSD notices and AOM patent license, including libwebm.
+          # Binary redistribution retains the BSD notices and AOM patent license, including libwebm and
+          # rav1d (the library has rav1d's parse pass, third_party/rav1d).
           foreach ($license in @('LICENSE.txt', 'libav1/LICENSE', 'libav1/PATENTS',
-              'third_party/libwebm/LICENSE.TXT', 'third_party/libwebm/PATENTS.TXT')) {
+              'third_party/libwebm/LICENSE.TXT', 'third_party/libwebm/PATENTS.TXT',
+              'third_party/rav1d/COPYING', 'third_party/rav1d/doc/PATENTS')) {
             $destination = Join-Path out/licenses $license
             New-Item -ItemType Directory -Force (Split-Path $destination) | Out-Null
             Copy-Item (Join-Path src $license) $destination
@@ -195,6 +197,11 @@ jobs:
             if (-not (Test-Path (Join-Path $llvm $tool))) { throw "$tool is not in $llvm" }
           }
           & (Join-Path $llvm 'clang-cl.exe') --version | Select-Object -First 1
+
+      # nasm: the Rust library has rav1d's parse pass, whose entropy decoder is assembly
+      # (third_party/rav1d, docs/phase2-rav1d.md).
+      - name: nasm
+        uses: ./src/.github/actions/nasm
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -697,6 +704,10 @@ jobs:
           $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
           if (Test-Path (Join-Path $llvm 'libclang.dll')) { "LIBCLANG_PATH=$llvm" >> $env:GITHUB_ENV }
 
+      # nasm, for the assembly of rav1d's parse pass (third_party/rav1d).
+      - name: nasm
+        uses: ./.github/actions/nasm
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Build rav1g-dec (cargo, MSVC, release)
@@ -719,9 +730,11 @@ jobs:
           python testing/sm6test/compile.py --verify sm6test-build target/release/rav1g-dec.exe
           if ($LASTEXITCODE -ne 0) { throw 'rav1g-dec does not have the Shader Model 6 test shaders of this run' }
           Copy-Item target/release/rav1g-dec.exe, target/release/rav1g_dec.pdb -Destination out/rav1g-dec/
-          # Binary redistribution retains the BSD notices and AOM patent license, including libwebm.
+          # Binary redistribution retains the BSD notices and AOM patent license, including libwebm and
+          # rav1d (the library has rav1d's parse pass, third_party/rav1d).
           foreach ($license in @('LICENSE.txt', 'libav1/LICENSE', 'libav1/PATENTS',
-              'third_party/libwebm/LICENSE.TXT', 'third_party/libwebm/PATENTS.TXT')) {
+              'third_party/libwebm/LICENSE.TXT', 'third_party/libwebm/PATENTS.TXT',
+              'third_party/rav1d/COPYING', 'third_party/rav1d/doc/PATENTS')) {
             $destination = Join-Path out/rav1g-dec/licenses $license
             New-Item -ItemType Directory -Force (Split-Path $destination) | Out-Null
             Copy-Item $license $destination
@@ -802,6 +815,33 @@ jobs:
           python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
             --out out/conformance --threads 4 "--title=rav1g-dec (cargo, MSVC)"
           if ($LASTEXITCODE -ne 0) { throw "conformance run with rav1g-dec: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
+
+      # The parser of phase 2 in this build (docs/phase2-rav1d.md): rav1d's parse pass on every stream,
+      # with four threads, and what it read folded into a number per stream. The parse-digest job holds
+      # the lines against those of the Linux build, whose parser is checked against the entropy decoder
+      # of libaom value by value (parse-check).
+      - name: Parse digest of every stream, rav1d's parse pass in rav1g-dec (-parsedigest)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force out/parse-digest | Out-Null
+          $tool = Resolve-Path out/rav1g-dec/rav1g-dec.exe
+          Push-Location conformance-streams
+          & $tool -parsedigest -t 4 -list manifest.txt > ../out/parse-digest/digest.txt
+          $code = $LASTEXITCODE
+          Pop-Location
+          $lines = @(Select-String -Path out/parse-digest/digest.txt -Pattern '^PARSEDIGEST ').Count
+          "## Parse digest, rav1g-dec (cargo, MSVC)", '', "$lines streams, exit code $code." >> $env:GITHUB_STEP_SUMMARY
+          if ($code -ne 0) { Get-Content out/parse-digest/digest.txt | Select-Object -Last 20; throw "rav1g-dec -parsedigest: exit code $code" }
+
+      - name: Preserve the parse digests of the MSVC build
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-parse-digest-msvc-${{ github.run_id }}
+          path: out/parse-digest/
+          if-no-files-found: warn
 
       # The interface for C (docs/rust-port.md, step 5): the whole set once more with -capi, which uses
       # the decoder through the functions of rav1g.h (the device, the settings, the output callbacks, the
@@ -1180,6 +1220,9 @@ jobs:
           rustup default stable
           rustup target add x86_64-pc-windows-msvc
           sudo apt-get update -qq
+          # nasm, for the assembly of rav1d's parse pass (third_party/rav1d).
+          sudo apt-get install -y -qq --no-install-recommends nasm
+          nasm -v
           llvm=
           for version in 21 20 19; do
             if sudo apt-get install -y -qq --no-install-recommends clang-$version lld-$version llvm-$version libclang-$version-dev; then
@@ -1226,7 +1269,8 @@ jobs:
           python3 testing/shader_cache/shaders.py verify --report shader-headers/report.json --root shader-headers "$exe"
           mkdir -p out/rav1g-dec-xwin
           cp "$exe" target/x86_64-pc-windows-msvc/release/rav1g_dec.pdb out/rav1g-dec-xwin/
-          for license in LICENSE.txt libav1/LICENSE libav1/PATENTS third_party/libwebm/LICENSE.TXT third_party/libwebm/PATENTS.TXT; do
+          for license in LICENSE.txt libav1/LICENSE libav1/PATENTS third_party/libwebm/LICENSE.TXT third_party/libwebm/PATENTS.TXT \
+              third_party/rav1d/COPYING third_party/rav1d/doc/PATENTS; do
             mkdir -p "out/rav1g-dec-xwin/licenses/$(dirname "$license")"
             cp "$license" "out/rav1g-dec-xwin/licenses/$license"
           done
@@ -1330,6 +1374,30 @@ jobs:
             --out out/conformance --threads 4 "--title=rav1g-dec built on Linux (cargo xwin, clang-cl)"
           if ($LASTEXITCODE -ne 0) { throw "conformance run with the rav1g-dec of the Linux build: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
 
+      # As in the rust job: the parser of phase 2 in the program of the Linux build.
+      - name: Parse digest of every stream, rav1d's parse pass in the rav1g-dec of the Linux build
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force out/parse-digest | Out-Null
+          $tool = Resolve-Path rav1g-dec-xwin/rav1g-dec.exe
+          Push-Location conformance-streams
+          & $tool -parsedigest -t 4 -list manifest.txt > ../out/parse-digest/digest.txt
+          $code = $LASTEXITCODE
+          Pop-Location
+          $lines = @(Select-String -Path out/parse-digest/digest.txt -Pattern '^PARSEDIGEST ').Count
+          "## Parse digest, rav1g-dec built on Linux (cargo xwin, clang-cl)", '', "$lines streams, exit code $code." >> $env:GITHUB_STEP_SUMMARY
+          if ($code -ne 0) { Get-Content out/parse-digest/digest.txt | Select-Object -Last 20; throw "rav1g-dec -parsedigest: exit code $code" }
+
+      - name: Preserve the parse digests of the Linux build
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-parse-digest-xwin-${{ github.run_id }}
+          path: out/parse-digest/
+          if-no-files-found: warn
+
       - name: The test player's decoder code through rav1g.h on the Rust library of the Linux build
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -1394,6 +1462,262 @@ jobs:
             out/order-check/
             out/memory-check/
           if-no-files-found: warn
+
+  # Phase 2, step 1 (docs/phase2-rav1d.md): rav1d as it is upstream, at the commit the copy in
+  # third_party/rav1d starts from, decodes every stream of the conformance set to its reference md5
+  # (testing/rav1d_md5 builds upstream's crate from its repository); and the copy is that commit with the
+  # changes third_party/rav1d/PATCHES.md lists and nothing else (upstream_diff.sh).
+  rav1d:
+    needs: conformance-streams
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Streams from the cache
+        uses: actions/cache/restore@v6
+        with:
+          path: conformance-streams
+          key: ${{ needs.conformance-streams.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Rust toolchain and nasm
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends nasm
+          rustc --version
+          nasm -v
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: testing/rav1d_md5
+          key: rav1d
+
+      - name: The copy in third_party/rav1d is upstream at the commit of UPSTREAM with the listed changes
+        run: |
+          set -euo pipefail
+          mkdir -p out/rav1d
+          repository=$(awk '$1 == "repository" { print $2 }' third_party/rav1d/UPSTREAM)
+          commit=$(awk '$1 == "commit" { print $2 }' third_party/rav1d/UPSTREAM)
+          # The md5 tool below builds the same commit.
+          grep -q "rev = \"$commit\"" testing/rav1d_md5/Cargo.toml
+          git clone -q --filter=blob:none "$repository" upstream-rav1d
+          git -C upstream-rav1d checkout -q "$commit"
+          sh third_party/rav1d/upstream_diff.sh upstream-rav1d out/rav1d/upstream.diff | tee out/rav1d/upstream.txt
+          {
+            echo '## rav1d: the copy against upstream'
+            echo
+            echo '```'
+            cat out/rav1d/upstream.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upstream rav1d decodes every stream to its reference md5
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --manifest-path testing/rav1d_md5/Cargo.toml
+          status=0
+          testing/rav1d_md5/target/release/rav1d-md5 --root conformance-streams \
+            --manifest conformance-streams/manifest.txt > out/rav1d/md5.txt || status=$?
+          {
+            echo '## rav1d as it is upstream on the conformance streams'
+            echo
+            echo '```'
+            tail -n 1 out/rav1d/md5.txt
+            grep ' FAIL ' out/rav1d/md5.txt | head -n 20 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          tail -n 1 out/rav1d/md5.txt
+          exit "$status"
+
+      - name: Preserve the diff against upstream and the md5 results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-rav1d-${{ github.run_id }}
+          path: out/rav1d/
+          if-no-files-found: warn
+
+  # Phase 2, step 2 (docs/phase2-rav1d.md): the parser of phase 2 against the entropy decoder of libaom.
+  # tools/rav1g-parse-check runs both on every stream of the conformance set, each into plain memory in
+  # the layouts the GPU stages read, and holds every frame of one against the other's: the mode info
+  # records field by field, the grid, the transform block records, the coefficients, the block lists (which
+  # the D3D12 host's own function counts for both), the palette blocks and the loop restoration units. No
+  # GPU. The same program prints the parse digest of every stream for the parse-digest job, and times the
+  # sink on the 4K stream of the set.
+  parse-check:
+    needs: conformance-streams
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Streams from the cache
+        uses: actions/cache/restore@v6
+        with:
+          path: conformance-streams
+          key: ${{ needs.conformance-streams.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      # libclang for bindgen (the bindings of the entropy decoder), nasm for rav1d's assembly. One version
+      # of LLVM, as in the rust-cross job: bindgen has to load the libclang whose headers clang gives it
+      # (with the libclang of another version the intrinsics headers do not parse).
+      - name: Rust toolchain, libclang and nasm
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends nasm
+          llvm=
+          for version in 21 20 19; do
+            if sudo apt-get install -y -qq --no-install-recommends clang-$version libclang-$version-dev; then
+              llvm=$version
+              break
+            fi
+          done
+          [ -n "$llvm" ] || { echo 'no clang with its libclang in the distribution'; exit 1; }
+          echo "/usr/lib/llvm-$llvm/bin" >> "$GITHUB_PATH"
+          echo "LIBCLANG_PATH=/usr/lib/llvm-$llvm/lib" >> "$GITHUB_ENV"
+          rustc --version
+          nasm -v
+          "/usr/lib/llvm-$llvm/bin/clang" --version | head -n 1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: parse-check
+
+      - name: Build rav1g-parse-check
+        run: cargo build --release --locked -p rav1g-parse-check
+
+      - name: Every frame of every stream, rav1d's parse pass and the sink against the entropy decoder of libaom
+        run: |
+          set -euo pipefail
+          mkdir -p out/parse-check
+          status=0
+          target/release/rav1g-parse-check -root conformance-streams -manifest conformance-streams/manifest.txt \
+            > out/parse-check/check.txt || status=$?
+          {
+            echo '## Parse check: rav1d and the sink against the entropy decoder of libaom'
+            echo
+            echo '```'
+            grep '^PARSE SUMMARY\|^PARSE COVERAGE' out/parse-check/check.txt || true
+            grep -A 6 ' DIFFERENT \| ERROR ' out/parse-check/check.txt | head -n 60 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          grep '^PARSE SUMMARY\|^PARSE COVERAGE' out/parse-check/check.txt || true
+          exit "$status"
+
+      # The same with four threads in rav1d: the tiles of a frame are then parsed side by side.
+      - name: The same with four parser threads
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          status=0
+          target/release/rav1g-parse-check -threads 4 -root conformance-streams \
+            -manifest conformance-streams/manifest.txt > out/parse-check/check-threads4.txt || status=$?
+          {
+            echo '## Parse check with four parser threads'
+            echo
+            echo '```'
+            grep '^PARSE SUMMARY' out/parse-check/check-threads4.txt || true
+            grep -A 6 ' DIFFERENT \| ERROR ' out/parse-check/check-threads4.txt | head -n 60 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          grep '^PARSE SUMMARY' out/parse-check/check-threads4.txt || true
+          exit "$status"
+
+      - name: Parse digest of every stream on Linux
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          target/release/rav1g-parse-check -digest -root conformance-streams \
+            -manifest conformance-streams/manifest.txt > out/parse-check/digest.txt
+          grep -c '^PARSEDIGEST ' out/parse-check/digest.txt
+
+      # What the sink costs on the CPU of this runner: the 4K stream and a 1080p stream of the set, one
+      # thread. A measurement for docs/phase2-rav1d.md, not a gate.
+      - name: CPU time of the sink
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          {
+            echo '## CPU time of the sink (one thread, this runner)'
+            echo
+            echo '```'
+            for stream in cut/nf-dvbdash-a1-8b-2160p.ivf cut/nf-chimera-10b-1080p.ivf; do
+              target/release/rav1g-parse-check -time "conformance-streams/$stream" || true
+            done
+            echo '```'
+          } | tee out/parse-check/time.txt >> "$GITHUB_STEP_SUMMARY"
+          cat out/parse-check/time.txt
+
+      - name: Preserve the results of the parse check
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-parse-check-${{ github.run_id }}
+          path: out/parse-check/
+          if-no-files-found: warn
+
+  # The parser of phase 2 reads the same from every stream in every build: the parse digests of the MSVC
+  # build and of the Linux cross build (rav1g-dec -parsedigest on Windows, four threads) against those of
+  # the Linux build of the parse-check job (one thread), whose values are checked there.
+  parse-digest:
+    needs: [parse-check, rust, rust-cross-run]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: rav1g-parse-check-${{ github.run_id }}
+          path: linux
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: rav1g-parse-digest-msvc-${{ github.run_id }}
+          path: msvc
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: rav1g-parse-digest-xwin-${{ github.run_id }}
+          path: xwin
+
+      - name: The parse digests of the three builds are the same
+        run: |
+          set -euo pipefail
+          grep '^PARSEDIGEST ' linux/digest.txt | tr -d '\r' > linux.txt
+          streams=$(grep -c . linux.txt)
+          status=0
+          for build in msvc xwin; do
+            grep -a '^PARSEDIGEST ' "$build/digest.txt" | tr -d '\r' > "$build.txt"
+            if cmp -s linux.txt "$build.txt"; then
+              echo "PASS $build: $streams streams, the same lines as the Linux build"
+            else
+              echo "FAIL $build: the lines differ from the Linux build"
+              diff linux.txt "$build.txt" | head -n 20 || true
+              status=1
+            fi
+          done | tee result.txt
+          grep -q '^FAIL' result.txt && status=1
+          [ "$streams" -gt 0 ] || { echo 'FAIL: no digest lines of the Linux build'; status=1; }
+          {
+            echo '## Parse digests: MSVC build and Linux cross build against the Linux build'
+            echo
+            echo '```'
+            cat result.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
 
   # Host check of how the shaders hand data between the threads of a thread group. A GPU promises
   # only that all threads of a group meet at a group sync; upstream's shaders counted on the 64

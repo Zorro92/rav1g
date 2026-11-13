@@ -159,11 +159,15 @@ static void launch(AVxWorker *const worker) {
 
 static void end(AVxWorker *const worker) {
 #if CONFIG_MULTITHREAD
-  if (worker->status_ != NOT_OK)
+  // A worker whose thread never came up (the one that runs on the calling thread, or one whose reset
+  // failed) has no thread to join and no mutex or condition to destroy: pthread_join() on the zeroed
+  // handle is a crash with glibc.
+  if (worker->status_ != NOT_OK) {
     change_state(worker, NOT_OK);
-  pthread_join(worker->impl_.thread_, NULL);
-  pthread_mutex_destroy(&worker->impl_.mutex_);
-  pthread_cond_destroy(&worker->impl_.condition_);
+    pthread_join(worker->impl_.thread_, NULL);
+    pthread_mutex_destroy(&worker->impl_.mutex_);
+    pthread_cond_destroy(&worker->impl_.condition_);
+  }
 #else
   worker->status_ = NOT_OK;
   assert(worker->impl_ == NULL);

@@ -78,6 +78,10 @@ pub mod capi;
 #[doc(hidden)]
 pub use rav1g_sys as sys;
 
+/// The parser of phase 2 on a stream, without a decoder: rav1d's parse pass, and what it reads folded
+/// into one number (docs/phase2-rav1d.md). `rav1g-dec -parsedigest` prints it.
+pub use rav1g_parse::digest as parse_digest;
+
 pub use decoder::{Decoder, LowMemory, MemoryAvailable, MemoryRequirements, Settings};
 pub use device::Device;
 pub use error::{Error, ErrorCode};

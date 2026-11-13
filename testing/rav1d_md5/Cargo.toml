@@ -1,0 +1,20 @@
+# rav1d as it is upstream, at the commit this repository's copy starts from (third_party/rav1d/UPSTREAM),
+# on the conformance streams: the md5 of every output frame against the references. Not a member of the
+# workspace of the repository: it builds upstream's crate, unchanged, from its repository.
+#
+#   cargo run --release --locked --manifest-path testing/rav1d_md5/Cargo.toml -- \
+#     --root <streams> --manifest <streams>/manifest.txt
+[package]
+name = "rav1d-md5"
+description = "Upstream rav1d on the conformance streams of rav1g: md5 of every frame against the references"
+version = "0.0.0"
+edition = "2021"
+license = "BSD-2-Clause"
+publish = false
+
+[workspace]
+
+[dependencies]
+# The commit of third_party/rav1d/UPSTREAM (CI checks that the two are the same).
+rav1d = { git = "https://github.com/memorysafety/rav1d", rev = "2e7216c20ac2a75de204d6c8d7268b75a45959b4" }
+md-5 = "0.10"

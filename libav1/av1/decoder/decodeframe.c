@@ -63,7 +63,7 @@
 #include "av1/decoder/detokenize.h"
 
 
-#include "dx\av1_core.h"
+#include "dx/av1_core.h"
 
 
 #define ACCT_STR __func__

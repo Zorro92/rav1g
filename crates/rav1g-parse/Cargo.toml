@@ -1,0 +1,16 @@
+[package]
+name = "rav1g-parse"
+description = "rav1g, phase 2: the parse pass of rav1d feeding the buffers the GPU stages read (mode info records, grid, block lists, transform block records, coefficients)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The layouts the buffers have: the mode info record, the transform block record and the tile's cursors
+# are the C structs of the entropy decoder until it leaves (docs/phase2-rav1d.md, step 6).
+rav1g-sys = { workspace = true }
+# The parser: third_party/rav1d, the parse pass of rav1d behind a sink.
+rav1d = { workspace = true }

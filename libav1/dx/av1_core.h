@@ -19,8 +19,8 @@
 
 #include "av1/decoder/decoder.h"
 #include "aom/aom_frame_buffer.h"
-#include "av1\common\blockd.h"
-#include "av1\common\onyxc_int.h"
+#include "av1/common/blockd.h"
+#include "av1/common/onyxc_int.h"
 #include "dx/av1_perf.h"
 
 #ifdef __cplusplus
