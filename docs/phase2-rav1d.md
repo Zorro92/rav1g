@@ -1445,6 +1445,57 @@ without: the less cache and bandwidth the parse has, the more the order counts. 
 clears of the `d2` cut are 3.5 MB a frame instead of 7.5 MB, on the decode thread (`-syncclear`) and
 on the completion thread alike, and 7.5 MB again with `cleargrid`.
 
+**Measured on CI** (run 43517057205 on `4d02423`, all 17 jobs green; before: run 43504802601 on
+`ef044fa`). Two kinds of machine, and they do not say the same.
+
+The Linux runner, parse and sink without a GPU (`rav1g-parse-check -time`, one thread, the best of
+three; the block lists and, with `time`, the other calls of the sink, in ms a frame). Its caches hold
+a frame and nothing competes for its memory:
+
+| Stream | Lists before | Lists at the end of a tile (`latelists`) | Lists by superblock (default) | Other calls of the sink |
+| --- | ---: | ---: | ---: | ---: |
+| `nf-dvbdash-d2-10b-2160p` (new) | | 0.574, 0.541 | 0.583, 0.583 | 1.07, 1.06 |
+| `nf-dvbdash-a1-8b-2160p` | 0.325 | 0.252, 0.260 | 0.304, 0.301 | 0.57, 0.55 |
+| `nf-chimera-10b-1080p` | 0.225 | 0.224, 0.224 | 0.233, 0.232 | 0.28, 0.28 |
+
+- The clear of the iteration lists in steps is the 0.325 to 0.256 ms of the 8-bit 4K stream (its key
+  frame cleared 5.2 MB; 23 frames).
+- Counting by superblock costs about 0.05 ms a 4K frame here, whatever the stream: the list code is
+  entered 2,040 times a frame instead of once, cold each time, and with a frame's records still in
+  the cache at the end of the tile it has nothing to win.
+
+The Windows runner, the whole decoder on WARP, which rasterises on the same processors and competes
+for cache and memory (`parser_timing.py`: the variants in turns on one runner, three rounds, one
+parser thread; ms a frame, the mean and the range of the rounds' means):
+
+| Stream | `sink_lists`, at the end of a tile (`latelists`) | `sink_lists`, by superblock (default) | `entropy_sum`, default | `entropy_sum`, `-parser c` |
+| --- | ---: | ---: | ---: | ---: |
+| `nf-dvbdash-d2-10b-2160p` | 1.183 (0.735 to 1.919) | 0.727 (0.709 to 0.755) | 20.19 | 36.85 |
+| `nf-dvbdash-a1-8b-2160p` | 0.270 (0.257 to 0.281) | 0.250 (0.233 to 0.262) | 5.86 | 10.10 |
+| `nf-chimera-10b-1080p` | 0.478 (0.404 to 0.515) | 0.316 (0.304 to 0.340) | 4.76 | 7.34 |
+| `nf-sparks-10b-1080p` | 0.185 (0.155 to 0.223) | 0.151 (0.149 to 0.155) | 2.84 | 4.45 |
+| `nf-dvbdash-d2-10b-2160p`, four threads, two rounds | 0.730 | 0.698 | 19.89 | 37.86 |
+| `syn-tiles-10b-1080p` (8 tiles), four threads | 0.226 | 0.236 | 4.41 | 7.09 |
+
+- Where the parse shares cache and memory with something else, the lists by superblock take 7 to 39 %
+  less than the pass at the end of the tile, and vary less from round to round (the pass ranges from
+  0.74 to 1.92 ms on the 10-bit 4K stream, the lists by superblock from 0.71 to 0.76). That is the
+  console's situation more than the Linux runner's is, and its slow state more still.
+- Against the run before (another runner, on which the calls of the sink, which did not change, are 5
+  to 12 % slower): `sink_lists` 0.369 to 0.316 ms on `nf-chimera-10b-1080p`, 0.172 to 0.151 on
+  `nf-sparks-10b-1080p`, 0.234 to 0.250 on the 8-bit 4K stream.
+- With `time` the other calls of the sink are 1.56 ms a frame of the 10-bit 4K stream on this runner,
+  1.14 ms of the 8-bit one.
+- The 10-bit 4K stream: rav1d's parse takes 0.55 of the C parser's time (20.2 against 36.8 ms a
+  frame), the widest gap of the set.
+- What the stream costs CI: a decode of its 30 temporal units takes 11 s on WARP. The `rust` job
+  went from 43.6 to 50.5 minutes (with it in eight runs of the whole set and 30 timed decodes),
+  `parse-check` from 2.6 to 3.7 minutes.
+- The memory check is as before with all of it: the video memory after every release is 0, the device
+  buffers are those of before (497.1 MiB in use for the 2160p 8-bit decoder, 657.9 for the decoder of
+  the 4K 10-bit size), the lowest private bytes after a release 195 MiB (193 before); with
+  `-syncclear` and with `-parser c` the same.
+
 **For the console**, all in the slow state, `-gputime`, the same clip in one launch:
 
 ```text
