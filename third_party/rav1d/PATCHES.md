@@ -16,7 +16,8 @@ Group); `doc/PATENTS` is the patent licence of the Alliance for Open Media that 
 Changes only take away, or route what the parse pass reads to the application. Nothing here changes how
 a syntax element is read. Two changes are switches of `ParseSettings` that are off unless the application
 sets them, and the parse is upstream's without them: the loop filter masks left out, and a tile kept on
-its thread (the rows of `decode.rs` and `thread_task.rs` below). An update to a newer upstream is then: copy the files again, apply the list
+its thread (the rows of `decode.rs` and `thread_task.rs` below). rav1g sets both unless it is told not to
+(`rav1g_parse::options::ParseOptions`, `-parseopt none` in its tools). An update to a newer upstream is then: copy the files again, apply the list
 below again, run the two checks at the end.
 
 `upstream_diff.sh <checkout of rav1d at the commit>` holds the directory against upstream: every file

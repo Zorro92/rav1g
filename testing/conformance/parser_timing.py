@@ -1,8 +1,10 @@
 """The two parsers of the decoder, timed in pairs on one machine (docs/phase2-rav1d.md, step 3).
 
-rav1g-dec decodes each stream with -gputime, once with -parser c and once with -parser rav1d, the two
-in turns and each several times, and the CPU timers of the decode thread are read from the summaries.
-Every --switches adds a third, fourth, ... decoder to the turns: -parser rav1d with that -parseopt list
+rav1g-dec decodes each stream with -gputime, once with -parser c and once with -parser rav1d (the
+default of the library, with its default switches nolfmask and tilethread), the two in turns and each
+several times, and the CPU timers of the decode thread are read from the summaries. Every --switches
+adds a third, fourth, ... decoder to the turns: -parser rav1d with that -parseopt list, e.g. none for
+rav1d's parse without the two switches, or time for the default with the calls of the sink timed
 (docs/phase2-rav1d.md, "Where the time goes"). The timers:
 
 - entropy_sum, entropy_wall: the parse of the tiles, summed over the tile threads and as wall time. With
@@ -12,8 +14,8 @@ Every --switches adds a third, fourth, ... decoder to the turns: -parser rav1d w
 - record: the recording of the command list;
 - frame: the decode thread from the set-up to the submission, which is what the parser is part of;
 - decode call: the whole call for a temporal unit, with the headers;
-- sink_lists, sink_staged, sink_calls: parts of entropy_sum with rav1d: the block lists at the end of a
-  tile, the copies of the staged coefficients (-parseopt stage), the calls of the sink (-parseopt time).
+- sink_lists, sink_calls: parts of entropy_sum with rav1d: the block lists, the calls of the sink
+  (-parseopt time).
 
 A run is a pair on one runner: the numbers of other runs are not comparable, the ratio of a pair is. On
 WARP the GPU is a CPU rasteriser that competes with the decode thread; the console's numbers decide.
@@ -32,7 +34,7 @@ import sys
 
 TIMERS = ['entropy_sum', 'entropy_wall', 'setup', 'record', 'frame']
 # Timers of the parser of phase 2: in the table, not required of a run.
-SINK_TIMERS = ['sink_lists', 'sink_staged', 'sink_calls']
+SINK_TIMERS = ['sink_lists', 'sink_calls']
 
 
 def timers_of(text):
@@ -62,7 +64,7 @@ def main():
                         help='a -parseopt list: one more decoder in the turns, -parser rav1d with it')
     args = parser.parse_args()
     # The decoders that take turns: a name for the table and the arguments.
-    variants = [('-parser c', ['-parser', 'c']), ('-parser rav1d', ['-parser', 'rav1d'])]
+    variants = [('-parser c', ['-parser', 'c']), ('-parser rav1d (default switches)', ['-parser', 'rav1d'])]
     variants += [('rav1d, -parseopt %s' % switches, ['-parser', 'rav1d', '-parseopt', switches])
                  for switches in args.switches]
     os.makedirs(args.out, exist_ok=True)

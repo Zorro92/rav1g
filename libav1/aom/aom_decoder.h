@@ -165,9 +165,9 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
 #define AV1_PARSER_RAV1D 1
 
 /* aom_codec_dec_cfg_t::parser_options, values to add up: ways of doing the
- * parse of AV1_PARSER_RAV1D that give the same frames and are there to be
- * timed against each other (docs/phase2-rav1d.md, "Where the time goes"). */
-#define AV1_PARSER_OPTION_STAGE 1             /* coefficients and transform block records reach their buffers in runs */
+ * parse of AV1_PARSER_RAV1D that give the same frames (docs/phase2-rav1d.md,
+ * "Where the time goes"). The library's settings have the first two on
+ * (rav1g::ParserOptions::default()); the value 1 was a switch that is gone. */
 #define AV1_PARSER_OPTION_NO_LF_MASKS 2       /* rav1d leaves out the masks of its own loop filter */
 #define AV1_PARSER_OPTION_TILE_KEEPS_THREAD 4 /* a tile stays on its thread between its superblock rows */
 #define AV1_PARSER_OPTION_TIME_CALLS 8        /* the calls of the sink are timed (AV1_PERF_CPU_SINK_CALLS) */
@@ -224,10 +224,11 @@ typedef struct aom_codec_dec_cfg {
    * The decoder is created for the width, height and bit depth given here;
    * aom_codec_peek_stream_info gives those of a stream. */
   int low_memory;
-  /* The parser: AV1_PARSER_LIBAOM (0, the default), the entropy decoder of
-   * libaom, or AV1_PARSER_RAV1D, the parse pass of rav1d (docs/phase2-rav1d.md).
-   * Both give the same frames; they differ in speed and in what a damaged
-   * stream does (the document says how). */
+  /* The parser: AV1_PARSER_LIBAOM (0), the entropy decoder of libaom, or
+   * AV1_PARSER_RAV1D, the parse pass of rav1d (docs/phase2-rav1d.md), which
+   * the library's settings choose unless they are told otherwise
+   * (rav1g::Settings::parser). Both give the same frames; they differ in
+   * speed and in what a damaged stream does (the document says how). */
   int parser;
   /* AV1_PARSER_OPTION_* values added up, for AV1_PARSER_RAV1D; 0 for none. */
   int parser_options;

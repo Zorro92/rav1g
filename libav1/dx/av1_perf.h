@@ -76,10 +76,8 @@ enum {
   /* the parser of phase 2 (AV1_PARSER_RAV1D), summed across the tile threads; parts of ENTROPY_SUM */
   AV1_PERF_CPU_SINK_LISTS,    /* the block lists at the end of a tile (the entropy decoder of libaom counts
                                  them at the same place, inside ENTROPY_SUM, without a timer of their own) */
-  AV1_PERF_CPU_SINK_STAGED,   /* AV1_PARSER_OPTION_STAGE: the copies of the staged coefficients and transform
-                                 block records into their buffers */
   AV1_PERF_CPU_SINK_CALLS,    /* AV1_PARSER_OPTION_TIME_CALLS: the calls of the sink (mode info record and
-                                 grid, transform block record, palette, superblock; SINK_STAGED is inside) */
+                                 grid, transform block record, palette, superblock) */
   AV1_PERF_CPU_COUNT
 };
 

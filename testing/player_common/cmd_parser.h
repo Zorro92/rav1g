@@ -32,11 +32,12 @@
 // a task without -lowmem and -lowmemparts gets: part 1, the shared back buffer.
 #define PLAYER_LOWMEM_ALL 7
 #define PLAYER_LOWMEM_DEFAULT 1
-// -parseopt: the words as bits (RAV1G_PARSER_OPTION_* of rav1g.h, which decoder.cpp holds them against).
-#define PLAYER_PARSEOPT_STAGE 1
+// -parseopt: the words as bits (RAV1G_PARSER_OPTION_* of rav1g.h, which decoder.cpp holds them against),
+// and what a task without -parseopt gets: nolfmask and tilethread (RAV1G_PARSER_OPTIONS_DEFAULT).
 #define PLAYER_PARSEOPT_NO_LF_MASKS 2
 #define PLAYER_PARSEOPT_TILE_KEEPS_THREAD 4
 #define PLAYER_PARSEOPT_TIME_CALLS 8
+#define PLAYER_PARSEOPT_DEFAULT (PLAYER_PARSEOPT_NO_LF_MASKS | PLAYER_PARSEOPT_TILE_KEEPS_THREAD)
 // The size the decoder is created for with -nofitsize, and for a stream that is larger than this.
 #define PLAYER_DECODER_WIDTH 4096
 #define PLAYER_DECODER_HEIGHT 2176
@@ -114,13 +115,14 @@ class CParameters {
     // (decoder.cpp, "The app's memory where the system has no limit for it"). -1: no model.
     int budget_mib_;
     int retain_mib_;
-    // -parser c|rav1d: what reads the bitstream: the entropy decoder of libaom (c, the default) or the parse
-    // pass of rav1d (docs/phase2-rav1d.md). parser_rav1d_ is the choice after Parse().
+    // -parser c|rav1d: what reads the bitstream: the parse pass of rav1d (rav1d, the default;
+    // docs/phase2-rav1d.md) or the entropy decoder of libaom (c). parser_rav1d_ is the choice after Parse().
     std::string parser_;
     bool parser_rav1d_;
-    // -parseopt <list>: with -parser rav1d, ways of doing the same parse, separated by commas: stage,
-    // nolfmask, tilethread, time; all (the first three); none. parser_options_ is the sum of the
-    // PLAYER_PARSEOPT_* values after Parse().
+    // -parseopt <list>: the switches of rav1d's parse, separated by commas. nolfmask and tilethread are
+    // on by default; a list that names one of them, none or default says which of the two are on (none:
+    // neither). time adds the timing of the sink's calls and leaves the two as they are. parser_options_
+    // is the sum of the PLAYER_PARSEOPT_* values after Parse().
     std::string parseopt_;
     unsigned parser_options_;
     // -continue_on_error: a decode call that fails does not end the task; the next temporal units go to

@@ -443,13 +443,14 @@ int AV1Decoder::DecodeOne() {
       cfg.intra_v2 = params_.intrav2_ != 0;
       // -interfast: room in the block maps for the lists by motion vector class.
       cfg.inter_fast = params_.interfast_ || params_.interfastlists_;
-      // -parser rav1d: the parse pass of rav1d reads the bitstream of this decoder.
+      // -parser: the parse pass of rav1d reads the bitstream of this decoder, or with -parser c the
+      // entropy decoder of libaom.
       cfg.parser = params_.parser_rav1d_ ? RAV1G_PARSER_RAV1D : RAV1G_PARSER_LIBAOM;
-      // -parseopt: the switches of that parser.
-      static_assert(PLAYER_PARSEOPT_STAGE == RAV1G_PARSER_OPTION_STAGE &&
-                        PLAYER_PARSEOPT_NO_LF_MASKS == RAV1G_PARSER_OPTION_NO_LF_MASKS &&
+      // -parseopt: the switches of rav1d's parse.
+      static_assert(PLAYER_PARSEOPT_NO_LF_MASKS == RAV1G_PARSER_OPTION_NO_LF_MASKS &&
                         PLAYER_PARSEOPT_TILE_KEEPS_THREAD == RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD &&
-                        PLAYER_PARSEOPT_TIME_CALLS == RAV1G_PARSER_OPTION_TIME_CALLS,
+                        PLAYER_PARSEOPT_TIME_CALLS == RAV1G_PARSER_OPTION_TIME_CALLS &&
+                        PLAYER_PARSEOPT_DEFAULT == RAV1G_PARSER_OPTIONS_DEFAULT,
                     "the bits of -parseopt out of step with rav1g.h");
       cfg.parser_options = params_.parser_options_;
       cfg.low_memory = params_.lowmem_parts_;
@@ -619,13 +620,13 @@ int AV1Decoder::DecodeOne() {
                                        : "inter_main, inter_compound (original)");
   // -parser: fixed when the decoder was created; Start() asks for a new decoder when the choice changes.
   XB_LOGI << "Parser: "
-          << (params_.parser_rav1d_ ? "the parse pass of rav1d (-parser rav1d)"
-                                    : "the entropy decoder of libaom (default; -parser rav1d selects rav1d's)");
-  // -parseopt: fixed with the parser.
+          << (params_.parser_rav1d_ ? "the parse pass of rav1d (default; -parser c selects the entropy decoder "
+                                      "of libaom)"
+                                    : "the entropy decoder of libaom (-parser c)");
+  // -parseopt: fixed with the parser. The default is nolfmask tilethread.
   if (params_.parser_rav1d_) {
     XB_LOGI << "Parser switches (-parseopt): "
-            << (params_.parser_options_ == 0 ? "none" : "")
-            << (params_.parser_options_ & PLAYER_PARSEOPT_STAGE ? "stage " : "")
+            << (params_.parser_options_ & PLAYER_PARSEOPT_DEFAULT ? "" : "none ")
             << (params_.parser_options_ & PLAYER_PARSEOPT_NO_LF_MASKS ? "nolfmask " : "")
             << (params_.parser_options_ & PLAYER_PARSEOPT_TILE_KEEPS_THREAD ? "tilethread " : "")
             << (params_.parser_options_ & PLAYER_PARSEOPT_TIME_CALLS ? "time " : "");

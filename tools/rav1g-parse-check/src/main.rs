@@ -23,8 +23,9 @@
 //! rav1g-parse-check -digest [-threads <n>] [-root <dir>] [-manifest <task list>] [<stream>...]
 //! ```
 //!
-//! `-parseopt` takes the switches of the parser of phase 2 (`rav1g_parse::options`: `stage`, `nolfmask`,
-//! `tilethread`, or `all`), separated by commas: the buffers have to be the same with each of them.
+//! `-parseopt` takes the switches of the parser of phase 2 (`rav1g_parse::options`: `nolfmask` and
+//! `tilethread`, which are on without it, `none`, `default`), separated by commas: the buffers have to
+//! be the same with each of them.
 //!
 //! `-digest` prints for every stream the line `rav1g-dec -parsedigest` prints on Windows: what rav1d's
 //! parse pass reads from it, folded into one number (`rav1g_parse::digest`).
@@ -71,7 +72,7 @@ fn usage() -> ! {
     eprintln!(
         "usage: rav1g-parse-check [-threads <n>] [-parseopt <list>] [-details <n>] [-root <dir>] [-manifest <task list>] \
          [<stream>...]\n       rav1g-parse-check -time [-threads <n>] [-parseopt <list>] <stream>\n-parseopt: the \
-         switches of the parser, separated by commas: stage, nolfmask, tilethread; all; none"
+         switches of the parser, separated by commas: nolfmask, tilethread (both on by default); none; default"
     );
     std::process::exit(2);
 }
@@ -140,7 +141,6 @@ fn check(path: &Path, options: &Options) -> Result<Report, String> {
     let mut c = chost::CParser::new()?;
     let mut r = rhost::RustParser::new(options.threads, options.parse)?;
     let mut report = Report::new(options.details);
-    report.staged = options.parse.stage;
     let mut number = 0;
     for (unit, data) in units.iter().enumerate() {
         let c_result = c.send(data);

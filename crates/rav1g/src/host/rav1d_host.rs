@@ -728,7 +728,6 @@ impl SinkHost for SlotHost {
     fn add_time(&self, timer: SinkTimer, ticks: i64) {
         let id = match timer {
             SinkTimer::Calls => sys::AV1_PERF_CPU_SINK_CALLS,
-            SinkTimer::Staged => sys::AV1_PERF_CPU_SINK_STAGED,
             SinkTimer::Lists => sys::AV1_PERF_CPU_SINK_LISTS,
         };
         // SAFETY: as above.

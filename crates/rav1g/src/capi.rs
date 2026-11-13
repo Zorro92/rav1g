@@ -35,24 +35,28 @@ pub const RAV1G_LOW_MEMORY_COEFS: u32 = 4;
 /// All memory reductions.
 pub const RAV1G_LOW_MEMORY_ALL: u32 = 7;
 
-/// `Rav1gSettings::parser`: the entropy decoder of libaom reads the bitstream. The default of
-/// `rav1g_settings_default`.
+/// `Rav1gSettings::parser`: the entropy decoder of libaom reads the bitstream. It stays until the last
+/// step of phase 2 (docs/phase2-rav1d.md).
 pub const RAV1G_PARSER_LIBAOM: u32 = 0;
-/// `Rav1gSettings::parser`: the parse pass of rav1d reads the bitstream. The same frames; the speed and
-/// what a damaged stream does differ (docs/phase2-rav1d.md).
+/// `Rav1gSettings::parser`: the parse pass of rav1d reads the bitstream. The default of
+/// `rav1g_settings_default`, and what every value other than `RAV1G_PARSER_LIBAOM` selects. The same
+/// frames; the speed and what a damaged stream does differ (docs/phase2-rav1d.md).
 pub const RAV1G_PARSER_RAV1D: u32 = 1;
 
 /// `Rav1gSettings::parser_options`, values to add up: ways of doing the parse of `RAV1G_PARSER_RAV1D`
-/// that give the same frames and are there to be timed against each other (docs/phase2-rav1d.md, "Where
-/// the time goes"). This one: the coefficients and the transform block records are collected in ordinary
-/// memory and copied to their buffers, which are write-combined memory, in runs.
-pub const RAV1G_PARSER_OPTION_STAGE: u32 = 1;
-/// rav1d leaves out the masks and levels of its own loop filter, which nothing here reads.
+/// that give the same frames (docs/phase2-rav1d.md, "Where the time goes"). The value 1 was a switch
+/// that is gone and means nothing. This one: rav1d leaves out the masks and levels of its own loop
+/// filter, which nothing here reads. Part of `RAV1G_PARSER_OPTIONS_DEFAULT`.
 pub const RAV1G_PARSER_OPTION_NO_LF_MASKS: u32 = 2;
-/// A tile stays on the thread it is on between its superblock rows.
+/// A tile stays on the thread it is on between its superblock rows. Part of
+/// `RAV1G_PARSER_OPTIONS_DEFAULT`.
 pub const RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD: u32 = 4;
 /// The calls of the sink are timed, for a timing run (`rav1g_set_perf_callback`).
 pub const RAV1G_PARSER_OPTION_TIME_CALLS: u32 = 8;
+/// The `Rav1gSettings::parser_options` of `rav1g_settings_default`: `RAV1G_PARSER_OPTION_NO_LF_MASKS`
+/// and `RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD`. An application that wants the timing as well adds
+/// `RAV1G_PARSER_OPTION_TIME_CALLS` to it; 0 is rav1d's parse without either.
+pub const RAV1G_PARSER_OPTIONS_DEFAULT: u32 = 6;
 
 /// `rav1g_set_inter_fast`: the fast inter path is on.
 pub const RAV1G_INTER_FAST_ON: u32 = 1;
@@ -79,10 +83,10 @@ const _: () = {
     assert!(RAV1G_LOW_MEMORY_MODE_INFO == LowMemory::MODE_INFO.0);
     assert!(RAV1G_LOW_MEMORY_COEFS == LowMemory::COEFS.0);
     assert!(RAV1G_LOW_MEMORY_ALL == LowMemory::ALL.0);
-    assert!(RAV1G_PARSER_OPTION_STAGE == crate::ParserOptions::STAGE);
     assert!(RAV1G_PARSER_OPTION_NO_LF_MASKS == crate::ParserOptions::NO_LF_MASKS);
     assert!(RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD == crate::ParserOptions::TILE_KEEPS_THREAD);
     assert!(RAV1G_PARSER_OPTION_TIME_CALLS == crate::ParserOptions::TIME_CALLS);
+    assert!(RAV1G_PARSER_OPTIONS_DEFAULT == crate::ParserOptions::DEFAULT);
     assert!(RAV1G_INTER_FAST_ON == switches::INTER_FAST_ON);
     assert!(RAV1G_INTER_FAST_SINGLE_ORIGINAL == switches::INTER_FAST_SINGLE_ORIGINAL);
     assert!(RAV1G_INTER_FAST_COMPOUND_ORIGINAL == switches::INTER_FAST_COMPOUND_ORIGINAL);
@@ -283,9 +287,10 @@ pub struct Rav1gSettings {
     pub output_all_layers: bool,
     /// The operating point of a stream with layers.
     pub operating_point: u32,
-    /// What reads the bitstream: `RAV1G_PARSER_LIBAOM` or `RAV1G_PARSER_RAV1D`.
+    /// What reads the bitstream: `RAV1G_PARSER_RAV1D` (the default) or `RAV1G_PARSER_LIBAOM`.
     pub parser: u32,
-    /// `RAV1G_PARSER_OPTION_*` values added up, for `RAV1G_PARSER_RAV1D`; 0 for none.
+    /// `RAV1G_PARSER_OPTION_*` values added up, for `RAV1G_PARSER_RAV1D`: `RAV1G_PARSER_OPTIONS_DEFAULT`
+    /// by default; 0 for none.
     pub parser_options: u32,
     /// The budget guard, or null. On a console an application that goes over its memory limit loses its
     /// D3D12 device, so with this callback the decoder asks before it allocates. The callback returns the
@@ -490,7 +495,8 @@ pub unsafe extern "C" fn rav1g_log_video_memory(d3d12_device: *mut c_void, label
 }
 
 /// The defaults: a decoder for 8-bit 1920x1088 frames with one tile thread, two pipeline slots and the
-/// shared back buffer, no budget guard, and no output (the application sets `output`).
+/// shared back buffer, the parse pass of rav1d as its parser (`RAV1G_PARSER_RAV1D` with
+/// `RAV1G_PARSER_OPTIONS_DEFAULT`), no budget guard, and no output (the application sets `output`).
 ///
 /// # Safety
 /// `settings` is valid for writing.
@@ -514,8 +520,11 @@ pub unsafe extern "C" fn rav1g_settings_default(settings: *mut Rav1gSettings) {
             packed_10x3: defaults.packed_10x3,
             output_all_layers: defaults.output_all_layers,
             operating_point: defaults.operating_point,
-            parser: RAV1G_PARSER_LIBAOM,
-            parser_options: 0,
+            parser: match defaults.parser {
+                crate::Parser::Libaom => RAV1G_PARSER_LIBAOM,
+                crate::Parser::Rav1d => RAV1G_PARSER_RAV1D,
+            },
+            parser_options: defaults.parser_options.bits(),
             memory_available: None,
             memory_available_context: std::ptr::null_mut(),
             output: Rav1gOutput {
@@ -543,7 +552,7 @@ fn settings_of(settings: &Rav1gSettings) -> Settings {
         packed_10x3: settings.packed_10x3,
         operating_point: settings.operating_point,
         output_all_layers: settings.output_all_layers,
-        parser: if settings.parser == RAV1G_PARSER_RAV1D { crate::Parser::Rav1d } else { crate::Parser::Libaom },
+        parser: if settings.parser == RAV1G_PARSER_LIBAOM { crate::Parser::Libaom } else { crate::Parser::Rav1d },
         parser_options: crate::ParserOptions::from_bits(settings.parser_options),
         memory_available: settings.memory_available.map(|available| -> crate::MemoryAvailable {
             Arc::new(move || {

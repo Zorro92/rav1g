@@ -673,10 +673,13 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     });
     if task.parser_rav1d {
         say!(
-            "PARSER {}: the parse pass of rav1d reads the bitstream (-parser rav1d), switches {} (-parseopt)",
+            "PARSER {}: the parse pass of rav1d reads the bitstream (-parser rav1d, the default), switches {} \
+             (-parseopt)",
             task.name,
             task.parser_options.words()
         );
+    } else {
+        say!("PARSER {}: the entropy decoder of libaom reads the bitstream (-parser c)", task.name);
     }
     if task.interfast & switches::INTER_FAST_ON != 0 {
         say!(

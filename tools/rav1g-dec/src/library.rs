@@ -62,7 +62,7 @@ pub struct Spec {
     pub inter_fast: bool,
     pub operating_point: u32,
     pub all_layers: bool,
-    /// -parser rav1d: the parse pass of rav1d reads the bitstream.
+    /// The parse pass of rav1d reads the bitstream (the default; -parser c: the entropy decoder of libaom).
     pub parser_rav1d: bool,
     /// -parseopt: the switches of that parser.
     pub parser_options: rav1g::ParserOptions,

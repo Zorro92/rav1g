@@ -24,8 +24,7 @@
 //! Two of those buffers are write-combined memory with the D3D12 host (the coefficients and the
 //! transform block records: upload heaps, which the CPU must not read and should write in order). The
 //! sink writes them as the entropy decoder of libaom does: each record once, in order, and of the
-//! coefficients the ones that are not zero, in rising scan order. With [`SinkOptions::stage`] both go
-//! through memory of the sink first and reach the buffers in runs, whole and in order.
+//! coefficients the ones that are not zero, in rising scan order.
 //!
 //! Until the entropy decoder of libaom leaves the tree (docs/phase2-rav1d.md, step 6), the block lists are
 //! computed by the code that takes its block context from that decoder's structs. So the sink keeps such
@@ -71,22 +70,9 @@ const TX_TYPE_FLAGS: [u32; 16] = [
 /// 2 the scans by row and by column.
 const TX_TYPE_SCAN: [u32; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1, 2, 1, 2];
 
-/// The largest number of coefficients a transform block has (32x32 coded).
-const MAX_COEFS: usize = 1024;
-/// The coefficients a tile stages before they go to their buffer ([`SinkOptions::stage`]): 32 KiB, which
-/// stays in the first-level cache next to what the parse reads.
-const STAGE_COEFS: usize = 8 * MAX_COEFS;
-/// The transform block records a tile stages: 8 KiB.
-const STAGE_BLOCKS: usize = 512;
-
 /// How the sink works. All off is the sink as it writes by default.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SinkOptions {
-    /// The coefficients and the transform block records of a tile are collected in memory of the sink
-    /// and copied to their buffers in runs: every word of a run is written, in order, by one copy. The
-    /// buffers hold the same bytes afterwards (a coefficient that is zero is then written as zero, where
-    /// it is otherwise left as the zero the buffer has).
-    pub stage: bool,
     /// The time inside the calls of a tile (block, transform block, palette, superblock) is measured
     /// and given to the host ([`SinkTimer::Calls`]), when the host has a clock. Two readings of the
     /// processor's time stamp counter a call.
@@ -97,12 +83,9 @@ pub struct SinkOptions {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SinkTimer {
     /// The calls of a tile: the mode info record and the grid of a block, the record of a transform
-    /// block, the palette, the superblock; with [`SinkOptions::stage`] the copies of the staged runs too.
-    /// Only with [`SinkOptions::time_calls`]. The parse that makes the calls is not in it, and neither
+    /// block, the palette, the superblock. Only with [`SinkOptions::time_calls`]. The parse that makes the calls is not in it, and neither
     /// are the coefficients the parse writes itself.
     Calls,
-    /// The copies of the staged runs into their buffers ([`SinkOptions::stage`]).
-    Staged,
     /// The block lists at the end of a tile.
     Lists,
 }
@@ -242,67 +225,11 @@ struct TileState {
     lossless: bool,
     /// The tile ran out of room: its frame fails.
     failed: bool,
-    /// [`SinkOptions::stage`]: what the tile has collected for its buffers.
-    stage: Option<Stage>,
     /// [`SinkOptions::time_calls`]: the time stamps the calls of the tile took, and the clock and the
     /// time stamp at the tile's begin, which give the length of a time stamp.
     call_stamps: u64,
     begin_ticks: i64,
     begin_stamp: u64,
-}
-
-/// The coefficients and the transform block records a tile has collected ([`SinkOptions::stage`]): a run
-/// of each, which lies in the buffer from `coef_dst` and `block_dst` on.
-struct Stage {
-    /// Zero behind the run, as the buffer is where nothing was written.
-    coefs: Box<[i32; STAGE_COEFS]>,
-    coef_dst: *mut i32,
-    coef_count: usize,
-    blocks: Box<[tx_block_info_gpu; STAGE_BLOCKS]>,
-    block_dst: *mut tx_block_info_gpu,
-    block_count: usize,
-}
-
-impl Stage {
-    fn new() -> Stage {
-        Stage {
-            coefs: zeroed_box(),
-            coef_dst: std::ptr::null_mut(),
-            coef_count: 0,
-            blocks: zeroed_box(),
-            block_dst: std::ptr::null_mut(),
-            block_count: 0,
-        }
-    }
-
-    fn is_empty(&self) -> bool {
-        self.coef_count == 0 && self.block_count == 0
-    }
-
-    /// The runs go to their buffers.
-    ///
-    /// # Safety
-    /// The buffers the runs were collected for are still the tile's.
-    unsafe fn flush(&mut self) {
-        // SAFETY: a run lies inside the tile's part of its buffer (checked when it was collected), and
-        // the stage is memory of its own.
-        unsafe {
-            if self.coef_count != 0 {
-                std::ptr::copy_nonoverlapping(self.coefs.as_ptr(), self.coef_dst, self.coef_count);
-            }
-            if self.block_count != 0 {
-                std::ptr::copy_nonoverlapping(self.blocks.as_ptr(), self.block_dst, self.block_count);
-            }
-        }
-        self.forget();
-    }
-
-    /// The runs are dropped (a tile that begins anew, behind a frame that failed).
-    fn forget(&mut self) {
-        self.coefs[..self.coef_count].fill(0);
-        self.coef_count = 0;
-        self.block_count = 0;
-    }
 }
 
 /// A cleared struct of the entropy decoder on the heap.
@@ -375,24 +302,6 @@ impl<H: SinkHost> Sink<H> {
 
     pub fn options(&self) -> SinkOptions {
         self.options
-    }
-
-    /// The staged runs of a tile go to their buffers ([`SinkOptions::stage`]).
-    ///
-    /// # Safety
-    /// The tile's thread, inside the frame.
-    unsafe fn flush_stage(host: &H, state: &mut TileState) {
-        if let Some(stage) = &mut state.stage
-            && !stage.is_empty()
-        {
-            let start = host.ticks();
-            // SAFETY: the caller's contract: the runs were collected for the tile's buffers in this
-            // frame.
-            unsafe { stage.flush() };
-            if start != 0 {
-                host.add_time(SinkTimer::Staged, host.ticks() - start);
-            }
-        }
     }
 
     /// The start of a call of a tile that is timed ([`SinkOptions::time_calls`]), or 0.
@@ -539,36 +448,12 @@ impl<H: SinkHost> Sink<H> {
             td.idct_blocks_sizes[type_index] += 1;
             td.idct_blocks_ptr += 1;
             let coefs = td.dq_buffer_base.add(td.dq_buffer_ptr as usize);
-            let count = (coef_count << 2) as usize;
             td.dq_buffer_ptr += coef_count << 2;
-            let Some(stage) = &mut state.stage else {
-                block.write(record);
-                // The parser writes the coefficients that are not zero, as the entropy decoder of libaom
-                // does: the buffer is zero where a frame has not written it (the transform stage binds it
-                // for writing and clears what it has read).
-                return coefs;
-            };
-            // Staged: the record and the coefficients go on behind the runs, which go to the buffers
-            // first when they have no room left or the buffers do not go on where the runs end (the
-            // tile's second part).
-            let fits = stage.coef_count + count <= STAGE_COEFS && stage.block_count < STAGE_BLOCKS;
-            let goes_on = (stage.coef_count == 0 || stage.coef_dst.add(stage.coef_count) == coefs)
-                && (stage.block_count == 0 || stage.block_dst.add(stage.block_count) == block);
-            if !(fits && goes_on) {
-                Self::flush_stage(&self.host, state);
-            }
-            let stage = state.stage.as_mut().expect("the tile stages");
-            if stage.coef_count == 0 {
-                stage.coef_dst = coefs;
-            }
-            if stage.block_count == 0 {
-                stage.block_dst = block;
-            }
-            stage.blocks[stage.block_count] = record;
-            stage.block_count += 1;
-            let staged = stage.coefs.as_mut_ptr().add(stage.coef_count);
-            stage.coef_count += count;
-            staged
+            block.write(record);
+            // The parser writes the coefficients that are not zero, as the entropy decoder of libaom
+            // does: the buffer is zero where a frame has not written it (the transform stage binds it
+            // for writing and clears what it has read).
+            coefs
         }
     }
 
@@ -685,15 +570,10 @@ impl<H: SinkHost> ParseSink for Sink<H> {
                 last_coefs: true,
                 lossless: false,
                 failed: false,
-                stage: None,
                 call_stamps: 0,
                 begin_ticks: 0,
                 begin_stamp: 0,
             });
-            if self.options.stage {
-                // What a frame that failed has left is not for this frame's buffers.
-                state.stage.get_or_insert_with(Stage::new).forget();
-            }
             if self.options.time_calls {
                 state.call_stamps = 0;
                 state.begin_ticks = self.host.ticks();
@@ -766,8 +646,7 @@ impl<H: SinkHost> ParseSink for Sink<H> {
         unsafe {
             let frame = self.frame();
             let state = self.tile(tile).as_mut().expect("the tile has begun");
-            // What the tile has staged, and the time of its calls.
-            Self::flush_stage(&self.host, state);
+            // The time of the tile's calls.
             if self.options.time_calls && state.begin_ticks != 0 {
                 let stamps = time_stamp().wrapping_sub(state.begin_stamp);
                 let ticks = self.host.ticks() - state.begin_ticks;

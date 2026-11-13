@@ -112,15 +112,15 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        "exists, as the console does",
        "", &params_.retain_mib_},
       {"parser", atString, anOptional,
-       "what reads the bitstream: c, the entropy decoder of libaom (default), or rav1d, the parse pass of rav1d "
+       "what reads the bitstream: rav1d, the parse pass of rav1d (default), or c, the entropy decoder of libaom "
        "(same output)",
        "", &params_.parser_},
       {"parseopt", atString, anOptional,
-       "with -parser rav1d, ways of doing the same parse, separated by commas (same output): stage, the "
-       "coefficients and the transform block records are collected in ordinary memory and copied to their "
-       "buffers in runs; nolfmask, rav1d leaves out the masks of its own loop filter; tilethread, a tile stays "
-       "on its thread between its superblock rows; all, these three; time, with -gputime the calls of the sink "
-       "are timed; none",
+       "the switches of rav1d's parse, separated by commas (same output): nolfmask, rav1d leaves out the masks "
+       "of its own loop filter; tilethread, a tile stays on its thread between its superblock rows. Both are on "
+       "by default, and a list that names one of them, none or default says which are on (none: neither; "
+       "nolfmask or tilethread: only that one). time, with -gputime the calls of the sink are timed, changes "
+       "nothing else",
        "", &params_.parseopt_},
       {"continue_on_error", atSingle, anOptional,
        "after a decode call that fails, go on with the next temporal unit in the same decoder instead of "
@@ -210,33 +210,39 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     Err += "\"";
     return -1;
   }
-  params_.parser_rav1d_ = params_.parser_ == "rav1d";
+  params_.parser_rav1d_ = params_.parser_ != "c";
 
-  // -parseopt: words separated by commas; a word that is none of them is an error of the task.
+  // -parseopt: words separated by commas; a word that is none of them is an error of the task. A word
+  // that says how the parse is done (nolfmask, tilethread, none, default) replaces the default of the two;
+  // time adds to whatever they are (rav1g::ParserOptions::from_words reads the list the same way).
   params_.parser_options_ = 0;
+  bool ways_named = false;
   for (size_t at = 0; at <= params_.parseopt_.size() && !params_.parseopt_.empty();) {
     size_t end = params_.parseopt_.find(',', at);
     if (end == std::string::npos) end = params_.parseopt_.size();
     const std::string word = params_.parseopt_.substr(at, end - at);
-    if (word == "stage") {
-      params_.parser_options_ |= PLAYER_PARSEOPT_STAGE;
+    if (word == "time") {
+      params_.parser_options_ |= PLAYER_PARSEOPT_TIME_CALLS;
     } else if (word == "nolfmask") {
       params_.parser_options_ |= PLAYER_PARSEOPT_NO_LF_MASKS;
+      ways_named = true;
     } else if (word == "tilethread") {
       params_.parser_options_ |= PLAYER_PARSEOPT_TILE_KEEPS_THREAD;
-    } else if (word == "time") {
-      params_.parser_options_ |= PLAYER_PARSEOPT_TIME_CALLS;
-    } else if (word == "all") {
-      params_.parser_options_ |=
-          PLAYER_PARSEOPT_STAGE | PLAYER_PARSEOPT_NO_LF_MASKS | PLAYER_PARSEOPT_TILE_KEEPS_THREAD;
-    } else if (word != "none") {
-      Err += "-parseopt takes stage, nolfmask, tilethread, time, all or none, separated by commas, not \"";
+      ways_named = true;
+    } else if (word == "default") {
+      params_.parser_options_ |= PLAYER_PARSEOPT_DEFAULT;
+      ways_named = true;
+    } else if (word == "none") {
+      ways_named = true;
+    } else {
+      Err += "-parseopt takes nolfmask, tilethread, time, default or none, separated by commas, not \"";
       Err += word;
       Err += "\"";
       return -1;
     }
     at = end + 1;
   }
+  if (!ways_named) params_.parser_options_ |= PLAYER_PARSEOPT_DEFAULT;
 
   // A displayed frame stays held until its replacement arrives. Headless output needs only one.
   const int min_queue = params_.nopresent_ ? 1 : 2;
@@ -354,9 +360,9 @@ void CParameters::Reset() {
   params_.retain_mib_ = 0;
   params_.continue_on_error_ = false;
   params_.parser_.clear();
-  params_.parser_rav1d_ = false;
+  params_.parser_rav1d_ = true;
   params_.parseopt_.clear();
-  params_.parser_options_ = 0;
+  params_.parser_options_ = PLAYER_PARSEOPT_DEFAULT;
   params_.lfhsplit_ = 0;
   params_.intraedgefix_ = false;
   params_.interfast_ = false;

@@ -63,7 +63,7 @@ def main():
     parser.add_argument('--tool', required=True, help='rav1g-dec.exe')
     parser.add_argument('--tool-args', default='', help='further arguments for it, e.g. "-hw"')
     parser.add_argument('--player-args', default='', help='further flags for every task of the player, e.g. '
-                        '"-parser rav1d" or "-parser rav1d -parseopt all"')
+                        '"-parser c" or "-parseopt none,time"')
     parser.add_argument('--streams', required=True, help='the directory of the conformance streams')
     parser.add_argument('--out', required=True, help='the logs')
     parser.add_argument('--title', default='the Rust library')
@@ -93,10 +93,17 @@ def main():
         problems.append('%d error lines in the player log; the first: %s' % (len(errors), errors[0]))
     if re.search(r'(?i)device.{0,16}removed|DXGI_ERROR_DEVICE', text):
         problems.append('a task lost the D3D12 device')
-    if '-parser rav1d' in args.player_args and 'Parser: the parse pass of rav1d' not in text:
-        problems.append('the log does not say that the parse pass of rav1d reads the streams')
-    if '-parseopt all' in args.player_args and 'Parser switches (-parseopt): stage nolfmask tilethread' not in text:
-        problems.append('the log does not say that the switches of the parser are on')
+    # What reads the streams: the parse pass of rav1d with its two default switches unless the tasks say
+    # otherwise (-parser c; -parseopt none).
+    if '-parser c' in args.player_args:
+        if 'Parser: the entropy decoder of libaom' not in text or 'Parser: the parse pass of rav1d' in text:
+            problems.append('the log does not say that the entropy decoder of libaom reads the streams')
+    else:
+        if 'Parser: the parse pass of rav1d' not in text or 'Parser: the entropy decoder of libaom' in text:
+            problems.append('the log does not say that the parse pass of rav1d reads the streams')
+        switches = 'none' if '-parseopt none' in args.player_args else 'nolfmask tilethread'
+        if 'Parser switches (-parseopt): ' + switches not in text:
+            problems.append('the log does not say that the switches of the parser are: ' + switches)
     ok = text.count('MD5 is OK')
     if ok != len(TASKS):
         problems.append('%d of %d tasks of the player ended with "MD5 is OK"' % (ok, len(TASKS)))

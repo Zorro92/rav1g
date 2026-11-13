@@ -1,10 +1,9 @@
 """A decode error in the middle of a stream: the decoder reports it, takes the frame back, and goes on.
 
 Cuts the tile data of one temporal unit of two streams of the conformance set (cut_tile.py): a vector
-with one tile, where the entropy decoder fails inside the tile ("Failed to decode tile data"), and the
-stream with eight tiles, where it finds a tile whose size does not fit ("Truncated packet or corrupt
-tile size"). Both errors come after the frame is set up (it has a pipeline slot, counted frame buffers,
-perhaps an output image) and before it is submitted: the decoder has to take all of that back.
+with one tile and the stream with eight tiles. Both errors come after the frame is set up (it has a
+pipeline slot, counted frame buffers, perhaps an output image) and before it is submitted: the decoder
+has to take all of that back.
 
 Checked, with the decoder program (rav1g-dec) and with the decoder code of the test player on the same
 library (rav1g-dec -playersmoke), all tasks in one process each:
@@ -16,11 +15,15 @@ library (rav1g-dec -playersmoke), all tasks in one process each:
   frame on must be those of the reference (the frames in between may be wrong or missing);
 - no task loses the D3D12 device.
 
-With --parser rav1d the decoders are created with the parse pass of rav1d (docs/phase2-rav1d.md, "A
-damaged stream"). Its words for both errors are "Failed to decode tile data"; a frame that fails leaves
-its reference slots empty, so the frames that name them fail as well, each with a decode error of its
-own, and the checks are the same: the frames before the damage, the frames from the next key frame on,
-the stream behind, no lost device.
+The decoders are created with the parse pass of rav1d, the default of the library (--parser rav1d;
+docs/phase2-rav1d.md, "A damaged stream"), or with --parser c with the entropy decoder of libaom; the
+tasks say which with -parser. The words of rav1d for both errors are "Failed to decode tile data"; a
+frame that fails leaves its reference slots empty, so the frames that name them fail as well, each with
+a decode error of its own. The entropy decoder of libaom fails inside the one tile ("Failed to decode
+tile data") and finds a tile whose size does not fit in the stream with eight ("Truncated packet or
+corrupt tile size"), and decodes the frames behind from the references it had. The checks are the same
+with both: the frames before the damage, the frames from the next key frame on, the stream behind, no
+lost device.
 
 usage: python cut_tile_check.py --streams <conformance streams> --out <directory>
            [--tool <rav1g-dec.exe>] [--tool-args "<args>"] [--player-smoke <rav1g-dec.exe>]
@@ -42,7 +45,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cut_tile  # noqa: E402
 
-# (name, stream of the set, the temporal unit to damage, the decoder's words for it)
+# (name, stream of the set, the temporal unit to damage, the words of the entropy decoder of libaom for it)
 CASES = [
     ('onetile', 'aom/av1-1-b8-23-film_grain-50.ivf', 1, 'Failed to decode tile data'),
     ('tiles', 'svt/syn-tiles-10b-1080p.ivf', 5, 'Truncated packet or corrupt tile size'),
@@ -78,7 +81,7 @@ def key_units(path):
 RAV1D_WORDS = 'Failed to decode tile data'
 
 
-def prepare(streams, parser='c'):
+def prepare(streams, parser='rav1d'):
     """Writes the damaged streams; returns what the checks need to know about each case."""
     work = os.path.join(streams, WORK)
     shutil.rmtree(work, ignore_errors=True)
@@ -138,7 +141,7 @@ def check_continued(label, got, case, whole, problems):
 def run_tool(args, cases, problems):
     """rav1g-dec: the tasks in one process with -keep_going."""
     out = os.path.join(args.out, 'tool' + ('-' + re.sub(r'\W+', '', args.tool_args) if args.tool_args else '') +
-                       ('-rav1d' if args.parser == 'rav1d' else ''))
+                       ('-c' if args.parser == 'c' else ''))
     os.makedirs(out, exist_ok=True)
     clean = '-i %s -check %s.md5 -timeout 300' % (CLEAN, CLEAN)
     tasks = []
@@ -156,7 +159,7 @@ def run_tool(args, cases, problems):
     list_path = os.path.join(args.streams, WORK, 'tool.list')
     with open(list_path, 'w', encoding='ascii') as f:
         f.write('\n'.join(tasks) + '\n')
-    parser_args = ['-parser', 'rav1d'] if args.parser == 'rav1d' else []
+    parser_args = ['-parser', args.parser]
     command = ([os.path.abspath(args.tool), '-keep_going', '-list', '%s/tool.list' % WORK] + args.tool_args.split() +
                parser_args)
     try:
@@ -166,8 +169,10 @@ def run_tool(args, cases, problems):
     text = done.stdout.decode('utf-8', 'replace')
     with open(os.path.join(out, 'tool.log'), 'w', encoding='utf-8') as f:
         f.write(text)
-    label = os.path.basename(args.tool) + (' ' + args.tool_args if args.tool_args else '') + (
-        ' -parser rav1d' if args.parser == 'rav1d' else '')
+    label = os.path.basename(args.tool) + (' ' + args.tool_args if args.tool_args else '') + ' -parser ' + args.parser
+    said = '^PARSER .*%s' % ('the parse pass of rav1d' if args.parser == 'rav1d' else 'the entropy decoder of libaom')
+    if not re.search(said, text, re.M):
+        problems.append('%s: the log does not say that this parser reads the streams' % label)
     results = {}
     for line in text.splitlines():
         found = re.match(r'RESULT stream=(\S+) status=(\S+) frames=(\d+) matched=(\d+).* detail="(.*)"\s*$', line)
@@ -220,9 +225,9 @@ def run_tool(args, cases, problems):
 
 def run_player(args, cases, problems):
     """The decoder code of the test player (rav1g-dec -playersmoke): the same, as tasks of its task file."""
-    out = os.path.join(args.out, 'player' + ('-rav1d' if args.parser == 'rav1d' else ''))
+    out = os.path.join(args.out, 'player' + ('-c' if args.parser == 'c' else ''))
     os.makedirs(out, exist_ok=True)
-    common = '-nopresent -frate -1' + (' -parser rav1d' if args.parser == 'rav1d' else '')
+    common = '-nopresent -frate -1 -parser ' + args.parser
     clean = '-i /%s -md5_frame_check %s' % (CLEAN, common)
     tasks = []
     for case in cases:
@@ -249,9 +254,10 @@ def run_player(args, cases, problems):
     text = done.stdout.decode('utf-8', 'replace')
     with open(os.path.join(out, 'player.log'), 'w', encoding='utf-8') as f:
         f.write(text)
-    label = 'player' + (' -parser rav1d' if args.parser == 'rav1d' else '')
-    if args.parser == 'rav1d' and 'Parser: the parse pass of rav1d' not in text:
-        problems.append('%s: the log does not say that the parse pass of rav1d reads the streams' % label)
+    label = 'player -parser ' + args.parser
+    said = 'Parser: the parse pass of rav1d' if args.parser == 'rav1d' else 'Parser: the entropy decoder of libaom'
+    if said not in text:
+        problems.append('%s: the log does not say that this parser reads the streams' % label)
     if done.returncode != 0 or 'PLAYERSMOKE the player ended its launch' not in text:
         problems.append('%s: exit code %d: the player did not end its launch' % (label, done.returncode))
     if re.search(r'(?i)device.{0,16}removed|DXGI_ERROR_DEVICE', text):
@@ -290,7 +296,8 @@ def main():
     parser.add_argument('--tool', help='rav1g-dec.exe')
     parser.add_argument('--tool-args', default='', help='further arguments for it, e.g. "-capi"')
     parser.add_argument('--player-smoke', help='rav1g-dec.exe, for its -playersmoke')
-    parser.add_argument('--parser', choices=['c', 'rav1d'], default='c', help='what reads the streams')
+    parser.add_argument('--parser', choices=['c', 'rav1d'], default='rav1d',
+                        help='what reads the streams (default rav1d, as the library)')
     args = parser.parse_args()
     if not args.tool and not args.player_smoke:
         parser.error('--tool or --player-smoke')

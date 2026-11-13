@@ -60,16 +60,16 @@ impl BitOr for LowMemory {
 /// in speed and in what a damaged stream does (docs/phase2-rav1d.md).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Parser {
-    /// The entropy decoder of libaom (C).
-    #[default]
+    /// The entropy decoder of libaom (C). It stays until the last step of phase 2.
     Libaom,
-    /// The parse pass of rav1d.
+    /// The parse pass of rav1d. The default.
+    #[default]
     Rav1d,
 }
 
-/// The switches of [`Parser::Rav1d`] ([`Settings::parser_options`]): the coefficients and the transform
-/// block records staged before they reach their buffers, rav1d without the masks of its own loop filter,
-/// a tile kept on its thread, the calls of the sink timed. The frames are the same with every one.
+/// The switches of [`Parser::Rav1d`] ([`Settings::parser_options`]): rav1d without the masks of its own
+/// loop filter and a tile kept on its thread, which are both on by default, and the calls of the sink
+/// timed. The frames are the same with every one.
 pub use rav1g_parse::options::ParseOptions as ParserOptions;
 
 /// What the application has left for the decoder, in bytes: its memory limit less what it uses and less
@@ -103,9 +103,10 @@ pub struct Settings {
     pub operating_point: u32,
     /// The frame of every spatial layer of a temporal unit is output, instead of the highest one.
     pub output_all_layers: bool,
-    /// What reads the bitstream.
+    /// What reads the bitstream: [`Parser::Rav1d`] unless the application says otherwise.
     pub parser: Parser,
-    /// The switches of [`Parser::Rav1d`]: ways of doing the same parse, to be timed against each other.
+    /// The switches of [`Parser::Rav1d`]: ways of doing the same parse. The default has the two on that
+    /// make it faster; [`ParserOptions::NONE`] turns them off.
     pub parser_options: ParserOptions,
     /// The budget guard. On a console an application that goes over its memory limit loses its D3D12
     /// device, so with this callback the decoder asks before it allocates: a creation whose device buffers
@@ -116,7 +117,8 @@ pub struct Settings {
 }
 
 impl Default for Settings {
-    /// A decoder for 8-bit 1920x1088 frames with one tile thread, two slots and the shared back buffer.
+    /// A decoder for 8-bit 1920x1088 frames with one tile thread, two slots and the shared back buffer,
+    /// whose parser is rav1d's parse pass with its default switches.
     fn default() -> Settings {
         Settings {
             width: 1920,

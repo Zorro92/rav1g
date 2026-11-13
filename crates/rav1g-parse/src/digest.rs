@@ -301,7 +301,10 @@ impl DigestParser {
             tiles: UnsafeCell::new(Vec::new()),
             total: Mutex::new(Digest { hash: Hash::START.0, ..Default::default() }),
         });
-        let settings = ParseSettings { threads: threads.max(1), frames: 1, ..Default::default() };
+        // The parse as the decoder does it by default (`crate::options`); the switches change nothing
+        // of what the sink is handed.
+        let mut settings = ParseSettings { threads: threads.max(1), frames: 1, ..Default::default() };
+        crate::options::ParseOptions::default().apply(&mut settings);
         Ok(Self { parser: Parser::new(&settings, sink.clone())?, sink })
     }
 

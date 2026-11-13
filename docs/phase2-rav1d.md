@@ -2,7 +2,8 @@
 
 Status: design, written 2026-11-12, with measurements on a development machine; steps 1 to 3 of the
 [plan](#plan) are in the tree ([Progress](#progress)): the decoder runs on either parser, chosen when it is
-created. Phase 1 ([rust-port.md](rust-port.md)) moved the host to Rust and kept the libaom-derived C parser;
+created, and since the console timed them rav1d's is the default
+([Console after step 3](#console-after-step-3-rav1d-is-the-default)). Phase 1 ([rust-port.md](rust-port.md)) moved the host to Rust and kept the libaom-derived C parser;
 phase 2 replaces that parser with the one of rav1d (<https://github.com/memorysafety/rav1d>, the Rust port
 of dav1d, BSD-2-Clause).
 
@@ -776,7 +777,8 @@ version as in the cross build).
 
 Done: the D3D12 host runs on the sink, one frame in parse at a time. A decoder is created with one of
 the two parsers and keeps it; the entropy decoder of libaom is the default until the console has timed
-both.
+both. (It has: the default is rav1d now, and the table below is the state of step 3. See
+[Console after step 3](#console-after-step-3-rav1d-is-the-default).)
 
 | Where | The choice |
 | --- | --- |
@@ -975,7 +977,10 @@ file and copies it into the `licenses` directory of every package.
 
 2026-11-13. The console timed step 3, the ratio was not the one the design measured, and this section
 is the search for the reason: what the console said, what was looked at, what was found, and the
-switches and timers that are in the tree so that the console can say which of it counts.
+switches and timers that are in the tree so that the console can say which of it counts. What the
+console then said, and what became of the switches (`nolfmask` and `tilethread` are the default,
+`stage` is gone), is in [the next section](#console-after-step-3-rav1d-is-the-default); this one is
+left as it was written.
 
 **The console on step 3.** Package 0.2.136.0, `-t 6 -queue_size 4 -nopresent -gputime`, two runs
 each, milliseconds a frame, means. The md5 set is 15 of 15 with `-parser rav1d`; the GPU is as busy
@@ -1183,6 +1188,114 @@ decides. One launch, the same clip, two runs each:
 frame for ever (it happened here with an index one past an array of timers; step 4 has the item).
 rav1d clears and makes anew its loop filter masks for every frame (700 KB at 4K) also with `nolfmask`,
 because the CDEF indexes of a superblock live in them; that is frame set-up, outside `entropy_sum`.
+
+### Console after step 3: rav1d is the default
+
+2026-11-13. The console timed the switches of [Where the time goes](#where-the-time-goes), and the
+answer decided the default.
+
+**The console.** Package 0.2.138.0, `-t 6 -frate -1 -limit 300 -queue_size 4 -nopresent -gputime`,
+frames per second, the mean of two runs:
+
+| Variant | `j4k40` (heavy 4K 10-bit, 40 Mbps) | `t40x1ld` (SVT 4K 10-bit, 40 Mbps) | `a1_8b4k` (light 4K 8-bit) |
+| --- | ---: | ---: | ---: |
+| `-parser c` | 19.5 | 22.7 | 53.4 |
+| `-parser rav1d` | 24.5 | 29.0 | 45.8 |
+| + `tilethread` | 25.2 | 29.8 | 47.7 |
+| + `nolfmask` | 24.6 | 30.3 | 58.6 |
+| + `all` (`tilethread`, `nolfmask`, `stage`) | 25.2 | 31.2 | 59.4 |
+| `-parser rav1d -t 1` | 25.1 | 29.6 | 49.0 |
+
+- `nolfmask` is what the light clip needed (45.8 to 58.6 frames per second: faster than the C parser
+  instead of slower), `tilethread` gives 0.7 to 1.9 frames per second on each clip, and the two
+  together are the best row of every clip.
+- `stage` gave nothing that could be measured: the direct stores into write-combined memory are not
+  what the parse waits for on the console.
+- The md5 set (15 clips) with `-parser rav1d -parseopt tilethread,nolfmask`: 15 of 15, no error.
+- `j4k40` with `all`: 39.7 ms a frame, 29.0 ms of it the parse (`cpu parse`): rav1d by itself about
+  20 ms, the calls of the sink about 3.4 ms, **the block lists 4.7 ms** (the largest part of the sink),
+  and about 9 ms of other work on the decode thread (set-up, memsets, recording). The parse of
+  `t40x1ld` with `all` is 21.6 ms a frame, that of `a1_8b4k` 8.3 ms.
+- So heavy 4K is at 25 frames per second, not yet at 30: the block lists and the calls of the sink
+  are the next thing to cut (below), then frames in parallel (step 4) and the other work of the
+  decode thread.
+
+**What changed.**
+
+| Where | The parser of a decoder | Its switches |
+| --- | --- | --- |
+| Rust | `Settings::parser`: `Parser::Rav1d` (default) or `Parser::Libaom` | `Settings::parser_options`: `ParserOptions::default()` has `no_lf_masks` and `tile_keeps_thread` on; `ParserOptions::NONE` has neither |
+| C (`rav1g.h`) | `Rav1gSettings::parser`: `RAV1G_PARSER_RAV1D` (what `rav1g_settings_default` writes, and what every value but `RAV1G_PARSER_LIBAOM` selects) or `RAV1G_PARSER_LIBAOM` | `Rav1gSettings::parser_options`: `RAV1G_PARSER_OPTIONS_DEFAULT` (what `rav1g_settings_default` writes: `_NO_LF_MASKS` and `_TILE_KEEPS_THREAD`); 0 for neither |
+| `rav1g-dec`, test player | no flag or `-parser rav1d`; `-parser c` for the entropy decoder of libaom | no flag: `nolfmask,tilethread`; `-parseopt` says otherwise, per task ([test-player.md](test-player.md#switches-of-the-parser--parseopt)) |
+| `rav1g-parse-check` (the oracle) | both, always | no flag: `nolfmask,tilethread`; `-parseopt` |
+
+How a default switch is turned off, for an A/B on the device: a `-parseopt` list that names
+`nolfmask`, `tilethread`, `none` or `default` replaces the default of those two, so the parse is done
+in the ways the list names and in no other; `time` only adds the timing.
+
+| `-parseopt` | `nolfmask` | `tilethread` | Sink calls timed |
+| --- | --- | --- | --- |
+| no flag, `default` | on | on | |
+| `time` | on | on | yes |
+| `none` | | | |
+| `none,time` | | | yes |
+| `tilethread` | | on | |
+| `nolfmask` | on | | |
+
+These are the rows of the table above: `-parseopt none` is its `-parser rav1d`, `-parseopt
+tilethread` and `-parseopt nolfmask` its two single rows, and no flag is what the md5 set was run
+with.
+
+- The two stay switches of the copy of rav1d (`ParseSettings::lf_masks`, `::tile_keeps_thread`,
+  upstream's behaviour unless set; `PATCHES.md`) and are set by `ParserOptions`. `nolfmask` was meant
+  to become a removal in the copy; it stays a switch until the console no longer needs the A/B.
+- **`stage` is gone**: the switch, its 32 KiB and 8 KiB of staging per tile in the sink, the timer
+  `sink_staged`, the bit 1 of the options (it means nothing now; the other bits kept their values) and
+  the one difference the oracle accepted for it (an explicit zero inside a transform block). The word
+  `all` went with it: it would now name the default.
+- `-parser c` stays, and with it everything of the C parser, until step 6.
+- The parse digest (`rav1g-dec -parsedigest`, `rav1g-parse-check -digest`) parses with the default
+  switches; the numbers are those of before, as they have to be.
+
+**CI**, job by job: a check that names no parser is now a check of rav1d with its default switches.
+
+| Job, check | Before | Now |
+| --- | --- | --- |
+| `rust`, `rust-cross-run`: the whole set, `-capi`, cut streams, order check, memory check, `-poisonmi`, `-poisonbuf`, `-interfast`, player smoke, timing smoke, stage dumps, MEMORY lines | the C parser | rav1d, `nolfmask,tilethread`; the conformance run has to say so in its `PARSER` line |
+| the same checks "once more" | with `-parser rav1d` | with `-parser c` (the run has to say "the entropy decoder of libaom") |
+| the two parsers against each other (md5 of every frame, stage dumps, MEMORY lines) | default against `-parser rav1d` | `-parser c` against the default |
+| the switches | `-parser rav1d -parseopt all,time` | `-parser rav1d -parseopt none,time`: rav1d as upstream schedules it, which no other run has any more |
+| `rust-equal` (the C++ decoder of branch `cpp`) | against the default run, its dumps and MEMORY lines | against the run, the dumps and the MEMORY lines of `-parser c`: the same parser on both sides, records byte for byte |
+| cut streams (`cut_tile_check.py`) | `--parser rav1d` asked for rav1d's words | `--parser` defaults to rav1d; `--parser c` for libaom's words; the tasks always carry `-parser`, and the log has to name that parser |
+| player smoke (`player_smoke.py`) | `Parser:` line checked with `-parser rav1d` | checked always: rav1d and `nolfmask tilethread` without a flag, libaom with `-parser c`, `none` with `-parseopt none` |
+| `parse-check` | no switch; `-parseopt all` | the default switches; `-parseopt none`; one thread and four each |
+| `parse-digest` | | unchanged: the same lines from three builds |
+| paired timing (`parser_timing.py`) | `-parser c`, `-parser rav1d`, `all` | `-parser c`, `-parser rav1d` (default switches), `none`, `time`, and each switch alone on the 2160p stream |
+| the packages of the test player | `-parser rav1d` on a task line | rav1d without a flag; import tables unchanged (rav1d was already linked) |
+
+**The memory check** (`memory_check.py`). Its expected numbers do not change. What it holds is the
+video memory after every release (0 bytes with both parsers), the growth of the private bytes of
+the process from iteration to iteration, and the decisions of the budget guard; the device buffers of
+a decoder do not depend on its parser (the MEMORY lines of the two are equal: 470.7 MiB for the
+2160p 8-bit decoder, 166.9 MiB for 1080p 10-bit with `-lowmem`, 58.9 MiB for 720p 8-bit, as before).
+What differs is host memory while a decoder exists: rav1d's parse state next to the C parser's, which
+a decoder still allocates. Run 43475533217, the program of the cross build, eight iterations, private
+bytes of the process in MiB (lowest to highest of the eight, and the mean):
+
+| Task, when | `-parser c` | `-parser rav1d` |
+| --- | ---: | ---: |
+| 2160p 8-bit, decoded | 651 to 834, 798 | 659 to 848, 806 |
+| 2160p 8-bit, released | 373 to 511, 461 | 371 to 520, 485 |
+| decoder of the 4K 10-bit size, decoded | 835 to 1026, 949 | 842 to 1025, 940 |
+| decoder of the 4K 10-bit size, released | 192 to 298, 279 | 195 to 306, 284 |
+| 1080p 10-bit, three slots, decoded | 444 to 499, 486 | 452 to 504, 491 |
+| 1080p 10-bit `-lowmem`, decoded | 448 to 505, 486 | 454 to 512, 492 |
+| 720p 8-bit, decoded | 461 to 502, 485 | 476 to 509, 491 |
+
+So 5 to 8 MiB more while a 1080p or 2160p decoder is in use, inside the run-to-run spread of WARP
+(tolerances: 40 MiB of growth, 96 MiB after a release), and the lowest level after a release, which
+is the number that repeats, is the same (192 against 195 MiB). The check now runs with rav1d by
+default and once more with `-parser c`; the tolerances are as they were.
 
 ## Licence
 

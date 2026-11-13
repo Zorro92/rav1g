@@ -4,8 +4,9 @@ A fast, open-source AV1 decoder on the GPU: entropy decoding on the CPU, everyth
 it (inverse transforms, intra and inter prediction, loop filter, CDEF, loop restoration,
 super-resolution, film grain) in D3D12 compute shaders. It runs on any D3D12 GPU. The name
 stands for Rust AV1 GPU: the decoder on this branch is Rust (the D3D12 host and the interface,
-`crates/rav1g`), the C parser and entropy decoder it took over from upstream (`libav1`), and HLSL
-(`libav1/dx/shaders`). There is no C++ host on `main` any more ([docs/rust-port.md](docs/rust-port.md));
+`crates/rav1g`, and the parser, the parse pass of rav1d in `third_party/rav1d`), HLSL
+(`libav1/dx/shaders`), and for now the C parser and entropy decoder it took over from upstream
+(`libav1`), which a decoder can still be created with. There is no C++ host on `main` any more ([docs/rust-port.md](docs/rust-port.md));
 the C++ decoder it was ported from lives on in branch `cpp` (release `v0.3.0`).
 
 rav1g is a fork of AOMedia's [av1-xbox-one](https://aomedia.googlesource.com/av1-xbox-one)
@@ -165,8 +166,11 @@ lists, transform blocks and coefficients as the C parser, byte for byte (`tools/
 Linux in CI), and the decoder runs on it: a decoder is created with either parser
 (`Settings::parser`, `Rav1gSettings::parser`, `rav1g-dec -parser c|rav1d`, the same flag in the test
 player), one frame in parse at a time, and both give the same frames and the same buffers behind every
-GPU stage. The C parser stays the default until the console has timed the two. Next is step 4, frames
-in parallel. And
+GPU stage. The console has timed the two (heavy 4K 10-bit at 40 Mbps: 19.5 frames per second with the
+C parser, 24.5 to 25.2 with rav1d; 22.7 against 29.0 to 31.2 on a second clip), so **rav1d's parse pass
+is the parser of a decoder unless it is created with the other one** (`-parser c`, which stays until
+the last step of phase 2), with two switches of its parse on that the same measurement chose
+(`-parseopt`). Next is step 4, frames in parallel. And
 inter and intra prediction on the GPU (a measured `-interfast` prototype showed that inter time is per
 block and per dispatch, not filtering; see [gpu-av1-decoder.md](docs/gpu-av1-decoder.md)).
 The goals, in order: heavy 4K at 30 fps in real time (at most 33.3 ms per frame; not met

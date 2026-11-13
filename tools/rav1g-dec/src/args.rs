@@ -84,7 +84,7 @@ pub struct Task {
     pub all_layers: bool,
     /// -oppoint <n>: the operating point of a stream with layers.
     pub oppoint: i32,
-    /// -parser c|rav1d: what reads the bitstream; true is rav1d's parse pass.
+    /// -parser c|rav1d: what reads the bitstream; true is rav1d's parse pass, the default.
     pub parser_rav1d: bool,
     /// -parseopt <list>: the switches of rav1d's parse pass (`rav1g::ParserOptions`).
     pub parser_options: rav1g::ParserOptions,
@@ -136,7 +136,7 @@ impl Default for Task {
             interfast: 0,
             continue_on_error: false,
             all_layers: false,
-            parser_rav1d: false,
+            parser_rav1d: true,
             parser_options: rav1g::ParserOptions::default(),
             oppoint: 0,
             timeout_s: 0,
@@ -217,15 +217,14 @@ pub fn usage() {
     say!("                        the output of any stream (same output)");
     say!("  -poisonbuf            the same for every buffer the CPU writes for the shaders, and the constants of");
     say!("                        every stage filled again in every frame before the stage writes them (same output)");
-    say!("  -parser c|rav1d       what reads the bitstream: the entropy decoder of libaom (c, the default) or the");
-    say!("                        parse pass of rav1d (same output; docs/phase2-rav1d.md)");
-    say!(
-        "  -parseopt <list>      with -parser rav1d, ways of doing the same parse, separated by commas (same output):"
-    );
-    say!("                        stage: the coefficients and the transform block records are collected in ordinary");
-    say!("                        memory and copied to their buffers in runs; nolfmask: rav1d leaves out the masks of");
-    say!("                        its own loop filter; tilethread: a tile stays on its thread between its superblock");
-    say!("                        rows; all: these three; time: with -gputime, the calls of the sink are timed; none");
+    say!("  -parser c|rav1d       what reads the bitstream: the parse pass of rav1d (rav1d, the default) or the");
+    say!("                        entropy decoder of libaom (c) (same output; docs/phase2-rav1d.md)");
+    say!("  -parseopt <list>      the switches of rav1d's parse, separated by commas (same output). nolfmask: rav1d");
+    say!("                        leaves out the masks of its own loop filter; tilethread: a tile stays on its");
+    say!("                        thread between its superblock rows. Both are on by default, and a list that names");
+    say!("                        one of them, none or default says which are on: none turns both off, nolfmask or");
+    say!("                        tilethread leaves only that one on. time: with -gputime, the calls of the sink are");
+    say!("                        timed; it changes nothing else (time alone: the default, timed)");
     say!("  -interfast            inter prediction by the fraction of the motion vector: a copy, one filter pass, or");
     say!("                        both (inter_fast, inter_compound_fast; same output)");
     say!("  -interfastlists       the block lists of -interfast with the original shaders on them (same output)");
@@ -379,7 +378,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-parseopt" => {
                 let list = value()?;
                 task.parser_options = rav1g::ParserOptions::from_words(&list)
-                    .ok_or_else(|| format!("-parseopt {list}: stage, nolfmask, tilethread, time, all or none"))?;
+                    .ok_or_else(|| format!("-parseopt {list}: nolfmask, tilethread, time, default or none"))?;
             }
             _ => {
                 let Some(globals) = globals.as_deref_mut() else {
