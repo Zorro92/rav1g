@@ -759,6 +759,18 @@ entropy decoder of libaom writes as well.
   show-existing, operating points, errors.
 - The warp validity mark needs a stream that has such a block.
 
+**Runs.** Commits `85f6fbe` (rav1d as published), `5632c6c` (the changes to it), `e5e9e42` (the
+workspace, the sink, the oracle, CI), `159fb21` (this section). CI run 43429728285 on `159fb21`, all 17
+jobs green: 252 of 252 on WARP with `rav1g-dec` of the MSVC build and of the cross build, also through
+`rav1g.h`, with `-poisonmi`, `-poisonbuf` and `-interfast`; order check, cut-tile, player smoke, memory
+check, the equality with the C++ decoder; no device removal; the import checks of both packages and of
+the application-container probe; `rav1d` 252 of 252; `parse-check` 252 of 252 with one and with four
+threads; `parse-digest` the same 252 lines from the three builds. The sink on that run's runner: 1.8 ms
+on the 4K stream, 0.6 ms on the 1080p stream. Before it, on a throwaway branch: run 43426711444 (the
+whole workflow; everything green but the build of `parse-check`, where bindgen loaded a libclang of
+another version than the headers clang gave it) and run 43429200887 (that job alone, with one LLVM
+version as in the cross build).
+
 ## Licence
 
 rav1d is BSD-2-Clause (copyright VideoLAN and the dav1d authors, and the rav1d contributors); the
