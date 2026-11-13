@@ -873,6 +873,7 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
         (*dec).memory = mem;
 
         let rcfg = ResourceConfig::from_cfg(cfg);
+        (*dec).parser_threads = c_int::try_from(cfg.threads).unwrap_or(1);
         (*dec).frame_slots = rcfg.gpu_pipeline_depth;
         let frame_slots = rcfg.gpu_pipeline_depth as usize;
 
@@ -1200,6 +1201,8 @@ unsafe fn destroy(dec: *mut Av1Core, log_steps: bool) {
         // thread waits for the fence of each), so nothing on the queue uses the buffers that are released
         // below.
         av1_drain_gpu_decoder(dec);
+        // The parser of phase 2: its threads are joined before the buffers they write are released.
+        drop((*dec).rav1d.take());
 
         if let Some(release_image) = (*dec).cb_release_image {
             for img in &(*dec).image_pool_src {

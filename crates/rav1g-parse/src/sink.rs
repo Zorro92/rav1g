@@ -33,8 +33,11 @@ use std::ffi::{c_int, c_void};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use rav1d::include::dav1d::headers::Rav1dSequenceHeader;
 use rav1d::include::dav1d::headers::{Rav1dFrameHeader, Rav1dPixelLayout};
-use rav1d::parse::{ParseBlock, ParseFrame, ParsePalette, ParseSink, ParseSuperblock, ParseTile, ParseTxb};
+use rav1d::parse::{
+    ParseBlock, ParseFrame, ParsePalette, ParseShowExisting, ParseSink, ParseSuperblock, ParseTile, ParseTxb,
+};
 use rav1g_sys::parser::{AV1_COMMON, AV1Decoder, MACROBLOCKD, MB_MODE_INFO, TileInfo, av1_tile_data};
 
 use crate::record::{self, BLOCK_SIZE_OF, MI_SIZE_HIGH_LOG2, MI_SIZE_WIDE_LOG2, RecordFrame};
@@ -74,6 +77,16 @@ pub struct TileMemory {
     /// The tile's part of the mode info pool and the records it has room for.
     pub mi_pool: *mut MB_MODE_INFO,
     pub mi_count_max: c_int,
+    /// The tile's part of the coefficient buffer has the worst-case layout: it is as large as the tile
+    /// can need, and the tile never goes on in a second part (`ThreadData::ext_idct_buffer`).
+    pub worst_case_coefs: bool,
+}
+
+/// The second part of a tile's mode info ([`SinkHost::second_mode_info`]): its cursors, and the records,
+/// with room for as many as the first part.
+pub struct SecondModeInfo {
+    pub tile_data: *mut av1_tile_data,
+    pub mi_pool: *mut MB_MODE_INFO,
 }
 
 /// What gives the sink its memory: the host of the decoder.
@@ -81,12 +94,44 @@ pub trait SinkHost: Send + Sync {
     /// The host's decoder: `gpu_decoder` of the `AV1Decoder` that `av1_mi_push_block` is called with.
     fn gpu_decoder(&self) -> *mut c_void;
 
+    /// A sequence header (`ParseSink::sequence`). `Err` refuses the sequence.
+    #[expect(clippy::result_unit_err, reason = "the error of ParseSink::sequence, which has no more to say")]
+    fn sequence(&self, _seq_hdr: &Rav1dSequenceHeader, _new: bool) -> Result<(), ()> {
+        Ok(())
+    }
+
+    /// A frame header that shows the frame of a reference slot (`ParseSink::show_existing`).
+    #[expect(clippy::result_unit_err, reason = "the error of ParseSink::show_existing, which has no more to say")]
+    fn show_existing(&self, _show: &ParseShowExisting<'_>) -> Result<(), ()> {
+        Ok(())
+    }
+
+    /// The clock of [`Self::tile_time`], or 0 when nothing is timed.
+    fn ticks(&self) -> i64 {
+        0
+    }
+
+    /// A superblock row of a tile was parsed since `start`, with the sink's part of it.
+    fn tile_time(&self, _start: i64) {}
+
     /// A frame's parse starts (frames come one at a time). `Err` fails the frame.
     #[expect(clippy::result_unit_err, reason = "the error of ParseSink::frame_begin, which has no more to say")]
     fn frame_begin(&self, frame: &ParseFrame<'_>) -> Result<FrameMemory, ()>;
 
     /// A tile's parse starts, on the thread that parses it.
     fn tile_begin(&self, tile: &ParseTile) -> TileMemory;
+
+    /// The tile's part of the mode info pool is full: where its records go on (`av1_setup_sec_data`).
+    /// `None` when there is no second part: the frame fails.
+    fn second_mode_info(&self, tile: usize, tile_data: *mut av1_tile_data) -> Option<SecondModeInfo>;
+
+    /// The tile's part of the coefficient buffer is used up to its mark (`dq_buffer_max`): the host moves
+    /// the tile's cursor to where its coefficients go on (`av1_setup_ext_coef_buffer`).
+    fn second_coefs(&self, tile: usize, tile_data: *mut av1_tile_data);
+
+    /// A tile has no room left for its blocks (`mode_info`) or for its coefficients, in two parts: the
+    /// frame fails. On the tile's thread.
+    fn no_room(&self, _tile: usize, _mode_info: bool) {}
 
     /// The colour index map of a palette block's plane (`av1_intra_palette`).
     fn palette(&self, tile: usize, palette: &ParsePalette<'_>);
@@ -97,8 +142,8 @@ pub trait SinkHost: Send + Sync {
     /// A tile is parsed and its block lists are counted.
     fn tile_end(&self, tile: usize);
 
-    /// The frame's parse has ended.
-    fn frame_end(&self, ok: bool);
+    /// The frame's parse has ended. Returns whether the frame stands (`ParseSink::frame_end`).
+    fn frame_end(&self, ok: bool) -> bool;
 }
 
 /// What the sink keeps of the frame in parse.
@@ -124,6 +169,11 @@ struct TileState {
     xd: Box<MACROBLOCKD>,
     memory: TileMemory,
     mi_count: c_int,
+    /// The second part of the tile's mode info, when the first is full, and the records in it.
+    second: Option<SecondModeInfo>,
+    mi_count2: c_int,
+    /// The tile's coefficients have their last part: the worst-case layout, or the second part.
+    last_coefs: bool,
     /// The segment of the tile's last block is lossless.
     lossless: bool,
     /// The tile ran out of room: its frame fails.
@@ -166,6 +216,22 @@ unsafe impl<H: SinkHost> Send for Sink<H> {}
 unsafe impl<H: SinkHost> Sync for Sink<H> {}
 
 impl<H: SinkHost> Sink<H> {
+    /// Before a superblock of a tile: when the tile's part of the coefficient buffer is used up to its
+    /// mark, the tile goes on in its second part (`decode_tile2` of `av1/decoder/decodeframe.c`).
+    ///
+    /// # Safety
+    /// The tile's thread, inside the frame; `state.memory.tile_data` is the tile's.
+    unsafe fn coefs_go_on(host: &H, tile: usize, state: &mut TileState) {
+        // SAFETY: the caller's contract.
+        unsafe {
+            let td = state.memory.tile_data;
+            if !state.last_coefs && (*td).dq_buffer_ptr >= (*td).dq_buffer_max {
+                host.second_coefs(tile, td);
+                state.last_coefs = true;
+            }
+        }
+    }
+
     pub fn new(host: H) -> Self {
         Self {
             host,
@@ -246,6 +312,8 @@ impl<H: SinkHost> ParseSink for Sink<H> {
                 // A tile of the frame before keeps its block context for the next frame's tile.
                 if let Some(state) = state.get_mut() {
                     state.mi_count = 0;
+                    state.mi_count2 = 0;
+                    state.second = None;
                     state.failed = false;
                 }
             }
@@ -264,12 +332,23 @@ impl<H: SinkHost> ParseSink for Sink<H> {
             let slot = self.tile(tile.index);
             let state = slot.get_or_insert_with(|| TileState {
                 xd: zeroed_box(),
-                memory: TileMemory { tile_data: std::ptr::null_mut(), mi_pool: std::ptr::null_mut(), mi_count_max: 0 },
+                memory: TileMemory {
+                    tile_data: std::ptr::null_mut(),
+                    mi_pool: std::ptr::null_mut(),
+                    mi_count_max: 0,
+                    worst_case_coefs: true,
+                },
                 mi_count: 0,
+                second: None,
+                mi_count2: 0,
+                last_coefs: true,
                 lossless: false,
                 failed: false,
             });
             state.mi_count = 0;
+            state.mi_count2 = 0;
+            state.second = None;
+            state.last_coefs = memory.worst_case_coefs;
             state.failed = false;
             let xd = &mut *state.xd;
             xd.tile = TileInfo {
@@ -291,6 +370,8 @@ impl<H: SinkHost> ParseSink for Sink<H> {
                 plane.subsampling_y = frame.ss_y;
             }
             state.memory = memory;
+            // The first superblock of the tile (`decode_tile2`).
+            Self::coefs_go_on(&self.host, tile.index, state);
         }
     }
 
@@ -300,12 +381,34 @@ impl<H: SinkHost> ParseSink for Sink<H> {
         unsafe {
             let frame = self.frame();
             let state = self.tile(tile).as_mut().expect("the tile has begun");
-            if state.mi_count >= state.memory.mi_count_max {
-                state.failed = true;
+            if state.failed {
                 return;
             }
-            let mi = state.memory.mi_pool.add(state.mi_count as usize);
-            state.mi_count += 1;
+            // The tile's part of the pool, and when it is full its second part (`decode_mbmi_block`,
+            // `set_offsets`).
+            if state.mi_count >= state.memory.mi_count_max && state.second.is_none() {
+                state.second = self.host.second_mode_info(tile, state.memory.tile_data);
+                if state.second.is_none() {
+                    state.failed = true;
+                    self.host.no_room(tile, true);
+                    return;
+                }
+            }
+            let mi = match &state.second {
+                Some(second) => {
+                    if state.mi_count2 >= state.memory.mi_count_max {
+                        state.failed = true;
+                        self.host.no_room(tile, true);
+                        return;
+                    }
+                    state.mi_count2 += 1;
+                    second.mi_pool.add(state.mi_count2 as usize - 1)
+                }
+                None => {
+                    state.mi_count += 1;
+                    state.memory.mi_pool.add(state.mi_count as usize - 1)
+                }
+            };
             mi.write_bytes(0, 1);
             let lossless = frame.hdr.segmentation.lossless[block.b.seg_id.get()];
             state.lossless = lossless;
@@ -344,6 +447,7 @@ impl<H: SinkHost> ParseSink for Sink<H> {
             let coef_count = (i32::from(txb.eob) + 4) >> 2;
             if td.dq_buffer_ptr + (coef_count << 2) > td.dq_buffer_end {
                 state.failed = true;
+                self.host.no_room(tile, false);
                 return std::ptr::null_mut();
             }
             let tx_type = if txb.txtp == WHT_WHT { 0 } else { usize::from(txb.txtp) };
@@ -399,6 +503,18 @@ impl<H: SinkHost> ParseSink for Sink<H> {
             }
         }
         self.host.superblock(tile, superblock);
+        // The next superblock of the tile, if there is one (`decode_tile2`).
+        // SAFETY: as above.
+        unsafe {
+            let frame = self.frame();
+            let state = self.tile(tile).as_mut().expect("the tile has begun");
+            let side = if frame.sb128 { 32 } else { 16 };
+            let last =
+                superblock.x4 + side >= state.xd.tile.mi_col_end && superblock.y4 + side >= state.xd.tile.mi_row_end;
+            if !last {
+                Self::coefs_go_on(&self.host, tile, state);
+            }
+        }
     }
 
     fn tile_end(&self, _frame: usize, tile: usize) {
@@ -411,13 +527,21 @@ impl<H: SinkHost> ParseSink for Sink<H> {
             let state = self.tile(tile).as_mut().expect("the tile has begun");
             let td = state.memory.tile_data;
             (*td).mi_count = state.mi_count;
+            if let Some(second) = &state.second {
+                (*second.tile_data).mi_count = state.mi_count2;
+            }
             let pbi: *mut AV1Decoder = &raw mut **self.pbi.get();
             let cm = &raw mut (*pbi).common;
             let xd: *mut MACROBLOCKD = &raw mut *state.xd;
             let (row_start, col_start) = ((*xd).tile.mi_row_start, (*xd).tile.mi_col_start);
             let start = Instant::now();
-            for index in 0..state.mi_count as usize {
-                let mi = &*state.memory.mi_pool.add(index);
+            // The records of the first part, then those of the second.
+            let second_pool = state.second.as_ref().map_or(std::ptr::null_mut(), |second| second.mi_pool);
+            let records = (0..state.mi_count as usize)
+                .map(|index| state.memory.mi_pool.add(index))
+                .chain((0..state.mi_count2 as usize).map(|index| second_pool.add(index)));
+            for mi in records {
+                let mi = &*mi;
                 let (mi_row, mi_col) = (mi.mi_row, mi.mi_col);
                 let bw = 1 << MI_SIZE_WIDE_LOG2[mi.sb_type as usize];
                 let bh = 1 << MI_SIZE_HIGH_LOG2[mi.sb_type as usize];
@@ -439,7 +563,7 @@ impl<H: SinkHost> ParseSink for Sink<H> {
         self.host.tile_end(tile);
     }
 
-    fn frame_end(&self, _frame: usize, ok: bool) {
+    fn frame_end(&self, _frame: usize, ok: bool) -> bool {
         // SAFETY: no tile of the frame is in parse any more.
         let failed = unsafe {
             let failed =
@@ -447,6 +571,24 @@ impl<H: SinkHost> ParseSink for Sink<H> {
             *self.frame.get() = None;
             failed
         };
-        self.host.frame_end(ok && !failed);
+        // Both are called, whatever the tiles say: the host has to take the frame back.
+        let stands = self.host.frame_end(ok && !failed);
+        stands && !failed
+    }
+
+    fn sequence(&self, seq_hdr: &Rav1dSequenceHeader, new: bool) -> Result<(), ()> {
+        self.host.sequence(seq_hdr, new)
+    }
+
+    fn show_existing(&self, show: &ParseShowExisting<'_>) -> Result<(), ()> {
+        self.host.show_existing(show)
+    }
+
+    fn ticks(&self) -> i64 {
+        self.host.ticks()
+    }
+
+    fn tile_time(&self, _frame: usize, start: i64) {
+        self.host.tile_time(start);
     }
 }

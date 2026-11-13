@@ -1,7 +1,8 @@
 # Phase 2: rav1d's parser in place of the C parser: design
 
-Status: design, written 2026-11-12, with measurements on a development machine. Nothing of it is in the tree
-yet. Phase 1 ([rust-port.md](rust-port.md)) moved the host to Rust and kept the libaom-derived C parser;
+Status: design, written 2026-11-12, with measurements on a development machine; steps 1 to 3 of the
+[plan](#plan) are in the tree ([Progress](#progress)): the decoder runs on either parser, chosen when it is
+created. Phase 1 ([rust-port.md](rust-port.md)) moved the host to Rust and kept the libaom-derived C parser;
 phase 2 replaces that parser with the one of rav1d (<https://github.com/memorysafety/rav1d>, the Rust port
 of dav1d, BSD-2-Clause).
 
@@ -771,6 +772,114 @@ whole workflow; everything green but the build of `parse-check`, where bindgen l
 another version than the headers clang gave it) and run 43429200887 (that job alone, with one LLVM
 version as in the cross build).
 
+### Step 3 (2026-11-13)
+
+Done: the D3D12 host runs on the sink, one frame in parse at a time. A decoder is created with one of
+the two parsers and keeps it; the entropy decoder of libaom is the default until the console has timed
+both.
+
+| Where | The choice |
+| --- | --- |
+| Rust | `Settings::parser`: `Parser::Libaom` (default) or `Parser::Rav1d` |
+| C (`rav1g.h`) | `Rav1gSettings::parser`: `RAV1G_PARSER_LIBAOM` (default) or `RAV1G_PARSER_RAV1D` |
+| `rav1g-dec` | `-parser c` (default) or `-parser rav1d`, per task |
+| Test player | `-parser c` (default) or `-parser rav1d`, per task line ([test-player.md](test-player.md#parser--parser)) |
+
+**What is in the tree.**
+
+- `crates/rav1g/src/host/rav1d_host.rs`: the host of the sink (`SinkHost` on the mapped buffers of a
+  slot) and the decode call of such a decoder. `aom_codec_dec_cfg_t::parser` selects it; the decode call
+  of the C interface (`decoder_decode` of `av1/av1_dx_iface.c`) hands the temporal unit to it instead of
+  to the entropy decoder. Everything else of a decoder is the same code: creation, slots, frame buffers,
+  recording, submission, the completion thread, the drain.
+- The stage modules read a frame's header through the structs of the entropy decoder. The new host
+  keeps such structs of its own, cleared, and writes into them what the stages read (about 60 fields)
+  from the headers rav1d has parsed; it then calls the functions the entropy decoder calls. A field
+  libaom does not write for a frame is not written either, so the structs hold the same values frame
+  for frame, also the ones that are left over from an earlier frame. The stages do not see which parser
+  ran, and no stage module changed. This is the "small module" of [Frame level](#frame-level); it goes
+  with the C structs in step 6.
+- The sink (`crates/rav1g-parse/src/sink.rs`) switches to the second share of a slot as the entropy
+  decoder does: a tile whose part of the mode info pool is full goes on in the part of the frame's second
+  slot, and a tile whose coefficients have reached the mark of their part goes on there at the next
+  superblock (`av1_setup_sec_data`, `av1_setup_ext_coef_buffer`, now also as Rust functions of
+  `frame.rs`). A frame takes a second slot under the same conditions with both parsers.
+- `third_party/rav1d`: the sink is told about a sequence header (and can refuse it), about a frame
+  header that shows a reference slot, and where the OBU of a frame lies in the data; it says at the end
+  of a frame whether the frame stands; the parse of a tile is timed for it. `PATCHES.md` has the list
+  (13 files changed, 50 as upstream).
+
+**How each duty of the host is done.**
+
+| Duty | With the entropy decoder of libaom | With rav1d |
+| --- | --- | --- |
+| Frame begin | `av1_setup_frame`: a slot, the clears, the frame's buffers and references counted | the same three functions, from `frame_begin` of the sink, on the thread of the decode call |
+| Tiles | `av1_setup_macroblockd` per tile thread | `tile_begin` of the sink, the same function, on rav1d's thread for the tile |
+| Palette | `av1_intra_palette` | `palette` of the sink into the same writer; the rows of a block outside the frame repeat the last one inside |
+| Loop restoration units | the entropy decoder writes `rst_info[].unit_info` | `superblock` of the sink writes the same array (the host memory the decoder has for it) |
+| Frame end | `av1_decode_frame_gpu`: record, output image, submit | the same two functions from `frame_end`; the time between `frame_begin` and `frame_end` is `entropy_wall` |
+| Frame buffers | libaom's buffer pool calls the host for a buffer and when it lets go | the host keeps the eight reference slots itself, as libaom does: a frame that stands refreshes its slots, a key frame shown by `show_existing_frame` takes all, a new sequence empties them. rav1d's pictures are handles without samples and are not looked at |
+| Output order | the completion thread hands frames over in the order of submission | the same: frames are submitted in decode order |
+| Which frame of a temporal unit is output | `av1_frame_is_output`, a look ahead over the OBU headers behind the frame | the same function, asked with the place of the frame's last OBU in the data of the call (rav1d's own rule and picture queue are not used) |
+| `show_existing_frame` | `av1_decode_sef`: an output copy with the film grain of the shown frame | the same two functions from `show_existing` of the sink, with the film grain parameters the host kept for the frame |
+| Operating point, all layers | `AV1D_SET_OPERATING_POINT`, `AV1D_SET_OUTPUT_ALL_LAYERS` | the operating point goes to rav1d when the parser is made (the first decode call) and decides which OBUs are parsed; all layers is libaom's output rule |
+| A sequence the decoder was not created for | `AOM_CODEC_NEEDS_RECONFIGURE` before anything of it is decoded | the sink refuses the sequence header with the same code and the same text; rav1d keeps the state it had |
+| Superres | the host rewrites the frame buffer's width to the upscaled one, which the entropy decoder reads for later frames | the same rewrite, for the host's own stages; rav1d keeps the sizes of its references itself |
+| Film grain | `cm->film_grain_params`, kept per frame buffer | from rav1d's header, in libaom's numbers (the chroma multipliers and offsets as coded), kept per frame; a frame that takes the parameters of a reference gets what was kept for that reference |
+| Global motion | the models with their shears | the matrices of rav1d's header through libaom's `get_shear_params` |
+| The slot's second share | `av1_setup_sec_data`, `av1_setup_ext_coef_buffer` | the sink, at the same points (above) |
+| Timers | `entropy_sum` per tile thread, `entropy_wall` around the tiles | `entropy_sum` around every superblock row of a tile, `entropy_wall` from the end of the frame's set-up to the start of its recording: both have the sink inside, and rav1d's set-up and wrap-up of the frame's parse |
+
+Only 4:2:0 and monochrome sequences are taken with rav1d (the sink and the shaders are for those); the
+entropy decoder reads other layouts and the stages then decode them wrongly.
+
+**A damaged stream.** The two parsers do not do the same, and step 3 keeps rav1d's rule:
+
+- The frame whose parse fails returns its slot and its buffers and is not submitted, and the decode
+  call returns the error (`Corrupt frame`, "Failed to decode tile data: the parse of the frame ended
+  with an error"). The rest of its temporal unit is dropped. This is the same with both parsers.
+- With the entropy decoder of libaom the reference slots stay as they were before the frame, and the
+  frames that follow are decoded from them: wrong pictures, or further errors when the wrong state does
+  not parse, until a key frame.
+- With rav1d the slots the failed frame was to refresh are empty afterwards (rav1d's own bookkeeping,
+  and the host's map does the same). A later frame that names an empty slot fails before anything of it
+  is set up: the decode call returns `Corrupt frame`, "The temporal unit could not be parsed
+  (InvalidArgument): ...", and that frame's own slots stay as they were. A frame whose references are
+  all whole is decoded.
+- With both, decoding is right again from the first frame whose references are whole, at the latest
+  the next key frame, and the frames before the damage are right.
+
+Why rav1d's rule and not libaom's: with frames in parallel (step 4) the references of a failed frame
+cannot be put back, because later frames have already taken them; "a frame that depends on a failed
+frame fails" is a rule the host can keep there, and it never gives the GPU a frame that was parsed
+against the wrong references. For an application it means missing frames instead of wrong ones, each
+with an error from the decode call. The checks keep their meaning: the cut-tile check
+(`testing/conformance/cut_tile_check.py --parser rav1d`) holds the same things as with the C parser (the
+task ends with the error and has the frames before the damage; the stream behind it is right; with
+`-continue_on_error` the decoder goes on, the frames before the damage and from the next key frame on
+are those of the reference; no lost device), with rav1d's words for the error. Measured on the two
+streams of that check and on the one-tile stream followed by itself whole: the frames from the next key
+frame on are the same with both parsers, frame for frame.
+
+Two things had to be right for this. `Parser::send` of the copy now leaves nothing of the data with
+the parser after an error: upstream's `gen_picture` keeps unread data when a picture is ready, also
+behind an OBU it could not read, and the next call then read that OBU again in front of its own data
+and failed, key frame or not. And the sink's verdict on a frame reaches rav1d (`frame_end` returns
+whether the frame stands), so that a frame the host could not take (a tile without room in two shares)
+is a failed frame in rav1d's bookkeeping as well.
+
+A panic in rav1d (a bug, not a damaged stream) is caught at the decode call when the parse runs on its
+thread: the call returns an error and the decoder decodes nothing more. With more than one parser
+thread a panic on a worker thread is not caught yet (step 4).
+
+**Licence notices.** `third_party/rust-crates/NOTICES.txt` has the MIT and Apache-2.0 notices of the 32
+crates of crates.io that are linked into the library and `rav1g-dec` (rav1d's dependencies and the
+Windows bindings), written by `collect.py` there from `Cargo.lock`; CI holds the file against the lock
+file and copies it into the `licenses` directory of every package.
+
+**The test player** logs its lifecycle events, one `LIFECYCLE ...` line each
+([test-player.md](test-player.md#inputs-and-logs-in-localstate)).
+
 ## Licence
 
 rav1d is BSD-2-Clause (copyright VideoLAN and the dav1d authors, and the rav1d contributors); the
@@ -783,8 +892,9 @@ Since step 1: `third_party/rav1d/COPYING` and `doc/PATENTS` are in the tree and 
 directory of every CI artifact with a program (the test player's packages, `rav1g-dec` of both builds);
 the README names rav1d. The crates rav1d depends on that end up in the library (`parking_lot`,
 `bitflags`, `libc`, `strum`, `zerocopy`, `atomig`, `raw-cpuid`, `av-data`, `cfg-if`, `paste`,
-`static_assertions`, `to_method`, `assert_matches`) are MIT or Apache-2.0, some either; their notices
-are not collected yet, which is to do before a release.
+`static_assertions`, `to_method`, `assert_matches`) are MIT or Apache-2.0, some either. Since step 3
+their notices, and those of the Windows bindings, are collected in
+`third_party/rust-crates/NOTICES.txt` and are in the `licenses` directory of every package.
 
 ## The experiment patch
 

@@ -111,6 +111,10 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        "with -budget: a destroyed decoder leaves up to this many MiB charged to the app until the next decoder "
        "exists, as the console does",
        "", &params_.retain_mib_},
+      {"parser", atString, anOptional,
+       "what reads the bitstream: c, the entropy decoder of libaom (default), or rav1d, the parse pass of rav1d "
+       "(same output)",
+       "", &params_.parser_},
       {"continue_on_error", atSingle, anOptional,
        "after a decode call that fails, go on with the next temporal unit in the same decoder instead of "
        "ending the task, as an application does with a damaged stream; the log counts the errors",
@@ -191,6 +195,15 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     GetHelp(0, 0, Err, avaiting, list_length);
     return -1;
   }
+
+  // -parser: c or rav1d; anything else is an error of the task.
+  if (!params_.parser_.empty() && params_.parser_ != "c" && params_.parser_ != "rav1d") {
+    Err += "-parser takes c or rav1d, not \"";
+    Err += params_.parser_;
+    Err += "\"";
+    return -1;
+  }
+  params_.parser_rav1d_ = params_.parser_ == "rav1d";
 
   // A displayed frame stays held until its replacement arrives. Headless output needs only one.
   const int min_queue = params_.nopresent_ ? 1 : 2;
@@ -307,6 +320,8 @@ void CParameters::Reset() {
   params_.budget_mib_ = -1;
   params_.retain_mib_ = 0;
   params_.continue_on_error_ = false;
+  params_.parser_.clear();
+  params_.parser_rav1d_ = false;
   params_.lfhsplit_ = 0;
   params_.intraedgefix_ = false;
   params_.interfast_ = false;

@@ -127,6 +127,10 @@ void App::Run() {
 
     } else {
       CoreWindow::GetForCurrentThread()->Dispatcher->ProcessEvents(CoreProcessEventsOption::ProcessOneAndAllPending);
+      // The window is not visible (another app has the screen, the system UI covers it, the console
+      // sleeps): the player stops its task list and ends. The decode thread then logs that the decoding
+      // process was terminated by the user; this line says why.
+      XB_LOGI << "LIFECYCLE the window is not visible: the decode is stopped and the app ends";
       m_main->StopDecode(taskStopFlush);
       m_windowClosed = true;
     }
@@ -140,12 +144,16 @@ void App::Uninitialize() {}
 
 // Application lifecycle event handlers.
 
+// Every lifecycle event is one "LIFECYCLE ..." line of the log, so that a decode that stops because the
+// window lost the screen is told apart from one that the user or a decode error ended.
 void App::OnActivated(CoreApplicationView ^ applicationView, IActivatedEventArgs ^ args) {
+  XB_LOGI << "LIFECYCLE Activated";
   // Run() won't start until the CoreWindow is activated.
   CoreWindow::GetForCurrentThread()->Activate();
 }
 
 void App::OnSuspending(Platform::Object ^ sender, SuspendingEventArgs ^ args) {
+  XB_LOGI << "LIFECYCLE Suspending";
   // Save app state asynchronously after requesting a deferral. Holding a deferral
   // indicates that the application is busy performing suspending operations. Be
   // aware that a deferral may not be held indefinitely. After about five seconds,
@@ -158,6 +166,7 @@ void App::OnSuspending(Platform::Object ^ sender, SuspendingEventArgs ^ args) {
 }
 
 void App::OnResuming(Platform::Object ^ sender, Platform::Object ^ args) {
+  XB_LOGI << "LIFECYCLE Resuming";
   // Restore any data or state that was unloaded on suspend. By default, data
   // and state are persisted when resuming from suspend. Note that this event
   // does not occur if the app was previously terminated.
@@ -173,10 +182,14 @@ void App::OnWindowSizeChanged(CoreWindow ^ sender, WindowSizeChangedEventArgs ^ 
 }
 
 void App::OnVisibilityChanged(CoreWindow ^ sender, VisibilityChangedEventArgs ^ args) {
+  XB_LOGI << "LIFECYCLE VisibilityChanged: the window is " << (args->Visible ? "visible" : "not visible");
   m_windowVisible = args->Visible;
 }
 
-void App::OnWindowClosed(CoreWindow ^ sender, CoreWindowEventArgs ^ args) { m_windowClosed = true; }
+void App::OnWindowClosed(CoreWindow ^ sender, CoreWindowEventArgs ^ args) {
+  XB_LOGI << "LIFECYCLE window Closed";
+  m_windowClosed = true;
+}
 
 // DisplayInformation event handlers.
 

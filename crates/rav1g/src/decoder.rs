@@ -56,6 +56,17 @@ impl BitOr for LowMemory {
     }
 }
 
+/// What reads the bitstream of a decoder ([`Settings::parser`]). Both give the same frames; they differ
+/// in speed and in what a damaged stream does (docs/phase2-rav1d.md).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Parser {
+    /// The entropy decoder of libaom (C).
+    #[default]
+    Libaom,
+    /// The parse pass of rav1d.
+    Rav1d,
+}
+
 /// What the application has left for the decoder, in bytes: its memory limit less what it uses and less
 /// what it is going to allocate itself (output images that do not exist yet). `None` when it does not
 /// know. Called on the threads that create, use and drop the decoder.
@@ -87,6 +98,8 @@ pub struct Settings {
     pub operating_point: u32,
     /// The frame of every spatial layer of a temporal unit is output, instead of the highest one.
     pub output_all_layers: bool,
+    /// What reads the bitstream.
+    pub parser: Parser,
     /// The budget guard. On a console an application that goes over its memory limit loses its D3D12
     /// device, so with this callback the decoder asks before it allocates: a creation whose device buffers
     /// would leave less than 48 MiB is refused ([`ErrorCode::Memory`], with a "MEMORY REFUSED" line in the
@@ -110,6 +123,7 @@ impl Default for Settings {
             packed_10x3: false,
             operating_point: 0,
             output_all_layers: false,
+            parser: Parser::default(),
             memory_available: None,
         }
     }
@@ -145,6 +159,10 @@ impl Settings {
         cfg.intra_v2 = c_int::from(self.intra_v2);
         cfg.inter_fast = c_int::from(self.inter_fast);
         cfg.low_memory = self.low_memory.to_raw();
+        cfg.parser = match self.parser {
+            Parser::Libaom => sys::AV1_PARSER_LIBAOM,
+            Parser::Rav1d => sys::AV1_PARSER_RAV1D,
+        } as c_int;
         cfg
     }
 

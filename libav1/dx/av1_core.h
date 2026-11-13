@@ -32,6 +32,12 @@ void av1_allocate_pbi(struct Av1Core *dec, AV1Decoder **ppbi, BufferPool **pbp);
 void av1_destroy_gpu_decoder(struct Av1Core *dec);
 void av1_drain_gpu_decoder(struct Av1Core *dec);
 
+// The decode call of a decoder whose parser is rav1d's (aom_codec_dec_cfg_t::parser): the frames of a
+// temporal unit are parsed, recorded and submitted. Returns an aom_codec_err_t and, for an error, a text
+// in *detail that lives until the next call. crates/rav1g/src/host/rav1d_host.rs.
+int rav1g_rav1d_decode(struct Av1Core *dec, const uint8_t *data, size_t size, void *user_priv,
+                       int operating_point, int output_all_layers, const char **detail);
+
 int av1_decode_frame_gpu(AV1Decoder *pbi);
 
 // 1 when a sequence with this largest frame size and bit depth fits the buffers of the decoder.

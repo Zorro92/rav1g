@@ -38,6 +38,7 @@ def main():
     parser.add_argument('--tasks', required=True)
     parser.add_argument('--out', required=True)
     parser.add_argument('--threads', type=int, default=4)
+    parser.add_argument('--tool-args', default='', help='further arguments for the tool, e.g. "-parser rav1d"')
     args = parser.parse_args()
     tool = os.path.abspath(args.tool)
     out = os.path.abspath(args.out)
@@ -65,6 +66,7 @@ def main():
         os.makedirs(target, exist_ok=True)
         command = [tool, '-name', name, '-i', path, '-t', str(args.threads), '-timeout', '1200',
                    '-dumpstages', frames, '-dumpdir', target, '-save_md5', os.path.join(target, name + '.md5')]
+        command += args.tool_args.split()
         if aom_md5:
             command.append('-aom_md5')
         if len(parts) > 2:

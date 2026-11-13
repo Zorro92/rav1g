@@ -488,6 +488,8 @@ fn gen_picture(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResult {
     } = mem::take(&mut state.in_0);
     let Some(mut r#in) = r#in else { return Ok(()) };
     while !r#in.is_empty() {
+        // rav1g: where this OBU starts, for the sink.
+        state.data_left = r#in.len();
         let len = rav1d_parse_obus(c, state, &r#in, &props);
         if let Ok(len) = len {
             r#in.slice_in_place(len..);

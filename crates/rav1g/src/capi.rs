@@ -35,6 +35,13 @@ pub const RAV1G_LOW_MEMORY_COEFS: u32 = 4;
 /// All memory reductions.
 pub const RAV1G_LOW_MEMORY_ALL: u32 = 7;
 
+/// `Rav1gSettings::parser`: the entropy decoder of libaom reads the bitstream. The default of
+/// `rav1g_settings_default`.
+pub const RAV1G_PARSER_LIBAOM: u32 = 0;
+/// `Rav1gSettings::parser`: the parse pass of rav1d reads the bitstream. The same frames; the speed and
+/// what a damaged stream does differ (docs/phase2-rav1d.md).
+pub const RAV1G_PARSER_RAV1D: u32 = 1;
+
 /// `rav1g_set_inter_fast`: the fast inter path is on.
 pub const RAV1G_INTER_FAST_ON: u32 = 1;
 /// With `RAV1G_INTER_FAST_ON`: the blocks with one reference are listed and predicted by the original
@@ -260,6 +267,8 @@ pub struct Rav1gSettings {
     pub output_all_layers: bool,
     /// The operating point of a stream with layers.
     pub operating_point: u32,
+    /// What reads the bitstream: `RAV1G_PARSER_LIBAOM` or `RAV1G_PARSER_RAV1D`.
+    pub parser: u32,
     /// The budget guard, or null. On a console an application that goes over its memory limit loses its
     /// D3D12 device, so with this callback the decoder asks before it allocates. The callback returns the
     /// bytes the decoder may still take: what the application has left of its limit, less what it is
@@ -487,6 +496,7 @@ pub unsafe extern "C" fn rav1g_settings_default(settings: *mut Rav1gSettings) {
             packed_10x3: defaults.packed_10x3,
             output_all_layers: defaults.output_all_layers,
             operating_point: defaults.operating_point,
+            parser: RAV1G_PARSER_LIBAOM,
             memory_available: None,
             memory_available_context: std::ptr::null_mut(),
             output: Rav1gOutput {
@@ -514,6 +524,7 @@ fn settings_of(settings: &Rav1gSettings) -> Settings {
         packed_10x3: settings.packed_10x3,
         operating_point: settings.operating_point,
         output_all_layers: settings.output_all_layers,
+        parser: if settings.parser == RAV1G_PARSER_RAV1D { crate::Parser::Rav1d } else { crate::Parser::Libaom },
         memory_available: settings.memory_available.map(|available| -> crate::MemoryAvailable {
             Arc::new(move || {
                 let context = context;

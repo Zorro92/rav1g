@@ -392,6 +392,11 @@ pub struct Av1Core {
     pub perf_inter_mode: c_int,
     /// The inter breakdown as the timing callback gets it: the completion thread's copy.
     pub perf_detail_out: Option<Box<av1_perf_inter_detail>>,
+    /// The parser of phase 2 (`aom_codec_dec_cfg_t::parser`), made by the first decode call of a decoder
+    /// that was created for it; none in a decoder whose parser is the entropy decoder of libaom.
+    pub rav1d: Option<Box<super::rav1d_host::Rav1dHost>>,
+    /// The threads the parser may use for the tiles of a frame (`aom_codec_dec_cfg_t::threads`).
+    pub parser_threads: c_int,
 }
 
 impl Av1Core {
@@ -418,6 +423,7 @@ impl Av1Core {
             (&raw mut (*dec).gpu_thread).write(None);
             (&raw mut (*dec).perf_inter_tiles).write(Vec::new());
             (&raw mut (*dec).perf_detail_out).write(None);
+            (&raw mut (*dec).rav1d).write(None);
             for slot in 0..FrameThreadDataCount as usize {
                 (&raw mut (*dec).frame_thread_data[slot].sec_data_mutex).write(Mutex::new(()));
                 (&raw mut (*dec).frame_thread_data[slot].perf.detail).write(None);

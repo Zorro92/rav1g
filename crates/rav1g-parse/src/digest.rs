@@ -255,7 +255,15 @@ impl ParseSink for DigestSink {
         unsafe { self.tile(tile) }.flush();
     }
 
-    fn frame_end(&self, _frame: usize, ok: bool) {
+    fn frame_end(&self, _frame: usize, ok: bool) -> bool {
+        self.end_frame(ok);
+        true
+    }
+}
+
+impl DigestSink {
+    /// The parse of the frame has ended: its tiles are folded into the digest.
+    fn end_frame(&self, ok: bool) {
         let mut total = self.total.lock().expect("no thread panics with it");
         // SAFETY: no tile of the frame is in parse any more.
         unsafe {

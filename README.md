@@ -159,10 +159,14 @@ the library as `rav1g.dll` (C of clang), and a static build with the C of MSVC
 
 Next targets: phase 2, the parser of rav1d in place of the C parser, which is the CPU limit at 4K
 ([docs/phase2-rav1d.md](docs/phase2-rav1d.md) has the design, the measurements behind it and the
-progress). Its first two steps are done: rav1d's parse pass is in the tree (`third_party/rav1d`) and in
-the library, and on every stream of the conformance set it gives the same mode info records, block
+progress). Its first three steps are done: rav1d's parse pass is in the tree (`third_party/rav1d`) and in
+the library, on every stream of the conformance set it gives the same mode info records, block
 lists, transform blocks and coefficients as the C parser, byte for byte (`tools/rav1g-parse-check`, on
-Linux in CI). Next is step 3, the decoder running on it. And
+Linux in CI), and the decoder runs on it: a decoder is created with either parser
+(`Settings::parser`, `Rav1gSettings::parser`, `rav1g-dec -parser c|rav1d`, the same flag in the test
+player), one frame in parse at a time, and both give the same frames and the same buffers behind every
+GPU stage. The C parser stays the default until the console has timed the two. Next is step 4, frames
+in parallel. And
 inter and intra prediction on the GPU (a measured `-interfast` prototype showed that inter time is per
 block and per dispatch, not filtering; see [gpu-av1-decoder.md](docs/gpu-av1-decoder.md)).
 The goals, in order: heavy 4K at 30 fps in real time (at most 33.3 ms per frame; not met
@@ -194,7 +198,9 @@ License 1.0 (`libav1/PATENTS`). `third_party/libwebm` carries its own licence an
 notices (`third_party/libwebm/LICENSE.TXT`, `third_party/libwebm/PATENTS.TXT`).
 `third_party/rav1d` is the parse pass of [rav1d](https://github.com/memorysafety/rav1d), the Rust
 port of dav1d (BSD-2-Clause, copyright VideoLAN, the dav1d authors and the Internet Security Research
-Group: `third_party/rav1d/COPYING`, `third_party/rav1d/doc/PATENTS`). Keep all of
+Group: `third_party/rav1d/COPYING`, `third_party/rav1d/doc/PATENTS`). The crates of crates.io
+that are linked into the library (rav1d's dependencies and the Windows bindings) are MIT or
+Apache-2.0 licensed; their notices are collected in `third_party/rust-crates/NOTICES.txt`. Keep all of
 them when redistributing source or binaries; CI artifacts include them under `licenses/`.
 
 ## Disclaimers

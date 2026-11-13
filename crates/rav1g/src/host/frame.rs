@@ -948,9 +948,18 @@ pub unsafe extern "C" fn av1_setup_ext_coef_buffer(
     thread_data: *mut ThreadData,
 ) {
     // SAFETY: the caller's contract.
+    unsafe { second_coefs((*pbi).gpu_decoder.cast::<Av1Core>(), &mut *(*thread_data).tile_data) };
+}
+
+/// A tile goes on with its coefficients in the share of the frame's second slot, which the frame takes
+/// here if it has none (the call waits for a slot).
+///
+/// # Safety
+/// `dec` is the decoder while the tiles of a frame are decoded; `tile` is a tile of that frame, of the
+/// calling thread.
+pub(crate) unsafe fn second_coefs(dec: *mut Av1Core, tile: &mut av1_tile_data) {
+    // SAFETY: the caller's contract.
     unsafe {
-        let tile = &mut *(*thread_data).tile_data;
-        let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
         let cur_td = (*dec).curr_frame_data;
         get_sec_data(dec, cur_td);
         let td = &*(*cur_td).sec_thread_data;
@@ -970,10 +979,27 @@ pub unsafe extern "C" fn av1_setup_sec_data(pbi: *mut AV1Decoder, _cm: *mut AV1_
     // SAFETY: the caller's contract.
     unsafe {
         let thread_data = &mut *thread_data;
-        let prev_t = &*thread_data.tile_data;
-        let tile_id = thread_data.tile_id as usize;
         let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
+        let (tile_data2, mi_pool2) = second_mode_info(dec, thread_data.tile_id as usize, &*thread_data.tile_data);
+        thread_data.mi_count2 = 0;
+        thread_data.mi_pool2 = mi_pool2;
+        thread_data.tile_data2 = tile_data2;
+    }
+}
 
+/// A tile goes on with its mode info in the share of the frame's second slot, which the frame takes here
+/// if it has none (the call waits for a slot): the tile's cursors there, and where its records go on.
+///
+/// # Safety
+/// `dec` is the decoder while the tiles of a frame are decoded; `prev_t` is the tile `tile_id` of that
+/// frame, of the calling thread.
+pub(crate) unsafe fn second_mode_info(
+    dec: *mut Av1Core,
+    tile_id: usize,
+    prev_t: &av1_tile_data,
+) -> (*mut av1_tile_data, *mut MB_MODE_INFO) {
+    // SAFETY: the caller's contract.
+    unsafe {
         let cur_td = (*dec).curr_frame_data;
         get_sec_data(dec, cur_td);
 
@@ -981,9 +1007,7 @@ pub unsafe extern "C" fn av1_setup_sec_data(pbi: *mut AV1Decoder, _cm: *mut AV1_
         let t = &mut *td.tile_data.add(tile_id);
         t.mi_count = 0;
         t.mi_offset = prev_t.mi_offset + td.mode_info_offset - (*cur_td).mode_info_offset;
-        thread_data.mi_count2 = 0;
-        thread_data.mi_pool2 = (*(*dec).mode_info_pool).host_ptr.cast::<MB_MODE_INFO>().offset(t.mi_offset as isize);
-        thread_data.tile_data2 = t;
+        (t, (*(*dec).mode_info_pool).host_ptr.cast::<MB_MODE_INFO>().offset(t.mi_offset as isize))
     }
 }
 
@@ -1001,13 +1025,45 @@ pub unsafe extern "C" fn av1_setup_macroblockd(
     thread_data: *mut ThreadData,
     tile: *mut TileInfo,
 ) {
-    // SAFETY: the caller's contract, for all of this function.
+    // SAFETY: the caller's contract.
     unsafe {
         let thread_data = &mut *thread_data;
         let xd: *mut MACROBLOCKD = &raw mut thread_data.xd;
-        let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
-        let cm = &*cm;
-        let tile = &*tile;
+        let setup = setup_tile((*pbi).gpu_decoder.cast::<Av1Core>(), &*cm, &*tile);
+        thread_data.tile_data = setup.tile_data;
+        (*xd).tile_data = setup.tile_data;
+        thread_data.tile_id = setup.tile_id;
+        thread_data.mi_count = 0;
+        thread_data.mi_count_max = setup.mi_count_max;
+        thread_data.mi_pool = setup.mi_pool;
+        thread_data.mi_count2 = 0;
+        thread_data.mi_pool2 = std::ptr::null_mut();
+        thread_data.tile_data2 = std::ptr::null_mut();
+        thread_data.ext_idct_buffer = setup.ext_idct_buffer;
+    }
+}
+
+/// What a tile thread starts a tile with ([`setup_tile`]).
+pub(crate) struct TileSetup {
+    /// The tile's cursors into the buffers of the frame's slot.
+    pub tile_data: *mut av1_tile_data,
+    pub tile_id: c_int,
+    /// The tile's part of the slot's share of the mode info pool, and the records it has room for.
+    pub mi_pool: *mut MB_MODE_INFO,
+    pub mi_count_max: c_int,
+    /// The frame's coefficients have the worst-case layout: no tile goes on in a second share.
+    pub ext_idct_buffer: c_int,
+}
+
+/// A tile of the frame in `curr_frame_data` starts: its cursors into the buffers of the frame's slot
+/// (coefficients, transform block records, block index list, block maps, mode info).
+///
+/// # Safety
+/// `dec` is the decoder while the tiles of the frame of `cm` are decoded; the calling thread is the one
+/// that decodes `tile`.
+pub(crate) unsafe fn setup_tile(dec: *mut Av1Core, cm: &AV1_COMMON, tile: &TileInfo) -> TileSetup {
+    // SAFETY: the caller's contract, for all of this function.
+    unsafe {
         let tile_id = tile.tile_col + tile.tile_row * cm.tile_cols;
         let td = &*(*dec).curr_frame_data;
         let t_ptr = td.tile_data.add(tile_id as usize);
@@ -1015,8 +1071,6 @@ pub unsafe extern "C" fn av1_setup_macroblockd(
         t_ptr.write_bytes(0, 1);
         perf_add_memset(dec, sys::AV1_PERF_CPU_MEMSET_TILE as usize, perf_t, size_of::<av1_tile_data>());
         let t = &mut *t_ptr;
-        thread_data.tile_data = t_ptr;
-        (*xd).tile_data = t_ptr;
         if (*dec).perf_inter_mode != 0 && tile_id < (*dec).perf_inter_tiles_count {
             t.perf_inter = (*dec).perf_inter_tiles_base.add(tile_id as usize).cast();
         }
@@ -1056,14 +1110,13 @@ pub unsafe extern "C" fn av1_setup_macroblockd(
         // AV1_LOW_MEMORY_MODE_INFO. The part in a second slot's share has the same place and size.
         t.mi_offset = (mi_offset_base >> (*dec).mode_info_shift) + td.mode_info_offset;
         t.mi_count = 0;
-        thread_data.tile_id = tile_id;
-        thread_data.mi_count = 0;
-        thread_data.mi_count_max = mi_max_base >> (*dec).mode_info_shift;
-        thread_data.mi_pool = (*(*dec).mode_info_pool).host_ptr.cast::<MB_MODE_INFO>().offset(t.mi_offset as isize);
-        thread_data.mi_count2 = 0;
-        thread_data.mi_pool2 = std::ptr::null_mut();
-        thread_data.tile_data2 = std::ptr::null_mut();
-        thread_data.ext_idct_buffer = td.ext_idct_buffer;
+        let setup = TileSetup {
+            tile_data: t_ptr,
+            tile_id,
+            mi_count_max: mi_max_base >> (*dec).mode_info_shift,
+            mi_pool: (*(*dec).mode_info_pool).host_ptr.cast::<MB_MODE_INFO>().offset(t.mi_offset as isize),
+            ext_idct_buffer: td.ext_idct_buffer,
+        };
 
         t.mi_col_start = tile.mi_col_start;
         t.mi_row_start = tile.mi_row_start;
@@ -1094,34 +1147,44 @@ pub unsafe extern "C" fn av1_setup_macroblockd(
         let clear_ints = (32 + 16 + t.gen_iter_clear_offset) as usize;
         t.gen_block_map_wrp.write_bytes(0, clear_ints);
         perf_add_memset(dec, sys::AV1_PERF_CPU_MEMSET_TILE as usize, perf_t, size_of::<c_int>() * clear_ints);
+        setup
     }
 }
 
 /// The pixels of one plane of a palette block, written into the slot's palette buffer.
 ///
 /// # Safety
-/// `dst` is valid for `height` rows of `stride` samples from where the block starts; `map` has `width *
-/// height` entries, each an index of the 8 colours from `colors`.
+/// `dst` is valid for `height` rows of `stride` samples from where the block starts; the map has
+/// `map.rows` rows of `width` entries, `map.stride` apart, each an index of the 8 colours from `colors`.
 unsafe fn write_palette_plane<T: Copy>(
     mut dst: *mut T,
     stride: usize,
-    mut map: *const u8,
+    map: &PaletteMap,
     width: usize,
     height: usize,
     colors: &[u16],
     sample: impl Fn(u16) -> T,
 ) {
-    for _ in 0..height {
+    for row in 0..height {
+        // The rows of the block behind the last one of the map repeat it.
+        // SAFETY: a row of the map (the caller's contract).
+        let indexes = unsafe { map.data.add(row.min(map.rows - 1) * map.stride) };
         for j in 0..width {
             // SAFETY: the caller's contract.
-            unsafe { dst.add(j).write(sample(colors[usize::from(*map.add(j))])) };
+            unsafe { dst.add(j).write(sample(colors[usize::from(*indexes.add(j))])) };
         }
-        // SAFETY: the next row of the block and of its colour map.
-        unsafe {
-            dst = dst.add(stride);
-            map = map.add(width);
-        }
+        // SAFETY: the next row of the block.
+        unsafe { dst = dst.add(stride) };
     }
+}
+
+/// The colour index map of a palette block's plane.
+pub(crate) struct PaletteMap {
+    pub data: *const u8,
+    /// Entries from one row to the next.
+    pub stride: usize,
+    /// The rows the map has; a block that is higher repeats the last one.
+    pub rows: usize,
 }
 
 /// `av1_intra_palette` (`dx/av1_core.h`): the pixels of a palette block go into the palette buffer of the
@@ -1140,6 +1203,34 @@ pub unsafe extern "C" fn av1_intra_palette(
     // SAFETY: the caller's contract.
     unsafe {
         let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
+        let mi = &*mi;
+        let params = &*params;
+        let (width, height) = (params.plane_width as usize, params.plane_height as usize);
+        let map = PaletteMap { data: params.color_map, stride: width, rows: height };
+        let colors = &mi.palette_mode_info.palette_colors;
+        write_palette(dec, mi.mi_row, mi.mi_col, plane as usize, colors, &map, width, height);
+    }
+}
+
+/// The pixels of a palette block go into the palette buffer of the frame's slot, in the layout of the
+/// frame buffer: `plane` 0 is luma, 1 both chroma planes from the one colour map. `colors` has eight
+/// colours per plane (Y, U, V); the block is `width` x `height` samples of the plane.
+///
+/// # Safety
+/// `dec` is the decoder while the tiles of a frame are decoded; `map` is valid for `width` entries a row.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn write_palette(
+    dec: *mut Av1Core,
+    mi_row: c_int,
+    mi_col: c_int,
+    plane: usize,
+    colors: &[u16; 24],
+    map: &PaletteMap,
+    width: usize,
+    height: usize,
+) {
+    // SAFETY: the caller's contract.
+    unsafe {
         let td = &*(*dec).curr_frame_data;
         // Palette blocks exist only in frames that allow screen content tools, and the frame setup has
         // created the buffer for those.
@@ -1147,31 +1238,26 @@ pub unsafe extern "C" fn av1_intra_palette(
             return;
         }
         let fb = &*td.frame_buffer;
-        let mi = &*mi;
-        let params = &*params;
-        let plane = plane as usize;
         let bsz = 4 >> plane;
         let palette_buf = (*td.palette_buffer).host_ptr.cast::<u8>();
-        let colors = &mi.palette_mode_info.palette_colors;
-        let (width, height) = (params.plane_width as usize, params.plane_height as usize);
         let plane_start = |p: usize| palette_buf.offset(fb.planes[p].offset as isize - fb.base_offset as isize);
         if fb.hbd != 0 {
             let stride = (fb.planes[plane].stride >> 1) as usize;
-            let offset = ((mi.mi_row * bsz) & !3) as usize * stride + ((mi.mi_col * bsz) & !3) as usize;
+            let offset = ((mi_row * bsz) & !3) as usize * stride + ((mi_col * bsz) & !3) as usize;
             let dst = plane_start(plane).cast::<u16>().add(offset);
-            write_palette_plane(dst, stride, params.color_map, width, height, &colors[8 * plane..], |c| c);
+            write_palette_plane(dst, stride, map, width, height, &colors[8 * plane..], |c| c);
             if plane != 0 {
                 let dst = plane_start(2).cast::<u16>().add(offset);
-                write_palette_plane(dst, stride, params.color_map, width, height, &colors[16..], |c| c);
+                write_palette_plane(dst, stride, map, width, height, &colors[16..], |c| c);
             }
         } else {
             let stride = fb.planes[plane].stride as usize;
-            let offset = ((mi.mi_row * bsz) & !3) as usize * stride + ((mi.mi_col * bsz) & !3) as usize;
+            let offset = ((mi_row * bsz) & !3) as usize * stride + ((mi_col * bsz) & !3) as usize;
             let dst = plane_start(plane).add(offset);
-            write_palette_plane(dst, stride, params.color_map, width, height, &colors[8 * plane..], |c| c as u8);
+            write_palette_plane(dst, stride, map, width, height, &colors[8 * plane..], |c| c as u8);
             if plane != 0 {
                 let dst = plane_start(2).add(offset);
-                write_palette_plane(dst, stride, params.color_map, width, height, &colors[16..], |c| c as u8);
+                write_palette_plane(dst, stride, map, width, height, &colors[16..], |c| c as u8);
             }
         }
     }

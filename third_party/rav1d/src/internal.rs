@@ -203,6 +203,10 @@ pub struct Rav1dState {
     pub(crate) refs: [Rav1dContextRefs; 8],
     pub(crate) cdf: [CdfThreadContext; 8], // Previously pooled
 
+    /// rav1g: the bytes of the data that was sent from the start of the OBU in parse to the end, for
+    /// the sink (`ParseFrame::data_left`).
+    pub(crate) data_left: usize,
+
     pub(crate) operating_point_idc: c_uint,
     pub(crate) max_spatial_id: u8,
     pub(crate) drain: bool,

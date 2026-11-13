@@ -62,6 +62,18 @@ typedef struct av1_stage_dump av1_stage_dump;
 #define RAV1G_LOW_MEMORY_ALL 7
 
 /*
+ `Rav1gSettings::parser`: the entropy decoder of libaom reads the bitstream. The default of
+ `rav1g_settings_default`.
+ */
+#define RAV1G_PARSER_LIBAOM 0
+
+/*
+ `Rav1gSettings::parser`: the parse pass of rav1d reads the bitstream. The same frames; the speed and
+ what a damaged stream does differ (docs/phase2-rav1d.md).
+ */
+#define RAV1G_PARSER_RAV1D 1
+
+/*
  `rav1g_set_inter_fast`: the fast inter path is on.
  */
 #define RAV1G_INTER_FAST_ON 1
@@ -363,6 +375,10 @@ typedef struct Rav1gSettings {
    The operating point of a stream with layers.
    */
   uint32_t operating_point;
+  /*
+   What reads the bitstream: `RAV1G_PARSER_LIBAOM` or `RAV1G_PARSER_RAV1D`.
+   */
+  uint32_t parser;
   /*
    The budget guard, or null. On a console an application that goes over its memory limit loses its
    D3D12 device, so with this callback the decoder asks before it allocates. The callback returns the

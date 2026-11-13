@@ -160,6 +160,10 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
 #define AV1_LOW_MEMORY_NONE 8
 #define AV1_LOW_MEMORY_DEFAULT AV1_LOW_MEMORY_SHARED_BACK_BUFFER
 
+/* aom_codec_dec_cfg_t::parser. */
+#define AV1_PARSER_LIBAOM 0
+#define AV1_PARSER_RAV1D 1
+
 /*!\brief Initialization Configurations
  *
  * This structure is used to pass init time configuration options to the
@@ -212,6 +216,11 @@ typedef struct aom_codec_dec_cfg {
    * The decoder is created for the width, height and bit depth given here;
    * aom_codec_peek_stream_info gives those of a stream. */
   int low_memory;
+  /* The parser: AV1_PARSER_LIBAOM (0, the default), the entropy decoder of
+   * libaom, or AV1_PARSER_RAV1D, the parse pass of rav1d (docs/phase2-rav1d.md).
+   * Both give the same frames; they differ in speed and in what a damaged
+   * stream does (the document says how). */
+  int parser;
   /* Memory budget guard, optional. On a console an application that goes over
    * its memory limit loses its D3D12 device for the rest of the process, so
    * the decoder asks before it allocates: at the creation, and when it

@@ -40,6 +40,20 @@ pub struct ParseFrame<'a> {
     /// frame's size) and the step that follows from it (`ScalableMotionParams`). Zero in an intra frame.
     pub ref_scale: [[i32; 2]; 7],
     pub ref_step: [[i32; 2]; 7],
+    /// The bytes of the data that was sent ([`Parser::send`]) from the start of the OBU that completed
+    /// the frame (its last tile group) to the end of the data.
+    pub data_left: usize,
+}
+
+/// A frame header with `show_existing_frame`: the frame in a reference slot is shown.
+pub struct ParseShowExisting<'a> {
+    /// The header that shows the frame: `existing_frame_idx` is the slot, `spatial_id` and
+    /// `temporal_id` are those of its OBU.
+    pub frame_hdr: &'a Rav1dFrameHeader,
+    /// The frame in the slot is a key frame: every slot refers to it from here on.
+    pub key: bool,
+    /// As [`ParseFrame::data_left`], from the start of the OBU of this header.
+    pub data_left: usize,
 }
 
 /// A tile whose parse starts, on the thread that parses its first superblock row.
@@ -141,6 +155,28 @@ pub struct ParseLrUnit {
 /// What takes the parse of a stream. The calls of a frame come between its `frame_begin` and its
 /// `frame_end`; those of a tile come from one thread at a time, in decode order.
 pub trait ParseSink: Send + Sync {
+    /// A sequence header was read (the thread that sends the data), before the parser takes it. `new`:
+    /// it is the first one or differs from the one before, and the parser forgets its references.
+    /// `Err` refuses it: the parser keeps the state it had and the data fails.
+    fn sequence(&self, _seq_hdr: &Rav1dSequenceHeader, _new: bool) -> Result<(), ()> {
+        Ok(())
+    }
+
+    /// A frame header shows the frame of a reference slot (the thread that sends the data, in decode
+    /// order with the frames). `Err` fails the data; the slots stay as they are.
+    fn show_existing(&self, _show: &ParseShowExisting<'_>) -> Result<(), ()> {
+        Ok(())
+    }
+
+    /// The clock of [`Self::tile_time`], or 0 when nothing is timed.
+    fn ticks(&self) -> i64 {
+        0
+    }
+
+    /// A superblock row of a tile was parsed, with everything the sink was called for; `start` is what
+    /// [`Self::ticks`] returned before it.
+    fn tile_time(&self, _frame: usize, _start: i64) {}
+
     /// The parse of a frame starts (the thread that sends the data, frames in decode order). The
     /// number returned comes back with every call of the frame. `Err` fails the frame.
     fn frame_begin(&self, frame: &ParseFrame<'_>) -> Result<usize, ()>;
@@ -165,8 +201,10 @@ pub trait ParseSink: Send + Sync {
     /// The last superblock row of a tile is parsed.
     fn tile_end(&self, frame: usize, tile: usize);
 
-    /// The parse of the frame has ended, with or without an error.
-    fn frame_end(&self, frame: usize, ok: bool);
+    /// The parse of the frame has ended, with or without an error. Returns whether the frame stands:
+    /// `false` fails a frame whose parse was good (the sink could not take it), and the parser then
+    /// treats it as it treats a frame with damaged data.
+    fn frame_end(&self, frame: usize, ok: bool) -> bool;
 }
 
 /// The settings of a [`Parser`].
@@ -223,37 +261,48 @@ impl Parser {
 
     /// Parses the frames in `data` (a temporal unit, or any run of whole OBUs). Returns when they are
     /// parsed when one frame is parsed at a time; with more, frames may still be in parse.
+    ///
+    /// After an error nothing of the data is left with the parser: the rest of it is dropped, with a
+    /// frame whose tiles were being collected, as the decoder of upstream's tools drops it. The next
+    /// call starts with its own data.
     pub fn send(&self, data: &[u8]) -> Result<(), Rav1dError> {
         let mut data = Rav1dData::wrap(CRef::Box(Box::from(data)))?;
-        let mut result = Ok(());
+        let result = self.send_all(&mut data);
+        if result.is_err() {
+            // `gen_picture` puts the data back when a picture is ready, also behind an OBU it could not
+            // read; a later call would then read that OBU again before its own data.
+            let state = &mut *self.c.state.try_lock().unwrap();
+            state.in_0 = Default::default();
+            state.out = Default::default();
+            state.cache = Default::default();
+            state.frame_hdr = None;
+            state.tiles.clear();
+            state.n_tiles = 0;
+        }
+        result
+    }
+
+    fn send_all(&self, data: &mut Rav1dData) -> Result<(), Rav1dError> {
         loop {
-            match rav1d_send_data(&self.c, &mut data) {
-                Ok(()) => {}
-                Err(Rav1dError::TryAgain) => {}
-                Err(error) => {
-                    // The parser keeps nothing of data it could not read, and neither does this: the
-                    // rest of the temporal unit is dropped, as the decoder of upstream's tools drops it.
-                    result = Err(error);
-                    data = Rav1dData::default();
-                }
+            match rav1d_send_data(&self.c, data) {
+                Ok(()) | Err(Rav1dError::TryAgain) => {}
+                Err(error) => return Err(error),
             }
-            // The pictures are handles without samples here: taking them keeps the queue moving.
+            // The pictures are handles without samples here: taking them keeps the queue moving, and
+            // the call goes on with the data the parser has kept.
             loop {
                 let mut picture = Rav1dPicture::default();
                 match rav1d_get_picture(&self.c, &mut picture) {
                     Ok(()) => {}
                     Err(Rav1dError::TryAgain) => break,
-                    Err(error) => {
-                        result = Err(error);
-                        break;
-                    }
+                    Err(error) => return Err(error),
                 }
             }
-            if data.data.as_ref().is_none_or(|data| data.is_empty()) {
-                break;
+            let sent = data.data.as_ref().is_none_or(|data| data.is_empty());
+            if sent && self.c.state.try_lock().unwrap().in_0.data.is_none() {
+                return Ok(());
             }
         }
-        result
     }
 
     /// Waits for the frames in parse and forgets the state of the stream (a seek, the end of a stream).

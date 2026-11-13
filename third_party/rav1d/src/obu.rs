@@ -33,6 +33,7 @@ use crate::include::dav1d::headers::{
 use crate::internal::{Rav1dContext, Rav1dState, Rav1dTileGroup, Rav1dTileGroupHeader};
 use crate::levels::ObuMetaType;
 use crate::log::Rav1dLog as _;
+use crate::parse::ParseShowExisting;
 use crate::picture::{rav1d_picture_copy_props, PictureFlags};
 use crate::thread_task::FRAME_ERROR;
 
@@ -2231,6 +2232,15 @@ fn parse_obus(
                 return Err(Rav1dError::InvalidArgument);
             }
 
+            // rav1g: the sink sees the sequence before the parser takes it, and can refuse it.
+            let new = state
+                .seq_hdr
+                .as_ref()
+                .is_none_or(|old| !seq_hdr.eq_without_operating_parameter_info(old));
+            c.sink
+                .sequence(&seq_hdr, new)
+                .map_err(|()| Rav1dError::InvalidArgument)?;
+
             let op_idx = if c.operating_point < seq_hdr.num_operating_points {
                 c.operating_point
             } else {
@@ -2472,6 +2482,21 @@ fn parse_obus(
             {
                 return Err(Rav1dError::InvalidArgument);
             }
+            // rav1g: the sink outputs the frame; the slots are updated behind it.
+            c.sink
+                .show_existing(&ParseShowExisting {
+                    frame_hdr,
+                    key: state.refs[frame_hdr.existing_frame_idx as usize]
+                        .p
+                        .p
+                        .frame_hdr
+                        .as_ref()
+                        .unwrap()
+                        .frame_type
+                        == Rav1dFrameType::Key,
+                    data_left: state.data_left,
+                })
+                .map_err(|()| Rav1dError::InvalidArgument)?;
             if c.fc.len() == 1 {
                 state.out = state.refs[frame_hdr.existing_frame_idx as usize].p.clone();
                 rav1d_picture_copy_props(

@@ -323,6 +323,13 @@ select the installed `Av1GpuTestPlayer` package. Under its **LocalState** folder
 create `args/` and `streams/`, upload your local test streams, and write a plain-text
 `LocalState\args\args_av1.txt`. No stream or server location is embedded in the build.
 
+The log has one `LIFECYCLE ...` line for every lifecycle event of the app (`Activated`,
+`Suspending`, `Resuming`, `VisibilityChanged: the window is visible` or `not visible`, `window
+Closed`), and `LIFECYCLE the window is not visible: the decode is stopped and the app ends` when
+the player ends its task list for that reason. A decode that stops with `Decoding process was
+terminated by user` right behind such a line was stopped by the window losing the screen (another
+app in front, the system UI, the console going to sleep), not by a decode error.
+
 Each non-comment line is one upstream task, for example:
 
 ```text
@@ -369,6 +376,7 @@ the start of every task say what is in effect.
 | Decoder size | the stream's largest frame size, rounded up to 128, and 8-bit buffers for an 8-bit stream; see [Decoder size](#decoder-size--nofitsize) | `Decoder size: 3840x2176 10-bit (fit to the stream, default)` | `-nofitsize`: 4096x2176 10-bit for every stream, `Decoder size: 4096x2176 10-bit (fixed, -nofitsize)` |
 | Memory reductions | part 1, one back buffer shared by all frames (frame buffer pool 12 → 10, no measurable time cost); see [Smaller decoder](#smaller-decoder--lowmem) | `Low memory parts: 1 (default: 1 shared back buffer)` | `-lowmemparts 0`: none, every frame takes its back buffer from the pool (`Low memory parts: 0 (none, -lowmemparts 0)`); `-lowmemparts N`: exactly the parts in `N`; `-lowmem`: all three (`-lowmemparts 7`) |
 | Pipeline slots | 2 | `Frame slots: 2` | `-slots 3`, `-slots 4` |
+| Parser | the entropy decoder of libaom (C) | `Parser: the entropy decoder of libaom (default; -parser rav1d selects rav1d's)` | `-parser rav1d`: the parse pass of rav1d, `Parser: the parse pass of rav1d (-parser rav1d)`; see [Parser](#parser--parser) |
 | Clears | on the decode thread | `Clears: decode thread (original)` | `-asyncclear` |
 | Intra prediction | upstream's shaders, `/Od` build | `Intra shaders: intra_main + intra_filter (original)`, `Intra main shader: intra_main (/Od, original)` | `-intrav2`, `-intraopt` |
 | Inter prediction | upstream's shaders, lists by type and block size | `Inter shaders: inter_main, inter_compound (original)` | `-interfast`: see [Inter fast path](#inter-fast-path--interfast) |
@@ -1247,6 +1255,36 @@ Package 0.2.3.0 (run 43008653829), 4K 10-bit, 1 tile, 300 frames, all tasks with
 listings `intra_main.asm` and `intra_main_hbd.asm`, and `stats.txt` gives the counts and
 the FXC compile time of all four. After the build the workflow checks that each of the
 four listings has the bytecode compiled into the package.
+
+## Parser (`-parser`)
+
+`-parser rav1d` creates the decoder of the task with the parse pass of
+rav1d in place of the entropy decoder of libaom ([phase2-rav1d.md](phase2-rav1d.md), step 3);
+`-parser c` is the default and the same as no flag. The flag is per task line, so one launch can
+time both on the same stream:
+
+```text
+-i /streams/<clip> -t 1 -frate -1 -nopresent -gputime -parser c
+-i /streams/<clip> -t 1 -frate -1 -nopresent -gputime -parser rav1d
+```
+
+- The output is the same: every frame, and the buffers behind every GPU stage (`-dumpstages`), are
+  those of the C parser. `-md5_frame_check` and `-save_md5` work as before.
+- What changes is the tile decode: in the `-gputime` summary `cpu entropy/tile decode, wall` and
+  `thread sum` (`entropy_wall`, `entropy_sum`), and with them `cpu decode thread, setup to submit`
+  and the frames per second of a clip whose limit is the decode thread. With rav1d the two entropy
+  timers contain the sink (the mode info records, the grid, the block lists) and the set-up and
+  wrap-up of the frame's parse.
+- `-t <n>` is the number of threads for the tiles of a frame with both parsers. One frame is in
+  parse at a time.
+- A damaged stream ([phase2-rav1d.md](phase2-rav1d.md), "A damaged stream"): the call for the
+  damaged frame fails with `Failed to decode tile data: the parse of the frame ended with an error`,
+  and a later frame that refers to it fails with `The temporal unit could not be parsed
+  (InvalidArgument): ...`; with `-continue_on_error` each is one counted error. Decoding is right
+  again from the first frame whose references are whole, at the latest the next key frame. The C
+  parser decodes such frames from the references it has, with wrong pictures until the key frame.
+- A task with the other parser than the task before gets a new decoder, like a task with other
+  `-slots`.
 
 ## Inter fast path (`-interfast`)
 

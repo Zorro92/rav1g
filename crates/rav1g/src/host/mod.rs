@@ -15,6 +15,9 @@
 //! `crates/rav1g-sys/host_entry.c` where the decoder's error may have to be raised. The application's
 //! entry points (`aom/aom_decoder.h`, `dx/av1_perf.h`) are here as well. The structs of the host are
 //! Rust's own (`types`); what the entropy decoder shares with it is bound in `rav1g_sys::parser`.
+//!
+//! A decoder created with the parser of phase 2 (docs/phase2-rav1d.md) runs rav1d's parse pass in place
+//! of the entropy decoder: `rav1d_host` is the host of its sink, and calls the same functions.
 
 // The stages index several tables of the C structs with one index, as the C++ they come from does.
 #![allow(clippy::needless_range_loop)]
@@ -36,6 +39,7 @@ mod output;
 mod perf;
 mod postfilter;
 mod prediction;
+mod rav1d_host;
 mod stage_dump;
 mod tables;
 mod thread;

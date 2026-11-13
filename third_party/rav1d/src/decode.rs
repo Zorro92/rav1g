@@ -4071,7 +4071,11 @@ fn rav1d_decode_frame_main(c: &Rav1dContext, f: &mut Rav1dFrameData) -> Rav1dRes
             }
             for col in 0..cols {
                 t.ts = tile_row * cols + col;
-                rav1d_decode_tile_sbrow(c, &mut t, f).map_err(|()| Rav1dError::InvalidArgument)?;
+                // rav1g: the time of the parse, for the sink.
+                let start = c.sink.ticks();
+                let res = rav1d_decode_tile_sbrow(c, &mut t, f);
+                c.sink.tile_time(f.sink_frame, start);
+                res.map_err(|()| Rav1dError::InvalidArgument)?;
             }
             if f.frame_hdr().frame_type.is_inter_or_switch() {
                 c.dsp
@@ -4100,8 +4104,12 @@ pub(crate) fn rav1d_decode_frame_exit(
         task_thread.error.store(0, Ordering::Relaxed);
     }
     // rav1g: the sink is told that the parse of the frame has ended.
+    // A frame the sink could not take fails like a frame with damaged data.
     if mem::take(&mut f.sink_begun) {
-        c.sink.frame_end(f.sink_frame, retval.is_ok());
+        if !c.sink.frame_end(f.sink_frame, retval.is_ok()) && retval.is_ok() {
+            retval = Err(Rav1dError::InvalidArgument);
+            task_thread.error.store(1, Ordering::SeqCst);
+        }
     }
 
     if retval.is_ok() && c.fc.len() > 1 && c.strict_std_compliance {
@@ -4577,6 +4585,7 @@ pub fn rav1d_submit_frame(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResu
                     [0; 2]
                 }
             }),
+            data_left: state.data_left,
         };
         match c.sink.frame_begin(&parse_frame) {
             Ok(sink_frame) => {

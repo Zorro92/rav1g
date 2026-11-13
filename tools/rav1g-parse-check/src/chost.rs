@@ -109,6 +109,21 @@ pub extern "C" fn av1_destroy_gpu_decoder(_dec: *mut Av1Core) {}
 #[unsafe(no_mangle)]
 pub extern "C" fn av1_drain_gpu_decoder(_dec: *mut Av1Core) {}
 
+/// The decode call of a decoder whose parser is rav1d's (`aom_codec_dec_cfg_t::parser`): this program
+/// creates no such decoder; rav1d is run next to the entropy decoder, not inside its interface.
+#[unsafe(no_mangle)]
+pub extern "C" fn rav1g_rav1d_decode(
+    _dec: *mut Av1Core,
+    _data: *const u8,
+    _size: usize,
+    _user_priv: *mut c_void,
+    _operating_point: c_int,
+    _output_all_layers: c_int,
+    _detail: *mut *const std::ffi::c_char,
+) -> c_int {
+    crate::sys::AOM_CODEC_ERROR as c_int
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn av1_sequence_fits_decoder(
     _dec: *mut Av1Core,

@@ -62,6 +62,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n', 1)[0])
     parser.add_argument('--tool', required=True, help='rav1g-dec.exe')
     parser.add_argument('--tool-args', default='', help='further arguments for it, e.g. "-hw"')
+    parser.add_argument('--player-args', default='', help='further flags for every task of the player, e.g. '
+                        '"-parser rav1d"')
     parser.add_argument('--streams', required=True, help='the directory of the conformance streams')
     parser.add_argument('--out', required=True, help='the logs')
     parser.add_argument('--title', default='the Rust library')
@@ -77,7 +79,7 @@ def main():
     os.makedirs(task_dir)
     try:
         with open(os.path.join(task_dir, 'args_av1.txt'), 'w', encoding='ascii') as f:
-            f.write('\n'.join(TASKS) + '\n')
+            f.write('\n'.join(task + (' ' + args.player_args if args.player_args else '') for task in TASKS) + '\n')
         text, code = launch(args.tool, tool_args, args.streams, os.path.join(args.out, 'player.log'), 1800)
     finally:
         shutil.rmtree(task_dir, ignore_errors=True)
@@ -91,6 +93,8 @@ def main():
         problems.append('%d error lines in the player log; the first: %s' % (len(errors), errors[0]))
     if re.search(r'(?i)device.{0,16}removed|DXGI_ERROR_DEVICE', text):
         problems.append('a task lost the D3D12 device')
+    if '-parser rav1d' in args.player_args and 'Parser: the parse pass of rav1d' not in text:
+        problems.append('the log does not say that the parse pass of rav1d reads the streams')
     ok = text.count('MD5 is OK')
     if ok != len(TASKS):
         problems.append('%d of %d tasks of the player ended with "MD5 is OK"' % (ok, len(TASKS)))

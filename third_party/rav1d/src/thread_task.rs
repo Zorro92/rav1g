@@ -957,10 +957,13 @@ pub fn rav1d_worker_task(task_thread: Arc<Rav1dTaskContextTaskThread>) {
                             1 as c_int + (t.type_0 == TaskType::TileReconstruction) as c_int
                         };
                         if error_0 == 0 {
+                            // rav1g: the time of the parse, for the sink.
+                            let start = c.sink.ticks();
                             error_0 = match rav1d_decode_tile_sbrow(c, &mut tc, &f) {
                                 Ok(()) => 0,
                                 Err(()) => 1,
                             };
+                            c.sink.tile_time(f.sink_frame, start);
                         }
                         let progress = if error_0 != 0 { TILE_ERROR } else { 1 + sby };
 

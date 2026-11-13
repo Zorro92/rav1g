@@ -86,7 +86,7 @@ def run(args):
             print('ERROR %s: the manifest has no stream %s' % (case, stream))
             failed = True
             continue
-        command = [tool] + manifest[stream] + ['-v'] + flags
+        command = [tool] + manifest[stream] + ['-v'] + flags + args.tool_args.split()
         if limit:
             command += ['-limit', str(limit)]
         done = subprocess.run(command, cwd=args.streams, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -143,6 +143,7 @@ def main():
     r.add_argument('--tool', required=True)
     r.add_argument('--streams', required=True)
     r.add_argument('--out', required=True)
+    r.add_argument('--tool-args', default='', help='further arguments for the tool, e.g. "-parser rav1d"')
     c = commands.add_parser('compare')
     c.add_argument('--reference', required=True)
     c.add_argument('--candidate', required=True)

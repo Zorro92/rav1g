@@ -15,7 +15,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 upstream=${1:?usage: upstream_diff.sh <checkout of rav1d> [<file for the diff>]}
 out=${2:-}
 
-CHANGED="Cargo.toml build.rs src/cpu.rs src/decode.rs src/internal.rs src/lib.rs src/msac.rs src/picture.rs
+CHANGED="Cargo.toml build.rs src/cpu.rs src/decode.rs src/internal.rs src/lib.rs src/msac.rs src/obu.rs src/picture.rs
 src/recon.rs src/refmvs.rs src/tables.rs src/thread_task.rs"
 ADDED="PATCHES.md UPSTREAM upstream_diff.sh src/parse.rs"
 

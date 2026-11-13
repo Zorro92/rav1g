@@ -84,6 +84,8 @@ pub struct Task {
     pub all_layers: bool,
     /// -oppoint <n>: the operating point of a stream with layers.
     pub oppoint: i32,
+    /// -parser c|rav1d: what reads the bitstream; true is rav1d's parse pass.
+    pub parser_rav1d: bool,
     /// -timeout: seconds for the task, 0 = none.
     pub timeout_s: i32,
     /// -gputime: the timing run of the player, its summary on stdout.
@@ -132,6 +134,7 @@ impl Default for Task {
             interfast: 0,
             continue_on_error: false,
             all_layers: false,
+            parser_rav1d: false,
             oppoint: 0,
             timeout_s: 0,
             gputime: false,
@@ -211,6 +214,8 @@ pub fn usage() {
     say!("                        the output of any stream (same output)");
     say!("  -poisonbuf            the same for every buffer the CPU writes for the shaders, and the constants of");
     say!("                        every stage filled again in every frame before the stage writes them (same output)");
+    say!("  -parser c|rav1d       what reads the bitstream: the entropy decoder of libaom (c, the default) or the");
+    say!("                        parse pass of rav1d (same output; docs/phase2-rav1d.md)");
     say!("  -interfast            inter prediction by the fraction of the motion vector: a copy, one filter pass, or");
     say!("                        both (inter_fast, inter_compound_fast; same output)");
     say!("  -interfastlists       the block lists of -interfast with the original shaders on them (same output)");
@@ -354,6 +359,13 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-progress" => task.progress = true,
             "-alllayers" => task.all_layers = true,
             "-oppoint" => task.oppoint = number()?,
+            "-parser" => {
+                task.parser_rav1d = match value()?.as_str() {
+                    "c" => false,
+                    "rav1d" => true,
+                    other => return Err(format!("-parser {other}: c or rav1d")),
+                }
+            }
             _ => {
                 let Some(globals) = globals.as_deref_mut() else {
                     return Err(format!("unknown argument '{a}'"));

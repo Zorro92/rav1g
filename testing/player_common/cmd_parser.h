@@ -109,6 +109,10 @@ class CParameters {
     // (decoder.cpp, "The app's memory where the system has no limit for it"). -1: no model.
     int budget_mib_;
     int retain_mib_;
+    // -parser c|rav1d: what reads the bitstream: the entropy decoder of libaom (c, the default) or the parse
+    // pass of rav1d (docs/phase2-rav1d.md). parser_rav1d_ is the choice after Parse().
+    std::string parser_;
+    bool parser_rav1d_;
     // -continue_on_error: a decode call that fails does not end the task; the next temporal units go to
     // the same decoder.
     bool continue_on_error_;

@@ -73,8 +73,9 @@ impl ParseSink for NullSink {
 
     fn tile_end(&self, _frame: usize, _tile: usize) {}
 
-    fn frame_end(&self, _frame: usize, ok: bool) {
+    fn frame_end(&self, _frame: usize, ok: bool) -> bool {
         self.frames.fetch_add(u64::from(ok), Ordering::Relaxed);
+        true
     }
 }
 

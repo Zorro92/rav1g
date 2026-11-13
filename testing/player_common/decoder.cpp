@@ -395,6 +395,7 @@ int AV1Decoder::DecodeOne() {
                        created_height_ != dec_height || created_bitdepth_ != dec_bitdepth ||
                        created_intrav2_ != params_.intrav2_ ||
                        created_interfast_ != (params_.interfast_ || params_.interfastlists_) ||
+                       created_parser_rav1d_ != params_.parser_rav1d_ ||
                        created_lowmem_ != params_.lowmem_parts_ || created_packed_10x3_ != params_.hdr10x3_ ||
                        created_noguard_ != params_.noguard_);
   if (initialized_ && (need_reinit_ || other_decoder)) DestroyDecoder();
@@ -441,6 +442,8 @@ int AV1Decoder::DecodeOne() {
       cfg.intra_v2 = params_.intrav2_ != 0;
       // -interfast: room in the block maps for the lists by motion vector class.
       cfg.inter_fast = params_.interfast_ || params_.interfastlists_;
+      // -parser rav1d: the parse pass of rav1d reads the bitstream of this decoder.
+      cfg.parser = params_.parser_rav1d_ ? RAV1G_PARSER_RAV1D : RAV1G_PARSER_LIBAOM;
       cfg.low_memory = params_.lowmem_parts_;
       // Budget guard: the decoder refuses a creation, and later a palette buffer, that does not fit what
       // the app has left. The output pool takes its textures on the first frame; until then they are held
@@ -513,6 +516,7 @@ int AV1Decoder::DecodeOne() {
       created_bitdepth_ = dec_bitdepth;
       created_intrav2_ = params_.intrav2_;
       created_interfast_ = params_.interfast_ || params_.interfastlists_;
+      created_parser_rav1d_ = params_.parser_rav1d_;
       created_lowmem_ = params_.lowmem_parts_;
       created_packed_10x3_ = params_.hdr10x3_;
       created_noguard_ = params_.noguard_;
@@ -604,6 +608,10 @@ int AV1Decoder::DecodeOne() {
                   : params_.interfast_ ? "by motion vector class: inter_fast, inter_compound_fast (-interfast; "
                                          "frames with a scaled reference keep the original shaders)"
                                        : "inter_main, inter_compound (original)");
+  // -parser: fixed when the decoder was created; Start() asks for a new decoder when the choice changes.
+  XB_LOGI << "Parser: "
+          << (params_.parser_rav1d_ ? "the parse pass of rav1d (-parser rav1d)"
+                                    : "the entropy decoder of libaom (default; -parser rav1d selects rav1d's)");
   // -intraopt: which build of the original intra_main shader runs; independent of the two flags above.
   rav1g_set_intra_opt(params_.intraopt_ != 0);
   XB_LOGI << "Intra main shader: "

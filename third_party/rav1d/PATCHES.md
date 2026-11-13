@@ -48,15 +48,21 @@ there).
 | `src/tables.rs` | Without the nine `#[no_mangle] dav1d_*` tables of the pixel assembly. |
 | `src/lib.rs` | Without the C API (the 19 `dav1d_*` functions) and the modules above; no film grain. `rav1d_open` takes the sink. The number of threads and of frames in parse is what the application says (0 is 1): upstream takes the number of processors and its square root, which on Windows are two imports the library does not have otherwise. A crate-level `allow` for the code the removals leave unused, so that the files stay close to upstream. `pub mod parse`, `pub mod levels`. |
 | `src/internal.rs` | Without the pixel DSP tables, the film grain task data and the buffers of the reconstruction pass (blocks, coefficients, palette indexes and colours per frame; CDEF and loop restoration line buffers). The context has the sink; a frame has its number at the sink. |
-| `src/decode.rs` | The parse pass only. A block is handed to the sink when its mode info is read, and its coefficients are read right behind it (upstream stores the block and reads the coefficients in the same pass; the second pass reconstructs). The palette index map goes to the sink as it is read (upstream packs it for the second pass). The sink is told when a frame, a tile and a superblock begin and end; the loop restoration units of a superblock are collected for it. No reconstruction, no bookkeeping of the lowest pixel a block predicts from, no pixel buffers. The reference handling, the CDF updates and the motion vector storage are upstream's. |
+| `src/obu.rs` | The sink sees a sequence header before the parser takes it and can refuse it, and it is told when a frame header shows the frame of a reference slot (`show_existing_frame`), before the slots are updated. Nothing of the reading changes. |
+| `src/decode.rs` | The parse pass only. A block is handed to the sink when its mode info is read, and its coefficients are read right behind it (upstream stores the block and reads the coefficients in the same pass; the second pass reconstructs). The palette index map goes to the sink as it is read (upstream packs it for the second pass). The sink is told when a frame, a tile and a superblock begin and end; the loop restoration units of a superblock are collected for it. No reconstruction, no bookkeeping of the lowest pixel a block predicts from, no pixel buffers. The reference handling, the CDF updates and the motion vector storage are upstream's. The sink says at the end of a frame whether the frame stands: a frame it could not take fails like a frame with damaged data (its reference slots are emptied, as upstream empties them). The parse of a superblock row of a tile is timed for the sink, when the sink has a clock. |
 | `src/recon.rs` | Reading of the coefficients and of the palette colours only (1,990 of 4,190 lines). `decode_coefs` asks the sink where the coefficients of a transform block go and writes them there: dequantised, 32 bits each, in scan order (upstream writes them at their position in the block, clamped to the range of the bit depth; the inverse scan tables for that are built once). The values and the context are computed as upstream computes them. |
-| `src/thread_task.rs` | Without the film grain tasks; the filter tasks do nothing. The scheduler, its task order and its progress signals are upstream's: the reconstruction task of a tile returns at once. |
+| `src/thread_task.rs` | Without the film grain tasks; the filter tasks do nothing. The scheduler, its task order and its progress signals are upstream's: the reconstruction task of a tile returns at once. The same timer around the parse of a superblock row as in `decode.rs`. |
 | `src/picture.rs` | A picture has no samples: each plane is the smallest piece of memory a plane can be. Pictures remain the handles of the reference bookkeeping. |
 
 ## Added
 
-- `src/parse.rs`: the interface to the application. `ParseSink` is called per frame, tile, block, coded
-  transform block, palette plane and superblock; `Parser` takes the temporal units of a stream.
+- `src/parse.rs`: the interface to the application. `ParseSink` is called per sequence header, frame,
+  shown reference slot, tile, block, coded transform block, palette plane and superblock; `Parser` takes
+  the temporal units of a stream. A frame and a shown slot come with the place of their OBU in the data
+  that was sent (`data_left`, which `lib.rs` and `internal.rs` keep per OBU), for an application that
+  decides itself which frame of a temporal unit is output. After an error `Parser::send` leaves nothing
+  of the data with the parser: upstream keeps unread data when a picture is ready, which would be read
+  again in front of the next data.
 - `PATCHES.md`, `UPSTREAM`, `upstream_diff.sh`.
 
 ## Checks

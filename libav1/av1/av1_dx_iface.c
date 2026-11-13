@@ -410,6 +410,16 @@ static aom_codec_err_t decoder_decode(aom_codec_alg_priv_t *ctx,
   // Reset flushed when receiving a valid frame.
   ctx->flushed = 0;
 
+  // The parser of phase 2: rav1d's parse pass reads the temporal unit, and the host records and submits
+  // its frames. The entropy decoder below is not used by such a decoder.
+  if (ctx->cfg.parser == AV1_PARSER_RAV1D) {
+    const char *detail = NULL;
+    res = (aom_codec_err_t)rav1g_rav1d_decode(ctx->gpu_decoder, data, data_sz, user_priv, ctx->operating_point,
+                                              ctx->output_all_layers, &detail);
+    if (res != AOM_CODEC_OK) set_error_detail(ctx, detail);
+    return res;
+  }
+
   const uint8_t *data_start = data;
   const uint8_t *data_end = data + data_sz;
 

@@ -63,10 +63,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'git log failed' }
           $sources | Set-Content out/SOURCES.txt -Encoding utf8
           # Binary redistribution retains the BSD notices and AOM patent license, including libwebm and
-          # rav1d (the library has rav1d's parse pass, third_party/rav1d).
+          # rav1d (the library has rav1d's parse pass, third_party/rav1d), and the MIT and Apache-2.0
+          # notices of the crates the library links (third_party/rust-crates/NOTICES.txt, which the
+          # rust-cross job holds against Cargo.lock).
           foreach ($license in @('LICENSE.txt', 'libav1/LICENSE', 'libav1/PATENTS',
               'third_party/libwebm/LICENSE.TXT', 'third_party/libwebm/PATENTS.TXT',
-              'third_party/rav1d/COPYING', 'third_party/rav1d/doc/PATENTS')) {
+              'third_party/rav1d/COPYING', 'third_party/rav1d/doc/PATENTS',
+              'third_party/rust-crates/NOTICES.txt')) {
             $destination = Join-Path out/licenses $license
             New-Item -ItemType Directory -Force (Split-Path $destination) | Out-Null
             Copy-Item (Join-Path src $license) $destination
@@ -731,10 +734,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'rav1g-dec does not have the Shader Model 6 test shaders of this run' }
           Copy-Item target/release/rav1g-dec.exe, target/release/rav1g_dec.pdb -Destination out/rav1g-dec/
           # Binary redistribution retains the BSD notices and AOM patent license, including libwebm and
-          # rav1d (the library has rav1d's parse pass, third_party/rav1d).
+          # rav1d (the library has rav1d's parse pass, third_party/rav1d), and the MIT and Apache-2.0
+          # notices of the crates the library links (third_party/rust-crates/NOTICES.txt, which the
+          # rust-cross job holds against Cargo.lock).
           foreach ($license in @('LICENSE.txt', 'libav1/LICENSE', 'libav1/PATENTS',
               'third_party/libwebm/LICENSE.TXT', 'third_party/libwebm/PATENTS.TXT',
-              'third_party/rav1d/COPYING', 'third_party/rav1d/doc/PATENTS')) {
+              'third_party/rav1d/COPYING', 'third_party/rav1d/doc/PATENTS',
+              'third_party/rust-crates/NOTICES.txt')) {
             $destination = Join-Path out/rav1g-dec/licenses $license
             New-Item -ItemType Directory -Force (Split-Path $destination) | Out-Null
             Copy-Item $license $destination
@@ -1051,6 +1057,98 @@ jobs:
             --streams conformance-streams --out out/memory-lines
           if ($LASTEXITCODE -ne 0) { throw "memory lines with rav1g-dec: exit code $LASTEXITCODE" }
 
+      # The parser of phase 2 as the parser of the decoder (docs/phase2-rav1d.md, step 3): the checks above
+      # once more with -parser rav1d, the parse pass of rav1d in place of the entropy decoder of libaom.
+      # The whole set against its references and expected.txt, a part of it through rav1g.h, the decode
+      # errors in cut streams (with the words and the error behaviour of that parser), the order check, the
+      # memory check, the part of the set with -poisonmi and with -poisonbuf, the whole set with -interfast,
+      # and the decoder code of the test player with its -parser flag.
+      - name: Decode every stream on WARP with -parser rav1d
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/conformance-rav1d --threads 4 "--tool-args=-parser rav1d" "--title=rav1g-dec (cargo, MSVC) with -parser rav1d"
+          $code = $LASTEXITCODE
+          if (-not (Select-String -Path out/conformance-rav1d/lists/run001.log -Pattern '^PARSER .*rav1d' -Quiet)) {
+            throw 'The decoder of this run does not report the parse pass of rav1d'
+          }
+          if ($code -ne 0) { throw "conformance run with -parser rav1d: exit code $code (1: not as expected.txt says, 2: the run could not be done)" }
+
+      - name: The other checks with -parser rav1d
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $failed = @()
+          $part = '--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)'
+          $runs = @(@{ name = 'poisonmi-rav1d'; args = '-poisonmi -parser rav1d'; only = $part },
+            @{ name = 'poisonbuf-rav1d'; args = '-poisonbuf -parser rav1d'; only = $part },
+            @{ name = 'capi-rav1d'; args = '-capi -parser rav1d'; only = $part },
+            @{ name = 'interfast-rav1d'; args = '-interfast -parser rav1d'; only = '--only=' })
+          foreach ($run in $runs) {
+            python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+              --out "out/conformance-$($run.name)" --threads 4 "--tool-args=$($run.args)" `
+              "--title=rav1g-dec (cargo, MSVC) with $($run.args)" $run.only
+            if ($LASTEXITCODE -ne 0) { $failed += "conformance with $($run.args): exit code $LASTEXITCODE" }
+          }
+          python testing/conformance/cut_tile_check.py --tool out/rav1g-dec/rav1g-dec.exe --parser rav1d `
+            --streams conformance-streams --out out/cut-tile
+          if ($LASTEXITCODE -ne 0) { $failed += "decode error check: exit code $LASTEXITCODE" }
+          python testing/conformance/cut_tile_check.py --tool out/rav1g-dec/rav1g-dec.exe "--tool-args=-capi" --parser rav1d `
+            --streams conformance-streams --out out/cut-tile
+          if ($LASTEXITCODE -ne 0) { $failed += "decode error check with -capi: exit code $LASTEXITCODE" }
+          python testing/conformance/cut_tile_check.py --player-smoke out/rav1g-dec/rav1g-dec.exe --parser rav1d `
+            --streams conformance-streams --out out/cut-tile
+          if ($LASTEXITCODE -ne 0) { $failed += "decode error check with the player's decoder code: exit code $LASTEXITCODE" }
+          python testing/conformance/order_check.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/order-check-rav1d "--tool-args=-parser rav1d" "--title=rav1g-dec (cargo, MSVC) with -parser rav1d"
+          if ($LASTEXITCODE -ne 0) { $failed += "order check: exit code $LASTEXITCODE" }
+          python testing/conformance/memory_check.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/memory-check-rav1d "--tool-args=-parser rav1d" "--title=rav1g-dec (cargo, MSVC) with -parser rav1d"
+          if ($LASTEXITCODE -ne 0) { $failed += "memory check: exit code $LASTEXITCODE" }
+          python testing/conformance/player_smoke.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/player-smoke-rav1d "--player-args=-parser rav1d" "--title=the Rust library (cargo, MSVC), the player with -parser rav1d"
+          if ($LASTEXITCODE -ne 0) { $failed += "the player's decoder code: exit code $LASTEXITCODE" }
+          if ($failed.Count) { throw "with -parser rav1d: $($failed -join '; ')" }
+
+      # The two parsers against each other: the md5 of every output frame of every stream, the buffers
+      # behind every GPU stage of the frames of dump_tasks.txt (the mode info, the block lists, the
+      # coefficients as the stages read them, every frame buffer), and the MEMORY lines of a few decoder
+      # configurations.
+      - name: The two parsers give the same frames, stage dumps and MEMORY lines
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/stage_dump/ci_dumps.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --tasks testing/conformance/dump_tasks.txt --out out/stage-dumps-rav1d --threads 4 "--tool-args=-parser rav1d"
+          if ($LASTEXITCODE -ne 0) { throw "stage dumps with -parser rav1d: exit code $LASTEXITCODE" }
+          python testing/conformance/compare_md5.py --reference out/conformance --candidate out/conformance-rav1d `
+            --manifest conformance-streams/manifest.txt --reference-dumps out/stage-dumps --candidate-dumps out/stage-dumps-rav1d `
+            "--reference-name=rav1g-dec -parser c" "--candidate-name=rav1g-dec -parser rav1d"
+          if ($LASTEXITCODE -ne 0) { throw "the two parsers: md5 per frame or stage dumps differ (exit code $LASTEXITCODE)" }
+          python testing/conformance/memory_lines.py run --tool out/rav1g-dec/rav1g-dec.exe `
+            --streams conformance-streams --out out/memory-lines-rav1d "--tool-args=-parser rav1d"
+          if ($LASTEXITCODE -ne 0) { throw "memory lines with -parser rav1d: exit code $LASTEXITCODE" }
+          python testing/conformance/memory_lines.py compare --reference out/memory-lines --candidate out/memory-lines-rav1d `
+            "--reference-name=rav1g-dec -parser c" "--candidate-name=rav1g-dec -parser rav1d"
+          if ($LASTEXITCODE -ne 0) { throw "the two parsers: the MEMORY lines differ (exit code $LASTEXITCODE)" }
+
+      # The two parsers timed in pairs on this runner (testing/conformance/parser_timing.py): the CPU
+      # timers of the decode thread with -parser c and with -parser rav1d, in turns, three rounds each;
+      # the 2160p stream first. One parser thread for the streams with one tile; four for the stream with
+      # eight tiles. The numbers of a runner say how the two compare on it; the console's decide.
+      - name: The two parsers, timed in pairs
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/parser_timing.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/parser-timing --rounds 3 --threads 1 `
+            --stream nf-dvbdash-a1-8b-2160p.ivf --stream nf-chimera-10b-1080p.ivf --stream nf-sparks-10b-1080p.ivf
+          if ($LASTEXITCODE -ne 0) { throw "paired timing of the parsers: exit code $LASTEXITCODE" }
+          python testing/conformance/parser_timing.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/parser-timing-t4 --rounds 3 --threads 4 --stream syn-tiles-10b-1080p.ivf
+          if ($LASTEXITCODE -ne 0) { throw "paired timing of the parsers with four threads: exit code $LASTEXITCODE" }
+
       - name: Preserve the stage dumps of rav1g-dec
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
@@ -1074,6 +1172,9 @@ jobs:
             out/sm6test/
             out/player-smoke/
             out/cut-tile/
+            out/*-rav1d/
+            out/parser-timing/
+            out/parser-timing-t4/
           if-no-files-found: warn
 
       - name: Preserve rav1g-dec.exe
@@ -1269,8 +1370,10 @@ jobs:
           python3 testing/shader_cache/shaders.py verify --report shader-headers/report.json --root shader-headers "$exe"
           mkdir -p out/rav1g-dec-xwin
           cp "$exe" target/x86_64-pc-windows-msvc/release/rav1g_dec.pdb out/rav1g-dec-xwin/
+          # The notices of the crates the library links are those of Cargo.lock.
+          python3 third_party/rust-crates/collect.py --check
           for license in LICENSE.txt libav1/LICENSE libav1/PATENTS third_party/libwebm/LICENSE.TXT third_party/libwebm/PATENTS.TXT \
-              third_party/rav1d/COPYING third_party/rav1d/doc/PATENTS; do
+              third_party/rav1d/COPYING third_party/rav1d/doc/PATENTS third_party/rust-crates/NOTICES.txt; do
             mkdir -p "out/rav1g-dec-xwin/licenses/$(dirname "$license")"
             cp "$license" "out/rav1g-dec-xwin/licenses/$license"
           done
@@ -1449,6 +1552,56 @@ jobs:
           }
           if ($failed.Count) { throw "conformance with the rav1g-dec of the Linux build: $($failed -join '; ')" }
 
+      # The parser of phase 2 as the parser of the decoder (docs/phase2-rav1d.md, step 3): the checks above
+      # once more with -parser rav1d, the parse pass of rav1d in place of the entropy decoder of libaom.
+      # The whole set against its references and expected.txt, the decode
+      # errors in cut streams (with the words and the error behaviour of that parser), the order check, the
+      # memory check, the part of the set with -poisonmi and with -poisonbuf, the whole set with -interfast,
+      # and the decoder code of the test player with its -parser flag.
+      - name: Decode every stream on WARP with -parser rav1d, the rav1g-dec of the Linux build
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/run.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
+            --out out/conformance-rav1d --threads 4 "--tool-args=-parser rav1d" "--title=rav1g-dec built on Linux with -parser rav1d"
+          $code = $LASTEXITCODE
+          if (-not (Select-String -Path out/conformance-rav1d/lists/run001.log -Pattern '^PARSER .*rav1d' -Quiet)) {
+            throw 'The decoder of this run does not report the parse pass of rav1d'
+          }
+          if ($code -ne 0) { throw "conformance run with -parser rav1d: exit code $code (1: not as expected.txt says, 2: the run could not be done)" }
+
+      - name: The other checks with -parser rav1d, the rav1g-dec of the Linux build
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $failed = @()
+          $part = '--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)'
+          $runs = @(@{ name = 'poisonmi-rav1d'; args = '-poisonmi -parser rav1d'; only = $part },
+            @{ name = 'poisonbuf-rav1d'; args = '-poisonbuf -parser rav1d'; only = $part },
+            @{ name = 'interfast-rav1d'; args = '-interfast -parser rav1d'; only = '--only=' })
+          foreach ($run in $runs) {
+            python testing/conformance/run.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
+              --out "out/conformance-$($run.name)" --threads 4 "--tool-args=$($run.args)" `
+              "--title=rav1g-dec built on Linux with $($run.args)" $run.only
+            if ($LASTEXITCODE -ne 0) { $failed += "conformance with $($run.args): exit code $LASTEXITCODE" }
+          }
+          python testing/conformance/cut_tile_check.py --tool rav1g-dec-xwin/rav1g-dec.exe --parser rav1d `
+            --streams conformance-streams --out out/cut-tile
+          if ($LASTEXITCODE -ne 0) { $failed += "decode error check: exit code $LASTEXITCODE" }
+          python testing/conformance/cut_tile_check.py --player-smoke rav1g-dec-xwin/rav1g-dec.exe --parser rav1d `
+            --streams conformance-streams --out out/cut-tile
+          if ($LASTEXITCODE -ne 0) { $failed += "decode error check with the player's decoder code: exit code $LASTEXITCODE" }
+          python testing/conformance/order_check.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
+            --out out/order-check-rav1d "--tool-args=-parser rav1d" "--title=rav1g-dec built on Linux with -parser rav1d"
+          if ($LASTEXITCODE -ne 0) { $failed += "order check: exit code $LASTEXITCODE" }
+          python testing/conformance/memory_check.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
+            --out out/memory-check-rav1d "--tool-args=-parser rav1d" "--title=rav1g-dec built on Linux with -parser rav1d"
+          if ($LASTEXITCODE -ne 0) { $failed += "memory check: exit code $LASTEXITCODE" }
+          python testing/conformance/player_smoke.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
+            --out out/player-smoke-rav1d "--player-args=-parser rav1d" "--title=the Rust library built on Linux, the player with -parser rav1d"
+          if ($LASTEXITCODE -ne 0) { $failed += "the player's decoder code: exit code $LASTEXITCODE" }
+          if ($failed.Count) { throw "with -parser rav1d: $($failed -join '; ')" }
+
       - name: Preserve the results, the per-stream logs and md5 files
         if: always()
         uses: actions/upload-artifact@v7
@@ -1461,6 +1614,7 @@ jobs:
             out/cut-tile/
             out/order-check/
             out/memory-check/
+            out/*-rav1d/
           if-no-files-found: warn
 
   # Phase 2, step 1 (docs/phase2-rav1d.md): rav1d as it is upstream, at the commit the copy in

@@ -16,8 +16,15 @@ library (rav1g-dec -playersmoke), all tasks in one process each:
   frame on must be those of the reference (the frames in between may be wrong or missing);
 - no task loses the D3D12 device.
 
+With --parser rav1d the decoders are created with the parse pass of rav1d (docs/phase2-rav1d.md, "A
+damaged stream"). Its words for both errors are "Failed to decode tile data"; a frame that fails leaves
+its reference slots empty, so the frames that name them fail as well, each with a decode error of its
+own, and the checks are the same: the frames before the damage, the frames from the next key frame on,
+the stream behind, no lost device.
+
 usage: python cut_tile_check.py --streams <conformance streams> --out <directory>
            [--tool <rav1g-dec.exe>] [--tool-args "<args>"] [--player-smoke <rav1g-dec.exe>]
+           [--parser c|rav1d]
 
 The damaged streams are written into <streams>/cuttest and removed at the end; --out gets logs and
 md5 lists only, no stream.
@@ -66,13 +73,20 @@ def key_units(path):
         len(units)
 
 
-def prepare(streams):
+# The words of the parse pass of rav1d for a frame whose tile data cannot be parsed, whatever is wrong
+# with it.
+RAV1D_WORDS = 'Failed to decode tile data'
+
+
+def prepare(streams, parser='c'):
     """Writes the damaged streams; returns what the checks need to know about each case."""
     work = os.path.join(streams, WORK)
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(work)
     cases = []
     for name, source, unit, words in CASES:
+        if parser == 'rav1d':
+            words = RAV1D_WORDS
         path = os.path.join(streams, source)
         if not os.path.isfile(path) or not os.path.isfile(path + '.md5'):
             raise Failed('%s or its .md5 is not in the stream set' % source)
@@ -123,7 +137,8 @@ def check_continued(label, got, case, whole, problems):
 
 def run_tool(args, cases, problems):
     """rav1g-dec: the tasks in one process with -keep_going."""
-    out = os.path.join(args.out, 'tool' + ('-' + re.sub(r'\W+', '', args.tool_args) if args.tool_args else ''))
+    out = os.path.join(args.out, 'tool' + ('-' + re.sub(r'\W+', '', args.tool_args) if args.tool_args else '') +
+                       ('-rav1d' if args.parser == 'rav1d' else ''))
     os.makedirs(out, exist_ok=True)
     clean = '-i %s -check %s.md5 -timeout 300' % (CLEAN, CLEAN)
     tasks = []
@@ -141,7 +156,9 @@ def run_tool(args, cases, problems):
     list_path = os.path.join(args.streams, WORK, 'tool.list')
     with open(list_path, 'w', encoding='ascii') as f:
         f.write('\n'.join(tasks) + '\n')
-    command = [os.path.abspath(args.tool), '-keep_going', '-list', '%s/tool.list' % WORK] + args.tool_args.split()
+    parser_args = ['-parser', 'rav1d'] if args.parser == 'rav1d' else []
+    command = ([os.path.abspath(args.tool), '-keep_going', '-list', '%s/tool.list' % WORK] + args.tool_args.split() +
+               parser_args)
     try:
         done = subprocess.run(command, cwd=args.streams, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=1800)
     except subprocess.TimeoutExpired:
@@ -149,7 +166,8 @@ def run_tool(args, cases, problems):
     text = done.stdout.decode('utf-8', 'replace')
     with open(os.path.join(out, 'tool.log'), 'w', encoding='utf-8') as f:
         f.write(text)
-    label = os.path.basename(args.tool) + (' ' + args.tool_args if args.tool_args else '')
+    label = os.path.basename(args.tool) + (' ' + args.tool_args if args.tool_args else '') + (
+        ' -parser rav1d' if args.parser == 'rav1d' else '')
     results = {}
     for line in text.splitlines():
         found = re.match(r'RESULT stream=(\S+) status=(\S+) frames=(\d+) matched=(\d+).* detail="(.*)"\s*$', line)
@@ -202,9 +220,9 @@ def run_tool(args, cases, problems):
 
 def run_player(args, cases, problems):
     """The decoder code of the test player (rav1g-dec -playersmoke): the same, as tasks of its task file."""
-    out = os.path.join(args.out, 'player')
+    out = os.path.join(args.out, 'player' + ('-rav1d' if args.parser == 'rav1d' else ''))
     os.makedirs(out, exist_ok=True)
-    common = '-nopresent -frate -1'
+    common = '-nopresent -frate -1' + (' -parser rav1d' if args.parser == 'rav1d' else '')
     clean = '-i /%s -md5_frame_check %s' % (CLEAN, common)
     tasks = []
     for case in cases:
@@ -231,7 +249,9 @@ def run_player(args, cases, problems):
     text = done.stdout.decode('utf-8', 'replace')
     with open(os.path.join(out, 'player.log'), 'w', encoding='utf-8') as f:
         f.write(text)
-    label = 'player'
+    label = 'player' + (' -parser rav1d' if args.parser == 'rav1d' else '')
+    if args.parser == 'rav1d' and 'Parser: the parse pass of rav1d' not in text:
+        problems.append('%s: the log does not say that the parse pass of rav1d reads the streams' % label)
     if done.returncode != 0 or 'PLAYERSMOKE the player ended its launch' not in text:
         problems.append('%s: exit code %d: the player did not end its launch' % (label, done.returncode))
     if re.search(r'(?i)device.{0,16}removed|DXGI_ERROR_DEVICE', text):
@@ -270,6 +290,7 @@ def main():
     parser.add_argument('--tool', help='rav1g-dec.exe')
     parser.add_argument('--tool-args', default='', help='further arguments for it, e.g. "-capi"')
     parser.add_argument('--player-smoke', help='rav1g-dec.exe, for its -playersmoke')
+    parser.add_argument('--parser', choices=['c', 'rav1d'], default='c', help='what reads the streams')
     args = parser.parse_args()
     if not args.tool and not args.player_smoke:
         parser.error('--tool or --player-smoke')
@@ -277,7 +298,7 @@ def main():
     problems = []
     try:
         try:
-            cases = prepare(args.streams)
+            cases = prepare(args.streams, args.parser)
             if args.tool:
                 run_tool(args, cases, problems)
             if args.player_smoke:

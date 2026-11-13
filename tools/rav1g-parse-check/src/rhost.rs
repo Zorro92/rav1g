@@ -11,10 +11,10 @@ use std::time::{Duration, Instant};
 
 use rav1g_parse::rav1d::include::dav1d::headers::Rav1dPixelLayout;
 use rav1g_parse::rav1d::parse::{ParseFrame, ParsePalette, ParseSettings, ParseSuperblock, ParseTile, Parser};
-use rav1g_parse::sink::{FrameMemory, Sink, SinkHost, TileMemory};
+use rav1g_parse::sink::{FrameMemory, SecondModeInfo, Sink, SinkHost, TileMemory};
 
 use crate::plain::{Arena, FrameSize, LrUnit, Palette, Side, TileBounds};
-use crate::sys::parser::{RESTORE_NONE, RESTORE_SGRPROJ, RESTORE_WIENER};
+use crate::sys::parser::{RESTORE_NONE, RESTORE_SGRPROJ, RESTORE_WIENER, av1_tile_data};
 
 /// The host of the sink.
 pub struct PlainHost {
@@ -74,9 +74,16 @@ impl SinkHost for PlainHost {
                 col_start: tile.col_start,
                 col_end: tile.col_end,
             });
-            TileMemory { tile_data, mi_pool, mi_count_max }
+            // A tile has room for all its blocks and the worst-case layout of its coefficients here.
+            TileMemory { tile_data, mi_pool, mi_count_max, worst_case_coefs: true }
         }
     }
+
+    fn second_mode_info(&self, _tile: usize, _tile_data: *mut av1_tile_data) -> Option<SecondModeInfo> {
+        None
+    }
+
+    fn second_coefs(&self, _tile: usize, _tile_data: *mut av1_tile_data) {}
 
     fn palette(&self, tile: usize, palette: &ParsePalette<'_>) {
         let count = usize::from(palette.pal_sz);
@@ -135,9 +142,10 @@ impl SinkHost for PlainHost {
 
     fn tile_end(&self, _tile: usize) {}
 
-    fn frame_end(&self, ok: bool) {
+    fn frame_end(&self, ok: bool) -> bool {
         // SAFETY: no tile is in parse any more.
         unsafe { (*self.side.get()).end_frame(ok) };
+        true
     }
 }
 

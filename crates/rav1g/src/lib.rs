@@ -62,7 +62,8 @@
 //! The same interface for C is the `capi` feature: the functions of `rav1g.h` (`capi` module).
 //!
 //! The entropy decoder is the libaom-derived C of `libav1/av1`, built by `rav1g-sys`; its interface
-//! (`aom_codec_*`) is what this crate calls and is not part of the interface of this crate.
+//! (`aom_codec_*`) is what this crate calls and is not part of the interface of this crate. A decoder can
+//! be created with the parse pass of rav1d in its place ([`Parser`], docs/phase2-rav1d.md).
 
 mod decoder;
 mod device;
@@ -82,7 +83,7 @@ pub use rav1g_sys as sys;
 /// into one number (docs/phase2-rav1d.md). `rav1g-dec -parsedigest` prints it.
 pub use rav1g_parse::digest as parse_digest;
 
-pub use decoder::{Decoder, LowMemory, MemoryAvailable, MemoryRequirements, Settings};
+pub use decoder::{Decoder, LowMemory, MemoryAvailable, MemoryRequirements, Parser, Settings};
 pub use device::Device;
 pub use error::{Error, ErrorCode};
 pub use output::{Frame, ImageFormat, ImageRequest, Output, OutputImage, Plane};
