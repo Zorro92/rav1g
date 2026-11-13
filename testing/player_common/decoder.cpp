@@ -925,6 +925,14 @@ int BufferLocker::Push(const Rav1gFrame* img) {
     bpp_ = img->bit_depth;
     XB_LOGI << "Got first frame (" << img->user_data << ") " << width_ << " x " << height_ << " x " << bpp_;
   }
+  // What the stream says about its colour (rav1g_color_text): with the first frame of the task, and
+  // whenever a frame says something else than the frame before it.
+  if (img && ColourChanged(img)) {
+    char colour[512];
+    rav1g_color_text(&img->color, img->has_mastering_display ? &img->mastering_display : NULL,
+                     img->has_content_light ? &img->content_light : NULL, colour, sizeof(colour));
+    XB_LOGI << "COLOUR frame " << (pushed_.load() - 1) << ": " << colour;
+  }
   if (!params_->target_file_.empty() || params_->md5_frame_check_ || params_->md5_ || md5_saver_) {
     if (!params_->target_file_.empty() && img && params_->save_wrong_yuv_.empty()) {
       SaveToFile(img, false);
@@ -978,6 +986,35 @@ int BufferLocker::Push(const Rav1gFrame* img) {
   buffer->SetShown(0);
   queue_.push(buffer);
   return 0;
+}
+
+// The colour of the frame is not that of the frame before it (or there was none); keeps it.
+bool BufferLocker::ColourChanged(const Rav1gFrame* img) {
+  const Rav1gColorInfo& c = img->color;
+  const Rav1gColorInfo& l = colour_;
+  bool same = have_colour_ && c.description_present == l.description_present && c.primaries == l.primaries &&
+              c.transfer_characteristics == l.transfer_characteristics &&
+              c.matrix_coefficients == l.matrix_coefficients && c.full_range == l.full_range &&
+              c.chroma_sample_position == l.chroma_sample_position &&
+              img->has_mastering_display == has_mastering_display_ && img->has_content_light == has_content_light_;
+  if (same && img->has_mastering_display) {
+    const Rav1gMasteringDisplay& m = img->mastering_display;
+    same = memcmp(m.primaries, mastering_display_.primaries, sizeof(m.primaries)) == 0 &&
+           memcmp(m.white_point, mastering_display_.white_point, sizeof(m.white_point)) == 0 &&
+           m.max_luminance == mastering_display_.max_luminance && m.min_luminance == mastering_display_.min_luminance;
+  }
+  if (same && img->has_content_light) {
+    same = img->content_light.max_content_light_level == content_light_.max_content_light_level &&
+           img->content_light.max_frame_average_light_level == content_light_.max_frame_average_light_level;
+  }
+  if (same) return false;
+  have_colour_ = true;
+  colour_ = img->color;
+  has_mastering_display_ = img->has_mastering_display;
+  has_content_light_ = img->has_content_light;
+  mastering_display_ = img->mastering_display;
+  content_light_ = img->content_light;
+  return true;
 }
 
 int BufferLocker::SaveToFile(const Rav1gFrame* img, bool one_frame) {

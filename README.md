@@ -83,7 +83,7 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
 - **Other GPUs**: upstream's shaders are only right where the 64 threads of a thread group run
   in lockstep, as on the console; on the WARP software adapter every stream decoded wrong, and
   GPUs with waves of 32 would too. The shaders now wait for each other with group syncs, and
-  host checks keep it that way (`testing/sync_check`). On WARP all 253 conformance streams
+  host checks keep it that way (`testing/sync_check`). On WARP all 254 conformance streams
   are md5-identical to their reference (AOM's test vectors, dav1d). On the console the output is unchanged
   (md5-identical to dav1d on the 10-bit and film-grain clips) and the frame time is the same
   within noise (e.g. 27.9 → 28.5 fps and 26.0 → 25.9 fps on two 12.6 Mbps 4K clips).
@@ -142,7 +142,7 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
   every push. This read is the candidate for the D3D12 device removals seen now and then on WARP:
   the conformance runs print a count of them to tell
   ([gpu-av1-decoder.md](docs/gpu-av1-decoder.md#unwritten-fields-of-a-constant-record-2026-11-12)).
-- **Every stream we test is md5-identical to dav1d on the console and on WARP**: 253 conformance
+- **Every stream we test is md5-identical to dav1d on the console and on WARP**: 254 conformance
   streams on WARP; on the console the 8-bit and 10-bit clips from 66x66 to 4K, hidden frames, film
   grain, global motion, spatial layers, size changes, scaled references and superres.
   The 10-bit stream with scaled references that stood here as wrong on the console is right: its md5
@@ -191,6 +191,10 @@ memory as possible left to the application.
   was removed at its end and what is open. The workspace builds with
   `RAV1G_SHADER_DIR=<shader headers> cargo build --release` on Windows and with
   `cargo xwin build --target x86_64-pc-windows-msvc` on Linux.
+- [docs/color.md](docs/color.md): what the decoder reports about the colour of a stream (the colour
+  description of the sequence header, the HDR metadata: mastering display and content light level),
+  in `rav1g.h` and in the Rust interface, and what an application that shows the frames does with
+  each value.
 - [docs/phase2-rav1d.md](docs/phase2-rav1d.md): the design of phase 2, rav1d's parser in place of the
   C parser, and its progress.
 - [third_party/rav1d/PATCHES.md](third_party/rav1d/PATCHES.md): the copy of rav1d, what was changed

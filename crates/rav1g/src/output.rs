@@ -11,6 +11,8 @@
 
 use windows::Win32::Graphics::Direct3D12::{ID3D12Fence, ID3D12Resource};
 
+use crate::color::{ColorInfo, ContentLightLevel, MasteringDisplay};
+
 /// The samples of an output image.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(i32)]
@@ -114,6 +116,19 @@ pub struct Frame {
     pub packed_10x3: bool,
     /// What was passed to [`crate::Decoder::decode`] with the temporal unit of the frame.
     pub user_data: u64,
+    /// The colour description of the frame's sequence header. A stream can change it with a new
+    /// sequence, so every frame has the one that holds for it.
+    pub color: ColorInfo,
+    /// The mastering display colour volume that goes with the frame, when the stream has sent one.
+    ///
+    /// Which frames a metadata OBU goes with is rav1d's rule: every frame from the OBU on, in decoding
+    /// order, until another OBU of its kind replaces it or a sequence header that differs from the one
+    /// before starts a new sequence; a frame that a later temporal unit shows again
+    /// (`show_existing_frame`) has what holds when it is shown. So a frame carries the metadata that is
+    /// current for it, and an application has nothing to keep (docs/color.md).
+    pub mastering_display: Option<MasteringDisplay>,
+    /// The content light level that goes with the frame, by the same rule.
+    pub content_light: Option<ContentLightLevel>,
     pub(crate) offsets: [usize; 3],
     pub(crate) strides: [usize; 3],
     pub(crate) fence: Option<(ID3D12Fence, u64)>,

@@ -198,6 +198,14 @@ class BufferLocker {
   int got_last_frame_ = 0;
   // Frames the decoder has handed over so far, for the MEMORY lines of the decode loop.
   std::atomic<int> pushed_{0};
+  // The colour of the last frame, for the COLOUR line of a frame that says something else.
+  bool ColourChanged(const Rav1gFrame* img);
+  bool have_colour_ = false;
+  bool has_mastering_display_ = false;
+  bool has_content_light_ = false;
+  Rav1gColorInfo colour_ = {};
+  Rav1gMasteringDisplay mastering_display_ = {};
+  Rav1gContentLightLevel content_light_ = {};
   // -nopresent: frames handed straight back to the pool
   int released_ = 0;
   std::chrono::steady_clock::time_point released_first_;

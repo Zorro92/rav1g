@@ -2030,6 +2030,60 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
 
+  # What the decoder reports about the colour of a stream (docs/color.md): the colour description of the
+  # sequence header and the HDR metadata OBUs, which it passes to the application with the stream info
+  # and with every frame. rav1g-dec prints it per stream ("COLOUR" lines), and the lines of three runs of
+  # the whole set in the rust job (rav1d's parser through the Rust interface and through rav1g.h, and
+  # -parser c) are held against two references that are not the decoder: FFmpeg's trace_headers for the
+  # syntax elements of the sequence header, ffprobe with libdav1d for the properties and the side data
+  # of every output frame. The streams that carry something (BT.709; BT.2020 with HLG; HDR10 with a
+  # mastering display and light levels) are named in the script with what they carry.
+  colour:
+    needs: [conformance-streams, rust]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Streams from the cache
+        uses: actions/cache/restore@v6
+        with:
+          path: conformance-streams
+          key: ${{ needs.conformance-streams.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: rav1g-dec-conformance-${{ github.run_id }}
+          path: rav1g-dec
+
+      - name: ffmpeg and ffprobe with libdav1d
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends ffmpeg
+          ffprobe -hide_banner -version | head -n 1
+          ffprobe -hide_banner -decoders 2>/dev/null | grep libdav1d
+
+      - name: Colour description and HDR metadata of every stream, rav1g-dec against trace_headers and ffprobe
+        run: |
+          set -euo pipefail
+          python3 testing/conformance/colour_check.py --streams conformance-streams --out out/colour \
+            --logs "rav1d's parser=rav1g-dec/conformance/logs" \
+            --logs "rav1g.h (-capi)=rav1g-dec/conformance-capi/logs" \
+            --logs "the C parser (-parser c)=rav1g-dec/conformance-c/logs"
+
+      - name: Preserve what the references say
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-colour-${{ github.run_id }}
+          path: out/colour/
+          if-no-files-found: warn
+
   # Host check of how the shaders hand data between the threads of a thread group. A GPU promises
   # only that all threads of a group meet at a group sync; upstream's shaders counted on the 64
   # threads of a group running in lockstep (one wave), which holds on the console and nowhere else.

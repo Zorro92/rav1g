@@ -236,6 +236,13 @@ static aom_codec_err_t decoder_peek_si_internal(const uint8_t *data,
   si->w = 0;
   si->h = 0;
   si->bit_depth = 0;
+  si->monochrome = 0;
+  si->color_description_present = 0;
+  si->color_primaries = AOM_CICP_CP_UNSPECIFIED;
+  si->transfer_characteristics = AOM_CICP_TC_UNSPECIFIED;
+  si->matrix_coefficients = AOM_CICP_MC_UNSPECIFIED;
+  si->color_range = 0;
+  si->chroma_sample_position = 0;
   si->is_kf = 0;  // is_kf indicates whether the current packet contains a RAP
 
   ObuHeader obu_header;
@@ -287,6 +294,13 @@ static aom_codec_err_t decoder_peek_si_internal(const uint8_t *data,
       si->w = sh.max_frame_width;
       si->h = sh.max_frame_height;
       si->bit_depth = sh.bit_depth;
+      si->monochrome = (unsigned int)sh.monochrome;
+      si->color_description_present = (unsigned int)sh.color_description_present;
+      si->color_primaries = (unsigned int)sh.color_primaries;
+      si->transfer_characteristics = (unsigned int)sh.transfer_characteristics;
+      si->matrix_coefficients = (unsigned int)sh.matrix_coefficients;
+      si->color_range = (unsigned int)sh.color_range;
+      si->chroma_sample_position = (unsigned int)sh.chroma_sample_position;
       got_sequence_header = 1;
     } else if (obu_header.type == OBU_FRAME_HEADER ||
                obu_header.type == OBU_FRAME) {

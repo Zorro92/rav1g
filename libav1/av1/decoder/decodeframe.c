@@ -3059,6 +3059,8 @@ void av1_read_color_config(struct aom_read_bit_buffer *rb,
       seq_params->profile != PROFILE_1 ? aom_rb_read_bit(rb) : 0;
   seq_params->monochrome = is_monochrome;
   int color_description_present_flag = aom_rb_read_bit(rb);
+  seq_params->color_description_present_flag =
+      (uint8_t)color_description_present_flag;
   if (color_description_present_flag) {
     seq_params->color_primaries = aom_rb_read_literal(rb, 8);
     seq_params->transfer_characteristics = aom_rb_read_literal(rb, 8);

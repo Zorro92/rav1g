@@ -292,6 +292,7 @@ typedef struct SequenceHeader {
                               // AOM_BITS_10 or AOM_BITS_12 in profile 2 or 3.
   uint8_t use_highbitdepth;   // If true, we need to use 16bit frame buffers.
   uint8_t monochrome;         // Monochorme video
+  uint8_t color_description_present_flag;  // The three below are coded.
   aom_color_primaries_t color_primaries;
   aom_transfer_characteristics_t transfer_characteristics;
   aom_matrix_coefficients_t matrix_coefficients;
@@ -562,6 +563,10 @@ typedef struct AV1Common {
 #endif
   const cfg_options_t *options;
   int is_decoding;
+  // The HDR metadata the next output image is given: that of the last metadata
+  // OBU of each type since the sequence began (rav1d's rule, which the host of
+  // rav1d's parser writes here per frame; docs/color.md).
+  aom_hdr_metadata_t hdr_metadata;
   DECLARE_ALIGNED(16, FRAME_CONTEXT, fc_alloc[2]);
 } AV1_COMMON;
 

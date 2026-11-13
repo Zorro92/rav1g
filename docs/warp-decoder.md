@@ -235,6 +235,17 @@ A `PROCESS before the task: ...` and a `PROCESS after the task: ...` line give t
 and working set of the process and the free memory of the machine: the tasks of a list run in one
 process, and a D3D12 device that runs out of memory is removed.
 
+Two kinds of `COLOUR` line say what the stream says about its colour, which the decoder passes
+to the application and does not use ([color.md](color.md)): `COLOUR <stream> sequence: ...` is the
+colour description of the sequence header a decoder is created for (the stream info), and `COLOUR
+<stream> frame <n>: ...; <MDCV>; <CLL>` what a frame carries, with its HDR metadata: for the first
+frame of a decoder and for every frame that says something else than the frame before it.
+
+```text
+COLOUR clip.ivf sequence: primaries 9 (BT.2020) transfer 16 (PQ) matrix 9 (BT.2020 NCL) range limited chroma pos 2 (colocated)
+COLOUR clip.ivf frame 0: primaries 9 (BT.2020) transfer 16 (PQ) matrix 9 (BT.2020 NCL) range limited chroma pos 2 (colocated); MDCV R 0.6800,0.3200 G 0.2650,0.6900 B 0.1500,0.0600 W 0.3127,0.3290 L 0.0050..1000 cd/m2 [44564,20972 17367,45220 9830,3932 20493,21561 256000 82]; CLL 1000/400
+```
+
 A `RECONFIGURE <stream>: temporal unit <n> starts a sequence of ...; new decoder ...` line
 says that the stream went on with a sequence that did not fit the decoder (larger frames, or
 more bits a sample) and that the program replaced the decoder, as an application has to
@@ -341,8 +352,11 @@ built on Linux, `rust-cross-run`).
 - **Streams encoded in the job** with SVT-AV1 from ffmpeg's `testsrc2` pattern, for features
   the other streams do not have: reference scaling (`resize-mode=2`: frames coded at other
   sizes than the frames they predict from), super-resolution (`superres-mode=2`: all
-  denominators), and eight tiles with a key frame every 16 frames
-  (`tile-columns=2:tile-rows=1:keyint=16`; every other stream has one tile). The script checks
+  denominators), eight tiles with a key frame every 16 frames
+  (`tile-columns=2:tile-rows=1:keyint=16`; every other stream has one tile), and HDR10 (BT.2020
+  with the PQ transfer, a mastering display and a content light level as metadata OBUs: the only
+  stream of the set with HDR metadata, for the check of what the decoder reports about the colour
+  of a stream, [color.md](color.md#the-check-in-ci)). The script checks
   that the encoder produced the feature (frame headers with `use_superres`, more than one coded
   width, several tile columns, more than one key frame). Reference from dav1d.
 
@@ -374,6 +388,13 @@ matching frames, first bad frame, decode time, result. The artifact
 `rav1g-dec-conformance-<run id>` has `results.tsv`, `summary.md`, the decoder's output for every
 stream (`logs/<stream>.log`) and the md5 of every output frame (`md5/<stream>.md5`, in the
 player's format).
+
+**`colour`** (Linux) reads the `COLOUR` lines of three of these runs in that artifact (the whole
+set with rav1d's parser, through `rav1g.h`, and with `-parser c`) and holds them against FFmpeg's
+`trace_headers` and against `ffprobe` with libdav1d, stream by stream
+(`testing/conformance/colour_check.py`, [color.md](color.md#the-check-in-ci)): the colour description
+of the sequence header, and the colour properties, the mastering display and the light levels of
+every output frame.
 
 ### Order check and poisoned buffers
 
@@ -534,8 +555,8 @@ another md5 on every decode: they counted on the 64 threads of a thread group ru
 syncs where threads hand data to each other, the super-resolution fix
 ([test-player.md](test-player.md#super-resolution)) and the three fixes below, all streams of the set
 (251 then; 252 with the eight-tile stream added on 2026-11-12, run 43366744476; 253 with the heavy
-10-bit 2160p cut `nf-dvbdash-d2-10b-2160p.ivf` added on 2026-11-13) are md5-identical to their
-reference:
+10-bit 2160p cut `nf-dvbdash-d2-10b-2160p.ivf` added on 2026-11-13; 254 with the HDR10 stream
+`syn-hdr10-10b-1080p.ivf` of the same day) are md5-identical to their reference:
 
 | streams | pass |
 | --- | --- |

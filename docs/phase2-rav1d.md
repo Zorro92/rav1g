@@ -1556,6 +1556,38 @@ the oracle, and it leads the paired timing of the parsers and the timing of the 
 - *The calls of the sink*: 3.4 ms a frame of `j4k40` on the console, first writes into the mode info
   pool and the grid (above). Fewer bytes there would mean another layout for the stages.
 
+### Colour description and HDR metadata
+
+2026-11-13. Not a step of the plan: the interface reported the size and the bit depth of a stream
+and nothing about its colour, and an application that shows the frames needs it
+([color.md](color.md)). Both parsers now pass on the colour description of the sequence header and
+the two HDR metadata OBUs, and the output is the bytes it was.
+
+- **rav1d** had all of it: `parse_seq_hdr` reads `color_config`, and the metadata OBUs of the
+  types `HDR_CLL` and `HDR_MDCV` are kept in the context and attached to every picture, which the
+  cut of step 1 left alone. What the sink was not given is now given
+  (`third_party/rav1d/PATCHES.md`): the three code points of a sequence header as numbers
+  (`ParseColorCodes`; the header has them as enums in which a reserved value is "unspecified"), and
+  with a frame and with a shown slot the HDR metadata upstream gives the picture
+  (`ParseHdrMetadata`). 27 lines more in the diff against upstream; nothing of the reading changes.
+- **The host** (`rav1d_host.rs`) writes the description into the sequence parameters of its
+  `AV1_COMMON` and the metadata into a new member of it, where the C parser has them too; the
+  output image of a frame takes both from there (`copy_output`), and the completion thread hands
+  them to the application with the frame. No stage reads any of it.
+- **The C parser** read the two OBUs and dropped the values; it keeps them now, with
+  `color_description_present_flag`, and forgets them at a sequence header that differs from the one
+  before, which is rav1d's rule.
+- **Which frames an OBU goes with** is rav1d's rule (`color.md`, "Which frames the HDR metadata goes
+  with"): from the OBU on, until another of its kind or a new sequence; a `show_existing_frame` has
+  what holds when it is shown.
+- **For step 4** (frames in parallel): the description and the metadata of a frame are read from
+  the `AV1_COMMON` of "the frame in parse" when its output image is taken, like everything else of
+  the frame header. They become the frame's with the rest.
+
+CI: job `colour` holds what `rav1g-dec` prints for every stream against FFmpeg's `trace_headers`
+and `ffprobe` with libdav1d, with both parsers and through both interfaces; the set has an HDR10
+stream for it (`syn-hdr10-10b-1080p.ivf`, the 254th).
+
 ## Licence
 
 rav1d is BSD-2-Clause (copyright VideoLAN and the dav1d authors, and the rav1d contributors); the

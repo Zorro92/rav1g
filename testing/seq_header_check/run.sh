@@ -29,13 +29,17 @@ if [ "${1:-}" = "--mutate" ]; then
   peek="$libav1/av1/common/seq_header_peek.h"
   number=0
   # Each mutation drops one read of the syntax: the two flags the reader before the fix did not know, the
-  # tier bit, the per-operating-point display delay, and the 12-bit flag.
+  # tier bit, the per-operating-point display delay, the 12-bit flag, and of the colour description the
+  # transfer, the range of a monochrome sequence and the chroma sample position.
   for mutation in \
     's/out->timing_info_present = (int)av1_seq_peek_bits(rb, 1);/out->timing_info_present = 0;/' \
     's/out->initial_display_delay_present = (int)av1_seq_peek_bits(rb, 1);/out->initial_display_delay_present = 0;/' \
     's/const int tier = level > 7 ? (int)av1_seq_peek_bits(rb, 1) : 0;/const int tier = 0;/' \
     's/if (av1_seq_peek_bits(rb, 1)) av1_seq_peek_bits(rb, 4); \/\* initial_display_delay_minus_1 \*\//av1_seq_peek_bits(rb, 1);/' \
-    's/if (out->profile == 2 \&\& av1_seq_peek_bits(rb, 1)) out->bit_depth = 12;/if (out->profile == 2) out->bit_depth = 12;/'; do
+    's/if (out->profile == 2 \&\& av1_seq_peek_bits(rb, 1)) out->bit_depth = 12;/if (out->profile == 2) out->bit_depth = 12;/' \
+    's/out->transfer_characteristics = (int)av1_seq_peek_bits(rb, 8);/out->transfer_characteristics = 2;/' \
+    's/if (out->monochrome) {/if (0) {/' \
+    's/out->chroma_sample_position = (int)av1_seq_peek_bits(rb, 2);/out->chroma_sample_position = 0;/'; do
     number=$((number + 1))
     mutant="$work/mutant$number"
     mkdir -p "$mutant/av1/common"

@@ -83,6 +83,16 @@ typedef struct aom_codec_stream_info {
   unsigned int bit_depth;              /**< Bit depth of the sequence header a
                                             peek has read: 8, 10 or 12 (0 when
                                             there was none) */
+  /* The colour description of that sequence header (color_config), as it is
+     coded: the three code points are 2 (unspecified) when the header has no
+     description. */
+  unsigned int monochrome;
+  unsigned int color_description_present;
+  unsigned int color_primaries;
+  unsigned int transfer_characteristics;
+  unsigned int matrix_coefficients;
+  unsigned int color_range;            /**< 1: full range */
+  unsigned int chroma_sample_position;
 } aom_codec_stream_info_t;
 
 /* REQUIRED FUNCTIONS

@@ -15,7 +15,8 @@ use crate::c_box::CRef;
 use crate::include::dav1d::data::Rav1dData;
 use crate::include::dav1d::dav1d::{Rav1dDecodeFrameType, Rav1dInloopFilterType, Rav1dSettings};
 use crate::include::dav1d::headers::{
-    Rav1dFrameHeader, Rav1dSequenceHeader, Rav1dWarpedMotionParams,
+    Rav1dContentLightLevel, Rav1dFrameHeader, Rav1dMasteringDisplay, Rav1dSequenceHeader,
+    Rav1dWarpedMotionParams,
 };
 use crate::include::dav1d::picture::Rav1dPicture;
 use crate::in_range::InRange;
@@ -23,6 +24,40 @@ use crate::internal::Rav1dContext;
 use crate::levels::{Av1Block, BlockSize, TxfmSize, TxfmType};
 use crate::{rav1d_close, rav1d_flush, rav1d_get_picture, rav1d_open, rav1d_send_data};
 pub use crate::error::Rav1dError;
+
+/// The colour description of a sequence header as it is coded: `color_primaries`,
+/// `transfer_characteristics` and `matrix_coefficients` of `color_config()`, each 2 ("unspecified")
+/// in a header without a description. [`Rav1dSequenceHeader`] has the three as enums, in which a value
+/// the enum has no name for (one the specification reserves) is "unspecified"; an application that
+/// reports the code points wants them as they are.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ParseColorCodes {
+    pub primaries: u8,
+    pub transfer: u8,
+    pub matrix: u8,
+}
+
+impl Default for ParseColorCodes {
+    /// The three "unspecified".
+    fn default() -> Self {
+        Self {
+            primaries: 2,
+            transfer: 2,
+            matrix: 2,
+        }
+    }
+}
+
+/// The HDR metadata that goes with a frame: what upstream attaches to the frame's picture. A
+/// metadata OBU of the type `METADATA_TYPE_HDR_CLL` or `METADATA_TYPE_HDR_MDCV` stays with the parser
+/// from the OBU on, for every frame whose last tile group, or whose `show_existing_frame` header,
+/// comes behind it, until another OBU of its type replaces it or a sequence header that differs from
+/// the one before forgets both.
+#[derive(Clone, Copy, Default)]
+pub struct ParseHdrMetadata<'a> {
+    pub content_light: Option<&'a Rav1dContentLightLevel>,
+    pub mastering_display: Option<&'a Rav1dMasteringDisplay>,
+}
 
 /// The frame whose parse starts: its headers and its size in 4x4 units.
 pub struct ParseFrame<'a> {
@@ -43,6 +78,8 @@ pub struct ParseFrame<'a> {
     /// The bytes of the data that was sent ([`Parser::send`]) from the start of the OBU that completed
     /// the frame (its last tile group) to the end of the data.
     pub data_left: usize,
+    /// The HDR metadata of the frame.
+    pub hdr: ParseHdrMetadata<'a>,
 }
 
 /// A frame header with `show_existing_frame`: the frame in a reference slot is shown.
@@ -54,6 +91,9 @@ pub struct ParseShowExisting<'a> {
     pub key: bool,
     /// As [`ParseFrame::data_left`], from the start of the OBU of this header.
     pub data_left: usize,
+    /// The HDR metadata of the frame as it is shown: what the parser has at this header, not what
+    /// the frame had when it was coded.
+    pub hdr: ParseHdrMetadata<'a>,
 }
 
 /// A tile whose parse starts, on the thread that parses its first superblock row.
@@ -157,8 +197,14 @@ pub struct ParseLrUnit {
 pub trait ParseSink: Send + Sync {
     /// A sequence header was read (the thread that sends the data), before the parser takes it. `new`:
     /// it is the first one or differs from the one before, and the parser forgets its references.
-    /// `Err` refuses it: the parser keeps the state it had and the data fails.
-    fn sequence(&self, _seq_hdr: &Rav1dSequenceHeader, _new: bool) -> Result<(), ()> {
+    /// `Err` refuses it: the parser keeps the state it had and the data fails. `color`: the colour
+    /// description as it is coded.
+    fn sequence(
+        &self,
+        _seq_hdr: &Rav1dSequenceHeader,
+        _color: ParseColorCodes,
+        _new: bool,
+    ) -> Result<(), ()> {
         Ok(())
     }
 

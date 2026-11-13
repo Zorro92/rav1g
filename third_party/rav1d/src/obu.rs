@@ -33,7 +33,7 @@ use crate::include::dav1d::headers::{
 use crate::internal::{Rav1dContext, Rav1dState, Rav1dTileGroup, Rav1dTileGroupHeader};
 use crate::levels::ObuMetaType;
 use crate::log::Rav1dLog as _;
-use crate::parse::ParseShowExisting;
+use crate::parse::{ParseColorCodes, ParseHdrMetadata, ParseShowExisting};
 use crate::picture::{rav1d_picture_copy_props, PictureFlags};
 use crate::thread_task::FRAME_ERROR;
 
@@ -111,6 +111,7 @@ fn check_trailing_bits(gb: &mut GetBits, strict_std_compliance: bool) -> Rav1dRe
 fn parse_seq_hdr(
     gb: &mut GetBits,
     strict_std_compliance: bool,
+    color_codes: &mut ParseColorCodes,
 ) -> Rav1dResult<Rav1dSequenceHeader> {
     let debug = Debug::new(false, "SEQHDR", gb);
 
@@ -356,10 +357,19 @@ fn parse_seq_hdr(
     let pri;
     let trc;
     let mtrx;
+    // rav1g: the three code points as they are coded go to the sink; the enums below keep
+    // "unspecified" for a value they have no name for.
+    *color_codes = ParseColorCodes::default();
     if color_description_present {
-        pri = gb.get_bits(8).try_into().unwrap_or_default();
-        trc = gb.get_bits(8).try_into().unwrap_or_default();
-        mtrx = gb.get_bits(8).try_into().unwrap_or_default();
+        let coded = [gb.get_bits(8), gb.get_bits(8), gb.get_bits(8)];
+        *color_codes = ParseColorCodes {
+            primaries: coded[0] as u8,
+            transfer: coded[1] as u8,
+            matrix: coded[2] as u8,
+        };
+        pri = coded[0].try_into().unwrap_or_default();
+        trc = coded[1].try_into().unwrap_or_default();
+        mtrx = coded[2].try_into().unwrap_or_default();
     } else {
         pri = Default::default();
         trc = Default::default();
@@ -545,7 +555,7 @@ pub(crate) fn rav1d_parse_sequence_header(
         };
 
         if r#type == Some(Rav1dObuType::SeqHdr) {
-            res = Ok(parse_seq_hdr(gb, false)?);
+            res = Ok(parse_seq_hdr(gb, false, &mut ParseColorCodes::default())?);
             if gb.byte_pos() > obu_end {
                 return Err(Rav1dError::InvalidArgument);
             }
@@ -2225,9 +2235,11 @@ fn parse_obus(
 
     match r#type {
         Some(Rav1dObuType::SeqHdr) => {
-            let seq_hdr = parse_seq_hdr(gb, c.strict_std_compliance).inspect_err(|_| {
-                writeln!(c.logger, "Error parsing sequence header");
-            })?;
+            let mut color_codes = ParseColorCodes::default();
+            let seq_hdr = parse_seq_hdr(gb, c.strict_std_compliance, &mut color_codes)
+                .inspect_err(|_| {
+                    writeln!(c.logger, "Error parsing sequence header");
+                })?;
             if gb.has_error() != 0 {
                 return Err(Rav1dError::InvalidArgument);
             }
@@ -2238,7 +2250,7 @@ fn parse_obus(
                 .as_ref()
                 .is_none_or(|old| !seq_hdr.eq_without_operating_parameter_info(old));
             c.sink
-                .sequence(&seq_hdr, new)
+                .sequence(&seq_hdr, color_codes, new)
                 .map_err(|()| Rav1dError::InvalidArgument)?;
 
             let op_idx = if c.operating_point < seq_hdr.num_operating_points {
@@ -2495,6 +2507,10 @@ fn parse_obus(
                         .frame_type
                         == Rav1dFrameType::Key,
                     data_left: state.data_left,
+                    hdr: ParseHdrMetadata {
+                        content_light: state.content_light.as_deref(),
+                        mastering_display: state.mastering_display.as_deref(),
+                    },
                 })
                 .map_err(|()| Rav1dError::InvalidArgument)?;
             if c.fc.len() == 1 {

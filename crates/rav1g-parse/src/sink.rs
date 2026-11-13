@@ -43,7 +43,8 @@ use std::ffi::{c_int, c_void};
 use rav1d::include::dav1d::headers::Rav1dSequenceHeader;
 use rav1d::include::dav1d::headers::{Rav1dFrameHeader, Rav1dPixelLayout};
 use rav1d::parse::{
-    ParseBlock, ParseFrame, ParsePalette, ParseShowExisting, ParseSink, ParseSuperblock, ParseTile, ParseTxb,
+    ParseBlock, ParseColorCodes, ParseFrame, ParsePalette, ParseShowExisting, ParseSink, ParseSuperblock, ParseTile,
+    ParseTxb,
 };
 use rav1g_sys::parser::{
     AV1_COMMON, AV1Decoder, MACROBLOCKD, MB_MODE_INFO, TileInfo, av1_tile_data, tx_block_info_gpu,
@@ -148,7 +149,7 @@ pub trait SinkHost: Send + Sync {
 
     /// A sequence header (`ParseSink::sequence`). `Err` refuses the sequence.
     #[expect(clippy::result_unit_err, reason = "the error of ParseSink::sequence, which has no more to say")]
-    fn sequence(&self, _seq_hdr: &Rav1dSequenceHeader, _new: bool) -> Result<(), ()> {
+    fn sequence(&self, _seq_hdr: &Rav1dSequenceHeader, _color: ParseColorCodes, _new: bool) -> Result<(), ()> {
         Ok(())
     }
 
@@ -747,8 +748,8 @@ impl<H: SinkHost> ParseSink for Sink<H> {
         stands && !failed
     }
 
-    fn sequence(&self, seq_hdr: &Rav1dSequenceHeader, new: bool) -> Result<(), ()> {
-        self.host.sequence(seq_hdr, new)
+    fn sequence(&self, seq_hdr: &Rav1dSequenceHeader, color: ParseColorCodes, new: bool) -> Result<(), ()> {
+        self.host.sequence(seq_hdr, color, new)
     }
 
     fn show_existing(&self, show: &ParseShowExisting<'_>) -> Result<(), ()> {

@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use rav1g::capi::{self, Rav1gStatus};
 use rav1g::switches::{self, PerfFrame, Poison};
+use rav1g::{ColorInfo, ContentLightLevel, MasteringDisplay};
 use rav1g::{
     Decoder, ErrorCode, Frame, ImageRequest, LowMemory, MemoryAvailable, Output, OutputImage, Plane, Settings,
 };
@@ -26,12 +27,57 @@ use crate::device::Device;
 use crate::pool::Rented;
 use crate::shim::Dumps;
 
+/// What a frame says about its colour: the description of its sequence header and its HDR metadata.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Colour {
+    pub info: ColorInfo,
+    pub mastering_display: Option<MasteringDisplay>,
+    pub content_light: Option<ContentLightLevel>,
+    /// The values came through the interface for C, and so does their text.
+    pub capi: bool,
+}
+
+impl Colour {
+    /// The description of a sequence header, which has no HDR metadata.
+    pub fn of_sequence(info: &ColorInfo, capi: bool) -> Colour {
+        Colour { info: *info, mastering_display: None, content_light: None, capi }
+    }
+
+    /// The colour description alone, as text.
+    pub fn description(&self) -> String {
+        let text = self.text();
+        text.split(';').next().unwrap_or_default().to_string()
+    }
+
+    /// The one line of the library for these values: `rav1g::color_text`, or `rav1g_color_text` of
+    /// rav1g.h for values of that interface.
+    pub fn text(&self) -> String {
+        if !self.capi {
+            return rav1g::color_text(&self.info, self.mastering_display.as_ref(), self.content_light.as_ref());
+        }
+        let color = capi::Rav1gColorInfo::from(&self.info);
+        let display = self.mastering_display.as_ref().map(capi::Rav1gMasteringDisplay::from);
+        let light = self.content_light.as_ref().map(capi::Rav1gContentLightLevel::from);
+        fn pointer<T>(value: &Option<T>) -> *const T {
+            value.as_ref().map_or(std::ptr::null(), std::ptr::from_ref)
+        }
+        let mut text = vec![0u8; 512];
+        // SAFETY: valid structs, null for what the frame does not have, and a buffer of the size given.
+        let length = unsafe {
+            capi::rav1g_color_text(&color, pointer(&display), pointer(&light), text.as_mut_ptr().cast(), text.len())
+        };
+        text.truncate(length.min(text.len() - 1));
+        String::from_utf8_lossy(&text).into_owned()
+    }
+}
+
 /// A frame as the task hashes it, from either interface.
 pub struct Picture<'a> {
     pub width: u32,
     pub height: u32,
     pub bit_depth: u32,
     pub monochrome: bool,
+    pub colour: Colour,
     /// Luma, U, V; `None` for a plane the frame does not have in a mapped buffer.
     pub planes: [Option<Plane<'a>>; 3],
 }
@@ -110,6 +156,12 @@ fn picture_of(frame: &Frame) -> Picture<'_> {
         height: frame.height,
         bit_depth: frame.bit_depth,
         monochrome: frame.monochrome,
+        colour: Colour {
+            info: frame.color,
+            mastering_display: frame.mastering_display,
+            content_light: frame.content_light,
+            capi: false,
+        },
         planes: [frame.plane(0), frame.plane(1), frame.plane(2)],
     }
 }
@@ -177,6 +229,12 @@ unsafe extern "C" fn c_frame<S: Sink>(context: *mut c_void, frame: *const capi::
         height: frame.height,
         bit_depth: frame.bit_depth,
         monochrome: frame.monochrome,
+        colour: Colour {
+            info: (&frame.color).into(),
+            mastering_display: frame.has_mastering_display.then(|| (&frame.mastering_display).into()),
+            content_light: frame.has_content_light.then(|| (&frame.content_light).into()),
+            capi: true,
+        },
         planes: [plane(0), plane(1), plane(2)],
     });
     sink.give_back(frame.image.token as usize);
@@ -218,7 +276,8 @@ impl Library {
         }
     }
 
-    fn is_c(&self) -> bool {
+    /// The program uses the decoder through the functions of rav1g.h.
+    pub fn is_c(&self) -> bool {
         matches!(self, Library::C(_))
     }
 
@@ -235,6 +294,8 @@ impl Library {
                 height: info.height,
                 is_key_frame: info.is_key_frame,
                 bit_depth: info.bit_depth,
+                monochrome: info.monochrome,
+                color: (&info.color).into(),
             },
         )
     }

@@ -20,7 +20,7 @@ use rav1g::switches::{self, PerfFrame, Poison};
 
 use crate::args::{self, EXIT_ERROR, EXIT_MISMATCH, EXIT_PASS, Task};
 use crate::device::{Device, hex32};
-use crate::library::{Choices, Library, Picture, Sink, Spec, TaskDecoder};
+use crate::library::{Choices, Colour, Library, Picture, Sink, Spec, TaskDecoder};
 use crate::md5::Md5;
 use crate::pool::{OutputPool, Rented};
 use crate::say;
@@ -42,6 +42,8 @@ struct State {
     height: u32,
     bit_depth: u32,
     size_changes: i32,
+    /// The colour of the last output frame; `None` in front of the first frame of a decoder.
+    colour: Option<Colour>,
     pool_error: String,
     out_file: Option<BufWriter<File>>,
     io_error: String,
@@ -253,6 +255,12 @@ impl Sink for Run {
             } else if frame.width != state.width || frame.height != state.height {
                 // Counted against the size of the first frame; the md5 of a frame is always over its own size.
                 state.size_changes += 1;
+            }
+            // What the stream says about its colour: once per decoder, which is once per sequence the
+            // program made a decoder for, and whenever a frame says something else than the frame before.
+            if state.colour != Some(frame.colour) {
+                state.colour = Some(frame.colour);
+                say!("COLOUR {} frame {}: {}", task.name, n, frame.colour.text());
             }
             let mut wrong = false;
             if state.have_ref {
@@ -489,6 +497,10 @@ fn create_decoder(
         // -budget: a budget callback that answers with the number of the flag.
         budget: (task.budget_mib >= 0).then_some((task.budget_mib << 20) as u64),
     };
+    // The colour description of the sequence header the decoder is created for, and the first frame of
+    // the decoder says what it carries.
+    say!("COLOUR {} sequence: {}", task.name, Colour::of_sequence(&info.color, library.is_c()).description());
+    run.state().colour = None;
     let (device_size, host_size) = library.memory_requirements(&spec);
     say!(
         "TASK {}: stream {}x{} {}-bit, decoder {}x{} {}-bit ({}), slots {}, low memory parts {}, CDEF {}, intra {}{}, \
@@ -536,6 +548,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
             height: 0,
             bit_depth: 0,
             size_changes: 0,
+            colour: None,
             pool_error: String::new(),
             out_file: None,
             io_error: String::new(),

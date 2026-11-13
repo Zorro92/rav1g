@@ -169,6 +169,17 @@ pub(crate) unsafe fn copy_output(dec: *mut Av1Core, cm: *mut AV1_COMMON, fb: *co
         img.frame_number = src.frame_number;
         img.hbd = td.is_hbd;
         img.monochrome = c_int::from(is_monochrome);
+        // What the application is told about the colour of the frame: the description of the sequence
+        // as the entropy decoder read it, or as the host of rav1d's parser wrote it there, and the HDR
+        // metadata that holds for the frame. Nothing here reads them.
+        let seq = &(*cm).seq_params;
+        img.color_description_present = seq.color_description_present_flag;
+        img.color_primaries = seq.color_primaries as u8;
+        img.transfer_characteristics = seq.transfer_characteristics as u8;
+        img.matrix_coefficients = seq.matrix_coefficients as u8;
+        img.color_range = u8::from(seq.color_range != 0);
+        img.chroma_sample_position = seq.chroma_sample_position as u8;
+        img.hdr = (*cm).hdr_metadata;
         img.planes[0].stride = y_stride;
         img.planes[1].stride = uv_stride;
         img.planes[2].stride = uv_stride;

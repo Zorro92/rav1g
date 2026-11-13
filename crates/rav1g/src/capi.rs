@@ -22,8 +22,9 @@ use windows::Win32::Graphics::Direct3D12::ID3D12Resource;
 use windows::core::Interface;
 
 use crate::sys::{av1_perf_frame, av1_stage_dump};
+use crate::{ColorInfo, ColorPrimaries, ContentLightLevel, MasteringDisplay, MatrixCoefficients};
 use crate::{Decoder, Device, Error, ErrorCode, Frame, ImageFormat, ImageRequest, LowMemory, Output, OutputImage};
-use crate::{Settings, switches};
+use crate::{Settings, TransferCharacteristics, switches};
 
 /// The shared back buffer: one back buffer for all pipeline slots and a pool of 10 frame buffers. The
 /// default of `rav1g_settings_default`.
@@ -82,6 +83,50 @@ pub const RAV1G_POISON_MODE_INFO: u32 = 1;
 /// stage in every frame.
 pub const RAV1G_POISON_BUFFERS: u32 = 2;
 
+/// `Rav1gColorInfo::primaries`, the values an application meets (AV1 specification 6.4.2, ITU-T H.273):
+/// BT.709, which is also sRGB.
+pub const RAV1G_COLOR_PRIMARIES_BT709: u8 = 1;
+/// The stream does not say; so do `RAV1G_TRANSFER_UNSPECIFIED` and `RAV1G_MATRIX_UNSPECIFIED`.
+pub const RAV1G_COLOR_PRIMARIES_UNSPECIFIED: u8 = 2;
+/// BT.601 with 625 lines (PAL).
+pub const RAV1G_COLOR_PRIMARIES_BT470BG: u8 = 5;
+/// BT.601 with 525 lines (NTSC).
+pub const RAV1G_COLOR_PRIMARIES_BT601: u8 = 6;
+/// BT.2020 and BT.2100: UHD and HDR video.
+pub const RAV1G_COLOR_PRIMARIES_BT2020: u8 = 9;
+/// Display P3.
+pub const RAV1G_COLOR_PRIMARIES_SMPTE432: u8 = 12;
+
+/// `Rav1gColorInfo::transfer_characteristics`: BT.709.
+pub const RAV1G_TRANSFER_BT709: u8 = 1;
+pub const RAV1G_TRANSFER_UNSPECIFIED: u8 = 2;
+/// BT.601.
+pub const RAV1G_TRANSFER_BT601: u8 = 6;
+pub const RAV1G_TRANSFER_SRGB: u8 = 13;
+/// BT.2020 for 10 bits: the curve of BT.709.
+pub const RAV1G_TRANSFER_BT2020_10BIT: u8 = 14;
+/// SMPTE ST 2084, the perceptual quantiser: HDR10.
+pub const RAV1G_TRANSFER_PQ: u8 = 16;
+/// ARIB STD-B67, hybrid log-gamma: HLG.
+pub const RAV1G_TRANSFER_HLG: u8 = 18;
+
+/// `Rav1gColorInfo::matrix_coefficients`: BT.709.
+pub const RAV1G_MATRIX_BT709: u8 = 1;
+pub const RAV1G_MATRIX_UNSPECIFIED: u8 = 2;
+/// BT.601 with 625 lines.
+pub const RAV1G_MATRIX_BT470BG: u8 = 5;
+/// BT.601 with 525 lines; the same matrix as `RAV1G_MATRIX_BT470BG`.
+pub const RAV1G_MATRIX_BT601: u8 = 6;
+/// BT.2020 with non-constant luminance: HDR10 and HLG video.
+pub const RAV1G_MATRIX_BT2020_NCL: u8 = 9;
+
+/// `Rav1gColorInfo::chroma_sample_position`: the stream does not say.
+pub const RAV1G_CHROMA_SAMPLE_POSITION_UNKNOWN: u8 = 0;
+/// In the column of the left luma samples, between the two rows ("left"): MPEG-2 and most HD video.
+pub const RAV1G_CHROMA_SAMPLE_POSITION_VERTICAL: u8 = 1;
+/// On the top left luma sample ("top left"): BT.2020 and BT.2100 video.
+pub const RAV1G_CHROMA_SAMPLE_POSITION_COLOCATED: u8 = 2;
+
 /// The budget guard refuses a decoder whose device buffers would leave the application less than this
 /// many bytes (`Rav1gSettings::memory_available`).
 pub const RAV1G_MEMORY_GUARD_MARGIN: u64 = 50331648;
@@ -105,6 +150,27 @@ const _: () = {
     assert!(RAV1G_POISON_MODE_INFO == switches::Poison::ModeInfo as u32);
     assert!(RAV1G_POISON_BUFFERS == switches::Poison::Buffers as u32);
     assert!(RAV1G_MEMORY_GUARD_MARGIN == 48 << 20);
+    assert!(RAV1G_COLOR_PRIMARIES_BT709 == ColorPrimaries::BT709.0);
+    assert!(RAV1G_COLOR_PRIMARIES_UNSPECIFIED == ColorPrimaries::UNSPECIFIED.0);
+    assert!(RAV1G_COLOR_PRIMARIES_BT470BG == ColorPrimaries::BT470BG.0);
+    assert!(RAV1G_COLOR_PRIMARIES_BT601 == ColorPrimaries::BT601.0);
+    assert!(RAV1G_COLOR_PRIMARIES_BT2020 == ColorPrimaries::BT2020.0);
+    assert!(RAV1G_COLOR_PRIMARIES_SMPTE432 == ColorPrimaries::SMPTE432.0);
+    assert!(RAV1G_TRANSFER_BT709 == TransferCharacteristics::BT709.0);
+    assert!(RAV1G_TRANSFER_UNSPECIFIED == TransferCharacteristics::UNSPECIFIED.0);
+    assert!(RAV1G_TRANSFER_BT601 == TransferCharacteristics::BT601.0);
+    assert!(RAV1G_TRANSFER_SRGB == TransferCharacteristics::SRGB.0);
+    assert!(RAV1G_TRANSFER_BT2020_10BIT == TransferCharacteristics::BT2020_10BIT.0);
+    assert!(RAV1G_TRANSFER_PQ == TransferCharacteristics::PQ.0);
+    assert!(RAV1G_TRANSFER_HLG == TransferCharacteristics::HLG.0);
+    assert!(RAV1G_MATRIX_BT709 == MatrixCoefficients::BT709.0);
+    assert!(RAV1G_MATRIX_UNSPECIFIED == MatrixCoefficients::UNSPECIFIED.0);
+    assert!(RAV1G_MATRIX_BT470BG == MatrixCoefficients::BT470BG.0);
+    assert!(RAV1G_MATRIX_BT601 == MatrixCoefficients::BT601.0);
+    assert!(RAV1G_MATRIX_BT2020_NCL == MatrixCoefficients::BT2020_NCL.0);
+    assert!(RAV1G_CHROMA_SAMPLE_POSITION_UNKNOWN == crate::ChromaSamplePosition::Unknown as u8);
+    assert!(RAV1G_CHROMA_SAMPLE_POSITION_VERTICAL == crate::ChromaSamplePosition::Vertical as u8);
+    assert!(RAV1G_CHROMA_SAMPLE_POSITION_COLOCATED == crate::ChromaSamplePosition::Colocated as u8);
 };
 
 /// How a call ended.
@@ -160,6 +226,63 @@ pub struct Rav1gDecoder {
     detail: CString,
 }
 
+/// The colour description of a sequence header (`color_config` of the AV1 specification): what the
+/// samples of its frames mean. The decoder does not use it; the application that shows the frames does
+/// (docs/color.md).
+///
+/// The three code points are the numbers of the stream (AV1 specification 6.4.2, which are those of
+/// ITU-T H.273), also values the specification reserves; the `RAV1G_COLOR_PRIMARIES_*`,
+/// `RAV1G_TRANSFER_*` and `RAV1G_MATRIX_*` constants name the ones an application meets. The matrix and
+/// the range are what the conversion to RGB needs. The transfer says what output the frames want: PQ
+/// (with BT.2020 primaries: HDR10) an HDR10 output, HLG an HLG output or a conversion to PQ, the others
+/// an SDR output.
+#[repr(C)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Rav1gColorInfo {
+    /// The header has a colour description (`color_description_present_flag`). Without one the three
+    /// code points are 2 (unspecified), and the application decides: what a container says, or BT.709.
+    pub description_present: bool,
+    /// `color_primaries`.
+    pub primaries: u8,
+    /// `transfer_characteristics`.
+    pub transfer_characteristics: u8,
+    /// `matrix_coefficients`: what turns luma and chroma into red, green and blue.
+    pub matrix_coefficients: u8,
+    /// `color_range`: true for full range (0 to 255 in 8 bits), false for limited range (luma 16 to
+    /// 235, chroma 16 to 240 in 8 bits; times 4 in 10 bits). Always coded; it is needed with the matrix.
+    pub full_range: bool,
+    /// `chroma_sample_position`: `RAV1G_CHROMA_SAMPLE_POSITION_*`, 3 is reserved.
+    pub chroma_sample_position: u8,
+}
+
+/// The mastering display colour volume of a frame (the metadata OBU `METADATA_TYPE_HDR_MDCV`, SMPTE ST
+/// 2086), in the fixed point of the OBU. That is not the fixed point of `DXGI_HDR_METADATA_HDR10`: a
+/// chromaticity is `value / 65536` here and `value / 50000` there, the largest luminance `value / 256`
+/// cd/m² here and whole cd/m² there, the smallest `value / 16384` cd/m² here and `value / 10000` there
+/// (docs/color.md has the conversion). The primaries are red, green, blue, in this order.
+#[repr(C)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Rav1gMasteringDisplay {
+    /// The chromaticity (x, y) of red, green and blue, in 0.16 fixed point.
+    pub primaries: [[u16; 2]; 3],
+    /// The chromaticity (x, y) of the white point, in 0.16 fixed point.
+    pub white_point: [u16; 2],
+    /// The largest luminance in cd/m², in 24.8 fixed point.
+    pub max_luminance: u32,
+    /// The smallest luminance in cd/m², in 18.14 fixed point.
+    pub min_luminance: u32,
+}
+
+/// The content light level of a frame (the metadata OBU `METADATA_TYPE_HDR_CLL`, CTA-861.3), in cd/m².
+#[repr(C)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct Rav1gContentLightLevel {
+    /// MaxCLL: the brightest sample of the content.
+    pub max_content_light_level: u16,
+    /// MaxFALL: the highest average of a frame.
+    pub max_frame_average_light_level: u16,
+}
+
 /// What the sequence header of a temporal unit says about the stream.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -171,6 +294,11 @@ pub struct Rav1gStreamInfo {
     pub bit_depth: u32,
     /// The temporal unit starts with a key frame.
     pub is_key_frame: bool,
+    /// The sequence has a luma plane only.
+    pub monochrome: bool,
+    /// The colour description of the sequence header. Every `Rav1gFrame` has the one of its own
+    /// sequence; HDR metadata is not in a sequence header and comes with the frames.
+    pub color: Rav1gColorInfo,
 }
 
 /// The samples of an output image.
@@ -246,6 +374,88 @@ pub struct Rav1gFrame {
     /// pointer is valid during the call (AddRef to keep it).
     pub d3d12_fence: *mut c_void,
     pub fence_value: u64,
+    /// The colour description of the frame's sequence header. A stream can change it with a new
+    /// sequence, so every frame has the one that holds for it.
+    pub color: Rav1gColorInfo,
+    /// `mastering_display` is the mastering display colour volume that goes with the frame; false when
+    /// the stream has sent none (the struct is zero then).
+    ///
+    /// Which frames a metadata OBU goes with: every frame from the OBU on, in decoding order, until
+    /// another OBU of its kind replaces it or a sequence header that differs from the one before starts
+    /// a new sequence; a frame that a later temporal unit shows again (`show_existing_frame`) has what
+    /// holds when it is shown. So a frame has the metadata that is current for it, and an application
+    /// that wants "the latest" takes it from the last frame it got.
+    pub has_mastering_display: bool,
+    /// `content_light` is the content light level that goes with the frame, by the same rule.
+    pub has_content_light: bool,
+    pub mastering_display: Rav1gMasteringDisplay,
+    pub content_light: Rav1gContentLightLevel,
+}
+
+impl From<&ColorInfo> for Rav1gColorInfo {
+    fn from(color: &ColorInfo) -> Rav1gColorInfo {
+        Rav1gColorInfo {
+            description_present: color.description_present,
+            primaries: color.primaries.0,
+            transfer_characteristics: color.transfer_characteristics.0,
+            matrix_coefficients: color.matrix_coefficients.0,
+            full_range: color.range == crate::ColorRange::Full,
+            chroma_sample_position: color.chroma_sample_position as u8,
+        }
+    }
+}
+
+impl From<&Rav1gColorInfo> for ColorInfo {
+    fn from(color: &Rav1gColorInfo) -> ColorInfo {
+        ColorInfo {
+            description_present: color.description_present,
+            primaries: ColorPrimaries(color.primaries),
+            transfer_characteristics: TransferCharacteristics(color.transfer_characteristics),
+            matrix_coefficients: MatrixCoefficients(color.matrix_coefficients),
+            range: if color.full_range { crate::ColorRange::Full } else { crate::ColorRange::Limited },
+            chroma_sample_position: crate::ChromaSamplePosition::from_raw(color.chroma_sample_position),
+        }
+    }
+}
+
+impl From<&MasteringDisplay> for Rav1gMasteringDisplay {
+    fn from(display: &MasteringDisplay) -> Rav1gMasteringDisplay {
+        Rav1gMasteringDisplay {
+            primaries: display.primaries,
+            white_point: display.white_point,
+            max_luminance: display.max_luminance,
+            min_luminance: display.min_luminance,
+        }
+    }
+}
+
+impl From<&Rav1gMasteringDisplay> for MasteringDisplay {
+    fn from(display: &Rav1gMasteringDisplay) -> MasteringDisplay {
+        MasteringDisplay {
+            primaries: display.primaries,
+            white_point: display.white_point,
+            max_luminance: display.max_luminance,
+            min_luminance: display.min_luminance,
+        }
+    }
+}
+
+impl From<&ContentLightLevel> for Rav1gContentLightLevel {
+    fn from(light: &ContentLightLevel) -> Rav1gContentLightLevel {
+        Rav1gContentLightLevel {
+            max_content_light_level: light.max_content_light_level,
+            max_frame_average_light_level: light.max_frame_average_light_level,
+        }
+    }
+}
+
+impl From<&Rav1gContentLightLevel> for ContentLightLevel {
+    fn from(light: &Rav1gContentLightLevel) -> ContentLightLevel {
+        ContentLightLevel {
+            max_content_light_level: light.max_content_light_level,
+            max_frame_average_light_level: light.max_frame_average_light_level,
+        }
+    }
 }
 
 /// The output of a decoder: where it gets its images and puts its frames. `get_image` and `unused` are
@@ -407,12 +617,59 @@ pub unsafe extern "C" fn rav1g_peek_stream_info(
                     height: si.height,
                     bit_depth: si.bit_depth,
                     is_key_frame: si.is_key_frame,
+                    monochrome: si.monochrome,
+                    color: (&si.color).into(),
                 };
             }
             Rav1gStatus::Ok
         }
         Err(error) => error.code.into(),
     }
+}
+
+/// The colour of a frame, or of a stream, as one line for a log:
+///
+/// "primaries 9 (BT.2020) transfer 16 (PQ) matrix 9 (BT.2020 NCL) range limited chroma pos 2 (colocated);
+/// MDCV R 0.6800,0.3200 G 0.2650,0.6900 B 0.1500,0.0600 W 0.3127,0.3290 L 0.0050..1000 cd/m2 [44564,20972
+/// 17367,45220 9830,3932 20493,21561 256000 82]; CLL 1000/400"
+///
+/// The code points with their names, ", no colour description" behind them when the header has none;
+/// the mastering display in its units (x,y of red, green, blue and the white point, the smallest and the
+/// largest luminance) and, in brackets, as the numbers of the OBU; MaxCLL/MaxFALL. "no MDCV" and "no CLL"
+/// for a null pointer. Writes the text with its terminating zero into `text`, cut to `size` bytes, and
+/// returns the length of the whole text without the zero.
+///
+/// # Safety
+/// `color` is valid; `mastering_display` and `content_light` are null or valid; `text` is valid for
+/// writing `size` bytes, or `size` is 0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rav1g_color_text(
+    color: *const Rav1gColorInfo,
+    mastering_display: *const Rav1gMasteringDisplay,
+    content_light: *const Rav1gContentLightLevel,
+    text: *mut c_char,
+    size: usize,
+) -> usize {
+    // SAFETY: the caller's contract.
+    let Some(color) = (unsafe { color.as_ref() }) else {
+        return 0;
+    };
+    // SAFETY: the caller's contract.
+    let (mastering_display, content_light) = unsafe { (mastering_display.as_ref(), content_light.as_ref()) };
+    let line = crate::color_text(
+        &color.into(),
+        mastering_display.map(Into::into).as_ref(),
+        content_light.map(Into::into).as_ref(),
+    );
+    if !text.is_null() && size > 0 {
+        let count = line.len().min(size - 1);
+        // SAFETY: the caller's contract: `count + 1 <= size` bytes are written.
+        unsafe {
+            std::ptr::copy_nonoverlapping(line.as_ptr(), text.cast::<u8>(), count);
+            text.add(count).write(0);
+        }
+    }
+    line.len()
 }
 
 /// A device for decoders. `d3d12_device` is the application's `ID3D12Device *`, or null for a device of
@@ -677,6 +934,11 @@ impl Output for CallbackOutput {
             strides: [frame.strides[0] as u32, frame.strides[1] as u32, frame.strides[2] as u32],
             d3d12_fence: fence.map_or(std::ptr::null_mut(), |(fence, _)| fence.as_raw()),
             fence_value: fence.map_or(0, |(_, value)| value),
+            color: (&frame.color).into(),
+            has_mastering_display: frame.mastering_display.is_some(),
+            has_content_light: frame.content_light.is_some(),
+            mastering_display: frame.mastering_display.as_ref().map(Into::into).unwrap_or_default(),
+            content_light: frame.content_light.as_ref().map(Into::into).unwrap_or_default(),
         };
         // SAFETY: the application's callback, called as the interface says; the frame and what it points
         // to are alive during the call.

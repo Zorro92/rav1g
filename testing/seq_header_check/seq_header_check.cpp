@@ -1,12 +1,14 @@
 // Host check for the sequence header peek (libav1/av1/common/seq_header_peek.h), the code behind
-// aom_codec_peek_stream_info() and the test player's -fitsize.
+// aom_codec_peek_stream_info() (rav1g_peek_stream_info: the frame size, the bit depth and the colour
+// description of a stream) and the test player's -fitsize.
 //
 // Sequence headers are written here bit by bit from the syntax tables of the AV1 specification (5.5.1 to
 // 5.5.5), independently of the parser, with known values; the peek must return those values. Covered: the
 // header of an SVT-AV1 4K encode (the one -fitsize got wrong), timing info with and without decoder model
 // info, several operating points with their own decoder model and display delay fields, frame size fields
-// of other widths than 16 bits, the reduced still picture header, the three profiles and bit depths, and a
-// few thousand random combinations. Every header is also cut short at every length: the peek must say so and
+// of other widths than 16 bits, the reduced still picture header, the three profiles and bit depths, the
+// colour description (code points, range, the subsampling of every profile, the chroma sample position) and
+// a few thousand random combinations. Every header is also cut short at every length: the peek must say so and
 // must not read past the end. The headers are then wrapped into OBUs and found again with the decoder's own
 // OBU header reader (av1/common/obu_util.c), the way decoder_peek_si_internal() walks a temporal unit.
 //
@@ -111,10 +113,45 @@ struct SeqHeader {
   int high_bitdepth = 0;
   int twelve_bit = 0;
   int monochrome = 0;
+  // The colour description.
+  int color_description = 0;
+  int color_primaries = 2;  // unspecified, what a header without a description means
+  int transfer_characteristics = 2;
+  int matrix_coefficients = 2;
+  int color_range = 0;
+  int subsampling_x = 1;  // coded in profile 2 with 12 bits only
+  int subsampling_y = 1;
+  int chroma_sample_position = 0;
 };
 
-// sequence_header_obu() of the specification. Returns the bit position after mono_chrome (or after the bit
-// depth fields in profile 1, which has no mono_chrome): the last bit the peek has to read.
+// BT.709 primaries, the sRGB transfer and the identity matrix: RGB, where color_config() codes neither a
+// range nor a subsampling.
+bool is_srgb(const SeqHeader &h) {
+  return h.color_description && h.color_primaries == 1 && h.transfer_characteristics == 13 &&
+         h.matrix_coefficients == 0;
+}
+
+// What color_config() gives for the subsampling: (x, y).
+void expected_subsampling(const SeqHeader &h, int *x, int *y) {
+  const bool mono = h.monochrome && h.profile != 1;
+  if (mono) {
+    *x = *y = 1;
+  } else if (is_srgb(h) || h.profile == 1) {
+    *x = *y = 0;
+  } else if (h.profile == 0) {
+    *x = *y = 1;
+  } else if (h.high_bitdepth && h.twelve_bit) {
+    *x = h.subsampling_x;
+    *y = h.subsampling_x ? h.subsampling_y : 0;
+  } else {
+    *x = 1;
+    *y = 0;
+  }
+}
+
+// sequence_header_obu() of the specification. Returns the bit position after the colour description of
+// color_config() (its range, or its chroma sample position where it has one): the last bit the peek has to
+// read.
 uint64_t write_sequence_header(const SeqHeader &h, BitWriter *w) {
   w->put(h.profile, 3);
   w->put(h.still_picture, 1);
@@ -195,14 +232,28 @@ uint64_t write_sequence_header(const SeqHeader &h, BitWriter *w) {
   w->put(h.high_bitdepth, 1);
   if (h.profile == 2 && h.high_bitdepth) w->put(h.twelve_bit, 1);
   if (h.profile != 1) w->put(h.monochrome, 1);
-  const uint64_t peek_end = w->bits;
-  w->put(0, 1);  // color_description_present_flag
+  w->put(h.color_description, 1);  // color_description_present_flag
+  if (h.color_description) {
+    w->put(h.color_primaries, 8);
+    w->put(h.transfer_characteristics, 8);
+    w->put(h.matrix_coefficients, 8);
+  }
+  uint64_t peek_end;
   if (h.monochrome && h.profile != 1) {
-    w->put(0, 1);  // color_range
+    w->put(h.color_range, 1);
+    peek_end = w->bits;
   } else {
-    w->put(0, 1);  // color_range
-    if (h.profile == 2 && h.high_bitdepth && h.twelve_bit) w->put(1, 1), w->put(1, 1);  // subsampling_x, _y
-    if (h.profile == 0 || (h.profile == 2 && h.high_bitdepth && h.twelve_bit)) w->put(0, 2);  // chroma_sample_position
+    if (!is_srgb(h)) {
+      w->put(h.color_range, 1);
+      if (h.profile == 2 && h.high_bitdepth && h.twelve_bit) {
+        w->put(h.subsampling_x, 1);
+        if (h.subsampling_x) w->put(h.subsampling_y, 1);
+      }
+      int x, y;
+      expected_subsampling(h, &x, &y);
+      if (x && y) w->put(h.chroma_sample_position, 2);
+    }
+    peek_end = w->bits;
     w->put(0, 1);  // separate_uv_delta_q
   }
   w->put(0, 1);  // film_grain_params_present
@@ -269,6 +320,21 @@ void check_header(const char *name, const SeqHeader &h) {
   CHECK_EQ(name, "enable_restoration", h.restoration, out.enable_restoration);
   CHECK_EQ(name, "bit_depth", expected_bit_depth(h), out.bit_depth);
   CHECK_EQ(name, "monochrome", h.profile == 1 ? 0 : h.monochrome, out.monochrome);
+  {
+    const bool mono = h.monochrome && h.profile != 1;
+    int x, y;
+    expected_subsampling(h, &x, &y);
+    CHECK_EQ(name, "color_description_present", h.color_description, out.color_description_present);
+    CHECK_EQ(name, "color_primaries", h.color_description ? h.color_primaries : 2, out.color_primaries);
+    CHECK_EQ(name, "transfer_characteristics", h.color_description ? h.transfer_characteristics : 2,
+             out.transfer_characteristics);
+    CHECK_EQ(name, "matrix_coefficients", h.color_description ? h.matrix_coefficients : 2, out.matrix_coefficients);
+    CHECK_EQ(name, "color_range", (!mono && is_srgb(h)) ? 1 : h.color_range, out.color_range);
+    CHECK_EQ(name, "subsampling_x", x, out.subsampling_x);
+    CHECK_EQ(name, "subsampling_y", y, out.subsampling_y);
+    CHECK_EQ(name, "chroma_sample_position", (!mono && !is_srgb(h) && x && y) ? h.chroma_sample_position : 0,
+             out.chroma_sample_position);
+  }
   CHECK_EQ(name, "bits_read", peek_end, out.bits_read);
 
   // Cut short: every length that ends before the last bit the peek needs must be reported, and the peek must
@@ -427,6 +493,20 @@ SeqHeader random_header() {
   h.high_bitdepth = (int)rnd(2);
   h.twelve_bit = (int)rnd(2);
   h.monochrome = (int)rnd(2);
+  h.color_description = (int)rnd(2);
+  // Any code point, also the ones the specification reserves; now and then the three of RGB.
+  h.color_primaries = (int)rnd(256);
+  h.transfer_characteristics = (int)rnd(256);
+  h.matrix_coefficients = (int)rnd(256);
+  if (rnd(8) == 0) {
+    h.color_primaries = 1;
+    h.transfer_characteristics = 13;
+    h.matrix_coefficients = 0;
+  }
+  h.color_range = (int)rnd(2);
+  h.subsampling_x = (int)rnd(2);
+  h.subsampling_y = (int)rnd(2);
+  h.chroma_sample_position = (int)rnd(4);
   return h;
 }
 
@@ -580,6 +660,54 @@ int main() {
   high.twelve_bit = 0;
   high.monochrome = 1;
   check_header("profile 2, 10-bit, monochrome", high);
+
+  // The colour description: HDR10 as an encoder writes it, HLG, BT.709 in full range, a monochrome
+  // sequence with one, RGB in profile 1, and the three subsamplings of profile 2 with 12 bits.
+  SeqHeader hdr10 = svt;
+  hdr10.color_description = 1;
+  hdr10.color_primaries = 9;
+  hdr10.transfer_characteristics = 16;
+  hdr10.matrix_coefficients = 9;
+  hdr10.chroma_sample_position = 2;
+  check_header("BT.2020, PQ, BT.2020 NCL, limited range, colocated chroma", hdr10);
+  hdr10.transfer_characteristics = 18;
+  hdr10.chroma_sample_position = 1;
+  check_header("BT.2020, HLG, vertical chroma", hdr10);
+  SeqHeader bt709 = hd;
+  bt709.color_description = 1;
+  bt709.color_primaries = bt709.transfer_characteristics = bt709.matrix_coefficients = 1;
+  bt709.color_range = 1;
+  check_header("BT.709, full range", bt709);
+  bt709.color_description = 0;
+  check_header("no colour description, full range", bt709);
+  bt709.color_description = 1;
+  bt709.monochrome = 1;
+  bt709.color_range = 0;
+  bt709.chroma_sample_position = 3;  // not coded
+  check_header("monochrome with a colour description", bt709);
+  SeqHeader rgb = svt;
+  rgb.profile = 1;
+  rgb.color_description = 1;
+  rgb.color_primaries = 1;
+  rgb.transfer_characteristics = 13;
+  rgb.matrix_coefficients = 0;
+  check_header("RGB in profile 1: no range bit", rgb);
+  rgb.matrix_coefficients = 1;
+  rgb.color_range = 1;
+  check_header("profile 1 that is not RGB: a range bit", rgb);
+  SeqHeader twelve = svt;
+  twelve.profile = 2;
+  twelve.twelve_bit = 1;
+  twelve.color_description = 1;
+  twelve.color_primaries = 9;
+  twelve.transfer_characteristics = 16;
+  twelve.matrix_coefficients = 9;
+  twelve.chroma_sample_position = 2;
+  check_header("profile 2, 12-bit, 4:2:0", twelve);
+  twelve.subsampling_y = 0;
+  check_header("profile 2, 12-bit, 4:2:2", twelve);
+  twelve.subsampling_x = 0;
+  check_header("profile 2, 12-bit, 4:4:4", twelve);
 
   // A video sequence with the reduced header is not a legal stream; the decoder refuses it too.
   {

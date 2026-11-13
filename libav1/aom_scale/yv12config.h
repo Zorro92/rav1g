@@ -78,6 +78,16 @@ typedef struct
     int uv_crop_height;
     int hbd;
     int monochrome;
+    /* What the application is told about the colour of the frame: the colour
+       description of its sequence header as it is coded, and the HDR metadata
+       that applies to it. No stage reads them. */
+    uint8_t color_description_present;
+    uint8_t color_primaries;
+    uint8_t transfer_characteristics;
+    uint8_t matrix_coefficients;
+    uint8_t color_range;
+    uint8_t chroma_sample_position;
+    aom_hdr_metadata_t hdr;
     void * user_priv;
     void * alloc_priv;
 

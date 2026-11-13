@@ -56,6 +56,9 @@
 //! - [`Output`]: the application's side of the output: it gives an [`OutputImage`] for every frame that
 //!   will be shown and gets the [`Frame`] when the GPU has written it.
 //! - [`Decoder`]: [`Decoder::decode`] per temporal unit, [`Decoder::drain`] at the end.
+//! - [`ColorInfo`], [`MasteringDisplay`], [`ContentLightLevel`]: what the stream says about the colour
+//!   of its frames, in [`StreamInfo`] and with every [`Frame`]. The decoder passes it on and does not
+//!   use it; the application needs it to show the frames right (docs/color.md).
 //! - [`switches`]: the process-wide choices of the test programs (which shader a stage uses, timing
 //!   records, stage dumps, the log).
 //!
@@ -66,6 +69,7 @@
 //! other choice of [`Settings::parser`] until the last step of phase 2; its interface (`aom_codec_*`) is
 //! what this crate creates a decoder through and is not part of the interface of this crate.
 
+mod color;
 mod decoder;
 mod device;
 mod error;
@@ -84,6 +88,10 @@ pub use rav1g_sys as sys;
 /// into one number (docs/phase2-rav1d.md). `rav1g-dec -parsedigest` prints it.
 pub use rav1g_parse::digest as parse_digest;
 
+pub use color::{
+    ChromaSamplePosition, ColorInfo, ColorPrimaries, ColorRange, ContentLightLevel, MasteringDisplay,
+    MatrixCoefficients, TransferCharacteristics, color_text,
+};
 pub use decoder::{Decoder, LowMemory, MemoryAvailable, MemoryRequirements, Parser, ParserOptions, Settings};
 pub use device::Device;
 pub use error::{Error, ErrorCode};
@@ -102,6 +110,12 @@ pub struct StreamInfo {
     pub is_key_frame: bool,
     /// Bits a sample: 8, 10 or 12; 0 when the temporal unit has no sequence header.
     pub bit_depth: u32,
+    /// The sequence has a luma plane only.
+    pub monochrome: bool,
+    /// The colour description of the sequence header: what the samples mean, for the application that
+    /// shows them (docs/color.md). Every [`Frame`] has the description of its own sequence; HDR
+    /// metadata is not part of a sequence header and comes with the frames.
+    pub color: ColorInfo,
 }
 
 /// Reads the sequence header of a temporal unit, without a decoder.
@@ -112,5 +126,19 @@ pub fn peek_stream_info(data: &[u8]) -> Result<StreamInfo, Error> {
     if code != sys::AOM_CODEC_OK {
         return Err(Error::new(ErrorCode::from_raw(code), "the temporal unit has no sequence header that can be read"));
     }
-    Ok(StreamInfo { width: si.w, height: si.h, is_key_frame: si.is_kf != 0, bit_depth: si.bit_depth })
+    Ok(StreamInfo {
+        width: si.w,
+        height: si.h,
+        is_key_frame: si.is_kf != 0,
+        bit_depth: si.bit_depth,
+        monochrome: si.monochrome != 0,
+        color: ColorInfo {
+            description_present: si.color_description_present != 0,
+            primaries: ColorPrimaries(si.color_primaries as u8),
+            transfer_characteristics: TransferCharacteristics(si.transfer_characteristics as u8),
+            matrix_coefficients: MatrixCoefficients(si.matrix_coefficients as u8),
+            range: if si.color_range != 0 { ColorRange::Full } else { ColorRange::Limited },
+            chroma_sample_position: ChromaSamplePosition::from_raw(si.chroma_sample_position as u8),
+        },
+    })
 }

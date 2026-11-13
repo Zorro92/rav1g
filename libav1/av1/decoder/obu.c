@@ -363,8 +363,11 @@ static uint32_t read_sequence_header_obu(AV1Decoder *pbi,
   // If a sequence header has been decoded before, we check if the new
   // one is consistent with the old one.
   if (pbi->sequence_header_ready) {
-    if (!are_seq_headers_consistent(&cm->seq_params, seq_params))
+    if (!are_seq_headers_consistent(&cm->seq_params, seq_params)) {
       pbi->sequence_header_changed = 1;
+      // The HDR metadata of the sequence before does not go with this one.
+      memset(&cm->hdr_metadata, 0, sizeof(cm->hdr_metadata));
+    }
   }
 
   cm->seq_params = *seq_params;
@@ -653,24 +656,36 @@ static void read_metadata_itut_t35(const uint8_t *data, size_t sz) {
   }
 }
 
-static void read_metadata_hdr_cll(const uint8_t *data, size_t sz) {
+// The two HDR metadata OBUs are kept for the output images (cm->hdr_metadata):
+// an OBU that is shorter than its fields is left out.
+static void read_metadata_hdr_cll(AV1_COMMON *cm, const uint8_t *data,
+                                  size_t sz) {
   struct aom_read_bit_buffer rb = { data, data + sz, 0, NULL, NULL };
-  aom_rb_read_literal(&rb, 16);  // max_cll
-  aom_rb_read_literal(&rb, 16);  // max_fall
+  if (sz < 4) return;
+  cm->hdr_metadata.max_cll = (uint16_t)aom_rb_read_literal(&rb, 16);
+  cm->hdr_metadata.max_fall = (uint16_t)aom_rb_read_literal(&rb, 16);
+  cm->hdr_metadata.has_cll = 1;
 }
 
-static void read_metadata_hdr_mdcv(const uint8_t *data, size_t sz) {
+static void read_metadata_hdr_mdcv(AV1_COMMON *cm, const uint8_t *data,
+                                   size_t sz) {
   struct aom_read_bit_buffer rb = { data, data + sz, 0, NULL, NULL };
+  if (sz < 24) return;
   for (int i = 0; i < 3; i++) {
-    aom_rb_read_literal(&rb, 16);  // primary_i_chromaticity_x
-    aom_rb_read_literal(&rb, 16);  // primary_i_chromaticity_y
+    // primary_i_chromaticity_x, primary_i_chromaticity_y
+    cm->hdr_metadata.mdcv_primaries[i][0] =
+        (uint16_t)aom_rb_read_literal(&rb, 16);
+    cm->hdr_metadata.mdcv_primaries[i][1] =
+        (uint16_t)aom_rb_read_literal(&rb, 16);
   }
 
-  aom_rb_read_literal(&rb, 16);  // white_point_chromaticity_x
-  aom_rb_read_literal(&rb, 16);  // white_point_chromaticity_y
+  // white_point_chromaticity_x, white_point_chromaticity_y
+  cm->hdr_metadata.mdcv_white_point[0] = (uint16_t)aom_rb_read_literal(&rb, 16);
+  cm->hdr_metadata.mdcv_white_point[1] = (uint16_t)aom_rb_read_literal(&rb, 16);
 
-  aom_rb_read_unsigned_literal(&rb, 32);  // luminance_max
-  aom_rb_read_unsigned_literal(&rb, 32);  // luminance_min
+  cm->hdr_metadata.mdcv_luminance_max = aom_rb_read_unsigned_literal(&rb, 32);
+  cm->hdr_metadata.mdcv_luminance_min = aom_rb_read_unsigned_literal(&rb, 32);
+  cm->hdr_metadata.has_mdcv = 1;
 }
 
 static void scalability_structure(struct aom_read_bit_buffer *rb) {
@@ -749,7 +764,7 @@ static void read_metadata_timecode(const uint8_t *data, size_t sz) {
 }
 
 // Not fully implemented. Always succeeds and returns sz.
-static size_t read_metadata(const uint8_t *data, size_t sz) {
+static size_t read_metadata(AV1_COMMON *cm, const uint8_t *data, size_t sz) {
   size_t type_length;
   uint64_t type_value;
   OBU_METADATA_TYPE metadata_type;
@@ -760,9 +775,9 @@ static size_t read_metadata(const uint8_t *data, size_t sz) {
   if (metadata_type == OBU_METADATA_TYPE_ITUT_T35) {
     read_metadata_itut_t35(data + type_length, sz - type_length);
   } else if (metadata_type == OBU_METADATA_TYPE_HDR_CLL) {
-    read_metadata_hdr_cll(data + type_length, sz - type_length);
+    read_metadata_hdr_cll(cm, data + type_length, sz - type_length);
   } else if (metadata_type == OBU_METADATA_TYPE_HDR_MDCV) {
-    read_metadata_hdr_mdcv(data + type_length, sz - type_length);
+    read_metadata_hdr_mdcv(cm, data + type_length, sz - type_length);
   } else if (metadata_type == OBU_METADATA_TYPE_SCALABILITY) {
     read_metadata_scalability(data + type_length, sz - type_length);
   } else if (metadata_type == OBU_METADATA_TYPE_TIMECODE) {
@@ -929,7 +944,7 @@ int aom_decode_frame_from_obus(struct AV1Decoder *pbi, const uint8_t *data,
         if (frame_decoding_finished) pbi->seen_frame_header = 0;
         break;
       case OBU_METADATA:
-        decoded_payload_size = read_metadata(data, payload_size);
+        decoded_payload_size = read_metadata(cm, data, payload_size);
         break;
       case OBU_TILE_LIST:
         if (CONFIG_NORMAL_TILE_MODE) {

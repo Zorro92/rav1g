@@ -34,13 +34,17 @@ const HEADER: &str = "\
  *   1. rav1g_device_create on the application's D3D12 device and queue (or without, for a device of the
  *      decoder's own); rav1g_device_wait_pipelines.
  *   2. rav1g_peek_stream_info on the temporal units of the stream until one starts with a key frame: the
- *      frame size and bit depth of the sequence.
+ *      frame size, the bit depth and the colour description of the sequence.
  *   3. rav1g_settings_default, the size and bit depth of the sequence, the output callbacks;
  *      rav1g_decoder_create.
  *   4. rav1g_decoder_decode per temporal unit. The decoder takes an image from the output for every frame
  *      that will be shown (get_image) and hands the frame over when the GPU has written it (frame).
  *      RAV1G_STATUS_NEEDS_RECONFIGURE: the stream went on with a sequence the decoder does not fit.
  *   5. rav1g_decoder_drain, rav1g_decoder_destroy, rav1g_device_destroy.
+ *
+ * Colour: the decoder puts out the samples of the stream and converts nothing. What they mean is in
+ * Rav1gStreamInfo::color and, with the HDR metadata, in every Rav1gFrame; the application that shows the
+ * frames has to use it (docs/color.md).
  *
  * A decoder is used by one thread at a time. The callbacks are called from the decoder's threads.
  */";

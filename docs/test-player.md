@@ -2755,6 +2755,30 @@ the last column of the last mode info unit, which is where the specification cla
 the visible width. The check covers the shader, which was right; the bug was in the host
 code that the conformance run covers. It runs as the `superres-check` job of the workflow.
 
+## Colour of the stream (`COLOUR`)
+
+The library passes on what a stream says about its colour, with every frame: the colour description
+of its sequence header and the HDR metadata that goes with it ([color.md](color.md) has the values
+and what an application does with each). The player logs it, with the first frame of a task and
+with every frame that says something else than the frame before it, as the one line
+`rav1g_color_text` of `rav1g.h` makes of a frame:
+
+```text
+COLOUR frame 0: primaries 9 (BT.2020) transfer 16 (PQ) matrix 9 (BT.2020 NCL) range limited chroma pos 2 (colocated); MDCV R 0.6800,0.3200 G 0.2650,0.6900 B 0.1500,0.0600 W 0.3127,0.3290 L 0.0050..1000 cd/m2 [44564,20972 17367,45220 9830,3932 20493,21561 256000 82]; CLL 1000/400
+COLOUR frame 0: primaries 2 (unspecified) transfer 2 (unspecified) matrix 2 (unspecified) range limited chroma pos 0 (unknown), no colour description; no MDCV; no CLL
+```
+
+The code points are the numbers of the stream with their names; `MDCV` is the mastering display
+(the chromaticities of red, green, blue and the white point, the smallest and the largest luminance,
+and in brackets the numbers of the metadata OBU), `CLL` is MaxCLL/MaxFALL; `no MDCV` and `no CLL`
+for a frame without them. The first line is an HDR10 stream, the second a stream that says nothing,
+which most test vectors are.
+
+The player only logs the values. Its own picture is upstream's conversion, which does not look at
+them: it is a test player, and a frame on its screen is there to be seen, not to be judged for
+colour. In CI the player's decoder code logs the line for the HDR10 stream of the conformance set
+(`player_smoke.py`).
+
 ## Layers and new sequences
 
 **One frame per temporal unit.** A stream with spatial layers has one shown frame per layer in

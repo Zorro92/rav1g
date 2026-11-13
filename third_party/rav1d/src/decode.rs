@@ -39,7 +39,7 @@ use crate::include::dav1d::headers::{
 };
 use crate::include::dav1d::picture::Rav1dPicture;
 use crate::parse::{
-    ParseBlock, ParseFrame, ParseLrUnit, ParsePalette, ParseSuperblock, ParseTile,
+    ParseBlock, ParseFrame, ParseHdrMetadata, ParseLrUnit, ParsePalette, ParseSuperblock, ParseTile,
 };
 use crate::internal::{
     Bxy, Rav1dContext, Rav1dContextTaskType, Rav1dFrameContext,
@@ -4588,6 +4588,10 @@ pub fn rav1d_submit_frame(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResu
                 }
             }),
             data_left: state.data_left,
+            hdr: ParseHdrMetadata {
+                content_light: state.content_light.as_deref(),
+                mastering_display: state.mastering_display.as_deref(),
+            },
         };
         match c.sink.frame_begin(&parse_frame) {
             Ok(sink_frame) => {

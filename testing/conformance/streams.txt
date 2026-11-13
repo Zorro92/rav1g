@@ -38,6 +38,11 @@ svt syn-superres-10b-1080p.ivf 64 superres-mode=2
 # and one key frame. Also the stream that testing/conformance/cut_tile_check.py damages for the decode
 # error of a tile whose size does not fit, and decodes on from its next key frame.
 svt syn-tiles-10b-1080p.ivf 40 tile-columns=2:tile-rows=1:keyint=16
+# HDR10: BT.2020 primaries, the PQ transfer, a mastering display colour volume and a content light
+# level (metadata OBUs), two key frames. No other stream of the set has HDR metadata, and of the others
+# only the two DVB-DASH cuts have a colour description (BT.709; BT.2020 with HLG). What the decoder
+# reports of it is held against ffprobe (testing/conformance/colour_check.py, docs/color.md).
+svt syn-hdr10-10b-1080p.ivf 12 keyint=6:color-primaries=9:transfer-characteristics=16:matrix-coefficients=9:chroma-sample-position=topleft:mastering-display=G(0.265,0.69)B(0.15,0.06)R(0.68,0.32)WP(0.3127,0.329)L(1000,0.005):content-light=1000,400
 
 aom av1-1-b8-00-quantizer-00.ivf
 aom av1-1-b8-00-quantizer-01.ivf

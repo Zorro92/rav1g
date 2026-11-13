@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use windows::core::Interface;
 
+use crate::color::{color_of_image, hdr_of_image};
 use crate::device::Device;
 use crate::error::{Error, ErrorCode, text};
 use crate::host::{decoder_own_bytes, frame_fence};
@@ -273,6 +274,7 @@ unsafe extern "C" fn frame_ready(context: *mut c_void, image: *mut c_void) -> c_
     let offset = |plane: usize| {
         if img.planes[plane].is_null() { 0 } else { (img.planes[plane] as usize).wrapping_sub(memory) }
     };
+    let (mastering_display, content_light) = hdr_of_image(img);
     let frame = Frame {
         width: img.d_w,
         height: img.d_h,
@@ -280,6 +282,9 @@ unsafe extern "C" fn frame_ready(context: *mut c_void, image: *mut c_void) -> c_
         monochrome: img.monochrome != 0,
         packed_10x3: img.is_hdr10x3 != 0 && img.bit_depth > 8,
         user_data: img.user_priv as usize as u64,
+        color: color_of_image(img),
+        mastering_display,
+        content_light,
         offsets: [offset(0), offset(1), offset(2)],
         strides: [img.stride[0] as usize, img.stride[1] as usize, img.stride[2] as usize],
         fence: frame_fence(),

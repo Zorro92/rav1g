@@ -137,6 +137,26 @@ typedef enum aom_chroma_sample_position {
   AOM_CSP_RESERVED = 3          /**< Reserved value */
 } aom_chroma_sample_position_t; /**< alias for enum aom_transfer_function */
 
+/*!\brief The HDR metadata of a frame
+ *
+ * What the metadata OBUs of the types METADATA_TYPE_HDR_MDCV (mastering
+ * display colour volume) and METADATA_TYPE_HDR_CLL (content light level) say,
+ * in the units of the bitstream (AV1 specification 6.7.3 and 6.7.4):
+ * chromaticities in 0.16 fixed point, the largest luminance in 24.8 and the
+ * smallest in 18.14 fixed point, both in candelas per square metre; the light
+ * levels in candelas per square metre.
+ */
+typedef struct aom_hdr_metadata {
+  uint8_t has_mdcv; /**< The mdcv_ members are those of an OBU */
+  uint8_t has_cll;  /**< max_cll and max_fall are those of an OBU */
+  uint16_t max_cll;  /**< MaxCLL */
+  uint16_t max_fall; /**< MaxFALL */
+  uint16_t mdcv_primaries[3][2];  /**< x and y of red, green, blue */
+  uint16_t mdcv_white_point[2];   /**< x and y of the white point */
+  uint32_t mdcv_luminance_max;
+  uint32_t mdcv_luminance_min;
+} aom_hdr_metadata_t;
+
 /**\brief Image Descriptor */
 typedef struct aom_image {
   aom_img_fmt_t fmt;                 /**< Image Format */
@@ -191,6 +211,10 @@ typedef struct aom_image {
   void *fb_priv; /**< Frame buffer data associated with the image. */
   void *fb2_priv; /**< external frame buffer data associated with the image. */
   int is_hdr10x3; /**< 1010102 packed format (for hdr only). */
+  /*!\brief The sequence header of the frame has a colour description: cp, tc
+   * and mc are coded, and not the "unspecified" of a header without one. */
+  int color_description_present;
+  aom_hdr_metadata_t hdr; /**< The HDR metadata of the frame. */
 } aom_image_t;   /**< alias for struct aom_image */
 
 /**\brief Representation of a rectangle on a surface */

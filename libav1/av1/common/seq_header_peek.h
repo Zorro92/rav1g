@@ -11,7 +11,8 @@
 
 /*
  * Reads the fields of a sequence header OBU payload that an application needs
- * before a decoder exists: the largest frame size and the bit depth.
+ * before a decoder exists: the largest frame size, the bit depth and the
+ * colour description.
  *
  * The decoder's own parser (read_sequence_header_obu in av1/decoder/obu.c)
  * cannot be used for this: it writes into an AV1Decoder, reports errors with
@@ -57,6 +58,16 @@ typedef struct Av1SeqHeaderPeek {
   int enable_restoration;
   int bit_depth;             /* 8, 10 or 12 */
   int monochrome;
+  /* The rest of color_config(): the colour description. The three code points
+     are 2 (unspecified) without color_description_present_flag. */
+  int color_description_present;
+  int color_primaries;
+  int transfer_characteristics;
+  int matrix_coefficients;
+  int color_range;           /* 1: full range */
+  int subsampling_x;
+  int subsampling_y;
+  int chroma_sample_position;
   uint32_t bits_read;        /* up to and including the last field above */
 } Av1SeqHeaderPeek;
 
@@ -209,6 +220,37 @@ static int av1_peek_sequence_header(const uint8_t *data, size_t size, Av1SeqHead
     if (out->profile == 2 && av1_seq_peek_bits(rb, 1)) out->bit_depth = 12; /* twelve_bit */
   }
   out->monochrome = out->profile == 1 ? 0 : (int)av1_seq_peek_bits(rb, 1); /* mono_chrome */
+
+  /* color_config(), the colour description */
+  out->color_description_present = (int)av1_seq_peek_bits(rb, 1);
+  out->color_primaries = out->transfer_characteristics = out->matrix_coefficients = 2; /* unspecified */
+  if (out->color_description_present) {
+    out->color_primaries = (int)av1_seq_peek_bits(rb, 8);
+    out->transfer_characteristics = (int)av1_seq_peek_bits(rb, 8);
+    out->matrix_coefficients = (int)av1_seq_peek_bits(rb, 8);
+  }
+  if (out->monochrome) {
+    out->color_range = (int)av1_seq_peek_bits(rb, 1);
+    out->subsampling_x = out->subsampling_y = 1;
+  } else if (out->color_primaries == 1 && out->transfer_characteristics == 13 &&
+             out->matrix_coefficients == 0) {
+    /* BT.709 primaries, the sRGB transfer and the identity matrix: RGB, full range, 4:4:4 */
+    out->color_range = 1;
+  } else {
+    out->color_range = (int)av1_seq_peek_bits(rb, 1);
+    if (out->profile == 0) {
+      out->subsampling_x = out->subsampling_y = 1;
+    } else if (out->profile == 2) {
+      if (out->bit_depth == 12) {
+        out->subsampling_x = (int)av1_seq_peek_bits(rb, 1);
+        if (out->subsampling_x) out->subsampling_y = (int)av1_seq_peek_bits(rb, 1);
+      } else {
+        out->subsampling_x = 1;
+      }
+    }
+    if (out->subsampling_x && out->subsampling_y)
+      out->chroma_sample_position = (int)av1_seq_peek_bits(rb, 2);
+  }
 
   if (rb->failed) return AV1_SEQ_PEEK_TRUNCATED;
   out->bits_read = (uint32_t)rb->pos;

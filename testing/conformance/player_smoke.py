@@ -12,6 +12,8 @@ functions as in the packages. This script gives it the task file the player read
 
 - the log names the Rust library ("LIBRARY rav1g ... the Rust host");
 - every task ends with "MD5 is OK";
+- every task has one "COLOUR" line, what its stream says about its colour: the HDR10 stream its colour
+  description, mastering display and light levels, the vectors none;
 - the log has no error line;
 - the launch ends (the player says so), and no device is lost;
 - a launch without a task file ends as well: it logs that it has no tasks and does not sit idle.
@@ -31,15 +33,23 @@ import sys
 # The tasks, as lines of the player's task file: a small 8-bit vector, 10-bit with four threads and three
 # frame slots, a stream whose frames change their size (Matroska, the reduced back buffer, -r), spatial
 # layers with the timing run and the clears on the decode thread (the other tasks have them on the
-# completion thread, the default).
+# completion thread, the default), and the HDR10 stream.
 TASKS = [
     '-i /aom/av1-1-b8-01-size-66x66.ivf -md5_frame_check -nopresent -frate -1',
     '-i /aom/av1-1-b10-00-quantizer-00.ivf -md5_frame_check -nopresent -frate -1 -t 4 -slots 3',
     '-i /aom/av1-1-b8-03-sizeup.mkv -md5_frame_check -nopresent -frate -1 -t 4 -r -lowmem',
     '-i /aom/av1-1-b8-22-svc-L2T1.ivf -md5_frame_check -nopresent -frate -1 -gputime -syncclear',
+    '-i /svt/syn-hdr10-10b-1080p.ivf -md5_frame_check -nopresent -frate -1',
 ]
+# The player's line about the colour of the HDR10 stream (rav1g_color_text of rav1g.h; docs/color.md): the
+# colour description, the mastering display and the light levels, as the stream was encoded (streams.txt).
+HDR10 = ('COLOUR frame 0: primaries 9 (BT.2020) transfer 16 (PQ) matrix 9 (BT.2020 NCL) range limited chroma pos 2 '
+         '(colocated); MDCV R 0.6800,0.3200 G 0.2650,0.6900 B 0.1500,0.0600 W 0.3127,0.3290 L 0.0050..1000 cd/m2 '
+         '[44564,20972 17367,45220 9830,3932 20493,21561 256000 82]; CLL 1000/400')
+NO_COLOUR = ('COLOUR frame 0: primaries 2 (unspecified) transfer 2 (unspecified) matrix 2 (unspecified) range limited '
+             'chroma pos 0 (unknown), no colour description; no MDCV; no CLL')
 ENDED = 'PLAYERSMOKE the player ended its launch'
-SHOWN = re.compile(r'LIBRARY |MD5 |ERROR|PLAYERSMOKE|Frame slots|Bye|No args')
+SHOWN = re.compile(r'LIBRARY |MD5 |ERROR|PLAYERSMOKE|Frame slots|Bye|No args|COLOUR ')
 
 
 def launch(tool, tool_args, root, log, timeout):
@@ -108,6 +118,12 @@ def main():
     ok = text.count('MD5 is OK')
     if ok != len(TASKS):
         problems.append('%d of %d tasks of the player ended with "MD5 is OK"' % (ok, len(TASKS)))
+    # The colour of each stream, once per task: the HDR10 stream with what it carries, the vectors with
+    # no colour description.
+    colour = [line[line.index('COLOUR '):] for line in text.split('\n') if 'COLOUR ' in line]
+    if sorted(colour) != sorted([HDR10] + [NO_COLOUR] * (len(TASKS) - 1)):
+        problems.append('the COLOUR lines of the player are not one per task with the HDR10 stream\'s among them: %s'
+                        % ' | '.join(colour))
 
     # Without a task file: the player says that it has no tasks, and the launch ends.
     empty = os.path.join(args.out, 'empty')

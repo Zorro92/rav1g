@@ -42,7 +42,8 @@ use rav1g_parse::rav1d::include::dav1d::headers::{
     Rav1dRestorationType, Rav1dSequenceHeader,
 };
 use rav1g_parse::rav1d::parse::{
-    ParseFrame, ParsePalette, ParseSettings, ParseShowExisting, ParseSuperblock, ParseTile, Parser,
+    ParseColorCodes, ParseFrame, ParseHdrMetadata, ParsePalette, ParseSettings, ParseShowExisting, ParseSuperblock,
+    ParseTile, Parser,
 };
 use rav1g_parse::sink::{FrameMemory, SecondModeInfo, Sink, SinkHost, SinkTimer, TileMemory};
 
@@ -58,7 +59,7 @@ use super::types::Av1Core;
 use crate::sys;
 use crate::sys::parser::{
     AV1_COMMON, AV1Decoder, INVALID_IDX, REF_NO_SCALE, RESTORE_NONE, RESTORE_SGRPROJ, RESTORE_SWITCHABLE,
-    RESTORE_WIENER, RefCntBuffer, RestorationInfo, TileInfo, WarpedMotionParams, aom_film_grain_t,
+    RESTORE_WIENER, RefCntBuffer, RestorationInfo, TileInfo, WarpedMotionParams, aom_film_grain_t, aom_hdr_metadata_t,
     av1_decoded_frame_buffer_t, av1_tile_data,
 };
 
@@ -101,6 +102,8 @@ struct State {
     /// The frame in parse, and the slots it refreshes.
     cur: *mut RefCntBuffer,
     refresh: u8,
+    /// The colour description of the sequence, as its header codes it.
+    color: ParseColorCodes,
     /// The data of the decode call.
     unit: *const u8,
     unit_len: usize,
@@ -139,6 +142,7 @@ impl State {
             map: [std::ptr::null_mut(); 8],
             cur: std::ptr::null_mut(),
             refresh: 0,
+            color: ParseColorCodes::default(),
             unit: std::ptr::null(),
             unit_len: 0,
             parse_start: 0,
@@ -400,6 +404,7 @@ unsafe fn fill_header(state: &mut State, dec: *mut Av1Core, frame: &ParseFrame<'
     let seq = frame.seq_hdr;
     let hdr = frame.frame_hdr;
     let map = state.map;
+    let color = state.color;
     let pbi = &mut *state.pbi;
     let cm = &mut pbi.common;
     let inter = matches!(hdr.frame_type, Rav1dFrameType::Inter | Rav1dFrameType::Switch);
@@ -428,6 +433,14 @@ unsafe fn fill_header(state: &mut State, dec: *mut Av1Core, frame: &ParseFrame<'
     sp.order_hint_info.order_hint_bits_minus_1 = c_int::from(seq.order_hint_n_bits) - 1;
     sp.order_hint_info.enable_dist_wtd_comp = c_int::from(seq.jnt_comp);
     sp.order_hint_info.enable_ref_frame_mvs = c_int::from(seq.ref_frame_mvs);
+    // The colour description (`av1_read_color_config`), which no stage reads: the output image of the
+    // frame takes it from here for the application.
+    sp.color_description_present_flag = u8::from(seq.color_description_present);
+    sp.color_primaries = color.primaries.into();
+    sp.transfer_characteristics = color.transfer.into();
+    sp.matrix_coefficients = color.matrix.into();
+    sp.color_range = c_int::from(seq.color_range.is_full());
+    sp.chroma_sample_position = seq.chr as _;
 
     // The frame.
     cm.current_frame.frame_type = hdr.frame_type as u8;
@@ -623,6 +636,26 @@ unsafe fn fill_header(state: &mut State, dec: *mut Av1Core, frame: &ParseFrame<'
     // SAFETY: the caller's contract.
     unsafe { film_grain(cm, &map, cur_frame, seq, hdr) };
     cm.cur_frame = cur;
+    cm.hdr_metadata = hdr_metadata(&frame.hdr);
+}
+
+/// The HDR metadata rav1d has for a frame, as the output image of the frame carries it.
+fn hdr_metadata(hdr: &ParseHdrMetadata<'_>) -> aom_hdr_metadata_t {
+    // SAFETY: a C struct of numbers.
+    let mut out: aom_hdr_metadata_t = unsafe { std::mem::zeroed() };
+    if let Some(cll) = hdr.content_light {
+        out.has_cll = 1;
+        out.max_cll = cll.max_content_light_level;
+        out.max_fall = cll.max_frame_average_light_level;
+    }
+    if let Some(mdcv) = hdr.mastering_display {
+        out.has_mdcv = 1;
+        out.mdcv_primaries = mdcv.primaries;
+        out.mdcv_white_point = mdcv.white_point;
+        out.mdcv_luminance_max = mdcv.max_luminance;
+        out.mdcv_luminance_min = mdcv.min_luminance;
+    }
+    out
 }
 
 impl SinkHost for SlotHost {
@@ -630,7 +663,7 @@ impl SinkHost for SlotHost {
         self.dec.cast()
     }
 
-    fn sequence(&self, seq: &Rav1dSequenceHeader, new: bool) -> Result<(), ()> {
+    fn sequence(&self, seq: &Rav1dSequenceHeader, color: ParseColorCodes, new: bool) -> Result<(), ()> {
         // SAFETY: the thread of the decode call, between frames.
         unsafe {
             let state = self.state();
@@ -662,6 +695,7 @@ impl SinkHost for SlotHost {
             if new {
                 state.clear_map(self.dec);
             }
+            state.color = color;
             // The operating point the application chose, as rav1d takes it: the first one when the
             // sequence does not have that many.
             let point = usize::try_from(state.pbi.operating_point).unwrap_or(0);
@@ -691,6 +725,8 @@ impl SinkHost for SlotHost {
             (*cm).film_grain_params = (*shown).film_grain_params;
             (*cm).temporal_layer_id = c_int::from(show.frame_hdr.temporal_id);
             (*cm).spatial_layer_id = c_int::from(show.frame_hdr.spatial_id);
+            // The frame is shown with the HDR metadata of now, as rav1d shows it.
+            (*cm).hdr_metadata = hdr_metadata(&show.hdr);
             let mut fb: av1_decoded_frame_buffer_t = std::mem::zeroed();
             let image_state = rav1g_decode_sef_begin(pbi, &mut fb);
             if image_state == 2 {

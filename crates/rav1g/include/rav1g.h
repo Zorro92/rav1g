@@ -15,13 +15,17 @@
  *   1. rav1g_device_create on the application's D3D12 device and queue (or without, for a device of the
  *      decoder's own); rav1g_device_wait_pipelines.
  *   2. rav1g_peek_stream_info on the temporal units of the stream until one starts with a key frame: the
- *      frame size and bit depth of the sequence.
+ *      frame size, the bit depth and the colour description of the sequence.
  *   3. rav1g_settings_default, the size and bit depth of the sequence, the output callbacks;
  *      rav1g_decoder_create.
  *   4. rav1g_decoder_decode per temporal unit. The decoder takes an image from the output for every frame
  *      that will be shown (get_image) and hands the frame over when the GPU has written it (frame).
  *      RAV1G_STATUS_NEEDS_RECONFIGURE: the stream went on with a sequence the decoder does not fit.
  *   5. rav1g_decoder_drain, rav1g_decoder_destroy, rav1g_device_destroy.
+ *
+ * Colour: the decoder puts out the samples of the stream and converts nothing. What they mean is in
+ * Rav1gStreamInfo::color and, with the HDR metadata, in every Rav1gFrame; the application that shows the
+ * frames has to use it (docs/color.md).
  *
  * A decoder is used by one thread at a time. The callbacks are called from the decoder's threads.
  */
@@ -147,6 +151,103 @@ typedef struct av1_stage_dump av1_stage_dump;
 #define RAV1G_POISON_BUFFERS 2
 
 /*
+ `Rav1gColorInfo::primaries`, the values an application meets (AV1 specification 6.4.2, ITU-T H.273):
+ BT.709, which is also sRGB.
+ */
+#define RAV1G_COLOR_PRIMARIES_BT709 1
+
+/*
+ The stream does not say; so do `RAV1G_TRANSFER_UNSPECIFIED` and `RAV1G_MATRIX_UNSPECIFIED`.
+ */
+#define RAV1G_COLOR_PRIMARIES_UNSPECIFIED 2
+
+/*
+ BT.601 with 625 lines (PAL).
+ */
+#define RAV1G_COLOR_PRIMARIES_BT470BG 5
+
+/*
+ BT.601 with 525 lines (NTSC).
+ */
+#define RAV1G_COLOR_PRIMARIES_BT601 6
+
+/*
+ BT.2020 and BT.2100: UHD and HDR video.
+ */
+#define RAV1G_COLOR_PRIMARIES_BT2020 9
+
+/*
+ Display P3.
+ */
+#define RAV1G_COLOR_PRIMARIES_SMPTE432 12
+
+/*
+ `Rav1gColorInfo::transfer_characteristics`: BT.709.
+ */
+#define RAV1G_TRANSFER_BT709 1
+
+#define RAV1G_TRANSFER_UNSPECIFIED 2
+
+/*
+ BT.601.
+ */
+#define RAV1G_TRANSFER_BT601 6
+
+#define RAV1G_TRANSFER_SRGB 13
+
+/*
+ BT.2020 for 10 bits: the curve of BT.709.
+ */
+#define RAV1G_TRANSFER_BT2020_10BIT 14
+
+/*
+ SMPTE ST 2084, the perceptual quantiser: HDR10.
+ */
+#define RAV1G_TRANSFER_PQ 16
+
+/*
+ ARIB STD-B67, hybrid log-gamma: HLG.
+ */
+#define RAV1G_TRANSFER_HLG 18
+
+/*
+ `Rav1gColorInfo::matrix_coefficients`: BT.709.
+ */
+#define RAV1G_MATRIX_BT709 1
+
+#define RAV1G_MATRIX_UNSPECIFIED 2
+
+/*
+ BT.601 with 625 lines.
+ */
+#define RAV1G_MATRIX_BT470BG 5
+
+/*
+ BT.601 with 525 lines; the same matrix as `RAV1G_MATRIX_BT470BG`.
+ */
+#define RAV1G_MATRIX_BT601 6
+
+/*
+ BT.2020 with non-constant luminance: HDR10 and HLG video.
+ */
+#define RAV1G_MATRIX_BT2020_NCL 9
+
+/*
+ `Rav1gColorInfo::chroma_sample_position`: the stream does not say.
+ */
+#define RAV1G_CHROMA_SAMPLE_POSITION_UNKNOWN 0
+
+/*
+ In the column of the left luma samples, between the two rows ("left"): MPEG-2 and most HD video.
+ */
+#define RAV1G_CHROMA_SAMPLE_POSITION_VERTICAL 1
+
+/*
+ On the top left luma sample ("top left"): BT.2020 and BT.2100 video.
+ */
+#define RAV1G_CHROMA_SAMPLE_POSITION_COLOCATED 2
+
+/*
  The budget guard refuses a decoder whose device buffers would leave the application less than this
  many bytes (`Rav1gSettings::memory_available`).
  */
@@ -226,6 +327,47 @@ typedef struct Rav1gDevice Rav1gDevice;
 typedef struct Rav1gParseDigest Rav1gParseDigest;
 
 /*
+ The colour description of a sequence header (`color_config` of the AV1 specification): what the
+ samples of its frames mean. The decoder does not use it; the application that shows the frames does
+ (docs/color.md).
+
+ The three code points are the numbers of the stream (AV1 specification 6.4.2, which are those of
+ ITU-T H.273), also values the specification reserves; the `RAV1G_COLOR_PRIMARIES_*`,
+ `RAV1G_TRANSFER_*` and `RAV1G_MATRIX_*` constants name the ones an application meets. The matrix and
+ the range are what the conversion to RGB needs. The transfer says what output the frames want: PQ
+ (with BT.2020 primaries: HDR10) an HDR10 output, HLG an HLG output or a conversion to PQ, the others
+ an SDR output.
+ */
+typedef struct Rav1gColorInfo {
+  /*
+   The header has a colour description (`color_description_present_flag`). Without one the three
+   code points are 2 (unspecified), and the application decides: what a container says, or BT.709.
+   */
+  bool description_present;
+  /*
+   `color_primaries`.
+   */
+  uint8_t primaries;
+  /*
+   `transfer_characteristics`.
+   */
+  uint8_t transfer_characteristics;
+  /*
+   `matrix_coefficients`: what turns luma and chroma into red, green and blue.
+   */
+  uint8_t matrix_coefficients;
+  /*
+   `color_range`: true for full range (0 to 255 in 8 bits), false for limited range (luma 16 to
+   235, chroma 16 to 240 in 8 bits; times 4 in 10 bits). Always coded; it is needed with the matrix.
+   */
+  bool full_range;
+  /*
+   `chroma_sample_position`: `RAV1G_CHROMA_SAMPLE_POSITION_*`, 3 is reserved.
+   */
+  uint8_t chroma_sample_position;
+} Rav1gColorInfo;
+
+/*
  What the sequence header of a temporal unit says about the stream.
  */
 typedef struct Rav1gStreamInfo {
@@ -242,7 +384,56 @@ typedef struct Rav1gStreamInfo {
    The temporal unit starts with a key frame.
    */
   bool is_key_frame;
+  /*
+   The sequence has a luma plane only.
+   */
+  bool monochrome;
+  /*
+   The colour description of the sequence header. Every `Rav1gFrame` has the one of its own
+   sequence; HDR metadata is not in a sequence header and comes with the frames.
+   */
+  struct Rav1gColorInfo color;
 } Rav1gStreamInfo;
+
+/*
+ The mastering display colour volume of a frame (the metadata OBU `METADATA_TYPE_HDR_MDCV`, SMPTE ST
+ 2086), in the fixed point of the OBU. That is not the fixed point of `DXGI_HDR_METADATA_HDR10`: a
+ chromaticity is `value / 65536` here and `value / 50000` there, the largest luminance `value / 256`
+ cd/m² here and whole cd/m² there, the smallest `value / 16384` cd/m² here and `value / 10000` there
+ (docs/color.md has the conversion). The primaries are red, green, blue, in this order.
+ */
+typedef struct Rav1gMasteringDisplay {
+  /*
+   The chromaticity (x, y) of red, green and blue, in 0.16 fixed point.
+   */
+  uint16_t primaries[3][2];
+  /*
+   The chromaticity (x, y) of the white point, in 0.16 fixed point.
+   */
+  uint16_t white_point[2];
+  /*
+   The largest luminance in cd/m², in 24.8 fixed point.
+   */
+  uint32_t max_luminance;
+  /*
+   The smallest luminance in cd/m², in 18.14 fixed point.
+   */
+  uint32_t min_luminance;
+} Rav1gMasteringDisplay;
+
+/*
+ The content light level of a frame (the metadata OBU `METADATA_TYPE_HDR_CLL`, CTA-861.3), in cd/m².
+ */
+typedef struct Rav1gContentLightLevel {
+  /*
+   MaxCLL: the brightest sample of the content.
+   */
+  uint16_t max_content_light_level;
+  /*
+   MaxFALL: the highest average of a frame.
+   */
+  uint16_t max_frame_average_light_level;
+} Rav1gContentLightLevel;
 
 /*
  What the decoder needs an output image for: a frame that is going to be output.
@@ -336,6 +527,28 @@ typedef struct Rav1gFrame {
    */
   void *d3d12_fence;
   uint64_t fence_value;
+  /*
+   The colour description of the frame's sequence header. A stream can change it with a new
+   sequence, so every frame has the one that holds for it.
+   */
+  struct Rav1gColorInfo color;
+  /*
+   `mastering_display` is the mastering display colour volume that goes with the frame; false when
+   the stream has sent none (the struct is zero then).
+
+   Which frames a metadata OBU goes with: every frame from the OBU on, in decoding order, until
+   another OBU of its kind replaces it or a sequence header that differs from the one before starts
+   a new sequence; a frame that a later temporal unit shows again (`show_existing_frame`) has what
+   holds when it is shown. So a frame has the metadata that is current for it, and an application
+   that wants "the latest" takes it from the last frame it got.
+   */
+  bool has_mastering_display;
+  /*
+   `content_light` is the content light level that goes with the frame, by the same rule.
+   */
+  bool has_content_light;
+  struct Rav1gMasteringDisplay mastering_display;
+  struct Rav1gContentLightLevel content_light;
 } Rav1gFrame;
 
 /*
@@ -524,6 +737,29 @@ const char *rav1g_version(void);
  `data` is valid for `size` bytes; `info` is valid for writing.
  */
 enum Rav1gStatus rav1g_peek_stream_info(const uint8_t *data, size_t size, struct Rav1gStreamInfo *info);
+
+/*
+ The colour of a frame, or of a stream, as one line for a log:
+
+ "primaries 9 (BT.2020) transfer 16 (PQ) matrix 9 (BT.2020 NCL) range limited chroma pos 2 (colocated);
+ MDCV R 0.6800,0.3200 G 0.2650,0.6900 B 0.1500,0.0600 W 0.3127,0.3290 L 0.0050..1000 cd/m2 [44564,20972
+ 17367,45220 9830,3932 20493,21561 256000 82]; CLL 1000/400"
+
+ The code points with their names, ", no colour description" behind them when the header has none;
+ the mastering display in its units (x,y of red, green, blue and the white point, the smallest and the
+ largest luminance) and, in brackets, as the numbers of the OBU; MaxCLL/MaxFALL. "no MDCV" and "no CLL"
+ for a null pointer. Writes the text with its terminating zero into `text`, cut to `size` bytes, and
+ returns the length of the whole text without the zero.
+
+ # Safety
+ `color` is valid; `mastering_display` and `content_light` are null or valid; `text` is valid for
+ writing `size` bytes, or `size` is 0.
+ */
+size_t rav1g_color_text(const struct Rav1gColorInfo *color,
+                        const struct Rav1gMasteringDisplay *mastering_display,
+                        const struct Rav1gContentLightLevel *content_light,
+                        char *text,
+                        size_t size);
 
 /*
  A device for decoders. `d3d12_device` is the application's `ID3D12Device *`, or null for a device of
