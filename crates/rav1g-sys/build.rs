@@ -66,7 +66,11 @@ const REPLACED_BY_RUST: &[&str] = &[
 ///   The linker is given the libraries that `lib.exe` or `llvm-lib` wrote.
 /// - Under MSVC the link needs `/LTCG`. `link.exe` starts again with it when it meets such an object, so
 ///   a program links without (the tests of the `rav1g` crate do); the build scripts of this crate and of
-///   `rav1g-dec` pass it so that it does not have to.
+///   `rav1g-dec` pass it so that it does not have to. They pass `/LTCG:incremental`, which is what the
+///   MSBuild projects link with: the code generator of the link is not the same in the two modes, and the
+///   entropy decoder it makes with plain `/LTCG` is slower (other code for the same functions, the symbol
+///   decoder among them; docs/rust-port.md). The mode leaves an `.iobj` and an `.ipdb` file next to the
+///   program in the target directory.
 ///
 /// `RAV1G_C_LTO` chooses for a measurement: `off`, `thin` or `full` (clang-cl), `on` (the default: `/GL`
 /// under MSVC, full LTO under clang-cl, which was the faster of the two there).
@@ -285,7 +289,7 @@ fn main() {
     }
     if lto == Lto::Msvc {
         // For the tests of this crate; a build script cannot give it to the programs of other crates.
-        println!("cargo:rustc-link-arg=/LTCG");
+        println!("cargo:rustc-link-arg=/LTCG:incremental");
     }
     println!("cargo:rustc-link-lib=d3d12");
     println!("cargo:rustc-link-lib=dxgi");
