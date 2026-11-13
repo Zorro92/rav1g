@@ -17,6 +17,13 @@ decoder a Rust API and a C ABI for embedding (the test player, later Bale). It d
 
 Output must stay byte-identical. Speed must stay within noise of `v0.3.0` on the console.
 
+The project's goals, in order (2026-11-12): heavy 4K at 30 fps in real time (at most 33.3 ms per frame),
+then faster still, then efficiency: decoding while leaving as much of the CPU, GPU and memory as possible
+to the application. Speed work is judged on 4K first; a change that costs a little below 4K is acceptable
+while 1080p60 and 1440p60 keep clear headroom (16.7 ms per frame). Phase 1 only has to keep the speed of
+`v0.3.0`; reaching 4K30 is the work of phase 2 (frame-parallel parsing) and of the GPU stages, and once it
+is reached, frame threads and memory are sized to the target rather than to the maximum.
+
 ## Approach: replace the host file by file, behind the existing C interfaces
 
 The C parser and the C++ host talk through plain C functions and shared C structs: the parser calls

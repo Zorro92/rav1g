@@ -146,7 +146,9 @@ C++ of the decoder. Step 5 is the Rust API and the C ABI the test player links),
 inter and intra prediction on the GPU (a measured `-interfast` prototype showed that inter time is per
 block and per dispatch, not filtering; see
 [gpu-av1-decoder.md](docs/gpu-av1-decoder.md)) and entropy decoding on the CPU (frame-parallel or a
-faster parser). The 41.7 ms budget for heavy 4K content is not met yet.
+faster parser). The goals, in order: heavy 4K at 30 fps in real time (at most 33.3 ms per frame; not met
+yet, nor the 41.7 ms of 24 fps), then faster still, then decoding with as much of the CPU, GPU and
+memory as possible left to the application.
 
 ## Documentation
 
