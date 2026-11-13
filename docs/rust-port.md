@@ -1567,6 +1567,14 @@ sequences of the order check, 137 of 137 with `-poisonmi` and with `-poisonbuf`,
 are 0.2.125.0 (`rav1g-testplayer-x64-43376471477`, the default) and 0.2.125.2
 (`rav1g-testplayer-msvc-x64-43376471477`). **These are the packages for the console.**
 
+**On the console** (2026-11-13): both packages install over the step-5 packages and log their `LIBRARY`
+line (`clang-cl, full LTO, DLL runtime` for `.0`, `MSVC, /GL, DLL runtime` for `.2`). The md5 set, 15
+streams in one launch through the budget guard, is 15 of 15 on each, with no error line. `-gputime`, one
+run each, ms per output frame, `.0` / `.2`: `j4k40` wall 49.4 / 50.6, decode thread 47.4 / 48.5, parser
+40.5 / 41.9, GPU busy 18.4 / 18.4; `t40x1ld` wall 44.5 / 44.9, parser 34.1 / 34.4, GPU 12.1; `fg4k_300` wall
+23.6 / 23.6 (GPU-bound); `a1_8b4k_300` wall 18.5 / 18.9. Within a run or two of the step-5 figures above,
+the clang build ahead.
+
 **Open after phase 1:**
 
 - **The rest of the host-pool clean-up.** The queues are still the ring of 100 pointers behind a
