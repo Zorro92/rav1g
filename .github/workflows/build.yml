@@ -1278,7 +1278,8 @@ jobs:
 
   # The program of the Linux build is a Windows program like the other: it decodes the conformance set on
   # WARP against the same references and expected.txt, and runs the decoder code of the test player, which
-  # in this program is compiled by clang-cl, as the C of the default package of the player is.
+  # in this program is compiled by clang-cl, as the C of the default package of the player is. The checks
+  # of the rust job that do not depend on a second run of the set follow with it.
   rust-cross-run:
     needs: [rust-cross, conformance-streams]
     runs-on: windows-latest
@@ -1319,6 +1320,41 @@ jobs:
             --out out/player-smoke "--title=the Rust library built on Linux (cargo xwin, clang-cl)"
           if ($LASTEXITCODE -ne 0) { throw "the player's decoder code on the Rust library of the Linux build: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
 
+      # The other checks of the rust job with this program (the comments are there): decode errors in cut
+      # streams through the Rust interface and with the player's decoder code, the order check, the part
+      # of the set with -poisonmi and with -poisonbuf, and the whole set with -interfast.
+      - name: Decode error in a cut stream, the rav1g-dec of the Linux build
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/cut_tile_check.py --tool rav1g-dec-xwin/rav1g-dec.exe `
+            --player-smoke rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams --out out/cut-tile
+          if ($LASTEXITCODE -ne 0) { throw "decode error check with the rav1g-dec of the Linux build: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
+
+      - name: Order check with the rav1g-dec of the Linux build
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/order_check.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
+            --out out/order-check "--title=rav1g-dec built on Linux (cargo xwin, clang-cl)"
+          if ($LASTEXITCODE -ne 0) { throw "order check with the rav1g-dec of the Linux build: exit code $LASTEXITCODE (1: a stream is wrong behind other streams, 2: the check could not be done)" }
+
+      - name: Conformance with -poisonmi, with -poisonbuf and with -interfast, the rav1g-dec of the Linux build
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $part = '--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)'
+          $runs = @(@{ name = 'poisonmi'; args = '-poisonmi'; only = $part }, @{ name = 'poisonbuf'; args = '-poisonbuf'; only = $part },
+            @{ name = 'interfast'; args = '-interfast'; only = '--only=' })
+          $failed = @()
+          foreach ($run in $runs) {
+            python testing/conformance/run.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
+              --out "out/conformance-$($run.name)" --threads 4 "--tool-args=$($run.args)" `
+              "--title=rav1g-dec built on Linux, with $($run.args)" $run.only
+            if ($LASTEXITCODE -ne 0) { $failed += "$($run.args): exit code $LASTEXITCODE" }
+          }
+          if ($failed.Count) { throw "conformance with the rav1g-dec of the Linux build: $($failed -join '; ')" }
+
       - name: Preserve the results, the per-stream logs and md5 files
         if: always()
         uses: actions/upload-artifact@v7
@@ -1326,7 +1362,10 @@ jobs:
           name: rav1g-dec-xwin-conformance-${{ github.run_id }}
           path: |
             out/conformance/
+            out/conformance-*/
             out/player-smoke/
+            out/cut-tile/
+            out/order-check/
           if-no-files-found: warn
 
   # Host check of how the shaders hand data between the threads of a thread group. A GPU promises
