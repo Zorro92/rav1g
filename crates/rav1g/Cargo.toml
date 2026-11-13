@@ -8,7 +8,19 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# The static library (rav1g.lib) is for an application that is not Rust: it links it, and the two
+# libraries of the C next to it (RAV1G_C_LIB_DIR), through include/rav1g.h. A dynamic library (--crate-type
+# cdylib) is the same with the C linked in. docs/rust-port.md, step 5.
+[lib]
+crate-type = ["rlib", "staticlib"]
+
 [features]
+# The interface for C: the functions of include/rav1g.h (src/capi.rs).
+capi = []
+# For an application in an app container (a UWP app): the C is compiled for that family of the Windows
+# API, as the MSBuild project of the library compiles it. The DLL runtime such an application links is
+# chosen with the target feature (RUSTFLAGS=-Ctarget-feature=-crt-static), not here.
+app-container = ["rav1g-sys/app-container"]
 uavsync = ["rav1g-sys/uavsync"]
 
 [dependencies]

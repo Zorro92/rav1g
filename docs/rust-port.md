@@ -2,7 +2,9 @@
 
 Status: started 2026-11-12; steps 1 (build skeleton, `rav1g-dec`), 2 (bindings for the shared structs,
 layout tests), 3 (leaf modules) and 4 (frame pipeline: the whole host is Rust in the cargo build, which
-compiles no C++ of the decoder any more) are in the tree, see [Progress](#progress). Step 5 is next.
+compiles no C++ of the decoder any more) are in the tree, and of step 5 the Rust interface and the
+interface for C (`rav1g.h`); see [Progress](#progress). Left of step 5: the UWP test player on the Rust
+library.
 Branch `main`. The C++ decoder at tag `v0.3.0` (branch `cpp`) is the reference: every step below has to
 decode the conformance set md5-identically to it and to dav1d.
 
@@ -60,10 +62,11 @@ At the end no C++ remains in the decoder: the C parser, the HLSL and Rust.
 
 | Path | What |
 | --- | --- |
-| `crates/rav1g` | the decoder: Rust host modules, API, `capi` feature for the C ABI |
+| `crates/rav1g` | the decoder: Rust host modules, API, `capi` feature for the C ABI (`include/rav1g.h`) |
 | `crates/rav1g-sys` | builds the C parser with `cc` (with it three C files of its own: the macros of the C interface as functions, the host functions that raise the decoder's error, the shader bytecode table); `bindgen` bindings |
 | `crates/rav1g-shaders` | shader bytecode: `build.rs` runs DXC (see Requirements) and embeds the DXIL with `include_bytes!` |
 | `tools/rav1g-dec` | command-line decoder for conformance, md5 and stage dumps |
+| `tools/rav1g-header` | writes `rav1g.h` from `crates/rav1g/src/capi.rs` with `cbindgen`, or checks it |
 | `libav1/`, `testing/` | as today; C++ files leave `libav1/dx` as steps 3-4 replace them |
 
 Dependencies: `windows` (D3D12/DXGI bindings), `cc`, `bindgen`, `cbindgen`. Edition 2024, stable Rust.
@@ -1031,6 +1034,166 @@ Seen on the way, not part of the port: on the local decoder (wine, vkd3d, lavapi
 the shared back buffer (`-lowmemparts 0`) gives wrong frames for 147 of the 244 vectors, with the C++
 frame pipeline as with the Rust one; on WARP the same configuration decodes right (the case
 `1080p-10bit-nolowmem` of the "MEMORY" lines passes its md5 check with both programs). Not looked into.
+
+### Step 5: Rust API and C ABI (2026-11-12)
+
+Three parts: what an application in an app container needs of the library (the C runtime, the imports),
+the two interfaces, and the UWP test player on the Rust library.
+
+#### Part 1: the C runtime and the app container
+
+**The C runtime.** The programs of the workspace link the static runtime (`+crt-static` in
+`.cargo/config.toml`); a UWP app links the DLL runtime of the VCLibs framework package. The library for
+such an application is built with the target feature switched off, in a target directory of its own so
+that the two builds do not replace each other:
+
+```
+CARGO_ENCODED_RUSTFLAGS=-Ctarget-feature=-crt-static<0x1f>--cfg<0x1f>windows_slim_errors
+RAV1G_C_LIB_DIR=<directory>
+cargo build --release -p rav1g --lib --features capi,app-container --target-dir target/app-container
+```
+
+- `cc` compiles the C with `/MD` when the target feature is off (it reads `CARGO_CFG_TARGET_FEATURE`), so
+  the build script needs no switch of its own. Nothing changes for `rav1g-dec`.
+- `CARGO_ENCODED_RUSTFLAGS` (flags separated by the byte 0x1f) and not `RUSTFLAGS`: with plain cargo
+  either replaces the flags of `.cargo/config.toml`, but `cargo xwin` 0.23.1 adds the flags of that file
+  behind those of `RUSTFLAGS`, and the static runtime wins. The encoded variable is the same everywhere.
+- `--features app-container`: the C is compiled with `WINAPI_FAMILY=WINAPI_FAMILY_APP`, which is what
+  MSBuild defines for `libav1.vcxproj`: the headers of the Windows SDK then declare only what an app
+  container application may call, so the C cannot use anything else.
+- The crate is a `staticlib` as well as an `rlib`: `rav1g.lib`. The two libraries of the C
+  (`rav1g_c.lib`, `rav1g_c_speed.lib`) are not in it (link time optimisation: see "The entropy decoder
+  with link time optimisation"); `RAV1G_C_LIB_DIR` names a directory the build copies them to. An
+  application links the three.
+- Which runtime DLL the program then imports from is decided by its link: with the import libraries of
+  the player's MSBuild environment (the `store` directory of the toolset) it is `vcruntime140_app.dll`.
+
+**The app container.** The question was whether the standard library of `x86_64-pc-windows-msvc`, which
+does not care about app containers, can be in a UWP app, or whether the tier-3 target
+`x86_64-uwp-windows-msvc` (nightly, `-Zbuild-std`) is needed. Answer: the stable target is used. The
+analysis of the imports is GPT 6.1 Sol's (which component brings which import, what the linker does with
+them, what is known about the console), from a DLL that has the interface of the library linked with
+`lld-link /appcontainer`; the numbers below are of the same link with the functions of `rav1g.h`.
+
+- **Linked the way cargo links (the Rust library first): 48 functions from `kernel32.dll`**, two from
+  `ntdll.dll`, one from `oleaut32.dll`. The C++ player imports from none of the three: its Win32
+  functions come through the API sets that `WindowsApp.lib` names (`api-ms-win-core-*.dll`).
+- **Where the 48 come from.** Not from the standard library: it declares its functions by name and takes
+  them from whatever import library the link has. They come from the `windows` crates
+  (`windows-link` 0.2.1), which always declare their functions as raw imports (`raw-dylib`) of a named
+  DLL, for every function of every module that is enabled, used or not: the `rav1g.lib` that was looked
+  at has 1,032 such import members, 365 of them for `kernel32.dll`. The linker looks for a function first in the library whose
+  object asked for it, so a call of the standard library, of the C or of the C runtime that is in
+  `rav1g.lib` finds the `kernel32.dll` member there before it looks at `WindowsApp.lib`.
+  `/NODEFAULTLIB:kernel32.lib` changes nothing: the members are in `rav1g.lib` itself.
+- **`WindowsApp.lib` in front of the libraries of the decoder removes all 48.** The same functions then
+  come from the API sets. This is how the player links: `WindowsApp.lib`, `rav1g.lib`, `rav1g_c.lib`,
+  `rav1g_c_speed.lib`, and `ntdll.lib` and `userenv.lib` behind them for functions of the standard library
+  that are in the objects the linker loads and not in the program it writes (file and pipe calls of
+  `ntdll.dll`, the home directory of `userenv.dll`).
+- **`--cfg windows_slim_errors`** takes the one import from `oleaut32.dll` out (`GetErrorInfo`, the
+  extended error text of `windows-result`; it is in `WindowsApp.lib`, so it was no risk, only one DLL
+  more).
+- **What is left: two functions of `ntdll.dll`, `NtWriteFile` and `RtlNtStatusToDosError`.** The standard
+  library writes the message of a panic to the standard error handle with them. `panic = "abort"` does
+  not remove them. `ntdll.dll` is in every process, and Microsoft's dependency checker for console titles
+  lists it among the DLLs of the core system; whether a program in the console's app container may
+  import from it by name is not documented, and is what the console test of the packages answers.
+- **Four API sets the C++ player does not import from** come with the standard library's panic output and
+  backtrace: `api-ms-win-core-console-l1-1-0` (`GetConsoleMode`, `GetConsoleOutputCP`, `WriteConsoleW`),
+  `api-ms-win-core-string-l1-1-0` (`MultiByteToWideChar`, `WideCharToMultiByte`),
+  `api-ms-win-core-libraryloader-l1-2-1` (`LoadLibraryA`) and `api-ms-win-core-string-obsolete-l1-1-0`
+  (`lstrlenW`). All four are names of `WindowsApp.lib`.
+- Not in the program although the library has objects that name them: `userenv.dll`, the other file and
+  pipe functions of `ntdll.dll`, `bcryptprimitives.dll` (the random seed of hash maps).
+- **Why `kernel32.dll` matters.** It is not only a rule of the store's certification: a native component
+  whose imports named `kernel32.dll` did not load on the console in a published case of 2016, and loaded
+  once the imports went through the API sets. Nothing public says that the app system of the console has
+  a `kernel32.dll` with the exports of the desktop.
+
+**The check** (`testing/uwp_imports`; the checker and the first list are Sol's): `check_imports.py` reads
+the normal and the delayed imports of a linked program and holds the DLLs against
+`player-dlls-allow.txt`: the DLLs of the C++ player, the four API sets above, and of `ntdll.dll` the two
+functions and nothing else. `kernel32.dll` and the desktop runtime (`vcruntime140.dll`) are not in the
+list. The `rust-cross` job builds the library as above with clang-cl, links it with
+`testing/uwp_imports/link_probe.sh` into a DLL with the 32 functions of `rav1g.h`, `WindowsApp.lib` first,
+and checks that DLL (99 functions of 30 DLLs; the desktop runtime is allowed there, the Linux build has no
+other). The player job checks the programs of its packages.
+
+**The fallback, should the console refuse the two imports from `ntdll.dll`** (approved for the console
+build of the player; not built now): the UWP target on a pinned nightly compiler, with the standard
+library built from source and panics that abort without a message:
+
+```
+rustup toolchain install nightly-2026-11-13 --profile minimal --component rust-src --component rustfmt
+RUSTFLAGS="-Ctarget-feature=-crt-static -Zunstable-options -Cpanic=immediate-abort --cfg windows_slim_errors"
+cargo +nightly-2026-11-13 build --release -p rav1g --lib --features capi,app-container \
+  -Zbuild-std=std,panic_abort --target x86_64-uwp-windows-msvc
+```
+
+Sol linked that library the same way: 81 functions of 25 DLLs, none from `kernel32.dll`, `ntdll.dll`,
+`userenv.dll`, `oleaut32.dll` or `bcryptprimitives.dll`. It costs the panic message and the backtrace (a
+panic ends the program at once), and a compiler that is not stable; it is for the UWP build alone. The
+`rav1g` crate itself keeps building on stable Rust for `x86_64-pc-windows-msvc`: nothing in it may come
+to need the nightly compiler.
+
+#### Part 2: the Rust interface and the interface for C
+
+**`rav1g`, the Rust interface** (`crates/rav1g/src/lib.rs` and `device.rs`, `decoder.rs`, `output.rs`,
+`switches.rs`, `error.rs`):
+
+| Type | What |
+| --- | --- |
+| `Device` | a D3D12 device, the direct queue the decoders submit to, and the compute pipeline states of the decoder on that device. `Device::new` makes its own (the first hardware adapter), `Device::with_d3d12` takes the application's device, with its queue or without. A decoder keeps a handle of its device, so the three live as long as a decoder needs them |
+| `Settings` | the frame size and bit depth, tile threads, pipeline slots, `LowMemory` (the memory reductions as a set), the buffers of `intra_v2` and `inter_fast`, packed 10-bit output, the operating point, the output of all layers, and `memory_available`, the budget callback as a closure. `Settings::memory_requirements` is the memory query |
+| `Output` | the application's side of the output, a trait: `image` gives an `OutputImage` for a frame that will be shown (a buffer with its mapping, one texture per plane, or both), `frame` gets the `Frame` when the GPU has written it, `unused` gets an image back that was not written, `end_of_frames` follows a drain |
+| `Frame` | the image back, the size, bit depth and kind of the frame, the value passed with its temporal unit, `plane` (the rows of a plane in the mapped buffer) and `d3d12_fence` (the fence of the command list that wrote the frame, and its value) |
+| `Decoder` | `new` (a device, settings, an output), `decode` (a temporal unit and a value for its frames), `drain`, the two layer controls; dropped, it waits for its frames and releases |
+| `switches` | the process-wide choices of the test programs (CDEF and intra shaders, the fast inter path, the clears, the experiments, the fill pattern of the debugging runs), and the timing records, the stage dumps and the log as closures |
+| `Error`, `ErrorCode` | the kind of an error, its text and what the decoder said about it; `ErrorCode::NeedsReconfigure` for a sequence the decoder does not fit |
+
+- **Nothing unsafe is asked of the caller** but one promise: `OutputImage::buffer` is `unsafe` because the
+  mapping it is given must stay valid while the decoder has the image. The decoder holds a reference of
+  every resource of an image from `image` to `frame` (the C interface took pointers and trusted the
+  application). The switches are safe functions: they are atomic values, and what a change in the middle
+  of a frame costs is a wrong frame, not memory.
+- **Frames with fences.** A frame is handed over when its command list has completed, as before: the
+  completion thread waits for the fence of the frame's slot and then calls the output. `Frame::d3d12_fence`
+  gives that fence and the value it reached. Nothing has to wait on it today; it is part of the frame so
+  that the interface stays when a later step hands frames over ahead of their completion.
+- **Underneath** the decoder is still created and driven through the entry points of the entropy decoder
+  (`aom_codec_dec_init`, `aom_codec_decode`: C, part of the parser), and lies in a host pool that
+  `Decoder` allocates; both are private to the crate now (`rav1g::sys` is hidden from the documentation).
+  The GPU backend boundary is as it was: the interface names D3D12 in the methods that are about D3D12
+  (`with_d3d12`, `d3d12_device`, `d3d12_fence`, the resources of an image), and `crates/rav1g/src/gpu`
+  got one accessor (the fence of a slot as the interface of the backend).
+
+**`rav1g.h`, the interface for C** (`crates/rav1g/src/capi.rs`, feature `capi`): the Rust interface
+behind C types, 32 functions. `rav1g_device_create` (the application's `ID3D12Device *` and queue, or
+null for the decoder's own), `rav1g_peek_stream_info`, `Rav1gSettings` with the output callbacks
+(`get_image`, `frame`, `unused`, `end_of_frames`) and the budget callback, `rav1g_decoder_create`,
+`_decode`, `_drain`, `_destroy`, the layer controls, `rav1g_memory_requirements`, the switches
+(`rav1g_set_*`), `rav1g_last_error` and the decoder's error texts. `Rav1gStatus` has the numbers of
+`ErrorCode`.
+
+- `crates/rav1g/include/rav1g.h` is written by cbindgen from `capi.rs`
+  (`cargo run -p rav1g-header`), is in the tree, and CI fails when it is not what the source gives
+  (`cargo run -p rav1g-header -- --check` in the `rust-cross` job). The tool builds for the machine it
+  runs on; it is not one of the default members of the workspace.
+- The records of the timing run and of the stage dumps (`av1_perf_frame`, `av1_stage_dump`) are named
+  in `rav1g.h` and defined in `dx/av1_perf.h`, as before: they are the instrumentation of the test
+  programs, and the entropy decoder writes into them.
+
+**`rav1g-dec` uses the interfaces and nothing else** (no `aom_codec_*`, no `rav1g::sys`): its task is
+written once (`tools/rav1g-dec/src/library.rs`) against either interface. By default it uses the Rust
+interface; with **`-capi`** it uses the functions of `rav1g.h` (device, settings, the output callbacks,
+frames, switches, log), which is what the player will call. CI decodes the whole conformance set both
+ways.
+
+Checked before the push on the local decoder (wine, vkd3d, lavapipe): the 244 vectors through the Rust
+interface and through `rav1g.h`, each plain and with flag sets (`-intrav2 -interfast -asyncclear -t 4
+-slots 4`; `-gputimedetail -slots 3 -poisonbuf -t 4`, with `-capi` also `-interfast -asyncclear`), 244
+of 244 every time; a refused creation (`-budget 5`).
 
 ## Estimate
 

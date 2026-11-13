@@ -21,18 +21,18 @@
 
 mod args;
 mod device;
+mod library;
 mod md5;
 mod pool;
 mod run;
 mod shim;
 
-use std::ffi::{CStr, c_char, c_int, c_void};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use rav1g::{PipelineCache, switches};
+use library::Library;
 
 use args::{EXIT_ERROR, EXIT_MISMATCH, EXIT_PASS, EXIT_TIMEOUT, EXIT_USAGE, Globals, Task};
 
@@ -55,13 +55,10 @@ macro_rules! say {
 
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 
-unsafe extern "C" fn decoder_log_line(_context: *mut c_void, is_error: c_int, line: *const c_char) {
-    if line.is_null() || (is_error == 0 && !VERBOSE.load(Ordering::Relaxed)) {
-        return;
+fn decoder_log_line(is_error: bool, line: &str) {
+    if is_error || VERBOSE.load(Ordering::Relaxed) {
+        say!("{}{}", if is_error { "DECODER ERROR: " } else { "decoder: " }, line);
     }
-    // SAFETY: the library passes a NUL-terminated line.
-    let text = unsafe { CStr::from_ptr(line) }.to_string_lossy();
-    say!("{}{}", if is_error != 0 { "DECODER ERROR: " } else { "decoder: " }, text);
 }
 
 /// -timeout: a task that runs too long gets its result line from here, and the process ends. The frames
@@ -147,8 +144,7 @@ fn real_main() -> i32 {
     }
 
     shim::set_log_verbose(globals.verbose);
-    // SAFETY: no decoder exists yet; the callback is a function of the program and has no context.
-    unsafe { switches::set_log_callback(Some(decoder_log_line), std::ptr::null_mut()) };
+    library::set_log(globals.capi, decoder_log_line);
 
     let Some(dev) = device::create(&globals) else {
         return EXIT_USAGE;
@@ -171,14 +167,16 @@ fn real_main() -> i32 {
         }
     }
     let pso_start = Instant::now();
-    // SAFETY: the device outlives the pipeline states: they are dropped before it, below.
-    let psos = unsafe { PipelineCache::new(dev.device_ptr(), args::PSO_THREADS) };
-    let Some(psos) = psos.filter(|psos| psos.wait()) else {
+    // The decoder's device: the program's D3D12 device and queue, and the pipeline states on it.
+    let Some(library) = Library::open(&dev, globals.capi, args::PSO_THREADS as u32) else {
         say!("ERROR the compute pipeline states could not be created");
         return EXIT_USAGE;
     };
     say!("PIPELINE states created in {:.0} ms", pso_start.elapsed().as_secs_f64() * 1000.0);
-    let variant = rav1g::shader_variant();
+    if globals.capi {
+        say!("INTERFACE the decoder is used through the functions of rav1g.h (-capi)");
+    }
+    let variant = library.shader_variant();
     say!("SHADERS {}", if variant.is_empty() { "normal build" } else { &variant });
     if globals.debug_layer {
         device::print_debug_messages(&dev.device);
@@ -189,7 +187,7 @@ fn real_main() -> i32 {
 
     let mut exit_code = EXIT_PASS;
     for (index, task) in tasks.iter().enumerate() {
-        let code = run::run_task(task, &dev, &psos);
+        let code = run::run_task(task, &dev, &library);
         if globals.debug_layer {
             device::print_debug_messages(&dev.device);
         }
@@ -209,7 +207,7 @@ fn real_main() -> i32 {
 
     drop(stop_watchdog);
     let _ = watchdog_thread.join();
-    drop(psos);
+    drop(library);
     drop(dev);
     if sm6_broken && exit_code == EXIT_PASS {
         exit_code = EXIT_ERROR;

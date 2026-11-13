@@ -194,6 +194,12 @@ fn base_build(repo: &Path, shaders: &Path) -> cc::Build {
     if env::var_os("CARGO_FEATURE_UAVSYNC").is_some() {
         build.define("RAV1G_UAVSYNC", None);
     }
+    if env::var_os("CARGO_FEATURE_APP_CONTAINER").is_some() {
+        // What MSBuild defines for a project with AppContainerApplication (libav1.vcxproj): the headers of
+        // the Windows SDK declare the API of an app container application only, so a call outside of it
+        // does not compile.
+        build.define("WINAPI_FAMILY", "WINAPI_FAMILY_APP");
+    }
     clang_cl_flags(&mut build);
     build
 }
@@ -286,6 +292,17 @@ fn main() {
     println!("cargo:rustc-link-search=native={}", out.display());
     for library in ["rav1g_c", "rav1g_c_speed"] {
         println!("cargo:rustc-link-lib=static:-bundle={library}");
+    }
+    // An application that links the static library of `rav1g` itself (the UWP test player) needs the two
+    // libraries of the C as well: they are not in rav1g.lib (see Lto). RAV1G_C_LIB_DIR names a directory
+    // they are copied to.
+    println!("cargo:rerun-if-env-changed=RAV1G_C_LIB_DIR");
+    if let Some(dir) = env::var_os("RAV1G_C_LIB_DIR").filter(|dir| !dir.is_empty()).map(PathBuf::from) {
+        for library in ["rav1g_c.lib", "rav1g_c_speed.lib"] {
+            if let Err(error) = fs::create_dir_all(&dir).and_then(|()| fs::copy(out.join(library), dir.join(library))) {
+                fail(&format!("RAV1G_C_LIB_DIR={}: cannot copy {library}: {error}", dir.display()));
+            }
+        }
     }
     if lto == Lto::Msvc {
         // For the tests of this crate; a build script cannot give it to the programs of other crates.

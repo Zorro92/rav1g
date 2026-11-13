@@ -10,7 +10,7 @@
 
 use crate::say;
 use crate::shim;
-use rav1g::sys;
+use rav1g::switches::{self, Poison};
 
 // The player's values (testing/player_common/cmd_parser.h, decoder_creator.h).
 pub const SLOTS_DEFAULT: i32 = 2;
@@ -73,10 +73,10 @@ pub struct Task {
     /// -lfhsplit <0|1|2>
     pub lfhsplit: i32,
     pub intraedgefix: bool,
-    /// -poisonmi (AV1_POISON_MODE_INFO), -poisonbuf (AV1_POISON_BUFFERS): av1_set_poison_buffers.
-    pub poison: i32,
-    /// -interfast (1), -interfastlists (7), -interfastmode <n>: av1_set_inter_fast.
-    pub interfast: i32,
+    /// -poisonmi, -poisonbuf: `switches::set_poison_buffers`.
+    pub poison: Poison,
+    /// -interfast (1), -interfastlists (7), -interfastmode <n>: `switches::set_inter_fast`.
+    pub interfast: u32,
     /// -alllayers: every shown frame of a temporal unit with spatial layers.
     pub all_layers: bool,
     /// -oppoint <n>: the operating point of a stream with layers.
@@ -125,7 +125,7 @@ impl Default for Task {
             asyncclear: false,
             lfhsplit: 0,
             intraedgefix: false,
-            poison: 0,
+            poison: Poison::Off,
             interfast: 0,
             all_layers: false,
             oppoint: 0,
@@ -152,6 +152,8 @@ pub struct Globals {
     pub gpu_validation: bool,
     /// -sm6test
     pub sm6test: bool,
+    /// -capi
+    pub capi: bool,
     /// -list
     pub list: String,
 }
@@ -224,6 +226,8 @@ pub fn usage() {
     say!("  -v                    print the decoder's log lines (MEMORY ...) and the player-style task lines");
     say!("  -debuglayer           switch the D3D12 debug layer on (needs the Graphics Tools feature of Windows)");
     say!("                        and print its messages after every task; -gpuvalidation adds GPU-based validation");
+    say!("  -capi                 use the decoder through its interface for C, the functions of rav1g.h, instead of");
+    say!("                        the Rust interface: what an application that is not Rust links (same output)");
     say!(
         "  -sm6test              run the Shader Model 6 test shaders on the device before the tasks, one 'SM6TEST ...'"
     );
@@ -301,11 +305,11 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-asyncclear" => task.asyncclear = true,
             "-lfhsplit" => task.lfhsplit = number()?,
             "-intraedgefix" => task.intraedgefix = true,
-            "-poisonmi" => task.poison = sys::AV1_POISON_MODE_INFO,
-            "-poisonbuf" => task.poison = sys::AV1_POISON_BUFFERS,
-            "-interfast" => task.interfast = sys::AV1_INTER_FAST_ON,
-            "-interfastlists" => task.interfast = sys::AV1_INTER_FAST_LISTS_ONLY,
-            "-interfastmode" => task.interfast = number()?,
+            "-poisonmi" => task.poison = Poison::ModeInfo,
+            "-poisonbuf" => task.poison = Poison::Buffers,
+            "-interfast" => task.interfast = switches::INTER_FAST_ON,
+            "-interfastlists" => task.interfast = switches::INTER_FAST_LISTS_ONLY,
+            "-interfastmode" => task.interfast = number()? as u32,
             "-gputime" => task.gputime = true,
             "-gputimedetail" => {
                 task.gputime = true;
@@ -333,6 +337,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
                         globals.gpu_validation = true;
                     }
                     "-sm6test" => globals.sm6test = true,
+                    "-capi" => globals.capi = true,
                     "-list" => globals.list = value()?,
                     _ => return Err(format!("unknown argument '{a}'")),
                 }
@@ -470,11 +475,11 @@ mod tests {
         assert_eq!(task.save_md5, "out dir/x.md5");
         assert_eq!((task.threads, task.timeout_s, task.interfast, task.aom_md5), (4, 300, 1, true));
         assert_eq!(globals.list, "tasks.list");
-        assert_eq!(task.poison, 0);
+        assert_eq!(task.poison, Poison::Off);
         parse_args(&strings(&["-poisonmi"]), &mut task, None).unwrap();
-        assert_eq!(task.poison, 1);
+        assert_eq!(task.poison, Poison::ModeInfo);
         parse_args(&strings(&["-poisonbuf"]), &mut task, None).unwrap();
-        assert_eq!(task.poison, 2);
+        assert_eq!(task.poison, Poison::Buffers);
         // A program flag is not a task flag of a list line.
         assert!(parse_args(&strings(&["-hw"]), &mut task, None).is_err());
         assert!(parse_args(&strings(&["-t"]), &mut task, None).is_err());

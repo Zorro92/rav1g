@@ -10,8 +10,9 @@
 //! timing summary, stage dump files, Shader Model 6 test, process settings.
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::sync::Arc;
 
-use rav1g::sys;
+use rav1g::switches::{DumpCallback, PerfFrame, StageDump};
 
 type LineFn = unsafe extern "C" fn(ctx: *mut c_void, line: *const c_char);
 
@@ -38,7 +39,7 @@ unsafe extern "C" {
 
     fn rd_perf_new() -> *mut RdPerf;
     fn rd_perf_free(perf: *mut RdPerf);
-    fn rd_perf_add_frame(perf: *mut RdPerf, frame: *const sys::av1_perf_frame);
+    fn rd_perf_add_frame(perf: *mut RdPerf, frame: *const PerfFrame);
     fn rd_perf_add_output(perf: *mut RdPerf, ms: f64);
     fn rd_perf_add_decode_call(perf: *mut RdPerf, ms: f64);
     fn rd_perf_lines(perf: *mut RdPerf, progress: c_int, line: LineFn, ctx: *mut c_void);
@@ -48,7 +49,7 @@ unsafe extern "C" {
     fn rd_dumps_free(dumps: *mut RdDumps);
     fn rd_dumps_start(dumps: *mut RdDumps, dir: *const c_char, name: *const c_char);
     fn rd_dumps_next_sequence(dumps: *mut RdDumps);
-    fn rd_dumps_callback(dumps: *mut c_void, dump: *const sys::av1_stage_dump);
+    fn rd_dumps_callback(dumps: *mut c_void, dump: *const StageDump);
     fn rd_dumps_take_lines(dumps: *mut RdDumps, line: LineFn, ctx: *mut c_void);
     fn rd_dumps_count(dumps: *mut RdDumps) -> c_int;
     fn rd_dumps_bytes(dumps: *mut RdDumps) -> u64;
@@ -154,11 +155,8 @@ impl Perf {
         Perf(unsafe { rd_perf_new() })
     }
     /// One record per command list of the decoder.
-    ///
-    /// # Safety
-    /// `frame` is the record the decoder passes to its perf callback, during that callback.
-    pub unsafe fn add_frame(&self, frame: *const sys::av1_perf_frame) {
-        // SAFETY: the caller's contract.
+    pub fn add_frame(&self, frame: &PerfFrame) {
+        // SAFETY: the handle is valid until drop; the record is read during the call.
         unsafe { rd_perf_add_frame(self.0, frame) }
     }
     pub fn add_output(&self, ms: f64) {
@@ -214,10 +212,26 @@ impl Dumps {
         // SAFETY: valid handle.
         unsafe { rd_dumps_next_sequence(self.0) }
     }
-    /// The callback and its context for `av1_set_stage_dump`. The writer must outlive the decoder's
-    /// completion thread.
-    pub fn callback(&self) -> (sys::av1_stage_dump_cb_fn_t, *mut c_void) {
-        (Some(rd_dumps_callback), self.0.cast())
+    /// What `switches::set_stage_dump` hands the dumps to: this writer.
+    ///
+    /// # Safety
+    /// The writer outlives the use of the callback: it is taken out of the switch, behind the drain of
+    /// the decoder, before the writer is dropped.
+    pub unsafe fn callback(&self) -> DumpCallback {
+        struct Writer(*mut RdDumps);
+        // SAFETY: the writer of testing/common/stage_dump.h takes its lock in every call.
+        unsafe impl Send for Writer {}
+        unsafe impl Sync for Writer {}
+        let writer = Writer(self.0);
+        Arc::new(move |dump: &StageDump| {
+            let writer = &writer;
+            // SAFETY: the caller's contract; the dump is read during the call.
+            unsafe { rd_dumps_callback(writer.0.cast(), dump) }
+        })
+    }
+    /// The same for `rav1g_set_stage_dump` of rav1g.h: the function and its context.
+    pub fn c_callback(&self) -> (unsafe extern "C" fn(*mut c_void, *const StageDump), *mut c_void) {
+        (rd_dumps_callback, self.0.cast())
     }
     /// After the drain: one line per dump.
     pub fn take_lines(&self) -> Vec<String> {

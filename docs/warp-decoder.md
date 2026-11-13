@@ -48,6 +48,9 @@ The shader headers come from a Windows build (FXC): CI keeps them as the artifac
 What differs from `warp_decoder`:
 
 - The usage text names `rav1g-dec`; the lines the scripts read are the same.
+- `-capi` (a flag of `rav1g-dec` only): the decoder is used through its interface for C, the functions
+  of `rav1g.h`, instead of the Rust interface (docs/rust-port.md, step 5); the output is the same, and
+  the program says so in an `INTERFACE` line. CI decodes the whole set once more with it.
 - `-budget <MiB>` (a flag of `rav1g-dec` only): the decoder is created with a budget callback that says
   the application has this much memory left for it, so the budget guard of the creation can be run on a
   desktop: with `-v` the `MEMORY budget` line of an accepted creation, or the wait and the

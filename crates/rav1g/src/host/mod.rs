@@ -19,6 +19,7 @@
 
 mod blocks;
 mod completion;
+pub(crate) use completion::frame_fence;
 mod compute;
 mod core;
 mod create;

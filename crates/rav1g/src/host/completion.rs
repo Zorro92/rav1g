@@ -11,8 +11,12 @@
 //! pipeline slot, and hands the output image to the application; `show_existing_frame` copies a frame
 //! that was decoded earlier into an output image with a command list of its own.
 
-use std::ffi::c_int;
+use std::cell::Cell;
+use std::ffi::{c_int, c_void};
 use std::thread::JoinHandle;
+
+use windows::Win32::Graphics::Direct3D12::ID3D12Fence;
+use windows::core::Interface;
 
 use super::create::{rav1g_frame_buffer_acquire, rav1g_release_fb};
 use super::frame::{commit_command_buffer, prepare_command_buffer, release_unsubmitted_frame};
@@ -111,6 +115,22 @@ pub unsafe extern "C" fn get_output_frame(pbi: *mut AV1Decoder, dst: *mut aom_im
     0
 }
 
+thread_local! {
+    /// The fence of the frame the completion thread is handing to the application, and the value the
+    /// fence had to reach for it; null outside of that call.
+    static FRAME_FENCE: Cell<(*mut c_void, u64)> = const { Cell::new((std::ptr::null_mut(), 0)) };
+}
+
+/// For the frame-ready callback of the Rust interface (`crate::decoder`), which the completion thread
+/// calls: the fence of the command list that wrote the frame it is called for, and the value of the fence
+/// behind that list. The image description of the C interface has no room for them.
+pub(crate) fn frame_fence() -> Option<(ID3D12Fence, u64)> {
+    let (fence, value) = FRAME_FENCE.get();
+    // SAFETY: set by the completion thread around the callback to the fence of a slot of its decoder,
+    // which lives as long as the decoder.
+    unsafe { ID3D12Fence::from_raw_borrowed(&fence) }.map(|fence| (fence.clone(), value))
+}
+
 /// The decoder for its completion thread.
 struct DecoderPtr(*mut Av1Core);
 
@@ -139,7 +159,12 @@ unsafe fn completion_thread(dec: *mut Av1Core) {
 
             let mut perf_rec: sys::av1_perf_frame = std::mem::zeroed();
             let mut perf_have_rec = false;
+            let mut fence: (*mut c_void, u64) = (std::ptr::null_mut(), 0);
             if let Some(td) = (*item).data.as_mut() {
+                // Of the frame's command list, read while the slot is still this frame's.
+                if let Some(slot_fence) = td.command_buffer.fence.as_ref() {
+                    fence = (slot_fence.d3d12().as_raw(), u64::from(td.command_buffer.fence_value));
+                }
                 // Waits for the frame's fence.
                 let perf_wait_start = if td.perf.collect != 0 { perf_now() } else { 0 };
                 Event::borrowed(&td.command_buffer.event).wait();
@@ -200,7 +225,9 @@ unsafe fn completion_thread(dec: *mut Av1Core) {
                     copy_to_img(dec, hw_img, &mut img);
                     rav1g_mt_queue_push(&raw mut (*dec).image_pool, std::ptr::from_mut(hw_img).cast());
                     let perf_notify_start = if perf_have_rec { perf_now() } else { 0 };
+                    FRAME_FENCE.set(fence);
                     notify((*dec).image_alloc_priv, (&raw mut img).cast());
+                    FRAME_FENCE.set((std::ptr::null_mut(), 0));
                     if perf_notify_start != 0 {
                         perf_rec.cpu_ms[sys::AV1_PERF_CPU_NOTIFY as usize] =
                             (perf_now() - perf_notify_start) as f64 * ticks_to_ms();

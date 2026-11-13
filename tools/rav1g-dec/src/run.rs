@@ -6,22 +6,23 @@
 // License 1.0 was not distributed with this source code in the PATENTS file, you can obtain it at
 // www.aomedia.org/license/patent.
 
-//! One task, as the player's `AV1Decoder::DecodeOne` and warp_decoder's `RunTask` do it: the decoder
-//! configuration, the output buffer callbacks, the hash of every output frame, the result line.
+//! One task, as the player's `AV1Decoder::DecodeOne` and warp_decoder's `RunTask` do it: the decoder's
+//! settings, the output of the decoder, the hash of every output frame, the result line.
 
-use std::ffi::{c_int, c_void};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
-use rav1g::{Config, Decoder, ErrorCode, PipelineCache, StreamInfo, switches, sys};
+use rav1g::StreamInfo;
+use rav1g::switches::{self, PerfFrame, Poison};
 
 use crate::args::{self, EXIT_ERROR, EXIT_MISMATCH, EXIT_PASS, Task};
 use crate::device::{Device, hex32};
+use crate::library::{Choices, Library, Picture, Sink, Spec, TaskDecoder};
 use crate::md5::Md5;
-use crate::pool::OutputPool;
+use crate::pool::{OutputPool, Rented};
 use crate::say;
 use crate::shim;
 
@@ -151,33 +152,31 @@ fn result_line(
 /// The visible samples of a frame, in the order they are hashed: luma rows, then U, then V; one byte a
 /// sample for 8-bit, two bytes (low byte first) above that. A monochrome frame is luma only, or, with
 /// -aom_md5, luma and two chroma planes of the mid grey value, which is what aomdec writes for --i420 and
-/// so what AOM's .md5 files of monochrome streams hash.
-///
-/// # Safety
-/// `img` is an image the decoder handed to the frame-ready callback: its planes are readable for the
-/// visible size at their strides.
-unsafe fn for_each_row(img: &sys::aom_image_t, aom_md5: bool, mut sink: impl FnMut(&[u8])) {
-    let bytes: usize = if img.bit_depth == 8 { 1 } else { 2 };
-    let width = img.d_w as usize;
-    let width_c = (img.d_w as usize).div_ceil(2);
-    let height_c = (img.d_h as usize).div_ceil(2);
-    let mut row = img.planes[0].cast_const();
-    for _ in 0..img.d_h {
-        // SAFETY: a visible row of the luma plane.
-        sink(unsafe { std::slice::from_raw_parts(row, width * bytes) });
-        row = row.wrapping_offset(img.stride[0] as isize);
-    }
-    if img.monochrome == 0 {
-        for plane in 1..3 {
-            let mut row = img.planes[plane].cast_const();
-            for _ in 0..height_c {
-                // SAFETY: a visible row of a chroma plane.
-                sink(unsafe { std::slice::from_raw_parts(row, width_c * bytes) });
-                row = row.wrapping_offset(img.stride[plane] as isize);
-            }
+/// so what AOM's .md5 files of monochrome streams hash. False for a frame whose image has no mapped
+/// buffer.
+fn for_each_row(frame: &Picture<'_>, aom_md5: bool, mut sink: impl FnMut(&[u8])) -> bool {
+    let bytes: usize = if frame.bit_depth == 8 { 1 } else { 2 };
+    let mut rows = |plane: &rav1g::Plane<'_>| {
+        let row_bytes = plane.width as usize * bytes;
+        for row in 0..plane.height as usize {
+            sink(&plane.data[row * plane.stride..][..row_bytes]);
+        }
+    };
+    let Some(luma) = &frame.planes[0] else {
+        return false;
+    };
+    rows(luma);
+    if !frame.monochrome {
+        for index in 1..3 {
+            let Some(plane) = &frame.planes[index] else {
+                return false;
+            };
+            rows(plane);
         }
     } else if aom_md5 {
-        let value: u32 = 1 << (img.bit_depth - 1);
+        let width_c = (frame.width as usize).div_ceil(2);
+        let height_c = (frame.height as usize).div_ceil(2);
+        let value: u32 = 1 << (frame.bit_depth - 1);
         let mut grey = vec![0u8; width_c * bytes];
         for x in 0..width_c {
             if bytes == 1 {
@@ -191,165 +190,123 @@ unsafe fn for_each_row(img: &sys::aom_image_t, aom_md5: bool, mut sink: impl FnM
             sink(&grey);
         }
     }
+    true
 }
 
 /// Writes a frame as it is hashed. False on a write error.
-///
-/// # Safety
-/// As `for_each_row`.
-unsafe fn write_frame(img: &sys::aom_image_t, aom_md5: bool, file: &mut impl Write) -> bool {
+fn write_frame(frame: &Picture<'_>, aom_md5: bool, file: &mut impl Write) -> bool {
     let mut ok = true;
-    // SAFETY: the caller's contract.
-    unsafe {
-        for_each_row(img, aom_md5, |row| {
-            if ok && file.write_all(row).is_err() {
-                ok = false;
-            }
-        })
-    };
-    ok
-}
-
-unsafe extern "C" fn get_buffer(
-    context: *mut c_void,
-    buf_size: usize,
-    _width: u16,
-    _height: u16,
-    _fb_type: sys::frame_buffer_type,
-    fb: *mut sys::av1_decoded_frame_buffer_t,
-) -> c_int {
-    if context.is_null() || fb.is_null() {
-        return -1;
-    }
-    // SAFETY: the context is the Run of the task, alive until its decoder is destroyed; fb is the
-    // decoder's.
-    let (run, fb) = unsafe { (&*context.cast::<Run>(), &mut *fb) };
-    match run.pool.rent(buf_size) {
-        Ok(buffer) => {
-            fb.dx12_buffer = buffer.resource.cast();
-            fb.buffer_host_ptr = buffer.mem.cast();
-            fb.buffer_size = buffer.size as _;
-            fb.dx12_texture = [std::ptr::null_mut(); 3];
-            fb.priv_ = buffer.token;
-            0
+    let complete = for_each_row(frame, aom_md5, |row| {
+        if ok && file.write_all(row).is_err() {
+            ok = false;
         }
-        Err(why) => {
-            let mut state = run.state();
-            if state.pool_error.is_empty() {
-                state.pool_error = why;
-            }
-            -1
-        }
-    }
+    });
+    ok && complete
 }
 
-unsafe extern "C" fn release_buffer(context: *mut c_void, buffer_priv: *mut c_void) -> c_int {
-    if context.is_null() {
-        return -1;
-    }
-    // SAFETY: as in get_buffer.
-    let run = unsafe { &*context.cast::<Run>() };
-    run.pool.give_back(buffer_priv);
-    0
-}
-
-/// -gputime: one record per command list of the decoder, from its GPU completion thread.
-unsafe extern "C" fn perf_frame(context: *mut c_void, frame: *const sys::av1_perf_frame) {
-    if context.is_null() || frame.is_null() {
-        return;
-    }
-    // SAFETY: as in get_buffer; the record is valid during the callback.
-    unsafe { (*context.cast::<Run>()).perf.add_frame(frame) };
-}
-
-/// The decoder's frame-ready callback: a frame whose GPU work is complete, or NULL after the last one.
-unsafe extern "C" fn notify_frame_ready(context: *mut c_void, image: *mut c_void) -> c_int {
-    if context.is_null() {
-        return -1;
-    }
-    // SAFETY: as in get_buffer.
-    let run = unsafe { &*context.cast::<Run>() };
-    if image.is_null() {
-        return 0;
-    }
-    // SAFETY: the decoder hands over an aom_image_t whose planes are in the output buffer of the frame.
-    let img = unsafe { &*image.cast::<sys::aom_image_t>() };
-    let task = &run.task;
-    if task.gputime {
-        let start = *run.perf_start.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        run.perf.add_output(ms_since(start));
-    }
-    let mut ctx = Md5::new();
-    // SAFETY: img is the decoder's image.
-    unsafe { for_each_row(img, task.aom_md5, |row| ctx.update(row)) };
-    let md5 = ctx.finish_hex();
-    {
-        let mut state = run.state();
-        let n = state.md5.len() as i32;
-        if n == 0 {
-            state.width = img.d_w;
-            state.height = img.d_h;
-            state.bit_depth = img.bit_depth;
-            run.width.store(img.d_w, Ordering::Relaxed);
-            run.height.store(img.d_h, Ordering::Relaxed);
-            run.bit_depth.store(img.bit_depth, Ordering::Relaxed);
-        } else if img.d_w != state.width || img.d_h != state.height {
-            // Counted against the size of the first frame; the md5 of a frame is always over its own size.
-            state.size_changes += 1;
-        }
-        let mut wrong = false;
-        if state.have_ref {
-            let expected = state.reference.get(n as usize).cloned();
-            if expected.as_deref() == Some(md5.as_str()) {
-                state.matched += 1;
-                run.matched.store(state.matched, Ordering::Relaxed);
-            } else {
-                wrong = true;
-                if state.first_bad < 0 {
-                    state.first_bad = n;
-                    run.first_bad.store(n, Ordering::Relaxed);
+/// The output of the task's decoders: readback buffers of the pool, and every frame hashed where it
+/// arrives, on the decoder's completion thread.
+impl Sink for Run {
+    fn rent(&self, size: usize) -> Option<Rented> {
+        match self.pool.rent(size) {
+            Ok(buffer) => Some(buffer),
+            Err(why) => {
+                let mut state = self.state();
+                if state.pool_error.is_empty() {
+                    state.pool_error = why;
                 }
-                if state.mismatch_lines < 16 {
-                    say!(
-                        "MISMATCH frame {} ({}x{} {}-bit{}): expected {}, got {}",
-                        n,
-                        img.d_w,
-                        img.d_h,
-                        img.bit_depth,
-                        if img.monochrome != 0 { " monochrome" } else { "" },
-                        expected.as_deref().unwrap_or("no frame (the reference has ended)"),
-                        md5
-                    );
-                } else if state.mismatch_lines == 16 {
-                    say!("MISMATCH ... further frames are not listed");
-                }
-                state.mismatch_lines += 1;
+                None
             }
         }
-        state.md5.push(md5);
-        run.frames.store(n + 1, Ordering::Relaxed);
-        if state.io_error.is_empty()
-            && let Some(file) = state.out_file.as_mut()
-            // SAFETY: img is the decoder's image.
-            && !unsafe { write_frame(img, task.aom_md5, file) }
+    }
+
+    fn give_back(&self, token: usize) {
+        self.pool.give_back(token);
+    }
+
+    /// -gputime: one record per command list of the decoder, from its GPU completion thread.
+    fn perf_frame(&self, frame: &PerfFrame) {
+        self.perf.add_frame(frame);
+    }
+
+    /// A frame whose GPU work is complete.
+    fn picture(&self, frame: &Picture<'_>) {
+        let run = self;
+        let task = &run.task;
+        if task.gputime {
+            let start = *run.perf_start.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            run.perf.add_output(ms_since(start));
+        }
+        let mut ctx = Md5::new();
+        for_each_row(frame, task.aom_md5, |row| ctx.update(row));
+        let md5 = ctx.finish_hex();
         {
-            state.io_error = "write error".to_string();
-        }
-        if wrong && !task.save_wrong_yuv.is_empty() && (task.wrong_limit < 0 || state.wrong_saved < task.wrong_limit) {
-            state.wrong_saved += 1;
-            let path = format!("{}/{}_{}.yuv", task.save_wrong_yuv, task.name, n);
-            let written = File::create(&path).is_ok_and(|file| {
-                let mut file = BufWriter::new(file);
-                // SAFETY: img is the decoder's image.
-                unsafe { write_frame(img, task.aom_md5, &mut file) && file.flush().is_ok() }
-            });
-            if !written {
-                say!("cannot write {}", path);
+            let mut state = run.state();
+            let n = state.md5.len() as i32;
+            if n == 0 {
+                state.width = frame.width;
+                state.height = frame.height;
+                state.bit_depth = frame.bit_depth;
+                run.width.store(frame.width, Ordering::Relaxed);
+                run.height.store(frame.height, Ordering::Relaxed);
+                run.bit_depth.store(frame.bit_depth, Ordering::Relaxed);
+            } else if frame.width != state.width || frame.height != state.height {
+                // Counted against the size of the first frame; the md5 of a frame is always over its own size.
+                state.size_changes += 1;
+            }
+            let mut wrong = false;
+            if state.have_ref {
+                let expected = state.reference.get(n as usize).cloned();
+                if expected.as_deref() == Some(md5.as_str()) {
+                    state.matched += 1;
+                    run.matched.store(state.matched, Ordering::Relaxed);
+                } else {
+                    wrong = true;
+                    if state.first_bad < 0 {
+                        state.first_bad = n;
+                        run.first_bad.store(n, Ordering::Relaxed);
+                    }
+                    if state.mismatch_lines < 16 {
+                        say!(
+                            "MISMATCH frame {} ({}x{} {}-bit{}): expected {}, got {}",
+                            n,
+                            frame.width,
+                            frame.height,
+                            frame.bit_depth,
+                            if frame.monochrome { " monochrome" } else { "" },
+                            expected.as_deref().unwrap_or("no frame (the reference has ended)"),
+                            md5
+                        );
+                    } else if state.mismatch_lines == 16 {
+                        say!("MISMATCH ... further frames are not listed");
+                    }
+                    state.mismatch_lines += 1;
+                }
+            }
+            state.md5.push(md5);
+            run.frames.store(n + 1, Ordering::Relaxed);
+            if state.io_error.is_empty()
+                && let Some(file) = state.out_file.as_mut()
+                && !write_frame(frame, task.aom_md5, file)
+            {
+                state.io_error = "write error".to_string();
+            }
+            if wrong
+                && !task.save_wrong_yuv.is_empty()
+                && (task.wrong_limit < 0 || state.wrong_saved < task.wrong_limit)
+            {
+                state.wrong_saved += 1;
+                let path = format!("{}/{}_{}.yuv", task.save_wrong_yuv, task.name, n);
+                let written = File::create(&path).is_ok_and(|file| {
+                    let mut file = BufWriter::new(file);
+                    write_frame(frame, task.aom_md5, &mut file) && file.flush().is_ok()
+                });
+                if !written {
+                    say!("cannot write {}", path);
+                }
             }
         }
     }
-    run.pool.give_back(img.fb2_priv);
-    0
 }
 
 /// Reads a reference md5 file: the first 32 characters of every line that starts with 32 hex digits.
@@ -363,11 +320,6 @@ fn read_reference(path: &str) -> Option<Vec<String>> {
         out.push(String::from_utf8_lossy(&line[..32]).to_ascii_lowercase());
     }
     Some(out)
-}
-
-/// The budget callback of -budget: the bytes the flag names.
-unsafe extern "C" fn fixed_budget(bytes: *mut c_void) -> i64 {
-    bytes as usize as i64
 }
 
 /// One line with the memory of the process and of the machine: the tasks of a list run in one process, and
@@ -450,39 +402,30 @@ impl DecoderSize {
 /// Creates the decoder for `size`; `info` is the sequence it is for. The error says what failed.
 fn create_decoder(
     run: &Arc<Run>,
-    dev: &Device,
-    psos: &PipelineCache,
+    library: &Library,
     size: DecoderSize,
     info: &StreamInfo,
     create_ms: &mut f64,
-) -> Result<Decoder, String> {
+) -> Result<TaskDecoder<Run>, String> {
     let task = &run.task;
     let create_start = Instant::now();
-    let config = Config {
+    let spec = Spec {
         width: size.width,
         height: size.height,
         bit_depth: size.bit_depth,
         threads: task.threads as u32,
-        frame_slots: task.slots,
+        slots: task.slots as u32,
+        low_memory: task.lowmem_parts as u32,
         intra_v2: task.intrav2,
         inter_fast: task.interfast != 0,
-        low_memory: if task.lowmem_parts != 0 { task.lowmem_parts } else { sys::AV1_LOW_MEMORY_NONE as i32 },
-        // -budget: a callback that answers with the number of the flag, which travels as its context.
-        memory_available: (task.budget_mib >= 0).then_some((
-            fixed_budget as unsafe extern "C" fn(*mut c_void) -> i64,
-            (task.budget_mib << 20) as usize as *mut c_void,
-        )),
-        out_buffers: sys::av1_out_buffers_cb_t {
-            get_out_buffer_cb: Some(get_buffer),
-            release_out_buffer_cb: Some(release_buffer),
-            notify_frame_ready_cb: Some(notify_frame_ready),
-            out_buffers_priv: Arc::as_ptr(run).cast_mut().cast(),
-        },
-        device: dev.device_ptr(),
-        command_queue: dev.queue_ptr(),
-        pipeline_cache: psos.as_ptr(),
+        // The layers of a stream that has them: one frame per temporal unit unless -alllayers, operating
+        // point 0 unless -oppoint.
+        operating_point: task.oppoint as u32,
+        all_layers: task.all_layers,
+        // -budget: a budget callback that answers with the number of the flag.
+        budget: (task.budget_mib >= 0).then_some((task.budget_mib << 20) as u64),
     };
-    let memory = config.memory_requirements();
+    let (device_size, host_size) = library.memory_requirements(&spec);
     say!(
         "TASK {}: stream {}x{} {}-bit, decoder {}x{} {}-bit ({}), slots {}, low memory parts {}, CDEF {}, intra {}{}, \
          clears {}, threads {}, output pool {}; device buffers {:.1} MiB, host pool {:.1} MiB",
@@ -502,25 +445,16 @@ fn create_decoder(
         if task.asyncclear { "-asyncclear" } else { "decode thread" },
         task.threads,
         task.queue_size,
-        memory.device_size as f64 / (1024.0 * 1024.0),
-        memory.host_size as f64 / (1024.0 * 1024.0)
+        device_size as f64 / (1024.0 * 1024.0),
+        host_size as f64 / (1024.0 * 1024.0)
     );
-    // SAFETY: the device, the queue and the pipeline states outlive the decoder (they are the program's);
-    // the Run behind the callbacks is kept by run_task until the decoder is dropped.
-    let mut decoder = unsafe { Decoder::new(&config) }?;
-    // The layers of a stream that has them: one frame per temporal unit unless -alllayers, operating point
-    // 0 unless -oppoint.
-    if let Err(error) =
-        decoder.set_output_all_layers(task.all_layers).and_then(|()| decoder.set_operating_point(task.oppoint))
-    {
-        return Err(format!("a layer control failed: {}", error.message));
-    }
+    let decoder = library.create(&spec, run)?;
     *create_ms += ms_since(create_start);
     Ok(decoder)
 }
 
 /// One task. Returns the exit code of the task.
-pub fn run_task(task: &Task, dev: &Device, psos: &PipelineCache) -> i32 {
+pub fn run_task(task: &Task, dev: &Device, library: &Library) -> i32 {
     say!("BEGIN stream={}", task.name);
     memory_line("before the task");
     let run = Arc::new(Run {
@@ -601,12 +535,12 @@ pub fn run_task(task: &Task, dev: &Device, psos: &PipelineCache) -> i32 {
         if !reader.next() {
             return fail("end of the stream before a key frame", decode_ms, create_ms);
         }
-        match rav1g::peek_stream_info(reader.data()) {
-            Ok(si) if si.is_key_frame => break si,
-            Ok(_) => skipped += 1,
-            Err(_) => {
+        match library.peek(reader.data()) {
+            Some(si) if si.is_key_frame => break si,
+            Some(_) => skipped += 1,
+            None => {
                 return fail(
-                    &format!("aom_codec_peek_stream_info failed on temporal unit {skipped}"),
+                    &format!("no sequence header could be read from temporal unit {skipped}"),
                     decode_ms,
                     create_ms,
                 );
@@ -626,11 +560,11 @@ pub fn run_task(task: &Task, dev: &Device, psos: &PipelineCache) -> i32 {
     // -poisonmi, -poisonbuf: the decoder fills these buffers when it creates them, so this switch is set before
     // the decoder exists (also the one a new sequence creates later in the task). With -poisonbuf it also
     // fills the constants of a stage whenever it hands them out (ComputeCommandBuffer::Alloc).
-    // SAFETY: the task has no decoder yet and the one of the task before is destroyed: no frame is in flight.
-    unsafe { switches::set_poison_buffers(task.poison) };
-    if task.poison == sys::AV1_POISON_MODE_INFO {
+    // The task has no decoder yet and the one of the task before is destroyed: no frame is in flight.
+    library.set_poison(task.poison);
+    if task.poison == Poison::ModeInfo {
         say!("POISON {}: the mode info pool (-poisonmi) filled with 0xA5 when the decoder creates it", task.name);
-    } else if task.poison != 0 {
+    } else if task.poison != Poison::Off {
         say!(
             "POISON {}: every buffer the CPU writes for the shaders (-poisonbuf) filled with 0xA5 when the decoder \
              creates it, the constants of a stage again before the stage writes them",
@@ -640,7 +574,7 @@ pub fn run_task(task: &Task, dev: &Device, psos: &PipelineCache) -> i32 {
 
     // -dumpstages: the writer outlives the decoder's completion thread, which the drain below joins.
     let stage_dumps = shim::Dumps::new();
-    let mut decoder = match create_decoder(&run, dev, psos, size, &si, &mut create_ms) {
+    let mut decoder = match create_decoder(&run, library, size, &si, &mut create_ms) {
         Ok(decoder) => Some(decoder),
         Err(create_error) => return fail(&create_error, decode_ms, create_ms),
     };
@@ -648,13 +582,11 @@ pub fn run_task(task: &Task, dev: &Device, psos: &PipelineCache) -> i32 {
     // Process-wide switches, set while no frame is in flight, as the player does at the start of a task.
     // -gputime, -gputimedetail, -gputimeisolate: the timing run of the player.
     *run.perf_start.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Instant::now();
-    let context: *mut c_void = Arc::as_ptr(&run).cast_mut().cast();
-    // SAFETY: no frame is in flight: the decoder has decoded nothing yet. The Run outlives the decoder, and
-    // the callbacks are taken out again below, after the drain.
-    unsafe {
-        switches::set_perf_callback(if task.gputime { Some(perf_frame) } else { None }, context);
-        switches::set_perf_detail(if task.gputime { task.gputime_detail } else { 0 });
-    }
+    // No frame is in flight: the decoder has decoded nothing yet. The callbacks are taken out again below,
+    // after the drain.
+    // SAFETY: the Run lives to the end of this function, and the timing is switched off below, behind
+    // the drain.
+    unsafe { library.set_perf(task.gputime.then_some(&run), task.gputime_detail as u32) };
     if task.gputime {
         say!(
             "GPUTIME {}: timing run{}; on WARP the times are those of a CPU rasterizer",
@@ -666,28 +598,27 @@ pub fn run_task(task: &Task, dev: &Device, psos: &PipelineCache) -> i32 {
             }
         );
     }
-    // SAFETY: as above.
-    unsafe {
-        switches::set_cdef_v2(!task.cdefv1);
-        switches::set_intra_v2(task.intrav2);
-        switches::set_intra_opt(task.intraopt);
-        switches::set_async_clear(task.asyncclear);
-        switches::set_lf_h_split(task.lfhsplit);
-        switches::set_intra_edge_fix(task.intraedgefix);
-        switches::set_inter_fast(task.interfast);
-    }
-    if task.interfast & sys::AV1_INTER_FAST_ON != 0 {
+    library.set_choices(&Choices {
+        cdef_v2: !task.cdefv1,
+        intra_v2: task.intrav2,
+        intra_opt: task.intraopt,
+        async_clear: task.asyncclear,
+        lf_h_split: task.lfhsplit as u32,
+        intra_edge_fix: task.intraedgefix,
+        inter_fast: task.interfast,
+    });
+    if task.interfast & switches::INTER_FAST_ON != 0 {
         say!(
             "INTERFAST {}: inter blocks by motion vector class, mode {} (one reference: {}; two: {}); frames with a \
              scaled reference keep the original lists and shaders",
             task.name,
             task.interfast & 7,
-            if task.interfast & sys::AV1_INTER_FAST_SINGLE_ORIGINAL != 0 {
+            if task.interfast & switches::INTER_FAST_SINGLE_ORIGINAL != 0 {
                 "inter_main on every list"
             } else {
                 "inter_fast"
             },
-            if task.interfast & sys::AV1_INTER_FAST_COMPOUND_ORIGINAL != 0 {
+            if task.interfast & switches::INTER_FAST_COMPOUND_ORIGINAL != 0 {
                 "inter_compound on every list"
             } else {
                 "inter_compound_fast"
@@ -708,12 +639,12 @@ pub fn run_task(task: &Task, dev: &Device, psos: &PipelineCache) -> i32 {
     }
     if !task.dump_frames.is_empty() {
         stage_dumps.start(&task.dumpdir, &task.name);
-        let (callback, dump_context) = stage_dumps.callback();
-        // SAFETY: no frame is in flight; the writer lives to the end of this function.
-        unsafe { switches::set_stage_dump(callback, dump_context, &task.dump_frames) };
+        // SAFETY: the writer lives to the end of this function, and the dumps are switched off below,
+        // behind the drain.
+        unsafe { library.set_stage_dump(Some(&stage_dumps), &task.dump_frames) };
     } else {
-        // SAFETY: no frame is in flight.
-        unsafe { switches::set_stage_dump(None, std::ptr::null_mut(), &[]) };
+        // SAFETY: nothing to outlive.
+        unsafe { library.set_stage_dump(None, &[]) };
     }
 
     let mut decode_error = String::new();
@@ -733,16 +664,16 @@ pub fn run_task(task: &Task, dev: &Device, psos: &PipelineCache) -> i32 {
             run.perf.add_decode_call(ms_since(call_start));
         }
         if let Err(error) = &result
-            && error.code == ErrorCode::NEEDS_RECONFIGURE
+            && error.needs_reconfigure
         {
             // A new sequence whose frames are larger, or have more bits, than the decoder was created for
-            // (aom/aom_codec.h). Nothing of this temporal unit was decoded. The frames of the sequence
+            // (`ErrorCode::NeedsReconfigure`). Nothing of this temporal unit was decoded. The frames of the sequence
             // before are drained, the decoder is replaced by one for the new sequence, sized from this
             // temporal unit as the first one was from the first, and the temporal unit is passed again.
             let why = error.detail.clone();
             let unit = skipped + units;
-            let new_si = match rav1g::peek_stream_info(reader.data()) {
-                Ok(new_si) if new_si.is_key_frame => new_si,
+            let new_si = match library.peek(reader.data()) {
+                Some(new_si) if new_si.is_key_frame => new_si,
                 _ => {
                     decode_error = format!(
                         "temporal unit {unit} needs another decoder ({why}) and does not start a sequence with a key \
@@ -766,7 +697,7 @@ pub fn run_task(task: &Task, dev: &Device, psos: &PipelineCache) -> i32 {
             // -dumpstages: the drain has handed over the dumps of the sequence before; the frame numbers of
             // the new decoder start at 0 again, and its dumps go to files of their own.
             stage_dumps.next_sequence();
-            let replacement = match create_decoder(&run, dev, psos, size, &new_si, &mut create_ms) {
+            let replacement = match create_decoder(&run, library, size, &new_si, &mut create_ms) {
                 Ok(replacement) => decoder.insert(replacement),
                 Err(create_error) => {
                     // Nothing to drain or destroy below.
@@ -794,7 +725,7 @@ pub fn run_task(task: &Task, dev: &Device, psos: &PipelineCache) -> i32 {
             result = replacement.decode(reader.data());
         }
         if let Err(error) = result {
-            decode_error = format!("aom_codec_decode failed on temporal unit {}: {}", skipped + units, error);
+            decode_error = format!("decoding failed on temporal unit {}: {}", skipped + units, error.text);
             break;
         }
         units += 1;
@@ -809,12 +740,11 @@ pub fn run_task(task: &Task, dev: &Device, psos: &PipelineCache) -> i32 {
     drop(reader);
     drop(decoder);
     // -gputime: the completion thread is joined, so the records are complete. The summary of the player,
-    // and with -progress its per-frame lines.
-    // SAFETY: no decoder exists, so no frame is in flight.
+    // and with -progress its per-frame lines. No decoder exists, so no frame is in flight.
+    // SAFETY: nothing to outlive.
     unsafe {
-        switches::set_stage_dump(None, std::ptr::null_mut(), &[]);
-        switches::set_perf_callback(None, std::ptr::null_mut());
-        switches::set_perf_detail(0);
+        library.set_stage_dump(None, &[]);
+        library.set_perf::<Run>(None, 0);
     }
     if task.gputime {
         for line in run.perf.lines(task.progress) {

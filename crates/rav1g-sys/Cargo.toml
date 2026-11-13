@@ -13,6 +13,9 @@ build = "build.rs"
 # The experiment build of the C++ host for shaders whose group syncs are syncs of all memory
 # (RAV1G_UAVSYNC; docs/test-player.md, "Experiments"). RAV1G_SHADER_DIR must then be the uavsync variant.
 uavsync = []
+# The C is compiled with WINAPI_FAMILY=WINAPI_FAMILY_APP, as libav1.vcxproj compiles it for the UWP test
+# player: the headers of the Windows SDK then declare only what an app container application may call.
+app-container = []
 
 [build-dependencies]
 cc = { workspace = true, features = ["parallel"] }

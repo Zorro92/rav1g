@@ -786,6 +786,21 @@ jobs:
             --out out/conformance --threads 4 "--title=rav1g-dec (cargo, MSVC)"
           if ($LASTEXITCODE -ne 0) { throw "conformance run with rav1g-dec: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
 
+      # The interface for C (docs/rust-port.md, step 5): the whole set once more with -capi, which uses
+      # the decoder through the functions of rav1g.h (the device, the settings, the output callbacks, the
+      # frames), as the UWP test player and every application that is not Rust does.
+      - name: Decode every stream on WARP through rav1g.h (rav1g-dec -capi)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/conformance-capi --threads 4 "--tool-args=-capi" "--title=rav1g-dec through rav1g.h (-capi)"
+          $code = $LASTEXITCODE
+          if (-not (Select-String -Path out/conformance-capi/lists/run001.log -Pattern '^INTERFACE .*rav1g\.h' -Quiet)) {
+            throw 'The decoder of this run does not report the interface for C'
+          }
+          if ($code -ne 0) { throw "conformance run with rav1g-dec -capi: exit code $code (1: not as expected.txt says, 2: the run could not be done)" }
+
       # The order check and the part of the set with -poisonmi, as the conformance job runs them with
       # warp_decoder: streams one after the other in one process without a repeat alone, and the decoder
       # with the mode info pool filled with 0xA5 at creation.
@@ -1058,6 +1073,52 @@ jobs:
             echo
             echo "cargo xwin build --release: $(( $(date +%s) - start )) s ($(clang-cl --version | head -n 1)); $(stat -c %s "$exe") bytes."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # rav1g.h, the interface for C, is written from crates/rav1g/src/capi.rs by cbindgen
+      # (tools/rav1g-header) and kept in the tree: the file there has to be what the source gives.
+      - name: rav1g.h is what crates/rav1g/src/capi.rs gives
+        run: cargo run --release --locked -p rav1g-header -- --check
+
+      # The library as an application in an app container links it (docs/rust-port.md, "The app
+      # container"): the static library with the interface for C, the C compiled for the app family of the
+      # Windows API, both for the DLL runtime. It is linked here into a DLL that has every function of
+      # rav1g.h, WindowsApp.lib first, and the DLLs that program imports from are held against the list
+      # of the test player (testing/uwp_imports): no kernel32.dll, and of ntdll.dll two functions. The
+      # player job does the same with the programs of its packages.
+      - name: Library for an app container application, and the DLLs it imports from
+        env:
+          RAV1G_SHADER_DIR: ${{ github.workspace }}/shader-headers
+        run: |
+          set -euo pipefail
+          separator=$(printf '\037')
+          CARGO_ENCODED_RUSTFLAGS="-Ctarget-feature=-crt-static${separator}--cfg${separator}windows_slim_errors" \
+            RAV1G_C_LIB_DIR="$PWD/out/app-container" \
+            cargo xwin build --release --locked -p rav1g --lib --features capi,app-container \
+            --target x86_64-pc-windows-msvc --target-dir target/app-container
+          cp target/app-container/x86_64-pc-windows-msvc/release/rav1g.lib out/app-container/
+          sh testing/uwp_imports/link_probe.sh out/app-container/rav1g.lib out/app-container \
+            "$HOME/.cache/cargo-xwin/xwin" out/app-container-probe
+          pipx install uv
+          uv run --with pefile==2024.8.26 python testing/uwp_imports/check_imports.py \
+            --allow testing/uwp_imports/player-dlls-allow.txt --also vcruntime140.dll \
+            --report out/app-container-probe/imports.tsv out/app-container-probe/probe.dll | tee out/app-container-probe/check.txt
+          {
+            echo '## Library for an app container application (Linux build)'
+            echo
+            echo '```'
+            cat out/app-container-probe/check.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Preserve the imports of the app container probe
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-app-container-probe-${{ github.run_id }}
+          path: |
+            out/app-container-probe/imports.tsv
+            out/app-container-probe/check.txt
+          if-no-files-found: warn
 
       - name: Preserve rav1g-dec.exe of the Linux build
         uses: actions/upload-artifact@v7

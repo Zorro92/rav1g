@@ -142,7 +142,9 @@ Next targets: the Rust host ([docs/rust-port.md](docs/rust-port.md), started 202
 5 are in: a Cargo workspace that builds the decoder, `rav1g-dec`, the conformance tool in Rust,
 bindings with layout tests for the structs shared with the shaders and with the entropy decoder, and the
 whole host in Rust, from the creation of a decoder to the completion thread; the cargo build compiles no
-C++ of the decoder. Step 5 is the Rust API and the C ABI the test player links), then
+C++ of the decoder. Of step 5 the Rust interface of the `rav1g` crate and its interface for C,
+`crates/rav1g/include/rav1g.h`, are in; left is the test player on the Rust library, and its timing on
+the console), then
 inter and intra prediction on the GPU (a measured `-interfast` prototype showed that inter time is per
 block and per dispatch, not filtering; see
 [gpu-av1-decoder.md](docs/gpu-av1-decoder.md)) and entropy decoding on the CPU (frame-parallel or a

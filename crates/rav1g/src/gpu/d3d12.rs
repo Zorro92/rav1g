@@ -934,6 +934,12 @@ impl Fence {
     pub fn into_raw(self) -> *mut c_void {
         self.fence.into_raw()
     }
+
+    /// The fence as the interface of the backend, for the frame an application gets
+    /// (`Frame::d3d12_fence`).
+    pub fn d3d12(&self) -> &ID3D12Fence {
+        &self.fence
+    }
 }
 
 /// An event a thread waits on for a fence: set when the fence reaches a value, reset by the wait.

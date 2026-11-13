@@ -14,7 +14,8 @@ build = "build.rs"
 uavsync = ["rav1g/uavsync"]
 
 [dependencies]
-rav1g = { workspace = true }
+# With the interface for C: -capi runs a task through the functions of rav1g.h.
+rav1g = { workspace = true, features = ["capi"] }
 
 [dependencies.windows]
 version = "0.62"

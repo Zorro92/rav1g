@@ -2,7 +2,9 @@
 #   RAV1G_SHADER_DIR=<directory with dx/shaders/h> cargo build --release
 [workspace]
 resolver = "3"
-members = ["crates/rav1g-sys", "crates/rav1g", "tools/rav1g-dec"]
+members = ["crates/rav1g-sys", "crates/rav1g", "tools/rav1g-dec", "tools/rav1g-header"]
+# The header tool builds for the machine it runs on and is run by name (cargo run -p rav1g-header).
+default-members = ["crates/rav1g-sys", "crates/rav1g", "tools/rav1g-dec"]
 
 [workspace.package]
 version = "0.4.0-dev"

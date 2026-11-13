@@ -17,7 +17,6 @@ use std::time::Duration;
 
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
-use windows::core::Interface;
 
 use crate::device::hex32;
 
@@ -45,12 +44,12 @@ impl Buffer {
 
 /// A buffer of the pool in the hands of the decoder.
 pub struct Rented {
-    /// What the callbacks hand back: `OutputPool::give_back` takes it.
-    pub token: *mut c_void,
-    /// `ID3D12Resource*` of the readback buffer.
-    pub resource: *mut c_void,
+    /// What comes back with the frame: `OutputPool::give_back` takes it.
+    pub token: usize,
+    /// The readback buffer.
+    pub resource: ID3D12Resource,
     /// The mapped memory of the buffer.
-    pub mem: *mut c_void,
+    pub mem: *mut u8,
     pub size: usize,
 }
 
@@ -136,18 +135,16 @@ impl OutputPool {
             buffer.mem = mem;
             buffer.size = size;
         }
+        let Some(resource) = buffer.resource.clone() else {
+            return Err(format!("no readback buffer of {size} bytes"));
+        };
         buffer.rented = true;
-        Ok(Rented {
-            token: (index + 1) as *mut c_void,
-            resource: buffer.resource.as_ref().map_or(std::ptr::null_mut(), |resource| resource.as_raw()),
-            mem: buffer.mem,
-            size: buffer.size,
-        })
+        Ok(Rented { token: index + 1, resource, mem: buffer.mem.cast(), size: buffer.size })
     }
 
     /// The decoder is done with a buffer.
-    pub fn give_back(&self, token: *mut c_void) {
-        let index = (token as usize).wrapping_sub(1);
+    pub fn give_back(&self, token: usize) {
+        let index = token.wrapping_sub(1);
         let mut buffers = self.lock();
         if let Some(buffer) = buffers.get_mut(index) {
             buffer.rented = false;

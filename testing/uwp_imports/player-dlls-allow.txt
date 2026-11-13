@@ -1,0 +1,67 @@
+# The DLLs a program of the test player's package may import from (check_imports.py).
+#
+# These are the DLLs the C++ player imports from (the API sets WindowsApp.lib names, the runtime of the
+# VCLibs framework package, DirectX), the API sets the Rust library adds through WindowsApp.lib, and
+# two functions of ntdll.dll. Every name is written out: no api-* or *_app pattern, so a new DLL is
+# looked at before it is allowed.
+#
+# Not here, on purpose: kernel32.dll and the other desktop DLLs of Win32 (a program that imports from
+# them may not load in the console's app container), and the desktop runtime (vcruntime140.dll,
+# msvcp140.dll: the package depends on the app runtime of VCLibs, not on those).
+api-ms-win-core-com-l1-1-0.dll
+api-ms-win-core-debug-l1-1-0.dll
+api-ms-win-core-errorhandling-l1-1-0.dll
+api-ms-win-core-fibers-l1-1-0.dll
+api-ms-win-core-fibers-l1-1-1.dll
+api-ms-win-core-file-l1-1-0.dll
+api-ms-win-core-handle-l1-1-0.dll
+api-ms-win-core-heap-l1-1-0.dll
+api-ms-win-core-interlocked-l1-1-0.dll
+api-ms-win-core-libraryloader-l1-2-0.dll
+api-ms-win-core-localization-l1-2-0.dll
+api-ms-win-core-processenvironment-l1-1-0.dll
+api-ms-win-core-processthreads-l1-1-0.dll
+api-ms-win-core-processthreads-l1-1-1.dll
+api-ms-win-core-profile-l1-1-0.dll
+api-ms-win-core-rtlsupport-l1-1-0.dll
+api-ms-win-core-synch-l1-1-0.dll
+api-ms-win-core-synch-l1-2-0.dll
+api-ms-win-core-sysinfo-l1-1-0.dll
+api-ms-win-core-util-l1-1-0.dll
+api-ms-win-core-winrt-error-l1-1-0.dll
+api-ms-win-core-winrt-error-l1-1-1.dll
+api-ms-win-core-winrt-l1-1-0.dll
+api-ms-win-core-winrt-string-l1-1-0.dll
+api-ms-win-crt-convert-l1-1-0.dll
+api-ms-win-crt-filesystem-l1-1-0.dll
+api-ms-win-crt-heap-l1-1-0.dll
+api-ms-win-crt-locale-l1-1-0.dll
+api-ms-win-crt-math-l1-1-0.dll
+api-ms-win-crt-runtime-l1-1-0.dll
+api-ms-win-crt-stdio-l1-1-0.dll
+api-ms-win-crt-string-l1-1-0.dll
+api-ms-win-crt-time-l1-1-0.dll
+api-ms-win-crt-utility-l1-1-0.dll
+d2d1.dll
+d3d11.dll
+d3d12.dll
+dwrite.dll
+dxgi.dll
+msvcp140_app.dll
+vccorlib140_app.dll
+vcruntime140_1_app.dll
+vcruntime140_app.dll
+xinputuap.dll
+# API sets of WindowsApp.lib that only the Rust library imports from: the standard library's output of a
+# panic message (the console calls and the conversions between UTF-8 and UTF-16) and its backtrace
+# (LoadLibraryA and lstrlenW, for a dbghelp.dll that an app container does not have: the backtrace is
+# then left out).
+api-ms-win-core-console-l1-1-0.dll
+api-ms-win-core-libraryloader-l1-2-1.dll
+api-ms-win-core-string-l1-1-0.dll
+api-ms-win-core-string-obsolete-l1-1-0.dll
+# The standard library of Rust writes the message of a panic to the standard error handle with these
+# two, whatever else the program does (std::sys::pal::windows::handle, synchronous_write). ntdll.dll is
+# in every process; whether the console's app container lets a program import from it by name is what
+# the console test of the packages answers. Nothing else of ntdll.dll is allowed.
+ntdll.dll: NtWriteFile, RtlNtStatusToDosError
