@@ -872,6 +872,97 @@ A panic in rav1d (a bug, not a damaged stream) is caught at the decode call when
 thread: the call returns an error and the decoder decodes nothing more. With more than one parser
 thread a panic on a worker thread is not caught yet (step 4).
 
+**Gates** (CI run 43447155433 on `a2fb4be`, all 17 jobs green; WARP):
+
+| Gate | With `-parser rav1d` |
+| --- | --- |
+| Conformance set, md5 against dav1d and AOM | 252 of 252 with `rav1g-dec` of the MSVC build and of the cross build, four threads |
+| The two parsers against each other | md5 per output frame: 252 of 252 streams equal, 1,045 frames |
+| Stage dumps of the seven dump streams | every frame buffer behind every stage and every list the stages read equal (block lists, loop filter lists and parameters, CDEF and loop restoration lists, the info line); the mode info records equal in what a stage reads of them, see below |
+| MEMORY lines | the same as with the C parser in all 10 cases |
+| Through `rav1g.h` (`-capi`) | the part of the set, and the cut-tile check |
+| Cut-tile check | the program, the program through `rav1g.h`, the player's decoder code; MSVC build and cross build |
+| Order check, memory check | both builds; 40 decoders md5 pass, video memory back at the start after every release |
+| `-poisonmi`, `-poisonbuf` (part of the set), `-interfast` (whole set) | both builds |
+| Player smoke with `-parser rav1d` | 4 of 4 tasks: MD5 is OK, both builds |
+| `D3D12 DEVICE REMOVALS` | 0 in every run |
+| Everything that existed, with the C parser | green, with the equality to the C++ decoder (`rust-equal`) |
+| Import checks | unchanged: `rav1g.dll` 95 functions of 29 DLLs, the player of the default package 284 of 36, the player of the MSVC package 305 of 48 |
+
+The mode info records in the dumps. The comparison of the two parsers (`stage_dump.py compare
+--two-parsers`) lists the records and does not hold them equal byte for byte, for two reasons that are
+not the new parser's: the entropy decoder of libaom does not clear a record, so a field the block's
+kind does not have (the filter intra mode of an inter block, the warp model of a block without one, the
+CDEF index of a record that is not the first of its 64x64, ...) holds what a frame before left at that
+place of the pool, and it keeps `num_proj_ref`; the sink clears the record. On the first two frames of a
+decoder the records differ in `num_proj_ref` alone; later in such left-over fields. No stage reads
+them: what the stages make of the records (`pred_blocks`, `lf_blocks`, `cdef_info`) and every frame
+buffer are equal, and the runs with `-poisonmi` pass with both parsers. Reproducing the left-over bytes
+would mean writing each field only where libaom writes it; that was not done.
+
+Found on the way to green: the superres denominator in a sequence without superres (libaom does not
+write it; the info line of a dump printed 0 against 8), fixed in the host.
+
+**Timing on CI.** `testing/conformance/parser_timing.py`: `rav1g-dec -gputime` with `-parser c` and
+`-parser rav1d` in turns on one runner, three rounds each, milliseconds a frame (the mean of the rounds'
+means). WARP is a CPU rasteriser on the same cores, so `setup` is the wait for a slot and `frame` is
+mostly that; the parse is what compares. One parser thread, except the last stream (eight tiles, four
+threads). Run 43447155433:
+
+| Stream | Timer | `-parser c` | `-parser rav1d` | Ratio |
+| --- | --- | ---: | ---: | ---: |
+| 2160p 8-bit (`nf-dvbdash-a1-8b-2160p`, 15 frames timed) | `entropy_sum` | 12.89 | 8.96 | 0.70 |
+| | `entropy_wall` | 12.90 | 9.14 | 0.71 |
+| | `setup` | 263.6 | 268.1 | 1.02 |
+| | `record` | 0.053 | 0.052 | 0.99 |
+| | `frame` | 276.8 | 277.7 | 1.00 |
+| | decode call | 379.8 | 374.3 | 0.99 |
+| 1080p 10-bit (`nf-chimera-10b-1080p`, 25 frames) | `entropy_sum` | 9.52 | 7.39 | 0.78 |
+| | `entropy_wall` | 9.53 | 7.95 | 0.83 |
+| | `frame` | 593.5 | 591.4 | 1.00 |
+| 1080p 10-bit (`nf-sparks-10b-1080p`, 36 frames) | `entropy_sum` | 5.76 | 4.32 | 0.75 |
+| | `entropy_wall` | 5.77 | 4.71 | 0.82 |
+| | `frame` | 391.8 | 392.1 | 1.00 |
+| 1080p 10-bit, 8 tiles, 4 threads (`syn-tiles-10b-1080p`, 32 frames) | `entropy_sum` | 9.07 | 5.20 | 0.57 |
+| | `entropy_wall` | 5.69 | 4.61 | 0.81 |
+| | `frame` | 120.6 | 119.6 | 0.99 |
+
+- With rav1d `entropy_sum` has the sink inside (on this runner about 1.9 ms of a 4K frame, step 2), and
+  `entropy_wall` also rav1d's set-up and wrap-up of a frame's parse (0.2 ms at 4K, 0.4 to 0.6 ms at
+  1080p 10-bit, where it is larger than the C parser's).
+- The 2160p stream is the light one of the design's measurements (`a1_8b4k_300`, ratio 0.70 there, the
+  same here). The heavy 4K clips, where the design measured 0.42 to 0.44, are not in the conformance
+  set: the console decides, with `-parser c` and `-parser rav1d` on the same clip in one launch.
+- With four threads on eight tiles the work is 0.57 of the C parser's and the wall time 0.81: rav1d
+  parses a tile row as superblock rows that take turns, and the sink's block lists come at the end of
+  each tile.
+
+**Open for step 4.**
+
+- Frames as values: the host of the sink and the sink itself keep "the frame in parse" (the slot in
+  `curr_frame_data`, the header structs, the tiles' state); `frame_begin` has to hand out a frame, and
+  recording and submission have to leave the parse thread, in decode order.
+- The reference slots are the host's own already; with frames in parallel a frame's slots have to be
+  marked at `frame_begin` and a failed frame has to fail the frames that took it (the rule of "A damaged
+  stream"), which rav1d does not do by itself with more than one frame in parse.
+- A panic on one of rav1d's worker threads is not caught.
+- The operating point is fixed when the parser is made (the first decode call); a change after that is
+  not passed on.
+- The header structs of the entropy decoder that the new host fills (1.2 MB each, one in the sink and
+  one in the host) and the C parser's own state, which a decoder with rav1d still allocates, go in
+  step 6.
+- The sink's cost (1.9 ms of a 4K frame on the CI runner) is mostly the grid and the records; clearing
+  each record before it is filled is part of it and could go where every field is written.
+- The warp validity mark is still not exercised by any stream we have.
+- The player's packages of this run for the console timing: `uwp_dx12_player_0.2.136.0_x64.msix`
+  (default, `rav1g.dll` with the C of clang) and `uwp_dx12_player_0.2.136.2_x64.msix` (C of MSVC), with
+  `-parser rav1d` on a task line.
+
+**Runs.** Commits `72c9212` (the host on the sink, the settings, the checks, the notices, the lifecycle
+lines) and `a2fb4be` (the comparison of the two parsers' dumps, the superres denominator). CI run
+43440279847 on `72c9212`: everything green except the comparison of the two parsers' stage dumps, for
+the two reasons above. CI run 43447155433 on `a2fb4be`: all 17 jobs green.
+
 **Licence notices.** `third_party/rust-crates/NOTICES.txt` has the MIT and Apache-2.0 notices of the 32
 crates of crates.io that are linked into the library and `rav1g-dec` (rav1d's dependencies and the
 Windows bindings), written by `collect.py` there from `Cargo.lock`; CI holds the file against the lock

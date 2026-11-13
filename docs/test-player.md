@@ -1258,7 +1258,7 @@ four listings has the bytecode compiled into the package.
 
 ## Parser (`-parser`)
 
-`-parser rav1d` creates the decoder of the task with the parse pass of
+Since package 0.2.136.0. `-parser rav1d` creates the decoder of the task with the parse pass of
 rav1d in place of the entropy decoder of libaom ([phase2-rav1d.md](phase2-rav1d.md), step 3);
 `-parser c` is the default and the same as no flag. The flag is per task line, so one launch can
 time both on the same stream:
