@@ -1510,6 +1510,24 @@ To read: `cpu parse: block lists` (the lists; with `latelists` the pass at the e
 `cpu entropy/tile decode, thread sum` (the parse with everything in it), `cpu clears, completion
 thread` and its MB a frame (7.5 with `cleargrid`, 3.5 without), and the frames per second.
 
+**Console.** Package 0.2.141.0, the four lines above on `d2` and `j4k40`: slow state (the warm-up
+task first), `-gputime`, 300 frames, two rounds. A cell has the value of round 1 and of round 2.
+
+| | `latelists,cleargrid` (old) | `latelists` | `cleargrid` | default |
+| --- | --- | --- | --- | --- |
+| `d2`, frames per second | 33.33 / 33.46 | 33.74 / 34.07 | 34.64 / 34.70 | 34.95 / 34.63 |
+| `j4k40`, frames per second | 28.16 / 28.18 | 28.53 / 28.63 | 28.86 / 28.83 | 28.93 / 28.96 |
+| block lists, ms a frame, `j4k40` | 4.09 | 4.08 / 4.02 | 3.21 / 3.19 | 3.24 / 3.24 |
+| block lists, ms a frame, `d2` | 1.67 | 1.61 / 1.62 | 1.18 / 1.17 | 1.18 / 1.20 |
+
+- The clears on the completion thread: 7.5 MB a frame in about 4.2 ms with `cleargrid`, 3.5 MB in
+  about 2.2 ms without.
+- The decode thread: 33.3 ms a frame of `j4k40`, 27.0 ms of `d2`.
+- The md5 set: 15 of 15 with the defaults.
+- The defaults are the best of the four on the console. The lists by superblock win there (3.2
+  against 4.1 ms a frame of `j4k40`, 1.2 against 1.6 of `d2`), which they do not on the Linux runner
+  (0.05 ms a 4K frame more than the pass at the end of the tile). Both defaults stay.
+
 **The 10-bit 4K stream of CI.** `nf-dvbdash-d2-10b-2160p.ivf`: 30 temporal units from the key frame
 at 15 s of the open stream `d2` is a cut of (`testing/conformance/streams.txt`): the key frame (1.6
 MB), two frames of 1.0 and 1.3 MB that are decoded and shown later, inter frames of 3 to 150 KB, and
