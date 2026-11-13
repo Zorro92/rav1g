@@ -51,8 +51,8 @@ The shader headers come from a Windows build (FXC): CI keeps them as the artifac
 CI: the job `rust` builds the program with MSVC and runs every check of this document with it
 (artifacts `rav1g-dec-x64-<run id>`, `rav1g-dec-conformance-<run id>`,
 `rav1g-dec-stage-dumps-<run id>`); `rust-cross` builds it on Linux (`rav1g-dec-x64-xwin-<run id>`)
-and `rust-cross-run` decodes the conformance set with that program and runs the player's decoder code
-with it; `cpp-reference` and `rust-equal` are the comparison with the C++ decoder.
+and `rust-cross-run` runs that program: the conformance set, the player's decoder code, the decode
+errors, the order check, `-poisonmi`, `-poisonbuf` and the set with `-interfast`; `cpp-reference` and `rust-equal` are the comparison with the C++ decoder.
 
 ## What it shares with the test player
 

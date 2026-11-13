@@ -1548,8 +1548,24 @@ the comparison with the C++ decoder still holds line for line. `rav1g.dll` is 12
 (3,670,528 bytes). On CI (run 43372543824, commit f7aafaa): all 14 jobs green; against the C++ decoder
 again 252 of 252 streams and 1,045 frames with equal md5, 7 of 7 stage dumps equal, the MEMORY lines the
 same in all 10 cases; the player's decoder code 4 of 4 in both builds; 0 device removals; the packages
-0.2.123.0 (`rav1g.dll` and the player) and 0.2.123.2, every import from an allowed DLL. **These are the
-packages for the console.**
+0.2.123.0 (`rav1g.dll` and the player) and 0.2.123.2, every import from an allowed DLL.
+
+**With the `experiments` input** (run 43373753754, commit 38e5838, all jobs green): the uavsync package
+0.2.124.1 builds on the Rust library (`rav1g.dll` from the uavsync shader headers, its bytecode in the
+DLL, every import allowed), next to 0.2.124.0 and 0.2.124.2; `rav1g-dec` decodes the whole set with
+`-lfhsplit 1`, `-lfhsplit 2`, `-intraedgefix`, `-poisonmi`, `-poisonbuf`, `-poisonbuf -interfast` and
+`-poisonbuf -intrav2`, and once more built with the uavsync shaders (`SHADERS uavsync`), each time with
+the results of `expected.txt`. These passes ran with `warp_decoder` before.
+
+**The program built on Linux** (8dde74a, run 43376471477): `rust-cross-run` decoded the set and ran the player's
+decoder code; it now also runs the decode errors in cut streams, the order check, the parts of the set
+with `-poisonmi` and `-poisonbuf` and the whole set with `-interfast`, so the build whose C is compiled
+by clang, as in the default package, has the checks of the MSVC build. All 14 jobs green; with that
+program: 252 of 252, the player's decoder code 4 of 4, the decode errors as with the MSVC build, 5 of 5
+sequences of the order check, 137 of 137 with `-poisonmi` and with `-poisonbuf`, 252 of 252 with
+`-interfast`, 0 device removals. The packages of this run, the last that changed anything a build reads,
+are 0.2.125.0 (`rav1g-testplayer-x64-43376471477`, the default) and 0.2.125.2
+(`rav1g-testplayer-msvc-x64-43376471477`). **These are the packages for the console.**
 
 **Open after phase 1:**
 
