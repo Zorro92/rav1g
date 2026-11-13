@@ -1324,6 +1324,8 @@ elsewhere shorten the wall time per frame. Neither changes the decoded output.
 | `-lowmem` | All three memory reductions: one back buffer shared by all frames (which is the default on its own), and smaller per-slot shares of the mode info pool and of the coefficient buffer; see [Smaller decoder](#smaller-decoder--lowmem). |
 | `-lowmemparts N` | Exactly the reductions in `N`, the sum of 1 (shared back buffer), 2 (mode info shares) and 4 (coefficient shares). Default 1. `-lowmemparts 0` is none of them, `-lowmem` is `-lowmemparts 7`. |
 | `-noguard` | The decoder of this task is created without the [budget guard](#budget-guard-memory-refused). Only for the test described under [Memory after a decoder is destroyed](#memory-after-a-decoder-is-destroyed): a creation that does not fit loses the D3D12 device for the rest of the launch. Has no effect on a task that reuses the decoder of the task before. |
+| `-budget N` | Only where the system gives the app no memory limit, which is the player's decoder code in `rav1g-dec -playersmoke` (CI on WARP): a model of the app's memory takes the place of `Windows::System::MemoryManager`, with a limit `N` MiB above what the process uses without a decoder, so the budget guard, the settle wait and the credit of a released decoder run there too; see [The app's memory as a model](#the-apps-memory-as-a-model--budget--retain). In the app the flag does nothing (one log line says so). |
+| `-retain N` | With `-budget`: a destroyed decoder leaves up to `N` MiB of its device buffers charged to the app until the next decoder exists, which is what the console does. |
 
 Without any of them the decoder has two slots, clears on the decode thread, is sized for
 the stream and shares one back buffer (see
@@ -1630,7 +1632,7 @@ A refusal allocates nothing and leaves the device as it was, so the next task of
 launch runs:
 
 ```text
-MEMORY decoder size: 4096x2176 10-bit (-nofitsize, the stream's largest frame is 3840x2160 10-bit), slots 3, intra_v2 buffers no, low memory parts 0; device buffers 842.2 MiB and up to 77.3 MiB for palette buffers on first use, host pool N.N MiB
+MEMORY decoder size: 4096x2176 10-bit (-nofitsize, the stream's largest frame is 3840x2160 10-bit), slots 3, intra_v2 buffers no, low memory parts 0; device buffers 842.2 MiB and up to 77.3 MiB for palette buffers on first use, host memory N.N MiB
 MEMORY output pool estimate: textures of 4 images of 3840x2160 10-bit, 100.9 MiB; held back from what the decoder may take until the pool has them. The decoder's budget guard keeps a margin of 48.0 MiB at its creation
 MEMORY app before the decoder: usage N.N MiB of limit 1024.0 MiB, N.N MiB left
 MEMORY budget: 890.2 MiB needed and N.N MiB left for the decoder, waited 300 ms for memory the system may still be returning: N.N MiB left now (no longer growing)
@@ -1742,7 +1744,7 @@ at the end of this block.
 Before the decoder is created (player, then the decoder's budget line):
 
 ```text
-MEMORY decoder size: 4096x2176 10-bit (-nofitsize, the stream's largest frame is 3840x2160 10-bit), slots 2, intra_v2 buffers no, low memory parts 0; device buffers 681.9 MiB and up to 51.5 MiB for palette buffers on first use, host pool N.N MiB
+MEMORY decoder size: 4096x2176 10-bit (-nofitsize, the stream's largest frame is 3840x2160 10-bit), slots 2, intra_v2 buffers no, low memory parts 0; device buffers 681.9 MiB and up to 51.5 MiB for palette buffers on first use, host memory N.N MiB
 MEMORY output pool estimate: textures of 4 images of 3840x2160 10-bit, 100.9 MiB; held back from what the decoder may take until the pool has them. The decoder's budget guard keeps a margin of 48.0 MiB at its creation
 MEMORY app before the decoder: usage N.N MiB of limit N.N MiB, N.N MiB left
 MEMORY budget: device buffers 681.9 MiB + margin 48.0 MiB = 729.9 MiB, the application has N.N MiB left for the decoder: accepted; palette buffers on first use would add up to 51.5 MiB
@@ -1751,7 +1753,7 @@ MEMORY budget: device buffers 681.9 MiB + margin 48.0 MiB = 729.9 MiB, the appli
 The default decoder, the same stream:
 
 ```text
-MEMORY decoder size: 3840x2176 10-bit (fit to the stream, the stream's largest frame is 3840x2160 10-bit), slots 2, intra_v2 buffers no, low memory parts 1; device buffers 615.7 MiB and up to 48.3 MiB for palette buffers on first use, host pool N.N MiB
+MEMORY decoder size: 3840x2176 10-bit (fit to the stream, the stream's largest frame is 3840x2160 10-bit), slots 2, intra_v2 buffers no, low memory parts 1; device buffers 615.7 MiB and up to 48.3 MiB for palette buffers on first use, host memory N.N MiB
 MEMORY budget: device buffers 615.7 MiB + margin 48.0 MiB = 663.7 MiB, the application has N.N MiB left for the decoder: accepted; palette buffers on first use would add up to 48.3 MiB
 MEMORY decoder created: 3840x2176 10-bit, slots 2, frame buffers 10 + 2 back buffers of 25346048 bytes (24.2 MiB) each; 40 device buffers, 645612288 bytes (615.7 MiB); host pool N of N bytes (N.N MiB) in use
 MEMORY decoder created options: intra_v2 buffers no (the decoder was not created for -intrav2); low memory 1 (shared back buffer yes, mode info share 1/2 of the worst case, coefficient share 17/24); palette buffers 0 of 2 created, 24.2 MiB each, a slot's on its first frame with screen content tools
@@ -1770,6 +1772,7 @@ After a creation that worked (decoder, then player):
 ```text
 MEMORY decoder created: 4096x2176 10-bit, slots 2, frame buffers 12 + 1 back buffer of 27017216 bytes (25.8 MiB) each; 36 device buffers, 715036928 bytes (681.9 MiB); host pool N of N bytes (N.N MiB) in use
 MEMORY decoder created options: intra_v2 buffers no (the decoder was not created for -intrav2); low memory 0 (shared back buffer no, mode info share 1/2 of the worst case, coefficient share 17/24); palette buffers 0 of 2 created, 25.8 MiB each, a slot's on its first frame with screen content tools
+MEMORY decoder created host memory: host pool N bytes (N.N MiB) for the entropy decoder, N of them in use; the decoder itself 69248 bytes (0.1 MiB) on the heap, not in the pool; both allocated before the budget is asked
 MEMORY decoder created by type: DeviceOnly 7 buffers 412.0 MiB; DeviceUpload 14 buffers 32.3 MiB; HostRW 9 buffers 164.6 MiB; ReadBack 0 buffers 0.0 MiB; DeviceOnlyConst 5 buffers 0.8 MiB; UploadUAV 1 buffers 72.2 MiB; textures 0
 MEMORY decoder created per slot: 141107968 bytes (134.6 MiB) = 11 own buffers 38.9 MiB + mode_info_pool share 59.5 MiB + idct_coefs share 36.1 MiB; a slot above 2 also adds one frame buffer, 25.8 MiB
 MEMORY decoder created largest: frame_buffer_pool 335.0 MiB DeviceOnly; mode_info_pool 119.0 MiB HostRW; idct_coefs 72.2 MiB UploadUAV; idct_residuals 26.0 MiB DeviceOnly; prediction_blocks 25.5 MiB DeviceOnly; idct_blocks 12.8 MiB DeviceOnly; idct_blocks_unordered 12.8 MiB DeviceUpload (per slot); prediction_blocks_warp 9.6 MiB DeviceOnly; gen_block_map 7.7 MiB HostRW (per slot); gen_mi_block_indexes 6.4 MiB HostRW (per slot)
@@ -1799,6 +1802,17 @@ buffers); the difference is the palette and intra v2 buffers, see
 - The host pool is ordinary memory, not D3D12 memory. Since the player uses the decoder through
   `rav1g.h` (2026-11-12) it belongs to the decoder, which allocates it at its creation and frees it
   when it is destroyed; before that it was a `std::vector` of the player, freed at the next creation.
+- **host memory** (packages after 0.2.125, 2026-11-13): the host pool holds what the entropy decoder
+  is given (its state and buffer pool, the contexts, the motion vectors and segment maps of the frame
+  buffers, the tiles of the slots). The decoder itself, with its allocator and its queues, is an
+  allocation of its own of 69,248 bytes; up to 0.2.125 it lay in the pool with the size of the C++
+  struct, so the pool of a configuration is 74,688 bytes smaller than it was (the two numbers of
+  `host pool N of N bytes` in the `decoder created` line). The pool and the decoder are allocated
+  before the decoder asks the budget callback, so the app's answer already has them and the guard
+  compares what comes after it, the device buffers. `host memory` in the `decoder size` line of the
+  player, which said `host pool` before, is the pool and the decoder together
+  (`Rav1gMemoryRequirements::host_size`): 0.07 MiB more than the pool, which the one decimal of the
+  line shows in some configurations and not in others.
 
 The player's output images are allocated at the first frame of a size, all free images of
 the pool at once:
@@ -2008,6 +2022,42 @@ Only needed if the settle line of the second task says `not returned`. The secon
 creation is then not checked: either `MEMORY app after the decoder` shows the app about
 where the first decoder left it (the memory was reused), or the creation fails with
 `0x887A0005` and the launch is over (it was not).
+
+### The app's memory as a model (`-budget`, `-retain`)
+
+The budget guard, the settle wait and the credit of a released decoder only run where the system
+gives the app a memory limit, which is the console. Two bugs in that part of the player were found
+there and nowhere else: memory a destroyed decoder left behind, and a refused creation that lost the
+credit, so that the next, smaller decoder was refused as well
+([above](#budget-guard-memory-refused)). So that CI runs this code too, the player's decoder code
+has a model of the app's memory for the places where the system reports none, which is
+`rav1g-dec -playersmoke` on a desktop device (WARP):
+
+- `-budget N`: the app's limit is what the process uses when the first task with the flag starts (no
+  decoder exists) and `N` MiB. `MEMORY app` lines are written as in the app, with `(modelled)` at
+  their end.
+- A decoder that exists is charged with its device buffers and its host memory
+  (`Rav1gMemoryRequirements`), from when its creation has succeeded: the guard is asked inside the
+  creation, before the buffers exist, as in the app.
+- `-retain N`: a destroyed decoder leaves `N` MiB of its device buffers charged (all of them when it
+  had fewer), until the next decoder exists. That is the console's behaviour as measured: a 4K
+  decoder leaves up to about 250 MiB that the next decoder gets back.
+
+The player then does what it does in the app: it waits for the memory to come back (2 s, it does
+not in the model), counts what stays charged as available to the next decoder, and hands the sum to
+the decoder's guard. One line at the start of every task says what the model is:
+
+```text
+MEMORY app model (-budget 250 -retain 160): the system gives this program no memory limit; modelled: limit N.N MiB = N.N MiB without a decoder + 250 MiB, a decoder charged with its device buffers and host memory, a destroyed decoder leaves up to 160.0 MiB charged until the next one exists
+```
+
+It is a model and not a measurement: exact, and the same in every run, which is what a check of the
+player's decisions needs. The output pool is not charged (its estimate is still held back from what
+the decoder may take), and what the process really gives back is measured by `rav1g-dec -memstate`.
+Both are run by `testing/conformance/memory_check.py`
+([warp-decoder.md](warp-decoder.md#memory-check)). In the app both flags do nothing, and a task that
+has one logs `-budget and -retain do nothing in the app: the system reports the app's memory and its
+limit`.
 
 ### Decoder size (`-nofitsize`)
 

@@ -105,6 +105,10 @@ class CParameters {
     // The parts in effect after Parse(): PLAYER_LOWMEM_DEFAULT, the value of -lowmemparts, or all with -lowmem.
     int lowmem_parts_;
     bool noguard_;
+    // -budget, -retain: the model of the app's memory where the system gives the app no limit
+    // (decoder.cpp, "The app's memory where the system has no limit for it"). -1: no model.
+    int budget_mib_;
+    int retain_mib_;
     // -continue_on_error: a decode call that fails does not end the task; the next temporal units go to
     // the same decoder.
     bool continue_on_error_;

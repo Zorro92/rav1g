@@ -854,6 +854,23 @@ jobs:
             --out out/order-check "--title=rav1g-dec (cargo, MSVC)"
           if ($LASTEXITCODE -ne 0) { throw "order check with rav1g-dec: exit code $LASTEXITCODE (1: a stream is wrong behind other streams, 2: the check could not be done)" }
 
+      # Memory check (testing/conformance/memory_check.py; docs/warp-decoder.md, "Memory check"): what the
+      # console showed twice and no run here could: a destroyed decoder that leaves memory behind, and a
+      # budget guard that loses its credit when a creation is refused. One process creates, uses and
+      # releases decoders of several configurations eight times over (the largest stream, a decoder of the
+      # 4K 10-bit size, three slots, -lowmem, a creation the guard must refuse, a smaller one it must
+      # accept); the video memory of the adapter after every release must be what it was before the first
+      # decoder, and the private bytes of the process must stop growing once the process is warm. Then
+      # the player's decoder code with a modelled app memory limit: a refused creation, and behind it a
+      # smaller decoder that is accepted only with the credit of the decoder released before.
+      - name: Memory check, decoders one after the other in one process
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/memory_check.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/memory-check "--title=rav1g-dec (cargo, MSVC)"
+          if ($LASTEXITCODE -ne 0) { throw "memory check with rav1g-dec: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
+
       # The same dependence without waiting for the memory of an earlier decoder: with -poisonmi the decoder
       # fills the mode info pool with the byte 0xA5 when it creates it, so a shader that reads bytes of a
       # record that the entropy decoder never wrote (padding of the C struct, a field the block's kind does
@@ -1011,6 +1028,7 @@ jobs:
             out/conformance/
             out/conformance-*/
             out/order-check/
+            out/memory-check/
             out/gputime-smoke/
             out/memory-lines/
             out/sm6test/
@@ -1321,8 +1339,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "the player's decoder code on the Rust library of the Linux build: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
 
       # The other checks of the rust job with this program (the comments are there): decode errors in cut
-      # streams through the Rust interface and with the player's decoder code, the order check, the part
-      # of the set with -poisonmi and with -poisonbuf, and the whole set with -interfast.
+      # streams through the Rust interface and with the player's decoder code, the order check, the memory
+      # check, the part of the set with -poisonmi and with -poisonbuf, and the whole set with -interfast.
       - name: Decode error in a cut stream, the rav1g-dec of the Linux build
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -1338,6 +1356,14 @@ jobs:
           python testing/conformance/order_check.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
             --out out/order-check "--title=rav1g-dec built on Linux (cargo xwin, clang-cl)"
           if ($LASTEXITCODE -ne 0) { throw "order check with the rav1g-dec of the Linux build: exit code $LASTEXITCODE (1: a stream is wrong behind other streams, 2: the check could not be done)" }
+
+      - name: Memory check with the rav1g-dec of the Linux build
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/memory_check.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
+            --out out/memory-check "--title=rav1g-dec built on Linux (cargo xwin, clang-cl)"
+          if ($LASTEXITCODE -ne 0) { throw "memory check with the rav1g-dec of the Linux build: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
 
       - name: Conformance with -poisonmi, with -poisonbuf and with -interfast, the rav1g-dec of the Linux build
         if: ${{ !cancelled() }}
@@ -1366,6 +1392,7 @@ jobs:
             out/player-smoke/
             out/cut-tile/
             out/order-check/
+            out/memory-check/
           if-no-files-found: warn
 
   # Host check of how the shaders hand data between the threads of a thread group. A GPU promises

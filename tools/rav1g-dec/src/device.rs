@@ -21,6 +21,8 @@ use crate::say;
 pub struct Device {
     pub device: ID3D12Device,
     pub queue: ID3D12CommandQueue,
+    /// The adapter of the device, for the video memory it reports; none where DXGI has no IDXGIAdapter3.
+    adapter: Option<IDXGIAdapter3>,
 }
 
 impl Device {
@@ -31,6 +33,17 @@ impl Device {
     /// `ID3D12CommandQueue*` for the decoder.
     pub fn queue_ptr(&self) -> *mut c_void {
         self.queue.as_raw()
+    }
+    /// The bytes of video memory the adapter says this process uses, local and non-local
+    /// (`QueryVideoMemoryInfo`); `None` where it does not say.
+    pub fn video_memory_usage(&self) -> Option<(u64, u64)> {
+        let adapter = self.adapter.as_ref()?;
+        let usage = |group| {
+            let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+            // SAFETY: a plain call on a valid adapter with a valid out value.
+            unsafe { adapter.QueryVideoMemoryInfo(0, group, &mut info) }.ok().map(|()| info.CurrentUsage)
+        };
+        Some((usage(DXGI_MEMORY_SEGMENT_GROUP_LOCAL)?, usage(DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL).unwrap_or(0)))
     }
 }
 
@@ -187,6 +200,6 @@ pub fn create(globals: &Globals) -> Option<Device> {
                 return None;
             }
         };
-        Some(Device { device, queue })
+        Some(Device { device, queue, adapter: adapter.cast::<IDXGIAdapter3>().ok() })
     }
 }

@@ -362,6 +362,68 @@ fn memory_line(when: &str) {
     );
 }
 
+/// -memstate: one line with the memory of the process and the video memory of the adapter, in bytes, for
+/// `testing/conformance/memory_check.py`. `at`: "before" a task, "decoded" (the frames of the task are out,
+/// its decoder and its output images still exist), "released" (nothing of the task exists any more).
+///
+/// The released state is read when it has settled: the system takes the memory of released D3D12 buffers
+/// back shortly after the release, not in it, so the numbers are read again every 20 ms until the private
+/// bytes have not gone down by 64 KiB for 100 ms, for 2 s at most. `settle_ms` says how long that took.
+pub fn memory_state(dev: &Device, name: &str, at: &str) {
+    use windows::Win32::System::ProcessStatus::{
+        K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+    };
+    use windows::Win32::System::Threading::GetCurrentProcess;
+
+    let read = || {
+        let mut pmc =
+            PROCESS_MEMORY_COUNTERS_EX { cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32, ..Default::default() };
+        // SAFETY: the structure is valid and carries its size.
+        let ok = unsafe {
+            K32GetProcessMemoryInfo(
+                GetCurrentProcess(),
+                (&raw mut pmc).cast::<PROCESS_MEMORY_COUNTERS>(),
+                size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+            )
+            .as_bool()
+        };
+        ok.then_some(pmc)
+    };
+    let Some(mut pmc) = read() else {
+        return;
+    };
+    let mut settle_ms = 0;
+    if at == "released" {
+        let mut steady_ms = 0;
+        while steady_ms < 100 && settle_ms < 2000 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            settle_ms += 20;
+            let Some(next) = read() else {
+                break;
+            };
+            // The commit charge: the private bytes, where the system reports them (wine does not).
+            let went_down = next.PagefileUsage + (64 << 10) <= pmc.PagefileUsage;
+            steady_ms = if went_down { 0 } else { steady_ms + 20 };
+            pmc = next;
+        }
+    }
+    let (local, non_local) = match dev.video_memory_usage() {
+        Some((local, non_local)) => (local as i64, non_local as i64),
+        None => (-1, -1),
+    };
+    say!(
+        "MEMSTATE stream={} at={} private={} commit={} working_set={} dxgi_local={} dxgi_non_local={} settle_ms={}",
+        name,
+        at,
+        pmc.PrivateUsage,
+        pmc.PagefileUsage,
+        pmc.WorkingSetSize,
+        local,
+        non_local,
+        settle_ms
+    );
+}
+
 /// The size the decoder is created for: the stream's largest frame size, rounded up to 128 as the decoder
 /// does, and 8-bit buffers for an 8-bit stream; 4096x2176 10-bit with -nofitsize or for a larger stream.
 /// A decoder that follows another one of the task (a new sequence that did not fit) is at least as large
@@ -428,7 +490,7 @@ fn create_decoder(
     let (device_size, host_size) = library.memory_requirements(&spec);
     say!(
         "TASK {}: stream {}x{} {}-bit, decoder {}x{} {}-bit ({}), slots {}, low memory parts {}, CDEF {}, intra {}{}, \
-         clears {}, threads {}, output pool {}; device buffers {:.1} MiB, host pool {:.1} MiB",
+         clears {}, threads {}, output pool {}; device buffers {:.1} MiB, host memory {:.1} MiB",
         task.name,
         info.width,
         info.height,
@@ -454,7 +516,7 @@ fn create_decoder(
 }
 
 /// One task. Returns the exit code of the task.
-pub fn run_task(task: &Task, dev: &Device, library: &Library) -> i32 {
+pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) -> i32 {
     say!("BEGIN stream={}", task.name);
     memory_line("before the task");
     let run = Arc::new(Run {
@@ -758,6 +820,9 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library) -> i32 {
     }
     decode_ms = ms_since(decode_start);
     drop(reader);
+    if memstate {
+        memory_state(dev, &task.name, "decoded");
+    }
     drop(decoder);
     // -gputime: the completion thread is joined, so the records are complete. The summary of the player,
     // and with -progress its per-frame lines. No decoder exists, so no frame is in flight.

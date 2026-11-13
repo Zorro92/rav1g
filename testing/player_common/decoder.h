@@ -359,6 +359,8 @@ class AV1Decoder {
   int created_lowmem_ = 0;
   bool created_packed_10x3_ = false;
   bool created_noguard_ = false;
+  // The device buffers of the decoder that exists, for the app memory model of -budget.
+  uint64_t created_device_size_ = 0;
   perfstats::PerfStats perf_stats_;
   std::mutex perf_cs_;
   int perf_installed_ = 0;

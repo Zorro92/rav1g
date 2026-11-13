@@ -99,6 +99,15 @@ gets a new decoder. The program uses the decoder through the Rust interface of t
   much memory left for it, so the budget guard of the creation can be run on a desktop: with `-v` the
   `MEMORY budget` line of an accepted creation, or the wait and the `MEMORY REFUSED` line of a refused
   one (the task then fails at the creation of its decoder).
+- `-memstate`: `MEMSTATE stream=<name> at=<before|decoded|released> private=<bytes> commit=<bytes>
+  working_set=<bytes> dxgi_local=<bytes> dxgi_non_local=<bytes> settle_ms=<n>` lines: the private
+  bytes of the process (`PrivateUsage`; `commit` is `PagefileUsage`, the same number where the system
+  reports both) and the video memory the adapter reports for the process
+  (`IDXGIAdapter3::QueryVideoMemoryInfo`, -1 where it does not). `before`: at the start of a task;
+  `decoded`: its frames are out, its decoder and its output images still exist; `released`: nothing
+  of the task exists any more. The released state is read when it has settled: again every 20 ms
+  until the private bytes have not gone down by 64 KiB for 100 ms, for 2 s at most. For the
+  [memory check](#memory-check).
 - `-playersmoke <directory>`: see the next section. (`warp_decoder` has the flag too, on the C++
   library.)
 
@@ -151,8 +160,13 @@ against the C++ decoder, which is no longer in this branch:
 - The job **`rust-equal`** first checks that the shaders of this commit are those of the pinned
   commit (`shaders.py same`, on the reports of the two shader builds), then compares, `rav1g-dec`
   against `warp_decoder`: the md5 of every output frame of every stream, the bytes of every stage
-  dump (`compare_md5.py`), and the MEMORY lines (`memory_lines.py compare`; the size of the host pool
-  is left out, it depends on where the program's allocator puts it).
+  dump (`compare_md5.py`), and the MEMORY lines (`memory_lines.py compare`). The host pool is left
+  out of that comparison: the C++ decoder lies in its pool, the Rust decoder is an allocation of its
+  own next to a pool that holds only what the entropy decoder is given, so the pool of a configuration
+  is 74,688 bytes smaller by design ([rust-port.md](rust-port.md#the-host-pool-and-the-queues-2026-11-13));
+  its two numbers in the `decoder created` line are made equal and the `host memory` line, which only
+  the Rust decoder writes, is dropped. The device buffers, the frame buffers, the options, the budget
+  decision and the steps of the release are compared as before.
 
 The pin is bumped on purpose, in the workflow and here, when a change both decoders have (a shader,
 the C of the parser) is on both branches. The comparison is between two hosts that run the same
@@ -423,6 +437,93 @@ frames before the damage and from the next key frame on are those of the referen
 with eight tiles the key frame 11 temporal units behind the damage; for the vector, which has one
 key frame, the whole stream appended); no device is lost, and the process ends. No damaged stream is
 in the repository or in an artifact.
+
+### Memory check
+
+Two things went wrong on the console that no run here could see, because they are states a process
+gets into over several decoders: a destroyed decoder left memory behind, and the player lost the
+credit of the budget guard when a creation was refused, so that the next, smaller decoder was refused
+as well ([test-player.md](test-player.md#budget-guard-memory-refused)).
+`testing/conformance/memory_check.py --tool <rav1g-dec.exe> --streams <dir> --out <dir>` runs two
+sequences that would show them again, in the `rust` job (MSVC build) and in `rust-cross-run` (the
+build of Linux).
+
+**The warm sequence.** One `rav1g-dec -memstate -keep_going` process runs six tasks eight times over,
+a few temporal units each: the largest stream of the set (3840x2160 8-bit; 470.7 MiB of device
+buffers), a decoder of the 4K 10-bit size (`-nofitsize`, 656.3 MiB: the set has no 4K 10-bit stream),
+1080p 10-bit with `-slots 3`, 1080p 10-bit with `-lowmem`, the 2160p stream with `-budget 300`,
+which the guard must refuse (470.7 + 48 MiB), and a 720p stream with the same budget, which it must
+accept (58.9 + 48 MiB). After every task, when its decoder, its output images and its stream reader
+are gone, the program prints the private bytes of the process and the video memory the adapter
+reports for it (`MEMSTATE ... at=released`).
+
+What WARP does with the memory decides what can be checked. Measured on the runners of CI, with the
+build before the [host pool change](rust-port.md#the-host-pool-and-the-queues-2026-11-13) and with the
+build after it (runs 43384492217, 43387114817 and 43392151836: nine runs of 4, 8 and 12 iterations):
+
+- **The video memory the adapter reports is exact.** `IDXGIAdapter3::QueryVideoMemoryInfo` gave 0
+  bytes after each of 312 releases, and with a decoder it gives its buffers. A build in which every
+  decoder keeps one reference to its coefficient buffer reported 67.8 MiB after the first release
+  and 750.5 MiB after the 24th.
+- **The private bytes after a release are not those before the first decoder.** The process starts
+  the sequence at 74 MiB and is at 340 to 530 MiB after most releases: WARP and the D3D12 runtime
+  keep memory of released buffers for the next ones, and how much differs from release to release
+  (after the same task up to 170 MiB between two iterations of one run). It is the runtime's memory,
+  not the decoder's, and the next decoder gets it back: the peak with the 4K 10-bit decoder is 911 to
+  945 MiB in every iteration.
+- **Only the release of the largest decoder makes the runtime give nearly all of it back**, so the
+  lowest level of an iteration, its floor, is the number that repeats: 192 to 195 MiB in the first
+  iteration, 268 to 272 in the second, 289 to 293 in the third, then 292 to 300, in every run and with
+  both builds. Now and then it takes a step of about 10 MiB and keeps it (three of four runs of 12
+  iterations ended at 309 to 314 MiB, one at 298).
+
+So the script checks, and prints, per release and per iteration:
+
+| Check | Tolerance | Measured without a defect |
+| --- | --- | --- |
+| Video memory after every release, against before the first task | 64 KiB | 0 bytes |
+| The floor of iterations 5 to 8, against the floor of iteration 4 (three iterations warm up) | 40 MiB | at most 15.6 MiB up to iteration 8, 19.1 MiB up to iteration 12 |
+| Private bytes after every release of iterations 5 to 8, against the highest level after a release of iterations 1 to 4 | 96 MiB | at most 27.5 MiB up to iteration 8, 32.2 MiB up to iteration 12 |
+| The budget guard | `MEMORY REFUSED` for the task that must be refused and no other; `accepted` for the task with a budget that fits; `not checked` without a budget | |
+| md5 | every task that decodes: `status=pass` | |
+
+The second check is the sharp one for host memory: a decoder that leaves 2 MiB behind on average
+(five decoders an iteration, four iterations) fails it. The third is loose on purpose and is there
+for what the floor cannot see, memory that only comes back with the next large decoder. What the
+check does not see is host memory below these tolerances that every decoder leaves, such as the
+decoder's own struct of 69 KiB.
+
+**The credit sequence.** The player's decoder code (`rav1g-dec -playersmoke`) with its
+[model of an app with a memory limit](test-player.md#the-apps-memory-as-a-model--budget--retain),
+`-budget 250 -retain 160 -queue_size 4` on every task: a 1080p 10-bit decoder (166.9 + 48 MiB of the
+250 less the 25.2 MiB held back for the output pool) is created, used and destroyed for the next task
+and leaves 160 MiB charged; the 2160p decoder does not fit and is refused; the 720p decoder needs
+106.9 MiB, more than the 84.4 MiB the app has left for it and less than the 244.4 MiB with the
+credit, so it is accepted only when the refusal before it kept the credit; the 2160p decoder is
+refused again; a 270p stream runs behind it. Checked: refused exactly there, accepted and `MD5 is OK`
+everywhere else, no error line but those of a refused creation, the launch ends. The numbers are the
+model's and the same in every run.
+
+**That it fails when it should** was tried with three builds that have a known defect (run
+43392151836, the script as it is here):
+
+- The host pool of every decoder is never freed (4 to 20 MiB a decoder): the floor rises by 58 MiB an
+  iteration, so iterations 5 to 8 are 58.3, 115.7, 170.6 and 234.1 MiB above iteration 4, and from
+  iteration 6 on the releases are 97 to 220 MiB above the highest of iterations 1 to 4. The video
+  memory stays at 0. 16 failed checks.
+- Every decoder keeps one reference to its coefficient buffer: the adapter reports 67.8 MiB after the
+  first release and 1,501.0 MiB after the last, so each of the 48 releases fails, and the private bytes
+  follow (the floor 188 to 764 MiB above iteration 4). 74 failed checks.
+- The player forgets the credit when a creation is refused, which was the bug of the console: the
+  720p creation is refused with 84.4 MiB left. 2 failed checks.
+
+Without a defect the same script passed twice in that run: the floor of iterations 5 to 8 at most 9.3
+and 15.6 MiB above iteration 4, the releases at most 1.5 and 8.5 MiB above the highest of iterations
+1 to 4, the video memory 0 bytes after each of the 96 releases.
+
+A D3D12 device that is removed while a sequence runs is not a result of the check; the sequence then
+runs again in a new process, up to three times, and the script prints the `D3D12 DEVICE REMOVALS`
+line of the other checks. The check takes about 1.5 min of a job.
 
 ### Results
 

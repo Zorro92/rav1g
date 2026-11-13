@@ -33,6 +33,83 @@ static std::string MibString(uint64_t bytes) {
   return ss;
 }
 
+#if (WINAPI_FAMILY != WINAPI_FAMILY_APP)
+// The app's memory where the system has no limit for it: the player's decoder code in a desktop program
+// (rav1g-dec -playersmoke, CI on WARP). There the functions below know nothing, the decoder's budget guard
+// is not asked, and what the player does around it (the settle wait, the memory a destroyed decoder leaves
+// charged and the next one gets back, a creation the guard refuses) never runs. -budget <MiB> puts a model
+// in the place of the system's numbers, so that it does:
+//   - the limit is what the process uses when the model starts (no decoder) and the MiB of -budget;
+//   - a decoder that exists is charged with its device buffers and its host memory, from when its creation
+//     has succeeded (the guard is asked inside the creation, before the buffers exist, as in the app);
+//   - with -retain <MiB>, a destroyed decoder leaves that much of its device buffers charged, until the
+//     next decoder exists: what the console does, where a 4K decoder leaves up to about 250 MiB that the
+//     next decoder gets back (docs/test-player.md).
+// A model, not a measurement: it is exact and the same in every run, which is what a check of the
+// player's decisions needs. What the process really gives back is measured by rav1g-dec -memstate.
+#include <psapi.h>
+namespace {
+struct AppMemoryModel {
+  bool on = false;
+  uint64_t base = 0;      // the private bytes of the process when the model started
+  uint64_t limit = 0;     // base and -budget
+  uint64_t retain = 0;    // -retain
+  uint64_t decoder = 0;   // device buffers and host memory of the decoder that exists
+  uint64_t retained = 0;  // what the last destroyed decoder leaves charged
+  uint64_t Usage() const { return base + decoder + retained; }
+};
+AppMemoryModel app_model;
+}  // namespace
+#endif
+
+// -budget, -retain of a task (see above). In the app the system's numbers are used and the flags do nothing.
+static void AppMemoryModelConfigure(int budget_mib, int retain_mib) {
+#if (WINAPI_FAMILY != WINAPI_FAMILY_APP)
+  if (budget_mib < 0) {
+    app_model.on = false;
+    return;
+  }
+  if (!app_model.on && !app_model.base) {
+    PROCESS_MEMORY_COUNTERS_EX pmc;
+    memset(&pmc, 0, sizeof(pmc));
+    pmc.cb = sizeof(pmc);
+    if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc)))
+      app_model.base = pmc.PrivateUsage ? pmc.PrivateUsage : pmc.PagefileUsage;
+    if (!app_model.base) app_model.base = (uint64_t)1 << 20;
+  }
+  app_model.on = true;
+  app_model.limit = app_model.base + ((uint64_t)budget_mib << 20);
+  app_model.retain = (uint64_t)(retain_mib > 0 ? retain_mib : 0) << 20;
+  XB_LOGI << "MEMORY app model (-budget " << budget_mib << " -retain " << (retain_mib > 0 ? retain_mib : 0)
+          << "): the system gives this program no memory limit; modelled: limit "
+          << MibString(app_model.limit) << " = " << MibString(app_model.base) << " without a decoder + "
+          << budget_mib << " MiB, a decoder charged with its device buffers and host memory, a destroyed "
+          << "decoder leaves up to " << MibString(app_model.retain) << " charged until the next one exists";
+#else
+  if (budget_mib >= 0 || retain_mib > 0)
+    XB_LOGI << "-budget and -retain do nothing in the app: the system reports the app's memory and its limit";
+#endif
+}
+
+// The model's bookkeeping: a decoder exists now (|bytes| of device buffers and host memory), or the
+// decoder with |device_bytes| of device buffers was destroyed.
+static void AppMemoryModelCreated(uint64_t bytes) {
+#if (WINAPI_FAMILY != WINAPI_FAMILY_APP)
+  app_model.decoder = bytes;
+  app_model.retained = 0;
+#else
+  (void)bytes;
+#endif
+}
+static void AppMemoryModelDestroyed(uint64_t device_bytes) {
+#if (WINAPI_FAMILY != WINAPI_FAMILY_APP)
+  app_model.decoder = 0;
+  app_model.retained = device_bytes < app_model.retain ? device_bytes : app_model.retain;
+#else
+  (void)device_bytes;
+#endif
+}
+
 // "MEMORY app" line: the memory of the whole app and the limit the system gives it. In app mode on the
 // console that limit is what a decoder creation runs into; the decoder's buffers count against it.
 static void LogAppMemory(const char* label, bool is_error) {
@@ -51,8 +128,15 @@ static void LogAppMemory(const char* label, bool is_error) {
   else
     XB_LOGI << line;
 #else
-  (void)label;
-  (void)is_error;
+  if (!app_model.on) return;
+  const uint64_t usage = app_model.Usage();
+  const std::string line = std::string("MEMORY app ") + label + ": usage " + MibString(usage) + " of limit " +
+                           MibString(app_model.limit) + ", " +
+                           MibString(app_model.limit > usage ? app_model.limit - usage : 0) + " left (modelled)";
+  if (is_error)
+    XB_LOGE << line;
+  else
+    XB_LOGI << line;
 #endif
 }
 
@@ -69,7 +153,9 @@ static int64_t AppMemoryLeft() {
     return -1;
   }
 #else
-  return -1;
+  if (!app_model.on) return -1;
+  const uint64_t usage = app_model.Usage();
+  return app_model.limit > usage ? (int64_t)(app_model.limit - usage) : 0;
 #endif
 }
 
@@ -82,7 +168,7 @@ static uint64_t AppMemoryUsageNow() {
     return 0;
   }
 #else
-  return 0;
+  return app_model.on ? app_model.Usage() : 0;
 #endif
 }
 
@@ -101,6 +187,8 @@ void AV1Decoder::DestroyDecoder() {
   rav1g_decoder_destroy(decoder_);
   decoder_ = nullptr;
   initialized_ = 0;
+  AppMemoryModelDestroyed(created_device_size_);
+  created_device_size_ = 0;
   settle_pending_ = true;
   LogMemory("after the decoder was destroyed");
 }
@@ -171,6 +259,8 @@ int AV1Decoder::DecodeLoop() {
   char dummy;
   pdummy = &dummy;
   is_running_ = 1;
+  // -budget, -retain: before the first task of the launch takes what the app uses without a decoder.
+  AppMemoryModelConfigure(params_.budget_mib_, params_.retain_mib_);
   for (int i = 0; i < params_.loops_; i++) {
     XB_LOGI << " ";
     XB_LOGI << "start loop " << i << " for " << params_.source_file_;
@@ -381,7 +471,7 @@ int AV1Decoder::DecodeOne() {
               << ", intra_v2 buffers "
               << (params_.intrav2_ ? "yes (-intrav2)" : "no") << ", low memory parts " << params_.lowmem_parts_
               << "; device buffers " << MibString(memory.device_size) << " and up to "
-              << MibString(memory.device_size_deferred) << " for palette buffers on first use, host pool "
+              << MibString(memory.device_size_deferred) << " for palette buffers on first use, host memory "
               << MibString(memory.host_size);
       XB_LOGI << "MEMORY output pool estimate: textures of " << params_.player_queue_size_ << " images of "
               << out_width << "x" << out_height << " " << out_bitdepth << "-bit, " << MibString(output_pool)
@@ -410,6 +500,8 @@ int AV1Decoder::DecodeOne() {
         LogAppMemory("after the failed decoder creation", true);
         throw 2;
       }
+      created_device_size_ = memory.device_size;
+      AppMemoryModelCreated(memory.device_size + memory.host_size);
       LogAppMemory("after the decoder", false);
       if (!new_sequence) storage_ = std::move(next_storage);
       initialized_ = 1;

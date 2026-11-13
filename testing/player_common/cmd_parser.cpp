@@ -103,6 +103,14 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"noguard", atSingle, anOptional,
        "create the decoder without the memory budget guard (a creation that does not fit loses the D3D12 device)",
        "", &params_.noguard_},
+      {"budget", atInt, anOptional,
+       "where the system gives the app no memory limit (rav1g-dec -playersmoke): model one, this many MiB above "
+       "what the app uses without a decoder, for the decoder's budget guard. Ignored in the app",
+       "", &params_.budget_mib_},
+      {"retain", atInt, anOptional,
+       "with -budget: a destroyed decoder leaves up to this many MiB charged to the app until the next decoder "
+       "exists, as the console does",
+       "", &params_.retain_mib_},
       {"continue_on_error", atSingle, anOptional,
        "after a decode call that fails, go on with the next temporal unit in the same decoder instead of "
        "ending the task, as an application does with a damaged stream; the log counts the errors",
@@ -296,6 +304,8 @@ void CParameters::Reset() {
   params_.lowmem_ = false;
   params_.lowmem_parts_ = PLAYER_LOWMEM_DEFAULT;
   params_.noguard_ = false;
+  params_.budget_mib_ = -1;
+  params_.retain_mib_ = 0;
   params_.continue_on_error_ = false;
   params_.lfhsplit_ = 0;
   params_.intraedgefix_ = false;

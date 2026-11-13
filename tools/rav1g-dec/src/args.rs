@@ -160,6 +160,8 @@ pub struct Globals {
     pub capi: bool,
     /// -keep_going
     pub keep_going: bool,
+    /// -memstate
+    pub memstate: bool,
     /// -list
     pub list: String,
     /// -playersmoke
@@ -240,6 +242,9 @@ pub fn usage() {
     say!("                        stream (one 'CONTINUE ...' line per error and one behind the task)");
     say!("  -keep_going           a task that ends with a decode error does not end the run: the tasks behind it");
     say!("                        are run in the same process");
+    say!("  -memstate             'MEMSTATE ...' lines with the memory of the process and the video memory the");
+    say!("                        adapter reports, in bytes: before a task, with its decoder still there, and when");
+    say!("                        everything of the task is released (testing/conformance/memory_check.py)");
     say!("  -capi                 use the decoder through its interface for C, the functions of rav1g.h, instead of");
     say!("                        the Rust interface: what an application that is not Rust links (same output)");
     say!(
@@ -359,6 +364,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
                     "-sm6test" => globals.sm6test = true,
                     "-capi" => globals.capi = true,
                     "-keep_going" => globals.keep_going = true,
+                    "-memstate" => globals.memstate = true,
                     "-list" => globals.list = value()?,
                     "-playersmoke" => globals.player_smoke = value()?,
                     _ => return Err(format!("unknown argument '{a}'")),

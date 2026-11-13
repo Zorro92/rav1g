@@ -196,7 +196,14 @@ fn real_main() -> i32 {
 
     let mut exit_code = EXIT_PASS;
     for (index, task) in tasks.iter().enumerate() {
-        let code = run::run_task(task, &dev, &library);
+        if globals.memstate {
+            run::memory_state(&dev, &task.name, "before");
+        }
+        let code = run::run_task(task, &dev, &library, globals.memstate);
+        if globals.memstate {
+            // The task's decoder, its output images and its stream reader are gone.
+            run::memory_state(&dev, &task.name, "released");
+        }
         if globals.debug_layer {
             device::print_debug_messages(&dev.device);
         }
