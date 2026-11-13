@@ -39,6 +39,12 @@ separate runs). 24 fps needs at most 41.7 ms per frame:
 | SVT-AV1 low-delay clip | 13.4 fps, GPU busy 66.5 ms | 21.0–23.1 fps, GPU busy 30.7–32.2 ms | 25.3–25.6 fps (27.3 with `-asyncclear`, one run) |
 | Jellyfin test clip | 10.5 fps, GPU busy 95.4 ms | 16.4–16.8 fps, GPU busy 50 ms (intra 21, inter 19) | 18.6–18.7 fps (19.2 with `-asyncclear`), GPU-bound at ~51 ms |
 
+The "GPU busy" figures of the table were taken with the per-stage timing of the inter breakdown
+(`-gputimedetail`), which makes the GPU slower by what its timestamps and barriers cost. Plain `-gputime`
+gives, with today's decoder, 18.5 ms of GPU time per frame on the test clip of the last row (`j4k40`)
+and 12.1 ms on the SVT-AV1 low-delay clip (`t40x1ld`): the decode thread, not the GPU, is what limits
+both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
+
 - **CDEF v2** is 7–9x faster than upstream and bit-exact. It is the default (`-cdefv1`
   selects upstream's shader).
 - **Intra v2** (`-intrav2`) is bit-exact but 2.3–2.4x slower. It is a negative result, off by
@@ -142,9 +148,10 @@ Next targets: the Rust host ([docs/rust-port.md](docs/rust-port.md), started 202
 5 are in: a Cargo workspace that builds the decoder, `rav1g-dec`, the conformance tool in Rust,
 bindings with layout tests for the structs shared with the shaders and with the entropy decoder, and the
 whole host in Rust, from the creation of a decoder to the completion thread; the cargo build compiles no
-C++ of the decoder. Step 5 is in but for its console test: the Rust interface of the `rav1g` crate, its
-interface for C, `crates/rav1g/include/rav1g.h`, and the test player on it, in three packages per run:
-with the C++ library as the reference, and with the Rust library built two ways), then
+C++ of the decoder. Step 5 is in: the Rust interface of the `rav1g` crate, its interface for C,
+`crates/rav1g/include/rav1g.h`, and the test player on it, in three packages per run: with the C++
+library as the reference, and with the Rust library built two ways. On the console the Rust library
+decodes the md5 set and is as fast as the C++ one or faster; the C++ sources leave the tree next), then
 inter and intra prediction on the GPU (a measured `-interfast` prototype showed that inter time is per
 block and per dispatch, not filtering; see
 [gpu-av1-decoder.md](docs/gpu-av1-decoder.md)) and entropy decoding on the CPU (frame-parallel or a

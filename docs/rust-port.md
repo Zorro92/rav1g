@@ -3,8 +3,9 @@
 Status: started 2026-11-12; steps 1 (build skeleton, `rav1g-dec`), 2 (bindings for the shared structs,
 layout tests), 3 (leaf modules) and 4 (frame pipeline: the whole host is Rust in the cargo build, which
 compiles no C++ of the decoder any more) are in the tree, and of step 5 the Rust interface and the
-interface for C (`rav1g.h`) and the UWP test player on the Rust library, in three packages to be timed
-on the console; see [Progress](#progress). Left of step 5: that console test.
+interface for C (`rav1g.h`) and the UWP test player on the Rust library, in three packages that were
+checked and timed on the console: the md5 set passes with all three, the Rust library is as fast as the
+C++ one or faster; see [Progress](#progress). Left: the C++ sources leave the tree.
 Branch `main`. The C++ decoder at tag `v0.3.0` (branch `cpp`) is the reference: every step below has to
 decode the conformance set md5-identically to it and to dav1d.
 
@@ -1315,10 +1316,59 @@ charged to the app, which the budget guard counts as available to the next creat
 behind every creation, also one that was refused, so the next, smaller decoder was refused too although
 it would have fit. It is kept until a decoder exists.
 
-**For the console** (the parent's): first whether the two Rust packages start at all (the two imports
-from `ntdll.dll`; the `LIBRARY` line is the first sign of life of the library), then the md5 set with
-each, then `-gputime` on the 2160p clips, the three packages one after the other with the same tasks:
-the tile threads (`entropy_sum`) and the decode thread first.
+#### Console results of step 5 (2026-11-12)
+
+The packages: 0.2.117.0 (the C++ reference behind `rav1g.h`, run 43361580570, with the fix of the device
+without a queue), 0.2.116.2 (the Rust library, C of MSVC) and 0.2.116.3 (the Rust library as `rav1g.dll`,
+C of clang) of run 43356992112. App mode, no presentation.
+
+- **All three start and say which library they have** (`LIBRARY` line). The two imports from
+  `ntdll.dll` load on the console: the stable target stands, the nightly UWP target is not needed.
+- **The md5 set**: 15 clips, 15 decoders in a row through the budget guard in one launch: 15 of 15 with
+  matching md5 on each of the three packages.
+- **Memory** (the same on all three): `-slots 3` refused as it should be (814.1 MiB needed, about 800
+  left); `-lowmem -slots 3` decodes, md5 matching; `-lowmem -slots 4` refused (813.2 against about 799
+  left); `-slots 4` on a 1080p clip and `-lowmem` on an 8-bit 4K clip decode, md5 matching. One wrong
+  refusal, on all three and so the player's: the default configuration behind the refused creation was
+  refused with 535 to 546 MiB left where the memory the decoder before had left would have made it fit;
+  that is the bug of the memory credit above, fixed since. Not tested: a decode error between setup and
+  submit (no stream that makes one).
+- **Timing**, `-gputime`, the mean of two runs, milliseconds per frame; C++ reference / Rust with the C
+  of MSVC / Rust with the C of clang:
+
+| Clip | Timer | C++ | Rust, MSVC | Rust, clang |
+| --- | --- | ---: | ---: | ---: |
+| `j4k40` (4K 10-bit, 1 tile) | tile threads (entropy, wall) | 42.64 | 42.31 (-0.8 %) | 40.99 (-3.9 %) |
+| | decode thread | 50.26 | 49.47 | 48.07 |
+| | wall per output frame | 52.55 | 51.69 | 50.29 |
+| | GPU busy | 18.55 | 18.45 | 18.45 |
+| | record | 2.46 | 2.13 | 2.12 |
+| `t40x1ld` (4K 10-bit, SVT-AV1 low delay, 1 tile) | tile threads (entropy) | 34.71 | 34.77 (+0.2 %) | 34.21 (-1.4 %) |
+| | decode thread | 43.46 | 43.30 | 42.76 |
+| | GPU busy | 12.07 | 12.05 | 12.05 |
+| | record | 1.58 | 1.47 | 1.47 |
+| `fg4k_300` (4K, 8 tile columns) | tile threads (entropy, sum) | 29.96 | 29.70 | 28.72 (-4.1 %) |
+| | wall per output frame (GPU-bound, 18.7 busy) | 23.58 | 23.56 | 23.49 |
+| `a1_8b4k_300` (4K 8-bit) | tile threads (entropy) | 10.18 | 10.19 | 10.03 |
+| | GPU busy | 7.24 | 7.24 | 7.24 |
+
+- **The Rust library with the C of MSVC is at the speed of the C++ library** on the console: the 3.7 %
+  of the tile threads that the MSVC build was behind on the runners of CI ("Tile decode time at the end
+  of step 4") do not show there (-0.8 % and +0.2 % at 4K).
+- **The C of clang is 1.5 to 4 % faster in the tile threads** than either, on every clip.
+- **The recording is 7 to 14 % faster in Rust** (2.13 against 2.46 ms on `j4k40`, 1.47 against 1.58 on
+  `t40x1ld`), as on WARP. The GPU does the same work in the same time with all three.
+- The gate of phase 1 is met: byte-identical output, and the speed of the C++ decoder or better.
+
+**Decided on these results:** the default package of the player becomes the build with the C of clang
+(the DLL), the static build with the C of MSVC stays as the alternative, and the C++ reference package
+is built for one more round, until the fix of the memory credit is checked on the console; then the C++
+sources leave the tree.
+
+**What was asked of the console test** (the parent's, for the record): first whether the two Rust
+packages start at all (the two imports from `ntdll.dll`; the `LIBRARY` line is the first sign of life of
+the library), then the md5 set with each, then `-gputime` on the 2160p clips, the three packages one
+after the other with the same tasks: the tile threads (`entropy_sum`) and the decode thread first.
 
 ## Estimate
 

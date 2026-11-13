@@ -169,6 +169,13 @@ package, the certificate, `SOURCES.txt` (with a `Variant:` line), the licences, 
 `imports/` (the DLLs the programs of the package import from, checked against
 `testing/uwp_imports/player-dlls-allow.txt`); the listings and the survey are in the first only.
 
+On the console (2026-11-12) all three decode the md5 set of 15 clips with matching md5; the Rust
+library with the C of MSVC is at the speed of the C++ library, the one with the C of clang 1.5 to
+4 % faster in the tile threads, and the command recording is 7 to 14 % faster in Rust
+([rust-port.md](rust-port.md), "Console results of step 5"). The package to use is the clang build
+(`rav1g-testplayer-rust-clang-x64-<run-id>`); the MSVC build is the alternative, and the C++
+package is the reference for as long as the C++ library is in the tree.
+
 The artifact `rav1g-testplayer-x64-<run-id>` contains:
 
 - `packages/`: the signed x64 sideload package (MSIX requested; legacy tooling may
