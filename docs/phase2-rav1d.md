@@ -1489,7 +1489,7 @@ parser thread; ms a frame, the mean and the range of the rounds' means):
 - The 10-bit 4K stream: rav1d's parse takes 0.55 of the C parser's time (20.2 against 36.8 ms a
   frame), the widest gap of the set.
 - What the stream costs CI: a decode of its 30 temporal units takes 11 s on WARP. The `rust` job
-  went from 43.6 to 50.5 minutes (with it in eight runs of the whole set and 30 timed decodes),
+  went from 43.6 to 50.5 minutes (with it in seven runs of the whole set and 20 timed decodes),
   `parse-check` from 2.6 to 3.7 minutes.
 - The memory check is as before with all of it: the video memory after every release is 0, the device
   buffers are those of before (497.1 MiB in use for the 2160p 8-bit decoder, 657.9 for the decoder of
