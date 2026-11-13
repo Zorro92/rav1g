@@ -19,7 +19,7 @@
 
 int rav1g_setup_frame_begin(AV1Decoder *pbi, AV1_COMMON *cm, int64_t *perf_start);
 int rav1g_setup_frame_coefs(AV1Decoder *pbi, AV1_COMMON *cm);
-void rav1g_setup_frame_end(AV1Decoder *pbi, AV1_COMMON *cm, int64_t perf_start);
+int rav1g_setup_frame_end(AV1Decoder *pbi, AV1_COMMON *cm, int64_t perf_start);
 int rav1g_decode_frame_record(AV1Decoder *pbi, av1_decoded_frame_buffer_t *fb, int64_t *perf_lap_start);
 void rav1g_decode_frame_submit(AV1Decoder *pbi, int image_state, const av1_decoded_frame_buffer_t *fb,
                                int64_t perf_lap_start);
@@ -34,7 +34,8 @@ void av1_setup_frame(AV1Decoder *pbi, AV1_COMMON *cm) {
   if (rav1g_setup_frame_coefs(pbi, cm))
     aom_internal_error(&cm->error, AOM_CODEC_MEM_ERROR,
                        "No room for the coefficients of a frame with very small tiles");
-  rav1g_setup_frame_end(pbi, cm, perf_start);
+  if (rav1g_setup_frame_end(pbi, cm, perf_start))
+    aom_internal_error(&cm->error, AOM_CODEC_MEM_ERROR, "Failed to start GPU completion thread.");
 }
 
 void av1_decode_sef(AV1Decoder *pbi) {

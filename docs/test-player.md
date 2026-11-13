@@ -355,6 +355,9 @@ through upstream's shaders (`libav1/dx/av1_perf.h`). The library has no size of 
 it is created for the `width`, `height` and `bitdepth` of the configuration, and
 `aom_codec_peek_stream_info` gives those of a stream, which is what the player now passes.
 
+`-queue_size` below 2 is refused (below 1 with `-nopresent`): the frame on display stays
+held until its replacement arrives, so a pool of one image waits for itself.
+
 **Budget guard with the default decoder**, a 3840x2160 10-bit stream, `-queue_size 4`
 (computed from the allocation code; the guard's numbers are under
 [Budget guard](#budget-guard-memory-refused)): the default decoder is 3840x2176 10-bit
@@ -809,7 +812,11 @@ better where one can be made: see [md5 references from dav1d](#md5-references-fr
   output shows up as errors from that frame on.
 - Both flags read every frame back from the GPU. Do not combine them with `-gputime`
   for timing numbers.
-- Do not add `-try10x3`: the saver and the checker hash that output format differently.
+- With `-try10x3` the saver and the checker both hash the unpacked 16-bit samples (the saver
+  hashed the packed words up to 2026-11-12, so a file it saved then does not check).
+- A check fails, and does not report `MD5 is OK`, when the reference file is missing or
+  empty, when the stream puts out more frames than the reference has lines, and when the
+  task ended with a decode error, also if every frame up to it matched.
 
 The md5 covers the visible picture after all later stages (loop restoration, film
 grain). Run it on at least one 8-bit and one 10-bit clip.
@@ -1526,6 +1533,15 @@ Low memory parts: 0 (none, -lowmemparts 0)
 | 4, coefficient shares | 21.2 / 31.9 MiB | A slot's share of the coefficient buffer holds 12/24 of the worst case instead of 17/24. | A frame takes a second slot once a tile has used half of its worst case. Two shares are exactly the worst case, less what is left over in the first at the superblock boundary where the frame switches: a tile whose coefficients come within one superblock of the worst case (every coefficient of every transform block coded, as in lossless coding of noise) is a decode error: `MEMORY FAILED frame: the coefficients of a tile do not fit its part of the coefficient buffer`. |
 
 A decode error ends the task in the player (`aom_codec_decode error`), like any other.
+With **`-continue_on_error`** it does not: the player logs the error and gives the same
+decoder the next temporal unit, which is what an application does with a damaged stream.
+The decoder has taken back what the failed frame held; the frames up to the next key frame
+may be wrong, or fail as well. The log has one `CONTINUE_ON_ERROR: decode error <n> at
+temporal unit <u> (<what the decoder said>)` line per failed call and, behind the drain,
+`CONTINUE_ON_ERROR: <n> decode errors, <m> temporal units decoded behind the first, <f>
+frames out`. A frame check of such a task counts every frame behind the first missing one
+as wrong (the reference has a line for the frame that failed): save the md5 of the run
+instead and compare the frames behind the next key frame.
 
 ### Budget guard (`MEMORY REFUSED`)
 

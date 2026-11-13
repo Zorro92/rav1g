@@ -305,7 +305,8 @@ int AV1Decoder::DecodeOne() {
                        created_height_ != dec_height || created_bitdepth_ != dec_bitdepth ||
                        created_intrav2_ != params_.intrav2_ ||
                        created_interfast_ != (params_.interfast_ || params_.interfastlists_) ||
-                       created_lowmem_ != params_.lowmem_parts_);
+                       created_lowmem_ != params_.lowmem_parts_ || created_packed_10x3_ != params_.hdr10x3_ ||
+                       created_noguard_ != params_.noguard_);
   if (initialized_ && (need_reinit_ || other_decoder)) DestroyDecoder();
   // Creates the decoder for dec_width x dec_height, dec_bitdepth and the stream info in si. |new_sequence|:
   // the decoder replaces the one of this task in the middle of the stream (a new sequence that did not fit
@@ -389,6 +390,11 @@ int AV1Decoder::DecodeOne() {
               << "guard keeps a margin of " << MibString(RAV1G_MEMORY_GUARD_MARGIN) << " at its creation"
               << (params_.noguard_ ? "; -noguard: the guard is off for this creation" : "");
       // The decoder allocates its host pool at its creation; its own lines give the video memory.
+      // Construct the pool before acquiring a decoder: this allocation can throw. Installing it after
+      // a successful creation is then a non-throwing shared_ptr move.
+      std::shared_ptr<OutBufferStorage> next_storage;
+      if (!new_sequence)
+        next_storage = std::make_shared<OutBufferStorage>(params_.player_queue_size_, dx_desources_.dx12_device.Get());
       LogAppMemory("before the decoder", false);
       const bool init_failed = rav1g_decoder_create(dx_desources_.decoder_device, &cfg, &decoder_) != RAV1G_STATUS_OK;
       // The memory an earlier decoder left is this decoder's now. Only when it exists: a creation that
@@ -405,9 +411,7 @@ int AV1Decoder::DecodeOne() {
         throw 2;
       }
       LogAppMemory("after the decoder", false);
-      if (!new_sequence)
-        storage_ = std::unique_ptr<OutBufferStorage>(
-            new OutBufferStorage(params_.player_queue_size_, dx_desources_.dx12_device.Get()));
+      if (!new_sequence) storage_ = std::move(next_storage);
       initialized_ = 1;
       created_threads_ = params_.threads_;
       created_queue_size_ = params_.player_queue_size_;
@@ -418,6 +422,8 @@ int AV1Decoder::DecodeOne() {
       created_intrav2_ = params_.intrav2_;
       created_interfast_ = params_.interfast_ || params_.interfastlists_;
       created_lowmem_ = params_.lowmem_parts_;
+      created_packed_10x3_ = params_.hdr10x3_;
+      created_noguard_ = params_.noguard_;
     } catch (int error) {
       XB_LOGE << "Unable to create decoder. Error " << error;
       return -1;
@@ -557,6 +563,9 @@ int AV1Decoder::DecodeOne() {
   int cnt = 0;
   int limit = params_.limit_;
   int has_error = 0;
+  // -continue_on_error: the decode calls that failed, and the temporal units decoded behind the first.
+  int decode_errors = 0;
+  int units_after_error = 0;
   int at_least_one = 0;
   // MEMORY lines of the decode loop: once the first frame is out (the output pool has its images then) and
   // once 30 are out, to tell memory that is taken once from memory that grows with the frames.
@@ -619,10 +628,23 @@ int AV1Decoder::DecodeOne() {
     }
     if (decode_err != RAV1G_STATUS_OK) {
       XB_LOGE << "aom_codec_decode error " << rav1g_decoder_error(decoder_);
+      if (params_.continue_on_error_) {
+        // What an application does with a damaged temporal unit: it gives the decoder the next one. The
+        // decoder has taken back what the failed frame held (its pipeline slot, its output image); the
+        // frames up to the next key frame may be wrong or fail as well.
+        const char* detail = rav1g_decoder_error_detail(decoder_);
+        ++decode_errors;
+        XB_LOGI << "CONTINUE_ON_ERROR: decode error " << decode_errors << " at temporal unit " << (frame_in - 1)
+                << ((detail && detail[0]) ? " (" : "") << ((detail && detail[0]) ? detail : "")
+                << ((detail && detail[0]) ? ")" : "") << "; the task goes on in the same decoder";
+        buffer = reader.GetData();
+        continue;
+      }
       has_error = 1;
       output_queue_->hasFatalError_ = 1;
       break;
     }
+    if (decode_errors) ++units_after_error;
     if (params_.gputime_) {
       const double call_ms =
           std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - perf_call_start).count();
@@ -640,6 +662,9 @@ int AV1Decoder::DecodeOne() {
   // drain
   rav1g_decoder_drain(decoder_);
   LogMemory("after the drain");
+  if (params_.continue_on_error_)
+    XB_LOGI << "CONTINUE_ON_ERROR: " << decode_errors << " decode errors, " << units_after_error
+            << " temporal units decoded behind the first, " << output_queue_->pushed_.load() << " frames out";
   // The drain joins the decoder's GPU completion thread: every dump of the task is written.
   if (dumps_installed_) {
     rav1g_set_stage_dump(NULL, NULL, NULL, 0);
@@ -969,10 +994,15 @@ std::shared_ptr<OutBufferWrapper> BufferLocker::Pop() {
 int Md5Checker::Initialize(const char* md5_file, bool for_stream, uint32_t start_frame) {
   std::string md5file(md5_file);
   md5file += ".md5";
-  if (ParseMd5File(md5file.c_str())) return -1;
   current_ = start_frame;
   for_stream_ = for_stream;
+  hasErrors_ = 0;
   if (for_stream_) MD5Init(&md5_ctx_);
+  if (ParseMd5File(md5file.c_str()) || md5_strings_.empty()) {
+    XB_LOGE << "MD5 reference is missing or empty";
+    ++hasErrors_;
+    return -1;
+  }
   return 0;
 }
 
@@ -986,21 +1016,21 @@ int Md5Saver::Put(const Rav1gFrame* img) {
     }
   }
   MD5Init(&md5_ctx_);
-  const uint8_t* ptr = img->planes[0];
-  uint32_t bpp = img->bit_depth == 8 ? 1 : 2;
-  uint32_t w_c = (img->width + 1) / 2;
-  uint32_t h_c = (img->height + 1) / 2;
-  for (uint32_t i = 0; i < img->height; i++) {
-    MD5Update(&md5_ctx_, ptr, img->width * bpp);
-    ptr += img->strides[0];
-  }
-  if (!img->monochrome) {
-    for (int k = 1; k < 3; k++) {
-      const uint8_t* ptr = img->planes[k];
-      for (uint32_t i = 0; i < h_c; i++) {
-        MD5Update(&md5_ctx_, ptr, w_c * bpp);
-        ptr += img->strides[k];
+  const bool packed = img->packed_10x3;
+  std::vector<uint8_t> unpacked(packed ? ((img->width + 5) / 6) * 12 : 0);
+  const uint32_t bpp = img->bit_depth == 8 ? 1 : 2;
+  for (int plane = 0; plane < (img->monochrome ? 1 : 3); ++plane) {
+    const uint32_t width = plane ? (img->width + 1) / 2 : img->width;
+    const uint32_t height = plane ? (img->height + 1) / 2 : img->height;
+    const uint8_t* ptr = img->planes[plane];
+    for (uint32_t row = 0; row < height; ++row) {
+      const uint8_t* samples = ptr;
+      if (packed) {
+        Md5Checker::Unpack10x3(ptr, unpacked.data(), width);
+        samples = unpacked.data();
       }
+      MD5Update(&md5_ctx_, samples, width * bpp);
+      ptr += img->strides[plane];
     }
   }
   MD5Final(md5_digest_, &md5_ctx_);
@@ -1072,8 +1102,10 @@ int Md5Checker::Put(const Rav1gFrame* img) {
       sprintf_s(ss_md5, 3, "%02x", md5_digest_[i]);
       frame_md5.append(ss_md5, 2);
     }
-    if (md5_strings_.empty()) {
-      XB_LOGE << "MD5 checker doesn't have referenced md5 values";
+    if (current_ >= md5_strings_.size()) {
+      XB_LOGE << "MD5 reference has no value for frame " << current_;
+      ++hasErrors_;
+      error = 1;
     } else if (frame_md5.compare(md5_strings_[current_]) != 0) {
       XB_LOGE << "MD5 checksum error in " << current_ << " frame. Avaiting " << md5_strings_[current_] << " In real "
               << frame_md5;
@@ -1110,7 +1142,8 @@ uint32_t Md5Checker::ShowResult(uint32_t fatal_error) {
   } else if (!fatal_error)
     XB_LOGI << "MD5 is OK";
   if (fatal_error) XB_LOGE << "Unable to decode whole stream die to fatal error";
-  return hasErrors_;
+  // A fatal decode is not a passing conformance result, even if its decoded prefix matched.
+  return hasErrors_ + (fatal_error ? 1u : 0u);
 }
 
 int Md5Checker::ParseMd5File(const char* md5_file) {

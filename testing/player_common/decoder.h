@@ -357,6 +357,8 @@ class AV1Decoder {
   bool created_intrav2_ = false;
   bool created_interfast_ = false;
   int created_lowmem_ = 0;
+  bool created_packed_10x3_ = false;
+  bool created_noguard_ = false;
   perfstats::PerfStats perf_stats_;
   std::mutex perf_cs_;
   int perf_installed_ = 0;

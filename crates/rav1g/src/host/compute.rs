@@ -28,6 +28,7 @@ use windows::core::Interface;
 
 use super::log::log;
 use super::tables::{BLOCK_SIZE_HIGH, BLOCK_SIZE_WIDE, GAUSSIAN_SEQUENCE, SS_SIZE_420};
+use super::thread::spawn_thread;
 use super::types::{Av1Core, ComputeShader, GpuBufferObject, compute_shader_lib};
 use crate::gpu::d3d12::{com_ref, com_release, com_store};
 use crate::gpu::{self, BufferRef, Device, Layout, LayoutDesc, OwnedDevice, Queue, Upload};
@@ -384,10 +385,11 @@ pub unsafe extern "C" fn rav1g_wait_shader_create_complete(lib: *mut compute_sha
     // SAFETY: the library is the first field of a ShaderLib (the caller's contract); the other fields are
     // made for shared use, and the C++ fields are written through the pointer.
     unsafe {
-        let workers =
-            std::mem::take(&mut *(*shader_lib).workers.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+        // Keep the lock until joining and publishing the result are complete. Another waiter must not
+        // mistake an emptied handle list for completed pipeline creation.
+        let mut workers = (*shader_lib).workers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let errors = &(*shader_lib).errors;
-        for worker in workers {
+        for worker in workers.drain(..) {
             if worker.join().is_err() {
                 errors.fetch_or(E_FAIL.0, Ordering::Relaxed);
             }
@@ -477,7 +479,14 @@ pub unsafe extern "C" fn av1_create_pipeline_cache_handle(d3d12device: *mut c_vo
             for _ in 0..threads {
                 let (device, tasks, next) = (device.owned(), tasks.clone(), next.clone());
                 let errors = (*shader_lib).errors.clone();
-                workers.push(std::thread::spawn(move || create_shader_thread(device, tasks, next, errors)));
+                match spawn_thread(move || create_shader_thread(device, tasks, next, errors)) {
+                    Ok(worker) => workers.push(worker),
+                    Err(error) => {
+                        log(true, &format!("MEMORY FAILED pipeline worker thread: {error}"));
+                        (*shader_lib).errors.fetch_or(E_FAIL.0, Ordering::Relaxed);
+                        break;
+                    }
+                }
             }
         }
     }
@@ -681,6 +690,54 @@ pub unsafe extern "C" fn rav1g_upload_luts(dec: *mut Av1Core) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two threads wait for the pipelines of one library (two decoders created at once on one device):
+    /// the second must not return while a pipeline worker still runs. It did when the first had taken the
+    /// workers out of the library and was joining them without the lock.
+    #[test]
+    fn a_second_waiter_waits_for_the_pipeline_workers() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        struct Handle(*mut ShaderLib);
+        // SAFETY: the library is made for shared use; the test frees it after both waiters are joined.
+        unsafe impl Send for Handle {}
+
+        let (release, blocked) = mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || {
+            let _ = blocked.recv();
+        });
+        // SAFETY: a library without pipelines is all zero (every pipeline and layout is none).
+        let lib = Box::into_raw(Box::new(ShaderLib {
+            lib: unsafe { std::mem::zeroed() },
+            workers: Mutex::new(vec![worker]),
+            errors: Arc::new(AtomicI32::new(0)),
+        }));
+        let wait = |returned: Arc<AtomicBool>| {
+            let handle = Handle(lib);
+            std::thread::spawn(move || {
+                let handle = handle;
+                // SAFETY: a library of this module, alive until the end of the test.
+                let errors = unsafe { rav1g_wait_shader_create_complete(handle.0.cast()) };
+                returned.store(true, Ordering::SeqCst);
+                errors
+            })
+        };
+        let (first_returned, second_returned) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let first = wait(first_returned.clone());
+        // The first waiter is at the join of the worker by now.
+        std::thread::sleep(Duration::from_millis(100));
+        let second = wait(second_returned.clone());
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!first_returned.load(Ordering::SeqCst), "the first waiter returned while the worker ran");
+        assert!(!second_returned.load(Ordering::SeqCst), "the second waiter returned while the worker ran");
+        release.send(()).unwrap();
+        assert_eq!(first.join().unwrap(), 0);
+        assert_eq!(second.join().unwrap(), 0);
+        // SAFETY: the box of this test; no thread uses it any more.
+        drop(unsafe { Box::from_raw(lib) });
+    }
 
     /// `get_random_number_test` of the C++, as it was written.
     fn get_random_number_test(mut val: i32) -> i32 {

@@ -395,6 +395,31 @@ pub unsafe extern "C" fn rav1g_mt_queue_get_count(queue: *mut DataPtrQueueMT) ->
     locked.inner().m_head - locked.inner().m_tail
 }
 
+/// Starts a thread of the decoder (the pipeline workers, the completion thread). An error when the
+/// system has no thread to give: `std::thread::spawn` would panic then, and a panic in a function the C
+/// calls ends the process.
+pub(crate) fn spawn_thread<F>(run: F) -> std::io::Result<std::thread::JoinHandle<()>>
+where
+    F: FnOnce() + Send + 'static,
+{
+    #[cfg(test)]
+    if spawn_test::FAIL.get() {
+        return Err(std::io::Error::other("no thread (the test asked for this failure)"));
+    }
+    std::thread::Builder::new().spawn(run)
+}
+
+/// For the tests of what a caller does without a thread.
+#[cfg(test)]
+pub(crate) mod spawn_test {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// The next `spawn_thread` calls of this thread fail.
+        pub(crate) static FAIL: Cell<bool> = const { Cell::new(false) };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

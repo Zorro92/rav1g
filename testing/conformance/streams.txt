@@ -29,6 +29,10 @@ cut nf-sparks-10b-1080p.ivf 40 40 AV1/Sparks/Sparks-5994fps-AV1-10bit-1920x1080-
 svt syn-resize-10b-1080p.ivf 64 resize-mode=2
 # Super-resolution: frames coded at a smaller width and upscaled, all denominators.
 svt syn-superres-10b-1080p.ivf 64 superres-mode=2
+# Eight tiles (four columns, two rows) and a key frame every 16 frames: the other streams have one tile
+# and one key frame. Also the stream that testing/conformance/cut_tile_check.py damages for the decode
+# error of a tile whose size does not fit, and decodes on from its next key frame.
+svt syn-tiles-10b-1080p.ivf 40 tile-columns=2:tile-rows=1:keyint=16
 
 aom av1-1-b8-00-quantizer-00.ivf
 aom av1-1-b8-00-quantizer-01.ivf

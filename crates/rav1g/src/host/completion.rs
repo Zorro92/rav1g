@@ -20,11 +20,13 @@ use windows::core::Interface;
 
 use super::create::{rav1g_frame_buffer_acquire, rav1g_release_fb};
 use super::frame::{commit_command_buffer, prepare_command_buffer, release_unsubmitted_frame};
+use super::log::log;
 use super::output::{rav1g_copy_output, rav1g_output_image};
 use super::perf::{av1_perf_ticks, perf_add, perf_callback, perf_collect, perf_now, ticks_to_ms};
 use super::stage_dump::{set_dump_info, stage_dump_deliver};
 use super::thread::{
     cond_signal, mutex_lock, mutex_unlock, rav1g_mt_queue_get, rav1g_mt_queue_is_empty, rav1g_mt_queue_push,
+    spawn_thread,
 };
 use super::types::{Av1Core, GpuWorkItem, av1_frame_thread_data};
 use crate::gpu::Event;
@@ -249,19 +251,28 @@ unsafe fn completion_thread(dec: *mut Av1Core) {
 ///
 /// # Safety
 /// `dec` is a decoder; decode thread.
-pub(crate) unsafe fn start_completion_thread(dec: *mut Av1Core) {
+pub(crate) unsafe fn start_completion_thread(dec: *mut Av1Core) -> bool {
     // SAFETY: the caller's contract. The handle of the thread is kept in the decoder as a pointer to it.
     unsafe {
         if !(*dec).gpu_thread.is_null() {
-            return;
+            return true;
         }
         let decoder = DecoderPtr(dec);
-        let thread: JoinHandle<()> = std::thread::spawn(move || {
+        let thread = spawn_thread(move || {
             let decoder = decoder;
             // The decoder joins this thread before it is released (av1_drain_gpu_decoder).
             completion_thread(decoder.0);
         });
-        (*dec).gpu_thread = Box::into_raw(Box::new(thread)).cast();
+        match thread {
+            Ok(thread) => {
+                (*dec).gpu_thread = Box::into_raw(Box::new(thread)).cast();
+                true
+            }
+            Err(error) => {
+                log(true, &format!("MEMORY FAILED GPU completion thread: {error}"));
+                false
+            }
+        }
     }
 }
 
@@ -366,7 +377,9 @@ pub unsafe extern "C" fn rav1g_decode_sef_begin(pbi: *mut AV1Decoder, fb: *mut a
         // From here on the next setup can take the context back if the output image cannot be had.
         (*dec).curr_frame_data = td_ptr;
         // The completion thread ends with a drain; a show_existing_frame may be the first thing after one.
-        start_completion_thread(dec);
+        if !start_completion_thread(dec) {
+            return 2; // the C entry raises the memory error, after Rust has returned
+        }
 
         prepare_command_buffer(dec);
         if td.dump_active != 0 {
@@ -409,5 +422,31 @@ pub unsafe extern "C" fn rav1g_decode_sef_submit(
             image.user_priv = (*pbi).user_priv;
         }
         rav1g_mt_queue_push(&raw mut (*dec).gpu_waiting_queue, item.cast());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::thread::spawn_test;
+
+    /// The system gives no thread for the completion thread: the frame setup is told so (and raises the
+    /// decoder's error); the decoder has no thread to join.
+    #[test]
+    fn no_completion_thread_is_an_error_not_a_panic() {
+        let layout = std::alloc::Layout::new::<Av1Core>();
+        // SAFETY: a decoder is created zeroed, which is a valid value of every field; freed below.
+        unsafe {
+            let dec = std::alloc::alloc_zeroed(layout).cast::<Av1Core>();
+            assert!(!dec.is_null());
+            spawn_test::FAIL.set(true);
+            let started = start_completion_thread(dec);
+            spawn_test::FAIL.set(false);
+            assert!(!started);
+            assert!((*dec).gpu_thread.is_null());
+            // The drain of a decoder without a completion thread returns at once.
+            av1_drain_gpu_decoder(dec);
+            std::alloc::dealloc(dec.cast(), layout);
+        }
     }
 }

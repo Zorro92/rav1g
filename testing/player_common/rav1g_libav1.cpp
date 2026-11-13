@@ -19,6 +19,7 @@
 #include <string.h>
 #include <string>
 #include <vector>
+#include <atomic>
 
 #include <d3d12.h>
 
@@ -38,6 +39,7 @@ static_assert(RAV1G_POISON_BUFFERS == AV1_POISON_BUFFERS, "the fill levels are A
 static_assert(RAV1G_MEMORY_GUARD_MARGIN == AV1_MEMORY_GUARD_MARGIN, "the guard margin is AV1_MEMORY_GUARD_MARGIN");
 
 struct Rav1gDevice {
+  mutable std::atomic<unsigned> references{1};
   ID3D12Device* device;
   // Null when the application gave none: every decoder then makes a direct queue of its own, as the
   // library always did for the player, which gives none.
@@ -47,6 +49,7 @@ struct Rav1gDevice {
 };
 
 struct Rav1gDecoder {
+  const Rav1gDevice* device;
   aom_codec_ctx_t ctx;
   std::vector<uint8_t> host_memory;
   Rav1gOutput output;
@@ -107,14 +110,16 @@ void* rav1g_device_d3d12_device(const Rav1gDevice* device) { return device ? dev
 
 void* rav1g_device_d3d12_queue(const Rav1gDevice* device) { return device ? device->queue : NULL; }
 
-// The player destroys its decoders before the device, so the pipeline states go here.
-void rav1g_device_destroy(Rav1gDevice* device) {
-  if (!device) return;
+// Decoders retain the pipeline owner, as rav1g.h promises even after the app releases its handle.
+static void release_device(const Rav1gDevice* device) {
+  if (!device || device->references.fetch_sub(1, std::memory_order_acq_rel) != 1) return;
   av1_destroy_pipeline_cache_handle(device->pipelines);
   if (device->queue) device->queue->Release();
   device->device->Release();
   delete device;
 }
+
+void rav1g_device_destroy(Rav1gDevice* device) { release_device(device); }
 
 void rav1g_log_video_memory(void* d3d12_device, const char* label) { av1_log_video_memory_now(d3d12_device, label); }
 
@@ -268,6 +273,8 @@ Rav1gStatus rav1g_decoder_create(const Rav1gDevice* device, const Rav1gSettings*
   }
   aom_codec_control(&decoder->ctx, AV1D_SET_OUTPUT_ALL_LAYERS, settings->output_all_layers ? 1 : 0);
   aom_codec_control(&decoder->ctx, AV1D_SET_OPERATING_POINT, (int)settings->operating_point);
+  device->references.fetch_add(1, std::memory_order_relaxed);
+  decoder->device = device;
   *out = decoder;
   return RAV1G_STATUS_OK;
 }
@@ -308,6 +315,7 @@ Rav1gStatus rav1g_decoder_set_operating_point(Rav1gDecoder* decoder, uint32_t op
 void rav1g_decoder_destroy(Rav1gDecoder* decoder) {
   if (!decoder) return;
   aom_codec_destroy(&decoder->ctx);
+  release_device(decoder->device);
   delete decoder;
 }
 

@@ -192,15 +192,19 @@ fn real_main() -> i32 {
             device::print_debug_messages(&dev.device);
         }
         if code == EXIT_ERROR {
+            exit_code = EXIT_ERROR;
+            if globals.keep_going {
+                // -keep_going: what the decoder left behind the error is what the next task starts on.
+                continue;
+            }
             // The decoder was destroyed, but a failed decode may leave the device or the process in a state
             // the next task should not inherit: the run ends here and says what was not run.
-            exit_code = EXIT_ERROR;
             if index + 1 < tasks.len() {
                 say!("STOPPED after a decode error; {} tasks not run", tasks.len() - index - 1);
             }
             break;
         }
-        if code == EXIT_MISMATCH {
+        if code == EXIT_MISMATCH && exit_code == EXIT_PASS {
             exit_code = EXIT_MISMATCH;
         }
     }

@@ -734,6 +734,27 @@ jobs:
           $ok = @($lines | Where-Object { $_ -match 'MD5 is OK' }).Count
           if ($ok -ne $tasks.Count) { throw "$ok of $($tasks.Count) tasks of the player ended with 'MD5 is OK'" }
           "## Test player decoder code through rav1g.h on WARP", '', "$ok of $($tasks.Count) tasks: MD5 is OK; the launch ended.", '' >> $env:GITHUB_STEP_SUMMARY
+          # A launch without a task file ends as well: it logs that it has no tasks and does not sit idle.
+          New-Item -ItemType Directory -Force out/player-smoke/empty | Out-Null
+          & out/warp_decoder/warp_decoder.exe -playersmoke (Resolve-Path out/player-smoke/empty).Path > out/player-smoke/no-tasks.log
+          if ($LASTEXITCODE -ne 0) { throw "warp_decoder -playersmoke without a task file: exit code $LASTEXITCODE (2: the player did not end its launch)" }
+          if (-not (Select-String -Path out/player-smoke/no-tasks.log -Pattern 'No args were found' -Quiet)) {
+            throw 'The player without a task file did not say that it has no tasks'
+          }
+
+      # A decode error in the middle of a stream (testing/conformance/cut_tile_check.py): the tile data of
+      # one temporal unit of two streams of the set cut short (one tile, eight tiles), which fails behind
+      # the frame's setup and before its submission. The player's decoder code, on the C++ library: the
+      # task ends with the error and the stream behind it decodes right; with -continue_on_error the same
+      # decoder goes on, and the frames from the next key frame on are those of the reference; the device
+      # is not lost and the launch ends. The rust job does the same with rav1g-dec.
+      - name: Decode error in a cut stream, the test player's decoder code (warp_decoder -playersmoke)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/cut_tile_check.py --player-smoke out/warp_decoder/warp_decoder.exe `
+            --streams conformance-streams --out out/cut-tile
+          if ($LASTEXITCODE -ne 0) { throw "decode error check with the player's decoder code: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
 
       - name: Decode every stream on WARP and compare with expected.txt
         shell: pwsh
@@ -919,6 +940,7 @@ jobs:
             out/memory-lines/
             out/sm6test/
             out/player-smoke/
+            out/cut-tile/
             out/msbuild.log
             out/msbuild-uavsync.log
           if-no-files-found: warn
@@ -1072,6 +1094,23 @@ jobs:
           }
           if ($code -ne 0) { throw "conformance run with rav1g-dec -capi: exit code $code (1: not as expected.txt says, 2: the run could not be done)" }
 
+      # A decode error in the middle of a stream (testing/conformance/cut_tile_check.py): the tile data of
+      # one temporal unit of two streams of the set cut short (one tile, eight tiles), which fails behind
+      # the frame's setup and before its submission. The task ends with the error, with the frames before
+      # it right, and the stream behind it in the same process decodes right; with -continue_on_error the
+      # same decoder is given the rest of the stream, and the frames from the next key frame on are those
+      # of the reference; no device is lost. Through the Rust interface and through rav1g.h.
+      - name: Decode error in a cut stream, rav1g-dec
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/cut_tile_check.py --tool out/rav1g-dec/rav1g-dec.exe `
+            --streams conformance-streams --out out/cut-tile
+          if ($LASTEXITCODE -ne 0) { throw "decode error check with rav1g-dec: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
+          python testing/conformance/cut_tile_check.py --tool out/rav1g-dec/rav1g-dec.exe "--tool-args=-capi" `
+            --streams conformance-streams --out out/cut-tile
+          if ($LASTEXITCODE -ne 0) { throw "decode error check with rav1g-dec -capi: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
+
       # The order check and the part of the set with -poisonmi, as the conformance job runs them with
       # warp_decoder: streams one after the other in one process without a repeat alone, and the decoder
       # with the mode info pool filled with 0xA5 at creation.
@@ -1165,6 +1204,7 @@ jobs:
             out/gputime-smoke/
             out/memory-lines/
             out/sm6test/
+            out/cut-tile/
           if-no-files-found: warn
 
       - name: Preserve rav1g-dec.exe

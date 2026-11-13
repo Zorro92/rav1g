@@ -648,6 +648,9 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library) -> i32 {
     }
 
     let mut decode_error = String::new();
+    // -continue_on_error: the decode calls that failed, and the temporal units decoded behind the first.
+    let mut decode_errors = 0;
+    let mut units_after_error = 0;
     let mut units = 0;
     let mut limit = task.limit;
     let mut decoders = 1;
@@ -724,9 +727,26 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library) -> i32 {
             );
             result = replacement.decode(reader.data());
         }
-        if let Err(error) = result {
-            decode_error = format!("decoding failed on temporal unit {}: {}", skipped + units, error.text);
-            break;
+        match result {
+            Err(error) if task.continue_on_error => {
+                // What an application does with a damaged temporal unit: it gives the decoder the next
+                // one. The decoder has taken back what the failed frame held (its pipeline slot, its
+                // output image); the frames up to the next key frame may be wrong, or fail as well.
+                decode_errors += 1;
+                say!(
+                    "CONTINUE {}: decode error {} at temporal unit {}: {}; the task goes on in the same decoder",
+                    task.name,
+                    decode_errors,
+                    skipped + units,
+                    error.text
+                );
+            }
+            Err(error) => {
+                decode_error = format!("decoding failed on temporal unit {}: {}", skipped + units, error.text);
+                break;
+            }
+            Ok(()) if decode_errors != 0 => units_after_error += 1,
+            Ok(()) => {}
         }
         units += 1;
         have = reader.next();
@@ -800,13 +820,28 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library) -> i32 {
         decode_error.push_str(&format!("the D3D12 device was removed, reason {}", hex32(error.code())));
     }
     let ref_frames = if state.have_ref { state.reference.len() as i32 } else { 0 };
-    let sizes = format!(
+    let mut sizes = format!(
         "{} temporal units in, {} frames out{}{}",
         units,
         frames,
         if state.size_changes != 0 { ", frame size changes within the stream" } else { "" },
         if decoders > 1 { ", a new decoder for a larger sequence" } else { "" }
     );
+    if task.continue_on_error {
+        say!(
+            "CONTINUE {}: {} decode errors, {} temporal units decoded behind the first, {} frames out",
+            task.name,
+            decode_errors,
+            units_after_error,
+            frames
+        );
+        if decode_errors != 0 {
+            sizes.push_str(&format!(
+                "; {decode_errors} decode errors, {units_after_error} temporal units decoded behind the first \
+                 (-continue_on_error)"
+            ));
+        }
+    }
     let (width, height, bit_depth) = (state.width, state.height, state.bit_depth);
     if !decode_error.is_empty() {
         result_line(

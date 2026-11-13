@@ -77,6 +77,9 @@ pub struct Task {
     pub poison: Poison,
     /// -interfast (1), -interfastlists (7), -interfastmode <n>: `switches::set_inter_fast`.
     pub interfast: u32,
+    /// -continue_on_error: a decode call that fails does not end the task; the next temporal units go to
+    /// the same decoder.
+    pub continue_on_error: bool,
     /// -alllayers: every shown frame of a temporal unit with spatial layers.
     pub all_layers: bool,
     /// -oppoint <n>: the operating point of a stream with layers.
@@ -127,6 +130,7 @@ impl Default for Task {
             intraedgefix: false,
             poison: Poison::Off,
             interfast: 0,
+            continue_on_error: false,
             all_layers: false,
             oppoint: 0,
             timeout_s: 0,
@@ -154,6 +158,8 @@ pub struct Globals {
     pub sm6test: bool,
     /// -capi
     pub capi: bool,
+    /// -keep_going
+    pub keep_going: bool,
     /// -list
     pub list: String,
 }
@@ -226,6 +232,11 @@ pub fn usage() {
     say!("  -v                    print the decoder's log lines (MEMORY ...) and the player-style task lines");
     say!("  -debuglayer           switch the D3D12 debug layer on (needs the Graphics Tools feature of Windows)");
     say!("                        and print its messages after every task; -gpuvalidation adds GPU-based validation");
+    say!("  -continue_on_error    a decode call that fails does not end the task: the error is counted and the next");
+    say!("                        temporal units go to the same decoder, as an application does with a damaged");
+    say!("                        stream (one 'CONTINUE ...' line per error and one behind the task)");
+    say!("  -keep_going           a task that ends with a decode error does not end the run: the tasks behind it");
+    say!("                        are run in the same process");
     say!("  -capi                 use the decoder through its interface for C, the functions of rav1g.h, instead of");
     say!("                        the Rust interface: what an application that is not Rust links (same output)");
     say!(
@@ -305,6 +316,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-asyncclear" => task.asyncclear = true,
             "-lfhsplit" => task.lfhsplit = number()?,
             "-intraedgefix" => task.intraedgefix = true,
+            "-continue_on_error" => task.continue_on_error = true,
             "-poisonmi" => task.poison = Poison::ModeInfo,
             "-poisonbuf" => task.poison = Poison::Buffers,
             "-interfast" => task.interfast = switches::INTER_FAST_ON,
@@ -338,6 +350,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
                     }
                     "-sm6test" => globals.sm6test = true,
                     "-capi" => globals.capi = true,
+                    "-keep_going" => globals.keep_going = true,
                     "-list" => globals.list = value()?,
                     _ => return Err(format!("unknown argument '{a}'")),
                 }

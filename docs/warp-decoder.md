@@ -48,6 +48,14 @@ The shader headers come from a Windows build (FXC): CI keeps them as the artifac
 What differs from `warp_decoder`:
 
 - The usage text names `rav1g-dec`; the lines the scripts read are the same.
+- `-continue_on_error` (a flag of `rav1g-dec` only, and of the test player): a decode call that
+  fails does not end the task. The error is counted and the next temporal units go to the same
+  decoder, which is what an application does with a damaged stream; one `CONTINUE <stream>: decode
+  error <n> at temporal unit <u>: <text>` line per error, and `CONTINUE <stream>: <n> decode errors,
+  <m> temporal units decoded behind the first, <f> frames out` behind the task. The result line is
+  that of the frames (`nocheck` without a reference), with the errors in its detail.
+- `-keep_going` (a flag of `rav1g-dec` only): a task that ends with a decode error does not end the
+  run; the tasks behind it run in the same process, and the exit code is still 2.
 - `-playersmoke <directory>` (a flag of `warp_decoder` only): runs the decoder code of the test player
   (`testing/player_common`) through `rav1g.h` on the C++ library, on the tasks of
   `<directory>/args/args_av1.txt`, as the player does with its LocalState; the player's log goes to
@@ -282,9 +290,11 @@ vectors, and for the two monochrome vectors once the grey planes are added.
   output (`testing/md5ref/make_md5_ref.sh`).
 - **Streams encoded in the job** with SVT-AV1 from ffmpeg's `testsrc2` pattern, for features
   the other streams do not have: reference scaling (`resize-mode=2`: frames coded at other
-  sizes than the frames they predict from) and super-resolution (`superres-mode=2`: all
-  denominators). The script checks that the encoder produced the feature (frame headers with
-  `use_superres`, more than one coded width). Reference from dav1d.
+  sizes than the frames they predict from), super-resolution (`superres-mode=2`: all
+  denominators), and eight tiles with a key frame every 16 frames
+  (`tile-columns=2:tile-rows=1:keyint=16`; every other stream has one tile). The script checks
+  that the encoder produced the feature (frame headers with `use_superres`, more than one coded
+  width, several tile columns, more than one key frame). Reference from dav1d.
 
 The streams are media. They are never committed and never uploaded as an artifact: the job
 keeps them in the Actions cache, keyed by the list and the scripts, and the Windows job
@@ -357,6 +367,26 @@ unwritten, and `loop_restoration.hlsl` computed an address from them and loaded 
 branch, from a root SRV, which has no bounds checking. That also happened in normal runs, with
 stale data in those fields
 ([gpu-av1-decoder.md](gpu-av1-decoder.md#unwritten-fields-of-a-constant-record-2026-11-12)).
+
+### A decode error in the middle of a stream
+
+`testing/conformance/cut_tile.py <in.ivf> <out.ivf> [--unit N] [--fraction F] [--then-whole]` makes a
+damaged copy of a stream: it keeps a part of the payload of the largest OBU with tile data of one
+temporal unit and sets the sizes of the OBU and of the IVF frame right, so the stream parses up to
+the cut. The decoder then fails behind the setup of the frame and before its submission: with
+`Failed to decode tile data` in a stream of one tile, with `Truncated packet or corrupt tile size`
+where the cut takes a later tile. `--then-whole` lets the undamaged stream follow in the same file.
+
+`testing/conformance/cut_tile_check.py` does that to two streams of the set (a vector with one tile,
+the stream with eight) and runs them, each time followed by an undamaged stream in the same process:
+with `rav1g-dec` through the Rust interface and through `rav1g.h` (the `rust` job), and with the
+decoder code of the test player on the C++ library (`warp_decoder -playersmoke`, the `conformance`
+job). It wants: the task of a damaged stream ends with that error and has the frames before the
+damage right; the stream behind it is right; with `-continue_on_error` the decoder goes on, and the
+frames before the damage and from the next key frame on are those of the reference (in the stream
+with eight tiles the key frame 11 temporal units behind the damage; for the vector, which has one
+key frame, the whole stream appended); no device is lost, and the process ends. No damaged stream is
+in the repository or in an artifact.
 
 ### Results
 

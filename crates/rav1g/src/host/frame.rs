@@ -890,14 +890,16 @@ pub unsafe extern "C" fn rav1g_setup_frame_coefs(pbi: *mut AV1Decoder, cm: *mut 
 /// # Safety
 /// As for [`rav1g_setup_frame_begin`], after it; `perf_start` is what that part returned.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_setup_frame_end(pbi: *mut AV1Decoder, cm: *mut AV1_COMMON, perf_start: i64) {
+pub unsafe extern "C" fn rav1g_setup_frame_end(pbi: *mut AV1Decoder, cm: *mut AV1_COMMON, perf_start: i64) -> c_int {
     // SAFETY: the caller's contract.
     unsafe {
         let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
         let td = &mut *(*dec).curr_frame_data;
         let cm = &*cm;
         assert!((*dec).thread_count <= EntropyThreadCount as c_int, "more tile threads than the decoder has room for");
-        start_completion_thread(dec);
+        if !start_completion_thread(dec) {
+            return -1;
+        }
 
         td.scale_enable = 0;
         for i in LAST_FRAME as usize..=ALTREF_FRAME as usize {
@@ -932,6 +934,7 @@ pub unsafe extern "C" fn rav1g_setup_frame_end(pbi: *mut AV1Decoder, cm: *mut AV
         td.inter_fast = if (*dec).inter_fast_tiles > 0 && td.scale_enable == 0 { inter_fast_mode() } else { 0 };
         perf_add(dec, sys::AV1_PERF_CPU_SETUP as usize, perf_start);
     }
+    0
 }
 
 /// `av1_setup_ext_coef_buffer` (`dx/av1_core.h`): the tile goes on with its coefficients in the share of

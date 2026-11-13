@@ -105,6 +105,17 @@ awk '$1 == "svt"' "$list" | while read -r kind name frames params rest; do
   case "$params" in
     *resize-mode*) [ "$widths" -gt 1 ] || { echo "$0: $name has no frames of another size" >&2; exit 1; } ;;
   esac
+  # Frame headers with more than one tile column, and key frames.
+  tiles=$(echo "$headers" | grep -E ' tile_cols_log2 ' | awk '$NF > 0' | grep -c . || true)
+  keys=$(echo "$headers" | grep -c -E ' frame_type +0+ = 0$' || true)
+  case "$params" in
+    *tile-columns*)
+      echo "svt $name: $tiles frame headers with several tile columns, $keys key frames"
+      [ "$tiles" -gt 0 ] || { echo "$0: $name has no frames with several tiles" >&2; exit 1; } ;;
+  esac
+  case "$params" in
+    *keyint*) [ "$keys" -gt 1 ] || { echo "$0: $name has one key frame" >&2; exit 1; } ;;
+  esac
   echo "-name $name -i svt/$name -check svt/$name.md5 -timeout $big_timeout" >> "$manifest"
 done
 

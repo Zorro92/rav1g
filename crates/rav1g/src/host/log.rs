@@ -26,12 +26,11 @@ const CREATE_ERROR_SIZE: usize = 512;
 static LOG_CB: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static LOG_PRIV: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 
-/// The reason the last decoder creation failed, a C string. Written by the thread that creates a decoder
-/// and read by the application after the creation returned, as in C++: no lock.
-struct CreateError(UnsafeCell<[u8; CREATE_ERROR_SIZE]>);
-// SAFETY: see the type: one writer, the creating thread, and readers after it is done.
-unsafe impl Sync for CreateError {}
-static CREATE_ERROR: CreateError = CreateError(UnsafeCell::new([0; CREATE_ERROR_SIZE]));
+// Independent decoders can be created on different threads. Keep the reason on the thread that
+// creates the decoder, like the public C API's LAST_ERROR.
+thread_local! {
+    static CREATE_ERROR: UnsafeCell<[u8; CREATE_ERROR_SIZE]> = const { UnsafeCell::new([0; CREATE_ERROR_SIZE]) };
+}
 
 /// `av1_set_log_callback` (`dx/av1_perf.h`).
 ///
@@ -46,7 +45,7 @@ pub unsafe extern "C" fn av1_set_log_callback(cb: sys::av1_log_cb_fn_t, private:
 /// `av1_last_create_error` (`dx/av1_perf.h`).
 #[unsafe(no_mangle)]
 pub extern "C" fn av1_last_create_error() -> *const c_char {
-    CREATE_ERROR.0.get().cast()
+    CREATE_ERROR.with(|reason| reason.get().cast())
 }
 
 /// One line to the callback, or to the debugger output without one.
@@ -121,30 +120,66 @@ pub unsafe extern "C" fn rav1g_log_line(is_error: c_int, line: *const c_char) {
 /// `line` is a C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rav1g_log_create_error_line(line: *const c_char) {
-    // SAFETY: the reason is written by the creating thread only (see CreateError); `line` is a C string,
-    // copied up to its end or to the size of the reason, which keeps its last byte 0.
-    unsafe {
-        let reason = &mut *CREATE_ERROR.0.get();
+    // SAFETY: only this thread accesses its reason; `line` is the caller's C string.
+    CREATE_ERROR.with(|reason| unsafe {
+        let reason = &mut *reason.get();
         if reason[0] == 0 {
             let bytes = std::ffi::CStr::from_ptr(line).to_bytes();
             let length = bytes.len().min(CREATE_ERROR_SIZE - 1);
             reason[..length].copy_from_slice(&bytes[..length]);
             reason[length] = 0;
         }
-        log_line(1, line);
-    }
+    });
+    // Do not hold a mutable reference to the reason during an application's log callback.
+    unsafe { log_line(1, line) };
 }
 
 /// `av1_clear_create_error` of the C++: a decoder creation starts.
 #[unsafe(no_mangle)]
 pub extern "C" fn rav1g_clear_create_error() {
-    // SAFETY: written by the creating thread only (see CreateError).
-    unsafe { (*CREATE_ERROR.0.get())[0] = 0 };
+    // SAFETY: only this thread accesses its reason.
+    CREATE_ERROR.with(|reason| unsafe { (*reason.get())[0] = 0 });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two decoders are created on two threads and both creations fail: each thread reads its own reason.
+    /// With one reason for the process the first read what the second wrote.
+    #[test]
+    fn the_reason_of_a_failed_creation_is_the_creating_threads() {
+        use std::ffi::CStr;
+        use std::sync::mpsc;
+
+        let reason = || {
+            // SAFETY: the reason of this thread, a C string.
+            unsafe { CStr::from_ptr(av1_last_create_error()) }.to_string_lossy().into_owned()
+        };
+        let (first_wrote, wait_first) = mpsc::channel::<()>();
+        let (second_wrote, wait_second) = mpsc::channel::<()>();
+        let first = std::thread::spawn(move || {
+            rav1g_clear_create_error();
+            log_create_error("MEMORY FAILED first decoder");
+            first_wrote.send(()).unwrap();
+            wait_second.recv().unwrap();
+            reason()
+        });
+        let second = std::thread::spawn(move || {
+            wait_first.recv().unwrap();
+            rav1g_clear_create_error();
+            log_create_error("MEMORY FAILED second decoder");
+            second_wrote.send(()).unwrap();
+            reason()
+        });
+        assert_eq!(first.join().unwrap(), "MEMORY FAILED first decoder");
+        assert_eq!(second.join().unwrap(), "MEMORY FAILED second decoder");
+        // Only the first reason of a creation is kept.
+        rav1g_clear_create_error();
+        log_create_error("MEMORY FAILED the allocation");
+        log_create_error("MEMORY FAILED a consequence");
+        assert_eq!(reason(), "MEMORY FAILED the allocation");
+    }
 
     #[test]
     fn lines_are_cut_like_vsnprintf() {

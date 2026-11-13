@@ -1355,7 +1355,7 @@ int main(int argc, char** argv) {
   if (!CreateDevice(globals, &dev)) return kExitUsage;
   // -playersmoke: the player's decoder code does everything from here on itself, as in the player: its
   // log callback, its pipeline states, its decoders.
-  if (!globals.player_smoke.empty()) return PlayerSmoke(dev.device.Get(), globals.player_smoke.c_str(), 600);
+  if (!globals.player_smoke.empty()) return PlayerSmoke(dev.device.Get(), globals.player_smoke.c_str(), 1500);
   // What the device reports about itself ("CAPS ..."), at every launch, and with -sm6test the Shader Model
   // 6 test shaders ("SM6TEST ..."), before anything of the decoder exists (testing/sm6test). A shader the
   // device refuses is a result of the test; the exit code changes only when the test itself broke.

@@ -1365,6 +1365,42 @@ C of clang) of run 43356992112. App mode, no presentation.
 is built for one more round, until the fix of the memory credit is checked on the console; then the C++
 sources leave the tree.
 
+#### Review of the player and of `rav1g.h`, and decode errors (2026-11-12)
+
+GPT 6.1 Sol reviewed the player's port to `rav1g.h`, the C++ library behind the header and the Rust
+behind it, and found eleven things besides the two the console had found. All eleven hold against the
+code and are fixed; those the player has on `cpp` as well were fixed there first (df73d8c) and merged.
+
+| | Finding | Fix |
+| --- | --- | --- |
+| 1 | A readback buffer that cannot be allocated was handed out without memory; the md5 or file writer then read a null plane (`frame_outs.cpp`; `cpp` too) | the image request fails |
+| 2 | The md5 check indexed past a reference that is shorter than the output, took a missing or empty reference for no error, and returned "no errors" for a task that ended with a decode error behind matching frames (`cpp` too) | all three are failures of the check |
+| 3 | `-queue_size 0`, and 1 with presentation, wait for an image for ever (`cpp` too) | refused: at least 2, or 1 with `-nopresent` |
+| 4 | Two threads waiting for the pipeline states of one device: the second could return while the workers still ran, because the first had taken the workers out and joined them without the lock (`host/compute.rs`) | the lock is held through the join; test with two waiters and a blocked worker |
+| 5 | `std::thread::spawn` panics when the system gives no thread, and a panic in a function the C calls ends the process (`host/compute.rs`, `host/completion.rs`) | `spawn_thread` returns the error: a pipeline library with a failure, or the decoder's memory error raised by the C entry; test with a spawn that is made to fail |
+| 6 | An exception of the output pool's allocation behind a successful creation left a decoder nothing released (`cpp` too) | the pool is constructed before the decoder is created |
+| 7 | A decoder was reused for a task whose `-try10x3` or `-noguard` differs from what it was created with (`cpp` too) | both are part of what a decoder was created with |
+| 8 | `-save_md5` with packed 10-bit output hashed the packed words, read past the row, and did not check against itself (`cpp` too) | it hashes the unpacked samples, as the check does |
+| 9 | `rav1g_libav1.cpp` freed the pipeline states with the application's device handle while decoders still used them; `rav1g.h` says they live as long as a decoder | a decoder holds a reference of its device |
+| 10 | A launch without a task file, or with an empty one, sat idle (`cpp` too) | it ends; CI runs that case |
+| 11 | The reason of a failed creation was one buffer for the process, written without a lock: two creations on two threads could read each other's reason, and `rav1g_last_error` is filled from it (`host/log.rs`) | it is per thread; test with two creating threads |
+
+**Decode errors.** A stream whose tile data is cut short fails behind the setup of its frame and before
+its submission, which is the path that takes a pipeline slot back. The console had it right on all
+three packages (the task ends, the next one is right). CI has it now, with streams it damages itself
+(`testing/conformance/cut_tile.py`, `cut_tile_check.py`; [warp-decoder.md](warp-decoder.md),
+"A decode error in the middle of a stream"), and the conformance set has a stream with eight tiles and
+three key frames for it (`syn-tiles-10b-1080p.ivf`), its first with more than one tile.
+
+- **`-continue_on_error`** (the player, and `rav1g-dec`): a decode call that fails does not end the
+  task; the same decoder gets the next temporal units, as an application would do it. Nothing had to
+  change in the decoder for it: the frame setup takes back what an unsubmitted frame holds. Measured on
+  the local decoder with the eight-tile stream cut at temporal unit 5: two decode errors (unit 5, and
+  unit 7, which predicts from the missing frame's state), 38 of 40 frames out, the 5 frames before the
+  damage and all 24 from the key frame at unit 16 on with the reference md5.
+- **`rav1g-dec -keep_going`**: a task that ended with a decode error is followed by the next task in
+  the same process, for these checks.
+
 **What was asked of the console test** (the parent's, for the record): first whether the two Rust
 packages start at all (the two imports from `ntdll.dll`; the `LIBRARY` line is the first sign of life of
 the library), then the md5 set with each, then `-gputime` on the 2160p clips, the three packages one
