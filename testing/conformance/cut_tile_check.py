@@ -6,8 +6,8 @@ stream with eight tiles, where it finds a tile whose size does not fit ("Truncat
 tile size"). Both errors come after the frame is set up (it has a pipeline slot, counted frame buffers,
 perhaps an output image) and before it is submitted: the decoder has to take all of that back.
 
-Checked, with the decoder program (rav1g-dec) and with the decoder code of the test player
-(warp_decoder -playersmoke), all tasks in one process each:
+Checked, with the decoder program (rav1g-dec) and with the decoder code of the test player on the same
+library (rav1g-dec -playersmoke), all tasks in one process each:
 
 - a damaged stream ends its task with the error, and the task has the frames before the damage;
 - the stream decoded behind it in the same process has every frame right;
@@ -17,7 +17,7 @@ Checked, with the decoder program (rav1g-dec) and with the decoder code of the t
 - no task loses the D3D12 device.
 
 usage: python cut_tile_check.py --streams <conformance streams> --out <directory>
-           [--tool <rav1g-dec.exe>] [--tool-args "<args>"] [--player-smoke <warp_decoder.exe>]
+           [--tool <rav1g-dec.exe>] [--tool-args "<args>"] [--player-smoke <rav1g-dec.exe>]
 
 The damaged streams are written into <streams>/cuttest and removed at the end; --out gets logs and
 md5 lists only, no stream.
@@ -201,7 +201,7 @@ def run_tool(args, cases, problems):
 
 
 def run_player(args, cases, problems):
-    """The decoder code of the test player (warp_decoder -playersmoke): the same, as tasks of its task file."""
+    """The decoder code of the test player (rav1g-dec -playersmoke): the same, as tasks of its task file."""
     out = os.path.join(args.out, 'player')
     os.makedirs(out, exist_ok=True)
     common = '-nopresent -frate -1'
@@ -236,6 +236,8 @@ def run_player(args, cases, problems):
         problems.append('%s: exit code %d: the player did not end its launch' % (label, done.returncode))
     if re.search(r'(?i)device.{0,16}removed|DXGI_ERROR_DEVICE', text):
         problems.append('%s: a task lost the D3D12 device' % label)
+    if not re.search(r'LIBRARY rav1g .*the Rust host', text):
+        problems.append('%s: the log has no LIBRARY line of the Rust library' % label)
     ok = text.count('MD5 is OK')
     if ok != 2 * len(cases):
         problems.append('%s: %d of the %d streams behind a damaged one ended with "MD5 is OK"' % (
@@ -267,7 +269,7 @@ def main():
     parser.add_argument('--out', required=True, help='logs and md5 lists (no stream)')
     parser.add_argument('--tool', help='rav1g-dec.exe')
     parser.add_argument('--tool-args', default='', help='further arguments for it, e.g. "-capi"')
-    parser.add_argument('--player-smoke', help='warp_decoder.exe, for its -playersmoke')
+    parser.add_argument('--player-smoke', help='rav1g-dec.exe, for its -playersmoke')
     args = parser.parse_args()
     if not args.tool and not args.player_smoke:
         parser.error('--tool or --player-smoke')

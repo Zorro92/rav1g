@@ -125,8 +125,11 @@ std::shared_ptr<OutBufferWrapper> OutBufferStorage::GetFreeBuffer(uint32_t width
           textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
           textureDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
           const uint64_t plane_bytes = dx12_device_->GetResourceAllocationInfo(0, 1, &textureDesc).SizeInBytes;
+          // Named, not temporaries: taking the address of a temporary is an extension of MSVC that clang
+          // (the build of rav1g-dec on Linux) refuses.
+          const CD3DX12_HEAP_PROPERTIES texture_heap(D3D12_HEAP_TYPE_DEFAULT);
           hr = dx12_device_->CreateCommittedResource(
-              &CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT), D3D12_HEAP_FLAG_SHARED, &textureDesc,
+              &texture_heap, D3D12_HEAP_FLAG_SHARED, &textureDesc,
               D3D12_RESOURCE_STATE_COPY_DEST, 0,
               IID_PPV_ARGS(&buffer->d3d12textures[i]));
           if (FAILED(hr)) {
@@ -161,8 +164,8 @@ std::shared_ptr<OutBufferWrapper> OutBufferStorage::GetFreeBuffer(uint32_t width
         heapProp.VisibleNodeMask = 0;
 
         const D3D12_RESOURCE_FLAGS flags = D3D12_RESOURCE_FLAG_NONE;
-        hr = dx12_device_->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE,
-                                                   &CD3DX12_RESOURCE_DESC::Buffer(buffer_size, flags), state, NULL,
+        const CD3DX12_RESOURCE_DESC buffer_desc = CD3DX12_RESOURCE_DESC::Buffer(buffer_size, flags);
+        hr = dx12_device_->CreateCommittedResource(&heapProp, D3D12_HEAP_FLAG_NONE, &buffer_desc, state, NULL,
                                                    IID_PPV_ARGS(&buffer->d3d12buffer));
 
         if (SUCCEEDED(hr)) {

@@ -15,9 +15,9 @@
 //! player's format and/or compared with a reference file. No window, no swap chain: it runs where there is
 //! no GPU, such as a CI runner.
 //!
-//! It replaces `testing/warp_decoder` and takes its flags, prints its lines and returns its exit codes
-//! (docs/warp-decoder.md), so the scripts of `testing/conformance` and `testing/stage_dump` run with
-//! either.
+//! It takes the flags of `warp_decoder`, the desktop program of the C++ decoder (branch `cpp`), prints its
+//! lines and returns its exit codes (docs/warp-decoder.md), so the scripts of `testing/conformance` and
+//! `testing/stage_dump` run with either: CI holds the two against each other (the `rust-equal` job).
 
 mod args;
 mod device;
@@ -52,6 +52,9 @@ macro_rules! say {
         $crate::say_text(&format!($($arg)*))
     };
 }
+
+/// -playersmoke: a launch of the player's decoder code that has not ended by then hangs.
+const PLAYER_SMOKE_TIMEOUT_S: i32 = 1500;
 
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 
@@ -132,8 +135,8 @@ fn real_main() -> i32 {
             say!("ERROR no tasks in the list {}", globals.list);
             return EXIT_USAGE;
         }
-    } else if globals.sm6test && base.input.is_empty() {
-        // -sm6test alone: the test needs a device and no stream.
+    } else if (globals.sm6test || !globals.player_smoke.is_empty()) && base.input.is_empty() {
+        // -sm6test alone: the test needs a device and no stream. -playersmoke has its tasks in its directory.
     } else {
         if let Err(error) = args::check_task(&mut base) {
             say!("ERROR {}", error);
@@ -149,6 +152,12 @@ fn real_main() -> i32 {
     let Some(dev) = device::create(&globals) else {
         return EXIT_USAGE;
     };
+    // -playersmoke: the player's decoder code does everything from here on itself, as in the player: its
+    // log callback, its pipeline states, its decoders, all through the functions of rav1g.h.
+    if !globals.player_smoke.is_empty() {
+        // SAFETY: the device is valid.
+        return unsafe { shim::player_smoke(dev.device_ptr(), &globals.player_smoke, PLAYER_SMOKE_TIMEOUT_S) };
+    }
     // What the device reports about itself ("CAPS ..."), at every launch, and with -sm6test the Shader
     // Model 6 test shaders ("SM6TEST ..."), before anything of the decoder exists (testing/sm6test). A
     // shader the device refuses is a result of the test; the exit code changes only when the test itself

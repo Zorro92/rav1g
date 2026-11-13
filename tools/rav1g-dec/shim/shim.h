@@ -15,7 +15,8 @@
  *   the summary of the timing run (testing/player_common/perf_stats.h, -gputime),
  *   the stage dump files (testing/common/stage_dump.h, -dumpstages),
  *   the capability report and the Shader Model 6 test (testing/sm6test, -sm6test),
- *   the crash line and the process settings of warp_decoder's main().
+ *   the crash line and the process settings of the program,
+ *   the decoder code of the test player itself (testing/player_common, -playersmoke; player_smoke.cpp).
  *
  * The test player uses the same code, so the two programs read the same streams and write the same lines
  * and files. src/shim.rs declares these functions for Rust.
@@ -84,6 +85,11 @@ void rd_sm6_log_caps(void *device, rd_line_fn line, void *ctx);
 /* The Shader Model 6 test on an ID3D12Device and ID3D12CommandQueue ("SM6TEST ..." lines). 0 when every
  * test came to a result, 1 when the test itself broke. */
 int rd_sm6_run_tests(void *device, void *queue, rd_line_fn line, void *ctx);
+
+/* -playersmoke: the decoder code of the test player (testing/player_common) with the tasks of
+ * <root>/args/args_av1.txt, on an ID3D12Device, through the functions of rav1g.h; its log goes to stdout.
+ * 0 when the player's loop ended, 2 (and the process ends) when it did not within |timeout_s|. */
+int rd_player_smoke(void *device, const char *root, int timeout_s);
 
 #ifdef __cplusplus
 }

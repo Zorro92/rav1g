@@ -6,7 +6,7 @@
 // License 1.0 was not distributed with this source code in the PATENTS file, you can obtain it at
 // www.aomedia.org/license/patent.
 
-//! The C++ this program shares with the test player and warp_decoder (shim/shim.h): stream readers,
+//! The C++ this program shares with the test player (shim/shim.h): stream readers,
 //! timing summary, stage dump files, Shader Model 6 test, process settings.
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
@@ -57,6 +57,8 @@ unsafe extern "C" {
 
     fn rd_sm6_log_caps(device: *mut c_void, line: LineFn, ctx: *mut c_void);
     fn rd_sm6_run_tests(device: *mut c_void, queue: *mut c_void, line: LineFn, ctx: *mut c_void) -> c_int;
+
+    fn rd_player_smoke(device: *mut c_void, root: *const c_char, timeout_s: c_int) -> c_int;
 }
 
 fn c_string(text: &str) -> CString {
@@ -86,7 +88,7 @@ unsafe extern "C" fn say_line(_ctx: *mut c_void, line: *const c_char) {
     crate::say_text(&unsafe { CStr::from_ptr(line) }.to_string_lossy());
 }
 
-/// No error dialogs, unbuffered C stdout, and the crash line of warp_decoder.
+/// No error dialogs, unbuffered C stdout, and the crash line.
 pub fn process_init() {
     // SAFETY: no arguments; called once at the start of main.
     unsafe { rd_process_init() }
@@ -280,4 +282,16 @@ pub unsafe fn sm6_log_caps(device: *mut c_void) {
 pub unsafe fn sm6_run_tests(device: *mut c_void, queue: *mut c_void) -> bool {
     // SAFETY: the caller's contract.
     unsafe { rd_sm6_run_tests(device, queue, say_line, std::ptr::null_mut()) != 0 }
+}
+
+/// -playersmoke: runs the decoder code of the test player (testing/player_common) with the tasks of
+/// `<root>/args/args_av1.txt`, through the functions of rav1g.h. The exit code of the program: 0 when the
+/// player's loop ended; when it does not end within `timeout_s`, the call ends the process with 2.
+///
+/// # Safety
+/// `device` is a valid `ID3D12Device*`.
+pub unsafe fn player_smoke(device: *mut c_void, root: &str, timeout_s: i32) -> i32 {
+    let root = c_string(root);
+    // SAFETY: the caller's contract; root is a NUL-terminated string.
+    unsafe { rd_player_smoke(device, root.as_ptr(), timeout_s as c_int) }
 }

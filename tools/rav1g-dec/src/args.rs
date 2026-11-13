@@ -162,6 +162,8 @@ pub struct Globals {
     pub keep_going: bool,
     /// -list
     pub list: String,
+    /// -playersmoke
+    pub player_smoke: String,
 }
 
 pub fn usage() {
@@ -170,6 +172,7 @@ pub fn usage() {
     say!("  rav1g-dec -i <stream> [task flags] [-hw] [-v]");
     say!("  rav1g-dec -list <file> [task flags as defaults for every line] [-hw] [-v]");
     say!("  rav1g-dec -sm6test [-hw]");
+    say!("  rav1g-dec -playersmoke <directory> [-hw]");
     say!("");
     say!("Task flags:");
     say!("  -i <file>             the stream: .ivf, .mkv/.webm, .obu, .mp4");
@@ -244,6 +247,11 @@ pub fn usage() {
     );
     say!("                        line per shader (docs/test-player.md); needs no stream: without -i and -list the");
     say!("                        program ends after the test");
+    say!("  -playersmoke <dir>    run the decoder code of the test player (testing/player_common) through rav1g.h on");
+    say!("                        the device, with the tasks of <dir>/args/args_av1.txt as the player reads them from");
+    say!("                        its LocalState (streams relative to <dir>); the player's log goes to stdout. Exit");
+    say!("                        code 0 when the player ended its launch (what its tasks did is in its log), 2 when");
+    say!("                        it did not within 25 minutes. No other task runs with it");
     say!("");
     say!("Exit code: 0 all tasks decoded and matched, 1 a frame or a frame count differs, 2 a decode error (or");
     say!("-sm6test could not run its test), 3 bad arguments or no device, 4 timeout. One 'RESULT ...' line per task");
@@ -352,6 +360,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
                     "-capi" => globals.capi = true,
                     "-keep_going" => globals.keep_going = true,
                     "-list" => globals.list = value()?,
+                    "-playersmoke" => globals.player_smoke = value()?,
                     _ => return Err(format!("unknown argument '{a}'")),
                 }
             }

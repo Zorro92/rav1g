@@ -8,7 +8,7 @@
  * www.aomedia.org/license/patent.
  */
 
-// The C interface of shim.h over the C++ that rav1g-dec shares with the test player and warp_decoder.
+// The C interface of shim.h over the C++ that rav1g-dec shares with the test player.
 
 #include <windows.h>
 
@@ -33,7 +33,7 @@
 extern "C" void usage_exit(void) { exit(3); }
 
 // An access violation or the like inside the decoder: say where, and end with the exception code as the
-// exit code instead of a dialog (warp_decoder's CrashFilter).
+// exit code instead of a dialog (the CrashFilter of warp_decoder, the program of the C++ decoder).
 static LONG WINAPI CrashFilter(EXCEPTION_POINTERS* info) {
   const DWORD code = info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionCode : 0;
   void* address = info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionAddress : NULL;
