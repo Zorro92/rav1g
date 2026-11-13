@@ -234,8 +234,13 @@
       <PreprocessorDefinitions>NDEBUG;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
-  <!-- The decoder behind rav1g.h is the Rust library instead of the C++ library of the solution
-       (docs/rust-port.md, step 5).
+  <!-- The decoder behind rav1g.h is the Rust library of the Cargo workspace (crates/rav1g with its
+       interface for C; docs/rust-port.md, step 5), built before this project and given to it by one of
+       two properties. A build without either stops with a message (the target at the end of this file).
+
+       /p:Rav1gRustDll=<directory>: the library as a DLL (rav1g.dll with rav1g.dll.lib), which is in
+       the package next to the program: the build whose C is compiled by clang with link time
+       optimisation, which only lld-link can link. This is the default package of CI.
 
        /p:Rav1gRustLib=<directory>: the static library, rav1g.lib, with the two libraries of the C
        (rav1g_c.lib, rav1g_c_speed.lib; objects of /GL, compiled by this link). The functions of
@@ -248,11 +253,7 @@
        are there for functions of Rust's standard library that are in the objects the linker loads
        and not in the program it writes (file and pipe calls, the home directory, QueryDosDeviceW).
        The check of the program's imports in CI (testing/uwp_imports) fails when a function of
-       kernel32.dll does get into the program.
-
-       /p:Rav1gRustDll=<directory>: the library as a DLL (rav1g.dll with rav1g.dll.lib), which is in
-       the package next to the program: the build whose C is compiled by clang with link time
-       optimisation, which only lld-link can link. -->
+       kernel32.dll does get into the program. -->
   <ItemDefinitionGroup Condition="'$(Rav1gRustLib)'!=''">
     <Link>
       <AdditionalDependencies>$(Rav1gRustLib)\rav1g.lib;$(Rav1gRustLib)\rav1g_c.lib;$(Rav1gRustLib)\rav1g_c_speed.lib;WindowsApp.lib;ntdll.lib;userenv.lib;kernel32.lib;%(AdditionalDependencies)</AdditionalDependencies>
@@ -335,6 +336,10 @@
     </ProjectReference>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="Rav1gLibraryIsGiven" BeforeTargets="PrepareForBuild">
+    <Error Condition="'$(Rav1gRustDll)$(Rav1gRustLib)'==''" Text="The player links the Rust library of the Cargo workspace: build it first and pass /p:Rav1gRustDll=&lt;directory with rav1g.dll and rav1g.dll.lib&gt; or /p:Rav1gRustLib=&lt;directory with rav1g.lib, rav1g_c.lib and rav1g_c_speed.lib&gt; (docs/test-player.md, &quot;Building&quot;; .github/workflows/build.yml has the commands)." />
+    <Error Condition="'$(Rav1gRustDll)'!='' And '$(Rav1gRustLib)'!=''" Text="Rav1gRustDll and Rav1gRustLib are both set: the player links one library." />
+  </Target>
   <ImportGroup Label="ExtensionTargets">
     <Import Project="$(VSINSTALLDIR)\Common7\IDE\Extensions\Microsoft\VsGraphics\ImageContentTask.targets" />
     <Import Project="$(VSINSTALLDIR)\Common7\IDE\Extensions\Microsoft\VsGraphics\MeshContentTask.targets" />

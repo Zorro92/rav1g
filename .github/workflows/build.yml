@@ -21,6 +21,10 @@ env:
   # The av1-xbox-one commit this repository is forked from (recorded in SOURCES.txt).
   UPSTREAM_URL: https://aomedia.googlesource.com/av1-xbox-one
   UPSTREAM_COMMIT: b5c61563b48625c261a8d627cfa928896fd10b13
+  # The equality reference (docs/rust-port.md, "Equality reference"): the commit of branch cpp whose
+  # warp_decoder the rust-equal job holds rav1g-dec against. Bumped on purpose, with the docs, when a
+  # change that both decoders have (a shader, the C of the parser) lands on both branches.
+  CPP_REFERENCE_COMMIT: df73d8c2aeaa95d31a6c603e57a0c92cccbd7ed9
 
 jobs:
   player:
@@ -66,11 +70,10 @@ jobs:
             Copy-Item (Join-Path src $license) $destination
           }
 
-      # The shaders: the bytecode header and the listing of every shader from one FXC call per shader, with the
-      # FXC, profile and flags of the Release x64 project (cs_5_0, entry main, default optimization, /Od
-      # where the project disables it), for the normal build and for the uavsync variant, from a cache by
-      # content (.github/actions/shaders, testing/shader_cache/shaders.py). A shader that does not compile
-      # stops the run here.
+      # The shaders: the bytecode header and the listing of every shader from one FXC call per shader
+      # (cs_5_0, entry main, default optimization, /Od for the two upstream intra shaders), for the normal
+      # build and for the uavsync variant, from a cache by content (.github/actions/shaders,
+      # testing/shader_cache/shaders.py). A shader that does not compile stops the run here.
       - name: Shaders
         id: shaders
         uses: ./src/.github/actions/shaders
@@ -91,7 +94,7 @@ jobs:
       # Codegen evidence for the CDEF and intra rewrites, which cannot be measured without a console: the
       # CDEF and intra listings get a side-by-side count, all shaders a one-line survey.
       # intra_main_opt and intra_main_hbd_opt are the upstream intra_main sources built with optimization
-      # (player flag -intraopt), listed next to the /Od builds the project asks for. A bit field
+      # (player flag -intraopt), listed next to the /Od builds of the same sources. A bit field
       # instruction whose width is known only at run time stops the run (docs/gpu-av1-decoder.md, "Bit
       # fields of width 0").
       - name: Shader survey, CDEF and intra listings
@@ -164,83 +167,17 @@ jobs:
           $manifest.Package.Applications.Application.VisualElements.Description = 'rav1g D3D12 compute AV1 test player'
           $manifest.Save($path)
 
-      - name: Build signed Release x64 sideload package
-        shell: pwsh
-        env:
-          CERT_THUMBPRINT: ${{ steps.cert.outputs.thumbprint }}
-          # /sdl promotes upstream's deprecated GetDesktopDpi call to C4996 even without /WX.
-          # _CL_ appends this override after the project's compiler options; no source patch is needed.
-          _CL_: /wd4996
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $packageDirectory = Join-Path $env:GITHUB_WORKSPACE 'out/packages/'
-          $buildLog = Join-Path $env:GITHUB_WORKSPACE 'out/msbuild.log'
-          # Building the solution supplies SolutionDir to the shader/include paths and builds all three projects.
-          # Clear the upstream committed PFX: signing must use only this run's certificate in the store.
-          & MSBuild.exe src/av1xbox.sln /m /v:minimal /p:Configuration=Release /p:Platform=x64 `
-            "/p:PlatformToolset=$env:PLATFORM_TOOLSET" "/p:WindowsTargetPlatformVersion=$env:WINDOWS_SDK" `
-            /p:WindowsTargetPlatformMinVersion=10.0.17763.0 /p:TreatWarningAsError=false `
-            /p:GenerateAppxPackageOnBuild=true /p:UapAppxPackageBuildMode=SideloadOnly `
-            /p:AppxBundle=Never /p:AppxPackageExtension=.msix "/p:AppxPackageDir=$packageDirectory" `
-            /p:AppxPackageSigningEnabled=true /p:PackageCertificateKeyFile= `
-            "/p:PackageCertificateThumbprint=$env:CERT_THUMBPRINT" `
-            "/p:Rav1gPrebuiltShaders=${{ steps.shaders.outputs.normal }}" `
-            "/p:Rav1gSm6TestShaders=${{ steps.sm6.outputs.dir }}" `
-            /fl "/flp:logfile=$buildLog;verbosity=normal"
-          if ($LASTEXITCODE -ne 0) { throw 'Release x64 player build/package failed; see msbuild.log' }
-          $packages = @(Get-ChildItem out/packages -Recurse -File | Where-Object {
-            $_.Extension -in @('.msix', '.msixbundle', '.appx', '.appxbundle') -and
-            $_.FullName -notmatch '[\\/]Dependencies[\\/]'
-          })
-          if (-not $packages.Count) { throw 'No application sideload package was produced' }
-          # The listings describe the shipped shaders: each comes from the FXC call that wrote the header the
-          # library was compiled from. MSBuild ran FXC on no shader of the library, and the bytecode of the
-          # headers is in the program of the package, byte for byte.
-          if (Select-String -Path $buildLog -Pattern 'fxc\.exe.*[\\/]dx[\\/]shaders[\\/]' -Quiet) {
-            throw 'MSBuild compiled shaders of the library itself: Rav1gPrebuiltShaders was not in effect'
-          }
-          python src/testing/shader_cache/shaders.py verify --report shader-build/normal/report.json `
-            --root shader-build/normal --note out/cdef-shaders/stats.txt --note out/intra-shaders/stats.txt `
-            --note out/shader-survey/survey.md @($packages | ForEach-Object { $_.FullName })
-          if ($LASTEXITCODE -ne 0) { throw 'The package was not built from the shader headers of this run' }
-          # -sm6test needs its shaders in the player: the bytecode of each is in the program of the package.
-          python src/testing/sm6test/compile.py --verify sm6test-build @($packages | ForEach-Object { $_.FullName })
-          if ($LASTEXITCODE -ne 0) { throw 'The package does not have the Shader Model 6 test shaders of this run' }
-          "Variant: reference: the C++ library (libav1) behind rav1g.h, package version 0.2.$env:GITHUB_RUN_NUMBER.0" |
-            Add-Content out/SOURCES.txt -Encoding utf8
-          @('## rav1g test player', '', 'CI build only; console timings are taken separately.', '',
-            "Three packages of the same player and the same identity, to be timed against each other (docs/test-player.md): this one, version 0.2.$env:GITHUB_RUN_NUMBER.0, with the C++ library; 0.2.$env:GITHUB_RUN_NUMBER.2 with the Rust library and the C of MSVC; 0.2.$env:GITHUB_RUN_NUMBER.3 with the Rust library and the C of clang.", '',
-            '### Artifact files', '```') +
-            @(Get-ChildItem out -Recurse -File | ForEach-Object { [IO.Path]::GetRelativePath((Resolve-Path out), $_.FullName) }) +
-            @('```') >> $env:GITHUB_STEP_SUMMARY
-
-      # The DLLs the programs of the package import from, against the list of testing/uwp_imports: the
-      # API sets of WindowsApp.lib, the runtime of VCLibs, DirectX; no kernel32.dll, no desktop runtime
-      # (docs/rust-port.md, "The app container"). The same check follows each of the other packages.
-      - name: Imports of the reference package
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          python -m pip install --quiet uv
-          if ($LASTEXITCODE -ne 0) { throw 'uv could not be installed' }
-          python src/testing/uwp_imports/check_package.py --out out/imports out/packages
-          if ($LASTEXITCODE -ne 0) { throw 'A program of the reference package imports from a DLL that is not in testing/uwp_imports/player-dlls-allow.txt' }
-
-      - name: Preserve package, certificate, dependencies, licenses, shader listings, survey and build log
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: rav1g-testplayer-x64-${{ github.run_id }}
-          path: out/
-          if-no-files-found: warn
-
       # ---------------------------------------------------------------------------------------------
-      # The same player on the Rust library (docs/rust-port.md, step 5): two more packages of the same
-      # identity, to be timed on the console against the one above and against each other. They differ
-      # in what compiled the C of the entropy decoder, which is where the tile threads spend their time:
-      #   revision 2: MSVC with /GL, the objects compiled by the player's link (/LTCG:incremental);
-      #   revision 3: clang with link time optimisation, linked with the Rust by lld-link into rav1g.dll.
-      # A higher revision installs over a lower one and keeps LocalState.
+      # The player is C++ (testing/uwp_dx12_player, testing/uwp_common) on the functions of rav1g.h; the
+      # decoder behind them is the Rust library of the Cargo workspace with the C of the parser and
+      # entropy decoder (docs/rust-port.md). Two packages of the same identity per run, which differ in
+      # what compiled that C, which is where the tile threads spend their time (docs/test-player.md):
+      #   revision 0, the default: clang with link time optimisation, linked with the Rust by lld-link
+      #               into rav1g.dll, which is in the package next to the program;
+      #   revision 2: MSVC with /GL, a static library, the objects compiled by the player's link
+      #               (/LTCG:incremental).
+      # Revision 1 is the uavsync package of the experiments input. A higher revision installs over a
+      # lower one and keeps LocalState.
       # ---------------------------------------------------------------------------------------------
 
       # Stable Rust, and libclang for bindgen, as in the rust job.
@@ -264,10 +201,95 @@ jobs:
           workspaces: src
           key: player
 
-      # The library for an app container application (docs/rust-port.md, "The C runtime"): the static
-      # library with the interface for C, for the DLL runtime, the C compiled by MSVC with /GL for the app
-      # family of the Windows API.
-      - name: Rust library for the player, C of MSVC (static library)
+      # The C compiled by clang-cl with full link time optimisation: on the console the build whose tile
+      # threads are 1.5 to 4 % faster than those of the MSVC build (docs/rust-port.md, "Console results of
+      # step 5"). Its objects are LLVM bitcode, which the player's link.exe cannot read; and lld-link, which
+      # can, cannot link the player: it reads neither the /GL objects the player is made of nor the options
+      # that write the Windows metadata of a C++/CX program (/WINMD; docs/rust-port.md, step 5, part 3). So
+      # the library is linked by lld-link into a DLL, rav1g.dll, with the functions of rav1g.h and the few
+      # functions of the C that the player's stream readers call, and the player links its import library.
+      # WindowsApp.lib is first on that link, the runtime is the app runtime (the store directory of the
+      # toolset): testing/uwp_dx12_player/build_rav1g_dll.ps1.
+      - name: Rust library for the default package, C of clang (rav1g.dll)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          & src/testing/uwp_dx12_player/build_rav1g_dll.ps1 -Shaders '${{ steps.shaders.outputs.normal }}' -Features 'capi,app-container' `
+            -TargetDir target-app-clang -Out rust-clang
+          "## Rust library for the default package, C of clang", '', "cargo rustc: $([math]::Round($clock.Elapsed.TotalMinutes, 1)) min ($(rustc --version); $(& (Join-Path $llvm 'clang-cl.exe') --version | Select-Object -First 1))." >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Build the signed default package (Release x64, rav1g.dll with the C of clang)
+        shell: pwsh
+        env:
+          CERT_THUMBPRINT: ${{ steps.cert.outputs.thumbprint }}
+          # /sdl promotes upstream's deprecated GetDesktopDpi call to C4996 even without /WX.
+          # _CL_ appends this override after the project's compiler options; no source patch is needed.
+          _CL_: /wd4996
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $packageDirectory = Join-Path $env:GITHUB_WORKSPACE 'out/packages/'
+          $buildLog = Join-Path $env:GITHUB_WORKSPACE 'out/msbuild.log'
+          $library = Join-Path $env:GITHUB_WORKSPACE 'rust-clang'
+          # Building the solution supplies SolutionDir to the include paths and builds both projects.
+          # Clear the upstream committed PFX: signing must use only this run's certificate in the store.
+          & MSBuild.exe src/av1xbox.sln /m /v:minimal /p:Configuration=Release /p:Platform=x64 `
+            "/p:PlatformToolset=$env:PLATFORM_TOOLSET" "/p:WindowsTargetPlatformVersion=$env:WINDOWS_SDK" `
+            /p:WindowsTargetPlatformMinVersion=10.0.17763.0 /p:TreatWarningAsError=false `
+            /p:GenerateAppxPackageOnBuild=true /p:UapAppxPackageBuildMode=SideloadOnly `
+            /p:AppxBundle=Never /p:AppxPackageExtension=.msix "/p:AppxPackageDir=$packageDirectory" `
+            /p:AppxPackageSigningEnabled=true /p:PackageCertificateKeyFile= `
+            "/p:PackageCertificateThumbprint=$env:CERT_THUMBPRINT" "/p:Rav1gRustDll=$library" `
+            "/p:Rav1gSm6TestShaders=${{ steps.sm6.outputs.dir }}" `
+            /fl "/flp:logfile=$buildLog;verbosity=normal"
+          if ($LASTEXITCODE -ne 0) { throw 'Release x64 player build/package failed; see msbuild.log' }
+          $packages = @(Get-ChildItem out/packages -Recurse -File | Where-Object {
+            $_.Extension -in @('.msix', '.msixbundle', '.appx', '.appxbundle') -and
+            $_.FullName -notmatch '[\\/]Dependencies[\\/]'
+          })
+          if (-not $packages.Count) { throw 'No application sideload package was produced' }
+          # -sm6test needs its shaders in the player: the bytecode of each is in the program of the package.
+          python src/testing/sm6test/compile.py --verify sm6test-build @($packages | ForEach-Object { $_.FullName })
+          if ($LASTEXITCODE -ne 0) { throw 'The package does not have the Shader Model 6 test shaders of this run' }
+          # The DLLs the programs of the package (the player and rav1g.dll, which has to be in it) import
+          # from, against the list of testing/uwp_imports: the API sets of WindowsApp.lib, the runtime of
+          # VCLibs, DirectX; no kernel32.dll, no desktop runtime (docs/rust-port.md, "The app container").
+          python -m pip install --quiet uv
+          if ($LASTEXITCODE -ne 0) { throw 'uv could not be installed' }
+          python src/testing/uwp_imports/check_package.py --out out/imports --need rav1g.dll --also rav1g.dll out/packages
+          if ($LASTEXITCODE -ne 0) { throw 'A program of the package imports from a DLL that is not in testing/uwp_imports/player-dlls-allow.txt, or rav1g.dll is not in the package' }
+          # The listings describe the shipped shaders: each comes from the FXC call that wrote the header the
+          # library was compiled from, and the bytecode of the headers is in the rav1g.dll of the package,
+          # byte for byte.
+          python src/testing/shader_cache/shaders.py verify --report shader-build/normal/report.json `
+            --root shader-build/normal --note out/cdef-shaders/stats.txt --note out/intra-shaders/stats.txt `
+            --note out/shader-survey/survey.md out/imports/unpacked/rav1g.dll
+          if ($LASTEXITCODE -ne 0) { throw 'The rav1g.dll of the package was not built from the shader headers of this run' }
+          Remove-Item out/imports/unpacked -Recurse -Force
+          $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
+          "Variant: default: the Rust library (rav1g.dll, $(rustc --version)); the C of the entropy decoder compiled by $(& (Join-Path $llvm 'clang-cl.exe') --version | Select-Object -First 1) with full link time optimisation, linked by lld-link; package version 0.2.$env:GITHUB_RUN_NUMBER.0" |
+            Add-Content out/SOURCES.txt -Encoding utf8
+          Copy-Item rust-clang/rav1g.pdb out/
+          @('## rav1g test player', '', 'CI build only; console timings are taken separately.', '',
+            "Two packages of the same player and the same identity (docs/test-player.md): this one, version 0.2.$env:GITHUB_RUN_NUMBER.0, the default, with the Rust library as rav1g.dll and the C of clang; 0.2.$env:GITHUB_RUN_NUMBER.2 with the Rust library linked statically and the C of MSVC.", '',
+            '```') + @($packages | ForEach-Object { $_.Name }) + @(Get-Content out/imports/check.txt) + @('```', '',
+            '### Artifact files', '```') +
+            @(Get-ChildItem out -Recurse -File | ForEach-Object { [IO.Path]::GetRelativePath((Resolve-Path out), $_.FullName) }) +
+            @('```') >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Preserve package, certificate, dependencies, licenses, shader listings, survey and build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-testplayer-x64-${{ github.run_id }}
+          path: out/
+          if-no-files-found: warn
+
+      # The alternative package (docs/rust-port.md, "The C runtime"): the static library with the interface
+      # for C, for the DLL runtime, the C compiled by MSVC with /GL for the app family of the Windows API
+      # and by the player's link.
+      - name: Rust library for the alternative package, C of MSVC (static library)
         shell: pwsh
         env:
           RAV1G_SHADER_DIR: ${{ steps.shaders.outputs.normal }}
@@ -286,9 +308,9 @@ jobs:
           python src/testing/uwp_imports/prune_import_members.py --ar (Join-Path $env:ProgramFiles 'LLVM\bin\llvm-ar.exe') rust-msvc/rav1g.lib
           if ($LASTEXITCODE -ne 0) { throw 'The import members could not be taken out of rav1g.lib' }
           Get-ChildItem rust-msvc | ForEach-Object { Write-Host "$($_.Name): $($_.Length) bytes" }
-          "## Rust library for the player, C of MSVC", '', "cargo build: $([math]::Round($clock.Elapsed.TotalMinutes, 1)) min ($(rustc --version))." >> $env:GITHUB_STEP_SUMMARY
+          "## Rust library for the alternative package, C of MSVC", '', "cargo build: $([math]::Round($clock.Elapsed.TotalMinutes, 1)) min ($(rustc --version))." >> $env:GITHUB_STEP_SUMMARY
 
-      - name: Stamp the package with the Rust library, C of MSVC (same identity, revision 2)
+      - name: Stamp the alternative package, C of MSVC (same identity, revision 2)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -297,16 +319,16 @@ jobs:
           $manifest.Package.Identity.Version = "0.2.$env:GITHUB_RUN_NUMBER.2"
           $manifest.Save($path)
 
-      - name: Build the signed package with the Rust library, C of MSVC
+      - name: Build the signed alternative package (rav1g.lib with the C of MSVC)
         shell: pwsh
         env:
           CERT_THUMBPRINT: ${{ steps.cert.outputs.thumbprint }}
           _CL_: /wd4996
         run: |
           $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force out-rust-msvc | Out-Null
-          $packageDirectory = Join-Path $env:GITHUB_WORKSPACE 'out-rust-msvc/packages/'
-          $buildLog = Join-Path $env:GITHUB_WORKSPACE 'out-rust-msvc/msbuild.log'
+          New-Item -ItemType Directory -Force out-msvc | Out-Null
+          $packageDirectory = Join-Path $env:GITHUB_WORKSPACE 'out-msvc/packages/'
+          $buildLog = Join-Path $env:GITHUB_WORKSPACE 'out-msvc/msbuild.log'
           $library = Join-Path $env:GITHUB_WORKSPACE 'rust-msvc'
           & MSBuild.exe src/av1xbox.sln /t:Rebuild /m /v:minimal /p:Configuration=Release /p:Platform=x64 `
             "/p:PlatformToolset=$env:PLATFORM_TOOLSET" "/p:WindowsTargetPlatformVersion=$env:WINDOWS_SDK" `
@@ -315,158 +337,58 @@ jobs:
             /p:AppxBundle=Never /p:AppxPackageExtension=.msix "/p:AppxPackageDir=$packageDirectory" `
             /p:AppxPackageSigningEnabled=true /p:PackageCertificateKeyFile= `
             "/p:PackageCertificateThumbprint=$env:CERT_THUMBPRINT" "/p:Rav1gRustLib=$library" `
-            "/p:Rav1gPrebuiltShaders=${{ steps.shaders.outputs.normal }}" `
             "/p:Rav1gSm6TestShaders=${{ steps.sm6.outputs.dir }}" `
             /fl "/flp:logfile=$buildLog;verbosity=normal"
-          if ($LASTEXITCODE -ne 0) { throw 'The player with the Rust library (C of MSVC) did not build; see out-rust-msvc/msbuild.log' }
-          $packages = @(Get-ChildItem out-rust-msvc/packages -Recurse -File | Where-Object {
+          if ($LASTEXITCODE -ne 0) { throw 'The player with the static Rust library (C of MSVC) did not build; see out-msvc/msbuild.log' }
+          $packages = @(Get-ChildItem out-msvc/packages -Recurse -File | Where-Object {
             $_.Extension -in @('.msix', '.msixbundle', '.appx', '.appxbundle') -and
             $_.FullName -notmatch '[\\/]Dependencies[\\/]'
           })
-          if (-not $packages.Count) { throw 'No sideload package with the Rust library (C of MSVC) was produced' }
+          if (-not $packages.Count) { throw 'No sideload package with the static Rust library (C of MSVC) was produced' }
           # The Rust library has the shaders of this run: their bytecode is in the program of the package.
           python src/testing/shader_cache/shaders.py verify --report shader-build/normal/report.json `
-            --root shader-build/normal --note out-rust-msvc/SHADERS.txt @($packages | ForEach-Object { $_.FullName })
-          if ($LASTEXITCODE -ne 0) { throw 'The package with the Rust library was not built from the shader headers of this run' }
+            --root shader-build/normal --note out-msvc/SHADERS.txt @($packages | ForEach-Object { $_.FullName })
+          if ($LASTEXITCODE -ne 0) { throw 'The package with the static Rust library was not built from the shader headers of this run' }
           python src/testing/sm6test/compile.py --verify sm6test-build @($packages | ForEach-Object { $_.FullName })
           if ($LASTEXITCODE -ne 0) { throw 'The package does not have the Shader Model 6 test shaders of this run' }
-          python src/testing/uwp_imports/check_package.py --out out-rust-msvc/imports out-rust-msvc/packages
+          python src/testing/uwp_imports/check_package.py --out out-msvc/imports out-msvc/packages
           if ($LASTEXITCODE -ne 0) { throw 'The program of the package imports from a DLL that is not in testing/uwp_imports/player-dlls-allow.txt' }
-          # The certificate, the notices and the record of the sources of the reference package apply.
+          Remove-Item out-msvc/imports/unpacked -Recurse -Force
+          # The certificate, the notices and the record of the sources of the default package apply.
           foreach ($item in @(Get-ChildItem out | Where-Object { $_.Name -notin @('packages', 'msbuild.log', 'shader-survey',
-              'cdef-shaders', 'intra-shaders', 'sm6test-shaders', 'imports') })) {
-            Copy-Item $item.FullName out-rust-msvc/ -Recurse
+              'cdef-shaders', 'intra-shaders', 'sm6test-shaders', 'imports', 'rav1g.pdb') })) {
+            Copy-Item $item.FullName out-msvc/ -Recurse
           }
-          (Get-Content out-rust-msvc/SOURCES.txt) -notmatch '^Variant: ' | Set-Content out-rust-msvc/SOURCES.txt -Encoding utf8
-          "Variant: the Rust library (static, $(rustc --version)); the C of the entropy decoder compiled by MSVC with /GL and by the player's link (/LTCG:incremental); package version 0.2.$env:GITHUB_RUN_NUMBER.2" |
-            Add-Content out-rust-msvc/SOURCES.txt -Encoding utf8
-          @('## Package with the Rust library, C of MSVC', '', "Version 0.2.$env:GITHUB_RUN_NUMBER.2.", '', '```') +
-            @($packages | ForEach-Object { $_.Name }) + @(Get-Content out-rust-msvc/imports/check.txt) + @('```') >> $env:GITHUB_STEP_SUMMARY
+          (Get-Content out-msvc/SOURCES.txt) -notmatch '^Variant: ' | Set-Content out-msvc/SOURCES.txt -Encoding utf8
+          "Variant: alternative: the Rust library (static, $(rustc --version)); the C of the entropy decoder compiled by MSVC with /GL and by the player's link (/LTCG:incremental); package version 0.2.$env:GITHUB_RUN_NUMBER.2" |
+            Add-Content out-msvc/SOURCES.txt -Encoding utf8
+          @('## Alternative package: static Rust library, C of MSVC', '', "Version 0.2.$env:GITHUB_RUN_NUMBER.2: installs over 0.2.$env:GITHUB_RUN_NUMBER.0.", '', '```') +
+            @($packages | ForEach-Object { $_.Name }) + @(Get-Content out-msvc/imports/check.txt) + @('```') >> $env:GITHUB_STEP_SUMMARY
 
-      - name: Preserve the package with the Rust library, C of MSVC
+      - name: Preserve the alternative package (C of MSVC)
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: rav1g-testplayer-rust-msvc-x64-${{ github.run_id }}
-          path: out-rust-msvc/
+          name: rav1g-testplayer-msvc-x64-${{ github.run_id }}
+          path: out-msvc/
           if-no-files-found: warn
 
-      # The C compiled by clang-cl with full link time optimisation (the build that is level with the
-      # MSBuild library in the tile threads on WARP; docs/rust-port.md, "Tile decode time"). Its objects are
-      # LLVM bitcode, which the player's link.exe cannot read; and lld-link, which can, cannot link the
-      # player: it reads neither the /GL objects the player is made of nor the options that write the
-      # Windows metadata of a C++/CX program (/WINMD; docs/rust-port.md, step 5, part 3). So the library
-      # is linked by lld-link into a DLL, rav1g.dll, with the
-      # functions of rav1g.h and the few functions of the C that the player's stream readers call, and
-      # the player links its import library. WindowsApp.lib is first on that
-      # link (LINK, which lld-link reads in front of its arguments), the runtime is the app runtime
-      # (the store directory of the toolset).
-      - name: Rust library for the player, C of clang (rav1g.dll)
-        shell: pwsh
-        env:
-          RAV1G_SHADER_DIR: ${{ steps.shaders.outputs.normal }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
-          if (-not $vs) { throw 'vswhere found no Visual Studio' }
-          $tools = (Get-Content (Join-Path $vs 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt') -Raw).Trim()
-          $store = Join-Path $vs "VC\Tools\MSVC\$tools\lib\x64\store"
-          if (-not (Test-Path (Join-Path $store 'vcruntime.lib'))) { throw "no app runtime libraries in $store" }
-          $separator = [char]0x1f
-          $env:CARGO_ENCODED_RUSTFLAGS = "-Ctarget-feature=-crt-static${separator}--cfg${separator}windows_slim_errors"
-          $env:CC_x86_64_pc_windows_msvc = Join-Path $llvm 'clang-cl.exe'
-          $env:AR_x86_64_pc_windows_msvc = Join-Path $llvm 'llvm-lib.exe'
-          $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = Join-Path $llvm 'lld-link.exe'
-          $env:LINK = 'WindowsApp.lib'
-          # What the player's stream readers (testing/common) call of the C.
-          $exports = @('aom_codec_av1_dx', 'aom_codec_error', 'aom_codec_error_detail', 'aom_img_alloc', 'aom_img_free',
-            'aom_img_plane_height', 'aom_img_plane_width', 'aom_read_obu_header', 'aom_uleb_decode')
-          $linkArgs = @('-Clink-arg=/APPCONTAINER', "-Clink-arg=/LIBPATH:$store") + @($exports | ForEach-Object { "-Clink-arg=/EXPORT:$_" })
-          $clock = [Diagnostics.Stopwatch]::StartNew()
-          cargo rustc --manifest-path src/Cargo.toml --release --locked -p rav1g --lib --features capi,app-container `
-            --crate-type cdylib --target x86_64-pc-windows-msvc --target-dir target-app-clang -- @linkArgs
-          if ($LASTEXITCODE -ne 0) { throw 'cargo rustc of rav1g.dll failed' }
-          New-Item -ItemType Directory -Force rust-clang | Out-Null
-          $built = 'target-app-clang/x86_64-pc-windows-msvc/release'
-          Copy-Item "$built/rav1g.dll", "$built/rav1g.dll.lib", "$built/rav1g.pdb" rust-clang/
-          Get-ChildItem rust-clang | ForEach-Object { Write-Host "$($_.Name): $($_.Length) bytes" }
-          "## Rust library for the player, C of clang", '', "cargo rustc: $([math]::Round($clock.Elapsed.TotalMinutes, 1)) min ($(rustc --version); $(& (Join-Path $llvm 'clang-cl.exe') --version | Select-Object -First 1))." >> $env:GITHUB_STEP_SUMMARY
-
-      - name: Stamp the package with the Rust library, C of clang (same identity, revision 3)
+      # The uavsync package: the default package with every group sync of the shaders compiled as a sync
+      # of all memory (AllMemoryBarrierWithGroupSync): rav1g.dll built from the shader headers of the
+      # uavsync variant of the Shaders step, with the uavsync feature of the crates, which makes the
+      # library say which shaders it has. An experiment for a device on which a frame buffer store of one
+      # thread is not seen by another thread of the group behind a sync of the group memory alone
+      # (docs/test-player.md, "Experiments"). Same identity as the default package and revision 1 instead
+      # of 0: it installs over the default package of this run and keeps its LocalState, and the default
+      # package of a later run installs over it.
+      - name: Rust library for the uavsync package (rav1g.dll with the uavsync shaders)
+        if: ${{ inputs.experiments }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $path = Resolve-Path src/testing/uwp_dx12_player/Package.appxmanifest
-          [xml]$manifest = Get-Content $path -Raw
-          $manifest.Package.Identity.Version = "0.2.$env:GITHUB_RUN_NUMBER.3"
-          $manifest.Save($path)
+          & src/testing/uwp_dx12_player/build_rav1g_dll.ps1 -Shaders '${{ steps.shaders.outputs.uavsync }}' -Features 'capi,app-container,uavsync' `
+            -TargetDir target-app-uavsync -Out rust-uavsync
 
-      - name: Build the signed package with the Rust library, C of clang
-        shell: pwsh
-        env:
-          CERT_THUMBPRINT: ${{ steps.cert.outputs.thumbprint }}
-          _CL_: /wd4996
-        run: |
-          $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force out-rust-clang | Out-Null
-          $packageDirectory = Join-Path $env:GITHUB_WORKSPACE 'out-rust-clang/packages/'
-          $buildLog = Join-Path $env:GITHUB_WORKSPACE 'out-rust-clang/msbuild.log'
-          $library = Join-Path $env:GITHUB_WORKSPACE 'rust-clang'
-          & MSBuild.exe src/av1xbox.sln /t:Rebuild /m /v:minimal /p:Configuration=Release /p:Platform=x64 `
-            "/p:PlatformToolset=$env:PLATFORM_TOOLSET" "/p:WindowsTargetPlatformVersion=$env:WINDOWS_SDK" `
-            /p:WindowsTargetPlatformMinVersion=10.0.17763.0 /p:TreatWarningAsError=false `
-            /p:GenerateAppxPackageOnBuild=true /p:UapAppxPackageBuildMode=SideloadOnly `
-            /p:AppxBundle=Never /p:AppxPackageExtension=.msix "/p:AppxPackageDir=$packageDirectory" `
-            /p:AppxPackageSigningEnabled=true /p:PackageCertificateKeyFile= `
-            "/p:PackageCertificateThumbprint=$env:CERT_THUMBPRINT" "/p:Rav1gRustDll=$library" `
-            "/p:Rav1gPrebuiltShaders=${{ steps.shaders.outputs.normal }}" `
-            "/p:Rav1gSm6TestShaders=${{ steps.sm6.outputs.dir }}" `
-            /fl "/flp:logfile=$buildLog;verbosity=normal"
-          if ($LASTEXITCODE -ne 0) { throw 'The player with the Rust library (C of clang) did not build; see out-rust-clang/msbuild.log' }
-          $packages = @(Get-ChildItem out-rust-clang/packages -Recurse -File | Where-Object {
-            $_.Extension -in @('.msix', '.msixbundle', '.appx', '.appxbundle') -and
-            $_.FullName -notmatch '[\\/]Dependencies[\\/]'
-          })
-          if (-not $packages.Count) { throw 'No sideload package with the Rust library (C of clang) was produced' }
-          python src/testing/sm6test/compile.py --verify sm6test-build @($packages | ForEach-Object { $_.FullName })
-          if ($LASTEXITCODE -ne 0) { throw 'The package does not have the Shader Model 6 test shaders of this run' }
-          # The programs of the package: the player and rav1g.dll, which has to be in it.
-          python src/testing/uwp_imports/check_package.py --out out-rust-clang/imports --need rav1g.dll --also rav1g.dll out-rust-clang/packages
-          if ($LASTEXITCODE -ne 0) { throw 'A program of the package imports from a DLL that is not in testing/uwp_imports/player-dlls-allow.txt, or rav1g.dll is not in the package' }
-          # The Rust library has the shaders of this run: their bytecode is in the rav1g.dll of the package.
-          python src/testing/shader_cache/shaders.py verify --report shader-build/normal/report.json `
-            --root shader-build/normal --note out-rust-clang/SHADERS.txt out-rust-clang/imports/unpacked/rav1g.dll
-          if ($LASTEXITCODE -ne 0) { throw 'The rav1g.dll of the package was not built from the shader headers of this run' }
-          Remove-Item out-rust-clang/imports/unpacked -Recurse -Force
-          foreach ($item in @(Get-ChildItem out | Where-Object { $_.Name -notin @('packages', 'msbuild.log', 'shader-survey',
-              'cdef-shaders', 'intra-shaders', 'sm6test-shaders', 'imports') })) {
-            Copy-Item $item.FullName out-rust-clang/ -Recurse
-          }
-          $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
-          (Get-Content out-rust-clang/SOURCES.txt) -notmatch '^Variant: ' | Set-Content out-rust-clang/SOURCES.txt -Encoding utf8
-          "Variant: the Rust library (rav1g.dll, $(rustc --version)); the C of the entropy decoder compiled by $(& (Join-Path $llvm 'clang-cl.exe') --version | Select-Object -First 1) with full link time optimisation, linked by lld-link; package version 0.2.$env:GITHUB_RUN_NUMBER.3" |
-            Add-Content out-rust-clang/SOURCES.txt -Encoding utf8
-          Copy-Item rust-clang/rav1g.pdb out-rust-clang/
-          @('## Package with the Rust library, C of clang', '', "Version 0.2.$env:GITHUB_RUN_NUMBER.3.", '', '```') +
-            @($packages | ForEach-Object { $_.Name }) + @(Get-Content out-rust-clang/imports/check.txt) + @('```') >> $env:GITHUB_STEP_SUMMARY
-
-      - name: Preserve the package with the Rust library, C of clang
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: rav1g-testplayer-rust-clang-x64-${{ github.run_id }}
-          path: out-rust-clang/
-          if-no-files-found: warn
-
-      # The uavsync package: the same sources, with every group sync of the shaders compiled as a sync
-      # of all memory (AllMemoryBarrierWithGroupSync; /p:Rav1gUavSync=1 in libav1.vcxproj, and the
-      # shader headers of the uavsync variant from the Shaders step). An
-      # experiment for a device on which a frame buffer store of one thread is not seen by another
-      # thread of the group behind a sync of the group memory alone (docs/test-player.md,
-      # "Experiments"). Same identity as the normal package and revision 1 instead of 0: it installs
-      # over the normal package of this run and keeps its LocalState, and the normal package of a
-      # later run installs over it.
       - name: Stamp the uavsync package (same identity, revision 1)
         if: ${{ inputs.experiments }}
         shell: pwsh
@@ -488,14 +410,14 @@ jobs:
           New-Item -ItemType Directory -Force out-uavsync | Out-Null
           $packageDirectory = Join-Path $env:GITHUB_WORKSPACE 'out-uavsync/packages/'
           $buildLog = Join-Path $env:GITHUB_WORKSPACE 'out-uavsync/msbuild.log'
+          $library = Join-Path $env:GITHUB_WORKSPACE 'rust-uavsync'
           & MSBuild.exe src/av1xbox.sln /t:Rebuild /m /v:minimal /p:Configuration=Release /p:Platform=x64 `
             "/p:PlatformToolset=$env:PLATFORM_TOOLSET" "/p:WindowsTargetPlatformVersion=$env:WINDOWS_SDK" `
             /p:WindowsTargetPlatformMinVersion=10.0.17763.0 /p:TreatWarningAsError=false `
             /p:GenerateAppxPackageOnBuild=true /p:UapAppxPackageBuildMode=SideloadOnly `
             /p:AppxBundle=Never /p:AppxPackageExtension=.msix "/p:AppxPackageDir=$packageDirectory" `
             /p:AppxPackageSigningEnabled=true /p:PackageCertificateKeyFile= `
-            "/p:PackageCertificateThumbprint=$env:CERT_THUMBPRINT" /p:Rav1gUavSync=1 `
-            "/p:Rav1gPrebuiltShaders=${{ steps.shaders.outputs.uavsync }}" `
+            "/p:PackageCertificateThumbprint=$env:CERT_THUMBPRINT" "/p:Rav1gRustDll=$library" `
             "/p:Rav1gSm6TestShaders=${{ steps.sm6.outputs.dir }}" `
             /fl "/flp:logfile=$buildLog;verbosity=normal"
           if ($LASTEXITCODE -ne 0) { throw 'uavsync player build/package failed; see out-uavsync/msbuild.log' }
@@ -504,23 +426,25 @@ jobs:
             $_.FullName -notmatch '[\\/]Dependencies[\\/]'
           })
           if (-not $packages.Count) { throw 'No uavsync sideload package was produced' }
-          # The package has the shaders of the uavsync build (the action has checked that they are not
-          # those of the normal build), and MSBuild compiled none of them.
-          if (Select-String -Path $buildLog -Pattern 'fxc\.exe.*[\\/]dx[\\/]shaders[\\/]' -Quiet) {
-            throw 'MSBuild compiled shaders of the library itself: Rav1gPrebuiltShaders was not in effect'
-          }
+          python src/testing/uwp_imports/check_package.py --out out-uavsync/imports --need rav1g.dll --also rav1g.dll out-uavsync/packages
+          if ($LASTEXITCODE -ne 0) { throw 'A program of the uavsync package imports from a DLL that is not in testing/uwp_imports/player-dlls-allow.txt, or rav1g.dll is not in the package' }
+          # The rav1g.dll of the package has the shaders of the uavsync build (the action has checked that
+          # they are not those of the normal build).
           python src/testing/shader_cache/shaders.py verify --report shader-build/uavsync/report.json `
-            --root shader-build/uavsync --note out-uavsync/SHADERS.txt @($packages | ForEach-Object { $_.FullName })
-          if ($LASTEXITCODE -ne 0) { throw 'The uavsync package was not built from the uavsync shader headers of this run' }
-          # The certificate, the notices and the record of the sources of the normal package apply.
+            --root shader-build/uavsync --note out-uavsync/SHADERS.txt out-uavsync/imports/unpacked/rav1g.dll
+          if ($LASTEXITCODE -ne 0) { throw 'The rav1g.dll of the uavsync package was not built from the uavsync shader headers of this run' }
+          Remove-Item out-uavsync/imports/unpacked -Recurse -Force
+          # The certificate, the notices and the record of the sources of the default package apply.
           foreach ($item in @(Get-ChildItem out | Where-Object { $_.Name -notin @('packages', 'msbuild.log', 'shader-survey',
-              'cdef-shaders', 'intra-shaders') })) {
+              'cdef-shaders', 'intra-shaders', 'sm6test-shaders', 'imports', 'rav1g.pdb') })) {
             Copy-Item $item.FullName out-uavsync/ -Recurse
           }
-          "Variant: uavsync (shaders compiled with GroupMemoryBarrierWithGroupSync=AllMemoryBarrierWithGroupSync), package version 0.2.$env:GITHUB_RUN_NUMBER.1" |
+          (Get-Content out-uavsync/SOURCES.txt) -notmatch '^Variant: ' | Set-Content out-uavsync/SOURCES.txt -Encoding utf8
+          "Variant: uavsync: the default build (rav1g.dll, C of clang) with the shaders compiled with GroupMemoryBarrierWithGroupSync=AllMemoryBarrierWithGroupSync; package version 0.2.$env:GITHUB_RUN_NUMBER.1" |
             Add-Content out-uavsync/SOURCES.txt -Encoding utf8
+          Copy-Item rust-uavsync/rav1g.pdb out-uavsync/
           @('## uavsync package', '', "Version 0.2.$env:GITHUB_RUN_NUMBER.1: installs over 0.2.$env:GITHUB_RUN_NUMBER.0.", '', '```') +
-            @($packages | ForEach-Object { $_.Name }) + @('```') >> $env:GITHUB_STEP_SUMMARY
+            @($packages | ForEach-Object { $_.Name }) + @(Get-Content out-uavsync/imports/check.txt) + @('```') >> $env:GITHUB_STEP_SUMMARY
 
       - name: Preserve the uavsync package
         if: ${{ always() && inputs.experiments }}
@@ -544,10 +468,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-
-      # warp_decoder compiles the library's sources itself; its list must be the library project's.
-      - name: Source list of the desktop decoder matches libav1.vcxproj
-        run: python3 testing/warp_decoder/sync_sources.py --check
 
       - name: Cache key
         id: key
@@ -592,15 +512,17 @@ jobs:
           path: conformance-md5/
           if-no-files-found: error
 
-  # Conformance run: warp_decoder (testing/warp_decoder), the decoder as a desktop console program,
-  # decodes every stream on the D3D12 WARP software adapter of the runner and compares the md5 of
-  # every output frame with the reference. testing/conformance/expected.txt lists the streams that
-  # fail today; the job fails on a failure that is not listed, on a failure of another kind than
-  # listed, on a crash or timeout that is not listed, and when a listed stream passes.
-  conformance:
+  # The equality reference (docs/rust-port.md, "Equality reference"): warp_decoder, the desktop program of
+  # the C++ decoder, built from branch cpp at the commit CPP_REFERENCE_COMMIT names, with the shaders of
+  # that commit. It decodes the conformance set, writes the stage dumps and the MEMORY lines with the
+  # scripts, the streams and the task lists of this commit, and the rust-equal job holds what rav1g-dec
+  # wrote against it. The C++ decoder itself is tested by the workflow of its own branch; here it is only
+  # the second implementation the Rust decoder has to agree with, for as long as the two branches have the
+  # same shaders (rust-equal checks that first).
+  cpp-reference:
     needs: conformance-streams
     runs-on: windows-latest
-    timeout-minutes: 150
+    timeout-minutes: 60
     env:
       PLATFORM_TOOLSET: v145
       WINDOWS_SDK: 10.0.26100.0
@@ -612,90 +534,58 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Check out the C++ decoder (branch cpp at the pinned commit)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ env.CPP_REFERENCE_COMMIT }}
+          path: cpp-reference
+          persist-credentials: false
+
       - uses: microsoft/setup-msbuild@v3
 
-      # The shader headers of the normal build and of the uavsync variant, from the cache the player job
-      # uses: the same keys, so the same bytecode as in the packages.
-      - name: Shaders
+      # The shaders of the pinned commit, by its own script and action: the same cache as the other jobs,
+      # so no shader is compiled while the shaders of the two branches are the same.
+      - name: Shaders of the C++ decoder
         id: shaders
-        uses: ./.github/actions/shaders
+        uses: ./cpp-reference/.github/actions/shaders
         with:
+          repo: cpp-reference
           sdk: ${{ env.WINDOWS_SDK }}
 
-      # The shaders of the Shader Model 6 test (-sm6test), as in the player job.
-      - name: Shader Model 6 test shaders
-        id: sm6
-        uses: ./.github/actions/sm6test-shaders
-        with:
-          sdk: ${{ env.WINDOWS_SDK }}
-
-      - name: Build warp_decoder (desktop, Release x64)
+      - name: Build warp_decoder of the C++ decoder (desktop, Release x64)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force out | Out-Null
+          $commit = git -C cpp-reference rev-parse HEAD
+          if ($commit -ne $env:CPP_REFERENCE_COMMIT) { throw "cpp-reference is at $commit, not at $env:CPP_REFERENCE_COMMIT" }
           $buildLog = Join-Path $env:GITHUB_WORKSPACE 'out/msbuild.log'
           $clock = [Diagnostics.Stopwatch]::StartNew()
-          & MSBuild.exe testing/warp_decoder/warp_decoder.vcxproj /m /v:minimal /p:Configuration=Release /p:Platform=x64 `
+          & MSBuild.exe cpp-reference/testing/warp_decoder/warp_decoder.vcxproj /m /v:minimal /p:Configuration=Release /p:Platform=x64 `
             "/p:PlatformToolset=$env:PLATFORM_TOOLSET" "/p:WindowsTargetPlatformVersion=$env:WINDOWS_SDK" `
             "/p:Rav1gPrebuiltShaders=${{ steps.shaders.outputs.normal }}" `
-            "/p:Rav1gSm6TestShaders=${{ steps.sm6.outputs.dir }}" `
             /fl "/flp:logfile=$buildLog;verbosity=normal"
           if ($LASTEXITCODE -ne 0) { throw 'warp_decoder build failed; see msbuild.log' }
-          $bin = 'testing/warp_decoder/bin/x64/Release'
+          $bin = 'cpp-reference/testing/warp_decoder/bin/x64/Release'
           if (-not (Test-Path "$bin/warp_decoder.exe")) { throw 'warp_decoder.exe was not produced' }
           # Built from the headers of the Shaders step: MSBuild ran FXC on no shader, and their bytecode
           # is in the program.
           if (Select-String -Path $buildLog -Pattern 'fxc\.exe.*[\\/]dx[\\/]shaders[\\/]' -Quiet) {
             throw 'MSBuild compiled the shaders itself: Rav1gPrebuiltShaders was not in effect'
           }
-          python testing/shader_cache/shaders.py verify --report shader-build/normal/report.json `
+          python cpp-reference/testing/shader_cache/shaders.py verify --report shader-build/normal/report.json `
             --root shader-build/normal "$bin/warp_decoder.exe"
-          if ($LASTEXITCODE -ne 0) { throw 'warp_decoder was not built from the shader headers of this run' }
-          python testing/sm6test/compile.py --verify sm6test-build "$bin/warp_decoder.exe"
-          if ($LASTEXITCODE -ne 0) { throw 'warp_decoder does not have the Shader Model 6 test shaders of this run' }
-          New-Item -ItemType Directory -Force out/warp_decoder | Out-Null
-          Get-ChildItem $bin -File | Where-Object { $_.Extension -in @('.exe', '.pdb', '.map') } |
-            Copy-Item -Destination out/warp_decoder/
-          # Binary redistribution retains the BSD notices and AOM patent license, including libwebm.
-          foreach ($license in @('LICENSE.txt', 'libav1/LICENSE', 'libav1/PATENTS',
-              'third_party/libwebm/LICENSE.TXT', 'third_party/libwebm/PATENTS.TXT')) {
-            $destination = Join-Path out/warp_decoder/licenses $license
-            New-Item -ItemType Directory -Force (Split-Path $destination) | Out-Null
-            Copy-Item $license $destination
-          }
-          "Commit: $env:GITHUB_SHA", "Run: https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID",
+          if ($LASTEXITCODE -ne 0) { throw 'warp_decoder was not built from the shader headers of the pinned commit' }
+          New-Item -ItemType Directory -Force out/warp_decoder, out/shaders | Out-Null
+          Copy-Item "$bin/warp_decoder.exe" out/warp_decoder/
+          # Which shaders the reference has, for the rust-equal job.
+          Copy-Item shader-build/normal/report.json out/shaders/report.json
+          "Commit: $commit (branch cpp of https://github.com/$env:GITHUB_REPOSITORY)",
+            "Run: https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID",
             "Build: Release x64; PlatformToolset=$env:PLATFORM_TOOLSET; Windows SDK=$env:WINDOWS_SDK" |
-            Set-Content out/warp_decoder/SOURCES.txt -Encoding utf8
-          "## warp_decoder", '', "Built in $([math]::Round($clock.Elapsed.TotalMinutes, 1)) min.", '' >> $env:GITHUB_STEP_SUMMARY
-
-      # Shader Model 6 test (docs/test-player.md): what WARP reports about itself (CAPS lines) and the test
-      # shaders run on it (SM6TEST lines), for reference next to the console's. What WARP does with a shader
-      # is a result and never fails the job: a pipeline state it refuses (PSO FAILED) and values that differ
-      # (FAIL, with a warning on the run). The job fails when the test itself breaks: the program ends with
-      # an error, a test has no result line, the report is missing.
-      - name: Shader Model 6 test on WARP
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force out/sm6test | Out-Null
-          & out/warp_decoder/warp_decoder.exe -sm6test > out/sm6test/warp.log
-          $code = $LASTEXITCODE
-          $lines = @(Get-Content out/sm6test/warp.log)
-          $shown = @($lines | Where-Object { $_ -match '^(ADAPTER|CAPS|SM6TEST) ' })
-          @('## Shader Model 6 test on WARP', '', '```') + $shown + @('```', '') >> $env:GITHUB_STEP_SUMMARY
-          $shown | ForEach-Object { Write-Host $_ }
-          if ($code -ne 0) { throw "warp_decoder -sm6test: exit code $code (2: the test could not run its shaders; see the SM6TEST lines)" }
-          $expected = @((Get-Content sm6test-build/report.json -Raw | ConvertFrom-Json).shaders).Count
-          $results = @($lines | Where-Object { $_ -match '^SM6TEST \S+: (PASS|FAIL|PSO FAILED|NOT BUILT)' })
-          if ($results.Count -ne $expected) { throw "$($results.Count) result lines for $expected test shaders" }
-          if (-not @($lines | Where-Object { $_ -match '^SM6TEST summary: ' }).Count) { throw 'No SM6TEST summary line' }
-          if (@($lines | Where-Object { $_ -match '^CAPS ' }).Count -lt 15) { throw 'The capability report is not complete' }
-          foreach ($needed in @('^CAPS shader model: ', '^CAPS options1: ', '^CAPS options4: ', '^CAPS wave size: ')) {
-            if (-not @($lines | Where-Object { $_ -match $needed }).Count) { throw "No line $needed in the capability report" }
-          }
-          $failed = @($results | Where-Object { $_ -match '^SM6TEST \S+: FAIL' })
-          foreach ($line in $failed) { Write-Host "::warning title=Shader Model 6 test on WARP::$line" }
+            Set-Content out/SOURCES.txt -Encoding utf8
+          "## Equality reference: warp_decoder of the C++ decoder", '',
+            "Branch cpp at ``$commit``: $(git -C cpp-reference log -1 --format=%s). Built in $([math]::Round($clock.Elapsed.TotalMinutes, 1)) min.", '' >> $env:GITHUB_STEP_SUMMARY
 
       - name: Streams from the cache
         uses: actions/cache/restore@v6
@@ -705,259 +595,68 @@ jobs:
           enableCrossOsArchive: true
           fail-on-cache-miss: true
 
-      # The decoder code of the test player (testing/player_common), run as the player runs it: its task
-      # file, its decoder creation with a device and no queue, its output pool, its md5 check, through
-      # rav1g.h on the C++ library (rav1g_libav1.cpp), which is what the reference package of the player
-      # job has. The player itself is a UWP app and does not run here; warp_decoder -playersmoke is the
-      # part of it that uses the decoder. Every task has to end with "MD5 is OK", the log must have no
-      # error line, and the launch has to end.
-      - name: The test player's decoder code through rav1g.h on WARP (warp_decoder -playersmoke)
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force conformance-streams/args, out/player-smoke | Out-Null
-          $tasks = @(
-            '-i /aom/av1-1-b8-01-size-66x66.ivf -md5_frame_check -nopresent -frate -1',
-            '-i /aom/av1-1-b10-00-quantizer-00.ivf -md5_frame_check -nopresent -frate -1 -t 4 -slots 3',
-            '-i /aom/av1-1-b8-03-sizeup.mkv -md5_frame_check -nopresent -frate -1 -t 4 -r -lowmem',
-            '-i /aom/av1-1-b8-22-svc-L2T1.ivf -md5_frame_check -nopresent -frate -1 -gputime -asyncclear')
-          $tasks | Set-Content conformance-streams/args/args_av1.txt -Encoding ascii
-          & out/warp_decoder/warp_decoder.exe -playersmoke (Resolve-Path conformance-streams).Path > out/player-smoke/player.log
-          $code = $LASTEXITCODE
-          Remove-Item conformance-streams/args -Recurse -Force
-          $lines = @(Get-Content out/player-smoke/player.log)
-          $lines | Where-Object { $_ -match 'LIBRARY |MD5 |ERROR|PLAYERSMOKE|Frame slots|Bye' } | ForEach-Object { Write-Host $_ }
-          if ($code -ne 0) { throw "warp_decoder -playersmoke: exit code $code (2: the player did not end its launch)" }
-          if (-not @($lines | Where-Object { $_ -match 'LIBRARY libav1' }).Count) { throw 'No LIBRARY line of the C++ library in the player log' }
-          $errors = @($lines | Where-Object { $_ -match ':ERROR:|:FATAL:' })
-          if ($errors.Count) { throw "$($errors.Count) error lines in the player log; the first: $($errors[0])" }
-          $ok = @($lines | Where-Object { $_ -match 'MD5 is OK' }).Count
-          if ($ok -ne $tasks.Count) { throw "$ok of $($tasks.Count) tasks of the player ended with 'MD5 is OK'" }
-          "## Test player decoder code through rav1g.h on WARP", '', "$ok of $($tasks.Count) tasks: MD5 is OK; the launch ended.", '' >> $env:GITHUB_STEP_SUMMARY
-          # A launch without a task file ends as well: it logs that it has no tasks and does not sit idle.
-          New-Item -ItemType Directory -Force out/player-smoke/empty | Out-Null
-          & out/warp_decoder/warp_decoder.exe -playersmoke (Resolve-Path out/player-smoke/empty).Path > out/player-smoke/no-tasks.log
-          if ($LASTEXITCODE -ne 0) { throw "warp_decoder -playersmoke without a task file: exit code $LASTEXITCODE (2: the player did not end its launch)" }
-          if (-not (Select-String -Path out/player-smoke/no-tasks.log -Pattern 'No args were found' -Quiet)) {
-            throw 'The player without a task file did not say that it has no tasks'
-          }
-
-      # A decode error in the middle of a stream (testing/conformance/cut_tile_check.py): the tile data of
-      # one temporal unit of two streams of the set cut short (one tile, eight tiles), which fails behind
-      # the frame's setup and before its submission. The player's decoder code, on the C++ library: the
-      # task ends with the error and the stream behind it decodes right; with -continue_on_error the same
-      # decoder goes on, and the frames from the next key frame on are those of the reference; the device
-      # is not lost and the launch ends. The rust job does the same with rav1g-dec.
-      - name: Decode error in a cut stream, the test player's decoder code (warp_decoder -playersmoke)
-        if: ${{ !cancelled() }}
-        shell: pwsh
-        run: |
-          python testing/conformance/cut_tile_check.py --player-smoke out/warp_decoder/warp_decoder.exe `
-            --streams conformance-streams --out out/cut-tile
-          if ($LASTEXITCODE -ne 0) { throw "decode error check with the player's decoder code: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
-
-      - name: Decode every stream on WARP and compare with expected.txt
+      # Every stream of the set, for the md5 of every output frame. The C++ decoder has to give the results
+      # of expected.txt as well: a reference that is wrong itself is no reference.
+      - name: Decode every stream on WARP with the C++ decoder
         shell: pwsh
         run: |
           python testing/conformance/run.py --tool out/warp_decoder/warp_decoder.exe --streams conformance-streams `
-            --out out/conformance --threads 4
-          if ($LASTEXITCODE -ne 0) { throw "conformance run: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
-
-      # Order check (testing/conformance/order_check.py; docs/gpu-av1-decoder.md, "Padding of the mode info
-      # record"): what a decoder writes must not depend on what the process decoded before. The sequences that
-      # showed such a dependence, each in one decoder process and in this order, every stream against its
-      # reference: an 8-bit quantizer vector and then the first 10-bit one, the ten 8-bit ones and then the
-      # 10-bit one (-t 1 and -t 4), svc-L2T1 and then svc-L2T1-2. No stream is decoded again alone: that is
-      # what kept the dependence out of sight. Only a sequence that lost the D3D12 device runs again, whole.
-      - name: Order check, streams one after the other in one process
-        if: ${{ !cancelled() }}
-        shell: pwsh
-        run: |
-          python testing/conformance/order_check.py --tool out/warp_decoder/warp_decoder.exe --streams conformance-streams `
-            --out out/order-check
-          if ($LASTEXITCODE -ne 0) { throw "order check: exit code $LASTEXITCODE (1: a stream is wrong behind other streams, 2: the check could not be done)" }
-
-      # The same dependence without waiting for the memory of an earlier decoder: with -poisonmi the decoder
-      # fills the mode info pool with the byte 0xA5 when it creates it (dx/av1_perf.h, av1_set_poison_buffers),
-      # so a shader that reads bytes of a record that the entropy decoder never wrote (padding of the C
-      # struct, a field the block's kind does not have) gives another output at once. The output has to be
-      # the same: a part of the set, about half a minute (ten quantizer vectors of each bit depth, the other
-      # vectors, one cut), has to give the results of expected.txt.
-      - name: Conformance of the vectors with a poisoned mode info pool (-poisonmi)
-        if: ${{ !cancelled() }}
-        shell: pwsh
-        run: |
-          python testing/conformance/run.py --tool out/warp_decoder/warp_decoder.exe --streams conformance-streams `
-            --out out/conformance-poisonmi --threads 4 "--tool-args=-poisonmi" "--title=part of the set with -poisonmi" `
-            "--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)"
-          if ($LASTEXITCODE -ne 0) { throw "conformance with -poisonmi: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
-
-      # -poisonbuf, the same for every buffer the CPU writes for the shaders, and for the constants of the
-      # stages in every frame: their memory is reused from frame to frame, so the decoder fills each record
-      # with 0xA5 when it hands it out, right before the stage writes it (ComputeCommandBuffer::Alloc). A
-      # field that a stage does not write and a shader reads then has no plausible value left from an
-      # earlier frame. That was the case of loop restoration, whose shader computed an address from the unit
-      # fields of a plane without restoration and loaded from it, which could remove the device
-      # (docs/gpu-av1-decoder.md, "Unwritten fields of a constant record"). The same part of the set as with
-      # -poisonmi has to give the results of expected.txt; the whole set, also with -interfast and with
-      # -intrav2, is decoded with it when the workflow is started with the experiments input.
-      - name: Conformance of the vectors with poisoned buffers and constants (-poisonbuf)
-        if: ${{ !cancelled() }}
-        shell: pwsh
-        run: |
-          python testing/conformance/run.py --tool out/warp_decoder/warp_decoder.exe --streams conformance-streams `
-            --out out/conformance-poisonbuf --threads 4 "--tool-args=-poisonbuf" "--title=part of the set with -poisonbuf" `
-            "--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)"
-          if ($LASTEXITCODE -ne 0) { throw "conformance with -poisonbuf: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
-
-      # The fast inter path (-interfast; docs/gpu-av1-decoder.md, "Inter prediction: breakdown and fast
-      # paths"): the blocks with one reference and the averaged compound blocks are listed by the fraction
-      # of their motion vectors and predicted by inter_fast.hlsl and inter_compound_fast.hlsl. The output
-      # has to be the same, so the whole set is decoded once more with the flag and has to give the
-      # results of expected.txt. This pass is the gate of the feature and runs on every push.
-      - name: Conformance with -interfast
-        if: ${{ !cancelled() }}
-        shell: pwsh
-        run: |
-          python testing/conformance/run.py --tool out/warp_decoder/warp_decoder.exe --streams conformance-streams `
-            --out out/conformance-interfast --threads 4 "--tool-args=-interfast" "--title=with -interfast"
-          if ($LASTEXITCODE -ne 0) { throw "conformance with -interfast: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
-
-      # The inter breakdown of the timing run (-gputimedetail, -gputimeisolate; docs/test-player.md, "Inter
-      # prediction breakdown") as a smoke test: a 10-bit stream and one with scaled references, each decoded
-      # with -gputime, -gputimedetail and -gputimeisolate against its reference. WARP's times say nothing;
-      # checked are the output, that the breakdown is there, that the dispatches the recording counts and
-      # the blocks the tile threads count agree on every frame, and that the numbers are plausible.
-      - name: Timing run with the inter breakdown on WARP (smoke test)
-        if: ${{ !cancelled() }}
-        shell: pwsh
-        run: |
-          python testing/conformance/gputime_smoke.py --tool out/warp_decoder/warp_decoder.exe --streams conformance-streams `
-            --out out/gputime-smoke --threads 4 --stream nf-chimera-10b-1080p.ivf:16 --stream syn-resize-10b-1080p.ivf:24:scaled `
-            --stream nf-chimera-8b-270p.ivf:40
-          if ($LASTEXITCODE -ne 0) { throw "inter breakdown smoke test: exit code $LASTEXITCODE (1: a check failed, 2: a run could not be done)" }
+            --out out/conformance --threads 4 "--title=warp_decoder of branch cpp (the equality reference)"
+          if ($LASTEXITCODE -ne 0) { throw "conformance run of the reference: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
 
       # Stage dumps (testing/conformance/dump_tasks.txt): the buffers behind every GPU stage of a few
-      # frames, as WARP wrote them, to compare with the dumps of another device (the test player's
-      # -dumpstages) with testing/stage_dump/stage_dump.py. Dumps of the vectors and of the streams
+      # frames, as the C++ decoder's shaders wrote them on WARP. Dumps of the vectors and of the streams
       # encoded here; of the cuts of published streams only digests (hashes), never samples.
-      - name: Stage dumps of the frames in dump_tasks.txt
+      - name: Stage dumps of the frames in dump_tasks.txt with the C++ decoder
         if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           python testing/stage_dump/ci_dumps.py --tool out/warp_decoder/warp_decoder.exe --streams conformance-streams `
             --tasks testing/conformance/dump_tasks.txt --out out/stage-dumps --threads 4
-          if ($LASTEXITCODE -ne 0) { throw "stage dumps: exit code $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "stage dumps of the reference: exit code $LASTEXITCODE" }
 
       # The MEMORY lines of the decoder (testing/conformance/memory_lines.py): what a decoder of a few
-      # configurations holds, its budget line and the steps of its release, for the comparison with the
-      # lines of rav1g-dec in the rust-equal job.
-      - name: MEMORY log lines of a few decoder configurations
+      # configurations holds, its budget line and the steps of its release.
+      - name: MEMORY log lines of a few decoder configurations with the C++ decoder
         if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           python testing/conformance/memory_lines.py run --tool out/warp_decoder/warp_decoder.exe `
             --streams conformance-streams --out out/memory-lines
-          if ($LASTEXITCODE -ne 0) { throw "memory lines: exit code $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "memory lines of the reference: exit code $LASTEXITCODE" }
 
-      - name: Preserve the stage dumps
+      - name: Preserve the stage dumps of the reference
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
-          name: rav1g-stage-dumps-${{ github.run_id }}
+          name: rav1g-cpp-reference-stage-dumps-${{ github.run_id }}
           path: out/stage-dumps/
           if-no-files-found: warn
 
-      # The experiments (docs/test-player.md, "Experiments"): on a device that follows D3D each of them
-      # leaves the output as it is, so the whole set is decoded again with each flag and has to give the
-      # results of expected.txt, and once more with a decoder whose shaders are those of the uavsync
-      # package. They answered their question (none changed the console's output), so they run only
-      # when the workflow is started by hand with the experiments input.
-      - name: Conformance with each experiment flag
-        if: ${{ !cancelled() && inputs.experiments }}
-        shell: pwsh
-        run: |
-          $runs = @(@{ name = 'lfhsplit1'; args = '-lfhsplit 1' }, @{ name = 'lfhsplit2'; args = '-lfhsplit 2' },
-            @{ name = 'intraedgefix'; args = '-intraedgefix' },
-            # Not experiments for a device: the whole set with the mode info pool poisoned, and with every
-            # buffer and the constants poisoned, also on the fast inter path and with the second intra
-            # scheduler (the steps with -poisonmi and -poisonbuf above decode a part of the set on every push).
-            @{ name = 'poisonmi-all'; args = '-poisonmi' },
-            @{ name = 'poisonbuf-all'; args = '-poisonbuf' },
-            @{ name = 'poisonbuf-interfast'; args = '-poisonbuf -interfast' },
-            @{ name = 'poisonbuf-intrav2'; args = '-poisonbuf -intrav2' })
-          $failed = @()
-          foreach ($run in $runs) {
-            python testing/conformance/run.py --tool out/warp_decoder/warp_decoder.exe --streams conformance-streams `
-              --out "out/conformance-$($run.name)" --threads 4 "--tool-args=$($run.args)" "--title=with $($run.args)"
-            if ($LASTEXITCODE -ne 0) { $failed += "$($run.args): exit code $LASTEXITCODE" }
-          }
-          if ($failed.Count) { throw "conformance with an experiment flag: $($failed -join '; ')" }
-
-      - name: Build warp_decoder with the shaders of the uavsync package
-        if: ${{ !cancelled() && inputs.experiments }}
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $buildLog = Join-Path $env:GITHUB_WORKSPACE 'out/msbuild-uavsync.log'
-          & MSBuild.exe testing/warp_decoder/warp_decoder.vcxproj /t:Rebuild /m /v:minimal /p:Configuration=Release /p:Platform=x64 `
-            "/p:PlatformToolset=$env:PLATFORM_TOOLSET" "/p:WindowsTargetPlatformVersion=$env:WINDOWS_SDK" /p:Rav1gUavSync=1 `
-            "/p:Rav1gPrebuiltShaders=${{ steps.shaders.outputs.uavsync }}" `
-            "/p:Rav1gSm6TestShaders=${{ steps.sm6.outputs.dir }}" `
-            /fl "/flp:logfile=$buildLog;verbosity=normal"
-          if ($LASTEXITCODE -ne 0) { throw 'warp_decoder uavsync build failed; see msbuild-uavsync.log' }
-          New-Item -ItemType Directory -Force out/warp_decoder_uavsync | Out-Null
-          Copy-Item testing/warp_decoder/bin/x64/Release/warp_decoder.exe out/warp_decoder_uavsync/
-          if (Select-String -Path $buildLog -Pattern 'fxc\.exe.*[\\/]dx[\\/]shaders[\\/]' -Quiet) {
-            throw 'MSBuild compiled the shaders itself: Rav1gPrebuiltShaders was not in effect'
-          }
-          python testing/shader_cache/shaders.py verify --report shader-build/uavsync/report.json `
-            --root shader-build/uavsync out/warp_decoder_uavsync/warp_decoder.exe
-          if ($LASTEXITCODE -ne 0) { throw 'The uavsync warp_decoder was not built from the uavsync shader headers of this run' }
-
-      - name: Conformance with the uavsync shaders
-        if: ${{ !cancelled() && inputs.experiments }}
-        shell: pwsh
-        run: |
-          python testing/conformance/run.py --tool out/warp_decoder_uavsync/warp_decoder.exe --streams conformance-streams `
-            --out out/conformance-uavsync --threads 4 "--title=uavsync shaders (all-memory group syncs)"
-          $code = $LASTEXITCODE
-          if (-not (Select-String -Path out/conformance-uavsync/lists/run001.log -Pattern '^SHADERS uavsync' -Quiet)) {
-            throw 'The decoder of this run does not report the uavsync shaders'
-          }
-          if ($code -ne 0) { throw "conformance with the uavsync shaders: exit code $code" }
-
-      - name: Preserve the results, the per-stream logs and md5 files, and the build log
+      - name: Preserve the results, the per-stream logs and md5 files, the MEMORY lines and the build log of the reference
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: rav1g-conformance-${{ github.run_id }}
+          name: rav1g-cpp-reference-${{ github.run_id }}
           path: |
             out/conformance/
-            out/conformance-*/
-            out/order-check/
-            out/gputime-smoke/
             out/memory-lines/
-            out/sm6test/
-            out/player-smoke/
-            out/cut-tile/
+            out/shaders/
+            out/SOURCES.txt
             out/msbuild.log
-            out/msbuild-uavsync.log
           if-no-files-found: warn
 
-      - name: Preserve warp_decoder.exe
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: rav1g-warp-decoder-x64-${{ github.run_id }}
-          path: out/warp_decoder/
-          if-no-files-found: warn
-
-  # The Rust port (docs/rust-port.md). Step 1: the Cargo workspace builds the C entropy decoder and the C++
-  # host with cc (crates/rav1g-sys) from the shader headers of the Shaders step, and rav1g-dec
-  # (tools/rav1g-dec) takes the place of warp_decoder. This job builds it with MSVC, decodes the conformance
-  # set with it on WARP against the same references and expected.txt, and runs the timing smoke test and the
-  # stage dumps with it; the rust-equal job then compares its md5 per frame with warp_decoder's.
+  # Conformance run of the decoder (docs/rust-port.md): the Cargo workspace builds the Rust library with the
+  # C of the parser and entropy decoder (crates/rav1g-sys, cc) from the shader headers of the Shaders step,
+  # and rav1g-dec (tools/rav1g-dec), the decoder as a desktop console program, decodes every stream of the
+  # set on the D3D12 WARP software adapter of the runner and compares the md5 of every output frame with
+  # the reference. testing/conformance/expected.txt lists the streams that fail today; a pass fails on a
+  # failure that is not listed, on a failure of another kind than listed, on a crash or timeout that is not
+  # listed, and when a listed stream passes. This job builds the program with MSVC and runs every check
+  # with it: the set through the Rust interface and through rav1g.h, the test player's decoder code, decode
+  # errors, the order check, the poisoned buffers, the fast inter path, the timing smoke test, the stage
+  # dumps and the MEMORY lines. The rust-equal job then holds its md5 per frame, its stage dumps and its
+  # MEMORY lines against those of the C++ decoder (cpp-reference).
   rust:
     needs: conformance-streams
     runs-on: windows-latest
@@ -972,7 +671,7 @@ jobs:
         with:
           persist-credentials: false
 
-      # The same cache and keys as the player and conformance jobs: the same bytecode.
+      # The same cache and keys as the player job: the same bytecode.
       - name: Shaders
         id: shaders
         uses: ./.github/actions/shaders
@@ -1046,22 +745,33 @@ jobs:
           cargo test --release --locked
           if ($LASTEXITCODE -ne 0) { throw 'cargo test failed' }
 
-      # The Shader Model 6 test through rav1g-dec, as the conformance job runs it through warp_decoder: the
-      # program ends without an error and every test shader has a result line.
+      # Shader Model 6 test (docs/test-player.md): what WARP reports about itself (CAPS lines) and the test
+      # shaders run on it (SM6TEST lines), for reference next to the console's. What WARP does with a shader
+      # is a result and never fails the job: a pipeline state it refuses (PSO FAILED) and values that differ
+      # (FAIL, with a warning on the run). The job fails when the test itself breaks: the program ends with
+      # an error, a test has no result line, the report is missing.
       - name: Shader Model 6 test on WARP
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force out/sm6test | Out-Null
-          & out/rav1g-dec/rav1g-dec.exe -sm6test > out/sm6test/rav1g-dec.log
+          & out/rav1g-dec/rav1g-dec.exe -sm6test > out/sm6test/warp.log
           $code = $LASTEXITCODE
-          $lines = @(Get-Content out/sm6test/rav1g-dec.log)
-          $lines | Where-Object { $_ -match '^(ADAPTER|SM6TEST) ' } | ForEach-Object { Write-Host $_ }
-          if ($code -ne 0) { throw "rav1g-dec -sm6test: exit code $code" }
+          $lines = @(Get-Content out/sm6test/warp.log)
+          $shown = @($lines | Where-Object { $_ -match '^(ADAPTER|CAPS|SM6TEST) ' })
+          @('## Shader Model 6 test on WARP', '', '```') + $shown + @('```', '') >> $env:GITHUB_STEP_SUMMARY
+          $shown | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) { throw "rav1g-dec -sm6test: exit code $code (2: the test could not run its shaders; see the SM6TEST lines)" }
           $expected = @((Get-Content sm6test-build/report.json -Raw | ConvertFrom-Json).shaders).Count
           $results = @($lines | Where-Object { $_ -match '^SM6TEST \S+: (PASS|FAIL|PSO FAILED|NOT BUILT)' })
           if ($results.Count -ne $expected) { throw "$($results.Count) result lines for $expected test shaders" }
+          if (-not @($lines | Where-Object { $_ -match '^SM6TEST summary: ' }).Count) { throw 'No SM6TEST summary line' }
           if (@($lines | Where-Object { $_ -match '^CAPS ' }).Count -lt 15) { throw 'The capability report is not complete' }
+          foreach ($needed in @('^CAPS shader model: ', '^CAPS options1: ', '^CAPS options4: ', '^CAPS wave size: ')) {
+            if (-not @($lines | Where-Object { $_ -match $needed }).Count) { throw "No line $needed in the capability report" }
+          }
+          $failed = @($results | Where-Object { $_ -match '^SM6TEST \S+: FAIL' })
+          foreach ($line in $failed) { Write-Host "::warning title=Shader Model 6 test on WARP::$line" }
 
       - name: Streams from the cache
         uses: actions/cache/restore@v6
@@ -1071,7 +781,21 @@ jobs:
           enableCrossOsArchive: true
           fail-on-cache-miss: true
 
-      # The gate of step 1: every stream of the set, against its reference and expected.txt.
+      # The decoder code of the test player (testing/player_common), run as the player runs it: its task
+      # file, its decoder creation with a device and no queue, its output pool, its md5 check, through
+      # rav1g.h on the Rust library: the files and the functions the packages of the player job have. The
+      # player itself is a UWP app and does not run here; rav1g-dec -playersmoke is the part of it that
+      # uses the decoder (testing/conformance/player_smoke.py). Every task has to end with "MD5 is OK", the
+      # log must name the Rust library and have no error line, and the launch has to end, also without a
+      # task file.
+      - name: The test player's decoder code through rav1g.h on the Rust library (rav1g-dec -playersmoke)
+        shell: pwsh
+        run: |
+          python testing/conformance/player_smoke.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/player-smoke "--title=the Rust library (cargo, MSVC)"
+          if ($LASTEXITCODE -ne 0) { throw "the player's decoder code on the Rust library: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
+
+      # Every stream of the set, against its reference and expected.txt.
       - name: Decode every stream on WARP with rav1g-dec and compare with expected.txt
         shell: pwsh
         run: |
@@ -1099,7 +823,9 @@ jobs:
       # the frame's setup and before its submission. The task ends with the error, with the frames before
       # it right, and the stream behind it in the same process decodes right; with -continue_on_error the
       # same decoder is given the rest of the stream, and the frames from the next key frame on are those
-      # of the reference; no device is lost. Through the Rust interface and through rav1g.h.
+      # of the reference; no device is lost. Through the Rust interface, through rav1g.h, and with the
+      # decoder code of the test player (-playersmoke), whose task ends with the error and whose stream
+      # behind it decodes right, and which goes on with -continue_on_error as the program does.
       - name: Decode error in a cut stream, rav1g-dec
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -1110,11 +836,17 @@ jobs:
           python testing/conformance/cut_tile_check.py --tool out/rav1g-dec/rav1g-dec.exe "--tool-args=-capi" `
             --streams conformance-streams --out out/cut-tile
           if ($LASTEXITCODE -ne 0) { throw "decode error check with rav1g-dec -capi: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
+          python testing/conformance/cut_tile_check.py --player-smoke out/rav1g-dec/rav1g-dec.exe `
+            --streams conformance-streams --out out/cut-tile
+          if ($LASTEXITCODE -ne 0) { throw "decode error check with the player's decoder code: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
 
-      # The order check and the part of the set with -poisonmi, as the conformance job runs them with
-      # warp_decoder: streams one after the other in one process without a repeat alone, and the decoder
-      # with the mode info pool filled with 0xA5 at creation.
-      - name: Order check with rav1g-dec
+      # Order check (testing/conformance/order_check.py; docs/gpu-av1-decoder.md, "Padding of the mode info
+      # record"): what a decoder writes must not depend on what the process decoded before. The sequences that
+      # showed such a dependence, each in one decoder process and in this order, every stream against its
+      # reference: an 8-bit quantizer vector and then the first 10-bit one, the ten 8-bit ones and then the
+      # 10-bit one (-t 1 and -t 4), svc-L2T1 and then svc-L2T1-2. No stream is decoded again alone: that is
+      # what kept the dependence out of sight. Only a sequence that lost the D3D12 device runs again, whole.
+      - name: Order check, streams one after the other in one process
         if: ${{ !cancelled() }}
         shell: pwsh
         run: |
@@ -1122,7 +854,13 @@ jobs:
             --out out/order-check "--title=rav1g-dec (cargo, MSVC)"
           if ($LASTEXITCODE -ne 0) { throw "order check with rav1g-dec: exit code $LASTEXITCODE (1: a stream is wrong behind other streams, 2: the check could not be done)" }
 
-      - name: Conformance of the vectors with a poisoned mode info pool (-poisonmi) with rav1g-dec
+      # The same dependence without waiting for the memory of an earlier decoder: with -poisonmi the decoder
+      # fills the mode info pool with the byte 0xA5 when it creates it, so a shader that reads bytes of a
+      # record that the entropy decoder never wrote (padding of the C struct, a field the block's kind does
+      # not have) gives another output at once. The output has to be the same: a part of the set, about half
+      # a minute (ten quantizer vectors of each bit depth, the other vectors, one cut), has to give the
+      # results of expected.txt.
+      - name: Conformance of the vectors with a poisoned mode info pool (-poisonmi)
         if: ${{ !cancelled() }}
         shell: pwsh
         run: |
@@ -1131,10 +869,16 @@ jobs:
             "--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)"
           if ($LASTEXITCODE -ne 0) { throw "conformance with -poisonmi with rav1g-dec: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
 
-      # The same part of the set with -poisonbuf, as the conformance job runs it with warp_decoder: every
-      # buffer the CPU writes filled with 0xA5 at creation, and the constants of every stage again in every
-      # frame before the stage writes them.
-      - name: Conformance of the vectors with poisoned buffers and constants (-poisonbuf) with rav1g-dec
+      # -poisonbuf, the same for every buffer the CPU writes for the shaders, and for the constants of the
+      # stages in every frame: their memory is reused from frame to frame, so the decoder fills each record
+      # with 0xA5 when it hands it out, right before the stage writes it. A field that a stage does not write
+      # and a shader reads then has no plausible value left from an earlier frame. That was the case of loop
+      # restoration, whose shader computed an address from the unit fields of a plane without restoration
+      # and loaded from it, which could remove the device (docs/gpu-av1-decoder.md, "Unwritten fields of a
+      # constant record"). The same part of the set as with -poisonmi has to give the results of
+      # expected.txt; the whole set, also with -interfast and with -intrav2, is decoded with it when the
+      # workflow is started with the experiments input.
+      - name: Conformance of the vectors with poisoned buffers and constants (-poisonbuf)
         if: ${{ !cancelled() }}
         shell: pwsh
         run: |
@@ -1143,22 +887,80 @@ jobs:
             "--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)"
           if ($LASTEXITCODE -ne 0) { throw "conformance with -poisonbuf with rav1g-dec: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
 
-      # With the experiments input: the whole set with rav1g-dec on the fast inter path, with -poisonbuf,
-      # and with both (the conformance job decodes the same with warp_decoder).
-      - name: Conformance of the whole set with -interfast and with -poisonbuf with rav1g-dec
+      # The fast inter path (-interfast; docs/gpu-av1-decoder.md, "Inter prediction: breakdown and fast
+      # paths"): the blocks with one reference and the averaged compound blocks are listed by the fraction
+      # of their motion vectors and predicted by inter_fast.hlsl and inter_compound_fast.hlsl. The output
+      # has to be the same, so the whole set is decoded once more with the flag and has to give the
+      # results of expected.txt. This pass is the gate of the feature and runs on every push.
+      - name: Conformance with -interfast
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/conformance-interfast --threads 4 "--tool-args=-interfast" "--title=rav1g-dec with -interfast"
+          if ($LASTEXITCODE -ne 0) { throw "conformance with -interfast: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
+
+      # The experiments (docs/test-player.md, "Experiments"): on a device that follows D3D each of them
+      # leaves the output as it is, so the whole set is decoded again with each flag and has to give the
+      # results of expected.txt, and once more with a decoder whose shaders are those of the uavsync
+      # package. They answered their question (none changed the console's output), so they run only
+      # when the workflow is started by hand with the experiments input.
+      - name: Conformance with each experiment flag
         if: ${{ !cancelled() && inputs.experiments }}
         shell: pwsh
         run: |
-          $runs = @(@{ name = 'interfast'; args = '-interfast' }, @{ name = 'poisonbuf-all'; args = '-poisonbuf' },
-            @{ name = 'poisonbuf-interfast'; args = '-poisonbuf -interfast' })
+          $runs = @(@{ name = 'lfhsplit1'; args = '-lfhsplit 1' }, @{ name = 'lfhsplit2'; args = '-lfhsplit 2' },
+            @{ name = 'intraedgefix'; args = '-intraedgefix' },
+            # Not experiments for a device: the whole set with the mode info pool poisoned, and with every
+            # buffer and the constants poisoned, also on the fast inter path and with the second intra
+            # scheduler (the steps with -poisonmi and -poisonbuf above decode a part of the set on every push).
+            @{ name = 'poisonmi-all'; args = '-poisonmi' },
+            @{ name = 'poisonbuf-all'; args = '-poisonbuf' },
+            @{ name = 'poisonbuf-interfast'; args = '-poisonbuf -interfast' },
+            @{ name = 'poisonbuf-intrav2'; args = '-poisonbuf -intrav2' })
           $failed = @()
           foreach ($run in $runs) {
             python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
               --out "out/conformance-$($run.name)" --threads 4 "--tool-args=$($run.args)" "--title=rav1g-dec with $($run.args)"
             if ($LASTEXITCODE -ne 0) { $failed += "$($run.args): exit code $LASTEXITCODE" }
           }
-          if ($failed.Count) { throw "conformance with rav1g-dec: $($failed -join '; ')" }
+          if ($failed.Count) { throw "conformance with an experiment flag: $($failed -join '; ')" }
 
+      # rav1g-dec with the shaders of the uavsync package: the uavsync feature of the crates and the shader
+      # headers of that variant.
+      - name: Build rav1g-dec with the shaders of the uavsync package
+        if: ${{ !cancelled() && inputs.experiments }}
+        shell: pwsh
+        env:
+          RAV1G_SHADER_DIR: ${{ steps.shaders.outputs.uavsync }}
+          RAV1G_SM6TEST_SHADER_DIR: ${{ steps.sm6.outputs.dir }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --release --locked -p rav1g-dec --features uavsync --target-dir target-uavsync
+          if ($LASTEXITCODE -ne 0) { throw 'cargo build of rav1g-dec with the uavsync shaders failed' }
+          New-Item -ItemType Directory -Force out/rav1g-dec-uavsync | Out-Null
+          Copy-Item target-uavsync/release/rav1g-dec.exe out/rav1g-dec-uavsync/
+          python testing/shader_cache/shaders.py verify --report shader-build/uavsync/report.json `
+            --root shader-build/uavsync out/rav1g-dec-uavsync/rav1g-dec.exe
+          if ($LASTEXITCODE -ne 0) { throw 'The uavsync rav1g-dec was not built from the uavsync shader headers of this run' }
+
+      - name: Conformance with the uavsync shaders
+        if: ${{ !cancelled() && inputs.experiments }}
+        shell: pwsh
+        run: |
+          python testing/conformance/run.py --tool out/rav1g-dec-uavsync/rav1g-dec.exe --streams conformance-streams `
+            --out out/conformance-uavsync --threads 4 "--title=rav1g-dec, uavsync shaders (all-memory group syncs)"
+          $code = $LASTEXITCODE
+          if (-not (Select-String -Path out/conformance-uavsync/lists/run001.log -Pattern '^SHADERS uavsync' -Quiet)) {
+            throw 'The decoder of this run does not report the uavsync shaders'
+          }
+          if ($code -ne 0) { throw "conformance with the uavsync shaders: exit code $code" }
+
+      # The inter breakdown of the timing run (-gputimedetail, -gputimeisolate; docs/test-player.md, "Inter
+      # prediction breakdown") as a smoke test: a 10-bit stream and one with scaled references, each decoded
+      # with -gputime, -gputimedetail and -gputimeisolate against its reference. WARP's times say nothing;
+      # checked are the output, that the breakdown is there, that the dispatches the recording counts and
+      # the blocks the tile threads count agree on every frame, and that the numbers are plausible.
       - name: Timing run with the inter breakdown on WARP with rav1g-dec (smoke test)
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -1168,6 +970,11 @@ jobs:
             --stream nf-chimera-8b-270p.ivf:40
           if ($LASTEXITCODE -ne 0) { throw "inter breakdown smoke test with rav1g-dec: exit code $LASTEXITCODE (1: a check failed, 2: a run could not be done)" }
 
+      # Stage dumps (testing/conformance/dump_tasks.txt): the buffers behind every GPU stage of a few
+      # frames, as WARP wrote them, to compare with the dumps of another device (the test player's
+      # -dumpstages) with testing/stage_dump/stage_dump.py, and in the rust-equal job with those of the C++
+      # decoder. Dumps of the vectors and of the streams encoded here; of the cuts of published streams only
+      # digests (hashes), never samples.
       - name: Stage dumps of the frames in dump_tasks.txt with rav1g-dec
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -1176,6 +983,9 @@ jobs:
             --tasks testing/conformance/dump_tasks.txt --out out/stage-dumps --threads 4
           if ($LASTEXITCODE -ne 0) { throw "stage dumps with rav1g-dec: exit code $LASTEXITCODE" }
 
+      # The MEMORY lines of the decoder (testing/conformance/memory_lines.py): what a decoder of a few
+      # configurations holds, its budget line and the steps of its release, for the comparison with the
+      # lines of the C++ decoder in the rust-equal job.
       - name: MEMORY log lines of a few decoder configurations with rav1g-dec
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -1204,6 +1014,7 @@ jobs:
             out/gputime-smoke/
             out/memory-lines/
             out/sm6test/
+            out/player-smoke/
             out/cut-tile/
           if-no-files-found: warn
 
@@ -1215,11 +1026,15 @@ jobs:
           path: out/rav1g-dec/
           if-no-files-found: warn
 
-  # Equality with the C++ reference (docs/rust-port.md, "Testing"): rav1g-dec and warp_decoder, built in
-  # this run from the same sources and shader headers, must write the same md5 for every output frame of
-  # every stream of the set, and the same buffers behind every GPU stage of the dumped frames.
+  # Equality with the C++ decoder (docs/rust-port.md, "Equality reference"): rav1g-dec of this commit and
+  # warp_decoder of branch cpp at CPP_REFERENCE_COMMIT must write the same md5 for every output frame of
+  # every stream of the set, the same buffers behind every GPU stage of the dumped frames, and the same
+  # MEMORY lines. Two implementations of the host can only be held against each other while they run the
+  # same shaders, so that is checked first: when a shader of this branch changes and the pinned commit
+  # does not have the change, this job fails there, and the comparison either gets a new pin (the change
+  # was made on both branches) or ends (the shaders of the branches diverge: the switch to DXC, phase 2).
   rust-equal:
-    needs: [conformance, rust]
+    needs: [cpp-reference, rust, shader-headers]
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
@@ -1229,8 +1044,8 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: rav1g-conformance-${{ github.run_id }}
-          path: warp-decoder
+          name: rav1g-cpp-reference-${{ github.run_id }}
+          path: cpp-reference
 
       - uses: actions/download-artifact@v8
         with:
@@ -1239,8 +1054,8 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: rav1g-stage-dumps-${{ github.run_id }}
-          path: warp-decoder-dumps
+          name: rav1g-cpp-reference-stage-dumps-${{ github.run_id }}
+          path: cpp-reference-dumps
 
       - uses: actions/download-artifact@v8
         with:
@@ -1252,18 +1067,40 @@ jobs:
           name: rav1g-conformance-md5-${{ github.run_id }}
           path: conformance-md5
 
-      - name: md5 per frame and stage dumps, rav1g-dec against warp_decoder
+      - uses: actions/download-artifact@v8
+        with:
+          name: rav1g-shader-headers-${{ github.run_id }}
+          path: shader-headers
+
+      - name: The shaders of this commit are those of the reference
         run: |
           set -euo pipefail
-          python3 testing/conformance/compare_md5.py --reference warp-decoder/conformance --candidate rav1g-dec/conformance \
-            --manifest conformance-md5/manifest.txt --reference-dumps warp-decoder-dumps --candidate-dumps rav1g-dec-dumps
+          {
+            echo '## Equality with the C++ decoder'
+            echo
+            echo "Reference: warp_decoder of branch cpp at \`$CPP_REFERENCE_COMMIT\`."
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          if ! python3 testing/shader_cache/shaders.py same --reference cpp-reference/shaders/report.json \
+              --candidate shader-headers/report.json --reference-name "branch cpp at ${CPP_REFERENCE_COMMIT:0:7}" \
+              --candidate-name 'this commit'; then
+            echo '::error title=The shaders differ from those of the equality reference::The C++ decoder of the pinned commit of branch cpp does not have the shaders of this commit, so its output cannot be held against. If the change is on branch cpp as well, set CPP_REFERENCE_COMMIT to that commit; if the shaders of the branches diverge from here on, the comparison ends (docs/rust-port.md, "Equality reference").'
+            exit 1
+          fi
 
-      # The decoder creation, the buffer plan and the release are Rust in rav1g-dec: the same buffers of
-      # the same sizes, and the same text about them.
-      - name: MEMORY log lines, rav1g-dec against warp_decoder
+      - name: md5 per frame and stage dumps, rav1g-dec against the C++ decoder
         run: |
-          python3 testing/conformance/memory_lines.py compare --reference warp-decoder/memory-lines \
-            --candidate rav1g-dec/memory-lines
+          set -euo pipefail
+          python3 testing/conformance/compare_md5.py --reference cpp-reference/conformance --candidate rav1g-dec/conformance \
+            --manifest conformance-md5/manifest.txt --reference-dumps cpp-reference-dumps --candidate-dumps rav1g-dec-dumps \
+            --reference-name 'warp_decoder (cpp)'
+
+      # The decoder creation, the buffer plan and the release: the same buffers of the same sizes, and the
+      # same text about them.
+      - name: MEMORY log lines, rav1g-dec against the C++ decoder
+        run: |
+          python3 testing/conformance/memory_lines.py compare --reference cpp-reference/memory-lines \
+            --candidate rav1g-dec/memory-lines --reference-name 'warp_decoder (cpp)'
 
   # The shader headers of the normal build for the Linux build below, which has no FXC: the headers and
   # the report of the Shaders step, as an artifact.
@@ -1297,8 +1134,9 @@ jobs:
 
   # Linux-native build (docs/rust-port.md, "Requirements"): the workspace for x86_64-pc-windows-msvc on a
   # Linux runner with cargo xwin, which is clang-cl and lld-link with the Windows SDK and C runtime that xwin
-  # fetches; no wine, no MSVC. The C entropy decoder and the C++ host are compiled by cc the same way. The
-  # shaders are the FXC headers of the shader-headers job.
+  # fetches; no wine, no MSVC. The C of the parser and entropy decoder, and the C++ of the test player that
+  # rav1g-dec has for -playersmoke, are compiled by cc the same way. The shaders are the FXC headers of the
+  # shader-headers job.
   rust-cross:
     needs: shader-headers
     runs-on: ubuntu-26.04
@@ -1316,7 +1154,7 @@ jobs:
           path: shader-headers
 
       # clang-cl, lld-link, llvm-lib and libclang (bindgen). The C++ standard library of the MSVC runtime
-      # that xwin fetches wants Clang 19 or newer.
+      # that xwin fetches (the stream readers and the player's code are C++) wants Clang 19 or newer.
       - name: Rust toolchain, LLVM and cargo-xwin
         run: |
           set -euo pipefail
@@ -1439,7 +1277,8 @@ jobs:
           if-no-files-found: error
 
   # The program of the Linux build is a Windows program like the other: it decodes the conformance set on
-  # WARP against the same references and expected.txt.
+  # WARP against the same references and expected.txt, and runs the decoder code of the test player, which
+  # in this program is compiled by clang-cl, as the C of the default package of the player is.
   rust-cross-run:
     needs: [rust-cross, conformance-streams]
     runs-on: windows-latest
@@ -1472,12 +1311,22 @@ jobs:
             --out out/conformance --threads 4 "--title=rav1g-dec built on Linux (cargo xwin, clang-cl)"
           if ($LASTEXITCODE -ne 0) { throw "conformance run with the rav1g-dec of the Linux build: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
 
+      - name: The test player's decoder code through rav1g.h on the Rust library of the Linux build
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/player_smoke.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
+            --out out/player-smoke "--title=the Rust library built on Linux (cargo xwin, clang-cl)"
+          if ($LASTEXITCODE -ne 0) { throw "the player's decoder code on the Rust library of the Linux build: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
+
       - name: Preserve the results, the per-stream logs and md5 files
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: rav1g-dec-xwin-conformance-${{ github.run_id }}
-          path: out/conformance/
+          path: |
+            out/conformance/
+            out/player-smoke/
           if-no-files-found: warn
 
   # Host check of how the shaders hand data between the threads of a thread group. A GPU promises

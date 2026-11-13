@@ -6,8 +6,14 @@
 // License 1.0 was not distributed with this source code in the PATENTS file, you can obtain it at
 // www.aomedia.org/license/patent.
 
-//! Tables of the decoder that are `static` in a C or C++ header and that the Rust host modules need:
-//! copies, held against the headers by the tests below (`rav1g_sys::c_table`).
+//! Tables the host modules need.
+//!
+//! The tables that are `static` in a C header of the parser are copies, held against the headers by the
+//! tests below (`rav1g_sys::c_table`). The tables of the host itself (`OBMC_MASK`, the `INTER_BLOCK_*`
+//! tables, `INTRA_MODE_SHADER_PARAMS`, `GAUSSIAN_SEQUENCE`) came from `libav1/dx/av1_compute.h` and
+//! `av1_compute.cpp` of the C++ decoder (branch `cpp`) and were held against that text while it was in
+//! this tree; here they are the only copy. `testing/intra_check` reads `INTRA_MODE_SHADER_PARAMS` from
+//! this file, in the form it has below: one `const` line, the numbers, `];`.
 
 /// `block_size_wide` of `av1/common/common_data.h`: the width of a block size in luma samples.
 pub(crate) const BLOCK_SIZE_WIDE: [u8; 22] =
@@ -320,48 +326,5 @@ mod tests {
             assert_eq!(crate::sys::c_table(name), Some(copy), "{name}");
         }
         assert_eq!(crate::sys::c_table("av1_sub_pel_filters_8sharp"), Some(bytes_of(&SUB_PEL_FILTERS_8SHARP)));
-    }
-
-    #[test]
-    fn tables_of_the_cpp_header_are_those_of_the_header() {
-        // The header is C++ (it has the shader library), so no C probe can include it: its text is read.
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../libav1/dx/av1_compute.h");
-        let source = std::fs::read_to_string(path).expect("libav1/dx/av1_compute.h is in the tree until step 5");
-        let tables: [(&str, &[i32]); 5] = [
-            ("static const int obmc_mask[16 * 4] =", &OBMC_MASK),
-            ("static const int InterBlockSizeIndexLUT[6][6] =", &INTER_BLOCK_SIZE_INDEX_LUT),
-            ("const int InterBlockWidthLUT[] =", &INTER_BLOCK_WIDTH_LUT),
-            ("const int InterBlockHeightLUT[] =", &INTER_BLOCK_HEIGHT_LUT),
-            ("const int intra_mode_shader_params[16 * 7][4] =", &INTRA_MODE_SHADER_PARAMS),
-        ];
-        for (declaration, copy) in tables {
-            let numbers = c_initializer(&source, declaration);
-            assert_eq!(numbers, copy.iter().map(|&n| i64::from(n)).collect::<Vec<_>>(), "{declaration}");
-        }
-    }
-
-    /// The numbers of a C initializer, for the tables whose C++ source is still in the tree.
-    pub(crate) fn c_initializer(source: &str, declaration: &str) -> Vec<i64> {
-        let start = source.find(declaration).unwrap_or_else(|| panic!("{declaration} is in the source"));
-        let body = &source[start + declaration.len()..];
-        let body = &body[body.find('{').expect("an initializer") + 1..body.find("};").expect("its end")];
-        let mut numbers = Vec::new();
-        for line in body.lines() {
-            let line = line.split("//").next().unwrap_or("");
-            for token in line.split(|c: char| !(c.is_ascii_digit() || c == '-')) {
-                if let Ok(number) = token.parse::<i64>() {
-                    numbers.push(number);
-                }
-            }
-        }
-        numbers
-    }
-
-    #[test]
-    fn gaussian_sequence_is_that_of_the_cpp() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../libav1/dx/av1_compute.cpp");
-        let source = std::fs::read_to_string(path).expect("libav1/dx/av1_compute.cpp is in the tree until step 5");
-        let numbers = c_initializer(&source, "static const int dx_gaussian_sequence[2048] =");
-        assert_eq!(numbers, GAUSSIAN_SEQUENCE.iter().map(|&n| i64::from(n)).collect::<Vec<_>>());
     }
 }

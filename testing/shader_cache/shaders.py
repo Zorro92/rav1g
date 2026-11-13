@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """The shaders of libav1 for the CI builds: compiled once, by content, and surveyed.
 
-FXC takes about 40 s for the 92 shaders of libav1/build/libav1.vcxproj when it runs on four at a
-time, and MSBuild runs it on one at a time. A workflow run needs the bytecode of every shader
-several times (the test player, its uavsync variant, warp_decoder and its uavsync variant) and
-the listing of every shader once (the survey). This script gives each of them the output of one
+FXC takes about 40 s for the shaders of libav1/dx/shaders when it runs on four at a time. A
+workflow run needs the bytecode of every shader several times (the libraries of the test player
+packages, rav1g-dec, its build on Linux) and the listing of every shader once (the survey). This script gives each of them the output of one
 FXC call per shader, kept in a cache directory by the content that decides it:
 
     key = sha256(the FXC binaries, the arguments (profile, entry point, variable name, /Od,
@@ -19,11 +18,10 @@ at a time. The workflow keeps the directory with actions/cache, keyed by all key
     shaders.py prune   drop the cache entries the given builds did not use
     shaders.py survey  the shader survey and the CDEF and intra listings, from the listings of a build
     shaders.py verify  the bytecode of the headers is in a built program
+    shaders.py same    two builds have the same shaders (the equality with the C++ decoder of branch cpp
+                       holds only as long as they do: docs/rust-port.md, "Equality reference")
 
-MSBuild then gets the headers through /p:Rav1gPrebuiltShaders=<root> (libav1.vcxproj,
-testing/warp_decoder/warp_decoder.vcxproj): the directory is first on the include path and the
-projects' own FxCompile items are left out. Without the property a build compiles the shaders
-itself, as before.
+The Rust library is built from the headers: RAV1G_SHADER_DIR=<root> (crates/rav1g-sys/build.rs).
 """
 import argparse
 import concurrent.futures
@@ -40,19 +38,19 @@ import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, '..', '..'))
-PROJECT = os.path.join(REPO, 'libav1', 'build', 'libav1.vcxproj')
 SHADERS = os.path.join(REPO, 'libav1', 'dx', 'shaders')
 FORMAT = 1  # of the key material and of a cache entry; a change makes every key new
 
-# The variants of a build: the preprocessor definitions FXC gets on top of the project settings.
+# The variants of a build: the preprocessor definitions FXC gets on top of the settings of every shader.
 VARIANTS = {
     'normal': [],
-    # /p:Rav1gUavSync=1 of the two projects.
+    # The library built with the uavsync feature of the crates takes these headers (RAV1G_SHADER_DIR).
     'uavsync': ['GroupMemoryBarrierWithGroupSync=AllMemoryBarrierWithGroupSync'],
 }
 
 # The shaders whose listings and counts go into the artifact next to the survey, and the ones
-# the project builds without optimization (checked: the -intraopt comparison needs exactly this).
+# built without optimization (/Od): the upstream intra shaders, which the -intraopt comparison holds
+# against their optimized builds intra_main_opt and intra_main_hbd_opt.
 SETS = [
     ('cdef-shaders', 'CDEF shader listings', ['cdef_filter', 'cdef_filter_v2']),
     ('intra-shaders', 'Intra shader listings',
@@ -74,27 +72,19 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def project_shaders(project=PROJECT):
-    """The FxCompile items of the project: [(name, built with /Od in Release x64)], by name."""
-    with open(project, encoding='utf-8-sig') as f:
-        text = f.read()
-    shaders = {}
-    for match in re.finditer(r'<FxCompile\s+Include="([^"]+)"\s*(/>|>(.*?)</FxCompile>)', text, re.S):
-        name = re.sub(r'^.*[\\/]', '', match.group(1))
-        if not name.endswith('.hlsl'):
-            continue
-        od = bool(re.search(r'<DisableOptimizations\s+Condition="[^"]*Release\|x64[^"]*">\s*true\s*<',
-                            match.group(3) or ''))
-        shaders[name[:-5]] = od
-    if len(shaders) < 80:
-        fail('only %d shaders found in %s' % (len(shaders), project))
-    unoptimized = sorted(name for name, od in shaders.items() if od)
-    if unoptimized != UNOPTIMIZED:
-        fail('shaders built with /Od in Release x64: %s (expected %s)' % (' '.join(unoptimized), ' '.join(UNOPTIMIZED)))
-    for name in ('intra_main_opt', 'intra_main_hbd_opt'):
-        if name not in shaders:
-            fail('%s is not a shader of the project' % name)
-    return sorted(shaders.items())
+def project_shaders(shaders_dir=SHADERS):
+    """The shaders of the decoder: [(name, built with /Od)], by name. Every .hlsl file of libav1/dx/shaders
+    is one shader (what a shader includes is a .h file); UNOPTIMIZED lists the ones built with /Od. That is
+    what the library project of the C++ decoder (branch cpp, libav1/build/libav1.vcxproj) says with its
+    FxCompile items, so the keys, and with them the bytecode, are the same on both branches while the
+    sources are."""
+    names = sorted(name[:-5] for name in os.listdir(shaders_dir) if name.endswith('.hlsl'))
+    if len(names) < 80:
+        fail('only %d shaders found in %s' % (len(names), shaders_dir))
+    for name in UNOPTIMIZED + ['intra_main_opt', 'intra_main_hbd_opt']:
+        if name not in names:
+            fail('%s is not a shader of %s' % (name, shaders_dir))
+    return [(name, name in UNOPTIMIZED) for name in names]
 
 
 INCLUDE = re.compile(rb'^[ \t]*#[ \t]*include[ \t]*"([^"]+)"', re.M)
@@ -391,7 +381,7 @@ def command_survey(args):
             runtime_width += runtime_width_bit_fields(name, c['code'])
         seconds = '%.1f' % shader['seconds']
         od = shader['od']
-        block = ['', '== %s.hlsl%s ==' % (name, ' (/Od: the project disables optimization for this shader)' if od else ''),
+        block = ['', '== %s.hlsl%s ==' % (name, ' (/Od: this shader is built without optimization)' if od else ''),
                  'thread group:                           dcl_thread_group %s' % c['group'],
                  'instruction slots:                      %s' % c['slots'],
                  'temp registers:                         dcl_temps %s' % c['temps'],
@@ -428,7 +418,7 @@ def command_survey(args):
             print(line)
         fail('bit field instructions with a run-time width in %d places: take the mask from a table' % len(runtime_width))
 
-    intro = ['FXC of Windows SDK %s: /T cs_5_0 /E main with the Release x64 project settings (default optimization; '
+    intro = ['FXC of Windows SDK %s: /T cs_5_0 /E main with the settings every build has (default optimization; '
              '/Od where marked).' % args.sdk,
              'Counts are static: instructions in the listing, not instructions executed.',
              'One FXC call per shader writes its listing and the bytecode header the programs are built from; its '
@@ -545,6 +535,36 @@ def command_verify(args):
     return 0
 
 
+def command_same(args):
+    """Two builds have the same shaders: every shader of one is in the other, with the same key (the
+    compiler, its arguments and the sources) or the same header."""
+    builds = []
+    for path in (args.reference, args.candidate):
+        with open(path, encoding='utf-8') as f:
+            report = json.load(f)
+        builds.append({shader['name']: shader for shader in report['shaders']})
+    reference, candidate = builds
+    different = []
+    for name in sorted(set(reference) | set(candidate)):
+        a, b = reference.get(name), candidate.get(name)
+        if a is None or b is None:
+            different.append('%s: only in %s' % (name, args.candidate_name if a is None else args.reference_name))
+        elif a['key'] != b['key'] and a['header_sha256'] != b['header_sha256']:
+            different.append('%s: another source, compiler or argument (key %s.. in %s, %s.. in %s)' % (
+                name, a['key'][:12], args.reference_name, b['key'][:12], args.candidate_name))
+    for line in different:
+        print('DIFFERENT ' + line)
+    summary = ('%d of %d shaders of %s and %s differ' % (len(different), len(set(reference) | set(candidate)),
+                                                       args.reference_name, args.candidate_name)
+               if different else
+               'the %d shaders of %s and %s are the same' % (len(candidate), args.reference_name, args.candidate_name))
+    print('shaders.py: ' + summary)
+    if os.environ.get('GITHUB_STEP_SUMMARY'):
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
+            f.write('- %s\n' % summary)
+    return 1 if different else 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest='command', required=True)
@@ -583,6 +603,13 @@ def main():
     verify.add_argument('--note', action='append', help='file to append the result to')
     verify.add_argument('binary', nargs='+', help='a program, or an app package with the program in it')
     verify.set_defaults(run=command_verify)
+
+    same = commands.add_parser('same', help='two builds (their reports) have the same shaders')
+    same.add_argument('--reference', required=True, help='report.json of one build')
+    same.add_argument('--candidate', required=True, help='report.json of the other')
+    same.add_argument('--reference-name', default='the reference')
+    same.add_argument('--candidate-name', default='this build')
+    same.set_defaults(run=command_same)
 
     args = parser.parse_args()
     # What FXC printed goes to the log as it is, whatever the console's code page can show.

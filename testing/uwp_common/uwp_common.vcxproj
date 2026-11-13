@@ -69,9 +69,6 @@
     <ClCompile Include="..\player_common\cmd_parser.cpp" />
     <ClCompile Include="..\player_common\decoder.cpp" />
     <ClCompile Include="..\player_common\decoder_creator.cpp" />
-    <!-- The functions of rav1g.h on the C++ library, for the player that links it. Not with
-         /p:Rav1gRustLib or /p:Rav1gRustDll: the Rust library has these functions itself. -->
-    <ClCompile Include="..\player_common\rav1g_libav1.cpp" Condition="'$(Rav1gRustLib)$(Rav1gRustDll)'==''" />
     <ClCompile Include="..\sm6test\sm6test.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -92,13 +89,8 @@
     <ClInclude Include="..\sm6test\sm6test.h" />
     <ClInclude Include="..\sm6test\sm6test_checks.h" />
   </ItemGroup>
-  <!-- The decoder behind rav1g.h: the C++ library of this solution, or the Rust library of the Cargo
-       workspace (docs/rust-port.md, step 5; uwp_dx12_player.vcxproj links it). -->
-  <ItemGroup Condition="'$(Rav1gRustLib)$(Rav1gRustDll)'==''">
-    <ProjectReference Include="..\..\libav1\build\libav1.vcxproj">
-      <Project>{e68f3562-9876-4971-8d90-27035e27a825}</Project>
-    </ProjectReference>
-  </ItemGroup>
+  <!-- The decoder behind rav1g.h is the Rust library of the Cargo workspace, which is no project of this
+       solution: uwp_dx12_player.vcxproj links it (/p:Rav1gRustDll or /p:Rav1gRustLib; docs/test-player.md). -->
   <PropertyGroup Label="Globals">
     <ProjectGuid>{c7b73550-4ca4-45c1-8436-936afd7f0ca5}</ProjectGuid>
     <Keyword>StaticLibrary</Keyword>

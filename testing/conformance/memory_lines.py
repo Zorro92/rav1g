@@ -13,8 +13,8 @@ reports), the usage number of the "MEMORY destroy" lines, and the size of the ho
 first address of the application's memory that is a multiple of 256; what is in use of it is compared).
 
 compare: the files of two runs must be the same, line for line. That is how the Rust decoder (rav1g-dec) is
-held against the C++ decoder (warp_decoder) of the same commit: same buffers, same sizes, same decisions,
-same text.
+held against the C++ decoder (warp_decoder of branch cpp, at the commit the workflow pins): same buffers,
+same sizes, same decisions, same text.
 
 Exit code: 0 equal (or run done), 1 different, 2 the run could not be done.
 """

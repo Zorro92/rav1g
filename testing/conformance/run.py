@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Conformance run: decodes every stream of a prepared directory with warp_decoder and compares the result
+"""Conformance run: decodes every stream of a prepared directory with rav1g-dec (or with warp_decoder, the
+program of the C++ decoder of branch cpp, which has the same flags and lines) and compares the result
 with testing/conformance/expected.txt.
 
-  python testing/conformance/run.py --tool <warp_decoder.exe> --streams <dir> --out <dir>
+  python testing/conformance/run.py --tool <rav1g-dec.exe> --streams <dir> --out <dir>
 
 <dir> of --streams is what testing/conformance/prepare_streams.sh wrote: the streams, their md5 references
-and manifest.txt, one warp_decoder task per line. The tasks run in one decoder process, in the order of the
+and manifest.txt, one task of the program per line. The tasks run in one decoder process, in the order of the
 manifest; a task that ends in a decode error, a timeout or a crash ends its process, and the run goes on
 with the next task in a new one. A stream that fails after other streams in the same process is decoded
 again alone, in a process of its own, and must fail the same way. A stream that fails behind others and
@@ -111,7 +112,7 @@ def task_timeout(line):
 
 
 def parse_result(line, result):
-    """A 'RESULT key=value ... detail="..."' line of warp_decoder."""
+    """A 'RESULT key=value ... detail="..."' line of the program."""
     detail = re.search(r' detail="(.*)"\s*$', line)
     head = line[:detail.start()] if detail else line
     fields = dict(part.split('=', 1) for part in head.split()[1:] if '=' in part)
@@ -235,8 +236,8 @@ def seconds(ms):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Conformance run of warp_decoder.')
-    parser.add_argument('--tool', required=True, help='warp_decoder.exe')
+    parser = argparse.ArgumentParser(description='Conformance run of rav1g-dec.')
+    parser.add_argument('--tool', required=True, help='rav1g-dec.exe (or warp_decoder.exe)')
     parser.add_argument('--streams', required=True, help='directory written by prepare_streams.sh')
     parser.add_argument('--out', required=True, help='directory for the results')
     parser.add_argument('--expected', default=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'expected.txt'))

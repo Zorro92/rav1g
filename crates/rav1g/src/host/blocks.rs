@@ -74,7 +74,8 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
-// What an intra mode reads of its neighbours, one bit per mode.
+// What an intra mode reads of its neighbours, one bit per mode. testing/intra_check reads these five lines
+// (`const NEED_..._LUT: u32 = 0x...;`) for its model of the host.
 const NEED_ABOVE_LUT: u32 = 0x3f7f; // 11 1111 0111 1?11
 const NEED_LEFT_LUT: u32 = 0x3ef7; // 11 1110 1111 01?1
 const NEED_RIGHT_LUT: u32 = 0x010a; // 0 0001 0000 10?0

@@ -43,7 +43,7 @@ using namespace Windows::Storage;
 using namespace Platform;
 #endif
 
-// For the stream readers (testing/common/tools_common.c). warp_decoder, which runs this file for its
+// For the stream readers (testing/common/tools_common.c). rav1g-dec, which runs this file for its
 // -playersmoke, has its own.
 #ifndef RAV1G_PLAYER_NO_USAGE_EXIT
 extern "C" void usage_exit(void) { exit(EXIT_FAILURE); }

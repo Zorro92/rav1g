@@ -6,56 +6,36 @@
 // License 1.0 was not distributed with this source code in the PATENTS file, you can obtain it at
 // www.aomedia.org/license/patent.
 
-//! Builds the C of the decoder (the libaom-derived entropy decoder of `libav1/av1`, `libav1/aom*`) into
-//! static libraries, and writes the bindings. The D3D12 host of `libav1/dx` is Rust (`crates/rav1g`):
-//! its C++ files are not compiled here ([`REPLACED_BY_RUST`]); they stay in the tree for the MSBuild
-//! projects (the test player, `warp_decoder`), which compile all of them until step 5 of
-//! `docs/rust-port.md`.
+//! Builds the C of the decoder (the libaom-derived parser and entropy decoder of `libav1/av1`,
+//! `libav1/aom*`) into static libraries, and writes the bindings. The D3D12 host is Rust (`crates/rav1g`).
 //!
-//! The files and their settings are those of `libav1/build/libav1.vcxproj` in Release x64, read from
-//! `testing/warp_decoder/libav1_sources.props` (written from that project by `sync_sources.py`; CI checks
-//! that it is up to date): `/O1 /Ot`, `/O2` for the files the project marks, no `NDEBUG` (the library's
-//! asserts are compiled in), `/sdl`, and link time optimisation as the project has it ([`Lto`]): `/GL`
-//! under MSVC, LTO under clang-cl.
+//! The files are those of `c_sources.txt`, with the settings the library project of the C++ decoder
+//! (branch `cpp`) has for them in Release x64: `/O1 /Ot`, `/O2` for the files the list marks, no `NDEBUG`
+//! (the library's asserts are compiled in), `/sdl`, and link time optimisation ([`Lto`]): `/GL` under
+//! MSVC, LTO under clang-cl.
 //!
 //! Three C files of this crate are compiled with them: `helpers.c` (the entry points of the C interface
 //! that are macros), `host_entry.c` (the functions of the host that end with the decoder's error, which C
 //! has to raise) and `shader_table.c` (the bytecode of the shaders).
 //!
 //! The shaders are not compiled here. `RAV1G_SHADER_DIR` names the directory whose `dx/shaders/h` has the
-//! bytecode headers of the FXC build (`testing/shader_cache/shaders.py build --root <dir>`, or what a
-//! build of `libav1.vcxproj` left in `libav1`), the directory MSBuild gets as `/p:Rav1gPrebuiltShaders`.
+//! bytecode headers of the FXC build (`testing/shader_cache/shaders.py build --root <dir>`; in CI the
+//! `normal` output of `.github/actions/shaders`).
 
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// A source of the library and whether the project compiles it with `/O2` (`MaxSpeed`).
+/// A source of the library and whether it is compiled with `/O2` (`c_sources.txt`).
 struct Source {
     path: PathBuf,
     max_speed: bool,
-    /// Rust has the functions of this file ([`REPLACED_BY_RUST`]).
-    replaced: bool,
 }
 
-/// The C++ files of `libav1/dx`: the host, whose functions the `rav1g` crate has in Rust
-/// (`crates/rav1g/src/host`). This build does not compile them. `libav1_sources.props` still lists them,
-/// for the MSBuild projects; a C++ file of the project that is not in this list stops the build.
-const REPLACED_BY_RUST: &[&str] = &[
-    "libav1/dx/av1_compute.cpp",
-    "libav1/dx/av1_core.cpp",
-    "libav1/dx/av1_memory.cpp",
-    "libav1/dx/av1_thread.cpp",
-    "libav1/dx/loopfilters.cpp",
-    "libav1/dx/prediction.cpp",
-    "libav1/dx/transform.cpp",
-    "libav1/dx/vp9dx_linear_allocator.cpp",
-];
-
-/// Link time optimisation of the C of the decoder, which the MSBuild projects have as whole
-/// program optimisation (`/GL`, `/LTCG`). Without it the entropy decoder is 7 to 12 % slower in the tile
-/// threads than in those builds; the numbers are in docs/rust-port.md ("The entropy decoder with link
-/// time optimisation").
+/// Link time optimisation of the C of the decoder, which the MSBuild projects of the C++ decoder have
+/// as whole program optimisation (`/GL`, `/LTCG`). Without it the entropy decoder is 7 to 12 % slower in
+/// the tile threads than in those builds; the numbers are in docs/rust-port.md ("The entropy decoder with
+/// link time optimisation").
 ///
 /// The objects of such a build are not machine code: MSVC writes its intermediate language, clang LLVM
 /// bitcode, and the linker compiles them. Two things follow:
@@ -103,41 +83,39 @@ fn fail(message: &str) -> ! {
     std::process::exit(1);
 }
 
-/// The `ClCompile` items of `libav1_sources.props`: one item per line, an optional `Optimization` line
-/// behind it.
-fn read_sources(props: &Path, repo: &Path) -> Vec<Source> {
+/// The files of `c_sources.txt`: one per line, relative to `libav1`, `/O2` behind the ones compiled for
+/// speed; `#` starts a comment.
+fn read_sources(list: &Path, repo: &Path) -> Vec<Source> {
     let text =
-        fs::read_to_string(props).unwrap_or_else(|error| fail(&format!("cannot read {}: {error}", props.display())));
+        fs::read_to_string(list).unwrap_or_else(|error| fail(&format!("cannot read {}: {error}", list.display())));
     let mut sources: Vec<Source> = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if let Some(rest) = line.strip_prefix("<ClCompile Include=\"$(RepoRoot)") {
-            let Some(end) = rest.find('"') else {
-                fail(&format!("{}: no closing quote in {line}", props.display()));
-            };
-            let relative = rest[..end].replace('\\', "/");
-            let path = repo.join(&relative);
-            if !path.is_file() {
-                fail(&format!("{} lists {relative}, which is not there", props.display()));
-            }
-            sources.push(Source { path, max_speed: false, replaced: REPLACED_BY_RUST.contains(&relative.as_str()) });
-        } else if line.starts_with("<Optimization") {
-            let Some(last) = sources.last_mut() else {
-                fail(&format!("{}: an Optimization line before any source", props.display()));
-            };
-            if !line.contains(">MaxSpeed<") {
-                fail(&format!("{}: a setting this build does not carry over: {line}", props.display()));
-            }
-            last.max_speed = true;
+    for (number, line) in text.lines().enumerate() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
         }
+        let mut words = line.split_whitespace();
+        let relative = words.next().unwrap_or("");
+        let max_speed = match (words.next(), words.next()) {
+            (None, _) => false,
+            (Some("/O2"), None) => true,
+            _ => fail(&format!(
+                "{}, line {}: a file name, and /O2 or nothing behind it: {line}",
+                list.display(),
+                number + 1
+            )),
+        };
+        let path = repo.join("libav1").join(relative);
+        if !relative.ends_with(".c") || !path.is_file() {
+            fail(&format!("{}, line {}: libav1/{relative} is not a C file of the tree", list.display(), number + 1));
+        }
+        if sources.iter().any(|source| source.path == path) {
+            fail(&format!("{}, line {}: {relative} is listed twice", list.display(), number + 1));
+        }
+        sources.push(Source { path, max_speed });
     }
     if sources.len() < 70 {
-        fail(&format!("{}: only {} sources found", props.display(), sources.len()));
-    }
-    for replaced in REPLACED_BY_RUST {
-        if !sources.iter().any(|source| source.replaced && source.path.ends_with(replaced)) {
-            fail(&format!("{} does not list {replaced}, which this build replaces", props.display()));
-        }
+        fail(&format!("{}: only {} sources found", list.display(), sources.len()));
     }
     sources
 }
@@ -195,9 +173,8 @@ fn base_build(repo: &Path, shaders: &Path) -> cc::Build {
         build.define("RAV1G_UAVSYNC", None);
     }
     if env::var_os("CARGO_FEATURE_APP_CONTAINER").is_some() {
-        // What MSBuild defines for a project with AppContainerApplication (libav1.vcxproj): the headers of
-        // the Windows SDK declare the API of an app container application only, so a call outside of it
-        // does not compile.
+        // What MSBuild defines for a project with AppContainerApplication: the headers of the Windows SDK
+        // declare the API of an app container application only, so a call outside of it does not compile.
         build.define("WINAPI_FAMILY", "WINAPI_FAMILY_APP");
     }
     clang_cl_flags(&mut build);
@@ -227,8 +204,8 @@ fn main() {
     // Two levels up, without canonicalize: on Windows that gives a \\?\ path, which cl does not take.
     let repo = manifest.parent().and_then(Path::parent).expect("the workspace root").to_path_buf();
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
-    let props = repo.join("testing").join("warp_decoder").join("libav1_sources.props");
-    println!("cargo:rerun-if-changed={}", props.display());
+    let list = manifest.join("c_sources.txt");
+    println!("cargo:rerun-if-changed={}", list.display());
     println!("cargo:rerun-if-changed={}", repo.join("libav1").display());
     println!("cargo:rerun-if-changed={}", manifest.join("wrapper.h").display());
     println!("cargo:rerun-if-changed={}", manifest.join("shared.h").display());
@@ -238,10 +215,10 @@ fn main() {
     println!("cargo:rerun-if-changed={}", manifest.join("host_entry.c").display());
 
     let shaders = shader_dir();
-    let sources = read_sources(&props, &repo);
+    let sources = read_sources(&list, &repo);
 
-    // Two calls, one static library each: the C files at /O1 /Ot and the C files the project marks at
-    // /O2. The optimisation is the project's and does not follow the cargo profile.
+    // Two calls, one static library each: the C files at /O1 /Ot and the C files the list marks at /O2.
+    // The optimisation is the list's and does not follow the cargo profile.
     let mut c_size = base_build(&repo, &shaders);
     c_size.opt_level(1).flag_if_supported("/Ot");
     let mut c_speed = base_build(&repo, &shaders);
@@ -281,20 +258,10 @@ fn main() {
         build.cargo_metadata(false);
     }
     for source in &sources {
-        let is_cpp = source.path.extension().is_some_and(|extension| extension != "c");
-        match (is_cpp, source.max_speed) {
-            // The host: Rust has it.
-            (true, _) if source.replaced => {}
-            (true, _) => fail(&format!(
-                "{}: a C++ file of the project that the Rust host does not replace",
-                source.path.display()
-            )),
-            (false, false) => {
-                c_size.file(&source.path);
-            }
-            (false, true) => {
-                c_speed.file(&source.path);
-            }
+        if source.max_speed {
+            c_speed.file(&source.path);
+        } else {
+            c_size.file(&source.path);
         }
     }
     // The entry points that are macros in the C headers, as functions (helpers.c).

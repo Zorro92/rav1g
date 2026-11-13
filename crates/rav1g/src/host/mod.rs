@@ -6,7 +6,9 @@
 // License 1.0 was not distributed with this source code in the PATENTS file, you can obtain it at
 // www.aomedia.org/license/patent.
 
-//! The host of the decoder: what `libav1/dx` is in C++, in Rust (steps 3 and 4 of `docs/rust-port.md`).
+//! The host of the decoder: what the C++ of `libav1/dx` is in the C++ decoder (branch `cpp`), in Rust
+//! (steps 3 and 4 of `docs/rust-port.md`). The modules say which C++ file their code comes from
+//! (`libav1/dx/prediction.cpp`, ...): those files are on branch `cpp`, not in this tree.
 //!
 //! The entropy decoder (C) calls the host through the functions of `dx/av1_core.h`, which are `extern "C"`
 //! functions here under those names (`create`, `frame`, `completion`, `blocks`), or C functions of

@@ -6,7 +6,7 @@
       [--reference-dumps <out of ci_dumps.py> --candidate-dumps <out of ci_dumps.py>]
 
 Both directories are what testing/conformance/run.py wrote for the same streams with two decoder programs
-(warp_decoder and rav1g-dec: step 1 of docs/rust-port.md). For every stream the two md5 files, one line per
+(warp_decoder of the C++ decoder, branch cpp, and rav1g-dec: docs/rust-port.md, "Equality reference"). For every stream the two md5 files, one line per
 output frame in the test player's format, must be the same bytes, and the two result lines must agree on the
 status and the number of frames. With --manifest every stream of the manifest must be in both runs.
 

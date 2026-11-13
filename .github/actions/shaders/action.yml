@@ -3,11 +3,10 @@ description: >
   The bytecode headers and the listings of the shaders of libav1, for the builds of a job: one FXC call per
   shader and variant (normal, uavsync), taken from a cache by content (testing/shader_cache/shaders.py).
 
-# FXC takes about 40 s for the 92 shaders on the four processors of a runner, and MSBuild ran it on one
-# shader at a time: the test player, its uavsync variant, the survey, warp_decoder and its uavsync variant
-# each compiled every shader. Now every shader is compiled once per variant, the two jobs that build
-# programs share the result through the Actions cache, and a run whose shaders, FXC arguments and FXC are
-# those of an earlier run compiles none.
+# FXC takes about 40 s for the shaders on the four processors of a runner. Every shader is compiled once
+# per variant, the jobs that build programs share the result through the Actions cache, and a run whose
+# shaders, FXC arguments and FXC are those of an earlier run compiles none. The workflow of branch cpp
+# (the C++ decoder) gives the same shaders the same keys.
 #
 #   key of a shader   sha256 of the FXC binaries, the arguments that decide the output (profile, entry
 #                     point, variable name, /Od, the defines of the variant), the source file and every
@@ -17,8 +16,8 @@ description: >
 #                     starts from the newest cache (restore-keys), compiles the shaders whose keys are
 #                     not in it, drops the entries it did not use and saves the directory under its digest
 #
-# The programs are built from these headers: MSBuild gets /p:Rav1gPrebuiltShaders=<the directory of the
-# variant> and compiles no shader itself (libav1.vcxproj, warp_decoder.vcxproj).
+# The programs are built from these headers: the Rust library gets RAV1G_SHADER_DIR=<the directory of the
+# variant> (crates/rav1g-sys/build.rs).
 
 inputs:
   repo:
