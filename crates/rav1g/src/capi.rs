@@ -53,6 +53,14 @@ pub const RAV1G_PARSER_OPTION_NO_LF_MASKS: u32 = 2;
 pub const RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD: u32 = 4;
 /// The calls of the sink are timed, for a timing run (`rav1g_set_perf_callback`).
 pub const RAV1G_PARSER_OPTION_TIME_CALLS: u32 = 8;
+/// The block lists of a tile are counted when the tile is parsed, in one pass over its mode info, and
+/// not superblock by superblock while the mode info is in the cache. The way of before, for a timing of
+/// the two against each other.
+pub const RAV1G_PARSER_OPTION_LATE_LISTS: u32 = 16;
+/// The mode info grid of a pipeline slot is cleared for every frame, and not only for a frame of
+/// another size than the frames before it on the slot. The way of before, for a timing of the two
+/// against each other.
+pub const RAV1G_PARSER_OPTION_CLEAR_GRID: u32 = 32;
 /// The `Rav1gSettings::parser_options` of `rav1g_settings_default`: `RAV1G_PARSER_OPTION_NO_LF_MASKS`
 /// and `RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD`. An application that wants the timing as well adds
 /// `RAV1G_PARSER_OPTION_TIME_CALLS` to it; 0 is rav1d's parse without either.
@@ -86,6 +94,9 @@ const _: () = {
     assert!(RAV1G_PARSER_OPTION_NO_LF_MASKS == crate::ParserOptions::NO_LF_MASKS);
     assert!(RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD == crate::ParserOptions::TILE_KEEPS_THREAD);
     assert!(RAV1G_PARSER_OPTION_TIME_CALLS == crate::ParserOptions::TIME_CALLS);
+    assert!(RAV1G_PARSER_OPTION_LATE_LISTS == crate::ParserOptions::LATE_LISTS);
+    assert!(RAV1G_PARSER_OPTION_CLEAR_GRID == crate::ParserOptions::CLEAR_GRID);
+    assert!(RAV1G_PARSER_OPTION_CLEAR_GRID == crate::sys::AV1_PARSER_OPTION_CLEAR_GRID);
     assert!(RAV1G_PARSER_OPTIONS_DEFAULT == crate::ParserOptions::DEFAULT);
     assert!(RAV1G_INTER_FAST_ON == switches::INTER_FAST_ON);
     assert!(RAV1G_INTER_FAST_SINGLE_ORIGINAL == switches::INTER_FAST_SINGLE_ORIGINAL);

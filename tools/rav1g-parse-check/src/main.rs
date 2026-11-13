@@ -24,8 +24,8 @@
 //! ```
 //!
 //! `-parseopt` takes the switches of the parser of phase 2 (`rav1g_parse::options`: `nolfmask` and
-//! `tilethread`, which are on without it, `none`, `default`), separated by commas: the buffers have to
-//! be the same with each of them.
+//! `tilethread`, which are on without it, `none`, `default`, `latelists`), separated by commas: the
+//! buffers have to be the same with each of them. With `-time`, `time` adds the time of the sink's calls.
 //!
 //! `-digest` prints for every stream the line `rav1g-dec -parsedigest` prints on Windows: what rav1d's
 //! parse pass reads from it, folded into one number (`rav1g_parse::digest`).
@@ -72,7 +72,8 @@ fn usage() -> ! {
     eprintln!(
         "usage: rav1g-parse-check [-threads <n>] [-parseopt <list>] [-details <n>] [-root <dir>] [-manifest <task list>] \
          [<stream>...]\n       rav1g-parse-check -time [-threads <n>] [-parseopt <list>] <stream>\n-parseopt: the \
-         switches of the parser, separated by commas: nolfmask, tilethread (both on by default); none; default"
+         switches of the parser, separated by commas: nolfmask, tilethread (both on by default); none; default; \
+         latelists; time (with -time)"
     );
     std::process::exit(2);
 }

@@ -226,7 +226,9 @@ pub fn usage() {
     say!("                        thread between its superblock rows. Both are on by default, and a list that names");
     say!("                        one of them, none or default says which are on: none turns both off, nolfmask or");
     say!("                        tilethread leaves only that one on. time: with -gputime, the calls of the sink are");
-    say!("                        timed; it changes nothing else (time alone: the default, timed)");
+    say!("                        timed; latelists: the block lists of a tile are counted at its end and not");
+    say!("                        superblock by superblock; cleargrid: the mode info grid of a slot is cleared for");
+    say!("                        every frame. These three change nothing else (time alone: the default, timed)");
     say!("  -interfast            inter prediction by the fraction of the motion vector: a copy, one filter pass, or");
     say!("                        both (inter_fast, inter_compound_fast; same output)");
     say!("  -interfastlists       the block lists of -interfast with the original shaders on them (same output)");
@@ -381,7 +383,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-parseopt" => {
                 let list = value()?;
                 task.parser_options = rav1g::ParserOptions::from_words(&list)
-                    .ok_or_else(|| format!("-parseopt {list}: nolfmask, tilethread, time, default or none"))?;
+                    .ok_or_else(|| format!("-parseopt {list}: nolfmask, tilethread, time, latelists, cleargrid, default or none"))?;
             }
             _ => {
                 let Some(globals) = globals.as_deref_mut() else {

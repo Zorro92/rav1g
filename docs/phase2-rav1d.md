@@ -1273,20 +1273,37 @@ with.
 | paired timing (`parser_timing.py`) | `-parser c`, `-parser rav1d`, `all` | `-parser c`, `-parser rav1d` (default switches), `none`, `time`, and each switch alone on the 2160p stream |
 | the packages of the test player | `-parser rav1d` on a task line | rav1d without a flag; import tables unchanged (rav1d was already linked) |
 
+**The slow state of the console: the state every timing has to be taken in.** About 10 to 15 seconds
+after the last controller input the console drops into a slower state, and stays there: the CPU is
+about 25 % slower, the memory bandwidth of the CPU is 4 to 6 times lower, the GPU is not affected. No
+interface lets an application hold the fast state, so playback runs in the slow one from its first
+quarter of a minute to its end. A timing run that starts right after its launch is partly in the fast
+state and says more than the device gives; a run for a number that counts has a warm-up task in
+front of it, so that all of it is in the slow state. In that state memory traffic of the CPU is what
+is expensive: bytes the CPU does not write or fetch count for more than instructions it does not
+run. (The tables above were taken without this rule; their ratios stand, the numbers of single runs
+may be high.)
+
 **The clears of a slot leave the decode thread.** A second measurement on the console, the same
-package and flags with rav1d and `-parseopt all`, on `d2`: a 300-frame cut, from 15 s, of the open
-stream `AV1/DVB-DASH/D_2.mp4` of the Netflix Open Content set (3840x2160, 10-bit HDR, 50 frames per
-second, about 46 Mbps, one tile a frame; 90 to 123 KB a frame, where `j4k40` has 77 KB). Two runs
-each:
+package and flags with rav1d and `-parseopt all`, all runs in the slow state, on `d2`: a 300-frame
+cut, from 15 s, of the open stream `AV1/DVB-DASH/D_2.mp4` of the Netflix Open Content set (3840x2160,
+10-bit HDR, 50 frames per second, about 46 Mbps, one tile a frame; 90 to 123 KB a frame, where
+`j4k40` has 77 KB). Two runs each:
 
 | | Clears on the decode thread | `-asyncclear` |
 | --- | ---: | ---: |
-| Frames per second out | 29.4, 29.3 | 38.5, 33.8 |
-| Memsets on the decode thread | 7.6 ms a frame | 0.01 ms |
-| `async_clear` on the completion thread | | 3.1 to 4.3 ms |
-| `wait_slot` | | about 0.1 ms |
+| Frames per second out | 29.24, 29.29 | 33.54, 33.91 |
+| Parse, mean | 24.5 ms a frame | 27.3 to 27.6 ms |
+| Memsets on the decode thread | 7.5 to 7.6 ms a frame | none |
+| `async_clear` on the completion thread | | 4.2 to 4.3 ms |
 
-- The md5 matched with `-asyncclear`. The C parser on the same clip: 21.0 frames per second.
+- 15 % more frames per second, and the md5 matched. The C parser on the same clip: 21.0 frames per
+  second. (A first pair of runs had 38.5 frames per second for `-asyncclear`: that run was partly in
+  the fast state.)
+- The parse is about 3 ms slower with it: the clears now run next to the parse, on another thread,
+  and take memory bandwidth from it. 7.5 MB cleared in 7.5 ms is 1 GB a second: the clears are bound
+  by memory, not by the processor. What is not cleared at all costs neither thread anything
+  ([below](#block-lists-and-clears-less-memory-traffic)).
 - The GPU is busy about 30 % of the time on this clip, so a slot is back, cleared, long before the
   decode thread asks for one. When `-asyncclear` was first timed (2026-11-11, two slots, the GPU as
   the limit) the decode thread waited for the slot as long as it had cleared before, and the flag
@@ -1327,6 +1344,148 @@ So 5 to 8 MiB more while a 1080p or 2160p decoder is in use, inside the run-to-r
 (tolerances: 40 MiB of growth, 96 MiB after a release), and the lowest level after a release, which
 is the number that repeats, is the same (192 against 195 MiB). The check now runs with rav1d by
 default and once more with `-parser c`; the tolerances are as they were.
+
+### Block lists and clears: less memory traffic
+
+2026-11-13, behind the console's numbers above: of the 29.0 ms a frame of `j4k40` takes to parse, 4.7
+ms were the block lists and 3.4 ms the other calls of the sink.
+
+**What the block lists are.** For every block the host counts the prediction blocks it needs into
+the lists the prediction stages run over (`av1_mi_push_block`, `crates/rav1g/src/host/blocks.rs`):
+inter blocks by type and size, intra transform blocks by their wavefront iteration (one more than
+the highest iteration of the neighbours they read, kept in a grid with an entry per 4x4 unit) and
+size. The entropy decoder of libaom calls it for every record of a tile when the tile is parsed, and
+the sink did the same: one pass over the records at the end of each tile.
+
+**What made them 4.7 ms.** `j4k40` has 13,000 blocks a frame: 360 ns a block on the console, 105 ns
+on the development machine (1.4 ms a frame). That is 3.4 times as long, like the other calls of the
+sink (3.5 times), where rav1d by itself takes 1.6 times as long there: what the two have in common
+is that they move memory, which is what the console is slow at
+([the slow state](#console-after-step-3-rav1d-is-the-default)). Three things were found:
+
+1. *The pass read a frame's records cold.* By the end of a tile the records (2.9 MB a frame of
+   `j4k40`), their units of the grid and the neighbours the lists look at have left the cache. The
+   pass fetched them again and wrote each record once more (its index into the list of block
+   indexes), so every record went to memory twice.
+2. *The lists of the wavefront iterations were cleared 5.2 MB at a time.* The setup of a tile clears
+   the lists of its first 272 iterations. When a block reached iteration 257 the function cleared
+   all the lists the tile can ever have: 5.2 MB for a 4K frame with one tile, of which the frame then
+   uses a few thousand counters. That happens in 97 of 300 frames of `j4k40` (8 of `t40x1ld`, 3 of
+   `a1_8b4k`, the key frame of the `d2` cut): 1.7 MB a frame on average, inside the timer of the block
+   lists, and all of it in the frames that are heavy anyway.
+3. *Inside the function the intra part is the larger one*: with it left out (an experiment, not a
+   mode) the lists of `j4k40` take 0.67 instead of 1.48 ms on the development machine, those of
+   `t40x1ld` 0.21 instead of 0.57. It reads and writes the wavefront grid along rows and columns for
+   every transform block. Not changed here; see what is open.
+
+**What changed.**
+
+- **The lists are counted superblock by superblock**, when the superblock is parsed and its records
+  and its part of the grid are in the cache (`Sink::count_lists`, from the sink's `superblock`). The
+  function is called for the same records in the same order with the same block context, and it
+  reads only what is parsed by then (the block's record, records above it and to its left through
+  the grid, wavefront entries of blocks before it), so the lists are the same. `-parseopt latelists`
+  (`ParserOptions::late_lists`, `RAV1G_PARSER_OPTION_LATE_LISTS`) counts them at the end of the
+  tile as before, for the A/B.
+- **The lists of the wavefront iterations are cleared as the wavefront gets there**: those of 1,024
+  more iterations (40 KiB) when a block reaches an iteration whose lists are not cleared yet
+  (`clear_iteration_lists` of `blocks.rs`). Everything that reads the lists reads those of the
+  iterations a tile has reached and one counter more. With both parsers: the function is the host's.
+- **The mode info grid of a slot is no longer cleared for a frame of the size of the frames before
+  it on the slot** (`rav1g_setup_frame_begin`; a decoder with rav1d's parse). The parse writes the
+  unit of every 4x4 of the frame, so what the frame before left inside the frame is overwritten
+  before anything reads it: the sink reads a unit behind its block, the block lists read units of
+  blocks that are parsed, the stages run when the parse is through, and a frame whose parse fails is
+  not submitted. Outside the frame the grid has to be null, and is: it was cleared when the slot first
+  had a frame of this width, height and row length, and only such frames were parsed into it since
+  (the slot remembers them; a frame of another size clears as before). That is 4.2 MB of the 7.5 MB
+  a 4K frame cleared, on whichever thread does the clears. `-parseopt cleargrid`
+  (`ParserOptions::clear_grid`, `RAV1G_PARSER_OPTION_CLEAR_GRID`) clears for every frame as before.
+- **The timer of the block lists** (`sink_lists`, "cpu parse: block lists") is taken with the
+  processor's time stamp counter around the lists of a superblock, two readings a superblock, in
+  every timing run with rav1d's parse; it means the same with `latelists`.
+- **The other calls of the sink were looked at and left.** Their profile on the development machine
+  (`j4k40`): 28 % of the call for a block is the stores of its pointer into the grid, 12 % the clear
+  of its record, the rest the fields of the record. Both are the first writes into memory the stages
+  read: the record's four cache lines and the grid's units have to be written once, and a record
+  filled without the clear would touch the same lines. No bytes to save there in this layout.
+
+Memory the CPU no longer moves, for a 4K frame:
+
+| What | Before | Now |
+| --- | --- | --- |
+| Clears of a slot: the mode info grid and the wavefront grid | 7.5 MB | 3.5 MB (the wavefront grid) |
+| Clear of the iteration lists, in a frame whose wavefront passes 256 iterations | 5.2 MB (`j4k40`: 1.7 MB a frame on average) | 40 KiB for every 1,024 iterations |
+| Records fetched again for the lists, and written back a second time | all of the frame's (`j4k40`: 2.9 MB) | none |
+
+**What is the same, and the one thing that is not.** Every buffer a stage reads holds the bytes it
+held: the oracle (`rav1g-parse-check`: both parsers, every buffer over its whole size) is equal on
+the conformance set and on the local 4K clips with the lists counted either way, one thread and
+four; the stage dumps of the default, of `-parseopt latelists` and of `-parseopt none,latelists,time`
+are equal byte for byte, mode info records included (CI holds the last against the default), and
+equal to those of `-parser c` in what the two parsers have equal; the frames are those of the
+references, and of the build before on the local 4K clips (`j4k40`, `fg4k_300`, `t12x1`,
+`a1_8b4k_300`, 40 frames each). Not the same: the block map behind the lists of the iterations a
+frame has reached now holds what an earlier frame counted there instead of zero. Nothing reads it,
+and no stage dump has it.
+
+**Measured on the development machine**, whose memory is fast, so that it shows the instructions and
+little of the traffic (`rav1g-parse-check -time`, one thread, the block lists in ms a frame, two runs
+each):
+
+| Clip | Before | The list clears in steps, lists at the end of a tile (`latelists`) | Lists by superblock (default) |
+| --- | ---: | ---: | ---: |
+| `j4k40` | 1.377, 1.390 | 1.316, 1.317 | 1.250, 1.221 |
+| `t40x1ld` | 0.512, 0.509 | 0.497, 0.497 | 0.482, 0.471 |
+| `d2` (the cut of CI, 30 temporal units) | 0.947, 0.949 | 0.919, 0.917 | 0.849, 0.844 |
+
+With another process streaming through memory next to the parse, the lists by superblock were 19 %
+faster than at the end of a tile on `j4k40` (1.71 against 2.11 ms) where they are 5 to 7 % faster
+without: the less cache and bandwidth the parse has, the more the order counts. Under wine the
+clears of the `d2` cut are 3.5 MB a frame instead of 7.5 MB, on the decode thread (`-syncclear`) and
+on the completion thread alike, and 7.5 MB again with `cleargrid`.
+
+**For the console**, all in the slow state, `-gputime`, the same clip in one launch:
+
+```text
+-parseopt latelists,cleargrid
+-parseopt latelists
+-parseopt cleargrid
+(no -parseopt)
+```
+
+The first line is the package before this change in everything but the clear of the iteration lists.
+To read: `cpu parse: block lists` (the lists; with `latelists` the pass at the end of the tile),
+`cpu entropy/tile decode, thread sum` (the parse with everything in it), `cpu clears, completion
+thread` and its MB a frame (7.5 with `cleargrid`, 3.5 without), and the frames per second.
+
+**The 10-bit 4K stream of CI.** `nf-dvbdash-d2-10b-2160p.ivf`: 30 temporal units from the key frame
+at 15 s of the open stream `d2` is a cut of (`testing/conformance/streams.txt`): the key frame (1.6
+MB), two frames of 1.0 and 1.3 MB that are decoded and shown later, inter frames of 3 to 150 KB, and
+every other temporal unit a `show_existing_frame`. It is in the conformance set (253 streams), in
+the oracle, and it leads the paired timing of the parsers and the timing of the sink, in front of the
+8-bit `a1` stream.
+
+**Open after this.**
+
+- *The wavefront grid* is what is left of the clears (3.5 MB a 4K frame, set to "no iteration") and
+  of the list time (the intra part). `gen_pred_blocks.hlsl` reads one entry of it per intra
+  transform block, the one at the block's bottom right; all the others are the host's own notes. A
+  host that kept the iterations along the row above and the column to the left in two small arrays
+  would write that one entry and clear nothing. What it has to get right: the corner above and to the
+  left, which neither array holds; the luma under a chroma-from-luma block, which is read as an
+  area; blocks that are not intra, whose place has to read as "no iteration". Clearing the grid only
+  around the intra blocks of a frame is the smaller step, but its regions are shared by the threads
+  of two tiles. Not done.
+- *The lists on a thread of their own*, behind the parse by a superblock row, would take them off
+  the parse thread of a frame with one tile. Step 4 gives the parse of two frames two threads, lists
+  included, so it comes first.
+- *Frames as values (step 4)*: counting by superblock keeps its state in the tile (how many of its
+  records are counted), as before; `av1_mi_push_block` still finds the frame through "the current
+  frame" of the decoder (`curr_frame_data`: the wavefront grids, the warp flags of the references),
+  and the kept grid is a property of the slot. Both have to become the frame's when frames are values.
+- *The calls of the sink*: 3.4 ms a frame of `j4k40` on the console, first writes into the mode info
+  pool and the grid (above). Fewer bytes there would mean another layout for the stages.
 
 ## Licence
 

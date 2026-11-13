@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use rav1g_parse::options::ParseOptions;
 use rav1g_parse::rav1d::include::dav1d::headers::Rav1dPixelLayout;
 use rav1g_parse::rav1d::parse::{ParseFrame, ParsePalette, ParseSettings, ParseSuperblock, ParseTile, Parser};
-use rav1g_parse::sink::{FrameMemory, SecondModeInfo, Sink, SinkHost, TileMemory};
+use rav1g_parse::sink::{FrameMemory, SecondModeInfo, Sink, SinkHost, SinkTimer, TileMemory};
 
 use crate::plain::{Arena, FrameSize, LrUnit, Palette, Side, TileBounds};
 use crate::sys::parser::{RESTORE_NONE, RESTORE_SGRPROJ, RESTORE_WIENER, av1_tile_data};
@@ -24,6 +24,11 @@ pub struct PlainHost {
     side: UnsafeCell<Box<Side>>,
     /// Nanoseconds spent making the arenas of the frames ready.
     arena_nanos: AtomicU64,
+    /// The timing run: the clock of the sink's timers, and what the sink has measured with it, in
+    /// nanoseconds: the block lists, and with `-parseopt time` the other calls of the sink.
+    clock: Option<Instant>,
+    list_nanos: AtomicU64,
+    call_nanos: AtomicU64,
 }
 
 // SAFETY: the calls come as the contract of `SinkHost` says (see the field).
@@ -44,6 +49,19 @@ impl SinkHost for PlainHost {
     fn gpu_decoder(&self) -> *mut c_void {
         // SAFETY: the address of a field of the boxed side.
         unsafe { (&raw mut (*self.side.get()).core).cast() }
+    }
+
+    fn ticks(&self) -> i64 {
+        // Nanoseconds, and never 0, which says that there is no clock.
+        self.clock.map_or(0, |clock| clock.elapsed().as_nanos() as i64 + 1)
+    }
+
+    fn add_time(&self, timer: SinkTimer, ticks: i64) {
+        let nanos = match timer {
+            SinkTimer::Lists => &self.list_nanos,
+            SinkTimer::Calls => &self.call_nanos,
+        };
+        nanos.fetch_add(ticks.max(0) as u64, Ordering::Relaxed);
     }
 
     fn frame_begin(&self, frame: &ParseFrame<'_>) -> Result<FrameMemory, ()> {
@@ -158,8 +176,20 @@ pub struct RustParser {
 
 impl RustParser {
     pub fn new(threads: u16, options: ParseOptions) -> Result<Self, String> {
+        Self::with_clock(threads, options, false)
+    }
+
+    /// `timed`: the host has a clock, so the sink measures its block lists (and with `-parseopt time` its
+    /// other calls).
+    pub fn with_clock(threads: u16, options: ParseOptions, timed: bool) -> Result<Self, String> {
         let sink = Arc::new(Sink::with_options(
-            PlainHost { side: UnsafeCell::new(Side::new()), arena_nanos: AtomicU64::new(0) },
+            PlainHost {
+                side: UnsafeCell::new(Side::new()),
+                arena_nanos: AtomicU64::new(0),
+                clock: timed.then(Instant::now),
+                list_nanos: AtomicU64::new(0),
+                call_nanos: AtomicU64::new(0),
+            },
             options.sink(),
         ));
         let mut settings = ParseSettings { threads, frames: 1, ..Default::default() };
@@ -191,9 +221,14 @@ impl RustParser {
         Duration::from_nanos(self.sink.host().arena_nanos.load(Ordering::Relaxed))
     }
 
-    /// Nanoseconds the tiles spent counting their block lists.
+    /// Nanoseconds the tiles spent counting their block lists, in a parser with a clock.
     pub fn block_list_nanos(&self) -> u64 {
-        self.sink.block_list_nanos()
+        self.sink.host().list_nanos.load(Ordering::Relaxed)
+    }
+
+    /// Nanoseconds the tiles spent in the other calls of the sink, with a clock and `-parseopt time`.
+    pub fn sink_call_nanos(&self) -> u64 {
+        self.sink.host().call_nanos.load(Ordering::Relaxed)
     }
 
     /// The frames parsed since the last call.

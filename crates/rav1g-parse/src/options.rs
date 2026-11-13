@@ -27,6 +27,13 @@ pub struct ParseOptions {
     pub tile_keeps_thread: bool,
     /// [`SinkOptions::time_calls`]: the calls of the sink are timed. Off by default.
     pub time_calls: bool,
+    /// [`SinkOptions::late_lists`]: the block lists of a tile are counted when the tile is parsed, as
+    /// they were before they were counted superblock by superblock. Off by default.
+    pub late_lists: bool,
+    /// The host clears the mode info grid of a pipeline slot for every frame, as it did before it kept
+    /// the grid between frames of one size. Not a switch of the parse: the D3D12 host reads it
+    /// (`rav1g_setup_frame_begin`). Off by default.
+    pub clear_grid: bool,
 }
 
 impl Default for ParseOptions {
@@ -42,23 +49,38 @@ impl ParseOptions {
     pub const NO_LF_MASKS: u32 = 2;
     pub const TILE_KEEPS_THREAD: u32 = 4;
     pub const TIME_CALLS: u32 = 8;
+    pub const LATE_LISTS: u32 = 16;
+    pub const CLEAR_GRID: u32 = 32;
     /// The bits of [`ParseOptions::default`].
     pub const DEFAULT: u32 = Self::NO_LF_MASKS | Self::TILE_KEEPS_THREAD;
-    /// The switches that say how the parse is done: all but the timing.
+    /// The two switches that are on by default, which a list of words names to replace that default.
     const WAYS: u32 = Self::NO_LF_MASKS | Self::TILE_KEEPS_THREAD;
 
     /// No switch: the parse as upstream's rav1d does it.
-    pub const NONE: ParseOptions = ParseOptions { no_lf_masks: false, tile_keeps_thread: false, time_calls: false };
+    pub const NONE: ParseOptions = ParseOptions {
+        no_lf_masks: false,
+        tile_keeps_thread: false,
+        time_calls: false,
+        late_lists: false,
+        clear_grid: false,
+    };
 
     /// The words of the tools (`-parseopt <word>[,<word>...]`).
-    pub const WORDS: [(&'static str, u32); 3] =
-        [("nolfmask", Self::NO_LF_MASKS), ("tilethread", Self::TILE_KEEPS_THREAD), ("time", Self::TIME_CALLS)];
+    pub const WORDS: [(&'static str, u32); 5] = [
+        ("nolfmask", Self::NO_LF_MASKS),
+        ("tilethread", Self::TILE_KEEPS_THREAD),
+        ("time", Self::TIME_CALLS),
+        ("latelists", Self::LATE_LISTS),
+        ("cleargrid", Self::CLEAR_GRID),
+    ];
 
     pub const fn from_bits(bits: u32) -> Self {
         Self {
             no_lf_masks: bits & Self::NO_LF_MASKS != 0,
             tile_keeps_thread: bits & Self::TILE_KEEPS_THREAD != 0,
             time_calls: bits & Self::TIME_CALLS != 0,
+            late_lists: bits & Self::LATE_LISTS != 0,
+            clear_grid: bits & Self::CLEAR_GRID != 0,
         }
     }
 
@@ -66,13 +88,16 @@ impl ParseOptions {
         u32::from(self.no_lf_masks) * Self::NO_LF_MASKS
             | u32::from(self.tile_keeps_thread) * Self::TILE_KEEPS_THREAD
             | u32::from(self.time_calls) * Self::TIME_CALLS
+            | u32::from(self.late_lists) * Self::LATE_LISTS
+            | u32::from(self.clear_grid) * Self::CLEAR_GRID
     }
 
-    /// A list of words, separated by commas. `nolfmask` and `tilethread` say how the parse is done, and
-    /// a list that has one of them, `none` or `default` replaces the default: the parse is done in the
-    /// ways the list names and in no other (`none`: in neither; `default`: in the two that are the
-    /// default). `time` adds the timing of the sink's calls and leaves the ways as they are, so `time`
-    /// alone times the default. `None` for a word that is none of these.
+    /// A list of words, separated by commas. `nolfmask` and `tilethread` are the two switches that are
+    /// on by default, and a list that has one of them, `none` or `default` replaces that default: of
+    /// the two, the ones the list names are on and no other (`none`: neither; `default`: both). `time`
+    /// (the timing of the sink's calls), `latelists` (the block lists at the end of a tile) and
+    /// `cleargrid` (the mode info grid cleared for every frame) are off by default; each is on when the
+    /// list has it and leaves the two as they are, so `time` alone times the default. `None` for a word that is none of these.
     ///
     /// | List | `nolfmask` | `tilethread` | `time` |
     /// | --- | --- | --- | --- |
@@ -92,7 +117,7 @@ impl ParseOptions {
                 "default" => Self::DEFAULT,
                 _ => Self::WORDS.iter().find(|(name, _)| *name == word)?.1,
             };
-            ways_named |= bit != Self::TIME_CALLS;
+            ways_named |= bit & Self::WAYS != 0 || bit == 0;
             bits |= bit;
         }
         if !ways_named {
@@ -114,7 +139,7 @@ impl ParseOptions {
 
     /// The part of the sink.
     pub fn sink(self) -> SinkOptions {
-        SinkOptions { time_calls: self.time_calls }
+        SinkOptions { time_calls: self.time_calls, late_lists: self.late_lists }
     }
 
     /// The part of rav1d, into its settings.
@@ -145,12 +170,23 @@ mod tests {
         let timed = ParseOptions::from_words("time").unwrap();
         assert_eq!(timed, ParseOptions { time_calls: true, ..default });
         assert_eq!(ParseOptions::from_words("default,time"), Some(timed));
+        // The other switch that is off by default: it adds to the two, like the timing.
+        let late = ParseOptions::from_words("latelists").unwrap();
+        assert_eq!(late, ParseOptions { late_lists: true, ..default });
+        assert_eq!(late.bits(), 22);
+        assert_eq!(late.words(), "nolfmask,tilethread,latelists");
+        let none_late = ParseOptions::from_words("none,latelists,time").unwrap();
+        assert_eq!(none_late, ParseOptions { late_lists: true, time_calls: true, ..ParseOptions::NONE });
+        assert_eq!(none_late.words(), "none,time,latelists");
+        let old = ParseOptions::from_words("latelists,cleargrid").unwrap();
+        assert_eq!(old, ParseOptions { late_lists: true, clear_grid: true, ..default });
+        assert_eq!(old.bits(), 54);
         let some = ParseOptions::from_words("tilethread,time").unwrap();
         assert!(some.tile_keeps_thread && some.time_calls && !some.no_lf_masks);
         let none_timed = ParseOptions::from_words("none,time").unwrap();
         assert_eq!(none_timed, ParseOptions { time_calls: true, ..ParseOptions::NONE });
         assert_eq!(none_timed.words(), "none,time");
-        for options in [default, ParseOptions::NONE, one, timed, some, none_timed] {
+        for options in [default, ParseOptions::NONE, one, timed, some, none_timed, late, none_late, old] {
             assert_eq!(ParseOptions::from_bits(options.bits()), options);
             assert_eq!(ParseOptions::from_words(&options.words()), Some(options));
         }

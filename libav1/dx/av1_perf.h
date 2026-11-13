@@ -74,8 +74,9 @@ enum {
   AV1_PERF_CPU_NOTIFY,        /* time inside the frame-ready callback */
   AV1_PERF_CPU_ASYNC_CLEAR,   /* the slot's clears, done here after the frame's fence (not with -syncclear) */
   /* the parser of phase 2 (AV1_PARSER_RAV1D), summed across the tile threads; parts of ENTROPY_SUM */
-  AV1_PERF_CPU_SINK_LISTS,    /* the block lists at the end of a tile (the entropy decoder of libaom counts
-                                 them at the same place, inside ENTROPY_SUM, without a timer of their own) */
+  AV1_PERF_CPU_SINK_LISTS,    /* the block lists, counted superblock by superblock (the entropy decoder of
+                                 libaom counts them at the end of a tile, inside ENTROPY_SUM, without a timer
+                                 of their own; AV1_PARSER_OPTION_LATE_LISTS does the same) */
   AV1_PERF_CPU_SINK_CALLS,    /* AV1_PARSER_OPTION_TIME_CALLS: the calls of the sink (mode info record and
                                  grid, transform block record, palette, superblock) */
   AV1_PERF_CPU_COUNT

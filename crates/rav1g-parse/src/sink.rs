@@ -14,9 +14,13 @@
 //!   `av1/decoder/decodeframe.c`);
 //! - a record per coded transform block and its coefficients, dequantised and in scan order
 //!   (`av1_read_coeffs_txb` of `av1/decoder/decodetxb.c`);
-//! - the block lists of the prediction stages, at the end of a tile, from the records in the order they
-//!   were read: `av1_mi_push_block`, the host's function, called as the entropy decoder calls it
-//!   (`decode_tile2`).
+//! - the block lists of the prediction stages, from the records in the order they were read:
+//!   `av1_mi_push_block`, the host's function, called with the block context the entropy decoder calls
+//!   it with (`decode_tile2`). The entropy decoder counts the lists of a tile when the tile is parsed;
+//!   the sink counts those of a superblock when the superblock is parsed, while its records and its
+//!   part of the grid are in the cache ([`SinkOptions::late_lists`] for the other way). The function
+//!   reads the block's record and, through the grid, records of blocks above it and to its left, which
+//!   are read before it; the calls come in the same order, so the lists are the same.
 //!
 //! The memory is the host's ([`SinkHost`]): for the D3D12 host the mapped buffers of a pipeline slot, for
 //! `tools/rav1g-parse-check` plain memory.
@@ -35,8 +39,6 @@
 use std::alloc::{Layout, alloc_zeroed, handle_alloc_error};
 use std::cell::UnsafeCell;
 use std::ffi::{c_int, c_void};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
 
 use rav1d::include::dav1d::headers::Rav1dSequenceHeader;
 use rav1d::include::dav1d::headers::{Rav1dFrameHeader, Rav1dPixelLayout};
@@ -73,6 +75,11 @@ const TX_TYPE_SCAN: [u32; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1, 2, 1, 2]
 /// How the sink works. All off is the sink as it writes by default.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SinkOptions {
+    /// The block lists of a tile are counted when the tile is parsed, in one pass over its records, as
+    /// the entropy decoder of libaom counts them, and not superblock by superblock. The lists are the
+    /// same; a tile's records are then mostly out of the cache when they are read again (4.7 ms of a
+    /// heavy 4K frame on the console, docs/phase2-rav1d.md).
+    pub late_lists: bool,
     /// The time inside the calls of a tile (block, transform block, palette, superblock) is measured
     /// and given to the host ([`SinkTimer::Calls`]), when the host has a clock. Two readings of the
     /// processor's time stamp counter a call.
@@ -86,7 +93,8 @@ pub enum SinkTimer {
     /// block, the palette, the superblock. Only with [`SinkOptions::time_calls`]. The parse that makes the calls is not in it, and neither
     /// are the coefficients the parse writes itself.
     Calls,
-    /// The block lists at the end of a tile.
+    /// The block lists: `av1_mi_push_block` for every record, superblock by superblock or, with
+    /// [`SinkOptions::late_lists`], at the end of a tile.
     Lists,
 }
 
@@ -225,9 +233,13 @@ struct TileState {
     lossless: bool,
     /// The tile ran out of room: its frame fails.
     failed: bool,
-    /// [`SinkOptions::time_calls`]: the time stamps the calls of the tile took, and the clock and the
-    /// time stamp at the tile's begin, which give the length of a time stamp.
+    /// The records of the tile, of its first part and then of its second, whose block lists are counted.
+    listed: usize,
+    /// For a host with a clock: the time stamps the calls of the tile took ([`SinkOptions::time_calls`])
+    /// and those its block lists took, and the clock and the time stamp at the tile's begin, which give
+    /// the length of a time stamp.
     call_stamps: u64,
+    list_stamps: u64,
     begin_ticks: i64,
     begin_stamp: u64,
 }
@@ -255,8 +267,6 @@ pub struct Sink<H: SinkHost> {
     pbi: UnsafeCell<Box<AV1Decoder>>,
     /// The tiles of the frame; the vector is written by `frame_begin`, an element by its tile's thread.
     tiles: UnsafeCell<Vec<UnsafeCell<Option<TileState>>>>,
-    /// Nanoseconds the tiles spent counting their block lists (`av1_mi_push_block`), for a timing run.
-    block_list_nanos: AtomicU64,
     options: SinkOptions,
 }
 
@@ -295,7 +305,6 @@ impl<H: SinkHost> Sink<H> {
             frame: UnsafeCell::new(None),
             pbi: UnsafeCell::new(zeroed_box()),
             tiles: UnsafeCell::new(Vec::new()),
-            block_list_nanos: AtomicU64::new(0),
             options,
         }
     }
@@ -322,11 +331,6 @@ impl<H: SinkHost> Sink<H> {
                 state.call_stamps += time_stamp().wrapping_sub(begin);
             }
         }
-    }
-
-    /// Nanoseconds the tiles have spent counting their block lists since the sink was made.
-    pub fn block_list_nanos(&self) -> u64 {
-        self.block_list_nanos.load(Ordering::Relaxed)
     }
 
     pub fn host(&self) -> &H {
@@ -357,6 +361,58 @@ impl<H: SinkHost> Sink<H> {
 
 /// The calls of a tile, without their timing.
 impl<H: SinkHost> Sink<H> {
+    /// Counts the block lists of the records of a tile that are not counted yet: all that were read
+    /// since the last call, in the order they were read.
+    ///
+    /// # Safety
+    /// The tile's thread, inside the frame. The block context is set for each block as
+    /// `set_offsets_for_pred_and_recon` and `set_mi_row_col` of the entropy decoder set it;
+    /// `av1_mi_push_block` reads the frame through `pbi`, which no thread writes while tiles are in
+    /// parse.
+    unsafe fn count_lists(&self, tile: usize) {
+        // SAFETY: the caller's contract; the records are those the tile has written into its parts of
+        // the pool, and each is in the grid.
+        unsafe {
+            let state = self.tile(tile).as_mut().expect("the tile has begun");
+            let first = state.mi_count as usize;
+            let total = first + state.mi_count2 as usize;
+            if state.listed >= total {
+                return;
+            }
+            let frame = self.frame();
+            let stamp = if state.begin_ticks != 0 { time_stamp() } else { 0 };
+            let pbi: *mut AV1Decoder = &raw mut **self.pbi.get();
+            let cm = &raw mut (*pbi).common;
+            let xd: *mut MACROBLOCKD = &raw mut *state.xd;
+            let (row_start, col_start) = ((*xd).tile.mi_row_start, (*xd).tile.mi_col_start);
+            // The records of the first part, then those of the second.
+            let second_pool = state.second.as_ref().map_or(std::ptr::null_mut(), |second| second.mi_pool);
+            for index in state.listed..total {
+                let mi = if index < first { state.memory.mi_pool.add(index) } else { second_pool.add(index - first) };
+                let mi = &*mi;
+                let (mi_row, mi_col) = (mi.mi_row, mi.mi_col);
+                let bw = 1 << MI_SIZE_WIDE_LOG2[mi.sb_type as usize];
+                let bh = 1 << MI_SIZE_HIGH_LOG2[mi.sb_type as usize];
+                (*xd).mi = frame.mi_grid.add((mi_row * frame.mi_stride + mi_col) as usize);
+                (*xd).mb_to_bottom_edge = (frame.mi_rows - bh - mi_row) * 4 * 8;
+                (*xd).mb_to_right_edge = (frame.mi_cols - bw - mi_col) * 4 * 8;
+                let up = mi_row > row_start;
+                let left = mi_col > col_start;
+                (*xd).up_available = up.into();
+                (*xd).left_available = left.into();
+                (*xd).chroma_up_available =
+                    if frame.ss_y != 0 && bh < 2 { (mi_row - 1 > row_start).into() } else { up.into() };
+                (*xd).chroma_left_available =
+                    if frame.ss_x != 0 && bw < 2 { (mi_col - 1 > col_start).into() } else { left.into() };
+                av1_mi_push_block(pbi, cm, xd);
+            }
+            state.listed = total;
+            if stamp != 0 {
+                state.list_stamps += time_stamp().wrapping_sub(stamp);
+            }
+        }
+    }
+
     fn block_call(&self, _frame: usize, tile: usize, block: &ParseBlock<'_>) {
         // SAFETY: a call of the tile's thread between the frame's begin and end; the record is the next
         // one of the tile's part of the pool, and the grid is written inside the tile.
@@ -570,15 +626,18 @@ impl<H: SinkHost> ParseSink for Sink<H> {
                 last_coefs: true,
                 lossless: false,
                 failed: false,
+                listed: 0,
                 call_stamps: 0,
+                list_stamps: 0,
                 begin_ticks: 0,
                 begin_stamp: 0,
             });
-            if self.options.time_calls {
-                state.call_stamps = 0;
-                state.begin_ticks = self.host.ticks();
-                state.begin_stamp = time_stamp();
-            }
+            // A host with a clock (a timing run): what a time stamp is worth is taken over the tile.
+            state.call_stamps = 0;
+            state.list_stamps = 0;
+            state.begin_ticks = self.host.ticks();
+            state.begin_stamp = if state.begin_ticks != 0 { time_stamp() } else { 0 };
+            state.listed = 0;
             state.mi_count = 0;
             state.mi_count2 = 0;
             state.second = None;
@@ -636,62 +695,40 @@ impl<H: SinkHost> ParseSink for Sink<H> {
         self.superblock_call(frame, tile, superblock);
         // SAFETY: as above.
         unsafe { self.call_end(tile, begin) };
+        // The block lists of the superblock, while its records are at hand. They have a timer of their
+        // own, so they are not inside the timed call.
+        if !self.options.late_lists {
+            // SAFETY: as above.
+            unsafe { self.count_lists(tile) };
+        }
     }
 
     fn tile_end(&self, _frame: usize, tile: usize) {
-        // SAFETY: a call of the tile's thread between the frame's begin and end. The block context is
-        // set for each block as `set_offsets_for_pred_and_recon` and `set_mi_row_col` of the entropy
-        // decoder set it; `av1_mi_push_block` reads the frame through `pbi`, which no thread writes
-        // while tiles are in parse.
+        // SAFETY: a call of the tile's thread between the frame's begin and end.
         unsafe {
-            let frame = self.frame();
+            {
+                let state = self.tile(tile).as_mut().expect("the tile has begun");
+                let td = state.memory.tile_data;
+                (*td).mi_count = state.mi_count;
+                if let Some(second) = &state.second {
+                    (*second.tile_data).mi_count = state.mi_count2;
+                }
+            }
+            // The block lists that are not counted yet: all of the tile's with
+            // `SinkOptions::late_lists`, and otherwise none (the tile's last superblock counted them).
+            self.count_lists(tile);
+            // The timers of the tile, for a host with a clock.
             let state = self.tile(tile).as_mut().expect("the tile has begun");
-            // The time of the tile's calls.
-            if self.options.time_calls && state.begin_ticks != 0 {
+            if state.begin_ticks != 0 {
                 let stamps = time_stamp().wrapping_sub(state.begin_stamp);
                 let ticks = self.host.ticks() - state.begin_ticks;
                 if stamps != 0 {
-                    let calls = state.call_stamps as f64 * ticks as f64 / stamps as f64;
-                    self.host.add_time(SinkTimer::Calls, calls as i64);
+                    let ticks_a_stamp = ticks as f64 / stamps as f64;
+                    if self.options.time_calls {
+                        self.host.add_time(SinkTimer::Calls, (state.call_stamps as f64 * ticks_a_stamp) as i64);
+                    }
+                    self.host.add_time(SinkTimer::Lists, (state.list_stamps as f64 * ticks_a_stamp) as i64);
                 }
-            }
-            let lists_start = self.host.ticks();
-            let td = state.memory.tile_data;
-            (*td).mi_count = state.mi_count;
-            if let Some(second) = &state.second {
-                (*second.tile_data).mi_count = state.mi_count2;
-            }
-            let pbi: *mut AV1Decoder = &raw mut **self.pbi.get();
-            let cm = &raw mut (*pbi).common;
-            let xd: *mut MACROBLOCKD = &raw mut *state.xd;
-            let (row_start, col_start) = ((*xd).tile.mi_row_start, (*xd).tile.mi_col_start);
-            let start = Instant::now();
-            // The records of the first part, then those of the second.
-            let second_pool = state.second.as_ref().map_or(std::ptr::null_mut(), |second| second.mi_pool);
-            let records = (0..state.mi_count as usize)
-                .map(|index| state.memory.mi_pool.add(index))
-                .chain((0..state.mi_count2 as usize).map(|index| second_pool.add(index)));
-            for mi in records {
-                let mi = &*mi;
-                let (mi_row, mi_col) = (mi.mi_row, mi.mi_col);
-                let bw = 1 << MI_SIZE_WIDE_LOG2[mi.sb_type as usize];
-                let bh = 1 << MI_SIZE_HIGH_LOG2[mi.sb_type as usize];
-                (*xd).mi = frame.mi_grid.add((mi_row * frame.mi_stride + mi_col) as usize);
-                (*xd).mb_to_bottom_edge = (frame.mi_rows - bh - mi_row) * 4 * 8;
-                (*xd).mb_to_right_edge = (frame.mi_cols - bw - mi_col) * 4 * 8;
-                let up = mi_row > row_start;
-                let left = mi_col > col_start;
-                (*xd).up_available = up.into();
-                (*xd).left_available = left.into();
-                (*xd).chroma_up_available =
-                    if frame.ss_y != 0 && bh < 2 { (mi_row - 1 > row_start).into() } else { up.into() };
-                (*xd).chroma_left_available =
-                    if frame.ss_x != 0 && bw < 2 { (mi_col - 1 > col_start).into() } else { left.into() };
-                av1_mi_push_block(pbi, cm, xd);
-            }
-            self.block_list_nanos.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
-            if lists_start != 0 {
-                self.host.add_time(SinkTimer::Lists, self.host.ticks() - lists_start);
             }
         }
         self.host.tile_end(tile);

@@ -38,7 +38,7 @@ use crate::sys::parser::{
     BLOCK_8X8, BLOCK_8X16, BLOCK_16X4, BLOCK_16X8, BLOCK_32X32, COMPOUND_DIFFWTD, COMPOUND_WEDGE, GLOBAL_GLOBALMV,
     GLOBALMV, INTRA_FRAME, MACROBLOCKD, MB_MODE_INFO, OBMC_CAUSAL, REF_NO_SCALE, SCALE_SUBPEL_BITS,
     SINGLE_INTER_MODE_END, SINGLE_INTER_MODE_START, TX_4X4, TX_16X32, TX_16X64, TX_32X16, TX_32X32, TX_32X64, TX_64X16,
-    TX_64X32, TX_64X64, UV_CFL_PRED, WARPED_CAUSAL, int_mv,
+    TX_64X32, TX_64X64, UV_CFL_PRED, WARPED_CAUSAL, av1_tile_data, int_mv,
 };
 
 unsafe extern "C" {
@@ -822,10 +822,7 @@ pub unsafe extern "C" fn av1_mi_push_block(pbi: *mut AV1Decoder, cm: *mut AV1_CO
 
                                 // The first block of an iteration the tile has not had: its lists start empty.
                                 if iter > tile.gen_intra_iter_set {
-                                    map.offset(tile.gen_iter_clear_offset as isize)
-                                        .cast::<u8>()
-                                        .write_bytes(0, tile.gen_iter_clear_size as usize);
-                                    tile.gen_intra_iter_set = tile.gen_intra_max_iter;
+                                    clear_iteration_lists(map, tile, iter);
                                 }
 
                                 let type_index = iter * IntraTypeCount + type_idx_base;
@@ -991,10 +988,7 @@ pub unsafe extern "C" fn av1_mi_push_block(pbi: *mut AV1Decoder, cm: *mut AV1_CO
 
                                 // The first block of an iteration the tile has not had: its lists start empty.
                                 if iter > tile.gen_intra_iter_set {
-                                    map.offset(tile.gen_iter_clear_offset as isize)
-                                        .cast::<u8>()
-                                        .write_bytes(0, tile.gen_iter_clear_size as usize);
-                                    tile.gen_intra_iter_set = tile.gen_intra_max_iter;
+                                    clear_iteration_lists(map, tile, iter);
                                 }
 
                                 let type_index = iter * IntraTypeCount + IntraBlockOffset - 1 - type_size;
@@ -1024,6 +1018,42 @@ pub unsafe extern "C" fn av1_mi_push_block(pbi: *mut AV1Decoder, cm: *mut AV1_CO
             }
         }
     }
+}
+
+/// The wavefront iterations whose lists are cleared at once when a tile reaches an iteration whose lists
+/// are not empty yet: 40 KiB of counters.
+const ITERATION_CLEAR_STEP: c_int = 1024;
+
+/// The lists of the wavefront iterations a tile has not had start empty. The setup of a tile clears those
+/// of its first iterations (`gen_intra_iter_set`, and 16 more: `setup_tile`); a block of a later
+/// iteration clears the lists from where the cleared ones end up to those of
+/// [`ITERATION_CLEAR_STEP`] iterations past its own, or to the end of the tile's lists. Everything that
+/// reads the lists reads those of the iterations the tile has reached, and one counter more (the
+/// recording, `rav1g_decode_frame_record`).
+///
+/// The C++ cleared all the lists the tile can have on the first such block: 5.2 MB for a 4K frame with
+/// one tile, in every frame whose intra blocks reach 257 iterations (a third of the frames of a heavy 4K
+/// clip), where the frame then uses a few thousand counters.
+///
+/// # Safety
+/// `map` is the block map of `tile`, whose lists are as its setup left them or as this function did.
+#[cold]
+#[inline(never)]
+unsafe fn clear_iteration_lists(map: *mut c_int, tile: &mut av1_tile_data, iter: c_int) {
+    let max_iter = tile.gen_intra_max_iter;
+    // Where the lists of the tile end, as the setup has it: `gen_iter_clear_offset` and the bytes behind.
+    let end_of_lists = tile.gen_iter_clear_offset + tile.gen_iter_clear_size / size_of::<c_int>() as c_int;
+    let reached = iter.saturating_add(ITERATION_CLEAR_STEP).min(max_iter);
+    // The lists of the iterations up to `reached`, and of 16 more, as the setup clears them.
+    let end = if reached >= max_iter { end_of_lists } else { ((reached + 16) * 10 + 256).min(end_of_lists) };
+    let from = tile.gen_iter_clear_offset;
+    if end > from {
+        // SAFETY: the caller's contract: inside the tile's part of the block map.
+        unsafe { map.offset(from as isize).write_bytes(0, (end - from) as usize) };
+        tile.gen_iter_clear_offset = end;
+        tile.gen_iter_clear_size = (end_of_lists - end) * size_of::<c_int>() as c_int;
+    }
+    tile.gen_intra_iter_set = reached;
 }
 
 /// The wavefront iteration of a transform block: one more than the highest iteration of the units it

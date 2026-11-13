@@ -470,6 +470,8 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
         td.clear_iter_bytes = 0;
         td.clean_mi_bytes = 0;
         td.clean_iter_bytes = 0;
+        td.kept_grid = [0; 3];
+        td.kept_grid_bytes = 0;
         request!(
             assign,
             td.mode_info_grid,
@@ -875,6 +877,10 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
         let rcfg = ResourceConfig::from_cfg(cfg);
         (*dec).parser_threads = c_int::try_from(cfg.threads).unwrap_or(1);
         (*dec).parser_options = cfg.parser_options;
+        (*dec).keep_mi_grid = c_int::from(
+            cfg.parser == crate::sys::AV1_PARSER_RAV1D as c_int
+                && cfg.parser_options & crate::sys::AV1_PARSER_OPTION_CLEAR_GRID as c_int == 0,
+        );
         (*dec).frame_slots = rcfg.gpu_pipeline_depth;
         let frame_slots = rcfg.gpu_pipeline_depth as usize;
 

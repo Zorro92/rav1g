@@ -122,8 +122,9 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        "the switches of rav1d's parse, separated by commas (same output): nolfmask, rav1d leaves out the masks "
        "of its own loop filter; tilethread, a tile stays on its thread between its superblock rows. Both are on "
        "by default, and a list that names one of them, none or default says which are on (none: neither; "
-       "nolfmask or tilethread: only that one). time, with -gputime the calls of the sink are timed, changes "
-       "nothing else",
+       "nolfmask or tilethread: only that one). time, with -gputime the calls of the sink are timed, and "
+       "latelists, the block lists of a tile are counted at its end and not superblock by superblock, and "
+       "cleargrid, the mode info grid is cleared for every frame, change nothing else",
        "", &params_.parseopt_},
       {"continue_on_error", atSingle, anOptional,
        "after a decode call that fails, go on with the next temporal unit in the same decoder instead of "
@@ -224,8 +225,9 @@ int CParameters::Parse(one_task& args, std::string& Err) {
   params_.asyncclear_ = !params_.syncclear_;
 
   // -parseopt: words separated by commas; a word that is none of them is an error of the task. A word
-  // that says how the parse is done (nolfmask, tilethread, none, default) replaces the default of the two;
-  // time adds to whatever they are (rav1g::ParserOptions::from_words reads the list the same way).
+  // that names the two default switches (nolfmask, tilethread, none, default) replaces the default of the
+  // two; time, latelists and cleargrid add to whatever they are (rav1g::ParserOptions::from_words reads the list the
+  // same way).
   params_.parser_options_ = 0;
   bool ways_named = false;
   for (size_t at = 0; at <= params_.parseopt_.size() && !params_.parseopt_.empty();) {
@@ -234,6 +236,10 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     const std::string word = params_.parseopt_.substr(at, end - at);
     if (word == "time") {
       params_.parser_options_ |= PLAYER_PARSEOPT_TIME_CALLS;
+    } else if (word == "latelists") {
+      params_.parser_options_ |= PLAYER_PARSEOPT_LATE_LISTS;
+    } else if (word == "cleargrid") {
+      params_.parser_options_ |= PLAYER_PARSEOPT_CLEAR_GRID;
     } else if (word == "nolfmask") {
       params_.parser_options_ |= PLAYER_PARSEOPT_NO_LF_MASKS;
       ways_named = true;
@@ -246,7 +252,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     } else if (word == "none") {
       ways_named = true;
     } else {
-      Err += "-parseopt takes nolfmask, tilethread, time, default or none, separated by commas, not \"";
+      Err += "-parseopt takes nolfmask, tilethread, time, latelists, cleargrid, default or none, separated by commas, not \"";
       Err += word;
       Err += "\"";
       return -1;

@@ -1300,6 +1300,8 @@ was measured: [phase2-rav1d.md](phase2-rav1d.md#where-the-time-goes).
 | `nolfmask` | on | rav1d does not fill the masks and levels of its own loop filter, which nothing here reads. |
 | `tilethread` | on | A tile stays on the thread it is on between its superblock rows. Without it rav1d puts the tile back into its task queue after every superblock row and wakes a waiting thread, and the next row runs on whichever of the `-t` threads takes it. |
 | `time` | off | With `-gputime`: the calls of the sink are timed (`sink_calls`, below). Two readings of the processor's time stamp counter per block and per transform block. |
+| `latelists` | off | The block lists of a tile are counted in one pass at the end of the tile, as up to package 0.2.140, and not superblock by superblock while the superblock's mode info is in the cache. |
+| `cleargrid` | off | The mode info grid of a pipeline slot is cleared for every frame (4.2 MB at 4K), as up to package 0.2.140, and not only for a frame of another size than the frames before it on the slot. |
 
 `-parseopt <word>[,<word>...]` says which are on:
 
@@ -1307,10 +1309,16 @@ was measured: [phase2-rav1d.md](phase2-rav1d.md#where-the-time-goes).
   the parse is done in the ways the list names and in no other. `-parseopt none` turns both off
   (rav1d's parse as upstream schedules it), `-parseopt tilethread` leaves only `tilethread` on,
   `-parseopt nolfmask` only `nolfmask`, `-parseopt default` is the same as no flag.
-- `time` adds the timing and changes nothing else: `-parseopt time` is the default, timed;
-  `-parseopt none,time` is the parse without the two, timed.
+- `time`, `latelists` and `cleargrid` are off by default; each is on when the list has it and changes
+  nothing else: `-parseopt time` is the default, timed; `-parseopt none,time` is the parse without
+  the two, timed; `-parseopt latelists,cleargrid` is the default with the block lists and the grid
+  clear as they were up to package 0.2.140
+  ([phase2-rav1d.md](phase2-rav1d.md#block-lists-and-clears-less-memory-traffic)).
 - Another word is an error of the task (`stage` and `all` were words until package 0.2.138; the
   switch `stage` is gone).
+- Console timings are taken in the console's slow state, which it enters 10 to 15 seconds after the
+  last controller input and in which playback runs: put a warm-up task in front
+  ([phase2-rav1d.md](phase2-rav1d.md#console-after-step-3-rav1d-is-the-default)).
 
 ```text
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parser c
@@ -1319,6 +1327,8 @@ was measured: [phase2-rav1d.md](phase2-rav1d.md#where-the-time-goes).
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt tilethread
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt nolfmask
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt time
+-i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt latelists
+-i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt cleargrid
 ```
 
 The log has `Parser switches (-parseopt): ...` behind the `Parser:` line (`nolfmask tilethread` for a
@@ -1331,7 +1341,7 @@ of `cpu entropy/tile decode, thread sum`, summed over the tile threads, and zero
 
 | Line (timer) | Meaning |
 | --- | --- |
-| `cpu parse: block lists` (`sink_lists`) | the block lists of the prediction stages, counted at the end of each tile from its mode info records (the C parser counts them at the same place) |
+| `cpu parse: block lists` (`sink_lists`) | the block lists of the prediction stages, counted from the mode info records superblock by superblock (with `latelists`: at the end of each tile, where the C parser counts them) |
 | `cpu parse: sink calls (-parseopt time)` (`sink_calls`) | with `time`: the calls of the sink, which write the mode info record and the grid of a block, the record of a transform block, the palette, and the per-superblock values |
 | `cpu parse: thread sum less the above` | the thread sum less the block lists and less the sink calls. With `time` this is rav1d by itself, with the coefficients it writes straight into their buffer |
 
@@ -1440,7 +1450,7 @@ flags.
 - **Since then (2026-11-13, package 0.2.138.0, rav1d's parse)**: with the parser of phase 2 the GPU
   is busy about a third of the time, a slot is back long before the decode thread wants it, and
   `-asyncclear` takes 7.6 ms of memsets off the decode thread of a heavy 4K 10-bit frame for 0.1 ms
-  of `wait_slot`: 29.4 to 38.5 frames per second on that clip
+  of `wait_slot`: 29.3 to 33.7 frames per second on that clip, measured in the console's slow state
   ([phase2-rav1d.md](phase2-rav1d.md#console-after-step-3-rav1d-is-the-default)). It is the default
   now. The entry below is the measurement of 2026-11-11, when the GPU was the limit.
 - **`-asyncclear` is md5-exact on both clips and gives no gain with two slots.** The

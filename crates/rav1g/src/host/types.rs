@@ -279,6 +279,12 @@ pub struct av1_frame_thread_data {
     pub clear_iter_bytes: usize,
     pub clean_mi_bytes: usize,
     pub clean_iter_bytes: usize,
+    /// The frames whose parse has written the mode info grid of the slot since its last clear: their
+    /// width, height and row length in 4x4 units, and the bytes that clear covered. Every unit outside
+    /// such a frame is still null. All 0: not known, the next frame clears the grid. Only kept for a
+    /// decoder that keeps the grid (`Av1Core::keep_mi_grid`).
+    pub kept_grid: [c_int; 3],
+    pub kept_grid_bytes: usize,
     pub scale_enable: c_int,
     pub inter_fast: c_int,
     pub scale_factors: [ScaleFactor; 8],
@@ -400,6 +406,10 @@ pub struct Av1Core {
     pub parser_threads: c_int,
     /// The switches of that parser (`aom_codec_dec_cfg_t::parser_options`).
     pub parser_options: c_int,
+    /// The mode info grid of a slot is not cleared for a frame of the size of the frames before it on
+    /// the slot (`rav1g_setup_frame_begin`): a decoder whose parser is rav1d's, unless its switches say
+    /// otherwise (`AV1_PARSER_OPTION_CLEAR_GRID`).
+    pub keep_mi_grid: c_int,
 }
 
 impl Av1Core {

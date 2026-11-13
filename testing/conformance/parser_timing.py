@@ -4,8 +4,9 @@ rav1g-dec decodes each stream with -gputime, once with -parser c and once with -
 default of the library, with its default switches nolfmask and tilethread), the two in turns and each
 several times, and the CPU timers of the decode thread are read from the summaries. Every --switches
 adds a third, fourth, ... decoder to the turns: -parser rav1d with that -parseopt list, e.g. none for
-rav1d's parse without the two switches, or time for the default with the calls of the sink timed
-(docs/phase2-rav1d.md, "Where the time goes"). The timers:
+rav1d's parse without the two switches, latelists for the default with the block lists counted at
+the end of a tile, or time for the default with the calls of the sink timed (docs/phase2-rav1d.md,
+"Where the time goes" and "Block lists and clears"). The timers:
 
 - entropy_sum, entropy_wall: the parse of the tiles, summed over the tile threads and as wall time. With
   rav1d the sink is inside (the mode info records, the grid, the block lists), and so is rav1d's set-up

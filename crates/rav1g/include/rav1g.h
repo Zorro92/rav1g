@@ -94,6 +94,20 @@ typedef struct av1_stage_dump av1_stage_dump;
 #define RAV1G_PARSER_OPTION_TIME_CALLS 8
 
 /*
+ The block lists of a tile are counted when the tile is parsed, in one pass over its mode info, and
+ not superblock by superblock while the mode info is in the cache. The way of before, for a timing of
+ the two against each other.
+ */
+#define RAV1G_PARSER_OPTION_LATE_LISTS 16
+
+/*
+ The mode info grid of a pipeline slot is cleared for every frame, and not only for a frame of
+ another size than the frames before it on the slot. The way of before, for a timing of the two
+ against each other.
+ */
+#define RAV1G_PARSER_OPTION_CLEAR_GRID 32
+
+/*
  The `Rav1gSettings::parser_options` of `rav1g_settings_default`: `RAV1G_PARSER_OPTION_NO_LF_MASKS`
  and `RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD`. An application that wants the timing as well adds
  `RAV1G_PARSER_OPTION_TIME_CALLS` to it; 0 is rav1d's parse without either.

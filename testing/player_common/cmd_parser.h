@@ -37,6 +37,8 @@
 #define PLAYER_PARSEOPT_NO_LF_MASKS 2
 #define PLAYER_PARSEOPT_TILE_KEEPS_THREAD 4
 #define PLAYER_PARSEOPT_TIME_CALLS 8
+#define PLAYER_PARSEOPT_LATE_LISTS 16
+#define PLAYER_PARSEOPT_CLEAR_GRID 32
 #define PLAYER_PARSEOPT_DEFAULT (PLAYER_PARSEOPT_NO_LF_MASKS | PLAYER_PARSEOPT_TILE_KEEPS_THREAD)
 // The size the decoder is created for with -nofitsize, and for a stream that is larger than this.
 #define PLAYER_DECODER_WIDTH 4096
@@ -125,8 +127,11 @@ class CParameters {
     bool parser_rav1d_;
     // -parseopt <list>: the switches of rav1d's parse, separated by commas. nolfmask and tilethread are
     // on by default; a list that names one of them, none or default says which of the two are on (none:
-    // neither). time adds the timing of the sink's calls and leaves the two as they are. parser_options_
-    // is the sum of the PLAYER_PARSEOPT_* values after Parse().
+    // neither). time (the timing of the sink's calls), latelists (the block lists of a tile at its end,
+    // as before they were counted superblock by superblock) and cleargrid (the mode info grid cleared for
+    // every frame, as before it was kept between frames of one size) are off by default; each is on when
+    // the list has it and leaves the two as they are. parser_options_ is the sum of the PLAYER_PARSEOPT_* values
+    // after Parse().
     std::string parseopt_;
     unsigned parser_options_;
     // -continue_on_error: a decode call that fails does not end the task; the next temporal units go to

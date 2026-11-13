@@ -132,8 +132,9 @@ pub fn run(path: &Path, threads: u16, options: ParseOptions) -> ExitCode {
     // The parse with the sink.
     let mut with_sink = Duration::MAX;
     let mut block_lists = Duration::MAX;
+    let mut sink_calls = Duration::ZERO;
     for _ in 0..RUNS {
-        let mut parser = match RustParser::new(threads, options) {
+        let mut parser = match RustParser::with_clock(threads, options, true) {
             Ok(parser) => parser,
             Err(error) => {
                 eprintln!("rav1g-parse-check: {error}");
@@ -152,6 +153,7 @@ pub fn run(path: &Path, threads: u16, options: ParseOptions) -> ExitCode {
         if total < with_sink {
             with_sink = total;
             block_lists = Duration::from_nanos(parser.block_list_nanos());
+            sink_calls = Duration::from_nanos(parser.sink_call_nanos());
         }
         if parser.recycled() as u64 != frames {
             eprintln!("rav1g-parse-check: {} frames with the sink, {frames} without", parser.recycled());
@@ -162,7 +164,7 @@ pub fn run(path: &Path, threads: u16, options: ParseOptions) -> ExitCode {
     let sink = with_sink.saturating_sub(parse);
     println!(
         "PARSE TIME {}: {frames} frames {width}x{height}, {threads} thread(s), switches {}, best of {RUNS}: parse {:.3} ms/frame, with \
-         the sink {:.3} ms/frame, the sink {:.3} ms/frame, of which the block lists {:.3} ms/frame (CPU time of all \
+         the sink {:.3} ms/frame, the sink {:.3} ms/frame, of which the block lists {:.3} ms/frame{} (CPU time of all \
          threads for the block lists)",
         path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
         options.words(),
@@ -170,6 +172,11 @@ pub fn run(path: &Path, threads: u16, options: ParseOptions) -> ExitCode {
         milliseconds(with_sink, frames),
         milliseconds(sink, frames),
         milliseconds(block_lists, frames),
+        if options.time_calls {
+            format!(" and the other calls of the sink {:.3} ms/frame", milliseconds(sink_calls, frames))
+        } else {
+            String::new()
+        },
     );
     ExitCode::SUCCESS
 }

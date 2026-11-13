@@ -533,8 +533,9 @@ another md5 on every decode: they counted on the 64 threads of a thread group ru
 ([gpu-av1-decoder.md](gpu-av1-decoder.md#lockstep-reliance-portability-2026-11-11)). With group
 syncs where threads hand data to each other, the super-resolution fix
 ([test-player.md](test-player.md#super-resolution)) and the three fixes below, all streams of the set
-(251 then; 252 with the eight-tile stream added on 2026-11-12, run 43366744476) are md5-identical to
-their reference:
+(251 then; 252 with the eight-tile stream added on 2026-11-12, run 43366744476; 253 with the heavy
+10-bit 2160p cut `nf-dvbdash-d2-10b-2160p.ivf` added on 2026-11-13) are md5-identical to their
+reference:
 
 | streams | pass |
 | --- | --- |
@@ -545,7 +546,7 @@ their reference:
 | size changes at key frames (`av1-1-b8-03-*`) | 2 of 2 |
 | temporal and spatial layers (`av1-1-b8-22-svc-*`) | 5 of 5 |
 | film grain, monochrome, 8 and 10 bit (`-23`, `-24`) | 4 of 4 |
-| Netflix Open Content cuts, 270p to 2160p, 8 and 10 bit | 5 of 5 |
+| Netflix Open Content cuts, 270p to 2160p, 8 and 10 bit | 6 of 6 |
 | SVT-AV1 reference scaling | 1 of 1 |
 | SVT-AV1 super-resolution | 1 of 1 |
 | SVT-AV1 eight tiles, three key frames | 1 of 1 |

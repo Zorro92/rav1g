@@ -18,6 +18,11 @@
 
 # 8-bit 3840x2160, one tile, frames that are decoded but not shown.
 cut nf-dvbdash-a1-8b-2160p.ivf 0 20 AV1/DVB-DASH/A_1.mp4
+# 10-bit 3840x2160 (HDR), 50 frames per second, about 46 Mbps, one tile: the heavy 4K stream of the set,
+# and the lead stream of the parser timing. From the key frame at 15 s: the key frame, two frames of about
+# 1 MB that are decoded but not shown at once (one every 16 temporal units), and inter frames, every other
+# temporal unit a show_existing_frame.
+cut nf-dvbdash-d2-10b-2160p.ivf 15 30 AV1/DVB-DASH/D_2.mp4
 # 8-bit 1280x720 and 480x270, global motion.
 cut nf-chimera-8b-720p.ivf 60 40 AV1/Chimera/Old/Chimera-AV1-8bit-1280x720-3363kbps.mp4
 cut nf-chimera-8b-270p.ivf 60 120 AV1/Chimera/Old/Chimera-AV1-8bit-480x270-552kbps.mp4

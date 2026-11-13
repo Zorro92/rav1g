@@ -675,18 +675,34 @@ pub unsafe extern "C" fn rav1g_setup_frame_begin(
         // (first use of the slot, another frame size, a slot that went back without a completed frame, the
         // switch off) clears here. The marks are taken off at once: from here on the grids are being
         // written.
+        //
+        // The mode info grid is not cleared at all where a clear would change nothing a reader sees
+        // (`Av1Core::keep_mi_grid`, a decoder with rav1d's parse): the parse of a frame writes the unit of
+        // every 4x4 of the frame, so what the frames before left inside the frame is overwritten before
+        // anything reads it (the sink reads a unit behind its block, the block lists read units of blocks
+        // that are parsed, the stages run when the parse is through; a frame whose parse fails is not
+        // submitted). What a clear is still needed for is the part of the grid outside the frame, which
+        // the stages may read and which has to be null: it is null when the grid was cleared once for
+        // these bytes and only frames of this width, height and row length were parsed into it since. So
+        // the slot remembers those (`kept_grid`), and a frame of another size clears as before. That is
+        // 4.2 MB a 4K frame the CPU does not write (docs/phase2-rav1d.md).
         let async_clear = ASYNC_CLEAR.load(Ordering::Relaxed);
         let mi_grid_bytes = size_of::<*mut *mut MB_MODE_INFO>() * cm.mi_alloc_size as usize;
-        if async_clear == 0 || td.clean_mi_bytes != mi_grid_bytes {
+        let keep_grid = (*dec).keep_mi_grid != 0;
+        let grid_frame = [cm.mi_cols, cm.mi_rows, cm.mi_stride];
+        let kept = keep_grid && td.kept_grid == grid_frame && td.kept_grid_bytes == mi_grid_bytes;
+        if !kept && (async_clear == 0 || td.clean_mi_bytes != mi_grid_bytes) {
             perf_t = super::perf::av1_perf_ticks();
             cm.mi_grid_base.cast::<u8>().write_bytes(0, mi_grid_bytes);
             perf_add_memset(dec, sys::AV1_PERF_CPU_MEMSET as usize, perf_t, mi_grid_bytes);
         }
+        (td.kept_grid, td.kept_grid_bytes) = if keep_grid { (grid_frame, mi_grid_bytes) } else { ([0; 3], 0) };
         let clean_iter_bytes = td.clean_iter_bytes;
         td.clean_mi_bytes = 0;
         td.clean_iter_bytes = 0;
         td.async_clear = async_clear;
-        td.clear_mi_bytes = mi_grid_bytes;
+        // A grid that is kept is not cleared behind the frame either.
+        td.clear_mi_bytes = if keep_grid { 0 } else { mi_grid_bytes };
         td.clear_iter_bytes = 0;
         td.clear_pending = 1;
 

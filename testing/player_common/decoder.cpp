@@ -450,6 +450,8 @@ int AV1Decoder::DecodeOne() {
       static_assert(PLAYER_PARSEOPT_NO_LF_MASKS == RAV1G_PARSER_OPTION_NO_LF_MASKS &&
                         PLAYER_PARSEOPT_TILE_KEEPS_THREAD == RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD &&
                         PLAYER_PARSEOPT_TIME_CALLS == RAV1G_PARSER_OPTION_TIME_CALLS &&
+                        PLAYER_PARSEOPT_LATE_LISTS == RAV1G_PARSER_OPTION_LATE_LISTS &&
+                        PLAYER_PARSEOPT_CLEAR_GRID == RAV1G_PARSER_OPTION_CLEAR_GRID &&
                         PLAYER_PARSEOPT_DEFAULT == RAV1G_PARSER_OPTIONS_DEFAULT,
                     "the bits of -parseopt out of step with rav1g.h");
       cfg.parser_options = params_.parser_options_;
@@ -629,7 +631,9 @@ int AV1Decoder::DecodeOne() {
             << (params_.parser_options_ & PLAYER_PARSEOPT_DEFAULT ? "" : "none ")
             << (params_.parser_options_ & PLAYER_PARSEOPT_NO_LF_MASKS ? "nolfmask " : "")
             << (params_.parser_options_ & PLAYER_PARSEOPT_TILE_KEEPS_THREAD ? "tilethread " : "")
-            << (params_.parser_options_ & PLAYER_PARSEOPT_TIME_CALLS ? "time " : "");
+            << (params_.parser_options_ & PLAYER_PARSEOPT_TIME_CALLS ? "time " : "")
+            << (params_.parser_options_ & PLAYER_PARSEOPT_LATE_LISTS ? "latelists " : "")
+            << (params_.parser_options_ & PLAYER_PARSEOPT_CLEAR_GRID ? "cleargrid " : "");
   }
   // -intraopt: which build of the original intra_main shader runs; independent of the two flags above.
   rav1g_set_intra_opt(params_.intraopt_ != 0);

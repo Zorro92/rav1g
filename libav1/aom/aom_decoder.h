@@ -171,6 +171,8 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
 #define AV1_PARSER_OPTION_NO_LF_MASKS 2       /* rav1d leaves out the masks of its own loop filter */
 #define AV1_PARSER_OPTION_TILE_KEEPS_THREAD 4 /* a tile stays on its thread between its superblock rows */
 #define AV1_PARSER_OPTION_TIME_CALLS 8        /* the calls of the sink are timed (AV1_PERF_CPU_SINK_CALLS) */
+#define AV1_PARSER_OPTION_LATE_LISTS 16       /* the block lists of a tile at its end, not superblock by superblock */
+#define AV1_PARSER_OPTION_CLEAR_GRID 32       /* the mode info grid of a slot is cleared for every frame */
 
 /*!\brief Initialization Configurations
  *

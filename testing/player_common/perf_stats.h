@@ -354,8 +354,8 @@ class PerfStats {
          "% of wall");
     Line(&out, "cpu entropy/tile decode, wall", cpu[AV1_PERF_CPU_ENTROPY_WALL], 0.0, 0);
     Line(&out, "cpu entropy/tile decode, thread sum", cpu[AV1_PERF_CPU_ENTROPY_SUM], 0.0, 0);
-    // With rav1d's parse: parts of the thread sum. The block lists; with -parseopt time the calls of the
-    // sink. What is left of the thread sum is rav1d with the coefficients it writes itself. All zero with
+    // With rav1d's parse: parts of the thread sum. The block lists (counted superblock by superblock, or
+    // with -parseopt latelists at the end of a tile); with -parseopt time the other calls of the sink. What is left of the thread sum is rav1d with the coefficients it writes itself. All zero with
     // the entropy decoder of libaom (-parser c), which has no timers for them.
     Line(&out, "cpu parse: block lists", cpu[AV1_PERF_CPU_SINK_LISTS], 0.0, 0);
     Line(&out, "cpu parse: sink calls (-parseopt time)", cpu[AV1_PERF_CPU_SINK_CALLS], 0.0, 0);
