@@ -122,7 +122,8 @@ have to write the same bytes at every stage, not only the same frames.
 - **What is compared** (job `rust-equal`): `rav1g-dec` of the pushed commit against `warp_decoder` of the
   C++ decoder, both on WARP, with the same scripts, streams and task lists: the md5 of every output frame
   of the 252 streams of the set, the bytes of every stage dump of `testing/conformance/dump_tasks.txt`,
-  and the MEMORY lines of ten decoder configurations (the size of the host pool left out).
+  and the MEMORY lines of ten decoder configurations (the host pool left out: it is smaller in the
+  Rust decoder by design, see [The host pool and the queues](#the-host-pool-and-the-queues-2026-11-13)).
 - **Where the C++ decoder comes from** (job `cpp-reference`): branch `cpp` at the commit that
   `CPP_REFERENCE_COMMIT` of `.github/workflows/build.yml` names, built with its own project files and
   its own shaders. **The pin is `df73d8c2aeaa95d31a6c603e57a0c92cccbd7ed9`** (the head of `cpp` on
@@ -1575,23 +1576,170 @@ run each, ms per output frame, `.0` / `.2`: `j4k40` wall 49.4 / 50.6, decode thr
 23.6 / 23.6 (GPU-bound); `a1_8b4k_300` wall 18.5 / 18.9. Within a run or two of the step-5 figures above,
 the clang build ahead.
 
-**Open after phase 1:**
+**Open after phase 1** (the first and the fourth item are done, see
+[The host pool and the queues](#the-host-pool-and-the-queues-2026-11-13)):
 
-- **The rest of the host-pool clean-up.** The queues are still the ring of 100 pointers behind a
-  critical section, laid out as the C++ struct, inside `Av1Core`; the inter breakdown and the tile
-  counters are still allocations of the C runtime; `Av1Core` still has the size of the C++ struct
-  (67,384 bytes) and lies in the host pool the application sizes by the memory query. Making the queues
-  Rust queues and the counters Rust allocations changes the size of the host pool and with it the
-  "host pool" MEMORY lines: `memory_lines.py` then has to leave those lines out of the comparison with
-  the C++ decoder (it leaves out the pool's total today), or the comparison of the MEMORY lines ends
-  before the rest does. Not done here because it changes what a decoder allocates and should be
-  checked on the console (15 decoders in a row through the budget guard) on its own.
 - **The switch from FXC to DXC** ([Requirements](#requirements)), and with it `crates/rav1g-shaders` and
   the end of the equality reference.
 - **crates.io.** Nothing is published; the crates are `publish = false`.
-- **The names of the remaining plain functions** (`rav1g_mt_queue_push`, `rav1g_memory_setup`, ...) are
-  those of the port; they go with the queues and the allocator when those become Rust types.
 - Phase 2: [phase2-rav1d.md](phase2-rav1d.md).
+
+### The host pool and the queues (2026-11-13)
+
+The rest of the host-pool clean-up that phase 1 left open, in two commits: 63bac01 (the decoder as
+its own allocation, the queues, the allocator) and d260e88 (the memory check).
+
+**What changed.**
+
+- **The decoder is its own allocation.** `Av1Core` lay in the host pool with the size and the layout of
+  the C++ struct (67,384 bytes), behind its allocator (7,296 bytes). Nothing C reads it: `dx/av1_core.h`
+  declares `struct Av1Core` and the entropy decoder holds a pointer it never looks behind. It is now
+  allocated by the host (`Av1Core::new`, `host/types.rs`), with whatever layout the compiler gives it
+  and without the fields nothing read; the allocator is a Rust type (`memory::Allocator`) in an
+  allocation of its own, because the decoder keeps pointers to its buffer descriptors. What the entropy decoder shares with the host (the frame buffer
+  descriptions, the tile data, the mode info) is still C, bound in `rav1g-sys` and held against the C
+  compiler by the layout tests there, which did not change.
+- **The queues are Rust queues the decoder owns.** `thread::Queue<T>` is a `Mutex<VecDeque<T>>` with a
+  `Condvar`: the items in the order they were pushed, a `get` that waits for one, a `push` that wakes
+  one waiting thread and never waits itself, as the ring of 100 pointers behind a critical section
+  did. Each is created with room for the pool its items come from, so a push allocates nothing. The
+  six of them: the free slots, the free output contexts, the free work items, the frames in flight for
+  the completion thread (null ends it), the free output images, the finished frames of an application
+  without a callback. The pool of frame buffers is `thread::FramePool`, whose lock still guards the
+  reference count of every frame buffer, so the frame setup and the completion thread take it around
+  their counting as they took the critical section. The lock of a frame's second slot is a std
+  `Mutex`. No critical section and no condition variable of Windows is left in the host; std's are
+  built on `WaitOnAddress`, which the library imported already (the import checks did not change).
+- **The inter breakdown and the tile counters** of the timing run (`-gputimedetail`) are Rust
+  allocations (`Option<Box<..>>`, a `Vec` that keeps its memory from frame to frame) and go with the
+  decoder; the `malloc` and `free` of the C runtime are gone from the host.
+- **Names.** The queue and allocator functions are methods (`Queue::push`, `Allocator::create_buffer`,
+  `FramePool::release`); the other plain functions that still had names of the port lost the prefix
+  (`idct_run`, `prediction_run_all`, `output_image`, ...), and `poison_constants`, which only Rust
+  calls, is no longer exported. The `rav1g_*` names that are left are the functions of `rav1g.h` and
+  the parts of `host_entry.c`, which C calls.
+
+**The host pool, before and after.** The pool holds what the entropy decoder is given: the private
+data of the codec interface, its state and buffer pool, the contexts, the motion vectors and segment
+maps of the frame buffers, the tiles of the slots. It is smaller by the two structs that left it,
+74,688 bytes with their rounding, in every configuration; the decoder and its allocator are 69,248
+bytes on the heap (the two structs and the storage of the queues).
+
+| Decoder | Host pool in use before | after | The decoder itself |
+| --- | ---: | ---: | ---: |
+| 3840x2176 8-bit, 2 slots | 19,876,064 | 19,801,376 | 69,248 |
+| 4096x2176 10-bit, 2 slots | 21,090,016 | 21,015,328 | 69,248 |
+| 1920x1152 10-bit, 3 slots | 7,057,984 | 6,983,296 | 69,248 |
+| 1920x1152 10-bit, 2 slots | 6,500,704 | 6,426,016 | 69,248 |
+| 1280x768 8-bit, 2 slots | 3,821,344 | 3,746,656 | 69,248 |
+
+**The memory query and the budget guard.**
+
+- `av1_codec_query_memory_requirements` (C, internal) gives the pool, which is what `Decoder::new`
+  allocates for it. The query of the interfaces, `Settings::memory_requirements` and
+  `rav1g_memory_requirements`, reports all host memory of a decoder as `host_size`: the pool and the
+  decoder itself.
+- The guard compares the device buffers the creation is about to allocate, and the margin of 48 MiB,
+  with what the application says it has left; that did not change, and it stays honest: the pool
+  (allocated by `Decoder::new`) and the decoder (allocated first thing in the creation) both exist
+  before the callback is asked, so the application's answer already has them. What the decoder
+  allocates behind the guard is its device buffers, which are counted, and its D3D12 objects (command
+  allocators, the list, fences), threads and the palette buffers (guarded on their own), as before.
+  The entropy decoder allocates nothing on the heap ([test-player.md](test-player.md#memory-after-a-decoder-is-destroyed)).
+- A new line says what the host memory is, for a created decoder and for one whose creation failed:
+  `MEMORY decoder created host memory: host pool 19805536 bytes (18.9 MiB) for the entropy decoder,
+  19801376 of them in use; the decoder itself 69248 bytes (0.1 MiB) on the heap, not in the pool; both
+  allocated before the budget is asked`. The player's `MEMORY decoder size` line and the `TASK` line of
+  `rav1g-dec` say `host memory` where they said `host pool`.
+
+**The comparison with the C++ decoder.** `memory_lines.py` leaves the host pool out: the two numbers
+of `host pool N of N bytes (N MiB) in use` in the `decoder created` line are made equal (it left out
+the pool's total before, which depends on where the program's allocator puts the pool), and the new
+line, which the C++ decoder does not write, is dropped. Why: the pool is smaller in the Rust decoder
+by design, as above. Everything else is compared as before, line for line: the device buffers
+(number, bytes, by type, per slot, the largest), the frame buffers, the options, the budget decision,
+the steps of the release. With that mask the lines of the build before this change and of the build
+after it are the same in all ten cases (run 43384492217).
+
+**Speed.** The CPU timers of the build before (0cd1375) and after, both MSVC, the two programs
+alternating on one runner, `-gputime -t 4`, on WARP (a CPU rasterizer that takes all four processors
+while the tile threads decode, so the entropy timers move with it). Three runs on three runners;
+median over the rounds, ms per frame; "p50" is the median frame of a run, "mean" its mean, which at
+2160p is one frame of 100 to 190 ms and 14 small ones.
+
+| 3840x2160 8-bit | Run 43387114817, 12 rounds: before | after | | Run 43389306016, 15 rounds: before | after | |
+| --- | ---: | ---: | --- | ---: | ---: | --- |
+| `entropy_sum` p50 | 1.820 | 1.895 | +4.2 %, slower in 11 of 12 | 2.471 | 2.425 | -1.9 %, slower in 2 of 15 |
+| `entropy_sum` mean | 5.970 | 6.123 | +2.6 %, slower in 5 of 12 | 9.283 | 9.420 | +1.5 %, slower in 6 of 15 |
+| `record` | 0.055 | 0.053 | -2.7 % | 0.053 | 0.052 | -1.9 % |
+| `rec_gen_blocks` / `rec_idct` / `rec_pred` | 0.036 / 0.010 / 0.013 | 0.036 / 0.009 / 0.013 | | | | |
+| `rec_loopfilter` / `rec_cdef_lr` / `rec_borders` / `rec_copy` | 0.009 / 0.001 / 0.001 / 0.007 | 0.009 / 0.001 / 0.001 / 0.007 | | | | |
+| `submit` | 0.322 | 0.324 | +0.6 % | 0.334 | 0.338 | +1.2 % |
+| `memset` | 0.182 | 0.190 | +4.4 % | 0.246 | 0.248 | +0.8 % |
+| `setup` without the wait for a slot | 0.187 | 0.194 | +4.0 % | 0.250 | 0.252 | +0.8 % |
+| `frame` without its waits | 6.565 | 6.737 | +2.6 % | 9.946 | 10.087 | +1.4 % |
+
+| | 1920x1080 10-bit, 8 rounds (43387114817): before | after | | 1280x720 8-bit, 8 rounds: before | after | |
+| --- | ---: | ---: | --- | ---: | ---: | --- |
+| `entropy_sum` mean / p50 | 6.055 / 4.872 | 6.113 / 4.947 | +0.9 % / +1.5 % | 3.543 / 2.739 | 3.566 / 2.752 | +0.6 % / +0.5 % |
+| `record` | 0.189 | 0.189 | 0 | 0.119 | 0.118 | -1.3 % |
+| `submit` | 0.985 | 0.980 | -0.5 % | 0.960 | 0.962 | +0.2 % |
+| `memset` | 0.050 | 0.052 | +4.0 % | 0.028 | 0.028 | 0 |
+| `frame` without its waits | 3.204 | 3.230 | +0.8 % | 2.378 | 2.389 | +0.5 % |
+
+The recording, the submit and the frame setup are where they were. The entropy decode of the 2160p
+stream differs by a few percent between the two programs, and the sign depends on the runner: after
+the first of the two runs it looked like a slowdown of 4 % of the median frame (11 of 12 rounds), on
+the next runner the new program was the faster one in 13 of 15. That second run also had three
+variants of the new program, to find a cause: the entropy decoder's memory put back where it lay in
+the pool before (74,688 bytes of padding in front), `Av1Core` with the declared field order
+(`repr(C)`), and both. All three were within 2 % of the new program and on the same side of the old
+one (median frame 2.412, 2.381, 2.409 ms against 2.425 and 2.471). `memset`, a clear the change does
+not touch, moved by as much as the entropy timer in the first run. So nothing the change does is
+measurable here; the queues are not on the path of a block (a tile thread takes a queue only when
+its frame needs a second slot, once a frame at most). The first run of the three (43384492217, 4
+rounds at 2160p) is not in the table: its 2160p means spread from 10 to 16 ms within one program.
+One timer is higher in two of the three runs, `notify` (+3 to +9 %): the time of the application's
+frame callback, here the md5 of the frame in `rav1g-dec`, code this change does not touch either.
+**The console decides**: `-gputime` on the 4K clips against packages 0.2.125.
+
+**The memory check** ([warp-decoder.md](warp-decoder.md#memory-check)) is new with this change and
+runs on every push with both builds of `rav1g-dec`: decoders of six configurations created, used and
+released eight times over in one process, with the video memory of the adapter and the private bytes
+of the process after every release, and the player's decoder code with a model of an app's memory
+limit, where a refused creation must not cost the next decoder its credit.
+
+**On CI** (run 43393650551, commit d260e88, all 14 jobs green at the first attempt):
+
+- 252 of 252 streams with `rav1g-dec` of the MSVC build through the Rust interface, through `rav1g.h`
+  and with `-interfast`, and with the program built on Linux, also with `-interfast`; 137 of 137 with
+  `-poisonmi` and with `-poisonbuf`, with both programs; the order check, the decode errors in cut
+  streams and the player's decoder code (4 of 4 tasks `MD5 is OK`) with both; `D3D12 DEVICE REMOVALS: 0`
+  in every pass.
+- Equality with the C++ decoder of `cpp` at df73d8c: the 97 shaders are the same; the md5 of every
+  output frame is equal for 252 of 252 streams (1,045 frames); the stage dumps are equal for the 7
+  dumped streams; the MEMORY lines, without the host pool, are the same in all 10 cases.
+- The memory check, MSVC build: 40 decoders md5 pass, 8 creations refused and no other; video memory
+  0 bytes after every release; the floor of the private bytes at most 12.2 MiB above iteration 4
+  (tolerance 40); the releases at most 13.6 MiB above the highest of iterations 1 to 4 (tolerance 96);
+  the credit sequence 2 refused, 3 accepted and `MD5 is OK`. The build of Linux: 0 bytes, 4.7 MiB and
+  25.8 MiB, the same decisions.
+- The packages 0.2.130.0 (`rav1g.dll`, 3,674,112 bytes, and the player) and 0.2.130.2: every import
+  from an allowed DLL.
+
+Before that, on a throwaway branch with a cut-down workflow (runs 43384492217, 43387114817,
+43389306016, 43392151836): the two builds side by side for the timers above, the measurements the
+tolerances of the memory check come from, and that check with three builds that have a known defect,
+each of which fails it.
+
+**For the console:** the packages of run 43393650551, `rav1g-testplayer-x64-43393650551` (0.2.130.0,
+the default) and `rav1g-testplayer-msvc-x64-43393650551` (0.2.130.2). Not run on a console yet: 15
+decoders in a row through the budget guard, the memory batch, and the timing against 0.2.125. What
+looks different in their logs: `host memory` where the `MEMORY decoder size` line said `host pool`
+(the number is the pool and the decoder together); the two numbers of `host pool N of N bytes` in
+`MEMORY decoder created`, 74,688 bytes lower than in 0.2.125 for the same configuration; and the new
+line `MEMORY decoder created host memory: ...` behind `MEMORY decoder created options`. Every other
+MEMORY line has the numbers it had.
 
 ## Estimate
 
