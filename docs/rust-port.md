@@ -627,7 +627,8 @@ The cargo build compiles the C of the entropy decoder (and the C++ that is left)
 optimisation, as the MSBuild projects do with `/GL` and `/LTCG` (commit 1face0c):
 
 - **MSVC** (the build on Windows): `/GL` for every file, `/LTCG` at the link of `rav1g-dec` and of the
-  tests.
+  tests (`/LTCG:incremental` since 2e890b2, which is what the MSBuild projects link with and makes faster
+  code of the entropy decoder: [tile decode time at the end of step 4](#tile-decode-time-at-the-end-of-step-4)).
 - **clang-cl** (the build on Linux, `cargo xwin`): `-flto` (full LTO; `lld-link` compiles the bitcode).
 - `RAV1G_C_LTO=off` builds without, `thin` with ThinLTO under clang-cl: for measurements.
 
@@ -854,6 +855,175 @@ Part 5, the structs:
   6 tests; the layout test with 34 structs and 619 fields), the 244 vectors plain and with the three
   flag sets of part 4, the stage dumps of seven vectors equal to those of the build before part 2, the
   "MEMORY" lines of five streams as before.
+
+Part 5 on CI (run 43328398581, commit 97722ee): all jobs green: `rav1g-dec` 251 of 251 on WARP, the order
+check, 137 of 137 with `-poisonmi` and with `-poisonbuf`, md5 of 1005 frames and the stage dumps of 7
+streams equal to `warp_decoder`, the "MEMORY" lines of the ten configurations equal, the timing smoke
+test, 251 of 251 with the program of the Linux build, the unit tests (29, 4 and 6; the layout test with
+MSVC as the C compiler); `D3D12 DEVICE REMOVALS: 0` in every pass of the three decoders. The same commit
+with the workflow's `experiments` input (run 43328491590): the whole set again with `rav1g-dec` and
+`-interfast`, with `-poisonbuf` and with both, 251 of 251 each, 0 device removals.
+
+Step 4 in numbers: `av1_core.cpp` (2,453 lines) is `host/create.rs`, `frame.rs`, `completion.rs`,
+`perf.rs`, `stage_dump.rs` and `types.rs` (4,676 lines with tests and comments) and 59 lines of C
+(`host_entry.c`). The Rust host is 11,590 lines in 21 files of `crates/rav1g/src/host` and 1,267 in
+`crates/rav1g/src/gpu`. The 516 lines of glue, the C++ bindings and the C++ probes of step 3 are gone.
+
+#### CPU time of the recording at the end of step 4
+
+Run 43328488394 of a throwaway branch: `warp_decoder` (MSBuild) and `rav1g-dec` of 97722ee from one
+checkout on one Windows runner, `rav1g-dec` of the Linux build (clang-cl) of the same run; each stream
+decoded five times by each program in turn with `-gputime -t 4` on WARP; microseconds per frame, the
+median frame of a run, the lowest of the five runs. 2160p first: it is the size that is not fast enough
+yet, and what speed is judged by.
+
+| Timer | 2160p 8-bit, 20 frames | | | 1080p 10-bit, 16 frames | | | 720p 8-bit, 40 frames | | |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| | `warp_decoder` | Rust, MSVC | Rust, clang-cl | `warp_decoder` | Rust, MSVC | Rust, clang-cl | `warp_decoder` | Rust, MSVC | Rust, clang-cl |
+| record (all stages) | 44 | 42 | 42 | 272 | 228 | 230 | 162 | 142 | 140 |
+| rec_gen_blocks | 28 | 28 | 28 | 30 | 31 | 31 | 30 | 30 | 30 |
+| rec_idct | 6 | 6 | 6 | 21 | 22 | 23 | 16 | 16 | 17 |
+| rec_pred | 8 | 7 | 7 | 37 | 38 | 37 | 33 | 32 | 32 |
+| rec_loopfilter | 9 | 9 | 8 | 9 | 9 | 10 | 9 | 9 | 9 |
+| rec_cdef_lr | 1 | 1 | 1 | 165 | 120 | 128 | 81 | 61 | 58 |
+| rec_borders | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 |
+| rec_copy | 6 | 7 | 7 | 20 | 17 | 17 | 7 | 7 | 7 |
+| submit | 270 | 271 | 262 | 979 | 984 | 985 | 864 | 875 | 864 |
+| setup (with the wait for a slot) | 259,057 | 259,125 | 263,938 | 807,431 | 807,312 | 811,144 | 64 | 64 | 66 |
+| memset (the clears of a frame's setup) | 396 | 393 | 401 | 118 | 118 | 117 | 61 | 60 | 61 |
+| frame (decode thread, setup to submit) | 269,249 | 270,037 | 269,594 | 810,810 | 810,820 | 814,628 | 2,785 | 2,930 | 2,793 |
+
+- The frame pipeline in Rust costs what it cost in C++: the recording as after step 3 (less where the CPU
+  writes lists), the submit, the clears and the setup the same. On WARP the setup of a 2160p or 1080p
+  frame is the wait for a pipeline slot, that is for the GPU work of the frame two before it, in all
+  three programs.
+- The decode thread of the 720p stream takes 5 % longer in the MSVC program (2,930 against 2,785): it
+  decodes tiles itself, and that is the tile decode time of the next section.
+
+#### Tile decode time at the end of step 4
+
+`entropy_sum` (the time of the tile threads, with the block lists) is where the two builds of the Rust
+decoder differ from each other and, the MSVC one, from `warp_decoder`. Three runs of throwaway branches,
+each with all its programs on one Windows runner and seven rounds; microseconds per frame, the median
+frame of a run, the lowest of the seven runs, in brackets the mean of the seven; the 2160p stream was
+decoded twice per run, at the start and at the end.
+
+**1. Step 3 against step 4** (run 43330704655; `rav1g-dec` of 1face0c, the build before step 4 with the
+same link time optimisation, and of 97722ee):
+
+| Stream | `warp_decoder` | Rust, MSVC, before step 4 | Rust, MSVC, step 4 | Rust, clang-cl, step 4 |
+| --- | ---: | ---: | ---: | ---: |
+| 2160p, first pass | 1710 (1790) | 1726 (1818), +0.9 % | 1932 (2022), +13.0 % | 1752 (1830), +2.5 % |
+| 2160p, second pass | 1651 (1690) | 1685 (1721), +2.1 % | 1841 (1915), +11.5 % | 1635 (1682), -1.0 % |
+| 1080p 10-bit | 4132 (4718) | 4337 (4699), +5.0 % | 4483 (4846), +8.5 % | 4130 (4468), 0.0 % |
+| 720p | 2623 (2724) | 2671 (2815), +1.8 % | 2832 (2948), +8.0 % | 2549 (2643), -2.8 % |
+
+The MSVC program of step 4 was 9 to 12 % slower on the 2160p stream than the one before step 4 on that
+runner (3 % at 1080p, 6 % at 720p), and the clang-cl program was not.
+
+**2. Part by part** (run 43333372366, another runner, a slower one; `rav1g-dec` of each part of step 4,
+MSVC):
+
+| Stream | `warp_decoder` | before step 4 | part 1 | part 2 | part 3 | part 4 | part 5 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2160p, first pass | 3149 | 3302 | 3357 | 3284 | 3425 | 3265 | 3417 |
+| 2160p, second pass | 3174 | 3312 | 3433 | 3247 | 3376 | 3325 | 3413 |
+| 720p | 4353 | 4578 | 4647 | 4520 | 4495 | 4493 | 4519 |
+
+On this runner step 4 is 3 % slower than the build before it on the 2160p stream and 1 % faster at
+720p, and no part stands out: the parts lie within 5 % of each other without an order (part 2 and part 4
+are faster than the build before step 4, part 1 and part 3 slower). So the difference of the first run
+is not the cost of one piece of Rust: it comes and goes with the machine and with small changes of the
+program.
+
+**3. What it is, as far as it is known** (the analysis is GPT 6.1 Sol's, from the two programs of run
+43328491590 and from its own runs 43332697462 and 43334799404):
+
+- It is not a call that got slower. `warp_decoder` calls `av1_mi_push_block` out of line as well; the
+  function the tile threads call for every block is the same instruction stream in the build before step
+  4 and in step 4; all 60 C files of the entropy decoder are compiled at the link in both; both clear with
+  the `memset` of the C runtime. The large clear of a tile's block map (7.5 MB at 2160p) happens once, in
+  the first decoded frame, not per frame.
+- 85 to 90 % of the gap at 2160p is in the C of the entropy decoder itself (parsing and tile setup 2229
+  against 2100 microseconds with timers added for the purpose; the loop over the block lists 143 against
+  131). And MSVC made other code of that C in the cargo link than in the MSBuild link: `decode_partition`
+  5144 bytes against 2532, the symbol decoder `od_ec_decode_cdf_q15` 694 against 590, its standard variant
+  520 against 300.
+- **The link mode.** The MSBuild projects link with `/LTCG:incremental`, cargo linked with `/LTCG`; the
+  code generator of the link is not the same in the two modes. With `/LTCG:incremental` the three
+  functions have the sizes and the instructions of `warp_decoder`.
+
+**4. The link variants side by side** (run 43337492684; `head` is 97722ee):
+
+| Stream | `warp_decoder` | Rust, MSVC, `/LTCG` (head) | Rust, MSVC, `/LTCG:incremental` | the same with Rust `lto = "fat"`, one codegen unit | Rust, clang-cl |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 2160p, first pass | 2957 (3039) | 3198 (3254), +8.2 % | 3065 (3133), +3.7 % | 3184 (3298), +7.7 % | 2956 (3080), 0.0 % |
+| 2160p, second pass | 2954 (3004) | 3163 (3229), +7.1 % | 3064 (3146), +3.7 % | 3167 (3208), +7.2 % | 2925 (3004), -1.0 % |
+| 1080p 10-bit | 6830 (6882) | 7057 (7173), +3.3 % | 6967 (7071), +2.0 % | 6939 (6989), +1.6 % | 6662 (6745), -2.5 % |
+| 720p | 4257 (4311) | 4403 (4450), +3.4 % | 4346 (4383), +2.1 % | 4330 (4382), +1.7 % | 4161 (4226), -2.3 % |
+
+- **`/LTCG:incremental` is adopted** (commit 2e890b2; on CI in run 43341601469 with every gate of part
+  5 met and 0 device removals): 3 to 4 % less tile time at 2160p (3065 against 3198, 3064 against 3163),
+  1 % less at 1080p and 720p. The link leaves `rav1g_dec.iobj` (7.4 MB) and
+  `rav1g_dec.ipdb` (1.2 MB) in the output directory of the program's build script under `target`; a build
+  after a change of the program's Rust relinks in 3 s. `RAV1G_C_LTO=off` still builds without.
+- **Rust `lto = "fat"` with one codegen unit is not adopted.** On top of the incremental link it takes
+  the gain at 2160p back (3184 and 3167: where the plain link was), gives 0.4 % at 1080p and 720p, and
+  makes the recording slower (all stages 242 against 218 microseconds at 1080p, CDEF and loop restoration
+  lists 134 against 113). In run 43332697462, on the plain link and with timers added, it had been the
+  fastest at 2160p; next to the incremental link it is not.
+- **clang-cl** (the Linux build, full LTO of the C) is at the speed of `warp_decoder` at 2160p and 2 %
+  faster at the other two sizes, in every run. It is the build to look at for the player's library in
+  step 5.
+
+**5. What is left, and not explained.** With the incremental link the MSVC program is still 3.7 % slower
+than `warp_decoder` in the tile threads at 2160p and 2 % at the other two sizes. The same C, compiled
+at the link by the same compiler in the same mode, next to a host that is Rust instead of C++: the
+program around the C is another one, and so is what the optimiser sees of the functions the C calls
+(in `warp_decoder` they are C++ it compiles too; here they are calls out of the code it knows). How much
+of the 3.7 % that is, and how much is where the code landed, is not known. The 12 % of run 43330704655
+was this plus the link mode plus that runner; the run that measured the parts on another runner shows
+how much of it moves with the machine. Not tried, for later: `/O2` for `entdec.c`, `decodeframe.c` and
+`decodetxb.c`, profile guided optimisation, and the Rust and the C in one LTO unit under clang
+(`-Clinker-plugin-lto`).
+
+#### What step 5 needs
+
+- **The interface.** `rav1g::Decoder` exists as a thin owner of the C interface (`aom_codec_*`); step 5
+  makes it the safe API of the design (a device and a queue or none, a temporal unit in, frames out as
+  resources with fences, the settings) and generates `rav1g.h` with `cbindgen`. `Config::memory_available`
+  is the budget callback of this step in raw form.
+- **Which toolchain builds the library the player links.** The tile threads are the CPU limit at 4K, and
+  the three choices differ there: C objects of MSVC `/GL`, linked by the player's `link.exe` with
+  `/LTCG:incremental` (3.7 % behind the MSBuild library at 2160p in the last run); the clang-cl build with
+  full LTO (level with it or ahead), which needs `lld-link` for the link of the player, or objects of
+  clang without LTO (at 2160p 6 % behind in run 43312178597); or the entropy decoder as the MSBuild
+  library it is today, with the Rust host as a second library. The console timing decides.
+- **The C runtime.** The workspace links the static runtime (`+crt-static`); a UWP app links the DLL
+  runtime of the VCLibs framework package. The player needs the C and the Rust built for that runtime.
+- **The app container.** The standard library of `x86_64-pc-windows-msvc` imports Win32 functions without
+  regard to what an app container offers; `x86_64-uwp-windows-msvc` is tier 3 and needs a nightly compiler
+  to build the standard library. What the host uses of `std` is threads (the completion thread, the
+  pipeline threads of the shader library), a lock, formatting and the allocator; an import the console
+  does not have shows only on the console.
+- **The host pool.** The decoder still lies in memory the application hands over, sized by the memory
+  query, with the layouts of the C++ structs. When `Decoder` owns its state that can go (the queues as
+  Rust queues, the inter breakdown and tile counters as Rust allocations, the `rav1g_*` functions that
+  only Rust calls as plain functions); the "MEMORY" lines about the host pool then change, and the
+  comparison of the lines in CI with them.
+- **The C++ sources.** `libav1/dx/*.cpp` leave the tree when the player links the Rust library; with them
+  go `warp_decoder`'s copy of the host, the `rust-equal` job in its present form, and the tests that read
+  `av1_compute.cpp` and `av1_compute.h`.
+- **Console tests for the parent:** the md5 set (8-bit and 10-bit, hidden frames, film grain, global
+  motion, layers, size changes, scaled references, superres), `-gputime` against `v0.3.0` with the tile
+  threads and the decode thread first, creation and release of 15 decoders in a row with the budget guard
+  (the lines of the guard and of the release are those of the C++), a refused creation, a decode error
+  between setup and submit (the slot is taken back), `-asyncclear`, `-slots 3` and `4`, `-lowmem`.
+
+Seen on the way, not part of the port: on the local decoder (wine, vkd3d, lavapipe) a decoder without
+the shared back buffer (`-lowmemparts 0`) gives wrong frames for 147 of the 244 vectors, with the C++
+frame pipeline as with the Rust one; on WARP the same configuration decodes right (the case
+`1080p-10bit-nolowmem` of the "MEMORY" lines passes its md5 check with both programs). Not looked into.
 
 ## Estimate
 
