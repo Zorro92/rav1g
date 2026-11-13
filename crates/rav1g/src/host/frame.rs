@@ -67,10 +67,11 @@ unsafe extern "C" {
     fn av1_frame_is_output(pbi: *const AV1Decoder) -> c_int;
 }
 
-/// Test player switch (-asyncclear): the per-frame clears of a slot's grids move from the decode thread
-/// to the completion thread. Off unless `av1_set_async_clear(1)` was called. See [`rav1g_setup_frame_begin`]
-/// for the rules.
-static ASYNC_CLEAR: AtomicI32 = AtomicI32::new(0);
+/// The per-frame clears of a slot's grids are done by the completion thread and not by the decode thread.
+/// On unless `av1_set_async_clear(0)` was called (the test player's -syncclear): on the console the clears
+/// are 7.6 ms of a heavy 4K frame on the decode thread, and the completion thread has the time for them
+/// (docs/phase2-rav1d.md, "Console after step 3"). See [`rav1g_setup_frame_begin`] for the rules.
+static ASYNC_CLEAR: AtomicI32 = AtomicI32::new(1);
 
 /// `av1_set_async_clear` (`dx/av1_perf.h`).
 #[unsafe(no_mangle)]
@@ -589,7 +590,7 @@ pub(crate) unsafe fn release_unsubmitted_frame(dec: *mut Av1Core) {
             td.sec_thread_data = std::ptr::null_mut();
         }
         // Its grids stay dirty and are not marked clean, so the next frame on this slot clears them itself,
-        // with or without -asyncclear.
+        // whichever thread does the clears otherwise.
         td.clear_pending = 0;
         (*dec).frame_data_pool.push(td_ptr);
     }
@@ -665,14 +666,14 @@ pub unsafe extern "C" fn rav1g_setup_frame_begin(
         cm.mi_grid_base = (*td.mode_info_grid).host_ptr.cast();
         cm.mi_grid_visible = cm.mi_grid_base;
         cm.mi_alloc_size = cm.mi_stride * ((cm.mi_rows + 31) & !31);
-        // Test player flag -asyncclear. The two per-frame clears of the slot (this grid and the intra
-        // iteration grid below) are sized from this frame, which the completion thread cannot know when it
+        // The clears on the completion thread (the default; not with -syncclear). The two per-frame clears
+        // of the slot (this grid and the intra iteration grid below) are sized from this frame, which the completion thread cannot know when it
         // returns the slot. The rule: after a frame's fence the completion thread clears exactly the bytes
         // that frame's setup cleared, and records the two sizes in the slot (clean_*). A frame skips a clear
         // only when the recorded size is exactly the size it would clear itself; then every byte of the grid
         // is what the clear on this thread would have left, inside the range and past it. Any other case
         // (first use of the slot, another frame size, a slot that went back without a completed frame, the
-        // flag off) clears here as before. The marks are taken off at once: from here on the grids are being
+        // switch off) clears here. The marks are taken off at once: from here on the grids are being
         // written.
         let async_clear = ASYNC_CLEAR.load(Ordering::Relaxed);
         let mi_grid_bytes = size_of::<*mut *mut MB_MODE_INFO>() * cm.mi_alloc_size as usize;
@@ -727,8 +728,7 @@ pub unsafe extern "C" fn rav1g_setup_frame_begin(
             // With -intrav2 nothing scans the iteration grid; av1_mi_push_block() writes the one entry per
             // block that gen_pred_blocks.hlsl reads.
             // The luma grid (4 bytes per entry) and the chroma grid right behind it: one range from the
-            // start of the buffer. -asyncclear: skipped when the completion thread left exactly this range
-            // cleared.
+            // start of the buffer. Skipped when the completion thread left exactly this range cleared.
             let iter_grid_bytes = td.iter_grid_offset_uv as usize * 5;
             if async_clear == 0 || clean_iter_bytes != iter_grid_bytes {
                 perf_t = super::perf::av1_perf_ticks();

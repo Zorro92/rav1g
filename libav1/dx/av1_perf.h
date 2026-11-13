@@ -45,8 +45,8 @@ enum {
 /* CPU timers. All values are milliseconds in the record. */
 enum {
   /* decode thread, blocked */
-  AV1_PERF_CPU_WAIT_SLOT = 0, /* waiting for a free pipeline slot (frame data); with -asyncclear the
-                                 slot comes back only after its clears, so that time is in here too */
+  AV1_PERF_CPU_WAIT_SLOT = 0, /* waiting for a free pipeline slot (frame data); the slot comes back only
+                                 after its clears (not with -syncclear), so that time is in here too */
   AV1_PERF_CPU_WAIT_SEC_SLOT, /* waiting for a second slot (extra coef buffer) */
   AV1_PERF_CPU_WAIT_FB,       /* waiting for a free reference frame buffer */
   AV1_PERF_CPU_WAIT_OUTPUT,   /* waiting in the player's output buffer callback */
@@ -72,7 +72,7 @@ enum {
   AV1_PERF_CPU_FENCE_WAIT,    /* blocked on the frame's fence event */
   AV1_PERF_CPU_GPU_LATENCY,   /* submit done to fence seen */
   AV1_PERF_CPU_NOTIFY,        /* time inside the frame-ready callback */
-  AV1_PERF_CPU_ASYNC_CLEAR,   /* -asyncclear: the slot's clears, done here after the frame's fence */
+  AV1_PERF_CPU_ASYNC_CLEAR,   /* the slot's clears, done here after the frame's fence (not with -syncclear) */
   /* the parser of phase 2 (AV1_PARSER_RAV1D), summed across the tile threads; parts of ENTROPY_SUM */
   AV1_PERF_CPU_SINK_LISTS,    /* the block lists at the end of a tile (the entropy decoder of libaom counts
                                  them at the same place, inside ENTROPY_SUM, without a timer of their own) */
@@ -320,8 +320,9 @@ const char *av1_shader_variant(void);
  * used the slot and before the slot goes back to the pool. The decode thread
  * then finds the slot already cleared; it still clears on its own when the
  * cleared size does not match the frame (first use, frame size change). The
- * decoded output is the same. Off by default. Change it only while no frame
- * is in flight. */
+ * decoded output is the same. On by default; av1_set_async_clear(0) puts the
+ * clears back on the decode thread (-syncclear). Change it only while no
+ * frame is in flight. */
 void av1_set_async_clear(int enable);
 
 /* Process-wide debugging aid of the test programs (-poisonmi, -poisonbuf),

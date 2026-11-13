@@ -30,12 +30,13 @@ import sys
 
 # The tasks, as lines of the player's task file: a small 8-bit vector, 10-bit with four threads and three
 # frame slots, a stream whose frames change their size (Matroska, the reduced back buffer, -r), spatial
-# layers with the timing run and the asynchronous clear.
+# layers with the timing run and the clears on the decode thread (the other tasks have them on the
+# completion thread, the default).
 TASKS = [
     '-i /aom/av1-1-b8-01-size-66x66.ivf -md5_frame_check -nopresent -frate -1',
     '-i /aom/av1-1-b10-00-quantizer-00.ivf -md5_frame_check -nopresent -frate -1 -t 4 -slots 3',
     '-i /aom/av1-1-b8-03-sizeup.mkv -md5_frame_check -nopresent -frate -1 -t 4 -r -lowmem',
-    '-i /aom/av1-1-b8-22-svc-L2T1.ivf -md5_frame_check -nopresent -frate -1 -gputime -asyncclear',
+    '-i /aom/av1-1-b8-22-svc-L2T1.ivf -md5_frame_check -nopresent -frate -1 -gputime -syncclear',
 ]
 ENDED = 'PLAYERSMOKE the player ended its launch'
 SHOWN = re.compile(r'LIBRARY |MD5 |ERROR|PLAYERSMOKE|Frame slots|Bye|No args')

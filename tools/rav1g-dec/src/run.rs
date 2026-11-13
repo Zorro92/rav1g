@@ -506,7 +506,7 @@ fn create_decoder(
         if task.cdefv1 { "cdef_filter (-cdefv1)" } else { "cdef_filter_v2" },
         if task.intrav2 { "intra_v2" } else { "intra_main + intra_filter" },
         if task.intraopt { " (intra_main_opt)" } else { "" },
-        if task.asyncclear { "-asyncclear" } else { "decode thread" },
+        if task.asyncclear { "completion thread" } else { "decode thread (-syncclear)" },
         task.threads,
         task.queue_size,
         device_size as f64 / (1024.0 * 1024.0),

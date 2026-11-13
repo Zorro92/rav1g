@@ -63,7 +63,8 @@ one commit each:
   completion thread; see
   [Pipeline slots and clears](#pipeline-slots-and-clears--slots--asyncclear). The changes
   are in `libav1/dx` and the test player. No shader changes. Without the flags the decoder
-  has two slots and clears on the decode thread, as upstream does. The same section covers
+  has two slots, and since package 0.2.140.0 it clears on the completion thread (`-syncclear`
+  for the decode thread, as upstream does). The same section covers
   the `MEMORY` log lines of a decoder creation (what was allocated, and which allocation
   failed) and the decoder's size, which the player takes from the stream (`-nofitsize`
   for the fixed 4096x2176 10-bit).
@@ -377,7 +378,7 @@ the start of every task say what is in effect.
 | Memory reductions | part 1, one back buffer shared by all frames (frame buffer pool 12 → 10, no measurable time cost); see [Smaller decoder](#smaller-decoder--lowmem) | `Low memory parts: 1 (default: 1 shared back buffer)` | `-lowmemparts 0`: none, every frame takes its back buffer from the pool (`Low memory parts: 0 (none, -lowmemparts 0)`); `-lowmemparts N`: exactly the parts in `N`; `-lowmem`: all three (`-lowmemparts 7`) |
 | Pipeline slots | 2 | `Frame slots: 2` | `-slots 3`, `-slots 4` |
 | Parser | the parse pass of rav1d, with its switches `nolfmask` and `tilethread` on | `Parser: the parse pass of rav1d (default; -parser c selects the entropy decoder of libaom)`, `Parser switches (-parseopt): nolfmask tilethread` | `-parser c`: the entropy decoder of libaom (C), `Parser: the entropy decoder of libaom (-parser c)`; `-parseopt` for the switches; see [Parser](#parser--parser) |
-| Clears | on the decode thread | `Clears: decode thread (original)` | `-asyncclear` |
+| Clears | on the GPU completion thread (since package 0.2.140.0) | `Clears: completion thread (default; -syncclear puts them on the decode thread)` | `-syncclear`: on the decode thread, `Clears: decode thread (-syncclear)`; `-asyncclear` names the default |
 | Intra prediction | upstream's shaders, `/Od` build | `Intra shaders: intra_main + intra_filter (original)`, `Intra main shader: intra_main (/Od, original)` | `-intrav2`, `-intraopt` |
 | Inter prediction | upstream's shaders, lists by type and block size | `Inter shaders: inter_main, inter_compound (original)` | `-interfast`: see [Inter fast path](#inter-fast-path--interfast) |
 
@@ -494,7 +495,7 @@ CPU timers (QueryPerformanceCounter, all in ms per frame):
 | `wait_fb`, `wait_image`, `wait_item` | blocked on the reference frame pool, the output image pool, the GPU work item pool |
 | `fence_wait`, `gpu_latency` | completion thread: time blocked on the frame's fence, and submit-to-fence time |
 | `notify` | time inside the frame-ready callback. With `-progress` this includes its two log writes per frame. |
-| `async_clear` | completion thread, `-asyncclear` only: the slot's clears after the frame's fence. Zero without the flag. |
+| `async_clear` | completion thread: the slot's clears after the frame's fence. Zero with `-syncclear`. |
 
 ### Log lines
 
@@ -1405,7 +1406,8 @@ elsewhere shorten the wall time per frame. Neither changes the decoded output.
 | Flag | Effect |
 | --- | --- |
 | `-slots N` | The decoder is created with `N` pipeline slots, `N` = 2, 3 or 4. Default 2. Any other value is refused: the task is skipped with `Invalid arguments string. -slots N is not allowed: the decoder takes 2 to 4 slots.` |
-| `-asyncclear` | The two large per-frame clears of a slot are done by the GPU completion thread after the fence of the frame that used the slot, before the slot goes back to the pool. The decode thread then finds the slot already cleared. |
+| `-asyncclear` | The two large per-frame clears of a slot are done by the GPU completion thread after the fence of the frame that used the slot, before the slot goes back to the pool. The decode thread then finds the slot already cleared. **The default since package 0.2.140.0**; the flag is still accepted and changes nothing. |
+| `-syncclear` | The clears on the decode thread, when it takes the slot for a frame: the default up to package 0.2.139. For an A/B of the two on one stream; both flags on one task line are an error of the task. |
 | `-nofitsize` | The decoder is created for 4096x2176 10-bit whatever the stream is, as it was up to package 0.2.7.0. Without it (the default) the decoder is created for the stream's largest frame size and bit depth, which makes every buffer smaller; see [Decoder size](#decoder-size--nofitsize). `-fitsize` is still accepted and changes nothing. |
 | `-lowmem` | All three memory reductions: one back buffer shared by all frames (which is the default on its own), and smaller per-slot shares of the mode info pool and of the coefficient buffer; see [Smaller decoder](#smaller-decoder--lowmem). |
 | `-lowmemparts N` | Exactly the reductions in `N`, the sum of 1 (shared back buffer), 2 (mode info shares) and 4 (coefficient shares). Default 1. `-lowmemparts 0` is none of them, `-lowmem` is `-lowmemparts 7`. |
@@ -1413,7 +1415,7 @@ elsewhere shorten the wall time per frame. Neither changes the decoded output.
 | `-budget N` | Only where the system gives the app no memory limit, which is the player's decoder code in `rav1g-dec -playersmoke` (CI on WARP): a model of the app's memory takes the place of `Windows::System::MemoryManager`, with a limit `N` MiB above what the process uses without a decoder, so the budget guard, the settle wait and the credit of a released decoder run there too; see [The app's memory as a model](#the-apps-memory-as-a-model--budget--retain). In the app the flag does nothing (one log line says so). |
 | `-retain N` | With `-budget`: a destroyed decoder leaves up to `N` MiB of its device buffers charged to the app until the next decoder exists, which is what the console does. |
 
-Without any of them the decoder has two slots, clears on the decode thread, is sized for
+Without any of them the decoder has two slots, clears on the completion thread, is sized for
 the stream and shares one back buffer (see
 [Defaults and opt-out flags](#defaults-and-opt-out-flags)). They are independent of each
 other and of `-cdefv1`, `-intrav2`, `-intraopt`, `-gputime`, `-nopresent` and the md5
@@ -1435,6 +1437,12 @@ flags.
   `D3D12 device or command queue (hr 0x887A0005)`, the default ones too. The
   [budget guard](#budget-guard-memory-refused) now refuses such a creation before it
   allocates.
+- **Since then (2026-11-13, package 0.2.138.0, rav1d's parse)**: with the parser of phase 2 the GPU
+  is busy about a third of the time, a slot is back long before the decode thread wants it, and
+  `-asyncclear` takes 7.6 ms of memsets off the decode thread of a heavy 4K 10-bit frame for 0.1 ms
+  of `wait_slot`: 29.4 to 38.5 frames per second on that clip
+  ([phase2-rav1d.md](phase2-rav1d.md#console-after-step-3-rav1d-is-the-default)). It is the default
+  now. The entry below is the measurement of 2026-11-11, when the GPU was the limit.
 - **`-asyncclear` is md5-exact on both clips and gives no gain with two slots.** The
   decode thread's clears (3.3 to 4.3 ms per frame) go away, and `wait_slot` grows by 1.5
   to 3.7 ms: with two slots the slot comes back just when the decode thread needs it, so
@@ -1449,12 +1457,12 @@ Every task's log says what is in effect:
 
 ```text
 Frame slots: 2
-Clears: decode thread (original)
+Clears: completion thread (default; -syncclear puts them on the decode thread)
 ```
 
 ```text
 Frame slots: 3
-Clears: off the decode thread (-asyncclear)
+Clears: decode thread (-syncclear)
 ```
 
 ### Slots

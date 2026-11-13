@@ -647,9 +647,11 @@ int AV1Decoder::DecodeOne() {
                   ? " (default: 1 shared back buffer)"
                   : created_lowmem_ ? " (1 shared back buffer, 2 mode info shares, 4 coefficient shares)"
                                     : " (none, -lowmemparts 0)");
-  // -asyncclear: the same rules as the shader flags above, independent of them and of -slots.
+  // -syncclear: the same rules as the shader flags above, independent of them and of -slots.
   rav1g_set_async_clear(params_.asyncclear_ != 0);
-  XB_LOGI << "Clears: " << (params_.asyncclear_ ? "off the decode thread (-asyncclear)" : "decode thread (original)");
+  XB_LOGI << "Clears: "
+          << (params_.asyncclear_ ? "completion thread (default; -syncclear puts them on the decode thread)"
+                                  : "decode thread (-syncclear)");
 
   // The experiments: set like the switches above. The shader build is fixed when the package is built.
   rav1g_set_lf_h_split(params_.lfhsplit_);

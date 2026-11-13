@@ -1273,6 +1273,37 @@ with.
 | paired timing (`parser_timing.py`) | `-parser c`, `-parser rav1d`, `all` | `-parser c`, `-parser rav1d` (default switches), `none`, `time`, and each switch alone on the 2160p stream |
 | the packages of the test player | `-parser rav1d` on a task line | rav1d without a flag; import tables unchanged (rav1d was already linked) |
 
+**The clears of a slot leave the decode thread.** A second measurement on the console, the same
+package and flags with rav1d and `-parseopt all`, on `d2`: a 300-frame cut, from 15 s, of the open
+stream `AV1/DVB-DASH/D_2.mp4` of the Netflix Open Content set (3840x2160, 10-bit HDR, 50 frames per
+second, about 46 Mbps, one tile a frame; 90 to 123 KB a frame, where `j4k40` has 77 KB). Two runs
+each:
+
+| | Clears on the decode thread | `-asyncclear` |
+| --- | ---: | ---: |
+| Frames per second out | 29.4, 29.3 | 38.5, 33.8 |
+| Memsets on the decode thread | 7.6 ms a frame | 0.01 ms |
+| `async_clear` on the completion thread | | 3.1 to 4.3 ms |
+| `wait_slot` | | about 0.1 ms |
+
+- The md5 matched with `-asyncclear`. The C parser on the same clip: 21.0 frames per second.
+- The GPU is busy about 30 % of the time on this clip, so a slot is back, cleared, long before the
+  decode thread asks for one. When `-asyncclear` was first timed (2026-11-11, two slots, the GPU as
+  the limit) the decode thread waited for the slot as long as it had cleared before, and the flag
+  gave nothing ([test-player.md](test-player.md#pipeline-slots-and-clears--slots--asyncclear)).
+- **So the clears on the completion thread are the default** of the library
+  (`rav1g::switches::set_async_clear`, `rav1g_set_async_clear`: on unless turned off), of `rav1g-dec`
+  and of the test player. `-syncclear` puts them back on the decode thread, for the A/B and as the
+  path of before; `-asyncclear` is still accepted and names the default. In CI every run that does
+  not say `-syncclear` now has the clears on the completion thread (the whole set with both parsers,
+  the cut streams, the order check, the memory check, the stage dumps, which `rust-equal` holds
+  against the C++ decoder, whose clears are on the decode thread); the other side has the whole set
+  once more in both Windows-decoder jobs, the memory check once more, and a task of the player
+  smoke.
+- What `d2` says about what is left: at 50 frames per second it needs 20 ms a frame. Its mean parse
+  is 24.5 ms, and every 24th frame is a large hidden frame whose parse takes up to about 195 ms, on
+  one tile, which no tile thread can split. Frames in parallel (step 4) are the lever for it.
+
 **The memory check** (`memory_check.py`). Its expected numbers do not change. What it holds is the
 video memory after every release (0 bytes with both parsers), the growth of the private bytes of
 the process from iteration to iteration, and the decisions of the budget guard; the device buffers of

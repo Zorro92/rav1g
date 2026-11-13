@@ -103,7 +103,11 @@ class CParameters {
     bool intrav2_;
     bool intraopt_;
     int slots_;
+    // The effective choice after Parse(): the per-frame clears of a slot on the completion thread, true
+    // unless -syncclear was given. -asyncclear names the default.
     bool asyncclear_;
+    bool asyncclear_flag_;
+    bool syncclear_;
     // The effective choice after Parse(): true unless -nofitsize was given.
     bool fitsize_;
     bool nofitsize_;

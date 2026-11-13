@@ -374,7 +374,7 @@ class PerfStats {
     Line(&out, "cpu submit", cpu[AV1_PERF_CPU_SUBMIT], 0.0, 0);
     Line(&out, "cpu memsets (frame + tile)", SumOf(w, AV1_PERF_CPU_MEMSET, AV1_PERF_CPU_MEMSET_TILE), mbytes.Mean(),
          "MB cleared per frame");
-    // -asyncclear: the clears moved to the completion thread. Zero without the flag.
+    // The clears on the completion thread, where they are by default. Zero with -syncclear.
     Line(&out, "cpu clears, completion thread", cpu[AV1_PERF_CPU_ASYNC_CLEAR], abytes.Mean(),
          "MB cleared per frame");
     Line(&out, "blocked, decode thread, all waits", blocked, Pct(blocked.Sum(), wall.Sum()), "% of wall");

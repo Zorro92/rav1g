@@ -681,7 +681,8 @@ void rav1g_set_intra_v2(bool enable);
 void rav1g_set_intra_opt(bool enable);
 
 /*
- The clears of a pipeline slot on the completion thread instead of the decode thread.
+ The clears of a pipeline slot on the completion thread instead of the decode thread. On by default;
+ `false` puts them back on the decode thread. The output is the same.
  */
 void rav1g_set_async_clear(bool enable);
 

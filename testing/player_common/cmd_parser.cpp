@@ -68,8 +68,11 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        &params_.intraopt_},
       {"slots", atInt, anOptional, "decoder pipeline slots (frames in flight), 2..4. Default 2", "",
        &params_.slots_},
-      {"asyncclear", atSingle, anOptional, "per-frame clears off the decode thread (same output)", "",
-       &params_.asyncclear_},
+      {"asyncclear", atSingle, anOptional,
+       "per-frame clears off the decode thread, on the GPU completion thread (the default; same output)", "",
+       &params_.asyncclear_flag_},
+      {"syncclear", atSingle, anOptional, "per-frame clears on the decode thread, as before the default changed", "",
+       &params_.syncclear_},
       {"fitsize", atSingle, anOptional,
        "create the decoder for the stream's size and bit depth (the default)", "fitsize", &params_.fitsize_},
       {"nofitsize", atSingle, anOptional, "create the decoder for 4096x2176 10-bit whatever the stream's size is",
@@ -212,6 +215,14 @@ int CParameters::Parse(one_task& args, std::string& Err) {
   }
   params_.parser_rav1d_ = params_.parser_ != "c";
 
+  // -syncclear: the clears on the decode thread. -asyncclear names the default; both on one line is an
+  // error of the task.
+  if (params_.syncclear_ && params_.asyncclear_flag_) {
+    Err += "-syncclear and -asyncclear are the two choices of one switch";
+    return -1;
+  }
+  params_.asyncclear_ = !params_.syncclear_;
+
   // -parseopt: words separated by commas; a word that is none of them is an error of the task. A word
   // that says how the parse is done (nolfmask, tilethread, none, default) replaces the default of the two;
   // time adds to whatever they are (rav1g::ParserOptions::from_words reads the list the same way).
@@ -350,7 +361,9 @@ void CParameters::Reset() {
   params_.intrav2_ = false;
   params_.intraopt_ = false;
   params_.slots_ = PLAYER_SLOTS_DEFAULT;
-  params_.asyncclear_ = false;
+  params_.asyncclear_ = true;
+  params_.asyncclear_flag_ = false;
+  params_.syncclear_ = false;
   params_.fitsize_ = true;
   params_.nofitsize_ = false;
   params_.lowmem_ = false;

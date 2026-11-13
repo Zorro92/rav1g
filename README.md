@@ -27,10 +27,11 @@ shader and a smaller memory footprint. Tested on Xbox Series consoles in UWP app
 the test player (`testing/uwp_dx12_player`).
 
 Defaults (test player and library): the rewritten CDEF shader, a decoder sized for the
-stream, one back buffer shared by all frames, two frames in flight. Each was md5-exact on
-the console; the upstream behaviour is `-cdefv1 -nofitsize -lowmemparts 0` in the test
-player. Everything else that was tried (`-slots 3`, `-lowmem`, `-asyncclear`, `-intrav2`,
-`-intraopt`) stays behind its flag. The columns below name the flags the runs were made
+stream, one back buffer shared by all frames, two frames in flight, rav1d's parse pass as
+the parser, and the per-frame clears of a slot on the GPU completion thread. Each was
+md5-exact on the console; the upstream behaviour is `-cdefv1 -nofitsize -lowmemparts 0
+-parser c -syncclear` in the test player. Everything else that was tried (`-slots 3`,
+`-lowmem`, `-intrav2`, `-intraopt`) stays behind its flag. The columns below name the flags the runs were made
 with; `-cdefv2`, `-fitsize` and the shared back buffer of `-lowmem` are the defaults now.
 
 4K 10-bit, 1 tile, 40 Mbps, 300 frames, on the console, no presentation (ranges are over

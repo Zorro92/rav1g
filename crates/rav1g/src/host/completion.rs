@@ -33,7 +33,8 @@ unsafe extern "C" {
     fn av1_frame_is_output(pbi: *const AV1Decoder) -> c_int;
 }
 
-/// Completion thread, -asyncclear: the frame that used `td` has completed on the GPU, so nothing reads
+/// Completion thread, unless the clears are the decode thread's (-syncclear): the frame that used `td`
+/// has completed on the GPU, so nothing reads
 /// the slot's grids any more, and the slot is not in the pool, so the decode thread cannot have it. Clears
 /// what the frame cleared at its setup; the next frame of the same size then starts on a slot that is
 /// already clean. Returns the bytes cleared.
@@ -198,7 +199,7 @@ unsafe fn completion_thread(dec: *mut Av1Core) {
                     }
                 }
                 td.sec_thread_data = std::ptr::null_mut();
-                // -asyncclear: the slot's grids are cleared here instead of on the decode thread. A second
+                // The slot's grids are cleared here instead of on the decode thread (not with -syncclear). A second
                 // slot went back above as it is: a frame uses only the coefficient and mode info shares of
                 // its second slot, not the grids, so that slot is as clean as it was.
                 let perf_clear_start = if perf_have_rec { perf_now() } else { 0 };

@@ -66,7 +66,7 @@ errors, the order check, `-poisonmi`, `-poisonbuf` and the set with `-interfast`
   rounded up to 128 and its bit depth, with two pipeline slots and the shared back buffer,
   CDEF runs through `cdef_filter_v2.hlsl`. The player's flags switch the same things:
   `-cdefv1`, `-nofitsize`, `-lowmemparts <n>`, `-lowmem`, `-slots <n>`, `-intrav2`,
-  `-intraopt`, `-asyncclear`, `-t <threads>`, `-limit <n>`.
+  `-intraopt`, `-syncclear`, `-parser c`, `-parseopt <list>`, `-t <threads>`, `-limit <n>`.
 - **The output path**: the decoder asks for an output image for every frame that is output
   and hands it back through the frame-ready callback; the frame is hashed there.
 - **The stream readers** of `testing/common` (IVF, WebM/Matroska, OBU, MP4), compiled into the program
@@ -139,7 +139,7 @@ minutes.
 `testing/conformance/player_smoke.py --tool <rav1g-dec.exe> --streams <dir> --out <dir>` is the check
 of CI: four tasks (a small 8-bit vector; 10-bit with four threads and three frame slots; a stream
 whose frames change size, from Matroska, with `-r -lowmem`; spatial layers with `-gputime
--asyncclear`), each of which has to end with `MD5 is OK`; the log has to name the Rust library
+-syncclear`), each of which has to end with `MD5 is OK`; the log has to name the Rust library
 (`LIBRARY rav1g ... the Rust host`) and have no error line; the launch has to end, and so does a
 launch without a task file, which says `No args were found`. The `rust` job runs it with the MSVC
 build and `rust-cross-run` with the build of Linux, whose C and C++ are compiled by clang as in the
@@ -201,7 +201,7 @@ rav1g-dec -sm6test
 | `-queue_size <n>` | output images in the pool (default 4) |
 | `-timeout <seconds>` | give up on a task after this time |
 | `-name <text>` | what the `BEGIN` and `RESULT` lines call the stream (default: its file name) |
-| `-cdefv1`, `-nofitsize`, `-lowmemparts <n>`, `-lowmem`, `-slots <n>`, `-intrav2`, `-intraopt`, `-asyncclear` | as in the [test player](test-player.md#defaults-and-opt-out-flags) |
+| `-cdefv1`, `-nofitsize`, `-lowmemparts <n>`, `-lowmem`, `-slots <n>`, `-intrav2`, `-intraopt`, `-syncclear` (`-asyncclear` is the default and accepted) | as in the [test player](test-player.md#defaults-and-opt-out-flags) |
 | `-lfhsplit <n>`, `-intraedgefix` | the [experiments](test-player.md#experiments) of the test player; with the `experiments` input the `rust` job runs the whole set with each, and with a program built with `--features uavsync` from the shaders of the uavsync package (it prints `SHADERS uavsync`) |
 | `-poisonmi`, `-poisonbuf` | debugging, off by default: the decoder fills the mode info pool (`-poisonmi`) or every buffer the CPU writes for the shaders (`-poisonbuf`) with the byte 0xA5 when it creates it, instead of leaving what the memory held. With `-poisonbuf` it also fills the constants of every stage again in every frame, right before the stage writes them (their memory is reused from frame to frame). What the decoder clears or initialises after the creation is as in a normal run. The output must be the same; a shader that reads bytes the CPU never wrote gives another one, or loses the device. The decoder passes both. See [Order check and poisoned buffers](#order-check-and-poisoned-buffers) |
 | `-interfast`, `-interfastlists` | the [inter fast path](test-player.md#inter-fast-path--interfast) of the test player: inter blocks listed by the fraction of their motion vectors (`inter_fast`, `inter_compound_fast`; with `-interfastlists` the original shaders on those lists), same output; the `rust` job decodes the whole set once more with `-interfast` on every push |

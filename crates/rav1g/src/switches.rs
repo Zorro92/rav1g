@@ -65,7 +65,8 @@ pub fn set_intra_opt(enable: bool) {
     unsafe { sys::av1_set_intra_opt(c_int::from(enable)) }
 }
 
-/// The clears of a pipeline slot on the completion thread instead of the decode thread.
+/// The clears of a pipeline slot on the completion thread instead of the decode thread. On by default;
+/// `false` puts them back on the decode thread. The output is the same.
 pub fn set_async_clear(enable: bool) {
     // SAFETY: sets a flag.
     unsafe { sys::av1_set_async_clear(c_int::from(enable)) }

@@ -970,6 +970,29 @@ jobs:
             --out out/conformance-interfast --threads 4 "--tool-args=-interfast" "--title=rav1g-dec with -interfast"
           if ($LASTEXITCODE -ne 0) { throw "conformance with -interfast: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
 
+      # The clears of a pipeline slot on the decode thread (-syncclear; docs/test-player.md, "Pipeline slots
+      # and clears"). Every other run has them on the completion thread, which is the default; this is the
+      # path of before, which stays as the switch's other side: the whole set once more with the flag has
+      # to give the results of expected.txt, and the memory check has to hold with it.
+      - name: Conformance and memory check with the clears on the decode thread (-syncclear)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $failed = @()
+          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/conformance-syncclear --threads 4 "--tool-args=-syncclear" "--title=rav1g-dec with -syncclear"
+          if ($LASTEXITCODE -ne 0) { $failed += "conformance with -syncclear: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
+          if (-not (Select-String -Path out/conformance-syncclear/lists/run001.log -Pattern 'clears decode thread \(-syncclear\)' -Quiet)) {
+            $failed += 'the decoder of the run with -syncclear does not report the clears on the decode thread'
+          }
+          if (-not (Select-String -Path out/conformance/lists/run001.log -Pattern 'clears completion thread' -Quiet)) {
+            $failed += 'the decoder of the run without the flag does not report the clears on the completion thread'
+          }
+          python testing/conformance/memory_check.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/memory-check-syncclear "--tool-args=-syncclear" "--title=rav1g-dec (cargo, MSVC) with -syncclear"
+          if ($LASTEXITCODE -ne 0) { $failed += "memory check with -syncclear: exit code $LASTEXITCODE" }
+          if ($failed.Count) { throw "with -syncclear: $($failed -join '; ')" }
+
       # The experiments (docs/test-player.md, "Experiments"): on a device that follows D3D each of them
       # leaves the output as it is, so the whole set is decoded again with each flag and has to give the
       # results of expected.txt, and once more with a decoder whose shaders are those of the uavsync
@@ -1218,6 +1241,7 @@ jobs:
             out/conformance-*/
             out/order-check/
             out/memory-check/
+            out/memory-check-syncclear/
             out/gputime-smoke/
             out/memory-lines/
             out/sm6test/
@@ -1569,7 +1593,8 @@ jobs:
 
       # The other checks of the rust job with this program (the comments are there): decode errors in cut
       # streams through the Rust interface and with the player's decoder code, the order check, the memory
-      # check, the part of the set with -poisonmi and with -poisonbuf, and the whole set with -interfast.
+      # check, the part of the set with -poisonmi and with -poisonbuf, and the whole set with -interfast
+      # and with -syncclear (the clears of a slot on the decode thread, the other side of that default).
       - name: Decode error in a cut stream, the rav1g-dec of the Linux build
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -1594,13 +1619,13 @@ jobs:
             --out out/memory-check "--title=rav1g-dec built on Linux (cargo xwin, clang-cl)"
           if ($LASTEXITCODE -ne 0) { throw "memory check with the rav1g-dec of the Linux build: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
 
-      - name: Conformance with -poisonmi, with -poisonbuf and with -interfast, the rav1g-dec of the Linux build
+      - name: Conformance with -poisonmi, with -poisonbuf, with -interfast and with -syncclear, the rav1g-dec of the Linux build
         if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           $part = '--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)'
           $runs = @(@{ name = 'poisonmi'; args = '-poisonmi'; only = $part }, @{ name = 'poisonbuf'; args = '-poisonbuf'; only = $part },
-            @{ name = 'interfast'; args = '-interfast'; only = '--only=' })
+            @{ name = 'interfast'; args = '-interfast'; only = '--only=' }, @{ name = 'syncclear'; args = '-syncclear'; only = '--only=' })
           $failed = @()
           foreach ($run in $runs) {
             python testing/conformance/run.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `

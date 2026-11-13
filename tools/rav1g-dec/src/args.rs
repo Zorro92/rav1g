@@ -69,6 +69,7 @@ pub struct Task {
     pub budget_mib: i64,
     pub intrav2: bool,
     pub intraopt: bool,
+    /// The per-frame clears of a slot on the completion thread: true unless -syncclear was given.
     pub asyncclear: bool,
     /// -lfhsplit <0|1|2>
     pub lfhsplit: i32,
@@ -129,7 +130,7 @@ impl Default for Task {
             budget_mib: -1,
             intrav2: false,
             intraopt: false,
-            asyncclear: false,
+            asyncclear: true,
             lfhsplit: 0,
             intraedgefix: false,
             poison: Poison::Off,
@@ -205,8 +206,9 @@ pub fn usage() {
     say!("  -t <n>                decoder threads (default 1)");
     say!("  -queue_size <n>       output images in the pool, 1..{} (default {})", QUEUE_SIZE_MAX, QUEUE_SIZE_DEFAULT);
     say!("  -timeout <seconds>    give up on a task after this time (exit code {})", EXIT_TIMEOUT);
-    say!("  -cdefv1 -nofitsize -lowmemparts <n> -lowmem -slots <n> -intrav2 -intraopt -asyncclear");
-    say!("                        as in the test player (docs/test-player.md); -cdefv2 and -fitsize are accepted");
+    say!("  -cdefv1 -nofitsize -lowmemparts <n> -lowmem -slots <n> -intrav2 -intraopt -syncclear");
+    say!("                        as in the test player (docs/test-player.md); -cdefv2, -fitsize and -asyncclear");
+    say!("                        (the default: the per-frame clears on the completion thread) are accepted");
     say!("  -budget <MiB>         the decoder is told the application has this much memory left for it: the budget");
     say!("                        guard of the creation (MEMORY budget and MEMORY REFUSED lines, with -v)");
     say!("  -lfhsplit <n>         horizontal loop filter: 1 even rows of blocks, a UAV barrier, odd rows; 2 every");
@@ -346,6 +348,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-intrav2" => task.intrav2 = true,
             "-intraopt" => task.intraopt = true,
             "-asyncclear" => task.asyncclear = true,
+            "-syncclear" => task.asyncclear = false,
             "-lfhsplit" => task.lfhsplit = number()?,
             "-intraedgefix" => task.intraedgefix = true,
             "-continue_on_error" => task.continue_on_error = true,

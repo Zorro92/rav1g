@@ -864,7 +864,8 @@ pub extern "C" fn rav1g_set_intra_opt(enable: bool) {
     switches::set_intra_opt(enable);
 }
 
-/// The clears of a pipeline slot on the completion thread instead of the decode thread.
+/// The clears of a pipeline slot on the completion thread instead of the decode thread. On by default;
+/// `false` puts them back on the decode thread. The output is the same.
 #[unsafe(no_mangle)]
 pub extern "C" fn rav1g_set_async_clear(enable: bool) {
     switches::set_async_clear(enable);
