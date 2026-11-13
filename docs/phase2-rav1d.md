@@ -25,9 +25,13 @@ of dav1d, BSD-2-Clause).
   The faster parser is the gain, not frame parallelism: a frame's parse needs the final CDFs of an earlier
   frame, and on the 1-tile 4K clips that chain limits two frame threads to 1.4 to 1.8 times one, three to
   at most 2.2.
-- **After phase 2 the GPU decides.** On the SVT low-delay 40 Mbps clip the GPU is busy about 31 ms per
-  frame, so 4K30 is within reach there; on the heaviest clip (`j4k40`) the GPU needs about 50 ms, and no
-  parser changes that.
+- **After phase 2 the GPU is not the limit either.** Measured on the console with `-gputime` (2026-11-12,
+  packages 0.2.116.2/.3 and 0.2.117.0, two runs each): the GPU is busy 18.5 ms per frame on the heaviest
+  clip (`j4k40`, p50 15.1 ms) and 12.1 ms on the SVT low-delay 40 Mbps clip, while the decode thread takes
+  50.3 and 43.5 ms, 42.6 and 34.7 of them in the parser. The figures of about 50 and 31 ms GPU time used
+  earlier came from `-gputimedetail`, whose per-stage timestamps and barriers inflate GPU time (same clip,
+  same shaders: 49.3 ms with `-gputimedetail`, 18.5 ms without). With the parser at about 20 ms, both
+  clips are projected under 33.3 ms.
 - **Memory:** with one frame parsed at a time the D3D12 buffers stay as they are. A second frame in parse
   costs one more slot (about 110 MiB at 4K 10-bit) until the shares of a slot are replaced by a shared
   pool; the measured frames fill 1 to 11 % of a share on average, the largest one 44 %.
@@ -439,10 +443,20 @@ parser would need 1.3 cores of work at 30 fps on `j4k40`, on one thread.
 
 ### What 4K30 then depends on
 
-The GPU. Console figures of the current build: `t40x1ld` GPU busy 30.7 to 32 ms per frame (27.3 fps
-today with three slots, limited by the decode thread at 36.6 ms); `j4k40` GPU busy about 50 ms (intra 21,
-inter 19). Phase 2 should bring the first to the GPU's rate, 31 to 32 fps. The second stays at about 20
-fps until intra and inter prediction get cheaper; that is outside this design.
+Measured on the console with `-gputime` (2026-11-12, the C++ reference package 0.2.117.0 and the two Rust
+packages, two runs each, ms per frame, mean):
+
+| Clip | Decode thread | of it, parser | Other decode-thread work | GPU busy |
+| --- | ---: | ---: | ---: | ---: |
+| `j4k40` | 50.3 | 42.6 | 7.7 | 18.5 |
+| `t40x1ld` | 43.5 | 34.7 | 8.8 | 12.1 |
+
+The GPU is busy well under 33.3 ms on both, so after phase 2 the decode thread decides: a parse of about
+20 ms (projected above) plus the other 8 to 9 ms of the decode thread (setup, memsets, recording) is about
+28 to 29 ms, under 33.3 ms with little margin, so the setup and memsets are the next CPU target after the
+parser. Earlier figures of about 50 ms (`j4k40`) and 31 ms (`t40x1ld`) GPU time came from
+`-gputimedetail`, which adds a timestamp and barrier per stage and inflates GPU time (same clip and
+shaders: 49.3 ms with it, 18.5 ms without); they are not the GPU's cost in normal decoding.
 
 ## Console and UWP
 
@@ -552,7 +566,7 @@ Console decision points: after step 3 (is the projected parse time real, and is 
 - **Thread order.** Out-of-order completion, references released early, errors in one frame while others
   are in parse. Step 4's repeated runs with varied thread counts are the test.
 - **Memory** until step 5: two frames in parse at 4K 10-bit only where a fourth slot fits.
-- **The GPU limit** on `j4k40` is not addressed here.
+- **The decode thread's other work** (about 8 ms per 4K frame: setup, memsets, recording) leaves little margin under 33.3 ms once the parser is about 20 ms; it is not addressed here.
 
 ### Estimate
 
