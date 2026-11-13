@@ -66,7 +66,7 @@
       <DisableSpecificWarnings>4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <!-- The headers of this build first, then the include directories of libav1 and uwp_common. -->
-      <AdditionalIncludeDirectories>$(ShaderHeaderRoot);$(RepoRoot)libav1;$(RepoRoot)libav1\build;$(RepoRoot)testing;$(RepoRoot)third_party\libwebm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ShaderHeaderRoot);$(RepoRoot)libav1;$(RepoRoot)libav1\build;$(RepoRoot)testing;$(RepoRoot)crates\rav1g\include;$(RepoRoot)third_party\libwebm;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <!-- As in libav1.vcxproj: no NDEBUG, so the library's asserts are compiled in, as they are in the player. -->
       <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;_UNICODE;UNICODE;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
@@ -155,6 +155,16 @@
     <ClCompile Include="$(RepoRoot)testing\common\webmdec.cc" />
     <!-- The capability report and the Shader Model 6 test (-sm6test), shared with the test player. -->
     <ClCompile Include="$(RepoRoot)testing\sm6test\sm6test.cpp" />
+    <!-- -playersmoke: the decoder code of the test player (testing/player_common), as the player runs it,
+         through rav1g.h on the C++ library of this program (rav1g_libav1.cpp). -->
+    <ClCompile Include="$(RepoRoot)testing\common\frame_outs.cpp" />
+    <ClCompile Include="$(RepoRoot)testing\player_common\cmd_parser.cpp" />
+    <ClCompile Include="$(RepoRoot)testing\player_common\decoder.cpp" />
+    <ClCompile Include="$(RepoRoot)testing\player_common\decoder_creator.cpp">
+      <PreprocessorDefinitions>RAV1G_PLAYER_NO_USAGE_EXIT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Include="$(RepoRoot)testing\player_common\rav1g_libav1.cpp" />
+    <ClCompile Include="player_smoke.cpp" />
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <!-- /p:Rav1gPrebuiltShaders: no shader is compiled here (see the item definitions above). The items are

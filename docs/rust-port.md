@@ -1293,6 +1293,20 @@ The throwaway runs of the player job on the way: 43351827977 (`QueryDosDeviceW` 
 (41 functions from `kernel32.dll` with `link.exe`), 43352944468 (`rav1g.dll` not allowed for its own
 program), 43353543992 (green).
 
+**First console result, and a fix (2026-11-12).** The package with the static Rust library (0.2.116.2)
+starts and decodes with matching md5: the two imports from `ntdll.dll` load. The reference package
+(0.2.116.0) did not work: `rav1g_libav1.cpp` wanted a command queue from the application, the player
+gives the decoder its device and no queue (the decoder always made its own), so the launch had no
+pipeline states; and the player then sat idle instead of ending the launch. Both are fixed: the
+reference takes a device without a queue, as the Rust library does, and a launch that cannot create its
+pipeline states says so and ends. Nothing of the Rust packages changed. That path had only been
+compiled, so CI runs it now: **`warp_decoder -playersmoke <directory>`** runs the decoder code of the
+player (`testing/player_common`: the task file, the creation with a device and no queue, the output
+pool, the md5 check) through `rav1g.h` on the C++ library, on WARP, with four tasks (8-bit, 10-bit with
+three slots, a stream that changes its size with `-r -lowmem`, two layers with `-gputime -asyncclear`);
+each has to end with `MD5 is OK`, the log must have no error line, and the launch has to end (the
+`conformance` job).
+
 **For the console** (the parent's): first whether the two Rust packages start at all (the two imports
 from `ntdll.dll`; the `LIBRARY` line is the first sign of life of the library), then the md5 set with
 each, then `-gputime` on the 2160p clips, the three packages one after the other with the same tasks:

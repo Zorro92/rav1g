@@ -43,7 +43,11 @@ using namespace Windows::Storage;
 using namespace Platform;
 #endif
 
+// For the stream readers (testing/common/tools_common.c). warp_decoder, which runs this file for its
+// -playersmoke, has its own.
+#ifndef RAV1G_PLAYER_NO_USAGE_EXIT
 extern "C" void usage_exit(void) { exit(EXIT_FAILURE); }
+#endif
 
 #if (WINAPI_FAMILY == WINAPI_FAMILY_APP)
 static std::string pstos(Platform::String ^ ps) {
@@ -195,11 +199,15 @@ int Decoders::DecodeLoop() {
   // The decoder's own log lines (MEMORY ...) go to the player's log, from the pipeline states on.
   rav1g_set_log_callback(AV1Decoder::LogLine, NULL);
   AV1Decoder::LogMemory(dx_resources_.dx12_device.Get(), "before the pipeline states");
-  // The decoder's device: the player's D3D12 device and queue, with the pipeline states of the decoder.
+  // The decoder's device: the player's D3D12 device with the pipeline states of the decoder. The player
+  // has no queue for it (PlayerWindow::Run): the decoder makes its own.
   dx_resources_.decoder_device = rav1g_device_create(dx_resources_.dx12_device.Get(),
                                                      dx_resources_.dx12_command_queue.Get(), CREATE_SHADERS_THREAD_CNT);
   if (!dx_resources_.decoder_device) {
     XB_LOGE << "Unable to create compute shaders: " << rav1g_last_error();
+    // Nothing can be decoded in this launch: it ends here, as it does behind the last task.
+    XB_LOGE << "No task was run. Bye";
+    if (display_) display_->AllJobDoneNotify();
     return -1;
   }
   // The pipeline states are created on threads and the first decoder creation waits for them. Waiting here

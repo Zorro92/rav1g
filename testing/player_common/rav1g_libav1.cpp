@@ -39,6 +39,8 @@ static_assert(RAV1G_MEMORY_GUARD_MARGIN == AV1_MEMORY_GUARD_MARGIN, "the guard m
 
 struct Rav1gDevice {
   ID3D12Device* device;
+  // Null when the application gave none: every decoder then makes a direct queue of its own, as the
+  // library always did for the player, which gives none.
   ID3D12CommandQueue* queue;
   // av1_create_pipeline_cache_handle
   void* pipelines;
@@ -76,8 +78,8 @@ Rav1gStatus rav1g_peek_stream_info(const uint8_t* data, size_t size, Rav1gStream
 }
 
 Rav1gDevice* rav1g_device_create(void* d3d12_device, void* d3d12_queue, uint32_t pipeline_threads) {
-  if (!d3d12_device || !d3d12_queue) {
-    last_error = "the reference build needs the application's D3D12 device and queue";
+  if (!d3d12_device) {
+    last_error = "the reference build needs the application's D3D12 device";
     return NULL;
   }
   void* pipelines = av1_create_pipeline_cache_handle(d3d12_device, (int)pipeline_threads);
@@ -89,7 +91,7 @@ Rav1gDevice* rav1g_device_create(void* d3d12_device, void* d3d12_queue, uint32_t
   device->device = static_cast<ID3D12Device*>(d3d12_device);
   device->queue = static_cast<ID3D12CommandQueue*>(d3d12_queue);
   device->device->AddRef();
-  device->queue->AddRef();
+  if (device->queue) device->queue->AddRef();
   device->pipelines = pipelines;
   return device;
 }
@@ -109,7 +111,7 @@ void* rav1g_device_d3d12_queue(const Rav1gDevice* device) { return device ? devi
 void rav1g_device_destroy(Rav1gDevice* device) {
   if (!device) return;
   av1_destroy_pipeline_cache_handle(device->pipelines);
-  device->queue->Release();
+  if (device->queue) device->queue->Release();
   device->device->Release();
   delete device;
 }

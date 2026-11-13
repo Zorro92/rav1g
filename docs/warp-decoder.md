@@ -48,6 +48,10 @@ The shader headers come from a Windows build (FXC): CI keeps them as the artifac
 What differs from `warp_decoder`:
 
 - The usage text names `rav1g-dec`; the lines the scripts read are the same.
+- `-playersmoke <directory>` (a flag of `warp_decoder` only): runs the decoder code of the test player
+  (`testing/player_common`) through `rav1g.h` on the C++ library, on the tasks of
+  `<directory>/args/args_av1.txt`, as the player does with its LocalState; the player's log goes to
+  stdout. CI runs four tasks with it (docs/rust-port.md, step 5, part 3).
 - `-capi` (a flag of `rav1g-dec` only): the decoder is used through its interface for C, the functions
   of `rav1g.h`, instead of the Rust interface (docs/rust-port.md, step 5); the output is the same, and
   the program says so in an `INTERFACE` line. CI decodes the whole set once more with it.

@@ -71,6 +71,9 @@ enum {
 // tools_common.c wants this from the program it is linked into.
 extern "C" void usage_exit(void) { exit(kExitUsage); }
 
+// player_smoke.cpp
+int PlayerSmoke(ID3D12Device* device, const char* root, int timeout_s);
+
 struct Task {
   std::string input;
   std::string name;           // -name, or the file name of the input: what the result line calls the stream
@@ -115,6 +118,7 @@ struct Globals {
   bool debug_layer = false;     // -debuglayer
   bool gpu_validation = false;  // -gpuvalidation
   bool sm6test = false;         // -sm6test
+  std::string player_smoke;     // -playersmoke <directory>
   std::string list;       // -list
 };
 
@@ -194,6 +198,9 @@ static void Usage() {
   Say("  -sm6test              run the Shader Model 6 test shaders on the device before the tasks, one 'SM6TEST ...'");
   Say("                        line per shader (docs/test-player.md); needs no stream: without -i and -list the");
   Say("                        program ends after the test");
+  Say("  -playersmoke <dir>    run the decoder code of the test player (testing/player_common) through rav1g.h on");
+  Say("                        the tasks of <dir>/args/args_av1.txt, as the player does in its LocalState; its log");
+  Say("                        goes to stdout. Needs no -i. Exit code 0: the player ended its launch, 2: it hung");
   Say("");
   Say("Exit code: 0 all tasks decoded and matched, 1 a frame or a frame count differs, 2 a decode error (or");
   Say("-sm6test could not run its test), 3 bad arguments or no device, 4 timeout. One 'RESULT ...' line per task");
@@ -319,6 +326,8 @@ static bool ParseArgs(const std::vector<std::string>& args, Task* task, Globals*
       globals->gpu_validation = true;
     } else if (globals && a == "-sm6test") {
       globals->sm6test = true;
+    } else if (globals && a == "-playersmoke") {
+      if (!value(&globals->player_smoke)) return false;
     } else if (globals && a == "-list") {
       if (!value(&globals->list)) return false;
     } else {
@@ -1328,8 +1337,8 @@ int main(int argc, char** argv) {
       Say("ERROR no tasks in the list %s", globals.list.c_str());
       return kExitUsage;
     }
-  } else if (globals.sm6test && base.input.empty()) {
-    // -sm6test alone: the test needs a device and no stream.
+  } else if ((globals.sm6test || !globals.player_smoke.empty()) && base.input.empty()) {
+    // -sm6test alone: the test needs a device and no stream. -playersmoke has its tasks in its directory.
   } else {
     if (!CheckTask(&base, &err)) {
       Say("ERROR %s", err.c_str());
@@ -1344,6 +1353,9 @@ int main(int argc, char** argv) {
 
   Device dev;
   if (!CreateDevice(globals, &dev)) return kExitUsage;
+  // -playersmoke: the player's decoder code does everything from here on itself, as in the player: its
+  // log callback, its pipeline states, its decoders.
+  if (!globals.player_smoke.empty()) return PlayerSmoke(dev.device.Get(), globals.player_smoke.c_str(), 600);
   // What the device reports about itself ("CAPS ..."), at every launch, and with -sm6test the Shader Model
   // 6 test shaders ("SM6TEST ..."), before anything of the decoder exists (testing/sm6test). A shader the
   // device refuses is a result of the test; the exit code changes only when the test itself broke.

@@ -705,6 +705,36 @@ jobs:
           enableCrossOsArchive: true
           fail-on-cache-miss: true
 
+      # The decoder code of the test player (testing/player_common), run as the player runs it: its task
+      # file, its decoder creation with a device and no queue, its output pool, its md5 check, through
+      # rav1g.h on the C++ library (rav1g_libav1.cpp), which is what the reference package of the player
+      # job has. The player itself is a UWP app and does not run here; warp_decoder -playersmoke is the
+      # part of it that uses the decoder. Every task has to end with "MD5 is OK", the log must have no
+      # error line, and the launch has to end.
+      - name: The test player's decoder code through rav1g.h on WARP (warp_decoder -playersmoke)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force conformance-streams/args, out/player-smoke | Out-Null
+          $tasks = @(
+            '-i /aom/av1-1-b8-01-size-66x66.ivf -md5_frame_check -nopresent -frate -1',
+            '-i /aom/av1-1-b10-00-quantizer-00.ivf -md5_frame_check -nopresent -frate -1 -t 4 -slots 3',
+            '-i /aom/av1-1-b8-03-sizeup.mkv -md5_frame_check -nopresent -frate -1 -t 4 -r -lowmem',
+            '-i /aom/av1-1-b8-22-svc-L2T1.ivf -md5_frame_check -nopresent -frate -1 -gputime -asyncclear')
+          $tasks | Set-Content conformance-streams/args/args_av1.txt -Encoding ascii
+          & out/warp_decoder/warp_decoder.exe -playersmoke (Resolve-Path conformance-streams).Path > out/player-smoke/player.log
+          $code = $LASTEXITCODE
+          Remove-Item conformance-streams/args -Recurse -Force
+          $lines = @(Get-Content out/player-smoke/player.log)
+          $lines | Where-Object { $_ -match 'LIBRARY |MD5 |ERROR|PLAYERSMOKE|Frame slots|Bye' } | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) { throw "warp_decoder -playersmoke: exit code $code (2: the player did not end its launch)" }
+          if (-not @($lines | Where-Object { $_ -match 'LIBRARY libav1' }).Count) { throw 'No LIBRARY line of the C++ library in the player log' }
+          $errors = @($lines | Where-Object { $_ -match ':ERROR:|:FATAL:' })
+          if ($errors.Count) { throw "$($errors.Count) error lines in the player log; the first: $($errors[0])" }
+          $ok = @($lines | Where-Object { $_ -match 'MD5 is OK' }).Count
+          if ($ok -ne $tasks.Count) { throw "$ok of $($tasks.Count) tasks of the player ended with 'MD5 is OK'" }
+          "## Test player decoder code through rav1g.h on WARP", '', "$ok of $($tasks.Count) tasks: MD5 is OK; the launch ended.", '' >> $env:GITHUB_STEP_SUMMARY
+
       - name: Decode every stream on WARP and compare with expected.txt
         shell: pwsh
         run: |
@@ -888,6 +918,7 @@ jobs:
             out/gputime-smoke/
             out/memory-lines/
             out/sm6test/
+            out/player-smoke/
             out/msbuild.log
             out/msbuild-uavsync.log
           if-no-files-found: warn
