@@ -1208,6 +1208,12 @@ interface and through `rav1g.h`, each plain and with flag sets (`-intrav2 -inter
 -slots 4`; `-gputimedetail -slots 3 -poisonbuf -t 4`, with `-capi` also `-interfast -asyncclear`), 244
 of 244 every time; a refused creation (`-budget 5`).
 
+Parts 1 and 2 on CI (run 43350624092, commit 43cbb24): all jobs green: `rav1g-dec` 251 of 251 on WARP
+through the Rust interface and 251 of 251 through `rav1g.h` (`-capi`), the order check, 137 of 137 with
+`-poisonmi` and with `-poisonbuf`, md5 and stage dumps equal to `warp_decoder`, the "MEMORY" lines equal,
+251 of 251 with the program of the Linux build, the header check, and the app container probe of the
+Linux build (99 functions of 30 DLLs, of `ntdll.dll` the two); `D3D12 DEVICE REMOVALS: 0` in every pass.
+
 #### Part 3: the UWP test player on the Rust library
 
 **The player uses the decoder through `rav1g.h` and nothing else** (`testing/player_common/decoder.cpp`,
@@ -1254,9 +1260,11 @@ as before.
   desktop DLLs, and linked as described there.
 - **The clang build is a DLL** (`/p:Rav1gRustDll=<directory>`), a deviation from "the player links the
   static library". The C of clang with link time optimisation is LLVM bitcode, which `link.exe` cannot
-  read. `lld-link` can, but the player's own objects are `/GL` objects of MSVC, which `lld-link` cannot
-  read, and it would have to link a C++/CX program with its Windows metadata (`/WINMD`), which was not
-  tried: the risk and the time were against it. So `lld-link` links the Rust and the C into
+  read. `lld-link` can, but it cannot link the player: tried in throwaway run 43355979785 with the
+  clang build as a static library and the player's objects compiled without `/GL` (which `lld-link`
+  cannot read either), `lld-link` 20.1.8 took the two options of a C++/CX link that write the Windows
+  metadata of the program's classes for files (`could not open '/WINMD'`, `could not open
+  '/WINMDFILE:...'`): it does not have them. So `lld-link` links the Rust and the C into
   `rav1g.dll` (`cargo rustc --crate-type cdylib`), with `WindowsApp.lib` first (the `LINK` variable,
   which `lld-link` reads in front of its arguments), `/APPCONTAINER`, the import libraries of the app
   runtime (the `store` directory of the toolset), and with nine functions of the C exported next to
@@ -1274,6 +1282,16 @@ as before.
   None imports from `kernel32.dll` or from the desktop runtime.
 - **Not removed yet:** `libav1/dx/*.cpp`, `warp_decoder` and the `rust-equal` job stay until the Rust
   packages have been checked on the console; so does the host pool as it is.
+
+Part 3 on CI (run 43354668049, commit 1394527): all 14 jobs green. The player job (5 min) has the three
+packages, versions 0.2.113.0, 0.2.113.2 and 0.2.113.3, each with the checks above. `rav1g-dec` 251 of 251
+on WARP through the Rust interface and 251 of 251 through `rav1g.h`, the order check, 137 of 137 with
+`-poisonmi` and with `-poisonbuf`, md5 of every frame and the stage dumps of 7 streams equal to
+`warp_decoder`, the "MEMORY" lines of the ten configurations equal, the timing smoke test, 251 of 251
+with the program of the Linux build; `D3D12 DEVICE REMOVALS: 0` in every pass of the three decoders.
+The throwaway runs of the player job on the way: 43351827977 (`QueryDosDeviceW` unresolved), 43352281782
+(41 functions from `kernel32.dll` with `link.exe`), 43352944468 (`rav1g.dll` not allowed for its own
+program), 43353543992 (green).
 
 **For the console** (the parent's): first whether the two Rust packages start at all (the two imports
 from `ntdll.dll`; the `LIBRARY` line is the first sign of life of the library), then the md5 set with

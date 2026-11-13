@@ -353,9 +353,10 @@ jobs:
 
       # The C compiled by clang-cl with full link time optimisation (the build that is level with the
       # MSBuild library in the tile threads on WARP; docs/rust-port.md, "Tile decode time"). Its objects are
-      # LLVM bitcode, which the player's link.exe cannot read; and lld-link, which can, cannot read the /GL
-      # objects the player is made of, and would have to link a C++/CX program with its Windows metadata,
-      # which was not tried. So the library is linked by lld-link into a DLL, rav1g.dll, with the
+      # LLVM bitcode, which the player's link.exe cannot read; and lld-link, which can, cannot link the
+      # player: it reads neither the /GL objects the player is made of nor the options that write the
+      # Windows metadata of a C++/CX program (/WINMD; docs/rust-port.md, step 5, part 3). So the library
+      # is linked by lld-link into a DLL, rav1g.dll, with the
       # functions of rav1g.h and the few functions of the C that the player's stream readers call, and
       # the player links its import library. WindowsApp.lib is first on that
       # link (LINK, which lld-link reads in front of its arguments), the runtime is the app runtime
