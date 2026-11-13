@@ -247,6 +247,23 @@ fn main() {
     let mut c_speed = base_build(&repo, &shaders);
     c_speed.opt_level(2);
     let lto = lto();
+    // What built the C, for the version text of the library (rav1g_version of rav1g.h): the logs of a
+    // timing run then say which build of the entropy decoder they are of.
+    println!(
+        "cargo:rustc-env=RAV1G_C_BUILD={}, {}, {} runtime",
+        if c_size.get_compiler().is_like_clang_cl() { "clang-cl" } else { "MSVC" },
+        match lto {
+            Lto::Off => "no link time optimisation",
+            Lto::Msvc => "/GL",
+            Lto::Thin => "thin LTO",
+            Lto::Full => "full LTO",
+        },
+        if env::var("CARGO_CFG_TARGET_FEATURE").is_ok_and(|features| features.split(',').any(|f| f == "crt-static")) {
+            "static"
+        } else {
+            "DLL"
+        }
+    );
     for build in [&mut c_size, &mut c_speed] {
         match lto {
             Lto::Off => {}

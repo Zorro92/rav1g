@@ -136,7 +136,8 @@ one commit each:
 ## Build
 
 `.github/workflows/build.yml` runs on every push to `main` that touches more than docs, and
-on demand. It builds `av1xbox.sln` (the player and its `uwp_common`/`libav1` dependencies)
+on demand. It builds `av1xbox.sln` (the player and its `uwp_common`/`libav1` dependencies;
+the player uses the decoder through `crates/rav1g/include/rav1g.h`)
 as Release x64 with MSBuild, the `v145` toolset and the `10.0.26100.0` Windows SDK. The
 minimum Windows version is overridden to `10.0.17763.0`. Upstream FXC/Shader Model 5.0
 compute shader settings are unchanged, and with `-cdefv1` and without `-intrav2` and
@@ -156,6 +157,17 @@ gh run list --workflow build.yml --limit 5
 gh run watch <run-id> --exit-status
 gh run download <run-id> --name rav1g-testplayer-x64-<run-id> --dir rav1g-testplayer
 ```
+
+Since 2026-11-12 a run builds three packages of the same player and the same identity, which
+differ in the decoder library behind the player ([rust-port.md](rust-port.md), step 5, part 3):
+`rav1g-testplayer-x64-<run-id>` (version `0.2.<run number>.0`, the C++ library: the reference),
+`rav1g-testplayer-rust-msvc-x64-<run-id>` (`.2`, the Rust library with the C of MSVC) and
+`rav1g-testplayer-rust-clang-x64-<run-id>` (`.3`, the Rust library as `rav1g.dll` with the C of
+clang). A higher revision installs over a lower one and keeps LocalState. The log of a launch
+names its library in a `LIBRARY` line before the pipeline states. The two Rust artifacts have the
+package, the certificate, `SOURCES.txt` (with a `Variant:` line), the licences, the build log and
+`imports/` (the DLLs the programs of the package import from, checked against
+`testing/uwp_imports/player-dlls-allow.txt`); the listings and the survey are in the first only.
 
 The artifact `rav1g-testplayer-x64-<run-id>` contains:
 
@@ -1718,7 +1730,9 @@ buffers); the difference is the palette and intra v2 buffers, see
 - **dxgi**: `IDXGIAdapter3::QueryVideoMemoryInfo` for the adapter of the decoder's device,
   local and non-local segment group. If the adapter or a query is not available the line
   says so with the HRESULT and the creation goes on.
-- The host pool is ordinary memory of the player (`std::vector`), not D3D12 memory.
+- The host pool is ordinary memory, not D3D12 memory. Since the player uses the decoder through
+  `rav1g.h` (2026-11-12) it belongs to the decoder, which allocates it at its creation and frees it
+  when it is destroyed; before that it was a `std::vector` of the player, freed at the next creation.
 
 The player's output images are allocated at the first frame of a size, all free images of
 the pool at once:
@@ -1858,12 +1872,12 @@ What is left is how the system charges the app:
   after the GPU thread is joined, one after the buffers of each memory type are released
   (the mapped ones first, the default-heap ones last), one at the end. Each has the
   `dxgi` usage and what the app's budget callback says is left.
-- After a decoder and its output pool are released, and before the next host pool is
-  allocated, the player waits until the app's memory is within 16 MiB of what it was at
+- After a decoder and its output pool are released, and before the next decoder is
+  created, the player waits until the app's memory is within 16 MiB of what it was at
   the first task of the launch, at most 2 s, checking every 20 ms.
 - The budget guard no longer refuses at once (see [Budget guard](#budget-guard-memory-refused)).
 - The pipeline states are waited for before the first task
-  (`av1_wait_pipeline_cache_handle`, new in `aom/aom_decoder.h`).
+  (`rav1g_device_wait_pipelines`; `av1_wait_pipeline_cache_handle` in the C++ library).
 - The task's md5 state and timing records are released at the end of the task; the md5
   file being saved is closed there.
 
@@ -1878,9 +1892,9 @@ launch. In the order they appear:
 | `before the pipeline states`, `after the pipeline states` | Once per launch, around the creation of the compute pipeline states. |
 | `task start` | Before the task opens its stream. |
 | `stream reader at the first key frame` | The reader thread runs, the first key frame is read. |
-| `before the decoder is destroyed`, `after the decoder was destroyed` | Around `aom_codec_destroy`, when the task needs another decoder, or at the end of a task that failed or had `-r`. The decoder's `MEMORY destroy` lines are in between. |
+| `before the decoder is destroyed`, `after the decoder was destroyed` | Around `rav1g_decoder_destroy`, when the task needs another decoder, or at the end of a task that failed or had `-r`. The decoder's `MEMORY destroy` lines are in between. |
 | `before the output pool is released`, `after the output pool was released` | The textures and readback buffers of the decoder before. |
-| `after the host pool was released` | The player's host pool of the decoder before. |
+| `after the host pool was released` | Only in packages before 2026-11-12, where the host pool was the player's: now it goes with the decoder, in front of `after the decoder was destroyed`. |
 | `settle after the release` | A line of its own, see below; then `after the settle wait`. |
 | `before the decoder`, `after the decoder`, `after the failed decoder creation` | Around the creation, as before (no `dxgi` twin: the decoder's own `dxgi` lines are there). |
 | `decoding, first frame out`, `decoding, 30 frames out` | From the decode loop, after the decode call that follows the first and the 30th output frame. The output pool has its images at the first. |
@@ -1903,7 +1917,6 @@ MEMORY destroy end, command queue, list and allocators released: dxgi local usag
 MEMORY app after the decoder was destroyed: usage N.N MiB of limit 1024.0 MiB, N.N MiB left
 MEMORY app before the output pool is released: ...
 MEMORY app after the output pool was released: ...
-MEMORY app after the host pool was released: ...
 MEMORY app settle after the release: usage N.N MiB -> N.N MiB in N ms; without a decoder the app used N.N MiB at the first task of the launch, N.N MiB more are charged now (returned)
 MEMORY app after the settle wait: ...
 ```

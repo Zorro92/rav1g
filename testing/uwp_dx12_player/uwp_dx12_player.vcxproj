@@ -216,7 +216,7 @@
     <ClCompile>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <PrecompiledHeaderOutputFile>$(IntDir)pch.pch</PrecompiledHeaderOutputFile>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(SolutionDir)libav1\build;$(SolutionDir)libav1;$(SolutionDir)third_party\libwebm;$(SolutionDir)testing;$(IntermediateOutputPath);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(SolutionDir)crates\rav1g\include;$(SolutionDir)libav1\build;$(SolutionDir)libav1;$(SolutionDir)third_party\libwebm;$(SolutionDir)testing;$(IntermediateOutputPath);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
       <PreprocessorDefinitions>_DEBUG;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
@@ -229,11 +229,46 @@
     <ClCompile>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <PrecompiledHeaderOutputFile>$(IntDir)pch.pch</PrecompiledHeaderOutputFile>
-      <AdditionalIncludeDirectories>$(ProjectDir);$(SolutionDir)libav1\build;$(SolutionDir)libav1;$(SolutionDir)third_party\libwebm;$(SolutionDir)testing;$(IntermediateOutputPath);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(SolutionDir)crates\rav1g\include;$(SolutionDir)libav1\build;$(SolutionDir)libav1;$(SolutionDir)third_party\libwebm;$(SolutionDir)testing;$(IntermediateOutputPath);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
       <PreprocessorDefinitions>NDEBUG;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
+  <!-- The decoder behind rav1g.h is the Rust library instead of the C++ library of the solution
+       (docs/rust-port.md, step 5).
+
+       /p:Rav1gRustLib=<directory>: the static library, rav1g.lib, with the two libraries of the C
+       (rav1g_c.lib, rav1g_c_speed.lib; objects of /GL, compiled by this link). The functions of
+       Windows have to come from the API sets of WindowsApp.lib, as they do for the rest of the
+       player: a program that imports from kernel32.dll may not load in the console's app container.
+       Two things see to that. rav1g.lib is given without the import members for desktop DLLs that
+       the windows crates put into it (testing/uwp_imports/prune_import_members.py): the linker
+       looks for a function first in the library that asked for it. And WindowsApp.lib stands right
+       behind the decoder's libraries, in front of ntdll.lib, userenv.lib and kernel32.lib, which
+       are there for functions of Rust's standard library that are in the objects the linker loads
+       and not in the program it writes (file and pipe calls, the home directory, QueryDosDeviceW).
+       The check of the program's imports in CI (testing/uwp_imports) fails when a function of
+       kernel32.dll does get into the program.
+
+       /p:Rav1gRustDll=<directory>: the library as a DLL (rav1g.dll with rav1g.dll.lib), which is in
+       the package next to the program: the build whose C is compiled by clang with link time
+       optimisation, which only lld-link can link. -->
+  <ItemDefinitionGroup Condition="'$(Rav1gRustLib)'!=''">
+    <Link>
+      <AdditionalDependencies>$(Rav1gRustLib)\rav1g.lib;$(Rav1gRustLib)\rav1g_c.lib;$(Rav1gRustLib)\rav1g_c_speed.lib;WindowsApp.lib;ntdll.lib;userenv.lib;kernel32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Rav1gRustDll)'!=''">
+    <Link>
+      <AdditionalDependencies>$(Rav1gRustDll)\rav1g.dll.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup Condition="'$(Rav1gRustDll)'!=''">
+    <None Include="$(Rav1gRustDll)\rav1g.dll">
+      <Link>rav1g.dll</Link>
+      <DeploymentContent>true</DeploymentContent>
+    </None>
+  </ItemGroup>
   <ItemGroup>
     <Image Include="Assets\LockScreenLogo.scale-200.png" />
     <Image Include="Assets\SplashScreen.scale-200.png" />

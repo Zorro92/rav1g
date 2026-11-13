@@ -325,10 +325,19 @@ pub extern "C" fn rav1g_last_error() -> *const c_char {
     LAST_ERROR.with(|last| last.borrow().as_ptr())
 }
 
-/// The version of the library, "0.4.0".
+/// The version of the library and what it was built with, for a log:
+/// "rav1g 0.4.0, the Rust host; entropy decoder: MSVC, /GL, DLL runtime".
 #[unsafe(no_mangle)]
 pub extern "C" fn rav1g_version() -> *const c_char {
-    concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr().cast()
+    static TEXT: std::sync::OnceLock<CString> = std::sync::OnceLock::new();
+    TEXT.get_or_init(|| {
+        c_string(&format!(
+            "rav1g {}, the Rust host; entropy decoder: {}",
+            env!("CARGO_PKG_VERSION"),
+            crate::sys::C_BUILD
+        ))
+    })
+    .as_ptr()
 }
 
 /// Reads the sequence header of a temporal unit, without a decoder.

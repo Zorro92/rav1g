@@ -22,7 +22,9 @@
 #include <mutex>
 #include <memory>
 #include <atomic>
-#include "aom/aom_decoder.h"
+
+// The samples of an output image; the numbers are those of Rav1gImageFormat (rav1g.h).
+typedef enum { fbtNone = -1, fbt8bit = 0, fbt10bit, fbt10x3 } frame_buffer_type;
 
 #include <wrl.h>
 #include <wrl/client.h>

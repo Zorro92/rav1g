@@ -28,8 +28,6 @@
 #include "common\log.h"
 #include "cmd_parser.h"
 #include "decoder.h"
-#include "aom/aom.h"
-#include "aom/aom_decoder.h"
 
 #include "common/stream_reader.h"
 #include "decoder_creator.h"
@@ -47,23 +45,6 @@ using namespace Platform;
 
 extern "C" void usage_exit(void) { exit(EXIT_FAILURE); }
 
-#define ERR_DESC(x) \
-  { x, #x }
-struct error_decript {
-  int err;
-  const char* err_string;
-};
-const error_decript error_decripts[] = {ERR_DESC(AOM_CODEC_OK),
-                                        ERR_DESC(AOM_CODEC_ERROR),
-                                        ERR_DESC(AOM_CODEC_MEM_ERROR),
-                                        ERR_DESC(AOM_CODEC_ABI_MISMATCH),
-                                        ERR_DESC(AOM_CODEC_INCAPABLE),
-                                        ERR_DESC(AOM_CODEC_UNSUP_BITSTREAM),
-                                        ERR_DESC(AOM_CODEC_CORRUPT_FRAME),
-                                        ERR_DESC(AOM_CODEC_INVALID_PARAM),
-                                        ERR_DESC(AOM_CODEC_UNSUP_FEATURE)};
-const int errors_size = sizeof(error_decripts) / sizeof(error_decript);
-
 #if (WINAPI_FAMILY == WINAPI_FAMILY_APP)
 static std::string pstos(Platform::String ^ ps) {
   std::string s;
@@ -72,13 +53,6 @@ static std::string pstos(Platform::String ^ ps) {
   return s;
 }
 #endif
-
-const char* GetVpxErrorString(int err) {
-  for (int i = 0; i < errors_size; i++) {
-    if (error_decripts[i].err == err) return error_decripts[i].err_string;
-  }
-  return "Unspecified error";
-}
 
 // The log callback of the capability report and the Shader Model 6 test (testing/sm6test).
 static void Sm6LogLine(void* priv, const char* line) {
@@ -216,20 +190,23 @@ int Decoders::DecodeLoop() {
     if (display_) display_->AllJobDoneNotify();
     return 0;
   }
+  // Which library this player has behind rav1g.h, for the logs of timing runs.
+  XB_LOGI << "LIBRARY " << rav1g_version();
   // The decoder's own log lines (MEMORY ...) go to the player's log, from the pipeline states on.
-  av1_set_log_callback(AV1Decoder::LogLine, NULL);
+  rav1g_set_log_callback(AV1Decoder::LogLine, NULL);
   AV1Decoder::LogMemory(dx_resources_.dx12_device.Get(), "before the pipeline states");
-  dx_resources_.dx12_psos =
-      av1_create_pipeline_cache_handle(dx_resources_.dx12_device.Get(), CREATE_SHADERS_THREAD_CNT);
-  if (!dx_resources_.dx12_psos) {
-    XB_LOGE << "Unable to create compute shaders";
+  // The decoder's device: the player's D3D12 device and queue, with the pipeline states of the decoder.
+  dx_resources_.decoder_device = rav1g_device_create(dx_resources_.dx12_device.Get(),
+                                                     dx_resources_.dx12_command_queue.Get(), CREATE_SHADERS_THREAD_CNT);
+  if (!dx_resources_.decoder_device) {
+    XB_LOGE << "Unable to create compute shaders: " << rav1g_last_error();
     return -1;
   }
   // The pipeline states are created on threads and the first decoder creation waits for them. Waiting here
   // puts their memory (about 84 MiB of the app's on the console, once per launch) in front of the first
   // "MEMORY app before the decoder" line instead of inside that creation. A state that failed is reported
   // by the decoder creation, as before.
-  av1_wait_pipeline_cache_handle(dx_resources_.dx12_psos);
+  rav1g_device_wait_pipelines(dx_resources_.decoder_device);
   AV1Decoder::LogMemory(dx_resources_.dx12_device.Get(), "after the pipeline states");
   decoder_ = std::shared_ptr<AV1Decoder>(new AV1Decoder(dx_resources_, display_, &stop_decode_));
   for (std::vector<one_task>::iterator iter = arg_lists.begin(); iter != arg_lists.end() && !stop_; iter++) {
@@ -257,7 +234,7 @@ int Decoders::DecodeLoop() {
   // finished all tasks
   decoder_.reset();
   if (display_) display_->AllJobDoneNotify();
-  av1_destroy_pipeline_cache_handle(dx_resources_.dx12_psos);
-  dx_resources_.dx12_psos = 0;
+  rav1g_device_destroy(dx_resources_.decoder_device);
+  dx_resources_.decoder_device = 0;
   return 0;
 }

@@ -36,9 +36,9 @@
 #include "cmd_parser.h"
 #include "common/utils.h"
 #include "common/stream_reader.h"
-#include "aom/aom_codec.h"
-#include "aom/aom_decoder.h"
-#include "aom/aomdx.h"
+// The decoder, through its interface for C (crates/rav1g/include): the Rust library, or the C++ library
+// behind the same functions (rav1g_libav1.cpp).
+#include "rav1g.h"
 #include "common/frame_outs.h"
 
 #include "common/md5_utils.h"
@@ -55,13 +55,6 @@
 
 #define STREAM_READER_CACHE_SIZE 20
 
-#define CB_OUTPUT 1
-#if CB_OUTPUT
-#define ASYNC_OUTPUT 0
-#else
-#define ASYNC_OUTPUT 1
-#endif
-
 // using namespace DirectX;
 using namespace Microsoft::WRL;
 
@@ -74,11 +67,12 @@ interface DisplayCallbacks;
 typedef struct d3d_resources {
   ComPtr<ID3D12Device> dx12_device;
   ComPtr<ID3D12CommandQueue> dx12_command_queue;
-  void* dx12_psos;
+  // The decoder's device on them: the compute pipeline states (rav1g_device_create).
+  Rav1gDevice* decoder_device = nullptr;
   d3d_resources(d3d_resources& other) {
     dx12_device = other.dx12_device;
     dx12_command_queue = other.dx12_command_queue;
-    dx12_psos = other.dx12_psos;
+    decoder_device = other.decoder_device;
   };
   d3d_resources(ID3D12Device* dx12_device, ID3D12CommandQueue* dx12_command_queue) {
     this->dx12_device = dx12_device;
@@ -89,10 +83,10 @@ typedef struct d3d_resources {
 class Md5Checker {
  public:
   int Initialize(const char* md5_file, bool for_stream, uint32_t start_frame);
-  int Put(aom_image_t* img);
+  int Put(const Rav1gFrame* img);
   void Finalize();
   uint32_t ShowResult(uint32_t fatal_error);
-  static void Unpack10x3(uint8_t* ptr_src, uint8_t* ptr_trg, int width_in_pix);
+  static void Unpack10x3(const uint8_t* ptr_src, uint8_t* ptr_trg, int width_in_pix);
 
  private:
   int ParseMd5File(const char* md5_file);
@@ -112,7 +106,7 @@ class Md5Saver {
   ~Md5Saver() {
     if (file_) fclose(file_);
   }
-  int Put(aom_image_t* img);
+  int Put(const Rav1gFrame* img);
 
  private:
   std::string md5_file_;
@@ -156,7 +150,7 @@ class BufferLocker {
     cv_.wait(lock, [this] { return this->got_last_frame_; });
   }
 
-  int Push(aom_image_t* img);
+  int Push(const Rav1gFrame* img);
   std::shared_ptr<OutBufferWrapper> Pop();
   int Drops() const { return frame_dropped_; }
   double FRate() { return current_frate_; }
@@ -166,8 +160,8 @@ class BufferLocker {
   }
   int hasFreeBuffers() { return buffers_pool_->GetSize() > 0; }
 
-  int SaveToFile(aom_image_t* img, bool one_frame);
-  int GetBufferInt(size_t buf_size, uint16_t w, uint16_t h, frame_buffer_type fb_type, av1_decoded_frame_buffer_t* fb);
+  int SaveToFile(const Rav1gFrame* img, bool one_frame);
+  int GetBufferInt(const Rav1gImageRequest* request, Rav1gImage* image);
   int ReleaseBufferInt(void* buffer_priv);
   void Flush();
   void Finalize() {
@@ -227,10 +221,10 @@ class AV1Decoder {
       : dx_desources_(dx_resources), display_(display), stop_(stop) {}
   ~AV1Decoder() {
     if (initialized_) {
-      aom_codec_destroy(&decctx_);
+      rav1g_decoder_destroy(decoder_);
     }
-    if (perf_installed_) av1_set_perf_callback(NULL, NULL);
-    if (dumps_installed_) av1_set_stage_dump(NULL, NULL, NULL, 0);
+    if (perf_installed_) rav1g_set_perf_callback(NULL, NULL);
+    if (dumps_installed_) rav1g_set_stage_dump(NULL, NULL, NULL, 0);
   }
   // "MEMORY app <where>" and "MEMORY dxgi <where>": the memory of the app (Windows::System::MemoryManager)
   // and the video memory of the device's adapter, at a step of the launch or of a task (decoder.cpp).
@@ -256,29 +250,38 @@ class AV1Decoder {
   std::shared_ptr<OutBufferWrapper> GetFrame(StreamStats* stats = 0);
   void FlushOutput();
 
-  static int GetBuffer(void* priv, size_t buf_size, uint16_t w, uint16_t h, frame_buffer_type fb_type,
-                       av1_decoded_frame_buffer_t* fb) {
+  // The output callbacks of the decoder (Rav1gOutput). An image for a frame that will be output, on the
+  // decode thread.
+  static int GetBuffer(void* priv, const Rav1gImageRequest* request, Rav1gImage* image) {
     if (!priv) return -1;
     AV1Decoder* This = static_cast<AV1Decoder*>(priv);
-    return This->output_queue_->GetBufferInt(buf_size, w, h, fb_type, fb);
+    return This->output_queue_->GetBufferInt(request, image);
   }
-  static int ReleaseBuffer(void* priv, void* buffer_priv) {
-    if (!priv) return -1;
+  // An image the decoder took and did not write.
+  static void ReleaseBuffer(void* priv, void* buffer_priv) {
+    if (!priv) return;
     AV1Decoder* This = static_cast<AV1Decoder*>(priv);
-    return This->output_queue_->ReleaseBufferInt(buffer_priv);
+    This->output_queue_->ReleaseBufferInt(buffer_priv);
   }
-  static int NotifyFrameReady(void* priv, void* img) {
-    if (!priv) return -1;
+  // A frame whose GPU work is complete, on the decoder's completion thread.
+  static void NotifyFrameReady(void* priv, const Rav1gFrame* img) {
+    if (!priv || !img) return;
     AV1Decoder* This = static_cast<AV1Decoder*>(priv);
-    if (img && This->params_.gputime_) This->PerfOutput();
-    // The drain of a decoder that is replaced in the middle of a stream: more frames follow.
-    if (!img && This->reconfiguring_) return 0;
-    return This->output_queue_->Push((aom_image_t*)img);
+    if (This->params_.gputime_) This->PerfOutput();
+    This->output_queue_->Push(img);
+  }
+  // Behind a drain: no more frames. Not for the drain of a decoder that is replaced in the middle of a
+  // stream: more frames follow.
+  static void NotifyEndOfFrames(void* priv) {
+    if (!priv) return;
+    AV1Decoder* This = static_cast<AV1Decoder*>(priv);
+    if (This->reconfiguring_) return;
+    This->output_queue_->Push(0);
   }
   // The decoder's budget guard: the bytes the decoder may still allocate (decoder.cpp).
   static int64_t MemoryAvailable(void* priv);
-  // The decoder's log lines (av1_set_log_callback), from whatever thread the decoder is on.
-  static void LogLine(void* priv, int is_error, const char* line) {
+  // The decoder's log lines (rav1g_set_log_callback), from whatever thread the decoder is on.
+  static void LogLine(void* priv, bool is_error, const char* line) {
     (void)priv;
     if (is_error)
       XB_LOGE << line;
@@ -295,11 +298,10 @@ class AV1Decoder {
 
  protected:
   static void RunDecoderLoop(AV1Decoder* ptr) { ptr->DecodeLoop(); }
-  static void RunFetchLoop(AV1Decoder* ptr) { ptr->FetchLoop(); }
   int DecodeLoop();
   int DecodeOne();
   void LogMemory(const char* where) { LogMemory(dx_desources_.dx12_device.Get(), where); }
-  // aom_codec_destroy with the MEMORY lines before and after it.
+  // rav1g_decoder_destroy with the MEMORY lines before and after it.
   void DestroyDecoder();
   // After a decoder and its output pool were released: waits, bounded, until the app's memory is back at
   // what it was without a decoder, and logs how long that took and what stays charged.
@@ -311,37 +313,26 @@ class AV1Decoder {
     perf_stats_.AddOutput(now_ms);
   }
   void PerfReport();
-  int FetchLoop();
-  void StartFetch() {
-    stop_fetch_ = 0;
-    fetch_thread_ = std::thread(RunFetchLoop, this);
-  }
-  void StopFetch() {
-    stop_fetch_ = 1;
-    fetch_thread_.join();
-  }
 
  private:
-  std::thread fetch_thread_;
   std::thread decode_thread_;
   CParameters::Parameters params_;
   volatile int is_running_ = 0;
-  aom_codec_ctx_t decctx_;
+  // The decoder (valid while initialized_). It has its host pool.
+  Rav1gDecoder* decoder_ = nullptr;
   volatile int stop_decode_ = 0;
-  volatile int stop_fetch_ = 0;
   d3d_resources dx_desources_;
   uint32_t* stop_;
   std::unique_ptr<BufferLocker> output_queue_;
   int need_preload_ = 1;
   uint32_t preload_num_ = PRELOAD_SIZE;
   DisplayCallbacks* display_ = 0;
-  std::vector<uint8_t> host_mem_;
   std::shared_ptr<OutBufferStorage> storage_;
   int initialized_ = 0;
   int need_reinit_ = 0;
   // Set around the drain of a decoder that is replaced for a new, larger sequence of the same stream.
   volatile int reconfiguring_ = 0;
-  // What the decoder in decctx_ was created with (valid while initialized_). A task that needs anything else
+  // What the decoder was created with (valid while initialized_). A task that needs anything else
   // gets a new decoder, also when the task before it ended before it reached the decoder.
   int created_threads_ = 0;
   int created_queue_size_ = 0;
@@ -351,7 +342,7 @@ class AV1Decoder {
   unsigned int created_bitdepth_ = 0;
   // Estimate of the output pool's textures for the stream, for MemoryAvailable.
   uint64_t output_pool_estimate_ = 0;
-  // The app's memory at the first task of the launch: pipeline states created, no decoder, no host pool, no
+  // The app's memory at the first task of the launch: pipeline states created, no decoder, no
   // output pool, no stream open. What a release should get back to. 0: not known.
   uint64_t app_baseline_ = 0;
   bool app_baseline_taken_ = false;

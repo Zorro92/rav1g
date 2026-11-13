@@ -421,7 +421,8 @@ extern "C" {
 const char *rav1g_last_error(void);
 
 /*
- The version of the library, "0.4.0".
+ The version of the library and what it was built with, for a log:
+ "rav1g 0.4.0, the Rust host; entropy decoder: MSVC, /GL, DLL runtime".
  */
 const char *rav1g_version(void);
 

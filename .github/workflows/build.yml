@@ -206,10 +206,25 @@ jobs:
           # -sm6test needs its shaders in the player: the bytecode of each is in the program of the package.
           python src/testing/sm6test/compile.py --verify sm6test-build @($packages | ForEach-Object { $_.FullName })
           if ($LASTEXITCODE -ne 0) { throw 'The package does not have the Shader Model 6 test shaders of this run' }
+          "Variant: reference: the C++ library (libav1) behind rav1g.h, package version 0.2.$env:GITHUB_RUN_NUMBER.0" |
+            Add-Content out/SOURCES.txt -Encoding utf8
           @('## rav1g test player', '', 'CI build only; console timings are taken separately.', '',
+            "Three packages of the same player and the same identity, to be timed against each other (docs/test-player.md): this one, version 0.2.$env:GITHUB_RUN_NUMBER.0, with the C++ library; 0.2.$env:GITHUB_RUN_NUMBER.2 with the Rust library and the C of MSVC; 0.2.$env:GITHUB_RUN_NUMBER.3 with the Rust library and the C of clang.", '',
             '### Artifact files', '```') +
             @(Get-ChildItem out -Recurse -File | ForEach-Object { [IO.Path]::GetRelativePath((Resolve-Path out), $_.FullName) }) +
             @('```') >> $env:GITHUB_STEP_SUMMARY
+
+      # The DLLs the programs of the package import from, against the list of testing/uwp_imports: the
+      # API sets of WindowsApp.lib, the runtime of VCLibs, DirectX; no kernel32.dll, no desktop runtime
+      # (docs/rust-port.md, "The app container"). The same check follows each of the other packages.
+      - name: Imports of the reference package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install --quiet uv
+          if ($LASTEXITCODE -ne 0) { throw 'uv could not be installed' }
+          python src/testing/uwp_imports/check_package.py --out out/imports out/packages
+          if ($LASTEXITCODE -ne 0) { throw 'A program of the reference package imports from a DLL that is not in testing/uwp_imports/player-dlls-allow.txt' }
 
       - name: Preserve package, certificate, dependencies, licenses, shader listings, survey and build log
         if: always()
@@ -217,6 +232,230 @@ jobs:
         with:
           name: rav1g-testplayer-x64-${{ github.run_id }}
           path: out/
+          if-no-files-found: warn
+
+      # ---------------------------------------------------------------------------------------------
+      # The same player on the Rust library (docs/rust-port.md, step 5): two more packages of the same
+      # identity, to be timed on the console against the one above and against each other. They differ
+      # in what compiled the C of the entropy decoder, which is where the tile threads spend their time:
+      #   revision 2: MSVC with /GL, the objects compiled by the player's link (/LTCG:incremental);
+      #   revision 3: clang with link time optimisation, linked with the Rust by lld-link into rav1g.dll.
+      # A higher revision installs over a lower one and keeps LocalState.
+      # ---------------------------------------------------------------------------------------------
+
+      # Stable Rust, and libclang for bindgen, as in the rust job.
+      - name: Rust toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup toolchain install stable --profile minimal --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw 'rustup could not install stable' }
+          rustup default stable
+          rustc --version
+          $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
+          if (Test-Path (Join-Path $llvm 'libclang.dll')) { "LIBCLANG_PATH=$llvm" >> $env:GITHUB_ENV }
+          foreach ($tool in @('clang-cl.exe', 'lld-link.exe', 'llvm-lib.exe')) {
+            if (-not (Test-Path (Join-Path $llvm $tool))) { throw "$tool is not in $llvm" }
+          }
+          & (Join-Path $llvm 'clang-cl.exe') --version | Select-Object -First 1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src
+          key: player
+
+      # The library for an app container application (docs/rust-port.md, "The C runtime"): the static
+      # library with the interface for C, for the DLL runtime, the C compiled by MSVC with /GL for the app
+      # family of the Windows API.
+      - name: Rust library for the player, C of MSVC (static library)
+        shell: pwsh
+        env:
+          RAV1G_SHADER_DIR: ${{ steps.shaders.outputs.normal }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $separator = [char]0x1f
+          $env:CARGO_ENCODED_RUSTFLAGS = "-Ctarget-feature=-crt-static${separator}--cfg${separator}windows_slim_errors"
+          $env:RAV1G_C_LIB_DIR = Join-Path $env:GITHUB_WORKSPACE 'rust-msvc'
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          cargo build --manifest-path src/Cargo.toml --release --locked -p rav1g --lib --features capi,app-container `
+            --target-dir target-app-msvc
+          if ($LASTEXITCODE -ne 0) { throw 'cargo build of the library failed' }
+          Copy-Item target-app-msvc/release/rav1g.lib rust-msvc/
+          # Without the import members for desktop DLLs (kernel32.dll, ...) that the windows crates put
+          # into the library: link.exe would take the functions of Windows from them.
+          python src/testing/uwp_imports/prune_import_members.py --ar (Join-Path $env:ProgramFiles 'LLVM\bin\llvm-ar.exe') rust-msvc/rav1g.lib
+          if ($LASTEXITCODE -ne 0) { throw 'The import members could not be taken out of rav1g.lib' }
+          Get-ChildItem rust-msvc | ForEach-Object { Write-Host "$($_.Name): $($_.Length) bytes" }
+          "## Rust library for the player, C of MSVC", '', "cargo build: $([math]::Round($clock.Elapsed.TotalMinutes, 1)) min ($(rustc --version))." >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Stamp the package with the Rust library, C of MSVC (same identity, revision 2)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = Resolve-Path src/testing/uwp_dx12_player/Package.appxmanifest
+          [xml]$manifest = Get-Content $path -Raw
+          $manifest.Package.Identity.Version = "0.2.$env:GITHUB_RUN_NUMBER.2"
+          $manifest.Save($path)
+
+      - name: Build the signed package with the Rust library, C of MSVC
+        shell: pwsh
+        env:
+          CERT_THUMBPRINT: ${{ steps.cert.outputs.thumbprint }}
+          _CL_: /wd4996
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force out-rust-msvc | Out-Null
+          $packageDirectory = Join-Path $env:GITHUB_WORKSPACE 'out-rust-msvc/packages/'
+          $buildLog = Join-Path $env:GITHUB_WORKSPACE 'out-rust-msvc/msbuild.log'
+          $library = Join-Path $env:GITHUB_WORKSPACE 'rust-msvc'
+          & MSBuild.exe src/av1xbox.sln /t:Rebuild /m /v:minimal /p:Configuration=Release /p:Platform=x64 `
+            "/p:PlatformToolset=$env:PLATFORM_TOOLSET" "/p:WindowsTargetPlatformVersion=$env:WINDOWS_SDK" `
+            /p:WindowsTargetPlatformMinVersion=10.0.17763.0 /p:TreatWarningAsError=false `
+            /p:GenerateAppxPackageOnBuild=true /p:UapAppxPackageBuildMode=SideloadOnly `
+            /p:AppxBundle=Never /p:AppxPackageExtension=.msix "/p:AppxPackageDir=$packageDirectory" `
+            /p:AppxPackageSigningEnabled=true /p:PackageCertificateKeyFile= `
+            "/p:PackageCertificateThumbprint=$env:CERT_THUMBPRINT" "/p:Rav1gRustLib=$library" `
+            "/p:Rav1gPrebuiltShaders=${{ steps.shaders.outputs.normal }}" `
+            "/p:Rav1gSm6TestShaders=${{ steps.sm6.outputs.dir }}" `
+            /fl "/flp:logfile=$buildLog;verbosity=normal"
+          if ($LASTEXITCODE -ne 0) { throw 'The player with the Rust library (C of MSVC) did not build; see out-rust-msvc/msbuild.log' }
+          $packages = @(Get-ChildItem out-rust-msvc/packages -Recurse -File | Where-Object {
+            $_.Extension -in @('.msix', '.msixbundle', '.appx', '.appxbundle') -and
+            $_.FullName -notmatch '[\\/]Dependencies[\\/]'
+          })
+          if (-not $packages.Count) { throw 'No sideload package with the Rust library (C of MSVC) was produced' }
+          # The Rust library has the shaders of this run: their bytecode is in the program of the package.
+          python src/testing/shader_cache/shaders.py verify --report shader-build/normal/report.json `
+            --root shader-build/normal --note out-rust-msvc/SHADERS.txt @($packages | ForEach-Object { $_.FullName })
+          if ($LASTEXITCODE -ne 0) { throw 'The package with the Rust library was not built from the shader headers of this run' }
+          python src/testing/sm6test/compile.py --verify sm6test-build @($packages | ForEach-Object { $_.FullName })
+          if ($LASTEXITCODE -ne 0) { throw 'The package does not have the Shader Model 6 test shaders of this run' }
+          python src/testing/uwp_imports/check_package.py --out out-rust-msvc/imports out-rust-msvc/packages
+          if ($LASTEXITCODE -ne 0) { throw 'The program of the package imports from a DLL that is not in testing/uwp_imports/player-dlls-allow.txt' }
+          # The certificate, the notices and the record of the sources of the reference package apply.
+          foreach ($item in @(Get-ChildItem out | Where-Object { $_.Name -notin @('packages', 'msbuild.log', 'shader-survey',
+              'cdef-shaders', 'intra-shaders', 'sm6test-shaders', 'imports') })) {
+            Copy-Item $item.FullName out-rust-msvc/ -Recurse
+          }
+          (Get-Content out-rust-msvc/SOURCES.txt) -notmatch '^Variant: ' | Set-Content out-rust-msvc/SOURCES.txt -Encoding utf8
+          "Variant: the Rust library (static, $(rustc --version)); the C of the entropy decoder compiled by MSVC with /GL and by the player's link (/LTCG:incremental); package version 0.2.$env:GITHUB_RUN_NUMBER.2" |
+            Add-Content out-rust-msvc/SOURCES.txt -Encoding utf8
+          @('## Package with the Rust library, C of MSVC', '', "Version 0.2.$env:GITHUB_RUN_NUMBER.2.", '', '```') +
+            @($packages | ForEach-Object { $_.Name }) + @(Get-Content out-rust-msvc/imports/check.txt) + @('```') >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Preserve the package with the Rust library, C of MSVC
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-testplayer-rust-msvc-x64-${{ github.run_id }}
+          path: out-rust-msvc/
+          if-no-files-found: warn
+
+      # The C compiled by clang-cl with full link time optimisation (the build that is level with the
+      # MSBuild library in the tile threads on WARP; docs/rust-port.md, "Tile decode time"). Its objects are
+      # LLVM bitcode, which the player's link.exe cannot read; and lld-link, which can, cannot read the /GL
+      # objects the player is made of, and would have to link a C++/CX program with its Windows metadata,
+      # which was not tried. So the library is linked by lld-link into a DLL, rav1g.dll, with the
+      # functions of rav1g.h and the few functions of the C that the player's stream readers call, and
+      # the player links its import library. WindowsApp.lib is first on that
+      # link (LINK, which lld-link reads in front of its arguments), the runtime is the app runtime
+      # (the store directory of the toolset).
+      - name: Rust library for the player, C of clang (rav1g.dll)
+        shell: pwsh
+        env:
+          RAV1G_SHADER_DIR: ${{ steps.shaders.outputs.normal }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          if (-not $vs) { throw 'vswhere found no Visual Studio' }
+          $tools = (Get-Content (Join-Path $vs 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt') -Raw).Trim()
+          $store = Join-Path $vs "VC\Tools\MSVC\$tools\lib\x64\store"
+          if (-not (Test-Path (Join-Path $store 'vcruntime.lib'))) { throw "no app runtime libraries in $store" }
+          $separator = [char]0x1f
+          $env:CARGO_ENCODED_RUSTFLAGS = "-Ctarget-feature=-crt-static${separator}--cfg${separator}windows_slim_errors"
+          $env:CC_x86_64_pc_windows_msvc = Join-Path $llvm 'clang-cl.exe'
+          $env:AR_x86_64_pc_windows_msvc = Join-Path $llvm 'llvm-lib.exe'
+          $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = Join-Path $llvm 'lld-link.exe'
+          $env:LINK = 'WindowsApp.lib'
+          # What the player's stream readers (testing/common) call of the C.
+          $exports = @('aom_codec_av1_dx', 'aom_codec_error', 'aom_codec_error_detail', 'aom_img_alloc', 'aom_img_free',
+            'aom_img_plane_height', 'aom_img_plane_width', 'aom_read_obu_header', 'aom_uleb_decode')
+          $linkArgs = @('-Clink-arg=/APPCONTAINER', "-Clink-arg=/LIBPATH:$store") + @($exports | ForEach-Object { "-Clink-arg=/EXPORT:$_" })
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          cargo rustc --manifest-path src/Cargo.toml --release --locked -p rav1g --lib --features capi,app-container `
+            --crate-type cdylib --target x86_64-pc-windows-msvc --target-dir target-app-clang -- @linkArgs
+          if ($LASTEXITCODE -ne 0) { throw 'cargo rustc of rav1g.dll failed' }
+          New-Item -ItemType Directory -Force rust-clang | Out-Null
+          $built = 'target-app-clang/x86_64-pc-windows-msvc/release'
+          Copy-Item "$built/rav1g.dll", "$built/rav1g.dll.lib", "$built/rav1g.pdb" rust-clang/
+          Get-ChildItem rust-clang | ForEach-Object { Write-Host "$($_.Name): $($_.Length) bytes" }
+          "## Rust library for the player, C of clang", '', "cargo rustc: $([math]::Round($clock.Elapsed.TotalMinutes, 1)) min ($(rustc --version); $(& (Join-Path $llvm 'clang-cl.exe') --version | Select-Object -First 1))." >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Stamp the package with the Rust library, C of clang (same identity, revision 3)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = Resolve-Path src/testing/uwp_dx12_player/Package.appxmanifest
+          [xml]$manifest = Get-Content $path -Raw
+          $manifest.Package.Identity.Version = "0.2.$env:GITHUB_RUN_NUMBER.3"
+          $manifest.Save($path)
+
+      - name: Build the signed package with the Rust library, C of clang
+        shell: pwsh
+        env:
+          CERT_THUMBPRINT: ${{ steps.cert.outputs.thumbprint }}
+          _CL_: /wd4996
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force out-rust-clang | Out-Null
+          $packageDirectory = Join-Path $env:GITHUB_WORKSPACE 'out-rust-clang/packages/'
+          $buildLog = Join-Path $env:GITHUB_WORKSPACE 'out-rust-clang/msbuild.log'
+          $library = Join-Path $env:GITHUB_WORKSPACE 'rust-clang'
+          & MSBuild.exe src/av1xbox.sln /t:Rebuild /m /v:minimal /p:Configuration=Release /p:Platform=x64 `
+            "/p:PlatformToolset=$env:PLATFORM_TOOLSET" "/p:WindowsTargetPlatformVersion=$env:WINDOWS_SDK" `
+            /p:WindowsTargetPlatformMinVersion=10.0.17763.0 /p:TreatWarningAsError=false `
+            /p:GenerateAppxPackageOnBuild=true /p:UapAppxPackageBuildMode=SideloadOnly `
+            /p:AppxBundle=Never /p:AppxPackageExtension=.msix "/p:AppxPackageDir=$packageDirectory" `
+            /p:AppxPackageSigningEnabled=true /p:PackageCertificateKeyFile= `
+            "/p:PackageCertificateThumbprint=$env:CERT_THUMBPRINT" "/p:Rav1gRustDll=$library" `
+            "/p:Rav1gPrebuiltShaders=${{ steps.shaders.outputs.normal }}" `
+            "/p:Rav1gSm6TestShaders=${{ steps.sm6.outputs.dir }}" `
+            /fl "/flp:logfile=$buildLog;verbosity=normal"
+          if ($LASTEXITCODE -ne 0) { throw 'The player with the Rust library (C of clang) did not build; see out-rust-clang/msbuild.log' }
+          $packages = @(Get-ChildItem out-rust-clang/packages -Recurse -File | Where-Object {
+            $_.Extension -in @('.msix', '.msixbundle', '.appx', '.appxbundle') -and
+            $_.FullName -notmatch '[\\/]Dependencies[\\/]'
+          })
+          if (-not $packages.Count) { throw 'No sideload package with the Rust library (C of clang) was produced' }
+          python src/testing/sm6test/compile.py --verify sm6test-build @($packages | ForEach-Object { $_.FullName })
+          if ($LASTEXITCODE -ne 0) { throw 'The package does not have the Shader Model 6 test shaders of this run' }
+          # The programs of the package: the player and rav1g.dll, which has to be in it.
+          python src/testing/uwp_imports/check_package.py --out out-rust-clang/imports --need rav1g.dll --also rav1g.dll out-rust-clang/packages
+          if ($LASTEXITCODE -ne 0) { throw 'A program of the package imports from a DLL that is not in testing/uwp_imports/player-dlls-allow.txt, or rav1g.dll is not in the package' }
+          # The Rust library has the shaders of this run: their bytecode is in the rav1g.dll of the package.
+          python src/testing/shader_cache/shaders.py verify --report shader-build/normal/report.json `
+            --root shader-build/normal --note out-rust-clang/SHADERS.txt out-rust-clang/imports/unpacked/rav1g.dll
+          if ($LASTEXITCODE -ne 0) { throw 'The rav1g.dll of the package was not built from the shader headers of this run' }
+          Remove-Item out-rust-clang/imports/unpacked -Recurse -Force
+          foreach ($item in @(Get-ChildItem out | Where-Object { $_.Name -notin @('packages', 'msbuild.log', 'shader-survey',
+              'cdef-shaders', 'intra-shaders', 'sm6test-shaders', 'imports') })) {
+            Copy-Item $item.FullName out-rust-clang/ -Recurse
+          }
+          $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
+          (Get-Content out-rust-clang/SOURCES.txt) -notmatch '^Variant: ' | Set-Content out-rust-clang/SOURCES.txt -Encoding utf8
+          "Variant: the Rust library (rav1g.dll, $(rustc --version)); the C of the entropy decoder compiled by $(& (Join-Path $llvm 'clang-cl.exe') --version | Select-Object -First 1) with full link time optimisation, linked by lld-link; package version 0.2.$env:GITHUB_RUN_NUMBER.3" |
+            Add-Content out-rust-clang/SOURCES.txt -Encoding utf8
+          Copy-Item rust-clang/rav1g.pdb out-rust-clang/
+          @('## Package with the Rust library, C of clang', '', "Version 0.2.$env:GITHUB_RUN_NUMBER.3.", '', '```') +
+            @($packages | ForEach-Object { $_.Name }) + @(Get-Content out-rust-clang/imports/check.txt) + @('```') >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Preserve the package with the Rust library, C of clang
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-testplayer-rust-clang-x64-${{ github.run_id }}
+          path: out-rust-clang/
           if-no-files-found: warn
 
       # The uavsync package: the same sources, with every group sync of the shaders compiled as a sync

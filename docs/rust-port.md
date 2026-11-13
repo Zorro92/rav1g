@@ -3,8 +3,8 @@
 Status: started 2026-11-12; steps 1 (build skeleton, `rav1g-dec`), 2 (bindings for the shared structs,
 layout tests), 3 (leaf modules) and 4 (frame pipeline: the whole host is Rust in the cargo build, which
 compiles no C++ of the decoder any more) are in the tree, and of step 5 the Rust interface and the
-interface for C (`rav1g.h`); see [Progress](#progress). Left of step 5: the UWP test player on the Rust
-library.
+interface for C (`rav1g.h`) and the UWP test player on the Rust library, in three packages to be timed
+on the console; see [Progress](#progress). Left of step 5: that console test.
 Branch `main`. The C++ decoder at tag `v0.3.0` (branch `cpp`) is the reference: every step below has to
 decode the conformance set md5-identically to it and to dav1d.
 
@@ -1086,11 +1086,23 @@ them, what is known about the console), from a DLL that has the interface of the
   object asked for it, so a call of the standard library, of the C or of the C runtime that is in
   `rav1g.lib` finds the `kernel32.dll` member there before it looks at `WindowsApp.lib`.
   `/NODEFAULTLIB:kernel32.lib` changes nothing: the members are in `rav1g.lib` itself.
-- **`WindowsApp.lib` in front of the libraries of the decoder removes all 48.** The same functions then
-  come from the API sets. This is how the player links: `WindowsApp.lib`, `rav1g.lib`, `rav1g_c.lib`,
-  `rav1g_c_speed.lib`, and `ntdll.lib` and `userenv.lib` behind them for functions of the standard library
-  that are in the objects the linker loads and not in the program it writes (file and pipe calls of
-  `ntdll.dll`, the home directory of `userenv.dll`).
+- **`WindowsApp.lib` in front of the libraries of the decoder removes all 48, with `lld-link`.** The same
+  functions then come from the API sets. `lld-link` takes a function from the first library on its
+  command line that has it.
+- **`link.exe` does not work that way**, and it is what links the player. It looks for a function first
+  in the library whose object asked for it, then in the libraries behind that one, then from the start
+  of the command line. With `WindowsApp.lib` in front the player's program still imported 41 functions
+  from `kernel32.dll` (throwaway run 43352281782): those that have an import member in `rav1g.lib`, and,
+  with `kernel32.lib` on the line behind the decoder's libraries, those of the standard library that
+  have none. So two things are done for a link with `link.exe`:
+  `testing/uwp_imports/prune_import_members.py` takes the import members for desktop DLLs out of
+  `rav1g.lib` (967 of 1,356 members: `kernel32.dll` 365, `dbghelp.dll` 193, `advapi32.dll` 158,
+  `pdh.dll` 101 and ten more DLLs; those for `d3d12.dll`, `dxgi.dll`, the API sets and
+  `bcryptprimitives.dll` stay), and the player's link has `WindowsApp.lib` right behind the decoder's
+  libraries: `rav1g.lib`, `rav1g_c.lib`, `rav1g_c_speed.lib`, `WindowsApp.lib`, then `ntdll.lib`,
+  `userenv.lib` and `kernel32.lib` for functions of the standard library that are in the objects the
+  linker loads and not in the program it writes (file and pipe calls of `ntdll.dll`, the home directory
+  of `userenv.dll`, `QueryDosDeviceW` of `kernel32.dll` since Rust 1.100).
 - **`--cfg windows_slim_errors`** takes the one import from `oleaut32.dll` out (`GetErrorInfo`, the
   extended error text of `windows-result`; it is in `WindowsApp.lib`, so it was no risk, only one DLL
   more).
@@ -1133,9 +1145,10 @@ cargo +nightly-2026-11-13 build --release -p rav1g --lib --features capi,app-con
 
 Sol linked that library the same way: 81 functions of 25 DLLs, none from `kernel32.dll`, `ntdll.dll`,
 `userenv.dll`, `oleaut32.dll` or `bcryptprimitives.dll`. It costs the panic message and the backtrace (a
-panic ends the program at once), and a compiler that is not stable; it is for the UWP build alone. The
-`rav1g` crate itself keeps building on stable Rust for `x86_64-pc-windows-msvc`: nothing in it may come
-to need the nightly compiler.
+panic ends the program at once), and a compiler that is not stable. The console build is what the
+decoder is for (hardware decoding on devices with a small GPU; a desktop PC has software decoders), so
+this is no loss elsewhere: the desktop build, `rav1g-dec` on WARP, is the test harness of CI and stays
+on whatever compiler the library needs.
 
 #### Part 2: the Rust interface and the interface for C
 
@@ -1194,6 +1207,78 @@ Checked before the push on the local decoder (wine, vkd3d, lavapipe): the 244 ve
 interface and through `rav1g.h`, each plain and with flag sets (`-intrav2 -interfast -asyncclear -t 4
 -slots 4`; `-gputimedetail -slots 3 -poisonbuf -t 4`, with `-capi` also `-interfast -asyncclear`), 244
 of 244 every time; a refused creation (`-budget 5`).
+
+#### Part 3: the UWP test player on the Rust library
+
+**The player uses the decoder through `rav1g.h` and nothing else** (`testing/player_common/decoder.cpp`,
+`decoder.h`, `decoder_creator.cpp`): `rav1g_device_create` on its device and queue where it created the
+pipeline cache, `Rav1gSettings` with its output callbacks and its budget callback where it filled
+`aom_codec_dec_cfg_t`, `rav1g_decoder_decode` and `_drain`, the frame as `Rav1gFrame`, the switches as
+`rav1g_set_*`. Every flag is where it was (md5 save and check, `-gputime` with its breakdowns, the budget
+guard and `-noguard`, `-slots`, `-lowmem`, `-lowmemparts`, `-asyncclear`, `-intrav2`, `-interfast`,
+`-dumpstages`, `-try10x3`, the layers, the reconfiguration in the middle of a stream), and the log lines
+are the same but for these:
+
+- **`LIBRARY <text>`**, new, once per launch before the pipeline states: what is behind `rav1g.h` in this
+  package (`rav1g_version`). A timing log says which library it is of.
+- **The host pool belongs to the decoder.** It was a `std::vector` of the player, freed at the next
+  creation with the line `MEMORY app after the host pool was released`; now the decoder allocates it at
+  its creation and frees it when it is destroyed, in front of `after the decoder was destroyed`. The line
+  is gone; the `MEMORY` lines of the decoder itself are unchanged.
+- A creation that fails logs `Failed to initialize decoder: decoder creation failed: <kind>: <the
+  decoder's MEMORY line>` (the text of `rav1g_last_error`; one "decoder creation failed:" more than
+  before).
+- Gone from the player: the output paths that polled `aom_codec_get_frame` (compiled out since the
+  callbacks came, `rav1g.h` has no such call). And `-try10x3` with an 8-bit stream no longer treats the
+  8-bit frames as packed when it hashes or saves them (`Rav1gFrame::packed_10x3` is true for packed
+  frames only; the image description of the C++ library said "packed" for the decoder, not the frame).
+
+**Three packages of one run**, the same player code and the same package identity (`Av1GpuTestPlayer`,
+so LocalState carries over), to be timed against each other on the console:
+
+| Artifact | Version | Behind `rav1g.h` | `LIBRARY` line |
+| --- | --- | --- | --- |
+| `rav1g-testplayer-x64-<run id>` | `0.2.<run number>.0` | the C++ library of the solution (`libav1`, the host of `libav1/dx`), through `testing/player_common/rav1g_libav1.cpp`: the reference | `libav1, the C++ host (the reference build), behind rav1g.h` |
+| `rav1g-testplayer-rust-msvc-x64-<run id>` | `0.2.<run number>.2` | the Rust library as a static library; the C of the entropy decoder compiled by MSVC with `/GL`, and by the player's link with `/LTCG:incremental` together with the player | `rav1g 0.4.0-dev, the Rust host; entropy decoder: MSVC, /GL, DLL runtime` |
+| `rav1g-testplayer-rust-clang-x64-<run id>` | `0.2.<run number>.3` | the Rust library as `rav1g.dll` in the package; the C compiled by clang-cl (the runner's, 20.1.8) with full link time optimisation, linked with the Rust by `lld-link` | `rav1g 0.4.0-dev, the Rust host; entropy decoder: clang-cl, full LTO, DLL runtime` |
+
+A higher revision installs over a lower one. Revision 1 is the uavsync package of the experiments input,
+as before.
+
+- **The reference package is the C++ library behind the same header.** `rav1g_libav1.cpp` has the
+  functions of `rav1g.h` on `aom_codec_*` and `av1_*`: the calls the player made itself, in the same
+  order. It is compiled into the player only when no Rust library is given, and goes with the C++ host.
+  So the three packages differ in the library and in nothing of the player.
+- **The static library** (`/p:Rav1gRustLib=<directory>` for `uwp_common.vcxproj` and
+  `uwp_dx12_player.vcxproj`): built as in part 1 with MSVC, `rav1g.lib` without its import members for
+  desktop DLLs, and linked as described there.
+- **The clang build is a DLL** (`/p:Rav1gRustDll=<directory>`), a deviation from "the player links the
+  static library". The C of clang with link time optimisation is LLVM bitcode, which `link.exe` cannot
+  read. `lld-link` can, but the player's own objects are `/GL` objects of MSVC, which `lld-link` cannot
+  read, and it would have to link a C++/CX program with its Windows metadata (`/WINMD`), which was not
+  tried: the risk and the time were against it. So `lld-link` links the Rust and the C into
+  `rav1g.dll` (`cargo rustc --crate-type cdylib`), with `WindowsApp.lib` first (the `LINK` variable,
+  which `lld-link` reads in front of its arguments), `/APPCONTAINER`, the import libraries of the app
+  runtime (the `store` directory of the toolset), and with nine functions of the C exported next to
+  those of `rav1g.h`, which the player's stream readers call (`aom_uleb_decode`, `aom_read_obu_header`,
+  `aom_img_*`, `aom_codec_error*`, `aom_codec_av1_dx`). The code of the tile threads is the same as in a
+  static link: the C and the Rust host are one link unit, and the player calls into it once per temporal
+  unit. The clang of the Windows runner (20.1.8) is not the clang of the Linux build that was measured
+  on WARP; the console timing is of this one.
+- **Checked for every package in the player job:** the bytecode of this run's shader headers is in the
+  program (in `rav1g.dll` for the third: 93 of 97, the four without a pipeline state left out by the
+  linker as in the C++ build), the Shader Model 6 test shaders are in the program, and the imports
+  (`testing/uwp_imports/check_package.py`): the C++ program 267 functions of 37 DLLs; the program with
+  the static Rust library 306 functions of 48 DLLs, of `ntdll.dll` the two; `rav1g.dll` 95 functions of
+  29 DLLs, of `ntdll.dll` the two, and its program 285 functions of 36 DLLs (`rav1g.dll` among them).
+  None imports from `kernel32.dll` or from the desktop runtime.
+- **Not removed yet:** `libav1/dx/*.cpp`, `warp_decoder` and the `rust-equal` job stay until the Rust
+  packages have been checked on the console; so does the host pool as it is.
+
+**For the console** (the parent's): first whether the two Rust packages start at all (the two imports
+from `ntdll.dll`; the `LIBRARY` line is the first sign of life of the library), then the md5 set with
+each, then `-gputime` on the 2160p clips, the three packages one after the other with the same tasks:
+the tile threads (`entropy_sum`) and the decode thread first.
 
 ## Estimate
 

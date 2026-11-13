@@ -17,6 +17,10 @@
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
+/// What built the C of this library: the compiler, its link time optimisation and the C runtime, as a
+/// text ("MSVC, /GL, static runtime").
+pub const C_BUILD: &str = env!("RAV1G_C_BUILD");
+
 /// The layouts shared with the GPU and between the entropy decoder and the host
 /// (`libav1/av1/common/blockd.h`, `mv.h`): the mode info record that the shaders read as `MB_MODE_INFO`
 /// of `libav1/dx/shaders/mode_info.h`, the block records of the prediction and transform stages, and the

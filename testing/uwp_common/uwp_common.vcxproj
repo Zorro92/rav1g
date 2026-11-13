@@ -69,6 +69,9 @@
     <ClCompile Include="..\player_common\cmd_parser.cpp" />
     <ClCompile Include="..\player_common\decoder.cpp" />
     <ClCompile Include="..\player_common\decoder_creator.cpp" />
+    <!-- The functions of rav1g.h on the C++ library, for the player that links it. Not with
+         /p:Rav1gRustLib or /p:Rav1gRustDll: the Rust library has these functions itself. -->
+    <ClCompile Include="..\player_common\rav1g_libav1.cpp" Condition="'$(Rav1gRustLib)$(Rav1gRustDll)'==''" />
     <ClCompile Include="..\sm6test\sm6test.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -89,7 +92,9 @@
     <ClInclude Include="..\sm6test\sm6test.h" />
     <ClInclude Include="..\sm6test\sm6test_checks.h" />
   </ItemGroup>
-  <ItemGroup>
+  <!-- The decoder behind rav1g.h: the C++ library of this solution, or the Rust library of the Cargo
+       workspace (docs/rust-port.md, step 5; uwp_dx12_player.vcxproj links it). -->
+  <ItemGroup Condition="'$(Rav1gRustLib)$(Rav1gRustDll)'==''">
     <ProjectReference Include="..\..\libav1\build\libav1.vcxproj">
       <Project>{e68f3562-9876-4971-8d90-27035e27a825}</Project>
     </ProjectReference>
@@ -236,7 +241,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <CompileAsWinRT>true</CompileAsWinRT>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>$(SolutionDir)third_party\libwebm;$(SolutionDir)testing;$(SolutionDir)libav1;$(SolutionDir)libav1\build</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)third_party\libwebm;$(SolutionDir)testing;$(SolutionDir)crates\rav1g\include;$(SolutionDir)libav1;$(SolutionDir)libav1\build</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <DisableSpecificWarnings>4264</DisableSpecificWarnings>
     </ClCompile>
@@ -254,7 +259,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <CompileAsWinRT>true</CompileAsWinRT>
       <SDLCheck>true</SDLCheck>
-      <AdditionalIncludeDirectories>$(SolutionDir)third_party\libwebm;$(SolutionDir)testing;$(SolutionDir)libav1;$(SolutionDir)libav1\build</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(SolutionDir)third_party\libwebm;$(SolutionDir)testing;$(SolutionDir)crates\rav1g\include;$(SolutionDir)libav1;$(SolutionDir)libav1\build</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <DisableSpecificWarnings>4264</DisableSpecificWarnings>
     </ClCompile>
