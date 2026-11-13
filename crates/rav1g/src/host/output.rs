@@ -32,7 +32,6 @@ use std::ffi::c_int;
 
 use super::core::{buffer, commands, perf_add, perf_gpu_mark, perf_ticks, pipeline, stage_dump_output};
 use super::film_grain::filmgrain_run;
-use super::thread::rav1g_mt_queue_get;
 use super::types::Av1Core;
 use crate::gpu::{BufferRef, BufferState, TextureFormat, TextureRef, TextureSource};
 use crate::sys::parser::{
@@ -107,7 +106,7 @@ unsafe fn frame_layout(dec: *mut Av1Core, cm: *const AV1_COMMON) -> (bool, bool,
 /// # Safety
 /// `dec` is the decoder while it records a frame; `cm` is the frame's; `fb` is valid for writing and
 /// zeroed.
-pub(crate) unsafe fn rav1g_output_image(
+pub(crate) unsafe fn output_image(
     dec: *mut Av1Core,
     cm: *mut AV1_COMMON,
     fb: *mut av1_decoded_frame_buffer_t,
@@ -146,8 +145,8 @@ pub(crate) unsafe fn rav1g_output_image(
 ///
 /// # Safety
 /// `dec` is the decoder while it records a frame that is output; `cm` is the frame's; `fb` is what
-/// [`rav1g_output_image`] got for it.
-pub(crate) unsafe fn rav1g_copy_output(dec: *mut Av1Core, cm: *mut AV1_COMMON, fb: *const av1_decoded_frame_buffer_t) {
+/// [`output_image`] got for it.
+pub(crate) unsafe fn copy_output(dec: *mut Av1Core, cm: *mut AV1_COMMON, fb: *const av1_decoded_frame_buffer_t) {
     // SAFETY: the caller's contract; the image descriptors of the pool are the decoder's, and the
     // resources of `fb` are the application's until the image comes back.
     unsafe {
@@ -158,7 +157,7 @@ pub(crate) unsafe fn rav1g_copy_output(dec: *mut Av1Core, cm: *mut AV1_COMMON, f
         let OutputLayout { bpp, num_planes, y_stride, uv_stride, y_size, uv_size, size, .. } = layout;
 
         let perf_t = perf_ticks();
-        let img = &mut *rav1g_mt_queue_get(&raw mut (*dec).image_pool).cast::<HwOutputImage>();
+        let img: &mut HwOutputImage = &mut *(*dec).image_pool.get();
         perf_add(dec, AV1_PERF_CPU_WAIT_IMAGE, perf_t);
         img.fb_ptr = fb.buffer_host_ptr.cast();
         img.alloc_priv = fb.priv_;

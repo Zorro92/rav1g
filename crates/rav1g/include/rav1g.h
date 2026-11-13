@@ -379,7 +379,8 @@ typedef struct Rav1gSettings {
  */
 typedef struct Rav1gMemoryRequirements {
   /*
-   Bytes of host memory (the decoder allocates them at creation).
+   Bytes of host memory, which the decoder allocates at creation, before it asks
+   `Rav1gSettings::memory_available`: the pool of the entropy decoder and the decoder itself.
    */
   size_t host_size;
   /*

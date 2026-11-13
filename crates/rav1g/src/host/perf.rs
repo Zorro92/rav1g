@@ -30,10 +30,6 @@ const GPU_STAGE_COUNT: usize = sys::AV1_PERF_GPU_STAGE_COUNT as usize;
 const INTER_SECTION_COUNT: i32 = sys::AV1_PERF_INTER_SECTION_COUNT;
 const INTER_LISTS: i32 = sys::AV1_PERF_INTER_LISTS;
 
-unsafe extern "C" {
-    fn malloc(size: usize) -> *mut c_void;
-}
-
 /// The callback of the timing run and its context (`av1_set_perf_callback`).
 static PERF_CB: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
 static PERF_PRIV: AtomicPtr<c_void> = AtomicPtr::new(std::ptr::null_mut());
@@ -222,13 +218,24 @@ pub(crate) unsafe fn perf_gpu_mark(dec: *mut Av1Core, stage: c_int) {
     }
 }
 
+/// An inter breakdown with every counter 0, or none when the process has no memory for one (the frame
+/// then has no breakdown).
+fn zeroed_detail() -> Option<Box<av1_perf_inter_detail>> {
+    let layout = std::alloc::Layout::new::<av1_perf_inter_detail>();
+    // SAFETY: the layout has a size, and the record is numbers: all zero is a valid value.
+    unsafe {
+        let detail = std::alloc::alloc_zeroed(layout).cast::<av1_perf_inter_detail>();
+        if detail.is_null() { None } else { Some(Box::from_raw(detail)) }
+    }
+}
+
 /// `av1_perf_inter_begin` of the C++: the inter breakdown of the frame of the current command list,
 /// cleared for the stage to fill, or null when the frame has none.
 ///
 /// # Safety
 /// `dec` is the decoder while it records a frame.
 pub(crate) unsafe fn perf_inter_begin(dec: *mut Av1Core) -> *mut av1_perf_inter_detail {
-    // SAFETY: the caller's contract; the record is memory of the C runtime, released with the decoder.
+    // SAFETY: the caller's contract; the record is the slot's, released with the decoder.
     unsafe {
         let Some(td) = (*dec).curr_frame_data.as_mut() else {
             return std::ptr::null_mut();
@@ -237,17 +244,19 @@ pub(crate) unsafe fn perf_inter_begin(dec: *mut Av1Core) -> *mut av1_perf_inter_
         if p.detail_mode == 0 {
             return std::ptr::null_mut();
         }
-        if p.detail.is_null() {
-            p.detail = malloc(size_of::<av1_perf_inter_detail>()).cast();
+        if p.detail.is_none() {
+            p.detail = zeroed_detail();
         }
-        if p.detail.is_null() {
+        let Some(detail) = p.detail.as_deref_mut() else {
+            // No memory for the record: the frame has no breakdown.
             p.detail_mode = 0;
             return std::ptr::null_mut();
-        }
-        p.detail.write_bytes(0, 1);
-        (*p.detail).mode = p.detail_mode;
+        };
+        let detail = std::ptr::from_mut(detail);
+        detail.write_bytes(0, 1);
+        (*detail).mode = p.detail_mode;
         p.detail_filled = 1;
-        p.detail
+        detail
     }
 }
 
@@ -272,7 +281,9 @@ pub(crate) unsafe fn perf_inter_mark(dec: *mut Av1Core, stage: c_int, section: c
         td.perf.mark_sub[index] = ((section + 1) | ((list + 1) << 8)) as u16;
         td.perf.mark_stage[index] = stage as u8;
         td.perf.mark_count += 1;
-        (*td.perf.detail).marks += 1;
+        if let Some(detail) = td.perf.detail.as_deref_mut() {
+            detail.marks += 1;
+        }
     }
 }
 
@@ -397,13 +408,20 @@ pub(crate) unsafe fn perf_collect(
         // pool before the callback runs, and the decode thread may be recording the slot's next frame by
         // then.
         let mut detail: *mut sys::av1_perf_inter_detail = std::ptr::null_mut();
-        if p.detail_mode != 0 && p.detail_filled != 0 && !p.detail.is_null() {
-            if (*dec).perf_detail_out.is_null() {
-                (*dec).perf_detail_out = malloc(size_of::<av1_perf_inter_detail>()).cast();
+        if p.detail_mode != 0
+            && p.detail_filled != 0
+            && let Some(recorded) = p.detail.as_deref()
+        {
+            if (*dec).perf_detail_out.is_none() {
+                (*dec).perf_detail_out = zeroed_detail();
             }
-            detail = (*dec).perf_detail_out.cast();
-            if !detail.is_null() {
-                std::ptr::copy_nonoverlapping(p.detail.cast::<sys::av1_perf_inter_detail>(), detail, 1);
+            if let Some(out) = (*dec).perf_detail_out.as_deref_mut() {
+                detail = std::ptr::from_mut(out).cast();
+                std::ptr::copy_nonoverlapping(
+                    std::ptr::from_ref(recorded).cast::<sys::av1_perf_inter_detail>(),
+                    detail,
+                    1,
+                );
             }
         }
         rec.inter = detail;

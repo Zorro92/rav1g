@@ -376,7 +376,7 @@ unsafe fn release(lib: *mut compute_shader_lib) {
 ///
 /// # Safety
 /// `lib` is null or a library of [`av1_create_pipeline_cache_handle`].
-pub(crate) unsafe fn rav1g_wait_shader_create_complete(lib: *mut compute_shader_lib) -> c_int {
+pub(crate) unsafe fn wait_shader_create_complete(lib: *mut compute_shader_lib) -> c_int {
     let shader_lib = lib.cast::<ShaderLib>();
     if shader_lib.is_null() {
         return -1;
@@ -430,8 +430,7 @@ pub unsafe extern "C" fn av1_create_pipeline_cache_handle(d3d12device: *mut c_vo
     );
 
     let shader_lib = Box::into_raw(Box::new(ShaderLib {
-        // SAFETY: the C++ struct is COM pointers, numbers, a queue and thread handles nobody uses; all
-        // zero is what its constructor leaves.
+        // SAFETY: the library is interfaces (none), pointers and numbers; all zero is the empty one.
         lib: unsafe { std::mem::zeroed() },
         workers: Mutex::new(Vec::new()),
         errors: Arc::new(AtomicI32::new(0)),
@@ -500,7 +499,7 @@ pub unsafe extern "C" fn av1_create_pipeline_cache_handle(d3d12device: *mut c_vo
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn av1_wait_pipeline_cache_handle(handle: *mut c_void) -> c_int {
     // SAFETY: the caller's contract.
-    unsafe { rav1g_wait_shader_create_complete(handle.cast()) }
+    unsafe { wait_shader_create_complete(handle.cast()) }
 }
 
 /// `av1_destroy_pipeline_cache_handle` (`aom/aom_decoder.h`).
@@ -515,7 +514,7 @@ pub unsafe extern "C" fn av1_destroy_pipeline_cache_handle(handle: *mut c_void) 
     }
     // SAFETY: the caller's contract: the handle is a ShaderLib from Box::into_raw.
     unsafe {
-        rav1g_wait_shader_create_complete(handle.cast());
+        wait_shader_create_complete(handle.cast());
         release(handle.cast());
         drop(Box::from_raw(handle.cast::<ShaderLib>()));
     }
@@ -631,7 +630,7 @@ unsafe fn fill_mask_lut(ptr: &mut [u8], offsets: &mut [[c_int; 2]; BLOCK_SIZES_A
 /// # Safety
 /// `dec` is the decoder with its device, its direct queue and the five buffers, created as
 /// `DeviceOnlyConst`.
-pub(crate) unsafe fn rav1g_upload_luts(dec: *mut Av1Core) -> i32 {
+pub(crate) unsafe fn upload_luts(dec: *mut Av1Core) -> i32 {
     // SAFETY: the caller's contract.
     let dec = unsafe { &mut *dec };
     // SAFETY: the COM pointers of the decoder's context.
@@ -717,7 +716,7 @@ mod tests {
             std::thread::spawn(move || {
                 let handle = handle;
                 // SAFETY: a library of this module, alive until the end of the test.
-                let errors = unsafe { rav1g_wait_shader_create_complete(handle.0.cast()) };
+                let errors = unsafe { wait_shader_create_complete(handle.0.cast()) };
                 returned.store(true, Ordering::SeqCst);
                 errors
             })

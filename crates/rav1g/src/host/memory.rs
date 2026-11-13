@@ -6,13 +6,10 @@
 // License 1.0 was not distributed with this source code in the PATENTS file, you can obtain it at
 // www.aomedia.org/license/patent.
 
-//! The decoder's allocator: device buffers with their descriptors in a fixed pool, and the host pool the
-//! application gives the decoder. From `libav1/dx/av1_memory.cpp`.
-//!
-//! The allocator is the C++ struct `av1_memory_allocator`, which the frame pipeline creates in the host
-//! pool and calls through its member functions; the glue (`crates/rav1g-sys/glue/av1_memory.cpp`) has
-//! those as calls of the `rav1g_memory_*` functions here. The sizes, the alignment, the order of the
-//! descriptors and the text of the log lines are those of the C++.
+//! The decoder's allocator: device buffers with their descriptors in a fixed pool, and the host pool, the
+//! one piece of host memory the entropy decoder's structures are cut from. From `libav1/dx/av1_memory.cpp`:
+//! the sizes, the alignment, the order of the descriptors and the text of the log lines are those of the
+//! C++ host.
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::fmt::Write as _;
@@ -23,8 +20,7 @@ use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 use windows::core::Interface;
 
 use super::log::{log, log_create_error};
-use super::types::{DevMemPoolSize, GpuBufferObject, MemoryTypeCount, av1_memory_allocator};
-use crate::gpu::d3d12::com_ref;
+use super::types::{DevMemPoolSize, GpuBufferObject, MemoryTypeCount};
 use crate::gpu::{self, BufferRef, Device, MemoryKind, MemorySegment, VideoMemory};
 use crate::sys::parser::{AV1_POISON_BUFFERS, AV1_POISON_MODE_INFO, AV1_POISON_OFF};
 
@@ -39,11 +35,11 @@ fn to_mib(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
 }
 
-/// `av1_memory_type_name` of the C++.
-pub(crate) fn rav1g_memory_type_name(mem: c_int) -> *const c_char {
-    const NAMES: [&CStr; MemoryKind::COUNT] =
-        [c"DeviceOnly", c"DeviceUpload", c"HostRW", c"ReadBack", c"DeviceOnlyConst", c"UploadUAV"];
-    usize::try_from(mem).ok().and_then(|mem| NAMES.get(mem)).map_or(c"unknown", |name| name).as_ptr()
+/// The name of a memory type in the log lines.
+pub(crate) fn memory_type_name(mem: c_int) -> &'static str {
+    const NAMES: [&str; MemoryKind::COUNT] =
+        ["DeviceOnly", "DeviceUpload", "HostRW", "ReadBack", "DeviceOnlyConst", "UploadUAV"];
+    usize::try_from(mem).ok().and_then(|mem| NAMES.get(mem)).copied().unwrap_or("unknown")
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -127,8 +123,7 @@ pub extern "C" fn av1_set_poison_buffers(level: c_int) {
 ///
 /// # Safety
 /// `ptr` is valid for writing `size` bytes.
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn rav1g_poison_constants(ptr: *mut c_void, size: usize) {
+pub(crate) unsafe fn poison_constants(ptr: *mut c_void, size: usize) {
     if POISON_BUFFERS.load(Ordering::Relaxed) == AV1_POISON_BUFFERS {
         // SAFETY: the caller's contract.
         unsafe { ptr.cast::<u8>().write_bytes(POISON, size) };
@@ -165,205 +160,209 @@ fn host_request(offset: usize, size: usize, align: c_int) -> (usize, usize) {
     (gap, align_up(size.wrapping_add(gap), HOST_MEM_ALIGN))
 }
 
-/// `av1_memory_allocator::setup`: the allocator starts empty on the host pool `host_mem`.
-///
-/// # Safety
-/// `this` is the allocator; `host_mem` is valid for `host_size` bytes for as long as the allocator is used.
-pub(crate) unsafe fn rav1g_memory_setup(this: *mut av1_memory_allocator, host_mem: *mut u8, host_size: usize) {
-    // SAFETY: the caller's contract.
-    let this = unsafe { &mut *this };
-    let offset = align_up(host_mem as usize, 256) - host_mem as usize;
-    this.host_base_addr = host_mem.wrapping_add(offset);
-    this.host_max_size = host_size.wrapping_sub(offset);
-    this.host_offset = 0;
-    this.shader_obj_count = 0;
-    this.host_obj_count = 0;
-    this.dev_obj_count = 0;
-    // SAFETY: a descriptor is pointers and numbers; all zero is the empty one.
-    this.dev_buffer_pool = unsafe { std::mem::zeroed() };
-    this.dev_bytes = [0; MemoryKind::COUNT];
-    this.dev_count = [0; MemoryKind::COUNT];
+/// The allocator of a decoder (`av1_memory_allocator` of the C++ host).
+pub(crate) struct Allocator {
+    /// The descriptors of the device buffers, in the order of their creation. The decoder keeps pointers
+    /// to them, so the allocator does not move while it has buffers.
+    pub dev_buffer_pool: [GpuBufferObject; DevMemPoolSize as usize],
+    pub dev_obj_count: c_int,
+    pub dev_bytes: [usize; MemoryKind::COUNT],
+    pub dev_count: [c_int; MemoryKind::COUNT],
+    pub host_base_addr: *mut u8,
+    pub host_max_size: usize,
+    pub host_offset: usize,
 }
 
-fn device_bytes(this: &av1_memory_allocator) -> usize {
-    this.dev_bytes.iter().sum()
-}
-
-/// `av1_memory_allocator::create_buffer`: a device buffer of `size` bytes, rounded up to 256, with the
-/// next descriptor of the pool. Returns null when the allocation fails, after a "MEMORY FAILED" line that
-/// names it.
-///
-/// # Safety
-/// `this` is the allocator, set up, with the device context of the decoder; `name` is null or a C string
-/// that lives as long as the buffer.
-pub(crate) unsafe fn rav1g_memory_create_buffer(
-    this: *mut av1_memory_allocator,
-    size: usize,
-    mem: c_int,
-    name: *const c_char,
-    slot: c_int,
-) -> *mut GpuBufferObject {
-    // SAFETY: the caller's contract.
-    let this = unsafe { &mut *this };
-    let name = if name.is_null() { c"unnamed".as_ptr() } else { name };
-    // SAFETY: a C string (the caller's contract, or the literal).
-    let name_c = unsafe { CStr::from_ptr(name) };
-    let name_text = name_c.to_string_lossy();
-    let owner = if slot >= 0 { format!(" of slot {slot}") } else { String::new() };
-    let aligned_size = align_up(size, DEVICE_MEM_ALIGN);
-    let total = device_bytes(this);
-    // SAFETY: a static C string.
-    let type_name = unsafe { CStr::from_ptr(rav1g_memory_type_name(mem)) }.to_string_lossy();
-    let before = |count: c_int| {
-        format!("allocated before it: {total} bytes ({:.1} MiB) in {count} buffers", to_mib(total as u64))
-    };
-
-    // The pool of buffer descriptors is fixed. Refuse instead of writing behind it.
-    if this.dev_obj_count >= DevMemPoolSize as c_int {
-        log_create_error(&format!(
-            "MEMORY FAILED buffer {name_text}{owner}: {aligned_size} bytes ({:.1} MiB), type {type_name}: the \
-             decoder's pool of {} buffer descriptors is full; {}",
-            to_mib(aligned_size as u64),
-            DevMemPoolSize as c_int,
-            before(this.dev_obj_count)
-        ));
-        return std::ptr::null_mut();
+impl Allocator {
+    /// An allocator without buffers on the host pool `host_mem`, which starts at the first address in it
+    /// that is a multiple of 256.
+    ///
+    /// # Safety
+    /// `host_mem` is valid for `host_size` bytes for as long as the allocator is used.
+    pub(crate) unsafe fn new(host_mem: *mut u8, host_size: usize) -> Allocator {
+        let offset = (align_up(host_mem as usize, 256) - host_mem as usize).min(host_size);
+        Allocator {
+            // SAFETY: a descriptor is pointers and numbers; all zero is the empty one.
+            dev_buffer_pool: unsafe { std::mem::zeroed() },
+            dev_obj_count: 0,
+            dev_bytes: [0; MemoryKind::COUNT],
+            dev_count: [0; MemoryKind::COUNT],
+            host_base_addr: host_mem.wrapping_add(offset),
+            host_max_size: host_size - offset,
+            host_offset: 0,
+        }
     }
 
-    let count = this.dev_obj_count;
-    let obj = &mut this.dev_buffer_pool[count as usize];
-    obj.dev = std::ptr::null_mut();
-    obj.host_ptr = std::ptr::null_mut();
-    obj.memtype = mem;
-    obj.size = aligned_size;
-    obj.name = name;
-    obj.slot = slot;
+    /// [`Allocator::new`] in an allocation of its own, which the buffer descriptors stay in. `None` when
+    /// the system has no memory for it.
+    ///
+    /// # Safety
+    /// As for [`Allocator::new`].
+    pub(crate) unsafe fn new_boxed(host_mem: *mut u8, host_size: usize) -> Option<Box<Allocator>> {
+        // SAFETY: the layout has a size; the allocation is written whole before the box is made.
+        unsafe {
+            let allocator = std::alloc::alloc(std::alloc::Layout::new::<Allocator>()).cast::<Allocator>();
+            if allocator.is_null() {
+                return None;
+            }
+            allocator.write(Allocator::new(host_mem, host_size));
+            Some(Box::from_raw(allocator))
+        }
+    }
 
-    let kind = MemoryKind::from_raw(mem);
-    // SAFETY: the context is the decoder's, with its device or null.
-    let device = unsafe { this.context.as_ref().and_then(|context| com_ref::<_, ID3D12Device>(&context.device)) };
-    let created = match (kind, device) {
-        (Some(kind), Some(device)) => Device::new(device).create_buffer(aligned_size as u64, kind),
-        _ => Err(gpu::Error { step: "CreateCommittedResource", code: E_POINTER.0 }),
-    };
-    let buffer = match created {
-        Ok(buffer) => buffer,
-        Err(error) => {
-            // Nothing of a failed buffer stays behind: its descriptor is not counted and release() never
-            // sees it.
+    /// The bytes of the device buffers.
+    pub(crate) fn device_bytes(&self) -> usize {
+        self.dev_bytes.iter().sum()
+    }
+
+    /// The descriptors of the device buffers that exist.
+    pub(crate) fn buffers(&self) -> &[GpuBufferObject] {
+        &self.dev_buffer_pool[..usize::try_from(self.dev_obj_count).unwrap_or(0)]
+    }
+
+    /// A device buffer of `size` bytes, rounded up to 256, with the next descriptor of the pool. Returns
+    /// null when the allocation fails, after a "MEMORY FAILED" line that names it.
+    ///
+    /// # Safety
+    /// `device` is the device of the decoder, or none.
+    pub(crate) unsafe fn create_buffer(
+        &mut self,
+        device: Option<&ID3D12Device>,
+        size: usize,
+        mem: c_int,
+        name: &'static CStr,
+        slot: c_int,
+    ) -> *mut GpuBufferObject {
+        let name_text = name.to_string_lossy();
+        let owner = if slot >= 0 { format!(" of slot {slot}") } else { String::new() };
+        let aligned_size = align_up(size, DEVICE_MEM_ALIGN);
+        let total = self.device_bytes();
+        let type_name = memory_type_name(mem);
+        let before = |count: c_int| {
+            format!("allocated before it: {total} bytes ({:.1} MiB) in {count} buffers", to_mib(total as u64))
+        };
+
+        // The pool of buffer descriptors is fixed. Refuse instead of writing behind it.
+        if self.dev_obj_count >= DevMemPoolSize as c_int {
             log_create_error(&format!(
-                "MEMORY FAILED buffer {name_text}{owner}: {aligned_size} bytes ({:.1} MiB), type {type_name}, heap \
-                 {}, {} hr 0x{:08X}; {}",
+                "MEMORY FAILED buffer {name_text}{owner}: {aligned_size} bytes ({:.1} MiB), type {type_name}: the \
+                 decoder's pool of {} buffer descriptors is full; {}",
                 to_mib(aligned_size as u64),
-                kind.map_or("unknown", Device::heap_name),
-                error.step,
-                error.code as u32,
-                before(count)
+                DevMemPoolSize as c_int,
+                before(self.dev_obj_count)
             ));
             return std::ptr::null_mut();
         }
-    };
-    let kind = kind.expect("a buffer was created for a kind");
-    if let Some(mapped) = buffer.mapped() {
-        obj.host_ptr = mapped.as_ptr().cast();
-        if poisoned(kind, name_c) {
-            // SAFETY: the mapping of the new buffer, `aligned_size` bytes.
-            unsafe { mapped.as_ptr().write_bytes(POISON, aligned_size) };
-        }
-    }
-    obj.dev = buffer.into_raw().cast();
 
-    this.dev_obj_count += 1;
-    this.dev_bytes[kind as usize] += aligned_size;
-    this.dev_count[kind as usize] += 1;
-    obj
-}
-
-/// `av1_memory_allocator::host_allocate`: `size` bytes of the host pool at an offset that is a multiple
-/// of `align` (of 32 at least). Returns null when the pool is too small, after a "MEMORY FAILED" line.
-///
-/// # Safety
-/// `this` is the allocator, set up.
-pub(crate) unsafe fn rav1g_memory_host_allocate(
-    this: *mut av1_memory_allocator,
-    size: usize,
-    align: c_int,
-) -> *mut c_void {
-    // SAFETY: the caller's contract.
-    let this = unsafe { &mut *this };
-    let (gap, size) = host_request(this.host_offset, size, align);
-    if this.host_offset.wrapping_add(size) > this.host_max_size {
-        log_create_error(&format!(
-            "MEMORY FAILED host pool: {size} bytes asked, {} of {} bytes in use (the pool is sized by \
-             av1_codec_query_memory_requirements; its configuration must be the one the decoder is created with)",
-            this.host_offset, this.host_max_size
-        ));
-        return std::ptr::null_mut();
-    }
-    let ptr = this.host_base_addr.wrapping_add(this.host_offset + gap);
-    this.host_offset += size;
-    ptr.cast()
-}
-
-fn release_type(this: &mut av1_memory_allocator, mem: c_int) -> (usize, c_int) {
-    let mut bytes = 0;
-    let mut released = 0;
-    let count = usize::try_from(this.dev_obj_count).unwrap_or(0);
-    for obj in &mut this.dev_buffer_pool[..count] {
-        if obj.dev.is_null() || obj.memtype != mem {
-            continue;
-        }
-        if !obj.host_ptr.is_null() {
-            // SAFETY: the descriptor holds the reference of create_buffer.
-            if let Some(buffer) = unsafe { BufferRef::from_raw(&obj.dev) } {
-                buffer.unmap();
-            }
-            obj.host_ptr = std::ptr::null_mut();
-        }
-        // SAFETY: the reference of create_buffer; the descriptor forgets the pointer.
-        unsafe { BufferRef::release(obj.dev.cast()) };
+        let count = self.dev_obj_count;
+        let obj = &mut self.dev_buffer_pool[count as usize];
         obj.dev = std::ptr::null_mut();
-        bytes += obj.size;
-        released += 1;
-    }
-    if let Some(kind) = MemoryKind::from_raw(mem) {
-        this.dev_bytes[kind as usize] = 0;
-        this.dev_count[kind as usize] = 0;
-    }
-    (bytes, released)
-}
+        obj.host_ptr = std::ptr::null_mut();
+        obj.memtype = mem;
+        obj.size = aligned_size;
+        obj.name = name.as_ptr();
+        obj.slot = slot;
 
-/// `av1_memory_allocator::release_type`: releases the buffers of one memory type and returns their bytes
-/// (and their number in `count`). For a release that is logged type by type; `release` must follow it
-/// before the allocator is used again.
-///
-/// # Safety
-/// `this` is the allocator; `count` is null or valid for writing. No buffer of the type is in use.
-pub(crate) unsafe fn rav1g_memory_release_type(
-    this: *mut av1_memory_allocator,
-    mem: c_int,
-    count: *mut c_int,
-) -> usize {
-    // SAFETY: the caller's contract.
-    let (bytes, released) = release_type(unsafe { &mut *this }, mem);
-    if !count.is_null() {
-        // SAFETY: the caller's contract.
-        unsafe { *count = released };
-    }
-    bytes
-}
+        let kind = MemoryKind::from_raw(mem);
+        let created = match (kind, device) {
+            (Some(kind), Some(device)) => Device::new(device).create_buffer(aligned_size as u64, kind),
+            _ => Err(gpu::Error { step: "CreateCommittedResource", code: E_POINTER.0 }),
+        };
+        let buffer = match created {
+            Ok(buffer) => buffer,
+            Err(error) => {
+                // Nothing of a failed buffer stays behind: its descriptor is not counted and release()
+                // never sees it.
+                log_create_error(&format!(
+                    "MEMORY FAILED buffer {name_text}{owner}: {aligned_size} bytes ({:.1} MiB), type {type_name}, \
+                     heap {}, {} hr 0x{:08X}; {}",
+                    to_mib(aligned_size as u64),
+                    kind.map_or("unknown", Device::heap_name),
+                    error.step,
+                    error.code as u32,
+                    before(count)
+                ));
+                return std::ptr::null_mut();
+            }
+        };
+        let kind = kind.expect("a buffer was created for a kind");
+        if let Some(mapped) = buffer.mapped() {
+            obj.host_ptr = mapped.as_ptr().cast();
+            if poisoned(kind, name) {
+                // SAFETY: the mapping of the new buffer, `aligned_size` bytes.
+                unsafe { mapped.as_ptr().write_bytes(POISON, aligned_size) };
+            }
+        }
+        obj.dev = buffer.into_raw().cast();
 
-/// `av1_memory_allocator::release`: releases every buffer. The descriptors are free again afterwards.
-///
-/// # Safety
-/// `this` is the allocator. No buffer is in use.
-pub(crate) unsafe fn rav1g_memory_release(this: *mut av1_memory_allocator) {
-    // SAFETY: the caller's contract.
-    let this = unsafe { &mut *this };
-    for mem in 0..MemoryKind::COUNT as c_int {
-        release_type(this, mem);
+        self.dev_obj_count += 1;
+        self.dev_bytes[kind as usize] += aligned_size;
+        self.dev_count[kind as usize] += 1;
+        obj
     }
-    this.dev_obj_count = 0;
+
+    /// `size` bytes of the host pool at an offset that is a multiple of `align` (of 32 at least). Returns
+    /// null when the pool is too small, after a "MEMORY FAILED" line.
+    pub(crate) fn host_allocate(&mut self, size: usize, align: c_int) -> *mut c_void {
+        let (gap, size) = host_request(self.host_offset, size, align);
+        if self.host_offset.wrapping_add(size) > self.host_max_size {
+            log_create_error(&format!(
+                "MEMORY FAILED host pool: {size} bytes asked, {} of {} bytes in use (the pool is sized by \
+                 av1_codec_query_memory_requirements; its configuration must be the one the decoder is created with)",
+                self.host_offset, self.host_max_size
+            ));
+            return std::ptr::null_mut();
+        }
+        let ptr = self.host_base_addr.wrapping_add(self.host_offset + gap);
+        self.host_offset += size;
+        ptr.cast()
+    }
+
+    /// Releases the buffers of one memory type and returns their bytes and their number. For a release
+    /// that is logged type by type; [`Allocator::release`] must follow it before the allocator is used
+    /// again.
+    ///
+    /// # Safety
+    /// No buffer of the type is in use.
+    pub(crate) unsafe fn release_type(&mut self, mem: c_int) -> (usize, c_int) {
+        let mut bytes = 0;
+        let mut released = 0;
+        let count = usize::try_from(self.dev_obj_count).unwrap_or(0);
+        for obj in &mut self.dev_buffer_pool[..count] {
+            if obj.dev.is_null() || obj.memtype != mem {
+                continue;
+            }
+            if !obj.host_ptr.is_null() {
+                // SAFETY: the descriptor holds the reference of create_buffer.
+                if let Some(buffer) = unsafe { BufferRef::from_raw(&obj.dev) } {
+                    buffer.unmap();
+                }
+                obj.host_ptr = std::ptr::null_mut();
+            }
+            // SAFETY: the reference of create_buffer; the descriptor forgets the pointer.
+            unsafe { BufferRef::release(obj.dev.cast()) };
+            obj.dev = std::ptr::null_mut();
+            bytes += obj.size;
+            released += 1;
+        }
+        if let Some(kind) = MemoryKind::from_raw(mem) {
+            self.dev_bytes[kind as usize] = 0;
+            self.dev_count[kind as usize] = 0;
+        }
+        (bytes, released)
+    }
+
+    /// Releases every buffer. The descriptors are free again afterwards.
+    ///
+    /// # Safety
+    /// No buffer is in use.
+    pub(crate) unsafe fn release(&mut self) {
+        for mem in 0..MemoryKind::COUNT as c_int {
+            // SAFETY: the caller's contract.
+            unsafe { self.release_type(mem) };
+        }
+        self.dev_obj_count = 0;
+    }
 }
 
 /// The plan of a decoder's memory (`av1_memory_allocator_dummy` of the C++): counts what the requests of
@@ -429,9 +428,28 @@ mod tests {
     }
 
     #[test]
+    fn the_host_pool_starts_at_a_multiple_of_256_and_refuses_what_does_not_fit() {
+        let mut memory = vec![0u8; 4096];
+        // SAFETY: the vector lives to the end of the test.
+        let mut allocator = unsafe { Allocator::new(memory.as_mut_ptr().wrapping_add(1), 4095) };
+        assert_eq!(allocator.host_base_addr as usize % 256, 0);
+        assert!(allocator.host_max_size <= 4095 && allocator.host_max_size >= 4095 - 255);
+        let first = allocator.host_allocate(100, 0);
+        let second = allocator.host_allocate(1, 64);
+        assert_eq!(first, allocator.host_base_addr.cast());
+        assert_eq!(second as usize - first as usize, 128);
+        assert_eq!(allocator.host_offset, 128 + 32);
+        // More than is left: null (and a MEMORY FAILED line), nothing taken.
+        assert!(allocator.host_allocate(4096, 0).is_null());
+        assert_eq!(allocator.host_offset, 128 + 32);
+        assert_eq!((allocator.device_bytes(), allocator.buffers().len()), (0, 0));
+        // SAFETY: no buffers.
+        unsafe { allocator.release() };
+    }
+
+    #[test]
     fn type_names() {
-        // SAFETY: static C strings.
-        let name = |mem| unsafe { CStr::from_ptr(rav1g_memory_type_name(mem)) }.to_str().unwrap();
+        let name = memory_type_name;
         assert_eq!(name(0), "DeviceOnly");
         assert_eq!(name(2), "HostRW");
         assert_eq!(name(5), "UploadUAV");

@@ -138,7 +138,7 @@ struct GenBlockData {
 ///
 /// # Safety
 /// `dec` is the decoder while it records a frame whose tiles are decoded; `pbi` is its entropy decoder.
-pub(crate) unsafe fn rav1g_prediction_gen_blocks(pbi: *mut AV1Decoder, dec: *mut Av1Core) {
+pub(crate) unsafe fn prediction_gen_blocks(pbi: *mut AV1Decoder, dec: *mut Av1Core) {
     // SAFETY: the caller's contract: the frame data, its tiles and their block maps, the frame header and
     // the buffers and pipelines of the decoder are live, and only this thread records.
     unsafe {
@@ -566,18 +566,18 @@ impl InterDetailRec<'_> {
     /// The counters of the tile threads, added up over the tiles of the frame.
     ///
     /// # Safety
-    /// `self.d` is null or the breakdown of the frame; `tiles` is null or `count` counters.
-    unsafe fn add_tiles(&mut self, tiles: *const av1_perf_inter_tile, count: c_int) {
+    /// `self.d` is null or the breakdown of the frame.
+    unsafe fn add_tiles(&mut self, tiles: &[av1_perf_inter_tile]) {
         // The counters are all 64-bit numbers.
         const WORK: usize = size_of::<av1_perf_inter_work>() / size_of::<i64>();
         const BLOCKS: usize = size_of::<av1_perf_inter_blocks>() / size_of::<i64>();
         // SAFETY: the caller's contract; the structs are WORK and BLOCKS 64-bit counters.
         unsafe {
-            if self.d.is_null() || tiles.is_null() {
+            if self.d.is_null() {
                 return;
             }
             let d = &mut *self.d;
-            for tile in std::slice::from_raw_parts(tiles, count.max(0) as usize) {
+            for tile in tiles {
                 for (section, work) in d.sections.iter_mut().zip(&tile.work) {
                     let src = (&raw const *work).cast::<[i64; WORK]>();
                     let dst = (&raw mut section.work).cast::<[i64; WORK]>();
@@ -648,8 +648,8 @@ unsafe fn list_range(offsets: *const c_int, i: usize) -> (c_int, c_int) {
 ///
 /// # Safety
 /// `dec` is the decoder while it records a frame whose block records are written
-/// ([`rav1g_prediction_gen_blocks`]); `cm` is the frame's.
-pub(crate) unsafe fn rav1g_prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, _tile: *mut TileInfo) {
+/// ([`prediction_gen_blocks`]); `cm` is the frame's.
+pub(crate) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, _tile: *mut TileInfo) {
     // SAFETY: the caller's contract: the frame data, its tiles and their block maps, the reference frame
     // buffers of a frame with inter blocks, and the buffers and pipelines of the decoder are live, and
     // only this thread records.
@@ -684,7 +684,8 @@ pub(crate) unsafe fn rav1g_prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_CO
         detail.init(td);
         if let Some(d) = detail.d.as_mut() {
             d.has_inter = c_int::from(do_inter);
-            detail.add_tiles((*dec).perf_inter_tiles, tile_count.min((*dec).perf_inter_tiles_cap));
+            let counters = &(*dec).perf_inter_tiles;
+            detail.add_tiles(&counters[..counters.len().min(usize::try_from(tile_count).unwrap_or(0))]);
         }
         let mut pass = InterPass { commands, shader: std::ptr::null(), detail };
         if do_inter {
@@ -1192,7 +1193,7 @@ struct BordersData {
 ///
 /// # Safety
 /// `dec` is the decoder while it records a frame; `cm` is the frame's.
-pub(crate) unsafe fn rav1g_inter_ext_borders(dec: *mut Av1Core, cm: *mut AV1_COMMON) {
+pub(crate) unsafe fn inter_ext_borders(dec: *mut Av1Core, cm: *mut AV1_COMMON) {
     // SAFETY: the caller's contract.
     unsafe {
         let td = &mut *(*dec).curr_frame_data;

@@ -13,21 +13,16 @@
 
 use std::cell::Cell;
 use std::ffi::{c_int, c_void};
-use std::thread::JoinHandle;
 
 use windows::Win32::Graphics::Direct3D12::ID3D12Fence;
 use windows::core::Interface;
 
-use super::create::{rav1g_frame_buffer_acquire, rav1g_release_fb};
 use super::frame::{commit_command_buffer, prepare_command_buffer, release_unsubmitted_frame};
 use super::log::log;
-use super::output::{rav1g_copy_output, rav1g_output_image};
+use super::output::{copy_output, output_image};
 use super::perf::{av1_perf_ticks, perf_add, perf_callback, perf_collect, perf_now, ticks_to_ms};
 use super::stage_dump::{set_dump_info, stage_dump_deliver};
-use super::thread::{
-    cond_signal, mutex_lock, mutex_unlock, rav1g_mt_queue_get, rav1g_mt_queue_is_empty, rav1g_mt_queue_push,
-    spawn_thread,
-};
+use super::thread::spawn_thread;
 use super::types::{Av1Core, GpuWorkItem, av1_frame_thread_data};
 use crate::gpu::Event;
 use crate::sys;
@@ -107,12 +102,11 @@ pub unsafe extern "C" fn get_output_frame(pbi: *mut AV1Decoder, dst: *mut aom_im
     // SAFETY: the caller's contract.
     unsafe {
         let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
-        if rav1g_mt_queue_is_empty(&raw mut (*dec).output_queue) != 0 {
+        let Some(hw_img) = (*dec).output_queue.try_get() else {
             return 1;
-        }
-        let hw_img = rav1g_mt_queue_get(&raw mut (*dec).output_queue).cast::<HwOutputImage>();
+        };
         copy_to_img(dec, &mut *hw_img, &mut *dst);
-        rav1g_mt_queue_push(&raw mut (*dec).image_pool, hw_img.cast());
+        (*dec).image_pool.push(hw_img);
     }
     0
 }
@@ -151,7 +145,7 @@ unsafe fn completion_thread(dec: *mut Av1Core) {
     unsafe {
         let notify = (*dec).cb_notify_frame_ready.filter(|_| !(*dec).image_alloc_priv.is_null());
         loop {
-            let item = rav1g_mt_queue_get(&raw mut (*dec).gpu_waiting_queue).cast::<GpuWorkItem>();
+            let item: *mut GpuWorkItem = (*dec).gpu_waiting_queue.get();
             if item.is_null() {
                 if let Some(notify) = notify {
                     notify((*dec).image_alloc_priv, std::ptr::null_mut());
@@ -180,27 +174,29 @@ unsafe fn completion_thread(dec: *mut Av1Core) {
                     perf_collect(dec, td, perf_wait_start, &mut perf_rec);
                     perf_have_rec = true;
                 }
-                mutex_lock(&raw mut (*dec).fb_pool_mutex);
-                let mut signal = 0;
-                if !td.back_buffer0.is_null() {
-                    signal |= rav1g_release_fb(dec, td.back_buffer0);
-                }
-                signal |= rav1g_release_fb(dec, td.dst_frame_buffer);
-                for r in 0..7 {
-                    if !td.refs[r].is_null() {
-                        signal |= rav1g_release_fb(dec, td.refs[r]);
+                {
+                    // The frame's buffers and its second slot go back under the lock of the buffer pool.
+                    let mut pool = (*dec).fb_pool.lock();
+                    let mut returned = false;
+                    if !td.back_buffer0.is_null() {
+                        returned |= pool.release(td.back_buffer0);
                     }
-                    td.refs[r] = std::ptr::null_mut();
+                    returned |= pool.release(td.dst_frame_buffer);
+                    for r in 0..7 {
+                        if !td.refs[r].is_null() {
+                            returned |= pool.release(td.refs[r]);
+                        }
+                        td.refs[r] = std::ptr::null_mut();
+                    }
+                    td.dst_frame_buffer = std::ptr::null_mut();
+                    td.back_buffer0 = std::ptr::null_mut();
+                    if returned {
+                        (*dec).fb_pool.signal();
+                    }
+                    if !td.sec_thread_data.is_null() {
+                        (*dec).frame_data_pool.push(td.sec_thread_data);
+                    }
                 }
-                td.dst_frame_buffer = std::ptr::null_mut();
-                td.back_buffer0 = std::ptr::null_mut();
-                if signal != 0 {
-                    cond_signal(&raw mut (*dec).fb_pool_empty_cond);
-                }
-                if !td.sec_thread_data.is_null() {
-                    rav1g_mt_queue_push(&raw mut (*dec).frame_data_pool, td.sec_thread_data.cast());
-                }
-                mutex_unlock(&raw mut (*dec).fb_pool_mutex);
                 td.sec_thread_data = std::ptr::null_mut();
                 // -asyncclear: the slot's grids are cleared here instead of on the decode thread. A second
                 // slot went back above as it is: a frame uses only the coefficient and mode info shares of
@@ -213,19 +209,15 @@ unsafe fn completion_thread(dec: *mut Av1Core) {
                     perf_rec.async_clear_bytes = cleared as i64;
                 }
                 // A pipeline slot, or the output context of a show_existing_frame copy.
-                let pool = if td.output_only != 0 {
-                    &raw mut (*dec).output_data_pool
-                } else {
-                    &raw mut (*dec).frame_data_pool
-                };
-                rav1g_mt_queue_push(pool, std::ptr::from_mut(td).cast());
+                let pool = if td.output_only != 0 { &(*dec).output_data_pool } else { &(*dec).frame_data_pool };
+                pool.push(std::ptr::from_mut(td));
             }
 
             if let Some(hw_img) = (*item).image.as_mut() {
                 if let Some(notify) = notify {
                     let mut img: aom_image_t = std::mem::zeroed();
                     copy_to_img(dec, hw_img, &mut img);
-                    rav1g_mt_queue_push(&raw mut (*dec).image_pool, std::ptr::from_mut(hw_img).cast());
+                    (*dec).image_pool.push(std::ptr::from_mut(hw_img));
                     let perf_notify_start = if perf_have_rec { perf_now() } else { 0 };
                     FRAME_FENCE.set(fence);
                     notify((*dec).image_alloc_priv, (&raw mut img).cast());
@@ -235,13 +227,13 @@ unsafe fn completion_thread(dec: *mut Av1Core) {
                             (perf_now() - perf_notify_start) as f64 * ticks_to_ms();
                     }
                 } else {
-                    rav1g_mt_queue_push(&raw mut (*dec).output_queue, std::ptr::from_mut(hw_img).cast());
+                    (*dec).output_queue.push(std::ptr::from_mut(hw_img));
                 }
             }
             if perf_have_rec && let Some((callback, context)) = perf_callback() {
                 callback(context, &perf_rec);
             }
-            rav1g_mt_queue_push(&raw mut (*dec).gpu_item_pool, item.cast());
+            (*dec).gpu_item_pool.push(item);
         }
     }
 }
@@ -252,9 +244,9 @@ unsafe fn completion_thread(dec: *mut Av1Core) {
 /// # Safety
 /// `dec` is a decoder; decode thread.
 pub(crate) unsafe fn start_completion_thread(dec: *mut Av1Core) -> bool {
-    // SAFETY: the caller's contract. The handle of the thread is kept in the decoder as a pointer to it.
+    // SAFETY: the caller's contract. The decoder keeps the handle of the thread.
     unsafe {
-        if !(*dec).gpu_thread.is_null() {
+        if (*dec).gpu_thread.is_some() {
             return true;
         }
         let decoder = DecoderPtr(dec);
@@ -265,7 +257,7 @@ pub(crate) unsafe fn start_completion_thread(dec: *mut Av1Core) -> bool {
         });
         match thread {
             Ok(thread) => {
-                (*dec).gpu_thread = Box::into_raw(Box::new(thread)).cast();
+                (*dec).gpu_thread = Some(thread);
                 true
             }
             Err(error) => {
@@ -284,14 +276,15 @@ pub(crate) unsafe fn start_completion_thread(dec: *mut Av1Core) -> bool {
 /// `dec` is null or a decoder; decode thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn av1_drain_gpu_decoder(dec: *mut Av1Core) {
-    // SAFETY: the caller's contract; the pointer is the box of `start_completion_thread`.
+    // SAFETY: the caller's contract.
     unsafe {
-        if dec.is_null() || (*dec).gpu_thread.is_null() {
+        if dec.is_null() {
             return;
         }
-        rav1g_mt_queue_push(&raw mut (*dec).gpu_waiting_queue, std::ptr::null_mut());
-        let thread = Box::from_raw((*dec).gpu_thread.cast::<JoinHandle<()>>());
-        (*dec).gpu_thread = std::ptr::null_mut();
+        let Some(thread) = (*dec).gpu_thread.take() else {
+            return;
+        };
+        (*dec).gpu_waiting_queue.push(std::ptr::null_mut());
         let _ = thread.join();
     }
 }
@@ -354,7 +347,7 @@ pub unsafe extern "C" fn rav1g_decode_sef_begin(pbi: *mut AV1Decoder, fb: *mut a
         }
         // Waits when both contexts are in flight: until the copy of an earlier show_existing_frame has
         // completed.
-        let td_ptr = rav1g_mt_queue_get(&raw mut (*dec).output_data_pool).cast::<av1_frame_thread_data>();
+        let td_ptr: *mut av1_frame_thread_data = (*dec).output_data_pool.get();
         perf_add(dec, sys::AV1_PERF_CPU_WAIT_SLOT as usize, perf_t);
         let td = &mut *td_ptr;
         td.sec_thread_data = std::ptr::null_mut();
@@ -373,7 +366,7 @@ pub unsafe extern "C" fn rav1g_decode_sef_begin(pbi: *mut AV1Decoder, fb: *mut a
         td.do_superres = 0;
         td.do_filmgrain = (*cm).film_grain_params.apply_grain;
         td.output_frame = 1;
-        rav1g_frame_buffer_acquire(dec, td.dst_frame_buffer);
+        (*dec).fb_pool.acquire(td.dst_frame_buffer);
         // From here on the next setup can take the context back if the output image cannot be had.
         (*dec).curr_frame_data = td_ptr;
         // The completion thread ends with a drain; a show_existing_frame may be the first thing after one.
@@ -386,7 +379,7 @@ pub unsafe extern "C" fn rav1g_decode_sef_begin(pbi: *mut AV1Decoder, fb: *mut a
             let info = format!("show_existing_frame film_grain={}", td.do_filmgrain);
             set_dump_info(td, &info);
         }
-        rav1g_output_image(dec, cm, fb)
+        output_image(dec, cm, fb)
     }
 }
 
@@ -407,12 +400,12 @@ pub unsafe extern "C" fn rav1g_decode_sef_submit(
         let cm = &raw mut (*pbi).common;
         let buf = &mut (*(*cm).cur_frame).buf;
         if image_state != 0 {
-            rav1g_copy_output(dec, cm, fb);
+            copy_output(dec, cm, fb);
         }
         commit_command_buffer(dec);
 
         let perf_t = av1_perf_ticks();
-        let item = rav1g_mt_queue_get(&raw mut (*dec).gpu_item_pool).cast::<GpuWorkItem>();
+        let item: *mut GpuWorkItem = (*dec).gpu_item_pool.get();
         perf_add(dec, sys::AV1_PERF_CPU_WAIT_ITEM as usize, perf_t);
         (*item).data = (*dec).curr_frame_data;
         (*item).image = buf.hw_show_image;
@@ -421,7 +414,7 @@ pub unsafe extern "C" fn rav1g_decode_sef_submit(
         if let Some(image) = (*item).image.as_mut() {
             image.user_priv = (*pbi).user_priv;
         }
-        rav1g_mt_queue_push(&raw mut (*dec).gpu_waiting_queue, item.cast());
+        (*dec).gpu_waiting_queue.push(item);
     }
 }
 
@@ -434,19 +427,17 @@ mod tests {
     /// decoder's error); the decoder has no thread to join.
     #[test]
     fn no_completion_thread_is_an_error_not_a_panic() {
-        let layout = std::alloc::Layout::new::<Av1Core>();
-        // SAFETY: a decoder is created zeroed, which is a valid value of every field; freed below.
+        let mut dec = Av1Core::new().expect("memory for a decoder");
+        let dec = &raw mut *dec;
+        // SAFETY: an empty decoder.
         unsafe {
-            let dec = std::alloc::alloc_zeroed(layout).cast::<Av1Core>();
-            assert!(!dec.is_null());
             spawn_test::FAIL.set(true);
             let started = start_completion_thread(dec);
             spawn_test::FAIL.set(false);
             assert!(!started);
-            assert!((*dec).gpu_thread.is_null());
+            assert!((*dec).gpu_thread.is_none());
             // The drain of a decoder without a completion thread returns at once.
             av1_drain_gpu_decoder(dec);
-            std::alloc::dealloc(dec.cast(), layout);
         }
     }
 }

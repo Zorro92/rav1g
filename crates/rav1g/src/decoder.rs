@@ -16,7 +16,7 @@ use windows::core::Interface;
 
 use crate::device::Device;
 use crate::error::{Error, ErrorCode, text};
-use crate::host::frame_fence;
+use crate::host::{decoder_own_bytes, frame_fence};
 use crate::output::{Frame, ImageFormat, ImageRequest, Output, OutputImage};
 use crate::sys;
 
@@ -118,7 +118,8 @@ impl Default for Settings {
 /// What a decoder of some settings takes.
 #[derive(Clone, Copy, Debug)]
 pub struct MemoryRequirements {
-    /// Bytes of host memory (the decoder allocates them at creation).
+    /// Bytes of host memory, which the decoder allocates at creation, before it asks the budget guard:
+    /// the pool of the entropy decoder and the decoder itself.
     pub host_size: usize,
     /// Bytes of the device buffers the creation allocates.
     pub device_size: usize,
@@ -153,7 +154,8 @@ impl Settings {
         // SAFETY: cfg is a valid configuration; the call reads sizes and writes the three results.
         unsafe { sys::av1_codec_query_memory_requirements(&mut cfg) };
         MemoryRequirements {
-            host_size: cfg.host_size,
+            // The query of the C interface gives the host pool; the decoder is an allocation next to it.
+            host_size: cfg.host_size + decoder_own_bytes(),
             device_size: cfg.device_size,
             device_size_deferred: cfg.device_size_deferred,
         }

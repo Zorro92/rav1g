@@ -6,34 +6,34 @@
 // License 1.0 was not distributed with this source code in the PATENTS file, you can obtain it at
 // www.aomedia.org/license/patent.
 
-//! The structs of the host: the decoder (`Av1Core`), a pipeline slot (`av1_frame_thread_data`), the
-//! allocator, the shader library, the queues, and the numbers of the block lists (`dx/types.h`,
-//! `dx/av1_compute.h`, `dx/av1_memory.h`, `dx/av1_thread.h`, `dx/intra_v2_sched.h` of the C++ host).
+//! The structs of the host: the decoder (`Av1Core`), a pipeline slot (`av1_frame_thread_data`), the shader
+//! library, and the numbers of the block lists (`dx/types.h`, `dx/av1_compute.h`, `dx/av1_thread.h`,
+//! `dx/intra_v2_sched.h` of the C++ host, whose names they keep).
 //!
-//! They are Rust's own since the last C++ file of the host left the cargo build: nothing outside this
-//! crate reads them (the entropy decoder holds the decoder as a pointer it never looks behind). The names
-//! and the fields are those of the C++ structs, and so are the layouts (`repr(C)`), for two reasons:
+//! They are Rust's own: nothing outside this crate reads them. The entropy decoder holds the decoder as a
+//! pointer it never looks behind (`struct Av1Core *` of `dx/av1_core.h`), so the decoder is an allocation
+//! of this crate ([`Av1Core::new`]) with the queues, the locks and the counters as Rust types, and its
+//! layout is whatever the compiler makes of it. What the entropy decoder shares with the host (the frame
+//! buffer descriptions, the tile's cursors, the mode info) stays C, is bound in `rav1g_sys::parser` and
+//! `rav1g_sys::shared`, and is held against the C compiler by the layout tests there.
 //!
-//! - The decoder and the allocator lie in the host pool of the application, whose size the memory query
-//!   reports. With the sizes of the C++ structs ([`CORE_BYTES`], [`ALLOCATOR_BYTES`]) a configuration takes
-//!   the same host memory from both decoders, and the "MEMORY" lines of the two compare equal.
-//! - A decoder is created zeroed, and all zero is a valid value of every field: no interface, no buffer,
-//!   a count of 0.
-//!
-//! What was a COM pointer in C++ is the interface or the backend type that wraps it, or none; a lock or a
-//! condition is the one of Windows that `aom_thread.h` made of a pthread one. What the entropy decoder
-//! shares with the host (the frame buffer descriptions, the tile's cursors, the mode info) stays C and is
-//! bound in `rav1g_sys::parser` and `rav1g_sys::shared`.
+//! A decoder starts zeroed except for the fields that are Rust values with a state of their own (the
+//! queues, the pool of frame buffers, the locks, the vector of the tile counters): all zero is a valid
+//! value of every other field, no interface, no buffer, a count of 0. What was a COM pointer in C++ is the
+//! interface or the backend type that wraps it, or none.
 
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
 
 use std::ffi::{c_char, c_int, c_long, c_uint, c_void};
+use std::sync::Mutex;
+use std::thread::JoinHandle;
 
 use windows::Win32::Graphics::Direct3D12::{
     ID3D12CommandQueue, ID3D12Device, ID3D12PipelineState, ID3D12RootSignature,
 };
-use windows::Win32::System::Threading::{CONDITION_VARIABLE, CRITICAL_SECTION};
 
+use super::memory::Allocator;
+use super::thread::{FramePool, Queue};
 use crate::gpu::{CommandAllocator, CommandList, Fence, Readback, TimestampQueries};
 use crate::sys::parser::{
     HwFrameBuffer, HwOutputImage, aom_notify_frame_ready_cb_fn_t, av1_get_decoded_buffer_cb_fn_t,
@@ -45,17 +45,6 @@ use crate::sys::parser::{
 pub type MemoryType = c_int;
 /// A buffer of the device, as the pointer a buffer descriptor keeps (`ID3D12Resource *`).
 pub type ID3D12Resource = c_void;
-/// A lock, as `aom_thread.h` has it on Windows.
-pub type pthread_mutex_t = CRITICAL_SECTION;
-/// A condition, as `aom_thread.h` has it on Windows.
-pub type pthread_cond_t = CONDITION_VARIABLE;
-
-/// The size of the C++ `Av1Core`, which is what the decoder takes of the host pool.
-pub const CORE_BYTES: usize = 67384;
-/// The size of the C++ `av1_memory_allocator`.
-pub const ALLOCATOR_BYTES: usize = 7296;
-const _: () = assert!(size_of::<Av1Core>() == CORE_BYTES && size_of::<av1_memory_allocator>() == ALLOCATOR_BYTES);
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct GpuBufferObject {
@@ -74,37 +63,6 @@ pub struct dx_compute_context {
     pub queue: Option<ID3D12CommandQueue>,
     pub queue_direct: Option<ID3D12CommandQueue>,
     pub command_list: Option<CommandList>,
-}
-
-#[repr(C)]
-pub struct av1_memory_allocator {
-    pub vtable_: *const c_void,
-    pub context: *mut dx_compute_context,
-    pub dev_buffer_pool: [GpuBufferObject; 128],
-    pub shader_obj_count: c_int,
-    pub host_obj_count: c_int,
-    pub dev_obj_count: c_int,
-    pub dev_bytes: [usize; 6],
-    pub dev_count: [c_int; 6],
-    pub host_base_addr: *mut u8,
-    pub host_max_size: usize,
-    pub host_offset: usize,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct DataPtrQueue {
-    pub m_element: [*mut c_void; 100],
-    pub m_head: c_int,
-    pub m_tail: c_int,
-    pub m_QueueNotEmpty: c_int,
-}
-
-#[repr(C)]
-pub struct DataPtrQueueMT {
-    pub int_queue: DataPtrQueue,
-    pub m_empty_cond: CONDITION_VARIABLE,
-    pub m_mutex: CRITICAL_SECTION,
 }
 
 #[repr(C)]
@@ -189,11 +147,7 @@ pub struct compute_shader_lib {
     pub sig_upscale: Option<ID3D12RootSignature>,
     pub compliled_: c_int,
     pub threads: c_int,
-    pub task_queue: DataPtrQueueMT,
-    pub create_shader_threads: [*mut c_void; 6],
     pub create_shader_errors: c_int,
-    pub task_cnt: c_int,
-    pub create_shader_tasks: *mut c_void,
 }
 
 #[repr(C)]
@@ -237,7 +191,8 @@ pub struct av1_perf_td {
     pub mark_sub: [u16; 1280],
     pub t_submit: i64,
     pub acc: av1_perf_accum,
-    pub detail: *mut av1_perf_inter_detail,
+    /// The inter breakdown of the slot's frame (-gputimedetail), from the first frame recorded with it.
+    pub detail: Option<Box<av1_perf_inter_detail>>,
     pub detail_mode: c_int,
     pub detail_filled: c_int,
 }
@@ -314,7 +269,8 @@ pub struct av1_frame_thread_data {
     pub dst_frame_buffer: *mut HwFrameBuffer,
     pub refs: [*mut HwFrameBuffer; 8],
     pub sec_thread_data: *mut av1_frame_thread_data,
-    pub sec_data_mutex: CRITICAL_SECTION,
+    /// Held while the frame takes its second slot: the decode thread or a tile thread.
+    pub sec_data_mutex: Mutex<()>,
     pub output_only: c_int,
     pub async_clear: c_int,
     pub clear_pending: c_int,
@@ -342,22 +298,27 @@ pub struct GpuWorkItem {
     pub image: *mut HwOutputImage,
 }
 
-#[repr(C)]
+/// Work items: one per frame in flight (at most `FrameThreadDataCount`, each holds a slot) and one per
+/// show_existing_frame copy in flight (at most `OutputThreadDataCount`, each holds an output context).
+pub const GpuItemPoolSize: usize = 8;
+/// The most frame buffers a decoder has: `RefFrameBufferCount` and one for each slot above two.
+pub const FrameBufferPoolSize: usize = 14;
+
 pub struct Av1Core {
     pub compute: dx_compute_context,
-    pub memory: *mut av1_memory_allocator,
+    /// The allocator, in an allocation of its own (the decoder keeps pointers to its buffer descriptors);
+    /// null until the creation has made it.
+    pub memory: *mut Allocator,
     pub shader_lib: *mut compute_shader_lib,
     pub cb_get_output_image: av1_get_decoded_buffer_cb_fn_t,
     pub cb_release_image: av1_release_decoded_buffer_cb_fn_t,
     pub cb_notify_frame_ready: aom_notify_frame_ready_cb_fn_t,
     pub image_alloc_priv: *mut c_void,
-    pub ring_buf_host: *mut c_void,
     pub pbi_alloc: *mut c_void,
     pub buf_pool_alloc: *mut c_void,
     pub above_context_alloc: [*mut *mut c_void; 5],
     pub restoration_info_alloc: [*mut c_void; 3],
     pub tplmvs_alloc: *mut c_void,
-    pub ring_buf_dev: *mut GpuBufferObject,
     pub idct_blocks: *mut GpuBufferObject,
     pub idct_residuals: *mut GpuBufferObject,
     pub frame_buffer_pool: *mut GpuBufferObject,
@@ -372,8 +333,6 @@ pub struct Av1Core {
     pub prediction_blocks: *mut GpuBufferObject,
     pub prediction_blocks_warp: *mut GpuBufferObject,
     pub loopfilter_blocks: *mut GpuBufferObject,
-    pub fb_pool_alloc_ptr: usize,
-    pub fb_pool_alloc_reset: usize,
     pub pred_map_size: c_int,
     pub inter_fast_tiles: c_int,
     pub block_count4x4: c_int,
@@ -390,7 +349,6 @@ pub struct Av1Core {
     pub curr_frame_data: *mut av1_frame_thread_data,
     pub frame_number: c_int,
     pub thread_count: c_int,
-    pub corrupted_seq: c_int,
     pub back_buffer1: HwFrameBuffer,
     pub back_buffer0: HwFrameBuffer,
     pub fb_size: c_int,
@@ -400,27 +358,91 @@ pub struct Av1Core {
     pub max_bitdepth: c_int,
     pub enable_superres: c_int,
     pub wedge_offsets: [[c_int; 2]; 22],
-    pub fb_pool_src: [HwFrameBuffer; 14],
-    pub image_pool_src: [HwOutputImage; 16],
-    pub fb_pool_empty_cond: CONDITION_VARIABLE,
-    pub fb_pool_mutex: CRITICAL_SECTION,
-    pub fb_pool: DataPtrQueue,
-    pub image_pool: DataPtrQueueMT,
-    pub output_queue: DataPtrQueueMT,
-    pub frame_data_pool: DataPtrQueueMT,
-    pub output_data_pool: DataPtrQueueMT,
-    pub gpu_item_pool_src: [GpuWorkItem; 8],
-    pub gpu_item_pool: DataPtrQueueMT,
-    pub gpu_waiting_queue: DataPtrQueueMT,
-    pub gpu_thread: *mut c_void,
+    pub fb_pool_src: [HwFrameBuffer; FrameBufferPoolSize],
+    pub image_pool_src: [HwOutputImage; ImagePoolSize as usize],
+    /// The frame buffers nothing counts on; its lock guards the reference counts of all of them.
+    pub fb_pool: FramePool,
+    /// Output images without a frame.
+    pub image_pool: Queue<*mut HwOutputImage>,
+    /// Finished frames of an application that takes them from the decode call (`get_output_frame`).
+    pub output_queue: Queue<*mut HwOutputImage>,
+    /// The pipeline slots that are free.
+    pub frame_data_pool: Queue<*mut av1_frame_thread_data>,
+    /// The output contexts that are free.
+    pub output_data_pool: Queue<*mut av1_frame_thread_data>,
+    pub gpu_item_pool_src: [GpuWorkItem; GpuItemPoolSize],
+    /// Work items without work.
+    pub gpu_item_pool: Queue<*mut GpuWorkItem>,
+    /// The frames in flight, for the completion thread, in the order of their submission; null ends the
+    /// thread (the drain).
+    pub gpu_waiting_queue: Queue<*mut GpuWorkItem>,
+    /// The completion thread, while it runs.
+    pub gpu_thread: Option<JoinHandle<()>>,
     pub tryhdr10x3: c_int,
     pub perf_cur: av1_perf_accum,
     pub perf_gpu_freq: u64,
     pub perf_gpu_last_end: u64,
-    pub perf_inter_tiles: *mut av1_perf_inter_tile,
-    pub perf_inter_tiles_cap: c_int,
+    /// The counters of the tile threads for the inter breakdown (-gputimedetail), one set per tile of
+    /// the frame that is being decoded. Each tile thread writes the counters of its tile through
+    /// `perf_inter_tiles_base`, which the frame setup takes from the vector; the decode thread reads the
+    /// vector when the tiles are done.
+    pub perf_inter_tiles: Vec<av1_perf_inter_tile>,
+    pub perf_inter_tiles_base: *mut av1_perf_inter_tile,
+    pub perf_inter_tiles_count: c_int,
     pub perf_inter_mode: c_int,
-    pub perf_detail_out: *mut av1_perf_inter_detail,
+    /// The inter breakdown as the timing callback gets it: the completion thread's copy.
+    pub perf_detail_out: Option<Box<av1_perf_inter_detail>>,
+}
+
+impl Av1Core {
+    /// A decoder with nothing in it: no device, no buffers, every count 0, the queues and the pool of
+    /// frame buffers empty. `None` when the system has no memory for it.
+    pub(crate) fn new() -> Option<Box<Av1Core>> {
+        let layout = std::alloc::Layout::new::<Av1Core>();
+        // SAFETY: the layout has a size. All zero is a valid value of every field but the ones written
+        // here before the box is made: pointers, numbers, arrays of them, `Option`s of interfaces and of
+        // boxes (none), and `gpu_thread` (none: written to make that sure).
+        unsafe {
+            let dec = std::alloc::alloc_zeroed(layout).cast::<Av1Core>();
+            if dec.is_null() {
+                return None;
+            }
+            (&raw mut (*dec).fb_pool).write(FramePool::with_capacity(FrameBufferPoolSize));
+            (&raw mut (*dec).image_pool).write(Queue::with_capacity(ImagePoolSize as usize));
+            (&raw mut (*dec).output_queue).write(Queue::with_capacity(ImagePoolSize as usize));
+            (&raw mut (*dec).frame_data_pool).write(Queue::with_capacity(FrameThreadDataCount as usize));
+            (&raw mut (*dec).output_data_pool).write(Queue::with_capacity(OutputThreadDataCount as usize));
+            (&raw mut (*dec).gpu_item_pool).write(Queue::with_capacity(GpuItemPoolSize));
+            // The work items of the frames in flight and the item that ends the thread.
+            (&raw mut (*dec).gpu_waiting_queue).write(Queue::with_capacity(GpuItemPoolSize + 1));
+            (&raw mut (*dec).gpu_thread).write(None);
+            (&raw mut (*dec).perf_inter_tiles).write(Vec::new());
+            (&raw mut (*dec).perf_detail_out).write(None);
+            for slot in 0..FrameThreadDataCount as usize {
+                (&raw mut (*dec).frame_thread_data[slot].sec_data_mutex).write(Mutex::new(()));
+                (&raw mut (*dec).frame_thread_data[slot].perf.detail).write(None);
+            }
+            for context in 0..OutputThreadDataCount as usize {
+                (&raw mut (*dec).output_thread_data[context].sec_data_mutex).write(Mutex::new(()));
+                (&raw mut (*dec).output_thread_data[context].perf.detail).write(None);
+            }
+            Some(Box::from_raw(dec))
+        }
+    }
+
+    /// What a decoder takes of the heap of the process besides its host pool: this struct, the
+    /// allocator with its buffer descriptors, and the storage of the queues.
+    pub(crate) const fn own_bytes() -> usize {
+        size_of::<Av1Core>()
+            + size_of::<Allocator>()
+            + size_of::<*mut c_void>()
+                * (FrameBufferPoolSize
+                    + 2 * ImagePoolSize as usize
+                    + FrameThreadDataCount as usize
+                    + OutputThreadDataCount as usize
+                    + 2 * GpuItemPoolSize
+                    + 1)
+    }
 }
 
 #[repr(C)]
@@ -466,7 +488,6 @@ pub struct ScaleFactor {
 
 pub const Av1PerfMaxMarks: c_int = 1280;
 pub const Av1StageDumpMax: c_int = 40;
-pub const BUFFERS_COUNT: c_int = 100;
 pub const CasualInter: c_int = 1;
 pub const CompoundAvrg: c_int = 2;
 pub const CompoundDiff: c_int = 3;

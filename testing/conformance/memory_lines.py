@@ -7,10 +7,18 @@
 run: decodes the first temporal units of a few streams of the conformance set with -v, in several decoder
 configurations (slots, low memory parts, the buffers of -intrav2 and -interfast), and writes the lines of
 the decoder that start with "MEMORY" to <out>/<case>.txt: the budget line, what the created decoder holds
-(by type, per slot, the largest buffers, the host pool), and the steps of its release. Left out or made
-equal is what differs from run to run on one machine: the "MEMORY dxgi" lines (the video memory the adapter
-reports), the usage number of the "MEMORY destroy" lines, and the size of the host pool (it counts from the
-first address of the application's memory that is a multiple of 256; what is in use of it is compared).
+(by type, per slot, the largest buffers), and the steps of its release. Left out or made equal is what
+differs from run to run on one machine: the "MEMORY dxgi" lines (the video memory the adapter reports) and
+the usage number of the "MEMORY destroy" lines. And the host pool: its two numbers in the "decoder
+created" line are made equal and the "host memory" line of the Rust decoder is left out.
+
+Why the host pool is not compared: the C++ decoder lies in its host pool (its struct of 67,384 bytes and
+its allocator of 7,296), the Rust decoder is an allocation of its own next to a pool that holds only what
+the entropy decoder is given (docs/rust-port.md, "The host pool"). So the pool of a configuration is
+smaller in the Rust decoder by design, and its total also counts from the first address of the pool's
+memory that is a multiple of 256, which differs from program to program. Everything the two decoders have
+in common is still compared: the device buffers (number, bytes, by type, per slot, the largest), the frame
+buffers, the options, the budget decision and the steps of the release.
 
 compare: the files of two runs must be the same, line for line. That is how the Rust decoder (rav1g-dec) is
 held against the C++ decoder (warp_decoder of branch cpp, at the commit the workflow pins): same buffers,
@@ -39,6 +47,7 @@ CASES = [
 ]
 
 LINE = re.compile(r'^(?:decoder: |DECODER ERROR: )(MEMORY .*)$')
+HOST_MEMORY_LINE = re.compile(r'^MEMORY [^:]* host memory: ')
 
 
 def memory_lines(text):
@@ -52,9 +61,12 @@ def memory_lines(text):
             continue
         if line.startswith('MEMORY destroy '):
             line = re.sub(r'dxgi local usage [0-9.]+ MiB', 'dxgi local usage <n> MiB', line)
-        # The host pool counts from the first address in the application's memory that is a multiple of
-        # 256, so its size is that of the configuration less what the program's allocator put in front.
-        line = re.sub(r'host pool (\d+) of \d+ bytes', r'host pool \1 of <n> bytes', line)
+        # The host pool is not compared (see above): the line of the Rust decoder about its host memory
+        # is left out, and the pool's numbers in the line both decoders have are made equal.
+        if HOST_MEMORY_LINE.match(line):
+            continue
+        line = re.sub(r'host pool \d+ of \d+ bytes \([0-9.]+ MiB\) in use',
+                      'host pool <n> of <n> bytes (<n> MiB) in use', line)
         lines.append(line)
     return lines
 

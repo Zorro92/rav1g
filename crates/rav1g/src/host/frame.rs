@@ -19,28 +19,24 @@
 use std::ffi::{c_int, c_void};
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use windows::Win32::Graphics::Direct3D12::ID3D12CommandQueue;
+use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12Device};
 
 use super::completion::start_completion_thread;
-use super::create::{
-    IDCT_COEF_COUNT_DENUM, rav1g_frame_buffer_release, rav1g_get_frame_buffer, rav1g_release_fb, to_mib,
-};
+use super::create::{IDCT_COEF_COUNT_DENUM, to_mib};
 use super::log::log;
-use super::loopfilter::rav1g_loopfilter_gpu;
-use super::memory::rav1g_memory_create_buffer;
-use super::output::{rav1g_copy_output, rav1g_output_image};
+use super::loopfilter::loopfilter_gpu;
+use super::output::{copy_output, output_image};
 use super::perf::{
     inter_fast_mode, perf_add, perf_add_memset, perf_begin_command_buffer, perf_detail_mode, perf_lap, perf_now,
     perf_resolve,
 };
-use super::postfilter::rav1g_cdef_looprestoration;
-use super::prediction::{rav1g_inter_ext_borders, rav1g_prediction_gen_blocks, rav1g_prediction_run_all};
+use super::postfilter::cdef_looprestoration;
+use super::prediction::{inter_ext_borders, prediction_gen_blocks, prediction_run_all};
 use super::stage_dump::{stage_dump_begin, stage_dump_frame_info};
-use super::thread::{mutex_lock, mutex_unlock, rav1g_mt_queue_get, rav1g_mt_queue_push};
-use super::transform::rav1g_idct_run;
+use super::thread::lock;
+use super::transform::idct_run;
 use super::types::{
     Av1Core, DeviceUpload, EntropyThreadCount, GpuWorkItem, InterFastMapSize, IntraV2MaxRegions, av1_frame_thread_data,
-    av1_perf_inter_tile,
 };
 use crate::gpu::d3d12::{com_ref, wrapped_ref};
 use crate::gpu::{CommandAllocator, CommandList, Event, Fence, Queue};
@@ -69,8 +65,6 @@ const YV12_FLAG_HIGHBITDEPTH: c_int = 8;
 unsafe extern "C" {
     /// `av1/decoder/obu.c`: the frame is the one of its temporal unit that is output.
     fn av1_frame_is_output(pbi: *const AV1Decoder) -> c_int;
-    fn malloc(size: usize) -> *mut c_void;
-    fn free(memory: *mut c_void);
 }
 
 /// Test player switch (-asyncclear): the per-frame clears of a slot's grids move from the decode thread
@@ -274,7 +268,7 @@ pub unsafe extern "C" fn av1_reallocate_frame_buffer(
         let ybf = &mut *ybf;
         ybf.hw_show_image = std::ptr::null_mut();
         if ybf.hw_buffer.is_null() {
-            ybf.hw_buffer = rav1g_get_frame_buffer(dec);
+            ybf.hw_buffer = (*dec).fb_pool.get();
         }
         if ybf.hw_buffer.is_null() {
             return -1;
@@ -305,7 +299,7 @@ pub unsafe extern "C" fn av1_reallocate_frame_buffer(
             || aligned_height > (*dec).max_height
             || (width != upscaled_width && (*dec).enable_superres == 0)
         {
-            rav1g_frame_buffer_release(dec, ybf.hw_buffer);
+            (*dec).fb_pool.release(ybf.hw_buffer);
             ybf.hw_buffer = std::ptr::null_mut();
             return -1;
         }
@@ -373,7 +367,7 @@ pub unsafe extern "C" fn av1_release_fb_callback(private: *mut c_void, ybf: *mut
         let dec = private.cast::<Av1Core>();
         let ybf = &mut *ybf;
         if !ybf.hw_buffer.is_null() {
-            rav1g_frame_buffer_release(dec, ybf.hw_buffer);
+            (*dec).fb_pool.release(ybf.hw_buffer);
             ybf.hw_buffer = std::ptr::null_mut();
         }
         let img = ybf.hw_show_image;
@@ -386,7 +380,7 @@ pub unsafe extern "C" fn av1_release_fb_callback(private: *mut c_void, ybf: *mut
             img.size = 0;
             img.alloc_priv = std::ptr::null_mut();
             img.is_valid = 0;
-            rav1g_mt_queue_push(&raw mut (*dec).image_pool, std::ptr::from_mut(img).cast());
+            (*dec).image_pool.push(std::ptr::from_mut(img));
         }
     }
 }
@@ -404,10 +398,10 @@ pub unsafe extern "C" fn av1_release_fb_callback(private: *mut c_void, ybf: *mut
 unsafe fn get_sec_data(dec: *mut Av1Core, td: *mut av1_frame_thread_data) {
     // SAFETY: the caller's contract; the second slot is taken under the lock of the first.
     unsafe {
-        mutex_lock(&raw mut (*td).sec_data_mutex);
+        let _taking = lock(&(*td).sec_data_mutex);
         if (*td).sec_thread_data.is_null() {
             let perf_t = super::perf::av1_perf_ticks();
-            (*td).sec_thread_data = rav1g_mt_queue_get(&raw mut (*dec).frame_data_pool).cast();
+            (*td).sec_thread_data = (*dec).frame_data_pool.get();
             perf_add(dec, sys::AV1_PERF_CPU_WAIT_SEC_SLOT as usize, perf_t);
             if perf_t != 0 {
                 (*dec).perf_cur.used_sec_slot = 1;
@@ -417,7 +411,6 @@ unsafe fn get_sec_data(dec: *mut Av1Core, td: *mut av1_frame_thread_data) {
                 (*sec.tile_data.add(i)).mi_count = 0;
             }
         }
-        mutex_unlock(&raw mut (*td).sec_data_mutex);
     }
 }
 
@@ -522,13 +515,13 @@ unsafe fn palette_buffer_for_frame(dec: *mut Av1Core, cm: &AV1_COMMON, td: &mut 
             }
         }
         // A failure is logged by the allocator as "MEMORY FAILED buffer palette_buffer of slot n".
-        let memory = (*dec).memory;
-        td.palette_buffer =
-            rav1g_memory_create_buffer(memory, size as usize, DeviceUpload, c"palette_buffer".as_ptr(), td.slot_index);
+        let memory = &mut *(*dec).memory;
+        let device = com_ref::<_, ID3D12Device>(&(*dec).compute.device);
+        td.palette_buffer = memory.create_buffer(device, size as usize, DeviceUpload, c"palette_buffer", td.slot_index);
         if td.palette_buffer.is_null() {
             return false;
         }
-        let total: usize = (*memory).dev_bytes.iter().sum();
+        let total = memory.device_bytes();
         log(
             false,
             &format!(
@@ -538,7 +531,7 @@ unsafe fn palette_buffer_for_frame(dec: *mut Av1Core, cm: &AV1_COMMON, td: &mut 
                 td.frame_number,
                 to_mib(size),
                 to_mib(total as u64),
-                (*memory).dev_obj_count
+                memory.dev_obj_count
             ),
         );
     }
@@ -558,28 +551,30 @@ pub(crate) unsafe fn release_unsubmitted_frame(dec: *mut Av1Core) {
         let Some(td) = (*dec).curr_frame_data.as_mut() else {
             return;
         };
-        mutex_lock(&raw mut (*dec).fb_pool_mutex);
-        if !td.back_buffer0.is_null() {
-            rav1g_release_fb(dec, td.back_buffer0);
-        }
-        if !td.dst_frame_buffer.is_null() {
-            rav1g_release_fb(dec, td.dst_frame_buffer);
-        }
-        for r in 0..7 {
-            if !td.refs[r].is_null() {
-                rav1g_release_fb(dec, td.refs[r]);
+        {
+            // No thread waits for a buffer here: this is the thread that takes them.
+            let mut pool = (*dec).fb_pool.lock();
+            if !td.back_buffer0.is_null() {
+                pool.release(td.back_buffer0);
             }
-            td.refs[r] = std::ptr::null_mut();
+            if !td.dst_frame_buffer.is_null() {
+                pool.release(td.dst_frame_buffer);
+            }
+            for r in 0..7 {
+                if !td.refs[r].is_null() {
+                    pool.release(td.refs[r]);
+                }
+                td.refs[r] = std::ptr::null_mut();
+            }
+            td.dst_frame_buffer = std::ptr::null_mut();
+            td.back_buffer0 = std::ptr::null_mut();
         }
-        td.dst_frame_buffer = std::ptr::null_mut();
-        td.back_buffer0 = std::ptr::null_mut();
-        mutex_unlock(&raw mut (*dec).fb_pool_mutex);
         (*dec).curr_frame_data = std::ptr::null_mut();
-        let td_ptr = std::ptr::from_mut(td).cast::<c_void>();
+        let td_ptr = std::ptr::from_mut(td);
         if td.output_only != 0 {
             // The output copy of a show_existing_frame: nothing but the reference to the frame it was to
             // copy.
-            rav1g_mt_queue_push(&raw mut (*dec).output_data_pool, td_ptr);
+            (*dec).output_data_pool.push(td_ptr);
             return;
         }
         // The coefficients of a submitted frame are zeroed by the IDCT shaders as they read them (the
@@ -590,13 +585,13 @@ pub(crate) unsafe fn release_unsubmitted_frame(dec: *mut Av1Core) {
         coef_buf.add(td.coef_buffer_offset as usize).cast::<u8>().write_bytes(0, td.coef_buffer_size as usize);
         if let Some(sec) = td.sec_thread_data.as_mut() {
             coef_buf.add(sec.coef_buffer_offset as usize).cast::<u8>().write_bytes(0, sec.coef_buffer_size as usize);
-            rav1g_mt_queue_push(&raw mut (*dec).frame_data_pool, std::ptr::from_mut(sec).cast());
+            (*dec).frame_data_pool.push(std::ptr::from_mut(sec));
             td.sec_thread_data = std::ptr::null_mut();
         }
         // Its grids stay dirty and are not marked clean, so the next frame on this slot clears them itself,
         // with or without -asyncclear.
         td.clear_pending = 0;
-        rav1g_mt_queue_push(&raw mut (*dec).frame_data_pool, td_ptr);
+        (*dec).frame_data_pool.push(td_ptr);
     }
 }
 
@@ -656,7 +651,7 @@ pub unsafe extern "C" fn rav1g_setup_frame_begin(
         release_unsubmitted_frame(dec);
 
         let mut perf_t = super::perf::av1_perf_ticks();
-        let td_ptr = rav1g_mt_queue_get(&raw mut (*dec).frame_data_pool).cast::<av1_frame_thread_data>();
+        let td_ptr: *mut av1_frame_thread_data = (*dec).frame_data_pool.get();
         perf_add(dec, sys::AV1_PERF_CPU_WAIT_SLOT as usize, perf_t);
         let td = &mut *td_ptr;
         td.sec_thread_data = std::ptr::null_mut();
@@ -707,16 +702,19 @@ pub unsafe extern "C" fn rav1g_setup_frame_begin(
         // own counters, which the prediction stage adds up when the frame is recorded.
         (*dec).perf_inter_mode = perf_detail_mode();
         if (*dec).perf_inter_mode != 0 {
-            let tiles = td.tile_count as usize;
-            if (*dec).perf_inter_tiles_cap < td.tile_count {
-                free((*dec).perf_inter_tiles.cast());
-                (*dec).perf_inter_tiles = malloc(size_of::<av1_perf_inter_tile>() * tiles).cast();
-                (*dec).perf_inter_tiles_cap = if (*dec).perf_inter_tiles.is_null() { 0 } else { td.tile_count };
-            }
-            if (*dec).perf_inter_tiles.is_null() {
-                (*dec).perf_inter_mode = 0;
+            // Zeroed counters for the tiles of this frame; the vector keeps its memory from frame to
+            // frame. Without memory for them the frame has no breakdown.
+            let tiles = usize::try_from(td.tile_count).unwrap_or(0);
+            let counters = &mut (*dec).perf_inter_tiles;
+            counters.clear();
+            if counters.try_reserve(tiles).is_ok() {
+                // SAFETY: the counters are 64-bit numbers.
+                counters.resize(tiles, std::mem::zeroed());
+                (*dec).perf_inter_tiles_base = counters.as_mut_ptr();
+                (*dec).perf_inter_tiles_count = td.tile_count;
             } else {
-                (*dec).perf_inter_tiles.write_bytes(0, tiles);
+                (*dec).perf_inter_tiles_count = 0;
+                (*dec).perf_inter_mode = 0;
             }
         }
 
@@ -780,7 +778,7 @@ pub unsafe extern "C" fn rav1g_setup_frame_begin(
             let mut new_buf = &raw mut (*dec).back_buffer0;
             if (*dec).shared_back_buffer == 0 {
                 perf_t = super::perf::av1_perf_ticks();
-                new_buf = rav1g_get_frame_buffer(dec);
+                new_buf = (*dec).fb_pool.get();
                 perf_add(dec, sys::AV1_PERF_CPU_WAIT_FB as usize, perf_t);
                 td.back_buffer0 = new_buf;
             }
@@ -796,7 +794,8 @@ pub unsafe extern "C" fn rav1g_setup_frame_begin(
             td.frame_buffer = td.dst_frame_buffer;
         }
 
-        mutex_lock(&raw mut (*dec).fb_pool_mutex);
+        // The reference counts are the pool's: counted under its lock.
+        let counting = (*dec).fb_pool.lock();
         fb.ref_cnt += 1;
         for i in 0..7 {
             td.refs[i] = std::ptr::null_mut();
@@ -812,7 +811,7 @@ pub unsafe extern "C" fn rav1g_setup_frame_begin(
             td.refs[i] = hw_buffer;
             (*hw_buffer).ref_cnt += 1;
         }
-        mutex_unlock(&raw mut (*dec).fb_pool_mutex);
+        drop(counting);
 
         // From here on the slot is in a state the next setup can take back (the frame's buffers and
         // references are counted), so a failure below is reported as a decode error of this frame.
@@ -1018,8 +1017,8 @@ pub unsafe extern "C" fn av1_setup_macroblockd(
         let t = &mut *t_ptr;
         thread_data.tile_data = t_ptr;
         (*xd).tile_data = t_ptr;
-        if (*dec).perf_inter_mode != 0 && tile_id < (*dec).perf_inter_tiles_cap {
-            t.perf_inter = (*dec).perf_inter_tiles.add(tile_id as usize).cast();
+        if (*dec).perf_inter_mode != 0 && tile_id < (*dec).perf_inter_tiles_count {
+            t.perf_inter = (*dec).perf_inter_tiles_base.add(tile_id as usize).cast();
         }
         let tile_rows = (tile.mi_row_end - tile.mi_row_start + 15) & !15;
         let tile_cols = (tile.mi_col_end - tile.mi_col_start + 15) & !15;
@@ -1203,22 +1202,22 @@ pub unsafe extern "C" fn rav1g_decode_frame_record(
         let mut perf_t = super::perf::av1_perf_ticks();
         prepare_command_buffer(dec);
         stage_dump_frame_info(dec, cm);
-        rav1g_prediction_gen_blocks(pbi, dec);
+        prediction_gen_blocks(pbi, dec);
         perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_GEN_BLOCKS as usize, perf_t);
-        rav1g_idct_run(dec);
+        idct_run(dec);
         perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_IDCT as usize, perf_t);
-        rav1g_prediction_run_all(dec, cm, std::ptr::null_mut());
+        prediction_run_all(dec, cm, std::ptr::null_mut());
         perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_PRED as usize, perf_t);
-        rav1g_loopfilter_gpu(dec, cm, &raw mut (*pbi).mb);
+        loopfilter_gpu(dec, cm, &raw mut (*pbi).mb);
         perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_LOOPFILTER as usize, perf_t);
-        rav1g_cdef_looprestoration(dec, cm, (&raw mut (*pbi).lr_ctxt).cast());
+        cdef_looprestoration(dec, cm, (&raw mut (*pbi).lr_ctxt).cast());
         perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_CDEF_LR as usize, perf_t);
-        rav1g_inter_ext_borders(dec, cm);
+        inter_ext_borders(dec, cm);
         perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_BORDERS as usize, perf_t);
         *perf_lap_start = perf_t;
         // A shown frame is output, unless it is a lower spatial layer of its temporal unit.
         (*(*dec).curr_frame_data).output_frame = c_int::from((*cm).show_frame != 0 && av1_frame_is_output(pbi) != 0);
-        rav1g_output_image(dec, cm, fb)
+        output_image(dec, cm, fb)
     }
 }
 
@@ -1239,7 +1238,7 @@ pub unsafe extern "C" fn rav1g_decode_frame_submit(
         let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
         let cm = &raw mut (*pbi).common;
         if image_state != 0 {
-            rav1g_copy_output(dec, cm, fb);
+            copy_output(dec, cm, fb);
         }
         let mut perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_COPY as usize, perf_lap_start);
         if perf_t != 0 {
@@ -1257,7 +1256,7 @@ pub unsafe extern "C" fn rav1g_decode_frame_submit(
         }
         commit_command_buffer(dec);
         perf_t = super::perf::av1_perf_ticks();
-        let item = rav1g_mt_queue_get(&raw mut (*dec).gpu_item_pool).cast::<GpuWorkItem>();
+        let item: *mut GpuWorkItem = (*dec).gpu_item_pool.get();
         perf_add(dec, sys::AV1_PERF_CPU_WAIT_ITEM as usize, perf_t);
         (*item).data = (*dec).curr_frame_data;
         (*item).image = std::ptr::null_mut();
@@ -1270,7 +1269,7 @@ pub unsafe extern "C" fn rav1g_decode_frame_submit(
             (*image).user_priv = (*pbi).user_priv;
             buf.hw_show_image = std::ptr::null_mut();
         }
-        rav1g_mt_queue_push(&raw mut (*dec).gpu_waiting_queue, item.cast());
+        (*dec).gpu_waiting_queue.push(item);
     }
 }
 

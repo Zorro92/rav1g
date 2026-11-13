@@ -91,7 +91,7 @@ pub(crate) fn log(is_error: bool, text: &str) {
 pub(crate) fn log_create_error(text: &str) {
     let line = c_line::<CREATE_ERROR_SIZE>(text);
     // SAFETY: `line` ends with a 0.
-    unsafe { rav1g_log_create_error_line(line.as_ptr().cast()) };
+    unsafe { log_create_error_line(line.as_ptr().cast()) };
 }
 
 /// `av1_log_error` (`dx/av1_perf.h`): an error line of the entropy decoder.
@@ -108,7 +108,7 @@ pub unsafe extern "C" fn av1_log_error(line: *const c_char) {
 ///
 /// # Safety
 /// `line` is a C string.
-pub(crate) unsafe fn rav1g_log_create_error_line(line: *const c_char) {
+pub(crate) unsafe fn log_create_error_line(line: *const c_char) {
     // SAFETY: only this thread accesses its reason; `line` is the caller's C string.
     CREATE_ERROR.with(|reason| unsafe {
         let reason = &mut *reason.get();
@@ -124,7 +124,7 @@ pub(crate) unsafe fn rav1g_log_create_error_line(line: *const c_char) {
 }
 
 /// `av1_clear_create_error` of the C++: a decoder creation starts.
-pub(crate) fn rav1g_clear_create_error() {
+pub(crate) fn clear_create_error() {
     // SAFETY: only this thread accesses its reason.
     CREATE_ERROR.with(|reason| unsafe { (*reason.get())[0] = 0 });
 }
@@ -147,7 +147,7 @@ mod tests {
         let (first_wrote, wait_first) = mpsc::channel::<()>();
         let (second_wrote, wait_second) = mpsc::channel::<()>();
         let first = std::thread::spawn(move || {
-            rav1g_clear_create_error();
+            clear_create_error();
             log_create_error("MEMORY FAILED first decoder");
             first_wrote.send(()).unwrap();
             wait_second.recv().unwrap();
@@ -155,7 +155,7 @@ mod tests {
         });
         let second = std::thread::spawn(move || {
             wait_first.recv().unwrap();
-            rav1g_clear_create_error();
+            clear_create_error();
             log_create_error("MEMORY FAILED second decoder");
             second_wrote.send(()).unwrap();
             reason()
@@ -163,7 +163,7 @@ mod tests {
         assert_eq!(first.join().unwrap(), "MEMORY FAILED first decoder");
         assert_eq!(second.join().unwrap(), "MEMORY FAILED second decoder");
         // Only the first reason of a creation is kept.
-        rav1g_clear_create_error();
+        clear_create_error();
         log_create_error("MEMORY FAILED the allocation");
         log_create_error("MEMORY FAILED a consequence");
         assert_eq!(reason(), "MEMORY FAILED the allocation");

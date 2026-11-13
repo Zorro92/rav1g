@@ -25,6 +25,7 @@ pub(crate) use completion::frame_fence;
 mod compute;
 mod core;
 mod create;
+pub(crate) use create::decoder_own_bytes;
 mod film_grain;
 mod frame;
 mod intra_v2;

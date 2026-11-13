@@ -10,8 +10,12 @@
 //! `av1_query_memory_requirements` of `av1_core.cpp`): the plan of its buffers, the budget guard, the
 //! "MEMORY" lines that say what it holds, and the pool of frame buffers.
 //!
-//! The decisions and the lines are those of the C++, number for number: an application reads them, and
-//! the two decoders are compared by them.
+//! The decisions and the lines are those of the C++ host, number for number: an application reads them,
+//! and the two decoders are compared by them. The exception is the host memory. The C++ decoder lies in
+//! the host pool; this one is an allocation of its own ([`Av1Core::new`], with its allocator), and the
+//! pool holds what the entropy decoder is given: its state, its buffer pool, its contexts and motion
+//! vectors, the tiles of the slots. Both exist before the budget guard asks the application what it has
+//! left, so the answer already has them, and the guard counts what comes after it: the device buffers.
 
 use std::ffi::{CStr, c_int, c_void};
 use std::fmt::Write as _;
@@ -22,27 +26,19 @@ use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12Device};
 use windows::core::Interface;
 
 use super::completion::av1_drain_gpu_decoder;
-use super::compute::{rav1g_upload_luts, rav1g_wait_shader_create_complete};
-use super::log::{log, log_create_error, rav1g_clear_create_error};
-use super::memory::{
-    Plan, log_video_memory, rav1g_memory_create_buffer, rav1g_memory_host_allocate, rav1g_memory_release,
-    rav1g_memory_release_type, rav1g_memory_setup, rav1g_memory_type_name,
-};
-use super::thread::{
-    cond_init, cond_signal, cond_wait, mutex_destroy, mutex_init, mutex_lock, mutex_unlock, rav1g_mt_queue_destroy,
-    rav1g_mt_queue_init, rav1g_mt_queue_push, rav1g_queue_get, rav1g_queue_init, rav1g_queue_push,
-};
+use super::compute::{upload_luts, wait_shader_create_complete};
+use super::log::{clear_create_error, log, log_create_error};
+use super::memory::{Allocator, Plan, log_video_memory, memory_type_name};
 use super::types::{
-    ALLOCATOR_BYTES, Av1Core, CORE_BYTES, DeviceOnly, DeviceOnlyConst, DeviceUpload, FrameThreadDataCount,
-    FrameThreadDataDefault, GpuBufferObject, HostRW, ImagePoolSize, InterFastMapSize, MemoryType, OutputCbSize,
-    OutputThreadDataCount, ReadBack, RefFrameBufferCount, RefFrameBufferCountSharedBack, UploadUAV,
-    av1_frame_thread_data, av1_memory_allocator,
+    Av1Core, DeviceOnly, DeviceOnlyConst, DeviceUpload, FrameThreadDataCount, FrameThreadDataDefault, GpuBufferObject,
+    HostRW, ImagePoolSize, InterFastMapSize, MemoryType, OutputCbSize, OutputThreadDataCount, ReadBack,
+    RefFrameBufferCount, RefFrameBufferCountSharedBack, UploadUAV, av1_frame_thread_data,
 };
 use crate::gpu::d3d12::{com_ref, com_release, com_store, wrapped_ref};
 use crate::gpu::{self, CommandAllocator, Device, Event, VideoMemory, create_hardware_device};
 use crate::sys::parser::{
-    AV1Decoder, BufferPool, HwFrameBuffer, MAX_MIB_SIZE, MB_MODE_INFO, MV_REF, RestorationUnitInfo, TPL_MV_REF,
-    aom_codec_dec_cfg_t, av1_tile_data, warped_filter, wedge_mask_buf,
+    AV1Decoder, BufferPool, MAX_MIB_SIZE, MB_MODE_INFO, MV_REF, RestorationUnitInfo, TPL_MV_REF, aom_codec_dec_cfg_t,
+    av1_tile_data, warped_filter, wedge_mask_buf,
 };
 use crate::sys::{
     AV1_LOW_MEMORY_ALL, AV1_LOW_MEMORY_COEFS, AV1_LOW_MEMORY_DEFAULT, AV1_LOW_MEMORY_MODE_INFO,
@@ -70,10 +66,6 @@ const FILMGRAIN_NOISE_INTS: usize = 96 * 96 + 48 * 48 * 2;
 const GAUSSIAN_SEQUENCE_BYTES: usize = size_of::<[i32; 2048]>();
 /// Entries of a random register table of the film grain.
 const FILMGRAIN_RANDOM_INTS: usize = 65536 + 1;
-
-unsafe extern "C" {
-    fn free(memory: *mut c_void);
-}
 
 /// The size of a table of the entropy decoder, from its declaration.
 const fn size_of_table<T>(_: *const T) -> usize {
@@ -190,10 +182,11 @@ impl ResourceConfig {
     }
 }
 
-/// Who serves the requests of [`allocate_buffers`]: the allocator of the decoder, or the plan that only
-/// counts what the requests would take (`av1_memory_manager_base` of the C++).
+/// Who serves the requests of [`allocate_buffers`]: the allocator of the decoder with the decoder's
+/// device, or the plan that only counts what the requests would take (`av1_memory_manager_base` of the
+/// C++).
 enum Requests {
-    Allocator(*mut av1_memory_allocator),
+    Allocator(*mut Allocator, ID3D12Device),
     Plan(Plan),
 }
 
@@ -206,16 +199,16 @@ impl Requests {
     fn planned(&self) -> (usize, usize) {
         match self {
             Requests::Plan(plan) => (plan.host, plan.device),
-            Requests::Allocator(_) => (0, 0),
+            Requests::Allocator(..) => (0, 0),
         }
     }
 
     /// `create_buffer`: null from the plan, and from the allocator when the allocation failed.
     fn buffer(&mut self, size: usize, kind: MemoryType, name: &'static CStr, slot: i32) -> *mut GpuBufferObject {
         match self {
-            // SAFETY: the allocator of the decoder that is being created; the name is static.
-            Requests::Allocator(memory) => unsafe {
-                rav1g_memory_create_buffer(*memory, size, kind, name.as_ptr(), slot)
+            // SAFETY: the allocator of the decoder that is being created, and its device.
+            Requests::Allocator(memory, device) => unsafe {
+                (**memory).create_buffer(Some(device), size, kind, name, slot)
             },
             Requests::Plan(plan) => {
                 plan.create_buffer(size);
@@ -228,7 +221,7 @@ impl Requests {
     fn host(&mut self, size: usize) -> *mut c_void {
         match self {
             // SAFETY: the allocator of the decoder that is being created.
-            Requests::Allocator(memory) => unsafe { rav1g_memory_host_allocate(*memory, size, 0) },
+            Requests::Allocator(memory, _) => unsafe { (**memory).host_allocate(size, 0) },
             Requests::Plan(plan) => {
                 plan.host_allocate(size, 0);
                 std::ptr::null_mut()
@@ -258,7 +251,7 @@ macro_rules! request {
 /// # Safety
 /// `dec` is valid for writing. With the allocator: `dec` is the decoder that is being created, zeroed.
 unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &ResourceConfig) -> bool {
-    let assign = matches!(mem, Requests::Allocator(_));
+    let assign = matches!(mem, Requests::Allocator(..));
     // SAFETY: the caller's contract.
     let dec = unsafe { &mut *dec };
     let target_width = (cfg.width + 127) & !127;
@@ -565,8 +558,20 @@ unsafe fn planned_device_bytes(dec: *mut Av1Core, rcfg: &ResourceConfig) -> (usi
     }
 }
 
+/// The private data of the codec interface (`aom_codec_alg_priv_t` of `av1_dx_iface.c`, about 20 KB),
+/// which lies at the start of the host pool, with room for the pool to start at a multiple of 256.
+const INTERFACE_BYTES: usize = 32 * 1024;
+
+/// What a decoder takes of the heap of the process besides its host pool: the decoder itself and its
+/// allocator ([`Av1Core::own_bytes`]). For the memory query of the Rust interface, which reports all host
+/// memory of a decoder.
+pub(crate) const fn decoder_own_bytes() -> usize {
+    Av1Core::own_bytes()
+}
+
 /// `av1_query_memory_requirements` (`dx/av1_core.h`): what a decoder of this configuration takes of the
-/// host pool and of device memory.
+/// host pool and of device memory. The host pool is what the entropy decoder is given; the decoder itself
+/// is not in it ([`decoder_own_bytes`]).
 ///
 /// # Safety
 /// `cfg` is the configuration of a decoder.
@@ -575,18 +580,14 @@ pub unsafe extern "C" fn av1_query_memory_requirements(cfg: *mut aom_codec_dec_c
     // SAFETY: the caller's contract.
     let cfg = unsafe { &mut *cfg };
     let mut plan = Requests::plan();
-    plan.host(32 * 1024); // the private data of the codec interface, about 20 KB
-    plan.host(ALLOCATOR_BYTES);
-    plan.host(CORE_BYTES);
+    plan.host(INTERFACE_BYTES);
     let rcfg = ResourceConfig::from_cfg(cfg);
     // A decoder for the sizes the plan writes; nothing else of it is used.
-    let mut dec = Box::<Av1Core>::new_uninit();
-    // SAFETY: zeroed, the decoder's struct is pointers and numbers; a plan assigns nothing.
-    let dec = unsafe {
-        dec.as_mut_ptr().write_bytes(0, 1);
-        allocate_buffers(dec.as_mut_ptr(), &mut plan, &rcfg);
-        dec.assume_init()
+    let Some(mut dec) = Av1Core::new() else {
+        return -1;
     };
+    // SAFETY: a plan assigns nothing.
+    unsafe { allocate_buffers(&raw mut *dec, &mut plan, &rcfg) };
     let (host, device) = plan.planned();
     cfg.host_size = host;
     cfg.device_size = device;
@@ -602,8 +603,8 @@ pub unsafe extern "C" fn av1_query_memory_requirements(cfg: *mut aom_codec_dec_c
 unsafe fn log_memory_summary(is_error: bool, label: &str, dec: &Av1Core, rcfg: &ResourceConfig) {
     // SAFETY: the allocator of the decoder (the caller's contract).
     let mem = unsafe { &*dec.memory };
-    let buffers = &mem.dev_buffer_pool[..usize::try_from(mem.dev_obj_count).unwrap_or(0)];
-    let total: usize = mem.dev_bytes.iter().sum();
+    let buffers = mem.buffers();
+    let total = mem.device_bytes();
     let shared = dec.shared_back_buffer != 0;
     log(
         is_error,
@@ -649,10 +650,23 @@ unsafe fn log_memory_summary(is_error: bool, label: &str, dec: &Av1Core, rcfg: &
         ),
     );
 
-    let type_name = |kind: MemoryType| {
-        // SAFETY: a static C string.
-        unsafe { CStr::from_ptr(rav1g_memory_type_name(kind)) }.to_string_lossy()
-    };
+    // Host memory: the pool, and what the decoder allocates next to it. Not a line of the C++ decoder,
+    // which lies in its pool.
+    log(
+        is_error,
+        &format!(
+            "MEMORY {label} host memory: host pool {} bytes ({:.1} MiB) for the entropy decoder, {} of them in \
+             use; the decoder itself {} bytes ({:.1} MiB) on the heap, not in the pool; both allocated before the \
+             budget is asked",
+            mem.host_max_size,
+            to_mib(mem.host_max_size as u64),
+            mem.host_offset,
+            Av1Core::own_bytes(),
+            to_mib(Av1Core::own_bytes() as u64)
+        ),
+    );
+
+    let type_name = memory_type_name;
     let mut line = BoundedLine::new(640);
     for kind in 0..gpu::MemoryKind::COUNT {
         if line.full() {
@@ -766,11 +780,9 @@ unsafe fn create_failed(
     } else {
         log_create_error(&format!("MEMORY FAILED decoder creation at: {step}"));
     }
-    // SAFETY: the caller's contract.
+    // SAFETY: the caller's contract; the decoder has its allocator from the start of the creation.
     unsafe {
-        if !(*dec).memory.is_null() {
-            log_memory_summary(true, "FAILED decoder, allocated up to the failure", &*dec, rcfg);
-        }
+        log_memory_summary(true, "FAILED decoder, allocated up to the failure", &*dec, rcfg);
         // Keeps the device for the query after the release.
         let device = device_of(dec);
         if let Some(device) = &device {
@@ -832,9 +844,9 @@ unsafe fn create_command_buffer(
     Ok(())
 }
 
-/// `av1_create_gpu_decoder` (`dx/av1_core.h`): a decoder in the host pool of `cfg`, on its device, with
-/// every buffer it needs. Returns 0 and the decoder, or -1 after a "MEMORY FAILED" or "MEMORY REFUSED"
-/// line; then nothing is left of it.
+/// `av1_create_gpu_decoder` (`dx/av1_core.h`): a decoder on its device, with every buffer it needs and
+/// with the host pool of `cfg` for the entropy decoder. Returns 0 and the decoder, or -1 after a "MEMORY
+/// FAILED" or "MEMORY REFUSED" line; then nothing is left of it.
 ///
 /// # Safety
 /// `gpu_dec` is valid for writing; `cfg` is the configuration the host pool was sized for.
@@ -843,46 +855,26 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
     // SAFETY: the caller's contract, for all of this function.
     unsafe {
         *gpu_dec = std::ptr::null_mut();
-        rav1g_clear_create_error();
+        clear_create_error();
         let cfg = &*cfg;
-        if cfg.host_size < ALLOCATOR_BYTES {
+
+        // The decoder and its allocator: allocations of their own, empty, with the queues and the locks
+        // made. The release is valid from here on, whichever step below fails.
+        let (Some(dec), Some(mem)) = (Av1Core::new(), Allocator::new_boxed(cfg.host_memory.cast(), cfg.host_size))
+        else {
             log_create_error(&format!(
-                "MEMORY FAILED host pool: {} bytes given, the allocator alone takes {}",
-                cfg.host_size, ALLOCATOR_BYTES
+                "MEMORY FAILED decoder: the process has no memory for the decoder's {} bytes",
+                Av1Core::own_bytes()
             ));
             return -1;
-        }
-
-        // The allocator lies at the start of the application's memory, empty.
-        let mem = cfg.host_memory.cast::<av1_memory_allocator>();
-        mem.write_bytes(0, 1);
-        rav1g_memory_setup(mem, cfg.host_memory.cast(), cfg.host_size);
-        rav1g_memory_host_allocate(mem, ALLOCATOR_BYTES, 0);
-        let dec = rav1g_memory_host_allocate(mem, CORE_BYTES, 0).cast::<Av1Core>();
-        if dec.is_null() {
-            return -1; // logged by the allocator; nothing was created yet
-        }
-        dec.write_bytes(0, 1);
+        };
+        let dec = Box::into_raw(dec);
+        let mem = Box::into_raw(mem);
         (*dec).memory = mem;
 
         let rcfg = ResourceConfig::from_cfg(cfg);
         (*dec).frame_slots = rcfg.gpu_pipeline_depth;
         let frame_slots = rcfg.gpu_pipeline_depth as usize;
-
-        // Everything that cannot fail comes first, so that the release is valid from here on, whichever
-        // step below fails.
-        rav1g_mt_queue_init(&raw mut (*dec).frame_data_pool);
-        rav1g_mt_queue_init(&raw mut (*dec).output_data_pool);
-        rav1g_mt_queue_init(&raw mut (*dec).gpu_item_pool);
-        rav1g_mt_queue_init(&raw mut (*dec).gpu_waiting_queue);
-        rav1g_mt_queue_init(&raw mut (*dec).output_queue);
-        rav1g_mt_queue_init(&raw mut (*dec).image_pool);
-        rav1g_queue_init(&raw mut (*dec).fb_pool);
-        cond_init(&raw mut (*dec).fb_pool_empty_cond);
-        mutex_init(&raw mut (*dec).fb_pool_mutex);
-        for i in 0..frame_slots {
-            mutex_init(&raw mut (*dec).frame_thread_data[i].sec_data_mutex);
-        }
 
         // The decoder takes a reference of the device and of the queue the application gave.
         if let Some(device) = ID3D12Device::from_raw_borrowed(&cfg.dx12device) {
@@ -894,7 +886,6 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
         if let Err(error) = create_device(&mut *dec) {
             return create_failed(dec, &rcfg, None, "D3D12 device or command queue", error.code);
         }
-        (*mem).context = &raw mut (*dec).compute;
         let device = device_of(dec).expect("the decoder has a device");
 
         (*dec).cb_get_output_image = cfg.out_buffers_cb.get_out_buffer_cb;
@@ -909,7 +900,7 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
         if (*dec).shader_lib.is_null() {
             return create_failed(dec, &rcfg, Some(&vm_before), "no pipeline cache (dxPsos) given", E_POINTER.0);
         }
-        let shader_errors = rav1g_wait_shader_create_complete((*dec).shader_lib);
+        let shader_errors = wait_shader_create_complete((*dec).shader_lib);
         if shader_errors != 0 {
             return create_failed(dec, &rcfg, Some(&vm_before), "compute pipeline states (shaders)", shader_errors);
         }
@@ -1021,7 +1012,7 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
             }
         }
 
-        if !allocate_buffers(dec, &mut Requests::Allocator(mem), &rcfg) {
+        if !allocate_buffers(dec, &mut Requests::Allocator(mem, device.clone()), &rcfg) {
             let step = "decoder buffers (the MEMORY FAILED line above names the one)";
             return create_failed(dec, &rcfg, Some(&vm_before), step, 0);
         }
@@ -1036,7 +1027,7 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
             if let Err((step, hr)) = create_command_buffer(Device::new(&device), td, what) {
                 return create_failed(dec, &rcfg, Some(&vm_before), step, hr);
             }
-            rav1g_mt_queue_push(&raw mut (*dec).frame_data_pool, std::ptr::from_mut(td).cast());
+            (*dec).frame_data_pool.push(std::ptr::from_mut(td));
         }
         for i in 0..OutputThreadDataCount as usize {
             let td = &mut (*dec).output_thread_data[i];
@@ -1045,7 +1036,7 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
             if let Err((step, hr)) = create_command_buffer(Device::new(&device), td, what) {
                 return create_failed(dec, &rcfg, Some(&vm_before), step, hr);
             }
-            rav1g_mt_queue_push(&raw mut (*dec).output_data_pool, std::ptr::from_mut(td).cast());
+            (*dec).output_data_pool.push(std::ptr::from_mut(td));
         }
 
         // The command list of the decoder, open on the allocator of the first slot, and closed until a
@@ -1062,19 +1053,17 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
             return create_failed(dec, &rcfg, Some(&vm_before), "command list Close", error.code);
         }
 
-        let hr = rav1g_upload_luts(dec);
+        let hr = upload_luts(dec);
         if hr < 0 {
             return create_failed(dec, &rcfg, Some(&vm_before), "upload of the lookup tables", hr);
         }
 
-        // Work items: one per frame in flight (at most FrameThreadDataCount, each holds a slot) and one per
-        // show_existing_frame copy in flight (at most OutputThreadDataCount, each holds an output context).
-        // The decode thread waits when the pool is empty.
+        // Work items (GpuItemPoolSize). The decode thread waits when the pool is empty.
         for i in 0..(*dec).gpu_item_pool_src.len() {
             let item = &raw mut (*dec).gpu_item_pool_src[i];
             (*item).data = std::ptr::null_mut();
             (*item).image = std::ptr::null_mut();
-            rav1g_mt_queue_push(&raw mut (*dec).gpu_item_pool, item.cast());
+            (*dec).gpu_item_pool.push(item);
         }
 
         for i in 0..ImagePoolSize as usize {
@@ -1082,7 +1071,7 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
             (*img).size = 0;
             (*img).fb_ptr = std::ptr::null_mut();
             (*img).is_valid = 0;
-            rav1g_mt_queue_push(&raw mut (*dec).image_pool, img.cast());
+            (*dec).image_pool.push(img);
         }
 
         let fb_size = (*dec).fb_size;
@@ -1097,7 +1086,7 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
             (*fb).size = fb_size as _;
             (*fb).base_offset = offset as _;
             (*fb).ref_cnt = 0;
-            rav1g_queue_push(&raw mut (*dec).fb_pool, fb.cast());
+            (*dec).fb_pool.lock().add(fb);
         }
 
         log_memory_summary(false, "decoder created", &*dec, &rcfg);
@@ -1126,78 +1115,6 @@ pub unsafe extern "C" fn av1_allocate_pbi(dec: *mut Av1Core, ppbi: *mut *mut AV1
         (*pbi).gpu_decoder = dec.cast();
         *ppbi = pbi;
         *pbp = bp;
-    }
-}
-
-// ---------------------------------------------------------------------------------------------------------
-// The pool of frame buffers: pieces of one device buffer. A buffer is out of the pool while something
-// counts on it: the entropy decoder's reference map, the frame that is decoded into it, the frames in
-// flight that read it.
-// ---------------------------------------------------------------------------------------------------------
-
-/// `get_frame_buffer` of the C++: a buffer of the pool, with one reference. Waits until a frame in flight
-/// returns one when the pool is empty.
-///
-/// # Safety
-/// `dec` is a decoder.
-pub(crate) unsafe fn rav1g_get_frame_buffer(dec: *mut Av1Core) -> *mut HwFrameBuffer {
-    // SAFETY: the caller's contract; the pool is used under its lock.
-    unsafe {
-        let mutex = &raw mut (*dec).fb_pool_mutex;
-        mutex_lock(mutex);
-        while (*dec).fb_pool.m_QueueNotEmpty == 0 {
-            cond_wait(&raw mut (*dec).fb_pool_empty_cond, mutex);
-        }
-        let fb = rav1g_queue_get(&raw mut (*dec).fb_pool).cast::<HwFrameBuffer>();
-        (*fb).ref_cnt = 1;
-        mutex_unlock(mutex);
-        fb
-    }
-}
-
-/// `frame_buffer_acquire` of the C++: one more reference to a buffer that is out of the pool.
-///
-/// # Safety
-/// `dec` is a decoder and `fb` a frame buffer of it.
-pub(crate) unsafe fn rav1g_frame_buffer_acquire(dec: *mut Av1Core, fb: *mut HwFrameBuffer) {
-    // SAFETY: the caller's contract.
-    unsafe {
-        mutex_lock(&raw mut (*dec).fb_pool_mutex);
-        (*fb).ref_cnt += 1;
-        mutex_unlock(&raw mut (*dec).fb_pool_mutex);
-    }
-}
-
-/// `release_fb` of the C++: gives a reference back, with the lock of the pool held by the caller. Returns
-/// 1 when the buffer went back to the pool; the caller then signals the pool's condition.
-///
-/// # Safety
-/// `dec` is a decoder whose pool lock this thread holds; `fb` is a frame buffer of it with a reference.
-pub(crate) unsafe fn rav1g_release_fb(dec: *mut Av1Core, fb: *mut HwFrameBuffer) -> c_int {
-    // SAFETY: the caller's contract.
-    unsafe {
-        (*fb).ref_cnt -= 1;
-        if (*fb).ref_cnt == 0 {
-            rav1g_queue_push(&raw mut (*dec).fb_pool, fb.cast());
-            return 1;
-        }
-    }
-    0
-}
-
-/// `frame_buffer_release` of the C++: gives a reference back; the buffer returns to the pool with its
-/// last one.
-///
-/// # Safety
-/// `dec` is a decoder and `fb` a frame buffer of it with a reference.
-pub(crate) unsafe fn rav1g_frame_buffer_release(dec: *mut Av1Core, fb: *mut HwFrameBuffer) {
-    // SAFETY: the caller's contract.
-    unsafe {
-        mutex_lock(&raw mut (*dec).fb_pool_mutex);
-        if rav1g_release_fb(dec, fb) != 0 {
-            cond_signal(&raw mut (*dec).fb_pool_empty_cond);
-        }
-        mutex_unlock(&raw mut (*dec).fb_pool_mutex);
     }
 }
 
@@ -1262,10 +1179,11 @@ unsafe fn release_interfaces(dec: *mut Av1Core) {
 
 /// `destroy_gpu_decoder` of the C++. Also for a decoder whose creation stopped half way: everything not
 /// built yet is zero. `log_steps`: the release of a decoder that was in use, logged step by step
-/// ("MEMORY destroy").
+/// ("MEMORY destroy"). The decoder and its allocator are freed at the end.
 ///
 /// # Safety
-/// `dec` is a decoder, or one whose creation failed; nothing uses it afterwards.
+/// `dec` is a decoder of [`Av1Core::new`] with its allocator, or one whose creation failed; nothing uses
+/// it afterwards.
 unsafe fn destroy(dec: *mut Av1Core, log_steps: bool) {
     // SAFETY: the caller's contract, for all of this function.
     unsafe {
@@ -1298,7 +1216,6 @@ unsafe fn destroy(dec: *mut Av1Core, log_steps: bool) {
                 Event::close(td.command_buffer.event);
             }
             td.command_buffer.event = std::ptr::null_mut();
-            mutex_destroy(&raw mut td.sec_data_mutex);
         }
         for td in &mut (*dec).output_thread_data {
             if !td.command_buffer.event.is_null() {
@@ -1306,25 +1223,6 @@ unsafe fn destroy(dec: *mut Av1Core, log_steps: bool) {
             }
             td.command_buffer.event = std::ptr::null_mut();
         }
-        // The inter breakdown of the timing run (-gputimedetail), where a frame was recorded with it.
-        for i in 0..frame_slots {
-            let perf = &mut (*dec).frame_thread_data[i].perf;
-            free(perf.detail.cast());
-            perf.detail = std::ptr::null_mut();
-        }
-        free((*dec).perf_inter_tiles.cast());
-        (*dec).perf_inter_tiles = std::ptr::null_mut();
-        (*dec).perf_inter_tiles_cap = 0;
-        free((*dec).perf_detail_out.cast());
-        (*dec).perf_detail_out = std::ptr::null_mut();
-
-        mutex_destroy(&raw mut (*dec).fb_pool_mutex);
-        rav1g_mt_queue_destroy(&raw mut (*dec).output_queue);
-        rav1g_mt_queue_destroy(&raw mut (*dec).image_pool);
-        rav1g_mt_queue_destroy(&raw mut (*dec).gpu_waiting_queue);
-        rav1g_mt_queue_destroy(&raw mut (*dec).gpu_item_pool);
-        rav1g_mt_queue_destroy(&raw mut (*dec).output_data_pool);
-        rav1g_mt_queue_destroy(&raw mut (*dec).frame_data_pool);
 
         let memory = (*dec).memory;
         if !memory.is_null() {
@@ -1333,8 +1231,7 @@ unsafe fn destroy(dec: *mut Av1Core, log_steps: bool) {
                 // The buffers the CPU maps first, the default-heap buffers the CPU never sees last: one line
                 // after each memory type.
                 for kind in [DeviceUpload, HostRW, UploadUAV, ReadBack, DeviceOnlyConst, DeviceOnly] {
-                    let mut count = 0;
-                    let bytes = rav1g_memory_release_type(memory, kind, &mut count);
+                    let (bytes, count) = (*memory).release_type(kind);
                     if count == 0 {
                         continue;
                     }
@@ -1342,16 +1239,21 @@ unsafe fn destroy(dec: *mut Av1Core, log_steps: bool) {
                     let _ = write!(
                         step,
                         "released {}, {count} buffers, {:.1} MiB",
-                        CStr::from_ptr(rav1g_memory_type_name(kind)).to_string_lossy(),
+                        memory_type_name(kind),
                         to_mib(bytes as u64)
                     );
                     log_destroy_step(device, available_cb, available_priv, &step);
                 }
             }
-            rav1g_memory_release(memory);
+            (*memory).release();
+            (*dec).memory = std::ptr::null_mut();
+            drop(Box::from_raw(memory));
         }
 
         release_interfaces(dec);
+        // The decoder itself: the queues, the counters of the timing run (-gputimedetail), the struct.
+        // Every interface it held is released above, in that order.
+        drop(Box::from_raw(dec));
 
         if let Some(device) = &device {
             log_destroy_step(device, available_cb, available_priv, "end, command queue, list and allocators released");

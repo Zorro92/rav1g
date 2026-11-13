@@ -278,7 +278,8 @@ pub struct Rav1gSettings {
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct Rav1gMemoryRequirements {
-    /// Bytes of host memory (the decoder allocates them at creation).
+    /// Bytes of host memory, which the decoder allocates at creation, before it asks
+    /// `Rav1gSettings::memory_available`: the pool of the entropy decoder and the decoder itself.
     pub host_size: usize,
     /// Bytes of the device buffers the creation allocates.
     pub device_size: usize,

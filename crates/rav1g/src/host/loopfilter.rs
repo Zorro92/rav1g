@@ -70,7 +70,7 @@ pub extern "C" fn av1_set_lf_h_split(mode: c_int) {
 ///
 /// # Safety
 /// `dec` is the decoder while it records a frame; `cm` and `xd` are those of the frame.
-pub(crate) unsafe fn rav1g_loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: *mut MACROBLOCKD) {
+pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: *mut MACROBLOCKD) {
     // SAFETY: the caller's contract: the frame data, the frame buffers, the buffers and pipelines of the
     // decoder and the frame header are live, and only this thread records.
     unsafe {

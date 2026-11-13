@@ -16,7 +16,7 @@ use std::ffi::{CStr, c_int};
 
 use windows::Win32::Graphics::Direct3D12::ID3D12GraphicsCommandList;
 
-use super::memory::rav1g_poison_constants;
+use super::memory::poison_constants;
 use super::types::{Av1Core, ComputeCommandBuffer, ComputeShader, GpuBufferObject, av1_stage_dump_region};
 use super::{perf, stage_dump};
 use crate::gpu::d3d12::com_ref;
@@ -83,7 +83,7 @@ pub(crate) unsafe fn alloc_constant_bytes(cb: &mut ComputeCommandBuffer, size: u
         let at = cb.cb_ptr;
         cb.cb_ptr += size;
         let data = memory.host_ptr.cast::<u8>().add(at);
-        rav1g_poison_constants(data.cast(), size);
+        poison_constants(data.cast(), size);
         Constants { data, location: buffer(cb.cb_alloc).location().offset(at as u64) }
     }
 }
