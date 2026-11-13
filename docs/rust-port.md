@@ -1307,6 +1307,14 @@ three slots, a stream that changes its size with `-r -lowmem`, two layers with `
 each has to end with `MD5 is OK`, the log must have no error line, and the launch has to end (the
 `conformance` job).
 
+Two more fixes of the same day. The build of `warp_decoder` with the player's sources did not link (run
+43361580570): the player's `decoder.cpp` and the library's `decoder.c` wrote the same object file; the
+player's has a name of its own there now. And a bug of the player that the console found, in both
+libraries and on `cpp` as well (fixed there, 8cd1c73, and merged): the memory a destroyed decoder leaves
+charged to the app, which the budget guard counts as available to the next creation, was forgotten
+behind every creation, also one that was refused, so the next, smaller decoder was refused too although
+it would have fit. It is kept until a decoder exists.
+
 **For the console** (the parent's): first whether the two Rust packages start at all (the two imports
 from `ntdll.dll`; the `LIBRARY` line is the first sign of life of the library), then the md5 set with
 each, then `-gputime` on the 2160p clips, the three packages one after the other with the same tasks:

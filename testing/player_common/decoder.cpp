@@ -391,8 +391,11 @@ int AV1Decoder::DecodeOne() {
       // The decoder allocates its host pool at its creation; its own lines give the video memory.
       LogAppMemory("before the decoder", false);
       const bool init_failed = rav1g_decoder_create(dx_desources_.decoder_device, &cfg, &decoder_) != RAV1G_STATUS_OK;
-      // The memory an earlier decoder left is this decoder's now.
-      reusable_after_release_ = 0;
+      // The memory an earlier decoder left is this decoder's now. Only when it exists: a creation that
+      // failed or was refused has allocated nothing, the memory is still there for the next creation, and
+      // the budget guard of a smaller decoder has to count it (without it a refused creation made the
+      // guard refuse the next one as well, which would have fit).
+      if (!init_failed) reusable_after_release_ = 0;
       if (!init_failed && memory.device_size > largest_device_size_) largest_device_size_ = memory.device_size;
       if (init_failed) {
         // The text ends with the decoder's MEMORY FAILED or MEMORY REFUSED line for what could not be

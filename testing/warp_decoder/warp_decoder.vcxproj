@@ -159,7 +159,10 @@
          through rav1g.h on the C++ library of this program (rav1g_libav1.cpp). -->
     <ClCompile Include="$(RepoRoot)testing\common\frame_outs.cpp" />
     <ClCompile Include="$(RepoRoot)testing\player_common\cmd_parser.cpp" />
-    <ClCompile Include="$(RepoRoot)testing\player_common\decoder.cpp" />
+    <!-- An object file name of its own: the library has a decoder.c. -->
+    <ClCompile Include="$(RepoRoot)testing\player_common\decoder.cpp">
+      <ObjectFileName>$(IntDir)player_decoder.obj</ObjectFileName>
+    </ClCompile>
     <ClCompile Include="$(RepoRoot)testing\player_common\decoder_creator.cpp">
       <PreprocessorDefinitions>RAV1G_PLAYER_NO_USAGE_EXIT;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
