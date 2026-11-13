@@ -230,7 +230,9 @@ From the host it needs two things:
 Kept (about 33,000 of rav1d's 55,000 lines of Rust, 1,700 lines of assembly): `obu.rs`, `decode.rs`, the coefficient reader of
 `recon.rs` (the first 1,760 lines), `msac.rs`, `cdf.rs`, `env.rs`, `refmvs.rs`, `warpmv.rs`, `pal.rs`,
 `intra_edge.rs`, the tables, `picture.rs`, `thread_task.rs`, `lib.rs`, `internal.rs`; `msac.asm`,
-`refmvs.asm`, `cpuid.asm`.
+`refmvs.asm`. (`cpuid.asm` was on this list; rav1d does not use it, the CPU features come from the
+`raw-cpuid` crate. `pal.rs` went with the pixel code: its one function packs the palette indexes for the
+second pass. [Progress](#progress) has what the copy is.)
 
 Dropped: the second pass (`recon_b_intra`, `recon_b_inter` and below), `ipred`, `mc`, `itx`,
 `loopfilter`, `cdef`, `looprestoration`, `filmgrain` and their `*_apply` files, 44 of the 47 x86 assembly
@@ -466,7 +468,7 @@ shaders: 49.3 ms with it, 18.5 ms without); they are not the GPU's cost in norma
   does not read it. Edition 2021 inside an edition 2024 workspace is fine.
 - **Assembly.** `build.rs` runs nasm (2.14 or newer) through `nasm-rs` and archives the objects with
   `cc`. The cross build needs nasm in the build image; the Windows runner needs it installed (it is not
-  part of the image). Only three files are needed (`msac`, `refmvs`, `cpuid`), so the build script of the
+  part of the image). Only two files are needed (`msac`, `refmvs`), so the build script of the
   vendored copy lists those.
 - **Imports.** rav1d has no file, environment or console access outside logging (`src/log.rs`, a callback
   or standard error) and debug prints that are compiled out; it uses `libc` only for types and error
@@ -519,7 +521,7 @@ Each step leaves a decoder that works; both parsers are in the program until ste
 (`rav1g-dec -parser`), so every gate can compare them.
 
 1. **Vendor and build.** `third_party/rav1d` at the pinned commit with its `COPYING`; the patches that
-   only remove (C API, pixel code, assembly other than the three files, the symbol prefix). nasm in the
+   only remove (C API, pixel code, assembly other than the two files, the symbol prefix). nasm in the
    three build environments (Windows runner, cross build, the application-container library).
    Gate: builds green; the import scan of the application-container library unchanged except for the
    five functions above; on a Linux runner the unpatched rav1d decodes the conformance set to the
@@ -574,6 +576,189 @@ Steps 1 and 2: two to three days. Step 3: three to four. Step 4: two. Step 5: tw
 About two working weeks to the removal of the C parser, with the console tests of steps 3 and 4 as the
 points where the plan can change.
 
+## Progress
+
+### Steps 1 and 2 (2026-11-13)
+
+Done, on Linux and in the Windows builds; no GPU stage reads anything of the new parser yet. The
+decoder is the decoder it was.
+
+**What is in the tree.**
+
+- `third_party/rav1d`: rav1d at `2e7216c`, the parse pass only, behind a sink (`src/parse.rs`):
+  67 files, 1.4 MB, 39,100 lines, against 1,364 files upstream (329,000 lines under `src`). 51 files are
+  upstream's byte for byte, 12 are changed (+549 −4,852 lines), 4 are ours. `PATCHES.md` there lists
+  every change and why; `upstream_diff.sh` holds the directory against a checkout of upstream and writes
+  the diff. The changes take away, or hand what is read to the sink; none changes how a syntax element
+  is read. The scheduler is upstream's: the reconstruction task of a tile returns at once, the filter
+  tasks do nothing, a picture is a handle without samples.
+- `crates/rav1g-parse`: `record` (a block of rav1d as a mode info record), `sink` (the sink that writes
+  records, grid, transform block records and coefficients into memory a host gives it, and counts the
+  block lists with the host's `av1_mi_push_block` at the end of a tile), `digest` (what the parser reads
+  from a stream as one number).
+- `tools/rav1g-parse-check`: the oracle of step 2, below. Linux only.
+- `testing/rav1d_md5`: upstream rav1d, unchanged, as a decoder on the conformance streams.
+- The library has rav1d linked: `rav1g_parse_digest_*` in `rav1g.h`, `rav1g-dec -parsedigest`.
+- `crates/rav1g-sys` builds on Linux as the entropy decoder alone (no shaders, no D3D12 host), which
+  is what the oracle links.
+
+**Step 1, the gates.**
+
+- *Builds.* nasm on the Windows runners through `.github/actions/nasm` (the release of nasm.us, checked
+  by its SHA-256, kept in the Actions cache), `apt-get install nasm` in the cross build. rav1d builds
+  with the workspace on stable, for MSVC, for clang-cl through `cargo xwin`, and in the two libraries of
+  the test player's packages.
+- *Imports of the application-container library.* The probe DLL of the cross build (every function of
+  `rav1g.h`, `WindowsApp.lib` first) imports the same 98 functions of the same 30 DLLs as before rav1d
+  was in it: no line of its import table changed. The functions the list above expected
+  (`GetLastError`, `CloseHandle`, `GetModuleHandleA`, `GetProcAddress`, `Sleep`,
+  `WakeByAddressSingle`) were already imported by the standard library. Two imports did appear at first,
+  `GetSystemInfo` and `ceil`, both from rav1d choosing its own number of threads (the number of
+  processors and its square root); the copy now takes the numbers from the application, and they are
+  gone. The same holds for the test player's packages: the import tables of `rav1g.dll` and the player
+  of the default package (95 functions of 29 DLLs, and 284 of 36) and of the player of the MSVC package
+  (305 of 48) are line for line those of the run before. `rav1g.dll` grows from 3,674,112 to 4,382,720
+  bytes.
+- *Upstream rav1d on the conformance set.* `testing/rav1d_md5` builds upstream's crate at the commit
+  from its repository and compares the md5 of every output frame with the references (AOM's md5 files,
+  and dav1d's through ffmpeg for the others). CI job `rav1d`, on a Linux runner: 252 of 252 streams,
+  1,045 frames. The same job runs `upstream_diff.sh`.
+
+**Step 2, the oracle.** `rav1g-parse-check` runs both parsers on a stream, temporal unit by temporal
+unit, each into plain memory laid out as a pipeline slot of the D3D12 host lays it out
+(`av1_setup_macroblockd`): the entropy decoder of libaom with a host that has no GPU (the functions of
+`dx/av1_core.h`, about 20), rav1d with the sink. The block lists of both are counted by the host's own
+`av1_mi_push_block`, compiled into the program from `crates/rav1g/src/host/blocks.rs` as it is. Then
+every buffer of a frame is compared over its whole size: the mode info pool record by record and field
+by field, the grid as record indexes, the transform block records, the coefficient buffer (it starts
+as a pattern, so a coefficient one side writes and the other does not is seen), the block index list,
+the block maps, the wavefront grids of intra prediction, the tiles' cursors and counters, the palette
+blocks and the loop restoration units. CI job `parse-check`, with one and with four parser threads.
+
+What it found, and how the sink reproduces libaom:
+
+| What | libaom | rav1d | In the sink |
+| --- | --- | --- | --- |
+| `partition` of the four 4x4 blocks of a split 8x8 | `PARTITION_NONE`: no partition is read under 8x8 | the split of the 8x8 | a split becomes none (it only occurs there) |
+| `ref_mv_idx` | counted from the second entry of the list for modes with a NEARMV | counted from the first for every mode | one less for NEARMV, NEAR_NEARMV, NEAR_NEWMV, NEW_NEARMV |
+| Coefficients that are zero | not written: the buffer is zero where a frame did not write (the transform stage clears what it read) | the sink's memory, 32 bits each | not written either |
+| Coefficient values | dequantised, masked to 24 bits, not clamped to the bit depth | clamped | the clamp is removed in the copy (`recon.rs`) |
+| Count in a transform block record | coefficients up to the last, rounded up to four | index of the last | `(eob + 4) >> 2` |
+| Transform size of a skipped inter block, of a lossless block | `read_tx_size`: the largest of the block (4x4 if lossless, or in a frame of 4x4 transforms), written to all 16 entries of `inter_tx_size` | the block's `max_ytx`, split bits unused | the same rule from block size and segment |
+| `inter_tx_size` of a block with a coded tree | written leaf by leaf; entries of the part outside the frame are never written; `tx_size` is the last leaf | two words of split bits | the tree is walked as `read_tx_size_vartx` walks it, from the split bits; entries outside the frame stay zero |
+| CDEF index | in the record that the top left 4x4 unit of each 64x64 points to; −1 if all its blocks are skipped; not written in a lossless or intra-block-copy frame | per 64x64 in the loop filter masks | written through the grid at the end of the superblock |
+| Lossless 4x4 transform | `DCT_DCT` with its own counter (`TX_SIZES_ALL`) | `WHT_WHT` | mapped |
+| Filter intra | DC mode with the filter next to it | a mode of its own | mapped |
+| Chroma from luma | index and joint sign | two signed values | computed back |
+| Reference of an inter-intra block, of a single reference | second reference `INTRA_FRAME`, `NONE_FRAME` | a flag | mapped |
+| Local warp that cannot be fitted | `wm_params.invalid` | the model's type stays identity | the mark is set, the numbers are not written (see below) |
+| Palette index map | extended to the whole block: columns and rows outside the frame repeat the last one inside | columns filled, rows not | the host of the sink repeats the last row |
+
+Equal without any work: the vector of a block with a global motion mode (rav1d stores the vector
+libaom derives from the model), the positions of chroma transform blocks of blocks under 8x8, the
+warp flag of a reference under global motion (`gm_warp` of the slot, against rav1d's
+`gmv_warp_allowed`), the delta of the loop filter and the quantiser index of a block, segment ids,
+compound types and masks, the interpolation filters, intra block copy, loop restoration units.
+
+Two things are not compared. `num_proj_ref`, the number of samples libaom found for a local warp:
+nothing behind the parser reads it. The numbers of a local warp that libaom marked as not valid: the
+fit stopped somewhere and the block is predicted from its vector; the mark itself is compared. **No
+stream we have contains such a block** (0 of 470,000 local warps), so that mark is the one field the
+oracle has not exercised.
+
+Results. In CI, on a Linux runner, the 252 streams of the conformance set are equal in all 1,108
+frames, with one parser thread and with four: 1,241,146 records, 1,483,395 transform blocks,
+44,829,632 coefficient slots, 477 palette planes, 6,559 loop restoration units. Among the records:
+768,000 inter blocks (481,000 skipped, 184,000 with transform sizes that are not all one), 202,000
+compound (44,000 with a wedge or difference mask), 31,000 inter-intra, 132,000 with overlapped motion,
+42,000 local warps, 11,600 with a global motion mode (4,900 warped), 17,000 intra block copies, 354,000
+blocks that are 4 wide or high, 10,700 that cross the frame edge.
+
+Locally, beyond that set, these are equal too: 13 small streams encoded
+for the purpose with libaom, rav1e and SVT-AV1 (segmentation, loop filter deltas, lossless, screen
+content with palettes and intra block copy, monochrome, 128x128 superblocks with tiles, error
+resilient; 330 frames), and longer clips (a 1080p clip of 14,645 frames with 19 million records, 4K
+clips of 300 frames, a 4K clip with 40x8 tiles; the small streams and the tiles clip also with four
+parser threads). Among the records compared: 4.7 million compound blocks (1.4 million with a wedge or difference mask), 1.2
+million inter-intra, 3.9 million with overlapped motion, 470,000 local warps, 260,000 with a global
+motion mode (46,000 of them warped), 5.2 million inter blocks whose transform sizes are not all one,
+480,000 blocks that cross the frame edge, 23,500 in a segment that is not 0, 1,600 with a loop filter
+delta, 17,000 intra block copies. The conformance set itself has no block in a segment other than 0
+and none with a loop filter delta: those two come from the streams encoded for the purpose, which are
+not in CI.
+
+What the entropy decoder of libaom needed from the plain host, and so from the D3D12 host today (step
+3 has to give the new parser the same, or not need it):
+
+- The frame buffer description of a frame with super-resolution is rewritten to the upscaled width
+  after the frame (`postfilter.rs`); libaom takes the size of a reference from there. Without it the
+  parse of a later frame goes wrong. rav1d keeps this itself.
+- Per frame buffer, the motion vectors and the segment map of the frame in it; the context arrays above
+  a tile row; the loop restoration units; the motion field. rav1d owns all of these.
+
+Found on the way: `end()` of `aom_util/aom_thread.c` joined a thread that was never started (the
+worker that runs on the calling thread), which the Windows emulation of pthreads tolerates and glibc
+does not; it now ends only workers that have a thread. Two `#include` lines of the entropy decoder had
+backslashes. The bindings give a C enum the type `int` on every target (a Linux compiler takes
+`unsigned int`; the host is written against the Windows type).
+
+On damaged streams the two parsers do not behave alike, as expected: libaom reports the frame and goes
+on with the next temporal unit, rav1d returns an error for the unit and drops the rest of it (seen on
+the cut-tile streams; the frames both parse are equal). What an application sees for a damaged stream
+is decided in step 3.
+
+**The digest.** `rav1g_parse::digest` folds what the parser hands the sink (the record of every block,
+transform blocks, coefficients, palettes, CDEF indexes, loop restoration units) into a 64-bit number
+per stream. `rav1g-dec -parsedigest` prints it in the Windows builds, `rav1g-parse-check -digest` on
+Linux, and CI job `parse-digest` requires the same lines from the MSVC build, the Linux cross build
+(both with four threads) and the Linux build (one thread). It is the cheap check that the parser,
+with its assembly, runs the same in every build; the values are checked on Linux.
+
+**CPU cost of the sink** (`rav1g-parse-check -time`: the stream parsed with a sink that keeps
+nothing, and with the sink writing the buffers; one thread, best of three, the difference is the
+sink). On the development machine, 3840x2160, milliseconds a frame:
+
+| Clip | Parse alone | With the sink | Sink | of which block lists |
+| --- | --- | --- | --- | --- |
+| `a1_8b4k_300` (light) | 4.7 ms | 5.3 ms | 0.6 ms | 0.2 ms |
+| `fg4k_300` | 8.1 ms | 9.0 ms | 0.8 ms | 0.3 ms |
+| `j4k40` (heavy) | 14.6 ms | 16.2 ms | 1.6 ms | 1.5 ms |
+| `t40x8` (40x8 tiles) | 11.8 ms | 11.9 ms | 0.1 ms | 0.5 ms |
+
+The difference of two runs is noisy at this size (the last row has a sink smaller than its block
+lists), but the estimate of [CPU cost of the hand-off](#cpu-cost-of-the-hand-off) holds: about 0.5
+ms on a light 4K frame, 1.5 ms on a heavy one. Most of it on a heavy frame is `av1_mi_push_block`,
+which the tile threads of the entropy decoder run today as well; the records, the grid and the
+transform block records are the smaller part.
+
+On the Linux runner of CI (`parse-check`, the two largest streams of the set): the 4K stream
+`nf-dvbdash-a1-8b-2160p`, 23 frames, parse 5.7 ms, with the sink 7.6 ms, the sink 1.9 ms (block lists
+0.4 ms); `nf-chimera-10b-1080p`, 33 frames, parse 3.7 ms, with the sink 4.4 ms, the sink 0.75 ms (block
+lists 0.3 ms). That 4K stream is the source of `a1_8b4k_300` above, where the sink is 0.6 ms: the runner
+is the slower machine for this, and 23 frames are few. What is left when the block lists are taken off
+is mostly memory: the grid alone is one pointer per 4x4 unit, 4 MB written for a 4K frame, which the
+entropy decoder of libaom writes as well.
+
+**What step 3 starts from.**
+
+- `ParseSink` and `rav1g_parse::sink::Sink` with its `SinkHost`: the D3D12 host implements `SinkHost`
+  on the mapped buffers of a slot (`frame_begin`, `tile_begin` with the cursors of
+  `av1_setup_macroblockd`, `palette` in place of `av1_intra_palette`, `superblock` for the loop
+  restoration units, `tile_end`, `frame_end` in place of `av1_decode_frame_gpu`).
+- The sink calls `av1_mi_push_block` through structs of the entropy decoder that it fills itself (an
+  `AV1Decoder` with the frame's size, grid and superblock size; a `MACROBLOCKD` per tile). That works
+  unchanged with the real host; a block context of the host's own is step 6.
+- One frame is in parse at a time (`Sink` keeps one frame's state); the tiles of a frame may be parsed
+  side by side.
+- The sink leaves the second share of a slot alone: the oracle gives a tile room for all its blocks and
+  the worst-case coefficient layout. The real host has to switch shares as `av1_setup_sec_data` and
+  `av1_setup_ext_coef_buffer` do, or size the parts for the worst case (step 5 replaces the shares).
+- Still to come from rav1d for the host, and not part of the sink yet: the frame header in the host's
+  terms (quantiser matrices, loop filter levels, CDEF and loop restoration parameters, film grain,
+  reference list and scale: `ParseFrame` has the headers), the picture allocator, output order and
+  show-existing, operating points, errors.
+- The warp validity mark needs a stream that has such a block.
+
 ## Licence
 
 rav1d is BSD-2-Clause (copyright VideoLAN and the dav1d authors, and the rav1d contributors); the
@@ -581,6 +766,13 @@ assembly files carry their own notices. The vendored copy keeps `COPYING` and th
 repository's licence text and README name it when step 1 lands. The AOMedia Patent License 1.0 notice
 stays: it covers the AV1 implementation, and the shaders and the host remain derived from AOM code after
 the C parser is gone. libaom's own files and the libwebm notices follow those files.
+
+Since step 1: `third_party/rav1d/COPYING` and `doc/PATENTS` are in the tree and in the `licenses`
+directory of every CI artifact with a program (the test player's packages, `rav1g-dec` of both builds);
+the README names rav1d. The crates rav1d depends on that end up in the library (`parking_lot`,
+`bitflags`, `libc`, `strum`, `zerocopy`, `atomig`, `raw-cpuid`, `av-data`, `cfg-if`, `paste`,
+`static_assertions`, `to_method`, `assert_matches`) are MIT or Apache-2.0, some either; their notices
+are not collected yet, which is to do before a release.
 
 ## The experiment patch
 

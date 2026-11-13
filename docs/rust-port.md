@@ -1733,13 +1733,24 @@ tolerances of the memory check come from, and that check with three builds that 
 each of which fails it.
 
 **For the console:** the packages of run 43393650551, `rav1g-testplayer-x64-43393650551` (0.2.130.0,
-the default) and `rav1g-testplayer-msvc-x64-43393650551` (0.2.130.2). Not run on a console yet: 15
-decoders in a row through the budget guard, the memory batch, and the timing against 0.2.125. What
+the default) and `rav1g-testplayer-msvc-x64-43393650551` (0.2.130.2). What
 looks different in their logs: `host memory` where the `MEMORY decoder size` line said `host pool`
 (the number is the pool and the decoder together); the two numbers of `host pool N of N bytes` in
 `MEMORY decoder created`, 74,688 bytes lower than in 0.2.125 for the same configuration; and the new
 line `MEMORY decoder created host memory: ...` behind `MEMORY decoder created options`. Every other
 MEMORY line has the numbers it had.
+
+**On the console** (2026-11-13; 0.2.130.0 and 0.2.130.2 of that run, and 0.2.131.0, the default package
+of run 43422691674 with the same code): the md5 set is 15 of 15 on 0.2.130.2 and twice on 0.2.131.0. The
+memory batch gives 4 of 4 md5 with the refusals it should have (`-slots 3`, and `-lowmem -slots 4`) on
+both 0.2.130 packages, and the credit is kept. 30 decoders created and destroyed in a row (4K 10-bit,
+1080p, 4K 8-bit) are clean on 0.2.130.2, 60 on 0.2.131.0. The line `MEMORY decoder created host memory`
+is as described above: the pool 74,688 bytes lower, the decoder 69,248 bytes on the heap. `-gputime` is
+what it was with 0.2.125: `j4k40` parser 40.3 ms a frame with the C of clang and 40.8 ms with the C of
+MSVC, GPU 18.4 ms; `t40x1ld` 34 to 35 ms. One run of 0.2.130.0 stopped in the middle of a clip with
+"Decoding process was terminated by user": the player's window had lost the focus on the console
+(someone used it), which is not a defect of the decoder. A follow-up for later: the player logs none of
+the Suspending, VisibilityChanged and Closed events; a log line for each would make that case plain.
 
 ## Estimate
 

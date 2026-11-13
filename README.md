@@ -158,7 +158,11 @@ the library as `rav1g.dll` (C of clang), and a static build with the C of MSVC
 ([docs/test-player.md](docs/test-player.md)).
 
 Next targets: phase 2, the parser of rav1d in place of the C parser, which is the CPU limit at 4K
-([docs/phase2-rav1d.md](docs/phase2-rav1d.md) has the design and the measurements behind it), and
+([docs/phase2-rav1d.md](docs/phase2-rav1d.md) has the design, the measurements behind it and the
+progress). Its first two steps are done: rav1d's parse pass is in the tree (`third_party/rav1d`) and in
+the library, and on every stream of the conformance set it gives the same mode info records, block
+lists, transform blocks and coefficients as the C parser, byte for byte (`tools/rav1g-parse-check`, on
+Linux in CI). Next is step 3, the decoder running on it. And
 inter and intra prediction on the GPU (a measured `-interfast` prototype showed that inter time is per
 block and per dispatch, not filtering; see [gpu-av1-decoder.md](docs/gpu-av1-decoder.md)).
 The goals, in order: heavy 4K at 30 fps in real time (at most 33.3 ms per frame; not met
@@ -179,19 +183,24 @@ memory as possible left to the application.
   `RAV1G_SHADER_DIR=<shader headers> cargo build --release` on Windows and with
   `cargo xwin build --target x86_64-pc-windows-msvc` on Linux.
 - [docs/phase2-rav1d.md](docs/phase2-rav1d.md): the design of phase 2, rav1d's parser in place of the
-  C parser.
+  C parser, and its progress.
+- [third_party/rav1d/PATCHES.md](third_party/rav1d/PATCHES.md): the copy of rav1d, what was changed
+  against upstream and how to check it.
 
 ## Licence
 
 BSD-2-Clause (`LICENSE.txt`, `libav1/LICENSE`) plus the Alliance for Open Media Patent
 License 1.0 (`libav1/PATENTS`). `third_party/libwebm` carries its own licence and patent
-notices (`third_party/libwebm/LICENSE.TXT`, `third_party/libwebm/PATENTS.TXT`). Keep all of
+notices (`third_party/libwebm/LICENSE.TXT`, `third_party/libwebm/PATENTS.TXT`).
+`third_party/rav1d` is the parse pass of [rav1d](https://github.com/memorysafety/rav1d), the Rust
+port of dav1d (BSD-2-Clause, copyright VideoLAN, the dav1d authors and the Internet Security Research
+Group: `third_party/rav1d/COPYING`, `third_party/rav1d/doc/PATENTS`). Keep all of
 them when redistributing source or binaries; CI artifacts include them under `licenses/`.
 
 ## Disclaimers
 
 Not affiliated with or endorsed by Microsoft. Xbox is a trademark of Microsoft Corporation.
 
-Independent project, not affiliated with rav1e or rav1d.
+Independent project, not affiliated with rav1e or rav1d; it uses rav1d's parser under rav1d's licence.
 
 Not affiliated with or endorsed by the Alliance for Open Media.
