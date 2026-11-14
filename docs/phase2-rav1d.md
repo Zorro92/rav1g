@@ -2666,6 +2666,19 @@ The packages of run 159: `uwp_dx12_player_0.2.159.0_x64.msix` (default, the one 
 lines above; artifact `rav1g-testplayer-x64-43601416014`), `0.2.159.2` (the static library, linked
 by MSVC), `0.2.159.3` (`hevcPlayback`).
 
+**Console results** (0.2.159.0, the lines above, the owner's app stopped). The md5 set: 15 of 15.
+`MEMORY app before the decoder` at the first task: 125.0 MiB (`j4k40`) and 126.8 (`d2`); the
+application had 796.3 and 794.5 MiB left for the decoder, as estimated. The guard decided as the
+table says:
+
+| Line | `MEMORY headroom` | `j4k40` fps | `d2` fps | Least free while decoding, `d2` |
+| --- | --- | ---: | ---: | ---: |
+| no flag | 2 frames, 3 slots, leaves 149.7 / 148.0 MiB: created | 45.7 (0.2.156: 45.7) | 49.3 (48.8) | 139 MiB |
+| `-slots 4` | 4 slots would leave 100.4 / 98.6 MiB: **created with 3 slots** | 45.4 (0.2.156: 19.5) | 48.8 (18.8) | 136 MiB |
+| `-parseframes 1` | 1 frame, 2 slots, leaves 199.2 / 197.3 MiB: created | 29.3 (29.3) | 35.0 (34.9) | 184 MiB |
+
+The removal of the C parser costs no speed, the cliff is gone, and the app uses about 19 MiB less.
+
 ## Licence
 
 rav1d is BSD-2-Clause (copyright VideoLAN and the dav1d authors, and the rav1d contributors); the
