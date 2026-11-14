@@ -71,7 +71,7 @@ At the end no C++ remains in the decoder: the C parser, the HLSL and Rust.
 | `crates/rav1g-shaders` | planned, with the switch to DXC: shader bytecode, `build.rs` runs DXC (see Requirements) and embeds the DXIL with `include_bytes!`. Today the bytecode is the FXC headers of `RAV1G_SHADER_DIR`, in `crates/rav1g-sys/shader_table.c` |
 | `tools/rav1g-dec` | command-line decoder for conformance, md5 and stage dumps |
 | `tools/rav1g-header` | writes `rav1g.h` from `crates/rav1g/src/capi.rs` with `cbindgen`, or checks it |
-| `libav1/` | the C parser and entropy decoder (`av1`, `aom*`), the shaders (`dx/shaders`) and three headers of `dx` (`av1_core.h` and `av1_perf.h`, the C interface between the parser, the host and the applications; `intra_v2_sched.h`, for the intra check). No C++ |
+| `libav1/` | the shaders (`dx/shaders`), `dx/av1_perf.h` (the records of the timing run and of the stage dumps, for the test player) and `dx/intra_v2_sched.h` (for the intra check), and what is left of libaom: the 17 C files and 75 headers that the shader checks of `testing/` compile as the reference, the readers of the test player include, or `crates/rav1g/build.rs` and the tests read as text. Nothing of it is compiled into the decoder |
 | `testing/` | the test player (C++, on `rav1g.h`), the conformance scripts, the host checks of the shaders |
 
 Dependencies: `windows` (D3D12/DXGI bindings), `cc`, `cbindgen` (`bindgen` until 2026-11-14). Edition 2024, stable Rust.
@@ -1762,7 +1762,7 @@ Started 2026-11-14. The decoder compiles no C of libaom, but its build still rea
 `crates/rav1g-sys/build.rs` runs bindgen over `wrapper.h` (`aom/aom_codec.h`, `aom/aom_decoder.h`,
 `aom/aomdx.h`, `dx/av1_perf.h`), `shared.h` (`av1/common/blockd.h`) and `parser.h` (`dx/av1_core.h` and
 seven headers of `av1/common`), and a C probe holds the result against the C compiler. That needs
-libclang on every machine that builds the decoder and keeps 113 headers in the tree for the sake
+libclang on every machine that builds the decoder and keeps 106 headers in the tree for the sake
 of some 60 structs. The plan: the decoder gets Rust types of its own for all of it, bindgen and libclang
 leave the build, and the headers are pruned to what the shader checks of CI compile. The output stays
 byte-identical; `rav1g.h` does not change.
@@ -1824,6 +1824,41 @@ which the decoder does not use):
 `rav1g-sys` stays a crate: `rav1g-parse` needs the records and sits below `rav1g`, and the shader table
 (the one C file that is left, with its link time optimisation and the `rav1g_c.lib` the UWP player
 links) has its build script there.
+
+**Done** (2026-11-14, commits 1369737, 8f773d9, 4cf5aaa and the two after it):
+
+- `crates/rav1g-sys/src` is five modules of Rust, about 1,500 lines where the bindings were about 7,000
+  generated ones: `records.rs` (the records the shaders read and the tile cursors, every size and offset
+  asserted), `host.rs` (the state of the host), `bitstream.rs` (enums and limits), `api.rs` (error codes,
+  configuration, image, output callbacks) and `perf.rs` (timing run, stage dumps, switches; the records
+  that reach the callbacks of `rav1g.h` asserted). Everything is at the top level of the crate; the
+  modules `parser` and `shared` are gone, and every type exists once.
+- The records were held against the C compiler one last time in the commit that introduced them
+  (clang-cl locally, MSVC and clang-cl in CI): the layout probe compared `records.rs` with the structs of
+  `blockd.h` field by field. The tests that hold `MB_MODE_INFO` against `dx/shaders/mode_info.h` stay.
+- The state of the host lost about 500 fields and every alignment the C asked for. `AV1Decoder`, of
+  which the host keeps one for the decoder and one per frame in parse, was 1,225,792 bytes and is 10,656
+  bytes. The unions of `YV12_BUFFER_CONFIG` are their array arms (`widths`, `strides`, `buffers`).
+- The switches, the timing callback, the stage dumps and the pipeline cache are called by path
+  (`crate::host::av1_set_cdef_v2`); they were reached through the declarations of the headers.
+- Gone with bindgen: `wrapper.h`, `shared.h`, `parser.h`, the layout probe and its C, the table probe and
+  the function probes (`rav1g_sys::c_table`, `rav1g_sys::probe`) with the four tests that held the Rust
+  copies of 21 tables and 4 inline functions against the headers. Those copies have no reference in the
+  tree any more; the conformance md5 and the parse check are what holds them. 126 lines of `Cargo.lock`
+  (bindgen and what it pulled in), and libclang in four CI jobs; the Linux build of `rav1g-parse-check`
+  needs no C compiler.
+- libaom's headers: 29 files (7,257 lines) removed, among them `dx/av1_core.h`, the entry points the
+  entropy decoder called. What stays was found by compiling: the dependency lists gcc writes for every
+  compile of the five shader checks and of `perf_stats_test`, the include closure of the sources under
+  `testing/`, `tools/` and `crates/` (the readers of the test player and of `rav1g-dec` include a few
+  headers of `aom` and `aom_ports`), and the files that are read as text (`crates/rav1g/build.rs`, the
+  tests of `host/frame.rs` and `host/create.rs`, `testing/intra_check/run.sh`). No shader and no header
+  the shaders include changed.
+- Checked before every push: the Windows cross build, the md5 of the 244 AOM vectors with `rav1g-dec
+  -hw` under wine on lavapipe (244 of 244 each time), `rav1g-parse-check` on Linux (244 of 244), the unit
+  tests under wine; after the pruning the shader checks with their mutants, `sm6test` and
+  `perf_stats_test`.
+
 
 ## Estimate
 

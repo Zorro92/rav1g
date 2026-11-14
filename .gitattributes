@@ -1,8 +1,8 @@
 # Code of other projects kept in this tree, marked for GitHub's language statistics. The decoder is
 # Rust and HLSL; none of the files below is compiled into it.
 
-# libaom: the reference the shader checks of testing/ and tools/rav1g-parse-check hold the decoder
-# against, and the headers of the structs the stages read. Its shaders (libav1/dx) are rav1g's own.
+# libaom: the reference the shader checks of testing/ hold the shaders against, and the files the
+# decoder's build and tests read tables from as text. Its shaders (libav1/dx) are rav1g's own.
 libav1/aom/** linguist-vendored
 libav1/aom_dsp/** linguist-vendored
 libav1/aom_mem/** linguist-vendored
