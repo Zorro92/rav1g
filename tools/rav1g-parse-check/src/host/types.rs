@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-2-Clause
 
 //! What `blocks.rs` uses of the host's `types.rs`: the names of the block lists (the host's constants,
-//! read from its file by build.rs) and the two structs through which `av1_mi_push_block` reaches the
-//! frame: the decoder and the frame's slot, here with the fields that function reads and nothing else.
+//! read from its file by build.rs) and the struct through which `av1_mi_push_block` reaches the
+//! frame: the frame's slot, here with the fields that function reads and nothing else.
 
 #![allow(non_camel_case_types, non_upper_case_globals, dead_code)]
 
@@ -46,11 +46,4 @@ pub struct av1_frame_thread_data {
     pub intra_v2_sched: IntraV2Sched,
     pub scale_factors: [ScaleFactor; 8],
     pub scale_enable: c_int,
-}
-
-/// The decoder of the entropy decoder of libaom in this program: the side (one of the two parsers) it
-/// belongs to. `av1_mi_push_block` does not look at the decoder: it finds the slot of a block's frame
-/// through the data of the block's tile.
-pub struct Av1Core {
-    pub side: *mut crate::plain::Side,
 }

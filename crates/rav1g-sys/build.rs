@@ -9,44 +9,30 @@
 //! Writes the bindings of the decoder to the headers of `libav1`, and builds the little C the decoder
 //! has: the shader table.
 //!
-//! **For a Windows target (the decoder)** no file of `libav1` is compiled. The decoder's parser is
-//! rav1d's parse pass (`crates/rav1g-parse`, docs/phase2-rav1d.md), its host is Rust (`crates/rav1g`),
-//! and what the host still needs of libaom's common code is Rust there too (`host/libaom.rs`). What
-//! stays of `libav1` for the decoder is its headers: the host fills and reads the structs of the frame
-//! header and of the blocks in the layouts the shaders and the sink were written for, and bindgen
-//! reads those from the headers (`wrapper.h`, `shared.h`, `parser.h`). One C file is compiled into
-//! `rav1g_c.lib`: `shader_table.c`, the bytecode of the shaders. A file of `c_sources.txt` marked
-//! `host` would be compiled with it; none is.
+//! No file of `libav1` is compiled. The decoder's parser is rav1d's parse pass (`crates/rav1g-parse`,
+//! docs/phase2-rav1d.md), its host is Rust (`crates/rav1g`), and what the host still needs of libaom's
+//! common code is Rust there too (`host/libaom.rs`). What stays of `libav1` for the decoder is its
+//! headers: the host fills and reads the structs of the frame header and of the blocks in the layouts
+//! the shaders and the sink were written for, and bindgen reads those from the headers (`wrapper.h`,
+//! `shared.h`, `parser.h`).
 //!
-//! The shaders are not compiled here. `RAV1G_SHADER_DIR` names the directory whose `dx/shaders/h` has the
-//! bytecode headers of the FXC build (`testing/shader_cache/shaders.py build --root <dir>`; in CI the
-//! `normal` output of `.github/actions/shaders`).
+//! **For a Windows target (the decoder)** one C file is compiled into `rav1g_c.lib`: `shader_table.c`,
+//! the bytecode of the shaders. The shaders are not compiled here. `RAV1G_SHADER_DIR` names the directory
+//! whose `dx/shaders/h` has the bytecode headers of the FXC build (`testing/shader_cache/shaders.py build
+//! --root <dir>`; in CI the `normal` output of `.github/actions/shaders`).
 //!
-//! **For a target that is not Windows** the crate is the entropy decoder of libaom alone: the files of
-//! `c_sources.txt` (the libaom-derived parser and entropy decoder of `libav1/av1`, `libav1/aom*`) with
-//! the settings the library project of the C++ decoder (branch `cpp`) has for them in Release x64
-//! (`/O1 /Ot`, `/O2` for the files the list marks; no `NDEBUG`), `helpers.c` (the entry points of its
-//! interface that are macros), the bindings and the layout probe. The D3D12 host does not build there;
-//! a program supplies the functions of `dx/av1_core.h` itself. `tools/rav1g-parse-check` is that
-//! program: it holds rav1d's parse against the entropy decoder on Linux, which is where that entropy
-//! decoder still runs (docs/phase2-rav1d.md, step 6).
+//! **For a target that is not Windows** the crate is the bindings and the layout probe alone: the D3D12
+//! host does not build there. `crates/rav1g-parse` and `tools/rav1g-parse-check` use the bindings on
+//! Linux (docs/phase2-rav1d.md, step 2).
 
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// A source of the library and whether it is compiled with `/O2` (`c_sources.txt`).
-struct Source {
-    path: PathBuf,
-    max_speed: bool,
-    /// The decoder still calls into the file (`host` in `c_sources.txt`).
-    host: bool,
-}
-
 /// Link time optimisation of the C of the decoder, which the MSBuild projects of the C++ decoder have
-/// as whole program optimisation (`/GL`, `/LTCG`). Without it the entropy decoder is 7 to 12 % slower in
-/// the tile threads than in those builds; the numbers are in docs/rust-port.md ("The entropy decoder with
-/// link time optimisation").
+/// as whole program optimisation (`/GL`, `/LTCG`). It was chosen while the entropy decoder of libaom was
+/// part of this library (docs/rust-port.md, "The entropy decoder with link time optimisation"); the one
+/// file that is left, the shader table, is compiled the same way.
 ///
 /// The objects of such a build are not machine code: MSVC writes its intermediate language, clang LLVM
 /// bitcode, and the linker compiles them. Two things follow:
@@ -92,46 +78,6 @@ fn lto() -> Lto {
 fn fail(message: &str) -> ! {
     eprintln!("rav1g-sys: {message}");
     std::process::exit(1);
-}
-
-/// The files of `c_sources.txt`: one per line, relative to `libav1`, `/O2` behind the ones compiled for
-/// speed and `host` behind the ones the decoder still calls into; `#` starts a comment.
-fn read_sources(list: &Path, repo: &Path) -> Vec<Source> {
-    let text =
-        fs::read_to_string(list).unwrap_or_else(|error| fail(&format!("cannot read {}: {error}", list.display())));
-    let mut sources: Vec<Source> = Vec::new();
-    for (number, line) in text.lines().enumerate() {
-        let line = line.split('#').next().unwrap_or("").trim();
-        if line.is_empty() {
-            continue;
-        }
-        let mut words = line.split_whitespace();
-        let relative = words.next().unwrap_or("");
-        let (mut max_speed, mut host) = (false, false);
-        for word in words {
-            match word {
-                "/O2" if !max_speed => max_speed = true,
-                "host" if !host => host = true,
-                _ => fail(&format!(
-                    "{}, line {}: a file name, and /O2 or host or nothing behind it: {line}",
-                    list.display(),
-                    number + 1
-                )),
-            }
-        }
-        let path = repo.join("libav1").join(relative);
-        if !relative.ends_with(".c") || !path.is_file() {
-            fail(&format!("{}, line {}: libav1/{relative} is not a C file of the tree", list.display(), number + 1));
-        }
-        if sources.iter().any(|source| source.path == path) {
-            fail(&format!("{}, line {}: {relative} is listed twice", list.display(), number + 1));
-        }
-        sources.push(Source { path, max_speed, host });
-    }
-    if sources.len() < 70 {
-        fail(&format!("{}: only {} sources found", list.display(), sources.len()));
-    }
-    sources
 }
 
 /// Writes bindings. The Rust of the host is written against the bindings of the Windows targets, where
@@ -237,7 +183,7 @@ fn clang_cl_flags(build: &mut cc::Build) {
 
 fn main() {
     let target = env::var("TARGET").unwrap_or_default();
-    // The decoder is for Windows. Elsewhere the crate is the entropy decoder alone (see the top).
+    // The decoder is for Windows. Elsewhere the crate is the bindings and the layout probe (see the top).
     let windows = target.ends_with("-windows-msvc");
     if !windows && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         fail(&format!("target {target}: of the Windows targets the decoder builds for *-windows-msvc only"));
@@ -246,46 +192,20 @@ fn main() {
     // Two levels up, without canonicalize: on Windows that gives a \\?\ path, which cl does not take.
     let repo = manifest.parent().and_then(Path::parent).expect("the workspace root").to_path_buf();
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
-    let list = manifest.join("c_sources.txt");
-    println!("cargo:rerun-if-changed={}", list.display());
     println!("cargo:rerun-if-changed={}", repo.join("libav1").display());
     println!("cargo:rerun-if-changed={}", manifest.join("wrapper.h").display());
     println!("cargo:rerun-if-changed={}", manifest.join("shared.h").display());
     println!("cargo:rerun-if-changed={}", manifest.join("parser.h").display());
     println!("cargo:rerun-if-changed={}", manifest.join("shader_table.c").display());
-    println!("cargo:rerun-if-changed={}", manifest.join("helpers.c").display());
 
     let shaders = windows.then(shader_dir);
     let shaders = shaders.as_deref();
-    let mut sources = read_sources(&list, &repo);
-    if windows {
-        // The decoder: its parser is rav1d's, and of the C only the files its host still calls into
-        // are part of it. The entropy decoder is built where it is the reference (see the top).
-        sources.retain(|source| source.host);
-        if sources.iter().any(|source| source.max_speed) {
-            fail(&format!("{}: a file of the decoder (host) is not compiled for speed (/O2)", list.display()));
-        }
-    }
 
-    // Two calls, one static library each: the C files at /O1 /Ot and the C files the list marks at /O2.
-    // The optimisation is the list's and does not follow the cargo profile.
+    // The C of the decoder, one static library: the shader table, at /O1 /Ot whatever the cargo profile.
     let mut c_size = base_build(&repo, shaders);
     c_size.opt_level(1).flag_if_supported("/Ot");
-    let mut c_speed = base_build(&repo, shaders);
-    c_speed.opt_level(2);
     let lto = if windows { lto() } else { Lto::Off };
-    if !windows {
-        // What the Microsoft compilers take as they come: a function that is called before its
-        // declaration (the entry points of dx/av1_core.h in a few files).
-        for build in [&mut c_size, &mut c_speed] {
-            build.flag_if_supported("-Wno-error=implicit-function-declaration");
-            build.flag_if_supported("-Wno-error=incompatible-pointer-types");
-            build.flag_if_supported("-Wno-error=int-conversion");
-            build.pic(true);
-        }
-    }
-    // What built the C, for the version text of the library (rav1g_version of rav1g.h): the logs of a
-    // timing run then say which build of the entropy decoder they are of.
+    // What built the C, for the version text of the library (rav1g_version of rav1g.h).
     println!(
         "cargo:rustc-env=RAV1G_C_BUILD={}, {}, {} runtime",
         if !windows {
@@ -307,71 +227,44 @@ fn main() {
             "DLL"
         }
     );
-    for build in [&mut c_size, &mut c_speed] {
-        match lto {
-            Lto::Off => {}
-            Lto::Msvc => {
-                build.flag("/GL");
-            }
-            Lto::Thin => {
-                build.flag("-flto=thin");
-            }
-            Lto::Full => {
-                build.flag("-flto");
-            }
+    match lto {
+        Lto::Off => {}
+        Lto::Msvc => {
+            c_size.flag("/GL");
         }
-        // The libraries go to the linker as they are, not through the .rlib of this crate (see Lto).
-        build.cargo_metadata(false);
-    }
-    for source in &sources {
-        if source.max_speed {
-            c_speed.file(&source.path);
-        } else {
-            c_size.file(&source.path);
+        Lto::Thin => {
+            c_size.flag("-flto=thin");
+        }
+        Lto::Full => {
+            c_size.flag("-flto");
         }
     }
+    // The library goes to the linker as it is, not through the .rlib of this crate (see Lto).
+    c_size.cargo_metadata(false);
     c_size.include(&manifest);
-    // One library for the decoder; two where the entropy decoder is built, the second with its files
-    // that are compiled for speed.
-    let libraries: &[&str] = if windows { &["rav1g_c"] } else { &["rav1g_c", "rav1g_c_speed"] };
     if windows {
         // The bytecode of the shaders, from the headers of RAV1G_SHADER_DIR (shader_table.c).
         c_size.file(manifest.join("shader_table.c"));
-    } else {
-        // The entry points of the entropy decoder's interface that are macros in the C headers, as
-        // functions (helpers.c).
-        c_size.file(manifest.join("helpers.c"));
-        c_speed.compile("rav1g_c_speed");
-    }
-    c_size.compile("rav1g_c");
-    println!("cargo:rustc-link-search=native={}", out.display());
-    for library in libraries {
-        println!("cargo:rustc-link-lib=static:-bundle={library}");
-    }
-    // An application that links the static library of `rav1g` itself (the UWP test player) needs the
-    // library of the C as well: it is not in rav1g.lib (see Lto). RAV1G_C_LIB_DIR names a directory it
-    // is copied to.
-    println!("cargo:rerun-if-env-changed=RAV1G_C_LIB_DIR");
-    if let Some(dir) = env::var_os("RAV1G_C_LIB_DIR").filter(|dir| !dir.is_empty()).map(PathBuf::from) {
-        for library in libraries.iter().map(|library| format!("{library}.lib")) {
-            if let Err(error) = fs::create_dir_all(&dir).and_then(|()| fs::copy(out.join(&library), dir.join(&library)))
-            {
+        c_size.compile("rav1g_c");
+        println!("cargo:rustc-link-search=native={}", out.display());
+        println!("cargo:rustc-link-lib=static:-bundle=rav1g_c");
+        // An application that links the static library of `rav1g` itself (the UWP test player) needs the
+        // library of the C as well: it is not in rav1g.lib (see Lto). RAV1G_C_LIB_DIR names a directory it
+        // is copied to.
+        println!("cargo:rerun-if-env-changed=RAV1G_C_LIB_DIR");
+        if let Some(dir) = env::var_os("RAV1G_C_LIB_DIR").filter(|dir| !dir.is_empty()).map(PathBuf::from) {
+            let library = "rav1g_c.lib";
+            if let Err(error) = fs::create_dir_all(&dir).and_then(|()| fs::copy(out.join(library), dir.join(library))) {
                 fail(&format!("RAV1G_C_LIB_DIR={}: cannot copy {library}: {error}", dir.display()));
             }
         }
-    }
-    if lto == Lto::Msvc {
-        // For the tests of this crate; a build script cannot give it to the programs of other crates.
-        println!("cargo:rustc-link-arg=/LTCG:incremental");
-    }
-    if windows {
+        if lto == Lto::Msvc {
+            // For the tests of this crate; a build script cannot give it to the programs of other crates.
+            println!("cargo:rustc-link-arg=/LTCG:incremental");
+        }
         println!("cargo:rustc-link-lib=d3d12");
         println!("cargo:rustc-link-lib=dxgi");
         println!("cargo:rustc-link-lib=dxguid");
-    } else {
-        // The entropy decoder's threads and its math.
-        println!("cargo:rustc-link-lib=pthread");
-        println!("cargo:rustc-link-lib=m");
     }
 
     let bindings = bindgen::Builder::default()
@@ -389,7 +282,7 @@ fn main() {
         .unwrap_or_else(|error| fail(&format!("bindgen: {error}")));
     write_bindings(&bindings, &out.join("bindings.rs"), windows);
 
-    // The layouts shared with the GPU and between the entropy decoder and the host (shared.h): types only.
+    // The layouts shared with the GPU and between the parser's sink and the host (shared.h): types only.
     let shared = bindgen::Builder::default()
         .header(manifest.join("shared.h").to_string_lossy())
         .clang_arg(format!("-I{}", repo.join("libav1").display()))
@@ -403,9 +296,8 @@ fn main() {
         .unwrap_or_else(|error| fail(&format!("bindgen (shared.h): {error}")));
     write_bindings(&shared, &out.join("shared.rs"), windows);
 
-    // The entropy decoder as the Rust host sees it (parser.h): the structs the host reads and fills in
-    // place, the enums and limits of the bitstream, and a few tables. Types and constants only; the
-    // functions the Rust calls are declared where they are called.
+    // The structs of libaom's decoder as the Rust host uses them (parser.h): the structs the host reads
+    // and fills in place, and the enums and limits of the bitstream. Types and constants only.
     let parser = bindgen::Builder::default()
         .header(manifest.join("parser.h").to_string_lossy())
         .clang_arg(format!("-I{}", repo.join("libav1").display()))
@@ -458,7 +350,7 @@ const INTERFACE_TYPES: &[&str] = &[
 /// The structs of `av1/common/blockd.h` and `mv.h` that cross a boundary (shared.h): the mode info record,
 /// which the shaders read as `MB_MODE_INFO` of `dx/shaders/mode_info.h`, the block records of the
 /// prediction and transform stages, and the tile's cursors into the buffers of a pipeline slot, which the
-/// entropy decoder and the host both use.
+/// parser's sink and the host both use.
 const SHARED_TYPES: &[&str] = &[
     "MB_MODE_INFO",
     "PALETTE_MODE_INFO",
@@ -475,7 +367,7 @@ const SHARED_TYPES: &[&str] = &[
     "av1_tile_data",
 ];
 
-/// Types of the entropy decoder and of its interface that the Rust host uses (parser.h); what they hold
+/// Types of libaom's decoder and of its interface that the Rust host uses (parser.h); what they hold
 /// comes along.
 const PARSER_TYPES: &[&str] = &[
     "AV1Decoder",
@@ -506,8 +398,9 @@ const PARSER_TYPES: &[&str] = &[
     "av1_stage_dump.*",
 ];
 
-/// Tables and limits of the entropy decoder that the Rust host reads: `extern` in its headers, so the
-/// bindings declare the C symbol; and constants that are macros or enumerators outside `enums.h`.
+/// Tables and limits of libaom's headers that the Rust host names: the tables are `extern` there, so the
+/// bindings declare a C symbol, which nothing defines and nothing may use (the host has the tables in
+/// Rust, `host/libaom.rs`); and constants that are macros or enumerators outside `enums.h`.
 const PARSER_VARS: &[&str] = &[
     "warped_filter",
     "wedge_params_lookup",
@@ -532,7 +425,7 @@ const PARSER_VARS: &[&str] = &[
     "AV1_MEMORY_GUARD_.*",
 ];
 
-/// The structs of the entropy decoder that the Rust host reads or writes in place: the layout probe
+/// The structs of libaom's decoder that the Rust host reads or writes in place: the layout probe
 /// holds their bindings against the C compiler of the build.
 const PARSER_PROBED: &[&str] = &[
     "AV1Decoder",
@@ -575,7 +468,7 @@ const C_TABLES: &[&str] = &[
     "av1_sub_pel_filters_8sharp",
 ];
 
-/// Inline functions of the entropy decoder's headers that the Rust host modules have a port of, as
+/// Inline functions of libaom's headers that the Rust host modules have a port of, as
 /// functions of the C probe: the tests of the ports call them.
 const C_FUNCTION_PROBES: &str = r#"
 #include <string.h>

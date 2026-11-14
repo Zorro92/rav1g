@@ -66,8 +66,8 @@
 //!
 //! The bitstream is read by the parse pass of rav1d (docs/phase2-rav1d.md; `third_party/rav1d`, behind
 //! the sink of `rav1g-parse`). The entropy decoder that was there before it, the libaom-derived C of
-//! `libav1/av1`, is not in the decoder any more (step 6 of that document): `rav1g-sys` builds it only
-//! for `tools/rav1g-parse-check`, which holds the parser against it.
+//! `libav1/av1`, is not in the decoder any more (step 6 of that document), and its sources are not in
+//! the tree: the headers are, for the structs the host and the shaders share.
 
 mod color;
 mod decoder;

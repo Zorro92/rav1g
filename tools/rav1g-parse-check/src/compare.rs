@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-2-Clause
 
-//! Holds a frame as rav1d's parse pass and the sink left it against the same frame of the entropy
-//! decoder of libaom: every buffer of the two arenas, whole.
+//! Holds a frame as the run that is checked left it against the same frame of the reference (rav1d's
+//! parse pass and the sink on both sides, see `main.rs`): every buffer of the two arenas, whole.
 //!
 //! - the tiles' cursors (all of `av1_tile_data` but the addresses),
 //! - the mode info pool, record by record and field by field,
@@ -10,30 +10,14 @@
 //! - the block index list, the block maps and the wavefront grids of intra prediction,
 //! - the palette blocks, and the loop restoration units.
 //!
-//! A buffer is compared over its full size, so what one parser wrote and the other did not is a
-//! difference wherever it lies. The fields of a record that are left out are listed in [`IGNORED`], each
-//! with its reason.
+//! A buffer is compared over its full size, so what one run wrote and the other did not is a
+//! difference wherever it lies. No field of a record is left out.
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use crate::plain::{Arena, Buffer, COEF_PATTERN};
 use crate::sys::parser::{MB_MODE_INFO, av1_tile_data, tx_block_info_gpu};
-
-/// Fields of the mode info record that are not compared: nothing reads them behind the parser.
-///
-/// `num_proj_ref`: the number of samples the entropy decoder of libaom found for a local warp. It is the
-/// decoder's working value (it decides whether the motion mode can be a warp and feeds the fit of the
-/// model); the stages read the model (`wm_params`), not the count. rav1d has no such number: it keeps a
-/// mask of the neighbours it took samples from.
-pub const IGNORED: &[&str] = &["num_proj_ref"];
-
-/// The numbers of a local warp that libaom marked as not valid (`wm_params.invalid`): the fit of the
-/// model stopped somewhere, the numbers are what it had by then, and the block is predicted from its
-/// motion vector (`av1_mi_push_block` looks at the mark first). They are not compared for such a block;
-/// the mark is.
-const NOT_VALID_WARP: &[&str] =
-    &["wm_params.wmmat", "wm_params.alpha", "wm_params.beta", "wm_params.gamma", "wm_params.delta"];
 
 /// A field of the mode info record: its name, where it lies and how long it is.
 struct Field {
@@ -144,7 +128,7 @@ pub struct Report {
     pub coefs: u64,
     pub palettes: u64,
     pub lr_units: u64,
-    /// What the blocks that were compared are: how many of each kind (of libaom's records), so that
+    /// What the blocks that were compared are: how many of each kind (of the reference's records), so that
     /// "equal" says over what.
     pub coverage: BTreeMap<&'static str, u64>,
     /// The differences by kind (the name of a record's field, of a buffer), and how many of each.
@@ -214,7 +198,7 @@ fn describe(mi: &MB_MODE_INFO) -> String {
     )
 }
 
-/// Counts the kinds of blocks among the records of a frame of libaom.
+/// Counts the kinds of blocks among the records of a frame of the reference.
 fn coverage(report: &mut Report, c: &Arena) {
     const GLOBALMV: u8 = 15;
     const GLOBAL_GLOBALMV: u8 = 23;
@@ -270,11 +254,11 @@ fn compare_numbers<T: PartialEq + std::fmt::Debug>(
     c: &Buffer<T>,
     r: &Buffer<T>,
 ) {
-    // SAFETY: both parsers have finished the frame.
+    // SAFETY: both runs have finished the frame.
     let (c, r) = unsafe { (c.values(), r.values()) };
     if c.len() != r.len() {
         report.difference(kind, || {
-            format!("frame {frame}: {kind}: {} entries with libaom, {} with rav1d", c.len(), r.len())
+            format!("frame {frame}: {kind}: {} entries in the reference, {} checked", c.len(), r.len())
         });
         return;
     }
@@ -288,22 +272,22 @@ fn compare_numbers<T: PartialEq + std::fmt::Debug>(
     }
     for (index, (a, b)) in c.iter().zip(r).enumerate() {
         if a != b {
-            report.difference(kind, || format!("frame {frame}: {kind}[{index}]: libaom {a:?}, rav1d {b:?}"));
+            report.difference(kind, || format!("frame {frame}: {kind}[{index}]: reference {a:?}, checked {b:?}"));
         }
     }
 }
 
-/// Holds the frame of rav1d (`r`) against that of libaom (`c`).
+/// Holds the frame of the run that is checked (`r`) against that of the reference (`c`).
 pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
     report.frames += 1;
     if c.size != r.size {
-        report.difference("frame size", || format!("frame {number}: libaom {:?}, rav1d {:?}", c.size, r.size));
+        report.difference("frame size", || format!("frame {number}: reference {:?}, checked {:?}", c.size, r.size));
         return;
     }
     coverage(report, c);
     if c.gm_warp != r.gm_warp {
         report.difference("gm_warp", || {
-            format!("frame {number}: gm_warp: libaom {:?}, rav1d {:?}", c.gm_warp, r.gm_warp)
+            format!("frame {number}: gm_warp: reference {:?}, checked {:?}", c.gm_warp, r.gm_warp)
         });
     }
 
@@ -336,8 +320,8 @@ pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
         if !same {
             report.difference("tile data", || {
                 format!(
-                    "frame {number} tile {index}: libaom records {} transform blocks {} coefficients to {} index list {} \
-                     blocks {} warp {} iterations {}/{} (max {}/{}) inter {} sizes {:?}; rav1d records {} transform \
+                    "frame {number} tile {index}: reference records {} transform blocks {} coefficients to {} index list {} \
+                     blocks {} warp {} iterations {}/{} (max {}/{}) inter {} sizes {:?}; checked records {} transform \
                      blocks {} coefficients to {} index list {} blocks {} warp {} iterations {}/{} (max {}/{}) inter {} \
                      sizes {:?}",
                     tc.mi_count,
@@ -370,7 +354,7 @@ pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
     }
 
     // The mode info pool.
-    // SAFETY: both parsers have finished the frame, for all the buffers read below.
+    // SAFETY: both runs have finished the frame, for all the buffers read below.
     let (pool_c, pool_r) = unsafe { (c.mi_pool.bytes(), r.mi_pool.bytes()) };
     if pool_c != pool_r {
         let fields = record_fields();
@@ -379,21 +363,16 @@ pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
             if a == b {
                 continue;
             }
-            // SAFETY: a record of libaom's pool.
-            let not_valid_warp = unsafe { (*c.mi_pool.ptr().add(index)).wm_params.invalid != 0 };
             for field in &fields {
                 let range = field.offset..field.offset + field.size;
-                if a[range.clone()] == b[range.clone()]
-                    || IGNORED.contains(&field.name.as_str())
-                    || (not_valid_warp && NOT_VALID_WARP.contains(&field.name.as_str()))
-                {
+                if a[range.clone()] == b[range.clone()] {
                     continue;
                 }
                 report.difference(&format!("record.{}", field.name), || {
-                    // SAFETY: a record of the pool.
+                    // SAFETY: a record of each pool.
                     let (mc, mr) = unsafe { (&*c.mi_pool.ptr().add(index), &*r.mi_pool.ptr().add(index)) };
                     format!(
-                        "frame {number} record {index}: {}: libaom {}, rav1d {}\n      libaom: {}\n      rav1d:  {}",
+                        "frame {number} record {index}: {}: reference {}, checked {}\n      reference: {}\n      checked:   {}",
                         field.name,
                         hex(&a[range.clone()]),
                         hex(&b[range.clone()]),
@@ -422,7 +401,7 @@ pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
             if a != b {
                 report.difference("grid", || {
                     format!(
-                        "frame {number}: grid row {} col {}: record {a} with libaom, {b} with rav1d",
+                        "frame {number}: grid row {} col {}: record {a} in the reference, {b} checked",
                         unit / stride,
                         unit % stride
                     )
@@ -445,8 +424,8 @@ pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
                 if x != y {
                     report.difference(&format!("transform block.{name}"), || {
                         format!(
-                            "frame {number} transform block {index}: {name}: libaom {x:#x}, rav1d {y:#x} (libaom flags {:#x} \
-                             offset {} position {:#x} sorting {:#x}; rav1d flags {:#x} offset {} position {:#x} sorting {:#x})",
+                            "frame {number} transform block {index}: {name}: reference {x:#x}, checked {y:#x} (reference flags {:#x} \
+                             offset {} position {:#x} sorting {:#x}; checked flags {:#x} offset {} position {:#x} sorting {:#x})",
                             a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]
                         )
                     });
@@ -460,7 +439,7 @@ pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
         // SAFETY: as above.
         let (coef_c, coef_r) = unsafe { (c.coefs.values(), r.coefs.values()) };
         if coef_c != coef_r {
-            // The transform block of libaom a coefficient belongs to, for the message.
+            // The transform block of the reference a coefficient belongs to, for the message.
             // SAFETY: as above.
             let tx_c = unsafe { c.tx_blocks.values() };
             let owner = |at: usize| -> String {
@@ -471,7 +450,7 @@ pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
                         count != 0 && (block.input_offset as usize..block.input_offset as usize + count).contains(&at)
                     })
                     .map_or_else(
-                        || String::from("in no transform block of libaom"),
+                        || String::from("in no transform block of the reference"),
                         |(index, block)| {
                             format!(
                                 "coefficient {} of transform block {index} (flags {:#x}, position {:#x}, sorting {:#x})",
@@ -488,7 +467,7 @@ pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
                 if a != b {
                     report.difference("coefficient", || {
                         format!(
-                            "frame {number}: coefficient buffer [{at}]: libaom {}, rav1d {}; {}",
+                            "frame {number}: coefficient buffer [{at}]: reference {}, checked {}; {}",
                             show(*a),
                             show(*b),
                             owner(at)
@@ -508,7 +487,7 @@ pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
         // writes of the grid the one entry per transform block the shader reads. The lists above say that
         // every block has the same iteration; here every entry the edges' side wrote has to be the grid's.
         let (grid, edges) = if c.wave_edges { (r, c) } else { (c, r) };
-        // SAFETY: both parsers have finished the frame.
+        // SAFETY: both runs have finished the frame.
         let (grid, edges) = unsafe { (grid.iter_grid.values(), edges.iter_grid.values()) };
         for (index, (a, b)) in grid.iter().zip(edges).enumerate() {
             if *b != -1 && a != b {
@@ -525,7 +504,11 @@ pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
         report.palettes += pc.len() as u64;
         if pc.len() != pr.len() {
             report.difference("palette count", || {
-                format!("frame {number} tile {tile}: {} palette planes with libaom, {} with rav1d", pc.len(), pr.len())
+                format!(
+                    "frame {number} tile {tile}: {} palette planes in the reference, {} checked",
+                    pc.len(),
+                    pr.len()
+                )
             });
         }
         for (index, (a, b)) in pc.iter().zip(pr.iter()).enumerate() {
@@ -544,8 +527,8 @@ pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
             report.difference(kind, || {
                 let first = a.map.iter().zip(&b.map).position(|(x, y)| x != y);
                 format!(
-                    "frame {number} tile {tile} palette {index}: {kind}: libaom row {} col {} plane {} {}x{} colours {:?}; \
-                     rav1d row {} col {} plane {} {}x{} colours {:?}; first map difference at {first:?}",
+                    "frame {number} tile {tile} palette {index}: {kind}: reference row {} col {} plane {} {}x{} colours {:?}; \
+                     checked row {} col {} plane {} {}x{} colours {:?}; first map difference at {first:?}",
                     a.mi_row, a.mi_col, a.plane, a.width, a.height, a.colors, b.mi_row, b.mi_col, b.plane, b.width, b.height,
                     b.colors
                 )
@@ -564,7 +547,7 @@ pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
             report.difference("loop restoration units", || {
                 let first = lc.iter().zip(&lr).find(|(a, b)| a != b);
                 format!(
-                    "frame {number}: loop restoration: {} units with libaom, {} with rav1d; first difference {first:?}",
+                    "frame {number}: loop restoration: {} units in the reference, {} checked; first difference {first:?}",
                     lc.len(),
                     lr.len()
                 )

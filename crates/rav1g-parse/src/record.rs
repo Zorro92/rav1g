@@ -9,11 +9,12 @@
 //! The mode info record of a block (`MB_MODE_INFO` of `libav1/av1/common/blockd.h`, which the shaders
 //! read as `dx/shaders/mode_info.h`) from a block of rav1d's parse pass.
 //!
-//! The entropy decoder of libaom fills the record while it reads the block (`av1/decoder/decodemv.c`,
+//! The entropy decoder of libaom filled the record while it read the block (`av1/decoder/decodemv.c`,
 //! `decodeframe.c`). The same bitstream gives rav1d the same syntax elements, in its own form
 //! (`Av1Block` of `rav1d::levels`); this file turns one into the other. Where libaom derives a field in a
-//! way of its own, the function that does it here says so. The check is `tools/rav1g-parse-check`: both
-//! parsers on the conformance streams, every record compared.
+//! way of its own, the function that does it here says so. The records were held against libaom's on
+//! the conformance streams while its sources were in the tree; `tools/rav1g-parse-check` now holds
+//! them equal for every way of running the parser.
 
 use rav1d::include::dav1d::headers::{Rav1dFrameHeader, Rav1dTxfmMode, Rav1dWarpedMotionType};
 use rav1d::levels::{Av1BlockInter, Av1BlockIntra, Av1BlockIntraInter, CompInterType, InterIntraType, MotionMode};

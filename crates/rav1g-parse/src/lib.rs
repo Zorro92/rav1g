@@ -17,8 +17,8 @@
 //! - [`digest`] folds what the parser reads from a stream into one number, the same on every platform:
 //!   what a build of the library has of this parser until the decoder runs it.
 //!
-//! Nothing here needs a GPU or Windows. `tools/rav1g-parse-check` runs this and the entropy decoder of
-//! libaom on the same streams and holds every buffer of one against the other's.
+//! Nothing here needs a GPU or Windows. `tools/rav1g-parse-check` runs this twice on the same streams,
+//! once as asked and once with one thread, and holds every buffer of one against the other's.
 
 pub mod digest;
 pub mod options;

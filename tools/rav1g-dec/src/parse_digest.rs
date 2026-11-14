@@ -14,8 +14,7 @@
 //! ```
 //!
 //! The line of a stream is the same on every platform and for any number of threads (`-t`);
-//! `rav1g-parse-check -digest` prints it on Linux, where the parser is also held against the entropy
-//! decoder of libaom, and CI compares the lines.
+//! `rav1g-parse-check -digest` prints it on Linux, and CI compares the lines.
 
 use rav1g::capi;
 

@@ -4,15 +4,24 @@
 //! this program by path). It names the lists by the constants of the host's `types.rs`, a file that does
 //! not build without D3D12; this script reads the constants from it, so that the program has the host's
 //! values and not a copy of them.
+//!
+//! The host's `libaom.rs` is compiled into this program by path as well, and includes the tables its
+//! own build script writes from the C sources of `libav1` (`crates/rav1g/build.rs`). That script is a
+//! module here and writes them for this program too.
 
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 
+#[path = "../../crates/rav1g/build.rs"]
+mod host_tables;
+
 fn main() {
+    host_tables::main();
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let types = manifest.join("../../crates/rav1g/src/host/types.rs");
     println!("cargo:rerun-if-changed={}", types.display());
+    println!("cargo:rerun-if-changed={}", manifest.join("../../crates/rav1g/build.rs").display());
     let text = fs::read_to_string(&types).unwrap_or_else(|error| panic!("cannot read {}: {error}", types.display()));
     let mut constants = String::from("// Written by build.rs from crates/rav1g/src/host/types.rs.\n");
     let mut count = 0;

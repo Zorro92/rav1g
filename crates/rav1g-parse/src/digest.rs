@@ -17,7 +17,8 @@
 //! It is what a build of the library has of the parser of phase 2 until the decoder itself runs it
 //! (docs/phase2-rav1d.md): `rav1g-dec -parsedigest` prints the number of a stream on Windows,
 //! `rav1g-parse-check -digest` on Linux, and CI holds the two against each other. The check of the
-//! values themselves is `tools/rav1g-parse-check`, against the entropy decoder of libaom.
+//! values themselves is the decoder's output (the md5 of every stream); `tools/rav1g-parse-check` holds
+//! them equal for every number of threads and every switch.
 
 use std::cell::UnsafeCell;
 use std::sync::{Arc, Mutex};

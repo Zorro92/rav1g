@@ -6,14 +6,13 @@
 // License 1.0 was not distributed with this source code in the PATENTS file, you can obtain it at
 // www.aomedia.org/license/patent.
 
-//! The bindings of the decoder to the headers of `libav1`, and what `build.rs` builds of its C: for the
-//! decoder (Windows) the shader table only; elsewhere the entropy decoder of libaom, for
-//! `tools/rav1g-parse-check`.
+//! The bindings of the decoder to the headers of `libav1`, and what `build.rs` builds of C: for the
+//! decoder (Windows) the shader table; everywhere the layout probe the tests read.
 //!
 //! Everything at the top level is the C interface as its headers have it (`libav1/aom/aom_decoder.h`,
-//! `aom_codec.h`, `aomdx.h`, `libav1/dx/av1_perf.h`) plus the `rav1g_codec_*` functions of `helpers.c`,
-//! which stand in for the macros of that interface. The decoder uses the types and the constants; the
-//! functions exist only where the entropy decoder is built. The `rav1g` crate is the decoder.
+//! `aom_codec.h`, `aomdx.h`, `libav1/dx/av1_perf.h`). The decoder uses the types and the constants; the
+//! functions the headers declare are bound but defined nowhere (no C of libaom is compiled), so nothing
+//! may call them. The `rav1g` crate is the decoder.
 
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
 #![allow(clippy::all)]
@@ -24,7 +23,7 @@ include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 /// text ("MSVC, /GL, static runtime").
 pub const C_BUILD: &str = env!("RAV1G_C_BUILD");
 
-/// The layouts shared with the GPU and between the entropy decoder and the host
+/// The layouts shared with the GPU and between the parser's sink and the host
 /// (`libav1/av1/common/blockd.h`, `mv.h`): the mode info record that the shaders read as `MB_MODE_INFO`
 /// of `libav1/dx/shaders/mode_info.h`, the block records of the prediction and transform stages, and the
 /// tile's cursors into the buffers of a pipeline slot. The tests of this crate hold them against the C
@@ -33,9 +32,10 @@ pub mod shared {
     include!(concat!(env!("OUT_DIR"), "/shared.rs"));
 }
 
-/// The entropy decoder as the Rust host of the `rav1g` crate sees it (`parser.h`): the structs the host
+/// The structs of libaom's decoder as the Rust host of the `rav1g` crate uses them (`parser.h`): the
+/// structs the host
 /// reads and fills in place (`AV1Decoder`, `AV1_COMMON`, `MACROBLOCKD`, the state of a tile thread, the
-/// frame buffer descriptions), the enums and limits of the bitstream, and the tables the host reads. The
+/// frame buffer descriptions), and the enums and limits of the bitstream. The
 /// tests of this crate hold the structs against the C compiler of the build.
 pub mod parser {
     include!(concat!(env!("OUT_DIR"), "/parser.rs"));

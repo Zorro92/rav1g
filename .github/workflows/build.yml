@@ -1019,8 +1019,7 @@ jobs:
 
       # The parser of phase 2 in this build (docs/phase2-rav1d.md): rav1d's parse pass on every stream,
       # with four threads, and what it read folded into a number per stream. The parse-digest job holds
-      # the lines against those of the Linux build, whose parser is checked against the entropy decoder
-      # of libaom value by value (parse-check).
+      # the lines against those of the Linux build (parse-check).
       - name: Parse digest of every stream, rav1d's parse pass in rav1g-dec (-parsedigest)
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -2021,10 +2020,9 @@ jobs:
   # warp_decoder of branch cpp at CPP_REFERENCE_COMMIT must write the same md5 for every output frame of
   # every stream of the set and the same buffers behind every GPU stage of the dumped frames. The C++
   # decoder reads a stream with the entropy decoder of libaom, the decoder of this commit with the parse
-  # pass of rav1d: this is where the two parsers are still held against each other on a GPU (the mode
+  # pass of rav1d: this is where the two parsers are still held against each other (the mode
   # info records are listed, not held equal: libaom leaves in a field a block's kind does not have what
-  # an earlier frame had there, rav1d's sink writes zero; stage_dump.py compare --two-parsers), next to
-  # the parse-check job, which holds them against each other value by value without one. The MEMORY
+  # an earlier frame had there, rav1d's sink writes zero; stage_dump.py compare --two-parsers). The MEMORY
   # lines are no longer the same text: the C++ decoder has a share of the mode info and coefficient
   # buffers for each slot, this one has pools (docs/phase2-rav1d.md, step 5); what is held of them is
   # in the last step. Two implementations of the host can only be held against each other while they run the
@@ -2560,12 +2558,15 @@ jobs:
           path: out/rav1d/
           if-no-files-found: warn
 
-  # Phase 2, step 2 (docs/phase2-rav1d.md): the parser of phase 2 against the entropy decoder of libaom.
-  # tools/rav1g-parse-check runs both on every stream of the conformance set, each into plain memory in
-  # the layouts the GPU stages read, and holds every frame of one against the other's: the mode info
-  # records field by field, the grid, the transform block records, the coefficients, the block lists (which
-  # the D3D12 host's own function counts for both), the palette blocks and the loop restoration units. No
-  # GPU. The same program prints the parse digest of every stream for the parse-digest job, and times the
+  # Phase 2, step 2 (docs/phase2-rav1d.md): the parser of phase 2 (rav1d's parse pass and the sink)
+  # against itself. tools/rav1g-parse-check parses every stream of the conformance set twice, each into
+  # plain memory in the layouts the GPU stages read: once with the threads, frames in parse and switches
+  # of the step, once with one thread, one frame in parse and the default switches (the reference). It
+  # holds every frame of one against the other's: the mode info records field by field, the grid, the
+  # transform block records, the coefficients, the block lists (which the D3D12 host's own function
+  # counts for both), the palette blocks and the loop restoration units. So no way of running the parser
+  # changes what it writes; that it reads the streams correctly is the md5 of the decodes (rust-conformance)
+  # and rust-equal. No C of libaom is compiled. No GPU. The same program prints the parse digest of every stream for the parse-digest job, and times the
   # sink on the 4K stream of the set.
   parse-check:
     needs: conformance-streams
@@ -2584,7 +2585,7 @@ jobs:
           enableCrossOsArchive: true
           fail-on-cache-miss: true
 
-      # libclang for bindgen (the bindings of the entropy decoder), nasm for rav1d's assembly. One version
+      # libclang for bindgen (the bindings of the structs of libav1's headers), nasm for rav1d's assembly. One version
       # of LLVM, as in the rust-cross job: bindgen has to load the libclang whose headers clang gives it
       # (with the libclang of another version the intrinsics headers do not parse).
       - name: Rust toolchain, libclang and nasm
@@ -2615,7 +2616,9 @@ jobs:
       - name: Build rav1g-parse-check
         run: cargo build --release --locked -p rav1g-parse-check
 
-      - name: Every frame of every stream, rav1d's parse pass and the sink against the entropy decoder of libaom
+      # Without a flag both runs are the same parse: it gives the counts and the coverage of the set, and
+      # says that two parses of a stream write the same.
+      - name: Every frame of every stream, rav1d's parse pass and the sink, parsed twice with one thread
         run: |
           set -euo pipefail
           mkdir -p out/parse-check
@@ -2623,7 +2626,7 @@ jobs:
           target/release/rav1g-parse-check -root conformance-streams -manifest conformance-streams/manifest.txt \
             > out/parse-check/check.txt || status=$?
           {
-            echo '## Parse check: rav1d and the sink against the entropy decoder of libaom'
+            echo '## Parse check: rav1d and the sink, two parses with one thread'
             echo
             echo '```'
             grep '^PARSE SUMMARY\|^PARSE COVERAGE' out/parse-check/check.txt || true
@@ -2633,8 +2636,9 @@ jobs:
           grep '^PARSE SUMMARY\|^PARSE COVERAGE' out/parse-check/check.txt || true
           exit "$status"
 
-      # The same with four threads in rav1d: the tiles of a frame are then parsed side by side.
-      - name: The same with four parser threads
+      # Four threads in rav1d against the reference with one: the tiles of a frame are then parsed side
+      # by side.
+      - name: Four parser threads against one
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
@@ -2656,7 +2660,7 @@ jobs:
       # above have the two that are on by default (nolfmask, tilethread) and the block lists counted
       # superblock by superblock; the buffers are the same with the two off and the lists counted at the
       # end of a tile, with one thread and with four.
-      - name: The same with the other side of every switch of the parser
+      - name: The other side of every switch of the parser against the default switches
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
@@ -2679,9 +2683,9 @@ jobs:
           exit "$status"
 
       # The wavefront of intra prediction (docs/phase2-rav1d.md, "No clears by the CPU"): the runs above
-      # keep it at the edges of the tiles, as the decoder does without a flag. Here the entropy decoder of
-      # libaom keeps it in the wavefront grid, which is cleared for every frame, and rav1d at the edges
-      # (-wave check): the block lists are equal only if every transform block of every stream gets the
+      # keep it at the edges of the tiles, as the decoder does without a flag. Here the reference
+      # keeps it in the wavefront grid, which is cleared for every frame, and the run that is checked at
+      # the edges (-wave check): the block lists are equal only if every transform block of every stream gets the
       # same iteration either way, and every entry of the grid that the edges' side writes (the ones the
       # shader reads) has to be the grid's. The edges start as a pattern no iteration has, so an entry
       # that is read without having been written in its frame shows in the lists. With one thread and
@@ -2712,10 +2716,10 @@ jobs:
       # Frames in parallel (docs/phase2-rav1d.md, step 4): rav1d with two, three and four frames in parse
       # at once, on as many threads and on more. The frames of several temporal units are then parsed
       # side by side, each into buffers of its own, and a frame may end before one that began before it.
-      # Every buffer of every frame has to be what the entropy decoder of libaom wrote, as with one frame
-      # in parse; the order of the threads is what differs from run to run, so each combination runs
+      # Every buffer of every frame has to be what the reference wrote with one frame in parse and one
+      # thread; the order of the threads is what differs from run to run, so each combination runs
       # twice.
-      - name: The same with two, three and four frames in parse
+      - name: Two, three and four frames in parse against one
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
@@ -2825,7 +2829,7 @@ jobs:
 
   # The parser of phase 2 reads the same from every stream in every build: the parse digests of the MSVC
   # build and of the Linux cross build (rav1g-dec -parsedigest on Windows, four threads) against those of
-  # the Linux build of the parse-check job (one thread), whose values are checked there.
+  # the Linux build of the parse-check job (one thread).
   parse-digest:
     needs: [parse-check, rust-conformance, rust-cross-run]
     runs-on: ubuntu-26.04

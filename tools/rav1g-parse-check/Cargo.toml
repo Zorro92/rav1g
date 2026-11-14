@@ -1,6 +1,6 @@
 [package]
 name = "rav1g-parse-check"
-description = "Holds the parser of phase 2 (rav1d's parse pass behind the sink of rav1g-parse) against the entropy decoder of libaom: every mode info record, the grid, the block lists, the transform block records and the coefficients of every frame. No GPU; Linux."
+description = "Holds the parser of phase 2 (rav1d's parse pass behind the sink of rav1g-parse) against itself: the parse with the threads, frames in parse and switches asked for against the parse with one thread and the default switches, every mode info record, the grid, the block lists, the transform block records and the coefficients of every frame. Also the parse digest and the timing of the sink. No GPU; Linux."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

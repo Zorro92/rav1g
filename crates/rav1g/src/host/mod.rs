@@ -14,8 +14,8 @@
 //! `rav1d_frames` for more than one frame in parse, and calls the functions of `frame`, `completion` and
 //! `blocks` that set a frame up, hand a tile its memory, record the frame and submit it. Many of them
 //! still have the names of the entry points the entropy decoder of libaom called while it was the
-//! parser (`dx/av1_core.h`); that entropy decoder is not part of the decoder any more, and
-//! `tools/rav1g-parse-check` is the only program that implements that header. The application's entry
+//! parser (`dx/av1_core.h`); that entropy decoder is not part of the decoder any more, and its
+//! sources are not in the tree. The application's entry
 //! points (`dx/av1_perf.h`, and the creation, decode and release that `crate::decoder` calls) are here
 //! as well. The structs of the host are Rust's own (`types`); the structs of the frame header and of
 //! the blocks, which the stages read and the sink writes, are those of libav1's headers, bound in

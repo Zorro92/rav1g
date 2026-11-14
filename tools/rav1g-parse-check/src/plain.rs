@@ -2,7 +2,7 @@
 
 //! The buffers of a frame in plain memory, in the layout the D3D12 host gives them in a pipeline slot.
 //!
-//! Each of the two parsers has a [`Side`]. For every frame the side gets an [`Arena`]: the mode info pool,
+//! Every frame of a parser gets an [`Arena`]: the mode info pool,
 //! the grid, the coefficients, the transform block records, the block index list, the block maps, the
 //! wavefront grids of intra prediction and the tiles' cursors. A tile's parts of them are where
 //! `av1_setup_macroblockd` of the host (`crates/rav1g/src/host/frame.rs`) puts them, with two choices that
@@ -11,17 +11,17 @@
 //! frame with very small tiles).
 //!
 //! All of an arena starts as zero bytes, except the coefficients (a pattern, so that a coefficient one
-//! parser writes and the other leaves out is seen), the wavefront grids (-1, as the host clears them
+//! run writes and the other leaves out is seen), the wavefront grids (-1, as the host clears them
 //! when it keeps the wavefront in them) and the edges of the wavefront (a pattern no iteration has: the
 //! host does not clear them, and an entry that is read without having been written in the frame shows in
-//! the lists). The parsed frame is the arena: the two sides' arenas of a frame are compared whole.
+//! the lists). The parsed frame is the arena: the arenas the two runs have of a frame are compared whole.
 
 use std::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
 use std::ffi::c_int;
 use std::sync::Mutex;
 
 use crate::host::blocks::WaveEdges;
-use crate::host::types::{Av1Core, av1_frame_thread_data};
+use crate::host::types::av1_frame_thread_data;
 use crate::sys::parser::{MB_MODE_INFO, av1_tile_data, tx_block_info_gpu};
 
 /// Coefficients a 4x4 unit of the frame can have: 16 of luma and two times 4 of chroma
@@ -92,7 +92,7 @@ unsafe impl<T> Send for Buffer<T> {}
 // SAFETY: as above.
 unsafe impl<T> Sync for Buffer<T> {}
 
-/// The size of a frame as both parsers know it.
+/// The size of a frame.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct FrameSize {
     /// The frame in 4x4 units.
@@ -380,78 +380,6 @@ impl Arena {
                 t.wave_edges = std::ptr::from_mut(edges).cast();
             }
             (t_ptr, self.mi_pool.ptr().add(mi_offset_base as usize), mi_count_max)
-        }
-    }
-}
-
-/// One of the two parsers: the decoder of the entropy decoder of libaom, the frame in parse and the
-/// frames that are parsed.
-pub struct Side {
-    /// What `gpu_decoder` of an `AV1Decoder` points to.
-    pub core: Av1Core,
-    /// The frame in parse.
-    pub arena: Option<Arena>,
-    /// The parsed frames in decode order, until they are compared.
-    pub frames: Vec<Arena>,
-    /// Frames whose parse ended with an error.
-    pub failed: usize,
-    /// The timing run: the frames are not kept; the arena of one is the next one's.
-    pub recycle: bool,
-    spare: Option<Arena>,
-    /// Frames parsed in the timing run.
-    pub recycled: usize,
-    /// What only the host of the entropy decoder of libaom keeps.
-    pub c: crate::chost::CState,
-    /// The frames of this side keep the wavefront in the edges of their tiles, not in the grids.
-    pub wave_edges: bool,
-}
-
-impl Side {
-    pub fn new(wave_edges: bool) -> Box<Self> {
-        let mut side = Box::new(Self {
-            core: Av1Core { side: std::ptr::null_mut() },
-            arena: None,
-            frames: Vec::new(),
-            failed: 0,
-            recycle: false,
-            spare: None,
-            recycled: 0,
-            c: Default::default(),
-            wave_edges,
-        });
-        side.core.side = &raw mut *side;
-        side
-    }
-
-    /// A frame's parse starts: its arena.
-    pub fn begin_frame(&mut self, size: FrameSize, gm_warp: [c_int; 8]) -> &Arena {
-        let arena = match self.spare.take() {
-            Some(mut arena) if arena.size == size => {
-                arena.reset(gm_warp);
-                arena
-            }
-            _ => {
-                let mut arena = Arena::new(size, self.wave_edges);
-                arena.set_gm_warp(gm_warp);
-                arena
-            }
-        };
-        self.arena.insert(arena)
-    }
-
-    /// The frame's parse has ended.
-    pub fn end_frame(&mut self, ok: bool) {
-        if let Some(mut arena) = self.arena.take() {
-            if self.recycle {
-                self.recycled += usize::from(ok);
-                self.spare = Some(arena);
-            } else if ok {
-                arena.ok = true;
-                self.frames.push(arena);
-            } else {
-                // A frame that failed is not a parsed frame: its buffers are dropped.
-                self.failed += 1;
-            }
         }
     }
 }

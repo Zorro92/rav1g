@@ -6,7 +6,7 @@
 //! to a scratch block), and with the sink of `rav1g-parse` writing the buffers of the GPU stages into
 //! plain memory. The difference is the sink: the mode info records, the grid, the transform block
 //! records, the coefficients written to their buffer, and the block lists (`av1_mi_push_block`, which
-//! the tile threads of the entropy decoder of libaom run today as well and which is timed by itself).
+//! is timed by itself).
 //!
 //! The second run uses one arena for all frames (cleared between frames, outside the time measured), so
 //! the parser writes memory the process already has, as it would write mapped buffers.

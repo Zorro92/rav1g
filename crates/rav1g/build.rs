@@ -13,8 +13,11 @@
 //!
 //! The numbers are read from the C sources of `libav1` where they are defined, as text: the decoder no
 //! longer compiles those files (docs/phase2-rav1d.md, step 6), and a copy typed into Rust would be a
-//! second place for 12,000 numbers. `tools/rav1g-parse-check` still compiles the C, so the same
-//! initialisers are the ones the reference parser runs with.
+//! second place for 12,000 numbers. The files stay in the tree for this and for the shader checks of
+//! `testing`, which compile a few of them.
+//!
+//! `tools/rav1g-parse-check` compiles `src/host/libaom.rs` by path; its build script has this file as a
+//! module and calls [`main`], which is public for that.
 //!
 //! What is read is an initialiser: the braces behind `name[...] = `, comments and nesting dropped, as a
 //! flat list of numbers and names. A preprocessor conditional inside one is taken at its first branch,
@@ -226,7 +229,7 @@ fn write_table(out: &mut String, rust_name: &str, kind: &str, values: &[i64], in
     out.push_str("];\n");
 }
 
-fn main() {
+pub fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let common = manifest.parent().and_then(Path::parent).expect("the workspace root").join("libav1/av1/common");

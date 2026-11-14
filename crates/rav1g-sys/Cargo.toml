@@ -1,6 +1,6 @@
 [package]
 name = "rav1g-sys"
-description = "The bindings of rav1g to the structs of libav1's headers, and its shader table; on Linux also the entropy decoder of libaom, for the tool that holds the parser against it"
+description = "The bindings of rav1g to the structs of libav1's headers, and its shader table"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
