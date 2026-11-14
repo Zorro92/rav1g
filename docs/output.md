@@ -264,6 +264,35 @@ How to read it:
   are the comparison. If it does, the staged shader can copy whole words where the frame has no
   padding (a 10-bit luma row is its words shifted by six), which this version does not do.
 
+**On the console** (package 0.2.161.0, the base 1 GiB, slow state, the owner's app not running; the
+timing lines of [test-player.md](test-player.md#console-the-task-lines-1), 300 frames, no film grain
+in either clip; the means of a frame in ms):
+
+| Clip | Images | Path | `copy_plane` | `output_copy` | Together | GPU busy | fps |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `j4k40` (3840x2160 10-bit) | planes | | 0.65 | 0.97 | 1.62 | 18.86 | 45.6 |
+| | `-output p010` | direct | 1.27 | 0.02 | **1.29** | 18.56 | 46.1 |
+| | `-output p010-copy` | staged | 0.79 | 1.36 | 2.16 | 19.42 | 44.9 |
+| | `-interop` | direct | 1.26 | 0.02 | 1.29 | 18.55 | 45.5 |
+| `d2` (3840x2160 10-bit) | planes | | 0.65 | 0.98 | 1.62 | 10.36 | 48.8 |
+| | `-output p010` | direct | 1.26 | 0.02 | **1.29** | 10.04 | 48.9 |
+| | `-output p010-copy` | staged | 0.78 | 1.37 | 2.15 | 10.89 | 48.5 |
+| | `-interop` | direct | 1.26 | 0.02 | 1.28 | 10.04 | 49.2 |
+
+- WARP's slowdown does not carry over: on the console's GPU the direct path costs 0.33 ms a 4K frame
+  **less** than the planes kind (1.29 against 1.62), and that is what a D3D11 texture with
+  `BIND_UNORDERED_ACCESS` gets (`-interop`). The staged path costs 0.5 ms more than the planes kind.
+- The fps are the same in every kind: at 4K the parse sets the pace, not the GPU.
+- The word-wise staged copy is not needed for the media app, which can create its textures with
+  `BIND_UNORDERED_ACCESS`.
+
+Console checks of the same package: the md5 set of 15 streams with `-output p010` and with
+`-output p010-copy`, one launch each: 30 of 30. `-interop` on `d2` (300 frames) and `j4k40` (the 300
+frames of its reference): `INTEROP is OK` and `MD5 is OK` on both; the D3D11 device opened the
+decoder's shared fence, created the P010 textures with `D3D11_RESOURCE_MISC_SHARED_NTHANDLE | SHARED`
+and `UNORDERED_ACCESS`, D3D12 opened them as writable, and every frame was waited for on the shared
+fence and read from the D3D11 texture. So the interop works in a UWP app on the console.
+
 ## Checks
 
 - `rav1g-dec -output p010` (`nv12` is the same word) gives the decoder NV12 and P010 textures that
