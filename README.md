@@ -180,9 +180,11 @@ runs in a console app of 1 GiB at 45 to 49 frames per second on the two heavy 4K
 with the C parser). In its last step the entropy decoder of libaom left the decoder: the library
 compiles no C of `libav1` any more (the eight set-up functions and the tables the host still needed of
 libaom's common code are Rust now), `-parser c`, `Settings::parser` and `RAV1G_PARSER_*` are gone, and
-the C parser lives on in two places only, both as a reference: `tools/rav1g-parse-check`, which holds
-rav1d's parse against it value by value on Linux in CI, and the C++ decoder of branch `cpp`, which CI
-holds every frame and the stage dumps against. Behind it, the semi-planar output
+the C parser lives on in one place only, as a reference: the C++ decoder of branch `cpp`, which CI
+holds every frame and the stage dumps against. Its sources are no longer on `main`: of libaom's C the
+tree keeps the headers and the 17 files the shader checks compile or the build reads tables from.
+`tools/rav1g-parse-check` holds rav1d's parse with any threads, frames in parse and switches against
+its parse with one thread, value by value, on Linux in CI. Behind it, the semi-planar output
 ([docs/output.md](docs/output.md)): the output pass can write a frame into one NV12 or P010 texture of
 the application, a D3D11 texture opened in D3D12 among them, with one output fence a decoder that
 D3D11 can wait on. Next:

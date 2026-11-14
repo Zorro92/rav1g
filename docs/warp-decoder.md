@@ -58,9 +58,8 @@ check, `-poisonmi`, `-poisonbuf`, the set with `-interfast` and with `-gpuclear`
 
 ## What it shares with the test player
 
-- **The decoder**: the Rust library of the workspace (`crates/rav1g`) with the C of the parser and
-  entropy decoder (`crates/rav1g-sys`: the files of `c_sources.txt` at `/O1 /Ot`, the marked ones at
-  `/O2`, asserts compiled in, link time optimisation), built from the same shader headers as the
+- **The decoder**: the Rust library of the workspace (`crates/rav1g`, its parser rav1d's parse pass;
+  of C only the shader table of `crates/rav1g-sys`), built from the same shader headers as the
   libraries of the player's packages.
 - **The decoder configuration** of `AV1Decoder::DecodeOne` in
   `testing/player_common/decoder.cpp`: the first key frame is looked for with
@@ -428,8 +427,9 @@ are gone**, and the table below is what a push was before:
   the program of the Linux build.
 - `colour` holds two runs (the Rust interface, `rav1g.h`), not three.
 - `parser-timing` and its input are gone, with `parser_timing.py`.
-- `parse-check` is unchanged, and is where the entropy decoder of libaom still runs: on Linux, as
-  the reference rav1d's parse is held against value by value.
+- `parse-check` was unchanged by this, and was where the entropy decoder of libaom still ran. Since
+  2026-11-14 its reference is rav1d's own parse with one thread (docs/phase2-rav1d.md, "The libaom
+  sources leave `main`").
 
 Until 2026-11-13 one job, `rust`, built the program and ran every check with it, one after the
 other: 50.5 minutes of a push that took 51.8 (run 43517057205), 17.4 of them the paired timing of
@@ -515,7 +515,7 @@ the longest job `rust-cross-run` with 13.3); the artifact `rav1g-dec-clears-<run
 Elsewhere: `rust-switches` decodes the whole set with `-syncclear`, as before; `rust-cross-run`
 decodes the whole set with `-gpuclear` with the program of the Linux
 build; the player smoke test has a task with each of the three flags and reads the player's
-`Clears:` lines; `parse-check` runs `rav1g-parse-check -wave check` (the grid for one parser, the
+`Clears:` lines; `parse-check` runs `rav1g-parse-check -wave check` (the grid for one run, the
 edges for the other: the block lists have to be equal) with one thread and with four, and `-wave
 grid` once.
 

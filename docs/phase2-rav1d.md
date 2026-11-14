@@ -611,7 +611,8 @@ decoder is the decoder it was.
   records, grid, transform block records and coefficients into memory a host gives it, and counts the
   block lists with the host's `av1_mi_push_block` at the end of a tile), `digest` (what the parser reads
   from a stream as one number).
-- `tools/rav1g-parse-check`: the oracle of step 2, below. Linux only.
+- `tools/rav1g-parse-check`: the oracle of step 2, below. Linux only. (Since 2026-11-14 its reference is
+  rav1d's own parse with one thread, not libaom: see "The libaom sources leave `main`" at the end.)
 - `testing/rav1d_md5`: upstream rav1d, unchanged, as a decoder on the conformance streams.
 - The library has rav1d linked: `rav1g_parse_digest_*` in `rav1g.h`, `rav1g-dec -parsedigest`.
 - `crates/rav1g-sys` builds on Linux as the entropy decoder alone (no shaders, no D3D12 host), which
@@ -639,7 +640,8 @@ decoder is the decoder it was.
   and dav1d's through ffmpeg for the others). CI job `rav1d`, on a Linux runner: 252 of 252 streams,
   1,045 frames. The same job runs `upstream_diff.sh`.
 
-**Step 2, the oracle.** `rav1g-parse-check` runs both parsers on a stream, temporal unit by temporal
+**Step 2, the oracle.** (As it was until 2026-11-14, with the entropy decoder of libaom as the
+reference.) `rav1g-parse-check` runs both parsers on a stream, temporal unit by temporal
 unit, each into plain memory laid out as a pipeline slot of the D3D12 host lays it out
 (`av1_setup_macroblockd`): the entropy decoder of libaom with a host that has no GPU (the functions of
 `dx/av1_core.h`, about 20), rav1d with the sink. The block lists of both are counted by the host's own
@@ -1244,7 +1246,7 @@ frames per second, the mean of two runs:
 | Rust | `Settings::parser`: `Parser::Rav1d` (default) or `Parser::Libaom` | `Settings::parser_options`: `ParserOptions::default()` has `no_lf_masks` and `tile_keeps_thread` on; `ParserOptions::NONE` has neither |
 | C (`rav1g.h`) | `Rav1gSettings::parser`: `RAV1G_PARSER_RAV1D` (what `rav1g_settings_default` writes, and what every value but `RAV1G_PARSER_LIBAOM` selects) or `RAV1G_PARSER_LIBAOM` | `Rav1gSettings::parser_options`: `RAV1G_PARSER_OPTIONS_DEFAULT` (what `rav1g_settings_default` writes: `_NO_LF_MASKS` and `_TILE_KEEPS_THREAD`); 0 for neither |
 | `rav1g-dec`, test player | no flag or `-parser rav1d`; `-parser c` for the entropy decoder of libaom | no flag: `nolfmask,tilethread`; `-parseopt` says otherwise, per task ([test-player.md](test-player.md#switches-of-the-parser--parseopt)) |
-| `rav1g-parse-check` (the oracle) | both, always | no flag: `nolfmask,tilethread`; `-parseopt` |
+| `rav1g-parse-check` (the oracle) | both, always (until 2026-11-14; rav1d only since) | no flag: `nolfmask,tilethread`; `-parseopt` |
 
 How a default switch is turned off, for an A/B on the device: a `-parseopt` list that names
 `nolfmask`, `tilethread`, `none` or `default` replaces the default of those two, so the parse is done
@@ -2797,3 +2799,34 @@ Not in the repository; five small changes to rav1d at the pinned commit, enough 
 
 The schedule of [the CDF chain](#what-the-streams-allow-the-cdf-chain) is a script over those lines and
 the frame sizes of the IVF file.
+
+### The libaom sources leave `main`
+
+2026-11-14, behind step 6. `main` compiles no C of libaom's decoder any more, in any build.
+
+- **`tools/rav1g-parse-check` has rav1d on both sides.** The reference is rav1d's parse pass and the
+  sink with one thread, one frame in parse, the default switches; the run that is checked has the
+  `-threads`, `-frames`, `-parseopt` and `-wave` of the command line. The comparison is the same
+  code, over every buffer of every frame, and now without exceptions: `num_proj_ref` and the numbers
+  of a local warp that is not valid were left out against libaom and are compared. So the tool says
+  that the threads, the frames in parse, the switches and the place of the wavefront do not change
+  what the parser writes, and shows the first field that differs when they do. Without a flag the
+  two runs are the same parse twice. The host of libaom's entropy decoder (`chost.rs`) is deleted;
+  the block lists are counted with the decoder's own Rust `has_top_right` and `has_bottom_left`
+  (`crates/rav1g/src/host/libaom.rs`, compiled by path, its tables written by the host's build
+  script).
+- **What no longer holds the parser against libaom on `main`:** nothing does value by value. That
+  the parser reads a stream correctly is held by the md5 of every frame of the conformance set, by
+  `rust-equal` (the C++ decoder of branch `cpp` at its pin, whose parser is the entropy decoder of
+  libaom: every frame and the stage dumps) and by the parse digests of the three builds. The old
+  tool is in the history (commit `099dd5e` and before).
+- **`rav1g-sys`** builds no C of `libav1` for any target: `c_sources.txt` and `helpers.c` are
+  deleted. For Windows it compiles the shader table as before; everywhere it writes the bindings
+  from the headers and the layout probe.
+- **The tree.** 57 C files of libaom (41,295 lines) are deleted. 17 stay: the ones the shader checks
+  compile as their reference (`testing/warp_check`, `inter_check`, `superres_check`,
+  `seq_header_check`) and the ones tables are read from as text (`crates/rav1g/build.rs`,
+  `testing/intra_check`). The headers stay: bindgen and the checks read them.
+- **Checked:** on the 244 public streams the new tool gives the frames, records, transform blocks,
+  coefficients, palette planes, loop restoration units and coverage counts the old one gave, equal
+  in every configuration CI runs, and the same parse digests.

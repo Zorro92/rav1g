@@ -323,7 +323,7 @@ Deviations from the design above, and why:
 - **`bindgen` runs from step 1**, on the C interface (`aom_decoder.h`, `aom_codec.h`, `aomdx.h`,
   `av1_perf.h`): the wrapper needs those types. Step 2 adds the layouts shared with the GPU and their tests.
   Four entry points that are macros in C (`aom_codec_dec_init`, `aom_codec_control`) are functions in
-  `crates/rav1g-sys/helpers.c`.
+  `crates/rav1g-sys/helpers.c` (deleted 2026-11-14 with the C of libaom's decoder).
 - **`rav1g-dec` still links test program C++** (see above). It leaves with the stages that replace it;
   decision 2 keeps the `-gputime` and `-dumpstages` entry points as they are until step 4.
 - **Nothing is published or reserved on crates.io**; the manifests say `publish = false` until step 5
@@ -1483,7 +1483,8 @@ shader with; the decoder's schedule is `host/intra_v2.rs`, ported from it), and 
 **What read the removed files reads something else:**
 
 - `crates/rav1g-sys/c_sources.txt` lists the 71 C files and the 7 compiled at `/O2`; `build.rs` read
-  them from `libav1_sources.props`. The same files with the same settings.
+  them from `libav1_sources.props`. The same files with the same settings. (The list and the files
+  left `main` on 2026-11-14: docs/phase2-rav1d.md, "The libaom sources leave `main`".)
 - `testing/shader_cache/shaders.py` takes every `.hlsl` file of `libav1/dx/shaders` as a shader and
   builds `intra_main` and `intra_main_hbd` with `/Od`, which is what the `FxCompile` items of the project
   said (checked: the same 97 names and flags). The keys of the shader cache, and so the bytecode, did
