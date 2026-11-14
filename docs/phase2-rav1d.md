@@ -2087,8 +2087,16 @@ is the right input in both, and the default gives one frame in parse in 1 GiB an
 
 - *The oracle with frames in parse* (`rav1g-parse-check -frames`, Linux): rav1d with 2, 3 and 4 frames
   in parse on 2 to 8 threads, runs of temporal units side by side, every buffer of every frame
-  against the entropy decoder of libaom: 254 of 254 streams equal in all twelve runs of CI (run
-  43567310004), and locally on the synthetic streams and 300 frames each of the 4K clips.
+  against the entropy decoder of libaom: 254 of 254 streams equal in all twelve runs of CI, in both
+  runs, and locally on the synthetic streams and 300 frames each of the 4K clips.
+- *The decoder on WARP* (run 43572104446): the whole set, 254 streams, as `expected.txt` says with
+  `-parseframes 2 -t 2`, `-parseframes 3 -t 4`, `-parseframes 4 -t 8` and `-parseframes 2 -t 3 -slots
+  3`; the stage dumps of the seven dump streams with two frames in parse equal to those of one, byte
+  for byte; the cut streams with 2 and 3 frames in parse and through `rav1g.h`; the memory check with
+  two frames in parse; what is created, the guard and the panic (`frames_check.py`: a budget of 814
+  MiB gives the 2160p 10-bit stream a decoder with one frame in parse and two slots where two frames
+  and four slots were asked for, and it decodes); the player's decoder code with a task of two frames
+  in parse. Everything that existed is as it was, with both parsers.
 - *The decoder* under wine on lavapipe, the 244 vectors of AOM: the frames are those of the
   references with 2, 3 and 4 frames in parse on 2, 3, 4, 6 and 8 threads, with 2 and 3 slots (where a
   frame waits for the slot of the one before it), through `rav1g.h`, and with `-poisonbuf`: 14 runs,
@@ -2107,29 +2115,55 @@ is the right input in both, and the default gives one frame in parse in 1 GiB an
   with frames in parse and the panic. Once a week and by hand (`frames_matrix`): `frames-matrix`,
   every combination of 1 to 4 frames in parse and up to 8 threads, twice.
 
-**Timing.** The parse alone, wall time a frame of the stream (`rav1g-parse-check -time -frames`,
-no GPU, the best of three; ms):
+**Timing.** The parse alone, wall time a frame of the stream (`rav1g-parse-check -time -frames`: a
+sink that keeps nothing, no GPU, the best of three; ms). Two threads in every column but the first,
+so that the last two columns are what frames in parse add:
 
-| Stream | Machine | 1 frame, 1 thread | 2 frames, 2 threads | 3 frames, 3 threads |
-| --- | --- | ---: | ---: | ---: |
-| `nf-dvbdash-d2-10b-2160p` | CI Linux runner | 13.81 | 10.81 | 10.73 |
-| `nf-dvbdash-a1-8b-2160p` | CI Linux runner | 4.47 | 4.08 | 4.07 |
-| `nf-chimera-10b-1080p` | CI Linux runner | 3.03 | 1.67 | 1.40 |
-| `d2` (the same cut) | development machine | 16.58 | 13.62 | 13.63 |
-| `j4k40`, 300 frames | development machine | 12.42 | 8.28 | 8.99 |
+| Stream | Machine | 1 thread | 2 threads, 1 frame in parse | 2 threads, 2 frames | 3 threads, 3 frames |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `nf-dvbdash-d2-10b-2160p` | CI Linux runner, run 43567310004 | 13.81 | 14.15 | 10.81 | 10.73 |
+| | CI Linux runner, run 43572104446 | 11.76 | 11.85 | 9.25 | 9.05 |
+| `nf-dvbdash-a1-8b-2160p` | run 43567310004 | 4.47 | 4.72 | 4.08 | 4.07 |
+| | run 43572104446 | 3.65 | 3.73 | 3.36 | 3.45 |
+| `nf-chimera-10b-1080p` | run 43567310004 | 3.03 | 1.80 | 1.67 | 1.40 |
+| | run 43572104446 | 2.52 | 1.46 | 1.43 | 1.20 |
+| `d2` (the same cut) | development machine | 16.58 | 16.68 | 13.62 | 13.63 |
+| `j4k40`, 300 frames | development machine | 12.42 | 12.50 | 8.28 | 8.99 |
 
-- The CDF chain bounds it, as the design measured: 1.2 to 1.3 on the `d2` cut (30 temporal units with
-  three large frames at their start), 1.5 on `j4k40`, 1.8 on the 1080p stream. A third frame in parse
-  gains nothing on the 4K streams.
+- The CDF chain bounds it, as the design measured: 1.2 to 1.3 times on the `d2` cut (30 temporal
+  units with three large frames at their start, and a `show_existing_frame` in every other one),
+  1.5 times on `j4k40`. A third frame in parse gains nothing on the 4K streams. The 1080p stream has
+  its gain from its tiles, with one frame in parse.
+- The same program with the sink that writes the buffers is not a measure with more than one frame in
+  parse: its host makes a frame's buffers ready (200 MB at 4K) on the thread that sends the data, which
+  the decoder does not do.
 - On WARP the stages run on the processors the parse runs on, so the time of a frame is the
-  rasteriser's; `frames_check.py` prints the timers of the 2160p stream with one and two frames in
-  parse in every run of `rust-frames`.
+  rasteriser's. `frames_check.py` in `rust-frames`, the 2160p 10-bit stream, ms a frame, the mean of
+  two runs in turns (run 43572104446):
+
+  | | Wall between decoded frames | Parse of a frame, wall | Parse, thread sum | Decode call |
+  | --- | ---: | ---: | ---: | ---: |
+  | 1 frame in parse, 2 threads | 407.3 | 31.3 | 27.5 | 392.7 |
+  | 2 frames in parse, 2 threads | 409.6 | 35.8 | 29.4 | 393.8 |
+  | 2 frames in parse, 3 threads | 406.8 | 33.8 | 29.7 | 390.9 |
+  | 3 frames in parse, 3 threads | 410.9 | 36.3 | 30.2 | 395.9 |
+
+  The same within what two runs differ by: the decoder waits for the rasteriser, and the parse costs
+  2 ms a frame more next to another parse on a runner whose four processors are busy.
 - **The console decides** ([test-player.md](test-player.md#frames-in-parse--parseframes) has the task
   lines): the md5 set with two frames in parse, the timing of one against two with one to three
   threads on `j4k40` and `d2`, and the guard's choice in 1 GiB. With two frames in parse the timer
   `cpu decode thread, setup to submit` is the time from the begin of a frame's setup to its
   submission, in which it also waits for its turn; the frames per second and `cpu entropy/tile
   decode` are the lines to read.
+
+**Runs.** Commits `0408ba3` (rav1d and the sink with frames as values, the oracle with `-frames`) and
+`3634007` (the host, the settings, the tools, CI, this section). CI run 43567310004 on `0408ba3`
+(number 151) and run 43572104446 on `3634007` (number 153): all jobs green, 17.6 and 17.0 minutes for
+the push; `rust-frames` 12.2 minutes, `rust-frames-threads` 7.2, `parse-check` 9 (the oracle with
+frames in parse: twelve runs, 254 of 254 each). The packages of run 153: `uwp_dx12_player_0.2.153.0_x64.msix`
+(default), `0.2.153.2` (MSVC) and `0.2.153.3` (`hevcPlayback`, the one for the timing with two frames
+in parse: artifact `rav1g-testplayer-hevcplayback-x64-43572104446`).
 
 **Left for step 5** (the pool in place of the shares).
 
