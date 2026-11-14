@@ -1194,9 +1194,9 @@ pub(crate) unsafe fn inter_ext_borders(dec: *mut Av1Core, cm: *mut AV1_COMMON) {
         let constants = alloc_constants::<BordersData>(&mut td.command_buffer);
         (*constants.data).planes = plane_words(&*td.dst_frame_buffer);
         let buf = &(*(*cm).cur_frame).buf;
-        let (y_crop_width, uv_crop_width) = (buf.__bindgen_anon_3.crop_widths[0], buf.__bindgen_anon_3.crop_widths[1]);
+        let (y_crop_width, uv_crop_width) = (buf.crop_widths[0], buf.crop_widths[1]);
         let (y_crop_height, uv_crop_height) =
-            (buf.__bindgen_anon_4.crop_heights[0], buf.__bindgen_anon_4.crop_heights[1]);
+            (buf.crop_heights[0], buf.crop_heights[1]);
 
         (*constants.data).dims[0][0] = y_crop_width;
         (*constants.data).dims[0][1] = y_crop_height;

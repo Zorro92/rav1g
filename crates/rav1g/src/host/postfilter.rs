@@ -562,10 +562,10 @@ pub(crate) unsafe fn cdef_looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON
             dst_fb.planes[1].offset = dst_fb.planes[0].offset + layout.y_size;
             dst_fb.planes[2].offset = dst_fb.planes[1].offset + layout.uv_size;
             let buf = &mut (*(*cm).cur_frame).buf;
-            buf.__bindgen_anon_3.crop_widths[0] = dst_fb.y_crop_width;
-            buf.__bindgen_anon_3.crop_widths[1] = dst_fb.uv_crop_width;
-            buf.__bindgen_anon_1.widths[0] = dst_fb.width;
-            buf.__bindgen_anon_1.widths[1] = dst_fb.width >> 1;
+            buf.crop_widths[0] = dst_fb.y_crop_width;
+            buf.crop_widths[1] = dst_fb.uv_crop_width;
+            buf.widths[0] = dst_fb.width;
+            buf.widths[1] = dst_fb.width >> 1;
         }
 
         looprestoration(dec, cm, lr_ctxt.cast());

@@ -196,6 +196,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", repo.join("libav1").display());
     println!("cargo:rerun-if-changed={}", manifest.join("wrapper.h").display());
     println!("cargo:rerun-if-changed={}", manifest.join("src").join("records.rs").display());
+    println!("cargo:rerun-if-changed={}", manifest.join("src").join("host.rs").display());
     println!("cargo:rerun-if-changed={}", manifest.join("parser.h").display());
     println!("cargo:rerun-if-changed={}", manifest.join("shader_table.c").display());
 
@@ -283,8 +284,7 @@ fn main() {
         .unwrap_or_else(|error| fail(&format!("bindgen: {error}")));
     write_bindings(&bindings, &out.join("bindings.rs"), windows);
 
-    // The structs of libaom's decoder as the Rust host uses them (parser.h): the structs the host reads
-    // and fills in place, and the enums and limits of the bitstream. Types and constants only.
+    // The enums and limits of the bitstream and the constants of the test instrumentation (parser.h).
     let parser = bindgen::Builder::default()
         .header(manifest.join("parser.h").to_string_lossy())
         .clang_arg(format!("-I{}", repo.join("libav1").display()))
@@ -298,6 +298,12 @@ fn main() {
         // The records shared with the shaders are not bindings any more: `src/records.rs` has them.
         .blocklist_type(RECORD_NAMES.join("|"))
         .raw_line("pub use crate::records::*;")
+        // Nor is the state of the host (`src/host.rs`), and the types of the C interface and of the test
+        // instrumentation are those of the root.
+        .blocklist_type(type_names(&manifest.join("src").join("host.rs")).join("|"))
+        .raw_line("pub use crate::host::*;")
+        .blocklist_type("aom_.*|av1_.*|cfg_options.*|frame_buffer_type")
+        .raw_line("pub use crate::*;")
         .blocklist_function(".*")
         .prepend_enum_name(false)
         .layout_tests(true)
@@ -316,7 +322,6 @@ fn main() {
     let records = fs::read_to_string(&records)
         .unwrap_or_else(|error| fail(&format!("cannot read {}: {error}", records.display())));
     probes.extend(read_probes(&records, RECORD_TYPES, "records::"));
-    probes.extend(read_probes(&parser.to_string(), PARSER_PROBED, "parser::"));
     let probe_c = out.join("layout_probe.c");
     fs::write(&probe_c, probe_source_c(&probes))
         .unwrap_or_else(|error| fail(&format!("cannot write {}: {error}", probe_c.display())));
@@ -385,36 +390,25 @@ const RECORD_NAMES: &[&str] = &[
     "DIFFWTD_MASK_TYPE",
 ];
 
-/// Types of libaom's decoder and of its interface that the Rust host uses (parser.h); what they hold
-/// comes along.
-const PARSER_TYPES: &[&str] = &[
-    "AV1Decoder",
-    "AV1_COMMON",
-    "MACROBLOCKD",
-    "ThreadData",
-    "TileInfo",
-    "Av1ColorMapParam",
-    "BufferPool",
-    "RefCntBuffer",
-    "YV12_BUFFER_CONFIG",
-    "HwFrameBuffer",
-    "HwOutputImage",
-    "av1_tile_data",
-    "tx_block_info_gpu",
-    "MV_REF",
-    "TPL_MV_REF",
-    "RestorationUnitInfo",
-    "AV1LrStruct",
-    "OrderHintInfo",
-    "WarpedMotionParams",
-    "scale_factors",
-    "int_mv",
-    "aom_codec_dec_cfg_t",
-    "aom_image_t",
-    "av1_decoded_frame_buffer_t",
-    "av1_perf_.*",
-    "av1_stage_dump.*",
-];
+/// Integer types of libaom's headers outside `enums.h` that the Rust host and `src/host.rs` name.
+const PARSER_TYPES: &[&str] = &["FRAME_TYPE", "RestorationType", "InterpFilter"];
+
+/// The names of the types a Rust file of this crate defines (`pub struct`, `pub union`, `pub type`).
+fn type_names(path: &Path) -> Vec<String> {
+    let text =
+        fs::read_to_string(path).unwrap_or_else(|error| fail(&format!("cannot read {}: {error}", path.display())));
+    let mut names = Vec::new();
+    for line in text.lines() {
+        for kind in ["pub struct ", "pub union ", "pub type "] {
+            if let Some(rest) = line.strip_prefix(kind) {
+                names.push(
+                    rest.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).next().unwrap_or("").to_string(),
+                );
+            }
+        }
+    }
+    names
+}
 
 /// Tables and limits of libaom's headers that the Rust host names: the tables are `extern` there, so the
 /// bindings declare a C symbol, which nothing defines and nothing may use (the host has the tables in
@@ -441,22 +435,6 @@ const PARSER_VARS: &[&str] = &[
     "WARPED_CAUSAL",
     "AV1_LOW_MEMORY_.*",
     "AV1_MEMORY_GUARD_.*",
-];
-
-/// The structs of libaom's decoder that the Rust host reads or writes in place: the layout probe
-/// holds their bindings against the C compiler of the build.
-const PARSER_PROBED: &[&str] = &[
-    "AV1Decoder",
-    "AV1_COMMON",
-    "MACROBLOCKD",
-    "ThreadData",
-    "TileInfo",
-    "Av1ColorMapParam",
-    "BufferPool",
-    "RefCntBuffer",
-    "YV12_BUFFER_CONFIG",
-    "HwFrameBuffer",
-    "HwOutputImage",
 ];
 
 /// Tables that are `static` in a header of the decoder and that the Rust host modules have a copy of

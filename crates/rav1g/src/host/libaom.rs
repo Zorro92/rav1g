@@ -160,10 +160,10 @@ pub(crate) unsafe fn loop_restoration_filter_frame_init(
         context.bit_depth = bit_depth;
         // SAFETY: the caller's contract; the planes of a buffer description are read as numbers.
         unsafe {
-            context.data8 = (*frame).__bindgen_anon_6.buffers[plane];
-            context.dst8 = cm.rst_frame.__bindgen_anon_6.buffers[plane];
-            context.data_stride = (*frame).__bindgen_anon_5.strides[usize::from(is_uv)];
-            context.dst_stride = cm.rst_frame.__bindgen_anon_5.strides[usize::from(is_uv)];
+            context.data8 = (*frame).buffers[plane];
+            context.dst8 = cm.rst_frame.buffers[plane];
+            context.data_stride = (*frame).strides[usize::from(is_uv)];
+            context.dst_stride = cm.rst_frame.strides[usize::from(is_uv)];
         }
         context.tile_rect = rect;
         context.tile_stripe0 = 0;

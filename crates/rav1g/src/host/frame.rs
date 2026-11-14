@@ -289,19 +289,19 @@ pub(crate) unsafe extern "C" fn av1_reallocate_frame_buffer(
 
         ybf.buffer_alloc = std::ptr::null_mut();
         ybf.buffer_alloc_sz = 0;
-        ybf.__bindgen_anon_3.crop_widths[0] = width; // y_crop_width
-        ybf.__bindgen_anon_4.crop_heights[0] = height; // y_crop_height
+        ybf.crop_widths[0] = width; // y_crop_width
+        ybf.crop_heights[0] = height; // y_crop_height
         let y_width = (width + 7) & !7;
         let y_height_visible = (height + 7) & !7;
-        ybf.__bindgen_anon_1.widths[0] = y_width;
-        ybf.__bindgen_anon_2.heights[0] = y_height_visible;
-        ybf.__bindgen_anon_5.strides[0] = y_stride;
+        ybf.widths[0] = y_width;
+        ybf.heights[0] = y_height_visible;
+        ybf.strides[0] = y_stride;
 
-        ybf.__bindgen_anon_3.crop_widths[1] = (width + 1) >> 1; // uv_crop_width
-        ybf.__bindgen_anon_4.crop_heights[1] = (height + 1) >> 1; // uv_crop_height
-        ybf.__bindgen_anon_1.widths[1] = y_width >> 1;
-        ybf.__bindgen_anon_2.heights[1] = y_height_visible >> 1;
-        ybf.__bindgen_anon_5.strides[1] = uv_stride;
+        ybf.crop_widths[1] = (width + 1) >> 1; // uv_crop_width
+        ybf.crop_heights[1] = (height + 1) >> 1; // uv_crop_height
+        ybf.widths[1] = y_width >> 1;
+        ybf.heights[1] = y_height_visible >> 1;
+        ybf.strides[1] = uv_stride;
 
         ybf.border = h_border;
         ybf.frame_size = fb_size as usize;
@@ -310,7 +310,7 @@ pub(crate) unsafe extern "C" fn av1_reallocate_frame_buffer(
         ybf.use_external_reference_buffers = 0;
         ybf.flags = if hbd != 0 { YV12_FLAG_HIGHBITDEPTH } else { 0 };
 
-        ybf.__bindgen_anon_6.buffers = [std::ptr::null_mut(); 3];
+        ybf.buffers = [std::ptr::null_mut(); 3];
         let buf = &mut *ybf.hw_buffer;
         let uv_width = y_width >> 1;
         let uv_height = y_height_visible >> 1;
@@ -814,7 +814,7 @@ pub(crate) unsafe fn setup_frame_begin(
         td.clear_iter_bytes = 0;
         td.clear_pending = 1;
 
-        let (y_width, y_height) = (buf.__bindgen_anon_1.widths[0], buf.__bindgen_anon_2.heights[0]);
+        let (y_width, y_height) = (buf.widths[0], buf.heights[0]);
         let grid_w = (((y_width + 63) & !63) >> 2) + 2 + 128;
         let grid_h = (((y_height + 63) & !63) >> 2) + 2 + 128;
         td.iter_grid_stride = grid_w;

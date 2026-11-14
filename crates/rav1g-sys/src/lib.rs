@@ -23,6 +23,7 @@ include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 /// text ("MSVC, /GL, static runtime").
 pub const C_BUILD: &str = env!("RAV1G_C_BUILD");
 
+pub mod host;
 pub mod records;
 
 /// The records shared with the shaders under the name they had as bindings ([`records`]).
@@ -30,11 +31,9 @@ pub mod shared {
     pub use crate::records::*;
 }
 
-/// The structs of libaom's decoder as the Rust host of the `rav1g` crate uses them (`parser.h`): the
-/// structs the host
-/// reads and fills in place (`AV1Decoder`, `AV1_COMMON`, `MACROBLOCKD`, the state of a tile thread, the
-/// frame buffer descriptions), and the enums and limits of the bitstream. The
-/// tests of this crate hold the structs against the C compiler of the build.
+/// The enums and limits of the bitstream and the constants of the test instrumentation, as bindings
+/// (`parser.h`), and with them, under the names the host uses them by, the state of the host ([`host`]),
+/// the records ([`records`]) and the types of the root.
 pub mod parser {
     include!(concat!(env!("OUT_DIR"), "/parser.rs"));
 }
