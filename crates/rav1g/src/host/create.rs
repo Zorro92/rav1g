@@ -58,6 +58,10 @@ const IDCT_COEF_COUNT_NUM_LOW: i32 = 12;
 /// `AV1_MEMORY_GUARD_MARGIN` of `aom/aom_decoder.h`: what a creation must leave of the application's
 /// memory.
 const MEMORY_GUARD_MARGIN: u64 = 48 << 20;
+/// `AV1_MEMORY_GUARD_HEADROOM` of `aom/aom_decoder.h`: what a creation should leave of the application's
+/// budget so that its frames are not slowed by the memory running out; a decoder that would leave less
+/// is created with fewer slots and frames in parse (`aom_codec_dec_cfg_t::memory_headroom`).
+const MEMORY_GUARD_HEADROOM: u64 = 100 << 20;
 /// How often the budget is asked again while it grows (`PollMs`).
 const GUARD_POLL_MS: u32 = 20;
 
@@ -212,11 +216,45 @@ impl ParsePlan {
         }
     }
 
-    /// The plan the budget guard falls back to when the slots of more than one frame in parse do not
-    /// fit: one frame in parse and its slots.
-    fn one_frame(self, cfg: &aom_codec_dec_cfg_t) -> ParsePlan {
-        ParsePlan { threads: self.threads, frames: 1, slots: Self::slots(cfg, 1) }
+    /// The next smaller plan the budget guard falls back to when a decoder would not leave the
+    /// headroom: one slot less, with the frames in parse that slot count has by default at most (one
+    /// less than slots); below the two slots every decoder has, one frame in parse. `None` for the
+    /// smallest decoder.
+    fn smaller(self) -> Option<ParsePlan> {
+        if self.slots > FrameThreadDataDefault {
+            let slots = self.slots - 1;
+            Some(ParsePlan { threads: self.threads, frames: self.frames.min(slots - 1).max(1), slots })
+        } else if self.frames > 1 {
+            Some(ParsePlan { frames: 1, ..self })
+        } else {
+            None
+        }
     }
+
+    /// "2 frames in parse on 2 threads with 3 pipeline slots", for the log.
+    fn words(self) -> String {
+        format!(
+            "{} frame{} in parse on {} thread{} with {} pipeline slots",
+            self.frames,
+            if self.frames == 1 { "" } else { "s" },
+            self.threads,
+            if self.threads == 1 { "" } else { "s" },
+            self.slots
+        )
+    }
+}
+
+/// The headroom of a configuration (`aom_codec_dec_cfg_t::memory_headroom`): 0 is the default, and no
+/// value is below the margin a creation is refused for.
+fn headroom_from_cfg(cfg: &aom_codec_dec_cfg_t) -> u64 {
+    if cfg.memory_headroom == 0 { MEMORY_GUARD_HEADROOM } else { (cfg.memory_headroom as u64).max(MEMORY_GUARD_MARGIN) }
+}
+
+/// The decoder the budget guard creates: of the device bytes of a plan and of the smaller plans behind
+/// it (`sizes`, falling), the index of the first that leaves `headroom` of what the application has
+/// `available`, or the last one when none does. The headroom never refuses; the margin does, afterwards.
+fn first_with_headroom(sizes: &[u64], available: u64, headroom: u64) -> usize {
+    sizes.iter().position(|planned| planned + headroom <= available).unwrap_or(sizes.len() - 1)
 }
 
 impl ResourceConfig {
@@ -1178,60 +1216,91 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
         // afford.
         (*dec).memory_available_cb = cfg.memory_available_cb;
         (*dec).memory_available_priv = cfg.memory_available_priv;
-        // More than one frame in parse wants more slots than one, and a decoder with them may not fit
-        // what the application has left. That is no reason to fail: the decoder is then created with one
-        // frame in parse and the slots of that, which is what it would have been without the setting.
-        if plan.frames > 1 {
-            let (planned, _) = planned_device_bytes(dec, &rcfg);
-            let needed = planned as u64 + MEMORY_GUARD_MARGIN;
+        // The headroom: a decoder that fits the hard margin below can still leave the application so
+        // little that the passes which read frame buffers run several times slower (docs/phase2-rav1d.md,
+        // step 6). That is no reason to fail: the decoder is then created with fewer slots and frames
+        // in parse, the largest of the smaller decoders that leaves the headroom, or the smallest one.
+        {
+            let asked = plan;
+            let headroom = headroom_from_cfg(cfg);
+            let mut ladder = vec![(plan, planned_device_bytes(dec, &rcfg).0 as u64)];
+            while let Some(next) = ladder[ladder.len() - 1].0.smaller() {
+                let planned = planned_device_bytes(dec, &ResourceConfig::with_slots(cfg, next.slots)).0 as u64;
+                ladder.push((next, planned));
+            }
             let (_, available, waited_ms) =
-                settled_budget((*dec).memory_available_cb, (*dec).memory_available_priv, needed);
-            let asked = if cfg.frames_in_parse <= 0 {
-                format!("{} by default for {}x{}", plan.frames, rcfg.width as u32, rcfg.height as u32)
+                settled_budget((*dec).memory_available_cb, (*dec).memory_available_priv, ladder[0].1 + headroom);
+            let by_default = if cfg.frames_in_parse <= 0 && cfg.frame_slots == 0 {
+                format!(" (the default for {}x{})", rcfg.width as u32, rcfg.height as u32)
             } else {
-                format!("{} asked for", plan.frames)
+                String::new()
             };
-            if available >= 0 && needed > available as u64 {
-                let one = plan.one_frame(cfg);
-                log(
-                    false,
-                    &format!(
-                        "MEMORY frames in parse: {asked}, with {} threads and {} pipeline slots: the device \
-                         buffers of that decoder, {:.1} MiB, and the margin of {:.1} MiB do not fit the {:.1} \
-                         MiB the application has left for the decoder (asked for {waited_ms} ms). The decoder is \
-                         created with 1 frame in parse and {} slots instead",
-                        plan.threads,
-                        plan.slots,
-                        to_mib(planned as u64),
-                        to_mib(MEMORY_GUARD_MARGIN),
-                        to_mib(available as u64),
-                        one.slots
-                    ),
-                );
-                plan = one;
-                rcfg = ResourceConfig::with_slots(cfg, plan.slots);
-                (*dec).frame_slots = rcfg.gpu_pipeline_depth;
-            } else {
-                log(
-                    false,
-                    &format!(
-                        "MEMORY frames in parse: {asked}, with {} threads and {} pipeline slots: device buffers \
-                         {:.1} MiB ({})",
-                        plan.threads,
-                        plan.slots,
-                        to_mib(planned as u64),
-                        if available >= 0 {
-                            format!(
-                                "with the margin of {:.1} MiB they fit the {:.1} MiB the application has left for \
-                                 the decoder",
-                                to_mib(MEMORY_GUARD_MARGIN),
-                                to_mib(available as u64)
-                            )
-                        } else {
-                            String::from("not held against a budget: no memory_available_cb, or it does not know")
-                        }
-                    ),
-                );
+            // Without a budget (no callback, or one that does not know) nothing is compared, and the
+            // "MEMORY budget: not checked" line below says so.
+            if available >= 0 {
+                let available = available as u64;
+                let sizes: Vec<u64> = ladder.iter().map(|step| step.1).collect();
+                let chosen = first_with_headroom(&sizes, available, headroom);
+                let left = |planned: u64| (available as f64 - planned as f64) / f64::from(1 << 20);
+                for (index, (step, planned)) in ladder.iter().enumerate().take(chosen) {
+                    log(
+                        false,
+                        &format!(
+                            "MEMORY headroom: {}{}: device buffers {:.1} MiB would leave {:.1} MiB of the {:.1} MiB \
+                             the application has left for the decoder, less than the headroom of {:.1} MiB{}: not \
+                             created so",
+                            step.words(),
+                            if index == 0 { by_default.as_str() } else { "" },
+                            to_mib(*planned),
+                            left(*planned),
+                            to_mib(available),
+                            to_mib(headroom),
+                            if index == 0 { format!(" (asked for {waited_ms} ms)") } else { String::new() }
+                        ),
+                    );
+                }
+                let (step, planned) = ladder[chosen];
+                let instead = if chosen == 0 {
+                    String::from("created as asked")
+                } else {
+                    format!("created in place of {}", asked.words())
+                };
+                if planned + headroom <= available {
+                    log(
+                        false,
+                        &format!(
+                            "MEMORY headroom: {}{}: device buffers {:.1} MiB leave {:.1} MiB of the {:.1} MiB the \
+                             application has left for the decoder, the headroom is {:.1} MiB: {instead}",
+                            step.words(),
+                            if chosen == 0 { by_default.as_str() } else { "" },
+                            to_mib(planned),
+                            left(planned),
+                            to_mib(available),
+                            to_mib(headroom)
+                        ),
+                    );
+                } else {
+                    log(
+                        false,
+                        &format!(
+                            "MEMORY headroom: {}{}: device buffers {:.1} MiB would leave {:.1} MiB of the {:.1} MiB \
+                             the application has left for the decoder, less than the headroom of {:.1} MiB, and \
+                             there is no smaller decoder: {instead} if the margin below holds; its frames may be \
+                             slow for want of memory",
+                            step.words(),
+                            if chosen == 0 { by_default.as_str() } else { "" },
+                            to_mib(planned),
+                            left(planned),
+                            to_mib(available),
+                            to_mib(headroom)
+                        ),
+                    );
+                }
+                if chosen != 0 {
+                    plan = step;
+                    rcfg = ResourceConfig::with_slots(cfg, plan.slots);
+                    (*dec).frame_slots = rcfg.gpu_pipeline_depth;
+                }
             }
         }
         (*dec).parser_threads = plan.threads;
@@ -1631,6 +1700,34 @@ mod tests {
         let text = std::fs::read_to_string(header).expect("aom_decoder.h");
         assert!(text.contains("#define AV1_MEMORY_GUARD_MARGIN ((size_t)48 << 20)"));
         assert_eq!(MEMORY_GUARD_MARGIN, 48 << 20);
+        assert!(text.contains("#define AV1_MEMORY_GUARD_HEADROOM ((size_t)100 << 20)"));
+        assert_eq!(MEMORY_GUARD_HEADROOM, 100 << 20);
+    }
+
+    /// The ladder of the budget guard, and the two cases of the console it is calibrated on (package
+    /// 0.2.156.0 in 1 GiB, 3840x2160 10-bit; docs/phase2-rav1d.md, step 6): the default must stay, a
+    /// fourth slot must not.
+    #[test]
+    fn the_headroom_keeps_the_default_and_drops_the_fourth_slot() {
+        let plan = |frames, slots| ParsePlan { threads: 2, frames, slots };
+        assert_eq!(plan(2, 4).smaller(), Some(plan(2, 3)));
+        assert_eq!(plan(2, 3).smaller(), Some(plan(1, 2)));
+        assert_eq!(plan(4, 4).smaller(), Some(plan(2, 3)));
+        assert_eq!(plan(1, 4).smaller(), Some(plan(1, 3)));
+        assert_eq!(plan(2, 2).smaller(), Some(plan(1, 2)));
+        assert_eq!(plan(1, 2).smaller(), None);
+
+        let tenths = |mib: u64| mib * (1 << 20) / 10;
+        let (one, two, four) = (tenths(5976), tenths(6465), tenths(6953));
+        // The default: 775.0 MiB left, 897 of 1024 MiB in use while decoding, 45.7 fps.
+        assert_eq!(first_with_headroom(&[two, one], tenths(7750), MEMORY_GUARD_HEADROOM), 0);
+        // -slots 4: 772.8 MiB left, 948 of 1024 MiB in use, 19.5 fps where 49.6 are possible.
+        assert_eq!(first_with_headroom(&[four, two, one], tenths(7728), MEMORY_GUARD_HEADROOM), 1);
+        // With the margin as the headroom, which is what the guard did, the fourth slot is accepted.
+        assert_eq!(first_with_headroom(&[four, two, one], tenths(7728), MEMORY_GUARD_MARGIN), 0);
+        // Nothing leaves the headroom: the smallest decoder, never a refusal.
+        assert_eq!(first_with_headroom(&[four, two, one], tenths(6500), MEMORY_GUARD_HEADROOM), 2);
+        assert_eq!(first_with_headroom(&[one], 0, MEMORY_GUARD_HEADROOM), 0);
     }
 
     #[test]

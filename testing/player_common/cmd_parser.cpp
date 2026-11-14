@@ -119,6 +119,11 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"noguard", atSingle, anOptional,
        "create the decoder without the memory budget guard (a creation that does not fit loses the D3D12 device)",
        "", &params_.noguard_},
+      {"headroom", atInt, anOptional,
+       "the MiB the decoder's budget guard should leave free behind the decoder (Rav1gSettings::memory_headroom); "
+       "a decoder that would leave less is created with fewer slots and frames in parse. Default 0: the "
+       "library's 100; 48 or less: only the margin of the guard, as up to package 0.2.156",
+       "", &params_.headroom_mib_},
       {"budget", atInt, anOptional,
        "where the system gives the app no memory limit (rav1g-dec -playersmoke): model one, this many MiB above "
        "what the app uses without a decoder, for the decoder's budget guard. Ignored in the app",
@@ -411,6 +416,7 @@ void CParameters::Reset() {
   params_.lowmem_ = false;
   params_.lowmem_parts_ = PLAYER_LOWMEM_DEFAULT;
   params_.noguard_ = false;
+  params_.headroom_mib_ = 0;
   params_.budget_mib_ = -1;
   params_.retain_mib_ = 0;
   params_.continue_on_error_ = false;

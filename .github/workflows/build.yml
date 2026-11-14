@@ -1574,9 +1574,10 @@ jobs:
       # What a decoder is created with, the budget guard, a parse that waits for memory, a panic in the
       # parse, and the time of the parse with one and with two frames in parse
       # (testing/conformance/frames_check.py): the 2160p stream, where the library's defaults are two
-      # threads and two frames in parse, and the 1080p stream with eight tiles. A budget between the
-      # decoder of one frame in parse and that of two has to give a decoder with one frame in parse that
-      # decodes: asking for frames in parse never fails a creation. The pools (docs/phase2-rav1d.md, step
+      # threads and two frames in parse, and the 1080p stream with eight tiles. The budget guard with fixed
+      # budgets: a decoder that would not leave the headroom (100 MiB) is created with fewer slots and
+      # frames in parse and decodes, a fourth slot in the budget of the default gets three (the case of
+      # the console in 1 GiB), and nothing is refused for the headroom. The pools (docs/phase2-rav1d.md, step
       # 5): with -parseopt poolwait a frame finds a pool empty behind its first piece while an older frame
       # holds one, so its tiles wait in the middle of their parse for the GPU, with one, two and four
       # frames in parse, and the frames are right; the lossless stream fills the pools of its size by

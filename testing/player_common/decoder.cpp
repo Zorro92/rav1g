@@ -478,7 +478,7 @@ int AV1Decoder::DecodeOne() {
                        created_parser_rav1d_ != params_.parser_rav1d_ ||
                        created_parser_options_ != params_.parser_options_ ||
                        created_lowmem_ != params_.lowmem_parts_ || created_packed_10x3_ != params_.hdr10x3_ ||
-                       created_noguard_ != params_.noguard_ ||
+                       created_noguard_ != params_.noguard_ || created_headroom_ != params_.headroom_mib_ ||
                        created_gpuclear_ != (params_.clears_ == PLAYER_CLEARS_GPU));
   if (initialized_ && (need_reinit_ || other_decoder)) DestroyDecoder();
   // -gpuclear, -cpuclear, -syncclear: set here, where no frame is in flight (the task before has drained)
@@ -565,6 +565,9 @@ int AV1Decoder::DecodeOne() {
       // the D3D12 device for the rest of the launch.
       cfg.memory_available = params_.noguard_ ? NULL : MemoryAvailable;
       cfg.memory_available_context = this;
+      // -headroom: what the guard should leave behind the decoder, so that the frames stay fast; a decoder
+      // that would leave less is created with fewer slots and frames in parse. 0: the library's default.
+      cfg.memory_headroom = params_.headroom_mib_ > 0 ? (uint64_t)params_.headroom_mib_ << 20 : 0;
       Rav1gMemoryRequirements memory;
       memset(&memory, 0, sizeof(memory));
       rav1g_memory_requirements(&cfg, &memory);
@@ -587,7 +590,13 @@ int AV1Decoder::DecodeOne() {
               << out_width << "x" << out_height << " " << out_bitdepth << "-bit, " << MibString(output_pool)
               << (params_.needReadBack_ ? " (the readback buffers of this run are not counted)" : "")
               << "; held back from what the decoder may take until the pool has them. The decoder's budget "
-              << "guard keeps a margin of " << MibString(RAV1G_MEMORY_GUARD_MARGIN) << " at its creation"
+              << "guard keeps a margin of " << MibString(RAV1G_MEMORY_GUARD_MARGIN) << " at its creation, and "
+              << "wants a headroom of "
+              << MibString(params_.headroom_mib_ <= 0 ? (uint64_t)RAV1G_MEMORY_GUARD_HEADROOM
+                           : ((uint64_t)params_.headroom_mib_ << 20) < RAV1G_MEMORY_GUARD_MARGIN
+                               ? (uint64_t)RAV1G_MEMORY_GUARD_MARGIN
+                               : (uint64_t)params_.headroom_mib_ << 20)
+              << " behind the decoder (less: fewer slots and frames in parse)"
               << (params_.noguard_ ? "; -noguard: the guard is off for this creation" : "");
       // The decoder allocates its host pool at its creation; its own lines give the video memory.
       // Construct the pool before acquiring a decoder: this allocation can throw. Installing it after
@@ -640,6 +649,7 @@ int AV1Decoder::DecodeOne() {
       created_lowmem_ = params_.lowmem_parts_;
       created_packed_10x3_ = params_.hdr10x3_;
       created_noguard_ = params_.noguard_;
+      created_headroom_ = params_.headroom_mib_;
       created_gpuclear_ = params_.clears_ == PLAYER_CLEARS_GPU;
     } catch (int error) {
       XB_LOGE << "Unable to create decoder. Error " << error;

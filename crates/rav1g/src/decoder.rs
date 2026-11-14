@@ -105,8 +105,8 @@ pub struct Settings {
     /// A frame in parse holds a pipeline slot, and takes its mode info, coefficients and transform
     /// block records from pools all frames in flight share. With `frame_slots` 0 a decoder with more
     /// than one frame in parse has one slot more than frames in parse, at most 4; when [`Settings::memory_available`]
-    /// says that such a decoder does not fit, the decoder is created with one frame in parse and the
-    /// slots of that. [`Decoder::configuration`] says what was created.
+    /// says that such a decoder would not leave [`Settings::memory_headroom`], the decoder is created
+    /// with fewer slots and frames in parse. [`Decoder::configuration`] says what was created.
     pub frames_in_parse: u32,
     /// Pipeline slots: frames that can be between the start of their CPU decode and the end of their GPU
     /// work at the same time, 2 to 4. 0 is the default: 2 with one frame in parse. Each slot has
@@ -135,6 +135,14 @@ pub struct Settings {
     /// log and in [`Error::detail`]), and so is a palette buffer that would leave less than 16 MiB (a
     /// decode error). Without it nothing is checked.
     pub memory_available: Option<MemoryAvailable>,
+    /// With [`Settings::memory_available`]: the bytes a creation should leave of what the callback
+    /// returns, behind its device buffers, so that the frames are not slowed by the memory running out
+    /// (on the console a 4K decoder that left 77 MiB ran at 19.5 frames a second, one that left 128 at
+    /// 45.7). 0 is the default, 100 MiB; a value below 48 MiB is 48 MiB. A decoder that would leave
+    /// less is created with fewer slots and frames in parse, never refused for it: one slot less at a
+    /// time down to 2, the first that leaves the headroom, or the smallest ("MEMORY headroom" log lines).
+    /// [`Decoder::configuration`] says what was created.
+    pub memory_headroom: u64,
 }
 
 impl Default for Settings {
@@ -158,6 +166,7 @@ impl Default for Settings {
             parser: Parser::default(),
             parser_options: ParserOptions::default(),
             memory_available: None,
+            memory_headroom: 0,
         }
     }
 }
@@ -390,6 +399,7 @@ impl Decoder {
             cfg.memory_available_cb = Some(memory_available);
             cfg.memory_available_priv = context;
         }
+        cfg.memory_headroom = usize::try_from(settings.memory_headroom).unwrap_or(usize::MAX);
         cfg.dx12device = device.d3d12_device().as_raw();
         cfg.dx12command_queue = device.d3d12_queue().as_raw();
         cfg.dxPsos = device.pipelines_ptr();

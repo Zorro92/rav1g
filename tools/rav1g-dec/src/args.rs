@@ -77,6 +77,9 @@ pub struct Task {
     pub lowmem_parts: i32,
     /// -budget: what the decoder is told the application has left, in MiB; negative: no budget callback.
     pub budget_mib: i64,
+    /// -headroom: what the budget guard should leave of the budget behind the decoder, in MiB; 0: the
+    /// library's default.
+    pub headroom_mib: i64,
     pub intrav2: bool,
     pub intraopt: bool,
     /// What a frame does about the clears of its slot's grids: nothing to clear without a flag;
@@ -141,6 +144,7 @@ impl Default for Task {
             lowmem: false,
             lowmem_parts: LOWMEM_DEFAULT,
             budget_mib: -1,
+            headroom_mib: 0,
             intrav2: false,
             intraopt: false,
             clears: Clears::NotNeeded,
@@ -239,6 +243,9 @@ pub fn usage() {
     say!("                        cleared (docs/test-player.md, \"Pipeline slots and clears\")");
     say!("  -budget <MiB>         the decoder is told the application has this much memory left for it: the budget");
     say!("                        guard of the creation (MEMORY budget and MEMORY REFUSED lines, with -v)");
+    say!("  -headroom <MiB>       with -budget: what the guard should leave of it behind the decoder; a decoder");
+    say!("                        that would leave less is created with fewer slots and frames in parse (MEMORY");
+    say!("                        headroom lines). Default 0: the library's 100; 48 or less is the guard's margin");
     say!("  -lfhsplit <n>         horizontal loop filter: 1 even rows of blocks, a UAV barrier, odd rows; 2 every");
     say!("                        row of blocks on its own (default 0: one dispatch per plane; same output)");
     say!("  -intraedgefix         8-bit intra: the above edge filter stops where the 10-bit one does (same output)");
@@ -375,6 +382,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-lowmemparts" => task.lowmem_parts = number()?,
             "-lowmem" => task.lowmem = true,
             "-budget" => task.budget_mib = i64::from(number()?),
+            "-headroom" => task.headroom_mib = i64::from(number()?),
             "-cdefv1" => task.cdefv1 = true,
             "-cdefv2" => task.cdefv2 = true,
             "-nofitsize" => task.nofitsize = true,

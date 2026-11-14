@@ -137,6 +137,8 @@ class CParameters {
     // The parts in effect after Parse(): PLAYER_LOWMEM_DEFAULT, the value of -lowmemparts, or all with -lowmem.
     int lowmem_parts_;
     bool noguard_;
+    // -headroom: what the budget guard should leave free behind the decoder, MiB; 0: the library's default.
+    int headroom_mib_;
     // -budget, -retain: the model of the app's memory where the system gives the app no limit
     // (decoder.cpp, "The app's memory where the system has no limit for it"). -1: no model.
     int budget_mib_;

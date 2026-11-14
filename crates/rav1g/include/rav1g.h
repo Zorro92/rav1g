@@ -302,6 +302,12 @@ typedef struct av1_stage_dump av1_stage_dump;
 #define RAV1G_MEMORY_GUARD_MARGIN 50331648
 
 /*
+ The default of `Rav1gSettings::memory_headroom`: what a creation should leave of what
+ `Rav1gSettings::memory_available` returns so that its frames are fast, 100 MiB.
+ */
+#define RAV1G_MEMORY_GUARD_HEADROOM 104857600
+
+/*
  How a call ended.
  */
 typedef enum Rav1gStatus {
@@ -703,10 +709,10 @@ typedef struct Rav1gSettings {
    `rav1g_decoder_drain`, and `Rav1gOutput::get_image` is called on a thread of the decoder.
 
    A frame in parse holds a pipeline slot, so more frames in parse want more slots
-   (`frame_slots`). When `memory_available` says that the decoder with those slots does not fit,
-   the decoder is created with one frame in parse and the slots of that, and says so in a "MEMORY
-   frames in parse" log line: asking for frames in parse never makes a creation fail that would
-   work without. `rav1g_decoder_configuration` says what was created.
+   (`frame_slots`). When `memory_available` says that the decoder with those slots would not
+   leave `memory_headroom`, the decoder is created with fewer slots and frames in parse, and says
+   so in "MEMORY headroom" log lines: asking for frames in parse or slots never makes a creation
+   fail that would work without. `rav1g_decoder_configuration` says what was created.
    */
   uint32_t frames_in_parse;
   /*
@@ -721,6 +727,24 @@ typedef struct Rav1gSettings {
    */
   int64_t (*memory_available)(void *context);
   void *memory_available_context;
+  /*
+   With `memory_available`: the bytes a creation should leave of what the callback returns, behind
+   its device buffers, so that the frames are not slowed by the memory running out (in a console
+   app with 1 GiB a 4K decoder that left 77 MiB ran at 19.5 frames a second, one that left 128 MiB
+   at 45.7). 0 is the default, `RAV1G_MEMORY_GUARD_HEADROOM`; a value below
+   `RAV1G_MEMORY_GUARD_MARGIN` is that margin. A decoder that would leave less is not refused: it
+   is created with one slot less at a time down to 2, and at most one frame in parse less than
+   slots (4 slots, then 2 frames in parse and 3 slots, then 1 frame in parse and 2 slots), the
+   first that leaves the headroom, or the smallest; that one is refused only for
+   `RAV1G_MEMORY_GUARD_MARGIN`. "MEMORY headroom" log lines say what was compared, and
+   `rav1g_decoder_configuration` what was created. The callback has to hold back what the
+   application itself still allocates for the frames that come out (see `memory_available`): the
+   headroom is what stays free when all of that exists.
+
+   New in 0.2.157: a field behind `memory_available_context`. An application that fills the
+   settings with `rav1g_settings_default` only has to be compiled with this header.
+   */
+  uint64_t memory_headroom;
   /*
    The output of the decoder.
    */
@@ -760,12 +784,12 @@ typedef struct Rav1gConfiguration {
   uint32_t threads;
   /*
    The frames whose parse may run at the same time (`Rav1gSettings::frames_in_parse`): what the
-   settings asked for or the default, unless the budget guard found that the slots of it do not fit,
-   and then 1.
+   settings asked for or the default, unless the budget guard found that the decoder would not
+   leave the headroom, and then fewer (`Rav1gSettings::memory_headroom`).
    */
   uint32_t frames_in_parse;
   /*
-   The pipeline slots (`Rav1gSettings::frame_slots`).
+   The pipeline slots (`Rav1gSettings::frame_slots`), or fewer for the same reason.
    */
   uint32_t frame_slots;
   /*

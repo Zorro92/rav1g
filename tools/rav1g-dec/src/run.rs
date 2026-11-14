@@ -497,6 +497,7 @@ fn create_decoder(
         parser_options: task.parser_options,
         // -budget: a budget callback that answers with the number of the flag.
         budget: (task.budget_mib >= 0).then_some((task.budget_mib << 20) as u64),
+        headroom: (task.headroom_mib.max(0) << 20) as u64,
     };
     // The colour description of the sequence header the decoder is created for, and the first frame of
     // the decoder says what it carries.

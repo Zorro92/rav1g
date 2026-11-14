@@ -2393,9 +2393,8 @@ uses about 897 of 1024 MiB. The timing lines of
 
 **Left** after this step:
 
-- The guard: count the app's growth while decoding (the output queue) and keep a margin from the
-  cliff found above, so that it falls back instead of accepting a decoder that runs 2.5 times slower.
-
+- The guard: keep a margin from the cliff found above, so that it falls back instead of accepting
+  a decoder that runs 2.5 times slower. Done: [the guard and the cliff](#the-guard-and-the-cliff).
 - The frame buffer at the recording (above): 24.2 MiB at 4K, which brings the default to 622.3 MiB.
 - The block index list of a slot (6.0 MiB at 4K, sized for the worst case, a few percent used)
   could be a fourth pool: 12 MiB with three slots, which brings the default under the 615.7 MiB.
@@ -2403,6 +2402,58 @@ uses about 897 of 1024 MiB. The timing lines of
 - The palette buffer of a slot (24.2 MiB at 4K, created on the first frame with screen content
   tools) is still one for each slot.
 - Step 6: the C parser leaves, and with it the shares, the second slot and the header structs.
+
+### The guard and the cliff
+
+2026-11-14, in front of step 6. The budget guard now wants a headroom behind the decoder and falls
+back to a smaller decoder where there is none; it refuses what it refused before.
+
+**What was wrong.** On the console in 1 GiB ([above](#step-5-the-pools)) the guard accepted the
+fourth slot, 695.3 + 48 MiB against 772.8 MiB left, and the decoder ran at 19.5 fps where 49.6 are
+possible. The guard's numbers were right: what the player's callback reports is already less the
+output pool that does not exist yet (100.9 MiB for four 4K 10-bit images), so `left - device
+buffers` is what the app has free while frames come out, 128.5 MiB for the default and 77.5 MiB for
+the fourth slot, against 127 and 76 MiB measured (1024 - 897, 1024 - 948). The growth of 100 to 120
+MiB between `MEMORY app after the decoder` and `30 frames out` is that pool; it was counted. What
+was wrong is the threshold: 48 MiB keeps the device, not the speed. Somewhere between 128 and 77
+MiB free the passes that read frame buffers get 2 to 12 times slower.
+
+**The rule.** `AV1_MEMORY_GUARD_HEADROOM`, 100 MiB, as a setting with that default
+(`aom_codec_dec_cfg_t::memory_headroom`, `Settings::memory_headroom`,
+`Rav1gSettings::memory_headroom`; a value below the margin is the margin). At a creation with a
+budget callback:
+
+1. The plan that is asked for and the smaller ones behind it: one slot less at a time down to two,
+   with at most one frame in parse less than slots (`ParsePlan::smaller`): 4 slots, then 2 frames in
+   parse on 3 slots, then 1 frame in parse on 2 slots.
+2. The first whose device buffers leave the headroom of what the callback returns is the decoder
+   (`first_with_headroom`); when none does, the smallest. The headroom never refuses.
+3. That decoder is held against the margin of 48 MiB as before (`MEMORY budget`, `MEMORY REFUSED`).
+
+No setting was added for the output memory an application adds later: the callback's contract
+already is "what is left, less what the application is going to allocate itself", the player keeps
+it, and a second place for the same number would count it twice. The headroom is what stays free
+once all of that exists; the header says so.
+
+**In 1 GiB, 3840x2160 10-bit** (775 MiB left for the decoder): the default, 646.5 MiB, leaves 128.5
+and is created as asked (it needs 746.5 MiB left); `-slots 4`, 695.3 MiB, would leave 77.5 and is
+created with 3 slots and 2 frames in parse (it needs 795.3); `-parseframes 1`, 597.6 MiB, leaves
+177.4. The `MEMORY headroom` lines say what was compared
+([test-player.md](test-player.md#the-headroom--headroom)).
+
+**Checks.** A unit test with the two console cases (`the_headroom_keeps_the_default_and_drops_the_fourth_slot`:
+775.0 MiB left keeps the default, 772.8 drops the fourth slot, and with the margin as the headroom
+the fourth slot is accepted, which is what 0.2.156 did). `frames_check.py` (job `rust-frames`) with
+fixed budgets on the 2160p 10-bit stream: the default in a budget of its size and the headroom (2
+frames, 3 slots), with 2 MiB less (1 frame, 2 slots), `-slots 4` and four frames in parse in the
+budget of the default (3 slots, 2 frames), `-slots 4` in its own budget (4 slots), a budget where
+nothing leaves the headroom (the smallest decoder, created), and `-headroom 48`; every task has to
+decode. The memory check is unchanged: its 2160p decoder is refused for the margin, as before.
+
+**What an application sees.** Nothing, unless it asks for more slots or frames in parse than leave
+100 MiB: then `rav1g_decoder_configuration` reports fewer. `Rav1gSettings` has a new field behind
+`memory_available_context`; an application that fills the settings with `rav1g_settings_default`
+is recompiled with the header and changes nothing.
 
 ## Licence
 

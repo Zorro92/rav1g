@@ -158,6 +158,9 @@ pub const RAV1G_CHROMA_SAMPLE_POSITION_COLOCATED: u8 = 2;
 /// The budget guard refuses a decoder whose device buffers would leave the application less than this
 /// many bytes (`Rav1gSettings::memory_available`).
 pub const RAV1G_MEMORY_GUARD_MARGIN: u64 = 50331648;
+/// The default of `Rav1gSettings::memory_headroom`: what a creation should leave of what
+/// `Rav1gSettings::memory_available` returns so that its frames are fast, 100 MiB.
+pub const RAV1G_MEMORY_GUARD_HEADROOM: u64 = 104857600;
 
 const _: () = {
     assert!(RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER == LowMemory::SHARED_BACK_BUFFER.0);
@@ -191,6 +194,7 @@ const _: () = {
     assert!(RAV1G_POISON_MODE_INFO == switches::Poison::ModeInfo as u32);
     assert!(RAV1G_POISON_BUFFERS == switches::Poison::Buffers as u32);
     assert!(RAV1G_MEMORY_GUARD_MARGIN == 48 << 20);
+    assert!(RAV1G_MEMORY_GUARD_HEADROOM == 100 << 20);
     assert!(RAV1G_COLOR_PRIMARIES_BT709 == ColorPrimaries::BT709.0);
     assert!(RAV1G_COLOR_PRIMARIES_UNSPECIFIED == ColorPrimaries::UNSPECIFIED.0);
     assert!(RAV1G_COLOR_PRIMARIES_BT470BG == ColorPrimaries::BT470BG.0);
@@ -570,10 +574,10 @@ pub struct Rav1gSettings {
     /// `rav1g_decoder_drain`, and `Rav1gOutput::get_image` is called on a thread of the decoder.
     ///
     /// A frame in parse holds a pipeline slot, so more frames in parse want more slots
-    /// (`frame_slots`). When `memory_available` says that the decoder with those slots does not fit,
-    /// the decoder is created with one frame in parse and the slots of that, and says so in a "MEMORY
-    /// frames in parse" log line: asking for frames in parse never makes a creation fail that would
-    /// work without. `rav1g_decoder_configuration` says what was created.
+    /// (`frame_slots`). When `memory_available` says that the decoder with those slots would not
+    /// leave `memory_headroom`, the decoder is created with fewer slots and frames in parse, and says
+    /// so in "MEMORY headroom" log lines: asking for frames in parse or slots never makes a creation
+    /// fail that would work without. `rav1g_decoder_configuration` says what was created.
     pub frames_in_parse: u32,
     /// The budget guard, or null. On a console an application that goes over its memory limit loses its
     /// D3D12 device, so with this callback the decoder asks before it allocates. The callback returns the
@@ -585,6 +589,22 @@ pub struct Rav1gSettings {
     /// destroy the decoder, with `memory_available_context`.
     pub memory_available: Option<unsafe extern "C" fn(context: *mut c_void) -> i64>,
     pub memory_available_context: *mut c_void,
+    /// With `memory_available`: the bytes a creation should leave of what the callback returns, behind
+    /// its device buffers, so that the frames are not slowed by the memory running out (in a console
+    /// app with 1 GiB a 4K decoder that left 77 MiB ran at 19.5 frames a second, one that left 128 MiB
+    /// at 45.7). 0 is the default, `RAV1G_MEMORY_GUARD_HEADROOM`; a value below
+    /// `RAV1G_MEMORY_GUARD_MARGIN` is that margin. A decoder that would leave less is not refused: it
+    /// is created with one slot less at a time down to 2, and at most one frame in parse less than
+    /// slots (4 slots, then 2 frames in parse and 3 slots, then 1 frame in parse and 2 slots), the
+    /// first that leaves the headroom, or the smallest; that one is refused only for
+    /// `RAV1G_MEMORY_GUARD_MARGIN`. "MEMORY headroom" log lines say what was compared, and
+    /// `rav1g_decoder_configuration` what was created. The callback has to hold back what the
+    /// application itself still allocates for the frames that come out (see `memory_available`): the
+    /// headroom is what stays free when all of that exists.
+    ///
+    /// New in 0.2.157: a field behind `memory_available_context`. An application that fills the
+    /// settings with `rav1g_settings_default` only has to be compiled with this header.
+    pub memory_headroom: u64,
     /// The output of the decoder.
     pub output: Rav1gOutput,
 }
@@ -597,10 +617,10 @@ pub struct Rav1gConfiguration {
     /// The threads that parse (`Rav1gSettings::threads`).
     pub threads: u32,
     /// The frames whose parse may run at the same time (`Rav1gSettings::frames_in_parse`): what the
-    /// settings asked for or the default, unless the budget guard found that the slots of it do not fit,
-    /// and then 1.
+    /// settings asked for or the default, unless the budget guard found that the decoder would not
+    /// leave the headroom, and then fewer (`Rav1gSettings::memory_headroom`).
     pub frames_in_parse: u32,
-    /// The pipeline slots (`Rav1gSettings::frame_slots`).
+    /// The pipeline slots (`Rav1gSettings::frame_slots`), or fewer for the same reason.
     pub frame_slots: u32,
     /// The bytes of the device buffers the creation allocated.
     pub device_size: usize,
@@ -879,6 +899,7 @@ pub unsafe extern "C" fn rav1g_settings_default(settings: *mut Rav1gSettings) {
             frames_in_parse: defaults.frames_in_parse,
             memory_available: None,
             memory_available_context: std::ptr::null_mut(),
+            memory_headroom: defaults.memory_headroom,
             output: Rav1gOutput {
                 context: std::ptr::null_mut(),
                 get_image: None,
@@ -914,6 +935,7 @@ fn settings_of(settings: &Rav1gSettings) -> Settings {
                 u64::try_from(unsafe { available(context.0) }).ok()
             })
         }),
+        memory_headroom: settings.memory_headroom,
     }
 }
 

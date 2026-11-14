@@ -116,6 +116,8 @@ pub struct Spec {
     pub parser_options: rav1g::ParserOptions,
     /// -budget: what the budget callback answers, in bytes.
     pub budget: Option<u64>,
+    /// -headroom: what the budget guard should leave of the budget, in bytes; 0 is the library's default.
+    pub headroom: u64,
 }
 
 /// The shader choices of a task.
@@ -319,6 +321,7 @@ impl Library {
             parser: if spec.parser_rav1d { rav1g::Parser::Rav1d } else { rav1g::Parser::Libaom },
             parser_options: spec.parser_options,
             memory_available: spec.budget.map(|bytes| -> MemoryAvailable { Arc::new(move || Some(bytes)) }),
+            memory_headroom: spec.headroom,
         }
     }
 
@@ -345,6 +348,7 @@ impl Library {
             settings.memory_available = Some(c_budget);
             settings.memory_available_context = bytes as usize as *mut c_void;
         }
+        settings.memory_headroom = spec.headroom;
         if let Some(sink) = sink {
             settings.output = capi::Rav1gOutput {
                 context: Arc::as_ptr(sink).cast_mut().cast(),

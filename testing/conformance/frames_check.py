@@ -18,11 +18,14 @@ What is checked:
     threads), four slots, and the library's defaults (no flag, and -t 0 -parseframes 0 -slots 0): two
     threads, two frames in parse and three slots for the large stream, one, one and two for the small one;
     one frame in parse where the slots are fixed at two. A decoder has one slot more than frames in parse.
-  - **The budget guard.** With a budget (-budget) between what the decoder of one frame in parse needs and
-    what that of two needs, a task that asks for two frames in parse gets a decoder with one frame in
-    parse and two slots, says so in a "MEMORY frames in parse" line, and decodes: asking for frames in
-    parse does not make a creation fail. With a budget that fits it gets two and three. The same for the
-    library's default of the large stream.
+  - **The budget guard.** With a budget (-budget) that holds the decoder of two frames in parse and the
+    headroom the guard wants behind a decoder (100 MiB), a task that asks for two frames in parse, or
+    for nothing, gets them; with 2 MiB less it gets a decoder with one frame in parse and two slots, says
+    so in "MEMORY headroom" lines, and decodes. A fourth slot (-slots 4, or four frames in parse) in the
+    budget of the default gets three slots and two frames in parse, which is the case of the console in
+    1 GiB (docs/phase2-rav1d.md, step 6); in a budget that holds it, four. A budget in which not even
+    the smallest decoder leaves the headroom gets the smallest decoder: the headroom never makes a
+    creation fail. -headroom 48 is the guard without the headroom.
   - **A parse that waits for memory** (-parseopt poolwait: behind its first piece of a pool a frame finds
     the pool empty while an older frame holds a piece of it). The large and the small stream, with one
     frame in parse and with two and four: the frames are those of the reference, and the "MEMORY pools"
@@ -46,8 +49,10 @@ import re
 import subprocess
 import sys
 
-# The margin the budget guard keeps at a creation (AV1_MEMORY_GUARD_MARGIN), MiB.
+# The margin the budget guard keeps at a creation (AV1_MEMORY_GUARD_MARGIN), MiB, and the headroom it
+# wants behind a decoder (AV1_MEMORY_GUARD_HEADROOM).
 MARGIN = 48
+HEADROOM = 100
 CONFIGURATION = re.compile(r'^CONFIGURATION .*?: threads (\d+) \(asked -?\d+\), frames in parse (\d+) \(asked -?\d+\), '
                            r'slots (\d+) \(asked -?\d+\); device buffers ([0-9.]+) MiB', re.M)
 # (label, flags, (threads, frames in parse, slots) for the large stream, the same for the small one).
@@ -145,40 +150,65 @@ def main():
                 'as the reference' if status == 'pass' else status))
             print('%s: threads %d, frames in parse %d, slots %d, %.1f MiB, %s' % ((where,) + created + (status,)))
 
-    # The budget guard, on the large stream: a budget between the two decoders, and one that fits both.
+    # The budget guard, on the large stream. Its headroom: a decoder that would leave less than HEADROOM
+    # of the budget is created with fewer slots and frames in parse, down to the smallest, and never
+    # refused for it. The budgets are fixed by the sizes measured above.
     one = sizes.get((large, 'one frame in parse'))
     two = sizes.get((large, 'two'))
+    four = sizes.get((large, 'two, four slots'))
     summary += ['', '| Budget, MiB | Flags | Frames in parse | Slots | Device buffers, MiB | The guard says |',
                 '| ---: | --- | ---: | ---: | ---: | --- |']
-    if one and two and two > one:
-        between = int((one + two) / 2) + MARGIN
-        enough = int(two) + MARGIN + 16
+    if one and two and four and four > two > one:
+        # Rounded up, so that a budget "for" a decoder holds it and its headroom.
+        fits_one = int(one) + 1 + HEADROOM
+        fits_two = int(two) + 1 + HEADROOM
+        fits_four = int(four) + 1 + HEADROOM
+        assert fits_one < int(two) + HEADROOM and fits_two < int(four) + HEADROOM
+        as_asked = 'created as asked'
+        smaller = 'created in place of'
+        smallest = 'there is no smaller decoder'
         for budget, flags, expected, words in (
-                (between, '-parseframes 2 -t 2', (2, 1, 2), 'is created with 1 frame in parse and 2 slots'),
-                (between, '-parseframes 0 -t 0 -slots 0', (2, 1, 2), 'is created with 1 frame in parse and 2 slots'),
-                (enough, '-parseframes 2 -t 2', (2, 2, 3), 'they fit'),
-                (enough, '-parseframes 0 -t 0 -slots 0', (2, 2, 3), 'they fit')):
+                # The default and its headroom fit; one MiB less and it is the decoder of one frame in parse.
+                (fits_two, '-parseframes 0 -t 0 -slots 0', (2, 2, 3), as_asked),
+                (fits_two, '-parseframes 2 -t 2', (2, 2, 3), as_asked),
+                (fits_two - 2, '-parseframes 0 -t 0 -slots 0', (2, 1, 2), smaller),
+                (fits_two - 2, '-parseframes 2 -t 2', (2, 1, 2), smaller),
+                # A fourth slot: one slot less where the budget is that of the default, as on the console
+                # in 1 GiB; four slots where they leave the headroom.
+                (fits_two, '-slots 4', (2, 2, 3), smaller),
+                (fits_two, '-parseframes 4 -t 8', (8, 2, 3), smaller),
+                (fits_four, '-slots 4', (2, 2, 4), as_asked),
+                # The smallest decoder does not leave the headroom: it is created all the same, because
+                # the margin holds. And with the margin as the headroom, the guard of the builds before.
+                (fits_one - 2, '-parseframes 0 -t 0 -slots 0', (2, 1, 2), smallest),
+                (int(two) + 1 + MARGIN, '-parseframes 0 -t 0 -slots 0 -headroom %d' % MARGIN, (2, 2, 3), as_asked),
+                (int(four) + 1 + MARGIN, '-slots 4 -headroom 1', (2, 2, 4), as_asked)):
             flags = '%s -budget %d' % (flags, budget)
             text, status, created = run(large, large_limit, flags + ' -v', 'budget guard')
             where = '%s, %s' % (large, flags)
-            line = re.search(r'MEMORY frames in parse: .*', text)
+            lines = re.findall(r'MEMORY headroom: .*', text)
+            line = lines[-1] if lines else ''
             if status != 'pass':
-                problems.append('%s: the stream did not decode as its reference says (status %s): asking for frames '
-                                'in parse must not make a task fail' % (where, status))
+                problems.append('%s: the stream did not decode as its reference says (status %s): the headroom '
+                                'must not make a task fail' % (where, status))
             if not created or created[:3] != expected:
                 problems.append('%s: created with %s; threads %d, frames in parse %d, slots %d were expected' % (
                     (where, 'threads %d, frames in parse %d, slots %d' % created[:3] if created else 'no CONFIGURATION line')
                     + expected))
-            if not line or words not in line.group(0):
-                problems.append('%s: no "MEMORY frames in parse" line with "%s": %s' % (
-                    where, words, line.group(0) if line else 'no such line'))
+            if words not in line:
+                problems.append('%s: the last "MEMORY headroom" line does not say "%s": %s' % (
+                    where, words, line or 'no such line'))
+            if words == smaller and not any('not created so' in l for l in lines[:-1]):
+                problems.append('%s: no "MEMORY headroom" line for the decoder that was not created' % where)
+            if not re.search(r'MEMORY budget: .*: accepted', text):
+                problems.append('%s: no "MEMORY budget: ... accepted" line' % where)
             summary.append('| %d | `%s` | %s | %s | %s | %s |' % (
                 budget, flags, created[1] if created else '?', created[2] if created else '?',
-                '%.1f' % created[3] if created else '?', (line.group(0) if line else 'nothing').replace('|', '/')))
-            print('%s: %s' % (where, line.group(0) if line else 'no MEMORY frames in parse line'))
+                '%.1f' % created[3] if created else '?', (line or 'nothing').replace('|', '/')))
+            print('%s: %s' % (where, ' // '.join(lines) if lines else 'no MEMORY headroom line'))
     else:
-        problems.append('%s: the decoder of two frames in parse (%s MiB) is not larger than that of one (%s MiB)' % (
-            large, two, one))
+        problems.append('%s: the decoders of one frame in parse, of two and of four slots (%s, %s, %s MiB) do not '
+                        'grow in this order' % (large, one, two, four))
 
     # A parse that waits for memory: the test switch of the pools, and a stream that fills them.
     pools_line = re.compile(r'MEMORY pools: .* a tile waited for a chunk (\d+) times for the GPU to finish an older '

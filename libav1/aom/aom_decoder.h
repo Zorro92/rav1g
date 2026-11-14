@@ -129,6 +129,21 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
  * adding 32 MiB; with a 4-image 4K output pool that refused the default
  * decoder in a fresh launch by 3.6 MiB. */
 #define AV1_MEMORY_GUARD_MARGIN ((size_t)48 << 20)
+/*!\brief What a decoder creation guarded by memory_available_cb should leave
+ * free so that its frames are fast: the default of
+ * aom_codec_dec_cfg_t::memory_headroom.
+ *
+ * The margin above keeps the device. It does not keep the speed: in a console
+ * app (limit 1024 MiB, 3840x2160 10-bit, 4 output images) the decoder with
+ * three slots, 646.5 MiB of device buffers where the callback said 775.0 MiB
+ * were left, ran at 45.7 frames a second with the app at 897 MiB; the one
+ * with four slots, 695.3 MiB where 772.8 MiB were left, ran at 19.5 with the
+ * app at 948 MiB (the passes that read frame buffers 2 to 12 times slower),
+ * and at 49.6 in an app with 3328 MiB. So between 128 and 77 MiB left behind
+ * the device buffers the memory runs short. A decoder that would leave less
+ * than the headroom is not refused: it is created with fewer slots and
+ * frames in parse. */
+#define AV1_MEMORY_GUARD_HEADROOM ((size_t)100 << 20)
 /*!\brief A creation that does not fit is not refused at once: the system
  * returns the memory of a decoder that was just destroyed some time after
  * the release, so the creation asks the callback again every 20 ms for as
@@ -279,10 +294,10 @@ typedef struct aom_codec_dec_cfg {
    * A frame in parse holds a pipeline slot, so more frames in parse want
    * more slots: with frame_slots 0 the decoder has 1 slot more than frames
    * in parse, at most 4. If the budget guard (memory_available_cb) finds
-   * that the decoder with those slots does not fit, the decoder is created
-   * with one frame in parse and the slots of that (frame_slots, or 2), and
-   * says so in a "MEMORY frames in parse" log line: asking for frames in
-   * parse never makes a creation fail that would work without.
+   * that the decoder with those slots would not leave memory_headroom, the
+   * decoder is created with fewer slots and frames in parse, and says so in
+   * "MEMORY headroom" log lines: asking for frames in parse or slots never
+   * makes a creation fail that would work without.
    * av1_decoder_frames_in_parse says what a decoder has. */
   int frames_in_parse;
   /* Memory budget guard, optional. On a console an application that goes over
@@ -304,6 +319,18 @@ typedef struct aom_codec_dec_cfg {
    * so memory_available_priv must be valid until aom_codec_destroy returns. */
   av1_memory_available_cb_fn_t memory_available_cb;
   void *memory_available_priv;
+  /* With memory_available_cb: the bytes a creation should leave of what the
+   * callback returns, behind its device buffers, so that the frames are not
+   * slowed by the memory running out. 0 is AV1_MEMORY_GUARD_HEADROOM; a value
+   * below AV1_MEMORY_GUARD_MARGIN is that margin (the guard as it was). A
+   * decoder that would leave less is created smaller, never refused for it:
+   * one slot less at a time down to 2, with at most one frame in parse less
+   * than slots (4 slots -> 2 frames in parse and 3 slots -> 1 frame in parse
+   * and 2 slots), the first that leaves the headroom, or the smallest. That
+   * one is then held against AV1_MEMORY_GUARD_MARGIN as every creation is.
+   * "MEMORY headroom" log lines say what was compared;
+   * av1_codec_get_configuration says what was created. */
+  size_t memory_headroom;
   /* Filled by av1_codec_query_memory_requirements next to host_size: the
    * bytes of the D3D12 buffers the creation allocates, and of the buffers
    * that are only created when a stream needs them (one palette buffer per

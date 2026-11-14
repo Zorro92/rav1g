@@ -1381,13 +1381,16 @@ player):
 | 1920x1080 10-bit, before | 166.9 | (207.9) | 248.8 |
 | 1920x1080 10-bit, now | 162.1 | 176.2 | 190.3 |
 
-**The budget guard still decides**: when the app does not have the memory for the decoder of the
-frames in parse, the decoder is created with one frame in parse and two slots, and the task runs as
-it would with `-parseframes 1`. With 775 to 800 MiB left for the decoder, which is what the default
-package had in 1 GiB, 646.5 + 48 MiB fit. The log says which it is:
+**The budget guard still decides**, and since package 0.2.157 it wants a
+[headroom](#the-headroom--headroom) of 100 MiB behind the decoder: when the decoder of the frames in
+parse would leave the app less, the decoder is created with fewer slots and frames in parse (four
+slots, then two frames in parse on three slots, then one frame in parse on two slots), and the task
+runs as it would with those flags. With 775 MiB left for the decoder, which is what the default
+package had in 1 GiB, the default (646.5 MiB) leaves 128.5 MiB and is created; a fourth slot (695.3
+MiB) would leave 77.5 MiB and is not. The log says which it is:
 
 ```text
-MEMORY frames in parse: 2 by default for 3840x2176, with 2 threads and 3 pipeline slots: device buffers 646.5 MiB (with the margin of 48.0 MiB they fit the N.N MiB the application has left for the decoder)
+MEMORY headroom: 2 frames in parse on 2 threads with 3 pipeline slots (the default for 3840x2176): device buffers 646.5 MiB leave N.N MiB of the N.N MiB the application has left for the decoder, the headroom is 100.0 MiB: created as asked
 MEMORY budget: device buffers 646.5 MiB + margin 48.0 MiB = 694.5 MiB, the application has N.N MiB left for the decoder: accepted; palette buffers on first use would add up to 72.5 MiB
 MEMORY decoder created: 3840x2176 10-bit, slots 3, frame buffers 11 + 2 back buffers of 25346048 bytes (24.2 MiB) each; 49 device buffers, 677854464 bytes (646.5 MiB); host pool N of N bytes (N.N MiB) in use
 MEMORY decoder created pools: mode info 2040 chunks of 256 records, 111.6 MiB; coefficients 2103 chunks of 7680, 61.6 MiB; transform block records 2040 chunks of 384, 12.0 MiB; a chunk is what a 64x64 area needs at worst, and the frames in flight take them in pieces as they are parsed
@@ -1397,11 +1400,12 @@ Frame slots: 3
 Frames in parse: 2 on 2 parser thread(s) (the library's default for the frame size)
 ```
 
-and where it does not fit:
+and where it would not leave the headroom (`-slots 4` in 1 GiB):
 
 ```text
-MEMORY frames in parse: 2 by default for 3840x2176, with 2 threads and 3 pipeline slots: the device buffers of that decoder, 646.5 MiB, and the margin of 48.0 MiB do not fit the N.N MiB the application has left for the decoder (asked for 300 ms). The decoder is created with 1 frame in parse and 2 slots instead
-MEMORY decoder created: threads 2, frames in parse 1, slots 2, device buffers 597.6 MiB
+MEMORY headroom: 2 frames in parse on 2 threads with 4 pipeline slots: device buffers 695.3 MiB would leave N.N MiB of the N.N MiB the application has left for the decoder, less than the headroom of 100.0 MiB (asked for 300 ms): not created so
+MEMORY headroom: 2 frames in parse on 2 threads with 3 pipeline slots: device buffers 646.5 MiB leave N.N MiB of the N.N MiB the application has left for the decoder, the headroom is 100.0 MiB: created in place of 2 frames in parse on 2 threads with 4 pipeline slots
+MEMORY decoder created: threads 2, frames in parse 2, slots 3, device buffers 646.5 MiB
 ```
 
 When the decoder is released it says what the pools were used for:
@@ -1451,9 +1455,11 @@ then has two frames in parse on two threads and three slots, the others one:
 
 The first line is one frame in parse on two threads and two slots (597.6 MiB); the second is the
 default, two frames on two threads with three slots (646.5 MiB); the third is the default with a
-fourth slot, two frames on the GPU side, which is what 0.2.153 and 0.2.154 timed (695.3 MiB now, and
-it fits 1 GiB too): the difference between the second and the third is what the third slot's absence
-costs. The last two are the same with six threads. To read: the frames per second, `cpu
+fourth slot, two frames on the GPU side, which is what 0.2.153 and 0.2.154 timed (695.3 MiB now).
+Where the fourth slot leaves the headroom (the `hevcPlayback` package) the difference between the
+second and the third is what the third slot's absence costs; in 1 GiB the guard gives the third task
+three slots since 0.2.157, so it is the second task again (0.2.156 created the four slots there and
+ran at 19.5 fps, see [the headroom](#the-headroom--headroom)). The last two are the same with six threads. To read: the frames per second, `cpu
 entropy/tile decode, wall` and `thread sum`, `gpu busy`, and the waits (`cpu wait_slot`, `cpu
 wait_sec_slot`, `cpu wait_output`). The `Frames in parse:` and `Frame slots:` lines of each task say
 what the decoder had.
@@ -1543,6 +1549,7 @@ happens to those clears. None of them changes the decoded output.
 | `-nofitsize` | The decoder is created for 4096x2176 10-bit whatever the stream is, as it was up to package 0.2.7.0. Without it (the default) the decoder is created for the stream's largest frame size and bit depth, which makes every buffer smaller; see [Decoder size](#decoder-size--nofitsize). `-fitsize` is still accepted and changes nothing. |
 | `-lowmem` | All three memory reductions: one back buffer shared by all frames (which is the default on its own), and smaller per-slot shares of the mode info pool and of the coefficient buffer; see [Smaller decoder](#smaller-decoder--lowmem). |
 | `-lowmemparts N` | Exactly the reductions in `N`, the sum of 1 (shared back buffer), 2 (mode info shares) and 4 (coefficient shares). Default 1. `-lowmemparts 0` is none of them, `-lowmem` is `-lowmemparts 7`. |
+| `-headroom N` | The MiB the [budget guard](#the-headroom--headroom) should leave free behind the decoder of this task; a decoder that would leave less is created with fewer slots and frames in parse. Default 0: the library's 100. 48 or less: only the guard's margin, as up to package 0.2.156. |
 | `-noguard` | The decoder of this task is created without the [budget guard](#budget-guard-memory-refused). Only for the test described under [Memory after a decoder is destroyed](#memory-after-a-decoder-is-destroyed): a creation that does not fit loses the D3D12 device for the rest of the launch. Has no effect on a task that reuses the decoder of the task before. |
 | `-budget N` | Only where the system gives the app no memory limit, which is the player's decoder code in `rav1g-dec -playersmoke` (CI on WARP): a model of the app's memory takes the place of `Windows::System::MemoryManager`, with a limit `N` MiB above what the process uses without a decoder, so the budget guard, the settle wait and the credit of a released decoder run there too; see [The app's memory as a model](#the-apps-memory-as-a-model--budget--retain). In the app the flag does nothing (one log line says so). |
 | `-retain N` | With `-budget`: a destroyed decoder leaves up to `N` MiB of its device buffers charged to the app until the next decoder exists, which is what the console does. |
@@ -1856,7 +1863,9 @@ after a decoder it destroyed as available to the next one, or a switch from one 
 to another can be refused although it fits.
 
 - **At the creation**: the decoder adds up the device buffers it is about to create, the
-  same way it creates them, and is refused when they would leave less than
+  same way it creates them. When they would leave less than [the headroom](#the-headroom--headroom)
+  it is created with fewer slots and frames in parse; the decoder that is then created is refused
+  when its buffers would leave less than
   `AV1_MEMORY_GUARD_MARGIN`, 48 MiB: headroom for what decoding takes outside the
   decoder's buffers and the output images. Nothing is added for the creation itself; see
   [the margin](#the-margin) below for the numbers. A creation that does not fit is not
@@ -1949,6 +1958,73 @@ Console, package 0.2.6.0, limit 1024.0 MiB, 4 output images of a 3840x2160 10-bi
 - The player now waits for the pipeline states before the first task, so `app before the
   decoder` is about 161 MiB in a fresh launch, not 77, and the difference to `app after
   the decoder` is the creation alone.
+
+#### The headroom (`-headroom`)
+
+The margin keeps the device. It does not keep the speed. Console, package 0.2.156.0, limit 1024.0
+MiB, 3840x2160 10-bit, 4 output images, `-nopresent -gputime`, 300 frames of `j4k40`:
+
+| Decoder | Device buffers, MiB | The guard was told | Left behind the buffers | App while decoding | fps |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| default: 2 frames in parse, 3 slots | 646.5 | 775.0 MiB left | 128.5 MiB | about 897 of 1024 MiB | 45.7 |
+| `-slots 4` | 695.3 | 772.8 MiB left | 77.5 MiB | about 948 of 1024 MiB | 19.5 |
+| `-slots 4` in the `hevcPlayback` package (3328 MiB) | 695.3 | | | | 49.6 |
+
+With the fourth slot the passes that read frame buffers were 2 to 12 times slower (`inter` 1.5 to
+19.2 ms a frame) and the decode thread waited for the GPU 96 % of the time: the memory was short,
+the code is the same. Both creations passed the margin (646.5 + 48 and 695.3 + 48 MiB).
+
+What the guard is told is already what stays for the decoder: the player's callback holds the
+textures of the output pool back until they exist (100.9 MiB here), so `left - device buffers` is
+what the app has free when the frames come out: 128.5 and 77.5 MiB by the guard's numbers, 127 and
+76 MiB measured (1024 - 897 and 1024 - 948). The 100 to 120 MiB by which the app grows between
+`MEMORY app after the decoder` and `MEMORY app decoding, 30 frames out` are that pool, counted
+before. So the guard had the right numbers and the wrong threshold.
+
+Since package 0.2.157 the guard wants a **headroom of 100 MiB** behind the device buffers
+(`AV1_MEMORY_GUARD_HEADROOM`, `Rav1gSettings::memory_headroom`; between the 128.5 MiB that ran and
+the 77.5 MiB that did not). A decoder that would leave less is **not refused**: the decoder is
+created smaller, one slot less at a time down to two, with at most one frame in parse less than
+slots:
+
+| Asked for | Then | Then |
+| --- | --- | --- |
+| 4 slots, 2 to 4 frames in parse | 3 slots, 2 frames in parse | 2 slots, 1 frame in parse |
+| 3 slots, 2 frames in parse (the default above 1440p) | 2 slots, 1 frame in parse | |
+| 4 slots, 1 frame in parse | 3 slots | 2 slots |
+
+The first that leaves the headroom is created; when none does, the smallest, with a line that says
+its frames may be slow. That decoder is then held against the margin of 48 MiB as before, which is
+the only thing a creation is refused for. For a 3840x2160 10-bit stream in the default package
+(about 775 MiB left for the decoder):
+
+| Task | Device buffers | Leaves | Created |
+| --- | ---: | ---: | --- |
+| no flag | 646.5 | 128.5 | as asked: 2 frames in parse, 3 slots |
+| `-slots 4` | 695.3 | 77.5 | 2 frames in parse, 3 slots (646.5 MiB) |
+| `-parseframes 1` | 597.6 | 177.4 | as asked: 1 frame in parse, 2 slots |
+
+The default needs 746.5 MiB left, the fourth slot 795.3. `-headroom N` sets the headroom of a task
+in MiB (0, the default: the library's 100; 48 or less: the margin alone, which is the guard of
+0.2.156 and before, for a run that wants the cliff back). What it does not count is what the player
+does not hold back either: the readback buffers of an md5 or file run (94.9 MiB for 4 images of 4K
+10-bit). An md5 run of a 4K clip therefore keeps its two frames in parse and runs with less free
+than a timing run; it is not a timing.
+
+```text
+MEMORY headroom: 2 frames in parse on 2 threads with 4 pipeline slots: device buffers 695.3 MiB would leave N.N MiB of the N.N MiB the application has left for the decoder, less than the headroom of 100.0 MiB (asked for 300 ms): not created so
+MEMORY headroom: 2 frames in parse on 2 threads with 3 pipeline slots: device buffers 646.5 MiB leave N.N MiB of the N.N MiB the application has left for the decoder, the headroom is 100.0 MiB: created in place of 2 frames in parse on 2 threads with 4 pipeline slots
+MEMORY headroom: 1 frame in parse on 2 threads with 2 pipeline slots: device buffers 597.6 MiB would leave N.N MiB of the N.N MiB the application has left for the decoder, less than the headroom of 100.0 MiB, and there is no smaller decoder: created in place of 2 frames in parse on 2 threads with 3 pipeline slots if the margin below holds; its frames may be slow for want of memory
+```
+
+Without a budget (no callback, `-noguard`, or a callback that does not know) nothing is compared
+and there is no such line; `MEMORY budget: not checked` says why.
+
+In CI the decision is held with fixed budgets (`rav1g-dec -budget N`, `frames_check.py`, job
+`rust-frames`): the default in a budget of its size and 100 MiB, with 2 MiB less, a fourth slot in
+the budget of the default (three slots, as on the console) and in its own, a budget in which nothing
+leaves the headroom (the smallest decoder, created), and `-headroom 48`; and by a unit test with
+the two console cases above (`create.rs`).
 
 One launch with three decoders (flags of package 0.2.7.0: `default`, then `-fitsize`, then
 `-lowmem -fitsize -slots 3`; now `-nofitsize -lowmemparts 0`, `-lowmemparts 0` and
