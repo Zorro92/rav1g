@@ -2097,6 +2097,10 @@ is the right input in both, and the default gives one frame in parse in 1 GiB an
   MiB gives the 2160p 10-bit stream a decoder with one frame in parse and two slots where two frames
   and four slots were asked for, and it decodes); the player's decoder code with a task of two frames
   in parse. Everything that existed is as it was, with both parsers.
+- *The matrix* (`frames-matrix`, run 43573509781, started by hand on `17b5dea`): the whole set with
+  every combination of 1 to 4 frames in parse and as many to 8 threads, twice each: 52 runs of 254
+  streams, all as `expected.txt` says (four jobs of 26 to 34 minutes side by side). The jobs of a push
+  were green in that run as well, a second time.
 - *The decoder* under wine on lavapipe, the 244 vectors of AOM: the frames are those of the
   references with 2, 3 and 4 frames in parse on 2, 3, 4, 6 and 8 threads, with 2 and 3 slots (where a
   frame waits for the slot of the one before it), through `rav1g.h`, and with `-poisonbuf`: 14 runs,
@@ -2163,7 +2167,9 @@ so that the last two columns are what frames in parse add:
 the push; `rust-frames` 12.2 minutes, `rust-frames-threads` 7.2, `parse-check` 9 (the oracle with
 frames in parse: twelve runs, 254 of 254 each). The packages of run 153: `uwp_dx12_player_0.2.153.0_x64.msix`
 (default), `0.2.153.2` (MSVC) and `0.2.153.3` (`hevcPlayback`, the one for the timing with two frames
-in parse: artifact `rav1g-testplayer-hevcplayback-x64-43572104446`).
+in parse: artifact `rav1g-testplayer-hevcplayback-x64-43572104446`). Run 43573509781 (number 154, by hand
+with `frames_matrix`, on the docs commit behind them: the same code) has the matrix above and the same
+packages as 0.2.154.x.
 
 **Left for step 5** (the pool in place of the shares).
 
