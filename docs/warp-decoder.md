@@ -48,11 +48,13 @@ RAV1G_SHADER_DIR=<dir> cargo xwin build --release --target x86_64-pc-windows-msv
 The shader headers come from a Windows build (FXC): CI keeps them as the artifact
 `rav1g-shader-headers-<run id>`.
 
-CI: the job `rust` builds the program with MSVC and runs every check of this document with it
-(artifacts `rav1g-dec-x64-<run id>`, `rav1g-dec-conformance-<run id>`,
-`rav1g-dec-stage-dumps-<run id>`); `rust-cross` builds it on Linux (`rav1g-dec-x64-xwin-<run id>`)
-and `rust-cross-run` runs that program: the conformance set, the player's decoder code, the decode
-errors, the order check, `-poisonmi`, `-poisonbuf` and the set with `-interfast`; `cpp-reference` and `rust-equal` are the comparison with the C++ decoder.
+CI: the job `rust` builds the program with MSVC (artifact `rav1g-dec-x64-<run id>`), and the jobs
+`rust-conformance`, `rust-parser-c` and `rust-switches` run every check of this document with it,
+side by side ([The jobs of a push](#the-jobs-of-a-push)); `rust-cross` builds it on Linux
+(`rav1g-dec-x64-xwin-<run id>`) and `rust-cross-run` and `rust-cross-run-parsers` run that program:
+the conformance set, the player's decoder code, the decode errors, the order check, the memory
+check, `-poisonmi`, `-poisonbuf`, the set with `-interfast` and with `-syncclear`, and all of it with
+`-parser c`; `cpp-reference` and `rust-equal` are the comparison with the C++ decoder.
 
 ## What it shares with the test player
 
@@ -141,8 +143,8 @@ of CI: four tasks (a small 8-bit vector; 10-bit with four threads and three fram
 whose frames change size, from Matroska, with `-r -lowmem`; spatial layers with `-gputime
 -syncclear`), each of which has to end with `MD5 is OK`; the log has to name the Rust library
 (`LIBRARY rav1g ... the Rust host`) and have no error line; the launch has to end, and so does a
-launch without a task file, which says `No args were found`. The `rust` job runs it with the MSVC
-build and `rust-cross-run` with the build of Linux, whose C and C++ are compiled by clang as in the
+launch without a task file, which says `No args were found`. The `rust-conformance` job runs it with
+the MSVC build and `rust-cross-run` with the build of Linux, whose C and C++ are compiled by clang as in the
 default package of the player. The cases with a decode error are in
 [A decode error in the middle of a stream](#a-decode-error-in-the-middle-of-a-stream).
 
@@ -202,7 +204,7 @@ rav1g-dec -sm6test
 | `-timeout <seconds>` | give up on a task after this time |
 | `-name <text>` | what the `BEGIN` and `RESULT` lines call the stream (default: its file name) |
 | `-cdefv1`, `-nofitsize`, `-lowmemparts <n>`, `-lowmem`, `-slots <n>`, `-intrav2`, `-intraopt`, `-syncclear` (`-asyncclear` is the default and accepted) | as in the [test player](test-player.md#defaults-and-opt-out-flags) |
-| `-lfhsplit <n>`, `-intraedgefix` | the [experiments](test-player.md#experiments) of the test player; with the `experiments` input the `rust` job runs the whole set with each, and with a program built with `--features uavsync` from the shaders of the uavsync package (it prints `SHADERS uavsync`) |
+| `-lfhsplit <n>`, `-intraedgefix` | the [experiments](test-player.md#experiments) of the test player; with the `experiments` input the `rust-experiments` job runs the whole set with each, and with a program built with `--features uavsync` from the shaders of the uavsync package (it prints `SHADERS uavsync`) |
 | `-poisonmi`, `-poisonbuf` | debugging, off by default: the decoder fills the mode info pool (`-poisonmi`) or every buffer the CPU writes for the shaders (`-poisonbuf`) with the byte 0xA5 when it creates it, instead of leaving what the memory held. With `-poisonbuf` it also fills the constants of every stage again in every frame, right before the stage writes them (their memory is reused from frame to frame). What the decoder clears or initialises after the creation is as in a normal run. The output must be the same; a shader that reads bytes the CPU never wrote gives another one, or loses the device. The decoder passes both. See [Order check and poisoned buffers](#order-check-and-poisoned-buffers) |
 | `-interfast`, `-interfastlists` | the [inter fast path](test-player.md#inter-fast-path--interfast) of the test player: inter blocks listed by the fraction of their motion vectors (`inter_fast`, `inter_compound_fast`; with `-interfastlists` the original shaders on those lists), same output; the `rust` job decodes the whole set once more with `-interfast` on every push |
 | `-interfastmode <n>` | `av1_set_inter_fast(n)` for diagnosis: 1 is `-interfast`, +2 keeps `inter_main` on the lists of one reference, +4 `inter_compound` on those of two (7 is `-interfastlists`); 8 only makes room for the lists in the block maps and leaves the path off |
@@ -286,7 +288,7 @@ python testing/stage_dump/stage_dump.py list dumps
 python testing/stage_dump/stage_dump.py compare console-dumps dumps
 ```
 
-The `rust` job writes such dumps on WARP for the streams and frames listed in
+The `rust-conformance` job writes such dumps on WARP for the streams and frames listed in
 `testing/conformance/dump_tasks.txt` (`<stream> <frames> [<temporal units>]`), after the
 run, and keeps them in the artifact `rav1g-dec-stage-dumps-<run id>` (those of the C++ decoder
 are in `rav1g-cpp-reference-stage-dumps-<run id>`), one directory per stream
@@ -334,8 +336,9 @@ vectors, and for the two monochrome vectors once the grey planes are added.
 
 ## Conformance run
 
-`.github/workflows/build.yml` runs it on every push, in two jobs (and a third time with the program
-built on Linux, `rust-cross-run`).
+`.github/workflows/build.yml` runs it on every push: one job has the streams, one builds the
+program, and the jobs behind that one run it ([The jobs of a push](#the-jobs-of-a-push)); and once
+more with the program built on Linux (`rust-cross-run`, `rust-cross-run-parsers`).
 
 **`conformance-streams`** (Linux) runs `testing/conformance/prepare_streams.sh`, which reads
 `testing/conformance/streams.txt` and fetches or makes:
@@ -366,7 +369,8 @@ restores them from there. The job's artifact `rav1g-conformance-md5-<run id>` ha
 references and the task list only.
 
 **`rust`** (Windows; it was `conformance`, with `warp_decoder`, while the C++ host was in this
-branch) builds `rav1g-dec` and runs `testing/conformance/run.py`: the
+branch) builds `rav1g-dec`, and **`rust-conformance`** (Windows) runs `testing/conformance/run.py`
+with it: the
 vectors in one decoder process, in the order of the list, with `-t 4`, and every large stream
 (the cuts and the streams encoded in the job) in a process of its own (see
 [Results](#results) for why). A task that ends in a
@@ -379,9 +383,10 @@ the D3D12 device is repeated). Every task has a
 timeout (300 s for a vector, 2400 s for the larger streams), so a hang ends that stream, not
 the job.
 
-Before the streams the job runs `rav1g-dec -sm6test` and shows the `CAPS` and `SM6TEST` lines of
-WARP in its summary ([Shader Model 6 test](test-player.md#shader-model-6-test--sm6test)); the log is
-`sm6test/warp.log` in the artifact.
+Behind the build the `rust` job runs `cargo test` and `rav1g-dec -sm6test`, and shows the `CAPS` and
+`SM6TEST` lines of WARP in its summary
+([Shader Model 6 test](test-player.md#shader-model-6-test--sm6test)); the log is `warp.log` in the
+artifact `rav1g-dec-sm6test-<run id>`.
 
 The result is a table in the job summary, one row per stream: size, bit depth, frames,
 matching frames, first bad frame, decode time, result. The artifact
@@ -389,12 +394,81 @@ matching frames, first bad frame, decode time, result. The artifact
 stream (`logs/<stream>.log`) and the md5 of every output frame (`md5/<stream>.md5`, in the
 player's format).
 
-**`colour`** (Linux) reads the `COLOUR` lines of three of these runs in that artifact (the whole
-set with rav1d's parser, through `rav1g.h`, and with `-parser c`) and holds them against FFmpeg's
+**`colour`** (Linux) reads the `COLOUR` lines of three of these runs in the artifacts of
+`rust-conformance` and `rust-parser-c` (the whole set with rav1d's parser, through `rav1g.h`, and
+with `-parser c`) and holds them against FFmpeg's
 `trace_headers` and against `ffprobe` with libdav1d, stream by stream
 (`testing/conformance/colour_check.py`, [color.md](color.md#the-check-in-ci)): the colour description
 of the sequence header, and the colour properties, the mastering display and the light levels of
 every output frame.
+
+### The jobs of a push
+
+Until 2026-11-13 one job, `rust`, built the program and ran every check with it, one after the
+other: 50.5 minutes of a push that took 51.8 (run 43517057205), 17.4 of them the paired timing of
+the two parsers. Now `rust` builds the program once and keeps it as an artifact, and the jobs behind
+it take it from there and run side by side, each on its own runner with the streams from the cache.
+Run 43540270287 (b766420), 17.1 minutes for the push:
+
+| Job | What it runs | Artifacts (`-<run id>`) | Minutes |
+| --- | --- | --- | ---: |
+| `rust` (Windows) | `cargo build --release` with MSVC, the shader checks, `cargo test`, `-sm6test` | `rav1g-dec-x64`, `rav1g-dec-sm6test` | 2.1 |
+| `rust-conformance` (Windows) | the player's decoder code; the whole set; the parse digest; the whole set with `-capi`; decode errors in cut streams (Rust interface, `rav1g.h`, player); the order check; the memory check; the timing smoke test; the stage dumps; the MEMORY lines | `rav1g-dec-conformance`, `rav1g-dec-stage-dumps`, `rav1g-parse-digest-msvc` | 8.0 |
+| `rust-parser-c` (Windows) | with `-parser c`: the whole set; the part of the set with `-poisonmi`, with `-poisonbuf` and with `-capi`; the whole set with `-interfast`; decode errors in cut streams (three ways); the order check; the memory check; the player's decoder code; the stage dumps; the MEMORY lines | `rav1g-dec-parser-c` | 12.3 |
+| `rust-switches` (Windows) | the part of the set with `-poisonmi` and with `-poisonbuf`; the whole set with `-interfast`; the whole set and the memory check with `-syncclear`; with `-parser rav1d -parseopt none,latelists,time` the whole set, the stage dumps, the player's decoder code and the decode errors in cut streams | `rav1g-dec-switches` | 10.7 |
+| `rust-parsers-equal` (Linux) | no decoder: the run, the dumps and the MEMORY lines of `-parser c` against those of the default; the dumps of the other parser switches against those of the default, byte for byte, and its run and dumps against those of `-parser c` | | 0.4 |
+| `rust-equal` (Linux) | the run, the dumps and the MEMORY lines of `rust-parser-c` against the C++ decoder (`cpp-reference`) | | 0.2 |
+| `colour` (Linux) | the `COLOUR` lines of `rust-conformance` (two runs) and `rust-parser-c` | `rav1g-colour` | 0.8 |
+| `rust-cross-run` (Windows) | the program of the Linux build: the whole set; the parse digest; the player's decoder code; decode errors; the order check; the memory check; `-poisonmi`, `-poisonbuf`, `-interfast`, `-syncclear` | `rav1g-dec-xwin-conformance`, `rav1g-parse-digest-xwin` | 13.3 |
+| `rust-cross-run-parsers` (Windows) | the program of the Linux build: everything with `-parser c`, and the other side of the parser switches | `rav1g-dec-xwin-parsers` | 13.5 |
+| `parse-digest` (Linux) | the digests of `rust-conformance` and `rust-cross-run` against those of `parse-check` | | 0.1 |
+
+The other jobs are as before and done within 5.5 minutes: `player` (4.5), `cpp-reference` (5.2),
+`parse-check` (3.2), `rust-cross` (3.0), the host checks of the shaders, `rav1d`,
+`conformance-streams`, `shader-headers`. A job is a draw of a runner: the whole set took 1.8
+minutes in `rust-conformance` and 2.9 in `rust-parser-c` and in the two `rust-cross-run` jobs of
+that run. In the two runs so far the longest job took 13.5 and 13.8 minutes, and the jobs of a
+push were done after 17.1 and 17.8 minutes (the second is run 43540279557, without its
+`rust-experiments` job).
+
+- The artifact of the `rust` job before, `rav1g-dec-conformance-<run id>`, is three now, one per
+  job, each with the directories of its runs (`conformance-c/`, `stage-dumps-c/` and
+  `memory-lines-c/` are in `rav1g-dec-parser-c-<run id>`; `conformance-interfast/`,
+  `conformance-syncclear/` and `stage-dumps-switches-rav1d/` in `rav1g-dec-switches-<run id>`).
+- The comparisons of two runs need the output of two jobs, so they are a job of their own behind
+  the three, `rust-parsers-equal`; it also runs when one of the three failed, on what that job wrote.
+- A job that fails fails the run, and the jobs behind it are skipped: `rust-equal` wants
+  `rust-parser-c`, `colour` wants `rust-conformance` and `rust-parser-c`, `parse-digest` wants
+  `rust-conformance` and `rust-cross-run`.
+- `rust-cross-run` was one job of 21 minutes; its two halves share nothing but the program.
+- Every command of the workflow before is in the workflow now, once. Not on a push any more: the
+  paired timing, below.
+
+Two jobs run only when the workflow is started for them (`workflow_dispatch`):
+
+- `rust-experiments`, with the `experiments` input: the whole set with each experiment flag and
+  with the poisoned buffers (seven passes), and with the program the `rust` job then also builds
+  with the shaders of the uavsync package (`rav1g-dec-experiments-<run id>`; 26.9 minutes in run
+  43540279557).
+- `parser-timing`, with the `parser_timing` input.
+
+### Paired timing of the parsers
+
+`testing/conformance/parser_timing.py` times the decoder with `-parser c`, with `-parser rav1d` and
+with rav1d and other switches in turns on one runner ([phase2-rav1d.md](phase2-rav1d.md)). It was a
+step of every push and is not any more: the console makes the speed decisions, the C parser leaves
+in the last step of phase 2, and the step took 17 minutes. The job `parser-timing` runs
+
+- when the workflow is started by hand with the input:
+  `gh workflow run build.yml --ref main -f parser_timing=true` (or "Run workflow" on the Actions
+  page, with the box `parser_timing`), and
+- once a week, Monday 03:23 UTC (`schedule`), with every job of a push.
+
+Its tables are in the summary of the job, and the artifact `rav1g-parser-timing-<run id>` has, for
+each of the four runs of the script (`parser-timing/`, `parser-timing-t4/`,
+`parser-timing-d2-t4/`, `parser-timing-switches/`), `parser-timing.md` and the log of every timed
+decode. On a runner of its own the job took 12.9 minutes (run 43540279557, started with both
+inputs; the other jobs of the workflow run next to it).
 
 ### Order check and poisoned buffers
 
@@ -405,8 +479,8 @@ read two bytes of struct padding in the mode info, and a decoder that got the me
 destroyed one found other bytes there than zero. `av1-1-b8-22-svc-L2T1-2` failed that way now and
 then behind `svc-L2T1`, `av1-1-b10-00-quantizer-00` every time behind an 8-bit quantizer vector.
 The repeat alone showed the stream as `unstable`, the job was run again, and it passed. Three steps
-of the `rust` job now test for it directly (the workflow of branch `cpp` has the same steps with
-`warp_decoder`):
+now test for it directly, the first in the `rust-conformance` job and the other two in
+`rust-switches` (the workflow of branch `cpp` has the same steps with `warp_decoder`):
 
 - **`testing/conformance/order_check.py`** decodes five sequences, each in one decoder process and
   in this order, every stream against its reference: `av1-1-b8-00-quantizer-00` then
@@ -452,7 +526,7 @@ where the cut takes a later tile. `--then-whole` lets the undamaged stream follo
 `testing/conformance/cut_tile_check.py` does that to two streams of the set (a vector with one tile,
 the stream with eight) and runs them, each time followed by an undamaged stream in the same process:
 with `rav1g-dec` through the Rust interface and through `rav1g.h`, and with the decoder code of
-the test player on the same library (`rav1g-dec -playersmoke`), all in the `rust` job. It wants: the task of a damaged stream ends with that error and has the frames before the
+the test player on the same library (`rav1g-dec -playersmoke`), all in the `rust-conformance` job. It wants: the task of a damaged stream ends with that error and has the frames before the
 damage right; the stream behind it is right; with `-continue_on_error` the decoder goes on, and the
 frames before the damage and from the next key frame on are those of the reference (in the stream
 with eight tiles the key frame 11 temporal units behind the damage; for the vector, which has one
@@ -466,8 +540,8 @@ gets into over several decoders: a destroyed decoder left memory behind, and the
 credit of the budget guard when a creation was refused, so that the next, smaller decoder was refused
 as well ([test-player.md](test-player.md#budget-guard-memory-refused)).
 `testing/conformance/memory_check.py --tool <rav1g-dec.exe> --streams <dir> --out <dir>` runs two
-sequences that would show them again, in the `rust` job (MSVC build) and in `rust-cross-run` (the
-build of Linux).
+sequences that would show them again, in the `rust-conformance` job (MSVC build) and in
+`rust-cross-run` (the build of Linux).
 
 **The warm sequence.** One `rav1g-dec -memstate -keep_going` process runs six tasks eight times over,
 a few temporal units each: the largest stream of the set (3840x2160 8-bit; 470.7 MiB of device

@@ -247,12 +247,13 @@ The run has more jobs. On Linux, `cdef-check`, `warp-check` and `intra-check` ru
 host-side comparisons of the CDEF shaders, of the warp shaders with libaom and of the intra
 paths, and `sync-check` runs every shader with group memory under an adversarial thread
 schedule ([below](#host-side-check-of-the-thread-groups)); `intra-check` also runs the self-test of the timing summary, the sequence header
-check and the self-test of the [Shader Model 6 test](#shader-model-6-test--sm6test)'s comparisons, and uploads its log as `rav1g-intra-check-<run-id>`. `conformance-streams` (Linux)
-and `rust` (Windows) are the conformance run: `rav1g-dec`, the decoder as a desktop program,
-decodes AOM's test vectors and other streams on the WARP software adapter of the runner and
-compares the md5 of every frame, and runs the decoder code of this player on the same library
-(`rav1g-dec -playersmoke`); `rust-cross` and `rust-cross-run` build the same program on Linux and
-run it; `cpp-reference` and `rust-equal` hold its output against the C++ decoder of branch `cpp`.
+check and the self-test of the [Shader Model 6 test](#shader-model-6-test--sm6test)'s comparisons, and uploads its log as `rav1g-intra-check-<run-id>`. `conformance-streams` (Linux),
+`rust` (Windows, the build) and the jobs behind it (`rust-conformance`, `rust-parser-c`,
+`rust-switches`, `rust-parsers-equal`) are the conformance run: `rav1g-dec`, the decoder as a
+desktop program, decodes AOM's test vectors and other streams on the WARP software adapter of the
+runner and compares the md5 of every frame, and runs the decoder code of this player on the same
+library (`rav1g-dec -playersmoke`); `rust-cross` builds the same program on Linux and
+`rust-cross-run` and `rust-cross-run-parsers` run it; `cpp-reference` and `rust-equal` hold its output against the C++ decoder of branch `cpp`.
 See [warp-decoder.md](warp-decoder.md). The run is green only if all jobs pass.
 
 ### Host-side check of the thread groups
@@ -3118,7 +3119,7 @@ rav1g-dec -sm6test -hw
 
 the first on WARP, the second on the first hardware adapter. The `rust` job of the workflow
 runs the first and shows the `CAPS` and `SM6TEST` lines in its summary (`Shader Model 6 test on
-WARP`; the log is `sm6test/warp.log` in the artifact `rav1g-dec-conformance-<run id>`). What WARP
+WARP`; the log is `warp.log` in the artifact `rav1g-dec-sm6test-<run id>`). What WARP
 does with a shader never fails the job: a refused pipeline state is a result, and values that
 differ put a warning on the run. The job fails when the test itself breaks.
 

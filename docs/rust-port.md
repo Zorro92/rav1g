@@ -1522,7 +1522,10 @@ dumps, the MEMORY lines, the Shader Model 6 test; with the `experiments` input t
 whole set with poisoned buffers and a build with the uavsync shaders), `cpp-reference`, `rust-equal`,
 `shader-headers`, `rust-cross`, `rust-cross-run` (the set and the player's decoder code with the program
 built on Linux), and the host checks of the shaders. The `-interfast` pass of the whole set, which ran
-with `warp_decoder` only, runs with `rav1g-dec` on every push.
+with `warp_decoder` only, runs with `rav1g-dec` on every push. (Since 2026-11-13 `rust` is the build,
+and its checks are in jobs behind it that run side by side: `rust-conformance`, `rust-parser-c`,
+`rust-switches`, `rust-parsers-equal`; `rust-cross-run` is two jobs.
+[warp-decoder.md](warp-decoder.md#the-jobs-of-a-push).)
 
 **On CI** (run 43371188041, commit 27fe25d, all 14 jobs green at the first attempt):
 

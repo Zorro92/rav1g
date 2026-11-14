@@ -905,7 +905,10 @@ would mean writing each field only where libaom writes it; that was not done.
 Found on the way to green: the superres denominator in a sequence without superres (libaom does not
 write it; the info line of a dump printed 0 against 8), fixed in the host.
 
-**Timing on CI.** `testing/conformance/parser_timing.py`: `rav1g-dec -gputime` with `-parser c` and
+**Timing on CI.** (Since 2026-11-13 not a step of a push: the job `parser-timing`, once a week and
+when the workflow is started with the `parser_timing` input,
+[warp-decoder.md](warp-decoder.md#paired-timing-of-the-parsers).)
+`testing/conformance/parser_timing.py`: `rav1g-dec -gputime` with `-parser c` and
 `-parser rav1d` in turns on one runner, three rounds each, milliseconds a frame (the mean of the rounds'
 means). WARP is a CPU rasteriser on the same cores, so `setup` is the wait for a slot and `frame` is
 mostly that; the parse is what compares. One parser thread, except the last stream (eight tiles, four
@@ -1490,7 +1493,8 @@ parser thread; ms a frame, the mean and the range of the rounds' means):
   frame), the widest gap of the set.
 - What the stream costs CI: a decode of its 30 temporal units takes 11 s on WARP. The `rust` job
   went from 43.6 to 50.5 minutes (with it in seven runs of the whole set and 20 timed decodes),
-  `parse-check` from 2.6 to 3.7 minutes.
+  `parse-check` from 2.6 to 3.7 minutes. (The `rust` job was split and the timed decodes taken off
+  the push on 2026-11-13: [warp-decoder.md](warp-decoder.md#the-jobs-of-a-push).)
 - The memory check is as before with all of it: the video memory after every release is 0, the device
   buffers are those of before (497.1 MiB in use for the 2160p 8-bit decoder, 657.9 for the decoder of
   the 4K 10-bit size), the lowest private bytes after a release 195 MiB (193 before); with

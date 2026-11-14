@@ -186,7 +186,8 @@ a test player (`docs/test-player.md`).
 ## The check in CI
 
 Job `colour`, `testing/conformance/colour_check.py`: the `COLOUR` lines of three runs of the whole
-conformance set (rav1d's parser through the Rust interface, through `rav1g.h`, and `-parser c`)
+conformance set (rav1d's parser through the Rust interface and through `rav1g.h`, in the job
+`rust-conformance`, and `-parser c`, in `rust-parser-c`)
 against two references that are not the decoder:
 
 - FFmpeg's `trace_headers` filter, for the syntax elements of the first sequence header as numbers
