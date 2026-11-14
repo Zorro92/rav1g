@@ -19,7 +19,7 @@
 use rav1d::include::dav1d::headers::{Rav1dFrameHeader, Rav1dTxfmMode, Rav1dWarpedMotionType};
 use rav1d::levels::{Av1BlockInter, Av1BlockIntra, Av1BlockIntraInter, CompInterType, InterIntraType, MotionMode};
 use rav1d::parse::ParseBlock;
-use rav1g_sys::parser::MB_MODE_INFO;
+use rav1g_sys::MB_MODE_INFO;
 
 /// `BLOCK_SIZE` of libaom for a `BlockSize` of rav1d (which lists the sizes from the largest).
 pub const BLOCK_SIZE_OF: [u8; 22] = [15, 14, 13, 12, 11, 21, 10, 9, 8, 19, 20, 7, 6, 5, 17, 18, 4, 3, 2, 16, 1, 0];

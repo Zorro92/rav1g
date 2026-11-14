@@ -45,7 +45,7 @@ use super::types::{
     Inter2x2ArrOffset, InterFastCompound, InterSizesAllCommon, IntraBlockOffset, IntraSizes, IntraTypeCount, ObmcAbove,
     ObmcLeft, ReconBlockOffset, av1_frame_thread_data, av1_perf_inter_tile,
 };
-use crate::sys::parser::{
+use crate::sys::{
     AV1_COMMON, AV1_PERF_INTER_CHROMA_2X2, AV1_PERF_INTER_COMP_AVG, AV1_PERF_INTER_COMP_AVG_FAST,
     AV1_PERF_INTER_COMP_DIFF_UV, AV1_PERF_INTER_COMP_DIFF_Y, AV1_PERF_INTER_COMP_MASKED, AV1_PERF_INTER_COMP_WARP,
     AV1_PERF_INTER_COMP_WARP_DIFF_UV, AV1_PERF_INTER_OBMC_ABOVE, AV1_PERF_INTER_OBMC_LEFT, AV1_PERF_INTER_SINGLE,
@@ -1474,55 +1474,5 @@ unsafe fn wavefront_iteration_edges(
         iter = iter.min(max_iter);
         edges.commit(col, row, w, h, iter);
         iter
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::sys::probe::{
-        rav1g_probe_extract_interp_filter, rav1g_probe_is_interintra_pred, rav1g_probe_max_uv_txsize,
-        rav1g_probe_scale_chroma_bsize,
-    };
-
-    #[test]
-    fn inline_functions_of_the_c_headers() {
-        // SAFETY: plain functions of numbers.
-        unsafe {
-            for bsize in 0..22 {
-                assert_eq!(
-                    c_int::from(scale_chroma_bsize_420(bsize as u8)),
-                    rav1g_probe_scale_chroma_bsize(bsize, 1, 1)
-                );
-                for (ss_x, ss_y) in [(0, 0), (1, 1)] {
-                    assert_eq!(
-                        c_int::from(max_uv_txsize(bsize as u8, ss_x, ss_y)),
-                        rav1g_probe_max_uv_txsize(bsize, ss_x, ss_y),
-                        "block size {bsize}, subsampling {ss_x} {ss_y}"
-                    );
-                }
-                for mode in 0..25 {
-                    for ref0 in -1..8 {
-                        for ref1 in -1..8 {
-                            assert_eq!(
-                                is_interintra_pred(bsize as u8, mode as u8, [ref0 as i8, ref1 as i8]),
-                                rav1g_probe_is_interintra_pred(bsize, mode, ref0, ref1) != 0,
-                                "block size {bsize}, mode {mode}, references {ref0} {ref1}"
-                            );
-                        }
-                    }
-                }
-            }
-            for filters in [0u32, 0x0001_0002, 0x0003_0000, 0x0002_0003, 0x000f_000f] {
-                assert_eq!(
-                    extract_interp_filter(filters, true) as c_int,
-                    rav1g_probe_extract_interp_filter(filters, 1)
-                );
-                assert_eq!(
-                    extract_interp_filter(filters, false) as c_int,
-                    rav1g_probe_extract_interp_filter(filters, 0)
-                );
-            }
-        }
     }
 }

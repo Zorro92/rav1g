@@ -22,12 +22,12 @@
 use std::ffi::{c_char, c_int, c_uint, c_void};
 use std::mem::offset_of;
 
-use crate::parser::{FRAME_TYPE, RestorationType};
-use crate::records::{BLOCK_SIZE, MB_MODE_INFO, WarpedMotionParams, av1_tile_data};
-use crate::{
+use crate::api::{
     aom_bit_depth_t, aom_chroma_sample_position_t, aom_color_primaries_t, aom_color_range_t, aom_hdr_metadata_t,
     aom_matrix_coefficients_t, aom_transfer_characteristics_t, cfg_options_t,
 };
+use crate::bitstream::{BLOCK_SIZE, FRAME_TYPE, RestorationType};
+use crate::records::{MB_MODE_INFO, WarpedMotionParams, av1_tile_data};
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]

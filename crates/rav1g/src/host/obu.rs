@@ -19,7 +19,7 @@
 use std::ffi::c_int;
 
 use crate::sys;
-use crate::sys::parser::AV1Decoder;
+use crate::sys::AV1Decoder;
 
 const OBU_SEQUENCE_HEADER: u8 = 1;
 const OBU_TEMPORAL_DELIMITER: u8 = 2;

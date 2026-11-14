@@ -30,21 +30,10 @@
 use std::ffi::{c_int, c_uint, c_void};
 use std::mem::{offset_of, zeroed};
 
-// The integer types behind the enums of `av1/common/enums.h` as the records store them.
-pub type tran_low_t = i32;
-pub type BLOCK_SIZE = u8;
-pub type PARTITION_TYPE = u8;
-pub type TX_SIZE = u8;
-pub type PREDICTION_MODE = u8;
-pub type UV_PREDICTION_MODE = u8;
-pub type MOTION_MODE = u8;
-pub type INTERINTRA_MODE = u8;
-pub type COMPOUND_TYPE = u32;
-pub type FILTER_INTRA_MODE = u8;
-pub type MV_REFERENCE_FRAME = i8;
-pub type TransformationType = u8;
-pub type InterpFilters = u32;
-pub type DIFFWTD_MASK_TYPE = u32;
+use crate::bitstream::{
+    BLOCK_SIZE, COMPOUND_TYPE, DIFFWTD_MASK_TYPE, FILTER_INTRA_MODE, INTERINTRA_MODE, InterpFilters, MOTION_MODE,
+    MV_REFERENCE_FRAME, PARTITION_TYPE, PREDICTION_MODE, TX_SIZE, TransformationType, UV_PREDICTION_MODE, tran_low_t,
+};
 
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]

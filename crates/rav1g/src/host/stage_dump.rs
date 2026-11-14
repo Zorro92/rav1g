@@ -25,7 +25,7 @@ use super::types::{
 use crate::gpu::d3d12::{com_ref, com_release, com_store, wrapped_ref};
 use crate::gpu::{BufferRef, BufferState, Device, Readback};
 use crate::sys;
-use crate::sys::parser::{AV1_COMMON, HwFrameBuffer, HwOutputImage, MB_MODE_INFO};
+use crate::sys::{AV1_COMMON, HwFrameBuffer, HwOutputImage, MB_MODE_INFO};
 
 /// Frames a dump can be asked for (`StageDumpFramesMax`).
 const FRAMES_MAX: usize = 256;

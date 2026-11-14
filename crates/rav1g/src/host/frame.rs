@@ -45,7 +45,7 @@ use super::types::{
 use crate::gpu::d3d12::{com_ref, wrapped_ref};
 use crate::gpu::{BufferState, CommandAllocator, CommandList, Event, Fence, Queue};
 use crate::sys;
-use crate::sys::parser::{
+use crate::sys::{
     ALTREF_FRAME, AV1_COMMON, AV1Decoder, HwFrameBuffer, HwOutputImage, INVALID_IDX, LAST_FRAME, MB_MODE_INFO,
     REF_NO_SCALE, RESTORE_NONE, TileInfo, YV12_BUFFER_CONFIG, av1_decoded_frame_buffer_t, av1_tile_data, scale_factors,
 };
@@ -1299,7 +1299,7 @@ pub(crate) unsafe fn more_transform_blocks(
         pieces.txb.push(Run { first: run.first, count: 0 });
         t.blocks_offset = run.first;
         t.idct_blocks_host =
-            (*(*dec).idct_blocks_pool).host_ptr.cast::<crate::sys::parser::tx_block_info_gpu>().add(run.first as usize);
+            (*(*dec).idct_blocks_pool).host_ptr.cast::<crate::sys::tx_block_info_gpu>().add(run.first as usize);
         t.idct_blocks_ptr = 0;
         run.count
     }

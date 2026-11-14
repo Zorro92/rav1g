@@ -58,9 +58,7 @@ use super::log::log;
 use super::perf::frame_timers;
 use super::types::{Av1Core, av1_frame_thread_data, av1_perf_accum};
 use crate::sys;
-use crate::sys::parser::{
-    AV1_COMMON, AV1Decoder, MACROBLOCKD, RefCntBuffer, RestorationUnitInfo, av1_decoded_frame_buffer_t,
-};
+use crate::sys::{AV1_COMMON, AV1Decoder, MACROBLOCKD, RefCntBuffer, RestorationUnitInfo, av1_decoded_frame_buffer_t};
 
 /// The entries of the queue: frames between the begin of their parse and their submission, and shown
 /// frames (`show_existing_frame`) that wait for their copy. A frame holds a pipeline slot, of which a

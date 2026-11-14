@@ -58,9 +58,7 @@ use rav1d::parse::{
     ParseBlock, ParseColorCodes, ParseFrame, ParsePalette, ParseShowExisting, ParseSink, ParseSuperblock, ParseTile,
     ParseTxb,
 };
-use rav1g_sys::parser::{
-    AV1_COMMON, AV1Decoder, MACROBLOCKD, MB_MODE_INFO, TileInfo, av1_tile_data, tx_block_info_gpu,
-};
+use rav1g_sys::{AV1_COMMON, AV1Decoder, MACROBLOCKD, MB_MODE_INFO, TileInfo, av1_tile_data, tx_block_info_gpu};
 
 /// `SinkOptions::test_panic`: the frame (counted from 1) whose first superblock panics.
 const TEST_PANIC_FRAME: u64 = 3;

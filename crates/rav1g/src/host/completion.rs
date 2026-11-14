@@ -26,7 +26,7 @@ use super::thread::spawn_thread;
 use super::types::{Av1Core, GpuWorkItem, av1_frame_thread_data};
 use crate::gpu::Event;
 use crate::sys;
-use crate::sys::parser::{AV1Decoder, HwOutputImage, aom_image_t, av1_decoded_frame_buffer_t};
+use crate::sys::{AV1Decoder, HwOutputImage, aom_image_t, av1_decoded_frame_buffer_t};
 
 /// The frame that used `td` has completed on the GPU, so nothing reads the slot's grids any more, and
 /// the slot is not in the pool, so the decode thread cannot have it. What the frame cleared at its setup

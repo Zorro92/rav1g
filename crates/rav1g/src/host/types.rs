@@ -14,8 +14,8 @@
 //! pointer it never looks behind (`struct Av1Core *` of `dx/av1_core.h`), so the decoder is an allocation
 //! of this crate ([`Av1Core::new`]) with the queues, the locks and the counters as Rust types, and its
 //! layout is whatever the compiler makes of it. What the entropy decoder shares with the host (the frame
-//! buffer descriptions, the tile's cursors, the mode info) stays C, is bound in `rav1g_sys::parser` and
-//! `rav1g_sys::shared`, and is held against the C compiler by the layout tests there.
+//! buffer descriptions, the tile's cursors, the mode info) had the shape of C structs and is in
+//! `rav1g_sys`: the records the shaders read with their layouts, the rest with the fields the host uses.
 //!
 //! A decoder starts zeroed except for the fields that are Rust values with a state of their own (the
 //! queues, the pool of frame buffers, the locks, the vector of the tile counters): all zero is a valid
@@ -36,7 +36,7 @@ use super::memory::Allocator;
 use super::pool::{KINDS, Pools};
 use super::thread::{FramePool, Queue};
 use crate::gpu::{CommandAllocator, CommandList, Fence, PlaneViews, Readback, TimestampQueries};
-use crate::sys::parser::{
+use crate::sys::{
     HwFrameBuffer, HwOutputImage, aom_notify_frame_ready_cb_fn_t, av1_get_decoded_buffer_cb_fn_t,
     av1_perf_inter_blocks, av1_perf_inter_detail, av1_perf_inter_work, av1_release_decoded_buffer_cb_fn_t,
     av1_stage_dump_plane, av1_tile_data,

@@ -22,7 +22,7 @@ use std::sync::Mutex;
 
 use crate::host::blocks::WaveEdges;
 use crate::host::types::av1_frame_thread_data;
-use crate::sys::parser::{MB_MODE_INFO, av1_tile_data, tx_block_info_gpu};
+use crate::sys::{MB_MODE_INFO, av1_tile_data, tx_block_info_gpu};
 
 /// Coefficients a 4x4 unit of the frame can have: 16 of luma and two times 4 of chroma
 /// (`IDCT_COEF_COUNT_DENUM` of the host).

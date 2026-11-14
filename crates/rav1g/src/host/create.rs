@@ -37,11 +37,11 @@ use super::types::{
 };
 use crate::gpu::d3d12::{com_ref, com_release, com_store, wrapped_ref};
 use crate::gpu::{self, CommandAllocator, Device, Event, SemiPlanar, VideoMemory, create_hardware_device};
-use crate::sys::parser::{MB_MODE_INFO, RestorationUnitInfo, aom_codec_dec_cfg_t, av1_tile_data};
 use crate::sys::{
     AV1_LOW_MEMORY_ALL, AV1_LOW_MEMORY_COEFS, AV1_LOW_MEMORY_DEFAULT, AV1_LOW_MEMORY_MODE_INFO,
     AV1_LOW_MEMORY_SHARED_BACK_BUFFER, AV1_MEMORY_GUARD_SETTLE_MS, AV1_MEMORY_GUARD_WAIT_MS,
 };
+use crate::sys::{MB_MODE_INFO, RestorationUnitInfo, aom_codec_dec_cfg_t, av1_tile_data};
 
 /// Bytes of a transform block record of the inverse transform (`IdctBlockSize`).
 const IDCT_BLOCK_SIZE: i32 = 16;

@@ -23,7 +23,7 @@ use super::types::{Av1Core, Av1PerfMaxMarks, av1_frame_thread_data, av1_perf_acc
 use crate::gpu::d3d12::{com_ref, com_release, com_store, wrapped_ref};
 use crate::gpu::{Device, Queue, Readback, TimestampQueries};
 use crate::sys;
-use crate::sys::parser::{AV1Decoder, av1_perf_inter_detail};
+use crate::sys::{AV1Decoder, av1_perf_inter_detail};
 
 const MAX_MARKS: usize = Av1PerfMaxMarks as usize;
 const CPU_COUNT: usize = sys::AV1_PERF_CPU_COUNT as usize;

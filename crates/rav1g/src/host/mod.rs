@@ -18,8 +18,8 @@
 //! sources are not in the tree. The application's entry
 //! points (`dx/av1_perf.h`, and the creation, decode and release that `crate::decoder` calls) are here
 //! as well. The structs of the host are Rust's own (`types`); the structs of the frame header and of
-//! the blocks, which the stages read and the sink writes, are those of libav1's headers, bound in
-//! `rav1g_sys::parser`. What the host needs of libaom's common code is in `libaom`, and what it reads
+//! the blocks, which the stages read and the sink writes, have the shape libav1's headers gave them and
+//! are in `rav1g_sys`. What the host needs of libaom's common code is in `libaom`, and what it reads
 //! of a temporal unit itself in `obu`.
 
 // The stages index several tables of the C structs with one index, as the C++ they come from does.
@@ -37,6 +37,18 @@ pub(crate) use create::{
 };
 pub(crate) use rav1d_host::{av1_decoder_configuration, rav1g_rav1d_decode, rav1g_rav1d_drain};
 pub(crate) use types::Av1Core;
+// The test switches, the timing run, the stage dumps and the pipeline cache: `switches.rs`, `device.rs` and
+// `capi.rs` call them.
+pub(crate) use compute::{
+    av1_create_pipeline_cache_handle, av1_destroy_pipeline_cache_handle, av1_wait_pipeline_cache_handle,
+};
+pub(crate) use frame::{av1_set_clears, av1_set_intra_v2, av1_shader_variant};
+pub(crate) use loopfilter::av1_set_lf_h_split;
+pub(crate) use memory::{av1_log_video_memory_now, av1_set_poison_buffers};
+pub(crate) use perf::{av1_set_inter_fast, av1_set_perf_callback, av1_set_perf_detail};
+pub(crate) use postfilter::av1_set_cdef_v2;
+pub(crate) use prediction::{av1_set_intra_edge_fix, av1_set_intra_opt};
+pub(crate) use stage_dump::av1_set_stage_dump;
 mod film_grain;
 mod frame;
 mod intra_v2;

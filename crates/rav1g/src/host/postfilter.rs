@@ -17,7 +17,7 @@ use super::core::{
     alloc_constants, buffer, commands, perf_gpu_mark, pipeline, stage_dump_active, stage_dump_data, stage_dump_fb,
 };
 use super::types::{Av1Core, av1_stage_dump_region};
-use crate::sys::parser::{
+use crate::sys::{
     AV1_COMMON, AV1_PERF_GPU_CDEF, AV1_PERF_GPU_LOOP_REST, AV1_PERF_GPU_SUPERRES, AV1LrStruct, HwFrameBuffer,
     MI_SIZE_64X64, RESTORE_NONE, RESTORE_WIENER,
 };

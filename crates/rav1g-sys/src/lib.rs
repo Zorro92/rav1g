@@ -6,86 +6,41 @@
 // License 1.0 was not distributed with this source code in the PATENTS file, you can obtain it at
 // www.aomedia.org/license/patent.
 
-//! The bindings of the decoder to the headers of `libav1`, and what `build.rs` builds of C: for the
-//! decoder (Windows) the shader table; everywhere the layout probe the tests read.
+//! The types of the decoder that have a fixed shape, and its shader table.
 //!
-//! Everything at the top level is the C interface as its headers have it (`libav1/aom/aom_decoder.h`,
-//! `aom_codec.h`, `aomdx.h`, `libav1/dx/av1_perf.h`). The decoder uses the types and the constants; the
-//! functions the headers declare are bound but defined nowhere (no C of libaom is compiled), so nothing
-//! may call them. The `rav1g` crate is the decoder.
+//! These types were bindings to the headers of libaom and of the C++ decoder (`libav1`). They are Rust
+//! now, and no header is read to build the decoder (docs/rust-port.md, "Own types, no libaom headers"):
+//!
+//! - [`records`]: the records the parser writes and the shaders read, and the cursors of a tile, with
+//!   their layouts held by constant assertions.
+//! - [`host`]: the state of the host that had the shape of libaom's decoder structs.
+//! - [`bitstream`]: the enums and limits of the AV1 bitstream.
+//! - [`api`]: error codes, the configuration of a decoder, the output image and the output callbacks.
+//! - [`perf`]: the timing run, the stage dumps and the test switches.
+//!
+//! Everything is also at the top level, under the names the C had (`rav1g_sys::MB_MODE_INFO`). They live
+//! in this crate because the sink of the parser (`rav1g-parse`) and the decoder (`rav1g`) both use them.
+//!
+//! `build.rs` builds the one C file the decoder has, for Windows: the shader table (`shader_table.c`, the
+//! bytecode of the shaders of `RAV1G_SHADER_DIR`), which the host reads through its own declaration.
 
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
-#![allow(clippy::all)]
 
-include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+pub mod api;
+pub mod bitstream;
+pub mod host;
+pub mod perf;
+pub mod records;
+
+pub use api::*;
+pub use bitstream::*;
+pub use host::*;
+pub use perf::*;
+pub use records::*;
 
 /// What built the C of this library: the compiler, its link time optimisation and the C runtime, as a
 /// text ("MSVC, /GL, static runtime").
 pub const C_BUILD: &str = env!("RAV1G_C_BUILD");
-
-pub mod host;
-pub mod records;
-
-/// The records shared with the shaders under the name they had as bindings ([`records`]).
-pub mod shared {
-    pub use crate::records::*;
-}
-
-/// The enums and limits of the bitstream and the constants of the test instrumentation, as bindings
-/// (`parser.h`), and with them, under the names the host uses them by, the state of the host ([`host`]),
-/// the records ([`records`]) and the types of the root.
-pub mod parser {
-    include!(concat!(env!("OUT_DIR"), "/parser.rs"));
-}
-
-unsafe extern "C" {
-    fn rav1g_c_tables(index: u32, name: *mut *const std::ffi::c_char, size: *mut u32) -> *const std::ffi::c_void;
-}
-
-/// Inline functions of the C headers as the compiler of the build has them, for the tests of their Rust
-/// ports in the `rav1g` crate (`C_FUNCTION_PROBES` in `build.rs`).
-pub mod probe {
-    use std::ffi::c_int;
-
-    unsafe extern "C" {
-        /// `scale_chroma_bsize` of `av1/common/onyxc_int.h`.
-        pub fn rav1g_probe_scale_chroma_bsize(bsize: c_int, ss_x: c_int, ss_y: c_int) -> c_int;
-        /// `av1_get_max_uv_txsize` of `av1/common/blockd.h`.
-        pub fn rav1g_probe_max_uv_txsize(bsize: c_int, ss_x: c_int, ss_y: c_int) -> c_int;
-        /// `is_interintra_pred` of `av1/common/blockd.h` for a mode info with these four fields.
-        pub fn rav1g_probe_is_interintra_pred(sb_type: c_int, mode: c_int, ref0: c_int, ref1: c_int) -> c_int;
-        /// `av1_extract_interp_filter` of `av1/common/filter.h`.
-        pub fn rav1g_probe_extract_interp_filter(filters: u32, x_filter: c_int) -> c_int;
-    }
-}
-
-/// The bytes of a table that is `static` in a header of the decoder, as the C compiler of the build has
-/// it: for the tests that hold the Rust copy of such a table against the header. `None` for a name the
-/// probe does not have (the list is `C_TABLES` in `build.rs`).
-pub fn c_table(name: &str) -> Option<&'static [u8]> {
-    probed_table(rav1g_c_tables, name)
-}
-
-type TableProbe = unsafe extern "C" fn(u32, *mut *const std::ffi::c_char, *mut u32) -> *const std::ffi::c_void;
-
-fn probed_table(tables: TableProbe, name: &str) -> Option<&'static [u8]> {
-    for index in 0.. {
-        let mut entry_name = std::ptr::null();
-        let mut size = 0u32;
-        // SAFETY: the probe returns null behind its last entry, else a static table of `size` bytes and
-        // its static name.
-        unsafe {
-            let data = tables(index, &mut entry_name, &mut size);
-            if data.is_null() {
-                break;
-            }
-            if std::ffi::CStr::from_ptr(entry_name).to_bytes() == name.as_bytes() {
-                return Some(std::slice::from_raw_parts(data.cast::<u8>(), size as usize));
-            }
-        }
-    }
-    None
-}
 
 #[cfg(test)]
 mod layout_tests;

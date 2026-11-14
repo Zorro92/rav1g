@@ -67,7 +67,7 @@ use super::rav1d_frames::{Descriptions, Entry, Failure, Frames, zeroed_box};
 use super::thread::spawn_thread;
 use super::types::{Av1Core, av1_frame_thread_data};
 use crate::sys;
-use crate::sys::parser::{
+use crate::sys::{
     AV1_COMMON, AV1Decoder, INVALID_IDX, REF_NO_SCALE, RESTORE_NONE, RESTORE_SGRPROJ, RESTORE_SWITCHABLE,
     RESTORE_WIENER, RefCntBuffer, TileInfo, WarpedMotionParams, aom_film_grain_t, aom_hdr_metadata_t,
     av1_decoded_frame_buffer_t, av1_tile_data,
@@ -638,7 +638,7 @@ unsafe fn fill_header(state: &mut State, dec: *mut Av1Core, frame: &ParseFrame<'
     cur_frame.buf.bit_depth = bit_depth;
     cur_frame.buf.monochrome = seq.monochrome;
     cur_frame.buf.matrix_coefficients =
-        if seq.mtrx == Rav1dMatrixCoefficients::Identity { sys::parser::AOM_CICP_MC_IDENTITY } else { 2 };
+        if seq.mtrx == Rav1dMatrixCoefficients::Identity { sys::AOM_CICP_MC_IDENTITY } else { 2 };
     // SAFETY: the caller's contract.
     unsafe { film_grain(cm, &map, cur_frame, seq, hdr) };
     cm.cur_frame = cur;

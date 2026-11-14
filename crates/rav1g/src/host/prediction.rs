@@ -33,7 +33,7 @@ use super::types::{
     av1_frame_thread_data, av1_perf_inter_tile, av1_stage_dump_region,
 };
 use crate::gpu::{BufferRef, Commands};
-use crate::sys::parser::{
+use crate::sys::{
     ALTREF_FRAME, AV1_COMMON, AV1_INTER_FAST_COMPOUND_ORIGINAL, AV1_INTER_FAST_SINGLE_ORIGINAL,
     AV1_PERF_GPU_EXT_BORDERS, AV1_PERF_GPU_GEN_BLOCKS, AV1_PERF_GPU_INTER, AV1_PERF_GPU_INTRA, AV1_PERF_GPU_RECON,
     AV1_PERF_INTER_CHROMA_2X2, AV1_PERF_INTER_COMP_AVG, AV1_PERF_INTER_COMP_AVG_FAST, AV1_PERF_INTER_COMP_DIFF_UV,
@@ -1195,8 +1195,7 @@ pub(crate) unsafe fn inter_ext_borders(dec: *mut Av1Core, cm: *mut AV1_COMMON) {
         (*constants.data).planes = plane_words(&*td.dst_frame_buffer);
         let buf = &(*(*cm).cur_frame).buf;
         let (y_crop_width, uv_crop_width) = (buf.crop_widths[0], buf.crop_widths[1]);
-        let (y_crop_height, uv_crop_height) =
-            (buf.crop_heights[0], buf.crop_heights[1]);
+        let (y_crop_height, uv_crop_height) = (buf.crop_heights[0], buf.crop_heights[1]);
 
         (*constants.data).dims[0][0] = y_crop_width;
         (*constants.data).dims[0][1] = y_crop_height;

@@ -71,29 +71,25 @@ pub enum Clears {
 
 /// CDEF through `cdef_filter_v2.hlsl` (true, the default) or `cdef_filter.hlsl`.
 pub fn set_cdef_v2(enable: bool) {
-    // SAFETY: sets a flag.
-    unsafe { sys::av1_set_cdef_v2(c_int::from(enable)) }
+    crate::host::av1_set_cdef_v2(c_int::from(enable))
 }
 
 /// Intra prediction through `intra_v2.hlsl`; only in a decoder that was created with
 /// [`crate::Settings::intra_v2`].
 pub fn set_intra_v2(enable: bool) {
-    // SAFETY: sets a flag.
-    unsafe { sys::av1_set_intra_v2(c_int::from(enable)) }
+    crate::host::av1_set_intra_v2(c_int::from(enable))
 }
 
 /// The optimised build of the original intra shader.
 pub fn set_intra_opt(enable: bool) {
-    // SAFETY: sets a flag.
-    unsafe { sys::av1_set_intra_opt(c_int::from(enable)) }
+    crate::host::av1_set_intra_opt(c_int::from(enable))
 }
 
 /// Who clears the grids of a pipeline slot for the next frame, and whether the wavefront grid has to be
 /// cleared at all ([`Clears`]; without a call it does not). [`Clears::Gpu`] has to be set before the
 /// decoder is created.
 pub fn set_clears(mode: Clears) {
-    // SAFETY: sets a flag.
-    unsafe { sys::av1_set_clears(mode as c_int) }
+    crate::host::av1_set_clears(mode as c_int)
 }
 
 /// The older form of [`set_clears`]: `true` is [`Clears::NotNeeded`], the default; `false` is
@@ -105,20 +101,17 @@ pub fn set_async_clear(enable: bool) {
 /// The fast inter path: 0, or [`INTER_FAST_ON`] with the `INTER_FAST_*` bits; only in a decoder that was
 /// created with [`crate::Settings::inter_fast`].
 pub fn set_inter_fast(mode: u32) {
-    // SAFETY: sets a flag.
-    unsafe { sys::av1_set_inter_fast(mode as c_int) }
+    crate::host::av1_set_inter_fast(mode as c_int)
 }
 
 /// Experiment: how the horizontal loop filter is dispatched, 0 (one dispatch per plane), 1 or 2.
 pub fn set_lf_h_split(mode: u32) {
-    // SAFETY: sets a flag.
-    unsafe { sys::av1_set_lf_h_split(mode as c_int) }
+    crate::host::av1_set_lf_h_split(mode as c_int)
 }
 
 /// Experiment: the 8-bit above edge filter bound of the intra shader.
 pub fn set_intra_edge_fix(enable: bool) {
-    // SAFETY: sets a flag.
-    unsafe { sys::av1_set_intra_edge_fix(c_int::from(enable)) }
+    crate::host::av1_set_intra_edge_fix(c_int::from(enable))
 }
 
 /// Debugging: the decoders created after the call fill the mode info pool, or every buffer the CPU writes
@@ -126,20 +119,17 @@ pub fn set_intra_edge_fix(enable: bool) {
 /// [`Poison::Buffers`] they also fill the constants of every stage again in every frame, right before the
 /// stage writes them. The output must be the same.
 pub fn set_poison_buffers(level: Poison) {
-    // SAFETY: sets a flag.
-    unsafe { sys::av1_set_poison_buffers(level as c_int) }
+    crate::host::av1_set_poison_buffers(level as c_int)
 }
 
 /// The inter breakdown of the timing records: 0 off, 1 sections, 2 every dispatch alone.
 pub fn set_perf_detail(mode: u32) {
-    // SAFETY: sets a flag.
-    unsafe { sys::av1_set_perf_detail(mode as c_int) }
+    crate::host::av1_set_perf_detail(mode as c_int)
 }
 
 /// Empty for the normal build of the shaders, `"uavsync"` for the experiment build.
 pub fn shader_variant() -> String {
-    // SAFETY: returns a static string.
-    crate::error::text(unsafe { sys::av1_shader_variant() })
+    crate::error::text(crate::host::av1_shader_variant())
 }
 
 /// What gets the records of the timing run ([`set_perf_callback`]).
@@ -194,10 +184,10 @@ pub fn set_perf_callback(callback: Option<PerfCallback>) {
         match callback {
             Some(callback) => {
                 store(&PERF, Some(callback));
-                sys::av1_set_perf_callback(Some(perf_frame), std::ptr::null_mut());
+                crate::host::av1_set_perf_callback(Some(perf_frame), std::ptr::null_mut());
             }
             None => {
-                sys::av1_set_perf_callback(None, std::ptr::null_mut());
+                crate::host::av1_set_perf_callback(None, std::ptr::null_mut());
                 store(&PERF, None);
             }
         }
@@ -214,10 +204,15 @@ pub fn set_stage_dump(callback: Option<DumpCallback>, frames: &[i32]) {
         match callback.filter(|_| !frames.is_empty()) {
             Some(callback) => {
                 store(&DUMP, Some(callback));
-                sys::av1_set_stage_dump(Some(stage_dump), std::ptr::null_mut(), frames.as_ptr(), frames.len() as c_int);
+                crate::host::av1_set_stage_dump(
+                    Some(stage_dump),
+                    std::ptr::null_mut(),
+                    frames.as_ptr(),
+                    frames.len() as c_int,
+                );
             }
             None => {
-                sys::av1_set_stage_dump(None, std::ptr::null_mut(), std::ptr::null(), 0);
+                crate::host::av1_set_stage_dump(None, std::ptr::null_mut(), std::ptr::null(), 0);
                 store(&DUMP, None);
             }
         }
@@ -232,10 +227,10 @@ pub fn set_log_callback(callback: Option<LogCallback>) {
         match callback {
             Some(callback) => {
                 store(&LOG, Some(callback));
-                sys::av1_set_log_callback(Some(log_line), std::ptr::null_mut());
+                crate::host::log::av1_set_log_callback(Some(log_line), std::ptr::null_mut());
             }
             None => {
-                sys::av1_set_log_callback(None, std::ptr::null_mut());
+                crate::host::log::av1_set_log_callback(None, std::ptr::null_mut());
                 store(&LOG, None);
             }
         }

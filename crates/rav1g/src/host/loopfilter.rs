@@ -18,7 +18,7 @@ use super::core::{
     stage_dump_data, stage_dump_fb,
 };
 use super::types::{Av1Core, av1_stage_dump_region};
-use crate::sys::parser::{AV1_COMMON, AV1_PERF_GPU_LF_GEN, AV1_PERF_GPU_LF_HORZ, AV1_PERF_GPU_LF_VERT, MACROBLOCKD};
+use crate::sys::{AV1_COMMON, AV1_PERF_GPU_LF_GEN, AV1_PERF_GPU_LF_HORZ, AV1_PERF_GPU_LF_VERT, MACROBLOCKD};
 
 /// The constants of the filter shaders.
 #[repr(C)]

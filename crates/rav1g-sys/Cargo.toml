@@ -1,6 +1,6 @@
 [package]
 name = "rav1g-sys"
-description = "The bindings of rav1g to the structs of libav1's headers, and its shader table"
+description = "The types of rav1g with a fixed shape (the records the shaders read, the state of the host, the enums of the bitstream), and its shader table"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,4 +19,3 @@ app-container = []
 
 [build-dependencies]
 cc = { workspace = true, features = ["parallel"] }
-bindgen = { workspace = true }

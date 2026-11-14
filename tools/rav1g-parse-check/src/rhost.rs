@@ -20,7 +20,7 @@ use rav1g_parse::rav1d::parse::{ParseFrame, ParsePalette, ParseSettings, ParseSu
 use rav1g_parse::sink::{FrameMemory, ModeInfoPiece, Sink, SinkHost, SinkTimer, TileMemory};
 
 use crate::plain::{Arena, FrameSize, LrUnit, Palette, TileBounds};
-use crate::sys::parser::{RESTORE_NONE, RESTORE_SGRPROJ, RESTORE_WIENER, av1_tile_data};
+use crate::sys::{RESTORE_NONE, RESTORE_SGRPROJ, RESTORE_WIENER, av1_tile_data};
 
 /// A frame in parse: its place in decode order and its buffers.
 struct InParse {

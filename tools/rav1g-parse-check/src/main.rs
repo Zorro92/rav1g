@@ -62,7 +62,7 @@ mod plain;
 mod rhost;
 mod timing;
 
-/// The bindings of the decoder's structs under the name the host's files know them by.
+/// The types of the decoder's structs under the name the host's files know them by.
 mod sys {
     pub use rav1g_sys::*;
 }

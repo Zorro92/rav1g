@@ -15,7 +15,7 @@ use super::core::{alloc_constants, buffer, commands, perf_gpu_mark, pipeline};
 use super::types::Av1Core;
 use crate::gpu::d3d12::{com_ref, wrapped_ref};
 use crate::gpu::{Device, PlaneViews};
-use crate::sys::parser::{AOM_CICP_MC_IDENTITY, AV1_COMMON, AV1_PERF_GPU_FILM_GRAIN, HwFrameBuffer};
+use crate::sys::{AOM_CICP_MC_IDENTITY, AV1_COMMON, AV1_PERF_GPU_FILM_GRAIN, HwFrameBuffer};
 use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 
 /// The film grain parameters of a frame as the shaders read them.

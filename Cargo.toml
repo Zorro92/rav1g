@@ -28,7 +28,6 @@ rav1g = { path = "crates/rav1g" }
 rav1g-parse = { path = "crates/rav1g-parse" }
 rav1d = { path = "third_party/rav1d" }
 cc = "1.2"
-bindgen = "0.73"
 
 [profile.release]
 # Line tables only: enough for the crash line of rav1g-dec to be resolved with the .pdb.

@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use crate::plain::{Arena, Buffer, COEF_PATTERN};
-use crate::sys::parser::{MB_MODE_INFO, av1_tile_data, tx_block_info_gpu};
+use crate::sys::{MB_MODE_INFO, av1_tile_data, tx_block_info_gpu};
 
 /// A field of the mode info record: its name, where it lies and how long it is.
 struct Field {

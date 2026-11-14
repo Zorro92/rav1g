@@ -8,8 +8,8 @@
 
 //! Tables the host modules need.
 //!
-//! The tables that are `static` in a C header of the parser are copies, held against the headers by the
-//! tests below (`rav1g_sys::c_table`). The tables of the host itself (`OBMC_MASK`, the `INTER_BLOCK_*`
+//! The tables that were `static` in a C header of libaom are copies, which were held against the headers
+//! by tests for as long as the build read those headers. The tables of the host itself (`OBMC_MASK`, the `INTER_BLOCK_*`
 //! tables, `INTRA_MODE_SHADER_PARAMS`, `GAUSSIAN_SEQUENCE`) came from `libav1/dx/av1_compute.h` and
 //! `av1_compute.cpp` of the C++ decoder (branch `cpp`) and were held against that text while it was in
 //! this tree; here they are the only copy. `testing/intra_check` reads `INTRA_MODE_SHADER_PARAMS` from
@@ -268,63 +268,3 @@ pub(crate) const GAUSSIAN_SEQUENCE: [i32; 2048] = [
     -32, -232, -280, -224, 96, 568, -76, 172, 148, 148, 104, 32, -296, -32, 788, -80, 32, -16, 280, 288, 944, 428,
     -484,
 ];
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn block_tables_are_those_of_the_header() {
-        assert_eq!(crate::sys::c_table("block_size_wide"), Some(&BLOCK_SIZE_WIDE[..]));
-        assert_eq!(crate::sys::c_table("block_size_high"), Some(&BLOCK_SIZE_HIGH[..]));
-        // ss_size_lookup[bsize][ss_x][ss_y], one byte each.
-        let ss = crate::sys::c_table("ss_size_lookup").expect("the probe has ss_size_lookup");
-        assert_eq!(ss.len(), 22 * 4);
-        for (bsize, &plane_bsize) in SS_SIZE_420.iter().enumerate() {
-            assert_eq!(ss[bsize * 4 + 3], plane_bsize, "ss_size_lookup[{bsize}][1][1]");
-        }
-    }
-
-    /// A table of 32-bit numbers of a header, from the probe.
-    fn c_ints(name: &str) -> Vec<i32> {
-        let bytes = crate::sys::c_table(name).unwrap_or_else(|| panic!("the probe has {name}"));
-        bytes.as_chunks::<4>().0.iter().map(|chunk| i32::from_ne_bytes(*chunk)).collect()
-    }
-
-    #[test]
-    fn transform_tables_are_those_of_the_header() {
-        assert_eq!(c_ints("tx_size_wide"), TX_SIZE_WIDE);
-        assert_eq!(c_ints("tx_size_high"), TX_SIZE_HIGH);
-    }
-
-    fn bytes_of<T: Copy>(table: &[T]) -> &[u8] {
-        // SAFETY: a table of plain numbers, read as its bytes.
-        unsafe { std::slice::from_raw_parts(table.as_ptr().cast::<u8>(), size_of_val(table)) }
-    }
-
-    #[test]
-    fn tables_of_the_c_headers_are_those_of_the_headers() {
-        let tables: [(&str, &[u8]); 16] = [
-            ("mi_size_wide_log2", &MI_SIZE_WIDE_LOG2),
-            ("mi_size_high_log2", &MI_SIZE_HIGH_LOG2),
-            ("max_txsize_rect_lookup", &MAX_TXSIZE_RECT_LOOKUP),
-            ("ss_size_lookup", &SS_SIZE_LOOKUP),
-            ("interintra_to_intra_mode", &INTERINTRA_TO_INTRA_MODE),
-            ("sm_weight_arrays", &SM_WEIGHT_ARRAYS),
-            ("tx_size_wide_log2", bytes_of(&TX_SIZE_WIDE_LOG2)),
-            ("tx_size_high_log2", bytes_of(&TX_SIZE_HIGH_LOG2)),
-            ("max_neighbor_obmc", bytes_of(&MAX_NEIGHBOR_OBMC)),
-            ("quant_dist_weight", bytes_of(&QUANT_DIST_WEIGHT)),
-            ("quant_dist_lookup_table", bytes_of(&QUANT_DIST_LOOKUP_TABLE)),
-            ("av1_sub_pel_filters_4", bytes_of(&SUB_PEL_FILTERS_4)),
-            ("av1_sub_pel_filters_4smooth", bytes_of(&SUB_PEL_FILTERS_4SMOOTH)),
-            ("av1_bilinear_filters", bytes_of(&BILINEAR_FILTERS)),
-            ("av1_sub_pel_filters_8", bytes_of(&SUB_PEL_FILTERS_8)),
-            ("av1_sub_pel_filters_8smooth", bytes_of(&SUB_PEL_FILTERS_8SMOOTH)),
-        ];
-        for (name, copy) in tables {
-            assert_eq!(crate::sys::c_table(name), Some(copy), "{name}");
-        }
-        assert_eq!(crate::sys::c_table("av1_sub_pel_filters_8sharp"), Some(bytes_of(&SUB_PEL_FILTERS_8SHARP)));
-    }
-}

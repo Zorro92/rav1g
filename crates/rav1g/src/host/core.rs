@@ -21,7 +21,7 @@ use super::types::{Av1Core, ComputeCommandBuffer, ComputeShader, GpuBufferObject
 use super::{perf, stage_dump};
 use crate::gpu::d3d12::com_ref;
 use crate::gpu::{BufferLocation, BufferRef, Commands, LayoutRef, PipelineRef};
-use crate::sys::parser::{AV1_COMMON, HwFrameBuffer, HwOutputImage, av1_perf_inter_detail};
+use crate::sys::{AV1_COMMON, HwFrameBuffer, HwOutputImage, av1_perf_inter_detail};
 
 /// The recording of the frame the decoder is building.
 ///

@@ -22,7 +22,7 @@ use windows::core::Interface;
 use super::log::{log, log_create_error};
 use super::types::{DevMemPoolSize, GpuBufferObject, MemoryTypeCount};
 use crate::gpu::{self, BufferRef, Device, MemoryKind, MemorySegment, VideoMemory};
-use crate::sys::parser::{AV1_POISON_BUFFERS, AV1_POISON_MODE_INFO, AV1_POISON_OFF};
+use crate::sys::{AV1_POISON_BUFFERS, AV1_POISON_MODE_INFO, AV1_POISON_OFF};
 
 const HOST_MEM_ALIGN: usize = 32;
 const DEVICE_MEM_ALIGN: usize = 256;

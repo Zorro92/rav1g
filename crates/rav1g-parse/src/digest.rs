@@ -28,7 +28,7 @@ use rav1d::parse::{
     ParseBlock, ParseFrame, ParsePalette, ParseSettings, ParseSink, ParseSuperblock, ParseTile, ParseTxb, Parser,
     Rav1dError,
 };
-use rav1g_sys::parser::MB_MODE_INFO;
+use rav1g_sys::MB_MODE_INFO;
 
 use crate::record::{self, RecordFrame};
 

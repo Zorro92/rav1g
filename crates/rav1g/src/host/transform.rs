@@ -17,9 +17,7 @@ use super::core::{
 use super::frame::joined_runs;
 use super::tables::{TX_SIZE_HIGH, TX_SIZE_WIDE};
 use super::types::Av1Core;
-use crate::sys::parser::{
-    AV1_PERF_GPU_IDCT, AV1_PERF_GPU_IDCT_SORT, AV1_PERF_GPU_RESIDUAL_CLEAR, TX_4X4, TX_SIZES_ALL,
-};
+use crate::sys::{AV1_PERF_GPU_IDCT, AV1_PERF_GPU_IDCT_SORT, AV1_PERF_GPU_RESIDUAL_CLEAR, TX_4X4, TX_SIZES_ALL};
 
 /// Transform types of the sort: the transform sizes and the lossless transform.
 const TX_TYPES: usize = TX_SIZES_ALL as usize + 1;

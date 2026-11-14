@@ -52,7 +52,7 @@ use crate::gpu::d3d12::{com_ref, wrapped_ref};
 use crate::gpu::{
     BufferRef, BufferState, Device, PlaneViews, SemiPlanar, TextureFormat, TextureRef, TextureSource, TextureState,
 };
-use crate::sys::parser::{
+use crate::sys::{
     AV1_COMMON, AV1_PERF_CPU_WAIT_IMAGE, AV1_PERF_CPU_WAIT_OUTPUT, AV1_PERF_GPU_COPY_PLANE, AV1_PERF_GPU_OUTPUT_COPY,
     HwFrameBuffer, HwOutputImage, av1_decoded_frame_buffer_t, fbt8bit, fbt10bit, fbt10x3, fbtNV12, fbtP010,
 };

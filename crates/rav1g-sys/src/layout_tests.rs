@@ -6,92 +6,23 @@
 // License 1.0 was not distributed with this source code in the PATENTS file, you can obtain it at
 // www.aomedia.org/license/patent.
 
-//! Layout tests: the bindings against the C compiler that built the decoder, and the mode info record
-//! against the struct the shaders read it with.
+//! Layout tests: the mode info record against the struct the shaders read it with.
 //!
-//! bindgen computes layouts with libclang and asserts them when the bindings are compiled. That says that
-//! Rust agrees with clang. The decoder is built by MSVC (or by clang-cl in the Linux build), so the first
-//! test here asks that compiler: `build.rs` writes a C file with the size and alignment of every probed
-//! struct and the offset and size of every one of its fields, compiles it into the library, and writes the
-//! same table from the bindings; the two must be equal entry by entry.
+//! The layouts of the records are constant assertions of `records.rs`. What those cannot say is that the
+//! HLSL reads the same bytes: these tests parse `libav1/dx/shaders/mode_info.h` and hold its structs
+//! against the Rust ones, field by field, and check that the bytes of the record no field covers are the
+//! ones the shaders mask.
 
 use std::collections::HashMap;
-use std::ffi::CStr;
 use std::mem::{offset_of, size_of};
 
 use crate::records::{self as shared, MB_MODE_INFO};
-use crate::*;
 
+/// The size of a field, from a function that returns a reference to it.
 fn field_size<T, F>(_: fn(&T) -> &F) -> usize {
     size_of::<F>()
 }
 
-include!(concat!(env!("OUT_DIR"), "/layout_table.rs"));
-
-#[repr(C)]
-struct LayoutEntry {
-    name: *const std::ffi::c_char,
-    size: u32,
-    offset: u32,
-    align: u32,
-}
-
-unsafe extern "C" {
-    fn rav1g_layout_table(count: *mut u32) -> *const LayoutEntry;
-}
-
-/// The table of layout_probe.c: (name, size, offset, alignment).
-fn c_layouts() -> Vec<(String, usize, usize, usize)> {
-    // SAFETY: returns a static table of `count` entries with static NUL-terminated names.
-    unsafe { probe_table(rav1g_layout_table) }
-}
-
-/// The table of a probe the build compiled.
-///
-/// # Safety
-/// `table` returns a static table, its length in the argument, with static NUL-terminated names.
-unsafe fn probe_table(
-    table: unsafe extern "C" fn(*mut u32) -> *const LayoutEntry,
-) -> Vec<(String, usize, usize, usize)> {
-    let mut count = 0u32;
-    // SAFETY: the caller's contract.
-    unsafe {
-        let table = table(&mut count);
-        std::slice::from_raw_parts(table, count as usize)
-            .iter()
-            .map(|entry| {
-                let name = CStr::from_ptr(entry.name).to_string_lossy().into_owned();
-                (name, entry.size as usize, entry.offset as usize, entry.align as usize)
-            })
-            .collect()
-    }
-}
-
-#[test]
-fn bindings_and_c_compiler_agree() {
-    let c = c_layouts();
-    let rust = rust_layouts();
-    assert_eq!(c.len(), rust.len(), "entries of the C table and of the table of the bindings");
-    let mut types = 0;
-    for (c, rust) in c.iter().zip(&rust) {
-        assert_eq!(
-            (c.0.as_str(), c.1, c.2, c.3),
-            *rust,
-            "(name, size, offset, alignment): the C compiler of the build, then the bindings"
-        );
-        types += usize::from(!c.0.contains('.'));
-    }
-    // 10 structs of the C interface, 13 of blockd.h and mv.h, and 11 of the entropy decoder that the Rust
-    // host reads or fills in place (AV1Decoder, AV1_COMMON, MACROBLOCKD, ThreadData, the frame buffer
-    // descriptions and others), with their fields.
-    assert_eq!(types, 19);
-    assert!(c.len() - types >= 237, "{} fields", c.len() - types);
-    println!("{types} structs, {} fields: sizes, alignments and offsets equal", c.len() - types);
-}
-
-/// The record sizes the host and the shaders count in (libav1/dx/shaders: `ModeInfoSize`, the 16-byte
-/// prediction and transform block records, the 48-byte warp block record; the same numbers are in the
-/// layout lines of the stage dumps, testing/common/stage_dump.h).
 #[test]
 fn gpu_record_sizes() {
     assert_eq!(size_of::<MB_MODE_INFO>(), 224);

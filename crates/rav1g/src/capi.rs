@@ -908,7 +908,7 @@ pub unsafe extern "C" fn rav1g_device_destroy(device: *mut Rav1gDevice) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rav1g_log_video_memory(d3d12_device: *mut c_void, label: *const c_char) {
     // SAFETY: the caller's contract.
-    unsafe { crate::sys::av1_log_video_memory_now(d3d12_device, label) };
+    unsafe { crate::host::av1_log_video_memory_now(d3d12_device, label) };
 }
 
 /// The defaults: a decoder for 8-bit 1920x1088 frames with the shared back buffer, the parse pass of
@@ -1512,8 +1512,7 @@ pub unsafe extern "C" fn rav1g_parse_digest_destroy(digest: *mut Rav1gParseDiges
 /// An empty string for the normal build of the shaders, "uavsync" for the experiment build.
 #[unsafe(no_mangle)]
 pub extern "C" fn rav1g_shader_variant() -> *const c_char {
-    // SAFETY: returns a static string.
-    unsafe { crate::sys::av1_shader_variant() }
+    crate::host::av1_shader_variant()
 }
 
 /// The timing run: with a callback every decoder takes GPU timestamps and CPU timers per stage and hands

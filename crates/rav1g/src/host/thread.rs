@@ -17,7 +17,7 @@
 use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 
-use crate::sys::parser::HwFrameBuffer;
+use crate::sys::HwFrameBuffer;
 
 /// A lock of the host. A thread that panics with one held ends the process (the panic crosses a function
 /// the C calls), so what a poisoned lock guards is never looked at again; the lock is taken regardless.

@@ -24,7 +24,7 @@ use std::sync::OnceLock;
 use super::tables::{
     BLOCK_SIZE_HIGH, BLOCK_SIZE_WIDE, MI_SIZE_HIGH_LOG2, MI_SIZE_WIDE_LOG2, TX_SIZE_HIGH, TX_SIZE_WIDE,
 };
-use crate::sys::parser::{
+use crate::sys::{
     AV1_COMMON, AV1LrStruct, AV1PixelRect, RESTORE_NONE, RestorationInfo, WarpedMotionParams, YV12_BUFFER_CONFIG,
 };
 

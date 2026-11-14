@@ -8,7 +8,7 @@
 
 use std::ffi::c_int;
 
-pub use crate::sys::parser::{av1_perf_inter_blocks, av1_perf_inter_work};
+pub use crate::sys::{av1_perf_inter_blocks, av1_perf_inter_work};
 
 include!(concat!(env!("OUT_DIR"), "/host_constants.rs"));
 

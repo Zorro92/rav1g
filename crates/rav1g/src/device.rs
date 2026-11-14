@@ -17,7 +17,7 @@ use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12Device};
 use windows::core::Interface;
 
 use crate::error::{Error, ErrorCode};
-use crate::{gpu, sys};
+use crate::gpu;
 
 /// The compute pipeline states (`av1_create_pipeline_cache_handle`), destroyed with the last owner.
 struct Pipelines(NonNull<c_void>);
@@ -30,7 +30,7 @@ impl Drop for Pipelines {
     fn drop(&mut self) {
         // SAFETY: created by av1_create_pipeline_cache_handle, destroyed once; every decoder that uses the
         // states holds the `Device` they belong to.
-        unsafe { sys::av1_destroy_pipeline_cache_handle(self.0.as_ptr()) }
+        unsafe { crate::host::av1_destroy_pipeline_cache_handle(self.0.as_ptr()) }
     }
 }
 
@@ -83,7 +83,8 @@ impl Device {
             }
         };
         // SAFETY: a valid device, which `Inner` keeps for as long as the states live.
-        let pipelines = unsafe { sys::av1_create_pipeline_cache_handle(device.as_raw(), pipeline_threads as i32) };
+        let pipelines =
+            unsafe { crate::host::av1_create_pipeline_cache_handle(device.as_raw(), pipeline_threads as i32) };
         let Some(pipelines) = NonNull::new(pipelines) else {
             return Err(Error::new(ErrorCode::Error, "the compute pipeline states could not be created"));
         };
@@ -109,7 +110,7 @@ impl Device {
     /// names it.
     pub fn wait_pipelines(&self) -> Result<(), Error> {
         // SAFETY: the handle is valid for as long as `self`.
-        let errors = unsafe { sys::av1_wait_pipeline_cache_handle(self.inner.pipelines.0.as_ptr()) };
+        let errors = unsafe { crate::host::av1_wait_pipeline_cache_handle(self.inner.pipelines.0.as_ptr()) };
         if errors == 0 {
             Ok(())
         } else {
@@ -131,7 +132,7 @@ impl Device {
     pub fn log_video_memory(&self, label: &str) {
         let label = CString::new(label.replace('\0', " ")).unwrap_or_default();
         // SAFETY: a valid device and a C string.
-        unsafe { sys::av1_log_video_memory_now(self.inner.device.as_raw(), label.as_ptr()) };
+        unsafe { crate::host::av1_log_video_memory_now(self.inner.device.as_raw(), label.as_ptr()) };
     }
 
     pub(crate) fn pipelines_ptr(&self) -> *mut c_void {
