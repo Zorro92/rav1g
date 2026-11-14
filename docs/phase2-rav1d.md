@@ -1801,6 +1801,40 @@ part of the set with `-gpuclear -parser c` and with `-gpuclear -poisonbuf -parse
 build, the player smoke test has a task with each flag, and `parse-check` runs `-wave check` with
 one thread and with four and `-wave grid` once.
 
+Run 43558835990 on `310b510`, all jobs green, 16.4 minutes for the push (`rust-clears` 7.9 minutes;
+run 43556652825 on `6ecd347` before it, the same without the idle state, 16.4 minutes):
+
+- **Who clears what**, the 2160p stream on WARP: the bytes of the table above, frame by frame
+  (12,368 on the tile threads without a flag and nothing else; 3,673,300 on the GPU with
+  `-gpuclear`, in every frame's command list; the same on the completion thread with `-cpuclear`;
+  7,851,220 on the GPU with `-gpuclear -parseopt cleargrid` and with `-gpuclear -parser c`). The
+  stream with eight tiles: 98,944 bytes on the tile threads without a flag, 1,226,100 on the GPU
+  with `-gpuclear`.
+- **What the clear takes** on that runner, whose memory is fast: the stage `slot_clear` 0.40 ms a
+  frame for the 3.5 MB (0.2 % of the stages of a frame on WARP, which rasterises on the CPU) and
+  1.08 ms for 7.9 MB; the completion thread 0.09 ms for the 3.5 MB, the decode thread 0.09 ms.
+- **The lists either way**: `rav1g-parse-check -wave check` equal on 254 of 254 streams with one
+  thread and with four (2.0 million transform blocks), `-wave grid` equal; the stage dumps of
+  `-cpuclear` equal to those of the default byte for byte; the dumps, the frames and the MEMORY
+  lines of `-parser c` equal to those of the C++ decoder as before (`rust-equal`).
+- **The lists' time on the Linux runner** (`rav1g-parse-check -time`, one thread, the best of three,
+  two runs; ms a frame), the grid and then the edges: `nf-dvbdash-d2-10b-2160p` 0.861, 0.844 and
+  0.961, 0.956; `nf-dvbdash-a1-8b-2160p` 0.448, 0.445 and 0.517, 0.503; `nf-chimera-10b-1080p`
+  0.320, 0.316 and 0.409, 0.409. As on the development machine: where memory is fast and nothing
+  competes for it, the edges cost 0.06 to 0.11 ms a frame of instructions more than the grid. On
+  WARP, with four threads and the rasteriser next to the parse, `cpu parse: block lists` of the
+  2160p stream is 0.66 ms without a flag, 0.58 with `-gpuclear`, 0.67 with `-cpuclear` and 0.60
+  with `-syncclear`: single runs, which do not tell the ways apart.
+- **The memory check with `-gpuclear`**: 40 decoders, every frame as its reference; the video memory
+  after a release 0 bytes above the start; the floor of the private bytes at most 13.3 MiB above
+  that of the fourth iteration (tolerance 40); the device buffers those of before (470.7 MiB for
+  the 2160p 8-bit decoder, 166.9 MiB for 1080p 10-bit with `-lowmem`, 58.9 MiB for 720p 8-bit).
+
+**The packages.** 0.2.148.0 (and `.2`, MSVC) of run 43558835990 is the one this section describes.
+0.2.146.0 and 0.2.147.0 (runs 43554948108 and 43556652825) have the same without the idle state;
+in the first of the two runs a check of CI still asked the log for the old default and failed,
+with every decode passing.
+
 **For the console**, all in the slow state (the warm-up task first), `-gputime`, the same clip in
 one launch:
 

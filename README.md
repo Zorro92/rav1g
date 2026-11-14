@@ -30,7 +30,7 @@ Defaults (test player and library): the rewritten CDEF shader, a decoder sized f
 stream, one back buffer shared by all frames, two frames in flight, rav1d's parse pass as
 the parser, and no per-frame clears of a slot by the CPU (the wavefront of intra prediction
 is kept at the edges of the tiles). Each was md5-exact on the console, except the last,
-which is new in package 0.2.146.0 and md5-exact in CI; `-cpuclear` is the default before it.
+which is new in package 0.2.148.0 and md5-exact in CI; `-cpuclear` is the default before it.
 The upstream behaviour is `-cdefv1 -nofitsize -lowmemparts 0
 -parser c -syncclear` in the test player. Everything else that was tried (`-slots 3`,
 `-lowmem`, `-intrav2`, `-intraopt`) stays behind its flag. The columns below name the flags the runs were made
