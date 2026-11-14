@@ -69,7 +69,13 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
   `-lowmem -slots 3` 773.5 MiB (measured). A decoder that
   does not fit is refused instead of losing the D3D12 device, and a destroyed decoder returns
   its memory (what stays charged to the app afterwards, up to ~250 MiB, is reused by the next decoder, and the
-  player's guard counts it as available).
+  player's guard counts it as available). The 1 GiB is an app that asks for nothing, which is what
+  the test player is and what all of these numbers are for. An app that declares the `hevcPlayback`
+  capability, as an app that plays 4K video does, is given 3.25 GB by Microsoft's documentation, in two
+  pools (a general heap and a graphics partition); which of them the decoder's D3D12 buffers are
+  charged to decides how much room a decoder has inside such an app. The player logs both pools
+  (`MEMORY pools`) and a package variant declares the capability to measure it:
+  [docs/test-player.md](docs/test-player.md#the-two-memory-pools-memory-pools-hevcplayback).
 - 1080p24/30 already decodes in real time.
 - **Hidden frames**: encodes with frames that are decoded but shown later (SVT-AV1 random
   access, and most real-world AV1) used to stop after the first frames, because every hidden

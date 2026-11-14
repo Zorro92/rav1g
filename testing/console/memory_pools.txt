@@ -1,0 +1,13 @@
+# Tasks for the console: which pool of the app's memory the decoder's D3D12 buffers are charged to, and what
+# the hevcPlayback capability changes (docs/test-player.md, "The two memory pools"). The lines of this file
+# are the tasks of LocalState\args\args_av1.txt; a line that starts with # is skipped (leave no empty line).
+# Run it twice, in this order: on the default package (0.2.<run>.0), then on the hevcPlayback package of
+# the same run (0.2.<run>.3, which installs over it), and compare the MEMORY app, MEMORY pools and MEMORY
+# dxgi lines of the two logs. The stream is 3840x2160 10-bit, in LocalState\streams.
+# Task 1: the default decoder (two slots, about 616 MiB of device buffers: the MEMORY decoder created line has
+# the number), 60 frames, destroyed at the end of the task (-r).
+-i /streams/j4k40.ivf -t 6 -frate -1 -limit 60 -queue_size 4 -progress -nopresent -r
+# Task 2: a decoder that does not fit an app of 1 GiB (four slots, about 917 MiB of device buffers). The default
+# package refuses it (MEMORY REFUSED, nothing is allocated); with hevcPlayback it is created if the system
+# gives the app the memory. Delete the line for the measurement of task 1 alone.
+-i /streams/j4k40.ivf -t 6 -frate -1 -limit 60 -queue_size 4 -progress -nopresent -r -slots 4

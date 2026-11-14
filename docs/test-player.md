@@ -190,13 +190,15 @@ gh run download <run-id> --name rav1g-testplayer-x64-<run-id> --dir rav1g-testpl
 
 A run builds two packages of the same player and the same identity. They differ in what compiled
 the C of the parser and entropy decoder, which is where the tile threads spend their time, and in
-how the library is linked:
+how the library is linked. A third is the default package again with one capability more in its
+manifest:
 
 | Artifact | Version | Library | Use |
 | --- | --- | --- | --- |
 | `rav1g-testplayer-x64-<run-id>` | `0.2.<run number>.0` | `rav1g.dll`: Rust, the C compiled by clang-cl with full link time optimisation, linked by lld-link | **the default: use this one** |
 | `rav1g-testplayer-msvc-x64-<run-id>` | `0.2.<run number>.2` | linked statically: Rust, the C compiled by MSVC with `/GL` and by the player's link (`/LTCG:incremental`) | the alternative: one program without a DLL of its own; for a comparison of the two compilers |
 | `rav1g-testplayer-uavsync-x64-<run-id>` | `0.2.<run number>.1` | the default build with the uavsync shaders | only with the `experiments` input; see [Experiments](#experiments) |
+| `rav1g-testplayer-hevcplayback-x64-<run-id>` | `0.2.<run number>.3` | the programs of the default package, byte for byte; the manifest declares the restricted capability `hevcPlayback` | only for the memory the console gives an app with that capability; see [The two memory pools](#the-two-memory-pools-memory-pools-hevcplayback) |
 
 A higher revision installs over a lower one and keeps LocalState; the default package of a later
 run installs over all of them. The log of a launch names its library in a `LIBRARY` line before the
@@ -217,7 +219,7 @@ Up to run 121 the revisions meant something else: `.0` was a package with the C+
 `rav1g.h` (the reference of the port, artifact `rav1g-testplayer-x64`), `.2` the Rust library with the
 C of MSVC (`rav1g-testplayer-rust-msvc-x64`) and `.3` the Rust library as `rav1g.dll`
 (`rav1g-testplayer-rust-clang-x64`), which is the default `.0` now. A package with the C++ decoder is
-built by the workflow of branch `cpp`.
+built by the workflow of branch `cpp`. Since 2026-11-14 `.3` is the `hevcPlayback` package of the table.
 
 The artifact `rav1g-testplayer-x64-<run-id>` contains:
 
@@ -1441,7 +1443,9 @@ task. Otherwise the flags are independent of each other and of `-cdefv1`, `-intr
 **Console results so far (2026-11-11, package 0.2.5.0, app mode, both 4K 10-bit clips):**
 
 - A console app has a memory limit of **1024.0 MiB** (`Windows::System::MemoryManager`),
-  and the decoder's D3D12 buffers count against it. The app used 77 MiB before the
+  and the decoder's D3D12 buffers count against it (an app that declares `hevcPlayback` gets
+  more, which the test player does not by default:
+  [The two memory pools](#the-two-memory-pools-memory-pools-hevcplayback)). The app used 77 MiB before the
   decoder and **882.7 MiB after the default two-slot decoder** (40 device buffers,
   754.7 MiB; host pool 23.2 MiB), and the output pool of 4 images took another 100.5 MiB:
   about 40 MiB were left. DXGI reported a local budget of 1209.6 MiB, with usage going
@@ -1876,7 +1880,10 @@ MEMORY decoder created options: intra_v2 buffers no (the decoder was not created
 ```
 
 `app` is `Windows::System::MemoryManager`: the memory of the whole app and the limit the
-system gives it. On the console the D3D12 buffers are part of it. The host pool is
+system gives it. On the console the D3D12 buffers are part of it. Where the system says how
+that memory is split into two pools, a `MEMORY pools` line with the same `<where>` follows every
+`app` line ([The two memory pools](#the-two-memory-pools-memory-pools-hevcplayback)); it is left
+out of the blocks here. The host pool is
 allocated before the `app before the decoder` line, so it is in that usage, and so are
 the pipeline states (the player waits for them before the first task). The player
 now reads on to the stream's first key frame before it creates the decoder, with or
@@ -2080,8 +2087,10 @@ What is left is how the system charges the app:
 None of this touches a frame: the decoded output is the same.
 
 **The `MEMORY app <where>` lines.** Every `app` line is followed by a `MEMORY dxgi
-<where>` line with the same text; `grep "MEMORY app"` gives the app's memory along a
-launch. In the order they appear:
+<where>` line with the same text, and in front of that by a `MEMORY pools <where>` line where
+the system has the two pools
+([The two memory pools](#the-two-memory-pools-memory-pools-hevcplayback));
+`grep "MEMORY app"` gives the app's memory along a launch. In the order they appear:
 
 | `<where>` | When |
 | --- | --- |
@@ -2139,6 +2148,120 @@ creation is then not checked: either `MEMORY app after the decoder` shows the ap
 where the first decoder left it (the memory was reused), or the creation fails with
 `0x887A0005` and the launch is over (it was not).
 
+### The two memory pools (`MEMORY pools`, `hevcPlayback`)
+
+**The question.** The 1 GiB of a console app is what an app gets that asks for nothing. Microsoft's
+[4K video playback for UWP apps on Xbox](https://learn.microsoft.com/en-us/windows/uwp/audio-video-camera/hevc-xbox)
+says that an app which declares the `hevcPlayback` capability "will be allocated 3.25GB of memory.
+This is 2GB more than apps without 4K playback enabled" (and that it no longer runs next to a game:
+the app is suspended and closed when one is launched). The same page has a call, for the console
+only and "for apps that have HEVC enabled", that reports the app's memory as two pools: "The
+`appMemory` properties refer to general heap usage. The `extendedMemory` properties provide graphics
+partition information" on the consoles that have such a partition. An app that plays 4K video
+declares the capability, so a decoder inside such an app does not live in 1 GiB; what it lives in
+depends on which of the two pools its D3D12 buffers are charged to, and that is not written down
+anywhere. `Windows::System::MemoryManager` has one usage and one limit. So the player logs the two
+pools, and a package with the capability exists to measure them.
+
+**The line.** Behind every `MEMORY app <where>` line, with the same `<where>`:
+
+```text
+MEMORY pools before the decoder: general heap usage N.N MiB of limit N.N MiB, N.N MiB left; graphics partition usage N.N MiB of limit N.N MiB, N.N MiB left; both usage N.N MiB of limit N.N MiB
+```
+
+The four numbers are those of the call, `appMemoryUsage`, `appMemoryLimit`, `extendedMemoryUsage`
+and `extendedMemoryLimit`; `both` is their sums. Where the call does not exist or fails, one line
+says so, once per launch, and the rest of the log is as before:
+
+```text
+MEMORY pools: not available (the activation factory of the console's application resources: hr 0x80040154): the system does not say here how the app's memory is split into the general heap and the graphics partition. This line is logged once per launch
+```
+
+`0x80040154` (class not registered) is a PC. The step in front of the HRESULT is the one that
+failed: the activation factory, or `GetExtendedMemoryInfo` when the class is there and the call is
+refused, which is what the page lets expect for an app without the capability. The player's decoder
+code in a desktop program (`rav1g-dec -playersmoke`) has no such line: it is not an app.
+
+**The call.** The class is `Windows.Xbox.ApplicationModel.ApplicationResources`. The Windows metadata
+does not have it, so the player declares what the page gives (`LogAppMemoryPools` in
+`testing/player_common/decoder.cpp`): the interface `IApplicationResourcesStatics2`,
+`dd36a017-b640-45f7-a023-1615cf098923`, of the class's activation factory, with one method behind
+those of `IInspectable`, `GetExtendedMemoryInfo`, which fills a structure of four 64-bit numbers in
+the order above. The factory comes from `RoGetActivationFactory` with that interface's identifier,
+the class name as a string reference (`WindowsCreateStringReference`). Both functions are in API
+sets the player imports from already (`api-ms-win-core-winrt-l1-1-0.dll`,
+`api-ms-win-core-winrt-string-l1-1-0.dll`), so `testing/uwp_imports/player-dlls-allow.txt` is as it
+was. A line costs what a `MEMORY app` line costs.
+
+The budget guard is not changed by any of this: it asks `Windows::System::MemoryManager`, as
+before, and whether that limit moves with the capability is one of the things the measurement
+below shows.
+
+**The capability in the manifest.** As the page declares it, a restricted capability: the
+namespace `http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities`
+with the prefix `rescap`, which is added to `IgnorableNamespaces`, and one element behind the
+ordinary capabilities. Nothing else:
+
+```xml
+<Package ... xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+         IgnorableNamespaces="uap mp rescap">
+  ...
+  <Capabilities>
+    <Capability Name="internetClient" />
+    <rescap:Capability Name="hevcPlayback" />
+  </Capabilities>
+</Package>
+```
+
+Restricted capabilities need an approval for the Store and none for a package that is sideloaded
+([App capability declarations](https://learn.microsoft.com/en-us/windows/uwp/packaging/app-capability-declarations#restricted-capabilities):
+"you can sideload apps that declare restricted capabilities without needing to receive any
+approval"), which is how the test player is installed. `hevcPlayback` is not in the list of
+restricted capabilities on that page; the 4K page is where it is documented.
+
+**The package.** The default package does not declare the capability, and stays that way: the
+budget guard, the sizes of the decoder and every memory result in this document are for an app of
+1 GiB, the hardest case. The `hevcPlayback` package (`rav1g-testplayer-hevcplayback-x64-<run-id>`,
+version `0.2.<run number>.3`) is not a build of its own. The player job unpacks the default package
+of the run, `testing/uwp_package/capability_variant.py manifest` writes the capability and revision
+3 into `AppxManifest.xml` and nothing else, and MakeAppx and SignTool of the Windows SDK pack and
+sign the result with the certificate of the run. `capability_variant.py check` then holds the two
+packages against each other, and the job fails unless the manifests differ in the capability and
+the version alone, every other file is in both byte for byte (`VARIANT.txt` of the artifact has
+their sha256), the variant is signed, and the default package does not declare the capability. The
+imports of its programs are checked like those of the other packages. Same identity and the same
+certificate as the default package, so revision 3 installs over `.0` (and `.1`, `.2`) of its run
+and keeps LocalState; the way back to an app of 1 GiB is the default package of a later run, which
+installs over it.
+
+**The measurement.** `testing/console/memory_pools.txt` has the tasks: a 3840x2160 10-bit stream,
+the default decoder, 60 frames, the decoder destroyed at the end of the task (`-r`), and a second
+task with a decoder that an app of 1 GiB cannot hold (`-slots 4`, about 917 MiB of device buffers).
+Run it on the default package, then install the `hevcPlayback` package of the same run over it and
+run it again. Timing plays no part, so the state of the console does not matter. From each log:
+
+```sh
+tr -d '\r' < log.txt | grep -E "MEMORY (app|pools|dxgi) |MEMORY decoder created:|MEMORY output pool:|MEMORY budget|MEMORY REFUSED decoder"
+```
+
+What to read, in the first task:
+
+| Lines | What they say |
+| --- | --- |
+| `MEMORY decoder created: ... N device buffers, ... (N.N MiB)` | What the decoder allocated: the size to look for below (about 616 MiB). |
+| `MEMORY pools before the decoder` and `after the decoder`, with the capability | **The answer.** The pool whose usage rises by the device buffers of the decoder is the one the D3D12 buffers are charged to: `general heap usage`, or `graphics partition usage`. The decoder's host memory, about 23 MiB of ordinary memory, is allocated between the two lines as well and belongs in the general heap; beyond it the other pool should not move. A rise that is split says which part goes where; the buffers the CPU maps (upload, readback and the `HostRW` type) may be treated differently from the default-heap ones, and the `by type` line has their sizes. |
+| `MEMORY pools decoding, first frame out` | The output pool is there: about 100 MiB of textures (`MEMORY output pool:`) on top, in the pool textures go to. `30 frames out` should be the same. |
+| `MEMORY pools after the decoder was destroyed`, `after the destroyed task's output pool was released` | What each pool gets back, and what stays charged (in an app of 1 GiB up to about 250 MiB stay and are reused by the next decoder). |
+| The limits of the `MEMORY pools` lines | The size of each pool. Their sum against the 3.25 GB of the page. |
+| `MEMORY app ... of limit N.N MiB`, both packages | 1024.0 MiB without the capability. With it: the limit `MemoryManager` reports, and which of the pools its usage follows: the general heap, or both. The budget guard uses this number, so if it does not cover the pool the buffers are in, the guard is wrong for such an app in one direction or the other. |
+| `MEMORY pools` on the default package | Whether the call works without the capability at all (the `not available` line with `GetExtendedMemoryInfo` and an HRESULT if not), and if it does, the limits of an app of 1 GiB. |
+| `MEMORY dxgi before` and `after the decoder's allocations`, both packages | The adapter's budget and usage (`IDXGIAdapter3::QueryVideoMemoryInfo`): whether the local budget, 1209.6 MiB in an app of 1 GiB, grows with the capability. |
+
+And in the second: `MEMORY REFUSED decoder` on the default package (nothing is allocated, the device
+stays). With the capability either the same refusal, if `MemoryManager`'s limit did not move, or
+`MEMORY budget: ... accepted` and a decoder that takes the app past 1 GiB, with the pools lines
+around it as in the first task.
+
 ### The app's memory as a model (`-budget`, `-retain`)
 
 The budget guard, the settle wait and the credit of a released decoder only run where the system
@@ -2168,7 +2291,9 @@ MEMORY app model (-budget 250 -retain 160): the system gives this program no mem
 ```
 
 It is a model and not a measurement: exact, and the same in every run, which is what a check of the
-player's decisions needs. The output pool is not charged (its estimate is still held back from what
+player's decisions needs. It has one limit, as `Windows::System::MemoryManager` has; the two pools of
+an app with `hevcPlayback` ([above](#the-two-memory-pools-memory-pools-hevcplayback)) are not in it.
+The output pool is not charged (its estimate is still held back from what
 the decoder may take), and what the process really gives back is measured by `rav1g-dec -memstate`.
 Both are run by `testing/conformance/memory_check.py`
 ([warp-decoder.md](warp-decoder.md#memory-check)). In the app both flags do nothing, and a task that

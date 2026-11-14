@@ -44,7 +44,9 @@ of dav1d, BSD-2-Clause).
 
 The goals of the project, in order: heavy 4K at 30 fps in real time (at most 33.3 ms per frame), then
 faster, then efficiency (CPU, GPU and memory left to the application). The target is the console: a UWP
-application, D3D12, eight Zen 2 cores of which the application gets some, 1 GiB of application memory.
+application, D3D12, eight Zen 2 cores of which the application gets some, 1 GiB of application memory
+(more for an application that declares `hevcPlayback`:
+[test-player.md](test-player.md#the-two-memory-pools-memory-pools-hevcplayback)).
 
 Today the CPU limits heavy 4K: the parser takes 34 to 45 ms per frame on one core on 1-tile streams, and
 setup and recording share its thread ([gpu-av1-decoder.md](gpu-av1-decoder.md), "Next CPU target").

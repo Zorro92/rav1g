@@ -296,7 +296,11 @@ decoder took the app to 882.7 MiB, ~40 MiB short of the limit with the output po
 (+~198 MiB) pushed GPU usage past the budget and removed the D3D12 device for the rest of the
 process. After the reductions, app memory after creation is 812.7 MiB (default), 765.5 MiB
 (`-fitsize`), 663.4 MiB (`-lowmem -fitsize`) and 773.5 MiB (`-lowmem -fitsize -slots 3`). An embedding
-app has the same 1 GiB for everything, so this matters beyond the test player.
+app has the same 1 GiB for everything, so this matters beyond the test player. (Unless it declares the
+`hevcPlayback` capability, which Microsoft documents as 3.25 GB in two pools, a general heap and a
+graphics partition; which pool the decoder's D3D12 buffers are charged to is measured with a package
+variant of the test player:
+[test-player.md](test-player.md#the-two-memory-pools-memory-pools-hevcplayback).)
 
 Same console, `-cdefv2`, 300 frames of 4K 10-bit; every configuration below is md5-exact:
 
