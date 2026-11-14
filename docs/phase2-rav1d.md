@@ -2361,7 +2361,40 @@ jobs green, 17.6 minutes for the push (`rust-frames` 13.8, `rust-cross-run-parse
 [test-player.md](test-player.md#frames-in-parse--parseframes)), `0.2.156.2` (MSVC), `0.2.156.3`
 (`hevcPlayback`).
 
+**Console.** Package 0.2.156.0 (the base 1 GiB), slow state (the warm-up task first), the owner's
+app not running. The md5 set of 15 streams with the library's defaults (one launch each): 15 of 15
+right. The default at 4K is accepted: 646.5 + 48 MiB against 775.0 MiB left; while decoding the app
+uses about 897 of 1024 MiB. The timing lines of
+[test-player.md](test-player.md#frames-in-parse--parseframes), 300 frames, fps:
+
+| Line | `j4k40` | `d2` | `j4k40`, `hevcPlayback` | `d2`, `hevcPlayback` |
+| --- | ---: | ---: | ---: | ---: |
+| `-t 2 -parseframes 1` | 29.3 | 34.9 | | |
+| default (2 frames in parse, 2 threads, 3 slots) | 45.7 | 48.8 | 45.6 | 49.4 |
+| `-slots 4` | **19.5** | **18.8** | 49.6 | 50.9 |
+| `-t 6 -parseframes 1` | 29.2 | 34.7 | | |
+| `-t 6` | 44.8 | 49.0 | | |
+
+- 4K30 holds with the pools: the default is 1.5 times real time on `j4k40` and the 50 fps `d2`
+  runs at about real time, in 1 GiB.
+- `-slots 4` in 1 GiB falls off a cliff. The app was at 948 of 1024 MiB while decoding, and the
+  passes that read frame buffers got slower (`inter` 1.5 → 19.2 ms a frame, `ext_borders` 8x,
+  `cdef` 2.4x); the decode thread waited for the GPU 96 % of the time. The same line in the
+  `hevcPlayback` package (3328 MiB) is the fastest line. So the memory, not the code. The guard
+  accepted it (695.3 + 48 against 772.8 MiB left): it does not count what the app adds once
+  frames come out (about 120 MiB at 4K: the output queue), and its margin is too small to keep away
+  from the cliff.
+- The third slot against a fourth, where memory allows: 45.6 against 49.6 fps on `j4k40` (−8 %),
+  49.4 against 50.9 on `d2` (−3 %); with three slots the decode thread waits for a slot 46 % of the
+  time. The default keeps three slots (49 MiB less, and far from the cliff in 1 GiB).
+- Six threads give nothing over two on these streams.
+- Pool use on the console with two frames in parse: at most 11–13 % (`j4k40`), 51–68 % of the
+  coefficient pool (`d2`); no tile waited for the GPU.
+
 **Left** after this step:
+
+- The guard: count the app's growth while decoding (the output queue) and keep a margin from the
+  cliff found above, so that it falls back instead of accepting a decoder that runs 2.5 times slower.
 
 - The frame buffer at the recording (above): 24.2 MiB at 4K, which brings the default to 622.3 MiB.
 - The block index list of a slot (6.0 MiB at 4K, sized for the worst case, a few percent used)
