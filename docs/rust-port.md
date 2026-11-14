@@ -1756,6 +1756,75 @@ MSVC, GPU 18.4 ms; `t40x1ld` 34 to 35 ms. One run of 0.2.130.0 stopped in the mi
 (someone used it), which is not a defect of the decoder. A follow-up for later: the player logs none of
 the Suspending, VisibilityChanged and Closed events; a log line for each would make that case plain.
 
+## Own types, no libaom headers
+
+Started 2026-11-14. The decoder compiles no C of libaom, but its build still reads libaom's headers:
+`crates/rav1g-sys/build.rs` runs bindgen over `wrapper.h` (`aom/aom_codec.h`, `aom/aom_decoder.h`,
+`aom/aomdx.h`, `dx/av1_perf.h`), `shared.h` (`av1/common/blockd.h`) and `parser.h` (`dx/av1_core.h` and
+seven headers of `av1/common`), and a C probe holds the result against the C compiler. That needs
+libclang on every machine that builds the decoder and keeps 113 headers in the tree for the sake
+of some 60 structs. The plan: the decoder gets Rust types of its own for all of it, bindgen and libclang
+leave the build, and the headers are pruned to what the shader checks of CI compile. The output stays
+byte-identical; `rav1g.h` does not change.
+
+**Inventory** (the bindings of the Windows build against every name the Rust of `crates/rav1g`,
+`crates/rav1g-parse` and `tools` uses; the bindings for Linux differ only in types of the C library,
+which the decoder does not use):
+
+| Bindings | Items written | Named by the Rust | With what those hold |
+| --- | --- | --- | --- |
+| root (`wrapper.h`) | 384 | 147 | 176: 107 constants, 14 structs, 21 functions |
+| `shared` (`shared.h`) | 28 | 6 | 24: 9 structs and unions, 15 integer types |
+| `parser` (`parser.h`) | 833 | 221 | 414: 170 constants, 114 structs and unions, 7 tables |
+
+- 250 names are written twice or three times (`MB_MODE_INFO` in `shared` and in `parser`, the perf and
+  stage dump types in the root and in `parser`), as separate Rust types with the same layout.
+- The 21 functions are the test switches and the pipeline cache of `dx/av1_perf.h` and
+  `aom/aom_decoder.h`. All are Rust functions of the host now (`#[unsafe(no_mangle)]`); the bindings only
+  declare them for the callers in the same crate, which can call them by path.
+- The 7 tables (`warped_filter`, `sgr_params`, ...) are `extern` declarations that nothing links: the
+  host has the tables in Rust (`host/libaom.rs`, written by `crates/rav1g/build.rs` from the text of the
+  C files).
+- Of the structs of the host state the Rust names a small part of the fields: `AV1Decoder` 15 of 60
+  (1,225,792 bytes as C), `AV1_COMMON` 47 of 138 (71,744 bytes), `MACROBLOCKD` 21 of 58 (15,776 bytes),
+  `ThreadData` 6 of 26 (82,336 bytes), `SequenceHeader` 28 of 44, `RefCntBuffer` 15 of 22,
+  `YV12_BUFFER_CONFIG` 23 of 29; `BufferPool` and `Av1ColorMapParam` are not used at all. Over all
+  structs outside the two groups below about 480 fields go.
+- Layouts that must stay as they are, because the bytes leave the Rust host:
+  - what the shaders read: `MB_MODE_INFO` (224 bytes, `MB_MODE_INFO` of `dx/shaders/mode_info.h`) with
+    `PALETTE_MODE_INFO`, `WarpedMotionParams` (also copied whole into the constants of the inter stage),
+    `INTERINTER_COMPOUND_DATA`, `FILTER_INTRA_MODE_INFO` and `int_mv`; `tx_block_info_gpu` (16 bytes, one
+    `uint4` of the IDCT shaders);
+  - what both the sink of the parser and the host index: `av1_tile_data` (280 bytes; no shader reads it);
+  - what the C interface hands out by layout: `av1_perf_frame`, `av1_perf_inter_detail`,
+    `av1_stage_dump` and `av1_stage_dump_plane` (the callbacks of `rav1g.h` get them), and the structs
+    between `decoder.rs` and the host that were the C interface of libaom (`aom_codec_dec_cfg_t`,
+    `aom_image_t`, `av1_decoded_frame_buffer_t`, `av1_out_buffers_cb_t`);
+  - `aom_film_grain_t`, which the host compares and copies as bytes.
+- The other records of the GPU stages (prediction blocks, loop filter and restoration constants, the
+  palette and film grain data) are structs of the host modules already and never were bindings. The
+  restoration units (`RestorationUnitInfo`) are host state: the host writes the constants of the loop
+  restoration shader from them field by field.
+
+**Steps**, each a commit that is green in CI before the next:
+
+1. The records shared with the shaders and the tile cursors: `crates/rav1g-sys/src/records.rs`,
+   `#[repr(C)]` structs with the size, the alignment and every field offset as constant assertions, taken
+   from the bindings. In this step the layout probe still holds them against the C compiler once more.
+2. The host state (`AV1Decoder`, `AV1_COMMON`, `MACROBLOCKD`, `ThreadData`, the frame buffer
+   descriptions, ...): Rust structs with the fields the decoder uses. No layout is kept.
+3. Constants, enums, error codes and the perf, stage dump and switch types: Rust definitions with the
+   same values; the constant assertions of `capi.rs` and `lib.rs` against `rav1g.h` stay. With this the
+   last bindings are gone: bindgen, `wrapper.h`, `parser.h`, the layout probe and its C leave, and the
+   tests that held Rust copies of tables and inline functions against the headers with them.
+4. libclang leaves the CI jobs and the documentation.
+5. The headers of libaom are pruned to what is still compiled or read: the shader checks of `testing/`,
+   the tables `crates/rav1g/build.rs` reads, and what the shaders include.
+
+`rav1g-sys` stays a crate: `rav1g-parse` needs the records and sits below `rav1g`, and the shader table
+(the one C file that is left, with its link time optimisation and the `rav1g_c.lib` the UWP player
+links) has its build script there.
+
 ## Estimate
 
 Steps 1-2: about a day. Step 3: two to three days. Step 4: one to two days. Step 5: one to two days.
