@@ -65,7 +65,10 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
 - **Memory**: a console app may use 1 GiB. At 4K the decoder took 882.7 MiB of it (app memory
   after creation, 2 slots), then 812.7 MiB, and 765.5 MiB sized for the stream (measured).
   The default now also shares one back buffer, 24 MiB less (computed: 615.7 MiB of D3D12
-  buffers for a 4K 10-bit stream). With `-lowmem` it is 663.4 MiB and with
+  buffers for a 4K 10-bit stream). With rav1d's parse the frames in flight take their mode
+  info and coefficients from pools instead of a share for each slot: 597.6 MiB with one frame
+  in parse, and 646.5 MiB with two frames in parse on three slots, which is the default at 4K
+  and fits the 1 GiB (it was 916.6 MiB and did not). With `-lowmem` it is 663.4 MiB and with
   `-lowmem -slots 3` 773.5 MiB (measured). A decoder that
   does not fit is refused instead of losing the D3D12 device, and a destroyed decoder returns
   its memory (what stays charged to the app afterwards, up to ~250 MiB, is reused by the next decoder, and the

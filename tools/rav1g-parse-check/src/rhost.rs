@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use rav1g_parse::options::ParseOptions;
 use rav1g_parse::rav1d::include::dav1d::headers::Rav1dPixelLayout;
 use rav1g_parse::rav1d::parse::{ParseFrame, ParsePalette, ParseSettings, ParseSuperblock, ParseTile, Parser};
-use rav1g_parse::sink::{FrameMemory, SecondModeInfo, Sink, SinkHost, SinkTimer, TileMemory};
+use rav1g_parse::sink::{FrameMemory, ModeInfoPiece, Sink, SinkHost, SinkTimer, TileMemory};
 
 use crate::plain::{Arena, FrameSize, LrUnit, Palette, TileBounds};
 use crate::sys::parser::{RESTORE_NONE, RESTORE_SGRPROJ, RESTORE_WIENER, av1_tile_data};
@@ -143,16 +143,23 @@ impl SinkHost for PlainHost {
                 col_start: tile.col_start,
                 col_end: tile.col_end,
             });
-            // A tile has room for all its blocks and the worst-case layout of its coefficients here.
-            TileMemory { tile_data, mi_pool, mi_count_max, worst_case_coefs: true }
+            // A tile has room for all its blocks, all its transform blocks and the worst-case layout of
+            // its coefficients here: it never asks for more.
+            TileMemory { tile_data, mi_pool, mi_count_max, txb_room: std::ffi::c_int::MAX }
         }
     }
 
-    fn second_mode_info(&self, _frame: usize, _tile: usize, _tile_data: *mut av1_tile_data) -> Option<SecondModeInfo> {
+    fn more_mode_info(&self, _frame: usize, _tile: usize, _tile_data: *mut av1_tile_data) -> Option<ModeInfoPiece> {
         None
     }
 
-    fn second_coefs(&self, _frame: usize, _tile: usize, _tile_data: *mut av1_tile_data) {}
+    fn more_coefs(&self, _frame: usize, _tile: usize, _tile_data: *mut av1_tile_data) -> bool {
+        false
+    }
+
+    fn more_transform_blocks(&self, _frame: usize, _tile: usize, _tile_data: *mut av1_tile_data) -> std::ffi::c_int {
+        0
+    }
 
     fn palette(&self, frame: usize, tile: usize, palette: &ParsePalette<'_>) {
         let count = usize::from(palette.pal_sz);

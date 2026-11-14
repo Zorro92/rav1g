@@ -14,8 +14,9 @@ use std::ffi::c_int;
 use super::core::{
     alloc_constant_bytes, alloc_constants, buffer, commands, layout, perf_gpu_mark, pipeline, stage_dump_residuals,
 };
+use super::frame::joined_runs;
 use super::tables::{TX_SIZE_HIGH, TX_SIZE_WIDE};
-use super::types::Av1Core;
+use super::types::{Av1Core, Run};
 use crate::sys::parser::{
     AV1_PERF_GPU_IDCT, AV1_PERF_GPU_IDCT_SORT, AV1_PERF_GPU_RESIDUAL_CLEAR, TX_4X4, TX_SIZES_ALL, av1_idct_scans,
 };
@@ -80,18 +81,29 @@ pub(crate) unsafe fn idct_run(dec: *mut Av1Core) {
         let shader = pipeline(&raw const (*lib).shader_idct_sort);
         commands.set_layout(shader.layout());
         commands.set_pipeline(shader);
-        commands.bind_read(0, buffer(td.idct_blocks_unordered).location());
+        // The records of the tiles: the slot's buffer, or with pools the pool of all frames, where a
+        // tile's records are in pieces: a dispatch for each run of pieces that follow each other.
+        let pooled = (*dec).pools.is_some();
+        let unordered = if pooled { (*dec).idct_blocks_pool } else { td.idct_blocks_unordered };
+        commands.bind_read(0, buffer(unordered).location());
         commands.bind_write(1, blocks.location());
-        for tile in tiles.iter() {
-            let sort = alloc_constants::<SortData>(&mut td.command_buffer);
-            for tx_type in 0..TX_TYPES {
-                (*sort.data).offsets[tx_type][0] = tile.idct_blocks_sizes[tx_type];
-            }
-            (*sort.data).count = tile.idct_blocks_ptr;
-            (*sort.data).src_offset = tile.blocks_offset;
-            if tile.idct_blocks_ptr != 0 {
-                commands.bind_constants(2, sort.location);
-                commands.dispatch(((tile.idct_blocks_ptr + 63) / 64) as u32, 1, 1);
+        for (index, tile) in tiles.iter().enumerate() {
+            let runs = if pooled {
+                joined_runs(&td.pieces[index].txb)
+            } else {
+                vec![Run { first: tile.blocks_offset, count: tile.idct_blocks_ptr }]
+            };
+            for run in runs {
+                let sort = alloc_constants::<SortData>(&mut td.command_buffer);
+                for tx_type in 0..TX_TYPES {
+                    (*sort.data).offsets[tx_type][0] = tile.idct_blocks_sizes[tx_type];
+                }
+                (*sort.data).count = run.count;
+                (*sort.data).src_offset = run.first;
+                if run.count != 0 {
+                    commands.bind_constants(2, sort.location);
+                    commands.dispatch(((run.count + 63) / 64) as u32, 1, 1);
+                }
             }
         }
         commands.write_barrier2(blocks, residuals);

@@ -1358,98 +1358,112 @@ With rav1d's parse a decoder can have more than one frame in parse
 the parser's threads, and a thread of the decoder records and submits them in decode order. The frames
 that come out, and their order, are the same.
 
+Since the pools ([phase2-rav1d.md](phase2-rav1d.md#step-5-the-pools), package 0.2.155.0) **a task
+without these flags gets the library's defaults for the frame size**: one thread, one frame in parse
+and two slots up to 2560x1440; two threads, two frames in parse and three slots above (4K).
+
 | Flag | Effect |
 | --- | --- |
-| `-parseframes N` | The decoder is asked for `N` frames in parse, 1 to 4 and never more than the threads (`-t`). Without the flag: 1. `-parseframes 0` asks for the library's default for the frame size: 2 for a stream above 2560x1440 with at least two threads, else 1. |
-| `-t N` | The threads that parse: the tiles of a frame and the frames in parse. Without the flag: 1. `-t 0` is the library's default: 2 above 2560x1440, else 1. |
-| `-slots N` | As [below](#pipeline-slots-and-clears--slots--gpuclear--cpuclear--syncclear). A task with `-parseframes` and no `-slots` gets the slots the library gives its frames in parse: two more than frames in parse, at most 4. |
+| `-parseframes N` | The decoder is asked for `N` frames in parse, 1 to 4 and never more than the threads (`-t`). Without the flag, or with 0: the library's default for the frame size, 2 for a stream above 2560x1440 with at least two threads, else 1. |
+| `-t N` | The threads that parse: the tiles of a frame and the frames in parse. Without the flag, or with 0: the library's default, 2 above 2560x1440, else 1. |
+| `-slots N` | As [below](#pipeline-slots-and-clears--slots--gpuclear--cpuclear--syncclear). Without the flag: what the library gives the frames in parse, one more than there are (2, or 3 with two frames in parse), at most 4. |
 
-A frame in parse holds a pipeline slot, so two frames in parse want four slots, and a decoder with
-four slots is larger: 916.6 MiB of device buffers for a 3840x2160 10-bit stream against 615.7 with
-two. **The budget guard decides**: when the app does not have the memory for the decoder of the frames
-in parse, the decoder is created with one frame in parse and two slots, and the task runs as it
-would without the flag. The log says which it is:
+A frame in parse holds a pipeline slot, but no longer a share of the mode info and coefficient
+buffers: all frames in flight take those in pieces from pools that hold the worst case of one frame.
+So the decoder of two frames in parse is one slot larger than that of one, not two slots with their
+shares. Device buffers, MiB (the `CONFIGURATION` line of `rav1g-dec`, `MEMORY decoder created` of the
+player):
+
+| Decoder | 1 frame in parse, 2 slots | 2 frames, 3 slots (the default above 1440p) | 2 to 4 frames, 4 slots (`-slots 4`) |
+| --- | ---: | ---: | ---: |
+| 3840x2160 10-bit, before the pools (0.2.154) | 615.7 | (766.1 with one frame in parse) | 916.6 |
+| **3840x2160 10-bit, now** | **597.6** | **646.5** | 695.3 |
+| 1920x1080 10-bit, before | 166.9 | (207.9) | 248.8 |
+| 1920x1080 10-bit, now | 162.1 | 176.2 | 190.3 |
+
+**The budget guard still decides**: when the app does not have the memory for the decoder of the
+frames in parse, the decoder is created with one frame in parse and two slots, and the task runs as
+it would with `-parseframes 1`. With 775 to 800 MiB left for the decoder, which is what the default
+package had in 1 GiB, 646.5 + 48 MiB fit. The log says which it is:
 
 ```text
-MEMORY decoder size: 3840x2160 10-bit (fit to the stream, the stream's largest frame is 3840x2160 10-bit), slots 0 (the library's for the frames in parse), frames in parse 2, intra_v2 buffers no, low memory parts 1; device buffers 916.6 MiB and up to 96.8 MiB for palette buffers on first use, host memory N.N MiB
-MEMORY frames in parse: 2 asked for, with 6 threads and 4 pipeline slots: the device buffers of that decoder, 916.6 MiB, and the margin of 48.0 MiB do not fit the 775.5 MiB the application has left for the decoder (asked for 300 ms). The decoder is created with 1 frame in parse and 2 slots instead
-MEMORY budget: device buffers 615.7 MiB + margin 48.0 MiB = 663.7 MiB, the application has 775.5 MiB left for the decoder: accepted; palette buffers on first use would add up to 48.4 MiB
-MEMORY decoder created: threads 6, frames in parse 1, slots 2, device buffers 615.7 MiB
-Frame slots: 2
-Frames in parse: 1 on 6 parser thread(s) (fewer than -parseframes asks for: the threads, or the slots did not fit the memory)
+MEMORY frames in parse: 2 by default for 3840x2176, with 2 threads and 3 pipeline slots: device buffers 646.5 MiB (with the margin of 48.0 MiB they fit the N.N MiB the application has left for the decoder)
+MEMORY budget: device buffers 646.5 MiB + margin 48.0 MiB = 694.5 MiB, the application has N.N MiB left for the decoder: accepted; palette buffers on first use would add up to 72.5 MiB
+MEMORY decoder created: 3840x2176 10-bit, slots 3, frame buffers 11 + 2 back buffers of 25346048 bytes (24.2 MiB) each; 49 device buffers, 677854464 bytes (646.5 MiB); host pool N of N bytes (N.N MiB) in use
+MEMORY decoder created pools: mode info 2040 chunks of 256 records, 111.6 MiB; coefficients 2103 chunks of 7680, 61.6 MiB; transform block records 2040 chunks of 384, 12.0 MiB; a chunk is what a 64x64 area needs at worst, and the frames in flight take them in pieces as they are parsed
+MEMORY decoder created per slot: 25850368 bytes (24.7 MiB) in 10 own buffers, and nothing of the pools; a slot above 2 also adds one frame buffer, 24.2 MiB
+MEMORY decoder created: threads 2, frames in parse 2, slots 3, device buffers 646.5 MiB
+Frame slots: 3
+Frames in parse: 2 on 2 parser thread(s) (the library's default for the frame size)
 ```
 
-and where it fits (the package with `hevcPlayback`,
-[The two memory pools](#the-two-memory-pools-memory-pools-hevcplayback)):
+and where it does not fit:
 
 ```text
-MEMORY frames in parse: 2 asked for, with 6 threads and 4 pipeline slots: device buffers 916.6 MiB (with the margin of 48.0 MiB they fit the N.N MiB the application has left for the decoder)
-MEMORY decoder created: threads 6, frames in parse 2, slots 4, device buffers 916.6 MiB
-Frame slots: 4
-Frames in parse: 2 on 6 parser thread(s) (-parseframes)
+MEMORY frames in parse: 2 by default for 3840x2176, with 2 threads and 3 pipeline slots: the device buffers of that decoder, 646.5 MiB, and the margin of 48.0 MiB do not fit the N.N MiB the application has left for the decoder (asked for 300 ms). The decoder is created with 1 frame in parse and 2 slots instead
+MEMORY decoder created: threads 2, frames in parse 1, slots 2, device buffers 597.6 MiB
 ```
+
+When the decoder is released it says what the pools were used for:
+
+```text
+MEMORY pools: the most in use at once: mode info 188 of 2040 chunks (9 %), coefficients 209 of 2103 chunks (10 %), transform block records 196 of 2040 chunks (10 %); a tile waited for a chunk 0 times for the GPU to finish an older frame and 0 times for a frame in parse in front of its own
+```
+
+A wait there is a parse that found a pool empty, or had to leave a frame in front what that frame
+could still need; the timer of it is `cpu wait_sec_slot` (it was the wait for a second slot).
+`-parseopt poolwait` is a test switch that makes every frame wait behind its first piece of a pool
+while an older frame holds one (same frames; never for a timing).
 
 The player creates a decoder of its own when `-parseframes` differs from the task before, as for
-`-t` and `-slots`. With `-parser c` a decoder has one frame in parse whatever the flag says.
+`-t` and `-slots`. With `-parser c` a decoder has one frame in parse and one thread by default
+whatever the frame size, two slots, and a share for each slot as before.
 
-What a timing run of such a task means: `cpu entropy/tile decode, wall` and `thread sum` are the
-parse of a frame as before (the frames overlap now); `cpu decode thread, setup to submit` is the time
-from the begin of a frame's setup to its submission, in which the frame also waits for its turn behind
-the frames before it, so it is no longer what one thread did; `decode call` is what the call took,
-which is the setup of the frame and the wait for a free place in parse. The frames per second (`wall
-between decoded frames`, `wall between output frames`) are the result.
+What a timing run of a task with more than one frame in parse means: `cpu entropy/tile decode, wall`
+and `thread sum` are the parse of a frame as before (the frames overlap now); `cpu decode thread,
+setup to submit` is the time from the begin of a frame's setup to its submission, in which the frame
+also waits for its turn behind the frames before it, so it is no longer what one thread did; `decode
+call` is what the call took, which is the setup of the frame and the wait for a free place in parse.
+The frames per second (`wall between decoded frames`, `wall between output frames`) are the result.
 
 ### Console: the task lines
 
-All of it with the package that declares `hevcPlayback` (`uwp_dx12_player_<version>.3_x64.msix`),
-where four slots fit, except the last block. Timing in the slow state, behind a warm-up task.
+All with the default package (`uwp_dx12_player_<version>.0_x64.msix`, 1 GiB), in the slow state,
+timing behind a warm-up task.
 
-**Same output**, the md5 set with two frames in parse: for every clip of the set, in launches of
-their own as [above](#same-output-md5-of-every-frame-3) (the reference is the clip's `.md5` of the
-set, or one saved without the flag):
+**Same output**, the md5 set with the new defaults: for every clip of the set, in launches of their
+own as [above](#same-output-md5-of-every-frame-3). No `-t`, no `-parseframes`, no `-slots`: a 4K clip
+then has two frames in parse on two threads and three slots, the others one:
 
 ```text
--i /streams/<clip>.ivf -t 6 -frate -1 -queue_size 4 -progress -nopresent -md5_frame_check -parseframes 2
+-i /streams/<clip>.ivf -frate -1 -queue_size 4 -progress -nopresent -md5_frame_check
 ```
 
-**Timing**, one frame in parse against two, and how many threads two need: each block in one launch,
-for `j4k40` and for `d2`:
+**Timing**, one frame in parse against two, for `j4k40` and for `d2`, each block in one launch:
 
 ```text
--i /streams/<clip>.ivf -t 1 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime
--i /streams/<clip>.ivf -t 2 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime
--i /streams/<clip>.ivf -t 3 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime
--i /streams/<clip>.ivf -t 2 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -parseframes 2
--i /streams/<clip>.ivf -t 3 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -parseframes 2
--i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -parseframes 2
--i /streams/<clip>.ivf -t 3 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -parseframes 3
+-i /streams/<clip>.ivf -t 2 -parseframes 1 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime
+-i /streams/<clip>.ivf -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime
+-i /streams/<clip>.ivf -slots 4 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime
+-i /streams/<clip>.ivf -t 6 -parseframes 1 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime
 -i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime
 ```
 
-The first three lines are one frame in parse on one, two and three threads (a stream with one tile
-uses one of them); the next three are two frames in parse on two, three and six; then three frames
-in parse; the last line is the task of the measurements so far. To read: the frames per second, `cpu
-entropy/tile decode, wall` and `thread sum` (the parse of a frame; with two frames in parse they share
-the memory bandwidth of the slow state, so a frame's parse may take longer while two of them overlap),
-`gpu busy`, and the waits (`cpu wait_slot`, `cpu wait_sec_slot`, `cpu wait_output`). The `Frames in
-parse:` and `Frame slots:` lines of each task say what the decoder had.
+The first line is one frame in parse on two threads and two slots (597.6 MiB); the second is the
+default, two frames on two threads with three slots (646.5 MiB); the third is the default with a
+fourth slot, two frames on the GPU side, which is what 0.2.153 and 0.2.154 timed (695.3 MiB now, and
+it fits 1 GiB too): the difference between the second and the third is what the third slot's absence
+costs. The last two are the same with six threads. To read: the frames per second, `cpu
+entropy/tile decode, wall` and `thread sum`, `gpu busy`, and the waits (`cpu wait_slot`, `cpu
+wait_sec_slot`, `cpu wait_output`). The `Frames in parse:` and `Frame slots:` lines of each task say
+what the decoder had.
 
-**The same with three slots**, which fit in 1 GiB only with `-lowmem` (652.6 MiB):
-
-```text
--i /streams/<clip>.ivf -t 2 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -parseframes 2 -slots 3 -lowmem
-```
-
-**The guard's choice in 1 GiB**, with the default package (`uwp_dx12_player_<version>.0_x64.msix`),
-any 4K 10-bit clip:
-
-```text
--i /streams/<clip>.ivf -t 6 -frate -1 -limit 60 -queue_size 4 -progress -nopresent -md5_frame_check -parseframes 2
-```
-
-The log has the `MEMORY frames in parse: ... is created with 1 frame in parse and 2 slots instead`
-line of the first block above, `Frames in parse: 1`, and the task ends with `MD5 is OK`. The same line
-with `-parseframes 0 -t 0` shows the library's default: two threads, and in 1 GiB one frame in parse.
+**Memory against 0.2.154**: the lines of the second and of the first task above, for a 4K 10-bit
+clip. To compare: `MEMORY frames in parse` (0.2.154 in 1 GiB: 916.6 MiB did not fit, one frame in
+parse; now 646.5 MiB fit), `MEMORY budget`, `MEMORY decoder created` (device buffers 646.5 against
+615.7 MiB of the decoder 0.2.154 ran with in 1 GiB, and 597.6 against 615.7 with `-parseframes 1`),
+the `MEMORY app` lines after the creation and at the first frame (the app's memory, of 1024 MiB), and
+`MEMORY pools` at the release (how full the pools were, and whether a tile waited).
 
 ## Inter fast path (`-interfast`)
 
@@ -1598,6 +1612,10 @@ from the start of its entropy decode until its GPU work is done: a command alloc
 fence, the block and mode info buffers the CPU fills and the GPU reads, and a share of
 the coefficient buffer and of the mode info pool. A frame whose own share is too small
 takes a second slot for the overflow (`sec=1` in the frame lines, `wait_sec_slot`).
+That is the decoder of `-parser c`. With rav1d's parse, the default, a slot has no share:
+the frames in flight take mode info records, coefficients and transform block records in
+pieces from pools of the decoder ([phase2-rav1d.md](phase2-rav1d.md#step-5-the-pools)),
+no frame takes a second slot, and `wait_sec_slot` is the wait of a tile for a piece.
 
 The slot count is a decoder creation parameter (`aom_codec_dec_cfg_t::frame_slots`; 0
 means the default 2, the library clamps other values to 2..4). The player keeps one
@@ -1686,7 +1704,8 @@ pool (23.2 MiB at 4096x2176 with two slots) and the player's output pool come on
 | Decoder | 2 slots | 3 slots | 4 slots |
 | --- | --- | --- | --- |
 | package 0.2.5.0, 4096x2176 10-bit | 754.7 | 951.4 | 1148.1 |
-| **default now, 3840x2160 10-bit stream** | **615.7** | **766.1** | **916.6** |
+| **default now, 3840x2160 10-bit stream**, `-parser c` (a share for each slot) | **615.7** | **766.1** | **916.6** |
+| **default now, 3840x2160 10-bit stream**, rav1d's parse (the pools, [Frames in parse](#frames-in-parse--parseframes)) | **597.6** | **646.5** | **695.3** |
 | default now, 1920x1080 8-bit stream | 128.1 | 165.8 | 203.6 |
 | `-lowmem`, 3840x2160 10-bit stream | 540.0 | 652.6 | 765.2 |
 | `-lowmemparts 0`, 3840x2160 10-bit stream (`-fitsize` of package 0.2.6.0 and 0.2.7.0) | 639.9 | 790.3 | 940.7 |

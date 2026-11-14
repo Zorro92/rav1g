@@ -162,7 +162,15 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
  * AV1_LOW_MEMORY_COEFS: a slot's share of the coefficient buffer holds 12/24
  * of the worst case instead of 17/24. A frame takes a second slot earlier; a
  * tile whose coefficients come within one superblock of the worst case (every
- * coefficient of every transform block coded) is a decode error. */
+ * coefficient of every transform block coded) is a decode error.
+ *
+ * With AV1_PARSER_RAV1D the decoder has no shares: the frames in flight take
+ * their mode info records, coefficients and transform block records in
+ * pieces from pools that hold the worst case of one frame
+ * (docs/phase2-rav1d.md, step 5). There AV1_LOW_MEMORY_MODE_INFO halves the
+ * mode info pool and AV1_LOW_MEMORY_COEFS sizes the coefficient pool for 24
+ * values a 4x4 unit instead of 30; a frame that does not fit such a pool is
+ * a decode error. */
 #define AV1_LOW_MEMORY_SHARED_BACK_BUFFER 1
 #define AV1_LOW_MEMORY_MODE_INFO 2
 #define AV1_LOW_MEMORY_COEFS 4
@@ -184,6 +192,7 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
 #define AV1_PARSER_OPTION_LATE_LISTS 16       /* the block lists of a tile at its end, not superblock by superblock */
 #define AV1_PARSER_OPTION_CLEAR_GRID 32       /* the mode info grid of a slot is cleared for every frame */
 #define AV1_PARSER_OPTION_TEST_PANIC 64       /* test only: the parse of the third frame panics */
+#define AV1_PARSER_OPTION_TEST_POOL_WAIT 128  /* test only: a frame finds the pools empty while an older frame holds a piece */
 
 /* aom_codec_dec_cfg_t::frames_in_parse: the most the decoder takes. */
 #define AV1_FRAMES_IN_PARSE_MAX 4
@@ -213,7 +222,8 @@ typedef struct aom_codec_dec_cfg {
   int tryHDR10x3;
   /* Pipeline slots: frames that can be between the start of their CPU decode
    * and the end of their GPU work at the same time. 0 selects the default
-   * (2); other values are clamped to 2..4. Each slot has its own buffers, so
+   * (one more than frames in parse: 2, or 3 with two frames in parse); other
+   * values are clamped to 2..4. Each slot has its own buffers, so
    * the value must be the same for av1_codec_query_memory_requirements and
    * aom_codec_dec_init. */
   int frame_slots;
@@ -267,7 +277,7 @@ typedef struct aom_codec_dec_cfg {
    * 0 selects the default: 2 when the decoder is created for frames above
    * 2560x1440 with at least 2 threads and 3 or more pipeline slots, else 1.
    * A frame in parse holds a pipeline slot, so more frames in parse want
-   * more slots: with frame_slots 0 the decoder has 2 slots more than frames
+   * more slots: with frame_slots 0 the decoder has 1 slot more than frames
    * in parse, at most 4. If the budget guard (memory_available_cb) finds
    * that the decoder with those slots does not fit, the decoder is created
    * with one frame in parse and the slots of that (frame_slots, or 2), and

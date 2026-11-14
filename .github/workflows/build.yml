@@ -1571,16 +1571,22 @@ jobs:
           enableCrossOsArchive: true
           fail-on-cache-miss: true
 
-      # What a decoder is created with, the budget guard, a panic in the parse, and the time of the parse
-      # with one and with two frames in parse (testing/conformance/frames_check.py): the 2160p stream,
-      # where the library's defaults are two threads and two frames in parse, and the 1080p stream with
-      # eight tiles. A budget between the decoder of one frame in parse and that of two has to give a
-      # decoder with one frame in parse that decodes: asking for frames in parse never fails a creation.
-      - name: What is created, the budget guard, a panic in the parse, timing
+      # What a decoder is created with, the budget guard, a parse that waits for memory, a panic in the
+      # parse, and the time of the parse with one and with two frames in parse
+      # (testing/conformance/frames_check.py): the 2160p stream, where the library's defaults are two
+      # threads and two frames in parse, and the 1080p stream with eight tiles. A budget between the
+      # decoder of one frame in parse and that of two has to give a decoder with one frame in parse that
+      # decodes: asking for frames in parse never fails a creation. The pools (docs/phase2-rav1d.md, step
+      # 5): with -parseopt poolwait a frame finds a pool empty behind its first piece while an older frame
+      # holds one, so its tiles wait in the middle of their parse for the GPU, with one, two and four
+      # frames in parse, and the frames are right; the lossless stream fills the pools of its size by
+      # itself.
+      - name: What is created, the budget guard, a parse that waits for memory, a panic in the parse, timing
         shell: pwsh
         run: |
           python testing/conformance/frames_check.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/frames-check --large nf-dvbdash-d2-10b-2160p.ivf --small syn-tiles-10b-1080p.ivf
+            --out out/frames-check --large nf-dvbdash-d2-10b-2160p.ivf --small syn-tiles-10b-1080p.ivf `
+            --dense av1-1-b8-00-quantizer-00.ivf
           if ($LASTEXITCODE -ne 0) { throw "frames in parallel: exit code $LASTEXITCODE (1: a check failed, 2: a run could not be done)" }
 
       # The whole set with two frames in parse on two threads, which is what the library gives a 4K
@@ -1592,8 +1598,8 @@ jobs:
           python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
             --out out/conformance-frames2 --threads 2 "--tool-args=-parseframes 2" "--title=rav1g-dec with -parseframes 2 -t 2"
           if ($LASTEXITCODE -ne 0) { throw "conformance with -parseframes 2: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
-          if (-not (Select-String -Path out/conformance-frames2/lists/run001.log -Pattern 'frames in parse 2 \(asked 2\), slots 4' -Quiet)) {
-            throw 'the decoders of the run with -parseframes 2 do not say that they have two frames in parse and four slots'
+          if (-not (Select-String -Path out/conformance-frames2/lists/run001.log -Pattern 'frames in parse 2 \(asked 2\), slots 3' -Quiet)) {
+            throw 'the decoders of the run with -parseframes 2 do not say that they have two frames in parse and three slots'
           }
 
       # A decode error with frames in parse (testing/conformance/cut_tile_check.py --frames-in-parse): the
@@ -1629,7 +1635,7 @@ jobs:
 
       # The memory check with two frames in parse: what the decoder takes comes back, also the thread that
       # submits the frames and the copies of the frames' headers, and the budget guard decides as it does
-      # with one (a decoder that does not fit with four slots is tried with two).
+      # with one (a decoder that does not fit with three slots is tried with two).
       - name: Memory check with two frames in parse
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -1652,8 +1658,9 @@ jobs:
           if-no-files-found: warn
 
   # More combinations of frames in parse and threads, next to the job above: three frames on four
-  # threads, four on eight, and two on three with three slots, where a frame waits for the slot of the
-  # frame before it (the gate of the slots).
+  # threads, four on eight, two on three with four slots (two frames on the GPU), and the whole set with
+  # the test switch of the pools (-parseopt poolwait: a frame finds a pool empty behind its first piece
+  # while an older frame holds one, and waits), with the library's frames in parse and with two.
   rust-frames-threads:
     needs: [conformance-streams, rust]
     runs-on: windows-latest
@@ -1680,12 +1687,14 @@ jobs:
           enableCrossOsArchive: true
           fail-on-cache-miss: true
 
-      - name: Conformance with three and four frames in parse, and with two on three slots
+      - name: Conformance with three and four frames in parse, with two on four slots, and with a parse that waits for memory
         shell: pwsh
         run: |
           $runs = @(@{ name = 'frames3-t4'; threads = 4; args = '-parseframes 3'; says = 'frames in parse 3 \(asked 3\), slots 4' },
             @{ name = 'frames4-t8'; threads = 8; args = '-parseframes 4'; says = 'frames in parse 4 \(asked 4\), slots 4' },
-            @{ name = 'frames2-t3-slots3'; threads = 3; args = '-parseframes 2 -slots 3'; says = 'frames in parse 2 \(asked 2\), slots 3' })
+            @{ name = 'frames2-t3-slots4'; threads = 3; args = '-parseframes 2 -slots 4'; says = 'frames in parse 2 \(asked 2\), slots 4' },
+            @{ name = 'poolwait-t4'; threads = 4; args = '-parseopt poolwait'; says = 'frames in parse 1 \(asked 0\), slots 2' },
+            @{ name = 'poolwait-frames2-t2'; threads = 2; args = '-parseframes 2 -parseopt poolwait'; says = 'frames in parse 2 \(asked 2\), slots 3' })
           $failed = @()
           foreach ($run in $runs) {
             python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
@@ -1819,7 +1828,13 @@ jobs:
       # decoder of libaom leaves in a field a block's kind does not have what an earlier frame had there,
       # rav1d's sink writes zero (stage_dump.py compare --two-parsers). The dumps and the MEMORY lines of
       # -parser c are also what the rust-equal job holds against the C++ decoder.
-      - name: The two parsers give the same frames, stage dumps and MEMORY lines
+      #
+      # The MEMORY lines are no longer the same (docs/phase2-rav1d.md, step 5): a decoder with rav1d's
+      # parser has pools where the other one has a share for each slot. What is held
+      # (memory_lines.py pools): the same decoder size and frame buffers, pools of a chunk for every
+      # 64x64 area of the decoder size, and with the same slots no more device memory than the shares
+      # take.
+      - name: The two parsers give the same frames and stage dumps; the pools next to the shares
         run: |
           set -euo pipefail
           status=0
@@ -1827,9 +1842,9 @@ jobs:
             --manifest conformance-md5/manifest.txt --reference-dumps parser-c/stage-dumps-c --candidate-dumps default-dumps \
             --reference-name 'rav1g-dec -parser c' --candidate-name 'rav1g-dec (rav1d, the default)' --two-parsers || {
               echo "::error::the two parsers: md5 per frame or stage dumps differ (exit code $?)"; status=1; }
-          python3 testing/conformance/memory_lines.py compare --reference parser-c/memory-lines-c --candidate default/memory-lines \
-            --reference-name 'rav1g-dec -parser c' --candidate-name 'rav1g-dec (rav1d, the default)' || {
-              echo "::error::the two parsers: the MEMORY lines differ (exit code $?)"; status=1; }
+          python3 testing/conformance/memory_lines.py pools --shares parser-c/memory-lines-c --pools default/memory-lines \
+            | tee -a "$GITHUB_STEP_SUMMARY" || {
+              echo "::error::the MEMORY lines of the decoder with pools are not what they should be next to those of -parser c"; status=1; }
           exit "$status"
 
       # The other side of every switch of rav1d's parse (the run of the rust-switches job): the stage

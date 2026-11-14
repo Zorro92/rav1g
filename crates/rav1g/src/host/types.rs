@@ -34,6 +34,7 @@ use windows::Win32::Graphics::Direct3D12::{
 
 use super::blocks::WaveEdges;
 use super::memory::Allocator;
+use super::pool::{KINDS, Pools};
 use super::thread::{FramePool, Queue};
 use crate::gpu::{CommandAllocator, CommandList, Fence, Readback, TimestampQueries};
 use crate::sys::parser::{
@@ -316,11 +317,42 @@ pub struct av1_frame_thread_data {
     /// vector when the tiles are done. They are the frame's, so they are in its slot.
     pub perf_inter_tiles: Vec<av1_perf_inter_tile>,
     pub perf_inter_mode: c_int,
+    /// A decoder with pools (`Av1Core::pools`): what each tile of the slot's frame has taken of them.
+    /// The vector is sized at the frame's setup and not touched while the tiles of the frame are in
+    /// parse; each tile's thread writes the element of its tile, through `tile_pieces`.
+    pub pieces: Vec<TilePieces>,
+    pub tile_pieces: *mut TilePieces,
     pub dump_active: c_int,
     pub dump_count: c_int,
     pub dump_is_sef: c_int,
     pub dump_info: [c_char; 512],
     pub dumps: [av1_stage_dump_entry; 40],
+}
+
+/// Records of a tile that follow each other in a pool: the index of the first one, and how many.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Run {
+    pub first: c_int,
+    pub count: c_int,
+}
+
+/// What a tile of a frame has taken of the pools (`pool.rs`): the pieces its records are in, for the
+/// stages that go through them, and the piece of each pool it is writing.
+#[derive(Default)]
+pub struct TilePieces {
+    /// The tile's mode info records, piece by piece in the order they were written. The count of the
+    /// last piece is set when the tile ends.
+    pub mode_info: Vec<Run>,
+    /// The same for its transform block records.
+    pub txb: Vec<Run>,
+    /// The piece the tile is writing, by `pool::Kind`: its first chunk and its chunks; none: 0 chunks.
+    pub piece: [(usize, usize); KINDS],
+    /// The cells (64x64 areas) of the tile that are not parsed yet: what it can still need of a pool,
+    /// in chunks.
+    pub cells_left: c_int,
+    /// Where the tile ends, in 4x4 units.
+    pub col_end: c_int,
+    pub row_end: c_int,
 }
 
 /// The memory of the edges of the intra wavefront of the frames of a slot (`blocks::WaveEdges`). It grows
@@ -372,6 +404,17 @@ pub struct Av1Core {
     pub inter_warp_filter: *mut GpuBufferObject,
     pub mode_info_pool: *mut GpuBufferObject,
     pub idct_coefs: *mut GpuBufferObject,
+    /// A decoder with pools: the transform block records of all frames in flight. Without pools every
+    /// slot has a buffer of its own (`av1_frame_thread_data::idct_blocks_unordered`).
+    pub idct_blocks_pool: *mut GpuBufferObject,
+    /// The pools of the mode info records, the coefficients and the transform block records
+    /// (`pool.rs`; docs/phase2-rav1d.md, step 5): a decoder whose parser is rav1d's. None: the three
+    /// are divided into a share for each slot, as the entropy decoder of libaom takes them.
+    pub pools: Option<Box<Pools>>,
+    /// The chunks of each pool (by `pool::Kind`), and those of them the frames in parse share under the
+    /// rule of `Pools::take`; 0 without pools.
+    pub pool_total: [usize; KINDS],
+    pub pool_rule: [usize; KINDS],
     pub filmgrain_noise: *mut GpuBufferObject,
     pub filmgrain_gaus: *mut GpuBufferObject,
     pub filmgrain_random_luma: *mut GpuBufferObject,
@@ -443,10 +486,6 @@ pub struct Av1Core {
     /// its default resolved and after the budget guard's choice): 1, or more for a decoder whose frames
     /// in parse are values (`rav1d_frames.rs`).
     pub frames_in_parse: c_int,
-    /// The frames in parse of such a decoder and the queue of their submission, for a frame that takes
-    /// its second slot (`rav1d_host::gate_second_slot`); null with one frame in parse. It is the
-    /// parser's host's, set while the parser exists.
-    pub parse_frames: *const super::rav1d_frames::Frames,
     /// The bytes of the device buffers the creation made.
     pub device_bytes: usize,
     /// The switches of that parser (`aom_codec_dec_cfg_t::parser_options`).
@@ -485,18 +524,21 @@ impl Av1Core {
             (&raw mut (*dec).gpu_thread).write(None);
             (&raw mut (*dec).perf_detail_out).write(None);
             (&raw mut (*dec).rav1d).write(None);
+            (&raw mut (*dec).pools).write(None);
             let no_edges = || WaveStore { tiles: Vec::new(), above: Vec::new(), above_end: Vec::new(), frames: 0 };
             for slot in 0..FrameThreadDataCount as usize {
                 (&raw mut (*dec).frame_thread_data[slot].sec_data_mutex).write(Mutex::new(()));
                 (&raw mut (*dec).frame_thread_data[slot].perf.detail).write(None);
                 (&raw mut (*dec).frame_thread_data[slot].wave).write(no_edges());
                 (&raw mut (*dec).frame_thread_data[slot].perf_inter_tiles).write(Vec::new());
+                (&raw mut (*dec).frame_thread_data[slot].pieces).write(Vec::new());
             }
             for context in 0..OutputThreadDataCount as usize {
                 (&raw mut (*dec).output_thread_data[context].sec_data_mutex).write(Mutex::new(()));
                 (&raw mut (*dec).output_thread_data[context].perf.detail).write(None);
                 (&raw mut (*dec).output_thread_data[context].wave).write(no_edges());
                 (&raw mut (*dec).output_thread_data[context].perf_inter_tiles).write(Vec::new());
+                (&raw mut (*dec).output_thread_data[context].pieces).write(Vec::new());
             }
             Some(Box::from_raw(dec))
         }

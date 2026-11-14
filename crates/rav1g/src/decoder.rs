@@ -102,8 +102,9 @@ pub struct Settings {
     /// of it: the error of a frame comes back from a later [`Decoder::decode`] or from
     /// [`Decoder::drain`], and [`Output::get_image`] is called on a thread of the decoder.
     ///
-    /// A frame in parse holds a pipeline slot. With `frame_slots` 0 a decoder with more than one frame
-    /// in parse has two slots more than frames in parse, at most 4; when [`Settings::memory_available`]
+    /// A frame in parse holds a pipeline slot, and takes its mode info, coefficients and transform
+    /// block records from pools all frames in flight share. With `frame_slots` 0 a decoder with more
+    /// than one frame in parse has one slot more than frames in parse, at most 4; when [`Settings::memory_available`]
     /// says that such a decoder does not fit, the decoder is created with one frame in parse and the
     /// slots of that. [`Decoder::configuration`] says what was created.
     pub frames_in_parse: u32,

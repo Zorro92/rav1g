@@ -52,14 +52,14 @@ use rav1g_parse::rav1d::parse::{
     ParseColorCodes, ParseFrame, ParseHdrMetadata, ParsePalette, ParseSettings, ParseShowExisting, ParseSuperblock,
     ParseTile, Parser,
 };
-use rav1g_parse::sink::{FrameMemory, SecondModeInfo, Sink, SinkHost, SinkTimer, TileMemory};
+use rav1g_parse::sink::{FrameMemory, ModeInfoPiece, Sink, SinkHost, SinkTimer, TileMemory};
 
 use super::completion::{rav1g_decode_sef_begin, rav1g_decode_sef_submit, start_completion_thread};
 use super::frame::{
-    PaletteMap, av1_reallocate_frame_buffer, av1_sequence_fits_decoder, rav1g_decode_frame_record,
-    rav1g_decode_frame_submit, rav1g_setup_frame_begin, rav1g_setup_frame_coefs, rav1g_setup_frame_end, release_frame,
-    release_unsubmitted_frame, second_coefs, second_mode_info, setup_frame_begin, setup_frame_coefs, setup_frame_end,
-    setup_tile, write_palette,
+    PaletteMap, av1_reallocate_frame_buffer, av1_sequence_fits_decoder, more_coefs, more_mode_info,
+    more_transform_blocks, rav1g_decode_frame_record, rav1g_decode_frame_submit, rav1g_setup_frame_begin,
+    rav1g_setup_frame_coefs, rav1g_setup_frame_end, release_frame, release_unsubmitted_frame, setup_frame_begin,
+    setup_frame_coefs, setup_frame_end, setup_tile, superblock_parsed, tile_parsed, write_palette,
 };
 use super::log::log;
 use super::perf::{av1_perf_ticks, frame_timers, perf_add, perf_add_ticks};
@@ -257,6 +257,24 @@ impl SlotHost {
     unsafe fn state(&self) -> &mut State {
         // SAFETY: the caller's contract.
         unsafe { &mut *self.state.get() }
+    }
+
+    /// The slot of the frame with a number of the sink, and its timers as those of the calling thread
+    /// for as long as the second value lives (with more than one frame in parse).
+    ///
+    /// # Safety
+    /// A call of a tile's thread between the `frame_begin` and the `frame_end` of the frame.
+    unsafe fn slot(&self, frame: usize) -> (*const av1_frame_thread_data, Option<impl Sized>) {
+        // SAFETY: the caller's contract.
+        unsafe {
+            match &self.frames {
+                Some(frames) => {
+                    let entry = Self::entry(frames, frame);
+                    (entry.td.cast_const(), Some(frame_timers(&raw const entry.acc as *mut _)))
+                }
+                None => ((*self.dec).curr_frame_data.cast_const(), None),
+            }
+        }
     }
 
     /// The frame header, for a tile.
@@ -823,14 +841,13 @@ impl SlotHost {
             entry.acc = std::mem::zeroed();
             // The timers of this thread are the frame's until the setup is through.
             let _timers = frame_timers(&raw mut entry.acc);
-            // The frame is the next in decode order; its slot, when the frames before it leave one.
+            // The frame is the next in decode order; its slot, when the frames before it leave one (the
+            // setup waits for it).
             frames.push(index, None);
-            frames.gate(index, false);
             let pbi: *mut AV1Decoder = &raw mut *state.pbi;
             let cm = &raw mut (*pbi).common;
             let mut perf_start = 0;
             let (td, no_palette) = setup_frame_begin(pbi, cm, &mut perf_start, false);
-            frames.set_slot(index, td);
             let failed = if no_palette != 0 {
                 Some("No palette buffer for a frame that allows screen content tools")
             } else if setup_frame_coefs(dec, td, cm) != 0 {
@@ -1169,57 +1186,40 @@ impl SinkHost for SlotHost {
                     setup_tile(self.dec, (*self.dec).curr_frame_data, cm, &tile_info(cm, tile))
                 }
             };
+            // The tile takes its pieces of the pools as it goes (`more_mode_info`, `more_coefs`,
+            // `more_transform_blocks`): it starts with none.
             TileMemory {
                 tile_data: setup.tile_data,
                 mi_pool: setup.mi_pool,
                 mi_count_max: setup.mi_count_max,
-                worst_case_coefs: setup.ext_idct_buffer != 0,
+                txb_room: 0,
             }
         }
     }
 
-    fn second_mode_info(&self, frame: usize, tile: usize, tile_data: *mut av1_tile_data) -> Option<SecondModeInfo> {
+    fn more_mode_info(&self, frame: usize, tile: usize, tile_data: *mut av1_tile_data) -> Option<ModeInfoPiece> {
         // SAFETY: a call of the tile's thread inside the frame, with the cursors of the tile.
-        let (tile_data, mi_pool) = unsafe {
-            match &self.frames {
-                Some(frames) => {
-                    let entry = Self::entry(frames, frame);
-                    let _timers = frame_timers(&raw const entry.acc as *mut _);
-                    second_mode_info(self.dec, entry.td, tile, &*tile_data)
-                }
-                None => second_mode_info(self.dec, (*self.dec).curr_frame_data, tile, &*tile_data),
-            }
-        };
-        Some(SecondModeInfo { tile_data, mi_pool })
+        unsafe {
+            let (td, _timers) = self.slot(frame);
+            let (mi_pool, count) = more_mode_info(self.dec, td, tile, &mut *tile_data)?;
+            Some(ModeInfoPiece { mi_pool, count })
+        }
     }
 
-    fn second_coefs(&self, frame: usize, _tile: usize, tile_data: *mut av1_tile_data) {
+    fn more_coefs(&self, frame: usize, tile: usize, tile_data: *mut av1_tile_data) -> bool {
         // SAFETY: as above.
         unsafe {
-            match &self.frames {
-                Some(frames) => {
-                    let entry = Self::entry(frames, frame);
-                    let _timers = frame_timers(&raw const entry.acc as *mut _);
-                    second_coefs(self.dec, entry.td, &mut *tile_data);
-                }
-                None => second_coefs(self.dec, (*self.dec).curr_frame_data, &mut *tile_data),
-            }
+            let (td, _timers) = self.slot(frame);
+            more_coefs(self.dec, td, tile, &mut *tile_data)
         }
     }
 
-    fn no_room(&self, _frame: usize, _tile: usize, mode_info: bool) {
-        // The line the entropy decoder of libaom logs for the same frame (`decode_mbmi_block`,
-        // `av1_read_coeffs_txb`).
-        log(
-            true,
-            if mode_info {
-                "MEMORY FAILED frame: the blocks of a tile do not fit its part of the mode info pool (two slot \
-                 shares); the frame is a decode error"
-            } else {
-                "MEMORY FAILED frame: the coefficients of a tile do not fit its part of the coefficient buffer (two \
-                 slot shares); the frame is a decode error"
-            },
-        );
+    fn more_transform_blocks(&self, frame: usize, tile: usize, tile_data: *mut av1_tile_data) -> c_int {
+        // SAFETY: as above.
+        unsafe {
+            let (td, _timers) = self.slot(frame);
+            more_transform_blocks(self.dec, td, tile, &mut *tile_data)
+        }
     }
 
     fn palette(&self, frame: usize, _tile: usize, palette: &ParsePalette<'_>) {
@@ -1233,21 +1233,31 @@ impl SinkHost for SlotHost {
         }
     }
 
-    fn superblock(&self, frame: usize, _tile: usize, superblock: &ParseSuperblock<'_>) {
-        if superblock.lr.is_empty() {
-            return;
-        }
+    fn superblock(&self, frame: usize, tile: usize, superblock: &ParseSuperblock<'_>) {
         // SAFETY: a call of a tile's thread inside the frame, with the header of the frame.
         unsafe {
-            let cm = match &self.frames {
-                Some(frames) => &raw const Self::entry(frames, frame).header.common,
-                None => self.common().cast_const(),
+            let (cm, td) = match &self.frames {
+                Some(frames) => {
+                    let entry = Self::entry(frames, frame);
+                    (&raw const entry.header.common, entry.td.cast_const())
+                }
+                None => (self.common().cast_const(), (*self.dec).curr_frame_data.cast_const()),
             };
-            write_restoration_units(cm, superblock);
+            // The area of the superblock is nothing the frame can still need of the pools.
+            superblock_parsed(self.dec, td, tile, superblock.x4, superblock.y4, (*cm).seq_params.mib_size);
+            if !superblock.lr.is_empty() {
+                write_restoration_units(cm, superblock);
+            }
         }
     }
 
-    fn tile_end(&self, _frame: usize, _tile: usize) {}
+    fn tile_end(&self, frame: usize, tile: usize) {
+        // SAFETY: a call of the tile's thread inside the frame, behind the tile's last block.
+        unsafe {
+            let (td, _timers) = self.slot(frame);
+            tile_parsed(self.dec, td, tile, &*(*td).tile_data.add(tile));
+        }
+    }
 
     fn frame_end(&self, sink_frame: usize, ok: bool) -> bool {
         if let Some(frames) = &self.frames {
@@ -1260,6 +1270,11 @@ impl SinkHost for SlotHost {
                 let entry = &*frames.entry(index);
                 let _timers = frame_timers(&raw const entry.acc as *mut _);
                 perf_add(self.dec, sys::AV1_PERF_CPU_ENTROPY_WALL as usize, entry.parse_start);
+                // The frame takes no more of the pools: the frames behind it are held against the
+                // next frame in parse.
+                if let Some(pools) = (*self.dec).pools.as_deref() {
+                    pools.parsed((*entry.td).slot_index as usize);
+                }
             }
             frames.parsed(index, ok);
             return ok;
@@ -1274,6 +1289,9 @@ impl SinkHost for SlotHost {
                 return false;
             }
             perf_add(dec, sys::AV1_PERF_CPU_ENTROPY_WALL as usize, state.parse_start);
+            if let (Some(pools), Some(td)) = ((*dec).pools.as_deref(), (*dec).curr_frame_data.as_ref()) {
+                pools.parsed(td.slot_index as usize);
+            }
             let pbi: *mut AV1Decoder = &raw mut *state.pbi;
             if ok {
                 let mut fb: av1_decoded_frame_buffer_t = std::mem::zeroed();
@@ -1339,7 +1357,6 @@ impl Rav1dHost {
         dec: *mut Av1Core,
         threads: c_int,
         frames: c_int,
-        slots: c_int,
         options: ParseOptions,
         operating_point: c_int,
     ) -> Option<Box<Rav1dHost>> {
@@ -1354,8 +1371,7 @@ impl Rav1dHost {
         let mut submitter = None;
         let mut queue = None;
         if frames > 1 {
-            let shared =
-                Arc::new(Frames::new(dec, usize::try_from(slots).unwrap_or(2), frames, state.descriptions.clone()));
+            let shared = Arc::new(Frames::new(dec, frames, state.descriptions.clone()));
             let thread = FramesPtr(shared.clone());
             let spawned = spawn_thread(move || {
                 let thread = thread;
@@ -1378,10 +1394,7 @@ impl Rav1dHost {
             }
         }
         // SAFETY: the decoder; set before a thread of the parser exists.
-        unsafe {
-            (*dec).frames_in_parse = frames as c_int;
-            (*dec).parse_frames = queue.as_ref().map_or(std::ptr::null(), |queue| Arc::as_ptr(queue));
-        }
+        unsafe { (*dec).frames_in_parse = frames as c_int };
         let host = SlotHost { dec, state: UnsafeCell::new(state), frames: queue };
         let sink = Arc::new(Sink::with_frames(host, options.sink(), frames));
         let mut settings = ParseSettings {
@@ -1401,8 +1414,6 @@ impl Rav1dHost {
                 if let Some(thread) = submitter {
                     let _ = thread.join();
                 }
-                // SAFETY: the decoder; the queue goes with the sink.
-                unsafe { (*dec).parse_frames = std::ptr::null() };
                 return None;
             }
         };
@@ -1437,9 +1448,15 @@ impl Rav1dHost {
     }
 
     /// The submission thread ends and is joined: nothing records a frame of the decoder any more.
+    /// And nothing waits for the pools: a frame that never ends (a panic) would hold the frames behind
+    /// it for ever.
     fn stop(&mut self) {
         if let Some(frames) = &self.sink.host().frames {
             frames.stop();
+            // SAFETY: the decoder of this parser, which lives longer.
+            if let Some(pools) = unsafe { (*self.sink.host().dec).pools.as_deref() } {
+                pools.stop();
+            }
         }
         if let Some(thread) = self.submitter.take() {
             let _ = thread.join();
@@ -1478,19 +1495,6 @@ pub(crate) unsafe fn stop_frames(dec: *mut Av1Core) {
     if let Some(host) = unsafe { (*dec).rav1d.as_mut() } {
         host.drain();
         host.stop();
-    }
-}
-
-/// A frame takes its second slot (`frame::get_sec_data`): with more than one frame in parse it waits
-/// until it may (`Frames::gate`). Nothing otherwise.
-///
-/// # Safety
-/// `dec` is the decoder and `td` the slot of a frame of it that is set up or in parse.
-pub(crate) unsafe fn gate_second_slot(dec: *mut Av1Core, td: *mut av1_frame_thread_data) {
-    // SAFETY: the caller's contract; the queue lives as long as the parser's threads and the setup of
-    // a frame do.
-    if let Some(frames) = unsafe { (*dec).parse_frames.as_ref() } {
-        frames.gate_second(td);
     }
 }
 
@@ -1571,14 +1575,7 @@ pub unsafe extern "C" fn rav1g_rav1d_decode(
     unsafe {
         if (*dec).rav1d.is_none() {
             let options = ParseOptions::from_bits((*dec).parser_options as u32);
-            (*dec).rav1d = Rav1dHost::new(
-                dec,
-                (*dec).parser_threads,
-                (*dec).frames_in_parse,
-                (*dec).frame_slots,
-                options,
-                operating_point,
-            );
+            (*dec).rav1d = Rav1dHost::new(dec, (*dec).parser_threads, (*dec).frames_in_parse, options, operating_point);
         }
         let Some(host) = (*dec).rav1d.as_mut() else {
             *detail = c"The parser could not be created".as_ptr();

@@ -51,12 +51,12 @@ typedef struct av1_stage_dump av1_stage_dump;
 #define RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER 1
 
 /*
- The mode info of a frame in shares that a pipeline slot takes as it needs them.
+ A mode info pool of half the worst case of a frame. A frame that needs more is a decode error.
  */
 #define RAV1G_LOW_MEMORY_MODE_INFO 2
 
 /*
- The coefficients of a frame in shares, likewise.
+ A coefficient pool of four fifths of the worst case of a frame, likewise.
  */
 #define RAV1G_LOW_MEMORY_COEFS 4
 
@@ -117,6 +117,15 @@ typedef struct av1_stage_dump av1_stage_dump;
  `Rav1gStatus::Error` and the decoder decodes nothing more.
  */
 #define RAV1G_PARSER_OPTION_TEST_PANIC 64
+
+/*
+ For a test of the decoder, never for an application: behind its first piece, a frame finds the pools
+ the frames in flight take their mode info records, coefficients and transform block records from
+ empty for as long as an older frame holds anything of them, so every frame waits in the middle of
+ its parse for memory to come back, as a frame does that finds a pool exhausted. The frames are the
+ same.
+ */
+#define RAV1G_PARSER_OPTION_TEST_POOL_WAIT 128
 
 /*
  The most frames a decoder parses at the same time (`Rav1gSettings::frames_in_parse`).
@@ -643,8 +652,8 @@ typedef struct Rav1gSettings {
   uint32_t threads;
   /*
    Pipeline slots: frames that can be between the start of their CPU decode and the end of their GPU
-   work at the same time, 2 to 4. 0 is the default: 2 with one frame in parse, and with more two
-   slots more than frames in parse, at most 4. Each slot has buffers of its own.
+   work at the same time, 2 to 4. 0 is the default: one slot more than frames in parse, at most 4.
+   Each slot has buffers of its own.
    */
   uint32_t frame_slots;
   /*
@@ -910,7 +919,7 @@ void rav1g_log_video_memory(void *d3d12_device, const char *label);
  rav1d as its parser (`RAV1G_PARSER_RAV1D` with `RAV1G_PARSER_OPTIONS_DEFAULT`), no budget guard, and
  no output (the application sets `output`). Its threads, frames in parse and pipeline slots are 0, the
  defaults for the frame size the application then sets: one thread, one frame in parse and two slots
- up to 2560x1440; above, two threads and, where the slots fit, two frames in parse with four slots.
+ up to 2560x1440; above, two threads and, where the slots fit, two frames in parse with three slots.
 
  # Safety
  `settings` is valid for writing.

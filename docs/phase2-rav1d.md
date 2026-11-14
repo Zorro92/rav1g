@@ -417,6 +417,9 @@ reserved. A parse that finds the pool
   records become dispatches per piece. This is a step of its own, after frame parallelism works with
   slots.
 
+What became of it: [Step 5: the pools](#step-5-the-pools). Two frames in parse on three slots are
+646.5 MiB of device buffers at 4K 10-bit.
+
 ### How many threads
 
 Projection to the console. The current parser takes 44 ms per frame there on `j4k40` and 34 ms on
@@ -546,7 +549,8 @@ Each step leaves a decoder that works; both parsers are in the program until ste
    host, settings for workers and frames in parse. Gates: the conformance set on WARP with one to four
    frames in parse and one to eight workers, equal md5 in every combination (run repeatedly: the order of
    threads is the risk); console md5 set; console timing with two frames in parse, slots three and four.
-5. **The pool** in place of the per-slot shares, and the defaults by frame size. Gates: conformance;
+5. **The pool** in place of the per-slot shares, and the defaults by frame size
+   ([done](#step-5-the-pools)). Gates: conformance;
    "MEMORY" lines; console application memory with two frames in parse not above today's three slots;
    a stream that exhausts the pool decodes (the parse waits).
 6. **The C parser leaves.** `libav1/av1`, `aom*`, their build in `rav1g-sys`, `host_entry.c`, the
@@ -1953,6 +1957,9 @@ frame size the decoder is created for ([How many threads](#how-many-threads)):
 | up to 2560x1440 | 1 | 1 | 2 |
 | above (4K) | 2 | 2, when the slots fit | 4, or 2 with one frame in parse |
 
+(Since [step 5](#step-5-the-pools) a decoder has one slot more than frames in parse: 3 at 4K, 646.5
+MiB, which fits 1 GiB. The rest of this section is step 4 as it was.)
+
 - Frames in parse are never more than the threads (rav1d's rule); the default is 1 where the
   application has fixed the threads at 1 or the slots at 2.
 - A frame in parse holds a pipeline slot, so a decoder with `F` frames in parse has `F + 2` slots by
@@ -2185,6 +2192,141 @@ packages as 0.2.154.x.
   parse; whether they can be smaller is a question of step 5 as well.
 - The header structs of the entropy decoder (one that goes from frame to frame, one to record from,
   a copy per entry) go in step 6 with the C parser.
+
+### Step 5: the pools
+
+2026-11-14. Done: a decoder whose parser is rav1d's has no shares. The mode info records, the
+coefficients and the transform block records of all frames in flight come from one buffer each, in
+pieces, as the parse proceeds (`crates/rav1g/src/host/pool.rs`). A second frame in parse costs a
+slot of 24.7 MiB and a frame buffer, not two slots of 150 MiB, and two frames in parse are the
+default at 4K in 1 GiB. The decoder of `-parser c` is what it was, with a share for each slot, until
+step 6: its `MEMORY` lines are still those of the C++ decoder.
+
+**Memory.** Device buffers, MiB (`CONFIGURATION` lines):
+
+| Decoder | 1 frame in parse, 2 slots | 2 frames, 3 slots | 2 to 4 frames, 4 slots |
+| --- | ---: | ---: | ---: |
+| 3840x2160 10-bit, step 4 | 615.7 | 766.1 (3 slots) | 916.6 |
+| 3840x2160 10-bit, now | 597.6 | 646.5 | 695.3 |
+| 1920x1080 10-bit, step 4 | 166.9 | 207.9 | 248.8 |
+| 1920x1080 10-bit, now | 162.1 | 176.2 | 190.3 |
+
+What the 646.5 MiB of the 4K default are: 13 frame buffers 314.2 (11 in the pool and two back
+buffers), the three pools 185.2 (mode info 111.6, coefficients 61.6, transform block records 12.0),
+the buffers of the stages 73.3 (residuals, sorted transform blocks, prediction and loop filter
+blocks, tables), three slots 74.1. The target was the 615.7 MiB of the decoder that ran in 1 GiB so
+far; the default is 30.8 MiB above it and fits with 107 MiB to spare where the guard had 801.8 MiB
+left. What would close the gap is under "Left" below.
+
+**The design.**
+
+- *Chunks.* A pool is divided into chunks of what a 64x64 area ("cell") needs at worst: 256 mode
+  info records (57 KiB), 7680 coefficients (30 KiB: a 4x4 transform block with all 16 coefficients
+  takes 20 values, its count rounded up to the next multiple of four above it; four of luma and two
+  of chroma an 8x8 area), 384 transform block records (6 KiB). A pool has a chunk for every cell of
+  the size the decoder is created for, 2040 at 4K, so it holds the worst case of one frame, and a
+  tile of `c` cells never needs more than `c` chunks. The coefficient pool has a thirty-second more
+  (63 chunks at 4K): the coefficients of a transform block are not split, so the end of a piece can
+  stay empty.
+- *Pieces.* A tile takes a piece when it needs room: up to 16 chunks of mode info (0.9 MiB) or
+  coefficients (0.5 MiB), 64 of transform block records (0.4 MiB), fewer when no such run is free,
+  an eighth of a pool that is smaller than eight pieces, and never more than the cells of the tile
+  that are not parsed. The sink asks for it (`SinkHost::more_mode_info`, `more_coefs`,
+  `more_transform_blocks`); a tile starts with nothing. When the tile ends, the chunks of its last
+  pieces that it did not write go back at once. The frame's pieces go back when its GPU work is
+  done (the completion thread), or when the frame fails; a failed frame's coefficient pieces are
+  cleared first, as its share was.
+- *The stages.* The shaders address the three buffers by offset, as they did. The two that go
+  through a tile's records have a dispatch for each run of pieces that follow each other instead of
+  one for a tile: `gen_pred_blocks` over the mode info, `idct_sort_blocks` over the transform block
+  records. The output pass is untouched and still one pass.
+- *The wait rule.* A tile that finds no chunk free waits for the GPU to finish an older frame. With
+  more than one frame in parse, the frames behind the oldest frame in parse cannot give anything
+  back before that frame is submitted, so they leave it what it can still need: for every frame in
+  parse the pools know a bound, `held + cells not parsed`, which starts as all its cells and only
+  falls. A frame takes chunks only while, for every frame in parse in front of it, that frame's
+  bound and what the frames behind that frame hold fit the pool; the oldest frame in parse takes
+  whatever is free. This is the rule of step 4's slot gate (`Frames::gate`, which is gone with the
+  second slot), moved to the pools. A second frame in parse therefore needs no memory of its own:
+  it gets what the first one has shown it cannot need, which after a few superblocks is nearly all
+  of the pool, and it waits for the first one only where that really is a worst case.
+- *A frame that does not fit* (only with a pool made smaller, `AV1_LOW_MEMORY_MODE_INFO` and
+  `_COEFS`) is a decode error of that frame when it is the oldest, nothing in front of it holds a
+  chunk and none is free: `MEMORY FAILED frame n: its blocks do not fit the mode info pool`.
+- *Slots and grids.* A slot keeps what is laid out by the position of a tile in the frame and is
+  read by address: the mode info grid (4.0 MiB at 4K), the wavefront grid (4.2), the block maps
+  (7.2), the block index list (6.0), CDEF and loop restoration lists (2.3), the constants (1.0):
+  24.7 MiB. Nothing of that moved. No frame takes a second slot, so a decoder has one slot more
+  than frames in parse by default (the two slots of one frame in parse; three for two), at most 4.
+- *The frame buffer* of a frame is still taken when its parse begins. Binding it at the recording
+  would let the pool of frame buffers stay at 10 for two frames in parse on three slots (the count
+  that never waits is 8 for the references, one for each frame on the GPU beyond the first that
+  still holds a reference the map has dropped, and one for the frame being recorded): 24.2 MiB at
+  4K. Not done in this step: the references of a frame in parse would have to be resolved at the
+  recording too, through every error path of step 4.
+
+**The defaults.** A decoder for frames up to 2560x1440: one thread, one frame in parse, two slots.
+Above: two threads, two frames in parse, three slots, and with a budget callback that says they do
+not fit, one frame in parse and two slots (`MEMORY frames in parse` line; the guard never refuses
+for it). `rav1g-dec` and the test player now ask for these defaults when a task has no `-t`,
+`-parseframes` or `-slots` (they asked for 1, 1 and 2).
+
+**A stream that exhausts a pool.** Three things in CI:
+
+- The lossless stream of the set (`av1-1-b8-00-quantizer-00`) comes close to the worst case of its
+  size: two of its frames do not fit the transform block pool together (100 % in use), so the parse
+  of a frame waits for the frame on the GPU, and the frames are right. `frames_check.py --dense`
+  runs it and reports the waits.
+- `-parseopt poolwait` (`AV1_PARSER_OPTION_TEST_POOL_WAIT`, test only) makes every stream such a
+  test: behind its first piece of a pool, a frame finds the pool empty for as long as an older
+  frame holds anything of it. Tiles then wait in the middle of their parse, with pieces in hand,
+  for the GPU and for the frames in parse in front. `frames_check.py` runs the 2160p and the
+  1080p stream so with one, two and four frames in parse and requires waits and the reference's
+  frames; `rust-frames-threads` runs the whole set so, with the library's frames in parse and with
+  two.
+- The unit tests of `pool.rs`: runs of chunks, the wait for the GPU, the rule, the chunks above
+  the rule, the switch.
+
+**Gates**, locally (wine on lavapipe, the 244 vectors of AOM; the oracle on Linux):
+
+- The frames are those of the references with 1, 2, 3 and 4 frames in parse (on up to 8 threads),
+  with `-parseopt poolwait` and 1, 2 and 4 frames, through `rav1g.h`, with `-poisonbuf` and two
+  frames, and with `-parser c`: 244 of 244 each. The 4K cuts with one and two frames in parse.
+- The stage dumps of five streams with two frames in parse, and with `poolwait`, equal those of one
+  frame in parse; those of `-parser c` equal them as before (`--two-parsers`).
+- The oracle (`rav1g-parse-check`, also `-frames 2` and `-threads 4`): 244 of 244.
+- The `MEMORY` lines of `-parser c` are byte for byte those of the build before.
+- `frames_check.py`: what is created, the guard (a budget of 670 MiB gives the 4K 10-bit stream one
+  frame in parse and two slots where two and three were asked for, 710 MiB gives two and three),
+  the waits, the panics.
+
+In CI: everything above on WARP with the whole set; `memory_lines.py pools` holds the `MEMORY`
+lines of the decoder with pools against those of `-parser c` (same decoder size and frame buffers,
+a chunk for every cell, and with the same slots no more device memory), in place of their equality;
+the memory check runs as it was (its budgets still separate the decoders: the 2160p 8-bit decoder
+is refused with 300 MiB, the 720p one accepted).
+
+**What the pools held** (wine, `MEMORY pools` lines; chunks of 2040 at 4K):
+
+| Stream | Frames in parse | Mode info | Coefficients | Transform block records |
+| --- | ---: | ---: | ---: | ---: |
+| `j4k40`, 60 temporal units | 1 | 6 % | 7 % | 7 % |
+| | 2 | 9 % | 10 % | 10 % |
+| `d2` cut (three large frames at its start) | 1 | 19 % | 58 % | 39 % |
+| | 2 | 22 % | 62 % | 42 % |
+
+No tile waited in any of the four. The `d2` cut shows why the pools hold a worst case: its first
+frames take 38 MiB of coefficients.
+
+**Left** after this step:
+
+- The frame buffer at the recording (above): 24.2 MiB at 4K, which brings the default to 622.3 MiB.
+- The block index list of a slot (6.0 MiB at 4K, sized for the worst case, a few percent used)
+  could be a fourth pool: 12 MiB with three slots, which brings the default under the 615.7 MiB.
+  A block's indexes must follow each other, so a piece has to be taken for a whole block.
+- The palette buffer of a slot (24.2 MiB at 4K, created on the first frame with screen content
+  tools) is still one for each slot.
+- Step 6: the C parser leaves, and with it the shares, the second slot and the header structs.
 
 ## Licence
 

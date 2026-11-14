@@ -22,8 +22,12 @@
 //!   reads the block's record and, through the grid, records of blocks above it and to its left, which
 //!   are read before it; the calls come in the same order, so the lists are the same.
 //!
-//! The memory is the host's ([`SinkHost`]): for the D3D12 host the mapped buffers of a pipeline slot, for
-//! `tools/rav1g-parse-check` plain memory.
+//! The memory is the host's ([`SinkHost`]): for the D3D12 host the mapped buffers of a pipeline slot and
+//! of the decoder's pools, for `tools/rav1g-parse-check` plain memory. A tile gets its mode info records,
+//! its coefficients and its transform block records in pieces: when the piece it writes is full, the
+//! sink asks the host for the next one (`more_mode_info`, `more_coefs`, `more_transform_blocks`), which
+//! may be anywhere in the buffer (docs/phase2-rav1d.md, step 5). A host that gives a tile room for all
+//! it can have at its begin is never asked.
 //!
 //! Two of those buffers are write-combined memory with the D3D12 host (the coefficients and the
 //! transform block records: upload heaps, which the CPU must not read and should write in order). The
@@ -138,21 +142,23 @@ pub struct FrameMemory {
 
 /// The memory of a tile's parse.
 pub struct TileMemory {
-    /// The tile's cursors into the buffers of the frame, set up as `av1_setup_macroblockd` sets them up.
+    /// The tile's cursors into the buffers of the frame, set up as `av1_setup_macroblockd` sets them up:
+    /// where its coefficients go and where they end (`dq_buffer_ptr`, `dq_buffer_end`), and where its
+    /// transform block records go (`idct_blocks_host`, `idct_blocks_ptr`).
     pub tile_data: *mut av1_tile_data,
-    /// The tile's part of the mode info pool and the records it has room for.
+    /// The tile's first piece of mode info records and the records it has room for; 0 records: the
+    /// host gives the first piece when the first block asks for it.
     pub mi_pool: *mut MB_MODE_INFO,
     pub mi_count_max: c_int,
-    /// The tile's part of the coefficient buffer has the worst-case layout: it is as large as the tile
-    /// can need, and the tile never goes on in a second part (`ThreadData::ext_idct_buffer`).
-    pub worst_case_coefs: bool,
+    /// The transform block records there is room for where the tile's cursor is.
+    pub txb_room: c_int,
 }
 
-/// The second part of a tile's mode info ([`SinkHost::second_mode_info`]): its cursors, and the records,
-/// with room for as many as the first part.
-pub struct SecondModeInfo {
-    pub tile_data: *mut av1_tile_data,
+/// A piece of mode info records for a tile ([`SinkHost::more_mode_info`]): the records and how many
+/// there is room for.
+pub struct ModeInfoPiece {
     pub mi_pool: *mut MB_MODE_INFO,
+    pub count: c_int,
 }
 
 /// What gives the sink its memory: the host of the decoder.
@@ -194,17 +200,21 @@ pub trait SinkHost: Send + Sync {
     /// A tile's parse starts, on the thread that parses it.
     fn tile_begin(&self, frame: usize, tile: &ParseTile) -> TileMemory;
 
-    /// The tile's part of the mode info pool is full: where its records go on (`av1_setup_sec_data`).
-    /// `None` when there is no second part: the frame fails.
-    fn second_mode_info(&self, frame: usize, tile: usize, tile_data: *mut av1_tile_data) -> Option<SecondModeInfo>;
+    /// The tile's piece of mode info records is full (or it has none yet): the piece its records go
+    /// on in. The call may wait for memory that an older frame gives back. `None` when there is none:
+    /// the frame fails. `tile_data.mi_count` has the records of the piece that is full.
+    fn more_mode_info(&self, frame: usize, tile: usize, tile_data: *mut av1_tile_data) -> Option<ModeInfoPiece>;
 
-    /// The tile's part of the coefficient buffer is used up to its mark (`dq_buffer_max`): the host moves
-    /// the tile's cursor to where its coefficients go on (`av1_setup_ext_coef_buffer`).
-    fn second_coefs(&self, frame: usize, tile: usize, tile_data: *mut av1_tile_data);
+    /// The coefficients of the tile's next transform block do not fit what is left of its piece
+    /// (`dq_buffer_end`): the host moves the tile's cursor (`dq_buffer_ptr`, `dq_buffer_end`) to where
+    /// they go on, a piece with room for the coefficients of any transform block. May wait like
+    /// [`Self::more_mode_info`]. `false` when there is none: the frame fails.
+    fn more_coefs(&self, frame: usize, tile: usize, tile_data: *mut av1_tile_data) -> bool;
 
-    /// A tile has no room left for its blocks (`mode_info`) or for its coefficients, in two parts: the
-    /// frame fails. On the tile's thread.
-    fn no_room(&self, _frame: usize, _tile: usize, _mode_info: bool) {}
+    /// The tile's piece of transform block records is full (or it has none yet): the host moves the
+    /// tile's cursor (`idct_blocks_host`, `idct_blocks_ptr`) to the next piece and returns the records
+    /// it has room for. May wait like [`Self::more_mode_info`]. 0 when there is none: the frame fails.
+    fn more_transform_blocks(&self, frame: usize, tile: usize, tile_data: *mut av1_tile_data) -> c_int;
 
     /// The colour index map of a palette block's plane (`av1_intra_palette`).
     fn palette(&self, frame: usize, tile: usize, palette: &ParsePalette<'_>);
@@ -245,18 +255,17 @@ struct TileState {
     /// The block context `av1_mi_push_block` reads, cleared, with the tile's constants set.
     xd: Box<MACROBLOCKD>,
     memory: TileMemory,
-    mi_count: c_int,
-    /// The second part of the tile's mode info, when the first is full, and the records in it.
-    second: Option<SecondModeInfo>,
-    mi_count2: c_int,
-    /// The tile's coefficients have their last part: the worst-case layout, or the second part.
-    last_coefs: bool,
+    /// The pieces of the tile's mode info records in the order they were written; the last one is the
+    /// one in use, the others are full.
+    pieces: Vec<Records>,
+    /// The transform block records there is room for where the tile's cursor is.
+    txb_room: c_int,
     /// The segment of the tile's last block is lossless.
     lossless: bool,
     /// The tile ran out of room: its frame fails.
     failed: bool,
-    /// The records of the tile, of its first part and then of its second, whose block lists are counted.
-    listed: usize,
+    /// The records of the tile whose block lists are counted: the piece, and the records of that piece.
+    listed: (usize, c_int),
     /// For a host with a clock: the time stamps the calls of the tile took ([`SinkOptions::time_calls`])
     /// and those its block lists took, and the clock and the time stamp at the tile's begin, which give
     /// the length of a time stamp.
@@ -264,6 +273,14 @@ struct TileState {
     list_stamps: u64,
     begin_ticks: i64,
     begin_stamp: u64,
+}
+
+/// A piece of a tile's mode info records.
+struct Records {
+    pool: *mut MB_MODE_INFO,
+    /// The records that are written, and those there is room for.
+    count: c_int,
+    max: c_int,
 }
 
 /// A cleared struct of the entropy decoder on the heap.
@@ -312,22 +329,6 @@ unsafe impl<H: SinkHost> Send for Sink<H> {}
 unsafe impl<H: SinkHost> Sync for Sink<H> {}
 
 impl<H: SinkHost> Sink<H> {
-    /// Before a superblock of a tile: when the tile's part of the coefficient buffer is used up to its
-    /// mark, the tile goes on in its second part (`decode_tile2` of `av1/decoder/decodeframe.c`).
-    ///
-    /// # Safety
-    /// The tile's thread, inside the frame; `state.memory.tile_data` is the tile's.
-    unsafe fn coefs_go_on(host: &H, frame: usize, tile: usize, state: &mut TileState) {
-        // SAFETY: the caller's contract.
-        unsafe {
-            let td = state.memory.tile_data;
-            if !state.last_coefs && (*td).dq_buffer_ptr >= (*td).dq_buffer_max {
-                host.second_coefs(frame, tile, td);
-                state.last_coefs = true;
-            }
-        }
-    }
-
     pub fn new(host: H) -> Self {
         Self::with_options(host, SinkOptions::default())
     }
@@ -420,9 +421,9 @@ impl<H: SinkHost> Sink<H> {
         // the pool, and each is in the grid.
         unsafe {
             let state = self.tile(frame_number, tile).as_mut().expect("the tile has begun");
-            let first = state.mi_count as usize;
-            let total = first + state.mi_count2 as usize;
-            if state.listed >= total {
+            let (mut piece, mut index) = state.listed;
+            // Nothing to count: the piece the count stopped in has no new record and is the last one.
+            if state.pieces.get(piece).is_none_or(|records| index >= records.count && piece + 1 == state.pieces.len()) {
                 return;
             }
             let frame = self.frame(frame_number);
@@ -433,11 +434,20 @@ impl<H: SinkHost> Sink<H> {
             let cm: *mut AV1_COMMON = &raw mut **self.frames[frame_number].cm.get();
             let xd: *mut MACROBLOCKD = &raw mut *state.xd;
             let (row_start, col_start) = ((*xd).tile.mi_row_start, (*xd).tile.mi_col_start);
-            // The records of the first part, then those of the second.
-            let second_pool = state.second.as_ref().map_or(std::ptr::null_mut(), |second| second.mi_pool);
-            for index in state.listed..total {
-                let mi = if index < first { state.memory.mi_pool.add(index) } else { second_pool.add(index - first) };
-                let mi = &*mi;
+            // The records piece by piece, in the order they were written. A piece that is not the last
+            // one is full.
+            loop {
+                let records = &state.pieces[piece];
+                if index >= records.count {
+                    if piece + 1 == state.pieces.len() {
+                        break;
+                    }
+                    piece += 1;
+                    index = 0;
+                    continue;
+                }
+                let mi = &*records.pool.add(index as usize);
+                index += 1;
                 let (mi_row, mi_col) = (mi.mi_row, mi.mi_col);
                 let bw = 1 << MI_SIZE_WIDE_LOG2[mi.sb_type as usize];
                 let bh = 1 << MI_SIZE_HIGH_LOG2[mi.sb_type as usize];
@@ -454,7 +464,7 @@ impl<H: SinkHost> Sink<H> {
                     if frame.ss_x != 0 && bw < 2 { (mi_col - 1 > col_start).into() } else { left.into() };
                 av1_mi_push_block(pbi, cm, xd);
             }
-            state.listed = total;
+            state.listed = (piece, index);
             if stamp != 0 {
                 state.list_stamps += time_stamp().wrapping_sub(stamp);
             }
@@ -470,31 +480,24 @@ impl<H: SinkHost> Sink<H> {
             if state.failed {
                 return;
             }
-            // The tile's part of the pool, and when it is full its second part (`decode_mbmi_block`,
+            // The tile's piece of the pool, and when it is full the next one (`decode_mbmi_block`,
             // `set_offsets`).
-            if state.mi_count >= state.memory.mi_count_max && state.second.is_none() {
-                state.second = self.host.second_mode_info(frame_number, tile, state.memory.tile_data);
-                if state.second.is_none() {
-                    state.failed = true;
-                    self.host.no_room(frame_number, tile, true);
-                    return;
-                }
-            }
-            let mi = match &state.second {
-                Some(second) => {
-                    if state.mi_count2 >= state.memory.mi_count_max {
+            if state.pieces.last().is_none_or(|records| records.count >= records.max) {
+                let td = state.memory.tile_data;
+                (*td).mi_count = state.pieces.last().map_or(0, |records| records.count);
+                match self.host.more_mode_info(frame_number, tile, td) {
+                    Some(piece) if piece.count > 0 => {
+                        state.pieces.push(Records { pool: piece.mi_pool, count: 0, max: piece.count });
+                    }
+                    _ => {
                         state.failed = true;
-                        self.host.no_room(frame_number, tile, true);
                         return;
                     }
-                    state.mi_count2 += 1;
-                    second.mi_pool.add(state.mi_count2 as usize - 1)
                 }
-                None => {
-                    state.mi_count += 1;
-                    state.memory.mi_pool.add(state.mi_count as usize - 1)
-                }
-            };
+            }
+            let records = state.pieces.last_mut().expect("the tile has a piece");
+            let mi = records.pool.add(records.count as usize);
+            records.count += 1;
             mi.write_bytes(0, 1);
             let lossless = frame.hdr.segmentation.lossless[block.b.seg_id.get()];
             state.lossless = lossless;
@@ -528,14 +531,27 @@ impl<H: SinkHost> Sink<H> {
             if state.failed {
                 return std::ptr::null_mut();
             }
-            let td = &mut *state.memory.tile_data;
-            // The coefficients up to the last one, rounded up to four.
+            let td = state.memory.tile_data;
+            // The coefficients up to the last one, rounded up to four. They are not split: when they do
+            // not fit what is left of the tile's piece, they go into the next one.
             let coef_count = (i32::from(txb.eob) + 4) >> 2;
-            if td.dq_buffer_ptr + (coef_count << 2) > td.dq_buffer_end {
+            if (*td).dq_buffer_ptr + (coef_count << 2) > (*td).dq_buffer_end
+                && (!self.host.more_coefs(frame_number, tile, td)
+                    || (*td).dq_buffer_ptr + (coef_count << 2) > (*td).dq_buffer_end)
+            {
                 state.failed = true;
-                self.host.no_room(frame_number, tile, false);
                 return std::ptr::null_mut();
             }
+            // The record's place: the tile's piece of records, or the next one.
+            if state.txb_room <= 0 {
+                state.txb_room = self.host.more_transform_blocks(frame_number, tile, td);
+                if state.txb_room <= 0 {
+                    state.failed = true;
+                    return std::ptr::null_mut();
+                }
+            }
+            state.txb_room -= 1;
+            let td = &mut *td;
             let tx_type = if txb.txtp == WHT_WHT { 0 } else { usize::from(txb.txtp) };
             let tx_size = txb.tx as usize;
             let type_index = if state.lossless && tx_size == 0 { TX_SIZES_ALL } else { tx_size };
@@ -588,18 +604,6 @@ impl<H: SinkHost> Sink<H> {
             }
         }
         self.host.superblock(frame_number, tile, superblock);
-        // The next superblock of the tile, if there is one (`decode_tile2`).
-        // SAFETY: as above.
-        unsafe {
-            let frame = self.frame(frame_number);
-            let state = self.tile(frame_number, tile).as_mut().expect("the tile has begun");
-            let side = if frame.sb128 { 32 } else { 16 };
-            let last =
-                superblock.x4 + side >= state.xd.tile.mi_col_end && superblock.y4 + side >= state.xd.tile.mi_row_end;
-            if !last {
-                Self::coefs_go_on(&self.host, frame_number, tile, state);
-            }
-        }
     }
 }
 
@@ -654,9 +658,7 @@ impl<H: SinkHost> ParseSink for Sink<H> {
             for state in states.iter_mut() {
                 // A tile of the frame before keeps its block context for the next frame's tile.
                 if let Some(state) = state.get_mut() {
-                    state.mi_count = 0;
-                    state.mi_count2 = 0;
-                    state.second = None;
+                    state.pieces.clear();
                     state.failed = false;
                 }
             }
@@ -679,15 +681,13 @@ impl<H: SinkHost> ParseSink for Sink<H> {
                     tile_data: std::ptr::null_mut(),
                     mi_pool: std::ptr::null_mut(),
                     mi_count_max: 0,
-                    worst_case_coefs: true,
+                    txb_room: 0,
                 },
-                mi_count: 0,
-                second: None,
-                mi_count2: 0,
-                last_coefs: true,
+                pieces: Vec::new(),
+                txb_room: 0,
                 lossless: false,
                 failed: false,
-                listed: 0,
+                listed: (0, 0),
                 call_stamps: 0,
                 list_stamps: 0,
                 begin_ticks: 0,
@@ -698,11 +698,12 @@ impl<H: SinkHost> ParseSink for Sink<H> {
             state.list_stamps = 0;
             state.begin_ticks = self.host.ticks();
             state.begin_stamp = if state.begin_ticks != 0 { time_stamp() } else { 0 };
-            state.listed = 0;
-            state.mi_count = 0;
-            state.mi_count2 = 0;
-            state.second = None;
-            state.last_coefs = memory.worst_case_coefs;
+            state.listed = (0, 0);
+            state.pieces.clear();
+            if memory.mi_count_max > 0 {
+                state.pieces.push(Records { pool: memory.mi_pool, count: 0, max: memory.mi_count_max });
+            }
+            state.txb_room = memory.txb_room;
             state.failed = false;
             let xd = &mut *state.xd;
             xd.tile = TileInfo {
@@ -724,8 +725,6 @@ impl<H: SinkHost> ParseSink for Sink<H> {
                 plane.subsampling_y = frame.ss_y;
             }
             state.memory = memory;
-            // The first superblock of the tile (`decode_tile2`).
-            Self::coefs_go_on(&self.host, frame_number, tile.index, state);
         }
     }
 
@@ -773,11 +772,9 @@ impl<H: SinkHost> ParseSink for Sink<H> {
         unsafe {
             {
                 let state = self.tile(frame, tile).as_mut().expect("the tile has begun");
+                // The records of the tile's last piece; the pieces before it are full.
                 let td = state.memory.tile_data;
-                (*td).mi_count = state.mi_count;
-                if let Some(second) = &state.second {
-                    (*second.tile_data).mi_count = state.mi_count2;
-                }
+                (*td).mi_count = state.pieces.last().map_or(0, |records| records.count);
             }
             // The block lists that are not counted yet: all of the tile's with
             // `SinkOptions::late_lists`, and otherwise none (the tile's last superblock counted them).

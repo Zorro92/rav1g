@@ -37,6 +37,7 @@ mod loopfilter;
 mod memory;
 mod output;
 mod perf;
+mod pool;
 mod postfilter;
 mod prediction;
 mod rav1d_frames;

@@ -29,6 +29,7 @@ use super::completion::av1_drain_gpu_decoder;
 use super::compute::{upload_luts, wait_shader_create_complete};
 use super::log::{clear_create_error, log, log_create_error};
 use super::memory::{Allocator, Plan, log_video_memory, memory_type_name};
+use super::pool::{COEF_CHUNK, KINDS, Kind, MODE_INFO_CHUNK, Pools, TXB_CHUNK};
 use super::types::{
     Av1Core, DeviceOnly, DeviceOnlyConst, DeviceUpload, FrameThreadDataCount, FrameThreadDataDefault, GpuBufferObject,
     HostRW, ImagePoolSize, InterFastMapSize, MemoryType, OutputCbSize, OutputThreadDataCount, ReadBack,
@@ -120,6 +121,35 @@ struct ResourceConfig {
     inter_fast: bool,
     /// `AV1_LOW_MEMORY_*`.
     low_memory: i32,
+    /// The mode info records, the coefficients and the transform block records of the frames in flight
+    /// come from pools (`pool.rs`), not from a share of each slot: the parser is rav1d's.
+    pooled: bool,
+    /// `AV1_PARSER_OPTION_TEST_POOL_WAIT`: the test switch of the pools (`pool.rs`).
+    pool_test_wait: bool,
+}
+
+/// The chunks of the pools of a decoder for frames of `cells` 64x64 areas: the chunks the frames in
+/// parse share under the rule of `Pools::take`, and all of them.
+///
+/// A chunk is the worst case of a cell, so `cells` chunks hold any frame. The coefficients have a
+/// thirty-second more, outside the rule: the coefficients of a transform block are not split, so the
+/// end of a piece can stay empty (at most 1027 values of 7680), which only a stream that is made for
+/// it can add up to more than the worst case leaves over.
+///
+/// `AV1_LOW_MEMORY_MODE_INFO` halves the mode info pool; `AV1_LOW_MEMORY_COEFS` sizes the coefficient
+/// pool for 24 values a 4x4 unit and not 30. Such a pool no longer holds every frame: a frame that
+/// does not fit is a decode error.
+fn pool_chunks(cells: usize, low_memory: i32) -> ([usize; KINDS], [usize; KINDS]) {
+    let mut rule = [cells.max(1); KINDS];
+    if low_memory & AV1_LOW_MEMORY_MODE_INFO as i32 != 0 {
+        rule[Kind::ModeInfo as usize] = cells.div_ceil(2).max(1);
+    }
+    if low_memory & AV1_LOW_MEMORY_COEFS as i32 != 0 {
+        rule[Kind::Coefs as usize] = (cells * 4).div_ceil(5).max(1);
+    }
+    let mut total = rule;
+    total[Kind::Coefs as usize] += (cells / 32).max(1);
+    (rule, total)
 }
 
 /// Pipeline slots asked for by the decoder configuration: 0 is the default, anything else is clamped to
@@ -161,8 +191,8 @@ impl ParsePlan {
             1
         } else if cfg.frames_in_parse <= 0 {
             // The default: a second frame in parse where the parse of one frame is what a 4K stream
-            // waits for, when there are threads for two and the slots are not fixed at two (a second
-            // frame in parse without a third slot waits for the first one).
+            // waits for, when there are threads for two and the slots are not fixed at two (with two
+            // slots a third frame begins only when the first one is through on the GPU).
             if large && threads >= 2 && (cfg.frame_slots == 0 || cfg.frame_slots >= 3) { 2 } else { 1 }
         } else {
             cfg.frames_in_parse.min(FRAMES_IN_PARSE_MAX).min(threads)
@@ -171,13 +201,14 @@ impl ParsePlan {
     }
 
     /// The slots of a decoder with `frames` frames in parse: what the configuration says, or by
-    /// default one for each frame in parse and two for the frames on the GPU (two keep the parse and
-    /// the GPU from waiting for each other), at most what the arrays are sized for.
+    /// default one for each frame in parse and one for the frame on the GPU, at most what the arrays
+    /// are sized for. That is what the two slots of a decoder with one frame in parse are; a frame in
+    /// parse takes what it needs from the pools and no second slot (docs/phase2-rav1d.md, step 5).
     fn slots(cfg: &aom_codec_dec_cfg_t, frames: i32) -> i32 {
         if cfg.frame_slots != 0 || frames <= 1 {
             frame_slots_from_cfg(cfg)
         } else {
-            FrameThreadDataCount.min(frames + FrameThreadDataDefault)
+            FrameThreadDataCount.min(frames + 1)
         }
     }
 
@@ -240,6 +271,8 @@ impl ResourceConfig {
             intra_v2: cfg.intra_v2 != 0,
             inter_fast: cfg.inter_fast != 0,
             low_memory,
+            pooled: cfg.parser == crate::sys::AV1_PARSER_RAV1D as i32,
+            pool_test_wait: cfg.parser_options & crate::sys::AV1_PARSER_OPTION_TEST_POOL_WAIT as i32 != 0,
         }
     }
 }
@@ -480,19 +513,55 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
     dec.mode_info_shift = if cfg.low_memory & AV1_LOW_MEMORY_MODE_INFO as i32 != 0 { 2 } else { 1 };
     dec.coef_count_num =
         if cfg.low_memory & AV1_LOW_MEMORY_COEFS as i32 != 0 { IDCT_COEF_COUNT_NUM_LOW } else { IDCT_COEF_COUNT_NUM };
-    let mi_share = mi_size >> dec.mode_info_shift;
+    let mut mi_share = mi_size >> dec.mode_info_shift;
     let slot_count = cfg.gpu_pipeline_depth as usize;
-    request!(
-        assign,
-        dec.mode_info_pool,
-        mem.buffer(size_of::<MB_MODE_INFO>() * mi_share as usize * slot_count, HostRW, c"mode_info_pool", -1)
-    );
-    let coef_buffer_size = target_width * target_height * 3 * dec.coef_count_num / (IDCT_COEF_COUNT_DENUM * 2);
-    request!(
-        assign,
-        dec.idct_coefs,
-        mem.buffer(size_of::<i32>() * coef_buffer_size as usize * slot_count, UploadUAV, c"idct_coefs", -1)
-    );
+    let mut coef_buffer_size = target_width * target_height * 3 * dec.coef_count_num / (IDCT_COEF_COUNT_DENUM * 2);
+    if cfg.pooled {
+        // The pools (pool.rs): one buffer each for the mode info records, the coefficients and the
+        // transform block records of all frames in flight, in chunks of what a 64x64 area needs at
+        // worst. No slot has a share.
+        let (rule, total) = pool_chunks(max_tiles as usize, cfg.low_memory);
+        dec.pool_rule = rule;
+        dec.pool_total = total;
+        mi_share = 0;
+        coef_buffer_size = 0;
+        request!(
+            assign,
+            dec.mode_info_pool,
+            mem.buffer(
+                size_of::<MB_MODE_INFO>() * MODE_INFO_CHUNK * total[Kind::ModeInfo as usize],
+                HostRW,
+                c"mode_info_pool",
+                -1
+            )
+        );
+        request!(
+            assign,
+            dec.idct_coefs,
+            mem.buffer(size_of::<i32>() * COEF_CHUNK * total[Kind::Coefs as usize], UploadUAV, c"idct_coefs", -1)
+        );
+        request!(
+            assign,
+            dec.idct_blocks_pool,
+            mem.buffer(
+                IDCT_BLOCK_SIZE as usize * TXB_CHUNK * total[Kind::Txb as usize],
+                DeviceUpload,
+                c"idct_blocks_unordered",
+                -1
+            )
+        );
+    } else {
+        request!(
+            assign,
+            dec.mode_info_pool,
+            mem.buffer(size_of::<MB_MODE_INFO>() * mi_share as usize * slot_count, HostRW, c"mode_info_pool", -1)
+        );
+        request!(
+            assign,
+            dec.idct_coefs,
+            mem.buffer(size_of::<i32>() * coef_buffer_size as usize * slot_count, UploadUAV, c"idct_coefs", -1)
+        );
+    }
     let grain_offsets = size_of::<i32>() * ((target_width / 32 + 4) * (target_height / 32 + 1)) as usize;
     for i in 0..cfg.gpu_pipeline_depth {
         let td = &mut dec.frame_thread_data[i as usize];
@@ -562,11 +631,13 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
                 gpu_clear_grids
             )
         );
-        request!(
-            assign,
-            td.idct_blocks_unordered,
-            mem.buffer((block_count_4x4 * IDCT_BLOCK_SIZE) as usize, DeviceUpload, c"idct_blocks_unordered", i)
-        );
+        if !cfg.pooled {
+            request!(
+                assign,
+                td.idct_blocks_unordered,
+                mem.buffer((block_count_4x4 * IDCT_BLOCK_SIZE) as usize, DeviceUpload, c"idct_blocks_unordered", i)
+            );
+        }
 
         request!(
             assign,
@@ -765,22 +836,65 @@ unsafe fn log_memory_summary(is_error: bool, label: &str, dec: &Av1Core, rcfg: &
         .iter()
         .filter(|td| !td.palette_buffer.is_null())
         .count();
+    let shares = if rcfg.pooled {
+        // A decoder with pools: how much of the worst case of a frame each holds.
+        let cells = ((dec.max_width >> 6) * (dec.max_height >> 6)).max(1) as usize;
+        format!(
+            "mode info pool {}/{cells} of the worst case, coefficient pool {}/{cells} and {} chunks for the ends of \
+             pieces",
+            dec.pool_rule[Kind::ModeInfo as usize],
+            dec.pool_rule[Kind::Coefs as usize],
+            dec.pool_total[Kind::Coefs as usize] - dec.pool_rule[Kind::Coefs as usize]
+        )
+    } else {
+        format!(
+            "mode info share 1/{} of the worst case, coefficient share {}/{}",
+            1 << dec.mode_info_shift,
+            dec.coef_count_num,
+            IDCT_COEF_COUNT_DENUM
+        )
+    };
     log(
         is_error,
         &format!(
-            "MEMORY {label} options: intra_v2 buffers {}; low memory {} (shared back buffer {}, mode info share \
-             1/{} of the worst case, coefficient share {}/{}); palette buffers {palette_buffers} of {} created, \
-             {:.1} MiB each, a slot's on its first frame with screen content tools",
+            "MEMORY {label} options: intra_v2 buffers {}; low memory {} (shared back buffer {}, {shares}); palette \
+             buffers {palette_buffers} of {} created, {:.1} MiB each, a slot's on its first frame with screen content \
+             tools",
             if rcfg.intra_v2 { "yes" } else { "no (the decoder was not created for -intrav2)" },
             rcfg.low_memory,
             if shared { "yes" } else { "no" },
-            1 << dec.mode_info_shift,
-            dec.coef_count_num,
-            IDCT_COEF_COUNT_DENUM,
             rcfg.gpu_pipeline_depth,
             to_mib(dec.palette_size as u64)
         ),
     );
+    if rcfg.pooled {
+        // The pools: what the frames in flight share. Not a line of the C++ decoder.
+        let size = |object: *mut GpuBufferObject| {
+            // SAFETY: null, or a buffer of the decoder.
+            to_mib(unsafe { object.as_ref() }.map_or(0, |object| object.size) as u64)
+        };
+        log(
+            is_error,
+            &format!(
+                "MEMORY {label} pools: mode info {} chunks of {MODE_INFO_CHUNK} records, {:.1} MiB; coefficients {} \
+                 chunks of {COEF_CHUNK}, {:.1} MiB; transform block records {} chunks of {TXB_CHUNK}, {:.1} MiB; a \
+                 chunk is what a 64x64 area needs at worst, and the frames in flight take them in pieces as they \
+                 are parsed{}",
+                dec.pool_total[Kind::ModeInfo as usize],
+                size(dec.mode_info_pool),
+                dec.pool_total[Kind::Coefs as usize],
+                size(dec.idct_coefs),
+                dec.pool_total[Kind::Txb as usize],
+                size(dec.idct_blocks_pool),
+                if rcfg.pool_test_wait {
+                    " (the test switch: behind its first piece a frame finds a pool empty while an older frame \
+                     holds a piece)"
+                } else {
+                    ""
+                }
+            ),
+        );
+    }
 
     // Host memory: the pool, and what the decoder allocates next to it. Not a line of the C++ decoder,
     // which lies in its pool.
@@ -833,20 +947,33 @@ unsafe fn log_memory_summary(is_error: bool, label: &str, dec: &Av1Core, rcfg: &
         }
     }
     let slot_share = slot_own + pool_share + coef_share;
-    log(
-        is_error,
-        &format!(
-            "MEMORY {label} per slot: {slot_share} bytes ({:.1} MiB) = {slot_buffers} own buffers {:.1} MiB + \
-             mode_info_pool share {:.1} MiB + idct_coefs share {:.1} MiB; a slot above {} also adds one frame \
-             buffer, {:.1} MiB",
-            to_mib(slot_share as u64),
-            to_mib(slot_own as u64),
-            to_mib(pool_share as u64),
-            to_mib(coef_share as u64),
-            FrameThreadDataDefault,
-            to_mib(dec.fb_size as u64)
-        ),
-    );
+    if rcfg.pooled {
+        log(
+            is_error,
+            &format!(
+                "MEMORY {label} per slot: {slot_own} bytes ({:.1} MiB) in {slot_buffers} own buffers, and nothing of \
+                 the pools; a slot above {} also adds one frame buffer, {:.1} MiB",
+                to_mib(slot_own as u64),
+                FrameThreadDataDefault,
+                to_mib(dec.fb_size as u64)
+            ),
+        );
+    } else {
+        log(
+            is_error,
+            &format!(
+                "MEMORY {label} per slot: {slot_share} bytes ({:.1} MiB) = {slot_buffers} own buffers {:.1} MiB + \
+                 mode_info_pool share {:.1} MiB + idct_coefs share {:.1} MiB; a slot above {} also adds one frame \
+                 buffer, {:.1} MiB",
+                to_mib(slot_share as u64),
+                to_mib(slot_own as u64),
+                to_mib(pool_share as u64),
+                to_mib(coef_share as u64),
+                FrameThreadDataDefault,
+                to_mib(dec.fb_size as u64)
+            ),
+        );
+    }
 
     // The largest buffers, one entry per name: the buffers of the slots are the same in every slot.
     const LARGEST: usize = 10;
@@ -1196,6 +1323,10 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
         }
         let coefs = &*(*dec).idct_coefs;
         coefs.host_ptr.cast::<u8>().write_bytes(0, coefs.size);
+        if rcfg.pooled {
+            let pools = Pools::with_test_wait((*dec).pool_total, (*dec).pool_rule, rcfg.pool_test_wait);
+            (*dec).pools = Some(Box::new(pools));
+        }
 
         (*dec).tryhdr10x3 = cfg.tryHDR10x3;
 
@@ -1383,6 +1514,27 @@ unsafe fn destroy(dec: *mut Av1Core, log_steps: bool) {
         av1_drain_gpu_decoder(dec);
         // The parser of phase 2: its threads are joined before the buffers they write are released.
         drop((*dec).rav1d.take());
+        // What the pools were used for, when the decoder was in use.
+        if let (true, Some(pools)) = (log_steps, (*dec).pools.as_deref()) {
+            let stats = pools.stats();
+            let part = |kind: Kind| {
+                let (peak, total) = (stats.peak[kind as usize], stats.total[kind as usize]);
+                format!("{peak} of {total} chunks ({:.0} %)", 100.0 * peak as f64 / total.max(1) as f64)
+            };
+            log(
+                false,
+                &format!(
+                    "MEMORY pools: the most in use at once: mode info {}, coefficients {}, transform block records \
+                     {}; a tile waited for a chunk {} times for the GPU to finish an older frame and {} times for a \
+                     frame in parse in front of its own",
+                    part(Kind::ModeInfo),
+                    part(Kind::Coefs),
+                    part(Kind::Txb),
+                    stats.waits_for_gpu,
+                    stats.waits_for_frame
+                ),
+            );
+        }
 
         if let Some(release_image) = (*dec).cb_release_image {
             for img in &(*dec).image_pool_src {

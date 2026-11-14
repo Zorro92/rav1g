@@ -3,6 +3,7 @@
 
   python memory_lines.py run --tool <exe> --streams <dir> --out <dir>
   python memory_lines.py compare --reference <dir> --candidate <dir>
+  python memory_lines.py pools --shares <dir> --pools <dir>
 
 run: decodes the first temporal units of a few streams of the conformance set with -v, in several decoder
 configurations (slots, low memory parts, the buffers of -intrav2 and -interfast), and writes the lines of
@@ -23,6 +24,18 @@ buffers, the options, the budget decision and the steps of the release.
 compare: the files of two runs must be the same, line for line. That is how the Rust decoder (rav1g-dec) is
 held against the C++ decoder (warp_decoder of branch cpp, at the commit the workflow pins): same buffers,
 same sizes, same decisions, same text.
+
+pools: the files of a run of a decoder with pools (the parser of rav1d: docs/phase2-rav1d.md, step 5)
+against those of a run of the decoder with a share for each slot (-parser c), case by case. The two are
+not the same lines any more; what must hold:
+  - the decoder size, the bit depth and the frame buffer size are the same; with the same slots, the
+    frame buffers are the same;
+  - the decoder with pools says what its pools are, and each has a chunk for every 64x64 area of the
+    decoder size (the mode info pool half of them and the coefficient pool four fifths with the low
+    memory parts 2 and 4), the coefficient pool a thirty-second more;
+  - with the same slots it takes no more device memory than the decoder with shares.
+A case where the slots differ (the library gives a decoder for frames above 2560x1440 two frames in
+parse and three slots) is reported and its sizes are not compared.
 
 Exit code: 0 equal (or run done), 1 different, 2 the run could not be done.
 """
@@ -65,6 +78,9 @@ def memory_lines(text):
         # is left out, and the pool's numbers in the line both decoders have are made equal.
         if HOST_MEMORY_LINE.match(line):
             continue
+        # What the pools were used for differs from run to run (which frames were in flight together).
+        if line.startswith('MEMORY pools: '):
+            line = re.sub(r'\d+', '<n>', line)
         line = re.sub(r'host pool \d+ of \d+ bytes \([0-9.]+ MiB\) in use',
                       'host pool <n> of <n> bytes (<n> MiB) in use', line)
         lines.append(line)
@@ -136,6 +152,71 @@ def compare(args):
     return 0
 
 
+CREATED = re.compile(r'^MEMORY decoder created: (\d+)x(\d+) (\d+)-bit, slots (\d+), frame buffers (\d+) \+ (\d+) back '
+                     r'buffers? of (\d+) bytes .*?; (\d+) device buffers, (\d+) bytes')
+POOLS = re.compile(r'^MEMORY decoder created pools: mode info (\d+) chunks of 256 records, [0-9.]+ MiB; coefficients '
+                   r'(\d+) chunks of 7680, [0-9.]+ MiB; transform block records (\d+) chunks of 384, ')
+LOW_MEMORY = re.compile(r'^MEMORY decoder created options: .*; low memory (\d+) ')
+
+
+def pools(args):
+    """The decoder with pools against the decoder with a share for each slot."""
+    failed = 0
+    print('| Case | Decoder | Slots, shares / pools | Device buffers with shares, MiB | With pools, MiB | Pools: chunks |')
+    print('| --- | --- | --- | ---: | ---: | --- |')
+    for case, _, _, _ in CASES:
+        found = []
+        for directory in (args.shares, args.pools):
+            path = os.path.join(directory, case + '.txt')
+            if not os.path.isfile(path):
+                print('ERROR %s: no %s' % (case, path))
+                return 2
+            with open(path, encoding='utf-8') as f:
+                lines = f.read().split('\n')
+            created = next((CREATED.match(line) for line in lines if CREATED.match(line)), None)
+            found.append((created, lines))
+        problems = []
+        (shares, _), (pooled, pooled_lines) = found
+        if not shares or not pooled:
+            print('ERROR %s: no "MEMORY decoder created" line' % case)
+            failed += 1
+            continue
+        a, b = [list(map(int, created.groups())) for created in (shares, pooled)]
+        if a[:3] != b[:3] or a[6] != b[6]:
+            problems.append('the decoder size, the bit depth or the frame buffer size differ')
+        same_slots = a[3] == b[3]
+        if same_slots and a[4:6] != b[4:6]:
+            problems.append('the frame buffers differ: %d + %d and %d + %d' % (a[4], a[5], b[4], b[5]))
+        line = next((POOLS.match(line) for line in pooled_lines if POOLS.match(line)), None)
+        low = next((LOW_MEMORY.match(line) for line in pooled_lines if LOW_MEMORY.match(line)), None)
+        chunks = '?'
+        if not line or not low:
+            problems.append('the decoder with pools has no "MEMORY decoder created pools" or options line')
+        else:
+            cells = (b[0] // 64) * (b[1] // 64)
+            parts = int(low.group(1))
+            expected = [(cells + 1) // 2 if parts & 2 else cells,
+                        ((cells * 4 + 4) // 5 if parts & 4 else cells) + max(1, cells // 32), cells]
+            chunks = '%s, %s, %s' % line.groups()
+            if [int(n) for n in line.groups()] != expected:
+                problems.append('the pools have %s chunks; %d cells and the low memory parts %d give %s' % (
+                    chunks, cells, parts, ', '.join(map(str, expected))))
+        if same_slots and b[8] > a[8]:
+            problems.append('the decoder with pools takes %d bytes of device memory, %d more than the decoder with '
+                            'shares' % (b[8], b[8] - a[8]))
+        print('| %s | %dx%d %d-bit | %d / %d | %.1f | %.1f%s | %s |' % (
+            case, b[0], b[1], b[2], a[3], b[3], a[8] / 1048576.0, b[8] / 1048576.0,
+            '' if same_slots else ' (other slots: not compared)', chunks))
+        for problem in problems:
+            print('FAIL %s: %s' % (case, problem))
+        failed += bool(problems)
+    if failed:
+        print('%d of %d cases are not as the pools should be' % (failed, len(CASES)))
+        return 1
+    print('The decoder with pools is as it should be next to the decoder with shares in all %d cases' % len(CASES))
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest='command', required=True)
@@ -149,8 +230,11 @@ def main():
     c.add_argument('--candidate', required=True)
     c.add_argument('--reference-name', default='warp_decoder')
     c.add_argument('--candidate-name', default='rav1g-dec')
+    p = commands.add_parser('pools')
+    p.add_argument('--shares', required=True, help='the lines of the decoder with a share for each slot (-parser c)')
+    p.add_argument('--pools', required=True, help='the lines of the decoder with pools (the parser of rav1d)')
     args = parser.parse_args()
-    return run(args) if args.command == 'run' else compare(args)
+    return {'run': run, 'compare': compare, 'pools': pools}[args.command](args)
 
 
 if __name__ == '__main__':

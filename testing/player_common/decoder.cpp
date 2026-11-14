@@ -682,10 +682,11 @@ int AV1Decoder::DecodeOne() {
     framedur = 1000000.0 / orig_frate;
   if (params_.frate_ < 0)
     XB_LOGI << "Frame rate = unlimited (-1)"
-            << " (" << params_.threads_ << " threads, player_queue_size " << params_.player_queue_size_ << ")";
+            << " (" << created_configuration_.threads << " threads, player_queue_size " << params_.player_queue_size_
+            << ")";
   else
-    XB_LOGI << "Frame rate = " << (1000000.0 / framedur) << " (" << params_.threads_ << " threads, player_queue_size "
-            << params_.player_queue_size_ << ")";
+    XB_LOGI << "Frame rate = " << (1000000.0 / framedur) << " (" << created_configuration_.threads
+            << " threads, player_queue_size " << params_.player_queue_size_ << ")";
   need_preload_ = params_.frate_ >= 0;
   preload_num_ = params_.player_queue_size_ < PRELOAD_SIZE ? params_.player_queue_size_ : PRELOAD_SIZE;
 
@@ -757,7 +758,7 @@ int AV1Decoder::DecodeOne() {
           << (params_.parse_frames_ == 0
                   ? " (the library's default for the frame size)"
                   : (static_cast<unsigned>(params_.parse_frames_) == created_configuration_.frames_in_parse
-                         ? (params_.parse_frames_ == 1 ? " (default; -parseframes for more)" : " (-parseframes)")
+                         ? " (-parseframes)"
                          : " (fewer than -parseframes asks for: the threads, or the slots did not fit the memory)"));
   // The decoder's size: also fixed at creation; a decoder of another size is replaced.
   XB_LOGI << "Decoder size: " << created_width_ << "x" << created_height_ << " " << created_bitdepth_ << "-bit"

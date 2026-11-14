@@ -218,6 +218,11 @@ unsafe fn completion_thread(dec: *mut Av1Core) {
                     }
                 }
                 td.sec_thread_data = std::ptr::null_mut();
+                // What the frame took of the pools is free for the frames in parse. Its coefficients
+                // are zero again: the transform stage clears what it reads.
+                if let (0, Some(pools)) = (td.output_only, (*dec).pools.as_deref()) {
+                    pools.release(td.slot_index as usize, |_, _, _| {});
+                }
                 // What the frame cleared of the slot's grids is clean again before the slot goes back
                 // (`clear_slot`). A second slot went back above as it is: a frame uses only the coefficient
                 // and mode info shares of its second slot, not the grids, so that slot is as clean as it

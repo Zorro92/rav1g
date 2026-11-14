@@ -25,7 +25,7 @@
 
 #define PLAYER_QUEUE_SIZE 16
 // -slots: the decoder's pipeline slots (aom_codec_dec_cfg_t::frame_slots).
-#define PLAYER_SLOTS_DEFAULT 2
+// (A task without -slots gets what the library gives the frames in parse: one more than there are.)
 // The clears of a pipeline slot (-gpuclear, -cpuclear, -syncclear): the values of RAV1G_CLEARS_* of
 // rav1g.h (decoder.cpp holds them against it).
 #define PLAYER_CLEARS_NOT_NEEDED 0
@@ -35,9 +35,9 @@
 #define PLAYER_SLOTS_MIN 2
 #define PLAYER_SLOTS_MAX 4
 // -parseframes: the frames whose parse may run at the same time (Rav1gSettings::frames_in_parse), 1 to
-// RAV1G_FRAMES_IN_PARSE_MAX; 0 is the library's default for the frame size. A task without the flag asks
-// for one.
-#define PLAYER_PARSE_FRAMES_DEFAULT 1
+// RAV1G_FRAMES_IN_PARSE_MAX; 0 is the library's default for the frame size (1 up to 2560x1440, 2 above),
+// which a task without the flag gets.
+#define PLAYER_PARSE_FRAMES_DEFAULT 0
 #define PLAYER_PARSE_FRAMES_MAX 4
 // -lowmemparts: the largest value, all three reductions (AV1_LOW_MEMORY_ALL of aom/aom_decoder.h), and what
 // a task without -lowmem and -lowmemparts gets: part 1, the shared back buffer.
@@ -115,8 +115,8 @@ class CParameters {
     bool cdefv1_;
     bool intrav2_;
     bool intraopt_;
-    // -slots: the pipeline slots the task asks for. 0 after Parse() when the task has -parseframes and no
-    // -slots: the library then gives the decoder the slots of its frames in parse.
+    // -slots: the pipeline slots the task asks for. 0 when the task has no -slots: the library then gives
+    // the decoder the slots of its frames in parse.
     int slots_;
     // The task has -slots (set by Parse()).
     bool slots_given_;

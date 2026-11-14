@@ -29,9 +29,9 @@ use crate::{Settings, TransferCharacteristics, switches};
 /// The shared back buffer: one back buffer for all pipeline slots and a pool of 10 frame buffers. The
 /// default of `rav1g_settings_default`.
 pub const RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER: u32 = 1;
-/// The mode info of a frame in shares that a pipeline slot takes as it needs them.
+/// A mode info pool of half the worst case of a frame. A frame that needs more is a decode error.
 pub const RAV1G_LOW_MEMORY_MODE_INFO: u32 = 2;
-/// The coefficients of a frame in shares, likewise.
+/// A coefficient pool of four fifths of the worst case of a frame, likewise.
 pub const RAV1G_LOW_MEMORY_COEFS: u32 = 4;
 /// All memory reductions.
 pub const RAV1G_LOW_MEMORY_ALL: u32 = 7;
@@ -66,6 +66,12 @@ pub const RAV1G_PARSER_OPTION_CLEAR_GRID: u32 = 32;
 /// thread that parses it, which is what a bug of the parser does. The decode call that finds it returns
 /// `Rav1gStatus::Error` and the decoder decodes nothing more.
 pub const RAV1G_PARSER_OPTION_TEST_PANIC: u32 = 64;
+/// For a test of the decoder, never for an application: behind its first piece, a frame finds the pools
+/// the frames in flight take their mode info records, coefficients and transform block records from
+/// empty for as long as an older frame holds anything of them, so every frame waits in the middle of
+/// its parse for memory to come back, as a frame does that finds a pool exhausted. The frames are the
+/// same.
+pub const RAV1G_PARSER_OPTION_TEST_POOL_WAIT: u32 = 128;
 /// The most frames a decoder parses at the same time (`Rav1gSettings::frames_in_parse`).
 pub const RAV1G_FRAMES_IN_PARSE_MAX: u32 = 4;
 /// The `Rav1gSettings::parser_options` of `rav1g_settings_default`: `RAV1G_PARSER_OPTION_NO_LF_MASKS`
@@ -166,6 +172,8 @@ const _: () = {
     assert!(RAV1G_PARSER_OPTION_CLEAR_GRID == crate::sys::AV1_PARSER_OPTION_CLEAR_GRID);
     assert!(RAV1G_PARSER_OPTION_TEST_PANIC == crate::ParserOptions::TEST_PANIC);
     assert!(RAV1G_PARSER_OPTION_TEST_PANIC == crate::sys::AV1_PARSER_OPTION_TEST_PANIC);
+    assert!(RAV1G_PARSER_OPTION_TEST_POOL_WAIT == crate::ParserOptions::TEST_POOL_WAIT);
+    assert!(RAV1G_PARSER_OPTION_TEST_POOL_WAIT == crate::sys::AV1_PARSER_OPTION_TEST_POOL_WAIT);
     assert!(RAV1G_FRAMES_IN_PARSE_MAX == crate::sys::AV1_FRAMES_IN_PARSE_MAX);
     assert!(RAV1G_PARSER_OPTIONS_DEFAULT == crate::ParserOptions::DEFAULT);
     assert!(RAV1G_INTER_FAST_ON == switches::INTER_FAST_ON);
@@ -529,8 +537,8 @@ pub struct Rav1gSettings {
     /// above (with `RAV1G_PARSER_LIBAOM` 0 is 1).
     pub threads: u32,
     /// Pipeline slots: frames that can be between the start of their CPU decode and the end of their GPU
-    /// work at the same time, 2 to 4. 0 is the default: 2 with one frame in parse, and with more two
-    /// slots more than frames in parse, at most 4. Each slot has buffers of its own.
+    /// work at the same time, 2 to 4. 0 is the default: one slot more than frames in parse, at most 4.
+    /// Each slot has buffers of its own.
     pub frame_slots: u32,
     /// The memory reductions: `RAV1G_LOW_MEMORY_*` values added up, 0 for none.
     pub low_memory: u32,
@@ -839,7 +847,7 @@ pub unsafe extern "C" fn rav1g_log_video_memory(d3d12_device: *mut c_void, label
 /// rav1d as its parser (`RAV1G_PARSER_RAV1D` with `RAV1G_PARSER_OPTIONS_DEFAULT`), no budget guard, and
 /// no output (the application sets `output`). Its threads, frames in parse and pipeline slots are 0, the
 /// defaults for the frame size the application then sets: one thread, one frame in parse and two slots
-/// up to 2560x1440; above, two threads and, where the slots fit, two frames in parse with four slots.
+/// up to 2560x1440; above, two threads and, where the slots fit, two frames in parse with three slots.
 ///
 /// # Safety
 /// `settings` is valid for writing.

@@ -25,7 +25,9 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"i", atString, anAtLeastOne, "source file path", "", &params_.source_file_},
       {"o", atString, anOptional, "target YUV file path", "output", &params_.target_file_},
       {"dir", atString, anAtLeastOne, "source directory", "", &params_.source_dir_},
-      {"t", atInt, anOptional, "threads", "", &params_.threads_},
+      {"t", atInt, anOptional,
+       "threads that parse; 0 or no flag: the library's default for the frame size (1 up to 2560x1440, 2 above)", "",
+       &params_.threads_},
       {"loop", atInt, anOptional, "loops", "", &params_.loops_},
       {"limit", atInt, anOptional, "decoding frame limit", "", &params_.limit_},
       {"progress", atSingle, anOptional, "show decoding time for each frame", "", &params_.progress_},
@@ -67,12 +69,12 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"intraopt", atSingle, anOptional, "original intra_main shader built with FXC optimisation (same source)", "",
        &params_.intraopt_},
       {"slots", atInt, anOptional,
-       "decoder pipeline slots (frames in flight), 2..4. Default 2, or with -parseframes what the library gives "
-       "the frames in parse",
+       "decoder pipeline slots (frames in flight), 2..4. Default: what the library gives the frames in parse, one "
+       "more than there are",
        "", &params_.slots_},
       {"parseframes", atInt, anOptional,
-       "frames whose parse may run at the same time, 1..4 and at most the threads (-t); 0: the library's default "
-       "for the frame size. Default 1 (same output)",
+       "frames whose parse may run at the same time, 1..4 and at most the threads (-t); 0 or no flag: the library's "
+       "default for the frame size, 1 up to 2560x1440 and 2 above (same output)",
        "", &params_.parse_frames_},
       {"gpuclear", atSingle, anOptional,
        "intra wavefront in the slot's grid, cleared by the GPU at the end of the frame's command list (same output)",
@@ -284,10 +286,10 @@ int CParameters::Parse(one_task& args, std::string& Err) {
            (params_.nopresent_ ? " with -nopresent." : " when presenting frames.");
     return -1;
   }
-  // -slots: 0 is what Reset() leaves, and means that the task did not say.
+  // -slots: 0 is what Reset() leaves, and means that the task did not say: the library then gives the
+  // decoder the slots of its frames in parse (one more than there are, or what its budget guard leaves).
   params_.slots_given_ = params_.slots_ != 0;
-  if (!params_.slots_given_) params_.slots_ = PLAYER_SLOTS_DEFAULT;
-  if (params_.slots_ < PLAYER_SLOTS_MIN || params_.slots_ > PLAYER_SLOTS_MAX) {
+  if (params_.slots_given_ && (params_.slots_ < PLAYER_SLOTS_MIN || params_.slots_ > PLAYER_SLOTS_MAX)) {
     // Refused, not clamped: a timing run must not report numbers for a slot count nobody asked for.
     char ss[96];
     sprintf(ss, "-slots %d is not allowed: the decoder takes %d to %d slots.", params_.slots_, PLAYER_SLOTS_MIN,
@@ -302,9 +304,8 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     Err += ss;
     return -1;
   }
-  // More than one frame in parse wants more slots than the two of the player's default: without -slots
-  // the library says how many (two more than frames in parse, at most 4, or what its budget guard leaves).
-  if (!params_.slots_given_ && params_.parse_frames_ != PLAYER_PARSE_FRAMES_DEFAULT) params_.slots_ = 0;
+  // -t: 0 is what Reset() leaves: the library's default for the frame size.
+  if (params_.threads_ < 0) params_.threads_ = 0;
 
   if (params_.lowmem_parts_ < 0 || params_.lowmem_parts_ > PLAYER_LOWMEM_ALL) {
     char ss[96];
@@ -365,7 +366,8 @@ void CParameters::Reset() {
   params_.isDirectory_ = false;
   params_.isSubList_ = false;
   params_.showIt_ = false;
-  params_.threads_ = 1;
+  // 0: the task has no -t; the library's default for the frame size.
+  params_.threads_ = 0;
   params_.loops_ = 1;
   params_.limit_ = -1;
   params_.progress_ = false;

@@ -33,13 +33,15 @@ use super::perf::{
     inter_fast_mode, perf_add, perf_add_memset, perf_begin_command_buffer, perf_detail_mode, perf_gpu_mark, perf_lap,
     perf_now, perf_resolve,
 };
+use super::pool::{CHUNK_ITEMS, COEF_CHUNK, Kind, Take};
 use super::postfilter::cdef_looprestoration;
 use super::prediction::{inter_ext_borders, prediction_gen_blocks, prediction_run_all};
 use super::stage_dump::{stage_dump_begin, stage_dump_frame_info};
 use super::thread::lock;
 use super::transform::idct_run;
 use super::types::{
-    Av1Core, DeviceUpload, EntropyThreadCount, GpuWorkItem, InterFastMapSize, IntraV2MaxRegions, av1_frame_thread_data,
+    Av1Core, DeviceUpload, EntropyThreadCount, GpuWorkItem, InterFastMapSize, IntraV2MaxRegions, Run, TilePieces,
+    av1_frame_thread_data,
 };
 use crate::gpu::d3d12::{com_ref, wrapped_ref};
 use crate::gpu::{BufferState, CommandAllocator, CommandList, Event, Fence, Queue};
@@ -423,9 +425,6 @@ unsafe fn get_sec_data(dec: *mut Av1Core, td: *mut av1_frame_thread_data) {
         let _taking = lock(&(*td).sec_data_mutex);
         if (*td).sec_thread_data.is_null() {
             let perf_t = super::perf::av1_perf_ticks();
-            // With more than one frame in parse a frame takes a slot only when the frames before it
-            // can still get theirs (`rav1d_host::SlotGate`).
-            super::rav1d_host::gate_second_slot(dec, td);
             (*td).sec_thread_data = (*dec).frame_data_pool.get();
             perf_add(dec, sys::AV1_PERF_CPU_WAIT_SEC_SLOT as usize, perf_t);
             if perf_t != 0 {
@@ -718,8 +717,16 @@ pub(crate) unsafe fn release_frame(dec: *mut Av1Core, td: *mut av1_frame_thread_
         // The coefficients of a submitted frame are zeroed by the IDCT shaders as they read them (the
         // entropy decoder writes only the non-zero ones and relies on the rest being zero). This frame never
         // reached the GPU, so its share is cleared here, and the share of its second slot, which it may
-        // have written too.
+        // have written too. With pools: the pieces it took of the coefficient pool, which then go back
+        // with the others.
         let coef_buf = (*(*dec).idct_coefs).host_ptr.cast::<i32>();
+        if let Some(pools) = (*dec).pools.as_deref() {
+            pools.release(td.slot_index as usize, |kind, first, chunks| {
+                if kind == Kind::Coefs {
+                    coef_buf.add(first * COEF_CHUNK).write_bytes(0, chunks * COEF_CHUNK);
+                }
+            });
+        }
         coef_buf.add(td.coef_buffer_offset as usize).cast::<u8>().write_bytes(0, td.coef_buffer_size as usize);
         if let Some(sec) = td.sec_thread_data.as_mut() {
             coef_buf.add(sec.coef_buffer_offset as usize).cast::<u8>().write_bytes(0, sec.coef_buffer_size as usize);
@@ -892,6 +899,20 @@ pub(crate) unsafe fn setup_frame_begin(
 
         td.tile_count = cm.tile_cols * cm.tile_rows;
         td.thread_count = (*pbi).max_threads.min(td.tile_count);
+        if let Some(pools) = (*dec).pools.as_deref() {
+            // The frame is the youngest of those that hold pieces of the pools; its tiles take theirs as
+            // they are parsed.
+            let tiles = usize::try_from(td.tile_count).unwrap_or(0);
+            td.pieces.resize_with(tiles.max(td.pieces.len()), TilePieces::default);
+            for pieces in &mut td.pieces {
+                pieces.mode_info.clear();
+                pieces.txb.clear();
+                pieces.piece = [(0, 0); 3];
+                pieces.cells_left = 0;
+            }
+            td.tile_pieces = td.pieces.as_mut_ptr();
+            pools.begin(td.slot_index as usize, frame_cells(cm));
+        }
         // Inter breakdown (-gputimedetail): the tile threads count the blocks they push, each tile into its
         // own counters, which the prediction stage adds up when the frame is recorded.
         td.perf_inter_mode = perf_detail_mode();
@@ -1077,6 +1098,10 @@ pub(crate) unsafe fn setup_frame_coefs(
         let cm = &*cm;
         td.ext_idct_buffer = 0;
         td.ext_coef_base = td.coef_buffer_offset;
+        if (*dec).pools.is_some() {
+            // A tile takes pieces of the coefficient pool as it goes, whatever its size.
+            return 0;
+        }
         // Worst-case layout of the coefficients (IDCT_COEF_COUNT_DENUM per 4x4 unit, av1_setup_macroblockd)
         // for a frame with a tile of at most TILE_SB_SIZE_THRESHOLD superblocks: such a tile is too small
         // for the switch to a second share at a superblock boundary.
@@ -1348,43 +1373,61 @@ pub(crate) unsafe fn setup_tile(
         let mi_offset = tile.mi_row_start * ((cm.mi_cols + 15) & !15) + tile.mi_col_start * tile_rows;
         let mi_max = tile_rows * tile_cols;
 
-        let coef_num = (*dec).coef_count_num;
-        let per_unit = if td.ext_idct_buffer != 0 { IDCT_COEF_COUNT_DENUM } else { coef_num };
-        t.dq_buffer_offset = mi_offset * per_unit;
-        t.dq_buffer_ptr =
-            (if td.ext_idct_buffer != 0 { td.ext_coef_base } else { td.coef_buffer_offset }) + t.dq_buffer_offset;
-        t.dq_buffer_base = (*(*dec).idct_coefs).host_ptr.cast();
-        let mib_sz = cm.seq_params.mib_size;
-        let sb_sz = mib_sz * mib_sz * IDCT_COEF_COUNT_DENUM;
-        t.dq_buffer_max = t.dq_buffer_ptr + mi_max * coef_num - sb_sz;
-        // The tile's part of a share, and where the part it is writing ends: av1_read_coeffs_txb() does not
-        // write behind it. With the worst-case layout the part is as large as the tile can need.
-        t.dq_buffer_size = mi_max * coef_num;
-        t.dq_buffer_end = t.dq_buffer_ptr + mi_max * per_unit;
-
         let blocks_4x4_count = (mi_offset * 3 + 1) >> 1;
         t.intra_iter_max = -1;
         t.intra_iter_max_uv = -1;
-
-        t.blocks_offset = blocks_4x4_count;
-        t.idct_blocks_host = (*td.idct_blocks_unordered)
-            .host_ptr
-            .cast::<crate::sys::parser::tx_block_info_gpu>()
-            .offset(blocks_4x4_count as isize);
-
-        let mi_offset_base =
-            tile.mi_row_start * cm.mi_stride + tile.mi_col_start * (tile.mi_row_end - tile.mi_row_start);
-        let mi_max_base = (tile.mi_row_end - tile.mi_row_start) * (tile.mi_col_end - tile.mi_col_start);
-        // The tile's part of the slot's share of the mode info pool: half of its 4x4 units, a quarter with
-        // AV1_LOW_MEMORY_MODE_INFO. The part in a second slot's share has the same place and size.
-        t.mi_offset = (mi_offset_base >> (*dec).mode_info_shift) + td.mode_info_offset;
+        t.dq_buffer_base = (*(*dec).idct_coefs).host_ptr.cast();
         t.mi_count = 0;
-        let setup = TileSetup {
-            tile_data: t_ptr,
-            tile_id,
-            mi_count_max: mi_max_base >> (*dec).mode_info_shift,
-            mi_pool: (*(*dec).mode_info_pool).host_ptr.cast::<MB_MODE_INFO>().offset(t.mi_offset as isize),
-            ext_idct_buffer: td.ext_idct_buffer,
+        let setup = if (*dec).pools.is_some() {
+            // A decoder with pools: the tile has no part of anything yet. It takes its first piece of
+            // each pool with its first block and its first transform block (`more_mode_info`,
+            // `more_coefs`, `more_transform_blocks`).
+            t.dq_buffer_offset = 0;
+            t.dq_buffer_ptr = 0;
+            t.dq_buffer_max = 0;
+            t.dq_buffer_size = 0;
+            t.dq_buffer_end = 0;
+            t.blocks_offset = 0;
+            t.idct_blocks_host = (*(*dec).idct_blocks_pool).host_ptr.cast();
+            t.mi_offset = 0;
+            let pieces = &mut *td.tile_pieces.add(tile_id as usize);
+            pieces.col_end = tile.mi_col_end.min(cm.mi_cols);
+            pieces.row_end = tile.mi_row_end.min(cm.mi_rows);
+            pieces.cells_left = cells(pieces.col_end - tile.mi_col_start) * cells(pieces.row_end - tile.mi_row_start);
+            TileSetup { tile_data: t_ptr, tile_id, mi_count_max: 0, mi_pool: std::ptr::null_mut(), ext_idct_buffer: 1 }
+        } else {
+            let coef_num = (*dec).coef_count_num;
+            let per_unit = if td.ext_idct_buffer != 0 { IDCT_COEF_COUNT_DENUM } else { coef_num };
+            t.dq_buffer_offset = mi_offset * per_unit;
+            t.dq_buffer_ptr =
+                (if td.ext_idct_buffer != 0 { td.ext_coef_base } else { td.coef_buffer_offset }) + t.dq_buffer_offset;
+            let mib_sz = cm.seq_params.mib_size;
+            let sb_sz = mib_sz * mib_sz * IDCT_COEF_COUNT_DENUM;
+            t.dq_buffer_max = t.dq_buffer_ptr + mi_max * coef_num - sb_sz;
+            // The tile's part of a share, and where the part it is writing ends: av1_read_coeffs_txb() does
+            // not write behind it. With the worst-case layout the part is as large as the tile can need.
+            t.dq_buffer_size = mi_max * coef_num;
+            t.dq_buffer_end = t.dq_buffer_ptr + mi_max * per_unit;
+
+            t.blocks_offset = blocks_4x4_count;
+            t.idct_blocks_host = (*td.idct_blocks_unordered)
+                .host_ptr
+                .cast::<crate::sys::parser::tx_block_info_gpu>()
+                .offset(blocks_4x4_count as isize);
+
+            let mi_offset_base =
+                tile.mi_row_start * cm.mi_stride + tile.mi_col_start * (tile.mi_row_end - tile.mi_row_start);
+            let mi_max_base = (tile.mi_row_end - tile.mi_row_start) * (tile.mi_col_end - tile.mi_col_start);
+            // The tile's part of the slot's share of the mode info pool: half of its 4x4 units, a quarter
+            // with AV1_LOW_MEMORY_MODE_INFO. The part in a second slot's share has the same place and size.
+            t.mi_offset = (mi_offset_base >> (*dec).mode_info_shift) + td.mode_info_offset;
+            TileSetup {
+                tile_data: t_ptr,
+                tile_id,
+                mi_count_max: mi_max_base >> (*dec).mode_info_shift,
+                mi_pool: (*(*dec).mode_info_pool).host_ptr.cast::<MB_MODE_INFO>().offset(t.mi_offset as isize),
+                ext_idct_buffer: td.ext_idct_buffer,
+            }
         };
 
         t.mi_col_start = tile.mi_col_start;
@@ -1433,6 +1476,256 @@ pub(crate) unsafe fn setup_tile(
         }
         setup
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The pools (pool.rs): what a tile takes as it is parsed.
+// ---------------------------------------------------------------------------------------------------------
+
+/// The cells (64x64 areas) along `units` 4x4 units.
+fn cells(units: c_int) -> c_int {
+    (units.max(0) + 15) >> 4
+}
+
+/// The cells of the frame of `cm`: those of its tiles, each from its own corner. A tile begins at a
+/// superblock, which is a cell or four, so that is the cells of the frame but for a tile that ends at
+/// the frame's edge.
+fn frame_cells(cm: &AV1_COMMON) -> usize {
+    let log2 = cm.seq_params.mib_size_log2;
+    let along = |starts: &[c_int], tiles: c_int, units: c_int| -> c_int {
+        (0..usize::try_from(tiles).unwrap_or(0))
+            .map(|tile| cells((starts[tile + 1] << log2).min(units) - (starts[tile] << log2)))
+            .sum()
+    };
+    let across = along(&cm.tile_col_start_sb, cm.tile_cols, cm.mi_cols);
+    let down = along(&cm.tile_row_start_sb, cm.tile_rows, cm.mi_rows);
+    usize::try_from(across * down).unwrap_or(0)
+}
+
+/// A piece of a pool for a tile of the frame on the slot `td`: its first chunk and its chunks. Waits
+/// until the frame may have one and one is free (`Pools::take`). `None`: the frame does not fit the
+/// pool, or the decoder is being released; the frame fails.
+///
+/// # Safety
+/// `dec` is a decoder with pools while the tiles of the frame on the slot `td` are parsed; `pieces` is
+/// the calling thread's tile.
+unsafe fn take_piece(
+    dec: *mut Av1Core,
+    td: *const av1_frame_thread_data,
+    pieces: &mut TilePieces,
+    kind: Kind,
+) -> Option<(usize, usize)> {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let pools = (*dec).pools.as_deref()?;
+        // A piece, and never more than the tile can still need: a chunk is the worst case of a cell.
+        let want = pools.piece(kind, usize::try_from(pieces.cells_left).unwrap_or(0));
+        let perf_t = super::perf::av1_perf_ticks();
+        let taken = pools.take((*td).slot_index as usize, kind, want);
+        perf_add(dec, sys::AV1_PERF_CPU_WAIT_SEC_SLOT as usize, perf_t);
+        match taken {
+            Take::Piece { first, chunks } => {
+                pieces.piece[kind as usize] = (first, chunks);
+                Some((first, chunks))
+            }
+            Take::Full => {
+                let what = match kind {
+                    Kind::ModeInfo => "blocks do not fit the mode info pool",
+                    Kind::Coefs => "coefficients do not fit the coefficient pool",
+                    Kind::Txb => "transform blocks do not fit the pool of their records",
+                };
+                log(
+                    true,
+                    &format!(
+                        "MEMORY FAILED frame {}: its {what}, which this frame has for itself ({} chunks of {} \
+                         items); the frame is a decode error",
+                        (*td).frame_number,
+                        (*dec).pool_total[kind as usize],
+                        CHUNK_ITEMS[kind as usize]
+                    ),
+                );
+                None
+            }
+            Take::Stopped => None,
+        }
+    }
+}
+
+/// The tile `tile_id` of the frame on the slot `td` has filled the mode info records it had: its next
+/// piece of the pool, as the records and how many there is room for.
+///
+/// # Safety
+/// As [`take_piece`]; `t` is the tile's data.
+pub(crate) unsafe fn more_mode_info(
+    dec: *mut Av1Core,
+    td: *const av1_frame_thread_data,
+    tile_id: usize,
+    t: &mut av1_tile_data,
+) -> Option<(*mut MB_MODE_INFO, c_int)> {
+    // SAFETY: the caller's contract; the piece is inside the pool's buffer.
+    unsafe {
+        let pieces = &mut *(*td).tile_pieces.add(tile_id);
+        let (first, chunks) = take_piece(dec, td, pieces, Kind::ModeInfo)?;
+        let run = Run {
+            first: (first * CHUNK_ITEMS[Kind::ModeInfo as usize]) as c_int,
+            count: (chunks * CHUNK_ITEMS[Kind::ModeInfo as usize]) as c_int,
+        };
+        // The pieces before this one are full; the count of this one is set at the tile's end.
+        pieces.mode_info.push(run);
+        t.mi_offset = run.first;
+        t.mi_count = 0;
+        let records = (*(*dec).mode_info_pool).host_ptr.cast::<MB_MODE_INFO>().add(run.first as usize);
+        Some((records, run.count))
+    }
+}
+
+/// The same for the tile's transform block records: the tile's cursor moves to the next piece. Returns
+/// the records there is room for; 0: none, the frame fails.
+///
+/// # Safety
+/// As [`more_mode_info`].
+pub(crate) unsafe fn more_transform_blocks(
+    dec: *mut Av1Core,
+    td: *const av1_frame_thread_data,
+    tile_id: usize,
+    t: &mut av1_tile_data,
+) -> c_int {
+    // SAFETY: the caller's contract; the piece is inside the pool's buffer.
+    unsafe {
+        let pieces = &mut *(*td).tile_pieces.add(tile_id);
+        // The piece the tile has written, which is full.
+        if let Some(last) = pieces.txb.last_mut() {
+            last.count = t.idct_blocks_ptr;
+        }
+        let Some((first, chunks)) = take_piece(dec, td, pieces, Kind::Txb) else {
+            return 0;
+        };
+        let run = Run {
+            first: (first * CHUNK_ITEMS[Kind::Txb as usize]) as c_int,
+            count: (chunks * CHUNK_ITEMS[Kind::Txb as usize]) as c_int,
+        };
+        pieces.txb.push(Run { first: run.first, count: 0 });
+        t.blocks_offset = run.first;
+        t.idct_blocks_host =
+            (*(*dec).idct_blocks_pool).host_ptr.cast::<crate::sys::parser::tx_block_info_gpu>().add(run.first as usize);
+        t.idct_blocks_ptr = 0;
+        run.count
+    }
+}
+
+/// The coefficients of the tile's next transform block do not fit what is left of its piece of the
+/// coefficient pool: the tile's cursor moves to the next piece, or the piece grows by the next one
+/// when that follows it. Returns false when there is none: the frame fails.
+///
+/// # Safety
+/// As [`more_mode_info`].
+pub(crate) unsafe fn more_coefs(
+    dec: *mut Av1Core,
+    td: *const av1_frame_thread_data,
+    tile_id: usize,
+    t: &mut av1_tile_data,
+) -> bool {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let pieces = &mut *(*td).tile_pieces.add(tile_id);
+        let Some((first, chunks)) = take_piece(dec, td, pieces, Kind::Coefs) else {
+            return false;
+        };
+        let start = (first * COEF_CHUNK) as c_int;
+        if t.dq_buffer_end != start || t.dq_buffer_end == 0 {
+            // What is left of the piece before stays empty, and zero.
+            t.dq_buffer_ptr = start;
+        }
+        t.dq_buffer_end = start + (chunks * COEF_CHUNK) as c_int;
+        true
+    }
+}
+
+/// A superblock of the tile at (`x4`, `y4`) is parsed: its cells are no longer what the tile, and the
+/// frame, can still need of the pools.
+///
+/// # Safety
+/// As [`more_mode_info`].
+pub(crate) unsafe fn superblock_parsed(
+    dec: *mut Av1Core,
+    td: *const av1_frame_thread_data,
+    tile_id: usize,
+    x4: c_int,
+    y4: c_int,
+    superblock: c_int,
+) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let Some(pools) = (*dec).pools.as_deref() else {
+            return;
+        };
+        let pieces = &mut *(*td).tile_pieces.add(tile_id);
+        let parsed = cells(superblock.min(pieces.col_end - x4)) * cells(superblock.min(pieces.row_end - y4));
+        let parsed = parsed.min(pieces.cells_left);
+        if parsed > 0 {
+            pieces.cells_left -= parsed;
+            pools.progress((*td).slot_index as usize, parsed as usize);
+        }
+    }
+}
+
+/// The tile is parsed: its last pieces have their counts, and the chunks of them that it did not write
+/// go back to the pools.
+///
+/// # Safety
+/// As [`more_mode_info`], behind the tile's last block.
+pub(crate) unsafe fn tile_parsed(
+    dec: *mut Av1Core,
+    td: *const av1_frame_thread_data,
+    tile_id: usize,
+    t: &av1_tile_data,
+) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let Some(pools) = (*dec).pools.as_deref() else {
+            return;
+        };
+        let slot = (*td).slot_index as usize;
+        let pieces = &mut *(*td).tile_pieces.add(tile_id);
+        let shrink = |kind: Kind, piece: &mut (usize, usize), used: c_int| {
+            let keep = (usize::try_from(used).unwrap_or(0)).div_ceil(CHUNK_ITEMS[kind as usize]);
+            if piece.1 != 0 && keep < piece.1 {
+                pools.shrink(slot, kind, piece.0, keep);
+                piece.1 = keep;
+            }
+        };
+        if let Some(last) = pieces.mode_info.last_mut() {
+            last.count = t.mi_count;
+            shrink(Kind::ModeInfo, &mut pieces.piece[Kind::ModeInfo as usize], t.mi_count);
+        }
+        if let Some(last) = pieces.txb.last_mut() {
+            last.count = t.idct_blocks_ptr;
+            shrink(Kind::Txb, &mut pieces.piece[Kind::Txb as usize], t.idct_blocks_ptr);
+        }
+        let piece = &mut pieces.piece[Kind::Coefs as usize];
+        if piece.1 != 0 {
+            let used = t.dq_buffer_ptr - (piece.0 * COEF_CHUNK) as c_int;
+            shrink(Kind::Coefs, piece, used);
+        }
+        // What is left of the tile's cells is nothing it can still need.
+        if pieces.cells_left > 0 {
+            pools.progress(slot, pieces.cells_left as usize);
+            pieces.cells_left = 0;
+        }
+    }
+}
+
+/// The runs of records of `runs` (a tile's pieces in the order they were written), with the pieces that
+/// follow each other as one run, and without the empty ones.
+pub(crate) fn joined_runs(runs: &[Run]) -> Vec<Run> {
+    let mut joined: Vec<Run> = Vec::with_capacity(runs.len());
+    for run in runs.iter().filter(|run| run.count > 0) {
+        match joined.last_mut() {
+            Some(last) if last.first + last.count == run.first => last.count += run.count,
+            _ => joined.push(*run),
+        }
+    }
+    joined
 }
 
 /// The pixels of one plane of a palette block, written into the slot's palette buffer.

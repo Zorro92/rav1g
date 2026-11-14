@@ -269,25 +269,35 @@ pub(crate) unsafe fn stage_dump_mode_info(dec: *mut Av1Core, cm: *const AV1_COMM
         let pool_records = pool.size / record;
         let mut regions = Vec::with_capacity(tile_count * 2);
         let mut layout = format!("buffer=mi_pool record={record}\n");
-        // The tiles of the frame's slot, then what they continued with in a second slot's share.
+        // The tiles of the frame's slot, then what they continued with in a second slot's share; with
+        // pools, the pieces of the tiles.
         let second: *const av1_tile_data = td.sec_thread_data.as_ref().map_or(std::ptr::null(), |sec| sec.tile_data);
-        for tiles in [td.tile_data.cast_const(), second] {
-            if tiles.is_null() {
-                continue;
+        let mut runs: Vec<(c_int, c_int)> = Vec::new();
+        if (*dec).pools.is_some() {
+            for pieces in td.pieces.iter().take(tile_count) {
+                runs.extend(super::frame::joined_runs(&pieces.mode_info).iter().map(|run| (run.first, run.count)));
             }
-            for tile in std::slice::from_raw_parts(tiles, tile_count) {
-                let (first, records) = (tile.mi_offset, tile.mi_count);
-                if records <= 0 || first < 0 || first as usize + records as usize > pool_records {
+        } else {
+            for tiles in [td.tile_data.cast_const(), second] {
+                if tiles.is_null() {
                     continue;
                 }
-                regions.push(av1_stage_dump_region {
-                    src: pool.dev,
-                    offset: record * first as usize,
-                    size: record * records as usize,
-                    uav: 0,
-                });
-                let _ = writeln!(layout, "run first={first} count={records}");
+                for tile in std::slice::from_raw_parts(tiles, tile_count) {
+                    runs.push((tile.mi_offset, tile.mi_count));
+                }
             }
+        }
+        for (first, records) in runs {
+            if records <= 0 || first < 0 || first as usize + records as usize > pool_records {
+                continue;
+            }
+            regions.push(av1_stage_dump_region {
+                src: pool.dev,
+                offset: record * first as usize,
+                size: record * records as usize,
+                uav: 0,
+            });
+            let _ = writeln!(layout, "run first={first} count={records}");
         }
         if !regions.is_empty() {
             stage_dump_data(dec, c"mi_pool", &layout, &regions);

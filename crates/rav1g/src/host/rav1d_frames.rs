@@ -35,11 +35,13 @@
 //! the reference map and counts as an empty slot there (with one frame in parse the slot is emptied; here
 //! later frames may already hold it).
 //!
-//! **Slots.** A frame in parse holds a pipeline slot, and takes a second one when its share of the mode
-//! info pool or of the coefficient buffer is full. Frames wait for each other: a frame's parse waits for
-//! the rows of its references, and a frame is recorded only behind the frames before it. So a frame that
-//! can only go on with a slot that later frames hold would wait for ever. [`Frames::gate`] is the rule
-//! that keeps a slot within reach of the oldest frame in parse.
+//! **Slots and pools.** A frame in parse holds a pipeline slot, which its setup waits for, and takes
+//! its mode info records, coefficients and transform block records from the pools of the decoder as it
+//! is parsed (`pool.rs`). Frames wait for each other: a frame's parse waits for the rows of its
+//! references, and a frame is recorded only behind the frames before it. So a frame that can only go on
+//! with memory that later frames hold would wait for ever: the rule of `Pools::take` keeps what the
+//! oldest frame in parse can still need within its reach. (Before the pools a frame took a second slot
+//! for more room, and the rule was about slots.)
 
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
@@ -271,13 +273,6 @@ struct Shared {
     /// How the parse of the entry's frame ended; none while it is in parse. A shown frame has "good"
     /// from the start.
     parsed: [Option<bool>; ENTRIES],
-    /// The pipeline slots the entry's frame holds or is about to take, and whether its second one is
-    /// among them.
-    slots: [u8; ENTRIES],
-    second: [bool; ENTRIES],
-    /// The slot of the entry's frame, as an address: how a tile thread that takes a second slot finds
-    /// the frame's entry.
-    td: [usize; ENTRIES],
     /// What failed since the last decode call took one: an error of a frame's parse or of its
     /// submission, which the next decode call (or the drain) returns.
     failures: VecDeque<Failure>,
@@ -291,8 +286,6 @@ struct Shared {
 /// The frames in parse of a decoder and the queue of their submission.
 pub(crate) struct Frames {
     dec: *mut Av1Core,
-    /// The pipeline slots of the decoder.
-    slots: usize,
     entries: Box<[UnsafeCell<Entry>]>,
     shared: Mutex<Shared>,
     changed: Condvar,
@@ -313,12 +306,7 @@ unsafe impl Sync for Frames {}
 
 impl Frames {
     /// `sink_frames`: the frames the sink may have in parse at once.
-    pub(super) fn new(
-        dec: *mut Av1Core,
-        slots: usize,
-        sink_frames: usize,
-        descriptions: std::sync::Arc<Descriptions>,
-    ) -> Frames {
+    pub(super) fn new(dec: *mut Av1Core, sink_frames: usize, descriptions: std::sync::Arc<Descriptions>) -> Frames {
         let entries = (0..ENTRIES)
             .map(|_| {
                 UnsafeCell::new(Entry {
@@ -340,15 +328,11 @@ impl Frames {
         rec.gpu_decoder = dec.cast();
         Frames {
             dec,
-            slots,
             entries,
             shared: Mutex::new(Shared {
                 order: VecDeque::with_capacity(ENTRIES),
                 taken: [false; ENTRIES],
                 parsed: [None; ENTRIES],
-                slots: [0; ENTRIES],
-                second: [false; ENTRIES],
-                td: [0; ENTRIES],
                 failures: VecDeque::new(),
                 stop: false,
                 broken: false,
@@ -394,9 +378,6 @@ impl Frames {
             if let Some(index) = shared.taken.iter().position(|taken| !taken) {
                 shared.taken[index] = true;
                 shared.parsed[index] = None;
-                shared.slots[index] = 0;
-                shared.second[index] = false;
-                shared.td[index] = 0;
                 return Some(index);
             }
             shared = self.wait(shared);
@@ -407,9 +388,6 @@ impl Frames {
     pub(super) fn release(&self, index: usize) {
         let mut shared = self.shared();
         shared.taken[index] = false;
-        shared.slots[index] = 0;
-        shared.second[index] = false;
-        shared.td[index] = 0;
         drop(shared);
         self.changed.notify_all();
     }
@@ -432,62 +410,8 @@ impl Frames {
             shared.order.pop_back();
         }
         shared.taken[index] = false;
-        shared.slots[index] = 0;
-        shared.second[index] = false;
-        shared.td[index] = 0;
         drop(shared);
         self.changed.notify_all();
-    }
-
-    /// The slot of the entry's frame.
-    pub(super) fn set_slot(&self, index: usize, td: *mut av1_frame_thread_data) {
-        self.shared().td[index] = td as usize;
-    }
-
-    /// The frame of the entry is about to take a pipeline slot (its first one, or its second with
-    /// `second`): waits until it may.
-    ///
-    /// The frames from the oldest one that is still in parse to the end of the queue all wait for that
-    /// oldest one: for its rows, if they reference it, and for their turn at the submission in any case.
-    /// If they held every slot while it has to take a second one to go on, nothing would ever move. So
-    /// a frame behind the oldest takes a slot only if one stays outside that group: free, or held by a
-    /// frame in front of the group, which is parsed and comes back from the GPU by itself. Once the
-    /// oldest frame has its second slot it cannot ask for more, and the rule is off. The oldest frame
-    /// itself takes what it asks for.
-    ///
-    /// With two frames in parse and four slots the rule holds a frame up only behind a frame that takes
-    /// very long: the third frame behind it waits for it. With fewer slots than a second frame in
-    /// parse needs, the second frame waits for the first, which is one frame in parse.
-    pub(super) fn gate(&self, index: usize, second: bool) {
-        let mut shared = self.shared();
-        loop {
-            let oldest = shared.order.iter().position(|&entry| shared.parsed[entry].is_none());
-            let allowed = match oldest {
-                None => true,
-                Some(at) if shared.order[at] == index => true,
-                Some(at) => {
-                    let held: usize = shared.order.iter().skip(at).map(|&entry| usize::from(shared.slots[entry])).sum();
-                    shared.second[shared.order[at]] || held + 1 < self.slots
-                }
-            };
-            if allowed || shared.stop {
-                break;
-            }
-            shared = self.wait(shared);
-        }
-        shared.slots[index] += 1;
-        shared.second[index] |= second;
-        drop(shared);
-        // A frame that has its second slot lifts the rule for the frames behind it.
-        self.changed.notify_all();
-    }
-
-    /// [`Self::gate`] for the second slot of the frame on the slot `td`.
-    pub(super) fn gate_second(&self, td: *mut av1_frame_thread_data) {
-        let index = self.shared().td.iter().position(|&slot| slot == td as usize);
-        if let Some(index) = index {
-            self.gate(index, true);
-        }
     }
 
     /// The parse of the entry's frame has ended. Any thread.
@@ -569,9 +493,6 @@ impl Frames {
                 shared.order.pop_front();
                 shared.taken[index] = false;
                 shared.parsed[index] = None;
-                shared.slots[index] = 0;
-                shared.second[index] = false;
-                shared.td[index] = 0;
             }
             let stop = shared.stop;
             drop(shared);
