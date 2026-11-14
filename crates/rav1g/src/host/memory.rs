@@ -221,7 +221,9 @@ impl Allocator {
     }
 
     /// A device buffer of `size` bytes, rounded up to 256, with the next descriptor of the pool. Returns
-    /// null when the allocation fails, after a "MEMORY FAILED" line that names it.
+    /// null when the allocation fails, after a "MEMORY FAILED" line that names it. `gpu_writable`: a
+    /// buffer of the type `HostRW` that a command list may write too (`Device::create_buffer`); its type,
+    /// its size and its lines in the log are those of any `HostRW` buffer.
     ///
     /// # Safety
     /// `device` is the device of the decoder, or none.
@@ -232,6 +234,7 @@ impl Allocator {
         mem: c_int,
         name: &'static CStr,
         slot: c_int,
+        gpu_writable: bool,
     ) -> *mut GpuBufferObject {
         let name_text = name.to_string_lossy();
         let owner = if slot >= 0 { format!(" of slot {slot}") } else { String::new() };
@@ -265,7 +268,7 @@ impl Allocator {
 
         let kind = MemoryKind::from_raw(mem);
         let created = match (kind, device) {
-            (Some(kind), Some(device)) => Device::new(device).create_buffer(aligned_size as u64, kind),
+            (Some(kind), Some(device)) => Device::new(device).create_buffer(aligned_size as u64, kind, gpu_writable),
             _ => Err(gpu::Error { step: "CreateCommittedResource", code: E_POINTER.0 }),
         };
         let buffer = match created {

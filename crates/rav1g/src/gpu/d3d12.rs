@@ -130,8 +130,12 @@ impl<'a> Device<'a> {
     }
 
     /// A committed buffer of `size` bytes in the heap and the initial state of its kind, mapped when the
-    /// kind is one the CPU reads or writes.
-    pub fn create_buffer(&self, size: u64, kind: MemoryKind) -> Result<Buffer, Error> {
+    /// kind is one the CPU reads or writes. `gpu_writable`: a buffer of [`MemoryKind::HostRw`] that a
+    /// command list may also write (in the state [`super::BufferState::ReadWrite`], from and back to
+    /// [`super::BufferState::Read`]): the same heap and the same initial state, with unordered access
+    /// allowed. A custom heap puts no limit on the states of its buffers, as the upload and the readback
+    /// heap do; [`MemoryKind::UploadUav`] is such a buffer with the other page property.
+    pub fn create_buffer(&self, size: u64, kind: MemoryKind, gpu_writable: bool) -> Result<Buffer, Error> {
         let (heap_type, state, page) = match kind {
             MemoryKind::DeviceOnly => {
                 (D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_CPU_PAGE_PROPERTY_UNKNOWN)
@@ -163,7 +167,9 @@ impl<'a> Device<'a> {
             CreationNodeMask: 0,
             VisibleNodeMask: 0,
         };
-        let flags = if matches!(kind, MemoryKind::DeviceOnly | MemoryKind::UploadUav) {
+        let flags = if matches!(kind, MemoryKind::DeviceOnly | MemoryKind::UploadUav)
+            || (gpu_writable && kind == MemoryKind::HostRw)
+        {
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
         } else {
             D3D12_RESOURCE_FLAG_NONE
@@ -583,6 +589,7 @@ fn resource_state(state: super::BufferState) -> D3D12_RESOURCE_STATES {
     match state {
         super::BufferState::ReadWrite => D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
         super::BufferState::CopySource => D3D12_RESOURCE_STATE_COPY_SOURCE,
+        super::BufferState::Read => D3D12_RESOURCE_STATE_GENERIC_READ,
     }
 }
 

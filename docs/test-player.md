@@ -58,13 +58,14 @@ one commit each:
   wrongly and is not faster**; the flag is kept only to investigate why.
 - **Pipeline slots and clears**: the number of frames the decoder keeps between CPU decode
   and GPU completion becomes a decoder creation parameter
-  (`aom_codec_dec_cfg_t::frame_slots`, player flag `-slots`), and the player flag
-  `-asyncclear` moves the per-frame clears of a slot from the decode thread to the GPU
-  completion thread; see
-  [Pipeline slots and clears](#pipeline-slots-and-clears--slots--asyncclear). The changes
-  are in `libav1/dx` and the test player. No shader changes. Without the flags the decoder
-  has two slots, and since package 0.2.140.0 it clears on the completion thread (`-syncclear`
-  for the decode thread, as upstream does). The same section covers
+  (`aom_codec_dec_cfg_t::frame_slots`, player flag `-slots`), and the per-frame clears of a
+  slot left the decode thread: first to the GPU completion thread, then (package 0.2.146.0)
+  away altogether; see
+  [Pipeline slots and clears](#pipeline-slots-and-clears--slots--gpuclear--cpuclear--syncclear).
+  The changes are in the host and the test player. No shader changes. Without the flags the
+  decoder has two slots and clears no grid of a slot for a frame (`-syncclear` clears on the
+  decode thread, as upstream does; `-cpuclear` on the completion thread; `-gpuclear` on the
+  GPU). The same section covers
   the `MEMORY` log lines of a decoder creation (what was allocated, and which allocation
   failed) and the decoder's size, which the player takes from the stream (`-nofitsize`
   for the fixed 4096x2176 10-bit).
@@ -379,7 +380,7 @@ the start of every task say what is in effect.
 | Memory reductions | part 1, one back buffer shared by all frames (frame buffer pool 12 → 10, no measurable time cost); see [Smaller decoder](#smaller-decoder--lowmem) | `Low memory parts: 1 (default: 1 shared back buffer)` | `-lowmemparts 0`: none, every frame takes its back buffer from the pool (`Low memory parts: 0 (none, -lowmemparts 0)`); `-lowmemparts N`: exactly the parts in `N`; `-lowmem`: all three (`-lowmemparts 7`) |
 | Pipeline slots | 2 | `Frame slots: 2` | `-slots 3`, `-slots 4` |
 | Parser | the parse pass of rav1d, with its switches `nolfmask` and `tilethread` on | `Parser: the parse pass of rav1d (default; -parser c selects the entropy decoder of libaom)`, `Parser switches (-parseopt): nolfmask tilethread` | `-parser c`: the entropy decoder of libaom (C), `Parser: the entropy decoder of libaom (-parser c)`; `-parseopt` for the switches; see [Parser](#parser--parser) |
-| Clears | on the GPU completion thread (since package 0.2.140.0) | `Clears: completion thread (default; -syncclear puts them on the decode thread)` | `-syncclear`: on the decode thread, `Clears: decode thread (-syncclear)`; `-asyncclear` names the default |
+| Clears of a slot | none: the wavefront of intra prediction is kept at the edges of the tiles (since package 0.2.146.0) | `Clears: none needed (default: intra wavefront at the edges of the tiles; -gpuclear, -cpuclear and -syncclear keep it in the slot's grid and clear that)` | `-gpuclear`, `-cpuclear`, `-syncclear`: the wavefront in the slot's grid, cleared for every frame by the GPU, the completion thread (the default of 0.2.140 to 0.2.144; `-asyncclear` is the same) or the decode thread; see [Clears](#clears) |
 | Intra prediction | upstream's shaders, `/Od` build | `Intra shaders: intra_main + intra_filter (original)`, `Intra main shader: intra_main (/Od, original)` | `-intrav2`, `-intraopt` |
 | Inter prediction | upstream's shaders, lists by type and block size | `Inter shaders: inter_main, inter_compound (original)` | `-interfast`: see [Inter fast path](#inter-fast-path--interfast) |
 
@@ -491,12 +492,12 @@ CPU timers (QueryPerformanceCounter, all in ms per frame):
 | `memset`, `memset_tile` | the per-frame and per-tile memsets on the decode and tile threads; the summary also gives the MB cleared per frame |
 | `setup` | `av1_setup_frame`, including its waits and memsets |
 | `frame` | decode thread, frame setup to submit done |
-| `wait_slot`, `wait_sec_slot` | blocked waiting for a free pipeline slot (two by default, see `-slots`): for the frame, and for the second slot a frame takes when its own coefficient or mode info share is too small. High values mean the GPU is behind the CPU. With `-asyncclear` a slot is free only after its clears, so that time is part of the wait. |
+| `wait_slot`, `wait_sec_slot` | blocked waiting for a free pipeline slot (two by default, see `-slots`): for the frame, and for the second slot a frame takes when its own coefficient or mode info share is too small. High values mean the GPU is behind the CPU. With `-cpuclear` a slot is free only after its clears, so that time is part of the wait. |
 | `wait_output` | blocked in the player's output buffer callback (pool of `-queue_size`) |
 | `wait_fb`, `wait_image`, `wait_item` | blocked on the reference frame pool, the output image pool, the GPU work item pool |
 | `fence_wait`, `gpu_latency` | completion thread: time blocked on the frame's fence, and submit-to-fence time |
 | `notify` | time inside the frame-ready callback. With `-progress` this includes its two log writes per frame. |
-| `async_clear` | completion thread: the slot's clears after the frame's fence. Zero with `-syncclear`. |
+| `async_clear` | completion thread: the slot's clears after the frame's fence. With `-cpuclear`; without a flag only what a frame still has to clear (nothing with rav1d's parse, the mode info grid with `-parser c`). Zero with `-syncclear` and `-gpuclear`. |
 
 ### Log lines
 
@@ -540,6 +541,8 @@ GPUTIME cpu decode thread, setup to submit        ...                           
 GPUTIME cpu entropy/tile decode, wall             ...
 GPUTIME cpu memsets (frame + tile)                ...                                        N.N MB cleared per frame
 GPUTIME cpu clears, completion thread             ...                                        N.N MB cleared per frame
+GPUTIME gpu clears, end of the command list       ...                                        N.N MB cleared per frame
+GPUTIME cleared per frame, bytes: cpu decode and tile threads N, cpu completion thread N, gpu N
 GPUTIME blocked, decode thread, all waits         ...                                        NN.N % of wall
 GPUTIME per OUTPUT frame (1.00 decoded frames each): wall .. ms, gpu busy .. ms, cpu decode thread .. ms, ...
 GPUTIME stage                    frames     mean      p50      p95      max      avg   share
@@ -1404,21 +1407,23 @@ streams) and three streams with `-gputimedetail -interfast` and `-gputimedetail 
 
 **Console results:** pending.
 
-## Pipeline slots and clears (`-slots`, `-asyncclear`)
+## Pipeline slots and clears (`-slots`, `-gpuclear`, `-cpuclear`, `-syncclear`)
 
 With CDEF v2 the CPU decode thread and the GPU need about the same time per 4K frame, and
 both vary from frame to frame. The decoder has two pipeline slots, so only two frames can
 be between the start of their CPU decode and the end of their GPU work: whenever one side
 is slower for a frame, the other waits (`wait_slot` on the CPU side, the idle gap on the
-GPU side). The decode thread also clears about 7.5 MB of the slot it has just taken before
-it can start a frame. These two flags test whether a deeper pipeline and clearing
-elsewhere shorten the wall time per frame. Neither changes the decoded output.
+GPU side). The decode thread of upstream also clears about 7.5 MB of the slot it has just
+taken before it can start a frame. These flags say how deep the pipeline is and what
+happens to those clears. None of them changes the decoded output.
 
 | Flag | Effect |
 | --- | --- |
 | `-slots N` | The decoder is created with `N` pipeline slots, `N` = 2, 3 or 4. Default 2. Any other value is refused: the task is skipped with `Invalid arguments string. -slots N is not allowed: the decoder takes 2 to 4 slots.` |
-| `-asyncclear` | The two large per-frame clears of a slot are done by the GPU completion thread after the fence of the frame that used the slot, before the slot goes back to the pool. The decode thread then finds the slot already cleared. **The default since package 0.2.140.0**; the flag is still accepted and changes nothing. |
-| `-syncclear` | The clears on the decode thread, when it takes the slot for a frame: the default up to package 0.2.139. For an A/B of the two on one stream; both flags on one task line are an error of the task. |
+| (no flag) | **No grid of a slot is cleared for a frame** (since package 0.2.146.0): the wavefront of intra prediction is kept in a few KB at the edges of the tiles, and the mode info grid is kept from frame to frame (rav1d's parse). See [Clears](#clears). |
+| `-gpuclear` | The wavefront in the slot's grid, as up to package 0.2.144, and **the GPU clears the grid**: the frame's command list ends with the clear, so the slot is clean when the frame's fence signals. No thread of the CPU clears. The decoder of such a task is created with grids the GPU may write, so the player creates a decoder of its own for it. |
+| `-cpuclear` | The wavefront in the slot's grid, cleared by the GPU completion thread after the fence of the frame that used the slot, before the slot goes back to the pool: the default of packages 0.2.140 to 0.2.144. `-asyncclear` is its older name and still accepted. |
+| `-syncclear` | The wavefront in the slot's grid, cleared by the decode thread when it takes the slot for a frame: the default up to package 0.2.139, and what upstream does. |
 | `-nofitsize` | The decoder is created for 4096x2176 10-bit whatever the stream is, as it was up to package 0.2.7.0. Without it (the default) the decoder is created for the stream's largest frame size and bit depth, which makes every buffer smaller; see [Decoder size](#decoder-size--nofitsize). `-fitsize` is still accepted and changes nothing. |
 | `-lowmem` | All three memory reductions: one back buffer shared by all frames (which is the default on its own), and smaller per-slot shares of the mode info pool and of the coefficient buffer; see [Smaller decoder](#smaller-decoder--lowmem). |
 | `-lowmemparts N` | Exactly the reductions in `N`, the sum of 1 (shared back buffer), 2 (mode info shares) and 4 (coefficient shares). Default 1. `-lowmemparts 0` is none of them, `-lowmem` is `-lowmemparts 7`. |
@@ -1426,11 +1431,12 @@ elsewhere shorten the wall time per frame. Neither changes the decoded output.
 | `-budget N` | Only where the system gives the app no memory limit, which is the player's decoder code in `rav1g-dec -playersmoke` (CI on WARP): a model of the app's memory takes the place of `Windows::System::MemoryManager`, with a limit `N` MiB above what the process uses without a decoder, so the budget guard, the settle wait and the credit of a released decoder run there too; see [The app's memory as a model](#the-apps-memory-as-a-model--budget--retain). In the app the flag does nothing (one log line says so). |
 | `-retain N` | With `-budget`: a destroyed decoder leaves up to `N` MiB of its device buffers charged to the app until the next decoder exists, which is what the console does. |
 
-Without any of them the decoder has two slots, clears on the completion thread, is sized for
-the stream and shares one back buffer (see
-[Defaults and opt-out flags](#defaults-and-opt-out-flags)). They are independent of each
-other and of `-cdefv1`, `-intrav2`, `-intraopt`, `-gputime`, `-nopresent` and the md5
-flags.
+Without any of them the decoder has two slots, clears no grid of a slot, is sized for the
+stream and shares one back buffer (see
+[Defaults and opt-out flags](#defaults-and-opt-out-flags)). `-gpuclear`, `-cpuclear` and
+`-syncclear` are the choices of one switch: two of them on one task line are an error of the
+task. Otherwise the flags are independent of each other and of `-cdefv1`, `-intrav2`,
+`-intraopt`, `-gputime`, `-nopresent` and the md5 flags.
 
 **Console results so far (2026-11-11, package 0.2.5.0, app mode, both 4K 10-bit clips):**
 
@@ -1468,12 +1474,17 @@ Every task's log says what is in effect:
 
 ```text
 Frame slots: 2
-Clears: completion thread (default; -syncclear puts them on the decode thread)
+Clears: none needed (default: intra wavefront at the edges of the tiles; -gpuclear, -cpuclear and -syncclear keep it in the slot's grid and clear that)
 ```
 
 ```text
 Frame slots: 3
-Clears: decode thread (-syncclear)
+Clears: GPU, at the end of the frame's command list; intra wavefront in the slot's grid (-gpuclear)
+```
+
+```text
+Clears: completion thread; intra wavefront in the slot's grid (-cpuclear)
+Clears: decode thread; intra wavefront in the slot's grid (-syncclear)
 ```
 
 ### Slots
@@ -2247,53 +2258,89 @@ each. The workflow runs it in the `intra-check` job.
 
 ### Clears
 
-Per frame, `av1_setup_frame` clears two buffers of the slot it has taken: the mode info
-grid (one pointer per 4x4 block, set to zero; 4.0 MiB for a 3840x2160 frame) and the
-intra iteration grid (set to -1; 3.5 MiB). The GPU reads both, so they cannot be cleared
-before the frame that used the slot has completed. With `-asyncclear` the completion
-thread does it right there: after the frame's fence and before the slot is pushed back to
-the pool. The slot is not visible to the decode thread during that time, and nothing on
-the GPU uses it any more.
+Upstream's `av1_setup_frame` clears two buffers of the slot it has taken, for every frame:
+the mode info grid (one pointer per 4x4 block, set to zero; 4.0 MiB for a 3840x2160 frame)
+and the intra iteration grid, the wavefront grid (set to -1; 3.5 MiB). On the console the
+processor has a fraction of its memory bandwidth for most of a playback
+([the slow state](phase2-rav1d.md#console-after-step-3-rav1d-is-the-default)), so these
+7.5 MB a frame were first moved off the decode thread and then removed. What happens to
+each now, and with which flag ([phase2-rav1d.md](phase2-rav1d.md#no-clears-by-the-cpu) has
+the reasons and the measurements):
 
-The size of both clears depends on the frame that will use the slot next, which the
-completion thread does not know. The rule:
+| | no flag | `-gpuclear` | `-cpuclear` | `-syncclear` |
+| --- | --- | --- | --- | --- |
+| Wavefront of intra prediction | at the edges of the tiles: a few KB of the tile thread, never cleared | in the slot's grid | in the slot's grid | in the slot's grid |
+| Wavefront grid, 3.5 MB of a 4K frame | not cleared: the host writes the one entry per transform block the shader reads | cleared by the frame's command list | cleared by the completion thread | cleared by the decode thread |
+| Mode info grid, 4.0 MiB, rav1d's parse | kept from frame to frame, not cleared | kept | kept | kept |
+| Mode info grid with `-parser c`, or with `-parseopt cleargrid` | cleared by the completion thread | cleared by the frame's command list | cleared by the completion thread | cleared by the decode thread |
 
-- The completion thread clears exactly the bytes the frame's own setup cleared, and
-  records the two sizes in the slot.
+- **No flag.** A transform block of an intra block is predicted in the iteration behind the
+  highest one of the neighbours it reads. The host used to keep the iteration of every 4x4
+  unit in the slot's grid and read the neighbours back from it, which is why every unit no
+  block wrote had to read as "no iteration". It now keeps the iterations along the border of
+  what a tile has decoded: one entry per column for the row above, one per row of the
+  superblock row for the column to the left, with where the decoded part ends. A block reads
+  only those. Of the grid it writes the one entry per transform block that
+  `gen_pred_blocks.hlsl` reads, so nothing has to be cleared, and the iterations are the same.
+- **`-gpuclear`.** The last commands of a frame's command list fill the grids of its slot
+  (`fill_buffer.hlsl`, the shader that clears the residuals), behind everything that reads
+  them. The command list is through before the frame's fence signals, and the slot goes back
+  to the pool on that fence, so the next frame finds the slot clean and no thread has written
+  a byte for it. The grids are memory the CPU writes and the shaders read; for this mode
+  they are created as buffers a command list may write as well, which is why the mode is
+  fixed when the decoder is created. Whether the console's processor sees what its GPU wrote
+  there without a further step is what a run with this flag and `-md5_frame_check` says: the
+  console reports itself as an adapter with one memory and coherent caches, where it does.
+- **`-cpuclear`, `-syncclear`.** The completion thread does the clears right behind the
+  frame's fence, before the slot is pushed back to the pool: the slot is not visible to the
+  decode thread during that time, and nothing on the GPU uses it any more. With `-syncclear`
+  the decode thread clears when it takes the slot.
+
+The size of the clears depends on the frame that will use the slot next, which whoever
+clears behind a frame does not know. The rule, for the three flags:
+
+- Behind a frame, exactly the bytes the frame's own setup cleared are cleared again, and the
+  two sizes are recorded in the slot.
 - The next frame skips a clear only if the recorded size is exactly the size it would
   clear itself. The grid is then byte for byte what the clear on the decode thread would
   have left.
 - In every other case the decode thread clears as before: first use of a slot, a frame
   of another size, a slot that came back without a completed frame (decode error).
 
-Not moved, because they are small or depend on the next frame:
+Not cleared by anybody else, because they are small or depend on the next frame:
 
-- the per-tile clears (`memset_tile`): the tile descriptor and the head of the tile's
-  block map, a few KB per tile;
+- the per-tile clears (`memset_tile`): the tile descriptor and the counters of the tile's
+  block lists, 12,368 bytes per tile, and 40 KiB more for every 1,024 wavefront iterations a
+  tile reaches past its first 272. The tile thread reads and counts them right away. This is
+  what the CPU still clears for a frame without a flag;
 - with `-intrav2`: the intra iteration grid is not cleared at all by frames on the new
   path, and the schedule's cell map is cleared once every 255 frames of a slot. The few
-  frames that keep the original path (intra block copy) clear the iteration grid on the
-  decode thread;
+  frames that keep the original path (intra block copy) keep the wavefront at the edges of
+  the tiles like any frame, or in the grid with one of the three flags;
 - the coefficient buffer: there is no per-frame clear to move. The entropy decoder
   writes only non-zero coefficients, and every IDCT shader stores zeros back over the
   coefficients it has read, so a slot's share is clean again when its frame completes.
   The only host-side clear is for a frame that was set up but never submitted, and it
   stays where it was.
 
-With `-gputime` the summary shows both sides:
+With `-gputime` the summary shows who cleared how much:
 
 ```text
 GPUTIME cpu memsets (frame + tile)                ...                                        N.N MB cleared per frame
 GPUTIME cpu clears, completion thread             ...                                        N.N MB cleared per frame
+GPUTIME gpu clears, end of the command list       ...                                        N.N MB cleared per frame
+GPUTIME cleared per frame, bytes: cpu decode and tile threads N, cpu completion thread N, gpu N
 ```
 
-The first line is what is left on the decode and tile threads (`memset`, `memset_tile`),
-the second the moved work (`async_clear`, measured on the completion thread and booked on
-the frame whose completion triggered it). `setup` and `frame` shrink by what moved.
-`wait_slot` now includes waiting for a slot that is being cleared: if the decode thread
-needs a slot at the moment its frame completes, it waits for the clear instead of doing
-it, and nothing is gained for that frame. The gain is in the frames where the slot came
-back early.
+The first line is what the decode and tile threads clear (`memset`, `memset_tile`), the
+second what the completion thread clears behind a frame (`async_clear`, booked on the
+frame whose completion triggered it), the third the clears of the frame's command list:
+its time is the GPU stage `slot_clear` of the stage table, from the timestamp behind the
+output copy to the one behind the clear. The fourth line has the three as bytes, since a
+tenth of a MB is more than what is left without a flag. With `-progress` every frame line
+ends with its own three numbers (`| cleared memset=N completion=N gpu=N`). With `-cpuclear`
+`wait_slot` includes waiting for a slot that is being cleared: if the decode thread needs a
+slot at the moment its frame completes, it waits for the clear instead of doing it.
 
 **Console result (2026-11-11, package 0.2.5.0, two slots, both 4K clips): md5-exact, no
 gain.** `cpu memsets` on the decode thread went down by the 3.3 to 4.3 ms per frame that
@@ -2301,14 +2348,47 @@ moved, `cpu wait_slot` went up by 1.5 to 3.7 ms, and the completion thread spent
 3.9 ms per frame on the clears. With two slots and a decode thread that is the slower
 side, the slot a frame needs is the one that has just completed, so the decode thread
 waits for the clear it used to do itself. Runs with the same settings differ by about
-1 fps on the SVT-AV1 clip, so the remainder cannot be told from noise. The flag stays off
-by default; it can only pay with a slot to spare, which needs the third slot to fit.
+1 fps on the SVT-AV1 clip, so the remainder cannot be told from noise. The flag stayed off
+then; with rav1d's parse the GPU is idle two thirds of the time and the clears on the
+completion thread became the default (package 0.2.140.0), until no clear was needed
+(0.2.146.0).
+
+### Timing: the four ways of the clears
+
+All four lines in `args_av1.txt`, same clip, behind a warm-up task, so that all of it is in
+the console's slow state:
+
+```text
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -cpuclear
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -gpuclear
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -syncclear
+```
+
+The first line is the default of package 0.2.144.0. The third task creates a decoder of its
+own (its grids are buffers the GPU may write), and so does the fourth, which goes back to
+the usual ones. Compare in the four summaries:
+
+- `cleared per frame, bytes`: 3.5 MB of a 4K frame on the completion thread with
+  `-cpuclear`, on the GPU with `-gpuclear`, on the decode thread with `-syncclear`, and a few
+  KB on the tile threads without a flag;
+- `cpu clears, completion thread`, `cpu memsets (frame + tile)`, and `gpu clears, end of the
+  command list` with the stage `gpu slot_clear`: what the clear costs whoever does it;
+- `cpu parse: block lists`: the lists, where the wavefront is kept;
+- `cpu entropy/tile decode, thread sum`: the parse with everything in it, which the clears of
+  `-cpuclear` take memory bandwidth from;
+- `cpu decode thread, setup to submit`, `wall between decoded frames` and the "per OUTPUT
+  frame" line: the result.
+
+Add `-parseopt cleargrid` to a line to have the mode info grid cleared for every frame as
+well (7.5 MB a 4K frame instead of 3.5; with the line without a flag the completion thread
+clears it).
 
 ### Timing: the four combinations
 
 All four lines in `args_av1.txt`, same clip, all with `-cdefv2` (the lines as they were
-run; the flag is the default now, and so are `-fitsize` and part 1 of `-lowmem` in the
-lines further down):
+run on 2026-11-11; the flag is the default now, so are `-fitsize` and part 1 of `-lowmem`
+in the lines further down, and `-asyncclear` is `-cpuclear`):
 
 ```text
 -i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -gputime -nopresent -cdefv2
@@ -2348,7 +2428,8 @@ task whose decoder does not fit is refused with `MEMORY REFUSED` and the next on
 
 As for [CDEF](#same-output-md5-of-every-frame), **in separate launches**, or with a
 [dav1d reference](#md5-references-from-dav1d) and only the check task. First launch,
-the reference with the default pipeline (no `-slots`, no `-asyncclear`):
+the reference with the pipeline to compare with (for the clears: `-cpuclear`, the default
+the console has run; for the slots: no `-slots`):
 
 ```text
 -i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -save_md5 /streams/<clip>.ivf.md5
@@ -2357,15 +2438,21 @@ the reference with the default pipeline (no `-slots`, no `-asyncclear`):
 Let the app exit, then a second launch with only the check task:
 
 ```text
--i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -cdefv2 -slots 3 -asyncclear -md5_frame_check
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -md5_frame_check
 ```
+
+That is the default: no clears. The same task with `-gpuclear`, and with `-syncclear`, in
+launches of their own, for the other ways; with `-slots 3 -lowmem` for the slots.
 
 The rules of the CDEF section apply unchanged: the same `-limit` in both tasks, the
 `.md5` file next to the stream, no `-gputime`, no `-try10x3`. A reference file saved for
 another check of the same clip and `-limit` can be reused. The task ends with `MD5 is OK`
-or a list of bad frames. Check `-slots 4 -asyncclear` the same way if it is to be timed,
+or a list of bad frames. Check `-slots 4` the same way if it is to be timed,
 and include a clip that takes the second slot (`sec=1` in a `-gputime -progress` run of
-the same clip) and one whose frame size changes.
+the same clip) and one whose frame size changes (a frame of another size clears for
+itself, whoever clears otherwise). `-gpuclear` is the one way in which the processor reads
+memory the GPU wrote: a wrong frame with it and a right one without says that the two do not
+see the same memory there.
 
 The memory changes need the same check, each as its own launch against the same
 reference: the default decoder, `-nofitsize`, `-lowmemparts 0`, `-lowmem`, and `-nofitsize

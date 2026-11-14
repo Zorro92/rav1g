@@ -38,6 +38,7 @@ enum {
   AV1_PERF_GPU_FILM_GRAIN,
   AV1_PERF_GPU_COPY_PLANE,     /* copy_plane shader into the staging area */
   AV1_PERF_GPU_OUTPUT_COPY,    /* CopyBufferRegion / CopyTextureRegion */
+  AV1_PERF_GPU_SLOT_CLEAR,     /* the grids of the frame's slot cleared for the next frame (AV1_CLEARS_GPU) */
   AV1_PERF_GPU_STAGE_COUNT,
   AV1_PERF_GPU_BEGIN = 255     /* first timestamp of a command list */
 };
@@ -46,7 +47,8 @@ enum {
 enum {
   /* decode thread, blocked */
   AV1_PERF_CPU_WAIT_SLOT = 0, /* waiting for a free pipeline slot (frame data); the slot comes back only
-                                 after its clears (not with -syncclear), so that time is in here too */
+                                 after its clears (those of the completion thread, AV1_PERF_CPU_ASYNC_CLEAR),
+                                 so that time is in here too */
   AV1_PERF_CPU_WAIT_SEC_SLOT, /* waiting for a second slot (extra coef buffer) */
   AV1_PERF_CPU_WAIT_FB,       /* waiting for a free reference frame buffer */
   AV1_PERF_CPU_WAIT_OUTPUT,   /* waiting in the player's output buffer callback */
@@ -72,7 +74,9 @@ enum {
   AV1_PERF_CPU_FENCE_WAIT,    /* blocked on the frame's fence event */
   AV1_PERF_CPU_GPU_LATENCY,   /* submit done to fence seen */
   AV1_PERF_CPU_NOTIFY,        /* time inside the frame-ready callback */
-  AV1_PERF_CPU_ASYNC_CLEAR,   /* the slot's clears, done here after the frame's fence (not with -syncclear) */
+  AV1_PERF_CPU_ASYNC_CLEAR,   /* the slot's clears, done here after the frame's fence: what a frame still
+                                 has to clear without a switch (nothing with the parser of phase 2), and the
+                                 grids with AV1_CLEARS_COMPLETION_THREAD (-cpuclear) */
   /* the parser of phase 2 (AV1_PARSER_RAV1D), summed across the tile threads; parts of ENTROPY_SUM */
   AV1_PERF_CPU_SINK_LISTS,    /* the block lists, counted superblock by superblock (the entropy decoder of
                                  libaom counts them at the end of a tile, inside ENTROPY_SUM, without a timer
@@ -108,6 +112,8 @@ typedef struct av1_perf_frame {
   double cpu_ms[AV1_PERF_CPU_COUNT];
   int64_t memset_bytes; /* bytes cleared by the timed memsets on the decode and tile threads */
   int64_t async_clear_bytes; /* bytes cleared on the completion thread (AV1_PERF_CPU_ASYNC_CLEAR) */
+  int64_t gpu_clear_bytes;   /* bytes of the slot's grids the frame's command list cleared (AV1_CLEARS_GPU,
+                                AV1_PERF_GPU_SLOT_CLEAR) */
   double complete_ms;   /* host clock when the frame's fence was seen */
   /* The inter prediction breakdown of the frame (av1_set_perf_detail), valid during the callback only;
    * NULL without it and for a show-existing copy. */
@@ -315,15 +321,44 @@ void av1_set_intra_edge_fix(int enable);
  * (AllMemoryBarrierWithGroupSync), for the log of a test program. */
 const char *av1_shader_variant(void);
 
-/* Process-wide. Non-zero moves the per-frame clears of a pipeline slot (the
- * mode info grid and the intra iteration grid) from the decode thread to the
- * GPU completion thread, which does them after the fence of the frame that
- * used the slot and before the slot goes back to the pool. The decode thread
- * then finds the slot already cleared; it still clears on its own when the
- * cleared size does not match the frame (first use, frame size change). The
- * decoded output is the same. On by default; av1_set_async_clear(0) puts the
- * clears back on the decode thread (-syncclear). Change it only while no
- * frame is in flight. */
+/* Process-wide: what a frame does about the two grids of its pipeline slot
+ * that used to be cleared for every frame, the mode info grid (a pointer per
+ * 4x4 unit; with the parser of phase 2 it is kept from frame to frame and not
+ * cleared in any of the modes) and the wavefront grid of intra prediction
+ * (the intra iteration grid, 3.5 MB of a 4K frame). The decoded output is the
+ * same in every mode. Change it only while no frame is in flight.
+ *
+ * AV1_CLEARS_NOT_NEEDED (the default): the wavefront is kept in the edges of
+ *   the tiles (av1_tile_data::wave_edges), a few KB the tile thread has in its
+ *   cache, and of the wavefront grid only the entry per transform block that
+ *   gen_pred_blocks.hlsl reads is written: the grid is not cleared at all. A
+ *   grid that still needs a clear (the mode info grid of a decoder with the
+ *   entropy decoder of libaom) is cleared by the completion thread, as with
+ *   AV1_CLEARS_COMPLETION_THREAD.
+ * AV1_CLEARS_GPU: the wavefront is kept in the wavefront grid, and the frame's
+ *   command list ends with the clear of the slot's grids (fill_buffer.hlsl),
+ *   so the slot is clean when the frame's fence signals. Only in a decoder
+ *   that was created while this mode was set: its grids are created as
+ *   buffers the GPU may write. In any other decoder the mode is
+ *   AV1_CLEARS_COMPLETION_THREAD.
+ * AV1_CLEARS_COMPLETION_THREAD: the wavefront grid, cleared by the completion
+ *   thread after the fence of the frame that used the slot and before the
+ *   slot goes back to the pool (the default up to package 0.2.144).
+ * AV1_CLEARS_DECODE_THREAD: the wavefront grid, cleared by the decode thread
+ *   when it takes the slot for a frame (the default up to package 0.2.139).
+ *
+ * With the last three the decode thread still clears on its own when the size
+ * that was cleared behind the frame before does not match the frame (first
+ * use of a slot, another frame size, a frame that was never submitted). */
+enum {
+  AV1_CLEARS_NOT_NEEDED = 0,
+  AV1_CLEARS_GPU = 1,
+  AV1_CLEARS_COMPLETION_THREAD = 2,
+  AV1_CLEARS_DECODE_THREAD = 3
+};
+void av1_set_clears(int mode);
+/* The older form of the switch: non-zero is AV1_CLEARS_NOT_NEEDED, 0 is
+ * AV1_CLEARS_DECODE_THREAD. */
 void av1_set_async_clear(int enable);
 
 /* Process-wide debugging aid of the test programs (-poisonmi, -poisonbuf),

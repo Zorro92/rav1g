@@ -77,6 +77,22 @@ pub const RAV1G_INTER_FAST_COMPOUND_ORIGINAL: u32 = 4;
 /// The lists of the fast inter path with the original shaders on all of them.
 pub const RAV1G_INTER_FAST_LISTS_ONLY: u32 = 7;
 
+/// `rav1g_set_clears`, the default: the wavefront of intra prediction is kept in a few KB at the edges of
+/// the tiles, and its grid in the pipeline slot (3.5 MB of a 4K frame) is not cleared at all. A grid
+/// that still needs a clear for every frame (the mode info grid with `RAV1G_PARSER_LIBAOM`) is cleared by
+/// the completion thread.
+pub const RAV1G_CLEARS_NOT_NEEDED: u32 = 0;
+/// `rav1g_set_clears`: the wavefront in its grid; the command list of a frame ends with the clear of the
+/// slot's grids, so no thread of the CPU clears them. Only in a decoder created while this mode was set;
+/// in any other decoder it is `RAV1G_CLEARS_COMPLETION_THREAD`.
+pub const RAV1G_CLEARS_GPU: u32 = 1;
+/// `rav1g_set_clears`: the wavefront in its grid; the completion thread clears the grids after the fence
+/// of the frame that used the slot (the default up to package 0.2.144).
+pub const RAV1G_CLEARS_COMPLETION_THREAD: u32 = 2;
+/// `rav1g_set_clears`: the wavefront in its grid; the decode thread clears the grids when it takes the
+/// slot for a frame.
+pub const RAV1G_CLEARS_DECODE_THREAD: u32 = 3;
+
 /// `rav1g_set_poison_buffers`: the mode info pool.
 pub const RAV1G_POISON_MODE_INFO: u32 = 1;
 /// `rav1g_set_poison_buffers`: every buffer the CPU writes for the shaders, and the constants of every
@@ -147,6 +163,14 @@ const _: () = {
     assert!(RAV1G_INTER_FAST_SINGLE_ORIGINAL == switches::INTER_FAST_SINGLE_ORIGINAL);
     assert!(RAV1G_INTER_FAST_COMPOUND_ORIGINAL == switches::INTER_FAST_COMPOUND_ORIGINAL);
     assert!(RAV1G_INTER_FAST_LISTS_ONLY == switches::INTER_FAST_LISTS_ONLY);
+    assert!(RAV1G_CLEARS_NOT_NEEDED == switches::Clears::NotNeeded as u32);
+    assert!(RAV1G_CLEARS_NOT_NEEDED == crate::sys::AV1_CLEARS_NOT_NEEDED as u32);
+    assert!(RAV1G_CLEARS_GPU == switches::Clears::Gpu as u32);
+    assert!(RAV1G_CLEARS_GPU == crate::sys::AV1_CLEARS_GPU as u32);
+    assert!(RAV1G_CLEARS_COMPLETION_THREAD == switches::Clears::CompletionThread as u32);
+    assert!(RAV1G_CLEARS_COMPLETION_THREAD == crate::sys::AV1_CLEARS_COMPLETION_THREAD as u32);
+    assert!(RAV1G_CLEARS_DECODE_THREAD == switches::Clears::DecodeThread as u32);
+    assert!(RAV1G_CLEARS_DECODE_THREAD == crate::sys::AV1_CLEARS_DECODE_THREAD as u32);
     assert!(RAV1G_POISON_MODE_INFO == switches::Poison::ModeInfo as u32);
     assert!(RAV1G_POISON_BUFFERS == switches::Poison::Buffers as u32);
     assert!(RAV1G_MEMORY_GUARD_MARGIN == 48 << 20);
@@ -1137,8 +1161,23 @@ pub extern "C" fn rav1g_set_intra_opt(enable: bool) {
     switches::set_intra_opt(enable);
 }
 
-/// The clears of a pipeline slot on the completion thread instead of the decode thread. On by default;
-/// `false` puts them back on the decode thread. The output is the same.
+/// What a frame does about the two grids of its pipeline slot that used to be cleared for every frame
+/// (`RAV1G_CLEARS_*`; a value that is none of them is the default, `RAV1G_CLEARS_NOT_NEEDED`): whether
+/// the wavefront grid of intra prediction has to be cleared at all, and who clears what has to be. The
+/// output is the same in every mode. Like the other switches it is set while no frame is in flight;
+/// `RAV1G_CLEARS_GPU` has to be set before the decoder is created.
+#[unsafe(no_mangle)]
+pub extern "C" fn rav1g_set_clears(mode: u32) {
+    switches::set_clears(match mode {
+        RAV1G_CLEARS_GPU => switches::Clears::Gpu,
+        RAV1G_CLEARS_COMPLETION_THREAD => switches::Clears::CompletionThread,
+        RAV1G_CLEARS_DECODE_THREAD => switches::Clears::DecodeThread,
+        _ => switches::Clears::NotNeeded,
+    });
+}
+
+/// The older form of `rav1g_set_clears`: `true` is `RAV1G_CLEARS_NOT_NEEDED`, the default; `false` is
+/// `RAV1G_CLEARS_DECODE_THREAD`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rav1g_set_async_clear(enable: bool) {
     switches::set_async_clear(enable);

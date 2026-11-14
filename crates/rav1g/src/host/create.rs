@@ -205,10 +205,23 @@ impl Requests {
 
     /// `create_buffer`: null from the plan, and from the allocator when the allocation failed.
     fn buffer(&mut self, size: usize, kind: MemoryType, name: &'static CStr, slot: i32) -> *mut GpuBufferObject {
+        self.buffer_for(size, kind, name, slot, false)
+    }
+
+    /// [`Requests::buffer`] for a grid of a slot, which with `gpu_writable` a command list may write too
+    /// (`Av1Core::gpu_clear_grids`). The plan counts the same either way.
+    fn buffer_for(
+        &mut self,
+        size: usize,
+        kind: MemoryType,
+        name: &'static CStr,
+        slot: i32,
+        gpu_writable: bool,
+    ) -> *mut GpuBufferObject {
         match self {
             // SAFETY: the allocator of the decoder that is being created, and its device.
             Requests::Allocator(memory, device) => unsafe {
-                (**memory).create_buffer(Some(device), size, kind, name, slot)
+                (**memory).create_buffer(Some(device), size, kind, name, slot, gpu_writable)
             },
             Requests::Plan(plan) => {
                 plan.create_buffer(size);
@@ -263,6 +276,8 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
     let max_tile_cols = target_width >> 6;
     let max_tile_rows = target_height >> 6;
     dec.block_count4x4 = block_count_4x4;
+    // The two grids of a slot as buffers a command list may write (the creation has set it).
+    let gpu_clear_grids = dec.gpu_clear_grids != 0;
     dec.max_width = target_width;
     dec.max_height = target_height;
     dec.max_bitdepth = cfg.bitdepth;
@@ -434,7 +449,7 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
         request!(
             assign,
             td.gen_intra_inter_grid,
-            mem.buffer((grid_w * grid_h * 6) as usize, HostRW, c"gen_intra_inter_grid", i)
+            mem.buffer_for((grid_w * grid_h * 6) as usize, HostRW, c"gen_intra_inter_grid", i, gpu_clear_grids)
         );
         request!(
             assign,
@@ -464,7 +479,9 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
         td.intra_v2_sched.stamp = 0;
         td.intra_v2_cols = 0;
         td.intra_v2_rows = 0;
-        td.async_clear = 0;
+        td.clears = 0;
+        td.gpu_cleared = 0;
+        td.wave_edges = 0;
         td.clear_pending = 0;
         td.clear_mi_bytes = 0;
         td.clear_iter_bytes = 0;
@@ -475,7 +492,13 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
         request!(
             assign,
             td.mode_info_grid,
-            mem.buffer(size_of::<*mut MB_MODE_INFO>() * mi_size as usize, HostRW, c"mode_info_grid", i)
+            mem.buffer_for(
+                size_of::<*mut MB_MODE_INFO>() * mi_size as usize,
+                HostRW,
+                c"mode_info_grid",
+                i,
+                gpu_clear_grids
+            )
         );
         request!(
             assign,
@@ -881,6 +904,10 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
             cfg.parser == crate::sys::AV1_PARSER_RAV1D as c_int
                 && cfg.parser_options & crate::sys::AV1_PARSER_OPTION_CLEAR_GRID as c_int == 0,
         );
+        // The clears of the slots' grids by the GPU: fixed here, because the grids of such a decoder are
+        // created as buffers a command list may write. A decoder that was created with another mode has
+        // them as buffers the GPU only reads, which every package so far has had.
+        (*dec).gpu_clear_grids = c_int::from(super::frame::clears_mode() == crate::sys::AV1_CLEARS_GPU as c_int);
         (*dec).frame_slots = rcfg.gpu_pipeline_depth;
         let frame_slots = rcfg.gpu_pipeline_depth as usize;
 

@@ -175,16 +175,18 @@ pub struct RustParser {
 }
 
 impl RustParser {
-    pub fn new(threads: u16, options: ParseOptions) -> Result<Self, String> {
-        Self::with_clock(threads, options, false)
+    /// `wave_edges`: the frames keep the wavefront in the edges of their tiles (the host's default), not
+    /// in the grids.
+    pub fn new(threads: u16, options: ParseOptions, wave_edges: bool) -> Result<Self, String> {
+        Self::with_clock(threads, options, false, wave_edges)
     }
 
     /// `timed`: the host has a clock, so the sink measures its block lists (and with `-parseopt time` its
     /// other calls).
-    pub fn with_clock(threads: u16, options: ParseOptions, timed: bool) -> Result<Self, String> {
+    pub fn with_clock(threads: u16, options: ParseOptions, timed: bool, wave_edges: bool) -> Result<Self, String> {
         let sink = Arc::new(Sink::with_options(
             PlainHost {
-                side: UnsafeCell::new(Side::new()),
+                side: UnsafeCell::new(Side::new(wave_edges)),
                 arena_nanos: AtomicU64::new(0),
                 clock: timed.then(Instant::now),
                 list_nanos: AtomicU64::new(0),

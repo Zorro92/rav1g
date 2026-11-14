@@ -53,7 +53,7 @@ CI: the job `rust` builds the program with MSVC (artifact `rav1g-dec-x64-<run id
 side by side ([The jobs of a push](#the-jobs-of-a-push)); `rust-cross` builds it on Linux
 (`rav1g-dec-x64-xwin-<run id>`) and `rust-cross-run` and `rust-cross-run-parsers` run that program:
 the conformance set, the player's decoder code, the decode errors, the order check, the memory
-check, `-poisonmi`, `-poisonbuf`, the set with `-interfast` and with `-syncclear`, and all of it with
+check, `-poisonmi`, `-poisonbuf`, the set with `-interfast` and with `-gpuclear`, and all of it with
 `-parser c`; `cpp-reference` and `rust-equal` are the comparison with the C++ decoder.
 
 ## What it shares with the test player
@@ -68,7 +68,8 @@ check, `-poisonmi`, `-poisonbuf`, the set with `-interfast` and with `-syncclear
   rounded up to 128 and its bit depth, with two pipeline slots and the shared back buffer,
   CDEF runs through `cdef_filter_v2.hlsl`. The player's flags switch the same things:
   `-cdefv1`, `-nofitsize`, `-lowmemparts <n>`, `-lowmem`, `-slots <n>`, `-intrav2`,
-  `-intraopt`, `-syncclear`, `-parser c`, `-parseopt <list>`, `-t <threads>`, `-limit <n>`.
+  `-intraopt`, `-gpuclear`, `-cpuclear`, `-syncclear`, `-parser c`, `-parseopt <list>`,
+  `-t <threads>`, `-limit <n>`.
 - **The output path**: the decoder asks for an output image for every frame that is output
   and hands it back through the frame-ready callback; the frame is hashed there.
 - **The stream readers** of `testing/common` (IVF, WebM/Matroska, OBU, MP4), compiled into the program
@@ -139,9 +140,10 @@ the player ended its launch (what its tasks did is in its log) and 2 when it did
 minutes.
 
 `testing/conformance/player_smoke.py --tool <rav1g-dec.exe> --streams <dir> --out <dir>` is the check
-of CI: four tasks (a small 8-bit vector; 10-bit with four threads and three frame slots; a stream
-whose frames change size, from Matroska, with `-r -lowmem`; spatial layers with `-gputime
--syncclear`), each of which has to end with `MD5 is OK`; the log has to name the Rust library
+of CI: five tasks (a small 8-bit vector; 10-bit with four threads, three frame slots and `-gpuclear`;
+a stream whose frames change size, from Matroska, with `-r -lowmem -cpuclear`; spatial layers with
+`-gputime -syncclear`; the HDR10 stream), each of which has to end with `MD5 is OK`; the log has to
+say who clears the grids of a slot in each task (`Clears:`), name the Rust library
 (`LIBRARY rav1g ... the Rust host`) and have no error line; the launch has to end, and so does a
 launch without a task file, which says `No args were found`. The `rust-conformance` job runs it with
 the MSVC build and `rust-cross-run` with the build of Linux, whose C and C++ are compiled by clang as in the
@@ -203,7 +205,7 @@ rav1g-dec -sm6test
 | `-queue_size <n>` | output images in the pool (default 4) |
 | `-timeout <seconds>` | give up on a task after this time |
 | `-name <text>` | what the `BEGIN` and `RESULT` lines call the stream (default: its file name) |
-| `-cdefv1`, `-nofitsize`, `-lowmemparts <n>`, `-lowmem`, `-slots <n>`, `-intrav2`, `-intraopt`, `-syncclear` (`-asyncclear` is the default and accepted) | as in the [test player](test-player.md#defaults-and-opt-out-flags) |
+| `-cdefv1`, `-nofitsize`, `-lowmemparts <n>`, `-lowmem`, `-slots <n>`, `-intrav2`, `-intraopt`, `-gpuclear`, `-cpuclear` (`-asyncclear` is the same), `-syncclear` | as in the [test player](test-player.md#defaults-and-opt-out-flags); the task line of a run names the choice (`clears none needed`, `clears GPU (-gpuclear)`, `clears completion thread (-cpuclear)`, `clears decode thread (-syncclear)`) |
 | `-lfhsplit <n>`, `-intraedgefix` | the [experiments](test-player.md#experiments) of the test player; with the `experiments` input the `rust-experiments` job runs the whole set with each, and with a program built with `--features uavsync` from the shaders of the uavsync package (it prints `SHADERS uavsync`) |
 | `-poisonmi`, `-poisonbuf` | debugging, off by default: the decoder fills the mode info pool (`-poisonmi`) or every buffer the CPU writes for the shaders (`-poisonbuf`) with the byte 0xA5 when it creates it, instead of leaving what the memory held. With `-poisonbuf` it also fills the constants of every stage again in every frame, right before the stage writes them (their memory is reused from frame to frame). What the decoder clears or initialises after the creation is as in a normal run. The output must be the same; a shader that reads bytes the CPU never wrote gives another one, or loses the device. The decoder passes both. See [Order check and poisoned buffers](#order-check-and-poisoned-buffers) |
 | `-interfast`, `-interfastlists` | the [inter fast path](test-player.md#inter-fast-path--interfast) of the test player: inter blocks listed by the fraction of their motion vectors (`inter_fast`, `inter_compound_fast`; with `-interfastlists` the original shaders on those lists), same output; the `rust` job decodes the whole set once more with `-interfast` on every push |
@@ -415,11 +417,12 @@ Run 43540270287 (b766420), 17.1 minutes for the push:
 | `rust` (Windows) | `cargo build --release` with MSVC, the shader checks, `cargo test`, `-sm6test` | `rav1g-dec-x64`, `rav1g-dec-sm6test` | 2.1 |
 | `rust-conformance` (Windows) | the player's decoder code; the whole set; the parse digest; the whole set with `-capi`; decode errors in cut streams (Rust interface, `rav1g.h`, player); the order check; the memory check; the timing smoke test; the stage dumps; the MEMORY lines | `rav1g-dec-conformance`, `rav1g-dec-stage-dumps`, `rav1g-parse-digest-msvc` | 8.0 |
 | `rust-parser-c` (Windows) | with `-parser c`: the whole set; the part of the set with `-poisonmi`, with `-poisonbuf` and with `-capi`; the whole set with `-interfast`; decode errors in cut streams (three ways); the order check; the memory check; the player's decoder code; the stage dumps; the MEMORY lines | `rav1g-dec-parser-c` | 12.3 |
-| `rust-switches` (Windows) | the part of the set with `-poisonmi` and with `-poisonbuf`; the whole set with `-interfast`; the whole set and the memory check with `-syncclear`; with `-parser rav1d -parseopt none,latelists,time` the whole set, the stage dumps, the player's decoder code and the decode errors in cut streams | `rav1g-dec-switches` | 10.7 |
-| `rust-parsers-equal` (Linux) | no decoder: the run, the dumps and the MEMORY lines of `-parser c` against those of the default; the dumps of the other parser switches against those of the default, byte for byte, and its run and dumps against those of `-parser c` | | 0.4 |
+| `rust-switches` (Windows) | the part of the set with `-poisonmi` and with `-poisonbuf`; the whole set with `-interfast`; with `-parser rav1d -parseopt none,latelists,time` the whole set, the stage dumps, the player's decoder code and the decode errors in cut streams. (The whole set and the memory check with `-syncclear` were here, in the 10.7 minutes; since 2026-11-13 they are in `rust-clears`) | `rav1g-dec-switches` | 10.7 |
+| `rust-clears` (Windows; since 2026-11-13, [below](#the-clears-of-a-slot-in-ci)) | who clears the grids of a slot and how much (`clears_check.py`); the whole set and the memory check with `-gpuclear`; the whole set and the stage dumps with `-cpuclear`; the whole set with `-syncclear`; the part of the set with `-gpuclear -parser c` and with `-gpuclear -poisonbuf -parseopt cleargrid -slots 3 -t 4` | `rav1g-dec-clears` | |
+| `rust-parsers-equal` (Linux) | no decoder: the run, the dumps and the MEMORY lines of `-parser c` against those of the default; the dumps of the other parser switches against those of the default, byte for byte, and its run and dumps against those of `-parser c`; the dumps of `-cpuclear` against those of the default, byte for byte | | 0.4 |
 | `rust-equal` (Linux) | the run, the dumps and the MEMORY lines of `rust-parser-c` against the C++ decoder (`cpp-reference`) | | 0.2 |
 | `colour` (Linux) | the `COLOUR` lines of `rust-conformance` (two runs) and `rust-parser-c` | `rav1g-colour` | 0.8 |
-| `rust-cross-run` (Windows) | the program of the Linux build: the whole set; the parse digest; the player's decoder code; decode errors; the order check; the memory check; `-poisonmi`, `-poisonbuf`, `-interfast`, `-syncclear` | `rav1g-dec-xwin-conformance`, `rav1g-parse-digest-xwin` | 13.3 |
+| `rust-cross-run` (Windows) | the program of the Linux build: the whole set; the parse digest; the player's decoder code; decode errors; the order check; the memory check; `-poisonmi`, `-poisonbuf`, `-interfast`, `-gpuclear` (`-syncclear` up to 2026-11-13) | `rav1g-dec-xwin-conformance`, `rav1g-parse-digest-xwin` | 13.3 |
 | `rust-cross-run-parsers` (Windows) | the program of the Linux build: everything with `-parser c`, and the other side of the parser switches | `rav1g-dec-xwin-parsers` | 13.5 |
 | `parse-digest` (Linux) | the digests of `rust-conformance` and `rust-cross-run` against those of `parse-check` | | 0.1 |
 
@@ -451,6 +454,36 @@ Two jobs run only when the workflow is started for them (`workflow_dispatch`):
   with the shaders of the uavsync package (`rav1g-dec-experiments-<run id>`; 26.9 minutes in run
   43540279557).
 - `parser-timing`, with the `parser_timing` input.
+
+### The clears of a slot in CI
+
+Since 2026-11-13 a frame clears no grid of its pipeline slot
+([phase2-rav1d.md](phase2-rav1d.md#no-clears-by-the-cpu)): every run of the workflow that names no
+flag has the wavefront of intra prediction at the edges of the tiles. The three ways that keep it in
+the slot's grid and clear that stay as flags, and the job `rust-clears` runs them:
+
+- `testing/conformance/clears_check.py --tool <rav1g-dec.exe> --streams <dir> --out <dir> --stream
+  <name>[:<temporal units>]`: the stream in eight ways with `-gputime -progress` (no flag,
+  `-gpuclear`, `-cpuclear`, `-syncclear`; no flag and `-gpuclear` with `-parseopt cleargrid` and with
+  `-parser c`), each against its reference, and from the frame lines of the timing run (`| cleared
+  memset=N completion=N gpu=N`) who cleared how many bytes for every frame. Without a flag: nothing
+  on the completion thread or the GPU, and less than 64 KiB a tile on the decode and tile threads
+  (12,368 bytes a tile: the counters of its block lists). With `-gpuclear`: the command list of
+  every frame, with the stage `slot_clear` in it, and no thread. With `-cpuclear`: the completion
+  thread, the same bytes, frame by frame. With `-syncclear`: the decode thread. With the mode info
+  grid cleared too: on the completion thread without a flag, on the GPU with `-gpuclear`, where a
+  frame clears the bytes of both grids. The job runs it on the 2160p stream and on the stream with
+  eight tiles; its table is in the summary of the job.
+- The whole set and the memory check with `-gpuclear`; the whole set and the stage dumps with
+  `-cpuclear` (`rust-parsers-equal` holds the dumps against those of the default, byte for byte); the
+  whole set with `-syncclear`; the part of the set of the poisoned runs with `-gpuclear -parser c` and
+  with `-gpuclear -poisonbuf -parseopt cleargrid -slots 3 -t 4`.
+
+Elsewhere: `rust-cross-run` decodes the whole set with `-gpuclear` with the program of the Linux
+build; the player smoke test has a task with each of the three flags and reads the player's
+`Clears:` lines; `parse-check` runs `rav1g-parse-check -wave check` (the grid for one parser, the
+edges for the other: the block lists have to be equal) with one thread and with four, and `-wave
+grid` once.
 
 ### Paired timing of the parsers
 

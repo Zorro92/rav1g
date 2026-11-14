@@ -11,13 +11,16 @@
 //! frame with very small tiles).
 //!
 //! All of an arena starts as zero bytes, except the coefficients (a pattern, so that a coefficient one
-//! parser writes and the other leaves out is seen) and the wavefront grids (-1, as the host clears them).
-//! The parsed frame is the arena: the two sides' arenas of a frame are compared whole.
+//! parser writes and the other leaves out is seen), the wavefront grids (-1, as the host clears them
+//! when it keeps the wavefront in them) and the edges of the wavefront (a pattern no iteration has: the
+//! host does not clear them, and an entry that is read without having been written in the frame shows in
+//! the lists). The parsed frame is the arena: the two sides' arenas of a frame are compared whole.
 
 use std::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
 use std::ffi::c_int;
 use std::sync::Mutex;
 
+use crate::host::blocks::WaveEdges;
 use crate::host::types::{Av1Core, av1_frame_thread_data};
 use crate::sys::parser::{MB_MODE_INFO, av1_tile_data, tx_block_info_gpu};
 
@@ -26,6 +29,10 @@ use crate::sys::parser::{MB_MODE_INFO, av1_tile_data, tx_block_info_gpu};
 pub const COEFS_PER_UNIT: c_int = 4 * 4 + 2 * 2 * 2;
 /// What the coefficient buffer holds before a parser writes it.
 pub const COEF_PATTERN: i32 = 0x5A5A_5A5A;
+/// What the edges of the wavefront hold before a parser writes them: an iteration far behind the last
+/// one a tile can have, so that a block that reads it gets the tile's last iteration and its lists differ
+/// from those of the wavefront grid.
+pub const WAVE_PATTERN: c_int = 0x5A5A_5A5A;
 
 /// Zeroed memory for `len` values of a C struct or a number.
 pub struct Buffer<T> {
@@ -159,6 +166,16 @@ pub struct Arena {
     pub iter_grid: Buffer<c_int>,
     pub iter_grid_stride: c_int,
     pub iter_grid_offset_uv: c_int,
+    /// The wavefront is kept in the edges of the tiles (the host's default) instead of in the grids.
+    pub wave_edges: bool,
+    /// The edges of the tiles, and the rows above them with where the decoded units end: for every row
+    /// of tiles the columns of luma, then those of chroma.
+    pub wave_tiles: Buffer<WaveEdges>,
+    pub wave_above: Buffer<c_int>,
+    pub wave_above_end: Buffer<i64>,
+    /// The number of the frame in this arena, as the host counts the frames of a slot: the edges of an
+    /// earlier frame do not count as decoded units of this one.
+    pub wave_stamp: i64,
     pub tiles: Buffer<av1_tile_data>,
     /// The palette blocks of each tile in the order they were read.
     pub palettes: Vec<Mutex<Vec<Palette>>>,
@@ -171,7 +188,13 @@ pub struct Arena {
 }
 
 impl Arena {
-    pub fn new(size: FrameSize) -> Self {
+    /// The columns of luma a row of tiles keeps above its wavefront: those of the frame, to the end of a
+    /// block that reaches past its right edge. Chroma has half of them.
+    fn wave_cols(size: &FrameSize) -> usize {
+        (((size.mi_cols + 31) & !31) + 32) as usize
+    }
+
+    pub fn new(size: FrameSize, wave_edges: bool) -> Self {
         let cols16 = (size.mi_cols + 15) & !15;
         let rows16 = (size.mi_rows + 15) & !15;
         let units = (cols16 * rows16) as usize;
@@ -192,6 +215,11 @@ impl Arena {
             iter_grid: Buffer::new((grid_w * grid_h) as usize * 3 / 2 + 64),
             iter_grid_stride: grid_w,
             iter_grid_offset_uv: grid_w * grid_h,
+            wave_edges,
+            wave_tiles: Buffer::new(tiles),
+            wave_above: Buffer::new(Self::wave_cols(&size) * 3 / 2 * size.tile_rows as usize),
+            wave_above_end: Buffer::new(Self::wave_cols(&size) * 3 / 2 * size.tile_rows as usize),
+            wave_stamp: 1,
             tiles: Buffer::new(tiles),
             palettes: (0..tiles).map(|_| Mutex::new(Vec::new())).collect(),
             lr_units: Mutex::new(Vec::new()),
@@ -199,6 +227,18 @@ impl Arena {
             ok: false,
         };
         arena.fill();
+        // SAFETY: the buffers of the edges, which nothing else works on. Filled once: the host does not
+        // clear them between frames either.
+        unsafe {
+            for i in 0..arena.wave_above.len() {
+                arena.wave_above.ptr().add(i).write(WAVE_PATTERN);
+            }
+            for edges in std::slice::from_raw_parts_mut(arena.wave_tiles.ptr(), arena.wave_tiles.len()) {
+                for plane in &mut edges.planes {
+                    plane.rows.fill([WAVE_PATTERN; 2]);
+                }
+            }
+        }
         arena
     }
 
@@ -226,6 +266,8 @@ impl Arena {
             self.tiles.ptr().write_bytes(0, self.tiles.len());
         }
         self.fill();
+        // The edges stay as the frame before left them, as in the host.
+        self.wave_stamp += 1;
         for palettes in &self.palettes {
             palettes.lock().expect("no thread panics with it").clear();
         }
@@ -314,6 +356,20 @@ impl Arena {
             t.gen_iter_clear_offset = (t.gen_intra_iter_set + 16) * 10 + 256;
             t.gen_iter_clear_size =
                 (size_of::<c_int>() as c_int).wrapping_mul(256 + t.gen_intra_max_iter * 10 - t.gen_iter_clear_offset);
+            if self.wave_edges {
+                // The tile's edges, with the rows above it in the part of its row of tiles.
+                let cols = Self::wave_cols(size);
+                let first = cols * 3 / 2 * (tile.index / size.tile_cols as usize);
+                let above = self.wave_above.ptr().add(first);
+                let above_end = self.wave_above_end.ptr().add(first);
+                let edges = &mut *self.wave_tiles.ptr().add(tile.index);
+                for (plane, at) in edges.planes.iter_mut().zip([0, cols]) {
+                    plane.above = above.add(at);
+                    plane.above_end = above_end.add(at);
+                    plane.stamp = self.wave_stamp << 32;
+                }
+                t.wave_edges = std::ptr::from_mut(edges).cast();
+            }
             (t_ptr, self.mi_pool.ptr().add(mi_offset_base as usize), mi_count_max)
         }
     }
@@ -338,19 +394,18 @@ pub struct Side {
     pub recycled: usize,
     /// What only the host of the entropy decoder of libaom keeps.
     pub c: crate::chost::CState,
+    /// The frames of this side keep the wavefront in the edges of their tiles, not in the grids.
+    pub wave_edges: bool,
 }
 
 impl Side {
-    pub fn new() -> Box<Self> {
+    pub fn new(wave_edges: bool) -> Box<Self> {
         let mut side = Box::new(Self {
             core: Av1Core { curr_frame_data: std::ptr::null_mut(), side: std::ptr::null_mut() },
-            frame_data: Arena::new(FrameSize {
-                mi_cols: 16,
-                mi_rows: 16,
-                tile_cols: 1,
-                tile_rows: 1,
-                has_chroma: true,
-            })
+            frame_data: Arena::new(
+                FrameSize { mi_cols: 16, mi_rows: 16, tile_cols: 1, tile_rows: 1, has_chroma: true },
+                wave_edges,
+            )
             .frame_data(),
             arena: None,
             frames: Vec::new(),
@@ -359,6 +414,7 @@ impl Side {
             spare: None,
             recycled: 0,
             c: Default::default(),
+            wave_edges,
         });
         side.frame_data.gen_intra_iter_y = std::ptr::null_mut();
         side.frame_data.gen_intra_iter_uv = std::ptr::null_mut();
@@ -375,7 +431,7 @@ impl Side {
                 arena
             }
             _ => {
-                let mut arena = Arena::new(size);
+                let mut arena = Arena::new(size, self.wave_edges);
                 arena.gm_warp = gm_warp;
                 arena
             }

@@ -10,7 +10,7 @@
 
 use crate::say;
 use crate::shim;
-use rav1g::switches::{self, Poison};
+use rav1g::switches::{self, Clears, Poison};
 
 // The player's values (testing/player_common/cmd_parser.h, decoder_creator.h).
 pub const SLOTS_DEFAULT: i32 = 2;
@@ -69,8 +69,9 @@ pub struct Task {
     pub budget_mib: i64,
     pub intrav2: bool,
     pub intraopt: bool,
-    /// The per-frame clears of a slot on the completion thread: true unless -syncclear was given.
-    pub asyncclear: bool,
+    /// What a frame does about the clears of its slot's grids: nothing to clear without a flag;
+    /// -gpuclear, -cpuclear (and -asyncclear, its older name), -syncclear.
+    pub clears: Clears,
     /// -lfhsplit <0|1|2>
     pub lfhsplit: i32,
     pub intraedgefix: bool,
@@ -130,7 +131,7 @@ impl Default for Task {
             budget_mib: -1,
             intrav2: false,
             intraopt: false,
-            asyncclear: true,
+            clears: Clears::NotNeeded,
             lfhsplit: 0,
             intraedgefix: false,
             poison: Poison::Off,
@@ -206,9 +207,15 @@ pub fn usage() {
     say!("  -t <n>                decoder threads (default 1)");
     say!("  -queue_size <n>       output images in the pool, 1..{} (default {})", QUEUE_SIZE_MAX, QUEUE_SIZE_DEFAULT);
     say!("  -timeout <seconds>    give up on a task after this time (exit code {})", EXIT_TIMEOUT);
-    say!("  -cdefv1 -nofitsize -lowmemparts <n> -lowmem -slots <n> -intrav2 -intraopt -syncclear");
-    say!("                        as in the test player (docs/test-player.md); -cdefv2, -fitsize and -asyncclear");
-    say!("                        (the default: the per-frame clears on the completion thread) are accepted");
+    say!("  -cdefv1 -nofitsize -lowmemparts <n> -lowmem -slots <n> -intrav2 -intraopt");
+    say!("                        as in the test player (docs/test-player.md); -cdefv2 and -fitsize (the defaults)");
+    say!("                        are accepted");
+    say!("  -gpuclear -cpuclear -syncclear");
+    say!("                        the wavefront of intra prediction in the grid of the slot, which is then cleared");
+    say!("                        for every frame: by the GPU at the end of the frame's command list, by the");
+    say!("                        completion thread (-asyncclear is the same), or by the decode thread. Without");
+    say!("                        one of them the wavefront is kept at the edges of the tiles and nothing is");
+    say!("                        cleared (docs/test-player.md, \"Pipeline slots and clears\")");
     say!("  -budget <MiB>         the decoder is told the application has this much memory left for it: the budget");
     say!("                        guard of the creation (MEMORY budget and MEMORY REFUSED lines, with -v)");
     say!("  -lfhsplit <n>         horizontal loop filter: 1 even rows of blocks, a UAV barrier, odd rows; 2 every");
@@ -349,8 +356,9 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-fitsize" => task.fitsize = true,
             "-intrav2" => task.intrav2 = true,
             "-intraopt" => task.intraopt = true,
-            "-asyncclear" => task.asyncclear = true,
-            "-syncclear" => task.asyncclear = false,
+            "-gpuclear" => task.clears = Clears::Gpu,
+            "-cpuclear" | "-asyncclear" => task.clears = Clears::CompletionThread,
+            "-syncclear" => task.clears = Clears::DecodeThread,
             "-lfhsplit" => task.lfhsplit = number()?,
             "-intraedgefix" => task.intraedgefix = true,
             "-continue_on_error" => task.continue_on_error = true,
@@ -382,8 +390,9 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             }
             "-parseopt" => {
                 let list = value()?;
-                task.parser_options = rav1g::ParserOptions::from_words(&list)
-                    .ok_or_else(|| format!("-parseopt {list}: nolfmask, tilethread, time, latelists, cleargrid, default or none"))?;
+                task.parser_options = rav1g::ParserOptions::from_words(&list).ok_or_else(|| {
+                    format!("-parseopt {list}: nolfmask, tilethread, time, latelists, cleargrid, default or none")
+                })?;
             }
             _ => {
                 let Some(globals) = globals.as_deref_mut() else {
@@ -545,6 +554,17 @@ mod tests {
         assert_eq!(task.poison, Poison::ModeInfo);
         parse_args(&strings(&["-poisonbuf"]), &mut task, None).unwrap();
         assert_eq!(task.poison, Poison::Buffers);
+        // The clears of a slot: nothing to clear without a flag.
+        assert_eq!(task.clears, Clears::NotNeeded);
+        for (flag, clears) in [
+            ("-gpuclear", Clears::Gpu),
+            ("-cpuclear", Clears::CompletionThread),
+            ("-syncclear", Clears::DecodeThread),
+            ("-asyncclear", Clears::CompletionThread),
+        ] {
+            parse_args(&strings(&[flag]), &mut task, None).unwrap();
+            assert_eq!(task.clears, clears, "{flag}");
+        }
         // A program flag is not a task flag of a list line.
         assert!(parse_args(&strings(&["-hw"]), &mut task, None).is_err());
         assert!(parse_args(&strings(&["-t"]), &mut task, None).is_err());

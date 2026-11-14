@@ -465,6 +465,12 @@ typedef struct
     // Inter breakdown of the timing run (dx/av1_perf.h, av1_set_perf_detail): the tile's counters, an
     // av1_perf_inter_tile; NULL without it.
     void * perf_inter;
+    // The edges of the tile's intra wavefront (the host's WaveEdges): the iterations along the row above
+    // and the column to the left of what the tile has decoded, from which av1_mi_push_block takes the
+    // iteration of a transform block. NULL: it keeps them in the slot's wavefront grid instead, which
+    // then has to be cleared for every frame (AV1_CLEARS_GPU, _COMPLETION_THREAD, _DECODE_THREAD of
+    // dx/av1_perf.h; a frame of -intrav2 has no wavefront).
+    void * wave_edges;
 } av1_tile_data;
 
 typedef struct tx_block_info {

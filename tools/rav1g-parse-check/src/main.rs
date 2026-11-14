@@ -18,14 +18,21 @@
 //! (`crates/rav1g/src/host/blocks.rs`), which is compiled into this program as it is (`host`).
 //!
 //! ```text
-//! rav1g-parse-check [-threads <n>] [-parseopt <list>] [-details <n>] [-root <dir>] [-manifest <task list>] [<stream>...]
-//! rav1g-parse-check -time [-threads <n>] [-parseopt <list>] <stream>
+//! rav1g-parse-check [-threads <n>] [-parseopt <list>] [-wave <way>] [-details <n>] [-root <dir>] [-manifest <task list>] [<stream>...]
+//! rav1g-parse-check -time [-threads <n>] [-parseopt <list>] [-wave <way>] <stream>
 //! rav1g-parse-check -digest [-threads <n>] [-root <dir>] [-manifest <task list>] [<stream>...]
 //! ```
 //!
 //! `-parseopt` takes the switches of the parser of phase 2 (`rav1g_parse::options`: `nolfmask` and
 //! `tilethread`, which are on without it, `none`, `default`, `latelists`), separated by commas: the
 //! buffers have to be the same with each of them. With `-time`, `time` adds the time of the sink's calls.
+//!
+//! `-wave` says where the host's function keeps the wavefront of intra prediction
+//! (`crates/rav1g/src/host/blocks.rs`): `edges` (the default, as in the decoder: in the edges of the
+//! tiles), `grid` (in the wavefront grids, which the decoder then clears for every frame), or `check`:
+//! the grids for the entropy decoder of libaom and the edges for rav1d. With `check` the block lists are
+//! equal only if every transform block gets the same iteration either way, and the entries of the grid
+//! the edges' side writes (the ones the shader reads) have to be those of the grid.
 //!
 //! `-digest` prints for every stream the line `rav1g-dec -parsedigest` prints on Windows: what rav1d's
 //! parse pass reads from it, folded into one number (`rav1g_parse::digest`).
@@ -65,15 +72,18 @@ struct Options {
     details: usize,
     time: bool,
     digest: bool,
+    /// -wave: the wavefront in the edges of the tiles, for the side of libaom and for that of rav1d.
+    wave_edges: (bool, bool),
     streams: Vec<(String, PathBuf)>,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: rav1g-parse-check [-threads <n>] [-parseopt <list>] [-details <n>] [-root <dir>] [-manifest <task list>] \
-         [<stream>...]\n       rav1g-parse-check -time [-threads <n>] [-parseopt <list>] <stream>\n-parseopt: the \
-         switches of the parser, separated by commas: nolfmask, tilethread (both on by default); none; default; \
-         latelists; time (with -time)"
+        "usage: rav1g-parse-check [-threads <n>] [-parseopt <list>] [-wave <way>] [-details <n>] [-root <dir>] \
+         [-manifest <task list>] [<stream>...]\n       rav1g-parse-check -time [-threads <n>] [-parseopt <list>] \
+         [-wave <way>] <stream>\n-parseopt: the switches of the parser, separated by commas: nolfmask, tilethread \
+         (both on by default); none; default; latelists; time (with -time)\n-wave: where the wavefront of intra \
+         prediction is kept: edges (default), grid, check (the grid for libaom, the edges for rav1d)"
     );
     std::process::exit(2);
 }
@@ -103,6 +113,7 @@ fn options() -> Options {
         details: 8,
         time: false,
         digest: false,
+        wave_edges: (true, true),
         streams: Vec::new(),
     };
     let mut root = PathBuf::from(".");
@@ -118,6 +129,14 @@ fn options() -> Options {
             "-time" => options.time = true,
             "-parseopt" => options.parse = ParseOptions::from_words(&value()).unwrap_or_else(|| usage()),
             "-digest" => options.digest = true,
+            "-wave" => {
+                options.wave_edges = match value().as_str() {
+                    "edges" => (true, true),
+                    "grid" => (false, false),
+                    "check" => (false, true),
+                    _ => usage(),
+                }
+            }
             _ if arg.starts_with('-') => usage(),
             _ => {
                 let path = PathBuf::from(&arg);
@@ -139,8 +158,8 @@ fn options() -> Options {
 fn check(path: &Path, options: &Options) -> Result<Report, String> {
     let data = std::fs::read(path).map_err(|error| format!("cannot read the file: {error}"))?;
     let units = container::read(&data)?;
-    let mut c = chost::CParser::new()?;
-    let mut r = rhost::RustParser::new(options.threads, options.parse)?;
+    let mut c = chost::CParser::new(options.wave_edges.0)?;
+    let mut r = rhost::RustParser::new(options.threads, options.parse, options.wave_edges.1)?;
     let mut report = Report::new(options.details);
     let mut number = 0;
     for (unit, data) in units.iter().enumerate() {
@@ -204,7 +223,7 @@ fn digest(options: &Options) -> ExitCode {
 fn main() -> ExitCode {
     let options = options();
     if options.time {
-        return timing::run(&options.streams[0].1, options.threads, options.parse);
+        return timing::run(&options.streams[0].1, options.threads, options.parse, options.wave_edges.1);
     }
     if options.digest {
         return digest(&options);

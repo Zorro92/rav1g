@@ -21,14 +21,17 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12Device};
 
+use super::blocks::WaveEdges;
 use super::completion::start_completion_thread;
+use super::core::{buffer, commands, pipeline};
 use super::create::{IDCT_COEF_COUNT_DENUM, to_mib};
 use super::log::log;
 use super::loopfilter::loopfilter_gpu;
+use super::memory::poison_constants;
 use super::output::{copy_output, output_image};
 use super::perf::{
-    inter_fast_mode, perf_add, perf_add_memset, perf_begin_command_buffer, perf_detail_mode, perf_lap, perf_now,
-    perf_resolve,
+    inter_fast_mode, perf_add, perf_add_memset, perf_begin_command_buffer, perf_detail_mode, perf_gpu_mark, perf_lap,
+    perf_now, perf_resolve,
 };
 use super::postfilter::cdef_looprestoration;
 use super::prediction::{inter_ext_borders, prediction_gen_blocks, prediction_run_all};
@@ -39,7 +42,7 @@ use super::types::{
     Av1Core, DeviceUpload, EntropyThreadCount, GpuWorkItem, InterFastMapSize, IntraV2MaxRegions, av1_frame_thread_data,
 };
 use crate::gpu::d3d12::{com_ref, wrapped_ref};
-use crate::gpu::{CommandAllocator, CommandList, Event, Fence, Queue};
+use crate::gpu::{BufferState, CommandAllocator, CommandList, Event, Fence, Queue};
 use crate::sys;
 use crate::sys::parser::{
     ALTREF_FRAME, AV1_COMMON, AV1Decoder, Av1ColorMapParam, HwFrameBuffer, HwOutputImage, INVALID_IDX, LAST_FRAME,
@@ -67,16 +70,34 @@ unsafe extern "C" {
     fn av1_frame_is_output(pbi: *const AV1Decoder) -> c_int;
 }
 
-/// The per-frame clears of a slot's grids are done by the completion thread and not by the decode thread.
-/// On unless `av1_set_async_clear(0)` was called (the test player's -syncclear): on the console the clears
-/// are 7.6 ms of a heavy 4K frame on the decode thread, and the completion thread has the time for them
-/// (docs/phase2-rav1d.md, "Console after step 3"). See [`rav1g_setup_frame_begin`] for the rules.
-static ASYNC_CLEAR: AtomicI32 = AtomicI32::new(1);
+const CLEARS_NOT_NEEDED: c_int = sys::AV1_CLEARS_NOT_NEEDED as c_int;
+const CLEARS_GPU: c_int = sys::AV1_CLEARS_GPU as c_int;
+const CLEARS_COMPLETION_THREAD: c_int = sys::AV1_CLEARS_COMPLETION_THREAD as c_int;
+const CLEARS_DECODE_THREAD: c_int = sys::AV1_CLEARS_DECODE_THREAD as c_int;
 
-/// `av1_set_async_clear` (`dx/av1_perf.h`).
+/// What a frame does about the clears of its slot's grids (`AV1_CLEARS_*` of `dx/av1_perf.h`). Without a
+/// call of `av1_set_clears` nothing of the wavefront grid is cleared: on the console the processor has a
+/// fraction of its memory bandwidth for most of a playback, the clears were 3.5 MB a 4K frame that the
+/// parse competed with, and the GPU has time to spare (docs/phase2-rav1d.md, "No clears by the CPU").
+/// See [`rav1g_setup_frame_begin`] for the rules.
+static CLEARS: AtomicI32 = AtomicI32::new(CLEARS_NOT_NEEDED);
+
+/// `av1_set_clears` (`dx/av1_perf.h`). A mode the header does not have is the default.
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_clears(mode: c_int) {
+    let known = (CLEARS_NOT_NEEDED..=CLEARS_DECODE_THREAD).contains(&mode);
+    CLEARS.store(if known { mode } else { CLEARS_NOT_NEEDED }, Ordering::Relaxed);
+}
+
+/// `av1_set_async_clear` (`dx/av1_perf.h`): the older form of the switch.
 #[unsafe(no_mangle)]
 pub extern "C" fn av1_set_async_clear(enable: c_int) {
-    ASYNC_CLEAR.store(enable, Ordering::Relaxed);
+    av1_set_clears(if enable != 0 { CLEARS_NOT_NEEDED } else { CLEARS_DECODE_THREAD });
+}
+
+/// The switch as it is now.
+pub(crate) fn clears_mode() -> c_int {
+    CLEARS.load(Ordering::Relaxed)
 }
 
 /// `av1_shader_variant` (`dx/av1_perf.h`): "uavsync" for the build whose shaders have their group syncs
@@ -518,7 +539,8 @@ unsafe fn palette_buffer_for_frame(dec: *mut Av1Core, cm: &AV1_COMMON, td: &mut 
         // A failure is logged by the allocator as "MEMORY FAILED buffer palette_buffer of slot n".
         let memory = &mut *(*dec).memory;
         let device = com_ref::<_, ID3D12Device>(&(*dec).compute.device);
-        td.palette_buffer = memory.create_buffer(device, size as usize, DeviceUpload, c"palette_buffer", td.slot_index);
+        td.palette_buffer =
+            memory.create_buffer(device, size as usize, DeviceUpload, c"palette_buffer", td.slot_index, false);
         if td.palette_buffer.is_null() {
             return false;
         }
@@ -537,6 +559,100 @@ unsafe fn palette_buffer_for_frame(dec: *mut Av1Core, cm: &AV1_COMMON, td: &mut 
         );
     }
     true
+}
+
+/// The frame of `cm` on the slot `td` keeps its intra wavefront in the edges of its tiles
+/// (`blocks::WaveEdges`): the slot gets the memory for them, if it has less than the frame needs, and the
+/// frame its stamp. Nothing is cleared: what the frame reads of the edges it has written before
+/// (`blocks::WavePlane`). Returns false when the process has no memory for them; the frame then keeps
+/// the wavefront in the grid. Decode thread, before the tiles of the frame start.
+fn wave_edges_for_frame(cm: &AV1_COMMON, td: &mut av1_frame_thread_data) -> bool {
+    // The columns of luma a row of tiles keeps: those of the frame, to the end of a block that reaches
+    // past its right edge. Chroma has half of them.
+    let cols = (((cm.mi_cols + 31) & !31) + 32) as usize;
+    let columns = cols * 3 / 2 * usize::try_from(cm.tile_rows).unwrap_or(0);
+    let tiles = usize::try_from(td.tile_count).unwrap_or(0);
+    let store = &mut td.wave;
+    if store.above.len() < columns {
+        let more = columns - store.above.len();
+        if store.above.try_reserve(more).is_err() || store.above_end.try_reserve(more).is_err() {
+            return false;
+        }
+        store.above.resize(columns, -1);
+        store.above_end.resize(columns, 0);
+    }
+    if store.tiles.len() < tiles {
+        if store.tiles.try_reserve(tiles - store.tiles.len()).is_err() {
+            return false;
+        }
+        // SAFETY: pointers and numbers; setup_tile writes the pointers before a tile uses its edges.
+        store.tiles.resize_with(tiles, || unsafe { std::mem::zeroed() });
+    }
+    store.frames += 1;
+    td.wave_stamp = store.frames << 32;
+    td.wave_cols = cols;
+    td.wave_tiles = store.tiles.as_mut_ptr();
+    td.wave_above = store.above.as_mut_ptr();
+    td.wave_above_end = store.above_end.as_mut_ptr();
+    // -poisonbuf: the edges hold what earlier frames left there, mostly plausible iterations. Filled
+    // again for every frame, an entry that is read without having been written by this frame is "no
+    // iteration" (the byte is negative) where the block there has one, and no decoded unit at all.
+    // SAFETY: the three vectors, over the part this frame uses.
+    unsafe {
+        poison_constants(td.wave_tiles.cast(), size_of::<WaveEdges>() * tiles);
+        poison_constants(td.wave_above.cast(), size_of::<c_int>() * columns);
+        poison_constants(td.wave_above_end.cast(), size_of::<i64>() * columns);
+    }
+    true
+}
+
+/// `AV1_CLEARS_GPU`: the last commands of the frame's command list clear the grids of its slot, the
+/// bytes its setup cleared or found clean (`clear_mi_bytes`, `clear_iter_bytes`), with fill_buffer.hlsl:
+/// nothing of the frame reads them behind this point, and the list is through before the frame's fence
+/// signals, which is what the slot goes back to its pool on. So the next frame of the slot finds the
+/// grids as a clear of its own would leave them, and no thread of the CPU has written a byte for it.
+///
+/// The grids are buffers the CPU writes and the shaders read (a custom heap, cached, in the state the
+/// shaders read it in); in a decoder for this mode a command list may write them as well
+/// (`Av1Core::gpu_clear_grids`), in the state for it, which they are in from the first clear to the
+/// last. The CPU reads and writes them again through the mapping it has had all along: on an adapter
+/// with one memory for both and coherent caches (WARP; the console reports itself as one) it sees what
+/// the GPU wrote; an adapter without that would need the mapping made again with a range to read.
+///
+/// # Safety
+/// `dec` is the decoder while it records the frame in `curr_frame_data`, whose stages are all recorded.
+unsafe fn record_slot_clears(dec: *mut Av1Core) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let td = &mut *(*dec).curr_frame_data;
+        if td.clears != CLEARS_GPU || td.clear_pending == 0 || td.clear_mi_bytes + td.clear_iter_bytes == 0 {
+            return;
+        }
+        let commands = commands(dec);
+        let shader = pipeline(&raw const (*(*dec).shader_lib).shader_fill_buffer);
+        commands.set_layout(shader.layout());
+        commands.set_pipeline(shader);
+        // The mode info grid to null pointers, the wavefront grid to "no iteration" (all bits set).
+        for (object, bytes, value) in
+            [(td.mode_info_grid, td.clear_mi_bytes, 0), (td.gen_intra_inter_grid, td.clear_iter_bytes, -1)]
+        {
+            if bytes == 0 {
+                continue;
+            }
+            let grid = buffer(object);
+            // The shader writes 16 bytes a thread: the bytes of the clear, rounded up, inside the buffer
+            // (whose size is a multiple of 256). What is behind the clear is not part of what the next
+            // frame takes as clean.
+            let words = (bytes.div_ceil(16)).min((*object).size / 16) as c_int;
+            commands.transition(grid, BufferState::Read, BufferState::ReadWrite);
+            commands.bind_write(0, grid.location());
+            commands.set_inline_constants(1, &[words, value], 0);
+            commands.dispatch(((words + 63) / 64) as u32, 1, 1);
+            commands.transition(grid, BufferState::ReadWrite, BufferState::Read);
+        }
+        td.gpu_cleared = 1;
+        perf_gpu_mark(dec, sys::AV1_PERF_GPU_SLOT_CLEAR as c_int);
+    }
 }
 
 /// A frame that was set up and never submitted (a decode error between its setup and its submit) still
@@ -590,8 +706,9 @@ pub(crate) unsafe fn release_unsubmitted_frame(dec: *mut Av1Core) {
             td.sec_thread_data = std::ptr::null_mut();
         }
         // Its grids stay dirty and are not marked clean, so the next frame on this slot clears them itself,
-        // whichever thread does the clears otherwise.
+        // whoever does the clears otherwise.
         td.clear_pending = 0;
+        td.gpu_cleared = 0;
         (*dec).frame_data_pool.push(td_ptr);
     }
 }
@@ -666,15 +783,20 @@ pub unsafe extern "C" fn rav1g_setup_frame_begin(
         cm.mi_grid_base = (*td.mode_info_grid).host_ptr.cast();
         cm.mi_grid_visible = cm.mi_grid_base;
         cm.mi_alloc_size = cm.mi_stride * ((cm.mi_rows + 31) & !31);
-        // The clears on the completion thread (the default; not with -syncclear). The two per-frame clears
-        // of the slot (this grid and the intra iteration grid below) are sized from this frame, which the completion thread cannot know when it
-        // returns the slot. The rule: after a frame's fence the completion thread clears exactly the bytes
-        // that frame's setup cleared, and records the two sizes in the slot (clean_*). A frame skips a clear
-        // only when the recorded size is exactly the size it would clear itself; then every byte of the grid
-        // is what the clear on this thread would have left, inside the range and past it. Any other case
-        // (first use of the slot, another frame size, a slot that went back without a completed frame, the
-        // switch off) clears here. The marks are taken off at once: from here on the grids are being
-        // written.
+        // The two grids of the slot that a frame clears (this grid and the wavefront grid below), and who
+        // clears them (`AV1_CLEARS_*`, `av1_set_clears`). The clears are sized from the frame, which whoever
+        // clears behind a frame cannot know of the frame that comes next. The rule: behind a frame, exactly
+        // the bytes that frame's setup cleared are cleared again, by the completion thread after the
+        // frame's fence or by the frame's own command list (`record_slot_clears`), and the two sizes are
+        // recorded in the slot (clean_*). A frame skips a clear only when the recorded size is exactly the
+        // size it would clear itself; then every byte of the grid is what the clear on this thread would
+        // have left, inside the range and past it. Any other case (first use of the slot, another frame
+        // size, a slot that went back without a completed frame, the clears on this thread) clears here.
+        // The marks are taken off at once: from here on the grids are being written.
+        //
+        // Without a switch (`AV1_CLEARS_NOT_NEEDED`) the wavefront grid is not cleared by anybody: the
+        // frame keeps its wavefront in the edges of its tiles (below). What then still needs a clear, the
+        // mode info grid of a decoder that does not keep it, is the completion thread's.
         //
         // The mode info grid is not cleared at all where a clear would change nothing a reader sees
         // (`Av1Core::keep_mi_grid`, a decoder with rav1d's parse): the parse of a frame writes the unit of
@@ -686,12 +808,18 @@ pub unsafe extern "C" fn rav1g_setup_frame_begin(
         // these bytes and only frames of this width, height and row length were parsed into it since. So
         // the slot remembers those (`kept_grid`), and a frame of another size clears as before. That is
         // 4.2 MB a 4K frame the CPU does not write (docs/phase2-rav1d.md).
-        let async_clear = ASYNC_CLEAR.load(Ordering::Relaxed);
+        let mut clears = clears_mode();
+        if clears == CLEARS_GPU && (*dec).gpu_clear_grids == 0 {
+            // The grids of this decoder are not buffers a command list may write: it was created with
+            // another mode.
+            clears = CLEARS_COMPLETION_THREAD;
+        }
+        let cleared_behind = clears != CLEARS_DECODE_THREAD;
         let mi_grid_bytes = size_of::<*mut *mut MB_MODE_INFO>() * cm.mi_alloc_size as usize;
         let keep_grid = (*dec).keep_mi_grid != 0;
         let grid_frame = [cm.mi_cols, cm.mi_rows, cm.mi_stride];
         let kept = keep_grid && td.kept_grid == grid_frame && td.kept_grid_bytes == mi_grid_bytes;
-        if !kept && (async_clear == 0 || td.clean_mi_bytes != mi_grid_bytes) {
+        if !kept && (!cleared_behind || td.clean_mi_bytes != mi_grid_bytes) {
             perf_t = super::perf::av1_perf_ticks();
             cm.mi_grid_base.cast::<u8>().write_bytes(0, mi_grid_bytes);
             perf_add_memset(dec, sys::AV1_PERF_CPU_MEMSET as usize, perf_t, mi_grid_bytes);
@@ -700,7 +828,8 @@ pub unsafe extern "C" fn rav1g_setup_frame_begin(
         let clean_iter_bytes = td.clean_iter_bytes;
         td.clean_mi_bytes = 0;
         td.clean_iter_bytes = 0;
-        td.async_clear = async_clear;
+        td.clears = clears;
+        td.gpu_cleared = 0;
         // A grid that is kept is not cleared behind the frame either.
         td.clear_mi_bytes = if keep_grid { 0 } else { mi_grid_bytes };
         td.clear_iter_bytes = 0;
@@ -740,13 +869,18 @@ pub unsafe extern "C" fn rav1g_setup_frame_begin(
         td.gen_intra_iter_uv = td.gen_intra_iter_y.add(td.iter_grid_offset_uv as usize);
         td.intra_stats = [0; 4];
         td.intra_v2 = intra_v2_setup_frame(dec, cm, td);
-        if td.intra_v2 == 0 {
-            // With -intrav2 nothing scans the iteration grid; av1_mi_push_block() writes the one entry per
-            // block that gen_pred_blocks.hlsl reads.
+        // With -intrav2 nothing scans the iteration grid; av1_mi_push_block() writes the one entry per
+        // block that gen_pred_blocks.hlsl reads. The same without a switch for the clears: the tiles keep
+        // the wavefront in their edges, the grid gets that one entry per block, and nothing of it is
+        // cleared, here or behind the frame.
+        td.wave_edges = c_int::from(td.intra_v2 == 0 && clears == CLEARS_NOT_NEEDED && wave_edges_for_frame(cm, td));
+        if td.intra_v2 == 0 && td.wave_edges == 0 {
+            // The wavefront in the grid, which av1_mi_push_block() reads back: every entry no block of
+            // the frame writes has to be "no iteration".
             // The luma grid (4 bytes per entry) and the chroma grid right behind it: one range from the
-            // start of the buffer. Skipped when the completion thread left exactly this range cleared.
+            // start of the buffer. Skipped when exactly this range was cleared behind the frame before.
             let iter_grid_bytes = td.iter_grid_offset_uv as usize * 5;
-            if async_clear == 0 || clean_iter_bytes != iter_grid_bytes {
+            if !cleared_behind || clean_iter_bytes != iter_grid_bytes {
                 perf_t = super::perf::av1_perf_ticks();
                 td.gen_intra_iter_y.cast::<u8>().write_bytes(0xFF, td.iter_grid_offset_uv as usize * 4);
                 td.gen_intra_iter_uv.cast::<u8>().write_bytes(0xFF, td.iter_grid_offset_uv as usize);
@@ -1163,6 +1297,18 @@ pub(crate) unsafe fn setup_tile(dec: *mut Av1Core, cm: &AV1_COMMON, tile: &TileI
         let clear_ints = (32 + 16 + t.gen_iter_clear_offset) as usize;
         t.gen_block_map_wrp.write_bytes(0, clear_ints);
         perf_add_memset(dec, sys::AV1_PERF_CPU_MEMSET_TILE as usize, perf_t, size_of::<c_int>() * clear_ints);
+        if td.wave_edges != 0 {
+            // The edges of the tile's wavefront, with the rows above it in the part of its row of tiles:
+            // tiles side by side have columns of their own there. Nothing of them is cleared.
+            let edges = &mut *td.wave_tiles.add(tile_id as usize);
+            let first = td.wave_cols * 3 / 2 * tile.tile_row as usize;
+            for (plane, at) in edges.planes.iter_mut().zip([0, td.wave_cols]) {
+                plane.above = td.wave_above.add(first + at);
+                plane.above_end = td.wave_above_end.add(first + at);
+                plane.stamp = td.wave_stamp;
+            }
+            t.wave_edges = std::ptr::from_mut(edges).cast();
+        }
         setup
     }
 }
@@ -1342,6 +1488,8 @@ pub unsafe extern "C" fn rav1g_decode_frame_submit(
         if image_state != 0 {
             copy_output(dec, cm, fb);
         }
+        // The clears of the slot by the GPU, behind everything that reads its grids.
+        record_slot_clears(dec);
         let mut perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_COPY as usize, perf_lap_start);
         if perf_t != 0 {
             let td = &*(*dec).curr_frame_data;

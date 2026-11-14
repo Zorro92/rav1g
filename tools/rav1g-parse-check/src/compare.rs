@@ -317,6 +317,7 @@ pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
         tile.gen_block_map = std::ptr::null_mut();
         tile.gen_block_map_wrp = std::ptr::null_mut();
         tile.gen_block_map_fast = std::ptr::null_mut();
+        tile.wave_edges = std::ptr::null_mut();
         tile.perf_inter = std::ptr::null_mut();
         tile
     };
@@ -499,7 +500,23 @@ pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
 
     compare_numbers(report, number, "block index list", &c.gen_indexes, &r.gen_indexes);
     compare_numbers(report, number, "block map", &c.block_map, &r.block_map);
-    compare_numbers(report, number, "wavefront grid", &c.iter_grid, &r.iter_grid);
+    if c.wave_edges == r.wave_edges {
+        compare_numbers(report, number, "wavefront grid", &c.iter_grid, &r.iter_grid);
+    } else {
+        // -wave check: one side keeps the wavefront in the grid, the other in the edges of its tiles and
+        // writes of the grid the one entry per transform block the shader reads. The lists above say that
+        // every block has the same iteration; here every entry the edges' side wrote has to be the grid's.
+        let (grid, edges) = if c.wave_edges { (r, c) } else { (c, r) };
+        // SAFETY: both parsers have finished the frame.
+        let (grid, edges) = unsafe { (grid.iter_grid.values(), edges.iter_grid.values()) };
+        for (index, (a, b)) in grid.iter().zip(edges).enumerate() {
+            if *b != -1 && a != b {
+                report.difference("wavefront entry", || {
+                    format!("frame {number}: wavefront grid[{index}]: the grid has {a}, the edges wrote {b}")
+                });
+            }
+        }
+    }
 
     // The palette blocks, tile by tile in the order they were read.
     for (tile, (pc, pr)) in c.palettes.iter().zip(&r.palettes).enumerate() {

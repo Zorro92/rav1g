@@ -1310,11 +1310,13 @@ cut, from 15 s, of the open stream `AV1/DVB-DASH/D_2.mp4` of the Netflix Open Co
 - The GPU is busy about 30 % of the time on this clip, so a slot is back, cleared, long before the
   decode thread asks for one. When `-asyncclear` was first timed (2026-11-11, two slots, the GPU as
   the limit) the decode thread waited for the slot as long as it had cleared before, and the flag
-  gave nothing ([test-player.md](test-player.md#pipeline-slots-and-clears--slots--asyncclear)).
+  gave nothing ([test-player.md](test-player.md#pipeline-slots-and-clears--slots--gpuclear--cpuclear--syncclear)).
 - **So the clears on the completion thread are the default** of the library
   (`rav1g::switches::set_async_clear`, `rav1g_set_async_clear`: on unless turned off), of `rav1g-dec`
   and of the test player. `-syncclear` puts them back on the decode thread, for the A/B and as the
-  path of before; `-asyncclear` is still accepted and names the default. In CI every run that does
+  path of before; `-asyncclear` is still accepted and names the default. (Since package 0.2.146.0
+  the default clears nothing, and the clears on the completion thread are `-cpuclear`:
+  [No clears by the CPU](#no-clears-by-the-cpu).) In CI every run that does
   not say `-syncclear` now has the clears on the completion thread (the whole set with both parsers,
   the cut streams, the order check, the memory check, the stage dumps, which `rust-equal` holds
   against the C++ decoder, whose clears are on the decode thread); the other side has the whole set
@@ -1549,7 +1551,7 @@ the oracle, and it leads the paired timing of the parsers and the timing of the 
   left, which neither array holds; the luma under a chroma-from-luma block, which is read as an
   area; blocks that are not intra, whose place has to read as "no iteration". Clearing the grid only
   around the intra blocks of a frame is the smaller step, but its regions are shared by the threads
-  of two tiles. Not done.
+  of two tiles. Not done here; done in [No clears by the CPU](#no-clears-by-the-cpu).
 - *The lists on a thread of their own*, behind the parse by a superblock row, would take them off
   the parse thread of a frame with one tile. Step 4 gives the parse of two frames two threads, lists
   included, so it comes first.
@@ -1559,6 +1561,277 @@ the oracle, and it leads the paired timing of the parsers and the timing of the 
   and the kept grid is a property of the slot. Both have to become the frame's when frames are values.
 - *The calls of the sink*: 3.4 ms a frame of `j4k40` on the console, first writes into the mode info
   pool and the grid (above). Fewer bytes there would mean another layout for the stages.
+
+### No clears by the CPU
+
+2026-11-13, behind the console's numbers of [Block lists and clears](#block-lists-and-clears-less-memory-traffic):
+with the defaults of package 0.2.141.0 the completion thread still cleared 3.5 MB for every 4K frame,
+in about 2.2 ms, all of it the wavefront grid; and when the clears first went to that thread the
+parse of `d2` got 3 ms a frame slower (24.5 to 27.4 ms), because the clears and the parse share the
+memory bandwidth the [slow state](#console-after-step-3-rav1d-is-the-default) leaves the processor.
+The parse is what a frame waits for (33.3 ms of the decode thread for `j4k40`, 27.0 for `d2`), the
+GPU is busy about 30 % of the time. So: no thread of the CPU clears anything of a slot for a frame.
+
+**What was cleared.** Two grids of a pipeline slot, for every frame (`rav1g_setup_frame_begin`,
+`crates/rav1g/src/host/frame.rs`): the mode info grid, a pointer per 4x4 unit, which has been kept
+from frame to frame since the section above, and the wavefront grid of intra prediction
+(`gen_intra_inter_grid`): an iteration number per 4x4 unit of luma and of chroma, set to "no
+iteration" (-1). 3,673,300 bytes for a 3840x2160 frame.
+
+**What the wavefront grid is for.** Intra prediction runs on the GPU as a wavefront: a transform block
+is predicted in the iteration behind the highest one of the neighbours it reads, and the host
+decides the iterations while it counts the block lists (`av1_mi_push_block`,
+`crates/rav1g/src/host/blocks.rs`). It wrote the iteration of a transform block along the block's
+right and bottom edge in the grid, and a later block read the units along the row above it and the
+column to its left from there. The clear is what made every other unit read as "no iteration": the
+units of inter and palette blocks, and units that are not decoded yet. The GPU reads the grid too,
+but one entry per transform block (`gen_pred_blocks.hlsl`: the block's own iteration, to find its
+list), an entry the host has just written.
+
+**Removed: the wavefront at the edges of the tiles.** What a block reads of the grid is never far
+from the border of what its tile has decoded: units in the row right above the block and in the
+column right to its left. So a tile now keeps that border and nothing else (`WaveEdges`, a struct per
+tile and plane):
+
+| Kept | Entries | Holds |
+| --- | --- | --- |
+| `above`, `above_end` | one per column of the plane | the iteration at the lowest decoded unit of the column; the row below the last transform block of the wavefront there |
+| `rows`: left | 32, one per row of a superblock row | the iteration at the rightmost decoded unit of the row |
+| `rows`: corner | 32 | the iteration at the unit above that one: above and to the left of the block that comes next in the row |
+| `left_end` | 32 | the column right of the last transform block of the wavefront in the row |
+
+- Every block is entered there when its lists are counted: a transform block of an intra block with
+  its iteration (`WavePlane::commit`), an inter or palette block with "no iteration"
+  (`WavePlane::pass`). The blocks of a tile come in an order in which a block is behind every block
+  above it and every block to its left, so the entry of a column is the unit right above the next
+  block of that column, and the entry of a row the unit right to the left of the next block of that
+  row.
+- A transform block reads the corner, the row above over its width and the column to its left over
+  its height, which are decoded whenever it may read them, and takes them from the three arrays
+  (`wavefront_iteration_edges`). A block predicted from luma (CFL) also waits for the luma under it:
+  that of the block itself, which was just counted, and for a block under 8x8 that of the blocks to
+  its left and above it, which is at the edges before the block's own luma is entered.
+- **Units further to the right and further down.** A block may also read above and to the right of
+  it, and below and to the left, where `has_top_right` and `has_bottom_left` of libaom say that
+  these units are decoded. For an inter-intra block the host asks them with the size of the block's
+  residual transform and predicts the block whole, so they can name units that are not decoded yet;
+  the cleared grid answered "no iteration" there. The edges answer the same: a transform block
+  leaves a mark of where it ends in its columns and rows, and such a unit counts only if the mark
+  says that the last transform block there ends right at the block that asks. The mark has the
+  number of the frame in it (the frames of a slot are counted), so one an earlier frame left never
+  passes for one of this frame, and one of an earlier superblock row or of a block further up names
+  another row or column. A block without an iteration writes no mark: where a mark is asked about
+  its units, the mark does not fit or the entry holds the block's "no iteration" by now.
+  **So the edges are not cleared either**: an entry that is read was written by the frame that
+  reads it.
+- One more thing of the old function that the new one has to repeat to give the same lists: a
+  chroma transform block outside the frame (the chroma loop has no clip at the frame's edge) has
+  counts below zero and reads nothing, not even the corner.
+- Of the grid the host now writes the one entry per transform block that the shader reads. The
+  grid is not cleared: what the shader reads of it, the frame has written.
+- Memory: the rows above are 12 bytes a column (4 KB of iterations and 8 KB of marks for the luma
+  of a 4K frame, half of that for chroma, per row of tiles: 17,856 bytes), the rest 1,072 bytes a
+  tile. They belong to the slot, grow to what its largest frame needs and are allocated from the
+  heap of the process (`WaveStore`), not from the host pool: the buffers of a decoder and the MEMORY
+  lines are those of before. A frame for which the process has no memory for them keeps the
+  wavefront in the grid.
+
+**Moved: the clear by the GPU (`-gpuclear`).** The other way to take a clear off the CPU, built as a
+switch: the wavefront stays in the grid, and the last commands of the frame's command list clear the
+grids of its slot (`record_slot_clears`): `fill_buffer.hlsl`, the shader that clears the residuals,
+over the bytes the frame's setup cleared, behind the output copy, which is the last thing of a frame
+that reads anything of the slot. (The output pass itself is untouched: copy and film grain are one
+pass as before.) The command list is through before the frame's fence signals, the slot goes back to
+its pool on that fence, so the next frame of the slot finds the grids as its own clear would leave
+them. The rule about sizes of the clears on the completion thread holds unchanged: what is cleared
+behind a frame is what the frame cleared, and a frame of another size clears for itself.
+
+- *The heap.* The grids are `HostRW` buffers: a custom heap in the memory pool L0 with the page
+  property write-back, in the state `GENERIC_READ`. D3D12 fixes the state of a buffer only in an
+  upload or a readback heap; a buffer of a custom heap can be in any state, if it was created with
+  the flag for it. The coefficient buffer has been such a buffer from the start (a custom heap,
+  write-combined, written by the CPU and zeroed by the IDCT shaders). For `-gpuclear` the two grids
+  are created with `ALLOW_UNORDERED_ACCESS`, and the clear moves them to `UNORDERED_ACCESS` and
+  back. Only a decoder that is created while the mode is set has such grids, so **a decoder without
+  the flag creates nothing a package before did not create**; in a decoder created without it the
+  mode is the clears on the completion thread.
+- *Does the CPU see what the GPU wrote?* The host reads and writes the grids through the mapping
+  it has had since the creation, made with an empty read range. On an adapter with one memory for
+  both and coherent caches (`CacheCoherentUMA`: WARP, and what the console reports) that is the
+  same memory and the caches agree, so it does; Bale measured the other direction there (the GPU
+  reading what the CPU wrote through a cached mapping). On an adapter without it the mapping would
+  have to be made again with the range to read. **Not checked on the console**: a run with
+  `-gpuclear -md5_frame_check` says it, since a grid the CPU sees stale gives wrong iterations.
+- With `-gpuclear` the mode info grid is cleared by the GPU as well where it is cleared at all
+  (`-parser c`, `-parseopt cleargrid`).
+
+**The switch.** One setting with four values; the three that are not the default keep the wavefront
+in the grid, which is the path of every package so far:
+
+| | Rust (`rav1g::switches::set_clears`) | C (`rav1g_set_clears`) | `rav1g-dec`, test player |
+| --- | --- | --- | --- |
+| The wavefront at the edges of the tiles, nothing cleared (default) | `Clears::NotNeeded` | `RAV1G_CLEARS_NOT_NEEDED` | no flag |
+| The grid, cleared by the frame's command list | `Clears::Gpu` | `RAV1G_CLEARS_GPU` | `-gpuclear` |
+| The grid, cleared by the completion thread (default of 0.2.140 to 0.2.144) | `Clears::CompletionThread` | `RAV1G_CLEARS_COMPLETION_THREAD` | `-cpuclear` (`-asyncclear`) |
+| The grid, cleared by the decode thread (default up to 0.2.139) | `Clears::DecodeThread` | `RAV1G_CLEARS_DECODE_THREAD` | `-syncclear` |
+
+It is a switch of the process like the one before it (`av1_set_clears` of `dx/av1_perf.h`), read by
+every frame at its setup and set while no frame is in flight; `RAV1G_CLEARS_GPU` has to be set
+before the decoder is created. `set_async_clear` / `rav1g_set_async_clear` stay as its older form
+(true: the default; false: the decode thread). The test player creates a decoder of its own for a
+task with `-gpuclear`.
+
+**What each cleared buffer does now**, for a 3840x2160 frame with one tile:
+
+| Buffer | Up to 0.2.144, default | Now, default | `-gpuclear` | `-cpuclear` | `-syncclear` |
+| --- | --- | --- | --- | --- | --- |
+| Wavefront grid, 3,673,300 bytes | cleared by the completion thread | **not cleared, not needed** | cleared by the GPU | completion thread | decode thread |
+| Mode info grid, 4,177,920 bytes, rav1d's parse | kept, not cleared | kept, not cleared | kept | kept | kept |
+| Mode info grid with `-parser c` or `-parseopt cleargrid` | completion thread | completion thread | cleared by the GPU | completion thread | decode thread |
+| The edges of the wavefront (new) | | not cleared | | | |
+| Counters of a tile's block lists and the tile's descriptor, 12,368 bytes a tile | tile thread | tile thread | tile thread | tile thread | tile thread |
+| Lists of the wavefront iterations past the first 272, 40 KiB per 1,024 iterations | tile thread | tile thread | tile thread | tile thread | tile thread |
+| Coefficients | zeroed by the IDCT shaders as they are read | the same | | | |
+
+So without a flag the CPU clears 12,368 bytes a tile and frame (272 of the tile's descriptor and
+12,096 of counters, which its tile thread counts the block lists in right after), and for a frame
+whose wavefront is long 40 KiB more per 1,024 iterations: 0.3 % of the 3.5 MB. These counters are
+the tile thread's own working memory, read and written by it as soon as they are cleared, so a
+clear by the GPU would only make the thread fetch them; they are left where they are. They do not
+shrink with the tile: a 1080p frame with eight tiles has 98,944 bytes of them.
+
+**What is the same.** The iteration of every transform block, and with it every list.
+
+- The oracle (`rav1g-parse-check`) has both ways (`-wave edges`, the default; `-wave grid`) and a
+  mode that holds one against the other: `-wave check` keeps the wavefront in the grid for the
+  entropy decoder of libaom and at the edges for rav1d. The block lists and the block maps are then
+  equal only if every transform block of the frame gets the same iteration either way, and every
+  entry of the grid the edges' side wrote has to be the grid's. The edges start as a pattern that no
+  iteration has, so an entry that is read without having been written in its frame shows as a
+  block in the tile's last iteration. Equal on the conformance set, with one thread and with four,
+  with the lists counted at the end of a tile, on the local synthetic streams (lossless,
+  monochrome, screen content, 128x128 superblocks with tiles, reference scaling, superres) and on
+  300 frames each of `j4k40` (4.29 million transform blocks) and `t40x1ld` (1.63 million). That is
+  where the special cases above were found: the inter-intra blocks in the first inter frame of the
+  first vector, the chroma blocks outside the frame in a lossless stream.
+- Under wine (the decoder on lavapipe, the 244 vectors of AOM): the frames are those of the
+  references with the default, with `-gpuclear`, `-cpuclear` and `-syncclear`; with `-parser c` and
+  `-parser c -gpuclear`; with `-poisonbuf` and `-poisonbuf -gpuclear -parseopt cleargrid`; with four
+  threads, and with four threads, three slots and `-gpuclear`; through `rav1g.h` with and without
+  `-gpuclear`. CI has the same on WARP, on the whole set.
+- The stage dumps of `-cpuclear` (the grid) are equal to those of the default (the edges) byte for
+  byte, the lists of the prediction blocks among them; CI holds them against each other
+  (`rust-parsers-equal`).
+
+**`-poisonbuf` and `-poisonmi`.** The grids start as 0xA5 bytes with `-poisonbuf`, as before. With
+the default nothing clears the wavefront grid behind that, so an entry the shader reads without the
+host having written it is a number no list has, not a "no iteration" a clear left there: the flag
+now tests more of this grid than it did. The edges are filled with the byte again for every frame
+(like the constants of the stages, whose memory is also used again from frame to frame): an entry
+that is read unwritten is then "no iteration" where the block there has one, which is a block
+predicted too early, and a mark that names no decoded unit. With `-gpuclear` the fill of the
+creation is what the first frame of a slot clears on the decode thread, as with the other two
+flags; from then on the grid holds what the GPU's clear left, and a clear that did not reach a byte
+the next frame reads would show as that frame's iterations. The mode info pool of `-poisonmi` is
+not touched by any of this.
+
+**Measured on the development machine** (`rav1g-parse-check -time`, one thread, the block lists in ms a
+frame, two runs each; the machine's memory is fast, so this is instructions, not traffic):
+
+| Clip | The wavefront in the grid (`-wave grid`) | At the edges (default) |
+| --- | ---: | ---: |
+| `j4k40` | 1.396, 1.429, 1.422 | 1.482, 1.472, 1.471 |
+| `t40x1ld` | 0.545, 0.539, 0.547 | 0.530, 0.504, 0.499 |
+| `d2` (the cut of CI, 30 temporal units) | 0.920, 0.909, 0.930 | 1.095, 1.075, 1.070 |
+
+- A transform block costs less at the edges than in the grid (`t40x1ld`). What costs is that every
+  block without an iteration now enters its border, where with the grid it did nothing: about 12 ns
+  a block here, and `d2` has 13,000 blocks a frame, nearly all of them inter blocks. So where memory
+  is fast the lists are 0.05 to 0.16 ms a frame slower on two of the three clips, and the clear
+  they replace is small too (0.17 ms for the 3.5 MB under wine on this machine).
+- The console is the other way round: the clear is 2.2 ms a frame there and takes bandwidth from
+  the parse, and the lists by the grid read and write memory that is not in the cache, which the
+  edges do not. Its `cpu parse: block lists` line and its frames per second decide; `-gpuclear`
+  is the way without the border writes, if they should cost more there than the grid does.
+- A variant in which a block without an iteration writes only its corners, and every read is held
+  against a mark instead, is as exact and slower where a frame has many intra blocks (`j4k40` 1.66
+  to 1.71 ms, `t40x1ld` 0.58 to 0.60): not taken.
+
+**Measured under wine** (the decoder on lavapipe; bytes cleared for a frame of the 30 temporal unit
+cut of `d2`, from the frame lines of the timing run, `testing/conformance/clears_check.py`):
+
+| Way | CPU, decode and tile threads | CPU, completion thread | GPU |
+| --- | ---: | ---: | ---: |
+| no flag | 12,368 | 0 | 0 |
+| `-gpuclear` | 12,368 | 0 | 3,673,300 |
+| `-cpuclear` (the default of 0.2.144) | 12,368 | 3,673,300 | 0 |
+| `-syncclear` | 3,685,668 | 0 | 0 |
+| `-parseopt cleargrid` | 12,368 | 4,177,920 | 0 |
+| `-gpuclear -parseopt cleargrid` | 12,368 | 0 | 7,851,220 |
+| `-parser c` | 12,368 | 4,177,920 | 0 |
+| `-gpuclear -parser c` | 12,368 | 0 | 7,851,220 |
+
+These are the frames from the third on. The first frame of each of the two slots clears on the
+decode thread, whatever the way (first use: 4.2 MB of the mode info grid without a flag, 7.9 MB
+of both grids with one of the three). The clear of 3.5 MB is a stage of 0.92 ms on lavapipe, a
+software rasteriser (1.0 % of what the stages of a frame take there); what it is on a GPU is the
+console's `gpu slot_clear` line.
+
+**CI.** A job of its own, `rust-clears`, next to `rust-switches` (which had the `-syncclear` run):
+`clears_check.py` on the 2160p stream and on the stream with eight tiles (the table above as a
+check: without a flag no byte on the completion thread or the GPU and less than 64 KiB a tile on
+the tile threads; with `-gpuclear` every frame's command list clears, with the stage in it;
+`-cpuclear` clears the same bytes on the completion thread; `-syncclear` on the decode thread;
+both grids with `-parser c` and `-parseopt cleargrid`); the whole set and the memory check with
+`-gpuclear`; the whole set and the stage dumps with `-cpuclear`; the whole set with `-syncclear`; a
+part of the set with `-gpuclear -parser c` and with `-gpuclear -poisonbuf -parseopt cleargrid -slots
+3 -t 4`. `rust-cross-run` decodes the whole set with `-gpuclear` with the program of the Linux
+build, the player smoke test has a task with each flag, and `parse-check` runs `-wave check` with
+one thread and with four and `-wave grid` once.
+
+**For the console**, all in the slow state (the warm-up task first), `-gputime`, the same clip in
+one launch:
+
+```text
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -cpuclear
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -gpuclear
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -syncclear
+```
+
+The first line is package 0.2.144.0. To read: `cleared per frame, bytes` (3.5 MB on the completion
+thread in the first line, on the GPU in the third, on the decode thread in the fourth; a few KB on
+the tile threads in the second), `cpu clears, completion thread`, `gpu clears, end of the command
+list` and the stage `gpu slot_clear` (what the clear costs the GPU), `cpu parse: block lists` (the
+lists, where the edges are), `cpu entropy/tile decode, thread sum` (the parse with everything in
+it, which the clears of the first line take bandwidth from), `cpu decode thread, setup to submit`,
+and the frames per second. The md5 of every frame with each, in launches of their own
+([test-player.md](test-player.md#same-output-md5-of-every-frame-3)): the line without a flag and
+the line with `-gpuclear` are the two the console has not run, and `-gpuclear` is the one that
+says whether its processor sees what its GPU wrote into the grids.
+
+**For step 4** (frames in parallel, frames as values, slots per frame).
+
+- The edges are the frame's: memory of its slot, a stamp per frame of the slot, pointers a tile
+  gets at its setup. Two frames in parse on two slots share nothing of it. When a frame becomes a
+  value, `WaveStore` and the stamp go with the slot it holds, as the kept mode info grid does.
+- The default has no state between two frames of a slot for the wavefront any more: no "clean"
+  mark, no size to match. The marks stay for the three flags and for the mode info grid of
+  `-parser c`, until step 6 removes that parser.
+- The clear by the GPU is ordered by the frame's own fence and touches only the frame's slot, so
+  it holds with frames in parallel as it is. It is the path to take if step 4 or 5 brings a buffer
+  that does need a clear per frame: `record_slot_clears` is a list of (buffer, bytes, value).
+- The switch is read from a static of the process at the setup of a frame
+  (`frame::clears_mode`), like the shader switches; `av1_mi_push_block` still finds the frame
+  through "the current frame" of the decoder, as noted above.
+
+**Open.**
+
+- The console: the four lines above, and the md5 set with the default and with `-gpuclear`.
+- The counters of a tile's block lists (12,368 bytes a tile and frame) and the lists of long
+  wavefronts are what the CPU still clears. Both are counters the tile thread uses at once.
+- The intra part of the block lists now works in the cache; what it costs on the console is
+  the `cpu parse: block lists` line of the run above.
 
 ### Colour description and HDR metadata
 

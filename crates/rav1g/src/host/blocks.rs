@@ -14,9 +14,23 @@
 //! into the lists of the tile (`av1_tile_data::gen_block_map`: inter blocks by type and size, intra
 //! blocks by wavefront iteration and size, reconstruction blocks by size) and writes the index each of
 //! them has in its list behind the block's index base (`gen_indexes`); the shader that writes the block
-//! records finds them there. For intra blocks it also keeps the wavefront: a grid with the iteration of
-//! the block at every 4x4 unit, from which a block takes the highest iteration of the neighbours it
-//! reads, plus one.
+//! records finds them there. For intra blocks it also keeps the wavefront: a transform block takes the
+//! highest iteration of the neighbours it reads, plus one.
+//!
+//! Where the iterations of the neighbours are kept (docs/phase2-rav1d.md, "No clears by the CPU"):
+//!
+//! - **In the edges of the tile** ([`WaveEdges`], the default): the iteration at the lowest decoded unit
+//!   of every column, at the rightmost decoded unit of every row of the superblock row, and at the unit
+//!   above that one, with where the decoded units end. A transform block reads units along the row above
+//!   it and the column to its left, which are those, and the frame's memory is not touched for them: of
+//!   the slot's wavefront grid only the one entry per transform block that `gen_pred_blocks.hlsl` reads
+//!   is written, so the grid needs no clear. Neither do the edges: an entry that is read is one of this
+//!   frame.
+//! - **In the slot's wavefront grid** (`av1_tile_data::wave_edges` null): an entry per 4x4 unit, written
+//!   along the right and the bottom edge of every transform block and read back by the blocks next to
+//!   it. Every other unit has to read as "no iteration", so the grid is cleared for every frame.
+//!
+//! Both give every transform block the same iteration.
 
 use std::ffi::c_int;
 
@@ -292,6 +306,156 @@ unsafe fn take(list: *mut c_int, by: c_int) -> c_int {
     }
 }
 
+/// The rows of 4x4 units whose edge a tile keeps: those of a superblock of 128 samples. A transform block
+/// reads the column to its left down to the end of its superblock at most.
+const WAVE_ROWS: usize = 32;
+const WAVE_ROW_MASK: usize = WAVE_ROWS - 1;
+
+/// The value of a unit no intra transform block of the frame has written: the block there is predicted
+/// before the wavefront starts (an inter block, a palette block).
+const NO_ITERATION: c_int = -1;
+
+/// The edges of a tile's intra wavefront in one plane: what the wavefront grid holds at the units a
+/// transform block can still read, which are the ones along the border of what the tile has decoded.
+///
+/// With `G(c, r)` for the iteration of the transform block at the unit in column `c` and row `r` of the
+/// plane ([`NO_ITERATION`] where the block is none of the wavefront, and where nothing is decoded yet,
+/// as in a grid that was cleared for the frame), and the blocks of a tile decoded in an order in which a
+/// block comes behind every block above it and every block to its left:
+///
+/// - `above[c]` is `G` at the lowest decoded unit of column `c`, and `above_end[c]` the row below that
+///   unit;
+/// - `rows[r & 31]` has, for the rows of the superblock row that is being decoded, `G` at the rightmost
+///   decoded unit of row `r` ([`LEFT`]) and `G` at the unit above that one ([`CORNER`]): the unit above
+///   and to the left of the block that comes next in row `r`, if `r` is that block's first row;
+///   `left_end[r & 31]` is the column to the right of the rightmost decoded unit.
+///
+/// Every block of the tile is entered when it is decoded: a transform block with its iteration
+/// ([`WavePlane::commit`]), a block without one as "no iteration" ([`WavePlane::pass`]). The units above
+/// a block (over its width), to its left (over its height) and at its
+/// corner are decoded whenever the block may read them, so their entries were written by the blocks
+/// that lie there in this frame. The units further to the right in the row above, and further down in the
+/// column to the left, are read on the word of `has_top_right` and `has_bottom_left`, which for an
+/// inter-intra block are asked with the size of its residual transform and can name units that are not
+/// decoded yet (a cleared grid has "no iteration" there). For those the ends say whether the unit is
+/// the decoded one: the ends carry the stamp of the frame (`stamp`: the frame's number on its slot,
+/// shifted left by 32), so an entry of an earlier frame never says so, and one of an earlier superblock
+/// row or of a block further up names another row or column. So nothing has to be cleared between
+/// frames.
+#[repr(C)]
+pub struct WavePlane {
+    /// By the column of the plane in the frame; valid for the columns of the tile, and for those of a
+    /// block that reaches past the right edge of the frame.
+    pub above: *mut c_int,
+    pub above_end: *mut i64,
+    pub rows: [[c_int; 2]; WAVE_ROWS],
+    pub left_end: [i64; WAVE_ROWS],
+    pub stamp: i64,
+}
+
+/// In [`WavePlane::rows`]: the iteration at the rightmost decoded unit of the row.
+const LEFT: usize = 0;
+/// In [`WavePlane::rows`]: the iteration at the unit above that one.
+const CORNER: usize = 1;
+
+/// `count` numbers from `first` on become `value`. The counts of a block are powers of two; the small ones,
+/// which most blocks have, are a store or two here and not a call.
+///
+/// # Safety
+/// `first` is valid for writing `count` values.
+#[inline(always)]
+unsafe fn fill<T: Copy>(first: *mut T, count: usize, value: T) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        match count {
+            1 => first.write(value),
+            2 => first.cast::<[T; 2]>().write_unaligned([value; 2]),
+            4 => first.cast::<[T; 4]>().write_unaligned([value; 4]),
+            8 => first.cast::<[T; 8]>().write_unaligned([value; 8]),
+            _ => {
+                for at in 0..count {
+                    first.add(at).write(value);
+                }
+            }
+        }
+    }
+}
+
+impl WavePlane {
+    /// The iterations of a block of `w` x `h` units at `col`, `row` of the plane that is decoded: `iter` at
+    /// the lowest unit of its columns and at the rightmost unit of its rows.
+    ///
+    /// # Safety
+    /// `above` is valid for the columns of the block.
+    #[inline(always)]
+    unsafe fn enter(&mut self, col: c_int, row: c_int, w: c_int, h: c_int, iter: c_int) {
+        let (w, h) = (w as usize, h as usize);
+        let first = row as usize & WAVE_ROW_MASK;
+        // SAFETY: the caller's contract, and the rows of the block when they do not wrap.
+        unsafe {
+            let above = self.above.offset(col as isize);
+            // What was above the block's right column is above and to the left of the block that follows
+            // in the block's first row; in its other rows that unit is one of the block's own.
+            let above_right = *above.add(w - 1);
+            fill(above, w, iter);
+            if first + h <= WAVE_ROWS {
+                // A block lies at a multiple of its height: its rows do not wrap.
+                fill(self.rows.as_mut_ptr().add(first), h, [iter; 2]);
+            } else {
+                for it in 0..h {
+                    self.rows[(first + it) & WAVE_ROW_MASK] = [iter; 2];
+                }
+            }
+            self.rows[first][CORNER] = above_right;
+        }
+    }
+
+    /// A transform block of `w` x `h` units at `col`, `row` of the plane is decoded, with its iteration:
+    /// the iterations, and where the decoded units of its columns and rows end now.
+    ///
+    /// # Safety
+    /// `above` and `above_end` are valid for the columns of the block.
+    #[inline(always)]
+    unsafe fn commit(&mut self, col: c_int, row: c_int, w: c_int, h: c_int, iter: c_int) {
+        let below = self.stamp | i64::from(row + h);
+        let right = self.stamp | i64::from(col + w);
+        let (first, h) = (row as usize & WAVE_ROW_MASK, h as usize);
+        // SAFETY: the caller's contract, and the rows of the block when they do not wrap.
+        unsafe {
+            self.enter(col, row, w, h as c_int, iter);
+            fill(self.above_end.offset(col as isize), w as usize, below);
+            if first + h <= WAVE_ROWS {
+                fill(self.left_end.as_mut_ptr().add(first), h, right);
+            } else {
+                for it in 0..h {
+                    self.left_end[(first + it) & WAVE_ROW_MASK] = right;
+                }
+            }
+        }
+    }
+
+    /// A block of `w` x `h` units at `col`, `row` of the plane that is none of the wavefront is decoded
+    /// (an inter block, a palette block): [`NO_ITERATION`] at its units. Where the decoded units end is
+    /// left as it was: the ends are asked only about units that may not be decoded, which read as "no
+    /// iteration" as well, and an end that an earlier transform block left names a unit further up or
+    /// further left than the one that is asked for, or the entry it is asked about holds this block's
+    /// "no iteration" by now.
+    ///
+    /// # Safety
+    /// `above` is valid for the columns of the block.
+    #[inline(always)]
+    unsafe fn pass(&mut self, col: c_int, row: c_int, w: c_int, h: c_int) {
+        // SAFETY: the caller's contract.
+        unsafe { self.enter(col, row, w, h, NO_ITERATION) };
+    }
+}
+
+/// The edges of a tile's intra wavefront (`av1_tile_data::wave_edges`): luma, then chroma.
+#[repr(C)]
+pub struct WaveEdges {
+    pub planes: [WavePlane; 2],
+}
+
 /// What the intra part needs to know of a plane of the block.
 struct IntraPlane {
     /// The wavefront grid of the plane at the block, and the distance of its rows.
@@ -329,6 +493,8 @@ pub unsafe extern "C" fn av1_mi_push_block(pbi: *mut AV1Decoder, cm: *mut AV1_CO
         let tile = &mut *xd.tile_data;
         let index_arr = tile.gen_indexes;
         let map = tile.gen_block_map;
+        // The edges of the tile's wavefront; null when the frame keeps the wavefront in the slot's grid.
+        let wave = tile.wave_edges.cast::<WaveEdges>();
 
         (**xd.mi).index_base = tile.gen_index_ptr;
         let mi = &**xd.mi;
@@ -669,6 +835,37 @@ pub unsafe extern "C" fn av1_mi_push_block(pbi: *mut AV1Decoder, cm: *mut AV1_CO
             // A block of 128 samples is predicted as units of 64.
             let unit_x_log = c_int::from(bw_log == 5 && !is_intrabc);
             let unit_y_log = c_int::from(bh_log == 5 && !is_intrabc);
+            // With the edges: the highest iteration of the luma under the block's chroma, which a block
+            // predicted from luma (CFL) waits for. The luma of the block itself is counted below. A block
+            // under 8x8 carries the chroma of the blocks to its left and above it too: their luma is at
+            // the edges now, before the block's own luma is entered there.
+            let mut luma_under = NO_ITERATION;
+            if let Some(edges) = wave.as_ref()
+                && !is_chroma_ref
+                && !uv_use_palette
+                && !is_inter_intra
+                && u32::from(mi.uv_mode) == UV_CFL_PRED as u32
+                && (bw == 1 || bh == 1)
+            {
+                let luma = &edges.planes[0];
+                // The luma units under the chroma transform block: twice its size, from the even unit.
+                let (first_col, first_row) = (mi_col & !1, mi_row & !1);
+                let end_col = first_col + (2 << (TX_SIZE_WIDE_LOG2[tx_sizes[1] as usize] - 2));
+                let end_row = first_row + (2 << (TX_SIZE_HIGH_LOG2[tx_sizes[1] as usize] - 2));
+                if mi_col > first_col {
+                    for row in mi_row..end_row {
+                        luma_under = luma_under.max(luma.rows[row as usize & WAVE_ROW_MASK][LEFT]);
+                    }
+                }
+                if mi_row > first_row {
+                    for col in mi_col..end_col {
+                        luma_under = luma_under.max(*luma.above.offset(col as isize));
+                    }
+                }
+                if mi_col > first_col && mi_row > first_row {
+                    luma_under = luma_under.max(luma.rows[mi_row as usize & WAVE_ROW_MASK][CORNER]);
+                }
+            }
             if !y_use_palette {
                 let txw = if is_intrabc {
                     bw_log.min(4)
@@ -806,6 +1003,23 @@ pub unsafe extern "C" fn av1_mi_push_block(pbi: *mut AV1Decoder, cm: *mut AV1_CO
                                     iter = 0;
                                     tile.gen_intra_iter_y = iter.max(tile.gen_intra_iter_y);
                                     *iter_grid_blk.offset((iter_grid_stride + subblk_w) as isize) = iter;
+                                } else if let Some(edges) = wave.as_mut() {
+                                    iter = wavefront_iteration_edges(
+                                        &plane,
+                                        &mut edges.planes[0],
+                                        mi_col + col_off,
+                                        mi_row + row_off,
+                                        above_left,
+                                        above_available,
+                                        left_available,
+                                        NO_ITERATION,
+                                        tile.gen_intra_iter_y,
+                                        tile.gen_intra_max_iter,
+                                    );
+                                    tile.gen_intra_iter_y = iter.max(tile.gen_intra_iter_y);
+                                    luma_under = luma_under.max(iter);
+                                    // The one entry of the grid that gen_pred_blocks.hlsl reads.
+                                    *iter_grid_blk.offset((iter_grid_stride + subblk_w) as isize) = iter;
                                 } else {
                                     iter = wavefront_iteration(
                                         &plane,
@@ -834,6 +1048,9 @@ pub unsafe extern "C" fn av1_mi_push_block(pbi: *mut AV1Decoder, cm: *mut AV1_CO
                         }
                     }
                 }
+            } else if let Some(edges) = wave.as_mut() {
+                // The luma of a palette block is not of the wavefront.
+                edges.planes[0].pass(mi_col, mi_row, bw, bh);
             }
 
             if !uv_use_palette && !is_chroma_ref {
@@ -956,6 +1173,23 @@ pub unsafe extern "C" fn av1_mi_push_block(pbi: *mut AV1Decoder, cm: *mut AV1_CO
                                     iter = 0;
                                     tile.gen_intra_iter_uv = iter.max(tile.gen_intra_iter_uv);
                                     *iter_grid_blk.offset((iter_grid_stride_uv + subblk_w) as isize) = iter;
+                                } else if let Some(edges) = wave.as_mut() {
+                                    iter = wavefront_iteration_edges(
+                                        &plane,
+                                        &mut edges.planes[1],
+                                        mi_col_uv + col_off,
+                                        mi_row_uv + row_off,
+                                        above_left,
+                                        above_available,
+                                        left_available,
+                                        // A CFL block also reads the luma under it.
+                                        if is_cfl { luma_under } else { NO_ITERATION },
+                                        tile.gen_intra_iter_uv,
+                                        tile.gen_intra_max_iter,
+                                    );
+                                    tile.gen_intra_iter_uv = iter.max(tile.gen_intra_iter_uv);
+                                    // The one entry of the grid that gen_pred_blocks.hlsl reads.
+                                    *iter_grid_blk.offset((iter_grid_stride_uv + subblk_w) as isize) = iter;
                                 } else {
                                     // A CFL block also reads the luma under it.
                                     let mut luma_iter = -1;
@@ -1000,6 +1234,16 @@ pub unsafe extern "C" fn av1_mi_push_block(pbi: *mut AV1Decoder, cm: *mut AV1_CO
                         }
                     }
                 }
+            } else if !is_chroma_ref && let Some(edges) = wave.as_mut() {
+                // The chroma of a palette block.
+                edges.planes[1].pass(mi_col >> 1, mi_row >> 1, 1 << bw_log_uv, 1 << bh_log_uv);
+            }
+        } else if let Some(edges) = wave.as_mut() {
+            // An inter block is predicted before the wavefront: the intra blocks next to it do not wait
+            // for it.
+            edges.planes[0].pass(mi_col, mi_row, bw, bh);
+            if !is_chroma_ref {
+                edges.planes[1].pass(mi_col >> 1, mi_row >> 1, 1 << bw_log_uv, 1 << bh_log_uv);
             }
         }
 
@@ -1103,6 +1347,77 @@ unsafe fn wavefront_iteration(
         for it in 1..=subblk_w {
             *iter_grid_blk.offset(it + subblk_h * stride) = iter;
         }
+        iter
+    }
+}
+
+/// [`wavefront_iteration`] with the iterations of the neighbours at the edges of the tile instead of in
+/// the wavefront grid: the transform block of `plane` at `col`, `row` of the plane takes its iteration
+/// from the units the grid version reads (the row above from the unit above and to the left, if
+/// `above_left`, to `above_available` units; `left_available` units of the column to the left; `other`),
+/// and is entered at the edges with it.
+///
+/// # Safety
+/// `edges` are the edges of the block's tile in the plane, with every block the tile has decoded; the
+/// units over the block's width in the row above are decoded if `above_available` is not 0, the ones over
+/// its height in the column to its left if `left_available` is not 0, and the corner if `above_left`.
+#[expect(clippy::too_many_arguments, reason = "the arguments of wavefront_iteration, and where the block is")]
+#[inline(always)]
+unsafe fn wavefront_iteration_edges(
+    plane: &IntraPlane,
+    edges: &mut WavePlane,
+    col: c_int,
+    row: c_int,
+    above_left: c_int,
+    above_available: c_int,
+    left_available: c_int,
+    other: c_int,
+    last_iter: c_int,
+    max_iter: c_int,
+) -> c_int {
+    let (w, h) = (1 << plane.txw, 1 << plane.txh);
+    // SAFETY: the caller's contract: the columns read are columns of the tile.
+    unsafe {
+        let above = edges.above.offset(col as isize);
+        let mut iter = other;
+        // (The grid version reads the row above from the corner to the last unit that counts: for a
+        // chroma block outside the frame, whose count is below 0, not even the corner.)
+        if above_left != 0 && above_available >= 0 {
+            iter = iter.max(edges.rows[row as usize & WAVE_ROW_MASK][CORNER]);
+        }
+        // Over the width of the block the row above is decoded; further to the right a unit counts if it
+        // is the decoded one of its column.
+        for it in 0..above_available.min(w) {
+            iter = iter.max(*above.offset(it as isize));
+        }
+        if above_available > w {
+            let above_end = edges.above_end.offset(col as isize);
+            let here = edges.stamp | i64::from(row);
+            for it in w..above_available {
+                if *above_end.offset(it as isize) == here {
+                    iter = iter.max(*above.offset(it as isize));
+                }
+            }
+        }
+        // The same for the column to the left, over the height of the block and further down. (The
+        // counts are below 0 for a chroma block outside the frame: nothing is read then.)
+        for it in 0..left_available.min(h) {
+            iter = iter.max(edges.rows[(row + it) as usize & WAVE_ROW_MASK][LEFT]);
+        }
+        if left_available > h {
+            let here = edges.stamp | i64::from(col);
+            for it in h..left_available {
+                if edges.left_end[(row + it) as usize & WAVE_ROW_MASK] == here {
+                    iter = iter.max(edges.rows[(row + it) as usize & WAVE_ROW_MASK][LEFT]);
+                }
+            }
+        }
+        iter = iter.max(NO_ITERATION) + 1;
+        if plane.is_intrabc {
+            iter = last_iter + 1;
+        }
+        iter = iter.min(max_iter);
+        edges.commit(col, row, w, h, iter);
         iter
     }
 }

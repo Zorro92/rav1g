@@ -63,6 +63,10 @@ static av1_perf_frame MakeFrame(int n, double complete_ms, int show) {
   f.cpu_ms[AV1_PERF_CPU_MEMSET_TILE] = 0.25;
   f.cpu_ms[AV1_PERF_CPU_ASYNC_CLEAR] = 3.5;
   f.async_clear_bytes = 6 * 1024 * 1024;
+  // -gpuclear: the clears at the end of the command list. (A real frame has them in one of the three places.)
+  f.gpu_stage_ms[AV1_PERF_GPU_SLOT_CLEAR] = 0.5;
+  f.gpu_stage_hits[AV1_PERF_GPU_SLOT_CLEAR] = 1;
+  f.gpu_clear_bytes = 4 * 1024 * 1024;
   f.complete_ms = complete_ms;
   return f;
 }
@@ -269,10 +273,17 @@ int main() {
                      "8.0 MB cleared per frame"));
     CHECK(Has(lines, "cpu clears, completion thread              90    3.500    3.500    3.500    3.500   "
                      "6.0 MB cleared per frame"));
+    CHECK(Has(lines, "gpu clears, end of the command list        90    0.500    0.500    0.500    0.500   "
+                     "4.0 MB cleared per frame"));
+    CHECK(Has(lines, "gpu slot_clear"));
+    CHECK(Has(lines, "cleared per frame, bytes: cpu decode and tile threads 8388608, cpu completion thread 6291456, "
+                     "gpu 4194304"));
     CHECK(Has(lines, "cpu async_clear"));
     CHECK(Has(lines, "cpu wait_slot"));
     CHECK(Has(st.FrameLines(), " memset=1.00 memset_tile=0.25 "));
     CHECK(Has(st.FrameLines(), " async_clear=3.50"));
+    CHECK(Has(st.FrameLines(), " slot_clear=0.50 |"));
+    CHECK(Has(st.FrameLines(), " | cleared memset=8388608 completion=6291456 gpu=4194304"));
     CHECK(st.FrameLines().size() == 100);
     CHECK(Has(st.FrameLines(), "iters=40 iv2=1 idisp=12 ibarr=9 igroups=300 ipasses=2400 tiles=4"));
     for (size_t i = 0; i < lines.size(); ++i) {

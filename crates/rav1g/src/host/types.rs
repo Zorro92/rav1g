@@ -32,6 +32,7 @@ use windows::Win32::Graphics::Direct3D12::{
     ID3D12CommandQueue, ID3D12Device, ID3D12PipelineState, ID3D12RootSignature,
 };
 
+use super::blocks::WaveEdges;
 use super::memory::Allocator;
 use super::thread::{FramePool, Queue};
 use crate::gpu::{CommandAllocator, CommandList, Fence, Readback, TimestampQueries};
@@ -273,7 +274,12 @@ pub struct av1_frame_thread_data {
     /// Held while the frame takes its second slot: the decode thread or a tile thread.
     pub sec_data_mutex: Mutex<()>,
     pub output_only: c_int,
-    pub async_clear: c_int,
+    /// What the frame on the slot does about the clears of the slot's grids (`AV1_CLEARS_*` of
+    /// `dx/av1_perf.h`): the switch as the frame's setup found it.
+    pub clears: c_int,
+    /// With `AV1_CLEARS_GPU`: the frame's command list ends with the clears (`clear_mi_bytes`,
+    /// `clear_iter_bytes`).
+    pub gpu_cleared: c_int,
     pub clear_pending: c_int,
     pub clear_mi_bytes: usize,
     pub clear_iter_bytes: usize,
@@ -285,6 +291,19 @@ pub struct av1_frame_thread_data {
     /// decoder that keeps the grid (`Av1Core::keep_mi_grid`).
     pub kept_grid: [c_int; 3],
     pub kept_grid_bytes: usize,
+    /// The frame keeps its intra wavefront in the edges of its tiles and not in the wavefront grid
+    /// (`AV1_CLEARS_NOT_NEEDED`): the edges, for the tile threads, which each write those of their tile
+    /// and the columns of their tile in the rows above (`setup_tile`). The memory is `wave`'s.
+    pub wave_edges: c_int,
+    pub wave_tiles: *mut WaveEdges,
+    pub wave_above: *mut c_int,
+    pub wave_above_end: *mut i64,
+    /// The columns of luma a row of tiles has in the rows above; chroma has half of them behind those.
+    pub wave_cols: usize,
+    /// The stamp of the frame in the edges: the number of the frame among those that kept their
+    /// wavefront on this slot, shifted left by 32 (`blocks::WavePlane::stamp`).
+    pub wave_stamp: i64,
+    pub wave: WaveStore,
     pub scale_enable: c_int,
     pub inter_fast: c_int,
     pub scale_factors: [ScaleFactor; 8],
@@ -296,6 +315,20 @@ pub struct av1_frame_thread_data {
     pub dump_is_sef: c_int,
     pub dump_info: [c_char; 512],
     pub dumps: [av1_stage_dump_entry; 40],
+}
+
+/// The memory of the edges of the intra wavefront of the frames of a slot (`blocks::WaveEdges`). It grows
+/// to what the largest frame of the slot needs and is never cleared: an entry that is read was written
+/// by the frame that reads it.
+pub struct WaveStore {
+    /// The edges of each tile.
+    pub tiles: Vec<WaveEdges>,
+    /// The rows above the tiles and where their decoded units end: for every row of tiles the columns of
+    /// luma, then those of chroma.
+    pub above: Vec<c_int>,
+    pub above_end: Vec<i64>,
+    /// The frames that kept their wavefront here.
+    pub frames: i64,
 }
 
 #[repr(C)]
@@ -410,6 +443,10 @@ pub struct Av1Core {
     /// the slot (`rav1g_setup_frame_begin`): a decoder whose parser is rav1d's, unless its switches say
     /// otherwise (`AV1_PARSER_OPTION_CLEAR_GRID`).
     pub keep_mi_grid: c_int,
+    /// The mode info grid and the wavefront grid of every slot are buffers a command list may write:
+    /// the decoder was created while the clears were the GPU's (`AV1_CLEARS_GPU`). Only then does a
+    /// frame end its command list with them.
+    pub gpu_clear_grids: c_int,
 }
 
 impl Av1Core {
@@ -437,13 +474,16 @@ impl Av1Core {
             (&raw mut (*dec).perf_inter_tiles).write(Vec::new());
             (&raw mut (*dec).perf_detail_out).write(None);
             (&raw mut (*dec).rav1d).write(None);
+            let no_edges = || WaveStore { tiles: Vec::new(), above: Vec::new(), above_end: Vec::new(), frames: 0 };
             for slot in 0..FrameThreadDataCount as usize {
                 (&raw mut (*dec).frame_thread_data[slot].sec_data_mutex).write(Mutex::new(()));
                 (&raw mut (*dec).frame_thread_data[slot].perf.detail).write(None);
+                (&raw mut (*dec).frame_thread_data[slot].wave).write(no_edges());
             }
             for context in 0..OutputThreadDataCount as usize {
                 (&raw mut (*dec).output_thread_data[context].sec_data_mutex).write(Mutex::new(()));
                 (&raw mut (*dec).output_thread_data[context].perf.detail).write(None);
+                (&raw mut (*dec).output_thread_data[context].wave).write(no_edges());
             }
             Some(Box::from_raw(dec))
         }

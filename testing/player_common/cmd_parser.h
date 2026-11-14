@@ -26,6 +26,12 @@
 #define PLAYER_QUEUE_SIZE 16
 // -slots: the decoder's pipeline slots (aom_codec_dec_cfg_t::frame_slots).
 #define PLAYER_SLOTS_DEFAULT 2
+// The clears of a pipeline slot (-gpuclear, -cpuclear, -syncclear): the values of RAV1G_CLEARS_* of
+// rav1g.h (decoder.cpp holds them against it).
+#define PLAYER_CLEARS_NOT_NEEDED 0
+#define PLAYER_CLEARS_GPU 1
+#define PLAYER_CLEARS_COMPLETION_THREAD 2
+#define PLAYER_CLEARS_DECODE_THREAD 3
 #define PLAYER_SLOTS_MIN 2
 #define PLAYER_SLOTS_MAX 4
 // -lowmemparts: the largest value, all three reductions (AV1_LOW_MEMORY_ALL of aom/aom_decoder.h), and what
@@ -105,9 +111,12 @@ class CParameters {
     bool intrav2_;
     bool intraopt_;
     int slots_;
-    // The effective choice after Parse(): the per-frame clears of a slot on the completion thread, true
-    // unless -syncclear was given. -asyncclear names the default.
-    bool asyncclear_;
+    // The effective choice after Parse(): what a frame does about the clears of its slot's grids, one of
+    // PLAYER_CLEARS_*. Without a flag nothing has to be cleared; -gpuclear, -cpuclear (-asyncclear is its
+    // older name) and -syncclear keep the wavefront in the slot's grid and say who clears it.
+    int clears_;
+    bool gpuclear_;
+    bool cpuclear_;
     bool asyncclear_flag_;
     bool syncclear_;
     // The effective choice after Parse(): true unless -nofitsize was given.

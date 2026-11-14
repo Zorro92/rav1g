@@ -22,7 +22,7 @@ namespace perfstats {
 static const char* const kGpuStageNames[] = {
     "gen_blocks",   "residual_clear", "idct_sort",  "idct",        "inter",      "recon",
     "intra",        "lf_gen",         "lf_vert",    "lf_horz",     "cdef",       "superres",
-    "loop_rest",    "ext_borders",    "film_grain", "copy_plane",  "output_copy"};
+    "loop_rest",    "ext_borders",    "film_grain", "copy_plane",  "output_copy", "slot_clear"};
 static_assert(sizeof(kGpuStageNames) / sizeof(kGpuStageNames[0]) == AV1_PERF_GPU_STAGE_COUNT,
               "GPU stage names out of step with av1_perf.h");
 
@@ -254,7 +254,7 @@ class PerfStats {
     }
     const size_t sef_total = n - decoded_total;
     size_t shown = 0, hidden = 0, sef = 0, intra = 0, gpu_ok = 0, sec_slot = 0;
-    Series wall, busy, sum, gap, blocked, iters, mbytes, abytes, wall_out, calls;
+    Series wall, busy, sum, gap, blocked, iters, mbytes, abytes, gbytes, wall_out, calls;
     Series sef_busy, sef_frame, sef_blocked;
     // Completion time of the decoded frame before the current one, warm-up included.
     double prev_complete = 0.0;
@@ -311,6 +311,7 @@ class PerfStats {
       }
       mbytes.Add((double)f.memset_bytes / (1024.0 * 1024.0));
       abytes.Add((double)f.async_clear_bytes / (1024.0 * 1024.0));
+      gbytes.Add((double)f.gpu_clear_bytes / (1024.0 * 1024.0));
     }
     for (size_t i = (ow > 0 ? ow : 1); i < outputs_.size(); ++i) wall_out.Add(outputs_[i] - outputs_[i - 1]);
     for (size_t i = Warmup(decode_calls_.size()); i < decode_calls_.size(); ++i) calls.Add(decode_calls_[i]);
@@ -374,9 +375,20 @@ class PerfStats {
     Line(&out, "cpu submit", cpu[AV1_PERF_CPU_SUBMIT], 0.0, 0);
     Line(&out, "cpu memsets (frame + tile)", SumOf(w, AV1_PERF_CPU_MEMSET, AV1_PERF_CPU_MEMSET_TILE), mbytes.Mean(),
          "MB cleared per frame");
-    // The clears on the completion thread, where they are by default. Zero with -syncclear.
+    // The clears on the completion thread: with -cpuclear, and what a frame still has to clear without a
+    // flag (nothing with rav1d's parse; the mode info grid with -parser c). Zero with -syncclear and
+    // -gpuclear.
     Line(&out, "cpu clears, completion thread", cpu[AV1_PERF_CPU_ASYNC_CLEAR], abytes.Mean(),
          "MB cleared per frame");
+    // -gpuclear: the clears at the end of the frame's command list (the stage slot_clear below).
+    Line(&out, "gpu clears, end of the command list", gpu_stage[AV1_PERF_GPU_SLOT_CLEAR], gbytes.Mean(),
+         "MB cleared per frame");
+    // The same three in bytes: the lines above round to a tenth of a MB, and what is left on the CPU
+    // without a flag (the counters of a tile's block lists) is a few KB.
+    snprintf(b, sizeof(b),
+             "cleared per frame, bytes: cpu decode and tile threads %.0f, cpu completion thread %.0f, gpu %.0f",
+             mbytes.Mean() * 1024.0 * 1024.0, abytes.Mean() * 1024.0 * 1024.0, gbytes.Mean() * 1024.0 * 1024.0);
+    out.push_back(b);
     Line(&out, "blocked, decode thread, all waits", blocked, Pct(blocked.Sum(), wall.Sum()), "% of wall");
     Line(&out, "blocked on fence, completion thread", cpu[AV1_PERF_CPU_FENCE_WAIT], 0.0, 0);
     Line(&out, "decode call (aom_codec_decode)", calls, 0.0, 0);
@@ -461,6 +473,10 @@ class PerfStats {
       for (int c = 0; c < AV1_PERF_CPU_COUNT; ++c) {
         if (f.cpu_ms[c] >= 0.005) Append(b, sizeof(b), &len, " %s=%.2f", kCpuNames[c], f.cpu_ms[c]);
       }
+      // The bytes cleared for the frame: by the decode and tile threads, by the completion thread behind
+      // it, and by its command list.
+      Append(b, sizeof(b), &len, " | cleared memset=%lld completion=%lld gpu=%lld", (long long)f.memset_bytes,
+             (long long)f.async_clear_bytes, (long long)f.gpu_clear_bytes);
       out.push_back(b);
       // -gputimedetail: the frame's inter breakdown, a line of its own behind the frame's line. Per section
       // name=ms:thread groups:block records; the passes as p1..p3.

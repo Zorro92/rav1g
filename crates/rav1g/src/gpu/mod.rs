@@ -98,6 +98,9 @@ pub enum BufferState {
     /// Shaders read and write it.
     ReadWrite,
     CopySource,
+    /// Read by shaders: what a buffer the CPU writes is in between the commands that write it on the
+    /// GPU ([`MemoryKind::HostRw`] made with `gpu_writable`).
+    Read,
 }
 
 /// The format of a plane of an output image as a texture.

@@ -68,10 +68,15 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        &params_.intraopt_},
       {"slots", atInt, anOptional, "decoder pipeline slots (frames in flight), 2..4. Default 2", "",
        &params_.slots_},
-      {"asyncclear", atSingle, anOptional,
-       "per-frame clears off the decode thread, on the GPU completion thread (the default; same output)", "",
-       &params_.asyncclear_flag_},
-      {"syncclear", atSingle, anOptional, "per-frame clears on the decode thread, as before the default changed", "",
+      {"gpuclear", atSingle, anOptional,
+       "intra wavefront in the slot's grid, cleared by the GPU at the end of the frame's command list (same output)",
+       "", &params_.gpuclear_},
+      {"cpuclear", atSingle, anOptional,
+       "intra wavefront in the slot's grid, cleared by the GPU completion thread (the default up to 0.2.144)", "",
+       &params_.cpuclear_},
+      {"asyncclear", atSingle, anOptional, "the older name of -cpuclear", "", &params_.asyncclear_flag_},
+      {"syncclear", atSingle, anOptional,
+       "intra wavefront in the slot's grid, cleared by the decode thread (the default up to 0.2.139)", "",
        &params_.syncclear_},
       {"fitsize", atSingle, anOptional,
        "create the decoder for the stream's size and bit depth (the default)", "fitsize", &params_.fitsize_},
@@ -216,13 +221,18 @@ int CParameters::Parse(one_task& args, std::string& Err) {
   }
   params_.parser_rav1d_ = params_.parser_ != "c";
 
-  // -syncclear: the clears on the decode thread. -asyncclear names the default; both on one line is an
-  // error of the task.
-  if (params_.syncclear_ && params_.asyncclear_flag_) {
-    Err += "-syncclear and -asyncclear are the two choices of one switch";
+  // -gpuclear, -cpuclear (-asyncclear), -syncclear: who clears the grids of a slot, with the wavefront in
+  // its grid. Without one of them nothing has to be cleared. Two of them on one line is an error of the
+  // task.
+  const bool cpuclear = params_.cpuclear_ || params_.asyncclear_flag_;
+  if ((params_.gpuclear_ ? 1 : 0) + (cpuclear ? 1 : 0) + (params_.syncclear_ ? 1 : 0) > 1) {
+    Err += "-gpuclear, -cpuclear (-asyncclear) and -syncclear are the choices of one switch";
     return -1;
   }
-  params_.asyncclear_ = !params_.syncclear_;
+  params_.clears_ = params_.gpuclear_ ? PLAYER_CLEARS_GPU
+                                      : cpuclear ? PLAYER_CLEARS_COMPLETION_THREAD
+                                                 : params_.syncclear_ ? PLAYER_CLEARS_DECODE_THREAD
+                                                                      : PLAYER_CLEARS_NOT_NEEDED;
 
   // -parseopt: words separated by commas; a word that is none of them is an error of the task. A word
   // that names the two default switches (nolfmask, tilethread, none, default) replaces the default of the
@@ -367,7 +377,9 @@ void CParameters::Reset() {
   params_.intrav2_ = false;
   params_.intraopt_ = false;
   params_.slots_ = PLAYER_SLOTS_DEFAULT;
-  params_.asyncclear_ = true;
+  params_.clears_ = PLAYER_CLEARS_NOT_NEEDED;
+  params_.gpuclear_ = false;
+  params_.cpuclear_ = false;
   params_.asyncclear_flag_ = false;
   params_.syncclear_ = false;
   params_.fitsize_ = true;

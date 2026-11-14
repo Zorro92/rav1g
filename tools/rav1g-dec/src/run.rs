@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use rav1g::StreamInfo;
-use rav1g::switches::{self, PerfFrame, Poison};
+use rav1g::switches::{self, Clears, PerfFrame, Poison};
 
 use crate::args::{self, EXIT_ERROR, EXIT_MISMATCH, EXIT_PASS, Task};
 use crate::device::{Device, hex32};
@@ -518,7 +518,12 @@ fn create_decoder(
         if task.cdefv1 { "cdef_filter (-cdefv1)" } else { "cdef_filter_v2" },
         if task.intrav2 { "intra_v2" } else { "intra_main + intra_filter" },
         if task.intraopt { " (intra_main_opt)" } else { "" },
-        if task.asyncclear { "completion thread" } else { "decode thread (-syncclear)" },
+        match task.clears {
+            Clears::NotNeeded => "none needed",
+            Clears::Gpu => "GPU (-gpuclear)",
+            Clears::CompletionThread => "completion thread (-cpuclear)",
+            Clears::DecodeThread => "decode thread (-syncclear)",
+        },
         task.threads,
         task.queue_size,
         device_size as f64 / (1024.0 * 1024.0),
@@ -639,6 +644,9 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     // fills the constants of a stage whenever it hands them out (ComputeCommandBuffer::Alloc).
     // The task has no decoder yet and the one of the task before is destroyed: no frame is in flight.
     library.set_poison(task.poison);
+    // -gpuclear, -cpuclear, -syncclear: also before the decoder exists. A decoder whose grids the GPU
+    // clears is created with grids the GPU may write.
+    library.set_clears(task.clears);
     if task.poison == Poison::ModeInfo {
         say!("POISON {}: the mode info pool (-poisonmi) filled with 0xA5 when the decoder creates it", task.name);
     } else if task.poison != Poison::Off {
@@ -679,7 +687,6 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         cdef_v2: !task.cdefv1,
         intra_v2: task.intrav2,
         intra_opt: task.intraopt,
-        async_clear: task.asyncclear,
         lf_h_split: task.lfhsplit as u32,
         intra_edge_fix: task.intraedgefix,
         inter_fast: task.interfast,

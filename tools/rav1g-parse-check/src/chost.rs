@@ -546,8 +546,10 @@ pub struct CParser {
 }
 
 impl CParser {
-    pub fn new() -> Result<Self, String> {
-        let mut side = Side::new();
+    /// `wave_edges`: the frames keep the wavefront in the edges of their tiles (the host's default), not
+    /// in the grids.
+    pub fn new(wave_edges: bool) -> Result<Self, String> {
+        let mut side = Side::new(wave_edges);
         let host_memory = Buffer::<u8>::new(HOST_MEMORY);
         // SAFETY: the configuration and the context are C structs for which zero bytes are a value; the
         // host memory and the side live as long as the decoder.

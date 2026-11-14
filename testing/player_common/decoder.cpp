@@ -398,8 +398,17 @@ int AV1Decoder::DecodeOne() {
                        created_parser_rav1d_ != params_.parser_rav1d_ ||
                        created_parser_options_ != params_.parser_options_ ||
                        created_lowmem_ != params_.lowmem_parts_ || created_packed_10x3_ != params_.hdr10x3_ ||
-                       created_noguard_ != params_.noguard_);
+                       created_noguard_ != params_.noguard_ ||
+                       created_gpuclear_ != (params_.clears_ == PLAYER_CLEARS_GPU));
   if (initialized_ && (need_reinit_ || other_decoder)) DestroyDecoder();
+  // -gpuclear, -cpuclear, -syncclear: set here, where no frame is in flight (the task before has drained)
+  // and before the decoder of this task is created: a decoder whose grids the GPU clears is created with
+  // grids the GPU may write, so a task with -gpuclear does not take over the decoder of a task without.
+  static_assert(PLAYER_CLEARS_NOT_NEEDED == RAV1G_CLEARS_NOT_NEEDED && PLAYER_CLEARS_GPU == RAV1G_CLEARS_GPU &&
+                    PLAYER_CLEARS_COMPLETION_THREAD == RAV1G_CLEARS_COMPLETION_THREAD &&
+                    PLAYER_CLEARS_DECODE_THREAD == RAV1G_CLEARS_DECODE_THREAD,
+                "the clears of the player out of step with rav1g.h");
+  rav1g_set_clears((uint32_t)params_.clears_);
   // Creates the decoder for dec_width x dec_height, dec_bitdepth and the stream info in si. |new_sequence|:
   // the decoder replaces the one of this task in the middle of the stream (a new sequence that did not fit
   // it, in the decode loop below); the output queue and the output pool of the task stay, with the frames
@@ -532,6 +541,7 @@ int AV1Decoder::DecodeOne() {
       created_lowmem_ = params_.lowmem_parts_;
       created_packed_10x3_ = params_.hdr10x3_;
       created_noguard_ = params_.noguard_;
+      created_gpuclear_ = params_.clears_ == PLAYER_CLEARS_GPU;
     } catch (int error) {
       XB_LOGE << "Unable to create decoder. Error " << error;
       return -1;
@@ -651,11 +661,16 @@ int AV1Decoder::DecodeOne() {
                   ? " (default: 1 shared back buffer)"
                   : created_lowmem_ ? " (1 shared back buffer, 2 mode info shares, 4 coefficient shares)"
                                     : " (none, -lowmemparts 0)");
-  // -syncclear: the same rules as the shader flags above, independent of them and of -slots.
-  rav1g_set_async_clear(params_.asyncclear_ != 0);
+  // -gpuclear, -cpuclear, -syncclear: the switch was set before the decoder was created (above).
   XB_LOGI << "Clears: "
-          << (params_.asyncclear_ ? "completion thread (default; -syncclear puts them on the decode thread)"
-                                  : "decode thread (-syncclear)");
+          << (params_.clears_ == PLAYER_CLEARS_GPU
+                  ? "GPU, at the end of the frame's command list; intra wavefront in the slot's grid (-gpuclear)"
+                  : params_.clears_ == PLAYER_CLEARS_COMPLETION_THREAD
+                        ? "completion thread; intra wavefront in the slot's grid (-cpuclear)"
+                        : params_.clears_ == PLAYER_CLEARS_DECODE_THREAD
+                              ? "decode thread; intra wavefront in the slot's grid (-syncclear)"
+                              : "none needed (default: intra wavefront at the edges of the tiles; -gpuclear, "
+                                "-cpuclear and -syncclear keep it in the slot's grid and clear that)");
 
   // The experiments: set like the switches above. The shader build is fixed when the package is built.
   rav1g_set_lf_h_split(params_.lfhsplit_);

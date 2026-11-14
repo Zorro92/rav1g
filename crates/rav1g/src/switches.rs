@@ -46,6 +46,29 @@ pub enum Poison {
     Buffers = 2,
 }
 
+/// What a frame does about the two grids of its pipeline slot that used to be cleared for every frame
+/// ([`set_clears`]): the mode info grid, which a decoder with the default parser keeps from frame to frame
+/// in every mode, and the wavefront grid of intra prediction (3.5 MB of a 4K frame). The output is the
+/// same in every mode.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[repr(i32)]
+pub enum Clears {
+    /// The wavefront is kept in a few KB at the edges of the tiles and its grid is not cleared at all. A
+    /// grid that still needs a clear (the mode info grid with [`crate::Parser::Libaom`]) is cleared by
+    /// the completion thread.
+    #[default]
+    NotNeeded = 0,
+    /// The wavefront in its grid; the command list of a frame ends with the clear of the grids, so no
+    /// thread of the CPU clears them. Only in a decoder created while this mode was set (its grids are
+    /// then buffers the GPU may write); in any other decoder it is [`Clears::CompletionThread`].
+    Gpu = 1,
+    /// The wavefront in its grid; the completion thread clears the grids after the fence of the frame
+    /// that used the slot.
+    CompletionThread = 2,
+    /// The wavefront in its grid; the decode thread clears the grids when it takes the slot for a frame.
+    DecodeThread = 3,
+}
+
 /// CDEF through `cdef_filter_v2.hlsl` (true, the default) or `cdef_filter.hlsl`.
 pub fn set_cdef_v2(enable: bool) {
     // SAFETY: sets a flag.
@@ -65,11 +88,18 @@ pub fn set_intra_opt(enable: bool) {
     unsafe { sys::av1_set_intra_opt(c_int::from(enable)) }
 }
 
-/// The clears of a pipeline slot on the completion thread instead of the decode thread. On by default;
-/// `false` puts them back on the decode thread. The output is the same.
-pub fn set_async_clear(enable: bool) {
+/// Who clears the grids of a pipeline slot for the next frame, and whether the wavefront grid has to be
+/// cleared at all ([`Clears`]; without a call it does not). [`Clears::Gpu`] has to be set before the
+/// decoder is created.
+pub fn set_clears(mode: Clears) {
     // SAFETY: sets a flag.
-    unsafe { sys::av1_set_async_clear(c_int::from(enable)) }
+    unsafe { sys::av1_set_clears(mode as c_int) }
+}
+
+/// The older form of [`set_clears`]: `true` is [`Clears::NotNeeded`], the default; `false` is
+/// [`Clears::DecodeThread`].
+pub fn set_async_clear(enable: bool) {
+    set_clears(if enable { Clears::NotNeeded } else { Clears::DecodeThread });
 }
 
 /// The fast inter path: 0, or [`INTER_FAST_ON`] with the `INTER_FAST_*` bits; only in a decoder that was

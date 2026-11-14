@@ -85,7 +85,8 @@ fn milliseconds(duration: Duration, frames: u64) -> f64 {
     duration.as_secs_f64() * 1000.0 / frames.max(1) as f64
 }
 
-pub fn run(path: &Path, threads: u16, options: ParseOptions) -> ExitCode {
+/// `wave_edges`: the wavefront in the edges of the tiles (the default of the decoder), not in the grids.
+pub fn run(path: &Path, threads: u16, options: ParseOptions, wave_edges: bool) -> ExitCode {
     let data = match std::fs::read(path) {
         Ok(data) => data,
         Err(error) => {
@@ -134,7 +135,7 @@ pub fn run(path: &Path, threads: u16, options: ParseOptions) -> ExitCode {
     let mut block_lists = Duration::MAX;
     let mut sink_calls = Duration::ZERO;
     for _ in 0..RUNS {
-        let mut parser = match RustParser::with_clock(threads, options, true) {
+        let mut parser = match RustParser::with_clock(threads, options, true, wave_edges) {
             Ok(parser) => parser,
             Err(error) => {
                 eprintln!("rav1g-parse-check: {error}");

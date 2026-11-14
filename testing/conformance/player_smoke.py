@@ -32,15 +32,20 @@ import sys
 
 # The tasks, as lines of the player's task file: a small 8-bit vector, 10-bit with four threads and three
 # frame slots, a stream whose frames change their size (Matroska, the reduced back buffer, -r), spatial
-# layers with the timing run and the clears on the decode thread (the other tasks have them on the
-# completion thread, the default), and the HDR10 stream.
+# layers with the timing run, and the HDR10 stream. The first and the last keep the wavefront of intra
+# prediction at the edges of the tiles and clear nothing (the default); the three between them keep it in
+# the grid of the slot, cleared by the GPU, by the completion thread and by the decode thread. The player
+# creates a decoder of its own for the task with -gpuclear, and another for the task behind it.
 TASKS = [
     '-i /aom/av1-1-b8-01-size-66x66.ivf -md5_frame_check -nopresent -frate -1',
-    '-i /aom/av1-1-b10-00-quantizer-00.ivf -md5_frame_check -nopresent -frate -1 -t 4 -slots 3',
-    '-i /aom/av1-1-b8-03-sizeup.mkv -md5_frame_check -nopresent -frate -1 -t 4 -r -lowmem',
+    '-i /aom/av1-1-b10-00-quantizer-00.ivf -md5_frame_check -nopresent -frate -1 -t 4 -slots 3 -gpuclear',
+    '-i /aom/av1-1-b8-03-sizeup.mkv -md5_frame_check -nopresent -frate -1 -t 4 -r -lowmem -cpuclear',
     '-i /aom/av1-1-b8-22-svc-L2T1.ivf -md5_frame_check -nopresent -frate -1 -gputime -syncclear',
     '-i /svt/syn-hdr10-10b-1080p.ivf -md5_frame_check -nopresent -frate -1',
 ]
+# What the player says about the clears of each task, in the order of the tasks.
+CLEARS = ['Clears: none needed', 'Clears: GPU,', 'Clears: completion thread;', 'Clears: decode thread;',
+          'Clears: none needed']
 # The player's line about the colour of the HDR10 stream (rav1g_color_text of rav1g.h; docs/color.md): the
 # colour description, the mastering display and the light levels, as the stream was encoded (streams.txt).
 HDR10 = ('COLOUR frame 0: primaries 9 (BT.2020) transfer 16 (PQ) matrix 9 (BT.2020 NCL) range limited chroma pos 2 '
@@ -49,7 +54,7 @@ HDR10 = ('COLOUR frame 0: primaries 9 (BT.2020) transfer 16 (PQ) matrix 9 (BT.20
 NO_COLOUR = ('COLOUR frame 0: primaries 2 (unspecified) transfer 2 (unspecified) matrix 2 (unspecified) range limited '
              'chroma pos 0 (unknown), no colour description; no MDCV; no CLL')
 ENDED = 'PLAYERSMOKE the player ended its launch'
-SHOWN = re.compile(r'LIBRARY |MD5 |ERROR|PLAYERSMOKE|Frame slots|Bye|No args|COLOUR ')
+SHOWN = re.compile(r'LIBRARY |MD5 |ERROR|PLAYERSMOKE|Frame slots|Clears: |Bye|No args|COLOUR ')
 
 
 def launch(tool, tool_args, root, log, timeout):
@@ -115,6 +120,13 @@ def main():
         switches = 'none' if '-parseopt none' in args.player_args else 'nolfmask tilethread'
         if 'Parser switches (-parseopt): ' + switches not in text:
             problems.append('the log does not say that the switches of the parser are: ' + switches)
+    # Who clears the grids of a slot, task by task; the task with -gpuclear clears with its command lists
+    # (the timing run of the task with -syncclear has no such stage).
+    clears = [line[line.index('Clears: '):] for line in text.split('\n') if 'Clears: ' in line]
+    if len(clears) != len(CLEARS) or not all(line.startswith(start) for line, start in zip(clears, CLEARS)):
+        problems.append('the Clears lines of the player are not those of the tasks: %s' % ' | '.join(clears))
+    if re.search(r'GPUTIME gpu slot_clear +[1-9]', text):
+        problems.append('the task with -syncclear has the clears of the GPU in its timing run')
     ok = text.count('MD5 is OK')
     if ok != len(TASKS):
         problems.append('%d of %d tasks of the player ended with "MD5 is OK"' % (ok, len(TASKS)))
