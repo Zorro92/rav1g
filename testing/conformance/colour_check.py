@@ -23,7 +23,7 @@ The references, for every stream of the manifest:
                                 (cbs_av1) reads them: color_description_present_flag, the three code points
                                 as numbers, color_range, chroma_sample_position. Held against the
                                 "sequence" line.
-  ffprobe -show_frames          with libdav1d: the colour properties and the side data (mastering display,
+  ffprobe -show_frames          (libdav1d): the colour properties and the side data (mastering display,
                                 content light level) of every output frame. The frames at which they change
                                 are the "frame" lines the decoder has to print, with these values.
 
@@ -166,8 +166,10 @@ def numerator(value, denominator):
 def probed_frames(ffprobe, path):
     """Per output frame, from ffprobe with libdav1d: ((primaries, transfer, matrix, full range, chroma
     position), mdcv, cll); a property ffprobe has no name for is None."""
-    code, out, err = run([ffprobe, '-v', 'error', '-c:v', 'libdav1d', '-select_streams', 'v:0', '-show_frames',
-                          '-of', 'json', path])
+    # No decoder is named: ffprobe 8.0, which the runner has, has no option for it (8.1 has -c:v), and
+    # libdav1d is the AV1 decoder FFmpeg takes when it has it (the job checks that it has). A decoder that showed no side data
+    # would fail on the stream that is known to have it.
+    code, out, err = run([ffprobe, '-v', 'error', '-select_streams', 'v:0', '-show_frames', '-of', 'json', path])
     if code != 0:
         raise CannotCheck('%s on %s: exit code %d: %s' % (ffprobe, path, code, err.strip()[-300:]))
     frames = []
