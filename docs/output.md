@@ -225,10 +225,44 @@ does. The semi-planar kind writes the row; so on such a stream the two kinds dif
 
 ## Cost
 
-The pass is the same pass, so the question is what the copies cost. The table is filled from the CI run
-of the commit that added this page (`testing/conformance/output_cost.py`, `rav1g-dec -gputime` on WARP,
-median of a frame in ms; WARP is a CPU rasterizer, so this says how the kinds compare there and nothing
-about a GPU) and from the console run. See [the progress section of phase 2](phase2-rav1d.md#p010-output).
+The pass is the same pass: no dispatch more, and on the direct path no copy and no use of the back
+buffer. The decoder allocates one descriptor heap of 64 descriptors for this kind and nothing else; the
+application's one texture is the size of the three plane textures it replaces.
+
+What it costs in time was measured on WARP only so far (CI run 43627226893, job `rust-output`,
+`testing/conformance/output_cost.py`: `rav1g-dec -gputime`, the median of a frame in ms). **WARP is a
+CPU rasterizer: this says how the kinds compare there and nothing about a GPU.** The console lines of
+[test-player.md](test-player.md#console-the-task-lines-1) are the measurement that counts.
+
+| Stream | Images | Path | `film_grain` | `copy_plane` | `output_copy` | The three together |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| 1920x1080 10-bit, no grain | planes | | | 2.52 | 2.13 | 4.64 |
+| | `-output p010` | direct | | 11.04 | 0.00 | 11.04 |
+| | `-output p010-copy` | staged | | 7.43 | 0.90 | 8.32 |
+| | `-output p010-buffer` | staged | | 7.41 | 2.00 | 9.41 |
+| 352x288 10-bit, film grain | planes | | 14.27 | | 0.16 | 14.43 |
+| | `-output p010` | direct | 13.89 | | 0.00 | 13.89 |
+| | `-output p010-copy` | staged | 13.64 | | 0.07 | 13.70 |
+| | `-output p010-buffer` | staged | 13.79 | | 0.12 | 13.90 |
+| 352x288 8-bit, film grain | planes | | 12.71 | | 0.08 | 12.79 |
+| | `-output p010` | direct | 12.57 | | 0.00 | 12.57 |
+| | `-output p010-copy` | staged | 12.29 | | 0.06 | 12.36 |
+| | `-output p010-buffer` | staged | 12.13 | | 0.08 | 12.21 |
+
+How to read it:
+
+- **`output_copy` is gone on the direct path** (0.001 ms: two state changes), and smaller on the staged
+  path into a texture (two copies in place of three).
+- **With film grain** the pass costs what it did, a little less: the same shader computes the same
+  samples and stores them elsewhere.
+- **Without film grain, on WARP, the semi-planar copy shader is slower than the copy of the planes
+  kind**: 11.0 ms against 2.5 + 2.1 for a 1080p 10-bit frame on the direct path, 7.4 + 0.9 staged. The
+  planes kind copies 16 bytes a thread as they are; the semi-planar shader takes the samples apart,
+  shifts them and puts U and V side by side, and on the direct path stores sixteen texels a thread
+  through typed views, each of which a CPU rasterizer bounds-checks. Whether a GPU shows any of this is
+  what the console timing has to say; the stages `copy_plane` and `output_copy` of its `-gputime` lines
+  are the comparison. If it does, the staged shader can copy whole words where the frame has no
+  padding (a 10-bit luma row is its words shifted by six), which this version does not do.
 
 ## Checks
 

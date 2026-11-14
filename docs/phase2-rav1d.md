@@ -2715,6 +2715,49 @@ into a buffer only): 244 of 244 AOM vectors with `-output p010-buffer` through b
 two resize streams (frames of odd sizes) and the superres stream; 244 of 244 on the defaults; 52 unit
 tests.
 
+**CI.** Commits `43acd01` (the output) and `2b89477` (the copy shader with eight samples a thread;
+the equality gate). Run 43622205520 on `43acd01` (number 160): every job green but `rust-equal`,
+which holds the shaders of a commit to those of the C++ decoder and found the four new ones in this
+commit alone (the 97 others equal, `film_grain_filter` among them); the gate now takes the names of
+shaders the compared runs do not use. Run 43627226893 on `2b89477` (number 161): all jobs green,
+18 minutes for the push (`rust-output` 11). On WARP, job `rust-output`:
+
+- WARP has both formats and lets shaders write them (`OUTPUT semi-planar: NV12 textures yes, written
+  by shaders yes; P010 textures yes, written by shaders yes`). With `-output p010` all 245 decoders of
+  the set took the **direct** path and none the staged one: 254 of 254 streams as `expected.txt`
+  says, every frame equal to its reference, every image as it has to be (low bits, padding, grey
+  chroma).
+- `-capi -output p010-copy -sharedfence`: 254 of 254 on the staged path, through `rav1g.h`, with the
+  output fence opened through a shared handle in every task and at the value of every frame.
+- `-output p010-buffer`: 254 of 254.
+- The player's decoder code with `-output p010`: 6 of 6 tasks `MD5 is OK`, every frame read back from
+  its texture. With **`-interop`: 6 of 6 `INTEROP is OK` and `MD5 is OK`**: the D3D11 device on WARP
+  creates NV12 and P010 textures with `SHARED_NTHANDLE | SHARED` and
+  `SHADER_RESOURCE | UNORDERED_ACCESS`, D3D12 opens them with `ALLOW_UNORDERED_ACCESS` (flags 0x24: also
+  simultaneous access), the decoder writes them directly, D3D11 opens the fence, waits for every frame
+  and reads the frame from its own texture. So the whole path works between the two APIs on one
+  adapter in a desktop process; the console has to show it for its driver and for a UWP app.
+- GPU-based validation on three streams with `-output p010`: the frames are right, and the debug
+  layer has the 23 creation warnings of every run (initial states of buffers) and nothing about the
+  texture, its views or its states.
+- The cost on WARP: [output.md](output.md#cost). With film grain the pass costs what it did; without,
+  the semi-planar copy shader is slower than the copy of the planes kind there (11.0 ms against 4.6
+  for a 1080p 10-bit frame, direct), which may be the CPU rasterizer and may not.
+
+The packages of run 161: `uwp_dx12_player_0.2.161.0_x64.msix` (default, the one for the console
+lines; artifact `rav1g-testplayer-x64-43627226893`), `0.2.161.2` (the static library, linked by
+MSVC), `0.2.161.3` (`hevcPlayback`).
+
+**Left.**
+
+- The console: the md5 set with `-output p010` and `-output p010-copy`, `-interop` on a 10-bit and an
+  8-bit 4K clip, and the timing of the default against the semi-planar kinds.
+- The semi-planar copy shader has not been tuned beyond eight samples a thread; a word-wise fast path
+  for the staged kind is described in [output.md](output.md#cost) and waits for the console's numbers.
+- Film grain on frames of odd size: a fault of the planes kind that was found and not touched
+  ([output.md](output.md#what-cannot-be-had)); no stream of the sets has it.
+- The player does not present the semi-planar kinds (its display reads one texture a plane).
+
 **Console**: the task lines are in
 [test-player.md](test-player.md#console-the-task-lines-1). What only the console can say: whether its
 D3D11 driver creates NV12 and P010 textures with `D3D11_BIND_UNORDERED_ACCESS` (the direct path for a
