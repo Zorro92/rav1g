@@ -193,7 +193,8 @@ jobs:
       #               (/LTCG:incremental).
       # Revision 1 is the uavsync package of the experiments input. Revision 3 is the default package
       # with the hevcPlayback capability in its manifest, for the memory the system gives such an app
-      # (the last step of this job). A higher revision installs over a lower one and keeps LocalState.
+      # (made from the default package, behind it). A higher revision installs over a lower one and
+      # keeps LocalState.
       # ---------------------------------------------------------------------------------------------
 
       # Stable Rust, and libclang for bindgen, as in the rust job.
@@ -305,6 +306,98 @@ jobs:
         with:
           name: rav1g-testplayer-x64-${{ github.run_id }}
           path: out/
+          if-no-files-found: warn
+
+      # The hevcPlayback package: the default package of this run with one more line in its manifest,
+      # <rescap:Capability Name="hevcPlayback"/>, the restricted capability of Microsoft's "4K video
+      # playback for UWP apps on Xbox". An app that declares it gets more memory from the console than
+      # the 1 GiB of the default package, in two pools; which pool the decoder's D3D12 buffers go to is
+      # measured with this package and the default one, and the player's MEMORY pools line
+      # (docs/test-player.md, "The two memory pools"). The default packages do not declare it, so that
+      # the budget tests keep the 1 GiB case.
+      # Not a build: the default package is unpacked, the manifest gets the capability and revision 3,
+      # and MakeAppx and SignTool of the Windows SDK pack and sign it with the certificate of this run.
+      # So the programs are those of the default package byte for byte, which
+      # testing/uwp_package/capability_variant.py checks, as it checks that the default package does not
+      # declare the capability. Same identity; revision 3 installs over the other packages of this run
+      # and keeps LocalState, and the default package of a later run installs over it.
+      # Here, behind the default package and in front of the other builds: their Rebuild of the solution
+      # deletes the default package under out/packages.
+      - name: Build the signed hevcPlayback package (the default package with the capability, revision 3)
+        shell: pwsh
+        env:
+          CERT_THUMBPRINT: ${{ steps.cert.outputs.thumbprint }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sdkBin = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin\$env:WINDOWS_SDK\x64"
+          $makeappx = Join-Path $sdkBin 'makeappx.exe'
+          $signtool = Join-Path $sdkBin 'signtool.exe'
+          foreach ($tool in @($makeappx, $signtool)) {
+            if (-not (Test-Path $tool)) { throw "$tool of Windows SDK $env:WINDOWS_SDK not found" }
+          }
+          python src/testing/uwp_package/capability_variant.py self-test
+          if ($LASTEXITCODE -ne 0) { throw 'The self-test of capability_variant.py failed' }
+          $found = @(Get-ChildItem out/packages -Recurse -File | Where-Object {
+            $_.Extension -eq '.msix' -and $_.FullName -notmatch '[\\/]Dependencies[\\/]'
+          })
+          if ($found.Count -ne 1) { throw "$($found.Count) default packages under out/packages, expected one" }
+          $default = $found[0]
+          $from = "_0.2.$env:GITHUB_RUN_NUMBER.0_"
+          $to = "_0.2.$env:GITHUB_RUN_NUMBER.3_"
+          if (-not $default.Name.Contains($from)) { throw "The default package $($default.Name) does not have the version of this run in its name" }
+          # The directory of the default package without the package itself: the certificate, the
+          # dependencies (VCLibs) and the install scripts, with the new version in their names.
+          $directory = Join-Path $env:GITHUB_WORKSPACE "out-hevcplayback/packages/$($default.Directory.Name.Replace($from, $to))"
+          New-Item -ItemType Directory -Force $directory | Out-Null
+          foreach ($item in @(Get-ChildItem $default.Directory.FullName | Where-Object { $_.Extension -notin @('.msix', '.appxsym', '.msixsym') })) {
+            Copy-Item $item.FullName (Join-Path $directory $item.Name.Replace($from, $to)) -Recurse
+          }
+          $unpacked = Join-Path $env:GITHUB_WORKSPACE 'hevcplayback-unpacked'
+          $log = Join-Path $env:GITHUB_WORKSPACE 'out-hevcplayback/makeappx.log'
+          & $makeappx unpack /p $default.FullName /d $unpacked /o | Out-File $log -Encoding utf8
+          if ($LASTEXITCODE -ne 0) { Get-Content $log | Select-Object -Last 30; throw 'MakeAppx could not unpack the default package' }
+          # What the packaging and the signing wrote into the default package: written anew for this one.
+          foreach ($name in @('AppxBlockMap.xml', 'AppxSignature.p7x', '[Content_Types].xml', 'AppxMetadata\CodeIntegrity.cat')) {
+            $file = Join-Path $unpacked $name
+            if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force }
+          }
+          $metadata = Join-Path $unpacked 'AppxMetadata'
+          if ((Test-Path -LiteralPath $metadata) -and -not @(Get-ChildItem -LiteralPath $metadata -Force).Count) {
+            Remove-Item -LiteralPath $metadata -Force
+          }
+          python src/testing/uwp_package/capability_variant.py manifest --revision 3 --restricted hevcPlayback (Join-Path $unpacked 'AppxManifest.xml')
+          if ($LASTEXITCODE -ne 0) { throw 'The manifest of the default package could not be given the capability' }
+          $package = Join-Path $directory $default.Name.Replace($from, $to)
+          & $makeappx pack /d $unpacked /p $package /o | Out-File $log -Encoding utf8 -Append
+          if ($LASTEXITCODE -ne 0) { Get-Content $log | Select-Object -Last 30; throw 'MakeAppx could not pack the hevcPlayback package' }
+          & $signtool sign /fd SHA256 /sha1 $env:CERT_THUMBPRINT $package
+          if ($LASTEXITCODE -ne 0) { throw 'SignTool could not sign the hevcPlayback package' }
+          Remove-Item -LiteralPath $unpacked -Recurse -Force
+          # The package is the default package with the capability and revision 3, and nothing else; and
+          # the default package does not have the capability.
+          python src/testing/uwp_package/capability_variant.py check --revision 3 --restricted hevcPlayback `
+            --base out/packages --variant out-hevcplayback/packages --note out-hevcplayback/VARIANT.txt
+          if ($LASTEXITCODE -ne 0) { throw 'The hevcPlayback package is not the default package with the capability and revision 3 alone, or the default package declares the capability' }
+          python src/testing/uwp_imports/check_package.py --out out-hevcplayback/imports --need rav1g.dll --also rav1g.dll out-hevcplayback/packages
+          if ($LASTEXITCODE -ne 0) { throw 'A program of the hevcPlayback package imports from a DLL that is not in testing/uwp_imports/player-dlls-allow.txt, or rav1g.dll is not in the package' }
+          Remove-Item out-hevcplayback/imports/unpacked -Recurse -Force
+          # The certificate, the notices and the record of the sources of the default package apply.
+          foreach ($item in @(Get-ChildItem out | Where-Object { $_.Name -notin @('packages', 'msbuild.log', 'shader-survey',
+              'cdef-shaders', 'intra-shaders', 'sm6test-shaders', 'imports', 'rav1g.pdb') })) {
+            Copy-Item $item.FullName out-hevcplayback/ -Recurse
+          }
+          (Get-Content out-hevcplayback/SOURCES.txt) -notmatch '^Variant: ' | Set-Content out-hevcplayback/SOURCES.txt -Encoding utf8
+          "Variant: hevcPlayback: the default package of this run (0.2.$env:GITHUB_RUN_NUMBER.0, its programs byte for byte: VARIANT.txt) with the restricted capability hevcPlayback in its manifest; package version 0.2.$env:GITHUB_RUN_NUMBER.3. rav1g.pdb is in the artifact of the default package" |
+            Add-Content out-hevcplayback/SOURCES.txt -Encoding utf8
+          @('## hevcPlayback package', '', "Version 0.2.$env:GITHUB_RUN_NUMBER.3: the default package with the restricted capability hevcPlayback; installs over the other packages of this run.", '', '```',
+            (Split-Path $package -Leaf)) + @(Get-Content out-hevcplayback/VARIANT.txt) + @(Get-Content out-hevcplayback/imports/check.txt) + @('```') >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Preserve the hevcPlayback package
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-testplayer-hevcplayback-x64-${{ github.run_id }}
+          path: out-hevcplayback/
           if-no-files-found: warn
 
       # The alternative package (docs/rust-port.md, "The C runtime"): the static library with the interface
@@ -473,96 +566,6 @@ jobs:
         with:
           name: rav1g-testplayer-uavsync-x64-${{ github.run_id }}
           path: out-uavsync/
-          if-no-files-found: warn
-
-      # The hevcPlayback package: the default package of this run with one more line in its manifest,
-      # <rescap:Capability Name="hevcPlayback"/>, the restricted capability of Microsoft's "4K video
-      # playback for UWP apps on Xbox". An app that declares it gets more memory from the console than
-      # the 1 GiB of the default package, in two pools; which pool the decoder's D3D12 buffers go to is
-      # measured with this package and the default one, and the player's MEMORY pools line
-      # (docs/test-player.md, "The two memory pools"). The default packages do not declare it, so that
-      # the budget tests keep the 1 GiB case.
-      # Not a build: the default package is unpacked, the manifest gets the capability and revision 3,
-      # and MakeAppx and SignTool of the Windows SDK pack and sign it with the certificate of this run.
-      # So the programs are those of the default package byte for byte, which
-      # testing/uwp_package/capability_variant.py checks, as it checks that the default package does not
-      # declare the capability. Same identity; revision 3 installs over the other packages of this run
-      # and keeps LocalState, and the default package of a later run installs over it.
-      - name: Build the signed hevcPlayback package (the default package with the capability, revision 3)
-        shell: pwsh
-        env:
-          CERT_THUMBPRINT: ${{ steps.cert.outputs.thumbprint }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $sdkBin = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin\$env:WINDOWS_SDK\x64"
-          $makeappx = Join-Path $sdkBin 'makeappx.exe'
-          $signtool = Join-Path $sdkBin 'signtool.exe'
-          foreach ($tool in @($makeappx, $signtool)) {
-            if (-not (Test-Path $tool)) { throw "$tool of Windows SDK $env:WINDOWS_SDK not found" }
-          }
-          python src/testing/uwp_package/capability_variant.py self-test
-          if ($LASTEXITCODE -ne 0) { throw 'The self-test of capability_variant.py failed' }
-          $found = @(Get-ChildItem out/packages -Recurse -File | Where-Object {
-            $_.Extension -eq '.msix' -and $_.FullName -notmatch '[\\/]Dependencies[\\/]'
-          })
-          if ($found.Count -ne 1) { throw "$($found.Count) default packages under out/packages, expected one" }
-          $default = $found[0]
-          $from = "_0.2.$env:GITHUB_RUN_NUMBER.0_"
-          $to = "_0.2.$env:GITHUB_RUN_NUMBER.3_"
-          if (-not $default.Name.Contains($from)) { throw "The default package $($default.Name) does not have the version of this run in its name" }
-          # The directory of the default package without the package itself: the certificate, the
-          # dependencies (VCLibs) and the install scripts, with the new version in their names.
-          $directory = Join-Path $env:GITHUB_WORKSPACE "out-hevcplayback/packages/$($default.Directory.Name.Replace($from, $to))"
-          New-Item -ItemType Directory -Force $directory | Out-Null
-          foreach ($item in @(Get-ChildItem $default.Directory.FullName | Where-Object { $_.Extension -notin @('.msix', '.appxsym', '.msixsym') })) {
-            Copy-Item $item.FullName (Join-Path $directory $item.Name.Replace($from, $to)) -Recurse
-          }
-          $unpacked = Join-Path $env:GITHUB_WORKSPACE 'hevcplayback-unpacked'
-          $log = Join-Path $env:GITHUB_WORKSPACE 'out-hevcplayback/makeappx.log'
-          & $makeappx unpack /p $default.FullName /d $unpacked /o | Out-File $log -Encoding utf8
-          if ($LASTEXITCODE -ne 0) { Get-Content $log | Select-Object -Last 30; throw 'MakeAppx could not unpack the default package' }
-          # What the packaging and the signing wrote into the default package: written anew for this one.
-          foreach ($name in @('AppxBlockMap.xml', 'AppxSignature.p7x', '[Content_Types].xml', 'AppxMetadata\CodeIntegrity.cat')) {
-            $file = Join-Path $unpacked $name
-            if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force }
-          }
-          $metadata = Join-Path $unpacked 'AppxMetadata'
-          if ((Test-Path -LiteralPath $metadata) -and -not @(Get-ChildItem -LiteralPath $metadata -Force).Count) {
-            Remove-Item -LiteralPath $metadata -Force
-          }
-          python src/testing/uwp_package/capability_variant.py manifest --revision 3 --restricted hevcPlayback (Join-Path $unpacked 'AppxManifest.xml')
-          if ($LASTEXITCODE -ne 0) { throw 'The manifest of the default package could not be given the capability' }
-          $package = Join-Path $directory $default.Name.Replace($from, $to)
-          & $makeappx pack /d $unpacked /p $package /o | Out-File $log -Encoding utf8 -Append
-          if ($LASTEXITCODE -ne 0) { Get-Content $log | Select-Object -Last 30; throw 'MakeAppx could not pack the hevcPlayback package' }
-          & $signtool sign /fd SHA256 /sha1 $env:CERT_THUMBPRINT $package
-          if ($LASTEXITCODE -ne 0) { throw 'SignTool could not sign the hevcPlayback package' }
-          Remove-Item -LiteralPath $unpacked -Recurse -Force
-          # The package is the default package with the capability and revision 3, and nothing else; and
-          # the default package does not have the capability.
-          python src/testing/uwp_package/capability_variant.py check --revision 3 --restricted hevcPlayback `
-            --base out/packages --variant out-hevcplayback/packages --note out-hevcplayback/VARIANT.txt
-          if ($LASTEXITCODE -ne 0) { throw 'The hevcPlayback package is not the default package with the capability and revision 3 alone, or the default package declares the capability' }
-          python src/testing/uwp_imports/check_package.py --out out-hevcplayback/imports --need rav1g.dll --also rav1g.dll out-hevcplayback/packages
-          if ($LASTEXITCODE -ne 0) { throw 'A program of the hevcPlayback package imports from a DLL that is not in testing/uwp_imports/player-dlls-allow.txt, or rav1g.dll is not in the package' }
-          Remove-Item out-hevcplayback/imports/unpacked -Recurse -Force
-          # The certificate, the notices and the record of the sources of the default package apply.
-          foreach ($item in @(Get-ChildItem out | Where-Object { $_.Name -notin @('packages', 'msbuild.log', 'shader-survey',
-              'cdef-shaders', 'intra-shaders', 'sm6test-shaders', 'imports', 'rav1g.pdb') })) {
-            Copy-Item $item.FullName out-hevcplayback/ -Recurse
-          }
-          (Get-Content out-hevcplayback/SOURCES.txt) -notmatch '^Variant: ' | Set-Content out-hevcplayback/SOURCES.txt -Encoding utf8
-          "Variant: hevcPlayback: the default package of this run (0.2.$env:GITHUB_RUN_NUMBER.0, its programs byte for byte: VARIANT.txt) with the restricted capability hevcPlayback in its manifest; package version 0.2.$env:GITHUB_RUN_NUMBER.3. rav1g.pdb is in the artifact of the default package" |
-            Add-Content out-hevcplayback/SOURCES.txt -Encoding utf8
-          @('## hevcPlayback package', '', "Version 0.2.$env:GITHUB_RUN_NUMBER.3: the default package with the restricted capability hevcPlayback; installs over the other packages of this run.", '', '```',
-            (Split-Path $package -Leaf)) + @(Get-Content out-hevcplayback/VARIANT.txt) + @(Get-Content out-hevcplayback/imports/check.txt) + @('```') >> $env:GITHUB_STEP_SUMMARY
-
-      - name: Preserve the hevcPlayback package
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: rav1g-testplayer-hevcplayback-x64-${{ github.run_id }}
-          path: out-hevcplayback/
           if-no-files-found: warn
 
   # The streams of the conformance run: AOM's decoder test vectors with AOM's md5 files, cuts of
