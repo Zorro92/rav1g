@@ -200,7 +200,7 @@ jobs:
       # keeps LocalState.
       # ---------------------------------------------------------------------------------------------
 
-      # Stable Rust, and libclang for bindgen, as in the rust job.
+      # Stable Rust, as in the rust job, and the LLVM of the runner for the C of the default package.
       - name: Rust toolchain
         shell: pwsh
         run: |
@@ -210,7 +210,6 @@ jobs:
           rustup default stable
           rustc --version
           $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
-          if (Test-Path (Join-Path $llvm 'libclang.dll')) { "LIBCLANG_PATH=$llvm" >> $env:GITHUB_ENV }
           foreach ($tool in @('clang-cl.exe', 'lld-link.exe', 'llvm-lib.exe')) {
             if (-not (Test-Path (Join-Path $llvm $tool))) { throw "$tool is not in $llvm" }
           }
@@ -809,7 +808,7 @@ jobs:
         with:
           sdk: ${{ env.WINDOWS_SDK }}
 
-      # Stable Rust (the minimum supported version is the latest stable), and libclang for bindgen.
+      # Stable Rust (the minimum supported version is the latest stable).
       - name: Rust toolchain
         shell: pwsh
         run: |
@@ -819,8 +818,6 @@ jobs:
           rustup default stable
           rustc --version
           cargo --version
-          $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
-          if (Test-Path (Join-Path $llvm 'libclang.dll')) { "LIBCLANG_PATH=$llvm" >> $env:GITHUB_ENV }
 
       # nasm, for the assembly of rav1d's parse pass (third_party/rav1d).
       - name: nasm
@@ -866,10 +863,9 @@ jobs:
           "## rav1g-dec", '', "cargo build --release: $built min ($(rustc --version)).", '' >> $env:GITHUB_STEP_SUMMARY
 
       # The unit tests of the workspace (the md5 of rav1g-dec, its argument parser) and the layout tests of
-      # the bindings (crates/rav1g-sys/src/layout_tests.rs): the size and alignment of every struct that
-      # Rust shares with the C interface, the entropy decoder or the shaders, and the offset and size of
-      # each of its fields, as the bindings have them against what the C compiler of this build says; and
-      # MB_MODE_INFO of blockd.h against the struct the shaders read it with (dx/shaders/mode_info.h).
+      # the records (crates/rav1g-sys/src/layout_tests.rs): MB_MODE_INFO of crates/rav1g-sys/src/records.rs
+      # against the struct the shaders read it with (dx/shaders/mode_info.h). The sizes and offsets of the
+      # records themselves are constant assertions there: a build that has them wrong does not compile.
       - name: Tests (cargo test)
         shell: pwsh
         env:
@@ -2155,7 +2151,7 @@ jobs:
           name: rav1g-shader-headers-${{ github.run_id }}
           path: shader-headers
 
-      # clang-cl, lld-link, llvm-lib and libclang (bindgen). The C++ standard library of the MSVC runtime
+      # clang-cl, lld-link and llvm-lib. The C++ standard library of the MSVC runtime
       # that xwin fetches (the stream readers and the player's code are C++) wants Clang 19 or newer.
       - name: Rust toolchain, LLVM and cargo-xwin
         run: |
@@ -2169,7 +2165,7 @@ jobs:
           nasm -v
           llvm=
           for version in 21 20 19; do
-            if sudo apt-get install -y -qq --no-install-recommends clang-$version lld-$version llvm-$version libclang-$version-dev; then
+            if sudo apt-get install -y -qq --no-install-recommends clang-$version lld-$version llvm-$version; then
               llvm=$version
               break
             fi
@@ -2180,10 +2176,9 @@ jobs:
             curl -fsSL https://apt.llvm.org/llvm.sh -o llvm.sh
             sudo bash llvm.sh $llvm
             rm llvm.sh
-            sudo apt-get install -y -qq --no-install-recommends clang-$llvm lld-$llvm llvm-$llvm libclang-$llvm-dev
+            sudo apt-get install -y -qq --no-install-recommends clang-$llvm lld-$llvm llvm-$llvm
           fi
           echo "/usr/lib/llvm-$llvm/bin" >> "$GITHUB_PATH"
-          echo "LIBCLANG_PATH=/usr/lib/llvm-$llvm/lib" >> "$GITHUB_ENV"
           pipx install "cargo-xwin==$CARGO_XWIN_VERSION"
           rustc --version
           "/usr/lib/llvm-$llvm/bin/clang-cl" --version | head -n 1
@@ -2585,29 +2580,17 @@ jobs:
           enableCrossOsArchive: true
           fail-on-cache-miss: true
 
-      # libclang for bindgen (the bindings of the structs of libav1's headers), nasm for rav1d's assembly. One version
-      # of LLVM, as in the rust-cross job: bindgen has to load the libclang whose headers clang gives it
-      # (with the libclang of another version the intrinsics headers do not parse).
-      - name: Rust toolchain, libclang and nasm
+      # nasm for rav1d's assembly. Nothing here is C: the types of rav1g-sys are Rust, and its shader table
+      # is built for Windows only.
+      - name: Rust toolchain and nasm
         run: |
           set -euo pipefail
           rustup toolchain install stable --profile minimal --no-self-update
           rustup default stable
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends nasm
-          llvm=
-          for version in 21 20 19; do
-            if sudo apt-get install -y -qq --no-install-recommends clang-$version libclang-$version-dev; then
-              llvm=$version
-              break
-            fi
-          done
-          [ -n "$llvm" ] || { echo 'no clang with its libclang in the distribution'; exit 1; }
-          echo "/usr/lib/llvm-$llvm/bin" >> "$GITHUB_PATH"
-          echo "LIBCLANG_PATH=/usr/lib/llvm-$llvm/lib" >> "$GITHUB_ENV"
           rustc --version
           nasm -v
-          "/usr/lib/llvm-$llvm/bin/clang" --version | head -n 1
 
       - uses: Swatinem/rust-cache@v2
         with:

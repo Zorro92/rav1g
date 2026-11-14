@@ -67,14 +67,14 @@ At the end no C++ remains in the decoder: the C parser, the HLSL and Rust.
 | Path | What |
 | --- | --- |
 | `crates/rav1g` | the decoder: Rust host modules, API, `capi` feature for the C ABI (`include/rav1g.h`) |
-| `crates/rav1g-sys` | builds the C parser with `cc` (with it three C files of its own: the macros of the C interface as functions, the host functions that raise the decoder's error, the shader bytecode table); `bindgen` bindings |
+| `crates/rav1g-sys` | the types with a fixed shape, in Rust (the records the shaders read, the state of the host, the enums of the bitstream, the perf and stage dump types; [Own types, no libaom headers](#own-types-no-libaom-headers)), and the shader bytecode table, the one C file, built with `cc` |
 | `crates/rav1g-shaders` | planned, with the switch to DXC: shader bytecode, `build.rs` runs DXC (see Requirements) and embeds the DXIL with `include_bytes!`. Today the bytecode is the FXC headers of `RAV1G_SHADER_DIR`, in `crates/rav1g-sys/shader_table.c` |
 | `tools/rav1g-dec` | command-line decoder for conformance, md5 and stage dumps |
 | `tools/rav1g-header` | writes `rav1g.h` from `crates/rav1g/src/capi.rs` with `cbindgen`, or checks it |
 | `libav1/` | the C parser and entropy decoder (`av1`, `aom*`), the shaders (`dx/shaders`) and three headers of `dx` (`av1_core.h` and `av1_perf.h`, the C interface between the parser, the host and the applications; `intra_v2_sched.h`, for the intra check). No C++ |
 | `testing/` | the test player (C++, on `rav1g.h`), the conformance scripts, the host checks of the shaders |
 
-Dependencies: `windows` (D3D12/DXGI bindings), `cc`, `bindgen`, `cbindgen`. Edition 2024, stable Rust.
+Dependencies: `windows` (D3D12/DXGI bindings), `cc`, `cbindgen` (`bindgen` until 2026-11-14). Edition 2024, stable Rust.
 Target `x86_64-pc-windows-msvc`, and the UWP target for the console build of the test player.
 
 ## Requirements

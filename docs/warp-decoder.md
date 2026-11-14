@@ -22,7 +22,7 @@ those of both.
 
 ## Build
 
-On Windows (stable Rust, the MSVC build tools, a Windows SDK, and LLVM for `bindgen`):
+On Windows (stable Rust, the MSVC build tools and a Windows SDK):
 
 ```bat
 set RAV1G_SHADER_DIR=<directory whose dx\shaders\h has the shader headers>
@@ -38,7 +38,7 @@ not set. With `RAV1G_SM6TEST_SHADER_DIR=<dir>` (what `testing/sm6test/compile.py
 `--features uavsync` builds the decoder for the headers of the uavsync variant.
 
 On Linux, for Windows (clang 19 or newer with `clang-cl`, `lld-link` and `llvm-lib` on the path,
-libclang, and `cargo-xwin`, which fetches the Windows SDK and the MSVC C runtime; no wine):
+and `cargo-xwin`, which fetches the Windows SDK and the MSVC C runtime; no wine):
 
 ```sh
 rustup target add x86_64-pc-windows-msvc
