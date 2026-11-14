@@ -14,7 +14,8 @@
 //! common code is Rust there too (`host/libaom.rs`). What stays of `libav1` for the decoder is its
 //! headers: the host fills and reads the structs of the frame header and of the blocks in the layouts
 //! the shaders and the sink were written for, and bindgen reads those from the headers (`wrapper.h`,
-//! `shared.h`, `parser.h`).
+//! `parser.h`). The records the shaders read are not among them: they are Rust with their layouts
+//! (`src/records.rs`), and the layout probe below holds them against the C structs.
 //!
 //! **For a Windows target (the decoder)** one C file is compiled into `rav1g_c.lib`: `shader_table.c`,
 //! the bytecode of the shaders. The shaders are not compiled here. `RAV1G_SHADER_DIR` names the directory
@@ -194,7 +195,7 @@ fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
     println!("cargo:rerun-if-changed={}", repo.join("libav1").display());
     println!("cargo:rerun-if-changed={}", manifest.join("wrapper.h").display());
-    println!("cargo:rerun-if-changed={}", manifest.join("shared.h").display());
+    println!("cargo:rerun-if-changed={}", manifest.join("src").join("records.rs").display());
     println!("cargo:rerun-if-changed={}", manifest.join("parser.h").display());
     println!("cargo:rerun-if-changed={}", manifest.join("shader_table.c").display());
 
@@ -282,20 +283,6 @@ fn main() {
         .unwrap_or_else(|error| fail(&format!("bindgen: {error}")));
     write_bindings(&bindings, &out.join("bindings.rs"), windows);
 
-    // The layouts shared with the GPU and between the parser's sink and the host (shared.h): types only.
-    let shared = bindgen::Builder::default()
-        .header(manifest.join("shared.h").to_string_lossy())
-        .clang_arg(format!("-I{}", repo.join("libav1").display()))
-        .clang_arg(format!("-I{}", repo.join("libav1").join("build").display()))
-        .allowlist_type(SHARED_TYPES.join("|"))
-        .prepend_enum_name(false)
-        .layout_tests(true)
-        .derive_default(true)
-        .generate_comments(false)
-        .generate()
-        .unwrap_or_else(|error| fail(&format!("bindgen (shared.h): {error}")));
-    write_bindings(&shared, &out.join("shared.rs"), windows);
-
     // The structs of libaom's decoder as the Rust host uses them (parser.h): the structs the host reads
     // and fills in place, and the enums and limits of the bitstream. Types and constants only.
     let parser = bindgen::Builder::default()
@@ -308,6 +295,9 @@ fn main() {
         .allowlist_file(r".*[/\\]dx[/\\]av1_perf\.h")
         .allowlist_type(PARSER_TYPES.join("|"))
         .allowlist_var(PARSER_VARS.join("|"))
+        // The records shared with the shaders are not bindings any more: `src/records.rs` has them.
+        .blocklist_type(RECORD_NAMES.join("|"))
+        .raw_line("pub use crate::records::*;")
         .blocklist_function(".*")
         .prepend_enum_name(false)
         .layout_tests(true)
@@ -322,7 +312,10 @@ fn main() {
     // the library) and once as the bindings have them (layout_table.rs, compiled into the tests of this
     // crate, which compare the two). The fields are read from the bindings, so none is left out.
     let mut probes = read_probes(&bindings.to_string(), INTERFACE_TYPES, "");
-    probes.extend(read_probes(&shared.to_string(), SHARED_TYPES, "shared::"));
+    let records = manifest.join("src").join("records.rs");
+    let records = fs::read_to_string(&records)
+        .unwrap_or_else(|error| fail(&format!("cannot read {}: {error}", records.display())));
+    probes.extend(read_probes(&records, RECORD_TYPES, "records::"));
     probes.extend(read_probes(&parser.to_string(), PARSER_PROBED, "parser::"));
     let probe_c = out.join("layout_probe.c");
     fs::write(&probe_c, probe_source_c(&probes))
@@ -347,11 +340,11 @@ const INTERFACE_TYPES: &[&str] = &[
     "av1_stage_dump_plane",
 ];
 
-/// The structs of `av1/common/blockd.h` and `mv.h` that cross a boundary (shared.h): the mode info record,
-/// which the shaders read as `MB_MODE_INFO` of `dx/shaders/mode_info.h`, the block records of the
-/// prediction and transform stages, and the tile's cursors into the buffers of a pipeline slot, which the
-/// parser's sink and the host both use.
-const SHARED_TYPES: &[&str] = &[
+/// The records of `src/records.rs`, which are written in Rust with their layouts and not read from
+/// `av1/common/blockd.h` and `mv.h` any more: the mode info record, which the shaders read as
+/// `MB_MODE_INFO` of `dx/shaders/mode_info.h`, the record of a transform block, and the tile's cursors
+/// into the buffers of a pipeline slot. The layout probe holds them against the C structs they were.
+const RECORD_TYPES: &[&str] = &[
     "MB_MODE_INFO",
     "PALETTE_MODE_INFO",
     "FILTER_INTRA_MODE_INFO",
@@ -359,12 +352,37 @@ const SHARED_TYPES: &[&str] = &[
     "WarpedMotionParams",
     "int_mv",
     "MV",
-    "PredictionBlock",
-    "InterWarpBlock",
-    "PredictionBlockSortingInfo",
     "tx_block_info_gpu",
-    "tx_block_info",
     "av1_tile_data",
+];
+
+/// Every type name of `src/records.rs`: the bindings of the parser's structs (parser.h) take these from
+/// there.
+const RECORD_NAMES: &[&str] = &[
+    "MB_MODE_INFO",
+    "PALETTE_MODE_INFO",
+    "FILTER_INTRA_MODE_INFO",
+    "INTERINTER_COMPOUND_DATA",
+    "WarpedMotionParams",
+    "int_mv",
+    "MV",
+    "mv",
+    "tx_block_info_gpu",
+    "av1_tile_data",
+    "tran_low_t",
+    "BLOCK_SIZE",
+    "PARTITION_TYPE",
+    "TX_SIZE",
+    "PREDICTION_MODE",
+    "UV_PREDICTION_MODE",
+    "MOTION_MODE",
+    "INTERINTRA_MODE",
+    "COMPOUND_TYPE",
+    "FILTER_INTRA_MODE",
+    "MV_REFERENCE_FRAME",
+    "TransformationType",
+    "InterpFilters",
+    "DIFFWTD_MASK_TYPE",
 ];
 
 /// Types of libaom's decoder and of its interface that the Rust host uses (parser.h); what they hold
@@ -564,7 +582,7 @@ fn c_field(field: &str) -> &str {
 fn probe_source_c(probes: &[Probe]) -> String {
     let mut text = String::from(
         "/* Written by build.rs: the layouts as this compiler has them. */\n\
-         #include <stddef.h>\n#include <stdint.h>\n\n#include \"wrapper.h\"\n#include \"shared.h\"\n\
+         #include <stddef.h>\n#include <stdint.h>\n\n#include \"wrapper.h\"\n\
          #include \"parser.h\"\n\
          #include \"av1/common/onyxc_int.h\"\n#include \"av1/common/filter.h\"\n\
          #include \"av1/common/reconintra.h\"\n#include \"aom_dsp/intrapred_common.h\"\n\n\

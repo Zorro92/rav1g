@@ -23,13 +23,11 @@ include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 /// text ("MSVC, /GL, static runtime").
 pub const C_BUILD: &str = env!("RAV1G_C_BUILD");
 
-/// The layouts shared with the GPU and between the parser's sink and the host
-/// (`libav1/av1/common/blockd.h`, `mv.h`): the mode info record that the shaders read as `MB_MODE_INFO`
-/// of `libav1/dx/shaders/mode_info.h`, the block records of the prediction and transform stages, and the
-/// tile's cursors into the buffers of a pipeline slot. The tests of this crate hold them against the C
-/// compiler of the build and against the shader's header.
+pub mod records;
+
+/// The records shared with the shaders under the name they had as bindings ([`records`]).
 pub mod shared {
-    include!(concat!(env!("OUT_DIR"), "/shared.rs"));
+    pub use crate::records::*;
 }
 
 /// The structs of libaom's decoder as the Rust host of the `rav1g` crate uses them (`parser.h`): the

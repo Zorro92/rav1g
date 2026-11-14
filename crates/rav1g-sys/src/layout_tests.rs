@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::ffi::CStr;
 use std::mem::{offset_of, size_of};
 
-use crate::shared::{self, MB_MODE_INFO};
+use crate::records::{self as shared, MB_MODE_INFO};
 use crate::*;
 
 fn field_size<T, F>(_: fn(&T) -> &F) -> usize {
@@ -84,7 +84,7 @@ fn bindings_and_c_compiler_agree() {
     // 10 structs of the C interface, 13 of blockd.h and mv.h, and 11 of the entropy decoder that the Rust
     // host reads or fills in place (AV1Decoder, AV1_COMMON, MACROBLOCKD, ThreadData, the frame buffer
     // descriptions and others), with their fields.
-    assert_eq!(types, 34);
+    assert_eq!(types, 30);
     assert!(c.len() - types >= 245, "{} fields", c.len() - types);
     println!("{types} structs, {} fields: sizes, alignments and offsets equal", c.len() - types);
 }
@@ -95,10 +95,7 @@ fn bindings_and_c_compiler_agree() {
 #[test]
 fn gpu_record_sizes() {
     assert_eq!(size_of::<MB_MODE_INFO>(), 224);
-    assert_eq!(size_of::<shared::PredictionBlock>(), 16);
-    assert_eq!(size_of::<shared::InterWarpBlock>(), 48);
     assert_eq!(size_of::<shared::tx_block_info_gpu>(), 16);
-    assert_eq!(size_of::<shared::PredictionBlockSortingInfo>(), 8);
     assert_eq!(size_of::<shared::MV>(), 4);
     assert_eq!(size_of::<shared::int_mv>(), 4);
 }
