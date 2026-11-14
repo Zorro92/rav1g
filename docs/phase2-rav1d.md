@@ -2653,7 +2653,18 @@ parse and says so; that is then the `-parseframes 1` line.
 the default package still exported nine functions of libav1 for the player's stream readers, which
 no longer exist: the `player` job of run 158 failed at that link, every other job was green). CI run
 43595221480 on `38ef031` (number 157): all jobs green. Run 43599688240 on `707d189` (number 158):
-all jobs green but `player`, so no package.
+all jobs green but `player`, so no package. Run 43601416014 on `39b0ca3` (number 159): all jobs
+green, 18.2 minutes for the push (`rust-frames` and `rust-cross-run` 15.3, `rust-frames-threads`
+12.4, `rust-switches` and `parse-check` 10.9, `rust-conformance` 10.6). On WARP: the whole set on
+the defaults and in every other run as `expected.txt` says; `rust-equal`: the md5 of every frame
+and the stage dumps of the decoder against the C++ decoder of the pin; `parse-check`: every stream
+equal to the entropy decoder of libaom; the guard with fixed budgets on the 2160p 10-bit stream
+(`frames_check.py`): the default in 775 MiB leaves 128.5 and is created, in 773 it is one frame in
+parse; `-slots 4` and four frames in parse in 775 are created with three slots and two frames, in
+824 with four slots; in 724 the smallest decoder is created; `-headroom 48` is the guard of before.
+The packages of run 159: `uwp_dx12_player_0.2.159.0_x64.msix` (default, the one for the console
+lines above; artifact `rav1g-testplayer-x64-43601416014`), `0.2.159.2` (the static library, linked
+by MSVC), `0.2.159.3` (`hevcPlayback`).
 
 ## Licence
 
