@@ -1301,6 +1301,7 @@ pub(crate) unsafe fn setup_tile(dec: *mut Av1Core, cm: &AV1_COMMON, tile: &TileI
             // The edges of the tile's wavefront, with the rows above it in the part of its row of tiles:
             // tiles side by side have columns of their own there. Nothing of them is cleared.
             let edges = &mut *td.wave_tiles.add(tile_id as usize);
+            edges.start(tile.mi_col_start, tile.mi_col_end - tile.mi_col_start);
             let first = td.wave_cols * 3 / 2 * tile.tile_row as usize;
             for (plane, at) in edges.planes.iter_mut().zip([0, td.wave_cols]) {
                 plane.above = td.wave_above.add(first + at);

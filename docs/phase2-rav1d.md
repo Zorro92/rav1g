@@ -1627,6 +1627,15 @@ tile and plane):
 - One more thing of the old function that the new one has to repeat to give the same lists: a
   chroma transform block outside the frame (the chroma loop has no clip at the frame's edge) has
   counts below zero and reads nothing, not even the corner.
+- **Idle.** Most blocks of most frames are inter blocks with no intra block near them, and entering
+  their "no iteration" is all the edges would cost them. So a tile keeps its edges only while it
+  has transform blocks of the wavefront near (`WaveEdges::idle`): it starts idle, and it goes idle
+  again at the start of a superblock row when the row before had none. A block reads units of its
+  own superblock row and of the one above, so while the tile is idle every unit a block can read is
+  "no iteration", and nothing is entered. The first intra block behind that wakes the tile: the
+  edges are set to what they would hold by then, "no iteration" in every column of the tile and in
+  every row (6 KB for a 4K frame with one tile, once per stretch of the frame that has intra
+  blocks), and are kept from there on.
 - Of the grid the host now writes the one entry per transform block that the shader reads. The
   grid is not cleared: what the shader reads of it, the frame has written.
 - Memory: the rows above are 12 bytes a column (4 KB of iterations and 8 KB of marks for the luma
@@ -1740,15 +1749,17 @@ frame, two runs each; the machine's memory is fast, so this is instructions, not
 
 | Clip | The wavefront in the grid (`-wave grid`) | At the edges (default) |
 | --- | ---: | ---: |
-| `j4k40` | 1.396, 1.429, 1.422 | 1.482, 1.472, 1.471 |
-| `t40x1ld` | 0.545, 0.539, 0.547 | 0.530, 0.504, 0.499 |
-| `d2` (the cut of CI, 30 temporal units) | 0.920, 0.909, 0.930 | 1.095, 1.075, 1.070 |
+| `j4k40` | 1.424, 1.423, 1.446 | 1.466, 1.505, 1.472 |
+| `t40x1ld` | 0.554, 0.547, 0.537 | 0.486, 0.505, 0.499 |
+| `d2` (the cut of CI, 30 temporal units) | 0.908, 0.921, 0.903 | 1.017, 1.021, 1.021 |
 
-- A transform block costs less at the edges than in the grid (`t40x1ld`). What costs is that every
-  block without an iteration now enters its border, where with the grid it did nothing: about 12 ns
-  a block here, and `d2` has 13,000 blocks a frame, nearly all of them inter blocks. So where memory
-  is fast the lists are 0.05 to 0.16 ms a frame slower on two of the three clips, and the clear
-  they replace is small too (0.17 ms for the 3.5 MB under wine on this machine).
+- A transform block costs less at the edges than in the grid (`t40x1ld`). What costs is that a
+  block without an iteration enters its border while its tile is not idle, where with the grid it
+  did nothing: about 12 ns a block here, and `d2` has 13,000 blocks a frame, nearly all of them
+  inter blocks, with an intra block somewhere in most superblock rows (without the idle state its
+  lists are 1.07 to 1.10 ms). So where memory is fast the lists are 0.04 to 0.11 ms a frame slower
+  on two of the three clips and 0.05 faster on the third, and the clear they replace is small too
+  (0.17 ms for the 3.5 MB under wine on this machine).
 - The console is the other way round: the clear is 2.2 ms a frame there and takes bandwidth from
   the parse, and the lists by the grid read and write memory that is not in the cache, which the
   edges do not. Its `cpu parse: block lists` line and its frames per second decide; `-gpuclear`

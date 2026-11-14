@@ -330,7 +330,8 @@ const NO_ITERATION: c_int = -1;
 ///   and to the left of the block that comes next in row `r`, if `r` is that block's first row;
 ///   `left_end[r & 31]` is the column to the right of the rightmost decoded unit.
 ///
-/// Every block of the tile is entered when it is decoded: a transform block with its iteration
+/// Every block of the tile is entered when it is decoded, while the tile is not idle ([`WaveEdges`]): a
+/// transform block with its iteration
 /// ([`WavePlane::commit`]), a block without one as "no iteration" ([`WavePlane::pass`]). The units above
 /// a block (over its width), to its left (over its height) and at its
 /// corner are decoded whenever the block may read them, so their entries were written by the blocks
@@ -451,9 +452,83 @@ impl WavePlane {
 }
 
 /// The edges of a tile's intra wavefront (`av1_tile_data::wave_edges`): luma, then chroma.
+///
+/// **Idle.** Most blocks of most frames are inter blocks, far from any intra block, and entering their
+/// "no iteration" at the edges is all the edges would cost them. So the edges are kept only while the
+/// tile has transform blocks of the wavefront near: a tile starts idle, and it goes idle again at the
+/// start of a superblock row when the superblock row before had none. A block reads units of its own
+/// superblock row and of the one above, so while a tile is idle every unit a block can read is "no
+/// iteration", and nothing is entered. The first intra block behind that wakes the tile: the edges are
+/// made what they would be by then, "no iteration" in every column of the tile and in every row, and
+/// are kept from there on.
 #[repr(C)]
 pub struct WaveEdges {
     pub planes: [WavePlane; 2],
+    /// Not 0: the edges are not kept (see above); what they hold is not read.
+    pub idle: c_int,
+    /// The superblock row of the block the tile was at last, and the last one with a transform block of
+    /// the wavefront; -1 and -2 at the start of the tile.
+    pub sb_row: c_int,
+    pub last_wave_sb_row: c_int,
+    /// The columns of the tile in luma: the first, and how many.
+    pub first_col: c_int,
+    pub cols: c_int,
+}
+
+impl WaveEdges {
+    /// A tile starts: idle. `first_col` and `cols` are its columns in 4x4 units of luma.
+    pub fn start(&mut self, first_col: c_int, cols: c_int) {
+        self.idle = 1;
+        self.sb_row = -1;
+        self.last_wave_sb_row = -2;
+        self.first_col = first_col;
+        self.cols = cols;
+    }
+
+    /// The tile is at a block of the superblock row `sb_row`: idle from the start of a superblock row
+    /// whose row before had no transform block of the wavefront.
+    #[inline(always)]
+    fn at(&mut self, sb_row: c_int) {
+        if sb_row != self.sb_row {
+            self.sb_row = sb_row;
+            if self.last_wave_sb_row < sb_row - 1 {
+                self.idle = 1;
+            }
+        }
+    }
+
+    /// The tile is at an intra block: its edges are kept from here on. If it was idle, no block of this
+    /// superblock row or of the one above has an iteration, which is what every entry a block can read
+    /// then has to say.
+    ///
+    /// # Safety
+    /// The rows above of the two planes are valid for the columns of the tile.
+    #[inline(always)]
+    unsafe fn wake(&mut self) {
+        self.last_wave_sb_row = self.sb_row;
+        if self.idle != 0 {
+            // SAFETY: the caller's contract.
+            unsafe { self.reset() };
+        }
+    }
+
+    /// # Safety
+    /// As for [`WaveEdges::wake`].
+    #[cold]
+    #[inline(never)]
+    unsafe fn reset(&mut self) {
+        self.idle = 0;
+        for (plane, shift) in self.planes.iter_mut().zip([0, 1]) {
+            let first = self.first_col >> shift;
+            let end = (self.first_col + self.cols + shift) >> shift;
+            // SAFETY: the caller's contract.
+            unsafe {
+                std::slice::from_raw_parts_mut(plane.above.offset(first as isize), (end - first) as usize)
+                    .fill(NO_ITERATION);
+            }
+            plane.rows = [[NO_ITERATION; 2]; WAVE_ROWS];
+        }
+    }
 }
 
 /// What the intra part needs to know of a plane of the block.
@@ -815,6 +890,13 @@ pub unsafe extern "C" fn av1_mi_push_block(pbi: *mut AV1Decoder, cm: *mut AV1_CO
 
         let y_use_palette = mi.palette_mode_info.palette_size[0] > 0;
         let uv_use_palette = mi.palette_mode_info.palette_size[1] > 0;
+        if let Some(edges) = wave.as_mut() {
+            edges.at(mi_row >> (*cm).seq_params.mib_size_log2);
+            if !is_inter || is_inter_intra {
+                // The block has, or may have, transform blocks of the wavefront.
+                edges.wake();
+            }
+        }
         if !is_inter || is_inter_intra {
             let is_intrabc = mi.use_intrabc != 0;
             let bsize_uv = scale_chroma_bsize_420(bsize);
@@ -1238,9 +1320,11 @@ pub unsafe extern "C" fn av1_mi_push_block(pbi: *mut AV1Decoder, cm: *mut AV1_CO
                 // The chroma of a palette block.
                 edges.planes[1].pass(mi_col >> 1, mi_row >> 1, 1 << bw_log_uv, 1 << bh_log_uv);
             }
-        } else if let Some(edges) = wave.as_mut() {
+        } else if let Some(edges) = wave.as_mut()
+            && edges.idle == 0
+        {
             // An inter block is predicted before the wavefront: the intra blocks next to it do not wait
-            // for it.
+            // for it. (Nothing to enter while the tile is idle.)
             edges.planes[0].pass(mi_col, mi_row, bw, bh);
             if !is_chroma_ref {
                 edges.planes[1].pass(mi_col >> 1, mi_row >> 1, 1 << bw_log_uv, 1 << bh_log_uv);

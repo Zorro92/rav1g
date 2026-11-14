@@ -363,6 +363,7 @@ impl Arena {
                 let above = self.wave_above.ptr().add(first);
                 let above_end = self.wave_above_end.ptr().add(first);
                 let edges = &mut *self.wave_tiles.ptr().add(tile.index);
+                edges.start(tile.col_start, tile.col_end - tile.col_start);
                 for (plane, at) in edges.planes.iter_mut().zip([0, cols]) {
                     plane.above = above.add(at);
                     plane.above_end = above_end.add(at);
