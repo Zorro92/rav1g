@@ -8,12 +8,12 @@
 // License 1.0 was not distributed with this source code in the PATENTS file, you can obtain it at
 // www.aomedia.org/license/patent.
 
-//! What the host needs of libaom's common code, in Rust: six functions that set a frame up for the
+//! What the host needs of libaom's common code, in Rust: eight functions that set a frame up for the
 //! stages, and the constant tables the stages are given.
 //!
 //! While the entropy decoder of libaom was the decoder's parser, these were calls into its C
 //! (`av1/common/av1_loopfilter.c`, `restoration.c`, `warped_motion.c`, `reconinter.c`) and symbols of
-//! it. That C is not part of the decoder any more (docs/phase2-rav1d.md, step 6): linking the six
+//! it. That C is not part of the decoder any more (docs/phase2-rav1d.md, step 6): linking the eight
 //! functions would bring the pixel code of libaom with them, which nothing here runs. The functions
 //! below are those functions, statement for statement; the tables are read from the C sources by the
 //! build script (`build.rs`), so they are the same numbers.

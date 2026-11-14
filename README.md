@@ -33,7 +33,7 @@ is kept at the edges of the tiles). Each was md5-exact on the console, except th
 which is new in package 0.2.148.0 and md5-exact in CI; `-cpuclear` is the default before it.
 The upstream behaviour was `-cdefv1 -nofitsize -lowmemparts 0
 -parser c -syncclear` in the test player; `-parser c`, upstream's entropy decoder, is no longer in
-the decoder (package 0.2.158). Everything else that was tried (`-slots 3`,
+the decoder (package 0.2.159). Everything else that was tried (`-slots 3`,
 `-lowmem`, `-intrav2`, `-intraopt`) stays behind its flag. The columns below name the flags the runs were made
 with; `-cdefv2`, `-fitsize` and the shared back buffer of `-lowmem` are the defaults now.
 
@@ -178,7 +178,7 @@ on two threads for a 4K stream, and takes the mode info records, coefficients an
 records of all frames in flight from pools; a 4K 10-bit decoder is 646.5 MiB of device buffers and
 runs in a console app of 1 GiB at 45 to 49 frames per second on the two heavy 4K clips (19.5 and 22.7
 with the C parser). In its last step the entropy decoder of libaom left the decoder: the library
-compiles no C of `libav1` any more (the six set-up functions and the tables the host still needed of
+compiles no C of `libav1` any more (the eight set-up functions and the tables the host still needed of
 libaom's common code are Rust now), `-parser c`, `Settings::parser` and `RAV1G_PARSER_*` are gone, and
 the C parser lives on in two places only, both as a reference: `tools/rav1g-parse-check`, which holds
 rav1d's parse against it value by value on Linux in CI, and the C++ decoder of branch `cpp`, which CI

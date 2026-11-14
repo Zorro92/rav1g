@@ -44,10 +44,10 @@ $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = Join-Path $llvm 'lld-link.exe'
 # from the first library that has it, so the functions of Windows come from the API sets and not from
 # kernel32.dll (docs/rust-port.md, "The app container").
 $env:LINK = 'WindowsApp.lib'
-# What the player's stream readers (testing/common) call of the C, next to the functions of rav1g.h.
-$exports = @('aom_codec_av1_dx', 'aom_codec_error', 'aom_codec_error_detail', 'aom_img_alloc', 'aom_img_free',
-  'aom_img_plane_height', 'aom_img_plane_width', 'aom_read_obu_header', 'aom_uleb_decode')
-$linkArgs = @('-Clink-arg=/APPCONTAINER', "-Clink-arg=/LIBPATH:$store") + @($exports | ForEach-Object { "-Clink-arg=/EXPORT:$_" })
+# The DLL exports the functions of rav1g.h and nothing else. (It used to export nine functions of libav1 for
+# the player's stream readers; the library has no C of libav1 any more, and the readers of testing/common
+# stand by themselves: docs/phase2-rav1d.md, step 6.)
+$linkArgs = @('-Clink-arg=/APPCONTAINER', "-Clink-arg=/LIBPATH:$store")
 cargo rustc --manifest-path (Join-Path $repo 'Cargo.toml') --release --locked -p rav1g --lib --features $Features `
   --crate-type cdylib --target x86_64-pc-windows-msvc --target-dir $TargetDir -- @linkArgs
 if ($LASTEXITCODE -ne 0) { throw 'cargo rustc of rav1g.dll failed' }

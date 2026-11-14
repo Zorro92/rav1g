@@ -2503,8 +2503,8 @@ known). So the headroom is the least that is known to be enough. The default now
 MiB and is created with 20 MiB to spare (it needs 774.5 MiB left, and would also have been created
 with the 775.0 of 0.2.156); the fourth slot needs 823.3 and is 31 MiB short.
 
-**What the host needed of libaom, in Rust.** The stages were fed by six functions and eight tables
-of libaom's common code, which the decoder called as C: the loop filter thresholds and levels
+**What the host needed of libaom, in Rust.** The stages were fed by eight functions and a dozen
+tables of libaom's common code, which the decoder called as C: the loop filter thresholds and levels
 (`av1_loop_filter_init`, `av1_loop_filter_frame_init`), the loop restoration units
 (`av1_alloc_restoration_struct`, `av1_loop_restoration_filter_frame_init`), the shears of a warp
 model (`get_shear_params`), the wedge masks (`av1_init_wedge_masks`), and whether the top right and
@@ -2551,7 +2551,7 @@ the output never depended on it; the Rust writes 0 there.
   `libav1` (`obudec.c` has them), and what `tools_common.c` had of libaom's tools is cut down to
   the three functions the readers call.
 
-**For an application** (`rav1g.h`, package 0.2.158):
+**For an application** (`rav1g.h`, package 0.2.159; run 158 has no package, see Runs below):
 
 - `Rav1gSettings::parser` is `reserved_parser`: not used, in the same place, so every field behind
   it is where it was. An application that set `parser` deletes the assignment (it chose rav1d
@@ -2619,7 +2619,7 @@ shares (`memory_lines.py pools`) in place of their equality with `-parser c`.
   is the linker. It is still built.
 - P010 output (the plan's last item).
 
-**Console**, package 0.2.158.0 (the base 1 GiB), slow state, the owner's app not running. The md5
+**Console**, package 0.2.159.0 (the base 1 GiB), slow state, the owner's app not running. The md5
 set on the defaults, one launch a clip, and the timing block for `j4k40` and `d2`, each block in one
 launch behind a warm-up task ([test-player.md](test-player.md#console-the-task-lines)):
 
@@ -2648,6 +2648,12 @@ before the decoder` (about 19 MiB less in use than with 0.2.156) and the numbers
 headroom` line. If the default should ever be given
 less than 774.5 MiB (a larger output queue, another app state), the guard creates one frame in
 parse and says so; that is then the `-parseframes 1` line.
+
+**Runs.** Commits `38ef031` (the guard), `707d189` (this step) and the fix behind it (the DLL of
+the default package still exported nine functions of libav1 for the player's stream readers, which
+no longer exist: the `player` job of run 158 failed at that link, every other job was green). CI run
+43595221480 on `38ef031` (number 157): all jobs green. Run 43599688240 on `707d189` (number 158):
+all jobs green but `player`, so no package.
 
 ## Licence
 

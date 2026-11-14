@@ -381,7 +381,7 @@ the start of every task say what is in effect.
 | Decoder size | the stream's largest frame size, rounded up to 128, and 8-bit buffers for an 8-bit stream; see [Decoder size](#decoder-size--nofitsize) | `Decoder size: 3840x2176 10-bit (fit to the stream, default)` | `-nofitsize`: 4096x2176 10-bit for every stream, `Decoder size: 4096x2176 10-bit (fixed, -nofitsize)` |
 | Memory reductions | part 1, one back buffer shared by all frames (frame buffer pool 12 → 10, no measurable time cost); see [Smaller decoder](#smaller-decoder--lowmem) | `Low memory parts: 1 (default: 1 shared back buffer)` | `-lowmemparts 0`: none, every frame takes its back buffer from the pool (`Low memory parts: 0 (none, -lowmemparts 0)`); `-lowmemparts N`: exactly the parts in `N`; `-lowmem`: all three (`-lowmemparts 7`) |
 | Pipeline slots | 2 | `Frame slots: 2` | `-slots 3`, `-slots 4` |
-| Parser | the parse pass of rav1d, with its switches `nolfmask` and `tilethread` on | `Parser: the parse pass of rav1d`, `Parser switches (-parseopt): nolfmask tilethread` | none since package 0.2.158: the entropy decoder of libaom (`-parser c`) left the decoder; up to 0.2.157 `Parser: the entropy decoder of libaom (-parser c)`; `-parseopt` for the switches; see [Parser](#parser--parser) |
+| Parser | the parse pass of rav1d, with its switches `nolfmask` and `tilethread` on | `Parser: the parse pass of rav1d`, `Parser switches (-parseopt): nolfmask tilethread` | none since package 0.2.159: the entropy decoder of libaom (`-parser c`) left the decoder; up to 0.2.157 `Parser: the entropy decoder of libaom (-parser c)`; `-parseopt` for the switches; see [Parser](#parser--parser) |
 | Clears of a slot | none: the wavefront of intra prediction is kept at the edges of the tiles (since package 0.2.146.0) | `Clears: none needed (default: intra wavefront at the edges of the tiles; -gpuclear, -cpuclear and -syncclear keep it in the slot's grid and clear that)` | `-gpuclear`, `-cpuclear`, `-syncclear`: the wavefront in the slot's grid, cleared for every frame by the GPU, the completion thread (the default of 0.2.140 to 0.2.144; `-asyncclear` is the same) or the decode thread; see [Clears](#clears) |
 | Intra prediction | upstream's shaders, `/Od` build | `Intra shaders: intra_main + intra_filter (original)`, `Intra main shader: intra_main (/Od, original)` | `-intrav2`, `-intraopt` |
 | Inter prediction | upstream's shaders, lists by type and block size | `Inter shaders: inter_main, inter_compound (original)` | `-interfast`: see [Inter fast path](#inter-fast-path--interfast) |
@@ -1266,7 +1266,7 @@ four listings has the bytecode compiled into the package.
 
 ## Parser (`-parser`)
 
-**The flag is gone since package 0.2.158.** The decoder reads every stream with the parse pass of
+**The flag is gone since package 0.2.159.** The decoder reads every stream with the parse pass of
 rav1d ([phase2-rav1d.md](phase2-rav1d.md)); the entropy decoder of libaom, which `-parser c` chose
 up to package 0.2.157, is no longer in the library
 ([step 6](phase2-rav1d.md#step-6-the-c-parser-leaves)). A task line with `-parser` is an error of
@@ -1373,7 +1373,7 @@ player):
 | 1920x1080 10-bit, now | 162.1 | 176.2 | 190.3 |
 
 **The budget guard still decides**, and since package 0.2.157 it wants a
-[headroom](#the-headroom--headroom) behind the decoder (128 MiB since 0.2.158, 100 in 0.2.157): when the decoder of the frames in
+[headroom](#the-headroom--headroom) behind the decoder (128 MiB since 0.2.159, 100 in 0.2.157): when the decoder of the frames in
 parse would leave the app less, the decoder is created with fewer slots and frames in parse (four
 slots, then two frames in parse on three slots, then one frame in parse on two slots), and the task
 runs as it would with those flags. With 775 MiB left for the decoder, which is what the default
@@ -1454,7 +1454,7 @@ entropy/tile decode, wall` and `thread sum`, `gpu busy`, and the waits (`cpu wai
 wait_sec_slot`, `cpu wait_output`). The `Frames in parse:` and `Frame slots:` lines of each task say
 what the decoder had.
 
-**Package 0.2.158** (the C parser gone, the headroom 128 MiB): the md5 line above for the set, and
+**Package 0.2.159** (the C parser gone, the headroom 128 MiB): the md5 line above for the set, and
 the second, the third and a `-parseframes 1` line of the timing block; what the guard should decide
 for each is in [phase2-rav1d.md](phase2-rav1d.md#step-6-the-c-parser-leaves).
 
@@ -1977,7 +1977,7 @@ before. So the guard had the right numbers and the wrong threshold.
 
 Since package 0.2.157 the guard wants a **headroom** behind the device buffers
 (`AV1_MEMORY_GUARD_HEADROOM`, `Rav1gSettings::memory_headroom`): 100 MiB in 0.2.157, between the
-128.5 MiB that ran and the 77.5 MiB that did not, and **128 MiB since 0.2.158**, the least that is
+128.5 MiB that ran and the 77.5 MiB that did not, and **128 MiB since 0.2.159**, the least that is
 known to be enough. The reason for the second number: with the C parser the host pool of a 4K
 decoder was 21.0 MiB, without it 1.8, so the app has about 19 MiB more left when the guard asks
 (about 794 MiB where it had 775), and a fourth slot would leave about 97 MiB: 3 MiB under a
@@ -1998,7 +1998,7 @@ The first that leaves the headroom is created; when none does, the smallest, wit
 its frames may be slow. That decoder is then held against the margin of 48 MiB as before, which is
 the only thing a creation is refused for. For a 3840x2160 10-bit stream in the default package:
 
-| Task | Device buffers | Leaves of 775 MiB (0.2.156) | Leaves of about 794 MiB (0.2.158) | Created by 0.2.158 |
+| Task | Device buffers | Leaves of 775 MiB (0.2.156) | Leaves of about 794 MiB (0.2.159) | Created by 0.2.159 |
 | --- | ---: | ---: | ---: | --- |
 | no flag | 646.5 | 128.5 | 148 | as asked: 2 frames in parse, 3 slots |
 | `-slots 4` | 695.3 | 77.5 | 97 | 2 frames in parse, 3 slots (646.5 MiB) |
