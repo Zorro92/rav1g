@@ -1,0 +1,23 @@
+# Code of other projects kept in this tree, marked for GitHub's language statistics. The decoder is
+# Rust and HLSL; none of the files below is compiled into it.
+
+# libaom: the reference the shader checks of testing/ and tools/rav1g-parse-check hold the decoder
+# against, and the headers of the structs the stages read. Its shaders (libav1/dx) are rav1g's own.
+libav1/aom/** linguist-vendored
+libav1/aom_dsp/** linguist-vendored
+libav1/aom_mem/** linguist-vendored
+libav1/aom_ports/** linguist-vendored
+libav1/aom_scale/** linguist-vendored
+libav1/aom_util/** linguist-vendored
+libav1/av1/** linguist-vendored
+libav1/build/** linguist-vendored
+
+# The WebM parser of the test player, and the file readers of aomdec and Microsoft's D3D12 helper
+# header the test player uses.
+third_party/libwebm/** linguist-vendored
+testing/common/d3dx12.h linguist-vendored
+testing/common/ivfdec.* linguist-vendored
+testing/common/obudec.* linguist-vendored
+testing/common/webmdec.* linguist-vendored
+testing/common/tools_common.* linguist-vendored
+testing/common/md5_utils.* linguist-vendored
