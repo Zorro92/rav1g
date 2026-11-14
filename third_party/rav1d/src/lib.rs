@@ -336,7 +336,7 @@ pub(crate) fn rav1d_open(
         allocator: s.allocator.clone(),
         logger: s.logger.clone(),
         apply_grain: s.apply_grain,
-        operating_point: s.operating_point.get(), // TODO propagate `InRange`
+        operating_point: s.operating_point.get().into(), // TODO propagate `InRange`
         all_layers: s.all_layers,
         frame_size_limit,
         strict_std_compliance: s.strict_std_compliance,
@@ -350,6 +350,7 @@ pub(crate) fn rav1d_open(
         sink,
         parse_lf_masks,
         parse_tile_keeps_thread,
+        broken: Default::default(),
         dsp: Default::default(),
         flush: Default::default(),
         picture_pool: Default::default(),
@@ -481,7 +482,7 @@ fn drain_picture(c: &Rav1dContext, state: &mut Rav1dState, out: &mut Rav1dPictur
     Err(Rav1dError::TryAgain)
 }
 
-fn gen_picture(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResult {
+pub(crate) fn gen_picture(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResult {
     if output_picture_ready(c, state, false) {
         return Ok(());
     }

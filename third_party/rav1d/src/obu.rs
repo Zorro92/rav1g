@@ -2253,8 +2253,9 @@ fn parse_obus(
                 .sequence(&seq_hdr, color_codes, new)
                 .map_err(|()| Rav1dError::InvalidArgument)?;
 
-            let op_idx = if c.operating_point < seq_hdr.num_operating_points {
-                c.operating_point
+            let operating_point = c.operating_point.load(Ordering::Relaxed);
+            let op_idx = if operating_point < seq_hdr.num_operating_points {
+                operating_point
             } else {
                 0
             };
@@ -2527,63 +2528,11 @@ fn parse_obus(
                     .p
                     .flags
                     .into();
-            } else {
-                let mut task_thread_lock = c.task_thread.lock.lock();
-                // Need to append this to the frame output queue.
-                let next = state.frame_thread.next;
-                state.frame_thread.next = (state.frame_thread.next + 1) % c.fc.len() as u32;
-
-                let fc = &c.fc[next as usize];
-                while !fc.task_thread.finished.load(Ordering::SeqCst) {
-                    fc.task_thread.cond.wait(&mut task_thread_lock);
-                }
-                let out_delayed = &mut state.frame_thread.out_delayed[next as usize];
-                if out_delayed.p.data.is_some() || fc.task_thread.error.load(Ordering::SeqCst) != 0
-                {
-                    let first = c.task_thread.first.load(Ordering::SeqCst);
-                    if first as usize + 1 < c.fc.len() {
-                        c.task_thread.first.fetch_add(1, Ordering::SeqCst);
-                    } else {
-                        c.task_thread.first.store(0, Ordering::SeqCst);
-                    }
-                    let _ = c.task_thread.reset_task_cur.compare_exchange(
-                        first,
-                        u32::MAX,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    );
-                    if c.task_thread.cur.get() != 0
-                        && (c.task_thread.cur.get() as usize) < c.fc.len()
-                    {
-                        c.task_thread.cur.update(|cur| cur - 1);
-                    }
-                }
-                let error = &mut *fc.task_thread.retval.try_lock().unwrap();
-                if error.is_some() {
-                    state.cached_error = mem::take(error);
-                    state.cached_error_props = out_delayed.p.m.clone();
-                    let _ = mem::take(out_delayed);
-                } else if out_delayed.p.data.is_some() {
-                    let progress =
-                        out_delayed.progress.as_ref().unwrap()[1].load(Ordering::Relaxed);
-                    if (out_delayed.visible || c.output_invisible_frames) && progress != FRAME_ERROR
-                    {
-                        state.out = out_delayed.clone();
-                        state.event_flags |= out_delayed.flags.into();
-                    }
-                    let _ = mem::take(out_delayed);
-                }
-                *out_delayed = state.refs[frame_hdr.existing_frame_idx as usize].p.clone();
-                out_delayed.visible = true;
-                rav1d_picture_copy_props(
-                    &mut out_delayed.p,
-                    state.content_light.clone(),
-                    state.mastering_display.clone(),
-                    // Must be moved from the context to the frame.
-                    Rav1dITUTT35::to_immut(mem::take(&mut state.itut_t35)),
-                    props.clone(),
-                );
             }
+            // rav1g: with more than one frame in parse upstream appends the shown picture to its
+            // queue of pictures, which takes a frame context and waits for the frame that had it.
+            // Here the sink has the frame (above) and keeps the order of the output itself, and
+            // the pictures are not used: a shown frame takes no frame context and waits for none.
             if state.refs[frame_hdr.existing_frame_idx as usize]
                 .p
                 .p

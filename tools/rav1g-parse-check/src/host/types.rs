@@ -48,9 +48,9 @@ pub struct av1_frame_thread_data {
     pub scale_enable: c_int,
 }
 
-/// The decoder as `av1_mi_push_block` reads it: the slot of the frame in parse, and for this program
-/// the side (one of the two parsers) the decoder belongs to.
+/// The decoder of the entropy decoder of libaom in this program: the side (one of the two parsers) it
+/// belongs to. `av1_mi_push_block` does not look at the decoder: it finds the slot of a block's frame
+/// through the data of the block's tile.
 pub struct Av1Core {
-    pub curr_frame_data: *mut av1_frame_thread_data,
     pub side: *mut crate::plain::Side,
 }

@@ -553,19 +553,22 @@ impl IntraPlane {
 /// lists of its tile.
 ///
 /// # Safety
-/// Called by the entropy decoder on the thread that decodes the tile: `pbi` is the decoder, `cm` the
-/// frame header, `xd` the thread's block context with the block's mode info and its tile's data.
+/// Called by the entropy decoder on the thread that decodes the tile: `cm` is the frame header (its
+/// size in 4x4 units and its superblock size are read), `xd` the thread's block context with the
+/// block's mode info and its tile's data, which names the slot of the frame
+/// (`av1_tile_data::frame_data`). The decoder is not looked at.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn av1_mi_push_block(pbi: *mut AV1Decoder, cm: *mut AV1_COMMON, xd: *mut MACROBLOCKD) {
+pub unsafe extern "C" fn av1_mi_push_block(_pbi: *mut AV1Decoder, cm: *mut AV1_COMMON, xd: *mut MACROBLOCKD) {
     // SAFETY: the caller's contract. The frame data is shared by the tile threads and only read here; the
     // tile data, the block's mode info and the parts of the wavefront grids the tile covers belong to
     // this thread. The mode info of the neighbours is read while the pointer to the block's own is not
     // written through.
     unsafe {
-        let dec = (*pbi).gpu_decoder.cast::<super::types::Av1Core>();
-        let td = &*(*dec).curr_frame_data.cast_const();
         let xd = &*xd.cast_const();
         let tile = &mut *xd.tile_data;
+        // The slot of the tile's frame. Not "the frame of the decoder": the tiles of several frames are
+        // parsed side by side (docs/phase2-rav1d.md, step 4), and `pbi` is not looked at.
+        let td = &*tile.frame_data.cast_const().cast::<av1_frame_thread_data>();
         let index_arr = tile.gen_indexes;
         let map = tile.gen_block_map;
         // The edges of the tile's wavefront; null when the frame keeps the wavefront in the slot's grid.

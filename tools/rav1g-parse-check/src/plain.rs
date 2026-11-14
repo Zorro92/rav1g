@@ -164,7 +164,6 @@ pub struct Arena {
     pub pred_map_size: c_int,
     /// The wavefront grids: luma, and chroma behind it.
     pub iter_grid: Buffer<c_int>,
-    pub iter_grid_stride: c_int,
     pub iter_grid_offset_uv: c_int,
     /// The wavefront is kept in the edges of the tiles (the host's default) instead of in the grids.
     pub wave_edges: bool,
@@ -183,6 +182,9 @@ pub struct Arena {
     pub lr_units: Mutex<Vec<LrUnit>>,
     /// A block with global motion is warped from this reference (`gm_warp` of the host's slot).
     pub gm_warp: [c_int; 8],
+    /// The slot of the frame as `av1_mi_push_block` reads it, which the function finds through the data
+    /// of a tile (`av1_tile_data::frame_data`).
+    frame_data: Box<av1_frame_thread_data>,
     /// The parser finished the frame without an error.
     pub ok: bool,
 }
@@ -213,7 +215,6 @@ impl Arena {
             block_map: Buffer::new(pred_map_size as usize + 4096),
             pred_map_size,
             iter_grid: Buffer::new((grid_w * grid_h) as usize * 3 / 2 + 64),
-            iter_grid_stride: grid_w,
             iter_grid_offset_uv: grid_w * grid_h,
             wave_edges,
             wave_tiles: Buffer::new(tiles),
@@ -224,8 +225,23 @@ impl Arena {
             palettes: (0..tiles).map(|_| Mutex::new(Vec::new())).collect(),
             lr_units: Mutex::new(Vec::new()),
             gm_warp: [0; 8],
+            frame_data: Box::new(av1_frame_thread_data {
+                gm_warp: [0; 8],
+                gen_intra_iter_y: std::ptr::null_mut(),
+                gen_intra_iter_uv: std::ptr::null_mut(),
+                iter_grid_stride: grid_w,
+                iter_grid_stride_uv: grid_w >> 1,
+                intra_v2: 0,
+                intra_v2_sched: Default::default(),
+                scale_factors: Default::default(),
+                scale_enable: 0,
+            }),
             ok: false,
         };
+        let mut arena = arena;
+        arena.frame_data.gen_intra_iter_y = arena.iter_grid.ptr();
+        // SAFETY: the chroma grid lies behind the luma grid in the buffer.
+        arena.frame_data.gen_intra_iter_uv = unsafe { arena.iter_grid.ptr().add(arena.iter_grid_offset_uv as usize) };
         arena.fill();
         // SAFETY: the buffers of the edges, which nothing else works on. Filled once: the host does not
         // clear them between frames either.
@@ -272,24 +288,14 @@ impl Arena {
             palettes.lock().expect("no thread panics with it").clear();
         }
         self.lr_units.lock().expect("no thread panics with it").clear();
-        self.gm_warp = gm_warp;
+        self.set_gm_warp(gm_warp);
         self.ok = false;
     }
 
-    /// The slot of the frame for `av1_mi_push_block`.
-    pub fn frame_data(&self) -> av1_frame_thread_data {
-        av1_frame_thread_data {
-            gm_warp: self.gm_warp,
-            gen_intra_iter_y: self.iter_grid.ptr(),
-            // SAFETY: the chroma grid lies behind the luma grid in the buffer.
-            gen_intra_iter_uv: unsafe { self.iter_grid.ptr().add(self.iter_grid_offset_uv as usize) },
-            iter_grid_stride: self.iter_grid_stride,
-            iter_grid_stride_uv: self.iter_grid_stride >> 1,
-            intra_v2: 0,
-            intra_v2_sched: Default::default(),
-            scale_factors: Default::default(),
-            scale_enable: 0,
-        }
+    /// The references a block with global motion is warped from, before the tiles of the frame start.
+    pub fn set_gm_warp(&mut self, gm_warp: [c_int; 8]) {
+        self.gm_warp = gm_warp;
+        self.frame_data.gm_warp = gm_warp;
     }
 
     /// A tile's cursors into the buffers, as `av1_setup_macroblockd` of the host sets them. Returns the
@@ -356,6 +362,8 @@ impl Arena {
             t.gen_iter_clear_offset = (t.gen_intra_iter_set + 16) * 10 + 256;
             t.gen_iter_clear_size =
                 (size_of::<c_int>() as c_int).wrapping_mul(256 + t.gen_intra_max_iter * 10 - t.gen_iter_clear_offset);
+            // The frame of the tile, for `av1_mi_push_block`: read by the tiles, written by none.
+            t.frame_data = std::ptr::from_ref::<av1_frame_thread_data>(&self.frame_data).cast_mut().cast();
             if self.wave_edges {
                 // The tile's edges, with the rows above it in the part of its row of tiles.
                 let cols = Self::wave_cols(size);
@@ -376,12 +384,11 @@ impl Arena {
     }
 }
 
-/// One of the two parsers: the decoder `av1_mi_push_block` finds its frame through, the frame in parse
-/// and the frames that are parsed.
+/// One of the two parsers: the decoder of the entropy decoder of libaom, the frame in parse and the
+/// frames that are parsed.
 pub struct Side {
     /// What `gpu_decoder` of an `AV1Decoder` points to.
     pub core: Av1Core,
-    pub frame_data: av1_frame_thread_data,
     /// The frame in parse.
     pub arena: Option<Arena>,
     /// The parsed frames in decode order, until they are compared.
@@ -402,12 +409,7 @@ pub struct Side {
 impl Side {
     pub fn new(wave_edges: bool) -> Box<Self> {
         let mut side = Box::new(Self {
-            core: Av1Core { curr_frame_data: std::ptr::null_mut(), side: std::ptr::null_mut() },
-            frame_data: Arena::new(
-                FrameSize { mi_cols: 16, mi_rows: 16, tile_cols: 1, tile_rows: 1, has_chroma: true },
-                wave_edges,
-            )
-            .frame_data(),
+            core: Av1Core { side: std::ptr::null_mut() },
             arena: None,
             frames: Vec::new(),
             failed: 0,
@@ -417,9 +419,6 @@ impl Side {
             c: Default::default(),
             wave_edges,
         });
-        side.frame_data.gen_intra_iter_y = std::ptr::null_mut();
-        side.frame_data.gen_intra_iter_uv = std::ptr::null_mut();
-        side.core.curr_frame_data = &raw mut side.frame_data;
         side.core.side = &raw mut *side;
         side
     }
@@ -433,11 +432,10 @@ impl Side {
             }
             _ => {
                 let mut arena = Arena::new(size, self.wave_edges);
-                arena.gm_warp = gm_warp;
+                arena.set_gm_warp(gm_warp);
                 arena
             }
         };
-        self.frame_data = arena.frame_data();
         self.arena.insert(arena)
     }
 
@@ -455,7 +453,5 @@ impl Side {
                 self.failed += 1;
             }
         }
-        self.frame_data.gen_intra_iter_y = std::ptr::null_mut();
-        self.frame_data.gen_intra_iter_uv = std::ptr::null_mut();
     }
 }

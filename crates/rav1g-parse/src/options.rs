@@ -34,6 +34,9 @@ pub struct ParseOptions {
     /// the grid between frames of one size. Not a switch of the parse: the D3D12 host reads it
     /// (`rav1g_setup_frame_begin`). Off by default.
     pub clear_grid: bool,
+    /// [`SinkOptions::test_panic`]: the parse of the third frame panics, for the test of what a bug in
+    /// the parser does to a decode call. Off, and no way of doing a parse.
+    pub test_panic: bool,
 }
 
 impl Default for ParseOptions {
@@ -51,6 +54,7 @@ impl ParseOptions {
     pub const TIME_CALLS: u32 = 8;
     pub const LATE_LISTS: u32 = 16;
     pub const CLEAR_GRID: u32 = 32;
+    pub const TEST_PANIC: u32 = 64;
     /// The bits of [`ParseOptions::default`].
     pub const DEFAULT: u32 = Self::NO_LF_MASKS | Self::TILE_KEEPS_THREAD;
     /// The two switches that are on by default, which a list of words names to replace that default.
@@ -63,15 +67,17 @@ impl ParseOptions {
         time_calls: false,
         late_lists: false,
         clear_grid: false,
+        test_panic: false,
     };
 
     /// The words of the tools (`-parseopt <word>[,<word>...]`).
-    pub const WORDS: [(&'static str, u32); 5] = [
+    pub const WORDS: [(&'static str, u32); 6] = [
         ("nolfmask", Self::NO_LF_MASKS),
         ("tilethread", Self::TILE_KEEPS_THREAD),
         ("time", Self::TIME_CALLS),
         ("latelists", Self::LATE_LISTS),
         ("cleargrid", Self::CLEAR_GRID),
+        ("testpanic", Self::TEST_PANIC),
     ];
 
     pub const fn from_bits(bits: u32) -> Self {
@@ -81,6 +87,7 @@ impl ParseOptions {
             time_calls: bits & Self::TIME_CALLS != 0,
             late_lists: bits & Self::LATE_LISTS != 0,
             clear_grid: bits & Self::CLEAR_GRID != 0,
+            test_panic: bits & Self::TEST_PANIC != 0,
         }
     }
 
@@ -90,6 +97,7 @@ impl ParseOptions {
             | u32::from(self.time_calls) * Self::TIME_CALLS
             | u32::from(self.late_lists) * Self::LATE_LISTS
             | u32::from(self.clear_grid) * Self::CLEAR_GRID
+            | u32::from(self.test_panic) * Self::TEST_PANIC
     }
 
     /// A list of words, separated by commas. `nolfmask` and `tilethread` are the two switches that are
@@ -97,7 +105,9 @@ impl ParseOptions {
     /// the two, the ones the list names are on and no other (`none`: neither; `default`: both). `time`
     /// (the timing of the sink's calls), `latelists` (the block lists at the end of a tile) and
     /// `cleargrid` (the mode info grid cleared for every frame) are off by default; each is on when the
-    /// list has it and leaves the two as they are, so `time` alone times the default. `None` for a word that is none of these.
+    /// list has it and leaves the two as they are, so `time` alone times the default. `testpanic` is not
+    /// a way of doing a parse: the parse of the third frame panics, for the test of what a bug does.
+    /// `None` for a word that is none of these.
     ///
     /// | List | `nolfmask` | `tilethread` | `time` |
     /// | --- | --- | --- | --- |
@@ -139,7 +149,7 @@ impl ParseOptions {
 
     /// The part of the sink.
     pub fn sink(self) -> SinkOptions {
-        SinkOptions { time_calls: self.time_calls, late_lists: self.late_lists }
+        SinkOptions { time_calls: self.time_calls, late_lists: self.late_lists, test_panic: self.test_panic }
     }
 
     /// The part of rav1d, into its settings.
@@ -195,5 +205,10 @@ mod tests {
         assert_eq!(ParseOptions::from_words("all"), None);
         assert_eq!(ParseOptions::from_words("tilethread,other"), None);
         assert_eq!(ParseOptions::from_bits(1), ParseOptions::NONE);
+        // The test switch: a bit of its own, off in every default.
+        let panics = ParseOptions::from_words("testpanic").unwrap();
+        assert_eq!(panics, ParseOptions { test_panic: true, ..default });
+        assert_eq!(panics.bits(), 70);
+        assert_eq!(ParseOptions::from_bits(70), panics);
     }
 }

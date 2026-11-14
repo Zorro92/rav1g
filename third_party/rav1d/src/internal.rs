@@ -1,7 +1,7 @@
 use std::ffi::{c_int, c_uint};
 use std::mem;
 use std::ops::{Deref, Range};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 
@@ -224,6 +224,9 @@ pub struct Rav1dContext {
     /// rav1g: the switches of `crate::parse::ParseSettings`.
     pub(crate) parse_lf_masks: bool,
     pub(crate) parse_tile_keeps_thread: bool,
+    /// rav1g: a worker thread ended with a panic (`thread_task::rav1d_worker_task`). Nothing waits
+    /// for a frame any more and no task is taken; the context is good for `rav1d_close` only.
+    pub(crate) broken: AtomicBool,
 
     pub(crate) state: Mutex<Rav1dState>,
 
@@ -242,7 +245,9 @@ pub struct Rav1dContext {
 
     pub(crate) allocator: Rav1dPicAllocator,
     pub(crate) apply_grain: bool,
-    pub(crate) operating_point: u8,
+    /// rav1g: an application may change it (`crate::parse::Parser::set_operating_point`); read at a
+    /// sequence header, as upstream reads it.
+    pub(crate) operating_point: AtomicU8,
     pub(crate) all_layers: bool,
     pub(crate) frame_size_limit: c_uint,
     pub(crate) strict_std_compliance: bool,

@@ -9,6 +9,7 @@
 //! A [`Parser`] is the decoder: [`Parser::send`] takes the bytes of a temporal unit and returns when the
 //! frames in it are parsed.
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use crate::c_box::CRef;
@@ -22,7 +23,7 @@ use crate::include::dav1d::picture::Rav1dPicture;
 use crate::in_range::InRange;
 use crate::internal::Rav1dContext;
 use crate::levels::{Av1Block, BlockSize, TxfmSize, TxfmType};
-use crate::{rav1d_close, rav1d_flush, rav1d_get_picture, rav1d_open, rav1d_send_data};
+use crate::{gen_picture, rav1d_close, rav1d_flush, rav1d_get_picture, rav1d_open, rav1d_send_data};
 pub use crate::error::Rav1dError;
 
 /// The colour description of a sequence header as it is coded: `color_primaries`,
@@ -194,6 +195,12 @@ pub struct ParseLrUnit {
 
 /// What takes the parse of a stream. The calls of a frame come between its `frame_begin` and its
 /// `frame_end`; those of a tile come from one thread at a time, in decode order.
+///
+/// With more than one frame in parse ([`ParseSettings::frames`]) the frames begin in decode order on
+/// the thread that sends the data, and a frame ends on whichever thread parsed its last part, in any
+/// order: a frame may end before one that began before it, and the calls of the tiles of several
+/// frames come side by side. `frame_end` is then called with the lock of the parser's scheduler
+/// held: it should hand the frame on and return.
 pub trait ParseSink: Send + Sync {
     /// A sequence header was read (the thread that sends the data), before the parser takes it. `new`:
     /// it is the first one or differs from the one before, and the parser forgets its references.
@@ -209,7 +216,8 @@ pub trait ParseSink: Send + Sync {
     }
 
     /// A frame header shows the frame of a reference slot (the thread that sends the data, in decode
-    /// order with the frames). `Err` fails the data; the slots stay as they are.
+    /// order with the `frame_begin` of the frames). `Err` fails the data; the slots stay as they are.
+    /// With more than one frame in parse the frame that is shown may still be in parse.
     fn show_existing(&self, _show: &ParseShowExisting<'_>) -> Result<(), ()> {
         Ok(())
     }
@@ -258,7 +266,9 @@ pub trait ParseSink: Send + Sync {
 pub struct ParseSettings {
     /// Worker threads; 1 parses on the thread that sends the data.
     pub threads: u16,
-    /// Frames that may be in parse at once (at most `threads`).
+    /// Frames that may be in parse at once (at most `threads`). With more than one, [`Parser::send`]
+    /// returns while frames are in parse, and an error of a frame's parse is told to the sink
+    /// (`ParseSink::frame_end`) and to nobody else.
     pub frames: u16,
     /// The operating point of a scalable stream.
     pub operating_point: u8,
@@ -316,14 +326,23 @@ impl Parser {
     }
 
     /// Parses the frames in `data` (a temporal unit, or any run of whole OBUs). Returns when they are
-    /// parsed when one frame is parsed at a time; with more, frames may still be in parse.
+    /// parsed when one frame is parsed at a time; with more, frames may still be in parse
+    /// ([`Self::wait`]), and the error returned is one of the data: a header that cannot be read, a
+    /// frame the sink did not take, a frame whose references are missing.
     ///
     /// After an error nothing of the data is left with the parser: the rest of it is dropped, with a
     /// frame whose tiles were being collected, as the decoder of upstream's tools drops it. The next
     /// call starts with its own data.
     pub fn send(&self, data: &[u8]) -> Result<(), Rav1dError> {
+        if self.broken() {
+            return Err(Rav1dError::InvalidArgument);
+        }
         let mut data = Rav1dData::wrap(CRef::Box(Box::from(data)))?;
-        let result = self.send_all(&mut data);
+        let result = if self.c.fc.len() > 1 {
+            self.send_frames(data)
+        } else {
+            self.send_all(&mut data)
+        };
         if result.is_err() {
             // `gen_picture` puts the data back when a picture is ready, also behind an OBU it could not
             // read; a later call would then read that OBU again before its own data.
@@ -361,13 +380,73 @@ impl Parser {
         }
     }
 
+    /// [`Self::send`] with more than one frame in parse. Upstream hands out pictures in the order of
+    /// the stream: a picture that is ready stops the parse of the data until it is taken, the second
+    /// call for a picture in a row waits for every frame in parse, and the error of an earlier frame
+    /// comes back in place of a picture and with it the rest of the data is dropped. The pictures
+    /// are handles without samples here and the sink is told how each frame ended, so the data is
+    /// parsed to its end and nothing is waited for but a free frame context.
+    fn send_frames(&self, data: Rav1dData) -> Result<(), Rav1dError> {
+        let state = &mut *self.c.state.try_lock().unwrap();
+        state.drain = false;
+        state.in_0 = data;
+        loop {
+            state.out = Default::default();
+            state.cache = Default::default();
+            state.cached_error = None;
+            state.cached_error_props = Default::default();
+            gen_picture(&self.c, state)?;
+            if state.in_0.data.is_none() {
+                state.out = Default::default();
+                state.cached_error = None;
+                return Ok(());
+            }
+        }
+    }
+
+    /// Waits until no frame is in parse: every frame that has begun has ended at the sink. The state
+    /// of the stream stays. Returns at once when one frame is parsed at a time.
+    pub fn wait(&self) {
+        if self.c.fc.len() == 1 {
+            return;
+        }
+        for fc in self.c.fc.iter() {
+            let mut task_thread_lock = self.c.task_thread.lock.lock();
+            while !fc.task_thread.finished.load(Ordering::SeqCst) && !self.broken() {
+                fc.task_thread.cond.wait(&mut task_thread_lock);
+            }
+        }
+    }
+
+    /// The operating point of a scalable stream, from the next sequence header on (where upstream
+    /// reads the one of its settings).
+    pub fn set_operating_point(&self, operating_point: u8) {
+        self.c.operating_point.store(operating_point.min(31), Ordering::Relaxed);
+    }
+
+    /// The frames that may be in parse at once: what the settings asked for, and at most the
+    /// threads.
+    pub fn frames(&self) -> usize {
+        self.c.fc.len()
+    }
+
+    /// A thread of the parser ended with a panic. Frames in parse do not end any more, and
+    /// [`Self::send`] fails; the parser can only be dropped.
+    pub fn broken(&self) -> bool {
+        self.c.broken.load(Ordering::SeqCst)
+    }
+
     /// Waits for the frames in parse and forgets the state of the stream (a seek, the end of a stream).
     pub fn flush(&self) {
-        loop {
-            let mut picture = Rav1dPicture::default();
-            match rav1d_get_picture(&self.c, &mut picture) {
-                Ok(()) => {}
-                Err(_) => break,
+        if self.c.fc.len() > 1 {
+            self.wait();
+        } else {
+            loop {
+                let mut picture = Rav1dPicture::default();
+                match rav1d_get_picture(&self.c, &mut picture) {
+                    Ok(()) => {}
+                    Err(_) => break,
+                }
             }
         }
         rav1d_flush(&self.c);

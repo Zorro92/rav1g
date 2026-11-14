@@ -659,10 +659,6 @@ fn hdr_metadata(hdr: &ParseHdrMetadata<'_>) -> aom_hdr_metadata_t {
 }
 
 impl SinkHost for SlotHost {
-    fn gpu_decoder(&self) -> *mut c_void {
-        self.dec.cast()
-    }
-
     fn sequence(&self, seq: &Rav1dSequenceHeader, color: ParseColorCodes, new: bool) -> Result<(), ()> {
         // SAFETY: the thread of the decode call, between frames.
         unsafe {
@@ -756,12 +752,12 @@ impl SinkHost for SlotHost {
         av1_perf_ticks()
     }
 
-    fn tile_time(&self, start: i64) {
+    fn tile_time(&self, _frame: usize, start: i64) {
         // SAFETY: the decoder; the timer is added to under its own rule for the tile threads.
         unsafe { perf_add(self.dec, sys::AV1_PERF_CPU_ENTROPY_SUM as usize, start) };
     }
 
-    fn add_time(&self, timer: SinkTimer, ticks: i64) {
+    fn add_time(&self, _frame: usize, timer: SinkTimer, ticks: i64) {
         let id = match timer {
             SinkTimer::Calls => sys::AV1_PERF_CPU_SINK_CALLS,
             SinkTimer::Lists => sys::AV1_PERF_CPU_SINK_LISTS,
@@ -770,7 +766,7 @@ impl SinkHost for SlotHost {
         unsafe { perf_add_ticks(self.dec, id as usize, ticks) };
     }
 
-    fn frame_begin(&self, frame: &ParseFrame<'_>) -> Result<FrameMemory, ()> {
+    fn frame_begin(&self, _frame: usize, frame: &ParseFrame<'_>) -> Result<FrameMemory, ()> {
         // SAFETY: the thread of the decode call, while no tile is in parse; the functions of the frame
         // setup are called as the entropy decoder calls them, with the header filled in.
         unsafe {
@@ -833,7 +829,7 @@ impl SinkHost for SlotHost {
         }
     }
 
-    fn tile_begin(&self, tile: &ParseTile) -> TileMemory {
+    fn tile_begin(&self, _frame: usize, tile: &ParseTile) -> TileMemory {
         // SAFETY: a call of the tile's thread inside the frame.
         unsafe {
             let cm = &*self.common();
@@ -856,18 +852,18 @@ impl SinkHost for SlotHost {
         }
     }
 
-    fn second_mode_info(&self, tile: usize, tile_data: *mut av1_tile_data) -> Option<SecondModeInfo> {
+    fn second_mode_info(&self, _frame: usize, tile: usize, tile_data: *mut av1_tile_data) -> Option<SecondModeInfo> {
         // SAFETY: a call of the tile's thread inside the frame, with the cursors of the tile.
         let (tile_data, mi_pool) = unsafe { second_mode_info(self.dec, tile, &*tile_data) };
         Some(SecondModeInfo { tile_data, mi_pool })
     }
 
-    fn second_coefs(&self, _tile: usize, tile_data: *mut av1_tile_data) {
+    fn second_coefs(&self, _frame: usize, _tile: usize, tile_data: *mut av1_tile_data) {
         // SAFETY: as above.
         unsafe { second_coefs(self.dec, &mut *tile_data) };
     }
 
-    fn no_room(&self, _tile: usize, mode_info: bool) {
+    fn no_room(&self, _frame: usize, _tile: usize, mode_info: bool) {
         // The line the entropy decoder of libaom logs for the same frame (`decode_mbmi_block`,
         // `av1_read_coeffs_txb`).
         log(
@@ -882,7 +878,7 @@ impl SinkHost for SlotHost {
         );
     }
 
-    fn palette(&self, _tile: usize, palette: &ParsePalette<'_>) {
+    fn palette(&self, _frame: usize, _tile: usize, palette: &ParsePalette<'_>) {
         let mut colors = [0u16; 24];
         for (dst, plane) in colors.as_chunks_mut::<8>().0.iter_mut().zip(palette.pal) {
             *dst = *plane;
@@ -905,7 +901,7 @@ impl SinkHost for SlotHost {
         }
     }
 
-    fn superblock(&self, _tile: usize, superblock: &ParseSuperblock<'_>) {
+    fn superblock(&self, _frame: usize, _tile: usize, superblock: &ParseSuperblock<'_>) {
         // SAFETY: a call of a tile's thread inside the frame; a unit is read with one superblock, so it
         // is written by one thread, inside the memory of its plane (checked against the plane's count).
         unsafe {
@@ -948,9 +944,9 @@ impl SinkHost for SlotHost {
         }
     }
 
-    fn tile_end(&self, _tile: usize) {}
+    fn tile_end(&self, _frame: usize, _tile: usize) {}
 
-    fn frame_end(&self, ok: bool) -> bool {
+    fn frame_end(&self, _frame: usize, ok: bool) -> bool {
         // SAFETY: the thread of the decode call, with no tile in parse any more; the frame is recorded
         // and submitted as the entropy decoder has it recorded behind its last tile.
         unsafe {
@@ -1072,6 +1068,9 @@ pub unsafe extern "C" fn rav1g_rav1d_decode(
         let state = host.sink.host().state();
         state.unit = std::ptr::null();
         state.unit_len = 0;
+        // A panic on the thread of this call, or on a thread of the parser (the call then came back with
+        // an error, or the frame it waited for never ended).
+        let sent = if parser.broken() { Err(Box::new(()) as Box<dyn std::any::Any + Send>) } else { sent };
         let failure = match sent {
             Err(_) => {
                 host.broken = true;

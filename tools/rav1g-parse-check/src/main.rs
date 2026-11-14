@@ -18,8 +18,8 @@
 //! (`crates/rav1g/src/host/blocks.rs`), which is compiled into this program as it is (`host`).
 //!
 //! ```text
-//! rav1g-parse-check [-threads <n>] [-parseopt <list>] [-wave <way>] [-details <n>] [-root <dir>] [-manifest <task list>] [<stream>...]
-//! rav1g-parse-check -time [-threads <n>] [-parseopt <list>] [-wave <way>] <stream>
+//! rav1g-parse-check [-threads <n>] [-frames <n>] [-parseopt <list>] [-wave <way>] [-details <n>] [-root <dir>] [-manifest <task list>] [<stream>...]
+//! rav1g-parse-check -time [-threads <n>] [-frames <n>] [-parseopt <list>] [-wave <way>] <stream>
 //! rav1g-parse-check -digest [-threads <n>] [-root <dir>] [-manifest <task list>] [<stream>...]
 //! ```
 //!
@@ -67,6 +67,8 @@ use rav1g_parse::options::ParseOptions;
 
 struct Options {
     threads: u16,
+    /// -frames: the frames rav1d may have in parse at once (at most the threads).
+    frames: u16,
     /// -parseopt: the switches of rav1d's side.
     parse: ParseOptions,
     details: usize,
@@ -79,11 +81,13 @@ struct Options {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: rav1g-parse-check [-threads <n>] [-parseopt <list>] [-wave <way>] [-details <n>] [-root <dir>] \
-         [-manifest <task list>] [<stream>...]\n       rav1g-parse-check -time [-threads <n>] [-parseopt <list>] \
-         [-wave <way>] <stream>\n-parseopt: the switches of the parser, separated by commas: nolfmask, tilethread \
-         (both on by default); none; default; latelists; time (with -time)\n-wave: where the wavefront of intra \
-         prediction is kept: edges (default), grid, check (the grid for libaom, the edges for rav1d)"
+        "usage: rav1g-parse-check [-threads <n>] [-frames <n>] [-parseopt <list>] [-wave <way>] [-details <n>] \
+         [-root <dir>] [-manifest <task list>] [<stream>...]\n       rav1g-parse-check -time [-threads <n>] \
+         [-frames <n>] [-parseopt <list>] [-wave <way>] <stream>\n-frames: the frames rav1d may have in parse at \
+         once (default 1; at most the threads)\n-parseopt: the switches of the parser, separated by commas: \
+         nolfmask, tilethread (both on by default); none; default; latelists; time (with -time)\n-wave: where the \
+         wavefront of intra prediction is kept: edges (default), grid, check (the grid for libaom, the edges for \
+         rav1d)"
     );
     std::process::exit(2);
 }
@@ -109,6 +113,7 @@ fn manifest(file: &Path, root: &Path) -> Vec<(String, PathBuf)> {
 fn options() -> Options {
     let mut options = Options {
         threads: 1,
+        frames: 1,
         parse: ParseOptions::default(),
         details: 8,
         time: false,
@@ -123,6 +128,7 @@ fn options() -> Options {
         let mut value = || args.next().unwrap_or_else(|| usage());
         match arg.as_str() {
             "-threads" => options.threads = value().parse().unwrap_or_else(|_| usage()),
+            "-frames" => options.frames = value().parse().unwrap_or_else(|_| usage()),
             "-details" => options.details = value().parse().unwrap_or_else(|_| usage()),
             "-root" => root = PathBuf::from(value()),
             "-manifest" => manifests.push(PathBuf::from(value())),
@@ -159,22 +165,42 @@ fn check(path: &Path, options: &Options) -> Result<Report, String> {
     let data = std::fs::read(path).map_err(|error| format!("cannot read the file: {error}"))?;
     let units = container::read(&data)?;
     let mut c = chost::CParser::new(options.wave_edges.0)?;
-    let mut r = rhost::RustParser::new(options.threads, options.parse, options.wave_edges.1)?;
+    let mut r = rhost::RustParser::new(options.threads, options.frames, options.parse, options.wave_edges.1)?;
     let mut report = Report::new(options.details);
     let mut number = 0;
-    for (unit, data) in units.iter().enumerate() {
-        let c_result = c.send(data);
-        let r_result = r.send(data);
-        if c_result.is_err() != r_result.is_err() {
-            report.difference("decode error", || {
-                format!("temporal unit {unit}: libaom {c_result:?}, rav1d {r_result:?}")
-            });
+    // With one frame in parse the two are held against each other temporal unit by temporal unit. With
+    // more, rav1d is given a run of units before its frames are waited for, so that the frames of
+    // several units are in parse side by side: one unit more than frames may be in parse, which keeps
+    // the frames that are held for the comparison few (a 4K frame is 200 MB of buffers on either side).
+    let run = if r.frames() > 1 { r.frames() + 1 } else { 1 };
+    for (first, units) in units.chunks(run).enumerate().map(|(at, units)| (at * run, units)) {
+        let mut c_frames = Vec::new();
+        let mut errors = Vec::new();
+        for data in units {
+            errors.push((c.send(data), r.send(data)));
+            c_frames.extend(c.take_frames());
         }
-        let c_frames = c.take_frames();
         let r_frames = r.take_frames();
+        if r.broken() {
+            return Err(String::from("a thread of rav1d ended with a panic"));
+        }
+        for (unit, (c_result, r_result)) in errors.iter().enumerate() {
+            // With more than one frame in parse an error of a frame's parse is the sink's to know, not
+            // the call's: only what both report for the unit itself is held against each other.
+            if c_result.is_err() != r_result.is_err() && run == 1 {
+                report.difference("decode error", || {
+                    format!("temporal unit {}: libaom {c_result:?}, rav1d {r_result:?}", first + unit)
+                });
+            }
+        }
         if c_frames.len() != r_frames.len() {
             report.difference("frame count", || {
-                format!("temporal unit {unit}: {} frames with libaom, {} with rav1d", c_frames.len(), r_frames.len())
+                format!(
+                    "temporal units {first} to {}: {} frames with libaom, {} with rav1d",
+                    first + units.len() - 1,
+                    c_frames.len(),
+                    r_frames.len()
+                )
             });
         }
         for (c_frame, r_frame) in c_frames.iter().zip(&r_frames) {
@@ -223,7 +249,13 @@ fn digest(options: &Options) -> ExitCode {
 fn main() -> ExitCode {
     let options = options();
     if options.time {
-        return timing::run(&options.streams[0].1, options.threads, options.parse, options.wave_edges.1);
+        return timing::run(
+            &options.streams[0].1,
+            options.threads,
+            options.frames,
+            options.parse,
+            options.wave_edges.1,
+        );
     }
     if options.digest {
         return digest(&options);

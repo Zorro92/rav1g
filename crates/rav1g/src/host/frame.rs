@@ -1287,6 +1287,8 @@ pub(crate) unsafe fn setup_tile(dec: *mut Av1Core, cm: &AV1_COMMON, tile: &TileI
         t.gen_intra_iter_y = -1;
         t.gen_intra_iter_uv = -1;
         t.have_inter = 0;
+        // The slot of the tile's frame, for av1_mi_push_block.
+        t.frame_data = std::ptr::from_ref(td).cast_mut().cast();
         t.gen_intra_max_iter =
             if td.tile_count == 1 { ((*dec).pred_map_size - 512) / 10 } else { ((tile_cols * tile_rows) >> 2) - 2 };
         t.gen_intra_iter_set = (t.gen_intra_max_iter - 16).min(256);

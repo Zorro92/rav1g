@@ -612,10 +612,36 @@ fn abort_frame(c: &Rav1dContext, fc: &Rav1dFrameContext, error: Rav1dResult) {
 }
 
 
+/// rav1g: the worker thread of upstream ([`worker_task`]), with its panics caught. A panic is a bug
+/// of the parser or of the sink, not a damaged stream; upstream lets the thread end, and whoever
+/// waits for the frame it worked on waits for ever. Here the context is marked broken: the thread
+/// that sends data stops waiting and gets an error, the other workers take no more tasks, and
+/// `rav1d_close` finds this thread as one that is parked.
 pub fn rav1d_worker_task(task_thread: Arc<Rav1dTaskContextTaskThread>) {
     // The main thread will unpark us once `task_thread.c` is set.
     thread::park();
-    let c = &*task_thread.c.lock().take().unwrap();
+    let c = task_thread.c.lock().take().unwrap();
+    let c = &*c;
+    let worker = Arc::clone(&task_thread);
+    let run = std::panic::AssertUnwindSafe(|| worker_task(c, worker));
+    if std::panic::catch_unwind(run).is_ok() {
+        return;
+    }
+    // The lock of the scheduler was released when the panic unwound the thread.
+    let ttd = &*task_thread.ttd;
+    let _task_thread_lock = ttd.lock.lock();
+    c.broken.store(true, Ordering::SeqCst);
+    // `rav1d_flush` waits for every worker to say that it is parked.
+    task_thread.flushed.set(true);
+    task_thread.cond.notify_one();
+    // The thread that waits for a frame, and the workers, which park.
+    for fc in c.fc.iter() {
+        fc.task_thread.cond.notify_one();
+    }
+    ttd.cond.notify_all();
+}
+
+fn worker_task(c: &Rav1dContext, task_thread: Arc<Rav1dTaskContextTaskThread>) {
     let mut tc = Rav1dTaskContext::new(task_thread);
 
     // We clone the Arc here for the lifetime of this function to avoid an
@@ -640,7 +666,8 @@ pub fn rav1d_worker_task(task_thread: Arc<Rav1dTaskContextTaskThread>) {
 
     let mut task_thread_lock = Some(ttd.lock.lock());
     'outer: while !tc.task_thread.die.get() {
-        if c.flush.load(Ordering::SeqCst) {
+        // rav1g: no task is taken in a context that is broken (a worker ended with a panic).
+        if c.flush.load(Ordering::SeqCst) || c.broken.load(Ordering::SeqCst) {
             park(c, &mut tc, ttd, task_thread_lock.as_mut().unwrap());
             continue 'outer;
         }

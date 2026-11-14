@@ -2533,6 +2533,59 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
 
+      # Frames in parallel (docs/phase2-rav1d.md, step 4): rav1d with two, three and four frames in parse
+      # at once, on as many threads and on more. The frames of several temporal units are then parsed
+      # side by side, each into buffers of its own, and a frame may end before one that began before it.
+      # Every buffer of every frame has to be what the entropy decoder of libaom wrote, as with one frame
+      # in parse; the order of the threads is what differs from run to run, so each combination runs
+      # twice.
+      - name: The same with two, three and four frames in parse
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          status=0
+          {
+            echo '## Parse check with more than one frame in parse (-frames)'
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          for run in '2 2' '2 4' '3 3' '4 4' '3 8' '4 8'; do
+            set -- $run
+            for round in 1 2; do
+              out="out/parse-check/check-frames$1-threads$2-round$round.txt"
+              target/release/rav1g-parse-check -frames "$1" -threads "$2" -root conformance-streams \
+                -manifest conformance-streams/manifest.txt > "$out" || status=$?
+              {
+                echo "frames $1, threads $2, round $round: $(grep '^PARSE SUMMARY' "$out" || echo 'no summary')"
+                grep -A 6 ' DIFFERENT \| ERROR \|panicked' "$out" | head -n 60 || true
+              } | tee -a "$GITHUB_STEP_SUMMARY"
+            done
+          done
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      # A panic in the parse (a bug of the parser or of the sink, not a damaged stream): with the test
+      # switch the sink panics in the third frame of a stream, on the thread that parses it. On a worker
+      # thread of rav1d that used to end the thread and leave the caller waiting for the frame for ever;
+      # the run has to end, and say what happened.
+      - name: A panic on a thread of the parser ends the parse
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          status=0
+          for run in '2 1' '4 2' '8 4'; do
+            set -- $run
+            out="out/parse-check/panic-threads$1-frames$2.txt"
+            timeout 120 target/release/rav1g-parse-check -parseopt testpanic -threads "$1" -frames "$2" \
+              conformance-streams/cut/nf-chimera-10b-1080p.ivf > "$out" 2>&1 || true
+            if grep -q 'ERROR a thread of rav1d ended with a panic' "$out"; then
+              echo "threads $1, frames $2: the run ended and reported the panic"
+            else
+              echo "FAIL threads $1, frames $2: no report of the panic"; tail -n 5 "$out"; status=1
+            fi
+          done | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
       - name: Parse digest of every stream on Linux
         if: ${{ !cancelled() }}
         run: |
@@ -2569,6 +2622,17 @@ jobs:
                       "conformance-streams/$stream" || true
                   done
                 fi
+              done
+            done
+            # Frames in parallel: the wall time of the parse of a stream, a frame, with one, two and three
+            # frames in parse on as many threads and on one more ("with the sink" is the number: the
+            # parse with the sink writing the buffers; the difference to the parse alone says nothing
+            # when frames overlap).
+            echo 'frames in parse:'
+            for stream in cut/nf-dvbdash-d2-10b-2160p.ivf cut/nf-dvbdash-a1-8b-2160p.ivf cut/nf-chimera-10b-1080p.ivf; do
+              for run in '1 1' '2 1' '2 2' '3 2' '3 3' '4 2' '2 2' '1 1'; do
+                set -- $run
+                target/release/rav1g-parse-check -time -threads "$1" -frames "$2" "conformance-streams/$stream" || true
               done
             done
             echo '```'

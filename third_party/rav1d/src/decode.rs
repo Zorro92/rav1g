@@ -4172,13 +4172,20 @@ pub(crate) fn rav1d_decode_frame(c: &Rav1dContext, fc: &Rav1dFrameContext) -> Ra
                 let mut task_thread_lock = (*fc.task_thread.ttd).lock.lock();
                 (*fc.task_thread.ttd).cond.notify_one();
                 if res.is_ok() {
-                    while fc.task_thread.done[0].load(Ordering::SeqCst) == 0
-                        || fc.task_thread.task_counter.load(Ordering::SeqCst) > 0
+                    while (fc.task_thread.done[0].load(Ordering::SeqCst) == 0
+                        || fc.task_thread.task_counter.load(Ordering::SeqCst) > 0)
+                        // rav1g: a worker thread that ended with a panic finishes no frame.
+                        && !c.broken.load(Ordering::SeqCst)
                     {
                         fc.task_thread.cond.wait(&mut task_thread_lock);
                     }
                 }
                 drop(task_thread_lock);
+                if c.broken.load(Ordering::SeqCst) {
+                    // The frame is left as it is: threads may still be in it. The context is good
+                    // for `rav1d_close` only.
+                    return Err(Rav1dError::InvalidArgument);
+                }
                 res = fc.task_thread.retval.try_lock().unwrap().err_or(());
             } else {
                 res = rav1d_decode_frame_main(c, &mut f);
@@ -4209,13 +4216,17 @@ fn get_upscale_x0(in_w: c_int, out_w: c_int, step: c_int) -> c_int {
 
 pub fn rav1d_submit_frame(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResult {
     // wait for c->out_delayed[next] and move into c->out if visible
-    let (fc, out, _task_thread_lock) = if c.fc.len() > 1 {
+    let (fc, out) = if c.fc.len() > 1 {
         let mut task_thread_lock = c.task_thread.lock.lock();
         let next = state.frame_thread.next;
         state.frame_thread.next = (state.frame_thread.next + 1) % c.fc.len() as u32;
 
         let fc = &c.fc[next as usize];
         while !fc.task_thread.finished.load(Ordering::SeqCst) {
+            // rav1g: a worker thread that ended with a panic finishes no frame.
+            if c.broken.load(Ordering::SeqCst) {
+                return Err(Rav1dError::InvalidArgument);
+            }
             fc.task_thread.cond.wait(&mut task_thread_lock);
         }
         let out_delayed = &mut state.frame_thread.out_delayed[next as usize];
@@ -4251,9 +4262,15 @@ pub fn rav1d_submit_frame(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResu
             }
             let _ = mem::take(out_delayed);
         }
-        (fc, out_delayed, Some(task_thread_lock))
+        // rav1g: upstream holds the lock of the scheduler to the end of this function. Here the
+        // function calls the sink, which sets the frame up and may wait for room that the frames in
+        // parse give back: their threads need the lock to go on. Nothing below needs it before the
+        // frame's first task is queued (the frame context has no task and no thread works on it),
+        // and it is taken again there.
+        drop(task_thread_lock);
+        (fc, out_delayed)
     } else {
-        (&c.fc[0], &mut state.out, None)
+        (&c.fc[0], &mut state.out)
     };
 
     let mut f = fc.data.try_write().unwrap();
@@ -4660,6 +4677,8 @@ pub fn rav1d_submit_frame(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResu
             return res;
         }
     } else {
+        // rav1g: see above; the queue of tasks is the scheduler's.
+        let _task_thread_lock = c.task_thread.lock.lock();
         rav1d_task_frame_init(c, fc);
     }
 

@@ -471,6 +471,11 @@ typedef struct
     // then has to be cleared for every frame (AV1_CLEARS_GPU, _COMPLETION_THREAD, _DECODE_THREAD of
     // dx/av1_perf.h; a frame of -intrav2 has no wavefront).
     void * wave_edges;
+    // The pipeline slot of the tile's frame (the host's av1_frame_thread_data), set when the tile is set
+    // up: av1_mi_push_block finds the frame of a block through its tile, not through a "current frame"
+    // of the decoder, so that the tiles of several frames can be parsed side by side
+    // (docs/phase2-rav1d.md, step 4).
+    void * frame_data;
 } av1_tile_data;
 
 typedef struct tx_block_info {
