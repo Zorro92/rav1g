@@ -110,8 +110,86 @@ static void AppMemoryModelDestroyed(uint64_t device_bytes) {
 #endif
 }
 
+#if (WINAPI_FAMILY == WINAPI_FAMILY_APP)
+// "MEMORY pools" line: the app's memory as the two pools the console keeps for it, each with its usage
+// and its limit. The console has a class for this that the Windows metadata does not describe; Microsoft's
+// "4K video playback for UWP apps on Xbox" gives its shape, which is declared here by hand:
+//   - the class Windows.Xbox.ApplicationModel.ApplicationResources, whose activation factory has the
+//     interface IApplicationResourcesStatics2 (dd36a017-b640-45f7-a023-1615cf098923);
+//   - one method behind those of IInspectable, GetExtendedMemoryInfo, which fills four 64-bit numbers:
+//     usage and limit of the app memory ("general heap usage") and of the extended memory ("graphics
+//     partition information" on the consoles that have one).
+// The page says the call works only on the console and only for an app that declares hevcPlayback, which
+// also gives the app more memory (docs/test-player.md, "The two memory pools"). Which pool the decoder's
+// D3D12 buffers are charged to is what the line is for: Windows::System::MemoryManager has one number.
+// Where the class or the call is missing (a PC, or a console that refuses it) one line says so, with the
+// HRESULT, and nothing more is logged for the rest of the launch.
+#include <inspectable.h>
+#include <roapi.h>
+#include <winstring.h>
+namespace {
+struct AppMemoryPools {
+  uint64_t app_usage;
+  uint64_t app_limit;
+  uint64_t extended_usage;
+  uint64_t extended_limit;
+};
+struct AppResourcesStatics2 : public ::IInspectable {
+  virtual HRESULT STDMETHODCALLTYPE GetExtendedMemoryInfo(AppMemoryPools* pools) = 0;
+};
+const IID kAppResourcesStatics2Iid = {0xdd36a017, 0xb640, 0x45f7, {0xa0, 0x23, 0x16, 0x15, 0xcf, 0x09, 0x89, 0x23}};
+std::atomic<bool> app_memory_pools_missing(false);
+}  // namespace
+
+static void LogAppMemoryPools(const char* label, bool is_error) {
+  if (app_memory_pools_missing.load()) return;
+  static const wchar_t kClass[] = L"Windows.Xbox.ApplicationModel.ApplicationResources";
+  const char* step = "the name of the class";
+  HSTRING_HEADER header;
+  HSTRING name = nullptr;
+  AppResourcesStatics2* statics = nullptr;
+  AppMemoryPools pools;
+  memset(&pools, 0, sizeof(pools));
+  HRESULT hr = ::WindowsCreateStringReference(kClass, (UINT32)(sizeof(kClass) / sizeof(kClass[0]) - 1), &header, &name);
+  if (SUCCEEDED(hr)) {
+    step = "the activation factory of the console's application resources";
+    hr = ::RoGetActivationFactory(name, kAppResourcesStatics2Iid, (void**)&statics);
+  }
+  if (SUCCEEDED(hr)) {
+    step = "GetExtendedMemoryInfo";
+    hr = statics->GetExtendedMemoryInfo(&pools);
+  }
+  if (statics) statics->Release();
+  if (FAILED(hr)) {
+    if (!app_memory_pools_missing.exchange(true)) {
+      char code[16];
+      sprintf_s(code, sizeof(code), "0x%08X", (unsigned int)hr);
+      XB_LOGI << "MEMORY pools: not available (" << step << ": hr " << code << "): the system does not say "
+              << "here how the app's memory is split into the general heap and the graphics partition. "
+              << "This line is logged once per launch";
+    }
+    return;
+  }
+  const uint64_t usage = pools.app_usage + pools.extended_usage;
+  const uint64_t limit = pools.app_limit + pools.extended_limit;
+  const std::string line =
+      std::string("MEMORY pools ") + label + ": general heap usage " + MibString(pools.app_usage) + " of limit " +
+      MibString(pools.app_limit) + ", " +
+      MibString(pools.app_limit > pools.app_usage ? pools.app_limit - pools.app_usage : 0) +
+      " left; graphics partition usage " + MibString(pools.extended_usage) + " of limit " +
+      MibString(pools.extended_limit) + ", " +
+      MibString(pools.extended_limit > pools.extended_usage ? pools.extended_limit - pools.extended_usage : 0) +
+      " left; both usage " + MibString(usage) + " of limit " + MibString(limit);
+  if (is_error)
+    XB_LOGE << line;
+  else
+    XB_LOGI << line;
+}
+#endif
+
 // "MEMORY app" line: the memory of the whole app and the limit the system gives it. In app mode on the
-// console that limit is what a decoder creation runs into; the decoder's buffers count against it.
+// console that limit is what a decoder creation runs into; the decoder's buffers count against it. The
+// "MEMORY pools" line follows it wherever the system has one.
 static void LogAppMemory(const char* label, bool is_error) {
 #if (WINAPI_FAMILY == WINAPI_FAMILY_APP)
   std::string line = std::string("MEMORY app ") + label + ": ";
@@ -127,6 +205,7 @@ static void LogAppMemory(const char* label, bool is_error) {
     XB_LOGE << line;
   else
     XB_LOGI << line;
+  LogAppMemoryPools(label, is_error);
 #else
   if (!app_model.on) return;
   const uint64_t usage = app_model.Usage();
