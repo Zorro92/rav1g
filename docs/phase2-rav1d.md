@@ -1777,13 +1777,14 @@ of both grids with one of the three). The clear of 3.5 MB is a stage of 0.92 ms 
 software rasteriser (1.0 % of what the stages of a frame take there); what it is on a GPU is the
 console's `gpu slot_clear` line.
 
-**CI.** A job of its own, `rust-clears`, next to `rust-switches` (which had the `-syncclear` run):
+**CI.** A job of its own, `rust-clears`, next to `rust-switches` (which keeps the `-syncclear` run of
+the whole set):
 `clears_check.py` on the 2160p stream and on the stream with eight tiles (the table above as a
 check: without a flag no byte on the completion thread or the GPU and less than 64 KiB a tile on
 the tile threads; with `-gpuclear` every frame's command list clears, with the stage in it;
 `-cpuclear` clears the same bytes on the completion thread; `-syncclear` on the decode thread;
 both grids with `-parser c` and `-parseopt cleargrid`); the whole set and the memory check with
-`-gpuclear`; the whole set and the stage dumps with `-cpuclear`; the whole set with `-syncclear`; a
+`-gpuclear`; the whole set and the stage dumps with `-cpuclear`; a
 part of the set with `-gpuclear -parser c` and with `-gpuclear -poisonbuf -parseopt cleargrid -slots
 3 -t 4`. `rust-cross-run` decodes the whole set with `-gpuclear` with the program of the Linux
 build, the player smoke test has a task with each flag, and `parse-check` runs `-wave check` with

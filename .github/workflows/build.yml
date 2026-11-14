@@ -677,9 +677,9 @@ jobs:
   #                     smoke test, the stage dumps and the MEMORY lines;
   #   rust-parser-c     the same checks with the other parser of the decoder (-parser c);
   #   rust-switches     the other side of the decoder's switches: the poisoned buffers, the fast inter
-  #                     path, the switches of rav1d's parse;
+  #                     path, the clears on the decode thread, the switches of rav1d's parse;
   #   rust-clears       the clears of a pipeline slot: who clears what without a flag (nobody), and the
-  #                     ways that clear the wavefront grid: -gpuclear, -cpuclear, -syncclear;
+  #                     ways that clear the wavefront grid, by the GPU and by the completion thread;
   #   rust-parsers-equal  what the four wrote, held against each other;
   #   rust-experiments, parser-timing  only when the workflow is started for them.
   # The rust-equal job then holds the md5 per frame, the stage dumps and the MEMORY lines of rust-parser-c
@@ -914,8 +914,8 @@ jobs:
           if (-not (Select-String -Path out/conformance/lists/run001.log -Pattern '^PARSER .*the parse pass of rav1d.*switches nolfmask,tilethread \(' -Quiet)) {
             throw 'The decoder of this run does not report the parse pass of rav1d with its default switches'
           }
-          if (-not (Select-String -Path out/conformance/lists/run001.log -Pattern 'clears completion thread' -Quiet)) {
-            throw 'The decoder of this run does not report the clears on the completion thread'
+          if (-not (Select-String -Path out/conformance/lists/run001.log -Pattern ', clears none needed, ' -Quiet)) {
+            throw 'The decoder of this run does not report that no clears are needed'
           }
           if ($code -ne 0) { throw "conformance run with rav1g-dec: exit code $code (1: not as expected.txt says, 2: the run could not be done)" }
 
@@ -1185,9 +1185,10 @@ jobs:
           if-no-files-found: warn
 
   # The other side of the decoder's switches, each with the parser and the other switches of the default:
-  # the poisoned mode info pool and the poisoned buffers (a part of the set), the fast inter path (the
-  # whole set), and the switches of rav1d's parse (the whole set, the stage dumps, the test player's
-  # decoder code, decode errors). The clears of a pipeline slot have a job of their own (rust-clears).
+  # the poisoned mode info pool and the poisoned buffers (a part of the set), the fast inter path and the
+  # clears of a pipeline slot on the decode thread (the whole set each), and the switches of rav1d's parse
+  # (the whole set, the stage dumps, the test player's decoder code, decode errors). The other ways of
+  # the clears have a job of their own (rust-clears).
   rust-switches:
     needs: [conformance-streams, rust]
     runs-on: windows-latest
@@ -1260,6 +1261,22 @@ jobs:
             --out out/conformance-interfast --threads 4 "--tool-args=-interfast" "--title=rav1g-dec with -interfast"
           if ($LASTEXITCODE -ne 0) { throw "conformance with -interfast: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
 
+      # The clears of a pipeline slot on the decode thread (-syncclear), the path of the first packages:
+      # the whole set once more. The other ways of the clears are in the rust-clears job, which also
+      # holds this one to what it clears on two streams.
+      - name: Conformance with the clears on the decode thread (-syncclear)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $failed = @()
+          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/conformance-syncclear --threads 4 "--tool-args=-syncclear" "--title=rav1g-dec with -syncclear"
+          if ($LASTEXITCODE -ne 0) { $failed += "conformance with -syncclear: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
+          if (-not (Select-String -Path out/conformance-syncclear/lists/run001.log -Pattern 'clears decode thread \(-syncclear\)' -Quiet)) {
+            $failed += 'the decoder of the run with -syncclear does not report the clears on the decode thread'
+          }
+          if ($failed.Count) { throw "with -syncclear: $($failed -join '; ')" }
+
       # The switches of rav1d's parse (-parseopt, docs/phase2-rav1d.md "Where the time goes"): ways of doing
       # the same parse. Here the other side of each: the two that are on by default off, which is rav1d's
       # parse as upstream schedules it, the block lists of a tile counted at its end and not superblock by
@@ -1308,7 +1325,7 @@ jobs:
   # it. Here the ways that keep the wavefront in the slot's grid and clear it for every frame, which stay
   # as switches: by the GPU at the end of the frame's command list (-gpuclear), by the completion thread
   # (-cpuclear, the default up to package 0.2.144), by the decode thread (-syncclear, the default up to
-  # 0.2.139). The output has to be the same with each.
+  # 0.2.139; its run of the whole set is in rust-switches). The output has to be the same with each.
   rust-clears:
     needs: [conformance-streams, rust]
     runs-on: windows-latest
@@ -1386,20 +1403,6 @@ jobs:
             --tasks testing/conformance/dump_tasks.txt --out out/stage-dumps-cpuclear --threads 4 "--tool-args=-cpuclear"
           if ($LASTEXITCODE -ne 0) { $failed += "stage dumps with -cpuclear: exit code $LASTEXITCODE" }
           if ($failed.Count) { throw "with -cpuclear: $($failed -join '; ')" }
-
-      # The clears on the decode thread: the path of the first packages, the whole set once more.
-      - name: Conformance with the clears on the decode thread (-syncclear)
-        if: ${{ !cancelled() }}
-        shell: pwsh
-        run: |
-          $failed = @()
-          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/conformance-syncclear --threads 4 "--tool-args=-syncclear" "--title=rav1g-dec with -syncclear"
-          if ($LASTEXITCODE -ne 0) { $failed += "conformance with -syncclear: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
-          if (-not (Select-String -Path out/conformance-syncclear/lists/run001.log -Pattern 'clears decode thread \(-syncclear\)' -Quiet)) {
-            $failed += 'the decoder of the run with -syncclear does not report the clears on the decode thread'
-          }
-          if ($failed.Count) { throw "with -syncclear: $($failed -join '; ')" }
 
       # The clears of the GPU where both grids are cleared: with the entropy decoder of libaom, whose mode
       # info grid is cleared for every frame, and with rav1d's parse made to clear it (-parseopt
@@ -2465,11 +2468,13 @@ jobs:
                   target/release/rav1g-parse-check -time -threads "$threads" -parseopt "$switches" \
                     "conformance-streams/$stream" || true
                 done
-                for wave in grid edges grid edges; do
-                  echo "wavefront: $wave"
-                  target/release/rav1g-parse-check -time -threads "$threads" -wave "$wave" \
-                    "conformance-streams/$stream" || true
-                done
+                if [ "$threads" -eq 1 ]; then
+                  for wave in grid edges grid edges; do
+                    echo "wavefront: $wave"
+                    target/release/rav1g-parse-check -time -threads "$threads" -wave "$wave" \
+                      "conformance-streams/$stream" || true
+                  done
+                fi
               done
             done
             echo '```'
