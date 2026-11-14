@@ -60,6 +60,7 @@ using namespace Microsoft::WRL;
 
 class DisplayImpl;
 class AV1Decoder;
+class SemiPlanarOutput;
 interface DisplayCallbacks;
 
 #define AVAR_SIZE 8
@@ -151,6 +152,9 @@ class BufferLocker {
   }
 
   int Push(const Rav1gFrame* img);
+  // -output p010, -interop: who waits for the frames and reads them back (semi_planar.h).
+  void SetSemiPlanar(std::shared_ptr<SemiPlanarOutput> semi_planar) { semi_planar_ = semi_planar; }
+  void ReportSemiPlanar();
   std::shared_ptr<OutBufferWrapper> Pop();
   int Drops() const { return frame_dropped_; }
   double FRate() { return current_frate_; }
@@ -169,6 +173,10 @@ class BufferLocker {
       if (out_file_) fclose(out_file_);
       out_file_ = 0;
       if (md5_checker_) has_md5_errors_ = md5_checker_->ShowResult(hasFatalError_);
+      // The semi-planar output: its line about the task; a frame that could not be waited for or read
+      // fails the task as a wrong frame does.
+      ReportSemiPlanar();
+      if (semi_planar_errors_) has_md5_errors_ = true;
       // The task's md5 state goes with the task: the reference list of the checker, and the saver, whose
       // file is closed (and so complete on disk) here instead of when the next task replaces this queue.
       md5_checker_.reset();
@@ -185,6 +193,8 @@ class BufferLocker {
   std::shared_ptr<OutBufferWrapper> last_frame_;
   std::unique_ptr<Md5Checker> md5_checker_;
   std::unique_ptr<Md5Saver> md5_saver_;
+  std::shared_ptr<SemiPlanarOutput> semi_planar_;
+  int semi_planar_errors_ = 0;
   std::mutex cs_;
   StreamTimer timer_;
   int frame_dropped_ = 0;
@@ -344,6 +354,9 @@ class AV1Decoder {
   // gets a new decoder, also when the task before it ended before it reached the decoder.
   int created_threads_ = 0;
   int created_queue_size_ = 0;
+  // -output and -interop of the task the decoder was created for.
+  int created_semi_planar_ = 0;
+  std::shared_ptr<SemiPlanarOutput> semi_planar_;
   int created_slots_ = 0;
   // -parseframes of the task the decoder was created for, and what the decoder then has
   // (rav1g_decoder_configuration): its threads, frames in parse and slots.

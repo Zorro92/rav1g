@@ -22,7 +22,10 @@ use windows::Win32::Foundation::{CloseHandle, E_FAIL, E_POINTER};
 use windows::Win32::Graphics::Direct3D::ID3DBlob;
 use windows::Win32::Graphics::Direct3D12::*;
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
+    DXGI_FORMAT, DXGI_FORMAT_NV12, DXGI_FORMAT_P010, DXGI_FORMAT_R8_TYPELESS, DXGI_FORMAT_R8_UINT,
+    DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8G8_TYPELESS, DXGI_FORMAT_R8G8_UINT, DXGI_FORMAT_R10G10B10A2_UNORM,
+    DXGI_FORMAT_R16_TYPELESS, DXGI_FORMAT_R16_UINT, DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16G16_TYPELESS,
+    DXGI_FORMAT_R16G16_UINT, DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, DXGI_MEMORY_SEGMENT_GROUP, DXGI_MEMORY_SEGMENT_GROUP_LOCAL,
@@ -31,7 +34,9 @@ use windows::Win32::Graphics::Dxgi::{
 use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObjectEx};
 use windows::core::{IUnknown, Interface};
 
-use super::{Error, LayoutDesc, MemoryKind, MemorySegment, VideoMemory};
+use super::{
+    Error, LayoutDesc, MemoryKind, MemorySegment, SemiPlanar, SemiPlanarSupport, TextureInfo, TextureState, VideoMemory,
+};
 
 /// A field of a struct of the host that holds an interface or none (eight bytes: the pointer) as a
 /// borrowed interface. `None` for a null pointer.
@@ -234,6 +239,14 @@ impl<'a> Device<'a> {
         parameters.extend((0..desc.read_buffers).map(|i| descriptor(D3D12_ROOT_PARAMETER_TYPE_SRV, i)));
         parameters.extend((0..desc.write_buffers).map(|i| descriptor(D3D12_ROOT_PARAMETER_TYPE_UAV, i)));
         parameters.extend((0..desc.constant_blocks).map(|i| descriptor(D3D12_ROOT_PARAMETER_TYPE_CBV, i)));
+        // The planes of a texture: a table of descriptors, which is how D3D12 binds a texture.
+        let planes = D3D12_DESCRIPTOR_RANGE {
+            RangeType: D3D12_DESCRIPTOR_RANGE_TYPE_UAV,
+            NumDescriptors: desc.write_planes,
+            BaseShaderRegister: desc.write_buffers,
+            RegisterSpace: 0,
+            OffsetInDescriptorsFromTableStart: 0,
+        };
         if desc.inline_constants != 0 {
             parameters.push(D3D12_ROOT_PARAMETER {
                 ParameterType: D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
@@ -247,6 +260,18 @@ impl<'a> Device<'a> {
                 ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
             });
         }
+        if desc.write_planes != 0 {
+            parameters.push(D3D12_ROOT_PARAMETER {
+                ParameterType: D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
+                Anonymous: D3D12_ROOT_PARAMETER_0 {
+                    DescriptorTable: D3D12_ROOT_DESCRIPTOR_TABLE {
+                        NumDescriptorRanges: 1,
+                        pDescriptorRanges: &raw const planes,
+                    },
+                },
+                ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+            });
+        }
         let signature_desc = D3D12_ROOT_SIGNATURE_DESC {
             NumParameters: parameters.len() as u32,
             pParameters: parameters.as_ptr(),
@@ -255,7 +280,7 @@ impl<'a> Device<'a> {
             Flags: D3D12_ROOT_SIGNATURE_FLAG_NONE,
         };
         let mut blob: Option<ID3DBlob> = None;
-        // SAFETY: the description points to `parameters`, which lives through the call.
+        // SAFETY: the description points to `parameters` and `planes`, which live through the call.
         unsafe { D3D12SerializeRootSignature(&signature_desc, D3D_ROOT_SIGNATURE_VERSION_1, &mut blob, None) }
             .map_err(failed("D3D12SerializeRootSignature"))?;
         let blob = blob.ok_or(Error { step: "D3D12SerializeRootSignature", code: E_FAIL.0 })?;
@@ -544,6 +569,132 @@ impl<'a> TextureRef<'a> {
         // SAFETY: the caller's contract.
         unsafe { com_ref::<*mut P, ID3D12Resource>(raw) }.map(|resource| TextureRef { resource })
     }
+
+    /// What the texture is.
+    pub fn info(&self) -> TextureInfo {
+        // SAFETY: a plain call on a live resource.
+        let desc = unsafe { self.resource.GetDesc() };
+        let texture = desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        TextureInfo {
+            semi_planar: match desc.Format {
+                DXGI_FORMAT_NV12 if texture => Some(SemiPlanar::Nv12),
+                DXGI_FORMAT_P010 if texture => Some(SemiPlanar::P010),
+                _ => None,
+            },
+            width: desc.Width as u32,
+            height: desc.Height,
+            shader_writes: desc.Flags.contains(D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
+        }
+    }
+}
+
+fn semi_planar_format(format: SemiPlanar) -> DXGI_FORMAT {
+    match format {
+        SemiPlanar::Nv12 => DXGI_FORMAT_NV12,
+        SemiPlanar::P010 => DXGI_FORMAT_P010,
+    }
+}
+
+fn texture_state(state: TextureState) -> D3D12_RESOURCE_STATES {
+    match state {
+        TextureState::Common => D3D12_RESOURCE_STATE_COMMON,
+        TextureState::ReadWrite => D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        TextureState::CopyDest => D3D12_RESOURCE_STATE_COPY_DEST,
+    }
+}
+
+/// The views of the planes of the application's textures that the output pass writes: a ring of pairs
+/// (luma, chroma) in a descriptor heap. A pair is written when the frame is recorded and has to stay
+/// until the frame's commands have run, so the ring has more pairs than a decoder has frames in flight.
+#[repr(transparent)]
+pub struct PlaneViews {
+    heap: ID3D12DescriptorHeap,
+}
+
+// SAFETY: `repr(transparent)` over its interface.
+unsafe impl Wrapped for PlaneViews {}
+
+impl PlaneViews {
+    /// The pairs of the ring.
+    pub const PAIRS: u32 = 32;
+
+    /// Hands the reference over as a raw `ID3D12DescriptorHeap *`.
+    pub fn into_raw(self) -> *mut c_void {
+        self.heap.into_raw()
+    }
+}
+
+impl Device<'_> {
+    /// What the device does with textures of `format`.
+    pub fn semi_planar_support(&self, format: SemiPlanar) -> SemiPlanarSupport {
+        let support = |format: DXGI_FORMAT| {
+            let mut data = D3D12_FEATURE_DATA_FORMAT_SUPPORT { Format: format, ..Default::default() };
+            // SAFETY: the struct of the feature, with its size.
+            unsafe {
+                self.device.CheckFeatureSupport(
+                    D3D12_FEATURE_FORMAT_SUPPORT,
+                    (&raw mut data).cast(),
+                    size_of::<D3D12_FEATURE_DATA_FORMAT_SUPPORT>() as u32,
+                )
+            }
+            .ok()
+            .map(|()| data.Support1)
+        };
+        let Some(texture) = support(semi_planar_format(format)) else {
+            return SemiPlanarSupport { texture: false, shader_writes: false };
+        };
+        // A shader writes a plane through a view of an integer format: one for luma, one for chroma.
+        let views = match format {
+            SemiPlanar::Nv12 => [DXGI_FORMAT_R8_UINT, DXGI_FORMAT_R8G8_UINT],
+            SemiPlanar::P010 => [DXGI_FORMAT_R16_UINT, DXGI_FORMAT_R16G16_UINT],
+        };
+        let writable = |support: Option<D3D12_FORMAT_SUPPORT1>| {
+            support.is_some_and(|support| support.contains(D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW))
+        };
+        SemiPlanarSupport {
+            texture: texture.contains(D3D12_FORMAT_SUPPORT1_TEXTURE2D),
+            shader_writes: texture.contains(D3D12_FORMAT_SUPPORT1_TEXTURE2D)
+                && writable(Some(texture))
+                && views.into_iter().all(|view| writable(support(view))),
+        }
+    }
+
+    /// The ring of plane views of a decoder.
+    pub fn create_plane_views(&self) -> Result<PlaneViews, Error> {
+        let desc = D3D12_DESCRIPTOR_HEAP_DESC {
+            Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+            NumDescriptors: PlaneViews::PAIRS * 2,
+            Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+            NodeMask: 0,
+        };
+        // SAFETY: a plain call on a live device.
+        let heap = unsafe { self.device.CreateDescriptorHeap::<ID3D12DescriptorHeap>(&desc) };
+        Ok(PlaneViews { heap: heap.map_err(failed("CreateDescriptorHeap"))? })
+    }
+
+    /// Writes the views of the luma and the chroma plane of `texture` into the pair `pair` of the ring.
+    pub fn write_plane_views(&self, views: &PlaneViews, pair: u32, texture: TextureRef<'_>, format: SemiPlanar) {
+        let formats = match format {
+            SemiPlanar::Nv12 => [DXGI_FORMAT_R8_UINT, DXGI_FORMAT_R8G8_UINT],
+            SemiPlanar::P010 => [DXGI_FORMAT_R16_UINT, DXGI_FORMAT_R16G16_UINT],
+        };
+        // SAFETY: plain calls on a live device, heap and texture; the handles are inside the heap.
+        unsafe {
+            let step = self.device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) as usize;
+            let start = views.heap.GetCPUDescriptorHandleForHeapStart();
+            for (plane, format) in formats.into_iter().enumerate() {
+                let desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
+                    Format: format,
+                    ViewDimension: D3D12_UAV_DIMENSION_TEXTURE2D,
+                    Anonymous: D3D12_UNORDERED_ACCESS_VIEW_DESC_0 {
+                        Texture2D: D3D12_TEX2D_UAV { MipSlice: 0, PlaneSlice: plane as u32 },
+                    },
+                };
+                let handle = D3D12_CPU_DESCRIPTOR_HANDLE { ptr: start.ptr + (pair as usize * 2 + plane) * step };
+                self.device.CreateUnorderedAccessView(texture.resource, None, Some(&desc), handle);
+            }
+        }
+    }
 }
 
 /// A place in a buffer, as a binding takes it: the GPU virtual address.
@@ -678,17 +829,49 @@ impl<'a> Commands<'a> {
         unsafe { self.list.CopyBufferRegion(dst.resource, dst_offset, src.resource, src_offset, size) };
     }
 
-    /// Copies a plane of an image that lies in a buffer into a texture of the application.
+    /// The planes of a texture the shader writes, at the last slot of a layout with
+    /// [`LayoutDesc::write_planes`](super::LayoutDesc): the pair `pair` of the ring.
+    pub fn bind_write_planes(&self, slot: u32, device: Device<'_>, views: &PlaneViews, pair: u32) {
+        // SAFETY: a live list and heap; the handle is inside the heap.
+        unsafe {
+            let step = device.device.GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) as u64;
+            let start = views.heap.GetGPUDescriptorHandleForHeapStart();
+            self.list.SetDescriptorHeaps(&[Some(views.heap.clone())]);
+            self.list.SetComputeRootDescriptorTable(
+                slot,
+                D3D12_GPU_DESCRIPTOR_HANDLE { ptr: start.ptr + u64::from(pair) * 2 * step },
+            );
+        }
+    }
+
+    /// Moves a texture of the application from one state to another.
+    pub fn transition_texture(&self, texture: TextureRef<'_>, before: TextureState, after: TextureState) {
+        // SAFETY: the barrier is used during the call, while the texture is borrowed.
+        unsafe {
+            self.list.ResourceBarrier(&[transition(texture.resource, texture_state(before), texture_state(after))]);
+        }
+    }
+
+    /// Copies a plane of an image that lies in a buffer into a texture of the application: into the
+    /// texture of the plane, or into the plane of a semi-planar texture that the format names.
     #[inline]
     pub fn copy_buffer_to_texture(&self, texture: TextureRef<'_>, src: BufferRef<'_>, source: &super::TextureSource) {
+        use super::TextureFormat;
+        // The planes of a semi-planar texture are its subresources 0 and 1, and a copy names them in
+        // the formats D3D12 gives their footprints (GetCopyableFootprints).
+        let (format, subresource) = match source.format {
+            TextureFormat::R8 => (DXGI_FORMAT_R8_UNORM, 0),
+            TextureFormat::R16 => (DXGI_FORMAT_R16_UNORM, 0),
+            TextureFormat::Rgb10A2 => (DXGI_FORMAT_R10G10B10A2_UNORM, 0),
+            TextureFormat::Nv12Luma => (DXGI_FORMAT_R8_TYPELESS, 0),
+            TextureFormat::Nv12Chroma => (DXGI_FORMAT_R8G8_TYPELESS, 1),
+            TextureFormat::P010Luma => (DXGI_FORMAT_R16_TYPELESS, 0),
+            TextureFormat::P010Chroma => (DXGI_FORMAT_R16G16_TYPELESS, 1),
+        };
         let footprint = D3D12_PLACED_SUBRESOURCE_FOOTPRINT {
             Offset: source.offset,
             Footprint: D3D12_SUBRESOURCE_FOOTPRINT {
-                Format: match source.format {
-                    super::TextureFormat::R8 => DXGI_FORMAT_R8_UNORM,
-                    super::TextureFormat::R16 => DXGI_FORMAT_R16_UNORM,
-                    super::TextureFormat::Rgb10A2 => DXGI_FORMAT_R10G10B10A2_UNORM,
-                },
+                Format: format,
                 Width: source.width,
                 Height: source.height,
                 Depth: 1,
@@ -701,7 +884,7 @@ impl<'a> Commands<'a> {
             let dst = D3D12_TEXTURE_COPY_LOCATION {
                 pResource: std::mem::transmute_copy(texture.resource),
                 Type: D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
-                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: 0 },
+                Anonymous: D3D12_TEXTURE_COPY_LOCATION_0 { SubresourceIndex: subresource },
             };
             let src = D3D12_TEXTURE_COPY_LOCATION {
                 pResource: std::mem::transmute_copy(src.resource),
@@ -836,10 +1019,11 @@ impl Device<'_> {
         Ok(CommandAllocator { allocator: allocator.map_err(failed("CreateCommandAllocator"))? })
     }
 
-    /// A fence at the value 0.
-    pub fn create_fence(&self) -> Result<Fence, Error> {
+    /// A fence at the value 0; `shared`: one that another device can open (`CreateSharedHandle`).
+    pub fn create_fence(&self, shared: bool) -> Result<Fence, Error> {
+        let flags = if shared { D3D12_FENCE_FLAG_SHARED } else { D3D12_FENCE_FLAG_NONE };
         // SAFETY: a plain call on a live device.
-        let fence = unsafe { self.device.CreateFence::<ID3D12Fence>(0, D3D12_FENCE_FLAG_NONE) };
+        let fence = unsafe { self.device.CreateFence::<ID3D12Fence>(0, flags) };
         Ok(Fence { fence: fence.map_err(failed("CreateFence"))? })
     }
 

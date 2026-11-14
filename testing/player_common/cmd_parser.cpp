@@ -60,6 +60,14 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        &params_.gputimeisolate_},
       {"nopresent", atSingle, anOptional, "release decoded frames without presenting them", "",
        &params_.nopresent_},
+      {"output", atString, anOptional,
+       "the output images: planes (default), p010 or nv12 (one NV12 or P010 texture that shaders may write), "
+       "p010-copy (one that they may not); the semi-planar kinds are not presented",
+       "", &params_.output_},
+      {"interop", atSingle, anOptional,
+       "the semi-planar output in textures a D3D11 device creates and D3D12 opens, with a wait on the decoder's "
+       "shared fence in D3D11 for every frame",
+       "", &params_.interop_},
       {"cdefv2", atSingle, anOptional, "CDEF through cdef_filter_v2.hlsl (the default; same output)", "cdef",
        &params_.cdefv2_},
       {"cdefv1", atSingle, anOptional, "CDEF through the original cdef_filter.hlsl (same output)", "cdef",
@@ -271,6 +279,27 @@ int CParameters::Parse(one_task& args, std::string& Err) {
   }
   if (!ways_named) params_.parser_options_ |= PLAYER_PARSEOPT_DEFAULT;
 
+  // -output: the kind of the output images. -interop is the semi-planar kind in textures of D3D11. Neither
+  // has the planes the player's display reads, so their frames are released as with -nopresent.
+  if (params_.output_.empty() || params_.output_ == "planes" || params_.output_ == "planar") {
+    params_.semi_planar_ = 0;
+  } else if (params_.output_ == "p010" || params_.output_ == "nv12") {
+    params_.semi_planar_ = 1;
+  } else if (params_.output_ == "p010-copy" || params_.output_ == "nv12-copy") {
+    params_.semi_planar_ = 2;
+  } else {
+    Err += "-output takes planes, p010 (or nv12) or p010-copy.";
+    return -1;
+  }
+  if (params_.interop_ && !params_.semi_planar_) params_.semi_planar_ = 1;
+  if (params_.semi_planar_) {
+    if (params_.hdr10x3_) {
+      Err += "-try10x3 does not go with the semi-planar output (-output p010, -interop).";
+      return -1;
+    }
+    params_.nopresent_ = true;
+  }
+
   // A displayed frame stays held until its replacement arrives. Headless output needs only one.
   const int min_queue = params_.nopresent_ ? 1 : 2;
   if (params_.player_queue_size_ < min_queue) {
@@ -385,6 +414,9 @@ void CParameters::Reset() {
   params_.gputimeisolate_ = false;
   params_.gputime_detail_ = 0;
   params_.nopresent_ = false;
+  params_.output_.clear();
+  params_.interop_ = false;
+  params_.semi_planar_ = 0;
   params_.cdefv2_ = true;
   params_.cdefv1_ = false;
   params_.intrav2_ = false;

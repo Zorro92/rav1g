@@ -23,14 +23,40 @@ pub enum ImageFormat {
     Bits10 = 1,
     /// Three samples of 10 bits packed into 32 bits ([`crate::Settings::packed_10x3`]).
     Packed10x3 = 2,
+    /// The semi-planar output ([`OutputKind::SemiPlanar`]) of an 8-bit frame: a luma plane and one chroma
+    /// plane with U and V side by side, one byte a sample, as an NV12 texture has them.
+    Nv12 = 3,
+    /// The same for a 10-bit frame, two bytes a sample with the 10 bits in the high bits (the sample
+    /// times 64), as a P010 texture has them.
+    P010 = 4,
+}
+
+impl ImageFormat {
+    /// The image has a luma plane and one chroma plane of U and V side by side.
+    pub fn is_semi_planar(self) -> bool {
+        matches!(self, ImageFormat::Nv12 | ImageFormat::P010)
+    }
+}
+
+/// What the output images of a decoder are ([`crate::Settings::output_kind`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[repr(u32)]
+pub enum OutputKind {
+    /// The planes one behind the other in a buffer, one texture a plane, or both.
+    #[default]
+    Planes = 0,
+    /// One NV12 texture (8-bit frames) or P010 texture (10-bit frames), which the output pass writes
+    /// (docs/output.md); a buffer gets the same two planes one behind the other.
+    SemiPlanar = 1,
 }
 
 /// What the decoder needs an output image for: a frame that is going to be output.
 #[derive(Clone, Copy, Debug)]
 pub struct ImageRequest {
-    /// Bytes of a buffer that takes the three planes of the frame.
+    /// Bytes of a buffer that takes the planes of the frame.
     pub buffer_size: usize,
-    /// Luma samples of a row, and rows, of the frame.
+    /// Luma samples of a row, and rows, of the frame. The texture of a semi-planar image
+    /// ([`ImageFormat::Nv12`], [`ImageFormat::P010`]) has both rounded up to even.
     pub width: u32,
     pub height: u32,
     pub format: ImageFormat,
@@ -78,6 +104,30 @@ impl OutputImage {
         self
     }
 
+    /// An image of the semi-planar output ([`OutputKind::SemiPlanar`]): one texture of the format the
+    /// request names, `DXGI_FORMAT_NV12` or `DXGI_FORMAT_P010`, of the size of the request with both
+    /// rounded up to even, in the state `D3D12_RESOURCE_STATE_COMMON`. It is in that state again when the
+    /// frame is handed over. A texture created with `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS` is
+    /// written by the output pass itself where the device allows it; any other is written by a copy of
+    /// each plane (docs/output.md). It may be a texture of another device or API that was opened on the
+    /// decoder's device.
+    pub fn semi_planar_texture(texture: ID3D12Resource, token: usize) -> OutputImage {
+        OutputImage {
+            buffer: None,
+            memory: std::ptr::null_mut(),
+            buffer_size: 0,
+            textures: [Some(texture), None, None],
+            token,
+        }
+    }
+
+    /// Adds the semi-planar texture to an image that is a buffer: the frame is written to both, the
+    /// texture by copies.
+    pub fn with_semi_planar_texture(mut self, texture: ID3D12Resource) -> OutputImage {
+        self.textures = [Some(texture), None, None];
+        self
+    }
+
     /// The buffer of the image.
     pub fn d3d12_buffer(&self) -> Option<&ID3D12Resource> {
         self.buffer.as_ref()
@@ -114,6 +164,8 @@ pub struct Frame {
     pub monochrome: bool,
     /// The samples are packed three to 32 bits ([`ImageFormat::Packed10x3`]).
     pub packed_10x3: bool,
+    /// The samples of the image, as the request for it said.
+    pub format: ImageFormat,
     /// What was passed to [`crate::Decoder::decode`] with the temporal unit of the frame.
     pub user_data: u64,
     /// The colour description of the frame's sequence header. A stream can change it with a new
@@ -137,14 +189,26 @@ pub struct Frame {
 impl Frame {
     /// A plane (0 luma, 1 U, 2 V) in the mapped buffer of the image. `None` for an image without a
     /// mapped buffer, and for the chroma planes of a monochrome frame.
+    ///
+    /// A semi-planar frame ([`Frame::format`]) has two: 0 luma, 1 the plane of U and V side by side,
+    /// whose `width` counts the pairs. Its luma plane has one more column behind an odd width and one
+    /// more row behind an odd height (repeats of the last), which `width` and `height` do not count but
+    /// `data` has. A monochrome frame has plane 1 too, of the middle value.
     pub fn plane(&self, index: usize) -> Option<Plane<'_>> {
-        if index > 2 || self.image.memory.is_null() || (index > 0 && self.monochrome) {
+        let semi_planar = self.format.is_semi_planar();
+        if index > 2
+            || self.image.memory.is_null()
+            || (index > 0 && self.monochrome && !semi_planar)
+            || (index > 1 && semi_planar)
+        {
             return None;
         }
         let (width, height) =
             if index == 0 { (self.width, self.height) } else { (self.width.div_ceil(2), self.height.div_ceil(2)) };
         let stride = self.strides[index];
-        let size = stride.checked_mul(height as usize)?;
+        // The luma plane of a semi-planar frame has its row behind an odd height.
+        let rows = if semi_planar && index == 0 { height.next_multiple_of(2) } else { height };
+        let size = stride.checked_mul(rows as usize)?;
         if self.offsets[index].checked_add(size)? > self.image.buffer_size {
             return None;
         }
@@ -154,13 +218,16 @@ impl Frame {
         Some(Plane { data, stride, width, height })
     }
 
-    /// The fence of the command list that wrote the frame into its image, and the value the fence has
-    /// when that list has run on the device's queue.
+    /// The output fence of the decoder ([`crate::Decoder::output_fence`]), and the value it has when the
+    /// command list that wrote the frame into its image has run on the device's queue. The fence is the
+    /// same for every frame of a decoder, and the value of a frame is larger than that of the frame
+    /// before it.
     ///
     /// A frame is handed over when its command list has completed, so the fence has reached the value:
     /// the resources of the image can be read at once, on any queue. The pair is part of the frame so that
     /// an application that orders its own GPU work behind the decoder's by fence can do so with every
-    /// frame alike.
+    /// frame alike; one that reads the image on another device or API opens the fence there
+    /// ([`crate::Settings::shared_fence`]) and waits for the value on that device's queue.
     pub fn d3d12_fence(&self) -> Option<(&ID3D12Fence, u64)> {
         self.fence.as_ref().map(|(fence, value)| (fence, *value))
     }

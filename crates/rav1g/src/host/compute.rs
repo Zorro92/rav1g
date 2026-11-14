@@ -86,8 +86,8 @@ const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
     // 20 transforms, 17 shaders that do not depend on the bit depth, 30 that do for 8 bits and for more.
-    assert!(SHADERS == 20 + 17 + 2 * 30);
-    assert!(LAYOUTS == 16);
+    assert!(SHADERS == 20 + 21 + 2 * 30);
+    assert!(LAYOUTS == 19);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
 
@@ -163,6 +163,9 @@ struct Layouts {
     lf: Layout,
     lf_gen: Layout,
     upscale: Layout,
+    copy_plane_sp: Layout,
+    copy_plane_sp_tex: Layout,
+    film_grain_tex: Layout,
 }
 
 /// Creates the layouts in the order of the C++ and puts each into its field of the library.
@@ -170,8 +173,17 @@ struct Layouts {
 /// # Safety
 /// `lib` is the zeroed library.
 unsafe fn create_layouts(device: Device<'_>, lib: *mut compute_shader_lib) -> Result<Layouts, gpu::Error> {
+    let layout_planes = |read_buffers, write_buffers, constant_blocks, inline_constants, write_planes| {
+        device.create_layout(LayoutDesc {
+            read_buffers,
+            write_buffers,
+            constant_blocks,
+            inline_constants,
+            write_planes,
+        })
+    };
     let layout = |read_buffers, write_buffers, constant_blocks, inline_constants| {
-        device.create_layout(LayoutDesc { read_buffers, write_buffers, constant_blocks, inline_constants })
+        layout_planes(read_buffers, write_buffers, constant_blocks, inline_constants, 0)
     };
     let layouts = Layouts {
         idct: layout(1, 2, 2, 2)?,
@@ -192,6 +204,11 @@ unsafe fn create_layouts(device: Device<'_>, lib: *mut compute_shader_lib) -> Re
         lf: layout(1, 1, 1, 5)?,
         lf_gen: layout(2, 1, 1, 6)?,
         upscale: layout(0, 1, 1, 3)?,
+        // copy_plane_sp.hlsl: u0 and 11 inline constants; with the two planes of a texture behind u0.
+        copy_plane_sp: layout(0, 1, 0, 11)?,
+        copy_plane_sp_tex: layout_planes(0, 1, 0, 11, 2)?,
+        // film_grain_filter_sp_tex.hlsl: the layout of film grain with the two planes in place of u0.
+        film_grain_tex: layout_planes(3, 0, 1, 0, 2)?,
     };
     // SAFETY: the fields are null COM pointers of root signatures (the caller's contract).
     unsafe {
@@ -211,6 +228,9 @@ unsafe fn create_layouts(device: Device<'_>, lib: *mut compute_shader_lib) -> Re
         com_store(&raw mut (*lib).sig_lf, layouts.lf.clone().into_raw());
         com_store(&raw mut (*lib).sig_lf_gen, layouts.lf_gen.clone().into_raw());
         com_store(&raw mut (*lib).sig_upscale, layouts.upscale.clone().into_raw());
+        com_store(&raw mut (*lib).sig_copy_plane_sp, layouts.copy_plane_sp.clone().into_raw());
+        com_store(&raw mut (*lib).sig_copy_plane_sp_tex, layouts.copy_plane_sp_tex.clone().into_raw());
+        com_store(&raw mut (*lib).sig_film_grain_tex, layouts.film_grain_tex.clone().into_raw());
     }
     Ok(layouts)
 }
@@ -338,6 +358,10 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ),
             ("inter_scale_obmc_above_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_scale_obmc_above),
             ("inter_scale_obmc_left_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_scale_obmc_left),
+            ("copy_plane_sp", &layouts.copy_plane_sp, &raw mut (*lib).shader_copy_plane_sp),
+            ("copy_plane_sp_tex", &layouts.copy_plane_sp_tex, &raw mut (*lib).shader_copy_plane_sp_tex),
+            ("film_grain_filter_sp", &layouts.film_grain, &raw mut (*lib).shader_filmgrain_filter_sp),
+            ("film_grain_filter_sp_tex", &layouts.film_grain_tex, &raw mut (*lib).shader_filmgrain_filter_sp_tex),
         ]
     };
     list.into_iter()
@@ -751,7 +775,7 @@ mod tests {
             .filter_map(|line| line.trim().trim_start_matches('(').strip_prefix('"'))
             .map(|rest| &rest[..rest.find('"').unwrap()])
             .collect();
-        assert_eq!(names.len(), 93);
+        assert_eq!(names.len(), 97);
         let mut unique = names.clone();
         unique.sort_unstable();
         unique.dedup();

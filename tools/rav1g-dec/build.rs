@@ -91,7 +91,7 @@ fn main() {
     // the one of shim.cpp.
     let player = repo.join("testing").join("player_common");
     cpp.define("RAV1G_PLAYER_NO_USAGE_EXIT", None);
-    for name in ["cmd_parser.cpp", "decoder.cpp", "decoder_creator.cpp"] {
+    for name in ["cmd_parser.cpp", "decoder.cpp", "decoder_creator.cpp", "semi_planar.cpp"] {
         cpp.file(player.join(name));
     }
     cpp.file(webm.join("mkvparser.cc"))

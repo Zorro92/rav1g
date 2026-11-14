@@ -56,6 +56,10 @@ pub struct Task {
     pub wrong_limit: i32,
     /// -aom_md5: monochrome frames are hashed as aomdec --i420 writes them.
     pub aom_md5: bool,
+    /// -output: what the output images are.
+    pub output: crate::pool::ImageMode,
+    /// -sharedfence: the output fence is created shareable, and opened through a handle.
+    pub shared_fence: bool,
     /// -t: the threads that parse; 0, which a task without -t has, is the library's default for the
     /// frame size.
     pub threads: i32,
@@ -129,6 +133,8 @@ impl Default for Task {
             save_wrong_yuv: String::new(),
             wrong_limit: -1,
             aom_md5: false,
+            output: crate::pool::ImageMode::Planes,
+            shared_fence: false,
             threads: 0,
             limit: -1,
             queue_size: QUEUE_SIZE_DEFAULT,
@@ -207,6 +213,12 @@ pub fn usage() {
     say!("  -md5_frame_check      the same with <stream>.md5, as in the player");
     say!("  -save_md5 <file>      write the md5 of every output frame in the player's format");
     say!("  -aom_md5              hash a monochrome frame with two grey chroma planes, as aomdec --i420 does");
+    say!("  -output <kind>        the output images (docs/output.md): planes (the default: a buffer with the");
+    say!("                        planes), p010 (the semi-planar output: an NV12 texture for 8-bit and a P010");
+    say!("                        texture for 10-bit frames, which shaders may write; nv12 is the same word),");
+    say!("                        p010-copy (a texture shaders may not write), p010-buffer (the two planes in a");
+    say!("                        buffer). The textures are read back and hashed as the planes are.");
+    say!("  -sharedfence          the output fence is created shareable and opened through a shared handle");
     say!("                        (AOM's .md5 files); without it luma only, as the player and dav1d do");
     say!("  -o <file>             write the visible samples of every output frame (planar, as they are hashed)");
     say!("  -save_wrong_yuv <dir> with a reference: write each frame that differs to <dir>/<name>_<frame>.yuv");
@@ -360,6 +372,11 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-md5_frame_check" => task.md5_frame_check = true,
             "-save_md5" => task.save_md5 = value()?,
             "-aom_md5" => task.aom_md5 = true,
+            "-output" => {
+                task.output = crate::pool::ImageMode::parse(&value()?)
+                    .ok_or_else(|| "-output takes planes, p010 (or nv12), p010-copy or p010-buffer".to_string())?;
+            }
+            "-sharedfence" => task.shared_fence = true,
             "-o" => task.out_yuv = value()?,
             "-save_wrong_yuv" => task.save_wrong_yuv = value()?,
             "-wrong_limit" => task.wrong_limit = number()?,

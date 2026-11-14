@@ -110,6 +110,11 @@ class CParameters {
     bool gputimeisolate_;
     int gputime_detail_;
     bool nopresent_;
+    // -output and -interop. After Parse(): semi_planar_ is 0 (the planes), 1 (one NV12 or P010 texture an
+    // image, which shaders may write) or 2 (one that they may not); interop_ makes it at least 1.
+    std::string output_;
+    bool interop_;
+    int semi_planar_;
     // The effective choice after Parse(): true unless -cdefv1 was given.
     bool cdefv2_;
     bool cdefv1_;

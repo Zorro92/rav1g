@@ -160,6 +160,13 @@ pub(crate) unsafe fn commit_command_buffer(dec: *mut Av1Core) {
         cb.fence_value += 1;
         let queue = Queue::new(queue);
         queue.execute(list);
+        // The output fence first: when the slot's fence, which the completion thread waits for, has its
+        // value, the output fence has the value of this list.
+        if let Some(output_fence) = wrapped_ref::<_, Fence>(&(*dec).output_fence) {
+            (*dec).output_fence_value += 1;
+            cb.output_fence_value = (*dec).output_fence_value;
+            queue.signal(output_fence, cb.output_fence_value);
+        }
         queue.signal(fence, u64::from(cb.fence_value));
         fence.set_event(u64::from(cb.fence_value), Event::borrowed(&cb.event));
 

@@ -24,7 +24,7 @@ use windows::core::Interface;
 use crate::sys::{av1_perf_frame, av1_stage_dump};
 use crate::{ColorInfo, ColorPrimaries, ContentLightLevel, MasteringDisplay, MatrixCoefficients};
 use crate::{Decoder, Device, Error, ErrorCode, Frame, ImageFormat, ImageRequest, LowMemory, Output, OutputImage};
-use crate::{Settings, TransferCharacteristics, switches};
+use crate::{OutputKind, Settings, TransferCharacteristics, switches};
 
 /// The shared back buffer: one back buffer for all pipeline slots and a pool of 10 frame buffers. The
 /// default of `rav1g_settings_default`.
@@ -153,6 +153,14 @@ pub const RAV1G_MEMORY_GUARD_MARGIN: u64 = 50331648;
 /// The default of `Rav1gSettings::memory_headroom`: what a creation should leave of what
 /// `Rav1gSettings::memory_available` returns so that its frames are fast, 128 MiB.
 pub const RAV1G_MEMORY_GUARD_HEADROOM: u64 = 134217728;
+
+/// `Rav1gSettings::output_kind`, the default: an output image is a buffer with the planes of the frame
+/// one behind the other, one texture a plane, or both.
+pub const RAV1G_OUTPUT_PLANES: u32 = 0;
+/// `Rav1gSettings::output_kind`: the semi-planar output. An output image is one texture of
+/// `DXGI_FORMAT_NV12` (8-bit frames) or `DXGI_FORMAT_P010` (10-bit frames), which the output pass of the
+/// decoder writes (docs/output.md).
+pub const RAV1G_OUTPUT_SEMI_PLANAR: u32 = 1;
 
 const _: () = {
     assert!(RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER == LowMemory::SHARED_BACK_BUFFER.0);
@@ -349,15 +357,22 @@ pub enum Rav1gImageFormat {
     /// Three samples of 10 bits packed into 32 bits (`Rav1gSettings::packed_10x3`); textures of
     /// R10G10B10A2 with a third of the width.
     Packed10x3 = 2,
+    /// The semi-planar output (`RAV1G_OUTPUT_SEMI_PLANAR`) of an 8-bit frame: a luma plane and one
+    /// chroma plane with U and V side by side, one byte a sample; one texture of `DXGI_FORMAT_NV12`.
+    Nv12 = 3,
+    /// The same for a 10-bit frame: two bytes a sample, the 10 bits in the high bits (the sample times
+    /// 64); one texture of `DXGI_FORMAT_P010`.
+    P010 = 4,
 }
 
 /// What the decoder needs an output image for: a frame that is going to be output.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Rav1gImageRequest {
-    /// Bytes of a buffer that takes the three planes of the frame.
+    /// Bytes of a buffer that takes the planes of the frame.
     pub buffer_size: usize,
-    /// Luma samples of a row, and rows, of the frame.
+    /// Luma samples of a row, and rows, of the frame. The texture of a semi-planar image
+    /// (`Rav1gImageFormat::Nv12`, `Rav1gImageFormat::P010`) has both rounded up to even.
     pub width: u32,
     pub height: u32,
     pub format: Rav1gImageFormat,
@@ -368,6 +383,17 @@ pub struct Rav1gImageRequest {
 /// destination state (to use it on the GPU), or both. The decoder holds a reference of each resource from
 /// `Rav1gOutput::get_image` until it has handed the image back (`Rav1gOutput::frame`,
 /// `Rav1gOutput::unused`).
+///
+/// With the semi-planar output (`RAV1G_OUTPUT_SEMI_PLANAR`; docs/output.md) the image is one texture,
+/// `d3d12_textures[0]`: `DXGI_FORMAT_NV12` for a request of `Rav1gImageFormat::Nv12`, `DXGI_FORMAT_P010`
+/// for one of `Rav1gImageFormat::P010`, of the width and height of the request, both rounded up to even,
+/// with one mip level. It is in the state `D3D12_RESOURCE_STATE_COMMON` when `get_image` returns, and in
+/// that state again when the frame is handed over; in between it is the decoder's. A texture created
+/// with `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS` is written by the output pass itself, where the
+/// device lets shaders write such a texture; any other is written by one copy a plane. It may be a
+/// texture of another device or API (a D3D11 texture with a shared handle) that the application opened
+/// on the decoder's device. A buffer, alone or next to the texture, gets the two planes one behind the
+/// other, as `Rav1gFrame::planes` says.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Rav1gImage {
@@ -377,7 +403,8 @@ pub struct Rav1gImage {
     pub memory: *mut u8,
     /// Bytes of the buffer.
     pub buffer_size: usize,
-    /// `ID3D12Resource *` of the textures of the luma, U and V plane, or null.
+    /// `ID3D12Resource *` of the textures of the luma, U and V plane, or null. With the semi-planar
+    /// output the first is the NV12 or P010 texture and the other two are null.
     pub d3d12_textures: [*mut c_void; 3],
     /// The application's name for the image; the decoder only carries it.
     pub token: *mut c_void,
@@ -402,13 +429,23 @@ pub struct Rav1gFrame {
     pub user_data: u64,
     /// The planes (luma, U, V) in the mapping of the image's buffer; null without a mapping, and for the
     /// chroma planes of a monochrome frame.
+    ///
+    /// A semi-planar frame (`format`) has two: the luma plane and the plane of U and V side by side
+    /// (U first), the third is null. A monochrome frame has both too, with the middle value (128, or 512
+    /// times 64) in the second.
     pub planes: [*const u8; 3],
     /// Bytes from one row of a plane to the next.
     pub strides: [u32; 3],
-    /// `ID3D12Fence *` of the command list that wrote the frame into its image, and the value the fence
-    /// has when that list has run. The frame is handed over when the list has completed, so the fence has
-    /// reached the value; the pair is here for an application that orders its GPU work by fence. The
-    /// pointer is valid during the call (AddRef to keep it).
+    /// The output fence of the decoder (`ID3D12Fence *`, the one of `rav1g_decoder_output_fence`: the
+    /// same for every frame of a decoder), and the value it has when the command list that wrote the
+    /// frame into its image has run. The value of a frame is larger than that of the frame before it.
+    /// The frame is handed over when the list has completed, so the fence has reached the value; the
+    /// pair is here for an application that orders its GPU work by fence, and for one that reads the
+    /// image on another device or API: it opens the fence there (`Rav1gSettings::shared_fence`) and waits
+    /// for the value on that device's queue (`ID3D11DeviceContext4::Wait`, `ID3D12CommandQueue::Wait`).
+    /// The pointer is valid during the call (AddRef to keep it).
+    ///
+    /// Up to 0.2.159 this was the fence of the pipeline slot that decoded the frame, one of several.
     pub d3d12_fence: *mut c_void,
     pub fence_value: u64,
     /// The colour description of the frame's sequence header. A stream can change it with a new
@@ -427,6 +464,8 @@ pub struct Rav1gFrame {
     pub has_content_light: bool,
     pub mastering_display: Rav1gMasteringDisplay,
     pub content_light: Rav1gContentLightLevel,
+    /// The samples of the image, as the request for it said. New in 0.2.160, behind the other fields.
+    pub format: Rav1gImageFormat,
 }
 
 impl From<&ColorInfo> for Rav1gColorInfo {
@@ -602,6 +641,18 @@ pub struct Rav1gSettings {
     /// New in 0.2.157: a field behind `memory_available_context`. An application that fills the
     /// settings with `rav1g_settings_default` only has to be compiled with this header.
     pub memory_headroom: u64,
+    /// What the output images are: `RAV1G_OUTPUT_PLANES` (0, the default) or
+    /// `RAV1G_OUTPUT_SEMI_PLANAR`, one NV12 or P010 texture for a frame, which the output pass writes
+    /// (docs/output.md). `Rav1gImageRequest::format` then says which of the two a frame needs.
+    ///
+    /// New in 0.2.160, with `shared_fence`: two fields behind `memory_headroom`. An application that
+    /// fills the settings with `rav1g_settings_default` only has to be compiled with this header.
+    pub output_kind: u32,
+    /// The output fence (`rav1g_decoder_output_fence`, `Rav1gFrame::d3d12_fence`) is created with
+    /// `D3D12_FENCE_FLAG_SHARED`: the application can make a handle of it
+    /// (`ID3D12Device::CreateSharedHandle`) and open it on another device, a D3D11 device among them
+    /// (`ID3D11Device5::OpenSharedFence`), to wait there for the frames it reads there.
+    pub shared_fence: bool,
     /// The output of the decoder.
     pub output: Rav1gOutput,
 }
@@ -894,6 +945,8 @@ pub unsafe extern "C" fn rav1g_settings_default(settings: *mut Rav1gSettings) {
             memory_available: None,
             memory_available_context: std::ptr::null_mut(),
             memory_headroom: defaults.memory_headroom,
+            output_kind: RAV1G_OUTPUT_PLANES,
+            shared_fence: false,
             output: Rav1gOutput {
                 context: std::ptr::null_mut(),
                 get_image: None,
@@ -918,6 +971,12 @@ fn settings_of(settings: &Rav1gSettings) -> Settings {
         intra_v2: settings.intra_v2,
         inter_fast: settings.inter_fast,
         packed_10x3: settings.packed_10x3,
+        output_kind: if settings.output_kind == RAV1G_OUTPUT_SEMI_PLANAR {
+            OutputKind::SemiPlanar
+        } else {
+            OutputKind::Planes
+        },
+        shared_fence: settings.shared_fence,
         operating_point: settings.operating_point,
         output_all_layers: settings.output_all_layers,
         parser_options: crate::ParserOptions::from_bits(settings.parser_options),
@@ -970,6 +1029,8 @@ impl Output for CallbackOutput {
                 ImageFormat::Bits8 => Rav1gImageFormat::Bits8,
                 ImageFormat::Bits10 => Rav1gImageFormat::Bits10,
                 ImageFormat::Packed10x3 => Rav1gImageFormat::Packed10x3,
+                ImageFormat::Nv12 => Rav1gImageFormat::Nv12,
+                ImageFormat::P010 => Rav1gImageFormat::P010,
             },
         };
         let mut image = Rav1gImage {
@@ -1004,8 +1065,12 @@ impl Output for CallbackOutput {
             return;
         };
         let raw = |resource: Option<&ID3D12Resource>| resource.map_or(std::ptr::null_mut(), Interface::as_raw);
+        let semi_planar = frame.format.is_semi_planar();
         let plane = |index: usize| {
-            if frame.image.memory.is_null() || (index > 0 && frame.monochrome) {
+            if frame.image.memory.is_null()
+                || (index > 0 && frame.monochrome && !semi_planar)
+                || (index > 1 && semi_planar)
+            {
                 std::ptr::null()
             } else {
                 frame.image.memory.wrapping_add(frame.offsets[index]).cast_const()
@@ -1039,6 +1104,13 @@ impl Output for CallbackOutput {
             has_content_light: frame.content_light.is_some(),
             mastering_display: frame.mastering_display.as_ref().map(Into::into).unwrap_or_default(),
             content_light: frame.content_light.as_ref().map(Into::into).unwrap_or_default(),
+            format: match frame.format {
+                ImageFormat::Bits8 => Rav1gImageFormat::Bits8,
+                ImageFormat::Bits10 => Rav1gImageFormat::Bits10,
+                ImageFormat::Packed10x3 => Rav1gImageFormat::Packed10x3,
+                ImageFormat::Nv12 => Rav1gImageFormat::Nv12,
+                ImageFormat::P010 => Rav1gImageFormat::P010,
+            },
         };
         // SAFETY: the application's callback, called as the interface says; the frame and what it points
         // to are alive during the call.
@@ -1209,6 +1281,25 @@ pub unsafe extern "C" fn rav1g_decoder_configuration(
             };
         }
     }
+}
+
+/// The output fence of the decoder, an `ID3D12Fence *`; no reference is added, and it lives as long as
+/// the decoder. The queue signals it behind every command list of the decoder, so its value says which
+/// frames are written: `Rav1gFrame::fence_value` is the value of a frame, and the values grow from
+/// frame to frame. It is the fence every `Rav1gFrame::d3d12_fence` of the decoder points to; this call
+/// has it before the first frame, for an application that opens it on another device
+/// (`Rav1gSettings::shared_fence`).
+///
+/// # Safety
+/// `decoder` is a decoder of `rav1g_decoder_create`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rav1g_decoder_output_fence(decoder: *const Rav1gDecoder) -> *mut c_void {
+    // SAFETY: the caller's contract.
+    let Some(decoder) = (unsafe { decoder.as_ref() }) else {
+        return std::ptr::null_mut();
+    };
+    // The decoder holds its own reference for as long as it lives.
+    decoder.decoder.output_fence().map_or(std::ptr::null_mut(), |fence| fence.as_raw())
 }
 
 /// The frame of every spatial layer of a temporal unit is output, instead of the highest one.

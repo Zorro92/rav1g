@@ -87,7 +87,11 @@ unsafe fn copy_to_img(dec: *const Av1Core, hw_img: &mut HwOutputImage, dst: &mut
     dst.user_priv = hw_img.user_priv;
     dst.fb2_priv = hw_img.alloc_priv;
     dst.monochrome = hw_img.monochrome;
-    if hw_img.monochrome != 0 {
+    dst.semi_planar = hw_img.semi_planar;
+    if hw_img.semi_planar != 0 {
+        // Two planes; a monochrome frame has its chroma plane too, of the middle value.
+        dst.planes[2] = std::ptr::null_mut();
+    } else if hw_img.monochrome != 0 {
         dst.planes[1] = std::ptr::null_mut();
         dst.planes[2] = std::ptr::null_mut();
     }
@@ -118,8 +122,8 @@ thread_local! {
 /// behind that list. The image description of the C interface has no room for them.
 pub(crate) fn frame_fence() -> Option<(ID3D12Fence, u64)> {
     let (fence, value) = FRAME_FENCE.get();
-    // SAFETY: set by the completion thread around the callback to the fence of a slot of its decoder,
-    // which lives as long as the decoder.
+    // SAFETY: set by the completion thread around the callback to the output fence of its decoder, which
+    // lives as long as the decoder.
     unsafe { ID3D12Fence::from_raw_borrowed(&fence) }.map(|fence| (fence.clone(), value))
 }
 
@@ -153,9 +157,10 @@ unsafe fn completion_thread(dec: *mut Av1Core) {
             let mut perf_have_rec = false;
             let mut fence: (*mut c_void, u64) = (std::ptr::null_mut(), 0);
             if let Some(td) = (*item).data.as_mut() {
-                // Of the frame's command list, read while the slot is still this frame's.
-                if let Some(slot_fence) = td.command_buffer.fence.as_ref() {
-                    fence = (slot_fence.d3d12().as_raw(), u64::from(td.command_buffer.fence_value));
+                // Of the frame's command list, read while the slot is still this frame's: the value the
+                // decoder's output fence has behind it.
+                if let Some(output_fence) = (*dec).output_fence.as_ref() {
+                    fence = (output_fence.d3d12().as_raw(), td.command_buffer.output_fence_value);
                 }
                 // Waits for the frame's fence.
                 let perf_wait_start = if td.perf.collect != 0 { perf_now() } else { 0 };

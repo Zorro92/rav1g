@@ -196,6 +196,8 @@ rav1g-dec -sm6test
 | `-check <file>` | compare with this md5 file: the first 32 characters of each line are the md5 of one output frame, in output order. Reads the player's format and AOM's |
 | `-md5_frame_check` | the same with `<stream>.md5`, as in the player |
 | `-save_md5 <file>` | write the md5 of every output frame in the player's format, `<md5>   <n>\r\n` |
+| `-output <kind>` | the output images ([output.md](output.md)): `planes` (the default, a buffer with the planes), `p010` (the semi-planar output: an NV12 texture for an 8-bit frame, a P010 texture for a 10-bit one, which shaders may write; `nv12` is the same word), `p010-copy` (a texture shaders may not write), `p010-buffer` (the two planes in a buffer). A texture is copied back and hashed as the planes are, so the references are the same; a frame whose image is not what the kind promises (low bits, padding, grey chroma) fails the task |
+| `-sharedfence` | the output fence is created shareable and opened through a shared handle; the opened fence has to reach the value of every frame, as the fence itself has to in every run |
 | `-aom_md5` | hash a monochrome frame with two grey chroma planes, as `aomdec --i420` writes it; see [AOM's md5 files](#aoms-md5-files) |
 | `-o <file>` | write the visible samples of every output frame, as they are hashed |
 | `-save_wrong_yuv <dir>` | with a reference: write each frame that differs to `<dir>/<name>_<frame>.yuv` |

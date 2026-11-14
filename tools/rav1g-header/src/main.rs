@@ -46,6 +46,11 @@ const HEADER: &str = "\
  * Rav1gStreamInfo::color and, with the HDR metadata, in every Rav1gFrame; the application that shows the
  * frames has to use it (docs/color.md).
  *
+ * Output: by default an image is a buffer with the planes of the frame, one texture a plane, or both.
+ * With Rav1gSettings::output_kind RAV1G_OUTPUT_SEMI_PLANAR it is one NV12 or P010 texture, which the
+ * decoder's output pass writes and an application can share with a D3D11 device; the output fence
+ * (rav1g_decoder_output_fence, Rav1gFrame::fence_value) says when a frame is written (docs/output.md).
+ *
  * A decoder is used by one thread at a time. The callbacks are called from the decoder's threads.
  */";
 

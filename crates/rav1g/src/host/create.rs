@@ -36,7 +36,7 @@ use super::types::{
     RefFrameBufferCount, RefFrameBufferCountSharedBack, UploadUAV, av1_frame_thread_data,
 };
 use crate::gpu::d3d12::{com_ref, com_release, com_store, wrapped_ref};
-use crate::gpu::{self, CommandAllocator, Device, Event, VideoMemory, create_hardware_device};
+use crate::gpu::{self, CommandAllocator, Device, Event, SemiPlanar, VideoMemory, create_hardware_device};
 use crate::sys::parser::{MB_MODE_INFO, RestorationUnitInfo, aom_codec_dec_cfg_t, av1_tile_data};
 use crate::sys::{
     AV1_LOW_MEMORY_ALL, AV1_LOW_MEMORY_COEFS, AV1_LOW_MEMORY_DEFAULT, AV1_LOW_MEMORY_MODE_INFO,
@@ -1008,7 +1008,7 @@ unsafe fn create_command_buffer(
     // SAFETY: an empty field (the caller's contract).
     unsafe { com_store(&raw mut cb.allocator, allocator.into_raw()) };
     cb.fence_value = 0;
-    let fence = device.create_fence().map_err(|error| (what[1], error.code))?;
+    let fence = device.create_fence(false).map_err(|error| (what[1], error.code))?;
     // SAFETY: as above.
     unsafe { com_store(&raw mut cb.fence, fence.into_raw()) };
     cb.event = Event::new().map_err(|error| (what[2], error.code))?.into_raw();
@@ -1083,6 +1083,43 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
         let shader_errors = wait_shader_create_complete((*dec).shader_lib);
         if shader_errors != 0 {
             return create_failed(dec, &rcfg, Some(&vm_before), "compute pipeline states (shaders)", shader_errors);
+        }
+
+        // The output fence: one for the decoder, signalled behind every command list.
+        match Device::new(&device).create_fence(cfg.shared_fence != 0) {
+            Ok(fence) => com_store(&raw mut (*dec).output_fence, fence.into_raw()),
+            Err(error) => {
+                let step = if cfg.shared_fence != 0 { "output fence (shared)" } else { "output fence" };
+                return create_failed(dec, &rcfg, Some(&vm_before), step, error.code);
+            }
+        }
+        // The semi-planar output: what the device does with the two texture formats, and the views of
+        // the planes the output pass writes. A device that lets no shader write such a texture gets
+        // its frames through the back buffer (`output.rs`); the log says which it is.
+        (*dec).output_kind = c_int::from(cfg.output_kind == 1);
+        if (*dec).output_kind != 0 {
+            let gpu = Device::new(&device);
+            let support = [gpu.semi_planar_support(SemiPlanar::Nv12), gpu.semi_planar_support(SemiPlanar::P010)];
+            (*dec).semi_planar_support = support;
+            let yes = |value: bool| if value { "yes" } else { "no" };
+            log(
+                false,
+                &format!(
+                    "OUTPUT semi-planar: NV12 textures {}, written by shaders {}; P010 textures {}, written by \
+                     shaders {}",
+                    yes(support[0].texture),
+                    yes(support[0].shader_writes),
+                    yes(support[1].texture),
+                    yes(support[1].shader_writes)
+                ),
+            );
+            match gpu.create_plane_views() {
+                Ok(views) => com_store(&raw mut (*dec).plane_views, views.into_raw()),
+                Err(error) => {
+                    let step = "descriptor heap of the semi-planar output";
+                    return create_failed(dec, &rcfg, Some(&vm_before), step, error.code);
+                }
+            }
         }
 
         // Budget guard: an application over its memory limit loses the D3D12 device for the rest of the
@@ -1401,6 +1438,8 @@ unsafe fn release_interfaces(dec: *mut Av1Core) {
             com_release(&raw mut td.command_buffer.fence);
             com_release(&raw mut td.command_buffer.allocator);
         }
+        com_release(&raw mut (*dec).plane_views);
+        com_release(&raw mut (*dec).output_fence);
         com_release(&raw mut (*dec).compute.command_list);
         com_release(&raw mut (*dec).compute.queue_direct);
         com_release(&raw mut (*dec).compute.queue);

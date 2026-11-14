@@ -299,6 +299,16 @@ typedef struct aom_codec_dec_cfg {
    * makes a creation fail that would work without.
    * av1_decoder_frames_in_parse says what a decoder has. */
   int frames_in_parse;
+  /* 0: an output image has its planes one behind the other in a buffer and
+   * one texture a plane. 1: the semi-planar output, a luma plane and one
+   * chroma plane with U and V side by side, in one NV12 texture (8-bit
+   * frames) or P010 texture (10-bit frames), which the output pass writes
+   * directly (docs/output.md). */
+  int output_kind;
+  /* Non-zero: the output fence is created shareable
+   * (D3D12_FENCE_FLAG_SHARED), for an application that opens it on another
+   * device. */
+  int shared_fence;
   /* Memory budget guard, optional. On a console an application that goes over
    * its memory limit loses its D3D12 device for the rest of the process, so
    * the decoder asks before it allocates: at the creation, and when it

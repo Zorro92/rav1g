@@ -78,6 +78,9 @@ typedef struct
     int uv_crop_height;
     int hbd;
     int monochrome;
+    /* The image is semi-planar (NV12 or P010): planes[1] is the plane of U
+       and V side by side, planes[2] is not used. */
+    int semi_planar;
     /* What the application is told about the colour of the frame: the colour
        description of its sequence header as it is coded, and the HDR metadata
        that applies to it. No stage reads them. */

@@ -558,7 +558,7 @@ Each step leaves a decoder that works; both parsers are in the program until ste
    bindings to parser structs, `-parser`. Gates: everything of CI; console md5 set and timing; licence
    files reviewed.
 
-Behind step 6, the last item, decided 2026-11-14: **P010 output mode.** rav1g's existing single output
+Behind step 6, the last item, decided 2026-11-14 ([done](#p010-output)): **P010 output mode.** rav1g's existing single output
 pass (output copy + film grain) writes P010 (MSB-aligned, interleaved UV) into a shareable D3D12
 texture plus shared fence, for the owner's app's D3D11 path. Tone mapping is done by that app
 (decoder-neutral), not by rav1g. Until then, keep the output stage a single fused pass.
@@ -2617,7 +2617,7 @@ shares (`memory_lines.py pools`) in place of their equality with `-parser c`.
 - The second package of a run (`.2`, the static library linked by MSVC) differed from the default
   in what compiled the entropy decoder. There is none to compile; what is left of the difference
   is the linker. It is still built.
-- P010 output (the plan's last item).
+- P010 output (the plan's last item): [done](#p010-output).
 
 **Console**, package 0.2.159.0 (the base 1 GiB), slow state, the owner's app not running. The md5
 set on the defaults, one launch a clip, and the timing block for `j4k40` and `d2`, each block in one
@@ -2678,6 +2678,48 @@ table says:
 | `-parseframes 1` | 1 frame, 2 slots, leaves 199.2 / 197.3 MiB: created | 29.3 (29.3) | 35.0 (34.9) | 184 MiB |
 
 The removal of the C parser costs no speed, the cliff is gone, and the app uses about 19 MiB less.
+
+### P010 output
+
+The last item of the plan, 2026-11-14. [output.md](output.md) is its description for an application;
+this is what was done and measured.
+
+**What.** A second kind of output image, `Rav1gSettings::output_kind = RAV1G_OUTPUT_SEMI_PLANAR`: one
+`DXGI_FORMAT_NV12` texture for an 8-bit frame, one `DXGI_FORMAT_P010` texture for a 10-bit frame (the
+sample times 64), of the frame size rounded up to even, in the common state before and after. The
+output pass stays one pass and writes it by one of two paths: **direct**, the film grain shader or the
+copy shader storing into the two plane slices of the application's texture (`R8_UINT`/`R8G8_UINT`,
+`R16_UINT`/`R16G16_UINT` views; no back buffer, no copy), for a texture with
+`ALLOW_UNORDERED_ACCESS` on a device that has typed unordered access on these formats; **staged**,
+the same shaders writing the layout of the texture into the back buffer and two `CopyTextureRegion`,
+for every other texture and for a buffer. Four shaders were added (`copy_plane_sp`,
+`copy_plane_sp_tex`, `film_grain_filter_sp`, `film_grain_filter_sp_tex`; the two film grain ones are
+`film_grain_filter.hlsl` compiled with a define, and the bytecode of `film_grain_filter` itself is
+byte for byte what it was), the first descriptor heap and descriptor table of the decoder (every
+other binding is a root descriptor, which a texture cannot be), and one **output fence** a decoder,
+signalled behind every command list in front of the slot's own fence; `Rav1gFrame::d3d12_fence` is
+that fence now, in every kind, and `Rav1gSettings::shared_fence` creates it shareable.
+
+**The planes kind is unchanged**: the same shaders with the same bytecode, the same commands. The
+conformance set and every other job run as before.
+
+**Padding, monochrome, other subsamplings**: [output.md](output.md#the-image) and
+[what cannot be had](output.md#what-cannot-be-had).
+
+**Checks.** `rav1g-dec -output p010 | p010-copy | p010-buffer` reads the image back and hashes the
+samples as the planes are hashed, so the references are the same; job `rust-output` of CI runs the
+whole set in each, the player's decoder code with `-output p010` and with `-interop` (D3D11 textures
+opened in D3D12, a D3D11 context waiting on the shared fence), and three streams under GPU-based
+validation. Locally (wine on lavapipe, which has neither NV12 nor P010 textures, so the staged path
+into a buffer only): 244 of 244 AOM vectors with `-output p010-buffer` through both interfaces, the
+two resize streams (frames of odd sizes) and the superres stream; 244 of 244 on the defaults; 52 unit
+tests.
+
+**Console**: the task lines are in
+[test-player.md](test-player.md#console-the-task-lines-1). What only the console can say: whether its
+D3D11 driver creates NV12 and P010 textures with `D3D11_BIND_UNORDERED_ACCESS` (the direct path for a
+D3D11 texture), whether the texture and the fence open across the two APIs in a UWP app, and what the
+direct path saves of the output pass at 4K.
 
 ## Licence
 

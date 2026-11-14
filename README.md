@@ -182,7 +182,10 @@ compiles no C of `libav1` any more (the eight set-up functions and the tables th
 libaom's common code are Rust now), `-parser c`, `Settings::parser` and `RAV1G_PARSER_*` are gone, and
 the C parser lives on in two places only, both as a reference: `tools/rav1g-parse-check`, which holds
 rav1d's parse against it value by value on Linux in CI, and the C++ decoder of branch `cpp`, which CI
-holds every frame and the stage dumps against. Next: the P010 output mode, and
+holds every frame and the stage dumps against. Behind it, the semi-planar output
+([docs/output.md](docs/output.md)): the output pass can write a frame into one NV12 or P010 texture of
+the application, a D3D11 texture opened in D3D12 among them, with one output fence a decoder that
+D3D11 can wait on. Next:
 inter and intra prediction on the GPU (a measured `-interfast` prototype showed that inter time is per
 block and per dispatch, not filtering; see [gpu-av1-decoder.md](docs/gpu-av1-decoder.md)).
 The goals, in order: heavy 4K at 30 fps in real time (at most 33.3 ms per frame; met on the
@@ -202,6 +205,11 @@ memory as possible left to the application.
   was removed at its end and what is open. The workspace builds with
   `RAV1G_SHADER_DIR=<shader headers> cargo build --release` on Windows and with
   `cargo xwin build --target x86_64-pc-windows-msvc` on Linux.
+- [docs/output.md](docs/output.md): the output images. By default a buffer with the planes of a frame
+  and one texture a plane; with `Rav1gSettings::output_kind = RAV1G_OUTPUT_SEMI_PLANAR` one NV12 or
+  P010 texture that the decoder's output pass writes, which an application can share with a D3D11
+  device, and the output fence that says when a frame is written. With a D3D11 consumer sketch and an
+  integration note.
 - [docs/color.md](docs/color.md): what the decoder reports about the colour of a stream (the colour
   description of the sequence header, the HDR metadata: mastering display and content light level),
   in `rav1g.h` and in the Rust interface, and what an application that shows the frames does with

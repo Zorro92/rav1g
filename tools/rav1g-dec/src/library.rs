@@ -18,13 +18,15 @@ use rav1g::capi::{self, Rav1gStatus};
 use rav1g::switches::{self, Clears, PerfFrame, Poison};
 use rav1g::{ColorInfo, ContentLightLevel, MasteringDisplay};
 use rav1g::{
-    Decoder, ErrorCode, Frame, ImageRequest, LowMemory, MemoryAvailable, Output, OutputImage, Plane, Settings,
+    Decoder, ErrorCode, Frame, ImageFormat, ImageRequest, LowMemory, MemoryAvailable, Output, OutputImage, OutputKind,
+    Plane, Settings,
 };
 use rav1g::{StreamInfo, peek_stream_info};
+use windows::Win32::Graphics::Direct3D12::ID3D12Fence;
 use windows::core::Interface;
 
 use crate::device::Device;
-use crate::pool::Rented;
+use crate::pool::{Rented, Request};
 use crate::shim::Dumps;
 
 /// What a frame says about its colour: the description of its sequence header and its HDR metadata.
@@ -79,13 +81,45 @@ pub struct Picture<'a> {
     pub monochrome: bool,
     pub colour: Colour,
     /// Luma, U, V; `None` for a plane the frame does not have in a mapped buffer.
+    ///
+    /// Of a semi-planar frame: luma, then the plane of U and V side by side (its width counts the
+    /// pairs), 10-bit samples in the high bits of 16.
     pub planes: [Option<Plane<'a>>; 3],
+    pub semi_planar: bool,
+    /// The output fence that came with the frame, and the value it has when the frame is written.
+    pub fence: Option<(ID3D12Fence, u64)>,
+}
+
+/// The two planes of a semi-planar frame in the mapping of a buffer of the pool.
+///
+/// # Safety
+/// `mem` is the mapping of a buffer that holds a frame of this size in the layout of
+/// `pool::semi_planar_layout`, and stays mapped for `'a`.
+unsafe fn semi_planar_planes<'a>(mem: *const u8, width: u32, height: u32, bit_depth: u32) -> [Option<Plane<'a>>; 3] {
+    let (stride, chroma) = crate::pool::semi_planar_layout(width, height, bit_depth > 8);
+    let (luma_rows, chroma_rows) = ((height as usize).next_multiple_of(2), (height as usize).div_ceil(2));
+    // SAFETY: the caller's contract.
+    unsafe {
+        [
+            Some(Plane { data: std::slice::from_raw_parts(mem, stride * luma_rows), stride, width, height }),
+            Some(Plane {
+                data: std::slice::from_raw_parts(mem.add(chroma), stride * chroma_rows),
+                stride,
+                width: width.div_ceil(2),
+                height: height.div_ceil(2),
+            }),
+            None,
+        ]
+    }
 }
 
 /// What a task is to its decoder: where the output images come from and where the frames go.
 pub trait Sink: Send + Sync + 'static {
-    /// An output image of `size` bytes; `None` fails the temporal unit.
-    fn rent(&self, size: usize) -> Option<Rented>;
+    /// An output image for a frame; `None` fails the temporal unit.
+    fn rent(&self, request: &Request) -> Option<Rented>;
+    /// The texture of an image the decoder has written, copied into the buffer of the image: the
+    /// mapping of that buffer.
+    fn read_texture(&self, token: usize) -> Option<*const u8>;
     /// The decoder is done with an image.
     fn give_back(&self, token: usize);
     /// A frame whose GPU work is complete, on the decoder's completion thread.
@@ -116,6 +150,10 @@ pub struct Spec {
     pub budget: Option<u64>,
     /// -headroom: what the budget guard should leave of the budget, in bytes; 0 is the library's default.
     pub headroom: u64,
+    /// -output: the semi-planar output.
+    pub semi_planar: bool,
+    /// -sharedfence.
+    pub shared_fence: bool,
 }
 
 /// The shader choices of a task.
@@ -153,6 +191,8 @@ struct RustOutput<S: Sink>(Arc<S>);
 
 fn picture_of(frame: &Frame) -> Picture<'_> {
     Picture {
+        semi_planar: frame.format.is_semi_planar(),
+        fence: frame.d3d12_fence().map(|(fence, value)| (fence.clone(), value)),
         width: frame.width,
         height: frame.height,
         bit_depth: frame.bit_depth,
@@ -169,7 +209,15 @@ fn picture_of(frame: &Frame) -> Picture<'_> {
 
 impl<S: Sink> Output for RustOutput<S> {
     fn image(&self, request: &ImageRequest) -> Option<OutputImage> {
-        let buffer = self.0.rent(request.buffer_size)?;
+        let buffer = self.0.rent(&Request {
+            size: request.buffer_size,
+            width: request.width,
+            height: request.height,
+            high_bit_depth: request.format == ImageFormat::P010,
+        })?;
+        if let Some(texture) = buffer.texture {
+            return Some(OutputImage::semi_planar_texture(texture, buffer.token));
+        }
         // SAFETY: the buffer stays mapped for as long as the pool has it, and the pool keeps a buffer
         // that is rented; the sink with its pool outlives the decoders of the task.
         Some(unsafe { OutputImage::buffer(buffer.resource, buffer.mem, buffer.size, buffer.token) })
@@ -180,7 +228,16 @@ impl<S: Sink> Output for RustOutput<S> {
     }
 
     fn frame(&self, frame: Frame) {
-        self.0.picture(&picture_of(&frame));
+        let mut picture = picture_of(&frame);
+        if picture.semi_planar
+            && picture.planes[0].is_none()
+            && let Some(mem) = self.0.read_texture(frame.image.token)
+        {
+            // SAFETY: the pool has copied the texture of the frame into its buffer, which stays mapped
+            // while the image is rented.
+            picture.planes = unsafe { semi_planar_planes(mem, frame.width, frame.height, frame.bit_depth) };
+        }
+        self.0.picture(&picture);
         self.0.give_back(frame.image.token);
     }
 }
@@ -195,14 +252,23 @@ unsafe extern "C" fn c_get_image<S: Sink>(
     // SAFETY: the context is the sink of the task, kept by the task's decoder; the other two are the
     // library's, valid during the call.
     let (sink, request, image) = unsafe { (&*context.cast::<S>(), &*request, &mut *image) };
-    let Some(buffer) = sink.rent(request.buffer_size) else {
+    let Some(buffer) = sink.rent(&Request {
+        size: request.buffer_size,
+        width: request.width,
+        height: request.height,
+        high_bit_depth: request.format == capi::Rav1gImageFormat::P010,
+    }) else {
         return -1;
     };
-    // The pool keeps its reference of the buffer while it is rented.
+    // The pool keeps its reference of the buffer and of the texture while the image is rented.
+    image.token = buffer.token as *mut c_void;
+    if let Some(texture) = &buffer.texture {
+        image.d3d12_textures[0] = texture.as_raw();
+        return 0;
+    }
     image.d3d12_buffer = buffer.resource.as_raw();
     image.memory = buffer.mem;
     image.buffer_size = buffer.size;
-    image.token = buffer.token as *mut c_void;
     0
 }
 
@@ -214,6 +280,7 @@ unsafe extern "C" fn c_unused<S: Sink>(context: *mut c_void, token: *mut c_void)
 unsafe extern "C" fn c_frame<S: Sink>(context: *mut c_void, frame: *const capi::Rav1gFrame) {
     // SAFETY: the context is the sink of the task; the frame is the library's, valid during the call.
     let (sink, frame) = unsafe { (&*context.cast::<S>(), &*frame) };
+    let semi_planar = matches!(frame.format, capi::Rav1gImageFormat::Nv12 | capi::Rav1gImageFormat::P010);
     let plane = |index: usize| {
         if frame.planes[index].is_null() {
             return None;
@@ -221,10 +288,23 @@ unsafe extern "C" fn c_frame<S: Sink>(context: *mut c_void, frame: *const capi::
         let (width, height) =
             if index == 0 { (frame.width, frame.height) } else { (frame.width.div_ceil(2), frame.height.div_ceil(2)) };
         let stride = frame.strides[index] as usize;
+        // The luma plane of a semi-planar frame has its row behind an odd height.
+        let rows = if semi_planar && index == 0 { height.next_multiple_of(2) } else { height };
         // SAFETY: rav1g.h: a plane has its rows, a stride apart, in the mapping of the image's buffer.
-        let data = unsafe { std::slice::from_raw_parts(frame.planes[index], stride * height as usize) };
+        let data = unsafe { std::slice::from_raw_parts(frame.planes[index], stride * rows as usize) };
         Some(Plane { data, stride, width, height })
     };
+    let mut planes = [plane(0), plane(1), plane(2)];
+    if semi_planar
+        && planes[0].is_none()
+        && let Some(mem) = sink.read_texture(frame.image.token as usize)
+    {
+        // SAFETY: the pool has copied the texture of the frame into its buffer, which stays mapped while
+        // the image is rented.
+        planes = unsafe { semi_planar_planes(mem, frame.width, frame.height, frame.bit_depth) };
+    }
+    // SAFETY: rav1g.h: null or the decoder's output fence, valid during the call.
+    let fence = unsafe { ID3D12Fence::from_raw_borrowed(&frame.d3d12_fence) }.cloned();
     sink.picture(&Picture {
         width: frame.width,
         height: frame.height,
@@ -236,7 +316,9 @@ unsafe extern "C" fn c_frame<S: Sink>(context: *mut c_void, frame: *const capi::
             content_light: frame.has_content_light.then(|| (&frame.content_light).into()),
             capi: true,
         },
-        planes: [plane(0), plane(1), plane(2)],
+        planes,
+        semi_planar,
+        fence: fence.map(|fence| (fence, frame.fence_value)),
     });
     sink.give_back(frame.image.token as usize);
 }
@@ -314,6 +396,8 @@ impl Library {
             intra_v2: spec.intra_v2,
             inter_fast: spec.inter_fast,
             packed_10x3: false,
+            output_kind: if spec.semi_planar { OutputKind::SemiPlanar } else { OutputKind::Planes },
+            shared_fence: spec.shared_fence,
             operating_point: spec.operating_point,
             output_all_layers: spec.all_layers,
             parser_options: spec.parser_options,
@@ -345,6 +429,10 @@ impl Library {
             settings.memory_available_context = bytes as usize as *mut c_void;
         }
         settings.memory_headroom = spec.headroom;
+        if spec.semi_planar {
+            settings.output_kind = capi::RAV1G_OUTPUT_SEMI_PLANAR;
+        }
+        settings.shared_fence = spec.shared_fence;
         if let Some(sink) = sink {
             settings.output = capi::Rav1gOutput {
                 context: Arc::as_ptr(sink).cast_mut().cast(),
@@ -505,7 +593,10 @@ pub fn set_log(capi: bool, line: fn(bool, &str)) {
 enum NoSink {}
 
 impl Sink for NoSink {
-    fn rent(&self, _size: usize) -> Option<Rented> {
+    fn read_texture(&self, _token: usize) -> Option<*const u8> {
+        None
+    }
+    fn rent(&self, _request: &Request) -> Option<Rented> {
         match *self {}
     }
     fn give_back(&self, _token: usize) {}

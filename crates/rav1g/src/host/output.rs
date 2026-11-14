@@ -24,6 +24,20 @@
 //! frames as the application has images could not decode any further (the decode thread waits here for an
 //! image that only a later show_existing_frame would hand over).
 //!
+//! **The semi-planar output** (`aom_codec_dec_cfg_t::output_kind`, docs/output.md): the image is one NV12
+//! texture (8-bit frames) or one P010 texture (10-bit frames), a luma plane and a chroma plane with U and
+//! V side by side, in the size of the frame with both rounded up to even. The same pass writes it, by one
+//! of two paths:
+//!
+//! - **direct**: the shaders of the pass (film grain, or the copy of the planes that get none) write
+//!   the two planes of the texture. Nothing is put together in the back buffer and nothing is copied.
+//!   Needs a texture that shaders may write, on a device that lets them.
+//! - **staged**: the shaders put the frame together in the back buffer as the texture is laid out, and
+//!   two copies move the planes into the texture; a buffer of the application gets the same bytes. For
+//!   a texture shaders may not write, and for an image with a buffer.
+//!
+//! The texture comes in the common state and is left in it.
+//!
 //! The C++ function is two calls here, with the glue between them: when the application gives no image
 //! the glue raises the decoder's error (`aom_internal_error`), which leaves the decode call with a
 //! `longjmp`, and that must not pass a Rust function.
@@ -31,13 +45,18 @@
 use std::ffi::c_int;
 
 use super::core::{buffer, commands, perf_add, perf_gpu_mark, perf_ticks, pipeline, stage_dump_output};
-use super::film_grain::filmgrain_run;
+use super::film_grain::{GrainTarget, filmgrain_run};
+use super::log::log;
 use super::types::Av1Core;
-use crate::gpu::{BufferRef, BufferState, TextureFormat, TextureRef, TextureSource};
+use crate::gpu::d3d12::{com_ref, wrapped_ref};
+use crate::gpu::{
+    BufferRef, BufferState, Device, PlaneViews, SemiPlanar, TextureFormat, TextureRef, TextureSource, TextureState,
+};
 use crate::sys::parser::{
     AV1_COMMON, AV1_PERF_CPU_WAIT_IMAGE, AV1_PERF_CPU_WAIT_OUTPUT, AV1_PERF_GPU_COPY_PLANE, AV1_PERF_GPU_OUTPUT_COPY,
-    HwFrameBuffer, HwOutputImage, av1_decoded_frame_buffer_t, fbt8bit, fbt10bit, fbt10x3,
+    HwFrameBuffer, HwOutputImage, av1_decoded_frame_buffer_t, fbt8bit, fbt10bit, fbt10x3, fbtNV12, fbtP010,
 };
+use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 
 /// The planes of an output image.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -58,8 +77,11 @@ struct OutputLayout {
 
 /// The layout of the output image of a frame: rows of a multiple of 256 bytes, the luma row twice the
 /// chroma row, planes of a multiple of 512 bytes.
-fn output_layout(src: &HwFrameBuffer, is_monochrome: bool, is_10x3: bool) -> OutputLayout {
+fn output_layout(src: &HwFrameBuffer, is_monochrome: bool, is_10x3: bool, semi_planar: bool) -> OutputLayout {
     const ALIGN1: c_int = 255;
+    if semi_planar {
+        return semi_planar_layout(src);
+    }
     let bpp = if src.hbd != 0 { if is_10x3 { 4 } else { 2 } } else { 1 };
     let y_texture_width = if is_10x3 { (src.y_crop_width + 2) / 3 } else { src.y_crop_width };
     let uv_texture_width = if is_10x3 { (src.uv_crop_width + 2) / 3 } else { src.uv_crop_width };
@@ -85,6 +107,30 @@ fn output_layout(src: &HwFrameBuffer, is_monochrome: bool, is_10x3: bool) -> Out
     }
 }
 
+/// The layout of a semi-planar image: the luma plane, then the plane of U and V side by side, as an NV12
+/// or a P010 texture of the frame size, both rounded up to even, has them. Rows of a multiple of 256
+/// bytes and planes of a multiple of 512, which is what a copy into a texture asks. A monochrome frame
+/// has the same two planes.
+fn semi_planar_layout(src: &HwFrameBuffer) -> OutputLayout {
+    let bpp = if src.hbd != 0 { 2 } else { 1 };
+    let width = (src.y_crop_width + 1) & !1;
+    let height = (src.y_crop_height + 1) & !1;
+    let stride = (width * bpp + 255) & !255;
+    let y_size = (stride * height + 511) & !511;
+    let uv_size = (stride * (height / 2) + 511) & !511;
+    OutputLayout {
+        bpp,
+        num_planes: 2,
+        y_stride: stride,
+        uv_stride: stride,
+        y_size,
+        uv_size,
+        size: y_size + uv_size,
+        y_texture_width: width,
+        uv_texture_width: width / 2,
+    }
+}
+
 /// What both calls need of the frame.
 ///
 /// # Safety
@@ -94,8 +140,9 @@ unsafe fn frame_layout(dec: *mut Av1Core, cm: *const AV1_COMMON) -> (bool, bool,
     unsafe {
         let src = &*(*(*dec).curr_frame_data).dst_frame_buffer;
         let is_monochrome = (*(*cm).cur_frame).buf.monochrome != 0;
-        let is_10x3 = (*dec).tryhdr10x3 != 0 && src.hbd != 0;
-        (is_monochrome, is_10x3, output_layout(src, is_monochrome, is_10x3))
+        let semi_planar = (*dec).output_kind != 0;
+        let is_10x3 = !semi_planar && (*dec).tryhdr10x3 != 0 && src.hbd != 0;
+        (is_monochrome, is_10x3, output_layout(src, is_monochrome, is_10x3, semi_planar))
     }
 }
 
@@ -122,7 +169,14 @@ pub(crate) unsafe fn output_image(
         let (_, is_10x3, layout) = frame_layout(dec, cm);
 
         let mut err = 1;
-        let fb_type = if td.is_hbd != 0 { if is_10x3 { fbt10x3 } else { fbt10bit } } else { fbt8bit };
+        let semi_planar = (*dec).output_kind != 0;
+        let fb_type = match (semi_planar, td.is_hbd != 0) {
+            (true, true) => fbtP010,
+            (true, false) => fbtNV12,
+            (false, true) if is_10x3 => fbt10x3,
+            (false, true) => fbt10bit,
+            (false, false) => fbt8bit,
+        };
         let perf_t = perf_ticks();
         if let Some(get_output_image) = (*dec).cb_get_output_image {
             err = get_output_image(
@@ -135,7 +189,36 @@ pub(crate) unsafe fn output_image(
             );
         }
         perf_add(dec, AV1_PERF_CPU_WAIT_OUTPUT, perf_t);
-        if err != 0 || ((*fb).dx12_buffer.is_null() && (*fb).dx12_texture[0].is_null()) { 2 } else { 1 }
+        if err != 0 || ((*fb).dx12_buffer.is_null() && (*fb).dx12_texture[0].is_null()) {
+            return 2;
+        }
+        if semi_planar && let Some(texture) = TextureRef::from_raw(&(*fb).dx12_texture[0]) {
+            // The texture has to be what the request named: the copy and the views are made for it.
+            let format = if td.is_hbd != 0 { SemiPlanar::P010 } else { SemiPlanar::Nv12 };
+            let info = texture.info();
+            let (width, height) = (layout.y_texture_width as u32, ((src.y_crop_height + 1) & !1) as u32);
+            if info.semi_planar != Some(format) || info.width != width || info.height != height {
+                log(
+                    true,
+                    &format!(
+                        "OUTPUT the image of a {}x{} frame has to be a {} texture of {width}x{height}; the \
+                         application gave {} of {}x{}",
+                        src.y_crop_width,
+                        src.y_crop_height,
+                        format.name(),
+                        info.semi_planar.map_or("another format", SemiPlanar::name),
+                        info.width,
+                        info.height
+                    ),
+                );
+                // The image goes back: the decoder took it and writes no frame into it.
+                if let Some(release) = (*dec).cb_release_image {
+                    release((*dec).image_alloc_priv, (*fb).priv_);
+                }
+                return 2;
+            }
+        }
+        1
     }
 }
 
@@ -169,6 +252,8 @@ pub(crate) unsafe fn copy_output(dec: *mut Av1Core, cm: *mut AV1_COMMON, fb: *co
         img.frame_number = src.frame_number;
         img.hbd = td.is_hbd;
         img.monochrome = c_int::from(is_monochrome);
+        let semi_planar = (*dec).output_kind != 0;
+        img.semi_planar = c_int::from(semi_planar);
         // What the application is told about the colour of the frame: the description of the sequence
         // as the entropy decoder read it, or as the host of rav1d's parser wrote it there, and the HDR
         // metadata that holds for the frame. Nothing here reads them.
@@ -186,7 +271,11 @@ pub(crate) unsafe fn copy_output(dec: *mut Av1Core, cm: *mut AV1_COMMON, fb: *co
         img.planes[0].offset = 0;
         img.planes[1].offset = y_size;
         img.planes[2].offset = y_size + uv_size;
-        if is_monochrome {
+        if semi_planar {
+            // Two planes, also for a monochrome frame, whose chroma plane is the middle value.
+            img.planes[2].stride = 0;
+            img.planes[2].offset = 0;
+        } else if is_monochrome {
             img.planes[1].offset = 0;
             img.planes[2].offset = 0;
         }
@@ -206,8 +295,12 @@ pub(crate) unsafe fn copy_output(dec: *mut Av1Core, cm: *mut AV1_COMMON, fb: *co
         }
         let dst_base_offset = dst.base_offset;
         let dst_planes = dst.planes;
+        if semi_planar {
+            copy_semi_planar(dec, &*cm, fb, &layout, do_filmgrain, film_grain_chroma);
+            return;
+        }
         if do_filmgrain {
-            filmgrain_run(dec, &*cm, c_int::from(film_grain_chroma));
+            filmgrain_run(dec, &*cm, c_int::from(film_grain_chroma), GrainTarget::Planes);
         }
 
         let commands = commands(dec);
@@ -271,6 +364,166 @@ pub(crate) unsafe fn copy_output(dec: *mut Av1Core, cm: *mut AV1_COMMON, fb: *co
     }
 }
 
+/// The semi-planar output of [`copy_output`]: the frame goes into the NV12 or P010 texture of the
+/// image, directly or through the back buffer (the module's text), and into its buffer if it has one.
+///
+/// # Safety
+/// As for [`copy_output`], which has set up the image and the planes of the back buffer.
+unsafe fn copy_semi_planar(
+    dec: *mut Av1Core,
+    cm: &AV1_COMMON,
+    fb: &av1_decoded_frame_buffer_t,
+    layout: &OutputLayout,
+    do_filmgrain: bool,
+    film_grain_chroma: bool,
+) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let td = &*(*dec).curr_frame_data;
+        let src = &*td.dst_frame_buffer;
+        let img: &HwOutputImage = &*(*(*cm).cur_frame).buf.hw_show_image;
+        let is_monochrome = img.monochrome != 0;
+        let hbd = src.hbd != 0;
+        let format = if hbd { SemiPlanar::P010 } else { SemiPlanar::Nv12 };
+        let dst_base_offset = (*dec).back_buffer1.base_offset;
+        let dst_planes = (*dec).back_buffer1.planes;
+        let commands = commands(dec);
+        let frame_buffers = buffer((*dec).frame_buffer_pool);
+        let lib = (*dec).shader_lib;
+
+        // Direct: a texture alone, which shaders may write on this device.
+        let texture = TextureRef::from_raw(&fb.dx12_texture[0]);
+        let views = wrapped_ref::<_, PlaneViews>(&(*dec).plane_views);
+        let device = com_ref::<_, ID3D12Device>(&(*dec).compute.device).map(Device::new);
+        let direct = match (texture, views, device) {
+            (Some(texture), Some(views), Some(device))
+                if fb.dx12_buffer.is_null()
+                    && texture.info().shader_writes
+                    && (*dec).semi_planar_support[usize::from(hbd)].shader_writes =>
+            {
+                let pair = (*dec).plane_view_next;
+                (*dec).plane_view_next = (pair + 1) % PlaneViews::PAIRS;
+                device.write_plane_views(views, pair, texture, format);
+                Some((texture, views, device, pair))
+            }
+            _ => None,
+        };
+        let path = if direct.is_some() { 1 } else { 2 };
+        if (*dec).semi_planar_path != path {
+            (*dec).semi_planar_path = path;
+            log(
+                false,
+                &format!(
+                    "OUTPUT {} {}",
+                    format.name(),
+                    if direct.is_some() {
+                        "direct: the output pass writes the planes of the texture"
+                    } else if texture.is_none() {
+                        "staged: the output pass writes the back buffer, one copy into the buffer of the image"
+                    } else {
+                        "staged: the output pass writes the back buffer, one copy a plane into the texture"
+                    }
+                ),
+            );
+        }
+
+        if let Some((texture, ..)) = direct {
+            commands.transition_texture(texture, TextureState::Common, TextureState::ReadWrite);
+        }
+        if do_filmgrain {
+            let target = match direct {
+                Some((_, _, _, pair)) => GrainTarget::SemiPlanarTexture(pair),
+                None => GrainTarget::SemiPlanar,
+            };
+            filmgrain_run(dec, cm, c_int::from(film_grain_chroma), target);
+        }
+
+        // The planes film grain did not write: luma without grain; chroma without grain on it, and the
+        // chroma plane of a frame that has none.
+        let copy_luma = !do_filmgrain;
+        let copy_chroma = is_monochrome || !do_filmgrain || !film_grain_chroma;
+        if copy_luma || copy_chroma {
+            let shader = pipeline(if direct.is_some() {
+                &raw const (*lib).shader_copy_plane_sp_tex
+            } else {
+                &raw const (*lib).shader_copy_plane_sp
+            });
+            commands.set_layout(shader.layout());
+            commands.set_pipeline(shader);
+            commands.bind_write(0, frame_buffers.location());
+            if let Some((_, views, device, pair)) = direct {
+                commands.bind_write_planes(2, device, views, pair);
+            }
+            let (width, height) = (src.y_crop_width as u32, src.y_crop_height as u32);
+            let dispatch = |mode: u32, groups: u32, rows: u32, src_plane: usize, dst_plane: usize| {
+                // wi_count, groups, mode, hbd, src_offset, src_offset_v, src_stride, dst_offset, dst_stride,
+                // width, height
+                let inline = [
+                    groups * rows,
+                    groups,
+                    mode,
+                    u32::from(hbd),
+                    src.planes[src_plane].offset as u32,
+                    src.planes[2].offset as u32,
+                    src.planes[src_plane].stride as u32,
+                    dst_planes[dst_plane].offset as u32,
+                    dst_planes[dst_plane].stride as u32,
+                    width,
+                    height,
+                ];
+                commands.set_inline_constants(1, &inline, 0);
+                commands.dispatch((inline[0] + 63) >> 6, 1, 1);
+            };
+            if copy_luma {
+                dispatch(0, width.div_ceil(4), height, 0, 0);
+            }
+            if copy_chroma {
+                let (width, height) = (width.div_ceil(2), height.div_ceil(2));
+                dispatch(if is_monochrome { 2 } else { 1 }, width.div_ceil(4), height, 1, 1);
+            }
+            commands.write_barrier(frame_buffers);
+            perf_gpu_mark(dec, AV1_PERF_GPU_COPY_PLANE);
+        }
+
+        if let Some((texture, ..)) = direct {
+            commands.transition_texture(texture, TextureState::ReadWrite, TextureState::Common);
+            perf_gpu_mark(dec, AV1_PERF_GPU_OUTPUT_COPY);
+            return;
+        }
+
+        commands.transition(frame_buffers, BufferState::ReadWrite, BufferState::CopySource);
+        if let Some(output) = BufferRef::from_raw(&fb.dx12_buffer) {
+            commands.copy_buffer(output, 0, frame_buffers, dst_base_offset as u64, layout.size as u64);
+        }
+        if let Some(texture) = texture {
+            commands.transition_texture(texture, TextureState::Common, TextureState::CopyDest);
+            let height = ((src.y_crop_height + 1) & !1) as u32;
+            let planes = [
+                (if hbd { TextureFormat::P010Luma } else { TextureFormat::Nv12Luma }, layout.y_texture_width, height),
+                (
+                    if hbd { TextureFormat::P010Chroma } else { TextureFormat::Nv12Chroma },
+                    layout.uv_texture_width,
+                    height / 2,
+                ),
+            ];
+            for (plane, (format, width, height)) in planes.into_iter().enumerate() {
+                let source = TextureSource {
+                    offset: dst_planes[plane].offset as u64,
+                    format,
+                    width: width as u32,
+                    height,
+                    row_pitch: dst_planes[plane].stride as u32,
+                };
+                commands.copy_buffer_to_texture(texture, frame_buffers, &source);
+            }
+            commands.transition_texture(texture, TextureState::CopyDest, TextureState::Common);
+        }
+        commands.transition(frame_buffers, BufferState::CopySource, BufferState::ReadWrite);
+        perf_gpu_mark(dec, AV1_PERF_GPU_OUTPUT_COPY);
+        stage_dump_output(dec, c"output", img, layout.size as usize);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,6 +561,28 @@ mod tests {
     }
 
     #[test]
+    fn semi_planar_layout_is_that_of_the_texture() {
+        // SAFETY: a frame buffer is numbers and two pointers the layout does not read.
+        let mut src: HwFrameBuffer = unsafe { std::mem::zeroed() };
+        for (width, height, hbd, stride, y_size, uv_size) in [
+            (352, 288, 0, 512, 147456, 73728),
+            (3840, 2160, 1, 7680, 16588800, 8294400),
+            // Odd sizes: the planes of a 226x226 and of a 66x68 texture.
+            (225, 225, 0, 256, 57856, 29184),
+            (65, 67, 1, 256, 17408, 8704),
+        ] {
+            src.hbd = hbd;
+            src.y_crop_width = width;
+            src.y_crop_height = height;
+            let layout = output_layout(&src, false, false, true);
+            assert_eq!((layout.y_stride, layout.uv_stride), (stride, stride));
+            assert_eq!((layout.y_size, layout.uv_size, layout.size), (y_size, uv_size, y_size + uv_size));
+            assert_eq!(layout.y_texture_width, (width + 1) & !1);
+            assert_eq!(layout.uv_texture_width * 2, layout.y_texture_width);
+        }
+    }
+
+    #[test]
     fn output_layout_as_in_cpp() {
         for (width, height) in [(352, 288), (1920, 1080), (3840, 2160), (226, 226), (16, 16), (1182, 665)] {
             for hbd in [0, 1] {
@@ -321,7 +596,7 @@ mod tests {
                 for is_monochrome in [false, true] {
                     for is_10x3 in [false, hbd != 0] {
                         assert_eq!(
-                            output_layout(&src, is_monochrome, is_10x3),
+                            output_layout(&src, is_monochrome, is_10x3, false),
                             layout_cpp(&src, is_monochrome, is_10x3)
                         );
                     }

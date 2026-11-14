@@ -22,7 +22,9 @@
 //!   the buffers ([`BufferLocation`]: a place in a buffer) and constants at the binding slots of the
 //!   layout, dispatches, barriers between dispatches that write and read the same buffer, state
 //!   transitions ([`BufferState`]) and copies, between buffers and from a buffer into a texture of the
-//!   application ([`TextureRef`], [`TextureSource`]).
+//!   application ([`TextureRef`], [`TextureSource`]). For the semi-planar output (docs/output.md) also the
+//!   planes of a texture of the application as what a shader writes ([`PlaneViews`],
+//!   [`Commands::bind_write_planes`]) and the states of that texture ([`TextureState`]).
 //!
 //! A binding slot is an index into the bindings of a layout in the order of [`LayoutDesc`]: the buffers
 //! the shader reads, the buffers it writes, the constant blocks, then the inline constants. D3D12 has
@@ -37,7 +39,8 @@ pub(crate) mod d3d12;
 
 pub use d3d12::{
     BufferLocation, BufferRef, CommandAllocator, CommandList, Commands, Device, Event, Fence, Layout, LayoutRef,
-    OwnedDevice, PipelineRef, Queue, Readback, TextureRef, TimestampQueries, Upload, create_hardware_device,
+    OwnedDevice, PipelineRef, PlaneViews, Queue, Readback, TextureRef, TimestampQueries, Upload,
+    create_hardware_device,
 };
 
 /// Who reads and writes a buffer. The numbers are the `MemoryType` of the C++ host.
@@ -90,6 +93,9 @@ pub struct LayoutDesc {
     pub constant_blocks: u32,
     /// 32-bit constants set inline, in the constant block behind the others; 0: none.
     pub inline_constants: u32,
+    /// Planes of a texture the shader writes, at the registers behind the write buffers (`u<write
+    /// buffers>..`), as one binding behind all the others ([`Commands::bind_write_planes`]); 0: none.
+    pub write_planes: u32,
 }
 
 /// The state a buffer is in between commands, for the transitions around copies.
@@ -112,6 +118,62 @@ pub enum TextureFormat {
     R16,
     /// Three samples of 10 bits in 32 bits.
     Rgb10A2,
+    /// The luma plane of an NV12 texture: one byte a sample.
+    Nv12Luma,
+    /// The chroma plane of an NV12 texture: U and V, one byte each.
+    Nv12Chroma,
+    /// The luma plane of a P010 texture: two bytes a sample.
+    P010Luma,
+    /// The chroma plane of a P010 texture: U and V, two bytes each.
+    P010Chroma,
+}
+
+/// A texture with a luma plane and a chroma plane of U and V side by side.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SemiPlanar {
+    /// 8 bits a sample.
+    Nv12,
+    /// 16 bits a sample, of which a 10-bit frame fills the high 10.
+    P010,
+}
+
+impl SemiPlanar {
+    pub fn name(self) -> &'static str {
+        match self {
+            SemiPlanar::Nv12 => "NV12",
+            SemiPlanar::P010 => "P010",
+        }
+    }
+}
+
+/// What a device does with the textures of a [`SemiPlanar`] format.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SemiPlanarSupport {
+    /// The device has 2D textures of the format.
+    pub texture: bool,
+    /// Shaders can write the planes of such a texture.
+    pub shader_writes: bool,
+}
+
+/// What a texture of the application is, as far as the output pass asks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TextureInfo {
+    /// `None` for any other format.
+    pub semi_planar: Option<SemiPlanar>,
+    pub width: u32,
+    pub height: u32,
+    /// The texture was created for shaders to write it.
+    pub shader_writes: bool,
+}
+
+/// The state a texture of the application is in between commands.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TextureState {
+    /// The state a texture has between its uses on different queues and devices.
+    Common,
+    /// Shaders write it.
+    ReadWrite,
+    CopyDest,
 }
 
 /// A plane of an image in a buffer, as the source of a copy into a texture.
@@ -119,6 +181,7 @@ pub enum TextureFormat {
 pub struct TextureSource {
     /// Where the plane starts in the buffer, in bytes.
     pub offset: u64,
+    /// The format of the plane; it also says which plane of a semi-planar texture is written.
     pub format: TextureFormat,
     /// Texels of a row and rows.
     pub width: u32,

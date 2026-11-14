@@ -35,7 +35,7 @@ use super::blocks::WaveEdges;
 use super::memory::Allocator;
 use super::pool::{KINDS, Pools};
 use super::thread::{FramePool, Queue};
-use crate::gpu::{CommandAllocator, CommandList, Fence, Readback, TimestampQueries};
+use crate::gpu::{CommandAllocator, CommandList, Fence, PlaneViews, Readback, TimestampQueries};
 use crate::sys::parser::{
     HwFrameBuffer, HwOutputImage, aom_notify_frame_ready_cb_fn_t, av1_get_decoded_buffer_cb_fn_t,
     av1_perf_inter_blocks, av1_perf_inter_detail, av1_perf_inter_work, av1_release_decoded_buffer_cb_fn_t,
@@ -122,6 +122,11 @@ pub struct compute_shader_lib {
     pub shader_filmgrain_filter: ComputeShader,
     pub shader_copy_plane: ComputeShader,
     pub shader_copy_plane_10bit10x3: ComputeShader,
+    // The semi-planar output (`output.rs`): into the staging area, and into the planes of a texture.
+    pub shader_copy_plane_sp: ComputeShader,
+    pub shader_copy_plane_sp_tex: ComputeShader,
+    pub shader_filmgrain_filter_sp: ComputeShader,
+    pub shader_filmgrain_filter_sp_tex: ComputeShader,
     pub shader_fill_buffer: ComputeShader,
     pub shader_gen_pred_blocks: ComputeShader,
     pub shader_gen_pred_blocks_fast: ComputeShader,
@@ -146,6 +151,9 @@ pub struct compute_shader_lib {
     pub sig_cdef_filter: Option<ID3D12RootSignature>,
     pub sig_film_grain: Option<ID3D12RootSignature>,
     pub sig_upscale: Option<ID3D12RootSignature>,
+    pub sig_copy_plane_sp: Option<ID3D12RootSignature>,
+    pub sig_copy_plane_sp_tex: Option<ID3D12RootSignature>,
+    pub sig_film_grain_tex: Option<ID3D12RootSignature>,
     pub compliled_: c_int,
     pub threads: c_int,
     pub create_shader_errors: c_int,
@@ -159,6 +167,8 @@ pub struct ComputeCommandBuffer {
     pub cb_alloc: *mut GpuBufferObject,
     pub cb_ptr: usize,
     pub fence_value: u32,
+    /// The value the decoder's output fence has behind the command list of the frame.
+    pub output_fence_value: u64,
 }
 
 #[repr(C)]
@@ -452,6 +462,19 @@ pub struct Av1Core {
     /// The completion thread, while it runs.
     pub gpu_thread: Option<JoinHandle<()>>,
     pub tryhdr10x3: c_int,
+    /// `aom_codec_dec_cfg_t::output_kind`: 1 for the semi-planar output (`output.rs`).
+    pub output_kind: c_int,
+    /// What the device does with NV12 and with P010 textures (semi-planar output only).
+    pub semi_planar_support: [crate::gpu::SemiPlanarSupport; 2],
+    /// The views of the planes of the application's textures, and the pair the next frame takes.
+    pub plane_views: Option<PlaneViews>,
+    pub plane_view_next: u32,
+    /// The path of the last semi-planar frame (0 none yet, 1 direct, 2 staged), for one log line a change.
+    pub semi_planar_path: c_int,
+    /// The output fence: signalled behind every command list, so its value says which frames are
+    /// written. One for the decoder, where the slots have one each.
+    pub output_fence: Option<Fence>,
+    pub output_fence_value: u64,
     pub perf_cur: av1_perf_accum,
     pub perf_gpu_freq: u64,
     pub perf_gpu_last_end: u64,

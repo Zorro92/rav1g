@@ -56,7 +56,13 @@ typedef enum
     fbtNone = -1,
     fbt8bit = 0,
     fbt10bit,
-    fbt10x3
+    fbt10x3,
+    /* The semi-planar output (aom_codec_dec_cfg_t::output_kind): a luma plane
+     * and one chroma plane with U and V side by side, as an NV12 texture has
+     * them (8-bit frames) and as a P010 texture has them (10-bit frames, the
+     * 10 bits in the high bits of 16). dx12_texture[0] is that texture. */
+    fbtNV12,
+    fbtP010
 } frame_buffer_type;
 
 /*!\brief get frame buffer callback prototype

@@ -103,7 +103,28 @@ std::shared_ptr<OutBufferWrapper> OutBufferStorage::GetFreeBuffer(uint32_t width
   }
   queue_free_.DoForAll(1, [&](OutBuffer* buffer) {
     if (flags & CBUFTEXTURE) {
-      if (buffer->renderWidth != width || buffer->renderHeight != height || buffer->fb_type != fb_type) {
+      const bool semi_planar = fb_type == fbtNV12 || fb_type == fbtP010;
+      if (semi_planar &&
+          (buffer->renderWidth != width || buffer->renderHeight != height || buffer->fb_type != fb_type)) {
+        // One texture for the image, made by the player's semi-planar output.
+        for (int i = 0; i < 3; i++) buffer->d3d12textures[i].Reset();
+        buffer->d3d11texture.Reset();
+        uint64_t image_bytes = 0;
+        hr = semi_planar_ ? semi_planar_->Create(buffer, width, height, fb_type, &image_bytes) : E_NOTIMPL;
+        if (FAILED(hr)) {
+          XB_LOGE << "MEMORY FAILED output image texture (" << (fb_type == fbtP010 ? "P010" : "NV12") << "): " << width
+                  << "x" << height << ", hr " << HresultText(hr) << "; allocated before it in this pool of "
+                  << queue_size_ << " images: textures of " << texture_images << " images, "
+                  << MibText(texture_bytes);
+          has_errors = 1;
+          return 0;
+        }
+        texture_bytes += image_bytes;
+        ++texture_images;
+        buffer->renderWidth = width;
+        buffer->renderHeight = height;
+        buffer->fb_type = fb_type;
+      } else if (buffer->renderWidth != width || buffer->renderHeight != height || buffer->fb_type != fb_type) {
         for (int i = 0; i < 3; i++) {
           const int subsampling = i > 0;
           const int _width = (fb_type == fbt10x3) ? (((width + subsampling) >> subsampling) + 2) / 3
@@ -198,7 +219,12 @@ std::shared_ptr<OutBufferWrapper> OutBufferStorage::GetFreeBuffer(uint32_t width
   texture_bytes_total_ += texture_bytes;
   if (texture_images || readback_buffers)
     XB_LOGI << "MEMORY output pool: allocated for " << width << "x" << height << " "
-            << (fb_type == fbt8bit ? "8-bit" : (fb_type == fbt10bit ? "10-bit" : "10-bit packed 10:10:10:2"))
+            << (fb_type == fbt8bit
+                    ? "8-bit"
+                    : (fb_type == fbt10bit
+                           ? "10-bit"
+                           : (fb_type == fbtNV12 ? "8-bit NV12"
+                                                 : (fb_type == fbtP010 ? "10-bit P010" : "10-bit packed 10:10:10:2"))))
             << " frames: textures of " << texture_images << " images, " << MibText(texture_bytes) << "; "
             << readback_buffers << " readback buffers, " << MibText(readback_bytes) << "; pool of " << queue_size_
             << " images";

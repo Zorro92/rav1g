@@ -12,13 +12,14 @@ use std::ffi::{c_int, c_void};
 use std::ops::BitOr;
 use std::sync::Arc;
 
+use windows::Win32::Graphics::Direct3D12::ID3D12Fence;
 use windows::core::Interface;
 
 use crate::color::{color_of_image, hdr_of_image};
 use crate::device::Device;
 use crate::error::{Error, ErrorCode, text};
 use crate::host::{self, decoder_own_bytes, frame_fence};
-use crate::output::{Frame, ImageFormat, ImageRequest, Output, OutputImage};
+use crate::output::{Frame, ImageFormat, ImageRequest, Output, OutputImage, OutputKind};
 use crate::sys;
 
 /// The memory reductions of a decoder, as a set ([`Settings::low_memory`]).
@@ -109,6 +110,13 @@ pub struct Settings {
     pub inter_fast: bool,
     /// 10-bit frames are put out with three samples packed into 32 bits ([`ImageFormat::Packed10x3`]).
     pub packed_10x3: bool,
+    /// What the output images are: the planes of the frame in a buffer and in one texture each, or the
+    /// semi-planar output, one NV12 or P010 texture that the output pass writes (docs/output.md).
+    pub output_kind: OutputKind,
+    /// The output fence ([`Decoder::output_fence`]) is created shareable (`D3D12_FENCE_FLAG_SHARED`):
+    /// an application can make a handle of it (`ID3D12Device::CreateSharedHandle`) and open it on another
+    /// device, a D3D11 device among them (`ID3D11Device5::OpenSharedFence`).
+    pub shared_fence: bool,
     /// The operating point of a stream with layers.
     pub operating_point: u32,
     /// The frame of every spatial layer of a temporal unit is output, instead of the highest one.
@@ -148,6 +156,8 @@ impl Default for Settings {
             intra_v2: false,
             inter_fast: false,
             packed_10x3: false,
+            output_kind: OutputKind::Planes,
+            shared_fence: false,
             operating_point: 0,
             output_all_layers: false,
             parser_options: ParserOptions::default(),
@@ -197,6 +207,8 @@ impl Settings {
         cfg.threads = self.threads;
         cfg.host_size = 0;
         cfg.tryHDR10x3 = c_int::from(self.packed_10x3);
+        cfg.output_kind = self.output_kind as c_int;
+        cfg.shared_fence = c_int::from(self.shared_fence);
         cfg.frame_slots = self.frame_slots as c_int;
         cfg.frames_in_parse = self.frames_in_parse as c_int;
         cfg.intra_v2 = c_int::from(self.intra_v2);
@@ -251,6 +263,8 @@ unsafe extern "C" fn get_image(
     let format = match fb_type {
         sys::fbt10bit => ImageFormat::Bits10,
         sys::fbt10x3 => ImageFormat::Packed10x3,
+        sys::fbtNV12 => ImageFormat::Nv12,
+        sys::fbtP010 => ImageFormat::P010,
         _ => ImageFormat::Bits8,
     };
     let request = ImageRequest { buffer_size, width: u32::from(width), height: u32::from(height), format };
@@ -308,7 +322,14 @@ unsafe extern "C" fn frame_ready(context: *mut c_void, image: *mut c_void) -> c_
         height: img.d_h,
         bit_depth: img.bit_depth,
         monochrome: img.monochrome != 0,
-        packed_10x3: img.is_hdr10x3 != 0 && img.bit_depth > 8,
+        packed_10x3: img.semi_planar == 0 && img.is_hdr10x3 != 0 && img.bit_depth > 8,
+        format: match (img.semi_planar != 0, img.bit_depth > 8) {
+            (true, true) => ImageFormat::P010,
+            (true, false) => ImageFormat::Nv12,
+            (false, true) if img.is_hdr10x3 != 0 => ImageFormat::Packed10x3,
+            (false, true) => ImageFormat::Bits10,
+            (false, false) => ImageFormat::Bits8,
+        },
         user_data: img.user_priv as usize as u64,
         color: color_of_image(img),
         mastering_display,
@@ -485,6 +506,14 @@ impl Decoder {
             host::rav1g_rav1d_drain(self.core, &mut detail)
         };
         if code == sys::AOM_CODEC_OK { Ok(()) } else { Err(failed(code, detail)) }
+    }
+
+    /// The output fence of the decoder: the queue signals it behind every command list of the decoder,
+    /// and [`Frame::d3d12_fence`] has the value it has when a frame is written. One fence for as long as
+    /// the decoder lives; shareable with [`Settings::shared_fence`].
+    pub fn output_fence(&self) -> Option<ID3D12Fence> {
+        // SAFETY: the decoder; the fence lives as long as it.
+        unsafe { (*self.core).output_fence.as_ref() }.map(|fence| fence.d3d12().clone())
     }
 
     /// What the decoder was created with: the threads, the frames in parse and the slots, with the

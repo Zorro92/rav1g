@@ -15,6 +15,7 @@
  */
 
 #include "decoder.h"
+#include "semi_planar.h"
 #include "decoder_creator.h"
 #include <direct.h>
 
@@ -362,11 +363,19 @@ int AV1Decoder::DecodeLoop() {
 int BufferLocker::GetBufferInt(const Rav1gImageRequest* request, Rav1gImage* image) {
   uint32_t flags = params_->needReadBack_ ? (params_->noninterop_ ? CBUFREADBACK : CBUFALL)
                                           : CBUFTEXTURE;
+  // The semi-planar output: the image is its texture. A run that reads the frames has a readback buffer
+  // next to it, which the texture is copied into (not with -interop: D3D11 reads the texture there).
+  if (params_->semi_planar_) flags = (params_->needReadBack_ && !params_->interop_) ? CBUFALL : CBUFTEXTURE;
   // The numbers of Rav1gImageFormat are those of frame_buffer_type.
   std::shared_ptr<OutBufferWrapper> buffer = buffers_pool_->GetFreeBuffer(
       request->width, request->height, (frame_buffer_type)request->format, request->buffer_size, flags);
   if (!buffer) return -1;
   OutBuffer* buf = buffer->Buffer();
+  if (params_->semi_planar_) {
+    image->d3d12_textures[0] = buf->d3d12textures[0].Get();
+    image->token = buf;
+    return 0;
+  }
   image->d3d12_buffer = buf->d3d12buffer.Get();
   image->memory = (uint8_t*)buf->pMem;
   image->buffer_size = buf->buffer_size;
@@ -477,6 +486,7 @@ int AV1Decoder::DecodeOne() {
                        created_interfast_ != (params_.interfast_ || params_.interfastlists_) ||
                        created_parser_options_ != params_.parser_options_ ||
                        created_lowmem_ != params_.lowmem_parts_ || created_packed_10x3_ != params_.hdr10x3_ ||
+                       created_semi_planar_ != (params_.semi_planar_ | (params_.interop_ ? 16 : 0)) ||
                        created_noguard_ != params_.noguard_ || created_headroom_ != params_.headroom_mib_ ||
                        created_gpuclear_ != (params_.clears_ == PLAYER_CLEARS_GPU));
   if (initialized_ && (need_reinit_ || other_decoder)) DestroyDecoder();
@@ -523,6 +533,10 @@ int AV1Decoder::DecodeOne() {
       cfg.output.frame = NotifyFrameReady;
       cfg.output.end_of_frames = NotifyEndOfFrames;
       cfg.packed_10x3 = params_.hdr10x3_ != 0;
+      // -output p010, -interop: one NV12 or P010 texture an image; with -interop the output fence is
+      // one a D3D11 device can open.
+      if (params_.semi_planar_) cfg.output_kind = RAV1G_OUTPUT_SEMI_PLANAR;
+      cfg.shared_fence = params_.interop_;
       // -slots: each slot has host memory and buffers of its own. 0 with -parseframes and no -slots: the
       // library gives the decoder the slots of its frames in parse.
       cfg.frame_slots = params_.slots_;
@@ -600,6 +614,17 @@ int AV1Decoder::DecodeOne() {
       std::shared_ptr<OutBufferStorage> next_storage;
       if (!new_sequence)
         next_storage = std::make_shared<OutBufferStorage>(params_.player_queue_size_, dx_desources_.dx12_device.Get());
+      if (!new_sequence) {
+        semi_planar_.reset();
+        if (params_.semi_planar_) {
+          // The textures of the pool, and the way back from them, on the queue the decoder submits to.
+          semi_planar_ = std::make_shared<SemiPlanarOutput>(
+              dx_desources_.dx12_device.Get(),
+              (ID3D12CommandQueue*)rav1g_device_d3d12_queue(dx_desources_.decoder_device), params_.semi_planar_,
+              params_.interop_);
+          next_storage->SetSemiPlanarTextures(semi_planar_);
+        }
+      }
       LogAppMemory("before the decoder", false);
       const bool init_failed = rav1g_decoder_create(dx_desources_.decoder_device, &cfg, &decoder_) != RAV1G_STATUS_OK;
       // The memory an earlier decoder left is this decoder's now. Only when it exists: a creation that
@@ -626,6 +651,9 @@ int AV1Decoder::DecodeOne() {
         LogAppMemory("after the failed decoder creation", true);
         throw 2;
       }
+      // -interop: the output fence of this decoder, opened in D3D11. A failure is in the log and fails
+      // every frame of the task.
+      if (semi_planar_) semi_planar_->SetFence((ID3D12Fence*)rav1g_decoder_output_fence(decoder_));
       created_device_size_ = memory.device_size;
       AppMemoryModelCreated(memory.device_size + memory.host_size);
       LogAppMemory("after the decoder", false);
@@ -643,6 +671,7 @@ int AV1Decoder::DecodeOne() {
       created_parser_options_ = params_.parser_options_;
       created_lowmem_ = params_.lowmem_parts_;
       created_packed_10x3_ = params_.hdr10x3_;
+      created_semi_planar_ = params_.semi_planar_ | (params_.interop_ ? 16 : 0);
       created_noguard_ = params_.noguard_;
       created_headroom_ = params_.headroom_mib_;
       created_gpuclear_ = params_.clears_ == PLAYER_CLEARS_GPU;
@@ -804,6 +833,7 @@ int AV1Decoder::DecodeOne() {
   }
 
   output_queue_ = std::unique_ptr<BufferLocker>(new BufferLocker(&params_, cur_frame, storage_));
+  output_queue_->SetSemiPlanar(semi_planar_);
   if (display_) display_->AddSource(this);
 
   int frame_in = 0;
@@ -969,6 +999,7 @@ int AV1Decoder::DecodeOne() {
     // released the displayed/last frame. A destroyed decoder no longer needs these.
     output_queue_.reset();
     storage_.reset();
+    semi_planar_.reset();
     LogMemory("after the destroyed task's output pool was released");
   }
   if (*stop_ == taskNext) *stop_ = TaskNone;
@@ -1075,6 +1106,22 @@ int BufferLocker::Push(const Rav1gFrame* img) {
                      img->has_content_light ? &img->content_light : NULL, colour, sizeof(colour));
     XB_LOGI << "COLOUR frame " << (pushed_.load() - 1) << ": " << colour;
   }
+  // The semi-planar output (-output p010, -interop): with -interop the D3D11 context waits for the frame
+  // on the decoder's fence; a run that reads the frames gets them back from their texture as the three
+  // planes the checks below read.
+  Rav1gFrame planar;
+  if (img && semi_planar_) {
+    const bool read = !params_->target_file_.empty() || params_->md5_frame_check_ || params_->md5_ || md5_saver_;
+    std::shared_ptr<OutBufferWrapper> held = buffers_pool_->FindRentedBuffer(img->image.token);
+    if (!held || !semi_planar_->Frame(img, held->Buffer(), read, &planar)) {
+      // The frame cannot be checked: the task fails as one with a wrong frame does.
+      ++semi_planar_errors_;
+      buffers_pool_->ReleaseRentedBuffer(img->image.token);
+      frame_no_++;
+      return 0;
+    }
+    if (read) img = &planar;
+  }
   if (!params_->target_file_.empty() || params_->md5_frame_check_ || params_->md5_ || md5_saver_) {
     if (!params_->target_file_.empty() && img && params_->save_wrong_yuv_.empty()) {
       SaveToFile(img, false);
@@ -1128,6 +1175,13 @@ int BufferLocker::Push(const Rav1gFrame* img) {
   buffer->SetShown(0);
   queue_.push(buffer);
   return 0;
+}
+
+void BufferLocker::ReportSemiPlanar() {
+  if (!semi_planar_) return;
+  semi_planar_->Report();
+  if (semi_planar_errors_)
+    XB_LOGE << "OUTPUT semi-planar: " << semi_planar_errors_ << " frames could not be waited for or read back";
 }
 
 // The colour of the frame is not that of the frame before it (or there was none); keeps it.

@@ -60,7 +60,8 @@ HDR10 = ('COLOUR frame 0: primaries 9 (BT.2020) transfer 16 (PQ) matrix 9 (BT.20
 NO_COLOUR = ('COLOUR frame 0: primaries 2 (unspecified) transfer 2 (unspecified) matrix 2 (unspecified) range limited '
              'chroma pos 0 (unknown), no colour description; no MDCV; no CLL')
 ENDED = 'PLAYERSMOKE the player ended its launch'
-SHOWN = re.compile(r'LIBRARY |MD5 |ERROR|PLAYERSMOKE|Frame slots|Frames in parse|Clears: |Bye|No args|COLOUR ')
+SHOWN = re.compile(r'LIBRARY |MD5 |ERROR|PLAYERSMOKE|Frame slots|Frames in parse|Clears: |Bye|No args|COLOUR '
+                   r'|INTEROP |OUTPUT ')
 
 
 def launch(tool, tool_args, root, log, timeout):
@@ -89,7 +90,16 @@ def main():
     parser.add_argument('--streams', required=True, help='the directory of the conformance streams')
     parser.add_argument('--out', required=True, help='the logs')
     parser.add_argument('--title', default='the Rust library')
+    parser.add_argument('--semi-planar', choices=['p010', 'p010-copy', 'interop'], default='',
+                        help='the semi-planar output (docs/output.md): every task with -output p010, with '
+                        '-output p010-copy, or with -interop, whose frames a D3D11 device waits for on the '
+                        'decoder\'s shared fence and reads from its own texture. The md5 check is the same. '
+                        'With interop on a device that cannot share a texture or a fence between D3D11 and '
+                        'D3D12, the check says so and does not fail')
     args = parser.parse_args()
+    if args.semi_planar:
+        flag = '-interop' if args.semi_planar == 'interop' else '-output ' + args.semi_planar
+        args.player_args = (args.player_args + ' ' + flag).strip()
     os.makedirs(args.out, exist_ok=True)
     tool_args = args.tool_args.split()
     problems = []
@@ -107,6 +117,24 @@ def main():
         shutil.rmtree(task_dir, ignore_errors=True)
     if code != 0 or ENDED not in text:
         problems.append('exit code %d: the player did not end its launch' % code)
+    if args.semi_planar == 'interop' and 'INTEROP is OK' not in text:
+        # A device that cannot do it says at which step: the texture of D3D11, its handle, its opening in
+        # D3D12, the fence. That is a finding about the device, not about the decoder.
+        steps = [line[line.index('INTEROP FAILED'):] for line in text.split('\n') if 'INTEROP FAILED: ' in line]
+        if steps and ENDED in text:
+            summary = 'NOT POSSIBLE on the device of this run: %s' % steps[0]
+            print('player_smoke.py: -interop: %s' % summary)
+            if os.environ.get('GITHUB_STEP_SUMMARY'):
+                with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
+                    f.write('## Test player decoder code, -interop, on %s\n\n- %s\n' % (args.title, summary))
+            return 0
+    if args.semi_planar:
+        # Every task says what its images were and how many of its frames came back from their texture.
+        what = 'INTEROP is OK' if args.semi_planar == 'interop' else 'OUTPUT semi-planar result: '
+        if text.count(what) < len(TASKS):
+            problems.append('%d of %d tasks of the player ended with "%s"' % (text.count(what), len(TASKS), what))
+        if re.search(r'result: .*; [1-9][0-9]* failed', text):
+            problems.append('frames of the semi-planar output could not be waited for or read back')
     library = re.search(r'LIBRARY (rav1g .*)', text)
     if not library or 'the Rust host' not in library.group(1):
         problems.append('the log has no LIBRARY line of the Rust library')

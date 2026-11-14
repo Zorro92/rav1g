@@ -69,6 +69,7 @@
     <ClCompile Include="..\player_common\cmd_parser.cpp" />
     <ClCompile Include="..\player_common\decoder.cpp" />
     <ClCompile Include="..\player_common\decoder_creator.cpp" />
+    <ClCompile Include="..\player_common\semi_planar.cpp" />
     <ClCompile Include="..\sm6test\sm6test.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -86,6 +87,7 @@
     <ClInclude Include="..\player_common\cmd_parser.h" />
     <ClInclude Include="..\player_common\decoder.h" />
     <ClInclude Include="..\player_common\decoder_creator.h" />
+    <ClInclude Include="..\player_common\semi_planar.h" />
     <ClInclude Include="..\sm6test\sm6test.h" />
     <ClInclude Include="..\sm6test\sm6test_checks.h" />
   </ItemGroup>

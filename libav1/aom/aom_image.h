@@ -211,6 +211,7 @@ typedef struct aom_image {
   void *fb_priv; /**< Frame buffer data associated with the image. */
   void *fb2_priv; /**< external frame buffer data associated with the image. */
   int is_hdr10x3; /**< 1010102 packed format (for hdr only). */
+  int semi_planar; /**< NV12 or P010: planes[1] has U and V side by side. */
   /*!\brief The sequence header of the frame has a colour description: cp, tc
    * and mc are coded, and not the "unspecified" of a header without one. */
   int color_description_present;

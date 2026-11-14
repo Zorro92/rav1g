@@ -17,12 +17,13 @@ use std::time::Instant;
 
 use rav1g::StreamInfo;
 use rav1g::switches::{self, Clears, PerfFrame, Poison};
+use windows::Win32::Graphics::Direct3D12::ID3D12Fence;
 
 use crate::args::{self, EXIT_ERROR, EXIT_MISMATCH, EXIT_PASS, Task};
 use crate::device::{Device, hex32};
 use crate::library::{Choices, Colour, Library, Picture, Sink, Spec, TaskDecoder};
 use crate::md5::Md5;
-use crate::pool::{OutputPool, Rented};
+use crate::pool::{OutputPool, Rented, Request};
 use crate::say;
 use crate::shim;
 
@@ -45,6 +46,8 @@ struct State {
     /// The colour of the last output frame; `None` in front of the first frame of a decoder.
     colour: Option<Colour>,
     pool_error: String,
+    /// The value of the output fence of the last frame.
+    fence_value: u64,
     out_file: Option<BufWriter<File>>,
     io_error: String,
 }
@@ -64,6 +67,8 @@ pub struct Run {
     /// -gputime: the records of the decoder's completion thread, as the player keeps them.
     perf: shim::Perf,
     perf_start: Mutex<Instant>,
+    /// -sharedfence: the output fence of the task's decoder as opened through its shared handle.
+    shared_fence: Mutex<Option<ID3D12Fence>>,
 }
 
 impl Run {
@@ -156,8 +161,41 @@ fn result_line(
 /// -aom_md5, luma and two chroma planes of the mid grey value, which is what aomdec writes for --i420 and
 /// so what AOM's .md5 files of monochrome streams hash. False for a frame whose image has no mapped
 /// buffer.
+///
+/// A semi-planar frame (-output p010) is hashed as the same samples: the 10 bits of a sample are taken
+/// out of the high bits of its 16, and the plane of U and V is taken apart into the rows of U and then
+/// those of V. So its md5 is that of the planes, whatever the image was.
 fn for_each_row(frame: &Picture<'_>, aom_md5: bool, mut sink: impl FnMut(&[u8])) -> bool {
     let bytes: usize = if frame.bit_depth == 8 { 1 } else { 2 };
+    if frame.semi_planar {
+        let (Some(luma), Some(chroma)) = (&frame.planes[0], &frame.planes[1]) else {
+            return false;
+        };
+        let mut line = vec![0u8; luma.width as usize * bytes];
+        // The samples of a row from `first` on, every `step`th.
+        let mut rows = |plane: &rav1g::Plane<'_>, first: usize, step: usize, sink: &mut dyn FnMut(&[u8])| {
+            for row in 0..plane.height as usize {
+                let data = &plane.data[row * plane.stride..];
+                for x in 0..plane.width as usize {
+                    let at = (first + x * step) * bytes;
+                    if bytes == 1 {
+                        line[x] = data[at];
+                    } else {
+                        let sample = u16::from_le_bytes([data[at], data[at + 1]]) >> 6;
+                        line[2 * x..2 * x + 2].copy_from_slice(&sample.to_le_bytes());
+                    }
+                }
+                sink(&line[..plane.width as usize * bytes]);
+            }
+        };
+        rows(luma, 0, 1, &mut sink);
+        if !frame.monochrome || aom_md5 {
+            // The chroma plane of a monochrome frame has the middle value, which is what aomdec writes.
+            rows(chroma, 0, 2, &mut sink);
+            rows(chroma, 1, 2, &mut sink);
+        }
+        return true;
+    }
     let mut rows = |plane: &rav1g::Plane<'_>| {
         let row_bytes = plane.width as usize * bytes;
         for row in 0..plane.height as usize {
@@ -195,6 +233,47 @@ fn for_each_row(frame: &Picture<'_>, aom_md5: bool, mut sink: impl FnMut(&[u8]))
     true
 }
 
+/// What a semi-planar image has besides the samples that are hashed: the low six bits of a 10-bit
+/// sample are zero, the column behind an odd width and the row behind an odd height repeat the last
+/// ones, and the chroma plane of a monochrome frame has the middle value. `None` when all of it holds.
+fn semi_planar_fault(frame: &Picture<'_>) -> Option<String> {
+    let (luma, chroma) = (frame.planes[0].as_ref()?, frame.planes[1].as_ref()?);
+    let bytes: usize = if frame.bit_depth == 8 { 1 } else { 2 };
+    let sample = |plane: &rav1g::Plane<'_>, x: usize, y: usize| {
+        let at = y * plane.stride + x * bytes;
+        if bytes == 1 { u16::from(plane.data[at]) } else { u16::from_le_bytes([plane.data[at], plane.data[at + 1]]) }
+    };
+    let (width, height) = (luma.width as usize, luma.height as usize);
+    let (full_width, full_height) = (width.next_multiple_of(2), height.next_multiple_of(2));
+    for y in 0..full_height {
+        for x in 0..full_width {
+            let value = sample(luma, x, y);
+            if bytes == 2 && value & 63 != 0 {
+                return Some(format!("luma sample {x},{y} is {value:#06x}: its low six bits are not zero"));
+            }
+            let from = sample(luma, x.min(width - 1), y.min(height - 1));
+            if value != from {
+                return Some(format!(
+                    "luma sample {x},{y} behind the frame is {value:#x}, the frame's last is {from:#x}"
+                ));
+            }
+        }
+    }
+    let neutral = if bytes == 1 { 128 } else { 512 << 6 };
+    for y in 0..chroma.height as usize {
+        for x in 0..2 * chroma.width as usize {
+            let value = sample(chroma, x, y);
+            if bytes == 2 && value & 63 != 0 {
+                return Some(format!("chroma sample {x},{y} is {value:#06x}: its low six bits are not zero"));
+            }
+            if frame.monochrome && value != neutral {
+                return Some(format!("chroma sample {x},{y} of a monochrome frame is {value:#x}, not {neutral:#x}"));
+            }
+        }
+    }
+    None
+}
+
 /// Writes a frame as it is hashed. False on a write error.
 fn write_frame(frame: &Picture<'_>, aom_md5: bool, file: &mut impl Write) -> bool {
     let mut ok = true;
@@ -209,8 +288,21 @@ fn write_frame(frame: &Picture<'_>, aom_md5: bool, file: &mut impl Write) -> boo
 /// The output of the task's decoders: readback buffers of the pool, and every frame hashed where it
 /// arrives, on the decoder's completion thread.
 impl Sink for Run {
-    fn rent(&self, size: usize) -> Option<Rented> {
-        match self.pool.rent(size) {
+    fn read_texture(&self, token: usize) -> Option<*const u8> {
+        match self.pool.read_texture(token) {
+            Ok(mem) => Some(mem),
+            Err(why) => {
+                let mut state = self.state();
+                if state.io_error.is_empty() {
+                    state.io_error = why;
+                }
+                None
+            }
+        }
+    }
+
+    fn rent(&self, request: &Request) -> Option<Rented> {
+        match self.pool.rent(request) {
             Ok(buffer) => Some(buffer),
             Err(why) => {
                 let mut state = self.state();
@@ -240,11 +332,64 @@ impl Sink for Run {
             run.perf.add_output(ms_since(start));
         }
         let mut ctx = Md5::new();
-        for_each_row(frame, task.aom_md5, |row| ctx.update(row));
+        let complete = for_each_row(frame, task.aom_md5, |row| ctx.update(row));
         let md5 = ctx.finish_hex();
+        // What the image and the fence of the frame have to be, besides the samples.
+        let mut fault = None;
+        if frame.semi_planar != task.output.is_semi_planar() {
+            fault = Some("the frame is not in the kind of image the task asked for".to_string());
+        } else if !complete {
+            fault = Some("the frame has no planes to read".to_string());
+        } else if frame.semi_planar {
+            fault = semi_planar_fault(frame).map(|fault| format!("semi-planar image: {fault}"));
+        }
+        let mut fence_value = 0;
+        if fault.is_none() {
+            fault = match &frame.fence {
+                None => Some("the frame came without the output fence".to_string()),
+                Some((fence, value)) => {
+                    fence_value = *value;
+                    // SAFETY: a plain call on a live fence.
+                    let completed = unsafe { fence.GetCompletedValue() };
+                    let mut shared = run.shared_fence.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if task.shared_fence && shared.is_none() {
+                        match run.pool.open_shared_fence(fence) {
+                            Ok(opened) => {
+                                say!("FENCE {}: the output fence was opened through a shared handle", task.name);
+                                *shared = Some(opened);
+                            }
+                            Err(why) => fault = Some(why),
+                        }
+                    }
+                    // SAFETY: as above.
+                    let opened = shared.as_ref().map(|fence| unsafe { fence.GetCompletedValue() });
+                    if fault.is_some() {
+                        fault.take()
+                    } else if completed < *value {
+                        Some(format!("the output fence is at {completed}, the frame has the value {value}"))
+                    } else if opened.is_some_and(|opened| opened < *value) {
+                        Some(format!("the opened output fence is at {opened:?}, the frame has the value {value}"))
+                    } else {
+                        None
+                    }
+                }
+            };
+        }
         {
             let mut state = run.state();
             let n = state.md5.len() as i32;
+            if fault.is_none() && fence_value <= state.fence_value {
+                fault = Some(format!(
+                    "the fence value {fence_value} is not above the {} of the frame before",
+                    state.fence_value
+                ));
+            }
+            state.fence_value = fence_value;
+            if let Some(fault) = fault
+                && state.io_error.is_empty()
+            {
+                state.io_error = format!("frame {n}: {fault}");
+            }
             if n == 0 {
                 state.width = frame.width;
                 state.height = frame.height;
@@ -497,11 +642,16 @@ fn create_decoder(
         // -budget: a budget callback that answers with the number of the flag.
         budget: (task.budget_mib >= 0).then_some((task.budget_mib << 20) as u64),
         headroom: (task.headroom_mib.max(0) << 20) as u64,
+        semi_planar: task.output.is_semi_planar(),
+        shared_fence: task.shared_fence,
     };
     // The colour description of the sequence header the decoder is created for, and the first frame of
     // the decoder says what it carries.
     say!("COLOUR {} sequence: {}", task.name, Colour::of_sequence(&info.color, library.is_c()).description());
     run.state().colour = None;
+    // A decoder has an output fence of its own, whose values start again.
+    run.state().fence_value = 0;
+    *run.shared_fence.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     let (device_size, host_size) = library.memory_requirements(&spec);
     say!(
         "TASK {}: stream {}x{} {}-bit, decoder {}x{} {}-bit ({}), slots {}, low memory parts {}, CDEF {}, intra {}{}, \
@@ -556,7 +706,8 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     memory_line("before the task");
     let run = Arc::new(Run {
         task: task.clone(),
-        pool: OutputPool::new(&dev.device, task.queue_size),
+        pool: OutputPool::new(&dev.device, &dev.queue, task.queue_size, task.output),
+        shared_fence: Mutex::new(None),
         state: Mutex::new(State {
             md5: Vec::new(),
             reference: Vec::new(),
@@ -571,6 +722,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
             size_changes: 0,
             colour: None,
             pool_error: String::new(),
+            fence_value: 0,
             out_file: None,
             io_error: String::new(),
         }),

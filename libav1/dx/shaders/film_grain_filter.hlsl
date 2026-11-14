@@ -19,7 +19,24 @@
 ByteAddressBuffer src : register(t0);
 StructuredBuffer<int> grain_block : register(t1);
 StructuredBuffer<int> random_offset : register(t2);
+// SEMI_PLANAR (film_grain_filter_sp.hlsl, film_grain_filter_sp_tex.hlsl): the frame goes into the
+// semi-planar output, a luma plane and a chroma plane of U and V side by side, which never has the
+// packed samples. With SP_TEXTURE the planes are those of a texture and nothing is written to `dst`.
+#ifdef SEMI_PLANAR
+#define IS_10X3 0
+#ifdef SP_TEXTURE
+RWByteAddressBuffer dst : register(u2);
+#define SP_LUMA_REGISTER u0
+#define SP_CHROMA_REGISTER u1
+#else
 RWByteAddressBuffer dst : register(u0);
+#define SP_BUFFER dst
+#endif
+#include "output_sp.h"
+#else
+RWByteAddressBuffer dst : register(u0);
+#define IS_10X3 data.is_10x3
+#endif
 
 struct FilmGrainData {
   GrainParams params;
@@ -334,12 +351,15 @@ groupshared int cb_grain_temp[3][16 * 16];
             out_luma = in_luma;
           }
 
-          if (data.is_10x3) {
+          if (IS_10X3) {
             luma_grain_temp[lid][i * luma_subblock_size_x + j + 0] = out_luma.x;
             luma_grain_temp[lid][i * luma_subblock_size_x + j + 1] = out_luma.y;
             luma_grain_temp[lid][i * luma_subblock_size_x + j + 2] = out_luma.z;
             luma_grain_temp[lid][i * luma_subblock_size_x + j + 3] = out_luma.w;
           } else {
+#ifdef SEMI_PLANAR
+            sp_store_luma(x + j, y + i, out_luma, data.width, data.height, bit_depth != 8, data.dst_planes[0].xy);
+#else
             const int2 dst_luma_plane = data.dst_planes[0].xy;
             if (((y + i) < data.height) && ((x + j) < data.width)) {
               if (bit_depth == 8) {
@@ -350,11 +370,12 @@ groupshared int cb_grain_temp[3][16 * 16];
                            uint2((out_luma.x << 0) | (out_luma.y << 16), (out_luma.z << 0) | (out_luma.w << 16)));
               }
             }
+#endif
           }
 
           GroupMemoryBarrierWithGroupSync();
 
-          if (data.is_10x3) {
+          if (IS_10X3) {
             int x3 = Gid.x * luma_subblock_size_x * 3;
             const int2 dst_luma_plane = data.dst_planes[0].xy;
             for (int j3 = GTid.z * (luma_subblock_size_x / 4) + GTid.x; j3 < luma_subblock_size_x;
@@ -390,6 +411,9 @@ groupshared int cb_grain_temp[3][16 * 16];
 
           // Chroma block application
           if (i < chroma_subblock_size_y && j < chroma_subblock_size_x && enable_chroma) {
+#ifdef SEMI_PLANAR
+            int4 sp_cb = int4(0, 0, 0, 0);
+#endif
             {  // cb
               int4 avarage_luma_c;
               avarage_luma_c.x = avarage_luma[lid][i * true_chroma_subblock_size_x + j + 0];
@@ -441,12 +465,15 @@ groupshared int cb_grain_temp[3][16 * 16];
               if (!apply_cb) {
                 out_cb = in_cb;
               }
-              if (data.is_10x3) {
+              if (IS_10X3) {
                 cb_grain_temp[lid][i * true_chroma_subblock_size_x + j + 0] = out_cb.x;
                 cb_grain_temp[lid][i * true_chroma_subblock_size_x + j + 1] = out_cb.y;
                 cb_grain_temp[lid][i * true_chroma_subblock_size_x + j + 2] = out_cb.z;
                 cb_grain_temp[lid][i * true_chroma_subblock_size_x + j + 3] = out_cb.w;
               } else {
+#ifdef SEMI_PLANAR
+                sp_cb = out_cb;
+#else
                 if ((((y >> chroma_subsamp_y) + i) < (data.height >> chroma_subsamp_y)) &&
                     (((x >> chroma_subsamp_x) + j) < (data.width >> chroma_subsamp_x))) {
                   chroma_plane = data.dst_planes[1].xy;
@@ -460,6 +487,7 @@ groupshared int cb_grain_temp[3][16 * 16];
                                uint2((out_cb.x << 0) | (out_cb.y << 16), (out_cb.z << 0) | (out_cb.w << 16)));
                   }
                 }
+#endif
               }
             }
             {  // cr
@@ -516,12 +544,18 @@ groupshared int cb_grain_temp[3][16 * 16];
               if (!apply_cr) {
                 out_cr = in_cr;
               }
-              if (data.is_10x3) {
+              if (IS_10X3) {
                 cr_grain_temp[lid][i * true_chroma_subblock_size_x + j + 0] = out_cr.x;
                 cr_grain_temp[lid][i * true_chroma_subblock_size_x + j + 1] = out_cr.y;
                 cr_grain_temp[lid][i * true_chroma_subblock_size_x + j + 2] = out_cr.z;
                 cr_grain_temp[lid][i * true_chroma_subblock_size_x + j + 3] = out_cr.w;
               } else {
+#ifdef SEMI_PLANAR
+                // U and V of a sample lie side by side: one store for both, by the thread that has both.
+                sp_store_chroma((x >> chroma_subsamp_x) + j, (y >> chroma_subsamp_y) + i, sp_cb, out_cr,
+                                (data.width + 1) >> 1, (data.height + 1) >> 1, bit_depth != 8,
+                                data.dst_planes[1].xy);
+#else
                 if ((((y >> chroma_subsamp_y) + i) < (data.height >> chroma_subsamp_y)) &&
                     (((x >> chroma_subsamp_x) + j) < (data.width >> chroma_subsamp_x))) {
                   chroma_plane = data.dst_planes[2].xy;
@@ -535,13 +569,14 @@ groupshared int cb_grain_temp[3][16 * 16];
                                uint2((out_cr.x << 0) | (out_cr.y << 16), (out_cr.z << 0) | (out_cr.w << 16)));
                   }
                 }
+#endif
               }
             }
           }
 
           GroupMemoryBarrierWithGroupSync();
 
-          if (data.is_10x3) {
+          if (IS_10X3) {
             int x3 = Gid.x * 3 * true_chroma_subblock_size_x;
             if (GTid.y < true_chroma_subblock_size_y) {
               i = GTid.y;

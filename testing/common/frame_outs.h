@@ -24,7 +24,8 @@
 #include <atomic>
 
 // The samples of an output image; the numbers are those of Rav1gImageFormat (rav1g.h).
-typedef enum { fbtNone = -1, fbt8bit = 0, fbt10bit, fbt10x3 } frame_buffer_type;
+// The numbers are those of Rav1gImageFormat; fbtNV12 and fbtP010 are the semi-planar output.
+typedef enum { fbtNone = -1, fbt8bit = 0, fbt10bit, fbt10x3, fbtNV12, fbtP010 } frame_buffer_type;
 
 #include <wrl.h>
 #include <wrl/client.h>
@@ -53,6 +54,8 @@ typedef struct OutBuffer {
   frame_buffer_type fb_type;
   ComPtr<ID3D12Resource> d3d12buffer;
   ComPtr<ID3D12Resource> d3d12textures[3];
+  // The semi-planar output with -interop: the D3D11 texture that d3d12textures[0] was opened from.
+  ComPtr<IUnknown> d3d11texture;
   size_t buffer_size;
 
   uint64_t pts;
@@ -77,6 +80,7 @@ typedef struct OutBuffer {
       planes[i] = 0;
       strides[i] = 0;
     }
+    d3d11texture.Reset();
     pMem = 0;
     memSize = 0;
     renderWidth = 0;
@@ -86,6 +90,15 @@ typedef struct OutBuffer {
     fb_type = fbtNone;
   }
 } OutBuffer;
+
+// The textures of the semi-planar output (player_common/semi_planar.h): one NV12 or P010 texture for an
+// image, in d3d12textures[0]. `bytes`: what the texture takes.
+class SemiPlanarTextures {
+ public:
+  virtual ~SemiPlanarTextures() {}
+  virtual HRESULT Create(OutBuffer* buffer, uint32_t width, uint32_t height, frame_buffer_type fb_type,
+                         uint64_t* bytes) = 0;
+};
 
 class OutBufferStorage;
 class OutBufferWrapper {
@@ -123,6 +136,9 @@ class OutBufferStorage {
   std::shared_ptr<OutBufferWrapper> ReleaseRentedBuffer(void* ptr);
   std::shared_ptr<OutBufferWrapper> FindRentedBuffer(void* ptr);
 
+  // Who creates the textures of images of the types fbtNV12 and fbtP010.
+  void SetSemiPlanarTextures(std::shared_ptr<SemiPlanarTextures> textures) { semi_planar_ = textures; }
+
   // Timing runs: log and count every time GetFreeBuffer finds the pool empty.
   void SetWaitLogging(bool on) { wait_logging_ = on; }
   void ResetWaitStats() {
@@ -149,6 +165,7 @@ class OutBufferStorage {
   int queue_size_;
   std::mutex cs_;
   ComPtr<ID3D12Device> dx12_device_;
+  std::shared_ptr<SemiPlanarTextures> semi_planar_;
   std::atomic<uint64_t> texture_bytes_total_{0};
   bool wait_logging_ = false;
   int wait_count_ = 0;

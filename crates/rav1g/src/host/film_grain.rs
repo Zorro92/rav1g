@@ -13,7 +13,10 @@ use std::ffi::c_int;
 
 use super::core::{alloc_constants, buffer, commands, perf_gpu_mark, pipeline};
 use super::types::Av1Core;
+use crate::gpu::d3d12::{com_ref, wrapped_ref};
+use crate::gpu::{Device, PlaneViews};
 use crate::sys::parser::{AOM_CICP_MC_IDENTITY, AV1_COMMON, AV1_PERF_GPU_FILM_GRAIN, HwFrameBuffer};
+use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 
 /// The film grain parameters of a frame as the shaders read them.
 #[repr(C)]
@@ -155,13 +158,24 @@ impl Rng {
     }
 }
 
+/// Where the frame with its grain goes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GrainTarget {
+    /// The three planes of the output image, in the back buffer.
+    Planes,
+    /// The two planes of the semi-planar output (`output.rs`), in the back buffer.
+    SemiPlanar,
+    /// The two planes of the application's texture: the pair of plane views.
+    SemiPlanarTexture(u32),
+}
+
 /// `av1_filmgrain_run` of the C++: records the grain synthesis for the output of the frame of the
 /// current command list. The frame with grain goes into the layout the decoder's back buffer has, which
 /// is that of the output image. Without `enable_chroma` only luma gets grain.
 ///
 /// # Safety
 /// `dec` is the decoder while it records a frame that is output; `cm` is the frame's.
-pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_chroma: c_int) {
+pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_chroma: c_int, target: GrainTarget) {
     // SAFETY: the caller's contract; the random offsets are a mapped buffer of the slot, sized for the
     // largest frame of the decoder.
     unsafe {
@@ -292,7 +306,7 @@ pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_ch
         (*data).width = src.y_crop_width;
         (*data).height = src.y_crop_height;
         (*data).random_offset_stride = (src.width / 32) + 1;
-        (*data).is_10x3 = c_int::from((*dec).tryhdr10x3 != 0 && src.hbd != 0);
+        (*data).is_10x3 = c_int::from(target == GrainTarget::Planes && (*dec).tryhdr10x3 != 0 && src.hbd != 0);
         let scaling_lut = &raw mut (*data).scaling_lut;
         init_scaling_function(&params.scaling_points_y[..params.num_y_points as usize], scaling_lut, 0);
         if params.chroma_scaling_from_luma != 0 {
@@ -340,14 +354,26 @@ pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_ch
             commands.write_barrier(noise);
         }
 
-        let shader = pipeline(&raw const (*lib).shader_filmgrain_filter);
+        let shader = pipeline(match target {
+            GrainTarget::Planes => &raw const (*lib).shader_filmgrain_filter,
+            GrainTarget::SemiPlanar => &raw const (*lib).shader_filmgrain_filter_sp,
+            GrainTarget::SemiPlanarTexture(_) => &raw const (*lib).shader_filmgrain_filter_sp_tex,
+        });
         commands.set_pipeline(shader);
         commands.set_layout(shader.layout());
         commands.bind_read(0, frame_buffers.location());
         commands.bind_read(1, noise.location());
         commands.bind_read(2, buffer(td.filmgrain_rand_offset).location());
-        commands.bind_write(3, frame_buffers.location());
-        commands.bind_constants(4, constants.location);
+        if let GrainTarget::SemiPlanarTexture(pair) = target {
+            // The layout without a buffer to write: the constants, then the planes of the texture.
+            let views = wrapped_ref::<_, PlaneViews>(&(*dec).plane_views).expect("a direct frame has its views");
+            let device = com_ref::<_, ID3D12Device>(&(*dec).compute.device).expect("the decoder has its device");
+            commands.bind_constants(3, constants.location);
+            commands.bind_write_planes(4, Device::new(device), views, pair);
+        } else {
+            commands.bind_write(3, frame_buffers.location());
+            commands.bind_constants(4, constants.location);
+        }
         commands.dispatch((src.width / 32 + 1) as u32, (src.height / 32 + 1) as u32, 1);
         commands.write_barrier(frame_buffers);
 

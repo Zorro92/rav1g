@@ -439,6 +439,7 @@ side alone ever fit in 41.67 ms (24 fps)?
 | Flag | Effect |
 | --- | --- |
 | `-gputime` | Per-stage GPU timestamps and CPU timers for every decoded frame, a summary at the end of the task, and a live log line each time the decoder blocks on the player's output buffers. |
+| `-output p010`, `-output p010-copy`, `-interop` | The semi-planar output: one NV12 or P010 texture an image, written by the decoder's output pass; with `-interop` the textures are D3D11's and a D3D11 context waits on the decoder's shared fence. Headless. See [Semi-planar output and D3D11 interop](#semi-planar-output-and-d3d11-interop--output--interop). |
 | `-nopresent` | Decoded frames go straight back to the buffer pool. Nothing is queued for display and nothing is presented, so the picture stays blank. The render loop sleeps 10 ms per pass instead of spinning. |
 | `-gputimedetail` | `-gputime`, and the inter stage broken down: a timestamp behind every section of it, work counters per section. See [Inter prediction breakdown](#inter-prediction-breakdown--gputimedetail--gputimeisolate). |
 | `-gputimeisolate` | `-gputimedetail`, and a UAV barrier and a timestamp behind every dispatch of the inter stage and of the reconstruction, so that each has a time of its own. Same output; the stage is slower by what the barriers cost. |
@@ -3162,6 +3163,85 @@ superblocks, noise, extremes, ramps and spikes as content). The source rows are 
 the last column of the last mode info unit, which is where the specification clamps, not at
 the visible width. The check covers the shader, which was right; the bug was in the host
 code that the conformance run covers. It runs as the `superres-check` job of the workflow.
+
+## Semi-planar output and D3D11 interop (`-output`, `-interop`)
+
+The decoder can write a frame into one NV12 or P010 texture in place of a buffer and three plane
+textures ([output.md](output.md)). The player has three ways to run a task with it. None of them
+presents: the player's display reads one texture a plane, so `-nopresent` is implied. The md5 check
+(`-md5_frame_check`, `-md5`), `-save_md5` and `-o` work as they do without: the player reads every
+frame back from its texture and takes it apart into the three planes the check hashes, so **the
+references are the same files**.
+
+| Flag | The images of the pool | How a frame is read back |
+| --- | --- | --- |
+| `-output p010` (`nv12` is the same word) | D3D12 textures with `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS`: NV12 for an 8-bit stream, P010 for a 10-bit one. The decoder's output pass writes them itself where the device allows it (the direct path) | a copy of the two planes into the readback buffer of the image, on the decoder's queue |
+| `-output p010-copy` | the same textures without that flag: the decoder fills them by one copy a plane (the staged path) | the same |
+| `-interop` | textures a **D3D11** device creates (`D3D11_RESOURCE_MISC_SHARED_NTHANDLE \| SHARED`, bind flags `SHADER_RESOURCE \| UNORDERED_ACCESS`, without the second where the driver refuses it) and D3D12 opens through their shared handle. The D3D11 device is created on the adapter of the D3D12 device. The decoder is created with a shareable output fence, which D3D11 opens (`ID3D11Device5::OpenSharedFence`) | for every frame the D3D11 context waits for the frame's value of the fence (`ID3D11DeviceContext4::Wait`); the frame is copied to a D3D11 staging texture and mapped. This is what an application with a D3D11 video path does |
+| `-output planes` | the default: a buffer and one texture a plane | |
+
+Without an md5 check or a file (a timing run) nothing is read back: `-output p010` then times the
+decoder alone, and `-interop` waits on the fence in D3D11 for every frame and reads nothing.
+
+Log lines:
+
+```text
+OUTPUT semi-planar: an image is one NV12 (8-bit) or P010 (10-bit) texture, which shaders may write (-output p010); frames are not presented
+decoder: OUTPUT semi-planar: NV12 textures yes, written by shaders yes; P010 textures yes, written by shaders yes
+decoder: OUTPUT P010 direct: the output pass writes the planes of the texture
+OUTPUT semi-planar result: 300 frames; 300 read back from their texture; 0 failed
+
+INTEROP D3D11 device created on the adapter of the D3D12 device, feature level 0xb100, with ID3D11Device5 and ID3D11DeviceContext4
+INTEROP fence: the decoder's output fence (D3D12_FENCE_FLAG_SHARED) was opened in D3D11
+INTEROP texture: P010 3840x2160 created by D3D11 with D3D11_RESOURCE_MISC_SHARED_NTHANDLE | SHARED, bind flags SHADER_RESOURCE | UNORDERED_ACCESS; opened in D3D12: format 104, flags 0x4 (shaders may write it: the direct path)
+INTEROP result: 300 frames; 300 waited for on the shared fence by the D3D11 context; 300 read from the D3D11 texture; 0 failed: INTEROP is OK
+```
+
+The `decoder:` lines are the library's: what the device says about the two formats, and which path the
+frames take (`direct`: the output pass writes the texture; `staged`: it writes the back buffer and a
+copy a plane follows). A step of `-interop` that the device refuses is an `INTEROP FAILED: <step> (hr
+...)` line: the D3D11 device, `ID3D11Device5`, the texture, its shared handle, its opening in D3D12,
+the handle of the fence, its opening in D3D11, the wait. The task then ends with `INTEROP FAILED` in
+its result line and is counted as one with wrong frames. A frame that cannot be read back does the
+same.
+
+In CI the player's decoder code runs its smoke tasks with `-output p010` and with `-interop` on WARP
+(`player_smoke.py --semi-planar`, job `rust-output`); where WARP cannot share between D3D11 and D3D12
+the check reports the step and does not fail, because that is a finding about WARP. The console has
+to show it for its own driver.
+
+### Console: the task lines
+
+With the default package (`uwp_dx12_player_<version>.0_x64.msix`), slow state, the owner's app not
+running. The md5 set, one launch a clip, once with each flag (8-bit clips become NV12, 10-bit clips
+P010):
+
+```text
+-i /streams/<clip>.ivf -frate -1 -queue_size 4 -progress -nopresent -md5_frame_check -output p010
+-i /streams/<clip>.ivf -frate -1 -queue_size 4 -progress -nopresent -md5_frame_check -output p010-copy
+```
+
+The interop mode on a 10-bit 4K clip and on an 8-bit one, each in a launch of its own; `INTEROP is
+OK` and `MD5 is OK` are the result, the `INTEROP texture:` line says whether the console's driver
+gave the D3D11 texture `UNORDERED_ACCESS`, the `decoder: OUTPUT ... direct` or `staged` line which
+path the frames took:
+
+```text
+-i /streams/d2_300.ivf -frate -1 -queue_size 4 -progress -nopresent -md5_frame_check -interop
+-i /streams/j4k40.ivf -frate -1 -queue_size 4 -progress -nopresent -md5_frame_check -interop
+```
+
+Timing, the default against the semi-planar kinds, for `d2_300` and for `j4k40`, each block in one
+launch behind a warm-up task. To read: the frames per second, `gpu busy`, and the stages
+`film_grain`, `copy_plane`, `output_copy` (the direct path has no copy: its `output_copy` is two
+state changes), and the `MEMORY output pool` line (one texture an image against three):
+
+```text
+-i /streams/<clip>.ivf -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime
+-i /streams/<clip>.ivf -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -output p010
+-i /streams/<clip>.ivf -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -output p010-copy
+-i /streams/<clip>.ivf -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -interop
+```
 
 ## Colour of the stream (`COLOUR`)
 
