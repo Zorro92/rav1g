@@ -566,7 +566,8 @@ impl Frames {
                 // The frame returns its slot and its buffers and is not submitted. Its description stays
                 // where later frames have it, with the mark.
                 release_frame(dec, entry.td);
-                descriptions.fail(entry.cur);
+                // The error first, then the mark: a frame that begins and finds the mark fails with
+                // an error of its own, which is told behind this one (`rav1g_rav1d_decode`).
                 self.fail(
                     sys::AOM_CODEC_CORRUPT_FRAME,
                     if ok {
@@ -575,6 +576,7 @@ impl Frames {
                         "Failed to decode tile data: the parse of the frame ended with an error"
                     },
                 );
+                descriptions.fail(entry.cur);
             } else {
                 bind_frame_for_record(dec, entry.td);
                 let rec = self.load(entry);

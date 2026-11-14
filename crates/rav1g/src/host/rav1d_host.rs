@@ -1628,11 +1628,24 @@ pub unsafe extern "C" fn rav1g_rav1d_decode(
                         ),
                     })
                 });
-                // With more than one frame in parse, a call without an error of its own returns the
-                // oldest error of a frame of an earlier call, one a call. Its own comes first: it is
-                // the one the caller acts on now (a sequence that needs another decoder).
+                // With more than one frame in parse, a call returns the oldest error there is, one
+                // a call: that of a frame of an earlier call (or of an earlier frame of this one)
+                // before its own, which is told by a later call or by the drain. A frame that fails
+                // when it begins because its reference failed comes behind the error of that
+                // reference, however long its begin had to wait (for a slot, since step 5). The one
+                // error that is always told at once is the one the caller acts on now: a sequence
+                // that needs another decoder.
                 match (&frames, own) {
                     (Some(frames), None) => frames.take_failure(),
+                    (Some(frames), Some(own)) if own.code != sys::AOM_CODEC_NEEDS_RECONFIGURE => {
+                        match frames.take_failure() {
+                            Some(older) => {
+                                frames.fail(own.code, own.detail);
+                                Some(older)
+                            }
+                            None => Some(own),
+                        }
+                    }
                     (_, own) => own,
                 }
             }

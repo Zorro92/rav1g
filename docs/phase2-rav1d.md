@@ -2271,6 +2271,14 @@ not fit, one frame in parse and two slots (`MEMORY frames in parse` line; the gu
 for it). `rav1g-dec` and the test player now ask for these defaults when a task has no `-t`,
 `-parseframes` or `-slots` (they asked for 1, 1 and 2).
 
+**The order of errors.** With three slots the begin of a frame can wait for a slot until a frame
+in front has failed and given its slot back; the frame then fails when it begins ("A reference of
+the frame has no frame buffer") before the error of that reference has been told. So a decode call
+of a decoder with more than one frame in parse now returns the oldest error there is, one a call:
+that of an earlier frame before its own, which a later call or the drain returns. Only a sequence
+that needs another decoder is told at once. (Step 4 told a call's own error first; the cut streams
+showed the difference on WARP: `cut_tile_check.py --frames-in-parse 2`.)
+
 **A stream that exhausts a pool.** Three things in CI:
 
 - The lossless stream of the set (`av1-1-b8-00-quantizer-00`) comes close to the worst case of its
