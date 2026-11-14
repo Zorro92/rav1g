@@ -15,8 +15,6 @@ reference check and with -gputime, once in each of these ways:
   sync               -syncclear: the same grid, cleared by the decode thread
   default-cleargrid  -parseopt cleargrid: the mode info grid cleared for every frame too (not kept)
   gpu-cleargrid      -gpuclear -parseopt cleargrid
-  default-c          -parser c: the entropy decoder of libaom, whose mode info grid is cleared for every frame
-  gpu-c              -gpuclear -parser c
 
 What is checked, from the lines of the timing run for every frame (the bytes cleared for the frame by the
 decode and tile threads, by the completion thread behind it, and by its command list). The first frames of
@@ -31,7 +29,7 @@ a run are left out where a slot's first frame counts: it clears on the decode th
     the gpu way, to the byte; the GPU nothing;
   - sync: the decode thread clears at least that much for every frame; the completion thread and the GPU
     nothing;
-  - the cleargrid ways and the -parser c ways have the mode info grid on top: the default way on the
+  - the cleargrid ways have the mode info grid on top: the default way on the
     completion thread, and the gpu way on the GPU, where every frame clears what the two grids are
     together.
 
@@ -49,9 +47,7 @@ WAYS = (('default', '', 'none needed'),
         ('cpu', '-cpuclear', 'completion thread (-cpuclear)'),
         ('sync', '-syncclear', 'decode thread (-syncclear)'),
         ('default-cleargrid', '-parseopt cleargrid', 'none needed'),
-        ('gpu-cleargrid', '-gpuclear -parseopt cleargrid', 'GPU (-gpuclear)'),
-        ('default-c', '-parser c', 'none needed'),
-        ('gpu-c', '-gpuclear -parser c', 'GPU (-gpuclear)'))
+        ('gpu-cleargrid', '-gpuclear -parseopt cleargrid', 'GPU (-gpuclear)'))
 # What the decode and tile threads may clear of a frame without a flag, per tile: the tile's descriptor and
 # the counters of its block lists.
 TILE_BYTES = 64 * 1024
@@ -162,7 +158,7 @@ def main():
         check('sync', 'the decode thread clears less than the command list clears with -gpuclear',
               lambda index, frame: index < FIRST or frame[0] >= grid[index])
         check('sync', 'the completion thread or the GPU clears something', idle)
-        for kind in ('cleargrid', 'c'):
+        for kind in ('cleargrid',):
             default, gpu = got['default-' + kind], 'gpu-' + kind
             check('default-' + kind, 'the completion thread does not clear the mode info grid',
                   lambda index, frame: frame[1] > 0)

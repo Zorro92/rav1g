@@ -23,6 +23,11 @@
 #include "av1/common/onyxc_int.h"
 #include "dx/av1_perf.h"
 
+/* The functions the entropy decoder of libaom calls on its host. The decoder of the library
+ * (crates/rav1g) no longer has that entropy decoder: its parser is rav1d's parse pass, and its host has
+ * these functions as Rust of its own. What implements this header now is the host of
+ * tools/rav1g-parse-check (src/chost.rs), which runs the entropy decoder into plain memory as the
+ * reference the parser is held against (docs/phase2-rav1d.md, step 6). */
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -32,15 +37,6 @@ void av1_allocate_pbi(struct Av1Core *dec, AV1Decoder **ppbi, BufferPool **pbp);
 void av1_destroy_gpu_decoder(struct Av1Core *dec);
 void av1_drain_gpu_decoder(struct Av1Core *dec);
 
-// The decode call of a decoder whose parser is rav1d's (aom_codec_dec_cfg_t::parser): the frames of a
-// temporal unit are parsed, recorded and submitted. Returns an aom_codec_err_t and, for an error, a text
-// in *detail that lives until the next call. crates/rav1g/src/host/rav1d_host.rs.
-int rav1g_rav1d_decode(struct Av1Core *dec, const uint8_t *data, size_t size, void *user_priv,
-                       int operating_point, int output_all_layers, const char **detail);
-// The drain of such a decoder, behind av1_drain_gpu_decoder: with more than one frame in parse
-// (aom_codec_dec_cfg_t::frames_in_parse) the error of a frame that was in parse when the last decode call
-// returned, one a call, AOM_CODEC_OK when there is none (always with one frame in parse).
-int rav1g_rav1d_drain(struct Av1Core *dec, const char **detail);
 // What the decoder was created with (aom_codec_dec_cfg_t::frames_in_parse, ::threads, ::frame_slots, each
 // with its default resolved and after the budget guard's choice) and the bytes of its device buffers.
 void av1_decoder_configuration(struct Av1Core *dec, int *frames_in_parse, int *threads, int *frame_slots,

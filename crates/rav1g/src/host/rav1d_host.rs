@@ -58,8 +58,8 @@ use super::completion::{rav1g_decode_sef_begin, rav1g_decode_sef_submit, start_c
 use super::frame::{
     PaletteMap, av1_reallocate_frame_buffer, av1_sequence_fits_decoder, more_coefs, more_mode_info,
     more_transform_blocks, rav1g_decode_frame_record, rav1g_decode_frame_submit, rav1g_setup_frame_begin,
-    rav1g_setup_frame_coefs, rav1g_setup_frame_end, release_frame, release_unsubmitted_frame, setup_frame_begin,
-    setup_frame_coefs, setup_frame_end, setup_tile, superblock_parsed, tile_parsed, write_palette,
+    rav1g_setup_frame_end, release_frame, release_unsubmitted_frame, setup_frame_begin, setup_frame_end, setup_tile,
+    superblock_parsed, tile_parsed, write_palette,
 };
 use super::log::log;
 use super::perf::{av1_perf_ticks, frame_timers, perf_add, perf_add_ticks};
@@ -69,21 +69,9 @@ use super::types::{Av1Core, av1_frame_thread_data};
 use crate::sys;
 use crate::sys::parser::{
     AV1_COMMON, AV1Decoder, INVALID_IDX, REF_NO_SCALE, RESTORE_NONE, RESTORE_SGRPROJ, RESTORE_SWITCHABLE,
-    RESTORE_WIENER, RefCntBuffer, RestorationInfo, TileInfo, WarpedMotionParams, aom_film_grain_t, aom_hdr_metadata_t,
+    RESTORE_WIENER, RefCntBuffer, TileInfo, WarpedMotionParams, aom_film_grain_t, aom_hdr_metadata_t,
     av1_decoded_frame_buffer_t, av1_tile_data,
 };
-
-unsafe extern "C" {
-    /// `av1/common/av1_loopfilter.c`: the constant parts of the loop filter thresholds.
-    fn av1_loop_filter_init(cm: *mut AV1_COMMON);
-    /// `av1/common/warped_motion.c`: the shears of a warp model; 0 when the model is not valid.
-    fn get_shear_params(wm: *mut WarpedMotionParams) -> c_int;
-    /// `av1/common/restoration.c`: the number of loop restoration units of a plane, from the frame size
-    /// and the unit size.
-    fn av1_alloc_restoration_struct(cm: *mut AV1_COMMON, rsi: *mut RestorationInfo, is_uv: c_int);
-    /// `av1/decoder/obu.c`: the frame is the one of its temporal unit that is output.
-    fn av1_frame_is_output(pbi: *const AV1Decoder) -> c_int;
-}
 
 /// `SCALE_NUMERATOR` of `av1/common/scale.h`: the superres denominator of a frame that is not scaled.
 const SCALE_NUMERATOR: u8 = 8;
@@ -127,8 +115,8 @@ impl State {
     fn new(dec: *mut Av1Core) -> State {
         let mut pbi = zeroed_box::<AV1Decoder>();
         pbi.gpu_decoder = dec.cast();
-        // SAFETY: a cleared frame header; the function writes its loop filter tables.
-        unsafe { av1_loop_filter_init(&raw mut pbi.common) };
+        // The constant parts of the loop filter thresholds.
+        super::libaom::loop_filter_init(&mut pbi.common);
         pbi.mb.global_motion = pbi.common.global_motion.as_mut_ptr();
         State {
             pbi,
@@ -596,7 +584,7 @@ unsafe fn fill_header(state: &mut State, dec: *mut Av1Core, frame: &ParseFrame<'
                 let rsi = &raw mut (*cm).rst_info[p];
                 (*rsi).restoration_unit_size = 1 << restoration.unit_size[usize::from(p > 0)];
                 (*rsi).unit_info = (*dec).restoration_info_alloc[p].cast();
-                av1_alloc_restoration_struct(cm, rsi, c_int::from(p > 0));
+                super::libaom::alloc_restoration_struct(&*cm, &mut *rsi, p > 0);
             }
         }
     }
@@ -616,8 +604,8 @@ unsafe fn fill_header(state: &mut State, dec: *mut Av1Core, frame: &ParseFrame<'
         for (model, gmv) in cm.global_motion[1..].iter_mut().zip(&hdr.gmv) {
             model.wmmat[..6].copy_from_slice(&gmv.matrix);
             model.wmtype = gmv.r#type as u8;
-            // SAFETY: a model of the header.
-            model.invalid = i16::from(unsafe { get_shear_params(model) } == 0);
+            // The shears of the model; a model without valid ones is marked.
+            model.invalid = i16::from(!super::libaom::get_shear_params(model));
         }
     }
 
@@ -850,8 +838,6 @@ impl SlotHost {
             let (td, no_palette) = setup_frame_begin(pbi, cm, &mut perf_start, false);
             let failed = if no_palette != 0 {
                 Some("No palette buffer for a frame that allows screen content tools")
-            } else if setup_frame_coefs(dec, td, cm) != 0 {
-                Some("No room for the coefficients of a frame with very small tiles")
             } else if setup_frame_end(dec, td, cm, perf_start) != 0 {
                 Some("Failed to start GPU completion thread.")
             } else {
@@ -869,7 +855,7 @@ impl SlotHost {
             // The frame's own copy of the header, as it is now: the tiles and the recording read it
             // while the header here goes on to the frames that follow.
             entry.td = td;
-            entry.is_output = hdr.show_frame != 0 && av1_frame_is_output(pbi) != 0;
+            entry.is_output = hdr.show_frame != 0 && super::obu::frame_is_output(pbi);
             entry.user_priv = (*pbi).user_priv;
             (&raw mut entry.header.mb).copy_from_nonoverlapping(&raw const (*pbi).mb, 1);
             (&raw mut entry.header.common).copy_from_nonoverlapping(cm, 1);
@@ -943,7 +929,7 @@ impl SlotHost {
             (*cm).spatial_layer_id = c_int::from(show.frame_hdr.spatial_id);
             // The frame is shown with the HDR metadata of now, as rav1d shows it.
             (*cm).hdr_metadata = hdr_metadata(&show.hdr);
-            let is_output = av1_frame_is_output(pbi) != 0;
+            let is_output = super::obu::frame_is_output(pbi);
             // The completion thread ends with a drain; a show_existing_frame may be the first thing
             // after one. It is started here, by the thread that starts it for a frame.
             let entry = if start_completion_thread(dec) { frames.acquire() } else { None };
@@ -1149,8 +1135,6 @@ impl SinkHost for SlotHost {
             let mut perf_start = 0;
             let failed = if rav1g_setup_frame_begin(pbi, cm, &mut perf_start) != 0 {
                 Some("No palette buffer for a frame that allows screen content tools")
-            } else if rav1g_setup_frame_coefs(pbi, cm) != 0 {
-                Some("No room for the coefficients of a frame with very small tiles")
             } else if rav1g_setup_frame_end(pbi, cm, perf_start) != 0 {
                 Some("Failed to start GPU completion thread.")
             } else {
@@ -1188,12 +1172,7 @@ impl SinkHost for SlotHost {
             };
             // The tile takes its pieces of the pools as it goes (`more_mode_info`, `more_coefs`,
             // `more_transform_blocks`): it starts with none.
-            TileMemory {
-                tile_data: setup.tile_data,
-                mi_pool: setup.mi_pool,
-                mi_count_max: setup.mi_count_max,
-                txb_room: 0,
-            }
+            TileMemory { tile_data: setup.tile_data, mi_pool: std::ptr::null_mut(), mi_count_max: 0, txb_room: 0 }
         }
     }
 
@@ -1502,8 +1481,7 @@ pub(crate) unsafe fn stop_frames(dec: *mut Av1Core) {
 ///
 /// # Safety
 /// `dec` is a decoder; the four out pointers are null or valid for writing.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn av1_decoder_configuration(
+pub(crate) unsafe extern "C" fn av1_decoder_configuration(
     dec: *mut Av1Core,
     frames_in_parse: *mut c_int,
     threads: *mut c_int,
@@ -1532,8 +1510,10 @@ pub unsafe extern "C" fn av1_decoder_configuration(
 ///
 /// # Safety
 /// `dec` is a decoder; `detail` is valid for writing; the thread the decoder is used from.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_rav1d_drain(dec: *mut Av1Core, detail: *mut *const c_char) -> sys::aom_codec_err_t {
+pub(crate) unsafe extern "C" fn rav1g_rav1d_drain(
+    dec: *mut Av1Core,
+    detail: *mut *const c_char,
+) -> sys::aom_codec_err_t {
     // SAFETY: the caller's contract.
     unsafe {
         let Some(host) = (*dec).rav1d.as_mut() else {
@@ -1561,8 +1541,7 @@ pub unsafe extern "C" fn rav1g_rav1d_drain(dec: *mut Av1Core, detail: *mut *cons
 /// # Safety
 /// `dec` is a decoder; `data` is valid for `size` bytes; `detail` is valid for writing; the thread is
 /// the one the decoder is used from.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_rav1d_decode(
+pub(crate) unsafe extern "C" fn rav1g_rav1d_decode(
     dec: *mut Av1Core,
     data: *const u8,
     size: usize,

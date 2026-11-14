@@ -36,15 +36,7 @@ pub const RAV1G_LOW_MEMORY_COEFS: u32 = 4;
 /// All memory reductions.
 pub const RAV1G_LOW_MEMORY_ALL: u32 = 7;
 
-/// `Rav1gSettings::parser`: the entropy decoder of libaom reads the bitstream. It stays until the last
-/// step of phase 2 (docs/phase2-rav1d.md).
-pub const RAV1G_PARSER_LIBAOM: u32 = 0;
-/// `Rav1gSettings::parser`: the parse pass of rav1d reads the bitstream. The default of
-/// `rav1g_settings_default`, and what every value other than `RAV1G_PARSER_LIBAOM` selects. The same
-/// frames; the speed and what a damaged stream does differ (docs/phase2-rav1d.md).
-pub const RAV1G_PARSER_RAV1D: u32 = 1;
-
-/// `Rav1gSettings::parser_options`, values to add up: ways of doing the parse of `RAV1G_PARSER_RAV1D`
+/// `Rav1gSettings::parser_options`, values to add up: ways of doing the parse (rav1d's parse pass)
 /// that give the same frames (docs/phase2-rav1d.md, "Where the time goes"). The value 1 was a switch
 /// that is gone and means nothing. This one: rav1d leaves out the masks and levels of its own loop
 /// filter, which nothing here reads. Part of `RAV1G_PARSER_OPTIONS_DEFAULT`.
@@ -91,7 +83,7 @@ pub const RAV1G_INTER_FAST_LISTS_ONLY: u32 = 7;
 
 /// `rav1g_set_clears`, the default: the wavefront of intra prediction is kept in a few KB at the edges of
 /// the tiles, and its grid in the pipeline slot (3.5 MB of a 4K frame) is not cleared at all. A grid
-/// that still needs a clear for every frame (the mode info grid with `RAV1G_PARSER_LIBAOM`) is cleared by
+/// that still needs a clear for every frame (the mode info grid with `RAV1G_PARSER_OPTION_CLEAR_GRID`) is cleared by
 /// the completion thread.
 pub const RAV1G_CLEARS_NOT_NEEDED: u32 = 0;
 /// `rav1g_set_clears`: the wavefront in its grid; the command list of a frame ends with the clear of the
@@ -159,8 +151,8 @@ pub const RAV1G_CHROMA_SAMPLE_POSITION_COLOCATED: u8 = 2;
 /// many bytes (`Rav1gSettings::memory_available`).
 pub const RAV1G_MEMORY_GUARD_MARGIN: u64 = 50331648;
 /// The default of `Rav1gSettings::memory_headroom`: what a creation should leave of what
-/// `Rav1gSettings::memory_available` returns so that its frames are fast, 100 MiB.
-pub const RAV1G_MEMORY_GUARD_HEADROOM: u64 = 104857600;
+/// `Rav1gSettings::memory_available` returns so that its frames are fast, 128 MiB.
+pub const RAV1G_MEMORY_GUARD_HEADROOM: u64 = 134217728;
 
 const _: () = {
     assert!(RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER == LowMemory::SHARED_BACK_BUFFER.0);
@@ -194,7 +186,7 @@ const _: () = {
     assert!(RAV1G_POISON_MODE_INFO == switches::Poison::ModeInfo as u32);
     assert!(RAV1G_POISON_BUFFERS == switches::Poison::Buffers as u32);
     assert!(RAV1G_MEMORY_GUARD_MARGIN == 48 << 20);
-    assert!(RAV1G_MEMORY_GUARD_HEADROOM == 100 << 20);
+    assert!(RAV1G_MEMORY_GUARD_HEADROOM == 128 << 20);
     assert!(RAV1G_COLOR_PRIMARIES_BT709 == ColorPrimaries::BT709.0);
     assert!(RAV1G_COLOR_PRIMARIES_UNSPECIFIED == ColorPrimaries::UNSPECIFIED.0);
     assert!(RAV1G_COLOR_PRIMARIES_BT470BG == ColorPrimaries::BT470BG.0);
@@ -538,7 +530,7 @@ pub struct Rav1gSettings {
     pub bit_depth: u32,
     /// The threads that parse: the tiles of a frame and, with more than one frame in parse, the frames;
     /// at most 8. 0 is the default, by the frame size the decoder is created for: 1 up to 2560x1440, 2
-    /// above (with `RAV1G_PARSER_LIBAOM` 0 is 1).
+    /// above.
     pub threads: u32,
     /// Pipeline slots: frames that can be between the start of their CPU decode and the end of their GPU
     /// work at the same time, 2 to 4. 0 is the default: one slot more than frames in parse, at most 4.
@@ -556,12 +548,17 @@ pub struct Rav1gSettings {
     pub output_all_layers: bool,
     /// The operating point of a stream with layers.
     pub operating_point: u32,
-    /// What reads the bitstream: `RAV1G_PARSER_RAV1D` (the default) or `RAV1G_PARSER_LIBAOM`.
-    pub parser: u32,
-    /// `RAV1G_PARSER_OPTION_*` values added up, for `RAV1G_PARSER_RAV1D`: `RAV1G_PARSER_OPTIONS_DEFAULT`
+    /// Not used: 0. Up to 0.2.157 this was `parser`, the choice between the parse pass of rav1d
+    /// (`RAV1G_PARSER_RAV1D`, 1, the default) and the entropy decoder of libaom (`RAV1G_PARSER_LIBAOM`,
+    /// 0). That entropy decoder is no longer in the library, the two constants are gone, and every
+    /// decoder parses with rav1d whatever this field holds. The field keeps its place, so the fields
+    /// behind it are where they were: an application that set `parser` deletes the assignment, one that
+    /// did not changes nothing.
+    pub reserved_parser: u32,
+    /// `RAV1G_PARSER_OPTION_*` values added up: `RAV1G_PARSER_OPTIONS_DEFAULT`
     /// by default; 0 for none.
     pub parser_options: u32,
-    /// Frames whose parse may run at the same time, with `RAV1G_PARSER_RAV1D`: 1 to
+    /// Frames whose parse may run at the same time: 1 to
     /// `RAV1G_FRAMES_IN_PARSE_MAX`, and never more than the threads. 0 is the default: 2 for a decoder
     /// that is created for frames above 2560x1440 with at least 2 threads and 3 or more pipeline slots,
     /// else 1.
@@ -864,7 +861,7 @@ pub unsafe extern "C" fn rav1g_log_video_memory(d3d12_device: *mut c_void, label
 }
 
 /// The defaults: a decoder for 8-bit 1920x1088 frames with the shared back buffer, the parse pass of
-/// rav1d as its parser (`RAV1G_PARSER_RAV1D` with `RAV1G_PARSER_OPTIONS_DEFAULT`), no budget guard, and
+/// rav1d as its parser (with `RAV1G_PARSER_OPTIONS_DEFAULT`), no budget guard, and
 /// no output (the application sets `output`). Its threads, frames in parse and pipeline slots are 0, the
 /// defaults for the frame size the application then sets: one thread, one frame in parse and two slots
 /// up to 2560x1440; above, two threads and, where the slots fit, two frames in parse with three slots.
@@ -891,10 +888,7 @@ pub unsafe extern "C" fn rav1g_settings_default(settings: *mut Rav1gSettings) {
             packed_10x3: defaults.packed_10x3,
             output_all_layers: defaults.output_all_layers,
             operating_point: defaults.operating_point,
-            parser: match defaults.parser {
-                crate::Parser::Libaom => RAV1G_PARSER_LIBAOM,
-                crate::Parser::Rav1d => RAV1G_PARSER_RAV1D,
-            },
+            reserved_parser: 0,
             parser_options: defaults.parser_options.bits(),
             frames_in_parse: defaults.frames_in_parse,
             memory_available: None,
@@ -926,7 +920,6 @@ fn settings_of(settings: &Rav1gSettings) -> Settings {
         packed_10x3: settings.packed_10x3,
         operating_point: settings.operating_point,
         output_all_layers: settings.output_all_layers,
-        parser: if settings.parser == RAV1G_PARSER_LIBAOM { crate::Parser::Libaom } else { crate::Parser::Rav1d },
         parser_options: crate::ParserOptions::from_bits(settings.parser_options),
         memory_available: settings.memory_available.map(|available| -> crate::MemoryAvailable {
             Arc::new(move || {

@@ -66,20 +66,7 @@ typedef struct av1_stage_dump av1_stage_dump;
 #define RAV1G_LOW_MEMORY_ALL 7
 
 /*
- `Rav1gSettings::parser`: the entropy decoder of libaom reads the bitstream. It stays until the last
- step of phase 2 (docs/phase2-rav1d.md).
- */
-#define RAV1G_PARSER_LIBAOM 0
-
-/*
- `Rav1gSettings::parser`: the parse pass of rav1d reads the bitstream. The default of
- `rav1g_settings_default`, and what every value other than `RAV1G_PARSER_LIBAOM` selects. The same
- frames; the speed and what a damaged stream does differ (docs/phase2-rav1d.md).
- */
-#define RAV1G_PARSER_RAV1D 1
-
-/*
- `Rav1gSettings::parser_options`, values to add up: ways of doing the parse of `RAV1G_PARSER_RAV1D`
+ `Rav1gSettings::parser_options`, values to add up: ways of doing the parse (rav1d's parse pass)
  that give the same frames (docs/phase2-rav1d.md, "Where the time goes"). The value 1 was a switch
  that is gone and means nothing. This one: rav1d leaves out the masks and levels of its own loop
  filter, which nothing here reads. Part of `RAV1G_PARSER_OPTIONS_DEFAULT`.
@@ -163,7 +150,7 @@ typedef struct av1_stage_dump av1_stage_dump;
 /*
  `rav1g_set_clears`, the default: the wavefront of intra prediction is kept in a few KB at the edges of
  the tiles, and its grid in the pipeline slot (3.5 MB of a 4K frame) is not cleared at all. A grid
- that still needs a clear for every frame (the mode info grid with `RAV1G_PARSER_LIBAOM`) is cleared by
+ that still needs a clear for every frame (the mode info grid with `RAV1G_PARSER_OPTION_CLEAR_GRID`) is cleared by
  the completion thread.
  */
 #define RAV1G_CLEARS_NOT_NEEDED 0
@@ -303,9 +290,9 @@ typedef struct av1_stage_dump av1_stage_dump;
 
 /*
  The default of `Rav1gSettings::memory_headroom`: what a creation should leave of what
- `Rav1gSettings::memory_available` returns so that its frames are fast, 100 MiB.
+ `Rav1gSettings::memory_available` returns so that its frames are fast, 128 MiB.
  */
-#define RAV1G_MEMORY_GUARD_HEADROOM 104857600
+#define RAV1G_MEMORY_GUARD_HEADROOM 134217728
 
 /*
  How a call ended.
@@ -653,7 +640,7 @@ typedef struct Rav1gSettings {
   /*
    The threads that parse: the tiles of a frame and, with more than one frame in parse, the frames;
    at most 8. 0 is the default, by the frame size the decoder is created for: 1 up to 2560x1440, 2
-   above (with `RAV1G_PARSER_LIBAOM` 0 is 1).
+   above.
    */
   uint32_t threads;
   /*
@@ -687,16 +674,21 @@ typedef struct Rav1gSettings {
    */
   uint32_t operating_point;
   /*
-   What reads the bitstream: `RAV1G_PARSER_RAV1D` (the default) or `RAV1G_PARSER_LIBAOM`.
+   Not used: 0. Up to 0.2.157 this was `parser`, the choice between the parse pass of rav1d
+   (`RAV1G_PARSER_RAV1D`, 1, the default) and the entropy decoder of libaom (`RAV1G_PARSER_LIBAOM`,
+   0). That entropy decoder is no longer in the library, the two constants are gone, and every
+   decoder parses with rav1d whatever this field holds. The field keeps its place, so the fields
+   behind it are where they were: an application that set `parser` deletes the assignment, one that
+   did not changes nothing.
    */
-  uint32_t parser;
+  uint32_t reserved_parser;
   /*
-   `RAV1G_PARSER_OPTION_*` values added up, for `RAV1G_PARSER_RAV1D`: `RAV1G_PARSER_OPTIONS_DEFAULT`
+   `RAV1G_PARSER_OPTION_*` values added up: `RAV1G_PARSER_OPTIONS_DEFAULT`
    by default; 0 for none.
    */
   uint32_t parser_options;
   /*
-   Frames whose parse may run at the same time, with `RAV1G_PARSER_RAV1D`: 1 to
+   Frames whose parse may run at the same time: 1 to
    `RAV1G_FRAMES_IN_PARSE_MAX`, and never more than the threads. 0 is the default: 2 for a decoder
    that is created for frames above 2560x1440 with at least 2 threads and 3 or more pipeline slots,
    else 1.
@@ -940,7 +932,7 @@ void rav1g_log_video_memory(void *d3d12_device, const char *label);
 
 /*
  The defaults: a decoder for 8-bit 1920x1088 frames with the shared back buffer, the parse pass of
- rav1d as its parser (`RAV1G_PARSER_RAV1D` with `RAV1G_PARSER_OPTIONS_DEFAULT`), no budget guard, and
+ rav1d as its parser (with `RAV1G_PARSER_OPTIONS_DEFAULT`), no budget guard, and
  no output (the application sets `output`). Its threads, frames in parse and pipeline slots are 0, the
  defaults for the frame size the application then sets: one thread, one frame in parse and two slots
  up to 2560x1440; above, two threads and, where the slots fit, two frames in parse with three slots.

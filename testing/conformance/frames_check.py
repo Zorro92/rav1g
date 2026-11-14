@@ -19,7 +19,7 @@ What is checked:
     threads, two frames in parse and three slots for the large stream, one, one and two for the small one;
     one frame in parse where the slots are fixed at two. A decoder has one slot more than frames in parse.
   - **The budget guard.** With a budget (-budget) that holds the decoder of two frames in parse and the
-    headroom the guard wants behind a decoder (100 MiB), a task that asks for two frames in parse, or
+    headroom the guard wants behind a decoder (128 MiB), a task that asks for two frames in parse, or
     for nothing, gets them; with 2 MiB less it gets a decoder with one frame in parse and two slots, says
     so in "MEMORY headroom" lines, and decodes. A fourth slot (-slots 4, or four frames in parse) in the
     budget of the default gets three slots and two frames in parse, which is the case of the console in
@@ -52,7 +52,7 @@ import sys
 # The margin the budget guard keeps at a creation (AV1_MEMORY_GUARD_MARGIN), MiB, and the headroom it
 # wants behind a decoder (AV1_MEMORY_GUARD_HEADROOM).
 MARGIN = 48
-HEADROOM = 100
+HEADROOM = 128
 CONFIGURATION = re.compile(r'^CONFIGURATION .*?: threads (\d+) \(asked -?\d+\), frames in parse (\d+) \(asked -?\d+\), '
                            r'slots (\d+) \(asked -?\d+\); device buffers ([0-9.]+) MiB', re.M)
 # (label, flags, (threads, frames in parse, slots) for the large stream, the same for the small one).

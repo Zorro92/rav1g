@@ -31,8 +31,9 @@ stream, one back buffer shared by all frames, two frames in flight, rav1d's pars
 the parser, and no per-frame clears of a slot by the CPU (the wavefront of intra prediction
 is kept at the edges of the tiles). Each was md5-exact on the console, except the last,
 which is new in package 0.2.148.0 and md5-exact in CI; `-cpuclear` is the default before it.
-The upstream behaviour is `-cdefv1 -nofitsize -lowmemparts 0
--parser c -syncclear` in the test player. Everything else that was tried (`-slots 3`,
+The upstream behaviour was `-cdefv1 -nofitsize -lowmemparts 0
+-parser c -syncclear` in the test player; `-parser c`, upstream's entropy decoder, is no longer in
+the decoder (package 0.2.158). Everything else that was tried (`-slots 3`,
 `-lowmem`, `-intrav2`, `-intraopt`) stays behind its flag. The columns below name the flags the runs were made
 with; `-cdefv2`, `-fitsize` and the shared back buffer of `-lowmem` are the defaults now.
 
@@ -165,28 +166,27 @@ a Rust interface (the `rav1g` crate) and an interface for C (`crates/rav1g/inclu
 test player uses). On the console it decodes the md5 set byte-identically and is as fast as the C++
 decoder or faster (1.5 to 4 % in the tile threads with the C of the parser compiled by clang, 7 to 14 %
 in the recording). The C++ host was removed from this branch after that; CI still holds every frame,
-the stage dumps and the memory lines of the Rust decoder against the C++ decoder of branch `cpp`, for as
+and the stage dumps of the Rust decoder against the C++ decoder of branch `cpp`, for as
 long as the two have the same shaders. The test player comes in two packages per run: the default with
-the library as `rav1g.dll` (C of clang), and a static build with the C of MSVC
+the library as `rav1g.dll`, and a build with the static library linked by MSVC
 ([docs/test-player.md](docs/test-player.md)).
 
-Next targets: phase 2, the parser of rav1d in place of the C parser, which is the CPU limit at 4K
-([docs/phase2-rav1d.md](docs/phase2-rav1d.md) has the design, the measurements behind it and the
-progress). Its first three steps are done: rav1d's parse pass is in the tree (`third_party/rav1d`) and in
-the library, on every stream of the conformance set it gives the same mode info records, block
-lists, transform blocks and coefficients as the C parser, byte for byte (`tools/rav1g-parse-check`, on
-Linux in CI), and the decoder runs on it: a decoder is created with either parser
-(`Settings::parser`, `Rav1gSettings::parser`, `rav1g-dec -parser c|rav1d`, the same flag in the test
-player), one frame in parse at a time, and both give the same frames and the same buffers behind every
-GPU stage. The console has timed the two (heavy 4K 10-bit at 40 Mbps: 19.5 frames per second with the
-C parser, 24.5 to 25.2 with rav1d; 22.7 against 29.0 to 31.2 on a second clip), so **rav1d's parse pass
-is the parser of a decoder unless it is created with the other one** (`-parser c`, which stays until
-the last step of phase 2), with two switches of its parse on that the same measurement chose
-(`-parseopt`). Next is step 4, frames in parallel. And
+**Phase 2, the parser of rav1d in place of the C parser, is complete**
+([docs/phase2-rav1d.md](docs/phase2-rav1d.md) has the design, the measurements and the progress, step
+by step). The decoder parses with rav1d's parse pass (`third_party/rav1d`), with two frames in parse
+on two threads for a 4K stream, and takes the mode info records, coefficients and transform block
+records of all frames in flight from pools; a 4K 10-bit decoder is 646.5 MiB of device buffers and
+runs in a console app of 1 GiB at 45 to 49 frames per second on the two heavy 4K clips (19.5 and 22.7
+with the C parser). In its last step the entropy decoder of libaom left the decoder: the library
+compiles no C of `libav1` any more (the six set-up functions and the tables the host still needed of
+libaom's common code are Rust now), `-parser c`, `Settings::parser` and `RAV1G_PARSER_*` are gone, and
+the C parser lives on in two places only, both as a reference: `tools/rav1g-parse-check`, which holds
+rav1d's parse against it value by value on Linux in CI, and the C++ decoder of branch `cpp`, which CI
+holds every frame and the stage dumps against. Next: the P010 output mode, and
 inter and intra prediction on the GPU (a measured `-interfast` prototype showed that inter time is per
 block and per dispatch, not filtering; see [gpu-av1-decoder.md](docs/gpu-av1-decoder.md)).
-The goals, in order: heavy 4K at 30 fps in real time (at most 33.3 ms per frame; not met
-yet, nor the 41.7 ms of 24 fps), then faster still, then decoding with as much of the CPU, GPU and
+The goals, in order: heavy 4K at 30 fps in real time (at most 33.3 ms per frame; met on the
+two heavy clips since the frames in parallel of phase 2), then faster still, then decoding with as much of the CPU, GPU and
 memory as possible left to the application.
 
 ## Documentation

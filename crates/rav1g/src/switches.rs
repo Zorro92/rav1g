@@ -54,7 +54,7 @@ pub enum Poison {
 #[repr(i32)]
 pub enum Clears {
     /// The wavefront is kept in a few KB at the edges of the tiles and its grid is not cleared at all. A
-    /// grid that still needs a clear (the mode info grid with [`crate::Parser::Libaom`]) is cleared by
+    /// grid that still needs a clear (the mode info grid with [`crate::ParserOptions::CLEAR_GRID`]) is cleared by
     /// the completion thread.
     #[default]
     NotNeeded = 0,

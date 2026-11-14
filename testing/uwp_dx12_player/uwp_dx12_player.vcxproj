@@ -242,8 +242,8 @@
        the package next to the program: the build whose C is compiled by clang with link time
        optimisation, which only lld-link can link. This is the default package of CI.
 
-       /p:Rav1gRustLib=<directory>: the static library, rav1g.lib, with the two libraries of the C
-       (rav1g_c.lib, rav1g_c_speed.lib; objects of /GL, compiled by this link). The functions of
+       /p:Rav1gRustLib=<directory>: the static library, rav1g.lib, with the library of its C
+       (rav1g_c.lib: the shader table; objects of /GL, compiled by this link). The functions of
        Windows have to come from the API sets of WindowsApp.lib, as they do for the rest of the
        player: a program that imports from kernel32.dll may not load in the console's app container.
        Two things see to that. rav1g.lib is given without the import members for desktop DLLs that
@@ -256,7 +256,7 @@
        kernel32.dll does get into the program. -->
   <ItemDefinitionGroup Condition="'$(Rav1gRustLib)'!=''">
     <Link>
-      <AdditionalDependencies>$(Rav1gRustLib)\rav1g.lib;$(Rav1gRustLib)\rav1g_c.lib;$(Rav1gRustLib)\rav1g_c_speed.lib;WindowsApp.lib;ntdll.lib;userenv.lib;kernel32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>$(Rav1gRustLib)\rav1g.lib;$(Rav1gRustLib)\rav1g_c.lib;WindowsApp.lib;ntdll.lib;userenv.lib;kernel32.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Rav1gRustDll)'!=''">

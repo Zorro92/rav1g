@@ -49,7 +49,7 @@ TASKS = [
 # What the player says about the clears of each task, in the order of the tasks.
 CLEARS = ['Clears: none needed', 'Clears: GPU,', 'Clears: completion thread;', 'Clears: decode thread;',
           'Clears: none needed', 'Clears: none needed']
-# What the player says about the frames in parse of each task (with -parser c a decoder has one).
+# What the player says about the frames in parse of each task.
 FRAMES = ['Frames in parse: 1 on 1 parser', 'Frames in parse: 1 on 4 parser', 'Frames in parse: 1 on 4 parser',
           'Frames in parse: 1 on 1 parser', 'Frames in parse: 1 on 1 parser', 'Frames in parse: 2 on 4 parser']
 # The player's line about the colour of the HDR10 stream (rav1g_color_text of rav1g.h; docs/color.md): the
@@ -85,7 +85,7 @@ def main():
     parser.add_argument('--tool', required=True, help='rav1g-dec.exe')
     parser.add_argument('--tool-args', default='', help='further arguments for it, e.g. "-hw"')
     parser.add_argument('--player-args', default='', help='further flags for every task of the player, e.g. '
-                        '"-parser c" or "-parseopt none,time"')
+                        '"-parseopt none,time"')
     parser.add_argument('--streams', required=True, help='the directory of the conformance streams')
     parser.add_argument('--out', required=True, help='the logs')
     parser.add_argument('--title', default='the Rust library')
@@ -115,17 +115,13 @@ def main():
         problems.append('%d error lines in the player log; the first: %s' % (len(errors), errors[0]))
     if re.search(r'(?i)device.{0,16}removed|DXGI_ERROR_DEVICE', text):
         problems.append('a task lost the D3D12 device')
-    # What reads the streams: the parse pass of rav1d with its two default switches unless the tasks say
-    # otherwise (-parser c; -parseopt none).
-    if '-parser c' in args.player_args:
-        if 'Parser: the entropy decoder of libaom' not in text or 'Parser: the parse pass of rav1d' in text:
-            problems.append('the log does not say that the entropy decoder of libaom reads the streams')
-    else:
-        if 'Parser: the parse pass of rav1d' not in text or 'Parser: the entropy decoder of libaom' in text:
-            problems.append('the log does not say that the parse pass of rav1d reads the streams')
-        switches = 'none' if '-parseopt none' in args.player_args else 'nolfmask tilethread'
-        if 'Parser switches (-parseopt): ' + switches not in text:
-            problems.append('the log does not say that the switches of the parser are: ' + switches)
+    # What reads the streams: the parse pass of rav1d, with its two default switches unless the tasks say
+    # otherwise (-parseopt none).
+    if 'Parser: the parse pass of rav1d' not in text:
+        problems.append('the log does not say that the parse pass of rav1d reads the streams')
+    switches = 'none' if '-parseopt none' in args.player_args else 'nolfmask tilethread'
+    if 'Parser switches (-parseopt): ' + switches not in text:
+        problems.append('the log does not say that the switches of the parser are: ' + switches)
     # Who clears the grids of a slot, task by task; the task with -gpuclear clears with its command lists
     # (the timing run of the task with -syncclear has no such stage).
     clears = [line[line.index('Clears: '):] for line in text.split('\n') if 'Clears: ' in line]
@@ -133,10 +129,9 @@ def main():
         problems.append('the Clears lines of the player are not those of the tasks: %s' % ' | '.join(clears))
     if re.search(r'GPUTIME gpu slot_clear +[1-9]', text):
         problems.append('the task with -syncclear has the clears of the GPU in its timing run')
-    # The frames in parse of each task: one, and two for the task that asks for them, unless the entropy
-    # decoder of libaom reads the streams.
+    # The frames in parse of each task: one, and two for the task that asks for them.
     frames = [line[line.index('Frames in parse: '):] for line in text.split('\n') if 'Frames in parse: ' in line]
-    expected = FRAMES if '-parser c' not in args.player_args else FRAMES[:-1] + ['Frames in parse: 1 on 4 parser']
+    expected = FRAMES
     if len(frames) != len(expected) or not all(line.startswith(start) for line, start in zip(frames, expected)):
         problems.append('the "Frames in parse" lines of the player are not those of the tasks: %s' % ' | '.join(frames))
     ok = text.count('MD5 is OK')

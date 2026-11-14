@@ -16,9 +16,9 @@ use super::core::{
 };
 use super::frame::joined_runs;
 use super::tables::{TX_SIZE_HIGH, TX_SIZE_WIDE};
-use super::types::{Av1Core, Run};
+use super::types::Av1Core;
 use crate::sys::parser::{
-    AV1_PERF_GPU_IDCT, AV1_PERF_GPU_IDCT_SORT, AV1_PERF_GPU_RESIDUAL_CLEAR, TX_4X4, TX_SIZES_ALL, av1_idct_scans,
+    AV1_PERF_GPU_IDCT, AV1_PERF_GPU_IDCT_SORT, AV1_PERF_GPU_RESIDUAL_CLEAR, TX_4X4, TX_SIZES_ALL,
 };
 
 /// Transform types of the sort: the transform sizes and the lossless transform.
@@ -81,19 +81,12 @@ pub(crate) unsafe fn idct_run(dec: *mut Av1Core) {
         let shader = pipeline(&raw const (*lib).shader_idct_sort);
         commands.set_layout(shader.layout());
         commands.set_pipeline(shader);
-        // The records of the tiles: the slot's buffer, or with pools the pool of all frames, where a
-        // tile's records are in pieces: a dispatch for each run of pieces that follow each other.
-        let pooled = (*dec).pools.is_some();
-        let unordered = if pooled { (*dec).idct_blocks_pool } else { td.idct_blocks_unordered };
-        commands.bind_read(0, buffer(unordered).location());
+        // The records of the tiles: the pool of all frames, where a tile's records are in pieces: a
+        // dispatch for each run of pieces that follow each other.
+        commands.bind_read(0, buffer((*dec).idct_blocks_pool).location());
         commands.bind_write(1, blocks.location());
         for (index, tile) in tiles.iter().enumerate() {
-            let runs = if pooled {
-                joined_runs(&td.pieces[index].txb)
-            } else {
-                vec![Run { first: tile.blocks_offset, count: tile.idct_blocks_ptr }]
-            };
-            for run in runs {
+            for run in joined_runs(&td.pieces[index].txb) {
                 let sort = alloc_constants::<SortData>(&mut td.command_buffer);
                 for tx_type in 0..TX_TYPES {
                     (*sort.data).offsets[tx_type][0] = tile.idct_blocks_sizes[tx_type];
@@ -141,16 +134,18 @@ pub(crate) unsafe fn idct_run(dec: *mut Av1Core) {
             // coefficients in its left half only; its scans count in rows of 32 and become rows of 64.
             let scans = alloc_constant_bytes(&mut td.command_buffer, block_size * 3 * 4);
             let gpu_scans = scans.data.cast::<c_int>();
-            for (order, &scan) in av1_idct_scans[tx_size].iter().enumerate() {
+            for (order, &scan) in super::libaom::IDCT_SCANS[tx_size].iter().enumerate() {
                 let dst = std::slice::from_raw_parts_mut(gpu_scans.add(order * block_size), block_size);
+                // A transform with a side of 64 has coefficients in 32 of them only, and its scan is that
+                // of the 32: shorter than the block. The positions behind the scan are never reached
+                // (the C read them from whatever followed the table); they are 0 here.
+                dst.fill(0);
                 if block_w > 32 {
-                    let scan = std::slice::from_raw_parts(scan, 32 * block_h);
                     for (dst, &position) in dst.iter_mut().zip(scan) {
                         let position = c_int::from(position);
                         *dst = (position & 31) + (position / 32) * 64;
                     }
                 } else {
-                    let scan = std::slice::from_raw_parts(scan, block_size);
                     for (dst, &position) in dst.iter_mut().zip(scan) {
                         *dst = c_int::from(position);
                     }

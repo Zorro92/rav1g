@@ -38,7 +38,7 @@ def main():
     parser.add_argument('--tasks', required=True)
     parser.add_argument('--out', required=True)
     parser.add_argument('--threads', type=int, default=4)
-    parser.add_argument('--tool-args', default='', help='further arguments for the tool, e.g. "-parser rav1d"')
+    parser.add_argument('--tool-args', default='', help='further arguments for the tool, e.g. "-parseopt none"')
     args = parser.parse_args()
     tool = os.path.abspath(args.tool)
     out = os.path.abspath(args.out)

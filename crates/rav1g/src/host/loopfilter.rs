@@ -20,11 +20,6 @@ use super::core::{
 use super::types::{Av1Core, av1_stage_dump_region};
 use crate::sys::parser::{AV1_COMMON, AV1_PERF_GPU_LF_GEN, AV1_PERF_GPU_LF_HORZ, AV1_PERF_GPU_LF_VERT, MACROBLOCKD};
 
-unsafe extern "C" {
-    /// `av1/common/av1_loopfilter.c`: the filter levels of the frame by segment, reference and mode.
-    fn av1_loop_filter_frame_init(cm: *mut AV1_COMMON, plane_start: c_int, plane_end: c_int);
-}
-
 /// The constants of the filter shaders.
 #[repr(C)]
 struct LoopfilterData {
@@ -77,7 +72,8 @@ pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: 
         if (*cm).lf.filter_level[0] == 0 && (*cm).lf.filter_level[1] == 0 {
             return;
         }
-        av1_loop_filter_frame_init(cm, 0, 3);
+        // The filter levels of the frame by segment, reference and mode.
+        super::libaom::loop_filter_frame_init(&mut *cm);
         let cm = &*cm;
         let lf = &cm.lf;
 

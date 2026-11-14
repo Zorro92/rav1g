@@ -368,7 +368,6 @@ class AV1Decoder {
   uint64_t largest_device_size_ = 0;
   bool created_intrav2_ = false;
   bool created_interfast_ = false;
-  bool created_parser_rav1d_ = false;
   unsigned created_parser_options_ = 0;
   int created_lowmem_ = 0;
   bool created_packed_10x3_ = false;

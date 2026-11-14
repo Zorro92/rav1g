@@ -17,7 +17,7 @@ use windows::core::Interface;
 use crate::color::{color_of_image, hdr_of_image};
 use crate::device::Device;
 use crate::error::{Error, ErrorCode, text};
-use crate::host::{decoder_own_bytes, frame_fence};
+use crate::host::{self, decoder_own_bytes, frame_fence};
 use crate::output::{Frame, ImageFormat, ImageRequest, Output, OutputImage};
 use crate::sys;
 
@@ -57,18 +57,7 @@ impl BitOr for LowMemory {
     }
 }
 
-/// What reads the bitstream of a decoder ([`Settings::parser`]). Both give the same frames; they differ
-/// in speed and in what a damaged stream does (docs/phase2-rav1d.md).
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum Parser {
-    /// The entropy decoder of libaom (C). It stays until the last step of phase 2.
-    Libaom,
-    /// The parse pass of rav1d. The default.
-    #[default]
-    Rav1d,
-}
-
-/// The switches of [`Parser::Rav1d`] ([`Settings::parser_options`]): rav1d without the masks of its own
+/// The switches of the parser ([`Settings::parser_options`]): rav1d without the masks of its own
 /// loop filter and a tile kept on its thread, which are both on by default, and the calls of the sink
 /// timed. The frames are the same with every one.
 pub use rav1g_parse::options::ParseOptions as ParserOptions;
@@ -89,9 +78,9 @@ pub struct Settings {
     pub bit_depth: u32,
     /// The threads that parse: the tiles of a frame and, with more than one frame in parse, the frames;
     /// at most 8. 0 is the default, by the frame size the decoder is created for: 1 up to 2560x1440, 2
-    /// above (with [`Parser::Libaom`] 0 is 1).
+    /// above.
     pub threads: u32,
-    /// Frames whose parse may run at the same time, with [`Parser::Rav1d`]: 1 to 4, and never more than
+    /// Frames whose parse may run at the same time: 1 to 4, and never more than
     /// the threads. 0 is the default: 2 for a decoder that is created for frames above 2560x1440 with at
     /// least 2 threads and 3 or more pipeline slots, else 1.
     ///
@@ -124,9 +113,7 @@ pub struct Settings {
     pub operating_point: u32,
     /// The frame of every spatial layer of a temporal unit is output, instead of the highest one.
     pub output_all_layers: bool,
-    /// What reads the bitstream: [`Parser::Rav1d`] unless the application says otherwise.
-    pub parser: Parser,
-    /// The switches of [`Parser::Rav1d`]: ways of doing the same parse. The default has the two on that
+    /// The switches of the parser: ways of doing the same parse. The default has the two on that
     /// make it faster; [`ParserOptions::NONE`] turns them off.
     pub parser_options: ParserOptions,
     /// The budget guard. On a console an application that goes over its memory limit loses its D3D12
@@ -138,7 +125,7 @@ pub struct Settings {
     /// With [`Settings::memory_available`]: the bytes a creation should leave of what the callback
     /// returns, behind its device buffers, so that the frames are not slowed by the memory running out
     /// (on the console a 4K decoder that left 77 MiB ran at 19.5 frames a second, one that left 128 at
-    /// 45.7). 0 is the default, 100 MiB; a value below 48 MiB is 48 MiB. A decoder that would leave
+    /// 45.7). 0 is the default, 128 MiB; a value below 48 MiB is 48 MiB. A decoder that would leave
     /// less is created with fewer slots and frames in parse, never refused for it: one slot less at a
     /// time down to 2, the first that leaves the headroom, or the smallest ("MEMORY headroom" log lines).
     /// [`Decoder::configuration`] says what was created.
@@ -163,7 +150,6 @@ impl Default for Settings {
             packed_10x3: false,
             operating_point: 0,
             output_all_layers: false,
-            parser: Parser::default(),
             parser_options: ParserOptions::default(),
             memory_available: None,
             memory_headroom: 0,
@@ -209,9 +195,6 @@ impl Settings {
         cfg.height = self.height;
         cfg.bitdepth = self.bit_depth;
         cfg.threads = self.threads;
-        cfg.cfg.ext_partition = 1;
-        // SAFETY: returns a constant of the build.
-        cfg.allow_lowbitdepth = unsafe { sys::rav1g_config_lowbitdepth() } as _;
         cfg.host_size = 0;
         cfg.tryHDR10x3 = c_int::from(self.packed_10x3);
         cfg.frame_slots = self.frame_slots as c_int;
@@ -219,10 +202,6 @@ impl Settings {
         cfg.intra_v2 = c_int::from(self.intra_v2);
         cfg.inter_fast = c_int::from(self.inter_fast);
         cfg.low_memory = self.low_memory.to_raw();
-        cfg.parser = match self.parser {
-            Parser::Libaom => sys::AV1_PARSER_LIBAOM,
-            Parser::Rav1d => sys::AV1_PARSER_RAV1D,
-        } as c_int;
         cfg.parser_options = self.parser_options.bits() as c_int;
         cfg
     }
@@ -231,9 +210,9 @@ impl Settings {
     pub fn memory_requirements(&self) -> MemoryRequirements {
         let mut cfg = self.to_raw();
         // SAFETY: cfg is a valid configuration; the call reads sizes and writes the three results.
-        unsafe { sys::av1_codec_query_memory_requirements(&mut cfg) };
+        unsafe { host::av1_query_memory_requirements((&raw mut cfg).cast()) };
         MemoryRequirements {
-            // The query of the C interface gives the host pool; the decoder is an allocation next to it.
+            // The query gives the host pool; the decoder is an allocation next to it.
             host_size: cfg.host_size + decoder_own_bytes(),
             device_size: cfg.device_size,
             device_size_deferred: cfg.device_size_deferred,
@@ -357,25 +336,52 @@ unsafe extern "C" fn frame_ready(context: *mut c_void, image: *mut c_void) -> c_
 /// 4. [`Decoder::drain`]: every frame that was submitted has been handed over. Then drop the decoder, or
 ///    go on decoding.
 pub struct Decoder {
-    ctx: Box<sys::aom_codec_ctx_t>,
-    // Handed to the decoder at creation; freed after aom_codec_destroy.
+    // The decoder of the host; released in `drop`.
+    core: *mut host::Av1Core,
+    // What the layers of a stream are decoded with (`set_operating_point`, `set_output_all_layers`).
+    operating_point: c_int,
+    output_all_layers: bool,
+    // Handed to the decoder at creation; freed after its release.
     _host_memory: Vec<u8>,
-    // The context of the callbacks; freed after aom_codec_destroy, which still calls them.
+    // The context of the callbacks; freed after the release, which still calls them.
     _shared: Box<Shared>,
     // The device, the queue and the pipeline states the decoder uses.
     device: Device,
 }
 
-// SAFETY: the context is only used through &mut self; the library's own threads are its business, and
+// SAFETY: the decoder is only used through &mut self; the library's own threads are its business, and
 // what they call (`Shared`) is Send + Sync.
 unsafe impl Send for Decoder {}
+
+/// The text of a kind of error, as the interface of the entropy decoder had it (`aom_codec_err_to_string`).
+fn kind_text(code: sys::aom_codec_err_t) -> &'static str {
+    match code {
+        sys::AOM_CODEC_OK => "Success",
+        sys::AOM_CODEC_ERROR => "Unspecified internal error",
+        sys::AOM_CODEC_MEM_ERROR => "Memory allocation error",
+        sys::AOM_CODEC_ABI_MISMATCH => "ABI version mismatch",
+        sys::AOM_CODEC_INCAPABLE => "Codec does not implement requested capability",
+        sys::AOM_CODEC_UNSUP_BITSTREAM => "Bitstream not supported by this decoder",
+        sys::AOM_CODEC_UNSUP_FEATURE => "Bitstream required feature not supported by this decoder",
+        sys::AOM_CODEC_CORRUPT_FRAME => "Corrupt frame detected",
+        sys::AOM_CODEC_INVALID_PARAM => "Invalid parameter",
+        sys::AOM_CODEC_LIST_END => "End of iterated list",
+        sys::AOM_CODEC_NEEDS_RECONFIGURE => "The sequence needs a decoder created for its frame size and bit depth",
+        _ => "Unrecognized error code",
+    }
+}
+
+/// The error of a call of the host, with what the host said about it.
+fn failed(code: sys::aom_codec_err_t, detail: *const std::ffi::c_char) -> Error {
+    Error { code: ErrorCode::from_raw(code), message: String::from(kind_text(code)), detail: text(detail) }
+}
 
 impl Decoder {
     /// Creates a decoder. Waits for the pipeline states of the device when they are still being created.
     pub fn new(device: &Device, settings: &Settings, output: Arc<dyn Output>) -> Result<Decoder, Error> {
         let mut cfg = settings.to_raw();
         // SAFETY: as in memory_requirements.
-        unsafe { sys::av1_codec_query_memory_requirements(&mut cfg) };
+        unsafe { host::av1_query_memory_requirements((&raw mut cfg).cast()) };
         let mut host_memory: Vec<u8> = Vec::new();
         if host_memory.try_reserve_exact(cfg.host_size).is_err() {
             return Err(Error::new(
@@ -403,43 +409,31 @@ impl Decoder {
         cfg.dx12device = device.d3d12_device().as_raw();
         cfg.dx12command_queue = device.d3d12_queue().as_raw();
         cfg.dxPsos = device.pipelines_ptr();
-        let mut ctx = Box::new(sys::aom_codec_ctx_t::default());
-        // SAFETY: ctx and cfg are valid; the device, the queue and the pipeline states are kept by the
-        // decoder's `Device`, the host memory and the context of the callbacks by the decoder.
-        let code = unsafe { sys::rav1g_codec_dec_init(&mut *ctx, &cfg, 0) };
-        if code != sys::AOM_CODEC_OK {
-            // SAFETY: a context that failed to initialise still answers the error calls.
-            let (message, detail) =
-                unsafe { (text(sys::aom_codec_error(&mut *ctx)), text(sys::aom_codec_error_detail(&mut *ctx))) };
+        let mut core = std::ptr::null_mut();
+        // SAFETY: cfg is valid; the device, the queue and the pipeline states are kept by the decoder's
+        // `Device`, the host memory and the context of the callbacks by the decoder.
+        if unsafe { host::av1_create_gpu_decoder(&mut core, (&raw mut cfg).cast()) } != 0 {
+            // The creation has released everything it built. The line that names what failed is the
+            // detail.
             return Err(Error {
-                code: ErrorCode::from_raw(code),
-                message: format!("decoder creation failed: {}", if message.is_empty() { "?" } else { &message }),
-                detail,
+                code: ErrorCode::Memory,
+                message: format!("decoder creation failed: {}", kind_text(sys::AOM_CODEC_MEM_ERROR)),
+                detail: text(host::log::av1_last_create_error()),
             });
         }
-        let mut decoder = Decoder { ctx, _host_memory: host_memory, _shared: shared, device: device.clone() };
-        decoder.set_output_all_layers(settings.output_all_layers)?;
-        decoder.set_operating_point(settings.operating_point)?;
-        Ok(decoder)
+        Ok(Decoder {
+            core,
+            operating_point: settings.operating_point as c_int,
+            output_all_layers: settings.output_all_layers,
+            _host_memory: host_memory,
+            _shared: shared,
+            device: device.clone(),
+        })
     }
 
     /// The device of the decoder.
     pub fn device(&self) -> &Device {
         &self.device
-    }
-
-    fn check(&mut self, code: sys::aom_codec_err_t) -> Result<(), Error> {
-        if code == sys::AOM_CODEC_OK {
-            return Ok(());
-        }
-        // SAFETY: the context is valid.
-        unsafe {
-            Err(Error {
-                code: ErrorCode::from_raw(code),
-                message: text(sys::aom_codec_error(&mut *self.ctx)),
-                detail: text(sys::aom_codec_error_detail(&mut *self.ctx)),
-            })
-        }
     }
 
     /// Decodes one temporal unit. `user_data` comes back with the frames of the unit
@@ -454,12 +448,24 @@ impl Decoder {
     /// that of a frame of an earlier call whose parse or submission failed since (when this unit has no error of its own): one error a call,
     /// the oldest first.
     pub fn decode(&mut self, data: &[u8], user_data: u64) -> Result<(), Error> {
+        if data.is_empty() {
+            return Err(failed(sys::AOM_CODEC_INVALID_PARAM, std::ptr::null()));
+        }
+        let mut detail = std::ptr::null();
         // SAFETY: data is valid for data.len() bytes for the duration of the call; the user value is
-        // carried, never followed.
+        // carried, never followed; the detail lives until the next call of the decoder.
         let code = unsafe {
-            sys::aom_codec_decode(&mut *self.ctx, data.as_ptr(), data.len(), user_data as usize as *mut c_void)
+            host::rav1g_rav1d_decode(
+                self.core,
+                data.as_ptr(),
+                data.len(),
+                user_data as usize as *mut c_void,
+                self.operating_point,
+                c_int::from(self.output_all_layers),
+                &mut detail,
+            )
         };
-        self.check(code)
+        if code == sys::AOM_CODEC_OK { Ok(()) } else { Err(failed(code, detail)) }
     }
 
     /// Waits for the frames in flight: every frame whose parse has begun is parsed and submitted, every
@@ -470,19 +476,25 @@ impl Decoder {
     /// the error of a frame that was still in parse when the last [`Self::decode`] returned, if one
     /// failed: one error a call, so an application that counts them calls this until it is `Ok`.
     pub fn drain(&mut self) -> Result<(), Error> {
-        // SAFETY: a NULL buffer of size 0 is the drain call of the interface.
-        let code = unsafe { sys::aom_codec_decode(&mut *self.ctx, std::ptr::null(), 0, std::ptr::null_mut()) };
-        self.check(code)
+        let mut detail = std::ptr::null();
+        // SAFETY: the decoder; the detail lives until the next call of the decoder.
+        let code = unsafe {
+            host::av1_drain_gpu_decoder(self.core);
+            // With more than one frame in parse, a frame that was in parse when the last decode call
+            // returned may have failed: the drain says so, one error a call.
+            host::rav1g_rav1d_drain(self.core, &mut detail)
+        };
+        if code == sys::AOM_CODEC_OK { Ok(()) } else { Err(failed(code, detail)) }
     }
 
     /// What the decoder was created with: the threads, the frames in parse and the slots, with the
     /// defaults of the settings resolved and after the budget guard's choice, and its device buffers.
     pub fn configuration(&mut self) -> Configuration {
         let (mut frames_in_parse, mut threads, mut frame_slots, mut device_size) = (1, 1, 2, 0);
-        // SAFETY: the context is valid; the four are written.
+        // SAFETY: the decoder; the four are written.
         unsafe {
-            sys::av1_codec_get_configuration(
-                &mut *self.ctx,
+            host::av1_decoder_configuration(
+                self.core,
                 &mut frames_in_parse,
                 &mut threads,
                 &mut frame_slots,
@@ -497,18 +509,18 @@ impl Decoder {
         }
     }
 
-    /// The frame of every spatial layer of a temporal unit, instead of the highest one.
+    /// The frame of every spatial layer of a temporal unit, instead of the highest one. From the next
+    /// [`Self::decode`] on.
     pub fn set_output_all_layers(&mut self, enable: bool) -> Result<(), Error> {
-        // SAFETY: the context is valid.
-        let code = unsafe { sys::rav1g_codec_set_output_all_layers(&mut *self.ctx, c_int::from(enable)) };
-        self.check(code)
+        self.output_all_layers = enable;
+        Ok(())
     }
 
-    /// The operating point of a stream with layers.
+    /// The operating point of a stream with layers. From the next [`Self::decode`] on; the parser takes
+    /// it at the next sequence header.
     pub fn set_operating_point(&mut self, operating_point: u32) -> Result<(), Error> {
-        // SAFETY: the context is valid.
-        let code = unsafe { sys::rav1g_codec_set_operating_point(&mut *self.ctx, operating_point as c_int) };
-        self.check(code)
+        self.operating_point = operating_point as c_int;
+        Ok(())
     }
 }
 
@@ -516,8 +528,8 @@ impl Drop for Decoder {
     /// Waits for the frames in flight, hands them over and releases the decoder. With a budget callback
     /// the release is logged step by step ("MEMORY destroy").
     fn drop(&mut self) {
-        // SAFETY: created by aom_codec_dec_init, destroyed once; the host memory and the context of the
-        // callbacks are freed after this.
-        unsafe { sys::aom_codec_destroy(&mut *self.ctx) };
+        // SAFETY: created by `new`, released once; the host memory and the context of the callbacks are
+        // freed after this.
+        unsafe { host::av1_destroy_gpu_decoder(self.core) };
     }
 }

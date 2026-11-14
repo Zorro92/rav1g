@@ -1,7 +1,9 @@
-# The C of the decoder: the libaom-derived parser and entropy decoder (libav1/av1, libav1/aom*), one file
-# per line, relative to libav1. crates/rav1g-sys/build.rs compiles every file of this list, at /O1 /Ot, and
-# the files marked /O2 at /O2: the settings the library project of the C++ decoder had for them in Release
-# x64 (branch cpp, libav1/build/libav1.vcxproj), which the timings of docs/rust-port.md were taken with.
+# The libaom-derived parser and entropy decoder (libav1/av1, libav1/aom*), one file per line, relative to
+# libav1. crates/rav1g-sys/build.rs compiles every file of this list for a target that is not Windows,
+# where the crate is the reference of tools/rav1g-parse-check: at /O1 /Ot, and the files marked /O2 at
+# /O2, the settings the library project of the C++ decoder had for them in Release x64 (branch cpp,
+# libav1/build/libav1.vcxproj). For a Windows target, the decoder, only the files marked host would be
+# compiled: none is, since the decoder has no C of libav1 any more (docs/phase2-rav1d.md, step 6).
 # A file that is added to or removed from libav1 is added or removed here.
 aom/src/aom_codec.c
 aom/src/aom_decoder.c

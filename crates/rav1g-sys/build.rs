@@ -6,27 +6,30 @@
 // License 1.0 was not distributed with this source code in the PATENTS file, you can obtain it at
 // www.aomedia.org/license/patent.
 
-//! Builds the C of the decoder (the libaom-derived parser and entropy decoder of `libav1/av1`,
-//! `libav1/aom*`) into static libraries, and writes the bindings. The D3D12 host is Rust (`crates/rav1g`).
+//! Writes the bindings of the decoder to the headers of `libav1`, and builds the little C the decoder
+//! has: the shader table.
 //!
-//! The files are those of `c_sources.txt`, with the settings the library project of the C++ decoder
-//! (branch `cpp`) has for them in Release x64: `/O1 /Ot`, `/O2` for the files the list marks, no `NDEBUG`
-//! (the library's asserts are compiled in), `/sdl`, and link time optimisation ([`Lto`]): `/GL` under
-//! MSVC, LTO under clang-cl.
-//!
-//! Three C files of this crate are compiled with them: `helpers.c` (the entry points of the C interface
-//! that are macros), `host_entry.c` (the functions of the host that end with the decoder's error, which C
-//! has to raise) and `shader_table.c` (the bytecode of the shaders).
+//! **For a Windows target (the decoder)** no file of `libav1` is compiled. The decoder's parser is
+//! rav1d's parse pass (`crates/rav1g-parse`, docs/phase2-rav1d.md), its host is Rust (`crates/rav1g`),
+//! and what the host still needs of libaom's common code is Rust there too (`host/libaom.rs`). What
+//! stays of `libav1` for the decoder is its headers: the host fills and reads the structs of the frame
+//! header and of the blocks in the layouts the shaders and the sink were written for, and bindgen
+//! reads those from the headers (`wrapper.h`, `shared.h`, `parser.h`). One C file is compiled into
+//! `rav1g_c.lib`: `shader_table.c`, the bytecode of the shaders. A file of `c_sources.txt` marked
+//! `host` would be compiled with it; none is.
 //!
 //! The shaders are not compiled here. `RAV1G_SHADER_DIR` names the directory whose `dx/shaders/h` has the
 //! bytecode headers of the FXC build (`testing/shader_cache/shaders.py build --root <dir>`; in CI the
 //! `normal` output of `.github/actions/shaders`).
 //!
-//! For a target that is not Windows the crate is the entropy decoder alone: the files of `c_sources.txt`
-//! and `helpers.c`, the bindings and the layout probe. The D3D12 host does not build there, so there is
-//! no shader table and none of the host's entry points (`host_entry.c`); a program supplies the functions
-//! of `dx/av1_core.h` itself. `tools/rav1g-parse-check` is that program: it holds the entropy decoder
-//! against the parser of phase 2 on Linux (docs/phase2-rav1d.md).
+//! **For a target that is not Windows** the crate is the entropy decoder of libaom alone: the files of
+//! `c_sources.txt` (the libaom-derived parser and entropy decoder of `libav1/av1`, `libav1/aom*`) with
+//! the settings the library project of the C++ decoder (branch `cpp`) has for them in Release x64
+//! (`/O1 /Ot`, `/O2` for the files the list marks; no `NDEBUG`), `helpers.c` (the entry points of its
+//! interface that are macros), the bindings and the layout probe. The D3D12 host does not build there;
+//! a program supplies the functions of `dx/av1_core.h` itself. `tools/rav1g-parse-check` is that
+//! program: it holds rav1d's parse against the entropy decoder on Linux, which is where that entropy
+//! decoder still runs (docs/phase2-rav1d.md, step 6).
 
 use std::env;
 use std::fs;
@@ -36,6 +39,8 @@ use std::path::{Path, PathBuf};
 struct Source {
     path: PathBuf,
     max_speed: bool,
+    /// The decoder still calls into the file (`host` in `c_sources.txt`).
+    host: bool,
 }
 
 /// Link time optimisation of the C of the decoder, which the MSBuild projects of the C++ decoder have
@@ -90,7 +95,7 @@ fn fail(message: &str) -> ! {
 }
 
 /// The files of `c_sources.txt`: one per line, relative to `libav1`, `/O2` behind the ones compiled for
-/// speed; `#` starts a comment.
+/// speed and `host` behind the ones the decoder still calls into; `#` starts a comment.
 fn read_sources(list: &Path, repo: &Path) -> Vec<Source> {
     let text =
         fs::read_to_string(list).unwrap_or_else(|error| fail(&format!("cannot read {}: {error}", list.display())));
@@ -102,15 +107,18 @@ fn read_sources(list: &Path, repo: &Path) -> Vec<Source> {
         }
         let mut words = line.split_whitespace();
         let relative = words.next().unwrap_or("");
-        let max_speed = match (words.next(), words.next()) {
-            (None, _) => false,
-            (Some("/O2"), None) => true,
-            _ => fail(&format!(
-                "{}, line {}: a file name, and /O2 or nothing behind it: {line}",
-                list.display(),
-                number + 1
-            )),
-        };
+        let (mut max_speed, mut host) = (false, false);
+        for word in words {
+            match word {
+                "/O2" if !max_speed => max_speed = true,
+                "host" if !host => host = true,
+                _ => fail(&format!(
+                    "{}, line {}: a file name, and /O2 or host or nothing behind it: {line}",
+                    list.display(),
+                    number + 1
+                )),
+            }
+        }
         let path = repo.join("libav1").join(relative);
         if !relative.ends_with(".c") || !path.is_file() {
             fail(&format!("{}, line {}: libav1/{relative} is not a C file of the tree", list.display(), number + 1));
@@ -118,7 +126,7 @@ fn read_sources(list: &Path, repo: &Path) -> Vec<Source> {
         if sources.iter().any(|source| source.path == path) {
             fail(&format!("{}, line {}: {relative} is listed twice", list.display(), number + 1));
         }
-        sources.push(Source { path, max_speed });
+        sources.push(Source { path, max_speed, host });
     }
     if sources.len() < 70 {
         fail(&format!("{}: only {} sources found", list.display(), sources.len()));
@@ -246,11 +254,18 @@ fn main() {
     println!("cargo:rerun-if-changed={}", manifest.join("parser.h").display());
     println!("cargo:rerun-if-changed={}", manifest.join("shader_table.c").display());
     println!("cargo:rerun-if-changed={}", manifest.join("helpers.c").display());
-    println!("cargo:rerun-if-changed={}", manifest.join("host_entry.c").display());
 
     let shaders = windows.then(shader_dir);
     let shaders = shaders.as_deref();
-    let sources = read_sources(&list, &repo);
+    let mut sources = read_sources(&list, &repo);
+    if windows {
+        // The decoder: its parser is rav1d's, and of the C only the files its host still calls into
+        // are part of it. The entropy decoder is built where it is the reference (see the top).
+        sources.retain(|source| source.host);
+        if sources.iter().any(|source| source.max_speed) {
+            fail(&format!("{}: a file of the decoder (host) is not compiled for speed (/O2)", list.display()));
+        }
+    }
 
     // Two calls, one static library each: the C files at /O1 /Ot and the C files the list marks at /O2.
     // The optimisation is the list's and does not follow the cargo profile.
@@ -315,28 +330,32 @@ fn main() {
             c_size.file(&source.path);
         }
     }
-    // The entry points that are macros in the C headers, as functions (helpers.c).
-    c_size.include(&manifest).file(manifest.join("helpers.c"));
+    c_size.include(&manifest);
+    // One library for the decoder; two where the entropy decoder is built, the second with its files
+    // that are compiled for speed.
+    let libraries: &[&str] = if windows { &["rav1g_c"] } else { &["rav1g_c", "rav1g_c_speed"] };
     if windows {
-        // The entry points of the host that can end with the decoder's error, which C has to raise
-        // (host_entry.c).
-        c_size.file(manifest.join("host_entry.c"));
         // The bytecode of the shaders, from the headers of RAV1G_SHADER_DIR (shader_table.c).
         c_size.file(manifest.join("shader_table.c"));
+    } else {
+        // The entry points of the entropy decoder's interface that are macros in the C headers, as
+        // functions (helpers.c).
+        c_size.file(manifest.join("helpers.c"));
+        c_speed.compile("rav1g_c_speed");
     }
     c_size.compile("rav1g_c");
-    c_speed.compile("rav1g_c_speed");
     println!("cargo:rustc-link-search=native={}", out.display());
-    for library in ["rav1g_c", "rav1g_c_speed"] {
+    for library in libraries {
         println!("cargo:rustc-link-lib=static:-bundle={library}");
     }
-    // An application that links the static library of `rav1g` itself (the UWP test player) needs the two
-    // libraries of the C as well: they are not in rav1g.lib (see Lto). RAV1G_C_LIB_DIR names a directory
-    // they are copied to.
+    // An application that links the static library of `rav1g` itself (the UWP test player) needs the
+    // library of the C as well: it is not in rav1g.lib (see Lto). RAV1G_C_LIB_DIR names a directory it
+    // is copied to.
     println!("cargo:rerun-if-env-changed=RAV1G_C_LIB_DIR");
     if let Some(dir) = env::var_os("RAV1G_C_LIB_DIR").filter(|dir| !dir.is_empty()).map(PathBuf::from) {
-        for library in ["rav1g_c.lib", "rav1g_c_speed.lib"] {
-            if let Err(error) = fs::create_dir_all(&dir).and_then(|()| fs::copy(out.join(library), dir.join(library))) {
+        for library in libraries.iter().map(|library| format!("{library}.lib")) {
+            if let Err(error) = fs::create_dir_all(&dir).and_then(|()| fs::copy(out.join(&library), dir.join(&library)))
+            {
                 fail(&format!("RAV1G_C_LIB_DIR={}: cannot copy {library}: {error}", dir.display()));
             }
         }

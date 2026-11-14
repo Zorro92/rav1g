@@ -140,10 +140,11 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
  * with four slots, 695.3 MiB where 772.8 MiB were left, ran at 19.5 with the
  * app at 948 MiB (the passes that read frame buffers 2 to 12 times slower),
  * and at 49.6 in an app with 3328 MiB. So between 128 and 77 MiB left behind
- * the device buffers the memory runs short. A decoder that would leave less
- * than the headroom is not refused: it is created with fewer slots and
- * frames in parse. */
-#define AV1_MEMORY_GUARD_HEADROOM ((size_t)100 << 20)
+ * the device buffers the memory runs short, and the headroom is the least
+ * that is known to be enough. A decoder that would leave less than the
+ * headroom is not refused: it is created with fewer slots and frames in
+ * parse. */
+#define AV1_MEMORY_GUARD_HEADROOM ((size_t)128 << 20)
 /*!\brief A creation that does not fit is not refused at once: the system
  * returns the memory of a decoder that was just destroyed some time after
  * the release, so the creation asks the callback again every 20 ms for as
@@ -193,12 +194,8 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
 #define AV1_LOW_MEMORY_NONE 8
 #define AV1_LOW_MEMORY_DEFAULT AV1_LOW_MEMORY_SHARED_BACK_BUFFER
 
-/* aom_codec_dec_cfg_t::parser. */
-#define AV1_PARSER_LIBAOM 0
-#define AV1_PARSER_RAV1D 1
-
 /* aom_codec_dec_cfg_t::parser_options, values to add up: ways of doing the
- * parse of AV1_PARSER_RAV1D that give the same frames (docs/phase2-rav1d.md,
+ * parse (rav1d's parse pass) that give the same frames (docs/phase2-rav1d.md,
  * "Where the time goes"). The library's settings have the first two on
  * (rav1g::ParserOptions::default()); the value 1 was a switch that is gone. */
 #define AV1_PARSER_OPTION_NO_LF_MASKS 2       /* rav1d leaves out the masks of its own loop filter */
@@ -269,15 +266,17 @@ typedef struct aom_codec_dec_cfg {
    * The decoder is created for the width, height and bit depth given here;
    * aom_codec_peek_stream_info gives those of a stream. */
   int low_memory;
-  /* The parser: AV1_PARSER_LIBAOM (0), the entropy decoder of libaom, or
-   * AV1_PARSER_RAV1D, the parse pass of rav1d (docs/phase2-rav1d.md), which
-   * the library's settings choose unless they are told otherwise
-   * (rav1g::Settings::parser). Both give the same frames; they differ in
-   * speed and in what a damaged stream does (the document says how). */
-  int parser;
-  /* AV1_PARSER_OPTION_* values added up, for AV1_PARSER_RAV1D; 0 for none. */
+  /* The decoder of the library (crates/rav1g) parses with the parse pass of
+   * rav1d (docs/phase2-rav1d.md); this configuration is what its host is
+   * created with. The entropy decoder of libaom in this tree is no longer
+   * part of that decoder: tools/rav1g-parse-check runs it, on a host of its
+   * own, as the reference the parser is held against, and the fields below
+   * that speak of frames in parse and of the parser's options mean nothing
+   * to it. (There was a field "parser" here that chose between the two.)
+   *
+   * AV1_PARSER_OPTION_* values added up; 0 for none. */
   int parser_options;
-  /* Frames whose parse may run at the same time, for AV1_PARSER_RAV1D
+  /* Frames whose parse may run at the same time
    * (docs/phase2-rav1d.md, "Frames in parallel"): 1 to
    * AV1_FRAMES_IN_PARSE_MAX, and never more than the threads. With 1 a
    * decode call returns when the frames of its data are parsed, recorded and

@@ -42,7 +42,7 @@ use crate::sys::parser::{
     AV1_PERF_INTER_SECTION_COUNT, AV1_PERF_INTER_SINGLE, AV1_PERF_INTER_SINGLE_COPY, AV1_PERF_INTER_SYNC0,
     AV1_PERF_INTER_SYNC1, AV1_PERF_INTER_WARP, AV1Decoder, EXTREF_FRAME, HwFrameBuffer, INVALID_IDX, LAST_FRAME,
     MAX_FRAME_DISTANCE, OrderHintInfo, RefCntBuffer, SCALE_SUBPEL_BITS, TileInfo, WarpedMotionParams,
-    av1_filter_intra_taps, av1_perf_inter_blocks, av1_perf_inter_detail, av1_perf_inter_work, av1_tile_data,
+    av1_perf_inter_blocks, av1_perf_inter_detail, av1_perf_inter_work, av1_tile_data,
 };
 
 const SIZES: usize = InterSizesAllCommon as usize;
@@ -212,13 +212,8 @@ pub(crate) unsafe fn prediction_gen_blocks(pbi: *mut AV1Decoder, dec: *mut Av1Co
 
         if main_tile != 0 {
             tiles.swap(0, main_tile);
-            if let Some(sec) = td.sec_thread_data.as_ref() {
-                std::slice::from_raw_parts_mut(sec.tile_data, tile_count).swap(0, main_tile);
-            }
             // What the tiles took of the pools goes with them.
-            if (*dec).pools.is_some() {
-                td.pieces.swap(0, main_tile);
-            }
+            td.pieces.swap(0, main_tile);
         }
 
         td.intra_iters = intra_iters;
@@ -302,27 +297,11 @@ pub(crate) unsafe fn prediction_gen_blocks(pbi: *mut AV1Decoder, dec: *mut Av1Co
             commands.set_inline_constants(8, &inline[..srt_words], 0);
             commands.dispatch(((mi_count + 63) >> 6) as u32, 1, 1);
         };
-        if (*dec).pools.is_some() {
-            // The mode info of a tile is in pieces of the pool: a dispatch for each run of pieces that
-            // follow each other.
-            for (tile, pieces) in tiles.iter().zip(&td.pieces) {
-                for run in joined_runs(&pieces.mode_info) {
-                    dispatch_tile(run.count, run.first, tile);
-                }
-            }
-        } else {
-            for tile in tiles.iter() {
-                dispatch_tile(tile.mi_count, tile.mi_offset, tile);
-            }
-        }
-        // The mode info of a frame that took a second slot's share of the pool: the same tiles, the part
-        // of their mode info that lies there.
-        if let Some(sec) = td.sec_thread_data.as_ref() {
-            let tiles2 = std::slice::from_raw_parts(sec.tile_data, tile_count);
-            for (tile, tile2) in tiles.iter().zip(tiles2) {
-                if tile2.mi_count != 0 {
-                    dispatch_tile(tile2.mi_count, tile2.mi_offset, tile);
-                }
+        // The mode info of a tile is in pieces of the pool: a dispatch for each run of pieces that
+        // follow each other.
+        for (tile, pieces) in tiles.iter().zip(&td.pieces) {
+            for run in joined_runs(&pieces.mode_info) {
+                dispatch_tile(run.count, run.first, tile);
             }
         }
         commands.write_barrier2(blocks, warp_blocks);
@@ -1033,7 +1012,7 @@ pub(crate) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
             (*data).flags[2] = 0;
             (*data).flags[3] = 0;
             (*data).planes = plane_words(&*td.frame_buffer);
-            let taps = (&raw const av1_filter_intra_taps).read();
+            let taps = &super::libaom::FILTER_INTRA_TAPS;
             for m in 0..5 {
                 for k in 0..8 {
                     for i in 0..8 {
@@ -1055,15 +1034,8 @@ pub(crate) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                 commands.set_pipeline(pipeline(&raw const (*shaders).reconstruct_block));
                 // A slot has a palette buffer once a frame that allows screen content tools has used it.
                 // Without one the frame has no palette block, and the shader loads from this buffer for palette
-                // blocks only; the binding still needs a buffer, so it gets another upload buffer of the slot.
-                let palette = if !td.palette_buffer.is_null() {
-                    td.palette_buffer
-                } else if td.idct_blocks_unordered.is_null() {
-                    // A decoder with pools: the transform block records are not the slot's.
-                    (*dec).idct_blocks_pool
-                } else {
-                    td.idct_blocks_unordered
-                };
+                // blocks only; the binding still needs a buffer, so it gets another upload buffer of the decoder.
+                let palette = if !td.palette_buffer.is_null() { td.palette_buffer } else { (*dec).idct_blocks_pool };
                 commands.bind_read(2, buffer(palette).location());
                 let fb_base_offset = (*td.frame_buffer).base_offset as c_int;
                 for i in 0..ReconstructBlockSizes as usize {

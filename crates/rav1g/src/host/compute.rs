@@ -26,6 +26,7 @@ use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12Device};
 use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL};
 use windows::core::Interface;
 
+use super::libaom::{II_SIZE_SCALES, II_WEIGHTS1D, WARPED_FILTER, WedgeMasks};
 use super::log::log;
 use super::tables::{BLOCK_SIZE_HIGH, BLOCK_SIZE_WIDE, GAUSSIAN_SEQUENCE, SS_SIZE_420};
 use super::thread::spawn_thread;
@@ -34,16 +35,13 @@ use crate::gpu::d3d12::{com_ref, com_release, com_store};
 use crate::gpu::{self, BufferRef, Device, Layout, LayoutDesc, OwnedDevice, Queue, Upload};
 use crate::sys::parser::{
     BLOCK_SIZES_ALL, TX_4X4, TX_4X8, TX_4X16, TX_8X4, TX_8X8, TX_8X16, TX_8X32, TX_16X4, TX_16X8, TX_16X16, TX_16X32,
-    TX_16X64, TX_32X8, TX_32X16, TX_32X32, TX_32X64, TX_64X16, TX_64X32, TX_64X64, TX_SIZES_ALL, ii_size_scales,
-    ii_weights1d, warped_filter, wedge_params_lookup,
+    TX_16X64, TX_32X8, TX_32X16, TX_32X32, TX_32X64, TX_64X16, TX_64X32, TX_64X64, TX_SIZES_ALL,
 };
 
 /// Threads that create pipelines at most (`MAX_CREATE_SHADER_THREADS` of the C++).
 const MAX_CREATE_THREADS: c_int = 6;
 
 unsafe extern "C" {
-    /// `av1/common/reconinter.c`: builds the wedge masks `wedge_params_lookup` points to.
-    fn av1_init_wedge_masks();
     /// `crates/rav1g-sys/shader_table.c`: the bytecode of the shaders, from the headers of the FXC build.
     fn rav1g_shader_table(count: *mut u32) -> *const ShaderBytecode;
 }
@@ -547,15 +545,11 @@ fn fill_random_lut(bytes: &mut [u8], steps: u32) {
 /// for their chroma blocks of half the size, as `inter_compound_masked.hlsl` and the other mask readers
 /// index them. `offsets[bsize]` gets where the masks of a block size start, luma and chroma, in units of
 /// 64 bytes.
-///
-/// # Safety
-/// The wedge masks are built (`av1_init_wedge_masks`).
-unsafe fn fill_mask_lut(ptr: &mut [u8], offsets: &mut [[c_int; 2]; BLOCK_SIZES_ALL as usize]) {
+fn fill_mask_lut(ptr: &mut [u8], offsets: &mut [[c_int; 2]; BLOCK_SIZES_ALL as usize]) {
     let mut offset = 0usize;
     // The inter-intra weights of a block: all 32; by row; by column; by the smaller of row and column.
     let inter_intra = |ptr: &mut [u8], offset: &mut usize, bw: usize, bh: usize, size: usize, scale: usize| {
-        // SAFETY: a table of the entropy decoder, constant; a copy of it.
-        let weights = unsafe { (&raw const ii_weights1d).read() };
+        let weights = &II_WEIGHTS1D;
         let patterns: [&dyn Fn(usize, usize) -> u8; 4] =
             [&|_, _| 32, &|_, y| weights[y * scale], &|x, _| weights[x * scale], &|x, y| weights[x.min(y) * scale]];
         for pattern in patterns {
@@ -567,59 +561,50 @@ unsafe fn fill_mask_lut(ptr: &mut [u8], offsets: &mut [[c_int; 2]; BLOCK_SIZES_A
             *offset += size;
         }
     };
+    // The masks of a block size with wedge bits: 16 wedges with two signs, bw * bh bytes each.
+    let wedges = WedgeMasks::get();
     for bsize in 0..BLOCK_SIZES_ALL as usize {
-        // SAFETY: tables of the entropy decoder; the masks of a block size with wedge bits are 2 x 16
-        // arrays of bw * bh bytes, built by av1_init_wedge_masks (the caller's contract).
-        unsafe {
-            let wedge = &wedge_params_lookup[bsize];
-            if wedge.bits == 0 {
-                continue;
-            }
-            let bw = BLOCK_SIZE_WIDE[bsize] as usize;
-            let bh = BLOCK_SIZE_HIGH[bsize] as usize;
-            let size = bw * bh;
-            offsets[bsize][0] = ((offset + 63) >> 6) as c_int;
-            for index in 0..16 {
-                for sign in 0..2 {
-                    let mask = std::slice::from_raw_parts((*wedge.masks.add(sign))[index], size);
-                    ptr[offset..offset + size].copy_from_slice(mask);
-                    offset += size;
-                }
-            }
-            let scale = ii_size_scales[bsize] as usize;
-            inter_intra(ptr, &mut offset, bw, bh, size, scale);
+        if WedgeMasks::bits(bsize) == 0 {
+            continue;
         }
+        let bw = BLOCK_SIZE_WIDE[bsize] as usize;
+        let bh = BLOCK_SIZE_HIGH[bsize] as usize;
+        let size = bw * bh;
+        offsets[bsize][0] = ((offset + 63) >> 6) as c_int;
+        for index in 0..16 {
+            for sign in 0..2 {
+                ptr[offset..offset + size].copy_from_slice(&wedges.mask(bsize, sign, index));
+                offset += size;
+            }
+        }
+        let scale = II_SIZE_SCALES[bsize] as usize;
+        inter_intra(ptr, &mut offset, bw, bh, size, scale);
     }
+    // Chroma: a mask averages 2x2 bytes of the luma mask of 2bw * 2bh bytes.
     for bsize in 0..BLOCK_SIZES_ALL as usize {
-        // SAFETY: as above; a chroma mask averages 2x2 bytes of the luma mask of 2bw * 2bh bytes.
-        unsafe {
-            let wedge = &wedge_params_lookup[bsize];
-            if wedge.bits == 0 {
-                continue;
-            }
-            let bw = (BLOCK_SIZE_WIDE[bsize] >> 1) as usize;
-            let bh = (BLOCK_SIZE_HIGH[bsize] >> 1) as usize;
-            let size = (bw * bh).max(64);
-            offsets[bsize][1] = ((offset + 63) >> 6) as c_int;
-            for index in 0..16 {
-                for sign in 0..2 {
-                    let mask = std::slice::from_raw_parts((*wedge.masks.add(sign))[index], 4 * bw * bh);
-                    let at = |x: usize, y: usize| u32::from(mask[x + y * bw * 2]);
-                    for y in 0..bh {
-                        for x in 0..bw {
-                            let sum = at(x * 2, y * 2)
-                                + at(x * 2 + 1, y * 2)
-                                + at(x * 2, y * 2 + 1)
-                                + at(x * 2 + 1, y * 2 + 1);
-                            ptr[offset + x + y * bw] = ((sum + 2) >> 2) as u8;
-                        }
-                    }
-                    offset += size;
-                }
-            }
-            let scale = ii_size_scales[SS_SIZE_420[bsize] as usize] as usize;
-            inter_intra(ptr, &mut offset, bw, bh, size, scale);
+        if WedgeMasks::bits(bsize) == 0 {
+            continue;
         }
+        let bw = (BLOCK_SIZE_WIDE[bsize] >> 1) as usize;
+        let bh = (BLOCK_SIZE_HIGH[bsize] >> 1) as usize;
+        let size = (bw * bh).max(64);
+        offsets[bsize][1] = ((offset + 63) >> 6) as c_int;
+        for index in 0..16 {
+            for sign in 0..2 {
+                let mask = wedges.mask(bsize, sign, index);
+                let at = |x: usize, y: usize| u32::from(mask[x + y * bw * 2]);
+                for y in 0..bh {
+                    for x in 0..bw {
+                        let sum =
+                            at(x * 2, y * 2) + at(x * 2 + 1, y * 2) + at(x * 2, y * 2 + 1) + at(x * 2 + 1, y * 2 + 1);
+                        ptr[offset + x + y * bw] = ((sum + 2) >> 2) as u8;
+                    }
+                }
+                offset += size;
+            }
+        }
+        let scale = II_SIZE_SCALES[SS_SIZE_420[bsize] as usize] as usize;
+        inter_intra(ptr, &mut offset, bw, bh, size, scale);
     }
 }
 
@@ -659,17 +644,11 @@ pub(crate) unsafe fn upload_luts(dec: *mut Av1Core) -> i32 {
     let mut fill_chroma = |bytes: &mut [u8]| fill_random_lut(bytes, 44);
     let mut fill_gaussian = |bytes: &mut [u8]| write_ints(bytes, GAUSSIAN_SEQUENCE.iter().copied());
     let mut fill_warp = |bytes: &mut [u8]| {
-        // SAFETY: a table of the entropy decoder, constant; a copy of it.
-        let filter = unsafe { (&raw const warped_filter).read() };
-        write_ints(bytes, filter.iter().flatten().map(|&tap| i32::from(tap)));
+        write_ints(bytes, WARPED_FILTER.iter().flatten().map(|&tap| i32::from(tap)));
     };
     let wedge_offsets = &mut dec.wedge_offsets;
     let mut fill_masks = |bytes: &mut [u8]| {
-        // SAFETY: the masks are built right here.
-        unsafe {
-            av1_init_wedge_masks();
-            fill_mask_lut(bytes, wedge_offsets);
-        }
+        fill_mask_lut(bytes, wedge_offsets);
     };
     let mut uploads = [
         Upload { dst: luma.0, size: luma.1, fill: &mut fill_luma },

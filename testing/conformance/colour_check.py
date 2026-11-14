@@ -14,8 +14,8 @@ display colour volume, content light level; with the frames). rav1g-dec prints i
 (A stream whose frames grow gets a second decoder in rav1g-dec, and with it a second pair of lines.)
 
 <dir> of --streams is what prepare_streams.sh wrote. <dir> of --logs is the logs directory of a conformance
-run (run.py: logs/<stream>.log), <name> what the report calls the run: the runs with rav1d's parser and with
--parser c, through the Rust interface and through rav1g.h (-capi), must all say the same.
+run (run.py: logs/<stream>.log), <name> what the report calls the run: the runs through the Rust interface
+and through rav1g.h (-capi) must say the same.
 
 The references, for every stream of the manifest:
 

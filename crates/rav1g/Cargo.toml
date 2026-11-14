@@ -8,8 +8,8 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# The static library (rav1g.lib) is for an application that is not Rust: it links it, and the two
-# libraries of the C next to it (RAV1G_C_LIB_DIR), through include/rav1g.h. A dynamic library (--crate-type
+# The static library (rav1g.lib) is for an application that is not Rust: it links it, and the library
+# of the C next to it (rav1g_c.lib, the shader table: RAV1G_C_LIB_DIR), through include/rav1g.h. A dynamic library (--crate-type
 # cdylib) is the same with the C linked in. docs/rust-port.md, step 5.
 [lib]
 crate-type = ["rlib", "staticlib"]
@@ -25,8 +25,8 @@ uavsync = ["rav1g-sys/uavsync"]
 
 [dependencies]
 rav1g-sys = { workspace = true }
-# The parser of phase 2 (docs/phase2-rav1d.md): rav1d's parse pass and its sink. The decoder does not run
-# it yet; the library has its digest of a stream (`parse_digest`, `rav1g_parse_digest_*` of rav1g.h).
+# The parser (docs/phase2-rav1d.md): rav1d's parse pass and its sink. The library also has its digest
+# of a stream (`parse_digest`, `rav1g_parse_digest_*` of rav1g.h).
 rav1g-parse = { workspace = true }
 
 [dependencies.windows]

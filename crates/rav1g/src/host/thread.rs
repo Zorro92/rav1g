@@ -57,6 +57,7 @@ impl<T> Queue<T> {
     }
 
     /// Takes the oldest item when there is one.
+    #[cfg(test)]
     pub(crate) fn try_get(&self) -> Option<T> {
         lock(&self.items).pop_front()
     }

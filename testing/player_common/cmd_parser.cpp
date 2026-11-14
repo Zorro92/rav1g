@@ -122,7 +122,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"headroom", atInt, anOptional,
        "the MiB the decoder's budget guard should leave free behind the decoder (Rav1gSettings::memory_headroom); "
        "a decoder that would leave less is created with fewer slots and frames in parse. Default 0: the "
-       "library's 100; 48 or less: only the margin of the guard, as up to package 0.2.156",
+       "library's 128; 48 or less: only the margin of the guard, as up to package 0.2.156",
        "", &params_.headroom_mib_},
       {"budget", atInt, anOptional,
        "where the system gives the app no memory limit (rav1g-dec -playersmoke): model one, this many MiB above "
@@ -132,10 +132,6 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        "with -budget: a destroyed decoder leaves up to this many MiB charged to the app until the next decoder "
        "exists, as the console does",
        "", &params_.retain_mib_},
-      {"parser", atString, anOptional,
-       "what reads the bitstream: rav1d, the parse pass of rav1d (default), or c, the entropy decoder of libaom "
-       "(same output)",
-       "", &params_.parser_},
       {"parseopt", atString, anOptional,
        "the switches of rav1d's parse, separated by commas (same output): nolfmask, rav1d leaves out the masks "
        "of its own loop filter; tilethread, a tile stays on its thread between its superblock rows. Both are on "
@@ -224,15 +220,6 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     GetHelp(0, 0, Err, avaiting, list_length);
     return -1;
   }
-
-  // -parser: c or rav1d; anything else is an error of the task.
-  if (!params_.parser_.empty() && params_.parser_ != "c" && params_.parser_ != "rav1d") {
-    Err += "-parser takes c or rav1d, not \"";
-    Err += params_.parser_;
-    Err += "\"";
-    return -1;
-  }
-  params_.parser_rav1d_ = params_.parser_ != "c";
 
   // -gpuclear, -cpuclear (-asyncclear), -syncclear: who clears the grids of a slot, with the wavefront in
   // its grid. Without one of them nothing has to be cleared. Two of them on one line is an error of the
@@ -420,8 +407,6 @@ void CParameters::Reset() {
   params_.budget_mib_ = -1;
   params_.retain_mib_ = 0;
   params_.continue_on_error_ = false;
-  params_.parser_.clear();
-  params_.parser_rav1d_ = true;
   params_.parseopt_.clear();
   params_.parser_options_ = PLAYER_PARSEOPT_DEFAULT;
   params_.lfhsplit_ = 0;

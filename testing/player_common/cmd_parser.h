@@ -143,10 +143,6 @@ class CParameters {
     // (decoder.cpp, "The app's memory where the system has no limit for it"). -1: no model.
     int budget_mib_;
     int retain_mib_;
-    // -parser c|rav1d: what reads the bitstream: the parse pass of rav1d (rav1d, the default;
-    // docs/phase2-rav1d.md) or the entropy decoder of libaom (c). parser_rav1d_ is the choice after Parse().
-    std::string parser_;
-    bool parser_rav1d_;
     // -parseopt <list>: the switches of rav1d's parse, separated by commas. nolfmask and tilethread are
     // on by default; a list that names one of them, none or default says which of the two are on (none:
     // neither). time (the timing of the sink's calls), latelists (the block lists of a tile at its end,

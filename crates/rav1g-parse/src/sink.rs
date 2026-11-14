@@ -34,8 +34,9 @@
 //! sink writes them as the entropy decoder of libaom does: each record once, in order, and of the
 //! coefficients the ones that are not zero, in rising scan order.
 //!
-//! Until the entropy decoder of libaom leaves the tree (docs/phase2-rav1d.md, step 6), the block lists are
-//! computed by the code that takes its block context from that decoder's structs. So the sink keeps such
+//! The block lists are computed by code that takes its block context from the structs of libaom's
+//! headers, as it did while that entropy decoder was the parser (docs/phase2-rav1d.md, step 6: a block
+//! context of the host's own is left to do). So the sink keeps such
 //! structs of its own, cleared, and sets the fields that code reads: an `AV1_COMMON` for the frame (frame
 //! size in 4x4 units, grid, superblock size) and a `MACROBLOCKD` per tile (the block's place in the grid,
 //! what is available around it, the tile, whose data names the frame's slot at the host).

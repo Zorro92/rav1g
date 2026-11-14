@@ -35,6 +35,7 @@
 use std::ffi::c_int;
 
 use super::intra_v2;
+use super::libaom::{has_bottom_left, has_top_right};
 use super::tables::{
     INTER_BLOCK_SIZE_INDEX_LUT, INTERINTRA_TO_INTRA_MODE, MAX_NEIGHBOR_OBMC, MAX_TXSIZE_RECT_LOOKUP, MI_SIZE_HIGH_LOG2,
     MI_SIZE_WIDE_LOG2, SS_SIZE_LOOKUP, TX_SIZE_HIGH_LOG2, TX_SIZE_WIDE_LOG2,
@@ -54,39 +55,6 @@ use crate::sys::parser::{
     SINGLE_INTER_MODE_END, SINGLE_INTER_MODE_START, TX_4X4, TX_16X32, TX_16X64, TX_32X16, TX_32X32, TX_32X64, TX_64X16,
     TX_64X32, TX_64X64, UV_CFL_PRED, WARPED_CAUSAL, av1_tile_data, int_mv,
 };
-
-unsafe extern "C" {
-    /// `av1/common/reconintra.c`: the samples above and to the right of a transform block are decoded.
-    fn has_top_right(
-        cm: *const AV1_COMMON,
-        bsize: u8,
-        mi_row: c_int,
-        mi_col: c_int,
-        top_available: c_int,
-        right_available: c_int,
-        partition: u8,
-        txsz: u8,
-        row_off: c_int,
-        col_off: c_int,
-        ss_x: c_int,
-        ss_y: c_int,
-    ) -> c_int;
-    /// `av1/common/reconintra.c`: the same for the samples to the left and below.
-    fn has_bottom_left(
-        cm: *const AV1_COMMON,
-        bsize: u8,
-        mi_row: c_int,
-        mi_col: c_int,
-        bottom_available: c_int,
-        left_available: c_int,
-        partition: u8,
-        txsz: u8,
-        row_off: c_int,
-        col_off: c_int,
-        ss_x: c_int,
-        ss_y: c_int,
-    ) -> c_int;
-}
 
 // What an intra mode reads of its neighbours, one bit per mode. testing/intra_check reads these five lines
 // (`const NEED_..._LUT: u32 = 0x...;`) for its model of the host.

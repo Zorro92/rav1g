@@ -25,7 +25,6 @@
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
 
 use std::ffi::{c_char, c_int, c_long, c_uint, c_void};
-use std::sync::Mutex;
 use std::thread::JoinHandle;
 
 use windows::Win32::Graphics::Direct3D12::{
@@ -224,7 +223,6 @@ pub struct av1_frame_thread_data {
     pub command_buffer: ComputeCommandBuffer,
     pub shaders: *mut bitdepth_dependent_shaders,
     pub mode_info_grid: *mut GpuBufferObject,
-    pub idct_blocks_unordered: *mut GpuBufferObject,
     pub loop_rest_types: *mut GpuBufferObject,
     pub loop_rest_wiener: *mut GpuBufferObject,
     pub cdef_indexes: *mut GpuBufferObject,
@@ -252,8 +250,6 @@ pub struct av1_frame_thread_data {
     pub do_superres: c_int,
     pub is_hbd: c_int,
     pub output_frame: c_int,
-    pub ext_idct_buffer: c_int,
-    pub ext_coef_base: c_int,
     pub slot_index: c_int,
     pub iter_grid_stride: c_int,
     pub iter_grid_stride_uv: c_int,
@@ -262,18 +258,11 @@ pub struct av1_frame_thread_data {
     pub bitdepth: c_int,
     pub thread_count: c_int,
     pub tile_count: c_int,
-    pub mode_info_offset: c_int,
-    pub mode_info_max: c_int,
-    pub coef_buffer_offset: c_int,
-    pub coef_buffer_size: c_int,
     pub tile_data: *mut av1_tile_data,
     pub frame_buffer: *mut HwFrameBuffer,
     pub back_buffer0: *mut HwFrameBuffer,
     pub dst_frame_buffer: *mut HwFrameBuffer,
     pub refs: [*mut HwFrameBuffer; 8],
-    pub sec_thread_data: *mut av1_frame_thread_data,
-    /// Held while the frame takes its second slot: the decode thread or a tile thread.
-    pub sec_data_mutex: Mutex<()>,
     pub output_only: c_int,
     /// What the frame on the slot does about the clears of the slot's grids (`AV1_CLEARS_*` of
     /// `dx/av1_perf.h`): the switch as the frame's setup found it.
@@ -392,11 +381,7 @@ pub struct Av1Core {
     pub cb_release_image: av1_release_decoded_buffer_cb_fn_t,
     pub cb_notify_frame_ready: aom_notify_frame_ready_cb_fn_t,
     pub image_alloc_priv: *mut c_void,
-    pub pbi_alloc: *mut c_void,
-    pub buf_pool_alloc: *mut c_void,
-    pub above_context_alloc: [*mut *mut c_void; 5],
     pub restoration_info_alloc: [*mut c_void; 3],
-    pub tplmvs_alloc: *mut c_void,
     pub idct_blocks: *mut GpuBufferObject,
     pub idct_residuals: *mut GpuBufferObject,
     pub frame_buffer_pool: *mut GpuBufferObject,
@@ -404,12 +389,10 @@ pub struct Av1Core {
     pub inter_warp_filter: *mut GpuBufferObject,
     pub mode_info_pool: *mut GpuBufferObject,
     pub idct_coefs: *mut GpuBufferObject,
-    /// A decoder with pools: the transform block records of all frames in flight. Without pools every
-    /// slot has a buffer of its own (`av1_frame_thread_data::idct_blocks_unordered`).
+    /// The transform block records of all frames in flight.
     pub idct_blocks_pool: *mut GpuBufferObject,
     /// The pools of the mode info records, the coefficients and the transform block records
-    /// (`pool.rs`; docs/phase2-rav1d.md, step 5): a decoder whose parser is rav1d's. None: the three
-    /// are divided into a share for each slot, as the entropy decoder of libaom takes them.
+    /// (`pool.rs`; docs/phase2-rav1d.md, step 5). None only until the creation has made them.
     pub pools: Option<Box<Pools>>,
     /// The chunks of each pool (by `pool::Kind`), and those of them the frames in parse share under the
     /// rule of `Pools::take`; 0 without pools.
@@ -425,8 +408,6 @@ pub struct Av1Core {
     pub pred_map_size: c_int,
     pub inter_fast_tiles: c_int,
     pub block_count4x4: c_int,
-    pub mode_info_shift: c_int,
-    pub coef_count_num: c_int,
     pub shared_back_buffer: c_int,
     pub low_memory: c_int,
     pub palette_size: usize,
@@ -527,14 +508,12 @@ impl Av1Core {
             (&raw mut (*dec).pools).write(None);
             let no_edges = || WaveStore { tiles: Vec::new(), above: Vec::new(), above_end: Vec::new(), frames: 0 };
             for slot in 0..FrameThreadDataCount as usize {
-                (&raw mut (*dec).frame_thread_data[slot].sec_data_mutex).write(Mutex::new(()));
                 (&raw mut (*dec).frame_thread_data[slot].perf.detail).write(None);
                 (&raw mut (*dec).frame_thread_data[slot].wave).write(no_edges());
                 (&raw mut (*dec).frame_thread_data[slot].perf_inter_tiles).write(Vec::new());
                 (&raw mut (*dec).frame_thread_data[slot].pieces).write(Vec::new());
             }
             for context in 0..OutputThreadDataCount as usize {
-                (&raw mut (*dec).output_thread_data[context].sec_data_mutex).write(Mutex::new(()));
                 (&raw mut (*dec).output_thread_data[context].perf.detail).write(None);
                 (&raw mut (*dec).output_thread_data[context].wave).write(no_edges());
                 (&raw mut (*dec).output_thread_data[context].perf_inter_tiles).write(Vec::new());

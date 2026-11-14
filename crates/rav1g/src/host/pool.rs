@@ -9,8 +9,8 @@
 //! The pools of what a frame's parse writes for the stages (docs/phase2-rav1d.md, step 5): the mode info
 //! records, the coefficients and the transform block records of all frames in flight come from one
 //! buffer each, in pieces, as the parse proceeds. A frame holds what it uses, not a share that is sized
-//! for the worst frame. Only a decoder whose parser is rav1d's has them (`Av1Core::pools`); the entropy
-//! decoder of libaom keeps the shares of the slots until it leaves.
+//! for the worst frame. (The entropy decoder of libaom, while it was a parser of the decoder, had a
+//! share of each buffer for every slot; it left in step 6.)
 //!
 //! **Chunks and pieces.** A pool is divided into chunks: what a 64x64 area needs at worst, so a tile of
 //! `c` such areas ("cells") never needs more than `c` chunks:

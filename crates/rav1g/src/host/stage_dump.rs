@@ -25,7 +25,7 @@ use super::types::{
 use crate::gpu::d3d12::{com_ref, com_release, com_store, wrapped_ref};
 use crate::gpu::{BufferRef, BufferState, Device, Readback};
 use crate::sys;
-use crate::sys::parser::{AV1_COMMON, HwFrameBuffer, HwOutputImage, MB_MODE_INFO, av1_tile_data};
+use crate::sys::parser::{AV1_COMMON, HwFrameBuffer, HwOutputImage, MB_MODE_INFO};
 
 /// Frames a dump can be asked for (`StageDumpFramesMax`).
 const FRAMES_MAX: usize = 256;
@@ -269,23 +269,10 @@ pub(crate) unsafe fn stage_dump_mode_info(dec: *mut Av1Core, cm: *const AV1_COMM
         let pool_records = pool.size / record;
         let mut regions = Vec::with_capacity(tile_count * 2);
         let mut layout = format!("buffer=mi_pool record={record}\n");
-        // The tiles of the frame's slot, then what they continued with in a second slot's share; with
-        // pools, the pieces of the tiles.
-        let second: *const av1_tile_data = td.sec_thread_data.as_ref().map_or(std::ptr::null(), |sec| sec.tile_data);
+        // The pieces of the tiles.
         let mut runs: Vec<(c_int, c_int)> = Vec::new();
-        if (*dec).pools.is_some() {
-            for pieces in td.pieces.iter().take(tile_count) {
-                runs.extend(super::frame::joined_runs(&pieces.mode_info).iter().map(|run| (run.first, run.count)));
-            }
-        } else {
-            for tiles in [td.tile_data.cast_const(), second] {
-                if tiles.is_null() {
-                    continue;
-                }
-                for tile in std::slice::from_raw_parts(tiles, tile_count) {
-                    runs.push((tile.mi_offset, tile.mi_count));
-                }
-            }
+        for pieces in td.pieces.iter().take(tile_count) {
+            runs.extend(super::frame::joined_runs(&pieces.mode_info).iter().map(|run| (run.first, run.count)));
         }
         for (first, records) in runs {
             if records <= 0 || first < 0 || first as usize + records as usize > pool_records {

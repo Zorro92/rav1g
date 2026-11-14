@@ -1,6 +1,6 @@
 [package]
 name = "rav1g-sys"
-description = "Builds the C entropy decoder and the C++ D3D12 host of rav1g with cc; bindgen bindings"
+description = "The bindings of rav1g to the structs of libav1's headers, and its shader table; on Linux also the entropy decoder of libaom, for the tool that holds the parser against it"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

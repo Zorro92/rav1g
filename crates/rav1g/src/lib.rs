@@ -64,10 +64,10 @@
 //!
 //! The same interface for C is the `capi` feature: the functions of `rav1g.h` (`capi` module).
 //!
-//! The bitstream is read by the parse pass of rav1d ([`Parser`], docs/phase2-rav1d.md). The entropy
-//! decoder that was there before it, the libaom-derived C of `libav1/av1`, built by `rav1g-sys`, is the
-//! other choice of [`Settings::parser`] until the last step of phase 2; its interface (`aom_codec_*`) is
-//! what this crate creates a decoder through and is not part of the interface of this crate.
+//! The bitstream is read by the parse pass of rav1d (docs/phase2-rav1d.md; `third_party/rav1d`, behind
+//! the sink of `rav1g-parse`). The entropy decoder that was there before it, the libaom-derived C of
+//! `libav1/av1`, is not in the decoder any more (step 6 of that document): `rav1g-sys` builds it only
+//! for `tools/rav1g-parse-check`, which holds the parser against it.
 
 mod color;
 mod decoder;
@@ -92,9 +92,7 @@ pub use color::{
     ChromaSamplePosition, ColorInfo, ColorPrimaries, ColorRange, ContentLightLevel, MasteringDisplay,
     MatrixCoefficients, TransferCharacteristics, color_text,
 };
-pub use decoder::{
-    Configuration, Decoder, LowMemory, MemoryAvailable, MemoryRequirements, Parser, ParserOptions, Settings,
-};
+pub use decoder::{Configuration, Decoder, LowMemory, MemoryAvailable, MemoryRequirements, ParserOptions, Settings};
 pub use device::Device;
 pub use error::{Error, ErrorCode};
 pub use output::{Frame, ImageFormat, ImageRequest, Output, OutputImage, Plane};
@@ -122,25 +120,22 @@ pub struct StreamInfo {
 
 /// Reads the sequence header of a temporal unit, without a decoder.
 pub fn peek_stream_info(data: &[u8]) -> Result<StreamInfo, Error> {
-    let mut si = sys::aom_codec_stream_info_t::default();
-    // SAFETY: data is a valid buffer of data.len() bytes and si a valid aom_codec_stream_info_t.
-    let code = unsafe { sys::rav1g_codec_peek_stream_info(data.as_ptr(), data.len(), &mut si) };
-    if code != sys::AOM_CODEC_OK {
-        return Err(Error::new(ErrorCode::from_raw(code), "the temporal unit has no sequence header that can be read"));
-    }
+    let info = host::obu::peek_stream_info(data).map_err(|code| {
+        Error::new(ErrorCode::from_raw(code), "the temporal unit has no sequence header that can be read")
+    })?;
     Ok(StreamInfo {
-        width: si.w,
-        height: si.h,
-        is_key_frame: si.is_kf != 0,
-        bit_depth: si.bit_depth,
-        monochrome: si.monochrome != 0,
+        width: info.width,
+        height: info.height,
+        is_key_frame: info.is_key_frame,
+        bit_depth: info.bit_depth,
+        monochrome: info.monochrome,
         color: ColorInfo {
-            description_present: si.color_description_present != 0,
-            primaries: ColorPrimaries(si.color_primaries as u8),
-            transfer_characteristics: TransferCharacteristics(si.transfer_characteristics as u8),
-            matrix_coefficients: MatrixCoefficients(si.matrix_coefficients as u8),
-            range: if si.color_range != 0 { ColorRange::Full } else { ColorRange::Limited },
-            chroma_sample_position: ChromaSamplePosition::from_raw(si.chroma_sample_position as u8),
+            description_present: info.color_description_present,
+            primaries: ColorPrimaries(info.color_primaries as u8),
+            transfer_characteristics: TransferCharacteristics(info.transfer_characteristics as u8),
+            matrix_coefficients: MatrixCoefficients(info.matrix_coefficients as u8),
+            range: if info.color_range != 0 { ColorRange::Full } else { ColorRange::Limited },
+            chroma_sample_position: ChromaSamplePosition::from_raw(info.chroma_sample_position as u8),
         },
     })
 }

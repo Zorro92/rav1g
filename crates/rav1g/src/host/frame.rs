@@ -24,7 +24,7 @@ use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12Device};
 use super::blocks::WaveEdges;
 use super::completion::start_completion_thread;
 use super::core::{buffer, commands, pipeline};
-use super::create::{IDCT_COEF_COUNT_DENUM, to_mib};
+use super::create::to_mib;
 use super::log::log;
 use super::loopfilter::loopfilter_gpu;
 use super::memory::poison_constants;
@@ -37,7 +37,6 @@ use super::pool::{CHUNK_ITEMS, COEF_CHUNK, Kind, Take};
 use super::postfilter::cdef_looprestoration;
 use super::prediction::{inter_ext_borders, prediction_gen_blocks, prediction_run_all};
 use super::stage_dump::{stage_dump_begin, stage_dump_frame_info};
-use super::thread::lock;
 use super::transform::idct_run;
 use super::types::{
     Av1Core, DeviceUpload, EntropyThreadCount, GpuWorkItem, InterFastMapSize, IntraV2MaxRegions, Run, TilePieces,
@@ -47,30 +46,19 @@ use crate::gpu::d3d12::{com_ref, wrapped_ref};
 use crate::gpu::{BufferState, CommandAllocator, CommandList, Event, Fence, Queue};
 use crate::sys;
 use crate::sys::parser::{
-    ALTREF_FRAME, AV1_COMMON, AV1Decoder, Av1ColorMapParam, HwFrameBuffer, HwOutputImage, INVALID_IDX, LAST_FRAME,
-    MACROBLOCKD, MB_MODE_INFO, REF_NO_SCALE, RESTORE_NONE, ThreadData, TileInfo, YV12_BUFFER_CONFIG,
-    av1_decoded_frame_buffer_t, av1_tile_data, scale_factors,
+    ALTREF_FRAME, AV1_COMMON, AV1Decoder, HwFrameBuffer, HwOutputImage, INVALID_IDX, LAST_FRAME, MB_MODE_INFO,
+    REF_NO_SCALE, RESTORE_NONE, TileInfo, YV12_BUFFER_CONFIG, av1_decoded_frame_buffer_t, av1_tile_data, scale_factors,
 };
 
-/// A tile of at most this many superblocks is too small for the switch to a second share of the
-/// coefficient buffer at a superblock boundary (`TileSbSizeThreshold`).
-const TILE_SB_SIZE_THRESHOLD: c_int = 2;
 /// `AV1_MEMORY_GUARD_MARGIN_BUFFER` of `aom/aom_decoder.h`: what a buffer that is created after the
 /// decoder must leave of the application's memory.
 const MEMORY_GUARD_MARGIN_BUFFER: u64 = 16 << 20;
-/// `MAX_MB_PLANE` of `av1/common/blockd.h`.
-const MAX_MB_PLANE: c_int = 3;
 /// `REF_INVALID_SCALE` of `av1/common/scale.h`.
 const REF_INVALID_SCALE: c_int = -1;
 /// `TRANSLATION` of `av1/common/mv.h`: the last global motion type that is not a warp.
 const TRANSLATION: c_int = 1;
 /// `YV12_FLAG_HIGHBITDEPTH` of `aom_scale/yv12config.h`.
 const YV12_FLAG_HIGHBITDEPTH: c_int = 8;
-
-unsafe extern "C" {
-    /// `av1/decoder/obu.c`: the frame is the one of its temporal unit that is output.
-    fn av1_frame_is_output(pbi: *const AV1Decoder) -> c_int;
-}
 
 const CLEARS_NOT_NEEDED: c_int = sys::AV1_CLEARS_NOT_NEEDED as c_int;
 const CLEARS_GPU: c_int = sys::AV1_CLEARS_GPU as c_int;
@@ -194,42 +182,8 @@ pub(crate) unsafe fn commit_command_buffer(dec: *mut Av1Core) {
 }
 
 // ---------------------------------------------------------------------------------------------------------
-// What the entropy decoder asks for outside a frame's setup.
+// What the parser's host asks for outside a frame's setup.
 // ---------------------------------------------------------------------------------------------------------
-
-/// `av1_setup_context_buffers` (`dx/av1_core.h`): the context arrays of the entropy decoder are the host
-/// memory the decoder set aside for them at its creation.
-///
-/// # Safety
-/// `pbi` is the entropy decoder's state of a decoder.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn av1_setup_context_buffers(pbi: *mut AV1Decoder) {
-    // SAFETY: the caller's contract.
-    unsafe {
-        let cm = &mut (*pbi).common;
-        let dec = &*(*pbi).gpu_decoder.cast::<Av1Core>();
-        // The above context.
-        let cols = (cm.mi_cols + 31) & !31;
-        let rows = cm.tile_rows;
-        cm.num_allocated_above_contexts = rows;
-        cm.num_allocated_above_context_mi_col = cols;
-        cm.num_allocated_above_context_planes = if cm.seq_params.monochrome != 0 { 1 } else { MAX_MB_PLANE };
-        cm.above_context[0] = dec.above_context_alloc[0].cast();
-        cm.above_context[1] = dec.above_context_alloc[1].cast();
-        cm.above_context[2] = dec.above_context_alloc[2].cast();
-        cm.above_seg_context = dec.above_context_alloc[3].cast();
-        cm.above_txfm_context = dec.above_context_alloc[4].cast();
-
-        cm.rst_info[0].unit_info = dec.restoration_info_alloc[0].cast();
-        cm.rst_info[1].unit_info = dec.restoration_info_alloc[1].cast();
-        cm.rst_info[2].unit_info = dec.restoration_info_alloc[2].cast();
-        cm.tpl_mvs = dec.tplmvs_alloc.cast();
-    }
-}
-
-/// `av1_show_frame` (`dx/av1_core.h`): nothing; a frame is output by its command list.
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_show_frame(_pbi: *mut AV1Decoder, _buf: *mut YV12_BUFFER_CONFIG, _is_visible: c_int) {}
 
 /// `av1_sequence_fits_decoder` (`dx/av1_core.h`): whether the frames of a sequence fit the buffers the
 /// decoder was created with: its largest frame, rounded up to 128 as the buffers are, and its bit depth
@@ -238,8 +192,7 @@ pub extern "C" fn av1_show_frame(_pbi: *mut AV1Decoder, _buf: *mut YV12_BUFFER_C
 ///
 /// # Safety
 /// `dec` is a decoder; the three out pointers are null or valid for writing.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn av1_sequence_fits_decoder(
+pub(crate) unsafe extern "C" fn av1_sequence_fits_decoder(
     dec: *mut Av1Core,
     max_frame_width: c_int,
     max_frame_height: c_int,
@@ -274,8 +227,7 @@ pub unsafe extern "C" fn av1_sequence_fits_decoder(
 ///
 /// # Safety
 /// `private` is null or the decoder; `ybf` is null or the buffer description of the frame.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn av1_reallocate_frame_buffer(
+pub(crate) unsafe extern "C" fn av1_reallocate_frame_buffer(
     private: *mut c_void,
     ybf: *mut YV12_BUFFER_CONFIG,
     width: c_int,
@@ -384,8 +336,7 @@ pub unsafe extern "C" fn av1_reallocate_frame_buffer(
 ///
 /// # Safety
 /// `private` is the decoder; `ybf` is the buffer description of a frame of it.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn av1_release_fb_callback(private: *mut c_void, ybf: *mut YV12_BUFFER_CONFIG) {
+pub(crate) unsafe extern "C" fn av1_release_fb_callback(private: *mut c_void, ybf: *mut YV12_BUFFER_CONFIG) {
     // SAFETY: the caller's contract.
     unsafe {
         let dec = private.cast::<Av1Core>();
@@ -412,31 +363,6 @@ pub unsafe extern "C" fn av1_release_fb_callback(private: *mut c_void, ybf: *mut
 // ---------------------------------------------------------------------------------------------------------
 // The setup of a frame.
 // ---------------------------------------------------------------------------------------------------------
-
-/// `get_sec_data` of the C++: the frame takes a second slot, for the share of that slot in the mode info
-/// pool and in the coefficient buffer. Waits for a slot when none is free. Called by the decode thread and
-/// by the tile threads.
-///
-/// # Safety
-/// `dec` is the decoder and `td` the slot of the frame that is being decoded.
-unsafe fn get_sec_data(dec: *mut Av1Core, td: *mut av1_frame_thread_data) {
-    // SAFETY: the caller's contract; the second slot is taken under the lock of the first.
-    unsafe {
-        let _taking = lock(&(*td).sec_data_mutex);
-        if (*td).sec_thread_data.is_null() {
-            let perf_t = super::perf::av1_perf_ticks();
-            (*td).sec_thread_data = (*dec).frame_data_pool.get();
-            perf_add(dec, sys::AV1_PERF_CPU_WAIT_SEC_SLOT as usize, perf_t);
-            if perf_t != 0 {
-                (*super::perf::frame_acc(dec)).used_sec_slot = 1;
-            }
-            let sec = &*(*td).sec_thread_data;
-            for i in 0..usize::try_from((*td).tile_count).unwrap_or(0) {
-                (*sec.tile_data.add(i)).mi_count = 0;
-            }
-        }
-    }
-}
 
 /// `intra_v2_next_stamp` of `dx/intra_v2_sched.h`: moves on to the stamp of the next frame. Returns true
 /// when the cell map and the regions have to be cleared first: for the first frame of a buffer (stamp 0)
@@ -715,10 +641,9 @@ pub(crate) unsafe fn release_frame(dec: *mut Av1Core, td: *mut av1_frame_thread_
             return;
         }
         // The coefficients of a submitted frame are zeroed by the IDCT shaders as they read them (the
-        // entropy decoder writes only the non-zero ones and relies on the rest being zero). This frame never
-        // reached the GPU, so its share is cleared here, and the share of its second slot, which it may
-        // have written too. With pools: the pieces it took of the coefficient pool, which then go back
-        // with the others.
+        // parser writes only the non-zero ones and relies on the rest being zero). This frame never
+        // reached the GPU, so the pieces it took of the coefficient pool are cleared here, and then go
+        // back with the others.
         let coef_buf = (*(*dec).idct_coefs).host_ptr.cast::<i32>();
         if let Some(pools) = (*dec).pools.as_deref() {
             pools.release(td.slot_index as usize, |kind, first, chunks| {
@@ -726,12 +651,6 @@ pub(crate) unsafe fn release_frame(dec: *mut Av1Core, td: *mut av1_frame_thread_
                     coef_buf.add(first * COEF_CHUNK).write_bytes(0, chunks * COEF_CHUNK);
                 }
             });
-        }
-        coef_buf.add(td.coef_buffer_offset as usize).cast::<u8>().write_bytes(0, td.coef_buffer_size as usize);
-        if let Some(sec) = td.sec_thread_data.as_mut() {
-            coef_buf.add(sec.coef_buffer_offset as usize).cast::<u8>().write_bytes(0, sec.coef_buffer_size as usize);
-            (*dec).frame_data_pool.push(std::ptr::from_mut(sec));
-            td.sec_thread_data = std::ptr::null_mut();
         }
         // Its grids stay dirty and are not marked clean, so the next frame on this slot clears them itself,
         // whoever does the clears otherwise.
@@ -779,8 +698,7 @@ fn describe_like(buf: &mut HwFrameBuffer, fb: &HwFrameBuffer, hbd: c_int) {
 ///
 /// # Safety
 /// `pbi` is the entropy decoder's state with the header of the frame in `cm`; decode thread.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_setup_frame_begin(
+pub(crate) unsafe extern "C" fn rav1g_setup_frame_begin(
     pbi: *mut AV1Decoder,
     cm: *mut AV1_COMMON,
     perf_start: *mut i64,
@@ -825,7 +743,6 @@ pub(crate) unsafe fn setup_frame_begin(
         let td_ptr: *mut av1_frame_thread_data = (*dec).frame_data_pool.get();
         perf_add(dec, sys::AV1_PERF_CPU_WAIT_SLOT as usize, perf_t);
         let td = &mut *td_ptr;
-        td.sec_thread_data = std::ptr::null_mut();
         if current {
             (*dec).curr_frame_data = td_ptr;
         }
@@ -1069,95 +986,16 @@ pub(crate) unsafe fn bind_frame_for_record(dec: *mut Av1Core, td: *mut av1_frame
     }
 }
 
-/// `av1_setup_frame`, its second part: where the coefficients of the frame start. Returns 1 when a frame
-/// with very small tiles has no room for its coefficients: the caller raises the decoder's error.
-///
-/// # Safety
-/// As for [`rav1g_setup_frame_begin`], after it.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_setup_frame_coefs(pbi: *mut AV1Decoder, cm: *mut AV1_COMMON) -> c_int {
-    // SAFETY: the caller's contract.
-    unsafe {
-        let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
-        setup_frame_coefs(dec, (*dec).curr_frame_data, cm)
-    }
-}
-
-/// [`rav1g_setup_frame_coefs`] for the frame on the slot `td_ptr`.
-///
-/// # Safety
-/// `dec` is the decoder, `td_ptr` the slot [`setup_frame_begin`] returned for the frame of `cm`.
-pub(crate) unsafe fn setup_frame_coefs(
-    dec: *mut Av1Core,
-    td_ptr: *mut av1_frame_thread_data,
-    cm: *const AV1_COMMON,
-) -> c_int {
-    // SAFETY: the caller's contract.
-    unsafe {
-        let td = &mut *td_ptr;
-        let cm = &*cm;
-        td.ext_idct_buffer = 0;
-        td.ext_coef_base = td.coef_buffer_offset;
-        if (*dec).pools.is_some() {
-            // A tile takes pieces of the coefficient pool as it goes, whatever its size.
-            return 0;
-        }
-        // Worst-case layout of the coefficients (IDCT_COEF_COUNT_DENUM per 4x4 unit, av1_setup_macroblockd)
-        // for a frame with a tile of at most TILE_SB_SIZE_THRESHOLD superblocks: such a tile is too small
-        // for the switch to a second share at a superblock boundary.
-        let mib_log2 = cm.seq_params.mib_size_log2;
-        let mut coef_end = 0;
-        for r in 0..cm.tile_rows as usize {
-            for c in 0..cm.tile_cols as usize {
-                let superblocks = (cm.tile_col_start_sb[c + 1] - cm.tile_col_start_sb[c])
-                    * (cm.tile_row_start_sb[r + 1] - cm.tile_row_start_sb[r]);
-                td.ext_idct_buffer |= c_int::from(superblocks <= TILE_SB_SIZE_THRESHOLD);
-                let row_start = cm.tile_row_start_sb[r] << mib_log2;
-                let col_start = cm.tile_col_start_sb[c] << mib_log2;
-                let rows = (((cm.tile_row_start_sb[r + 1] << mib_log2).min(cm.mi_rows) - row_start) + 15) & !15;
-                let cols = (((cm.tile_col_start_sb[c + 1] << mib_log2).min(cm.mi_cols) - col_start) + 15) & !15;
-                let mi_offset = row_start * ((cm.mi_cols + 15) & !15) + col_start * rows;
-                coef_end = coef_end.max((mi_offset + rows * cols) * IDCT_COEF_COUNT_DENUM);
-            }
-        }
-        if td.ext_idct_buffer != 0 {
-            get_sec_data(dec, td_ptr);
-            // The layout runs on from one share into the next. It starts in this slot's share, as it always
-            // did, when it fits that share alone or when the second slot's share is the one behind it; when
-            // the second slot's share is the one in front, it starts there (it used to start in this slot's
-            // share all the same and ran over the share behind it, which is another slot's or the end of the
-            // buffer).
-            let share = td.coef_buffer_size / size_of::<c_int>() as c_int;
-            let sec = &*td.sec_thread_data;
-            let sec_offset = sec.coef_buffer_offset;
-            if coef_end > share {
-                if coef_end <= 2 * share && sec_offset + share == td.coef_buffer_offset {
-                    td.ext_coef_base = sec_offset;
-                } else if coef_end > 2 * share || td.coef_buffer_offset + share != sec_offset {
-                    log(
-                        true,
-                        &format!(
-                            "MEMORY FAILED frame {}: a tile of at most {TILE_SB_SIZE_THRESHOLD} superblocks needs \
-                             the worst-case coefficient layout, {coef_end} coefficients, in two shares of {share} \
-                             that follow each other; the frame has the shares of slots {} and {}",
-                            td.frame_number, td.slot_index, sec.slot_index
-                        ),
-                    );
-                    return 1;
-                }
-            }
-        }
-    }
-    0
-}
-
 /// `av1_setup_frame`, its last part: the completion thread runs, and the slot knows the scale of the
 /// frame's references and which of them a global motion block is warped from.
 ///
 /// # Safety
 /// As for [`rav1g_setup_frame_begin`], after it; `perf_start` is what that part returned.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_setup_frame_end(pbi: *mut AV1Decoder, cm: *mut AV1_COMMON, perf_start: i64) -> c_int {
+pub(crate) unsafe extern "C" fn rav1g_setup_frame_end(
+    pbi: *mut AV1Decoder,
+    cm: *mut AV1_COMMON,
+    perf_start: i64,
+) -> c_int {
     // SAFETY: the caller's contract.
     unsafe {
         let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
@@ -1168,7 +1006,8 @@ pub unsafe extern "C" fn rav1g_setup_frame_end(pbi: *mut AV1Decoder, cm: *mut AV
 /// [`rav1g_setup_frame_end`] for the frame on the slot `td`.
 ///
 /// # Safety
-/// As for [`setup_frame_coefs`]; `perf_start` is what [`setup_frame_begin`] returned.
+/// `dec` is the decoder, `td` the slot [`setup_frame_begin`] returned for the frame of `cm`, and
+/// `perf_start` the start it returned.
 pub(crate) unsafe fn setup_frame_end(
     dec: *mut Av1Core,
     td: *mut av1_frame_thread_data,
@@ -1220,131 +1059,16 @@ pub(crate) unsafe fn setup_frame_end(
     0
 }
 
-/// `av1_setup_ext_coef_buffer` (`dx/av1_core.h`): the tile goes on with its coefficients in the share of
-/// the frame's second slot.
-///
-/// # Safety
-/// `pbi` is the entropy decoder's state while it decodes the tile of `thread_data`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn av1_setup_ext_coef_buffer(
-    pbi: *mut AV1Decoder,
-    _cm: *mut AV1_COMMON,
-    thread_data: *mut ThreadData,
-) {
-    // SAFETY: the caller's contract.
-    unsafe {
-        let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
-        second_coefs(dec, (*dec).curr_frame_data, &mut *(*thread_data).tile_data);
-    }
-}
-
-/// A tile goes on with its coefficients in the share of the frame's second slot, which the frame takes
-/// here if it has none (the call waits for a slot).
-///
-/// # Safety
-/// `dec` is the decoder while the tiles of the frame on the slot `cur_td` are decoded; `tile` is a tile
-/// of that frame, of the calling thread.
-pub(crate) unsafe fn second_coefs(dec: *mut Av1Core, cur_td: *mut av1_frame_thread_data, tile: &mut av1_tile_data) {
-    // SAFETY: the caller's contract.
-    unsafe {
-        get_sec_data(dec, cur_td);
-        let td = &*(*cur_td).sec_thread_data;
-        // The tile's part of the second slot's share: the same place and size as in the first.
-        tile.dq_buffer_ptr = td.coef_buffer_offset + tile.dq_buffer_offset;
-        tile.dq_buffer_end = tile.dq_buffer_ptr + tile.dq_buffer_size;
-    }
-}
-
-/// `av1_setup_sec_data` (`dx/av1_core.h`): the tile goes on with its mode info in the share of the
-/// frame's second slot.
-///
-/// # Safety
-/// As for [`av1_setup_ext_coef_buffer`].
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn av1_setup_sec_data(pbi: *mut AV1Decoder, _cm: *mut AV1_COMMON, thread_data: *mut ThreadData) {
-    // SAFETY: the caller's contract.
-    unsafe {
-        let thread_data = &mut *thread_data;
-        let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
-        let (tile_data2, mi_pool2) =
-            second_mode_info(dec, (*dec).curr_frame_data, thread_data.tile_id as usize, &*thread_data.tile_data);
-        thread_data.mi_count2 = 0;
-        thread_data.mi_pool2 = mi_pool2;
-        thread_data.tile_data2 = tile_data2;
-    }
-}
-
-/// A tile goes on with its mode info in the share of the frame's second slot, which the frame takes here
-/// if it has none (the call waits for a slot): the tile's cursors there, and where its records go on.
-///
-/// # Safety
-/// `dec` is the decoder while the tiles of the frame on the slot `cur_td` are decoded; `prev_t` is the
-/// tile `tile_id` of that frame, of the calling thread.
-pub(crate) unsafe fn second_mode_info(
-    dec: *mut Av1Core,
-    cur_td: *mut av1_frame_thread_data,
-    tile_id: usize,
-    prev_t: &av1_tile_data,
-) -> (*mut av1_tile_data, *mut MB_MODE_INFO) {
-    // SAFETY: the caller's contract.
-    unsafe {
-        get_sec_data(dec, cur_td);
-
-        let td = &*(*cur_td).sec_thread_data;
-        let t = &mut *td.tile_data.add(tile_id);
-        t.mi_count = 0;
-        t.mi_offset = prev_t.mi_offset + td.mode_info_offset - (*cur_td).mode_info_offset;
-        (t, (*(*dec).mode_info_pool).host_ptr.cast::<MB_MODE_INFO>().offset(t.mi_offset as isize))
-    }
-}
-
-/// `av1_setup_macroblockd` (`dx/av1_core.h`): a tile thread starts a tile: the tile's cursors into the
-/// buffers of the frame's slot (coefficients, transform block records, block index list, block maps,
-/// mode info).
-///
-/// # Safety
-/// `pbi` is the entropy decoder's state while it decodes the frame of `cm`; `thread_data` is the calling
-/// tile thread's and `tile` its tile.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn av1_setup_macroblockd(
-    pbi: *mut AV1Decoder,
-    cm: *mut AV1_COMMON,
-    thread_data: *mut ThreadData,
-    tile: *mut TileInfo,
-) {
-    // SAFETY: the caller's contract.
-    unsafe {
-        let thread_data = &mut *thread_data;
-        let xd: *mut MACROBLOCKD = &raw mut thread_data.xd;
-        let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
-        let setup = setup_tile(dec, (*dec).curr_frame_data, &*cm, &*tile);
-        thread_data.tile_data = setup.tile_data;
-        (*xd).tile_data = setup.tile_data;
-        thread_data.tile_id = setup.tile_id;
-        thread_data.mi_count = 0;
-        thread_data.mi_count_max = setup.mi_count_max;
-        thread_data.mi_pool = setup.mi_pool;
-        thread_data.mi_count2 = 0;
-        thread_data.mi_pool2 = std::ptr::null_mut();
-        thread_data.tile_data2 = std::ptr::null_mut();
-        thread_data.ext_idct_buffer = setup.ext_idct_buffer;
-    }
-}
-
 /// What a tile thread starts a tile with ([`setup_tile`]).
 pub(crate) struct TileSetup {
     /// The tile's cursors into the buffers of the frame's slot.
     pub tile_data: *mut av1_tile_data,
-    pub tile_id: c_int,
-    /// The tile's part of the slot's share of the mode info pool, and the records it has room for.
-    pub mi_pool: *mut MB_MODE_INFO,
-    pub mi_count_max: c_int,
-    /// The frame's coefficients have the worst-case layout: no tile goes on in a second share.
-    pub ext_idct_buffer: c_int,
 }
 
-/// A tile of the frame on the slot `td` starts: its cursors into the buffers of the frame's slot
-/// (coefficients, transform block records, block index list, block maps, mode info).
+/// A tile of the frame on the slot `td` starts: its cursors into the buffers of the frame's slot (block
+/// index list, block maps) and into the pools, of which it has nothing yet: it takes its first piece of
+/// each with its first block and its first transform block ([`more_mode_info`], [`more_coefs`],
+/// [`more_transform_blocks`]).
 ///
 /// # Safety
 /// `dec` is the decoder while the tiles of the frame of `cm`, which has the slot `td`, are decoded; the
@@ -1371,64 +1095,25 @@ pub(crate) unsafe fn setup_tile(
         let tile_rows = (tile.mi_row_end - tile.mi_row_start + 15) & !15;
         let tile_cols = (tile.mi_col_end - tile.mi_col_start + 15) & !15;
         let mi_offset = tile.mi_row_start * ((cm.mi_cols + 15) & !15) + tile.mi_col_start * tile_rows;
-        let mi_max = tile_rows * tile_cols;
 
         let blocks_4x4_count = (mi_offset * 3 + 1) >> 1;
         t.intra_iter_max = -1;
         t.intra_iter_max_uv = -1;
         t.dq_buffer_base = (*(*dec).idct_coefs).host_ptr.cast();
         t.mi_count = 0;
-        let setup = if (*dec).pools.is_some() {
-            // A decoder with pools: the tile has no part of anything yet. It takes its first piece of
-            // each pool with its first block and its first transform block (`more_mode_info`,
-            // `more_coefs`, `more_transform_blocks`).
-            t.dq_buffer_offset = 0;
-            t.dq_buffer_ptr = 0;
-            t.dq_buffer_max = 0;
-            t.dq_buffer_size = 0;
-            t.dq_buffer_end = 0;
-            t.blocks_offset = 0;
-            t.idct_blocks_host = (*(*dec).idct_blocks_pool).host_ptr.cast();
-            t.mi_offset = 0;
-            let pieces = &mut *td.tile_pieces.add(tile_id as usize);
-            pieces.col_end = tile.mi_col_end.min(cm.mi_cols);
-            pieces.row_end = tile.mi_row_end.min(cm.mi_rows);
-            pieces.cells_left = cells(pieces.col_end - tile.mi_col_start) * cells(pieces.row_end - tile.mi_row_start);
-            TileSetup { tile_data: t_ptr, tile_id, mi_count_max: 0, mi_pool: std::ptr::null_mut(), ext_idct_buffer: 1 }
-        } else {
-            let coef_num = (*dec).coef_count_num;
-            let per_unit = if td.ext_idct_buffer != 0 { IDCT_COEF_COUNT_DENUM } else { coef_num };
-            t.dq_buffer_offset = mi_offset * per_unit;
-            t.dq_buffer_ptr =
-                (if td.ext_idct_buffer != 0 { td.ext_coef_base } else { td.coef_buffer_offset }) + t.dq_buffer_offset;
-            let mib_sz = cm.seq_params.mib_size;
-            let sb_sz = mib_sz * mib_sz * IDCT_COEF_COUNT_DENUM;
-            t.dq_buffer_max = t.dq_buffer_ptr + mi_max * coef_num - sb_sz;
-            // The tile's part of a share, and where the part it is writing ends: av1_read_coeffs_txb() does
-            // not write behind it. With the worst-case layout the part is as large as the tile can need.
-            t.dq_buffer_size = mi_max * coef_num;
-            t.dq_buffer_end = t.dq_buffer_ptr + mi_max * per_unit;
-
-            t.blocks_offset = blocks_4x4_count;
-            t.idct_blocks_host = (*td.idct_blocks_unordered)
-                .host_ptr
-                .cast::<crate::sys::parser::tx_block_info_gpu>()
-                .offset(blocks_4x4_count as isize);
-
-            let mi_offset_base =
-                tile.mi_row_start * cm.mi_stride + tile.mi_col_start * (tile.mi_row_end - tile.mi_row_start);
-            let mi_max_base = (tile.mi_row_end - tile.mi_row_start) * (tile.mi_col_end - tile.mi_col_start);
-            // The tile's part of the slot's share of the mode info pool: half of its 4x4 units, a quarter
-            // with AV1_LOW_MEMORY_MODE_INFO. The part in a second slot's share has the same place and size.
-            t.mi_offset = (mi_offset_base >> (*dec).mode_info_shift) + td.mode_info_offset;
-            TileSetup {
-                tile_data: t_ptr,
-                tile_id,
-                mi_count_max: mi_max_base >> (*dec).mode_info_shift,
-                mi_pool: (*(*dec).mode_info_pool).host_ptr.cast::<MB_MODE_INFO>().offset(t.mi_offset as isize),
-                ext_idct_buffer: td.ext_idct_buffer,
-            }
-        };
+        t.dq_buffer_offset = 0;
+        t.dq_buffer_ptr = 0;
+        t.dq_buffer_max = 0;
+        t.dq_buffer_size = 0;
+        t.dq_buffer_end = 0;
+        t.blocks_offset = 0;
+        t.idct_blocks_host = (*(*dec).idct_blocks_pool).host_ptr.cast();
+        t.mi_offset = 0;
+        let pieces = &mut *td.tile_pieces.add(tile_id as usize);
+        pieces.col_end = tile.mi_col_end.min(cm.mi_cols);
+        pieces.row_end = tile.mi_row_end.min(cm.mi_rows);
+        pieces.cells_left = cells(pieces.col_end - tile.mi_col_start) * cells(pieces.row_end - tile.mi_row_start);
+        let setup = TileSetup { tile_data: t_ptr };
 
         t.mi_col_start = tile.mi_col_start;
         t.mi_row_start = tile.mi_row_start;
@@ -1764,31 +1449,6 @@ pub(crate) struct PaletteMap {
     pub rows: usize,
 }
 
-/// `av1_intra_palette` (`dx/av1_core.h`): the pixels of a palette block go into the palette buffer of the
-/// frame's slot, in the layout of the frame buffer; for chroma both planes from the one colour map.
-///
-/// # Safety
-/// `pbi` is the entropy decoder's state while it decodes a frame; `mi` is the block and `params` its
-/// colour map for `plane`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn av1_intra_palette(
-    pbi: *mut AV1Decoder,
-    mi: *mut MB_MODE_INFO,
-    params: *mut Av1ColorMapParam,
-    plane: c_int,
-) {
-    // SAFETY: the caller's contract.
-    unsafe {
-        let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
-        let mi = &*mi;
-        let params = &*params;
-        let (width, height) = (params.plane_width as usize, params.plane_height as usize);
-        let map = PaletteMap { data: params.color_map, stride: width, rows: height };
-        let colors = &mi.palette_mode_info.palette_colors;
-        write_palette(dec, (*dec).curr_frame_data, mi.mi_row, mi.mi_col, plane as usize, colors, &map, width, height);
-    }
-}
-
 /// The pixels of a palette block go into the palette buffer of the frame's slot, in the layout of the
 /// frame buffer: `plane` 0 is luma, 1 both chroma planes from the one colour map. `colors` has eight
 /// colours per plane (Y, U, V); the block is `width` x `height` samples of the plane.
@@ -1854,8 +1514,7 @@ pub(crate) unsafe fn write_palette(
 /// # Safety
 /// `pbi` is the entropy decoder's state with a frame whose tiles are decoded; `fb` and `perf_lap_start`
 /// are valid for writing; decode thread.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_decode_frame_record(
+pub(crate) unsafe extern "C" fn rav1g_decode_frame_record(
     pbi: *mut AV1Decoder,
     fb: *mut av1_decoded_frame_buffer_t,
     perf_lap_start: *mut i64,
@@ -1898,7 +1557,7 @@ pub(crate) unsafe fn decode_frame_record(
         perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_BORDERS as usize, perf_t);
         *perf_lap_start = perf_t;
         // A shown frame is output, unless it is a lower spatial layer of its temporal unit.
-        let is_output = (*cm).show_frame != 0 && output.unwrap_or_else(|| av1_frame_is_output(pbi) != 0);
+        let is_output = (*cm).show_frame != 0 && output.unwrap_or_else(|| super::obu::frame_is_output(pbi));
         (*(*dec).curr_frame_data).output_frame = c_int::from(is_output);
         output_image(dec, cm, fb)
     }
@@ -1909,8 +1568,7 @@ pub(crate) unsafe fn decode_frame_record(
 ///
 /// # Safety
 /// As for [`rav1g_decode_frame_record`], after it, with the state and the lap start it returned.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_decode_frame_submit(
+pub(crate) unsafe extern "C" fn rav1g_decode_frame_submit(
     pbi: *mut AV1Decoder,
     image_state: c_int,
     fb: *const av1_decoded_frame_buffer_t,

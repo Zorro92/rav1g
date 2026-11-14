@@ -31,6 +31,68 @@
 
 #define OBU_DETECTION_SIZE (OBU_HEADER_SIZE + OBU_EXTENSION_SIZE + 4 * OBU_MAX_LENGTH_FIELD_SIZE)
 
+// aom_uleb_decode() of aom/src/aom_integer.c and aom_read_obu_header() of av1/common/obu_util.c, here
+// because the programs that read streams with this file no longer link the C of libav1 (the decoder's
+// parser is rav1d's parse pass, docs/phase2-rav1d.md): the reader stands by itself.
+static int obudec_uleb_decode(const uint8_t *buffer, size_t available, uint64_t *value, size_t *length) {
+  if (buffer && value) {
+    *value = 0;
+    for (size_t i = 0; i < OBU_MAX_LENGTH_FIELD_SIZE && i < available; ++i) {
+      const uint8_t decoded_byte = *(buffer + i) & 0x7f;
+      *value |= ((uint64_t)decoded_byte) << (i * 7);
+      if ((*(buffer + i) >> 7) == 0) {
+        if (length) *length = i + 1;
+        // Values above 32 bits fail, as they do in libaom.
+        if (*value > UINT32_MAX) return -1;
+        return 0;
+      }
+    }
+  }
+  // The pointers were invalid, or the value does not end in the bytes there are.
+  return -1;
+}
+
+static aom_codec_err_t obudec_read_obu_header_bits(uint8_t *buffer, size_t buffer_length, size_t *consumed,
+                                                   ObuHeader *header, int is_annexb) {
+  if (buffer_length < 1 || !consumed || !header) return AOM_CODEC_INVALID_PARAM;
+  const uint8_t first = buffer[0];
+  header->size = 1;
+  // The forbidden bit must not be set.
+  if (first & 0x80) return AOM_CODEC_CORRUPT_FRAME;
+  header->type = (OBU_TYPE)((first >> 3) & 15);
+  switch (header->type) {
+    case OBU_SEQUENCE_HEADER:
+    case OBU_TEMPORAL_DELIMITER:
+    case OBU_FRAME_HEADER:
+    case OBU_TILE_GROUP:
+    case OBU_METADATA:
+    case OBU_FRAME:
+    case OBU_REDUNDANT_FRAME_HEADER:
+    case OBU_TILE_LIST:
+    case OBU_PADDING: break;
+    default: return AOM_CODEC_CORRUPT_FRAME;
+  }
+  header->has_extension = (first >> 2) & 1;
+  header->has_size_field = (first >> 1) & 1;
+  // Section 5 streams must have the size field.
+  if (!header->has_size_field && !is_annexb) return AOM_CODEC_UNSUP_BITSTREAM;
+  // obu_reserved_1bit must be 0.
+  if (first & 1) return AOM_CODEC_CORRUPT_FRAME;
+  if (header->has_extension) {
+    if (buffer_length == 1) return AOM_CODEC_CORRUPT_FRAME;
+    header->size += 1;
+    header->temporal_layer_id = buffer[1] >> 5;
+    header->spatial_layer_id = (buffer[1] >> 3) & 3;
+    // extension_header_reserved_3bits must be 0.
+    if (buffer[1] & 7) return AOM_CODEC_CORRUPT_FRAME;
+  } else {
+    header->temporal_layer_id = 0;
+    header->spatial_layer_id = 0;
+  }
+  *consumed = header->size;
+  return AOM_CODEC_OK;
+}
+
 // Reads unsigned LEB128 integer and returns 0 upon successful read and decode.
 // Stores raw bytes in 'value_buffer', length of the number in 'value_length',
 // and decoded value in 'value'.
@@ -54,7 +116,7 @@ static int obudec_read_leb128(FILE *f, uint8_t *value_buffer, size_t *value_leng
     }
   }
 
-  return aom_uleb_decode(value_buffer, len, value, NULL);
+  return obudec_uleb_decode(value_buffer, len, value, NULL);
 }
 
 // Reads OBU header from 'f'. The 'buffer_capacity' passed in must be large
@@ -88,7 +150,7 @@ static int obudec_read_obu_header(FILE *f, size_t buffer_capacity, int is_annexb
 
   size_t obu_bytes_parsed = 0;
   const aom_codec_err_t parse_result =
-      aom_read_obu_header(obu_data, *bytes_read, &obu_bytes_parsed, obu_header, is_annexb);
+      obudec_read_obu_header_bits(obu_data, *bytes_read, &obu_bytes_parsed, obu_header, is_annexb);
   if (parse_result != AOM_CODEC_OK || *bytes_read != obu_bytes_parsed) {
     // fprintf(stderr, "obudec: Error parsing OBU header.\n");
     return -1;
@@ -367,7 +429,7 @@ int obudec_read_temporal_unit(struct ObuDecInputContext *obu_ctx, uint8_t **buff
       }
     } else {
       // temporal unit size was already stored in buffer
-      if (aom_uleb_decode(obu_ctx->buffer, obu_ctx->bytes_buffered, &size, &length_of_temporal_unit_size) != 0) {
+      if (obudec_uleb_decode(obu_ctx->buffer, obu_ctx->bytes_buffered, &size, &length_of_temporal_unit_size) != 0) {
         fprintf(stderr, "obudec: Failure reading temporal unit header\n");
         return -1;
       }

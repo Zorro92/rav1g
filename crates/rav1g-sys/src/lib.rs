@@ -6,11 +6,14 @@
 // License 1.0 was not distributed with this source code in the PATENTS file, you can obtain it at
 // www.aomedia.org/license/patent.
 
-//! The C of the decoder (the entropy decoder), built by `build.rs`, and its bindings.
+//! The bindings of the decoder to the headers of `libav1`, and what `build.rs` builds of its C: for the
+//! decoder (Windows) the shader table only; elsewhere the entropy decoder of libaom, for
+//! `tools/rav1g-parse-check`.
 //!
-//! Everything at the top level is the C interface as it is (`libav1/aom/aom_decoder.h`, `aom_codec.h`, `aomdx.h`,
-//! `libav1/dx/av1_perf.h`) plus the `rav1g_codec_*` functions of `helpers.c`, which stand in for the
-//! macros of that interface. The `rav1g` crate is the wrapper to use.
+//! Everything at the top level is the C interface as its headers have it (`libav1/aom/aom_decoder.h`,
+//! `aom_codec.h`, `aomdx.h`, `libav1/dx/av1_perf.h`) plus the `rav1g_codec_*` functions of `helpers.c`,
+//! which stand in for the macros of that interface. The decoder uses the types and the constants; the
+//! functions exist only where the entropy decoder is built. The `rav1g` crate is the decoder.
 
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
 #![allow(clippy::all)]

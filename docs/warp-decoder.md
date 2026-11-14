@@ -407,6 +407,28 @@ every output frame.
 
 ### The jobs of a push
 
+**Since 2026-11-14 (phase 2, step 6: the C parser left the decoder,
+[phase2-rav1d.md](phase2-rav1d.md#step-6-the-c-parser-leaves)) the jobs that existed for `-parser c`
+are gone**, and the table below is what a push was before:
+
+- `rust-parser-c` is gone: there is no `-parser c` to run.
+- `rust-parsers-equal` is `rust-dumps-equal`: the stage dumps of the other parser switches, of
+  `-cpuclear` and of two frames in parse against those of the default, byte for byte. It no longer
+  has a second parser to hold the default against.
+- `rust-equal` holds the run of `rust-conformance` (rav1d's parse) against the C++ decoder of the
+  pin, whose parser is the entropy decoder of libaom: the md5 of every frame, and the stage dumps
+  with the mode info records listed and not held equal (`--two-parsers`). That is the comparison
+  `rust-parsers-equal` made against `-parser c`, with the C++ decoder in the place of `-parser c`
+  (the two were byte for byte the same for as long as both existed). Of the MEMORY lines it holds
+  what `rust-parsers-equal` held: the pools next to the shares (`memory_lines.py pools`), now the
+  shares of the C++ decoder.
+- `rust-cross-run-parsers` is `rust-cross-run-switches`: the other side of the parser switches with
+  the program of the Linux build.
+- `colour` holds two runs (the Rust interface, `rav1g.h`), not three.
+- `parser-timing` and its input are gone, with `parser_timing.py`.
+- `parse-check` is unchanged, and is where the entropy decoder of libaom still runs: on Linux, as
+  the reference rav1d's parse is held against value by value.
+
 Until 2026-11-13 one job, `rust`, built the program and ran every check with it, one after the
 other: 50.5 minutes of a push that took 51.8 (run 43517057205), 17.4 of them the paired timing of
 the two parsers. Now `rust` builds the program once and keeps it as an artifact, and the jobs behind
@@ -496,6 +518,9 @@ edges for the other: the block lists have to be equal) with one thread and with 
 grid` once.
 
 ### Paired timing of the parsers
+
+(History: the job and the script went with the C parser on 2026-11-14. The numbers below are what
+they measured while there were two parsers.)
 
 `testing/conformance/parser_timing.py` times the decoder with `-parser c`, with `-parser rav1d` and
 with rav1d and other switches in turns on one runner ([phase2-rav1d.md](phase2-rav1d.md)). It was a

@@ -493,7 +493,6 @@ fn create_decoder(
         // point 0 unless -oppoint.
         operating_point: task.oppoint as u32,
         all_layers: task.all_layers,
-        parser_rav1d: task.parser_rav1d,
         parser_options: task.parser_options,
         // -budget: a budget callback that answers with the number of the flag.
         budget: (task.budget_mib >= 0).then_some((task.budget_mib << 20) as u64),
@@ -708,16 +707,11 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         intra_edge_fix: task.intraedgefix,
         inter_fast: task.interfast,
     });
-    if task.parser_rav1d {
-        say!(
-            "PARSER {}: the parse pass of rav1d reads the bitstream (-parser rav1d, the default), switches {} \
-             (-parseopt)",
-            task.name,
-            task.parser_options.words()
-        );
-    } else {
-        say!("PARSER {}: the entropy decoder of libaom reads the bitstream (-parser c)", task.name);
-    }
+    say!(
+        "PARSER {}: the parse pass of rav1d reads the bitstream, switches {} (-parseopt)",
+        task.name,
+        task.parser_options.words()
+    );
     if task.interfast & switches::INTER_FAST_ON != 0 {
         say!(
             "INTERFAST {}: inter blocks by motion vector class, mode {} (one reference: {}; two: {}); frames with a \

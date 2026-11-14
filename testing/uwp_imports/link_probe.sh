@@ -5,7 +5,7 @@
 # not from the import stubs for kernel32.dll that the Rust library carries (docs/rust-port.md, "The app
 # container"). check_imports.py then reads the DLL. lld-link, on any machine: the Linux build of CI.
 #
-# usage: link_probe.sh <rav1g.lib> <directory of rav1g_c.lib and rav1g_c_speed.lib> <xwin directory> <out directory>
+# usage: link_probe.sh <rav1g.lib> <directory of rav1g_c.lib> <xwin directory> <out directory>
 #
 # The xwin directory is what cargo xwin keeps the Windows SDK and the C runtime in (~/.cache/cargo-xwin/xwin).
 # It has the desktop C runtime only, so the DLL imports from vcruntime140.dll where the player imports
@@ -24,6 +24,6 @@ test -n "$exports"
 # shellcheck disable=SC2086
 lld-link /dll /appcontainer "/out:$out/probe.dll" /opt:ref /opt:icf /machine:x64 $exports \
   "/libpath:$xwin/crt/lib/x86_64" "/libpath:$xwin/sdk/lib/um/x86_64" "/libpath:$xwin/sdk/lib/ucrt/x86_64" \
-  WindowsApp.lib "$lib" "$c_libs/rav1g_c.lib" "$c_libs/rav1g_c_speed.lib" \
+  WindowsApp.lib "$lib" "$c_libs/rav1g_c.lib" \
   d3d12.lib dxgi.lib dxguid.lib ntdll.lib userenv.lib
 echo "linked $out/probe.dll with $(echo "$exports" | wc -l) functions of rav1g.h"

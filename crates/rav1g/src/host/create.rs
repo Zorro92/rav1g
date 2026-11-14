@@ -37,10 +37,7 @@ use super::types::{
 };
 use crate::gpu::d3d12::{com_ref, com_release, com_store, wrapped_ref};
 use crate::gpu::{self, CommandAllocator, Device, Event, VideoMemory, create_hardware_device};
-use crate::sys::parser::{
-    AV1Decoder, BufferPool, MAX_MIB_SIZE, MB_MODE_INFO, MV_REF, RestorationUnitInfo, TPL_MV_REF, aom_codec_dec_cfg_t,
-    av1_tile_data, warped_filter, wedge_mask_buf,
-};
+use crate::sys::parser::{MB_MODE_INFO, RestorationUnitInfo, aom_codec_dec_cfg_t, av1_tile_data};
 use crate::sys::{
     AV1_LOW_MEMORY_ALL, AV1_LOW_MEMORY_COEFS, AV1_LOW_MEMORY_DEFAULT, AV1_LOW_MEMORY_MODE_INFO,
     AV1_LOW_MEMORY_SHARED_BACK_BUFFER, AV1_MEMORY_GUARD_SETTLE_MS, AV1_MEMORY_GUARD_WAIT_MS,
@@ -48,12 +45,6 @@ use crate::sys::{
 
 /// Bytes of a transform block record of the inverse transform (`IdctBlockSize`).
 const IDCT_BLOCK_SIZE: i32 = 16;
-/// Coefficients of a 4x4 unit: 16 luma and 2 * 4 chroma (`IdctCoefCountDenum`).
-pub(crate) const IDCT_COEF_COUNT_DENUM: i32 = 4 * 4 + 2 * 2 * 2;
-/// The share of a slot in the coefficient buffer, in 24ths of the worst case: about 71 %.
-const IDCT_COEF_COUNT_NUM: i32 = 17;
-/// `AV1_LOW_MEMORY_COEFS`: half; two shares are exactly the worst case.
-const IDCT_COEF_COUNT_NUM_LOW: i32 = 12;
 
 /// `AV1_MEMORY_GUARD_MARGIN` of `aom/aom_decoder.h`: what a creation must leave of the application's
 /// memory.
@@ -61,7 +52,7 @@ const MEMORY_GUARD_MARGIN: u64 = 48 << 20;
 /// `AV1_MEMORY_GUARD_HEADROOM` of `aom/aom_decoder.h`: what a creation should leave of the application's
 /// budget so that its frames are not slowed by the memory running out; a decoder that would leave less
 /// is created with fewer slots and frames in parse (`aom_codec_dec_cfg_t::memory_headroom`).
-const MEMORY_GUARD_HEADROOM: u64 = 100 << 20;
+const MEMORY_GUARD_HEADROOM: u64 = 128 << 20;
 /// How often the budget is asked again while it grows (`PollMs`).
 const GUARD_POLL_MS: u32 = 20;
 
@@ -71,11 +62,6 @@ const FILMGRAIN_NOISE_INTS: usize = 96 * 96 + 48 * 48 * 2;
 const GAUSSIAN_SEQUENCE_BYTES: usize = size_of::<[i32; 2048]>();
 /// Entries of a random register table of the film grain.
 const FILMGRAIN_RANDOM_INTS: usize = 65536 + 1;
-
-/// The size of a table of the entropy decoder, from its declaration.
-const fn size_of_table<T>(_: *const T) -> usize {
-    size_of::<T>()
-}
 
 pub(crate) fn to_mib(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
@@ -125,9 +111,6 @@ struct ResourceConfig {
     inter_fast: bool,
     /// `AV1_LOW_MEMORY_*`.
     low_memory: i32,
-    /// The mode info records, the coefficients and the transform block records of the frames in flight
-    /// come from pools (`pool.rs`), not from a share of each slot: the parser is rav1d's.
-    pooled: bool,
     /// `AV1_PARSER_OPTION_TEST_POOL_WAIT`: the test switch of the pools (`pool.rs`).
     pool_test_wait: bool,
 }
@@ -184,16 +167,13 @@ struct ParsePlan {
 impl ParsePlan {
     /// What the configuration asks for, before the budget guard has a say.
     fn from_cfg(cfg: &aom_codec_dec_cfg_t) -> ParsePlan {
-        let rav1d = cfg.parser == crate::sys::AV1_PARSER_RAV1D as i32;
         let large = u64::from(cfg.width) * u64::from(cfg.height) > SMALL_FRAME_SAMPLES;
         let threads = match cfg.threads {
-            0 if rav1d && large => 2,
+            0 if large => 2,
             0 => 1,
             threads => threads.min(super::types::EntropyThreadCount as u32) as i32,
         };
-        let frames = if !rav1d {
-            1
-        } else if cfg.frames_in_parse <= 0 {
+        let frames = if cfg.frames_in_parse <= 0 {
             // The default: a second frame in parse where the parse of one frame is what a 4K stream
             // waits for, when there are threads for two and the slots are not fixed at two (with two
             // slots a third frame begins only when the first one is through on the GPU).
@@ -309,7 +289,6 @@ impl ResourceConfig {
             intra_v2: cfg.intra_v2 != 0,
             inter_fast: cfg.inter_fast != 0,
             low_memory,
-            pooled: cfg.parser == crate::sys::AV1_PARSER_RAV1D as i32,
             pool_test_wait: cfg.parser_options & crate::sys::AV1_PARSER_OPTION_TEST_POOL_WAIT as i32 != 0,
         }
     }
@@ -415,33 +394,12 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
     dec.max_height = target_height;
     dec.max_bitdepth = cfg.bitdepth;
 
-    request!(assign, dec.pbi_alloc, mem.host(size_of::<AV1Decoder>()));
-    request!(assign, dec.buf_pool_alloc, mem.host(size_of::<BufferPool>()));
-
-    for p in 0..5 {
-        request!(assign, dec.above_context_alloc[p], mem.host(size_of::<*mut c_void>() * max_tile_rows as usize));
-    }
-    for row in 0..max_tile_rows as usize {
-        for p in 0..5 {
-            let context = mem.host(mi_cols as usize);
-            if assign {
-                if context.is_null() {
-                    return false;
-                }
-                // SAFETY: the array of `max_tile_rows` pointers allocated above.
-                unsafe { dec.above_context_alloc[p].add(row).write(context) };
-            }
-        }
-    }
-
     let y_max_rst_units = max_tile_cols * max_tile_rows;
     let uv_max_rst_units = (max_tile_cols >> 1) * (max_tile_rows >> 1);
     let unit = size_of::<RestorationUnitInfo>();
     request!(assign, dec.restoration_info_alloc[0], mem.host(unit * y_max_rst_units as usize));
     request!(assign, dec.restoration_info_alloc[1], mem.host(unit * uv_max_rst_units as usize));
     request!(assign, dec.restoration_info_alloc[2], mem.host(unit * uv_max_rst_units as usize));
-    let tmvs_size = ((mi_rows + MAX_MIB_SIZE as i32) >> 1) * (mi_cols >> 1);
-    request!(assign, dec.tplmvs_alloc, mem.host(size_of::<TPL_MV_REF>() * tmvs_size as usize));
 
     let residuals_size = target_width * target_height
         + 2 * ((((target_width >> 1) + 127) & !127) * (((target_height >> 1) + 127) & !127));
@@ -456,7 +414,7 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
         mem.buffer((block_count_4x4 * IDCT_BLOCK_SIZE) as usize, DeviceOnly, c"idct_blocks", -1)
     );
     let (wedge_mask_bytes, warped_filter_bytes) =
-        (size_of_table(&raw const wedge_mask_buf), size_of_table(&raw const warped_filter));
+        (super::libaom::WEDGE_MASK_BUF_BYTES, size_of_val(&super::libaom::WARPED_FILTER));
     request!(assign, dec.inter_mask_lut, mem.buffer(wedge_mask_bytes * 2, DeviceOnlyConst, c"inter_mask_lut", -1));
     request!(
         assign,
@@ -539,75 +497,44 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
         dec.loopfilter_blocks,
         mem.buffer((lf_blk_count * 32) as usize, DeviceOnly, c"loopfilter_blocks", -1)
     );
-    // One share of the mode info pool and of the coefficient buffer per slot (mode_info_offset and
-    // coef_buffer_offset below). With the default two slots these are the sizes the code always had.
-    //
-    // A frame has at most one mode info entry per 4x4 unit and IDCT_COEF_COUNT_DENUM (16 luma + 2 * 4
-    // chroma) coefficients per 4x4 unit. A share holds half of the entries and 17/24 of the coefficients; a
-    // frame that needs more takes a second slot and continues in that slot's share (av1_setup_sec_data,
-    // av1_setup_ext_coef_buffer), so two shares cover the worst case. The low memory shares are a quarter
-    // and 12/24: two of them no longer cover every frame, and a frame that runs out is a decode error
-    // (decode_mbmi_block, av1_read_coeffs_txb).
-    dec.mode_info_shift = if cfg.low_memory & AV1_LOW_MEMORY_MODE_INFO as i32 != 0 { 2 } else { 1 };
-    dec.coef_count_num =
-        if cfg.low_memory & AV1_LOW_MEMORY_COEFS as i32 != 0 { IDCT_COEF_COUNT_NUM_LOW } else { IDCT_COEF_COUNT_NUM };
-    let mut mi_share = mi_size >> dec.mode_info_shift;
-    let slot_count = cfg.gpu_pipeline_depth as usize;
-    let mut coef_buffer_size = target_width * target_height * 3 * dec.coef_count_num / (IDCT_COEF_COUNT_DENUM * 2);
-    if cfg.pooled {
-        // The pools (pool.rs): one buffer each for the mode info records, the coefficients and the
-        // transform block records of all frames in flight, in chunks of what a 64x64 area needs at
-        // worst. No slot has a share.
-        let (rule, total) = pool_chunks(max_tiles as usize, cfg.low_memory);
-        dec.pool_rule = rule;
-        dec.pool_total = total;
-        mi_share = 0;
-        coef_buffer_size = 0;
-        request!(
-            assign,
-            dec.mode_info_pool,
-            mem.buffer(
-                size_of::<MB_MODE_INFO>() * MODE_INFO_CHUNK * total[Kind::ModeInfo as usize],
-                HostRW,
-                c"mode_info_pool",
-                -1
-            )
-        );
-        request!(
-            assign,
-            dec.idct_coefs,
-            mem.buffer(size_of::<i32>() * COEF_CHUNK * total[Kind::Coefs as usize], UploadUAV, c"idct_coefs", -1)
-        );
-        request!(
-            assign,
-            dec.idct_blocks_pool,
-            mem.buffer(
-                IDCT_BLOCK_SIZE as usize * TXB_CHUNK * total[Kind::Txb as usize],
-                DeviceUpload,
-                c"idct_blocks_unordered",
-                -1
-            )
-        );
-    } else {
-        request!(
-            assign,
-            dec.mode_info_pool,
-            mem.buffer(size_of::<MB_MODE_INFO>() * mi_share as usize * slot_count, HostRW, c"mode_info_pool", -1)
-        );
-        request!(
-            assign,
-            dec.idct_coefs,
-            mem.buffer(size_of::<i32>() * coef_buffer_size as usize * slot_count, UploadUAV, c"idct_coefs", -1)
-        );
-    }
+    // The pools (pool.rs; docs/phase2-rav1d.md, step 5): one buffer each for the mode info records, the
+    // coefficients and the transform block records of all frames in flight, in chunks of what a 64x64
+    // area needs at worst. A frame has at most one mode info record per 4x4 unit and 24 coefficients
+    // (16 luma + 2 * 4 chroma) per 4x4 unit, a little more with their counts; a pool holds that for
+    // one frame, or less with the low memory parts, and then a frame that does not fit is a decode
+    // error. No slot has a share of them.
+    let (rule, total) = pool_chunks(max_tiles as usize, cfg.low_memory);
+    dec.pool_rule = rule;
+    dec.pool_total = total;
+    request!(
+        assign,
+        dec.mode_info_pool,
+        mem.buffer(
+            size_of::<MB_MODE_INFO>() * MODE_INFO_CHUNK * total[Kind::ModeInfo as usize],
+            HostRW,
+            c"mode_info_pool",
+            -1
+        )
+    );
+    request!(
+        assign,
+        dec.idct_coefs,
+        mem.buffer(size_of::<i32>() * COEF_CHUNK * total[Kind::Coefs as usize], UploadUAV, c"idct_coefs", -1)
+    );
+    request!(
+        assign,
+        dec.idct_blocks_pool,
+        mem.buffer(
+            IDCT_BLOCK_SIZE as usize * TXB_CHUNK * total[Kind::Txb as usize],
+            DeviceUpload,
+            c"idct_blocks_unordered",
+            -1
+        )
+    );
     let grain_offsets = size_of::<i32>() * ((target_width / 32 + 4) * (target_height / 32 + 1)) as usize;
     for i in 0..cfg.gpu_pipeline_depth {
         let td = &mut dec.frame_thread_data[i as usize];
         td.slot_index = i;
-        td.mode_info_max = mi_share;
-        td.mode_info_offset = i * mi_share;
-        td.coef_buffer_offset = i * coef_buffer_size;
-        td.coef_buffer_size = coef_buffer_size * size_of::<i32>() as i32;
         request!(assign, td.command_buffer.cb_alloc, mem.buffer(1024 * 1024, DeviceUpload, c"cb_alloc", i));
         request!(assign, td.tile_data, mem.host(size_of::<av1_tile_data>() * max_tiles as usize));
         request!(
@@ -669,14 +596,6 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
                 gpu_clear_grids
             )
         );
-        if !cfg.pooled {
-            request!(
-                assign,
-                td.idct_blocks_unordered,
-                mem.buffer((block_count_4x4 * IDCT_BLOCK_SIZE) as usize, DeviceUpload, c"idct_blocks_unordered", i)
-            );
-        }
-
         request!(
             assign,
             td.cdef_indexes,
@@ -725,13 +644,6 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
     }
     dec.palette_size = fb_size as usize;
 
-    let mvs_size = ((target_width >> 3) * (target_height >> 3)) as usize * size_of::<MV_REF>();
-    let seg_size = ((target_width >> 2) * (target_height >> 2)) as usize;
-    for i in 0..cfg.ref_fb_count as usize {
-        let fb = &mut dec.fb_pool_src[i];
-        request!(assign, fb.mvs_alloc, mem.host(mvs_size));
-        request!(assign, fb.seg_alloc, mem.host(seg_size));
-    }
     true
 }
 
@@ -799,9 +711,8 @@ unsafe fn planned_device_bytes(dec: *mut Av1Core, rcfg: &ResourceConfig) -> (usi
     }
 }
 
-/// The private data of the codec interface (`aom_codec_alg_priv_t` of `av1_dx_iface.c`, about 20 KB),
-/// which lies at the start of the host pool, with room for the pool to start at a multiple of 256.
-const INTERFACE_BYTES: usize = 32 * 1024;
+/// What the host pool is aligned to: the allocator starts at the first such address of its memory.
+const HOST_POOL_ALIGNMENT: usize = 256;
 
 /// What a decoder takes of the heap of the process besides its host pool: the decoder itself and its
 /// allocator ([`Av1Core::own_bytes`]). For the memory query of the Rust interface, which reports all host
@@ -816,12 +727,12 @@ pub(crate) const fn decoder_own_bytes() -> usize {
 ///
 /// # Safety
 /// `cfg` is the configuration of a decoder.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn av1_query_memory_requirements(cfg: *mut aom_codec_dec_cfg_t) -> c_int {
+pub(crate) unsafe extern "C" fn av1_query_memory_requirements(cfg: *mut aom_codec_dec_cfg_t) -> c_int {
     // SAFETY: the caller's contract.
     let cfg = unsafe { &mut *cfg };
     let mut plan = Requests::plan();
-    plan.host(INTERFACE_BYTES);
+    // Room for the pool to start at a multiple of 256 in the memory it is given.
+    plan.host(HOST_POOL_ALIGNMENT);
     let rcfg = ResourceConfig::from_cfg(cfg);
     // A decoder for the sizes the plan writes; nothing else of it is used.
     let Some(mut dec) = Av1Core::new() else {
@@ -874,24 +785,15 @@ unsafe fn log_memory_summary(is_error: bool, label: &str, dec: &Av1Core, rcfg: &
         .iter()
         .filter(|td| !td.palette_buffer.is_null())
         .count();
-    let shares = if rcfg.pooled {
-        // A decoder with pools: how much of the worst case of a frame each holds.
-        let cells = ((dec.max_width >> 6) * (dec.max_height >> 6)).max(1) as usize;
-        format!(
-            "mode info pool {}/{cells} of the worst case, coefficient pool {}/{cells} and {} chunks for the ends of \
-             pieces",
-            dec.pool_rule[Kind::ModeInfo as usize],
-            dec.pool_rule[Kind::Coefs as usize],
-            dec.pool_total[Kind::Coefs as usize] - dec.pool_rule[Kind::Coefs as usize]
-        )
-    } else {
-        format!(
-            "mode info share 1/{} of the worst case, coefficient share {}/{}",
-            1 << dec.mode_info_shift,
-            dec.coef_count_num,
-            IDCT_COEF_COUNT_DENUM
-        )
-    };
+    // How much of the worst case of a frame each pool holds.
+    let cells = ((dec.max_width >> 6) * (dec.max_height >> 6)).max(1) as usize;
+    let shares = format!(
+        "mode info pool {}/{cells} of the worst case, coefficient pool {}/{cells} and {} chunks for the ends of \
+         pieces",
+        dec.pool_rule[Kind::ModeInfo as usize],
+        dec.pool_rule[Kind::Coefs as usize],
+        dec.pool_total[Kind::Coefs as usize] - dec.pool_rule[Kind::Coefs as usize]
+    );
     log(
         is_error,
         &format!(
@@ -905,8 +807,8 @@ unsafe fn log_memory_summary(is_error: bool, label: &str, dec: &Av1Core, rcfg: &
             to_mib(dec.palette_size as u64)
         ),
     );
-    if rcfg.pooled {
-        // The pools: what the frames in flight share. Not a line of the C++ decoder.
+    {
+        // The pools: what the frames in flight share.
         let size = |object: *mut GpuBufferObject| {
             // SAFETY: null, or a buffer of the decoder.
             to_mib(unsafe { object.as_ref() }.map_or(0, |object| object.size) as u64)
@@ -934,13 +836,12 @@ unsafe fn log_memory_summary(is_error: bool, label: &str, dec: &Av1Core, rcfg: &
         );
     }
 
-    // Host memory: the pool, and what the decoder allocates next to it. Not a line of the C++ decoder,
-    // which lies in its pool.
+    // Host memory: the pool, and what the decoder allocates next to it.
     log(
         is_error,
         &format!(
-            "MEMORY {label} host memory: host pool {} bytes ({:.1} MiB) for the entropy decoder, {} of them in \
-             use; the decoder itself {} bytes ({:.1} MiB) on the heap, not in the pool; both allocated before the \
+            "MEMORY {label} host memory: host pool {} bytes ({:.1} MiB) for the tiles' cursors and the loop restoration units, {} of them \
+             in use; the decoder itself {} bytes ({:.1} MiB) on the heap, not in the pool; both allocated before the \
              budget is asked",
             mem.host_max_size,
             to_mib(mem.host_max_size as u64),
@@ -967,51 +868,25 @@ unsafe fn log_memory_summary(is_error: bool, label: &str, dec: &Av1Core, rcfg: &
     // The decoder creates buffers only. The output images are textures of the application.
     log(is_error, &format!("MEMORY {label} by type: {}; textures 0", line.text));
 
-    // One slot: its own buffers and its share of the two buffers that are divided between the slots.
+    // One slot: its own buffers. It has nothing of the pools.
     let mut slot_own = 0usize;
     let mut slot_buffers = 0;
-    let mut pool_share = 0usize;
-    let mut coef_share = 0usize;
     for obj in buffers {
         if obj.slot == 0 {
             slot_own += obj.size;
             slot_buffers += 1;
         }
-        if std::ptr::eq(obj, dec.mode_info_pool) {
-            pool_share = obj.size / rcfg.gpu_pipeline_depth as usize;
-        }
-        if std::ptr::eq(obj, dec.idct_coefs) {
-            coef_share = obj.size / rcfg.gpu_pipeline_depth as usize;
-        }
     }
-    let slot_share = slot_own + pool_share + coef_share;
-    if rcfg.pooled {
-        log(
-            is_error,
-            &format!(
-                "MEMORY {label} per slot: {slot_own} bytes ({:.1} MiB) in {slot_buffers} own buffers, and nothing of \
-                 the pools; a slot above {} also adds one frame buffer, {:.1} MiB",
-                to_mib(slot_own as u64),
-                FrameThreadDataDefault,
-                to_mib(dec.fb_size as u64)
-            ),
-        );
-    } else {
-        log(
-            is_error,
-            &format!(
-                "MEMORY {label} per slot: {slot_share} bytes ({:.1} MiB) = {slot_buffers} own buffers {:.1} MiB + \
-                 mode_info_pool share {:.1} MiB + idct_coefs share {:.1} MiB; a slot above {} also adds one frame \
-                 buffer, {:.1} MiB",
-                to_mib(slot_share as u64),
-                to_mib(slot_own as u64),
-                to_mib(pool_share as u64),
-                to_mib(coef_share as u64),
-                FrameThreadDataDefault,
-                to_mib(dec.fb_size as u64)
-            ),
-        );
-    }
+    log(
+        is_error,
+        &format!(
+            "MEMORY {label} per slot: {slot_own} bytes ({:.1} MiB) in {slot_buffers} own buffers, and nothing of \
+             the pools; a slot above {} also adds one frame buffer, {:.1} MiB",
+            to_mib(slot_own as u64),
+            FrameThreadDataDefault,
+            to_mib(dec.fb_size as u64)
+        ),
+    );
 
     // The largest buffers, one entry per name: the buffers of the slots are the same in every slot.
     const LARGEST: usize = 10;
@@ -1147,8 +1022,10 @@ unsafe fn create_command_buffer(
 ///
 /// # Safety
 /// `gpu_dec` is valid for writing; `cfg` is the configuration the host pool was sized for.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg: *mut aom_codec_dec_cfg_t) -> c_int {
+pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
+    gpu_dec: *mut *mut Av1Core,
+    cfg: *mut aom_codec_dec_cfg_t,
+) -> c_int {
     // SAFETY: the caller's contract, for all of this function.
     unsafe {
         *gpu_dec = std::ptr::null_mut();
@@ -1172,10 +1049,7 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
         let mut plan = ParsePlan::from_cfg(cfg);
         let mut rcfg = ResourceConfig::with_slots(cfg, plan.slots);
         (*dec).parser_options = cfg.parser_options;
-        (*dec).keep_mi_grid = c_int::from(
-            cfg.parser == crate::sys::AV1_PARSER_RAV1D as c_int
-                && cfg.parser_options & crate::sys::AV1_PARSER_OPTION_CLEAR_GRID as c_int == 0,
-        );
+        (*dec).keep_mi_grid = c_int::from(cfg.parser_options & crate::sys::AV1_PARSER_OPTION_CLEAR_GRID as c_int == 0);
         // The clears of the slots' grids by the GPU: fixed here, because the grids of such a decoder are
         // created as buffers a command list may write. A decoder that was created with another mode has
         // them as buffers the GPU only reads, which every package so far has had.
@@ -1392,10 +1266,8 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
         }
         let coefs = &*(*dec).idct_coefs;
         coefs.host_ptr.cast::<u8>().write_bytes(0, coefs.size);
-        if rcfg.pooled {
-            let pools = Pools::with_test_wait((*dec).pool_total, (*dec).pool_rule, rcfg.pool_test_wait);
-            (*dec).pools = Some(Box::new(pools));
-        }
+        let pools = Pools::with_test_wait((*dec).pool_total, (*dec).pool_rule, rcfg.pool_test_wait);
+        (*dec).pools = Some(Box::new(pools));
 
         (*dec).tryhdr10x3 = cfg.tryHDR10x3;
 
@@ -1475,25 +1347,6 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
         *gpu_dec = dec;
     }
     0
-}
-
-/// `av1_allocate_pbi` (`dx/av1_core.h`): the entropy decoder's state and its buffer pool, zeroed, in the
-/// host memory the creation set aside for them.
-///
-/// # Safety
-/// `dec` is a decoder; `ppbi` and `pbp` are valid for writing.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn av1_allocate_pbi(dec: *mut Av1Core, ppbi: *mut *mut AV1Decoder, pbp: *mut *mut BufferPool) {
-    // SAFETY: the caller's contract; the two pieces of host memory have the sizes of the structs.
-    unsafe {
-        let pbi = (*dec).pbi_alloc.cast::<AV1Decoder>();
-        let bp = (*dec).buf_pool_alloc.cast::<BufferPool>();
-        pbi.write_bytes(0, 1);
-        bp.write_bytes(0, 1);
-        (*pbi).gpu_decoder = dec.cast();
-        *ppbi = pbi;
-        *pbp = bp;
-    }
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -1669,8 +1522,7 @@ unsafe fn destroy(dec: *mut Av1Core, log_steps: bool) {
 ///
 /// # Safety
 /// `dec` is null or a decoder of [`av1_create_gpu_decoder`]; nothing uses it afterwards.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn av1_destroy_gpu_decoder(dec: *mut Av1Core) {
+pub(crate) unsafe extern "C" fn av1_destroy_gpu_decoder(dec: *mut Av1Core) {
     if dec.is_null() {
         return;
     }
@@ -1700,8 +1552,8 @@ mod tests {
         let text = std::fs::read_to_string(header).expect("aom_decoder.h");
         assert!(text.contains("#define AV1_MEMORY_GUARD_MARGIN ((size_t)48 << 20)"));
         assert_eq!(MEMORY_GUARD_MARGIN, 48 << 20);
-        assert!(text.contains("#define AV1_MEMORY_GUARD_HEADROOM ((size_t)100 << 20)"));
-        assert_eq!(MEMORY_GUARD_HEADROOM, 100 << 20);
+        assert!(text.contains("#define AV1_MEMORY_GUARD_HEADROOM ((size_t)128 << 20)"));
+        assert_eq!(MEMORY_GUARD_HEADROOM, 128 << 20);
     }
 
     /// The ladder of the budget guard, and the two cases of the console it is calibrated on (package
@@ -1719,10 +1571,16 @@ mod tests {
 
         let tenths = |mib: u64| mib * (1 << 20) / 10;
         let (one, two, four) = (tenths(5976), tenths(6465), tenths(6953));
-        // The default: 775.0 MiB left, 897 of 1024 MiB in use while decoding, 45.7 fps.
+        // The default: 775.0 MiB left, 897 of 1024 MiB in use while decoding, 45.7 fps. It leaves 128.5
+        // MiB, which is what the headroom is taken from: the least that is known to be enough.
         assert_eq!(first_with_headroom(&[two, one], tenths(7750), MEMORY_GUARD_HEADROOM), 0);
-        // -slots 4: 772.8 MiB left, 948 of 1024 MiB in use, 19.5 fps where 49.6 are possible.
-        assert_eq!(first_with_headroom(&[four, two, one], tenths(7728), MEMORY_GUARD_HEADROOM), 1);
+        // -slots 4: 772.8 MiB left, 948 of 1024 MiB in use, 19.5 fps where 49.6 are possible. Not
+        // created so; and with 2.2 MiB less than the launch above, not the default either.
+        assert_eq!(first_with_headroom(&[four, two, one], tenths(7728), MEMORY_GUARD_HEADROOM), 2);
+        // The same two with the 19.2 MiB the entropy decoder of libaom had in the host pool, which
+        // the application has left since step 6: the default with room to spare, the fourth slot not.
+        assert_eq!(first_with_headroom(&[two, one], tenths(7942), MEMORY_GUARD_HEADROOM), 0);
+        assert_eq!(first_with_headroom(&[four, two, one], tenths(7920), MEMORY_GUARD_HEADROOM), 1);
         // With the margin as the headroom, which is what the guard did, the fourth slot is accepted.
         assert_eq!(first_with_headroom(&[four, two, one], tenths(7728), MEMORY_GUARD_MARGIN), 0);
         // Nothing leaves the headroom: the smallest decoder, never a refusal.

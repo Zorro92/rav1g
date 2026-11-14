@@ -99,8 +99,6 @@ pub struct Task {
     pub all_layers: bool,
     /// -oppoint <n>: the operating point of a stream with layers.
     pub oppoint: i32,
-    /// -parser c|rav1d: what reads the bitstream; true is rav1d's parse pass, the default.
-    pub parser_rav1d: bool,
     /// -parseopt <list>: the switches of rav1d's parse pass (`rav1g::ParserOptions`).
     pub parser_options: rav1g::ParserOptions,
     /// -timeout: seconds for the task, 0 = none.
@@ -154,7 +152,6 @@ impl Default for Task {
             interfast: 0,
             continue_on_error: false,
             all_layers: false,
-            parser_rav1d: true,
             parser_options: rav1g::ParserOptions::default(),
             oppoint: 0,
             timeout_s: 0,
@@ -245,7 +242,7 @@ pub fn usage() {
     say!("                        guard of the creation (MEMORY budget and MEMORY REFUSED lines, with -v)");
     say!("  -headroom <MiB>       with -budget: what the guard should leave of it behind the decoder; a decoder");
     say!("                        that would leave less is created with fewer slots and frames in parse (MEMORY");
-    say!("                        headroom lines). Default 0: the library's 100; 48 or less is the guard's margin");
+    say!("                        headroom lines). Default 0: the library's 128; 48 or less is the guard's margin");
     say!("  -lfhsplit <n>         horizontal loop filter: 1 even rows of blocks, a UAV barrier, odd rows; 2 every");
     say!("                        row of blocks on its own (default 0: one dispatch per plane; same output)");
     say!("  -intraedgefix         8-bit intra: the above edge filter stops where the 10-bit one does (same output)");
@@ -254,8 +251,6 @@ pub fn usage() {
     say!("                        the output of any stream (same output)");
     say!("  -poisonbuf            the same for every buffer the CPU writes for the shaders, and the constants of");
     say!("                        every stage filled again in every frame before the stage writes them (same output)");
-    say!("  -parser c|rav1d       what reads the bitstream: the parse pass of rav1d (rav1d, the default) or the");
-    say!("                        entropy decoder of libaom (c) (same output; docs/phase2-rav1d.md)");
     say!("  -parseopt <list>      the switches of rav1d's parse, separated by commas (same output). nolfmask: rav1d");
     say!("                        leaves out the masks of its own loop filter; tilethread: a tile stays on its");
     say!("                        thread between its superblock rows. Both are on by default, and a list that names");
@@ -415,11 +410,10 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-alllayers" => task.all_layers = true,
             "-oppoint" => task.oppoint = number()?,
             "-parser" => {
-                task.parser_rav1d = match value()?.as_str() {
-                    "c" => false,
-                    "rav1d" => true,
-                    other => return Err(format!("-parser {other}: c or rav1d")),
-                }
+                return Err(String::from(
+                    "-parser is gone: the parse pass of rav1d reads every stream; the entropy decoder of libaom \
+                     (-parser c) left the decoder (docs/phase2-rav1d.md, step 6)",
+                ));
             }
             "-parseopt" => {
                 let list = value()?;

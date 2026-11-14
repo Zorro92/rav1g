@@ -19,19 +19,8 @@ use super::core::{
 use super::types::{Av1Core, av1_stage_dump_region};
 use crate::sys::parser::{
     AV1_COMMON, AV1_PERF_GPU_CDEF, AV1_PERF_GPU_LOOP_REST, AV1_PERF_GPU_SUPERRES, AV1LrStruct, HwFrameBuffer,
-    MI_SIZE_64X64, RESTORE_NONE, RESTORE_WIENER, YV12_BUFFER_CONFIG, sgr_params,
+    MI_SIZE_64X64, RESTORE_NONE, RESTORE_WIENER,
 };
-
-unsafe extern "C" {
-    /// `av1/common/restoration.c`: the restoration units of the planes `plane_start..plane_end`.
-    fn av1_loop_restoration_filter_frame_init(
-        lr_ctxt: *mut AV1LrStruct,
-        frame: *mut YV12_BUFFER_CONFIG,
-        cm: *mut AV1_COMMON,
-        optimized_lr: c_int,
-        num_planes: c_int,
-    );
-}
 
 fn plane_words(buffer: &HwFrameBuffer) -> [[c_int; 4]; 3] {
     buffer.planes.map(|plane| [plane.stride, plane.offset, plane.res_stride, plane.res_offset])
@@ -339,7 +328,7 @@ unsafe fn looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON, lr_ctxt: *mut 
         }
         let restored = [0, 1, 2].map(|p| u32::from((*cm).rst_info[p].frame_restoration_type) != RESTORE_NONE as u32);
         if restored.contains(&true) {
-            av1_loop_restoration_filter_frame_init(lr_ctxt, &raw mut (*(*cm).cur_frame).buf, cm, 0, 3);
+            super::libaom::loop_restoration_filter_frame_init(&mut *lr_ctxt, &raw mut (*(*cm).cur_frame).buf, &mut *cm);
         }
 
         let mut lr_ptr: c_int = 0;
@@ -441,11 +430,8 @@ unsafe fn looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON, lr_ctxt: *mut 
             }
         }
 
-        let parameters = (&raw const sgr_params).read();
-        for (set, parameters) in parameters.iter().enumerate() {
-            (*sgr_constants.data).sgr_params[set] =
-                [parameters.r[0], parameters.r[1], parameters.s[0], parameters.s[1]];
-        }
+        // The parameter sets of the self-guided filter: two radii and two strengths each.
+        (*sgr_constants.data).sgr_params = super::libaom::SGR_PARAMS;
 
         let commands = commands(dec);
         let frame_buffers = buffer((*dec).frame_buffer_pool);

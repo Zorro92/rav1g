@@ -25,9 +25,9 @@ compare: the files of two runs must be the same, line for line. That is how the 
 held against the C++ decoder (warp_decoder of branch cpp, at the commit the workflow pins): same buffers,
 same sizes, same decisions, same text.
 
-pools: the files of a run of a decoder with pools (the parser of rav1d: docs/phase2-rav1d.md, step 5)
-against those of a run of the decoder with a share for each slot (-parser c), case by case. The two are
-not the same lines any more; what must hold:
+pools: the files of a run of the decoder (pools: docs/phase2-rav1d.md, step 5) against those of a run of
+the C++ decoder, which has a share of the mode info and coefficient buffers for each slot, case by case.
+The two are not the same lines; what must hold:
   - the decoder size, the bit depth and the frame buffer size are the same; with the same slots, the
     frame buffers are the same;
   - the decoder with pools says what its pools are, and each has a chunk for every 64x64 area of the
@@ -224,15 +224,15 @@ def main():
     r.add_argument('--tool', required=True)
     r.add_argument('--streams', required=True)
     r.add_argument('--out', required=True)
-    r.add_argument('--tool-args', default='', help='further arguments for the tool, e.g. "-parser rav1d"')
+    r.add_argument('--tool-args', default='', help='further arguments for the tool, e.g. "-parseopt none"')
     c = commands.add_parser('compare')
     c.add_argument('--reference', required=True)
     c.add_argument('--candidate', required=True)
     c.add_argument('--reference-name', default='warp_decoder')
     c.add_argument('--candidate-name', default='rav1g-dec')
     p = commands.add_parser('pools')
-    p.add_argument('--shares', required=True, help='the lines of the decoder with a share for each slot (-parser c)')
-    p.add_argument('--pools', required=True, help='the lines of the decoder with pools (the parser of rav1d)')
+    p.add_argument('--shares', required=True, help='the lines of the decoder with a share for each slot (the C++ decoder)')
+    p.add_argument('--pools', required=True, help='the lines of the decoder with pools')
     args = parser.parse_args()
     return {'run': run, 'compare': compare, 'pools': pools}[args.command](args)
 

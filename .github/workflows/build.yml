@@ -13,12 +13,6 @@ on:
           rust-experiments, about 20 minutes)
         type: boolean
         default: false
-      parser_timing:
-        description: >
-          Also time the two parsers in pairs on a runner (the job parser-timing, about 18 minutes;
-          docs/warp-decoder.md, "Paired timing of the parsers")
-        type: boolean
-        default: false
       frames_matrix:
         description: >
           Also decode the conformance set with every combination of 1 to 4 frames in parse and up to 8
@@ -26,9 +20,8 @@ on:
           docs/phase2-rav1d.md, "Frames in parallel")
         type: boolean
         default: false
-  # Once a week, Monday 03:23 UTC: every job of a push, the paired timing of the two parsers (the job
-  # parser-timing) and the whole matrix of frames in parse and threads (the job frames-matrix), which no
-  # push runs.
+  # Once a week, Monday 03:23 UTC: every job of a push, and the whole matrix of frames in parse and
+  # threads (the job frames-matrix), which no push runs.
   schedule:
     - cron: '23 3 * * 1'
 
@@ -192,9 +185,11 @@ jobs:
 
       # ---------------------------------------------------------------------------------------------
       # The player is C++ (testing/uwp_dx12_player, testing/uwp_common) on the functions of rav1g.h; the
-      # decoder behind them is the Rust library of the Cargo workspace with the C of the parser and
-      # entropy decoder (docs/rust-port.md). Two packages of the same identity per run, which differ in
-      # what compiled that C, which is where the tile threads spend their time (docs/test-player.md):
+      # decoder behind them is the Rust library of the Cargo workspace (docs/rust-port.md). Two packages
+      # of the same identity per run. They differed in what compiled the C of the entropy decoder, which
+      # is where the tile threads spent their time; since step 6 of docs/phase2-rav1d.md the library has
+      # none of that C (its parser is rav1d's parse pass), and what is left of the difference is how the
+      # library is linked (docs/test-player.md):
       #   revision 0, the default: clang with link time optimisation, linked with the Rust by lld-link
       #               into rav1g.dll, which is in the package next to the program;
       #   revision 2: MSVC with /GL, a static library, the objects compiled by the player's link
@@ -298,7 +293,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'The rav1g.dll of the package was not built from the shader headers of this run' }
           Remove-Item out/imports/unpacked -Recurse -Force
           $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
-          "Variant: default: the Rust library (rav1g.dll, $(rustc --version)); the C of the entropy decoder compiled by $(& (Join-Path $llvm 'clang-cl.exe') --version | Select-Object -First 1) with full link time optimisation, linked by lld-link; package version 0.2.$env:GITHUB_RUN_NUMBER.0" |
+          "Variant: default: the Rust library (rav1g.dll, $(rustc --version)), linked by lld-link, its shader table compiled by $(& (Join-Path $llvm 'clang-cl.exe') --version | Select-Object -First 1); no C of libaom (the parser is rav1d's parse pass); package version 0.2.$env:GITHUB_RUN_NUMBER.0" |
             Add-Content out/SOURCES.txt -Encoding utf8
           Copy-Item rust-clang/rav1g.pdb out/
           @('## rav1g test player', '', 'CI build only; console timings are taken separately.', '',
@@ -482,7 +477,7 @@ jobs:
             Copy-Item $item.FullName out-msvc/ -Recurse
           }
           (Get-Content out-msvc/SOURCES.txt) -notmatch '^Variant: ' | Set-Content out-msvc/SOURCES.txt -Encoding utf8
-          "Variant: alternative: the Rust library (static, $(rustc --version)); the C of the entropy decoder compiled by MSVC with /GL and by the player's link (/LTCG:incremental); package version 0.2.$env:GITHUB_RUN_NUMBER.2" |
+          "Variant: alternative: the Rust library (static, $(rustc --version)), linked by the player's link (/LTCG:incremental), its shader table compiled by MSVC with /GL; no C of libaom (the parser is rav1d's parse pass); package version 0.2.$env:GITHUB_RUN_NUMBER.2" |
             Add-Content out-msvc/SOURCES.txt -Encoding utf8
           @('## Alternative package: static Rust library, C of MSVC', '', "Version 0.2.$env:GITHUB_RUN_NUMBER.2: installs over 0.2.$env:GITHUB_RUN_NUMBER.0.", '', '```') +
             @($packages | ForEach-Object { $_.Name }) + @(Get-Content out-msvc/imports/check.txt) + @('```') >> $env:GITHUB_STEP_SUMMARY
@@ -769,23 +764,24 @@ jobs:
           if-no-files-found: warn
 
   # The decoder as a desktop console program (docs/rust-port.md): the Cargo workspace builds the Rust library
-  # with the C of the parser and entropy decoder (crates/rav1g-sys, cc) from the shader headers of the Shaders
-  # step, and rav1g-dec (tools/rav1g-dec) with MSVC. This job builds the program once, runs the unit tests
+  # (its parser is rav1d's parse pass; crates/rav1g-sys compiles the shader table from the shader headers of
+  # the Shaders step, and no C of libaom) and rav1g-dec (tools/rav1g-dec) with MSVC. This job builds the program once, runs the unit tests
   # and the Shader Model 6 test, and keeps the program as an artifact. The jobs behind it take the program
   # from there and run side by side, each on its own runner, every check on the D3D12 WARP software adapter
   # (docs/warp-decoder.md, "The jobs of a push"):
   #   rust-conformance  the set through the Rust interface and through rav1g.h, the test player's decoder
   #                     code, the parse digest, decode errors, the order check, the memory check, the timing
   #                     smoke test, the stage dumps and the MEMORY lines;
-  #   rust-parser-c     the same checks with the other parser of the decoder (-parser c);
   #   rust-switches     the other side of the decoder's switches: the poisoned buffers, the fast inter
   #                     path, the clears on the decode thread, the switches of rav1d's parse;
   #   rust-clears       the clears of a pipeline slot: who clears what without a flag (nobody), and the
   #                     ways that clear the wavefront grid, by the GPU and by the completion thread;
-  #   rust-parsers-equal  what the four wrote, held against each other;
-  #   rust-experiments, parser-timing  only when the workflow is started for them.
-  # The rust-equal job then holds the md5 per frame, the stage dumps and the MEMORY lines of rust-parser-c
-  # against those of the C++ decoder (cpp-reference).
+  #   rust-dumps-equal  the stage dumps they wrote, held against each other;
+  #   rust-experiments  only when the workflow is started for it.
+  # The rust-equal job then holds the md5 per frame and the stage dumps of rust-conformance against those
+  # of the C++ decoder (cpp-reference), whose parser is the entropy decoder of libaom: the decoder has
+  # none of that C any more (docs/phase2-rav1d.md, step 6), and the C++ decoder at its pin is where it
+  # is still held against it.
   rust:
     needs: conformance-streams
     runs-on: windows-latest
@@ -1132,8 +1128,8 @@ jobs:
 
       # Stage dumps (testing/conformance/dump_tasks.txt): the buffers behind every GPU stage of a few
       # frames, as WARP wrote them, to compare with the dumps of another device (the test player's
-      # -dumpstages) with testing/stage_dump/stage_dump.py, and in the rust-parsers-equal job with the
-      # dumps of -parser c and of the other switches of the parser. Dumps of the vectors and of the streams
+      # -dumpstages) with testing/stage_dump/stage_dump.py, in the rust-dumps-equal job with the dumps of
+      # the other switches of the parser, and in the rust-equal job with those of the C++ decoder. Dumps of the vectors and of the streams
       # encoded here; of the cuts of published streams only digests (hashes), never samples.
       - name: Stage dumps of the frames in dump_tasks.txt with rav1g-dec
         if: ${{ !cancelled() }}
@@ -1145,7 +1141,7 @@ jobs:
 
       # The MEMORY lines of the decoder (testing/conformance/memory_lines.py): what a decoder of a few
       # configurations holds, its budget line and the steps of its release, for the comparison with the
-      # lines of -parser c in the rust-parsers-equal job.
+      # lines of the C++ decoder in the rust-equal job.
       - name: MEMORY log lines of a few decoder configurations with rav1g-dec
         if: ${{ !cancelled() }}
         shell: pwsh
@@ -1175,114 +1171,6 @@ jobs:
             out/gputime-smoke/
             out/memory-lines/
             out/player-smoke/
-            out/cut-tile/
-          if-no-files-found: warn
-
-  # The entropy decoder of libaom, which stays the other parser of the decoder until the last step of
-  # phase 2 (docs/phase2-rav1d.md): the checks of the rust-conformance and rust-switches jobs once more
-  # with -parser c. The whole set against its references and expected.txt, a part of it through rav1g.h,
-  # the decode errors in cut streams (with the words and the error behaviour of that parser), the order
-  # check, the memory check, the part of the set with -poisonmi and with -poisonbuf, the whole set with
-  # -interfast, the decoder code of the test player with its -parser flag, the stage dumps and the MEMORY
-  # lines. The rust-equal job holds this run, not the one of rust-conformance, against the C++ decoder,
-  # whose parser is the same C; the rust-parsers-equal job holds it against the run of rust-conformance.
-  rust-parser-c:
-    needs: [conformance-streams, rust]
-    runs-on: windows-latest
-    timeout-minutes: 45
-    steps:
-      - name: Disable newline conversion
-        run: git config --global core.autocrlf false
-
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - name: rav1g-dec.exe of the rust job
-        uses: actions/download-artifact@v8
-        with:
-          name: rav1g-dec-x64-${{ github.run_id }}
-          path: out/rav1g-dec
-
-      - name: Streams from the cache
-        uses: actions/cache/restore@v6
-        with:
-          path: conformance-streams
-          key: ${{ needs.conformance-streams.outputs.key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-
-      - name: Decode every stream on WARP with -parser c
-        shell: pwsh
-        run: |
-          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/conformance-c --threads 4 "--tool-args=-parser c" "--title=rav1g-dec (cargo, MSVC) with -parser c"
-          $code = $LASTEXITCODE
-          if (-not (Select-String -Path out/conformance-c/lists/run001.log -Pattern '^PARSER .*the entropy decoder of libaom' -Quiet)) {
-            throw 'The decoder of this run does not report the entropy decoder of libaom'
-          }
-          if ($code -ne 0) { throw "conformance run with -parser c: exit code $code (1: not as expected.txt says, 2: the run could not be done)" }
-
-      - name: The other checks with -parser c
-        if: ${{ !cancelled() }}
-        shell: pwsh
-        run: |
-          $failed = @()
-          $part = '--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)'
-          $runs = @(@{ name = 'poisonmi-c'; args = '-poisonmi -parser c'; only = $part },
-            @{ name = 'poisonbuf-c'; args = '-poisonbuf -parser c'; only = $part },
-            @{ name = 'capi-c'; args = '-capi -parser c'; only = $part },
-            @{ name = 'interfast-c'; args = '-interfast -parser c'; only = '--only=' })
-          foreach ($run in $runs) {
-            python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-              --out "out/conformance-$($run.name)" --threads 4 "--tool-args=$($run.args)" `
-              "--title=rav1g-dec (cargo, MSVC) with $($run.args)" $run.only
-            if ($LASTEXITCODE -ne 0) { $failed += "conformance with $($run.args): exit code $LASTEXITCODE" }
-          }
-          python testing/conformance/cut_tile_check.py --tool out/rav1g-dec/rav1g-dec.exe --parser c `
-            --streams conformance-streams --out out/cut-tile
-          if ($LASTEXITCODE -ne 0) { $failed += "decode error check: exit code $LASTEXITCODE" }
-          python testing/conformance/cut_tile_check.py --tool out/rav1g-dec/rav1g-dec.exe "--tool-args=-capi" --parser c `
-            --streams conformance-streams --out out/cut-tile
-          if ($LASTEXITCODE -ne 0) { $failed += "decode error check with -capi: exit code $LASTEXITCODE" }
-          python testing/conformance/cut_tile_check.py --player-smoke out/rav1g-dec/rav1g-dec.exe --parser c `
-            --streams conformance-streams --out out/cut-tile
-          if ($LASTEXITCODE -ne 0) { $failed += "decode error check with the player's decoder code: exit code $LASTEXITCODE" }
-          python testing/conformance/order_check.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/order-check-c "--tool-args=-parser c" "--title=rav1g-dec (cargo, MSVC) with -parser c"
-          if ($LASTEXITCODE -ne 0) { $failed += "order check: exit code $LASTEXITCODE" }
-          python testing/conformance/memory_check.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/memory-check-c "--tool-args=-parser c" "--title=rav1g-dec (cargo, MSVC) with -parser c"
-          if ($LASTEXITCODE -ne 0) { $failed += "memory check: exit code $LASTEXITCODE" }
-          python testing/conformance/player_smoke.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/player-smoke-c "--player-args=-parser c" "--title=the Rust library (cargo, MSVC), the player with -parser c"
-          if ($LASTEXITCODE -ne 0) { $failed += "the player's decoder code: exit code $LASTEXITCODE" }
-          if ($failed.Count) { throw "with -parser c: $($failed -join '; ')" }
-
-      # The stage dumps and the MEMORY lines of -parser c (the comments are in the rust-conformance job):
-      # what the rust-parsers-equal job holds against those of the default parser, and the rust-equal job
-      # against those of the C++ decoder.
-      - name: Stage dumps and MEMORY log lines with -parser c
-        if: ${{ !cancelled() }}
-        shell: pwsh
-        run: |
-          $failed = @()
-          python testing/stage_dump/ci_dumps.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --tasks testing/conformance/dump_tasks.txt --out out/stage-dumps-c --threads 4 "--tool-args=-parser c"
-          if ($LASTEXITCODE -ne 0) { $failed += "stage dumps with -parser c: exit code $LASTEXITCODE" }
-          python testing/conformance/memory_lines.py run --tool out/rav1g-dec/rav1g-dec.exe `
-            --streams conformance-streams --out out/memory-lines-c "--tool-args=-parser c"
-          if ($LASTEXITCODE -ne 0) { $failed += "memory lines with -parser c: exit code $LASTEXITCODE" }
-          if ($failed.Count) { throw "with -parser c: $($failed -join '; ')" }
-
-      - name: Preserve the results, the per-stream logs, the md5 files, the stage dumps and the MEMORY lines of -parser c
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: rav1g-dec-parser-c-${{ github.run_id }}
-          path: |
-            out/conformance-*/
-            out/*-c/
             out/cut-tile/
           if-no-files-found: warn
 
@@ -1385,14 +1273,14 @@ jobs:
       # superblock (latelists), and the calls of the sink timed. The whole set against its references and
       # expected.txt, the stage dumps, the decoder code of the test player with its -parseopt flag, and the
       # decode errors in cut streams (a tile that is handed from thread to thread ends as one that keeps
-      # its thread). The rust-parsers-equal job holds the stage dumps and the md5 of every frame against
-      # those of -parser c, and the stage dumps against those of the default switches byte for byte.
+      # its thread). The rust-dumps-equal job holds the stage dumps against those of the default switches
+      # byte for byte.
       - name: The other side of every switch of the parser (-parseopt none,latelists)
         if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           $failed = @()
-          $switches = '-parser rav1d -parseopt none,latelists,time'
+          $switches = '-parseopt none,latelists,time'
           python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
             --out out/conformance-switches-rav1d --threads 4 "--tool-args=$switches" "--title=rav1g-dec (cargo, MSVC) with $switches"
           if ($LASTEXITCODE -ne 0) { $failed += "conformance with ${switches}: exit code $LASTEXITCODE" }
@@ -1405,7 +1293,7 @@ jobs:
           python testing/conformance/player_smoke.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
             --out out/player-smoke-switches-rav1d "--player-args=$switches" "--title=the Rust library (cargo, MSVC), the player with $switches"
           if ($LASTEXITCODE -ne 0) { $failed += "the player's decoder code with ${switches}: exit code $LASTEXITCODE" }
-          python testing/conformance/cut_tile_check.py --tool out/rav1g-dec/rav1g-dec.exe "--tool-args=-parseopt none,latelists" --parser rav1d `
+          python testing/conformance/cut_tile_check.py --tool out/rav1g-dec/rav1g-dec.exe "--tool-args=-parseopt none,latelists" `
             --streams conformance-streams --out out/cut-tile
           if ($LASTEXITCODE -ne 0) { $failed += "decode error check with -parseopt none,latelists: exit code $LASTEXITCODE" }
           if ($failed.Count) { throw "the switches of the parser: $($failed -join '; ')" }
@@ -1456,7 +1344,7 @@ jobs:
 
       # Who clears what, from the timing run (testing/conformance/clears_check.py): the 2160p stream and
       # the stream with eight tiles, each decoded in every way, also with the mode info grid cleared for
-      # every frame (-parseopt cleargrid, -parser c). Without a flag the completion thread and the GPU
+      # every frame (-parseopt cleargrid). Without a flag the completion thread and the GPU
       # clear nothing and the decode and tile threads the counters of the tiles' block lists; with
       # -gpuclear the command list of every frame clears, and no thread; with -cpuclear the completion
       # thread clears the same bytes; with -syncclear the decode thread.
@@ -1487,7 +1375,7 @@ jobs:
           if ($failed.Count) { throw "with -gpuclear: $($failed -join '; ')" }
 
       # The clears on the completion thread, with the wavefront in the grid: the default of the packages
-      # up to 0.2.144. The whole set, and the stage dumps, which the rust-parsers-equal job holds against
+      # up to 0.2.144. The whole set, and the stage dumps, which the rust-dumps-equal job holds against
       # those of the default byte for byte: the block lists of the two ways of keeping the wavefront
       # have to be the same lists.
       - name: Conformance and stage dumps with the clears on the completion thread (-cpuclear)
@@ -1506,18 +1394,17 @@ jobs:
           if ($LASTEXITCODE -ne 0) { $failed += "stage dumps with -cpuclear: exit code $LASTEXITCODE" }
           if ($failed.Count) { throw "with -cpuclear: $($failed -join '; ')" }
 
-      # The clears of the GPU where both grids are cleared: with the entropy decoder of libaom, whose mode
-      # info grid is cleared for every frame, and with rav1d's parse made to clear it (-parseopt
-      # cleargrid) on poisoned buffers, three slots and four threads. With -poisonbuf the grids start as
+      # The clears of the GPU where both grids are cleared: with the parse made to clear the mode info
+      # grid for every frame (-parseopt cleargrid) on poisoned buffers, three slots and four threads.
+      # With -poisonbuf the grids start as
       # 0xA5 bytes, so an entry that neither the CPU nor the clear of the GPU has written shows in the
       # output. The part of the set of the poisoned runs.
-      - name: The clears of the GPU with -parser c and with poisoned buffers
+      - name: The clears of the GPU of both grids, with poisoned buffers
         if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           $part = '--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)'
-          $runs = @(@{ name = 'gpuclear-c'; args = '-gpuclear -parser c' },
-            @{ name = 'gpuclear-poisonbuf'; args = '-gpuclear -poisonbuf -parseopt cleargrid -slots 3 -t 4' })
+          $runs = @(@{ name = 'gpuclear-poisonbuf'; args = '-gpuclear -poisonbuf -parseopt cleargrid -slots 3 -t 4' })
           $failed = @()
           foreach ($run in $runs) {
             python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
@@ -1575,7 +1462,7 @@ jobs:
       # parse, and the time of the parse with one and with two frames in parse
       # (testing/conformance/frames_check.py): the 2160p stream, where the library's defaults are two
       # threads and two frames in parse, and the 1080p stream with eight tiles. The budget guard with fixed
-      # budgets: a decoder that would not leave the headroom (100 MiB) is created with fewer slots and
+      # budgets: a decoder that would not leave the headroom (128 MiB) is created with fewer slots and
       # frames in parse and decodes, a fourth slot in the budget of the default gets three (the case of
       # the console in 1 GiB), and nothing is refused for the headroom. The pools (docs/phase2-rav1d.md, step
       # 5): with -parseopt poolwait a frame finds a pool empty behind its first piece while an older frame
@@ -1623,7 +1510,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { $failed += "two frames in parse through rav1g.h: exit code $LASTEXITCODE" }
           if ($failed.Count) { throw "decode error check with frames in parse: $($failed -join '; ') (1: a check failed, 2: the check could not be done)" }
 
-      # The stage dumps with two frames in parse, which the rust-parsers-equal job holds against those
+      # The stage dumps with two frames in parse, which the rust-dumps-equal job holds against those
       # of one frame in parse byte for byte: every list the stages read and every frame buffer behind
       # every stage.
       - name: Stage dumps with two frames in parse
@@ -1777,8 +1664,8 @@ jobs:
 
   # What the jobs above wrote, held against each other; no decoder runs here. It runs also when one of
   # them failed, on what that job wrote before it did.
-  rust-parsers-equal:
-    needs: [rust, rust-conformance, rust-parser-c, rust-switches, rust-clears, rust-frames]
+  rust-dumps-equal:
+    needs: [rust, rust-conformance, rust-switches, rust-clears, rust-frames]
     if: ${{ !cancelled() && needs.rust.result == 'success' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 15
@@ -1796,11 +1683,6 @@ jobs:
         with:
           name: rav1g-dec-stage-dumps-${{ github.run_id }}
           path: default-dumps
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: rav1g-dec-parser-c-${{ github.run_id }}
-          path: parser-c
 
       - uses: actions/download-artifact@v8
         with:
@@ -1822,41 +1704,14 @@ jobs:
           name: rav1g-conformance-md5-${{ github.run_id }}
           path: conformance-md5
 
-      # The two parsers against each other: the md5 of every output frame of every stream, the buffers
-      # behind every GPU stage of the frames of dump_tasks.txt (the block lists, the loop filter lists and
-      # parameters, the CDEF and loop restoration lists, every frame buffer), and the MEMORY lines of a few
-      # decoder configurations. The mode info records themselves are listed, not held equal: the entropy
-      # decoder of libaom leaves in a field a block's kind does not have what an earlier frame had there,
-      # rav1d's sink writes zero (stage_dump.py compare --two-parsers). The dumps and the MEMORY lines of
-      # -parser c are also what the rust-equal job holds against the C++ decoder.
-      #
-      # The MEMORY lines are no longer the same (docs/phase2-rav1d.md, step 5): a decoder with rav1d's
-      # parser has pools where the other one has a share for each slot. What is held
-      # (memory_lines.py pools): the same decoder size and frame buffers, pools of a chunk for every
-      # 64x64 area of the decoder size, and with the same slots no more device memory than the shares
-      # take.
-      - name: The two parsers give the same frames and stage dumps; the pools next to the shares
-        run: |
-          set -euo pipefail
-          status=0
-          python3 testing/conformance/compare_md5.py --reference parser-c/conformance-c --candidate default/conformance \
-            --manifest conformance-md5/manifest.txt --reference-dumps parser-c/stage-dumps-c --candidate-dumps default-dumps \
-            --reference-name 'rav1g-dec -parser c' --candidate-name 'rav1g-dec (rav1d, the default)' --two-parsers || {
-              echo "::error::the two parsers: md5 per frame or stage dumps differ (exit code $?)"; status=1; }
-          python3 testing/conformance/memory_lines.py pools --shares parser-c/memory-lines-c --pools default/memory-lines \
-            | tee -a "$GITHUB_STEP_SUMMARY" || {
-              echo "::error::the MEMORY lines of the decoder with pools are not what they should be next to those of -parser c"; status=1; }
-          exit "$status"
-
       # The other side of every switch of rav1d's parse (the run of the rust-switches job): the stage
       # dumps against those of the default switches byte for byte (the mode info records too: the same
-      # parser wrote them), and the stage dumps and the md5 of every frame against those of -parser c.
-      - name: The other side of every switch of the parser gives the same stage dumps and frames
-        if: ${{ !cancelled() }}
+      # parser wrote them). Its frames are held against the references in the run itself.
+      - name: The other side of every switch of the parser gives the same stage dumps
         run: |
           set -euo pipefail
           status=0
-          switches='-parser rav1d -parseopt none,latelists,time'
+          switches='-parseopt none,latelists,time'
           dumped=0
           for dir in default-dumps/*/; do
             name=$(basename "$dir")
@@ -1874,11 +1729,6 @@ jobs:
             echo '::error::no stage dumps of the default switches to hold these against'
             status=1
           fi
-          python3 testing/conformance/compare_md5.py --reference parser-c/conformance-c --candidate switches/conformance-switches-rav1d \
-            --manifest conformance-md5/manifest.txt --reference-dumps parser-c/stage-dumps-c \
-            --candidate-dumps switches/stage-dumps-switches-rav1d \
-            --reference-name 'rav1g-dec -parser c' --candidate-name "rav1g-dec $switches" --two-parsers || {
-              echo "::error::-parser c against $switches: md5 per frame or stage dumps differ (exit code $?)"; status=1; }
           exit "$status"
 
       # The two ways of keeping the wavefront of intra prediction (the run of the rust-clears job): the
@@ -2019,83 +1869,22 @@ jobs:
           path: out/conformance-*/
           if-no-files-found: warn
 
-  # Not on a push: once a week (schedule) and when the workflow is started by hand with the parser_timing
-  # input (gh workflow run build.yml -f parser_timing=true). The console makes the speed decisions, and
-  # the C parser leaves in the last step of phase 2, so a push does not wait 17 minutes for these numbers.
-  parser-timing:
-    needs: [conformance-streams, rust]
-    if: ${{ github.event_name == 'schedule' || inputs.parser_timing }}
-    runs-on: windows-latest
-    timeout-minutes: 45
-    steps:
-      - name: Disable newline conversion
-        run: git config --global core.autocrlf false
-
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - name: rav1g-dec.exe of the rust job
-        uses: actions/download-artifact@v8
-        with:
-          name: rav1g-dec-x64-${{ github.run_id }}
-          path: out/rav1g-dec
-
-      - name: Streams from the cache
-        uses: actions/cache/restore@v6
-        with:
-          path: conformance-streams
-          key: ${{ needs.conformance-streams.outputs.key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-
-      # The two parsers timed in pairs on this runner (testing/conformance/parser_timing.py): the CPU
-      # timers of the decode thread with -parser c, with -parser rav1d (its default switches) and with
-      # rav1d and other switches, in turns, three rounds each; the two 2160p streams first, the heavy
-      # 10-bit one in front. One parser thread for the streams with one tile, with the block lists at the
-      # end of a tile (latelists: the way of before, against the default) and with the calls of the sink
-      # timed; four for the stream with eight tiles; and the 2160p streams once more with four threads,
-      # the 8-bit one with each switch by itself (one tile: what further threads cost a parse that
-      # cannot use them). The numbers of a runner say how the decoders compare on it; the console's
-      # numbers decide.
-      - name: The two parsers, timed in pairs
-        shell: pwsh
-        run: |
-          python testing/conformance/parser_timing.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/parser-timing --rounds 3 --threads 1 --switches latelists --switches time `
-            --stream nf-dvbdash-d2-10b-2160p.ivf --stream nf-dvbdash-a1-8b-2160p.ivf `
-            --stream nf-chimera-10b-1080p.ivf --stream nf-sparks-10b-1080p.ivf
-          if ($LASTEXITCODE -ne 0) { throw "paired timing of the parsers: exit code $LASTEXITCODE" }
-          python testing/conformance/parser_timing.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/parser-timing-t4 --rounds 3 --threads 4 --switches latelists --switches none `
-            --stream syn-tiles-10b-1080p.ivf
-          if ($LASTEXITCODE -ne 0) { throw "paired timing of the parsers with four threads: exit code $LASTEXITCODE" }
-          python testing/conformance/parser_timing.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/parser-timing-d2-t4 --rounds 2 --threads 4 --switches latelists --switches none `
-            --stream nf-dvbdash-d2-10b-2160p.ivf
-          if ($LASTEXITCODE -ne 0) { throw "paired timing of the parsers, the 10-bit 2160p stream with four threads: exit code $LASTEXITCODE" }
-          python testing/conformance/parser_timing.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/parser-timing-switches --rounds 3 --threads 4 --stream nf-dvbdash-a1-8b-2160p.ivf `
-            --switches none --switches nolfmask --switches tilethread --switches latelists --switches time
-          if ($LASTEXITCODE -ne 0) { throw "paired timing of the switches of the parser: exit code $LASTEXITCODE" }
-
-      - name: Preserve the timings
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: rav1g-parser-timing-${{ github.run_id }}
-          path: out/parser-timing*/
-          if-no-files-found: warn
-
   # Equality with the C++ decoder (docs/rust-port.md, "Equality reference"): rav1g-dec of this commit and
   # warp_decoder of branch cpp at CPP_REFERENCE_COMMIT must write the same md5 for every output frame of
-  # every stream of the set, the same buffers behind every GPU stage of the dumped frames, and the same
-  # MEMORY lines. Two implementations of the host can only be held against each other while they run the
+  # every stream of the set and the same buffers behind every GPU stage of the dumped frames. The C++
+  # decoder reads a stream with the entropy decoder of libaom, the decoder of this commit with the parse
+  # pass of rav1d: this is where the two parsers are still held against each other on a GPU (the mode
+  # info records are listed, not held equal: libaom leaves in a field a block's kind does not have what
+  # an earlier frame had there, rav1d's sink writes zero; stage_dump.py compare --two-parsers), next to
+  # the parse-check job, which holds them against each other value by value without one. The MEMORY
+  # lines are no longer the same text: the C++ decoder has a share of the mode info and coefficient
+  # buffers for each slot, this one has pools (docs/phase2-rav1d.md, step 5); what is held of them is
+  # in the last step. Two implementations of the host can only be held against each other while they run the
   # same shaders, so that is checked first: when a shader of this branch changes and the pinned commit
   # does not have the change, this job fails there, and the comparison either gets a new pin (the change
   # was made on both branches) or ends (the shaders of the branches diverge: the switch to DXC, phase 2).
   rust-equal:
-    needs: [cpp-reference, rust-parser-c, shader-headers]
+    needs: [cpp-reference, rust-conformance, shader-headers]
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
@@ -2110,8 +1899,13 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: rav1g-dec-parser-c-${{ github.run_id }}
+          name: rav1g-dec-conformance-${{ github.run_id }}
           path: rav1g-dec
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: rav1g-dec-stage-dumps-${{ github.run_id }}
+          path: rav1g-dec-dumps
 
       - uses: actions/download-artifact@v8
         with:
@@ -2144,23 +1938,21 @@ jobs:
             exit 1
           fi
 
-      # The C++ decoder reads a stream with the entropy decoder of libaom, so what is held against it is
-      # rav1g-dec with -parser c (the run, the dumps and the MEMORY lines of the rust-parser-c job):
-      # the same parser on both sides, and the mode info records byte for byte. The parse pass of rav1d,
-      # which rav1g-dec uses without the flag, is held against -parser c in the rust-parsers-equal job.
-      - name: md5 per frame and stage dumps, rav1g-dec -parser c against the C++ decoder
+      - name: md5 per frame and stage dumps, rav1g-dec against the C++ decoder
         run: |
           set -euo pipefail
-          python3 testing/conformance/compare_md5.py --reference cpp-reference/conformance --candidate rav1g-dec/conformance-c \
-            --manifest conformance-md5/manifest.txt --reference-dumps cpp-reference-dumps --candidate-dumps rav1g-dec/stage-dumps-c \
-            --reference-name 'warp_decoder (cpp)' --candidate-name 'rav1g-dec -parser c'
+          python3 testing/conformance/compare_md5.py --reference cpp-reference/conformance --candidate rav1g-dec/conformance \
+            --manifest conformance-md5/manifest.txt --reference-dumps cpp-reference-dumps --candidate-dumps rav1g-dec-dumps \
+            --reference-name 'warp_decoder (cpp, the entropy decoder of libaom)' --candidate-name 'rav1g-dec (rav1d)' --two-parsers
 
-      # The decoder creation, the buffer plan and the release: the same buffers of the same sizes, and the
-      # same text about them.
-      - name: MEMORY log lines, rav1g-dec -parser c against the C++ decoder
+      # The decoder creation and the buffer plan (memory_lines.py pools): the same decoder size and frame
+      # buffers as the C++ decoder, pools of a chunk for every 64x64 area of the decoder size, and with
+      # the same slots no more device memory than the C++ decoder takes with its shares.
+      - name: MEMORY log lines, the pools of rav1g-dec next to the shares of the C++ decoder
+        if: ${{ !cancelled() }}
         run: |
-          python3 testing/conformance/memory_lines.py compare --reference cpp-reference/memory-lines \
-            --candidate rav1g-dec/memory-lines-c --reference-name 'warp_decoder (cpp)' --candidate-name 'rav1g-dec -parser c'
+          python3 testing/conformance/memory_lines.py pools --shares cpp-reference/memory-lines \
+            --pools rav1g-dec/memory-lines | tee -a "$GITHUB_STEP_SUMMARY"
 
   # The shader headers of the normal build for the Linux build below, which has no FXC: the headers and
   # the report of the Shaders step, as an artifact.
@@ -2194,8 +1986,8 @@ jobs:
 
   # Linux-native build (docs/rust-port.md, "Requirements"): the workspace for x86_64-pc-windows-msvc on a
   # Linux runner with cargo xwin, which is clang-cl and lld-link with the Windows SDK and C runtime that xwin
-  # fetches; no wine, no MSVC. The C of the parser and entropy decoder, and the C++ of the test player that
-  # rav1g-dec has for -playersmoke, are compiled by cc the same way. The shaders are the FXC headers of the
+  # fetches; no wine, no MSVC. The shader table and the C++ of the test player that rav1g-dec has for
+  # -playersmoke are compiled by cc the same way. The shaders are the FXC headers of the
   # shader-headers job.
   rust-cross:
     needs: shader-headers
@@ -2346,8 +2138,8 @@ jobs:
   # WARP against the same references and expected.txt, and runs the decoder code of the test player, which
   # in this program is compiled by clang-cl, as the C of the default package of the player is. The checks
   # of the rust-conformance and rust-switches jobs that do not depend on a second run of the set follow
-  # with it, in two jobs side by side: this one has the parser of the default, rust-cross-run-parsers the
-  # other parser and the other side of the switches of the parser.
+  # with it, in two jobs side by side: this one has the switches of the default, rust-cross-run-switches
+  # the other side of the switches of the parser.
   rust-cross-run:
     needs: [rust-cross, conformance-streams]
     runs-on: windows-latest
@@ -2477,9 +2269,9 @@ jobs:
             out/memory-check/
           if-no-files-found: warn
 
-  # The second half of the checks with the program of the Linux build: the other parser, and the other
-  # side of every switch of rav1d's parse.
-  rust-cross-run-parsers:
+  # The second half of the checks with the program of the Linux build: the other side of every switch of
+  # rav1d's parse.
+  rust-cross-run-switches:
     needs: [rust-cross, conformance-streams]
     runs-on: windows-latest
     timeout-minutes: 45
@@ -2505,64 +2297,13 @@ jobs:
           enableCrossOsArchive: true
           fail-on-cache-miss: true
 
-      # The entropy decoder of libaom, the other parser of the decoder until the last step of phase 2
-      # (docs/phase2-rav1d.md): the checks of the rust-cross-run job once more with -parser c. The whole set against its
-      # references and expected.txt, the decode errors in cut streams (with the words and the error
-      # behaviour of that parser), the order check, the memory check, the part of the set with -poisonmi
-      # and with -poisonbuf, the whole set with -interfast, and the decoder code of the test player with
-      # its -parser flag.
-      - name: Decode every stream on WARP with -parser c, the rav1g-dec of the Linux build
-        shell: pwsh
-        run: |
-          python testing/conformance/run.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
-            --out out/conformance-c --threads 4 "--tool-args=-parser c" "--title=rav1g-dec built on Linux with -parser c"
-          $code = $LASTEXITCODE
-          if (-not (Select-String -Path out/conformance-c/lists/run001.log -Pattern '^PARSER .*the entropy decoder of libaom' -Quiet)) {
-            throw 'The decoder of this run does not report the entropy decoder of libaom'
-          }
-          if ($code -ne 0) { throw "conformance run with -parser c: exit code $code (1: not as expected.txt says, 2: the run could not be done)" }
-
-      - name: The other checks with -parser c, the rav1g-dec of the Linux build
-        if: ${{ !cancelled() }}
+      # The whole set against its references and expected.txt, and the decoder code of the test player
+      # with its -parseopt flag.
+      - name: The other side of every switch of the parser, the rav1g-dec of the Linux build
         shell: pwsh
         run: |
           $failed = @()
-          $part = '--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)'
-          $runs = @(@{ name = 'poisonmi-c'; args = '-poisonmi -parser c'; only = $part },
-            @{ name = 'poisonbuf-c'; args = '-poisonbuf -parser c'; only = $part },
-            @{ name = 'interfast-c'; args = '-interfast -parser c'; only = '--only=' })
-          foreach ($run in $runs) {
-            python testing/conformance/run.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
-              --out "out/conformance-$($run.name)" --threads 4 "--tool-args=$($run.args)" `
-              "--title=rav1g-dec built on Linux with $($run.args)" $run.only
-            if ($LASTEXITCODE -ne 0) { $failed += "conformance with $($run.args): exit code $LASTEXITCODE" }
-          }
-          python testing/conformance/cut_tile_check.py --tool rav1g-dec-xwin/rav1g-dec.exe --parser c `
-            --streams conformance-streams --out out/cut-tile
-          if ($LASTEXITCODE -ne 0) { $failed += "decode error check: exit code $LASTEXITCODE" }
-          python testing/conformance/cut_tile_check.py --player-smoke rav1g-dec-xwin/rav1g-dec.exe --parser c `
-            --streams conformance-streams --out out/cut-tile
-          if ($LASTEXITCODE -ne 0) { $failed += "decode error check with the player's decoder code: exit code $LASTEXITCODE" }
-          python testing/conformance/order_check.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
-            --out out/order-check-c "--tool-args=-parser c" "--title=rav1g-dec built on Linux with -parser c"
-          if ($LASTEXITCODE -ne 0) { $failed += "order check: exit code $LASTEXITCODE" }
-          python testing/conformance/memory_check.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
-            --out out/memory-check-c "--tool-args=-parser c" "--title=rav1g-dec built on Linux with -parser c"
-          if ($LASTEXITCODE -ne 0) { $failed += "memory check: exit code $LASTEXITCODE" }
-          python testing/conformance/player_smoke.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
-            --out out/player-smoke-c "--player-args=-parser c" "--title=the Rust library built on Linux, the player with -parser c"
-          if ($LASTEXITCODE -ne 0) { $failed += "the player's decoder code: exit code $LASTEXITCODE" }
-          if ($failed.Count) { throw "with -parser c: $($failed -join '; ')" }
-
-      # The other side of every switch of rav1d's parse (docs/phase2-rav1d.md "Where the time goes"):
-      # without its two default switches, the block lists at the end of a tile, the calls of the sink
-      # timed. The whole set, and the decoder code of the test player.
-      - name: The same with the other side of every switch of the parser, the rav1g-dec of the Linux build
-        if: ${{ !cancelled() }}
-        shell: pwsh
-        run: |
-          $failed = @()
-          $switches = '-parser rav1d -parseopt none,latelists,time'
+          $switches = '-parseopt none,latelists,time'
           python testing/conformance/run.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
             --out out/conformance-switches-rav1d --threads 4 "--tool-args=$switches" "--title=rav1g-dec built on Linux with $switches"
           if ($LASTEXITCODE -ne 0) { $failed += "conformance with ${switches}: exit code $LASTEXITCODE" }
@@ -2578,13 +2319,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: rav1g-dec-xwin-parsers-${{ github.run_id }}
+          name: rav1g-dec-xwin-switches-${{ github.run_id }}
           path: |
             out/conformance-*/
             out/player-smoke-*/
             out/cut-tile/
             out/*-rav1d/
-            out/*-c/
           if-no-files-found: warn
 
   # Phase 2, step 1 (docs/phase2-rav1d.md): rav1d as it is upstream, at the commit the copy in
@@ -2983,14 +2723,14 @@ jobs:
 
   # What the decoder reports about the colour of a stream (docs/color.md): the colour description of the
   # sequence header and the HDR metadata OBUs, which it passes to the application with the stream info
-  # and with every frame. rav1g-dec prints it per stream ("COLOUR" lines), and the lines of three runs of
-  # the whole set in the rust-conformance and rust-parser-c jobs (rav1d's parser through the Rust interface
-  # and through rav1g.h, and -parser c) are held against two references that are not the decoder: FFmpeg's trace_headers for the
+  # and with every frame. rav1g-dec prints it per stream ("COLOUR" lines), and the lines of two runs of
+  # the whole set in the rust-conformance job (through the Rust interface and through rav1g.h) are held
+  # against two references that are not the decoder: FFmpeg's trace_headers for the
   # syntax elements of the sequence header, ffprobe with libdav1d for the properties and the side data
   # of every output frame. The streams that carry something (BT.709; BT.2020 with HLG; HDR10 with a
   # mastering display and light levels) are named in the script with what they carry.
   colour:
-    needs: [conformance-streams, rust-conformance, rust-parser-c]
+    needs: [conformance-streams, rust-conformance]
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
@@ -3011,11 +2751,6 @@ jobs:
           name: rav1g-dec-conformance-${{ github.run_id }}
           path: rav1g-dec
 
-      - uses: actions/download-artifact@v8
-        with:
-          name: rav1g-dec-parser-c-${{ github.run_id }}
-          path: rav1g-dec-c
-
       - name: ffmpeg and ffprobe with libdav1d
         run: |
           set -euo pipefail
@@ -3029,8 +2764,7 @@ jobs:
           set -euo pipefail
           python3 testing/conformance/colour_check.py --streams conformance-streams --out out/colour \
             --logs "rav1d's parser=rav1g-dec/conformance/logs" \
-            --logs "rav1g.h (-capi)=rav1g-dec/conformance-capi/logs" \
-            --logs "the C parser (-parser c)=rav1g-dec-c/conformance-c/logs"
+            --logs "rav1g.h (-capi)=rav1g-dec/conformance-capi/logs"
 
       - name: Preserve what the references say
         if: always()

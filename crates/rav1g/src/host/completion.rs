@@ -28,11 +28,6 @@ use crate::gpu::Event;
 use crate::sys;
 use crate::sys::parser::{AV1Decoder, HwOutputImage, aom_image_t, av1_decoded_frame_buffer_t};
 
-unsafe extern "C" {
-    /// `av1/decoder/obu.c`: the frame is the one of its temporal unit that is output.
-    fn av1_frame_is_output(pbi: *const AV1Decoder) -> c_int;
-}
-
 /// The frame that used `td` has completed on the GPU, so nothing reads the slot's grids any more, and
 /// the slot is not in the pool, so the decode thread cannot have it. What the frame cleared at its setup
 /// is clean again behind it, so that the next frame of the same size starts on a slot that is: cleared
@@ -110,25 +105,6 @@ unsafe fn copy_to_img(dec: *const Av1Core, hw_img: &mut HwOutputImage, dst: &mut
     hw_img.alloc_priv = std::ptr::null_mut();
     hw_img.user_priv = std::ptr::null_mut();
     hw_img.is_valid = 0;
-}
-
-/// `get_output_frame` (`dx/av1_core.h`): the next output image, for an application that takes its frames
-/// from the decode call and has no notification callback. Returns 1 when there is none.
-///
-/// # Safety
-/// `pbi` is the entropy decoder's state of a decoder; `dst` is valid for writing.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn get_output_frame(pbi: *mut AV1Decoder, dst: *mut aom_image_t) -> c_int {
-    // SAFETY: the caller's contract.
-    unsafe {
-        let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
-        let Some(hw_img) = (*dec).output_queue.try_get() else {
-            return 1;
-        };
-        copy_to_img(dec, &mut *hw_img, &mut *dst);
-        (*dec).image_pool.push(hw_img);
-    }
-    0
 }
 
 thread_local! {
@@ -213,20 +189,14 @@ unsafe fn completion_thread(dec: *mut Av1Core) {
                     if returned {
                         (*dec).fb_pool.signal();
                     }
-                    if !td.sec_thread_data.is_null() {
-                        (*dec).frame_data_pool.push(td.sec_thread_data);
-                    }
                 }
-                td.sec_thread_data = std::ptr::null_mut();
                 // What the frame took of the pools is free for the frames in parse. Its coefficients
                 // are zero again: the transform stage clears what it reads.
                 if let (0, Some(pools)) = (td.output_only, (*dec).pools.as_deref()) {
                     pools.release(td.slot_index as usize, |_, _, _| {});
                 }
                 // What the frame cleared of the slot's grids is clean again before the slot goes back
-                // (`clear_slot`). A second slot went back above as it is: a frame uses only the coefficient
-                // and mode info shares of its second slot, not the grids, so that slot is as clean as it
-                // was.
+                // (`clear_slot`).
                 let perf_clear_start = if perf_have_rec { perf_now() } else { 0 };
                 let (cleared, gpu_cleared) = clear_slot(td);
                 if perf_clear_start != 0 && cleared != 0 {
@@ -303,8 +273,7 @@ pub(crate) unsafe fn start_completion_thread(dec: *mut Av1Core) -> bool {
 ///
 /// # Safety
 /// `dec` is null or a decoder; decode thread.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn av1_drain_gpu_decoder(dec: *mut Av1Core) {
+pub(crate) unsafe extern "C" fn av1_drain_gpu_decoder(dec: *mut Av1Core) {
     // SAFETY: the caller's contract.
     unsafe {
         if dec.is_null() {
@@ -349,8 +318,10 @@ pub unsafe extern "C" fn av1_drain_gpu_decoder(dec: *mut Av1Core) {
 /// # Safety
 /// `pbi` is the entropy decoder's state behind the header of a show_existing_frame; `fb` is valid for
 /// writing; decode thread.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_decode_sef_begin(pbi: *mut AV1Decoder, fb: *mut av1_decoded_frame_buffer_t) -> c_int {
+pub(crate) unsafe extern "C" fn rav1g_decode_sef_begin(
+    pbi: *mut AV1Decoder,
+    fb: *mut av1_decoded_frame_buffer_t,
+) -> c_int {
     // SAFETY: the caller's contract.
     unsafe { decode_sef_begin(pbi, fb, None) }
 }
@@ -379,7 +350,7 @@ pub(crate) unsafe fn decode_sef_begin(
             return -1;
         }
         // Not the frame of its temporal unit that is output: a frame of a higher spatial layer follows.
-        if !output.unwrap_or_else(|| av1_frame_is_output(pbi) != 0) {
+        if !output.unwrap_or_else(|| super::obu::frame_is_output(pbi)) {
             return -1;
         }
 
@@ -397,7 +368,6 @@ pub(crate) unsafe fn decode_sef_begin(
         let td_ptr: *mut av1_frame_thread_data = (*dec).output_data_pool.get();
         perf_add(dec, sys::AV1_PERF_CPU_WAIT_SLOT as usize, perf_t);
         let td = &mut *td_ptr;
-        td.sec_thread_data = std::ptr::null_mut();
         td.back_buffer0 = std::ptr::null_mut();
         td.refs = [std::ptr::null_mut(); 8];
         td.clear_pending = 0;
@@ -435,8 +405,7 @@ pub(crate) unsafe fn decode_sef_begin(
 ///
 /// # Safety
 /// As for [`rav1g_decode_sef_begin`], after it returned a state that is not -1.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_decode_sef_submit(
+pub(crate) unsafe extern "C" fn rav1g_decode_sef_submit(
     pbi: *mut AV1Decoder,
     image_state: c_int,
     fb: *const av1_decoded_frame_buffer_t,

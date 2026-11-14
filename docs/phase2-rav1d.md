@@ -553,7 +553,8 @@ Each step leaves a decoder that works; both parsers are in the program until ste
    ([done](#step-5-the-pools)). Gates: conformance;
    "MEMORY" lines; console application memory with two frames in parse not above today's three slots;
    a stream that exhausts the pool decodes (the parse waits).
-6. **The C parser leaves.** `libav1/av1`, `aom*`, their build in `rav1g-sys`, `host_entry.c`, the
+6. **The C parser leaves** ([done](#step-6-the-c-parser-leaves), with what it left of this list).
+   `libav1/av1`, `aom*`, their build in `rav1g-sys`, `host_entry.c`, the
    bindings to parser structs, `-parser`. Gates: everything of CI; console md5 set and timing; licence
    files reviewed.
 
@@ -2402,6 +2403,7 @@ uses about 897 of 1024 MiB. The timing lines of
 - The palette buffer of a slot (24.2 MiB at 4K, created on the first frame with screen content
   tools) is still one for each slot.
 - Step 6: the C parser leaves, and with it the shares, the second slot and the header structs.
+  Done: [Step 6](#step-6-the-c-parser-leaves).
 
 ### The guard and the cliff
 
@@ -2418,7 +2420,7 @@ MiB between `MEMORY app after the decoder` and `30 frames out` is that pool; it 
 was wrong is the threshold: 48 MiB keeps the device, not the speed. Somewhere between 128 and 77
 MiB free the passes that read frame buffers get 2 to 12 times slower.
 
-**The rule.** `AV1_MEMORY_GUARD_HEADROOM`, 100 MiB, as a setting with that default
+**The rule.** `AV1_MEMORY_GUARD_HEADROOM`, 100 MiB (128 MiB since [step 6](#step-6-the-c-parser-leaves), which says why), as a setting with that default
 (`aom_codec_dec_cfg_t::memory_headroom`, `Settings::memory_headroom`,
 `Rav1gSettings::memory_headroom`; a value below the margin is the margin). At a creation with a
 budget callback:
@@ -2451,9 +2453,201 @@ nothing leaves the headroom (the smallest decoder, created), and `-headroom 48`;
 decode. The memory check is unchanged: its 2160p decoder is refused for the margin, as before.
 
 **What an application sees.** Nothing, unless it asks for more slots or frames in parse than leave
-100 MiB: then `rav1g_decoder_configuration` reports fewer. `Rav1gSettings` has a new field behind
+the headroom: then `rav1g_decoder_configuration` reports fewer. `Rav1gSettings` has a new field behind
 `memory_available_context`; an application that fills the settings with `rav1g_settings_default`
 is recompiled with the header and changes nothing.
+
+### Step 6: the C parser leaves
+
+2026-11-14. Done: the decoder has no parser but rav1d's parse pass, and compiles no C of `libav1`.
+The entropy decoder of libaom is still in the tree, as a reference: for the oracle of step 2, and
+(at the pin of branch `cpp`) in the C++ decoder CI holds every frame against.
+
+**What left the decoder.**
+
+- *The parser choice.* `Parser::Libaom` and `Settings::parser`, `RAV1G_PARSER_LIBAOM` and
+  `RAV1G_PARSER_RAV1D`, `aom_codec_dec_cfg_t::parser`, `rav1g-dec -parser` and the player's
+  `-parser` (a task line with it is an error now, also with `rav1d`).
+- *The C.* `rav1g-sys` compiled 71 files of `libav1` and three of its own into the decoder
+  (`rav1g_c.lib`, `rav1g_c_speed.lib`). For a Windows target it now compiles one: the shader table.
+  `host_entry.c` is deleted, `helpers.c` is built only where the entropy decoder is. The decoder
+  links one C library, `rav1g_c.lib`.
+- *The interface of the entropy decoder* between the library and its host. `Decoder` held an
+  `aom_codec_ctx_t` and went through `aom_codec_dec_init`, `aom_codec_decode`, `aom_codec_control`
+  and `aom_codec_destroy` of `av1_dx_iface.c`, which for a decoder with rav1d called back into Rust.
+  It now creates, runs and releases the host directly (`decoder.rs`); the texts of the error kinds
+  are a table of its own.
+- *The shares.* A slot's share of the mode info buffer and of the coefficient buffer, the second
+  slot a frame took for a second share (`get_sec_data`, `second_mode_info`, `second_coefs`,
+  `av1_setup_sec_data`, `av1_setup_ext_coef_buffer`), the worst-case coefficient layout of a frame
+  with very small tiles, a slot's own buffer of transform block records, and the branches of the
+  stages for a decoder without pools. Every decoder has the pools of step 5.
+- *The entry points of `dx/av1_core.h`* that only the entropy decoder called
+  (`av1_setup_frame` and `av1_decode_frame_gpu` of `host_entry.c`, `av1_setup_macroblockd`,
+  `av1_intra_palette`, `av1_setup_context_buffers`, `av1_show_frame`, `av1_allocate_pbi`,
+  `get_output_frame`). The ones the host of the sink calls too are plain functions of the crate; of
+  all of them only `av1_mi_push_block` is still exported, for the sink.
+- *The entropy decoder's memory in the host pool*: its decoder struct and buffer pool (1.2 MB), the
+  above contexts, the motion vector buffer of a frame and, for every frame buffer, its motion
+  vectors and segment map, and the 32 KB of the codec interface. The host pool of a 3840x2160
+  10-bit decoder with three slots is 1.8 MiB (it was 21.0 MiB); what is left in it is the tiles'
+  cursors of the slots and the loop restoration units.
+
+**The headroom of the guard is 128 MiB** (it was 100 for one run, [above](#the-guard-and-the-cliff)).
+The entropy decoder's memory was in what the application had used when the guard asked: the
+console measured 775.0 MiB left for the default decoder, and with 19.2 MiB less in the host pool
+that is about 794. A fourth slot (695.3 MiB) would then leave about 97 MiB, 3 MiB under a headroom
+of 100: a decision that depends on the launch, for a decoder that leaves less than anything that
+has been measured at full speed (128.5 MiB ran at 45.7 fps, 77.5 at 19.5; nothing in between is
+known). So the headroom is the least that is known to be enough. The default now leaves about 148
+MiB and is created with 20 MiB to spare (it needs 774.5 MiB left, and would also have been created
+with the 775.0 of 0.2.156); the fourth slot needs 823.3 and is 31 MiB short.
+
+**What the host needed of libaom, in Rust.** The stages were fed by six functions and eight tables
+of libaom's common code, which the decoder called as C: the loop filter thresholds and levels
+(`av1_loop_filter_init`, `av1_loop_filter_frame_init`), the loop restoration units
+(`av1_alloc_restoration_struct`, `av1_loop_restoration_filter_frame_init`), the shears of a warp
+model (`get_shear_params`), the wedge masks (`av1_init_wedge_masks`), and whether the top right and
+bottom left of a transform block are decoded (`has_top_right`, `has_bottom_left`). Linking those
+without the rest does not work: their files reference the pixel code of libaom (the loop filters,
+the convolutions, the intra predictors), which is most of `aom_dsp` and `av1/common`, and nothing
+of it runs here. So they are Rust now, statement for statement (`host/libaom.rs`, 470 lines), and
+the tables (the warp filter, the wedge masters, codebooks and sign flips, the inter-intra weights,
+the self-guided filter parameters, the filter intra taps, the scan orders, the edge availability
+tables, the divisor table: 12,000 numbers) are read from the C sources where they are defined, as
+text, by the build script of the crate (`crates/rav1g/build.rs`): one place for the numbers, the
+one the reference parser is compiled from. Two more pieces of the old interface are Rust for the
+same reason (`host/obu.rs`): the stream info of a temporal unit (`rav1g_peek_stream_info`: the OBU
+headers and the sequence header up to its colour description) and the rule for the frame of a
+temporal unit that is output (`av1_frame_is_output`).
+
+One thing the port showed: the transform stage copied a scan of `32 * height` or `width * height`
+entries for the sizes with a side of 64, from tables that have 1024 or 512: it read behind them.
+The positions behind a scan are never reached (a 64-point transform has coefficients in 32), so
+the output never depended on it; the Rust writes 0 there.
+
+**What stays, and why.**
+
+- *The headers of `libav1`.* The stages read the frame header and the block context through
+  `AV1_COMMON`, `AV1Decoder` and `MACROBLOCKD`, the mode info record is `MB_MODE_INFO`, and the sink
+  and the host of the sink fill such structs (`fill_header`, the 88 KB copy of a frame in parse).
+  Bindgen reads them from the headers; no C is compiled for it. Structs of the host's own in their
+  place (the "block context of the host's own" of step 3, and a frame header of the fields the
+  stages read) are not part of this step: every stage module would change, and nothing of the
+  output or of the memory depends on it but 88 KB a frame in parse.
+- *`tools/rav1g-parse-check`, with libaom's parser as its reference.* It is cheap to keep and it is
+  the only check that holds the parser itself, value by value, against another implementation:
+  every mode info record, the grid, the block lists, the transform block records and the
+  coefficients of every frame of the set. It was already a program of its own with a host of its
+  own (`chost.rs`), on Linux; `rav1g-sys` builds the entropy decoder for it there as before (all of
+  `c_sources.txt`), and it lost nothing but two stubs. Its block lists are counted with libaom's
+  own `has_top_right` and `has_bottom_left` (it links them), the decoder's with the Rust.
+- *The C++ decoder of branch `cpp` at its pin* (`cpp-reference`, `rust-equal`): the second place
+  where the entropy decoder still decodes. `rust-equal` held `-parser c` against it byte for byte,
+  and `rust-parsers-equal` held the default against `-parser c`; now `rust-equal` holds the default
+  against the C++ decoder directly: the md5 of every frame, and the stage dumps with the mode info
+  records listed, as between the two parsers before.
+- *`testing/common`*: the stream readers of the test programs no longer take two functions from
+  `libav1` (`obudec.c` has them), and what `tools_common.c` had of libaom's tools is cut down to
+  the three functions the readers call.
+
+**For an application** (`rav1g.h`, package 0.2.158):
+
+- `Rav1gSettings::parser` is `reserved_parser`: not used, in the same place, so every field behind
+  it is where it was. An application that set `parser` deletes the assignment (it chose rav1d
+  already unless it wrote `RAV1G_PARSER_LIBAOM`, which no longer exists); one that filled the
+  settings with `rav1g_settings_default` and left the field alone changes nothing.
+- `RAV1G_PARSER_LIBAOM` and `RAV1G_PARSER_RAV1D` are gone.
+- `Rav1gMemoryRequirements::host_size` is smaller.
+- An application that links the static library links `rav1g.lib` and `rav1g_c.lib`;
+  `rav1g_c_speed.lib` no longer exists.
+- The Rust interface: `Settings::parser` and `Parser` are gone; `set_operating_point` and
+  `set_output_all_layers` take effect with the next `decode`, as they did.
+
+**Memory**, 3840x2160 10-bit (wine on lavapipe, `MEMORY decoder created` lines):
+
+| | Before (0.2.157) | Now |
+| --- | ---: | ---: |
+| Device buffers, 2 frames in parse and 3 slots (the default) | 646.5 MiB | 646.5 MiB |
+| Device buffers, 1 frame in parse and 2 slots | 597.6 MiB | 597.6 MiB |
+| Device buffers, 4 slots | 695.3 MiB | 695.3 MiB |
+| Host pool, the default (host memory, in the app's usage) | 21.0 MiB | 1.8 MiB |
+
+The device buffers are the same: the shares went in step 5 for this decoder, and this step removed
+the code of the other one. The application has 19.2 MiB more: the host pool is allocated before
+the budget is asked, so it is in what the guard is told. The two items of step 5's list that would lower them are not done,
+below.
+
+**CI.** Gone: `rust-parser-c`, `parser-timing` (with its input and `parser_timing.py`), the
+`-parser c` halves of `rust-clears` and of the Linux-built program's second job, the third run of
+`colour`. `rust-parsers-equal` is `rust-dumps-equal` (the dumps of the other switches, of
+`-cpuclear` and of two frames in parse against the default, byte for byte), `rust-cross-run-parsers`
+is `rust-cross-run-switches`. Kept as they were: the md5 references of the whole set in every run,
+`expected.txt`, the conformance jobs with frames, threads, clears and switches, the oracle
+(`parse-check`), the parse digests of the three builds, the memory check, the cut streams, the
+host checks of the shaders. `rust-equal` now needs `rust-conformance` and holds the default
+against the C++ decoder (above); of the MEMORY lines it holds the pools next to the C++ decoder's
+shares (`memory_lines.py pools`) in place of their equality with `-parser c`.
+
+**Gates**, locally (wine on lavapipe, the 244 vectors of AOM; the oracle on Linux):
+
+- The frames are those of the references: the defaults, `-parseframes 2 -t 2`, `-parseframes 4 -t
+  8`, `-parseopt poolwait -parseframes 2 -t 2`, through `rav1g.h` (`-capi`), and `-poisonbuf
+  -parseframes 2 -t 2`: 244 of 244 each. The 4K 10-bit cut with the defaults, with one frame in
+  parse and with `-slots 4`; the 1080p stream with eight tiles; the lossless stream.
+- The oracle, built with the entropy decoder as before: 244 of 244 streams equal, also with
+  `-frames 2 -threads 4`.
+- The unit tests: 51 (43 before): the ports of `libaom.rs` (the tables against known entries of
+  the sources, a wedge mask and its complement, the shears of a model, the filter levels with
+  deltas and segments, the restoration units) and of `obu.rs` (an OBU header and its errors, the
+  output rule with layers and operating points, the stream info of a written sequence header).
+- A build without link time optimisation links: no symbol of `libav1` is referenced.
+
+**Left** after this step (each is a memory or a tidiness item; none changes a frame):
+
+- The frame buffer bound at the recording (24.2 MiB at 4K; step 5's list). It did not fall out of
+  this step: the references of a frame in parse would have to be resolved at the recording, through
+  every error path of step 4, and the removal of the shares does not touch that.
+- The block index list of a slot as a fourth pool (12 MiB at 4K with three slots). Not touched
+  either: it is laid out by the position of a tile, and a block's indexes must follow each other.
+- The palette buffer of a slot (24.2 MiB at 4K, on first use) is still one for each slot.
+- The structs of libaom's headers that the stages read (`AV1_COMMON`, `MACROBLOCKD`), and with them
+  the 88 KB header copy of a frame in parse and the bindgen of `rav1g-sys`: a frame header and a
+  block context of the host's own.
+- The second package of a run (`.2`, the static library linked by MSVC) differed from the default
+  in what compiled the entropy decoder. There is none to compile; what is left of the difference
+  is the linker. It is still built.
+- P010 output (the plan's last item).
+
+**Console**, package 0.2.158.0 (the base 1 GiB), slow state, the owner's app not running. The md5
+set on the defaults, one launch a clip, and the timing block for `j4k40` and `d2`, each block in one
+launch behind a warm-up task ([test-player.md](test-player.md#console-the-task-lines)):
+
+```text
+-i /streams/<clip>.ivf -frate -1 -queue_size 4 -progress -nopresent -md5_frame_check
+
+-i /streams/<clip>.ivf -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime
+-i /streams/<clip>.ivf -slots 4 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime
+-i /streams/<clip>.ivf -parseframes 1 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime
+```
+
+What the guard should decide in 1 GiB for a 3840x2160 10-bit clip (the headroom is 128 MiB; about
+794 MiB should be left for the decoder, the 775 of 0.2.156 and the 19 MiB the host pool no longer
+takes; the `MEMORY headroom` lines and `Frame slots:` say what it did and with what numbers):
+
+| Line | Asked for | Device buffers | Leaves, about | Created | To expect |
+| --- | --- | ---: | ---: | --- | --- |
+| md5, no flag | 2 frames in parse, 3 slots | 646.5 | 148 | as asked | 15 of 15 as before |
+| timing, no flag | 2 frames in parse, 3 slots | 646.5 | 148 | as asked | 45 to 49 fps, as 0.2.156 |
+| `-slots 4` | 2 frames in parse, 4 slots | 695.3 | 97 | **2 frames in parse, 3 slots** (646.5) | the fps of the line above, not 19.5 |
+| `-parseframes 1` | 1 frame in parse, 2 slots | 597.6 | 197 | as asked | about 29 (`j4k40`) and 35 (`d2`) |
+
+`-parseframes 1` without `-t` has the library's two threads at 4K, which is what the `-t 2
+-parseframes 1` line of 0.2.156 had. To check first in the log of the default line: `MEMORY app
+before the decoder` (about 19 MiB less in use than with 0.2.156) and the numbers of its `MEMORY
+headroom` line. If the default should ever be given
+less than 774.5 MiB (a larger output queue, another app state), the guard creates one frame in
+parse and says so; that is then the `-parseframes 1` line.
 
 ## Licence
 
