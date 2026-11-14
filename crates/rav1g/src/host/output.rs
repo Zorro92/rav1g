@@ -456,10 +456,10 @@ unsafe fn copy_semi_planar(
             }
             let (width, height) = (src.y_crop_width as u32, src.y_crop_height as u32);
             let dispatch = |mode: u32, groups: u32, rows: u32, src_plane: usize, dst_plane: usize| {
-                // wi_count, groups, mode, hbd, src_offset, src_offset_v, src_stride, dst_offset, dst_stride,
+                // rows, groups, mode, hbd, src_offset, src_offset_v, src_stride, dst_offset, dst_stride,
                 // width, height
                 let inline = [
-                    groups * rows,
+                    rows,
                     groups,
                     mode,
                     u32::from(hbd),
@@ -472,14 +472,15 @@ unsafe fn copy_semi_planar(
                     height,
                 ];
                 commands.set_inline_constants(1, &inline, 0);
-                commands.dispatch((inline[0] + 63) >> 6, 1, 1);
+                // A thread writes eight samples of a row; a group is eight by eight threads.
+                commands.dispatch(groups.div_ceil(8), rows.div_ceil(8), 1);
             };
             if copy_luma {
-                dispatch(0, width.div_ceil(4), height, 0, 0);
+                dispatch(0, width.div_ceil(8), height, 0, 0);
             }
             if copy_chroma {
                 let (width, height) = (width.div_ceil(2), height.div_ceil(2));
-                dispatch(if is_monochrome { 2 } else { 1 }, width.div_ceil(4), height, 1, 1);
+                dispatch(if is_monochrome { 2 } else { 1 }, width.div_ceil(8), height, 1, 1);
             }
             commands.write_barrier(frame_buffers);
             perf_gpu_mark(dec, AV1_PERF_GPU_COPY_PLANE);

@@ -2070,6 +2070,9 @@ jobs:
           name: rav1g-shader-headers-${{ github.run_id }}
           path: shader-headers
 
+      # The four shaders of the semi-planar output (docs/output.md) are in this commit alone: the C++
+      # decoder has no such output, and the runs that are compared here do not take that path. Every
+      # shader the reference has must be the same here.
       - name: The shaders of this commit are those of the reference
         run: |
           set -euo pipefail
@@ -2081,7 +2084,8 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           if ! python3 testing/shader_cache/shaders.py same --reference cpp-reference/shaders/report.json \
               --candidate shader-headers/report.json --reference-name "branch cpp at ${CPP_REFERENCE_COMMIT:0:7}" \
-              --candidate-name 'this commit'; then
+              --candidate-name 'this commit' \
+              --candidate-only copy_plane_sp,copy_plane_sp_tex,film_grain_filter_sp,film_grain_filter_sp_tex; then
             echo '::error title=The shaders differ from those of the equality reference::The C++ decoder of the pinned commit of branch cpp does not have the shaders of this commit, so its output cannot be held against. If the change is on branch cpp as well, set CPP_REFERENCE_COMMIT to that commit; if the shaders of the branches diverge from here on, the comparison ends (docs/rust-port.md, "Equality reference").'
             exit 1
           fi

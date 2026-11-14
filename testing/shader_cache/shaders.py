@@ -545,8 +545,17 @@ def command_same(args):
         builds.append({shader['name']: shader for shader in report['shaders']})
     reference, candidate = builds
     different = []
+    # Shaders the candidate may have alone: those of a path the reference does not have, which the runs
+    # that are compared do not take.
+    alone = [name for name in args.candidate_only.split(',') if name]
+    for name in alone:
+        if name in reference:
+            different.append('%s: named as a shader of %s alone, but %s has it' % (
+                name, args.candidate_name, args.reference_name))
     for name in sorted(set(reference) | set(candidate)):
         a, b = reference.get(name), candidate.get(name)
+        if a is None and name in alone:
+            continue
         if a is None or b is None:
             different.append('%s: only in %s' % (name, args.candidate_name if a is None else args.reference_name))
         elif a['key'] != b['key'] and a['header_sha256'] != b['header_sha256']:
@@ -557,7 +566,10 @@ def command_same(args):
     summary = ('%d of %d shaders of %s and %s differ' % (len(different), len(set(reference) | set(candidate)),
                                                        args.reference_name, args.candidate_name)
                if different else
-               'the %d shaders of %s and %s are the same' % (len(candidate), args.reference_name, args.candidate_name))
+               'the %d shaders of %s are those of %s%s' % (
+                   len(reference), args.reference_name, args.candidate_name,
+                   ', which has %d more that the compared runs do not use (%s)' % (
+                       len([name for name in alone if name in candidate]), ', '.join(alone)) if alone else ''))
     print('shaders.py: ' + summary)
     if os.environ.get('GITHUB_STEP_SUMMARY'):
         with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
@@ -609,6 +621,8 @@ def main():
     same.add_argument('--candidate', required=True, help='report.json of the other')
     same.add_argument('--reference-name', default='the reference')
     same.add_argument('--candidate-name', default='this build')
+    same.add_argument('--candidate-only', default='',
+                      help='names, with commas between them, of shaders the candidate may have alone')
     same.set_defaults(run=command_same)
 
     args = parser.parse_args()
