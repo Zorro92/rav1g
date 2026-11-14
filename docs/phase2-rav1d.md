@@ -2326,6 +2326,41 @@ is refused with 300 MiB, the 720p one accepted).
 No tile waited in any of the four. The `d2` cut shows why the pools hold a worst case: its first
 frames take 38 MiB of coefficients.
 
+**On WARP** (run 43591295650). Everything of CI as it was, with the main set now on the new
+defaults (the 2160p streams with two frames in parse), the whole set with two frames in parse, with
+three on four threads, four on eight, two on four slots, and with `-parseopt poolwait` (the
+library's frames in parse, and two): all as `expected.txt` says. `frames_check.py`: with `poolwait`
+the 2160p stream waited 31 times for the GPU with one, two and four frames in parse (2 and 8 times
+for a frame in front with two and four), the 1080p stream 78, 78 and 260 times; the lossless
+stream waited once for the GPU by itself, with one and with two frames in parse; every frame as its
+reference. The pools next to the shares of `-parser c` (`memory_lines.py pools`), device buffers
+in MiB:
+
+| Case | Slots, shares / pools | Shares | Pools | Chunks: mode info, coefficients, records |
+| --- | --- | ---: | ---: | --- |
+| 2160p 8-bit | 2 / 3 (the default: two frames in parse) | 470.7 | 489.3 | 2040, 2103, 2040 |
+| 1080p 10-bit | 2 / 2 | 166.9 | 162.1 | 540, 556, 540 |
+| 1080p 10-bit, `-slots 4` | 4 / 4 | 248.8 | 190.3 | 540, 556, 540 |
+| 1080p 10-bit, `-slots 3 -lowmem` | 3 / 3 | 177.8 | 158.2 | 270, 448, 540 |
+| 1080p 10-bit, `-lowmemparts 0` | 2 / 2 | 173.4 | 168.6 | 540, 556, 540 |
+| 720p 8-bit | 2 / 2 | 58.9 | 56.8 | 240, 247, 240 |
+| 16x16 | 2 / 2 | 4.2 | 4.2 | 4, 5, 4 |
+| 352x288 8-bit | 2 / 2 | 11.9 | 11.6 | 36, 37, 36 |
+
+The memory check is green with the budgets it had: its comments name the sizes of the decoder
+with shares; with pools the 1080p 10-bit decoder of the credit sequence is 162.1 MiB (was 166.9),
+the 720p one 56.8 (58.9), and the 2160p 8-bit one, which must be refused, 489.3 by default and about
+452.5 (computed) with one frame in parse where the guard falls back, against budgets of 250 and 300 MiB.
+
+**Runs.** Commits `e9a7a92` (the pools, the defaults, the tools, CI, this section) and `22f54a0`
+(the order of errors). CI run 43589582666 on `e9a7a92` (number 155): all green but `rust-frames`,
+whose cut stream check found the order of errors. Run 43591295650 on `22f54a0` (number 156): all
+jobs green, 17.6 minutes for the push (`rust-frames` 13.8, `rust-cross-run-parsers` 13.7,
+`rust-conformance` 12.8, `rust-frames-threads` 9.3 with its two runs more). The packages of run
+156: `uwp_dx12_player_0.2.156.0_x64.msix` (default, the one for the console lines of
+[test-player.md](test-player.md#frames-in-parse--parseframes)), `0.2.156.2` (MSVC), `0.2.156.3`
+(`hevcPlayback`).
+
 **Left** after this step:
 
 - The frame buffer at the recording (above): 24.2 MiB at 4K, which brings the default to 622.3 MiB.

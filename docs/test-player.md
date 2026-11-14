@@ -1358,7 +1358,7 @@ With rav1d's parse a decoder can have more than one frame in parse
 the parser's threads, and a thread of the decoder records and submits them in decode order. The frames
 that come out, and their order, are the same.
 
-Since the pools ([phase2-rav1d.md](phase2-rav1d.md#step-5-the-pools), package 0.2.155.0) **a task
+Since the pools ([phase2-rav1d.md](phase2-rav1d.md#step-5-the-pools), package 0.2.156.0) **a task
 without these flags gets the library's defaults for the frame size**: one thread, one frame in parse
 and two slots up to 2560x1440; two threads, two frames in parse and three slots above (4K).
 
