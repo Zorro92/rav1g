@@ -101,6 +101,8 @@ pub struct Spec {
     pub height: u32,
     pub bit_depth: u32,
     pub threads: u32,
+    /// -parseframes: the frames in parse; 0 is the library's default.
+    pub parse_frames: u32,
     pub slots: u32,
     /// The parts of -lowmemparts; 0 is none.
     pub low_memory: u32,
@@ -305,6 +307,7 @@ impl Library {
             height: spec.height,
             bit_depth: spec.bit_depth,
             threads: spec.threads,
+            frames_in_parse: spec.parse_frames,
             frame_slots: spec.slots,
             // The program always says which parts it wants: no part is "none", not the library's default.
             low_memory: LowMemory(spec.low_memory),
@@ -328,6 +331,7 @@ impl Library {
         settings.height = spec.height;
         settings.bit_depth = spec.bit_depth;
         settings.threads = spec.threads;
+        settings.frames_in_parse = spec.parse_frames;
         settings.frame_slots = spec.slots;
         settings.low_memory = spec.low_memory;
         settings.intra_v2 = spec.intra_v2;
@@ -544,12 +548,50 @@ impl<S: Sink> TaskDecoder<S> {
         }
     }
 
-    /// Every frame that was submitted has been handed over.
-    pub fn drain(&mut self) {
+    /// Every frame whose parse has begun is parsed and submitted, and every frame that was submitted
+    /// has been handed over. With more than one frame in parse the error of a frame that was still in
+    /// parse when the last decode call returned, one a call: the caller drains until this is `Ok`.
+    pub fn drain(&mut self) -> Result<(), DecodeError> {
         match self {
-            TaskDecoder::Rust(decoder) => decoder.drain(),
-            // SAFETY: a decoder of rav1g_decoder_create, used by this thread.
-            TaskDecoder::C(decoder, _) => unsafe { capi::rav1g_decoder_drain(*decoder) },
+            TaskDecoder::Rust(decoder) => decoder.drain().map_err(|error| DecodeError {
+                needs_reconfigure: false,
+                text: error.to_string(),
+                detail: error.detail,
+            }),
+            TaskDecoder::C(decoder, _) => {
+                // SAFETY: a decoder of rav1g_decoder_create, used by this thread.
+                let status = unsafe { capi::rav1g_decoder_drain(*decoder) };
+                if status == Rav1gStatus::Ok {
+                    return Ok(());
+                }
+                // SAFETY: the decoder is valid.
+                let (message, detail) = unsafe {
+                    (c_text(capi::rav1g_decoder_error(*decoder)), c_text(capi::rav1g_decoder_error_detail(*decoder)))
+                };
+                let mut text = if message.is_empty() { "?".to_string() } else { message };
+                if !detail.is_empty() {
+                    text = format!("{text}: {detail}");
+                }
+                Err(DecodeError { needs_reconfigure: false, detail, text })
+            }
+        }
+    }
+
+    /// What the decoder was created with: threads, frames in parse, pipeline slots, and the bytes of its
+    /// device buffers.
+    pub fn configuration(&mut self) -> (u32, u32, u32, usize) {
+        match self {
+            TaskDecoder::Rust(decoder) => {
+                let created = decoder.configuration();
+                (created.threads, created.frames_in_parse, created.frame_slots, created.device_size)
+            }
+            TaskDecoder::C(decoder, _) => {
+                // SAFETY: numbers; all zero is a value.
+                let mut created: capi::Rav1gConfiguration = unsafe { std::mem::zeroed() };
+                // SAFETY: a decoder of rav1g_decoder_create, used by this thread; valid for writing.
+                unsafe { capi::rav1g_decoder_configuration(*decoder, &mut created) };
+                (created.threads, created.frames_in_parse, created.frame_slots, created.device_size)
+            }
         }
     }
 }

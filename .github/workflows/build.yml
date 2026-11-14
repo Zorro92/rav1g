@@ -19,8 +19,16 @@ on:
           docs/warp-decoder.md, "Paired timing of the parsers")
         type: boolean
         default: false
-  # Once a week, Monday 03:23 UTC: every job of a push, and the paired timing of the two parsers
-  # (the job parser-timing), which no push runs.
+      frames_matrix:
+        description: >
+          Also decode the conformance set with every combination of 1 to 4 frames in parse and up to 8
+          parser threads, twice each (the job frames-matrix, four jobs of about 40 minutes side by side;
+          docs/phase2-rav1d.md, "Frames in parallel")
+        type: boolean
+        default: false
+  # Once a week, Monday 03:23 UTC: every job of a push, the paired timing of the two parsers (the job
+  # parser-timing) and the whole matrix of frames in parse and threads (the job frames-matrix), which no
+  # push runs.
   schedule:
     - cron: '23 3 * * 1'
 
@@ -1531,10 +1539,236 @@ jobs:
             out/stage-dumps-cpuclear/
           if-no-files-found: warn
 
+  # Frames in parallel (docs/phase2-rav1d.md, step 4): a decoder with more than one frame in parse
+  # (-parseframes). Its frames are values: they are parsed side by side on the parser's threads and
+  # recorded and submitted in decode order by a thread of the decoder. The frames have to be those of one
+  # frame in parse, to the byte, whatever the threads do; the order of the threads is what differs from
+  # run to run, so the set runs in several combinations here and in the job below, and in all of them,
+  # twice, in the job frames-matrix (once a week and by hand).
+  rust-frames:
+    needs: [conformance-streams, rust]
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Disable newline conversion
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: rav1g-dec.exe of the rust job
+        uses: actions/download-artifact@v8
+        with:
+          name: rav1g-dec-x64-${{ github.run_id }}
+          path: out/rav1g-dec
+
+      - name: Streams from the cache
+        uses: actions/cache/restore@v6
+        with:
+          path: conformance-streams
+          key: ${{ needs.conformance-streams.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      # What a decoder is created with, the budget guard, a panic in the parse, and the time of the parse
+      # with one and with two frames in parse (testing/conformance/frames_check.py): the 2160p stream,
+      # where the library's defaults are two threads and two frames in parse, and the 1080p stream with
+      # eight tiles. A budget between the decoder of one frame in parse and that of two has to give a
+      # decoder with one frame in parse that decodes: asking for frames in parse never fails a creation.
+      - name: What is created, the budget guard, a panic in the parse, timing
+        shell: pwsh
+        run: |
+          python testing/conformance/frames_check.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/frames-check --large nf-dvbdash-d2-10b-2160p.ivf --small syn-tiles-10b-1080p.ivf
+          if ($LASTEXITCODE -ne 0) { throw "frames in parallel: exit code $LASTEXITCODE (1: a check failed, 2: a run could not be done)" }
+
+      # The whole set with two frames in parse on two threads, which is what the library gives a 4K
+      # stream by default: the results of expected.txt.
+      - name: Conformance with two frames in parse (-parseframes 2 -t 2)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/conformance-frames2 --threads 2 "--tool-args=-parseframes 2" "--title=rav1g-dec with -parseframes 2 -t 2"
+          if ($LASTEXITCODE -ne 0) { throw "conformance with -parseframes 2: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
+          if (-not (Select-String -Path out/conformance-frames2/lists/run001.log -Pattern 'frames in parse 2 \(asked 2\), slots 4' -Quiet)) {
+            throw 'the decoders of the run with -parseframes 2 do not say that they have two frames in parse and four slots'
+          }
+
+      # A decode error with frames in parse (testing/conformance/cut_tile_check.py --frames-in-parse): the
+      # error comes back from a later call or from the drain; the frames before the damage and from the
+      # next key frame on are right, a frame that depends on a failed one fails, nothing hangs, no device
+      # is lost. With two and with three frames in parse, also through rav1g.h.
+      - name: Decode error in the middle of a stream with frames in parse
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $failed = @()
+          python testing/conformance/cut_tile_check.py --tool out/rav1g-dec/rav1g-dec.exe --frames-in-parse 2 `
+            --streams conformance-streams --out out/cut-tile-frames
+          if ($LASTEXITCODE -ne 0) { $failed += "two frames in parse: exit code $LASTEXITCODE" }
+          python testing/conformance/cut_tile_check.py --tool out/rav1g-dec/rav1g-dec.exe --frames-in-parse 3 `
+            --streams conformance-streams --out out/cut-tile-frames
+          if ($LASTEXITCODE -ne 0) { $failed += "three frames in parse: exit code $LASTEXITCODE" }
+          python testing/conformance/cut_tile_check.py --tool out/rav1g-dec/rav1g-dec.exe "--tool-args=-capi" --frames-in-parse 2 `
+            --streams conformance-streams --out out/cut-tile-frames
+          if ($LASTEXITCODE -ne 0) { $failed += "two frames in parse through rav1g.h: exit code $LASTEXITCODE" }
+          if ($failed.Count) { throw "decode error check with frames in parse: $($failed -join '; ') (1: a check failed, 2: the check could not be done)" }
+
+      # The stage dumps with two frames in parse, which the rust-parsers-equal job holds against those
+      # of one frame in parse byte for byte: every list the stages read and every frame buffer behind
+      # every stage.
+      - name: Stage dumps with two frames in parse
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/stage_dump/ci_dumps.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --tasks testing/conformance/dump_tasks.txt --out out/stage-dumps-frames2 --threads 4 "--tool-args=-parseframes 2"
+          if ($LASTEXITCODE -ne 0) { throw "stage dumps with -parseframes 2: exit code $LASTEXITCODE" }
+
+      # The memory check with two frames in parse: what the decoder takes comes back, also the thread that
+      # submits the frames and the copies of the frames' headers, and the budget guard decides as it does
+      # with one (a decoder that does not fit with four slots is tried with two).
+      - name: Memory check with two frames in parse
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/memory_check.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/memory-check-frames2 "--tool-args=-parseframes 2 -t 2" "--title=rav1g-dec (cargo, MSVC) with -parseframes 2 -t 2"
+          if ($LASTEXITCODE -ne 0) { throw "memory check with -parseframes 2: exit code $LASTEXITCODE" }
+
+      - name: Preserve the results, the per-stream logs, the md5 files and the stage dumps of frames in parallel
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-dec-frames-${{ github.run_id }}
+          path: |
+            out/frames-check/
+            out/conformance-frames2/
+            out/cut-tile-frames/
+            out/stage-dumps-frames2/
+            out/memory-check-frames2/
+          if-no-files-found: warn
+
+  # More combinations of frames in parse and threads, next to the job above: three frames on four
+  # threads, four on eight, and two on three with three slots, where a frame waits for the slot of the
+  # frame before it (the gate of the slots).
+  rust-frames-threads:
+    needs: [conformance-streams, rust]
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Disable newline conversion
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: rav1g-dec.exe of the rust job
+        uses: actions/download-artifact@v8
+        with:
+          name: rav1g-dec-x64-${{ github.run_id }}
+          path: out/rav1g-dec
+
+      - name: Streams from the cache
+        uses: actions/cache/restore@v6
+        with:
+          path: conformance-streams
+          key: ${{ needs.conformance-streams.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Conformance with three and four frames in parse, and with two on three slots
+        shell: pwsh
+        run: |
+          $runs = @(@{ name = 'frames3-t4'; threads = 4; args = '-parseframes 3'; says = 'frames in parse 3 \(asked 3\), slots 4' },
+            @{ name = 'frames4-t8'; threads = 8; args = '-parseframes 4'; says = 'frames in parse 4 \(asked 4\), slots 4' },
+            @{ name = 'frames2-t3-slots3'; threads = 3; args = '-parseframes 2 -slots 3'; says = 'frames in parse 2 \(asked 2\), slots 3' })
+          $failed = @()
+          foreach ($run in $runs) {
+            python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+              --out "out/conformance-$($run.name)" --threads $run.threads "--tool-args=$($run.args)" `
+              "--title=rav1g-dec with $($run.args) -t $($run.threads)"
+            if ($LASTEXITCODE -ne 0) { $failed += "$($run.args) -t $($run.threads): exit code $LASTEXITCODE" }
+            if (-not (Select-String -Path "out/conformance-$($run.name)/lists/run001.log" -Pattern $run.says -Quiet)) {
+              $failed += "$($run.args) -t $($run.threads): the decoders of the run do not say what they were to have"
+            }
+          }
+          if ($failed.Count) { throw "conformance with frames in parse: $($failed -join '; ') (1: not as expected.txt says, 2: the run could not be done)" }
+
+      - name: Preserve the results and the per-stream logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-dec-frames-threads-${{ github.run_id }}
+          path: out/conformance-*/
+          if-no-files-found: warn
+
+  # Every combination of frames in parse and parser threads, twice each (docs/phase2-rav1d.md, step 4:
+  # "one to four frames in parse and one to eight workers, equal md5 in every combination, run
+  # repeatedly"). Once a week and when the workflow is started with the frames_matrix input: four jobs
+  # side by side, one for each number of frames in parse, with the thread counts that have room for it.
+  frames-matrix:
+    needs: [conformance-streams, rust]
+    if: ${{ github.event_name == 'schedule' || inputs.frames_matrix }}
+    runs-on: windows-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        frames: [1, 2, 3, 4]
+    steps:
+      - name: Disable newline conversion
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: rav1g-dec.exe of the rust job
+        uses: actions/download-artifact@v8
+        with:
+          name: rav1g-dec-x64-${{ github.run_id }}
+          path: out/rav1g-dec
+
+      - name: Streams from the cache
+        uses: actions/cache/restore@v6
+        with:
+          path: conformance-streams
+          key: ${{ needs.conformance-streams.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Conformance with ${{ matrix.frames }} frame(s) in parse on every number of threads, twice
+        shell: pwsh
+        run: |
+          $frames = ${{ matrix.frames }}
+          $failed = @()
+          foreach ($round in 1, 2) {
+            foreach ($threads in 1..8) {
+              if ($threads -lt $frames) { continue }
+              python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+                --out "out/conformance-frames$frames-t$threads-round$round" --threads $threads "--tool-args=-parseframes $frames" `
+                "--title=rav1g-dec with -parseframes $frames -t $threads, round $round"
+              if ($LASTEXITCODE -ne 0) { $failed += "-parseframes $frames -t $threads, round ${round}: exit code $LASTEXITCODE" }
+            }
+          }
+          if ($failed.Count) { throw "the matrix of frames in parse and threads: $($failed -join '; ') (1: not as expected.txt says, 2: the run could not be done)" }
+
+      - name: Preserve the results and the per-stream logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-dec-frames-matrix-${{ matrix.frames }}-${{ github.run_id }}
+          path: out/conformance-*/
+          if-no-files-found: warn
+
   # What the jobs above wrote, held against each other; no decoder runs here. It runs also when one of
   # them failed, on what that job wrote before it did.
   rust-parsers-equal:
-    needs: [rust, rust-conformance, rust-parser-c, rust-switches, rust-clears]
+    needs: [rust, rust-conformance, rust-parser-c, rust-switches, rust-clears, rust-frames]
     if: ${{ !cancelled() && needs.rust.result == 'success' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 15
@@ -1567,6 +1801,11 @@ jobs:
         with:
           name: rav1g-dec-clears-${{ github.run_id }}
           path: clears
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: rav1g-dec-frames-${{ github.run_id }}
+          path: frames
 
       - uses: actions/download-artifact@v8
         with:
@@ -1645,6 +1884,35 @@ jobs:
             tail -n 3 compare.txt
             if [ "$code" -ne 0 ]; then
               echo "::error::stage dumps of $name: the default and -cpuclear differ"
+              status=1
+            fi
+          done
+          if [ "$dumped" -eq 0 ]; then
+            echo '::error::no stage dumps of the default to hold these against'
+            status=1
+          fi
+          exit "$status"
+
+      # Frames in parallel (the run of the rust-frames job): the stage dumps of a decoder with two frames
+      # in parse against those of the default, one frame in parse, byte for byte: the frames are set up
+      # while others are in parse and recorded by another thread, from a copy of their header, and every
+      # list and every frame buffer behind every stage has to be what it is when one thread does it all
+      # in turn.
+      - name: Two frames in parse and one give the same stage dumps
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          status=0
+          dumped=0
+          for dir in default-dumps/*/; do
+            name=$(basename "$dir")
+            [ "$name" != streams ] || continue
+            dumped=$((dumped + 1))
+            code=0
+            python3 testing/stage_dump/stage_dump.py compare "$dir" "frames/stage-dumps-frames2/$name" > compare.txt 2>&1 || code=$?
+            tail -n 3 compare.txt
+            if [ "$code" -ne 0 ]; then
+              echo "::error::stage dumps of $name: one frame in parse and two differ"
               status=1
             fi
           done

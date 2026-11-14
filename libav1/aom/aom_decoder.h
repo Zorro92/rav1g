@@ -183,6 +183,10 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
 #define AV1_PARSER_OPTION_TIME_CALLS 8        /* the calls of the sink are timed (AV1_PERF_CPU_SINK_CALLS) */
 #define AV1_PARSER_OPTION_LATE_LISTS 16       /* the block lists of a tile at its end, not superblock by superblock */
 #define AV1_PARSER_OPTION_CLEAR_GRID 32       /* the mode info grid of a slot is cleared for every frame */
+#define AV1_PARSER_OPTION_TEST_PANIC 64       /* test only: the parse of the third frame panics */
+
+/* aom_codec_dec_cfg_t::frames_in_parse: the most the decoder takes. */
+#define AV1_FRAMES_IN_PARSE_MAX 4
 
 /*!\brief Initialization Configurations
  *
@@ -190,7 +194,11 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
  * decoder.
  */
 typedef struct aom_codec_dec_cfg {
-  unsigned int threads; /**< Maximum number of threads to use, default 1 */
+  /* Threads that parse: the tiles of a frame and, with frames_in_parse above
+   * 1, the frames. 0 selects the default of AV1_PARSER_RAV1D by the size the
+   * decoder is created for: 1 up to 2560x1440, 2 above; for
+   * AV1_PARSER_LIBAOM 0 is 1. At most 8. */
+  unsigned int threads;
   unsigned int width;       /**< Width */
   unsigned int height;       /**< Height */
   unsigned int bitdepth;
@@ -244,6 +252,29 @@ typedef struct aom_codec_dec_cfg {
   int parser;
   /* AV1_PARSER_OPTION_* values added up, for AV1_PARSER_RAV1D; 0 for none. */
   int parser_options;
+  /* Frames whose parse may run at the same time, for AV1_PARSER_RAV1D
+   * (docs/phase2-rav1d.md, "Frames in parallel"): 1 to
+   * AV1_FRAMES_IN_PARSE_MAX, and never more than the threads. With 1 a
+   * decode call returns when the frames of its data are parsed, recorded and
+   * submitted. With more it returns when their parse has begun: the frames
+   * are parsed on the decoder's threads next to those of the next calls, and
+   * recorded and submitted in decode order by a thread of the decoder; the
+   * output is the same, in the same order. Then
+   *  - the error of a frame comes back from a later decode call, or from the
+   *    drain (aom_codec_decode with no data), one error a call;
+   *  - the callback for the output image is called on a thread of the
+   *    decoder, not inside the decode call.
+   * 0 selects the default: 2 when the decoder is created for frames above
+   * 2560x1440 with at least 2 threads and 3 or more pipeline slots, else 1.
+   * A frame in parse holds a pipeline slot, so more frames in parse want
+   * more slots: with frame_slots 0 the decoder has 2 slots more than frames
+   * in parse, at most 4. If the budget guard (memory_available_cb) finds
+   * that the decoder with those slots does not fit, the decoder is created
+   * with one frame in parse and the slots of that (frame_slots, or 2), and
+   * says so in a "MEMORY frames in parse" log line: asking for frames in
+   * parse never makes a creation fail that would work without.
+   * av1_decoder_frames_in_parse says what a decoder has. */
+  int frames_in_parse;
   /* Memory budget guard, optional. On a console an application that goes over
    * its memory limit loses its D3D12 device for the rest of the process, so
    * the decoder asks before it allocates: at the creation, and when it

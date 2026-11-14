@@ -484,6 +484,7 @@ fn create_decoder(
         height: size.height,
         bit_depth: size.bit_depth,
         threads: task.threads as u32,
+        parse_frames: task.parse_frames as u32,
         slots: task.slots as u32,
         low_memory: task.lowmem_parts as u32,
         intra_v2: task.intrav2,
@@ -529,8 +530,23 @@ fn create_decoder(
         device_size as f64 / (1024.0 * 1024.0),
         host_size as f64 / (1024.0 * 1024.0)
     );
-    let decoder = library.create(&spec, run)?;
+    let mut decoder = library.create(&spec, run)?;
     *create_ms += ms_since(create_start);
+    // What the decoder made of the task: the library resolves a 0, and its budget guard may have
+    // created the decoder with one frame in parse where more were asked for.
+    let (threads, parse_frames, slots, device_bytes) = decoder.configuration();
+    say!(
+        "CONFIGURATION {}: threads {} (asked {}), frames in parse {} (asked {}), slots {} (asked {}); device \
+         buffers {:.1} MiB",
+        task.name,
+        threads,
+        task.threads,
+        parse_frames,
+        task.parse_frames,
+        slots,
+        task.slots,
+        device_bytes as f64 / (1024.0 * 1024.0)
+    );
     Ok(decoder)
 }
 
@@ -789,7 +805,29 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
                 break;
             }
             if let Some(mut old) = decoder.take() {
-                old.drain();
+                // With more than one frame in parse, frames of the sequence before may still fail.
+                while let Err(error) = old.drain() {
+                    if !task.continue_on_error {
+                        decode_error = format!(
+                            "decoding failed in a frame before temporal unit {}: {}",
+                            skipped + units,
+                            error.text
+                        );
+                        break;
+                    }
+                    decode_errors += 1;
+                    say!(
+                        "CONTINUE {}: decode error {} in a frame before temporal unit {}: {}; the task goes on \
+                         with a new decoder",
+                        task.name,
+                        decode_errors,
+                        skipped + units,
+                        error.text
+                    );
+                }
+                if !decode_error.is_empty() {
+                    break;
+                }
             }
             // -dumpstages: the drain has handed over the dumps of the sequence before; the frame numbers of
             // the new decoder start at 0 again, and its dumps go to files of their own.
@@ -848,7 +886,21 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     // Drain: joins the decoder's GPU completion thread, so every frame that was submitted has been handed
     // over.
     if let Some(decoder) = decoder.as_mut() {
-        decoder.drain();
+        // With more than one frame in parse, a frame that was still in parse when its decode call
+        // returned may have failed: the drain says so, one error a call.
+        while let Err(error) = decoder.drain() {
+            decode_errors += 1;
+            if task.continue_on_error {
+                say!(
+                    "CONTINUE {}: decode error {} in a frame that was in parse at the end of the stream: {}",
+                    task.name,
+                    decode_errors,
+                    error.text
+                );
+            } else if decode_error.is_empty() {
+                decode_error = format!("decoding failed in a frame that was in parse at the end: {}", error.text);
+            }
+        }
     }
     decode_ms = ms_since(decode_start);
     drop(reader);

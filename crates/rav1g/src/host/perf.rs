@@ -11,6 +11,7 @@
 //! that goes to the callback when the frame has completed on the GPU. Everything here is inert until
 //! `av1_set_perf_callback` installs a callback; it never changes what is decoded.
 
+use std::cell::Cell;
 use std::ffi::{c_int, c_void};
 use std::sync::atomic::{AtomicI32, AtomicI64, AtomicPtr, Ordering};
 
@@ -18,7 +19,7 @@ use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12Device};
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
 use super::core::commands;
-use super::types::{Av1Core, Av1PerfMaxMarks, av1_frame_thread_data};
+use super::types::{Av1Core, Av1PerfMaxMarks, av1_frame_thread_data, av1_perf_accum};
 use crate::gpu::d3d12::{com_ref, com_release, com_store, wrapped_ref};
 use crate::gpu::{Device, Queue, Readback, TimestampQueries};
 use crate::sys;
@@ -120,10 +121,47 @@ pub extern "C" fn av1_perf_ticks() -> i64 {
     if perf_enabled() { perf_now() } else { 0 }
 }
 
+thread_local! {
+    /// The timers of the frame this thread is working on, when that is not "the frame of the decoder"
+    /// (`Av1Core::perf_cur`): a decoder with more than one frame in parse, whose frames are values
+    /// (docs/phase2-rav1d.md, step 4). Null otherwise.
+    static FRAME_ACC: Cell<*mut av1_perf_accum> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+/// The timers the calls of this thread add to: those of the frame the thread was given
+/// ([`frame_timers`]), or those of the frame the decoder is building.
+///
+/// # Safety
+/// `dec` is the decoder.
+pub(crate) unsafe fn frame_acc(dec: *mut Av1Core) -> *mut av1_perf_accum {
+    let acc = FRAME_ACC.get();
+    // SAFETY: the caller's contract.
+    if acc.is_null() { unsafe { &raw mut (*dec).perf_cur } } else { acc }
+}
+
+/// Until it is dropped, the timers of this thread are `acc`: those of a frame that is a value.
+pub(crate) struct FrameTimers(*mut av1_perf_accum);
+
+/// The calls of this thread add to `acc` instead of the decoder's `perf_cur`, until the value returned
+/// is dropped. Nothing changes with null.
+///
+/// # Safety
+/// `acc` is null or valid for as long as the value returned lives; the timers of a frame are added to
+/// as atomics by every thread that works on the frame.
+pub(crate) unsafe fn frame_timers(acc: *mut av1_perf_accum) -> FrameTimers {
+    FrameTimers(FRAME_ACC.replace(acc))
+}
+
+impl Drop for FrameTimers {
+    fn drop(&mut self) {
+        FRAME_ACC.set(self.0);
+    }
+}
+
 /// A counter of the frame that is being built, which the tile threads add to as well.
 ///
 /// # Safety
-/// `counter` is a counter of the decoder's `perf_cur`, valid for `'a`.
+/// `counter` is a counter of the timers of a frame ([`frame_acc`]), valid for `'a`.
 unsafe fn counter<'a>(counter: *mut i64) -> &'a AtomicI64 {
     // SAFETY: the caller's contract; every thread uses these counters as atomics or while no other thread
     // has them (the snapshot at submit).
@@ -140,7 +178,7 @@ pub(crate) unsafe fn perf_add(dec: *mut Av1Core, id: usize, start_ticks: i64) {
         return;
     }
     // SAFETY: the caller's contract.
-    unsafe { counter(&raw mut (*dec).perf_cur.ticks[id]) }.fetch_add(perf_now() - start_ticks, Ordering::SeqCst);
+    unsafe { counter(&raw mut (*frame_acc(dec)).ticks[id]) }.fetch_add(perf_now() - start_ticks, Ordering::SeqCst);
 }
 
 /// Adds a time that was measured elsewhere, in ticks of [`perf_now`], to a CPU timer of the frame that is
@@ -150,7 +188,7 @@ pub(crate) unsafe fn perf_add(dec: *mut Av1Core, id: usize, start_ticks: i64) {
 /// `dec` is the decoder.
 pub(crate) unsafe fn perf_add_ticks(dec: *mut Av1Core, id: usize, ticks: i64) {
     // SAFETY: the caller's contract.
-    unsafe { counter(&raw mut (*dec).perf_cur.ticks[id]) }.fetch_add(ticks, Ordering::SeqCst);
+    unsafe { counter(&raw mut (*frame_acc(dec)).ticks[id]) }.fetch_add(ticks, Ordering::SeqCst);
 }
 
 /// `av1_perf_cpu_add` (`dx/av1_core.h`): [`perf_add`] for the entropy decoder.
@@ -178,7 +216,7 @@ pub(crate) unsafe fn perf_lap(dec: *mut Av1Core, id: usize, start_ticks: i64) ->
     }
     let now = perf_now();
     // SAFETY: the caller's contract.
-    unsafe { counter(&raw mut (*dec).perf_cur.ticks[id]) }.fetch_add(now - start_ticks, Ordering::SeqCst);
+    unsafe { counter(&raw mut (*frame_acc(dec)).ticks[id]) }.fetch_add(now - start_ticks, Ordering::SeqCst);
     now
 }
 
@@ -192,8 +230,9 @@ pub(crate) unsafe fn perf_add_memset(dec: *mut Av1Core, id: usize, start_ticks: 
     }
     // SAFETY: the caller's contract.
     unsafe {
-        counter(&raw mut (*dec).perf_cur.ticks[id]).fetch_add(perf_now() - start_ticks, Ordering::SeqCst);
-        counter(&raw mut (*dec).perf_cur.memset_bytes).fetch_add(bytes as i64, Ordering::SeqCst);
+        let acc = frame_acc(dec);
+        counter(&raw mut (*acc).ticks[id]).fetch_add(perf_now() - start_ticks, Ordering::SeqCst);
+        counter(&raw mut (*acc).memset_bytes).fetch_add(bytes as i64, Ordering::SeqCst);
     }
 }
 
@@ -314,9 +353,10 @@ pub(crate) unsafe fn perf_begin_command_buffer(dec: *mut Av1Core, td: *mut av1_f
         if p.collect == 0 {
             return;
         }
-        (*dec).perf_cur.t_record_start = perf_now();
-        if (*dec).perf_cur.t_frame_start == 0 {
-            (*dec).perf_cur.t_frame_start = (*dec).perf_cur.t_record_start;
+        let acc = frame_acc(dec);
+        (*acc).t_record_start = perf_now();
+        if (*acc).t_frame_start == 0 {
+            (*acc).t_frame_start = (*acc).t_record_start;
         }
 
         if queries(&*td).is_none() && p.gpu_failed == 0 {
@@ -346,7 +386,7 @@ pub(crate) unsafe fn perf_begin_command_buffer(dec: *mut Av1Core, td: *mut av1_f
         // The inter breakdown of a decoded frame, in the mode its tiles were counted with (the frame
         // setup). Its counters need no timestamps.
         if (*td).output_only == 0 {
-            (*td).perf.detail_mode = (*dec).perf_inter_mode;
+            (*td).perf.detail_mode = (*td).perf_inter_mode;
         }
         if queries(&*td).is_some() {
             (*td).perf.gpu_active = 1;

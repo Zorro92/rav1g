@@ -470,7 +470,8 @@ int AV1Decoder::DecodeOne() {
   // so for the task before; the comparison also covers a task before that ended ahead of this point.
   const bool other_decoder =
       initialized_ && (created_threads_ != params_.threads_ || created_queue_size_ != params_.player_queue_size_ ||
-                       created_slots_ != params_.slots_ || created_width_ != dec_width ||
+                       created_slots_ != params_.slots_ || created_parse_frames_ != params_.parse_frames_ ||
+                       created_width_ != dec_width ||
                        created_height_ != dec_height || created_bitdepth_ != dec_bitdepth ||
                        created_intrav2_ != params_.intrav2_ ||
                        created_interfast_ != (params_.interfast_ || params_.interfastlists_) ||
@@ -523,8 +524,13 @@ int AV1Decoder::DecodeOne() {
       cfg.output.frame = NotifyFrameReady;
       cfg.output.end_of_frames = NotifyEndOfFrames;
       cfg.packed_10x3 = params_.hdr10x3_ != 0;
-      // -slots: each slot has host memory and buffers of its own.
+      // -slots: each slot has host memory and buffers of its own. 0 with -parseframes and no -slots: the
+      // library gives the decoder the slots of its frames in parse.
       cfg.frame_slots = params_.slots_;
+      // -parseframes: the frames whose parse may run at the same time. The decoder is created with one
+      // when the slots of more do not fit what the app has left (its "MEMORY frames in parse" line).
+      static_assert(PLAYER_PARSE_FRAMES_MAX == RAV1G_FRAMES_IN_PARSE_MAX, "-parseframes out of step with rav1g.h");
+      cfg.frames_in_parse = params_.parse_frames_;
       // The same for what else decides which buffers exist: -intrav2 needs buffers of its own, -lowmem and
       // -lowmemparts leave some out or make them smaller. The player always says which parts it wants; 0 is
       // none.
@@ -570,6 +576,8 @@ int AV1Decoder::DecodeOne() {
       XB_LOGI << "MEMORY decoder size: " << dec_width << "x" << dec_height << " " << dec_bitdepth << "-bit ("
               << (params_.fitsize_ ? "fit to the stream" : "-nofitsize") << ", the stream's largest frame is "
               << si.width << "x" << si.height << " " << si.bit_depth << "-bit), slots " << params_.slots_
+              << (params_.slots_ ? "" : " (the library's for the frames in parse)") << ", frames in parse "
+              << params_.parse_frames_ << (params_.parse_frames_ ? "" : " (the library's default)")
               << ", intra_v2 buffers "
               << (params_.intrav2_ ? "yes (-intrav2)" : "no") << ", low memory parts " << params_.lowmem_parts_
               << "; device buffers " << MibString(memory.device_size) << " and up to "
@@ -594,6 +602,17 @@ int AV1Decoder::DecodeOne() {
       // the budget guard of a smaller decoder has to count it (without it a refused creation made the
       // guard refuse the next one as well, which would have fit).
       if (!init_failed) reusable_after_release_ = 0;
+      // What was created: the library resolves the defaults, and its budget guard creates the decoder
+      // with one frame in parse (and fewer slots, so smaller device buffers) where the slots of more do
+      // not fit. The numbers of the memory query above are those of the decoder that was asked for.
+      memset(&created_configuration_, 0, sizeof(created_configuration_));
+      if (!init_failed) {
+        rav1g_decoder_configuration(decoder_, &created_configuration_);
+        memory.device_size = created_configuration_.device_size;
+        XB_LOGI << "MEMORY decoder created: threads " << created_configuration_.threads << ", frames in parse "
+                << created_configuration_.frames_in_parse << ", slots " << created_configuration_.frame_slots
+                << ", device buffers " << MibString(memory.device_size);
+      }
       if (!init_failed && memory.device_size > largest_device_size_) largest_device_size_ = memory.device_size;
       if (init_failed) {
         // The text ends with the decoder's MEMORY FAILED or MEMORY REFUSED line for what could not be
@@ -610,6 +629,7 @@ int AV1Decoder::DecodeOne() {
       created_threads_ = params_.threads_;
       created_queue_size_ = params_.player_queue_size_;
       created_slots_ = params_.slots_;
+      created_parse_frames_ = params_.parse_frames_;
       created_width_ = dec_width;
       created_height_ = dec_height;
       created_bitdepth_ = dec_bitdepth;
@@ -729,8 +749,16 @@ int AV1Decoder::DecodeOne() {
   XB_LOGI << "Intra main shader: "
           << (params_.intraopt_ ? "intra_main_opt (FXC optimised, -intraopt)" : "intra_main (/Od, original)");
 
-  // -slots: fixed when the decoder was created; Start() asks for a new decoder when the value changes.
-  XB_LOGI << "Frame slots: " << params_.slots_;
+  // -slots, -parseframes, -t: fixed when the decoder was created; Start() asks for a new decoder when a
+  // value changes. What the decoder has is what the library made of them.
+  XB_LOGI << "Frame slots: " << created_configuration_.frame_slots;
+  XB_LOGI << "Frames in parse: " << created_configuration_.frames_in_parse << " on "
+          << created_configuration_.threads << " parser thread(s)"
+          << (params_.parse_frames_ == 0
+                  ? " (the library's default for the frame size)"
+                  : (static_cast<unsigned>(params_.parse_frames_) == created_configuration_.frames_in_parse
+                         ? (params_.parse_frames_ == 1 ? " (default; -parseframes for more)" : " (-parseframes)")
+                         : " (fewer than -parseframes asks for: the threads, or the slots did not fit the memory)"));
   // The decoder's size: also fixed at creation; a decoder of another size is replaced.
   XB_LOGI << "Decoder size: " << created_width_ << "x" << created_height_ << " " << created_bitdepth_ << "-bit"
           << (params_.fitsize_ ? " (fit to the stream, default)" : " (fixed, -nofitsize)");
@@ -824,7 +852,13 @@ int AV1Decoder::DecodeOne() {
         // The drain joins the decoder's completion thread, which ends with the notice that no more frames
         // come; the output queue must not take that for the end of the stream.
         reconfiguring_ = 1;
-        rav1g_decoder_drain(decoder_);
+        // With more than one frame in parse the drain returns the error of a frame that was still in
+        // parse, one a call.
+        while (rav1g_decoder_drain(decoder_) != RAV1G_STATUS_OK) {
+          ++decode_errors;
+          XB_LOGE << "aom_codec_decode error " << rav1g_decoder_error(decoder_) << " ("
+                  << rav1g_decoder_error_detail(decoder_) << ") in a frame of the sequence before";
+        }
         reconfiguring_ = 0;
         DestroyDecoder();
         // -dumpstages: the drain has handed over the dumps of the sequence before; the frame numbers of the
@@ -878,8 +912,22 @@ int AV1Decoder::DecodeOne() {
     buffer = reader.GetData();
   }
   LogMemory("before the drain");
-  // drain
-  rav1g_decoder_drain(decoder_);
+  // drain. With more than one frame in parse (-parseframes) a frame that was still in parse when its
+  // decode call returned may have failed: the drain returns such an error, one a call.
+  while (rav1g_decoder_drain(decoder_) != RAV1G_STATUS_OK) {
+    const char* detail = rav1g_decoder_error_detail(decoder_);
+    XB_LOGE << "aom_codec_decode error " << rav1g_decoder_error(decoder_);
+    ++decode_errors;
+    if (params_.continue_on_error_) {
+      XB_LOGI << "CONTINUE_ON_ERROR: decode error " << decode_errors
+              << " in a frame that was in parse at the end of the stream"
+              << ((detail && detail[0]) ? " (" : "") << ((detail && detail[0]) ? detail : "")
+              << ((detail && detail[0]) ? ")" : "");
+    } else {
+      has_error = 1;
+      output_queue_->hasFatalError_ = 1;
+    }
+  }
   LogMemory("after the drain");
   if (params_.continue_on_error_)
     XB_LOGI << "CONTINUE_ON_ERROR: " << decode_errors << " decode errors, " << units_after_error

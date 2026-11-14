@@ -684,7 +684,7 @@ pub(crate) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
         detail.init(td);
         if let Some(d) = detail.d.as_mut() {
             d.has_inter = c_int::from(do_inter);
-            let counters = &(*dec).perf_inter_tiles;
+            let counters = &td.perf_inter_tiles;
             detail.add_tiles(&counters[..counters.len().min(usize::try_from(tile_count).unwrap_or(0))]);
         }
         let mut pass = InterPass { commands, shader: std::ptr::null(), detail };

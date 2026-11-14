@@ -39,6 +39,7 @@ mod output;
 mod perf;
 mod postfilter;
 mod prediction;
+mod rav1d_frames;
 mod rav1d_host;
 mod stage_dump;
 mod tables;

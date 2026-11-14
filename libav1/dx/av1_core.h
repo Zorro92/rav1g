@@ -37,6 +37,14 @@ void av1_drain_gpu_decoder(struct Av1Core *dec);
 // in *detail that lives until the next call. crates/rav1g/src/host/rav1d_host.rs.
 int rav1g_rav1d_decode(struct Av1Core *dec, const uint8_t *data, size_t size, void *user_priv,
                        int operating_point, int output_all_layers, const char **detail);
+// The drain of such a decoder, behind av1_drain_gpu_decoder: with more than one frame in parse
+// (aom_codec_dec_cfg_t::frames_in_parse) the error of a frame that was in parse when the last decode call
+// returned, one a call, AOM_CODEC_OK when there is none (always with one frame in parse).
+int rav1g_rav1d_drain(struct Av1Core *dec, const char **detail);
+// What the decoder was created with (aom_codec_dec_cfg_t::frames_in_parse, ::threads, ::frame_slots, each
+// with its default resolved and after the budget guard's choice) and the bytes of its device buffers.
+void av1_decoder_configuration(struct Av1Core *dec, int *frames_in_parse, int *threads, int *frame_slots,
+                               size_t *device_size);
 
 int av1_decode_frame_gpu(AV1Decoder *pbi);
 

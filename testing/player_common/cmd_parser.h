@@ -34,6 +34,11 @@
 #define PLAYER_CLEARS_DECODE_THREAD 3
 #define PLAYER_SLOTS_MIN 2
 #define PLAYER_SLOTS_MAX 4
+// -parseframes: the frames whose parse may run at the same time (Rav1gSettings::frames_in_parse), 1 to
+// RAV1G_FRAMES_IN_PARSE_MAX; 0 is the library's default for the frame size. A task without the flag asks
+// for one.
+#define PLAYER_PARSE_FRAMES_DEFAULT 1
+#define PLAYER_PARSE_FRAMES_MAX 4
 // -lowmemparts: the largest value, all three reductions (AV1_LOW_MEMORY_ALL of aom/aom_decoder.h), and what
 // a task without -lowmem and -lowmemparts gets: part 1, the shared back buffer.
 #define PLAYER_LOWMEM_ALL 7
@@ -110,7 +115,13 @@ class CParameters {
     bool cdefv1_;
     bool intrav2_;
     bool intraopt_;
+    // -slots: the pipeline slots the task asks for. 0 after Parse() when the task has -parseframes and no
+    // -slots: the library then gives the decoder the slots of its frames in parse.
     int slots_;
+    // The task has -slots (set by Parse()).
+    bool slots_given_;
+    // -parseframes: the frames in parse the task asks for; 0 is the library's default.
+    int parse_frames_;
     // The effective choice after Parse(): what a frame does about the clears of its slot's grids, one of
     // PLAYER_CLEARS_*. Without a flag nothing has to be cleared; -gpuclear, -cpuclear (-asyncclear is its
     // older name) and -syncclear keep the wavefront in the slot's grid and say who clears it.

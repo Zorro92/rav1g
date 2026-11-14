@@ -25,9 +25,19 @@ corrupt tile size"), and decodes the frames behind from the references it had. T
 with both: the frames before the damage, the frames from the next key frame on, the stream behind, no
 lost device.
 
+With more than one frame in parse (--frames-in-parse N: the tasks get -parseframes N;
+docs/phase2-rav1d.md, "Frames in parallel") the decoder does the same, and an application sees it later:
+the error of a frame's parse comes back from a later decode call or from the drain, when frames behind
+the damaged one that do not depend on it may already be out. So two of the checks are put the way that
+holds there: a task that ends at its first error has at least the frames before the damage, all of them
+right, and may have right frames behind them; and a task that goes on need not have decoded a temporal
+unit behind the first error it was told about (a short stream is through by then). What is held as
+before: the words of the error, the frames before the damage, the frames from the next key frame on, the
+stream behind the damaged one, no lost device, and that nothing hangs.
+
 usage: python cut_tile_check.py --streams <conformance streams> --out <directory>
            [--tool <rav1g-dec.exe>] [--tool-args "<args>"] [--player-smoke <rav1g-dec.exe>]
-           [--parser c|rav1d]
+           [--parser c|rav1d] [--frames-in-parse N]
 
 The damaged streams are written into <streams>/cuttest and removed at the end; --out gets logs and
 md5 lists only, no stream.
@@ -108,7 +118,9 @@ def prepare(streams, parser='rav1d'):
             name, source, unit, units, what, keys,
             '' if resume is None else '; the reference is checked again from temporal unit %d' % resume))
         cases.append({'name': name, 'source': source, 'unit': unit, 'words': words, 'cut': cut, 'whole': whole,
-                      'reference': reference, 'units': units, 'resume': resume})
+                      'reference': reference, 'units': units, 'resume': resume,
+                      # The frames in front of the damaged temporal unit, where a temporal unit is a frame.
+                      'before': unit if units == len(reference) else 1})
     return cases
 
 
@@ -140,8 +152,9 @@ def check_continued(label, got, case, whole, problems):
 
 def run_tool(args, cases, problems):
     """rav1g-dec: the tasks in one process with -keep_going."""
+    several = args.frames_in_parse > 1
     out = os.path.join(args.out, 'tool' + ('-' + re.sub(r'\W+', '', args.tool_args) if args.tool_args else '') +
-                       ('-c' if args.parser == 'c' else ''))
+                       ('-c' if args.parser == 'c' else '') + ('-frames%d' % args.frames_in_parse if several else ''))
     os.makedirs(out, exist_ok=True)
     clean = '-i %s -check %s.md5 -timeout 300' % (CLEAN, CLEAN)
     tasks = []
@@ -159,7 +172,7 @@ def run_tool(args, cases, problems):
     list_path = os.path.join(args.streams, WORK, 'tool.list')
     with open(list_path, 'w', encoding='ascii') as f:
         f.write('\n'.join(tasks) + '\n')
-    parser_args = ['-parser', args.parser]
+    parser_args = ['-parser', args.parser] + (['-parseframes', str(args.frames_in_parse)] if several else [])
     command = ([os.path.abspath(args.tool), '-keep_going', '-list', '%s/tool.list' % WORK] + args.tool_args.split() +
                parser_args)
     try:
@@ -169,10 +182,13 @@ def run_tool(args, cases, problems):
     text = done.stdout.decode('utf-8', 'replace')
     with open(os.path.join(out, 'tool.log'), 'w', encoding='utf-8') as f:
         f.write(text)
-    label = os.path.basename(args.tool) + (' ' + args.tool_args if args.tool_args else '') + ' -parser ' + args.parser
+    label = os.path.basename(args.tool) + (' ' + args.tool_args if args.tool_args else '') + ' -parser ' + args.parser + \
+        (' -parseframes %d' % args.frames_in_parse if several else '')
     said = '^PARSER .*%s' % ('the parse pass of rav1d' if args.parser == 'rav1d' else 'the entropy decoder of libaom')
     if not re.search(said, text, re.M):
         problems.append('%s: the log does not say that this parser reads the streams' % label)
+    if several and not re.search(r'^CONFIGURATION .*, frames in parse %d ' % args.frames_in_parse, text, re.M):
+        problems.append('%s: no decoder of the run says that it has %d frames in parse' % (label, args.frames_in_parse))
     results = {}
     for line in text.splitlines():
         found = re.match(r'RESULT stream=(\S+) status=(\S+) frames=(\d+) matched=(\d+).* detail="(.*)"\s*$', line)
@@ -193,10 +209,17 @@ def run_tool(args, cases, problems):
         if status != 'error' or case['words'] not in detail:
             problems.append('%s: %s-cut ended as %s (%s); a decode error with "%s" was expected' % (
                 label, name, status, detail, case['words']))
-        elif frames != matched or frames < 1:
+        elif several and (matched < case['before'] or frames < matched):
+            # The error is told behind its frame: frames that do not depend on the damaged one may be out
+            # behind the right ones, and count as wrong against a reference that has the damaged frame.
+            problems.append('%s: %s-cut: %d right frames, the %d before the damage were expected (%d frames out)' % (
+                label, name, matched, case['before'], frames))
+        elif not several and (frames != matched or frames < 1):
             problems.append('%s: %s-cut: %d of the %d frames before the damage match' % (label, name, matched, frames))
         else:
-            print('%s: %s-cut: decode error "%s" behind %d right frames' % (label, name, case['words'], frames))
+            print('%s: %s-cut: decode error "%s" behind %d right frames%s' % (
+                label, name, case['words'], matched,
+                '' if frames == matched else ' (%d frames out when the error was told)' % frames))
         for behind in ('clean-behind-%s-cut' % name, 'clean-behind-%s-continue' % name):
             status, frames, matched, detail = results.get(behind, ('none', 0, 0, ''))
             if status != 'pass':
@@ -211,7 +234,7 @@ def run_tool(args, cases, problems):
                 problems.append('%s: %s ended as %s (%s) %s' % (
                     label, task, status, detail, 'without counted decode errors' if not errors else ''))
                 continue
-            if int(errors.group(2)) < 1:
+            if int(errors.group(2)) < 1 and not (several and kind == 'cut'):
                 problems.append('%s: %s decoded no temporal unit behind its first error' % (label, task))
             saved = os.path.join(args.streams, WORK, 'tool-%s-%s.md5' % (name, kind))
             if not os.path.isfile(saved):
@@ -296,6 +319,8 @@ def main():
     parser.add_argument('--tool', help='rav1g-dec.exe')
     parser.add_argument('--tool-args', default='', help='further arguments for it, e.g. "-capi"')
     parser.add_argument('--player-smoke', help='rav1g-dec.exe, for its -playersmoke')
+    parser.add_argument('--frames-in-parse', type=int, default=1,
+                        help='the tasks get -parseframes N: more than one frame in parse (with --tool)')
     parser.add_argument('--parser', choices=['c', 'rav1d'], default='rav1d',
                         help='what reads the streams (default rav1d, as the library)')
     args = parser.parse_args()

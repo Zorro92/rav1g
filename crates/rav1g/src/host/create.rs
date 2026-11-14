@@ -131,10 +131,72 @@ fn frame_slots_from_cfg(cfg: &aom_codec_dec_cfg_t) -> i32 {
     FrameThreadDataDefault.max(FrameThreadDataCount.min(cfg.frame_slots))
 }
 
+/// The most a decoder parses at once (`AV1_FRAMES_IN_PARSE_MAX`).
+const FRAMES_IN_PARSE_MAX: i32 = crate::sys::AV1_FRAMES_IN_PARSE_MAX as i32;
+/// The frame size up to which the defaults are one thread and one frame in parse
+/// (docs/phase2-rav1d.md, "How many threads"): 2560x1440. A decoder for larger frames (4K) has two
+/// threads and, where its slots fit, two frames in parse.
+const SMALL_FRAME_SAMPLES: u64 = 2560 * 1440;
+
+/// How a decoder parses: the threads, the frames in parse and the pipeline slots, with the defaults of
+/// `aom_codec_dec_cfg_t` resolved (`threads`, `frames_in_parse`, `frame_slots` of `aom/aom_decoder.h`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ParsePlan {
+    threads: i32,
+    frames: i32,
+    slots: i32,
+}
+
+impl ParsePlan {
+    /// What the configuration asks for, before the budget guard has a say.
+    fn from_cfg(cfg: &aom_codec_dec_cfg_t) -> ParsePlan {
+        let rav1d = cfg.parser == crate::sys::AV1_PARSER_RAV1D as i32;
+        let large = u64::from(cfg.width) * u64::from(cfg.height) > SMALL_FRAME_SAMPLES;
+        let threads = match cfg.threads {
+            0 if rav1d && large => 2,
+            0 => 1,
+            threads => threads.min(super::types::EntropyThreadCount as u32) as i32,
+        };
+        let frames = if !rav1d {
+            1
+        } else if cfg.frames_in_parse <= 0 {
+            // The default: a second frame in parse where the parse of one frame is what a 4K stream
+            // waits for, when there are threads for two and the slots are not fixed at two (a second
+            // frame in parse without a third slot waits for the first one).
+            if large && threads >= 2 && (cfg.frame_slots == 0 || cfg.frame_slots >= 3) { 2 } else { 1 }
+        } else {
+            cfg.frames_in_parse.min(FRAMES_IN_PARSE_MAX).min(threads)
+        };
+        ParsePlan { threads, frames, slots: Self::slots(cfg, frames) }
+    }
+
+    /// The slots of a decoder with `frames` frames in parse: what the configuration says, or by
+    /// default one for each frame in parse and two for the frames on the GPU (two keep the parse and
+    /// the GPU from waiting for each other), at most what the arrays are sized for.
+    fn slots(cfg: &aom_codec_dec_cfg_t, frames: i32) -> i32 {
+        if cfg.frame_slots != 0 || frames <= 1 {
+            frame_slots_from_cfg(cfg)
+        } else {
+            FrameThreadDataCount.min(frames + FrameThreadDataDefault)
+        }
+    }
+
+    /// The plan the budget guard falls back to when the slots of more than one frame in parse do not
+    /// fit: one frame in parse and its slots.
+    fn one_frame(self, cfg: &aom_codec_dec_cfg_t) -> ParsePlan {
+        ParsePlan { threads: self.threads, frames: 1, slots: Self::slots(cfg, 1) }
+    }
+}
+
 impl ResourceConfig {
-    /// The same for the memory query and for the creation: both must count the same allocations.
+    /// The same for the memory query and for the creation: both must count the same allocations. (The
+    /// creation may then be made with fewer slots, when the budget guard says that those of more than
+    /// one frame in parse do not fit: it takes less of everything.)
     fn from_cfg(cfg: &aom_codec_dec_cfg_t) -> ResourceConfig {
-        let gpu_pipeline_depth = frame_slots_from_cfg(cfg);
+        Self::with_slots(cfg, ParsePlan::from_cfg(cfg).slots)
+    }
+
+    fn with_slots(cfg: &aom_codec_dec_cfg_t, gpu_pipeline_depth: i32) -> ResourceConfig {
         // 0 is the default (the shared back buffer); AV1_LOW_MEMORY_NONE is how an application asks for none.
         let low_memory = if cfg.low_memory != 0 {
             cfg.low_memory & AV1_LOW_MEMORY_ALL as i32
@@ -564,6 +626,51 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
     true
 }
 
+/// What the application has left for the decoder (`memory_available_cb`), for a creation that needs
+/// `needed` bytes: the first answer, the last one and the milliseconds between them; -1 without a
+/// callback or when the callback does not know. An answer that is too small is not taken at once: the
+/// system gives the memory of released D3D12 buffers back some time after the release (a decoder that was
+/// destroyed just before this creation), so the answer is asked again for as long as it keeps growing.
+/// Bounded: AV1_MEMORY_GUARD_WAIT_MS, and AV1_MEMORY_GUARD_SETTLE_MS without a gain of 1 MiB ends it.
+///
+/// # Safety
+/// The callback is the application's and `private` what it takes.
+unsafe fn settled_budget(
+    callback: Option<unsafe extern "C" fn(*mut c_void) -> i64>,
+    private: *mut c_void,
+    needed: u64,
+) -> (i64, i64, u32) {
+    let Some(callback) = callback else {
+        return (-1, -1, 0);
+    };
+    // SAFETY: the caller's contract, for every call below.
+    let first = unsafe { callback(private) };
+    let mut available = first;
+    let mut best = available;
+    let mut waited_ms = 0u32;
+    let mut settle_ms = 0u32;
+    while available >= 0
+        && needed > available as u64
+        && waited_ms < AV1_MEMORY_GUARD_WAIT_MS
+        && settle_ms < AV1_MEMORY_GUARD_SETTLE_MS
+    {
+        std::thread::sleep(Duration::from_millis(u64::from(GUARD_POLL_MS)));
+        waited_ms += GUARD_POLL_MS;
+        // SAFETY: as above.
+        available = unsafe { callback(private) };
+        if available < 0 {
+            break;
+        }
+        if available >= best + (1 << 20) {
+            best = available;
+            settle_ms = 0;
+        } else {
+            settle_ms += GUARD_POLL_MS;
+        }
+    }
+    (first, available, waited_ms)
+}
+
 /// The bytes of the palette buffers of a decoder: one per slot, created later, when a stream needs it.
 fn deferred_device_bytes(dec: &Av1Core, rcfg: &ResourceConfig) -> usize {
     rcfg.gpu_pipeline_depth as usize * ((dec.palette_size + 255) & !255)
@@ -897,8 +1004,8 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
         let mem = Box::into_raw(mem);
         (*dec).memory = mem;
 
-        let rcfg = ResourceConfig::from_cfg(cfg);
-        (*dec).parser_threads = c_int::try_from(cfg.threads).unwrap_or(1);
+        let mut plan = ParsePlan::from_cfg(cfg);
+        let mut rcfg = ResourceConfig::with_slots(cfg, plan.slots);
         (*dec).parser_options = cfg.parser_options;
         (*dec).keep_mi_grid = c_int::from(
             cfg.parser == crate::sys::AV1_PARSER_RAV1D as c_int
@@ -909,7 +1016,6 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
         // them as buffers the GPU only reads, which every package so far has had.
         (*dec).gpu_clear_grids = c_int::from(super::frame::clears_mode() == crate::sys::AV1_CLEARS_GPU as c_int);
         (*dec).frame_slots = rcfg.gpu_pipeline_depth;
-        let frame_slots = rcfg.gpu_pipeline_depth as usize;
 
         // The decoder takes a reference of the device and of the queue the application gave.
         if let Some(device) = ID3D12Device::from_raw_borrowed(&cfg.dx12device) {
@@ -945,38 +1051,75 @@ pub unsafe extern "C" fn av1_create_gpu_decoder(gpu_dec: *mut *mut Av1Core, cfg:
         // afford.
         (*dec).memory_available_cb = cfg.memory_available_cb;
         (*dec).memory_available_priv = cfg.memory_available_priv;
+        // More than one frame in parse wants more slots than one, and a decoder with them may not fit
+        // what the application has left. That is no reason to fail: the decoder is then created with one
+        // frame in parse and the slots of that, which is what it would have been without the setting.
+        if plan.frames > 1 {
+            let (planned, _) = planned_device_bytes(dec, &rcfg);
+            let needed = planned as u64 + MEMORY_GUARD_MARGIN;
+            let (_, available, waited_ms) =
+                settled_budget((*dec).memory_available_cb, (*dec).memory_available_priv, needed);
+            let asked = if cfg.frames_in_parse <= 0 {
+                format!("{} by default for {}x{}", plan.frames, rcfg.width as u32, rcfg.height as u32)
+            } else {
+                format!("{} asked for", plan.frames)
+            };
+            if available >= 0 && needed > available as u64 {
+                let one = plan.one_frame(cfg);
+                log(
+                    false,
+                    &format!(
+                        "MEMORY frames in parse: {asked}, with {} threads and {} pipeline slots: the device \
+                         buffers of that decoder, {:.1} MiB, and the margin of {:.1} MiB do not fit the {:.1} \
+                         MiB the application has left for the decoder (asked for {waited_ms} ms). The decoder is \
+                         created with 1 frame in parse and {} slots instead",
+                        plan.threads,
+                        plan.slots,
+                        to_mib(planned as u64),
+                        to_mib(MEMORY_GUARD_MARGIN),
+                        to_mib(available as u64),
+                        one.slots
+                    ),
+                );
+                plan = one;
+                rcfg = ResourceConfig::with_slots(cfg, plan.slots);
+                (*dec).frame_slots = rcfg.gpu_pipeline_depth;
+            } else {
+                log(
+                    false,
+                    &format!(
+                        "MEMORY frames in parse: {asked}, with {} threads and {} pipeline slots: device buffers \
+                         {:.1} MiB ({})",
+                        plan.threads,
+                        plan.slots,
+                        to_mib(planned as u64),
+                        if available >= 0 {
+                            format!(
+                                "with the margin of {:.1} MiB they fit the {:.1} MiB the application has left for \
+                                 the decoder",
+                                to_mib(MEMORY_GUARD_MARGIN),
+                                to_mib(available as u64)
+                            )
+                        } else {
+                            String::from("not held against a budget: no memory_available_cb, or it does not know")
+                        }
+                    ),
+                );
+            }
+        }
+        (*dec).parser_threads = plan.threads;
+        (*dec).frames_in_parse = plan.frames;
+        let frame_slots = rcfg.gpu_pipeline_depth as usize;
         {
             let (planned, deferred) = planned_device_bytes(dec, &rcfg);
+            (*dec).device_bytes = planned;
             let callback = (*dec).memory_available_cb;
             let private = (*dec).memory_available_priv;
-            let mut available = callback.map_or(-1, |callback| callback(private));
             let needed = planned as u64 + MEMORY_GUARD_MARGIN;
-            if let Some(callback) = callback.filter(|_| available >= 0 && needed > available as u64) {
-                // Not refused at once. The system gives the memory of released D3D12 buffers back some time
-                // after the release (a decoder that was destroyed just before this creation), so the answer
-                // is asked again for as long as it keeps growing. Bounded: AV1_MEMORY_GUARD_WAIT_MS, and
-                // AV1_MEMORY_GUARD_SETTLE_MS without a gain of 1 MiB ends it.
-                let first = available;
-                let mut best = available;
-                let mut waited_ms = 0u32;
-                let mut settle_ms = 0u32;
-                while needed > available as u64
-                    && waited_ms < AV1_MEMORY_GUARD_WAIT_MS
-                    && settle_ms < AV1_MEMORY_GUARD_SETTLE_MS
-                {
-                    std::thread::sleep(Duration::from_millis(u64::from(GUARD_POLL_MS)));
-                    waited_ms += GUARD_POLL_MS;
-                    available = callback(private);
-                    if available < 0 {
-                        break;
-                    }
-                    if available >= best + (1 << 20) {
-                        best = available;
-                        settle_ms = 0;
-                    } else {
-                        settle_ms += GUARD_POLL_MS;
-                    }
-                }
+            // Not refused at once: the answer is asked again for as long as it keeps growing
+            // (`settled_budget`).
+            let (first, available, waited_ms) = settled_budget(callback, private, needed);
+            if callback.is_some() && first >= 0 && needed > first as u64 {
                 if available >= 0 {
                     log(
                         false,
@@ -1231,6 +1374,9 @@ unsafe fn destroy(dec: *mut Av1Core, log_steps: bool) {
             log_destroy_step(device, available_cb, available_priv, "start");
         }
 
+        // A decoder with more than one frame in parse: its frames in parse are submitted, and the thread
+        // that submits them ends.
+        super::rav1d_host::stop_frames(dec);
         // Joins the GPU completion thread: every frame that was submitted has completed on the GPU (the
         // thread waits for the fence of each), so nothing on the queue uses the buffers that are released
         // below.

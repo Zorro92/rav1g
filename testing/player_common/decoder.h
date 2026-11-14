@@ -345,6 +345,10 @@ class AV1Decoder {
   int created_threads_ = 0;
   int created_queue_size_ = 0;
   int created_slots_ = 0;
+  // -parseframes of the task the decoder was created for, and what the decoder then has
+  // (rav1g_decoder_configuration): its threads, frames in parse and slots.
+  int created_parse_frames_ = 0;
+  Rav1gConfiguration created_configuration_ = {};
   unsigned int created_width_ = 0;
   unsigned int created_height_ = 0;
   unsigned int created_bitdepth_ = 0;

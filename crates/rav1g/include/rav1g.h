@@ -112,6 +112,18 @@ typedef struct av1_stage_dump av1_stage_dump;
 #define RAV1G_PARSER_OPTION_CLEAR_GRID 32
 
 /*
+ For a test of the decoder, never for an application: the parse of the third frame panics, on the
+ thread that parses it, which is what a bug of the parser does. The decode call that finds it returns
+ `Rav1gStatus::Error` and the decoder decodes nothing more.
+ */
+#define RAV1G_PARSER_OPTION_TEST_PANIC 64
+
+/*
+ The most frames a decoder parses at the same time (`Rav1gSettings::frames_in_parse`).
+ */
+#define RAV1G_FRAMES_IN_PARSE_MAX 4
+
+/*
  The `Rav1gSettings::parser_options` of `rav1g_settings_default`: `RAV1G_PARSER_OPTION_NO_LF_MASKS`
  and `RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD`. An application that wants the timing as well adds
  `RAV1G_PARSER_OPTION_TIME_CALLS` to it; 0 is rav1d's parse without either.
@@ -624,12 +636,15 @@ typedef struct Rav1gSettings {
    */
   uint32_t bit_depth;
   /*
-   Tile threads.
+   The threads that parse: the tiles of a frame and, with more than one frame in parse, the frames;
+   at most 8. 0 is the default, by the frame size the decoder is created for: 1 up to 2560x1440, 2
+   above (with `RAV1G_PARSER_LIBAOM` 0 is 1).
    */
   uint32_t threads;
   /*
    Pipeline slots: frames that can be between the start of their CPU decode and the end of their GPU
-   work at the same time, 2 to 4. 0 is the default, 2. Each slot has buffers of its own.
+   work at the same time, 2 to 4. 0 is the default: 2 with one frame in parse, and with more two
+   slots more than frames in parse, at most 4. Each slot has buffers of its own.
    */
   uint32_t frame_slots;
   /*
@@ -666,6 +681,26 @@ typedef struct Rav1gSettings {
    */
   uint32_t parser_options;
   /*
+   Frames whose parse may run at the same time, with `RAV1G_PARSER_RAV1D`: 1 to
+   `RAV1G_FRAMES_IN_PARSE_MAX`, and never more than the threads. 0 is the default: 2 for a decoder
+   that is created for frames above 2560x1440 with at least 2 threads and 3 or more pipeline slots,
+   else 1.
+
+   With 1, `rav1g_decoder_decode` returns when the frames of its data are parsed, recorded and
+   submitted. With more it returns when their parse has begun; the frames are parsed on the
+   decoder's threads next to those of the next calls, and a thread of the decoder records and
+   submits them in decode order. The frames and their order are the same. What an application sees
+   of it: the error of a frame comes back from a later `rav1g_decoder_decode` or from
+   `rav1g_decoder_drain`, and `Rav1gOutput::get_image` is called on a thread of the decoder.
+
+   A frame in parse holds a pipeline slot, so more frames in parse want more slots
+   (`frame_slots`). When `memory_available` says that the decoder with those slots does not fit,
+   the decoder is created with one frame in parse and the slots of that, and says so in a "MEMORY
+   frames in parse" log line: asking for frames in parse never makes a creation fail that would
+   work without. `rav1g_decoder_configuration` says what was created.
+   */
+  uint32_t frames_in_parse;
+  /*
    The budget guard, or null. On a console an application that goes over its memory limit loses its
    D3D12 device, so with this callback the decoder asks before it allocates. The callback returns the
    bytes the decoder may still take: what the application has left of its limit, less what it is
@@ -693,7 +728,9 @@ typedef struct Rav1gMemoryRequirements {
    */
   size_t host_size;
   /*
-   Bytes of the device buffers the creation allocates.
+   Bytes of the device buffers the creation allocates: those of the decoder the settings ask for.
+   The decoder that is created may have fewer slots and take less (`Rav1gSettings::frames_in_parse`,
+   `rav1g_decoder_configuration`).
    */
   size_t device_size;
   /*
@@ -702,6 +739,31 @@ typedef struct Rav1gMemoryRequirements {
    */
   size_t device_size_deferred;
 } Rav1gMemoryRequirements;
+
+/*
+ What a decoder was created with, where its settings left the choice to it
+ (`rav1g_decoder_configuration`).
+ */
+typedef struct Rav1gConfiguration {
+  /*
+   The threads that parse (`Rav1gSettings::threads`).
+   */
+  uint32_t threads;
+  /*
+   The frames whose parse may run at the same time (`Rav1gSettings::frames_in_parse`): what the
+   settings asked for or the default, unless the budget guard found that the slots of it do not fit,
+   and then 1.
+   */
+  uint32_t frames_in_parse;
+  /*
+   The pipeline slots (`Rav1gSettings::frame_slots`).
+   */
+  uint32_t frame_slots;
+  /*
+   The bytes of the device buffers the creation allocated.
+   */
+  size_t device_size;
+} Rav1gConfiguration;
 
 /*
  What `rav1g_parse_digest_result` writes.
@@ -844,9 +906,11 @@ void rav1g_device_destroy(struct Rav1gDevice *device);
 void rav1g_log_video_memory(void *d3d12_device, const char *label);
 
 /*
- The defaults: a decoder for 8-bit 1920x1088 frames with one tile thread, two pipeline slots and the
- shared back buffer, the parse pass of rav1d as its parser (`RAV1G_PARSER_RAV1D` with
- `RAV1G_PARSER_OPTIONS_DEFAULT`), no budget guard, and no output (the application sets `output`).
+ The defaults: a decoder for 8-bit 1920x1088 frames with the shared back buffer, the parse pass of
+ rav1d as its parser (`RAV1G_PARSER_RAV1D` with `RAV1G_PARSER_OPTIONS_DEFAULT`), no budget guard, and
+ no output (the application sets `output`). Its threads, frames in parse and pipeline slots are 0, the
+ defaults for the frame size the application then sets: one thread, one frame in parse and two slots
+ up to 2560x1440; above, two threads and, where the slots fit, two frames in parse with four slots.
 
  # Safety
  `settings` is valid for writing.
@@ -881,6 +945,11 @@ enum Rav1gStatus rav1g_decoder_create(const struct Rav1gDevice *device,
  the GPU, not when they are complete; it waits when every pipeline slot is in flight, and when the
  output has no image. On an error `rav1g_decoder_error` and `rav1g_decoder_error_detail` say more.
 
+ With more than one frame in parse (`Rav1gSettings::frames_in_parse`) the call returns when the parse
+ of the unit's frames has begun, and it waits when as many frames are in parse as may be. An error is
+ then that of this unit (a header that cannot be read, a frame whose references are missing) or that of
+ a frame of an earlier call whose parse or submission failed since (when this unit has no error of its own): one error a call, the oldest first.
+
  # Safety
  `decoder` is a decoder of `rav1g_decoder_create`, used by one thread at a time; `data` is valid for
  `size` bytes.
@@ -909,13 +978,30 @@ const char *rav1g_decoder_error(const struct Rav1gDecoder *decoder);
 const char *rav1g_decoder_error_detail(const struct Rav1gDecoder *decoder);
 
 /*
- Waits for the frames in flight: every frame that was submitted has been handed to the output, then
- `Rav1gOutput::end_of_frames` is called. The decoder can go on decoding afterwards.
+ Waits for the frames in flight: every frame whose parse has begun is parsed and submitted, every frame
+ that was submitted has been handed to the output, then `Rav1gOutput::end_of_frames` is called. The
+ decoder can go on decoding afterwards.
+
+ With one frame in parse the result is `Rav1gStatus::Ok`. With more
+ (`Rav1gSettings::frames_in_parse`) it is the error of a frame that was still in parse when the last
+ `rav1g_decoder_decode` returned, if one failed (`rav1g_decoder_error`, `rav1g_decoder_error_detail`):
+ one error a call, so an application that counts them calls this until it returns `Rav1gStatus::Ok`.
 
  # Safety
  `decoder` is a decoder of `rav1g_decoder_create`, used by one thread at a time.
  */
-void rav1g_decoder_drain(struct Rav1gDecoder *decoder);
+enum Rav1gStatus rav1g_decoder_drain(struct Rav1gDecoder *decoder);
+
+/*
+ What the decoder was created with: the threads, the frames in parse and the pipeline slots, with the
+ defaults of the settings resolved and after the budget guard's choice, and the bytes of its device
+ buffers.
+
+ # Safety
+ `decoder` is a decoder of `rav1g_decoder_create`, used by one thread at a time; `configuration` is
+ valid for writing.
+ */
+void rav1g_decoder_configuration(struct Rav1gDecoder *decoder, struct Rav1gConfiguration *configuration);
 
 /*
  The frame of every spatial layer of a temporal unit is output, instead of the highest one.

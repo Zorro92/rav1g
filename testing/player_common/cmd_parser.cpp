@@ -66,8 +66,14 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        &params_.intrav2_},
       {"intraopt", atSingle, anOptional, "original intra_main shader built with FXC optimisation (same source)", "",
        &params_.intraopt_},
-      {"slots", atInt, anOptional, "decoder pipeline slots (frames in flight), 2..4. Default 2", "",
-       &params_.slots_},
+      {"slots", atInt, anOptional,
+       "decoder pipeline slots (frames in flight), 2..4. Default 2, or with -parseframes what the library gives "
+       "the frames in parse",
+       "", &params_.slots_},
+      {"parseframes", atInt, anOptional,
+       "frames whose parse may run at the same time, 1..4 and at most the threads (-t); 0: the library's default "
+       "for the frame size. Default 1 (same output)",
+       "", &params_.parse_frames_},
       {"gpuclear", atSingle, anOptional,
        "intra wavefront in the slot's grid, cleared by the GPU at the end of the frame's command list (same output)",
        "", &params_.gpuclear_},
@@ -278,6 +284,9 @@ int CParameters::Parse(one_task& args, std::string& Err) {
            (params_.nopresent_ ? " with -nopresent." : " when presenting frames.");
     return -1;
   }
+  // -slots: 0 is what Reset() leaves, and means that the task did not say.
+  params_.slots_given_ = params_.slots_ != 0;
+  if (!params_.slots_given_) params_.slots_ = PLAYER_SLOTS_DEFAULT;
   if (params_.slots_ < PLAYER_SLOTS_MIN || params_.slots_ > PLAYER_SLOTS_MAX) {
     // Refused, not clamped: a timing run must not report numbers for a slot count nobody asked for.
     char ss[96];
@@ -286,6 +295,16 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     Err += ss;
     return -1;
   }
+  if (params_.parse_frames_ < 0 || params_.parse_frames_ > PLAYER_PARSE_FRAMES_MAX) {
+    char ss[128];
+    sprintf(ss, "-parseframes %d is not allowed: 1 to %d frames in parse, or 0 for the library's default.",
+            params_.parse_frames_, PLAYER_PARSE_FRAMES_MAX);
+    Err += ss;
+    return -1;
+  }
+  // More than one frame in parse wants more slots than the two of the player's default: without -slots
+  // the library says how many (two more than frames in parse, at most 4, or what its budget guard leaves).
+  if (!params_.slots_given_ && params_.parse_frames_ != PLAYER_PARSE_FRAMES_DEFAULT) params_.slots_ = 0;
 
   if (params_.lowmem_parts_ < 0 || params_.lowmem_parts_ > PLAYER_LOWMEM_ALL) {
     char ss[96];
@@ -376,7 +395,10 @@ void CParameters::Reset() {
   params_.cdefv1_ = false;
   params_.intrav2_ = false;
   params_.intraopt_ = false;
-  params_.slots_ = PLAYER_SLOTS_DEFAULT;
+  // 0: the task has no -slots (Parse() makes the default of it).
+  params_.slots_ = 0;
+  params_.slots_given_ = false;
+  params_.parse_frames_ = PLAYER_PARSE_FRAMES_DEFAULT;
   params_.clears_ = PLAYER_CLEARS_NOT_NEEDED;
   params_.gpuclear_ = false;
   params_.cpuclear_ = false;

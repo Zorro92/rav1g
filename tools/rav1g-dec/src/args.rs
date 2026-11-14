@@ -16,6 +16,8 @@ use rav1g::switches::{self, Clears, Poison};
 pub const SLOTS_DEFAULT: i32 = 2;
 pub const SLOTS_MIN: i32 = 2;
 pub const SLOTS_MAX: i32 = 4;
+/// -parseframes: the most frames a decoder parses at the same time.
+pub const PARSE_FRAMES_MAX: i32 = 4;
 pub const LOWMEM_ALL: i32 = 7;
 pub const LOWMEM_DEFAULT: i32 = 1;
 pub const DECODER_WIDTH: u32 = 4096;
@@ -55,10 +57,19 @@ pub struct Task {
     pub wrong_limit: i32,
     /// -aom_md5: monochrome frames are hashed as aomdec --i420 writes them.
     pub aom_md5: bool,
+    /// -t: the threads that parse; 0 is the library's default for the frame size.
     pub threads: i32,
+    /// -parseframes: the frames whose parse may run at the same time; 0 is the library's default for the
+    /// frame size. This program asks for 1 unless it is told otherwise.
+    pub parse_frames: i32,
     pub limit: i32,
     pub queue_size: i32,
+    /// -slots: the pipeline slots; 0 is the library's default (2 with one frame in parse, with more two
+    /// more than frames in parse). 2 unless the task says otherwise, or says -parseframes without -slots:
+    /// then 0.
     pub slots: i32,
+    /// The task has -slots.
+    pub slots_given: bool,
     pub cdefv1: bool,
     pub cdefv2: bool,
     pub nofitsize: bool,
@@ -122,6 +133,8 @@ impl Default for Task {
             limit: -1,
             queue_size: QUEUE_SIZE_DEFAULT,
             slots: SLOTS_DEFAULT,
+            slots_given: false,
+            parse_frames: 1,
             cdefv1: false,
             cdefv2: false,
             nofitsize: false,
@@ -204,7 +217,14 @@ pub fn usage() {
     say!("                        as the player does; compare two runs with testing/stage_dump/stage_dump.py");
     say!("  -dumpdir <dir>        where -dumpstages writes (default dumps; created when it is not there)");
     say!("  -limit <n>            decode only the first n temporal units of the stream");
-    say!("  -t <n>                decoder threads (default 1)");
+    say!("  -t <n>                decoder threads: the tiles of a frame and, with -parseframes, the frames");
+    say!("                        (default 1; 0: the library's default for the frame size, 2 above 2560x1440)");
+    say!("  -parseframes <n>      frames whose parse may run at the same time, 1..4 and at most the threads");
+    say!("                        (default 1; 0: the library's default for the frame size). With more than 1");
+    say!("                        the frames are parsed side by side and submitted in decode order by a");
+    say!("                        thread of the decoder (docs/phase2-rav1d.md, \"Frames in parallel\"); the");
+    say!("                        output is the same. Without -slots the decoder then has two slots more than");
+    say!("                        frames in parse (at most 4), or what its budget guard leaves it");
     say!("  -queue_size <n>       output images in the pool, 1..{} (default {})", QUEUE_SIZE_MAX, QUEUE_SIZE_DEFAULT);
     say!("  -timeout <seconds>    give up on a task after this time (exit code {})", EXIT_TIMEOUT);
     say!("  -cdefv1 -nofitsize -lowmemparts <n> -lowmem -slots <n> -intrav2 -intraopt");
@@ -346,7 +366,11 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-t" => task.threads = number()?,
             "-queue_size" => task.queue_size = number()?,
             "-timeout" => task.timeout_s = number()?,
-            "-slots" => task.slots = number()?,
+            "-slots" => {
+                task.slots = number()?;
+                task.slots_given = true;
+            }
+            "-parseframes" => task.parse_frames = number()?,
             "-lowmemparts" => task.lowmem_parts = number()?,
             "-lowmem" => task.lowmem = true,
             "-budget" => task.budget_mib = i64::from(number()?),
@@ -433,11 +457,22 @@ pub fn check_task(task: &mut Task) -> Result<(), String> {
     if task.nofitsize && task.fitsize {
         return Err("-nofitsize and -fitsize cannot be used together".to_string());
     }
-    if task.slots < SLOTS_MIN || task.slots > SLOTS_MAX {
+    if task.slots != 0 && (task.slots < SLOTS_MIN || task.slots > SLOTS_MAX) {
         return Err(format!(
-            "-slots {} is not allowed: the decoder takes {} to {} slots",
+            "-slots {} is not allowed: the decoder takes {} to {} slots (0: the library's default)",
             task.slots, SLOTS_MIN, SLOTS_MAX
         ));
+    }
+    if task.parse_frames < 0 || task.parse_frames > PARSE_FRAMES_MAX {
+        return Err(format!(
+            "-parseframes {} is not allowed: 1 to {} frames in parse (0: the library's default)",
+            task.parse_frames, PARSE_FRAMES_MAX
+        ));
+    }
+    // More than one frame in parse wants more slots than the two of this program's default: without
+    // -slots the library says how many.
+    if !task.slots_given && task.parse_frames != 1 {
+        task.slots = 0;
     }
     if task.lowmem_parts < 0 || task.lowmem_parts > LOWMEM_ALL {
         return Err(format!(
@@ -454,7 +489,7 @@ pub fn check_task(task: &mut Task) -> Result<(), String> {
     if task.queue_size < 1 || task.queue_size > QUEUE_SIZE_MAX {
         return Err(format!("-queue_size {} is not allowed: 1 to {}", task.queue_size, QUEUE_SIZE_MAX));
     }
-    if task.threads < 1 {
+    if task.threads < 0 {
         task.threads = 1;
     }
     if !task.dumpstages.is_empty() {

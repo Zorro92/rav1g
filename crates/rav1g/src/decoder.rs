@@ -87,10 +87,29 @@ pub struct Settings {
     pub height: u32,
     /// 8 for a decoder with 8-bit frame buffers (an 8-bit stream), 10 otherwise.
     pub bit_depth: u32,
-    /// Tile threads.
+    /// The threads that parse: the tiles of a frame and, with more than one frame in parse, the frames;
+    /// at most 8. 0 is the default, by the frame size the decoder is created for: 1 up to 2560x1440, 2
+    /// above (with [`Parser::Libaom`] 0 is 1).
     pub threads: u32,
+    /// Frames whose parse may run at the same time, with [`Parser::Rav1d`]: 1 to 4, and never more than
+    /// the threads. 0 is the default: 2 for a decoder that is created for frames above 2560x1440 with at
+    /// least 2 threads and 3 or more pipeline slots, else 1.
+    ///
+    /// With 1, [`Decoder::decode`] returns when the frames of its data are parsed, recorded and
+    /// submitted. With more it returns when their parse has begun; the frames are parsed on the
+    /// decoder's threads next to those of the next calls, and a thread of the decoder records and
+    /// submits them in decode order. The frames and their order are the same. What an application sees
+    /// of it: the error of a frame comes back from a later [`Decoder::decode`] or from
+    /// [`Decoder::drain`], and [`Output::get_image`] is called on a thread of the decoder.
+    ///
+    /// A frame in parse holds a pipeline slot. With `frame_slots` 0 a decoder with more than one frame
+    /// in parse has two slots more than frames in parse, at most 4; when [`Settings::memory_available`]
+    /// says that such a decoder does not fit, the decoder is created with one frame in parse and the
+    /// slots of that. [`Decoder::configuration`] says what was created.
+    pub frames_in_parse: u32,
     /// Pipeline slots: frames that can be between the start of their CPU decode and the end of their GPU
-    /// work at the same time, 2 to 4. 0 is the default, 2. Each slot has buffers of its own.
+    /// work at the same time, 2 to 4. 0 is the default: 2 with one frame in parse. Each slot has
+    /// buffers of its own.
     pub frame_slots: u32,
     /// The memory reductions.
     pub low_memory: LowMemory,
@@ -118,14 +137,16 @@ pub struct Settings {
 }
 
 impl Default for Settings {
-    /// A decoder for 8-bit 1920x1088 frames with one tile thread, two slots and the shared back buffer,
-    /// whose parser is rav1d's parse pass with its default switches.
+    /// A decoder for 8-bit 1920x1088 frames with the shared back buffer, whose parser is rav1d's parse
+    /// pass with its default switches, and whose threads, frames in parse and slots are the defaults for
+    /// its frame size: one thread, one frame in parse and two slots at this size.
     fn default() -> Settings {
         Settings {
             width: 1920,
             height: 1088,
             bit_depth: 8,
-            threads: 1,
+            threads: 0,
+            frames_in_parse: 0,
             frame_slots: 0,
             low_memory: LowMemory::default(),
             intra_v2: false,
@@ -140,13 +161,30 @@ impl Default for Settings {
     }
 }
 
+/// What a decoder was created with, where its settings left the choice to it ([`Decoder::configuration`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Configuration {
+    /// The threads that parse ([`Settings::threads`]).
+    pub threads: u32,
+    /// The frames whose parse may run at the same time ([`Settings::frames_in_parse`]): what the settings
+    /// asked for or the default, unless the budget guard found that the slots of it do not fit, and then
+    /// 1.
+    pub frames_in_parse: u32,
+    /// The pipeline slots ([`Settings::frame_slots`]).
+    pub frame_slots: u32,
+    /// The bytes of the device buffers the creation allocated.
+    pub device_size: usize,
+}
+
 /// What a decoder of some settings takes.
 #[derive(Clone, Copy, Debug)]
 pub struct MemoryRequirements {
     /// Bytes of host memory, which the decoder allocates at creation, before it asks the budget guard:
     /// the pool of the entropy decoder and the decoder itself.
     pub host_size: usize,
-    /// Bytes of the device buffers the creation allocates.
+    /// Bytes of the device buffers the creation allocates: those of the decoder the settings ask for.
+    /// The decoder that is created may have fewer slots and take less
+    /// ([`Settings::frames_in_parse`], [`Decoder::configuration`]).
     pub device_size: usize,
     /// Bytes of the device buffers that are only created when a stream needs them: one palette buffer per
     /// slot.
@@ -167,6 +205,7 @@ impl Settings {
         cfg.host_size = 0;
         cfg.tryHDR10x3 = c_int::from(self.packed_10x3);
         cfg.frame_slots = self.frame_slots as c_int;
+        cfg.frames_in_parse = self.frames_in_parse as c_int;
         cfg.intra_v2 = c_int::from(self.intra_v2);
         cfg.inter_fast = c_int::from(self.inter_fast);
         cfg.low_memory = self.low_memory.to_raw();
@@ -397,6 +436,12 @@ impl Decoder {
     ///
     /// The call returns when the frames of the unit are recorded and submitted to the GPU, not when they
     /// are complete; it waits when every pipeline slot is in flight, and when the output has no image.
+    ///
+    /// With more than one frame in parse ([`Settings::frames_in_parse`]) it returns when the parse of the
+    /// unit's frames has begun, and it waits when as many frames are in parse as may be. An error is
+    /// then that of this unit (a header that cannot be read, a frame whose references are missing) or
+    /// that of a frame of an earlier call whose parse or submission failed since (when this unit has no error of its own): one error a call,
+    /// the oldest first.
     pub fn decode(&mut self, data: &[u8], user_data: u64) -> Result<(), Error> {
         // SAFETY: data is valid for data.len() bytes for the duration of the call; the user value is
         // carried, never followed.
@@ -406,11 +451,39 @@ impl Decoder {
         self.check(code)
     }
 
-    /// Waits for the frames in flight: every frame that was submitted has been handed to the output, then
-    /// [`Output::end_of_frames`] is called. The decoder can go on decoding afterwards.
-    pub fn drain(&mut self) {
+    /// Waits for the frames in flight: every frame whose parse has begun is parsed and submitted, every
+    /// frame that was submitted has been handed to the output, then [`Output::end_of_frames`] is called.
+    /// The decoder can go on decoding afterwards.
+    ///
+    /// With one frame in parse the result is always `Ok`. With more ([`Settings::frames_in_parse`]) it is
+    /// the error of a frame that was still in parse when the last [`Self::decode`] returned, if one
+    /// failed: one error a call, so an application that counts them calls this until it is `Ok`.
+    pub fn drain(&mut self) -> Result<(), Error> {
         // SAFETY: a NULL buffer of size 0 is the drain call of the interface.
-        unsafe { sys::aom_codec_decode(&mut *self.ctx, std::ptr::null(), 0, std::ptr::null_mut()) };
+        let code = unsafe { sys::aom_codec_decode(&mut *self.ctx, std::ptr::null(), 0, std::ptr::null_mut()) };
+        self.check(code)
+    }
+
+    /// What the decoder was created with: the threads, the frames in parse and the slots, with the
+    /// defaults of the settings resolved and after the budget guard's choice, and its device buffers.
+    pub fn configuration(&mut self) -> Configuration {
+        let (mut frames_in_parse, mut threads, mut frame_slots, mut device_size) = (1, 1, 2, 0);
+        // SAFETY: the context is valid; the four are written.
+        unsafe {
+            sys::av1_codec_get_configuration(
+                &mut *self.ctx,
+                &mut frames_in_parse,
+                &mut threads,
+                &mut frame_slots,
+                &mut device_size,
+            );
+        }
+        Configuration {
+            threads: threads.max(1) as u32,
+            frames_in_parse: frames_in_parse.max(1) as u32,
+            frame_slots: frame_slots.max(0) as u32,
+            device_size,
+        }
     }
 
     /// The frame of every spatial layer of a temporal unit, instead of the highest one.

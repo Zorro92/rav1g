@@ -124,6 +124,23 @@ pub extern "C" fn rav1g_rav1d_decode(
     crate::sys::AOM_CODEC_ERROR as c_int
 }
 
+/// The drain of such a decoder, of which this program has none.
+#[unsafe(no_mangle)]
+pub extern "C" fn rav1g_rav1d_drain(_dec: *mut Av1Core, _detail: *mut *const std::ffi::c_char) -> c_int {
+    crate::sys::AOM_CODEC_OK as c_int
+}
+
+/// What a decoder was created with: nothing is asked of this program's.
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_decoder_configuration(
+    _dec: *mut Av1Core,
+    _frames_in_parse: *mut c_int,
+    _threads: *mut c_int,
+    _frame_slots: *mut c_int,
+    _device_size: *mut usize,
+) {
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn av1_sequence_fits_decoder(
     _dec: *mut Av1Core,

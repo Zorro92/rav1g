@@ -32,6 +32,11 @@ aom_codec_err_t rav1g_codec_peek_stream_info(const uint8_t *data, size_t data_si
  * aom_codec_control is a macro over a function with a variable argument list. */
 aom_codec_err_t rav1g_codec_set_output_all_layers(aom_codec_ctx_t *ctx, int enable);
 aom_codec_err_t rav1g_codec_set_operating_point(aom_codec_ctx_t *ctx, int operating_point);
+/* av1/av1_dx_iface.c: what a decoder was created with (aom_codec_dec_cfg_t::frames_in_parse, ::threads and
+ * ::frame_slots with their defaults resolved and after the budget guard's choice) and the bytes of its
+ * device buffers. Nothing is written for a context without a decoder. */
+void av1_codec_get_configuration(aom_codec_ctx_t *ctx, int *frames_in_parse, int *threads, int *frame_slots,
+                                 size_t *device_size);
 
 /* CONFIG_LOWBITDEPTH of the build, the value the player gives aom_codec_dec_cfg_t::allow_lowbitdepth. */
 int rav1g_config_lowbitdepth(void);

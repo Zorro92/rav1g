@@ -43,7 +43,7 @@
 //! for (index, unit) in units.iter().enumerate() {
 //!     decoder.decode(unit, index as u64)?;
 //! }
-//! decoder.drain();
+//! decoder.drain()?;
 //! # Ok(())
 //! # }
 //! ```
@@ -92,7 +92,9 @@ pub use color::{
     ChromaSamplePosition, ColorInfo, ColorPrimaries, ColorRange, ContentLightLevel, MasteringDisplay,
     MatrixCoefficients, TransferCharacteristics, color_text,
 };
-pub use decoder::{Decoder, LowMemory, MemoryAvailable, MemoryRequirements, Parser, ParserOptions, Settings};
+pub use decoder::{
+    Configuration, Decoder, LowMemory, MemoryAvailable, MemoryRequirements, Parser, ParserOptions, Settings,
+};
 pub use device::Device;
 pub use error::{Error, ErrorCode};
 pub use output::{Frame, ImageFormat, ImageRequest, Output, OutputImage, Plane};

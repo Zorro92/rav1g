@@ -305,6 +305,9 @@ pub unsafe extern "C" fn av1_drain_gpu_decoder(dec: *mut Av1Core) {
         if dec.is_null() {
             return;
         }
+        // With more than one frame in parse, frames may still be in parse or wait for their submission:
+        // they are submitted first.
+        super::rav1d_host::drain_frames(dec);
         let Some(thread) = (*dec).gpu_thread.take() else {
             return;
         };
@@ -344,6 +347,21 @@ pub unsafe extern "C" fn av1_drain_gpu_decoder(dec: *mut Av1Core) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rav1g_decode_sef_begin(pbi: *mut AV1Decoder, fb: *mut av1_decoded_frame_buffer_t) -> c_int {
     // SAFETY: the caller's contract.
+    unsafe { decode_sef_begin(pbi, fb, None) }
+}
+
+/// [`rav1g_decode_sef_begin`]. `output`: whether the frame is the one of its temporal unit that is
+/// output, for a caller that asked when the header was read (the question looks through the data of
+/// the decode call, which a copy that is recorded later no longer has); `None` asks here.
+///
+/// # Safety
+/// As for [`rav1g_decode_sef_begin`]; the thread that records the frames.
+pub(crate) unsafe fn decode_sef_begin(
+    pbi: *mut AV1Decoder,
+    fb: *mut av1_decoded_frame_buffer_t,
+    output: Option<bool>,
+) -> c_int {
+    // SAFETY: the caller's contract.
     unsafe {
         let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
         let cm = &raw mut (*pbi).common;
@@ -356,13 +374,13 @@ pub unsafe extern "C" fn rav1g_decode_sef_begin(pbi: *mut AV1Decoder, fb: *mut a
             return -1;
         }
         // Not the frame of its temporal unit that is output: a frame of a higher spatial layer follows.
-        if av1_frame_is_output(pbi) == 0 {
+        if !output.unwrap_or_else(|| av1_frame_is_output(pbi) != 0) {
             return -1;
         }
 
         let perf_t = av1_perf_ticks();
         if perf_t != 0 {
-            let acc = &mut (*dec).perf_cur;
+            let acc = &mut *super::perf::frame_acc(dec);
             acc.t_frame_start = perf_t;
             acc.is_sef = 1;
             acc.show_frame = 1;

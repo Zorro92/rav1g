@@ -122,6 +122,14 @@ aom_codec_err_t av1_codec_query_memory_requirements(aom_codec_dec_cfg_t *cfg)
     return AOM_CODEC_OK;
 }
 
+void av1_codec_get_configuration(aom_codec_ctx_t *ctx, int *frames_in_parse, int *threads, int *frame_slots,
+                                 size_t *device_size)
+{
+    aom_codec_alg_priv_t *priv = ctx ? (aom_codec_alg_priv_t *)ctx->priv : NULL;
+    if (priv && priv->gpu_decoder)
+        av1_decoder_configuration(priv->gpu_decoder, frames_in_parse, threads, frame_slots, device_size);
+}
+
 static aom_codec_err_t decoder_init(aom_codec_ctx_t *ctx,
                                     aom_codec_priv_enc_mr_cfg_t *data) {
   // This function only allocates space for the aom_codec_alg_priv_t
@@ -183,7 +191,7 @@ static aom_codec_err_t decoder_init(aom_codec_ctx_t *ctx,
 
     priv->pbi->common.options = &priv->cfg.cfg;
     priv->pbi->allow_lowbitdepth = priv->cfg.allow_lowbitdepth;
-    priv->pbi->max_threads = AOMMIN(8, priv->cfg.threads);
+    priv->pbi->max_threads = AOMMAX(1, AOMMIN(8, priv->cfg.threads));
     priv->pbi->inv_tile_order = priv->invert_tile_order;
     priv->pbi->common.large_scale_tile = priv->tile_mode;
     priv->pbi->common.is_annexb = priv->is_annexb;
@@ -416,6 +424,14 @@ static aom_codec_err_t decoder_decode(aom_codec_alg_priv_t *ctx,
     ctx->flushed = 1;
     if (ctx->gpu_decoder) {
         av1_drain_gpu_decoder(ctx->gpu_decoder);
+        // With more than one frame in parse, a frame that was in parse when the last decode call returned
+        // may have failed: the drain says so, one error a call.
+        if (ctx->cfg.parser == AV1_PARSER_RAV1D) {
+          const char *detail = NULL;
+          res = (aom_codec_err_t)rav1g_rav1d_drain(ctx->gpu_decoder, &detail);
+          if (res != AOM_CODEC_OK) set_error_detail(ctx, detail);
+          return res;
+        }
     }
     return AOM_CODEC_OK;
   }

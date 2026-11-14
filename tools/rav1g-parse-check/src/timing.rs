@@ -166,8 +166,10 @@ pub fn run(path: &Path, threads: u16, frames_in_parse: u16, options: ParseOption
         let start = Instant::now();
         parser.wait();
         total += start.elapsed();
-        // The arena of a frame is made ready inside `send`: that time is the host's, not the sink's.
-        let total = total.saturating_sub(parser.arena_time());
+        // The arena of a frame is made ready inside `send`: that time is the host's, not the sink's. With
+        // more than one frame in parse it runs next to the parse of the other frames, so it is not time
+        // the parse took, and it stays in: the number is then the wall time of the stream, a frame.
+        let total = if frames_in_parse > 1 { total } else { total.saturating_sub(parser.arena_time()) };
         if total < with_sink {
             with_sink = total;
             block_lists = Duration::from_nanos(parser.block_list_nanos());

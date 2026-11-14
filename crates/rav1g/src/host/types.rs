@@ -310,6 +310,12 @@ pub struct av1_frame_thread_data {
     pub gm_warp: [c_int; 8],
     pub perf_markers: [i64; 16],
     pub perf: av1_perf_td,
+    /// The counters of the tile threads for the inter breakdown (-gputimedetail), one set per tile of
+    /// the slot's frame, and the mode they are counted in (0: not counted). Each tile thread writes the
+    /// counters of its tile (`setup_tile` hands them out); the thread that records the frame reads the
+    /// vector when the tiles are done. They are the frame's, so they are in its slot.
+    pub perf_inter_tiles: Vec<av1_perf_inter_tile>,
+    pub perf_inter_mode: c_int,
     pub dump_active: c_int,
     pub dump_count: c_int,
     pub dump_is_sef: c_int,
@@ -386,9 +392,12 @@ pub struct Av1Core {
     pub frame_thread_data: [av1_frame_thread_data; 4],
     pub frame_slots: c_int,
     pub output_thread_data: [av1_frame_thread_data; 2],
+    /// The slot (or output context) of the frame that is being recorded, for the stages; with one
+    /// frame in parse at a time it is the frame's from its setup on. A decoder with more than one frame
+    /// in parse (`frames_in_parse`) has it only while a frame is recorded: the frames in parse are
+    /// values of the parser's host (docs/phase2-rav1d.md, step 4).
     pub curr_frame_data: *mut av1_frame_thread_data,
     pub frame_number: c_int,
-    pub thread_count: c_int,
     pub back_buffer1: HwFrameBuffer,
     pub back_buffer0: HwFrameBuffer,
     pub fb_size: c_int,
@@ -422,21 +431,24 @@ pub struct Av1Core {
     pub perf_cur: av1_perf_accum,
     pub perf_gpu_freq: u64,
     pub perf_gpu_last_end: u64,
-    /// The counters of the tile threads for the inter breakdown (-gputimedetail), one set per tile of
-    /// the frame that is being decoded. Each tile thread writes the counters of its tile through
-    /// `perf_inter_tiles_base`, which the frame setup takes from the vector; the decode thread reads the
-    /// vector when the tiles are done.
-    pub perf_inter_tiles: Vec<av1_perf_inter_tile>,
-    pub perf_inter_tiles_base: *mut av1_perf_inter_tile,
-    pub perf_inter_tiles_count: c_int,
-    pub perf_inter_mode: c_int,
     /// The inter breakdown as the timing callback gets it: the completion thread's copy.
     pub perf_detail_out: Option<Box<av1_perf_inter_detail>>,
     /// The parser of phase 2 (`aom_codec_dec_cfg_t::parser`), made by the first decode call of a decoder
     /// that was created for it; none in a decoder whose parser is the entropy decoder of libaom.
     pub rav1d: Option<Box<super::rav1d_host::Rav1dHost>>,
-    /// The threads the parser may use for the tiles of a frame (`aom_codec_dec_cfg_t::threads`).
+    /// The threads the parser may use for the tiles of a frame and for the frames in parse
+    /// (`aom_codec_dec_cfg_t::threads`, with its default resolved).
     pub parser_threads: c_int,
+    /// The frames whose parse may run at the same time (`aom_codec_dec_cfg_t::frames_in_parse`, with
+    /// its default resolved and after the budget guard's choice): 1, or more for a decoder whose frames
+    /// in parse are values (`rav1d_frames.rs`).
+    pub frames_in_parse: c_int,
+    /// The frames in parse of such a decoder and the queue of their submission, for a frame that takes
+    /// its second slot (`rav1d_host::gate_second_slot`); null with one frame in parse. It is the
+    /// parser's host's, set while the parser exists.
+    pub parse_frames: *const super::rav1d_frames::Frames,
+    /// The bytes of the device buffers the creation made.
+    pub device_bytes: usize,
     /// The switches of that parser (`aom_codec_dec_cfg_t::parser_options`).
     pub parser_options: c_int,
     /// The mode info grid of a slot is not cleared for a frame of the size of the frames before it on
@@ -471,7 +483,6 @@ impl Av1Core {
             // The work items of the frames in flight and the item that ends the thread.
             (&raw mut (*dec).gpu_waiting_queue).write(Queue::with_capacity(GpuItemPoolSize + 1));
             (&raw mut (*dec).gpu_thread).write(None);
-            (&raw mut (*dec).perf_inter_tiles).write(Vec::new());
             (&raw mut (*dec).perf_detail_out).write(None);
             (&raw mut (*dec).rav1d).write(None);
             let no_edges = || WaveStore { tiles: Vec::new(), above: Vec::new(), above_end: Vec::new(), frames: 0 };
@@ -479,11 +490,13 @@ impl Av1Core {
                 (&raw mut (*dec).frame_thread_data[slot].sec_data_mutex).write(Mutex::new(()));
                 (&raw mut (*dec).frame_thread_data[slot].perf.detail).write(None);
                 (&raw mut (*dec).frame_thread_data[slot].wave).write(no_edges());
+                (&raw mut (*dec).frame_thread_data[slot].perf_inter_tiles).write(Vec::new());
             }
             for context in 0..OutputThreadDataCount as usize {
                 (&raw mut (*dec).output_thread_data[context].sec_data_mutex).write(Mutex::new(()));
                 (&raw mut (*dec).output_thread_data[context].perf.detail).write(None);
                 (&raw mut (*dec).output_thread_data[context].wave).write(no_edges());
+                (&raw mut (*dec).output_thread_data[context].perf_inter_tiles).write(Vec::new());
             }
             Some(Box::from_raw(dec))
         }

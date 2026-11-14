@@ -1,9 +1,10 @@
 # Phase 2: rav1d's parser in place of the C parser: design
 
-Status: design, written 2026-11-12, with measurements on a development machine; steps 1 to 3 of the
+Status: design, written 2026-11-12, with measurements on a development machine; steps 1 to 4 of the
 [plan](#plan) are in the tree ([Progress](#progress)): the decoder runs on either parser, chosen when it is
-created, and since the console timed them rav1d's is the default
-([Console after step 3](#console-after-step-3-rav1d-is-the-default)). Phase 1 ([rust-port.md](rust-port.md)) moved the host to Rust and kept the libaom-derived C parser;
+created, since the console timed them rav1d's is the default
+([Console after step 3](#console-after-step-3-rav1d-is-the-default)), and a decoder can have more than one
+frame in parse ([Step 4](#step-4-frames-in-parallel)). Phase 1 ([rust-port.md](rust-port.md)) moved the host to Rust and kept the libaom-derived C parser;
 phase 2 replaces that parser with the one of rav1d (<https://github.com/memorysafety/rav1d>, the Rust port
 of dav1d, BSD-2-Clause).
 
@@ -552,6 +553,11 @@ Each step leaves a decoder that works; both parsers are in the program until ste
    bindings to parser structs, `-parser`. Gates: everything of CI; console md5 set and timing; licence
    files reviewed.
 
+Behind step 6, the last item, decided 2026-11-14: **P010 output mode.** rav1g's existing single output
+pass (output copy + film grain) writes P010 (MSB-aligned, interleaved UV) into a shareable D3D12
+texture plus shared fence, for the owner's app's D3D11 path. Tone mapping is done by that app
+(decoder-neutral), not by rav1g. Until then, keep the output stage a single fused pass.
+
 Console decision points: after step 3 (is the projected parse time real, and is 4K30 reached on
 `t40x1ld`), after step 4 (is a second frame in parse worth its memory before the pool exists).
 
@@ -944,7 +950,8 @@ threads). Run 43447155433:
   parses a tile row as superblock rows that take turns, and the sink's block lists come at the end of
   each tile.
 
-**Open for step 4.**
+**Open for step 4.** (All of it is done in [Step 4](#step-4-frames-in-parallel), except the two items
+that are step 6's and the warp validity mark.)
 
 - Frames as values: the host of the sink and the sink itself keep "the frame in parse" (the slot in
   `curr_frame_data`, the header structs, the tiles' state); `frame_begin` has to hand out a frame, and
@@ -1858,7 +1865,8 @@ and the frames per second. The md5 of every frame with each, in launches of thei
 the line with `-gpuclear` are the two the console has not run, and `-gpuclear` is the one that
 says whether its processor sees what its GPU wrote into the grids.
 
-**For step 4** (frames in parallel, frames as values, slots per frame).
+**For step 4** (frames in parallel, frames as values, slots per frame; done:
+[Step 4](#step-4-frames-in-parallel)).
 
 - The edges are the frame's: memory of its slot, a stamp per frame of the slot, pointers a tile
   gets at its setup. Two frames in parse on two slots share nothing of it. When a frame becomes a
@@ -1907,11 +1915,236 @@ the two HDR metadata OBUs, and the output is the bytes it was.
   what holds when it is shown.
 - **For step 4** (frames in parallel): the description and the metadata of a frame are read from
   the `AV1_COMMON` of "the frame in parse" when its output image is taken, like everything else of
-  the frame header. They become the frame's with the rest.
+  the frame header. They become the frame's with the rest. (They have: the output image of a frame
+  takes them from the frame's copy of the header.)
 
 CI: job `colour` holds what `rav1g-dec` prints for every stream against FFmpeg's `trace_headers`
 and `ffprobe` with libdav1d, with both parsers and through both interfaces; the set has an HDR10
 stream for it (`syn-hdr10-10b-1080p.ivf`, the 254th).
+
+### Step 4: frames in parallel
+
+2026-11-14. Done: a decoder can have more than one frame in parse. Its frames are values, they are
+recorded and submitted in decode order by a thread of the decoder, and the host counts their
+references. The decoder of one frame in parse is the code it was, and still what a decoder is unless
+it is asked or sized for more.
+
+**Why.** The console on package 0.2.148.0, in its slow state: `j4k40` 33.0 ms a frame on the decode
+thread, 27.3 of it the parse, the GPU busy 18.8 ms: 29.3 frames per second. `d2` 27.0 ms, 25.1 of it
+the parse, the GPU busy 9.5 ms: 34.9 frames per second for a stream of 50, with single frames that
+take up to 195 ms to parse. The GPU has room; one thread of parse is the limit. With two frames in
+parse the parse of the frames behind a large one overlaps it, and setup and recording are no longer on
+a thread that parses.
+
+**The settings.**
+
+| Where | Threads that parse | Frames in parse | Slots |
+| --- | --- | --- | --- |
+| Rust | `Settings::threads` | `Settings::frames_in_parse` | `Settings::frame_slots` |
+| C (`rav1g.h`) | `Rav1gSettings::threads` | `Rav1gSettings::frames_in_parse` (at most `RAV1G_FRAMES_IN_PARSE_MAX`, 4) | `Rav1gSettings::frame_slots` |
+| `rav1g-dec`, test player | `-t <n>` (1 without the flag) | `-parseframes <n>` (1 without the flag) | `-slots <n>` (2 without the flag; with `-parseframes` and no `-slots`: the library's) |
+| What was created | `Decoder::configuration()`, `rav1g_decoder_configuration`; the `CONFIGURATION` line of `rav1g-dec`, `MEMORY decoder created` and `Frames in parse:` of the player |
+
+0 is the default of each, and what `Settings::default()` and `rav1g_settings_default` have, by the
+frame size the decoder is created for ([How many threads](#how-many-threads)):
+
+| Decoder created for | Threads | Frames in parse | Slots |
+| --- | ---: | ---: | ---: |
+| up to 2560x1440 | 1 | 1 | 2 |
+| above (4K) | 2 | 2, when the slots fit | 4, or 2 with one frame in parse |
+
+- Frames in parse are never more than the threads (rav1d's rule); the default is 1 where the
+  application has fixed the threads at 1 or the slots at 2.
+- A frame in parse holds a pipeline slot, so a decoder with `F` frames in parse has `F + 2` slots by
+  default, at most 4: `F` for the parse and two for the frames on the GPU.
+- **The budget guard decides.** Four slots of a 4K 10-bit decoder are 916.6 MiB of device buffers,
+  which an application with 1 GiB does not have. So at the creation the decoder asks the application's
+  callback (`memory_available`) for the decoder with the slots of its frames in parse first; if that
+  does not fit with the margin, it is created with one frame in parse and the slots of that, and says
+  so: `MEMORY frames in parse: 2 by default for 3840x2160, with 2 threads and 4 pipeline slots: the
+  device buffers of that decoder, 916.6 MiB, and the margin of 48.0 MiB do not fit the 775.5 MiB the
+  application has left for the decoder (asked for 300 ms). The decoder is created with 1 frame in
+  parse and 2 slots instead`. Asking for frames in parse never fails a creation that works without.
+  Without a callback nothing is checked, as before.
+- The memory query (`Settings::memory_requirements`, `rav1g_memory_requirements`) answers for the
+  decoder that is asked for; `configuration()` has the device buffers of the one that was created.
+
+**The design.**
+
+*Frames as values* (`crates/rav1g/src/host/rav1d_frames.rs`, and the functions that end in `_value`
+in `rav1d_host.rs`). When the parse of a frame begins (`frame_begin`, on the thread of the decode
+call, frames in decode order) the frame gets an entry: its pipeline slot, a copy of its header as the
+stages read it, memory for what its tiles write besides the buffers of the slot (the loop restoration
+units), its timers, and a reference on its own frame description and on those of its seven
+references. The reference slots it refreshes hold it from there on, so the frame behind it finds it.
+The tiles of the frame are parsed by rav1d's threads with that entry. Nothing of a frame is in "the
+current frame" of the decoder any more:
+
+| Was "the frame of the decoder" | Now |
+| --- | --- |
+| `Av1Core::curr_frame_data` in the setup of a frame, in the tiles' setup, the second share, the palette | the functions of `frame.rs` take the slot (`setup_frame_begin`, `setup_frame_coefs`, `setup_frame_end`, `setup_tile`, `second_mode_info`, `second_coefs`, `write_palette`, `release_frame`); the entry points of the entropy decoder call them with `curr_frame_data`, which a decoder with one frame in parse still has |
+| `av1_mi_push_block` found the slot through the decoder | through the tile: `av1_tile_data::frame_data` (the wavefront edges and the warp flags of the references are the slot's) |
+| the sink kept one frame's state and one `AV1Decoder` (1.2 MB) for the block lists | a place for every frame that may be in parse (`Sink::with_frames`), each with an `AV1_COMMON` (72 KB); every call of the host carries the frame's number |
+| the header structs the host fills (`fill_header`) | still one, which goes from frame to frame in decode order, so that a field a frame does not write holds what the frame before left, as with one frame in parse; a frame takes its copy (88 KB) when it is set up, and the tiles and the recording read the copy |
+| the loop restoration units in host memory of the decoder | memory of the frame's entry |
+| the timers of "the" frame (`Av1Core::perf_cur`) | the entry's; a thread that works for a frame names the frame's timers (`perf::frame_timers`) |
+| the counters of the inter breakdown | the slot's |
+| the kept mode info grid, the wavefront edges and their stamp | were the slot's already, and go with the frame's slot |
+| the shared back buffers were described at the setup | at the recording (`bind_frame_for_record`), when the frame's command list is the one that uses them |
+| the clears mode | read at the setup of each frame as before; the frame keeps it in its slot |
+
+*The ordered queue.* The entries are a queue in the order the frames began. The parse of a frame ends
+on whichever thread parsed its last part, in any order; `frame_end` only marks the entry (rav1d calls
+it with the lock of its scheduler). A thread of the decoder, the submission thread, takes the entry
+at the head of the queue when it is marked, loads the frame's header, records the stages, submits the
+command list and hands the frame to the completion thread: the functions the decode thread calls with
+one frame in parse (`decode_frame_record`, `rav1g_decode_frame_submit`). A `show_existing_frame` is an
+entry in the same queue. So the GPU gets the frames in decode order with their references complete,
+and the output is in the order of the stream. Which frame of a temporal unit is output is asked when
+the frame begins, while the data of the call is there.
+
+*References counted by the host.* A frame description has a count under a lock; an entry holds its
+frame and its seven references until the frame is submitted, the reference map holds its eight, and
+the frame buffer goes back to the pool when the last one lets go and the frame's GPU work is done, as
+before. rav1d's pictures are still not looked at.
+
+*Slots.* A frame takes a second slot when a share is full. Frames wait for each other (a frame's
+parse for the rows of its references, every frame for its turn at the submission), so a frame that
+needs a slot that later frames hold would wait for ever. The rule (`Frames::gate`): a frame behind
+the oldest frame in parse takes a slot only if one stays within reach of that oldest frame; the
+oldest takes what it asks for. With two frames in parse and four slots this holds a frame up only
+behind a frame that takes very long (the third frame behind it waits). With fewer slots than a second
+frame in parse needs, the second waits for the first: any number of frames in parse works with any
+number of slots.
+
+*Errors.* With one frame in parse nothing changed ([A damaged stream](#step-3-2026-11-13)). With
+more:
+
+- A frame whose parse fails returns its slot and is not submitted, and its frame description gets a
+  mark. **A frame that references a failed frame fails**: an entry is recorded only if its own parse
+  was good and none of its references has the mark, which is known by then, because the frames before
+  it in the queue are through. rav1d goes on parsing such a frame; the host does not give it to the
+  GPU.
+- The slots a failed frame refreshed hold a failed frame, which counts as an empty slot. A frame that
+  names such a slot when it begins fails at once and leaves its own slots empty too; that is what
+  becomes of them when the reference fails only later, so what a stream decodes to does not depend on
+  which happened first. (With one frame in parse a frame that is refused leaves its slots as they
+  were.) A `show_existing_frame` of a failed frame is not shown.
+- The frames of a temporal unit behind a frame whose parse fails are parsed too (the failure is not
+  known when they begin); with one frame in parse the rest of the unit is dropped.
+- **Where the error comes back.** A decode call returns its own error (a header that cannot be read,
+  a frame whose references are missing, a sequence that needs another decoder), or else the oldest
+  error of a frame of an earlier call, one a call; the drain returns what is left, one a call
+  (`Decoder::drain` returns a result now, `rav1g_decoder_drain` a status). Frames behind the damaged
+  one that do not depend on it may be out before the error is told.
+- Decoding is right again from the first frame whose references are whole, as before.
+
+*Panics.* A panic on a worker thread of rav1d is caught (`rav1d_worker_task`): the context is marked
+broken, the thread that waits for the frame is woken and gets an error, the other workers take no
+more tasks. The decode call returns `Error` ("The parser stopped with a panic") and the decoder
+decodes nothing more, as after a panic on the thread of the call. A panic of the submission thread
+does the same. The drain then ends the submission thread before the completion thread is joined:
+nothing may go to the GPU behind a completion thread that has ended. `-parseopt testpanic`
+(`RAV1G_PARSER_OPTION_TEST_PANIC`) makes the sink panic in the third frame, for the test.
+
+*The operating point.* A change (`set_operating_point`) goes to the parser with the next decode call
+(`Parser::set_operating_point`) and holds from the next sequence header on, which is where libaom and
+rav1d read it. With one frame in parse too.
+
+*An application* sees three things of more than one frame in parse: a decode call returns when the
+parse of its frames has begun; an error may be that of an earlier frame, or come from the drain; and
+the callback for the output image (`Output::get_image`, `Rav1gOutput::get_image`) is called on a
+thread of the decoder.
+
+**rav1d.** Five changes, each in `third_party/rav1d/PATCHES.md`: the lock of the scheduler is not held
+while the sink sets a frame up (upstream holds it to the end of `rav1d_submit_frame`; the setup waits
+for a slot that a frame in parse gives back, whose thread needs that lock); a `show_existing_frame`
+takes no frame context (upstream queues its picture behind the frame that had the context, so a
+stream like `d2`, which shows a hidden frame in every other temporal unit, would never have two
+frames in parse); `Parser::send` parses the data to its end without taking pictures; the panic of a
+worker; the operating point. `tilethread` with more than one frame in parse keeps upstream's signal,
+as the switch was written.
+
+**Memory.** Device buffers of a decoder, MiB (`CONFIGURATION` lines; computed from the allocation
+code as before):
+
+| Decoder | 2 slots (1 frame in parse) | 3 slots | 4 slots (2 to 4 frames in parse) |
+| --- | ---: | ---: | ---: |
+| 3840x2160 10-bit | 615.7 | 766.1 | 916.6 |
+| 1920x1080 10-bit | 166.9 | 207.9 | 248.8 |
+
+Host memory of a decoder with frames in parse: eight entries with a header copy each (0.7 MiB), the
+header the submission thread records from (1.2 MiB), an `AV1_COMMON` per frame in parse in the sink
+(72 KB; the sink's `AV1Decoder` of 1.2 MiB is gone for every decoder), and rav1d's frame contexts.
+The console (packages 0.2.150.0 and `.3`): with the default package the application has 1024 MiB and
+the four-slot 4K decoder is refused (775.5 MiB left); with `hevcPlayback` the limit is 3328 MiB in
+one heap that the device buffers and the output textures count against, the decoder is accepted and
+the application is at 1198 MiB at the first frame. So the callback of `Windows::System::MemoryManager`
+is the right input in both, and the default gives one frame in parse in 1 GiB and two under
+`hevcPlayback`.
+
+**Gates.**
+
+- *The oracle with frames in parse* (`rav1g-parse-check -frames`, Linux): rav1d with 2, 3 and 4 frames
+  in parse on 2 to 8 threads, runs of temporal units side by side, every buffer of every frame
+  against the entropy decoder of libaom: 254 of 254 streams equal in all twelve runs of CI (run
+  43567310004), and locally on the synthetic streams and 300 frames each of the 4K clips.
+- *The decoder* under wine on lavapipe, the 244 vectors of AOM: the frames are those of the
+  references with 2, 3 and 4 frames in parse on 2, 3, 4, 6 and 8 threads, with 2 and 3 slots (where a
+  frame waits for the slot of the one before it), through `rav1g.h`, and with `-poisonbuf`: 14 runs,
+  244 of 244 each. The stage dumps with 2 and with 3 frames in parse are those of one, byte for byte.
+- *Cut streams* (`cut_tile_check.py --frames-in-parse`): with 2, 3 and 4 frames in parse the frames
+  before the damage and from the next key frame on are right, a frame that depends on a failed one
+  fails, nothing hangs, no device is lost; the same counts in every round (12 errors and 11 frames
+  out on the one-tile stream followed by itself whole, 4 errors and 37 of 40 frames on the stream
+  with eight tiles).
+- *CI* (per push): `rust-frames` (what is created, the budget guard and the panic:
+  `frames_check.py`; the whole set with `-parseframes 2 -t 2`; cut streams with 2 and 3 frames in
+  parse, also through `rav1g.h`; the stage dumps with two frames in parse, which `rust-parsers-equal`
+  holds against those of one byte for byte; the memory check with two frames in parse) and
+  `rust-frames-threads` (the whole set with 3 frames on 4 threads, 4 on 8, and 2 on 3 with three
+  slots); the player's decoder code has a task with `-parseframes 2`; `parse-check` has the oracle
+  with frames in parse and the panic. Once a week and by hand (`frames_matrix`): `frames-matrix`,
+  every combination of 1 to 4 frames in parse and up to 8 threads, twice.
+
+**Timing.** The parse alone, wall time a frame of the stream (`rav1g-parse-check -time -frames`,
+no GPU, the best of three; ms):
+
+| Stream | Machine | 1 frame, 1 thread | 2 frames, 2 threads | 3 frames, 3 threads |
+| --- | --- | ---: | ---: | ---: |
+| `nf-dvbdash-d2-10b-2160p` | CI Linux runner | 13.81 | 10.81 | 10.73 |
+| `nf-dvbdash-a1-8b-2160p` | CI Linux runner | 4.47 | 4.08 | 4.07 |
+| `nf-chimera-10b-1080p` | CI Linux runner | 3.03 | 1.67 | 1.40 |
+| `d2` (the same cut) | development machine | 16.58 | 13.62 | 13.63 |
+| `j4k40`, 300 frames | development machine | 12.42 | 8.28 | 8.99 |
+
+- The CDF chain bounds it, as the design measured: 1.2 to 1.3 on the `d2` cut (30 temporal units with
+  three large frames at their start), 1.5 on `j4k40`, 1.8 on the 1080p stream. A third frame in parse
+  gains nothing on the 4K streams.
+- On WARP the stages run on the processors the parse runs on, so the time of a frame is the
+  rasteriser's; `frames_check.py` prints the timers of the 2160p stream with one and two frames in
+  parse in every run of `rust-frames`.
+- **The console decides** ([test-player.md](test-player.md#frames-in-parse--parseframes) has the task
+  lines): the md5 set with two frames in parse, the timing of one against two with one to three
+  threads on `j4k40` and `d2`, and the guard's choice in 1 GiB. With two frames in parse the timer
+  `cpu decode thread, setup to submit` is the time from the begin of a frame's setup to its
+  submission, in which it also waits for its turn; the frames per second and `cpu entropy/tile
+  decode` are the lines to read.
+
+**Left for step 5** (the pool in place of the shares).
+
+- The slots are what two frames in parse cost: 916.6 MiB of device buffers at 4K 10-bit, of which a
+  frame uses 4 to 17 MB of its two largest shares. With the pool a frame in parse takes pieces as its
+  parse proceeds, a second frame in parse costs no slot, and the default can be two frames in parse
+  at 4K in 1 GiB as well. The entry of a frame is where its pieces belong.
+- The gate of the slots goes with the second share: with a pool a parse that finds it empty waits
+  for the GPU, which is the same kind of wait with the same rule (the oldest frame in parse first).
+- The frame buffer is still bound when the parse begins; binding it at the recording (the design's
+  point 3) saves a buffer per frame in parse and belongs to the pool's accounting.
+- The grids of a slot (mode info grid, wavefront grid, block maps and indexes) stay per frame in
+  parse; whether they can be smaller is a question of step 5 as well.
+- The header structs of the entropy decoder (one that goes from frame to frame, one to record from,
+  a copy per entry) go in step 6 with the C parser.
 
 ## Licence
 

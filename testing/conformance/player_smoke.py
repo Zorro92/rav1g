@@ -35,17 +35,23 @@ import sys
 # layers with the timing run, and the HDR10 stream. The first and the last keep the wavefront of intra
 # prediction at the edges of the tiles and clear nothing (the default); the three between them keep it in
 # the grid of the slot, cleared by the GPU, by the completion thread and by the decode thread. The player
-# creates a decoder of its own for the task with -gpuclear, and another for the task behind it.
+# creates a decoder of its own for the task with -gpuclear, and another for the task behind it. The last
+# task has two frames in parse (-parseframes 2: the frames are parsed side by side and submitted in decode
+# order by a thread of the decoder; the player gives the decoder its images on that thread).
 TASKS = [
     '-i /aom/av1-1-b8-01-size-66x66.ivf -md5_frame_check -nopresent -frate -1',
     '-i /aom/av1-1-b10-00-quantizer-00.ivf -md5_frame_check -nopresent -frate -1 -t 4 -slots 3 -gpuclear',
     '-i /aom/av1-1-b8-03-sizeup.mkv -md5_frame_check -nopresent -frate -1 -t 4 -r -lowmem -cpuclear',
     '-i /aom/av1-1-b8-22-svc-L2T1.ivf -md5_frame_check -nopresent -frate -1 -gputime -syncclear',
     '-i /svt/syn-hdr10-10b-1080p.ivf -md5_frame_check -nopresent -frate -1',
+    '-i /svt/syn-tiles-10b-1080p.ivf -md5_frame_check -nopresent -frate -1 -t 4 -parseframes 2',
 ]
 # What the player says about the clears of each task, in the order of the tasks.
 CLEARS = ['Clears: none needed', 'Clears: GPU,', 'Clears: completion thread;', 'Clears: decode thread;',
-          'Clears: none needed']
+          'Clears: none needed', 'Clears: none needed']
+# What the player says about the frames in parse of each task (with -parser c a decoder has one).
+FRAMES = ['Frames in parse: 1 on 1 parser', 'Frames in parse: 1 on 4 parser', 'Frames in parse: 1 on 4 parser',
+          'Frames in parse: 1 on 1 parser', 'Frames in parse: 1 on 1 parser', 'Frames in parse: 2 on 4 parser']
 # The player's line about the colour of the HDR10 stream (rav1g_color_text of rav1g.h; docs/color.md): the
 # colour description, the mastering display and the light levels, as the stream was encoded (streams.txt).
 HDR10 = ('COLOUR frame 0: primaries 9 (BT.2020) transfer 16 (PQ) matrix 9 (BT.2020 NCL) range limited chroma pos 2 '
@@ -54,7 +60,7 @@ HDR10 = ('COLOUR frame 0: primaries 9 (BT.2020) transfer 16 (PQ) matrix 9 (BT.20
 NO_COLOUR = ('COLOUR frame 0: primaries 2 (unspecified) transfer 2 (unspecified) matrix 2 (unspecified) range limited '
              'chroma pos 0 (unknown), no colour description; no MDCV; no CLL')
 ENDED = 'PLAYERSMOKE the player ended its launch'
-SHOWN = re.compile(r'LIBRARY |MD5 |ERROR|PLAYERSMOKE|Frame slots|Clears: |Bye|No args|COLOUR ')
+SHOWN = re.compile(r'LIBRARY |MD5 |ERROR|PLAYERSMOKE|Frame slots|Frames in parse|Clears: |Bye|No args|COLOUR ')
 
 
 def launch(tool, tool_args, root, log, timeout):
@@ -127,6 +133,12 @@ def main():
         problems.append('the Clears lines of the player are not those of the tasks: %s' % ' | '.join(clears))
     if re.search(r'GPUTIME gpu slot_clear +[1-9]', text):
         problems.append('the task with -syncclear has the clears of the GPU in its timing run')
+    # The frames in parse of each task: one, and two for the task that asks for them, unless the entropy
+    # decoder of libaom reads the streams.
+    frames = [line[line.index('Frames in parse: '):] for line in text.split('\n') if 'Frames in parse: ' in line]
+    expected = FRAMES if '-parser c' not in args.player_args else FRAMES[:-1] + ['Frames in parse: 1 on 4 parser']
+    if len(frames) != len(expected) or not all(line.startswith(start) for line, start in zip(frames, expected)):
+        problems.append('the "Frames in parse" lines of the player are not those of the tasks: %s' % ' | '.join(frames))
     ok = text.count('MD5 is OK')
     if ok != len(TASKS):
         problems.append('%d of %d tasks of the player ended with "MD5 is OK"' % (ok, len(TASKS)))
