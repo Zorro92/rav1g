@@ -2237,9 +2237,12 @@ jobs:
             }
           }
           # A name no shader has is refused, and nothing is decoded with it.
-          $refused = & out/rav1g-dec-dxc/rav1g-dec.exe -shaderpick fxc=no_such_shader -list conformance-streams/manifest.txt 2>&1 | Out-String
-          if ($LASTEXITCODE -ne 3 -or $refused -notmatch "ERROR -shaderpick fxc=no_such_shader: shader pick: no shader has the name 'no_such_shader'") {
-            $failed += "-shaderpick with a name no shader has: exit code $LASTEXITCODE, expected 3 and an ERROR line"
+          # (Its standard output alone: a line on the error stream of a program ends a step of this shell.)
+          $refused = & out/rav1g-dec-dxc/rav1g-dec.exe -shaderpick fxc=no_such_shader -list conformance-streams/manifest.txt | Out-String
+          $code = $LASTEXITCODE
+          $global:LASTEXITCODE = 0
+          if ($code -ne 3 -or $refused -notmatch "ERROR -shaderpick fxc=no_such_shader: shader pick: no shader has the name 'no_such_shader'") {
+            $failed += "-shaderpick with a name no shader has: exit code $code, expected 3 and an ERROR line"
           }
           if ($failed.Count) { throw ("the shader picks: " + ($failed -join '; ')) }
 
