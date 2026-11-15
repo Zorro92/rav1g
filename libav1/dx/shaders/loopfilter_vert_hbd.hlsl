@@ -60,7 +60,14 @@ void filter_vertical_edge(RWByteAddressBuffer buffer, uint offset, int4 limits, 
 
   int flat_uv = abs(p1.y - p1.w) <= Thresh10 && abs(p1.z - p1.w) <= Thresh10 && abs(q0.y - q0.x) <= Thresh10 &&
                 abs(q0.z - q0.x) <= Thresh10;
-  int flat = flat_uv && abs(p1.x - p1.w) <= Thresh10 && abs(q0.w - q0.x) <= Thresh10;
+  // The last term is abs(q0.x - q0.w), not abs(q0.w - q0.x) as in the other loop filters. q0.x and q0.y are
+  // the halves of one word of the frame, q0.z and q0.w those of the next. With q0.w - q0.x here and
+  // q0.y - q0.z in the mask above, the bytecode DXC writes has (w >> 16) - (z & 0xffff) and
+  // (z >> 16) - (w & 0xffff), and the console's compile of that DXIL computed the second in place of the
+  // first: flat came out as if this term were abs(q0.y - q0.z) <= Thresh10, on the luma edges of 8 and 14
+  // taps (docs/gpu-av1-decoder.md, "DXC experiment"). The p side has the low half first (p1.x - p1.w, with
+  // p1.y - p1.z in the mask), which the console computes as written; this is the same form.
+  int flat = flat_uv && abs(p1.x - p1.w) <= Thresh10 && abs(q0.x - q0.w) <= Thresh10;
   int flat2 = abs(p0.y - p1.w) <= Thresh10 && abs(p0.z - p1.w) <= Thresh10 && abs(p0.w - p1.w) <= Thresh10 &&
               abs(q1.x - q0.x) <= Thresh10 && abs(q1.y - q0.x) <= Thresh10 && abs(q1.z - q0.x) <= Thresh10;
   if (type == 3 && flat && flat2) {
