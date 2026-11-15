@@ -41,7 +41,8 @@ struct GenLfData {
   int delta_q_info_delta_lf_present_flag;
   int delta_q_info_delta_lf_multi;
   int lf_mode_ref_delta_enabled;
-  int r[3];
+  unsigned int mi_grid_entry;  // bytes of an entry of the mode info grid (cb_mi_grid_entry)
+  int r[2];
 
   int lf_filter_level[2];
   int lf_filter_level_u;
@@ -110,6 +111,8 @@ void av1_loopfilter_gpu(Av1Core *dec, AV1_COMMON *cm, MACROBLOCKD *xd) {
   GenLfData *gen_data = (GenLfData *)cbo.host_ptr;
   gen_data->mi_stride = cm->mi_stride;
   gen_data->mi_addr_base = static_cast<int>((uint64_t)dec->mode_info_pool->host_ptr);
+  // The grid is the entropy decoder's: the address of a record, of which the shaders read the low half.
+  gen_data->mi_grid_entry = static_cast<unsigned int>(sizeof(MB_MODE_INFO *));
   gen_data->delta_q_info_delta_lf_multi = cm->delta_q_info.delta_lf_multi;
   gen_data->delta_q_info_delta_lf_present_flag = cm->delta_q_info.delta_lf_present_flag;
   gen_data->lf_mode_ref_delta_enabled = cm->lf.mode_ref_delta_enabled;
