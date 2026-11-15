@@ -21,3 +21,6 @@ testing/common/obudec.* linguist-vendored
 testing/common/webmdec.* linguist-vendored
 testing/common/tools_common.* linguist-vendored
 testing/common/md5_utils.* linguist-vendored
+
+# The headers the shaders include are HLSL, not C.
+libav1/dx/shaders/*.h linguist-language=HLSL
