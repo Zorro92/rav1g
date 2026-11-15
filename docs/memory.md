@@ -130,8 +130,26 @@ The largest single part of every 4K frame is the mode info grid: a pointer of 8 
 (`cb_mi_addr_base`, `get_mi_index`). Transform block records, the block index list and the constants are
 0.1 to 0.2 MiB together.
 
-**Console: pending.** The same task lines with `-memstats` on `j4k40` and `d2` in the slow state, for
-the frame buffer counts and the "at once" numbers with a real GPU.
+**Console (2026-11-15, package 0.2.175.0, slow state, Bale stopped, 300 temporal units of each 4K clip,
+2 frames in parse on 3 slots).** "At once" is the peak over all frames in flight; "frame" the peak of one
+frame.
+
+| Stream | Mode info at once / frame | Coefficients at once / frame | Tx records at once / frame | `prediction_blocks` frame | `idct_blocks` frame | Frame buffers out, peak / typical | Distinct refs, peak | CPU MiB per frame, mean / peak | App usage, 30 frames out |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `j4k40` | 11.1 % / 5.3 % | 10.6 % / 4.1 % | 10.5 % / 3.8 % | 5.3 % | 3.8 % | 10 / 9 | 3 | 9.41 / 13.08 | 866.9 MiB |
+| `d2_300` | 20.0 % / 12.8 % | 57.6 % / 33.3 % | 38.7 % / 26.1 % | 19.8 % | 26.1 % | 11 / 11 | 5 | 8.74 / 41.84 | 873.2 MiB |
+| `a1_8b4k_300` (8-bit) | 10.7 % / 5.3 % | 22.3 % / 13.9 % | 20.0 % / 11.0 % | 8.6 % | 11.0 % | 11 / 11 | 5 | 5.20 / 20.13 | 859.6 MiB |
+| `fg4k_300` | 8.5 % / 2.3 % | 29.5 % / 17.1 % | 17.7 % / 3.6 % | 3.6 % | 3.6 % | 11 / 7 | 7 | 5.66 / 17.98 | 674.3 MiB |
+| `t40x1ld` | 4.6 % / 3.0 % | 16.4 % / 7.9 % | 8.7 % / 2.4 % | 3.3 % | 2.4 % | 5 / 4 | 1 | 7.91 / 11.65 | 870.3 MiB |
+| `t12x1` | 6.7 % / 3.6 % | 15.0 % / 6.3 % | 10.7 % / 4.4 % | 4.0 % | 4.4 % | 11 / 11 | 4 | 6.14 / 11.42 | 854.4 MiB |
+
+- No clip allows the screen content tools: no palette buffer was created on any of them.
+- The pools: the mode info pool is used to 20 % at most (22.3 MiB of 111.6), one frame to 12.8 %; the
+  coefficient pool to 57.6 % (`d2`), one frame to 33.3 %. So the mode info pool has the room, the
+  coefficient pool little.
+- The frame buffers are not oversized on the console either: four of the six clips have all 11 out at
+  once, with no more than 7 distinct references; the rest are frames in flight.
+- The mode info grid (4.15 MiB, fixed) is 42 to 80 % of what the CPU writes for a frame.
 
 ## Where the time of the decode call goes
 
