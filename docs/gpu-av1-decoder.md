@@ -1026,8 +1026,25 @@ an empty `expected.txt`, every output frame at its reference md5, and the player
 DXC 1.8.2403 and 1.9.2602 decode the 244 AOM vectors to their md5 on wine's vkd3d with lavapipe. So
 DXC's code computes the same bytes on two software devices.
 
-**Console: pending.** To measure: the default package and the DXC package of one run, the same clips,
-the same flags (`0.2.<n>.0` first: `0.2.<n>.4` installs over it, not the other way round).
+**Console (2026-11-15, packages 0.2.170.0 and 0.2.170.4 of run 43729069337): the DXC shaders decode
+wrong.** md5 passes on 5 of the 15 streams of the console set (the 8-bit `b8` 720p and 1080p streams,
+the 8-bit 4K A_1 cut, the two SVC streams, `size-66x66`) and fails on 10: from frame 0 on `j4k40`,
+both resize/superres syntheses, `fg1080_300`, `t12x1` and `t40x1ld`, from frame 120 on `fg4k_300` and
+from frame 99 on `sparks`. WARP and lavapipe decode the same shaders right, so the difference is the
+console's compile of the DXIL.
+
+The stage dumps of frame 0 of `syn_resize-mode.ivf` (10-bit 1280x720, a key frame), console with DXC
+against `rav1g-dec` with the FXC shaders on lavapipe: everything up to the loop filter parameters and
+edge lists is equal, and the first stage that differs is **the even pass of the vertical loop filter,
+luma only** (`loopfilter_vert_hbd`): 157 of 921600 samples, by 1 to 10, three samples on each side of
+an 8-sample edge (x mod 8 = 5, 6, 7, 0, 1, 2), so the filter of 8 taps (the 14-tap filter changes six
+on each side). Chroma is equal. The other failing streams were not dumped.
+
+Speed, for what it is worth with wrong output (4K, means of 290 frames, first configuration of each
+clip): the GPU stage sum 18.86 ms with FXC and 18.65 ms with DXC on `j4k40` (inter -6.7 %, loop
+restoration -16 %, idct -4.3 %, intra -0.3 %, CDEF +1.1 %), inter -5.3 % on `d2_300`; frames a second
+within the spread of the runs (the parse sets them). So DXC as it is would give about 1 % of GPU time,
+and the first thing it needs is the reason the console computes the 8-tap luma filter differently.
 
 ## Inter prediction: breakdown and fast paths (2026-11-12)
 
