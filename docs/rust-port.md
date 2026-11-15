@@ -1859,10 +1859,10 @@ links) has its build script there.
   tests under wine; after the pruning the shader checks with their mutants, `sm6test` and
   `perf_stats_test`.
 - On the console (test player 0.2.167, `a4f3530`): md5 15 of 15 in the default output and 15 of 15
-  with P010, the D3D11 interop of the two 4K streams OK. No speed lost: the GPU stage sum of the 10-bit 4K
+  with P010, the D3D11 interop of the two 4K streams OK. No speed lost: the GPU stage sum of a 10-bit 4K
   stream is the same to 0.01 ms (18.86, 18.56, 19.43, 18.56 ms against 18.86, 18.56, 19.42, 18.55 for
-  0.2.161); the decode call moves by about 1 % either way (0.15 ms faster on the 10-bit stream, 0.2 ms
-  slower on the 8-bit one), within what the CPU side varies between packages.
+  0.2.161); the decode call moves by about 1 % either way (0.15 ms faster on one 4K stream, 0.2 ms
+  slower on the other), within what the CPU side varies between packages.
 
 
 ## Estimate
