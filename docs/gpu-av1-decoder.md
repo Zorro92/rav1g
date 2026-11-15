@@ -1114,13 +1114,32 @@ w)`, the form of the p side. Nothing else of the shader changed. On WARP and on 
 conformance sets are md5-identical with the changed shader as FXC compiles it and as DXC does.
 **FXC's bytecode of `loopfilter_vert_hbd` changes with it** (the same size, a few instructions of the
 flatness tests in another order; `testing/dxbc_scan` finds no pair in the new listing), so the shader
-of the default package is a new one too, with the output unchanged: the console's md5 set with the
-default package and with the DXC package of the commit of the fix is **pending**. The change is on
+of the default package is a new one too, with the output unchanged: on the console (packages
+0.2.174.0 and 0.2.174.4 of run 43741669294) the md5 set is **15 of 15 with the default package and 15
+of 15 with the DXC package**. The change is on
 branch `cpp` as well (`e583067`), and the equality reference is pinned there
 ([rust-port.md](rust-port.md#equality-reference)).
 
-**Console timing: pending.** The speeds above were measured with a wrong vertical loop filter; the
-A/B of FXC against DXC with both right is still to be run.
+**Console timing, both right (2026-11-15).** One install of the DXC package 0.2.174.4, Bale stopped,
+`-shaderpick fxc=all` and `dxc=all` taking turns: two rounds of each 4K stream, each round the four
+output configurations of the timing set (planes, P010 direct, P010 staged, D3D11 interop), so eight
+runs of 290 frames for each compiler and stream. Means of the eight, ms per frame:
+
+| | `j4k40` FXC | `j4k40` DXC | | `d2_300` FXC | `d2_300` DXC | |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| GPU stage sum | 18.75 | 18.48 | -1.5 % | 9.54 | 9.17 | -3.9 % |
+| intra | 11.60 | 11.59 | -0.1 % | 1.72 | 1.70 | -0.9 % |
+| inter | 1.46 | 1.36 | -6.9 % | 5.87 | 5.56 | -5.3 % |
+| CDEF | 2.39 | 2.42 | +1.2 % | | | |
+| loop restoration | 1.53 | 1.29 | -15.9 % | | | |
+| idct | 0.82 | 0.78 | -4.9 % | 0.38 | 0.37 | -2.9 % |
+| plane copy | 0.99 | 0.91 | -7.9 % | 0.99 | 0.92 | -7.5 % |
+| decode call (CPU) | 21.84 | 21.59 | -1.2 % | 20.05 | 19.74 | -1.6 % |
+| frames a second | 45.7 | 46.2 | +0.9 % | 49.6 | 50.4 | +1.7 % |
+
+DXC is faster in every one of the eight pairs of each stream. What it gives is small: 0.3 to 0.4 ms of
+GPU a frame, mostly in inter, loop restoration and the plane copy; intra, 62 % of the GPU time of
+`j4k40`, is the same. The parse still sets the frame rate.
 
 ## Inter prediction: breakdown and fast paths (2026-11-12)
 
