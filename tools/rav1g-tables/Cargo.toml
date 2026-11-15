@@ -1,0 +1,13 @@
+[package]
+name = "rav1g-tables"
+description = "Prints the host's copies of tables and inline functions of libaom's headers as text, for testing/tables_check, which holds them against what a C program prints from the headers. The copies are the files of the D3D12 host, compiled into this program by path. No GPU; Linux."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[dependencies]
+rav1g-sys = { workspace = true }

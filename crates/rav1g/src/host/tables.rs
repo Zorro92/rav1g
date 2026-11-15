@@ -8,12 +8,14 @@
 
 //! Tables the host modules need.
 //!
-//! The tables that were `static` in a C header of libaom are copies, which were held against the headers
-//! by tests for as long as the build read those headers. The tables of the host itself (`OBMC_MASK`, the `INTER_BLOCK_*`
-//! tables, `INTRA_MODE_SHADER_PARAMS`, `GAUSSIAN_SEQUENCE`) came from `libav1/dx/av1_compute.h` and
-//! `av1_compute.cpp` of the C++ decoder (branch `cpp`) and were held against that text while it was in
-//! this tree; here they are the only copy. `testing/intra_check` reads `INTRA_MODE_SHADER_PARAMS` from
-//! this file, in the form it has below: one `const` line, the numbers, `];`.
+//! The tables that are `static` in a C header of libaom are copies. `testing/tables_check` holds them
+//! against the headers of `libav1` (a C program prints the tables of the headers, `tools/rav1g-tables`
+//! those of this file, compiled into it by path). The tables of the host itself (`OBMC_MASK`, the
+//! `INTER_BLOCK_*` tables, `INTRA_MODE_SHADER_PARAMS`, `GAUSSIAN_SEQUENCE`) came from
+//! `libav1/dx/av1_compute.h` and `av1_compute.cpp` of the C++ decoder (branch `cpp`) and were held
+//! against that text while it was in this tree; here they are the only copy. `testing/intra_check`
+//! reads `INTRA_MODE_SHADER_PARAMS` from this file, in the form it has below: one `const` line, the
+//! numbers, `];`.
 
 /// `block_size_wide` of `av1/common/common_data.h`: the width of a block size in luma samples.
 pub(crate) const BLOCK_SIZE_WIDE: [u8; 22] =

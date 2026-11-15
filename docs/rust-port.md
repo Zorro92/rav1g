@@ -71,6 +71,7 @@ At the end no C++ remains in the decoder: the C parser, the HLSL and Rust.
 | `crates/rav1g-shaders` | planned, with the switch to DXC: shader bytecode, `build.rs` runs DXC (see Requirements) and embeds the DXIL with `include_bytes!`. Today the bytecode is the FXC headers of `RAV1G_SHADER_DIR`, in `crates/rav1g-sys/shader_table.c` |
 | `tools/rav1g-dec` | command-line decoder for conformance, md5 and stage dumps |
 | `tools/rav1g-header` | writes `rav1g.h` from `crates/rav1g/src/capi.rs` with `cbindgen`, or checks it |
+| `tools/rav1g-tables` | prints the host's copies of tables and inline functions of libaom's headers, for `testing/tables_check` (Linux; [Own types, no libaom headers](#own-types-no-libaom-headers)) |
 | `libav1/` | the shaders (`dx/shaders`), `dx/av1_perf.h` (the records of the timing run and of the stage dumps, for the test player) and `dx/intra_v2_sched.h` (for the intra check), and what is left of libaom: the 17 C files and 75 headers that the shader checks of `testing/` compile as the reference, the readers of the test player include, or `crates/rav1g/build.rs` and the tests read as text. Nothing of it is compiled into the decoder |
 | `testing/` | the test player (C++, on `rav1g.h`), the conformance scripts, the host checks of the shaders |
 
@@ -1816,7 +1817,8 @@ which the decoder does not use):
 3. Constants, enums, error codes and the perf, stage dump and switch types: Rust definitions with the
    same values; the constant assertions of `capi.rs` and `lib.rs` against `rav1g.h` stay. With this the
    last bindings are gone: bindgen, `wrapper.h`, `parser.h`, the layout probe and its C leave, and the
-   tests that held Rust copies of tables and inline functions against the headers with them.
+   tests that held Rust copies of tables and inline functions against the headers with them (a check
+   outside of the build holds them since: `testing/tables_check`, below).
 4. libclang leaves the CI jobs and the documentation.
 5. The headers of libaom are pruned to what is still compiled or read: the shader checks of `testing/`,
    the tables `crates/rav1g/build.rs` reads, and what the shaders include.
@@ -1843,10 +1845,10 @@ links) has its build script there.
   (`crate::host::av1_set_cdef_v2`); they were reached through the declarations of the headers.
 - Gone with bindgen: `wrapper.h`, `shared.h`, `parser.h`, the layout probe and its C, the table probe and
   the function probes (`rav1g_sys::c_table`, `rav1g_sys::probe`) with the four tests that held the Rust
-  copies of 21 tables and 4 inline functions against the headers. Those copies have no reference in the
-  tree any more; the conformance md5 and the parse check are what holds them. 126 lines of `Cargo.lock`
-  (bindgen and what it pulled in), and libclang in four CI jobs; the Linux build of `rav1g-parse-check`
-  needs no C compiler.
+  copies of 21 tables and 4 inline functions against the headers. Those copies are held against the
+  headers again, outside of the decoder's build (`testing/tables_check`, below). 126 lines of
+  `Cargo.lock` (bindgen and what it pulled in), and libclang in four CI jobs; the Linux build of
+  `rav1g-parse-check` needs no C compiler.
 - libaom's headers: 29 files (7,257 lines) removed, among them `dx/av1_core.h`, the entry points the
   entropy decoder called. What stays was found by compiling: the dependency lists gcc writes for every
   compile of the five shader checks and of `perf_stats_test`, the include closure of the sources under
@@ -1863,6 +1865,35 @@ links) has its build script there.
   stream is the same to 0.01 ms (18.86, 18.56, 19.43, 18.56 ms against 18.86, 18.56, 19.42, 18.55 for
   0.2.161); the decode call moves by about 1 % either way (0.15 ms faster on one 4K stream, 0.2 ms
   slower on the other), within what the CPU side varies between packages.
+
+**The copies of tables and inline functions** (`testing/tables_check`, CI job `tables-check`). The host
+has copies of 21 tables that are `static` in a header of libaom (`host/tables.rs`: block and transform
+sizes, `ss_size_lookup` and its 4:2:0 column as a table of its own, the smooth weights, the weights of
+the distance compound, the six tables of interpolation kernels, ...) and ports of four inline functions
+(`host/blocks.rs`: `scale_chroma_bsize`, `av1_get_max_uv_txsize`, `is_interintra_pred`,
+`av1_extract_interp_filter`). The tests that held them against the headers needed the C compiler in the
+decoder's build and left with it. The check that holds them now is outside of that build, on Linux:
+
+- `testing/tables_check/dump.c`, compiled by gcc against the headers of `libav1`, prints every table
+  (name, type of a number, count, the numbers) and the result of the functions for a range of inputs:
+  every block size for the first two (the second with every subsampling the block size has a plane
+  block for), every block size with 25 modes and every pair of references from -1 to 7 for the third,
+  every pair of four bits and four words with other bits set for the fourth. 22 tables and 45,180
+  results.
+- `tools/rav1g-tables` prints the same lines from the copies. They are the host's own files, compiled
+  into the program by path through the module `rav1g-parse-check` has for the block lists; nothing of
+  the host moved or changed. It depends on `rav1g-sys` alone and builds in seconds.
+- `run.sh` compares the two texts; a line that differs fails. With `--mutate` it builds the program 18
+  more times from a copy of the workspace, each with one number of a table or one detail of a function
+  changed in the host's file, and every one has to be rejected.
+
+No C is part of the decoder's build by this, and no libclang is needed: the C program is built by the
+check and nowhere else, and no header that was removed had to come back.
+
+```
+sh testing/tables_check/run.sh            # the check
+sh testing/tables_check/run.sh --mutate   # and 18 mutated copies of the host's files, which must all fail
+```
 
 
 ## Estimate

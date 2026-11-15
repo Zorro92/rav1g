@@ -3007,6 +3007,35 @@ jobs:
           sh testing/superres_check/run.sh --mutate | tee superres-check.log
           { echo '## Super-resolution check'; echo '```'; cat superres-check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
+  # The Rust host's copies of 21 tables and 4 inline functions of libaom's headers
+  # (crates/rav1g/src/host/tables.rs, blocks.rs) against the headers of this tree: a C program, built
+  # here by gcc against libav1, prints the tables and the results of the functions over a range of
+  # inputs, tools/rav1g-tables prints the same from the host's files (compiled into it by path), and
+  # the two texts must be equal; 18 copies of the host's files with one number or one result changed
+  # must be rejected. The decoder's build has no C of libaom and reads no header (no libclang): this
+  # job is where the copies meet the headers.
+  tables-check:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version
+          gcc --version | head -n 1
+
+      - name: Compare the host's tables and inline functions with libaom's headers
+        run: |
+          set -euo pipefail
+          sh testing/tables_check/run.sh --mutate | tee tables-check.log
+          { echo '## Tables and inline functions of libaom'; echo '```'; cat tables-check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
   # Host proof for intra v2: the original intra shaders (intra_main + intra_filter, with the
   # wavefront iterations of the original host code) and intra_v2 with its scheduler, compiled as
   # C++, must write byte-identical frames on generated block layouts, 8-bit and 10-bit.

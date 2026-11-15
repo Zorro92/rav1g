@@ -9,6 +9,7 @@ members = [
     "tools/rav1g-dec",
     "tools/rav1g-header",
     "tools/rav1g-parse-check",
+    "tools/rav1g-tables",
     "third_party/rav1d",
 ]
 # The header tool builds for the machine it runs on and is run by name (cargo run -p rav1g-header).

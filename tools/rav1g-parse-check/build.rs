@@ -16,7 +16,7 @@ use std::path::PathBuf;
 #[path = "../../crates/rav1g/build.rs"]
 mod host_tables;
 
-fn main() {
+pub fn main() {
     host_tables::main();
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let types = manifest.join("../../crates/rav1g/src/host/types.rs");
