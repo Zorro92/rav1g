@@ -12,6 +12,8 @@ build = "build.rs"
 [features]
 # A decoder for the shaders of the uavsync package (RAV1G_SHADER_DIR must be that variant).
 uavsync = ["rav1g/uavsync"]
+# A decoder for the shaders of the DXC package (RAV1G_SHADER_DIR must be that variant).
+dxc = ["rav1g/dxc"]
 
 [dependencies]
 # With the interface for C: -capi runs a task through the functions of rav1g.h.

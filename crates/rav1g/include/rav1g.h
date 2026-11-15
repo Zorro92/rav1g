@@ -911,7 +911,8 @@ const char *rav1g_last_error(void);
 
 /*
  The version of the library and what it was built with, for a log:
- "rav1g 0.4.0, the Rust host; entropy decoder: MSVC, /GL, DLL runtime".
+ "rav1g 0.4.0, the Rust host; entropy decoder: MSVC, /GL, DLL runtime; shaders: FXC cs_5_0". The
+ shaders of the DXC experiment are named by their compiler: "shaders: DXC 1.9.2602.17 cs_6_0".
  */
 const char *rav1g_version(void);
 
@@ -1226,7 +1227,8 @@ void rav1g_parse_digest_result(const struct Rav1gParseDigest *digest, struct Rav
 void rav1g_parse_digest_destroy(struct Rav1gParseDigest *digest);
 
 /*
- An empty string for the normal build of the shaders, "uavsync" for the experiment build.
+ An empty string for the normal build of the shaders, "uavsync" and "dxc" for the experiment builds
+ (what compiled the shaders is in the text of `rav1g_version`).
  */
 const char *rav1g_shader_variant(void);
 

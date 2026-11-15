@@ -42,5 +42,9 @@ pub use records::*;
 /// text ("MSVC, /GL, static runtime").
 pub const C_BUILD: &str = env!("RAV1G_C_BUILD");
 
+/// What compiled the shaders of this library: "FXC cs_5_0", or with the feature `dxc` the compiler of
+/// the DXC experiment ("DXC 1.9.2602.17 cs_6_0").
+pub const SHADER_SET: &str = env!("RAV1G_SHADER_SET");
+
 #[cfg(test)]
 mod layout_tests;

@@ -196,8 +196,9 @@ jobs:
       #               (/LTCG:incremental).
       # Revision 1 is the uavsync package of the experiments input. Revision 3 is the default package
       # with the hevcPlayback capability in its manifest, for the memory the system gives such an app
-      # (made from the default package, behind it). A higher revision installs over a lower one and
-      # keeps LocalState.
+      # (made from the default package, behind it). Revision 4 is the DXC package: the default build
+      # with the shaders compiled by DXC (the last steps of this job). A higher revision installs over a
+      # lower one and keeps LocalState.
       # ---------------------------------------------------------------------------------------------
 
       # Stable Rust, as in the rust job, and the LLVM of the runner for the C of the default package.
@@ -570,6 +571,98 @@ jobs:
           path: out-uavsync/
           if-no-files-found: warn
 
+      # The DXC package (docs/gpu-av1-decoder.md, "DXC experiment"): the default package with the same
+      # shader sources compiled by DXC for Shader Model 6.0 (DXIL) instead of by FXC for cs_5_0: rav1g.dll
+      # built from the headers of the dxc variant of the Shaders step, with the dxc feature of the crates,
+      # which makes the library say what compiled its shaders (the LIBRARY line of the player's log:
+      # "shaders: DXC <version> cs_6_0", where the default package says "shaders: FXC cs_5_0"). It is for
+      # one measurement on the console: what the compiler alone does to the GPU time, before a shader is
+      # written for Shader Model 6. Same identity as the default package and revision 4: it installs over
+      # every other package of this run and keeps LocalState, and the default package of a later run
+      # installs over it. Built on every push: these steps are the last of the job and take about a
+      # minute and a half; no job waits for them but the end of the run, which other jobs decide.
+      # The library is built in the target directory of the default library, whose rav1g.dll is in
+      # rust-clang and in its package by now: the crates that do not depend on the shaders are not
+      # compiled again.
+      - name: Rust library for the DXC package (rav1g.dll with the shaders DXC compiled)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & src/testing/uwp_dx12_player/build_rav1g_dll.ps1 -Shaders '${{ steps.shaders.outputs.dxc }}' -Features 'capi,app-container,dxc' `
+            -TargetDir target-app-clang -Out rust-dxc
+
+      - name: Stamp the DXC package (same identity, revision 4)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = Resolve-Path src/testing/uwp_dx12_player/Package.appxmanifest
+          [xml]$manifest = Get-Content $path -Raw
+          $manifest.Package.Identity.Version = "0.2.$env:GITHUB_RUN_NUMBER.4"
+          $manifest.Save($path)
+
+      - name: Build the signed DXC package (the shaders compiled by DXC for Shader Model 6.0)
+        shell: pwsh
+        env:
+          CERT_THUMBPRINT: ${{ steps.cert.outputs.thumbprint }}
+          _CL_: /wd4996
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force out-dxc | Out-Null
+          $packageDirectory = Join-Path $env:GITHUB_WORKSPACE 'out-dxc/packages/'
+          $buildLog = Join-Path $env:GITHUB_WORKSPACE 'out-dxc/msbuild.log'
+          $library = Join-Path $env:GITHUB_WORKSPACE 'rust-dxc'
+          & MSBuild.exe src/av1xbox.sln /t:Rebuild /m /v:minimal /p:Configuration=Release /p:Platform=x64 `
+            "/p:PlatformToolset=$env:PLATFORM_TOOLSET" "/p:WindowsTargetPlatformVersion=$env:WINDOWS_SDK" `
+            /p:WindowsTargetPlatformMinVersion=10.0.17763.0 /p:TreatWarningAsError=false `
+            /p:GenerateAppxPackageOnBuild=true /p:UapAppxPackageBuildMode=SideloadOnly `
+            /p:AppxBundle=Never /p:AppxPackageExtension=.msix "/p:AppxPackageDir=$packageDirectory" `
+            /p:AppxPackageSigningEnabled=true /p:PackageCertificateKeyFile= `
+            "/p:PackageCertificateThumbprint=$env:CERT_THUMBPRINT" "/p:Rav1gRustDll=$library" `
+            "/p:Rav1gSm6TestShaders=${{ steps.sm6.outputs.dir }}" `
+            /fl "/flp:logfile=$buildLog;verbosity=normal"
+          if ($LASTEXITCODE -ne 0) { throw 'DXC player build/package failed; see out-dxc/msbuild.log' }
+          $packages = @(Get-ChildItem out-dxc/packages -Recurse -File | Where-Object {
+            $_.Extension -in @('.msix', '.msixbundle', '.appx', '.appxbundle') -and
+            $_.FullName -notmatch '[\\/]Dependencies[\\/]'
+          })
+          if (-not $packages.Count) { throw 'No DXC sideload package was produced' }
+          python src/testing/uwp_imports/check_package.py --out out-dxc/imports --need rav1g.dll --also rav1g.dll out-dxc/packages
+          if ($LASTEXITCODE -ne 0) { throw 'A program of the DXC package imports from a DLL that is not in testing/uwp_imports/player-dlls-allow.txt, or rav1g.dll is not in the package' }
+          # The rav1g.dll of the package has the bytecode DXC wrote, byte for byte, and the line that
+          # names the compiler; the rav1g.dll of the default package does not have that line.
+          python src/testing/shader_cache/shaders.py verify --report shader-build/dxc/report.json `
+            --root shader-build/dxc --note out-dxc/SHADERS.txt out-dxc/imports/unpacked/rav1g.dll
+          if ($LASTEXITCODE -ne 0) { throw 'The rav1g.dll of the DXC package was not built from the DXC shader headers of this run' }
+          $set = (Get-Content shader-build/dxc/shader_set.txt -Raw).Trim()
+          python -c "import sys; mark = sys.argv[1].encode(); has = [mark in open(path, 'rb').read() for path in sys.argv[2:]]; print('the line of the DXC build in the DLL of the DXC package, of the default package:', has); sys.exit(0 if has == [True, False] else 1)" `
+            $set out-dxc/imports/unpacked/rav1g.dll rust-clang/rav1g.dll
+          if ($LASTEXITCODE -ne 0) { throw "The rav1g.dll of the DXC package does not say '$set', or that of the default package does" }
+          Remove-Item out-dxc/imports/unpacked -Recurse -Force
+          # The certificate, the notices and the record of the sources of the default package apply.
+          foreach ($item in @(Get-ChildItem out | Where-Object { $_.Name -notin @('packages', 'msbuild.log', 'shader-survey',
+              'cdef-shaders', 'intra-shaders', 'sm6test-shaders', 'imports', 'rav1g.pdb') })) {
+            Copy-Item $item.FullName out-dxc/ -Recurse
+          }
+          # DXC's listings of the shaders of the package, and the report of their build.
+          New-Item -ItemType Directory -Force out-dxc/dxc-shaders | Out-Null
+          Copy-Item shader-build/dxc/asm out-dxc/dxc-shaders/asm -Recurse
+          Copy-Item shader-build/dxc/report.json out-dxc/dxc-shaders/build.json
+          $report = Get-Content shader-build/dxc/report.json -Raw | ConvertFrom-Json
+          (Get-Content out-dxc/SOURCES.txt) -notmatch '^Variant: ' | Set-Content out-dxc/SOURCES.txt -Encoding utf8
+          "Variant: dxc: the default build (rav1g.dll, C of clang) with the shaders compiled by $set ($($report.dxc_version)): dxc $($report.arguments), -Od where FXC has /Od; package version 0.2.$env:GITHUB_RUN_NUMBER.4" |
+            Add-Content out-dxc/SOURCES.txt -Encoding utf8
+          Copy-Item rust-dxc/rav1g.pdb out-dxc/
+          @('## DXC package', '', "Version 0.2.$env:GITHUB_RUN_NUMBER.4: installs over the other packages of this run. Shaders: $set, ``dxc $($report.arguments)``.", '', '```') +
+            @($packages | ForEach-Object { $_.Name }) + @(Get-Content out-dxc/imports/check.txt) + @('```') >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Preserve the DXC package
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-testplayer-dxc-x64-${{ github.run_id }}
+          path: out-dxc/
+          if-no-files-found: warn
+
   # The streams of the conformance run: AOM's decoder test vectors with AOM's md5 files, cuts of
   # Netflix Open Content and streams encoded here with SVT-AV1, both with md5 references from dav1d
   # (testing/conformance/streams.txt, prepare_streams.sh). The streams are media: they are kept in
@@ -777,6 +870,7 @@ jobs:
   #                     ways that clear the wavefront grid, by the GPU and by the completion thread;
   #   rust-dumps-equal  the stage dumps they wrote, held against each other;
   #   rust-experiments  only when the workflow is started for it.
+  # (rust-dxc is not behind this job: it builds the program again with the shaders DXC compiled.)
   # The rust-equal job then holds the md5 per frame and the stage dumps of rust-conformance against those
   # of the C++ decoder (cpp-reference), whose parser is the entropy decoder of libaom: the decoder has
   # none of that C any more (docs/phase2-rav1d.md, step 6), and the C++ decoder at its pin is where it
@@ -2010,6 +2104,134 @@ jobs:
         with:
           name: rav1g-dec-experiments-${{ github.run_id }}
           path: out/conformance-*/
+          if-no-files-found: warn
+
+  # The DXC experiment on WARP (docs/gpu-av1-decoder.md, "DXC experiment"): rav1g-dec built with the dxc
+  # feature from the headers of the dxc variant of the Shaders step, the same shader sources compiled by
+  # DXC for Shader Model 6.0, decodes every stream of the set to its reference md5, as the rust-conformance
+  # job has it for the FXC shaders, and the test player's decoder code runs on it through rav1g.h. This is
+  # what holds the shaders of the DXC package of the player job: the same headers, by the same keys of the
+  # same cache. The job builds its own program, so the rust job and the jobs behind it are what they are
+  # without the experiment.
+  rust-dxc:
+    needs: conformance-streams
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      WINDOWS_SDK: 10.0.26100.0
+    steps:
+      - name: Disable newline conversion
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Shaders
+        id: shaders
+        uses: ./.github/actions/shaders
+        with:
+          sdk: ${{ env.WINDOWS_SDK }}
+
+      - name: Shader Model 6 test shaders
+        id: sm6
+        uses: ./.github/actions/sm6test-shaders
+        with:
+          sdk: ${{ env.WINDOWS_SDK }}
+
+      - name: Rust toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup toolchain install stable --profile minimal --no-self-update
+          if ($LASTEXITCODE -ne 0) { throw 'rustup could not install stable' }
+          rustup default stable
+          rustc --version
+
+      - name: nasm
+        uses: ./.github/actions/nasm
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: dxc
+
+      - name: Build rav1g-dec with the shaders DXC compiled (cargo, MSVC, release, the dxc feature)
+        shell: pwsh
+        env:
+          RAV1G_SHADER_DIR: ${{ steps.shaders.outputs.dxc }}
+          RAV1G_SM6TEST_SHADER_DIR: ${{ steps.sm6.outputs.dir }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force out/rav1g-dec-dxc | Out-Null
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          cargo build --release --locked -p rav1g-dec --features dxc
+          if ($LASTEXITCODE -ne 0) { throw 'cargo build of rav1g-dec with the DXC shaders failed' }
+          $built = [math]::Round($clock.Elapsed.TotalMinutes, 1)
+          Copy-Item target/release/rav1g-dec.exe, target/release/rav1g_dec.pdb -Destination out/rav1g-dec-dxc/
+          # Built from the headers of the dxc variant: DXC's bytecode is in the program, byte for byte.
+          python testing/shader_cache/shaders.py verify --report shader-build/dxc/report.json `
+            --root shader-build/dxc out/rav1g-dec-dxc/rav1g-dec.exe
+          if ($LASTEXITCODE -ne 0) { throw 'The DXC rav1g-dec was not built from the DXC shader headers of this run' }
+          # DXC's listings and the report of the build (compiler, arguments, key and header of every shader).
+          New-Item -ItemType Directory -Force out/dxc-shaders | Out-Null
+          Copy-Item shader-build/dxc/asm out/dxc-shaders/asm -Recurse
+          Copy-Item shader-build/dxc/report.json out/dxc-shaders/build.json
+          Copy-Item shader-build/dxc/shader_set.txt out/dxc-shaders/
+          $report = Get-Content shader-build/dxc/report.json -Raw | ConvertFrom-Json
+          "Commit: $env:GITHUB_SHA", "Run: https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID",
+            "Build: cargo build --release -p rav1g-dec --features dxc, $(rustc --version), MSVC",
+            "Shaders: $($report.shader_set) ($($report.dxc_version)): dxc $($report.arguments), -Od where FXC has /Od" |
+            Set-Content out/rav1g-dec-dxc/SOURCES.txt -Encoding utf8
+          "## rav1g-dec with the shaders DXC compiled", '',
+            "cargo build --release --features dxc: $built min ($(rustc --version)). Shaders: $($report.shader_set) (``$($report.dxc_version)``), ``dxc $($report.arguments)``, -Od where FXC has /Od.", '' >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Streams from the cache
+        uses: actions/cache/restore@v6
+        with:
+          path: conformance-streams
+          key: ${{ needs.conformance-streams.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      # Every stream of the set against its reference and expected.txt, as the rust-conformance job runs
+      # it with the FXC shaders; the run has to say that its shaders are the ones DXC compiled.
+      - name: Decode every stream on WARP with the shaders DXC compiled and compare with expected.txt
+        shell: pwsh
+        run: |
+          python testing/conformance/run.py --tool out/rav1g-dec-dxc/rav1g-dec.exe --streams conformance-streams `
+            --out out/conformance-dxc --threads 4 "--title=rav1g-dec, shaders compiled by DXC (cs_6_0)"
+          $code = $LASTEXITCODE
+          $set = (Get-Content shader-build/dxc/shader_set.txt -Raw).Trim()
+          if (-not (Select-String -Path out/conformance-dxc/lists/run001.log -SimpleMatch "SHADERS dxc ($set)" -Quiet)) {
+            throw "The decoder of this run does not report the shaders of the DXC build ($set)"
+          }
+          if ($code -ne 0) { throw "conformance with the shaders DXC compiled: exit code $code (1: not as expected.txt says, 2: the run could not be done)" }
+
+      # The test player's decoder code on the same library through rav1g.h, as the DXC package has it;
+      # its LIBRARY line names the compiler of the shaders.
+      - name: The test player's decoder code with the shaders DXC compiled (rav1g-dec -playersmoke)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          python testing/conformance/player_smoke.py --tool out/rav1g-dec-dxc/rav1g-dec.exe --streams conformance-streams `
+            --out out/player-smoke-dxc "--title=the Rust library with the shaders DXC compiled"
+          $code = $LASTEXITCODE
+          $set = (Get-Content shader-build/dxc/shader_set.txt -Raw).Trim()
+          if (-not (Get-ChildItem out/player-smoke-dxc -Recurse -File | Select-String -Pattern "LIBRARY rav1g .*shaders: $([regex]::Escape($set))" -Quiet)) {
+            throw "The LIBRARY line of the player's decoder code does not name the shaders of the DXC build ($set)"
+          }
+          if ($code -ne 0) { throw "the player's decoder code with the shaders DXC compiled: exit code $code" }
+
+      - name: Preserve rav1g-dec.exe with the shaders DXC compiled, the listings, the results and the logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-dec-dxc-${{ github.run_id }}
+          path: |
+            out/rav1g-dec-dxc/
+            out/dxc-shaders/
+            out/conformance-dxc/
+            out/player-smoke-dxc/
           if-no-files-found: warn
 
   # Equality with the C++ decoder (docs/rust-port.md, "Equality reference"): rav1g-dec of this commit and

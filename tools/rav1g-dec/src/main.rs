@@ -191,7 +191,7 @@ fn real_main() -> i32 {
         say!("INTERFACE the decoder is used through the functions of rav1g.h (-capi)");
     }
     let variant = library.shader_variant();
-    say!("SHADERS {}", if variant.is_empty() { "normal build" } else { &variant });
+    say!("SHADERS {} ({})", if variant.is_empty() { "normal build" } else { &variant }, rav1g::switches::shader_set());
     if globals.debug_layer {
         device::print_debug_messages(&dev.device);
     }

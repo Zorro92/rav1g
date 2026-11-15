@@ -16,7 +16,9 @@
 //! **For a Windows target (the decoder)** one C file is compiled into `rav1g_c.lib`: `shader_table.c`,
 //! the bytecode of the shaders. The shaders are not compiled here. `RAV1G_SHADER_DIR` names the directory
 //! whose `dx/shaders/h` has the bytecode headers of the FXC build (`testing/shader_cache/shaders.py build
-//! --root <dir>`; in CI the `normal` output of `.github/actions/shaders`).
+//! --root <dir>`; in CI the `normal` output of `.github/actions/shaders`). With the feature `dxc` it is
+//! the directory of the DXC build of the same sources (`--variant dxc`; docs/gpu-av1-decoder.md, "DXC
+//! experiment"), and the library says so (`SHADER_SET`).
 //!
 //! **For a target that is not Windows** the crate is its Rust alone: the D3D12 host does not build there.
 //! `crates/rav1g-parse` and `tools/rav1g-parse-check` use the types on Linux (docs/phase2-rav1d.md,
@@ -110,6 +112,41 @@ fn shader_dir() -> PathBuf {
     dir
 }
 
+/// What compiled the shaders, for the version text of the library: "FXC cs_5_0", or with the feature
+/// `dxc` the line of `shader_set.txt` in the directory of the shaders ("DXC 1.9.2602.17 cs_6_0"), which
+/// the DXC build of testing/shader_cache/shaders.py writes and no other. The feature and the file go
+/// together, so a library cannot say FXC about DXC's shaders or the other way round.
+fn shader_set(shaders: Option<&Path>) -> String {
+    let dxc = env::var_os("CARGO_FEATURE_DXC").is_some();
+    if dxc && env::var_os("CARGO_FEATURE_UAVSYNC").is_some() {
+        fail("the features dxc and uavsync are two builds of the shaders: one of them");
+    }
+    let Some(shaders) = shaders else {
+        return "none (not a Windows target)".to_string();
+    };
+    let file = shaders.join("shader_set.txt");
+    println!("cargo:rerun-if-changed={}", file.display());
+    let text = fs::read_to_string(&file).ok().map(|text| text.trim().to_string()).filter(|text| !text.is_empty());
+    match (dxc, text) {
+        (false, None) => "FXC cs_5_0".to_string(),
+        (true, Some(text)) => {
+            if !text.starts_with("DXC ") || !text.bytes().all(|b| b == b' ' || b.is_ascii_graphic()) {
+                fail(&format!("{}: not the line of a DXC build: {text:?}", file.display()));
+            }
+            text
+        }
+        (true, None) => fail(&format!(
+            "the feature dxc needs the shaders of the dxc variant: there is no {} \
+             (testing/shader_cache/shaders.py build --variant dxc --root <dir>)",
+            file.display()
+        )),
+        (false, Some(text)) => fail(&format!(
+            "RAV1G_SHADER_DIR={} has the shaders of the dxc variant ({text}): build with the feature dxc",
+            shaders.display()
+        )),
+    }
+}
+
 /// A compiler call with the settings every file of the library has.
 fn base_build(shaders: Option<&Path>) -> cc::Build {
     let mut build = cc::Build::new();
@@ -150,6 +187,8 @@ fn main() {
 
     let shaders = windows.then(shader_dir);
     let shaders = shaders.as_deref();
+    // What compiled the shaders, for the version text of the library.
+    println!("cargo:rustc-env=RAV1G_SHADER_SET={}", shader_set(shaders));
 
     // The C of the decoder, one static library: the shader table, at /O1 /Ot whatever the cargo profile.
     let mut c_size = base_build(shaders);

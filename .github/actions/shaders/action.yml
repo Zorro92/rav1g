@@ -1,7 +1,8 @@
 name: Shaders
 description: >
   The bytecode headers and the listings of the shaders of libav1, for the builds of a job: one FXC call per
-  shader and variant (normal, uavsync), taken from a cache by content (testing/shader_cache/shaders.py).
+  shader and variant (normal, uavsync), and one DXC call per shader for the DXC experiment (dxc), taken
+  from a cache by content (testing/shader_cache/shaders.py).
 
 # FXC takes about 40 s for the shaders on the four processors of a runner. Every shader is compiled once
 # per variant, the jobs that build programs share the result through the Actions cache, and a run whose
@@ -18,13 +19,18 @@ description: >
 #
 # The programs are built from these headers: the Rust library gets RAV1G_SHADER_DIR=<the directory of the
 # variant> (crates/rav1g-sys/build.rs).
+#
+# The variant dxc is the DXC experiment (docs/gpu-av1-decoder.md, "DXC experiment"): the same sources
+# compiled by the DXC of the same Windows SDK for Shader Model 6.0. Its entries are in the same cache,
+# keyed by the DXC binaries and DXC's arguments in place of FXC's; DXC takes a few seconds for all of
+# them. The normal and the uavsync builds, their keys and their headers are what they are without it.
 
 inputs:
   repo:
     description: The directory of the checkout, relative to the workspace
     default: .
   sdk:
-    description: The Windows SDK whose FXC compiles the shaders
+    description: The Windows SDK whose FXC (and DXC, for the variant dxc) compiles the shaders
     required: true
 
 outputs:
@@ -34,6 +40,11 @@ outputs:
   uavsync:
     description: The same for the uavsync variant
     value: ${{ steps.build.outputs.uavsync }}
+  dxc:
+    description: >
+      The same for the DXC experiment: the headers DXC's bytecode was written to, DXC's listings, and
+      shader_set.txt, the line the library of the dxc feature reports
+    value: ${{ steps.build.outputs.dxc }}
 
 runs:
   using: composite
@@ -46,7 +57,10 @@ runs:
         $fxc = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin\${{ inputs.sdk }}\x64\fxc.exe"
         if (-not (Test-Path $fxc)) { throw "fxc.exe of Windows SDK ${{ inputs.sdk }} not found" }
         "fxc=$fxc" >> $env:GITHUB_OUTPUT
-        python "${{ inputs.repo }}/testing/shader_cache/shaders.py" key --fxc $fxc
+        $dxc = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin\${{ inputs.sdk }}\x64\dxc.exe"
+        if (-not (Test-Path $dxc)) { throw "dxc.exe of Windows SDK ${{ inputs.sdk }} not found" }
+        "dxc=$dxc" >> $env:GITHUB_OUTPUT
+        python "${{ inputs.repo }}/testing/shader_cache/shaders.py" key --fxc $fxc --dxc $dxc --variants normal,uavsync,dxc
         if ($LASTEXITCODE -ne 0) { throw 'The keys of the shaders could not be computed' }
 
     - name: Shader cache
@@ -67,9 +81,10 @@ runs:
         '## Shaders' >> $env:GITHUB_STEP_SUMMARY
         '' >> $env:GITHUB_STEP_SUMMARY
         $reports = @()
-        foreach ($variant in @('normal', 'uavsync')) {
+        foreach ($variant in @('normal', 'uavsync', 'dxc')) {
           $directory = (New-Item -ItemType Directory -Force "shader-build/$variant").FullName
-          python $script build --fxc "${{ steps.key.outputs.fxc }}" --cache shader-cache --variant $variant `
+          python $script build --fxc "${{ steps.key.outputs.fxc }}" --dxc "${{ steps.key.outputs.dxc }}" `
+            --cache shader-cache --variant $variant `
             --root $directory --listings (Join-Path $directory 'asm') --report (Join-Path $directory 'report.json')
           if ($LASTEXITCODE -ne 0) { throw "The shaders of the $variant build could not be compiled" }
           "$variant=$directory" >> $env:GITHUB_OUTPUT
@@ -79,6 +94,11 @@ runs:
         if ((Get-FileHash shader-build/normal/dx/shaders/h/loopfilter_hor.h).Hash -eq
             (Get-FileHash shader-build/uavsync/dx/shaders/h/loopfilter_hor.h).Hash) {
           throw 'The shaders of the uavsync build are those of the normal build'
+        }
+        # The DXC build is DXIL and says what compiled it; the FXC builds have no such line.
+        if (-not (Test-Path shader-build/dxc/shader_set.txt) -or (Test-Path shader-build/normal/shader_set.txt) -or
+            (Test-Path shader-build/uavsync/shader_set.txt)) {
+          throw 'shader_set.txt is the mark of the DXC build, and of that build alone'
         }
         # What is saved is what this run used.
         python $script prune --cache shader-cache @reports

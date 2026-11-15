@@ -127,9 +127,15 @@ pub fn set_perf_detail(mode: u32) {
     crate::host::av1_set_perf_detail(mode as c_int)
 }
 
-/// Empty for the normal build of the shaders, `"uavsync"` for the experiment build.
+/// Empty for the normal build of the shaders, `"uavsync"` and `"dxc"` for the experiment builds.
 pub fn shader_variant() -> String {
     crate::error::text(crate::host::av1_shader_variant())
+}
+
+/// What compiled the shaders of the library: `"FXC cs_5_0"`, or the compiler of the DXC experiment
+/// (`"DXC 1.9.2602.17 cs_6_0"`, the feature `dxc`).
+pub fn shader_set() -> &'static str {
+    crate::sys::SHADER_SET
 }
 
 /// What gets the records of the timing run ([`set_perf_callback`]).

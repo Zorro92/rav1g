@@ -91,10 +91,17 @@ pub(crate) fn clears_mode() -> c_int {
 }
 
 /// `av1_shader_variant` (`dx/av1_perf.h`): "uavsync" for the build whose shaders have their group syncs
-/// as syncs of all memory (the feature `uavsync`), else an empty string.
+/// as syncs of all memory (the feature `uavsync`), "dxc" for the build whose shaders DXC compiled (the
+/// feature `dxc`), else an empty string.
 #[unsafe(no_mangle)]
 pub extern "C" fn av1_shader_variant() -> *const std::ffi::c_char {
-    if cfg!(feature = "uavsync") { c"uavsync".as_ptr() } else { c"".as_ptr() }
+    if cfg!(feature = "uavsync") {
+        c"uavsync".as_ptr()
+    } else if cfg!(feature = "dxc") {
+        c"dxc".as_ptr()
+    } else {
+        c"".as_ptr()
+    }
 }
 
 /// Test player switch (-intrav2): intra prediction through intra_v2.hlsl, which writes the same bytes
