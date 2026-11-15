@@ -966,6 +966,69 @@ formats. DXIL signed by DXC 1.9 is accepted.
 - So a move to DXC/SM 6.0-6.4 would bring wave reductions, broadcasts and ballots (useful for the CFL and
   DC sums, the CDEF direction search, compaction of block lists) but not packed 16-bit throughput.
 
+### DXC experiment (2026-11-15)
+
+Before any shader is written for Shader Model 6, one question can be answered without touching a
+source: what does the compiler alone do to the GPU time? The **DXC package** is the default package
+with the same HLSL sources compiled by DXC for Shader Model 6.0 (DXIL) instead of by FXC for `cs_5_0`
+(DXBC). Nothing else differs: the same host code, root signatures, pipeline states and dispatches.
+
+**What is built.** `testing/shader_cache/shaders.py build --dxc <dxc> --variant dxc` compiles every
+`.hlsl` of `libav1/dx/shaders` (101 files, of which the library makes pipeline states of 97) with one
+DXC call each, into the same cache and the same header layout as the FXC build (`const BYTE <name>[]`),
+and writes `shader_set.txt`, the line that names the compiler. The crates have the feature `dxc`
+(`rav1g-sys`, `rav1g`, `rav1g-dec`): it changes no host code, it makes the library say what compiled
+its shaders, and the build script accepts the feature and a directory with `shader_set.txt` only
+together, so a library cannot say FXC about DXC's bytecode or the other way round. In CI the compiler
+is the DXC of the Windows SDK that also has the FXC (10.0.26100.0: DXC 1.9.2602.17).
+
+**Flags:** `dxc -nologo -T cs_6_0 -E main -HV 2018 -WX -Wno-ambig-lit-shift`, with `-Od` added for
+`intra_main` and `intra_main_hbd`, the two shaders FXC builds with `/Od`.
+
+| Flag | Why |
+| --- | --- |
+| `-T cs_6_0` | the lowest DXIL profile; nothing in the sources asks for more, and the console takes up to 6.4 |
+| no `-O` | DXC's default, `-O3`, as FXC's default is its full optimisation; `-Od` where FXC has `/Od` |
+| `-HV 2018` | the language version whose `&&`, `\|\|` and `?:` evaluate both sides, as FXC's do. DXC's default (2021) short-circuits them: other control flow from the same sources (57 of the 101 shaders compile to other bytecode with it). 2016 gives the same bytecode as 2018 |
+| `-WX` | a warning is an error, so that anything DXC objects to and FXC does not is seen |
+| `-Wno-ambig-lit-shift` | the one warning the sources give (560 times): `1 << n` with a literal on the left, whose type DXC could take as 64 bits where FXC's is `int`. It never does here, and that is held: the build refuses a listing with a 64-bit value in its code |
+| no `-Gis` | the listings have no floating point arithmetic, so IEEE strictness has nothing to decide |
+| nothing stripped, no `-all-resources-bound`, no 16-bit types | the container keeps its reflection part as FXC's keeps `RDEF`; the rest would be changes of semantics, not of compiler |
+
+Every shader must compile, be a DXIL container, and carry the validator's hash (D3D12 takes no
+unsigned DXIL).
+
+**Source changes: none.** DXC accepts all 101 sources as they are (apart from the warning above), so
+the FXC bytecode is untouched: in the run below the normal and the uavsync builds took all 101 headers
+from the cache of the commit before, by the same keys, and `rust-equal` held them against the pinned
+C++ decoder as before.
+
+**Host changes: none for DXIL.** The pipeline states are created from DXC's bytecode with the root
+signatures as they are; WARP and vkd3d take them. Behind the feature there is only the report.
+
+**How a log shows it.** The `LIBRARY` line of the player ends with `shaders: DXC 1.9.2602.17 cs_6_0`
+(the default package: `shaders: FXC cs_5_0`), its `Experiments:` line says `shaders dxc`, and
+`rav1g-dec` prints `SHADERS dxc (DXC 1.9.2602.17 cs_6_0)` (default: `SHADERS normal build (FXC
+cs_5_0)`).
+
+**CI** (every push): the Shaders action builds the dxc variant next to the two FXC variants (a few
+seconds of DXC, then from the cache); the `player` job builds the DXC package behind its other packages
+(artifact `rav1g-testplayer-dxc-x64-<run id>`, version `0.2.<run number>.4`, about half a minute as the
+library shares the target directory of the default one); the job `rust-dxc` builds `rav1g-dec` with the
+feature and runs the conformance set and the player's decoder code on WARP (artifact
+`rav1g-dec-dxc-<run id>`, with DXC's listings). The push run is not longer for it: `rust-dxc` ends
+long before the jobs that decide the length of the run. `rust-equal` and all other jobs stay on the FXC
+build.
+
+**WARP result** (run 43729069337, commit e319730, DXC 1.9.2602.17): `254 streams: 254 pass, 0 fail` with
+an empty `expected.txt`, every output frame at its reference md5, and the player's decoder code through
+`rav1g.h` ends every task with `MD5 is OK`. Locally the same sources compiled by the Linux releases of
+DXC 1.8.2403 and 1.9.2602 decode the 244 AOM vectors to their md5 on wine's vkd3d with lavapipe. So
+DXC's code computes the same bytes on two software devices.
+
+**Console: pending.** To measure: the default package and the DXC package of one run, the same clips,
+the same flags (`0.2.<n>.0` first: `0.2.<n>.4` installs over it, not the other way round).
+
 ## Inter prediction: breakdown and fast paths (2026-11-12)
 
 ### What the console measured

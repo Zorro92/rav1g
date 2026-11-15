@@ -198,12 +198,13 @@ manifest:
 | `rav1g-testplayer-x64-<run-id>` | `0.2.<run number>.0` | `rav1g.dll`: Rust, the C compiled by clang-cl with full link time optimisation, linked by lld-link | **the default: use this one** |
 | `rav1g-testplayer-msvc-x64-<run-id>` | `0.2.<run number>.2` | linked statically: Rust, the C compiled by MSVC with `/GL` and by the player's link (`/LTCG:incremental`) | the alternative: one program without a DLL of its own; for a comparison of the two compilers |
 | `rav1g-testplayer-uavsync-x64-<run-id>` | `0.2.<run number>.1` | the default build with the uavsync shaders | only with the `experiments` input; see [Experiments](#experiments) |
+| `rav1g-testplayer-dxc-x64-<run-id>` | `0.2.<run number>.4` | the default build with the same shader sources compiled by DXC for Shader Model 6.0 (`LIBRARY ... shaders: DXC <version> cs_6_0`) | an experiment: what the compiler alone does to the GPU time; see [gpu-av1-decoder.md](gpu-av1-decoder.md#dxc-experiment-2026-11-15) |
 | `rav1g-testplayer-hevcplayback-x64-<run-id>` | `0.2.<run number>.3` | the programs of the default package, byte for byte; the manifest declares the restricted capability `hevcPlayback` | only for the memory the console gives an app with that capability; see [The two memory pools](#the-two-memory-pools-memory-pools-hevcplayback) |
 
 A higher revision installs over a lower one and keeps LocalState; the default package of a later
 run installs over all of them. The log of a launch names its library in a `LIBRARY` line before the
 pipeline states (`LIBRARY rav1g <version>, the Rust host; entropy decoder: clang-cl, full LTO, DLL
-runtime`, or `MSVC, /GL`). Every artifact has the package, the certificate, `SOURCES.txt` (with a
+runtime; shaders: FXC cs_5_0`, or `MSVC, /GL`; the DXC package says `shaders: DXC <version> cs_6_0`). Every artifact has the package, the certificate, `SOURCES.txt` (with a
 `Variant:` line), the licences, the build log and `imports/` (the DLLs the programs of the package
 import from, checked against `testing/uwp_imports/player-dlls-allow.txt`: no `kernel32.dll`); the
 shader listings and the survey are in the default artifact only, which also has `rav1g.pdb`.

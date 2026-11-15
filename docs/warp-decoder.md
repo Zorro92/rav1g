@@ -35,7 +35,10 @@ The shader headers are those of the FXC build: the directory
 ([test-player.md](test-player.md#shader-cache-of-the-workflow)); the build stops when the variable is
 not set. With `RAV1G_SM6TEST_SHADER_DIR=<dir>` (what `testing/sm6test/compile.py --out <dir>` writes)
 `-sm6test` has its test shaders; without it the test reports that they are not built in.
-`--features uavsync` builds the decoder for the headers of the uavsync variant.
+`--features uavsync` builds the decoder for the headers of the uavsync variant, `--features dxc` for
+those of the dxc variant (`shaders.py build --dxc <dxc> --variant dxc`: the same sources compiled by
+DXC, [gpu-av1-decoder.md](gpu-av1-decoder.md#dxc-experiment-2026-11-15)); the program prints which it
+has (`SHADERS normal build (FXC cs_5_0)`, `SHADERS dxc (DXC <version> cs_6_0)`).
 
 On Linux, for Windows (clang 19 or newer with `clang-cl`, `lld-link` and `llvm-lib` on the path,
 and `cargo-xwin`, which fetches the Windows SDK and the MSVC C runtime; no wine):
