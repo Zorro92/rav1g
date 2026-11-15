@@ -733,6 +733,11 @@ int AV1Decoder::DecodeOne() {
   perf_installed_ = params_.gputime_ ? 1 : 0;
   // -gputimedetail, -gputimeisolate: the inter breakdown, set like the callback while no frame is in flight.
   rav1g_set_perf_detail(params_.gputime_ ? params_.gputime_detail_ : 0);
+  // -memstats: the decoder writes MEMSTATS lines when the task has drained; with -progress a line a frame.
+  rav1g_set_memory_stats(params_.memstats_ ? (params_.progress_ ? 2 : 1) : 0);
+  if (params_.memstats_)
+    XB_LOGI << "MEMSTATS on (-memstats): the summary follows the drain of the task"
+            << (params_.progress_ ? ", a line for every frame (-progress)" : "");
   storage_->SetWaitLogging(params_.gputime_);
   storage_->ResetWaitStats();
   if (params_.gputime_)

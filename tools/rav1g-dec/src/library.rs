@@ -507,6 +507,15 @@ impl Library {
         }
     }
 
+    /// -memstats: 0 off, 1 the summary behind the drain, 2 also a line a frame.
+    pub fn set_memory_stats(&self, level: u32) {
+        if self.is_c() {
+            capi::rav1g_set_memory_stats(level);
+        } else {
+            switches::set_memory_stats(level);
+        }
+    }
+
     /// -poisonmi, -poisonbuf: for the decoders created after the call.
     pub fn set_poison(&self, level: Poison) {
         if self.is_c() {

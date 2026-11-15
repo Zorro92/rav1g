@@ -1475,6 +1475,8 @@ unsafe fn destroy(dec: *mut Av1Core, log_steps: bool) {
         av1_drain_gpu_decoder(dec);
         // The parser of phase 2: its threads are joined before the buffers they write are released.
         drop((*dec).rav1d.take());
+        // -memstats: what no drain has written.
+        super::mem_stats::summary(dec);
         // What the pools were used for, when the decoder was in use.
         if let (true, Some(pools)) = (log_steps, (*dec).pools.as_deref()) {
             let stats = pools.stats();

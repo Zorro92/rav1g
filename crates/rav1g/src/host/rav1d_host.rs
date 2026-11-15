@@ -1521,7 +1521,11 @@ pub(crate) unsafe extern "C" fn rav1g_rav1d_drain(
         };
         let failure = host.sink.host().frames.as_ref().and_then(|frames| frames.take_failure());
         match failure {
-            None => sys::AOM_CODEC_OK,
+            None => {
+                // -memstats: the summary of the frames up to this drain.
+                super::mem_stats::summary(dec);
+                sys::AOM_CODEC_OK
+            }
             Some(failure) => {
                 host.detail = CString::new(failure.detail).unwrap_or_default();
                 *detail = host.detail.as_ptr();

@@ -352,6 +352,10 @@ pub struct TilePieces {
     /// Where the tile ends, in 4x4 units.
     pub col_end: c_int,
     pub row_end: c_int,
+    /// The coefficient values of the pieces the tile has left behind, and where the run of pieces it
+    /// is writing began (for the statistics of `mem_stats.rs`).
+    pub coef_values: i64,
+    pub coef_run: c_int,
 }
 
 /// The memory of the edges of the intra wavefront of the frames of a slot (`blocks::WaveEdges`). It grows
@@ -502,6 +506,8 @@ pub struct Av1Core {
     /// the decoder was created while the clears were the GPU's (`AV1_CLEARS_GPU`). Only then does a
     /// frame end its command list with them.
     pub gpu_clear_grids: c_int,
+    /// The statistics of `-memstats` (`mem_stats.rs`).
+    pub mem_stats: super::mem_stats::MemStats,
 }
 
 impl Av1Core {
@@ -529,6 +535,7 @@ impl Av1Core {
             (&raw mut (*dec).perf_detail_out).write(None);
             (&raw mut (*dec).rav1d).write(None);
             (&raw mut (*dec).pools).write(None);
+            (&raw mut (*dec).mem_stats).write(super::mem_stats::MemStats::new());
             let no_edges = || WaveStore { tiles: Vec::new(), above: Vec::new(), above_end: Vec::new(), frames: 0 };
             for slot in 0..FrameThreadDataCount as usize {
                 (&raw mut (*dec).frame_thread_data[slot].perf.detail).write(None);

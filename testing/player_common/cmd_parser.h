@@ -86,6 +86,8 @@ class CParameters {
     int loops_;
     int limit_;
     bool progress_;
+    // -memstats: the decoder's memory statistics (rav1g_set_memory_stats; docs/memory.md).
+    bool memstats_;
     int start_frame_;
     int frate_;
     bool needReadBack_;

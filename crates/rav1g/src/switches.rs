@@ -122,6 +122,12 @@ pub fn set_poison_buffers(level: Poison) {
     crate::host::av1_set_poison_buffers(level as c_int)
 }
 
+/// The memory statistics of the test programs (docs/memory.md): 0 off, 1 the decoders log a block of
+/// `MEMSTATS ` lines when they have drained, 2 also a line for every frame. The output is the same.
+pub fn set_memory_stats(level: u32) {
+    crate::host::av1_set_memory_stats(level.min(2) as c_int)
+}
+
 /// The inter breakdown of the timing records: 0 off, 1 sections, 2 every dispatch alone.
 pub fn set_perf_detail(mode: u32) {
     crate::host::av1_set_perf_detail(mode as c_int)

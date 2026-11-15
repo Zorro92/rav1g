@@ -812,6 +812,8 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     // fills the constants of a stage whenever it hands them out (ComputeCommandBuffer::Alloc).
     // The task has no decoder yet and the one of the task before is destroyed: no frame is in flight.
     library.set_poison(task.poison);
+    // -memstats: set while no frame is in flight; the decoder writes its lines when it has drained.
+    library.set_memory_stats(if task.memstats { 1 + u32::from(task.progress) } else { 0 });
     // -gpuclear, -cpuclear, -syncclear: also before the decoder exists. A decoder whose grids the GPU
     // clears is created with grids the GPU may write.
     library.set_clears(task.clears);

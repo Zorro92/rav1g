@@ -666,6 +666,7 @@ pub(crate) unsafe fn release_frame(dec: *mut Av1Core, td: *mut av1_frame_thread_
                 }
             });
         }
+        super::mem_stats::frame_released(dec, td_ptr);
         // Its grids stay dirty and are not marked clean, so the next frame on this slot clears them itself,
         // whoever does the clears otherwise.
         td.clear_pending = 0;
@@ -840,6 +841,8 @@ pub(crate) unsafe fn setup_frame_begin(
                 pieces.txb.clear();
                 pieces.piece = [(0, 0); 3];
                 pieces.cells_left = 0;
+                pieces.coef_values = 0;
+                pieces.coef_run = 0;
             }
             td.tile_pieces = td.pieces.as_mut_ptr();
             pools.begin(td.slot_index as usize, frame_cells(cm));
@@ -962,6 +965,7 @@ pub(crate) unsafe fn setup_frame_begin(
             (*hw_buffer).ref_cnt += 1;
         }
         drop(counting);
+        super::mem_stats::frame_setup(dec, cm, td);
 
         // From here on the slot is in a state the next setup can take back (the frame's buffers and
         // references are counted), so a failure below is reported as a decode error of this frame.
@@ -1333,6 +1337,8 @@ pub(crate) unsafe fn more_coefs(
         let start = (first * COEF_CHUNK) as c_int;
         if t.dq_buffer_end != start || t.dq_buffer_end == 0 {
             // What is left of the piece before stays empty, and zero.
+            pieces.coef_values += i64::from(t.dq_buffer_ptr - pieces.coef_run);
+            pieces.coef_run = start;
             t.dq_buffer_ptr = start;
         }
         t.dq_buffer_end = start + (chunks * COEF_CHUNK) as c_int;
@@ -1411,6 +1417,16 @@ pub(crate) unsafe fn tile_parsed(
             pools.progress(slot, pieces.cells_left as usize);
             pieces.cells_left = 0;
         }
+        // -memstats: what the tile wrote.
+        let records = |runs: &[Run]| runs.iter().map(|run| run.count.max(0) as u64).sum::<u64>();
+        super::mem_stats::tile_parsed(
+            dec,
+            td,
+            records(&pieces.mode_info),
+            (pieces.coef_values + i64::from(t.dq_buffer_ptr - pieces.coef_run)).max(0) as u64,
+            records(&pieces.txb),
+            t.gen_index_ptr.max(0) as u64,
+        );
     }
 }
 
@@ -1491,6 +1507,11 @@ pub(crate) unsafe fn write_palette(
             return;
         }
         let fb = &*td.frame_buffer;
+        super::mem_stats::palette_block(
+            _dec,
+            td,
+            width * height * if fb.hbd != 0 { 2 } else { 1 } * if plane != 0 { 2 } else { 1 },
+        );
         let bsz = 4 >> plane;
         let palette_buf = (*td.palette_buffer).host_ptr.cast::<u8>();
         let plane_start = |p: usize| palette_buf.offset(fb.planes[p].offset as isize - fb.base_offset as isize);
@@ -1597,6 +1618,7 @@ pub(crate) unsafe extern "C" fn rav1g_decode_frame_submit(
         }
         // The clears of the slot by the GPU, behind everything that reads its grids.
         record_slot_clears(dec);
+        super::mem_stats::frame_recorded(dec, &*cm);
         let mut perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_COPY as usize, perf_lap_start);
         if perf_t != 0 {
             let td = &*(*dec).curr_frame_data;

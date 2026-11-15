@@ -106,6 +106,8 @@ struct Chunks {
     free_count: usize,
     /// The most chunks that were in use at once.
     peak: usize,
+    /// The same since the statistics last asked (`Pools::take_stat_peak`).
+    stat_peak: usize,
 }
 
 impl Chunks {
@@ -114,7 +116,7 @@ impl Chunks {
         for chunk in 0..total {
             free[chunk / 64] |= 1 << (chunk % 64);
         }
-        Chunks { rule: rule.min(total), free, total, free_count: total, peak: 0 }
+        Chunks { rule: rule.min(total), free, total, free_count: total, peak: 0, stat_peak: 0 }
     }
 
     fn is_free(&self, chunk: usize) -> bool {
@@ -155,6 +157,7 @@ impl Chunks {
         }
         self.free_count -= run;
         self.peak = self.peak.max(self.total - self.free_count);
+        self.stat_peak = self.stat_peak.max(self.total - self.free_count);
         Some((first, run))
     }
 
@@ -392,6 +395,21 @@ impl Pools {
         frame.held = [0; KINDS];
         self.remaining[slot].store(0, Ordering::Release);
         self.changed.notify_all();
+    }
+
+    /// The chunks the frame of the slot holds, by [`Kind`].
+    pub(crate) fn held(&self, slot: usize) -> [usize; KINDS] {
+        self.state().frames[slot].held
+    }
+
+    /// The most chunks of each pool that were in use at once since the last call; the count starts
+    /// over with what is in use now. For the statistics of `mem_stats.rs`.
+    pub(crate) fn take_stat_peak(&self) -> [usize; KINDS] {
+        let mut state = self.state();
+        [0, 1, 2].map(|kind| {
+            let chunks = &mut state.chunks[kind];
+            std::mem::replace(&mut chunks.stat_peak, chunks.total - chunks.free_count)
+        })
     }
 
     /// Closes the pools: nothing waits any more, and a take gives [`Take::Stopped`].

@@ -111,8 +111,10 @@ pub struct Task {
     pub gputime: bool,
     /// -gputimedetail (1), -gputimeisolate (2): the inter breakdown; either sets gputime.
     pub gputime_detail: i32,
-    /// -progress: with -gputime, the per-frame lines behind the summary.
+    /// -progress: with -gputime, the per-frame lines behind the summary; with -memstats, a line a frame.
     pub progress: bool,
+    /// -memstats: the decoder's memory statistics, `MEMSTATS` lines behind the drain (docs/memory.md).
+    pub memstats: bool,
     /// -dumpstages <frame list>
     pub dumpstages: String,
     /// -dumpdir <dir>
@@ -164,6 +166,7 @@ impl Default for Task {
             gputime: false,
             gputime_detail: 0,
             progress: false,
+            memstats: false,
             dumpstages: String::new(),
             dumpdir: "dumps".to_string(),
             dump_frames: Vec::new(),
@@ -292,6 +295,10 @@ pub fn usage() {
     );
     say!("                        stage and of the reconstruction (same output)");
     say!("  -progress             with -gputime: one 'GPUTIME frame ...' line per frame behind the summary");
+    say!("  -memstats             memory statistics (docs/memory.md): 'MEMSTATS ...' lines behind the drain: what the");
+    say!("                        frames used of the pools and buffers that hold a worst case, the frame buffers out");
+    say!("                        of their pool, the bytes the CPU writes for a frame; with -progress a line for");
+    say!("                        every frame (same output)");
     say!("  -alllayers            a stream with spatial layers: output the frame of every layer of a temporal unit");
     say!("                        (default: one frame per temporal unit, the highest layer it has)");
     say!("  -oppoint <n>          a stream with layers: decode operating point n of its sequence header (default 0)");
@@ -433,6 +440,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
                 task.gputime_detail = 2;
             }
             "-progress" => task.progress = true,
+            "-memstats" => task.memstats = true,
             "-alllayers" => task.all_layers = true,
             "-oppoint" => task.oppoint = number()?,
             "-parser" => {

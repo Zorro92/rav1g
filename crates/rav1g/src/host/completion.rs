@@ -200,6 +200,7 @@ unsafe fn completion_thread(dec: *mut Av1Core) {
                 if let (0, Some(pools)) = (td.output_only, (*dec).pools.as_deref()) {
                     pools.release(td.slot_index as usize, |_, _, _| {});
                 }
+                super::mem_stats::frame_released(dec, td);
                 // What the frame cleared of the slot's grids is clean again before the slot goes back
                 // (`clear_slot`).
                 let perf_clear_start = if perf_have_rec { perf_now() } else { 0 };

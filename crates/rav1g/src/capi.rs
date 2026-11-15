@@ -1449,6 +1449,15 @@ pub extern "C" fn rav1g_set_poison_buffers(level: u32) {
     });
 }
 
+/// The memory statistics of the test programs (docs/memory.md): 0 off; 1: a decoder logs a block of
+/// lines that start with "MEMSTATS " when it has drained (`rav1g_decoder_drain` without an error) or is
+/// destroyed, about the frames since the last block; 2: also a line for every frame. The output is the
+/// same.
+#[unsafe(no_mangle)]
+pub extern "C" fn rav1g_set_memory_stats(level: u32) {
+    switches::set_memory_stats(level);
+}
+
 /// The inter breakdown of the timing records: 0 off, 1 sections, 2 every dispatch alone.
 #[unsafe(no_mangle)]
 pub extern "C" fn rav1g_set_perf_detail(mode: u32) {

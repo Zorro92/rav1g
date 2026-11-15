@@ -1209,6 +1209,14 @@ enum Rav1gStatus rav1g_set_shader_pick(const char *pick);
 void rav1g_set_poison_buffers(uint32_t level);
 
 /*
+ The memory statistics of the test programs (docs/memory.md): 0 off; 1: a decoder logs a block of
+ lines that start with "MEMSTATS " when it has drained (`rav1g_decoder_drain` without an error) or is
+ destroyed, about the frames since the last block; 2: also a line for every frame. The output is the
+ same.
+ */
+void rav1g_set_memory_stats(uint32_t level);
+
+/*
  The inter breakdown of the timing records: 0 off, 1 sections, 2 every dispatch alone.
  */
 void rav1g_set_perf_detail(uint32_t mode);

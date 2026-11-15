@@ -258,6 +258,7 @@ pub(crate) unsafe fn prediction_gen_blocks(pbi: *mut AV1Decoder, dec: *mut Av1Co
                 }
             }
         }
+        super::mem_stats::pred_blocks(dec, pred_block_total, pred_warp_count);
         // -dumpstages: the mode info, where the first stage that reads it starts.
         stage_dump_mode_info(dec, cm);
         let commands = commands(dec);

@@ -56,6 +56,8 @@ mod intra_v2;
 mod libaom;
 pub(crate) mod log;
 mod loopfilter;
+mod mem_stats;
+pub(crate) use mem_stats::av1_set_memory_stats;
 mod memory;
 pub(crate) mod obu;
 mod output;

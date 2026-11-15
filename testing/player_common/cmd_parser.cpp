@@ -31,6 +31,11 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"loop", atInt, anOptional, "loops", "", &params_.loops_},
       {"limit", atInt, anOptional, "decoding frame limit", "", &params_.limit_},
       {"progress", atSingle, anOptional, "show decoding time for each frame", "", &params_.progress_},
+      {"memstats", atSingle, anOptional,
+       "memory statistics (docs/memory.md): MEMSTATS lines behind the drain of the task, what the frames used of "
+       "the pools and buffers that hold a worst case, the frame buffers out of their pool, the bytes the CPU "
+       "writes for a frame; with -progress a line for every frame. Same output",
+       "", &params_.memstats_},
       {"save_md5", atString, anOptional, "Save md5 for each frame", "", &params_.save_md5_},
       {"md5_frame_check", atSingle, anOptional, "Calculate md5 for each frame & compare it with md5 file", "",
        &params_.md5_frame_check_},
@@ -392,6 +397,7 @@ void CParameters::Reset() {
   params_.loops_ = 1;
   params_.limit_ = -1;
   params_.progress_ = false;
+  params_.memstats_ = false;
   params_.start_frame_ = 0;
   params_.frate_ = 0;
   params_.needReadBack_ = false;
