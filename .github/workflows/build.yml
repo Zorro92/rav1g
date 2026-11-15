@@ -35,7 +35,7 @@ env:
   # The equality reference (docs/rust-port.md, "Equality reference"): the commit of branch cpp whose
   # warp_decoder the rust-equal job holds rav1g-dec against. Bumped on purpose, with the docs, when a
   # change that both decoders have (a shader, the C of the parser) lands on both branches.
-  CPP_REFERENCE_COMMIT: df73d8c2aeaa95d31a6c603e57a0c92cccbd7ed9
+  CPP_REFERENCE_COMMIT: e5830675f65df65a829af3ad17592dc8f63b44c0
 
 jobs:
   player:

@@ -159,7 +159,7 @@ Phase 1 of the Rust port kept the output of the decoder byte for byte, and CI go
 against the C++ decoder, which is no longer in this branch:
 
 - The job **`cpp-reference`** checks out branch `cpp` at the commit that `CPP_REFERENCE_COMMIT` of
-  `.github/workflows/build.yml` names (df73d8c, the head of `cpp` on 2026-11-13), builds its
+  `.github/workflows/build.yml` names (e583067, the head of `cpp` on 2026-11-15), builds its
   `warp_decoder` with its own shaders, and runs it with the scripts, streams and task lists of this
   commit: the whole set (`run.py`; it has to give the results of `expected.txt` too), the stage dumps
   of `dump_tasks.txt`, and the MEMORY lines of ten decoder configurations (`memory_lines.py`).

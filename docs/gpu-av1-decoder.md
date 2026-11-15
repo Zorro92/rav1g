@@ -1044,7 +1044,8 @@ Speed, for what it is worth with wrong output (4K, means of 290 frames, first co
 clip): the GPU stage sum 18.86 ms with FXC and 18.65 ms with DXC on `j4k40` (inter -6.7 %, loop
 restoration -16 %, idct -4.3 %, intra -0.3 %, CDEF +1.1 %), inter -5.3 % on `d2_300`; frames a second
 within the spread of the runs (the parse sets them). So DXC as it is would give about 1 % of GPU time,
-and the first thing it needs is the reason the console computes the 8-tap luma filter differently.
+and the first thing it needed was the reason the console computes the 8-tap luma filter differently
+(found and fixed, below).
 
 **The bisect build.** To find the shaders the console computes differently, the DXC package has three
 bytecodes of every shader from the run after this one on: DXC's (what it had), DXC's with `-Od`, and
@@ -1057,6 +1058,69 @@ optimisation that brings the console's compiler to it. On WARP and on lavapipe t
 md5-identical with every shader of each of the three sets and with a mix
 ([test-player.md](test-player.md#shader-pick--shaderpick-the-dxc-package)). The default package has one
 bytecode per shader, as it had.
+
+**Console, the bisection** (DXC package 0.2.172.4 of run 43738098636, one launch per pick):
+
+| Pick | Result |
+| --- | --- |
+| `-shaderpick fxc=all` | md5 right (the control: the default package's shaders in the DXC package) |
+| `-shaderpick fxc=loopfilter_vert_hbd`, all 15 streams | **15 of 15 md5 right**: this one shader is all of it |
+| `-shaderpick fxc=all,dxc=loopfilter_vert_hbd`, `syn_resize-mode` | 64 frames wrong: the shader alone is enough |
+| `-shaderpick od=loopfilter_vert_hbd`, `syn_resize-mode` | 64 frames wrong: DXC's `-Od` bytecode goes the same way |
+
+So the 10 failing streams are the 10-bit streams with a loop filter, and the 5 that passed are the
+8-bit ones, which never run this shader.
+
+**The cause: one comparison, computed with the operands of another.** The dumps of frame 0 of
+`syn_resize-mode` say which, without another console run. A model of `loopfilter_vert_hbd` on the
+console's own `intra` (the arithmetic of the shader in Python, as `lf_model.py` has it for 8 bits)
+gives the console's `lf_vert_even` and `lf_vert` to the last sample, 0 of 921600 differing, when one
+term is exchanged: in `flat`, the console's compile of DXC's bytecode computes
+
+```
+abs(q0.y - q0.z) <= 4        where the source has        abs(q0.w - q0.x) <= 4
+```
+
+As written, the model differs from the console in 157 samples of the even pass and 419 of both, and
+is lavapipe's plane exactly. On the 1358 luma edges of the even pass where that term decides (the
+mask passes, the rest of `flat` holds), the exchanged term gives the console's branch on all 1358.
+Nothing else is other than written: the arithmetic of the 8-tap and 14-tap branches, the 4-tap branch,
+chroma (its edge types never reach `flat`), and the horizontal filter, which has the same expressions.
+An edge with `q0.w` away from `q0.x` and `q0.y` near `q0.z` took the 8-tap branch where it should take
+the 4-tap one, hence three samples on each side.
+
+Why this shader: a sample is 16 bits, two to a word of the frame; `q0.x` and `q0.y` are the halves of
+one word of the `Load4` around the edge (`z`), `q0.z` and `q0.w` those of the next (`w`). DXC's
+bytecode has
+
+```
+%182 = sub (lshr w, 16), (and z, 65535)     ; q0.w - q0.x, in flat
+%140 = sub (lshr z, 16), (and w, 65535)     ; q0.y - q0.z, in the mask
+```
+
+the same operation on the same two extractions with the two words exchanged, both under an `IMax(x,
+-x)`, and the console's compiler takes the second for the first. A scan of DXC's listings for that
+shape (two instructions of one operation that is not commutative, on two different extractions of two
+values, crossed) finds it in this shader alone of the 101, at `-Od` as well. The p side of the same
+shader has `p1.x - p1.w` in `flat` and `p1.y - p1.z` in the mask, `(and x) - (lshr y)` against `(lshr x) -
+(and y)`: not the same operation crossed, and computed as written. The 8-bit filter has its four
+samples of a side in one word, and the horizontal filters load every sample on its own. What the
+console's compiler does inside is not known; like the pair of the 8-bit filter
+([above](#a-paired-read-before-an-overlapping-in-place-write-2026-11-12)) this is one sequence it gets
+wrong, with the sequences next to it right.
+
+**The fix: the term is `abs(q0.x - q0.w)`.** The same decision, and in DXC's bytecode `(and z) - (lshr
+w)`, the form of the p side. Nothing else of the shader changed. On WARP and on lavapipe the
+conformance sets are md5-identical with the changed shader as FXC compiles it and as DXC does.
+**FXC's bytecode of `loopfilter_vert_hbd` changes with it** (the same size, a few instructions of the
+flatness tests in another order; `testing/dxbc_scan` finds no pair in the new listing), so the shader
+of the default package is a new one too, with the output unchanged: the console's md5 set with the
+default package and with the DXC package of the commit of the fix is **pending**. The change is on
+branch `cpp` as well (`e583067`), and the equality reference is pinned there
+([rust-port.md](rust-port.md#equality-reference)).
+
+**Console timing: pending.** The speeds above were measured with a wrong vertical loop filter; the
+A/B of FXC against DXC with both right is still to be run.
 
 ## Inter prediction: breakdown and fast paths (2026-11-12)
 

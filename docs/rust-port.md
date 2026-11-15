@@ -127,8 +127,10 @@ have to write the same bytes at every stage, not only the same frames.
   Rust decoder by design, see [The host pool and the queues](#the-host-pool-and-the-queues-2026-11-13)).
 - **Where the C++ decoder comes from** (job `cpp-reference`): branch `cpp` at the commit that
   `CPP_REFERENCE_COMMIT` of `.github/workflows/build.yml` names, built with its own project files and
-  its own shaders. **The pin is `df73d8c2aeaa95d31a6c603e57a0c92cccbd7ed9`** (the head of `cpp` on
-  2026-11-13: the player's review fixes; its `libav1` is the one `main` had when the C++ host was removed).
+  its own shaders. **The pin is `e5830675f65df65a829af3ad17592dc8f63b44c0`** (the head of `cpp` on
+  2026-11-15: the pin before it, `df73d8c`, whose `libav1` is the one `main` had when the C++ host was
+  removed, with the one shader change both branches got that day, the last term of `flat` in
+  `loopfilter_vert_hbd.hlsl`; [gpu-av1-decoder.md](gpu-av1-decoder.md#dxc-experiment-2026-11-15)).
 - **The pin is bumped on purpose**, in the workflow and in this section, when a change that both decoders
   have (a shader, the C of the parser) has landed on both branches. A change on `main` alone that leaves
   the output as it is needs no bump.
