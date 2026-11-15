@@ -2394,7 +2394,7 @@ uses about 897 of 1024 MiB. The timing lines of
 - Pool use on the console with two frames in parse: at most 11–13 % (`j4k40`), 51–68 % of the
   coefficient pool (`d2`); no tile waited for the GPU.
 
-**Left** after this step:
+**Left** after this step (measured since: [memory.md](memory.md), `-memstats`):
 
 - The guard: keep a margin from the cliff found above, so that it falls back instead of accepting
   a decoder that runs 2.5 times slower. Done: [the guard and the cliff](#the-guard-and-the-cliff).

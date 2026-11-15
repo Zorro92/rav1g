@@ -207,6 +207,8 @@ memory as possible left to the application.
   was removed at its end and what is open. The workspace builds with
   `RAV1G_SHADER_DIR=<shader headers> cargo build --release` on Windows and with
   `cargo xwin build --target x86_64-pc-windows-msvc` on Linux.
+- [docs/memory.md](docs/memory.md): what streams really use of the decoder's memory (`-memstats`), and
+  the reductions that follow from it, ranked.
 - [docs/output.md](docs/output.md): the output images. By default a buffer with the planes of a frame
   and one texture a plane; with `Rav1gSettings::output_kind = RAV1G_OUTPUT_SEMI_PLANAR` one NV12 or
   P010 texture that the decoder's output pass writes, which an application can share with a D3D11
