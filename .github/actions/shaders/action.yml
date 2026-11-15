@@ -95,7 +95,13 @@ runs:
             (Get-FileHash shader-build/uavsync/dx/shaders/h/loopfilter_hor.h).Hash) {
           throw 'The shaders of the uavsync build are those of the normal build'
         }
-        # The DXC build is DXIL and says what compiled it; the FXC builds have no such line.
+        # The DXC build is DXIL and says what compiled it; the FXC builds have no such line. It also has
+        # the two other bytecodes of every shader for the shader pick (DXC with -Od, and FXC's, from the
+        # cache entries of the normal build), and the line of each set.
+        if (-not (Test-Path shader-build/dxc/shader_sets.txt) -or -not (Test-Path shader-build/dxc/dx/shaders/h_od/loopfilter_vert.h) -or
+            -not (Test-Path shader-build/dxc/dx/shaders/h_fxc/loopfilter_vert.h)) {
+          throw 'The DXC build has not the three bytecodes of the shader pick'
+        }
         if (-not (Test-Path shader-build/dxc/shader_set.txt) -or (Test-Path shader-build/normal/shader_set.txt) -or
             (Test-Path shader-build/uavsync/shader_set.txt)) {
           throw 'shader_set.txt is the mark of the DXC build, and of that build alone'

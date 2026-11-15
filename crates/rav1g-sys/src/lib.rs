@@ -46,5 +46,10 @@ pub const C_BUILD: &str = env!("RAV1G_C_BUILD");
 /// the DXC experiment ("DXC 1.9.2602.17 cs_6_0").
 pub const SHADER_SET: &str = env!("RAV1G_SHADER_SET");
 
+/// The feature `dxc`: the compiler and the arguments of the three bytecodes the library has of every
+/// shader, in the order of the sets of the shader pick (dxc, od, fxc); empty strings without the feature.
+pub const SHADER_SETS: [&str; 3] =
+    [env!("RAV1G_SHADER_SET_DXC"), env!("RAV1G_SHADER_SET_OD"), env!("RAV1G_SHADER_SET_FXC")];
+
 #[cfg(test)]
 mod layout_tests;

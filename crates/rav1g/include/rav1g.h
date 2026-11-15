@@ -1185,6 +1185,23 @@ void rav1g_set_lf_h_split(uint32_t mode);
 void rav1g_set_intra_edge_fix(bool enable);
 
 /*
+ Experiment (the DXC package: a library whose `rav1g_shader_variant` is "dxc"): which bytecode the
+ pipeline state of a shader is made of, in the devices created after the call. The library of that
+ build has three of every shader: `dxc`, what DXC compiled with its default optimisation (every shader,
+ without a pick); `od`, what DXC compiled with `-Od`; `fxc`, the `cs_5_0` bytecode of FXC, the one of
+ the default build. `pick` is "fxc=<list>,od=<list>,dxc=<list>": a list is shader names (the names of
+ the `.hlsl` files) separated by commas, `all`, or names with `*` for any characters; a later part
+ overrides an earlier one ("fxc=all,dxc=loopfilter_vert_hbd"). Null or an empty text is no pick. The
+ device logs one "SHADERSET" line per bytecode set and a "SHADERPICK" line with the shaders of each.
+ `RAV1G_STATUS_INVALID_PARAM` (and the reason in `rav1g_last_error`) for a text that is not a pick, a
+ name no shader has, and any pick in a library that is not that build; the pick then stays what it was.
+
+ # Safety
+ `pick` is null or a C string.
+ */
+enum Rav1gStatus rav1g_set_shader_pick(const char *pick);
+
+/*
  Debugging: the decoders created after the call fill the mode info pool (`RAV1G_POISON_MODE_INFO`) or
  every buffer the CPU writes for the shaders (`RAV1G_POISON_BUFFERS`) with the byte 0xA5 when they
  create it; 0 switches it off. The output must be the same.

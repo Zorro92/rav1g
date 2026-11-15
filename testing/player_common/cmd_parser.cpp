@@ -474,5 +474,7 @@ void CParameters::GetHelp(int pos, const char* arg, std::string& errMsg, const P
   }
   // Handled before the task lines are parsed (decoder_creator.cpp), so it is not in the list above.
   errMsg += " [-sm6test]\tShader Model 6 test before the tasks; may be the only thing on its line\n";
+  errMsg += " [-shaderpick <pick>]\tthe DXC package: fxc=<list>,od=<list>,dxc=<list>, the bytecode of the named shaders "
+            "in this launch (docs/test-player.md); may be the only thing on its line\n";
   errMsg += "\n";
 }

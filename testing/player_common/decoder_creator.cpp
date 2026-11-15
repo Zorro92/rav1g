@@ -172,13 +172,28 @@ int Decoders::DecodeLoop() {
   // Shader Model 6 test shaders then run once, here, before the pipeline states of the decoder are created
   // ("SM6TEST ..." lines). The flag is taken off the line, and a line that had nothing else is no task: a
   // task file with only -sm6test runs the test and ends.
+  //
+  // -shaderpick <pick>: the same kind of flag, for the DXC package (docs/test-player.md, "Shader pick"):
+  // which of the three bytecodes that package has of every shader the pipeline states of this launch are
+  // made of. It holds for the whole launch, whatever line it stands on (the last one counts), as the
+  // pipeline states are created once, below.
   bool sm6test = false;
   bool has_tasks = false;
+  bool has_shader_pick = false;
+  std::string shader_pick;
   for (std::vector<one_task>::iterator task = arg_lists.begin(); task != arg_lists.end(); task++) {
     for (std::vector<std::string>::iterator arg = task->begin(); arg != task->end();) {
       if (*arg == "-sm6test") {
         sm6test = true;
         arg = task->erase(arg);
+      } else if (*arg == "-shaderpick") {
+        arg = task->erase(arg);
+        has_shader_pick = true;
+        shader_pick.clear();
+        if (arg != task->end()) {
+          shader_pick = *arg;
+          arg = task->erase(arg);
+        }
       } else {
         arg++;
       }
@@ -199,6 +214,19 @@ int Decoders::DecodeLoop() {
   XB_LOGI << "LIBRARY " << rav1g_version();
   // The decoder's own log lines (MEMORY ...) go to the player's log, from the pipeline states on.
   rav1g_set_log_callback(AV1Decoder::LogLine, NULL);
+  // -shaderpick: before the pipeline states. The library logs the pick ("SHADERSET ...", "SHADERPICK ...")
+  // when it creates them. A pick the library does not take (a name no shader has, a package that is not
+  // the DXC package) ends the launch: no task is run with other shaders than the line asked for.
+  if (has_shader_pick) {
+    XB_LOGI << "Shader pick (-shaderpick): " << (shader_pick.empty() ? "(empty)" : shader_pick.c_str());
+    if (shader_pick.empty() || rav1g_set_shader_pick(shader_pick.c_str()) != RAV1G_STATUS_OK) {
+      XB_LOGE << "-shaderpick " << shader_pick << " is not allowed: "
+              << (shader_pick.empty() ? "it needs a pick, fxc=<list>,od=<list>,dxc=<list>" : rav1g_last_error());
+      XB_LOGE << "No task was run. Bye";
+      if (display_) display_->AllJobDoneNotify();
+      return -1;
+    }
+  }
   AV1Decoder::LogMemory(dx_resources_.dx12_device.Get(), "before the pipeline states");
   // The decoder's device: the player's D3D12 device with the pipeline states of the decoder. The player
   // has no queue for it (PlayerWindow::Run): the decoder makes its own.

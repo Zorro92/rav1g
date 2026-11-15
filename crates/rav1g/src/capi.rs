@@ -15,7 +15,7 @@
 //! This file is read by cbindgen on its own: every type of a signature is defined here or is a C type.
 
 use std::cell::RefCell;
-use std::ffi::{CString, c_char, c_void};
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::Arc;
 
 use windows::Win32::Graphics::Direct3D12::ID3D12Resource;
@@ -1408,6 +1408,33 @@ pub extern "C" fn rav1g_set_lf_h_split(mode: u32) {
 #[unsafe(no_mangle)]
 pub extern "C" fn rav1g_set_intra_edge_fix(enable: bool) {
     switches::set_intra_edge_fix(enable);
+}
+
+/// Experiment (the DXC package: a library whose `rav1g_shader_variant` is "dxc"): which bytecode the
+/// pipeline state of a shader is made of, in the devices created after the call. The library of that
+/// build has three of every shader: `dxc`, what DXC compiled with its default optimisation (every shader,
+/// without a pick); `od`, what DXC compiled with `-Od`; `fxc`, the `cs_5_0` bytecode of FXC, the one of
+/// the default build. `pick` is "fxc=<list>,od=<list>,dxc=<list>": a list is shader names (the names of
+/// the `.hlsl` files) separated by commas, `all`, or names with `*` for any characters; a later part
+/// overrides an earlier one ("fxc=all,dxc=loopfilter_vert_hbd"). Null or an empty text is no pick. The
+/// device logs one "SHADERSET" line per bytecode set and a "SHADERPICK" line with the shaders of each.
+/// `RAV1G_STATUS_INVALID_PARAM` (and the reason in `rav1g_last_error`) for a text that is not a pick, a
+/// name no shader has, and any pick in a library that is not that build; the pick then stays what it was.
+///
+/// # Safety
+/// `pick` is null or a C string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rav1g_set_shader_pick(pick: *const c_char) -> Rav1gStatus {
+    let text = if pick.is_null() {
+        String::new()
+    } else {
+        // SAFETY: the caller's contract.
+        unsafe { CStr::from_ptr(pick) }.to_string_lossy().into_owned()
+    };
+    match switches::set_shader_pick(&text) {
+        Ok(()) => Rav1gStatus::Ok,
+        Err(reason) => set_last_error(&Error::new(ErrorCode::InvalidParam, reason)),
+    }
 }
 
 /// Debugging: the decoders created after the call fill the mode info pool (`RAV1G_POISON_MODE_INFO`) or

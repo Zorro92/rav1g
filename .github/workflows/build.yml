@@ -647,10 +647,13 @@ jobs:
           New-Item -ItemType Directory -Force out-dxc/dxc-shaders | Out-Null
           Copy-Item shader-build/dxc/asm out-dxc/dxc-shaders/asm -Recurse
           Copy-Item shader-build/dxc/report.json out-dxc/dxc-shaders/build.json
+          Copy-Item shader-build/dxc/shader_sets.txt out-dxc/dxc-shaders/
           $report = Get-Content shader-build/dxc/report.json -Raw | ConvertFrom-Json
           (Get-Content out-dxc/SOURCES.txt) -notmatch '^Variant: ' | Set-Content out-dxc/SOURCES.txt -Encoding utf8
-          "Variant: dxc: the default build (rav1g.dll, C of clang) with the shaders compiled by $set ($($report.dxc_version)): dxc $($report.arguments), -Od where FXC has /Od; package version 0.2.$env:GITHUB_RUN_NUMBER.4" |
+          "Variant: dxc: the default build (rav1g.dll, C of clang) with the shaders compiled by $set ($($report.dxc_version)): dxc $($report.arguments), -Od where FXC has /Od; package version 0.2.$env:GITHUB_RUN_NUMBER.4",
+            "Shader pick: the library has three bytecodes of every shader, and the task flag -shaderpick fxc=<list>,od=<list>,dxc=<list> says which one a launch uses (docs/test-player.md, 'Shader pick'); without the flag every shader is of the set dxc. The sets:" |
             Add-Content out-dxc/SOURCES.txt -Encoding utf8
+          Get-Content shader-build/dxc/shader_sets.txt | ForEach-Object { "  $_" } | Add-Content out-dxc/SOURCES.txt -Encoding utf8
           Copy-Item rust-dxc/rav1g.pdb out-dxc/
           @('## DXC package', '', "Version 0.2.$env:GITHUB_RUN_NUMBER.4: installs over the other packages of this run. Shaders: $set, ``dxc $($report.arguments)``.", '', '```') +
             @($packages | ForEach-Object { $_.Name }) + @(Get-Content out-dxc/imports/check.txt) + @('```') >> $env:GITHUB_STEP_SUMMARY
@@ -2176,7 +2179,7 @@ jobs:
           New-Item -ItemType Directory -Force out/dxc-shaders | Out-Null
           Copy-Item shader-build/dxc/asm out/dxc-shaders/asm -Recurse
           Copy-Item shader-build/dxc/report.json out/dxc-shaders/build.json
-          Copy-Item shader-build/dxc/shader_set.txt out/dxc-shaders/
+          Copy-Item shader-build/dxc/shader_set.txt, shader-build/dxc/shader_sets.txt -Destination out/dxc-shaders/
           $report = Get-Content shader-build/dxc/report.json -Raw | ConvertFrom-Json
           "Commit: $env:GITHUB_SHA", "Run: https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID",
             "Build: cargo build --release -p rav1g-dec --features dxc, $(rustc --version), MSVC",
@@ -2207,6 +2210,39 @@ jobs:
           }
           if ($code -ne 0) { throw "conformance with the shaders DXC compiled: exit code $code (1: not as expected.txt says, 2: the run could not be done)" }
 
+      # The shader pick (docs/test-player.md, "Shader pick"): the library of the dxc feature has three
+      # bytecodes of every shader, DXC's (the run above), DXC's with -Od and FXC's, and -shaderpick says
+      # which one a pipeline state is made of. The whole set again with every shader of FXC's bytecode,
+      # with every shader of DXC's -Od bytecode, and with a mix of the three: each has to give the results
+      # of expected.txt, and its log has to say what was picked.
+      - name: Decode every stream on WARP with the shader picks (FXC's bytecode, DXC -Od, a mix)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $picks = @(@{ name = 'fxc'; pick = 'fxc=all'; line = 'dxc 0; od 0; fxc 97 (all)' },
+            @{ name = 'od'; pick = 'od=all'; line = 'dxc 0; od 97 (all); fxc 0' },
+            @{ name = 'mixed'; pick = 'fxc=loopfilter_*,idct*,*_fast,od=inter_*,cdef_*,intra_*,dxc=inter_main,reconstruct_block*'; line = '' })
+          $failed = @()
+          foreach ($pick in $picks) {
+            python testing/conformance/run.py --tool out/rav1g-dec-dxc/rav1g-dec.exe --streams conformance-streams `
+              --out "out/conformance-dxc-pick-$($pick.name)" --threads 4 "--tool-args=-shaderpick $($pick.pick)" `
+              "--title=rav1g-dec of the DXC experiment with -shaderpick $($pick.pick)"
+            if ($LASTEXITCODE -ne 0) { $failed += "-shaderpick $($pick.pick): exit code $LASTEXITCODE" }
+            $log = "out/conformance-dxc-pick-$($pick.name)/lists/run001.log"
+            if (-not (Select-String -Path $log -SimpleMatch "SHADERPICK $($pick.pick): $($pick.line)" -Quiet)) {
+              $failed += "-shaderpick $($pick.pick): no line 'SHADERPICK $($pick.pick): $($pick.line)' in $log"
+            }
+            if (@(Select-String -Path $log -Pattern '^SHADERSET (dxc|od|fxc): ').Count -lt 3) {
+              $failed += "-shaderpick $($pick.pick): not the three SHADERSET lines in $log"
+            }
+          }
+          # A name no shader has is refused, and nothing is decoded with it.
+          $refused = & out/rav1g-dec-dxc/rav1g-dec.exe -shaderpick fxc=no_such_shader -list conformance-streams/manifest.txt 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 3 -or $refused -notmatch "ERROR -shaderpick fxc=no_such_shader: shader pick: no shader has the name 'no_such_shader'") {
+            $failed += "-shaderpick with a name no shader has: exit code $LASTEXITCODE, expected 3 and an ERROR line"
+          }
+          if ($failed.Count) { throw ("the shader picks: " + ($failed -join '; ')) }
+
       # The test player's decoder code on the same library through rav1g.h, as the DXC package has it;
       # its LIBRARY line names the compiler of the shaders.
       - name: The test player's decoder code with the shaders DXC compiled (rav1g-dec -playersmoke)
@@ -2221,6 +2257,17 @@ jobs:
             throw "The LIBRARY line of the player's decoder code does not name the shaders of the DXC build ($set)"
           }
           if ($code -ne 0) { throw "the player's decoder code with the shaders DXC compiled: exit code $code" }
+          # The same with a pick on every task line, as a task file of the console has it: the player takes
+          # the flag off the line, sets the pick before the pipeline states, and the library logs it.
+          python testing/conformance/player_smoke.py --tool out/rav1g-dec-dxc/rav1g-dec.exe --streams conformance-streams `
+            --out out/player-smoke-dxc-pick "--player-args=-shaderpick fxc=loopfilter_vert_hbd,od=cdef_filter_v2" `
+            "--title=the Rust library of the DXC experiment with -shaderpick"
+          $code = $LASTEXITCODE
+          if (-not (Get-ChildItem out/player-smoke-dxc-pick -Recurse -File | Select-String -SimpleMatch `
+              'SHADERPICK fxc=loopfilter_vert_hbd,od=cdef_filter_v2: dxc 95 (all others); od 1 (cdef_filter_v2); fxc 1 (loopfilter_vert_hbd)' -Quiet)) {
+            throw "The player's log does not have the SHADERPICK line of the pick of its task lines"
+          }
+          if ($code -ne 0) { throw "the player's decoder code with a shader pick: exit code $code" }
 
       - name: Preserve rav1g-dec.exe with the shaders DXC compiled, the listings, the results and the logs
         if: always()
@@ -2231,7 +2278,9 @@ jobs:
             out/rav1g-dec-dxc/
             out/dxc-shaders/
             out/conformance-dxc/
+            out/conformance-dxc-pick-*/
             out/player-smoke-dxc/
+            out/player-smoke-dxc-pick/
           if-no-files-found: warn
 
   # Equality with the C++ decoder (docs/rust-port.md, "Equality reference"): rav1g-dec of this commit and

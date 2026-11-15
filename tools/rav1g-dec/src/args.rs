@@ -195,6 +195,8 @@ pub struct Globals {
     pub list: String,
     /// -playersmoke
     pub player_smoke: String,
+    /// -shaderpick <pick>
+    pub shader_pick: String,
 }
 
 pub fn usage() {
@@ -317,6 +319,13 @@ pub fn usage() {
     );
     say!("                        line per shader (docs/test-player.md); needs no stream: without -i and -list the");
     say!("                        program ends after the test");
+    say!("  -shaderpick <pick>    the build with the feature dxc (the DXC experiment), which has three bytecodes of");
+    say!("                        every shader: fxc=<list>,od=<list>,dxc=<list> says which one the pipeline state of");
+    say!("                        a shader is made of in this run. dxc: DXC's default optimisation (every shader,");
+    say!("                        without the flag); od: DXC with -Od; fxc: the cs_5_0 bytecode of FXC. A list is");
+    say!("                        shader names separated by commas, 'all', or names with '*'; a later part overrides");
+    say!("                        an earlier one (fxc=all,dxc=loopfilter_vert_hbd). 'SHADERSET ...' and 'SHADERPICK");
+    say!("                        ...' lines say what was taken (docs/test-player.md, \"Shader pick\")");
     say!("  -playersmoke <dir>    run the decoder code of the test player (testing/player_common) through rav1g.h on");
     say!("                        the device, with the tasks of <dir>/args/args_av1.txt as the player reads them from");
     say!("                        its LocalState (streams relative to <dir>); the player's log goes to stdout. Exit");
@@ -457,6 +466,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
                     "-parsedigest" => globals.parse_digest = true,
                     "-list" => globals.list = value()?,
                     "-playersmoke" => globals.player_smoke = value()?,
+                    "-shaderpick" => globals.shader_pick = value()?,
                     _ => return Err(format!("unknown argument '{a}'")),
                 }
             }

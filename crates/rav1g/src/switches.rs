@@ -138,6 +138,25 @@ pub fn shader_set() -> &'static str {
     crate::sys::SHADER_SET
 }
 
+/// The shader pick of the DXC experiment (the feature `dxc`; docs/test-player.md, "Shader pick"): the
+/// library of that build has three bytecodes of every shader, and `pick` says which one the pipeline
+/// state of a shader is made of, in the devices created after the call:
+/// `fxc=<list>,od=<list>,dxc=<list>`. `dxc` is DXC's bytecode with its default optimisation (every
+/// shader, without a pick), `od` DXC's with `-Od`, `fxc` the `cs_5_0` bytecode of FXC. A list is shader
+/// names separated by commas, `all`, or names with `*`; a later part overrides an earlier one. An empty
+/// text is no pick, and the only one a library without the feature takes. `Err` (the pick stays what it
+/// was) names what is wrong.
+pub fn set_shader_pick(pick: &str) -> Result<(), String> {
+    crate::host::set_shader_pick(pick)
+}
+
+/// The DXC experiment: the log lines a device created now writes about its shaders, one per bytecode set
+/// with its compiler and arguments (`SHADERSET ...`) and the pick (`SHADERPICK ...`). Empty without the
+/// feature `dxc`.
+pub fn shader_pick_lines() -> Vec<String> {
+    crate::host::shader_pick_lines()
+}
+
 /// What gets the records of the timing run ([`set_perf_callback`]).
 pub type PerfCallback = Arc<dyn Fn(&PerfFrame) + Send + Sync>;
 /// What gets the stage dumps ([`set_stage_dump`]).

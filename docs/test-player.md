@@ -127,6 +127,10 @@ one commit each:
 - **Experiments**: `-lfhsplit`, `-intraedgefix` and a second package whose shaders sync all
   memory at every group sync, for the bugs that show on the console only. See
   [Experiments](#experiments). Off by default; the output does not change.
+- **Shader pick**: in the DXC package, `-shaderpick fxc=<list>,od=<list>,dxc=<list>` says per
+  shader whether its pipeline state is made of DXC's bytecode, of DXC's `-Od` bytecode or of FXC's,
+  for finding the shader a device computes differently. See
+  [Shader pick](#shader-pick--shaderpick-the-dxc-package).
 - **Layers, new sequences, references of different sizes**: of a temporal unit with spatial
   layers the frame of the highest layer is output (`-alllayers` for every layer's frame,
   `-oppoint <n>` for another operating point), a sequence that does not fit the decoder is
@@ -198,7 +202,7 @@ manifest:
 | `rav1g-testplayer-x64-<run-id>` | `0.2.<run number>.0` | `rav1g.dll`: Rust, the C compiled by clang-cl with full link time optimisation, linked by lld-link | **the default: use this one** |
 | `rav1g-testplayer-msvc-x64-<run-id>` | `0.2.<run number>.2` | linked statically: Rust, the C compiled by MSVC with `/GL` and by the player's link (`/LTCG:incremental`) | the alternative: one program without a DLL of its own; for a comparison of the two compilers |
 | `rav1g-testplayer-uavsync-x64-<run-id>` | `0.2.<run number>.1` | the default build with the uavsync shaders | only with the `experiments` input; see [Experiments](#experiments) |
-| `rav1g-testplayer-dxc-x64-<run-id>` | `0.2.<run number>.4` | the default build with the same shader sources compiled by DXC for Shader Model 6.0 (`LIBRARY ... shaders: DXC <version> cs_6_0`) | an experiment: what the compiler alone does to the GPU time; see [gpu-av1-decoder.md](gpu-av1-decoder.md#dxc-experiment-2026-11-15) |
+| `rav1g-testplayer-dxc-x64-<run-id>` | `0.2.<run number>.4` | the default build with the same shader sources compiled by DXC for Shader Model 6.0 (`LIBRARY ... shaders: DXC <version> cs_6_0`) | an experiment: what the compiler alone does to the GPU time; see [gpu-av1-decoder.md](gpu-av1-decoder.md#dxc-experiment-2026-11-15). It also has FXC's bytecode and DXC's `-Od` bytecode of every shader, chosen per shader with [`-shaderpick`](#shader-pick--shaderpick-the-dxc-package) |
 | `rav1g-testplayer-hevcplayback-x64-<run-id>` | `0.2.<run number>.3` | the programs of the default package, byte for byte; the manifest declares the restricted capability `hevcPlayback` | only for the memory the console gives an app with that capability; see [The two memory pools](#the-two-memory-pools-memory-pools-hevcplayback) |
 
 A higher revision installs over a lower one and keeps LocalState; the default package of a later
@@ -3361,6 +3365,98 @@ LocalState (streams, references), and the normal package of any later run instal
 Going back to the normal package of the same run needs an uninstall, which removes LocalState;
 so run the normal package first. Its log says `Experiments: shaders uavsync`. The flags work in
 it as well.
+
+### Shader pick (`-shaderpick`, the DXC package)
+
+For finding which shader a device computes differently when DXC compiled it
+([gpu-av1-decoder.md](gpu-av1-decoder.md#dxc-experiment-2026-11-15)). The DXC package
+(`rav1g-testplayer-dxc-x64-<run id>`, the `dxc` feature of the crates) has **three bytecodes of every
+shader**, and the flag says which one the pipeline state of a shader is made of in a launch:
+
+| Set | What it is |
+| --- | --- |
+| `dxc` | DXC, `-T cs_6_0`, its default optimisation (`-Od` for `intra_main` and `intra_main_hbd`, as FXC has `/Od` for them): what every shader is without the flag |
+| `od` | DXC with `-Od` for every shader (DXIL as well, with next to nothing folded, merged or reordered by DXC) |
+| `fxc` | the `cs_5_0` bytecode of FXC: byte for byte the shader of the default package, from the same cache entry |
+
+A device takes DXBC and DXIL pipeline states side by side, so any mix runs.
+
+```text
+-shaderpick fxc=<list>,od=<list>,dxc=<list>
+```
+
+- A `<list>` is shader names separated by commas (the names of the `.hlsl` files of
+  `libav1/dx/shaders`: `loopfilter_vert_hbd`), or `all`. A name may have `*` for any characters:
+  `loopfilter_*`, `*_hbd`, `inter_*_hbd`.
+- Any of the three parts may be missing, and a part may come more than once. The parts apply from left
+  to right, a later one overrides an earlier one: `fxc=all,dxc=loopfilter_vert_hbd` is FXC's bytecode
+  for everything but one shader, which is the quick way to ask "is this shader alone enough to break
+  the output?"; `fxc=loopfilter_vert_hbd` asks "is it the only one?".
+- No spaces inside the pick.
+- A name no shader has, a part that is not `fxc=`, `od=` or `dxc=`, and any pick in a package that is
+  not the DXC package are refused: the player logs `-shaderpick <pick> is not allowed: <reason>` and
+  `No task was run. Bye`, `rav1g-dec` prints `ERROR -shaderpick ...` and ends with exit code 3. Nothing
+  is decoded with other shaders than the line asked for.
+
+**It holds for the whole launch.** The pipeline states are created once per launch, before the first
+task, so the player takes the flag (and its value) off the task lines before it parses them, as it
+does with `-sm6test`: it may stand on a line of its own or on the line of a stream, and the last one
+of the file counts. One launch, one pick: a bisection is one launch per pick. In `rav1g-dec` it is a
+program flag (the command line, or `--tool-args` of `testing/conformance/run.py`).
+
+```text
+-shaderpick fxc=loopfilter_vert_hbd
+-i /streams/syn_resize-mode.ivf -t 6 -frate -1 -queue_size 4 -nopresent -md5_frame_check
+```
+
+**What the log says.** The library writes four lines when it creates the pipeline states (in the
+player's log behind `MEMORY app before the pipeline states`; `rav1g-dec` prints them behind its
+`SHADERS` line): one per set with the compiler and its arguments, and the pick, with the number of
+shaders of every set and the names of all but the largest set:
+
+```text
+SHADERSET dxc: DXC 1.9.2602.17 cs_6_0: dxc -nologo -T cs_6_0 -E main -HV 2018 -WX -Wno-ambig-lit-shift; -Od for intra_main, intra_main_hbd
+SHADERSET od: DXC 1.9.2602.17 cs_6_0: dxc -nologo -T cs_6_0 -E main -HV 2018 -WX -Wno-ambig-lit-shift -Od for every shader but intra_v2, intra_v2_hbd (64-bit values at -Od: the bytecode of the set dxc)
+SHADERSET fxc: FXC cs_5_0: fxc /nologo /T cs_5_0 /E main /Vn <name>; /Od for intra_main, intra_main_hbd
+SHADERPICK fxc=loopfilter_vert_hbd,od=cdef_filter_v2: dxc 95 (all others); od 1 (cdef_filter_v2); fxc 1 (loopfilter_vert_hbd)
+```
+
+Without the flag the last line is `SHADERPICK none: dxc 97 (all); od 0; fxc 0`. A pick with many names
+goes on in lines that start with `SHADERPICK +`. The player also logs `Shader pick (-shaderpick):
+<pick>` when a task file has the flag. The `LIBRARY` line and `Experiments: shaders dxc` are what they
+are without a pick: they name the build, not the pick.
+
+- **`intra_v2` and `intra_v2_hbd` in the set `od`** are the bytecode of the set `dxc`. At `-Od` DXC
+  leaves the literals of one `?:` of that source as 64-bit values (its optimisation narrows them), and
+  such DXIL needs 64-bit integer shader operations of the device. The build says so in the `SHADERSET
+  od` line, and the listings of `-Od` are in the artifact all the same. (The shaders run with
+  `-intrav2` only.)
+- **A pipeline state the device refuses** is named: `MEMORY FAILED compute pipeline state <n> (<shader>,
+  the bytecode of the set <set>, <bytes> bytes of bytecode): hr 0x...`, and the launch runs no task.
+  (wine's vkd3d refuses the `-Od` DXIL of `gen_pred_blocks` and `gen_pred_blocks_fast`, "invalid value
+  self-reference" in its DXIL parser; WARP takes all of them.)
+- **Size.** The library of the DXC package has all three bytecodes of the 97 shaders, about three times
+  the shader bytes of the default one. The default package, the uavsync package and every other build
+  have one bytecode per shader, their headers and their code are what they were, and they refuse the
+  flag.
+
+In the interface it is `rav1g_set_shader_pick(const char *pick)` of `rav1g.h`, next to the other
+experiment switches (`RAV1G_STATUS_INVALID_PARAM` and `rav1g_last_error` for a pick that is refused);
+it holds for the devices created after the call. `rav1g::switches::set_shader_pick` and
+`shader_pick_lines` in Rust.
+
+**The build.** `testing/shader_cache/shaders.py build --variant dxc --dxc <dxc> --fxc <fxc>` writes the
+three sets: `dx/shaders/h` (DXC), `dx/shaders/h_od` (arrays `<name>_od`), `dx/shaders/h_fxc` (arrays
+`<name>_fxc`, the cache entries of the variant normal by their keys), `shader_sets.txt` (the three
+`SHADERSET` lines) and, with `--listings`, DXC's `-Od` listings in `<listings>/od`. `crates/rav1g-sys`
+with the feature `dxc` compiles all three into the shader table. `shaders.py verify` holds all three
+against the built library.
+
+**CI** (job `rust-dxc`, every push): the conformance set on WARP with every shader of the set `dxc`,
+then with `-shaderpick fxc=all`, with `-shaderpick od=all` and with a mix of the three; each has to
+give the results of `expected.txt` and the `SHADERPICK` line of its pick. The player's decoder code
+runs once with a pick on its task lines, and a pick with a name no shader has must be refused.
+(artifact `rav1g-dec-dxc-<run id>`: `conformance-dxc-pick-fxc`, `-od`, `-mixed`, `player-smoke-dxc-pick`.)
 
 ## Stage dumps (`-dumpstages`)
 

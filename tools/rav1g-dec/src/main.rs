@@ -180,6 +180,13 @@ fn real_main() -> i32 {
             return if sm6_broken { EXIT_ERROR } else { EXIT_PASS };
         }
     }
+    // -shaderpick: the bytecode of the named shaders, before the pipeline states are created.
+    if !globals.shader_pick.is_empty()
+        && let Err(reason) = library::set_shader_pick(globals.capi, &globals.shader_pick)
+    {
+        say!("ERROR -shaderpick {}: {}", globals.shader_pick, reason);
+        return EXIT_USAGE;
+    }
     let pso_start = Instant::now();
     // The decoder's device: the program's D3D12 device and queue, and the pipeline states on it.
     let Some(library) = Library::open(&dev, globals.capi, args::PSO_THREADS as u32) else {
@@ -192,6 +199,10 @@ fn real_main() -> i32 {
     }
     let variant = library.shader_variant();
     say!("SHADERS {} ({})", if variant.is_empty() { "normal build" } else { &variant }, rav1g::switches::shader_set());
+    // The DXC experiment: what compiled the three bytecodes of the build, and which shaders got which.
+    for line in rav1g::switches::shader_pick_lines() {
+        say!("{}", line);
+    }
     if globals.debug_layer {
         device::print_debug_messages(&dev.device);
     }

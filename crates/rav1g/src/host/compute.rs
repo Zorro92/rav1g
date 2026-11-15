@@ -28,6 +28,7 @@ use windows::core::Interface;
 
 use super::libaom::{II_SIZE_SCALES, II_WEIGHTS1D, WARPED_FILTER, WedgeMasks};
 use super::log::log;
+use super::shader_pick::{self, Set};
 use super::tables::{BLOCK_SIZE_HIGH, BLOCK_SIZE_WIDE, GAUSSIAN_SEQUENCE, SS_SIZE_420};
 use super::thread::spawn_thread;
 use super::types::{Av1Core, ComputeShader, GpuBufferObject, compute_shader_lib};
@@ -41,6 +42,7 @@ use crate::sys::{
 /// Threads that create pipelines at most (`MAX_CREATE_SHADER_THREADS` of the C++).
 const MAX_CREATE_THREADS: c_int = 6;
 
+#[cfg(not(feature = "dxc"))]
 unsafe extern "C" {
     /// `crates/rav1g-sys/shader_table.c`: the bytecode of the shaders, from the headers of the FXC build.
     fn rav1g_shader_table(count: *mut u32) -> *const ShaderBytecode;
@@ -53,17 +55,78 @@ struct ShaderBytecode {
     size: u32,
 }
 
-/// The bytecode of a shader by the name of its header.
-fn bytecode(name: &str) -> Option<&'static [u8]> {
+#[cfg(feature = "dxc")]
+unsafe extern "C" {
+    /// `crates/rav1g-sys/shader_table.c` with the feature `dxc`: the table of one of the three bytecodes
+    /// the library then has of every shader (0 DXC, 1 DXC with -Od, 2 FXC), all in the same order.
+    fn rav1g_shader_table_set(set: u32, count: *mut u32) -> *const ShaderBytecode;
+}
+
+/// The table of the bytecode the build has of every shader: without the feature `dxc` the only one.
+fn shader_table(set: Set) -> &'static [ShaderBytecode] {
     let mut count = 0u32;
     // SAFETY: a static table of `count` entries with static names and bytecode.
     unsafe {
-        let table = std::slice::from_raw_parts(rav1g_shader_table(&mut count), count as usize);
-        table
+        #[cfg(feature = "dxc")]
+        let table = rav1g_shader_table_set(set as u32, &mut count);
+        #[cfg(not(feature = "dxc"))]
+        let table = {
+            let _ = set;
+            rav1g_shader_table(&mut count)
+        };
+        std::slice::from_raw_parts(table, count as usize)
+    }
+}
+
+/// The bytecode of a shader by the name of its header, of one of the sets of the build.
+fn bytecode_of(name: &str, set: Set) -> Option<&'static [u8]> {
+    // SAFETY: static names and bytecode (see `shader_table`).
+    unsafe {
+        shader_table(set)
             .iter()
             .find(|entry| CStr::from_ptr(entry.name).to_bytes() == name.as_bytes())
             .map(|entry| std::slice::from_raw_parts(entry.code, entry.size as usize))
     }
+}
+
+/// The bytecode of a shader by the name of its header: the one a pipeline state has without a pick.
+#[cfg(test)]
+fn bytecode(name: &str) -> Option<&'static [u8]> {
+    bytecode_of(name, Set::Dxc)
+}
+
+/// The names of the shaders the build has bytecode of, in the order of the table.
+fn shader_names() -> Vec<&'static str> {
+    // SAFETY: static names (see `shader_table`).
+    shader_table(Set::Dxc).iter().map(|entry| unsafe { CStr::from_ptr(entry.name) }.to_str().unwrap_or("")).collect()
+}
+
+/// The shader pick of the DXC experiment (`shader_pick.rs`): which of the three bytecodes of the build
+/// the pipeline state of a shader is made of, in the devices created after the call. An empty text is
+/// DXC's bytecode for every shader, and the only text a library without the feature `dxc` takes.
+pub(crate) fn set_shader_pick(text: &str) -> Result<(), String> {
+    shader_pick::set(text, &shader_names())
+}
+
+/// With the feature `dxc`, the log lines about the bytecodes of the build: one per set with its compiler
+/// and arguments ("SHADERSET ..."), and the pick as it is set ("SHADERPICK ...": how many shaders are of
+/// which set, and the names of the ones that are not of the largest). No lines without the feature.
+pub(crate) fn shader_pick_lines() -> Vec<String> {
+    if !cfg!(feature = "dxc") {
+        return Vec::new();
+    }
+    let names = shader_names();
+    let text = shader_pick::get();
+    let mut lines: Vec<String> = ["dxc", "od", "fxc"]
+        .iter()
+        .zip(crate::sys::SHADER_SETS)
+        .map(|(set, line)| format!("SHADERSET {set}: {line}"))
+        .collect();
+    match shader_pick::resolve(&text, &names) {
+        Ok(sets) => lines.extend(shader_pick::wrap(&shader_pick::describe(&text, &names, &sets), 700)),
+        Err(error) => lines.push(format!("SHADERPICK {error}")),
+    }
+    lines
 }
 
 /// The library as the pipeline cache handle points to it.
@@ -93,6 +156,9 @@ const _: () = {
 
 /// One pipeline to create.
 struct Task {
+    /// The shader, and which of the bytecodes of the build it is (the shader pick), for the log.
+    name: &'static str,
+    set: Set,
     bytecode: &'static [u8],
     layout: Layout,
     dst: *mut ComputeShader,
@@ -117,10 +183,16 @@ fn create_shader(device: Device<'_>, task: &Task) -> Result<(), gpu::Error> {
 }
 
 fn log_failed_pipeline(index: usize, task: &Task, error: gpu::Error) {
+    // The DXC experiment names the shader and its bytecode: a device may refuse one of the three.
+    let which = if cfg!(feature = "dxc") {
+        format!("{}, the bytecode of the set {}, ", task.name, shader_pick::label(task.set))
+    } else {
+        String::new()
+    };
     log(
         true,
         &format!(
-            "MEMORY FAILED compute pipeline state {index} ({} bytes of bytecode): hr 0x{:08X}",
+            "MEMORY FAILED compute pipeline state {index} ({which}{} bytes of bytecode): hr 0x{:08X}",
             task.bytecode.len(),
             error.code as u32
         ),
@@ -242,7 +314,7 @@ unsafe fn create_layouts(device: Device<'_>, lib: *mut compute_shader_lib) -> Re
 /// `lib` is the library.
 unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Result<Vec<Task>, String> {
     // SAFETY: only addresses of fields of the library are taken (the caller's contract).
-    let list: Vec<(&str, &Layout, *mut ComputeShader)> = unsafe {
+    let list: Vec<(&'static str, &Layout, *mut ComputeShader)> = unsafe {
         let idct = |tx: c_int| &raw mut (*lib).shader_idct[tx as usize];
         vec![
             ("idct4x4", &layouts.idct, idct(TX_4X4)),
@@ -364,10 +436,16 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("film_grain_filter_sp_tex", &layouts.film_grain_tex, &raw mut (*lib).shader_filmgrain_filter_sp_tex),
         ]
     };
+    // The shader pick of the DXC experiment: the set of every shader of the table. Without the feature
+    // `dxc` the pick is empty and the table the only one.
+    let names = shader_names();
+    let sets = shader_pick::resolve(&shader_pick::get(), &names)?;
     list.into_iter()
         .map(|(name, layout, dst)| {
-            let bytecode = bytecode(name).ok_or_else(|| format!("the build has no bytecode of the shader {name}"))?;
-            Ok(Task { bytecode, layout: layout.clone(), dst })
+            let set = names.iter().position(|other| *other == name).map_or(Set::Dxc, |index| sets[index]);
+            let bytecode =
+                bytecode_of(name, set).ok_or_else(|| format!("the build has no bytecode of the shader {name}"))?;
+            Ok(Task { name, set, bytecode, layout: layout.clone(), dst })
         })
         .collect()
 }
@@ -450,6 +528,12 @@ pub unsafe extern "C" fn av1_create_pipeline_cache_handle(d3d12device: *mut c_vo
             }
         ),
     );
+
+    // The DXC experiment: what compiled the three bytecodes of the build, and which shaders this device
+    // gets which of (docs/test-player.md, "Shader pick").
+    for line in shader_pick_lines() {
+        log(false, &line);
+    }
 
     let shader_lib = Box::into_raw(Box::new(ShaderLib {
         // SAFETY: the library is interfaces (none), pointers and numbers; all zero is the empty one.

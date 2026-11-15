@@ -41,6 +41,7 @@ pub(crate) use types::Av1Core;
 // `capi.rs` call them.
 pub(crate) use compute::{
     av1_create_pipeline_cache_handle, av1_destroy_pipeline_cache_handle, av1_wait_pipeline_cache_handle,
+    set_shader_pick, shader_pick_lines,
 };
 pub(crate) use frame::{av1_set_clears, av1_set_intra_v2, av1_shader_variant};
 pub(crate) use loopfilter::av1_set_lf_h_split;
@@ -64,6 +65,7 @@ mod postfilter;
 mod prediction;
 mod rav1d_frames;
 mod rav1d_host;
+mod shader_pick;
 mod stage_dump;
 mod tables;
 mod thread;

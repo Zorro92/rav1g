@@ -574,6 +574,21 @@ impl Drop for Library {
     }
 }
 
+/// -shaderpick: the pick of the pipeline states created from now on, through the interface the program
+/// was started for. `Err` is the reason the library did not take it.
+pub fn set_shader_pick(capi: bool, pick: &str) -> Result<(), String> {
+    if capi {
+        let text = std::ffi::CString::new(pick).map_err(|_| "a 0 byte in the pick".to_string())?;
+        // SAFETY: a C string.
+        match unsafe { capi::rav1g_set_shader_pick(text.as_ptr()) } {
+            Rav1gStatus::Ok => Ok(()),
+            _ => Err(c_text(capi::rav1g_last_error())),
+        }
+    } else {
+        switches::set_shader_pick(pick)
+    }
+}
+
 /// The log lines of the decoder go to `line`, through the interface the program was started for.
 pub fn set_log(capi: bool, line: fn(bool, &str)) {
     unsafe extern "C" fn c_line(context: *mut c_void, is_error: bool, text: *const c_char) {

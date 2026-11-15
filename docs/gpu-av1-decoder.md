@@ -1046,6 +1046,18 @@ restoration -16 %, idct -4.3 %, intra -0.3 %, CDEF +1.1 %), inter -5.3 % on `d2_
 within the spread of the runs (the parse sets them). So DXC as it is would give about 1 % of GPU time,
 and the first thing it needs is the reason the console computes the 8-tap luma filter differently.
 
+**The bisect build.** To find the shaders the console computes differently, the DXC package has three
+bytecodes of every shader from the run after this one on: DXC's (what it had), DXC's with `-Od`, and
+FXC's `cs_5_0` bytecode, the shader of the default package. `-shaderpick fxc=<list>,od=<list>,dxc=<list>`
+on a task line says which one a launch makes the pipeline state of a shader of; without the flag it is
+DXC's for every shader, as before. The library logs the three sets with their compiler arguments
+(`SHADERSET ...`) and the pick (`SHADERPICK ...`). `fxc=all` must then be the default package's output,
+`fxc=all,dxc=<shader>` asks whether one shader alone breaks it, and `od=<shader>` whether it is DXC's
+optimisation that brings the console's compiler to it. On WARP and on lavapipe the conformance set is
+md5-identical with every shader of each of the three sets and with a mix
+([test-player.md](test-player.md#shader-pick--shaderpick-the-dxc-package)). The default package has one
+bytecode per shader, as it had.
+
 ## Inter prediction: breakdown and fast paths (2026-11-12)
 
 ### What the console measured
