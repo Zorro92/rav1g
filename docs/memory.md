@@ -40,7 +40,7 @@ tile ends.
 | --- | --- |
 | `begin` | Frames recorded, the largest frame, the decoder (size, bit depth, slots, frames in parse). |
 | `pool mode_info_pool`, `pool idct_coefs`, `pool idct_blocks_unordered` | The three pools: chunks and size; **chunks in use at once, peak** (what a smaller pool has to hold without a wait); chunks one frame holds when it is recorded, peak and mean; the records (coefficients) one frame wrote, peak, as a share of the pool, and mean; the same at once; **fill**: records written over the room of the chunks held (what the chunk granularity costs). Coefficients are counted as the transform blocks take them, with the padding of their counts. |
-| `buffer gen_mi_block_indexes` | The block index list of a slot (CPU, at the parse): entries of a frame against its size. |
+| `buffer gen_mi_block_indexes` | The block index list of a slot (CPU, at the parse; since the [reduction](#stage-buffers-sized-for-the-frames-candidate-3) into lists of the tiles, copied into the slot's buffer at the recording): entries of a frame against the worst case. The lines of the four buffers that grow also say what the buffer has now and how often it grew. |
 | `buffer prediction_blocks`, `buffer prediction_blocks_warp` | The records `gen_pred_blocks` writes on the GPU for a frame against the buffer. The counts are known on the CPU before the frame is recorded. |
 | `buffer idct_blocks` | The sorted transform blocks (GPU): as many as the frame's transform block records. |
 | `frame buffers` | The buffers of the pool that are out of it (a reference count above 0: named by a reference slot, the frame of a slot in flight, a reference such a frame still reads) at the setup of every frame, that frame's included: peak, the most frequent count, mean, and how many frames saw each count. |
@@ -174,7 +174,7 @@ slots 74.1). By MiB, with the risk; the numbers above are local and from seven s
 | --- | --- | ---: | --- | --- |
 | 1 | Frame buffers of 10 bits as three samples in 32 bits | 104.7 MiB (13 x 8.1), and a third of every palette buffer | Not a matter of the stream. `fbt10x3` is not this: it is a format of the **output image** (`tryHDR10x3`: the output copy and the film grain shader pack three samples into a word of the application's image). No stage reads or writes a packed frame buffer. | High. Every shader that touches a frame buffer (intra, inter, reconstruction, loop filter, CDEF, loop restoration, superres, borders, film grain, output) gets another addressing, and three samples share a word, so two threads of a dispatch that write neighbours write the same word: the writes have to be laid out by word. All of it in `cs_5_0`. Byte-identical is possible, the work is the largest here. |
 | 2 | Mode info pool at half, or a quarter, of the worst case | 55.8 or 83.7 MiB | At once at most 22.3 % (`d2`), 9 to 11 % elsewhere; one frame at most 12.9 %. The wait for the GPU exists and is tested (`poolwait`); a pool at half exists as `-lowmemparts 2`. | Low at half, medium at a quarter. A frame that alone does not fit is a decode error (`MEMORY FAILED`): at half an average block below 8x4 over a whole frame, at a quarter below 8x8; the low quantizer vectors reach 58 % at 352x288. A fallback would be a second buffer created on that frame, under the budget guard. More waits cost speed, not frames. |
-| 3 | Stage buffers at a quarter, grown on the frame that needs more: `prediction_blocks`, `prediction_blocks_warp`, `idct_blocks`, and the block index list as a fourth pool | 33.7 MiB (0.75 x 44.9) and 13.5 MiB (0.75 x 18.0) | A frame's peak is 15.8 %, 3.6 %, 26.1 % and 11.5 % (`d2`), a few percent elsewhere. | Medium. The three GPU buffers are used by one command list at a time and their counts are known before the frame is recorded, so a frame that needs more can get a larger buffer first (the guard may refuse: then a decode error). The index list is written at the parse: a pool with a piece for a whole block ([step 5, "Left"](phase2-rav1d.md#step-5-the-pools)). |
+| 3 | **Done**, [below](#stage-buffers-sized-for-the-frames-candidate-3) (the index list without a pool). Stage buffers at a quarter, grown on the frame that needs more: `prediction_blocks`, `prediction_blocks_warp`, `idct_blocks`, and the block index list as a fourth pool | 33.7 MiB (0.75 x 44.9) and 13.5 MiB (0.75 x 18.0) | A frame's peak is 15.8 %, 3.6 %, 26.1 % and 11.5 % (`d2`), a few percent elsewhere. | Medium. The three GPU buffers are used by one command list at a time and their counts are known before the frame is recorded, so a frame that needs more can get a larger buffer first (the guard may refuse: then a decode error). The index list is written at the parse: a pool with a piece for a whole block ([step 5, "Left"](phase2-rav1d.md#step-5-the-pools)). |
 | 4 | Smaller mode info record (224 bytes) | up to 55.8 MiB at half the size; less together with 2 | 2.5 to 2.8 MiB of a busy 4K frame's CPU bytes are these records. | Medium. No stream can fail for it, but the layout is shared by the sink, the block lists and the shaders that include `mode_info.h`; what a record can lose is not measured here. |
 | 5 | The frame buffer bound at the recording | 24.2 MiB (11 to 10 in the pool) | The reference slots name at most 5 frames in these streams; the pool is emptied by the frames in flight. | Medium: the references of a frame in parse are resolved at the recording, through every error path of step 4. The floor stays 10 (8 references, a failed frame, the next frame): the measured 5 do not allow less, a stream may use 8. |
 | 6 | Coefficient pool at three quarters | 15.4 MiB | 62.4 % at once in `d2`, 10 to 26 % elsewhere. | Low, and little: `d2` would be near its waits, and half is not possible for it. |
@@ -188,27 +188,40 @@ A smaller mode info record (4) is the other large part.
 
 ## Reductions made
 
-### Stage buffers sized for the frames (candidate 3, first part)
+### Stage buffers sized for the frames (candidate 3)
 
-2026-11-15. `idct_blocks`, `prediction_blocks` and `prediction_blocks_warp` are created with a quarter of
-their worst case and made larger before the frame that writes more is recorded
-(`crates/rav1g/src/host/stage_buffers.rs`). The decoder for 3840x2160 10-bit (two frames in parse, three
-slots) takes **612.8 MiB** of device buffers where it took 646.5: 33.7 MiB less.
+2026-11-15. `idct_blocks`, `prediction_blocks`, `prediction_blocks_warp` and the block index list of
+every slot are created with a quarter of their worst case and made larger before the frame that writes
+more is recorded (`crates/rav1g/src/host/stage_buffers.rs`). The decoder for 3840x2160 10-bit (two frames
+in parse, three slots) takes **599.4 MiB** of device buffers where it took 646.5: 47.1 MiB less (33.7
+for the three buffers of the stages, 13.5 for the index lists; a slot is 20.2 MiB where it was 24.7).
 
 | Buffer | Worst case, MiB | Created with, MiB |
 | --- | ---: | ---: |
 | `idct_blocks` | 12.0 | 3.0 |
 | `prediction_blocks` | 23.9 | 6.0 |
 | `prediction_blocks_warp` | 9.0 | 2.2 |
+| `gen_mi_block_indexes`, a slot | 6.0 | 1.5 |
 
 - *When.* The counts are those of the tiles' lists when the parse of the frame has ended: the transform
   block records, and the lists `gen_pred_blocks` turns into offsets (`prediction::pred_block_counts`). The
   thread that records the frames looks at them before it records anything of the frame
   (`stage_buffers::for_frame`). A buffer that holds the frame's records and 64 more is left alone.
+- *The index list.* The parse wrote a tile's entries into the slot's buffer at a place laid out for
+  the worst case of the tiles in front of it, so the buffer could not be smaller. Each tile now writes a
+  list of its own in host memory, which grows with the tile and is kept for the next frame
+  (`TilePieces::indexes`; `av1_mi_push_block` makes room for a block before it writes), and the
+  recording copies the lists into the slot's buffer one behind the other and tells `gen_pred_blocks`
+  where each starts (`mi_idx_base`, as before). That is one copy of what the frame wrote (0.69 MiB for
+  the largest frame of the `d2` cut, 0.14 MiB on average) by the thread that records, and as much host
+  memory for each frame in parse; no shader changed. It was not made a fourth pool: a pool's pieces
+  would have changed what a block's `index_base` means and with it the mode info the reference is
+  compared with.
 - *How.* The thread waits until the queue has run every command list that was submitted (a fence behind
   them: the frames in flight read the old buffer), releases the buffer and creates the new one in the
   same descriptor, so the two never exist together. The new size is an eighth above what the frame
   needs, in steps of 64 KiB, and at most the worst case, which is what the buffer always was before.
+  The index list of a slot is read by the frame of that slot only, so it grows without the wait.
 - *It sticks.* A buffer never gets smaller: a stream that had one such frame will have more, and a wait
   for the queue on every other frame would cost more than the memory is worth. A decoder that has decoded
   the worst case holds what it held before this change.
@@ -219,19 +232,20 @@ slots) takes **612.8 MiB** of device buffers where it took 646.5: 33.7 MiB less.
   It does not wait: the memory an application has left does not come back by waiting, and the frame
   cannot be recorded without the buffer. The headroom of the creation does not refuse a growth, as it
   refuses no creation. An allocation that fails (`MEMORY FAILED buffer ..., grown for a frame`) is the
-  same decode error; the buffer is then gone and the next frame creates it again. The most the three
-  can add, 33.6 MiB at 4K, is in `device_size_deferred` of the memory query, next to the palette
+  same decode error; the buffer is then gone and the next frame creates it again. The most they
+  can add, 47.1 MiB at 4K with three slots, is in `device_size_deferred` of the memory query, next to the palette
   buffers, and in the `MEMORY budget` line.
-- *The lines.* `MEMORY decoder created stage buffers: idct_blocks 3.0 of 12.0 MiB, ...` at the creation;
-  `MEMORY buffer idct_blocks grown for frame 0, which writes 204595 records: 3.0 to 3.6 MiB of the 12.0
-  MiB of the worst case; device buffers now 613.4 MiB` at a growth. `-memstats` keeps its percentages
+- *The lines.* `MEMORY decoder created stage buffers: idct_blocks 3.0 of 12.0 MiB, ...,
+  gen_mi_block_indexes 1.5 of 6.0 MiB a slot` at the creation; `MEMORY buffer idct_blocks grown for
+  frame 0, which writes 204595 records: 3.0 to 3.6 MiB of the 12.0 MiB of the worst case; device buffers
+  now 600.0 MiB` at a growth. `-memstats` keeps its percentages
   against the worst case and adds what the buffer has now and how often it grew: `buffer idct_blocks:
   12.0 MiB at worst, 3.6 MiB now, grown 1 times, ...`.
 - *What grows.* Of the 4K clips only the `d2` cut: its first frame writes 204,595 transform blocks
-  (26.1 %), `idct_blocks` goes from 3.0 to 3.6 MiB once. The conformance vectors (352x288) grow in 44 of
-  the 244 runs, up to the worst case.
+  (26.1 %), `idct_blocks` goes from 3.0 to 3.6 MiB once. The conformance vectors (352x288) grow a buffer
+  48 times in the 244 runs (4 of them an index list), up to the worst case.
 - *Checked locally* (wine on lavapipe): the 244 vectors of AOM with the library's defaults and with two
-  frames in parse on two threads, 244 of 244 each, 44 growths in each run; the `d2` cut 30 of 30. A
+  frames in parse on two threads, 244 of 244 each; the `d2` cut 30 of 30. A
   growth that the guard refuses was not produced: the budget of `rav1g-dec -budget` is one number for
   the creation and for the growth.
 - **Console: pending.**

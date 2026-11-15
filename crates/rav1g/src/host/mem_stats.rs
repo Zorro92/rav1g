@@ -487,15 +487,17 @@ pub(crate) unsafe fn summary(dec: *mut Av1Core) {
                 percent(series.mean(), records),
             ));
         };
+        use super::stage_buffers::{IDCT_BLOCKS, INDEX_LIST, PRED_BLOCKS, PRED_BLOCKS_WARP, RECORD};
+        // The index list: the largest of the slots' buffers.
+        let index_now = (0..slots).map(|slot| size((*dec).frame_thread_data[slot].gen_mi_block_indexes)).max();
         buffer(
             "gen_mi_block_indexes",
-            size((*dec).frame_thread_data[0].gen_mi_block_indexes),
-            4,
+            (*dec).stage_worst[INDEX_LIST],
+            RECORD[INDEX_LIST],
             true,
             &state.items[INDEX],
-            None,
+            Some((index_now.unwrap_or(0), (*dec).stage_growths[INDEX_LIST])),
         );
-        use super::stage_buffers::{IDCT_BLOCKS, PRED_BLOCKS, PRED_BLOCKS_WARP, RECORD};
         let grown = |object: *mut super::types::GpuBufferObject, index: usize, series: &Series| {
             let name = ["idct_blocks", "prediction_blocks", "prediction_blocks_warp"][index];
             let now = Some((size(object), (*dec).stage_growths[index]));

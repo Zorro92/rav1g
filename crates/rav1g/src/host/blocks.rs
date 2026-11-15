@@ -537,7 +537,6 @@ pub unsafe extern "C" fn av1_mi_push_block(_pbi: *mut AV1Decoder, cm: *mut AV1_C
         // The slot of the tile's frame. Not "the frame of the decoder": the tiles of several frames are
         // parsed side by side (docs/phase2-rav1d.md, step 4), and `pbi` is not looked at.
         let td = &*tile.frame_data.cast_const().cast::<av1_frame_thread_data>();
-        let index_arr = tile.gen_indexes;
         let map = tile.gen_block_map;
         // The edges of the tile's wavefront; null when the frame keeps the wavefront in the slot's grid.
         let wave = tile.wave_edges.cast::<WaveEdges>();
@@ -552,6 +551,20 @@ pub unsafe extern "C" fn av1_mi_push_block(_pbi: *mut AV1Decoder, cm: *mut AV1_C
         let bh = 1 << bh_log;
         let bw_log_uv = (bw_log - 1).max(0);
         let bh_log_uv = (bh_log - 1).max(0);
+        // The tile's index list has room for what a block can add: an entry for each of its transform
+        // blocks of luma and of chroma (fewer than two a 4x4 unit) or for its prediction blocks, those of
+        // overlapped prediction and reconstruction included.
+        {
+            let pieces = &mut *td.tile_pieces.offset(xd.tile_data.cast_const().offset_from(td.tile_data.cast_const()));
+            let written = tile.gen_index_ptr.max(0) as usize;
+            let room = 2 * (bw * bh) as usize + 64;
+            if written + room > pieces.indexes.capacity() {
+                pieces.indexes.set_len(written);
+                pieces.indexes.reserve(room);
+                tile.gen_indexes = pieces.indexes.as_mut_ptr();
+            }
+        }
+        let index_arr = tile.gen_indexes;
 
         let mi_row = mi.mi_row;
         let mi_col = mi.mi_col;

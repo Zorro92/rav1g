@@ -356,6 +356,12 @@ pub struct TilePieces {
     /// is writing began (for the statistics of `mem_stats.rs`).
     pub coef_values: i64,
     pub coef_run: c_int,
+    /// The tile's block index list (`av1_tile_data::gen_indexes` points into it): what the blocks of
+    /// the tile have in the lists of the stages, written by the tile's thread up to
+    /// `av1_tile_data::gen_index_ptr` entries (its length is not kept current). It grows with the tile
+    /// and keeps its memory for the next frame; the lists of the tiles go into the slot's buffer one
+    /// behind the other when the frame is recorded.
+    pub indexes: Vec<u32>,
 }
 
 /// The memory of the edges of the intra wavefront of the frames of a slot (`blocks::WaveEdges`). It grows

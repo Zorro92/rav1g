@@ -250,6 +250,22 @@ pub(crate) unsafe fn prediction_gen_blocks(pbi: *mut AV1Decoder, dec: *mut Av1Co
             td.pieces.swap(0, main_tile);
         }
 
+        // The block index lists of the tiles, one behind the other in the slot's buffer, which
+        // stage_buffers::for_frame has made large enough: a tile's list starts where gen_pred_blocks is
+        // told it does (mi_idx_base).
+        {
+            let list = &*td.gen_mi_block_indexes;
+            let host = list.host_ptr.cast::<u32>();
+            let mut base = 0usize;
+            for tile in tiles.iter_mut() {
+                let count = tile.gen_index_ptr.max(0) as usize;
+                assert!((base + count) * size_of::<u32>() <= list.size, "the block index list of the slot is too small");
+                host.add(base).copy_from_nonoverlapping(tile.gen_indexes.cast_const(), count);
+                tile.gen_index_base = base as c_int;
+                base += count;
+            }
+        }
+
         td.intra_iters = intra_iters;
         let pred_block_types = InterCountsAll + ReconstructBlockSizes + (intra_iters + 1) * IntraTypeCount;
         let mut offset = 0;

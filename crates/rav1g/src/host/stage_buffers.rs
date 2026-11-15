@@ -7,15 +7,22 @@
 // www.aomedia.org/license/patent.
 
 //! The buffers of the stages that hold what the blocks of one frame need, sized for the frames and not
-//! for the worst case (docs/memory.md): the sorted transform blocks (`idct_blocks`) and the two lists
-//! `gen_pred_blocks` writes (`prediction_blocks`, `prediction_blocks_warp`).
+//! for the worst case (docs/memory.md): the sorted transform blocks (`idct_blocks`), the two lists
+//! `gen_pred_blocks` writes (`prediction_blocks`, `prediction_blocks_warp`), and the block index list of
+//! each slot (`gen_mi_block_indexes`).
 //!
-//! One command list uses them at a time, and how many records a frame writes into each is known on the
-//! CPU when its tiles are parsed. So a decoder is created with a part of the worst case
+//! One command list uses the first three at a time, and how many records a frame writes into each is
+//! known on the CPU when its tiles are parsed. So a decoder is created with a part of the worst case
 //! ([`initial_bytes`]), and the frame that needs more gets a larger buffer before it is recorded
 //! ([`for_frame`]): the thread that records the frames waits until the queue has run everything that
 //! was submitted, the old buffer is released and the new one created. A buffer never gets smaller, and
 //! never larger than the worst case the decoder was created for, which is what it always was before.
+//!
+//! The block index list is written by the parse, tile by tile, at places that used to be laid out for
+//! the worst case of every tile. The tiles now write lists of their own in host memory
+//! (`TilePieces::indexes`), which the recording copies into the slot's buffer one behind the other
+//! (`prediction_gen_blocks`); the buffer grows like the others, without the wait: only the frame of the
+//! slot reads it.
 //!
 //! The growth is held against the application's budget like a palette buffer: what it adds and a margin
 //! of 16 MiB have to fit what the application has left (`memory_available_cb`), or the frame is a decode
@@ -32,13 +39,14 @@ use super::types::{Av1Core, GpuBufferObject, av1_frame_thread_data};
 use crate::gpu::d3d12::com_ref;
 use crate::gpu::{Device, Event, Queue};
 
-/// The buffers that grow, in the order of `Av1Core::stage_worst`.
-pub(crate) const STAGE_BUFFERS: usize = 3;
+/// The buffers that grow, in the order of `Av1Core::stage_worst`; the last one is a buffer of each slot.
+pub(crate) const STAGE_BUFFERS: usize = 4;
 pub(crate) const IDCT_BLOCKS: usize = 0;
 pub(crate) const PRED_BLOCKS: usize = 1;
 pub(crate) const PRED_BLOCKS_WARP: usize = 2;
+pub(crate) const INDEX_LIST: usize = 3;
 /// The bytes of a record of each.
-pub(crate) const RECORD: [usize; STAGE_BUFFERS] = [16, 16, 48];
+pub(crate) const RECORD: [usize; STAGE_BUFFERS] = [16, 16, 48, 4];
 
 /// The part of the worst case a decoder is created with.
 const INITIAL_DIVISOR: usize = 4;
@@ -70,8 +78,8 @@ fn grown_bytes(current: usize, records: usize, record: usize, worst: usize) -> O
     Some(step(needed + needed / 8).min(worst).max(needed))
 }
 
-/// The records the frame on `td` writes into each buffer: its transform blocks, and the two lists of
-/// `gen_pred_blocks`.
+/// The records the frame on `td` writes into each buffer: its transform blocks, the two lists of
+/// `gen_pred_blocks`, and the entries of the block index lists of its tiles.
 ///
 /// # Safety
 /// `td` is the slot of a frame whose tiles are parsed and whose stages are not recorded yet.
@@ -81,7 +89,8 @@ unsafe fn frame_records(td: &av1_frame_thread_data) -> [usize; STAGE_BUFFERS] {
         let tiles = std::slice::from_raw_parts(td.tile_data, td.tile_count.max(0) as usize);
         let transform: c_int = tiles.iter().map(|tile| tile.idct_blocks_sizes.iter().sum::<c_int>()).sum();
         let (blocks, warp) = pred_block_counts(td, tiles);
-        [transform, blocks, warp].map(|count| count.max(0) as usize)
+        let indexes: c_int = tiles.iter().map(|tile| tile.gen_index_ptr.max(0)).sum();
+        [transform, blocks, warp, indexes].map(|count| count.max(0) as usize)
     }
 }
 
@@ -122,7 +131,7 @@ pub(crate) unsafe fn for_frame(dec: *mut Av1Core, td: *const av1_frame_thread_da
     unsafe {
         let records = frame_records(&*td);
         let objects: [*mut GpuBufferObject; STAGE_BUFFERS] =
-            [(*dec).idct_blocks, (*dec).prediction_blocks, (*dec).prediction_blocks_warp];
+            [(*dec).idct_blocks, (*dec).prediction_blocks, (*dec).prediction_blocks_warp, (*td).gen_mi_block_indexes];
         let mut waited = false;
         for index in 0..STAGE_BUFFERS {
             let object = objects[index];
@@ -156,8 +165,8 @@ pub(crate) unsafe fn for_frame(dec: *mut Av1Core, td: *const av1_frame_thread_da
                     return false;
                 }
             }
-            // The frames in flight read the buffer that is released.
-            if !waited {
+            // The frames in flight read the buffer that is released; the index list is the slot's own.
+            if !waited && index != INDEX_LIST {
                 if !wait_for_queue(dec) {
                     log(true, &format!("MEMORY FAILED buffer {name} grown for frame {frame}: no fence to wait for the queue"));
                     return false;
@@ -191,6 +200,8 @@ pub(crate) unsafe fn for_frame(dec: *mut Av1Core, td: *const av1_frame_thread_da
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const _: () = assert!(STAGE_BUFFERS == INDEX_LIST + 1 && PRED_BLOCKS_WARP == 2 && PRED_BLOCKS == 1 && IDCT_BLOCKS == 0);
 
     #[test]
     fn a_buffer_grows_only_for_a_frame_that_needs_more() {

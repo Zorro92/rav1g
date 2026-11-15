@@ -35,7 +35,7 @@ use super::types::{
     HostRW, ImagePoolSize, InterFastMapSize, MemoryType, OutputCbSize, OutputThreadDataCount, ReadBack,
     RefFrameBufferCount, RefFrameBufferCountSharedBack, UploadUAV, av1_frame_thread_data,
 };
-use super::stage_buffers::{IDCT_BLOCKS, PRED_BLOCKS, PRED_BLOCKS_WARP, initial_bytes};
+use super::stage_buffers::{IDCT_BLOCKS, INDEX_LIST, PRED_BLOCKS, PRED_BLOCKS_WARP, initial_bytes};
 use crate::gpu::d3d12::{com_ref, com_release, com_store, wrapped_ref};
 use crate::gpu::{self, CommandAllocator, Device, Event, SemiPlanar, VideoMemory, create_hardware_device};
 use crate::sys::{
@@ -411,10 +411,12 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
     );
     // The buffers that grow with the frames (stage_buffers.rs): a part of the worst case, which is one
     // transform block and two prediction blocks for every 4x4 unit and a warp block for every 8x8.
+    // The block index list of a slot (the last one): two entries for every 4x4 unit.
     let stage_worst = [
         (block_count_4x4 * IDCT_BLOCK_SIZE) as usize,
         (block_count_4x4 * 16 * 2) as usize,
         ((block_count_4x4 >> 2) * 48) as usize,
+        size_of::<i32>() * block_count_4x4 as usize * 2,
     ];
     dec.stage_worst = stage_worst;
     request!(
@@ -548,7 +550,7 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
         request!(
             assign,
             td.gen_mi_block_indexes,
-            mem.buffer(size_of::<i32>() * block_count_4x4 as usize * 2, HostRW, c"gen_mi_block_indexes", i)
+            mem.buffer(initial_bytes(stage_worst[INDEX_LIST]), HostRW, c"gen_mi_block_indexes", i)
         );
         request!(
             assign,
@@ -704,13 +706,16 @@ unsafe fn settled_budget(
 /// for each slot, and what the buffers of the stages that are created with a part of their worst case
 /// can grow by (`stage_buffers.rs`).
 fn deferred_device_bytes(dec: &Av1Core, rcfg: &ResourceConfig) -> usize {
-    rcfg.gpu_pipeline_depth as usize * ((dec.palette_size + 255) & !255) + stage_growth_bytes(dec)
+    let slots = rcfg.gpu_pipeline_depth as usize;
+    slots * ((dec.palette_size + 255) & !255) + stage_growth_bytes(dec, slots)
 }
 
-/// What the buffers of the stages that grow with the frames can add to what they are created with.
-fn stage_growth_bytes(dec: &Av1Core) -> usize {
+/// What the buffers of the stages that grow with the frames can add to what they are created with: the
+/// block index list in each of the `slots`.
+fn stage_growth_bytes(dec: &Av1Core, slots: usize) -> usize {
     let aligned = |bytes: usize| (bytes + 255) & !255;
-    dec.stage_worst.iter().map(|&worst| aligned(worst) - aligned(initial_bytes(worst))).sum()
+    let growth = |index: usize| aligned(dec.stage_worst[index]) - aligned(initial_bytes(dec.stage_worst[index]));
+    growth(IDCT_BLOCKS) + growth(PRED_BLOCKS) + growth(PRED_BLOCKS_WARP) + slots * growth(INDEX_LIST)
 }
 
 /// The device bytes [`allocate_buffers`] creates for `rcfg`, and the bytes of the buffers that are created
@@ -833,14 +838,15 @@ unsafe fn log_memory_summary(is_error: bool, label: &str, dec: &Av1Core, rcfg: &
         log(
             is_error,
             &format!(
-                "MEMORY {label} stage buffers: idct_blocks {}, prediction_blocks {}, prediction_blocks_warp {}: a \
-                 part of the worst case, grown before the frame that writes more is recorded (up to {:.1} MiB \
-                 more in all, held against the budget with a margin of {:.1} MiB; a growth that is refused is a \
-                 decode error of the frame)",
+                "MEMORY {label} stage buffers: idct_blocks {}, prediction_blocks {}, prediction_blocks_warp {}, \
+                 gen_mi_block_indexes {} a slot: a part of the worst case, grown before the frame that writes \
+                 more is recorded (up to {:.1} MiB more in all, held against the budget with a margin of {:.1} \
+                 MiB; a growth that is refused is a decode error of the frame)",
                 part(dec.idct_blocks, IDCT_BLOCKS),
                 part(dec.prediction_blocks, PRED_BLOCKS),
                 part(dec.prediction_blocks_warp, PRED_BLOCKS_WARP),
-                to_mib(stage_growth_bytes(dec) as u64),
+                part(dec.frame_thread_data[0].gen_mi_block_indexes, INDEX_LIST),
+                to_mib(stage_growth_bytes(dec, rcfg.gpu_pipeline_depth as usize) as u64),
                 to_mib(super::stage_buffers::MEMORY_GUARD_MARGIN_BUFFER)
             ),
         );

@@ -1114,7 +1114,6 @@ pub(crate) unsafe fn setup_tile(
         let tile_cols = (tile.mi_col_end - tile.mi_col_start + 15) & !15;
         let mi_offset = tile.mi_row_start * ((cm.mi_cols + 15) & !15) + tile.mi_col_start * tile_rows;
 
-        let blocks_4x4_count = (mi_offset * 3 + 1) >> 1;
         t.intra_iter_max = -1;
         t.intra_iter_max_uv = -1;
         t.dq_buffer_base = (*(*dec).idct_coefs).host_ptr.cast();
@@ -1135,9 +1134,12 @@ pub(crate) unsafe fn setup_tile(
 
         t.mi_col_start = tile.mi_col_start;
         t.mi_row_start = tile.mi_row_start;
+        // The tile's block index list is its own memory (`TilePieces::indexes`) and grows with its blocks
+        // (`av1_mi_push_block`); where it starts in the slot's buffer is known when the frame is recorded.
         t.gen_index_ptr = 0;
-        t.gen_index_base = blocks_4x4_count * 2;
-        t.gen_indexes = (*td.gen_mi_block_indexes).host_ptr.cast::<u32>().offset(t.gen_index_base as isize);
+        t.gen_index_base = 0;
+        pieces.indexes.clear();
+        t.gen_indexes = pieces.indexes.as_mut_ptr();
         t.gen_block_warp_offset = tile_id * (256 + 32) + (mi_offset >> 2) * 10;
         t.gen_block_map_offset = t.gen_block_warp_offset + 32;
         let block_map = (*td.gen_block_map).host_ptr.cast::<c_int>();
