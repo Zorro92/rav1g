@@ -385,6 +385,27 @@ pub struct GpuWorkItem {
     pub image: *mut HwOutputImage,
 }
 
+impl av1_frame_thread_data {
+    /// The block index list of `tile`, a tile of the slot's frame, has room for `room` entries behind
+    /// the ones the tile has written: the list is the tile's own memory (`TilePieces::indexes`), which
+    /// grows here, and `av1_tile_data::gen_indexes` follows it.
+    ///
+    /// # Safety
+    /// The thread that parses the tile, which is one of the tiles of the frame on this slot.
+    pub(crate) unsafe fn index_list_room(&self, tile: &mut crate::sys::av1_tile_data, room: usize) {
+        // SAFETY: the caller's contract: the element of the tile is its thread's.
+        unsafe {
+            let pieces = &mut *self.tile_pieces.offset(std::ptr::from_mut(tile).cast_const().offset_from(self.tile_data));
+            let written = tile.gen_index_ptr.max(0) as usize;
+            if written + room > pieces.indexes.capacity() {
+                pieces.indexes.set_len(written);
+                pieces.indexes.reserve(room);
+                tile.gen_indexes = pieces.indexes.as_mut_ptr();
+            }
+        }
+    }
+}
+
 /// Work items: one per frame in flight (at most `FrameThreadDataCount`, each holds a slot) and one per
 /// show_existing_frame copy in flight (at most `OutputThreadDataCount`, each holds an output context).
 pub const GpuItemPoolSize: usize = 8;

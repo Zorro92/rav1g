@@ -554,16 +554,7 @@ pub unsafe extern "C" fn av1_mi_push_block(_pbi: *mut AV1Decoder, cm: *mut AV1_C
         // The tile's index list has room for what a block can add: an entry for each of its transform
         // blocks of luma and of chroma (fewer than two a 4x4 unit) or for its prediction blocks, those of
         // overlapped prediction and reconstruction included.
-        {
-            let pieces = &mut *td.tile_pieces.offset(xd.tile_data.cast_const().offset_from(td.tile_data.cast_const()));
-            let written = tile.gen_index_ptr.max(0) as usize;
-            let room = 2 * (bw * bh) as usize + 64;
-            if written + room > pieces.indexes.capacity() {
-                pieces.indexes.set_len(written);
-                pieces.indexes.reserve(room);
-                tile.gen_indexes = pieces.indexes.as_mut_ptr();
-            }
-        }
+        td.index_list_room(tile, 2 * (bw * bh) as usize + 64);
         let index_arr = tile.gen_indexes;
 
         let mi_row = mi.mi_row;

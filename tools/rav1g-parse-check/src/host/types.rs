@@ -47,3 +47,13 @@ pub struct av1_frame_thread_data {
     pub scale_factors: [ScaleFactor; 8],
     pub scale_enable: c_int,
 }
+
+impl av1_frame_thread_data {
+    /// The block index list of a tile has room for what a block adds. The host's lists grow here; the
+    /// lists of this program are laid out for the worst case of every tile (`plain.rs`), so there is
+    /// nothing to do.
+    ///
+    /// # Safety
+    /// None here; the host's function has a contract.
+    pub unsafe fn index_list_room(&self, _tile: &mut crate::sys::av1_tile_data, _room: usize) {}
+}
