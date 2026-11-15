@@ -217,6 +217,10 @@ int intra_edge_filter_strength(int blk_wh, int d, int type) {
 
 uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
   uint addr = grid.Load(index * cb_mi_grid_entry);
+  // A unit without a block (beside or below the frame) has an entry of 0, and nothing is made of the record
+  // that is read for it. With entries of four bytes it is the first record of the pool, so that no load
+  // leaves the pool; with addresses it is where the 32 bits wrap, as it always was.
+  if (cb_mi_grid_entry == 4 && addr < base) addr = base;
   addr -= base;
   return addr / ModeInfoSize;
 }

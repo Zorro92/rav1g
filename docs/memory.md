@@ -273,8 +273,16 @@ info grid` of `-memstats`), a slot's grid is 2.0 MiB where it was 4.0, and the d
   readers of the grid on the CPU, the block lists (`av1_mi_push_block`: the block and its neighbours)
   and the CDEF lists, get the record from the entry and the pool. The clears of the grid, where a
   frame still has them, are half as long.
-- *The reference.* Branch `cpp` has the same shaders (`736393d`, the pin of `rust-equal` since this
-  change): its host writes libaom's grid of addresses and says 8. `stage_dump.py` reads either grid
+- *A unit without a block.* `gen_pred_blocks` loads the record of a neighbour beside or below the
+  frame, whose entry is 0, and makes nothing of it. With an address in the grid that load was where
+  the 32 bits wrap (the low half of the pool's address taken off 0), outside the pool. With the new
+  entries it was 4 GiB behind the pool, always, and WARP, which does not bound such loads, lost the
+  device in two streams of every run of the set (run 43774848753, the first push of this change:
+  `av1-1-b8-03-sizeup` and one of the 640x360 10-bit streams). The shader now reads the first record of
+  the pool for such a unit when the entries have four bytes, so no load leaves the pool for it;
+  `gen_lf_blocks` has always skipped such a unit.
+- *The reference.* Branch `cpp` has the same shaders (`736393d` and `c55087e`, the pin of `rust-equal`
+  since this change): its host writes libaom's grid of addresses and says 8. `stage_dump.py` reads either grid
   by the `entry=` of the dump and compares the records the units name, as before.
 - *Checked locally* (wine on lavapipe): the 244 vectors of AOM with the shaders FXC compiled and with
   the shaders DXC 1.9 compiled, 244 of 244 each; the `d2` cut 30 of 30; `rav1g-parse-check` with four
