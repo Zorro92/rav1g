@@ -769,6 +769,8 @@ pub(crate) unsafe fn setup_frame_begin(
 
         cm.mi_grid_base = (*td.mode_info_grid).host_ptr.cast();
         cm.mi_grid_visible = cm.mi_grid_base;
+        // The pool the entries of the grid name records of.
+        cm.mi = (*(*dec).mode_info_pool).host_ptr.cast();
         cm.mi_alloc_size = cm.mi_stride * ((cm.mi_rows + 31) & !31);
         // The two grids of the slot that a frame clears (this grid and the wavefront grid below), and who
         // clears them (`AV1_CLEARS_*`, `av1_set_clears`). The clears are sized from the frame, which whoever
@@ -802,7 +804,7 @@ pub(crate) unsafe fn setup_frame_begin(
             clears = CLEARS_COMPLETION_THREAD;
         }
         let cleared_behind = clears != CLEARS_DECODE_THREAD;
-        let mi_grid_bytes = size_of::<*mut *mut MB_MODE_INFO>() * cm.mi_alloc_size as usize;
+        let mi_grid_bytes = size_of::<sys::MiGridEntry>() * cm.mi_alloc_size as usize;
         let keep_grid = (*dec).keep_mi_grid != 0;
         let grid_frame = [cm.mi_cols, cm.mi_rows, cm.mi_stride];
         let kept = keep_grid && td.kept_grid == grid_frame && td.kept_grid_bytes == mi_grid_bytes;

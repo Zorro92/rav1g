@@ -125,7 +125,8 @@ struct GenBlockData {
     iter_grid_stride_uv: c_int,
     disable_edge_filter: c_int,
     force_integet_mv: c_int,
-    reserved: [c_int; 3],
+    mi_grid_entry: u32,
+    reserved: [c_int; 2],
     wedge_offsets: [[c_int; 4]; 22],
     dist_wtd: [[c_int; 4]; 8 * 8],
     lossless_seg: [[c_int; 4]; 8],
@@ -186,8 +187,9 @@ pub(crate) unsafe fn prediction_gen_blocks(pbi: *mut AV1Decoder, dec: *mut Av1Co
         (*data).mi_cols = (*cm).mi_cols;
         (*data).mi_rows = (*cm).mi_rows;
         (*data).mi_stride = (*cm).mi_stride;
-        // The low half of the address of the mode info pool: the grid holds pointers into it.
-        (*data).mi_addr_base = (*(*dec).mode_info_pool).host_ptr as u64 as u32;
+        // The grid: entries of four bytes, the place of a record in the pool above this base.
+        (*data).mi_addr_base = crate::sys::MI_GRID_BASE;
+        (*data).mi_grid_entry = crate::sys::MI_GRID_ENTRY_BYTES;
         (*data).iter_grid_stride = td.iter_grid_stride;
         (*data).iter_grid_offset_uv = td.iter_grid_offset_uv;
         (*data).iter_grid_stride_uv = td.iter_grid_stride_uv;

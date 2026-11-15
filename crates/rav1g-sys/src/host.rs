@@ -175,7 +175,10 @@ pub struct macroblockd {
     pub plane: [macroblockd_plane; 3],
     pub tile: TileInfo,
     pub mi_stride: c_int,
-    pub mi: *mut *mut MB_MODE_INFO,
+    /// The entry of the block in the mode info grid; the entries of its neighbours are around it.
+    pub mi: *mut MiGridEntry,
+    /// The pool the entries of the grid name records of ([`mi_grid_record`]).
+    pub mi_pool: *mut MB_MODE_INFO,
     pub up_available: c_int,
     pub left_available: c_int,
     pub chroma_up_available: c_int,
@@ -426,9 +429,10 @@ pub struct AV1Common {
     pub mi_stride: c_int,
     pub base_qindex: c_int,
     pub mi_alloc_size: c_int,
+    /// The pool of the mode info records: what the entries of the grid name records of.
     pub mi: *mut MB_MODE_INFO,
-    pub mi_grid_base: *mut *mut MB_MODE_INFO,
-    pub mi_grid_visible: *mut *mut MB_MODE_INFO,
+    pub mi_grid_base: *mut MiGridEntry,
+    pub mi_grid_visible: *mut MiGridEntry,
     pub lf_info: loop_filter_info_n,
     pub superres_scale_denominator: u8,
     pub superres_upscaled_width: c_int,
@@ -483,4 +487,44 @@ pub struct AV1Decoder {
     pub next_obu: *const u8,
     pub obus_end: *const u8,
     pub temporal_unit_end: *const u8,
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// The mode info grid: for every 4x4 unit of a frame the record of the block that covers it.
+// ---------------------------------------------------------------------------------------------------------
+
+/// An entry of the mode info grid: 0 for a unit without a block, else where the record of the block
+/// starts in the pool of the mode info records, in bytes, plus [`MI_GRID_BASE`]. The shaders that read
+/// the grid take the base off and divide by the size of a record (`cb_mi_addr_base`, `get_mi_index`).
+/// libaom's grid, and the C++ host's, has the address of the record there, 8 bytes of which the
+/// shaders read the low half; this is that word alone, with a base that does not depend on where the
+/// pool is mapped.
+pub type MiGridEntry = u32;
+/// What an entry has above the place of its record in the pool: no record has the entry 0.
+pub const MI_GRID_BASE: u32 = size_of::<MB_MODE_INFO>() as u32;
+/// The bytes of an entry, as the shaders are told (`cb_mi_grid_entry`).
+pub const MI_GRID_ENTRY_BYTES: u32 = size_of::<MiGridEntry>() as u32;
+
+/// The entry of the record `mi` of the pool at `pool`.
+///
+/// # Safety
+/// `mi` is a record of the pool that starts at `pool`, which is smaller than 4 GiB.
+#[inline]
+pub unsafe fn mi_grid_entry(pool: *const MB_MODE_INFO, mi: *const MB_MODE_INFO) -> MiGridEntry {
+    // SAFETY: the caller's contract.
+    (unsafe { mi.byte_offset_from(pool) }) as u32 + MI_GRID_BASE
+}
+
+/// The record an entry names in the pool at `pool`; null for the entry of a unit without a block.
+///
+/// # Safety
+/// `entry` is 0 or an entry [`mi_grid_entry`] made for the pool at `pool`.
+#[inline]
+pub unsafe fn mi_grid_record(pool: *mut MB_MODE_INFO, entry: MiGridEntry) -> *mut MB_MODE_INFO {
+    if entry == 0 {
+        std::ptr::null_mut()
+    } else {
+        // SAFETY: the caller's contract.
+        unsafe { pool.byte_add((entry - MI_GRID_BASE) as usize) }
+    }
 }

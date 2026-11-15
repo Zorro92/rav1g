@@ -26,7 +26,11 @@ cbuffer GenLfData : register(b0) {
   uint cb_delta_q_info_delta_lf_present_flag;
   int cb_delta_q_info_delta_lf_multi;
   int cb_lf_mode_ref_delta_enabled;
-  int3 reserved;
+  // The bytes of an entry of mi_grid. 8: the address of the record of the block at the unit, of which
+  // the low half is read. 4: that word alone. Less cb_mi_addr_base the word is where the record starts
+  // in mi_pool, in bytes; an entry of zeros is a unit without a block.
+  uint cb_mi_grid_entry;
+  int2 reserved;
   int2 cb_lf_filter_level;
   int cb_lf_filter_level_u;
   int cb_lf_filter_level_v;
@@ -47,13 +51,17 @@ cbuffer GenLfSRT : register(b1) {
 };
 
 int get_mi_index(ByteAddressBuffer grid, int index, uint base) {
-  uint2 addr = grid.Load2(index * 8);
-  if (addr.x == 0 && addr.y == 0)
-    return -1;
-  else {
-    addr.x -= base;
-    return addr.x / ModeInfoSize;
+  uint addr;
+  if (cb_mi_grid_entry == 4) {
+    addr = grid.Load(index * 4);
+    if (addr == 0) return -1;
+  } else {
+    uint2 entry = grid.Load2(index * 8);
+    if (entry.x == 0 && entry.y == 0) return -1;
+    addr = entry.x;
   }
+  addr -= base;
+  return addr / ModeInfoSize;
 }
 
 int get_filter_level_hor(int plane, int ref0, int mode, int segment_id, int delta_from_base, int delta[4]) {

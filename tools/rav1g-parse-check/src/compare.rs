@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use crate::plain::{Arena, Buffer, COEF_PATTERN};
-use crate::sys::{MB_MODE_INFO, av1_tile_data, tx_block_info_gpu};
+use crate::sys::{MB_MODE_INFO, MI_GRID_BASE, av1_tile_data, tx_block_info_gpu};
 
 /// A field of the mode info record: its name, where it lies and how long it is.
 struct Field {
@@ -388,16 +388,13 @@ pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
     {
         // SAFETY: as above.
         let (grid_c, grid_r) = unsafe { (c.mi_grid.values(), r.mi_grid.values()) };
-        let index = |arena: &Arena, mi: *mut MB_MODE_INFO| -> i64 {
-            if mi.is_null() {
-                -1
-            } else {
-                (mi as usize - arena.mi_pool.ptr() as usize) as i64 / size_of::<MB_MODE_INFO>() as i64
-            }
+        // An entry is the place of its record in the pool of its arena (`mi_grid_entry`), 0 for none.
+        let index = |entry: u32| -> i64 {
+            if entry == 0 { -1 } else { i64::from(entry - MI_GRID_BASE) / size_of::<MB_MODE_INFO>() as i64 }
         };
         let stride = c.size.mi_stride() as usize;
         for (unit, (a, b)) in grid_c.iter().zip(grid_r).enumerate() {
-            let (a, b) = (index(c, *a), index(r, *b));
+            let (a, b) = (index(*a), index(*b));
             if a != b {
                 report.difference("grid", || {
                     format!(

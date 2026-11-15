@@ -142,7 +142,9 @@ unsafe fn cdef_filter_run(dec: *mut Av1Core, cm: &AV1_COMMON, src: *const HwFram
         let cdef_skips = (*td.cdef_skips).host_ptr.cast::<c_int>();
         let nvfb = (cm.mi_rows + mi_size_64 - 1) / mi_size_64;
         let nhfb = (cm.mi_cols + mi_size_64 - 1) / mi_size_64;
-        let mode_info = |row: c_int, col: c_int| &**cm.mi_grid_visible.offset((row * cm.mi_stride + col) as isize);
+        let mode_info = |row: c_int, col: c_int| {
+            &*crate::sys::mi_grid_record(cm.mi, *cm.mi_grid_visible.offset((row * cm.mi_stride + col) as isize))
+        };
 
         // The strength index of every 64x64 block, and for every 8x8 block whether all of it is skipped.
         for fbr in 0..nvfb {

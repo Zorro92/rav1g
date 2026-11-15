@@ -127,10 +127,12 @@ have to write the same bytes at every stage, not only the same frames.
   Rust decoder by design, see [The host pool and the queues](#the-host-pool-and-the-queues-2026-11-13)).
 - **Where the C++ decoder comes from** (job `cpp-reference`): branch `cpp` at the commit that
   `CPP_REFERENCE_COMMIT` of `.github/workflows/build.yml` names, built with its own project files and
-  its own shaders. **The pin is `e5830675f65df65a829af3ad17592dc8f63b44c0`** (the head of `cpp` on
-  2026-11-15: the pin before it, `df73d8c`, whose `libav1` is the one `main` had when the C++ host was
-  removed, with the one shader change both branches got that day, the last term of `flat` in
-  `loopfilter_vert_hbd.hlsl`; [gpu-av1-decoder.md](gpu-av1-decoder.md#dxc-experiment-2026-11-15)).
+  its own shaders. **The pin is `736393d8fc0e47ad6658f10424017dc9fdb4c624`** (the head of `cpp` on
+  2026-11-15: `df73d8c`, whose `libav1` is the one `main` had when the C++ host was removed, with the
+  two shader changes both branches got that day: the last term of `flat` in `loopfilter_vert_hbd.hlsl`
+  (`e583067`; [gpu-av1-decoder.md](gpu-av1-decoder.md#dxc-experiment-2026-11-15)), and the size of an
+  entry of the mode info grid as a constant of the three shaders that read it, which the C++ host sets
+  to 8 and the Rust host to 4 ([memory.md](memory.md#the-mode-info-grid-in-four-bytes-a-unit))).
 - **The pin is bumped on purpose**, in the workflow and in this section, when a change that both decoders
   have (a shader, the C of the parser) has landed on both branches. A change on `main` alone that leaves
   the output as it is needs no bump.

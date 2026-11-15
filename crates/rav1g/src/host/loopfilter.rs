@@ -35,7 +35,8 @@ struct GenLfData {
     delta_q_info_delta_lf_present_flag: c_int,
     delta_q_info_delta_lf_multi: c_int,
     lf_mode_ref_delta_enabled: c_int,
-    r: [c_int; 3],
+    mi_grid_entry: u32,
+    r: [c_int; 2],
 
     lf_filter_level: [c_int; 2],
     lf_filter_level_u: c_int,
@@ -114,8 +115,9 @@ pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: 
         let gen_constants = alloc_constants::<GenLfData>(&mut td.command_buffer);
         let gen_data = gen_constants.data;
         (*gen_data).mi_stride = cm.mi_stride;
-        // The low half of the address of the mode info pool: the grid holds pointers into it.
-        (*gen_data).mi_addr_base = (*(*dec).mode_info_pool).host_ptr as u64 as c_int;
+        // The grid: entries of four bytes, the place of a record in the pool above this base.
+        (*gen_data).mi_addr_base = crate::sys::MI_GRID_BASE as c_int;
+        (*gen_data).mi_grid_entry = crate::sys::MI_GRID_ENTRY_BYTES;
         (*gen_data).delta_q_info_delta_lf_multi = cm.delta_q_info.delta_lf_multi;
         (*gen_data).delta_q_info_delta_lf_present_flag = cm.delta_q_info.delta_lf_present_flag;
         (*gen_data).lf_mode_ref_delta_enabled = c_int::from(lf.mode_ref_delta_enabled);

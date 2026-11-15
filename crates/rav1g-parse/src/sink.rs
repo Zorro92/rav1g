@@ -58,7 +58,10 @@ use rav1d::parse::{
     ParseBlock, ParseColorCodes, ParseFrame, ParsePalette, ParseShowExisting, ParseSink, ParseSuperblock, ParseTile,
     ParseTxb,
 };
-use rav1g_sys::{AV1_COMMON, AV1Decoder, MACROBLOCKD, MB_MODE_INFO, TileInfo, av1_tile_data, tx_block_info_gpu};
+use rav1g_sys::{
+    AV1_COMMON, AV1Decoder, MACROBLOCKD, MB_MODE_INFO, MiGridEntry, TileInfo, av1_tile_data, mi_grid_entry,
+    mi_grid_record, tx_block_info_gpu,
+};
 
 /// `SinkOptions::test_panic`: the frame (counted from 1) whose first superblock panics.
 const TEST_PANIC_FRAME: u64 = 3;
@@ -134,9 +137,13 @@ fn time_stamp() -> u64 {
 
 /// The memory of a frame's parse that all its tiles share.
 pub struct FrameMemory {
-    /// The grid: the address of the block's record at every 4x4 unit, `mi_stride` a row, all null.
-    pub mi_grid: *mut *mut MB_MODE_INFO,
+    /// The grid: the entry of the block's record at every 4x4 unit (`rav1g_sys::mi_grid_entry`),
+    /// `mi_stride` a row.
+    pub mi_grid: *mut MiGridEntry,
     pub mi_stride: c_int,
+    /// The pool the records of the frame's tiles are in (every `TileMemory::mi_pool` and every piece
+    /// behind it is inside it): what the entries of the grid count from.
+    pub mi_pool: *mut MB_MODE_INFO,
 }
 
 /// The memory of a tile's parse.
@@ -236,7 +243,8 @@ struct FrameState {
     mi_cols: c_int,
     mi_rows: c_int,
     mi_stride: c_int,
-    mi_grid: *mut *mut MB_MODE_INFO,
+    mi_grid: *mut MiGridEntry,
+    mi_pool: *mut MB_MODE_INFO,
     has_chroma: bool,
     ss_x: c_int,
     ss_y: c_int,
@@ -451,6 +459,7 @@ impl<H: SinkHost> Sink<H> {
                 let bw = 1 << MI_SIZE_WIDE_LOG2[mi.sb_type as usize];
                 let bh = 1 << MI_SIZE_HIGH_LOG2[mi.sb_type as usize];
                 (*xd).mi = frame.mi_grid.add((mi_row * frame.mi_stride + mi_col) as usize);
+                (*xd).mi_pool = frame.mi_pool;
                 (*xd).mb_to_bottom_edge = (frame.mi_rows - bh - mi_row) * 4 * 8;
                 (*xd).mb_to_right_edge = (frame.mi_cols - bw - mi_col) * 4 * 8;
                 let up = mi_row > row_start;
@@ -513,10 +522,11 @@ impl<H: SinkHost> Sink<H> {
             let x_mis = (1 << MI_SIZE_WIDE_LOG2[bsize]).min(frame.mi_cols - block.x4) as usize;
             let y_mis = (1 << MI_SIZE_HIGH_LOG2[bsize]).min(frame.mi_rows - block.y4) as usize;
             let first = frame.mi_grid.add((block.y4 * frame.mi_stride + block.x4) as usize);
+            let entry = mi_grid_entry(frame.mi_pool, mi);
             for y in 0..y_mis {
                 let row = first.add(y * frame.mi_stride as usize);
                 for x in 0..x_mis {
-                    row.add(x).write(mi);
+                    row.add(x).write(entry);
                 }
             }
         }
@@ -595,7 +605,7 @@ impl<H: SinkHost> Sink<H> {
                     if x4 >= frame.mi_cols || y4 >= frame.mi_rows {
                         continue;
                     }
-                    let mi = *frame.mi_grid.add((y4 * frame.mi_stride + x4) as usize);
+                    let mi = mi_grid_record(frame.mi_pool, *frame.mi_grid.add((y4 * frame.mi_stride + x4) as usize));
                     if !mi.is_null() {
                         (*mi).cdef_strength = superblock.cdef_idx[index];
                     }
@@ -636,6 +646,7 @@ impl<H: SinkHost> ParseSink for Sink<H> {
             cm.mi_stride = memory.mi_stride;
             cm.mi_grid_base = memory.mi_grid;
             cm.mi_grid_visible = memory.mi_grid;
+            cm.mi = memory.mi_pool;
             // BLOCK_128X128 or BLOCK_64X64, and their sides in 4x4 units.
             cm.seq_params.sb_size = if header.seq_hdr.sb128 != 0 { 15 } else { 12 };
             cm.seq_params.mib_size_log2 = if header.seq_hdr.sb128 != 0 { 5 } else { 4 };
@@ -646,6 +657,7 @@ impl<H: SinkHost> ParseSink for Sink<H> {
                 mi_rows: header.bh,
                 mi_stride: memory.mi_stride,
                 mi_grid: memory.mi_grid,
+                mi_pool: memory.mi_pool,
                 has_chroma,
                 ss_x,
                 ss_y,

@@ -138,7 +138,11 @@ cbuffer GenBlockData : register(b0) {
   uint cb_iter_grid_stride_uv;
   uint cb_disable_edge_filter;
   uint cb_force_integet_mv;
-  int3 cb_reserved;
+  // The bytes of an entry of mi_grid. 8: the address of the record of the block at the unit, of which
+  // the low half is read. 4: that word alone. Less cb_mi_addr_base the word is where the record starts
+  // in mi_pool, in bytes.
+  uint cb_mi_grid_entry;
+  int2 cb_reserved;
   int4 cb_wedge_offsets[22];  //??
   int4 cb_dist_wtd[8 * 8];
   int4 cb_lossless_seg[8];
@@ -212,7 +216,7 @@ int intra_edge_filter_strength(int blk_wh, int d, int type) {
 }
 
 uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
-  uint addr = grid.Load(index * 8);
+  uint addr = grid.Load(index * cb_mi_grid_entry);
   addr -= base;
   return addr / ModeInfoSize;
 }

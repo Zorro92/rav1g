@@ -22,7 +22,7 @@ use std::sync::Mutex;
 
 use crate::host::blocks::WaveEdges;
 use crate::host::types::av1_frame_thread_data;
-use crate::sys::{MB_MODE_INFO, av1_tile_data, tx_block_info_gpu};
+use crate::sys::{MB_MODE_INFO, MiGridEntry, av1_tile_data, tx_block_info_gpu};
 
 /// Coefficients a 4x4 unit of the frame can have: 16 of luma and two times 4 of chroma
 /// (`IDCT_COEF_COUNT_DENUM` of the host).
@@ -155,7 +155,7 @@ pub struct LrUnit {
 pub struct Arena {
     pub size: FrameSize,
     pub mi_pool: Buffer<MB_MODE_INFO>,
-    pub mi_grid: Buffer<*mut MB_MODE_INFO>,
+    pub mi_grid: Buffer<MiGridEntry>,
     pub coefs: Buffer<i32>,
     pub tx_blocks: Buffer<tx_block_info_gpu>,
     pub gen_indexes: Buffer<u32>,

@@ -278,6 +278,8 @@ class ModeInfo:
         self.cols = grid.num("mi_cols")
         self.rows = grid.num("mi_rows")
         self.base = grid.num("pool_base")
+        # The bytes of an entry: 8, the address of the record (the low half is read), or 4, that word alone.
+        self.entry = grid.num("entry", 8)
         self.record = grid.num("record", 224)
         self.runs = []  # (first pool index, count, offset in the data)
         pos = 0
@@ -290,10 +292,13 @@ class ModeInfo:
 
     def index(self, col, row):
         """Pool index of the record of a unit; None when the grid has no record there."""
-        pos = (row * self.stride + col) * 8
-        if pos + 8 > len(self.grid.data):
+        pos = (row * self.stride + col) * self.entry
+        if pos + self.entry > len(self.grid.data):
             return None
-        low, high = struct.unpack_from("<II", self.grid.data, pos)
+        if self.entry == 4:
+            low, high = struct.unpack_from("<I", self.grid.data, pos)[0], 0
+        else:
+            low, high = struct.unpack_from("<II", self.grid.data, pos)
         if low == 0 and high == 0:
             return None
         return ((low - self.base) & 0xffffffff) // self.record

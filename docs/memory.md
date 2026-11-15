@@ -46,7 +46,7 @@ tile ends.
 | `frame buffers` | The buffers of the pool that are out of it (a reference count above 0: named by a reference slot, the frame of a slot in flight, a reference such a frame still reads) at the setup of every frame, that frame's included: peak, the most frequent count, mean, and how many frames saw each count. |
 | `references` | How many different frames the 8 reference slots name at the setup of a frame, the same way. |
 | `palette` | Palette buffers created; frames that allow screen content tools (each binds a palette buffer of the size of a frame buffer); frames that have palette blocks; the bytes of the palette blocks of a frame (what a palette buffer really holds), peak and mean, and at once. |
-| `cpu bytes written` | What the CPU writes for a frame into memory the GPU reads, mean / peak, and by part: mode info records (224 bytes each, cleared and filled), the mode info grid (8 bytes a 4x4 unit), coefficients (an upper bound: 4 bytes for every value up to a block's last one; only those that are not zero are written), transform block records (16 bytes), the block index list, the CDEF lists (record thread), the constants of the stages, palette blocks. Not in it: the counters of the block lists (`gen_block_map`), loop restoration units, film grain offsets, and the clears, which `-gputime` reports. |
+| `cpu bytes written` | What the CPU writes for a frame into memory the GPU reads, mean / peak, and by part: mode info records (224 bytes each, cleared and filled), the mode info grid (4 bytes a 4x4 unit; 8 when the numbers below were measured), coefficients (an upper bound: 4 bytes for every value up to a block's last one; only those that are not zero are written), transform block records (16 bytes), the block index list, the CDEF lists (record thread), the constants of the stages, palette blocks. Not in it: the counters of the block lists (`gen_block_map`), loop restoration units, film grain offsets, and the clears, which `-gputime` reports. |
 
 Not measured, because the stream does not change them: `idct_residuals` (24.4 MiB) and
 `loopfilter_blocks` follow the size of the frame; the grids and maps of a slot are addressed by position.
@@ -180,7 +180,8 @@ slots 74.1). By MiB, with the risk; the numbers above are local and from seven s
 | 6 | Coefficient pool at three quarters | 15.4 MiB | 62.4 % at once in `d2`, 10 to 26 % elsewhere. | Low, and little: `d2` would be near its waits, and half is not possible for it. |
 | 7 | Palette blocks from a pool instead of a buffer of the size of a frame a slot | 0 MiB for film (no clip allows screen content tools); 72.5 MiB less on the first frame of a stream that does | 36 KB a frame at most where a buffer is 3.2 MiB. | Medium: the shaders address the palette buffer like the frame buffer. It removes a growth of 72.5 MiB that the budget guard can only refuse. |
 
-For the CPU (second priority, DRAM bandwidth in the slow state): the mode info grid as 4 bytes a unit
+For the CPU (second priority, DRAM bandwidth in the slow state; the first of these is **done**,
+[below](#the-mode-info-grid-in-four-bytes-a-unit)): the mode info grid as 4 bytes a unit
 (an index, which is what the shaders use) halves the largest part, 2.0 of 8.6 MiB a frame on `j4k40`, and
 takes 2.0 MiB off every slot; the host's readers of the grid (block lists, CDEF lists) then add a base.
 The CDEF skip list (0.5 MiB a frame, record thread, read back through the grid) could be a GPU pass.
@@ -248,4 +249,35 @@ for the three buffers of the stages, 13.5 for the index lists; a slot is 20.2 Mi
   frames in parse on two threads, 244 of 244 each; the `d2` cut 30 of 30. A
   growth that the guard refuses was not produced: the budget of `rav1g-dec -budget` is one number for
   the creation and for the growth.
+- **Console: pending.**
+
+### The mode info grid in four bytes a unit
+
+2026-11-15. The grid of a slot has four bytes for every 4x4 unit where it had eight: the CPU writes
+2,073,600 bytes of grid for a 3840x2160 frame where it wrote 4,147,200 (`cpu bytes written ... mode
+info grid` of `-memstats`), a slot's grid is 2.0 MiB where it was 4.0, and the decoder for 3840x2160
+10-bit (two frames in parse, three slots) takes **593.4 MiB** of device buffers (599.4 before; a slot
+18.2 MiB).
+
+- *The entry.* libaom's grid has the address of the block's record; the shaders read its low half,
+  take the low half of the pool's address off (`cb_mi_addr_base`) and divide by the size of a record.
+  The entry is now that one word, and not an address: where the record starts in the pool, in bytes,
+  plus 224 (`rav1g_sys::MiGridEntry`, `mi_grid_entry`, `mi_grid_record`), with 224 as the base the
+  shaders take off. A unit without a block is 0, which no record has. The arithmetic of the shaders is
+  what it was, and nothing depends on where the pool is mapped.
+- *The shaders.* `gen_pred_blocks.hlsl` (and `gen_pred_blocks_fast.hlsl`, which includes it) and
+  `gen_lf_blocks_hor/vert.hlsl` read the size of an entry from a constant that was reserved
+  (`cb_mi_grid_entry`): with 4 they read one word a unit, with 8 the address as before. Nothing
+  in them is beyond `cs_5_0`; FXC and DXC compile them.
+- *The host.* The sink writes the entry of a block into its units (`rav1g-parse/src/sink.rs`); the
+  readers of the grid on the CPU, the block lists (`av1_mi_push_block`: the block and its neighbours)
+  and the CDEF lists, get the record from the entry and the pool. The clears of the grid, where a
+  frame still has them, are half as long.
+- *The reference.* Branch `cpp` has the same shaders (`736393d`, the pin of `rust-equal` since this
+  change): its host writes libaom's grid of addresses and says 8. `stage_dump.py` reads either grid
+  by the `entry=` of the dump and compares the records the units name, as before.
+- *Checked locally* (wine on lavapipe): the 244 vectors of AOM with the shaders FXC compiled and with
+  the shaders DXC 1.9 compiled, 244 of 244 each; the `d2` cut 30 of 30; `rav1g-parse-check` with four
+  threads and two frames in parse, 244 of 244 equal; the listings scan and the thread group check of
+  the changed shaders.
 - **Console: pending.**

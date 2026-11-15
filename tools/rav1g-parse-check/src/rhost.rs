@@ -125,7 +125,8 @@ impl SinkHost for PlainHost {
                 arena
             }
         };
-        let memory = FrameMemory { mi_grid: arena.mi_grid.ptr(), mi_stride: size.mi_stride() };
+        let memory =
+            FrameMemory { mi_grid: arena.mi_grid.ptr(), mi_stride: size.mi_stride(), mi_pool: arena.mi_pool.ptr() };
         // SAFETY: the place is this frame's and none of its tiles is in parse (the contract of
         // `SinkHost::frame_begin`).
         unsafe { *self.places[frame].get() = Some(InParse { order, arena }) };

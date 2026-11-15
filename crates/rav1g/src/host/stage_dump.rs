@@ -233,7 +233,8 @@ pub(crate) unsafe fn stage_dump_data(
 }
 
 /// `av1_stage_dump_mode_info` of the C++: the mode info the stages of the frame read: the grid (one
-/// pointer per 4x4 unit, rows of mi_stride) and the records it points to. Of the pool only the records of
+/// entry per 4x4 unit, rows of mi_stride; `pool_base` is what an entry has above the place of its record
+/// in the pool, where the C++ host's entries are addresses and its base that of the pool) and the records it points to. Of the pool only the records of
 /// the frame's tiles are copied, tile by tile: the layout lists, per run of records, the pool index of
 /// its first record and the number of records.
 ///
@@ -252,15 +253,14 @@ pub(crate) unsafe fn stage_dump_mode_info(dec: *mut Av1Core, cm: *const AV1_COMM
         let grid_object = &*td.mode_info_grid;
         let pool = &*(*dec).mode_info_pool;
         let record = size_of::<MB_MODE_INFO>();
-        let grid_bytes =
-            (size_of::<*mut MB_MODE_INFO>() * cm.mi_stride as usize * cm.mi_rows as usize).min(grid_object.size);
+        let entry = size_of::<crate::sys::MiGridEntry>();
+        let grid_bytes = (entry * cm.mi_stride as usize * cm.mi_rows as usize).min(grid_object.size);
         let text = format!(
-            "buffer=mi_grid entry={} mi_stride={} mi_cols={} mi_rows={} pool_base={} record={record}\n",
-            size_of::<*mut MB_MODE_INFO>(),
+            "buffer=mi_grid entry={entry} mi_stride={} mi_cols={} mi_rows={} pool_base={} record={record}\n",
             cm.mi_stride,
             cm.mi_cols,
             cm.mi_rows,
-            pool.host_ptr as usize as u32
+            crate::sys::MI_GRID_BASE
         );
         let grid = av1_stage_dump_region { src: grid_object.dev, offset: 0, size: grid_bytes, uav: 0 };
         stage_dump_data(dec, c"mi_grid", &text, &[grid]);

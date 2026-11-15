@@ -51,7 +51,7 @@ use crate::sys::{
     AV1_PERF_INTER_COMP_WARP_DIFF_UV, AV1_PERF_INTER_OBMC_ABOVE, AV1_PERF_INTER_OBMC_LEFT, AV1_PERF_INTER_SINGLE,
     AV1_PERF_INTER_SINGLE_COPY, AV1_PERF_INTER_WARP, AV1Decoder, BILINEAR, BLOCK_4X4, BLOCK_4X8, BLOCK_4X16, BLOCK_8X4,
     BLOCK_8X8, BLOCK_8X16, BLOCK_16X4, BLOCK_16X8, BLOCK_32X32, COMPOUND_DIFFWTD, COMPOUND_WEDGE, GLOBAL_GLOBALMV,
-    GLOBALMV, INTRA_FRAME, MACROBLOCKD, MB_MODE_INFO, OBMC_CAUSAL, REF_NO_SCALE, SCALE_SUBPEL_BITS,
+    GLOBALMV, INTRA_FRAME, MACROBLOCKD, MB_MODE_INFO, OBMC_CAUSAL, REF_NO_SCALE, SCALE_SUBPEL_BITS, mi_grid_record,
     SINGLE_INTER_MODE_END, SINGLE_INTER_MODE_START, TX_4X4, TX_16X32, TX_16X64, TX_32X16, TX_32X32, TX_32X64, TX_64X16,
     TX_64X32, TX_64X64, UV_CFL_PRED, WARPED_CAUSAL, av1_tile_data, int_mv,
 };
@@ -541,9 +541,11 @@ pub unsafe extern "C" fn av1_mi_push_block(_pbi: *mut AV1Decoder, cm: *mut AV1_C
         // The edges of the tile's wavefront; null when the frame keeps the wavefront in the slot's grid.
         let wave = tile.wave_edges.cast::<WaveEdges>();
 
-        (**xd.mi).index_base = tile.gen_index_ptr;
-        let mi = &**xd.mi;
-        let neighbour = |offset: c_int| &**xd.mi.offset(offset as isize);
+        // The grid has the entries of the records (`mi_grid_record`).
+        let record = |offset: c_int| mi_grid_record(xd.mi_pool, *xd.mi.offset(offset as isize));
+        (*record(0)).index_base = tile.gen_index_ptr;
+        let mi = &*record(0);
+        let neighbour = |offset: c_int| &*record(offset);
         let bsize = mi.sb_type;
         let bw_log = c_int::from(MI_SIZE_WIDE_LOG2[bsize as usize]);
         let bh_log = c_int::from(MI_SIZE_HIGH_LOG2[bsize as usize]);

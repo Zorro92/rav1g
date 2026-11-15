@@ -599,7 +599,7 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
             assign,
             td.mode_info_grid,
             mem.buffer_for(
-                size_of::<*mut MB_MODE_INFO>() * mi_size as usize,
+                size_of::<crate::sys::MiGridEntry>() * mi_size as usize,
                 HostRW,
                 c"mode_info_grid",
                 i,
