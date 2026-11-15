@@ -134,6 +134,40 @@ struct GenBlockData {
     wm_params: [WarpParams; 8],
 }
 
+/// The records `gen_pred_blocks` writes for a frame into `prediction_blocks` (with the lists by motion
+/// vector class of -interfast) and into `prediction_blocks_warp`: the counts of the lists of its tiles,
+/// which [`prediction_gen_blocks`] turns into offsets. For the buffers, before the frame is recorded
+/// (`stage_buffers.rs`).
+///
+/// # Safety
+/// `tiles` are the tiles of the frame on `td`, parsed, with their block maps as the parse left them.
+pub(crate) unsafe fn pred_block_counts(td: &av1_frame_thread_data, tiles: &[av1_tile_data]) -> (c_int, c_int) {
+    // SAFETY: the caller's contract: the lists of a tile are in the block map of its slot.
+    unsafe {
+        let iters = |tile: &av1_tile_data| (-1).max(tile.gen_intra_iter_y).max(tile.gen_intra_iter_uv);
+        let types = |iters: c_int| InterCountsAll + ReconstructBlockSizes + (iters + 1) * IntraTypeCount;
+        let pred_block_types = types(tiles.iter().map(iters).max().unwrap_or(-1));
+        let mut blocks = 0;
+        let mut warp = 0;
+        for tile in tiles {
+            // What the loops of prediction_gen_blocks take: the lists below the tile's gen_pred_map_max.
+            let lists = (types(iters(tile)) + 1).min(pred_block_types + 1);
+            for it in 0..lists {
+                blocks += *tile.gen_block_map.offset(it as isize);
+            }
+            for it in 0..=SIZES {
+                warp += *tile.gen_block_map_wrp.add(it);
+            }
+            if td.inter_fast != 0 && !tile.gen_block_map_fast.is_null() {
+                for it in 0..=InterFastLists as usize {
+                    blocks += *tile.gen_block_map_fast.add(it);
+                }
+            }
+        }
+        (blocks, warp)
+    }
+}
+
 /// `av1_prediction_gen_blocks` of the C++: turns the counts of the tiles' lists into where each list
 /// starts in the block records of the frame, and records the shader that writes the records.
 ///
@@ -259,6 +293,9 @@ pub(crate) unsafe fn prediction_gen_blocks(pbi: *mut AV1Decoder, dec: *mut Av1Co
             }
         }
         super::mem_stats::pred_blocks(dec, pred_block_total, pred_warp_count);
+        // What the buffers were made for before the recording began (stage_buffers::for_frame).
+        debug_assert!(pred_block_total as usize * 16 <= (*(*dec).prediction_blocks).size);
+        debug_assert!(pred_warp_count as usize * 48 <= (*(*dec).prediction_blocks_warp).size);
         // -dumpstages: the mode info, where the first stage that reads it starts.
         stage_dump_mode_info(dec, cm);
         let commands = commands(dec);

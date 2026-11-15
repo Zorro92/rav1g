@@ -304,6 +304,78 @@ impl Allocator {
         obj
     }
 
+    /// The buffer `obj` of this allocator gets `size` bytes, rounded up to 256, in place of what it has:
+    /// its old resource is released first, so the two never exist together, and the descriptor stays
+    /// where it is. What the buffer held is gone; a buffer the CPU maps has a new mapping. Returns false when the allocation fails, after a
+    /// "MEMORY FAILED" line; the descriptor then has no resource and a size of 0, and a later call may
+    /// give it one again.
+    ///
+    /// # Safety
+    /// `obj` is a descriptor [`Allocator::create_buffer`] of this allocator returned; no command list
+    /// that is recorded or in flight names the buffer, and nothing keeps a pointer into its mapping;
+    /// `device` is the device of the decoder, or none.
+    pub(crate) unsafe fn resize_buffer(
+        &mut self,
+        device: Option<&ID3D12Device>,
+        obj: *mut GpuBufferObject,
+        size: usize,
+    ) -> bool {
+        // SAFETY: the caller's contract.
+        let obj = unsafe { &mut *obj };
+        let aligned_size = align_up(size, DEVICE_MEM_ALIGN);
+        let kind = MemoryKind::from_raw(obj.memtype);
+        if !obj.dev.is_null() {
+            if !obj.host_ptr.is_null() {
+                // SAFETY: the descriptor holds the reference of create_buffer.
+                if let Some(buffer) = unsafe { BufferRef::from_raw(&obj.dev) } {
+                    buffer.unmap();
+                }
+                obj.host_ptr = std::ptr::null_mut();
+            }
+            // SAFETY: the reference of create_buffer; the descriptor forgets the pointer.
+            unsafe { BufferRef::release(obj.dev.cast()) };
+            obj.dev = std::ptr::null_mut();
+            if let Some(kind) = kind {
+                self.dev_bytes[kind as usize] -= obj.size;
+            }
+        }
+        obj.size = 0;
+        let created = match (kind, device) {
+            (Some(kind), Some(device)) => Device::new(device).create_buffer(aligned_size as u64, kind, false),
+            _ => Err(gpu::Error { step: "CreateCommittedResource", code: E_POINTER.0 }),
+        };
+        match created {
+            Ok(buffer) => {
+                if let Some(mapped) = buffer.mapped() {
+                    obj.host_ptr = mapped.as_ptr().cast();
+                }
+                obj.dev = buffer.into_raw().cast();
+                obj.size = aligned_size;
+                if let Some(kind) = kind {
+                    self.dev_bytes[kind as usize] += aligned_size;
+                }
+                true
+            }
+            Err(error) => {
+                let total = self.device_bytes();
+                // SAFETY: the name of a buffer is a static C string (create_buffer).
+                let name = unsafe { CStr::from_ptr(obj.name) }.to_string_lossy();
+                log_create_error(&format!(
+                    "MEMORY FAILED buffer {name}, grown for a frame: {aligned_size} bytes ({:.1} MiB), type {}, heap \
+                     {}, {} hr 0x{:08X}; allocated besides it: {total} bytes ({:.1} MiB) in {} buffers",
+                    to_mib(aligned_size as u64),
+                    memory_type_name(obj.memtype),
+                    kind.map_or("unknown", Device::heap_name),
+                    error.step,
+                    error.code as u32,
+                    to_mib(total as u64),
+                    self.dev_obj_count - 1
+                ));
+                false
+            }
+        }
+    }
+
     /// `size` bytes of the host pool at an offset that is a multiple of `align` (of 32 at least). Returns
     /// null when the pool is too small, after a "MEMORY FAILED" line.
     pub(crate) fn host_allocate(&mut self, size: usize, align: c_int) -> *mut c_void {

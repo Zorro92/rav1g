@@ -2,13 +2,15 @@
 
 2026-11-15. A measurement, to choose reductions from: the decoder for 3840x2160 10-bit takes 646.5 MiB
 of device buffers in an application with 1 GiB ([phase2-rav1d.md, step 5](phase2-rav1d.md#step-5-the-pools)),
-and most of them are sized for a worst case. Nothing of the decoder was changed for it.
+and most of them are sized for a worst case. Nothing of the decoder was changed for the measurement;
+what was changed since is under [Reductions made](#reductions-made).
 
 - [The flag](#the-flag)
 - [The lines](#the-lines)
 - [What was measured](#what-was-measured)
 - [Where the time of the decode call goes](#where-the-time-of-the-decode-call-goes)
 - [Candidates, ranked](#candidates-ranked)
+- [Reductions made](#reductions-made)
 
 ## The flag
 
@@ -183,3 +185,53 @@ For the CPU (second priority, DRAM bandwidth in the slow state): the mode info g
 takes 2.0 MiB off every slot; the host's readers of the grid (block lists, CDEF lists) then add a base.
 The CDEF skip list (0.5 MiB a frame, record thread, read back through the grid) could be a GPU pass.
 A smaller mode info record (4) is the other large part.
+
+## Reductions made
+
+### Stage buffers sized for the frames (candidate 3, first part)
+
+2026-11-15. `idct_blocks`, `prediction_blocks` and `prediction_blocks_warp` are created with a quarter of
+their worst case and made larger before the frame that writes more is recorded
+(`crates/rav1g/src/host/stage_buffers.rs`). The decoder for 3840x2160 10-bit (two frames in parse, three
+slots) takes **612.8 MiB** of device buffers where it took 646.5: 33.7 MiB less.
+
+| Buffer | Worst case, MiB | Created with, MiB |
+| --- | ---: | ---: |
+| `idct_blocks` | 12.0 | 3.0 |
+| `prediction_blocks` | 23.9 | 6.0 |
+| `prediction_blocks_warp` | 9.0 | 2.2 |
+
+- *When.* The counts are those of the tiles' lists when the parse of the frame has ended: the transform
+  block records, and the lists `gen_pred_blocks` turns into offsets (`prediction::pred_block_counts`). The
+  thread that records the frames looks at them before it records anything of the frame
+  (`stage_buffers::for_frame`). A buffer that holds the frame's records and 64 more is left alone.
+- *How.* The thread waits until the queue has run every command list that was submitted (a fence behind
+  them: the frames in flight read the old buffer), releases the buffer and creates the new one in the
+  same descriptor, so the two never exist together. The new size is an eighth above what the frame
+  needs, in steps of 64 KiB, and at most the worst case, which is what the buffer always was before.
+- *It sticks.* A buffer never gets smaller: a stream that had one such frame will have more, and a wait
+  for the queue on every other frame would cost more than the memory is worth. A decoder that has decoded
+  the worst case holds what it held before this change.
+- *The guard.* A growth is held against the application's budget as a palette buffer is: what it adds
+  and the margin of 16 MiB (`AV1_MEMORY_GUARD_MARGIN_BUFFER`) have to fit what the callback returns, or
+  the frame is a decode error (`AOM_CODEC_MEM_ERROR`, a `MEMORY REFUSED buffer ... grown for frame n`
+  line), nothing is allocated and the device is intact.
+  It does not wait: the memory an application has left does not come back by waiting, and the frame
+  cannot be recorded without the buffer. The headroom of the creation does not refuse a growth, as it
+  refuses no creation. An allocation that fails (`MEMORY FAILED buffer ..., grown for a frame`) is the
+  same decode error; the buffer is then gone and the next frame creates it again. The most the three
+  can add, 33.6 MiB at 4K, is in `device_size_deferred` of the memory query, next to the palette
+  buffers, and in the `MEMORY budget` line.
+- *The lines.* `MEMORY decoder created stage buffers: idct_blocks 3.0 of 12.0 MiB, ...` at the creation;
+  `MEMORY buffer idct_blocks grown for frame 0, which writes 204595 records: 3.0 to 3.6 MiB of the 12.0
+  MiB of the worst case; device buffers now 613.4 MiB` at a growth. `-memstats` keeps its percentages
+  against the worst case and adds what the buffer has now and how often it grew: `buffer idct_blocks:
+  12.0 MiB at worst, 3.6 MiB now, grown 1 times, ...`.
+- *What grows.* Of the 4K clips only the `d2` cut: its first frame writes 204,595 transform blocks
+  (26.1 %), `idct_blocks` goes from 3.0 to 3.6 MiB once. The conformance vectors (352x288) grow in 44 of
+  the 244 runs, up to the worst case.
+- *Checked locally* (wine on lavapipe): the 244 vectors of AOM with the library's defaults and with two
+  frames in parse on two threads, 244 of 244 each, 44 growths in each run; the `d2` cut 30 of 30. A
+  growth that the guard refuses was not produced: the budget of `rav1g-dec -budget` is one number for
+  the creation and for the growth.
+- **Console: pending.**

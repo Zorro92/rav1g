@@ -68,6 +68,7 @@ mod prediction;
 mod rav1d_frames;
 mod rav1d_host;
 mod shader_pick;
+mod stage_buffers;
 mod stage_dump;
 mod tables;
 mod thread;

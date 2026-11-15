@@ -468,14 +468,18 @@ pub(crate) unsafe fn summary(dec: *mut Av1Core) {
                 percent(state.items[kind].sum as f64, state.chunks[kind].sum as f64 * CHUNK_ITEMS[kind] as f64),
             ));
         }
-        // The buffers of the stages and of a slot that hold a worst case.
-        let buffer = |name: &str, bytes: usize, record: usize, per_slot: bool, series: &Series| {
+        // The buffers of the stages and of a slot: what a frame writes against the worst case the buffer
+        // can hold; those that grow with the frames say what they have now and how often they grew.
+        let buffer = |name: &str, bytes: usize, record: usize, per_slot: bool, series: &Series, now: Option<(usize, u32)>| {
             let records = (bytes / record) as f64;
             say(format!(
-                "buffer {name}: {:.1} MiB{}, {records:.0} records of {record} bytes; of a frame peak {} ({:.1} %, \
+                "buffer {name}: {:.1} MiB{}{}, {records:.0} records of {record} bytes; of a frame peak {} ({:.1} %, \
                  {:.2} MiB) mean {:.0} ({:.1} %)",
                 mib(bytes as f64),
                 if per_slot { " a slot" } else { "" },
+                now.map_or(String::new(), |(now, growths)| {
+                    format!(" at worst, {:.1} MiB now, grown {growths} times", mib(now as f64))
+                }),
                 series.peak,
                 percent(series.peak as f64, records),
                 mib((series.peak * record as u64) as f64),
@@ -489,10 +493,17 @@ pub(crate) unsafe fn summary(dec: *mut Av1Core) {
             4,
             true,
             &state.items[INDEX],
+            None,
         );
-        buffer("prediction_blocks", size((*dec).prediction_blocks), 16, false, &state.pred_blocks);
-        buffer("prediction_blocks_warp", size((*dec).prediction_blocks_warp), 48, false, &state.warp_blocks);
-        buffer("idct_blocks", size((*dec).idct_blocks), 16, false, &state.items[Kind::Txb as usize]);
+        use super::stage_buffers::{IDCT_BLOCKS, PRED_BLOCKS, PRED_BLOCKS_WARP, RECORD};
+        let grown = |object: *mut super::types::GpuBufferObject, index: usize, series: &Series| {
+            let name = ["idct_blocks", "prediction_blocks", "prediction_blocks_warp"][index];
+            let now = Some((size(object), (*dec).stage_growths[index]));
+            buffer(name, (*dec).stage_worst[index], RECORD[index], false, series, now);
+        };
+        grown((*dec).prediction_blocks, PRED_BLOCKS, &state.pred_blocks);
+        grown((*dec).prediction_blocks_warp, PRED_BLOCKS_WARP, &state.warp_blocks);
+        grown((*dec).idct_blocks, IDCT_BLOCKS, &state.items[Kind::Txb as usize]);
         // The frame buffers.
         let fb_total = (0..FrameBufferPoolSize).filter(|&fb| (*dec).fb_pool_src[fb].size != 0).count();
         say(format!(

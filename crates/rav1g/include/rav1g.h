@@ -831,7 +831,8 @@ typedef struct Rav1gMemoryRequirements {
   size_t device_size;
   /*
    Bytes of the device buffers that are only created when a stream needs them: one palette buffer per
-   pipeline slot.
+   pipeline slot, and what the buffers of the stages that are created with a quarter of their worst case
+   grow by on a frame that writes more blocks.
    */
   size_t device_size_deferred;
 } Rav1gMemoryRequirements;

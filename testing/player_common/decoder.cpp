@@ -594,7 +594,7 @@ int AV1Decoder::DecodeOne() {
               << ", intra_v2 buffers "
               << (params_.intrav2_ ? "yes (-intrav2)" : "no") << ", low memory parts " << params_.lowmem_parts_
               << "; device buffers " << MibString(memory.device_size) << " and up to "
-              << MibString(memory.device_size_deferred) << " for palette buffers on first use, host memory "
+              << MibString(memory.device_size_deferred) << " for palette buffers on first use and stage buffers that grow, host memory "
               << MibString(memory.host_size);
       XB_LOGI << "MEMORY output pool estimate: textures of " << params_.player_queue_size_ << " images of "
               << out_width << "x" << out_height << " " << out_bitdepth << "-bit, " << MibString(output_pool)

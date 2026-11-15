@@ -35,6 +35,7 @@ use super::types::{
     HostRW, ImagePoolSize, InterFastMapSize, MemoryType, OutputCbSize, OutputThreadDataCount, ReadBack,
     RefFrameBufferCount, RefFrameBufferCountSharedBack, UploadUAV, av1_frame_thread_data,
 };
+use super::stage_buffers::{IDCT_BLOCKS, PRED_BLOCKS, PRED_BLOCKS_WARP, initial_bytes};
 use crate::gpu::d3d12::{com_ref, com_release, com_store, wrapped_ref};
 use crate::gpu::{self, CommandAllocator, Device, Event, SemiPlanar, VideoMemory, create_hardware_device};
 use crate::sys::{
@@ -408,10 +409,18 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
         dec.idct_residuals,
         mem.buffer(size_of::<i16>() * residuals_size as usize, DeviceOnly, c"idct_residuals", -1)
     );
+    // The buffers that grow with the frames (stage_buffers.rs): a part of the worst case, which is one
+    // transform block and two prediction blocks for every 4x4 unit and a warp block for every 8x8.
+    let stage_worst = [
+        (block_count_4x4 * IDCT_BLOCK_SIZE) as usize,
+        (block_count_4x4 * 16 * 2) as usize,
+        ((block_count_4x4 >> 2) * 48) as usize,
+    ];
+    dec.stage_worst = stage_worst;
     request!(
         assign,
         dec.idct_blocks,
-        mem.buffer((block_count_4x4 * IDCT_BLOCK_SIZE) as usize, DeviceOnly, c"idct_blocks", -1)
+        mem.buffer(initial_bytes(stage_worst[IDCT_BLOCKS]), DeviceOnly, c"idct_blocks", -1)
     );
     let (wedge_mask_bytes, warped_filter_bytes) =
         (super::libaom::WEDGE_MASK_BUF_BYTES, size_of_val(&super::libaom::WARPED_FILTER));
@@ -470,7 +479,6 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
     let grid_h = mi_rows + 2 + 128;
     let cdef_blocks = target_width * target_height / 64 / 64;
 
-    let block_count_8x8 = block_count_4x4 >> 2;
     let mi_size = mi_cols * mi_rows;
     let lf_blk_count = (target_width / 64) * (target_height / 4)      // vertical edges, luma
         + (target_width / 128) * (target_height / 8) * 2              // vertical edges, chroma
@@ -485,12 +493,12 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
     request!(
         assign,
         dec.prediction_blocks,
-        mem.buffer((block_count_4x4 * 16 * 2) as usize, DeviceOnly, c"prediction_blocks", -1)
+        mem.buffer(initial_bytes(stage_worst[PRED_BLOCKS]), DeviceOnly, c"prediction_blocks", -1)
     );
     request!(
         assign,
         dec.prediction_blocks_warp,
-        mem.buffer((block_count_8x8 * 48) as usize, DeviceOnly, c"prediction_blocks_warp", -1)
+        mem.buffer(initial_bytes(stage_worst[PRED_BLOCKS_WARP]), DeviceOnly, c"prediction_blocks_warp", -1)
     );
     request!(
         assign,
@@ -692,9 +700,17 @@ unsafe fn settled_budget(
     (first, available, waited_ms)
 }
 
-/// The bytes of the palette buffers of a decoder: one per slot, created later, when a stream needs it.
+/// The bytes a decoder may add to its device buffers later, when a stream needs them: a palette buffer
+/// for each slot, and what the buffers of the stages that are created with a part of their worst case
+/// can grow by (`stage_buffers.rs`).
 fn deferred_device_bytes(dec: &Av1Core, rcfg: &ResourceConfig) -> usize {
-    rcfg.gpu_pipeline_depth as usize * ((dec.palette_size + 255) & !255)
+    rcfg.gpu_pipeline_depth as usize * ((dec.palette_size + 255) & !255) + stage_growth_bytes(dec)
+}
+
+/// What the buffers of the stages that grow with the frames can add to what they are created with.
+fn stage_growth_bytes(dec: &Av1Core) -> usize {
+    let aligned = |bytes: usize| (bytes + 255) & !255;
+    dec.stage_worst.iter().map(|&worst| aligned(worst) - aligned(initial_bytes(worst))).sum()
 }
 
 /// The device bytes [`allocate_buffers`] creates for `rcfg`, and the bytes of the buffers that are created
@@ -807,6 +823,28 @@ unsafe fn log_memory_summary(is_error: bool, label: &str, dec: &Av1Core, rcfg: &
             to_mib(dec.palette_size as u64)
         ),
     );
+    {
+        // The buffers of the stages that grow: what they have, and the worst case they can reach.
+        let part = |object: *mut GpuBufferObject, index: usize| {
+            // SAFETY: null, or a buffer of the decoder.
+            let size = unsafe { object.as_ref() }.map_or(0, |object| object.size);
+            format!("{:.1} of {:.1} MiB", to_mib(size as u64), to_mib(dec.stage_worst[index] as u64))
+        };
+        log(
+            is_error,
+            &format!(
+                "MEMORY {label} stage buffers: idct_blocks {}, prediction_blocks {}, prediction_blocks_warp {}: a \
+                 part of the worst case, grown before the frame that writes more is recorded (up to {:.1} MiB \
+                 more in all, held against the budget with a margin of {:.1} MiB; a growth that is refused is a \
+                 decode error of the frame)",
+                part(dec.idct_blocks, IDCT_BLOCKS),
+                part(dec.prediction_blocks, PRED_BLOCKS),
+                part(dec.prediction_blocks_warp, PRED_BLOCKS_WARP),
+                to_mib(stage_growth_bytes(dec) as u64),
+                to_mib(super::stage_buffers::MEMORY_GUARD_MARGIN_BUFFER)
+            ),
+        );
+    }
     {
         // The pools: what the frames in flight share.
         let size = |object: *mut GpuBufferObject| {
@@ -1270,8 +1308,8 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
                     false,
                     &format!(
                         "MEMORY budget: device buffers {:.1} MiB + margin {:.1} MiB = {:.1} MiB, the application \
-                         has {:.1} MiB left for the decoder: accepted; palette buffers on first use would add up \
-                         to {:.1} MiB",
+                         has {:.1} MiB left for the decoder: accepted; palette buffers on first use and stage \
+                         buffers that grow would add up to {:.1} MiB",
                         to_mib(planned as u64),
                         to_mib(MEMORY_GUARD_MARGIN),
                         to_mib(needed),
@@ -1284,7 +1322,7 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
                     false,
                     &format!(
                         "MEMORY budget: not checked ({}); device buffers {:.1} MiB, palette buffers on first use \
-                         would add up to {:.1} MiB",
+                         and stage buffers that grow would add up to {:.1} MiB",
                         if callback.is_some() {
                             "the application's callback does not know what is left"
                         } else {

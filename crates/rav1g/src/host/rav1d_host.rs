@@ -1272,7 +1272,10 @@ impl SinkHost for SlotHost {
                 pools.parsed(td.slot_index as usize);
             }
             let pbi: *mut AV1Decoder = &raw mut *state.pbi;
-            if ok {
+            // A buffer of the stages that the frame needs larger and does not get (a "MEMORY" line says
+            // why) fails the frame as a failed parse does, with its own error.
+            let fits = ok && super::stage_buffers::for_frame(dec, (*dec).curr_frame_data);
+            if fits {
                 let mut fb: av1_decoded_frame_buffer_t = std::mem::zeroed();
                 let mut lap_start = 0;
                 let mut image_state = rav1g_decode_frame_record(pbi, &mut fb, &mut lap_start);
@@ -1296,14 +1299,21 @@ impl SinkHost for SlotHost {
                     let frame = std::mem::replace(&mut state.map[slot], std::ptr::null_mut());
                     state.unref(dec, frame);
                 }
-                state.fail(
-                    sys::AOM_CODEC_CORRUPT_FRAME,
-                    "Failed to decode tile data: the parse of the frame ended with an error",
-                );
+                if ok {
+                    state.fail(
+                        sys::AOM_CODEC_MEM_ERROR,
+                        "Failed to decode the frame: a buffer it needs larger did not fit the memory",
+                    );
+                } else {
+                    state.fail(
+                        sys::AOM_CODEC_CORRUPT_FRAME,
+                        "Failed to decode tile data: the parse of the frame ended with an error",
+                    );
+                }
             }
             (*pbi).common.cur_frame = std::ptr::null_mut();
             state.unref(dec, cur);
-            ok
+            fits
         }
     }
 }

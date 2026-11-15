@@ -575,6 +575,15 @@ impl Frames {
                     },
                 );
                 descriptions.fail(entry.cur);
+            } else if !super::stage_buffers::for_frame(dec, entry.td) {
+                // A buffer of the stages that the frame needs larger was refused or failed (a "MEMORY"
+                // line says which): the frame fails as one whose parse failed.
+                release_frame(dec, entry.td);
+                self.fail(
+                    sys::AOM_CODEC_MEM_ERROR,
+                    "Failed to decode the frame: a buffer it needs larger did not fit the memory",
+                );
+                descriptions.fail(entry.cur);
             } else {
                 bind_frame_for_record(dec, entry.td);
                 let rec = self.load(entry);

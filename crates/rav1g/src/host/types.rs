@@ -508,6 +508,14 @@ pub struct Av1Core {
     pub gpu_clear_grids: c_int,
     /// The statistics of `-memstats` (`mem_stats.rs`).
     pub mem_stats: super::mem_stats::MemStats,
+    /// The worst case in bytes of the buffers of the stages that grow with the frames
+    /// (`stage_buffers.rs`: the sorted transform blocks, the prediction blocks, the warp blocks), which
+    /// is the most each of them gets, and how often each was made larger.
+    pub stage_worst: [usize; super::stage_buffers::STAGE_BUFFERS],
+    pub stage_growths: [u32; super::stage_buffers::STAGE_BUFFERS],
+    /// Held by whoever uses the allocator after the creation: the decode thread for a palette buffer,
+    /// the thread that records the frames for a buffer that grows.
+    pub memory_lock: std::sync::Mutex<()>,
 }
 
 impl Av1Core {
@@ -536,6 +544,7 @@ impl Av1Core {
             (&raw mut (*dec).rav1d).write(None);
             (&raw mut (*dec).pools).write(None);
             (&raw mut (*dec).mem_stats).write(super::mem_stats::MemStats::new());
+            (&raw mut (*dec).memory_lock).write(std::sync::Mutex::new(()));
             let no_edges = || WaveStore { tiles: Vec::new(), above: Vec::new(), above_end: Vec::new(), frames: 0 };
             for slot in 0..FrameThreadDataCount as usize {
                 (&raw mut (*dec).frame_thread_data[slot].perf.detail).write(None);

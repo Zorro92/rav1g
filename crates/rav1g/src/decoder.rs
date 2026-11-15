@@ -193,7 +193,8 @@ pub struct MemoryRequirements {
     /// ([`Settings::frames_in_parse`], [`Decoder::configuration`]).
     pub device_size: usize,
     /// Bytes of the device buffers that are only created when a stream needs them: one palette buffer per
-    /// slot.
+    /// slot, and what the buffers of the stages that are created with a quarter of their worst case grow
+    /// by on a frame that writes more blocks.
     pub device_size_deferred: usize,
 }
 

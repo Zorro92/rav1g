@@ -36,6 +36,7 @@ use super::perf::{
 use super::pool::{CHUNK_ITEMS, COEF_CHUNK, Kind, Take};
 use super::postfilter::cdef_looprestoration;
 use super::prediction::{inter_ext_borders, prediction_gen_blocks, prediction_run_all};
+use super::stage_buffers::MEMORY_GUARD_MARGIN_BUFFER;
 use super::stage_dump::{stage_dump_begin, stage_dump_frame_info};
 use super::transform::idct_run;
 use super::types::{
@@ -50,9 +51,6 @@ use crate::sys::{
     REF_NO_SCALE, RESTORE_NONE, TileInfo, YV12_BUFFER_CONFIG, av1_decoded_frame_buffer_t, av1_tile_data, scale_factors,
 };
 
-/// `AV1_MEMORY_GUARD_MARGIN_BUFFER` of `aom/aom_decoder.h`: what a buffer that is created after the
-/// decoder must leave of the application's memory.
-const MEMORY_GUARD_MARGIN_BUFFER: u64 = 16 << 20;
 /// `REF_INVALID_SCALE` of `av1/common/scale.h`.
 const REF_INVALID_SCALE: c_int = -1;
 /// `TRANSLATION` of `av1/common/mv.h`: the last global motion type that is not a warp.
@@ -458,6 +456,8 @@ unsafe fn palette_buffer_for_frame(dec: *mut Av1Core, cm: &AV1_COMMON, td: &mut 
     // SAFETY: the caller's contract.
     unsafe {
         let size = (*dec).palette_size as u64;
+        // The allocator after the creation: the thread that records the frames grows buffers with it.
+        let _memory = (*dec).memory_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(available_cb) = (*dec).memory_available_cb {
             let available = available_cb((*dec).memory_available_priv);
             if available >= 0 && size + MEMORY_GUARD_MARGIN_BUFFER > available as u64 {

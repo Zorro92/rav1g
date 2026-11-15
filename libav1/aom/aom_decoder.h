@@ -343,7 +343,9 @@ typedef struct aom_codec_dec_cfg {
   /* Filled by av1_codec_query_memory_requirements next to host_size: the
    * bytes of the D3D12 buffers the creation allocates, and of the buffers
    * that are only created when a stream needs them (one palette buffer per
-   * slot, on the first frame of the slot that allows screen content tools). */
+   * slot, on the first frame of the slot that allows screen content tools,
+   * and what the buffers of the stages that are created with a quarter of
+   * their worst case grow by on a frame that writes more blocks). */
   size_t device_size;
   size_t device_size_deferred;
 } aom_codec_dec_cfg_t;            /**< alias for struct aom_codec_dec_cfg */
