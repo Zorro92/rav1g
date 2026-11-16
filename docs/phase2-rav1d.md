@@ -2797,6 +2797,117 @@ low memory 35); `b`: the same with `-parseopt time`; `c`: `-t 4 -parseframes 3` 
 - **Four threads and three frames in parse** give 6 % (`d2`, 51.9 to 55.0 fps) and 7 % (`j4k40`, 47.8
   to 51.1) for 18.1 MiB of device buffers (a fourth slot) and 1.0 to 2.0 ms more thread time a frame.
 
+### Records written once, and the lists of CDEF on the GPU (2026-11-16)
+
+Behind [the split above](#the-parse-split-on-the-console-2026-11-16): the sink's calls are 2.6 and
+3.2 ms a 4K frame on the console, and the thread that records spends up to 2.9 ms on the lists of
+CDEF. Two changes, each behind a word of `-parseopt` and **both off by default**: one is slower where
+it could be measured, the other costs the GPU a pass whose time only the console can say. The
+development machine is an Intel Core i7-10610U; its memory is fast, so it shows instructions and
+little of the traffic.
+
+**A mode info record written once (`-parseopt recordonce`,** `ParserOptions::record_once`,
+`RAV1G_PARSER_OPTION_RECORD_ONCE`). The sink clears the 224 bytes of a record where it lies in the
+pool and then stores the fields of the block's kind. With the switch it puts the record together by
+itself, from zeros, and writes all 224 bytes to the pool once (`Sink::block_call`; the functions of
+`record.rs` are inlined and none keeps the record's address, so the compiler holds the fields as
+values and the copy becomes one store a field).
+
+- *The same bytes.* Every byte of every record, the padding included: `rav1g-parse-check` holds the
+  buffers of `-parseopt none,latelists,recordonce` against the default on the 244 streams of the
+  conformance set (587,790 records, one thread and four with two frames in parse) and on five 4K
+  clips (6.8 million records); CI holds the same, and the stage dumps (the mode info pool among them)
+  of the run with the other side of every switch.
+- *Slower, not faster.* The other calls of the sink (`rav1g-parse-check -time -parseopt time`, one
+  thread, ms a frame, three rounds taken in turn):
+
+  | Clip | Before (`42e0337`) | Now, default (cleared and filled) | `recordonce` |
+  | --- | ---: | ---: | ---: |
+  | `j4k40`, 200 frames | 1.429, 1.471, 1.467 | 1.462, 1.416, 1.374 | 1.694, 1.711, 1.674 |
+  | `d2`, 100 frames | 1.559, 1.594, 1.519 | 1.474, 1.449, 1.442 | 1.747, 1.759, 1.757 |
+
+  17 to 21 % more with the record written once. The default is 2 to 7 % less than before, by the
+  way: the transform size tree of an inter block now fills an array of its own and not the record
+  through a pointer, and the functions that fill a record are inlined.
+- *Why.* A record written once has to store every field, the zeros of the fields the block's kind
+  does not have too: about 60 stores, most of them of values that were kept on the stack in between,
+  where the clear is 14 stores and a block's kind then writes only its own fields. And no byte of
+  memory traffic
+  is saved, which is what the clear looked like it cost: the clear is the first write into
+  the record's four cache lines, so it is what waits for them, and every later store finds them in
+  the first-level cache. Whichever store comes first pays that; the lines go to memory once either way.
+  A prefetch of the lines in front of the record changed nothing, and neither did a prefetch of the
+  grid lines of the next superblock.
+- *Where the calls' time is.* 12,400 block calls and 13,800 transform block calls a frame of `j4k40`:
+  a block call takes about 190 ticks of the time stamp counter, 40 % of it the record and 60 % the
+  grid and the rest (64 bytes of each of 16 grid rows a 64x64 superblock, the rows nearly a page
+  apart); a transform block call 44 ticks, a large part of it the two readings of the counter. Nothing in
+  the calls is written twice or read back except the CDEF index of a 64x64 area, which the
+  superblock call stores into a record that is still in the cache. What is left to save is bytes,
+  not stores: a smaller record ([memory.md](memory.md), candidate 4).
+
+**The lists of CDEF written by the GPU (`-parseopt gpucdef`,** `ParserOptions::gpu_cdef_lists`,
+`RAV1G_PARSER_OPTION_GPU_CDEF_LISTS`). CDEF reads two lists besides the frame: the strength index of
+every 64x64 block (`cdef_indexes`) and a skip flag for every 8x8 block (`cdef_skips`). The thread
+that records the frame wrote both from the mode info, four records through the grid for every 8x8
+block: 130,000 flags and half a million records of a 4K frame, read cold. With the switch a pass of
+the frame's command list writes them, in front of CDEF: `cdef_lists.hlsl`, one group a 64x64 block
+and one thread an 8x8 block, which loads the same grid and the same records as the loop filter's
+list shaders and stores the same words at the same places (`record_cdef_lists` of `postfilter.rs`).
+
+- *What it writes.* `nhfb` by `nvfb` indexes and `skip_cols` by `skip_rows` flags in rows of
+  `nhfb * 16`, as the loops of `cdef_filter_run` do, and no entry behind them: a thread outside that
+  stores nothing. An entry the CPU never wrote holds what it held.
+- *The buffers.* The two lists of a slot are upload buffers, which no shader can write. In a decoder
+  created with the switch they are buffers in a custom heap that the CPU has a cached mapping of and a
+  command list may write (as the grids of `-gpuclear`): the same sizes, counted as `HostRW` in the
+  `MEMORY` lines where they were `DeviceUpload`. They are in the state for writing around the pass
+  only, so CDEF and the stage dump read them as before. The switch is read when the decoder is
+  created; the test player makes a new decoder for a task with other switches.
+- *The stage dump `cdef_info`* is a copy the command list makes, recorded behind the pass, so it has
+  what the pass wrote; in a decoder without the switch nothing moved. The pinned C++ reference is
+  the one it was, and the shader is one the reference does not have (`--candidate-only`, like the
+  shaders of the semi-planar output).
+- *Compilers.* `cs_5_0` with FXC (70 instructions, no group sync, nothing of Shader Model 6) and
+  `cs_6_0` with DXC, default optimisation and `-Od`; CI runs DXC's bytecode in the mixed pick of the
+  DXC job.
+- *The same output.* Under wine on lavapipe: the 244 streams of the conformance set with
+  `-parseopt gpucdef,recordonce` and with `-parseopt gpucdef -poisonbuf`, 244 of 244 each; the md5 of
+  40 frames of five 4K clips (`j4k40`, `d2_300`, `a1_8b4k_300`, `fg4k_300`, `t40x8`) equal with and
+  without; the stage dumps of eight streams equal by `stage_dump.py compare`, `cdef_info` included. CI
+  has both words in the run with the other side of every switch (the whole set on WARP, the stage
+  dumps against those of the default, the player's decoder code).
+- *Measured* under wine on lavapipe, where the GPU is a rasterizer on the same processor: 30 frames
+  of each clip, the median of a frame (the means have frames in which a call of wine waits for
+  hundreds of milliseconds).
+
+  | Clip | `cpu rec_cdef_lr`, default | with `gpucdef` | `gpu cdef_lists` (lavapipe) |
+  | --- | ---: | ---: | ---: |
+  | `j4k40` | 1.252 ms | 0.023 ms | 1.86 ms |
+  | `t40x8` | 0.906 ms | 0.023 ms | 2.10 ms |
+
+  The three other clips have no CDEF in those frames and no pass. What the pass takes on a GPU is
+  for the console to say: 2,040 groups of 64 threads, each with four loads of the grid, four of the
+  records and one store.
+- *The timing run* has a stage for it, `gpu cdef_lists` (`AV1_PERF_GPU_CDEF_LISTS`, the last of the
+  stages; `av1_perf_frame` is 16 bytes longer). `-memstats` counts no bytes of the CPU for the lists
+  of such a decoder.
+
+**For the console** (one package, the lines of the split above; `j4k40` and `d2_300`, three rounds
+taken in turn, in the slow state):
+
+```text
+-i /streams/<clip>.ivf -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -output p010 -parseopt time
+-i /streams/<clip>.ivf -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -output p010 -parseopt time,gpucdef
+-i /streams/<clip>.ivf -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -output p010 -parseopt time,recordonce
+-i /streams/<clip>.ivf -frate -1 -queue_size 4 -progress -nopresent -md5_frame_check -parseopt gpucdef,recordonce
+```
+
+To read: `cpu rec_cdef_lr` against `gpu cdef_lists` and the frames per second for `gpucdef` (it is
+the default if the pass is well under the 2.9 ms it takes off the thread that records and the frames
+per second of `j4k40`, which the GPU bounds, do not fall); `cpu parse: sink calls` for `recordonce`
+(the switch goes if the console agrees with the development machine).
+
 ## Licence
 
 rav1d is BSD-2-Clause (copyright VideoLAN and the dav1d authors, and the rav1d contributors); the

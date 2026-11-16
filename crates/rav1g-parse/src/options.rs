@@ -43,6 +43,14 @@ pub struct ParseOptions {
     /// frame of every stream waits in the middle of its parse, as a frame does that finds the pool
     /// exhausted. Off, and no way of doing a parse.
     pub test_pool_wait: bool,
+    /// [`SinkOptions::record_once`]: the mode info record of a block is put together by itself and
+    /// written to the pool once, and not cleared in the pool and filled there. Off by default.
+    pub record_once: bool,
+    /// The two lists CDEF reads (the strength index of every 64x64 block and the skip flag of every 8x8
+    /// block) are written by a pass of the GPU in front of CDEF (`cdef_lists.hlsl`) and not by the
+    /// thread that records the frame. Not a switch of the parse: the D3D12 host reads it when the decoder
+    /// is created (the two buffers are then buffers a shader may write). Off by default.
+    pub gpu_cdef_lists: bool,
 }
 
 impl Default for ParseOptions {
@@ -62,6 +70,8 @@ impl ParseOptions {
     pub const CLEAR_GRID: u32 = 32;
     pub const TEST_PANIC: u32 = 64;
     pub const TEST_POOL_WAIT: u32 = 128;
+    pub const RECORD_ONCE: u32 = 256;
+    pub const GPU_CDEF_LISTS: u32 = 512;
     /// The bits of [`ParseOptions::default`].
     pub const DEFAULT: u32 = Self::NO_LF_MASKS | Self::TILE_KEEPS_THREAD;
     /// The two switches that are on by default, which a list of words names to replace that default.
@@ -76,10 +86,12 @@ impl ParseOptions {
         clear_grid: false,
         test_panic: false,
         test_pool_wait: false,
+        record_once: false,
+        gpu_cdef_lists: false,
     };
 
     /// The words of the tools (`-parseopt <word>[,<word>...]`).
-    pub const WORDS: [(&'static str, u32); 7] = [
+    pub const WORDS: [(&'static str, u32); 9] = [
         ("nolfmask", Self::NO_LF_MASKS),
         ("tilethread", Self::TILE_KEEPS_THREAD),
         ("time", Self::TIME_CALLS),
@@ -87,6 +99,8 @@ impl ParseOptions {
         ("cleargrid", Self::CLEAR_GRID),
         ("testpanic", Self::TEST_PANIC),
         ("poolwait", Self::TEST_POOL_WAIT),
+        ("recordonce", Self::RECORD_ONCE),
+        ("gpucdef", Self::GPU_CDEF_LISTS),
     ];
 
     pub const fn from_bits(bits: u32) -> Self {
@@ -98,6 +112,8 @@ impl ParseOptions {
             clear_grid: bits & Self::CLEAR_GRID != 0,
             test_panic: bits & Self::TEST_PANIC != 0,
             test_pool_wait: bits & Self::TEST_POOL_WAIT != 0,
+            record_once: bits & Self::RECORD_ONCE != 0,
+            gpu_cdef_lists: bits & Self::GPU_CDEF_LISTS != 0,
         }
     }
 
@@ -109,6 +125,8 @@ impl ParseOptions {
             | u32::from(self.clear_grid) * Self::CLEAR_GRID
             | u32::from(self.test_panic) * Self::TEST_PANIC
             | u32::from(self.test_pool_wait) * Self::TEST_POOL_WAIT
+            | u32::from(self.record_once) * Self::RECORD_ONCE
+            | u32::from(self.gpu_cdef_lists) * Self::GPU_CDEF_LISTS
     }
 
     /// A list of words, separated by commas. `nolfmask` and `tilethread` are the two switches that are
@@ -119,7 +137,9 @@ impl ParseOptions {
     /// list has it and leaves the two as they are, so `time` alone times the default. `testpanic` is not
     /// a way of doing a parse: the parse of the third frame panics, for the test of what a bug does.
     /// Neither is `poolwait`: a frame finds the host's pools empty while an older frame holds a piece,
-    /// for the test of a parse that waits for memory. `None` for a word that is none of these.
+    /// for the test of a parse that waits for memory. `recordonce` (a block's mode info record written
+    /// to the pool once, not cleared there and filled) and `gpucdef` (the lists of CDEF written by the
+    /// GPU) are off by default and add like `time`. `None` for a word that is none of these.
     ///
     /// | List | `nolfmask` | `tilethread` | `time` |
     /// | --- | --- | --- | --- |
@@ -161,7 +181,12 @@ impl ParseOptions {
 
     /// The part of the sink.
     pub fn sink(self) -> SinkOptions {
-        SinkOptions { time_calls: self.time_calls, late_lists: self.late_lists, test_panic: self.test_panic }
+        SinkOptions {
+            time_calls: self.time_calls,
+            late_lists: self.late_lists,
+            test_panic: self.test_panic,
+            record_once: self.record_once,
+        }
     }
 
     /// The part of rav1d, into its settings.
@@ -226,5 +251,17 @@ mod tests {
         assert_eq!(small, ParseOptions { test_pool_wait: true, ..default });
         assert_eq!(small.bits(), 134);
         assert_eq!(small.words(), "nolfmask,tilethread,poolwait");
+        // The two ways that were added behind them: off by default, bits of their own.
+        let once = ParseOptions::from_words("recordonce").unwrap();
+        assert_eq!(once, ParseOptions { record_once: true, ..default });
+        assert_eq!(once.bits(), 262);
+        let lists = ParseOptions::from_words("gpucdef,time").unwrap();
+        assert_eq!(lists, ParseOptions { gpu_cdef_lists: true, time_calls: true, ..default });
+        assert_eq!(lists.bits(), 526);
+        assert_eq!(lists.words(), "nolfmask,tilethread,time,gpucdef");
+        for options in [once, lists] {
+            assert_eq!(ParseOptions::from_bits(options.bits()), options);
+            assert_eq!(ParseOptions::from_words(&options.words()), Some(options));
+        }
     }
 }

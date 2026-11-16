@@ -484,6 +484,8 @@ span exactly**, and any gap between two stages is counted in the later one.
 | `ext_borders` | reference border extension |
 | `film_grain` | film grain |
 | `copy_plane`, `output_copy` | copy shader into the staging area, then the copy into the output buffer or textures |
+| `slot_clear` | with `-gpuclear`: the grids of the frame's slot cleared at the end of the command list |
+| `cdef_lists` | with `-parseopt gpucdef`: the two lists CDEF reads, written from the mode info in front of `cdef` (it is the last line of the table, not where it runs) |
 
 A timestamp records when the GPU reaches that point of the list. Stages that end in a
 UAV barrier are cleanly separated. `residual_clear` has no barrier before `idct_sort`,
@@ -1306,6 +1308,8 @@ was measured: [phase2-rav1d.md](phase2-rav1d.md#where-the-time-goes).
 | `time` | off | With `-gputime`: the calls of the sink are timed (`sink_calls`, below). Two readings of the processor's time stamp counter per block and per transform block. |
 | `latelists` | off | The block lists of a tile are counted in one pass at the end of the tile, as up to package 0.2.140, and not superblock by superblock while the superblock's mode info is in the cache. |
 | `cleargrid` | off | The mode info grid of a pipeline slot is cleared for every frame (4.2 MB at 4K), as up to package 0.2.140, and not only for a frame of another size than the frames before it on the slot. |
+| `recordonce` | off | The mode info record of a block is put together by itself and written to its pool once, all 224 bytes, and not cleared in the pool and then filled. The same records; the slower way on the development machine ([phase2-rav1d.md](phase2-rav1d.md#records-written-once-and-the-lists-of-cdef-on-the-gpu-2026-11-16)). |
+| `gpucdef` | off | The two lists CDEF reads (the strength index of every 64x64 block, the skip flag of every 8x8 block) are written by a pass of the frame's command list in front of CDEF (`cdef_lists.hlsl`, the GPU stage `cdef_lists` of `-gputime`) and not by the thread that records the frame (`cpu rec_cdef_lr`). The same lists. Read when the decoder is created: the two buffers of a slot are then of the type `HostRW`. |
 
 `-parseopt <word>[,<word>...]` says which are on:
 
@@ -1313,8 +1317,8 @@ was measured: [phase2-rav1d.md](phase2-rav1d.md#where-the-time-goes).
   the parse is done in the ways the list names and in no other. `-parseopt none` turns both off
   (rav1d's parse as upstream schedules it), `-parseopt tilethread` leaves only `tilethread` on,
   `-parseopt nolfmask` only `nolfmask`, `-parseopt default` is the same as no flag.
-- `time`, `latelists` and `cleargrid` are off by default; each is on when the list has it and changes
-  nothing else: `-parseopt time` is the default, timed; `-parseopt none,time` is the parse without
+- `time`, `latelists`, `cleargrid`, `recordonce` and `gpucdef` are off by default; each is on when
+  the list has it and changes nothing else: `-parseopt time` is the default, timed; `-parseopt none,time` is the parse without
   the two, timed; `-parseopt latelists,cleargrid` is the default with the block lists and the grid
   clear as they were up to package 0.2.140
   ([phase2-rav1d.md](phase2-rav1d.md#block-lists-and-clears-less-memory-traffic)).
@@ -1332,6 +1336,8 @@ was measured: [phase2-rav1d.md](phase2-rav1d.md#where-the-time-goes).
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt time
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt latelists
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt cleargrid
+-i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt time,recordonce
+-i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt time,gpucdef
 ```
 
 The log has `Parser switches (-parseopt): ...` behind the `Parser:` line (`nolfmask tilethread` for a
@@ -3421,10 +3427,10 @@ shaders of every set and the names of all but the largest set:
 SHADERSET dxc: DXC 1.9.2602.17 cs_6_0: dxc -nologo -T cs_6_0 -E main -HV 2018 -WX -Wno-ambig-lit-shift; -Od for intra_main, intra_main_hbd
 SHADERSET od: DXC 1.9.2602.17 cs_6_0: dxc -nologo -T cs_6_0 -E main -HV 2018 -WX -Wno-ambig-lit-shift -Od for every shader but intra_v2, intra_v2_hbd (64-bit values at -Od: the bytecode of the set dxc)
 SHADERSET fxc: FXC cs_5_0: fxc /nologo /T cs_5_0 /E main /Vn <name>; /Od for intra_main, intra_main_hbd
-SHADERPICK fxc=loopfilter_vert_hbd,od=cdef_filter_v2: dxc 95 (all others); od 1 (cdef_filter_v2); fxc 1 (loopfilter_vert_hbd)
+SHADERPICK fxc=loopfilter_vert_hbd,od=cdef_filter_v2: dxc 96 (all others); od 1 (cdef_filter_v2); fxc 1 (loopfilter_vert_hbd)
 ```
 
-Without the flag the last line is `SHADERPICK none: dxc 97 (all); od 0; fxc 0`. A pick with many names
+Without the flag the last line is `SHADERPICK none: dxc 98 (all); od 0; fxc 0`. A pick with many names
 goes on in lines that start with `SHADERPICK +`. The player also logs `Shader pick (-shaderpick):
 <pick>` when a task file has the flag. The `LIBRARY` line and `Experiments: shaders dxc` are what they
 are without a pick: they name the build, not the pick.
@@ -3438,7 +3444,7 @@ are without a pick: they name the build, not the pick.
   the bytecode of the set <set>, <bytes> bytes of bytecode): hr 0x...`, and the launch runs no task.
   (wine's vkd3d refuses the `-Od` DXIL of `gen_pred_blocks` and `gen_pred_blocks_fast`, "invalid value
   self-reference" in its DXIL parser; WARP takes all of them.)
-- **Size.** The library of the DXC package has all three bytecodes of the 97 shaders, about three times
+- **Size.** The library of the DXC package has all three bytecodes of the 98 shaders, about three times
   the shader bytes of the default one. The default package, the uavsync package and every other build
   have one bytecode per shader, their headers and their code are what they were, and they refuse the
   flag.
@@ -3529,7 +3535,7 @@ out (the format is in `testing/common/stage_dump.h`):
 | `pred_blocks`, `pred_blocks_warp` | the prediction block records `gen_pred_blocks` wrote | the prediction and reconstruction stages |
 | `lf_params` | the constants of the loop filter: the frame's levels and deltas, the level per plane, segment, reference and mode, and the three limits of every level | `gen_lf_blocks_vert/hor`, `loopfilter_vert/hor` |
 | `lf_blocks` | the six edge lists of the loop filter (vertical and horizontal edges of Y, U, V): per block sixteen edges, each a level, a filter length and the step to the next edge | `loopfilter_vert/hor` |
-| `cdef_info` | CDEF's strength index per 64x64 block and skip flag per 8x8 block | `cdef_filter` |
+| `cdef_info` | CDEF's strength index per 64x64 block and skip flag per 8x8 block, as the thread that records wrote them or, with `-parseopt gpucdef`, as `cdef_lists` did: the copy is behind that pass in the command list | `cdef_filter` |
 | `lr_info` | loop restoration: type and coefficients per unit | `loop_restoration` |
 
 A frame has the buffers of the stages that run for it (no `lf_blocks` without loop filter).

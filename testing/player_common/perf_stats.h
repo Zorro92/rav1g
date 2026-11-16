@@ -22,7 +22,8 @@ namespace perfstats {
 static const char* const kGpuStageNames[] = {
     "gen_blocks",   "residual_clear", "idct_sort",  "idct",        "inter",      "recon",
     "intra",        "lf_gen",         "lf_vert",    "lf_horz",     "cdef",       "superres",
-    "loop_rest",    "ext_borders",    "film_grain", "copy_plane",  "output_copy", "slot_clear"};
+    "loop_rest",    "ext_borders",    "film_grain", "copy_plane",  "output_copy", "slot_clear",
+    "cdef_lists"};
 static_assert(sizeof(kGpuStageNames) / sizeof(kGpuStageNames[0]) == AV1_PERF_GPU_STAGE_COUNT,
               "GPU stage names out of step with av1_perf.h");
 

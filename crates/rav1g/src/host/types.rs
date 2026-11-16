@@ -127,6 +127,8 @@ pub struct compute_shader_lib {
     pub shader_copy_plane_sp_tex: ComputeShader,
     pub shader_filmgrain_filter_sp: ComputeShader,
     pub shader_filmgrain_filter_sp_tex: ComputeShader,
+    // The lists of CDEF from the mode info (`postfilter.rs`, `Av1Core::gpu_cdef_lists`).
+    pub shader_cdef_lists: ComputeShader,
     pub shader_fill_buffer: ComputeShader,
     pub shader_gen_pred_blocks: ComputeShader,
     pub shader_gen_pred_blocks_fast: ComputeShader,
@@ -154,6 +156,7 @@ pub struct compute_shader_lib {
     pub sig_copy_plane_sp: Option<ID3D12RootSignature>,
     pub sig_copy_plane_sp_tex: Option<ID3D12RootSignature>,
     pub sig_film_grain_tex: Option<ID3D12RootSignature>,
+    pub sig_cdef_lists: Option<ID3D12RootSignature>,
     pub compliled_: c_int,
     pub threads: c_int,
     pub create_shader_errors: c_int,
@@ -543,6 +546,10 @@ pub struct Av1Core {
     /// the decoder was created while the clears were the GPU's (`AV1_CLEARS_GPU`). Only then does a
     /// frame end its command list with them.
     pub gpu_clear_grids: c_int,
+    /// The two lists CDEF reads (`cdef_indexes` and `cdef_skips` of every slot) are written by a pass of
+    /// the frame's command list (`cdef_lists.hlsl`) and not by the thread that records it
+    /// (`AV1_PARSER_OPTION_GPU_CDEF_LISTS`): the two are then buffers a command list may write.
+    pub gpu_cdef_lists: c_int,
     /// The statistics of `-memstats` (`mem_stats.rs`).
     pub mem_stats: super::mem_stats::MemStats,
     /// The worst case in bytes of the buffers of the stages that grow with the frames

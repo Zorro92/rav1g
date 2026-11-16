@@ -343,7 +343,9 @@ pub(crate) unsafe fn frame_recorded(dec: *mut Av1Core, cm: &AV1_COMMON) {
         let palette_blocks = stats.palette_blocks[slot].load(Ordering::Relaxed);
         let held = (*dec).pools.as_deref().map_or([0; KINDS], |pools| pools.held(slot));
         let pred = [stats.pred[0].load(Ordering::Relaxed), stats.pred[1].load(Ordering::Relaxed)];
-        let cdef = if td.do_cdef != 0 {
+        // The lists of CDEF, when the thread that records writes them: none of the CPU's bytes in a
+        // decoder whose command lists write them (`Av1Core::gpu_cdef_lists`).
+        let cdef = if td.do_cdef != 0 && (*dec).gpu_cdef_lists == 0 {
             let (nvfb, nhfb) = ((cm.mi_rows + 15) / 16, (cm.mi_cols + 15) / 16);
             (nvfb * nhfb + (nvfb * 16).min(cm.mi_rows / 2) * (nhfb * 16).min(cm.mi_cols / 2)) as u64 * 4
         } else {

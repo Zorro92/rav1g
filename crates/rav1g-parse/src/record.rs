@@ -75,8 +75,16 @@ pub struct RecordFrame<'a> {
 /// the entries of `inter_tx_size` it covers; `tx_size` is left as the size of the last leaf. A part of
 /// the tree that lies outside the frame is not walked, so its entries keep what the record had (zero in
 /// a cleared record): this is reproduced, not tidied.
-struct VarTx<'a> {
-    mi: &'a mut MB_MODE_INFO,
+///
+/// The walk has the two fields by themselves, and the record gets them when it is through: the record of
+/// a block is put together in a place of its own and written to the pool once (`Sink::block`), which the
+/// compiler does field by field only while no function that is not inlined has the record's address;
+/// this one calls itself.
+struct VarTx {
+    /// `inter_tx_size` and `tx_size` of the record: what a cleared record has, and then what the walk
+    /// writes.
+    inter_tx_size: [u8; 16],
+    tx_size: u8,
     split: [u16; 2],
     /// The smallest transform the tree of this block size can reach, in 4x4 units, as shifts.
     tx_w_log2: i32,
@@ -88,7 +96,7 @@ struct VarTx<'a> {
     max_blocks_high: i32,
 }
 
-impl VarTx<'_> {
+impl VarTx {
     /// `set_inter_tx_size`.
     fn set(&mut self, split_size: usize, txs: u8, blk_row: i32, blk_col: i32) {
         let mut idy = 0;
@@ -97,7 +105,7 @@ impl VarTx<'_> {
             while idx < TX_SIZE_WIDE_UNIT[split_size] {
                 let index =
                     (((blk_row + idy) >> self.tx_h_log2) << self.stride_log2) + ((blk_col + idx) >> self.tx_w_log2);
-                self.mi.inter_tx_size[index as usize & 15] = txs;
+                self.inter_tx_size[index as usize & 15] = txs;
                 idx += TX_SIZE_WIDE_UNIT[self.min_txs];
             }
             idy += TX_SIZE_HIGH_UNIT[self.min_txs];
@@ -114,13 +122,13 @@ impl VarTx<'_> {
         let is_split = depth < 2 && self.split[depth] & (1 << (y_off * 4 + x_off)) != 0;
         if !is_split {
             self.set(tx, tx_size, blk_row, blk_col);
-            self.mi.tx_size = tx_size;
+            self.tx_size = tx_size;
             return;
         }
         let sub = SUB_TX_SIZE_MAP[tx];
         if sub == TX_4X4 {
             self.set(tx, sub, blk_row, blk_col);
-            self.mi.tx_size = sub;
+            self.tx_size = sub;
             return;
         }
         let bsw = TX_SIZE_WIDE_UNIT[sub as usize];
@@ -138,6 +146,7 @@ impl VarTx<'_> {
 }
 
 /// The transform size fields of an inter block (intra block copy included).
+#[inline(always)]
 fn inter_tx(
     mi: &mut MB_MODE_INFO,
     frame: &RecordFrame<'_>,
@@ -161,7 +170,8 @@ fn inter_tx(
         let mi_row = mi.mi_row;
         let mi_col = mi.mi_col;
         let mut walker = VarTx {
-            mi,
+            inter_tx_size: mi.inter_tx_size,
+            tx_size: mi.tx_size,
             split: [u16::from(inter.tx_split0), inter.tx_split1],
             tx_w_log2,
             tx_h_log2,
@@ -181,6 +191,8 @@ fn inter_tx(
             }
             idy += bh;
         }
+        mi.inter_tx_size = walker.inter_tx_size;
+        mi.tx_size = walker.tx_size;
     } else {
         // `read_tx_size`: 4x4 in a lossless segment, else the largest of the block (a skipped inter block
         // has no size coded even where the frame codes sizes; a frame of 4x4 transforms has 4x4).
@@ -191,6 +203,7 @@ fn inter_tx(
 }
 
 /// The fields of an intra block that are its own.
+#[inline(always)]
 fn intra(mi: &mut MB_MODE_INFO, block: &ParseBlock<'_>, intra: &Av1BlockIntra, lossless: bool) {
     const FILTER_PRED: u8 = 13;
     const CFL_PRED: u8 = 13;
@@ -220,19 +233,26 @@ fn intra(mi: &mut MB_MODE_INFO, block: &ParseBlock<'_>, intra: &Av1BlockIntra, l
         mi.angle_delta[1] = intra.uv_angle;
     }
     mi.palette_mode_info.palette_size = [i16::from(intra.pal_sz[0]), i16::from(intra.pal_sz[1])];
-    if intra.pal_sz[0] != 0 {
-        mi.palette_mode_info.palette_colors[..intra.pal_sz[0] as usize]
-            .copy_from_slice(&block.pal[0][..intra.pal_sz[0] as usize]);
-    }
-    if intra.pal_sz[1] != 0 {
-        let n = intra.pal_sz[1] as usize;
-        mi.palette_mode_info.palette_colors[8..8 + n].copy_from_slice(&block.pal[1][..n]);
-        mi.palette_mode_info.palette_colors[16..16 + n].copy_from_slice(&block.pal[2][..n]);
+    if intra.pal_sz[0] != 0 || intra.pal_sz[1] != 0 {
+        // The colours in an array of their own, which the record then gets whole: a store into the
+        // record at a place the compiler does not know keeps the whole record in memory (see `VarTx`).
+        let mut colors = mi.palette_mode_info.palette_colors;
+        if intra.pal_sz[0] != 0 {
+            let n = intra.pal_sz[0] as usize;
+            colors[..n].copy_from_slice(&block.pal[0][..n]);
+        }
+        if intra.pal_sz[1] != 0 {
+            let n = intra.pal_sz[1] as usize;
+            colors[8..8 + n].copy_from_slice(&block.pal[1][..n]);
+            colors[16..16 + n].copy_from_slice(&block.pal[2][..n]);
+        }
+        mi.palette_mode_info.palette_colors = colors;
     }
     mi.tx_size = if lossless { TX_4X4 } else { intra.tx as u8 };
 }
 
 /// The fields of an inter block that are its own.
+#[inline(always)]
 fn inter(mi: &mut MB_MODE_INFO, block: &ParseBlock<'_>, inter: &Av1BlockInter) {
     let is_comp = inter.comp_type.is_some();
     let interintra = inter.interintra_type.is_some();
@@ -304,9 +324,11 @@ fn inter(mi: &mut MB_MODE_INFO, block: &ParseBlock<'_>, inter: &Av1BlockInter) {
         let warp = block.warpmv;
         mi.wm_params.wmtype = WMTYPE_AFFINE as _;
         if warp.r#type == Rav1dWarpedMotionType::Affine {
-            for (dst, src) in mi.wm_params.wmmat.iter_mut().zip(warp.matrix) {
+            let mut wmmat = mi.wm_params.wmmat;
+            for (dst, src) in wmmat.iter_mut().zip(warp.matrix) {
                 *dst = src;
             }
+            mi.wm_params.wmmat = wmmat;
             mi.wm_params.alpha = warp.alpha();
             mi.wm_params.beta = warp.beta();
             mi.wm_params.gamma = warp.gamma();
@@ -319,6 +341,7 @@ fn inter(mi: &mut MB_MODE_INFO, block: &ParseBlock<'_>, inter: &Av1BlockInter) {
 
 /// Fills the record of a block. `mi` is a cleared record; `lossless` says whether the block's segment
 /// is lossless.
+#[inline(always)]
 pub fn fill(mi: &mut MB_MODE_INFO, frame: &RecordFrame<'_>, block: &ParseBlock<'_>, lossless: bool) {
     let b = block.b;
     let bsize = BLOCK_SIZE_OF[block.bs as usize];

@@ -152,7 +152,9 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        "by default, and a list that names one of them, none or default says which are on (none: neither; "
        "nolfmask or tilethread: only that one). time, with -gputime the calls of the sink are timed, and "
        "latelists, the block lists of a tile are counted at its end and not superblock by superblock, and "
-       "cleargrid, the mode info grid is cleared for every frame, change nothing else",
+       "cleargrid, the mode info grid is cleared for every frame, and recordonce, a mode info record is "
+       "written to its pool once and not cleared there and filled, and gpucdef, the two lists CDEF reads are "
+       "written by a pass of the GPU and not by the thread that records, change nothing else",
        "", &params_.parseopt_},
       {"continue_on_error", atSingle, anOptional,
        "after a decode call that fails, go on with the next temporal unit in the same decoder instead of "
@@ -250,7 +252,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
 
   // -parseopt: words separated by commas; a word that is none of them is an error of the task. A word
   // that names the two default switches (nolfmask, tilethread, none, default) replaces the default of the
-  // two; time, latelists and cleargrid add to whatever they are (rav1g::ParserOptions::from_words reads the list the
+  // two; time, latelists, cleargrid, recordonce and gpucdef add to whatever they are (rav1g::ParserOptions::from_words reads the list the
   // same way).
   params_.parser_options_ = 0;
   bool ways_named = false;
@@ -264,6 +266,10 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       params_.parser_options_ |= PLAYER_PARSEOPT_LATE_LISTS;
     } else if (word == "cleargrid") {
       params_.parser_options_ |= PLAYER_PARSEOPT_CLEAR_GRID;
+    } else if (word == "recordonce") {
+      params_.parser_options_ |= PLAYER_PARSEOPT_RECORD_ONCE;
+    } else if (word == "gpucdef") {
+      params_.parser_options_ |= PLAYER_PARSEOPT_GPU_CDEF_LISTS;
     } else if (word == "nolfmask") {
       params_.parser_options_ |= PLAYER_PARSEOPT_NO_LF_MASKS;
       ways_named = true;
@@ -276,7 +282,8 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     } else if (word == "none") {
       ways_named = true;
     } else {
-      Err += "-parseopt takes nolfmask, tilethread, time, latelists, cleargrid, default or none, separated by commas, not \"";
+      Err += "-parseopt takes nolfmask, tilethread, time, latelists, cleargrid, recordonce, gpucdef, default or none, separated "
+             "by commas, not \"";
       Err += word;
       Err += "\"";
       return -1;

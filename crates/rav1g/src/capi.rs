@@ -78,6 +78,16 @@ pub const RAV1G_PARSER_OPTION_TEST_PANIC: u32 = 64;
 /// its parse for memory to come back, as a frame does that finds a pool exhausted. The frames are the
 /// same.
 pub const RAV1G_PARSER_OPTION_TEST_POOL_WAIT: u32 = 128;
+/// The mode info record of a block is put together by itself and written to its pool once, every byte
+/// of it, and not cleared where it lies in the pool and then filled. The records are the same. For a
+/// timing of the two against each other; it was the slower way where it was measured.
+pub const RAV1G_PARSER_OPTION_RECORD_ONCE: u32 = 256;
+/// The two lists CDEF reads besides the frame (the strength index of every 64x64 block, the skip flag
+/// of every 8x8 block) are written by a pass of the frame's command list, in front of CDEF, and not by
+/// the thread that records the frame, which reads the frame's mode info again for them. The lists are
+/// the same. Read when the decoder is created: the two buffers of every pipeline slot are then buffers
+/// the GPU may write. For a timing of the two against each other.
+pub const RAV1G_PARSER_OPTION_GPU_CDEF_LISTS: u32 = 512;
 /// The most frames a decoder parses at the same time (`Rav1gSettings::frames_in_parse`).
 pub const RAV1G_FRAMES_IN_PARSE_MAX: u32 = 4;
 /// The `Rav1gSettings::parser_options` of `rav1g_settings_default`: `RAV1G_PARSER_OPTION_NO_LF_MASKS`
@@ -193,6 +203,10 @@ const _: () = {
     assert!(RAV1G_PARSER_OPTION_TEST_PANIC == crate::sys::AV1_PARSER_OPTION_TEST_PANIC);
     assert!(RAV1G_PARSER_OPTION_TEST_POOL_WAIT == crate::ParserOptions::TEST_POOL_WAIT);
     assert!(RAV1G_PARSER_OPTION_TEST_POOL_WAIT == crate::sys::AV1_PARSER_OPTION_TEST_POOL_WAIT);
+    assert!(RAV1G_PARSER_OPTION_RECORD_ONCE == crate::ParserOptions::RECORD_ONCE);
+    assert!(RAV1G_PARSER_OPTION_RECORD_ONCE == crate::sys::AV1_PARSER_OPTION_RECORD_ONCE);
+    assert!(RAV1G_PARSER_OPTION_GPU_CDEF_LISTS == crate::ParserOptions::GPU_CDEF_LISTS);
+    assert!(RAV1G_PARSER_OPTION_GPU_CDEF_LISTS == crate::sys::AV1_PARSER_OPTION_GPU_CDEF_LISTS);
     assert!(RAV1G_FRAMES_IN_PARSE_MAX == crate::sys::AV1_FRAMES_IN_PARSE_MAX);
     assert!(RAV1G_PARSER_OPTIONS_DEFAULT == crate::ParserOptions::DEFAULT);
     assert!(RAV1G_INTER_FAST_ON == switches::INTER_FAST_ON);

@@ -370,7 +370,8 @@ impl Requests {
     }
 
     /// [`Requests::buffer`] for a grid of a slot, which with `gpu_writable` a command list may write too
-    /// (`Av1Core::gpu_clear_grids`). The plan counts the same either way.
+    /// (`Av1Core::gpu_clear_grids`), and for the lists of CDEF (`Av1Core::gpu_cdef_lists`). The plan counts
+    /// the same either way.
     fn buffer_for(
         &mut self,
         size: usize,
@@ -439,6 +440,7 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
     dec.block_count4x4 = block_count_4x4;
     // The two grids of a slot as buffers a command list may write (the creation has set it).
     let gpu_clear_grids = dec.gpu_clear_grids != 0;
+    let gpu_cdef_lists = dec.gpu_cdef_lists != 0;
     dec.max_width = target_width;
     dec.max_height = target_height;
     dec.max_bitdepth = cfg.bitdepth;
@@ -655,15 +657,25 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
                 gpu_clear_grids
             )
         );
+        // The two lists of CDEF: written by the thread that records a frame, or, in a decoder for it
+        // (`Av1Core::gpu_cdef_lists`), by a pass of the frame's command list: then buffers the CPU has a
+        // cached mapping of (which nothing but `-poisonbuf` writes through) and a command list may write.
+        let (cdef_kind, cdef_writable) = if gpu_cdef_lists { (HostRW, true) } else { (DeviceUpload, false) };
         request!(
             assign,
             td.cdef_indexes,
-            mem.buffer(size_of::<i32>() * cdef_blocks as usize, DeviceUpload, c"cdef_indexes", i)
+            mem.buffer_for(size_of::<i32>() * cdef_blocks as usize, cdef_kind, c"cdef_indexes", i, cdef_writable)
         );
         request!(
             assign,
             td.cdef_skips,
-            mem.buffer(size_of::<i32>() * cdef_blocks as usize * 16 * 16, DeviceUpload, c"cdef_skips", i)
+            mem.buffer_for(
+                size_of::<i32>() * cdef_blocks as usize * 16 * 16,
+                cdef_kind,
+                c"cdef_skips",
+                i,
+                cdef_writable
+            )
         );
         request!(
             assign,
@@ -1161,6 +1173,8 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
         // created as buffers a command list may write. A decoder that was created with another mode has
         // them as buffers the GPU only reads, which every package so far has had.
         (*dec).gpu_clear_grids = c_int::from(super::frame::clears_mode() == crate::sys::AV1_CLEARS_GPU as c_int);
+        (*dec).gpu_cdef_lists =
+            c_int::from(cfg.parser_options & crate::sys::AV1_PARSER_OPTION_GPU_CDEF_LISTS as c_int != 0);
         (*dec).frame_slots = rcfg.gpu_pipeline_depth;
 
         // The decoder takes a reference of the device and of the queue the application gave.

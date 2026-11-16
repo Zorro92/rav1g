@@ -17,9 +17,10 @@ use super::core::{
     alloc_constants, buffer, commands, perf_gpu_mark, pipeline, stage_dump_active, stage_dump_data, stage_dump_fb,
 };
 use super::types::{Av1Core, av1_stage_dump_region};
+use crate::gpu::BufferState;
 use crate::sys::{
-    AV1_COMMON, AV1_PERF_GPU_CDEF, AV1_PERF_GPU_LOOP_REST, AV1_PERF_GPU_SUPERRES, AV1LrStruct, HwFrameBuffer,
-    MI_SIZE_64X64, RESTORE_NONE, RESTORE_WIENER,
+    AV1_COMMON, AV1_PERF_GPU_CDEF, AV1_PERF_GPU_CDEF_LISTS, AV1_PERF_GPU_LOOP_REST, AV1_PERF_GPU_SUPERRES, AV1LrStruct,
+    HwFrameBuffer, MI_SIZE_64X64, RESTORE_NONE, RESTORE_WIENER,
 };
 
 fn plane_words(buffer: &HwFrameBuffer) -> [[c_int; 4]; 3] {
@@ -123,6 +124,55 @@ pub extern "C" fn av1_set_cdef_v2(enable: c_int) {
     CDEF_V2.store(enable, Ordering::Relaxed);
 }
 
+// The two fields of a mode info record `cdef_lists.hlsl` loads, by the place of their words in a record
+// (`TX_INFO_WORD`, `SEG_CDEF_FLAGS_WORD`: byte 1 of each).
+const _: () = {
+    assert!(std::mem::offset_of!(crate::sys::MB_MODE_INFO, skip) == 200 + 1);
+    assert!(std::mem::offset_of!(crate::sys::MB_MODE_INFO, cdef_strength) == 220 + 1);
+    assert!(size_of::<crate::sys::MiGridEntry>() == 4);
+};
+
+/// The lists of CDEF by the GPU (`Av1Core::gpu_cdef_lists`, `AV1_PARSER_OPTION_GPU_CDEF_LISTS`):
+/// `cdef_lists.hlsl` writes what the loops of [`cdef_filter_run`] write, the same words at the same
+/// places and no other: the index of each of the `nhfb` by `nvfb` 64x64 blocks, and the skip flag of
+/// each of the `skip_cols` by `skip_rows` 8x8 blocks, in rows of `nhfb * 16`. It reads the mode info as
+/// the loop filter's list shaders do, from the grid of the slot and the pool, which hold the frame's
+/// records until the frame's fence; the thread that records then reads none of it.
+///
+/// The two lists are buffers the CPU could write (a custom heap, in the state the shaders read them in)
+/// that a command list may write as well: in the state for it around this pass only, so CDEF and the
+/// stage dump find them as they find the lists the CPU wrote.
+///
+/// # Safety
+/// `dec` is the decoder while it records a frame whose slot has the lists as buffers the GPU may write;
+/// `cm` is the frame's. `sizes`: `nhfb`, `nvfb`, `skip_cols`, `skip_rows` of the frame.
+unsafe fn record_cdef_lists(dec: *mut Av1Core, cm: &AV1_COMMON, sizes: [c_int; 4]) {
+    let [nhfb, nvfb, skip_cols, skip_rows] = sizes;
+    // SAFETY: the caller's contract.
+    unsafe {
+        let td = &mut *(*dec).curr_frame_data;
+        let commands = commands(dec);
+        let shader = pipeline(&raw const (*(*dec).shader_lib).shader_cdef_lists);
+        let (indexes, skips) = (buffer(td.cdef_indexes), buffer(td.cdef_skips));
+        commands.transition(indexes, BufferState::Read, BufferState::ReadWrite);
+        commands.transition(skips, BufferState::Read, BufferState::ReadWrite);
+        commands.set_layout(shader.layout());
+        commands.set_pipeline(shader);
+        commands.bind_read(0, buffer((*dec).mode_info_pool).location());
+        commands.bind_read(1, buffer(td.mode_info_grid).location());
+        commands.bind_write(2, indexes.location());
+        commands.bind_write(3, skips.location());
+        // mi_stride, mi_addr_base, index_stride, skips_stride, skip_cols, skip_rows
+        let inline = [cm.mi_stride, crate::sys::MI_GRID_BASE as c_int, nhfb, nhfb * 16, skip_cols, skip_rows];
+        commands.set_inline_constants(4, &inline, 0);
+        // A group a 64x64 block, a thread an 8x8 block.
+        commands.dispatch(nhfb as u32, nvfb as u32, 1);
+        commands.transition(indexes, BufferState::ReadWrite, BufferState::Read);
+        commands.transition(skips, BufferState::ReadWrite, BufferState::Read);
+        perf_gpu_mark(dec, AV1_PERF_GPU_CDEF_LISTS);
+    }
+}
+
 /// `av1_cdef_filter_run` of the C++: CDEF from `src` into `dst`, when the frame has it.
 ///
 /// # Safety
@@ -138,30 +188,34 @@ unsafe fn cdef_filter_run(dec: *mut Av1Core, cm: &AV1_COMMON, src: *const HwFram
         let cdef_info = &cm.cdef_info;
         let mi_size_64 = MI_SIZE_64X64 as c_int;
 
-        let cdef_indexes = (*td.cdef_indexes).host_ptr.cast::<c_int>();
-        let cdef_skips = (*td.cdef_skips).host_ptr.cast::<c_int>();
         let nvfb = (cm.mi_rows + mi_size_64 - 1) / mi_size_64;
         let nhfb = (cm.mi_cols + mi_size_64 - 1) / mi_size_64;
-        let mode_info = |row: c_int, col: c_int| {
-            &*crate::sys::mi_grid_record(cm.mi, *cm.mi_grid_visible.offset((row * cm.mi_stride + col) as isize))
-        };
-
-        // The strength index of every 64x64 block, and for every 8x8 block whether all of it is skipped.
-        for fbr in 0..nvfb {
-            for fbc in 0..nhfb {
-                *cdef_indexes.offset((fbr * nhfb + fbc) as isize) =
-                    c_int::from(mode_info(mi_size_64 * fbr, mi_size_64 * fbc).cdef_strength);
-            }
-        }
         let skip_rows = (nvfb * 16).min(cm.mi_rows / 2);
         let skip_cols = (nhfb * 16).min(cm.mi_cols / 2);
-        for r in 0..skip_rows {
-            for c in 0..skip_cols {
-                let skipped = mode_info(r * 2, c * 2).skip != 0
-                    && mode_info(r * 2, c * 2 + 1).skip != 0
-                    && mode_info(r * 2 + 1, c * 2).skip != 0
-                    && mode_info(r * 2 + 1, c * 2 + 1).skip != 0;
-                *cdef_skips.offset((r * nhfb * 16 + c) as isize) = c_int::from(skipped);
+        // The two lists: the strength index of every 64x64 block, and for every 8x8 block whether all of
+        // it is skipped. Written here, from the frame's mode info, or by a pass of the command list in
+        // a decoder for that (`record_cdef_lists`, below the constants).
+        let gpu_lists = (*dec).gpu_cdef_lists != 0;
+        if !gpu_lists {
+            let cdef_indexes = (*td.cdef_indexes).host_ptr.cast::<c_int>();
+            let cdef_skips = (*td.cdef_skips).host_ptr.cast::<c_int>();
+            let mode_info = |row: c_int, col: c_int| {
+                &*crate::sys::mi_grid_record(cm.mi, *cm.mi_grid_visible.offset((row * cm.mi_stride + col) as isize))
+            };
+            for fbr in 0..nvfb {
+                for fbc in 0..nhfb {
+                    *cdef_indexes.offset((fbr * nhfb + fbc) as isize) =
+                        c_int::from(mode_info(mi_size_64 * fbr, mi_size_64 * fbc).cdef_strength);
+                }
+            }
+            for r in 0..skip_rows {
+                for c in 0..skip_cols {
+                    let skipped = mode_info(r * 2, c * 2).skip != 0
+                        && mode_info(r * 2, c * 2 + 1).skip != 0
+                        && mode_info(r * 2 + 1, c * 2).skip != 0
+                        && mode_info(r * 2 + 1, c * 2 + 1).skip != 0;
+                    *cdef_skips.offset((r * nhfb * 16 + c) as isize) = c_int::from(skipped);
+                }
             }
         }
 
@@ -214,9 +268,15 @@ unsafe fn cdef_filter_run(dec: *mut Av1Core, cm: &AV1_COMMON, src: *const HwFram
         (*data).dst_offset[1] = target.planes[1].offset;
         (*data).dst_offset[2] = target.planes[2].offset;
 
+        if gpu_lists {
+            record_cdef_lists(dec, cm, [nhfb, nvfb, skip_cols, skip_rows]);
+        }
+
         // -dumpstages: the two lists CDEF reads besides the frame. The strength index of every 64x64 block,
         // rows of nhfb; behind them the skip flags of the 8x8 blocks, rows of skips_stride, of which the loops
-        // above write skip_cols by skip_rows for this frame.
+        // above write skip_cols by skip_rows for this frame. The copy is a command of the list, behind the
+        // pass that writes the lists in a decoder that has them written there: it has what CDEF reads
+        // either way.
         if stage_dump_active(dec) {
             let indexes = &*td.cdef_indexes;
             let skips = &*td.cdef_skips;
