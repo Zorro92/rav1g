@@ -36,7 +36,8 @@ struct GenLfData {
     delta_q_info_delta_lf_multi: c_int,
     lf_mode_ref_delta_enabled: c_int,
     mi_grid_entry: u32,
-    r: [c_int; 2],
+    mi_grid_last: u32,
+    r: c_int,
 
     lf_filter_level: [c_int; 2],
     lf_filter_level_u: c_int,
@@ -118,6 +119,8 @@ pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: 
         // The grid: entries of four bytes, the place of a record in the pool above this base.
         (*gen_data).mi_addr_base = crate::sys::MI_GRID_BASE as c_int;
         (*gen_data).mi_grid_entry = crate::sys::MI_GRID_ENTRY_BYTES;
+        // The last entry of the slot's grid: a load of the shaders that is not in the grid reads it.
+        (*gen_data).mi_grid_last = ((*td.mode_info_grid).size / size_of::<crate::sys::MiGridEntry>() - 1) as u32;
         (*gen_data).delta_q_info_delta_lf_multi = cm.delta_q_info.delta_lf_multi;
         (*gen_data).delta_q_info_delta_lf_present_flag = cm.delta_q_info.delta_lf_present_flag;
         (*gen_data).lf_mode_ref_delta_enabled = c_int::from(lf.mode_ref_delta_enabled);

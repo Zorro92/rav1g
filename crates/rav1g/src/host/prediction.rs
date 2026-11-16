@@ -126,7 +126,8 @@ struct GenBlockData {
     disable_edge_filter: c_int,
     force_integet_mv: c_int,
     mi_grid_entry: u32,
-    reserved: [c_int; 2],
+    mi_grid_last: u32,
+    reserved: c_int,
     wedge_offsets: [[c_int; 4]; 22],
     dist_wtd: [[c_int; 4]; 8 * 8],
     lossless_seg: [[c_int; 4]; 8],
@@ -190,6 +191,8 @@ pub(crate) unsafe fn prediction_gen_blocks(pbi: *mut AV1Decoder, dec: *mut Av1Co
         // The grid: entries of four bytes, the place of a record in the pool above this base.
         (*data).mi_addr_base = crate::sys::MI_GRID_BASE;
         (*data).mi_grid_entry = crate::sys::MI_GRID_ENTRY_BYTES;
+        // The last entry of the slot's grid: a load of the shader that is not in the grid reads it.
+        (*data).mi_grid_last = ((*td.mode_info_grid).size / size_of::<crate::sys::MiGridEntry>() - 1) as u32;
         (*data).iter_grid_stride = td.iter_grid_stride;
         (*data).iter_grid_offset_uv = td.iter_grid_offset_uv;
         (*data).iter_grid_stride_uv = td.iter_grid_stride_uv;
