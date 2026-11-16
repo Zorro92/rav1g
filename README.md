@@ -5,13 +5,13 @@ it (inverse transforms, intra and inter prediction, loop filter, CDEF, loop rest
 super-resolution, film grain) in D3D12 compute shaders. It runs on any D3D12 GPU. The name
 stands for Rust AV1 GPU: the decoder on this branch is Rust (the D3D12 host and the interface,
 `crates/rav1g`, and the parser, the parse pass of rav1d in `third_party/rav1d`), HLSL
-(`libav1/dx/shaders`), and for now the C parser and entropy decoder it took over from upstream
-(`libav1`), which a decoder can still be created with. There is no C++ host on `main` any more ([docs/rust-port.md](docs/rust-port.md));
+(`libav1/dx/shaders`). libaom's C parser is no longer part of the decoder; what is left of libaom in
+`libav1` is the reference the shader checks of `testing/` compile. There is no C++ host on `main` any more ([docs/rust-port.md](docs/rust-port.md));
 the C++ decoder it was ported from lives on in branch `cpp` (release `v0.3.0`).
 
 rav1g is a fork of AOMedia's [av1-xbox-one](https://aomedia.googlesource.com/av1-xbox-one)
 (commit `b5c61563b48625c261a8d627cfa928896fd10b13`, August 2021), with upstream's history
-kept. Upstream's own description is in `README.pdf`.
+kept. Upstream's own description, `README.pdf`, is on branches `original` and `cpp`.
 
 ## Why
 
