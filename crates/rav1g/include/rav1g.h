@@ -61,7 +61,8 @@ typedef struct av1_stage_dump av1_stage_dump;
 #define RAV1G_LOW_MEMORY_MODE_INFO 2
 
 /*
- A coefficient pool of four fifths of the worst case of a frame, likewise.
+ A coefficient pool of four fifths of the worst case of a frame, likewise. In the default above
+ 1920x1088.
  */
 #define RAV1G_LOW_MEMORY_COEFS 4
 
