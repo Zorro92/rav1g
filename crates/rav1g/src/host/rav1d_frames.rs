@@ -36,7 +36,8 @@
 //! later frames may already hold it).
 //!
 //! **The frame buffer.** A frame takes its frame buffer from the pool when its parse begins, and holds
-//! it through the parse. In a decoder created with `AV1_LOW_MEMORY_LATE_FRAME_BUFFER` it takes it
+//! it through the parse. In a decoder created with `AV1_LOW_MEMORY_LATE_FRAME_BUFFER` (and the shared
+//! back buffer) it takes it
 //! when it is recorded (`frame::bind_frame_for_record`): the description of a frame in parse has no
 //! frame buffer then, the frames that refer to it count their reference on the buffer when they are
 //! recorded themselves, by which time it has one or the mark, and a frame that fails never has one.

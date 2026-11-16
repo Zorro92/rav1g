@@ -457,8 +457,8 @@ pub struct Av1Core {
     pub block_count4x4: c_int,
     pub shared_back_buffer: c_int,
     pub low_memory: c_int,
-    /// `AV1_LOW_MEMORY_LATE_FRAME_BUFFER`: a frame that is a value (more than one frame in parse) takes
-    /// its frame buffer, and its back buffer when the frames do not share one, when it is recorded
+    /// `AV1_LOW_MEMORY_LATE_FRAME_BUFFER` in a decoder with the shared back buffer: a frame that is a
+    /// value (more than one frame in parse) takes its frame buffer when it is recorded
     /// (`frame::bind_frame_for_record`).
     pub late_frame_buffer: c_int,
     pub palette_size: usize,

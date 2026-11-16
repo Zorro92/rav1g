@@ -1096,12 +1096,14 @@ pub(crate) unsafe fn bind_frame_for_record(
 /// The frame on the slot `td`, which was set up without a frame buffer, takes its buffers of the pool
 /// and counts its references, as [`setup_frame_begin`] does for a frame that has its buffer by then.
 ///
-/// The takes wait while the pool is empty. What is out of the pool then is held by the reference
+/// The take waits while the pool is empty. What is out of the pool then is held by the reference
 /// slots and the frames of the queue, or only by frames on the GPU. The first are at most 8 buffers:
 /// each was in a reference slot when this frame, the oldest of the queue, began, and no frame that
-/// began since has a buffer. With this frame's own (and its back buffer, when the frames do not share
-/// one) that is within the pool, so a buffer the take waits for is one a frame on the GPU returns,
-/// which the completion thread does without this thread (`ResourceConfig::with_slots`).
+/// began since has a buffer. With this frame's own that is within the pool, so a buffer the take
+/// waits for is one a frame on the GPU returns, which the completion thread does without this thread
+/// (`ResourceConfig::with_slots`). The frame is reconstructed into its own buffer or into the back
+/// buffer the frames share: a decoder whose frames take a back buffer from the pool does not have
+/// frames that come here.
 ///
 /// # Safety
 /// As [`bind_frame_for_record`], for a frame with `late_buffers`.
@@ -1119,23 +1121,15 @@ unsafe fn take_frame_buffers(
         let (width, height) = ((*cur).buf.crop_widths[0], (*cur).buf.crop_heights[0]);
         let filtered = td.do_loop_rest != 0 || td.do_cdef != 0 || td.do_superres != 0;
         let perf_t = super::perf::av1_perf_ticks();
+        assert!((*dec).shared_back_buffer != 0, "frames take their buffer here only with the shared back buffer");
         let fb_ptr = (*dec).fb_pool.get();
-        if filtered && (*dec).shared_back_buffer == 0 {
-            td.back_buffer0 = (*dec).fb_pool.get();
-        }
         perf_add(dec, sys::AV1_PERF_CPU_WAIT_FB as usize, perf_t);
         let fb = &mut *fb_ptr;
         layout_frame_buffer(fb, width, height, td.is_hbd);
         fb.frame_number = td.frame_number;
         (*cur).buf.hw_buffer = fb_ptr;
         td.dst_frame_buffer = fb_ptr;
-        td.frame_buffer = if !filtered {
-            fb_ptr
-        } else if (*dec).shared_back_buffer != 0 {
-            &raw mut (*dec).back_buffer0
-        } else {
-            td.back_buffer0
-        };
+        td.frame_buffer = if filtered { &raw mut (*dec).back_buffer0 } else { fb_ptr };
         {
             // The reference counts are the pool's: counted under its lock.
             let _counting = (*dec).fb_pool.lock();

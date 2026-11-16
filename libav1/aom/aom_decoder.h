@@ -196,7 +196,8 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
  * a frame of a decoder with more than one frame in parse takes its frame
  * buffer when it is recorded, not when its parse begins, and the frame buffer
  * pool has no buffer for the slots above two: 10 with the shared back buffer
- * (11 with three slots without this part). Covers every stream. Not in
+ * (11 with three slots without this part). Covers every stream. It has an
+ * effect only together with AV1_LOW_MEMORY_SHARED_BACK_BUFFER. Not in
  * AV1_LOW_MEMORY_ALL, which is the three parts above; AV1_LOW_MEMORY_PARTS is
  * every part there is. */
 #define AV1_LOW_MEMORY_SHARED_BACK_BUFFER 1

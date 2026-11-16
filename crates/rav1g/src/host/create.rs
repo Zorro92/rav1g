@@ -138,6 +138,14 @@ fn default_low_memory(width: u32, height: u32) -> i32 {
     }
 }
 
+/// Whether the frames of a decoder with these parts take their frame buffer when they are recorded:
+/// `AV1_LOW_MEMORY_LATE_FRAME_BUFFER`, in a decoder with the shared back buffer. A decoder whose frames
+/// take a back buffer from the pool as well is left as it is (docs/memory.md).
+fn late_frame_buffer(low_memory: i32) -> bool {
+    let both = (AV1_LOW_MEMORY_LATE_FRAME_BUFFER | AV1_LOW_MEMORY_SHARED_BACK_BUFFER) as i32;
+    low_memory & both == both
+}
+
 /// The chunks of the pools of a decoder for frames of `cells` 64x64 areas: the chunks the frames in
 /// parse share under the rule of `Pools::take`, and all of them.
 ///
@@ -300,17 +308,18 @@ impl ResourceConfig {
         } else {
             RefFrameBufferCount
         };
-        // With the frame buffer bound at the recording (AV1_LOW_MEMORY_LATE_FRAME_BUFFER) a frame in parse
-        // holds no buffer of the pool (its own and, without the shared back buffer, its back buffer are
-        // taken by the thread that records the frames, `frame::bind_frame_for_record`), so the buffer for
-        // each slot above two is left out. What is then out of the pool when the frame at the head of the
-        // queue asks for its buffers: the buffers of frames that are recorded and that the map or a frame
-        // of the queue refers to, which are at most 8 (every one of them was in the map when the frame at
-        // the head began, and the frames that began since have no buffer yet), and what only frames on
-        // the GPU hold, which comes back without this thread. So the 8 and the frame's own 1 (or 2) are
-        // always within the 10 (or 12): the take waits for the GPU at most, never for a frame behind it.
-        // The count is not taken below the 10 of a decoder with two slots (docs/memory.md).
-        let late = low_memory & AV1_LOW_MEMORY_LATE_FRAME_BUFFER as i32 != 0;
+        // With the frame buffer bound at the recording (AV1_LOW_MEMORY_LATE_FRAME_BUFFER, which has an
+        // effect only together with the shared back buffer: `late_frame_buffer`) a frame in parse holds
+        // no buffer of the pool (the thread that records the frames takes it,
+        // `frame::bind_frame_for_record`), so the buffer for each slot above two is left out. What is
+        // then out of the pool when the frame at the head of the queue asks for its buffer: the buffers
+        // of frames that are recorded and that the map or a frame of the queue refers to, which are at
+        // most 8 (every one of them was in the map when the frame at the head began, and the frames that
+        // began since have no buffer yet), and what only frames on the GPU hold, which comes back
+        // without this thread. So the 8 and the frame's own are always within the 10: the take waits for
+        // the GPU at most, never for a frame behind it. The count is not taken below the 10 of a decoder
+        // with two slots (docs/memory.md).
+        let late = late_frame_buffer(low_memory);
         let ref_fb_count =
             if late { base_fb_count } else { base_fb_count + gpu_pipeline_depth - FrameThreadDataDefault };
         ResourceConfig {
@@ -498,7 +507,7 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
     // back buffer the frames share when they do not take one from the pool.
     dec.shared_back_buffer = i32::from(cfg.low_memory & AV1_LOW_MEMORY_SHARED_BACK_BUFFER as i32 != 0);
     dec.low_memory = cfg.low_memory;
-    dec.late_frame_buffer = i32::from(cfg.low_memory & AV1_LOW_MEMORY_LATE_FRAME_BUFFER as i32 != 0);
+    dec.late_frame_buffer = i32::from(late_frame_buffer(cfg.low_memory));
     dec.fb_size = fb_size;
     dec.fb_offset = if dec.shared_back_buffer != 0 { 2 * fb_size } else { fb_size };
     dec.enable_superres = cfg.enable_superres;
@@ -858,8 +867,10 @@ unsafe fn log_memory_summary(is_error: bool, label: &str, dec: &Av1Core, rcfg: &
         dec.pool_total[Kind::Coefs as usize] - dec.pool_rule[Kind::Coefs as usize]
     );
     // Said only by a decoder that has the part, so that the line of the others is what it was.
-    let late = if rcfg.low_memory & AV1_LOW_MEMORY_LATE_FRAME_BUFFER as i32 != 0 {
+    let late = if late_frame_buffer(rcfg.low_memory) {
         ", frame buffers bound at the recording"
+    } else if rcfg.low_memory & AV1_LOW_MEMORY_LATE_FRAME_BUFFER as i32 != 0 {
+        ", frame buffers not bound at the recording: that needs the shared back buffer"
     } else {
         ""
     };
@@ -1760,9 +1771,9 @@ mod tests {
         let rcfg = ResourceConfig::from_cfg(&cfg);
         assert_eq!((rcfg.ref_fb_count, rcfg.low_memory), (13, 0));
         // The frame buffer bound at the recording: no buffer for the slots above two, and never fewer
-        // than a decoder with two slots has.
+        // than a decoder with two slots has. Without the shared back buffer the part changes nothing.
         for (parts, slots, buffers) in
-            [(35, 3, 10), (35, 4, 10), (35, 2, 10), (3, 4, 12), (32, 3, 12), (32, 4, 12), (39, 3, 10)]
+            [(35, 3, 10), (35, 4, 10), (35, 2, 10), (3, 4, 12), (32, 3, 13), (32, 4, 14), (39, 3, 10)]
         {
             (cfg.low_memory, cfg.frame_slots) = (parts, slots);
             let rcfg = ResourceConfig::from_cfg(&cfg);

@@ -405,7 +405,8 @@ went from 0.02 ms a frame to 1.4 to 1.8 ms, in a pool that is used to 20 % at mo
 2026-11-16. **A part of the low memory parts that is off by default** until the console has compared it:
 `AV1_LOW_MEMORY_LATE_FRAME_BUFFER`, `RAV1G_LOW_MEMORY_LATE_FRAME_BUFFER`, `LowMemory::LATE_FRAME_BUFFER`,
 32, which `-lowmemparts` takes with the others (`-lowmemparts 35` is the default of a 4K decoder with
-it; `-lowmem` stays the parts 1, 2 and 4). With it the decoder for 3840x2160 10-bit (two frames in parse,
+it; `-lowmem` stays the parts 1, 2 and 4). It has an effect only together with the shared back buffer,
+part 1. With it the decoder for 3840x2160 10-bit (two frames in parse,
 three slots) takes **513.5 MiB** of device buffers where it takes 537.6: 24.2 MiB less, one frame buffer
 (12.1 MiB at 8 bits).
 
@@ -418,6 +419,19 @@ three slots) takes **513.5 MiB** of device buffers where it takes 537.6: 24.2 Mi
   from `bind_frame_for_record`). So a frame in parse holds no frame buffer, and the pool has 10 where
   it had one more for each slot above two (11 with three slots, 12 with four). With one frame in parse
   nothing changes but the count.
+- *Only with the shared back buffer.* A decoder whose frames take their back buffer from the pool
+  (`-lowmemparts 0`, or 32 without 1) is left as it is, with its 12 buffers and one for each slot above
+  two, and says so (`frame buffers not bound at the recording: that needs the shared back buffer`). The
+  first form of the part took that back buffer at the recording as well, and CI showed wrong frames
+  with it on WARP (run 43859355280: the set with `-parseframes 3 -t 4 -lowmemparts 32`, and the clean
+  stream of the decode error check, differ from their second frame on, while the same runs with 33 are
+  right). The local decoder gives such frames without the shared back buffer whatever else is set, with
+  one frame in parse and before this change too (147 of the 244 vectors, the same with `-lowmemparts 0`
+  and with 32; [rust-port.md](rust-port.md); in the stage dumps of a 16x64 vector the inter
+  prediction of the second frame differs at its left and right edge). Whether WARP gives them without
+  the part when more than one frame is in parse was not looked at: no job runs that combination. Locally
+  it is a matter of the decoder without the shared back buffer, which no default has, and not of this
+  part; for WARP that is open.
 - *The references.* The entry of a frame in parse already holds a reference on the description of its
   own frame and of the seven it is predicted from (`rav1d_frames.rs`), so every such frame is alive
   until the entry is through; what moved is when the frame buffers behind the descriptions are named.
@@ -443,10 +457,9 @@ three slots) takes **513.5 MiB** of device buffers where it takes 537.6: 24.2 Mi
   as the take at the begin of the parse did. What is out of the pool when the frame at the head of the
   queue asks: buffers the reference slots or the frames of the queue refer to, and buffers only frames
   on the GPU hold. The first are at most 8: each was in a reference slot when the frame at the head
-  began, and no frame that began since has a buffer. With the frame's own that is 9 of 10 (and with its
-  back buffer, in a decoder without the shared one, which is taken at the recording as well, 10 of
-  12), so a buffer the take waits for is always one a frame on the GPU returns, and the completion
-  thread returns it without the thread that waits. The floor of 10 is kept: 8 references, the next
+  began, and no frame that began since has a buffer. With the frame's own that is 9 of 10, so a buffer
+  the take waits for is always one a frame on the GPU returns, and the completion thread returns it
+  without the thread that waits. The floor of 10 is kept: 8 references, the next
   frame, and one that a decoder with one frame in parse needs for a failed frame.
 - *The lines.* `MEMORY decoder created options: ... low memory 35 (shared back buffer yes, ..., frame
   buffers bound at the recording)`; `MEMORY decoder created: ... slots 3, frame buffers 10 + 2 back
@@ -471,7 +484,8 @@ three slots) takes **513.5 MiB** of device buffers where it takes 537.6: 24.2 Mi
   | `d2` cut | 11, 9, 8.4 | 7 | 10, 10, 8.1 | 5 |
 
   A buffer less is out on average, and the pool that is one smaller is found empty less often (18
-  times where the default is 83 times): the frames in parse held the buffers the default waits for.
+  times, and 22 in a second run, where the default is 83 times): the frames in parse held the buffers
+  the default waits for.
   The streams that empty the pool still do, with their frames on the GPU. The time is
   the same within the noise of the software GPU: two runs each with `-gputime`, 60 frames of
   `a1_8b4k_300` in 8.2 and 8.6 s by default and 8.0 and 7.9 s with the part, `t40x8` in 22.2 and 22.3
@@ -483,12 +497,11 @@ three slots) takes **513.5 MiB** of device buffers where it takes 537.6: 24.2 Mi
 - *Checked locally:* the frames of the seven streams are the same with and without the part, md5 by
   md5 (and those of the console's references where there is one); the 244 vectors of AOM with
   `-parseframes 2 -t 2 -lowmemparts 33` and with `-parseframes 3 -t 4 -lowmemparts 33`, 244 of 244
-  each, and without the part with one and with two frames in parse, 244 of 244. Without the shared
-  back buffer (`-lowmemparts 32`) the local decoder gives the 147 wrong vectors it gives with
-  `-lowmemparts 0` ([rust-port.md](rust-port.md)), so that combination is CI's on WARP.
-- *CI* (job `rust-frames`): the whole set with `-parseframes 2 -lowmemparts 33` and with `-parseframes 3
-  -t 4 -lowmemparts 32`, and the decode error in the middle of a stream with two and three frames in
-  parse and through `rav1g.h`.
+  each, and without the part with one and with two frames in parse, 244 of 244; the damaged streams
+  of the local set with two and with three frames in parse end as they do without the part.
+- *CI* (job `rust-frames`, on WARP): the whole set with `-parseframes 2 -lowmemparts 33` and with
+  `-parseframes 3 -t 4 -lowmemparts 33`, and the decode error in the middle of a stream with two and
+  three frames in parse and through `rav1g.h`.
 - *For the console:* `-lowmemparts 35` against the default on the 4K clips: md5, device buffers 513.5
   against 537.6 MiB and the app's usage, the frames a second and the decode call, `cpu wait_fb` and
   the `MEMORY frame buffers` line (waits), `frame buffers` of `-memstats`. Four of the six clips had

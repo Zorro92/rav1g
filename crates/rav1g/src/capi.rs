@@ -38,7 +38,8 @@ pub const RAV1G_LOW_MEMORY_ALL: u32 = 7;
 /// A frame of a decoder with more than one frame in parse takes its frame buffer when it is recorded,
 /// not when its parse begins, and the pool has no frame buffer for the slots above two: 10 with the
 /// shared back buffer, where three slots have 11 (24.2 MiB less for 3840x2160 10-bit). Covers every
-/// stream. Not in `RAV1G_LOW_MEMORY_ALL` and not in the default.
+/// stream. It has an effect only together with `RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER`. Not in
+/// `RAV1G_LOW_MEMORY_ALL` and not in the default.
 pub const RAV1G_LOW_MEMORY_LATE_FRAME_BUFFER: u32 = 32;
 /// What `rav1g_settings_default` sets: the default, which is by the size of the decoder. Up to 1920x1088
 /// it is `RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER`; above, `RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER |

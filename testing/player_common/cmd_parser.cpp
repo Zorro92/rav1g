@@ -108,7 +108,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        &params_.lowmem_},
       {"lowmemparts", atInt, anOptional,
        "memory reductions in effect: 1 shared back buffer + 2 mode info pool at half + 4 smaller coefficient pool "
-       "+ 32 frame buffer bound at the recording (one frame buffer less with three slots; not in -lowmem). "
+       "+ 32 frame buffer bound at the recording (with 1: one frame buffer less with three slots; not in -lowmem). "
        "Default: 1, and 3 for a decoder above 1920x1088; 1 for the mode info pool of the worst case, 0 for none",
        "", &params_.lowmem_parts_},
       {"lfhsplit", atInt, anOptional,

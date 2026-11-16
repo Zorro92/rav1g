@@ -42,7 +42,8 @@ impl LowMemory {
     /// A frame of a decoder with more than one frame in parse takes its frame buffer when it is
     /// recorded, not when its parse begins, and the pool has no frame buffer for the slots above two:
     /// 10 with the shared back buffer, where three slots have 11 (docs/memory.md). Covers every stream.
-    /// Not in [`LowMemory::ALL`] and not in the default.
+    /// It has an effect only together with [`LowMemory::SHARED_BACK_BUFFER`]. Not in [`LowMemory::ALL`]
+    /// and not in the default.
     pub const LATE_FRAME_BUFFER: LowMemory = LowMemory(sys::AV1_LOW_MEMORY_LATE_FRAME_BUFFER);
     /// The default, which is by the size of the decoder: the shared back buffer, and for a decoder
     /// above 1920x1088 the mode info pool at half (docs/memory.md). Not a part: a set that has it is
