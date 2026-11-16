@@ -37,7 +37,13 @@ impl LowMemory {
     /// A coefficient pool of four fifths of the worst case of a frame. A frame that needs more is a
     /// decode error.
     pub const COEFS: LowMemory = LowMemory(sys::AV1_LOW_MEMORY_COEFS);
+    /// The three parts above (`-lowmem` of the test programs).
     pub const ALL: LowMemory = LowMemory(sys::AV1_LOW_MEMORY_ALL);
+    /// A frame of a decoder with more than one frame in parse takes its frame buffer when it is
+    /// recorded, not when its parse begins, and the pool has no frame buffer for the slots above two:
+    /// 10 with the shared back buffer, where three slots have 11 (docs/memory.md). Covers every stream.
+    /// Not in [`LowMemory::ALL`] and not in the default.
+    pub const LATE_FRAME_BUFFER: LowMemory = LowMemory(sys::AV1_LOW_MEMORY_LATE_FRAME_BUFFER);
     /// The default, which is by the size of the decoder: the shared back buffer, and for a decoder
     /// above 1920x1088 the mode info pool at half (docs/memory.md). Not a part: a set that has it is
     /// the default, whatever else it has.
@@ -48,7 +54,7 @@ impl LowMemory {
         if self.0 & LowMemory::DEFAULT.0 != 0 {
             return 0;
         }
-        let bits = self.0 & sys::AV1_LOW_MEMORY_ALL;
+        let bits = self.0 & sys::AV1_LOW_MEMORY_PARTS;
         if bits == 0 { sys::AV1_LOW_MEMORY_NONE as c_int } else { bits as c_int }
     }
 }
@@ -62,7 +68,9 @@ impl Default for LowMemory {
 
 const _: () = {
     assert!(sys::AV1_LOW_MEMORY_DEFAULT == sys::AV1_LOW_MEMORY_SHARED_BACK_BUFFER | sys::AV1_LOW_MEMORY_MODE_INFO);
-    assert!(LowMemory::DEFAULT.0 & (sys::AV1_LOW_MEMORY_ALL | sys::AV1_LOW_MEMORY_NONE) == 0);
+    assert!(LowMemory::DEFAULT.0 & (sys::AV1_LOW_MEMORY_PARTS | sys::AV1_LOW_MEMORY_NONE) == 0);
+    assert!(sys::AV1_LOW_MEMORY_PARTS == sys::AV1_LOW_MEMORY_ALL | sys::AV1_LOW_MEMORY_LATE_FRAME_BUFFER);
+    assert!(sys::AV1_LOW_MEMORY_PARTS & sys::AV1_LOW_MEMORY_NONE == 0);
 };
 
 impl BitOr for LowMemory {

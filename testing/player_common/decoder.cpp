@@ -547,7 +547,9 @@ int AV1Decoder::DecodeOne() {
       // The same for what else decides which buffers exist: -intrav2 needs buffers of its own, -lowmem and
       // -lowmemparts leave some out or make them smaller. The player always says which parts it wants; 0 is
       // none.
-      static_assert(PLAYER_LOWMEM_DEFAULT == RAV1G_LOW_MEMORY_DEFAULT, "-lowmemparts out of step with rav1g.h");
+      static_assert(PLAYER_LOWMEM_DEFAULT == RAV1G_LOW_MEMORY_DEFAULT && PLAYER_LOWMEM_ALL == RAV1G_LOW_MEMORY_ALL &&
+                        PLAYER_LOWMEM_PARTS == (RAV1G_LOW_MEMORY_ALL | RAV1G_LOW_MEMORY_LATE_FRAME_BUFFER),
+                    "-lowmemparts out of step with rav1g.h");
       cfg.intra_v2 = params_.intrav2_ != 0;
       // -interfast: room in the block maps for the lists by motion vector class.
       cfg.inter_fast = params_.interfast_ || params_.interfastlists_;
@@ -804,7 +806,8 @@ int AV1Decoder::DecodeOne() {
           << (created_lowmem_ == PLAYER_LOWMEM_DEFAULT ? std::string("default") : std::to_string(created_lowmem_))
           << (created_lowmem_ == PLAYER_LOWMEM_DEFAULT
                   ? " (the library's: 1 shared back buffer, and above 1920x1088 2 mode info pool at half)"
-                  : created_lowmem_ ? " (1 shared back buffer, 2 mode info pool at half, 4 smaller coefficient pool)"
+                  : created_lowmem_ ? " (1 shared back buffer, 2 mode info pool at half, 4 smaller coefficient pool, "
+                                      "32 frame buffer bound at the recording)"
                                     : " (none, -lowmemparts 0)");
   // -gpuclear, -cpuclear, -syncclear: the switch was set before the decoder was created (above).
   XB_LOGI << "Clears: "

@@ -273,6 +273,12 @@ pub struct av1_frame_thread_data {
     pub back_buffer0: *mut HwFrameBuffer,
     pub dst_frame_buffer: *mut HwFrameBuffer,
     pub refs: [*mut HwFrameBuffer; 8],
+    /// The frame on the slot has no frame buffer yet: it takes it, and counts its references, when it
+    /// is recorded (`Av1Core::late_frame_buffer`).
+    pub late_buffers: c_int,
+    /// The layout of the frame on the slot in a frame buffer that starts at 0, from its setup on: what
+    /// the palette blocks of its tiles are written by.
+    pub layout: HwFrameBuffer,
     pub output_only: c_int,
     /// What the frame on the slot does about the clears of the slot's grids (`AV1_CLEARS_*` of
     /// `dx/av1_perf.h`): the switch as the frame's setup found it.
@@ -451,6 +457,10 @@ pub struct Av1Core {
     pub block_count4x4: c_int,
     pub shared_back_buffer: c_int,
     pub low_memory: c_int,
+    /// `AV1_LOW_MEMORY_LATE_FRAME_BUFFER`: a frame that is a value (more than one frame in parse) takes
+    /// its frame buffer, and its back buffer when the frames do not share one, when it is recorded
+    /// (`frame::bind_frame_for_record`).
+    pub late_frame_buffer: c_int,
     pub palette_size: usize,
     pub memory_available_cb: ::std::option::Option<unsafe extern "C" fn(priv_: *mut c_void) -> i64>,
     pub memory_available_priv: *mut c_void,

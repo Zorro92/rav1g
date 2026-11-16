@@ -190,12 +190,22 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
  * (docs/phase2-rav1d.md, step 5). There AV1_LOW_MEMORY_MODE_INFO halves the
  * mode info pool and AV1_LOW_MEMORY_COEFS sizes the coefficient pool for 24
  * values a 4x4 unit instead of 30; a frame that does not fit such a pool is
- * a decode error. */
+ * a decode error.
+ *
+ * AV1_LOW_MEMORY_LATE_FRAME_BUFFER (with AV1_PARSER_RAV1D; docs/memory.md):
+ * a frame of a decoder with more than one frame in parse takes its frame
+ * buffer when it is recorded, not when its parse begins, and the frame buffer
+ * pool has no buffer for the slots above two: 10 with the shared back buffer
+ * (11 with three slots without this part). Covers every stream. Not in
+ * AV1_LOW_MEMORY_ALL, which is the three parts above; AV1_LOW_MEMORY_PARTS is
+ * every part there is. */
 #define AV1_LOW_MEMORY_SHARED_BACK_BUFFER 1
 #define AV1_LOW_MEMORY_MODE_INFO 2
 #define AV1_LOW_MEMORY_COEFS 4
 #define AV1_LOW_MEMORY_ALL 7
 #define AV1_LOW_MEMORY_NONE 8
+#define AV1_LOW_MEMORY_LATE_FRAME_BUFFER 32
+#define AV1_LOW_MEMORY_PARTS (AV1_LOW_MEMORY_ALL | AV1_LOW_MEMORY_LATE_FRAME_BUFFER)
 #define AV1_LOW_MEMORY_DEFAULT (AV1_LOW_MEMORY_SHARED_BACK_BUFFER | AV1_LOW_MEMORY_MODE_INFO)
 
 /* aom_codec_dec_cfg_t::parser_options, values to add up: ways of doing the

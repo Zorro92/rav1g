@@ -127,6 +127,8 @@ struct State {
     cpu: [Series; CPU],
     cpu_total: Series,
     fb_in_use: Histogram,
+    /// The takes of the frame buffer pool that had waited when the first frame was set up.
+    fb_waits_before: u64,
     references: Histogram,
     screen_frames: u64,
     palette_frames: u64,
@@ -191,17 +193,19 @@ pub(crate) unsafe fn frame_setup(dec: *mut Av1Core, cm: &AV1_COMMON, td: &av1_fr
             return;
         };
         stats.clear(slot);
-        let in_use = {
-            let _pool = (*dec).fb_pool.lock();
-            (0..FrameBufferPoolSize).filter(|&buffer| (*dec).fb_pool_src[buffer].ref_cnt != 0).count()
-        };
-        let mut buffers = [std::ptr::null_mut(); 8];
+        // A frame that takes its frame buffer when it is recorded is counted there
+        // (`frame_buffers_taken`), and the frames it refers to are told apart by their descriptions:
+        // their frame buffers are not this thread's to read yet.
+        let late = td.late_buffers != 0;
+        let in_use = if late { 0 } else { frame_buffers_out(dec) };
+        let mut buffers = [std::ptr::null(); 8];
         let mut distinct = 0;
         for reference in cm.ref_frame_map {
             let Some(reference) = reference.as_ref() else {
                 continue;
             };
-            let buffer = reference.buf.hw_buffer;
+            let buffer: *const std::ffi::c_void =
+                if late { std::ptr::from_ref(reference).cast() } else { reference.buf.hw_buffer.cast_const().cast() };
             if !buffer.is_null() && !buffers[..distinct].contains(&buffer) {
                 buffers[distinct] = buffer;
                 distinct += 1;
@@ -216,11 +220,42 @@ pub(crate) unsafe fn frame_setup(dec: *mut Av1Core, cm: &AV1_COMMON, td: &av1_fr
             for item in &stats.at_once {
                 item.store(0, Ordering::Relaxed);
             }
+            state.fb_waits_before = (*dec).fb_pool.waits();
         }
         state.setups += 1;
-        state.fb_in_use.add(in_use);
+        if !late {
+            state.fb_in_use.add(in_use);
+        }
         state.references.add(distinct);
         state.screen_frames += u64::from(cm.allow_screen_content_tools != 0);
+    }
+}
+
+/// The frame buffers of the pool that are out of it.
+///
+/// # Safety
+/// `dec` is the decoder.
+unsafe fn frame_buffers_out(dec: *mut Av1Core) -> usize {
+    // SAFETY: the caller's contract; the reference counts are read under the lock of the pool.
+    unsafe {
+        let _pool = (*dec).fb_pool.lock();
+        (0..FrameBufferPoolSize).filter(|&buffer| (*dec).fb_pool_src[buffer].ref_cnt != 0).count()
+    }
+}
+
+/// A frame that had none took its frame buffer of the pool, at its recording: the frame buffers that
+/// are out of the pool, that frame's included.
+///
+/// # Safety
+/// `dec` is the decoder, on the thread that records the frame.
+pub(crate) unsafe fn frame_buffers_taken(dec: *mut Av1Core) {
+    if level() == 0 {
+        return;
+    }
+    // SAFETY: the caller's contract.
+    unsafe {
+        let in_use = frame_buffers_out(dec);
+        lock(&(*dec).mem_stats.state).fb_in_use.add(in_use);
     }
 }
 
@@ -508,11 +543,16 @@ pub(crate) unsafe fn summary(dec: *mut Av1Core) {
         grown((*dec).idct_blocks, IDCT_BLOCKS, &state.items[Kind::Txb as usize]);
         // The frame buffers.
         let fb_total = (0..FrameBufferPoolSize).filter(|&fb| (*dec).fb_pool_src[fb].size != 0).count();
+        // A decoder whose frames take their buffer when they are recorded counts there, the others at
+        // the setup; with one frame in parse every frame takes its buffer at its setup.
+        let late = (*dec).late_frame_buffer != 0 && (*dec).frames_in_parse > 1;
         say(format!(
-            "frame buffers: {fb_total} in the pool and 2 back buffers, {:.1} MiB each; out of the pool at the setup \
-             of a frame, that frame's included: {}",
+            "frame buffers: {fb_total} in the pool and 2 back buffers, {:.1} MiB each; out of the pool {}, that \
+             frame's included: {}; a frame waited for a buffer {} times",
             mib((*dec).fb_size as f64),
-            state.fb_in_use.text()
+            if late { "when a frame takes its buffer at its recording" } else { "at the setup of a frame" },
+            state.fb_in_use.text(),
+            (*dec).fb_pool.waits().saturating_sub(state.fb_waits_before)
         ));
         say(format!(
             "references: frames the 8 reference slots name at the setup of a frame: {}",

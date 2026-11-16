@@ -48,7 +48,8 @@ use crate::gpu::{BufferState, CommandAllocator, CommandList, Event, Fence, Queue
 use crate::sys;
 use crate::sys::{
     ALTREF_FRAME, AV1_COMMON, AV1Decoder, HwFrameBuffer, HwOutputImage, INVALID_IDX, LAST_FRAME, MB_MODE_INFO,
-    REF_NO_SCALE, RESTORE_NONE, TileInfo, YV12_BUFFER_CONFIG, av1_decoded_frame_buffer_t, av1_tile_data, scale_factors,
+    REF_NO_SCALE, RESTORE_NONE, RefCntBuffer, TileInfo, YV12_BUFFER_CONFIG, av1_decoded_frame_buffer_t, av1_tile_data,
+    scale_factors,
 };
 
 /// `REF_INVALID_SCALE` of `av1/common/scale.h`.
@@ -233,6 +234,107 @@ pub(crate) unsafe extern "C" fn av1_sequence_fits_decoder(
     }
 }
 
+/// Whether a frame of this size fits the buffers the decoder was created with: its bytes, with and
+/// without superres, in a frame buffer of `size` bytes, and its width and height in the tables, lists
+/// and grids, which are sized for the width and the height of the creation. A frame that is wider or
+/// higher than that is refused even when its bytes would fit a frame buffer.
+fn frame_fits(dec: &Av1Core, size: usize, width: c_int, height: c_int, upscaled_width: c_int, hbd: c_int) -> bool {
+    let h_border = 16;
+    let aligned_width = (width + 127) & !127;
+    let aligned_height = (height + 127) & !127;
+    let y_stride = aligned_width + 2 * h_border;
+    let y_height = aligned_height;
+    let y_size = y_height * y_stride;
+    let uv_stride = (aligned_width >> 1) + 2 * h_border;
+    let uv_size = (y_height >> 1) * uv_stride;
+    let fb_size = (y_size + 2 * uv_size) * (1 + hbd);
+
+    let superres_w = (upscaled_width + 127) & !127;
+    let superres_size =
+        (y_height * (superres_w + 2 * h_border) + 2 * (y_height >> 1) * ((superres_w >> 1) + 2 * h_border)) * (1 + hbd);
+    !(size < fb_size as usize
+        || size < superres_size as usize
+        || aligned_width > dec.max_width
+        || superres_w > dec.max_width
+        || aligned_height > dec.max_height
+        || (width != upscaled_width && dec.enable_superres == 0))
+}
+
+/// The description of a frame of this size, but for the frame buffer it is decoded into
+/// (`hw_buffer`, which is left alone).
+fn describe_frame(ybf: &mut YV12_BUFFER_CONFIG, width: c_int, height: c_int, hbd: c_int) {
+    let h_border = 16;
+    let aligned_width = (width + 127) & !127;
+    let aligned_height = (height + 127) & !127;
+    let y_stride = aligned_width + 2 * h_border;
+    let y_size = aligned_height * y_stride;
+    let uv_stride = (aligned_width >> 1) + 2 * h_border;
+    let uv_size = (aligned_height >> 1) * uv_stride;
+    let fb_size = (y_size + 2 * uv_size) * (1 + hbd);
+
+    ybf.buffer_alloc = std::ptr::null_mut();
+    ybf.buffer_alloc_sz = 0;
+    ybf.crop_widths[0] = width; // y_crop_width
+    ybf.crop_heights[0] = height; // y_crop_height
+    let y_width = (width + 7) & !7;
+    let y_height_visible = (height + 7) & !7;
+    ybf.widths[0] = y_width;
+    ybf.heights[0] = y_height_visible;
+    ybf.strides[0] = y_stride;
+
+    ybf.crop_widths[1] = (width + 1) >> 1; // uv_crop_width
+    ybf.crop_heights[1] = (height + 1) >> 1; // uv_crop_height
+    ybf.widths[1] = y_width >> 1;
+    ybf.heights[1] = y_height_visible >> 1;
+    ybf.strides[1] = uv_stride;
+
+    ybf.border = h_border;
+    ybf.frame_size = fb_size as usize;
+    ybf.subsampling_x = 1;
+    ybf.subsampling_y = 1;
+    ybf.use_external_reference_buffers = 0;
+    ybf.flags = if hbd != 0 { YV12_FLAG_HIGHBITDEPTH } else { 0 };
+
+    ybf.buffers = [std::ptr::null_mut(); 3];
+}
+
+/// The layout of a frame of this size in the frame buffer `buf`, from where the buffer lies in the pool
+/// (`base_offset`).
+fn layout_frame_buffer(buf: &mut HwFrameBuffer, width: c_int, height: c_int, hbd: c_int) {
+    let bpp = hbd + 1;
+    let h_border = 16;
+    let aligned_width = (width + 127) & !127;
+    let aligned_height = (height + 127) & !127;
+    let y_stride = aligned_width + 2 * h_border;
+    let y_size = aligned_height * y_stride;
+    let uv_stride = (aligned_width >> 1) + 2 * h_border;
+    let uv_size = (aligned_height >> 1) * uv_stride;
+    let y_width = (width + 7) & !7;
+    let y_height_visible = (height + 7) & !7;
+    let uv_width = y_width >> 1;
+    let uv_height = y_height_visible >> 1;
+    buf.width = y_width;
+    buf.height = y_height_visible;
+    buf.hbd = hbd;
+    buf.y_crop_width = width;
+    buf.y_crop_height = height;
+    buf.uv_crop_width = (width + 1) >> 1;
+    buf.uv_crop_height = (height + 1) >> 1;
+    buf.planes[0].stride = y_stride * bpp;
+    buf.planes[1].stride = uv_stride * bpp;
+    buf.planes[2].stride = uv_stride * bpp;
+    buf.planes[0].offset = (buf.base_offset as c_int).wrapping_add(h_border * bpp);
+    buf.planes[1].offset = (buf.base_offset as c_int).wrapping_add((y_size + h_border) * bpp);
+    buf.planes[2].offset = buf.planes[1].offset + uv_size * bpp;
+    let short = size_of::<i16>() as c_int;
+    buf.planes[0].res_stride = short * ((y_width + 127) & !127);
+    buf.planes[1].res_stride = short * ((uv_width + 127) & !127);
+    buf.planes[2].res_stride = short * ((uv_width + 127) & !127);
+    buf.planes[0].res_offset = 0;
+    buf.planes[1].res_offset = buf.planes[0].res_stride * ((y_height_visible + 127) & !127);
+    buf.planes[2].res_offset = buf.planes[1].res_offset + buf.planes[1].res_stride * ((uv_height + 127) & !127);
+}
+
 /// `av1_reallocate_frame_buffer` (`dx/av1_core.h`): the frame buffer of the frame whose header is being
 /// read: a buffer of the pool (the call waits for one when the pool is empty) with the layout of a frame
 /// of this size. Returns -1 for a frame the decoder's buffers were not created for.
@@ -261,84 +363,40 @@ pub(crate) unsafe extern "C" fn av1_reallocate_frame_buffer(
         if ybf.hw_buffer.is_null() {
             return -1;
         }
-        let bpp = hbd + 1;
-        let h_border = 16;
-        let aligned_width = (width + 127) & !127;
-        let aligned_height = (height + 127) & !127;
-        let y_stride = aligned_width + 2 * h_border;
-        let y_height = aligned_height;
-        let y_size = y_height * y_stride;
-        let uv_stride = (aligned_width >> 1) + 2 * h_border;
-        let uv_size = (y_height >> 1) * uv_stride;
-        let fb_size = (y_size + 2 * uv_size) * (1 + hbd);
-
-        let superres_w = (upscaled_width + 127) & !127;
-        let superres_size = (y_height * (superres_w + 2 * h_border)
-            + 2 * (y_height >> 1) * ((superres_w >> 1) + 2 * h_border))
-            * (1 + hbd);
-        // The frame buffer is not the only buffer sized at creation: the per-column and per-row tables, the
-        // block lists and the grids are sized for the width and the height the decoder was created with. A
-        // frame that is wider or higher than that is refused even when its bytes would fit a frame buffer.
-        let size = (*ybf.hw_buffer).size;
-        if size < fb_size as usize
-            || size < superres_size as usize
-            || aligned_width > (*dec).max_width
-            || superres_w > (*dec).max_width
-            || aligned_height > (*dec).max_height
-            || (width != upscaled_width && (*dec).enable_superres == 0)
-        {
+        if !frame_fits(&*dec, (*ybf.hw_buffer).size, width, height, upscaled_width, hbd) {
             (*dec).fb_pool.release(ybf.hw_buffer);
             ybf.hw_buffer = std::ptr::null_mut();
             return -1;
         }
+        describe_frame(ybf, width, height, hbd);
+        layout_frame_buffer(&mut *ybf.hw_buffer, width, height, hbd);
+    }
+    0
+}
 
-        ybf.buffer_alloc = std::ptr::null_mut();
-        ybf.buffer_alloc_sz = 0;
-        ybf.crop_widths[0] = width; // y_crop_width
-        ybf.crop_heights[0] = height; // y_crop_height
-        let y_width = (width + 7) & !7;
-        let y_height_visible = (height + 7) & !7;
-        ybf.widths[0] = y_width;
-        ybf.heights[0] = y_height_visible;
-        ybf.strides[0] = y_stride;
-
-        ybf.crop_widths[1] = (width + 1) >> 1; // uv_crop_width
-        ybf.crop_heights[1] = (height + 1) >> 1; // uv_crop_height
-        ybf.widths[1] = y_width >> 1;
-        ybf.heights[1] = y_height_visible >> 1;
-        ybf.strides[1] = uv_stride;
-
-        ybf.border = h_border;
-        ybf.frame_size = fb_size as usize;
-        ybf.subsampling_x = 1;
-        ybf.subsampling_y = 1;
-        ybf.use_external_reference_buffers = 0;
-        ybf.flags = if hbd != 0 { YV12_FLAG_HIGHBITDEPTH } else { 0 };
-
-        ybf.buffers = [std::ptr::null_mut(); 3];
-        let buf = &mut *ybf.hw_buffer;
-        let uv_width = y_width >> 1;
-        let uv_height = y_height_visible >> 1;
-        buf.width = y_width;
-        buf.height = y_height_visible;
-        buf.hbd = hbd;
-        buf.y_crop_width = width;
-        buf.y_crop_height = height;
-        buf.uv_crop_width = (width + 1) >> 1;
-        buf.uv_crop_height = (height + 1) >> 1;
-        buf.planes[0].stride = y_stride * bpp;
-        buf.planes[1].stride = uv_stride * bpp;
-        buf.planes[2].stride = uv_stride * bpp;
-        buf.planes[0].offset = (buf.base_offset as c_int).wrapping_add(h_border * bpp);
-        buf.planes[1].offset = (buf.base_offset as c_int).wrapping_add((y_size + h_border) * bpp);
-        buf.planes[2].offset = buf.planes[1].offset + uv_size * bpp;
-        let short = size_of::<i16>() as c_int;
-        buf.planes[0].res_stride = short * ((y_width + 127) & !127);
-        buf.planes[1].res_stride = short * ((uv_width + 127) & !127);
-        buf.planes[2].res_stride = short * ((uv_width + 127) & !127);
-        buf.planes[0].res_offset = 0;
-        buf.planes[1].res_offset = buf.planes[0].res_stride * ((y_height_visible + 127) & !127);
-        buf.planes[2].res_offset = buf.planes[1].res_offset + buf.planes[1].res_stride * ((uv_height + 127) & !127);
+/// [`av1_reallocate_frame_buffer`] for a frame that takes its frame buffer when it is recorded
+/// (`Av1Core::late_frame_buffer`, [`bind_frame_for_record`]): the description of the frame without a
+/// buffer, and the same -1 for a frame the decoder's buffers were not created for. Nothing waits.
+///
+/// # Safety
+/// `dec` is the decoder; `ybf` is the buffer description of the frame, which has no frame buffer.
+pub(crate) unsafe fn describe_frame_without_buffer(
+    dec: *mut Av1Core,
+    ybf: *mut YV12_BUFFER_CONFIG,
+    width: c_int,
+    height: c_int,
+    upscaled_width: c_int,
+    hbd: c_int,
+) -> c_int {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let ybf = &mut *ybf;
+        ybf.hw_show_image = std::ptr::null_mut();
+        // Every frame buffer of the pool has the size of the creation.
+        if !frame_fits(&*dec, (*dec).fb_size as usize, width, height, upscaled_width, hbd) {
+            return -1;
+        }
+        describe_frame(ybf, width, height, hbd);
     }
     0
 }
@@ -900,12 +958,22 @@ pub(crate) unsafe fn setup_frame_begin(
         let lib = (*dec).shader_lib;
         td.shaders = if td.is_hbd != 0 { &raw mut (*lib).shaders_hbd } else { &raw mut (*lib).shaders_8bit };
 
-        let fb_ptr = buf.hw_buffer;
-        assert!(!fb_ptr.is_null(), "the frame has its frame buffer");
-        let fb = &mut *fb_ptr;
+        // The layout of the frame, for its palette blocks: the parse writes them, and a frame in parse
+        // may not have its frame buffer yet, or share its back buffer with the frame that is recorded.
+        td.layout = std::mem::zeroed();
+        td.layout.size = (*dec).fb_size as usize;
+        layout_frame_buffer(&mut td.layout, buf.crop_widths[0], buf.crop_heights[0], td.is_hbd);
 
-        fb.frame_number = (*dec).frame_number;
-        fb.hbd = td.is_hbd;
+        // A frame that is a value takes its frame buffer when it is recorded, in a decoder that was
+        // created for that (`bind_frame_for_record`).
+        let late = !current && (*dec).late_frame_buffer != 0;
+        td.late_buffers = c_int::from(late);
+        let fb_ptr = buf.hw_buffer;
+        assert!(late == fb_ptr.is_null(), "the frame has its frame buffer, or takes it when it is recorded");
+        if let Some(fb) = fb_ptr.as_mut() {
+            fb.frame_number = (*dec).frame_number;
+            fb.hbd = td.is_hbd;
+        }
         (*dec).frame_number += 1;
         td.do_superres = c_int::from((*dec).enable_superres != 0 && cm.width != cm.superres_upscaled_width);
         td.do_loop_rest =
@@ -920,7 +988,12 @@ pub(crate) unsafe fn setup_frame_begin(
         td.do_filmgrain = c_int::from(cm.film_grain_params.apply_grain != 0);
         td.dst_frame_buffer = fb_ptr;
         td.back_buffer0 = std::ptr::null_mut();
-        if td.do_loop_rest != 0 || td.do_cdef != 0 || td.do_superres != 0 {
+        if late {
+            // No buffer and no reference is counted for the frame until it is recorded: its slot has
+            // none, which is also what a frame that fails before that gives back.
+            td.frame_buffer = std::ptr::null_mut();
+            td.refs = [std::ptr::null_mut(); 8];
+        } else if td.do_loop_rest != 0 || td.do_cdef != 0 || td.do_superres != 0 {
             // The frame is reconstructed into a back buffer and filtered from there into its own buffer.
             // Only its own command list reads or writes the back buffer, and the command lists of the frames
             // run on the queue one after the other, so one buffer can serve all frames (shared_back_buffer),
@@ -949,24 +1022,26 @@ pub(crate) unsafe fn setup_frame_begin(
             td.frame_buffer = td.dst_frame_buffer;
         }
 
-        // The reference counts are the pool's: counted under its lock.
-        let counting = (*dec).fb_pool.lock();
-        fb.ref_cnt += 1;
-        for i in 0..7 {
-            td.refs[i] = std::ptr::null_mut();
-            if cm.remapped_ref_idx[i] == -1 {
-                continue;
+        if let Some(fb) = fb_ptr.as_mut() {
+            // The reference counts are the pool's: counted under its lock.
+            let counting = (*dec).fb_pool.lock();
+            fb.ref_cnt += 1;
+            for i in 0..7 {
+                td.refs[i] = std::ptr::null_mut();
+                if cm.remapped_ref_idx[i] == -1 {
+                    continue;
+                }
+                let reference = cm.ref_frame_map[cm.remapped_ref_idx[i] as usize];
+                if reference.is_null() {
+                    continue;
+                }
+                let hw_buffer = (*reference).buf.hw_buffer;
+                assert!((*hw_buffer).size == (*dec).fb_size as usize, "a reference is a frame buffer of the pool");
+                td.refs[i] = hw_buffer;
+                (*hw_buffer).ref_cnt += 1;
             }
-            let reference = cm.ref_frame_map[cm.remapped_ref_idx[i] as usize];
-            if reference.is_null() {
-                continue;
-            }
-            let hw_buffer = (*reference).buf.hw_buffer;
-            assert!((*hw_buffer).size == (*dec).fb_size as usize, "a reference is a frame buffer of the pool");
-            td.refs[i] = hw_buffer;
-            (*hw_buffer).ref_cnt += 1;
+            drop(counting);
         }
-        drop(counting);
         super::mem_stats::frame_setup(dec, cm, td);
 
         // From here on the slot is in a state the next setup can take back (the frame's buffers and
@@ -991,18 +1066,96 @@ unsafe fn describe_back_buffers(dec: *mut Av1Core, td: &av1_frame_thread_data) {
 }
 
 /// A frame that is a value (`setup_frame_begin` without `current`) is about to be recorded: its slot is
-/// the one the stages record from, and the shared back buffers are described for it.
+/// the one the stages record from, and the shared back buffers are described for it. A frame that has
+/// no frame buffer yet (`Av1Core::late_frame_buffer`) takes it here, with `cur`, its description, and
+/// `refs`, those of its references.
 ///
 /// # Safety
-/// `dec` is the decoder and `td` the slot of a frame that was set up and whose tiles are parsed; the
-/// thread that records the frames, which has no other frame in `curr_frame_data`.
-pub(crate) unsafe fn bind_frame_for_record(dec: *mut Av1Core, td: *mut av1_frame_thread_data) {
+/// `dec` is the decoder and `td` the slot of a frame that was set up and whose tiles are parsed; `cur`
+/// is the description of the frame and `refs` are null or the descriptions of its references, each
+/// with a reference of the caller's, and the frames of `refs` are recorded; the thread that records
+/// the frames, which has no other frame in `curr_frame_data`.
+pub(crate) unsafe fn bind_frame_for_record(
+    dec: *mut Av1Core,
+    td: *mut av1_frame_thread_data,
+    cur: *mut RefCntBuffer,
+    refs: &[*mut RefCntBuffer; 7],
+) {
     // SAFETY: the caller's contract.
     unsafe {
+        if (*td).late_buffers != 0 {
+            take_frame_buffers(dec, &mut *td, cur, refs);
+        }
         (*dec).curr_frame_data = td;
         if (*td).frame_buffer != (*td).dst_frame_buffer {
             describe_back_buffers(dec, &*td);
         }
+    }
+}
+
+/// The frame on the slot `td`, which was set up without a frame buffer, takes its buffers of the pool
+/// and counts its references, as [`setup_frame_begin`] does for a frame that has its buffer by then.
+///
+/// The takes wait while the pool is empty. What is out of the pool then is held by the reference
+/// slots and the frames of the queue, or only by frames on the GPU. The first are at most 8 buffers:
+/// each was in a reference slot when this frame, the oldest of the queue, began, and no frame that
+/// began since has a buffer. With this frame's own (and its back buffer, when the frames do not share
+/// one) that is within the pool, so a buffer the take waits for is one a frame on the GPU returns,
+/// which the completion thread does without this thread (`ResourceConfig::with_slots`).
+///
+/// # Safety
+/// As [`bind_frame_for_record`], for a frame with `late_buffers`.
+unsafe fn take_frame_buffers(
+    dec: *mut Av1Core,
+    td: &mut av1_frame_thread_data,
+    cur: *mut RefCntBuffer,
+    refs: &[*mut RefCntBuffer; 7],
+) {
+    // SAFETY: the caller's contract. The frame buffer of the description is written here while other
+    // threads may read the description: none of them reads its frame buffer before this frame is
+    // recorded (a frame that refers to it counts that reference here as well, when its own turn comes;
+    // the thread of the decode calls asks the description's mark, not its buffer).
+    unsafe {
+        let (width, height) = ((*cur).buf.crop_widths[0], (*cur).buf.crop_heights[0]);
+        let filtered = td.do_loop_rest != 0 || td.do_cdef != 0 || td.do_superres != 0;
+        let perf_t = super::perf::av1_perf_ticks();
+        let fb_ptr = (*dec).fb_pool.get();
+        if filtered && (*dec).shared_back_buffer == 0 {
+            td.back_buffer0 = (*dec).fb_pool.get();
+        }
+        perf_add(dec, sys::AV1_PERF_CPU_WAIT_FB as usize, perf_t);
+        let fb = &mut *fb_ptr;
+        layout_frame_buffer(fb, width, height, td.is_hbd);
+        fb.frame_number = td.frame_number;
+        (*cur).buf.hw_buffer = fb_ptr;
+        td.dst_frame_buffer = fb_ptr;
+        td.frame_buffer = if !filtered {
+            fb_ptr
+        } else if (*dec).shared_back_buffer != 0 {
+            &raw mut (*dec).back_buffer0
+        } else {
+            td.back_buffer0
+        };
+        {
+            // The reference counts are the pool's: counted under its lock.
+            let _counting = (*dec).fb_pool.lock();
+            fb.ref_cnt += 1;
+            for (held, &reference) in td.refs.iter_mut().zip(refs) {
+                *held = std::ptr::null_mut();
+                if reference.is_null() {
+                    continue;
+                }
+                let hw_buffer = (*reference).buf.hw_buffer;
+                assert!(
+                    !hw_buffer.is_null() && (*hw_buffer).size == (*dec).fb_size as usize,
+                    "a reference is a frame buffer of the pool"
+                );
+                *held = hw_buffer;
+                (*hw_buffer).ref_cnt += 1;
+            }
+        }
+        td.late_buffers = 0;
+        super::mem_stats::frame_buffers_taken(dec);
     }
 }
 
@@ -1512,7 +1665,9 @@ pub(crate) unsafe fn write_palette(
         if td.palette_buffer.is_null() {
             return;
         }
-        let fb = &*td.frame_buffer;
+        // The layout of the frame: its frame buffer, or the back buffer it is reconstructed into, may
+        // not be the frame's yet while its tiles are parsed.
+        let fb = &td.layout;
         super::mem_stats::palette_block(
             _dec,
             td,
@@ -1673,6 +1828,30 @@ mod tests {
         }
         assert!(intra_v2_next_stamp(&mut stamp));
         assert_eq!(stamp, 1);
+    }
+
+    #[test]
+    fn the_layout_of_a_frame_moves_with_its_buffer() {
+        // SAFETY: numbers; all zero is a value.
+        let mut first: HwFrameBuffer = unsafe { std::mem::zeroed() };
+        let mut second = first;
+        second.base_offset = 4096;
+        // 352x288 10-bit: rows of 384 + 32 samples, 384 rows of luma.
+        layout_frame_buffer(&mut first, 352, 288, 1);
+        layout_frame_buffer(&mut second, 352, 288, 1);
+        assert_eq!((first.width, first.height, first.hbd), (352, 288, 1));
+        assert_eq!(first.planes.map(|plane| plane.stride), [832, 448, 448]);
+        assert_eq!(first.planes.map(|plane| plane.offset), [32, 319_520, 405_536]);
+        for (a, b) in first.planes.iter().zip(&second.planes) {
+            assert_eq!((b.offset - a.offset, b.stride, b.res_offset), (4096, a.stride, a.res_offset));
+        }
+        // The description of the frame without a buffer says the same sizes.
+        // SAFETY: numbers and pointers; all zero is a value.
+        let mut ybf: YV12_BUFFER_CONFIG = unsafe { std::mem::zeroed() };
+        describe_frame(&mut ybf, 352, 288, 1);
+        assert_eq!((ybf.crop_widths[0], ybf.crop_heights[0], ybf.strides, ybf.flags), (352, 288, [416, 224], 8));
+        assert_eq!(ybf.frame_size, 2 * (384 * 416 + 2 * 192 * 224));
+        assert!(ybf.hw_buffer.is_null());
     }
 
     #[test]

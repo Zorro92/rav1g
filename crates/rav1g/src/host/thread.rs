@@ -15,6 +15,7 @@
 //! `push` that wakes one waiting thread and never waits itself.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 
 use crate::sys::HwFrameBuffer;
@@ -74,6 +75,8 @@ impl<T> Queue<T> {
 pub(crate) struct FramePool {
     free: Mutex<VecDeque<*mut HwFrameBuffer>>,
     returned: Condvar,
+    /// The takes that found the pool empty and waited for a frame in flight, for the logs.
+    waits: AtomicU64,
 }
 
 /// The pool with its lock held.
@@ -83,7 +86,11 @@ pub(crate) struct FramePoolGuard<'a> {
 
 impl FramePool {
     pub(crate) fn with_capacity(capacity: usize) -> FramePool {
-        FramePool { free: Mutex::new(VecDeque::with_capacity(capacity)), returned: Condvar::new() }
+        FramePool {
+            free: Mutex::new(VecDeque::with_capacity(capacity)),
+            returned: Condvar::new(),
+            waits: AtomicU64::new(0),
+        }
     }
 
     pub(crate) fn lock(&self) -> FramePoolGuard<'_> {
@@ -102,14 +109,24 @@ impl FramePool {
     /// The buffers in the pool are valid frame buffers of the decoder.
     pub(crate) unsafe fn get(&self) -> *mut HwFrameBuffer {
         let mut free = lock(&self.free);
+        let mut waited = false;
         loop {
             if let Some(fb) = free.pop_front() {
                 // SAFETY: the caller's contract; the count is written under the lock.
                 unsafe { (*fb).ref_cnt = 1 };
                 return fb;
             }
+            if !waited {
+                waited = true;
+                self.waits.fetch_add(1, Ordering::Relaxed);
+            }
             free = self.returned.wait(free).unwrap_or_else(PoisonError::into_inner);
         }
+    }
+
+    /// The takes that waited since the pool was made.
+    pub(crate) fn waits(&self) -> u64 {
+        self.waits.load(Ordering::Relaxed)
     }
 
     /// One more reference to a buffer that is out of the pool.
@@ -265,6 +282,7 @@ mod tests {
             pool.0.release(second);
             assert_eq!(waiter.join().unwrap(), second as usize);
             assert_eq!((*second).ref_cnt, 1);
+            assert_eq!(pool.0.waits(), 1);
             let mut locked = pool.0.lock();
             assert!(locked.release(first));
             assert!(locked.release(second));

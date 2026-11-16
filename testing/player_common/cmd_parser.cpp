@@ -107,7 +107,8 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        "smaller decoder: shared back buffer, mode info pool at half, smaller coefficient pool (same output)", "",
        &params_.lowmem_},
       {"lowmemparts", atInt, anOptional,
-       "memory reductions in effect: 1 shared back buffer + 2 mode info pool at half + 4 smaller coefficient pool. "
+       "memory reductions in effect: 1 shared back buffer + 2 mode info pool at half + 4 smaller coefficient pool "
+       "+ 32 frame buffer bound at the recording (one frame buffer less with three slots; not in -lowmem). "
        "Default: 1, and 3 for a decoder above 1920x1088; 1 for the mode info pool of the worst case, 0 for none",
        "", &params_.lowmem_parts_},
       {"lfhsplit", atInt, anOptional,
@@ -334,10 +335,10 @@ int CParameters::Parse(one_task& args, std::string& Err) {
   if (params_.threads_ < 0) params_.threads_ = 0;
 
   if (params_.lowmem_parts_ != PLAYER_LOWMEM_DEFAULT &&
-      (params_.lowmem_parts_ < 0 || params_.lowmem_parts_ > PLAYER_LOWMEM_ALL)) {
-    char ss[96];
-    sprintf(ss, "-lowmemparts %d is not allowed: the sum of 1, 2 and 4, at most %d.", params_.lowmem_parts_,
-            PLAYER_LOWMEM_ALL);
+      (params_.lowmem_parts_ < 0 || (params_.lowmem_parts_ & ~PLAYER_LOWMEM_PARTS) != 0)) {
+    char ss[112];
+    sprintf(ss, "-lowmemparts %d is not allowed: the sum of 1, 2, 4 and 32, at most %d.", params_.lowmem_parts_,
+            PLAYER_LOWMEM_PARTS);
     Err += ss;
     return -1;
   }

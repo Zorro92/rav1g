@@ -18,6 +18,9 @@ pub const SLOTS_MAX: i32 = 4;
 /// -parseframes: the most frames a decoder parses at the same time.
 pub const PARSE_FRAMES_MAX: i32 = 4;
 pub const LOWMEM_ALL: i32 = 7;
+/// -lowmemparts: every part there is: those of -lowmem, and 32, the frame buffer bound at the recording
+/// (`LowMemory::LATE_FRAME_BUFFER`), which -lowmem does not have.
+pub const LOWMEM_PARTS: i32 = 39;
 /// What a task without -lowmemparts and -lowmem has: the library's default for the decoder's size
 /// (`LowMemory::DEFAULT`, `RAV1G_LOW_MEMORY_DEFAULT`).
 pub const LOWMEM_DEFAULT: i32 = 16;
@@ -513,10 +516,10 @@ pub fn check_task(task: &mut Task) -> Result<(), String> {
     if !task.slots_given {
         task.slots = 0;
     }
-    if task.lowmem_parts != LOWMEM_DEFAULT && (task.lowmem_parts < 0 || task.lowmem_parts > LOWMEM_ALL) {
+    if task.lowmem_parts != LOWMEM_DEFAULT && (task.lowmem_parts < 0 || task.lowmem_parts & !LOWMEM_PARTS != 0) {
         return Err(format!(
-            "-lowmemparts {} is not allowed: the sum of 1, 2 and 4, at most {}",
-            task.lowmem_parts, LOWMEM_ALL
+            "-lowmemparts {} is not allowed: the sum of 1, 2, 4 and 32, at most {}",
+            task.lowmem_parts, LOWMEM_PARTS
         ));
     }
     if task.lowmem {
@@ -643,6 +646,26 @@ mod tests {
         assert!(parse_args(&strings(&["-hw"]), &mut task, None).is_err());
         assert!(parse_args(&strings(&["-t"]), &mut task, None).is_err());
         assert!(parse_args(&strings(&["-t", "four"]), &mut task, None).is_err());
+    }
+
+    #[test]
+    fn the_low_memory_parts() {
+        let parts = |text: &str, lowmem: bool| {
+            let mut task = Task { input: "a.ivf".to_string(), ..Task::default() };
+            parse_args(&strings(&["-lowmemparts", text]), &mut task, None).unwrap();
+            task.lowmem = lowmem;
+            check_task(&mut task).map(|()| task.lowmem_parts)
+        };
+        // The sum of 1, 2, 4 and 32 (the frame buffer bound at the recording); 16 is the default.
+        for allowed in [0, 1, 3, 7, 32, 33, 35, 39, LOWMEM_DEFAULT] {
+            assert_eq!(parts(&allowed.to_string(), false), Ok(allowed));
+        }
+        for refused in [-1, 8, 15, 17, 40, 48, 64] {
+            assert!(parts(&refused.to_string(), false).is_err(), "{refused}");
+        }
+        // -lowmem is the three parts it always was.
+        assert_eq!(parts("32", true), Ok(LOWMEM_ALL));
+        assert_eq!(LOWMEM_PARTS as u32, (rav1g::LowMemory::ALL | rav1g::LowMemory::LATE_FRAME_BUFFER).0);
     }
 
     #[test]

@@ -39,8 +39,8 @@ use super::stage_buffers::{IDCT_BLOCKS, INDEX_LIST, PRED_BLOCKS, PRED_BLOCKS_WAR
 use crate::gpu::d3d12::{com_ref, com_release, com_store, wrapped_ref};
 use crate::gpu::{self, CommandAllocator, Device, Event, SemiPlanar, VideoMemory, create_hardware_device};
 use crate::sys::{
-    AV1_LOW_MEMORY_ALL, AV1_LOW_MEMORY_COEFS, AV1_LOW_MEMORY_DEFAULT, AV1_LOW_MEMORY_MODE_INFO,
-    AV1_LOW_MEMORY_SHARED_BACK_BUFFER, AV1_MEMORY_GUARD_SETTLE_MS, AV1_MEMORY_GUARD_WAIT_MS,
+    AV1_LOW_MEMORY_COEFS, AV1_LOW_MEMORY_DEFAULT, AV1_LOW_MEMORY_LATE_FRAME_BUFFER, AV1_LOW_MEMORY_MODE_INFO,
+    AV1_LOW_MEMORY_PARTS, AV1_LOW_MEMORY_SHARED_BACK_BUFFER, AV1_MEMORY_GUARD_SETTLE_MS, AV1_MEMORY_GUARD_WAIT_MS,
 };
 use crate::sys::{MB_MODE_INFO, RestorationUnitInfo, aom_codec_dec_cfg_t, av1_tile_data};
 
@@ -271,7 +271,7 @@ impl ResourceConfig {
     fn with_slots(cfg: &aom_codec_dec_cfg_t, gpu_pipeline_depth: i32) -> ResourceConfig {
         // 0 is the default (the shared back buffer); AV1_LOW_MEMORY_NONE is how an application asks for none.
         let low_memory = if cfg.low_memory != 0 {
-            cfg.low_memory & AV1_LOW_MEMORY_ALL as i32
+            cfg.low_memory & AV1_LOW_MEMORY_PARTS as i32
         } else {
             default_low_memory(cfg.width, cfg.height)
         };
@@ -300,7 +300,19 @@ impl ResourceConfig {
         } else {
             RefFrameBufferCount
         };
-        let ref_fb_count = base_fb_count + gpu_pipeline_depth - FrameThreadDataDefault;
+        // With the frame buffer bound at the recording (AV1_LOW_MEMORY_LATE_FRAME_BUFFER) a frame in parse
+        // holds no buffer of the pool (its own and, without the shared back buffer, its back buffer are
+        // taken by the thread that records the frames, `frame::bind_frame_for_record`), so the buffer for
+        // each slot above two is left out. What is then out of the pool when the frame at the head of the
+        // queue asks for its buffers: the buffers of frames that are recorded and that the map or a frame
+        // of the queue refers to, which are at most 8 (every one of them was in the map when the frame at
+        // the head began, and the frames that began since have no buffer yet), and what only frames on
+        // the GPU hold, which comes back without this thread. So the 8 and the frame's own 1 (or 2) are
+        // always within the 10 (or 12): the take waits for the GPU at most, never for a frame behind it.
+        // The count is not taken below the 10 of a decoder with two slots (docs/memory.md).
+        let late = low_memory & AV1_LOW_MEMORY_LATE_FRAME_BUFFER as i32 != 0;
+        let ref_fb_count =
+            if late { base_fb_count } else { base_fb_count + gpu_pipeline_depth - FrameThreadDataDefault };
         ResourceConfig {
             bitdepth: cfg.bitdepth as i32,
             width: cfg.width as i32,
@@ -486,6 +498,7 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
     // back buffer the frames share when they do not take one from the pool.
     dec.shared_back_buffer = i32::from(cfg.low_memory & AV1_LOW_MEMORY_SHARED_BACK_BUFFER as i32 != 0);
     dec.low_memory = cfg.low_memory;
+    dec.late_frame_buffer = i32::from(cfg.low_memory & AV1_LOW_MEMORY_LATE_FRAME_BUFFER as i32 != 0);
     dec.fb_size = fb_size;
     dec.fb_offset = if dec.shared_back_buffer != 0 { 2 * fb_size } else { fb_size };
     dec.enable_superres = cfg.enable_superres;
@@ -844,10 +857,16 @@ unsafe fn log_memory_summary(is_error: bool, label: &str, dec: &Av1Core, rcfg: &
         dec.pool_rule[Kind::Coefs as usize],
         dec.pool_total[Kind::Coefs as usize] - dec.pool_rule[Kind::Coefs as usize]
     );
+    // Said only by a decoder that has the part, so that the line of the others is what it was.
+    let late = if rcfg.low_memory & AV1_LOW_MEMORY_LATE_FRAME_BUFFER as i32 != 0 {
+        ", frame buffers bound at the recording"
+    } else {
+        ""
+    };
     log(
         is_error,
         &format!(
-            "MEMORY {label} options: intra_v2 buffers {}; low memory {} (shared back buffer {}, {shares}); palette \
+            "MEMORY {label} options: intra_v2 buffers {}; low memory {} (shared back buffer {}, {shares}{late}); palette \
              buffers {palette_buffers} of {} created, {:.1} MiB each, a slot's on its first frame with screen content \
              tools",
             if rcfg.intra_v2 { "yes" } else { "no (the decoder was not created for -intrav2)" },
@@ -1571,6 +1590,18 @@ unsafe fn destroy(dec: *mut Av1Core, log_steps: bool) {
                 ),
             );
         }
+        // The same for the frame buffers of a decoder whose frames take theirs when they are recorded
+        // (the line of the other decoders is what it was).
+        if log_steps && (*dec).late_frame_buffer != 0 {
+            log(
+                false,
+                &format!(
+                    "MEMORY frame buffers: no buffer for the slots above two; a frame waited {} times for a frame on the GPU \
+                     to return one",
+                    (*dec).fb_pool.waits()
+                ),
+            );
+        }
 
         if let Some(release_image) = (*dec).cb_release_image {
             for img in &(*dec).image_pool_src {
@@ -1728,5 +1759,14 @@ mod tests {
         cfg.low_memory = 8; // AV1_LOW_MEMORY_NONE
         let rcfg = ResourceConfig::from_cfg(&cfg);
         assert_eq!((rcfg.ref_fb_count, rcfg.low_memory), (13, 0));
+        // The frame buffer bound at the recording: no buffer for the slots above two, and never fewer
+        // than a decoder with two slots has.
+        for (parts, slots, buffers) in
+            [(35, 3, 10), (35, 4, 10), (35, 2, 10), (3, 4, 12), (32, 3, 12), (32, 4, 12), (39, 3, 10)]
+        {
+            (cfg.low_memory, cfg.frame_slots) = (parts, slots);
+            let rcfg = ResourceConfig::from_cfg(&cfg);
+            assert_eq!((rcfg.ref_fb_count, rcfg.low_memory), (buffers, parts), "parts {parts}, {slots} slots");
+        }
     }
 }

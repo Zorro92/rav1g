@@ -35,6 +35,12 @@
 //! the reference map and counts as an empty slot there (with one frame in parse the slot is emptied; here
 //! later frames may already hold it).
 //!
+//! **The frame buffer.** A frame takes its frame buffer from the pool when its parse begins, and holds
+//! it through the parse. In a decoder created with `AV1_LOW_MEMORY_LATE_FRAME_BUFFER` it takes it
+//! when it is recorded (`frame::bind_frame_for_record`): the description of a frame in parse has no
+//! frame buffer then, the frames that refer to it count their reference on the buffer when they are
+//! recorded themselves, by which time it has one or the mark, and a frame that fails never has one.
+//!
 //! **Slots and pools.** A frame in parse holds a pipeline slot, which its setup waits for, and takes
 //! its mode info records, coefficients and transform block records from the pools of the decoder as it
 //! is parsed (`pool.rs`). Frames wait for each other: a frame's parse waits for the rows of its
@@ -109,7 +115,8 @@ pub(super) struct Descriptions {
 // SAFETY: a description is written by the thread that sets its frame up, before any other thread has
 // the pointer, and read after that; its reference count is read and written under `counts`; the fields of
 // its frame buffer that the recording writes (`hw_show_image`, the visible width of a frame with
-// superres) are the recording thread's while the frame is recorded.
+// superres, and the frame buffer itself in a decoder whose frames take it when they are recorded) are
+// the recording thread's while the frame is recorded.
 unsafe impl Send for Descriptions {}
 // SAFETY: as above.
 unsafe impl Sync for Descriptions {}
@@ -585,7 +592,9 @@ impl Frames {
                 );
                 descriptions.fail(entry.cur);
             } else {
-                bind_frame_for_record(dec, entry.td);
+                // In a decoder whose frames take their frame buffer here, this waits while the pool is
+                // empty, for a frame on the GPU (`frame::take_frame_buffers`).
+                bind_frame_for_record(dec, entry.td, entry.cur, &entry.refs);
                 let rec = self.load(entry);
                 let mut fb: av1_decoded_frame_buffer_t = std::mem::zeroed();
                 let mut lap_start = 0;

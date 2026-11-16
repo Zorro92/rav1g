@@ -1750,6 +1750,45 @@ jobs:
           if ($LASTEXITCODE -ne 0) { $failed += "two frames in parse through rav1g.h: exit code $LASTEXITCODE" }
           if ($failed.Count) { throw "decode error check with frames in parse: $($failed -join '; ') (1: a check failed, 2: the check could not be done)" }
 
+      # The frame buffer bound at the recording (docs/memory.md, candidate 5; -lowmemparts with 32): a
+      # frame in parse has no frame buffer, takes it when it is recorded and counts its references then,
+      # and the pool has 10 buffers whatever the slots. The whole set with two frames in parse and the
+      # shared back buffer (33), and with three frames in parse on four slots where every frame takes
+      # its back buffer from the pool at its recording as well (32): the results of expected.txt, and
+      # the decoders say what they are. Then the decode error in the middle of a stream, where a frame
+      # that fails never takes a buffer and the frames that refer to it are not recorded.
+      - name: Conformance and decode errors with the frame buffer bound at the recording (-lowmemparts 33 and 32)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $failed = @()
+          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/conformance-latefb --threads 2 "--tool-args=-v -parseframes 2 -lowmemparts 33 -memstats" `
+            "--title=rav1g-dec with -parseframes 2 -t 2 -lowmemparts 33"
+          if ($LASTEXITCODE -ne 0) { $failed += "conformance with -parseframes 2 -lowmemparts 33: exit code $LASTEXITCODE" }
+          if (-not (Select-String -Path out/conformance-latefb/lists/run001.log -Pattern 'slots 3, frame buffers 10 \+ 2 back buffers' -Quiet) -or
+              -not (Select-String -Path out/conformance-latefb/lists/run001.log -Pattern 'low memory 33 \(.*frame buffers bound at the recording\)' -Quiet) -or
+              -not (Select-String -Path out/conformance-latefb/lists/run001.log -Pattern 'MEMSTATS frame buffers: 10 in the pool .* when a frame takes its buffer at its recording' -Quiet)) {
+            $failed += 'the decoders of the run with -lowmemparts 33 do not say that they have three slots, 10 frame buffers and bind them at the recording'
+          }
+          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/conformance-latefb-ownback --threads 4 "--tool-args=-v -parseframes 3 -lowmemparts 32" `
+            "--title=rav1g-dec with -parseframes 3 -t 4 -lowmemparts 32"
+          if ($LASTEXITCODE -ne 0) { $failed += "conformance with -parseframes 3 -lowmemparts 32: exit code $LASTEXITCODE" }
+          if (-not (Select-String -Path out/conformance-latefb-ownback/lists/run001.log -Pattern 'slots 4, frame buffers 12 \+ 1 back buffer' -Quiet)) {
+            $failed += 'the decoders of the run with -lowmemparts 32 do not say that they have four slots and 12 frame buffers'
+          }
+          python testing/conformance/cut_tile_check.py --tool out/rav1g-dec/rav1g-dec.exe "--tool-args=-lowmemparts 33" --frames-in-parse 2 `
+            --streams conformance-streams --out out/cut-tile-frames
+          if ($LASTEXITCODE -ne 0) { $failed += "decode error, two frames in parse, -lowmemparts 33: exit code $LASTEXITCODE" }
+          python testing/conformance/cut_tile_check.py --tool out/rav1g-dec/rav1g-dec.exe "--tool-args=-lowmemparts 33" --frames-in-parse 3 `
+            --streams conformance-streams --out out/cut-tile-frames
+          if ($LASTEXITCODE -ne 0) { $failed += "decode error, three frames in parse, -lowmemparts 33: exit code $LASTEXITCODE" }
+          python testing/conformance/cut_tile_check.py --tool out/rav1g-dec/rav1g-dec.exe "--tool-args=-capi -lowmemparts 32" --frames-in-parse 2 `
+            --streams conformance-streams --out out/cut-tile-frames
+          if ($LASTEXITCODE -ne 0) { $failed += "decode error through rav1g.h, two frames in parse, -lowmemparts 32: exit code $LASTEXITCODE" }
+          if ($failed.Count) { throw "frame buffer bound at the recording: $($failed -join '; ')" }
+
       # The stage dumps with two frames in parse, which the rust-dumps-equal job holds against those
       # of one frame in parse byte for byte: every list the stages read and every frame buffer behind
       # every stage.
@@ -1780,6 +1819,8 @@ jobs:
           path: |
             out/frames-check/
             out/conformance-frames2/
+            out/conformance-latefb/
+            out/conformance-latefb-ownback/
             out/cut-tile-frames/
             out/stage-dumps-frames2/
             out/memory-check-frames2/

@@ -56,10 +56,10 @@ use rav1g_parse::sink::{FrameMemory, ModeInfoPiece, Sink, SinkHost, SinkTimer, T
 
 use super::completion::{rav1g_decode_sef_begin, rav1g_decode_sef_submit, start_completion_thread};
 use super::frame::{
-    PaletteMap, av1_reallocate_frame_buffer, av1_sequence_fits_decoder, more_coefs, more_mode_info,
-    more_transform_blocks, rav1g_decode_frame_record, rav1g_decode_frame_submit, rav1g_setup_frame_begin,
-    rav1g_setup_frame_end, release_frame, release_unsubmitted_frame, setup_frame_begin, setup_frame_end, setup_tile,
-    superblock_parsed, tile_parsed, write_palette,
+    PaletteMap, av1_reallocate_frame_buffer, av1_sequence_fits_decoder, describe_frame_without_buffer, more_coefs,
+    more_mode_info, more_transform_blocks, rav1g_decode_frame_record, rav1g_decode_frame_submit,
+    rav1g_setup_frame_begin, rav1g_setup_frame_end, release_frame, release_unsubmitted_frame, setup_frame_begin,
+    setup_frame_end, setup_tile, superblock_parsed, tile_parsed, write_palette,
 };
 use super::log::log;
 use super::perf::{av1_perf_ticks, frame_timers, perf_add, perf_add_ticks};
@@ -109,6 +109,9 @@ struct State {
     parse_start: i64,
     /// The first thing that failed in the decode call.
     failure: Option<Failure>,
+    /// With more than one frame in parse: a frame takes its frame buffer when it is recorded
+    /// (`Av1Core::late_frame_buffer`), so the frame of a reference slot may have none yet.
+    late_frame_buffer: bool,
 }
 
 impl State {
@@ -129,6 +132,8 @@ impl State {
             unit_len: 0,
             parse_start: 0,
             failure: None,
+            // SAFETY: the decoder the host is made for.
+            late_frame_buffer: unsafe { (*dec).late_frame_buffer != 0 },
         }
     }
 
@@ -168,14 +173,21 @@ impl State {
 
     /// The reference slot holds a frame that later frames can use: one with a frame buffer that is not
     /// known to have failed (with more than one frame in parse, the frame of a slot may still be in
-    /// parse; if it fails, the frames that took it fail when their turn comes).
+    /// parse; if it fails, the frames that took it fail when their turn comes). In a decoder whose
+    /// frames take their frame buffer when they are recorded, the frame of a slot has its buffer by the
+    /// time a frame that began behind it is recorded, or the mark; its buffer is the recording thread's
+    /// to write until then and is not looked at here.
     ///
     /// # Safety
-    /// The thread of the decode call.
+    /// The thread of the decode call, of a decoder with more than one frame in parse.
     unsafe fn slot_is_whole(&self, slot: usize) -> bool {
         let reference = self.map[slot & 7];
         // SAFETY: a slot is null or a description with a reference.
-        unsafe { !reference.is_null() && !(*reference).buf.hw_buffer.is_null() && !self.descriptions.failed(reference) }
+        unsafe {
+            !reference.is_null()
+                && (self.late_frame_buffer || !(*reference).buf.hw_buffer.is_null())
+                && !self.descriptions.failed(reference)
+        }
     }
 
     /// Where the OBU behind the one in parse starts, and where the data of the decode call ends: what
@@ -807,15 +819,15 @@ impl SlotHost {
             };
             state.set_next_obu(frame.data_left);
             let hbd = c_int::from(frame.seq_hdr.hbd != 0);
-            if av1_reallocate_frame_buffer(
-                dec.cast(),
-                &raw mut (*cur).buf,
-                hdr.size.width[0],
-                hdr.size.height,
-                hdr.size.width[1],
-                hbd,
-            ) != 0
-            {
+            let (width, height, upscaled) = (hdr.size.width[0], hdr.size.height, hdr.size.width[1]);
+            // The frame buffer of the frame, which the call waits for, or the description alone when the
+            // frame takes its buffer at its recording.
+            let described = if state.late_frame_buffer {
+                describe_frame_without_buffer(dec, &raw mut (*cur).buf, width, height, upscaled, hbd)
+            } else {
+                av1_reallocate_frame_buffer(dec.cast(), &raw mut (*cur).buf, width, height, upscaled, hbd)
+            };
+            if described != 0 {
                 state.descriptions.abandon(cur);
                 frames.release(index);
                 state.fail(sys::AOM_CODEC_MEM_ERROR, "Failed to allocate frame buffer");

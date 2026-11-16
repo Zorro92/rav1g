@@ -44,6 +44,9 @@
 // (RAV1G_LOW_MEMORY_DEFAULT of rav1g.h, which decoder.cpp holds it against: part 1, the shared back buffer,
 // and above 1920x1088 part 2, the mode info pool at half).
 #define PLAYER_LOWMEM_ALL 7
+// Every part -lowmemparts takes: those of -lowmem, and 32, the frame buffer bound at the recording
+// (RAV1G_LOW_MEMORY_LATE_FRAME_BUFFER), which -lowmem does not have.
+#define PLAYER_LOWMEM_PARTS 39
 #define PLAYER_LOWMEM_DEFAULT 16
 // -parseopt: the words as bits (RAV1G_PARSER_OPTION_* of rav1g.h, which decoder.cpp holds them against),
 // and what a task without -parseopt gets: nolfmask and tilethread (RAV1G_PARSER_OPTIONS_DEFAULT).

@@ -33,8 +33,13 @@ pub const RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER: u32 = 1;
 pub const RAV1G_LOW_MEMORY_MODE_INFO: u32 = 2;
 /// A coefficient pool of four fifths of the worst case of a frame, likewise.
 pub const RAV1G_LOW_MEMORY_COEFS: u32 = 4;
-/// All memory reductions.
+/// The three memory reductions above.
 pub const RAV1G_LOW_MEMORY_ALL: u32 = 7;
+/// A frame of a decoder with more than one frame in parse takes its frame buffer when it is recorded,
+/// not when its parse begins, and the pool has no frame buffer for the slots above two: 10 with the
+/// shared back buffer, where three slots have 11 (24.2 MiB less for 3840x2160 10-bit). Covers every
+/// stream. Not in `RAV1G_LOW_MEMORY_ALL` and not in the default.
+pub const RAV1G_LOW_MEMORY_LATE_FRAME_BUFFER: u32 = 32;
 /// What `rav1g_settings_default` sets: the default, which is by the size of the decoder. Up to 1920x1088
 /// it is `RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER`; above, `RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER |
 /// RAV1G_LOW_MEMORY_MODE_INFO` (memory is short at 4K; the whole pool of a decoder for 1080p is 29.5 MiB,
@@ -174,6 +179,7 @@ const _: () = {
     assert!(RAV1G_LOW_MEMORY_MODE_INFO == LowMemory::MODE_INFO.0);
     assert!(RAV1G_LOW_MEMORY_COEFS == LowMemory::COEFS.0);
     assert!(RAV1G_LOW_MEMORY_ALL == LowMemory::ALL.0);
+    assert!(RAV1G_LOW_MEMORY_LATE_FRAME_BUFFER == LowMemory::LATE_FRAME_BUFFER.0);
     assert!(RAV1G_LOW_MEMORY_DEFAULT == LowMemory::DEFAULT.0);
     assert!(RAV1G_PARSER_OPTION_NO_LF_MASKS == crate::ParserOptions::NO_LF_MASKS);
     assert!(RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD == crate::ParserOptions::TILE_KEEPS_THREAD);

@@ -43,7 +43,7 @@ tile ends.
 | `buffer gen_mi_block_indexes` | The block index list of a slot (CPU, at the parse; since the [reduction](#stage-buffers-sized-for-the-frames-candidate-3) into lists of the tiles, copied into the slot's buffer at the recording): entries of a frame against the worst case. The lines of the four buffers that grow also say what the buffer has now and how often it grew. |
 | `buffer prediction_blocks`, `buffer prediction_blocks_warp` | The records `gen_pred_blocks` writes on the GPU for a frame against the buffer. The counts are known on the CPU before the frame is recorded. |
 | `buffer idct_blocks` | The sorted transform blocks (GPU): as many as the frame's transform block records. |
-| `frame buffers` | The buffers of the pool that are out of it (a reference count above 0: named by a reference slot, the frame of a slot in flight, a reference such a frame still reads) at the setup of every frame, that frame's included: peak, the most frequent count, mean, and how many frames saw each count. |
+| `frame buffers` | The buffers of the pool that are out of it (a reference count above 0: named by a reference slot, the frame of a slot in flight, a reference such a frame still reads) at the setup of every frame, that frame's included: peak, the most frequent count, mean, and how many frames saw each count; and how often a frame found the pool empty and waited for a buffer. In a decoder whose frames take their buffer when they are recorded ([candidate 5](#the-frame-buffer-bound-at-the-recording-candidate-5)) the count is taken there: `out of the pool when a frame takes its buffer at its recording`. |
 | `references` | How many different frames the 8 reference slots name at the setup of a frame, the same way. |
 | `palette` | Palette buffers created; frames that allow screen content tools (each binds a palette buffer of the size of a frame buffer); frames that have palette blocks; the bytes of the palette blocks of a frame (what a palette buffer really holds), peak and mean, and at once. |
 | `cpu bytes written` | What the CPU writes for a frame into memory the GPU reads, mean / peak, and by part: mode info records (224 bytes each, cleared and filled), the mode info grid (4 bytes a 4x4 unit; 8 when the numbers below were measured), coefficients (an upper bound: 4 bytes for every value up to a block's last one; only those that are not zero are written), transform block records (16 bytes), the block index list, the CDEF lists (record thread), the constants of the stages, palette blocks. Not in it: the counters of the block lists (`gen_block_map`), loop restoration units, film grain offsets, and the clears, which `-gputime` reports. |
@@ -176,7 +176,7 @@ slots 74.1). By MiB, with the risk; the numbers above are local and from seven s
 | 2 | **Done at half, the default above 1920x1088**, [below](#the-wait-of-the-second-frame-in-parse-in-a-pool-at-half-candidate-2). Mode info pool at half, or a quarter, of the worst case | 55.8 or 83.7 MiB | At once at most 22.3 % (`d2`), 9 to 11 % elsewhere; one frame at most 12.9 %. The wait for the GPU exists and is tested (`poolwait`); a pool at half exists as `-lowmemparts 2`. | Low at half, medium at a quarter. A frame that alone does not fit is a decode error (`MEMORY FAILED`): at half an average block below 8x4 over a whole frame, at a quarter below 8x8; the low quantizer vectors reach 58 % at 352x288. A fallback would be a second buffer created on that frame, under the budget guard. More waits cost speed, not frames. |
 | 3 | **Done**, [below](#stage-buffers-sized-for-the-frames-candidate-3) (the index list without a pool). Stage buffers at a quarter, grown on the frame that needs more: `prediction_blocks`, `prediction_blocks_warp`, `idct_blocks`, and the block index list as a fourth pool | 33.7 MiB (0.75 x 44.9) and 13.5 MiB (0.75 x 18.0) | A frame's peak is 15.8 %, 3.6 %, 26.1 % and 11.5 % (`d2`), a few percent elsewhere. | Medium. The three GPU buffers are used by one command list at a time and their counts are known before the frame is recorded, so a frame that needs more can get a larger buffer first (the guard may refuse: then a decode error). The index list is written at the parse: a pool with a piece for a whole block ([step 5, "Left"](phase2-rav1d.md#step-5-the-pools)). |
 | 4 | Smaller mode info record (224 bytes) | up to 55.8 MiB at half the size; less together with 2 | 2.5 to 2.8 MiB of a busy 4K frame's CPU bytes are these records. | Medium. No stream can fail for it, but the layout is shared by the sink, the block lists and the shaders that include `mode_info.h`; what a record can lose is not measured here. |
-| 5 | The frame buffer bound at the recording | 24.2 MiB (11 to 10 in the pool) | The reference slots name at most 5 frames in these streams; the pool is emptied by the frames in flight. | Medium: the references of a frame in parse are resolved at the recording, through every error path of step 4. The floor stays 10 (8 references, a failed frame, the next frame): the measured 5 do not allow less, a stream may use 8. |
+| 5 | **Done as part 32 of the low memory parts, off by default**, [below](#the-frame-buffer-bound-at-the-recording-candidate-5). The frame buffer bound at the recording | 24.2 MiB (11 to 10 in the pool) | The reference slots name at most 5 frames in these streams; the pool is emptied by the frames in flight. | Medium: the references of a frame in parse are resolved at the recording, through every error path of step 4. The floor stays 10 (8 references, a failed frame, the next frame): the measured 5 do not allow less, a stream may use 8. |
 | 6 | Coefficient pool at three quarters | 15.4 MiB | 62.4 % at once in `d2`, 10 to 26 % elsewhere. | Low, and little: `d2` would be near its waits, and half is not possible for it. |
 | 7 | Palette blocks from a pool instead of a buffer of the size of a frame a slot | 0 MiB for film (no clip allows screen content tools); 72.5 MiB less on the first frame of a stream that does | 36 KB a frame at most where a buffer is 3.2 MiB. | Medium: the shaders address the palette buffer like the frame buffer. It removes a growth of 72.5 MiB that the budget guard can only refuse. |
 
@@ -399,3 +399,98 @@ went from 0.02 ms a frame to 1.4 to 1.8 ms, in a pool that is used to 20 % at mo
 
 
 - **Console, the default package** (2026-11-15, 0.2.186.0, no memory flag): md5 15 of 15, no `MEMORY FAILED`; the five clips above 1920x1088 got `1020/2040 ... (the default: half above 1920x1088)` and 537.6 MiB of device buffers at 3840x2176 10-bit, the others the whole pool (`240/240`, `540/540`, `4/4`).
+
+### The frame buffer bound at the recording (candidate 5)
+
+2026-11-16. **A part of the low memory parts that is off by default** until the console has compared it:
+`AV1_LOW_MEMORY_LATE_FRAME_BUFFER`, `RAV1G_LOW_MEMORY_LATE_FRAME_BUFFER`, `LowMemory::LATE_FRAME_BUFFER`,
+32, which `-lowmemparts` takes with the others (`-lowmemparts 35` is the default of a 4K decoder with
+it; `-lowmem` stays the parts 1, 2 and 4). With it the decoder for 3840x2160 10-bit (two frames in parse,
+three slots) takes **513.5 MiB** of device buffers where it takes 537.6: 24.2 MiB less, one frame buffer
+(12.1 MiB at 8 bits).
+
+- *What.* A frame of a decoder with more than one frame in parse took its frame buffer from the pool
+  when its parse began (the thread of the decode call, `av1_reallocate_frame_buffer`) and counted its
+  references on the buffers of the frames it is predicted from at its setup. With the part it gets its
+  description only (`describe_frame_without_buffer`: sizes, strides, the same refusal of a frame the
+  decoder was not created for), and the thread that records the frames takes the buffer, lays it out
+  and counts the references right before the frame is recorded (`take_frame_buffers` of `frame.rs`,
+  from `bind_frame_for_record`). So a frame in parse holds no frame buffer, and the pool has 10 where
+  it had one more for each slot above two (11 with three slots, 12 with four). With one frame in parse
+  nothing changes but the count.
+- *The references.* The entry of a frame in parse already holds a reference on the description of its
+  own frame and of the seven it is predicted from (`rav1d_frames.rs`), so every such frame is alive
+  until the entry is through; what moved is when the frame buffers behind the descriptions are named.
+  The frames are recorded in decode order, so when a frame's turn comes every frame it refers to has
+  been recorded, and has its buffer, or has failed, and has the mark, in which case the frame is not
+  recorded. The thread of the decode calls no longer asks whether the frame of a reference slot has a
+  frame buffer (it may still be in parse), only whether it has the mark (`slot_is_whole`).
+- *The paths.* A frame whose parse fails, whose reference failed, or that needs a stage buffer the
+  guard refuses never takes a buffer: its slot goes back with none (`release_frame`), and its
+  description, which the reference slots and later frames may hold, has the mark and no buffer. A
+  setup that fails gives the description back the same way. A `show_existing_frame` is an entry
+  behind the frame it shows, so that frame has its buffer when the copy is recorded, or the mark
+  ("the frame a show_existing_frame names failed"). A hidden frame is a frame like the others. A drain
+  waits for the queue, so every frame that began takes its buffer, is submitted and completes; the
+  release of a decoder drains first. Nothing of this is new code but the take itself: the mark and
+  the order of the queue were there for step 4.
+- *The palette blocks* are written by the tiles in the layout of the frame buffer, which they read
+  from the buffer the frame is reconstructed into. That is not the frame's while it is parsed (no
+  buffer yet; and with the shared back buffer the description was that of the frame being recorded,
+  which only differs for a frame of another size). The slot now keeps the layout of its frame from the
+  setup on (`av1_frame_thread_data::layout`), with and without the part.
+- *No wait that was not there, and none for a frame behind.* The take waits while the pool is empty,
+  as the take at the begin of the parse did. What is out of the pool when the frame at the head of the
+  queue asks: buffers the reference slots or the frames of the queue refer to, and buffers only frames
+  on the GPU hold. The first are at most 8: each was in a reference slot when the frame at the head
+  began, and no frame that began since has a buffer. With the frame's own that is 9 of 10 (and with its
+  back buffer, in a decoder without the shared one, which is taken at the recording as well, 10 of
+  12), so a buffer the take waits for is always one a frame on the GPU returns, and the completion
+  thread returns it without the thread that waits. The floor of 10 is kept: 8 references, the next
+  frame, and one that a decoder with one frame in parse needs for a failed frame.
+- *The lines.* `MEMORY decoder created options: ... low memory 35 (shared back buffer yes, ..., frame
+  buffers bound at the recording)`; `MEMORY decoder created: ... slots 3, frame buffers 10 + 2 back
+  buffers`; at the release `MEMORY frame buffers: no buffer for the slots above two; a frame waited n
+  times for a frame on the GPU to return one`. `-memstats`: `frame buffers: 10 in the pool ...; out of
+  the pool when a frame takes its buffer at its recording, that frame's included: peak ..., typical
+  ..., mean ...; a frame waited for a buffer n times` (the waits are counted without the part too).
+  The time of the wait is `cpu wait_fb` of `GPUTIME`, on the thread that records.
+- *Measured locally* (wine on lavapipe, the defaults against `-lowmemparts 35`, two frames in parse on
+  three slots, 60 temporal units of each clip and the 30 of the `d2` cut; the software GPU keeps frames
+  in flight longer than the console). The count is taken when the frame takes its buffer, which is
+  later with the part, so the two columns are not the same moment.
+
+  | Stream | Default, 11 buffers: out peak, typical, mean | waits | Part 32, 10 buffers: out peak, typical, mean | waits |
+  | --- | --- | ---: | --- | ---: |
+  | `j4k40` | 9, 8, 7.7 | 0 | 8, 7, 6.7 | 0 |
+  | `a1_8b4k_300` | 11, 11, 9.7 | 34 | 10, 10, 8.9 | 13 |
+  | `fg4k_300` | 7, 7, 6.7 | 0 | 7, 6, 5.8 | 0 |
+  | `t40x8` | 11, 11, 9.2 | 21 | 10, 10, 8.3 | 0 |
+  | `t40x1ld` | 5, 4, 4.4 | 0 | 5, 3, 3.3 | 0 |
+  | `t12x1` | 11, 11, 9.2 | 21 | 10, 10, 8.2 | 0 |
+  | `d2` cut | 11, 9, 8.4 | 7 | 10, 10, 8.1 | 5 |
+
+  A buffer less is out on average, and the pool that is one smaller is found empty less often (18
+  times where the default is 83 times): the frames in parse held the buffers the default waits for.
+  The streams that empty the pool still do, with their frames on the GPU. The time is
+  the same within the noise of the software GPU: two runs each with `-gputime`, 60 frames of
+  `a1_8b4k_300` in 8.2 and 8.6 s by default and 8.0 and 7.9 s with the part, `t40x8` in 22.2 and 22.3
+  against 22.0 and 21.7 s, the `d2` cut in 6.05 and 6.05 against 6.12 and 6.05 s. `cpu wait_fb` with the
+  part is 12 ms a frame on `a1_8b4k_300`, 32 ms on the `d2` cut and 0 on `t40x8`: what the thread that
+  records waits for the GPU, which is behind there anyway. The wait of the default, at the begin of a
+  parse inside the decode call, has no timer of its own, so the two are compared by the decode call
+  and the frames a second.
+- *Checked locally:* the frames of the seven streams are the same with and without the part, md5 by
+  md5 (and those of the console's references where there is one); the 244 vectors of AOM with
+  `-parseframes 2 -t 2 -lowmemparts 33` and with `-parseframes 3 -t 4 -lowmemparts 33`, 244 of 244
+  each, and without the part with one and with two frames in parse, 244 of 244. Without the shared
+  back buffer (`-lowmemparts 32`) the local decoder gives the 147 wrong vectors it gives with
+  `-lowmemparts 0` ([rust-port.md](rust-port.md)), so that combination is CI's on WARP.
+- *CI* (job `rust-frames`): the whole set with `-parseframes 2 -lowmemparts 33` and with `-parseframes 3
+  -t 4 -lowmemparts 32`, and the decode error in the middle of a stream with two and three frames in
+  parse and through `rav1g.h`.
+- *For the console:* `-lowmemparts 35` against the default on the 4K clips: md5, device buffers 513.5
+  against 537.6 MiB and the app's usage, the frames a second and the decode call, `cpu wait_fb` and
+  the `MEMORY frame buffers` line (waits), `frame buffers` of `-memstats`. Four of the six clips had
+  all 11 out at once there; if the waits do not grow and the time is the same, 32 can join the default
+  above 1920x1088 (`default_low_memory` of `create.rs`, `AV1_LOW_MEMORY_DEFAULT`).
