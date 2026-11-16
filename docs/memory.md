@@ -249,7 +249,9 @@ for the three buffers of the stages, 13.5 for the index lists; a slot is 20.2 Mi
   frames in parse on two threads, 244 of 244 each; the `d2` cut 30 of 30. A
   growth that the guard refuses was not produced: the budget of `rav1g-dec -budget` is one number for
   the creation and for the growth.
-- **Console: pending.**
+- **Console** (2026-11-15, package 0.2.184.0, with the four byte grid below): md5 15 of 15 with
+  `-memstats`. No growth was refused; the 4K clips grew nothing, `b8_720_300` and `b8_1080_300` one
+  buffer once each. The numbers of both reductions together are at the end of the next section.
 
 ### The mode info grid in four bytes a unit
 
@@ -298,4 +300,15 @@ info grid` of `-memstats`), a slot's grid is 2.0 MiB where it was 4.0, and the d
   the shaders DXC 1.9 compiled, 244 of 244 each; the `d2` cut 30 of 30; `rav1g-parse-check` with four
   threads and two frames in parse, 244 of 244 equal; the listings scan and the thread group check of
   the changed shaders.
-- **Console: pending.**
+- **Console, both reductions** (2026-11-15, package 0.2.184.0 against 0.2.175.0, the same task lines,
+  slow state, Bale stopped, three rounds of each 4K clip, means of six timed runs): md5 15 of 15.
+
+  | | 0.2.175.0 | 0.2.184.0 | |
+  | --- | ---: | ---: | ---: |
+  | Device buffers at 3840x2176 10-bit, 3 slots | 646.5 MiB | 593.4 MiB | -53.1 MiB |
+  | Application usage, `j4k40`, 30 frames out | 866.3 MiB | 801.9 to 835.0 MiB | about -45 MiB |
+  | Decode call, `j4k40` / `d2_300` | 21.79 / 20.01 ms | 21.08 / 19.38 ms | -3.2 % |
+  | GPU stage sum, `j4k40` / `d2_300` | 18.64 / 9.48 ms | 18.53 / 9.40 ms | -0.6 / -0.8 % |
+  | Frames a second, `j4k40` / `d2_300` | 45.9 / 49.8 | 47.4 / 51.2 | +3.2 / +2.9 % |
+
+  The CPU gains from writing half the grid; the GPU is the same.
