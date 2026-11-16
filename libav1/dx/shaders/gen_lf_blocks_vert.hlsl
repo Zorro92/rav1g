@@ -30,7 +30,11 @@ cbuffer GenLfData : register(b0) {
   // the low half is read. 4: that word alone. Less cb_mi_addr_base the word is where the record starts
   // in mi_pool, in bytes; an entry of zeros is a unit without a block.
   uint cb_mi_grid_entry;
-  int2 reserved;
+  // The last entry mi_grid has. A thread without work, or a pass of a loop behind its end, still loads
+  // (the compiler makes such loads unconditional), from places that are not in the grid: it gets this
+  // entry, so that no load leaves the buffer.
+  uint cb_mi_grid_last;
+  int reserved;
   int2 cb_lf_filter_level;
   int cb_lf_filter_level_u;
   int cb_lf_filter_level_v;
@@ -51,15 +55,13 @@ cbuffer GenLfSRT : register(b1) {
 };
 
 int get_mi_index(ByteAddressBuffer grid, int index, uint base) {
-  uint addr;
-  if (cb_mi_grid_entry == 4) {
-    addr = grid.Load(index * 4);
-    if (addr == 0) return -1;
-  } else {
-    uint2 entry = grid.Load2(index * 8);
-    if (entry.x == 0 && entry.y == 0) return -1;
-    addr = entry.x;
-  }
+  // One way for both sizes of an entry, without a branch: a branch on the size is flattened by the compiler,
+  // and the load of the size that is not there then reads behind a grid of the smaller entries.
+  const uint at = min((uint)index, cb_mi_grid_last) * cb_mi_grid_entry;
+  uint addr = grid.Load(at);
+  // The high half of an address; with entries of four bytes the same word again.
+  const uint high = grid.Load(at + cb_mi_grid_entry - 4);
+  if (addr == 0 && high == 0) return -1;
   addr -= base;
   return addr / ModeInfoSize;
 }

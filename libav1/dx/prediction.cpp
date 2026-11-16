@@ -668,7 +668,8 @@ struct GenBlockData {
   int disable_edge_filter;
   int force_integet_mv;
   unsigned int mi_grid_entry;  // bytes of an entry of the mode info grid (cb_mi_grid_entry)
-  int reserved[2];
+  unsigned int mi_grid_last;   // the last entry the grid has (cb_mi_grid_last)
+  int reserved;
   int wedge_offsets[22][4];  //??
   int dist_wtd[8 * 8][4];
   int lossless_seg[8][4];
@@ -705,6 +706,8 @@ void av1_prediction_gen_blocks(AV1Decoder *pbi, Av1Core *dec) {
   data->mi_addr_base = static_cast<unsigned int>(reinterpret_cast<uint64_t>(dec->mode_info_pool->host_ptr));
   // The grid is the entropy decoder's: the address of a record, of which the shaders read the low half.
   data->mi_grid_entry = static_cast<unsigned int>(sizeof(MB_MODE_INFO *));
+  // A load of the shader that is not in the grid (a thread without work) reads its last entry.
+  data->mi_grid_last = static_cast<unsigned int>(td->mode_info_grid->size / sizeof(MB_MODE_INFO *) - 1);
   data->iter_grid_stride = td->iter_grid_stride;
   data->iter_grid_offset_uv = td->iter_grid_offset_uv;
   data->iter_grid_stride_uv = td->iter_grid_stride_uv;
