@@ -2772,6 +2772,31 @@ D3D11 driver creates NV12 and P010 textures with `D3D11_BIND_UNORDERED_ACCESS` (
 D3D11 texture), whether the texture and the fence open across the two APIs in a UWP app, and what the
 direct path saves of the output pass at 4K.
 
+### The parse split on the console (2026-11-16)
+
+Package 0.2.192.0, slow state, Bale stopped, `-output p010 -gputime`, 300 frames, three interleaved
+rounds of each (ms a frame, means). `a`: the defaults at 4K (2 threads, 2 frames in parse, 3 slots,
+low memory 35); `b`: the same with `-parseopt time`; `c`: `-t 4 -parseframes 3` (4 slots).
+
+| Clip | Run | fps | GPU busy | Parse wall | Thread sum | of it: rav1d | sink calls | block lists | Record | Device buffers |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `d2_300` | a | 51.93 | 9.27 | 34.13 | 25.78 | | | 1.31 | 0.49 | 513.5 MiB |
+| | b | 51.59 | 9.28 | 34.39 | 25.84 | 21.99 | 2.56 | 1.29 | 0.49 | |
+| | c | 54.97 | 9.29 | 43.98 | 26.84 | | | 1.38 | 0.94 | 531.6 MiB |
+| `j4k40` | a | 47.77 | 18.33 | 29.51 | 27.74 | | | 3.42 | 3.34 | 513.5 MiB |
+| | b | 47.36 | 18.33 | 29.98 | 28.21 | 21.68 | 3.16 | 3.37 | 3.46 | |
+| | c | 51.05 | 18.34 | 37.57 | 29.71 | | | 3.58 | 3.73 | 531.6 MiB |
+
+- **rav1d's own parse is 85 % of the parse threads' time on `d2` and 77 % on `j4k40`** (22.0 and 21.7
+  ms a frame; its entropy decoder runs the assembly of `msac.asm`). What rav1g adds on those threads:
+  the sink's calls (the mode info records, grid and transform block records: 2.6 and 3.2 ms) and the
+  block lists (1.3 and 3.4 ms), 3.9 and 6.6 ms a frame. The thread that records adds 0.5 and 3.3 ms
+  (`j4k40`: the CDEF lists, read back through the grid). `-parseopt time` costs 0.3 to 0.4 fps.
+- `d2` is bound by the parse (the GPU waits 9.5 ms before each frame), `j4k40` by the GPU (intra 11.5
+  of 18.3 ms; the decode thread waits 10 ms a frame).
+- **Four threads and three frames in parse** give 6 % (`d2`, 51.9 to 55.0 fps) and 7 % (`j4k40`, 47.8
+  to 51.1) for 18.1 MiB of device buffers (a fourth slot) and 1.0 to 2.0 ms more thread time a frame.
+
 ## Licence
 
 rav1d is BSD-2-Clause (copyright VideoLAN and the dav1d authors, and the rav1d contributors); the
