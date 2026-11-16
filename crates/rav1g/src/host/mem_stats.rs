@@ -457,6 +457,7 @@ pub(crate) unsafe fn summary(dec: *mut Av1Core) {
         }
         let at_once: [u64; ITEMS] = std::array::from_fn(|item| stats.at_once[item].swap(0, Ordering::Relaxed));
         let pool_peak = (*dec).pools.as_deref().map_or([0; KINDS], |pools| pools.take_stat_peak());
+        let pool_waits = (*dec).pools.as_deref().map_or([[0; 2]; KINDS], |pools| pools.take_stat_waits());
         let say = |text: String| log(false, &format!("MEMSTATS {text}"));
         let size = |buffer: *mut super::types::GpuBufferObject| buffer.as_ref().map_or(0, |buffer| buffer.size);
         let slots = usize::try_from((*dec).frame_slots).unwrap_or(0).min(SLOTS);
@@ -478,13 +479,19 @@ pub(crate) unsafe fn summary(dec: *mut Av1Core) {
         let pool_names = ["mode_info_pool", "idct_coefs", "idct_blocks_unordered"];
         for kind in 0..KINDS {
             let total = (*dec).pool_total[kind];
+            // A pool below the worst case of a frame (the low memory parts) says so.
+            let cells = (((*dec).max_width >> 6) * ((*dec).max_height >> 6)).max(1) as usize;
+            let rule = (*dec).pool_rule[kind];
+            let share =
+                if rule < cells { format!(" ({rule}/{cells} of the worst case of a frame)") } else { String::new() };
             let bytes = size(pool_buffers[kind]) as f64;
             let chunk_mib = mib(bytes) / total.max(1) as f64;
             let capacity = (total * CHUNK_ITEMS[kind]) as f64;
             say(format!(
-                "pool {}: {total} chunks of {} {}, {:.1} MiB; chunks in use at once peak {} ({:.1} %, {:.1} MiB); \
-                 chunks of a frame peak {} mean {:.1}; {} of a frame peak {} ({:.1} % of the pool) mean {:.0}, at \
-                 once peak {} ({:.1} %); fill of the chunks held {:.1} %",
+                "pool {}: {total} chunks of {} {}{share}, {:.1} MiB; chunks in use at once peak {} ({:.1} %, {:.1} \
+                 MiB); chunks of a frame peak {} mean {:.1}; {} of a frame peak {} ({:.1} % of the pool) mean {:.0}, \
+                 at once peak {} ({:.1} %); fill of the chunks held {:.1} %; a tile waited for a chunk of it {} \
+                 times for the GPU to finish an older frame and {} times for a frame in parse in front of its own",
                 pool_names[kind],
                 CHUNK_ITEMS[kind],
                 ITEM_NAMES[kind],
@@ -501,6 +508,8 @@ pub(crate) unsafe fn summary(dec: *mut Av1Core) {
                 at_once[kind],
                 percent(at_once[kind] as f64, capacity),
                 percent(state.items[kind].sum as f64, state.chunks[kind].sum as f64 * CHUNK_ITEMS[kind] as f64),
+                pool_waits[kind][0],
+                pool_waits[kind][1],
             ));
         }
         // The buffers of the stages and of a slot: what a frame writes against the worst case the buffer

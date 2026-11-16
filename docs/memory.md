@@ -39,7 +39,7 @@ tile ends.
 | Line | What it says |
 | --- | --- |
 | `begin` | Frames recorded, the largest frame, the decoder (size, bit depth, slots, frames in parse). |
-| `pool mode_info_pool`, `pool idct_coefs`, `pool idct_blocks_unordered` | The three pools: chunks and size; **chunks in use at once, peak** (what a smaller pool has to hold without a wait); chunks one frame holds when it is recorded, peak and mean; the records (coefficients) one frame wrote, peak, as a share of the pool, and mean; the same at once; **fill**: records written over the room of the chunks held (what the chunk granularity costs). Coefficients are counted as the transform blocks take them, with the padding of their counts. |
+| `pool mode_info_pool`, `pool idct_coefs`, `pool idct_blocks_unordered` | The three pools: chunks and size; **chunks in use at once, peak** (what a smaller pool has to hold without a wait); chunks one frame holds when it is recorded, peak and mean; the records (coefficients) one frame wrote, peak, as a share of the pool, and mean; the same at once; **fill**: records written over the room of the chunks held (what the chunk granularity costs); how often a tile **waited for a chunk of that pool**, for the GPU to finish an older frame and for a frame in parse in front of its own (the `MEMORY pools` line of a release has the sum of the three pools). A pool below the worst case of a frame says its share (`1695 chunks of 7680 coefficients (1632/2040 of the worst case of a frame)`), and its percentages are of the pool as it is. Coefficients are counted as the transform blocks take them, with the padding of their counts. |
 | `buffer gen_mi_block_indexes` | The block index list of a slot (CPU, at the parse; since the [reduction](#stage-buffers-sized-for-the-frames-candidate-3) into lists of the tiles, copied into the slot's buffer at the recording): entries of a frame against the worst case. The lines of the four buffers that grow also say what the buffer has now and how often it grew. |
 | `buffer prediction_blocks`, `buffer prediction_blocks_warp` | The records `gen_pred_blocks` writes on the GPU for a frame against the buffer. The counts are known on the CPU before the frame is recorded. |
 | `buffer idct_blocks` | The sorted transform blocks (GPU): as many as the frame's transform block records. |
@@ -177,7 +177,7 @@ slots 74.1). By MiB, with the risk; the numbers above are local and from seven s
 | 3 | **Done**, [below](#stage-buffers-sized-for-the-frames-candidate-3) (the index list without a pool). Stage buffers at a quarter, grown on the frame that needs more: `prediction_blocks`, `prediction_blocks_warp`, `idct_blocks`, and the block index list as a fourth pool | 33.7 MiB (0.75 x 44.9) and 13.5 MiB (0.75 x 18.0) | A frame's peak is 15.8 %, 3.6 %, 26.1 % and 11.5 % (`d2`), a few percent elsewhere. | Medium. The three GPU buffers are used by one command list at a time and their counts are known before the frame is recorded, so a frame that needs more can get a larger buffer first (the guard may refuse: then a decode error). The index list is written at the parse: a pool with a piece for a whole block ([step 5, "Left"](phase2-rav1d.md#step-5-the-pools)). |
 | 4 | Smaller mode info record (224 bytes) | up to 55.8 MiB at half the size; less together with 2 | 2.5 to 2.8 MiB of a busy 4K frame's CPU bytes are these records. | Medium. No stream can fail for it, but the layout is shared by the sink, the block lists and the shaders that include `mode_info.h`; what a record can lose is not measured here. |
 | 5 | **Done as part 32 of the low memory parts, in the default above 1920x1088**, [below](#the-frame-buffer-bound-at-the-recording-candidate-5). The frame buffer bound at the recording | 24.2 MiB (11 to 10 in the pool) | The reference slots name at most 5 frames in these streams; the pool is emptied by the frames in flight. | Medium: the references of a frame in parse are resolved at the recording, through every error path of step 4. The floor stays 10 (8 references, a failed frame, the next frame): the measured 5 do not allow less, a stream may use 8. |
-| 6 | Coefficient pool at three quarters | 15.4 MiB | 62.4 % at once in `d2`, 10 to 26 % elsewhere. | Low, and little: `d2` would be near its waits, and half is not possible for it. |
+| 6 | **Measured, as the part that exists (4, four fifths); not in the default yet**, [below](#the-coefficient-pool-at-four-fifths-candidate-6). Coefficient pool at three quarters | 15.0 MiB at three quarters, 12.0 at four fifths (the pool has 63 chunks for the ends of pieces that stay) | 62.4 % at once in `d2`, 10 to 26 % elsewhere. | Low, and little: `d2` would be near its waits, and half is not possible for it. A frame that needs more than the pool is a decode error. |
 | 7 | Palette blocks from a pool instead of a buffer of the size of a frame a slot | 0 MiB for film (no clip allows screen content tools); 72.5 MiB less on the first frame of a stream that does | 36 KB a frame at most where a buffer is 3.2 MiB. | Medium: the shaders address the palette buffer like the frame buffer. It removes a growth of 72.5 MiB that the budget guard can only refuse. |
 
 For the CPU (second priority, DRAM bandwidth in the slow state; the first of these is **done**,
@@ -532,3 +532,105 @@ three slots) takes **513.5 MiB** of device buffers where it takes 537.6: 24.2 Mi
   No cost: every difference is within the spread of the rounds (47.06 to 47.98 fps on `j4k40`).
 - So 32 is in the default above 1920x1088 (`AV1_LOW_MEMORY_DEFAULT` = 35): the default 4K 10-bit decoder
   takes **513.5 MiB** of device buffers.
+
+### The coefficient pool at four fifths (candidate 6)
+
+2026-11-16. **Not in the default yet: `-lowmemparts 39` against the default (35) on the console decides.**
+The part exists since the pools: `AV1_LOW_MEMORY_COEFS`, `RAV1G_LOW_MEMORY_COEFS`, `LowMemory::COEFS`, 4,
+one of the three of `-lowmem`. With it the decoder for 3840x2160 10-bit (two frames in parse, three
+slots) takes **501.5 MiB** of device buffers where the default takes 513.5: 12.0 MiB less (356.5
+against 368.4 MiB at 8 bits). Nothing of the decoder changed for it but what `-memstats` says.
+
+- *What.* The coefficient pool of the frames in parse is sized for 24 values a 4x4 unit where a chunk
+  is sized for 30: 1632 of the 2040 chunks of a 3840x2176 frame, and the 63 for the ends of pieces as
+  before, 1695 chunks of 30,720 bytes, 49.7 MiB where the whole pool is 2103 chunks and 61.6 MiB
+  (`pool_chunks` of `create.rs`). 24 values a unit is every coefficient of a 4:2:0 frame, 16 of luma
+  and 8 of chroma; the other 6 are the padding of the counts (a transform block takes its coefficients
+  up to the last one, rounded up to the next multiple of four above it: 20 for a full 4x4 block).
+- *Four fifths, not three quarters.* Three quarters would be a new part (1530 + 63 chunks, 46.7 MiB,
+  498.5 MiB of device buffers): 3.0 MiB more, for a value in both headers, the C interface, the two
+  test programs and their checks, where four fifths is a part that `-lowmem`, `memory_lines.py` and the
+  player's smoke test have run since the pools. Measured locally with a build that had three quarters
+  under the same part: no stream waited at either size (the table below), so the numbers do not
+  choose; the margin does. The most the coefficient pool held at once is 1312 chunks locally and 1211
+  on the console (`d2`): 77 and 71 % of the pool at four fifths, 82 and 76 % at three quarters. And
+  four fifths has a meaning a stream can be held against, a frame's coefficients without padding;
+  three quarters has none.
+- *The rule of the pools* is the one of the mode info pool at half
+  ([above](#the-wait-of-the-second-frame-in-parse-in-a-pool-at-half-candidate-2)), which is by pool: a
+  frame in front whose cells are more than the pool's chunks is left, for its cells that are not
+  parsed, their share of the pool (`Frame::can_need`: four fifths of a chunk a cell, rounded up; the
+  1632 when it begins). Held against a chunk a cell, the frame behind a 4K frame would get its first
+  chunk when a fifth of the frame in front is parsed (remaining cells below 1632); with the share it
+  gets it when about 20 cells are parsed, as in the whole pool. A frame of 1080p in the decoder for 4K
+  (510 cells) is held against its cells as before. `pool.rs` has a test of the pool of a 4K decoder
+  (`the_coefficient_pool_at_four_fifths_leaves_the_frame_in_front_its_share`).
+- *A frame that needs more than the pool is a decode error*, as in the mode info pool at half:
+  `MEMORY FAILED frame n: its coefficients do not fit the coefficient pool (1695 chunks of 7680 items,
+  of which the frames in parse behind it hold m)`, `AOM_CODEC_MEM_ERROR`, and the frames that depend on it fail until
+  the next key frame. That is a frame with more than 24 values a 4x4 unit on average over the whole frame
+  (the oldest frame in parse has the 63 chunks above the rule too: 83 % of the worst case): nearly every
+  coefficient of nearly every block coded, which is lossless or a quantizer near it on noise. The
+  densest frames measured: the lossless 640x360 10-bit vector, 74.8 % of the worst case (344,860
+  values in 60 cells), which fits; `d2` 33.3 %. And, as in the mode info pool, with two frames in parse
+  a frame that fits alone can fail when its last part has more than four fifths of a chunk a cell
+  behind a part with less, and the frame behind has taken the room.
+- *Why the frame does not wait, and why the pool does not grow.* Both were looked at. A wait gives
+  nothing: such a frame is the oldest one when it fails, nothing in front of it holds a chunk, and the
+  frames in parse behind it cannot give theirs back before it is submitted (`Take::Full` is that
+  state; the take waits in every other). The stage buffers
+  [grow](#stage-buffers-sized-for-the-frames-candidate-3) because their counts are known before the
+  frame is recorded and one command list uses them at a time. The coefficient pool is written by the
+  tiles of every frame in parse through a pointer each tile keeps (`dq_buffer_base`), in the middle of
+  a frame whose need is known only when it is parsed, and it is one buffer that the transform stage
+  binds and the records address by offset. A larger one would have to be created beside it (49.7 and
+  61.6 MiB together, under the budget guard, which may refuse), filled with what the frames in parse
+  have written (a read of write-combined memory), and every tile on every parse thread moved to it at
+  once: a stop of all parse threads that the parse has no place for. A second buffer for the chunks
+  above the first would change the shader's binding. So it stays a decode error. An application that
+  has to take such streams at 4K names the parts without `RAV1G_LOW_MEMORY_COEFS`, as for the mode
+  info pool.
+- *The lines.* `MEMORY decoder created options: ... low memory 39 (..., coefficient pool 1632/2040 and
+  63 chunks for the ends of pieces, ...)`. `-memstats` (new with this): `pool idct_coefs: 1695 chunks
+  of 7680 coefficients (1632/2040 of the worst case of a frame), 49.7 MiB; chunks in use at once peak
+  1312 (77.4 %, 38.4 MiB); ...; a tile waited for a chunk of it 0 times for the GPU to finish an older
+  frame and 0 times for a frame in parse in front of its own`. The waits are by pool, which the `MEMORY
+  pools` line of a release only has as a sum; the time of all of them is `cpu wait_sec_slot` of
+  `GPUTIME`.
+- *Measured locally* (wine on lavapipe, the default against `-lowmemparts 39`, and three quarters from
+  a build made for the comparison; two frames in parse on three slots, 60 temporal units of each clip
+  and the 30 of the `d2` cut). Chunks of the coefficient pool in use at once, peak, as a share of the
+  pool; no tile waited for a chunk of the coefficient pool in any of the 21 runs, for the GPU or for a
+  frame in front.
+
+  | Stream | At once, peak, chunks | A frame, peak, chunks | Whole, 2103 | Four fifths, 1695 | Three quarters, 1593 |
+  | --- | ---: | ---: | ---: | ---: | ---: |
+  | `j4k40` | 209 | 70 | 9.9 % | 12.3 % | 13.1 % |
+  | `a1_8b4k_300` | 469 | 293 | 22.3 % | 27.7 % | 29.4 % |
+  | `fg4k_300` | 46 | 17 | 2.2 % | 2.6 % | 2.9 % |
+  | `t40x8` | 554 | 203 | 26.3 % | 32.0 % | 34.8 % |
+  | `t40x1ld` | 363 | 167 | 17.3 % | 21.4 % | 22.8 % |
+  | `t12x1` | 315 | 126 | 15.0 % | 18.6 % | 19.8 % |
+  | `d2` cut | 1312 | 672 | 62.4 % | 77.4 % | 82.4 % |
+
+  The time is the same (two runs each, the first run of a container left out): `j4k40`, `a1_8b4k_300` and the `d2` cut in 23.1 to 23.2, 8.4 to 8.5 and 6.4 s
+  by default and 23.3 to 23.4, 8.5 and 6.4 to 6.5 s with the part; `cpu wait_sec_slot` 0.003 to 0.035
+  ms a frame on average on both sides, 0.22 ms at most once (the default). The one wait for a frame in
+  front in these runs (`d2`, with the part) was for a chunk of transform block records, whose pool is
+  whole.
+- *Checked locally:* the frames of the seven streams are the same with the default, with the part and
+  with three quarters, md5 by md5. The 244 vectors of AOM with `-lowmemparts 37` (the part with the
+  whole mode info pool), `-parseframes 2 -t 2` and `-parseframes 3 -t 4`: 244 of 244 each, no `MEMORY
+  FAILED`; tiles waited for a chunk of the coefficient pool 59 times with two frames in parse (24 for
+  the GPU, 35 for a frame in front; 9 with the whole pool) and 124 times with three, in 9 of the
+  vectors, the lossless and low quantizer ones, whose frames take up to 91.6 % of the smaller pool.
+  With `-lowmemparts 39` 243 of 244: the lossless 640x360 10-bit vector does not fit half the mode info
+  pool, as before, which a decoder of that size does not have by default.
+- *For the console:* `-lowmemparts 39` against the default on the 4K clips, `d2_300` first (57.6 % of
+  the whole pool at once there, 33.3 % a frame): md5 and no `MEMORY FAILED`; device buffers 501.5
+  against 513.5 MiB and the app's usage; the frames a second and the decode call; `cpu wait_sec_slot`;
+  and the `pool idct_coefs` line of `-memstats`: chunks in use at once (about 71 % expected on `d2`)
+  and the two waits. If the waits stay near 0 and the time is the same, 4 can join the default above
+  1920x1088 (`AV1_LOW_MEMORY_DEFAULT` 39, which is then `AV1_LOW_MEMORY_PARTS`), and the default 4K
+  10-bit decoder takes 501.5 MiB. If `d2` waits for the GPU there, the pool is the price of those waits
+  and stays whole.

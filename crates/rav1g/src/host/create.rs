@@ -157,7 +157,10 @@ fn late_frame_buffer(low_memory: i32) -> bool {
 ///
 /// `AV1_LOW_MEMORY_MODE_INFO` halves the mode info pool (the default of a decoder above 1920x1088,
 /// [`default_low_memory`]); `AV1_LOW_MEMORY_COEFS` sizes the coefficient pool for 24 values a 4x4 unit
-/// and not 30. Such a pool no longer holds every frame: a frame that does not fit is a decode error.
+/// and not 30 (four fifths: every coefficient of a 4:2:0 frame without the padding of the counts; 12.0
+/// MiB at 3840x2176; docs/memory.md, candidate 6). Such a pool no longer holds every frame: a frame that
+/// does not fit is a decode error. The pool is one buffer that the tiles in parse write through a
+/// pointer and the frames on the GPU read by offsets, so it is not made larger for such a frame.
 fn pool_chunks(cells: usize, low_memory: i32) -> ([usize; KINDS], [usize; KINDS]) {
     let mut rule = [cells.max(1); KINDS];
     if low_memory & AV1_LOW_MEMORY_MODE_INFO as i32 != 0 {

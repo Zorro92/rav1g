@@ -42,7 +42,8 @@
 //! nothing in front of it holds a chunk and none is free: a decode error of that frame, as a frame that
 //! outgrew its two shares was.
 //!
-//! **A pool below the worst case of a frame** (the same `AV1_LOW_MEMORY_*`: half the mode info pool).
+//! **A pool below the worst case of a frame** (the same `AV1_LOW_MEMORY_*`: half the mode info pool,
+//! four fifths of the coefficient pool; the rule is the same for every pool, by its own chunks).
 //! Held against `held + cells that are not parsed`, a frame in front could need more than the pool
 //! until half of it is parsed, and the frame behind it would wait that long for its first chunk,
 //! though the pool is nearly empty (measured: 1.4 to 1.8 ms a 4K frame). Such a pool holds a frame
@@ -52,7 +53,7 @@
 //! worst case, and it falls as the frame is parsed. What this gives up: a frame that has more than
 //! that share in its last part, behind a part with less, can find the room taken by the frame behind
 //! it and fail, where alone it would have fit. A frame whose cells are no more than the pool is held
-//! against its cells, as ever.
+//! against its cells, as ever. The waits are counted by pool (`-memstats`, [`Pools::take_stat_waits`]).
 //!
 //! **The test switch** (`AV1_PARSER_OPTION_TEST_POOL_WAIT`, `-parseopt poolwait`). A pool that holds
 //! the worst case is exhausted only by streams made for it, so the switch makes every stream a test
@@ -217,8 +218,11 @@ struct State {
     stop: bool,
     /// The test switch: see the module.
     test_wait: bool,
-    /// The takes that waited: for a chunk to come back from the GPU, and for a frame in front.
-    waits: [u64; 2],
+    /// The takes that waited, by [`Kind`]: for a chunk to come back from the GPU, and for a frame in
+    /// front.
+    waits: [[u64; 2]; KINDS],
+    /// The same since the statistics last asked ([`Pools::take_stat_waits`]).
+    stat_waits: [[u64; 2]; KINDS],
 }
 
 /// What the pools did, for the "MEMORY pools" line of a decoder's release.
@@ -266,7 +270,8 @@ impl Pools {
                 begun: 0,
                 stop: false,
                 test_wait,
-                waits: [0; 2],
+                waits: [[0; 2]; KINDS],
+                stat_waits: [[0; 2]; KINDS],
             }),
             changed: Condvar::new(),
             waiting: AtomicUsize::new(0),
@@ -379,8 +384,10 @@ impl Pools {
             state = self.changed.wait(state).unwrap_or_else(PoisonError::into_inner);
             self.waiting.fetch_sub(1, Ordering::AcqRel);
         };
-        state.waits[0] += u64::from(waited[0]);
-        state.waits[1] += u64::from(waited[1]);
+        for why in 0..2 {
+            state.waits[k][why] += u64::from(waited[why]);
+            state.stat_waits[k][why] += u64::from(waited[why]);
+        }
         taken
     }
 
@@ -448,6 +455,12 @@ impl Pools {
         })
     }
 
+    /// The takes of each pool that waited since the last call: for the GPU to finish an older frame,
+    /// and for a frame in parse in front. For the statistics of `mem_stats.rs`.
+    pub(crate) fn take_stat_waits(&self) -> [[u64; 2]; KINDS] {
+        std::mem::take(&mut self.state().stat_waits)
+    }
+
     /// Closes the pools: nothing waits any more, and a take gives [`Take::Stopped`].
     pub(crate) fn stop(&self) {
         self.state().stop = true;
@@ -459,8 +472,8 @@ impl Pools {
         Stats {
             total: [0, 1, 2].map(|kind| state.chunks[kind].total),
             peak: [0, 1, 2].map(|kind| state.chunks[kind].peak),
-            waits_for_gpu: state.waits[0],
-            waits_for_frame: state.waits[1],
+            waits_for_gpu: state.waits.iter().map(|waits| waits[0]).sum(),
+            waits_for_frame: state.waits.iter().map(|waits| waits[1]).sum(),
         }
     }
 }
@@ -629,6 +642,65 @@ mod tests {
         assert_eq!(frame(2040).can_need(0, 1020), 0);
         // Four fifths (the coefficient pool of the low memory part).
         assert_eq!(frame(2040).can_need(100, 1632), 80);
+        assert_eq!(frame(2040).can_need(2040, 1632), 1632);
+        assert_eq!(frame(2040).can_need(1, 1632), 1);
+        // A frame of 1080p in the decoder for 4K: its cells.
+        assert_eq!(frame(510).can_need(510, 1632), 510);
+    }
+
+    #[test]
+    fn the_coefficient_pool_at_four_fifths_leaves_the_frame_in_front_its_share() {
+        // The pool of a decoder for 3840x2176 with `AV1_LOW_MEMORY_COEFS`: 1632 of 2040 chunks under the
+        // rule and 63 for the ends of pieces, which are the oldest frame's alone.
+        let pools = Arc::new(Pools::new([2040, 1695, 2040], [2040, 1632, 2040]));
+        let coefs = |pools: &Arc<Pools>, slot: usize, want: usize| {
+            let pools = pools.clone();
+            let done = Arc::new(AtomicBool::new(false));
+            let flag = done.clone();
+            let handle = thread::spawn(move || {
+                let taken = pools.take(slot, Kind::Coefs, want);
+                flag.store(true, Ordering::Release);
+                taken
+            });
+            thread::sleep(Duration::from_millis(100));
+            (handle, done)
+        };
+        pools.begin(0, 2040);
+        pools.begin(1, 2040);
+        // The other pools hold the worst case: the frame behind waits for nothing but the bound.
+        // The frame in front has parsed nothing: the whole of the rule is what it can need.
+        let (handle, done) = coefs(&pools, 1, 16);
+        assert!(!done.load(Ordering::Acquire));
+        // A piece of 16 and 20 cells parsed: it can need the 16 it holds and 1616 for its 2020 cells,
+        // which is the pool. The frame behind still waits.
+        assert_eq!(piece(pools.take(0, Kind::Coefs, 16)), (0, 16));
+        pools.progress(0, 20);
+        assert!(!done.load(Ordering::Acquire));
+        // 40 cells parsed with that piece: 16 + 1600 of 1632, and the frame behind has its piece. Held
+        // against a chunk a cell it would get its first chunk when 425 cells are parsed.
+        pools.progress(0, 20);
+        assert_eq!(piece(handle.join().unwrap()), (16, 16));
+        // Half of the frame in front is parsed with those 16 chunks. It takes a large piece for the
+        // rest: at its end it can hold the 16 and the 816 of its 1020 cells, the piece is of those.
+        pools.progress(0, 980);
+        assert_eq!(piece(pools.take(0, Kind::Coefs, 304)), (32, 304));
+        // So of the 1632 the frame behind can have 800: the 16 it holds, and 784 more.
+        assert_eq!(piece(pools.take(1, Kind::Coefs, 400)), (336, 400));
+        assert_eq!(piece(pools.take(1, Kind::Coefs, 400)), (736, 384));
+        let (handle, done) = coefs(&pools, 1, 1);
+        assert!(!done.load(Ordering::Acquire));
+        // The oldest frame in parse takes what is free, the chunks above the rule too.
+        assert_eq!(piece(pools.take(0, Kind::Coefs, 2000)), (1120, 575));
+        assert_eq!(pools.take(0, Kind::Coefs, 1), Take::Full);
+        assert_eq!(pools.held_behind(0, Kind::Coefs), 800);
+        pools.stop();
+        assert_eq!(handle.join().unwrap(), Take::Stopped);
+        // The waits are counted by pool.
+        assert_eq!(pools.take_stat_waits(), [[0, 0], [0, 2], [0, 0]]);
+        assert_eq!(pools.take_stat_waits(), [[0; 2]; KINDS]);
+        let stats = pools.stats();
+        assert_eq!((stats.waits_for_gpu, stats.waits_for_frame), (0, 2));
+        assert_eq!(stats.peak, [0, 1695, 0]);
     }
 
     #[test]
