@@ -2908,6 +2908,115 @@ the default if the pass is well under the 2.9 ms it takes off the thread that re
 per second of `j4k40`, which the GPU bounds, do not fall); `cpu parse: sink calls` for `recordonce`
 (the switch goes if the console agrees with the development machine).
 
+### The block lists on the GPU: a design
+
+Not built: a plan for review. The block lists are 1.3 (`d2`) and 3.4 ms (`j4k40`) a 4K frame on the
+parse threads of the console.
+
+**What the lists are.** `av1_mi_push_block` (`blocks.rs`), called by the sink for every mode info
+record in the order of the parse, does three things:
+
+1. *It sorts the block's prediction blocks into lists.* A list is a kind and a size: 219 lists of
+   inter blocks (by type, 24 sizes, and the 2x2 chroma lists), 24 of warped blocks, 36 of
+   reconstruction blocks, with `-interfast` the lists by motion vector class, and 10 lists for every
+   wavefront iteration of intra prediction. The counter of each list is in the tile's part of
+   `gen_block_map`.
+2. *It numbers them.* A prediction block gets the value its list's counter had (`take`), which is its
+   place in the list, and that number goes into the tile's index list (`gen_mi_block_indexes`), behind
+   the `index_base` the function stores into the record. So the order inside a list is the order of
+   the parse.
+3. *It runs the wavefront of intra prediction.* A transform block gets one more than the highest
+   iteration of the neighbours it reads (above, left, above right, below left, by its mode), kept at
+   the edges of the tile, and written into `gen_intra_inter_grid` at the one entry the shader reads.
+   This is the larger half of the function (0.81 of 1.48 ms on the development machine for `j4k40`),
+   and it is a chain: a block's iteration needs those of the blocks before it.
+
+**Who reads them.** The thread that records turns the counters into the starts of the lists, list by
+list over the tiles (`prediction_gen_blocks`), and copies the index lists of the tiles into the
+slot's buffer. `gen_pred_blocks.hlsl`, one thread a record, sorts the block again by itself, and
+writes each prediction block record at the start of its list plus its number. The prediction stages
+then run a dispatch a list: the inter passes over the lists that are not empty, intra prediction a
+dispatch (or two) for every iteration.
+
+**What the CPU needs before it records**, and gets from the lists today:
+
+- the records of `prediction_blocks` and `prediction_blocks_warp` the frame writes, for the two
+  buffers that grow with the frames (`stage_buffers::for_frame`, `pred_block_counts`), and the
+  entries of the index list;
+- the start and the count of every list, for the inline constants and the size of its dispatch
+  (`list_range`), and which lists are empty;
+- the number of wavefront iterations (`intra_iters`): as many dispatches as that;
+- `have_inter` of a tile, and with `-gputimedetail` the counters of the inter breakdown.
+
+**The plan, in two steps of which the first can stand alone.**
+
+*Step A: the lists of everything but intra prediction, counted and numbered by the GPU.* The parse
+keeps the wavefront (3 above) and the intra lists; it no longer sorts or numbers inter, warped and
+reconstruction blocks.
+
+- A pass in front of `gen_pred_blocks`, one group of 64 threads for 64 records in the order of the
+  pool, as `gen_pred_blocks` is dispatched: each thread sorts its block as that shader does (the code
+  is shared, a header of both), the group counts in shared memory how many prediction blocks of each
+  list its records have, and each thread takes as its number inside the group the count of the
+  records before it in the group with the same list. The group stores its counts as a row of a
+  table, a row a group and a column a list, on the device only (280 lists; a frame of `j4k40` has
+  12,400 records, 194 groups, 0.2 MiB; the table is sized by the frame's records, which the parse
+  knows).
+- A second pass adds the rows up, a thread a list down the groups of a tile, then across the tiles
+  in the order of `prediction_gen_blocks` (lists outside, tiles inside): the start of every list of
+  every tile, and the count. This is what the thread that records computes now.
+- `gen_pred_blocks` takes a block's place as the start of its list, plus the sum of the groups
+  before its group, plus its number inside the group: the same place as today, because the order of
+  the pool is the order of the parse inside a tile. So `prediction_blocks` holds the same bytes, and
+  the inter shaders do not change.
+- *The sizes.* The thread that records no longer knows the counts. For the buffers, an upper bound
+  the parse can have cheaply: the prediction blocks of an inter block are bounded by its 4x4 units
+  (luma, chroma, the neighbours of overlapped prediction along its two edges, 2x2 chroma), which
+  the sink adds up in the block call. For the dispatches,
+  `DispatchIndirect` (D3D11 has it): the second pass writes the three group counts of every list
+  into an argument buffer, and the lists' starts and counts into a buffer the inter shaders read
+  where they have inline constants now. That is the change that is wide: every inter shader
+  (`inter_common.h`) and every dispatch of `prediction_run_all`, which then records a dispatch for
+  every list (about 280) and not only for those that have blocks.
+- The stage dumps `pred_blocks` and `pred_blocks_warp` are equal to those of the C++ reference
+  byte for byte if the numbering is right, which is what `rust-equal` then holds; the dump has to
+  take its count from the GPU's table (a copy of the counts in front of the records) and not from
+  the CPU.
+
+*Step B: the wavefront.* The iteration of a transform block is the longest path to it, and a GPU
+finds it by repeating: every block takes one more than the highest of its neighbours until nothing
+changes, which gives the numbers of the chain whatever the order. Inside a group of the size of a
+superblock the passes can run in shared memory (as `intra_v2.hlsl` does); between superblocks a
+dispatch for every diagonal of superblocks, about 128 for a 4K frame, known from the frame's size. But the
+number of iterations (165 a frame of `j4k40` on average, 453 at most) is then not known when the
+frame is recorded, and intra prediction is a dispatch an iteration: either the list is recorded for
+the worst case with indirect dispatches that are mostly empty (thousands of commands a frame, more
+CPU than the lists cost), or the frame is recorded in two parts with the counts read back in
+between, which puts a wait for the GPU into the thread that records. Neither is worth it before
+step A has shown what the lists without the wavefront cost.
+
+**Risks.**
+
+- *The order.* A number that depends on which thread ran first (a counter the threads add to) would
+  give the same frames and other lists; the plan has none, every number is a sum over the records in
+  front. The proof is the stage dump, on every stream of the set.
+- *The upper bound of the buffers* undoes a part of the memory work: the two buffers are 0.1 to 0.4
+  of their worst case today because the counts are exact. The bound from the units of the inter
+  blocks is tight for frames of large blocks and loose for frames of 4x4 blocks.
+- *The inter shaders read their list from a buffer*: one more load a thread in the inter stage, and
+  4K speed must not fall. `-interfast` has lists of its own to carry through.
+- *Empty dispatches* cost the thread that records: 280 dispatches with their constants a frame,
+  where it records only the lists that have blocks now. To be measured before the shaders change.
+- *Shader Model 5.* Shared memory of a group, `DispatchIndirect` and raw buffers are all `cs_5_0`;
+  no atomic operation and no wave operation is needed.
+
+**What it would save.** Step A takes the sorting and the numbering off the parse threads, a bit
+under half of the function if the console splits it as the development machine does: about 0.6 of
+the 1.3 ms of `d2` and 1.5 of the 3.4 ms of `j4k40`, for two small passes of the GPU, which has 10
+to 23 ms of room a frame in playback. Step B would take the rest, the whole
+1.3 and 3.4 ms, at the price above. `d2` is the clip the parse bounds: 0.6 ms of 25.8 ms of thread
+time is 2 %, the whole 1.3 ms 5 %.
+
 ## Licence
 
 rav1d is BSD-2-Clause (copyright VideoLAN and the dav1d authors, and the rav1d contributors); the
