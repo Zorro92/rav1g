@@ -1241,11 +1241,13 @@ unsafe fn take_piece(
                     Kind::Coefs => "coefficients do not fit the coefficient pool",
                     Kind::Txb => "transform blocks do not fit the pool of their records",
                 };
+                // In a pool below the worst case the frames in parse behind this one may hold a part.
+                let behind = pools.held_behind((*td).slot_index as usize, kind);
                 log(
                     true,
                     &format!(
-                        "MEMORY FAILED frame {}: its {what}, which this frame has for itself ({} chunks of {} \
-                         items); the frame is a decode error",
+                        "MEMORY FAILED frame {}: its {what} ({} chunks of {} items, of which the frames in parse \
+                         behind it hold {behind}); the frame is a decode error",
                         (*td).frame_number,
                         (*dec).pool_total[kind as usize],
                         CHUNK_ITEMS[kind as usize]

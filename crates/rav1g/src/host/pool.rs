@@ -42,6 +42,18 @@
 //! nothing in front of it holds a chunk and none is free: a decode error of that frame, as a frame that
 //! outgrew its two shares was.
 //!
+//! **A pool below the worst case of a frame** (the same `AV1_LOW_MEMORY_*`: half the mode info pool).
+//! Held against `held + cells that are not parsed`, a frame in front could need more than the pool
+//! until half of it is parsed, and the frame behind it would wait that long for its first chunk,
+//! though the pool is nearly empty (measured: 1.4 to 1.8 ms a 4K frame). Such a pool holds a frame
+//! only if the frame needs less than a chunk a cell, so that is what the frame in front is left: for
+//! its cells that are not parsed, their share of the pool (`cells not parsed * pool / cells of the
+//! frame`, [`Frame::can_need`]). At its begin that is the whole pool, as `cells` is in a pool of the
+//! worst case, and it falls as the frame is parsed. What this gives up: a frame that has more than
+//! that share in its last part, behind a part with less, can find the room taken by the frame behind
+//! it and fail, where alone it would have fit. A frame whose cells are no more than the pool is held
+//! against its cells, as ever.
+//!
 //! **The test switch** (`AV1_PARSER_OPTION_TEST_POOL_WAIT`, `-parseopt poolwait`). A pool that holds
 //! the worst case is exhausted only by streams made for it, so the switch makes every stream a test
 //! of the waits: a frame's first piece of a pool is given as always, and every piece after it counts
@@ -179,9 +191,22 @@ struct Frame {
     /// The chunks it holds.
     held: [usize; KINDS],
     /// The most chunks it can hold when its parse has ended: what `held + cells not parsed` was at
-    /// its lowest, the times it was looked at.
+    /// its lowest, the times it was looked at (in a pool below the frame's worst case: the share of
+    /// the pool of the cells not parsed, [`Frame::can_need`]).
     bound: [usize; KINDS],
+    /// Its cells.
+    cells: usize,
     pieces: Vec<Piece>,
+}
+
+impl Frame {
+    /// The chunks the frame is left for `remaining` cells that are not parsed, in a pool of which the
+    /// frames in parse share `rule` chunks: a chunk a cell, which is the worst case, or in a pool that
+    /// is smaller than the frame's cells the share of the pool those cells are of the frame, rounded
+    /// up (see the module).
+    fn can_need(&self, remaining: usize, rule: usize) -> usize {
+        if self.cells <= rule { remaining } else { (remaining * rule).div_ceil(self.cells) }
+    }
 }
 
 struct State {
@@ -233,7 +258,7 @@ impl Pools {
     /// [`Pools::new`], with the test switch (see the module).
     pub(crate) fn with_test_wait(total: [usize; KINDS], rule: [usize; KINDS], test_wait: bool) -> Pools {
         let frame =
-            || Frame { order: 0, in_parse: false, held: [0; KINDS], bound: [0; KINDS], pieces: Vec::with_capacity(64) };
+            || Frame { order: 0, in_parse: false, held: [0; KINDS], bound: [0; KINDS], cells: 0, pieces: Vec::with_capacity(64) };
         Pools {
             state: Mutex::new(State {
                 chunks: [0, 1, 2].map(|kind| Chunks::new(total[kind], rule[kind])),
@@ -267,12 +292,14 @@ impl Pools {
         let mut state = self.state();
         state.begun += 1;
         let order = state.begun;
+        let rules = [0, 1, 2].map(|kind| state.chunks[kind].rule);
         let frame = &mut state.frames[slot];
         debug_assert!(frame.pieces.is_empty(), "the slot's last frame gave its pieces back");
         frame.order = order;
         frame.in_parse = true;
         frame.held = [0; KINDS];
-        frame.bound = [cells; KINDS];
+        frame.cells = cells;
+        frame.bound = rules.map(|rule| frame.can_need(cells, rule));
         self.remaining[slot].store(cells as i32, Ordering::Release);
     }
 
@@ -316,7 +343,7 @@ impl Pools {
                     continue;
                 }
                 let remaining = usize::try_from(self.remaining[other].load(Ordering::Acquire)).unwrap_or(0);
-                let bound = front.bound[k].min(front.held[k] + remaining);
+                let bound = front.bound[k].min(front.held[k] + front.can_need(remaining, state.chunks[k].rule));
                 let front_order = front.order;
                 state.frames[other].bound[k] = bound;
                 let behind: usize =
@@ -332,8 +359,9 @@ impl Pools {
                 let taken = if empty { None } else { state.chunks[k].take(allowed) };
                 if let Some((first, chunks)) = taken {
                     let remaining = usize::try_from(self.remaining[slot].load(Ordering::Acquire)).unwrap_or(0);
+                    let rule = state.chunks[k].rule;
                     let frame = &mut state.frames[slot];
-                    frame.bound[k] = frame.bound[k].min(frame.held[k] + remaining);
+                    frame.bound[k] = frame.bound[k].min(frame.held[k] + frame.can_need(remaining, rule));
                     frame.held[k] += chunks;
                     frame.pieces.push(Piece { kind, first: first as u32, chunks: chunks as u32 });
                     break Take::Piece { first, chunks };
@@ -395,6 +423,14 @@ impl Pools {
         frame.held = [0; KINDS];
         self.remaining[slot].store(0, Ordering::Release);
         self.changed.notify_all();
+    }
+
+    /// The chunks of a pool that the frames behind the frame of the slot hold: what a frame that does
+    /// not fit ([`Take::Full`]) did not have for itself.
+    pub(crate) fn held_behind(&self, slot: usize, kind: Kind) -> usize {
+        let state = self.state();
+        let order = state.frames[slot].order;
+        state.frames.iter().filter(|frame| frame.order > order).map(|frame| frame.held[kind as usize]).sum()
     }
 
     /// The chunks the frame of the slot holds, by [`Kind`].
@@ -549,6 +585,50 @@ mod tests {
         pools.stop();
         assert_eq!(handle.join().unwrap(), Take::Stopped);
         assert_eq!(pools.take(0, Kind::ModeInfo, 1), Take::Stopped);
+    }
+
+    #[test]
+    fn a_pool_below_the_worst_case_leaves_the_frame_in_front_its_share() {
+        // Half the worst case of a frame of 40 cells.
+        let pools = Arc::new(Pools::new([20, 40, 40], [20, 40, 40]));
+        pools.begin(0, 40);
+        pools.begin(1, 40);
+        // The frame in front has parsed nothing: it can need all of the pool.
+        let (handle, done) = take_on_thread(&pools, 1, 16);
+        assert!(!done.load(Ordering::Acquire));
+        // Ten of its cells are parsed and it holds one chunk: of the 20 chunks it can need the 15 of
+        // its 30 cells and the one it holds, so four are the frame's behind. (Held against a chunk a
+        // cell it could need 31: the frame behind would wait until 21 cells are parsed.)
+        assert_eq!(piece(pools.take(0, Kind::ModeInfo, 1)), (0, 1));
+        pools.progress(0, 10);
+        assert_eq!(piece(handle.join().unwrap()), (1, 4));
+        let (handle, done) = take_on_thread(&pools, 1, 16);
+        assert!(!done.load(Ordering::Acquire));
+        // All of it parsed with that one chunk: the rest of the pool is free for the frame behind.
+        pools.progress(0, 30);
+        assert_eq!(piece(handle.join().unwrap()), (5, 15));
+        // The frame in front does not fit now, and the pools say what was not its own.
+        assert_eq!(pools.take(0, Kind::ModeInfo, 1), Take::Full);
+        assert_eq!(pools.held_behind(0, Kind::ModeInfo), 19);
+        assert_eq!(pools.held_behind(1, Kind::ModeInfo), 0);
+        let stats = pools.stats();
+        assert_eq!((stats.waits_for_gpu, stats.waits_for_frame), (0, 2));
+    }
+
+    #[test]
+    fn the_share_of_a_frame_in_a_pool() {
+        let frame = |cells| Frame { order: 1, in_parse: true, held: [0; KINDS], bound: [0; KINDS], cells, pieces: Vec::new() };
+        // A pool of the frame's cells, or of more: a chunk a cell.
+        assert_eq!(frame(2040).can_need(2040, 2040), 2040);
+        assert_eq!(frame(2040).can_need(700, 2040), 700);
+        assert_eq!(frame(510).can_need(510, 1020), 510);
+        // Half the worst case of the frame: the whole pool at its begin, then half a chunk a cell, rounded up.
+        assert_eq!(frame(2040).can_need(2040, 1020), 1020);
+        assert_eq!(frame(2040).can_need(1021, 1020), 511);
+        assert_eq!(frame(2040).can_need(1, 1020), 1);
+        assert_eq!(frame(2040).can_need(0, 1020), 0);
+        // Four fifths (the coefficient pool of the low memory part).
+        assert_eq!(frame(2040).can_need(100, 1632), 80);
     }
 
     #[test]

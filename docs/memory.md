@@ -312,3 +312,56 @@ info grid` of `-memstats`), a slot's grid is 2.0 MiB where it was 4.0, and the d
   | Frames a second, `j4k40` / `d2_300` | 45.9 / 49.8 | 47.4 / 51.2 | +3.2 / +2.9 % |
 
   The CPU gains from writing half the grid; the GPU is the same.
+
+### The wait of the second frame in parse in a pool at half (candidate 2)
+
+2026-11-15. Not a reduction yet: `-lowmemparts 3` (the mode info pool at half, 1020 chunks at 4K)
+stays off by default. On the console it cost 2.4 % of the frames a second on `j4k40` and `d2_300` with
+the GPU's time unchanged: `cpu wait_sec_slot` of `GPUTIME`, the time a tile waits for a piece of a pool,
+went from 0.02 ms a frame to 1.4 to 1.8 ms, in a pool that is used to 20 % at most.
+
+- *The cause* was the rule of the pools ([step 5, "The wait rule"](phase2-rav1d.md#step-5-the-pools),
+  `Pools::take`), not a shortage. A frame in parse behind another takes chunks only while what the
+  frame in front can still need, and what the frames behind that one hold, fit the pool; "can still
+  need" was `held + cells not parsed`, a chunk a cell, which is the worst case. In a pool of the worst
+  case that bound is the whole pool when the frame begins and falls with the first cells it parses.
+  In a pool at half it stays above the pool until the frame in front has parsed half its cells (1020
+  of 2040), so the second frame in parse got its first chunk when the first one was half way through:
+  for that long one frame was in parse, not two.
+- *The rule now*: in a pool that is smaller than the cells of the frame in front, that frame is left,
+  for its cells that are not parsed, their share of the pool (`cells not parsed * pool / cells`,
+  rounded up; `Frame::can_need` of `pool.rs`). That is the whole pool when the frame begins and falls
+  as it is parsed, as the bound of a pool of the worst case does. A frame whose cells are no more than
+  the pool is held against its cells as before, so nothing changes for the default pools, and nothing
+  for a frame of 1080p in a decoder for 4K with the pool at half.
+- *What it gives up.* A pool below the worst case never held every frame: a frame that needs more than
+  the pool is a decode error, as before (the lossless 640x360 vector with the pool at half, before and
+  after). New is that a frame which fits the pool alone can fail when it has more than the pool's share
+  in its last part, behind a part with less, and the frame behind it has taken the room meanwhile: with
+  the pool at half, a last part with more than half a chunk a cell, while the frame behind holds what
+  the first part left. The largest frame measured takes 12.9 % of the worst case as a whole. It fails
+  as a frame that does not fit does, and its line says what was not its own: `MEMORY FAILED frame n:
+  its blocks do not fit the mode info pool (1020 chunks of 256 items, of which the frames in parse
+  behind it hold 300)`. A pool at half that never fails a frame which fits alone has to make the frame
+  behind wait as it did; there is no rule between the two, because a frame in parse cannot give a
+  chunk back before the frame in front of it is submitted.
+- *Measured locally* (wine on lavapipe, `-lowmemparts 3`, two frames in parse, `-gputime`; the software
+  GPU keeps frames from overlapping in parse most of the time, so the console will show more on both
+  sides):
+
+  | Stream | Waits for a frame in front, before / after | `cpu wait_sec_slot` mean, ms | max, ms |
+  | --- | --- | --- | --- |
+  | `d2` cut, 30 frames | 8 / 0 | 7.035 / 0.008 | 107.0 / 0.04 |
+  | `j4k40`, 60 frames | 1 / 0 | 0.007 / 0.007 | 0.010 / 0.010 |
+  | the 244 vectors of AOM | 235 / 61 | | |
+
+  With the default pools the `d2` cut has 0.018 ms. The 244 vectors with `-lowmemparts 3 -parseframes 2
+  -t 2`: 243 right and the lossless 640x360 10-bit vector a decode error (it does not fit half a pool,
+  nothing behind it), the same before and after; with the default pools and two frames in parse 244 of
+  244; the `d2` cut with the pool at half 30 of 30.
+- *The coefficient pool is only written by the CPU* (it is write-combined memory, `UploadUAV`):
+  `decode_coefs` of the parser stores the values that are not zero, and the host clears (the creation,
+  a frame that failed). Nothing reads it back; the transform block records, the constants and the
+  lists in upload heaps are stored the same way.
+- **Console: pending** (`-lowmemparts 3` against the default, `cpu wait_sec_slot`).
+

@@ -2253,6 +2253,9 @@ left. What would close the gap is under "Left" below.
   second slot), moved to the pools. A second frame in parse therefore needs no memory of its own:
   it gets what the first one has shown it cannot need, which after a few superblocks is nearly all
   of the pool, and it waits for the first one only where that really is a worst case.
+  In a pool below the worst case of a frame (the low memory parts) the frame in front is left the
+  share of the pool of its cells that are not parsed, not a chunk a cell: held against a chunk a
+  cell, the second frame waited until the first was half parsed ([memory.md](memory.md#the-wait-of-the-second-frame-in-parse-in-a-pool-at-half-candidate-2)).
 - *A frame that does not fit* (only with a pool made smaller, `AV1_LOW_MEMORY_MODE_INFO` and
   `_COEFS`) is a decode error of that frame when it is the oldest, nothing in front of it holds a
   chunk and none is free: `MEMORY FAILED frame n: its blocks do not fit the mode info pool`.
