@@ -26,15 +26,22 @@ use crate::{ColorInfo, ColorPrimaries, ContentLightLevel, MasteringDisplay, Matr
 use crate::{Decoder, Device, Error, ErrorCode, Frame, ImageFormat, ImageRequest, LowMemory, Output, OutputImage};
 use crate::{OutputKind, Settings, TransferCharacteristics, switches};
 
-/// The shared back buffer: one back buffer for all pipeline slots and a pool of 10 frame buffers. The
-/// default of `rav1g_settings_default`.
+/// The shared back buffer: one back buffer for all pipeline slots and a pool of 10 frame buffers.
 pub const RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER: u32 = 1;
-/// A mode info pool of half the worst case of a frame. A frame that needs more is a decode error.
+/// A mode info pool of half the worst case of a frame: 55.8 MiB less for 3840x2160. A frame that needs
+/// more than the pool is a decode error.
 pub const RAV1G_LOW_MEMORY_MODE_INFO: u32 = 2;
 /// A coefficient pool of four fifths of the worst case of a frame, likewise.
 pub const RAV1G_LOW_MEMORY_COEFS: u32 = 4;
 /// All memory reductions.
 pub const RAV1G_LOW_MEMORY_ALL: u32 = 7;
+/// What `rav1g_settings_default` sets: the default, which is by the size of the decoder. Up to 1920x1088
+/// it is `RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER`; above, `RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER |
+/// RAV1G_LOW_MEMORY_MODE_INFO` (memory is short at 4K; the whole pool of a decoder for 1080p is 29.5 MiB,
+/// and the streams that come near the worst case, lossless and low quantizers, are of such sizes). Not a
+/// part to add: settings that have it get the default. The parts alone are taken as they are at every
+/// size, `RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER` for a decoder of any size that has to take every stream.
+pub const RAV1G_LOW_MEMORY_DEFAULT: u32 = 16;
 
 /// `Rav1gSettings::parser_options`, values to add up: ways of doing the parse (rav1d's parse pass)
 /// that give the same frames (docs/phase2-rav1d.md, "Where the time goes"). The value 1 was a switch
@@ -167,6 +174,7 @@ const _: () = {
     assert!(RAV1G_LOW_MEMORY_MODE_INFO == LowMemory::MODE_INFO.0);
     assert!(RAV1G_LOW_MEMORY_COEFS == LowMemory::COEFS.0);
     assert!(RAV1G_LOW_MEMORY_ALL == LowMemory::ALL.0);
+    assert!(RAV1G_LOW_MEMORY_DEFAULT == LowMemory::DEFAULT.0);
     assert!(RAV1G_PARSER_OPTION_NO_LF_MASKS == crate::ParserOptions::NO_LF_MASKS);
     assert!(RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD == crate::ParserOptions::TILE_KEEPS_THREAD);
     assert!(RAV1G_PARSER_OPTION_TIME_CALLS == crate::ParserOptions::TIME_CALLS);
@@ -575,7 +583,8 @@ pub struct Rav1gSettings {
     /// work at the same time, 2 to 4. 0 is the default: one slot more than frames in parse, at most 4.
     /// Each slot has buffers of its own.
     pub frame_slots: u32,
-    /// The memory reductions: `RAV1G_LOW_MEMORY_*` values added up, 0 for none.
+    /// The memory reductions: `RAV1G_LOW_MEMORY_DEFAULT`, which `rav1g_settings_default` sets, or the
+    /// parts wanted added up, 0 for none.
     pub low_memory: u32,
     /// Buffers for the second intra path (`rav1g_set_intra_v2`).
     pub intra_v2: bool,

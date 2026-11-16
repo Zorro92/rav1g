@@ -104,11 +104,11 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"nofitsize", atSingle, anOptional, "create the decoder for 4096x2176 10-bit whatever the stream's size is",
        "fitsize", &params_.nofitsize_},
       {"lowmem", atSingle, anOptional,
-       "smaller decoder: shared back buffer, smaller mode info and coefficient shares (same output)", "",
+       "smaller decoder: shared back buffer, mode info pool at half, smaller coefficient pool (same output)", "",
        &params_.lowmem_},
       {"lowmemparts", atInt, anOptional,
-       "memory reductions in effect: 1 shared back buffer + 2 mode info shares + 4 coefficient shares. Default 1, "
-       "0 for none",
+       "memory reductions in effect: 1 shared back buffer + 2 mode info pool at half + 4 smaller coefficient pool. "
+       "Default: 1, and 3 for a decoder above 1920x1088; 1 for the mode info pool of the worst case, 0 for none",
        "", &params_.lowmem_parts_},
       {"lfhsplit", atInt, anOptional,
        "horizontal loop filter: 1 even rows of blocks, UAV barrier, odd rows; 2 every row of blocks on its "
@@ -333,7 +333,8 @@ int CParameters::Parse(one_task& args, std::string& Err) {
   // -t: 0 is what Reset() leaves: the library's default for the frame size.
   if (params_.threads_ < 0) params_.threads_ = 0;
 
-  if (params_.lowmem_parts_ < 0 || params_.lowmem_parts_ > PLAYER_LOWMEM_ALL) {
+  if (params_.lowmem_parts_ != PLAYER_LOWMEM_DEFAULT &&
+      (params_.lowmem_parts_ < 0 || params_.lowmem_parts_ > PLAYER_LOWMEM_ALL)) {
     char ss[96];
     sprintf(ss, "-lowmemparts %d is not allowed: the sum of 1, 2 and 4, at most %d.", params_.lowmem_parts_,
             PLAYER_LOWMEM_ALL);
@@ -355,7 +356,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
   if (params_.gputime_detail_) params_.gputime_ = true;
   if (params_.dumpdir_.empty()) params_.dumpdir_ = "/dumps";
   params_.dumpdir_ = write_root_path_ + params_.dumpdir_;
-  // -lowmem is all parts; -lowmemparts alone says exactly which ones (0: none); neither: the default, part 1.
+  // -lowmem is all parts; -lowmemparts alone says exactly which ones (0: none); neither: the library's default for the decoder's size.
   if (params_.lowmem_) params_.lowmem_parts_ = PLAYER_LOWMEM_ALL;
   // The defaults that have an opt-out flag. -cdefv2 and -fitsize are still accepted and change nothing;
   // giving a flag together with its opposite was refused above.

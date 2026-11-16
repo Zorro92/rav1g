@@ -547,6 +547,7 @@ int AV1Decoder::DecodeOne() {
       // The same for what else decides which buffers exist: -intrav2 needs buffers of its own, -lowmem and
       // -lowmemparts leave some out or make them smaller. The player always says which parts it wants; 0 is
       // none.
+      static_assert(PLAYER_LOWMEM_DEFAULT == RAV1G_LOW_MEMORY_DEFAULT, "-lowmemparts out of step with rav1g.h");
       cfg.intra_v2 = params_.intrav2_ != 0;
       // -interfast: room in the block maps for the lists by motion vector class.
       cfg.inter_fast = params_.interfast_ || params_.interfastlists_;
@@ -592,7 +593,9 @@ int AV1Decoder::DecodeOne() {
               << (params_.slots_ ? "" : " (the library's for the frames in parse)") << ", frames in parse "
               << params_.parse_frames_ << (params_.parse_frames_ ? "" : " (the library's default)")
               << ", intra_v2 buffers "
-              << (params_.intrav2_ ? "yes (-intrav2)" : "no") << ", low memory parts " << params_.lowmem_parts_
+              << (params_.intrav2_ ? "yes (-intrav2)" : "no") << ", low memory parts "
+              << (params_.lowmem_parts_ == PLAYER_LOWMEM_DEFAULT ? std::string("default")
+                                                                 : std::to_string(params_.lowmem_parts_))
               << "; device buffers " << MibString(memory.device_size) << " and up to "
               << MibString(memory.device_size_deferred) << " for palette buffers on first use and stage buffers that grow, host memory "
               << MibString(memory.host_size);
@@ -797,10 +800,11 @@ int AV1Decoder::DecodeOne() {
   XB_LOGI << "Decoder size: " << created_width_ << "x" << created_height_ << " " << created_bitdepth_ << "-bit"
           << (params_.fitsize_ ? " (fit to the stream, default)" : " (fixed, -nofitsize)");
   // -lowmem, -lowmemparts: fixed at creation too.
-  XB_LOGI << "Low memory parts: " << created_lowmem_
+  XB_LOGI << "Low memory parts: "
+          << (created_lowmem_ == PLAYER_LOWMEM_DEFAULT ? std::string("default") : std::to_string(created_lowmem_))
           << (created_lowmem_ == PLAYER_LOWMEM_DEFAULT
-                  ? " (default: 1 shared back buffer)"
-                  : created_lowmem_ ? " (1 shared back buffer, 2 mode info shares, 4 coefficient shares)"
+                  ? " (the library's: 1 shared back buffer, and above 1920x1088 2 mode info pool at half)"
+                  : created_lowmem_ ? " (1 shared back buffer, 2 mode info pool at half, 4 smaller coefficient pool)"
                                     : " (none, -lowmemparts 0)");
   // -gpuclear, -cpuclear, -syncclear: the switch was set before the decoder was created (above).
   XB_LOGI << "Clears: "

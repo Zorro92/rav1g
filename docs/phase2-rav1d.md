@@ -2256,6 +2256,9 @@ left. What would close the gap is under "Left" below.
   In a pool below the worst case of a frame (the low memory parts) the frame in front is left the
   share of the pool of its cells that are not parsed, not a chunk a cell: held against a chunk a
   cell, the second frame waited until the first was half parsed ([memory.md](memory.md#the-wait-of-the-second-frame-in-parse-in-a-pool-at-half-candidate-2)).
+  Since then the mode info pool at half is the default for a decoder above 1920x1088: 1020 chunks and
+  537.6 MiB of device buffers at 4K (the numbers of this section are those of the pool of the worst
+  case, `-lowmemparts 1`).
 - *A frame that does not fit* (only with a pool made smaller, `AV1_LOW_MEMORY_MODE_INFO` and
   `_COEFS`) is a decode error of that frame when it is the oldest, nothing in front of it holds a
   chunk and none is free: `MEMORY FAILED frame n: its blocks do not fit the mode info pool`.

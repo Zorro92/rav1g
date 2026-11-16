@@ -112,8 +112,30 @@ struct ResourceConfig {
     inter_fast: bool,
     /// `AV1_LOW_MEMORY_*`.
     low_memory: i32,
+    /// The parts are the default of the decoder's size ([`default_low_memory`]), not an application's.
+    low_memory_default: bool,
     /// `AV1_PARSER_OPTION_TEST_POOL_WAIT`: the test switch of the pools (`pool.rs`).
     pool_test_wait: bool,
+}
+
+/// The size up to which a decoder keeps the mode info pool of the worst case by default: the buffers of
+/// a decoder for frames up to 1920x1088, which are sized for 1920x1152 (rounded up to 128, as
+/// `allocate_buffers` does): 540 cells.
+const FULL_MODE_INFO_POOL_SAMPLES: u64 = 1920 * 1152;
+
+/// The low memory parts of a decoder whose configuration asks for the default (`low_memory` 0): the
+/// shared back buffer, and for a decoder above 1920x1088 the mode info pool at half
+/// (`AV1_LOW_MEMORY_DEFAULT`). Memory is short at 4K, where half the pool is 55.8 MiB and the frames are
+/// film, which uses a fifth of it at most; up to 1080p the whole pool is 29.5 MiB or less, and the
+/// streams that come near the worst case (lossless, low quantizers: 58 % in the conformance set) are of
+/// such sizes. Parts an application names are taken as they are, at every size.
+fn default_low_memory(width: u32, height: u32) -> i32 {
+    let rounded = |side: u32| u64::from(side).next_multiple_of(128);
+    if rounded(width) * rounded(height) > FULL_MODE_INFO_POOL_SAMPLES {
+        AV1_LOW_MEMORY_DEFAULT as i32
+    } else {
+        AV1_LOW_MEMORY_SHARED_BACK_BUFFER as i32
+    }
 }
 
 /// The chunks of the pools of a decoder for frames of `cells` 64x64 areas: the chunks the frames in
@@ -124,9 +146,9 @@ struct ResourceConfig {
 /// end of a piece can stay empty (at most 1027 values of 7680), which only a stream that is made for
 /// it can add up to more than the worst case leaves over.
 ///
-/// `AV1_LOW_MEMORY_MODE_INFO` halves the mode info pool; `AV1_LOW_MEMORY_COEFS` sizes the coefficient
-/// pool for 24 values a 4x4 unit and not 30. Such a pool no longer holds every frame: a frame that
-/// does not fit is a decode error.
+/// `AV1_LOW_MEMORY_MODE_INFO` halves the mode info pool (the default of a decoder above 1920x1088,
+/// [`default_low_memory`]); `AV1_LOW_MEMORY_COEFS` sizes the coefficient pool for 24 values a 4x4 unit
+/// and not 30. Such a pool no longer holds every frame: a frame that does not fit is a decode error.
 fn pool_chunks(cells: usize, low_memory: i32) -> ([usize; KINDS], [usize; KINDS]) {
     let mut rule = [cells.max(1); KINDS];
     if low_memory & AV1_LOW_MEMORY_MODE_INFO as i32 != 0 {
@@ -251,7 +273,7 @@ impl ResourceConfig {
         let low_memory = if cfg.low_memory != 0 {
             cfg.low_memory & AV1_LOW_MEMORY_ALL as i32
         } else {
-            AV1_LOW_MEMORY_DEFAULT as i32
+            default_low_memory(cfg.width, cfg.height)
         };
         // Frame buffers in the pool. A buffer is out of the pool while the entropy decoder or a frame in
         // flight holds it:
@@ -290,6 +312,7 @@ impl ResourceConfig {
             intra_v2: cfg.intra_v2 != 0,
             inter_fast: cfg.inter_fast != 0,
             low_memory,
+            low_memory_default: cfg.low_memory == 0,
             pool_test_wait: cfg.parser_options & crate::sys::AV1_PARSER_OPTION_TEST_POOL_WAIT as i32 != 0,
         }
     }
@@ -808,9 +831,15 @@ unsafe fn log_memory_summary(is_error: bool, label: &str, dec: &Av1Core, rcfg: &
         .count();
     // How much of the worst case of a frame each pool holds.
     let cells = ((dec.max_width >> 6) * (dec.max_height >> 6)).max(1) as usize;
+    // Which mode info pool, and why: the default is by the size of the decoder.
+    let why = match (rcfg.low_memory_default, rcfg.low_memory & AV1_LOW_MEMORY_MODE_INFO as i32 != 0) {
+        (true, true) => " (the default: half above 1920x1088)",
+        (true, false) => " (the default: whole up to 1920x1088)",
+        (false, _) => " (as asked)",
+    };
     let shares = format!(
-        "mode info pool {}/{cells} of the worst case, coefficient pool {}/{cells} and {} chunks for the ends of \
-         pieces",
+        "mode info pool {}/{cells} of the worst case{why}, coefficient pool {}/{cells} and {} chunks for the ends \
+         of pieces",
         dec.pool_rule[Kind::ModeInfo as usize],
         dec.pool_rule[Kind::Coefs as usize],
         dec.pool_total[Kind::Coefs as usize] - dec.pool_rule[Kind::Coefs as usize]
@@ -1684,7 +1713,18 @@ mod tests {
         }
         cfg.frame_slots = 3;
         let rcfg = ResourceConfig::from_cfg(&cfg);
-        assert_eq!((rcfg.ref_fb_count, rcfg.low_memory), (11, 1));
+        // The default: the shared back buffer, and above 1920x1088 the mode info pool at half.
+        assert_eq!((rcfg.ref_fb_count, rcfg.low_memory, rcfg.low_memory_default), (11, 1, true));
+        for (width, height, parts) in [(1920, 1080, 1), (1920, 1088, 1), (1920, 1152, 1), (1088, 1920, 1), (1920, 1153, 3), (2560, 1440, 3), (3840, 2160, 3)] {
+            (cfg.width, cfg.height) = (width, height);
+            assert_eq!(ResourceConfig::from_cfg(&cfg).low_memory, parts, "{width}x{height}");
+        }
+        // What an application names is taken as it is, at every size.
+        (cfg.width, cfg.height, cfg.low_memory) = (640, 360, 3);
+        let rcfg = ResourceConfig::from_cfg(&cfg);
+        assert_eq!((rcfg.low_memory, rcfg.low_memory_default), (3, false));
+        (cfg.width, cfg.height, cfg.low_memory) = (3840, 2160, 1);
+        assert_eq!(ResourceConfig::from_cfg(&cfg).low_memory, 1);
         cfg.low_memory = 8; // AV1_LOW_MEMORY_NONE
         let rcfg = ResourceConfig::from_cfg(&cfg);
         assert_eq!((rcfg.ref_fb_count, rcfg.low_memory), (13, 0));

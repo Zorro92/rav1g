@@ -173,7 +173,7 @@ slots 74.1). By MiB, with the risk; the numbers above are local and from seven s
 | # | Reduction | Saves | What the numbers say | Risk |
 | --- | --- | ---: | --- | --- |
 | 1 | Frame buffers of 10 bits as three samples in 32 bits | 104.7 MiB (13 x 8.1), and a third of every palette buffer | Not a matter of the stream. `fbt10x3` is not this: it is a format of the **output image** (`tryHDR10x3`: the output copy and the film grain shader pack three samples into a word of the application's image). No stage reads or writes a packed frame buffer. | High. Every shader that touches a frame buffer (intra, inter, reconstruction, loop filter, CDEF, loop restoration, superres, borders, film grain, output) gets another addressing, and three samples share a word, so two threads of a dispatch that write neighbours write the same word: the writes have to be laid out by word. All of it in `cs_5_0`. Byte-identical is possible, the work is the largest here. |
-| 2 | Mode info pool at half, or a quarter, of the worst case | 55.8 or 83.7 MiB | At once at most 22.3 % (`d2`), 9 to 11 % elsewhere; one frame at most 12.9 %. The wait for the GPU exists and is tested (`poolwait`); a pool at half exists as `-lowmemparts 2`. | Low at half, medium at a quarter. A frame that alone does not fit is a decode error (`MEMORY FAILED`): at half an average block below 8x4 over a whole frame, at a quarter below 8x8; the low quantizer vectors reach 58 % at 352x288. A fallback would be a second buffer created on that frame, under the budget guard. More waits cost speed, not frames. |
+| 2 | **Done at half, the default above 1920x1088**, [below](#the-wait-of-the-second-frame-in-parse-in-a-pool-at-half-candidate-2). Mode info pool at half, or a quarter, of the worst case | 55.8 or 83.7 MiB | At once at most 22.3 % (`d2`), 9 to 11 % elsewhere; one frame at most 12.9 %. The wait for the GPU exists and is tested (`poolwait`); a pool at half exists as `-lowmemparts 2`. | Low at half, medium at a quarter. A frame that alone does not fit is a decode error (`MEMORY FAILED`): at half an average block below 8x4 over a whole frame, at a quarter below 8x8; the low quantizer vectors reach 58 % at 352x288. A fallback would be a second buffer created on that frame, under the budget guard. More waits cost speed, not frames. |
 | 3 | **Done**, [below](#stage-buffers-sized-for-the-frames-candidate-3) (the index list without a pool). Stage buffers at a quarter, grown on the frame that needs more: `prediction_blocks`, `prediction_blocks_warp`, `idct_blocks`, and the block index list as a fourth pool | 33.7 MiB (0.75 x 44.9) and 13.5 MiB (0.75 x 18.0) | A frame's peak is 15.8 %, 3.6 %, 26.1 % and 11.5 % (`d2`), a few percent elsewhere. | Medium. The three GPU buffers are used by one command list at a time and their counts are known before the frame is recorded, so a frame that needs more can get a larger buffer first (the guard may refuse: then a decode error). The index list is written at the parse: a pool with a piece for a whole block ([step 5, "Left"](phase2-rav1d.md#step-5-the-pools)). |
 | 4 | Smaller mode info record (224 bytes) | up to 55.8 MiB at half the size; less together with 2 | 2.5 to 2.8 MiB of a busy 4K frame's CPU bytes are these records. | Medium. No stream can fail for it, but the layout is shared by the sink, the block lists and the shaders that include `mode_info.h`; what a record can lose is not measured here. |
 | 5 | The frame buffer bound at the recording | 24.2 MiB (11 to 10 in the pool) | The reference slots name at most 5 frames in these streams; the pool is emptied by the frames in flight. | Medium: the references of a frame in parse are resolved at the recording, through every error path of step 4. The floor stays 10 (8 references, a failed frame, the next frame): the measured 5 do not allow less, a stream may use 8. |
@@ -315,8 +315,34 @@ info grid` of `-memstats`), a slot's grid is 2.0 MiB where it was 4.0, and the d
 
 ### The wait of the second frame in parse in a pool at half (candidate 2)
 
-2026-11-15. Not a reduction yet: `-lowmemparts 3` (the mode info pool at half, 1020 chunks at 4K)
-stays off by default. On the console it cost 2.4 % of the frames a second on `j4k40` and `d2_300` with
+2026-11-15. **The mode info pool at half is the default of a decoder above 1920x1088** since the rule
+below was changed and the console showed no cost (the last item). The decoder for 3840x2160 10-bit (two
+frames in parse, three slots) takes **537.6 MiB** of device buffers where it took 593.4.
+
+- *The rule* (the owner's): a configuration that asks for the default (`low_memory` 0 of the C
+  configuration, `LowMemory::DEFAULT`, `RAV1G_LOW_MEMORY_DEFAULT`, which `rav1g_settings_default` sets;
+  a task of the player or of `rav1g-dec` without `-lowmemparts`) gets the shared back buffer, and the
+  mode info pool at half when the decoder is larger than the one frames up to 1920x1088 have (1920x1152,
+  540 cells; `default_low_memory` of `create.rs`). Memory is short only at 4K, where half the pool is
+  55.8 MiB and the frames are film, which uses a fifth of the pool at most; up to 1080p the whole pool is
+  29.5 MiB or less, and the streams that come near the worst case, lossless and low quantizers (58 % in
+  the conformance set), are mostly of such sizes: with the pool halved at every size the lossless
+  640x360 10-bit vector was a decode error, and with this rule every vector decodes. Nothing is added
+  to the path of a frame: the rule is a number at the creation.
+- *Parts that are named win*, in both directions and at every size: `-lowmemparts 1`
+  (`RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER` alone) is the pool of the worst case at 4K, `-lowmemparts 3`
+  the pool at half at 640x360. The `MEMORY ... options` line of a creation says which pool it is and
+  why: `mode info pool 1020/2040 of the worst case (the default: half above 1920x1088)`, `540/540 ...
+  (the default: whole up to 1920x1088)`, `2040/2040 ... (as asked)`.
+- *What the default gives up above 1920x1088.* A frame that needs more than half the worst case of
+  mode info (an average block below 8x4 over the whole frame) is a decode error (`MEMORY FAILED frame
+  n: its blocks do not fit the mode info pool`), and with two frames in parse a frame that would fit
+  alone can fail when its end is much denser than its start (the item on what the rule of the pools
+  gives up, below). The largest frame measured takes 12.9 % of the worst case, the most at once
+  22.3 %. An application that has to take every stream at every size names the parts without
+  `RAV1G_LOW_MEMORY_MODE_INFO`.
+
+Before the change `-lowmemparts 3` was off by default because on the console it cost 2.4 % of the frames a second on `j4k40` and `d2_300` with
 the GPU's time unchanged: `cpu wait_sec_slot` of `GPUTIME`, the time a tile waits for a piece of a pool,
 went from 0.02 ms a frame to 1.4 to 1.8 ms, in a pool that is used to 20 % at most.
 
@@ -363,5 +389,11 @@ went from 0.02 ms a frame to 1.4 to 1.8 ms, in a pool that is used to 20 % at mo
   `decode_coefs` of the parser stores the values that are not zero, and the host clears (the creation,
   a frame that failed). Nothing reads it back; the transform block records, the constants and the
   lists in upload heaps are stored the same way.
-- **Console: pending** (`-lowmemparts 3` against the default, `cpu wait_sec_slot`).
+- **Console** (package 0.2.185, the owner's app stopped, slow state, three interleaved rounds, `j4k40`
+  and `d2_300`, 2 threads, 2 frames in parse, 3 slots; `-lowmemparts 3` against the default of that
+  package, 1): md5 15 of 15 and no `MEMORY FAILED`; device buffers 593.4 to 537.6 MiB, the app's usage
+  with 30 frames out about 817 to 746..780 MiB; the GPU's time the same; the decode call 21.00 against
+  21.02 ms on `j4k40` and 19.31 against 19.27 on `d2`; 47.6 against 47.6 and 51.5 against 51.6 frames
+  a second; `cpu wait_sec_slot` 0.017 ms for both. The wait is gone, and with it the cost of the pool
+  at half.
 

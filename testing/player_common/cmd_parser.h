@@ -40,9 +40,11 @@
 #define PLAYER_PARSE_FRAMES_DEFAULT 0
 #define PLAYER_PARSE_FRAMES_MAX 4
 // -lowmemparts: the largest value, all three reductions (AV1_LOW_MEMORY_ALL of aom/aom_decoder.h), and what
-// a task without -lowmem and -lowmemparts gets: part 1, the shared back buffer.
+// a task without -lowmem and -lowmemparts gets: the library's default for the decoder's size
+// (RAV1G_LOW_MEMORY_DEFAULT of rav1g.h, which decoder.cpp holds it against: part 1, the shared back buffer,
+// and above 1920x1088 part 2, the mode info pool at half).
 #define PLAYER_LOWMEM_ALL 7
-#define PLAYER_LOWMEM_DEFAULT 1
+#define PLAYER_LOWMEM_DEFAULT 16
 // -parseopt: the words as bits (RAV1G_PARSER_OPTION_* of rav1g.h, which decoder.cpp holds them against),
 // and what a task without -parseopt gets: nolfmask and tilethread (RAV1G_PARSER_OPTIONS_DEFAULT).
 #define PLAYER_PARSEOPT_NO_LF_MASKS 2

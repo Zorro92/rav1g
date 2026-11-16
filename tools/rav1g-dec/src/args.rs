@@ -18,7 +18,9 @@ pub const SLOTS_MAX: i32 = 4;
 /// -parseframes: the most frames a decoder parses at the same time.
 pub const PARSE_FRAMES_MAX: i32 = 4;
 pub const LOWMEM_ALL: i32 = 7;
-pub const LOWMEM_DEFAULT: i32 = 1;
+/// What a task without -lowmemparts and -lowmem has: the library's default for the decoder's size
+/// (`LowMemory::DEFAULT`, `RAV1G_LOW_MEMORY_DEFAULT`).
+pub const LOWMEM_DEFAULT: i32 = 16;
 pub const DECODER_WIDTH: u32 = 4096;
 pub const DECODER_HEIGHT: u32 = 2176;
 pub const DECODER_BITDEPTH: u32 = 10;
@@ -511,7 +513,7 @@ pub fn check_task(task: &mut Task) -> Result<(), String> {
     if !task.slots_given {
         task.slots = 0;
     }
-    if task.lowmem_parts < 0 || task.lowmem_parts > LOWMEM_ALL {
+    if task.lowmem_parts != LOWMEM_DEFAULT && (task.lowmem_parts < 0 || task.lowmem_parts > LOWMEM_ALL) {
         return Err(format!(
             "-lowmemparts {} is not allowed: the sum of 1, 2 and 4, at most {}",
             task.lowmem_parts, LOWMEM_ALL

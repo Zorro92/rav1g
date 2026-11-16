@@ -31,25 +31,39 @@ impl LowMemory {
     pub const NONE: LowMemory = LowMemory(0);
     /// One back buffer for all pipeline slots, and a pool of 10 frame buffers.
     pub const SHARED_BACK_BUFFER: LowMemory = LowMemory(sys::AV1_LOW_MEMORY_SHARED_BACK_BUFFER);
-    /// The mode info of a frame in shares that a slot takes as it needs them.
+    /// A mode info pool of half the worst case of a frame. A frame that needs more than the pool is a
+    /// decode error.
     pub const MODE_INFO: LowMemory = LowMemory(sys::AV1_LOW_MEMORY_MODE_INFO);
-    /// The coefficients of a frame in shares, likewise.
+    /// A coefficient pool of four fifths of the worst case of a frame. A frame that needs more is a
+    /// decode error.
     pub const COEFS: LowMemory = LowMemory(sys::AV1_LOW_MEMORY_COEFS);
     pub const ALL: LowMemory = LowMemory(sys::AV1_LOW_MEMORY_ALL);
+    /// The default, which is by the size of the decoder: the shared back buffer, and for a decoder
+    /// above 1920x1088 the mode info pool at half (docs/memory.md). Not a part: a set that has it is
+    /// the default, whatever else it has.
+    pub const DEFAULT: LowMemory = LowMemory(16);
 
     fn to_raw(self) -> c_int {
         // 0 in the C configuration is "the default", not "none".
+        if self.0 & LowMemory::DEFAULT.0 != 0 {
+            return 0;
+        }
         let bits = self.0 & sys::AV1_LOW_MEMORY_ALL;
         if bits == 0 { sys::AV1_LOW_MEMORY_NONE as c_int } else { bits as c_int }
     }
 }
 
 impl Default for LowMemory {
-    /// The shared back buffer.
+    /// [`LowMemory::DEFAULT`].
     fn default() -> LowMemory {
-        LowMemory::SHARED_BACK_BUFFER
+        LowMemory::DEFAULT
     }
 }
+
+const _: () = {
+    assert!(sys::AV1_LOW_MEMORY_DEFAULT == sys::AV1_LOW_MEMORY_SHARED_BACK_BUFFER | sys::AV1_LOW_MEMORY_MODE_INFO);
+    assert!(LowMemory::DEFAULT.0 & (sys::AV1_LOW_MEMORY_ALL | sys::AV1_LOW_MEMORY_NONE) == 0);
+};
 
 impl BitOr for LowMemory {
     type Output = LowMemory;

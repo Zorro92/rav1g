@@ -69,7 +69,9 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
   buffers for a 4K 10-bit stream). With rav1d's parse the frames in flight take their mode
   info and coefficients from pools instead of a share for each slot: 597.6 MiB with one frame
   in parse, and 646.5 MiB with two frames in parse on three slots, which is the default at 4K
-  and fits the 1 GiB (it was 916.6 MiB and did not). With `-lowmem` it is 663.4 MiB and with
+  and fits the 1 GiB (it was 916.6 MiB and did not). Since then the buffers of the stages are sized
+  for the frames, the mode info grid has four bytes a unit and the mode info pool of a decoder above
+  1920x1088 is half the worst case: 537.6 MiB ([docs/memory.md](docs/memory.md)). With `-lowmem` it is 663.4 MiB and with
   `-lowmem -slots 3` 773.5 MiB (measured). A decoder that
   does not fit is refused instead of losing the D3D12 device, and a destroyed decoder returns
   its memory (what stays charged to the app afterwards, up to ~250 MiB, is reused by the next decoder, and the

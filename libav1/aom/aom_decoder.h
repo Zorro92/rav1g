@@ -159,8 +159,12 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
 /*!\brief aom_codec_dec_cfg_t::low_memory. The decoded output is the same
  * with every combination.
  *
- * 0 selects the default, AV1_LOW_MEMORY_DEFAULT: the shared back buffer and
- * nothing else. Any other value is taken as it is: the sum of the parts
+ * 0 selects the default, which is by the size of the decoder: above 1920x1088
+ * AV1_LOW_MEMORY_DEFAULT, the shared back buffer and the mode info pool at
+ * half; up to that size the shared back buffer alone (memory is short at 4K;
+ * the whole pool of a decoder for 1080p is 29.5 MiB, and the streams that
+ * come near the worst case are of such sizes: docs/memory.md). Any other
+ * value is taken as it is, at every size: the sum of the parts
  * wanted, or AV1_LOW_MEMORY_NONE for none of them (every frame takes its back
  * buffer from the frame buffer pool, as the decoder did before the reductions
  * existed).
@@ -192,7 +196,7 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
 #define AV1_LOW_MEMORY_COEFS 4
 #define AV1_LOW_MEMORY_ALL 7
 #define AV1_LOW_MEMORY_NONE 8
-#define AV1_LOW_MEMORY_DEFAULT AV1_LOW_MEMORY_SHARED_BACK_BUFFER
+#define AV1_LOW_MEMORY_DEFAULT (AV1_LOW_MEMORY_SHARED_BACK_BUFFER | AV1_LOW_MEMORY_MODE_INFO)
 
 /* aom_codec_dec_cfg_t::parser_options, values to add up: ways of doing the
  * parse (rav1d's parse pass) that give the same frames (docs/phase2-rav1d.md,
@@ -254,7 +258,8 @@ typedef struct aom_codec_dec_cfg {
    * aom_codec_dec_init. */
   int inter_fast;
   /* Memory reductions: a combination of the AV1_LOW_MEMORY_* values above.
-   * 0 selects the default (AV1_LOW_MEMORY_DEFAULT, the shared back buffer);
+   * 0 selects the default (the shared back buffer, and for a decoder above
+   * 1920x1088 the mode info pool at half: AV1_LOW_MEMORY_DEFAULT);
    * AV1_LOW_MEMORY_NONE switches all of them off.
    *
    * What a zero-initialised configuration gets, next to the fields the
