@@ -177,7 +177,7 @@ slots 74.1). By MiB, with the risk; the numbers above are local and from seven s
 | 3 | **Done**, [below](#stage-buffers-sized-for-the-frames-candidate-3) (the index list without a pool). Stage buffers at a quarter, grown on the frame that needs more: `prediction_blocks`, `prediction_blocks_warp`, `idct_blocks`, and the block index list as a fourth pool | 33.7 MiB (0.75 x 44.9) and 13.5 MiB (0.75 x 18.0) | A frame's peak is 15.8 %, 3.6 %, 26.1 % and 11.5 % (`d2`), a few percent elsewhere. | Medium. The three GPU buffers are used by one command list at a time and their counts are known before the frame is recorded, so a frame that needs more can get a larger buffer first (the guard may refuse: then a decode error). The index list is written at the parse: a pool with a piece for a whole block ([step 5, "Left"](phase2-rav1d.md#step-5-the-pools)). |
 | 4 | Smaller mode info record (224 bytes) | up to 55.8 MiB at half the size; less together with 2 | 2.5 to 2.8 MiB of a busy 4K frame's CPU bytes are these records. | Medium. No stream can fail for it, but the layout is shared by the sink, the block lists and the shaders that include `mode_info.h`; what a record can lose is not measured here. |
 | 5 | **Done as part 32 of the low memory parts, in the default above 1920x1088**, [below](#the-frame-buffer-bound-at-the-recording-candidate-5). The frame buffer bound at the recording | 24.2 MiB (11 to 10 in the pool) | The reference slots name at most 5 frames in these streams; the pool is emptied by the frames in flight. | Medium: the references of a frame in parse are resolved at the recording, through every error path of step 4. The floor stays 10 (8 references, a failed frame, the next frame): the measured 5 do not allow less, a stream may use 8. |
-| 6 | **Measured, as the part that exists (4, four fifths); not in the default yet**, [below](#the-coefficient-pool-at-four-fifths-candidate-6). Coefficient pool at three quarters | 15.0 MiB at three quarters, 12.0 at four fifths (the pool has 63 chunks for the ends of pieces that stay) | 62.4 % at once in `d2`, 10 to 26 % elsewhere. | Low, and little: `d2` would be near its waits, and half is not possible for it. A frame that needs more than the pool is a decode error. |
+| 6 | **Done as the part that exists (4, four fifths), in the default above 1920x1088**, [below](#the-coefficient-pool-at-four-fifths-candidate-6). Coefficient pool at three quarters | 15.0 MiB at three quarters, 12.0 at four fifths (the pool has 63 chunks for the ends of pieces that stay) | 62.4 % at once in `d2`, 10 to 26 % elsewhere. | Low, and little: `d2` would be near its waits, and half is not possible for it. A frame that needs more than the pool is a decode error. |
 | 7 | Palette blocks from a pool instead of a buffer of the size of a frame a slot | 0 MiB for film (no clip allows screen content tools); 72.5 MiB less on the first frame of a stream that does | 36 KB a frame at most where a buffer is 3.2 MiB. | Medium: the shaders address the palette buffer like the frame buffer. It removes a growth of 72.5 MiB that the budget guard can only refuse. |
 
 For the CPU (second priority, DRAM bandwidth in the slow state; the first of these is **done**,
@@ -535,7 +535,8 @@ three slots) takes **513.5 MiB** of device buffers where it takes 537.6: 24.2 Mi
 
 ### The coefficient pool at four fifths (candidate 6)
 
-2026-11-16. **Not in the default yet: `-lowmemparts 39` against the default (35) on the console decides.**
+2026-11-16. **In the default above 1920x1088 since package 0.2.193**, after the console compared `-lowmemparts 39`
+with the default (35), [below](#the-coefficient-pool-at-four-fifths-on-the-console).
 The part exists since the pools: `AV1_LOW_MEMORY_COEFS`, `RAV1G_LOW_MEMORY_COEFS`, `LowMemory::COEFS`, 4,
 one of the three of `-lowmem`. With it the decoder for 3840x2160 10-bit (two frames in parse, three
 slots) takes **501.5 MiB** of device buffers where the default takes 513.5: 12.0 MiB less (356.5
@@ -634,3 +635,26 @@ against 368.4 MiB at 8 bits). Nothing of the decoder changed for it but what `-m
   1920x1088 (`AV1_LOW_MEMORY_DEFAULT` 39, which is then `AV1_LOW_MEMORY_PARTS`), and the default 4K
   10-bit decoder takes 501.5 MiB. If `d2` waits for the GPU there, the pool is the price of those waits
   and stays whole.
+
+#### The coefficient pool at four fifths on the console
+
+2026-11-16, package 0.2.192.0 (cfa49ab), 2 threads, 2 frames in parse, 3 slots, Bale stopped.
+
+- *md5:* the five clips above 1920x1088 of the set and `d2_300` with `-lowmemparts 39 -memstats`: 6 of
+  6, no `MEMORY FAILED`. Device buffers 501.5 MiB at 3840x2176 10-bit, 356.5 at 8 bits.
+- *The pool* (`pool idct_coefs`, 1695 chunks): in use at once, peak, `d2_300` 1312 (77.4 %; the same as
+  locally, not the 71 % the earlier console numbers suggested), `fg4k_300` 621 (36.6 %), `a1_8b4k_300`
+  469 (27.7 %), `t40x1ld` 363, `t12x1` 315, `j4k40` 239; a frame at most 700 chunks (`d2`, 41.3 % of the
+  pool). No tile waited for a chunk of it, for the GPU or for a frame in front, on any clip.
+- *Time* (interleaved, 3 rounds, each the default output and `-output p010`, 6 tasks a side, without
+  `-memstats`):
+
+  | Clip | fps, default (35) | fps, part 4 (39) | Decode call ms | GPU busy ms |
+  | --- | ---: | ---: | --- | --- |
+  | `j4k40` | 47.43 | 47.44 | 21.08 / 21.08 | 18.52 / 18.51 |
+  | `d2_300` | 51.15 | 51.30 | 19.48 / 19.40 | 9.38 / 9.38 |
+
+  `cpu wait_sec_slot` 0.016 to 0.023 ms a frame on average on `d2` on both sides. No cost.
+- So 4 is in the default above 1920x1088: `AV1_LOW_MEMORY_DEFAULT` is 39, every part
+  (`AV1_LOW_MEMORY_PARTS`), and the default 4K 10-bit decoder takes **501.5 MiB** of device buffers
+  (537.6 before candidate 5, 646.5 before the reductions of 2026-11-15).

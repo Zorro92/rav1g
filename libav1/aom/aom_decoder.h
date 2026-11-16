@@ -160,8 +160,10 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
  * with every combination.
  *
  * 0 selects the default, which is by the size of the decoder: above 1920x1088
- * AV1_LOW_MEMORY_DEFAULT, the shared back buffer, the mode info pool at half
- * and the frame buffer bound at the recording; up to that size the shared back buffer alone (memory is short at 4K;
+ * AV1_LOW_MEMORY_DEFAULT, every part there is (AV1_LOW_MEMORY_PARTS): the
+ * shared back buffer, the mode info pool at half, the coefficient pool at four
+ * fifths and the frame buffer bound at the recording; up to that size the
+ * shared back buffer alone (memory is short at 4K;
  * the whole pool of a decoder for 1080p is 29.5 MiB, and the streams that
  * come near the worst case are of such sizes: docs/memory.md). Any other
  * value is taken as it is, at every size: the sum of the parts
@@ -207,9 +209,7 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
 #define AV1_LOW_MEMORY_NONE 8
 #define AV1_LOW_MEMORY_LATE_FRAME_BUFFER 32
 #define AV1_LOW_MEMORY_PARTS (AV1_LOW_MEMORY_ALL | AV1_LOW_MEMORY_LATE_FRAME_BUFFER)
-#define AV1_LOW_MEMORY_DEFAULT \
-  (AV1_LOW_MEMORY_SHARED_BACK_BUFFER | AV1_LOW_MEMORY_MODE_INFO | \
-   AV1_LOW_MEMORY_LATE_FRAME_BUFFER)
+#define AV1_LOW_MEMORY_DEFAULT AV1_LOW_MEMORY_PARTS
 
 /* aom_codec_dec_cfg_t::parser_options, values to add up: ways of doing the
  * parse (rav1d's parse pass) that give the same frames (docs/phase2-rav1d.md,
@@ -272,8 +272,8 @@ typedef struct aom_codec_dec_cfg {
   int inter_fast;
   /* Memory reductions: a combination of the AV1_LOW_MEMORY_* values above.
    * 0 selects the default (the shared back buffer, and for a decoder above
-   * 1920x1088 the mode info pool at half and the frame buffer bound at the
-   * recording: AV1_LOW_MEMORY_DEFAULT);
+   * 1920x1088 the mode info pool at half, the coefficient pool at four fifths
+   * and the frame buffer bound at the recording: AV1_LOW_MEMORY_DEFAULT);
    * AV1_LOW_MEMORY_NONE switches all of them off.
    *
    * What a zero-initialised configuration gets, next to the fields the

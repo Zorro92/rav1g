@@ -46,8 +46,8 @@ impl LowMemory {
     /// 1920x1088; not in [`LowMemory::ALL`].
     pub const LATE_FRAME_BUFFER: LowMemory = LowMemory(sys::AV1_LOW_MEMORY_LATE_FRAME_BUFFER);
     /// The default, which is by the size of the decoder: the shared back buffer, and for a decoder
-    /// above 1920x1088 the mode info pool at half and the frame buffer bound at the recording
-    /// (docs/memory.md). Not a part: a set that has it is
+    /// above 1920x1088 every part: the mode info pool at half, the coefficient pool at four fifths and
+    /// the frame buffer bound at the recording (docs/memory.md). Not a part: a set that has it is
     /// the default, whatever else it has.
     pub const DEFAULT: LowMemory = LowMemory(16);
 
@@ -69,12 +69,7 @@ impl Default for LowMemory {
 }
 
 const _: () = {
-    assert!(
-        sys::AV1_LOW_MEMORY_DEFAULT
-            == sys::AV1_LOW_MEMORY_SHARED_BACK_BUFFER
-                | sys::AV1_LOW_MEMORY_MODE_INFO
-                | sys::AV1_LOW_MEMORY_LATE_FRAME_BUFFER
-    );
+    assert!(sys::AV1_LOW_MEMORY_DEFAULT == sys::AV1_LOW_MEMORY_PARTS);
     assert!(LowMemory::DEFAULT.0 & (sys::AV1_LOW_MEMORY_PARTS | sys::AV1_LOW_MEMORY_NONE) == 0);
     assert!(sys::AV1_LOW_MEMORY_PARTS == sys::AV1_LOW_MEMORY_ALL | sys::AV1_LOW_MEMORY_LATE_FRAME_BUFFER);
     assert!(sys::AV1_LOW_MEMORY_PARTS & sys::AV1_LOW_MEMORY_NONE == 0);

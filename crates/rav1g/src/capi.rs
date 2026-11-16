@@ -31,7 +31,8 @@ pub const RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER: u32 = 1;
 /// A mode info pool of half the worst case of a frame: 55.8 MiB less for 3840x2160. A frame that needs
 /// more than the pool is a decode error.
 pub const RAV1G_LOW_MEMORY_MODE_INFO: u32 = 2;
-/// A coefficient pool of four fifths of the worst case of a frame, likewise.
+/// A coefficient pool of four fifths of the worst case of a frame, likewise. In the default above
+/// 1920x1088.
 pub const RAV1G_LOW_MEMORY_COEFS: u32 = 4;
 /// The three memory reductions above.
 pub const RAV1G_LOW_MEMORY_ALL: u32 = 7;
@@ -43,7 +44,7 @@ pub const RAV1G_LOW_MEMORY_ALL: u32 = 7;
 pub const RAV1G_LOW_MEMORY_LATE_FRAME_BUFFER: u32 = 32;
 /// What `rav1g_settings_default` sets: the default, which is by the size of the decoder. Up to 1920x1088
 /// it is `RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER`; above, `RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER |
-/// RAV1G_LOW_MEMORY_MODE_INFO | RAV1G_LOW_MEMORY_LATE_FRAME_BUFFER` (memory is short at 4K; the whole pool of a decoder for 1080p is 29.5 MiB,
+/// RAV1G_LOW_MEMORY_MODE_INFO | RAV1G_LOW_MEMORY_COEFS | RAV1G_LOW_MEMORY_LATE_FRAME_BUFFER`, every part (memory is short at 4K; the whole pool of a decoder for 1080p is 29.5 MiB,
 /// and the streams that come near the worst case, lossless and low quantizers, are of such sizes). Not a
 /// part to add: settings that have it get the default. The parts alone are taken as they are at every
 /// size, `RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER` for a decoder of any size that has to take every stream.

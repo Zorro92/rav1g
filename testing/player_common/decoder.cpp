@@ -805,7 +805,8 @@ int AV1Decoder::DecodeOne() {
   XB_LOGI << "Low memory parts: "
           << (created_lowmem_ == PLAYER_LOWMEM_DEFAULT ? std::string("default") : std::to_string(created_lowmem_))
           << (created_lowmem_ == PLAYER_LOWMEM_DEFAULT
-                  ? " (the library's: 1 shared back buffer, and above 1920x1088 2 mode info pool at half)"
+                  ? " (the library's: 1 shared back buffer, and above 1920x1088 also 2 mode info pool at half, 4 smaller "
+                    "coefficient pool, 32 frame buffer bound at the recording)"
                   : created_lowmem_ ? " (1 shared back buffer, 2 mode info pool at half, 4 smaller coefficient pool, "
                                       "32 frame buffer bound at the recording)"
                                     : " (none, -lowmemparts 0)");

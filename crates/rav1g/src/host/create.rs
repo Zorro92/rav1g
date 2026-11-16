@@ -124,9 +124,9 @@ struct ResourceConfig {
 const FULL_MODE_INFO_POOL_SAMPLES: u64 = 1920 * 1152;
 
 /// The low memory parts of a decoder whose configuration asks for the default (`low_memory` 0): the
-/// shared back buffer, and for a decoder above 1920x1088 the mode info pool at half and the frame
-/// buffer bound at the recording (`AV1_LOW_MEMORY_DEFAULT`; the latter measured on the console with no
-/// cost in time and fewer waits for a frame buffer, docs/memory.md). Memory is short at 4K, where half the pool is 55.8 MiB and the frames are
+/// shared back buffer, and for a decoder above 1920x1088 every part: the mode info pool at half, the
+/// coefficient pool at four fifths and the frame buffer bound at the recording (`AV1_LOW_MEMORY_DEFAULT`;
+/// the last two measured on the console with no cost in time, docs/memory.md). Memory is short at 4K, where half the pool is 55.8 MiB and the frames are
 /// film, which uses a fifth of it at most; up to 1080p the whole pool is 29.5 MiB or less, and the
 /// streams that come near the worst case (lossless, low quantizers: 58 % in the conformance set) are of
 /// such sizes. Parts an application names are taken as they are, at every size.
@@ -1759,10 +1759,9 @@ mod tests {
         }
         cfg.frame_slots = 3;
         let rcfg = ResourceConfig::from_cfg(&cfg);
-        // The default: the shared back buffer, and above 1920x1088 the mode info pool at half and the
-        // frame buffer bound at the recording.
+        // The default: the shared back buffer, and above 1920x1088 every part.
         assert_eq!((rcfg.ref_fb_count, rcfg.low_memory, rcfg.low_memory_default), (11, 1, true));
-        for (width, height, parts) in [(1920, 1080, 1), (1920, 1088, 1), (1920, 1152, 1), (1088, 1920, 1), (1920, 1153, 35), (2560, 1440, 35), (3840, 2160, 35)] {
+        for (width, height, parts) in [(1920, 1080, 1), (1920, 1088, 1), (1920, 1152, 1), (1088, 1920, 1), (1920, 1153, 39), (2560, 1440, 39), (3840, 2160, 39)] {
             (cfg.width, cfg.height) = (width, height);
             assert_eq!(ResourceConfig::from_cfg(&cfg).low_memory, parts, "{width}x{height}");
         }
