@@ -42,7 +42,8 @@
 // -lowmemparts: the largest value, all three reductions (AV1_LOW_MEMORY_ALL of aom/aom_decoder.h), and what
 // a task without -lowmem and -lowmemparts gets: the library's default for the decoder's size
 // (RAV1G_LOW_MEMORY_DEFAULT of rav1g.h, which decoder.cpp holds it against: part 1, the shared back buffer,
-// and above 1920x1088 part 2, the mode info pool at half).
+// and above 1920x1088 part 2, the mode info pool at half, and part 32, the frame buffer bound at the
+// recording).
 #define PLAYER_LOWMEM_ALL 7
 // Every part -lowmemparts takes: those of -lowmem, and 32, the frame buffer bound at the recording
 // (RAV1G_LOW_MEMORY_LATE_FRAME_BUFFER), which -lowmem does not have.

@@ -176,7 +176,7 @@ slots 74.1). By MiB, with the risk; the numbers above are local and from seven s
 | 2 | **Done at half, the default above 1920x1088**, [below](#the-wait-of-the-second-frame-in-parse-in-a-pool-at-half-candidate-2). Mode info pool at half, or a quarter, of the worst case | 55.8 or 83.7 MiB | At once at most 22.3 % (`d2`), 9 to 11 % elsewhere; one frame at most 12.9 %. The wait for the GPU exists and is tested (`poolwait`); a pool at half exists as `-lowmemparts 2`. | Low at half, medium at a quarter. A frame that alone does not fit is a decode error (`MEMORY FAILED`): at half an average block below 8x4 over a whole frame, at a quarter below 8x8; the low quantizer vectors reach 58 % at 352x288. A fallback would be a second buffer created on that frame, under the budget guard. More waits cost speed, not frames. |
 | 3 | **Done**, [below](#stage-buffers-sized-for-the-frames-candidate-3) (the index list without a pool). Stage buffers at a quarter, grown on the frame that needs more: `prediction_blocks`, `prediction_blocks_warp`, `idct_blocks`, and the block index list as a fourth pool | 33.7 MiB (0.75 x 44.9) and 13.5 MiB (0.75 x 18.0) | A frame's peak is 15.8 %, 3.6 %, 26.1 % and 11.5 % (`d2`), a few percent elsewhere. | Medium. The three GPU buffers are used by one command list at a time and their counts are known before the frame is recorded, so a frame that needs more can get a larger buffer first (the guard may refuse: then a decode error). The index list is written at the parse: a pool with a piece for a whole block ([step 5, "Left"](phase2-rav1d.md#step-5-the-pools)). |
 | 4 | Smaller mode info record (224 bytes) | up to 55.8 MiB at half the size; less together with 2 | 2.5 to 2.8 MiB of a busy 4K frame's CPU bytes are these records. | Medium. No stream can fail for it, but the layout is shared by the sink, the block lists and the shaders that include `mode_info.h`; what a record can lose is not measured here. |
-| 5 | **Done as part 32 of the low memory parts, off by default**, [below](#the-frame-buffer-bound-at-the-recording-candidate-5). The frame buffer bound at the recording | 24.2 MiB (11 to 10 in the pool) | The reference slots name at most 5 frames in these streams; the pool is emptied by the frames in flight. | Medium: the references of a frame in parse are resolved at the recording, through every error path of step 4. The floor stays 10 (8 references, a failed frame, the next frame): the measured 5 do not allow less, a stream may use 8. |
+| 5 | **Done as part 32 of the low memory parts, in the default above 1920x1088**, [below](#the-frame-buffer-bound-at-the-recording-candidate-5). The frame buffer bound at the recording | 24.2 MiB (11 to 10 in the pool) | The reference slots name at most 5 frames in these streams; the pool is emptied by the frames in flight. | Medium: the references of a frame in parse are resolved at the recording, through every error path of step 4. The floor stays 10 (8 references, a failed frame, the next frame): the measured 5 do not allow less, a stream may use 8. |
 | 6 | Coefficient pool at three quarters | 15.4 MiB | 62.4 % at once in `d2`, 10 to 26 % elsewhere. | Low, and little: `d2` would be near its waits, and half is not possible for it. |
 | 7 | Palette blocks from a pool instead of a buffer of the size of a frame a slot | 0 MiB for film (no clip allows screen content tools); 72.5 MiB less on the first frame of a stream that does | 36 KB a frame at most where a buffer is 3.2 MiB. | Medium: the shaders address the palette buffer like the frame buffer. It removes a growth of 72.5 MiB that the budget guard can only refuse. |
 
@@ -402,7 +402,8 @@ went from 0.02 ms a frame to 1.4 to 1.8 ms, in a pool that is used to 20 % at mo
 
 ### The frame buffer bound at the recording (candidate 5)
 
-2026-11-16. **A part of the low memory parts that is off by default** until the console has compared it:
+2026-11-16. **A part of the low memory parts, in the default above 1920x1088** since the console compared it
+(package 0.2.191, [below](#the-frame-buffer-bound-at-the-recording-on-the-console)):
 `AV1_LOW_MEMORY_LATE_FRAME_BUFFER`, `RAV1G_LOW_MEMORY_LATE_FRAME_BUFFER`, `LowMemory::LATE_FRAME_BUFFER`,
 32, which `-lowmemparts` takes with the others (`-lowmemparts 35` is the default of a 4K decoder with
 it; `-lowmem` stays the parts 1, 2 and 4). It has an effect only together with the shared back buffer,
@@ -507,3 +508,27 @@ three slots) takes **513.5 MiB** of device buffers where it takes 537.6: 24.2 Mi
   the `MEMORY frame buffers` line (waits), `frame buffers` of `-memstats`. Four of the six clips had
   all 11 out at once there; if the waits do not grow and the time is the same, 32 can join the default
   above 1920x1088 (`default_low_memory` of `create.rs`, `AV1_LOW_MEMORY_DEFAULT`).
+
+#### The frame buffer bound at the recording on the console
+
+2026-11-16, package 0.2.190.0 (883ecee), 2 threads, 2 frames in parse, 3 slots, Bale stopped.
+
+- *md5:* the set of 15 with the part, `-lowmemparts 35` on the clips above 1920x1088 and `-lowmemparts
+  33` below: 15 of 15, no `MEMORY FAILED`.
+- *Memory:* 513.5 MiB of device buffers at 3840x2176 10-bit where the default takes 537.6 (frame
+  buffers 10 + 2 back buffers); 368.4 against 380.5 MiB at 8 bits.
+- *Waits for a frame buffer* (`-memstats`, 300 frames): `a1_8b4k_300` 188 by default, 27 with the part;
+  `d2_300` 138 and 10; `j4k40` 0 and 0. The default's frames in parse hold their buffers and wait at
+  the begin of the parse; with the part the take at the recording waits for the GPU only (`cpu
+  wait_fb` 0.002 ms a frame on average, 11.4 ms at most once). Below 1920x1088 the part waits more
+  (`b8_720_300` 101, `b8_1080_300` 76 with `-lowmemparts 33`), where it is not in the default.
+- *Time* (interleaved, 3 rounds, each the default output and `-output p010`, 6 tasks a side):
+
+  | Clip | fps, default (3) | fps, part (35) | Decode call ms | GPU busy ms |
+  | --- | ---: | ---: | --- | --- |
+  | `j4k40` | 47.48 | 47.58 | 21.06 / 21.03 | 18.53 / 18.48 |
+  | `d2_300` | 51.22 | 51.42 | 19.41 / 19.36 | 9.39 / 9.36 |
+
+  No cost: every difference is within the spread of the rounds (47.06 to 47.98 fps on `j4k40`).
+- So 32 is in the default above 1920x1088 (`AV1_LOW_MEMORY_DEFAULT` = 35): the default 4K 10-bit decoder
+  takes **513.5 MiB** of device buffers.

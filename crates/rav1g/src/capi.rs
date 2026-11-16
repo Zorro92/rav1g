@@ -39,11 +39,11 @@ pub const RAV1G_LOW_MEMORY_ALL: u32 = 7;
 /// not when its parse begins, and the pool has no frame buffer for the slots above two: 10 with the
 /// shared back buffer, where three slots have 11 (24.2 MiB less for 3840x2160 10-bit). Covers every
 /// stream. It has an effect only together with `RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER`. Not in
-/// `RAV1G_LOW_MEMORY_ALL` and not in the default.
+/// `RAV1G_LOW_MEMORY_ALL`; in the default above 1920x1088.
 pub const RAV1G_LOW_MEMORY_LATE_FRAME_BUFFER: u32 = 32;
 /// What `rav1g_settings_default` sets: the default, which is by the size of the decoder. Up to 1920x1088
 /// it is `RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER`; above, `RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER |
-/// RAV1G_LOW_MEMORY_MODE_INFO` (memory is short at 4K; the whole pool of a decoder for 1080p is 29.5 MiB,
+/// RAV1G_LOW_MEMORY_MODE_INFO | RAV1G_LOW_MEMORY_LATE_FRAME_BUFFER` (memory is short at 4K; the whole pool of a decoder for 1080p is 29.5 MiB,
 /// and the streams that come near the worst case, lossless and low quantizers, are of such sizes). Not a
 /// part to add: settings that have it get the default. The parts alone are taken as they are at every
 /// size, `RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER` for a decoder of any size that has to take every stream.
