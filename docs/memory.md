@@ -397,3 +397,5 @@ went from 0.02 ms a frame to 1.4 to 1.8 ms, in a pool that is used to 20 % at mo
   a second; `cpu wait_sec_slot` 0.017 ms for both. The wait is gone, and with it the cost of the pool
   at half.
 
+
+- **Console, the default package** (2026-11-15, 0.2.186.0, no memory flag): md5 15 of 15, no `MEMORY FAILED`; the five clips above 1920x1088 got `1020/2040 ... (the default: half above 1920x1088)` and 537.6 MiB of device buffers at 3840x2176 10-bit, the others the whole pool (`240/240`, `540/540`, `4/4`).
