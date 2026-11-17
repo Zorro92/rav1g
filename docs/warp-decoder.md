@@ -478,6 +478,13 @@ push were done after 17.1 and 17.8 minutes (the second is run 43540279557, witho
 - Every command of the workflow before is in the workflow now, once. Not on a push any more: the
   paired timing, below.
 
+Which pushes start the workflow: a push to `main` or `cpp`, unless it changes only files that cannot
+change a build, a test or a package (`paths-ignore` of `build.yml`): `**.md`, `docs/**`, `.gitattributes`
+(linguist attributes only) and `.gitignore`. The licence files are not on that list, because the
+packages carry them. Any other push can skip its run with `[skip ci]` in the commit message, for a
+change that is known to be safe without one (the trigger itself was changed that way, in 06bd44d).
+Every push to `main` makes GitHub count the languages again, with or without a run.
+
 Two jobs run only when the workflow is started for them (`workflow_dispatch`):
 
 - `rust-experiments`, with the `experiments` input: the whole set with each experiment flag and
