@@ -3173,6 +3173,25 @@ are those of the development machine laid over the console's totals, so every sa
   index from a kept record, and the sink's grid stores left out. One package, two task lines, and the
   lines to read are `cpu parse: sink calls`, the new GPU stage and the frames a second of `d2_300`.
 
+### The split of the sink and the block lists on the console (2026-11-16)
+
+Package 0.2.198.0 (bbce849), slow state, Bale stopped, the defaults at 4K (2 threads, 2 frames in
+parse) with `-output p010 -gputime -parseopt time`, 300 frames, three rounds (ms a frame, mean, and the
+range of the rounds). The two timers are new: `sink_grid` (of the sink calls, the entries of the grid)
+and `sink_intra` (of the block lists, the wavefront and the intra lists).
+
+| Clip | fps | Thread sum | rav1d | Sink calls | of it: grid | Block lists | of it: intra and wavefront | so: inter lists |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `d2_300` | 51.91 | 25.76 | 21.70 | 2.67 | **1.18** (1.16-1.20) | 1.39 | 0.55 (0.55-0.56) | 0.84 |
+| `j4k40` | 48.82 | 28.10 | 21.86 | 2.78 | **1.11** (1.08-1.12) | 3.47 | 2.36 (2.32-2.42) | 1.11 |
+
+- **The grid is 40 to 44 % of the sink calls on the console**, 1.1 to 1.2 ms a frame, where the
+  development machine has 0.43 ms of 1.83 on `d2`: its stores, 1.98 MiB a frame, cost the console's
+  slow memory more. That is the saving of step C of the design above, on the parse threads of both
+  clips, the estimate (1.1 and 1.4 ms) borne out.
+- Step A (the inter lists) would take at most 0.84 (`d2`) and 1.11 ms (`j4k40`); step B (the wavefront
+  and intra lists) 0.55 and 2.36 ms. On `d2`, the clip the parse bounds, C is the largest of the three.
+
 ## Licence
 
 rav1d is BSD-2-Clause (copyright VideoLAN and the dav1d authors, and the rav1d contributors); the
