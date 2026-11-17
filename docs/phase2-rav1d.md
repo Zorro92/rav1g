@@ -2936,7 +2936,9 @@ switch was turned on while it was off by default; ms a frame, means):
 
 ### The block lists on the GPU: a design
 
-Not built: a plan for review. The block lists are 1.3 (`d2`) and 3.4 ms (`j4k40`) a 4K frame on the
+Not built: a plan for review, first of the block lists alone and then (2026-11-16) of the whole
+path: every reader of the mode info on the CPU and what a GPU can take of it, in four steps with a
+recommendation at the end. The block lists are 1.3 (`d2`) and 3.4 ms (`j4k40`) a 4K frame on the
 parse threads of the console.
 
 **What the lists are.** `av1_mi_push_block` (`blocks.rs`), called by the sink for every mode info
@@ -2974,11 +2976,47 @@ dispatch (or two) for every iteration.
 - the number of wavefront iterations (`intra_iters`): as many dispatches as that;
 - `have_inter` of a tile, and with `-gputimedetail` the counters of the inter breakdown.
 
-**The plan, in two steps of which the first can stand alone.**
+**The plan: four steps, A to D.** What follows is the whole path, not one change: what the CPU still
+does with the mode info after the parse wrote it, and how far a GPU with 10 to 23 ms of room a frame
+in playback can take it over. Nothing of it is built. Every shader it names has to compile as
+`cs_5_0` with FXC: no step needs more than raw buffers, the shared memory of a group and
+`DispatchIndirect`.
 
-*Step A: the lists of everything but intra prediction, counted and numbered by the GPU.* The parse
-keeps the wavefront (3 above) and the intra lists; it no longer sorts or numbers inter, warped and
-reconstruction blocks.
+**The ceiling.** On the console the parse threads spend 25.8 (`d2`) and 28.2 ms (`j4k40`) a 4K
+frame, 22.0 and 21.7 of it in rav1d's own parse, which no step here touches. What is rav1g's is the
+sink's calls (2.6 and 3.2 ms with the timer's own cost in them) and the block lists (1.3 and 3.4 ms):
+3.9 and 6.6 ms, 15 and 23 % of the thread time. The thread that records has 0.5 ms a frame left on
+both clips since the lists of CDEF are the GPU's. `d2` is the clip the parse bounds.
+
+**Who on the CPU still reads the mode info after the sink wrote it.** rav1d's parse reads none of it:
+it has contexts of its own (above and left of the block, in the tile), and the sink only gets
+calls.
+
+| Reader | What it reads | Why | Cost |
+| --- | --- | --- | --- |
+| `Sink::count_lists` (`sink.rs`), a superblock at a time | every record once (position, size), and the grid for the block's place | sets the block context of `av1_mi_push_block` | in the block lists below |
+| `av1_mi_push_block`, inter part (`blocks.rs`) | the block's record; through the grid the records one unit above and to the left: of a block under 8x8 for its 2x2 chroma, of a block with overlapped prediction along its two edges | sorts the prediction blocks into lists and numbers them; writes `index_base` back into the record, the counters (`gen_block_map`) and the index list | the smaller half of the block lists: 1.3 (`d2`) and 3.4 ms (`j4k40`) on the console for both halves; 0.67 of 1.48 ms for this half on the development machine (`j4k40`) |
+| `av1_mi_push_block`, intra part | the block's record only; the wavefront is in the edges of the tile, not in the grid | the iteration of every transform block; writes one entry a transform block into `gen_intra_inter_grid`, the intra lists and the index list | the larger half: 0.81 of 1.48 ms on the development machine |
+| `Sink::superblock_call` | one grid entry for each 64x64 area | stores the CDEF index into the record at the area's top left | 2,040 loads and stores a 4K frame, in the cache: nothing |
+| `cdef_filter_run` (`postfilter.rs`) | grid and records, four for every 8x8 block | the lists of CDEF | 3.0 ms a frame of `j4k40` on the thread that records, up to package 0.2.196; now only with `-parseopt nolfmask,tilethread` or `none` |
+| `prediction_gen_blocks` (`prediction.rs`), the thread that records | the counters and the index lists of the tiles, not the mode info | the starts of the lists; copies the index lists into the slot's buffer (0.08 MiB a frame of `j4k40`, 0.15 of `d2`) | part of the 0.5 ms a frame that thread has left |
+| The clears | | the grid is cleared when a slot first has a frame of a size, and for no frame after it (`keep_mi_grid`); the wavefront grid is not cleared at all | 12 KB a frame |
+| Stage dumps (`mi_grid`, `mi_pool`) | nothing on the CPU: copies in the command list | | |
+| Loop filter, loop restoration, palette, film grain | the loop filter's lists are the GPU's (`gen_lf_blocks`); restoration units, palette maps and grain offsets come from the sink's calls, not from the mode info | | |
+
+What the CPU *writes* for a frame into memory the GPU reads (`-memstats`, means of 30 frames, the
+default of package 0.2.197, MiB):
+
+| Clip | All | Mode info records | Grid | Coefficients, at most | Transform block records | Block index list | Constants |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `j4k40` | 5.70 | 2.28 | 1.98 | 1.13 | 0.14 | 0.08 | 0.10 |
+| `d2_300` | 8.04 | 2.77 | 1.98 | 2.83 | 0.24 | 0.15 | 0.08 |
+
+Not in it: the counters of the lists and the entries of the wavefront grid.
+
+**Step A: the lists of everything but intra prediction, counted and numbered by the GPU.** The parse
+keeps the wavefront and the intra lists; it no longer sorts or numbers inter, warped and
+reconstruction blocks, and no longer reads a neighbour's record.
 
 - A pass in front of `gen_pred_blocks`, one group of 64 threads for 64 records in the order of the
   pool, as `gen_pred_blocks` is dispatched: each thread sorts its block as that shader does (the code
@@ -2994,54 +3032,146 @@ reconstruction blocks.
 - `gen_pred_blocks` takes a block's place as the start of its list, plus the sum of the groups
   before its group, plus its number inside the group: the same place as today, because the order of
   the pool is the order of the parse inside a tile. So `prediction_blocks` holds the same bytes, and
-  the inter shaders do not change.
+  the inter shaders do not change what they compute.
+- *The order is a sum, never a race:* no counter that threads add to. A number is the count of the
+  records in front, so it does not depend on which thread ran first.
 - *The sizes.* The thread that records no longer knows the counts. For the buffers, an upper bound
   the parse can have cheaply: the prediction blocks of an inter block are bounded by its 4x4 units
   (luma, chroma, the neighbours of overlapped prediction along its two edges, 2x2 chroma), which
-  the sink adds up in the block call. For the dispatches,
-  `DispatchIndirect` (D3D11 has it): the second pass writes the three group counts of every list
-  into an argument buffer, and the lists' starts and counts into a buffer the inter shaders read
-  where they have inline constants now. That is the change that is wide: every inter shader
-  (`inter_common.h`) and every dispatch of `prediction_run_all`, which then records a dispatch for
-  every list (about 280) and not only for those that have blocks.
-- The stage dumps `pred_blocks` and `pred_blocks_warp` are equal to those of the C++ reference
-  byte for byte if the numbering is right, which is what `rust-equal` then holds; the dump has to
-  take its count from the GPU's table (a copy of the counts in front of the records) and not from
-  the CPU.
+  the sink adds up in the block call. For the dispatches, `DispatchIndirect`: the second pass
+  writes the three group counts of every list into an argument buffer, and the lists' starts and
+  counts into a buffer the inter shaders read where they have inline constants now. That is the
+  change that is wide: every inter shader (`inter_common.h`) and every dispatch of
+  `prediction_run_all`, which then records a dispatch for every list (about 280) and not only for
+  those that have blocks.
+- *The check.* The stage dumps `pred_blocks` and `pred_blocks_warp` are equal to those of the C++
+  reference byte for byte if the numbering is right, which is what `rust-equal` then holds on every
+  stream of the set; the dump takes its count from the GPU's table (a copy of the counts in front of
+  the records). One field of the records changes: `index_base` counts the entries of the index
+  list in front of the block, and the list then has the intra entries alone, so the comparison of
+  the mode info with the C++ decoder's (`stage_dump.py`) has to leave that field to the lists.
+- *Saves:* the smaller half of the block lists if the console splits them as the development machine
+  does: about 0.6 (`d2`) and 1.5 ms (`j4k40`) of the parse threads. Of the bytes, the inter entries of
+  the index list (under 0.1 MiB) and the counters. On the thread that records the sums and the copy
+  go and 280 dispatches come: about even, to be measured. *Costs the GPU* two passes over the records
+  with about the work of `gen_blocks`: 0.3 ms as an estimate.
+- *Risks:* the upper bound undoes a part of the memory work (the two buffers are 2 to 20 % of their
+  worst case in a frame because the counts are exact); one more load a thread in the inter stage,
+  where 4K speed must not fall; `-interfast` has lists of its own to carry through; the empty
+  dispatches.
 
-*Step B: the wavefront.* The iteration of a transform block is the longest path to it, and a GPU
-finds it by repeating: every block takes one more than the highest of its neighbours until nothing
-changes, which gives the numbers of the chain whatever the order. Inside a group of the size of a
-superblock the passes can run in shared memory (as `intra_v2.hlsl` does); between superblocks a
-dispatch for every diagonal of superblocks, about 128 for a 4K frame, known from the frame's size. But the
-number of iterations (165 a frame of `j4k40` on average, 453 at most) is then not known when the
-frame is recorded, and intra prediction is a dispatch an iteration: either the list is recorded for
-the worst case with indirect dispatches that are mostly empty (thousands of commands a frame, more
-CPU than the lists cost), or the frame is recorded in two parts with the counts read back in
-between, which puts a wait for the GPU into the thread that records. Neither is worth it before
-step A has shown what the lists without the wavefront cost.
+**Step B: the wavefront of intra prediction.** The iteration of a transform block is the longest
+path to it through the blocks it reads. It is hard for two separate reasons.
 
-**Risks.**
+*Finding the iterations.* Any way that finds the true longest path gives the numbers of the CPU's
+chain, so the entry of every block in `gen_intra_inter_grid` and every list are the same bytes;
+what differs is the cost.
 
-- *The order.* A number that depends on which thread ran first (a counter the threads add to) would
-  give the same frames and other lists; the plan has none, every number is a sum over the records in
-  front. The proof is the stage dump, on every stream of the set.
-- *The upper bound of the buffers* undoes a part of the memory work: the two buffers are 0.1 to 0.4
-  of their worst case today because the counts are exact. The bound from the units of the inter
-  blocks is tight for frames of large blocks and loose for frames of 4x4 blocks.
-- *The inter shaders read their list from a buffer*: one more load a thread in the inter stage, and
-  4K speed must not fall. `-interfast` has lists of its own to carry through.
-- *Empty dispatches* cost the thread that records: 280 dispatches with their constants a frame,
-  where it records only the lists that have blocks now. To be measured before the shaders change.
-- *Shader Model 5.* Shared memory of a group, `DispatchIndirect` and raw buffers are all `cs_5_0`;
-  no atomic operation and no wave operation is needed.
+| Way | How | Same bytes | Verdict |
+| --- | --- | --- | --- |
+| Repeat until nothing changes, over the whole frame | a dispatch a round, every block takes one more than the highest of its neighbours | yes, after as many rounds as the frame has iterations (165 on average and 453 at most in `j4k40`), which is not known beforehand | no: hundreds of dispatches, and a bound that has to hold for every stream |
+| One thread walks a tile in the order of the parse | the CPU's loop as it is, in a shader (a loop without a group sync is `cs_5_0`) | yes | no: one GPU thread for 50,000 transform blocks is far slower than the CPU, which takes 1 to 2 ms |
+| A group a superblock, passes inside the group | the blocks of a superblock in shared memory, a fixed number of passes with a group sync (about 48 for 64x64: a level is at most a block's column plus twice its row in 4x4 units); between superblocks a dispatch for every diagonal (column plus twice the row), 126 for 3840x2160, known from the frame's size | yes | the one that can work: 126 small dispatches with a barrier each, 1 to 3 ms of the GPU by estimate; group syncs in a loop are what `intra_v2` did, and that was slower on the console |
+| A formula from the position (a prefix pass) | level from column and row alone | no: the level depends on the modes and sizes of the blocks in between (which neighbours a mode reads, where a block has no above right) | no |
 
-**What it would save.** Step A takes the sorting and the numbering off the parse threads, a bit
-under half of the function if the console splits it as the development machine does: about 0.6 of
-the 1.3 ms of `d2` and 1.5 of the 3.4 ms of `j4k40`, for two small passes of the GPU, which has 10
-to 23 ms of room a frame in playback. Step B would take the rest, the whole
-1.3 and 3.4 ms, at the price above. `d2` is the clip the parse bounds: 0.6 ms of 25.8 ms of thread
-time is 2 %, the whole 1.3 ms 5 %.
+*Using them.* Intra prediction is a dispatch (or two) an iteration, and the lists are by iteration.
+The thread that records needs the number of iterations and the count of every list before it can
+record the stage, and the GPU would know them only when it has run. Three ways out, none free:
+
+- *Read the counts back*: the frame is recorded in two parts, the lists first, and the thread that
+  records waits for them. In playback the GPU is idle most of a frame and the wait is a round trip;
+  when the GPU bounds the frames a second (`j4k40` in the benchmark) the small part queues behind
+  the frame in front. It is a new wait in the middle of a frame.
+- *Indirect dispatches up to a bound*: a dispatch for every iteration the frame could have. The
+  bound is in the thousands at 4K, and the commands cost the thread that records more than the
+  wavefront costs the parse.
+- *An intra stage that schedules itself* (regions and passes inside a group): that is `intra_v2`,
+  measured and slower.
+
+- *Saves:* the larger half of the lists, about 0.7 (`d2`) and 1.9 ms (`j4k40`) of the parse threads
+  by the same split, the entries of the wavefront grid (4 bytes a transform block) and the intra part
+  of the index list. *Costs* 1 to 3 ms of the GPU and a read back.
+- *The check* would be the stage dump `pred_blocks` again (the intra records are sorted by
+  iteration), and the frames.
+
+**Step C: the mode info grid built by the GPU.** A record has its position and its size, so a pass
+can write the grid: a thread a record, which stores the record's entry at every 4x4 unit of the block
+inside the frame (up to 1,024 stores for a 128x128 block), dispatched over the runs of records of the
+tiles as `gen_pred_blocks` is, as the first pass of the command list. Every unit of a frame belongs
+to one block, so no two threads store to one place and the order does not matter; the grid outside
+the frame stays the zeros the slot was created with, as now.
+
+- *What still reads the grid on the CPU*, and how each reader goes:
+  1. the sink's CDEF index of a 64x64 area: the tile keeps the record of the block at the area's
+     top left when it writes it (four pointers a superblock);
+  2. `count_lists`: it has the record already and takes the grid only for the context;
+  3. `av1_mi_push_block`, inter part, the neighbours one unit above and to the left. After step A it
+     is gone. Without step A the function gets them from the edges of the tile, as the wavefront
+     does: the record of the lowest block of every column and of the rightmost block of every row of
+     the superblock row, a few KB that stay in the cache.
+  So C does not need A or B: with the neighbours at the edges it stands alone.
+- rav1d needs nothing of it, and the per-frame clear of the grid is gone already.
+- *The check.* The stage dump `mi_grid` is taken behind the pass and compared unit by unit with the
+  C++ decoder's by `rust-equal`, and with the CPU's own grid under a switch (`rust-dumps-equal`);
+  `rav1g-parse-check` keeps a grid in plain memory for the comparison of the records. Every stage
+  that reads the grid (`gen_pred_blocks`, `gen_lf_blocks`, `cdef_lists`) runs behind the pass and
+  does not change.
+- *Saves:* the stores of the grid in the block call, which are 64 bytes on each of 16 pages for a
+  64x64 superblock: 60 % of a block call on the development machine (with what else is not the
+  record), so about 45 % of the sink's calls, which would be 1.1 (`d2`) and 1.4 ms (`j4k40`) on the
+  console; an estimate until the grid has a timer of its own. Of the bytes, 1.98 MiB a 4K frame
+  whatever the frame holds: 25 % (`d2`) and 35 % (`j4k40`) of all the CPU writes for the GPU, and
+  the part that is spread widest. *Costs the GPU* 518,400 stores from 12,000 threads: under 0.3 ms
+  by the measure of `cdef_lists` (0.24 ms for 130,000 threads with eight loads each).
+- *Risks:* small. A thread with 1,024 stores next to threads with one is uneven work, not wrong
+  work; a record that crosses the frame's edge is clipped as the sink clips it; the neighbours at
+  the edges are new code on the parse threads and have to give the lists of today, which the stage
+  dumps hold.
+
+**Step D: what is left after C.**
+
+| What | Can the GPU take it | Why |
+| --- | --- | --- |
+| The mode info records (2.3 to 2.8 MiB a frame, the largest part then) | no | they are what the parse knows; they can only get smaller (224 bytes each: [memory.md](memory.md), candidate 4), which is bytes and not a GPU step |
+| The transform block records (0.14 to 0.24 MiB; 13,800 calls a frame of `j4k40`, about a fifth of the time of the sink's calls on the development machine) | no | position, size, type and where the coefficients are come out of the entropy decoder; the GPU already sorts them |
+| Dequantisation of the coefficients | in principle | rav1d multiplies every coefficient that is not zero while it reads it; the transform shaders could. It is a change of rav1d's token loop, of the record (the quantiser, the matrix) and of 20 shaders, with the rounding and the clamps to keep bit for bit: large, and inside the 22 ms that are rav1d's, so not sized here |
+| The clears | nothing left | 12 KB a frame |
+| The thread that records (0.5 ms) | little | constants and commands |
+| Restoration units, grain offsets, palette maps | no | values of the bitstream, small |
+
+**The steps side by side** (console, ms a 4K frame; the splits of the lists and of the sink's calls
+are those of the development machine laid over the console's totals, so every saving is an estimate):
+
+| Step | Parse threads, `d2` | Parse threads, `j4k40` | Thread that records | CPU bytes a frame | GPU time added | Shaders and dispatches | Risk |
+| --- | ---: | ---: | --- | --- | --- | --- | --- |
+| A, lists but intra | -0.6 | -1.5 | about even (sums and copy go, 280 dispatches come) | under 0.1 MiB and the counters | 0.3 ms | two new passes, `gen_pred_blocks`, every inter shader, indirect dispatches | high: wide, buffer bounds, the inter stage's speed |
+| B, the wavefront | -0.7 | -1.9 | a wait for the GPU, or thousands of commands | the wavefront entries, the rest of the index list | 1 to 3 ms | a new pass in 126 dispatches, a read back or another intra stage | highest |
+| C, the grid | -1.1 | -1.4 | none | 1.98 MiB | under 0.3 ms | one new pass; no shader changes | low |
+| D, the rest | | | | | | nothing the GPU can take without rav1d's loop | |
+| All of A to C | -2.4 of 25.8 | -4.8 of 28.2 | | | | | |
+
+**Recommendation.**
+
+1. *C first.* The largest saving on `d2`, the clip the parse bounds, the largest part of the bytes
+   the CPU writes, one shader of the size of `cdef_lists`, and nothing that an existing shader reads
+   changes. It is also the step whose saving is memory traffic, which is what the console is slow
+   at, so the estimate is more likely low than high.
+2. *A second, and only if a timer says its half is worth it.* Its saving is about that of C for
+   several times the change, and its risks are in the stage that is the GPU's largest.
+3. *B not now.* It needs either a wait for the GPU inside a frame or an intra stage of another kind,
+   and the one that was tried was slower.
+4. *After that the parse threads are rav1d's*: 22 of 23 ms.
+
+**The first step**, small and to be timed by the console on its own:
+
+- *Two timers* under `-parseopt time`, no change of what is decoded: the stores of the grid inside
+  the sink's calls, and the intra part of the block lists. They turn the two splits this plan
+  borrows from the development machine into the console's numbers, and say whether C is 1 ms and
+  whether A is worth its width.
+- Then *C behind a switch* of `-parseopt` (off by default until the console has timed it, as
+  `gpucdef` was): the pass, the neighbours of the block lists at the edges of the tile, the CDEF
+  index from a kept record, and the sink's grid stores left out. One package, two task lines, and the
+  lines to read are `cpu parse: sink calls`, the new GPU stage and the frames a second of `d2_300`.
 
 ## Licence
 
