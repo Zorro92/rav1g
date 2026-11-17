@@ -3,7 +3,11 @@ name: Build
 on:
   push:
     branches: [main, cpp]
-    paths-ignore: ['**.md', 'docs/**']
+    # Changes that cannot change a build, a test or a package: the docs, and the files only git and
+    # GitHub read (the licence files are not here: the packages carry them).
+    # .gitattributes holds linguist attributes only; one with eol or filter settings would change
+    # checkouts and has to leave this list.
+    paths-ignore: ['**.md', 'docs/**', '.gitattributes', '.gitignore']
   workflow_dispatch:
     inputs:
       experiments:
