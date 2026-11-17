@@ -1096,6 +1096,8 @@ impl SinkHost for SlotHost {
         let id = match timer {
             SinkTimer::Calls => sys::AV1_PERF_CPU_SINK_CALLS,
             SinkTimer::Lists => sys::AV1_PERF_CPU_SINK_LISTS,
+            SinkTimer::Grid => sys::AV1_PERF_CPU_SINK_GRID,
+            SinkTimer::ListsIntra => sys::AV1_PERF_CPU_SINK_LISTS_INTRA,
         };
         // SAFETY: as above.
         unsafe {

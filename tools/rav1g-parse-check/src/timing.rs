@@ -145,6 +145,8 @@ pub fn run(path: &Path, threads: u16, frames_in_parse: u16, options: ParseOption
     let mut with_sink = Duration::MAX;
     let mut block_lists = Duration::MAX;
     let mut sink_calls = Duration::ZERO;
+    let mut sink_grid = Duration::ZERO;
+    let mut lists_intra = Duration::ZERO;
     for _ in 0..RUNS {
         let mut parser = match RustParser::with_clock(threads, frames_in_parse, options, true, wave_edges) {
             Ok(parser) => parser,
@@ -174,6 +176,8 @@ pub fn run(path: &Path, threads: u16, frames_in_parse: u16, options: ParseOption
             with_sink = total;
             block_lists = Duration::from_nanos(parser.block_list_nanos());
             sink_calls = Duration::from_nanos(parser.sink_call_nanos());
+            sink_grid = Duration::from_nanos(parser.sink_grid_nanos());
+            lists_intra = Duration::from_nanos(parser.block_list_intra_nanos());
         }
         if parser.recycled() as u64 != frames {
             eprintln!("rav1g-parse-check: {} frames with the sink, {frames} without", parser.recycled());
@@ -193,7 +197,13 @@ pub fn run(path: &Path, threads: u16, frames_in_parse: u16, options: ParseOption
         milliseconds(sink, frames),
         milliseconds(block_lists, frames),
         if options.time_calls {
-            format!(" and the other calls of the sink {:.3} ms/frame", milliseconds(sink_calls, frames))
+            format!(
+                " and the other calls of the sink {:.3} ms/frame (of the calls the grid {:.3}, of the lists the \
+                 wavefront and intra lists {:.3})",
+                milliseconds(sink_calls, frames),
+                milliseconds(sink_grid, frames),
+                milliseconds(lists_intra, frames)
+            )
         } else {
             String::new()
         },

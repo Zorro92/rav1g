@@ -72,6 +72,10 @@ unsafe extern "C" {
     /// `dx/av1_core.h`: counts the prediction blocks of the block `xd` is at into the lists of its tile.
     /// The host's function (`crates/rav1g/src/host/blocks.rs`).
     fn av1_mi_push_block(pbi: *mut AV1Decoder, cm: *mut AV1_COMMON, xd: *mut MACROBLOCKD);
+    /// The same file: the time stamps the wavefront and intra part of `av1_mi_push_block` took on this
+    /// thread since the last call, which starts the count again; `count` says whether the calls that
+    /// follow are counted ([`SinkOptions::time_calls`]).
+    fn rav1g_intra_list_stamps(count: bool) -> u64;
 }
 
 /// `TX_SIZES_ALL`: the entry of a tile's transform block counts for the 4x4 blocks of a lossless segment.
@@ -116,6 +120,12 @@ pub enum SinkTimer {
     /// The block lists: `av1_mi_push_block` for every record, superblock by superblock or, with
     /// [`SinkOptions::late_lists`], at the end of a tile.
     Lists,
+    /// Of [`SinkTimer::Calls`]: the entries of the grid a block call writes. Only with
+    /// [`SinkOptions::time_calls`].
+    Grid,
+    /// Of [`SinkTimer::Lists`]: the wavefront and the lists of intra prediction, the part of
+    /// `av1_mi_push_block` behind the inter blocks' lists. Only with [`SinkOptions::time_calls`].
+    ListsIntra,
 }
 
 /// The processor's time stamp counter, or 0 where there is none to read.
@@ -278,6 +288,10 @@ struct TileState {
     /// the length of a time stamp.
     call_stamps: u64,
     list_stamps: u64,
+    /// Parts of the two with [`SinkOptions::time_calls`]: the grid's entries, and the wavefront and
+    /// intra part of the block lists.
+    grid_stamps: u64,
+    intra_stamps: u64,
     begin_ticks: i64,
     begin_stamp: u64,
 }
@@ -435,6 +449,10 @@ impl<H: SinkHost> Sink<H> {
             }
             let frame = self.frame(frame_number);
             let stamp = if state.begin_ticks != 0 { time_stamp() } else { 0 };
+            let time_intra = stamp != 0 && self.options.time_calls;
+            if time_intra {
+                rav1g_intra_list_stamps(true);
+            }
             // The function finds the frame's slot through the tile's data and does not look at the
             // decoder.
             let pbi: *mut AV1Decoder = std::ptr::null_mut();
@@ -475,6 +493,9 @@ impl<H: SinkHost> Sink<H> {
             state.listed = (piece, index);
             if stamp != 0 {
                 state.list_stamps += time_stamp().wrapping_sub(stamp);
+            }
+            if time_intra {
+                state.intra_stamps += rav1g_intra_list_stamps(false);
             }
         }
     }
@@ -527,11 +548,15 @@ impl<H: SinkHost> Sink<H> {
             let y_mis = (1 << MI_SIZE_HIGH_LOG2[bsize]).min(frame.mi_rows - block.y4) as usize;
             let first = frame.mi_grid.add((block.y4 * frame.mi_stride + block.x4) as usize);
             let entry = mi_grid_entry(frame.mi_pool, mi);
+            let grid_begin = if self.options.time_calls { time_stamp() } else { 0 };
             for y in 0..y_mis {
                 let row = first.add(y * frame.mi_stride as usize);
                 for x in 0..x_mis {
                     row.add(x).write(entry);
                 }
+            }
+            if grid_begin != 0 {
+                state.grid_stamps += time_stamp().wrapping_sub(grid_begin);
             }
         }
     }
@@ -705,12 +730,16 @@ impl<H: SinkHost> ParseSink for Sink<H> {
                 listed: (0, 0),
                 call_stamps: 0,
                 list_stamps: 0,
+                grid_stamps: 0,
+                intra_stamps: 0,
                 begin_ticks: 0,
                 begin_stamp: 0,
             });
             // A host with a clock (a timing run): what a time stamp is worth is taken over the tile.
             state.call_stamps = 0;
             state.list_stamps = 0;
+            state.grid_stamps = 0;
+            state.intra_stamps = 0;
             state.begin_ticks = self.host.ticks();
             state.begin_stamp = if state.begin_ticks != 0 { time_stamp() } else { 0 };
             state.listed = (0, 0);
@@ -803,6 +832,12 @@ impl<H: SinkHost> ParseSink for Sink<H> {
                     let ticks_a_stamp = ticks as f64 / stamps as f64;
                     if self.options.time_calls {
                         self.host.add_time(frame, SinkTimer::Calls, (state.call_stamps as f64 * ticks_a_stamp) as i64);
+                        self.host.add_time(frame, SinkTimer::Grid, (state.grid_stamps as f64 * ticks_a_stamp) as i64);
+                        self.host.add_time(
+                            frame,
+                            SinkTimer::ListsIntra,
+                            (state.intra_stamps as f64 * ticks_a_stamp) as i64,
+                        );
                     }
                     self.host.add_time(frame, SinkTimer::Lists, (state.list_stamps as f64 * ticks_a_stamp) as i64);
                 }

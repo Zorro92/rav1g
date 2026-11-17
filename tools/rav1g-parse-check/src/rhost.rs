@@ -60,6 +60,9 @@ pub struct PlainHost {
     clock: Option<Instant>,
     list_nanos: AtomicU64,
     call_nanos: AtomicU64,
+    /// Parts of the two with `-parseopt time`: the grid's entries, and the wavefront and intra lists.
+    grid_nanos: AtomicU64,
+    intra_nanos: AtomicU64,
 }
 
 // SAFETY: the calls come as the contract of `SinkHost` says (see `places`).
@@ -90,6 +93,8 @@ impl SinkHost for PlainHost {
         let nanos = match timer {
             SinkTimer::Lists => &self.list_nanos,
             SinkTimer::Calls => &self.call_nanos,
+            SinkTimer::Grid => &self.grid_nanos,
+            SinkTimer::ListsIntra => &self.intra_nanos,
         };
         nanos.fetch_add(ticks.max(0) as u64, Ordering::Relaxed);
     }
@@ -274,6 +279,8 @@ impl RustParser {
                 clock: timed.then(Instant::now),
                 list_nanos: AtomicU64::new(0),
                 call_nanos: AtomicU64::new(0),
+                grid_nanos: AtomicU64::new(0),
+                intra_nanos: AtomicU64::new(0),
             },
             options.sink(),
             usize::from(frames),
@@ -329,6 +336,16 @@ impl RustParser {
     /// Nanoseconds the tiles spent in the other calls of the sink, with a clock and `-parseopt time`.
     pub fn sink_call_nanos(&self) -> u64 {
         self.sink.host().call_nanos.load(Ordering::Relaxed)
+    }
+
+    /// Of [`Self::sink_call_nanos`]: the grid's entries (`-parseopt time`).
+    pub fn sink_grid_nanos(&self) -> u64 {
+        self.sink.host().grid_nanos.load(Ordering::Relaxed)
+    }
+
+    /// Of [`Self::block_list_nanos`]: the wavefront and intra lists (`-parseopt time`).
+    pub fn block_list_intra_nanos(&self) -> u64 {
+        self.sink.host().intra_nanos.load(Ordering::Relaxed)
     }
 
     /// The frames parsed since the last call, in decode order, once no frame is in parse any more.

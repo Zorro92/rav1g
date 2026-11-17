@@ -86,6 +86,10 @@ enum {
                                  of their own; AV1_PARSER_OPTION_LATE_LISTS does the same) */
   AV1_PERF_CPU_SINK_CALLS,    /* AV1_PARSER_OPTION_TIME_CALLS: the calls of the sink (mode info record and
                                  grid, transform block record, palette, superblock) */
+  AV1_PERF_CPU_SINK_GRID,     /* AV1_PARSER_OPTION_TIME_CALLS: of SINK_CALLS, the entries of the mode info
+                                 grid the block calls write */
+  AV1_PERF_CPU_SINK_LISTS_INTRA, /* AV1_PARSER_OPTION_TIME_CALLS: of SINK_LISTS, the wavefront and the lists
+                                 of intra prediction (the part of av1_mi_push_block behind the inter lists) */
   AV1_PERF_CPU_COUNT
 };
 

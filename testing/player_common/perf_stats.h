@@ -32,7 +32,7 @@ static const char* const kCpuNames[] = {
     "setup",         "memset",        "memset_tile",    "entropy_wall",   "entropy_sum", "record",
     "rec_gen_blocks", "rec_idct",     "rec_pred",       "rec_loopfilter", "rec_cdef_lr", "rec_borders",
     "rec_copy",      "submit",        "frame",          "fence_wait",     "gpu_latency", "notify",
-    "async_clear",   "sink_lists",    "sink_calls"};
+    "async_clear",   "sink_lists",    "sink_calls",     "sink_grid",      "sink_intra"};
 static_assert(sizeof(kCpuNames) / sizeof(kCpuNames[0]) == AV1_PERF_CPU_COUNT,
               "CPU timer names out of step with av1_perf.h");
 
@@ -361,6 +361,10 @@ class PerfStats {
     // the entropy decoder of libaom (-parser c), which has no timers for them.
     Line(&out, "cpu parse: block lists", cpu[AV1_PERF_CPU_SINK_LISTS], 0.0, 0);
     Line(&out, "cpu parse: sink calls (-parseopt time)", cpu[AV1_PERF_CPU_SINK_CALLS], 0.0, 0);
+    // -parseopt time: parts of the two above, the grid's entries of the sink calls and the wavefront and
+    // intra lists of the block lists.
+    Line(&out, "cpu parse: of the calls, grid (-parseopt time)", cpu[AV1_PERF_CPU_SINK_GRID], 0.0, 0);
+    Line(&out, "cpu parse: of the lists, intra (-parseopt time)", cpu[AV1_PERF_CPU_SINK_LISTS_INTRA], 0.0, 0);
     {
       // The thread sum less the two: only with -parseopt time is this rav1d by itself.
       Series rest;

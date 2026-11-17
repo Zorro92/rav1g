@@ -32,7 +32,39 @@
 //!
 //! Both give every transform block the same iteration.
 
+use std::cell::Cell;
 use std::ffi::c_int;
+
+thread_local! {
+    /// `-parseopt time`: whether the wavefront and intra part of [`av1_mi_push_block`] is timed on this
+    /// thread, and the time stamps it took since [`rav1g_intra_list_stamps`] was called last.
+    static INTRA_STAMPS: Cell<(bool, u64)> = const { Cell::new((false, 0)) };
+}
+
+/// The processor's time stamp counter, or 0 where there is none to read.
+#[inline]
+fn intra_time_stamp() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: the instruction is part of every x86-64 processor and reads a counter.
+        #[allow(unused_unsafe, reason = "safe to call from some toolchains on")]
+        unsafe {
+            core::arch::x86_64::_rdtsc()
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        0
+    }
+}
+
+/// For the sink's timer of the block lists (`SinkTimer::ListsIntra` of rav1g-parse): the time stamps the
+/// wavefront and intra part of [`av1_mi_push_block`] took on this thread since the last call, which
+/// starts the count again; `count` says whether the calls that follow are counted.
+#[unsafe(no_mangle)]
+pub extern "C" fn rav1g_intra_list_stamps(count: bool) -> u64 {
+    INTRA_STAMPS.with(|stamps| stamps.replace((count, 0)).1)
+}
 
 use super::intra_v2;
 use super::libaom::{has_bottom_left, has_top_right};
@@ -867,6 +899,8 @@ pub unsafe extern "C" fn av1_mi_push_block(_pbi: *mut AV1Decoder, cm: *mut AV1_C
 
         let y_use_palette = mi.palette_mode_info.palette_size[0] > 0;
         let uv_use_palette = mi.palette_mode_info.palette_size[1] > 0;
+        // -parseopt time: the wavefront and the intra lists from here to the reconstruction blocks.
+        let intra_begin = if INTRA_STAMPS.with(|stamps| stamps.get().0) { intra_time_stamp() } else { 0 };
         if let Some(edges) = wave.as_mut() {
             edges.at(mi_row >> (*cm).seq_params.mib_size_log2);
             if !is_inter || is_inter_intra {
@@ -1306,6 +1340,14 @@ pub unsafe extern "C" fn av1_mi_push_block(_pbi: *mut AV1Decoder, cm: *mut AV1_C
             if !is_chroma_ref {
                 edges.planes[1].pass(mi_col >> 1, mi_row >> 1, 1 << bw_log_uv, 1 << bh_log_uv);
             }
+        }
+
+        if intra_begin != 0 {
+            let took = intra_time_stamp().wrapping_sub(intra_begin);
+            INTRA_STAMPS.with(|stamps| {
+                let (count, sum) = stamps.get();
+                stamps.set((count, sum + took));
+            });
         }
 
         // A block with residuals whose prediction is not written together with them (palette, overlapped

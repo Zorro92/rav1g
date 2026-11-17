@@ -497,6 +497,7 @@ CPU timers (QueryPerformanceCounter, all in ms per frame):
 | --- | --- |
 | `entropy_wall`, `entropy_sum` | tile (entropy) decode: wall time on the decode thread, and the sum over the tile threads. `sum / wall` is the parallelism actually reached. |
 | `sink_lists`, `sink_calls` | with rav1d's parse (not with `-parser c`), parts of `entropy_sum`: see [Switches of the parser](#switches-of-the-parser--parseopt) |
+| `sink_grid`, `sink_intra` | with `-parseopt time`: of `sink_calls` the entries of the mode info grid the block calls write, and of `sink_lists` the wavefront and the lists of intra prediction (the part of `av1_mi_push_block` behind the inter blocks' lists); since package 0.2.198 |
 | `record` | recording the frame's command list, waits excluded. `rec_gen_blocks`, `rec_idct`, `rec_pred`, `rec_loopfilter`, `rec_cdef_lr`, `rec_borders`, `rec_copy` split it by host function (`rec_copy` still contains `wait_output` and `wait_image`). |
 | `submit` | `Close`, `ExecuteCommandLists`, `Signal` |
 | `memset`, `memset_tile` | the per-frame and per-tile memsets on the decode and tile threads; the summary also gives the MB cleared per frame |
@@ -1353,6 +1354,7 @@ of `cpu entropy/tile decode, thread sum`, summed over the tile threads, and zero
 | --- | --- |
 | `cpu parse: block lists` (`sink_lists`) | the block lists of the prediction stages, counted from the mode info records superblock by superblock (with `latelists`: at the end of each tile, where the C parser counts them) |
 | `cpu parse: sink calls (-parseopt time)` (`sink_calls`) | with `time`: the calls of the sink, which write the mode info record and the grid of a block, the record of a transform block, the palette, and the per-superblock values |
+| `cpu parse: of the calls, grid (-parseopt time)` (`sink_grid`), `cpu parse: of the lists, intra (-parseopt time)` (`sink_intra`) | with `time`: the parts of the two lines above that moving the grid and the intra lists to the GPU would take off the parse threads ([phase2-rav1d.md](phase2-rav1d.md), the design of the block lists on the GPU). Two more readings of the time stamp counter per block, one per block in the block lists. Not taken off the thread sum: they are inside the two above. |
 | `cpu parse: thread sum less the above` | the thread sum less the block lists and less the sink calls. With `time` this is rav1d by itself, with the coefficients it writes straight into their buffer |
 
 ## Frames in parse (`-parseframes`)
