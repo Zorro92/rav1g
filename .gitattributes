@@ -24,3 +24,10 @@ testing/common/md5_utils.* linguist-vendored
 
 # The headers the shaders include are HLSL, not C.
 libav1/dx/shaders/*.h linguist-language=HLSL
+
+# Test tooling, kept out of the language statistics so that they describe the decoder: the UWP test
+# player (C++), the shader and parser checks against the C++ reference, the conformance scripts
+# (Python), and the C++ glue of rav1g-dec's player smoke test. The decoder's own C is its public
+# header (crates/rav1g/include/rav1g.h) and the perf struct and shader table the C side shares.
+testing/** linguist-detectable=false
+tools/rav1g-dec/shim/** linguist-detectable=false
