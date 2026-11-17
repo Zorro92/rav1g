@@ -31,3 +31,6 @@ libav1/dx/shaders/*.h linguist-language=HLSL
 # header (crates/rav1g/include/rav1g.h) and the perf struct and shader table the C side shares.
 testing/** linguist-detectable=false
 tools/rav1g-dec/shim/** linguist-detectable=false
+# The C++ original of the -intrav2 schedule: the decoder has its port (crates/rav1g/src/host/intra_v2.rs);
+# the header is the reference testing/intra_check holds the port against.
+libav1/dx/intra_v2_sched.h linguist-detectable=false
