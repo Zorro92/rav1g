@@ -1913,3 +1913,28 @@ surprises in step 4.
 2. `rav1g-dec` keeps the `-gputime` and `-dumpstages` diagnostics from step 1, through the same C entry
    points until step 4 moves them.
 3. Minimum supported Rust version: the latest stable when step 1 lands, raised freely.
+
+## Rust 1.100.0 (2026-11-16)
+
+CI is not pinned and installs the latest stable: run 198 (bbce849) built and passed all its jobs with
+rustc 1.100.0, and the local native crates (`rav1g-parse`, `rav1g-parse-check`, `rav1g-header`,
+`rav1g-sys`) build without a warning on it; Cargo's new `unused_dependencies` lint finds nothing.
+What the release notes (rust-lang/rust RELEASES.md, "Version 1.100.0") offer the decoder:
+
+- **Profile-guided optimisation.** `-Cprofile-sample-use` (a profile sampled with `perf`) is new;
+  instrumented PGO (`-Cprofile-generate` / `-Cprofile-use`) was stable before and was never tried
+  here. The parse threads are 22 ms a 4K frame of rav1d (docs/phase2-rav1d.md), of which the Rust
+  part (block and coefficient parsing, branchy code) is what PGO helps; `msac.asm` is assembly and
+  does not change. An instrumented `rav1g-dec` run under wine on the local clips gives a profile of
+  the same parse code the console runs (the parse does not depend on the GPU). Untried; the output
+  cannot change (PGO changes code layout and inlining, not results). The first candidate of the list.
+- **Custom allocators** (`std::alloc::Allocator`, `Vec::new_in`): the pools are D3D12 buffers handed
+  out by index, not heap memory, so they do not apply. The one heap structure on the hot path, the
+  block index list of a tile (`TilePieces::indexes`), is copied at the recording (0.14 MiB a frame);
+  an allocator over the mapped buffer would save that copy, well under 0.1 ms. Not worth it.
+- **`core::mem::DropGuard`**: tidier cleanup on the error paths of the creation (`create.rs`) and of
+  the FFI; no speed or memory. Use when that code is touched.
+- **Cargo dependency cooldowns and `[lints.cargo]`**: supply-chain hygiene for the few dependencies
+  (`Cargo.lock` is committed); turn on when the manifests next change.
+- Not relevant: the 32-bit x86 ABI change, ARM and WASM target changes, the new build-directory layout
+  (no script here reads `target/*/deps`), the never type (CI passed).
