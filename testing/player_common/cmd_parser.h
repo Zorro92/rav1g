@@ -50,15 +50,15 @@
 #define PLAYER_LOWMEM_PARTS 39
 #define PLAYER_LOWMEM_DEFAULT 16
 // -parseopt: the words as bits (RAV1G_PARSER_OPTION_* of rav1g.h, which decoder.cpp holds them against),
-// and what a task without -parseopt gets: nolfmask and tilethread (RAV1G_PARSER_OPTIONS_DEFAULT).
+// and what a task without -parseopt gets: nolfmask, tilethread and gpucdef (RAV1G_PARSER_OPTIONS_DEFAULT).
 #define PLAYER_PARSEOPT_NO_LF_MASKS 2
 #define PLAYER_PARSEOPT_TILE_KEEPS_THREAD 4
 #define PLAYER_PARSEOPT_TIME_CALLS 8
 #define PLAYER_PARSEOPT_LATE_LISTS 16
 #define PLAYER_PARSEOPT_CLEAR_GRID 32
-#define PLAYER_PARSEOPT_RECORD_ONCE 256
 #define PLAYER_PARSEOPT_GPU_CDEF_LISTS 512
-#define PLAYER_PARSEOPT_DEFAULT (PLAYER_PARSEOPT_NO_LF_MASKS | PLAYER_PARSEOPT_TILE_KEEPS_THREAD)
+#define PLAYER_PARSEOPT_DEFAULT \
+  (PLAYER_PARSEOPT_NO_LF_MASKS | PLAYER_PARSEOPT_TILE_KEEPS_THREAD | PLAYER_PARSEOPT_GPU_CDEF_LISTS)
 // The size the decoder is created for with -nofitsize, and for a stream that is larger than this.
 #define PLAYER_DECODER_WIDTH 4096
 #define PLAYER_DECODER_HEIGHT 2176
@@ -158,15 +158,15 @@ class CParameters {
     // (decoder.cpp, "The app's memory where the system has no limit for it"). -1: no model.
     int budget_mib_;
     int retain_mib_;
-    // -parseopt <list>: the switches of rav1d's parse, separated by commas. nolfmask and tilethread are
-    // on by default; a list that names one of them, none or default says which of the two are on (none:
-    // neither). time (the timing of the sink's calls), latelists (the block lists of a tile at its end,
-    // as before they were counted superblock by superblock) and cleargrid (the mode info grid cleared for
-    // every frame, as before it was kept between frames of one size), recordonce (a block's mode info
-    // record written to the pool once, not cleared there and filled) and gpucdef (the two lists CDEF reads
-    // written by a pass of the GPU, not by the thread that records the frame) are off by default; each is
-    // on when the list has it and leaves the two as they are. parser_options_ is the sum of the PLAYER_PARSEOPT_* values
-    // after Parse().
+    // -parseopt <list>: the switches of rav1d's parse, separated by commas. nolfmask, tilethread and
+    // gpucdef (the two lists CDEF reads written by a pass of the GPU, not by the thread that records the
+    // frame) are on by default; a list that names one of them, none or default says which of the three
+    // are on (none: none of them; nolfmask,tilethread: the lists of CDEF by the thread that records).
+    // time (the timing of the sink's calls), latelists (the block lists of a tile at its end, as before
+    // they were counted superblock by superblock) and cleargrid (the mode info grid cleared for every
+    // frame, as before it was kept between frames of one size) are off by default; each is on when the
+    // list has it and leaves the three as they are. parser_options_ is the sum of the PLAYER_PARSEOPT_*
+    // values after Parse().
     std::string parseopt_;
     unsigned parser_options_;
     // -continue_on_error: a decode call that fails does not end the task; the next temporal units go to

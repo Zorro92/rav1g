@@ -1102,7 +1102,7 @@ jobs:
           python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
             --out out/conformance --threads 4 "--title=rav1g-dec (cargo, MSVC)"
           $code = $LASTEXITCODE
-          if (-not (Select-String -Path out/conformance/lists/run001.log -Pattern '^PARSER .*the parse pass of rav1d.*switches nolfmask,tilethread \(' -Quiet)) {
+          if (-not (Select-String -Path out/conformance/lists/run001.log -Pattern '^PARSER .*the parse pass of rav1d.*switches nolfmask,tilethread,gpucdef \(' -Quiet)) {
             throw 'The decoder of this run does not report the parse pass of rav1d with its default switches'
           }
           if (-not (Select-String -Path out/conformance/lists/run001.log -Pattern ', clears none needed, ' -Quiet)) {
@@ -1510,23 +1510,23 @@ jobs:
       # The switches of rav1d's parse (-parseopt, docs/phase2-rav1d.md "Where the time goes"): ways of doing
       # the same parse. Here the other side of each: the two that are on by default off, which is rav1d's
       # parse as upstream schedules it, the block lists of a tile counted at its end and not superblock by
-      # superblock (latelists), the calls of the sink timed, a mode info record written to its pool once
-      # (recordonce), and the two lists CDEF reads written by a pass of the GPU (gpucdef, cdef_lists.hlsl:
-      # the stage dump cdef_info is copied behind that pass). The whole set against its references and
+      # superblock (latelists), and the calls of the sink timed. Of the three that are on by default the
+      # third is gpucdef, the two lists CDEF reads written by a pass of the GPU (cdef_lists.hlsl): with
+      # it off the thread that records writes them, as before. The whole set against its references and
       # expected.txt, the stage dumps, the decoder code of the test player with its -parseopt flag, and the
       # decode errors in cut streams (a tile that is handed from thread to thread ends as one that keeps
       # its thread). The rust-dumps-equal job holds the stage dumps against those of the default switches
       # byte for byte.
-      - name: The other side of every switch of the parser (-parseopt none,latelists,recordonce,gpucdef)
+      - name: The other side of every switch of the parser (-parseopt none,latelists)
         if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           $failed = @()
-          $switches = '-parseopt none,latelists,time,recordonce,gpucdef'
+          $switches = '-parseopt none,latelists,time'
           python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
             --out out/conformance-switches-rav1d --threads 4 "--tool-args=$switches" "--title=rav1g-dec (cargo, MSVC) with $switches"
           if ($LASTEXITCODE -ne 0) { $failed += "conformance with ${switches}: exit code $LASTEXITCODE" }
-          if (-not (Select-String -Path out/conformance-switches-rav1d/lists/run001.log -Pattern '^PARSER .*switches none,time,latelists,recordonce,gpucdef \(' -Quiet)) {
+          if (-not (Select-String -Path out/conformance-switches-rav1d/lists/run001.log -Pattern '^PARSER .*switches none,time,latelists \(' -Quiet)) {
             $failed += 'the decoder of the run does not report the switches of the parser'
           }
           python testing/stage_dump/ci_dumps.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
@@ -1994,7 +1994,7 @@ jobs:
         run: |
           set -euo pipefail
           status=0
-          switches='-parseopt none,latelists,time,recordonce,gpucdef'
+          switches='-parseopt none,latelists,time'
           dumped=0
           for dir in default-dumps/*/; do
             name=$(basename "$dir")
@@ -2262,16 +2262,13 @@ jobs:
         if: ${{ !cancelled() }}
         shell: pwsh
         run: |
-          # The mix also has the lists of CDEF written by the GPU (-parseopt gpucdef), by DXC's bytecode of
-          # cdef_lists with its default optimisation: the pass is off by default, so no other run of this
-          # job dispatches that shader.
-          $picks = @(@{ name = 'fxc'; pick = 'fxc=all'; line = 'dxc 0; od 0; fxc 98 (all)'; more = '' },
-            @{ name = 'od'; pick = 'od=all'; line = 'dxc 0; od 98 (all); fxc 0'; more = '' },
-            @{ name = 'mixed'; pick = 'fxc=loopfilter_*,idct*,*_fast,od=inter_*,cdef_*,intra_*,dxc=inter_main,reconstruct_block*,cdef_lists'; line = ''; more = ' -parseopt gpucdef' })
+          $picks = @(@{ name = 'fxc'; pick = 'fxc=all'; line = 'dxc 0; od 0; fxc 98 (all)' },
+            @{ name = 'od'; pick = 'od=all'; line = 'dxc 0; od 98 (all); fxc 0' },
+            @{ name = 'mixed'; pick = 'fxc=loopfilter_*,idct*,*_fast,od=inter_*,cdef_*,intra_*,dxc=inter_main,reconstruct_block*'; line = '' })
           $failed = @()
           foreach ($pick in $picks) {
             python testing/conformance/run.py --tool out/rav1g-dec-dxc/rav1g-dec.exe --streams conformance-streams `
-              --out "out/conformance-dxc-pick-$($pick.name)" --threads 4 "--tool-args=-shaderpick $($pick.pick)$($pick.more)" `
+              --out "out/conformance-dxc-pick-$($pick.name)" --threads 4 "--tool-args=-shaderpick $($pick.pick)" `
               "--title=rav1g-dec of the DXC experiment with -shaderpick $($pick.pick)"
             if ($LASTEXITCODE -ne 0) { $failed += "-shaderpick $($pick.pick): exit code $LASTEXITCODE" }
             $log = "out/conformance-dxc-pick-$($pick.name)/lists/run001.log"
@@ -2385,9 +2382,10 @@ jobs:
           path: shader-headers
 
       # The four shaders of the semi-planar output (docs/output.md) are in this commit alone: the C++
-      # decoder has no such output, and the runs that are compared here do not take that path. Neither
-      # do they take cdef_lists (the lists of CDEF written by the GPU, -parseopt gpucdef: off by
-      # default). Every shader the reference has must be the same here.
+      # decoder has no such output, and the runs that are compared here do not take that path.
+      # cdef_lists is in this commit alone too: it writes the two lists CDEF reads, which the C++ decoder
+      # writes on its recording thread, and the stage dump cdef_info holds the two against each other.
+      # Every shader the reference has must be the same here.
       - name: The shaders of this commit are those of the reference
         run: |
           set -euo pipefail
@@ -2639,7 +2637,7 @@ jobs:
           python testing/conformance/run.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
             --out out/conformance --threads 4 "--title=rav1g-dec built on Linux (cargo xwin, clang-cl)"
           $code = $LASTEXITCODE
-          if (-not (Select-String -Path out/conformance/lists/run001.log -Pattern '^PARSER .*the parse pass of rav1d.*switches nolfmask,tilethread \(' -Quiet)) {
+          if (-not (Select-String -Path out/conformance/lists/run001.log -Pattern '^PARSER .*the parse pass of rav1d.*switches nolfmask,tilethread,gpucdef \(' -Quiet)) {
             throw 'The decoder of this run does not report the parse pass of rav1d with its default switches'
           }
           if ($code -ne 0) { throw "conformance run with the rav1g-dec of the Linux build: exit code $code (1: not as expected.txt says, 2: the run could not be done)" }
@@ -2769,11 +2767,11 @@ jobs:
         shell: pwsh
         run: |
           $failed = @()
-          $switches = '-parseopt none,latelists,time,recordonce,gpucdef'
+          $switches = '-parseopt none,latelists,time'
           python testing/conformance/run.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
             --out out/conformance-switches-rav1d --threads 4 "--tool-args=$switches" "--title=rav1g-dec built on Linux with $switches"
           if ($LASTEXITCODE -ne 0) { $failed += "conformance with ${switches}: exit code $LASTEXITCODE" }
-          if (-not (Select-String -Path out/conformance-switches-rav1d/lists/run001.log -Pattern '^PARSER .*switches none,time,latelists,recordonce,gpucdef \(' -Quiet)) {
+          if (-not (Select-String -Path out/conformance-switches-rav1d/lists/run001.log -Pattern '^PARSER .*switches none,time,latelists \(' -Quiet)) {
             $failed += 'the decoder of the run does not report the switches of the parser'
           }
           python testing/conformance/player_smoke.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
@@ -2962,21 +2960,20 @@ jobs:
 
       # The switches of the parser (-parseopt, docs/phase2-rav1d.md "Where the time goes"): the two runs
       # above have the two that are on by default (nolfmask, tilethread) and the block lists counted
-      # superblock by superblock; the buffers are the same with the two off, the lists counted at the
-      # end of a tile and every mode info record written to its pool once (recordonce), with one thread
-      # and with four.
+      # superblock by superblock; the buffers are the same with the two off and the lists counted at the
+      # end of a tile, with one thread and with four.
       - name: The other side of every switch of the parser against the default switches
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           status=0
           {
-            echo '## Parse check with the other side of every switch of the parser (-parseopt none,latelists,recordonce)'
+            echo '## Parse check with the other side of every switch of the parser (-parseopt none,latelists)'
             echo
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           for threads in 1 4; do
-            target/release/rav1g-parse-check -threads "$threads" -parseopt none,latelists,recordonce -root conformance-streams \
+            target/release/rav1g-parse-check -threads "$threads" -parseopt none,latelists -root conformance-streams \
               -manifest conformance-streams/manifest.txt > "out/parse-check/check-switches-threads$threads.txt" \
               || status=$?
             {

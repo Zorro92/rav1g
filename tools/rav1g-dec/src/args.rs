@@ -275,15 +275,14 @@ pub fn usage() {
     say!("                        every stage filled again in every frame before the stage writes them (same output)");
     say!("  -parseopt <list>      the switches of rav1d's parse, separated by commas (same output). nolfmask: rav1d");
     say!("                        leaves out the masks of its own loop filter; tilethread: a tile stays on its");
-    say!("                        thread between its superblock rows. Both are on by default, and a list that names");
-    say!("                        one of them, none or default says which are on: none turns both off, nolfmask or");
-    say!("                        tilethread leaves only that one on. time: with -gputime, the calls of the sink are");
-    say!("                        timed; latelists: the block lists of a tile are counted at its end and not");
-    say!("                        superblock by superblock; cleargrid: the mode info grid of a slot is cleared for");
-    say!("                        every frame; recordonce: a block's mode info record is written to the pool once");
-    say!("                        and not cleared there and filled; gpucdef: the two lists CDEF reads are written");
+    say!("                        thread between its superblock rows; gpucdef: the two lists CDEF reads are written");
     say!("                        by a pass of the GPU (cdef_lists) and not by the thread that records the frame.");
-    say!("                        These five change nothing else (time alone: the default, timed)");
+    say!("                        The three are on by default, and a list that names one of them, none or default");
+    say!("                        says which are on: none turns all off, nolfmask,tilethread leaves gpucdef off.");
+    say!("                        time: with -gputime, the calls of the sink are timed; latelists: the block lists");
+    say!("                        of a tile are counted at its end and not superblock by superblock; cleargrid: the");
+    say!("                        mode info grid of a slot is cleared for every frame. These three change nothing");
+    say!("                        else (time alone: the default, timed)");
     say!("  -interfast            inter prediction by the fraction of the motion vector: a copy, one filter pass, or");
     say!("                        both (inter_fast, inter_compound_fast; same output)");
     say!("  -interfastlists       the block lists of -interfast with the original shaders on them (same output)");
@@ -461,8 +460,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
                 let list = value()?;
                 task.parser_options = rav1g::ParserOptions::from_words(&list).ok_or_else(|| {
                     format!(
-                        "-parseopt {list}: nolfmask, tilethread, time, latelists, cleargrid, recordonce, gpucdef, \
-                         default or none"
+                        "-parseopt {list}: nolfmask, tilethread, gpucdef, time, latelists, cleargrid, default or none"
                     )
                 })?;
             }

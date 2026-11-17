@@ -83,8 +83,8 @@ impl BitOr for LowMemory {
 }
 
 /// The switches of the parser ([`Settings::parser_options`]): rav1d without the masks of its own
-/// loop filter and a tile kept on its thread, which are both on by default, and the calls of the sink
-/// timed. The frames are the same with every one.
+/// loop filter, a tile kept on its thread and the lists of CDEF written by the GPU, which are on by
+/// default, and the calls of the sink timed. The frames are the same with every one.
 pub use rav1g_parse::options::ParseOptions as ParserOptions;
 
 /// What the application has left for the decoder, in bytes: its memory limit less what it uses and less
@@ -145,7 +145,7 @@ pub struct Settings {
     pub operating_point: u32,
     /// The frame of every spatial layer of a temporal unit is output, instead of the highest one.
     pub output_all_layers: bool,
-    /// The switches of the parser: ways of doing the same parse. The default has the two on that
+    /// The switches of the parser: ways of doing the same parse. The default has the three on that
     /// make it faster; [`ParserOptions::NONE`] turns them off.
     pub parser_options: ParserOptions,
     /// The budget guard. On a console an application that goes over its memory limit loses its D3D12

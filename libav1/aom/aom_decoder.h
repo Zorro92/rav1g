@@ -213,8 +213,9 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
 
 /* aom_codec_dec_cfg_t::parser_options, values to add up: ways of doing the
  * parse (rav1d's parse pass) that give the same frames (docs/phase2-rav1d.md,
- * "Where the time goes"). The library's settings have the first two on
- * (rav1g::ParserOptions::default()); the value 1 was a switch that is gone. */
+ * "Where the time goes"). The library's settings have the first two and the
+ * last on (rav1g::ParserOptions::default(), 518); the values 1 and 256 were
+ * switches that are gone. */
 #define AV1_PARSER_OPTION_NO_LF_MASKS 2       /* rav1d leaves out the masks of its own loop filter */
 #define AV1_PARSER_OPTION_TILE_KEEPS_THREAD 4 /* a tile stays on its thread between its superblock rows */
 #define AV1_PARSER_OPTION_TIME_CALLS 8        /* the calls of the sink are timed (AV1_PERF_CPU_SINK_CALLS) */
@@ -222,7 +223,6 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
 #define AV1_PARSER_OPTION_CLEAR_GRID 32       /* the mode info grid of a slot is cleared for every frame */
 #define AV1_PARSER_OPTION_TEST_PANIC 64       /* test only: the parse of the third frame panics */
 #define AV1_PARSER_OPTION_TEST_POOL_WAIT 128  /* test only: a frame finds the pools empty while an older frame holds a piece */
-#define AV1_PARSER_OPTION_RECORD_ONCE 256     /* a block's mode info record is written to the pool once, not cleared there and filled */
 #define AV1_PARSER_OPTION_GPU_CDEF_LISTS 512  /* the lists CDEF reads are written by a pass of the GPU, not by the thread that records */
 
 /* aom_codec_dec_cfg_t::frames_in_parse: the most the decoder takes. */

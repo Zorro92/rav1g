@@ -50,7 +50,6 @@
 use std::alloc::{Layout, alloc_zeroed, handle_alloc_error};
 use std::cell::UnsafeCell;
 use std::ffi::c_int;
-use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use rav1d::include::dav1d::headers::Rav1dSequenceHeader;
@@ -105,11 +104,6 @@ pub struct SinkOptions {
     /// For the test of what a bug does: the sink panics at the end of the first superblock of the third
     /// frame it is given, on the thread that parses it. Nothing else sets this.
     pub test_panic: bool,
-    /// The mode info record of a block is put together by itself and written to the pool once, every
-    /// byte of it, and not cleared where it lies in the pool and then filled. The records are the same,
-    /// byte for byte. Slower where it was measured (docs/phase2-rav1d.md, "Records written once, and
-    /// the lists of CDEF on the GPU"): a switch for a device to say.
-    pub record_once: bool,
 }
 
 /// What the sink measures for a host with a clock ([`SinkHost::add_time`]).
@@ -520,20 +514,12 @@ impl<H: SinkHost> Sink<H> {
                 mi_rows: frame.mi_rows,
                 has_chroma: frame.has_chroma,
             };
-            if self.options.record_once {
-                // The record is put together here, from zeros, and goes to the pool once, all 224 bytes
-                // of it (the padding of the struct too, which is zero as in a cleared record). The
-                // functions that fill it are inlined and none has its address, so the compiler keeps
-                // the fields as values and stores each into the pool once, with the zeros of what the
-                // block's kind does not write.
-                let mut built = MaybeUninit::<MB_MODE_INFO>::zeroed();
-                record::fill(&mut *built.as_mut_ptr(), &record_frame, block, lossless);
-                std::ptr::copy_nonoverlapping(built.as_ptr().cast::<u8>(), mi.cast::<u8>(), size_of::<MB_MODE_INFO>());
-            } else {
-                // The record cleared in the pool, then the fields of the block's kind.
-                mi.write_bytes(0, 1);
-                record::fill(&mut *mi, &record_frame, block, lossless);
-            }
+            // The record cleared in the pool, then the fields of the block's kind. (A record put together
+            // by itself and written to the pool once is the same bytes and was slower: every field has
+            // to be stored then, and the lines of a record go to memory once either way;
+            // docs/phase2-rav1d.md, "Records written once, and the lists of CDEF on the GPU".)
+            mi.write_bytes(0, 1);
+            record::fill(&mut *mi, &record_frame, block, lossless);
 
             // The grid: the units of the block that are inside the frame.
             let bsize = BLOCK_SIZE_OF[block.bs as usize] as usize;

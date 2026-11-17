@@ -1244,7 +1244,7 @@ frames per second, the mean of two runs:
 | Where | The parser of a decoder | Its switches |
 | --- | --- | --- |
 | Rust | `Settings::parser`: `Parser::Rav1d` (default) or `Parser::Libaom` | `Settings::parser_options`: `ParserOptions::default()` has `no_lf_masks` and `tile_keeps_thread` on; `ParserOptions::NONE` has neither |
-| C (`rav1g.h`) | `Rav1gSettings::parser`: `RAV1G_PARSER_RAV1D` (what `rav1g_settings_default` writes, and what every value but `RAV1G_PARSER_LIBAOM` selects) or `RAV1G_PARSER_LIBAOM` | `Rav1gSettings::parser_options`: `RAV1G_PARSER_OPTIONS_DEFAULT` (what `rav1g_settings_default` writes: `_NO_LF_MASKS` and `_TILE_KEEPS_THREAD`); 0 for neither |
+| C (`rav1g.h`) | `Rav1gSettings::parser`: `RAV1G_PARSER_RAV1D` (what `rav1g_settings_default` writes, and what every value but `RAV1G_PARSER_LIBAOM` selects) or `RAV1G_PARSER_LIBAOM` | `Rav1gSettings::parser_options`: `RAV1G_PARSER_OPTIONS_DEFAULT` (what `rav1g_settings_default` writes: `_NO_LF_MASKS` and `_TILE_KEEPS_THREAD`, and since 2026-11-16 `_GPU_CDEF_LISTS`: 518); 0 for neither |
 | `rav1g-dec`, test player | no flag or `-parser rav1d`; `-parser c` for the entropy decoder of libaom | no flag: `nolfmask,tilethread`; `-parseopt` says otherwise, per task ([test-player.md](test-player.md#switches-of-the-parser--parseopt)) |
 | `rav1g-parse-check` (the oracle) | both, always (until 2026-11-14; rav1d only since) | no flag: `nolfmask,tilethread`; `-parseopt` |
 
@@ -2801,23 +2801,24 @@ low memory 35); `b`: the same with `-parseopt time`; `c`: `-t 4 -parseframes 3` 
 
 Behind [the split above](#the-parse-split-on-the-console-2026-11-16): the sink's calls are 2.6 and
 3.2 ms a 4K frame on the console, and the thread that records spends up to 2.9 ms on the lists of
-CDEF. Two changes, each behind a word of `-parseopt` and **both off by default**: one is slower where
-it could be measured, the other costs the GPU a pass whose time only the console can say. The
-development machine is an Intel Core i7-10610U; its memory is fast, so it shows instructions and
-little of the traffic.
+CDEF. Two changes, each first behind a word of `-parseopt` and off by default: one was slower where
+it could be measured and is gone again, the other costs the GPU a pass whose time only the console
+could say, and is the default since the console said it (what became of the two is at the end of
+this section). The development machine is an Intel Core i7-10610U; its memory is fast, so it shows
+instructions and little of the traffic.
 
-**A mode info record written once (`-parseopt recordonce`,** `ParserOptions::record_once`,
-`RAV1G_PARSER_OPTION_RECORD_ONCE`). The sink clears the 224 bytes of a record where it lies in the
-pool and then stores the fields of the block's kind. With the switch it puts the record together by
-itself, from zeros, and writes all 224 bytes to the pool once (`Sink::block_call`; the functions of
-`record.rs` are inlined and none keeps the record's address, so the compiler holds the fields as
-values and the copy becomes one store a field).
+**A mode info record written once (`-parseopt recordonce`,** a negative result: the switch was in
+commits `96fee02` to `3717e5e` and is removed). The sink clears the 224 bytes of a record where it
+lies in the pool and then stores the fields of the block's kind. With the switch it put the record
+together by itself, from zeros, and wrote all 224 bytes to the pool once (`Sink::block_call`; the
+functions of `record.rs` are inlined and none keeps the record's address, so the compiler held the
+fields as values and the copy became one store a field).
 
 - *The same bytes.* Every byte of every record, the padding included: `rav1g-parse-check` holds the
   buffers of `-parseopt none,latelists,recordonce` against the default on the 244 streams of the
   conformance set (587,790 records, one thread and four with two frames in parse) and on five 4K
-  clips (6.8 million records); CI holds the same, and the stage dumps (the mode info pool among them)
-  of the run with the other side of every switch.
+  clips (6.8 million records); CI held the same while the switch was there, and the stage dumps (the
+  mode info pool among them) of the run with the other side of every switch.
 - *Slower, not faster.* The other calls of the sink (`rav1g-parse-check -time -parseopt time`, one
   thread, ms a frame, three rounds taken in turn):
 
@@ -2861,22 +2862,24 @@ list shaders and stores the same words at the same places (`record_cdef_lists` o
 - *The buffers.* The two lists of a slot are upload buffers, which no shader can write. In a decoder
   created with the switch they are buffers in a custom heap that the CPU has a cached mapping of and a
   command list may write (as the grids of `-gpuclear`): the same sizes, counted as `HostRW` in the
-  `MEMORY` lines where they were `DeviceUpload`. They are in the state for writing around the pass
-  only, so CDEF and the stage dump read them as before. The switch is read when the decoder is
-  created; the test player makes a new decoder for a task with other switches.
+  `MEMORY` lines where they were `DeviceUpload` (and are without the switch). They are in the state
+  for writing around the pass only, so CDEF and the stage dump read them as before. The switch is
+  read when the decoder is created; the test player makes a new decoder for a task with other
+  switches.
 - *The stage dump `cdef_info`* is a copy the command list makes, recorded behind the pass, so it has
   what the pass wrote; in a decoder without the switch nothing moved. The pinned C++ reference is
-  the one it was, and the shader is one the reference does not have (`--candidate-only`, like the
+  the one it was (its lists are the ones of its recording thread, and `rust-equal` finds the GPU's
+  equal to them), and the shader is one the reference does not have (`--candidate-only`, like the
   shaders of the semi-planar output).
 - *Compilers.* `cs_5_0` with FXC (70 instructions, no group sync, nothing of Shader Model 6) and
-  `cs_6_0` with DXC, default optimisation and `-Od`; CI runs DXC's bytecode in the mixed pick of the
-  DXC job.
+  `cs_6_0` with DXC, default optimisation and `-Od`; the DXC job of CI runs all three bytecodes on
+  the whole set.
 - *The same output.* Under wine on lavapipe: the 244 streams of the conformance set with
   `-parseopt gpucdef,recordonce` and with `-parseopt gpucdef -poisonbuf`, 244 of 244 each; the md5 of
   40 frames of five 4K clips (`j4k40`, `d2_300`, `a1_8b4k_300`, `fg4k_300`, `t40x8`) equal with and
-  without; the stage dumps of eight streams equal by `stage_dump.py compare`, `cdef_info` included. CI
-  has both words in the run with the other side of every switch (the whole set on WARP, the stage
-  dumps against those of the default, the player's decoder code).
+  without; the stage dumps of eight streams equal by `stage_dump.py compare`, `cdef_info` included.
+  On WARP in CI: the whole set, the stage dumps of the two ways against each other and against the
+  C++ decoder's, the player's decoder code.
 - *Measured* under wine on lavapipe, where the GPU is a rasterizer on the same processor: 30 frames
   of each clip, the median of a frame (the means have frames in which a call of wine waits for
   hundreds of milliseconds).
@@ -2893,20 +2896,43 @@ list shaders and stores the same words at the same places (`record_cdef_lists` o
   stages; `av1_perf_frame` is 16 bytes longer). `-memstats` counts no bytes of the CPU for the lists
   of such a decoder.
 
-**For the console** (one package, the lines of the split above; `j4k40` and `d2_300`, three rounds
-taken in turn, in the slow state):
+**The console** (package 0.2.196, slow state, Bale stopped, `-output p010 -gputime`, 300 frames,
+three rounds taken in turn; `-parseopt time` against `-parseopt time,gpucdef`, which was how the
+switch was turned on while it was off by default; ms a frame, means):
 
-```text
--i /streams/<clip>.ivf -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -output p010 -parseopt time
--i /streams/<clip>.ivf -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -output p010 -parseopt time,gpucdef
--i /streams/<clip>.ivf -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -output p010 -parseopt time,recordonce
--i /streams/<clip>.ivf -frate -1 -queue_size 4 -progress -nopresent -md5_frame_check -parseopt gpucdef,recordonce
-```
+| Clip | Lists by | fps (the three rounds) | Command list record | `cpu rec_cdef_lr` | `gpu cdef_lists` | GPU busy | Decode call | Decode thread blocked |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `j4k40` | the thread that records | 47.69 (47.63, 47.54, 47.88) | 3.44 | 3.00 | | 18.33 | 20.96 | 10.27 |
+| | the GPU | 48.73 (48.63, 48.85, 48.71) | 0.51 | 0.026 | 0.244 | 18.57 | 20.49 | 9.23 |
+| `d2_300` | the thread that records | 51.63 | | 0.002 | | | | |
+| | the GPU | 51.81 | | 0.002 | | | | |
 
-To read: `cpu rec_cdef_lr` against `gpu cdef_lists` and the frames per second for `gpucdef` (it is
-the default if the pass is well under the 2.9 ms it takes off the thread that records and the frames
-per second of `j4k40`, which the GPU bounds, do not fall); `cpu parse: sink calls` for `recordonce`
-(the switch goes if the console agrees with the development machine).
+- **3.0 ms a frame leave the thread that records for 0.24 ms of the GPU**, and `j4k40` is 2.2 %
+  faster in every round, though it is the clip the GPU bounds. `d2_300` has no CDEF and no pass:
+  nothing changes there.
+- The md5 set of 15 clips with the lists by the GPU: 15 of 15, no `MEMORY FAILED`.
+
+**What became of the two switches** (the commit behind this result):
+
+- **The lists of CDEF by the GPU are the default.** `gpucdef` is the third of the switches that are
+  on by default (`ParserOptions::default()`, `RAV1G_PARSER_OPTIONS_DEFAULT`: 518, where it was 6;
+  an application that passes the number 6 by itself keeps the lists on the thread that records). It
+  is turned off like the two others, by a list that names the ways it wants:
+  `-parseopt nolfmask,tilethread` is the default of before, `-parseopt none` has none of the three.
+  CI's run with the other side of every switch (`-parseopt none,latelists,time`) is now the run with
+  the lists by the thread that records, and its stage dumps are held against those of the default,
+  `cdef_info` among them; `rust-equal` holds the default's against the C++ decoder's.
+
+  ```text
+  -i /streams/<clip>.ivf -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -output p010
+  -i /streams/<clip>.ivf -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -output p010 -parseopt nolfmask,tilethread
+  ```
+- **`recordonce` is gone**, with its code: the sink clears a record in the pool and fills it, as
+  before. It was the slower way in every round on the development machine and saves no byte of
+  traffic, so there was nothing for the console to decide. What it measured stays above. Its value,
+  256, is not given to another switch: like the value 1 it means nothing to the library, and the
+  word is an error of the task. What stays of the change is the default's 2 to 7 % (the transform
+  size tree in an array of its own, the fill inlined).
 
 ### The block lists on the GPU: a design
 

@@ -386,7 +386,7 @@ the start of every task say what is in effect.
 | Decoder size | the stream's largest frame size, rounded up to 128, and 8-bit buffers for an 8-bit stream; see [Decoder size](#decoder-size--nofitsize) | `Decoder size: 3840x2176 10-bit (fit to the stream, default)` | `-nofitsize`: 4096x2176 10-bit for every stream, `Decoder size: 4096x2176 10-bit (fixed, -nofitsize)` |
 | Memory reductions | the library's default for the decoder's size: part 1, one back buffer shared by all frames (frame buffer pool 12 → 10), and since package 0.2.186 for a decoder above 1920x1088 part 2, the mode info pool at half (55.8 MiB less at 4K; [memory.md](memory.md#the-wait-of-the-second-frame-in-parse-in-a-pool-at-half-candidate-2)), since 0.2.191 part 32, the frame buffer bound at the recording (24.2 MiB), and since 0.2.193 part 4, the coefficient pool at four fifths (12.0 MiB); no measurable time cost; see [Smaller decoder](#smaller-decoder--lowmem) | `Low memory parts: default (the library's: 1 shared back buffer, and above 1920x1088 also 2 mode info pool at half, 4 smaller coefficient pool, 32 frame buffer bound at the recording)`; the decoder's `MEMORY decoder created options` line says which pool it is | `-lowmemparts 1`: the mode info pool of the worst case, the default up to package 0.2.185; `-lowmemparts 0`: none, every frame takes its back buffer from the pool (`Low memory parts: 0 (none, -lowmemparts 0)`); `-lowmemparts N`: exactly the parts in `N`; `-lowmem`: all three (`-lowmemparts 7`) |
 | Pipeline slots | 2 | `Frame slots: 2` | `-slots 3`, `-slots 4` |
-| Parser | the parse pass of rav1d, with its switches `nolfmask` and `tilethread` on | `Parser: the parse pass of rav1d`, `Parser switches (-parseopt): nolfmask tilethread` | none since package 0.2.159: the entropy decoder of libaom (`-parser c`) left the decoder; up to 0.2.157 `Parser: the entropy decoder of libaom (-parser c)`; `-parseopt` for the switches; see [Parser](#parser--parser) |
+| Parser | the parse pass of rav1d, with its switches `nolfmask`, `tilethread` and (since the package after 0.2.196) `gpucdef` on | `Parser: the parse pass of rav1d`, `Parser switches (-parseopt): nolfmask tilethread gpucdef` | none since package 0.2.159: the entropy decoder of libaom (`-parser c`) left the decoder; up to 0.2.157 `Parser: the entropy decoder of libaom (-parser c)`; `-parseopt` for the switches; see [Parser](#parser--parser) |
 | Clears of a slot | none: the wavefront of intra prediction is kept at the edges of the tiles (since package 0.2.146.0) | `Clears: none needed (default: intra wavefront at the edges of the tiles; -gpuclear, -cpuclear and -syncclear keep it in the slot's grid and clear that)` | `-gpuclear`, `-cpuclear`, `-syncclear`: the wavefront in the slot's grid, cleared for every frame by the GPU, the completion thread (the default of 0.2.140 to 0.2.144; `-asyncclear` is the same) or the decode thread; see [Clears](#clears) |
 | Intra prediction | upstream's shaders, `/Od` build | `Intra shaders: intra_main + intra_filter (original)`, `Intra main shader: intra_main (/Od, original)` | `-intrav2`, `-intraopt` |
 | Inter prediction | upstream's shaders, lists by type and block size | `Inter shaders: inter_main, inter_compound (original)` | `-interfast`: see [Inter fast path](#inter-fast-path--interfast) |
@@ -485,7 +485,7 @@ span exactly**, and any gap between two stages is counted in the later one.
 | `film_grain` | film grain |
 | `copy_plane`, `output_copy` | copy shader into the staging area, then the copy into the output buffer or textures |
 | `slot_clear` | with `-gpuclear`: the grids of the frame's slot cleared at the end of the command list |
-| `cdef_lists` | with `-parseopt gpucdef`: the two lists CDEF reads, written from the mode info in front of `cdef` (it is the last line of the table, not where it runs) |
+| `cdef_lists` | the two lists CDEF reads (the default; not with `-parseopt nolfmask,tilethread` or `none`), written from the mode info in front of `cdef` (it is the last line of the table, not where it runs) |
 
 A timestamp records when the GPU reaches that point of the list. Stages that end in a
 UAV barrier are cleanly separated. `residual_clear` has no barrier before `idct_sort`,
@@ -1298,32 +1298,34 @@ and 45 to 49 with two frames in parse and the pools.
 
 rav1d's parse has switches: ways of doing the same parse, kept as switches so that one launch can
 time the parse with and without each on the same stream. The output is the same with every one of
-them. Two are on by default since package 0.2.139.0; why each exists and what it changed where it
-was measured: [phase2-rav1d.md](phase2-rav1d.md#where-the-time-goes).
+them. Two are on by default since package 0.2.139.0 and a third, `gpucdef`, since the package
+after 0.2.196; why each exists and what it changed where it was measured: [phase2-rav1d.md](phase2-rav1d.md#where-the-time-goes).
 
 | Word | Default | Effect |
 | --- | --- | --- |
 | `nolfmask` | on | rav1d does not fill the masks and levels of its own loop filter, which nothing here reads. |
 | `tilethread` | on | A tile stays on the thread it is on between its superblock rows. Without it rav1d puts the tile back into its task queue after every superblock row and wakes a waiting thread, and the next row runs on whichever of the `-t` threads takes it. |
+| `gpucdef` | on | The two lists CDEF reads (the strength index of every 64x64 block, the skip flag of every 8x8 block) are written by a pass of the frame's command list in front of CDEF (`cdef_lists.hlsl`, the GPU stage `cdef_lists` of `-gputime`) and not by the thread that records the frame (`cpu rec_cdef_lr`): 3.0 ms a frame of `j4k40` off that thread for 0.24 ms of the GPU on the console, 2.2 % more frames a second ([phase2-rav1d.md](phase2-rav1d.md#records-written-once-and-the-lists-of-cdef-on-the-gpu-2026-11-16)). The same lists. Read when the decoder is created: the two buffers of a slot are then of the type `HostRW`. |
 | `time` | off | With `-gputime`: the calls of the sink are timed (`sink_calls`, below). Two readings of the processor's time stamp counter per block and per transform block. |
 | `latelists` | off | The block lists of a tile are counted in one pass at the end of the tile, as up to package 0.2.140, and not superblock by superblock while the superblock's mode info is in the cache. |
 | `cleargrid` | off | The mode info grid of a pipeline slot is cleared for every frame (4.2 MB at 4K), as up to package 0.2.140, and not only for a frame of another size than the frames before it on the slot. |
-| `recordonce` | off | The mode info record of a block is put together by itself and written to its pool once, all 224 bytes, and not cleared in the pool and then filled. The same records; the slower way on the development machine ([phase2-rav1d.md](phase2-rav1d.md#records-written-once-and-the-lists-of-cdef-on-the-gpu-2026-11-16)). |
-| `gpucdef` | off | The two lists CDEF reads (the strength index of every 64x64 block, the skip flag of every 8x8 block) are written by a pass of the frame's command list in front of CDEF (`cdef_lists.hlsl`, the GPU stage `cdef_lists` of `-gputime`) and not by the thread that records the frame (`cpu rec_cdef_lr`). The same lists. Read when the decoder is created: the two buffers of a slot are then of the type `HostRW`. |
 
 `-parseopt <word>[,<word>...]` says which are on:
 
-- A list that names `nolfmask`, `tilethread`, `none` or `default` replaces the default of those two:
-  the parse is done in the ways the list names and in no other. `-parseopt none` turns both off
-  (rav1d's parse as upstream schedules it), `-parseopt tilethread` leaves only `tilethread` on,
-  `-parseopt nolfmask` only `nolfmask`, `-parseopt default` is the same as no flag.
-- `time`, `latelists`, `cleargrid`, `recordonce` and `gpucdef` are off by default; each is on when
-  the list has it and changes nothing else: `-parseopt time` is the default, timed; `-parseopt none,time` is the parse without
-  the two, timed; `-parseopt latelists,cleargrid` is the default with the block lists and the grid
+- A list that names `nolfmask`, `tilethread`, `gpucdef`, `none` or `default` replaces the default of
+  those three: the parse is done in the ways the list names and in no other. `-parseopt none` turns
+  all three off (rav1d's parse as upstream schedules it, the lists of CDEF by the thread that
+  records), `-parseopt nolfmask,tilethread` leaves `gpucdef` off (the default up to package 0.2.196),
+  `-parseopt tilethread` leaves only `tilethread` on, `-parseopt default` is the same as no flag.
+- `time`, `latelists` and `cleargrid` are off by default; each is on when the list has it and
+  changes nothing else: `-parseopt time` is the default, timed; `-parseopt none,time` is the parse
+  without the three, timed; `-parseopt latelists,cleargrid` is the default with the block lists and the grid
   clear as they were up to package 0.2.140
   ([phase2-rav1d.md](phase2-rav1d.md#block-lists-and-clears-less-memory-traffic)).
 - Another word is an error of the task (`stage` and `all` were words until package 0.2.138; the
-  switch `stage` is gone).
+  switch `stage` is gone, and so is `recordonce`, a word of package 0.2.196 alone: a mode info
+  record written to its pool once, the slower way,
+  [phase2-rav1d.md](phase2-rav1d.md#records-written-once-and-the-lists-of-cdef-on-the-gpu-2026-11-16)).
 - Console timings are taken in the console's slow state, which it enters 10 to 15 seconds after the
   last controller input and in which playback runs: put a warm-up task in front
   ([phase2-rav1d.md](phase2-rav1d.md#console-after-step-3-rav1d-is-the-default)).
@@ -1336,12 +1338,11 @@ was measured: [phase2-rav1d.md](phase2-rav1d.md#where-the-time-goes).
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt time
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt latelists
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt cleargrid
--i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt time,recordonce
--i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt time,gpucdef
+-i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt nolfmask,tilethread
 ```
 
-The log has `Parser switches (-parseopt): ...` behind the `Parser:` line (`nolfmask tilethread` for a
-task without the flag, `none` with `-parseopt none`). A task with other switches than the task
+The log has `Parser switches (-parseopt): ...` behind the `Parser:` line (`nolfmask tilethread gpucdef`
+for a task without the flag, `none` with `-parseopt none`). A task with other switches than the task
 before gets a new decoder.
 
 With rav1d's parse the `-gputime` summary splits the tile decode further. All three lines are parts
@@ -3535,7 +3536,7 @@ out (the format is in `testing/common/stage_dump.h`):
 | `pred_blocks`, `pred_blocks_warp` | the prediction block records `gen_pred_blocks` wrote | the prediction and reconstruction stages |
 | `lf_params` | the constants of the loop filter: the frame's levels and deltas, the level per plane, segment, reference and mode, and the three limits of every level | `gen_lf_blocks_vert/hor`, `loopfilter_vert/hor` |
 | `lf_blocks` | the six edge lists of the loop filter (vertical and horizontal edges of Y, U, V): per block sixteen edges, each a level, a filter length and the step to the next edge | `loopfilter_vert/hor` |
-| `cdef_info` | CDEF's strength index per 64x64 block and skip flag per 8x8 block, as the thread that records wrote them or, with `-parseopt gpucdef`, as `cdef_lists` did: the copy is behind that pass in the command list | `cdef_filter` |
+| `cdef_info` | CDEF's strength index per 64x64 block and skip flag per 8x8 block, as `cdef_lists` wrote them (the copy is behind that pass in the command list) or, without `gpucdef`, as the thread that records did | `cdef_filter` |
 | `lr_info` | loop restoration: type and coefficients per unit | `loop_restoration` |
 
 A frame has the buffers of the stages that run for it (no `lf_blocks` without loop filter).

@@ -76,10 +76,9 @@ pub struct RecordFrame<'a> {
 /// the tree that lies outside the frame is not walked, so its entries keep what the record had (zero in
 /// a cleared record): this is reproduced, not tidied.
 ///
-/// The walk has the two fields by themselves, and the record gets them when it is through: the record of
-/// a block is put together in a place of its own and written to the pool once (`Sink::block`), which the
-/// compiler does field by field only while no function that is not inlined has the record's address;
-/// this one calls itself.
+/// The walk has the two fields by themselves, and the record gets them when it is through: the walk
+/// calls itself, so it is not inlined, and with the record's address in it the compiler would keep less
+/// of the fill in registers (the sink's calls were 2 to 7 % slower that way).
 struct VarTx {
     /// `inter_tx_size` and `tx_size` of the record: what a cleared record has, and then what the walk
     /// writes.
@@ -234,8 +233,7 @@ fn intra(mi: &mut MB_MODE_INFO, block: &ParseBlock<'_>, intra: &Av1BlockIntra, l
     }
     mi.palette_mode_info.palette_size = [i16::from(intra.pal_sz[0]), i16::from(intra.pal_sz[1])];
     if intra.pal_sz[0] != 0 || intra.pal_sz[1] != 0 {
-        // The colours in an array of their own, which the record then gets whole: a store into the
-        // record at a place the compiler does not know keeps the whole record in memory (see `VarTx`).
+        // The colours in an array of their own, which the record then gets whole (see `VarTx`).
         let mut colors = mi.palette_mode_info.palette_colors;
         if intra.pal_sz[0] != 0 {
             let n = intra.pal_sz[0] as usize;

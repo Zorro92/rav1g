@@ -92,8 +92,8 @@ typedef struct av1_stage_dump av1_stage_dump;
 
 /*
  `Rav1gSettings::parser_options`, values to add up: ways of doing the parse (rav1d's parse pass)
- that give the same frames (docs/phase2-rav1d.md, "Where the time goes"). The value 1 was a switch
- that is gone and means nothing. This one: rav1d leaves out the masks and levels of its own loop
+ that give the same frames (docs/phase2-rav1d.md, "Where the time goes"). The values 1 and 256 were
+ switches that are gone and mean nothing. This one: rav1d leaves out the masks and levels of its own loop
  filter, which nothing here reads. Part of `RAV1G_PARSER_OPTIONS_DEFAULT`.
  */
 #define RAV1G_PARSER_OPTION_NO_LF_MASKS 2
@@ -140,18 +140,12 @@ typedef struct av1_stage_dump av1_stage_dump;
 #define RAV1G_PARSER_OPTION_TEST_POOL_WAIT 128
 
 /*
- The mode info record of a block is put together by itself and written to its pool once, every byte
- of it, and not cleared where it lies in the pool and then filled. The records are the same. For a
- timing of the two against each other; it was the slower way where it was measured.
- */
-#define RAV1G_PARSER_OPTION_RECORD_ONCE 256
-
-/*
  The two lists CDEF reads besides the frame (the strength index of every 64x64 block, the skip flag
  of every 8x8 block) are written by a pass of the frame's command list, in front of CDEF, and not by
- the thread that records the frame, which reads the frame's mode info again for them. The lists are
- the same. Read when the decoder is created: the two buffers of every pipeline slot are then buffers
- the GPU may write. For a timing of the two against each other.
+ the thread that records the frame, which reads the frame's mode info again for them (3 ms of a
+ heavy 4K frame on the console). The lists are the same. Read when the decoder is created: the two
+ buffers of every pipeline slot are then buffers the GPU may write. Part of
+ `RAV1G_PARSER_OPTIONS_DEFAULT`.
  */
 #define RAV1G_PARSER_OPTION_GPU_CDEF_LISTS 512
 
@@ -161,11 +155,12 @@ typedef struct av1_stage_dump av1_stage_dump;
 #define RAV1G_FRAMES_IN_PARSE_MAX 4
 
 /*
- The `Rav1gSettings::parser_options` of `rav1g_settings_default`: `RAV1G_PARSER_OPTION_NO_LF_MASKS`
- and `RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD`. An application that wants the timing as well adds
- `RAV1G_PARSER_OPTION_TIME_CALLS` to it; 0 is rav1d's parse without either.
+ The `Rav1gSettings::parser_options` of `rav1g_settings_default`: `RAV1G_PARSER_OPTION_NO_LF_MASKS`,
+ `RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD` and `RAV1G_PARSER_OPTION_GPU_CDEF_LISTS` (518; it was 6
+ before the last of them joined it). An application that wants the timing as well adds
+ `RAV1G_PARSER_OPTION_TIME_CALLS` to it; 0 is rav1d's parse without any of them.
  */
-#define RAV1G_PARSER_OPTIONS_DEFAULT 6
+#define RAV1G_PARSER_OPTIONS_DEFAULT 518
 
 /*
  `rav1g_set_inter_fast`: the fast inter path is on.
