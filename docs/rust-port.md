@@ -144,7 +144,8 @@ have to write the same bytes at every stage, not only the same frames.
   lists equal. The check holds every other shared shader byte-identical and fails if a named
   exception is identical or missing from either build. `--candidate-only` lists shaders the
   reference lacks. This includes `gen_pred_blocks_fast_packed`, which Rust uses for `-interfast`.
-  The legacy `gen_pred_blocks_fast` is built for the comparison.
+  The legacy `gen_pred_blocks_fast` is built for the comparison. The `-shaderpick` selector
+  `gen_pred_blocks_fast` selects bytecode for the packed variant.
 
 ## Branches
 

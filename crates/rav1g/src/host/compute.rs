@@ -78,18 +78,27 @@ fn shader_table(set: Set) -> &'static [ShaderBytecode] {
     }
 }
 
-/// The bytecode of a shader by the name of its header, of one of the sets of the build.
+/// The pipeline name used by `-shaderpick`. The fast pipeline reads packed records.
+fn shader_name(entry: &'static ShaderBytecode) -> &'static str {
+    // SAFETY: the shader table has static names.
+    match unsafe { CStr::from_ptr(entry.name) }.to_str().unwrap_or("") {
+        "gen_pred_blocks_fast_packed" => "gen_pred_blocks_fast",
+        name => name,
+    }
+}
+
+/// The bytecode of a shader by its pipeline name, of one of the sets of the build.
 fn bytecode_of(name: &str, set: Set) -> Option<&'static [u8]> {
     // SAFETY: static names and bytecode (see `shader_table`).
     unsafe {
         shader_table(set)
             .iter()
-            .find(|entry| CStr::from_ptr(entry.name).to_bytes() == name.as_bytes())
+            .find(|entry| shader_name(entry) == name)
             .map(|entry| std::slice::from_raw_parts(entry.code, entry.size as usize))
     }
 }
 
-/// The bytecode of a shader by the name of its header: the one a pipeline state has without a pick.
+/// The bytecode a pipeline state has without a pick.
 #[cfg(test)]
 fn bytecode(name: &str) -> Option<&'static [u8]> {
     bytecode_of(name, Set::Dxc)
@@ -97,8 +106,7 @@ fn bytecode(name: &str) -> Option<&'static [u8]> {
 
 /// The names of the shaders the build has bytecode of, in the order of the table.
 fn shader_names() -> Vec<&'static str> {
-    // SAFETY: static names (see `shader_table`).
-    shader_table(Set::Dxc).iter().map(|entry| unsafe { CStr::from_ptr(entry.name) }.to_str().unwrap_or("")).collect()
+    shader_table(Set::Dxc).iter().map(shader_name).collect()
 }
 
 /// The shader pick of the DXC experiment (`shader_pick.rs`): which of the three bytecodes of the build
@@ -357,7 +365,7 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("intra_v2", &layouts.intra_v2, &raw mut (*lib).shader_intra_v2),
             ("intra_v2_hbd", &layouts.intra_v2, &raw mut (*lib).shader_intra_v2_hbd),
             ("gen_pred_blocks", &layouts.pred_blocks, &raw mut (*lib).shader_gen_pred_blocks),
-            ("gen_pred_blocks_fast_packed", &layouts.pred_blocks_fast, &raw mut (*lib).shader_gen_pred_blocks_fast),
+            ("gen_pred_blocks_fast", &layouts.pred_blocks_fast, &raw mut (*lib).shader_gen_pred_blocks_fast),
             ("inter_fast", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_fast),
             ("inter_compound_fast", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_comp_fast),
             ("inter_fast_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_fast),
@@ -878,5 +886,6 @@ mod tests {
         for name in names {
             assert!(bytecode(name).is_some(), "the glue has the bytecode of {name}");
         }
+        assert!(shader_pick::resolve("fxc=gen_pred_blocks_fast", &shader_names()).is_ok());
     }
 }
