@@ -150,6 +150,14 @@ typedef struct av1_stage_dump av1_stage_dump;
 #define RAV1G_PARSER_OPTION_GPU_CDEF_LISTS 512
 
 /*
+ A check of the decoder, not a way of doing the parse: a pass of every frame's command list builds the
+ frame's mode info grid from its records into a second grid of the pipeline slot, and the decoder holds
+ it against the grid the parse wrote when the frame is done (`GRIDCHECK` in the log of its release).
+ The frames are the same. Read when the decoder is created; every slot then has the second grid.
+ */
+#define RAV1G_PARSER_OPTION_GPU_GRID_CHECK 1024
+
+/*
  The most frames a decoder parses at the same time (`Rav1gSettings::frames_in_parse`).
  */
 #define RAV1G_FRAMES_IN_PARSE_MAX 4

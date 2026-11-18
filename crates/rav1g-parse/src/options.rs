@@ -48,6 +48,11 @@ pub struct ParseOptions {
     /// thread that records the frame. Not a switch of the parse: the D3D12 host reads it when the decoder
     /// is created (the two buffers are then buffers a shader may write). On by default.
     pub gpu_cdef_lists: bool,
+    /// A check, not a way of doing the parse: a pass of the GPU builds the mode info grid of every frame
+    /// from the frame's records (`mi_grid_build.hlsl`) into a second grid of the slot, which the D3D12
+    /// host holds against the grid the sink wrote when the frame is done, and reports at the decoder's
+    /// release (`GRIDCHECK`). Nothing reads the second grid otherwise. Off by default.
+    pub gpu_grid_check: bool,
 }
 
 impl Default for ParseOptions {
@@ -69,6 +74,7 @@ impl ParseOptions {
     pub const TEST_PANIC: u32 = 64;
     pub const TEST_POOL_WAIT: u32 = 128;
     pub const GPU_CDEF_LISTS: u32 = 512;
+    pub const GPU_GRID_CHECK: u32 = 1024;
     /// The bits of [`ParseOptions::default`].
     pub const DEFAULT: u32 = Self::NO_LF_MASKS | Self::TILE_KEEPS_THREAD | Self::GPU_CDEF_LISTS;
     /// The three switches that are on by default, which a list of words names to replace that default.
@@ -84,10 +90,11 @@ impl ParseOptions {
         test_panic: false,
         test_pool_wait: false,
         gpu_cdef_lists: false,
+        gpu_grid_check: false,
     };
 
     /// The words of the tools (`-parseopt <word>[,<word>...]`).
-    pub const WORDS: [(&'static str, u32); 8] = [
+    pub const WORDS: [(&'static str, u32); 9] = [
         ("nolfmask", Self::NO_LF_MASKS),
         ("tilethread", Self::TILE_KEEPS_THREAD),
         ("time", Self::TIME_CALLS),
@@ -96,6 +103,7 @@ impl ParseOptions {
         ("testpanic", Self::TEST_PANIC),
         ("poolwait", Self::TEST_POOL_WAIT),
         ("gpucdef", Self::GPU_CDEF_LISTS),
+        ("gridcheck", Self::GPU_GRID_CHECK),
     ];
 
     pub const fn from_bits(bits: u32) -> Self {
@@ -108,6 +116,7 @@ impl ParseOptions {
             test_panic: bits & Self::TEST_PANIC != 0,
             test_pool_wait: bits & Self::TEST_POOL_WAIT != 0,
             gpu_cdef_lists: bits & Self::GPU_CDEF_LISTS != 0,
+            gpu_grid_check: bits & Self::GPU_GRID_CHECK != 0,
         }
     }
 
@@ -120,6 +129,7 @@ impl ParseOptions {
             | u32::from(self.test_panic) * Self::TEST_PANIC
             | u32::from(self.test_pool_wait) * Self::TEST_POOL_WAIT
             | u32::from(self.gpu_cdef_lists) * Self::GPU_CDEF_LISTS
+            | u32::from(self.gpu_grid_check) * Self::GPU_GRID_CHECK
     }
 
     /// A list of words, separated by commas. `nolfmask`, `tilethread` and `gpucdef` are the three
@@ -131,8 +141,9 @@ impl ParseOptions {
     /// by default; each is on when the list has it and leaves the three as they are, so `time` alone
     /// times the default. `testpanic` is not a way of doing a parse: the parse of the third frame panics,
     /// for the test of what a bug does. Neither is `poolwait`: a frame finds the host's pools empty while
-    /// an older frame holds a piece, for the test of a parse that waits for memory. `None` for a word
-    /// that is none of these.
+    /// an older frame holds a piece, for the test of a parse that waits for memory. Nor is `gridcheck`:
+    /// the mode info grid built by the GPU is held against the sink's (off by default; like `time`, it
+    /// leaves the three as they are). `None` for a word that is none of these.
     ///
     /// | List | `nolfmask` | `tilethread` | `gpucdef` | `time` |
     /// | --- | --- | --- | --- | --- |

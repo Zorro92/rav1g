@@ -149,8 +149,8 @@ const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
     // 20 transforms, 17 shaders that do not depend on the bit depth, 30 that do for 8 bits and for more.
-    assert!(SHADERS == 20 + 22 + 2 * 30);
-    assert!(LAYOUTS == 20);
+    assert!(SHADERS == 20 + 23 + 2 * 30);
+    assert!(LAYOUTS == 21);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
 
@@ -239,6 +239,7 @@ struct Layouts {
     copy_plane_sp_tex: Layout,
     film_grain_tex: Layout,
     cdef_lists: Layout,
+    mi_grid_build: Layout,
 }
 
 /// Creates the layouts in the order of the C++ and puts each into its field of the library.
@@ -284,6 +285,9 @@ unsafe fn create_layouts(device: Device<'_>, lib: *mut compute_shader_lib) -> Re
         film_grain_tex: layout_planes(3, 0, 1, 0, 2)?,
         // cdef_lists.hlsl: the mode info pool and grid, the two lists, 6 inline constants.
         cdef_lists: layout(2, 2, 0, 6)?,
+        // mi_grid_build.hlsl: the mode info pool and the runs of the frame's records, the grid, 7 inline
+        // constants.
+        mi_grid_build: layout(2, 1, 0, 7)?,
     };
     // SAFETY: the fields are null COM pointers of root signatures (the caller's contract).
     unsafe {
@@ -307,6 +311,7 @@ unsafe fn create_layouts(device: Device<'_>, lib: *mut compute_shader_lib) -> Re
         com_store(&raw mut (*lib).sig_copy_plane_sp_tex, layouts.copy_plane_sp_tex.clone().into_raw());
         com_store(&raw mut (*lib).sig_film_grain_tex, layouts.film_grain_tex.clone().into_raw());
         com_store(&raw mut (*lib).sig_cdef_lists, layouts.cdef_lists.clone().into_raw());
+        com_store(&raw mut (*lib).sig_mi_grid_build, layouts.mi_grid_build.clone().into_raw());
     }
     Ok(layouts)
 }
@@ -439,6 +444,7 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("film_grain_filter_sp", &layouts.film_grain, &raw mut (*lib).shader_filmgrain_filter_sp),
             ("film_grain_filter_sp_tex", &layouts.film_grain_tex, &raw mut (*lib).shader_filmgrain_filter_sp_tex),
             ("cdef_lists", &layouts.cdef_lists, &raw mut (*lib).shader_cdef_lists),
+            ("mi_grid_build", &layouts.mi_grid_build, &raw mut (*lib).shader_mi_grid_build),
         ]
     };
     // The shader pick of the DXC experiment: the set of every shader of the table. Without the feature
@@ -864,7 +870,7 @@ mod tests {
             .filter_map(|line| line.trim().trim_start_matches('(').strip_prefix('"'))
             .map(|rest| &rest[..rest.find('"').unwrap()])
             .collect();
-        assert_eq!(names.len(), 98);
+        assert_eq!(names.len(), 99);
         let mut unique = names.clone();
         unique.sort_unstable();
         unique.dedup();

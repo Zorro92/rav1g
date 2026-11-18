@@ -3192,6 +3192,42 @@ and `sink_intra` (of the block lists, the wavefront and the intra lists).
 - Step A (the inter lists) would take at most 0.84 (`d2`) and 1.11 ms (`j4k40`); step B (the wavefront
   and intra lists) 0.55 and 2.36 ms. On `d2`, the clip the parse bounds, C is the largest of the three.
 
+### The grid built by the GPU: the check (2026-11-18)
+
+The first part of step C of [the design above](#the-block-lists-on-the-gpu-a-design): the GPU builds
+the mode info grid, and nothing reads what it builds yet. `-parseopt gridcheck` of `rav1g-dec`
+(`RAV1G_PARSER_OPTION_GPU_GRID_CHECK`, 1024; read when the decoder is created):
+
+- *The pass.* `mi_grid_build.hlsl`, in front of the frame's stages (`grid_check::record`, called first
+  in `decode_frame_record`), one thread a mode info record: the record's row, column and block size
+  (bytes 160, 164 and 188 of a record) give its units, clipped to the frame as the sink's `block_call`
+  clips them, and the thread writes the record's entry (its place in the pool in bytes plus
+  `MI_GRID_BASE`) into each. The blocks of a frame do not overlap, so every unit has one writer and the
+  grid does not depend on the order of the threads. The frame's records lie in the runs of the pool its
+  tiles took (`TilePieces::mode_info`, joined as the stage dump joins them): the thread that records
+  writes the runs, each with the records in front of it, into a buffer of the slot (`mi_runs`, at most
+  a run a chunk of the mode info pool), and a thread finds its run by a search over those sums. `cs_5_0`
+  with FXC (53 instruction slots), and in the SM6 set.
+- *The check.* The pass writes a second grid of the slot (`mode_info_grid_gpu`). When the frame's fence
+  is done, the completion thread holds it against the grid the sink wrote, unit by unit inside the
+  frame, before anything clears the slot (`grid_check::compare`), and the decoder's release logs
+  `GRIDCHECK the mode info grid built by the GPU against the parse's: <frames> frames, <units> units,
+  <n> differ`, with the first unit that differs (an error line then). Only a decoder with the switch has
+  the two buffers; the frames are the same.
+- *Checked locally* (wine on lavapipe): the 244 vectors of AOM, 244 of 244, 665 frames and 7.6 million
+  units held, none differs; 24 frames each of `j4k40`, `d2_300`, `fg4k_300` (8 tile columns) and
+  `a1_8b4k_300`, with two frames in parse, none differs. A shader that leaves out the last column of
+  every block above 16x16 is caught (42 of 648 units differ on the 66x66 vector) while its md5 still
+  passes, which is what the second grid is for.
+- *CI* (job `rust-switches`): the whole set with `-parseopt gridcheck`, its references, and in every
+  stream's log a `GRIDCHECK` line with no unit that differs.
+- *Next* (the second part of step C): the grid of the slot built by this pass and not by the sink, which
+  takes the sink's stores of the grid off the parse threads (1.18 ms a frame of `d2_300`, 1.11 of
+  `j4k40` on the console, [above](#the-split-of-the-sink-and-the-block-lists-on-the-console-2026-11-16));
+  before that the readers of the grid on the CPU have to go (the inter part of the block lists reads
+  the records above and to the left through it, the sink the CDEF index of a superblock), as the design
+  says.
+
 ## Licence
 
 rav1d is BSD-2-Clause (copyright VideoLAN and the dav1d authors, and the rav1d contributors); the

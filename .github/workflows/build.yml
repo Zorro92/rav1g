@@ -1544,6 +1544,30 @@ jobs:
           if ($LASTEXITCODE -ne 0) { $failed += "decode error check with -parseopt none,latelists: exit code $LASTEXITCODE" }
           if ($failed.Count) { throw "the switches of the parser: $($failed -join '; ')" }
 
+      # -parseopt gridcheck (grid_check.rs, mi_grid_build.hlsl): a pass of the GPU builds the mode info grid
+      # of every frame from its records into a second grid, which the decoder holds against the grid the
+      # parse wrote, unit by unit, when the frame is done; the first step of the grid built by the GPU
+      # (docs/phase2-rav1d.md, "The block lists on the GPU: a design", step C). The whole set with the
+      # check: its frames against the references, and in the log of every stream the decoder's GRIDCHECK
+      # line with no unit that differs.
+      - name: The mode info grid built by the GPU against the parse's (-parseopt gridcheck)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $failed = @()
+          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/conformance-gridcheck --threads 4 "--tool-args=-parseopt gridcheck" "--title=rav1g-dec (cargo, MSVC) with -parseopt gridcheck"
+          if ($LASTEXITCODE -ne 0) { $failed += "conformance with -parseopt gridcheck: exit code $LASTEXITCODE" }
+          $lines = @(Get-ChildItem out/conformance-gridcheck/logs -Filter *.log | Select-String -Pattern '^GRIDCHECK ')
+          $differ = @($lines | Where-Object { $_.Line -notmatch ' 0 differ$' })
+          $frames = 0
+          foreach ($line in $lines) { if ($line.Line -match ': (\d+) frames,') { $frames += [int]$Matches[1] } }
+          Write-Output "GRIDCHECK: $($lines.Count) lines, $frames frames checked, $($differ.Count) with units that differ"
+          foreach ($line in $differ) { Write-Output "::error::$($line.Filename): $($line.Line)" }
+          if ($differ.Count) { $failed += "$($differ.Count) streams have units whose entries differ" }
+          if ($lines.Count -lt 200 -or $frames -lt 500) { $failed += "only $($lines.Count) GRIDCHECK lines and $frames frames checked" }
+          if ($failed.Count) { throw "the grid built by the GPU: $($failed -join '; ')" }
+
       - name: Preserve the results, the per-stream logs, the md5 files and the stage dumps of the switches
         if: always()
         uses: actions/upload-artifact@v7
@@ -2266,8 +2290,8 @@ jobs:
         if: ${{ !cancelled() }}
         shell: pwsh
         run: |
-          $picks = @(@{ name = 'fxc'; pick = 'fxc=all'; line = 'dxc 0; od 0; fxc 98 (all)' },
-            @{ name = 'od'; pick = 'od=all'; line = 'dxc 0; od 98 (all); fxc 0' },
+          $picks = @(@{ name = 'fxc'; pick = 'fxc=all'; line = 'dxc 0; od 0; fxc 99 (all)' },
+            @{ name = 'od'; pick = 'od=all'; line = 'dxc 0; od 99 (all); fxc 0' },
             @{ name = 'mixed'; pick = 'fxc=loopfilter_*,idct*,*_fast,od=inter_*,cdef_*,intra_*,dxc=inter_main,reconstruct_block*'; line = '' })
           $failed = @()
           foreach ($pick in $picks) {
@@ -2389,6 +2413,7 @@ jobs:
       # decoder has no such output, and the runs that are compared here do not take that path.
       # cdef_lists is in this commit alone too: it writes the two lists CDEF reads, which the C++ decoder
       # writes on its recording thread, and the stage dump cdef_info holds the two against each other.
+      # So is mi_grid_build, the mode info grid built by the GPU for the check of -parseopt gridcheck.
       # Every shader the reference has must be the same here.
       - name: The shaders of this commit are those of the reference
         run: |
@@ -2402,7 +2427,7 @@ jobs:
           if ! python3 testing/shader_cache/shaders.py same --reference cpp-reference/shaders/report.json \
               --candidate shader-headers/report.json --reference-name "branch cpp at ${CPP_REFERENCE_COMMIT:0:7}" \
               --candidate-name 'this commit' \
-              --candidate-only copy_plane_sp,copy_plane_sp_tex,film_grain_filter_sp,film_grain_filter_sp_tex,cdef_lists; then
+              --candidate-only copy_plane_sp,copy_plane_sp_tex,film_grain_filter_sp,film_grain_filter_sp_tex,cdef_lists,mi_grid_build; then
             echo '::error title=The shaders differ from those of the equality reference::The C++ decoder of the pinned commit of branch cpp does not have the shaders of this commit, so its output cannot be held against. If the change is on branch cpp as well, set CPP_REFERENCE_COMMIT to that commit; if the shaders of the branches diverge from here on, the comparison ends (docs/rust-port.md, "Equality reference").'
             exit 1
           fi

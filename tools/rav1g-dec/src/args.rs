@@ -282,7 +282,9 @@ pub fn usage() {
     say!("                        time: with -gputime, the calls of the sink are timed; latelists: the block lists");
     say!("                        of a tile are counted at its end and not superblock by superblock; cleargrid: the");
     say!("                        mode info grid of a slot is cleared for every frame. These three change nothing");
-    say!("                        else (time alone: the default, timed)");
+    say!("                        else (time alone: the default, timed). gridcheck: a pass of the GPU builds the mode");
+    say!("                        info grid from the records (mi_grid_build) into a second grid, held against the");
+    say!("                        parse's when each frame is done (a GRIDCHECK line at the release; same output)");
     say!("  -interfast            inter prediction by the fraction of the motion vector: a copy, one filter pass, or");
     say!("                        both (inter_fast, inter_compound_fast; same output)");
     say!("  -interfastlists       the block lists of -interfast with the original shaders on them (same output)");
@@ -460,7 +462,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
                 let list = value()?;
                 task.parser_options = rav1g::ParserOptions::from_words(&list).ok_or_else(|| {
                     format!(
-                        "-parseopt {list}: nolfmask, tilethread, gpucdef, time, latelists, cleargrid, default or none"
+                        "-parseopt {list}: nolfmask, tilethread, gpucdef, time, latelists, cleargrid, gridcheck, default or none"
                     )
                 })?;
             }

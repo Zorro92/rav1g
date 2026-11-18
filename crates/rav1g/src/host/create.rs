@@ -441,6 +441,7 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
     // The two grids of a slot as buffers a command list may write (the creation has set it).
     let gpu_clear_grids = dec.gpu_clear_grids != 0;
     let gpu_cdef_lists = dec.gpu_cdef_lists != 0;
+    let gpu_grid_check = dec.gpu_grid_check != 0;
     dec.max_width = target_width;
     dec.max_height = target_height;
     dec.max_bitdepth = cfg.bitdepth;
@@ -657,6 +658,32 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
                 gpu_clear_grids
             )
         );
+        // The check of the grid (`Av1Core::gpu_grid_check`): the second grid, which a pass of the command
+        // list writes and the completion thread reads, and the runs of the frame's records, which the
+        // thread that records writes and the pass reads: at most one a chunk of the mode info pool.
+        if gpu_grid_check {
+            request!(
+                assign,
+                td.mode_info_grid_gpu,
+                mem.buffer_for(
+                    size_of::<crate::sys::MiGridEntry>() * mi_size as usize,
+                    HostRW,
+                    c"mode_info_grid_gpu",
+                    i,
+                    true
+                )
+            );
+            request!(
+                assign,
+                td.mi_runs,
+                mem.buffer(
+                    2 * size_of::<u32>() * (dec.pool_total[Kind::ModeInfo as usize] + 1),
+                    HostRW,
+                    c"mi_runs",
+                    i
+                )
+            );
+        }
         // The two lists of CDEF: written by the thread that records a frame, or, in a decoder for it
         // (`Av1Core::gpu_cdef_lists`), by a pass of the frame's command list: then buffers the CPU has a
         // cached mapping of (which nothing but `-poisonbuf` writes through) and a command list may write.
@@ -1175,6 +1202,8 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
         (*dec).gpu_clear_grids = c_int::from(super::frame::clears_mode() == crate::sys::AV1_CLEARS_GPU as c_int);
         (*dec).gpu_cdef_lists =
             c_int::from(cfg.parser_options & crate::sys::AV1_PARSER_OPTION_GPU_CDEF_LISTS as c_int != 0);
+        (*dec).gpu_grid_check =
+            c_int::from(cfg.parser_options & crate::sys::AV1_PARSER_OPTION_GPU_GRID_CHECK as c_int != 0);
         (*dec).frame_slots = rcfg.gpu_pipeline_depth;
 
         // The decoder takes a reference of the device and of the queue the application gave.
@@ -1598,6 +1627,8 @@ unsafe fn destroy(dec: *mut Av1Core, log_steps: bool) {
         drop((*dec).rav1d.take());
         // -memstats: what no drain has written.
         super::mem_stats::summary(dec);
+        // -parseopt gridcheck: the grids the GPU built against those of the parse.
+        super::grid_check::summary(dec);
         // What the pools were used for, when the decoder was in use.
         if let (true, Some(pools)) = (log_steps, (*dec).pools.as_deref()) {
             let stats = pools.stats();

@@ -1310,6 +1310,7 @@ them. Two are on by default since package 0.2.139.0 and a third, `gpucdef`, sinc
 | `time` | off | With `-gputime`: the calls of the sink are timed (`sink_calls`, below). Two readings of the processor's time stamp counter per block and per transform block. |
 | `latelists` | off | The block lists of a tile are counted in one pass at the end of the tile, as up to package 0.2.140, and not superblock by superblock while the superblock's mode info is in the cache. |
 | `cleargrid` | off | The mode info grid of a pipeline slot is cleared for every frame (4.2 MB at 4K), as up to package 0.2.140, and not only for a frame of another size than the frames before it on the slot. |
+| `gridcheck` | off | `rav1g-dec` only (the test player does not take the word). A check, not a way of doing the parse: a pass in front of the frame's stages (`mi_grid_build.hlsl`) builds the mode info grid from the frame's records into a second grid of the slot, and the decoder holds it against the grid the parse wrote when the frame is done; at its release a `GRIDCHECK` line says how many frames and units were held and how many differed (an error line when any did). The first step of the grid built by the GPU ([phase2-rav1d.md](phase2-rav1d.md#the-grid-built-by-the-gpu-the-check-2026-11-18)). Every slot has the second grid and a list of the frame's runs of records. |
 
 `-parseopt <word>[,<word>...]` says which are on:
 

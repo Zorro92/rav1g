@@ -1733,6 +1733,8 @@ pub(crate) unsafe fn decode_frame_record(
         let mut perf_t = super::perf::av1_perf_ticks();
         prepare_command_buffer(dec);
         stage_dump_frame_info(dec, cm);
+        // -parseopt gridcheck: the grid built by the GPU, in front of the stages (`grid_check.rs`).
+        super::grid_check::record(dec, cm);
         prediction_gen_blocks(pbi, dec);
         perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_GEN_BLOCKS as usize, perf_t);
         idct_run(dec);

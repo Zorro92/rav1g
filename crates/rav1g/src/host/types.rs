@@ -129,6 +129,8 @@ pub struct compute_shader_lib {
     pub shader_filmgrain_filter_sp_tex: ComputeShader,
     // The lists of CDEF from the mode info (`postfilter.rs`, `Av1Core::gpu_cdef_lists`).
     pub shader_cdef_lists: ComputeShader,
+    // The mode info grid from the records, for the check of the grid (`grid_check.rs`).
+    pub shader_mi_grid_build: ComputeShader,
     pub shader_fill_buffer: ComputeShader,
     pub shader_gen_pred_blocks: ComputeShader,
     pub shader_gen_pred_blocks_fast: ComputeShader,
@@ -157,6 +159,7 @@ pub struct compute_shader_lib {
     pub sig_copy_plane_sp_tex: Option<ID3D12RootSignature>,
     pub sig_film_grain_tex: Option<ID3D12RootSignature>,
     pub sig_cdef_lists: Option<ID3D12RootSignature>,
+    pub sig_mi_grid_build: Option<ID3D12RootSignature>,
     pub compliled_: c_int,
     pub threads: c_int,
     pub create_shader_errors: c_int,
@@ -240,6 +243,13 @@ pub struct av1_frame_thread_data {
     pub loop_rest_wiener: *mut GpuBufferObject,
     pub cdef_indexes: *mut GpuBufferObject,
     pub cdef_skips: *mut GpuBufferObject,
+    /// With the check of the grid (`Av1Core::gpu_grid_check`): the grid the GPU builds, and the runs of
+    /// the frame's records it reads (`grid_check.rs`); null otherwise.
+    pub mode_info_grid_gpu: *mut GpuBufferObject,
+    pub mi_runs: *mut GpuBufferObject,
+    /// The frame whose grids are held against each other when it is done: 1 when the pass is recorded,
+    /// and the frame's mi_stride, mi_cols and mi_rows.
+    pub grid_check_frame: [c_int; 4],
     pub filmgrain_rand_offset: *mut GpuBufferObject,
     pub gen_mi_block_indexes: *mut GpuBufferObject,
     pub gen_intra_inter_grid: *mut GpuBufferObject,
@@ -550,6 +560,11 @@ pub struct Av1Core {
     /// the frame's command list (`cdef_lists.hlsl`) and not by the thread that records it
     /// (`AV1_PARSER_OPTION_GPU_CDEF_LISTS`): the two are then buffers a command list may write.
     pub gpu_cdef_lists: c_int,
+    /// The check of the mode info grid (`AV1_PARSER_OPTION_GPU_GRID_CHECK`, `grid_check.rs`): every slot
+    /// has a second grid that a pass of the frame's command list builds from the records, held against
+    /// the grid of the parse when the frame is done.
+    pub gpu_grid_check: c_int,
+    pub grid_check: super::grid_check::GridCheck,
     /// The statistics of `-memstats` (`mem_stats.rs`).
     pub mem_stats: super::mem_stats::MemStats,
     /// The worst case in bytes of the buffers of the stages that grow with the frames
