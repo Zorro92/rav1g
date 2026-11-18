@@ -9,8 +9,7 @@
  * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
  */
 
-// Test flag -interfast: gen_pred_blocks.hlsl with the lists by motion vector class (INTER_FAST there). The
-// records are the same; those of the blocks with one reference and of the averaged compound blocks go to
-// the list of their class instead of the list of their type.
+// Compile the 224-byte fast shader for comparison with the C++ reference.
+#define LEGACY_MODE_INFO 1
 #define INTER_FAST 1
 #include "gen_pred_blocks.hlsl"

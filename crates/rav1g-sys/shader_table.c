@@ -45,7 +45,7 @@ typedef unsigned char BYTE; /* the type FXC gives its arrays */
 #include "dx/shaders/h/intra_v2.h"
 #include "dx/shaders/h/intra_v2_hbd.h"
 #include "dx/shaders/h/gen_pred_blocks.h"
-#include "dx/shaders/h/gen_pred_blocks_fast.h"
+#include "dx/shaders/h/gen_pred_blocks_fast_packed.h"
 #include "dx/shaders/h/inter_fast.h"
 #include "dx/shaders/h/inter_compound_fast.h"
 #include "dx/shaders/h/inter_fast_hbd.h"
@@ -153,7 +153,7 @@ static const rav1g_shader_bytecode rav1g_shaders[] = {
   RAV1G_SHADER(intra_v2),
   RAV1G_SHADER(intra_v2_hbd),
   RAV1G_SHADER(gen_pred_blocks),
-  RAV1G_SHADER(gen_pred_blocks_fast),
+  RAV1G_SHADER(gen_pred_blocks_fast_packed),
   RAV1G_SHADER(inter_fast),
   RAV1G_SHADER(inter_compound_fast),
   RAV1G_SHADER(inter_fast_hbd),

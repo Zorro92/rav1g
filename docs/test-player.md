@@ -121,7 +121,7 @@ one commit each:
 - **Inter fast path**: `-interfast` lists the inter blocks with one reference and the averaged
   compound blocks by the fraction of their motion vectors and predicts them with a copy or one
   filter pass where the vector needs no more (`inter_fast.hlsl`, `inter_compound_fast.hlsl`,
-  `gen_pred_blocks_fast.hlsl`). See [Inter fast path](#inter-fast-path--interfast). Off by
+  `gen_pred_blocks_fast_packed.hlsl`). See [Inter fast path](#inter-fast-path--interfast). Off by
   default; the output does not change, and without the flag the lists and dispatches are the
   ones that always ran.
 - **Experiments**: `-lfhsplit`, `-intraedgefix` and a second package whose shaders sync all

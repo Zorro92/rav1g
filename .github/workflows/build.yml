@@ -2573,6 +2573,7 @@ jobs:
       # writes on its recording thread, and the stage dump cdef_info holds the two against each other.
       # So is mi_grid_build, the mode info grid built by the GPU for the check of -parseopt gridcheck.
       # The three readers shared with cpp use the 96-byte layout here.
+      # The legacy fast variant stays byte-identical for the comparison. Rust dispatches the packed variant.
       - name: Compare shaders against the reference
         run: |
           set -euo pipefail
@@ -2585,7 +2586,7 @@ jobs:
           if ! python3 testing/shader_cache/shaders.py same --reference cpp-reference/shaders/report.json \
               --candidate shader-headers/report.json --reference-name "branch cpp at ${CPP_REFERENCE_COMMIT:0:7}" \
               --candidate-name 'this commit' \
-              --candidate-only copy_plane_sp,copy_plane_sp_tex,film_grain_filter_sp,film_grain_filter_sp_tex,cdef_lists,mi_grid_build \
+              --candidate-only copy_plane_sp,copy_plane_sp_tex,film_grain_filter_sp,film_grain_filter_sp_tex,cdef_lists,mi_grid_build,gen_pred_blocks_fast_packed \
               --candidate-changed gen_pred_blocks,gen_lf_blocks_vert,gen_lf_blocks_hor; then
             echo '::error title=Shader comparison failed::Check the shader differences against the pinned cpp build and the explicit exceptions (docs/rust-port.md, "Equality reference").'
             exit 1
@@ -3511,7 +3512,7 @@ jobs:
   # Host check of the fast inter prediction shaders (inter_fast.hlsl, inter_compound_fast.hlsl and their
   # _hbd builds; test flag -interfast) against the original shaders and against libaom's C code of this
   # tree: the shaders, compiled as C++, predict generated frames from lists by motion vector class as
-  # gen_pred_blocks_fast.hlsl makes them, and the frame must be what inter_main and inter_compound write
+  # gen_pred_blocks_fast_packed.hlsl makes them, and the frame must be what inter_main and inter_compound write
   # and what libaom writes, for every block size, class, pair of classes, fraction and filter, 8-bit and
   # 10-bit, at the edges of the frame; seventeen mutated copies must fail.
   inter-check:

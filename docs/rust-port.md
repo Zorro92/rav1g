@@ -139,11 +139,12 @@ have to write the same bytes at every stage, not only the same frames.
   the output as it is needs no bump.
 - **The shader check** (`testing/shader_cache/shaders.py same`) compares the two build reports.
   `--candidate-changed` requires different bytecode for the three shared shaders that read Rust's
-  [96-byte mode info records](memory.md#the-mode-info-record-field-by-field-candidate-4):
-  `gen_pred_blocks`, `gen_lf_blocks_vert` and `gen_lf_blocks_hor`. The stage dumps hold their output
+  [96-byte mode info records](memory.md#the-mode-info-record-field-by-field-candidate-4).
+  These are `gen_pred_blocks`, `gen_lf_blocks_vert` and `gen_lf_blocks_hor`. The stage dumps hold their output
   lists equal. The check holds every other shared shader byte-identical and fails if a named
   exception is identical or missing from either build. `--candidate-only` lists shaders the
-  reference lacks.
+  reference lacks. This includes `gen_pred_blocks_fast_packed`, which Rust uses for `-interfast`.
+  The legacy `gen_pred_blocks_fast` is built for the comparison.
 
 ## Branches
 

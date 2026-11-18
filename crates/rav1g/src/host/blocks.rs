@@ -283,7 +283,7 @@ fn perf_inter_count_block(
 }
 
 /// -interfast: the class of a motion vector by its fraction (`InterFastCopy..InterFast2D` of
-/// `dx/types.h`), as gen_pred_blocks_fast.hlsl takes it from the block record. `frac_mask`: 7 for luma,
+/// `dx/types.h`), as gen_pred_blocks_fast_packed.hlsl takes it from the block record. `frac_mask`: 7 for luma,
 /// whose vector is in 1/8 sample, 15 for chroma (1/16 chroma sample).
 #[inline]
 fn inter_fast_class(mv: &int_mv, frac_mask: i16) -> c_int {

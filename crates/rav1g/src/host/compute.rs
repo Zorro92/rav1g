@@ -266,7 +266,7 @@ unsafe fn create_layouts(device: Device<'_>, lib: *mut compute_shader_lib) -> Re
         common0110: layout(0, 1, 1, 0)?,
         copy_plane: layout(0, 1, 0, 6)?,
         pred_blocks: layout(5, 2, 1, 7)?,
-        // gen_pred_blocks_fast.hlsl (-interfast): one more inline constant.
+        // gen_pred_blocks_fast_packed.hlsl (-interfast) takes one more inline constant.
         pred_blocks_fast: layout(5, 2, 1, 8)?,
         intra_pred: layout(3, 1, 1, 10)?,
         // intra_v2.hlsl: t0..t4, u0, b0 and 8 inline constants in b1.
@@ -357,7 +357,7 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("intra_v2", &layouts.intra_v2, &raw mut (*lib).shader_intra_v2),
             ("intra_v2_hbd", &layouts.intra_v2, &raw mut (*lib).shader_intra_v2_hbd),
             ("gen_pred_blocks", &layouts.pred_blocks, &raw mut (*lib).shader_gen_pred_blocks),
-            ("gen_pred_blocks_fast", &layouts.pred_blocks_fast, &raw mut (*lib).shader_gen_pred_blocks_fast),
+            ("gen_pred_blocks_fast_packed", &layouts.pred_blocks_fast, &raw mut (*lib).shader_gen_pred_blocks_fast),
             ("inter_fast", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_fast),
             ("inter_compound_fast", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_comp_fast),
             ("inter_fast_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_fast),
