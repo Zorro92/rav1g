@@ -3,6 +3,9 @@ name: Build
 on:
   push:
     branches: [main, cpp]
+    # A release: a tag v<version of the workspace> runs every job of a push, and the job release
+    # publishes rav1g.dll when all of them have passed (path filters do not apply to a tag).
+    tags: ['v*']
     # Changes that cannot change a build, a test or a package: the docs, and the files only git and
     # GitHub read (the licence files are not here: the packages carry them).
     # .gitattributes holds linguist attributes only; one with eol or filter settings would change
@@ -314,6 +317,18 @@ jobs:
           name: rav1g-testplayer-x64-${{ github.run_id }}
           path: out/
           if-no-files-found: warn
+
+      # The library of the default package by itself, as an application loads it (docs/integration.md):
+      # rav1g.dll with its import library and its symbols. The job release publishes it for a tag.
+      - name: Preserve rav1g.dll of the default package
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-dll-x64-${{ github.run_id }}
+          path: |
+            rust-clang/rav1g.dll
+            rust-clang/rav1g.dll.lib
+            rust-clang/rav1g.pdb
+          if-no-files-found: error
 
       # The hevcPlayback package: the default package of this run with one more line in its manifest,
       # <rescap:Capability Name="hevcPlayback"/>, the restricted capability of Microsoft's "4K video
@@ -3432,3 +3447,71 @@ jobs:
           name: rav1g-intra-check-${{ github.run_id }}
           path: intra-check.log
           if-no-files-found: warn
+
+  # A release (docs/integration.md, "Releases"): for a tag v<version>, when every job of the push has
+  # passed, rav1g.dll of the default package (the build the console runs: the C of clang, the app
+  # runtime, FXC cs_5_0 shaders), its import library and symbols, the rav1g.h it was built with, the
+  # licences the library needs (rav1g, AOM's patent licence, rav1d, the notices of the linked crates) and
+  # SHA256SUMS, as a pre-release. The tag has to be v and the version of the workspace, which
+  # rav1g_version() reports.
+  release:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    needs: [player, conformance-streams, cpp-reference, rust, rust-conformance, rust-output, rust-switches,
+      rust-clears, rust-frames, rust-frames-threads, rust-dumps-equal, rust-dxc, rust-equal, shader-headers,
+      rust-cross, rust-cross-run, rust-cross-run-switches, rav1d, parse-check, parse-digest, colour, sync-check,
+      cdef-check, warp-check, inter-check, superres-check, tables-check, intra-check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: rav1g-dll-x64-${{ github.run_id }}
+          path: dll
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::the tag $TAG is not v and the version of the workspace ($version)"
+            exit 1
+          fi
+          abi=$(sed -n 's/^#define RAV1G_ABI_VERSION \([0-9]*\)$/\1/p' crates/rav1g/include/rav1g.h)
+          [ -n "$abi" ] || { echo '::error::rav1g.h has no RAV1G_ABI_VERSION'; exit 1; }
+          mkdir rel licenses
+          cp dll/rav1g.dll dll/rav1g.dll.lib dll/rav1g.pdb crates/rav1g/include/rav1g.h rel/
+          for f in LICENSE.txt libav1/LICENSE libav1/PATENTS third_party/rav1d/COPYING third_party/rav1d/doc/PATENTS \
+              third_party/rust-crates/NOTICES.txt; do
+            mkdir -p "licenses/$(dirname "$f")"
+            cp "$f" "licenses/$f"
+          done
+          (cd licenses && zip -qrX ../rel/rav1g-licenses.zip .)
+          (cd rel && sha256sum rav1g.dll rav1g.dll.lib rav1g.pdb rav1g.h rav1g-licenses.zip > SHA256SUMS)
+          cat rel/SHA256SUMS
+          {
+            echo "rav1g $version: the AV1 decoder of this repository as \`rav1g.dll\`, for an x64 Windows or UWP app"
+            echo "that loads it at run time (docs/integration.md). Built by CI run $GITHUB_RUN_NUMBER from \`$GITHUB_SHA\`; every"
+            echo "job of the run passed before this was published."
+            echo
+            echo "- \`rav1g.dll\`: the library of the default package (the C of clang, linked by lld-link, the app"
+            echo "  runtime; shaders FXC cs_5_0). \`rav1g.dll.lib\` to link it, \`rav1g.pdb\` for its symbols."
+            echo "- \`rav1g.h\`: the interface it was built with, \`RAV1G_ABI_VERSION\` $abi; a loader compares"
+            echo "  \`rav1g_abi_version()\` with it."
+            echo "- \`rav1g-licenses.zip\`: the licences a redistribution of the library has to carry."
+            echo "- \`SHA256SUMS\`: the SHA-256 of each file, for a pin."
+            echo
+            echo "A pre-release: the decoder is tested on the conformance set in CI and on a game console, and is"
+            echo "not yet used by a released application."
+          } > notes.md
+          gh release create "$TAG" rel/* --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease \
+            --title "rav1g $version" --notes-file notes.md
+          { echo "## Release $TAG"; echo '```'; cat rel/SHA256SUMS; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

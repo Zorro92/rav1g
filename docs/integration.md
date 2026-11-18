@@ -112,3 +112,19 @@ library: `rav1g-header --check` (CI) fails when the declarations of the header h
 number has not (`tools/rav1g-header/abi.txt` has the fingerprint of the declarations of each version).
 Version 1 is the interface since package 0.2.202; a library older than that has no `rav1g_abi_version`,
 and a loader that finds no such export refuses it too. `rav1g_version()` is the text for a log.
+
+## Releases
+
+A tag `v<version>` (the version of the workspace, `Cargo.toml`, which `rav1g_version()` reports) runs
+every job of a push, and when all have passed the job `release` publishes a GitHub pre-release with:
+
+| File | What |
+| --- | --- |
+| `rav1g.dll` | the library of the default package: the build the console runs (the C of clang, linked by lld-link, the app runtime, FXC `cs_5_0` shaders) |
+| `rav1g.dll.lib`, `rav1g.pdb` | its import library and its symbols |
+| `rav1g.h` | the interface it was built with (`RAV1G_ABI_VERSION`) |
+| `rav1g-licenses.zip` | the licences a redistribution carries: rav1g (BSD-2-Clause), AOM's patent licence, rav1d, the notices of the linked crates |
+| `SHA256SUMS` | the SHA-256 of each, for an application that pins the release |
+
+An application copies `rav1g.h` from the release (or from the tagged commit) and pins `rav1g.dll` by
+the tag and its SHA-256. The first release is `v0.4.0-alpha.1` (2026-11-18).
