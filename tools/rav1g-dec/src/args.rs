@@ -205,6 +205,8 @@ pub struct Globals {
     pub player_smoke: String,
     /// -shaderpick <pick>
     pub shader_pick: String,
+    /// -pipelinecache <dir>
+    pub pipeline_cache: String,
 }
 
 pub fn usage() {
@@ -342,6 +344,11 @@ pub fn usage() {
     say!("                        shader names separated by commas, 'all', or names with '*'; a later part overrides");
     say!("                        an earlier one (fxc=all,dxc=loopfilter_vert_hbd). 'SHADERSET ...' and 'SHADERPICK");
     say!("                        ...' lines say what was taken (docs/test-player.md, \"Shader pick\")");
+    say!("  -pipelinecache <dir>  the device is created with the pipeline cache on disk in <dir> (created when it is");
+    say!("                        not there; docs/integration.md, \"The pipeline cache\"): the pipeline states are");
+    say!("                        loaded from the file of the folder when it has them, and the file is written when");
+    say!("                        it does not. The 'PIPELINES ...' line says what the cache did (hit, miss, rebuilt)");
+    say!("                        and is printed with or without the flag (same output)");
     say!("  -playersmoke <dir>    run the decoder code of the test player (testing/player_common) through rav1g.h on");
     say!("                        the device, with the tasks of <dir>/args/args_av1.txt as the player reads them from");
     say!("                        its LocalState (streams relative to <dir>); the player's log goes to stdout. Exit");
@@ -486,6 +493,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
                     "-list" => globals.list = value()?,
                     "-playersmoke" => globals.player_smoke = value()?,
                     "-shaderpick" => globals.shader_pick = value()?,
+                    "-pipelinecache" => globals.pipeline_cache = value()?,
                     _ => return Err(format!("unknown argument '{a}'")),
                 }
             }
@@ -650,6 +658,10 @@ mod tests {
         }
         // A program flag is not a task flag of a list line.
         assert!(parse_args(&strings(&["-hw"]), &mut task, None).is_err());
+        assert!(parse_args(&strings(&["-pipelinecache", "cache"]), &mut task, None).is_err());
+        let mut globals = Globals::default();
+        parse_args(&strings(&["-pipelinecache", "a dir\\rav1g"]), &mut task, Some(&mut globals)).unwrap();
+        assert_eq!(globals.pipeline_cache, "a dir\\rav1g");
         assert!(parse_args(&strings(&["-t"]), &mut task, None).is_err());
         assert!(parse_args(&strings(&["-t", "four"]), &mut task, None).is_err());
     }

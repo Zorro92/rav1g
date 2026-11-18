@@ -14,6 +14,10 @@ api-ms-win-core-errorhandling-l1-1-0.dll
 api-ms-win-core-fibers-l1-1-0.dll
 api-ms-win-core-fibers-l1-1-1.dll
 api-ms-win-core-file-l1-1-0.dll
+# MoveFileExW and GetFileInformationByHandleEx: the standard library's rename of a file, which the
+# pipeline cache on disk writes as a temporary file renamed over its name (docs/integration.md). Both are
+# names of WindowsApp.lib.
+api-ms-win-core-file-l2-1-0.dll
 api-ms-win-core-handle-l1-1-0.dll
 api-ms-win-core-heap-l1-1-0.dll
 api-ms-win-core-interlocked-l1-1-0.dll

@@ -177,14 +177,23 @@ int Decoders::DecodeLoop() {
   // which of the three bytecodes that package has of every shader the pipeline states of this launch are
   // made of. It holds for the whole launch, whatever line it stands on (the last one counts), as the
   // pipeline states are created once, below.
+  //
+  // -pipelinecache: the same kind of flag, without a value: the pipeline states of this launch are
+  // loaded from the decoder's pipeline cache on disk, in <LocalCacheFolder>\rav1g, and the file is
+  // written there when it does not have them (docs/integration.md, "The pipeline cache"). The decoder
+  // logs what the cache did in one "PIPELINES ..." line when the pipeline states all exist.
   bool sm6test = false;
   bool has_tasks = false;
   bool has_shader_pick = false;
+  bool pipeline_cache = false;
   std::string shader_pick;
   for (std::vector<one_task>::iterator task = arg_lists.begin(); task != arg_lists.end(); task++) {
     for (std::vector<std::string>::iterator arg = task->begin(); arg != task->end();) {
       if (*arg == "-sm6test") {
         sm6test = true;
+        arg = task->erase(arg);
+      } else if (*arg == "-pipelinecache") {
+        pipeline_cache = true;
         arg = task->erase(arg);
       } else if (*arg == "-shaderpick") {
         arg = task->erase(arg);
@@ -230,8 +239,26 @@ int Decoders::DecodeLoop() {
   AV1Decoder::LogMemory(dx_resources_.dx12_device.Get(), "before the pipeline states");
   // The decoder's device: the player's D3D12 device with the pipeline states of the decoder. The player
   // has no queue for it (PlayerWindow::Run): the decoder makes its own.
-  dx_resources_.decoder_device = rav1g_device_create(dx_resources_.dx12_device.Get(),
-                                                     dx_resources_.dx12_command_queue.Get(), CREATE_SHADERS_THREAD_CNT);
+  if (pipeline_cache) {
+    // The app's local cache folder (not backed up, not roamed); rav1g-dec -playersmoke: the folder of
+    // its tasks.
+#if (WINAPI_FAMILY == WINAPI_FAMILY_APP)
+    std::wstring cache_dir(ApplicationData::Current->LocalCacheFolder->Path->Data());
+#else
+    std::wstring cache_dir(write_path.begin(), write_path.end());
+#endif
+    if (!cache_dir.empty() && cache_dir.back() != L'\\' && cache_dir.back() != L'/') cache_dir += L'\\';
+    cache_dir += L"rav1g";
+    std::string shown;
+    for (wchar_t c : cache_dir) shown += c < 128 ? static_cast<char>(c) : '?';
+    XB_LOGI << "Pipeline cache (-pipelinecache): " << shown;
+    dx_resources_.decoder_device = rav1g_device_create_with_cache(
+        dx_resources_.dx12_device.Get(), dx_resources_.dx12_command_queue.Get(), CREATE_SHADERS_THREAD_CNT,
+        reinterpret_cast<const uint16_t*>(cache_dir.c_str()));
+  } else {
+    dx_resources_.decoder_device = rav1g_device_create(
+        dx_resources_.dx12_device.Get(), dx_resources_.dx12_command_queue.Get(), CREATE_SHADERS_THREAD_CNT);
+  }
   if (!dx_resources_.decoder_device) {
     XB_LOGE << "Unable to create compute shaders: " << rav1g_last_error();
     // Nothing can be decoded in this launch: it ends here, as it does behind the last task.

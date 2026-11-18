@@ -10,6 +10,7 @@
 //! states of the decoder on that device.
 
 use std::ffi::{CString, c_void};
+use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::Arc;
 
@@ -19,7 +20,8 @@ use windows::core::Interface;
 use crate::error::{Error, ErrorCode};
 use crate::gpu;
 
-/// The compute pipeline states (`av1_create_pipeline_cache_handle`), destroyed with the last owner.
+/// The compute pipeline states (`av1_create_pipeline_cache_handle`, `create_pipelines`), destroyed with the
+/// last owner.
 struct Pipelines(NonNull<c_void>);
 
 // SAFETY: the library is used by the decoders from several threads; it has its own locks.
@@ -28,7 +30,7 @@ unsafe impl Sync for Pipelines {}
 
 impl Drop for Pipelines {
     fn drop(&mut self) {
-        // SAFETY: created by av1_create_pipeline_cache_handle, destroyed once; every decoder that uses the
+        // SAFETY: created by create_pipelines, destroyed once; every decoder that uses the
         // states holds the `Device` they belong to.
         unsafe { crate::host::av1_destroy_pipeline_cache_handle(self.0.as_ptr()) }
     }
@@ -59,10 +61,16 @@ impl Device {
     /// call returns; [`Device::wait_pipelines`] waits for them, and so does the first decoder creation.
     /// With 0 they are created by this call.
     pub fn new(pipeline_threads: u32) -> Result<Device, Error> {
+        Device::new_with_cache(pipeline_threads, None)
+    }
+
+    /// [`Device::new`] with the pipeline cache on disk in the folder `cache_dir` (see
+    /// [`Device::with_d3d12_and_cache`]).
+    pub fn new_with_cache(pipeline_threads: u32, cache_dir: Option<&Path>) -> Result<Device, Error> {
         let device = gpu::create_hardware_device().map_err(device_error)?;
         // SAFETY: a reference the call hands over.
         let device = unsafe { ID3D12Device::from_raw(device.into_raw()) };
-        Device::with_d3d12(&device, None, pipeline_threads)
+        Device::with_d3d12_and_cache(&device, None, pipeline_threads, cache_dir)
     }
 
     /// The application's D3D12 device. `queue` is the direct command queue the decoders submit to; without
@@ -74,6 +82,22 @@ impl Device {
         queue: Option<&ID3D12CommandQueue>,
         pipeline_threads: u32,
     ) -> Result<Device, Error> {
+        Device::with_d3d12_and_cache(device, queue, pipeline_threads, None)
+    }
+
+    /// [`Device::with_d3d12`] with the pipeline cache on disk (docs/integration.md, "The pipeline
+    /// cache"): `cache_dir` is a folder of the application's own (created when it is not there), in which
+    /// the decoder keeps one file, `rav1g-pipelines-<key>.bin`, with the compiled pipeline states of the
+    /// device. A later device on the same adapter and driver loads them from it instead of compiling them;
+    /// a file that is missing, damaged or of another driver, adapter or library version is written again.
+    /// `None` is [`Device::with_d3d12`]. Nothing of the cache makes the creation fail; the log line
+    /// `PIPELINES ...` says what it did, when the pipeline states all exist.
+    pub fn with_d3d12_and_cache(
+        device: &ID3D12Device,
+        queue: Option<&ID3D12CommandQueue>,
+        pipeline_threads: u32,
+        cache_dir: Option<&Path>,
+    ) -> Result<Device, Error> {
         let queue = match queue {
             Some(queue) => queue.clone(),
             None => {
@@ -82,9 +106,8 @@ impl Device {
                 unsafe { ID3D12CommandQueue::from_raw(queue.into_raw()) }
             }
         };
-        // SAFETY: a valid device, which `Inner` keeps for as long as the states live.
-        let pipelines =
-            unsafe { crate::host::av1_create_pipeline_cache_handle(device.as_raw(), pipeline_threads as i32) };
+        // `Inner` keeps the device for as long as the states live.
+        let pipelines = crate::host::create_pipelines(device, pipeline_threads.min(i32::MAX as u32) as i32, cache_dir);
         let Some(pipelines) = NonNull::new(pipelines) else {
             return Err(Error::new(ErrorCode::Error, "the compute pipeline states could not be created"));
         };
@@ -97,12 +120,31 @@ impl Device {
     /// `device` is a valid `ID3D12Device *`; `queue` is null or a valid `ID3D12CommandQueue *` of that
     /// device.
     pub unsafe fn from_raw(device: *mut c_void, queue: *mut c_void, pipeline_threads: u32) -> Result<Device, Error> {
+        // SAFETY: the caller's contract.
+        unsafe { Device::from_raw_with_cache(device, queue, pipeline_threads, None) }
+    }
+
+    /// As [`Device::with_d3d12_and_cache`], from the pointers of a C interface.
+    ///
+    /// # Safety
+    /// As [`Device::from_raw`].
+    pub unsafe fn from_raw_with_cache(
+        device: *mut c_void,
+        queue: *mut c_void,
+        pipeline_threads: u32,
+        cache_dir: Option<&Path>,
+    ) -> Result<Device, Error> {
         // SAFETY: the caller's contract; the references are borrowed and cloned.
         unsafe {
             let Some(device) = ID3D12Device::from_raw_borrowed(&device) else {
                 return Err(Error::new(ErrorCode::InvalidParam, "no D3D12 device"));
             };
-            Device::with_d3d12(device, ID3D12CommandQueue::from_raw_borrowed(&queue), pipeline_threads)
+            Device::with_d3d12_and_cache(
+                device,
+                ID3D12CommandQueue::from_raw_borrowed(&queue),
+                pipeline_threads,
+                cache_dir,
+            )
         }
     }
 

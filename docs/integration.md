@@ -78,6 +78,7 @@ output fence. Nothing has to be reset between streams.
 - **Create it early, once.** `rav1g_device_create` compiles the pipeline states (on threads, while the
   call returns); `rav1g_decoder_create` waits for them. Creating the device when the first AV1 stream
   is opened puts that wait in front of the first frame; at the start of the app it is gone by then.
+  With the [pipeline cache](#the-pipeline-cache-on-disk) a launch after the first loads them instead.
 - **The output fence is the decoder's.** A new decoder has a new fence: open it on the D3D11 device
   again (`rav1g_decoder_output_fence`, `CreateSharedHandle`, `OpenSharedFence`), and close the handle
   of the old one.
@@ -91,6 +92,70 @@ output fence. Nothing has to be reset between streams.
   (`IDXGIDevice::GetAdapter`), as the draft does.
 - **Release.** `rav1g_device_destroy` releases the application's handle; the device lives on until
   its last decoder is destroyed.
+
+## The pipeline cache on disk
+
+Compiling the 99 pipeline states takes about 6.5 s on the console with 6 threads (16 s seen with
+fewer) and about 75 MiB of the app's memory, at every launch. `rav1g_device_create_with_cache` keeps
+them in a file, and a later launch on the same adapter and driver loads them from it:
+
+```c
+struct Rav1gDevice *rav1g_device_create_with_cache(void *d3d12_device, void *d3d12_queue,
+                                                   uint32_t pipeline_threads, const uint16_t *cache_dir);
+```
+
+- **Where.** `cache_dir` is the path of a folder of the app's own, as a NUL-terminated UTF-16 string:
+  a UWP app passes `ApplicationData::Current().LocalCacheFolder().Path()` + `\rav1g` (cast the
+  `const wchar_t *` to `const uint16_t *`). The decoder creates the folder when it is not there and
+  keeps one file in it, `rav1g-pipelines-<key>.bin`; nothing else of the app should be in that folder.
+  Null or an empty path is no cache: exactly `rav1g_device_create`. Files are read and written with
+  path-based calls (`CreateFileW`, `ReadFile`, the standard library's file functions), which an app
+  container has for its own data folders.
+- **The key.** `<key>` is 16 hex digits of a fingerprint (FNV-1a 64) of everything the pipeline states
+  are made of: the bytecode of every shader of the set in use (the shader pick of the DXC experiment
+  changes it), the serialized root signatures, the names of the pipelines, the version of the library
+  and its shader set. A new `rav1g.dll` has a new key.
+- **What the file holds.** A D3D12 pipeline library (`ID3D12PipelineLibrary`) where the device has
+  them (`D3D12_SHADER_CACHE_SUPPORT_LIBRARY`), otherwise the cached blob of every pipeline state
+  (`GetCachedBlob`, given back in `D3D12_CACHED_PIPELINE_STATE`) where it has those
+  (`D3D12_SHADER_CACHE_SUPPORT_SINGLE_PSO`); a header with the key, the size and a checksum is in front
+  of either. A device with neither compiles every time ("cache unsupported").
+- **Invalidation.** The file is used only when its header, size and checksum are right and the device
+  takes it. A file of another driver or adapter (`D3D12_ERROR_DRIVER_VERSION_MISMATCH`,
+  `D3D12_ERROR_ADAPTER_NOT_FOUND`), a damaged one (`E_INVALIDARG`, a short file, a wrong checksum) or one
+  that lacks a pipeline is rebuilt: the pipelines are compiled and the file is written again. A new key
+  (another library) is a miss. The file is written as a temporary file in the folder and renamed over
+  its name; then the other `rav1g-pipelines-*` files of the folder are deleted, so the folder holds one
+  file. The app can delete the folder at any time (`LocalCacheFolder` is not backed up or roamed).
+- **Nothing of the cache fails the creation.** A folder that cannot be created, a file that cannot be
+  read or written: the pipelines are compiled as without the cache, and the log line says why.
+- **When.** The pipelines are still created on the `pipeline_threads` threads while the call returns.
+  On a miss the file is written by the last of those threads behind the last pipeline, so
+  `rav1g_device_wait_pipelines` (or the first `rav1g_decoder_create`) also waits for the write. The
+  pipeline library and its blob are released then; the pipeline states stay.
+- **The log line.** One per device, through the log callback, when every pipeline exists (after
+  `rav1g_device_create_with_cache` has returned; the numbers here show the form, not a measurement):
+
+  ```text
+  PIPELINES cache miss: 99 pipelines in 6512 ms (pipeline library, key 89487f5980cd97ff; written: 2950 KiB in 41 ms)
+  PIPELINES cache hit: 99 pipelines in 380 ms (pipeline library, key 89487f5980cd97ff)
+  PIPELINES cache rebuilt (the device refused the pipeline library: hr 0x887E0002, of another driver or runtime): 99 pipelines in 6600 ms (pipeline library, key 89487f5980cd97ff; written: ...)
+  PIPELINES cache unsupported (the device keeps neither pipeline libraries nor cached pipeline states): 99 pipelines in 6500 ms
+  PIPELINES no cache: 99 pipelines in 6500 ms
+  ```
+
+  The time runs from the start of the device creation's pipelines (the file read included) until all
+  exist; the write is behind it. "hit": every pipeline came from the file; "miss": there was no file of
+  the key; "rebuilt (<reason>)": there was one and it could not be used, or not for every pipeline (the
+  line then says how many were loaded). "not written: <reason>" instead of "written" when the file
+  could not be written. `rav1g_device_create` writes the "no cache" line.
+- **Interface version 2.** The function is new in `RAV1G_ABI_VERSION` 2 (below); `rav1g_device_create`
+  is unchanged.
+
+In Rust: `Device::with_d3d12_and_cache(device, queue, threads, Some(path))` (and `new_with_cache`).
+`rav1g-dec -pipelinecache <dir>` and the test player's `-pipelinecache` use it; CI runs a stream on
+WARP with a miss, a hit, a cut file and a file that is no cache at all
+(`testing/conformance/pipeline_cache_check.py`).
 
 ## What the settings need
 
@@ -111,7 +176,9 @@ the header changes (a struct, an enum, a function), not for a constant, a commen
 library: `rav1g-header --check` (CI) fails when the declarations of the header have changed and the
 number has not (`tools/rav1g-header/abi.txt` has the fingerprint of the declarations of each version).
 Version 1 is the interface since package 0.2.202; a library older than that has no `rav1g_abi_version`,
-and a loader that finds no such export refuses it too. `rav1g_version()` is the text for a log.
+and a loader that finds no such export refuses it too. Version 2 adds
+`rav1g_device_create_with_cache` ([the pipeline cache](#the-pipeline-cache-on-disk)); nothing else of
+version 1 changed. `rav1g_version()` is the text for a log.
 
 ## Releases
 

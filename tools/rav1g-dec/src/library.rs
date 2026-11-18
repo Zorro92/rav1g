@@ -342,11 +342,22 @@ pub enum Library {
 
 impl Library {
     /// Starts the creation of the pipeline states on `threads` threads and waits for them. `None` when
-    /// they could not be created.
-    pub fn open(dev: &Device, capi: bool, threads: u32) -> Option<Library> {
+    /// they could not be created. `cache`: the folder of the pipeline cache on disk (-pipelinecache).
+    pub fn open(dev: &Device, capi: bool, threads: u32, cache: Option<&std::path::Path>) -> Option<Library> {
         if capi {
-            // SAFETY: the program's device and queue, which outlive the library's device.
-            let device = unsafe { capi::rav1g_device_create(dev.device_ptr(), dev.queue_ptr(), threads) };
+            let device = match cache {
+                Some(cache) => {
+                    use std::os::windows::ffi::OsStrExt;
+                    let path: Vec<u16> = cache.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+                    // SAFETY: the program's device and queue, which outlive the library's device; a C
+                    // string of UTF-16.
+                    unsafe {
+                        capi::rav1g_device_create_with_cache(dev.device_ptr(), dev.queue_ptr(), threads, path.as_ptr())
+                    }
+                }
+                // SAFETY: the program's device and queue, which outlive the library's device.
+                None => unsafe { capi::rav1g_device_create(dev.device_ptr(), dev.queue_ptr(), threads) },
+            };
             if device.is_null() {
                 return None;
             }
@@ -354,7 +365,7 @@ impl Library {
             // SAFETY: a device of rav1g_device_create.
             (unsafe { capi::rav1g_device_wait_pipelines(device) } == Rav1gStatus::Ok).then_some(library)
         } else {
-            let device = rav1g::Device::with_d3d12(&dev.device, Some(&dev.queue), threads).ok()?;
+            let device = rav1g::Device::with_d3d12_and_cache(&dev.device, Some(&dev.queue), threads, cache).ok()?;
             device.wait_pipelines().is_ok().then_some(Library::Rust(device))
         }
     }

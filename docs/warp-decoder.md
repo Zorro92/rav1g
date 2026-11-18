@@ -114,6 +114,11 @@ gets a new decoder. The program uses the decoder through the Rust interface of t
   of the task exists any more. The released state is read when it has settled: again every 20 ms
   until the private bytes have not gone down by 64 KiB for 100 ms, for 2 s at most. For the
   [memory check](#memory-check).
+- `-pipelinecache <directory>`: the device is created with the pipeline cache on disk in that folder
+  (`rav1g_device_create_with_cache` with `-capi`, `Device::with_d3d12_and_cache` without;
+  [integration.md](integration.md#the-pipeline-cache-on-disk)). The decoder's `PIPELINES ...` line says
+  what the cache did (`cache hit`, `cache miss`, `cache rebuilt (<reason>)`); the program prints it with
+  and without the flag (`PIPELINES no cache: ...`). CI: `testing/conformance/pipeline_cache_check.py`.
 - `-playersmoke <directory>`: see the next section. (`warp_decoder` has the flag too, on the C++
   library.)
 

@@ -17,9 +17,11 @@
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::mem::offset_of;
+use std::path::Path;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use windows::Win32::Foundation::{E_FAIL, E_POINTER};
 use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12Device};
@@ -28,12 +30,13 @@ use windows::core::Interface;
 
 use super::libaom::{II_SIZE_SCALES, II_WEIGHTS1D, WARPED_FILTER, WedgeMasks};
 use super::log::log;
+use super::pipeline_cache::{self, PipelineCache};
 use super::shader_pick::{self, Set};
 use super::tables::{BLOCK_SIZE_HIGH, BLOCK_SIZE_WIDE, GAUSSIAN_SEQUENCE, SS_SIZE_420};
 use super::thread::spawn_thread;
 use super::types::{Av1Core, ComputeShader, GpuBufferObject, compute_shader_lib};
 use crate::gpu::d3d12::{com_ref, com_release, com_store};
-use crate::gpu::{self, BufferRef, Device, Layout, LayoutDesc, OwnedDevice, Queue, Upload};
+use crate::gpu::{self, BufferRef, Device, Layout, LayoutDesc, OwnedDevice, Pipeline, Queue, Upload};
 use crate::sys::{
     BLOCK_SIZES_ALL, TX_4X4, TX_4X8, TX_4X16, TX_8X4, TX_8X8, TX_8X16, TX_8X32, TX_16X4, TX_16X8, TX_16X16, TX_16X32,
     TX_16X64, TX_32X8, TX_32X16, TX_32X32, TX_32X64, TX_64X16, TX_64X32, TX_64X64, TX_SIZES_ALL,
@@ -169,17 +172,51 @@ unsafe impl Send for Task {}
 // SAFETY: the same; a task is taken by one thread.
 unsafe impl Sync for Task {}
 
-/// `create_shader` of the C++: the pipeline of a task into its field of the library.
-fn create_shader(device: Device<'_>, task: &Task) -> Result<(), gpu::Error> {
+/// `create_shader` of the C++: the pipeline of a task into its field of the library, from the pipeline
+/// cache or compiled.
+fn create_shader(device: Device<'_>, task: &Task, cache: &PipelineCache) -> Result<(), gpu::Error> {
     // SAFETY: the field belongs to this task (see Task) and its COM pointers are still null.
     unsafe {
         (*task.dst).bytecode = task.bytecode.as_ptr();
         (*task.dst).size = task.bytecode.len();
         com_store(&raw mut (*task.dst).signaturePtr, task.layout.clone().into_raw());
-        let pipeline = device.create_pipeline(&task.layout, task.bytecode)?;
+        let pipeline = cache.create(device, task.name, &task.layout, task.bytecode)?;
         com_store(&raw mut (*task.dst).pso, pipeline.into_raw());
     }
     Ok(())
+}
+
+/// The creation of the pipelines of a library, shared by the threads that create them.
+struct Creation {
+    tasks: Vec<Task>,
+    /// The next task to take.
+    next: AtomicUsize,
+    /// The codes of the pipelines that could not be created, or'ed (those of the library).
+    errors: Arc<AtomicI32>,
+    cache: PipelineCache,
+    /// The threads that still create pipelines: the last one finishes the creation.
+    running: AtomicUsize,
+}
+
+impl Creation {
+    /// `count` threads have stopped creating pipelines; behind the last one the cache writes its file and
+    /// its log line.
+    fn threads_done(&self, device: Device<'_>, count: usize) {
+        if self.running.fetch_sub(count, Ordering::AcqRel) == count {
+            self.finish(device);
+        }
+    }
+
+    /// Every pipeline exists (or one failed): the pipeline cache's file and log line.
+    fn finish(&self, device: Device<'_>) {
+        let pipelines: Vec<(&str, Option<Pipeline>)> = self
+            .tasks
+            .iter()
+            // SAFETY: no thread writes the fields any more; each is null or a created pipeline state.
+            .map(|task| (task.name, unsafe { Pipeline::from_com(&(*task.dst).pso) }))
+            .collect();
+        self.cache.finish(device, &pipelines);
+    }
 }
 
 fn log_failed_pipeline(index: usize, task: &Task, error: gpu::Error) {
@@ -200,14 +237,15 @@ fn log_failed_pipeline(index: usize, task: &Task, error: gpu::Error) {
 }
 
 /// A thread that creates pipelines: takes the next task until there is none or one has failed.
-fn create_shader_thread(device: OwnedDevice, tasks: Arc<Vec<Task>>, next: Arc<AtomicUsize>, errors: Arc<AtomicI32>) {
+fn create_shader_thread(device: OwnedDevice, creation: Arc<Creation>) {
     // As the threads of the C++ (pthread_create of aom_thread.h).
     // SAFETY: the pseudo handle of this thread.
     let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL) };
+    let errors = &creation.errors;
     loop {
-        let index = next.fetch_add(1, Ordering::Relaxed);
-        let Some(task) = tasks.get(index) else { break };
-        if let Err(error) = create_shader(device.device(), task) {
+        let index = creation.next.fetch_add(1, Ordering::Relaxed);
+        let Some(task) = creation.tasks.get(index) else { break };
+        if let Err(error) = create_shader(device.device(), task, &creation.cache) {
             log_failed_pipeline(index, task, error);
             errors.fetch_or(error.code, Ordering::Relaxed);
         }
@@ -215,6 +253,7 @@ fn create_shader_thread(device: OwnedDevice, tasks: Arc<Vec<Task>>, next: Arc<At
             break;
         }
     }
+    creation.threads_done(device.device(), 1);
 }
 
 /// The layouts of the library, by the name of their field (`sig_<name>`).
@@ -513,7 +552,7 @@ pub(crate) unsafe fn wait_shader_create_complete(lib: *mut compute_shader_lib) -
 /// `av1_create_pipeline_cache_handle` (`aom/aom_decoder.h`): the layouts and pipelines of the decoder on
 /// a device. With `threads` the pipelines are created on that many threads (6 at most) while the call
 /// returns; [`av1_wait_pipeline_cache_handle`] waits for them. Returns null when a layout, or without
-/// threads a pipeline, could not be created.
+/// threads a pipeline, could not be created. No pipeline cache on disk ([`create_pipelines`]).
 ///
 /// # Safety
 /// `d3d12device` is null or an `ID3D12Device *` that lives until the handle is destroyed.
@@ -523,6 +562,18 @@ pub unsafe extern "C" fn av1_create_pipeline_cache_handle(d3d12device: *mut c_vo
     let Some(device) = (unsafe { ID3D12Device::from_raw_borrowed(&d3d12device) }) else {
         return std::ptr::null_mut();
     };
+    create_pipelines(device, threads, None)
+}
+
+/// [`av1_create_pipeline_cache_handle`] with the pipeline cache on disk in `cache_dir`
+/// (`pipeline_cache.rs`): the pipelines are loaded from the file of the folder where it has them, and the
+/// file is written when it did not. `None`: no cache. The handle is the same; the cache changes nothing
+/// but where the pipelines come from, and nothing of it fails the creation. One `PIPELINES` log line
+/// when every pipeline exists.
+///
+/// The device lives until the handle is destroyed.
+pub(crate) fn create_pipelines(device: &ID3D12Device, threads: c_int, cache_dir: Option<&Path>) -> *mut c_void {
+    let start = Instant::now();
     let device = Device::new(device);
 
     // For the logs of the console runs: what the device says about double precision in shaders. The inter
@@ -570,35 +621,52 @@ pub unsafe extern "C" fn av1_create_pipeline_cache_handle(d3d12device: *mut c_vo
         }
     };
 
+    // The pipeline cache: the key of these pipelines, and the file of the key if there is one.
+    let key = match cache_dir {
+        Some(_) => pipeline_cache::key(tasks.iter().map(|task| (task.name, task.bytecode, task.layout.serialized()))),
+        None => 0,
+    };
+    let cache = PipelineCache::open(device, cache_dir, key, start);
+
     let threads = threads.clamp(0, MAX_CREATE_THREADS);
+    // SAFETY: the new library; nothing else has the handle yet.
+    let errors = unsafe { (*shader_lib).errors.clone() };
+    let creation = Arc::new(Creation {
+        tasks,
+        next: AtomicUsize::new(0),
+        errors,
+        cache,
+        running: AtomicUsize::new(threads as usize),
+    });
     if threads == 0 {
         let mut failed = false;
-        for (index, task) in tasks.iter().enumerate() {
-            if let Err(error) = create_shader(device, task) {
+        for (index, task) in creation.tasks.iter().enumerate() {
+            if let Err(error) = create_shader(device, task, &creation.cache) {
                 log_failed_pipeline(index, task, error);
                 failed = true;
             }
         }
+        creation.finish(device);
+        drop(creation);
         if failed {
             // SAFETY: the handle of this call, with no threads.
             unsafe { av1_destroy_pipeline_cache_handle(handle) };
             return std::ptr::null_mut();
         }
     } else {
-        let tasks = Arc::new(tasks);
-        let next = Arc::new(AtomicUsize::new(0));
         // SAFETY: the new library; nothing else has the handle yet.
         unsafe {
             (*lib).threads = threads;
             let mut workers = (*shader_lib).workers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            for _ in 0..threads {
-                let (device, tasks, next) = (device.owned(), tasks.clone(), next.clone());
-                let errors = (*shader_lib).errors.clone();
-                match spawn_thread(move || create_shader_thread(device, tasks, next, errors)) {
+            for started in 0..threads as usize {
+                let (owned, shared) = (device.owned(), creation.clone());
+                match spawn_thread(move || create_shader_thread(owned, shared)) {
                     Ok(worker) => workers.push(worker),
                     Err(error) => {
                         log(true, &format!("MEMORY FAILED pipeline worker thread: {error}"));
                         (*shader_lib).errors.fetch_or(E_FAIL.0, Ordering::Relaxed);
+                        // The threads that were not started have stopped.
+                        creation.threads_done(device, threads as usize - started);
                         break;
                     }
                 }

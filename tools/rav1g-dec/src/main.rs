@@ -60,9 +60,10 @@ const PLAYER_SMOKE_TIMEOUT_S: i32 = 1500;
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 
 fn decoder_log_line(is_error: bool, line: &str) {
-    if line.starts_with("MEMSTATS ") || line.starts_with("GRIDCHECK ") {
+    if line.starts_with("MEMSTATS ") || line.starts_with("GRIDCHECK ") || line.starts_with("PIPELINES ") {
         // -memstats, -parseopt gridcheck: the lines of the decoder as they are (a grid that differs is
-        // also an error line of the decoder).
+        // also an error line of the decoder); what the pipeline cache did (-pipelinecache), and how long
+        // the pipeline states took without it.
         say!("{line}");
     } else if is_error || VERBOSE.load(Ordering::Relaxed) {
         say!("{}{}", if is_error { "DECODER ERROR: " } else { "decoder: " }, line);
@@ -193,7 +194,8 @@ fn real_main() -> i32 {
     }
     let pso_start = Instant::now();
     // The decoder's device: the program's D3D12 device and queue, and the pipeline states on it.
-    let Some(library) = Library::open(&dev, globals.capi, args::PSO_THREADS as u32) else {
+    let cache = (!globals.pipeline_cache.is_empty()).then(|| std::path::Path::new(&globals.pipeline_cache));
+    let Some(library) = Library::open(&dev, globals.capi, args::PSO_THREADS as u32, cache) else {
         say!("ERROR the compute pipeline states could not be created");
         return EXIT_USAGE;
     };

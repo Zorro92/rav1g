@@ -357,7 +357,7 @@ typedef struct av1_stage_dump av1_stage_dump;
  `rav1g_abi_version` returns the value the library was built with; an application that loads the
  library at run time compares the two and refuses a library with another value.
  */
-#define RAV1G_ABI_VERSION 1
+#define RAV1G_ABI_VERSION 2
 
 /*
  How a call ended.
@@ -952,9 +952,9 @@ extern "C" {
 
 /*
  The text of the last error on this thread of a call that has no decoder to ask:
- `rav1g_device_create`, `rav1g_device_wait_pipelines`, `rav1g_decoder_create`. For a creation the
- budget guard refused or that ran out of memory it ends with the decoder's "MEMORY REFUSED" or
- "MEMORY FAILED" line. Valid until the next such call on the thread.
+ `rav1g_device_create`, `rav1g_device_create_with_cache`, `rav1g_device_wait_pipelines`,
+ `rav1g_decoder_create`. For a creation the budget guard refused or that ran out of memory it ends with
+ the decoder's "MEMORY REFUSED" or "MEMORY FAILED" line. Valid until the next such call on the thread.
  */
 const char *rav1g_last_error(void);
 
@@ -1014,6 +1014,25 @@ size_t rav1g_color_text(const struct Rav1gColorInfo *color,
  The pointers are null or valid interfaces of the kinds named.
  */
 struct Rav1gDevice *rav1g_device_create(void *d3d12_device, void *d3d12_queue, uint32_t pipeline_threads);
+
+/*
+ `rav1g_device_create` with the pipeline cache on disk (docs/integration.md, "The pipeline cache").
+ `cache_dir` is the path of a folder of the application's own as a C string of UTF-16 (a UWP app passes
+ `<LocalCacheFolder>\rav1g`), which the call creates when it is not there; null or an empty path is
+ no cache, `rav1g_device_create`. The decoder keeps one file there, `rav1g-pipelines-<key>.bin`, with
+ the compiled pipeline states of the device: a later device on the same adapter and driver loads them
+ from it instead of compiling them, and a file that is missing, damaged or of another driver, adapter
+ or library version is written again (and the files of other keys deleted). Nothing of the cache makes
+ the call fail. When the pipeline states all exist, the log has one line that says what the cache did:
+ `PIPELINES cache hit|miss|rebuilt (<reason>): <n> pipelines in <ms> ms (...)`.
+
+ # Safety
+ As `rav1g_device_create`; `cache_dir` is null or a C string of UTF-16.
+ */
+struct Rav1gDevice *rav1g_device_create_with_cache(void *d3d12_device,
+                                                   void *d3d12_queue,
+                                                   uint32_t pipeline_threads,
+                                                   const uint16_t *cache_dir);
 
 /*
  Waits until every pipeline state of the device exists; the first decoder creation does the same. An
