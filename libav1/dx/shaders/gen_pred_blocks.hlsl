@@ -206,6 +206,11 @@ cbuffer GenBlockData : register(b0) {
   } cb_wm_params[8];
 };
 
+#if defined(COUNT_PRED_LISTS) || defined(GPU_PRED_LISTS)
+#include "pred_list_common.h"
+#define GPU_LIST_PATH
+#endif
+
 cbuffer GenBlockSRT : register(b1) {
   uint cb_wi_count;
   uint cb_mi_offset;
@@ -214,12 +219,18 @@ cbuffer GenBlockSRT : register(b1) {
   uint cb_row_srart;
   uint cb_index_offset;
   uint cb_index_offset_warp;
-#ifdef INTER_FAST
+#ifdef GPU_LIST_PATH
+  uint cb_fast_lists;
+  uint cb_group_base;
+  uint cb_list_count;
+  uint cb_rank_offset;
+  uint cb_starts_offset;
+#elif defined(INTER_FAST)
   uint cb_index_offset_fast;
 #endif
 };
 
-#ifdef INTER_FAST
+#if defined(INTER_FAST) || defined(GPU_LIST_PATH)
 // Test flag -interfast (gen_pred_blocks_fast_packed.hlsl; docs/gpu-av1-decoder.md, "Inter prediction: breakdown and
 // fast paths"). The blocks with one reference that are not warped, and the compound blocks that are
 // averaged or distance weighted, are listed by the fraction of their motion vectors instead of by their
@@ -278,10 +289,57 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
   return addr / ModeInfoSize;
 }
 
-[numthreads(64, 1, 1)] void main(uint3 thread
-                                 : SV_DispatchThreadID) {
-  if (thread.x >= cb_wi_count) return;
+#ifdef COUNT_PRED_LISTS
+RWByteAddressBuffer list_scratch : register(u0);
 
+// Two entries per OBMC neighbour (at most four per edge), two for ordinary
+// prediction and two for reconstruction. Sub-8x8 chroma uses at most eight
+// entries and cannot use OBMC. An entry carries up to eight records.
+groupshared uint events[PredGroupSize * PredMaxEvents];
+groupshared uint event_counts[PredGroupSize];
+#define BucketSize 8
+#define Buckets (PredGroupSize / BucketSize)
+groupshared uint histograms[PredMaxLists * Buckets];
+
+int next_gpu_block(int list, uint count, inout uint event, uint lane, uint group) {
+  events[event * PredGroupSize + lane] = list | (count << 10);
+  ++event;
+  return 0;
+}
+#define STORE_PRED(buffer, method, address, value)
+#elif defined(GPU_PRED_LISTS)
+ByteAddressBuffer list_scratch : register(t5);
+
+int next_gpu_block(int list, uint count, inout uint event, uint lane, uint group) {
+  uint rank_address = cb_rank_offset + (group * PredGroupSize + lane) * PredRankBytes + (event >> 1) * 4;
+  uint local_rank = (list_scratch.Load(rank_address) >> ((event & 1) * 16)) & 0xffff;
+  ++event;
+  return local_rank + list_scratch.Load((group * cb_list_count + list) * 4) +
+         list_scratch.Load(cb_starts_offset + PredHeaderBytes + list * 4);
+}
+#endif
+
+#ifndef COUNT_PRED_LISTS
+#define STORE_PRED(buffer, method, address, value) buffer.method(address, value)
+#endif
+
+#ifdef GPU_LIST_PATH
+#define NEXT_PRED(kind, list, count) next_gpu_block(PredList##kind + (list), count, event, lane, group)
+#define FAST_LISTS cb_fast_lists
+#else
+int next_cpu_block(int list, inout int index_addr) {
+  int number = blocks_indexes.Load(index_addr);
+  index_addr += 4;
+  return blocks_index_base.Load(4 * list) + number;
+}
+#define NEXT_PRED(kind, list, count) next_cpu_block(CpuList##kind + (list), index_addr)
+#define CpuListMain cb_index_offset
+#define CpuListWarpBlock cb_index_offset_warp
+#define CpuListFast cb_index_offset_fast
+#define FAST_LISTS 1
+#endif
+
+void generate_blocks(uint record, uint lane, uint group, inout uint event) {
   const int InterBlockSizeIndexLUT[6][6] = {
       // h:        4    8    16    32    64    128
       {0, 1, 2, -1, -1, -1},     // w = 4 (4)
@@ -294,7 +352,7 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
   const int mi_size_wide_log2[] = {0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 0, 2, 1, 3, 2, 4};
   const int mi_size_high_log2[] = {0, 1, 0, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4, 5, 4, 5, 2, 0, 3, 1, 4, 2};
 
-  const int mi_addr = cb_mi_offset + thread.x;
+  const int mi_addr = cb_mi_offset + record;
   MB_MODE_INFO mi = buffer_mi[mi_addr];
 
   int bsize = mi.block_type & 255;
@@ -364,26 +422,23 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
       const int pass_type = is_warp_compound ? 5 : ((0x3422 >> (comp_type * 4)) & 15);
       int pass_type_index = (pass_type - 1) * InterSizesAllCommon + block_size_id_y;
 
-#ifdef INTER_FAST
-      int list_addr = cb_index_offset + pass_type_index;
-      if (pass_type == CompoundAvrg)
-        list_addr = cb_index_offset_fast + InterFastCompound +
-                    (inter_fast_class(block.z) | (inter_fast_class(block.w) << 2)) * InterSizesAllCommon +
-                    block_size_id_y;
-      int dst_ptr = blocks_index_base.Load(4 * list_addr) + blocks_indexes.Load(index_addr);
-#else
-      int dst_ptr = blocks_index_base.Load(4 * (cb_index_offset + pass_type_index)) + blocks_indexes.Load(index_addr);
+      int dst_ptr;
+#if defined(INTER_FAST) || defined(GPU_LIST_PATH)
+      if (FAST_LISTS && pass_type == CompoundAvrg) {
+        int fast_list = InterFastCompound + (inter_fast_class(block.z) | (inter_fast_class(block.w) << 2)) * InterSizesAllCommon + block_size_id_y;
+        dst_ptr = NEXT_PRED(Fast, fast_list, 1);
+      } else
 #endif
-      index_addr += 4;
-      pred_blocks.Store4(dst_ptr * 16, block);
+      {
+        dst_ptr = NEXT_PRED(Main, pass_type_index, 1);
+      }
+      STORE_PRED(pred_blocks, Store4, dst_ptr * 16, block);
     } else {
       if (is_luma_warp) {
-        int dst_ptr =
-            blocks_index_base.Load(4 * (cb_index_offset_warp + block_size_id_y)) + blocks_indexes.Load(index_addr);
-        index_addr += 4;
+        int dst_ptr = NEXT_PRED(WarpBlock, block_size_id_y, 1);
         dst_ptr *= 48;
-        pred_blocks_warp.Store(dst_ptr, mi_col | (mi_row << 16));
-        pred_blocks_warp.Store(dst_ptr + 4, ((ref0 - 1) << 2) | no_skip_flag);
+        STORE_PRED(pred_blocks_warp, Store, dst_ptr, mi_col | (mi_row << 16));
+        STORE_PRED(pred_blocks_warp, Store, dst_ptr + 4, ((ref0 - 1) << 2) | no_skip_flag);
 
         WarpedMotionParams params;
         if (is_local_warp)
@@ -391,14 +446,14 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
         else
           params = cb_wm_params[ref0 - 1].params;
 
-        pred_blocks_warp.Store4(dst_ptr + 8, params.mat[0]);
-        pred_blocks_warp.Store2(dst_ptr + 24, params.mat[1].xy);
+        STORE_PRED(pred_blocks_warp, Store4, dst_ptr + 8, params.mat[0]);
+        STORE_PRED(pred_blocks_warp, Store2, dst_ptr + 24, params.mat[1].xy);
         int4 angle32;
         angle32.x = ((int)(params.angles.x << 16)) >> 16;
         angle32.y = ((int)params.angles.x) >> 16;
         angle32.w = ((int)(params.angles.y << 16)) >> 16;
         angle32.z = ((int)params.angles.y) >> 16;
-        pred_blocks_warp.Store4(dst_ptr + 32, angle32);
+        STORE_PRED(pred_blocks_warp, Store4, dst_ptr + 32, angle32);
       } else {
         uint4 block;
         block.x = mi_col | (mi_row << 16);
@@ -409,15 +464,17 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
         block.z = (mi.mv[0] << 1) & 0xfffeffff;
         block.w = 0;
 
-#ifdef INTER_FAST
-        int dst_ptr = blocks_index_base.Load(4 * (cb_index_offset_fast + inter_fast_class(block.z) * InterSizesAllCommon +
-                                                  block_size_id_y)) +
-                      blocks_indexes.Load(index_addr);
-#else
-        int dst_ptr = blocks_index_base.Load(4 * (cb_index_offset + block_size_id_y)) + blocks_indexes.Load(index_addr);
+        int dst_ptr;
+#if defined(INTER_FAST) || defined(GPU_LIST_PATH)
+        if (FAST_LISTS) {
+          int fast_list = inter_fast_class(block.z) * InterSizesAllCommon + block_size_id_y;
+          dst_ptr = NEXT_PRED(Fast, fast_list, 1);
+        } else
 #endif
-        index_addr += 4;
-        pred_blocks.Store4(dst_ptr * 16, block);
+        {
+          dst_ptr = NEXT_PRED(Main, block_size_id_y, 1);
+        }
+        STORE_PRED(pred_blocks, Store4, dst_ptr * 16, block);
       }
     }
 
@@ -471,13 +528,10 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
                               (is_compound0 == is_compound1) << 25 |  // combo write
                               no_skip_flag | bh_flag;
 
-            int dst_ptr0 =
-                blocks_index_base.Load(4 * (cb_index_offset + type_index0)) + blocks_indexes.Load(index_addr);
-            index_addr += 4;
+            int dst_ptr0 = NEXT_PRED(Main, type_index0, diff_comp ? 2 : 4);
             int dst_ptr1 = dst_ptr0 + 1;
             if (diff_comp) {
-              dst_ptr1 = blocks_index_base.Load(4 * (cb_index_offset + type_index1)) + blocks_indexes.Load(index_addr);
-              index_addr += 4;
+              dst_ptr1 = NEXT_PRED(Main, type_index1, 2);
             }
 
             dst_ptr0 *= 16;
@@ -502,19 +556,17 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
             block1.z = buffer_mi[mi_index_1].mv[0];
             block1.w = buffer_mi[mi_index_1].mv[1];
 
-            pred_blocks.Store4(dst_ptr0, block0);
-            pred_blocks.Store4(dst_ptr1, block1);
+            STORE_PRED(pred_blocks, Store4, dst_ptr0, block0);
+            STORE_PRED(pred_blocks, Store4, dst_ptr1, block1);
             block0.y ^= 3;
             block1.y ^= 3;
             dst_ptr0 += 32 >> diff_comp;
             dst_ptr1 += 32 >> diff_comp;
-            pred_blocks.Store4(dst_ptr0, block0);
-            pred_blocks.Store4(dst_ptr1, block1);
+            STORE_PRED(pred_blocks, Store4, dst_ptr0, block0);
+            STORE_PRED(pred_blocks, Store4, dst_ptr1, block1);
           } else {
             const int type_index = Inter2x2ArrOffset + is_compound;
-            int dst_addr =
-                16 * (blocks_index_base.Load(4 * (cb_index_offset + type_index)) + blocks_indexes.Load(index_addr));
-            index_addr += 4;
+            int dst_addr = 16 * NEXT_PRED(Main, type_index, 2 * bcols);
 
             const int interp_filters = MI_INTERP_FILTERS(buffer_mi[mi_index_1]);
             uint filter_type_h =
@@ -533,7 +585,7 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
               for (int col = 0; col < bcols; ++col) {
                 block.x = (x + col) | ((y + row) << 16);
                 block.y = mode_base | p;
-                pred_blocks.Store4(dst_addr, block);
+                STORE_PRED(pred_blocks, Store4, dst_addr, block);
                 dst_addr += 16;
               }
             }
@@ -562,28 +614,24 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
           const int pass_type =
               is_warp_compound ? (comp_type == COMPOUND_DIFFWTD ? 7 : 5) : ((0x6422 >> (comp_type * 4)) & 15);
           int pass_type_index = (pass_type - 1) * InterSizesAllCommon + block_size_id_uv;
-#ifdef INTER_FAST
-          int list_addr = cb_index_offset + pass_type_index;
-          if (pass_type == CompoundAvrg)
-            list_addr = cb_index_offset_fast + InterFastCompound +
-                        (inter_fast_class(block.z) | (inter_fast_class(block.w) << 2)) * InterSizesAllCommon +
-                        block_size_id_uv;
-          int dst_ptr = blocks_index_base.Load(4 * list_addr) + blocks_indexes.Load(index_addr);
-#else
-          int dst_ptr =
-              blocks_index_base.Load(4 * (cb_index_offset + pass_type_index)) + blocks_indexes.Load(index_addr);
+          int dst_ptr;
+#if defined(INTER_FAST) || defined(GPU_LIST_PATH)
+          if (FAST_LISTS && pass_type == CompoundAvrg) {
+            int fast_list = InterFastCompound + (inter_fast_class(block.z) | (inter_fast_class(block.w) << 2)) * InterSizesAllCommon + block_size_id_uv;
+            dst_ptr = NEXT_PRED(Fast, fast_list, 2);
+          } else
 #endif
-          index_addr += 4;
+          {
+            dst_ptr = NEXT_PRED(Main, pass_type_index, 2);
+          }
           dst_ptr *= 16;
-          pred_blocks.Store4(dst_ptr, block);
+          STORE_PRED(pred_blocks, Store4, dst_ptr, block);
           block.y ^= 3;
-          pred_blocks.Store4(dst_ptr + 16, block);
+          STORE_PRED(pred_blocks, Store4, dst_ptr + 16, block);
         } else {
           const int is_chroma_warp = is_luma_warp && bw_log >= 2 && bh_log >= 2;
           if (is_chroma_warp) {
-            int dst_ptr =
-                blocks_index_base.Load(4 * (cb_index_offset_warp + block_size_id_uv)) + blocks_indexes.Load(index_addr);
-            index_addr += 4;
+            int dst_ptr = NEXT_PRED(WarpBlock, block_size_id_uv, 2);
             dst_ptr *= 48;
 
             WarpedMotionParams params;
@@ -598,17 +646,17 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
             angle32.w = ((int)(params.angles.y << 16)) >> 16;
             angle32.z = ((int)params.angles.y) >> 16;
 
-            pred_blocks_warp.Store(dst_ptr, mi_col_uv | (mi_row_uv << 16));
-            pred_blocks_warp.Store(dst_ptr + 4, 1 | ((ref0 - 1) << 2) | no_skip_flag);
-            pred_blocks_warp.Store4(dst_ptr + 8, params.mat[0]);
-            pred_blocks_warp.Store2(dst_ptr + 24, params.mat[1].xy);
-            pred_blocks_warp.Store4(dst_ptr + 32, angle32);
+            STORE_PRED(pred_blocks_warp, Store, dst_ptr, mi_col_uv | (mi_row_uv << 16));
+            STORE_PRED(pred_blocks_warp, Store, dst_ptr + 4, 1 | ((ref0 - 1) << 2) | no_skip_flag);
+            STORE_PRED(pred_blocks_warp, Store4, dst_ptr + 8, params.mat[0]);
+            STORE_PRED(pred_blocks_warp, Store2, dst_ptr + 24, params.mat[1].xy);
+            STORE_PRED(pred_blocks_warp, Store4, dst_ptr + 32, angle32);
             dst_ptr += 48;
-            pred_blocks_warp.Store(dst_ptr, mi_col_uv | (mi_row_uv << 16));
-            pred_blocks_warp.Store(dst_ptr + 4, 2 | ((ref0 - 1) << 2) | no_skip_flag);
-            pred_blocks_warp.Store4(dst_ptr + 8, params.mat[0]);
-            pred_blocks_warp.Store2(dst_ptr + 24, params.mat[1].xy);
-            pred_blocks_warp.Store4(dst_ptr + 32, angle32);
+            STORE_PRED(pred_blocks_warp, Store, dst_ptr, mi_col_uv | (mi_row_uv << 16));
+            STORE_PRED(pred_blocks_warp, Store, dst_ptr + 4, 2 | ((ref0 - 1) << 2) | no_skip_flag);
+            STORE_PRED(pred_blocks_warp, Store4, dst_ptr + 8, params.mat[0]);
+            STORE_PRED(pred_blocks_warp, Store2, dst_ptr + 24, params.mat[1].xy);
+            STORE_PRED(pred_blocks_warp, Store4, dst_ptr + 32, angle32);
 
           } else {
             uint4 block;
@@ -617,20 +665,21 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
             block.z = mi.mv[0];
             block.w = 0;
 
-#ifdef INTER_FAST
-            int dst_ptr = blocks_index_base.Load(4 * (cb_index_offset_fast +
-                                                      inter_fast_class(block.z) * InterSizesAllCommon + block_size_id_uv)) +
-                          blocks_indexes.Load(index_addr);
-#else
-            int dst_ptr =
-                blocks_index_base.Load(4 * (cb_index_offset + block_size_id_uv)) + blocks_indexes.Load(index_addr);
+            int dst_ptr;
+#if defined(INTER_FAST) || defined(GPU_LIST_PATH)
+            if (FAST_LISTS) {
+              int fast_list = inter_fast_class(block.z) * InterSizesAllCommon + block_size_id_uv;
+              dst_ptr = NEXT_PRED(Fast, fast_list, 2);
+            } else
 #endif
-            index_addr += 4;
+            {
+              dst_ptr = NEXT_PRED(Main, block_size_id_uv, 2);
+            }
             dst_ptr *= 16;
-            pred_blocks.Store4(dst_ptr, block);
+            STORE_PRED(pred_blocks, Store4, dst_ptr, block);
             dst_ptr += 16;
             block.y ^= 3;
-            pred_blocks.Store4(dst_ptr, block);
+            STORE_PRED(pred_blocks, Store4, dst_ptr, block);
           }
         }
       }
@@ -666,9 +715,8 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
           block.w = 0;
 
           int type_index = (ObmcAbove - 1) * InterSizesAllCommon + ((w << 2) | h);  // InterBlockSizeIndexLUT[w][h];
-          int dst_ptr = blocks_index_base.Load(4 * (cb_index_offset + type_index)) + blocks_indexes.Load(index_addr);
-          index_addr += 4;
-          pred_blocks.Store4(dst_ptr * 16, block);
+          int dst_ptr = NEXT_PRED(Main, type_index, 1);
+          STORE_PRED(pred_blocks, Store4, dst_ptr * 16, block);
 
           if (obmc_chroma) {
             filter_type_h = (InterFilterLut >> ((MI_FILTER_H(filters) << 2) + ((w > 1) << 4))) & 7;
@@ -679,13 +727,12 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
             block.z = buffer_mi[mi_addr_above].mv[0];
 
             type_index = (ObmcAbove - 1) * InterSizesAllCommon + (((w - 1) << 2) | huv);
-            dst_ptr = blocks_index_base.Load(4 * (cb_index_offset + type_index)) + blocks_indexes.Load(index_addr);
-            index_addr += 4;
+            dst_ptr = NEXT_PRED(Main, type_index, 2);
             dst_ptr *= 16;
-            pred_blocks.Store4(dst_ptr, block);
+            STORE_PRED(pred_blocks, Store4, dst_ptr, block);
             block.y ^= 3;
             dst_ptr += 16;
-            pred_blocks.Store4(dst_ptr, block);
+            STORE_PRED(pred_blocks, Store4, dst_ptr, block);
           }
         }
         col += 1 << w;
@@ -722,9 +769,8 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
           block.w = 0;
 
           int type_index = (ObmcLeft - 1) * InterSizesAllCommon + ((h << 2) | w);  // InterBlockSizeIndexLUT[w][h];
-          int dst_ptr = blocks_index_base.Load(4 * (cb_index_offset + type_index)) + blocks_indexes.Load(index_addr);
-          index_addr += 4;
-          pred_blocks.Store4(dst_ptr * 16, block);
+          int dst_ptr = NEXT_PRED(Main, type_index, 1);
+          STORE_PRED(pred_blocks, Store4, dst_ptr * 16, block);
           filter_type_h = (InterFilterLut >> ((MI_FILTER_H(filters) << 2) + ((wuv > 0) << 4))) & 7;
           filter_type_v = (InterFilterLut >> ((MI_FILTER_V(filters) << 2) + ((h > 1) << 4))) & 7;
           block.x = (mi_col >> 1) | (((mi_row + row) >> 1) << 16);
@@ -733,13 +779,12 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
           block.z = buffer_mi[mi_addr_left].mv[0];
 
           type_index = (ObmcLeft - 1) * InterSizesAllCommon + (((h - 1) << 2) | wuv);
-          dst_ptr = blocks_index_base.Load(4 * (cb_index_offset + type_index)) + blocks_indexes.Load(index_addr);
-          index_addr += 4;
+          dst_ptr = NEXT_PRED(Main, type_index, 2);
           dst_ptr *= 16;
-          pred_blocks.Store4(dst_ptr, block);
+          STORE_PRED(pred_blocks, Store4, dst_ptr, block);
           block.y ^= 3;
           dst_ptr += 16;
-          pred_blocks.Store4(dst_ptr, block);
+          STORE_PRED(pred_blocks, Store4, dst_ptr, block);
         }
         row += 1 << h;
       }
@@ -749,7 +794,13 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
   const int y_use_palette = MI_Y_PALETTE(mi) != 0;
   const int uv_use_palette = MI_UV_PALETTE(mi) != 0;
 
+#ifndef COUNT_PRED_LISTS
   if (ref0 <= 0 || is_inter_intra) {
+#ifdef GPU_PRED_LISTS
+    const uint intra_base = list_scratch.Load(cb_starts_offset + PredIntraBase);
+#else
+    const uint intra_base = 0;
+#endif
     const int tx_size_wide_log2[] = {0, 1, 2, 3, 4, 0, 1, 1, 2, 2, 3, 3, 4, 0, 2, 1, 3, 2, 4};
     const int tx_size_high_log2[] = {0, 1, 2, 3, 4, 1, 0, 2, 1, 3, 2, 4, 3, 2, 0, 3, 1, 4, 2};
     const int mode_to_angle_map[] = {
@@ -895,7 +946,7 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
               int iter_grid_stride = cb_iter_grid_stride;
               int iter = intra_iter_grid.Load((col + subblk_w + (row + 1) * iter_grid_stride) * 4);
               const int type_index = iter * IntraTypeCount + type_idx_base;
-              const int dst_ptr = blocks_index_base.Load(4 * (cb_index_offset + type_index)) + (block_index >> 2);
+              const int dst_ptr = intra_base + blocks_index_base.Load(4 * (cb_index_offset + type_index)) + (block_index >> 2);
 
               uint4 block;
               block.x = col | (row << 16);
@@ -904,7 +955,7 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
                         (left_available ? (dir_left_filter << 26) : 0);
               block.z = mode_info0;
               block.w = 0;
-              pred_blocks.Store4(dst_ptr * 16, block);
+              STORE_PRED(pred_blocks, Store4, dst_ptr * 16, block);
             }
           }
         }
@@ -1030,7 +1081,7 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
               int iter_grid_stride = cb_iter_grid_stride_uv;
               int iter = intra_iter_grid.Load((iter_grid_offset + col + subblk_w + (row + 1) * iter_grid_stride) * 4);
               const int type_index = iter * IntraTypeCount + type_idx_base;
-              int dst_ptr = blocks_index_base.Load(4 * (cb_index_offset + type_index)) + (block_index >> 2);
+              int dst_ptr = intra_base + blocks_index_base.Load(4 * (cb_index_offset + type_index)) + (block_index >> 2);
               dst_ptr *= 16;
 
               uint uv_mode = mode_flags_base | (above_available << 10) | (left_available << 16) |
@@ -1041,11 +1092,11 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
               block.y = uv_mode | mode_u;
               block.z = mode_info0;
               block.w = 0;
-              pred_blocks.Store4(dst_ptr, block);
+              STORE_PRED(pred_blocks, Store4, dst_ptr, block);
 
               dst_ptr += 16;
               block.y = uv_mode | mode_v;
-              pred_blocks.Store4(dst_ptr, block);
+              STORE_PRED(pred_blocks, Store4, dst_ptr, block);
             }
           }
         }
@@ -1053,13 +1104,13 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
     }
   }
 
+#endif
+
   const int do_recon = (mi.tx_info & 0xff00) == 0;
   const int inter_recon = do_recon && (is_obmc_above || is_obmc_left);
   if (y_use_palette || inter_recon) {
     const int type_index = ReconBlockOffset + bw_log + 6 * bh_log;
-    int dst_ptr = blocks_index_base.Load(4 * (cb_index_offset + type_index)) + blocks_indexes.Load(index_addr);
-
-    index_addr += 4;
+    int dst_ptr = NEXT_PRED(Main, type_index, 1);
     dst_ptr *= 16;
 
     uint4 block;
@@ -1067,13 +1118,11 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
     block.y = (do_recon << 2) | (y_use_palette << 3);
     block.z = 0;
     block.w = 0;
-    pred_blocks.Store4(dst_ptr, block);
+    STORE_PRED(pred_blocks, Store4, dst_ptr, block);
   }
   if ((uv_use_palette || inter_recon) && !is_chroma_ref) {
     const int type_index = ReconBlockOffset + bw_log_uv + 6 * bh_log_uv;
-    int dst_ptr = blocks_index_base.Load(4 * (cb_index_offset + type_index)) + blocks_indexes.Load(index_addr);
-
-    index_addr += 4;
+    int dst_ptr = NEXT_PRED(Main, type_index, 2);
     dst_ptr *= 16;
 
     uint4 block;
@@ -1081,9 +1130,70 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
     block.y = 1 | (do_recon << 2) | (uv_use_palette << 3);
     block.z = 0;
     block.w = 0;
-    pred_blocks.Store4(dst_ptr, block);
+    STORE_PRED(pred_blocks, Store4, dst_ptr, block);
     dst_ptr += 16;
     block.y = 2 | (do_recon << 2) | (uv_use_palette << 3);
-    pred_blocks.Store4(dst_ptr, block);
+    STORE_PRED(pred_blocks, Store4, dst_ptr, block);
   }
 }
+
+
+#ifdef COUNT_PRED_LISTS
+[numthreads(PredGroupSize, 1, 1)]
+void main(uint3 thread : SV_DispatchThreadID, uint lane : SV_GroupIndex, uint3 gid : SV_GroupID) {
+  const uint group = cb_group_base + gid.x;
+  uint n = 0;
+  if (thread.x < cb_wi_count) generate_blocks(thread.x, lane, group, n);
+  event_counts[lane] = n;
+  for (uint i = lane; i < cb_list_count * Buckets; i += PredGroupSize) histograms[i] = 0;
+  GroupMemoryBarrierWithGroupSync();
+
+  // Each worker owns a disjoint range of lanes and a private histogram.
+  // Visit lanes and entries in order, then join the eight histograms.
+  if (lane < Buckets) {
+    for (uint j = 0; j < BucketSize; ++j) {
+      uint record = lane * BucketSize + j;
+      for (uint e = 0; e < event_counts[record]; ++e) {
+        uint address = e * PredGroupSize + record;
+        uint value = events[address];
+        uint slot = (value & 1023) * Buckets + lane;
+        uint before = histograms[slot];
+        histograms[slot] = before + (value >> 10);
+        events[address] = (value & 1023) | (before << 16);
+      }
+    }
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  for (uint list = lane; list < cb_list_count; list += PredGroupSize) {
+    uint sum = 0;
+    [unroll] for (uint bucket = 0; bucket < Buckets; ++bucket)
+      sum += histograms[list * Buckets + bucket];
+    list_scratch.Store((group * cb_list_count + list) * 4, sum);
+  }
+
+  uint packed = 0;
+  for (uint e = 0; e < n; ++e) {
+    uint value = events[e * PredGroupSize + lane];
+    uint rank = value >> 16;
+    for (uint bucket = 0; bucket < lane / BucketSize; ++bucket)
+      rank += histograms[(value & 1023) * Buckets + bucket];
+    packed |= rank << ((e & 1) * 16);
+    if ((e & 1) || e + 1 == n) {
+      list_scratch.Store(cb_rank_offset + (group * PredGroupSize + lane) * PredRankBytes + (e >> 1) * 4, packed);
+      packed = 0;
+    }
+  }
+}
+#else
+[numthreads(64, 1, 1)]
+void main(uint3 thread : SV_DispatchThreadID, uint lane : SV_GroupIndex, uint3 gid : SV_GroupID) {
+  if (thread.x >= cb_wi_count) return;
+  uint event = 0;
+#ifdef GPU_PRED_LISTS
+  generate_blocks(thread.x, lane, cb_group_base + gid.x, event);
+#else
+  generate_blocks(thread.x, lane, 0, event);
+#endif
+}
+#endif

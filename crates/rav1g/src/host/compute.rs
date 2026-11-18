@@ -156,9 +156,9 @@ const LAYOUTS: usize =
 const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
-    // 20 transforms, 17 shaders that do not depend on the bit depth, 30 that do for 8 bits and for more.
-    assert!(SHADERS == 20 + 23 + 2 * 30);
-    assert!(LAYOUTS == 21);
+    // 20 transforms, 26 shaders that do not depend on the bit depth, 30 that do for 8 bits and for more.
+    assert!(SHADERS == 20 + 26 + 2 * 30);
+    assert!(LAYOUTS == 24);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
 
@@ -234,6 +234,9 @@ struct Layouts {
     copy_plane: Layout,
     pred_blocks: Layout,
     pred_blocks_fast: Layout,
+    pred_blocks_gpu: Layout,
+    pred_list_count: Layout,
+    pred_list_scan: Layout,
     intra_pred: Layout,
     intra_v2: Layout,
     inter_pred: Layout,
@@ -276,6 +279,9 @@ unsafe fn create_layouts(device: Device<'_>, lib: *mut compute_shader_lib) -> Re
         pred_blocks: layout(5, 2, 1, 7)?,
         // gen_pred_blocks_fast_packed.hlsl (-interfast) takes one more inline constant.
         pred_blocks_fast: layout(5, 2, 1, 8)?,
+        pred_blocks_gpu: layout(6, 2, 1, 12)?,
+        pred_list_count: layout(4, 1, 1, 12)?,
+        pred_list_scan: layout(1, 1, 0, 7)?,
         intra_pred: layout(3, 1, 1, 10)?,
         // intra_v2.hlsl: t0..t4, u0, b0 and 8 inline constants in b1.
         intra_v2: layout(5, 1, 1, 8)?,
@@ -320,6 +326,9 @@ unsafe fn create_layouts(device: Device<'_>, lib: *mut compute_shader_lib) -> Re
         com_store(&raw mut (*lib).sig_film_grain_tex, layouts.film_grain_tex.clone().into_raw());
         com_store(&raw mut (*lib).sig_cdef_lists, layouts.cdef_lists.clone().into_raw());
         com_store(&raw mut (*lib).sig_mi_grid_build, layouts.mi_grid_build.clone().into_raw());
+        com_store(&raw mut (*lib).sig_pred_blocks_gpu, layouts.pred_blocks_gpu.clone().into_raw());
+        com_store(&raw mut (*lib).sig_pred_list_count, layouts.pred_list_count.clone().into_raw());
+        com_store(&raw mut (*lib).sig_pred_list_scan, layouts.pred_list_scan.clone().into_raw());
     }
     Ok(layouts)
 }
@@ -453,6 +462,9 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("film_grain_filter_sp_tex", &layouts.film_grain_tex, &raw mut (*lib).shader_filmgrain_filter_sp_tex),
             ("cdef_lists", &layouts.cdef_lists, &raw mut (*lib).shader_cdef_lists),
             ("mi_grid_build", &layouts.mi_grid_build, &raw mut (*lib).shader_mi_grid_build),
+            ("pred_list_count", &layouts.pred_list_count, &raw mut (*lib).shader_pred_list_count),
+            ("pred_list_scan", &layouts.pred_list_scan, &raw mut (*lib).shader_pred_list_scan),
+            ("gen_pred_blocks_gpu", &layouts.pred_blocks_gpu, &raw mut (*lib).shader_gen_pred_blocks_gpu),
         ]
     };
     // The shader pick of the DXC experiment: the set of every shader of the table. Without the feature
@@ -878,7 +890,7 @@ mod tests {
             .filter_map(|line| line.trim().trim_start_matches('(').strip_prefix('"'))
             .map(|rest| &rest[..rest.find('"').unwrap()])
             .collect();
-        assert_eq!(names.len(), 99);
+        assert_eq!(names.len(), 102);
         let mut unique = names.clone();
         unique.sort_unstable();
         unique.dedup();

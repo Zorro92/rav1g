@@ -52,6 +52,7 @@ pub(crate) use prediction::{av1_set_intra_edge_fix, av1_set_intra_opt};
 pub(crate) use stage_dump::av1_set_stage_dump;
 mod film_grain;
 mod frame;
+mod gpu_pred_lists;
 mod grid_check;
 mod intra_v2;
 mod libaom;

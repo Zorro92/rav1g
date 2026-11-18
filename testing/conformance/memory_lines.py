@@ -35,7 +35,7 @@ The two are not the same lines; what must hold:
     memory parts 2 and 4), the coefficient pool a thirty-second more;
   - with the same slots it takes no more device memory than the decoder with shares.
 A case where the slots differ (the library gives a decoder for frames above 2560x1440 two frames in
-parse and three slots) is reported and its sizes are not compared.
+parse and four slots) is reported and its sizes are not compared.
 
 Exit code: 0 equal (or run done), 1 different, 2 the run could not be done.
 """

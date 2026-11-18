@@ -27,15 +27,19 @@ use windows::core::Interface;
 
 use super::completion::av1_drain_gpu_decoder;
 use super::compute::{upload_luts, wait_shader_create_complete};
+use super::gpu_pred_lists::{self, FrameLayout};
 use super::log::{clear_create_error, log, log_create_error};
 use super::memory::{Allocator, Plan, log_video_memory, memory_type_name};
 use super::pool::{COEF_CHUNK, KINDS, Kind, MODE_INFO_CHUNK, Pools, TXB_CHUNK};
+use super::stage_buffers::{
+    GPU_PRED_SCRATCH, GPU_PRED_TEMPLATES, IDCT_BLOCKS, INDEX_LIST, PRED_BLOCKS, PRED_BLOCKS_WARP,
+    gpu_list_initial_bytes, initial_bytes,
+};
 use super::types::{
     Av1Core, DeviceOnly, DeviceOnlyConst, DeviceUpload, FrameThreadDataCount, FrameThreadDataDefault, GpuBufferObject,
     HostRW, ImagePoolSize, InterFastMapSize, MemoryType, OutputCbSize, OutputThreadDataCount, ReadBack,
     RefFrameBufferCount, RefFrameBufferCountSharedBack, UploadUAV, av1_frame_thread_data,
 };
-use super::stage_buffers::{IDCT_BLOCKS, INDEX_LIST, PRED_BLOCKS, PRED_BLOCKS_WARP, initial_bytes};
 use crate::gpu::d3d12::{com_ref, com_release, com_store, wrapped_ref};
 use crate::gpu::{self, CommandAllocator, Device, Event, SemiPlanar, VideoMemory, create_hardware_device};
 use crate::sys::{
@@ -457,13 +461,14 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
     // The buffers that grow with the frames (stage_buffers.rs): a part of the worst case, which is one
     // transform block and two prediction blocks for every 4x4 unit and a warp block for every 8x8.
     // The block index list of a slot (the last one): two entries for every 4x4 unit.
-    let stage_worst = [
+    let mut stage_worst = [
         (block_count_4x4 * IDCT_BLOCK_SIZE) as usize,
         (block_count_4x4 * 16 * 2) as usize,
         ((block_count_4x4 >> 2) * 48) as usize,
         size_of::<i32>() * block_count_4x4 as usize * 2,
+        0,
+        0,
     ];
-    dec.stage_worst = stage_worst;
     request!(
         assign,
         dec.idct_blocks,
@@ -534,6 +539,18 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
         + (target_height / 128) * (target_width / 8) * 2; // horizontal edges, chroma
 
     let max_tiles = max_tile_cols * max_tile_rows;
+    let gpu_pred = gpu_pred_lists::enabled(dec.parser_options);
+    if gpu_pred {
+        let capacity = FrameLayout::worst(mi_size as u32, max_tiles as u32, cfg.inter_fast, cfg.intra_v2);
+        stage_worst[GPU_PRED_SCRATCH] = capacity.scratch_bytes();
+        stage_worst[GPU_PRED_TEMPLATES] = capacity.template_bytes();
+        request!(
+            assign,
+            dec.gpu_pred_scratch,
+            mem.buffer(gpu_list_initial_bytes(stage_worst[GPU_PRED_SCRATCH]), DeviceOnly, c"gpu_pred_scratch", -1)
+        );
+    }
+    dec.stage_worst = stage_worst;
 
     dec.pred_map_size = (256 + 32) * max_tiles + (mi_size >> 2) * 10;
     // -interfast: the lists by motion vector class of every tile, behind the block maps as they always were.
@@ -593,11 +610,24 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
         td.slot_index = i;
         request!(assign, td.command_buffer.cb_alloc, mem.buffer(1024 * 1024, DeviceUpload, c"cb_alloc", i));
         request!(assign, td.tile_data, mem.host(size_of::<av1_tile_data>() * max_tiles as usize));
+        let index_bytes = if gpu_pred { gpu_list_initial_bytes } else { initial_bytes };
         request!(
             assign,
             td.gen_mi_block_indexes,
-            mem.buffer(initial_bytes(stage_worst[INDEX_LIST]), HostRW, c"gen_mi_block_indexes", i)
+            mem.buffer(index_bytes(stage_worst[INDEX_LIST]), HostRW, c"gen_mi_block_indexes", i)
         );
+        if gpu_pred {
+            request!(
+                assign,
+                td.gpu_pred_templates,
+                mem.buffer(
+                    gpu_list_initial_bytes(stage_worst[GPU_PRED_TEMPLATES]),
+                    DeviceUpload,
+                    c"gpu_pred_templates",
+                    i
+                )
+            );
+        }
         request!(
             assign,
             td.gen_intra_inter_grid,
@@ -673,12 +703,7 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
             request!(
                 assign,
                 td.mi_runs,
-                mem.buffer(
-                    2 * size_of::<u32>() * (dec.pool_total[Kind::ModeInfo as usize] + 1),
-                    HostRW,
-                    c"mi_runs",
-                    i
-                )
+                mem.buffer(2 * size_of::<u32>() * (dec.pool_total[Kind::ModeInfo as usize] + 1), HostRW, c"mi_runs", i)
             );
         }
         // The two lists of CDEF: written by the thread that records a frame, or, in a decoder for it
@@ -795,12 +820,32 @@ fn deferred_device_bytes(dec: &Av1Core, rcfg: &ResourceConfig) -> usize {
     slots * ((dec.palette_size + 255) & !255) + stage_growth_bytes(dec, slots)
 }
 
+fn configure_parser_buffers(dec: &mut Av1Core, bits: c_int) {
+    let options = crate::ParserOptions::from_bits(bits as u32);
+    dec.parser_options = bits;
+    dec.keep_mi_grid = c_int::from(!options.clear_grid);
+    dec.gpu_grid = c_int::from(options.gpu_grid);
+    // A GPU grid is only available to the GPU. CDEF takes its lists there, and
+    // the grid check needs the sink-written grid.
+    dec.gpu_cdef_lists = c_int::from(options.gpu_cdef_lists || options.gpu_grid);
+    dec.gpu_grid_check = c_int::from(options.gpu_grid_check && !options.gpu_grid);
+}
+
 /// What the buffers of the stages that grow with the frames can add to what they are created with: the
 /// block index list in each of the `slots`.
 fn stage_growth_bytes(dec: &Av1Core, slots: usize) -> usize {
     let aligned = |bytes: usize| (bytes + 255) & !255;
-    let growth = |index: usize| aligned(dec.stage_worst[index]) - aligned(initial_bytes(dec.stage_worst[index]));
-    growth(IDCT_BLOCKS) + growth(PRED_BLOCKS) + growth(PRED_BLOCKS_WARP) + slots * growth(INDEX_LIST)
+    let growth = |index: usize| {
+        let worst = dec.stage_worst[index];
+        let small = index >= GPU_PRED_SCRATCH || (index == INDEX_LIST && gpu_pred_lists::enabled(dec.parser_options));
+        let initial = if small { gpu_list_initial_bytes(worst) } else { initial_bytes(worst) };
+        aligned(worst) - aligned(initial)
+    };
+    growth(IDCT_BLOCKS)
+        + growth(PRED_BLOCKS)
+        + growth(PRED_BLOCKS_WARP)
+        + growth(GPU_PRED_SCRATCH)
+        + slots * (growth(INDEX_LIST) + growth(GPU_PRED_TEMPLATES))
 }
 
 /// The device bytes [`allocate_buffers`] creates for `rcfg`, and the bytes of the buffers that are created
@@ -844,6 +889,7 @@ pub(crate) unsafe extern "C" fn av1_query_memory_requirements(cfg: *mut aom_code
     let Some(mut dec) = Av1Core::new() else {
         return -1;
     };
+    configure_parser_buffers(&mut dec, cfg.parser_options);
     // SAFETY: a plan assigns nothing.
     unsafe { allocate_buffers(&raw mut *dec, &mut plan, &rcfg) };
     let (host, device) = plan.planned();
@@ -1191,24 +1237,11 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
 
         let mut plan = ParsePlan::from_cfg(cfg);
         let mut rcfg = ResourceConfig::with_slots(cfg, plan.slots);
-        (*dec).parser_options = cfg.parser_options;
-        (*dec).keep_mi_grid = c_int::from(cfg.parser_options & crate::sys::AV1_PARSER_OPTION_CLEAR_GRID as c_int == 0);
+        configure_parser_buffers(&mut *dec, cfg.parser_options);
         // The clears of the slots' grids by the GPU: fixed here, because the grids of such a decoder are
         // created as buffers a command list may write. A decoder that was created with another mode has
         // them as buffers the GPU only reads, which every package so far has had.
         (*dec).gpu_clear_grids = c_int::from(super::frame::clears_mode() == crate::sys::AV1_CLEARS_GPU as c_int);
-        (*dec).gpu_cdef_lists =
-            c_int::from(cfg.parser_options & crate::sys::AV1_PARSER_OPTION_GPU_CDEF_LISTS as c_int != 0);
-        (*dec).gpu_grid_check =
-            c_int::from(cfg.parser_options & crate::sys::AV1_PARSER_OPTION_GPU_GRID_CHECK as c_int != 0);
-        // The grid built by the GPU: the parse writes none, so nothing on the CPU may read it. The thread
-        // that records would for the lists of CDEF, so those are the GPU's too, and the check has no
-        // grid of the parse to hold the GPU's against.
-        (*dec).gpu_grid = c_int::from(cfg.parser_options & crate::sys::AV1_PARSER_OPTION_GPU_GRID as c_int != 0);
-        if (*dec).gpu_grid != 0 {
-            (*dec).gpu_cdef_lists = 1;
-            (*dec).gpu_grid_check = 0;
-        }
         (*dec).frame_slots = rcfg.gpu_pipeline_depth;
 
         // The decoder takes a reference of the device and of the queue the application gave.
@@ -1238,6 +1271,12 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
         let shader_errors = wait_shader_create_complete((*dec).shader_lib);
         if shader_errors != 0 {
             return create_failed(dec, &rcfg, Some(&vm_before), "compute pipeline states (shaders)", shader_errors);
+        }
+        if gpu_pred_lists::enabled(cfg.parser_options) {
+            match gpu_pred_lists::Signatures::new(Device::new(&device), &*(*dec).shader_lib) {
+                Ok(signatures) => (*dec).gpu_pred_signatures = Some(signatures),
+                Err(error) => return create_failed(dec, &rcfg, Some(&vm_before), error.step, error.code),
+            }
         }
 
         // The output fence: one for the decoder, signalled behind every command list.
@@ -1819,7 +1858,15 @@ mod tests {
         let rcfg = ResourceConfig::from_cfg(&cfg);
         // The default: the shared back buffer, and above 1920x1088 every part.
         assert_eq!((rcfg.ref_fb_count, rcfg.low_memory, rcfg.low_memory_default), (11, 1, true));
-        for (width, height, parts) in [(1920, 1080, 1), (1920, 1088, 1), (1920, 1152, 1), (1088, 1920, 1), (1920, 1153, 39), (2560, 1440, 39), (3840, 2160, 39)] {
+        for (width, height, parts) in [
+            (1920, 1080, 1),
+            (1920, 1088, 1),
+            (1920, 1152, 1),
+            (1088, 1920, 1),
+            (1920, 1153, 39),
+            (2560, 1440, 39),
+            (3840, 2160, 39),
+        ] {
             (cfg.width, cfg.height) = (width, height);
             assert_eq!(ResourceConfig::from_cfg(&cfg).low_memory, parts, "{width}x{height}");
         }

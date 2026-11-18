@@ -380,13 +380,16 @@ def data_digest(d, dumps):
         mi = mode_info_of(dumps)
         crcs = []
         if mi:
+            # Index bases depend on which lists the parser writes. The prediction
+            # dumps check the shader-visible records in their final order.
+            offset = next(field[1] for field in mi.fields if field[0] == "index_base")
             by_index = {}
             for row in range(mi.rows):
                 for col in range(mi.cols):
                     index = mi.index(col, row)
                     if index not in by_index:
                         record = mi.record_at(index)
-                        by_index[index] = zlib.crc32(record) if record else 0
+                        by_index[index] = zlib.crc32(record[offset + 4:], zlib.crc32(record[:offset])) if record else 0
                     crcs.append(by_index[index])
         return struct.pack("<%dI" % len(crcs), *crcs), with_mode("crc")
     if d.stage == "mi_pool":
@@ -573,6 +576,8 @@ def compare_mode_info(da, db, dumps_a, dumps_b, limit, out):
         out("      sizes differ: A %dx%d units, B %dx%d" % (ma.cols, ma.rows, mb.cols, mb.rows))
         return False
     fields_b = {f[0]: f for f in mb.fields}
+    if da.fields.get("index_base", "all") != db.fields.get("index_base", "all"):
+        fields_b.pop("index_base", None)
     common = [(f, fields_b[f[0]]) for f in ma.fields if f[0] in fields_b]
     if ma.record != mb.record:
         out("      record sizes %d and %d bytes; comparing %d shared fields" % (ma.record, mb.record, len(common)))
@@ -1034,7 +1039,7 @@ def cmd_compare(args):
         for key, da in ka:
             db = map_b.pop(key, None)
             if db is None:
-                if da.is_data():
+                if da.is_data() and not args.strict_data:
                     print("  data  %-16s only in A (B was written without it: not compared)" % da.label())
                 else:
                     print("  stage %-13s only in A" % da.label())
@@ -1070,7 +1075,7 @@ def cmd_compare(args):
                     print(line)
         for key, db in kb:
             if key in map_b:
-                if db.is_data():
+                if db.is_data() and not args.strict_data:
                     print("  data  %-16s only in B (A was written without it: not compared)" % db.label())
                 else:
                     print("  stage %-13s only in B" % db.label())
@@ -1223,6 +1228,7 @@ def main_with(argv):
     p.add_argument("a")
     p.add_argument("b")
     p.add_argument("--all", action="store_true", help="the pattern of every stage that differs, not only the first")
+    p.add_argument("--strict-data", action="store_true", help="require matching data stages on both sides")
     p.add_argument("--two-parsers", action="store_true",
                    help="list mode info differences for the two parsers without failing the comparison. "
                         "Their record layouts and the contents of unused fields differ. The prediction, "

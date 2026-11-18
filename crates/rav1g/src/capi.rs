@@ -97,6 +97,9 @@ pub const RAV1G_PARSER_OPTION_GPU_GRID_CHECK: u32 = 1024;
 /// is then a buffer the GPU may write, and the decoder works as with
 /// `RAV1G_PARSER_OPTION_GPU_CDEF_LISTS`, set or not. Part of `RAV1G_PARSER_OPTIONS_DEFAULT`.
 pub const RAV1G_PARSER_OPTION_GPU_GRID: u32 = 2048;
+/// Build the inter, warp and reconstruction prediction lists on the GPU. The parser keeps the
+/// intra wavefront and its lists. Off by default.
+pub const RAV1G_PARSER_OPTION_GPU_PRED_LISTS: u32 = 4096;
 /// The most frames a decoder parses at the same time (`Rav1gSettings::frames_in_parse`).
 pub const RAV1G_FRAMES_IN_PARSE_MAX: u32 = 4;
 /// The `Rav1gSettings::parser_options` of `rav1g_settings_default`: `RAV1G_PARSER_OPTION_NO_LF_MASKS`,
@@ -219,6 +222,8 @@ const _: () = {
     assert!(RAV1G_PARSER_OPTION_GPU_GRID_CHECK == crate::sys::AV1_PARSER_OPTION_GPU_GRID_CHECK);
     assert!(RAV1G_PARSER_OPTION_GPU_GRID == crate::ParserOptions::GPU_GRID);
     assert!(RAV1G_PARSER_OPTION_GPU_GRID == crate::sys::AV1_PARSER_OPTION_GPU_GRID);
+    assert!(RAV1G_PARSER_OPTION_GPU_PRED_LISTS == crate::ParserOptions::GPU_PRED_LISTS);
+    assert!(RAV1G_PARSER_OPTION_GPU_PRED_LISTS == crate::sys::AV1_PARSER_OPTION_GPU_PRED_LISTS);
     assert!(RAV1G_FRAMES_IN_PARSE_MAX == crate::sys::AV1_FRAMES_IN_PARSE_MAX);
     assert!(RAV1G_PARSER_OPTIONS_DEFAULT == crate::ParserOptions::DEFAULT);
     assert!(RAV1G_INTER_FAST_ON == switches::INTER_FAST_ON);

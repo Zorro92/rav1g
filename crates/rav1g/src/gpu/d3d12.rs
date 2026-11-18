@@ -224,6 +224,39 @@ impl<'a> Device<'a> {
         .map(|()| options.DoublePrecisionFloatShaderOps.as_bool())
     }
 
+    /// An indirect command that sets four root constants and dispatches.
+    pub fn create_dispatch_signature(
+        &self,
+        layout: LayoutRef<'_>,
+        root: u32,
+        first_word: u32,
+    ) -> Result<DispatchSignature, Error> {
+        let arguments = [
+            D3D12_INDIRECT_ARGUMENT_DESC {
+                Type: D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT,
+                Anonymous: D3D12_INDIRECT_ARGUMENT_DESC_0 {
+                    Constant: D3D12_INDIRECT_ARGUMENT_DESC_0_1 {
+                        RootParameterIndex: root,
+                        DestOffsetIn32BitValues: first_word,
+                        Num32BitValuesToSet: 4,
+                    },
+                },
+            },
+            D3D12_INDIRECT_ARGUMENT_DESC { Type: D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH, ..Default::default() },
+        ];
+        let desc = D3D12_COMMAND_SIGNATURE_DESC {
+            ByteStride: DispatchSignature::BYTES as u32,
+            NumArgumentDescs: arguments.len() as u32,
+            pArgumentDescs: arguments.as_ptr(),
+            NodeMask: 0,
+        };
+        let mut signature = None;
+        // SAFETY: the description borrows the arguments during the call, and the layout is live.
+        unsafe { self.device.CreateCommandSignature(&desc, layout.signature, &mut signature) }
+            .map_err(|error| Error { step: "indirect dispatch signature", code: error.code().0 })?;
+        Ok(DispatchSignature(signature.expect("a created command signature")))
+    }
+
     /// A pipeline layout: a root signature whose parameters are the bindings of `desc` in their order,
     /// each a root descriptor, and the inline constants as root constants in the constant register behind
     /// the constant blocks.
@@ -546,6 +579,12 @@ pub struct LayoutRef<'a> {
     signature: &'a ID3D12RootSignature,
 }
 
+pub struct DispatchSignature(ID3D12CommandSignature);
+
+impl DispatchSignature {
+    pub const BYTES: usize = 7 * size_of::<u32>();
+}
+
 impl<'a> LayoutRef<'a> {
     /// # Safety
     /// `signature` is the COM pointer of a created layout (`ID3D12RootSignature`) and holds its reference
@@ -797,6 +836,29 @@ impl<'a> Commands<'a> {
     pub fn dispatch(&self, x: u32, y: u32, z: u32) {
         // SAFETY: a live list.
         unsafe { self.list.Dispatch(x, y, z) };
+    }
+
+    /// Executes up to `max_count` dispatches. The same buffer also holds the actual command count.
+    pub fn dispatch_indirect(
+        &self,
+        signature: &DispatchSignature,
+        max_count: u32,
+        buffer: BufferRef<'_>,
+        args_offset: u32,
+        count_offset: u32,
+    ) {
+        // SAFETY: the live list uses the layout of the signature. The buffer holds the arguments and
+        // a count, in indirect-argument state.
+        unsafe {
+            self.list.ExecuteIndirect(
+                &signature.0,
+                max_count,
+                buffer.resource,
+                u64::from(args_offset),
+                buffer.resource,
+                u64::from(count_offset),
+            );
+        }
     }
 
     /// The commands that follow see what the commands before wrote into `buffer`.

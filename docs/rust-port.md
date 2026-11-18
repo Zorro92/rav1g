@@ -138,14 +138,11 @@ have to write the same bytes at every stage, not only the same frames.
   have (a shader, the C of the parser) has landed on both branches. A change on `main` alone that leaves
   the output as it is needs no bump.
 - **The shader check** (`testing/shader_cache/shaders.py same`) compares the two build reports.
-  `--candidate-changed` requires different bytecode for the three shared shaders that read Rust's
-  [96-byte mode info records](memory.md#the-mode-info-record-field-by-field-candidate-4).
-  These are `gen_pred_blocks`, `gen_lf_blocks_vert` and `gen_lf_blocks_hor`. The stage dumps hold their output
-  lists equal. The check holds every other shared shader byte-identical and fails if a named
-  exception is identical or missing from either build. `--candidate-only` lists shaders the
-  reference lacks. This includes `gen_pred_blocks_fast_packed`, which Rust uses for `-interfast`.
-  The legacy `gen_pred_blocks_fast` is built for the comparison. The `-shaderpick` selector
-  `gen_pred_blocks_fast` selects bytecode for the packed variant.
+  `--candidate-changed` covers the shared readers of the packed mode info records, the legacy
+  fast generator that shares list access code, and the two intra V2 builds that take a root
+  constant for the intra list start. `--candidate-only` includes the GPU prediction list shaders
+  and `gen_pred_blocks_fast_packed`. The `gen_pred_blocks_fast` selector picks the packed build.
+  The stage dumps check the final prediction lists against the C++ decoder.
 
 ## Branches
 

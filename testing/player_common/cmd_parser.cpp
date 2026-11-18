@@ -153,7 +153,8 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        "These four are on by default. Naming any of them, none or default selects them explicitly. "
        "Use nolfmask,tilethread,gpucdef for the sink-written grid. time, with -gputime the calls of the sink are "
        "timed, and latelists, the block lists of a tile are counted at its end and not superblock by "
-       "superblock, and cleargrid, the mode info grid is cleared for every frame, add to the selection.",
+       "superblock, and cleargrid, the mode info grid is cleared for every frame, add to the selection. "
+       "gpublists builds the inter, warp and reconstruction lists on the GPU (off by default).",
        "", &params_.parseopt_},
       {"continue_on_error", atSingle, anOptional,
        "after a decode call that fails, go on with the next temporal unit in the same decoder instead of "
@@ -265,6 +266,8 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       params_.parser_options_ |= PLAYER_PARSEOPT_LATE_LISTS;
     } else if (word == "cleargrid") {
       params_.parser_options_ |= PLAYER_PARSEOPT_CLEAR_GRID;
+    } else if (word == "gpublists") {
+      params_.parser_options_ |= PLAYER_PARSEOPT_GPU_PRED_LISTS;
     } else if (word == "gpugrid") {
       params_.parser_options_ |= PLAYER_PARSEOPT_GPU_GRID;
       ways_named = true;
@@ -283,7 +286,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     } else if (word == "none") {
       ways_named = true;
     } else {
-      Err += "-parseopt takes nolfmask, tilethread, gpucdef, time, latelists, cleargrid, gpugrid, default or none, "
+      Err += "-parseopt takes nolfmask, tilethread, gpucdef, time, latelists, cleargrid, gpugrid, gpublists, default or none, "
              "separated by commas, not \"";
       Err += word;
       Err += "\"";

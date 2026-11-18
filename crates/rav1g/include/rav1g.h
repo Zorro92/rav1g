@@ -168,6 +168,12 @@ typedef struct av1_stage_dump av1_stage_dump;
 #define RAV1G_PARSER_OPTION_GPU_GRID 2048
 
 /*
+ Build the inter, warp and reconstruction prediction lists on the GPU. The parser keeps the
+ intra wavefront and its lists. Off by default.
+ */
+#define RAV1G_PARSER_OPTION_GPU_PRED_LISTS 4096
+
+/*
  The most frames a decoder parses at the same time (`Rav1gSettings::frames_in_parse`).
  */
 #define RAV1G_FRAMES_IN_PARSE_MAX 4

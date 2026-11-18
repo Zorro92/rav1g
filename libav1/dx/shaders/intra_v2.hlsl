@@ -50,7 +50,7 @@ cbuffer IntraV2SRT : register(b1) {
   uint cb_stamp;          // stamp of this frame's cell entries
   uint cb_map_stride;     // luma cell map stride, in cells
   uint cb_map_uv_offset;  // index of the first chroma cell
-  uint cb_reserved0;
+  uint cb_intra_base;    // start of the intra records, zero with the CPU block map
   uint cb_reserved1;
 };
 
@@ -346,7 +346,7 @@ void finish_row(uint3 block, int plane, int addr, int px, int py, int4 value, in
 
   uint3 block = uint3(0, 0, 0);
   if (mine) {
-    const uint record = block_map.Load(((entry.x & 0xffffff) + bucket) << 2) + (cell.x & 0xffffff) + (plane >> 1);
+    const uint record = cb_intra_base + block_map.Load(((entry.x & 0xffffff) + bucket) << 2) + (cell.x & 0xffffff) + (plane >> 1);
     block = pred_blocks.Load3(record << 4);
   }
 

@@ -62,6 +62,8 @@ pub struct ParseOptions {
     /// thread that records would read the grid for them), and [`Self::gpu_grid_check`] has nothing to
     /// hold the grid against. On by default.
     pub gpu_grid: bool,
+    /// Build inter, warp and reconstruction lists on the GPU. Off by default.
+    pub gpu_pred_lists: bool,
 }
 
 impl Default for ParseOptions {
@@ -85,6 +87,7 @@ impl ParseOptions {
     pub const GPU_CDEF_LISTS: u32 = 512;
     pub const GPU_GRID_CHECK: u32 = 1024;
     pub const GPU_GRID: u32 = 2048;
+    pub const GPU_PRED_LISTS: u32 = 4096;
     /// The bits of [`ParseOptions::default`].
     pub const DEFAULT: u32 = Self::NO_LF_MASKS | Self::TILE_KEEPS_THREAD | Self::GPU_CDEF_LISTS | Self::GPU_GRID;
     /// The switches that are on by default, which a list of words names to replace that default.
@@ -102,10 +105,11 @@ impl ParseOptions {
         gpu_cdef_lists: false,
         gpu_grid_check: false,
         gpu_grid: false,
+        gpu_pred_lists: false,
     };
 
     /// The words of the tools (`-parseopt <word>[,<word>...]`).
-    pub const WORDS: [(&'static str, u32); 10] = [
+    pub const WORDS: [(&'static str, u32); 11] = [
         ("nolfmask", Self::NO_LF_MASKS),
         ("tilethread", Self::TILE_KEEPS_THREAD),
         ("time", Self::TIME_CALLS),
@@ -116,6 +120,7 @@ impl ParseOptions {
         ("gpucdef", Self::GPU_CDEF_LISTS),
         ("gridcheck", Self::GPU_GRID_CHECK),
         ("gpugrid", Self::GPU_GRID),
+        ("gpublists", Self::GPU_PRED_LISTS),
     ];
 
     pub const fn from_bits(bits: u32) -> Self {
@@ -130,20 +135,22 @@ impl ParseOptions {
             gpu_cdef_lists: bits & Self::GPU_CDEF_LISTS != 0,
             gpu_grid_check: bits & Self::GPU_GRID_CHECK != 0,
             gpu_grid: bits & Self::GPU_GRID != 0,
+            gpu_pred_lists: bits & Self::GPU_PRED_LISTS != 0,
         }
     }
 
     pub fn bits(self) -> u32 {
-        u32::from(self.no_lf_masks) * Self::NO_LF_MASKS
-            | u32::from(self.tile_keeps_thread) * Self::TILE_KEEPS_THREAD
-            | u32::from(self.time_calls) * Self::TIME_CALLS
-            | u32::from(self.late_lists) * Self::LATE_LISTS
-            | u32::from(self.clear_grid) * Self::CLEAR_GRID
-            | u32::from(self.test_panic) * Self::TEST_PANIC
-            | u32::from(self.test_pool_wait) * Self::TEST_POOL_WAIT
-            | u32::from(self.gpu_cdef_lists) * Self::GPU_CDEF_LISTS
-            | u32::from(self.gpu_grid_check) * Self::GPU_GRID_CHECK
+        (u32::from(self.no_lf_masks) * Self::NO_LF_MASKS)
+            | (u32::from(self.tile_keeps_thread) * Self::TILE_KEEPS_THREAD)
+            | (u32::from(self.time_calls) * Self::TIME_CALLS)
+            | (u32::from(self.late_lists) * Self::LATE_LISTS)
+            | (u32::from(self.clear_grid) * Self::CLEAR_GRID)
+            | (u32::from(self.test_panic) * Self::TEST_PANIC)
+            | (u32::from(self.test_pool_wait) * Self::TEST_POOL_WAIT)
+            | (u32::from(self.gpu_cdef_lists) * Self::GPU_CDEF_LISTS)
+            | (u32::from(self.gpu_grid_check) * Self::GPU_GRID_CHECK)
             | (u32::from(self.gpu_grid) * Self::GPU_GRID)
+            | (u32::from(self.gpu_pred_lists) * Self::GPU_PRED_LISTS)
     }
 
     /// A list of words, separated by commas. Naming any default switch (`nolfmask`, `tilethread`,
@@ -187,6 +194,7 @@ impl ParseOptions {
             late_lists: self.late_lists,
             test_panic: self.test_panic,
             gpu_grid: self.gpu_grid,
+            gpu_pred_lists: self.gpu_pred_lists,
         }
     }
 
@@ -204,7 +212,13 @@ mod tests {
     #[test]
     fn words_and_bits() {
         let default = ParseOptions::default();
-        assert!(default.no_lf_masks && default.tile_keeps_thread && default.gpu_cdef_lists && default.gpu_grid && !default.time_calls);
+        assert!(
+            default.no_lf_masks
+                && default.tile_keeps_thread
+                && default.gpu_cdef_lists
+                && default.gpu_grid
+                && !default.time_calls
+        );
         assert_eq!(default.bits(), 2566);
         assert_eq!(default.words(), "nolfmask,tilethread,gpucdef,gpugrid");
         assert_eq!(ParseOptions::from_words("default"), Some(default));
@@ -248,7 +262,11 @@ mod tests {
         let grid_check = ParseOptions::from_words("nolfmask,tilethread,gpucdef,gridcheck").unwrap();
         assert_eq!(grid_check, ParseOptions { gpu_grid: false, gpu_grid_check: true, ..default });
         assert!(default.sink().gpu_grid && !grid_check.sink().gpu_grid);
+        let gpu_lists = ParseOptions::from_words("gpublists").unwrap();
+        assert_eq!(gpu_lists, ParseOptions { gpu_pred_lists: true, ..default });
+        assert_eq!(gpu_lists.bits(), 6662);
         for options in [
+            gpu_lists,
             default,
             ParseOptions::NONE,
             one,

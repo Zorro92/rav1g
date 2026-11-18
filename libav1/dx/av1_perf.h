@@ -42,6 +42,8 @@ enum {
   AV1_PERF_GPU_CDEF_LISTS,     /* the two lists CDEF reads, written by cdef_lists.hlsl in front of CDEF
                                   (AV1_PARSER_OPTION_GPU_CDEF_LISTS); behind the others here, in front of
                                   AV1_PERF_GPU_CDEF in the command list */
+  AV1_PERF_GPU_PRED_COUNT,    /* group counts and record ranks for -parseopt gpublists */
+  AV1_PERF_GPU_PRED_SCAN,     /* scan the group counts and write indirect arguments */
   AV1_PERF_GPU_STAGE_COUNT,
   AV1_PERF_GPU_BEGIN = 255     /* first timestamp of a command list */
 };

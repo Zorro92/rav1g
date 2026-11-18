@@ -190,11 +190,12 @@ pub struct av1_tile_data {
     pub blocks_offset: c_int,
     pub idct_blocks_ptr: c_int,
     pub idct_blocks_sizes: [c_int; 21],
-    pub block_count: c_int,
-    pub block_count_wrp: c_int,
+    pub pred_block_bound: c_int,
+    pub pred_warp_bound: c_int,
     pub intra_iter_max: c_int,
     pub intra_iter_max_uv: c_int,
     pub have_inter: c_int,
+    pub gpu_pred_lists: c_int,
     pub gen_indexes: *mut c_uint,
     pub gen_index_ptr: c_int,
     pub gen_index_base: c_int,
@@ -209,6 +210,7 @@ pub struct av1_tile_data {
     pub gen_iter_clear_size: c_int,
     pub gen_block_map_offset: c_int,
     pub gen_block_warp_offset: c_int,
+    pub have_recon: c_int,
     pub gen_block_map_fast: *mut c_int,
     pub gen_block_fast_offset: c_int,
     pub mi_offset: c_int,
@@ -232,11 +234,12 @@ const _: () = {
     assert!(offset_of!(av1_tile_data, blocks_offset) == 36);
     assert!(offset_of!(av1_tile_data, idct_blocks_ptr) == 40);
     assert!(offset_of!(av1_tile_data, idct_blocks_sizes) == 44);
-    assert!(offset_of!(av1_tile_data, block_count) == 128);
-    assert!(offset_of!(av1_tile_data, block_count_wrp) == 132);
+    assert!(offset_of!(av1_tile_data, pred_block_bound) == 128);
+    assert!(offset_of!(av1_tile_data, pred_warp_bound) == 132);
     assert!(offset_of!(av1_tile_data, intra_iter_max) == 136);
     assert!(offset_of!(av1_tile_data, intra_iter_max_uv) == 140);
     assert!(offset_of!(av1_tile_data, have_inter) == 144);
+    assert!(offset_of!(av1_tile_data, gpu_pred_lists) == 148);
     assert!(offset_of!(av1_tile_data, gen_indexes) == 152);
     assert!(offset_of!(av1_tile_data, gen_index_ptr) == 160);
     assert!(offset_of!(av1_tile_data, gen_index_base) == 164);
@@ -251,6 +254,7 @@ const _: () = {
     assert!(offset_of!(av1_tile_data, gen_iter_clear_size) == 208);
     assert!(offset_of!(av1_tile_data, gen_block_map_offset) == 212);
     assert!(offset_of!(av1_tile_data, gen_block_warp_offset) == 216);
+    assert!(offset_of!(av1_tile_data, have_recon) == 220);
     assert!(offset_of!(av1_tile_data, gen_block_map_fast) == 224);
     assert!(offset_of!(av1_tile_data, gen_block_fast_offset) == 232);
     assert!(offset_of!(av1_tile_data, mi_offset) == 236);

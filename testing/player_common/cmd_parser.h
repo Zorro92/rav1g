@@ -60,6 +60,7 @@
 // gpugrid: the mode info grid of a frame is built by a pass of the GPU from the frame's records and not by the
 // parse threads (off by default; such a decoder has gpucdef on whatever the list says).
 #define PLAYER_PARSEOPT_GPU_GRID 2048
+#define PLAYER_PARSEOPT_GPU_PRED_LISTS 4096
 #define PLAYER_PARSEOPT_DEFAULT \
   (PLAYER_PARSEOPT_NO_LF_MASKS | PLAYER_PARSEOPT_TILE_KEEPS_THREAD | PLAYER_PARSEOPT_GPU_CDEF_LISTS | PLAYER_PARSEOPT_GPU_GRID)
 // The size the decoder is created for with -nofitsize, and for a stream that is larger than this.
@@ -161,15 +162,8 @@ class CParameters {
     // (decoder.cpp, "The app's memory where the system has no limit for it"). -1: no model.
     int budget_mib_;
     int retain_mib_;
-    // -parseopt <list>: the switches of rav1d's parse, separated by commas. nolfmask, tilethread and
-    // gpucdef (the two lists CDEF reads written by a pass of the GPU, not by the thread that records the
-    // frame) are on by default; a list that names one of them, none or default says which of the three
-    // are on (none: none of them; nolfmask,tilethread: the lists of CDEF by the thread that records).
-    // time (the timing of the sink's calls), latelists (the block lists of a tile at its end, as before
-    // they were counted superblock by superblock) and cleargrid (the mode info grid cleared for every
-    // frame, as before it was kept between frames of one size) are off by default; each is on when the
-    // list has it and leaves the three as they are. parser_options_ is the sum of the PLAYER_PARSEOPT_*
-    // values after Parse().
+    // Names of the parser switches. Naming a default switch, none or default selects the defaults
+    // explicitly. The other switches, including gpublists, add to that selection.
     std::string parseopt_;
     unsigned parser_options_;
     // -continue_on_error: a decode call that fails does not end the task; the next temporal units go to

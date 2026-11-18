@@ -166,6 +166,10 @@ fn options() -> Options {
     for file in manifests {
         options.streams.extend(manifest(&file, &root));
     }
+    if options.parse.gpu_pred_lists && !options.time {
+        eprintln!("rav1g-parse-check: gpublists requires -time here. Use rav1g-dec to check the GPU lists.");
+        usage();
+    }
     if options.streams.is_empty() {
         usage();
     }

@@ -285,7 +285,10 @@ pub fn usage() {
     say!("                        else (time alone: the default, timed). gridcheck: a pass of the GPU builds the mode");
     say!("                        info grid from the records (mi_grid_build) into a second grid, held against the");
     say!("                        parse's when each frame is done (a GRIDCHECK line at the release; same output).");
-    say!("                        Use -parseopt nolfmask,tilethread,gpucdef,gridcheck for the sink-written grid check.");
+    say!(
+        "                        Use -parseopt nolfmask,tilethread,gpucdef,gridcheck for the sink-written grid check."
+    );
+    say!("                        gpublists: the GPU builds inter, warp and reconstruction lists (off by default).");
     say!("  -interfast            inter prediction by the fraction of the motion vector: a copy, one filter pass, or");
     say!("                        both (inter_fast, inter_compound_fast; same output)");
     say!("  -interfastlists       the block lists of -interfast with the original shaders on them (same output)");
@@ -463,7 +466,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
                 let list = value()?;
                 task.parser_options = rav1g::ParserOptions::from_words(&list).ok_or_else(|| {
                     format!(
-                        "-parseopt {list}: nolfmask, tilethread, gpucdef, time, latelists, cleargrid, gridcheck, gpugrid, \
+                        "-parseopt {list}: nolfmask, tilethread, gpucdef, time, latelists, cleargrid, gridcheck, gpugrid, gpublists, \
                          default or none"
                     )
                 })?;

@@ -33,6 +33,7 @@ use std::ffi::c_int;
 use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12Device};
 
 use super::create::to_mib;
+use super::gpu_pred_lists::FrameLayout;
 use super::log::log;
 use super::prediction::pred_block_counts;
 use super::types::{Av1Core, GpuBufferObject, av1_frame_thread_data};
@@ -40,13 +41,15 @@ use crate::gpu::d3d12::com_ref;
 use crate::gpu::{Device, Event, Queue};
 
 /// The buffers that grow, in the order of `Av1Core::stage_worst`; the last one is a buffer of each slot.
-pub(crate) const STAGE_BUFFERS: usize = 4;
+pub(crate) const STAGE_BUFFERS: usize = 6;
 pub(crate) const IDCT_BLOCKS: usize = 0;
 pub(crate) const PRED_BLOCKS: usize = 1;
 pub(crate) const PRED_BLOCKS_WARP: usize = 2;
 pub(crate) const INDEX_LIST: usize = 3;
+pub(crate) const GPU_PRED_SCRATCH: usize = 4;
+pub(crate) const GPU_PRED_TEMPLATES: usize = 5;
 /// The bytes of a record of each.
-pub(crate) const RECORD: [usize; STAGE_BUFFERS] = [16, 16, 48, 4];
+pub(crate) const RECORD: [usize; STAGE_BUFFERS] = [16, 16, 48, 4, 1, 1];
 
 /// The part of the worst case a decoder is created with.
 const INITIAL_DIVISOR: usize = 4;
@@ -63,6 +66,10 @@ pub(crate) const MEMORY_GUARD_MARGIN_BUFFER: u64 = 16 << 20;
 /// The bytes a decoder is created with for a buffer whose worst case is `worst` bytes.
 pub(crate) fn initial_bytes(worst: usize) -> usize {
     worst.div_ceil(INITIAL_DIVISOR)
+}
+
+pub(crate) fn gpu_list_initial_bytes(worst: usize) -> usize {
+    worst.min(GROWTH_STEP)
 }
 
 /// The bytes a buffer of `current` bytes has to have for a frame of `records` records of `record` bytes,
@@ -90,7 +97,13 @@ unsafe fn frame_records(td: &av1_frame_thread_data) -> [usize; STAGE_BUFFERS] {
         let transform: c_int = tiles.iter().map(|tile| tile.idct_blocks_sizes.iter().sum::<c_int>()).sum();
         let (blocks, warp) = pred_block_counts(td, tiles);
         let indexes: c_int = tiles.iter().map(|tile| tile.gen_index_ptr.max(0)).sum();
-        [transform, blocks, warp, indexes].map(|count| count.max(0) as usize)
+        let mut records = [0; STAGE_BUFFERS];
+        records[..4].copy_from_slice(&[transform, blocks, warp, indexes].map(|count| count.max(0) as usize));
+        if let Some(layout) = FrameLayout::for_frame(td, tiles) {
+            records[GPU_PRED_SCRATCH] = layout.scratch_bytes();
+            records[GPU_PRED_TEMPLATES] = layout.template_bytes();
+        }
+        records
     }
 }
 
@@ -130,11 +143,21 @@ pub(crate) unsafe fn for_frame(dec: *mut Av1Core, td: *const av1_frame_thread_da
     // SAFETY: the caller's contract, for all of this function.
     unsafe {
         let records = frame_records(&*td);
-        let objects: [*mut GpuBufferObject; STAGE_BUFFERS] =
-            [(*dec).idct_blocks, (*dec).prediction_blocks, (*dec).prediction_blocks_warp, (*td).gen_mi_block_indexes];
+        let objects: [*mut GpuBufferObject; STAGE_BUFFERS] = [
+            (*dec).idct_blocks,
+            (*dec).prediction_blocks,
+            (*dec).prediction_blocks_warp,
+            (*td).gen_mi_block_indexes,
+            (*dec).gpu_pred_scratch,
+            (*td).gpu_pred_templates,
+        ];
         let mut waited = false;
         for index in 0..STAGE_BUFFERS {
             let object = objects[index];
+            if object.is_null() {
+                debug_assert_eq!(records[index], 0);
+                continue;
+            }
             let (current, worst) = ((*object).size, (*dec).stage_worst[index]);
             let Some(size) = grown_bytes(current, records[index], RECORD[index], worst) else {
                 continue;
@@ -165,10 +188,13 @@ pub(crate) unsafe fn for_frame(dec: *mut Av1Core, td: *const av1_frame_thread_da
                     return false;
                 }
             }
-            // The frames in flight read the buffer that is released; the index list is the slot's own.
-            if !waited && index != INDEX_LIST {
+            // Other frames in flight use shared buffers. The index list and templates belong to this slot.
+            if !waited && index != INDEX_LIST && index != GPU_PRED_TEMPLATES {
                 if !wait_for_queue(dec) {
-                    log(true, &format!("MEMORY FAILED buffer {name} grown for frame {frame}: no fence to wait for the queue"));
+                    log(
+                        true,
+                        &format!("MEMORY FAILED buffer {name} grown for frame {frame}: no fence to wait for the queue"),
+                    );
                     return false;
                 }
                 waited = true;
@@ -201,7 +227,9 @@ pub(crate) unsafe fn for_frame(dec: *mut Av1Core, td: *const av1_frame_thread_da
 mod tests {
     use super::*;
 
-    const _: () = assert!(STAGE_BUFFERS == INDEX_LIST + 1 && PRED_BLOCKS_WARP == 2 && PRED_BLOCKS == 1 && IDCT_BLOCKS == 0);
+    const _: () = assert!(
+        STAGE_BUFFERS == GPU_PRED_TEMPLATES + 1 && PRED_BLOCKS_WARP == 2 && PRED_BLOCKS == 1 && IDCT_BLOCKS == 0
+    );
 
     #[test]
     fn a_buffer_grows_only_for_a_frame_that_needs_more() {

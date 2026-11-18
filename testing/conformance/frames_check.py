@@ -22,8 +22,7 @@ What is checked:
     headroom the guard wants behind a decoder (128 MiB), the default tries four slots, then three
     slots, then one frame in parse on two slots as the budget shrinks. The log says so in "MEMORY
     headroom" lines and the stream decodes. A task that asks for four frames can also fall back. When
-    the smallest decoder leaves the headroom gets the smallest decoder: the headroom never makes a
-    creation fail. -headroom 48 is the guard without the headroom.
+    even the smallest decoder would leave too little headroom, the guard still tries to create it. -headroom 48 is the guard without the headroom.
   - **A parse that waits for memory** (-parseopt poolwait: behind its first piece of a pool a frame finds
     the pool empty while an older frame holds a piece of it). The large and the small stream, with one
     frame in parse and with two and four: the frames are those of the reference, and the "MEMORY pools"

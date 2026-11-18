@@ -135,6 +135,9 @@ pub struct compute_shader_lib {
     pub shader_fill_buffer: ComputeShader,
     pub shader_gen_pred_blocks: ComputeShader,
     pub shader_gen_pred_blocks_fast: ComputeShader,
+    pub shader_gen_pred_blocks_gpu: ComputeShader,
+    pub shader_pred_list_count: ComputeShader,
+    pub shader_pred_list_scan: ComputeShader,
     pub shader_gen_lf_vert: ComputeShader,
     pub shader_gen_lf_hor: ComputeShader,
     pub shader_upscale: ComputeShader,
@@ -161,6 +164,9 @@ pub struct compute_shader_lib {
     pub sig_film_grain_tex: Option<ID3D12RootSignature>,
     pub sig_cdef_lists: Option<ID3D12RootSignature>,
     pub sig_mi_grid_build: Option<ID3D12RootSignature>,
+    pub sig_pred_blocks_gpu: Option<ID3D12RootSignature>,
+    pub sig_pred_list_count: Option<ID3D12RootSignature>,
+    pub sig_pred_list_scan: Option<ID3D12RootSignature>,
     pub compliled_: c_int,
     pub threads: c_int,
     pub create_shader_errors: c_int,
@@ -232,6 +238,7 @@ pub struct av1_stage_dump_entry {
     pub bytes_per_sample: c_int,
     pub bit_depth: c_int,
     pub size: usize,
+    pub gpu_record_size: usize,
     pub planes: [av1_stage_dump_plane; 3],
 }
 
@@ -255,6 +262,7 @@ pub struct av1_frame_thread_data {
     pub grid_check_frame: [c_int; 4],
     pub filmgrain_rand_offset: *mut GpuBufferObject,
     pub gen_mi_block_indexes: *mut GpuBufferObject,
+    pub gpu_pred_templates: *mut GpuBufferObject,
     pub gen_intra_inter_grid: *mut GpuBufferObject,
     pub gen_block_map: *mut GpuBufferObject,
     pub palette_buffer: *mut GpuBufferObject,
@@ -417,7 +425,8 @@ impl av1_frame_thread_data {
     pub(crate) unsafe fn index_list_room(&self, tile: &mut crate::sys::av1_tile_data, room: usize) {
         // SAFETY: the caller's contract: the element of the tile is its thread's.
         unsafe {
-            let pieces = &mut *self.tile_pieces.offset(std::ptr::from_mut(tile).cast_const().offset_from(self.tile_data));
+            let pieces =
+                &mut *self.tile_pieces.offset(std::ptr::from_mut(tile).cast_const().offset_from(self.tile_data));
             let written = tile.gen_index_ptr.max(0) as usize;
             if written + room > pieces.indexes.capacity() {
                 pieces.indexes.set_len(written);
@@ -467,6 +476,8 @@ pub struct Av1Core {
     pub filmgrain_random_chroma: *mut GpuBufferObject,
     pub prediction_blocks: *mut GpuBufferObject,
     pub prediction_blocks_warp: *mut GpuBufferObject,
+    pub gpu_pred_scratch: *mut GpuBufferObject,
+    pub(super) gpu_pred_signatures: Option<super::gpu_pred_lists::Signatures>,
     pub loopfilter_blocks: *mut GpuBufferObject,
     pub pred_map_size: c_int,
     pub inter_fast_tiles: c_int,

@@ -3173,6 +3173,32 @@ are those of the development machine laid over the console's totals, so every sa
   index from a kept record, and the sink's grid stores left out. One package, two task lines, and the
   lines to read are `cpu parse: sink calls`, the new GPU stage and the frames a second of `d2_300`.
 
+### Step A behind `gpublists`
+
+`-parseopt gpublists` keeps the intra lists and their wavefront on the parse threads. The sink
+counts an upper bound for the other prediction records as it fills the mode info record. It leaves
+out the inter and reconstruction index entries and, with the GPU grid, the tile-edge pointers
+used for sub-8x8 chroma and overlapped prediction. The separate wavefront edges still track intra
+dependencies.
+
+The first GPU pass counts up to 64 mode info records per group. Eight work items walk disjoint runs
+of eight records in parse order and keep a histogram each in group memory. The histogram sums
+give each record its number within the group, without atomics. The scan pass walks groups in tile
+order and prepares the indirect dispatch arguments. A batch contains the nonempty lists for one
+shader, in order. The inter shaders receive their usual root constants. The final lists retain
+their order, including the fast inter lists behind the intra records. Intra dispatches also use
+indirect arguments to apply the start of the intra records.
+
+The two output buffers grow against the sink's bounds. The group rows, rank entries and dispatch
+arguments share one scratch buffer on the queue. The slot keeps its own templates and starts its
+CPU index buffer at 64 KiB, since that buffer holds only intra entries. Stage dumps read the
+GPU-written lengths and keep the used records. The mode info comparison leaves differences in
+`index_base` between the two prediction paths to the prediction list dumps.
+
+`-gputime -parseopt time,gpublists` shows `pred_count` and `pred_scan`. Compare them and the
+prediction stages with `-gputime -parseopt time`. The switch is off by default. WARP times are
+from a CPU rasterizer. Promotion to the default needs a console measurement.
+
 ### The split of the sink and the block lists on the console (2026-11-16)
 
 Package 0.2.198.0 (bbce849), slow state, Bale stopped, the defaults at 4K (2 threads, 2 frames in

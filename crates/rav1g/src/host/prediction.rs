@@ -20,7 +20,9 @@ use super::core::{
     stage_dump_data, stage_dump_fb, stage_dump_mode_info,
 };
 use super::frame::joined_runs;
+use super::gpu_pred_lists::{self, DispatchKind, FrameLayout, Recording};
 use super::intra_v2;
+use super::stage_dump::stage_dump_gpu_records;
 use super::tables::{
     BILINEAR_FILTERS, INTER_BLOCK_HEIGHT_LUT, INTER_BLOCK_WIDTH_LUT, INTRA_MODE_SHADER_PARAMS, OBMC_MASK,
     QUANT_DIST_LOOKUP_TABLE, QUANT_DIST_WEIGHT, SM_WEIGHT_ARRAYS, SUB_PEL_FILTERS_4, SUB_PEL_FILTERS_4SMOOTH,
@@ -41,8 +43,8 @@ use crate::sys::{
     AV1_PERF_INTER_LISTS, AV1_PERF_INTER_OBMC_ABOVE, AV1_PERF_INTER_OBMC_LEFT, AV1_PERF_INTER_RECON,
     AV1_PERF_INTER_SECTION_COUNT, AV1_PERF_INTER_SINGLE, AV1_PERF_INTER_SINGLE_COPY, AV1_PERF_INTER_SYNC0,
     AV1_PERF_INTER_SYNC1, AV1_PERF_INTER_WARP, AV1Decoder, EXTREF_FRAME, HwFrameBuffer, INVALID_IDX, LAST_FRAME,
-    MAX_FRAME_DISTANCE, OrderHintInfo, RefCntBuffer, SCALE_SUBPEL_BITS, TileInfo, WarpedMotionParams,
-    av1_perf_inter_blocks, av1_perf_inter_detail, av1_perf_inter_work, av1_tile_data,
+    MAX_FRAME_DISTANCE, OrderHintInfo, RefCntBuffer, SCALE_SUBPEL_BITS, WarpedMotionParams, av1_perf_inter_blocks,
+    av1_perf_inter_detail, av1_perf_inter_work, av1_tile_data,
 };
 
 const SIZES: usize = InterSizesAllCommon as usize;
@@ -149,13 +151,20 @@ pub(crate) unsafe fn pred_block_counts(td: &av1_frame_thread_data, tiles: &[av1_
         let iters = |tile: &av1_tile_data| (-1).max(tile.gen_intra_iter_y).max(tile.gen_intra_iter_uv);
         let types = |iters: c_int| InterCountsAll + ReconstructBlockSizes + (iters + 1) * IntraTypeCount;
         let pred_block_types = types(tiles.iter().map(iters).max().unwrap_or(-1));
+        let gpu_lists = tiles.first().is_some_and(|tile| tile.gpu_pred_lists != 0);
+        let first = if gpu_lists { InterCountsAll + ReconstructBlockSizes } else { 0 };
         let mut blocks = 0;
         let mut warp = 0;
         for tile in tiles {
             // What the loops of prediction_gen_blocks take: the lists below the tile's gen_pred_map_max.
             let lists = (types(iters(tile)) + 1).min(pred_block_types + 1);
-            for it in 0..lists {
+            for it in first..lists {
                 blocks += *tile.gen_block_map.offset(it as isize);
+            }
+            if gpu_lists {
+                blocks += tile.pred_block_bound;
+                warp += tile.pred_warp_bound;
+                continue;
             }
             for it in 0..=SIZES {
                 warp += *tile.gen_block_map_wrp.add(it);
@@ -175,7 +184,7 @@ pub(crate) unsafe fn pred_block_counts(td: &av1_frame_thread_data, tiles: &[av1_
 ///
 /// # Safety
 /// `dec` is the decoder while it records a frame whose tiles are decoded; `pbi` is its entropy decoder.
-pub(crate) unsafe fn prediction_gen_blocks(pbi: *mut AV1Decoder, dec: *mut Av1Core) {
+pub(super) unsafe fn prediction_gen_blocks<'a>(pbi: *mut AV1Decoder, dec: *mut Av1Core) -> Option<Recording<'a>> {
     // SAFETY: the caller's contract: the frame data, its tiles and their block maps, the frame header and
     // the buffers and pipelines of the decoder are live, and only this thread records.
     unsafe {
@@ -264,7 +273,10 @@ pub(crate) unsafe fn prediction_gen_blocks(pbi: *mut AV1Decoder, dec: *mut Av1Co
             let mut base = 0usize;
             for tile in tiles.iter_mut() {
                 let count = tile.gen_index_ptr.max(0) as usize;
-                assert!((base + count) * size_of::<u32>() <= list.size, "the block index list of the slot is too small");
+                assert!(
+                    (base + count) * size_of::<u32>() <= list.size,
+                    "the block index list of the slot is too small"
+                );
                 host.add(base).copy_from_nonoverlapping(tile.gen_indexes.cast_const(), count);
                 tile.gen_index_base = base as c_int;
                 base += count;
@@ -272,9 +284,13 @@ pub(crate) unsafe fn prediction_gen_blocks(pbi: *mut AV1Decoder, dec: *mut Av1Co
         }
 
         td.intra_iters = intra_iters;
-        let pred_block_types = InterCountsAll + ReconstructBlockSizes + (intra_iters + 1) * IntraTypeCount;
+        let gpu_layout = FrameLayout::for_frame(td, tiles);
+        let inter_fast = gpu_pred_lists::inter_fast(td, tiles);
+        let normal_lists = InterCountsAll + ReconstructBlockSizes;
+        let pred_block_types = normal_lists + (intra_iters + 1) * IntraTypeCount;
+        let first = if gpu_layout.is_some() { normal_lists } else { 0 };
         let mut offset = 0;
-        for it in 0..=pred_block_types {
+        for it in first..=pred_block_types {
             for tile in tiles.iter() {
                 if it < tile.gen_pred_map_max {
                     let list = tile.gen_block_map.offset(it as isize);
@@ -284,106 +300,158 @@ pub(crate) unsafe fn prediction_gen_blocks(pbi: *mut AV1Decoder, dec: *mut Av1Co
                 }
             }
         }
-        let pred_block_count = offset; // records of prediction_blocks the frame's lists take
-        offset = 0;
-        for it in 0..=SIZES {
-            for tile in tiles.iter() {
-                let list = tile.gen_block_map_wrp.add(it);
-                let cnt = *list;
-                *list = offset;
-                offset += cnt;
-            }
-        }
-        let pred_warp_count = offset; // records of prediction_blocks_warp
-        // -interfast: the lists by motion vector class, behind the lists by type in prediction_blocks. The
-        // blocks in them are the ones the lists CasualInter and CompoundAvrg have without the flag, so the
-        // buffer holds as many records as it always did.
-        let inter_fast = td.inter_fast != 0 && !tiles[0].gen_block_map_fast.is_null();
-        let mut pred_block_total = pred_block_count;
-        if inter_fast {
-            for it in 0..=InterFastLists as usize {
+        let mut pred_block_total = offset;
+        let mut pred_warp_count = 0;
+        if gpu_layout.is_some() {
+            // The intra offsets are relative to their own records. The scan adds their
+            // count to the start of the fast lists and returns the actual output lengths.
+            pred_block_total += tiles.iter().map(|tile| tile.pred_block_bound).sum::<c_int>();
+            pred_warp_count = tiles.iter().map(|tile| tile.pred_warp_bound).sum();
+        } else {
+            for it in 0..=SIZES {
                 for tile in tiles.iter() {
-                    if tile.gen_block_map_fast.is_null() {
-                        continue;
-                    }
-                    let list = tile.gen_block_map_fast.add(it);
+                    let list = tile.gen_block_map_wrp.add(it);
                     let cnt = *list;
-                    *list = pred_block_total;
-                    pred_block_total += cnt;
+                    *list = pred_warp_count;
+                    pred_warp_count += cnt;
+                }
+            }
+            // -interfast: these lists follow the intra records in the ordinary prediction buffer.
+            if inter_fast {
+                for it in 0..=InterFastLists as usize {
+                    for tile in tiles.iter() {
+                        if tile.gen_block_map_fast.is_null() {
+                            continue;
+                        }
+                        let list = tile.gen_block_map_fast.add(it);
+                        let cnt = *list;
+                        *list = pred_block_total;
+                        pred_block_total += cnt;
+                    }
                 }
             }
         }
         super::mem_stats::pred_blocks(dec, pred_block_total, pred_warp_count);
-        // What the buffers were made for before the recording began (stage_buffers::for_frame).
         debug_assert!(pred_block_total as usize * 16 <= (*(*dec).prediction_blocks).size);
         debug_assert!(pred_warp_count as usize * 48 <= (*(*dec).prediction_blocks_warp).size);
-        // -dumpstages: the mode info, where the first stage that reads it starts.
-        stage_dump_mode_info(dec, cm);
+
         let commands = commands(dec);
         let lib = (*dec).shader_lib;
+        let mode_info = buffer((*dec).mode_info_pool).location();
+        let mi_grid = buffer(td.mode_info_grid).location();
         let blocks = buffer((*dec).prediction_blocks);
         let warp_blocks = buffer((*dec).prediction_blocks_warp);
-        // -interfast: the same shader with the lists by class and one more inline constant, where they are.
-        let shader = pipeline(if inter_fast {
-            &raw const (*lib).shader_gen_pred_blocks_fast
+
+        // A tile's contiguous runs, in parse order. A run's first group continues the numbering
+        // from the preceding run, even if the pieces of the pool do not follow each other.
+        let dispatch_runs = |srt_slot: u32, srt_words: usize| {
+            let mut group = 0;
+            for (tile, run) in tiles
+                .iter()
+                .zip(&td.pieces)
+                .flat_map(|(tile, pieces)| joined_runs(&pieces.mode_info).into_iter().map(move |run| (tile, run)))
+            {
+                let mut inline = [
+                    run.count,
+                    run.first,
+                    tile.gen_index_base,
+                    tile.mi_col_start,
+                    tile.mi_row_start,
+                    tile.gen_block_map_offset,
+                    tile.gen_block_warp_offset,
+                    tile.gen_block_fast_offset,
+                    0,
+                    0,
+                    0,
+                    0,
+                ];
+                if let Some(gpu) = gpu_layout {
+                    inline[7] = c_int::from(inter_fast);
+                    inline[8..].copy_from_slice(&[
+                        group as c_int,
+                        gpu.lists as c_int,
+                        gpu.rank_offset() as c_int,
+                        gpu.starts_offset() as c_int,
+                    ]);
+                }
+                commands.set_inline_constants(srt_slot, &inline[..srt_words], 0);
+                let groups = (run.count as u32).div_ceil(gpu_pred_lists::GROUP_SIZE);
+                commands.dispatch(groups, 1, 1);
+                group += groups;
+            }
+            if let Some(gpu) = gpu_layout {
+                debug_assert_eq!(group, gpu.groups);
+            }
+        };
+        let gpu_lists = gpu_layout.map(|gpu| Recording::new(dec, gpu));
+        if let Some(gpu) = &gpu_lists {
+            Recording::mark_grid(dec);
+            let shader = pipeline(&raw const (*lib).shader_pred_list_count);
+            commands.set_layout(shader.layout());
+            commands.set_pipeline(shader);
+            commands.bind_read(0, mode_info);
+            commands.bind_read(3, mi_grid);
+            commands.bind_write(4, gpu.scratch().location());
+            commands.bind_constants(5, constants.location);
+            dispatch_runs(6, 12);
+            gpu.scan(dec, offset as u32);
+        }
+        // -dumpstages: the mode info, where the first stage that reads it starts.
+        stage_dump_mode_info(dec, cm);
+        let (shader, srt_words) = if gpu_lists.is_some() {
+            (pipeline(&raw const (*lib).shader_gen_pred_blocks_gpu), 12)
+        } else if inter_fast {
+            (pipeline(&raw const (*lib).shader_gen_pred_blocks_fast), 8)
         } else {
-            &raw const (*lib).shader_gen_pred_blocks
-        });
-        let srt_words = if inter_fast { 8 } else { 7 };
+            (pipeline(&raw const (*lib).shader_gen_pred_blocks), 7)
+        };
         commands.set_layout(shader.layout());
         commands.set_pipeline(shader);
-        commands.bind_read(0, buffer((*dec).mode_info_pool).location());
+        commands.bind_read(0, mode_info);
         commands.bind_read(1, buffer(td.gen_mi_block_indexes).location());
         commands.bind_read(2, buffer(td.gen_block_map).location());
-        commands.bind_read(3, buffer(td.mode_info_grid).location());
+        commands.bind_read(3, mi_grid);
         commands.bind_read(4, buffer(td.gen_intra_inter_grid).location());
-        commands.bind_write(5, blocks.location());
-        commands.bind_write(6, warp_blocks.location());
-        commands.bind_constants(7, constants.location);
-        // The inline constants of a tile: wi_count, mi_offset, mi_idx_base, col_start, row_start,
-        // index_offset, index_offset_warp, and for the lists by class index_offset_fast.
-        let dispatch_tile = |mi_count: c_int, mi_offset: c_int, tile: &av1_tile_data| {
-            let inline = [
-                mi_count,
-                mi_offset,
-                tile.gen_index_base,
-                tile.mi_col_start,
-                tile.mi_row_start,
-                tile.gen_block_map_offset,
-                tile.gen_block_warp_offset,
-                tile.gen_block_fast_offset,
-            ];
-            commands.set_inline_constants(8, &inline[..srt_words], 0);
-            commands.dispatch(((mi_count + 63) >> 6) as u32, 1, 1);
+        let root = if let Some(gpu) = &gpu_lists {
+            commands.bind_read(5, gpu.scratch().location());
+            6
+        } else {
+            5
         };
-        // The mode info of a tile is in pieces of the pool: a dispatch for each run of pieces that
-        // follow each other.
-        for (tile, pieces) in tiles.iter().zip(&td.pieces) {
-            for run in joined_runs(&pieces.mode_info) {
-                dispatch_tile(run.count, run.first, tile);
-            }
-        }
+        commands.bind_write(root, blocks.location());
+        commands.bind_write(root + 1, warp_blocks.location());
+        commands.bind_constants(root + 2, constants.location);
+        dispatch_runs(root + 3, srt_words);
         commands.write_barrier2(blocks, warp_blocks);
         perf_gpu_mark(dec, AV1_PERF_GPU_GEN_BLOCKS);
         // -dumpstages: the block records gen_pred_blocks has just written, as the prediction stages read
         // them.
         if stage_dump_active(dec) {
-            const PRED_BLOCK_SIZE: usize = 16;
-            const PRED_WARP_BLOCK_SIZE: usize = 48;
-            let object = &*(*dec).prediction_blocks;
-            let size = (pred_block_total as usize * PRED_BLOCK_SIZE).min(object.size);
-            let region = av1_stage_dump_region { src: object.dev, offset: 0, size, uav: 1 };
-            let layout = format!("buffer=pred_blocks record={PRED_BLOCK_SIZE} count={}\n", size / PRED_BLOCK_SIZE);
-            stage_dump_data(dec, c"pred_blocks", &layout, 160, &[region]);
-            let object = &*(*dec).prediction_blocks_warp;
-            let size = (pred_warp_count as usize * PRED_WARP_BLOCK_SIZE).min(object.size);
-            let region = av1_stage_dump_region { src: object.dev, offset: 0, size, uav: 1 };
-            let layout = format!(
-                "buffer=pred_blocks_warp record={PRED_WARP_BLOCK_SIZE} count={}\n",
-                size / PRED_WARP_BLOCK_SIZE
-            );
-            stage_dump_data(dec, c"pred_blocks_warp", &layout, 160, &[region]);
+            for (i, (stage, object, stride, count)) in [
+                (c"pred_blocks", (*dec).prediction_blocks, 16, pred_block_total),
+                (c"pred_blocks_warp", (*dec).prediction_blocks_warp, 48, pred_warp_count),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let size = (count as usize * stride).min((*object).size);
+                let region = av1_stage_dump_region { src: (*object).dev, offset: 0, size, uav: 1 };
+                if let Some(gpu) = gpu_layout {
+                    let counts = av1_stage_dump_region {
+                        src: (*(*dec).gpu_pred_scratch).dev,
+                        offset: gpu.starts_offset() as usize + i * 4,
+                        size: 4,
+                        uav: 0,
+                    };
+                    stage_dump_gpu_records(dec, stage, counts, region, stride);
+                } else {
+                    let layout =
+                        format!("buffer={} record={stride} count={}\n", stage.to_string_lossy(), size / stride);
+                    stage_dump_data(dec, stage, &layout, 160, &[region]);
+                }
+            }
         }
+        gpu_lists
     }
 }
 
@@ -654,31 +722,83 @@ struct InterPass<'a> {
     commands: Commands<'a>,
     shader: *const ComputeShader,
     detail: InterDetailRec<'a>,
+    gpu: Option<Recording<'a>>,
+}
+
+struct ListWork {
+    width_log2: u32,
+    height_log2: u32,
+    threads_per_record: u32,
+    width: c_int,
+    height: c_int,
+}
+
+impl ListWork {
+    fn new(width_log2: u32, height_log2: u32, extra_y: u32, threads: u32) -> Self {
+        Self {
+            width_log2,
+            height_log2: height_log2 + extra_y,
+            threads_per_record: threads << (width_log2 + height_log2 + extra_y),
+            width: 4 << width_log2,
+            height: 4 << height_log2,
+        }
+    }
+
+    fn inter_size(i: usize, extra_y: u32, threads: u32) -> Self {
+        Self::new(INTER_BLOCK_WIDTH_LUT[i] as u32, INTER_BLOCK_HEIGHT_LUT[i] as u32, extra_y, threads)
+    }
 }
 
 impl InterPass<'_> {
-    /// One list of blocks: the pipeline if it is another than the last, the inline constants (threads
-    /// with work, the first record of the list, log2 of the block's width and height in 4x4 units, with
-    /// whatever a shader has above them), the dispatch.
+    /// One batch of lists with one shader. The GPU path compacts nonempty lists into a single
+    /// ExecuteIndirect call. Both paths use the same group sizes and root constants.
     ///
     /// # Safety
-    /// `shader` is a pipeline of the decoder that records.
-    #[inline]
-    unsafe fn run(
+    /// `shader` is a live pipeline and `offsets` contains `lists` range starts and their sentinel.
+    unsafe fn lists(
         &mut self,
         shader: *const ComputeShader,
-        pass_offset: c_int,
-        width_log2: u32,
-        height_log2: u32,
-        wi_count: u32,
+        offsets: *const c_int,
+        first: u32,
+        lists: usize,
+        section: c_int,
+        work: impl Fn(usize) -> ListWork,
     ) {
-        if self.shader != shader {
-            self.shader = shader;
-            // SAFETY: the caller's contract.
-            self.commands.set_pipeline(unsafe { pipeline(shader) });
+        // SAFETY: the caller's contract.
+        unsafe {
+            if let Some(gpu) = &mut self.gpu {
+                if self.shader != shader {
+                    self.shader = shader;
+                    self.commands.set_pipeline(pipeline(shader));
+                }
+                gpu.batch(
+                    self.commands,
+                    DispatchKind::Inter,
+                    0,
+                    (0..lists).map(|i| {
+                        let w = work(i);
+                        [first + i as u32, w.threads_per_record, w.width_log2, w.height_log2]
+                    }),
+                );
+            } else {
+                for i in 0..lists {
+                    let (offset, count) = list_range(offsets, i);
+                    if count == 0 {
+                        continue;
+                    }
+                    if self.shader != shader {
+                        self.shader = shader;
+                        self.commands.set_pipeline(pipeline(shader));
+                    }
+                    let w = work(i);
+                    let wi_count = w.threads_per_record * count as u32;
+                    self.commands.set_inline_constants(7, &[wi_count, offset as u32, w.width_log2, w.height_log2], 0);
+                    self.commands.dispatch(wi_count.div_ceil(64), 1, 1);
+                    self.detail.dispatch(AV1_PERF_GPU_INTER, section, i as c_int, w.width, w.height, count, wi_count);
+                }
+                self.detail.section(section);
+            }
         }
-        self.commands.set_inline_constants(7, &[wi_count, pass_offset as u32, width_log2, height_log2], 0);
-        self.commands.dispatch((wi_count + 63) >> 6, 1, 1);
     }
 }
 
@@ -702,7 +822,7 @@ unsafe fn list_range(offsets: *const c_int, i: usize) -> (c_int, c_int) {
 /// # Safety
 /// `dec` is the decoder while it records a frame whose block records are written
 /// ([`prediction_gen_blocks`]); `cm` is the frame's.
-pub(crate) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, _tile: *mut TileInfo) {
+pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, gpu: Option<Recording<'_>>) {
     // SAFETY: the caller's contract: the frame data, its tiles and their block maps, the reference frame
     // buffers of a frame with inter blocks, and the buffers and pipelines of the decoder are live, and
     // only this thread records.
@@ -729,7 +849,7 @@ pub(crate) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
         // -gputimedetail: the inter breakdown of the frame, null without it.
         let mut detail = InterDetailRec {
             dec,
-            d: perf_inter_begin(dec),
+            d: if gpu.is_some() { std::ptr::null_mut() } else { perf_inter_begin(dec) },
             commands,
             frame_buffers,
             thread_bytes: [0; AV1_PERF_INTER_SECTION_COUNT as usize],
@@ -740,7 +860,7 @@ pub(crate) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
             let counters = &td.perf_inter_tiles;
             detail.add_tiles(&counters[..counters.len().min(usize::try_from(tile_count).unwrap_or(0))]);
         }
-        let mut pass = InterPass { commands, shader: std::ptr::null(), detail };
+        let mut pass = InterPass { commands, shader: std::ptr::null(), detail, gpu };
         if do_inter {
             let constants = alloc_constants::<InterData>(&mut td.command_buffer);
             let inter_data = constants.data;
@@ -845,32 +965,27 @@ pub(crate) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                 AV1_PERF_INTER_COMP_DIFF_Y,
                 AV1_PERF_INTER_COMP_MASKED,
             ];
+            let inter_fast = td.inter_fast != 0 && !block_map_fast.is_null();
             for t in Warp..=CompoundMasked {
-                let wi_per_subb = if t == Warp { 1 } else { wi_per_block };
-                let offsets = if t == Warp { block_map_wrp } else { lists_of(t) };
-                // A thread of a compound shader for references of the frame's size: 4x2 samples.
-                let is_4x2 = u32::from(!scaled && t > CasualInter);
-                let section = SECTION_OF_TYPE[t as usize];
-                for i in 0..SIZES {
-                    let (offset, count) = list_range(offsets, i);
-                    if count == 0 {
-                        continue;
-                    }
-                    let width_log2 = INTER_BLOCK_WIDTH_LUT[i] as u32;
-                    let height_log2 = INTER_BLOCK_HEIGHT_LUT[i] as u32 + is_4x2;
-                    let wi_count = (wi_per_subb << (width_log2 + height_log2)) * count as u32;
-                    pass.run(shader_of(t), offset, width_log2, height_log2, wi_count);
-                    pass.detail.dispatch(
-                        AV1_PERF_GPU_INTER,
-                        section,
-                        i as c_int,
-                        4 << INTER_BLOCK_WIDTH_LUT[i],
-                        4 << INTER_BLOCK_HEIGHT_LUT[i],
-                        count,
-                        wi_count,
-                    );
+                if inter_fast && (t == CasualInter || t == super::types::CompoundAvrg) {
+                    continue;
                 }
-                pass.detail.section(section);
+                let threads = if t == Warp { 1 } else { wi_per_block };
+                let (offsets, list) = if t == Warp {
+                    (block_map_wrp, gpu_pred_lists::WARP_LIST)
+                } else {
+                    (lists_of(t), ((t - 1) * InterSizesAllCommon) as u32)
+                };
+                // A thread of an unscaled compound shader writes 4x2 samples.
+                let extra_y = u32::from(!scaled && t > CasualInter);
+                pass.lists(
+                    shader_of(t),
+                    offsets,
+                    list,
+                    INTER_BLOCK_WIDTH_LUT.len(),
+                    SECTION_OF_TYPE[t as usize],
+                    |i| ListWork::inter_size(i, extra_y, threads),
+                );
             }
 
             // -interfast: the lists by motion vector class, which have the blocks of the types CasualInter and
@@ -878,7 +993,7 @@ pub(crate) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
             // size. The class goes to the fast shaders in the bits 8 and up of width_log2; the lists of class 3
             // (both references of class 3 for a compound block) run the original shaders, which do the same
             // for any class.
-            if td.inter_fast != 0 && !block_map_fast.is_null() {
+            if inter_fast {
                 for list in 0..InterFastLists / InterSizesAllCommon {
                     let compound = list >= InterFastClasses;
                     let cls = if compound { list - InterFastClasses } else { list };
@@ -897,73 +1012,54 @@ pub(crate) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                     };
                     let section =
                         (if compound { AV1_PERF_INTER_COMP_AVG_FAST } else { AV1_PERF_INTER_SINGLE_COPY }) + cls;
-                    let offsets = block_map_fast.add(list as usize * SIZES);
-                    for i in 0..SIZES {
-                        let (offset, count) = list_range(offsets, i);
-                        if count == 0 {
-                            continue;
-                        }
-                        let mut width_log2 = INTER_BLOCK_WIDTH_LUT[i] as u32;
-                        // A thread of a compound shader: 4x2 samples.
-                        let height_log2 = INTER_BLOCK_HEIGHT_LUT[i] as u32 + u32::from(compound);
-                        let wi_count = (1 << (width_log2 + height_log2)) * count as u32;
-                        if !original {
-                            width_log2 |= (cls as u32) << 8;
-                        }
-                        pass.run(list_shader, offset, width_log2, height_log2, wi_count);
-                        pass.detail.dispatch(
-                            AV1_PERF_GPU_INTER,
-                            section,
-                            i as c_int,
-                            4 << INTER_BLOCK_WIDTH_LUT[i],
-                            4 << INTER_BLOCK_HEIGHT_LUT[i],
-                            count,
-                            wi_count,
-                        );
-                    }
-                    pass.detail.section(section);
+                    let first = list as usize * SIZES;
+                    pass.lists(
+                        list_shader,
+                        block_map_fast.add(first),
+                        gpu_pred_lists::FAST_LIST + first as u32,
+                        INTER_BLOCK_WIDTH_LUT.len(),
+                        section,
+                        |i| {
+                            let mut work = ListWork::inter_size(i, u32::from(compound), 1);
+                            if !original {
+                                work.width_log2 |= (cls as u32) << 8;
+                            }
+                            work
+                        },
+                    );
                 }
             }
 
             // Compound blocks with a warped reference, luma and chroma: a thread per column of a 4x4.
             let warp_compound = |pass: &mut InterPass<'_>, list_type: c_int, section: c_int| {
-                let offsets = lists_of(list_type);
-                for i in 0..SIZES {
-                    let (offset, count) = list_range(offsets, i);
-                    if count == 0 {
-                        continue;
-                    }
-                    let width_log2 = INTER_BLOCK_WIDTH_LUT[i] as u32;
-                    let height_log2 = INTER_BLOCK_HEIGHT_LUT[i] as u32;
-                    let wi_count = (4 << (width_log2 + height_log2)) * count as u32;
-                    pass.run(warp_comp, offset, width_log2, height_log2, wi_count);
-                    pass.detail.dispatch(
-                        AV1_PERF_GPU_INTER,
-                        section,
-                        i as c_int,
-                        4 << width_log2,
-                        4 << height_log2,
-                        count,
-                        wi_count,
-                    );
-                }
-                pass.detail.section(section);
+                pass.lists(
+                    warp_comp,
+                    lists_of(list_type),
+                    ((list_type - 1) * InterSizesAllCommon) as u32,
+                    INTER_BLOCK_WIDTH_LUT.len(),
+                    section,
+                    |i| ListWork::inter_size(i, 0, 4),
+                );
             };
             if enable_gm_warp {
                 warp_compound(&mut pass, CompoundGlobalWarp, AV1_PERF_INTER_COMP_WARP);
             }
 
             // The chroma of blocks under 8x8, 2x2 samples at a time.
-            let (offset, count) = list_range(block_map, Inter2x2ArrOffset as usize);
-            if count > 0 {
-                let wi_count = (count << td.scale_enable) as u32;
-                pass.shader = shader_of(10);
-                commands.set_pipeline(pipeline(pass.shader));
-                commands.set_inline_constants(7, &[wi_count, offset as u32, 0, 0], 0);
-                commands.dispatch((wi_count + 63) >> 6, 1, 1);
-                pass.detail.dispatch(AV1_PERF_GPU_INTER, AV1_PERF_INTER_CHROMA_2X2, 0, 2, 2, count, wi_count);
-                pass.detail.section(AV1_PERF_INTER_CHROMA_2X2);
-            }
+            pass.lists(
+                shader_of(10),
+                block_map.add(Inter2x2ArrOffset as usize),
+                Inter2x2ArrOffset as u32,
+                1,
+                AV1_PERF_INTER_CHROMA_2X2,
+                |_| ListWork {
+                    width_log2: 0,
+                    height_log2: 0,
+                    threads_per_record: 1 << td.scale_enable,
+                    width: 2,
+                    height: 2,
+                },
+            );
 
             // sync 0
             commands.write_barrier(frame_buffers);
@@ -971,27 +1067,14 @@ pub(crate) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
 
             // The chroma of compound blocks with a mask from the difference of the references: it reads
             // the luma prediction of the block.
-            let offsets = lists_of(CompoundDiffUv);
-            for i in 0..SIZES {
-                let (offset, count) = list_range(offsets, i);
-                if count == 0 {
-                    continue;
-                }
-                let width_log2 = INTER_BLOCK_WIDTH_LUT[i] as u32;
-                let height_log2 = INTER_BLOCK_HEIGHT_LUT[i] as u32 + u32::from(!scaled);
-                let wi_count = (wi_per_block << (width_log2 + height_log2)) * count as u32;
-                pass.run(shader_of(CompoundDiffUv), offset, width_log2, height_log2, wi_count);
-                pass.detail.dispatch(
-                    AV1_PERF_GPU_INTER,
-                    AV1_PERF_INTER_COMP_DIFF_UV,
-                    i as c_int,
-                    4 << INTER_BLOCK_WIDTH_LUT[i],
-                    4 << INTER_BLOCK_HEIGHT_LUT[i],
-                    count,
-                    wi_count,
-                );
-            }
-            pass.detail.section(AV1_PERF_INTER_COMP_DIFF_UV);
+            pass.lists(
+                shader_of(CompoundDiffUv),
+                lists_of(CompoundDiffUv),
+                ((CompoundDiffUv - 1) * InterSizesAllCommon) as u32,
+                INTER_BLOCK_WIDTH_LUT.len(),
+                AV1_PERF_INTER_COMP_DIFF_UV,
+                |i| ListWork::inter_size(i, u32::from(!scaled), wi_per_block),
+            );
 
             if enable_gm_warp {
                 warp_compound(&mut pass, CompoundDiffUvGlobalWarp, AV1_PERF_INTER_COMP_WARP_DIFF_UV);
@@ -999,54 +1082,28 @@ pub(crate) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
 
             // Overlapped prediction from the blocks above, then, behind a barrier, from the blocks to the
             // left. The place of a list is its size: (w << 2) | h above, (h << 2) | w to the left.
-            let offsets = lists_of(ObmcAbove);
-            for i in 0..SIZES {
-                let (offset, count) = list_range(offsets, i);
-                if count == 0 {
-                    continue;
-                }
-                let width_log2 = (i >> 2) as u32;
-                let height_log2 = (i & 3) as u32;
-                let wi_count = (wi_per_block << (width_log2 + height_log2)) * count as u32;
-                pass.run(shader_of(ObmcAbove), offset, width_log2, height_log2, wi_count);
-                pass.detail.dispatch(
-                    AV1_PERF_GPU_INTER,
-                    AV1_PERF_INTER_OBMC_ABOVE,
-                    i as c_int,
-                    4 << width_log2,
-                    4 << height_log2,
-                    count,
-                    wi_count,
-                );
-            }
-            pass.detail.section(AV1_PERF_INTER_OBMC_ABOVE);
+            pass.lists(
+                shader_of(ObmcAbove),
+                lists_of(ObmcAbove),
+                ((ObmcAbove - 1) * InterSizesAllCommon) as u32,
+                SIZES,
+                AV1_PERF_INTER_OBMC_ABOVE,
+                |i| ListWork::new((i >> 2) as u32, (i & 3) as u32, 0, wi_per_block),
+            );
 
             // sync 1
             commands.write_barrier(frame_buffers);
             pass.detail.sync(AV1_PERF_INTER_SYNC1);
 
             // pass 2: Obmc-left
-            let offsets = lists_of(ObmcLeft);
-            for i in 0..SIZES {
-                let (offset, count) = list_range(offsets, i);
-                if count == 0 {
-                    continue;
-                }
-                let width_log2 = (i & 3) as u32;
-                let height_log2 = (i >> 2) as u32;
-                let wi_count = (wi_per_block << (width_log2 + height_log2)) * count as u32;
-                pass.run(shader_of(ObmcLeft), offset, width_log2, height_log2, wi_count);
-                pass.detail.dispatch(
-                    AV1_PERF_GPU_INTER,
-                    AV1_PERF_INTER_OBMC_LEFT,
-                    i as c_int,
-                    4 << width_log2,
-                    4 << height_log2,
-                    count,
-                    wi_count,
-                );
-            }
-            pass.detail.section(AV1_PERF_INTER_OBMC_LEFT);
+            pass.lists(
+                shader_of(ObmcLeft),
+                lists_of(ObmcLeft),
+                ((ObmcLeft - 1) * InterSizesAllCommon) as u32,
+                SIZES,
+                AV1_PERF_INTER_OBMC_LEFT,
+                |i| ListWork::new((i & 3) as u32, (i >> 2) as u32, 0, wi_per_block),
+            );
 
             // sync 2: the timestamp of the stage is the one behind it.
             commands.write_barrier(frame_buffers);
@@ -1055,8 +1112,12 @@ pub(crate) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
         }
 
         let recon_map = block_map.add(ReconBlockOffset as usize);
-        let recon_blocks = *recon_map.add(ReconstructBlockSizes as usize) - *recon_map;
-        if td.intra_iters >= 0 || recon_blocks != 0 {
+        let have_recon = if pass.gpu.is_some() {
+            std::slice::from_raw_parts(tiles, tile_count as usize).iter().any(|tile| tile.have_recon != 0)
+        } else {
+            *recon_map.add(ReconstructBlockSizes as usize) != *recon_map
+        };
+        if td.intra_iters >= 0 || have_recon {
             let constants = alloc_constants::<IntraData>(&mut td.command_buffer);
             let data = constants.data;
             // The /Od build unless -intraopt asks for the optimised build of the same source (same layout).
@@ -1089,7 +1150,7 @@ pub(crate) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
             commands.bind_read(1, residuals.location());
             commands.bind_write(3, frame_buffers.location());
             commands.bind_constants(4, constants.location);
-            if recon_blocks != 0 {
+            if have_recon {
                 commands.set_pipeline(pipeline(&raw const (*shaders).reconstruct_block));
                 // A slot has a palette buffer once a frame that allows screen content tools has used it.
                 // Without one the frame has no palette block, and the shader loads from this buffer for palette
@@ -1097,25 +1158,38 @@ pub(crate) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                 let palette = if !td.palette_buffer.is_null() { td.palette_buffer } else { (*dec).idct_blocks_pool };
                 commands.bind_read(2, buffer(palette).location());
                 let fb_base_offset = (*td.frame_buffer).base_offset as c_int;
-                for i in 0..ReconstructBlockSizes as usize {
-                    let (offset, count) = list_range(recon_map, i);
-                    if count != 0 {
-                        let width_log2 = (i % 6) as c_int;
-                        let height_log2 = (i / 6) as c_int;
-                        let wi_count = count << (width_log2 + height_log2);
-                        // wi_count, pass_offset, width_log2, height_log2, fb_base_offset, five unused words
-                        let inline = [wi_count, offset, width_log2, height_log2, fb_base_offset, 0, 0, 0, 0, 0];
-                        commands.set_inline_constants(5, &inline, 0);
-                        commands.dispatch(((wi_count + 63) >> 6) as u32, 1, 1);
-                        pass.detail.dispatch(
-                            AV1_PERF_GPU_RECON,
-                            AV1_PERF_INTER_RECON,
-                            i as c_int,
-                            4 << width_log2,
-                            4 << height_log2,
-                            count,
-                            wi_count as u32,
-                        );
+                if let Some(gpu) = &mut pass.gpu {
+                    commands.set_inline_constants(5, &[fb_base_offset, 0, 0, 0, 0, 0], 4);
+                    gpu.batch(
+                        commands,
+                        DispatchKind::Recon,
+                        0,
+                        (0..ReconstructBlockSizes as u32).map(|i| {
+                            let (w, h) = (i % 6, i / 6);
+                            [ReconBlockOffset as u32 + i, 1 << (w + h), w, h]
+                        }),
+                    );
+                } else {
+                    for i in 0..ReconstructBlockSizes as usize {
+                        let (offset, count) = list_range(recon_map, i);
+                        if count != 0 {
+                            let width_log2 = (i % 6) as c_int;
+                            let height_log2 = (i / 6) as c_int;
+                            let wi_count = count << (width_log2 + height_log2);
+                            // wi_count, pass_offset, width_log2, height_log2, fb_base_offset, five unused words
+                            let inline = [wi_count, offset, width_log2, height_log2, fb_base_offset, 0, 0, 0, 0, 0];
+                            commands.set_inline_constants(5, &inline, 0);
+                            commands.dispatch(((wi_count + 63) >> 6) as u32, 1, 1);
+                            pass.detail.dispatch(
+                                AV1_PERF_GPU_RECON,
+                                AV1_PERF_INTER_RECON,
+                                i as c_int,
+                                4 << width_log2,
+                                4 << height_log2,
+                                count,
+                                wi_count as u32,
+                            );
+                        }
                     }
                 }
 
@@ -1158,8 +1232,13 @@ pub(crate) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                     while done < d.count {
                         let groups = (d.count - done).min(65535);
                         v2_srt[0] = list_offset + 8 * (d.first + done) as u32;
-                        commands.set_inline_constants(7, &v2_srt, 0);
-                        commands.dispatch(groups as u32, 1, 1);
+                        if let Some(gpu) = &mut pass.gpu {
+                            commands.set_inline_constants(7, &v2_srt[..4], 0);
+                            gpu.batch(commands, DispatchKind::IntraV2, groups as u32, [[v2_srt[4], v2_srt[5], 0, 0]]);
+                        } else {
+                            commands.set_inline_constants(7, &v2_srt, 0);
+                            commands.dispatch(groups as u32, 1, 1);
+                        }
                         td.intra_stats[0] += 1;
                         done += 65535;
                     }
@@ -1200,8 +1279,19 @@ pub(crate) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                             shader = intra_main;
                             commands.set_pipeline(pipeline(shader));
                         }
-                        commands.set_inline_constants(5, &srt, 0);
-                        commands.dispatch(((wi_count + 255) >> 8) as u32, 1, 1);
+                        let groups = ((wi_count + 255) >> 8) as u32;
+                        if let Some(gpu) = &mut pass.gpu {
+                            commands.set_inline_constants(5, &srt[..6], 0);
+                            gpu.batch(
+                                commands,
+                                DispatchKind::Intra,
+                                groups,
+                                [[srt[6] as u32, srt[7] as u32, srt[8] as u32, srt[9] as u32]],
+                            );
+                        } else {
+                            commands.set_inline_constants(5, &srt, 0);
+                            commands.dispatch(groups, 1, 1);
+                        }
                         td.intra_stats[0] += 1;
                         td.intra_stats[2] += (wi_count + 255) >> 8;
                     }
@@ -1212,8 +1302,17 @@ pub(crate) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                             shader = intra_filter;
                             commands.set_pipeline(pipeline(shader));
                         }
-                        commands.set_inline_constants(5, &[count << 3, offset], 0);
-                        commands.dispatch(count as u32, 1, 1);
+                        if let Some(gpu) = &mut pass.gpu {
+                            gpu.batch(
+                                commands,
+                                DispatchKind::Filter,
+                                count as u32,
+                                [[(count << 3) as u32, offset as u32, 0, 0]],
+                            );
+                        } else {
+                            commands.set_inline_constants(5, &[count << 3, offset], 0);
+                            commands.dispatch(count as u32, 1, 1);
+                        }
                         td.intra_stats[0] += 1;
                         td.intra_stats[2] += count;
                     }
@@ -1226,6 +1325,9 @@ pub(crate) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                 perf_gpu_mark(dec, AV1_PERF_GPU_INTRA);
                 stage_dump_fb(dec, c"intra", td.frame_buffer, std::ptr::null());
             }
+        }
+        if let Some(gpu) = pass.gpu {
+            gpu.finish(commands);
         }
     }
 }

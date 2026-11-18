@@ -475,6 +475,7 @@ span exactly**, and any gap between two stages is counted in the later one.
 | GPU stage | What it covers |
 | --- | --- |
 | `gen_blocks` | prediction block generation; with `-parseopt gpugrid` (and `gridcheck`) also the pass in front of it that builds the mode info grid from the records (`mi_grid_build`), which has no mark of its own |
+| `pred_count`, `pred_scan` | With `-parseopt gpublists`, count and number each group's prediction records, then scan the group counts and write the indirect dispatch arguments. |
 | `residual_clear` | residual buffer fill (the whole buffer, every frame) |
 | `idct_sort`, `idct` | transform block sort, inverse transform (all types) |
 | `inter`, `recon` | inter prediction (all passes); `recon` adds the residuals of the blocks whose prediction is not final when their inter shader ends (overlapped prediction) and of palette blocks. The other inter blocks get their residuals in the inter shader. |
@@ -1311,13 +1312,14 @@ them. Four are on by default; why each exists and what it changed where it was m
 | `cleargrid` | off | The mode info grid of a pipeline slot is cleared for every frame (4.2 MB at 4K), as up to package 0.2.140, and not only for a frame of another size than the frames before it on the slot. |
 | `gpugrid` | on | The mode info grid of a frame (for every 4x4 unit the record of its block, 1.98 MiB a 4K frame) is built by a pass of the frame's command list from the frame's mode info records (`mi_grid_build.hlsl`, in front of every stage that reads the grid; its GPU time is in the stage `gen_blocks` of `-gputime`) and not written by the parse threads: `sink_grid` is then 0 and `sink_calls` smaller by it (1.18 ms a frame of `d2_300` and 1.11 of `j4k40` on the console before the switch). What the parse threads read through the grid they get from the edges of the tile. The same grid, records and lists. Read when the decoder is created: the grid of a slot is then a buffer a command list may write, and the decoder has the lists of CDEF by the GPU as with `gpucdef`, whatever the list says (`-parseopt none,gpugrid` too), because no thread of the CPU may read the grid ([phase2-rav1d.md](phase2-rav1d.md#the-grid-built-by-the-gpu-the-switch-2026-11-18)). |
 | `gridcheck` | off | `rav1g-dec` only (the test player does not take the word). A check, not a way of doing the parse: a pass in front of the frame's stages (`mi_grid_build.hlsl`) builds the mode info grid from the frame's records into a second grid of the slot, and the decoder holds it against the grid the parse wrote when the frame is done; at its release a `GRIDCHECK` line says how many frames and units were held and how many differed (an error line when any did). The first step of the grid built by the GPU ([phase2-rav1d.md](phase2-rav1d.md#the-grid-built-by-the-gpu-the-check-2026-11-18)). Every slot has the second grid and a list of the frame's runs of records. Use `-parseopt nolfmask,tilethread,gpucdef,gridcheck` to keep the sink-written grid for the comparison. |
+| `gpublists` | off | The GPU counts the inter, warp and reconstruction lists. The parser still writes the intra lists and wavefront. Compare `-parseopt time` with `-parseopt time,gpublists` under `-gputime`. Per-dispatch inter counters are available on the CPU list path. |
 
 `-parseopt <word>[,<word>...]` says which are on:
 
 - Naming `nolfmask`, `tilethread`, `gpucdef`, `gpugrid`, `none` or `default` selects the default
   switches explicitly. `-parseopt none` clears all four. `-parseopt nolfmask,tilethread,gpucdef`
   keeps the sink-written grid. `-parseopt default` selects all four.
-- `time`, `latelists` and `cleargrid` add to the selection. `-parseopt time` times the defaults and
+- `time`, `latelists`, `cleargrid` and `gpublists` add to the selection. `-parseopt time` times the defaults and
   `-parseopt none,time` times the parse with all four default switches off.
 - Another word is an error of the task (`stage` and `all` were words until package 0.2.138; the
   switch `stage` is gone, and so is `recordonce`, a word of package 0.2.196 alone: a mode info

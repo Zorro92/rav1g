@@ -1683,6 +1683,86 @@ jobs:
             out/cut-tile/
           if-no-files-found: warn
 
+  # GPU prediction lists. Compare frame hashes across the whole set and dump the stage buffers.
+  rust-gpublists:
+    needs: [conformance-streams, rust]
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: rav1g-dec-x64-${{ github.run_id }}
+          path: out/rav1g-dec
+
+      - uses: actions/cache/restore@v6
+        with:
+          path: conformance-streams
+          key: ${{ needs.conformance-streams.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: GPU lists with the standard and fast inter paths
+        shell: pwsh
+        run: |
+          $tool = 'out/rav1g-dec/rav1g-dec.exe'
+          foreach ($mode in @('standard', 'fast')) {
+            $extra = if ($mode -eq 'fast') { ' -interfast' } else { '' }
+            $switches = "-parseopt gpublists$extra"
+            python testing/conformance/run.py --tool $tool --streams conformance-streams `
+              --out "out/conformance-gpublists-$mode" --threads 4 "--tool-args=$switches" "--title=rav1g-dec with $switches"
+            if ($LASTEXITCODE -ne 0) { throw "conformance with $switches" }
+            if (-not (Select-String -Path "out/conformance-gpublists-$mode/lists/run001.log" -Pattern '^PARSER .*switches .*gpublists \(' -Quiet)) {
+              throw "the decoder did not report gpublists"
+            }
+            python testing/stage_dump/ci_dumps.py --tool $tool --streams conformance-streams `
+              --tasks testing/conformance/dump_tasks.txt --out "out/dumps-gpublists-$mode" --threads 4 "--tool-args=$switches"
+            if ($LASTEXITCODE -ne 0) { throw "stage dumps with $switches" }
+          }
+          python testing/stage_dump/ci_dumps.py --tool $tool --streams conformance-streams `
+            --tasks testing/conformance/dump_tasks.txt --out out/dumps-cpulists-fast --threads 4 "--tool-args=-interfast"
+          if ($LASTEXITCODE -ne 0) { throw 'stage dumps of the CPU fast lists' }
+          python testing/conformance/player_smoke.py --tool $tool --streams conformance-streams `
+            --out out/player-smoke-gpublists "--player-args=-parseopt gpublists" "--title=the player with gpublists"
+          if ($LASTEXITCODE -ne 0) { throw 'the player with gpublists' }
+
+      - name: Compare 4K memory use and stage timings on WARP
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $tool = (Resolve-Path out/rav1g-dec/rav1g-dec.exe).Path
+          $logDir = New-Item -Force -ItemType Directory out/gpublists-time
+          Push-Location conformance-streams
+          try {
+            $task = Select-String -Path manifest.txt -Pattern '-name nf-dvbdash-d2-10b-2160p\.ivf ' | Select-Object -First 1
+            if (-not $task) { throw 'missing 4K task' }
+            $inputPath = [regex]::Match($task.Line, '(?:^|\s)-i\s+(\S+)').Groups[1].Value
+            if (-not $inputPath) { throw 'missing 4K input' }
+            foreach ($mode in @('time', 'time,gpublists')) {
+              & $tool -i $inputPath -limit 16 -t 2 -v -memstats -gputime -parseopt $mode | Tee-Object -FilePath (Join-Path $logDir.FullName "$mode.log")
+              if ($LASTEXITCODE -ne 0) { throw "timing run with $mode" }
+            }
+            if (-not (Select-String -Path (Join-Path $logDir.FullName 'time,gpublists.log') -Pattern '^GPUTIME gpu pred_(count|scan) +[1-9]' -Quiet)) {
+              throw 'no GPU list timestamps'
+            }
+          } finally {
+            Pop-Location
+          }
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: rav1g-dec-gpublists-${{ github.run_id }}
+          path: |
+            out/conformance-gpublists-*/
+            out/dumps-*/
+            out/gpublists-time/
+            out/player-smoke-gpublists/
+          if-no-files-found: error
+
   # The clears of a pipeline slot (docs/test-player.md, "Pipeline slots and clears"; docs/phase2-rav1d.md,
   # "No clears by the CPU"). Without a flag, which is every other run of the workflow, a frame keeps the
   # wavefront of intra prediction at the edges of its tiles and no thread clears a grid of the slot for
@@ -2423,8 +2503,8 @@ jobs:
         if: ${{ !cancelled() }}
         shell: pwsh
         run: |
-          $picks = @(@{ name = 'fxc'; pick = 'fxc=all'; line = 'dxc 0; od 0; fxc 99 (all)' },
-            @{ name = 'od'; pick = 'od=all'; line = 'dxc 0; od 99 (all); fxc 0' },
+          $picks = @(@{ name = 'fxc'; pick = 'fxc=all'; line = 'dxc 0; od 0; fxc 102 (all)' },
+            @{ name = 'od'; pick = 'od=all'; line = 'dxc 0; od 102 (all); fxc 0' },
             @{ name = 'mixed'; pick = 'fxc=loopfilter_*,idct*,*_fast,od=inter_*,cdef_*,intra_*,dxc=inter_main,reconstruct_block*'; line = '' })
           $failed = @()
           foreach ($pick in $picks) {
@@ -2471,7 +2551,7 @@ jobs:
             "--title=the Rust library of the DXC experiment with -shaderpick"
           $code = $LASTEXITCODE
           if (-not (Get-ChildItem out/player-smoke-dxc-pick -Recurse -File | Select-String -SimpleMatch `
-              'SHADERPICK fxc=loopfilter_vert_hbd,od=cdef_filter_v2: dxc 95 (all others); od 1 (cdef_filter_v2); fxc 1 (loopfilter_vert_hbd)' -Quiet)) {
+              'SHADERPICK fxc=loopfilter_vert_hbd,od=cdef_filter_v2: dxc 98 (all others); od 1 (cdef_filter_v2); fxc 1 (loopfilter_vert_hbd)' -Quiet)) {
             throw "The player's log does not have the SHADERPICK line of the pick of its task lines"
           }
           if ($code -ne 0) { throw "the player's decoder code with a shader pick: exit code $code" }
@@ -2502,7 +2582,7 @@ jobs:
   # in the last step. The shader check allows the three shaders that read the packed mode info records.
   # Their output lists are held equal by the stage dump comparison.
   rust-equal:
-    needs: [cpp-reference, rust-conformance, shader-headers]
+    needs: [cpp-reference, rust-conformance, rust-gpublists, shader-headers]
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
@@ -2540,13 +2620,18 @@ jobs:
           name: rav1g-shader-headers-${{ github.run_id }}
           path: shader-headers
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: rav1g-dec-gpublists-${{ github.run_id }}
+          path: gpublists
+
       # The four shaders of the semi-planar output (docs/output.md) are in this commit alone: the C++
       # decoder has no such output, and the runs that are compared here do not take that path.
       # cdef_lists is in this commit alone too: it writes the two lists CDEF reads, which the C++ decoder
       # writes on its recording thread, and the stage dump cdef_info holds the two against each other.
       # So is mi_grid_build, the mode info grid built by the GPU for the check of -parseopt gridcheck.
-      # The three readers shared with cpp use the 96-byte layout here.
-      # The legacy fast variant stays byte-identical for the comparison. Rust dispatches the packed variant.
+      # Three readers shared with cpp use the packed records. The legacy fast build shares the
+      # refactored list access code, and intra_v2 takes an extra root constant for the GPU list base.
       - name: Compare shaders against the reference
         run: |
           set -euo pipefail
@@ -2559,8 +2644,8 @@ jobs:
           if ! python3 testing/shader_cache/shaders.py same --reference cpp-reference/shaders/report.json \
               --candidate shader-headers/report.json --reference-name "branch cpp at ${CPP_REFERENCE_COMMIT:0:7}" \
               --candidate-name 'this commit' \
-              --candidate-only copy_plane_sp,copy_plane_sp_tex,film_grain_filter_sp,film_grain_filter_sp_tex,cdef_lists,mi_grid_build,gen_pred_blocks_fast_packed \
-              --candidate-changed gen_pred_blocks,gen_lf_blocks_vert,gen_lf_blocks_hor; then
+              --candidate-only copy_plane_sp,copy_plane_sp_tex,film_grain_filter_sp,film_grain_filter_sp_tex,cdef_lists,mi_grid_build,gen_pred_blocks_fast_packed,pred_list_count,pred_list_scan,gen_pred_blocks_gpu \
+              --candidate-changed gen_pred_blocks,gen_pred_blocks_fast,gen_lf_blocks_vert,gen_lf_blocks_hor,intra_v2,intra_v2_hbd; then
             echo '::error title=Shader comparison failed::Check the shader differences against the pinned cpp build and the explicit exceptions (docs/rust-port.md, "Equality reference").'
             exit 1
           fi
@@ -2571,6 +2656,22 @@ jobs:
           python3 testing/conformance/compare_md5.py --reference cpp-reference/conformance --candidate rav1g-dec/conformance \
             --manifest conformance-md5/manifest.txt --reference-dumps cpp-reference-dumps --candidate-dumps rav1g-dec-dumps \
             --reference-name 'warp_decoder (cpp, the entropy decoder of libaom)' --candidate-name 'rav1g-dec (rav1d)' --two-parsers
+
+      - name: GPU prediction lists against the C++ decoder and the CPU lists
+        run: |
+          set -euo pipefail
+          python3 testing/conformance/compare_md5.py --reference cpp-reference/conformance \
+            --candidate gpublists/conformance-gpublists-standard --manifest conformance-md5/manifest.txt \
+            --reference-dumps cpp-reference-dumps --candidate-dumps gpublists/dumps-gpublists-standard \
+            --reference-name 'warp_decoder (cpp)' --candidate-name 'rav1g-dec (gpublists)' --two-parsers
+          python3 testing/conformance/compare_md5.py --reference rav1g-dec/conformance \
+            --candidate gpublists/conformance-gpublists-standard --manifest conformance-md5/manifest.txt \
+            --reference-dumps rav1g-dec-dumps --candidate-dumps gpublists/dumps-gpublists-standard \
+            --reference-name 'rav1g-dec (CPU lists)' --candidate-name 'rav1g-dec (gpublists)' --strict-data
+          python3 testing/conformance/compare_md5.py --reference rav1g-dec/conformance \
+            --candidate gpublists/conformance-gpublists-fast --manifest conformance-md5/manifest.txt \
+            --reference-dumps gpublists/dumps-cpulists-fast --candidate-dumps gpublists/dumps-gpublists-fast \
+            --reference-name 'rav1g-dec (CPU fast lists)' --candidate-name 'rav1g-dec (GPU fast lists)' --strict-data
 
       # The decoder creation and the buffer plan (memory_lines.py pools): the same decoder size and frame
       # buffers as the C++ decoder, pools of a chunk for every 64x64 area of the decoder size, and with
@@ -3603,7 +3704,7 @@ jobs:
   release:
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     needs: [player, conformance-streams, cpp-reference, rust, rust-conformance, rust-output, rust-switches,
-      rust-sinkgrid, rust-clears, rust-frames, rust-frames-threads, rust-dumps-equal, rust-dxc, rust-equal, shader-headers,
+      rust-sinkgrid, rust-gpublists, rust-clears, rust-frames, rust-frames-threads, rust-dumps-equal, rust-dxc, rust-equal, shader-headers,
       rust-cross, rust-cross-run, rust-cross-run-switches, rav1d, parse-check, parse-digest, colour, sync-check,
       cdef-check, warp-check, inter-check, superres-check, tables-check, intra-check]
     runs-on: ubuntu-latest

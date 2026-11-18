@@ -563,7 +563,15 @@ pub unsafe extern "C" fn av1_mi_push_block(_pbi: *mut AV1Decoder, cm: *mut AV1_C
     // was before a parse could be without one (the choice is a constant in it, not a test for every
     // neighbour).
     // SAFETY: the caller's contract.
-    unsafe { if (*xd).mi.is_null() { push_block::<false>(cm, xd) } else { push_block::<true>(cm, xd) } }
+    unsafe {
+        if (*(*xd).tile_data).gpu_pred_lists != 0 {
+            push_block::<false, true>(cm, xd);
+        } else if (*xd).mi.is_null() {
+            push_block::<false, false>(cm, xd);
+        } else {
+            push_block::<true, false>(cm, xd);
+        }
+    }
 }
 
 /// [`av1_mi_push_block`]. `HAS_GRID`: the block context has the block's place in the mode info grid
@@ -571,7 +579,7 @@ pub unsafe extern "C" fn av1_mi_push_block(_pbi: *mut AV1Decoder, cm: *mut AV1_C
 ///
 /// # Safety
 /// As for [`av1_mi_push_block`].
-unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBLOCKD) {
+unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBLOCKD) {
     // SAFETY: the caller's contract. The frame data is shared by the tile threads and only read here; the
     // tile data, the block's mode info and the parts of the wavefront grids the tile covers belong to
     // this thread. The mode info of the neighbours is read while the pointer to the block's own is not
@@ -620,17 +628,19 @@ unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBL
         let bh = 1 << bh_log;
         let bw_log_uv = (bw_log - 1).max(0);
         let bh_log_uv = (bh_log - 1).max(0);
+        let is_inter = mi.ref_frame[0] > INTRA;
+        let is_inter_intra = is_interintra_pred(mi.sb_type, mi.mode, mi.ref_frame);
         // The tile's index list has room for what a block can add: an entry for each of its transform
         // blocks of luma and of chroma (fewer than two a 4x4 unit) or for its prediction blocks, those of
         // overlapped prediction and reconstruction included.
-        td.index_list_room(tile, 2 * (bw * bh) as usize + 64);
+        if !GPU_PRED_LISTS || !is_inter || is_inter_intra {
+            td.index_list_room(tile, 2 * (bw * bh) as usize + if GPU_PRED_LISTS { 0 } else { 64 });
+        }
         let index_arr = tile.gen_indexes;
 
         // The block has no chroma of its own: the block to its right or below carries it.
         let is_chroma_ref = ((mi_row & 1) == 0 && (bh & 1) == 1) || ((mi_col & 1) == 0 && (bw & 1) == 1);
 
-        let is_inter = mi.ref_frame[0] > INTRA;
-        let is_inter_intra = is_interintra_pred(mi.sb_type, mi.mode, mi.ref_frame);
         let is_compound = mi.ref_frame[1] > INTRA;
         let is_obmc = is_inter
             && u32::from(mi.motion_mode) == OBMC_CAUSAL as u32
@@ -643,7 +653,7 @@ unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBL
             *index_arr.offset(tile.gen_index_ptr as isize) = value as u32;
             tile.gen_index_ptr += 1;
         };
-        if is_inter {
+        if is_inter && !GPU_PRED_LISTS {
             tile.have_inter = 1;
             let mut is_global_warp = [false; 2];
             if xd.cur_frame_force_integer_mv == 0
@@ -1384,7 +1394,7 @@ unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBL
 
         // A block with residuals whose prediction is not written together with them (palette, overlapped
         // prediction) gets a reconstruction block.
-        if mi.skip == 0 {
+        if !GPU_PRED_LISTS && mi.skip == 0 {
             if y_use_palette || is_obmc {
                 let type_index = ReconBlockOffset + bw_log + 6 * bh_log;
                 *index_arr.offset(tile.gen_index_ptr as isize) = take(map.offset(type_index as isize), 1) as u32;

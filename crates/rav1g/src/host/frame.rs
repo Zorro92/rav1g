@@ -1737,11 +1737,11 @@ pub(crate) unsafe fn decode_frame_record(
         // of every stage that reads it (and of the stage dump of the mode info); -parseopt gridcheck: a
         // second grid, for the check (`grid_check.rs`).
         super::grid_check::record(dec, cm);
-        prediction_gen_blocks(pbi, dec);
+        let gpu_lists = prediction_gen_blocks(pbi, dec);
         perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_GEN_BLOCKS as usize, perf_t);
         idct_run(dec);
         perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_IDCT as usize, perf_t);
-        prediction_run_all(dec, cm, std::ptr::null_mut());
+        prediction_run_all(dec, cm, gpu_lists);
         perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_PRED as usize, perf_t);
         loopfilter_gpu(dec, cm, &raw mut (*pbi).mb);
         perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_LOOPFILTER as usize, perf_t);
