@@ -101,3 +101,14 @@ output fence. Nothing has to be reset between streams.
 `frames_in_parse`, `frame_slots` and `threads` at their defaults: at 3840x2160 10-bit that is 501.5
 MiB of device buffers (every low memory part above 1920x1088 since package 0.2.193), two frames in
 parse, three slots, two threads.
+
+## Loading the library at run time: the interface version
+
+`rav1g_abi_version()` returns `RAV1G_ABI_VERSION` of the `rav1g.h` the library was built with. A loader
+(`LoadPackagedLibrary`, `GetProcAddress`) calls it first and refuses a library whose value is not the
+`RAV1G_ABI_VERSION` of the header it was compiled with. The number is raised whenever a declaration of
+the header changes (a struct, an enum, a function), not for a constant, a comment or a change inside the
+library: `rav1g-header --check` (CI) fails when the declarations of the header have changed and the
+number has not (`tools/rav1g-header/abi.txt` has the fingerprint of the declarations of each version).
+Version 1 is the interface since package 0.2.202; a library older than that has no `rav1g_abi_version`,
+and a loader that finds no such export refuses it too. `rav1g_version()` is the text for a log.

@@ -12,6 +12,13 @@
 //! cbindgen; `cargo run -p rav1g-header -- --check` fails when the file in the tree is not what it would
 //! write (CI runs that). The program builds for the machine it runs on: it needs neither Windows nor the
 //! decoder.
+//!
+//! The interface version: `RAV1G_ABI_VERSION` of `capi.rs`, which `rav1g_abi_version` returns, is
+//! raised whenever a declaration of the header changes. `abi.txt` has, for each version, the
+//! fingerprint of the header's declarations (the text without comments and preprocessor lines, its
+//! white space folded, FNV-1a 64); `--check` fails when the declarations of the header have a
+//! fingerprint that is not the one of its version, so a change of the interface cannot go out under the
+//! version of another. The program prints the fingerprint, for the line of a new version.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -94,6 +101,47 @@ fn generate(source: &Path) -> Result<String, String> {
     String::from_utf8(text).map_err(|error| format!("the header is not UTF-8: {error}"))
 }
 
+/// The declarations of a header: the text without comments and preprocessor lines, white space folded.
+fn declarations(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix("/*") {
+            rest = after.find("*/").map_or("", |end| &after[end + 2..]);
+        } else if let Some(after) = rest.strip_prefix("//") {
+            rest = after.find('\n').map_or("", |end| &after[end..]);
+        } else {
+            let c = rest.chars().next().unwrap_or(' ');
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    out.lines()
+        .filter(|line| !line.trim_start().starts_with('#'))
+        .flat_map(str::split_whitespace)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// FNV-1a, 64 bits.
+fn fingerprint(text: &str) -> u64 {
+    text.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// `RAV1G_ABI_VERSION` as the header defines it.
+fn abi_version(text: &str) -> Option<u32> {
+    text.lines().find_map(|line| line.trim().strip_prefix("#define RAV1G_ABI_VERSION ")?.trim().parse().ok())
+}
+
+/// The fingerprint `abi.txt` has for a version: lines of "<version> <fingerprint in hex>".
+fn recorded(table: &str, version: u32) -> Option<u64> {
+    table.lines().find_map(|line| {
+        let mut words = line.split_whitespace();
+        (words.next()?.parse::<u32>().ok()? == version)
+            .then(|| u64::from_str_radix(words.next()?.trim_start_matches("0x"), 16).ok())?
+    })
+}
+
 fn main() -> ExitCode {
     let check = match std::env::args().nth(1).as_deref() {
         None => false,
@@ -113,6 +161,35 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // The version of the interface and the fingerprint of its declarations.
+    let print = fingerprint(&declarations(&text));
+    let Some(version) = abi_version(&text) else {
+        eprintln!("rav1g-header: the header has no RAV1G_ABI_VERSION (capi.rs)");
+        return ExitCode::from(2);
+    };
+    let table_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("abi.txt");
+    let table = std::fs::read_to_string(&table_path).unwrap_or_default();
+    match recorded(&table, version) {
+        Some(expected) if expected == print => {
+            println!("RAV1G_ABI_VERSION {version}: the declarations have the fingerprint of the version ({print:016x})")
+        }
+        Some(expected) => {
+            eprintln!(
+                "rav1g-header: the declarations of rav1g.h changed (fingerprint {print:016x}, version {version} has \
+                 {expected:016x}): raise RAV1G_ABI_VERSION in crates/rav1g/src/capi.rs and add the line \
+                 \"{} {print:016x}\" to tools/rav1g-header/abi.txt",
+                version + 1
+            );
+            return ExitCode::FAILURE;
+        }
+        None => {
+            eprintln!(
+                "rav1g-header: tools/rav1g-header/abi.txt has no line for RAV1G_ABI_VERSION {version}: add \
+                 \"{version} {print:016x}\""
+            );
+            return ExitCode::FAILURE;
+        }
+    }
     if check {
         let current = std::fs::read_to_string(&header).unwrap_or_default();
         if current.replace("\r\n", "\n") == text {

@@ -352,6 +352,14 @@ typedef struct av1_stage_dump av1_stage_dump;
 #define RAV1G_OUTPUT_SEMI_PLANAR 1
 
 /*
+ The version of the interface of this header: raised whenever a declaration of `rav1g.h` changes (a
+ struct, an enum, a function), and not for a constant, a comment or a change inside the library.
+ `rav1g_abi_version` returns the value the library was built with; an application that loads the
+ library at run time compares the two and refuses a library with another value.
+ */
+#define RAV1G_ABI_VERSION 1
+
+/*
  How a call ended.
  */
 typedef enum Rav1gStatus {
@@ -949,6 +957,12 @@ extern "C" {
  "MEMORY FAILED" line. Valid until the next such call on the thread.
  */
 const char *rav1g_last_error(void);
+
+/*
+ `RAV1G_ABI_VERSION` of the `rav1g.h` the library was built with. A loader compares it with the
+ constant of the header it was compiled with before it uses anything else of the library.
+ */
+uint32_t rav1g_abi_version(void);
 
 /*
  The version of the library and what it was built with, for a log:

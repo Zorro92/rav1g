@@ -763,6 +763,19 @@ pub extern "C" fn rav1g_last_error() -> *const c_char {
     LAST_ERROR.with(|last| last.borrow().as_ptr())
 }
 
+/// The version of the interface of this header: raised whenever a declaration of `rav1g.h` changes (a
+/// struct, an enum, a function), and not for a constant, a comment or a change inside the library.
+/// `rav1g_abi_version` returns the value the library was built with; an application that loads the
+/// library at run time compares the two and refuses a library with another value.
+pub const RAV1G_ABI_VERSION: u32 = 1;
+
+/// `RAV1G_ABI_VERSION` of the `rav1g.h` the library was built with. A loader compares it with the
+/// constant of the header it was compiled with before it uses anything else of the library.
+#[unsafe(no_mangle)]
+pub extern "C" fn rav1g_abi_version() -> u32 {
+    RAV1G_ABI_VERSION
+}
+
 /// The version of the library and what it was built with, for a log:
 /// "rav1g 0.4.0, the Rust host; entropy decoder: MSVC, /GL, DLL runtime; shaders: FXC cs_5_0". The
 /// shaders of the DXC experiment are named by their compiler: "shaders: DXC 1.9.2602.17 cs_6_0".
