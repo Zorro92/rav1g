@@ -442,6 +442,7 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
     let gpu_clear_grids = dec.gpu_clear_grids != 0;
     let gpu_cdef_lists = dec.gpu_cdef_lists != 0;
     let gpu_grid_check = dec.gpu_grid_check != 0;
+    let gpu_grid = dec.gpu_grid != 0;
     dec.max_width = target_width;
     dec.max_height = target_height;
     dec.max_bitdepth = cfg.bitdepth;
@@ -655,12 +656,13 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
                 HostRW,
                 c"mode_info_grid",
                 i,
-                gpu_clear_grids
+                gpu_clear_grids || gpu_grid
             )
         );
         // The check of the grid (`Av1Core::gpu_grid_check`): the second grid, which a pass of the command
-        // list writes and the completion thread reads, and the runs of the frame's records, which the
-        // thread that records writes and the pass reads: at most one a chunk of the mode info pool.
+        // list writes and the completion thread reads. With it, and in a decoder whose grid that pass
+        // builds (`Av1Core::gpu_grid`), the runs of the frame's records, which the thread that records
+        // writes and the pass reads: at most one a chunk of the mode info pool.
         if gpu_grid_check {
             request!(
                 assign,
@@ -673,6 +675,8 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
                     true
                 )
             );
+        }
+        if gpu_grid_check || gpu_grid {
             request!(
                 assign,
                 td.mi_runs,
@@ -1204,6 +1208,14 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
             c_int::from(cfg.parser_options & crate::sys::AV1_PARSER_OPTION_GPU_CDEF_LISTS as c_int != 0);
         (*dec).gpu_grid_check =
             c_int::from(cfg.parser_options & crate::sys::AV1_PARSER_OPTION_GPU_GRID_CHECK as c_int != 0);
+        // The grid built by the GPU: the parse writes none, so nothing on the CPU may read it. The thread
+        // that records would for the lists of CDEF, so those are the GPU's too, and the check has no
+        // grid of the parse to hold the GPU's against.
+        (*dec).gpu_grid = c_int::from(cfg.parser_options & crate::sys::AV1_PARSER_OPTION_GPU_GRID as c_int != 0);
+        if (*dec).gpu_grid != 0 {
+            (*dec).gpu_cdef_lists = 1;
+            (*dec).gpu_grid_check = 0;
+        }
         (*dec).frame_slots = rcfg.gpu_pipeline_depth;
 
         // The decoder takes a reference of the device and of the queue the application gave.

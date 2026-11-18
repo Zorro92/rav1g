@@ -129,7 +129,8 @@ pub struct compute_shader_lib {
     pub shader_filmgrain_filter_sp_tex: ComputeShader,
     // The lists of CDEF from the mode info (`postfilter.rs`, `Av1Core::gpu_cdef_lists`).
     pub shader_cdef_lists: ComputeShader,
-    // The mode info grid from the records, for the check of the grid (`grid_check.rs`).
+    // The mode info grid from the records (`grid_check.rs`): the grid of the slot in a decoder whose
+    // parse writes none (`Av1Core::gpu_grid`), or a second grid for the check of the pass.
     pub shader_mi_grid_build: ComputeShader,
     pub shader_fill_buffer: ComputeShader,
     pub shader_gen_pred_blocks: ComputeShader,
@@ -243,9 +244,11 @@ pub struct av1_frame_thread_data {
     pub loop_rest_wiener: *mut GpuBufferObject,
     pub cdef_indexes: *mut GpuBufferObject,
     pub cdef_skips: *mut GpuBufferObject,
-    /// With the check of the grid (`Av1Core::gpu_grid_check`): the grid the GPU builds, and the runs of
-    /// the frame's records it reads (`grid_check.rs`); null otherwise.
+    /// With the check of the grid (`Av1Core::gpu_grid_check`): the grid the GPU builds (`grid_check.rs`);
+    /// null otherwise.
     pub mode_info_grid_gpu: *mut GpuBufferObject,
+    /// The runs of the frame's records the pass that builds a grid reads (with the check, or with
+    /// `Av1Core::gpu_grid`); null otherwise.
     pub mi_runs: *mut GpuBufferObject,
     /// The frame whose grids are held against each other when it is done: 1 when the pass is recorded,
     /// and the frame's mi_stride, mi_cols and mi_rows.
@@ -565,6 +568,12 @@ pub struct Av1Core {
     /// the grid of the parse when the frame is done.
     pub gpu_grid_check: c_int,
     pub grid_check: super::grid_check::GridCheck,
+    /// The mode info grid of every slot is built by a pass of the frame's command list from the frame's
+    /// records, in front of the stages (`AV1_PARSER_OPTION_GPU_GRID`, `grid_check::record`), and the
+    /// parse writes none: the grid is then a buffer a command list may write. Such a decoder has the
+    /// lists of CDEF by the GPU (`gpu_cdef_lists`) and no check of the grid, whatever its switches say:
+    /// no thread of the CPU reads the grid.
+    pub gpu_grid: c_int,
     /// The statistics of `-memstats` (`mem_stats.rs`).
     pub mem_stats: super::mem_stats::MemStats,
     /// The worst case in bytes of the buffers of the stages that grow with the frames

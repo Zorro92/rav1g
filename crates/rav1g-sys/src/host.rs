@@ -175,7 +175,9 @@ pub struct macroblockd {
     pub plane: [macroblockd_plane; 3],
     pub tile: TileInfo,
     pub mi_stride: c_int,
-    /// The entry of the block in the mode info grid; the entries of its neighbours are around it.
+    /// The entry of the block in the mode info grid; the entries of its neighbours are around it. Null
+    /// when the parse threads have no grid (the GPU builds it): the block's record and the records
+    /// around it are then in the four fields at the end.
     pub mi: *mut MiGridEntry,
     /// The pool the entries of the grid name records of ([`mi_grid_record`]).
     pub mi_pool: *mut MB_MODE_INFO,
@@ -195,8 +197,22 @@ pub struct macroblockd {
     pub delta_lf: [c_int; 4],
     pub cb_offset: [u16; 3],
     pub tile_data: *mut av1_tile_data,
+    /// Without the grid (`mi` is null): the block's record.
+    pub mi_record: *mut MB_MODE_INFO,
+    /// Without the grid: the records of the blocks in the row of 4x4 units above the block, a record a
+    /// unit, from the block's first column on.
+    pub mi_above: *const *mut MB_MODE_INFO,
+    /// Without the grid: the records of the blocks in the column of 4x4 units to the left of the block,
+    /// a record a unit, by the row's place in a superblock row of 128x128 ([`MI_LEFT_EDGE`] entries: a
+    /// row's entry is at its number modulo that).
+    pub mi_left: *const *mut MB_MODE_INFO,
+    /// Without the grid: the record of the 4x4 block above and to the left of a 4x4 block in an odd row
+    /// and column, which is the first block of the 8x8 the two are in.
+    pub mi_above_left: *mut MB_MODE_INFO,
 }
 pub type MACROBLOCKD = macroblockd;
+/// The entries of [`macroblockd::mi_left`]: the 4x4 rows of a superblock of 128x128.
+pub const MI_LEFT_EDGE: usize = 32;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct loopfilter {

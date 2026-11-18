@@ -3221,12 +3221,116 @@ the mode info grid, and nothing reads what it builds yet. `-parseopt gridcheck` 
   passes, which is what the second grid is for.
 - *CI* (job `rust-switches`): the whole set with `-parseopt gridcheck`, its references, and in every
   stream's log a `GRIDCHECK` line with no unit that differs.
-- *Next* (the second part of step C): the grid of the slot built by this pass and not by the sink, which
+- *Next* (the second part of step C, [below](#the-grid-built-by-the-gpu-the-switch-2026-11-18)): the grid of the slot built by this pass and not by the sink, which
   takes the sink's stores of the grid off the parse threads (1.18 ms a frame of `d2_300`, 1.11 of
   `j4k40` on the console, [above](#the-split-of-the-sink-and-the-block-lists-on-the-console-2026-11-16));
   before that the readers of the grid on the CPU have to go (the inter part of the block lists reads
   the records above and to the left through it, the sink the CDEF index of a superblock), as the design
   says.
+
+### The grid built by the GPU: the switch (2026-11-18)
+
+The second part of step C of [the design above](#the-block-lists-on-the-gpu-a-design), behind a switch
+that is off: `-parseopt gpugrid` (`RAV1G_PARSER_OPTION_GPU_GRID`, 2048; read when the decoder is
+created). With it the mode info grid of a slot is written by the pass of
+[the check](#the-grid-built-by-the-gpu-the-check-2026-11-18) and the parse threads write none.
+
+- *The pass.* `mi_grid_build.hlsl` as it was (the shader's code is that of the check: `cs_5_0` with FXC,
+  53 instruction slots), now with the grid of the slot (`mode_info_grid`) as its target. It is the first
+  thing in the frame's command list (`grid_check::record` in `decode_frame_record`), in front of
+  `gen_pred_blocks`, the loop filter's lists, the lists of CDEF and the stage dump of the mode info,
+  which all read the grid behind it and do not change. The grid of every slot of such a decoder is a
+  buffer a command list may write (the type `HostRW` it had, as with `-gpuclear`), and every slot has the
+  runs of the frame's records (`mi_runs`). The pass has no mark of its own in `-gputime`: its time is in
+  the stage `gen_blocks`, which is marked behind it.
+- *The sink* (`SinkOptions::gpu_grid`) leaves out the stores of the grid in the block call: 1.98 MiB a
+  4K frame that the CPU no longer writes (`-memstats` counts no grid bytes for such a decoder).
+- *The readers of the grid on the CPU*, which the design lists, and what each has now:
+
+  | Reader | Read through the grid | With `gpugrid` |
+  | --- | --- | --- |
+  | `av1_mi_push_block`, inter part (`blocks.rs`): the 2x2 chroma of a block under 8x8, the neighbours of overlapped prediction | the records one unit above and to the left (`xd.mi` and offsets from it) | the edges of the tile, kept by the sink while it counts the lists (`TileState::above`, `TileState::left`): for every 4x4 column of the tile the record of the lowest block counted so far, for every 4x4 row of the superblock row that of the rightmost. The blocks are counted in the order of the parse, so these are the blocks above and to the left of the block that is counted next, as the entropy decoder's own contexts are. The one unit above *and* to the left that is read (by the last 4x4 block of an 8x8) is the first 4x4 block of that 8x8, kept by itself. A block's width and height in pointer stores for every record, where the grid took the product of the two; 8 KB a 4K tile, in the cache. The function is compiled twice, for a block context with the grid and for one with the edges, so that the code with the grid is what it was |
+  | `Sink::count_lists` | sets the block's place in the grid (`xd.mi`) | sets the block's record and the two edges (four fields at the end of `MACROBLOCKD`) |
+  | `Sink::superblock_call`: the CDEF index of a 64x64 area | the entry at the area's top left unit | the block call keeps the record of the block that has that unit (four pointers a superblock; a block of 128 has more than one area) |
+  | the late lists (`latelists`) | as `count_lists`, at the end of a tile | the same edges, filled in one pass over the tile's records |
+  | `cdef_filter_run` (`postfilter.rs`) when the lists of CDEF are the CPU's (`-parseopt nolfmask,tilethread`, `none`) | the grid and the records, four for every 8x8 block, on the thread that records, in front of the submit: before the GPU has built anything | not done: a decoder with `gpugrid` has the lists of CDEF by the GPU (`gpucdef`) whatever its list of switches says, `-parseopt none,gpugrid` too |
+  | `grid_check::compare` (`gridcheck`) | the grid of the parse against the GPU's | nothing to hold against: `gridcheck` does nothing in a decoder with `gpugrid` |
+  | The clears of the grid | | unchanged: the CPU (or the GPU, `-gpuclear`) clears the grid when the slot gets a frame of another size, or for every frame with `cleargrid`; the pass writes the units inside the frame behind that, so what is outside the frame is null as before |
+
+  With the switch off nothing of this is used, and the path of the default is the code of before.
+- *The same bytes.* The grid has to be the one the sink wrote, and the block lists counted from the
+  edges the ones counted through the grid. What holds it:
+  - `rav1g-parse-check -parseopt gpugrid` (Linux, no GPU): the parse without the grid against the
+    parse with the default switches, every mode info record (the CDEF index and `index_base` are
+    fields of it), the block lists, the index lists, and the grid the records give, built as the pass
+    builds it, against the grid the sink wrote. In CI (`parse-check`) the whole set with one thread,
+    with four, with `none,latelists,gpugrid` and with two frames in parse.
+  - the stage dumps of `-parseopt gpugrid` against those of the default switches, byte for byte
+    (`rust-dumps-equal`): `mi_grid` is copied behind the pass, so it is the GPU's grid against the
+    sink's; `mi_pool`, `pred_blocks` and `pred_blocks_warp` are the records and the lists. The dumps of
+    the default are held against the C++ decoder's by `rust-equal`.
+  - the frames: the job `rust-gpugrid` decodes the whole set with `-parseopt gpugrid` and with
+    `-parseframes 2 -parseopt none,latelists,gpugrid`, the part of the poisoned runs with the grid
+    cleared for every frame (`-gpuclear -poisonbuf -parseopt cleargrid,gpugrid -slots 3 -t 4`,
+    `-syncclear -parseopt cleargrid,gpugrid`), the player's decoder code and the decode errors in cut
+    streams.
+- *Checked locally.* `rav1g-parse-check`: the 244 vectors of AOM (665 frames, 587,790 records) equal
+  with `gpugrid` (1 and 4 threads), `gpugrid,latelists` and `none,gpugrid`; `j4k40` (1,797 frames, 23.5
+  million records), `d2_300`, `fg4k_300` (8 tile columns), `b8_720_300`, `b8_1080_300`, `t40x8` and
+  `sparks` (14,645 frames) equal with four threads and two frames in parse. Under wine on lavapipe:
+  the 244 vectors pass with `-parseopt gpugrid`, with `-parseframes 2 -t 4 -parseopt none,latelists,gpugrid`,
+  with `cleargrid,gpugrid` alone, with `-gpuclear -poisonbuf` and with `-syncclear`; 60 frames each of
+  `j4k40` and `d2_300` and 40 of `fg4k_300`, `a1_8b4k_300` and `b8_1080_300` against their references;
+  the stage dumps of 18 frames of eight streams (two of them 4K) are the same files, byte for byte,
+  with the switch, without it, and from the tree before the change.
+- *Timed locally* (ms a 4K frame; the development machine is not the console, whose memory is
+  slower: there the stores of the grid were 1.18 and 1.11 ms):
+
+  | | `d2_300` | `d2_300` with `gpugrid` | `j4k40` | `j4k40` with `gpugrid` |
+  | --- | ---: | ---: | ---: | ---: |
+  | `rav1g-parse-check -time -threads 1`, 300 frames, six rounds | | | | |
+  | sink calls | 1.10 | 0.78 | 1.16 | 0.78 |
+  | of them the grid | 0.27 | 0 | 0.31 | 0 |
+  | block lists | 1.08 | 1.17 | 2.11 | 2.27 |
+  | `rav1g-dec -hw` under wine on lavapipe, `-t 2 -parseframes 2 -gputime`, 60 frames, three rounds | | | | |
+  | `sink_calls` | 2.14 | 1.69 | 2.39 | 1.72 |
+  | `sink_grid` | 0.47 | 0 | 0.56 | 0 |
+  | `sink_lists` | 2.08 | 2.30 | 4.10 | 4.29 |
+  | GPU `gen_blocks` (a CPU rasterizer: not the console's GPU) | 1.86 | 3.34 | 2.16 | 3.99 |
+
+  The calls of the sink lose the grid and a little more (0.3 to 0.4 ms natively, 0.45 to 0.7 under
+  wine); the block lists gain the stores of the edges, 0.08 (`d2_300`) and 0.16 ms (`j4k40`) natively,
+  0.2 under wine. Net 0.25 (`d2_300`) and 0.22 ms (`j4k40`) a frame of the parse threads
+  natively, 0.23 and 0.48 under wine. The default did not move: its block lists and sink calls are
+  within 0.02 ms a frame of the tree before the change, which is what two builds differ by. (The
+  stores of the edges could still be one a block, with a search on the side of the few blocks that
+  read a neighbour; not done.)
+- *The console has to say whether it is worth being the default.* The estimate is the 1.18 (`d2_300`)
+  and 1.11 ms (`j4k40`) the grid cost there, less the edges (in the cache, so closer to the
+  development machine's 0.1 to 0.2 ms than to the cost of the grid), for a pass of 12,000 threads on the GPU
+  (under 0.3 ms by the measure of `cdef_lists`). Three interleaved rounds of, for `d2_300` and `j4k40`:
+
+  ```text
+  -i /streams/<clip>.ivf -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -output p010
+  -i /streams/<clip>.ivf -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -output p010 -parseopt gpugrid
+  -i /streams/<clip>.ivf -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -output p010 -parseopt time
+  -i /streams/<clip>.ivf -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -output p010 -parseopt time,gpugrid
+  ```
+
+  The lines to read: the frames a second of the first two; of the last two `cpu parse: sink calls`
+  (down by the grid), `cpu parse: of the calls, grid` (0 with the switch), `cpu parse: block lists` (up
+  by the edges), the thread sum, and the GPU stage `gen_blocks` (up by the pass). And in a launch of
+  its own the frames against their references with the switch (`-md5_frame_check -parseopt gpugrid`)
+  on the md5 set.
+- *Risks.* A block list counted from a wrong edge gives a wrong frame, not a crash: that is what the
+  parse check and the dumps hold on every stream of the set, with the tiles and partitions the set has.
+  The pass and the stages behind it are in one command list, so the grid is built before it is read;
+  the CPU reads none of it, and a decoder with the switch cannot have a reader on the CPU (the lists of
+  CDEF are forced to the GPU). On the console the pass is uneven work (a thread stores up to 1,024
+  units, most store a few) in front of the first stage, to be timed there. The clears of the grid by
+  the CPU and the stores of the GPU go to one buffer through two mappings, as with `-gpuclear`, which
+  the console has run. The switch adds a branch a block call and one a call of the lists to the
+  default path, and no store.
 
 ## Licence
 

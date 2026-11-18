@@ -12,8 +12,10 @@
 // entry of the record of the block that covers it, as the sink writes it on the parse threads (block_call
 // of crates/rav1g-parse/src/sink.rs): where the record starts in mi_pool, in bytes, plus cb_mi_addr_base,
 // at every unit of the block that is inside the frame. The blocks of a frame do not overlap, so every unit
-// has one writer. For now the pass writes a second grid that the host holds against the sink's
-// (AV1_PARSER_OPTION_GPU_GRID_CHECK, crates/rav1g/src/host/grid_check.rs); nothing reads it otherwise.
+// has one writer. The pass writes the grid of the slot in a decoder whose sink writes none
+// (AV1_PARSER_OPTION_GPU_GRID), in front of every stage that reads it; with the check
+// (AV1_PARSER_OPTION_GPU_GRID_CHECK) a second grid that the host holds against the sink's
+// (crates/rav1g/src/host/grid_check.rs).
 //
 // One thread a record. The frame's records lie in runs of the pool (the pieces its tiles took): runs has
 // for each run the index of its first record in the pool and the records of the runs in front of it, so

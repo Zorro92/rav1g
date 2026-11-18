@@ -153,7 +153,9 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        "three are on by default, and a list that names one of them, none or default says which are on (none: "
        "none of them; nolfmask,tilethread: without gpucdef). time, with -gputime the calls of the sink are "
        "timed, and latelists, the block lists of a tile are counted at its end and not superblock by "
-       "superblock, and cleargrid, the mode info grid is cleared for every frame, change nothing else",
+       "superblock, and cleargrid, the mode info grid is cleared for every frame, change nothing else. gpugrid: "
+       "the mode info grid is built by a pass of the GPU from the frame's records and not by the parse threads "
+       "(off by default; with it gpucdef is on)",
        "", &params_.parseopt_},
       {"continue_on_error", atSingle, anOptional,
        "after a decode call that fails, go on with the next temporal unit in the same decoder instead of "
@@ -251,7 +253,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
 
   // -parseopt: words separated by commas; a word that is none of them is an error of the task. A word
   // that names the three default switches (nolfmask, tilethread, gpucdef, none, default) replaces the
-  // default of the three; time, latelists and cleargrid add to whatever they are
+  // default of the three; time, latelists, cleargrid and gpugrid add to whatever they are
   // (rav1g::ParserOptions::from_words reads the list the same way).
   params_.parser_options_ = 0;
   bool ways_named = false;
@@ -265,6 +267,8 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       params_.parser_options_ |= PLAYER_PARSEOPT_LATE_LISTS;
     } else if (word == "cleargrid") {
       params_.parser_options_ |= PLAYER_PARSEOPT_CLEAR_GRID;
+    } else if (word == "gpugrid") {
+      params_.parser_options_ |= PLAYER_PARSEOPT_GPU_GRID;
     } else if (word == "gpucdef") {
       params_.parser_options_ |= PLAYER_PARSEOPT_GPU_CDEF_LISTS;
       ways_named = true;
@@ -280,8 +284,8 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     } else if (word == "none") {
       ways_named = true;
     } else {
-      Err += "-parseopt takes nolfmask, tilethread, gpucdef, time, latelists, cleargrid, default or none, separated "
-             "by commas, not \"";
+      Err += "-parseopt takes nolfmask, tilethread, gpucdef, time, latelists, cleargrid, gpugrid, default or none, "
+             "separated by commas, not \"";
       Err += word;
       Err += "\"";
       return -1;

@@ -35,6 +35,9 @@
 //! `-parseopt` takes the switches of the parser of phase 2 (`rav1g_parse::options`: `nolfmask` and
 //! `tilethread`, which are on without it, `none`, `default`, `latelists`), separated by commas: the
 //! buffers have to be the same with each of them. With `-time`, `time` adds the time of the sink's calls.
+//! With `gpugrid` the sink of the run that is checked writes no grid and gives the block lists the
+//! records at the edges of the tiles; its grid is then built here from its records, as the pass of the
+//! GPU builds it in the decoder, and held against the reference's like every other buffer.
 //!
 //! `-wave` says where the host's function keeps the wavefront of intra prediction
 //! (`crates/rav1g/src/host/blocks.rs`): `edges` (the default, as in the decoder: in the edges of the
@@ -220,6 +223,10 @@ fn check(path: &Path, options: &Options) -> Result<Report, String> {
             });
         }
         for (reference_frame, checked_frame) in reference_frames.iter().zip(&checked_frames) {
+            if options.parse.gpu_grid {
+                // The sink of the run that is checked wrote no grid: the grid its records give.
+                compare::build_grid(checked_frame);
+            }
             compare::frame(&mut report, number, reference_frame, checked_frame);
             number += 1;
         }

@@ -225,6 +225,7 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
 #define AV1_PARSER_OPTION_TEST_POOL_WAIT 128  /* test only: a frame finds the pools empty while an older frame holds a piece */
 #define AV1_PARSER_OPTION_GPU_CDEF_LISTS 512  /* the lists CDEF reads are written by a pass of the GPU, not by the thread that records */
 #define AV1_PARSER_OPTION_GPU_GRID_CHECK 1024 /* a check: the GPU builds the mode info grid into a second grid, held against the sink's */
+#define AV1_PARSER_OPTION_GPU_GRID 2048       /* the mode info grid is built by a pass of the GPU from the records, not written by the sink */
 
 /* aom_codec_dec_cfg_t::frames_in_parse: the most the decoder takes. */
 #define AV1_FRAMES_IN_PARSE_MAX 4

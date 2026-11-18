@@ -477,7 +477,7 @@ span exactly**, and any gap between two stages is counted in the later one.
 
 | GPU stage | What it covers |
 | --- | --- |
-| `gen_blocks` | prediction block generation |
+| `gen_blocks` | prediction block generation; with `-parseopt gpugrid` (and `gridcheck`) also the pass in front of it that builds the mode info grid from the records (`mi_grid_build`), which has no mark of its own |
 | `residual_clear` | residual buffer fill (the whole buffer, every frame) |
 | `idct_sort`, `idct` | transform block sort, inverse transform (all types) |
 | `inter`, `recon` | inter prediction (all passes); `recon` adds the residuals of the blocks whose prediction is not final when their inter shader ends (overlapped prediction) and of palette blocks. The other inter blocks get their residuals in the inter shader. |
@@ -500,7 +500,7 @@ CPU timers (QueryPerformanceCounter, all in ms per frame):
 | --- | --- |
 | `entropy_wall`, `entropy_sum` | tile (entropy) decode: wall time on the decode thread, and the sum over the tile threads. `sum / wall` is the parallelism actually reached. |
 | `sink_lists`, `sink_calls` | with rav1d's parse (not with `-parser c`), parts of `entropy_sum`: see [Switches of the parser](#switches-of-the-parser--parseopt) |
-| `sink_grid`, `sink_intra` | with `-parseopt time`: of `sink_calls` the entries of the mode info grid the block calls write, and of `sink_lists` the wavefront and the lists of intra prediction (the part of `av1_mi_push_block` behind the inter blocks' lists); since package 0.2.198 |
+| `sink_grid`, `sink_intra` | with `-parseopt time`: of `sink_calls` the entries of the mode info grid the block calls write, and of `sink_lists` the wavefront and the lists of intra prediction (the part of `av1_mi_push_block` behind the inter blocks' lists); since package 0.2.198. With `-parseopt gpugrid` the parse threads write no grid: `sink_grid` is 0 |
 | `record` | recording the frame's command list, waits excluded. `rec_gen_blocks`, `rec_idct`, `rec_pred`, `rec_loopfilter`, `rec_cdef_lr`, `rec_borders`, `rec_copy` split it by host function (`rec_copy` still contains `wait_output` and `wait_image`). |
 | `submit` | `Close`, `ExecuteCommandLists`, `Signal` |
 | `memset`, `memset_tile` | the per-frame and per-tile memsets on the decode and tile threads; the summary also gives the MB cleared per frame |
@@ -1313,7 +1313,8 @@ them. Two are on by default since package 0.2.139.0 and a third, `gpucdef`, sinc
 | `time` | off | With `-gputime`: the calls of the sink are timed (`sink_calls`, below). Two readings of the processor's time stamp counter per block and per transform block. |
 | `latelists` | off | The block lists of a tile are counted in one pass at the end of the tile, as up to package 0.2.140, and not superblock by superblock while the superblock's mode info is in the cache. |
 | `cleargrid` | off | The mode info grid of a pipeline slot is cleared for every frame (4.2 MB at 4K), as up to package 0.2.140, and not only for a frame of another size than the frames before it on the slot. |
-| `gridcheck` | off | `rav1g-dec` only (the test player does not take the word). A check, not a way of doing the parse: a pass in front of the frame's stages (`mi_grid_build.hlsl`) builds the mode info grid from the frame's records into a second grid of the slot, and the decoder holds it against the grid the parse wrote when the frame is done; at its release a `GRIDCHECK` line says how many frames and units were held and how many differed (an error line when any did). The first step of the grid built by the GPU ([phase2-rav1d.md](phase2-rav1d.md#the-grid-built-by-the-gpu-the-check-2026-11-18)). Every slot has the second grid and a list of the frame's runs of records. |
+| `gpugrid` | off | The mode info grid of a frame (for every 4x4 unit the record of its block, 1.98 MiB a 4K frame) is built by a pass of the frame's command list from the frame's mode info records (`mi_grid_build.hlsl`, in front of every stage that reads the grid; its GPU time is in the stage `gen_blocks` of `-gputime`) and not written by the parse threads: `sink_grid` is then 0 and `sink_calls` smaller by it (1.18 ms a frame of `d2_300` and 1.11 of `j4k40` on the console before the switch). What the parse threads read through the grid they get from the edges of the tile. The same grid, records and lists. Read when the decoder is created: the grid of a slot is then a buffer a command list may write, and the decoder has the lists of CDEF by the GPU as with `gpucdef`, whatever the list says (`-parseopt none,gpugrid` too), because no thread of the CPU may read the grid ([phase2-rav1d.md](phase2-rav1d.md#the-grid-built-by-the-gpu-the-switch-2026-11-18)). Off until the console has timed it. |
+| `gridcheck` | off | `rav1g-dec` only (the test player does not take the word). A check, not a way of doing the parse: a pass in front of the frame's stages (`mi_grid_build.hlsl`) builds the mode info grid from the frame's records into a second grid of the slot, and the decoder holds it against the grid the parse wrote when the frame is done; at its release a `GRIDCHECK` line says how many frames and units were held and how many differed (an error line when any did). The first step of the grid built by the GPU ([phase2-rav1d.md](phase2-rav1d.md#the-grid-built-by-the-gpu-the-check-2026-11-18)). Every slot has the second grid and a list of the frame's runs of records. Nothing to check with `gpugrid`, which leaves no grid of the parse: the word does nothing then. |
 
 `-parseopt <word>[,<word>...]` says which are on:
 
@@ -1322,8 +1323,8 @@ them. Two are on by default since package 0.2.139.0 and a third, `gpucdef`, sinc
   all three off (rav1d's parse as upstream schedules it, the lists of CDEF by the thread that
   records), `-parseopt nolfmask,tilethread` leaves `gpucdef` off (the default up to package 0.2.196),
   `-parseopt tilethread` leaves only `tilethread` on, `-parseopt default` is the same as no flag.
-- `time`, `latelists` and `cleargrid` are off by default; each is on when the list has it and
-  changes nothing else: `-parseopt time` is the default, timed; `-parseopt none,time` is the parse
+- `time`, `latelists`, `cleargrid` and `gpugrid` are off by default; each is on when the list has it and
+  changes nothing else (`-parseopt time,gpugrid` is the default with the grid built by the GPU, timed): `-parseopt time` is the default, timed; `-parseopt none,time` is the parse
   without the three, timed; `-parseopt latelists,cleargrid` is the default with the block lists and the grid
   clear as they were up to package 0.2.140
   ([phase2-rav1d.md](phase2-rav1d.md#block-lists-and-clears-less-memory-traffic)).
@@ -1344,6 +1345,7 @@ them. Two are on by default since package 0.2.139.0 and a third, `gpucdef`, sinc
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt latelists
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt cleargrid
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt nolfmask,tilethread
+-i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt time,gpugrid
 ```
 
 The log has `Parser switches (-parseopt): ...` behind the `Parser:` line (`nolfmask tilethread gpucdef`

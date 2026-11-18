@@ -57,6 +57,9 @@
 #define PLAYER_PARSEOPT_LATE_LISTS 16
 #define PLAYER_PARSEOPT_CLEAR_GRID 32
 #define PLAYER_PARSEOPT_GPU_CDEF_LISTS 512
+// gpugrid: the mode info grid of a frame is built by a pass of the GPU from the frame's records and not by the
+// parse threads (off by default; such a decoder has gpucdef on whatever the list says).
+#define PLAYER_PARSEOPT_GPU_GRID 2048
 #define PLAYER_PARSEOPT_DEFAULT \
   (PLAYER_PARSEOPT_NO_LF_MASKS | PLAYER_PARSEOPT_TILE_KEEPS_THREAD | PLAYER_PARSEOPT_GPU_CDEF_LISTS)
 // The size the decoder is created for with -nofitsize, and for a stream that is larger than this.

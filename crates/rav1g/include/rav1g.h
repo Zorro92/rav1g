@@ -159,6 +159,17 @@ typedef struct av1_stage_dump av1_stage_dump;
 #define RAV1G_PARSER_OPTION_GPU_GRID_CHECK 1024
 
 /*
+ The mode info grid of a frame (for every 4x4 unit the record of its block) is built by a pass of the
+ frame's command list from the frame's mode info records, in front of every stage that reads it, and
+ not written by the threads that parse (1.98 MiB a 4K frame, 1.1 to 1.2 ms a frame of those threads on
+ the console). The grid is the same. Read when the decoder is created: the grid of every pipeline slot
+ is then a buffer the GPU may write, and the decoder works as with
+ `RAV1G_PARSER_OPTION_GPU_CDEF_LISTS`, set or not. Off in `RAV1G_PARSER_OPTIONS_DEFAULT` until a
+ device has timed it.
+ */
+#define RAV1G_PARSER_OPTION_GPU_GRID 2048
+
+/*
  The most frames a decoder parses at the same time (`Rav1gSettings::frames_in_parse`).
  */
 #define RAV1G_FRAMES_IN_PARSE_MAX 4

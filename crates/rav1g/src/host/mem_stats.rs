@@ -353,7 +353,12 @@ pub(crate) unsafe fn frame_recorded(dec: *mut Av1Core, cm: &AV1_COMMON) {
         };
         let cpu: [u64; CPU] = [
             items[0] * size_of::<MB_MODE_INFO>() as u64,
-            (cm.mi_cols * cm.mi_rows).max(0) as u64 * size_of::<crate::sys::MiGridEntry>() as u64,
+            // The grid: none of the CPU's bytes in a decoder whose command lists build it.
+            if (*dec).gpu_grid == 0 {
+                (cm.mi_cols * cm.mi_rows).max(0) as u64 * size_of::<crate::sys::MiGridEntry>() as u64
+            } else {
+                0
+            },
             items[1] * 4,
             items[2] * 16,
             items[INDEX] * 4,

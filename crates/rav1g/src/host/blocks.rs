@@ -83,9 +83,9 @@ use crate::sys::{
     AV1_PERF_INTER_COMP_WARP_DIFF_UV, AV1_PERF_INTER_OBMC_ABOVE, AV1_PERF_INTER_OBMC_LEFT, AV1_PERF_INTER_SINGLE,
     AV1_PERF_INTER_SINGLE_COPY, AV1_PERF_INTER_WARP, AV1Decoder, BILINEAR, BLOCK_4X4, BLOCK_4X8, BLOCK_4X16, BLOCK_8X4,
     BLOCK_8X8, BLOCK_8X16, BLOCK_16X4, BLOCK_16X8, BLOCK_32X32, COMPOUND_DIFFWTD, COMPOUND_WEDGE, GLOBAL_GLOBALMV,
-    GLOBALMV, INTRA_FRAME, MACROBLOCKD, MB_MODE_INFO, OBMC_CAUSAL, REF_NO_SCALE, SCALE_SUBPEL_BITS, mi_grid_record,
+    GLOBALMV, INTRA_FRAME, MACROBLOCKD, MB_MODE_INFO, MI_LEFT_EDGE, OBMC_CAUSAL, REF_NO_SCALE, SCALE_SUBPEL_BITS,
     SINGLE_INTER_MODE_END, SINGLE_INTER_MODE_START, TX_4X4, TX_16X32, TX_16X64, TX_32X16, TX_32X32, TX_32X64, TX_64X16,
-    TX_64X32, TX_64X64, UV_CFL_PRED, WARPED_CAUSAL, av1_tile_data, int_mv,
+    TX_64X32, TX_64X64, UV_CFL_PRED, WARPED_CAUSAL, av1_tile_data, int_mv, mi_grid_record,
 };
 
 // What an intra mode reads of its neighbours, one bit per mode. testing/intra_check reads these five lines
@@ -559,6 +559,19 @@ impl IntraPlane {
 /// (`av1_tile_data::frame_data`). The decoder is not looked at.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn av1_mi_push_block(_pbi: *mut AV1Decoder, cm: *mut AV1_COMMON, xd: *mut MACROBLOCKD) {
+    // The function twice, once for each way of finding the records: the one with the grid is the code it
+    // was before a parse could be without one (the choice is a constant in it, not a test for every
+    // neighbour).
+    // SAFETY: the caller's contract.
+    unsafe { if (*xd).mi.is_null() { push_block::<false>(cm, xd) } else { push_block::<true>(cm, xd) } }
+}
+
+/// [`av1_mi_push_block`]. `HAS_GRID`: the block context has the block's place in the mode info grid
+/// (`MACROBLOCKD::mi`); without it, the block's record and the records at the edges of the tile.
+///
+/// # Safety
+/// As for [`av1_mi_push_block`].
+unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBLOCKD) {
     // SAFETY: the caller's contract. The frame data is shared by the tile threads and only read here; the
     // tile data, the block's mode info and the parts of the wavefront grids the tile covers belong to
     // this thread. The mode info of the neighbours is read while the pointer to the block's own is not
@@ -573,11 +586,31 @@ pub unsafe extern "C" fn av1_mi_push_block(_pbi: *mut AV1Decoder, cm: *mut AV1_C
         // The edges of the tile's wavefront; null when the frame keeps the wavefront in the slot's grid.
         let wave = tile.wave_edges.cast::<WaveEdges>();
 
-        // The grid has the entries of the records (`mi_grid_record`).
-        let record = |offset: c_int| mi_grid_record(xd.mi_pool, *xd.mi.offset(offset as isize));
-        (*record(0)).index_base = tile.gen_index_ptr;
-        let mi = &*record(0);
-        let neighbour = |offset: c_int| &*record(offset);
+        // The grid has the entries of the records (`mi_grid_record`). A parse without a grid (the GPU
+        // builds it, `-parseopt gpugrid`) gives the block's record by itself.
+        let has_grid = HAS_GRID;
+        let own = if has_grid { mi_grid_record(xd.mi_pool, *xd.mi) } else { xd.mi_record };
+        (*own).index_base = tile.gen_index_ptr;
+        let mi = &*own;
+        // The record of the block at the 4x4 unit `rows` below and `cols` to the right of the block's first
+        // one: the block itself, or a unit of the row above it or of the column to its left, which are
+        // all this function reads. With the grid, the grid's entry there. Without it, what the sink keeps
+        // at the edges of the tile: the lowest block of every column so far and the rightmost block of
+        // every row of the superblock row, which are the blocks above and to the left of the block that is
+        // counted (the blocks of a tile come in the order of the parse), and the first 4x4 block of the
+        // 8x8 for the one unit that is above and to the left.
+        let neighbour = |rows: c_int, cols: c_int| -> &MB_MODE_INFO {
+            if has_grid {
+                &*mi_grid_record(xd.mi_pool, *xd.mi.offset((rows * xd.mi_stride + cols) as isize))
+            } else if rows < 0 {
+                if cols < 0 { &*xd.mi_above_left } else { &**xd.mi_above.offset(cols as isize) }
+            } else if cols < 0 {
+                &**xd.mi_left.add((mi.mi_row + rows) as usize % MI_LEFT_EDGE)
+            } else {
+                debug_assert!(rows == 0 && cols == 0);
+                mi
+            }
+        };
         let bsize = mi.sb_type;
         let bw_log = c_int::from(MI_SIZE_WIDE_LOG2[bsize as usize]);
         let bh_log = c_int::from(MI_SIZE_HIGH_LOG2[bsize as usize]);
@@ -695,8 +728,8 @@ pub unsafe extern "C" fn av1_mi_push_block(_pbi: *mut AV1Decoder, cm: *mut AV1_C
                 if sub8x8 {
                     let dy = if bh_log == 0 { -1 } else { 0 };
                     let dx = if bw_log == 0 { -1 } else { 0 };
-                    for offset in [dx + dy * xd.mi_stride, dx, dy * xd.mi_stride] {
-                        sub8x8 &= neighbour(offset).ref_frame[0] > INTRA;
+                    for (rows, cols) in [(dy, dx), (0, dx), (dy, 0)] {
+                        sub8x8 &= neighbour(rows, cols).ref_frame[0] > INTRA;
                     }
                 }
 
@@ -704,11 +737,11 @@ pub unsafe extern "C" fn av1_mi_push_block(_pbi: *mut AV1Decoder, cm: *mut AV1_C
                     let brows = if bh_log == 2 { 4 } else { 2 };
                     let bcols = if bw_log == 2 { 4 } else { 2 };
                     for row in 0..brows {
-                        let mi_index = (if bh_log == 0 { row - 1 } else { 0 }) * xd.mi_stride;
-                        let sub_mi = neighbour(mi_index);
+                        let sub_row = if bh_log == 0 { row - 1 } else { 0 };
+                        let sub_mi = neighbour(sub_row, 0);
 
                         if bw_log == 0 {
-                            let sub_mi0 = neighbour(mi_index - 1);
+                            let sub_mi0 = neighbour(sub_row, -1);
                             let is_compound1 = c_int::from(sub_mi.ref_frame[1] > INTRA);
                             let is_compound0 = c_int::from(sub_mi0.ref_frame[1] > INTRA);
                             let differ = c_int::from(is_compound0 != is_compound1);
@@ -791,8 +824,8 @@ pub unsafe extern "C" fn av1_mi_push_block(_pbi: *mut AV1Decoder, cm: *mut AV1_C
                         bsize > BLOCK_16X8 as u8 && bsize != BLOCK_4X16 as u8 && bsize != BLOCK_16X4 as u8;
                     let mut col = 0;
                     while col < x_mis && count < MAX_NEIGHBOR_OBMC[bw_log as usize] {
-                        let mut above = col - xd.mi_stride;
-                        let mut w = c_int::from(MI_SIZE_WIDE_LOG2[neighbour(above).sb_type as usize]);
+                        let mut above = col;
+                        let mut w = c_int::from(MI_SIZE_WIDE_LOG2[neighbour(-1, above).sb_type as usize]);
                         if w == 0 {
                             w = 1;
                             above += 1;
@@ -800,7 +833,7 @@ pub unsafe extern "C" fn av1_mi_push_block(_pbi: *mut AV1Decoder, cm: *mut AV1_C
                         if w > bw_log {
                             w = bw_log;
                         }
-                        let above_mi = neighbour(above);
+                        let above_mi = neighbour(-1, above);
                         if above_mi.ref_frame[0] > INTRA {
                             count += 1 + c_int::from(w == 5);
                             let type_index_y = (ObmcAbove - 1) * SIZES + ((w << 2) | h);
@@ -848,16 +881,16 @@ pub unsafe extern "C" fn av1_mi_push_block(_pbi: *mut AV1Decoder, cm: *mut AV1_C
                     let wuv = if w == 0 { 0 } else { w - 1 };
                     let mut row = 0;
                     while row < y_mis && count < MAX_NEIGHBOR_OBMC[bh_log as usize] {
-                        let mut left = xd.mi_stride * row - 1;
-                        let mut h = c_int::from(MI_SIZE_HIGH_LOG2[neighbour(left).sb_type as usize]);
+                        let mut left = row;
+                        let mut h = c_int::from(MI_SIZE_HIGH_LOG2[neighbour(left, -1).sb_type as usize]);
                         if h == 0 {
                             h = 1;
-                            left += xd.mi_stride;
+                            left += 1;
                         }
                         if h > bh_log {
                             h = bh_log;
                         }
-                        let left_mi = neighbour(left);
+                        let left_mi = neighbour(left, -1);
                         if left_mi.ref_frame[0] > INTRA {
                             count += 1 + c_int::from(h == 5);
 

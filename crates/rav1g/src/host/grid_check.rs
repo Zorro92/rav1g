@@ -6,13 +6,19 @@
 // License 1.0 was not distributed with this source code in the PATENTS file, you can obtain it at
 // www.aomedia.org/license/patent.
 
-//! The check of the mode info grid built by the GPU (`-parseopt gridcheck`,
-//! `AV1_PARSER_OPTION_GPU_GRID_CHECK`): the first step of building the grid on the GPU instead of on the
-//! parse threads (docs/phase2-rav1d.md, "The block lists on the GPU: a design", step C). A pass in front
-//! of the frame's stages (`mi_grid_build.hlsl`) builds the grid from the frame's mode info records into a
-//! second grid of the slot; when the frame is done, the completion thread holds that grid against the one
-//! the sink wrote, unit by unit, and the decoder's release says how many units differed (`GRIDCHECK`).
-//! Nothing else reads the second grid, so the frames are the same with and without the check.
+//! The mode info grid built by the GPU (docs/phase2-rav1d.md, "The block lists on the GPU: a design",
+//! step C): a pass in front of the frame's stages (`mi_grid_build.hlsl`) builds the grid from the frame's
+//! mode info records.
+//!
+//! - `-parseopt gpugrid` (`AV1_PARSER_OPTION_GPU_GRID`): the pass writes the grid of the slot, the one
+//!   every stage reads, and the sink writes none (`SinkOptions::gpu_grid`): the stores of the grid are
+//!   off the parse threads. No thread of the CPU reads the grid in such a decoder.
+//! - `-parseopt gridcheck` (`AV1_PARSER_OPTION_GPU_GRID_CHECK`), the step before it: the pass writes a
+//!   second grid of the slot; when the frame is done, the completion thread holds that grid against the
+//!   one the sink wrote, unit by unit, and the decoder's release says how many units differed
+//!   (`GRIDCHECK`). Nothing else reads the second grid, so the frames are the same with and without the
+//!   check. Not with `gpugrid`, which leaves no grid of the parse to hold against: there the stage dump
+//!   `mi_grid`, taken behind the pass, is held against the dump of a decoder whose sink writes the grid.
 
 use std::ffi::c_int;
 
@@ -48,20 +54,23 @@ pub struct GridCheck {
     pub first_gpu: u32,
 }
 
-/// Records the pass that builds the grid of the frame in the slot's second grid, in front of the frame's
-/// stages, and keeps the frame's size for [`compare`]. Nothing when the decoder has no check.
+/// Records the pass that builds the grid of the frame, in front of the frame's stages: into the grid of
+/// the slot in a decoder whose parse writes none (`Av1Core::gpu_grid`), else, with the check, into the
+/// slot's second grid, with the frame's size kept for [`compare`]. Nothing in any other decoder.
 ///
 /// # Safety
 /// `dec` is the decoder while it records a frame whose tiles are parsed; `cm` is the frame's.
 pub(crate) unsafe fn record(dec: *mut Av1Core, cm: *const AV1_COMMON) {
     // SAFETY: the caller's contract.
     unsafe {
-        if (*dec).gpu_grid_check == 0 {
+        let build = (*dec).gpu_grid != 0;
+        if !build && (*dec).gpu_grid_check == 0 {
             return;
         }
         let td = &mut *(*dec).curr_frame_data;
         td.grid_check_frame[0] = 0;
-        if td.mode_info_grid_gpu.is_null() || td.mi_runs.is_null() {
+        let target = if build { td.mode_info_grid } else { td.mode_info_grid_gpu };
+        if target.is_null() || td.mi_runs.is_null() {
             return;
         }
         let cm = &*cm;
@@ -75,7 +84,11 @@ pub(crate) unsafe fn record(dec: *mut Av1Core, cm: *const AV1_COMMON) {
         for pieces in td.pieces.iter().take(tile_count) {
             for run in super::frame::joined_runs(&pieces.mode_info) {
                 if runs == room || run.first < 0 {
-                    // More runs than the pool has chunks, which cannot be: the frame is not checked.
+                    // More runs than the pool has chunks, which cannot be: the frame is not checked. A
+                    // frame whose grid this pass is would be decoded with the grid of another frame.
+                    if build {
+                        log(true, "GPUGRID a frame has more runs of mode info records than the pool has chunks");
+                    }
                     return;
                 }
                 words.add(2 * runs).write(run.first as u32);
@@ -87,7 +100,7 @@ pub(crate) unsafe fn record(dec: *mut Av1Core, cm: *const AV1_COMMON) {
         if runs == 0 || records == 0 {
             return;
         }
-        let grid = buffer(td.mode_info_grid_gpu);
+        let grid = buffer(target);
         let commands = commands(dec);
         let shader = pipeline(&raw const (*(*dec).shader_lib).shader_mi_grid_build);
         commands.transition(grid, BufferState::Read, BufferState::ReadWrite);
@@ -110,7 +123,9 @@ pub(crate) unsafe fn record(dec: *mut Av1Core, cm: *const AV1_COMMON) {
         // A thread a record.
         commands.dispatch(records.div_ceil(64), 1, 1);
         commands.transition(grid, BufferState::ReadWrite, BufferState::Read);
-        td.grid_check_frame = [1, cm.mi_stride, cm.mi_cols, cm.mi_rows];
+        if !build {
+            td.grid_check_frame = [1, cm.mi_stride, cm.mi_cols, cm.mi_rows];
+        }
     }
 }
 

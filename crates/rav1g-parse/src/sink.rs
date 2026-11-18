@@ -22,6 +22,13 @@
 //!   reads the block's record and, through the grid, records of blocks above it and to its left, which
 //!   are read before it; the calls come in the same order, so the lists are the same.
 //!
+//! With [`SinkOptions::gpu_grid`] the sink writes no grid: the host builds it from the records (a pass of
+//! the GPU). What the parse threads read through the grid, the sink then keeps by itself, a few KB a tile
+//! that stay in the cache: for the block lists the records at the edges of the tile, as the entropy
+//! decoder keeps its contexts above and to the left (the lowest block of every column and the rightmost
+//! block of every row of the superblock row; `TileState::above`, `TileState::left`), and for the CDEF
+//! index of a 64x64 area the record of the block at its top left.
+//!
 //! The memory is the host's ([`SinkHost`]): for the D3D12 host the mapped buffers of a pipeline slot and
 //! of the decoder's pools, for `tools/rav1g-parse-check` plain memory. A tile gets its mode info records,
 //! its coefficients and its transform block records in pieces: when the piece it writes is full, the
@@ -59,8 +66,8 @@ use rav1d::parse::{
     ParseTxb,
 };
 use rav1g_sys::{
-    AV1_COMMON, AV1Decoder, MACROBLOCKD, MB_MODE_INFO, MiGridEntry, TileInfo, av1_tile_data, mi_grid_entry,
-    mi_grid_record, tx_block_info_gpu,
+    AV1_COMMON, AV1Decoder, MACROBLOCKD, MB_MODE_INFO, MI_LEFT_EDGE, MiGridEntry, TileInfo, av1_tile_data,
+    mi_grid_entry, mi_grid_record, tx_block_info_gpu,
 };
 
 /// `SinkOptions::test_panic`: the frame (counted from 1) whose first superblock panics.
@@ -108,6 +115,11 @@ pub struct SinkOptions {
     /// For the test of what a bug does: the sink panics at the end of the first superblock of the third
     /// frame it is given, on the thread that parses it. Nothing else sets this.
     pub test_panic: bool,
+    /// The sink does not write the grid ([`FrameMemory::mi_grid`] is not looked at): the host builds it
+    /// from the records. The records the block lists read above and to the left of a block, and the
+    /// record a 64x64 area keeps its CDEF index in, come from what the sink keeps of a tile. The records
+    /// and the lists are the same.
+    pub gpu_grid: bool,
 }
 
 /// What the sink measures for a host with a clock ([`SinkHost::add_time`]).
@@ -148,7 +160,7 @@ fn time_stamp() -> u64 {
 /// The memory of a frame's parse that all its tiles share.
 pub struct FrameMemory {
     /// The grid: the entry of the block's record at every 4x4 unit (`rav1g_sys::mi_grid_entry`),
-    /// `mi_stride` a row.
+    /// `mi_stride` a row. Not written, and not read, with [`SinkOptions::gpu_grid`].
     pub mi_grid: *mut MiGridEntry,
     pub mi_stride: c_int,
     /// The pool the records of the frame's tiles are in (every `TileMemory::mi_pool` and every piece
@@ -294,6 +306,21 @@ struct TileState {
     intra_stamps: u64,
     begin_ticks: i64,
     begin_stamp: u64,
+    /// With [`SinkOptions::gpu_grid`], what the block lists read where the grid was: for every 4x4
+    /// column of the tile the record of the lowest block whose lists are counted, and for every 4x4 row
+    /// of a superblock row (by the row's number modulo [`MI_LEFT_EDGE`]) that of the rightmost. The
+    /// blocks of a tile are counted in the order of the parse, so for the block that is counted next
+    /// these are the blocks in the row above it and in the column to its left. `above` has a superblock
+    /// more than the tile is wide, so that a block at the tile's right edge stays inside it.
+    above: Vec<*mut MB_MODE_INFO>,
+    left: [*mut MB_MODE_INFO; MI_LEFT_EDGE],
+    /// The last 4x4 block counted in an even row and column: the first of the four 4x4 blocks of an 8x8,
+    /// which the last of them (odd row and column) reads for its chroma.
+    above_left: *mut MB_MODE_INFO,
+    /// With [`SinkOptions::gpu_grid`]: the records of the blocks at the top left of the 64x64 areas of
+    /// the superblock in parse (four areas of a 128x128 superblock, by column and row; the first entry
+    /// alone for a 64x64 one), null where no block has been read: where libaom keeps the CDEF index.
+    cdef_records: [*mut MB_MODE_INFO; 4],
 }
 
 /// A piece of a tile's mode info records.
@@ -436,8 +463,25 @@ impl<H: SinkHost> Sink<H> {
     /// The tile's thread, inside the frame. The block context is set for each block as
     /// `set_offsets_for_pred_and_recon` and `set_mi_row_col` of the entropy decoder set it;
     /// `av1_mi_push_block` reads the size of the frame through `cm`, which no thread writes while tiles
-    /// of the frame are in parse.
+    /// of the frame are in parse. With [`SinkOptions::gpu_grid`] the block context has the block's record
+    /// and the tile's edges in place of the grid, and each block that is counted goes into the edges.
     unsafe fn count_lists(&self, frame_number: usize, tile: usize) {
+        // The loop twice, so that the one with the grid is the code it was before there was another way.
+        // SAFETY: the caller's contract.
+        unsafe {
+            if self.options.gpu_grid {
+                self.count_lists_way::<true>(frame_number, tile);
+            } else {
+                self.count_lists_way::<false>(frame_number, tile);
+            }
+        }
+    }
+
+    /// [`Self::count_lists`]. `GPU_GRID`: [`SinkOptions::gpu_grid`].
+    ///
+    /// # Safety
+    /// As for [`Self::count_lists`].
+    unsafe fn count_lists_way<const GPU_GRID: bool>(&self, frame_number: usize, tile: usize) {
         // SAFETY: the caller's contract; the records are those the tile has written into its parts of
         // the pool, and each is in the grid.
         unsafe {
@@ -471,12 +515,21 @@ impl<H: SinkHost> Sink<H> {
                     index = 0;
                     continue;
                 }
-                let mi = &*records.pool.add(index as usize);
+                let record = records.pool.add(index as usize);
+                let mi = &*record;
                 index += 1;
                 let (mi_row, mi_col) = (mi.mi_row, mi.mi_col);
                 let bw = 1 << MI_SIZE_WIDE_LOG2[mi.sb_type as usize];
                 let bh = 1 << MI_SIZE_HIGH_LOG2[mi.sb_type as usize];
-                (*xd).mi = frame.mi_grid.add((mi_row * frame.mi_stride + mi_col) as usize);
+                if GPU_GRID {
+                    (*xd).mi = std::ptr::null_mut();
+                    (*xd).mi_record = record;
+                    (*xd).mi_above = state.above.as_ptr().add((mi_col - col_start) as usize);
+                    (*xd).mi_left = state.left.as_ptr();
+                    (*xd).mi_above_left = state.above_left;
+                } else {
+                    (*xd).mi = frame.mi_grid.add((mi_row * frame.mi_stride + mi_col) as usize);
+                }
                 (*xd).mi_pool = frame.mi_pool;
                 (*xd).mb_to_bottom_edge = (frame.mi_rows - bh - mi_row) * 4 * 8;
                 (*xd).mb_to_right_edge = (frame.mi_cols - bw - mi_col) * 4 * 8;
@@ -489,6 +542,26 @@ impl<H: SinkHost> Sink<H> {
                 (*xd).chroma_left_available =
                     if frame.ss_x != 0 && bw < 2 { (mi_col - 1 > col_start).into() } else { left.into() };
                 av1_mi_push_block(pbi, cm, xd);
+                if GPU_GRID {
+                    // The block is now the lowest of its columns and the rightmost of its rows. Plain
+                    // stores, a block's width and height of them (with the checks and the division of
+                    // slices they were twice the time): the columns are inside `above`, which has a
+                    // superblock more than the tile is wide, and a block lies at a multiple of its
+                    // height, so its rows do not pass the end of `left`.
+                    debug_assert!((mi_col - col_start + bw) as usize <= state.above.len());
+                    debug_assert!(mi_row as usize % MI_LEFT_EDGE + bh as usize <= MI_LEFT_EDGE);
+                    let above = state.above.as_mut_ptr().add((mi_col - col_start) as usize);
+                    for column in 0..bw as usize {
+                        above.add(column).write(record);
+                    }
+                    let left = state.left.as_mut_ptr().add(mi_row as usize % MI_LEFT_EDGE);
+                    for row in 0..bh as usize {
+                        left.add(row).write(record);
+                    }
+                    if bw == 1 && bh == 1 && (mi_row | mi_col) & 1 == 0 {
+                        state.above_left = record;
+                    }
+                }
             }
             state.listed = (piece, index);
             if stamp != 0 {
@@ -542,8 +615,22 @@ impl<H: SinkHost> Sink<H> {
             mi.write_bytes(0, 1);
             record::fill(&mut *mi, &record_frame, block, lossless);
 
-            // The grid: the units of the block that are inside the frame.
             let bsize = BLOCK_SIZE_OF[block.bs as usize] as usize;
+            if self.options.gpu_grid {
+                // No grid. The 64x64 areas whose top left unit is the block's: the block's first unit and,
+                // of a block wider or higher than 64, every 64th from it. (A block lies at a multiple of
+                // its width and of its height, so it has the top left unit of an area only this way.)
+                if frame.cdef_coded && (block.x4 | block.y4) & 15 == 0 {
+                    for y4 in (block.y4..block.y4 + (1 << MI_SIZE_HIGH_LOG2[bsize])).step_by(16) {
+                        for x4 in (block.x4..block.x4 + (1 << MI_SIZE_WIDE_LOG2[bsize])).step_by(16) {
+                            let area = if frame.sb128 { ((x4 >> 4) & 1) + ((y4 >> 4) & 1) * 2 } else { 0 };
+                            state.cdef_records[area as usize] = mi;
+                        }
+                    }
+                }
+                return;
+            }
+            // The grid: the units of the block that are inside the frame.
             let x_mis = (1 << MI_SIZE_WIDE_LOG2[bsize]).min(frame.mi_cols - block.x4) as usize;
             let y_mis = (1 << MI_SIZE_HIGH_LOG2[bsize]).min(frame.mi_rows - block.y4) as usize;
             let first = frame.mi_grid.add((block.y4 * frame.mi_stride + block.x4) as usize);
@@ -620,7 +707,28 @@ impl<H: SinkHost> Sink<H> {
         // the tile, whose blocks have their records.
         unsafe {
             let frame = self.frame(frame_number);
-            if frame.cdef_coded {
+            if frame.cdef_coded && self.options.gpu_grid {
+                // The same without the grid: the block calls of the superblock kept the records.
+                if let Some(state) = self.tile(frame_number, tile).as_mut() {
+                    let areas = if frame.sb128 { 0..4 } else { 0..1 };
+                    for area in areas {
+                        let (x4, y4, index) = if frame.sb128 {
+                            (superblock.x4 + (area & 1) * 16, superblock.y4 + (area >> 1) * 16, area as usize)
+                        } else {
+                            let index = ((superblock.x4 >> 4) & 1) + ((superblock.y4 >> 4) & 1) * 2;
+                            (superblock.x4, superblock.y4, index as usize)
+                        };
+                        if x4 >= frame.mi_cols || y4 >= frame.mi_rows {
+                            continue;
+                        }
+                        let mi = state.cdef_records[area as usize];
+                        if !mi.is_null() {
+                            (*mi).cdef_strength = superblock.cdef_idx[index];
+                        }
+                    }
+                    state.cdef_records = [std::ptr::null_mut(); 4];
+                }
+            } else if frame.cdef_coded {
                 // libaom keeps the CDEF index of a 64x64 area in the record its top left 4x4 unit points
                 // to (`read_cdef` of `av1/decoder/decodemv.c`); -1 when all its blocks are skipped.
                 let quadrants = if frame.sb128 { 0..4 } else { 0..1 };
@@ -734,6 +842,10 @@ impl<H: SinkHost> ParseSink for Sink<H> {
                 intra_stamps: 0,
                 begin_ticks: 0,
                 begin_stamp: 0,
+                above: Vec::new(),
+                left: [std::ptr::null_mut(); MI_LEFT_EDGE],
+                above_left: std::ptr::null_mut(),
+                cdef_records: [std::ptr::null_mut(); 4],
             });
             // A host with a clock (a timing run): what a time stamp is worth is taken over the tile.
             state.call_stamps = 0;
@@ -749,6 +861,16 @@ impl<H: SinkHost> ParseSink for Sink<H> {
             }
             state.txb_room = memory.txb_room;
             state.failed = false;
+            if self.options.gpu_grid {
+                // The edges of the tile: nothing is read of them before a block of this tile has written
+                // it (a block reads above and to the left only inside the tile).
+                let columns = (tile.col_end - tile.col_start).max(0) as usize + MI_LEFT_EDGE + 1;
+                state.above.clear();
+                state.above.resize(columns, std::ptr::null_mut());
+                state.left = [std::ptr::null_mut(); MI_LEFT_EDGE];
+                state.above_left = std::ptr::null_mut();
+                state.cdef_records = [std::ptr::null_mut(); 4];
+            }
             let xd = &mut *state.xd;
             xd.tile = TileInfo {
                 mi_row_start: tile.row_start,

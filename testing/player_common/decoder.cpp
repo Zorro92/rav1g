@@ -560,6 +560,7 @@ int AV1Decoder::DecodeOne() {
                         PLAYER_PARSEOPT_LATE_LISTS == RAV1G_PARSER_OPTION_LATE_LISTS &&
                         PLAYER_PARSEOPT_CLEAR_GRID == RAV1G_PARSER_OPTION_CLEAR_GRID &&
                         PLAYER_PARSEOPT_GPU_CDEF_LISTS == RAV1G_PARSER_OPTION_GPU_CDEF_LISTS &&
+                        PLAYER_PARSEOPT_GPU_GRID == RAV1G_PARSER_OPTION_GPU_GRID &&
                         PLAYER_PARSEOPT_DEFAULT == RAV1G_PARSER_OPTIONS_DEFAULT,
                     "the bits of -parseopt out of step with rav1g.h");
       cfg.parser_options = params_.parser_options_;
@@ -784,7 +785,8 @@ int AV1Decoder::DecodeOne() {
           << (params_.parser_options_ & PLAYER_PARSEOPT_TIME_CALLS ? "time " : "")
           << (params_.parser_options_ & PLAYER_PARSEOPT_LATE_LISTS ? "latelists " : "")
           << (params_.parser_options_ & PLAYER_PARSEOPT_CLEAR_GRID ? "cleargrid " : "")
-          << (params_.parser_options_ & PLAYER_PARSEOPT_GPU_CDEF_LISTS ? "gpucdef " : "");
+          << (params_.parser_options_ & PLAYER_PARSEOPT_GPU_CDEF_LISTS ? "gpucdef " : "")
+          << (params_.parser_options_ & PLAYER_PARSEOPT_GPU_GRID ? "gpugrid " : "");
   // -intraopt: which build of the original intra_main shader runs; independent of the two flags above.
   rav1g_set_intra_opt(params_.intraopt_ != 0);
   XB_LOGI << "Intra main shader: "

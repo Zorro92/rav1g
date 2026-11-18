@@ -277,6 +277,34 @@ fn compare_numbers<T: PartialEq + std::fmt::Debug>(
     }
 }
 
+/// The grid of a frame whose sink wrote none (`-parseopt gpugrid`), from the frame's records, as the
+/// pass of the GPU builds it in the decoder (`mi_grid_build.hlsl`): the entry of every record at the
+/// 4x4 units of its block that are inside the frame. [`frame`] then holds it against the grid the
+/// reference's sink wrote, so the records of such a parse give the same grid.
+pub fn build_grid(arena: &Arena) {
+    let stride = arena.size.mi_stride();
+    for tile in 0..arena.tiles.len() {
+        // SAFETY: a tile of a parsed frame, the records of its part of the pool, and the units of their
+        // blocks inside the frame, which are units of the arena's grid.
+        unsafe {
+            let data = &*arena.tiles.ptr().add(tile);
+            let first = arena.mi_pool.ptr().add(data.mi_offset as usize);
+            for index in 0..data.mi_count as usize {
+                let mi = first.add(index);
+                let wide = 1 << crate::host::tables::MI_SIZE_WIDE_LOG2[(*mi).sb_type as usize];
+                let high = 1 << crate::host::tables::MI_SIZE_HIGH_LOG2[(*mi).sb_type as usize];
+                let (row, col) = ((*mi).mi_row, (*mi).mi_col);
+                let entry = crate::sys::mi_grid_entry(arena.mi_pool.ptr(), mi);
+                for y in row..(row + high).min(arena.size.mi_rows) {
+                    for x in col..(col + wide).min(arena.size.mi_cols) {
+                        arena.mi_grid.ptr().add((y * stride + x) as usize).write(entry);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Holds the frame of the run that is checked (`r`) against that of the reference (`c`).
 pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
     report.frames += 1;

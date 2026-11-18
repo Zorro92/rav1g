@@ -90,6 +90,14 @@ pub const RAV1G_PARSER_OPTION_GPU_CDEF_LISTS: u32 = 512;
 /// it against the grid the parse wrote when the frame is done (`GRIDCHECK` in the log of its release).
 /// The frames are the same. Read when the decoder is created; every slot then has the second grid.
 pub const RAV1G_PARSER_OPTION_GPU_GRID_CHECK: u32 = 1024;
+/// The mode info grid of a frame (for every 4x4 unit the record of its block) is built by a pass of the
+/// frame's command list from the frame's mode info records, in front of every stage that reads it, and
+/// not written by the threads that parse (1.98 MiB a 4K frame, 1.1 to 1.2 ms a frame of those threads on
+/// the console). The grid is the same. Read when the decoder is created: the grid of every pipeline slot
+/// is then a buffer the GPU may write, and the decoder works as with
+/// `RAV1G_PARSER_OPTION_GPU_CDEF_LISTS`, set or not. Off in `RAV1G_PARSER_OPTIONS_DEFAULT` until a
+/// device has timed it.
+pub const RAV1G_PARSER_OPTION_GPU_GRID: u32 = 2048;
 /// The most frames a decoder parses at the same time (`Rav1gSettings::frames_in_parse`).
 pub const RAV1G_FRAMES_IN_PARSE_MAX: u32 = 4;
 /// The `Rav1gSettings::parser_options` of `rav1g_settings_default`: `RAV1G_PARSER_OPTION_NO_LF_MASKS`,
@@ -210,6 +218,8 @@ const _: () = {
     assert!(RAV1G_PARSER_OPTION_GPU_CDEF_LISTS == crate::sys::AV1_PARSER_OPTION_GPU_CDEF_LISTS);
     assert!(RAV1G_PARSER_OPTION_GPU_GRID_CHECK == crate::ParserOptions::GPU_GRID_CHECK);
     assert!(RAV1G_PARSER_OPTION_GPU_GRID_CHECK == crate::sys::AV1_PARSER_OPTION_GPU_GRID_CHECK);
+    assert!(RAV1G_PARSER_OPTION_GPU_GRID == crate::ParserOptions::GPU_GRID);
+    assert!(RAV1G_PARSER_OPTION_GPU_GRID == crate::sys::AV1_PARSER_OPTION_GPU_GRID);
     assert!(RAV1G_FRAMES_IN_PARSE_MAX == crate::sys::AV1_FRAMES_IN_PARSE_MAX);
     assert!(RAV1G_PARSER_OPTIONS_DEFAULT == crate::ParserOptions::DEFAULT);
     assert!(RAV1G_INTER_FAST_ON == switches::INTER_FAST_ON);
