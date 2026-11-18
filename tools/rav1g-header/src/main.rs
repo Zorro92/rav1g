@@ -39,7 +39,8 @@ const HEADER: &str = "\
  *
  * The order of use:
  *   1. rav1g_device_create on the application's D3D12 device and queue (or without, for a device of the
- *      decoder's own); rav1g_device_wait_pipelines.
+ *      decoder's own), or rav1g_device_create_with_cache with a folder for the pipeline cache on disk;
+ *      rav1g_device_wait_pipelines.
  *   2. rav1g_peek_stream_info on the temporal units of the stream until one starts with a key frame: the
  *      frame size, the bit depth and the colour description of the sequence.
  *   3. rav1g_settings_default, the size and bit depth of the sequence, the output callbacks;

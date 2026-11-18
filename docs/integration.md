@@ -155,7 +155,10 @@ struct Rav1gDevice *rav1g_device_create_with_cache(void *d3d12_device, void *d3d
 In Rust: `Device::with_d3d12_and_cache(device, queue, threads, Some(path))` (and `new_with_cache`).
 `rav1g-dec -pipelinecache <dir>` and the test player's `-pipelinecache` use it; CI runs a stream on
 WARP with a miss, a hit, a cut file and a file that is no cache at all
-(`testing/conformance/pipeline_cache_check.py`).
+(`testing/conformance/pipeline_cache_check.py`). WARP keeps a pipeline library (1668 KiB of file for
+the default shaders, written in about 5 ms); it compiles a pipeline when it first runs it, so its 99
+pipeline states take about 60 ms with and without the file, and CI checks what the cache does, not
+what it saves. wine's vkd3d keeps neither ("cache unsupported").
 
 ## What the settings need
 
