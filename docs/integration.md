@@ -115,11 +115,18 @@ struct Rav1gDevice *rav1g_device_create_with_cache(void *d3d12_device, void *d3d
   are made of: the bytecode of every shader of the set in use (the shader pick of the DXC experiment
   changes it), the serialized root signatures, the names of the pipelines, the version of the library
   and its shader set. A new `rav1g.dll` has a new key.
-- **What the file holds.** A D3D12 pipeline library (`ID3D12PipelineLibrary`) where the device has
-  them (`D3D12_SHADER_CACHE_SUPPORT_LIBRARY`), otherwise the cached blob of every pipeline state
-  (`GetCachedBlob`, given back in `D3D12_CACHED_PIPELINE_STATE`) where it has those
-  (`D3D12_SHADER_CACHE_SUPPORT_SINGLE_PSO`); a header with the key, the size and a checksum is in front
-  of either. A device with neither compiles every time ("cache unsupported").
+- **What the file holds.** The cached blob of every pipeline state (`GetCachedBlob`, given back in
+  `D3D12_CACHED_PIPELINE_STATE`) by its name, where the device has those
+  (`D3D12_SHADER_CACHE_SUPPORT_SINGLE_PSO`); a header with the key, the size and a checksum is in front.
+  A device without them compiles every time ("cache unsupported"). A D3D12 pipeline library
+  (`ID3D12PipelineLibrary`) instead is an experiment, used only when asked for with
+  `rav1g_set_pipeline_cache_library(true)` before the device is created: **on the console the pipeline
+  library removed the device** (package 0.2.207: the console reports
+  `D3D12_SHADER_CACHE_SUPPORT_LIBRARY`, every launch logged `not written: CreatePipelineLibrary hr
+  0x887A0005` behind the 99 pipelines, and the decoder creation behind it failed with
+  `DXGI_ERROR_DEVICE_REMOVED`). That build passed a dangling pointer for the empty blob of a new
+  library; it passes null now, which may or may not have been the cause. An app leaves the switch off.
+  A file of the other kind is rebuilt.
 - **Invalidation.** The file is used only when its header, size and checksum are right and the device
   takes it. A file of another driver or adapter (`D3D12_ERROR_DRIVER_VERSION_MISMATCH`,
   `D3D12_ERROR_ADAPTER_NOT_FOUND`), a damaged one (`E_INVALIDARG`, a short file, a wrong checksum) or one
@@ -128,19 +135,23 @@ struct Rav1gDevice *rav1g_device_create_with_cache(void *d3d12_device, void *d3d
   its name; then the other `rav1g-pipelines-*` files of the folder are deleted, so the folder holds one
   file. The app can delete the folder at any time (`LocalCacheFolder` is not backed up or roamed).
 - **Nothing of the cache fails the creation.** A folder that cannot be created, a file that cannot be
-  read or written: the pipelines are compiled as without the cache, and the log line says why.
+  read or written: the pipelines are compiled as without the cache, and the log line says why. A cache
+  call can still take the device with it (the console's pipeline library did): the line then ends with
+  `DEVICE REMOVED: GetDeviceRemovedReason 0x... <name>` and is an error line, and everything on the
+  device has to be created again (see "A lost device ends everything on it").
 - **When.** The pipelines are still created on the `pipeline_threads` threads while the call returns.
   On a miss the file is written by the last of those threads behind the last pipeline, so
   `rav1g_device_wait_pipelines` (or the first `rav1g_decoder_create`) also waits for the write. The
-  pipeline library and its blob are released then; the pipeline states stay.
+  blobs (or the pipeline library) are released then; the pipeline states stay.
 - **The log line.** One per device, through the log callback, when every pipeline exists (after
   `rav1g_device_create_with_cache` has returned; the numbers here show the form, not a measurement):
 
   ```text
-  PIPELINES cache miss: 99 pipelines in 6512 ms (pipeline library, key 89487f5980cd97ff; written: 2950 KiB in 41 ms)
-  PIPELINES cache hit: 99 pipelines in 380 ms (pipeline library, key 89487f5980cd97ff)
-  PIPELINES cache rebuilt (the device refused the pipeline library: hr 0x887E0002, of another driver or runtime): 99 pipelines in 6600 ms (pipeline library, key 89487f5980cd97ff; written: ...)
-  PIPELINES cache unsupported (the device keeps neither pipeline libraries nor cached pipeline states): 99 pipelines in 6500 ms
+  PIPELINES cache miss: 99 pipelines in 6512 ms (cached pipeline states, key 89487f5980cd97ff; written: 2950 KiB in 41 ms)
+  PIPELINES cache hit: 99 pipelines in 380 ms (cached pipeline states, key 89487f5980cd97ff)
+  PIPELINES cache rebuilt (99 of 99 pipelines not taken from the file, first hr 0x887E0002, of another driver or runtime): 99 pipelines in 6600 ms (cached pipeline states, key 89487f5980cd97ff, 0 loaded; written: ...)
+  PIPELINES cache unsupported (the device keeps no cached pipeline states): 99 pipelines in 6500 ms
+  PIPELINES cache miss: 99 pipelines in 6520 ms (pipeline library, key 89487f5980cd97ff; not written: CreatePipelineLibrary hr 0x887A0005; DEVICE REMOVED: GetDeviceRemovedReason 0x<code> <name>)
   PIPELINES no cache: 99 pipelines in 6500 ms
   ```
 
@@ -155,10 +166,15 @@ struct Rav1gDevice *rav1g_device_create_with_cache(void *d3d12_device, void *d3d
 In Rust: `Device::with_d3d12_and_cache(device, queue, threads, Some(path))` (and `new_with_cache`).
 `rav1g-dec -pipelinecache <dir>` and the test player's `-pipelinecache` use it; CI runs a stream on
 WARP with a miss, a hit, a cut file and a file that is no cache at all
-(`testing/conformance/pipeline_cache_check.py`). WARP keeps a pipeline library (1668 KiB of file for
-the default shaders, written in about 5 ms); it compiles a pipeline when it first runs it, so its 99
-pipeline states take about 60 ms with and without the file, and CI checks what the cache does, not
-what it saves. wine's vkd3d keeps neither ("cache unsupported").
+(`testing/conformance/pipeline_cache_check.py`), on the cached blobs and then with the pipeline library
+(`rav1g-dec -pipelinecachekind library`; WARP has both: a pipeline library file is 1668 KiB for the
+default shaders). WARP compiles a pipeline when it first runs it, so its 99 pipeline states take about
+60 ms with and without the file, and CI checks what the cache does, not what it saves. wine's vkd3d
+keeps neither ("cache unsupported").
+
+In Rust the switch is `rav1g::switches::set_pipeline_cache_library`; in C
+`rav1g_set_pipeline_cache_library(bool)`, with the other experiment switches (part of interface
+version 2, which had no release without it).
 
 ## What the settings need
 

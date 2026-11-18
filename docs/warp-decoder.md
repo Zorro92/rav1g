@@ -118,7 +118,9 @@ gets a new decoder. The program uses the decoder through the Rust interface of t
   (`rav1g_device_create_with_cache` with `-capi`, `Device::with_d3d12_and_cache` without;
   [integration.md](integration.md#the-pipeline-cache-on-disk)). The decoder's `PIPELINES ...` line says
   what the cache did (`cache hit`, `cache miss`, `cache rebuilt (<reason>)`); the program prints it with
-  and without the flag (`PIPELINES no cache: ...`). CI: `testing/conformance/pipeline_cache_check.py`.
+  and without the flag (`PIPELINES no cache: ...`). `-pipelinecachekind library` keeps a D3D12 pipeline
+  library instead of the cached blobs of the pipeline states (the default; the library removed the
+  device on the console). CI: `testing/conformance/pipeline_cache_check.py`.
 - `-playersmoke <directory>`: see the next section. (`warp_decoder` has the flag too, on the C++
   library.)
 

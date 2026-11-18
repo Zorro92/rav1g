@@ -178,14 +178,17 @@ int Decoders::DecodeLoop() {
   // made of. It holds for the whole launch, whatever line it stands on (the last one counts), as the
   // pipeline states are created once, below.
   //
-  // -pipelinecache: the same kind of flag, without a value: the pipeline states of this launch are
+  // -pipelinecache [blobs|library]: the same kind of flag: the pipeline states of this launch are
   // loaded from the decoder's pipeline cache on disk, in <LocalCacheFolder>\rav1g, and the file is
-  // written there when it does not have them (docs/integration.md, "The pipeline cache"). The decoder
-  // logs what the cache did in one "PIPELINES ..." line when the pipeline states all exist.
+  // written there when it does not have them (docs/integration.md, "The pipeline cache on disk"). blobs
+  // (the default, also without a value): the cached blob of every pipeline state; library: a D3D12
+  // pipeline library (rav1g_set_pipeline_cache_library), which removed the device on the console. The
+  // decoder logs what the cache did in one "PIPELINES ..." line when the pipeline states all exist.
   bool sm6test = false;
   bool has_tasks = false;
   bool has_shader_pick = false;
   bool pipeline_cache = false;
+  bool pipeline_cache_library = false;
   std::string shader_pick;
   for (std::vector<one_task>::iterator task = arg_lists.begin(); task != arg_lists.end(); task++) {
     for (std::vector<std::string>::iterator arg = task->begin(); arg != task->end();) {
@@ -194,7 +197,12 @@ int Decoders::DecodeLoop() {
         arg = task->erase(arg);
       } else if (*arg == "-pipelinecache") {
         pipeline_cache = true;
+        pipeline_cache_library = false;
         arg = task->erase(arg);
+        if (arg != task->end() && (*arg == "blobs" || *arg == "library")) {
+          pipeline_cache_library = *arg == "library";
+          arg = task->erase(arg);
+        }
       } else if (*arg == "-shaderpick") {
         arg = task->erase(arg);
         has_shader_pick = true;
@@ -251,7 +259,8 @@ int Decoders::DecodeLoop() {
     cache_dir += L"rav1g";
     std::string shown;
     for (wchar_t c : cache_dir) shown += c < 128 ? static_cast<char>(c) : '?';
-    XB_LOGI << "Pipeline cache (-pipelinecache): " << shown;
+    XB_LOGI << "Pipeline cache (-pipelinecache " << (pipeline_cache_library ? "library" : "blobs") << "): " << shown;
+    rav1g_set_pipeline_cache_library(pipeline_cache_library);
     dx_resources_.decoder_device = rav1g_device_create_with_cache(
         dx_resources_.dx12_device.Get(), dx_resources_.dx12_command_queue.Get(), CREATE_SHADERS_THREAD_CNT,
         reinterpret_cast<const uint16_t*>(cache_dir.c_str()));

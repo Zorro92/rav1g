@@ -14,10 +14,14 @@ a process of its own with the same cache folder (<out>/cache, emptied first):
   2. through rav1g.h (-capi): "cache hit", every pipeline loaded from the file;
   3. the file cut to half its size: "cache rebuilt (...)" with the reason, and the file written again;
   4. "cache hit" again, from the file run 3 wrote;
-  5. the file replaced by bytes that are no pipeline cache: "cache rebuilt (...)".
+  5. the file replaced by bytes that are no pipeline cache: "cache rebuilt (...)";
+  6. with -pipelinecachekind library (a pipeline library, which is used only when asked for): "cache rebuilt
+     (the file has cached pipeline states, ...)";
+  7. the same: "cache hit" from the pipeline library;
+  8. the default again: "cache rebuilt (the file has pipeline library, ...)".
 
-Every run has to give the frames of the reference. Which way the device keeps the pipelines (a pipeline
-library or the cached pipeline states) is in the lines, and in the summary. Written to --out: run<n>.log and
+Runs 1 to 5 and 8 have to keep the cached pipeline states (the default), 6 and 7 a pipeline library. Every
+run has to give the frames of the reference, and no line may say that the device was removed. Written to --out: run<n>.log and
 summary.md (also appended to $GITHUB_STEP_SUMMARY when that is set). Exit code 1 when a check fails, 2 when a
 run could not be done.
 """
@@ -66,7 +70,7 @@ def main():
     problems = []
     lines = []
 
-    def run(number, expect, extra=()):
+    def run(number, expect, extra=(), kind='cached pipeline states'):
         command = [tool] + task + ['-pipelinecache', folder] + list(extra)
         result = subprocess.run(command, cwd=args.streams, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         text = result.stdout.decode('utf-8', 'replace')
@@ -93,6 +97,10 @@ def main():
             loaded = re.search(r'\((pipeline library|cached pipeline states), key ([0-9a-f]{16})', line[0])
             if not loaded:
                 problems.append('run %d: the line does not say how the device keeps the pipelines' % number)
+            elif loaded.group(1) != kind:
+                problems.append('run %d: %s, not %s: %s' % (number, loaded.group(1), kind, line[0]))
+            elif 'DEVICE REMOVED' in line[0]:
+                problems.append('run %d: the device was removed: %s' % (number, line[0]))
             elif expect != 'hit' and 'written: ' not in line[0]:
                 problems.append('run %d: the file was not written: %s' % (number, line[0]))
             elif expect == 'hit' and 'written' in line[0]:
@@ -122,6 +130,13 @@ def main():
         with open(os.path.join(folder, files[0]), 'wb') as f:
             f.write(b'not a pipeline cache at all, but long enough to have a header of one')
     if not run(5, 'rebuilt (', ['-capi']):
+        return 2
+    library = ['-pipelinecachekind', 'library']
+    if not run(6, 'rebuilt (the file has cached pipeline states', library, 'pipeline library'):
+        return 2
+    if not run(7, 'hit', library + ['-capi'], 'pipeline library'):
+        return 2
+    if not run(8, 'rebuilt (the file has pipeline library'):
         return 2
     files = cache_files(folder)
     if len(files) != 1:

@@ -3480,32 +3480,41 @@ The decoder's device is created with `rav1g_device_create_with_cache` and the fo
 `ApplicationData::Current->LocalCacheFolder->Path` + `\rav1g` (the app's `LocalCache\rav1g`), instead of
 `rav1g_device_create`: the pipeline states are loaded from the file of that folder when it has them,
 and the file is written when it does not ([integration.md](integration.md#the-pipeline-cache-on-disk)).
-The flag has no value. Like `-sm6test` and `-shaderpick` it holds for the whole launch, since the
-pipeline states are created once, before the first task: it may stand on a line of its own or on the
-line of a stream. `rav1g-dec -playersmoke` takes the folder `rav1g` of its task directory.
+`-pipelinecache` or `-pipelinecache blobs` keeps the cached blob of every pipeline state (the
+default); `-pipelinecache library` keeps a D3D12 pipeline library instead
+(`rav1g_set_pipeline_cache_library`), an experiment: **on the console the pipeline library removed the
+device** (package 0.2.207, every launch: `PIPELINES cache miss: ... (pipeline library, ...; not written:
+CreatePipelineLibrary hr 0x887A0005)`, then `MEMORY FAILED decoder creation at: output fence (hr
+0x887A0005)`). Like `-sm6test` and `-shaderpick` the flag holds for the whole launch, since the pipeline
+states are created once, before the first task: it may stand on a line of its own or on the line of a
+stream. `rav1g-dec -playersmoke` takes the folder `rav1g` of its task directory.
 
 ```text
 -pipelinecache
 -i /streams/<stream>.ivf -t 6 -frate -1 -queue_size 4 -nopresent -md5_frame_check
 ```
 
-**What the log says.** `Pipeline cache (-pipelinecache): <folder>` before the pipeline states, and
-from the library, when they all exist, one line (also without the flag: `PIPELINES no cache: ...`):
+**What the log says.** `Pipeline cache (-pipelinecache blobs): <folder>` (or `library`) before the
+pipeline states, and from the library, when they all exist, one line (also without the flag:
+`PIPELINES no cache: ...`):
 
 ```text
-PIPELINES cache miss: 99 pipelines in <ms> ms (pipeline library, key <16 hex digits>; written: <n> KiB in <ms> ms)
-PIPELINES cache hit: 99 pipelines in <ms> ms (pipeline library, key <16 hex digits>)
+PIPELINES cache miss: 99 pipelines in <ms> ms (cached pipeline states, key <16 hex digits>; written: <n> KiB in <ms> ms)
+PIPELINES cache hit: 99 pipelines in <ms> ms (cached pipeline states, key <16 hex digits>)
 ```
 
-"cached pipeline states" instead of "pipeline library" where the device has no pipeline libraries;
-`cache rebuilt (<reason>)` for a file the device refused or that is damaged; `cache unsupported` for a
-device that keeps neither. The `MEMORY app before the pipeline states` and `... after the pipeline
+"pipeline library" instead of "cached pipeline states" with `-pipelinecache library`; `cache rebuilt
+(<reason>)` for a file the device refused, that is damaged or of the other kind; `cache unsupported
+(<reason>)` for a device that does not keep pipelines the way it was asked. When the device was removed
+on the way the line ends with `DEVICE REMOVED: GetDeviceRemovedReason 0x... <name>` and is an error
+line. The `MEMORY app before the pipeline states` and `... after the pipeline
 states` lines around it show what the pipeline states cost the app's memory either way.
 
 **Console probe.** Two launches of the same package with `-pipelinecache` in the task file: the first
-logs `cache miss` (or `cache rebuilt`, when a file of an earlier package's key is there: it is deleted)
-and the time of compiling them all, the second `cache hit` and the time of loading them. A new package
-has a new library and with it a new key: its first launch is a miss again.
+logs `cache miss` (or `cache rebuilt`, when a file of an earlier package's key or of the other kind is
+there: it is deleted) and the time of compiling them all, the second `cache hit` and the time of loading
+them. A new package has a new library and with it a new key: its first launch is a miss again. The
+pipeline library is a separate pair of launches with `-pipelinecache library`.
 
 ## Stage dumps (`-dumpstages`)
 

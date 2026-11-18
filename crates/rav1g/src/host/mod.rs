@@ -64,6 +64,7 @@ pub(crate) mod obu;
 mod output;
 mod perf;
 mod pipeline_cache;
+pub(crate) use pipeline_cache::set_library as set_pipeline_cache_library;
 mod pool;
 mod postfilter;
 mod prediction;

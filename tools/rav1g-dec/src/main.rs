@@ -195,6 +195,8 @@ fn real_main() -> i32 {
     let pso_start = Instant::now();
     // The decoder's device: the program's D3D12 device and queue, and the pipeline states on it.
     let cache = (!globals.pipeline_cache.is_empty()).then(|| std::path::Path::new(&globals.pipeline_cache));
+    // -pipelinecachekind library: a pipeline library in place of the cached blobs.
+    library::set_pipeline_cache_library(globals.capi, globals.pipeline_cache_library);
     let Some(library) = Library::open(&dev, globals.capi, args::PSO_THREADS as u32, cache) else {
         say!("ERROR the compute pipeline states could not be created");
         return EXIT_USAGE;

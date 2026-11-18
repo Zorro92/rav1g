@@ -901,15 +901,17 @@ pub unsafe extern "C" fn rav1g_device_create(
     }
 }
 
-/// `rav1g_device_create` with the pipeline cache on disk (docs/integration.md, "The pipeline cache").
+/// `rav1g_device_create` with the pipeline cache on disk (docs/integration.md, "The pipeline cache on disk").
 /// `cache_dir` is the path of a folder of the application's own as a C string of UTF-16 (a UWP app passes
 /// `<LocalCacheFolder>\rav1g`), which the call creates when it is not there; null or an empty path is
 /// no cache, `rav1g_device_create`. The decoder keeps one file there, `rav1g-pipelines-<key>.bin`, with
-/// the compiled pipeline states of the device: a later device on the same adapter and driver loads them
-/// from it instead of compiling them, and a file that is missing, damaged or of another driver, adapter
-/// or library version is written again (and the files of other keys deleted). Nothing of the cache makes
-/// the call fail. When the pipeline states all exist, the log has one line that says what the cache did:
-/// `PIPELINES cache hit|miss|rebuilt (<reason>): <n> pipelines in <ms> ms (...)`.
+/// the compiled pipeline states of the device (the cached blob of every one, `GetCachedBlob`): a later
+/// device on the same adapter and driver creates them from it instead of compiling them, and a file that
+/// is missing, damaged or of another driver, adapter or library version is written again (and the files
+/// of other keys deleted). Nothing of the cache makes the call fail. When the pipeline states all exist,
+/// the log has one line that says what the cache did:
+/// `PIPELINES cache hit|miss|rebuilt (<reason>): <n> pipelines in <ms> ms (...)`; an error line that
+/// says "DEVICE REMOVED" when the device was lost on the way.
 ///
 /// # Safety
 /// As `rav1g_device_create`; `cache_dir` is null or a C string of UTF-16.
@@ -1510,6 +1512,15 @@ pub extern "C" fn rav1g_set_lf_h_split(mode: u32) {
 #[unsafe(no_mangle)]
 pub extern "C" fn rav1g_set_intra_edge_fix(enable: bool) {
     switches::set_intra_edge_fix(enable);
+}
+
+/// Experiment: the devices created after the call with `rav1g_device_create_with_cache` keep their
+/// pipelines in a D3D12 pipeline library (`ID3D12PipelineLibrary`) instead of in the cached blobs of the
+/// pipeline states (`GetCachedBlob`), the default. On the console the pipeline library removed the device;
+/// leave it off outside of a test.
+#[unsafe(no_mangle)]
+pub extern "C" fn rav1g_set_pipeline_cache_library(enable: bool) {
+    switches::set_pipeline_cache_library(enable);
 }
 
 /// Experiment (the DXC package: a library whose `rav1g_shader_variant` is "dxc"): which bytecode the

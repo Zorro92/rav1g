@@ -614,6 +614,16 @@ pub fn set_shader_pick(capi: bool, pick: &str) -> Result<(), String> {
     }
 }
 
+/// -pipelinecachekind: the pipeline cache of the devices created from now on keeps a pipeline library
+/// (`true`) or the cached blobs of the pipeline states, through the interface the program was started for.
+pub fn set_pipeline_cache_library(capi: bool, enable: bool) {
+    if capi {
+        capi::rav1g_set_pipeline_cache_library(enable);
+    } else {
+        switches::set_pipeline_cache_library(enable);
+    }
+}
+
 /// The log lines of the decoder go to `line`, through the interface the program was started for.
 pub fn set_log(capi: bool, line: fn(bool, &str)) {
     unsafe extern "C" fn c_line(context: *mut c_void, is_error: bool, text: *const c_char) {

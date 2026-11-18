@@ -6,28 +6,30 @@
 // License 1.0 was not distributed with this source code in the PATENTS file, you can obtain it at
 // www.aomedia.org/license/patent.
 
-//! The pipeline cache on disk (docs/integration.md, "The pipeline cache"): the compiled pipeline states of
-//! a device in a file of a folder of the application, so that the next device on the same adapter and
-//! driver loads them instead of compiling them again.
+//! The pipeline cache on disk (docs/integration.md, "The pipeline cache on disk"): the compiled pipeline
+//! states of a device in a file of a folder of the application, so that the next device on the same
+//! adapter and driver loads them instead of compiling them again.
 //!
 //! One file, `rav1g-pipelines-<key>.bin`: `<key>` is 16 hex digits of a fingerprint of everything the
 //! pipelines are made of (the bytecode of every shader of the set in use, the serialized root signatures,
 //! the names of the pipelines, the version of the library). The file is a header and one of two payloads:
 //!
-//! - a D3D12 pipeline library (`ID3D12PipelineLibrary`), where the device has them
-//!   (`D3D12_SHADER_CACHE_SUPPORT_LIBRARY`);
-//! - otherwise, the cached blob of every pipeline state (`GetCachedBlob`) by its name, where the device
-//!   has those (`D3D12_SHADER_CACHE_SUPPORT_SINGLE_PSO`).
+//! - the cached blob of every pipeline state (`GetCachedBlob`) by its name, where the device has those
+//!   (`D3D12_SHADER_CACHE_SUPPORT_SINGLE_PSO`): the default;
+//! - a D3D12 pipeline library (`ID3D12PipelineLibrary`), only when it is asked for
+//!   (`rav1g_set_pipeline_cache_library`) and the device has them (`D3D12_SHADER_CACHE_SUPPORT_LIBRARY`):
+//!   on the console the first pipeline library of a device removed the device.
 //!
 //! A missing file is a miss, a file that is damaged, of another kind or that the device refuses (another
 //! driver or adapter) is rebuilt: the pipelines are compiled and the file written again, as a temporary
 //! file renamed over the final name, and the other `rav1g-pipelines-*` files of the folder are deleted.
 //! Nothing of the cache fails a device creation. One log line per device says what happened
-//! (`PIPELINES ...`).
+//! (`PIPELINES ...`); when the device was removed on the way, it is an error line that says so, with
+//! `GetDeviceRemovedReason`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use super::log::log;
@@ -297,12 +299,36 @@ fn refusal(code: i32) -> String {
     format!("hr 0x{:08X}, {what}", code as u32)
 }
 
+/// The devices created from now on keep their pipelines in a pipeline library instead of in the cached
+/// blobs of the pipeline states (`rav1g_set_pipeline_cache_library`).
+static LIBRARY: AtomicBool = AtomicBool::new(false);
+
+/// The pipeline library instead of the cached blobs, for the devices created after the call. Off by
+/// default: on the console, the first `CreatePipelineLibrary` of a device removed the device (package
+/// 0.2.207, `DXGI_ERROR_DEVICE_REMOVED`), so a device takes a library only when it is asked for.
+pub(crate) fn set_library(enable: bool) {
+    LIBRARY.store(enable, Ordering::Relaxed);
+}
+
+/// What a code of `GetDeviceRemovedReason` is.
+fn removed_reason(code: i32) -> &'static str {
+    match code as u32 {
+        0x887A_0005 => "DXGI_ERROR_DEVICE_REMOVED",
+        0x887A_0006 => "DXGI_ERROR_DEVICE_HUNG",
+        0x887A_0007 => "DXGI_ERROR_DEVICE_RESET",
+        0x887A_0020 => "DXGI_ERROR_DRIVER_INTERNAL_ERROR",
+        0x887A_0001 => "DXGI_ERROR_INVALID_CALL",
+        0x8007_000E => "E_OUTOFMEMORY",
+        _ => "",
+    }
+}
+
 /// What the device keeps the pipelines in.
 enum Store {
     /// No cache was asked for.
     Off,
-    /// The device keeps no pipelines.
-    Unsupported,
+    /// The device keeps no pipelines the way it is asked to (why).
+    Unsupported(String),
     /// A pipeline library: the one of the file, or none (then everything is compiled).
     Library(Option<PipelineLibrary>),
     /// The cached blobs of the file by name (empty without a file).
@@ -344,12 +370,19 @@ impl PipelineCache {
             return cache;
         };
         let support = device.shader_cache_support();
-        let kind = if support.library {
+        let kind = if LIBRARY.load(Ordering::Relaxed) {
+            if !support.library {
+                cache.store = Store::Unsupported("a pipeline library was asked for, the device has none".to_string());
+                return cache;
+            }
             Kind::Library
         } else if support.single_pipeline {
             Kind::Blobs
         } else {
-            cache.store = Store::Unsupported;
+            cache.store = Store::Unsupported(format!(
+                "the device keeps no cached pipeline states{}",
+                if support.library { "; it has pipeline libraries, which are used only when asked for" } else { "" }
+            ));
             return cache;
         };
         let file = match read_file(dir, key) {
@@ -367,7 +400,7 @@ impl PipelineCache {
             return cache;
         };
         if file_kind != kind {
-            cache.rejected = Some(format!("the file has {}, the device takes {}", file_kind.label(), kind.label()));
+            cache.rejected = Some(format!("the file has {}, this device keeps {}", file_kind.label(), kind.label()));
             return cache;
         }
         match kind {
@@ -451,14 +484,8 @@ impl PipelineCache {
                 log(false, &format!("PIPELINES no cache: {count} in {elapsed:.0} ms"));
                 return;
             }
-            Store::Unsupported => {
-                log(
-                    false,
-                    &format!(
-                        "PIPELINES cache unsupported (the device keeps neither pipeline libraries nor cached \
-                         pipeline states): {count} in {elapsed:.0} ms"
-                    ),
-                );
+            Store::Unsupported(reason) => {
+                log(false, &format!("PIPELINES cache unsupported ({reason}): {count} in {elapsed:.0} ms"));
                 return;
             }
             Store::Library(_) => Kind::Library,
@@ -485,7 +512,14 @@ impl PipelineCache {
             detail += "; ";
             detail += &self.write(device, kind, pipelines);
         }
-        log(false, &format!("PIPELINES cache {outcome}: {count} in {elapsed:.0} ms ({detail})"));
+        // A call of the cache that failed may have been the device going away (on the console a pipeline
+        // library removed it): the line says so, as an error line, and why.
+        let removed = device.removed_reason();
+        if let Some(code) = removed {
+            detail +=
+                &format!("; DEVICE REMOVED: GetDeviceRemovedReason 0x{:08X} {}", code as u32, removed_reason(code));
+        }
+        log(removed.is_some(), &format!("PIPELINES cache {outcome}: {count} in {elapsed:.0} ms ({detail})"));
     }
 
     /// Writes the file of all pipelines; what was done, for the log line.

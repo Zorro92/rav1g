@@ -1326,6 +1326,12 @@ impl Commands<'_> {
 // ---------------------------------------------------------------------------------------------------------
 
 impl Device<'_> {
+    /// `None` while the device works; the reason it was removed (`GetDeviceRemovedReason`) when it was.
+    pub fn removed_reason(&self) -> Option<i32> {
+        // SAFETY: a valid device.
+        unsafe { self.device.GetDeviceRemovedReason() }.err().map(|error| error.code().0)
+    }
+
     /// What the device can keep of a compiled pipeline (`D3D12_FEATURE_SHADER_CACHE`).
     pub fn shader_cache_support(&self) -> super::ShaderCacheSupport {
         let mut data = D3D12_FEATURE_DATA_SHADER_CACHE::default();
@@ -1354,13 +1360,24 @@ impl Device<'_> {
     pub fn create_pipeline_library(&self, blob: Vec<u8>) -> Result<PipelineLibrary, Error> {
         let device = self.device.cast::<ID3D12Device1>().map_err(failed("ID3D12Device1"))?;
         let owner = BlobOwner::new(blob);
+        let mut library: Option<ID3D12PipelineLibrary> = None;
         // SAFETY: the bytes live in `owner`, which the library holds as its private data from here on (or
-        // which is released below when there is no library).
-        let library = unsafe {
+        // which is released below when there is no library). An empty blob is passed as a null pointer
+        // (an empty slice has a dangling one, which a runtime may read as a blob).
+        unsafe {
             let bytes = owner.bytes();
-            device.CreatePipelineLibrary::<ID3D12PipelineLibrary>(bytes)
+            let pointer = if bytes.is_empty() { std::ptr::null() } else { bytes.as_ptr().cast::<c_void>() };
+            (Interface::vtable(&device).CreatePipelineLibrary)(
+                device.as_raw(),
+                pointer,
+                bytes.len(),
+                &ID3D12PipelineLibrary::IID,
+                (&raw mut library).cast(),
+            )
+            .ok()
         }
         .map_err(failed("CreatePipelineLibrary"))?;
+        let library = library.ok_or(Error { step: "CreatePipelineLibrary", code: E_POINTER.0 })?;
         // SAFETY: a valid library and an IUnknown; the library takes a reference of the owner.
         unsafe { library.SetPrivateDataInterface(&BLOB_OWNER_GUID, &owner.unknown) }
             .map_err(failed("SetPrivateDataInterface"))?;
