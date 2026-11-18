@@ -43,12 +43,14 @@ done
 
 # shader:family. Families (shader_tu.cpp): 1 inverse transforms, 2 lossless transform, 3 inter
 # prediction, 4 deblocking, 5 loop restoration, 6 film grain templates (6y: one group per chroma
-# plane), 7 film grain. The intra and CDEF shaders have checks of their own with real input
+# plane), 7 film grain, 8 prediction list counts, 9 prediction list scan. The intra and CDEF
+# shaders have checks of their own with real input
 # (intra_check, cdef_check), which watch their group memory the same way.
 list=""
 for f in "$shaders"/*.hlsl; do
   name=$(basename "$f" .hlsl)
-  grep -q '^groupshared' "$f" || continue
+  # pred_list_count includes the shared prediction generator containing its group memory.
+  [ "$name" = pred_list_count ] || grep -q '^groupshared' "$f" || continue
   case "$name" in
     idct_lossless) family=2 ;;
     idct*) family=1 ;;
@@ -58,6 +60,9 @@ for f in "$shaders"/*.hlsl; do
     film_grain_gen_luma) family=6 ;;
     film_grain_gen_chroma) family=6y ;;
     film_grain_filter) family=7 ;;
+    pred_list_count) family=8 ;;
+    pred_list_scan) family=9 ;;
+    gen_pred_blocks) continue ;; # group memory only in the pred_list_count build
     intra_* | cdef_*) continue ;;
     *) echo "sync_check: $name.hlsl has group memory and no family here" >&2; exit 1 ;;
   esac
@@ -74,7 +79,13 @@ convert() {
   done
   for item in $list; do
     name=${item%:*}
-    python3 "$here/to_cpp.py" "$shaders/$name.hlsl" "$1/$name.gen.h" "$1/$name.entry.h"
+    source="$shaders/$name.hlsl"
+    if [ "$name" = pred_list_count ]; then
+      # Select the count entry point from the shared source, including its group arrays.
+      source="$1/$name.hlsl"
+      g++ -E -P -x c++ "$shaders/$name.hlsl" > "$source"
+    fi
+    python3 "$here/to_cpp.py" "$source" "$1/$name.gen.h" "$1/$name.entry.h"
   done
 }
 

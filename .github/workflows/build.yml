@@ -1129,7 +1129,7 @@ jobs:
           python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
             --out out/conformance --threads 4 "--title=rav1g-dec (cargo, MSVC)"
           $code = $LASTEXITCODE
-          if (-not (Select-String -Path out/conformance/lists/run001.log -Pattern '^PARSER .*the parse pass of rav1d.*switches nolfmask,tilethread,gpucdef \(' -Quiet)) {
+          if (-not (Select-String -Path out/conformance/lists/run001.log -Pattern '^PARSER .*the parse pass of rav1d.*switches nolfmask,tilethread,gpucdef,gpugrid \(' -Quiet)) {
             throw 'The decoder of this run does not report the parse pass of rav1d with its default switches'
           }
           if (-not (Select-String -Path out/conformance/lists/run001.log -Pattern ', clears none needed, ' -Quiet)) {
@@ -1728,6 +1728,11 @@ jobs:
           python testing/conformance/player_smoke.py --tool $tool --streams conformance-streams `
             --out out/player-smoke-gpublists "--player-args=-parseopt gpublists" "--title=the player with gpublists"
           if ($LASTEXITCODE -ne 0) { throw 'the player with gpublists' }
+          python testing/conformance/run.py --tool $tool --streams conformance-streams `
+            --out out/conformance-gpublists-intrav2 --threads 4 "--only=^(syn-resize|av1-1-b8-01-size-66x66)" `
+            "--tool-args=-intrav2 -parseopt nolfmask,tilethread,gpucdef,gpublists" `
+            "--title=rav1g-dec with GPU prediction lists, intra V2 and the sink-written grid"
+          if ($LASTEXITCODE -ne 0) { throw 'gpublists with intra V2 and the sink-written grid' }
 
       - name: Compare 4K memory use and stage timings on WARP
         if: ${{ !cancelled() }}
@@ -1745,8 +1750,10 @@ jobs:
               & $tool -i $inputPath -limit 16 -t 2 -v -memstats -gputime -parseopt $mode | Tee-Object -FilePath (Join-Path $logDir.FullName "$mode.log")
               if ($LASTEXITCODE -ne 0) { throw "timing run with $mode" }
             }
-            if (-not (Select-String -Path (Join-Path $logDir.FullName 'time,gpublists.log') -Pattern '^GPUTIME gpu pred_(count|scan) +[1-9]' -Quiet)) {
-              throw 'no GPU list timestamps'
+            foreach ($stage in @('pred_count', 'pred_scan')) {
+              if (-not (Select-String -Path (Join-Path $logDir.FullName 'time,gpublists.log') -Pattern "^GPUTIME gpu $stage +[1-9]" -Quiet)) {
+                throw "no GPU timestamps for $stage"
+              }
             }
           } finally {
             Pop-Location
@@ -2900,7 +2907,7 @@ jobs:
           python testing/conformance/run.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
             --out out/conformance --threads 4 "--title=rav1g-dec built on Linux (cargo xwin, clang-cl)"
           $code = $LASTEXITCODE
-          if (-not (Select-String -Path out/conformance/lists/run001.log -Pattern '^PARSER .*the parse pass of rav1d.*switches nolfmask,tilethread,gpucdef \(' -Quiet)) {
+          if (-not (Select-String -Path out/conformance/lists/run001.log -Pattern '^PARSER .*the parse pass of rav1d.*switches nolfmask,tilethread,gpucdef,gpugrid \(' -Quiet)) {
             throw 'The decoder of this run does not report the parse pass of rav1d with its default switches'
           }
           if ($code -ne 0) { throw "conformance run with the rav1g-dec of the Linux build: exit code $code (1: not as expected.txt says, 2: the run could not be done)" }

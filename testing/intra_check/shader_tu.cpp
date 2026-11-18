@@ -59,7 +59,7 @@ static void set_srt(const uint32_t *w) {
   cb_stamp = w[3];
   cb_map_stride = w[4];
   cb_map_uv_offset = w[5];
-  cb_reserved0 = w[6];
+  cb_intra_base = w[6];
   cb_reserved1 = w[7];
 #endif
 }

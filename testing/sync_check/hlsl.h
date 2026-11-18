@@ -103,6 +103,7 @@ struct vec<T, 4> {
   vec() : x(0), y(0), z(0), w(0) {}
   vec(T s) : x(s), y(s), z(s), w(s) {}
   vec(T a, T b, T c, T d) : x(a), y(b), z(c), w(d) {}
+  vec(const vec<T, 2> &ab, T c, T d) : x(ab.x), y(ab.y), z(c), w(d) {}
   vec(const vec &o) : x(o.x), y(o.y), z(o.z), w(o.w) {}
   vec &operator=(const vec &o) {
     x = o.x; y = o.y; z = o.z; w = o.w;
@@ -236,6 +237,15 @@ struct GsRefOf<vec<T, 4>, 4> {
 template <class T, size_t N>
 struct CbArray {
   T data[N];
+  T &operator[](long i) {
+    if (i < 0 || (size_t)i >= N) {
+      static T outside;
+      g_out_of_bounds++;
+      outside = T();
+      return outside;
+    }
+    return data[i];
+  }
   const T &operator[](long i) const {
     static const T zero = T();
     if (i < 0 || (size_t)i >= N) {
@@ -301,6 +311,11 @@ struct RWByteAddressBuffer {
   template <class T, int N, int A, int B>
   void Store2(uint address, const swizzle<T, N, A, B> &v) {
     Store2(address, (vec<T, 2>)v);
+  }
+  void Store3(uint address, const uint3 &v) {
+    Store(address, v.x);
+    Store(address + 4, v.y);
+    Store(address + 8, v.z);
   }
   template <class T>
   void Store4(uint address, const vec<T, 4> &v) {

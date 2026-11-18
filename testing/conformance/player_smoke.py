@@ -143,11 +143,17 @@ def main():
         problems.append('%d error lines in the player log; the first: %s' % (len(errors), errors[0]))
     if re.search(r'(?i)device.{0,16}removed|DXGI_ERROR_DEVICE', text):
         problems.append('a task lost the D3D12 device')
-    # What reads the streams: the parse pass of rav1d, with its three default switches unless the tasks say
-    # otherwise (-parseopt none).
+    # What reads the streams: the parse pass of rav1d, with the switches named by the tasks.
     if 'Parser: the parse pass of rav1d' not in text:
         problems.append('the log does not say that the parse pass of rav1d reads the streams')
-    switches = 'none' if '-parseopt none' in args.player_args else 'nolfmask tilethread gpucdef'
+    if '-parseopt none' in args.player_args:
+        switches = 'none'
+    else:
+        switches = 'nolfmask tilethread gpucdef'
+        if '-parseopt nolfmask,tilethread,gpucdef' not in args.player_args:
+            switches += ' gpugrid'
+        if '-parseopt gpublists' in args.player_args:
+            switches += ' gpublists'
     if 'Parser switches (-parseopt): ' + switches not in text:
         problems.append('the log does not say that the switches of the parser are: ' + switches)
     # Who clears the grids of a slot, task by task; the task with -gpuclear clears with its command lists

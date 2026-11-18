@@ -55,7 +55,7 @@ Not measured, because the stream does not change them: `idct_residuals` (24.4 Mi
 
 The decoder starts with four pipeline slots, two frames in parse and two parser threads.
 At 3840x2176 10-bit it uses 487.8 MiB of device buffers. With three slots it uses
-469.6 MiB. The budget guard tries three slots with two frames in parse, then two slots
+469.7 MiB. The budget guard tries three slots with two frames in parse, then two slots
 with one frame in parse. The GPU builds the mode info grid, so the sink skips the grid
 writes, 1.98 MiB per 4K frame.
 

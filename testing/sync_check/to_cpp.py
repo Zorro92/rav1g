@@ -37,7 +37,7 @@ def convert(text, name):
         code = re.sub(r':\s*register\([a-z0-9]+\)', '', code)
         code = re.sub(r'\bvoid main\(', 'void shader_main(', code)
         code = re.sub(r'#include "([A-Za-z0-9_]+)\.h"', r'#include "\1.gen.h"', code)
-        code = re.sub(r'\bout\s+(\w+)\s+(\w+)(?=\s*[,)])', r'\1 &\2', code)  # an out parameter
+        code = re.sub(r'\b(?:inout|out)\s+(\w+)\s+(\w+)(?=\s*[,)])', r'\1 &\2', code)
 
         m = re.match(r'^(\s*)groupshared\s+(\w+)\s+(\w+)((?:\[[^\]]+\])+);(.*)$', code)
         if m:

@@ -337,6 +337,66 @@ static void setup(World *w, Rng *rng, Dispatch *d) {
   d->groups_y = 2;
 #endif
 }
+#elif SHADER_FAMILY == 8
+#include "pred_list_common.gen.h"
+static void setup(World *w, Rng *rng, Dispatch *d) {
+  static MB_MODE_INFO records[2 * PredGroupSize];
+  const uint sizes[] = {3, 6, 9, 12};  // 8x8 through 64x64
+  cb_wi_count = PredGroupSize + 1 + rng->below(PredGroupSize);
+  cb_mi_cols = cb_mi_rows = cb_mi_stride = 128;
+  cb_mi_addr_base = 0;
+  cb_mi_grid_entry = 4;
+  cb_mi_grid_last = cb_mi_cols * cb_mi_rows - 1;
+  cb_force_integet_mv = 0;
+  cb_fast_lists = rng->below(2);
+  cb_list_count = cb_fast_lists ? PredMaxLists : PredListFast;
+  cb_group_base = rng->below(4);
+  cb_mi_offset = 0;
+  d->groups_x = (cb_wi_count + PredGroupSize - 1) / PredGroupSize;
+  cb_rank_offset = (cb_group_base + d->groups_x) * cb_list_count * 4;
+  for (uint i = 0; i < cb_wi_count; ++i) {
+    auto &mi = records[i];
+    mi = MB_MODE_INFO{};
+    const uint ref0 = rng->below(4) == 0 ? 0 : 1;
+    const uint ref1 = ref0 && rng->below(3) == 0 ? 2 : 0;
+    mi.block_type = sizes[rng->below(4)] | (ref0 << 16) | (ref1 << 24);
+    mi.modes = ref1 ? 17 : ref0 ? 13 : 0;
+    mi.mv[0] = rng->u32();
+    mi.mv[1] = rng->u32();
+    mi.mi_position = (i % 16 * 8 << 16) | (i / 16 * 8);
+  }
+  buffer_mi.ptr = records;
+  buffer_mi.count = cb_wi_count;
+  mi_grid.ptr = w->ro[0];
+  mi_grid.size = kRoSize;
+  list_scratch.ptr = w->rw[0];
+  list_scratch.size = kRwSize;
+}
+#elif SHADER_FAMILY == 9
+static void setup(World *w, Rng *rng, Dispatch *) {
+  templates.ptr = w->ro[0];
+  templates.size = kRoSize;
+  scratch.ptr = w->rw[0];
+  scratch.size = kRwSize;
+  cb_groups = 1 + rng->below(4);
+  cb_lists = rng->below(2) ? PredMaxLists : PredListFast;
+  cb_starts_offset = cb_groups * cb_lists * 4;
+  cb_counts_offset = cb_starts_offset + PredHeaderBytes + cb_lists * 4;
+  cb_args_offset = cb_counts_offset + 8;
+  cb_template_offset = 3 * 16;
+  cb_intra_records = 40;
+  for (uint i = 0; i < cb_groups * cb_lists; ++i) put32(w->rw[0], 4 * i, rng->below(6));
+
+  // One batch with one template per inter list, and a batch for one intra dispatch.
+  const uint batches[] = {2, 0, 0, 0, 0, cb_lists, 0, 0, cb_lists, 1, 4, 3};
+  memcpy(w->ro[0], batches, sizeof(batches));
+  for (uint i = 0; i < cb_lists; ++i) {
+    const uint list[] = {i, 16, 2, 2};
+    memcpy(w->ro[0] + cb_template_offset + i * 16, list, sizeof(list));
+  }
+  const uint intra[] = {0, 0, 10, 3};
+  memcpy(w->ro[0] + cb_template_offset + cb_lists * 16, intra, sizeof(intra));
+}
 #else
 #error "SHADER_FAMILY"
 #endif
