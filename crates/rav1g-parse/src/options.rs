@@ -60,12 +60,12 @@ pub struct ParseOptions {
     /// tile. The D3D12 host reads it when the decoder is created: the grid of every slot is then a buffer
     /// a shader may write, the lists of CDEF are the GPU's whatever [`Self::gpu_cdef_lists`] says (the
     /// thread that records would read the grid for them), and [`Self::gpu_grid_check`] has nothing to
-    /// hold the grid against. Off by default.
+    /// hold the grid against. On by default.
     pub gpu_grid: bool,
 }
 
 impl Default for ParseOptions {
-    /// `nolfmask`, `tilethread` and `gpucdef`.
+    /// `nolfmask`, `tilethread`, `gpucdef` and `gpugrid`.
     fn default() -> Self {
         Self::from_bits(Self::DEFAULT)
     }
@@ -86,8 +86,8 @@ impl ParseOptions {
     pub const GPU_GRID_CHECK: u32 = 1024;
     pub const GPU_GRID: u32 = 2048;
     /// The bits of [`ParseOptions::default`].
-    pub const DEFAULT: u32 = Self::NO_LF_MASKS | Self::TILE_KEEPS_THREAD | Self::GPU_CDEF_LISTS;
-    /// The three switches that are on by default, which a list of words names to replace that default.
+    pub const DEFAULT: u32 = Self::NO_LF_MASKS | Self::TILE_KEEPS_THREAD | Self::GPU_CDEF_LISTS | Self::GPU_GRID;
+    /// The switches that are on by default, which a list of words names to replace that default.
     const WAYS: u32 = Self::DEFAULT;
 
     /// No switch: the parse as upstream's rav1d does it.
@@ -146,30 +146,11 @@ impl ParseOptions {
             | (u32::from(self.gpu_grid) * Self::GPU_GRID)
     }
 
-    /// A list of words, separated by commas. `nolfmask`, `tilethread` and `gpucdef` are the three
-    /// switches that are on by default, and a list that has one of them, `none` or `default` replaces
-    /// that default: of the three, the ones the list names are on and no other (`none`: none of them;
-    /// `default`: all three; `nolfmask,tilethread`: the lists of CDEF written by the thread that records,
-    /// as before the GPU wrote them). `time` (the timing of the sink's calls), `latelists` (the block
-    /// lists at the end of a tile) and `cleargrid` (the mode info grid cleared for every frame) are off
-    /// by default; each is on when the list has it and leaves the three as they are, so `time` alone
-    /// times the default. `testpanic` is not a way of doing a parse: the parse of the third frame panics,
-    /// for the test of what a bug does. Neither is `poolwait`: a frame finds the host's pools empty while
-    /// an older frame holds a piece, for the test of a parse that waits for memory. Nor is `gridcheck`:
-    /// the mode info grid built by the GPU is held against the sink's (off by default; like `time`, it
-    /// leaves the three as they are). `gpugrid` is a way of its own, off by default, and adds to the
-    /// three like `time`: the mode info grid is built by a pass of the GPU and not by the sink (the
-    /// D3D12 host then has `gpucdef` on whatever the list says). `None` for a word that is none of these.
-    ///
-    /// | List | `nolfmask` | `tilethread` | `gpucdef` | `time` |
-    /// | --- | --- | --- | --- | --- |
-    /// | no list, `default` | on | on | on | |
-    /// | `time`, `default,time` | on | on | on | on |
-    /// | `none` | | | | |
-    /// | `none,time` | | | | on |
-    /// | `nolfmask` | on | | | |
-    /// | `nolfmask,tilethread` | on | on | | |
-    /// | `tilethread,time` | | on | | on |
+    /// A list of words, separated by commas. Naming any default switch (`nolfmask`, `tilethread`,
+    /// `gpucdef`, `gpugrid`), `none` or `default` selects the default switches explicitly.
+    /// The other words add to the selection. For example, `time` times the default and
+    /// `nolfmask,tilethread,gpucdef,gridcheck` checks the sink-written grid against the GPU's.
+    /// Returns `None` for an unknown word.
     pub fn from_words(list: &str) -> Option<Self> {
         let mut bits = 0;
         let mut ways_named = false;
@@ -189,7 +170,7 @@ impl ParseOptions {
     }
 
     /// The words of the switches that are on, as [`Self::from_words`] reads them: `none` in front when
-    /// none of the three that are on by default is.
+    /// none of the default switches is on.
     pub fn words(self) -> String {
         let mut words: Vec<&str> =
             Self::WORDS.iter().filter(|(_, bit)| self.bits() & bit != 0).map(|(name, _)| *name).collect();
@@ -223,11 +204,11 @@ mod tests {
     #[test]
     fn words_and_bits() {
         let default = ParseOptions::default();
-        assert!(default.no_lf_masks && default.tile_keeps_thread && default.gpu_cdef_lists && !default.time_calls);
-        assert_eq!(default.bits(), 518);
-        assert_eq!(default.words(), "nolfmask,tilethread,gpucdef");
+        assert!(default.no_lf_masks && default.tile_keeps_thread && default.gpu_cdef_lists && default.gpu_grid && !default.time_calls);
+        assert_eq!(default.bits(), 2566);
+        assert_eq!(default.words(), "nolfmask,tilethread,gpucdef,gpugrid");
         assert_eq!(ParseOptions::from_words("default"), Some(default));
-        assert_eq!(ParseOptions::from_words("nolfmask,tilethread,gpucdef"), Some(default));
+        assert_eq!(ParseOptions::from_words("nolfmask,tilethread,gpucdef,gpugrid"), Some(default));
         assert_eq!(ParseOptions::from_words("none"), Some(ParseOptions::NONE));
         assert_eq!(ParseOptions::NONE.words(), "none");
         assert_eq!(ParseOptions::NONE.bits(), 0);
@@ -237,39 +218,36 @@ mod tests {
         let timed = ParseOptions::from_words("time").unwrap();
         assert_eq!(timed, ParseOptions { time_calls: true, ..default });
         assert_eq!(ParseOptions::from_words("default,time"), Some(timed));
-        // The default without the lists of CDEF by the GPU: the two other ways, named.
+        // Keep the parser defaults and have the CPU write the grid and CDEF lists.
         let cpu_lists = ParseOptions::from_words("nolfmask,tilethread").unwrap();
-        assert_eq!(cpu_lists, ParseOptions { gpu_cdef_lists: false, ..default });
+        assert_eq!(cpu_lists, ParseOptions { gpu_cdef_lists: false, gpu_grid: false, ..default });
         assert_eq!(cpu_lists.bits(), 6);
         assert_eq!(cpu_lists.words(), "nolfmask,tilethread");
         let only_lists = ParseOptions::from_words("gpucdef,time").unwrap();
         assert_eq!(only_lists, ParseOptions { gpu_cdef_lists: true, time_calls: true, ..ParseOptions::NONE });
         assert_eq!(only_lists.bits(), 520);
         assert_eq!(only_lists.words(), "time,gpucdef");
-        // The other switch that is off by default: it adds to the three, like the timing.
+        // The other switch that is off by default: it adds to the defaults, like the timing.
         let late = ParseOptions::from_words("latelists").unwrap();
         assert_eq!(late, ParseOptions { late_lists: true, ..default });
-        assert_eq!(late.bits(), 534);
-        assert_eq!(late.words(), "nolfmask,tilethread,latelists,gpucdef");
+        assert_eq!(late.bits(), 2582);
+        assert_eq!(late.words(), "nolfmask,tilethread,latelists,gpucdef,gpugrid");
         let none_late = ParseOptions::from_words("none,latelists,time").unwrap();
         assert_eq!(none_late, ParseOptions { late_lists: true, time_calls: true, ..ParseOptions::NONE });
         assert_eq!(none_late.words(), "none,time,latelists");
         let old = ParseOptions::from_words("latelists,cleargrid").unwrap();
         assert_eq!(old, ParseOptions { late_lists: true, clear_grid: true, ..default });
-        assert_eq!(old.bits(), 566);
+        assert_eq!(old.bits(), 2614);
         let some = ParseOptions::from_words("tilethread,time").unwrap();
         assert!(some.tile_keeps_thread && some.time_calls && !some.no_lf_masks);
         let none_timed = ParseOptions::from_words("none,time").unwrap();
         assert_eq!(none_timed, ParseOptions { time_calls: true, ..ParseOptions::NONE });
         assert_eq!(none_timed.words(), "none,time");
-        // The grid built by the GPU: a way that is off by default and adds to the three.
         let gpu_grid = ParseOptions::from_words("gpugrid").unwrap();
-        assert_eq!(gpu_grid, ParseOptions { gpu_grid: true, ..default });
-        assert_eq!(gpu_grid.bits(), 2566);
-        assert_eq!(gpu_grid.words(), "nolfmask,tilethread,gpucdef,gpugrid");
-        assert!(gpu_grid.sink().gpu_grid && !default.sink().gpu_grid);
-        let gpu_grid_timed = ParseOptions::from_words("time,gpugrid").unwrap();
-        assert_eq!(gpu_grid_timed, ParseOptions { gpu_grid: true, time_calls: true, ..default });
+        assert_eq!(gpu_grid, ParseOptions { gpu_grid: true, ..ParseOptions::NONE });
+        let grid_check = ParseOptions::from_words("nolfmask,tilethread,gpucdef,gridcheck").unwrap();
+        assert_eq!(grid_check, ParseOptions { gpu_grid: false, gpu_grid_check: true, ..default });
+        assert!(default.sink().gpu_grid && !grid_check.sink().gpu_grid);
         for options in [
             default,
             ParseOptions::NONE,
@@ -283,7 +261,7 @@ mod tests {
             none_late,
             old,
             gpu_grid,
-            gpu_grid_timed,
+            grid_check,
         ] {
             assert_eq!(ParseOptions::from_bits(options.bits()), options);
             assert_eq!(ParseOptions::from_words(&options.words()), Some(options));
@@ -298,11 +276,11 @@ mod tests {
         // The test switches: bits of their own, off in every default.
         let panics = ParseOptions::from_words("testpanic").unwrap();
         assert_eq!(panics, ParseOptions { test_panic: true, ..default });
-        assert_eq!(panics.bits(), 582);
-        assert_eq!(ParseOptions::from_bits(582), panics);
+        assert_eq!(panics.bits(), 2630);
+        assert_eq!(ParseOptions::from_bits(2630), panics);
         let small = ParseOptions::from_words("poolwait").unwrap();
         assert_eq!(small, ParseOptions { test_pool_wait: true, ..default });
-        assert_eq!(small.bits(), 646);
-        assert_eq!(small.words(), "nolfmask,tilethread,poolwait,gpucdef");
+        assert_eq!(small.bits(), 2694);
+        assert_eq!(small.words(), "nolfmask,tilethread,poolwait,gpucdef,gpugrid");
     }
 }

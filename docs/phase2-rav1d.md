@@ -1244,7 +1244,7 @@ frames per second, the mean of two runs:
 | Where | The parser of a decoder | Its switches |
 | --- | --- | --- |
 | Rust | `Settings::parser`: `Parser::Rav1d` (default) or `Parser::Libaom` | `Settings::parser_options`: `ParserOptions::default()` has `no_lf_masks` and `tile_keeps_thread` on; `ParserOptions::NONE` has neither |
-| C (`rav1g.h`) | `Rav1gSettings::parser`: `RAV1G_PARSER_RAV1D` (what `rav1g_settings_default` writes, and what every value but `RAV1G_PARSER_LIBAOM` selects) or `RAV1G_PARSER_LIBAOM` | `Rav1gSettings::parser_options`: `RAV1G_PARSER_OPTIONS_DEFAULT` (what `rav1g_settings_default` writes: `_NO_LF_MASKS` and `_TILE_KEEPS_THREAD`, and since 2026-11-16 `_GPU_CDEF_LISTS`: 518); 0 for neither |
+| C (`rav1g.h`) | `Rav1gSettings::parser`: `RAV1G_PARSER_RAV1D` (what `rav1g_settings_default` writes, and what every value but `RAV1G_PARSER_LIBAOM` selects) or `RAV1G_PARSER_LIBAOM` | `Rav1gSettings::parser_options`: `RAV1G_PARSER_OPTIONS_DEFAULT` (what `rav1g_settings_default` writes: `_NO_LF_MASKS` and `_TILE_KEEPS_THREAD`, `_GPU_CDEF_LISTS` and `_GPU_GRID`: 2566); 0 for none |
 | `rav1g-dec`, test player | no flag or `-parser rav1d`; `-parser c` for the entropy decoder of libaom | no flag: `nolfmask,tilethread`; `-parseopt` says otherwise, per task ([test-player.md](test-player.md#switches-of-the-parser--parseopt)) |
 | `rav1g-parse-check` (the oracle) | both, always (until 2026-11-14; rav1d only since) | no flag: `nolfmask,tilethread`; `-parseopt` |
 
@@ -3195,7 +3195,7 @@ and `sink_intra` (of the block lists, the wavefront and the intra lists).
 ### The grid built by the GPU: the check (2026-11-18)
 
 The first part of step C of [the design above](#the-block-lists-on-the-gpu-a-design): the GPU builds
-the mode info grid, and nothing reads what it builds yet. `-parseopt gridcheck` of `rav1g-dec`
+the mode info grid, and nothing reads what it builds yet. `-parseopt nolfmask,tilethread,gpucdef,gridcheck` of `rav1g-dec`
 (`RAV1G_PARSER_OPTION_GPU_GRID_CHECK`, 1024; read when the decoder is created):
 
 - *The pass.* `mi_grid_build.hlsl`, in front of the frame's stages (`grid_check::record`, called first
@@ -3219,7 +3219,7 @@ the mode info grid, and nothing reads what it builds yet. `-parseopt gridcheck` 
   `a1_8b4k_300`, with two frames in parse, none differs. A shader that leaves out the last column of
   every block above 16x16 is caught (42 of 648 units differ on the 66x66 vector) while its md5 still
   passes, which is what the second grid is for.
-- *CI* (job `rust-switches`): the whole set with `-parseopt gridcheck`, its references, and in every
+- *CI* (job `rust-switches`): the whole set with `-parseopt nolfmask,tilethread,gpucdef,gridcheck`, its references, and in every
   stream's log a `GRIDCHECK` line with no unit that differs.
 - *Next* (the second part of step C, [below](#the-grid-built-by-the-gpu-the-switch-2026-11-18)): the grid of the slot built by this pass and not by the sink, which
   takes the sink's stores of the grid off the parse threads (1.18 ms a frame of `d2_300`, 1.11 of
@@ -3229,6 +3229,9 @@ the mode info grid, and nothing reads what it builds yet. `-parseopt gridcheck` 
   says.
 
 ### The grid built by the GPU: the switch (2026-11-18)
+
+The measurements below used the earlier defaults. Use `-parseopt nolfmask,tilethread,gpucdef`
+for the sink-written grid today. The default uses the GPU grid.
 
 The second part of step C of [the design above](#the-block-lists-on-the-gpu-a-design), behind a switch
 that is off: `-parseopt gpugrid` (`RAV1G_PARSER_OPTION_GPU_GRID`, 2048; read when the decoder is

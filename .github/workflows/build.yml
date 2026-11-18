@@ -895,7 +895,7 @@ jobs:
   #                     smoke test, the stage dumps and the MEMORY lines;
   #   rust-switches     the other side of the decoder's switches: the poisoned buffers, the fast inter
   #                     path, the clears on the decode thread, the switches of rav1d's parse;
-  #   rust-gpugrid      the mode info grid built by the GPU and not by the parse (-parseopt gpugrid);
+  #   rust-sinkgrid     the mode info grid written by the parse;
   #   rust-clears       the clears of a pipeline slot: who clears what without a flag (nobody), and the
   #                     ways that clear the wavefront grid, by the GPU and by the completion thread;
   #   rust-dumps-equal  the stage dumps they wrote, held against each other;
@@ -1579,7 +1579,7 @@ jobs:
         run: |
           $failed = @()
           python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/conformance-gridcheck --threads 4 "--tool-args=-parseopt gridcheck" "--title=rav1g-dec (cargo, MSVC) with -parseopt gridcheck"
+            --out out/conformance-gridcheck --threads 4 "--tool-args=-parseopt nolfmask,tilethread,gpucdef,gridcheck" "--title=rav1g-dec (cargo, MSVC) with -parseopt gridcheck"
           if ($LASTEXITCODE -ne 0) { $failed += "conformance with -parseopt gridcheck: exit code $LASTEXITCODE" }
           $lines = @(Get-ChildItem out/conformance-gridcheck/logs -Filter *.log | Select-String -Pattern '^GRIDCHECK ')
           $differ = @($lines | Where-Object { $_.Line -notmatch ' 0 differ$' })
@@ -1602,15 +1602,9 @@ jobs:
             out/cut-tile/
           if-no-files-found: warn
 
-  # The mode info grid built by the GPU and not by the parse (-parseopt gpugrid, off by default;
-  # docs/phase2-rav1d.md, "The grid built by the GPU: the switch"): a pass in front of the frame's stages
-  # (mi_grid_build.hlsl) writes the grid of the slot from the frame's mode info records, the sink writes
-  # none, and what the parse threads read through the grid (the records above and to the left of a block
-  # for the block lists, the record a 64x64 area keeps its CDEF index in) comes from the edges of the
-  # tile. The output has to be the same, and so have the buffers: the rust-dumps-equal job holds the
-  # stage dumps of this job (the grid, taken behind the pass, the mode info records and the lists of the
-  # prediction blocks among them) against those of the default switches byte for byte.
-  rust-gpugrid:
+  # Exercise the sink-written grid separately from the default GPU grid. rust-dumps-equal
+  # compares the grids, records and prediction lists from the two paths.
+  rust-sinkgrid:
     needs: [conformance-streams, rust]
     runs-on: windows-latest
     timeout-minutes: 45
@@ -1637,61 +1631,37 @@ jobs:
           fail-on-cache-miss: true
 
       # The whole set against its references and expected.txt, the stage dumps, the decoder code of the
-      # test player with its -parseopt flag, and the decode errors in cut streams (a tile that fails has
-      # written a part of the edges).
-      - name: The mode info grid built by the GPU (-parseopt gpugrid)
+      # test player with its -parseopt flag, and the decode errors in cut streams.
+      - name: The mode info grid written by the parse
         shell: pwsh
         run: |
           $failed = @()
-          $switches = '-parseopt gpugrid'
+          $switches = '-parseopt nolfmask,tilethread,gpucdef'
           python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/conformance-gpugrid --threads 4 "--tool-args=$switches" "--title=rav1g-dec (cargo, MSVC) with $switches"
+            --out out/conformance-sinkgrid --threads 4 "--tool-args=$switches" "--title=rav1g-dec (cargo, MSVC) with $switches"
           if ($LASTEXITCODE -ne 0) { $failed += "conformance with ${switches}: exit code $LASTEXITCODE" }
-          if (-not (Select-String -Path out/conformance-gpugrid/lists/run001.log -Pattern '^PARSER .*switches nolfmask,tilethread,gpucdef,gpugrid \(' -Quiet)) {
+          if (-not (Select-String -Path out/conformance-sinkgrid/lists/run001.log -Pattern '^PARSER .*switches nolfmask,tilethread,gpucdef \(' -Quiet)) {
             $failed += 'the decoder of the run does not report the switches of the parser'
           }
           python testing/stage_dump/ci_dumps.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --tasks testing/conformance/dump_tasks.txt --out out/stage-dumps-gpugrid --threads 4 "--tool-args=$switches"
+            --tasks testing/conformance/dump_tasks.txt --out out/stage-dumps-sinkgrid --threads 4 "--tool-args=$switches"
           if ($LASTEXITCODE -ne 0) { $failed += "stage dumps with ${switches}: exit code $LASTEXITCODE" }
           python testing/conformance/player_smoke.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/player-smoke-gpugrid "--player-args=$switches" "--title=the Rust library (cargo, MSVC), the player with $switches"
+            --out out/player-smoke-sinkgrid "--player-args=$switches" "--title=the Rust library (cargo, MSVC), the player with $switches"
           if ($LASTEXITCODE -ne 0) { $failed += "the player's decoder code with ${switches}: exit code $LASTEXITCODE" }
           python testing/conformance/cut_tile_check.py --tool out/rav1g-dec/rav1g-dec.exe "--tool-args=$switches" `
             --streams conformance-streams --out out/cut-tile
           if ($LASTEXITCODE -ne 0) { $failed += "decode error check with ${switches}: exit code $LASTEXITCODE" }
-          if ($failed.Count) { throw "the grid built by the GPU: $($failed -join '; ')" }
+          if ($failed.Count) { throw "the sink-written grid: $($failed -join '; ')" }
 
-      # With the other side of the other switches: the block lists counted at the end of a tile (the edges
-      # are then filled in one pass over the tile's records), rav1d's parse as upstream schedules it, a
-      # list without gpucdef (the decoder has the lists of CDEF by the GPU all the same: no thread of the
-      # CPU reads the grid), and two frames in parse on four threads. The whole set.
-      - name: The grid built by the GPU with the other side of the other switches and two frames in parse
-        if: ${{ !cancelled() }}
-        shell: pwsh
-        run: |
-          $failed = @()
-          $switches = '-parseframes 2 -parseopt none,latelists,gpugrid'
-          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/conformance-gpugrid-frames2 --threads 4 "--tool-args=$switches" "--title=rav1g-dec (cargo, MSVC) with $switches -t 4"
-          if ($LASTEXITCODE -ne 0) { $failed += "conformance with ${switches}: exit code $LASTEXITCODE" }
-          if (-not (Select-String -Path out/conformance-gpugrid-frames2/lists/run001.log -Pattern '^PARSER .*switches none,latelists,gpugrid \(' -Quiet)) {
-            $failed += 'the decoder of the run does not report the switches of the parser'
-          }
-          if (-not (Select-String -Path out/conformance-gpugrid-frames2/lists/run001.log -Pattern 'frames in parse 2 \(asked 2\)' -Quiet)) {
-            $failed += 'the decoders of the run do not have two frames in parse'
-          }
-          if ($failed.Count) { throw "the grid built by the GPU: $($failed -join '; ')" }
-
-      # With the grid cleared for every frame (-parseopt cleargrid): by the GPU at the end of the frame's
-      # command list on poisoned buffers (the pass and the clear both write the grid), and by the decode
-      # thread at the frame's setup. The part of the set of the poisoned runs.
-      - name: The grid built by the GPU and cleared for every frame
+      # Clear the grid on poisoned buffers by command list, and by the decode thread at setup.
+      - name: The sink-written grid cleared for every frame
         if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           $part = '--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)'
-          $runs = @(@{ name = 'gpugrid-gpuclear-poisonbuf'; args = '-gpuclear -poisonbuf -parseopt cleargrid,gpugrid -slots 3 -t 4' },
-            @{ name = 'gpugrid-syncclear'; args = '-syncclear -parseopt cleargrid,gpugrid' })
+          $runs = @(@{ name = 'sinkgrid-gpuclear-poisonbuf'; args = '-gpuclear -poisonbuf -parseopt nolfmask,tilethread,gpucdef,cleargrid -slots 3 -t 4' },
+            @{ name = 'sinkgrid-syncclear'; args = '-syncclear -parseopt nolfmask,tilethread,gpucdef,cleargrid' })
           $failed = @()
           foreach ($run in $runs) {
             python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
@@ -1699,17 +1669,17 @@ jobs:
               "--title=rav1g-dec, part of the set with $($run.args)" $part
             if ($LASTEXITCODE -ne 0) { $failed += "$($run.args): exit code $LASTEXITCODE" }
           }
-          if ($failed.Count) { throw "the grid built by the GPU, cleared: $($failed -join '; ')" }
+          if ($failed.Count) { throw "the sink-written grid, cleared: $($failed -join '; ')" }
 
       - name: Preserve the results, the per-stream logs, the md5 files and the stage dumps
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: rav1g-dec-gpugrid-${{ github.run_id }}
+          name: rav1g-dec-sinkgrid-${{ github.run_id }}
           path: |
             out/conformance-*/
-            out/stage-dumps-gpugrid/
-            out/player-smoke-gpugrid/
+            out/stage-dumps-sinkgrid/
+            out/player-smoke-sinkgrid/
             out/cut-tile/
           if-no-files-found: warn
 
@@ -1888,7 +1858,7 @@ jobs:
         shell: pwsh
         run: |
           python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/conformance-frames2 --threads 2 "--tool-args=-parseframes 2" "--title=rav1g-dec with -parseframes 2 -t 2"
+            --out out/conformance-frames2 --threads 2 "--tool-args=-parseframes 2 -slots 3" "--title=rav1g-dec with -parseframes 2 -t 2"
           if ($LASTEXITCODE -ne 0) { throw "conformance with -parseframes 2: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
           if (-not (Select-String -Path out/conformance-frames2/lists/run001.log -Pattern 'frames in parse 2 \(asked 2\), slots 3' -Quiet)) {
             throw 'the decoders of the run with -parseframes 2 do not say that they have two frames in parse and three slots'
@@ -1927,7 +1897,7 @@ jobs:
         run: |
           $failed = @()
           python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/conformance-latefb --threads 2 "--tool-args=-v -parseframes 2 -lowmemparts 33 -memstats" `
+            --out out/conformance-latefb --threads 2 "--tool-args=-v -parseframes 2 -slots 3 -lowmemparts 33 -memstats" `
             "--title=rav1g-dec with -parseframes 2 -t 2 -lowmemparts 33"
           if ($LASTEXITCODE -ne 0) { $failed += "conformance with -parseframes 2 -lowmemparts 33: exit code $LASTEXITCODE" }
           if (-not (Select-String -Path out/conformance-latefb/lists/run001.log -Pattern 'slots 3, frame buffers 10 \+ 2 back buffers' -Quiet) -or
@@ -2027,7 +1997,7 @@ jobs:
             @{ name = 'frames4-t8'; threads = 8; args = '-parseframes 4'; says = 'frames in parse 4 \(asked 4\), slots 4' },
             @{ name = 'frames2-t3-slots4'; threads = 3; args = '-parseframes 2 -slots 4'; says = 'frames in parse 2 \(asked 2\), slots 4' },
             @{ name = 'poolwait-t4'; threads = 4; args = '-parseopt poolwait'; says = 'frames in parse 1 \(asked 0\), slots 2' },
-            @{ name = 'poolwait-frames2-t2'; threads = 2; args = '-parseframes 2 -parseopt poolwait'; says = 'frames in parse 2 \(asked 2\), slots 3' })
+            @{ name = 'poolwait-frames2-t2'; threads = 2; args = '-parseframes 2 -slots 3 -parseopt poolwait'; says = 'frames in parse 2 \(asked 2\), slots 3' })
           $failed = @()
           foreach ($run in $runs) {
             python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
@@ -2110,7 +2080,7 @@ jobs:
   # What the jobs above wrote, held against each other; no decoder runs here. It runs also when one of
   # them failed, on what that job wrote before it did.
   rust-dumps-equal:
-    needs: [rust, rust-conformance, rust-switches, rust-gpugrid, rust-clears, rust-frames]
+    needs: [rust, rust-conformance, rust-switches, rust-sinkgrid, rust-clears, rust-frames]
     if: ${{ !cancelled() && needs.rust.result == 'success' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 15
@@ -2151,14 +2121,10 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: rav1g-dec-gpugrid-${{ github.run_id }}
-          path: gpugrid
+          name: rav1g-dec-sinkgrid-${{ github.run_id }}
+          path: sinkgrid
 
-      # The mode info grid built by the GPU (the run of the rust-gpugrid job): the stage dumps against
-      # those of the default switches byte for byte. The dump mi_grid is the grid behind the pass, held
-      # here against the grid the sink wrote; mi_pool and the lists of the prediction blocks say that
-      # the block lists counted from the edges of the tiles are those counted through the grid. The
-      # rust-equal job holds the dumps of the default switches against the C++ decoder's.
+      # Compare the default GPU grid and the sink-written grid, including their mode info and lists.
       - name: The grid built by the GPU gives the same stage dumps as the grid the parse writes
         run: |
           set -euo pipefail
@@ -2169,10 +2135,10 @@ jobs:
             [ "$name" != streams ] || continue
             dumped=$((dumped + 1))
             code=0
-            python3 testing/stage_dump/stage_dump.py compare "$dir" "gpugrid/stage-dumps-gpugrid/$name" > compare.txt 2>&1 || code=$?
+            python3 testing/stage_dump/stage_dump.py compare "$dir" "sinkgrid/stage-dumps-sinkgrid/$name" > compare.txt 2>&1 || code=$?
             tail -n 3 compare.txt
             if [ "$code" -ne 0 ]; then
-              echo "::error::stage dumps of $name: the default switches and -parseopt gpugrid differ"
+              echo "::error::stage dumps of $name: the GPU and sink-written grids differ"
               status=1
             fi
           done
@@ -3180,25 +3146,21 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
 
-      # -parseopt gpugrid (docs/phase2-rav1d.md, "The grid built by the GPU: the switch"): the sink writes
-      # no grid and gives the block lists the records at the edges of the tiles, where the default reads
-      # them through the grid. The records (the CDEF index of a 64x64 area among their fields), the block
-      # lists and the index lists have to be the same, and so has the grid the records give (built here as
-      # the pass of the GPU builds it): with the block lists counted superblock by superblock and at the
-      # end of a tile, with one thread, with four, and with two frames in parse.
-      - name: The parse without the grid against the default switches (-parseopt gpugrid)
+      # Compare the default GPU grid (rebuilt from the records by parse-check) and the sink-written
+      # grid, including edge readers with late lists, multiple threads and two frames in parse.
+      - name: Check the parser with each grid path
         if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           status=0
           {
-            echo '## Parse check without the grid of the sink (-parseopt gpugrid)'
+            echo '## Parse check with each grid path'
             echo
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           run=0
-          for arguments in '-threads 1 -parseopt gpugrid' '-threads 4 -parseopt gpugrid' \
-              '-threads 4 -parseopt none,latelists,gpugrid' '-threads 4 -frames 2 -parseopt gpugrid'; do
+          for arguments in '-threads 1' '-threads 4 -parseopt nolfmask,tilethread,gpucdef' \
+              '-threads 4 -parseopt none,latelists,gpugrid' '-threads 4 -frames 2'; do
             run=$((run + 1))
             # shellcheck disable=SC2086
             target/release/rav1g-parse-check $arguments -root conformance-streams \
@@ -3641,7 +3603,7 @@ jobs:
   release:
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     needs: [player, conformance-streams, cpp-reference, rust, rust-conformance, rust-output, rust-switches,
-      rust-gpugrid, rust-clears, rust-frames, rust-frames-threads, rust-dumps-equal, rust-dxc, rust-equal, shader-headers,
+      rust-sinkgrid, rust-clears, rust-frames, rust-frames-threads, rust-dumps-equal, rust-dxc, rust-equal, shader-headers,
       rust-cross, rust-cross-run, rust-cross-run-switches, rav1d, parse-check, parse-digest, colour, sync-check,
       cdef-check, warp-check, inter-check, superres-check, tables-check, intra-check]
     runs-on: ubuntu-latest

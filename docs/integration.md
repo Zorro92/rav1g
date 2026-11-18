@@ -49,8 +49,8 @@ until the application has an image free; the decoder then waits with it." So wit
 - **How many the decoder holds.** An image is the decoder's from `get_image` until `frame` (or
   `unused`) has returned; then it is the application's. The decoder holds at most one image a
   pipeline slot (`rav1g_decoder_configuration().frame_slots`, at most 4) and one for each of the two
-  copies of a frame shown again (`show_existing_frame`) that can be in flight: at 4K with three slots,
-  up to 5. The pool needs that many on top of what the application holds: the frames queued for the
+  copies of a frame shown again (`show_existing_frame`) that can be in flight: at 4K with four slots,
+  up to 6. The pool needs that many on top of what the application holds: the frames queued for the
   sample thread, those Media Foundation has (queued and on screen). If the pool is smaller, playback
   waits for the renderer to give one back, which it does as it plays.
 - **A wait that has to end.** On a pause the renderer keeps its samples and gives nothing back, so the
@@ -98,9 +98,9 @@ output fence. Nothing has to be reset between streams.
 `rav1g_peek_stream_info` on the first temporal unit with a sequence header: its largest frame size,
 `max_frame_width` and `max_frame_height`, not the size of the first frame), the output callbacks,
 `output_kind = RAV1G_OUTPUT_SEMI_PLANAR` and `shared_fence = true`. Leave `low_memory`,
-`frames_in_parse`, `frame_slots` and `threads` at their defaults: at 3840x2160 10-bit that is 501.5
-MiB of device buffers (every low memory part above 1920x1088 since package 0.2.193), two frames in
-parse, three slots, two threads.
+`frames_in_parse`, `frame_slots` and `threads` at their defaults. At 3840x2160 10-bit the decoder uses 487.8
+MiB of device buffers, with two frames in parse, four slots and two threads. The GPU builds the
+mode info grid by default.
 
 ## Loading the library at run time: the interface version
 

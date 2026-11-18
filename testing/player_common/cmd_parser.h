@@ -25,7 +25,7 @@
 
 #define PLAYER_QUEUE_SIZE 16
 // -slots: the decoder's pipeline slots (aom_codec_dec_cfg_t::frame_slots).
-// (A task without -slots gets what the library gives the frames in parse: one more than there are.)
+// (A task without -slots uses the library default.)
 // The clears of a pipeline slot (-gpuclear, -cpuclear, -syncclear): the values of RAV1G_CLEARS_* of
 // rav1g.h (decoder.cpp holds them against it).
 #define PLAYER_CLEARS_NOT_NEEDED 0
@@ -50,7 +50,7 @@
 #define PLAYER_LOWMEM_PARTS 39
 #define PLAYER_LOWMEM_DEFAULT 16
 // -parseopt: the words as bits (RAV1G_PARSER_OPTION_* of rav1g.h, which decoder.cpp holds them against),
-// and what a task without -parseopt gets: nolfmask, tilethread and gpucdef (RAV1G_PARSER_OPTIONS_DEFAULT).
+// and what a task without -parseopt gets: nolfmask, tilethread, gpucdef and gpugrid (RAV1G_PARSER_OPTIONS_DEFAULT).
 #define PLAYER_PARSEOPT_NO_LF_MASKS 2
 #define PLAYER_PARSEOPT_TILE_KEEPS_THREAD 4
 #define PLAYER_PARSEOPT_TIME_CALLS 8
@@ -61,7 +61,7 @@
 // parse threads (off by default; such a decoder has gpucdef on whatever the list says).
 #define PLAYER_PARSEOPT_GPU_GRID 2048
 #define PLAYER_PARSEOPT_DEFAULT \
-  (PLAYER_PARSEOPT_NO_LF_MASKS | PLAYER_PARSEOPT_TILE_KEEPS_THREAD | PLAYER_PARSEOPT_GPU_CDEF_LISTS)
+  (PLAYER_PARSEOPT_NO_LF_MASKS | PLAYER_PARSEOPT_TILE_KEEPS_THREAD | PLAYER_PARSEOPT_GPU_CDEF_LISTS | PLAYER_PARSEOPT_GPU_GRID)
 // The size the decoder is created for with -nofitsize, and for a stream that is larger than this.
 #define PLAYER_DECODER_WIDTH 4096
 #define PLAYER_DECODER_HEIGHT 2176

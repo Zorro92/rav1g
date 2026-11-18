@@ -117,14 +117,13 @@ pub struct Settings {
     /// [`Decoder::drain`], and [`Output::get_image`] is called on a thread of the decoder.
     ///
     /// A frame in parse holds a pipeline slot, and takes its mode info, coefficients and transform
-    /// block records from pools all frames in flight share. With `frame_slots` 0 a decoder with more
-    /// than one frame in parse has one slot more than frames in parse, at most 4; when [`Settings::memory_available`]
-    /// says that such a decoder would not leave [`Settings::memory_headroom`], the decoder is created
+    /// block records from pools all frames in flight share. When [`Settings::memory_available`]
+    /// says that the decoder would leave less than [`Settings::memory_headroom`], it is created
     /// with fewer slots and frames in parse. [`Decoder::configuration`] says what was created.
     pub frames_in_parse: u32,
     /// Pipeline slots: frames that can be between the start of their CPU decode and the end of their GPU
-    /// work at the same time, 2 to 4. 0 is the default: 2 with one frame in parse. Each slot has
-    /// buffers of its own.
+    /// work at the same time, 2 to 4. 0 is the default: four above 2560x1440, else one more than
+    /// frames in parse, at most four. Each slot has buffers of its own.
     pub frame_slots: u32,
     /// The memory reductions.
     pub low_memory: LowMemory,

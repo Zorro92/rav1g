@@ -503,7 +503,7 @@ CPU timers (QueryPerformanceCounter, all in ms per frame):
 | `memset`, `memset_tile` | the per-frame and per-tile memsets on the decode and tile threads; the summary also gives the MB cleared per frame |
 | `setup` | `av1_setup_frame`, including its waits and memsets |
 | `frame` | decode thread, frame setup to submit done |
-| `wait_slot`, `wait_sec_slot` | blocked waiting for a free pipeline slot (two by default, see `-slots`): for the frame, and for the second slot a frame takes when its own coefficient or mode info share is too small. High values mean the GPU is behind the CPU. With `-cpuclear` a slot is free only after its clears, so that time is part of the wait. |
+| `wait_slot`, `wait_sec_slot` | blocked waiting for a free pipeline slot (see `-slots`): for the frame, and for the second slot a frame takes when its own coefficient or mode info share is too small. High values mean the GPU is behind the CPU. With `-cpuclear` a slot is free only after its clears, so that time is part of the wait. |
 | `wait_output` | blocked in the player's output buffer callback (pool of `-queue_size`) |
 | `wait_fb`, `wait_image`, `wait_item` | blocked on the reference frame pool, the output image pool, the GPU work item pool |
 | `fence_wait`, `gpu_latency` | completion thread: time blocked on the frame's fence, and submit-to-fence time |
@@ -1299,8 +1299,7 @@ and 45 to 49 with two frames in parse and the pools.
 
 rav1d's parse has switches: ways of doing the same parse, kept as switches so that one launch can
 time the parse with and without each on the same stream. The output is the same with every one of
-them. Two are on by default since package 0.2.139.0 and a third, `gpucdef`, since package
-0.2.197; why each exists and what it changed where it was measured: [phase2-rav1d.md](phase2-rav1d.md#where-the-time-goes).
+them. Four are on by default; why each exists and what it changed where it was measured: [phase2-rav1d.md](phase2-rav1d.md#where-the-time-goes).
 
 | Word | Default | Effect |
 | --- | --- | --- |
@@ -1310,21 +1309,16 @@ them. Two are on by default since package 0.2.139.0 and a third, `gpucdef`, sinc
 | `time` | off | With `-gputime`: the calls of the sink are timed (`sink_calls`, below). Two readings of the processor's time stamp counter per block and per transform block. |
 | `latelists` | off | The block lists of a tile are counted in one pass at the end of the tile, as up to package 0.2.140, and not superblock by superblock while the superblock's mode info is in the cache. |
 | `cleargrid` | off | The mode info grid of a pipeline slot is cleared for every frame (4.2 MB at 4K), as up to package 0.2.140, and not only for a frame of another size than the frames before it on the slot. |
-| `gpugrid` | off | The mode info grid of a frame (for every 4x4 unit the record of its block, 1.98 MiB a 4K frame) is built by a pass of the frame's command list from the frame's mode info records (`mi_grid_build.hlsl`, in front of every stage that reads the grid; its GPU time is in the stage `gen_blocks` of `-gputime`) and not written by the parse threads: `sink_grid` is then 0 and `sink_calls` smaller by it (1.18 ms a frame of `d2_300` and 1.11 of `j4k40` on the console before the switch). What the parse threads read through the grid they get from the edges of the tile. The same grid, records and lists. Read when the decoder is created: the grid of a slot is then a buffer a command list may write, and the decoder has the lists of CDEF by the GPU as with `gpucdef`, whatever the list says (`-parseopt none,gpugrid` too), because no thread of the CPU may read the grid ([phase2-rav1d.md](phase2-rav1d.md#the-grid-built-by-the-gpu-the-switch-2026-11-18)). Off until the console has timed it. |
-| `gridcheck` | off | `rav1g-dec` only (the test player does not take the word). A check, not a way of doing the parse: a pass in front of the frame's stages (`mi_grid_build.hlsl`) builds the mode info grid from the frame's records into a second grid of the slot, and the decoder holds it against the grid the parse wrote when the frame is done; at its release a `GRIDCHECK` line says how many frames and units were held and how many differed (an error line when any did). The first step of the grid built by the GPU ([phase2-rav1d.md](phase2-rav1d.md#the-grid-built-by-the-gpu-the-check-2026-11-18)). Every slot has the second grid and a list of the frame's runs of records. Nothing to check with `gpugrid`, which leaves no grid of the parse: the word does nothing then. |
+| `gpugrid` | on | The mode info grid of a frame (for every 4x4 unit the record of its block, 1.98 MiB a 4K frame) is built by a pass of the frame's command list from the frame's mode info records (`mi_grid_build.hlsl`, in front of every stage that reads the grid; its GPU time is in the stage `gen_blocks` of `-gputime`) and not written by the parse threads: `sink_grid` is then 0 and `sink_calls` smaller by it (1.18 ms a frame of `d2_300` and 1.11 of `j4k40` on the console before the switch). What the parse threads read through the grid they get from the edges of the tile. The same grid, records and lists. Read when the decoder is created: the grid of a slot is then a buffer a command list may write, and the decoder has the lists of CDEF by the GPU as with `gpucdef`, whatever the list says (`-parseopt none,gpugrid` too), because no thread of the CPU may read the grid ([phase2-rav1d.md](phase2-rav1d.md#the-grid-built-by-the-gpu-the-switch-2026-11-18)). |
+| `gridcheck` | off | `rav1g-dec` only (the test player does not take the word). A check, not a way of doing the parse: a pass in front of the frame's stages (`mi_grid_build.hlsl`) builds the mode info grid from the frame's records into a second grid of the slot, and the decoder holds it against the grid the parse wrote when the frame is done; at its release a `GRIDCHECK` line says how many frames and units were held and how many differed (an error line when any did). The first step of the grid built by the GPU ([phase2-rav1d.md](phase2-rav1d.md#the-grid-built-by-the-gpu-the-check-2026-11-18)). Every slot has the second grid and a list of the frame's runs of records. Use `-parseopt nolfmask,tilethread,gpucdef,gridcheck` to keep the sink-written grid for the comparison. |
 
 `-parseopt <word>[,<word>...]` says which are on:
 
-- A list that names `nolfmask`, `tilethread`, `gpucdef`, `none` or `default` replaces the default of
-  those three: the parse is done in the ways the list names and in no other. `-parseopt none` turns
-  all three off (rav1d's parse as upstream schedules it, the lists of CDEF by the thread that
-  records), `-parseopt nolfmask,tilethread` leaves `gpucdef` off (the default up to package 0.2.196),
-  `-parseopt tilethread` leaves only `tilethread` on, `-parseopt default` is the same as no flag.
-- `time`, `latelists`, `cleargrid` and `gpugrid` are off by default; each is on when the list has it and
-  changes nothing else (`-parseopt time,gpugrid` is the default with the grid built by the GPU, timed): `-parseopt time` is the default, timed; `-parseopt none,time` is the parse
-  without the three, timed; `-parseopt latelists,cleargrid` is the default with the block lists and the grid
-  clear as they were up to package 0.2.140
-  ([phase2-rav1d.md](phase2-rav1d.md#block-lists-and-clears-less-memory-traffic)).
+- Naming `nolfmask`, `tilethread`, `gpucdef`, `gpugrid`, `none` or `default` selects the default
+  switches explicitly. `-parseopt none` clears all four. `-parseopt nolfmask,tilethread,gpucdef`
+  keeps the sink-written grid. `-parseopt default` selects all four.
+- `time`, `latelists` and `cleargrid` add to the selection. `-parseopt time` times the defaults and
+  `-parseopt none,time` times the parse with all four default switches off.
 - Another word is an error of the task (`stage` and `all` were words until package 0.2.138; the
   switch `stage` is gone, and so is `recordonce`, a word of package 0.2.196 alone: a mode info
   record written to its pool once, the slower way,
@@ -1342,7 +1336,7 @@ them. Two are on by default since package 0.2.139.0 and a third, `gpucdef`, sinc
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt latelists
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt cleargrid
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt nolfmask,tilethread
--i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt time,gpugrid
+-i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt time
 ```
 
 The log has `Parser switches (-parseopt): ...` behind the `Parser:` line (`nolfmask tilethread gpucdef`
@@ -1369,13 +1363,13 @@ that come out, and their order, are the same.
 
 Since the pools ([phase2-rav1d.md](phase2-rav1d.md#step-5-the-pools), package 0.2.156.0) **a task
 without these flags gets the library's defaults for the frame size**: one thread, one frame in parse
-and two slots up to 2560x1440; two threads, two frames in parse and three slots above (4K).
+and two slots up to 2560x1440. Above that size the defaults are two threads, two frames in parse and four slots.
 
 | Flag | Effect |
 | --- | --- |
 | `-parseframes N` | The decoder is asked for `N` frames in parse, 1 to 4 and never more than the threads (`-t`). Without the flag, or with 0: the library's default for the frame size, 2 for a stream above 2560x1440 with at least two threads, else 1. |
 | `-t N` | The threads that parse: the tiles of a frame and the frames in parse. Without the flag, or with 0: the library's default, 2 above 2560x1440, else 1. |
-| `-slots N` | As [below](#pipeline-slots-and-clears--slots--gpuclear--cpuclear--syncclear). Without the flag: what the library gives the frames in parse, one more than there are (2, or 3 with two frames in parse), at most 4. |
+| `-slots N` | As [below](#pipeline-slots-and-clears--slots--gpuclear--cpuclear--syncclear). Without the flag: four above 2560x1440, else one more than frames in parse, at most four. |
 
 A frame in parse holds a pipeline slot, but no longer a share of the mode info and coefficient
 buffers: all frames in flight take those in pieces from pools that hold the worst case of one frame.
@@ -1383,10 +1377,11 @@ So the decoder of two frames in parse is one slot larger than that of one, not t
 shares. Device buffers, MiB (the `CONFIGURATION` line of `rav1g-dec`, `MEMORY decoder created` of the
 player):
 
-| Decoder | 1 frame in parse, 2 slots | 2 frames, 3 slots (the default above 1440p) | 2 to 4 frames, 4 slots (`-slots 4`) |
+| Decoder | 1 frame in parse, 2 slots | 2 frames, 3 slots | 2 to 4 frames, 4 slots (the default above 2560x1440) |
 | --- | ---: | ---: | ---: |
 | 3840x2160 10-bit, before the pools (0.2.154) | 615.7 | (766.1 with one frame in parse) | 916.6 |
-| **3840x2160 10-bit, now** | **597.6** | **646.5** | 695.3 |
+| 3840x2160 10-bit, before the memory reductions | 597.6 | 646.5 | 695.3 |
+| **3840x2160 10-bit, now** | | **469.6** | **487.8** |
 | 1920x1080 10-bit, before | 166.9 | (207.9) | 248.8 |
 | 1920x1080 10-bit, now | 162.1 | 176.2 | 190.3 |
 
@@ -1395,8 +1390,8 @@ player):
 parse would leave the app less, the decoder is created with fewer slots and frames in parse (four
 slots, then two frames in parse on three slots, then one frame in parse on two slots), and the task
 runs as it would with those flags. With 775 MiB left for the decoder, which is what the default
-package had in 1 GiB, the default (646.5 MiB) leaves 128.5 MiB and is created; a fourth slot (695.3
-MiB) would leave 77.5 MiB and is not. The log says which it is:
+package had in 1 GiB before the memory reductions, three slots (646.5 MiB) left 128.5 MiB and
+four slots (695.3 MiB) left 77.5 MiB. This is the log from that three-slot decoder:
 
 ```text
 MEMORY headroom: 2 frames in parse on 2 threads with 3 pipeline slots (the default for 3840x2176): device buffers 646.5 MiB leave N.N MiB of the N.N MiB the application has left for the decoder, the headroom is 128.0 MiB: created as asked
@@ -2012,7 +2007,7 @@ slots:
 | Asked for | Then | Then |
 | --- | --- | --- |
 | 4 slots, 2 to 4 frames in parse | 3 slots, 2 frames in parse | 2 slots, 1 frame in parse |
-| 3 slots, 2 frames in parse (the default above 1440p) | 2 slots, 1 frame in parse | |
+| 3 slots, 2 frames in parse | 2 slots, 1 frame in parse | |
 | 4 slots, 1 frame in parse | 3 slots | 2 slots |
 
 The first that leaves the headroom is created; when none does, the smallest, with a line that says

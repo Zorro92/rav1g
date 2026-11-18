@@ -82,8 +82,8 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"intraopt", atSingle, anOptional, "original intra_main shader built with FXC optimisation (same source)", "",
        &params_.intraopt_},
       {"slots", atInt, anOptional,
-       "decoder pipeline slots (frames in flight), 2..4. Default: what the library gives the frames in parse, one "
-       "more than there are",
+       "decoder pipeline slots (frames in flight), 2..4. Default: four above 2560x1440, otherwise one "
+       "more than frames in parse",
        "", &params_.slots_},
       {"parseframes", atInt, anOptional,
        "frames whose parse may run at the same time, 1..4 and at most the threads (-t); 0 or no flag: the library's "
@@ -149,13 +149,11 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"parseopt", atString, anOptional,
        "the switches of rav1d's parse, separated by commas (same output): nolfmask, rav1d leaves out the masks "
        "of its own loop filter; tilethread, a tile stays on its thread between its superblock rows; gpucdef, "
-       "the two lists CDEF reads are written by a pass of the GPU and not by the thread that records. The "
-       "three are on by default, and a list that names one of them, none or default says which are on (none: "
-       "none of them; nolfmask,tilethread: without gpucdef). time, with -gputime the calls of the sink are "
+       "the GPU writes the CDEF lists; gpugrid, the GPU builds the mode info grid and also writes the CDEF lists. "
+       "These four are on by default. Naming any of them, none or default selects them explicitly. "
+       "Use nolfmask,tilethread,gpucdef for the sink-written grid. time, with -gputime the calls of the sink are "
        "timed, and latelists, the block lists of a tile are counted at its end and not superblock by "
-       "superblock, and cleargrid, the mode info grid is cleared for every frame, change nothing else. gpugrid: "
-       "the mode info grid is built by a pass of the GPU from the frame's records and not by the parse threads "
-       "(off by default; with it gpucdef is on)",
+       "superblock, and cleargrid, the mode info grid is cleared for every frame, add to the selection.",
        "", &params_.parseopt_},
       {"continue_on_error", atSingle, anOptional,
        "after a decode call that fails, go on with the next temporal unit in the same decoder instead of "
@@ -252,8 +250,8 @@ int CParameters::Parse(one_task& args, std::string& Err) {
                                                                       : PLAYER_CLEARS_NOT_NEEDED;
 
   // -parseopt: words separated by commas; a word that is none of them is an error of the task. A word
-  // that names the three default switches (nolfmask, tilethread, gpucdef, none, default) replaces the
-  // default of the three; time, latelists, cleargrid and gpugrid add to whatever they are
+  // that names a default switch, none or default selects the default switches explicitly;
+  // time, latelists and cleargrid add to the selection
   // (rav1g::ParserOptions::from_words reads the list the same way).
   params_.parser_options_ = 0;
   bool ways_named = false;
@@ -269,6 +267,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       params_.parser_options_ |= PLAYER_PARSEOPT_CLEAR_GRID;
     } else if (word == "gpugrid") {
       params_.parser_options_ |= PLAYER_PARSEOPT_GPU_GRID;
+      ways_named = true;
     } else if (word == "gpucdef") {
       params_.parser_options_ |= PLAYER_PARSEOPT_GPU_CDEF_LISTS;
       ways_named = true;
@@ -323,7 +322,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     return -1;
   }
   // -slots: 0 is what Reset() leaves, and means that the task did not say: the library then gives the
-  // decoder the slots of its frames in parse (one more than there are, or what its budget guard leaves).
+  // decoder its default slots, subject to the budget guard.
   params_.slots_given_ = params_.slots_ != 0;
   if (params_.slots_given_ && (params_.slots_ < PLAYER_SLOTS_MIN || params_.slots_ > PLAYER_SLOTS_MAX)) {
     // Refused, not clamped: a timing run must not report numbers for a slot count nobody asked for.

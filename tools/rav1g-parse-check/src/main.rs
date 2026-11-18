@@ -29,8 +29,7 @@
 //! ```
 //!
 //! `-threads`, `-frames` and `-parseopt` are those of the run that is checked; the reference always has
-//! one thread, one frame in parse and the default switches. Without any of them the two runs are the
-//! same parse twice.
+//! one thread, one frame in parse and the sink-written grid.
 //!
 //! `-parseopt` takes the switches of the parser of phase 2 (`rav1g_parse::options`: `nolfmask` and
 //! `tilethread`, which are on without it, `none`, `default`, `latelists`), separated by commas: the
@@ -178,8 +177,9 @@ fn options() -> Options {
 fn check(path: &Path, options: &Options) -> Result<Report, String> {
     let data = std::fs::read(path).map_err(|error| format!("cannot read the file: {error}"))?;
     let units = container::read(&data)?;
-    // The reference: one thread, one frame in parse, the default switches.
-    let mut reference = rhost::RustParser::new(1, 1, ParseOptions::default(), options.wave_edges.0)?;
+    // Keep the sink-written grid in the reference to check the edge readers on the default path.
+    let reference_options = ParseOptions { gpu_grid: false, ..ParseOptions::default() };
+    let mut reference = rhost::RustParser::new(1, 1, reference_options, options.wave_edges.0)?;
     let mut checked = rhost::RustParser::new(options.threads, options.frames, options.parse, options.wave_edges.1)?;
     let mut report = Report::new(options.details);
     let mut number = 0;

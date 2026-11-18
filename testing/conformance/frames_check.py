@@ -16,14 +16,12 @@ What is checked:
   - **What is created.** The CONFIGURATION line of the program (rav1g_decoder_configuration) against what
     the flags ask for: -parseframes 1 to 4 on as many threads, more frames than threads (as many frames as
     threads), four slots, and the library's defaults (no flag, and -t 0 -parseframes 0 -slots 0): two
-    threads, two frames in parse and three slots for the large stream, one, one and two for the small one;
-    one frame in parse where the slots are fixed at two. A decoder has one slot more than frames in parse.
+    threads, two frames in parse and four slots for the large stream, one, one and two for the small one.
+    With two fixed slots the default is one frame in parse.
   - **The budget guard.** With a budget (-budget) that holds the decoder of two frames in parse and the
-    headroom the guard wants behind a decoder (128 MiB), a task that asks for two frames in parse, or
-    for nothing, gets them; with 2 MiB less it gets a decoder with one frame in parse and two slots, says
-    so in "MEMORY headroom" lines, and decodes. A fourth slot (-slots 4, or four frames in parse) in the
-    budget of the default gets three slots and two frames in parse, which is the case of the console in
-    1 GiB (docs/phase2-rav1d.md, step 6); in a budget that holds it, four. A budget in which not even
+    headroom the guard wants behind a decoder (128 MiB), the default tries four slots, then three
+    slots, then one frame in parse on two slots as the budget shrinks. The log says so in "MEMORY
+    headroom" lines and the stream decodes. A task that asks for four frames can also fall back. When
     the smallest decoder leaves the headroom gets the smallest decoder: the headroom never makes a
     creation fail. -headroom 48 is the guard without the headroom.
   - **A parse that waits for memory** (-parseopt poolwait: behind its first piece of a pool a frame finds
@@ -57,14 +55,15 @@ CONFIGURATION = re.compile(r'^CONFIGURATION .*?: threads (\d+) \(asked -?\d+\), 
                            r'slots (\d+) \(asked -?\d+\); device buffers ([0-9.]+) MiB', re.M)
 # (label, flags, (threads, frames in parse, slots) for the large stream, the same for the small one).
 CREATED = (
-    ('one frame in parse', '-parseframes 1 -t 2', (2, 1, 2), (2, 1, 2)),
-    ('two', '-parseframes 2 -t 2', (2, 2, 3), (2, 2, 3)),
+    ('one frame in parse', '-parseframes 1 -t 2', (2, 1, 4), (2, 1, 2)),
+    ('two, three slots', '-parseframes 2 -t 2 -slots 3', (2, 2, 3), (2, 2, 3)),
     ('two, four slots', '-parseframes 2 -t 4 -slots 4', (4, 2, 4), (4, 2, 4)),
     ('three', '-parseframes 3 -t 3', (3, 3, 4), (3, 3, 4)),
     ('four', '-parseframes 4 -t 8', (8, 4, 4), (8, 4, 4)),
-    ('more frames than threads', '-parseframes 4 -t 2', (2, 2, 3), (2, 2, 3)),
-    ('no flag', '', (2, 2, 3), (1, 1, 2)),
-    ('the defaults of the library', '-parseframes 0 -t 0 -slots 0', (2, 2, 3), (1, 1, 2)),
+    ('more frames than threads', '-parseframes 4 -t 2', (2, 2, 4), (2, 2, 3)),
+    ('no flag', '', (2, 2, 4), (1, 1, 2)),
+    ('the defaults of the library', '-parseframes 0 -t 0 -slots 0', (2, 2, 4), (1, 1, 2)),
+    ('one, two slots', '-parseframes 1 -t 2 -slots 2', (2, 1, 2), (2, 1, 2)),
     ('the default frames in parse with two slots', '-parseframes 0 -t 4 -slots 2', (4, 1, 2), (4, 1, 2)),
 )
 TIMERS = ('wall between decoded frames', 'cpu entropy/tile decode, wall', 'cpu entropy/tile decode, thread sum',
@@ -153,8 +152,8 @@ def main():
     # The budget guard, on the large stream. Its headroom: a decoder that would leave less than HEADROOM
     # of the budget is created with fewer slots and frames in parse, down to the smallest, and never
     # refused for it. The budgets are fixed by the sizes measured above.
-    one = sizes.get((large, 'one frame in parse'))
-    two = sizes.get((large, 'two'))
+    one = sizes.get((large, 'one, two slots'))
+    two = sizes.get((large, 'two, three slots'))
     four = sizes.get((large, 'two, four slots'))
     summary += ['', '| Budget, MiB | Flags | Frames in parse | Slots | Device buffers, MiB | The guard says |',
                 '| ---: | --- | ---: | ---: | ---: | --- |']
@@ -168,20 +167,19 @@ def main():
         smaller = 'created in place of'
         smallest = 'there is no smaller decoder'
         for budget, flags, expected, words in (
-                # The default and its headroom fit; one MiB less and it is the decoder of one frame in parse.
-                (fits_two, '-parseframes 0 -t 0 -slots 0', (2, 2, 3), as_asked),
-                (fits_two, '-parseframes 2 -t 2', (2, 2, 3), as_asked),
+                (fits_four, '-parseframes 0 -t 0 -slots 0', (2, 2, 4), as_asked),
+                (fits_two, '-parseframes 0 -t 0 -slots 0', (2, 2, 3), smaller),
+                (fits_two, '-parseframes 2 -t 2 -slots 3', (2, 2, 3), as_asked),
                 (fits_two - 2, '-parseframes 0 -t 0 -slots 0', (2, 1, 2), smaller),
                 (fits_two - 2, '-parseframes 2 -t 2', (2, 1, 2), smaller),
-                # A fourth slot: one slot less where the budget is that of the default, as on the console
-                # in 1 GiB; four slots where they leave the headroom.
+                # Explicit requests use the same fallback.
                 (fits_two, '-slots 4', (2, 2, 3), smaller),
                 (fits_two, '-parseframes 4 -t 8', (8, 2, 3), smaller),
                 (fits_four, '-slots 4', (2, 2, 4), as_asked),
                 # The smallest decoder does not leave the headroom: it is created all the same, because
                 # the margin holds. And with the margin as the headroom, the guard of the builds before.
                 (fits_one - 2, '-parseframes 0 -t 0 -slots 0', (2, 1, 2), smallest),
-                (int(two) + 1 + MARGIN, '-parseframes 0 -t 0 -slots 0 -headroom %d' % MARGIN, (2, 2, 3), as_asked),
+                (int(two) + 1 + MARGIN, '-slots 3 -headroom %d' % MARGIN, (2, 2, 3), as_asked),
                 (int(four) + 1 + MARGIN, '-slots 4 -headroom 1', (2, 2, 4), as_asked)):
             flags = '%s -budget %d' % (flags, budget)
             text, status, created = run(large, large_limit, flags + ' -v', 'budget guard')

@@ -216,19 +216,12 @@ impl ParsePlan {
         } else {
             cfg.frames_in_parse.min(FRAMES_IN_PARSE_MAX).min(threads)
         };
-        ParsePlan { threads, frames, slots: Self::slots(cfg, frames) }
-    }
-
-    /// The slots of a decoder with `frames` frames in parse: what the configuration says, or by
-    /// default one for each frame in parse and one for the frame on the GPU, at most what the arrays
-    /// are sized for. That is what the two slots of a decoder with one frame in parse are; a frame in
-    /// parse takes what it needs from the pools and no second slot (docs/phase2-rav1d.md, step 5).
-    fn slots(cfg: &aom_codec_dec_cfg_t, frames: i32) -> i32 {
-        if cfg.frame_slots != 0 || frames <= 1 {
-            frame_slots_from_cfg(cfg)
-        } else {
-            FrameThreadDataCount.min(frames + 1)
-        }
+        let slots = match cfg.frame_slots {
+            0 if large => FrameThreadDataCount,
+            0 => (frames + 1).clamp(FrameThreadDataDefault, FrameThreadDataCount),
+            _ => frame_slots_from_cfg(cfg),
+        };
+        ParsePlan { threads, frames, slots }
     }
 
     /// The next smaller plan the budget guard falls back to when a decoder would not leave the
@@ -1809,6 +1802,14 @@ mod tests {
     fn slots_of_a_configuration() {
         // SAFETY: a configuration is numbers and pointers.
         let mut cfg: aom_codec_dec_cfg_t = unsafe { std::mem::zeroed() };
+        (cfg.width, cfg.height) = (2560, 1440);
+        assert_eq!(ParsePlan::from_cfg(&cfg), ParsePlan { threads: 1, frames: 1, slots: 2 });
+        cfg.width += 1;
+        let large = ParsePlan::from_cfg(&cfg);
+        assert_eq!(large, ParsePlan { threads: 2, frames: 2, slots: 4 });
+        assert_eq!(large.smaller().unwrap(), ParsePlan { slots: 3, ..large });
+        assert_eq!(large.smaller().unwrap().smaller().unwrap(), ParsePlan { threads: 2, frames: 1, slots: 2 });
+        (cfg.width, cfg.height) = (0, 0);
         assert_eq!(frame_slots_from_cfg(&cfg), 2);
         for (asked, slots) in [(1, 2), (3, 3), (4, 4), (9, 4), (-1, 2)] {
             cfg.frame_slots = asked;

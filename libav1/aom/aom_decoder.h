@@ -255,7 +255,7 @@ typedef struct aom_codec_dec_cfg {
   int tryHDR10x3;
   /* Pipeline slots: frames that can be between the start of their CPU decode
    * and the end of their GPU work at the same time. 0 selects the default
-   * (one more than frames in parse: 2, or 3 with two frames in parse); other
+   * (four above 2560x1440, else one more than frames in parse, at most four); other
    * values are clamped to 2..4. Each slot has its own buffers, so
    * the value must be the same for av1_codec_query_memory_requirements and
    * aom_codec_dec_init. */
@@ -313,9 +313,8 @@ typedef struct aom_codec_dec_cfg {
    *    decoder, not inside the decode call.
    * 0 selects the default: 2 when the decoder is created for frames above
    * 2560x1440 with at least 2 threads and 3 or more pipeline slots, else 1.
-   * A frame in parse holds a pipeline slot, so more frames in parse want
-   * more slots: with frame_slots 0 the decoder has 1 slot more than frames
-   * in parse, at most 4. If the budget guard (memory_available_cb) finds
+   * A frame in parse holds a pipeline slot. If the budget guard
+   * (memory_available_cb) finds
    * that the decoder with those slots would not leave memory_headroom, the
    * decoder is created with fewer slots and frames in parse, and says so in
    * "MEMORY headroom" log lines: asking for frames in parse or slots never

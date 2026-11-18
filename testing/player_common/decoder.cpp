@@ -538,7 +538,7 @@ int AV1Decoder::DecodeOne() {
       if (params_.semi_planar_) cfg.output_kind = RAV1G_OUTPUT_SEMI_PLANAR;
       cfg.shared_fence = params_.interop_;
       // -slots: each slot has host memory and buffers of its own. 0 with -parseframes and no -slots: the
-      // library gives the decoder the slots of its frames in parse.
+      // library chooses the slot count.
       cfg.frame_slots = params_.slots_;
       // -parseframes: the frames whose parse may run at the same time. The decoder is created with one
       // when the slots of more do not fit what the app has left (its "MEMORY frames in parse" line).
@@ -594,7 +594,7 @@ int AV1Decoder::DecodeOne() {
       XB_LOGI << "MEMORY decoder size: " << dec_width << "x" << dec_height << " " << dec_bitdepth << "-bit ("
               << (params_.fitsize_ ? "fit to the stream" : "-nofitsize") << ", the stream's largest frame is "
               << si.width << "x" << si.height << " " << si.bit_depth << "-bit), slots " << params_.slots_
-              << (params_.slots_ ? "" : " (the library's for the frames in parse)") << ", frames in parse "
+              << (params_.slots_ ? "" : " (the library's default)") << ", frames in parse "
               << params_.parse_frames_ << (params_.parse_frames_ ? "" : " (the library's default)")
               << ", intra_v2 buffers "
               << (params_.intrav2_ ? "yes (-intrav2)" : "no") << ", low memory parts "
@@ -777,7 +777,7 @@ int AV1Decoder::DecodeOne() {
                                          "frames with a scaled reference keep the original shaders)"
                                        : "inter_main, inter_compound (original)");
   XB_LOGI << "Parser: the parse pass of rav1d";
-  // -parseopt: fixed when the decoder was created. The default is nolfmask tilethread gpucdef.
+  // -parseopt: fixed when the decoder was created. The default is nolfmask tilethread gpucdef gpugrid.
   XB_LOGI << "Parser switches (-parseopt): "
           << (params_.parser_options_ & PLAYER_PARSEOPT_DEFAULT ? "" : "none ")
           << (params_.parser_options_ & PLAYER_PARSEOPT_NO_LF_MASKS ? "nolfmask " : "")

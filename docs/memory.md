@@ -51,11 +51,19 @@ tile ends.
 Not measured, because the stream does not change them: `idct_residuals` (24.4 MiB) and
 `loopfilter_blocks` follow the size of the frame; the grids and maps of a slot are addressed by position.
 
+## Defaults above 2560x1440
+
+The decoder starts with four pipeline slots, two frames in parse and two parser threads.
+At 3840x2176 10-bit it uses 487.8 MiB of device buffers. With three slots it uses
+469.6 MiB. The budget guard tries three slots with two frames in parse, then two slots
+with one frame in parse. The GPU builds the mode info grid, so the sink skips the grid
+writes, 1.98 MiB per 4K frame.
+
 ## What was measured
 
 Locally: `rav1g-dec -hw` under wine on vkd3d and lavapipe (a software GPU: the frames stay in flight
 longer than on a console, which the frame buffer counts and the "at once" numbers feel; the per-frame
-numbers are the stream's). Defaults: at 4K two frames in parse on three slots. 60 temporal units of each
+numbers are the stream's). The runs used two frames in parse on three slots at 4K. 60 temporal units of each
 4K clip, the 30 of the `d2` cut, 120 of `j1080`.
 
 **The pools, 2040 chunks (coefficients 2103).** Chunks in use at once, peak, as a share of the pool and
@@ -191,8 +199,8 @@ The smaller mode info record (4) reduces the other large part.
 
 ### The mode info record, field by field (candidate 4)
 
-The mode info record is 96 bytes. The default 3840x2160 10-bit decoder (two frames in parse, three
-slots) takes **469.6 MiB** of device buffers, down from **501.5 MiB**. The local `MEMORY decoder created`
+The mode info record is 96 bytes. The 3840x2160 10-bit decoder with two frames in parse and three
+slots takes **469.6 MiB** of device buffers, down from **501.5 MiB**. The local `MEMORY decoder created`
 lines on Wine and lavapipe report 492,441,856 bytes after and 525,865,216 before, with the decoder size
 rounded to 3840x2176. The mode info pool has 1020 chunks of 256 records. It shrinks from 55.8 to
 23.9 MiB, saving 31.9 MiB (33,423,360 bytes). The pool at sizes up to 1920x1088 shrinks by the same

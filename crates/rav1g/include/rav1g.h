@@ -153,7 +153,7 @@ typedef struct av1_stage_dump av1_stage_dump;
  A check of the decoder, not a way of doing the parse: a pass of every frame's command list builds the
  frame's mode info grid from its records into a second grid of the pipeline slot, and the decoder holds
  it against the grid the parse wrote when the frame is done (`GRIDCHECK` in the log of its release).
- The frames are the same. Read when the decoder is created; every slot then has the second grid.
+ Clear `RAV1G_PARSER_OPTION_GPU_GRID` to use the check. Every slot then has the second grid.
  */
 #define RAV1G_PARSER_OPTION_GPU_GRID_CHECK 1024
 
@@ -163,8 +163,7 @@ typedef struct av1_stage_dump av1_stage_dump;
  not written by the threads that parse (1.98 MiB a 4K frame, 1.1 to 1.2 ms a frame of those threads on
  the console). The grid is the same. Read when the decoder is created: the grid of every pipeline slot
  is then a buffer the GPU may write, and the decoder works as with
- `RAV1G_PARSER_OPTION_GPU_CDEF_LISTS`, set or not. Off in `RAV1G_PARSER_OPTIONS_DEFAULT` until a
- device has timed it.
+ `RAV1G_PARSER_OPTION_GPU_CDEF_LISTS`, set or not. Part of `RAV1G_PARSER_OPTIONS_DEFAULT`.
  */
 #define RAV1G_PARSER_OPTION_GPU_GRID 2048
 
@@ -175,11 +174,11 @@ typedef struct av1_stage_dump av1_stage_dump;
 
 /*
  The `Rav1gSettings::parser_options` of `rav1g_settings_default`: `RAV1G_PARSER_OPTION_NO_LF_MASKS`,
- `RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD` and `RAV1G_PARSER_OPTION_GPU_CDEF_LISTS` (518; it was 6
- before the last of them joined it). An application that wants the timing as well adds
+ `RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD`, `RAV1G_PARSER_OPTION_GPU_CDEF_LISTS` and
+ `RAV1G_PARSER_OPTION_GPU_GRID`. An application that wants the timing as well adds
  `RAV1G_PARSER_OPTION_TIME_CALLS` to it; 0 is rav1d's parse without any of them.
  */
-#define RAV1G_PARSER_OPTIONS_DEFAULT 518
+#define RAV1G_PARSER_OPTIONS_DEFAULT 2566
 
 /*
  `rav1g_set_inter_fast`: the fast inter path is on.
@@ -758,7 +757,8 @@ typedef struct Rav1gSettings {
   uint32_t threads;
   /*
    Pipeline slots: frames that can be between the start of their CPU decode and the end of their GPU
-   work at the same time, 2 to 4. 0 is the default: one slot more than frames in parse, at most 4.
+   work at the same time, 2 to 4. 0 is the default: four above 2560x1440, else one more than
+   frames in parse, at most four.
    Each slot has buffers of its own.
    */
   uint32_t frame_slots;
@@ -1073,7 +1073,7 @@ void rav1g_log_video_memory(void *d3d12_device, const char *label);
  rav1d as its parser (with `RAV1G_PARSER_OPTIONS_DEFAULT`), no budget guard, and
  no output (the application sets `output`). Its threads, frames in parse and pipeline slots are 0, the
  defaults for the frame size the application then sets: one thread, one frame in parse and two slots
- up to 2560x1440; above, two threads and, where the slots fit, two frames in parse with three slots.
+ up to 2560x1440; above, two threads and, where the slots fit, two frames in parse with four slots.
 
  # Safety
  `settings` is valid for writing.
