@@ -305,6 +305,11 @@ fence and read from the D3D11 texture. So the interop works in a UWP app on the 
   the output fence has not reached the frame's value or the value is not above that of the frame
   before. `-sharedfence` creates the fence shareable, opens it through a shared handle and holds the
   opened fence to the same.
+- Since 2026-11-18, in every run of `rav1g-dec` too: each decode call passes the number of its temporal
+  unit, from 1, as its user data, and a frame fails the task when the user data it brings back
+  (`Frame::user_data`, `Rav1gFrame::user_data`) is 0 or not above that of the frame before (equal is
+  allowed with `-alllayers`). So an application can carry a presentation time through the decoder, and
+  the order and the pairing of the values are held on every stream of every run.
 - CI, job `rust-output`: the whole conformance set with `-output p010`, with `-capi -output p010-copy
   -sharedfence` and with `-output p010-buffer`, against the references and `expected.txt`; three streams
   with `-output p010` under GPU-based validation; the player's decoder code with `-output p010` and with

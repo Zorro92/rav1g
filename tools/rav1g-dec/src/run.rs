@@ -48,6 +48,8 @@ struct State {
     pool_error: String,
     /// The value of the output fence of the last frame.
     fence_value: u64,
+    /// The user data of the frame before (`picture`).
+    user_data: u64,
     out_file: Option<BufWriter<File>>,
     io_error: String,
 }
@@ -385,6 +387,18 @@ impl Sink for Run {
                 ));
             }
             state.fence_value = fence_value;
+            // The user data is the number of the frame's temporal unit: above that of the frame before,
+            // as every unit has one frame that is output (the same with -alllayers for the frames of the
+            // spatial layers of one unit). A value the frame did not get from its own unit is a fault.
+            let user_data_ok = frame.user_data != 0
+                && (frame.user_data > state.user_data || (task.all_layers && frame.user_data == state.user_data));
+            if fault.is_none() && !user_data_ok {
+                fault = Some(format!(
+                    "the user data {} is not above the {} of the frame before",
+                    frame.user_data, state.user_data
+                ));
+            }
+            state.user_data = frame.user_data;
             if let Some(fault) = fault
                 && state.io_error.is_empty()
             {
@@ -723,6 +737,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
             colour: None,
             pool_error: String::new(),
             fence_value: 0,
+            user_data: 0,
             out_file: None,
             io_error: String::new(),
         }),
@@ -915,13 +930,17 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     let mut decoders = 1;
     let decode_start = Instant::now();
     let mut have = true;
+    // The number of the temporal unit, from 1, as the user data of the decode call: the frames have to
+    // bring it back, in order (`picture`).
+    let mut unit_number: u64 = 0;
     while have && limit != 0 {
         limit = limit.wrapping_sub(1);
+        unit_number += 1;
         let Some(current) = decoder.as_mut() else {
             break;
         };
         let call_start = Instant::now();
-        let mut result = current.decode(reader.data());
+        let mut result = current.decode(reader.data(), unit_number);
         if task.gputime {
             run.perf.add_decode_call(ms_since(call_start));
         }
@@ -1006,7 +1025,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
                 size.height,
                 size.bit_depth
             );
-            result = replacement.decode(reader.data());
+            result = replacement.decode(reader.data(), unit_number);
         }
         match result {
             Err(error) if task.continue_on_error => {

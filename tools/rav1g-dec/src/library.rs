@@ -88,6 +88,9 @@ pub struct Picture<'a> {
     pub semi_planar: bool,
     /// The output fence that came with the frame, and the value it has when the frame is written.
     pub fence: Option<(ID3D12Fence, u64)>,
+    /// What came with the temporal unit of the frame (`Frame::user_data`, `Rav1gFrame::user_data`): the
+    /// program passes the number of the unit, from 1.
+    pub user_data: u64,
 }
 
 /// The two planes of a semi-planar frame in the mapping of a buffer of the pool.
@@ -191,6 +194,7 @@ struct RustOutput<S: Sink>(Arc<S>);
 
 fn picture_of(frame: &Frame) -> Picture<'_> {
     Picture {
+        user_data: frame.user_data,
         semi_planar: frame.format.is_semi_planar(),
         fence: frame.d3d12_fence().map(|(fence, value)| (fence.clone(), value)),
         width: frame.width,
@@ -319,6 +323,7 @@ unsafe extern "C" fn c_frame<S: Sink>(context: *mut c_void, frame: *const capi::
         planes,
         semi_planar,
         fence: fence.map(|fence| (fence, frame.fence_value)),
+        user_data: frame.user_data,
     });
     sink.give_back(frame.image.token as usize);
 }
@@ -647,17 +652,17 @@ pub enum TaskDecoder<S: Sink> {
 }
 
 impl<S: Sink> TaskDecoder<S> {
-    /// One temporal unit.
-    pub fn decode(&mut self, data: &[u8]) -> Result<(), DecodeError> {
+    /// One temporal unit, with what its frames are to bring back (`user_data`).
+    pub fn decode(&mut self, data: &[u8], user_data: u64) -> Result<(), DecodeError> {
         match self {
-            TaskDecoder::Rust(decoder) => decoder.decode(data, 0).map_err(|error| DecodeError {
+            TaskDecoder::Rust(decoder) => decoder.decode(data, user_data).map_err(|error| DecodeError {
                 needs_reconfigure: error.code == ErrorCode::NeedsReconfigure,
                 text: error.to_string(),
                 detail: error.detail,
             }),
             TaskDecoder::C(decoder, _) => {
                 // SAFETY: a decoder of rav1g_decoder_create, used by this thread; a valid buffer.
-                let status = unsafe { capi::rav1g_decoder_decode(*decoder, data.as_ptr(), data.len(), 0) };
+                let status = unsafe { capi::rav1g_decoder_decode(*decoder, data.as_ptr(), data.len(), user_data) };
                 if status == Rav1gStatus::Ok {
                     return Ok(());
                 }
