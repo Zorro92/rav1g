@@ -14,9 +14,6 @@
 //! - [`Device`]: creates buffers ([`MemoryKind`] says who reads and writes one), pipeline layouts
 //!   ([`LayoutDesc`]) and compute pipelines from the bytecode of a shader, fills buffers of constant data
 //!   ([`Device::upload`], a blocking copy on a [`Queue`]), and reports the video memory of its adapter.
-//!   For the pipeline cache on disk it says what it can keep of a compiled pipeline
-//!   ([`ShaderCacheSupport`]), and keeps pipelines in a [`PipelineLibrary`] or gives the cached blob of
-//!   one ([`Pipeline::cached_blob`]) to create it from again.
 //!   [`OwnedDevice`] is the device for another thread.
 //! - `Buffer`, [`BufferRef`]: a buffer the caller owns, and a buffer of the decoder where it is used.
 //! - [`Layout`], `Pipeline`: what a dispatch needs besides its buffers; [`LayoutRef`] and [`PipelineRef`]
@@ -42,8 +39,8 @@ pub(crate) mod d3d12;
 
 pub use d3d12::{
     BufferLocation, BufferRef, CommandAllocator, CommandList, Commands, Device, Event, Fence, Layout, LayoutRef,
-    OwnedDevice, Pipeline, PipelineLibrary, PipelineRef, PlaneViews, Queue, Readback, TextureRef, TimestampQueries,
-    Upload, create_hardware_device,
+    OwnedDevice, PipelineRef, PlaneViews, Queue, Readback, TextureRef, TimestampQueries, Upload,
+    create_hardware_device,
 };
 
 /// Who reads and writes a buffer. The numbers are the `MemoryType` of the C++ host.
@@ -191,15 +188,6 @@ pub struct TextureSource {
     pub height: u32,
     /// Bytes from one row to the next.
     pub row_pitch: u32,
-}
-
-/// What a device can keep of a compiled pipeline, for the pipeline cache on disk.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct ShaderCacheSupport {
-    /// Pipeline libraries: many pipelines by name in one blob.
-    pub library: bool,
-    /// The cached blob of one pipeline, from which the device creates it again.
-    pub single_pipeline: bool,
 }
 
 /// A call of the backend that failed: which one, and its code (an `HRESULT` in D3D12).

@@ -765,9 +765,9 @@ fn set_last_error(error: &Error) -> Rav1gStatus {
 }
 
 /// The text of the last error on this thread of a call that has no decoder to ask:
-/// `rav1g_device_create`, `rav1g_device_create_with_cache`, `rav1g_device_wait_pipelines`,
-/// `rav1g_decoder_create`. For a creation the budget guard refused or that ran out of memory it ends with
-/// the decoder's "MEMORY REFUSED" or "MEMORY FAILED" line. Valid until the next such call on the thread.
+/// `rav1g_device_create`, `rav1g_device_wait_pipelines`, `rav1g_decoder_create`. For a creation the
+/// budget guard refused or that ran out of memory it ends with the decoder's "MEMORY REFUSED" or
+/// "MEMORY FAILED" line. Valid until the next such call on the thread.
 #[unsafe(no_mangle)]
 pub extern "C" fn rav1g_last_error() -> *const c_char {
     LAST_ERROR.with(|last| last.borrow().as_ptr())
@@ -777,7 +777,7 @@ pub extern "C" fn rav1g_last_error() -> *const c_char {
 /// struct, an enum, a function), and not for a constant, a comment or a change inside the library.
 /// `rav1g_abi_version` returns the value the library was built with; an application that loads the
 /// library at run time compares the two and refuses a library with another value.
-pub const RAV1G_ABI_VERSION: u32 = 2;
+pub const RAV1G_ABI_VERSION: u32 = 1;
 
 /// `RAV1G_ABI_VERSION` of the `rav1g.h` the library was built with. A loader compares it with the
 /// constant of the header it was compiled with before it uses anything else of the library.
@@ -909,62 +909,6 @@ pub unsafe extern "C" fn rav1g_device_create(
             std::ptr::null_mut()
         }
     }
-}
-
-/// `rav1g_device_create` with the pipeline cache on disk (docs/integration.md, "The pipeline cache on disk").
-/// `cache_dir` is the path of a folder of the application's own as a C string of UTF-16 (a UWP app passes
-/// `<LocalCacheFolder>\rav1g`), which the call creates when it is not there; null or an empty path is
-/// no cache, `rav1g_device_create`. The decoder keeps one file there, `rav1g-pipelines-<key>.bin`, with
-/// the compiled pipeline states of the device (the cached blob of every one, `GetCachedBlob`): a later
-/// device on the same adapter and driver creates them from it instead of compiling them, and a file that
-/// is missing, damaged or of another driver, adapter or library version is written again (and the files
-/// of other keys deleted). Nothing of the cache makes the call fail. When the pipeline states all exist,
-/// the log has one line that says what the cache did:
-/// `PIPELINES cache hit|miss|rebuilt (<reason>): <n> pipelines in <ms> ms (...)`; an error line that
-/// says "DEVICE REMOVED" when the device was lost on the way.
-///
-/// # Safety
-/// As `rav1g_device_create`; `cache_dir` is null or a C string of UTF-16.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rav1g_device_create_with_cache(
-    d3d12_device: *mut c_void,
-    d3d12_queue: *mut c_void,
-    pipeline_threads: u32,
-    cache_dir: *const u16,
-) -> *mut Rav1gDevice {
-    // SAFETY: the caller's contract: a C string of UTF-16.
-    let cache_dir = unsafe { wide_path(cache_dir) };
-    let cache_dir = cache_dir.as_deref();
-    let device = if d3d12_device.is_null() {
-        Device::new_with_cache(pipeline_threads, cache_dir)
-    } else {
-        // SAFETY: the caller's contract.
-        unsafe { Device::from_raw_with_cache(d3d12_device, d3d12_queue, pipeline_threads, cache_dir) }
-    };
-    match device {
-        Ok(device) => Box::into_raw(Box::new(Rav1gDevice { device })),
-        Err(error) => {
-            set_last_error(&error);
-            std::ptr::null_mut()
-        }
-    }
-}
-
-/// A path as a C string of UTF-16; `None` for null and for an empty path.
-///
-/// # Safety
-/// `path` is null or a C string of UTF-16.
-unsafe fn wide_path(path: *const u16) -> Option<std::path::PathBuf> {
-    use std::os::windows::ffi::OsStringExt;
-    if path.is_null() {
-        return None;
-    }
-    // SAFETY: the caller's contract: the units up to the first 0 can be read.
-    let units = unsafe {
-        let length = (0..).take_while(|&index| *path.add(index) != 0).count();
-        std::slice::from_raw_parts(path, length)
-    };
-    (!units.is_empty()).then(|| std::ffi::OsString::from_wide(units).into())
 }
 
 /// Waits until every pipeline state of the device exists; the first decoder creation does the same. An
@@ -1522,15 +1466,6 @@ pub extern "C" fn rav1g_set_lf_h_split(mode: u32) {
 #[unsafe(no_mangle)]
 pub extern "C" fn rav1g_set_intra_edge_fix(enable: bool) {
     switches::set_intra_edge_fix(enable);
-}
-
-/// Experiment: the devices created after the call with `rav1g_device_create_with_cache` keep their
-/// pipelines in a D3D12 pipeline library (`ID3D12PipelineLibrary`) instead of in the cached blobs of the
-/// pipeline states (`GetCachedBlob`), the default. On the console the pipeline library removed the device;
-/// leave it off outside of a test.
-#[unsafe(no_mangle)]
-pub extern "C" fn rav1g_set_pipeline_cache_library(enable: bool) {
-    switches::set_pipeline_cache_library(enable);
 }
 
 /// Experiment (the DXC package: a library whose `rav1g_shader_variant` is "dxc"): which bytecode the

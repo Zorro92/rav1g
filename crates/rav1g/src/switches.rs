@@ -114,14 +114,6 @@ pub fn set_intra_edge_fix(enable: bool) {
     crate::host::av1_set_intra_edge_fix(c_int::from(enable))
 }
 
-/// Experiment: the devices created after the call with a pipeline cache on disk
-/// ([`crate::Device::with_d3d12_and_cache`]) keep their pipelines in a D3D12 pipeline library instead of
-/// in the cached blobs of the pipeline states, the default (docs/integration.md, "The pipeline cache on
-/// disk": on the console the pipeline library removed the device).
-pub fn set_pipeline_cache_library(enable: bool) {
-    crate::host::set_pipeline_cache_library(enable)
-}
-
 /// Debugging: the decoders created after the call fill the mode info pool, or every buffer the CPU writes
 /// for the shaders, with the byte 0xA5 when they create it, instead of leaving what the memory held; with
 /// [`Poison::Buffers`] they also fill the constants of every stage again in every frame, right before the

@@ -1069,7 +1069,7 @@ jobs:
   # not listed, on a failure of another kind than listed, on a crash or timeout that is not listed, and
   # when a listed stream passes. Then the checks that need no second parser and no switch: the set through
   # rav1g.h, the test player's decoder code, the parse digest, decode errors, the order check, the memory
-  # check, the timing smoke test, the pipeline cache on disk, the stage dumps and the MEMORY lines.
+  # check, the timing smoke test, the stage dumps and the MEMORY lines.
   rust-conformance:
     needs: [conformance-streams, rust]
     runs-on: windows-latest
@@ -1170,20 +1170,6 @@ jobs:
             throw 'The decoder of this run does not report the interface for C'
           }
           if ($code -ne 0) { throw "conformance run with rav1g-dec -capi: exit code $code (1: not as expected.txt says, 2: the run could not be done)" }
-
-      # The pipeline cache on disk (-pipelinecache; docs/integration.md, "The pipeline cache";
-      # testing/conformance/pipeline_cache_check.py): one stream decoded five times with one cache folder,
-      # each run a process of its own: a miss writes the file (and deletes the file of another key), a hit
-      # through rav1g.h loads every pipeline from it, the file cut to half is rebuilt, the rebuilt file is a
-      # hit, a file that is no cache at all is rebuilt; every run gives the frames of the reference. The
-      # PIPELINES lines (with the way WARP keeps the pipelines) go to the summary.
-      - name: Pipeline cache on disk, miss, hit, rebuilt (rav1g-dec -pipelinecache)
-        if: ${{ !cancelled() }}
-        shell: pwsh
-        run: |
-          python testing/conformance/pipeline_cache_check.py --tool out/rav1g-dec/rav1g-dec.exe `
-            --streams conformance-streams --out out/pipeline-cache
-          if ($LASTEXITCODE -ne 0) { throw "pipeline cache check with rav1g-dec: exit code $LASTEXITCODE (1: a check failed, 2: a run could not be done)" }
 
       # A decode error in the middle of a stream (testing/conformance/cut_tile_check.py): the tile data of
       # one temporal unit of two streams of the set cut short (one tile, eight tiles), which fails behind
@@ -1298,7 +1284,6 @@ jobs:
             out/memory-lines/
             out/player-smoke/
             out/cut-tile/
-            out/pipeline-cache/
           if-no-files-found: warn
 
   # The semi-planar output (docs/output.md): an output image is one NV12 texture (8-bit frames) or one

@@ -40,8 +40,8 @@ pub(crate) use types::Av1Core;
 // The test switches, the timing run, the stage dumps and the pipeline cache: `switches.rs`, `device.rs` and
 // `capi.rs` call them.
 pub(crate) use compute::{
-    av1_destroy_pipeline_cache_handle, av1_wait_pipeline_cache_handle, create_pipelines, set_shader_pick,
-    shader_pick_lines,
+    av1_create_pipeline_cache_handle, av1_destroy_pipeline_cache_handle, av1_wait_pipeline_cache_handle,
+    set_shader_pick, shader_pick_lines,
 };
 pub(crate) use frame::{av1_set_clears, av1_set_intra_v2, av1_shader_variant};
 pub(crate) use loopfilter::av1_set_lf_h_split;
@@ -63,8 +63,6 @@ mod memory;
 pub(crate) mod obu;
 mod output;
 mod perf;
-mod pipeline_cache;
-pub(crate) use pipeline_cache::set_library as set_pipeline_cache_library;
 mod pool;
 mod postfilter;
 mod prediction;
