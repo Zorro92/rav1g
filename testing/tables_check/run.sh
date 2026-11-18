@@ -91,8 +91,8 @@ blocks.rs@s/    let plane_bsize = SS_SIZE_LOOKUP\[(bsize as usize \* 4) + (subsa
 blocks.rs@s/(BLOCK_8X8 as u8..=BLOCK_32X32 as u8).contains(&sb_type)/(BLOCK_8X8 as u8..BLOCK_32X32 as u8).contains(\&sb_type)/@is_interintra_pred: 32x32 left out
 blocks.rs@s/    ref_frame\[0\] > INTRA$/    ref_frame[0] >= INTRA/@is_interintra_pred: an intra block taken for one
 blocks.rs@s/(SINGLE_INTER_MODE_START as u8..SINGLE_INTER_MODE_END as u8).contains(&mode)/(SINGLE_INTER_MODE_START as u8..=SINGLE_INTER_MODE_END as u8).contains(\&mode)/@is_interintra_pred: the first compound mode taken for a single one
-blocks.rs@s/(filters >> if x_filter { 16 } else { 0 }) & 0xf/(filters >> if x_filter { 16 } else { 0 }) \& 0x7/@av1_extract_interp_filter: three bits of the filter
-blocks.rs@s/(filters >> if x_filter { 16 } else { 0 }) & 0xf/(filters >> if x_filter { 0 } else { 16 }) \& 0xf/@av1_extract_interp_filter: the two directions swapped'
+blocks.rs@s/filters\[usize::from(x_filter)\] & 0xf/filters[usize::from(x_filter)] \& 0x7/@av1_extract_interp_filter: three bits of the filter
+blocks.rs@s/filters\[usize::from(x_filter)\] & 0xf/filters[usize::from(!x_filter)] \& 0xf/@av1_extract_interp_filter: the two directions swapped'
   echo "$mutants" | while IFS='@' read -r file expr what; do
     cp "$work/pristine/tables.rs" "$work/pristine/blocks.rs" "$host/"
     sed -e "$expr" "$work/pristine/$file" > "$host/$file"
