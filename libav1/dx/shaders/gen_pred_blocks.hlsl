@@ -229,6 +229,15 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
   return addr / ModeInfoSize;
 }
 
+WarpedMotionParams local_warp_params(int4 mat0, int2 mat1, int2 angles) {
+  WarpedMotionParams params;
+  params.mat[0] = mat0;
+  params.mat[1] = int4(mat1, 0, 0);
+  params.angles = angles;
+  params.type = 0;
+  return params;
+}
+
 [numthreads(64, 1, 1)] void main(uint3 thread
                                  : SV_DispatchThreadID) {
   if (thread.x >= cb_wi_count) return;
@@ -256,8 +265,9 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
   const int bw_log_uv = max(0, bw_log - 1);
   const int bh_log_uv = max(0, bh_log - 1);
 
-  const uint mi_row = mi.mi_row;
-  const uint mi_col = mi.mi_col;
+  const uint mi_row = mi.mi_position & 0xffff;
+  const uint mi_col = mi.mi_position >> 16;
+  const uint flags = mi.palette_filter_flags >> 24;
   const int is_chroma_ref = ((mi_row & 1) == 0 && (bh & 1) == 1) || ((mi_col & 1) == 0 && (bw & 1) == 1);
 
   const int ref0 = ((int)mi.block_type << 8) >> 24;
@@ -279,15 +289,15 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
     const int is_global_warp1 = (is_compound == 0 || allow_global_warp == 0) ? 0 : cb_global_warp[ref1 - 1].x;
     // Bit 16 of the word is wm_params.invalid (0 or 1), which the entropy decoder writes for every
     // WARPED_CAUSAL block. Bits 8..15 are padding of the C struct and stay out of the test.
-    const int is_local_warp = motion_mode == WARPED_CAUSAL && (mi.wm_params.type & 0x10000) == 0;
+    const int is_local_warp = motion_mode == WARPED_CAUSAL && (flags & MI_WARP_INVALID) == 0;
     const int is_luma_warp = (is_local_warp || is_global_warp0) && allow_warp;
 
     const int no_skip_flag =
         ((mi.tx_info & 0xff00) == 0 && !is_inter_intra && !is_obmc_left && !is_obmc_above) ? InterNoSkipFlag : 0;
     const int block_size_id_y = InterBlockSizeIndexLUT[bw_log][bh_log];
-    const int comp_type = mi.interinter_comp.type;
+    const int comp_type = (mi.compound_filters & 255);
     uint wtd = 0;
-    const int wedge_idx = mi.interinter_comp.wedge_sign + mi.interinter_comp.wedge_index * 2;
+    const int wedge_idx = ((flags & MI_WEDGE_SIGN) != 0) + ((mi.compound_filters >> 8) & 255) * 2;
 
     if (is_compound) {
       wtd = 0x88;
@@ -296,14 +306,14 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
       } else if (comp_type == COMPOUND_WEDGE) {
         wtd = cb_wedge_offsets[bsize].x + (wedge_idx << (bw_log + bh_log - 2));
       } else if (comp_type == COMPOUND_DIFFWTD) {
-        wtd = mi.interinter_comp.mask_type;
+        wtd = (flags & MI_MASK_TYPE) != 0;
       }
       wtd <<= 17;
 
       const int is_warp_compound = is_global_warp0 || is_global_warp1;
       const uint filter_type_h =
-          (InterFilterLut >> ((((mi.interp_filters >> 16) & 15) << 2) + ((bw_log > 0) << 4))) & 7;
-      const uint filter_type_v = (InterFilterLut >> (((mi.interp_filters & 15) << 2) + ((bh_log > 0) << 4))) & 7;
+          (InterFilterLut >> ((((mi.compound_filters >> 24) & 15) << 2) + ((bw_log > 0) << 4))) & 7;
+      const uint filter_type_v = (InterFilterLut >> ((((mi.compound_filters >> 16) & 15) << 2) + ((bh_log > 0) << 4))) & 7;
       const int gpu_comp_type = (0x2100 >> (comp_type * 4)) & 15;
 
       uint4 block;
@@ -340,7 +350,7 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
 
         WarpedMotionParams params;
         if (is_local_warp)
-          params = mi.wm_params;
+          params = local_warp_params(mi.warp_mat0, mi.warp_mat1, mi.warp_angles);
         else
           params = cb_wm_params[ref0 - 1].params;
 
@@ -356,8 +366,8 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
         uint4 block;
         block.x = mi_col | (mi_row << 16);
         const uint filter_type_h =
-            (InterFilterLut >> ((((mi.interp_filters >> 16) & 15) << 2) + ((bw_log > 0) << 4))) & 7;
-        const uint filter_type_v = (InterFilterLut >> (((mi.interp_filters & 15) << 2) + ((bh_log > 0) << 4))) & 7;
+            (InterFilterLut >> ((((mi.compound_filters >> 24) & 15) << 2) + ((bw_log > 0) << 4))) & 7;
+        const uint filter_type_v = (InterFilterLut >> ((((mi.compound_filters >> 16) & 15) << 2) + ((bh_log > 0) << 4))) & 7;
         block.y = ((ref0 - 1) << 2) | (filter_type_h << 5) | (filter_type_v << 9) | no_skip_flag;
         block.z = (mi.mv[0] << 1) & 0xfffeffff;
         block.w = 0;
@@ -418,8 +428,8 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
             int type_index0 = Inter2x2ArrOffset + (is_compound0 << diff_comp);
             int type_index1 = Inter2x2ArrOffset + (is_compound1 << diff_comp);
 
-            const int interp_filters0 = buffer_mi[mi_index_0].interp_filters;
-            const int interp_filters1 = buffer_mi[mi_index_1].interp_filters;
+            const int interp_filters0 = buffer_mi[mi_index_0].compound_filters;
+            const int interp_filters1 = buffer_mi[mi_index_1].compound_filters;
             const int flags = 1 |                                     // U-plane
                               (is_compound0 == is_compound1) << 25 |  // combo write
                               no_skip_flag | bh_flag;
@@ -437,8 +447,8 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
             dst_ptr1 *= 16;
 
             uint filter_type_h =
-                (InterFilterLut >> ((((interp_filters0 >> 16) & 15) << 2) + ((bw_log_uv > 0) << 4))) & 7;
-            uint filter_type_v = (InterFilterLut >> (((interp_filters0 & 15) << 2) + ((bh_log_uv > 0) << 4))) & 7;
+                (InterFilterLut >> ((((interp_filters0 >> 24) & 15) << 2) + ((bw_log_uv > 0) << 4))) & 7;
+            uint filter_type_v = (InterFilterLut >> ((((interp_filters0 >> 16) & 15) << 2) + ((bh_log_uv > 0) << 4))) & 7;
             uint4 block0;
             block0.x = x | ((y + row) << 16);
             block0.y = flags | ((((block_type0 << 8) >> 24) - 1) << 2) | (filter_type_h << 5) | (filter_type_v << 9) |
@@ -446,8 +456,8 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
             block0.z = buffer_mi[mi_index_0].mv[0];
             block0.w = buffer_mi[mi_index_0].mv[1];
 
-            filter_type_h = (InterFilterLut >> ((((interp_filters1 >> 16) & 15) << 2) + ((bw_log_uv > 0) << 4))) & 7;
-            filter_type_v = (InterFilterLut >> (((interp_filters1 & 15) << 2) + ((bh_log_uv > 0) << 4))) & 7;
+            filter_type_h = (InterFilterLut >> ((((interp_filters1 >> 24) & 15) << 2) + ((bw_log_uv > 0) << 4))) & 7;
+            filter_type_v = (InterFilterLut >> ((((interp_filters1 >> 16) & 15) << 2) + ((bh_log_uv > 0) << 4))) & 7;
             uint4 block1;
             block1.x = block0.x + 1;
             block1.y = flags | ((((block_type1 << 8) >> 24) - 1) << 2) | (filter_type_h << 5) | (filter_type_v << 9) |
@@ -469,10 +479,10 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
                 16 * (blocks_index_base.Load(4 * (cb_index_offset + type_index)) + blocks_indexes.Load(index_addr));
             index_addr += 4;
 
-            const int interp_filters = buffer_mi[mi_index_1].interp_filters;
+            const int interp_filters = buffer_mi[mi_index_1].compound_filters;
             uint filter_type_h =
-                (InterFilterLut >> ((((interp_filters >> 16) & 15) << 2) + ((bw_log_uv > 0) << 4))) & 7;
-            uint filter_type_v = (InterFilterLut >> (((interp_filters & 15) << 2) + ((bh_log_uv > 0) << 4))) & 7;
+                (InterFilterLut >> ((((interp_filters >> 24) & 15) << 2) + ((bw_log_uv > 0) << 4))) & 7;
+            uint filter_type_v = (InterFilterLut >> ((((interp_filters >> 16) & 15) << 2) + ((bh_log_uv > 0) << 4))) & 7;
             const int block_type = (int)buffer_mi[mi_index_1].block_type;
 
             uint mode_base = ((((block_type << 8) >> 24) - 1) << 2) | (filter_type_h << 5) | (filter_type_v << 9) |
@@ -495,8 +505,8 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
       } else  //! sub8x8
       {
         const uint filter_type_h =
-            (InterFilterLut >> ((((mi.interp_filters >> 16) & 15) << 2) + ((bw_log_uv > 0) << 4))) & 7;
-        const uint filter_type_v = (InterFilterLut >> (((mi.interp_filters & 15) << 2) + ((bh_log_uv > 0) << 4))) & 7;
+            (InterFilterLut >> ((((mi.compound_filters >> 24) & 15) << 2) + ((bw_log_uv > 0) << 4))) & 7;
+        const uint filter_type_v = (InterFilterLut >> ((((mi.compound_filters >> 16) & 15) << 2) + ((bh_log_uv > 0) << 4))) & 7;
         if (is_compound) {
           if (comp_type == COMPOUND_WEDGE) {
             wtd = cb_wedge_offsets[bsize].y + (wedge_idx << max(0, bw_log_uv + bh_log_uv - 2));
@@ -541,7 +551,7 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
 
             WarpedMotionParams params;
             if (is_local_warp)
-              params = mi.wm_params;
+              params = local_warp_params(mi.warp_mat0, mi.warp_mat1, mi.warp_angles);
             else
               params = cb_wm_params[ref0 - 1].params;
 
@@ -607,10 +617,10 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
         uint above_ref = ((int)buffer_mi[mi_addr_above].block_type << 8) >> 24;
         if (above_ref > 0) {
           count += 1 + (w == 5);
-          const int filters = buffer_mi[mi_addr_above].interp_filters;
+          const int filters = buffer_mi[mi_addr_above].compound_filters;
 
-          uint filter_type_h = (InterFilterLut >> ((((filters >> 16) & 15) << 2) + ((w > 0) << 4))) & 7;
-          uint filter_type_v = (InterFilterLut >> (((filters & 15) << 2) + ((h > 0) << 4))) & 7;
+          uint filter_type_h = (InterFilterLut >> ((((filters >> 24) & 15) << 2) + ((w > 0) << 4))) & 7;
+          uint filter_type_v = (InterFilterLut >> ((((filters >> 16) & 15) << 2) + ((h > 0) << 4))) & 7;
 
           int4 block;
           block.x = (mi_col + col) | (mi_row << 16);
@@ -624,8 +634,8 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
           pred_blocks.Store4(dst_ptr * 16, block);
 
           if (obmc_chroma) {
-            filter_type_h = (InterFilterLut >> ((((filters >> 16) & 15) << 2) + ((w > 1) << 4))) & 7;
-            filter_type_v = (InterFilterLut >> (((filters & 15) << 2) + ((huv > 0) << 4))) & 7;
+            filter_type_h = (InterFilterLut >> ((((filters >> 24) & 15) << 2) + ((w > 1) << 4))) & 7;
+            filter_type_v = (InterFilterLut >> ((((filters >> 16) & 15) << 2) + ((huv > 0) << 4))) & 7;
             block.x = ((mi_col + col) >> 1) | ((mi_row >> 1) << 16);
             block.y = 1 | ((above_ref - 1) << 2) | (filter_type_h << 5) | (filter_type_v << 9) |
                       (((0x84210 >> (h * 4)) & 15) << 17);
@@ -664,9 +674,9 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
         if (left_ref > 0) {
           count += 1 + (h == 5);
 
-          const int filters = buffer_mi[mi_addr_left].interp_filters;
-          uint filter_type_h = (InterFilterLut >> ((((filters >> 16) & 15) << 2) + ((w > 0) << 4))) & 7;
-          uint filter_type_v = (InterFilterLut >> (((filters & 15) << 2) + ((h > 0) << 4))) & 7;
+          const int filters = buffer_mi[mi_addr_left].compound_filters;
+          uint filter_type_h = (InterFilterLut >> ((((filters >> 24) & 15) << 2) + ((w > 0) << 4))) & 7;
+          uint filter_type_v = (InterFilterLut >> ((((filters >> 16) & 15) << 2) + ((h > 0) << 4))) & 7;
 
           int4 block;
           block.x = mi_col | ((mi_row + row) << 16);
@@ -678,8 +688,8 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
           int dst_ptr = blocks_index_base.Load(4 * (cb_index_offset + type_index)) + blocks_indexes.Load(index_addr);
           index_addr += 4;
           pred_blocks.Store4(dst_ptr * 16, block);
-          filter_type_h = (InterFilterLut >> ((((filters >> 16) & 15) << 2) + ((wuv > 0) << 4))) & 7;
-          filter_type_v = (InterFilterLut >> (((filters & 15) << 2) + ((h > 1) << 4))) & 7;
+          filter_type_h = (InterFilterLut >> ((((filters >> 24) & 15) << 2) + ((wuv > 0) << 4))) & 7;
+          filter_type_v = (InterFilterLut >> ((((filters >> 16) & 15) << 2) + ((h > 1) << 4))) & 7;
           block.x = (mi_col >> 1) | (((mi_row + row) >> 1) << 16);
           block.y = 1 | ((left_ref - 1) << 2) | (filter_type_h << 5) | (filter_type_v << 9) |
                     (((0x84210 >> (w * 4)) & 15) << 17);
@@ -699,8 +709,8 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
     }
   }
 
-  const int y_use_palette = (mi.palette_mode_info.sizes & 0xffff) != 0;
-  const int uv_use_palette = (mi.palette_mode_info.sizes & 0xffff0000) != 0;
+  const int y_use_palette = (mi.palette_filter_flags & 255) != 0;
+  const int uv_use_palette = (mi.palette_filter_flags & 0xff00) != 0;
 
   if (ref0 <= 0 || is_inter_intra) {
     const int tx_size_wide_log2[] = {0, 1, 2, 3, 4, 0, 1, 1, 2, 2, 3, 3, 4, 0, 2, 1, 3, 2, 4};
@@ -751,7 +761,7 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
       // bits of the word they are in are padding of the C struct: the entropy decoder never writes them, and
       // the memory of the mode info pool is not cleared, so they hold what the memory held before (a decoder
       // destroyed earlier in the process, for one). Only the byte of use_filter_intra counts.
-      const int use_filter = (mi.filter_intra_mode_info >> 8) & 255;
+      const int use_filter = (flags & MI_USE_FILTER_INTRA) != 0;
 
       const int mode_gpu = is_intrabc ? (12 << 6) : use_filter ? (13 << 6) : mode1 ? ((mode1 - 1) << 6) : (14 << 6);
 
@@ -795,7 +805,7 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
 
       int mode_info0 = 0;
       if (is_inter_intra) {
-        const int w_idx = mi.interintra_wedge_sign + mi.interintra_wedge_index * 2;
+        const int w_idx = (mi.intra_params >> 24) * 2;
         const int w_ofs = cb_wedge_offsets[bsize].x;
         const int w_sz = 1 << max(0, bw_log + bh_log - 2);
         mode_info0 = w_ofs + w_sz * ((intra_mode_flags & 1) ? w_idx : (32 + interintra_mode));
@@ -804,7 +814,7 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
         need_left = 0;
         need_above = 0;
       } else if (use_filter) {
-        mode_info0 = txh | ((mi.filter_intra_mode_info & 255) << 4);
+        mode_info0 = txh | (((mi.palette_filter_flags >> 16) & 255) << 4);
       }
 
       const int type_size = txw + txh;
@@ -924,17 +934,19 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
       int mode_v = 2 << 3;  // plane
       int mode_info0 = 0;
       if (mode1 == UV_CFL_PRED) {
-        int sign_u = ((mi.cfl_alpha_signs + 1) * 11) >> 5;   // CFL_SIGN_U(cfl_alpha_signs);
-        int sign_v = (mi.cfl_alpha_signs + 1) - 3 * sign_u;  // CFL_SIGN_V(cfl_alpha_signs);
-        int idx_u = (sign_u == 2) ? (mi.cfl_alpha_idx >> 4) + 1 : (sign_u == 1) ? -(mi.cfl_alpha_idx >> 4) - 1 : 0;
-        int idx_v = (sign_v == 2) ? (mi.cfl_alpha_idx & 15) + 1 : (sign_v == 1) ? -(mi.cfl_alpha_idx & 15) - 1 : 0;
+        const int cfl_alpha_idx = (mi.intra_params >> 8) & 255;
+        const int cfl_alpha_signs = (mi.intra_params >> 16) & 255;
+        int sign_u = ((cfl_alpha_signs + 1) * 11) >> 5;   // CFL_SIGN_U(cfl_alpha_signs);
+        int sign_v = (cfl_alpha_signs + 1) - 3 * sign_u;  // CFL_SIGN_V(cfl_alpha_signs);
+        int idx_u = (sign_u == 2) ? (cfl_alpha_idx >> 4) + 1 : (sign_u == 1) ? -(cfl_alpha_idx >> 4) - 1 : 0;
+        int idx_v = (sign_v == 2) ? (cfl_alpha_idx & 15) + 1 : (sign_v == 1) ? -(cfl_alpha_idx & 15) - 1 : 0;
         mode_u |= (idx_u + 16) << 22;
         mode_v |= (idx_v + 16) << 22;
         mode_info0 = cfl_max_x | (cfl_max_y << 16);
       }
 
       if (is_inter_intra) {
-        const int w_idx = mi.interintra_wedge_sign + mi.interintra_wedge_index * 2;
+        const int w_idx = (mi.intra_params >> 24) * 2;
         const int w_ofs = cb_wedge_offsets[bsize].y;
         const int w_sz = 1 << max(0, bw_log_uv + bh_log_uv - 2);
         mode_info0 = w_ofs + w_sz * ((intra_mode_flags & 1) ? w_idx : (32 + interintra_mode));

@@ -518,7 +518,7 @@ impl<H: SinkHost> Sink<H> {
                 let record = records.pool.add(index as usize);
                 let mi = &*record;
                 index += 1;
-                let (mi_row, mi_col) = (mi.mi_row, mi.mi_col);
+                let (mi_row, mi_col) = (i32::from(mi.mi_row), i32::from(mi.mi_col));
                 let bw = 1 << MI_SIZE_WIDE_LOG2[mi.sb_type as usize];
                 let bh = 1 << MI_SIZE_HIGH_LOG2[mi.sb_type as usize];
                 if GPU_GRID {

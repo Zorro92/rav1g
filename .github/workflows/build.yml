@@ -748,8 +748,8 @@ jobs:
   # that commit. It decodes the conformance set, writes the stage dumps and the MEMORY lines with the
   # scripts, the streams and the task lists of this commit, and the rust-equal job holds what rav1g-dec
   # wrote against it. The C++ decoder itself is tested by the workflow of its own branch; here it is only
-  # the second implementation the Rust decoder has to agree with, for as long as the two branches have the
-  # same shaders (rust-equal checks that first).
+  # the second implementation the Rust decoder has to agree with. rust-equal holds the shared
+  # shaders equal with explicit exceptions for the readers of the packed mode info record.
   cpp-reference:
     needs: conformance-streams
     runs-on: windows-latest
@@ -2523,13 +2523,11 @@ jobs:
   # decoder reads a stream with the entropy decoder of libaom, the decoder of this commit with the parse
   # pass of rav1d: this is where the two parsers are still held against each other (the mode
   # info records are listed, not held equal: libaom leaves in a field a block's kind does not have what
-  # an earlier frame had there, rav1d's sink writes zero; stage_dump.py compare --two-parsers). The MEMORY
+  # an earlier frame had there, and the layouts differ; stage_dump.py compare --two-parsers). The MEMORY
   # lines are no longer the same text: the C++ decoder has a share of the mode info and coefficient
   # buffers for each slot, this one has pools (docs/phase2-rav1d.md, step 5); what is held of them is
-  # in the last step. Two implementations of the host can only be held against each other while they run the
-  # same shaders, so that is checked first: when a shader of this branch changes and the pinned commit
-  # does not have the change, this job fails there, and the comparison either gets a new pin (the change
-  # was made on both branches) or ends (the shaders of the branches diverge: the switch to DXC, phase 2).
+  # in the last step. The shader check allows the three shaders that read the packed mode info records.
+  # Their output lists are held equal by the stage dump comparison.
   rust-equal:
     needs: [cpp-reference, rust-conformance, shader-headers]
     runs-on: ubuntu-26.04
@@ -2574,8 +2572,8 @@ jobs:
       # cdef_lists is in this commit alone too: it writes the two lists CDEF reads, which the C++ decoder
       # writes on its recording thread, and the stage dump cdef_info holds the two against each other.
       # So is mi_grid_build, the mode info grid built by the GPU for the check of -parseopt gridcheck.
-      # Every shader the reference has must be the same here.
-      - name: The shaders of this commit are those of the reference
+      # The three readers shared with cpp use the 96-byte layout here.
+      - name: Compare shaders against the reference
         run: |
           set -euo pipefail
           {
@@ -2587,8 +2585,9 @@ jobs:
           if ! python3 testing/shader_cache/shaders.py same --reference cpp-reference/shaders/report.json \
               --candidate shader-headers/report.json --reference-name "branch cpp at ${CPP_REFERENCE_COMMIT:0:7}" \
               --candidate-name 'this commit' \
-              --candidate-only copy_plane_sp,copy_plane_sp_tex,film_grain_filter_sp,film_grain_filter_sp_tex,cdef_lists,mi_grid_build; then
-            echo '::error title=The shaders differ from those of the equality reference::The C++ decoder of the pinned commit of branch cpp does not have the shaders of this commit, so its output cannot be held against. If the change is on branch cpp as well, set CPP_REFERENCE_COMMIT to that commit; if the shaders of the branches diverge from here on, the comparison ends (docs/rust-port.md, "Equality reference").'
+              --candidate-only copy_plane_sp,copy_plane_sp_tex,film_grain_filter_sp,film_grain_filter_sp_tex,cdef_lists,mi_grid_build \
+              --candidate-changed gen_pred_blocks,gen_lf_blocks_vert,gen_lf_blocks_hor; then
+            echo '::error title=Shader comparison failed::Check the shader differences against the pinned cpp build and the explicit exceptions (docs/rust-port.md, "Equality reference").'
             exit 1
           fi
 

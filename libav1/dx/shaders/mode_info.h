@@ -14,70 +14,41 @@
  * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
  */
 
-// The records the entropy decoder writes into the mode info pool (MB_MODE_INFO of av1/common/blockd.h), as
-// the shaders read them: 32-bit words. A word that packs fields of one or two bytes is noted with its bytes
-// (byte 0 is bits 0..7). The entropy decoder writes field by field and nothing clears the pool, so bytes that
-// are padding of the C struct, or belong to a field that the block's kind does not write, hold whatever the
-// memory held before, also from a decoder destroyed earlier in the process. A shader must take from a word
-// only the bits of the field it reads (a mask or a shift pair), and only fields that the entropy decoder
-// writes for that kind of block. The words with padding or unwritten bytes are marked "PADDING" below; the
-// layout itself is checked against blockd.h by the layout tests of crates/rav1g-sys.
-
-struct INTERINTER_COMPOUND_DATA {
-  int type;
-  int mask_type;
-  int wedge_index;
-  int wedge_sign;
-};
-
+// The global warp constants use this layout.
 struct WarpedMotionParams {
   int4 mat[2];
   int2 angles;  // x: alpha (bits 0..15), beta (16..31); y: gamma, delta
-  // byte 0 wmtype, byte 1 PADDING, bytes 2..3 invalid (0 or 1). Only bit 16 (invalid) is read.
   int type;
 };
 
-struct PALETTE_MODE_INFO {
-  int colors[12];  // TODO remove this?
-  uint sizes;      // bits 0..15 palette_size[0] (luma), bits 16..31 palette_size[1] (chroma)
-};
-
+// The sink clears each record before filling it. Packed fields are read with masks or shifts;
+// byte 0 is bits 0..7. The layout tests of rav1g-sys check this against records.rs.
 struct MB_MODE_INFO {
-  PALETTE_MODE_INFO palette_mode_info;
-  WarpedMotionParams wm_params;
-  INTERINTER_COMPOUND_DATA interinter_comp;
-  // byte 0 filter_intra_mode, byte 1 use_filter_intra, bytes 2..3 PADDING: mask both reads to their byte.
-  uint filter_intra_mode_info;
+  int4 warp_mat0;   // local warp, coefficients 0..3
+  int2 warp_mat1;   // coefficients 4 and 5
+  int2 warp_angles; // x: alpha and beta; y: gamma and delta, all signed 16-bit
   int mv[2];
-  uint interp_filters;
-  // TODO(debargha): Consolidate these flags
-  int interintra_wedge_index;
-  int interintra_wedge_sign;
-  int current_qindex;
-  int delta_lf_from_base;
-  int delta_lf[4];
-
-  int mi_row;
-  int mi_col;
+  uint mi_position; // low half: mi_row, high half: mi_col
   uint index_base;
 
-  int num_proj_ref;
-  // Index of the alpha Cb and alpha Cr combination
-  int cfl_alpha_idx;
-  // Joint sign of alpha Cb and alpha Cr
-  int cfl_alpha_signs;
+  uint block_type;       // sb_type, partition, ref_frame[0], ref_frame[1] (signed)
+  uint modes;            // mode, uv_mode, interintra_mode, motion_mode
+  uint intra_mode_flags; // use_wedge_interintra, use_intrabc, angle_delta[2] (signed)
+  uint tx_info;          // tx_size, skip, cdef_strength (signed), segment_id
+  uint inter_tx_size[4]; // 16 bytes, a transform size each, for inter and intrabc blocks
+  uint delta_lf;         // four signed loop filter deltas
+  uint intra_params;     // delta_lf_from_base (signed), cfl_alpha_idx, cfl_alpha_signs, interintra_wedge_index
+  uint palette_filter_flags; // palette_size[2], filter_intra_mode, flags
+  uint compound_filters;     // compound_type, wedge_index, vertical filter, horizontal filter
+};
 
-  uint comp_idx;    // bits 0..15 comp_group_idx, bits 16..31 compound_idx (no shader reads it)
-  uint block_type;  // byte 0 sb_type, byte 1 partition, byte 2 ref_frame[0], byte 3 ref_frame[1] (signed)
-  uint modes;       // byte 0 mode, byte 1 uv_mode, byte 2 interintra_mode, byte 3 motion_mode
-  //    uint txk_type[16];
-  uint intra_mode_flags;  // byte 0 use_wedge_interintra, byte 1 use_intrabc, bytes 2 and 3 angle_delta[2] (signed)
-  // byte 0 tx_size, byte 1 skip, byte 2 skip_mode (not written in intra frames: do not read it), byte 3 segment_id
-  uint tx_info;
-  uint inter_tx_size[4];  // 16 bytes, one transform size each; written for inter and intrabc blocks
-  // byte 0 seg_id_predicted, byte 1 cdef_strength, byte 2 ref_mv_idx, byte 3 reserved (never written). No
-  // shader reads this word.
-  uint seg_cdef_flags;
-};  // sizeof(MB_MODE_INFO)==224
+#define ModeInfoSize 96
+#define MI_USE_FILTER_INTRA 1
+#define MI_WARP_INVALID 2
+#define MI_MASK_TYPE 4
+#define MI_WEDGE_SIGN 8
 
-#define ModeInfoSize 224
+// Byte offsets of the aligned words read by mi_grid_build and cdef_lists.
+#define MI_POSITION_WORD 40
+#define SB_TYPE_WORD 48
+#define TX_INFO_WORD 60

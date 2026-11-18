@@ -124,11 +124,10 @@ pub extern "C" fn av1_set_cdef_v2(enable: c_int) {
     CDEF_V2.store(enable, Ordering::Relaxed);
 }
 
-// The two fields of a mode info record `cdef_lists.hlsl` loads, by the place of their words in a record
-// (`TX_INFO_WORD`, `SEG_CDEF_FLAGS_WORD`: byte 1 of each).
+// The two bytes of TX_INFO_WORD that cdef_lists.hlsl reads.
 const _: () = {
-    assert!(std::mem::offset_of!(crate::sys::MB_MODE_INFO, skip) == 200 + 1);
-    assert!(std::mem::offset_of!(crate::sys::MB_MODE_INFO, cdef_strength) == 220 + 1);
+    assert!(std::mem::offset_of!(crate::sys::MB_MODE_INFO, skip) == 60 + 1);
+    assert!(std::mem::offset_of!(crate::sys::MB_MODE_INFO, cdef_strength) == 60 + 2);
     assert!(size_of::<crate::sys::MiGridEntry>() == 4);
 };
 

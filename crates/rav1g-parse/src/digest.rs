@@ -180,8 +180,7 @@ impl ParseSink for DigestSink {
         // SAFETY: a call of the tile's thread inside the frame.
         let (frame, state) = unsafe { (self.frame(), self.tile(tile)) };
         state.flush();
-        // SAFETY: a record is a C struct of numbers, for which zero bytes are a value.
-        let mut mi: MB_MODE_INFO = unsafe { std::mem::zeroed() };
+        let mut mi = MB_MODE_INFO::default();
         let lossless = frame.hdr.segmentation.lossless[block.b.seg_id.get()];
         let record_frame = RecordFrame {
             hdr: &frame.hdr,
@@ -190,7 +189,7 @@ impl ParseSink for DigestSink {
             has_chroma: frame.has_chroma,
         };
         record::fill(&mut mi, &record_frame, block, lossless);
-        // SAFETY: the bytes of the record, whose padding is zero as the whole of it was.
+        // SAFETY: all bytes of the record are initialized fields.
         state
             .hash
             .bytes(unsafe { std::slice::from_raw_parts((&raw const mi).cast::<u8>(), size_of::<MB_MODE_INFO>()) });

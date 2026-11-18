@@ -8,31 +8,23 @@
 
 //! The records the decoder shares with the shaders, and the cursors of a tile.
 //!
-//! The parser writes these into buffers that the GPU stages read, so their layouts are fixed: they are
-//! the layouts `av1/common/blockd.h` and `mv.h` of libaom gave them in the C decoder, which the HLSL was
-//! written against.
+//! The parser writes these into buffers that the GPU stages read.
 //!
-//! - [`MB_MODE_INFO`], the mode info record of a block, with what it holds ([`PALETTE_MODE_INFO`],
-//!   [`WarpedMotionParams`], [`INTERINTER_COMPOUND_DATA`], [`FILTER_INTRA_MODE_INFO`], [`int_mv`]). The
-//!   shaders read it as `MB_MODE_INFO` of `libav1/dx/shaders/mode_info.h`, as four 32 bit words at a time
-//!   (`ModeInfoSize` bytes a record). The tests of this crate hold the fields against that header
-//!   (`layout_tests.rs`).
+//! - [`MB_MODE_INFO`], the mode info record of a block. The shaders read it as 32-bit words
+//!   (`libav1/dx/shaders/mode_info.h`). The layout tests hold the fields against that header.
 //! - [`tx_block_info_gpu`], the record of a transform block: the IDCT shaders load it as one `uint4`
 //!   (`IdctBlockSize` of `idct_shader_common.h`).
 //! - [`av1_tile_data`], the cursors of a tile into the buffers of a pipeline slot. No shader reads it; the
 //!   sink of the parser (`rav1g-parse`) and the host (`rav1g`) both do.
 //!
-//! No C compiler sees these any more, so each layout is written down here: the size, the alignment and
-//! the offset of every field, as the C compilers of the build had them (MSVC, clang-cl and clang for
-//! Linux agreed) when the bindings were still generated from the headers. A change of a field that moves
-//! anything fails the build.
+//! The size, alignment and field offsets of each record are checked at compile time.
 
 use std::ffi::{c_int, c_uint, c_void};
 use std::mem::{offset_of, zeroed};
 
 use crate::bitstream::{
-    BLOCK_SIZE, COMPOUND_TYPE, DIFFWTD_MASK_TYPE, FILTER_INTRA_MODE, INTERINTRA_MODE, InterpFilters, MOTION_MODE,
-    MV_REFERENCE_FRAME, PARTITION_TYPE, PREDICTION_MODE, TX_SIZE, TransformationType, UV_PREDICTION_MODE, tran_low_t,
+    BLOCK_SIZE, FILTER_INTRA_MODE, INTERINTRA_MODE, MOTION_MODE, MV_REFERENCE_FRAME, PARTITION_TYPE, PREDICTION_MODE,
+    TX_SIZE, TransformationType, UV_PREDICTION_MODE, tran_low_t,
 };
 
 #[repr(C)]
@@ -88,68 +80,17 @@ const _: () = {
     assert!(offset_of!(WarpedMotionParams, wmtype) == 40);
     assert!(offset_of!(WarpedMotionParams, invalid) == 42);
 };
+/// One block in the mode info pool, in the word order of `dx/shaders/mode_info.h`.
 #[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
-pub struct PALETTE_MODE_INFO {
-    pub palette_colors: [u16; 24],
-    pub palette_size: [i16; 2],
-}
-const _: () = {
-    assert!(size_of::<PALETTE_MODE_INFO>() == 52);
-    assert!(align_of::<PALETTE_MODE_INFO>() == 2);
-    assert!(offset_of!(PALETTE_MODE_INFO, palette_colors) == 0);
-    assert!(offset_of!(PALETTE_MODE_INFO, palette_size) == 48);
-};
-#[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
-pub struct FILTER_INTRA_MODE_INFO {
-    pub filter_intra_mode: FILTER_INTRA_MODE,
-    pub use_filter_intra: u8,
-}
-const _: () = {
-    assert!(size_of::<FILTER_INTRA_MODE_INFO>() == 2);
-    assert!(align_of::<FILTER_INTRA_MODE_INFO>() == 1);
-    assert!(offset_of!(FILTER_INTRA_MODE_INFO, filter_intra_mode) == 0);
-    assert!(offset_of!(FILTER_INTRA_MODE_INFO, use_filter_intra) == 1);
-};
-#[repr(C)]
-#[derive(Debug, Default, Copy, Clone)]
-pub struct INTERINTER_COMPOUND_DATA {
-    pub type_: COMPOUND_TYPE,
-    pub mask_type: DIFFWTD_MASK_TYPE,
-    pub wedge_index: c_int,
-    pub wedge_sign: c_int,
-}
-const _: () = {
-    assert!(size_of::<INTERINTER_COMPOUND_DATA>() == 16);
-    assert!(align_of::<INTERINTER_COMPOUND_DATA>() == 4);
-    assert!(offset_of!(INTERINTER_COMPOUND_DATA, type_) == 0);
-    assert!(offset_of!(INTERINTER_COMPOUND_DATA, mask_type) == 4);
-    assert!(offset_of!(INTERINTER_COMPOUND_DATA, wedge_index) == 8);
-    assert!(offset_of!(INTERINTER_COMPOUND_DATA, wedge_sign) == 12);
-};
-#[repr(C)]
-#[derive(Copy, Clone)]
+#[derive(Default, Copy, Clone)]
 pub struct MB_MODE_INFO {
-    pub palette_mode_info: PALETTE_MODE_INFO,
-    pub wm_params: WarpedMotionParams,
-    pub interinter_comp: INTERINTER_COMPOUND_DATA,
-    pub filter_intra_mode_info: FILTER_INTRA_MODE_INFO,
+    /// The six coefficients and four signed shear parameters of a local warp.
+    pub wmmat: [i32; 6],
+    pub warp_angles: [i16; 4],
     pub mv: [int_mv; 2],
-    pub interp_filters: InterpFilters,
-    pub interintra_wedge_index: c_int,
-    pub interintra_wedge_sign: c_int,
-    pub current_qindex: c_int,
-    pub delta_lf_from_base: c_int,
-    pub delta_lf: [c_int; 4],
-    pub mi_row: c_int,
-    pub mi_col: c_int,
+    pub mi_row: u16,
+    pub mi_col: u16,
     pub index_base: c_int,
-    pub num_proj_ref: c_int,
-    pub cfl_alpha_idx: c_int,
-    pub cfl_alpha_signs: c_int,
-    pub comp_group_idx: i16,
-    pub compound_idx: i16,
     pub sb_type: BLOCK_SIZE,
     pub partition: PARTITION_TYPE,
     pub ref_frame: [MV_REFERENCE_FRAME; 2],
@@ -162,62 +103,64 @@ pub struct MB_MODE_INFO {
     pub angle_delta: [i8; 2],
     pub tx_size: TX_SIZE,
     pub skip: i8,
-    pub skip_mode: i8,
+    pub cdef_strength: i8,
     pub segment_id: i8,
     pub inter_tx_size: [u8; 16],
-    pub seg_id_predicted: i8,
-    pub cdef_strength: i8,
-    pub ref_mv_idx: u8,
-    pub reserved: i8,
+    pub delta_lf: [i8; 4],
+    pub delta_lf_from_base: i8,
+    pub cfl_alpha_idx: u8,
+    pub cfl_alpha_signs: u8,
+    pub interintra_wedge_index: u8,
+    pub palette_size: [u8; 2],
+    pub filter_intra_mode: FILTER_INTRA_MODE,
+    pub flags: u8,
+    pub compound_type: u8,
+    pub wedge_index: u8,
+    /// Vertical, then horizontal.
+    pub interp_filters: [u8; 2],
+}
+impl MB_MODE_INFO {
+    pub const USE_FILTER_INTRA: u8 = 1 << 0;
+    pub const WARP_INVALID: u8 = 1 << 1;
+    pub const MASK_TYPE: u8 = 1 << 2;
+    pub const WEDGE_SIGN: u8 = 1 << 3;
 }
 const _: () = {
-    assert!(size_of::<MB_MODE_INFO>() == 224);
+    assert!(size_of::<MB_MODE_INFO>() == 96);
     assert!(align_of::<MB_MODE_INFO>() == 4);
-    assert!(offset_of!(MB_MODE_INFO, palette_mode_info) == 0);
-    assert!(offset_of!(MB_MODE_INFO, wm_params) == 52);
-    assert!(offset_of!(MB_MODE_INFO, interinter_comp) == 96);
-    assert!(offset_of!(MB_MODE_INFO, filter_intra_mode_info) == 112);
-    assert!(offset_of!(MB_MODE_INFO, mv) == 116);
-    assert!(offset_of!(MB_MODE_INFO, interp_filters) == 124);
-    assert!(offset_of!(MB_MODE_INFO, interintra_wedge_index) == 128);
-    assert!(offset_of!(MB_MODE_INFO, interintra_wedge_sign) == 132);
-    assert!(offset_of!(MB_MODE_INFO, current_qindex) == 136);
-    assert!(offset_of!(MB_MODE_INFO, delta_lf_from_base) == 140);
-    assert!(offset_of!(MB_MODE_INFO, delta_lf) == 144);
-    assert!(offset_of!(MB_MODE_INFO, mi_row) == 160);
-    assert!(offset_of!(MB_MODE_INFO, mi_col) == 164);
-    assert!(offset_of!(MB_MODE_INFO, index_base) == 168);
-    assert!(offset_of!(MB_MODE_INFO, num_proj_ref) == 172);
-    assert!(offset_of!(MB_MODE_INFO, cfl_alpha_idx) == 176);
-    assert!(offset_of!(MB_MODE_INFO, cfl_alpha_signs) == 180);
-    assert!(offset_of!(MB_MODE_INFO, comp_group_idx) == 184);
-    assert!(offset_of!(MB_MODE_INFO, compound_idx) == 186);
-    assert!(offset_of!(MB_MODE_INFO, sb_type) == 188);
-    assert!(offset_of!(MB_MODE_INFO, partition) == 189);
-    assert!(offset_of!(MB_MODE_INFO, ref_frame) == 190);
-    assert!(offset_of!(MB_MODE_INFO, mode) == 192);
-    assert!(offset_of!(MB_MODE_INFO, uv_mode) == 193);
-    assert!(offset_of!(MB_MODE_INFO, interintra_mode) == 194);
-    assert!(offset_of!(MB_MODE_INFO, motion_mode) == 195);
-    assert!(offset_of!(MB_MODE_INFO, use_wedge_interintra) == 196);
-    assert!(offset_of!(MB_MODE_INFO, use_intrabc) == 197);
-    assert!(offset_of!(MB_MODE_INFO, angle_delta) == 198);
-    assert!(offset_of!(MB_MODE_INFO, tx_size) == 200);
-    assert!(offset_of!(MB_MODE_INFO, skip) == 201);
-    assert!(offset_of!(MB_MODE_INFO, skip_mode) == 202);
-    assert!(offset_of!(MB_MODE_INFO, segment_id) == 203);
-    assert!(offset_of!(MB_MODE_INFO, inter_tx_size) == 204);
-    assert!(offset_of!(MB_MODE_INFO, seg_id_predicted) == 220);
-    assert!(offset_of!(MB_MODE_INFO, cdef_strength) == 221);
-    assert!(offset_of!(MB_MODE_INFO, ref_mv_idx) == 222);
-    assert!(offset_of!(MB_MODE_INFO, reserved) == 223);
+    assert!(offset_of!(MB_MODE_INFO, wmmat) == 0);
+    assert!(offset_of!(MB_MODE_INFO, warp_angles) == 24);
+    assert!(offset_of!(MB_MODE_INFO, mv) == 32);
+    assert!(offset_of!(MB_MODE_INFO, mi_row) == 40);
+    assert!(offset_of!(MB_MODE_INFO, mi_col) == 42);
+    assert!(offset_of!(MB_MODE_INFO, index_base) == 44);
+    assert!(offset_of!(MB_MODE_INFO, sb_type) == 48);
+    assert!(offset_of!(MB_MODE_INFO, partition) == 49);
+    assert!(offset_of!(MB_MODE_INFO, ref_frame) == 50);
+    assert!(offset_of!(MB_MODE_INFO, mode) == 52);
+    assert!(offset_of!(MB_MODE_INFO, uv_mode) == 53);
+    assert!(offset_of!(MB_MODE_INFO, interintra_mode) == 54);
+    assert!(offset_of!(MB_MODE_INFO, motion_mode) == 55);
+    assert!(offset_of!(MB_MODE_INFO, use_wedge_interintra) == 56);
+    assert!(offset_of!(MB_MODE_INFO, use_intrabc) == 57);
+    assert!(offset_of!(MB_MODE_INFO, angle_delta) == 58);
+    assert!(offset_of!(MB_MODE_INFO, tx_size) == 60);
+    assert!(offset_of!(MB_MODE_INFO, skip) == 61);
+    assert!(offset_of!(MB_MODE_INFO, cdef_strength) == 62);
+    assert!(offset_of!(MB_MODE_INFO, segment_id) == 63);
+    assert!(offset_of!(MB_MODE_INFO, inter_tx_size) == 64);
+    assert!(offset_of!(MB_MODE_INFO, delta_lf) == 80);
+    assert!(offset_of!(MB_MODE_INFO, delta_lf_from_base) == 84);
+    assert!(offset_of!(MB_MODE_INFO, cfl_alpha_idx) == 85);
+    assert!(offset_of!(MB_MODE_INFO, cfl_alpha_signs) == 86);
+    assert!(offset_of!(MB_MODE_INFO, interintra_wedge_index) == 87);
+    assert!(offset_of!(MB_MODE_INFO, palette_size) == 88);
+    assert!(offset_of!(MB_MODE_INFO, filter_intra_mode) == 90);
+    assert!(offset_of!(MB_MODE_INFO, flags) == 91);
+    assert!(offset_of!(MB_MODE_INFO, compound_type) == 92);
+    assert!(offset_of!(MB_MODE_INFO, wedge_index) == 93);
+    assert!(offset_of!(MB_MODE_INFO, interp_filters) == 94);
 };
-impl Default for MB_MODE_INFO {
-    fn default() -> Self {
-        // SAFETY: all zero is a value of every field.
-        unsafe { zeroed() }
-    }
-}
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]
 pub struct tx_block_info_gpu {

@@ -226,36 +226,70 @@ def write_digest(dumps, path):
 # testing/common/stage_dump.h.
 # ---------------------------------------------------------------------------------------------------------
 
-# MB_MODE_INFO of libav1/dx/shaders/mode_info.h: (name, offset, bytes, signed; bytes 0: shown as hex of the
-# given length in |raw|).
-MI_FIELDS = (
-    ("palette", 0, 52, None), ("wm_params", 52, 44, None), ("interinter_comp", 96, 16, None),
-    ("filter_intra", 112, 4, False), ("mv0", 116, 4, None), ("mv1", 120, 4, None), ("interp_filters", 124, 4, None),
-    ("interintra_wedge_index", 128, 4, True), ("interintra_wedge_sign", 132, 4, True),
-    ("current_qindex", 136, 4, True), ("delta_lf_from_base", 140, 4, True), ("delta_lf", 144, 16, None),
-    ("mi_row", 160, 4, True), ("mi_col", 164, 4, True), ("index_base", 168, 4, True),
-    ("num_proj_ref", 172, 4, True), ("cfl_alpha_idx", 176, 4, True), ("cfl_alpha_signs", 180, 4, True),
-    ("comp_group_idx", 184, 2, True), ("compound_idx", 186, 2, True), ("sb_type", 188, 1, False),
-    ("partition", 189, 1, False), ("ref_frame0", 190, 1, True), ("ref_frame1", 191, 1, True),
-    ("mode", 192, 1, False), ("uv_mode", 193, 1, False), ("interintra_mode", 194, 1, False),
-    ("motion_mode", 195, 1, False), ("use_wedge_interintra", 196, 1, True), ("use_intrabc", 197, 1, False),
-    ("angle_delta_y", 198, 1, True), ("angle_delta_uv", 199, 1, True), ("tx_size", 200, 1, False),
-    ("skip", 201, 1, True), ("skip_mode", 202, 1, True), ("segment_id", 203, 1, True),
-    ("inter_tx_size", 204, 16, None), ("seg_id_predicted", 220, 1, True), ("cdef_strength", 221, 1, True),
-    ("ref_mv_idx", 222, 1, False), ("reserved", 223, 1, True),
-)
-# The fields gen_lf_blocks_vert/hor read of a record (the last two only with delta_lf_present).
+# MB_MODE_INFO by record size: (name, offset, bytes, signed[, bit offset, bit count]).
+# signed=None shows raw bytes in hex. Names shared by both layouts have the same meaning.
+MI_DELTA_FIELDS = tuple("delta_lf[%d]" % i for i in range(4))
+MI_FIELDS = {
+    224: (
+        ("palette_colors", 0, 48, None), ("palette_size_y", 48, 2, False), ("palette_size_uv", 50, 2, False),
+        ("wmmat", 52, 24, None), ("wmmat_unused", 76, 8, None),
+        ("warp_alpha", 84, 2, True), ("warp_beta", 86, 2, True), ("warp_gamma", 88, 2, True),
+        ("warp_delta", 90, 2, True), ("wmtype", 92, 1, False), ("warp_padding", 93, 1, None),
+        ("warp_invalid", 94, 2, True), ("compound_type", 96, 4, False), ("mask_type", 100, 4, False),
+        ("wedge_index", 104, 4, True), ("wedge_sign", 108, 4, True), ("filter_intra_mode", 112, 1, False),
+        ("use_filter_intra", 113, 1, False), ("filter_intra_padding", 114, 2, None),
+        ("mv0", 116, 4, None), ("mv1", 120, 4, None), ("interp_filter_v", 124, 2, False),
+        ("interp_filter_h", 126, 2, False), ("interintra_wedge_index", 128, 4, True),
+        ("interintra_wedge_sign", 132, 4, True), ("current_qindex", 136, 4, True),
+        ("delta_lf_from_base", 140, 4, True),
+        *((name, 144 + 4 * i, 4, True) for i, name in enumerate(MI_DELTA_FIELDS)),
+        ("mi_row", 160, 4, True), ("mi_col", 164, 4, True), ("index_base", 168, 4, True),
+        ("num_proj_ref", 172, 4, True), ("cfl_alpha_idx", 176, 4, True), ("cfl_alpha_signs", 180, 4, True),
+        ("comp_group_idx", 184, 2, True), ("compound_idx", 186, 2, True), ("sb_type", 188, 1, False),
+        ("partition", 189, 1, False), ("ref_frame0", 190, 1, True), ("ref_frame1", 191, 1, True),
+        ("mode", 192, 1, False), ("uv_mode", 193, 1, False), ("interintra_mode", 194, 1, False),
+        ("motion_mode", 195, 1, False), ("use_wedge_interintra", 196, 1, True), ("use_intrabc", 197, 1, False),
+        ("angle_delta_y", 198, 1, True), ("angle_delta_uv", 199, 1, True), ("tx_size", 200, 1, False),
+        ("skip", 201, 1, True), ("skip_mode", 202, 1, True), ("segment_id", 203, 1, True),
+        ("inter_tx_size", 204, 16, None), ("seg_id_predicted", 220, 1, True), ("cdef_strength", 221, 1, True),
+        ("ref_mv_idx", 222, 1, False), ("reserved", 223, 1, True),
+    ),
+    96: (
+        ("wmmat", 0, 24, None), ("warp_alpha", 24, 2, True), ("warp_beta", 26, 2, True),
+        ("warp_gamma", 28, 2, True), ("warp_delta", 30, 2, True), ("mv0", 32, 4, None), ("mv1", 36, 4, None),
+        ("mi_row", 40, 2, False), ("mi_col", 42, 2, False), ("index_base", 44, 4, True),
+        ("sb_type", 48, 1, False), ("partition", 49, 1, False), ("ref_frame0", 50, 1, True),
+        ("ref_frame1", 51, 1, True), ("mode", 52, 1, False), ("uv_mode", 53, 1, False),
+        ("interintra_mode", 54, 1, False), ("motion_mode", 55, 1, False), ("use_wedge_interintra", 56, 1, True),
+        ("use_intrabc", 57, 1, False), ("angle_delta_y", 58, 1, True), ("angle_delta_uv", 59, 1, True),
+        ("tx_size", 60, 1, False), ("skip", 61, 1, True), ("cdef_strength", 62, 1, True),
+        ("segment_id", 63, 1, True), ("inter_tx_size", 64, 16, None),
+        *((name, 80 + i, 1, True) for i, name in enumerate(MI_DELTA_FIELDS)),
+        ("delta_lf_from_base", 84, 1, True), ("cfl_alpha_idx", 85, 1, False), ("cfl_alpha_signs", 86, 1, False),
+        ("interintra_wedge_index", 87, 1, False), ("palette_size_y", 88, 1, False), ("palette_size_uv", 89, 1, False),
+        ("filter_intra_mode", 90, 1, False), ("use_filter_intra", 91, 1, False, 0, 1),
+        ("warp_invalid", 91, 1, False, 1, 1), ("mask_type", 91, 1, False, 2, 1),
+        ("wedge_sign", 91, 1, False, 3, 1), ("flags_reserved", 91, 1, False, 4, 4),
+        ("compound_type", 92, 1, False), ("wedge_index", 93, 1, False), ("interp_filter_v", 94, 1, False),
+        ("interp_filter_h", 95, 1, False),
+    ),
+}
+# The fields gen_lf_blocks_vert/hor read of a record (the deltas only with delta_lf_present).
 MI_LF_FIELDS = ("sb_type", "ref_frame0", "mode", "use_intrabc", "tx_size", "skip", "segment_id", "inter_tx_size",
-                "delta_lf_from_base", "delta_lf")
+                "delta_lf_from_base", *MI_DELTA_FIELDS)
 FILTER_TAPS = (4, 6, 8, 14)
 
 
 def field_value(record, field):
-    name, offset, size, signed = field
+    _, offset, size, signed, *bits = field
     raw = record[offset:offset + size]
     if signed is None:
         return raw.hex()
-    return int.from_bytes(raw, "little", signed=signed)
+    value = int.from_bytes(raw, "little", signed=signed)
+    if bits:
+        shift, width = bits
+        value = (value >> shift) & ((1 << width) - 1)
+    return value
 
 
 def words_of(data, offset, count):
@@ -281,6 +315,11 @@ class ModeInfo:
         # The bytes of an entry: 8, the address of the record (the low half is read), or 4, that word alone.
         self.entry = grid.num("entry", 8)
         self.record = grid.num("record", 224)
+        if self.record not in MI_FIELDS:
+            raise ValueError("unsupported mode info record size %d" % self.record)
+        if pool and pool.num("record", self.record) != self.record:
+            raise ValueError("mi_grid and mi_pool disagree on the mode info record size")
+        self.fields = MI_FIELDS[self.record]
         self.runs = []  # (first pool index, count, offset in the data)
         pos = 0
         for word, fields in (pool.parts if pool else []):
@@ -510,7 +549,11 @@ def compare_lf_params(da, db, limit, out):
 
 def compare_mode_info(da, db, dumps_a, dumps_b, limit, out):
     if da.crcs is not None or db.crcs is not None:
-        # One side is a digest: a CRC per 4x4 unit.
+        # One side is a digest: a CRC per 4x4 unit, over the record in its original layout.
+        size_a, size_b = da.num("record", 224), db.num("record", 224)
+        if size_a != size_b:
+            out("      different record layouts (%d and %d bytes); digests have no field values" % (size_a, size_b))
+            return False
         ca = da.crcs if da.crcs is not None else data_crcs(da, dumps_a)
         cb = db.crcs if db.crcs is not None else data_crcs(db, dumps_b)
         cols = da.num("mi_cols")
@@ -529,6 +572,10 @@ def compare_mode_info(da, db, dumps_a, dumps_b, limit, out):
     if (ma.cols, ma.rows) != (mb.cols, mb.rows):
         out("      sizes differ: A %dx%d units, B %dx%d" % (ma.cols, ma.rows, mb.cols, mb.rows))
         return False
+    fields_b = {f[0]: f for f in mb.fields}
+    common = [(f, fields_b[f[0]]) for f in ma.fields if f[0] in fields_b]
+    if ma.record != mb.record:
+        out("      record sizes %d and %d bytes; comparing %d shared fields" % (ma.record, mb.record, len(common)))
     pair_fields = {}
     per_field = {}
     first = {}
@@ -545,7 +592,7 @@ def compare_mode_info(da, db, dumps_a, dumps_b, limit, out):
                 elif ra == rb:
                     pair_fields[key] = ()
                 else:
-                    pair_fields[key] = tuple(f for f in MI_FIELDS if field_value(ra, f) != field_value(rb, f))
+                    pair_fields[key] = tuple((a, b) for a, b in common if field_value(ra, a) != field_value(rb, b))
             fields = pair_fields[key]
             if fields is None:
                 missing += 1
@@ -557,19 +604,20 @@ def compare_mode_info(da, db, dumps_a, dumps_b, limit, out):
             if not fields:
                 continue
             bad_units += 1
-            if any(f[0] in MI_LF_FIELDS for f in fields):
+            if any(a[0] in MI_LF_FIELDS for a, _ in fields):
                 lf_units += 1
             ra, rb = ma.record_at(ia), mb.record_at(ib)
-            for f in fields:
-                per_field[f[0]] = per_field.get(f[0], 0) + 1
-                if len(first.setdefault(f[0], [])) < limit:
-                    va, vb = field_value(ra, f), field_value(rb, f)
-                    if f[3] is None and f[2] > 16:
-                        # A long field: the bytes from the first to the last that differ.
-                        diff = [i for i in range(f[2]) if ra[f[1] + i] != rb[f[1] + i]]
+            for a, b in fields:
+                name, offset, size, signed = a[:4]
+                per_field[name] = per_field.get(name, 0) + 1
+                if len(first.setdefault(name, [])) < limit:
+                    va, vb = field_value(ra, a), field_value(rb, b)
+                    if signed is None and size == b[2] and size > 16:
+                        # Show up to 16 bytes starting at the first difference.
+                        diff = [i for i in range(size) if ra[offset + i] != rb[b[1] + i]]
                         lo, hi = diff[0], min(diff[-1] + 1, diff[0] + 16)
                         va, vb = "[byte %d]%s" % (lo, va[2 * lo:2 * hi]), vb[2 * lo:2 * hi]
-                    first[f[0]].append((col, row, va, vb))
+                    first[name].append((col, row, va, vb))
     total = ma.cols * ma.rows
     if not bad_units:
         out("      equal (%d 4x4 units of %dx%d, %d and %d records)" % (total, ma.cols, ma.rows, len(ma.cache),
@@ -1000,7 +1048,7 @@ def cmd_compare(args):
                 # of them (pred_blocks, lf_blocks, cdef_info) is compared like every other buffer.
                 listed = not equal and args.two_parsers and da.stage in ("mi_grid", "mi_pool")
                 print("  data  %-16s %s" % (da.label(), "equal" if equal else
-                                           "differs in fields no stage reads of these blocks" if listed else "DIFFERS"))
+                                           "differs (listed by --two-parsers)" if listed else "DIFFERS"))
                 if listed:
                     records_listed.append(da.label())
                 elif not equal:
@@ -1030,7 +1078,7 @@ def cmd_compare(args):
         print("  frame %d: %s%s" % (dumps_a[0].frame if dumps_a else -1,
                                    "all stages equal" if first_bad is None else "first difference at stage " + first_bad,
                                    "; data that differs: " + ", ".join(data_bad) if data_bad else "") +
-              ("; records that differ in fields no stage reads: " + ", ".join(records_listed) if records_listed else ""))
+              ("; mode info differences listed: " + ", ".join(records_listed) if records_listed else ""))
     print("RESULT %s" % ("equal" if all_equal else "DIFFERENT"))
     return 0 if all_equal else 1
 
@@ -1112,7 +1160,7 @@ def cmd_mi(args):
     print("%s: 4x4 unit column %d, row %d of %dx%d: %s" % (args.file, args.col, args.row, mi.cols, mi.rows,
                                                           "no record" if record is None else "pool index %d" % index))
     if record is not None:
-        for f in MI_FIELDS:
+        for f in mi.fields:
             print("  %-24s %s%s" % (f[0], field_value(record, f), "  (read by gen_lf_blocks)" if f[0] in MI_LF_FIELDS else ""))
     return 0
 
@@ -1176,13 +1224,9 @@ def main_with(argv):
     p.add_argument("b")
     p.add_argument("--all", action="store_true", help="the pattern of every stage that differs, not only the first")
     p.add_argument("--two-parsers", action="store_true",
-                   help="the dumps are of the two parsers of the decoder (docs/phase2-rav1d.md): a difference in "
-                        "the mode info records is listed and does not make the result DIFFERENT. The entropy "
-                        "decoder of libaom does not clear a record, so a field the block's kind does not have "
-                        "holds what an earlier frame left there, and it keeps the number of warp samples; "
-                        "rav1d's sink writes zero. No stage reads such a field: the buffers the stages make of "
-                        "the records (pred_blocks, lf_blocks, cdef_info) and every frame buffer are compared as "
-                        "always")
+                   help="list mode info differences for the two parsers without failing the comparison. "
+                        "Their record layouts and the contents of unused fields differ. The prediction, "
+                        "loop filter and CDEF lists and the frame buffers must still match")
     p.add_argument("--samples", type=int, default=12,
                    help="how many differing samples, blocks, units or records to list (default 12)")
     p.set_defaults(func=cmd_compare)

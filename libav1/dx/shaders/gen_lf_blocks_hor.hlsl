@@ -66,16 +66,16 @@ int get_mi_index(ByteAddressBuffer grid, int index, uint base) {
   return addr / ModeInfoSize;
 }
 
-int get_filter_level_hor(int plane, int ref0, int mode, int segment_id, int delta_from_base, int delta[4]) {
+int get_filter_level_hor(int plane, int ref0, int mode, int segment_id, uint intra_params, uint delta) {
   segment_id = (segment_id >> 24) & 7;
   const int mode_lut = (0x017f6000 >> (mode & 255)) & 1;
   if (cb_delta_q_info_delta_lf_present_flag) {
     const int lut_val = plane + 1;  // plane + 1 for DIR = 1;
     int delta_lf;
     if (cb_delta_q_info_delta_lf_multi) {
-      delta_lf = delta[lut_val];
+      delta_lf = (int)((delta >> (8 * lut_val)) << 24) >> 24;
     } else {
-      delta_lf = delta_from_base;
+      delta_lf = (int)(intra_params << 24) >> 24;
     }
 
     int base_level;
@@ -185,7 +185,7 @@ int get_tx_size_hor(int plane, int col, int row, int bw_log, int bh_log, int is_
     if ((mi_row + r) & (ts - 1)) break;
 
     const int curr_level = get_filter_level_hor(plane, ref0, mi_pool[mi_idx].modes, tx_info,
-                                                mi_pool[mi_idx].delta_lf_from_base, mi_pool[mi_idx].delta_lf);
+                                                mi_pool[mi_idx].intra_params, mi_pool[mi_idx].delta_lf);
     const int curr_skipped = skip && is_inter;
     filter_level = curr_level;
     if ((mi_row + r) > 0) {
@@ -204,7 +204,7 @@ int get_tx_size_hor(int plane, int col, int row, int bw_log, int bh_log, int is_
       const int pv_ts = get_tx_size_hor(plane, col, row - (1 << subsampling), pv_bw_log, pv_bh_log, pv_is_inter,
                                         pv_skip, pv_tx_info, mi_pool[mi1_idx].inter_tx_size);
       const int pv_lvl = get_filter_level_hor(plane, pv_ref0, mi_pool[mi1_idx].modes, pv_tx_info,
-                                              mi_pool[mi1_idx].delta_lf_from_base, mi_pool[mi1_idx].delta_lf);
+                                              mi_pool[mi1_idx].intra_params, mi_pool[mi1_idx].delta_lf);
 
       const int pu_edge = ((mi_row + r) & ((1 << max(bh_log - subsampling, 0)) - 1)) == 0;
 

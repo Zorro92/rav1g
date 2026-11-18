@@ -145,8 +145,8 @@ pub(crate) fn max_uv_txsize(bsize: u8, subsampling_x: c_int, subsampling_y: c_in
 
 /// `av1_extract_interp_filter` of `av1/common/filter.h`: the filter of one direction.
 #[inline]
-pub(crate) fn extract_interp_filter(filters: u32, x_filter: bool) -> u32 {
-    (filters >> if x_filter { 16 } else { 0 }) & 0xf
+pub(crate) fn extract_interp_filter(filters: [u8; 2], x_filter: bool) -> u32 {
+    u32::from(filters[usize::from(x_filter)] & 0xf)
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -242,10 +242,10 @@ fn perf_inter_count_block(
     if is_warp {
         b.area_warp += area;
     }
-    if is_compound && mi.interinter_comp.type_ == COMPOUND_WEDGE as u32 {
+    if is_compound && i32::from(mi.compound_type) == COMPOUND_WEDGE {
         b.area_wedge += area;
     }
-    if is_compound && mi.interinter_comp.type_ == COMPOUND_DIFFWTD as u32 {
+    if is_compound && i32::from(mi.compound_type) == COMPOUND_DIFFWTD {
         b.area_diffwtd += area;
     }
     if is_inter_intra {
@@ -592,6 +592,8 @@ unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBL
         let own = if has_grid { mi_grid_record(xd.mi_pool, *xd.mi) } else { xd.mi_record };
         (*own).index_base = tile.gen_index_ptr;
         let mi = &*own;
+        let mi_row = i32::from(mi.mi_row);
+        let mi_col = i32::from(mi.mi_col);
         // The record of the block at the 4x4 unit `rows` below and `cols` to the right of the block's first
         // one: the block itself, or a unit of the row above it or of the column to its left, which are
         // all this function reads. With the grid, the grid's entry there. Without it, what the sink keeps
@@ -605,7 +607,7 @@ unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBL
             } else if rows < 0 {
                 if cols < 0 { &*xd.mi_above_left } else { &**xd.mi_above.offset(cols as isize) }
             } else if cols < 0 {
-                &**xd.mi_left.add((mi.mi_row + rows) as usize % MI_LEFT_EDGE)
+                &**xd.mi_left.add((mi_row + rows) as usize % MI_LEFT_EDGE)
             } else {
                 debug_assert!(rows == 0 && cols == 0);
                 mi
@@ -623,9 +625,6 @@ unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBL
         // overlapped prediction and reconstruction included.
         td.index_list_room(tile, 2 * (bw * bh) as usize + 64);
         let index_arr = tile.gen_indexes;
-
-        let mi_row = mi.mi_row;
-        let mi_col = mi.mi_col;
 
         // The block has no chroma of its own: the block to its right or below carries it.
         let is_chroma_ref = ((mi_row & 1) == 0 && (bh & 1) == 1) || ((mi_col & 1) == 0 && (bw & 1) == 1);
@@ -659,10 +658,10 @@ unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBL
             }
             let is_local_warp = xd.cur_frame_force_integer_mv == 0
                 && u32::from(mi.motion_mode) == WARPED_CAUSAL as u32
-                && mi.wm_params.invalid == 0;
+                && mi.flags & MB_MODE_INFO::WARP_INVALID == 0;
             let is_luma_warp = (is_local_warp || is_global_warp[0]) && bw_log >= 1 && bh_log >= 1;
             let is_chroma_warp = is_luma_warp && bw_log >= 2 && bh_log >= 2;
-            let comp_type = mi.interinter_comp.type_;
+            let comp_type = i32::from(mi.compound_type);
 
             // Y:
             let block_size_id_y = INTER_BLOCK_SIZE_INDEX_LUT[(bw_log * 6 + bh_log) as usize];
@@ -670,9 +669,9 @@ unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBL
                 let is_warp_compound = is_global_warp[0] || is_global_warp[1];
                 let (list_type, mut section) = if is_warp_compound {
                     (CompoundGlobalWarp, AV1_PERF_INTER_COMP_WARP)
-                } else if comp_type == COMPOUND_WEDGE as u32 {
+                } else if comp_type == COMPOUND_WEDGE {
                     (CompoundMasked, AV1_PERF_INTER_COMP_MASKED)
-                } else if comp_type == COMPOUND_DIFFWTD as u32 {
+                } else if comp_type == COMPOUND_DIFFWTD {
                     (CompoundDiff, AV1_PERF_INTER_COMP_DIFF_Y)
                 } else {
                     (CompoundAvrg, AV1_PERF_INTER_COMP_AVG)
@@ -772,14 +771,14 @@ unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBL
                 } else if is_compound {
                     let is_warp_compound = (is_global_warp[0] || is_global_warp[1]) && bw_log >= 2 && bh_log >= 2;
                     let (list_type, mut section) = if is_warp_compound {
-                        if comp_type == COMPOUND_DIFFWTD as u32 {
+                        if comp_type == COMPOUND_DIFFWTD {
                             (CompoundDiffUvGlobalWarp, AV1_PERF_INTER_COMP_WARP_DIFF_UV)
                         } else {
                             (CompoundGlobalWarp, AV1_PERF_INTER_COMP_WARP)
                         }
-                    } else if comp_type == COMPOUND_WEDGE as u32 {
+                    } else if comp_type == COMPOUND_WEDGE {
                         (CompoundMasked, AV1_PERF_INTER_COMP_MASKED)
-                    } else if comp_type == COMPOUND_DIFFWTD as u32 {
+                    } else if comp_type == COMPOUND_DIFFWTD {
                         (CompoundDiffUv, AV1_PERF_INTER_COMP_DIFF_UV)
                     } else {
                         (CompoundAvrg, AV1_PERF_INTER_COMP_AVG)
@@ -930,8 +929,8 @@ unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBL
             }
         }
 
-        let y_use_palette = mi.palette_mode_info.palette_size[0] > 0;
-        let uv_use_palette = mi.palette_mode_info.palette_size[1] > 0;
+        let y_use_palette = mi.palette_size[0] > 0;
+        let uv_use_palette = mi.palette_size[1] > 0;
         // -parseopt time: the wavefront and the intra lists from here to the reconstruction blocks.
         let intra_begin = if INTRA_STAMPS.with(|stamps| stamps.get().0) { intra_time_stamp() } else { 0 };
         if let Some(edges) = wave.as_mut() {
@@ -1026,7 +1025,7 @@ unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBL
                 let need_right = plane.need(NEED_RIGHT_LUT);
                 let need_bot = plane.need(NEED_BOT_LUT);
                 let need_aboveleft = plane.need(NEED_ABOVE_LEFT_LUT) && !is_intrabc;
-                let use_filter = mi.filter_intra_mode_info.use_filter_intra != 0;
+                let use_filter = mi.flags & MB_MODE_INFO::USE_FILTER_INTRA != 0;
 
                 let type_size = txw + txh;
                 let type_idx_base = if use_filter { IntraBlockOffset } else { IntraBlockOffset - 1 - type_size };

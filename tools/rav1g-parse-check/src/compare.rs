@@ -52,36 +52,12 @@ macro_rules! fields {
 /// they lie in.
 fn record_fields() -> Vec<Field> {
     let mut fields = fields![
-        palette_mode_info.palette_colors,
-        palette_mode_info.palette_size,
-        wm_params.wmmat,
-        wm_params.alpha,
-        wm_params.beta,
-        wm_params.gamma,
-        wm_params.delta,
-        wm_params.wmtype,
-        wm_params.invalid,
-        interinter_comp.type_,
-        interinter_comp.mask_type,
-        interinter_comp.wedge_index,
-        interinter_comp.wedge_sign,
-        filter_intra_mode_info.filter_intra_mode,
-        filter_intra_mode_info.use_filter_intra,
+        wmmat,
+        warp_angles,
         mv,
-        interp_filters,
-        interintra_wedge_index,
-        interintra_wedge_sign,
-        current_qindex,
-        delta_lf_from_base,
-        delta_lf,
         mi_row,
         mi_col,
         index_base,
-        num_proj_ref,
-        cfl_alpha_idx,
-        cfl_alpha_signs,
-        comp_group_idx,
-        compound_idx,
         sb_type,
         partition,
         ref_frame,
@@ -94,13 +70,20 @@ fn record_fields() -> Vec<Field> {
         angle_delta,
         tx_size,
         skip,
-        skip_mode,
+        cdef_strength,
         segment_id,
         inter_tx_size,
-        seg_id_predicted,
-        cdef_strength,
-        ref_mv_idx,
-        reserved,
+        delta_lf,
+        delta_lf_from_base,
+        cfl_alpha_idx,
+        cfl_alpha_signs,
+        interintra_wedge_index,
+        palette_size,
+        filter_intra_mode,
+        flags,
+        compound_type,
+        wedge_index,
+        interp_filters,
     ];
     fields.sort_by_key(|field| field.offset);
     let mut all = Vec::new();
@@ -182,7 +165,7 @@ fn hex(bytes: &[u8]) -> String {
 /// A record in a few words, for a difference.
 fn describe(mi: &MB_MODE_INFO) -> String {
     format!(
-        "block at row {} col {} size {} ref [{}, {}] mode {} skip {} skip_mode {} intrabc {} motion {} segment {} tx {}",
+        "block at row {} col {} size {} ref [{}, {}] mode {} skip {} intrabc {} motion {} segment {} tx {}",
         mi.mi_row,
         mi.mi_col,
         mi.sb_type,
@@ -190,7 +173,6 @@ fn describe(mi: &MB_MODE_INFO) -> String {
         mi.ref_frame[1],
         mi.mode,
         mi.skip,
-        mi.skip_mode,
         mi.use_intrabc,
         mi.motion_mode,
         mi.segment_id,
@@ -228,17 +210,23 @@ fn coverage(report: &mut Report, c: &Arena) {
                 inter && mi.inter_tx_size.iter().any(|tx| *tx != mi.inter_tx_size[0]),
             );
             count("compound", inter && mi.ref_frame[1] > 0);
-            count("compound, wedge or difference mask", inter && mi.ref_frame[1] > 0 && mi.interinter_comp.type_ >= 2);
+            count("compound, wedge or difference mask", inter && mi.ref_frame[1] > 0 && mi.compound_type >= 2);
             count("inter-intra", inter && mi.ref_frame[1] == 0);
             count("overlapped motion", inter && mi.motion_mode == 1);
             count("local warp", inter && mi.motion_mode == 2);
-            count("local warp, model not valid", inter && mi.motion_mode == 2 && mi.wm_params.invalid != 0);
+            count(
+                "local warp, model not valid",
+                inter && mi.motion_mode == 2 && mi.flags & MB_MODE_INFO::WARP_INVALID != 0,
+            );
             count("global motion mode", global);
             count("global motion mode, warped", global && c.gm_warp[mi.ref_frame[0] as usize] != 0);
-            count("crosses the frame edge", mi.mi_col + wide > c.size.mi_cols || mi.mi_row + high > c.size.mi_rows);
+            count(
+                "crosses the frame edge",
+                i32::from(mi.mi_col) + wide > c.size.mi_cols || i32::from(mi.mi_row) + high > c.size.mi_rows,
+            );
             count("4 wide or high (chroma from the neighbours)", wide == 1 || high == 1);
-            count("palette", mi.palette_mode_info.palette_size != [0, 0]);
-            count("filter intra", mi.filter_intra_mode_info.use_filter_intra != 0);
+            count("palette", mi.palette_size != [0, 0]);
+            count("filter intra", mi.flags & MB_MODE_INFO::USE_FILTER_INTRA != 0);
             count("chroma from luma", !inter && mi.uv_mode == UV_CFL_PRED);
             count("segment not 0", mi.segment_id != 0);
             count("loop filter delta", mi.delta_lf_from_base != 0 || mi.delta_lf != [0; 4]);
@@ -293,7 +281,7 @@ pub fn build_grid(arena: &Arena) {
                 let mi = first.add(index);
                 let wide = 1 << crate::host::tables::MI_SIZE_WIDE_LOG2[(*mi).sb_type as usize];
                 let high = 1 << crate::host::tables::MI_SIZE_HIGH_LOG2[(*mi).sb_type as usize];
-                let (row, col) = ((*mi).mi_row, (*mi).mi_col);
+                let (row, col) = (i32::from((*mi).mi_row), i32::from((*mi).mi_col));
                 let entry = crate::sys::mi_grid_entry(arena.mi_pool.ptr(), mi);
                 for y in row..(row + high).min(arena.size.mi_rows) {
                     for x in col..(col + wide).min(arena.size.mi_cols) {

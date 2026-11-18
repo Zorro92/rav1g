@@ -125,12 +125,13 @@ fn main() -> std::io::Result<()> {
     }
     let pairs = (0..16u32).flat_map(|y| (0..16u32).map(move |x| (x << 16) | y));
     for filters in pairs.chain([0xfff0_fff0, 0xffff_ffff, 0x1234_5678, 0x8000_0001]) {
+        let [v, _, h, _] = filters.to_le_bytes();
         for x_filter in [true, false] {
             writeln!(
                 out,
                 "av1_extract_interp_filter(0x{filters:08x}, {}) = {}",
                 u8::from(x_filter),
-                extract_interp_filter(filters, x_filter)
+                extract_interp_filter([v, h], x_filter)
             )
             .expect("writing to a string");
         }

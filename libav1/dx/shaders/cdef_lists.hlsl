@@ -20,6 +20,8 @@
 // grid has entries of four bytes (the Rust host): where the record of the unit's block starts in mi_pool, in
 // bytes, plus cb_mi_addr_base.
 
+#include "mode_info.h"
+
 ByteAddressBuffer mi_pool : register(t0);
 ByteAddressBuffer mi_grid : register(t1);
 RWByteAddressBuffer cdef_index : register(u0);
@@ -33,10 +35,6 @@ cbuffer cb_cdef_lists : register(b0) {
   uint cb_skip_cols;     // the 8x8 blocks of the frame that have a skip flag, by
   uint cb_skip_rows;     // rows: what the host's loop writes, and no entry behind it
 };
-
-// The words of a record that hold the two fields (MB_MODE_INFO of mode_info.h, 224 bytes).
-#define TX_INFO_WORD 200         // byte 1: skip
-#define SEG_CDEF_FLAGS_WORD 220  // byte 1: cdef_strength, signed
 
 // Where the record of the block at a 4x4 unit of the frame starts in mi_pool. Every unit inside the frame
 // has a block when the frame is parsed; an entry of zeros would be a unit without one, and reads the first
@@ -60,8 +58,8 @@ uint skip_at(uint row, uint col) { return (mi_pool.Load(record_at(row, col) + TX
   }
   // The first thread of a group: the index of its 64x64 block, whose top left unit is inside the frame.
   if ((thread.x & 7) == 0 && (thread.y & 7) == 0) {
-    const uint word = mi_pool.Load(record_at(thread.y * 2, thread.x * 2) + SEG_CDEF_FLAGS_WORD);
-    const int strength = ((int)(word << 16)) >> 24;
+    const uint word = mi_pool.Load(record_at(thread.y * 2, thread.x * 2) + TX_INFO_WORD);
+    const int strength = ((int)(word << 8)) >> 24;
     cdef_index.Store(((thread.y >> 3) * cb_index_stride + (thread.x >> 3)) * 4, (uint)strength);
   }
 }

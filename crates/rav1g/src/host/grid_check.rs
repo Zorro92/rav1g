@@ -28,12 +28,12 @@ use super::types::{Av1Core, av1_frame_thread_data};
 use crate::gpu::BufferState;
 use crate::sys::{AV1_COMMON, MB_MODE_INFO, MI_GRID_BASE, MiGridEntry};
 
-// The fields of a record the pass reads, by their place (MI_ROW_BYTE, MI_COL_BYTE, SB_TYPE_WORD of
-// mi_grid_build.hlsl), and the size of a record and of an entry it assumes.
+// The fields of a record the pass reads, by their place (MI_POSITION_WORD and SB_TYPE_WORD in
+// mode_info.h), and the size of a grid entry.
 const _: () = {
-    assert!(std::mem::offset_of!(MB_MODE_INFO, mi_row) == 160);
-    assert!(std::mem::offset_of!(MB_MODE_INFO, mi_col) == 164);
-    assert!(std::mem::offset_of!(MB_MODE_INFO, sb_type) == 188);
+    assert!(std::mem::offset_of!(MB_MODE_INFO, mi_row) == 40);
+    assert!(std::mem::offset_of!(MB_MODE_INFO, mi_col) == 42);
+    assert!(std::mem::offset_of!(MB_MODE_INFO, sb_type) == 48);
     assert!(size_of::<MiGridEntry>() == 4);
 };
 

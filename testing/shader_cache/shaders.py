@@ -18,8 +18,7 @@ at a time. The workflow keeps the directory with actions/cache, keyed by all key
     shaders.py prune   drop the cache entries the given builds did not use
     shaders.py survey  the shader survey and the CDEF and intra listings, from the listings of a build
     shaders.py verify  the bytecode of the headers is in a built program
-    shaders.py same    two builds have the same shaders (the equality with the C++ decoder of branch cpp
-                       holds only as long as they do: docs/rust-port.md, "Equality reference")
+    shaders.py same    two builds have the same shaders, with explicit exceptions for the C++ equality check
 
 The Rust library is built from the headers: RAV1G_SHADER_DIR=<root> (crates/rav1g-sys/build.rs).
 
@@ -821,15 +820,14 @@ def command_verify(args):
 
 
 def command_same(args):
-    """Two builds have the same shaders: every shader of one is in the other, with the same key (the
-    compiler, its arguments and the sources) or the same header."""
+    """Compare the build reports by shader header hash."""
     builds = []
     for path in (args.reference, args.candidate):
         with open(path, encoding='utf-8') as f:
             report = json.load(f)
         builds.append({shader['name']: shader for shader in report['shaders']})
     reference, candidate = builds
-    different = []
+    different, changed = [], []
     # Shaders the candidate may have alone: those of a path the reference does not have, which the runs
     # that are compared do not take.
     alone = [name for name in args.candidate_only.split(',') if name]
@@ -837,24 +835,37 @@ def command_same(args):
         if name in reference:
             different.append('%s: named as a shader of %s alone, but %s has it' % (
                 name, args.candidate_name, args.reference_name))
-    for name in sorted(set(reference) | set(candidate)):
+    expected_changes = set(filter(None, args.candidate_changed.split(',')))
+    for name in sorted(set(reference) | set(candidate) | expected_changes):
         a, b = reference.get(name), candidate.get(name)
+        if name in expected_changes:
+            if a is None or b is None:
+                missing = args.reference_name if a is None else args.candidate_name
+                different.append('%s: named as changed on purpose but missing from %s' % (name, missing))
+            elif a['header_sha256'] == b['header_sha256']:
+                different.append('%s: named as changed on purpose but identical' % name)
+            else:
+                changed.append(name)
+            continue
         if a is None and name in alone:
             continue
         if a is None or b is None:
             different.append('%s: only in %s' % (name, args.candidate_name if a is None else args.reference_name))
-        elif a['key'] != b['key'] and a['header_sha256'] != b['header_sha256']:
-            different.append('%s: another source, compiler or argument (key %s.. in %s, %s.. in %s)' % (
+        elif a['header_sha256'] != b['header_sha256']:
+            different.append('%s: headers differ (key %s.. in %s, %s.. in %s)' % (
                 name, a['key'][:12], args.reference_name, b['key'][:12], args.candidate_name))
+    for name in changed:
+        print('CHANGED ON PURPOSE ' + name)
     for line in different:
         print('DIFFERENT ' + line)
-    summary = ('%d of %d shaders of %s and %s differ' % (len(different), len(set(reference) | set(candidate)),
-                                                       args.reference_name, args.candidate_name)
+    summary = ('%d shader comparison errors for %s and %s' % (len(different), args.reference_name, args.candidate_name)
                if different else
-               'the %d shaders of %s are those of %s%s' % (
-                   len(reference), args.reference_name, args.candidate_name,
+               '%d shaders of %s match %s%s' % (
+                   len(reference) - len(changed), args.reference_name, args.candidate_name,
                    ', which has %d more that the compared runs do not use (%s)' % (
                        len([name for name in alone if name in candidate]), ', '.join(alone)) if alone else ''))
+    if changed:
+        summary += '; %d changed on purpose (%s)' % (len(changed), ', '.join(changed))
     print('shaders.py: ' + summary)
     if os.environ.get('GITHUB_STEP_SUMMARY'):
         with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
@@ -910,6 +921,8 @@ def main():
     same.add_argument('--candidate-name', default='this build')
     same.add_argument('--candidate-only', default='',
                       help='names, with commas between them, of shaders the candidate may have alone')
+    same.add_argument('--candidate-changed', default='',
+                      help='names, with commas between them, of shaders that must be present and differ in both builds')
     same.set_defaults(run=command_same)
 
     args = parser.parse_args()

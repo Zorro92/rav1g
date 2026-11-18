@@ -6,8 +6,8 @@
 // License 1.0 was not distributed with this source code in the PATENTS file, you can obtain it at
 // www.aomedia.org/license/patent.
 
-//! The mode info record of a block (`MB_MODE_INFO` of `libav1/av1/common/blockd.h`, which the shaders
-//! read as `dx/shaders/mode_info.h`) from a block of rav1d's parse pass.
+//! The mode info record of a block (`MB_MODE_INFO`, read by the shaders as `dx/shaders/mode_info.h`)
+//! from a block of rav1d's parse pass.
 //!
 //! The entropy decoder of libaom filled the record while it read the block (`av1/decoder/decodemv.c`,
 //! `decodeframe.c`). The same bitstream gives rav1d the same syntax elements, in its own form
@@ -41,22 +41,16 @@ const NONE_FRAME: i8 = -1;
 /// `PREDICTION_MODE`: the first single inter mode and the first compound one.
 const NEARESTMV: u8 = 13;
 const NEAREST_NEARESTMV: u8 = 17;
-/// The inter modes with a NEARMV, as rav1d numbers them: NEARMV of the single modes, and NEARMV_NEARMV,
-/// NEARMV_NEWMV and NEWMV_NEARMV of the compound ones.
-const NEARMV_OF_SINGLE: u8 = 1;
-const NEAR_COMPOUND: [u8; 3] = [1, 4, 5];
 /// `PARTITION_NONE` and the partition of rav1d that splits a block in four.
 const PARTITION_NONE: u8 = 0;
 const PARTITION_SPLIT: u8 = 3;
 /// `COMPOUND_TYPE`.
-const COMPOUND_AVERAGE: u32 = 0;
-const COMPOUND_DISTWTD: u32 = 1;
-const COMPOUND_WEDGE: u32 = 2;
-const COMPOUND_DIFFWTD: u32 = 3;
-/// `BILINEAR` of `InterpFilter`, for both directions (`av1_broadcast_interp_filter`).
-const INTERP_BILINEAR_BOTH: u32 = 3 | (3 << 16);
-/// `DEFAULT_WMTYPE` of `av1/common/warped_motion.h` (`AFFINE`).
-const WMTYPE_AFFINE: u8 = 3;
+const COMPOUND_AVERAGE: u8 = 0;
+const COMPOUND_DISTWTD: u8 = 1;
+const COMPOUND_WEDGE: u8 = 2;
+const COMPOUND_DIFFWTD: u8 = 3;
+/// `BILINEAR` of `InterpFilter`, for both directions.
+const INTERP_BILINEAR_BOTH: [u8; 2] = [3, 3];
 
 /// What the record of a block needs of its frame.
 pub struct RecordFrame<'a> {
@@ -166,11 +160,11 @@ fn inter_tx(
         let bw_log2 = i32::from(MI_SIZE_WIDE_LOG2[b]);
         let width = 1 << bw_log2;
         let height = 1 << i32::from(MI_SIZE_HIGH_LOG2[b]);
-        let mi_row = mi.mi_row;
-        let mi_col = mi.mi_col;
+        let mi_row = i32::from(mi.mi_row);
+        let mi_col = i32::from(mi.mi_col);
         let mut walker = VarTx {
-            inter_tx_size: mi.inter_tx_size,
-            tx_size: mi.tx_size,
+            inter_tx_size: [0; 16],
+            tx_size: 0,
             split: [u16::from(inter.tx_split0), inter.tx_split1],
             tx_w_log2,
             tx_h_log2,
@@ -203,15 +197,15 @@ fn inter_tx(
 
 /// The fields of an intra block that are its own.
 #[inline(always)]
-fn intra(mi: &mut MB_MODE_INFO, block: &ParseBlock<'_>, intra: &Av1BlockIntra, lossless: bool) {
+fn intra(mi: &mut MB_MODE_INFO, intra: &Av1BlockIntra, lossless: bool) {
     const FILTER_PRED: u8 = 13;
     const CFL_PRED: u8 = 13;
     mi.ref_frame = [INTRA_FRAME, NONE_FRAME];
     if intra.y_mode == FILTER_PRED {
         // A filter intra block is a DC block with the filter named next to it.
         mi.mode = 0;
-        mi.filter_intra_mode_info.use_filter_intra = 1;
-        mi.filter_intra_mode_info.filter_intra_mode = intra.y_angle as _;
+        mi.flags = MB_MODE_INFO::USE_FILTER_INTRA;
+        mi.filter_intra_mode = intra.y_angle as _;
     } else {
         mi.mode = intra.y_mode;
         mi.angle_delta[0] = intra.y_angle;
@@ -224,28 +218,14 @@ fn intra(mi: &mut MB_MODE_INFO, block: &ParseBlock<'_>, intra: &Av1BlockIntra, l
             a if a < 0 => 1,
             _ => 2,
         };
-        let magnitude = |alpha: i8| if alpha == 0 { 0 } else { i32::from(alpha.unsigned_abs()) - 1 };
+        let magnitude = |alpha: i8| if alpha == 0 { 0 } else { alpha.unsigned_abs() - 1 };
         let [u, v] = intra.cfl_alpha;
         mi.cfl_alpha_signs = sign(u) * 3 + sign(v) - 1;
         mi.cfl_alpha_idx = (magnitude(u) << 4) | magnitude(v);
     } else {
         mi.angle_delta[1] = intra.uv_angle;
     }
-    mi.palette_mode_info.palette_size = [i16::from(intra.pal_sz[0]), i16::from(intra.pal_sz[1])];
-    if intra.pal_sz[0] != 0 || intra.pal_sz[1] != 0 {
-        // The colours in an array of their own, which the record then gets whole (see `VarTx`).
-        let mut colors = mi.palette_mode_info.palette_colors;
-        if intra.pal_sz[0] != 0 {
-            let n = intra.pal_sz[0] as usize;
-            colors[..n].copy_from_slice(&block.pal[0][..n]);
-        }
-        if intra.pal_sz[1] != 0 {
-            let n = intra.pal_sz[1] as usize;
-            colors[8..8 + n].copy_from_slice(&block.pal[1][..n]);
-            colors[16..16 + n].copy_from_slice(&block.pal[2][..n]);
-        }
-        mi.palette_mode_info.palette_colors = colors;
-    }
+    mi.palette_size = intra.pal_sz;
     mi.tx_size = if lossless { TX_4X4 } else { intra.tx as u8 };
 }
 
@@ -263,12 +243,6 @@ fn inter(mi: &mut MB_MODE_INFO, block: &ParseBlock<'_>, inter: &Av1BlockInter) {
         NONE_FRAME
     };
     mi.mode = inter.inter_mode + if is_comp { NEAREST_NEARESTMV } else { NEARESTMV };
-    // libaom counts the index of the reference vector of a mode with a NEARMV from the second entry of
-    // the list (`read_drl_idx` of `av1/decoder/decodemv.c`, `have_nearmv_in_inter_mode`); rav1d counts
-    // from the first for every mode.
-    let has_near =
-        if is_comp { NEAR_COMPOUND.contains(&inter.inter_mode) } else { inter.inter_mode == NEARMV_OF_SINGLE };
-    mi.ref_mv_idx = inter.drl_idx as u8 - u8::from(has_near);
     mi.motion_mode = inter.motion_mode as _;
     // The vectors. A block with a local warp keeps its vector in the other form of rav1d's union.
     let one_d = &inter.nd.one_d;
@@ -285,56 +259,38 @@ fn inter(mi: &mut MB_MODE_INFO, block: &ParseBlock<'_>, inter: &Av1BlockInter) {
         }
     }
     let (h, v) = inter.filter2d.hv();
-    mi.interp_filters = ((h as u32) << 16) | v as u32;
+    mi.interp_filters = [v as u8, h as u8];
 
-    mi.compound_idx = 1;
-    match inter.comp_type {
-        None | Some(CompInterType::Avg) => mi.interinter_comp.type_ = COMPOUND_AVERAGE as _,
-        Some(CompInterType::WeightedAvg) => {
-            mi.interinter_comp.type_ = COMPOUND_DISTWTD as _;
-            mi.compound_idx = 0;
-        }
-        Some(CompInterType::Wedge) => {
-            mi.interinter_comp.type_ = COMPOUND_WEDGE as _;
-            mi.comp_group_idx = 1;
-            mi.interinter_comp.wedge_index = one_d.wedge_idx.into();
-            mi.interinter_comp.wedge_sign = one_d.mask_sign.into();
-        }
-        Some(CompInterType::Seg) => {
-            mi.interinter_comp.type_ = COMPOUND_DIFFWTD as _;
-            mi.comp_group_idx = 1;
-            mi.interinter_comp.mask_type = one_d.mask_sign as _;
-        }
-    }
+    let (compound_type, wedge_index, mut flags) = match inter.comp_type {
+        None | Some(CompInterType::Avg) => (COMPOUND_AVERAGE, 0, 0),
+        Some(CompInterType::WeightedAvg) => (COMPOUND_DISTWTD, 0, 0),
+        Some(CompInterType::Wedge) => (COMPOUND_WEDGE, one_d.wedge_idx, one_d.mask_sign * MB_MODE_INFO::WEDGE_SIGN),
+        Some(CompInterType::Seg) => (COMPOUND_DIFFWTD, 0, one_d.mask_sign * MB_MODE_INFO::MASK_TYPE),
+    };
+    mi.compound_type = compound_type;
+    mi.wedge_index = wedge_index;
     if let Some(interintra_type) = inter.interintra_type {
         mi.interintra_mode = one_d.interintra_mode.get() as _;
         if interintra_type == InterIntraType::Wedge {
             mi.use_wedge_interintra = 1;
-            mi.interintra_wedge_index = one_d.wedge_idx.into();
+            mi.interintra_wedge_index = one_d.wedge_idx;
         }
     }
     if inter.motion_mode == MotionMode::Warp {
         // The local warp of the block (`find_projection` of libaom): the model the task derived from
         // the motion vectors around the block. Where no model can be fitted, or its shear is out of
-        // range, libaom marks the record (`wm_params.invalid`) and the block is predicted from its
+        // range, libaom marks the model invalid and the block is predicted from its
         // motion vector; rav1d leaves the type of the task's model at identity for that. The numbers of
         // such a model mean nothing and are not written.
         let warp = block.warpmv;
-        mi.wm_params.wmtype = WMTYPE_AFFINE as _;
         if warp.r#type == Rav1dWarpedMotionType::Affine {
-            let mut wmmat = mi.wm_params.wmmat;
-            for (dst, src) in wmmat.iter_mut().zip(warp.matrix) {
-                *dst = src;
-            }
-            mi.wm_params.wmmat = wmmat;
-            mi.wm_params.alpha = warp.alpha();
-            mi.wm_params.beta = warp.beta();
-            mi.wm_params.gamma = warp.gamma();
-            mi.wm_params.delta = warp.delta();
+            mi.wmmat = warp.matrix;
+            mi.warp_angles = [warp.alpha(), warp.beta(), warp.gamma(), warp.delta()];
         } else {
-            mi.wm_params.invalid = 1;
+            flags |= MB_MODE_INFO::WARP_INVALID;
         }
     }
+    mi.flags = flags;
 }
 
 /// Fills the record of a block. `mi` is a cleared record; `lossless` says whether the block's segment
@@ -348,22 +304,20 @@ pub fn fill(mi: &mut MB_MODE_INFO, frame: &RecordFrame<'_>, block: &ParseBlock<'
     // (`decode_partition`); rav1d passes the split of the 8x8 on. A larger block is never the product of
     // a split itself (the split recurses), so this is the one case.
     mi.partition = if b.bp as u8 == PARTITION_SPLIT { PARTITION_NONE } else { b.bp as u8 };
-    mi.mi_row = block.y4;
-    mi.mi_col = block.x4;
+    // AV1 frame dimensions are at most 65536 pixels, or 16384 units of 4x4.
+    mi.mi_row = block.y4 as u16;
+    mi.mi_col = block.x4 as u16;
     mi.segment_id = b.seg_id.get() as i8;
-    mi.seg_id_predicted = block.seg_pred.into();
     mi.skip = b.skip as i8;
-    mi.skip_mode = b.skip_mode as i8;
-    mi.current_qindex = block.qidx.into();
     if frame.hdr.delta.lf.present != 0 {
         if frame.hdr.delta.lf.multi != 0 {
-            mi.delta_lf = block.delta_lf.map(i32::from);
+            mi.delta_lf = block.delta_lf;
         } else {
-            mi.delta_lf_from_base = block.delta_lf[0].into();
+            mi.delta_lf_from_base = block.delta_lf[0];
         }
     }
     match &b.ii {
-        Av1BlockIntraInter::Intra(intra_block) => intra(mi, block, intra_block, lossless),
+        Av1BlockIntraInter::Intra(intra_block) => intra(mi, intra_block, lossless),
         Av1BlockIntraInter::Inter(inter_block) if block.intrabc => {
             // Intra block copy: an intra block of DC modes with a vector, read with bilinear filters.
             mi.ref_frame = [INTRA_FRAME, NONE_FRAME];

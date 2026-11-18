@@ -41,12 +41,12 @@
 // buffer=<name> and has the fields of the whole buffer; the others start with a word (list, run, plane) and
 // describe a part. All numbers are decimal. The buffers (the stage name is the buffer name):
 //
-//   mi_grid    entry=8|4 mi_stride mi_cols mi_rows pool_base record=224
+//   mi_grid    entry=8|4 mi_stride mi_cols mi_rows pool_base record=224|96
 //              One entry of 8 bytes per 4x4 unit, rows of mi_stride entries: the address of the unit's mode
 //              info record, 0 for none (the C++ decoder), or one of 4 bytes: the low word of such an entry
 //              (the Rust decoder). Its low 32 bits minus pool_base, divided by record, is the index of
 //              the record in the mode info pool. (The addresses differ from run to run; the records do not.)
-//   mi_pool    record=224, and one line "run first=<pool index> count=<records>" per tile
+//   mi_pool    record=224|96, and one line "run first=<pool index> count=<records>" per tile
 //              The records of the runs, one run behind the other. A record is MB_MODE_INFO of
 //              libav1/dx/shaders/mode_info.h.
 //   pred_blocks       record=16 count     the prediction block records of gen_pred_blocks.hlsl

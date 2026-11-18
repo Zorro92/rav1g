@@ -46,7 +46,7 @@ tile ends.
 | `frame buffers` | The buffers of the pool that are out of it (a reference count above 0: named by a reference slot, the frame of a slot in flight, a reference such a frame still reads) at the setup of every frame, that frame's included: peak, the most frequent count, mean, and how many frames saw each count; and how often a frame found the pool empty and waited for a buffer. In a decoder whose frames take their buffer when they are recorded ([candidate 5](#the-frame-buffer-bound-at-the-recording-candidate-5)) the count is taken there: `out of the pool when a frame takes its buffer at its recording`. |
 | `references` | How many different frames the 8 reference slots name at the setup of a frame, the same way. |
 | `palette` | Palette buffers created; frames that allow screen content tools (each binds a palette buffer of the size of a frame buffer); frames that have palette blocks; the bytes of the palette blocks of a frame (what a palette buffer really holds), peak and mean, and at once. |
-| `cpu bytes written` | What the CPU writes for a frame into memory the GPU reads, mean / peak, and by part: mode info records (224 bytes each, cleared and filled), the mode info grid (4 bytes a 4x4 unit; 8 when the numbers below were measured), coefficients (an upper bound: 4 bytes for every value up to a block's last one; only those that are not zero are written), transform block records (16 bytes), the block index list, the CDEF lists (record thread), the constants of the stages, palette blocks. Not in it: the counters of the block lists (`gen_block_map`), loop restoration units, film grain offsets, and the clears, which `-gputime` reports. |
+| `cpu bytes written` | What the CPU writes for a frame into memory the GPU reads, mean / peak, and by part: mode info records (96 bytes each, cleared and filled; 224 when the numbers below were measured), the mode info grid (4 bytes a 4x4 unit; 8 when the numbers below were measured), coefficients (an upper bound: 4 bytes for every value up to a block's last one; only those that are not zero are written), transform block records (16 bytes), the block index list, the CDEF lists (record thread), the constants of the stages, palette blocks. Not in it: the counters of the block lists (`gen_block_map`), loop restoration units, film grain offsets, and the clears, which `-gputime` reports. |
 
 Not measured, because the stream does not change them: `idct_residuals` (24.4 MiB) and
 `loopfilter_blocks` follow the size of the frame; the grids and maps of a slot are addressed by position.
@@ -175,7 +175,7 @@ slots 74.1). By MiB, with the risk; the numbers above are local and from seven s
 | 1 | Frame buffers of 10 bits as three samples in 32 bits | 104.7 MiB (13 x 8.1), and a third of every palette buffer | Not a matter of the stream. `fbt10x3` is not this: it is a format of the **output image** (`tryHDR10x3`: the output copy and the film grain shader pack three samples into a word of the application's image). No stage reads or writes a packed frame buffer. | High. Every shader that touches a frame buffer (intra, inter, reconstruction, loop filter, CDEF, loop restoration, superres, borders, film grain, output) gets another addressing, and three samples share a word, so two threads of a dispatch that write neighbours write the same word: the writes have to be laid out by word. All of it in `cs_5_0`. Byte-identical is possible, the work is the largest here. |
 | 2 | **Done at half, the default above 1920x1088**, [below](#the-wait-of-the-second-frame-in-parse-in-a-pool-at-half-candidate-2). Mode info pool at half, or a quarter, of the worst case | 55.8 or 83.7 MiB | At once at most 22.3 % (`d2`), 9 to 11 % elsewhere; one frame at most 12.9 %. The wait for the GPU exists and is tested (`poolwait`); a pool at half exists as `-lowmemparts 2`. | Low at half, medium at a quarter. A frame that alone does not fit is a decode error (`MEMORY FAILED`): at half an average block below 8x4 over a whole frame, at a quarter below 8x8; the low quantizer vectors reach 58 % at 352x288. A fallback would be a second buffer created on that frame, under the budget guard. More waits cost speed, not frames. |
 | 3 | **Done**, [below](#stage-buffers-sized-for-the-frames-candidate-3) (the index list without a pool). Stage buffers at a quarter, grown on the frame that needs more: `prediction_blocks`, `prediction_blocks_warp`, `idct_blocks`, and the block index list as a fourth pool | 33.7 MiB (0.75 x 44.9) and 13.5 MiB (0.75 x 18.0) | A frame's peak is 15.8 %, 3.6 %, 26.1 % and 11.5 % (`d2`), a few percent elsewhere. | Medium. The three GPU buffers are used by one command list at a time and their counts are known before the frame is recorded, so a frame that needs more can get a larger buffer first (the guard may refuse: then a decode error). The index list is written at the parse: a pool with a piece for a whole block ([step 5, "Left"](phase2-rav1d.md#step-5-the-pools)). |
-| 4 | **Measured, not made**, [below](#the-mode-info-record-field-by-field-candidate-4). Smaller mode info record (224 bytes) | 31.9 MiB at 96 bytes, 27.9 at 112 (of the 55.8 the pool has since 2) | 76 of the 224 bytes have no reader, and the rest fits 96. 2.5 to 2.8 MiB of a busy 4K frame's CPU bytes are these records. | Medium. No stream can fail for it, but the layout is shared by the sink, the block lists and the five shaders that read a record, three of which the C++ decoder of the equality reference has too. |
+| 4 | **Done**, [below](#the-mode-info-record-field-by-field-candidate-4). Mode info record of 96 bytes | 31.9 MiB (of the 55.8 the pool has since 2) | The sink clears and fills 96 bytes a block where it used 224. | The shared layout changed for the sink, the block lists and the five shaders that read a record. The stage dumps hold the lists they produce equal. |
 | 5 | **Done as part 32 of the low memory parts, in the default above 1920x1088**, [below](#the-frame-buffer-bound-at-the-recording-candidate-5). The frame buffer bound at the recording | 24.2 MiB (11 to 10 in the pool) | The reference slots name at most 5 frames in these streams; the pool is emptied by the frames in flight. | Medium: the references of a frame in parse are resolved at the recording, through every error path of step 4. The floor stays 10 (8 references, a failed frame, the next frame): the measured 5 do not allow less, a stream may use 8. |
 | 6 | **Done as the part that exists (4, four fifths), in the default above 1920x1088**, [below](#the-coefficient-pool-at-four-fifths-candidate-6). Coefficient pool at three quarters | 15.0 MiB at three quarters, 12.0 at four fifths (the pool has 63 chunks for the ends of pieces that stay) | 62.4 % at once in `d2`, 10 to 26 % elsewhere. | Low, and little: `d2` would be near its waits, and half is not possible for it. A frame that needs more than the pool is a decode error. |
 | 7 | Palette blocks from a pool instead of a buffer of the size of a frame a slot | 0 MiB for film (no clip allows screen content tools); 72.5 MiB less on the first frame of a stream that does | 36 KB a frame at most where a buffer is 3.2 MiB. | Medium: the shaders address the palette buffer like the frame buffer. It removes a growth of 72.5 MiB that the budget guard can only refuse. |
@@ -185,13 +185,24 @@ For the CPU (second priority, DRAM bandwidth in the slow state; the first of the
 (an index, which is what the shaders use) halves the largest part, 2.0 of 8.6 MiB a frame on `j4k40`, and
 takes 2.0 MiB off every slot; the host's readers of the grid (block lists, CDEF lists) then add a base.
 The CDEF skip list (0.5 MiB a frame, record thread, read back through the grid) could be a GPU pass.
-A smaller mode info record (4) is the other large part.
+The smaller mode info record (4) reduces the other large part.
 
-## The mode info record, field by field (candidate 4)
+## Reductions made
 
-2026-11-18. Measured before anything is changed: what each of the 224 bytes of a record
-(`MB_MODE_INFO` of `crates/rav1g-sys/src/records.rs`, `libav1/dx/shaders/mode_info.h`) is for. The
-record is written by the sink (`crates/rav1g-parse/src/record.rs`, a cleared record filled for every
+### The mode info record, field by field (candidate 4)
+
+The mode info record is 96 bytes. The default 3840x2160 10-bit decoder (two frames in parse, three
+slots) takes **469.6 MiB** of device buffers, down from **501.5 MiB**. The mode info pool has 1020
+chunks of 256 records, so the pool shrinks from 55.8 to 23.9 MiB, saving 31.9 MiB. The device-buffer
+total is computed by subtracting those 33,423,360 bytes from the previous total. The pool at sizes up
+to 1920x1088 shrinks by the same four sevenths.
+
+The sink clears and fills 96 bytes a block where it used 224. For a busy 4K frame that is about
+1.1 to 1.2 MiB of records, down from 2.5 to 2.8 MiB.
+
+The table shows what each of the 224 bytes of a record used to hold
+and where the fields are used (`MB_MODE_INFO` of `crates/rav1g-sys/src/records.rs` and
+`libav1/dx/shaders/mode_info.h`). The record is written by the sink (`crates/rav1g-parse/src/record.rs`, a cleared record filled for every
 block; `cdef_strength` at the end of the superblock) and by the host (`index_base`, in
 `av1_mi_push_block` of `crates/rav1g/src/host/blocks.rs`). It is read by five shaders
 (`gen_pred_blocks`, `gen_lf_blocks_vert`, `gen_lf_blocks_hor` as a `StructuredBuffer<MB_MODE_INFO>`;
@@ -199,7 +210,7 @@ block; `cdef_strength` at the end of the superblock) and by the host (`index_bas
 `postfilter.rs` for the CDEF lists without the GPU pass, `grid_check.rs`) and by the sink itself (the
 block's place and size, for the grid and the host's call).
 
-| Field | Offset, bytes | Written | Read | In a smaller record |
+| Field | Old offset, bytes | Written | Read | In the 96-byte record |
 | --- | --- | --- | --- | --- |
 | `palette_colors[24]` | 0, 48 | sink, palette blocks | nobody: the colours reach the GPU with the block's index map (the sink's palette call, `write_palette`) | gone |
 | `palette_size[2]` | 48, 4 | sink, intra blocks | `gen_pred_blocks`, `blocks.rs` (zero or not) | 2 (0 to 8) |
@@ -267,38 +278,27 @@ The smallest layout without a second buffer, **96 bytes**, in words as the shade
 | 80 | 4 | `delta_lf[4]` (signed bytes) |
 | 84 | 4 | `delta_lf_from_base` (signed), `cfl_alpha_idx`, `cfl_alpha_signs`, `interintra_wedge_index` |
 | 88 | 4 | `palette_size[2]` (a byte each), `filter_intra_mode`, flags: bit 0 `use_filter_intra`, bit 1 the warp model is not valid, bit 2 `mask_type`, bit 3 `wedge_sign` |
-| 92 | 4 | the compound type, `wedge_index`, the two interpolation filters |
+| 92 | 4 | the compound type, `wedge_index`, the vertical and horizontal interpolation filters |
 
-The four words at 48 to 63 are the ones the shaders have today, so their masks and shifts stay; the
-record no longer contains `WarpedMotionParams` (44 bytes, which the constants of the global warp keep),
-`gen_pred_blocks` puts the six numbers and the angles of a local warp into one. Without a padding byte
-and without a byte nobody writes, the rule of `mode_info.h` about masking stays but has no case left.
-A layout that keeps `WarpedMotionParams` whole and gives each of the four flags a byte has 108 bytes,
-112 as words: 4 MiB more at 4K for less change in `gen_pred_blocks`. Below 96 only with the model of
-the warp in a list of its own (64 bytes then): another buffer and another index, not part of this.
+The four words at 48 to 63 use the old byte positions, with `cdef_strength` in the free byte of
+`tx_info`. `gen_pred_blocks` uses the six coefficients and four signed shear parameters of the
+local warp. The global warp constants still use their 44-byte `WarpedMotionParams` layout. The GPU
+grid builder reads position as one aligned word, and the CDEF list shader reads both fields from
+`tx_info`.
 
-What the sizes give: a mode info pool at half is 1020 chunks of 256 records, 55.8 MiB at 224 bytes,
-27.9 at 112, **23.9 at 96**: 31.9 MiB less, the device buffers of the default 4K 10-bit decoder 469.6
-instead of 501.5 MiB; the whole pool of a decoder up to 1920x1088 shrinks by the same four sevenths.
-The sink clears and fills 96 bytes a block instead of 224 (1.1 to 1.2 instead of 2.5 to 2.8 MiB of a
-busy 4K frame). The sink's calls today, `rav1g-parse-check -time -threads 1`, locally: three runs of three each, `j4k40` 15.59 to 16.02 ms a frame with the sink against 13.56 to 14.87 without (the sink 1.1 to 2.0 ms), `d2_300` 15.20 to 17.77 against 14.06 to 15.86 (1.1 to 3.6 ms): the difference of two runs, and here noisier than what a smaller record can give, so the console decides.
+Before the change, three sets of three local runs of `rav1g-parse-check -time -threads 1` on busy 4K
+streams put the sink at 1.1 to 2.0 ms and 1.1 to 3.6 ms per frame. Those numbers are differences of
+runs with and without the sink.
 
-**The equality reference.** The stage dumps are not in the way: `stage_dump.py` reads a record by the
-fields of a table and the size in the dump's text (`record=`), so a second table for the size 96 and a
-comparison by the names both layouts have keeps `mi_grid` and `mi_pool` readable against the C++
-decoder, where `--two-parsers` already lists them without letting them decide. The shaders are:
-`gen_pred_blocks`, `gen_lf_blocks_vert` and `gen_lf_blocks_hor` are then no longer the shaders of
-branch `cpp`, and `rust-equal` checks first that every shader the reference has is the same here
-(`shaders.py same`; `--candidate-only` is for shaders the reference does not have at all, and names
-one it has as an error). By the rule of [rust-port.md](rust-port.md#equality-reference) the change
-goes to `cpp` as well or the comparison ends. A third way keeps most of it: let the check name the
-three shaders as changed on purpose, and hold what is behind them. Their output is dumped and compared
-byte by byte (`pred_blocks`, `pred_blocks_warp`, `lf_blocks`, and `cdef_info` behind `cdef_lists`), as
-are all later stages and the md5 of every frame of every stream; two hosts with two record layouts
-that write the same block lists is the same statement as before about everything but the three
-shaders' reading of the record, and that reading is what the equal lists show. Not decided here.
-
-## Reductions made
+**The equality reference.** The `rust-equal` job uses `shaders.py same --candidate-changed` for
+`gen_pred_blocks`, `gen_lf_blocks_vert` and `gen_lf_blocks_hor`. The check requires these shaders to
+differ from the C++ reference and the other shared shaders to match. `--candidate-only` covers
+shaders present only on the Rust branch, including `cdef_lists` and `mi_grid_build`. The stage dump
+and per-frame md5 checks still hold the prediction, warp, loop filter and CDEF lists and the later
+stages against the C++ decoder. `stage_dump.py` reads the 224- and 96-byte layouts by the dump's
+`record=` and compares the shared fields of `mi_grid` and `mi_pool` through the grid. With
+`--two-parsers` those differences are listed without deciding equality. Digests of mode info hold
+CRCs of the original records, so a digest can compare units only within one layout.
 
 ### Stage buffers sized for the frames (candidate 3)
 

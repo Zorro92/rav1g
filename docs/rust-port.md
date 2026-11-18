@@ -137,15 +137,13 @@ have to write the same bytes at every stage, not only the same frames.
 - **The pin is bumped on purpose**, in the workflow and in this section, when a change that both decoders
   have (a shader, the C of the parser) has landed on both branches. A change on `main` alone that leaves
   the output as it is needs no bump.
-- **The comparison holds only while both branches have the same shaders.** `rust-equal` checks that
-  first (`testing/shader_cache/shaders.py same`, on the reports of the two shader builds: the same
-  compiler, arguments and sources, shader by shader) and fails there when they differ. Then either the
-  change goes to `cpp` as well and the pin moves, or the branches diverge and the comparison **ends**:
-  the jobs `cpp-reference` and `rust-equal` are removed, and the references of dav1d and AOM, the host
-  checks of the shaders and the console md5 set carry on alone. That end is planned: the shaders of
-  `main` switch from FXC to DXC ([Requirements](#requirements)), and phase 2 replaces the C parser
-  ([phase2-rav1d.md](phase2-rav1d.md)), where the C parser of this branch, not the C++ decoder, is the
-  oracle.
+- **The shader check** (`testing/shader_cache/shaders.py same`) compares the two build reports.
+  `--candidate-changed` requires different bytecode for the three shared shaders that read Rust's
+  [96-byte mode info records](memory.md#the-mode-info-record-field-by-field-candidate-4):
+  `gen_pred_blocks`, `gen_lf_blocks_vert` and `gen_lf_blocks_hor`. The stage dumps hold their output
+  lists equal. The check holds every other shared shader byte-identical and fails if a named
+  exception is identical or missing from either build. `--candidate-only` lists shaders the
+  reference lacks.
 
 ## Branches
 

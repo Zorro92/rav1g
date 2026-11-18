@@ -21,6 +21,8 @@
 // for each run the index of its first record in the pool and the records of the runs in front of it, so
 // thread i finds its run by a search over those sums.
 
+#include "mode_info.h"
+
 ByteAddressBuffer mi_pool : register(t0);
 ByteAddressBuffer runs : register(t1);
 RWByteAddressBuffer grid : register(u0);
@@ -32,13 +34,8 @@ cbuffer cb_mi_grid_build : register(b0) {
   uint cb_mi_cols;
   uint cb_mi_rows;
   uint cb_mi_addr_base;  // what an entry has above the place of its record (MI_GRID_BASE)
-  uint cb_record_bytes;  // the size of a record (MB_MODE_INFO of mode_info.h, 224 bytes)
+  uint cb_record_bytes;  // the size of a record (MB_MODE_INFO of mode_info.h)
 };
-
-// The fields of a record the pass reads (offsets of MB_MODE_INFO, held by the host).
-#define MI_ROW_BYTE 160
-#define MI_COL_BYTE 164
-#define SB_TYPE_WORD 188  // byte 0: sb_type, a BLOCK_SIZE
 
 // log2 of the width and the height in 4x4 units, by BLOCK_SIZE (mi_size_wide_log2, mi_size_high_log2).
 static const uint kWideLog2[22] = {0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 0, 2, 1, 3, 2, 4};
@@ -60,8 +57,9 @@ static const uint kHighLog2[22] = {0, 1, 0, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4, 5, 4, 
   }
   const uint index = runs.Load(lo * 8) + (i - runs.Load(lo * 8 + 4));
   const uint base = index * cb_record_bytes;
-  const uint row = mi_pool.Load(base + MI_ROW_BYTE);
-  const uint col = mi_pool.Load(base + MI_COL_BYTE);
+  const uint position = mi_pool.Load(base + MI_POSITION_WORD);
+  const uint row = position & 0xffff;
+  const uint col = position >> 16;
   const uint bsize = min(mi_pool.Load(base + SB_TYPE_WORD) & 255, 21);
   const uint x_mis = min(1u << kWideLog2[bsize], cb_mi_cols - col);
   const uint y_mis = min(1u << kHighLog2[bsize], cb_mi_rows - row);
