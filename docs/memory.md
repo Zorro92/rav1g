@@ -201,6 +201,24 @@ four sevenths.
 The sink clears and fills 96 bytes a block where it used 224. For a busy 4K frame that is about
 1.1 to 1.2 MiB of records, down from 2.5 to 2.8 MiB.
 
+On the console (package 0.2.214 against 0.2.209, both measured after a restart of the console on
+2026-11-18, three runs of 300 frames each, the mean): the md5 set of 15 streams is unchanged, and every
+variant is faster, by less than one run differs from the next but in the same direction in all eight:
+
+| Stream, options | fps 224 → 96 bytes | Entropy/tile thread sum, ms | Sink calls, ms |
+| --- | --- | --- | --- |
+| `j4k40`, default | 49.2 → 50.2 | 27.7 → 26.5 | |
+| `j4k40`, `gpugrid` | 50.4 → 50.6 | 25.3 → 24.8 | |
+| `j4k40`, `time` | 48.9 → 49.5 | 28.2 → 27.1 | 2.91 → 2.30 |
+| `j4k40`, `time,gpugrid` | 50.0 → 50.3 | 26.0 → 25.3 | 1.34 → 1.21 |
+| `d2_300`, default | 52.7 → 53.9 | 25.4 → 24.4 | |
+| `d2_300`, `gpugrid` | 54.1 → 55.6 | 22.9 → 21.7 | |
+| `d2_300`, `time` | 52.0 → 53.4 | 25.9 → 24.7 | 2.73 → 2.04 |
+| `d2_300`, `time,gpugrid` | 53.6 → 55.0 | 23.1 → 22.1 | 1.23 → 1.00 |
+
+The GPU's busy time is the same (18.4 and 9.8 ms a frame): the shaders that read the record do not
+notice the narrower fields. The sink is 0.6 to 0.7 ms a frame cheaper, the parse threads about 1 ms.
+
 The table shows what each of the 224 bytes of a record used to hold
 and where the fields are used (`MB_MODE_INFO` of `crates/rav1g-sys/src/records.rs` and
 `libav1/dx/shaders/mode_info.h`). The record is written by the sink (`crates/rav1g-parse/src/record.rs`, a cleared record filled for every
