@@ -165,6 +165,7 @@ pub struct Choices {
     pub lr_legacy: bool,
     pub fg_legacy: bool,
     pub copy_legacy: bool,
+    pub idct_legacy: bool,
     pub inter_legacy: bool,
     pub cdef_v2: bool,
     pub cdef_legacy: bool,
@@ -500,6 +501,7 @@ impl Library {
         switches::set_lr_legacy(choices.lr_legacy);
         switches::set_fg_legacy(choices.fg_legacy);
         switches::set_copy_legacy(choices.copy_legacy);
+        switches::set_idct_legacy(choices.idct_legacy);
         switches::set_inter_legacy(choices.inter_legacy);
         switches::set_cdef_legacy(choices.cdef_legacy);
         switches::set_cdef_lists_legacy(choices.cdef_lists_legacy);

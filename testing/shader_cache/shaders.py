@@ -57,6 +57,7 @@ REQUIRED_BYTECODE = [
     'loop_restoration', LR_LEGACY, 'loop_restoration_wiener',
     'film_grain_filter_sp_tex', 'film_grain_filter_sp_tex_v2',
     'copy_plane_sp_tex', 'copy_plane_sp_tex_v2',
+    'idct4x4', 'idct4x4_v2', 'idct4x8', 'idct4x8_v2', 'idct8x4', 'idct8x4_v2', 'idct8x8', 'idct8x8_v2',
     'inter_main', 'inter_main_hbd', 'inter_main_v2', 'inter_main_v2_hbd',
     'inter_compound', 'inter_compound_hbd', 'inter_compound_v2', 'inter_compound_v2_hbd',
 ]

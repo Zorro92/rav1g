@@ -96,6 +96,7 @@ pub struct Task {
     pub lrlegacy: bool,
     pub fglegacy: bool,
     pub copylegacy: bool,
+    pub idctlegacy: bool,
     pub interlegacy: bool,
     /// What a frame does about the clears of its slot's grids: nothing to clear without a flag;
     /// -gpuclear, -cpuclear (and -asyncclear, its older name), -syncclear.
@@ -171,6 +172,7 @@ impl Default for Task {
             lrlegacy: false,
             fglegacy: false,
             copylegacy: false,
+            idctlegacy: false,
             interlegacy: false,
             clears: Clears::NotNeeded,
             lflegacy: false,
@@ -273,6 +275,7 @@ pub fn usage() {
     say!("  -lrlegacy           use the original loop_restoration shader");
     say!("  -fglegacy           use the original direct NV12/P010 film grain shader");
     say!("  -copylegacy         use the original direct NV12/P010 copy shader");
+    say!("  -idctlegacy         use the original small inverse transform shaders");
     say!("  -interlegacy        use the original unscaled single-reference and average/distance inter shaders");
     say!("                        as in the test player (docs/test-player.md); -cdefv2 and -fitsize (the defaults)");
     say!("                        are accepted");
@@ -458,6 +461,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-lrlegacy" => task.lrlegacy = true,
             "-fglegacy" => task.fglegacy = true,
             "-copylegacy" => task.copylegacy = true,
+            "-idctlegacy" => task.idctlegacy = true,
             "-interlegacy" => task.interlegacy = true,
             "-gpuclear" => task.clears = Clears::Gpu,
             "-cpuclear" | "-asyncclear" => task.clears = Clears::CompletionThread,
@@ -676,6 +680,9 @@ mod tests {
         assert!(!task.copylegacy);
         parse_args(&strings(&["-copylegacy"]), &mut task, None).unwrap();
         assert!(task.copylegacy);
+        assert!(!task.idctlegacy);
+        parse_args(&strings(&["-idctlegacy"]), &mut task, None).unwrap();
+        assert!(task.idctlegacy);
         assert!(!task.interlegacy);
         parse_args(&strings(&["-interlegacy"]), &mut task, None).unwrap();
         assert!(task.interlegacy);

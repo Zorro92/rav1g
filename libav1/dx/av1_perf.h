@@ -300,6 +300,11 @@ void av1_set_fg_legacy(int enable);
  * Zero selects the tiled shader (default). Change it while no frame is in flight. */
 void av1_set_copy_legacy(int enable);
 
+/* Process-wide. Non-zero selects the original lossy 4x4, 4x8, 8x4 and 8x8
+ * transform shaders. Zero selects the per-thread shaders (default).
+ * Change it while no frame is in flight. */
+void av1_set_idct_legacy(int enable);
+
 /* Process-wide. Non-zero selects the original single-reference and
  * average/distance-weighted compound shaders for unscaled inter on the size
  * lists. Zero selects the optimized shaders (default). Change it only while

@@ -115,6 +115,10 @@ pub struct bitdepth_dependent_shaders {
 #[repr(C)]
 pub struct compute_shader_lib {
     pub shader_idct: [ComputeShader; 20],
+    pub shader_idct4x4_v2: ComputeShader,
+    pub shader_idct4x8_v2: ComputeShader,
+    pub shader_idct8x4_v2: ComputeShader,
+    pub shader_idct8x8_v2: ComputeShader,
     pub shader_idct_sort: ComputeShader,
     pub shader_loop_rest: ComputeShader,
     pub shader_loop_rest_legacy: ComputeShader,

@@ -99,6 +99,11 @@ pub fn set_copy_legacy(enable: bool) {
     crate::host::av1_set_copy_legacy(c_int::from(enable))
 }
 
+/// Use the original shaders for lossy 4x4, 4x8, 8x4 and 8x8 transforms.
+pub fn set_idct_legacy(enable: bool) {
+    crate::host::av1_set_idct_legacy(c_int::from(enable))
+}
+
 /// Use the original single-reference and average/distance compound kernels for the unscaled inter size lists.
 pub fn set_inter_legacy(enable: bool) {
     crate::host::av1_set_inter_legacy(c_int::from(enable))

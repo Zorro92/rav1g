@@ -887,6 +887,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         lr_legacy: task.lrlegacy,
         fg_legacy: task.fglegacy,
         copy_legacy: task.copylegacy,
+        idct_legacy: task.idctlegacy,
         inter_legacy: task.interlegacy,
         cdef_v2: !task.cdefv1,
         cdef_legacy: task.cdeflegacy,
@@ -912,6 +913,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
             }
         );
     }
+    say!("Small inverse transform shaders: {}", if task.idctlegacy { "legacy (-idctlegacy)" } else { "default" });
     say!(
         "PARSER {}: the parse pass of rav1d reads the bitstream, switches {} (-parseopt)",
         task.name,

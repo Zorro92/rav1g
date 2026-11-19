@@ -15,10 +15,14 @@
 typedef unsigned char BYTE; /* the type of the bytecode arrays */
 
 #include "dx/shaders/h/idct4x4.h"
+#include "dx/shaders/h/idct4x4_v2.h"
 #include "dx/shaders/h/idct4x8.h"
+#include "dx/shaders/h/idct4x8_v2.h"
 #include "dx/shaders/h/idct4x16.h"
 #include "dx/shaders/h/idct8x4.h"
+#include "dx/shaders/h/idct8x4_v2.h"
 #include "dx/shaders/h/idct8x8.h"
+#include "dx/shaders/h/idct8x8_v2.h"
 #include "dx/shaders/h/idct8x16.h"
 #include "dx/shaders/h/idct8x32.h"
 #include "dx/shaders/h/idct16x4.h"
@@ -142,10 +146,14 @@ typedef struct {
 #define RAV1G_SHADER(name) { #name, name, (unsigned int)sizeof(name) }
 static const rav1g_shader_bytecode rav1g_shaders[] = {
   RAV1G_SHADER(idct4x4),
+  RAV1G_SHADER(idct4x4_v2),
   RAV1G_SHADER(idct4x8),
+  RAV1G_SHADER(idct4x8_v2),
   RAV1G_SHADER(idct4x16),
   RAV1G_SHADER(idct8x4),
+  RAV1G_SHADER(idct8x4_v2),
   RAV1G_SHADER(idct8x8),
+  RAV1G_SHADER(idct8x8_v2),
   RAV1G_SHADER(idct8x16),
   RAV1G_SHADER(idct8x32),
   RAV1G_SHADER(idct16x4),

@@ -156,8 +156,8 @@ const LAYOUTS: usize =
 const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
-    // 20 transforms, 34 bit-depth-independent shaders, and 34 per bit depth.
-    assert!(SHADERS == 20 + 34 + 2 * 34);
+    // 24 transform pipelines, 34 other bit-depth-independent shaders, and 34 per bit depth.
+    assert!(SHADERS == 24 + 34 + 2 * 34);
     assert!(LAYOUTS == 24);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
@@ -363,6 +363,10 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("idct64x32", &layouts.idct, idct(TX_64X32)),
             ("idct64x64", &layouts.idct, idct(TX_64X64)),
             ("idct_lossless", &layouts.idct, idct(TX_SIZES_ALL)),
+            ("idct4x4_v2", &layouts.idct, &raw mut (*lib).shader_idct4x4_v2),
+            ("idct4x8_v2", &layouts.idct, &raw mut (*lib).shader_idct4x8_v2),
+            ("idct8x4_v2", &layouts.idct, &raw mut (*lib).shader_idct8x4_v2),
+            ("idct8x8_v2", &layouts.idct, &raw mut (*lib).shader_idct8x8_v2),
             ("idct_sort_blocks", &layouts.common111, &raw mut (*lib).shader_idct_sort),
             ("fill_buffer", &layouts.common0102, &raw mut (*lib).shader_fill_buffer),
             ("loop_restoration", &layouts.loop_rest, &raw mut (*lib).shader_loop_rest),
@@ -904,7 +908,7 @@ mod tests {
             .filter_map(|line| line.trim().trim_start_matches('(').strip_prefix('"'))
             .map(|rest| &rest[..rest.find('"').unwrap()])
             .collect();
-        assert_eq!(names.len(), 118);
+        assert_eq!(names.len(), 122);
         let mut unique = names.clone();
         unique.sort_unstable();
         unique.dedup();

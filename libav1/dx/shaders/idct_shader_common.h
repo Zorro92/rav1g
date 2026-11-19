@@ -1698,9 +1698,13 @@ step0[63] = input[in_offset + (in_stride) * 63]; \
     output[out_offset + (out_stride)*63] = round_shift(clamp_value(step1[0] - step1[63], range), output_shift);  \
   }
 
+#ifndef IDCT_IDENTITY_LOOP
+#define IDCT_IDENTITY_LOOP
+#endif
+
 #define IIDENTITY_N(N, mult, shift, input, in_offset, in_stride, output, out_offset, out_stride, range, output_shift) \
   {                                                                                                                   \
-    for (int i = 0; i < N; ++i) {                                                                                     \
+    IDCT_IDENTITY_LOOP for (int i = 0; i < N; ++i) {                                                                   \
       output[out_offset + i * (out_stride)] =                                                                         \
           clamp_value(round_shift(round_shift(mult * clamp_value(input[in_offset + i * (in_stride)], range), shift),  \
                                   output_shift),                                                                      \
