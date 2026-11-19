@@ -24,6 +24,15 @@ static void dispatch(const Case &c, std::vector<uint8_t> &result, uint64_t order
   for (int i = 0; i < SGRPROJ_PARAMS; ++i) {
     const auto &param = sgr_params[i];
     data.Sgr_Params[i] = int4(param.radius[0], param.radius[1], param.strength[0], param.strength[1]);
+#ifdef LR_OPTIMIZED
+    for (int j = 0; j < 4; ++j) {
+      uint word = 0;
+      for (int byte = 0; byte < 4; ++byte) {
+        word |= static_cast<uint>(x_by_xplus1[i * 16 + j * 4 + byte] - 1) << (8 * byte);
+      }
+      data.Sgr_A2Packed[i][j] = word;
+    }
+#endif
   }
 
   src = {result.data(), result.size()};

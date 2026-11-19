@@ -380,6 +380,7 @@ struct PlaneRestorationData {
 #[repr(C)]
 struct RestorationData {
     sgr_params: [[c_int; 4]; 16],
+    sgr_a2_packed: [[u32; 4]; 16],
 }
 
 /// `av1_looprestoration` of the C++: loop restoration into the frame's buffer, when the frame has it.
@@ -409,7 +410,16 @@ unsafe fn looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON, lr_ctxt: *mut 
         let src_buffer = &*if td.do_cdef == td.do_superres { td.frame_buffer.cast_const() } else { back_buffer1 };
         let pp_buffer = &*if td.do_superres != 0 { back_buffer1 } else { td.frame_buffer.cast_const() };
 
-        let sgr_constants = alloc_constants::<RestorationData>(&mut td.command_buffer);
+        let sgr_constants = if legacy {
+            let constants = alloc_constants::<[[c_int; 4]; 16]>(&mut td.command_buffer);
+            *constants.data = super::libaom::SGR_PARAMS;
+            constants.location
+        } else {
+            let constants = alloc_constants::<RestorationData>(&mut td.command_buffer);
+            *constants.data =
+                RestorationData { sgr_params: super::libaom::SGR_PARAMS, sgr_a2_packed: super::libaom::SGR_A2_PACKED };
+            constants.location
+        };
         let plane_constants = alloc_constants::<[PlaneRestorationData; 3]>(&mut td.command_buffer);
         let pl_data = plane_constants.data.cast::<PlaneRestorationData>();
 
@@ -500,9 +510,6 @@ unsafe fn looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON, lr_ctxt: *mut 
             }
         }
 
-        // The parameter sets of the self-guided filter: two radii and two strengths each.
-        (*sgr_constants.data).sgr_params = super::libaom::SGR_PARAMS;
-
         let commands = commands(dec);
         let frame_buffers = buffer((*dec).frame_buffer_pool);
         let lib = (*dec).shader_lib;
@@ -517,7 +524,7 @@ unsafe fn looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON, lr_ctxt: *mut 
         commands.bind_read(1, buffer(td.loop_rest_types).location());
         commands.bind_read(2, buffer(td.loop_rest_wiener).location());
         commands.bind_write(3, frame_buffers.location());
-        commands.bind_constants(4, sgr_constants.location);
+        commands.bind_constants(4, sgr_constants);
         commands.bind_constants(5, plane_constants.location);
 
         for p in 0..3 {

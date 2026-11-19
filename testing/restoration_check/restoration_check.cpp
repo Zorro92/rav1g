@@ -50,9 +50,11 @@ namespace legacy {
 }
 
 namespace optimized {
+#define LR_OPTIMIZED
 #include "optimized.gen.h"
 #include "optimized.entry.h"
 #include "shader_adapter.h"
+#undef LR_OPTIMIZED
 }
 
 static Case make_case(Size size, int ss, int depth, int unit_size, int kind, int param, int pattern,

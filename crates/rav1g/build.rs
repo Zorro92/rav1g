@@ -323,6 +323,20 @@ pub fn main() {
     let text = read_c(&common.join(file));
     let tokens = initialiser(&text, file, "sgr_params", None);
     write_table(&mut out, "SGR_PARAMS", "i32", &numbers(&tokens, file, "sgr_params", 16 * 4), &[4]);
+    // a2 is in 1..=256. Pack four (a2 - 1) values per word for the restoration shader.
+    let tokens = initialiser(&text, file, "x_by_xplus1", None);
+    let a2 = numbers(&tokens, file, "x_by_xplus1", 256);
+    let (a2_words, _) = a2.as_chunks::<4>();
+    let a2_packed: Vec<_> = a2_words
+        .iter()
+        .map(|chunk| {
+            chunk.iter().enumerate().fold(0, |word, (byte, &a2)| {
+                assert!((1..=256).contains(&a2), "SGR a2 out of range");
+                word | ((a2 - 1) << (8 * byte))
+            })
+        })
+        .collect();
+    write_table(&mut out, "SGR_A2_PACKED", "u32", &a2_packed, &[4]);
 
     // reconintra.c: the taps of the five filter intra modes.
     let file = "reconintra.c";

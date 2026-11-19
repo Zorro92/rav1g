@@ -40,6 +40,7 @@ RWByteAddressBuffer dst : register(u0);      // UAV
 cbuffer PlaneRestorationData : register(b0) {
   struct {
     int4 Sgr_Params[16];
+    uint4 Sgr_A2Packed[16];
   } data;
 };
 
@@ -86,12 +87,21 @@ groupshared int intermediate[WG_HEIGHT + 6][WG_WIDTH];
 groupshared int flt[2][WG_HEIGHT][WG_WIDTH];
 groupshared int A[WG_HEIGHT + 2][WG_WIDTH + 2];
 groupshared int B[WG_HEIGHT + 2][WG_WIDTH + 2];
+groupshared uint sgr_a2[64];
+
+// round(2^SGRPROJ_RECIP_BITS / n), where n is the area of the box.
+static const uint SGR_RECIP_5X5 = ((1 << SGRPROJ_RECIP_BITS) + 12) / 25;
+static const uint SGR_RECIP_3X3 = ((1 << SGRPROJ_RECIP_BITS) + 4) / 9;
+
+uint lookup_sgr_a2(uint z) {
+  const uint word = sgr_a2[z >> 2];
+  return ((word >> ((z & 3) * 8)) & 255) + 1;
+}
 
 #define get_loaded_source_sample(x, y) input[y + 3][x + 4]
 // Self guided filter, pass 0, first half: the box sums A and B of the group (with a border of one), spread
 // over its threads.
-void box_sums0(int w, int h, int r, int eps, int lx, int ly, int bit_depth) {
-  uint n = (2 * r + 1) * (2 * r + 1);
+void box_sums0(int w, int h, int eps, int lx, int ly, int bit_depth) {
   int id = ly * WG_WIDTH + lx;
   for (int idx = id; idx < (h + 2)*(w + 2); idx += WG_HEIGHT * WG_WIDTH) {
     // Unsigned: idx counts up from the thread's place in the group and w + 2 is the width of the group
@@ -110,18 +120,10 @@ void box_sums0(int w, int h, int r, int eps, int lx, int ly, int bit_depth) {
     }
     a = Round2(a, 2 * (bit_depth - 8));
     uint d = Round2(b, bit_depth - 8);
-    uint p = max(0, int(a * n - d * d));
+    uint p = max(0, int(a * 25 - d * d));
     uint z = Round2(p * eps, SGRPROJ_MTABLE_BITS);  // p*s in documentation
-    z = min(z, 255);
-    uint a2 = 0;
-    if (z >= 255)
-      a2 = 256;
-    else if (z == 0)
-      a2 = 1;
-    else
-      a2 = ((z << SGRPROJ_SGR_BITS) + (z >> 1)) / (z + 1);
-    uint oneOverN = ((1 << SGRPROJ_RECIP_BITS) + (n >> 1)) / n;
-    uint b2 = ((1 << SGRPROJ_SGR_BITS) - a2) * b * oneOverN;
+    uint a2 = lookup_sgr_a2(min(z, 255u));
+    uint b2 = ((1 << SGRPROJ_SGR_BITS) - a2) * b * SGR_RECIP_5X5;
     A[1 + i][1 + j] = a2;
     B[1 + i][1 + j] = Round2(b2, SGRPROJ_RECIP_BITS);
   }
@@ -159,8 +161,7 @@ int box_filter0(int lx, int ly) {
 
 // Self guided filter, pass 1, first half: the box sums A and B of the group (with a border of one), spread
 // over its threads.
-void box_sums1(int w, int h, int r, int eps, int lx, int ly, int bit_depth) {
-  uint n = (2 * r + 1) * (2 * r + 1);
+void box_sums1(int w, int h, int eps, int lx, int ly, int bit_depth) {
   int id = ly * WG_WIDTH + lx;
   for (int idx = id; idx < (h + 2)*(w + 2); idx += WG_HEIGHT * WG_WIDTH) {
     int i = (int)((uint)idx / (uint)(w + 2)) - 1;  // unsigned, as in box_sums0
@@ -176,18 +177,10 @@ void box_sums1(int w, int h, int r, int eps, int lx, int ly, int bit_depth) {
     }
     a = Round2(a, 2 * (bit_depth - 8));
     uint d = Round2(b, bit_depth - 8);
-    uint p = max(0, int(a * n - d * d));
+    uint p = max(0, int(a * 9 - d * d));
     uint z = Round2(p * eps, SGRPROJ_MTABLE_BITS);  // p*s in documentation
-    z = min(z, 255);
-    uint a2 = 0;
-    if (z >= 255)
-      a2 = 256;
-    else if (z == 0)
-      a2 = 1;
-    else
-      a2 = ((z << SGRPROJ_SGR_BITS) + (z >> 1)) / (z + 1);
-    uint oneOverN = ((1 << SGRPROJ_RECIP_BITS) + (n >> 1)) / n;
-    uint b2 = ((1 << SGRPROJ_SGR_BITS) - a2) * b * oneOverN;
+    uint a2 = lookup_sgr_a2(min(z, 255u));
+    uint b2 = ((1 << SGRPROJ_SGR_BITS) - a2) * b * SGR_RECIP_3X3;
     A[1 + i][1 + j] = a2;
     B[1 + i][1 + j] = Round2(b2, SGRPROJ_RECIP_BITS);
   }
@@ -307,6 +300,15 @@ int box_filter1(int lx, int ly) {
       }
     }
 
+  // The first group sync also publishes the a2 table. Lookups in the box passes use group memory.
+  if (rType.x == RESTORE_SGRPROJ && ly == 0) {
+    const uint4 packed = data.Sgr_A2Packed[lx];
+    sgr_a2[4 * lx] = packed.x;
+    sgr_a2[4 * lx + 1] = packed.y;
+    sgr_a2[4 * lx + 2] = packed.z;
+    sgr_a2[4 * lx + 3] = packed.w;
+  }
+
   GroupMemoryBarrierWithGroupSync();
 
   if (rType.x == RESTORE_WIENER) {
@@ -376,7 +378,7 @@ int box_filter1(int lx, int ly) {
     // The two passes use the same memory for their box sums: a group sync before the sums are read, and
     // one before the next pass writes its own.
     if (r0) {
-        box_sums0(WG_WIDTH, WG_HEIGHT, r0, eps0, lx, ly, bit_depth);
+        box_sums0(WG_WIDTH, WG_HEIGHT, eps0, lx, ly, bit_depth);
         GroupMemoryBarrierWithGroupSync();
         v += w0 * box_filter0(lx, ly);
         GroupMemoryBarrierWithGroupSync();
@@ -384,7 +386,7 @@ int box_filter1(int lx, int ly) {
         v += w0 * u;
     }
     if (r1) {
-        box_sums1(WG_WIDTH, WG_HEIGHT, r1, eps1, lx, ly, bit_depth);
+        box_sums1(WG_WIDTH, WG_HEIGHT, eps1, lx, ly, bit_depth);
         GroupMemoryBarrierWithGroupSync();
         v += w2 * box_filter1(lx, ly);
     } else {
