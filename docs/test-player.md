@@ -3403,7 +3403,7 @@ DXIL as the default package. [DXC experiment](gpu-av1-decoder.md#dxc-experiment-
 | Set | What it is |
 | --- | --- |
 | `dxc` | DXC, `-T cs_6_0`, its default optimisation (`-Od` for `intra_main` and `intra_main_hbd`, as FXC has `/Od` for them): what every shader is without the flag |
-| `od` | DXC with `-Od` for every shader (DXIL as well, with next to nothing folded, merged or reordered by DXC) |
+| `od` | DXC with `-Od` where supported. For `intra_filter_hbd` it uses the optimized legacy kernel. |
 | `fxc` | FXC's `cs_5_0` bytecode from the same HLSL sources |
 
 The experiment also requires SM 6.0. It can create DXBC and DXIL pipeline states side by side.
@@ -3429,6 +3429,13 @@ does with `-sm6test`: it may stand on a line of its own or on the line of a stre
 of the file counts. One launch, one pick: a bisection is one launch per pick. In `rav1g-dec` it is a
 program flag (the command line, or `--tool-args` of `testing/conformance/run.py`).
 
+The default high-bit-depth filter intra kernel preloads the block edges and filter taps.
+Each lane predicts two adjacent samples of a 4x2 unit and writes one word with its residual.
+Two banks of group memory carry the uncorrected edges, with one group sync between diagonals.
+For an A/B in the shader-pick package, use `-shaderpick od=intra_filter_hbd` for the original
+kernel and `-shaderpick dxc=intra_filter_hbd` for the default kernel, both at the same DXC
+optimization level. The FXC set also uses the original kernel.
+
 ```text
 -shaderpick fxc=loopfilter_vert_hbd
 -i <stream> -t 6 -frate -1 -queue_size 4 -nopresent -md5_frame_check
@@ -3441,7 +3448,7 @@ shaders of every set and the names of all but the largest set:
 
 ```text
 SHADERSET dxc: DXC 1.9.2602.17 cs_6_0: dxc -nologo -T cs_6_0 -E main -HV 2018 -WX -Wno-ambig-lit-shift; -Od for intra_main, intra_main_hbd
-SHADERSET od: DXC 1.9.2602.17 cs_6_0: dxc -nologo -T cs_6_0 -E main -HV 2018 -WX -Wno-ambig-lit-shift -Od for every shader but intra_v2, intra_v2_hbd (64-bit values at -Od: the bytecode of the set dxc)
+SHADERSET od: DXC 1.9.2602.17 cs_6_0: dxc -nologo -T cs_6_0 -E main -HV 2018 -WX -Wno-ambig-lit-shift -Od; intra_filter_hbd uses the optimized legacy kernel; default DXIL for intra_v2, intra_v2_hbd (64-bit values at -Od)
 SHADERSET fxc: FXC cs_5_0: fxc /nologo /T cs_5_0 /E main /Vn <name>; /Od for intra_main, intra_main_hbd
 SHADERPICK fxc=loopfilter_vert_hbd,od=cdef_filter_v2: dxc 100 (all others); od 1 (cdef_filter_v2); fxc 1 (loopfilter_vert_hbd)
 ```

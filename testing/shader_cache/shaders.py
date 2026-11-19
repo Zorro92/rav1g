@@ -139,6 +139,8 @@ def fxc_arguments(name, od):
     args = ['/nologo', '/T', 'cs_5_0', '/E', 'main', '/Vn', name]
     if od:
         args.append('/Od')
+    if name == 'intra_filter_hbd':
+        args += ['/D', 'INTRA_FILTER_LEGACY']
     return args
 
 
@@ -175,14 +177,18 @@ def dxc_version(dxc):
     return text or 'version not reported', short
 
 
-def dxc_arguments(od, variant):
+def dxc_arguments(od, variant, name=None):
     """The arguments that decide DXC's output; the output files and the source path come on top. No
     -Vn: DXC writes the bytecode (-Fo), and write_header the array with the name of the shader."""
     args = ['-nologo', '-T', DXC_PROFILE, '-E', 'main'] + DXC_ARGUMENTS
-    if od:
+    legacy_filter = od and name == 'intra_filter_hbd'
+    if od and not legacy_filter:
         args.append('-Od')
     for define in VARIANTS[variant]:
         args += ['-D', define]
+    # Keep the original kernel at the same optimization level for the shader-pick A/B.
+    if legacy_filter:
+        args += ['-D', 'INTRA_FILTER_LEGACY']
     return args
 
 
@@ -191,7 +197,7 @@ def shader_key(name, od, variant, identity, shaders_dir=SHADERS):
         material = {'format': FORMAT, 'fxc': identity, 'arguments': fxc_arguments(name, od),
                     'files': source_files(name, shaders_dir)}
     else:
-        material = {'format': FORMAT, 'dxc': identity, 'arguments': dxc_arguments(od, variant),
+        material = {'format': FORMAT, 'dxc': identity, 'arguments': dxc_arguments(od, variant, name),
                     'name': name, 'files': source_files(name, shaders_dir)}
     return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
 
@@ -271,7 +277,7 @@ def compile_shader(compiler, cache, name, od, variant, key, shaders_dir, allow_w
     dxc = variant != 'fxc'
     blob_path = os.path.join(work, name + '.dxil')
     if dxc:
-        command = [compiler] + dxc_arguments(od, variant) + ['-Fc', listing, '-Fo', blob_path, source]
+        command = [compiler] + dxc_arguments(od, variant, name) + ['-Fc', listing, '-Fo', blob_path, source]
     else:
         command = [compiler] + fxc_arguments(name, od) + ['/Fc', listing, '/Fh', header, source]
     start = time.monotonic()
@@ -290,7 +296,7 @@ def compile_shader(compiler, cache, name, od, variant, key, shaders_dir, allow_w
         else:
             write_header(header, name, blob, [
                 'Written by testing/shader_cache/shaders.py from the bytecode of',
-                'dxc ' + ' '.join(dxc_arguments(od, variant)) + ' ' + name + '.hlsl',
+                'dxc ' + ' '.join(dxc_arguments(od, variant, name)) + ' ' + name + '.hlsl',
                 'validation hash ' + blob[4:20].hex()])
     ok = done.returncode == 0 and os.path.isfile(header) and os.path.isfile(listing)
     if not ok:
@@ -416,13 +422,14 @@ def build_pick_sets(args, shaders, dxc_keys, dxc_id, fxc_id, jobs, shader_set, r
                 header = entry_files(args.cache, key, name)[1]
             target = os.path.join(headers, name + '.h')
             copy_renamed_header(header, target, name, suffix)
-            entries.append({'name': name, 'od': od and not is_wide, 'key': keys[name], 'bytecode_key': key,
+            unoptimized_entry = od and not (set_name == 'od' and name == 'intra_filter_hbd')
+            entries.append({'name': name, 'od': unoptimized_entry and not is_wide, 'key': keys[name], 'bytecode_key': key,
                             'compiled': name in results, 'seconds': meta['seconds'],
                             'header_sha256': sha256_file(target)})
         if set_name == 'od':
-            lines[set_name] = 'od: %s: dxc %s for every shader%s' % (
+            lines[set_name] = 'od: %s: dxc %s; intra_filter_hbd uses the optimized legacy kernel%s' % (
                 shader_set, ' '.join(dxc_arguments(True, args.variant)),
-                ' but %s (64-bit values at -Od: the bytecode of the set dxc)' % ', '.join(wide) if wide else '')
+                '; default DXIL for %s (64-bit values at -Od)' % ', '.join(wide) if wide else '')
         else:
             lines[set_name] = 'fxc: FXC cs_5_0: fxc %s; /Od for %s' % (
                 ' '.join(fxc_arguments('<name>', False)), unoptimized)

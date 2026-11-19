@@ -784,7 +784,7 @@ static RunResult run_original(const Geometry &g, const Frame &f, std::vector<uin
     if (counts[9]) {
       const uint32_t filter_srt[2] = { counts[9] << 3, offset };
       filter_api->set_srt(filter_srt);
-      for (uint32_t group = 0; group < counts[9]; ++group) run_group(filter_api, group, 64, &garbage);
+      for (uint32_t group = 0; group < counts[9]; ++group) run_group(filter_api, group, filter_api->threads, &garbage);
       if (cov) {
         cov->v1_dispatches++;
         cov->v1_groups += counts[9];

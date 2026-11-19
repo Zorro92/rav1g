@@ -79,6 +79,9 @@ static void scramble(uint64_t *state) {
 #elif SHADER_KIND == 0
   garbage(above.bytes(), above.byte_size(), state);
   garbage(left.bytes(), left.byte_size(), state);
+#elif SHADER_KIND == 1 && defined(SHADER_HBD)
+  garbage(unit_edges.bytes(), unit_edges.byte_size(), state);
+  garbage(left_edges.bytes(), left_edges.byte_size(), state);
 #elif SHADER_KIND == 1
   garbage(mem.bytes(), mem.byte_size(), state);
   garbage(loc_above.bytes(), loc_above.byte_size(), state);
@@ -96,6 +99,9 @@ static void scramble(uint64_t *state) {
 static void run(uint32_t group, uint32_t thread) {
 #if SHADER_KIND == 0
   shader_main(uint3(group * 256 + thread, 0, 0)); /* numthreads(256, 1, 1), SV_DispatchThreadID */
+#elif SHADER_KIND == 1 && defined(SHADER_HBD)
+  /* numthreads(4, 8, 1): SV_GroupThreadID, SV_GroupID */
+  shader_main(uint3(thread & 3, thread >> 2, 0), uint3(group, 0, 0));
 #elif SHADER_KIND == 1
   /* numthreads(8, 8, 1): SV_DispatchThreadID, SV_GroupID */
   shader_main(uint3(group * 8 + (thread & 7), thread >> 3, 0), uint3(group, 0, 0));
@@ -108,6 +114,8 @@ static void run(uint32_t group, uint32_t thread) {
 
 #if SHADER_KIND == 0
 #define SHADER_THREADS 256
+#elif SHADER_KIND == 1 && defined(SHADER_HBD)
+#define SHADER_THREADS 32
 #elif SHADER_KIND == 1
 #define SHADER_THREADS 64
 #else
