@@ -13,7 +13,7 @@ build = "build.rs"
 # The experiment build of the C++ host for shaders whose group syncs are syncs of all memory
 # (RAV1G_UAVSYNC; docs/test-player.md, "Experiments"). RAV1G_SHADER_DIR must then be the uavsync variant.
 uavsync = []
-# Embed the alternate DXC -Od and FXC bytecodes for debugging with -shaderpick.
+# Embed the alternate DXC -Od bytecode for debugging with -shaderpick.
 # RAV1G_SHADER_DIR must be the shader-pick variant.
 shader-pick = []
 # The C is compiled with WINAPI_FAMILY=WINAPI_FAMILY_APP, as libav1.vcxproj compiles it for the UWP test

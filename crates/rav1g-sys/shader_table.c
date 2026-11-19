@@ -8,11 +8,11 @@
  * www.aomedia.org/license/patent.
  */
 
-/* The bytecode of the shaders, from the headers of the FXC build (RAV1G_SHADER_DIR), as a table by the name
+/* The bytecode of the shaders, from the DXC headers (RAV1G_SHADER_DIR), as a table by the name
  * of the header: the Rust shader library (crates/rav1g/src/host/compute.rs) makes its pipelines from it.
  * The table has the shaders the decoder makes pipelines of, in the order the library creates them. */
 
-typedef unsigned char BYTE; /* the type FXC gives its arrays */
+typedef unsigned char BYTE; /* the type of the bytecode arrays */
 
 #include "dx/shaders/h/idct4x4.h"
 #include "dx/shaders/h/idct4x8.h"
@@ -235,11 +235,8 @@ const rav1g_shader_bytecode *rav1g_shader_table(unsigned int *count) {
 }
 
 #ifdef RAV1G_SHADER_SETS
-/* The shader-pick experiment (docs/test-player.md, "Shader pick"): two more bytecodes of every
- * shader of the table, for the library to choose from per shader when it creates its pipeline states.
- * rav1g_shader_sets.inc is written by build.rs from the table above: the headers of dx/shaders/h_od (DXC
- * with -Od, the arrays <name>_od) and of dx/shaders/h_fxc (FXC's cs_5_0 bytecode, <name>_fxc) of the build
- * of the variant shader-pick, the tables rav1g_shaders_od and rav1g_shaders_fxc in the order of rav1g_shaders,
- * and rav1g_shader_table_set (set 0: the table above, 1: od, 2: fxc). */
+/* The shader-pick experiment (docs/test-player.md, "Shader pick") adds the DXC -Od set.
+ * build.rs generates rav1g_shader_sets.inc with the headers from dx/shaders/h_od, the table
+ * rav1g_shaders_od in the order of rav1g_shaders, and rav1g_shader_table_set (0: dxc, 1: od). */
 #include "rav1g_shader_sets.inc"
 #endif

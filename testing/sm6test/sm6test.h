@@ -1,9 +1,8 @@
 /*
  * Shader Model 6 test (docs/test-player.md, "Shader Model 6 test"), for the test player and warp_decoder.
  *
- * The decoder's shaders are FXC shaders of Shader Model 5.0. Whether they could become DXC shaders of
- * Shader Model 6 depends on what the device of the console takes: DXIL at all, the wave intrinsics, native
- * 16-bit types, a wave size the shader asks for. Two things answer that:
+ * The decoder's shaders use Shader Model 6.0. This test also probes optional capabilities of the
+ * device, including wave intrinsics, native 16-bit types and shader-specified wave sizes.
  *
  *   Sm6LogCaps   what the device reports about itself (lines "CAPS ..."), at every launch
  *   Sm6RunTests  the test shaders of testing/sm6test/shaders, compiled with DXC, each run once on known

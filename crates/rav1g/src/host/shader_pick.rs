@@ -7,18 +7,18 @@
 // www.aomedia.org/license/patent.
 
 //! The shader-pick experiment (the feature `shader-pick`; docs/test-player.md, "Shader pick"): the
-//! library of that feature has three bytecodes of every shader, and a text says which one the pipeline
+//! library of that feature has two bytecodes of every shader, and a text says which one the pipeline
 //! state of a shader is made of when a device is created:
 //!
 //! ```text
-//! fxc=<list>,od=<list>,dxc=<list>
+//! od=<list>,dxc=<list>
 //! ```
 //!
 //! `dxc` is the default build's DXC bytecode (every shader, without a pick), `od` what
-//! DXC compiled with `-Od`, and `fxc` the `cs_5_0` bytecode of FXC. A list is
+//! DXC compiled with `-Od` where supported. A list is
 //! names of shaders separated by commas; `all` is every shader, and a name may have `*` for any
 //! characters (`loopfilter_*`, `*_hbd`). The parts apply from left to right, so a later one overrides an
-//! earlier one: `fxc=all,dxc=loopfilter_vert_hbd` is FXC's bytecode for everything but one shader.
+//! earlier one: `od=all,dxc=loopfilter_vert_hbd` uses `od` for everything but one shader.
 //!
 //! A library without the feature has one bytecode per shader and takes the empty pick only.
 
@@ -29,10 +29,9 @@ use std::sync::RwLock;
 pub(crate) enum Set {
     Dxc = 0,
     Od = 1,
-    Fxc = 2,
 }
 
-const SETS: [(Set, &str); 3] = [(Set::Dxc, "dxc"), (Set::Od, "od"), (Set::Fxc, "fxc")];
+const SETS: [(Set, &str); 2] = [(Set::Dxc, "dxc"), (Set::Od, "od")];
 
 /// The name of a set in a pick and in the log.
 pub(crate) fn label(set: Set) -> &'static str {
@@ -70,18 +69,21 @@ pub(crate) fn resolve(text: &str, names: &[&str]) -> Result<Vec<Set>, String> {
         let pattern = match item.split_once('=') {
             Some((set, pattern)) => {
                 let set = set.trim();
+                if set == "fxc" {
+                    return Err("shader pick: the 'fxc' set has been removed. Use dxc or od.".to_string());
+                }
                 current = Some(
                     SETS.iter()
                         .find(|(_, name)| *name == set)
                         .map(|(set, _)| *set)
-                        .ok_or_else(|| format!("shader pick: '{set}' is not a set: fxc, od or dxc"))?,
+                        .ok_or_else(|| format!("shader pick: unknown set '{set}'. Use dxc or od."))?,
                 );
                 pattern.trim()
             }
             None => item,
         };
         let Some(set) = current else {
-            return Err(format!("shader pick: '{item}' is in no set: fxc=<list>,od=<list>,dxc=<list>"));
+            return Err(format!("shader pick: '{item}' is in no set. Expected od=<list>,dxc=<list>."));
         };
         if pattern.is_empty() {
             return Err("shader pick: a set without a shader".to_string());
@@ -118,7 +120,9 @@ pub(crate) fn describe(text: &str, names: &[&str], sets: &[Set]) -> String {
             let list: Vec<&str> = names.iter().zip(sets).filter(|(_, s)| **s == set).map(|(name, _)| *name).collect();
             line += &format!(" ({})", list.join(" "));
         }
-        line += if set == Set::Fxc { "" } else { ";" };
+        if set == Set::Dxc {
+            line += ";";
+        }
     }
     line
 }
@@ -145,10 +149,10 @@ pub(crate) fn wrap(line: &str, limit: usize) -> Vec<String> {
 pub(crate) fn set(text: &str, names: &[&str]) -> Result<(), String> {
     let text = text.trim();
     if !text.is_empty() {
+        resolve(text, names)?;
         if !cfg!(feature = "shader-pick") {
             return Err("shader pick: alternate bytecode requires the shader-pick build".to_string());
         }
-        resolve(text, names)?;
     }
     *PICK.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = text.to_string();
     Ok(())
@@ -181,14 +185,18 @@ mod tests {
     fn picks() {
         use Set::*;
         assert_eq!(resolve("", &NAMES).unwrap(), [Dxc; 5]);
-        assert_eq!(resolve("fxc=all", &NAMES).unwrap(), [Fxc; 5]);
-        assert_eq!(resolve("fxc=loopfilter_vert_hbd,idct4x4,od=inter_main", &NAMES).unwrap(), [Fxc, Dxc, Fxc, Dxc, Od]);
-        assert_eq!(resolve("fxc=all,dxc=loopfilter_vert_hbd", &NAMES).unwrap(), [Fxc, Fxc, Dxc, Fxc, Fxc]);
-        assert_eq!(resolve("od=*_hbd, fxc=loopfilter_hor*", &NAMES).unwrap(), [Dxc, Dxc, Od, Fxc, Dxc]);
-        assert!(resolve("fxc=nothing", &NAMES).is_err());
+        assert_eq!(resolve("od=all", &NAMES).unwrap(), [Od; 5]);
+        assert_eq!(resolve("od=loopfilter_vert_hbd,idct4x4,dxc=inter_main", &NAMES).unwrap(), [Od, Dxc, Od, Dxc, Dxc]);
+        assert_eq!(resolve("od=all,dxc=loopfilter_vert_hbd", &NAMES).unwrap(), [Od, Od, Dxc, Od, Od]);
+        assert_eq!(resolve("od=*_hbd, dxc=loopfilter_hor*", &NAMES).unwrap(), [Dxc, Dxc, Od, Dxc, Dxc]);
+        assert!(resolve("od=nothing", &NAMES).is_err());
         assert!(resolve("idct4x4", &NAMES).is_err());
         assert!(resolve("o3=all", &NAMES).is_err());
-        assert!(resolve("fxc=", &NAMES).is_err());
+        assert!(resolve("od=", &NAMES).is_err());
+        assert_eq!(
+            set("od=all,fxc=inter_main", &NAMES).unwrap_err(),
+            "shader pick: the 'fxc' set has been removed. Use dxc or od."
+        );
     }
 
     #[test]
@@ -203,16 +211,15 @@ mod tests {
     #[test]
     fn lines() {
         let line = |text: &str| describe(text, &NAMES, &resolve(text, &NAMES).unwrap());
-        assert_eq!(line(""), "SHADERPICK none: dxc 5 (all); od 0; fxc 0");
+        assert_eq!(line(""), "SHADERPICK none: dxc 5 (all); od 0");
+        assert_eq!(line("od=all"), "SHADERPICK od=all: dxc 0; od 5 (all)");
         assert_eq!(
-            line("fxc=loopfilter_vert_hbd,od=inter_main"),
-            "SHADERPICK fxc=loopfilter_vert_hbd,od=inter_main: dxc 3 (all others); od 1 (inter_main); fxc 1 \
-             (loopfilter_vert_hbd)"
+            line("od=loopfilter_vert_hbd,inter_main"),
+            "SHADERPICK od=loopfilter_vert_hbd,inter_main: dxc 3 (all others); od 2 (loopfilter_vert_hbd inter_main)"
         );
         assert_eq!(
-            line("fxc=all,dxc=loopfilter_*_hbd"),
-            "SHADERPICK fxc=all,dxc=loopfilter_*_hbd: dxc 2 (loopfilter_vert_hbd loopfilter_hor_hbd); od 0; fxc 3 \
-             (all others)"
+            line("od=all,dxc=loopfilter_*_hbd"),
+            "SHADERPICK od=all,dxc=loopfilter_*_hbd: dxc 2 (loopfilter_vert_hbd loopfilter_hor_hbd); od 3 (all others)"
         );
     }
 }

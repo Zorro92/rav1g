@@ -7,14 +7,13 @@ one shader's bytecode header, listing and compiler messages.
     shaders.py key     the digest of all keys, for the actions/cache key
     shaders.py build   headers and listings of one variant from the cache, compiling what is missing
     shaders.py prune   drop the cache entries the given builds did not use
-    shaders.py survey  the FXC survey and CDEF and intra listings of the shader-pick build
     shaders.py verify  the bytecode of the headers is in a built program
     shaders.py same    compare two builds' shader header hashes
 
 The Rust library takes dx/shaders/h and shader_set.txt from RAV1G_SHADER_DIR=<root>. The uavsync
 variant builds with all-memory group syncs. The shader-pick variant adds dx/shaders/h_od and
-dx/shaders/h_fxc, plus shader_sets.txt. Only that variant calls FXC. The shader-pick Cargo feature
-embeds the extra bytecode for -shaderpick (docs/test-player.md, "Shader pick").
+shader_sets.txt. The shader-pick Cargo feature embeds the extra DXC bytecode for -shaderpick
+(docs/test-player.md, "Shader pick").
 """
 import argparse
 import concurrent.futures
@@ -42,37 +41,32 @@ VARIANTS = {
     'shader-pick': [],
 }
 
-# The shaders whose listings and counts go into the artifact next to the survey, and the ones
-# built without optimization (/Od): the upstream intra shaders, which the -intraopt comparison holds
-# against their optimized builds intra_main_opt and intra_main_hbd_opt.
-SETS = [
-    ('cdef-shaders', 'CDEF shader listings', ['cdef_filter', 'cdef_filter_v2']),
-    ('intra-shaders', 'Intra shader listings',
-     ['intra_main', 'intra_main_opt', 'intra_main_hbd', 'intra_main_hbd_opt', 'intra_filter', 'intra_filter_hbd',
-      'intra_v2', 'intra_v2_hbd']),
+# Verify both implementations of CDEF and all the intra variants in the built binary.
+REQUIRED_BYTECODE = [
+    'cdef_filter', 'cdef_filter_v2', 'intra_main', 'intra_main_opt', 'intra_main_hbd', 'intra_main_hbd_opt',
+    'intra_filter', 'intra_filter_hbd', 'intra_v2', 'intra_v2_hbd',
 ]
+# The upstream intra shaders are compared with their optimized builds by -intraopt.
 UNOPTIMIZED = ['intra_main', 'intra_main_hbd']
 
 # What DXC is given for every shader on top of -T, -E and -Od:
 #
 #   -T cs_6_0   Shader Model 6.0, the lowest DXIL there is: what every device with DXIL takes. Nothing in
 #               the sources asks for more.
-#   -HV 2018    the language version whose && || and ?: evaluate both sides, as FXC's do. DXC's default
+#   -HV 2018    the language version whose && || and ?: evaluate both sides. DXC's default
 #               (2021) short-circuits them, which is other control flow for the same sources (57 of the
 #               shaders compile to other code with it). 2016 gives the same bytecode as 2018.
-#   -WX         a warning is an error: what DXC objects to and FXC does not is to be seen and decided.
+#   -WX         a warning is an error.
 #   -Wno-ambig-lit-shift
 #               the one warning the sources give (560 times): "1 << n" with a literal on the left, whose
-#               type DXC could take as 64 bits where FXC's is int. It never does here: the build
-#               refuses a listing with a 64-bit value in it, so the shifts are 32-bit ones as in FXC.
-#   no -O       DXC's default, -O3; -Od for the shaders FXC builds with /Od.
+#               type DXC could take as 64 bits. The default build refuses a listing with a 64-bit
+#               value in it, so the shifts are 32-bit ones.
+#   no -O       DXC's default, -O3. The shaders in UNOPTIMIZED use -Od.
 #   no -Gis     the shaders have no floating point arithmetic (the listings have none), so IEEE
 #               strictness has nothing to decide.
-#   nothing that strips: the container keeps its reflection part, as FXC's keeps RDEF.
+#   nothing that strips: the container keeps its reflection part.
 DXC_PROFILE = 'cs_6_0'
 DXC_ARGUMENTS = ['-HV', '2018', '-WX', '-Wno-ambig-lit-shift']
-# Extra sets of the shader-pick variant: (set name, headers under dx/shaders, array suffix).
-PICK_SETS = [('od', 'h_od', '_od'), ('fxc', 'h_fxc', '_fxc')]
 
 
 def fail(message):
@@ -117,31 +111,9 @@ def source_files(name, shaders_dir=SHADERS):
             fail('%s: cannot read %s' % (name, rel))
         seen[rel] = hashlib.sha256(data).hexdigest()
         for include in INCLUDE.findall(data):
-            # Relative to the including file, as FXC resolves it.
+            # Relative to the including file.
             todo.append(os.path.normpath(os.path.join(os.path.dirname(rel), include.decode('utf-8'))).replace('\\', '/'))
     return sorted(seen.items())
-
-
-def fxc_identity(fxc):
-    """What decides the compiler's output: fxc.exe and the d3dcompiler it loads from its directory."""
-    if not fxc or not os.path.isfile(fxc):
-        fail('fxc not found: %s' % fxc)
-    parts = [('fxc', sha256_file(fxc))]
-    directory = os.path.dirname(os.path.abspath(fxc))
-    for other in sorted(os.listdir(directory)):
-        if re.match(r'd3dcompiler.*\.dll$', other, re.I):
-            parts.append((other.lower(), sha256_file(os.path.join(directory, other))))
-    return hashlib.sha256(json.dumps(parts).encode()).hexdigest()
-
-
-def fxc_arguments(name, od):
-    """The arguments that decide the output; the output files and the source path come on top."""
-    args = ['/nologo', '/T', 'cs_5_0', '/E', 'main', '/Vn', name]
-    if od:
-        args.append('/Od')
-    if name == 'intra_filter_hbd':
-        args += ['/D', 'INTRA_FILTER_LEGACY']
-    return args
 
 
 def dxc_libraries(dxc):
@@ -177,28 +149,20 @@ def dxc_version(dxc):
     return text or 'version not reported', short
 
 
-def dxc_arguments(od, variant, name=None):
+def dxc_arguments(od, variant):
     """The arguments that decide DXC's output; the output files and the source path come on top. No
     -Vn: DXC writes the bytecode (-Fo), and write_header the array with the name of the shader."""
     args = ['-nologo', '-T', DXC_PROFILE, '-E', 'main'] + DXC_ARGUMENTS
-    legacy_filter = od and name == 'intra_filter_hbd'
-    if od and not legacy_filter:
+    if od:
         args.append('-Od')
     for define in VARIANTS[variant]:
         args += ['-D', define]
-    # Keep the original kernel at the same optimization level for the shader-pick A/B.
-    if legacy_filter:
-        args += ['-D', 'INTRA_FILTER_LEGACY']
     return args
 
 
 def shader_key(name, od, variant, identity, shaders_dir=SHADERS):
-    if variant == 'fxc':
-        material = {'format': FORMAT, 'fxc': identity, 'arguments': fxc_arguments(name, od),
-                    'files': source_files(name, shaders_dir)}
-    else:
-        material = {'format': FORMAT, 'dxc': identity, 'arguments': dxc_arguments(od, variant, name),
-                    'name': name, 'files': source_files(name, shaders_dir)}
+    material = {'format': FORMAT, 'dxc': identity, 'arguments': dxc_arguments(od, variant),
+                'name': name, 'files': source_files(name, shaders_dir)}
     return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
 
 
@@ -214,9 +178,8 @@ def entry_complete(cache, key, name):
 
 
 def messages(lines):
-    """What FXC printed, without the lines that only say where it saved its output."""
-    return [line.rstrip() for line in lines
-            if line.strip() and not re.search(r'compilation \w+ save succeeded', line)]
+    """Compiler diagnostics without blank lines."""
+    return [line.rstrip() for line in lines if line.strip()]
 
 
 def container_parts(blob):
@@ -237,8 +200,7 @@ def dxil_problem(blob, listing, allow_wide=False):
     if not any(blob[4:20]):
         return 'no validation hash: DXC did not find the validator (dxil.dll, libdxil.so)'
     # A 64-bit value in the code (not in the comments, the data layout or the metadata) would be a shift
-    # whose literal DXC took as 64 bits (-Wno-ambig-lit-shift in DXC_ARGUMENTS), which is not what FXC
-    # compiles; and none of the sources has a 64-bit type.
+    # or other expression whose literal DXC took as 64 bits. The sources have no 64-bit types.
     wide = dxil_wide(listing)
     if wide and not allow_wide:
         return '64-bit values in the listing, the first: %s' % wide
@@ -255,7 +217,7 @@ def dxil_wide(listing):
 
 
 def write_header(path, name, blob, comment):
-    """The bytecode as the array FXC's /Fh writes: const BYTE <name>[], which shader_table.c includes."""
+    """The bytecode as a const BYTE array for shader_table.c."""
     lines = ['// ' + line for line in comment] + ['', 'const BYTE %s[] =' % name, '{']
     for start in range(0, len(blob), 16):
         lines.append('  ' + ', '.join('%3d' % b for b in blob[start:start + 16]) +
@@ -268,24 +230,21 @@ def write_header(path, name, blob, comment):
 def compile_shader(compiler, cache, name, od, variant, key, shaders_dir, allow_wide=False):
     """One compiler call: the header and the listing of the shader, into a new cache entry. allow_wide
     (the -Od set of the shader pick): DXIL with 64-bit values in its code is kept, and the entry says so
-    ('wide' in meta.json); see build_pick_sets."""
+    ('wide' in meta.json); see build_od_set."""
     os.makedirs(cache, exist_ok=True)
     work = tempfile.mkdtemp(prefix='new-', dir=cache)
     header = os.path.join(work, name + '.h')
     listing = os.path.join(work, name + '.asm')
     source = os.path.join(shaders_dir, name + '.hlsl')
-    dxc = variant != 'fxc'
     blob_path = os.path.join(work, name + '.dxil')
-    if dxc:
-        command = [compiler] + dxc_arguments(od, variant, name) + ['-Fc', listing, '-Fo', blob_path, source]
-    else:
-        command = [compiler] + fxc_arguments(name, od) + ['/Fc', listing, '/Fh', header, source]
+    arguments = dxc_arguments(od, variant)
+    command = [compiler] + arguments + ['-Fc', listing, '-Fo', blob_path, source]
     start = time.monotonic()
     done = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     seconds = round(time.monotonic() - start, 1)
     output = messages(done.stdout.decode('utf-8', 'replace').splitlines())
     wide = None
-    if dxc and done.returncode == 0 and os.path.isfile(blob_path) and os.path.isfile(listing):
+    if done.returncode == 0 and os.path.isfile(blob_path) and os.path.isfile(listing):
         with open(blob_path, 'rb') as f:
             blob = f.read()
         os.remove(blob_path)
@@ -296,7 +255,7 @@ def compile_shader(compiler, cache, name, od, variant, key, shaders_dir, allow_w
         else:
             write_header(header, name, blob, [
                 'Written by testing/shader_cache/shaders.py from the bytecode of',
-                'dxc ' + ' '.join(dxc_arguments(od, variant, name)) + ' ' + name + '.hlsl',
+                'dxc ' + ' '.join(arguments) + ' ' + name + '.hlsl',
                 'validation hash ' + blob[4:20].hex()])
     ok = done.returncode == 0 and os.path.isfile(header) and os.path.isfile(listing)
     if not ok:
@@ -304,7 +263,7 @@ def compile_shader(compiler, cache, name, od, variant, key, shaders_dir, allow_w
         return {'ok': False, 'seconds': seconds, 'output': output, 'exit': done.returncode}
     with open(os.path.join(work, 'meta.json'), 'w', encoding='utf-8') as f:
         meta = {'format': FORMAT, 'name': name, 'variant': variant, 'od': od, 'seconds': seconds, 'output': output}
-        if dxc and wide:
+        if wide:
             meta['wide'] = wide
         json.dump(meta, f, indent=1)
     directory = entry_files(cache, key, name)[0]
@@ -327,17 +286,12 @@ def command_key(args):
     for variant in args.variants.split(','):
         if variant not in VARIANTS:
             fail('unknown variant %s' % variant)
-        pick = variant == 'shader-pick'
-        fxc_id = fxc_identity(args.fxc) if pick else None
         for name, od in shaders:
             digest.update(shader_key(name, od, variant, identity).encode())
             count += 1
-            if pick:
-                digest.update(shader_key(name, od, 'fxc', fxc_id).encode())
+            if variant == 'shader-pick' and not od:
+                digest.update(shader_key(name, True, variant, identity).encode())
                 count += 1
-                if not od:
-                    digest.update(shader_key(name, True, variant, identity).encode())
-                    count += 1
     value = digest.hexdigest()[:32]
     print('shaders.py: %d shader keys (%s), digest %s' % (count, args.variants, value))
     if os.environ.get('GITHUB_OUTPUT'):
@@ -349,13 +303,12 @@ def command_key(args):
 def cache_entries(cache, compiler, variant, shaders, identity, jobs, what, allow_wide=False):
     """The cache entries of the shaders [(name, od)] of a variant, compiling the ones that are missing:
     ({name: key}, {name: the result of the compiler call of this run}, the number that were missing)."""
-    tool = 'FXC' if variant == 'fxc' else 'DXC'
     keys = {name: shader_key(name, od, variant, identity) for name, od in shaders}
     missing = [(name, od) for name, od in shaders if not entry_complete(cache, keys[name], name)]
     results = {}
     if missing:
-        print('shaders.py: %s: %d of %d shaders are not in the cache; %s on up to %d at a time' %
-              (what, len(missing), len(shaders), tool, jobs), flush=True)
+        print('shaders.py: %s: %d of %d shaders are not in the cache; DXC on up to %d at a time' %
+              (what, len(missing), len(shaders), jobs), flush=True)
         with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
             futures = {pool.submit(compile_shader, compiler, cache, name, od, variant, keys[name], SHADERS,
                                    allow_wide): name for name, od in missing}
@@ -363,17 +316,16 @@ def cache_entries(cache, compiler, variant, shaders, identity, jobs, what, allow
                 results[futures[future]] = future.result()
     failed = sorted(name for name, result in results.items() if not result['ok'])
     for name in failed:
-        print('%s failed for %s.hlsl (exit code %s):' % (tool, name, results[name]['exit']))
+        print('DXC failed for %s.hlsl (exit code %s):' % (name, results[name]['exit']))
         for line in results[name]['output']:
             print('  ' + line)
     if failed:
-        fail('%s failed for ' % tool + ', '.join(name + '.hlsl' for name in failed))
+        fail('DXC failed for ' + ', '.join(name + '.hlsl' for name in failed))
     return keys, results, len(missing)
 
 
 def copy_renamed_header(source, target, name, suffix):
-    """A header of the cache with its array renamed <name><suffix>, so that the bytecodes of one shader
-    by several compilers can be in one program."""
+    """Rename the cached array to <name><suffix> so both bytecodes can be in one program."""
     with open(source, 'rb') as f:
         data = f.read()
     declaration = ('const BYTE %s[]' % name).encode()
@@ -383,62 +335,53 @@ def copy_renamed_header(source, target, name, suffix):
         f.write(data.replace(declaration, ('const BYTE %s%s[]' % (name, suffix)).encode()))
 
 
-def build_pick_sets(args, shaders, dxc_keys, dxc_id, fxc_id, jobs, shader_set, report):
-    """Build the two extra sets for shader picking and write their compiler and arguments.
+def build_od_set(args, shaders, dxc_keys, identity, jobs, shader_set, report):
+    """Build the alternate -Od bytecode and record the compiler and arguments of both sets.
 
     A shader whose -Od DXIL has 64-bit values in its code (the literal of a shift or of a ?: that DXC
     takes as 64 bits and that only its optimisation narrows; a device needs 64-bit integer shader
     operations for it) has the bytecode of the default set in the set od as well, and the line of the set
     names it."""
     unoptimized = ', '.join(name for name, od in shaders if od)
-    sources = {'od': (args.dxc, args.variant, [(name, True) for name, _ in shaders], dxc_id),
-               'fxc': (args.fxc, 'fxc', shaders, fxc_id)}
-    report['sets'] = {}
-    lines = {'dxc': 'dxc: %s: dxc %s; -Od for %s' % (
-        shader_set, ' '.join(dxc_arguments(False, args.variant)), unoptimized)}
-    for set_name, directory, suffix in PICK_SETS:
-        compiler, variant, set_shaders, identity = sources[set_name]
-        keys, results, missing = cache_entries(args.cache, compiler, variant, set_shaders, identity, jobs,
-                                               'shader-pick, the set %s' % set_name, allow_wide=set_name == 'od')
-        headers = os.path.join(args.root, 'dx', 'shaders', directory)
-        os.makedirs(headers, exist_ok=True)
-        listings = os.path.join(args.listings, set_name) if args.listings else None
+    od_shaders = [(name, True) for name, _ in shaders]
+    keys, results, missing = cache_entries(args.cache, args.dxc, args.variant, od_shaders, identity, jobs,
+                                           'shader-pick, the set od', allow_wide=True)
+    headers = os.path.join(args.root, 'dx', 'shaders', 'h_od')
+    os.makedirs(headers, exist_ok=True)
+    listings = os.path.join(args.listings, 'od') if args.listings else None
+    if listings:
+        os.makedirs(listings, exist_ok=True)
+    entries = []
+    wide = []
+    for name, _ in shaders:
+        key = keys[name]
+        _, header, listing, meta_path = entry_files(args.cache, key, name)
+        with open(meta_path, encoding='utf-8') as f:
+            meta = json.load(f)
+        is_wide = bool(meta.get('wide'))
         if listings:
-            os.makedirs(listings, exist_ok=True)
-        entries = []
-        wide = []
-        for name, od in set_shaders:
-            key = keys[name]
-            _, header, listing, meta_path = entry_files(args.cache, key, name)
-            with open(meta_path, encoding='utf-8') as f:
-                meta = json.load(f)
-            is_wide = bool(meta.get('wide'))
-            if listings:
-                shutil.copyfile(listing, os.path.join(listings, name + '.asm'))
-            if is_wide:
-                # The bytecode of the default set instead (the listing stays the one of -Od).
-                wide.append(name)
-                key = dxc_keys[name]
-                header = entry_files(args.cache, key, name)[1]
-            target = os.path.join(headers, name + '.h')
-            copy_renamed_header(header, target, name, suffix)
-            unoptimized_entry = od and not (set_name == 'od' and name == 'intra_filter_hbd')
-            entries.append({'name': name, 'od': unoptimized_entry and not is_wide, 'key': keys[name], 'bytecode_key': key,
-                            'compiled': name in results, 'seconds': meta['seconds'],
-                            'header_sha256': sha256_file(target)})
-        if set_name == 'od':
-            lines[set_name] = 'od: %s: dxc %s; intra_filter_hbd uses the optimized legacy kernel%s' % (
-                shader_set, ' '.join(dxc_arguments(True, args.variant)),
-                '; default DXIL for %s (64-bit values at -Od)' % ', '.join(wide) if wide else '')
-        else:
-            lines[set_name] = 'fxc: FXC cs_5_0: fxc %s; /Od for %s' % (
-                ' '.join(fxc_arguments('<name>', False)), unoptimized)
-        report['sets'][set_name] = {'directory': directory, 'suffix': suffix, 'line': lines[set_name],
-                                    'default_bytecode': wide, 'compiled': missing,
-                                    'from_cache': len(set_shaders) - missing, 'shaders': entries}
-        print('shaders.py: shader-pick, the set %s: %d shaders, %d compiled now, %d from the cache; headers in %s' %
-              (set_name, len(set_shaders), missing, len(set_shaders) - missing, headers))
-    lines = [lines[name] for name in ('dxc', 'od', 'fxc')]
+            shutil.copyfile(listing, os.path.join(listings, name + '.asm'))
+        if is_wide:
+            # The bytecode of the default set instead (the listing stays the one of -Od).
+            wide.append(name)
+            key = dxc_keys[name]
+            header = entry_files(args.cache, key, name)[1]
+        target = os.path.join(headers, name + '.h')
+        copy_renamed_header(header, target, name, '_od')
+        entries.append({'name': name, 'od': not is_wide, 'key': keys[name], 'bytecode_key': key,
+                        'compiled': name in results, 'seconds': meta['seconds'],
+                        'header_sha256': sha256_file(target)})
+
+    dxc_line = 'dxc: %s: dxc %s; -Od for %s' % (shader_set, report['arguments'], unoptimized)
+    od_line = 'od: %s: dxc %s' % (shader_set, report['arguments_unoptimized'])
+    if wide:
+        od_line += '; default DXIL for %s (64-bit values at -Od)' % ', '.join(wide)
+    lines = [dxc_line, od_line]
+    report['sets'] = {'od': {'directory': 'h_od', 'suffix': '_od', 'line': od_line,
+                              'default_bytecode': wide, 'compiled': missing,
+                              'from_cache': len(shaders) - missing, 'shaders': entries}}
+    print('shaders.py: shader-pick, the set od: %d shaders, %d compiled now, %d from the cache; headers in %s' %
+          (len(shaders), missing, len(shaders) - missing, headers))
     with open(os.path.join(args.root, 'shader_sets.txt'), 'w', encoding='ascii', newline='\n') as f:
         f.write('\n'.join(lines) + '\n')
     report['set_lines'] = lines
@@ -449,7 +392,6 @@ def build_pick_sets(args, shaders, dxc_keys, dxc_id, fxc_id, jobs, shader_set, r
 def command_build(args):
     start = time.monotonic()
     identity = dxc_identity(args.dxc)
-    fxc_id = fxc_identity(args.fxc) if args.variant == 'shader-pick' else None
     shaders = project_shaders()
     jobs = max(1, args.jobs or (os.cpu_count() or 2))
     keys, results, missing = cache_entries(args.cache, args.dxc, args.variant, shaders, identity, jobs,
@@ -468,8 +410,8 @@ def command_build(args):
               'shader_set': shader_set, 'jobs': jobs,
               'compiled': missing, 'from_cache': len(shaders) - missing, 'shaders': []}
     print('shaders.py: %s: %s; dxc %s; -Od for %s' % (shader_set, version, report['arguments'], ', '.join(UNOPTIMIZED)))
-    if fxc_id is not None:
-        build_pick_sets(args, shaders, keys, identity, fxc_id, jobs, shader_set, report)
+    if args.variant == 'shader-pick':
+        build_od_set(args, shaders, keys, identity, jobs, shader_set, report)
     for name, od in shaders:
         _, header, listing, meta_path = entry_files(args.cache, keys[name], name)
         with open(meta_path, encoding='utf-8') as f:
@@ -524,190 +466,6 @@ def command_prune(args):
     size = sum(os.path.getsize(os.path.join(root, name)) for root, _, names in os.walk(args.cache) for name in names)
     print('shaders.py: cache %s: %d entries kept (%.1f MiB), %d of other sources or compilers removed' %
           (args.cache, kept, size / (1024.0 * 1024.0), removed))
-    return 0
-
-
-# ---------------------------------------------------------------------------------------------
-# The survey: counts from the listings. Static counts: instructions in the listing, not executed.
-# ---------------------------------------------------------------------------------------------
-def count(code, pattern):
-    return sum(1 for line in code if re.search(pattern, line, re.I))
-
-
-def listing_counts(path):
-    with open(path, encoding='utf-8', errors='replace') as f:
-        text = f.read().splitlines()
-    code = [line for line in text if not re.match(r'^\s*(//|$)', line)]
-    indexable = [line.strip() for line in code if re.match(r'^\s*dcl_indexableTemp', line, re.I)]
-    indexable_values = 0
-    for declaration in indexable:
-        match = re.search(r'\[(\d+)\],\s*(\d+)', declaration)
-        if match:
-            indexable_values += int(match.group(1)) * int(match.group(2))
-    shared = [line.strip() for line in code if re.match(r'^\s*dcl_tgsm_', line, re.I)]
-    shared_bytes = 0
-    for declaration in shared:
-        numbers = [int(n) for n in re.findall(r'\d+', re.sub(r'^\S+\s+g\d+', '', declaration))]
-        shared_bytes += numbers[0] * numbers[1] if 'structured' in declaration else numbers[0]
-    # Entries of the immediate constant buffer: one per line of its declaration.
-    icb_entries = 0
-    for i, line in enumerate(code):
-        if 'dcl_immediateConstantBuffer' not in line:
-            continue
-        for later in code[i:]:
-            icb_entries += 1
-            if re.search(r'\}\s*\}', later):
-                break
-        break
-    group = re.sub(r'^dcl_thread_group\s*', '', ''.join(l for l in code if re.match(r'^\s*dcl_thread_group', l)).strip())
-    threads = 1
-    for n in group.split(','):
-        if n.strip():
-            threads *= int(n.strip())
-    slots = None
-    for line in text:
-        match = re.search(r'Approximately (\d+) instruction slots used', line)
-        if match:
-            slots = match.group(1)
-            break
-    if slots is None:
-        fail('%s: no instruction slot count in the listing' % path)
-    temps = re.sub(r'^dcl_temps\s*', '', ''.join(l for l in code if re.match(r'^\s*dcl_temps', l)).strip())
-    return {
-        'code': code, 'group': group, 'threads': threads, 'slots': slots, 'temps': temps,
-        'indexable': indexable, 'indexable_values': indexable_values,
-        'indexable_instructions': count(code, r'\bx\d+\['),
-        'icb_entries': icb_entries, 'icb_reads': count(code, r'\bicb\['),
-        'shared': shared, 'shared_bytes': shared_bytes,
-        'sync': count(code, r'^\s*sync'), 'sync_threads': count(code, r'^\s*sync\S*_t\b'),
-        'shared_loads': count(code, r'^\s*ld_(raw|structured)\S*\s.*\bg\d'),
-        'shared_stores': count(code, r'^\s*store_(raw|structured)\S*\s+g\d'),
-        'buffer_loads': count(code, r'^\s*ld_(raw|structured)\S*\s.*\b[tu]\d'),
-        'buffer_stores': count(code, r'^\s*store_(raw|structured)\S*\s+u\d'),
-        'loops': count(code, r'^\s*loop\b'),
-    }
-
-
-def runtime_width_bit_fields(name, code):
-    """Bit field instructions whose width is known only at run time, except ubfe at offset 0. FXC makes
-    these out of x & ((1 << n) - 1) and of (x >> n) << n with a run-time n, and where n can be 0 the
-    result depends on the GPU (docs/gpu-av1-decoder.md, "Bit fields of width 0"); the shaders take such
-    masks from a table. ubfe at offset 0 is what the block index of every inter shader compiles to and
-    is known to be right on the console."""
-    found = []
-    for line in code:
-        match = re.match(r'^\s*(bfi|ubfe|ibfe)\s+\S+,\s*(l\([^)]*\)|[^,]+),\s*(l\([^)]*\)|[^,]+),', line, re.I)
-        if not match:
-            continue
-        op, width, offset = match.group(1).lower(), match.group(2).strip(), match.group(3).strip()
-        if width.lower().startswith('l('):
-            continue
-        if op == 'ubfe' and re.match(r'^l\(0(, 0)*\)$', offset, re.I):
-            continue
-        found.append('%s.hlsl: %s' % (name, line.strip()))
-    return found
-
-
-def command_survey(args):
-    with open(args.report, encoding='utf-8') as f:
-        report = json.load(f)
-    fxc = report.get('sets', {}).get('fxc')
-    if not fxc:
-        fail('the DXBC survey needs the report of a shader-pick build')
-    report.update(fxc)
-    shaders = report['shaders']
-    rows = {}
-    runtime_width = []
-    for shader in shaders:
-        name = shader['name']
-        c = listing_counts(os.path.join(args.listings, name + '.asm'))
-        # The original 8-bit -intraopt experiment still uses run-time widths.
-        if name != 'intra_main_opt':
-            runtime_width += runtime_width_bit_fields(name, c['code'])
-        seconds = '%.1f' % shader['seconds']
-        od = shader['od']
-        block = ['', '== %s.hlsl%s ==' % (name, ' (/Od: this shader is built without optimization)' if od else ''),
-                 'thread group:                           dcl_thread_group %s' % c['group'],
-                 'instruction slots:                      %s' % c['slots'],
-                 'temp registers:                         dcl_temps %s' % c['temps'],
-                 'indexable temps:                        %d' % len(c['indexable'])]
-        block += ['    ' + declaration for declaration in c['indexable']]
-        block += ['instructions using an indexable temp:   %d' % c['indexable_instructions'],
-                  'immediate constant buffer:              %s' %
-                  ('yes, %d entries' % c['icb_entries'] if c['icb_entries'] else 'no'),
-                  'instructions reading it (icb):          %d' % c['icb_reads'],
-                  'groupshared declarations:               %d, %d bytes' % (len(c['shared']), c['shared_bytes'])]
-        block += ['    ' + declaration for declaration in c['shared']]
-        block += ['group barriers (sync):                  %d, %d of them wait for the whole thread group' %
-                  (c['sync'], c['sync_threads']),
-                  'groupshared loads / stores:             %d / %d' % (c['shared_loads'], c['shared_stores']),
-                  'buffer loads / stores:                  %d / %d' % (c['buffer_loads'], c['buffer_stores']),
-                  'loops:                                  %d' % c['loops'],
-                  'FXC compile time:                       %s s%s' %
-                  (seconds, '' if shader['compiled'] else ' (in the run that compiled it; from the cache here)'),
-                  'bytecode header:                        sha256 %s, written by the FXC call that wrote this listing' %
-                  shader['header_sha256']]
-        rows[name] = {
-            'block': block,
-            'line': '| %s | %s | %s | %d | %s | %s | %d / %d | %d | %d | %d | %d | %d / %d | %d | %s |' % (
-                name, '/Od' if od else '', c['group'], c['threads'], c['slots'], c['temps'], len(c['indexable']),
-                c['indexable_values'], c['indexable_instructions'], c['icb_entries'], c['icb_reads'],
-                c['shared_bytes'], c['sync'], c['sync_threads'], c['loops'], seconds),
-            'csv': '%s,%d,%s,%d,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%s' % (
-                name, 1 if od else 0, re.sub(r'[,\s]+', 'x', c['group']), c['threads'], c['slots'], c['temps'],
-                len(c['indexable']), c['indexable_values'], c['indexable_instructions'], c['icb_entries'],
-                c['icb_reads'], c['shared_bytes'], c['sync'], c['sync_threads'], c['loops'], seconds),
-        }
-    if runtime_width:
-        for line in runtime_width:
-            print(line)
-        fail('bit field instructions with a run-time width in %d places: take the mask from a table' % len(runtime_width))
-
-    intro = ['FXC of Windows SDK %s: /T cs_5_0 /E main with the settings every build has (default optimization; '
-             '/Od where marked).' % args.sdk,
-             'Counts are static: instructions in the listing, not instructions executed.',
-             'One FXC call per shader writes its listing and the bytecode header the programs are built from; its '
-             'output is kept by the content of the source, of the files it includes and of the compiler.',
-             '%d of the %d shaders were compiled in this run, on up to %d at a time, so the compile time of a shader '
-             'includes contention with the others; %d came from the cache, with the compile time of the run that '
-             'compiled them.' % (report['compiled'], len(shaders), report['jobs'], report['from_cache'])]
-    summary = []
-    names = [shader['name'] for shader in shaders]
-    for directory, title, members in SETS:
-        target = os.path.join(args.out, directory)
-        os.makedirs(target, exist_ok=True)
-        stats = list(intro)
-        for name in members:
-            if name not in rows:
-                fail('%s is not a shader of the build' % name)
-            shutil.copyfile(os.path.join(args.listings, name + '.asm'), os.path.join(target, name + '.asm'))
-            stats += rows[name]['block']
-        with open(os.path.join(target, 'stats.txt'), 'w', encoding='utf-8') as f:
-            f.write('\n'.join(stats) + '\n')
-        summary += ['## ' + title, '```'] + stats + ['```']
-    survey = ['# Shader survey', ''] + intro + [
-        '',
-        'Indexable temps: arrays the compiler keeps in addressable scratch memory, as count / total 32-bit components.',
-        'Barriers: all sync instructions / those that wait for the whole thread group.', '',
-        '| shader | opt | thread group | threads | instruction slots | temps | indexable temps | instructions on them '
-        '| ICB entries | ICB reads | groupshared bytes | barriers | loops | FXC s |',
-        '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |']
-    survey += [rows[name]['line'] for name in names]
-    target = os.path.join(args.out, 'shader-survey')
-    os.makedirs(target, exist_ok=True)
-    with open(os.path.join(target, 'survey.md'), 'w', encoding='utf-8') as f:
-        f.write('\n'.join(survey) + '\n')
-    with open(os.path.join(target, 'survey.csv'), 'w', encoding='utf-8') as f:
-        f.write('\n'.join(
-            ['shader,od,thread_group,threads,instruction_slots,temps,indexable_temps,indexable_components,'
-             'indexable_instructions,icb_entries,icb_reads,groupshared_bytes,barriers,barriers_thread_sync,loops,'
-             'fxc_seconds'] + [rows[name]['csv'] for name in names]) + '\n')
-    summary += ['## Shader survey', ''] + survey[2:]
-    if os.environ.get('GITHUB_STEP_SUMMARY'):
-        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
-            f.write('\n'.join(summary) + '\n')
-    total = sum(int(rows[name]['csv'].split(',')[4]) for name in names)
-    print('shaders.py: survey of %d shaders in %s, %d instruction slots in all' % (len(names), target, total))
     return 0
 
 
@@ -777,11 +535,10 @@ def command_verify(args):
                 print('shaders.py: ' + line)
                 if count < args.min_found:
                     ok = False
-            for directory, _, members in SETS:
-                missing = [name for name in members if name not in found]
-                if missing:
-                    print('shaders.py: listed in %s and not in the program: %s' % (directory, ', '.join(missing)))
-                    ok = False
+            missing = [name for name in REQUIRED_BYTECODE if name not in found]
+            if missing:
+                print('shaders.py: required shader bytecode missing from the program: ' + ', '.join(missing))
+                ok = False
     if args.note:
         for path in args.note:
             with open(path, 'a', encoding='utf-8') as f:
@@ -853,13 +610,11 @@ def main():
     commands = parser.add_subparsers(dest='command', required=True)
 
     key = commands.add_parser('key', help='the digest of the keys of all shaders')
-    key.add_argument('--fxc', help='for the shader-pick variant')
     key.add_argument('--dxc', required=True)
     key.add_argument('--variants', default='normal')
     key.set_defaults(run=command_key)
 
     build = commands.add_parser('build', help='headers and listings of one variant')
-    build.add_argument('--fxc', help='for the shader-pick variant')
     build.add_argument('--dxc', required=True)
     build.add_argument('--cache', required=True, help='the cache directory')
     build.add_argument('--variant', choices=VARIANTS, default='normal')
@@ -873,13 +628,6 @@ def main():
     prune.add_argument('--cache', required=True)
     prune.add_argument('reports', nargs='+')
     prune.set_defaults(run=command_prune)
-
-    survey = commands.add_parser('survey', help='survey.md, survey.csv and the CDEF and intra listings')
-    survey.add_argument('--report', required=True)
-    survey.add_argument('--listings', required=True)
-    survey.add_argument('--out', required=True)
-    survey.add_argument('--sdk', default='?')
-    survey.set_defaults(run=command_survey)
 
     verify = commands.add_parser('verify', help='the bytecode of the headers is in a built program')
     verify.add_argument('--report', required=True)
@@ -901,7 +649,7 @@ def main():
     same.set_defaults(run=command_same)
 
     args = parser.parse_args()
-    # What FXC printed goes to the log as it is, whatever the console's code page can show.
+    # Keep diagnostics readable on consoles with a limited code page.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, 'reconfigure'):
             stream.reconfigure(errors='replace')

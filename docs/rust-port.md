@@ -89,12 +89,11 @@ Agreed on 2026-11-12, in addition to the steps above:
   packaging. Running the decoder still needs D3D12 (WARP in CI, or the console).
 - **Signed DXIL.** DXC builds the decoder shaders for `cs_6_0`, preserving `-Od` for
   `intra_main` and `intra_main_hbd`. The console accepts Shader Model 6.4 at most, with waves
-  of 64 lanes and no native 16-bit operations or `[WaveSize]`. WARP uses waves of 4. The
-  `shader-pick` experiment also embeds FXC bytecode for driver diagnostics. The overlapping
-  in-place register writes checked by `testing/dxbc_scan` are a DXBC instruction pattern.
-  DXIL assigns each SSA value once, and the driver compiles those values to machine instructions.
-  The scan still checks the experiment's FXC listings. Console md5 comparisons exercise the
-  driver's DXIL code generation. [Shader Model 6 feasibility](gpu-av1-decoder.md#shader-model-6-feasibility-2026-11-12)
+  of 64 lanes and no native 16-bit operations or `[WaveSize]`. WARP uses waves of 4.
+  The `shader-pick` experiment adds DXC `-Od` bytecode for driver diagnostics.
+  The FXC listing scan for overlapping DXBC register writes is on branch `fxc-sm5`.
+  Console md5 comparisons exercise the driver's DXIL code generation.
+  [Shader Model 6 feasibility](gpu-av1-decoder.md#shader-model-6-feasibility-2026-11-12)
 - **A GPU backend boundary.** The host talks to the GPU through one internal interface (buffers, pipeline
   states, dispatch, barriers, fences, timestamps, readback). Phase 1 implements it for D3D12 only; a
   Vulkan backend (SPIR-V from the same HLSL through DXC; Linux, Android, macOS via MoltenVK, and
@@ -140,7 +139,7 @@ the same decoded samples and matching stage dumps under the existing two-parser 
 
 ## Branches
 
-- `main`: the Rust decoder. `cpp`: the C++ decoder (tag `v0.3.0`), C++ fixes and experiments. `original`:
+- `main`: the DXC/Shader Model 6 Rust decoder. `cpp`: the C++ decoder (tag `v0.3.0`), C++ fixes and experiments. `original`:
   upstream, frozen.
 - `fxc-sm5` (2026-11-19, at `c1de272`, the release `v0.4.0-alpha.2`): the last decoder whose shaders are
   all FXC `cs_5_0` (Shader Model 5, D3D11-compatible bytecode). Frozen: no further work is planned there,

@@ -49,12 +49,9 @@ one commit each:
   Intra v2 also adds intra dispatch counters to the `-gputime` output and a
   host-side comparison of the two paths (`testing/intra_check`), which is not part of the
   player build. It is bit-exact but slower than the original path.
-- **Intra optimisation A/B**: upstream builds `intra_main.hlsl` and `intra_main_hbd.hlsl`
-  with FXC optimisation disabled. Two wrapper files, `intra_main_opt.hlsl` and
-  `intra_main_hbd_opt.hlsl`, only `#include` those sources and are compiled with the
-  project's default (optimised) settings, and the player flag `-intraopt` selects them; see
-  [Intra optimisation A/B](#intra-optimisation-ab--intraopt). The `/Od` builds stay the
-  default. The earlier optimised build decoded incorrectly on the console and showed no speed gain.
+- **Intra optimisation A/B**: the default DXC build uses `-Od` for `intra_main` and
+  `intra_main_hbd`. The player flag `-intraopt` selects the optimised DXC builds
+  of the same source. [Intra optimisation A/B](#intra-optimisation-ab--intraopt)
 - **High-bit-depth intra**: `intra_main_hbd.hlsl` prepares both edges together and shares the
   DC and CFL reductions across a block's threads in the group. It uses three group syncs. See
   [High-bit-depth intra shader](#high-bit-depth-intra-shader).
@@ -129,10 +126,9 @@ one commit each:
 - **Experiments**: `-lfhsplit`, `-intraedgefix` and a second package whose shaders sync all
   memory at every group sync, for the bugs that show on the console only. See
   [Experiments](#experiments). Off by default; the output does not change.
-- **Shader pick**: in the DXC package, `-shaderpick fxc=<list>,od=<list>,dxc=<list>` says per
-  shader whether its pipeline state is made of DXC's bytecode, of DXC's `-Od` bytecode or of FXC's,
-  for finding the shader a device computes differently. See
-  [Shader pick](#shader-pick--shaderpick-the-dxc-package).
+- **Shader pick**: in the revision 4 package, `-shaderpick od=<list>,dxc=<list>` selects
+  default or `-Od` DXIL per shader for compiler diagnostics.
+  [Shader pick](#shader-pick--shaderpick-the-dxc-package)
 - **Layers, new sequences, references of different sizes**: of a temporal unit with spatial
   layers the frame of the highest layer is output (`-alllayers` for every layer's frame,
   `-oppoint <n>` for another operating point), a sequence that does not fit the decoder is
@@ -161,7 +157,7 @@ interface for C and the C of the parser, for an app container and the DLL runtim
 `crates/rav1g/include/rav1g.h`) as Release x64 with MSBuild, the `v145` toolset and the
 `10.0.26100.0` Windows SDK. The minimum Windows version is overridden to `10.0.17763.0`. The
 decoder's compute shaders use DXC `cs_6_0`. MSBuild uses the SDK's DXC for the presentation
-shaders (`vs_6_0` and `ps_6_0`). An appended
+shaders (`vs_6_0` and `ps_6_0`). The frozen FXC player and decoder are on branch `fxc-sm5`. An appended
 compiler option `/wd4996` suppresses the newer SDK's deprecated `GetDesktopDpi` diagnostic (promoted
 to an error by upstream's `/sdl`), without changing the player source.
 
@@ -202,15 +198,15 @@ shader compiler diagnostics.
 | `rav1g-testplayer-x64-<run-id>` | `0.2.<run number>.0` | `rav1g.dll`: Rust, the C compiled by clang-cl with full link time optimisation, linked by lld-link | **the default: use this one** |
 | `rav1g-testplayer-msvc-x64-<run-id>` | `0.2.<run number>.2` | linked statically: Rust, the C compiled by MSVC with `/GL` and by the player's link (`/LTCG:incremental`) | the alternative: one program without a DLL of its own; for a comparison of the two compilers |
 | `rav1g-testplayer-uavsync-x64-<run-id>` | `0.2.<run number>.1` | the default build with the uavsync shaders | built with the `experiments` dispatch input. [Experiments](#experiments) |
-| `rav1g-testplayer-dxc-x64-<run-id>` | `0.2.<run number>.4` | the shader-pick build with the default DXIL plus alternate DXC `-Od` and FXC bytecode | compiler diagnostics with [`-shaderpick`](#shader-pick--shaderpick-the-dxc-package) |
+| `rav1g-testplayer-dxc-x64-<run-id>` | `0.2.<run number>.4` | the shader-pick build with the default DXIL and alternate DXC `-Od` bytecode | compiler diagnostics with [`-shaderpick`](#shader-pick--shaderpick-the-dxc-package) |
 | `rav1g-testplayer-hevcplayback-x64-<run-id>` | `0.2.<run number>.3` | the programs of the default package, byte for byte; the manifest declares the restricted capability `hevcPlayback` | only for the memory the console gives an app with that capability; see [The two memory pools](#the-two-memory-pools-memory-pools-hevcplayback) |
 
 A higher revision installs over a lower one and keeps LocalState; the default package of a later
 run installs over all of them. The log of a launch names its library in a `LIBRARY` line before the
 pipeline states, including `shaders: DXC <version> cs_6_0`. Every artifact has the package,
 the certificate, `SOURCES.txt`, licences, the build log and the DLL import report. The default
-artifact has `rav1g.pdb` and the default DXIL listings. Revision 4 carries all three compute shader
-listings and the DXBC survey.
+artifact has `rav1g.pdb` and the default DXIL listings. Revision 4 carries the DXIL listings
+for both sets in `dxc-shaders/asm/`.
 
 Which to use: the default. On the console (2026-11-12, [rust-port.md](rust-port.md), "Console
 results of step 5") both decode the md5 set of 15 clips with matching md5; the build with the C of
@@ -378,7 +374,7 @@ the start of every task say what is in effect.
 | Pipeline slots | 2 | `Frame slots: 2` | `-slots 3`, `-slots 4` |
 | Parser | the parse pass of rav1d, with its switches `nolfmask`, `tilethread` and (since package 0.2.197) `gpucdef` on | `Parser: the parse pass of rav1d`, `Parser switches (-parseopt): nolfmask tilethread gpucdef` | none since package 0.2.159: the entropy decoder of libaom (`-parser c`) left the decoder; up to 0.2.157 `Parser: the entropy decoder of libaom (-parser c)`; `-parseopt` for the switches; see [Parser](#parser--parser) |
 | Clears of a slot | none: the wavefront of intra prediction is kept at the edges of the tiles (since package 0.2.146.0) | `Clears: none needed (default: intra wavefront at the edges of the tiles; -gpuclear, -cpuclear and -syncclear keep it in the slot's grid and clear that)` | `-gpuclear`, `-cpuclear`, `-syncclear`: the wavefront in the slot's grid, cleared for every frame by the GPU, the completion thread (the default of 0.2.140 to 0.2.144; `-asyncclear` is the same) or the decode thread; see [Clears](#clears) |
-| Intra prediction | frame-wide wavefront, `/Od` build of the main shader | `Intra shaders: intra_main + intra_filter (original)`, `Intra main shader: intra_main (/Od, original)` | `-intrav2`, `-intraopt` |
+| Intra prediction | frame-wide wavefront, DXC `-Od` build of the main shader | `Intra shaders: intra_main + intra_filter (original)`, `Intra main shader: intra_main (-Od, original)` | `-intrav2`, `-intraopt` |
 | Inter prediction | upstream's shaders, lists by type and block size | `Inter shaders: inter_main, inter_compound (original)` | `-interfast`: see [Inter fast path](#inter-fast-path--interfast) |
 
 - **`-cdefv2` and `-fitsize` are still accepted** and change nothing: old task lines keep
@@ -615,9 +611,8 @@ later pass reads what an earlier one wrote into the frame:
 
 `recon` is the GPU stage behind it and has a barrier of its own. A frame with a reference
 of another size runs every section but `warp` and `comp_warp*` through the shaders for
-scaled references (`inter_scale_*`); the summary lists those as `<section>/scaled`. Which
-shader a section is, and what one thread of it does, is in the workflow artifact
-(`shader-survey/inter-static.md`) and, for `single` and `comp_avg`, in
+scaled references (`inter_scale_*`); the summary lists those as `<section>/scaled`. The
+breakdown of `single` and `comp_avg` is in
 [gpu-av1-decoder.md](gpu-av1-decoder.md#inter-prediction-breakdown-and-fast-paths-2026-11-12).
 With `-interfast` those two sections are listed by motion vector class, see
 [Inter fast path](#inter-fast-path--interfast).
@@ -948,15 +943,10 @@ compiled shader on the console.
 
 ### Shader listings in the artifact
 
-The workflow runs both shaders through the same FXC, profile and flags as the Release
-build (`/T cs_5_0 /E main`) and stores the listings under `cdef-shaders/`. After the
-build it checks that each listing's bytecode is the one compiled into the package.
-`stats.txt` gives, for each shader: instruction slots, temp registers, indexable
-temps (arrays the compiler could not keep in registers), immediate constant buffer
-use, group shared memory size, barriers, and load/store counts. The counts are static
-(instructions in the listing), not instructions executed, and are not a timing.
+The default package includes the DXIL listings for both shaders under `shader-survey/asm/`.
+CI checks that their bytecode is in the packaged library.
 
-With the pinned upstream and FXC from Windows SDK `10.0.26100.0`:
+The table records static counts from the earlier FXC build with Windows SDK `10.0.26100.0`.
 
 | | `cdef_filter.hlsl` | `cdef_filter_v2.hlsl` |
 | --- | --- | --- |
@@ -1014,7 +1004,7 @@ next one may start.
 | Edge pixels | loaded, corner-filtered, edge-filtered and upsampled in stages through group memory, a sync after each stage | each pixel evaluates the edge samples it needs as a function of the frame buffer |
 | DC and CFL sums | every thread sums the whole edge; CFL average by a tree reduction that relies on the threads of a wave running in lockstep | one partial sum per cell in group memory, added up after a sync |
 | Filter intra | separate shader, relies on 64 threads running in lockstep | cells of the same group, one anti-diagonal of cells per pass |
-| FXC | the project compiles `intra_main` with optimization disabled (`/Od`) | default optimization |
+| DXC optimization | `-Od` for `intra_main` and `intra_main_hbd` | default optimization |
 | Host, per frame | clears the iteration grid (5 bytes per 4x4 of the frame) and scans it for every block | scans a cell map for the same neighbours; the map is not cleared per frame (entries carry a frame stamp); one sort of the region list |
 
 The block records are the ones `gen_pred_blocks.hlsl` writes; that shader is unchanged
@@ -1145,13 +1135,8 @@ shaders); frames larger than about 380 pixels a side.
 
 ### Shader listings in the artifact
 
-`intra-shaders/` holds the FXC listings of the four upstream intra shaders and of
-`intra_v2`, `intra_v2_hbd`, compiled with the flags the Release build uses for each
-(`intra_main` and `intra_main_hbd` with `/Od`, as the project asks), and `stats.txt`
-with the same counts as for CDEF. After the build the workflow checks that each listing's
-bytecode is the one compiled into the package. The directory also has the listings of
-`intra_main_opt` and `intra_main_hbd_opt`, see
-[Intra optimisation A/B](#intra-optimisation-ab--intraopt).
+The default package includes the DXIL listings of both intra paths under `shader-survey/asm/`.
+CI checks that their bytecode is in the packaged library.
 
 ## High-bit-depth intra shader
 
@@ -1164,7 +1149,7 @@ the edge selected for each pixel. DC and CFL use the shared memory for per-threa
 which the first thread of the block combines for its group.
 
 The wavefront schedule, bindings and video buffers are those of the existing frame-wide path.
-The `/Od` build of this source is the default, and `-intraopt` selects the FXC-optimised build
+The DXC `-Od` build of this source is the default, and `-intraopt` selects the optimised build
 of the same source.
 
 On the console (2026-11-18, package 0.2.218 against 0.2.220's default path, the same session after a
@@ -1183,15 +1168,12 @@ that was not merged) was slower than the default on the same console: `j4k40` in
 
 ## Intra optimisation A/B (`-intraopt`)
 
-Upstream's project compiles `intra_main.hlsl` and `intra_main_hbd.hlsl` with FXC
-optimisation disabled (`DisableOptimizations` for these two items in
-`libav1/build/libav1.vcxproj`, FXC `/Od`). They are the only shaders built that way, and
-neither a comment nor upstream's history says why. This flag puts both builds of the same
-source into one install, so a console run can compare their timing and their output.
+The player can compare the timing and output of two DXC builds of
+`intra_main.hlsl` and `intra_main_hbd.hlsl` in one install.
 
 | Flag | Effect |
 | --- | --- |
-| `-intraopt` | Where the decoder runs `intra_main` (`intra_main_hbd` for high bit depth), it uses the pipeline state built with FXC optimisation instead of the `/Od` one. The shader source is the same. |
+| `-intraopt` | Where the decoder runs `intra_main` (`intra_main_hbd` for high bit depth), it selects the pipeline state built with DXC's default optimisation. Both builds use the same shader source. |
 
 Off by default: without the flag the decoder uses the same pipeline states and issues
 the same dispatches as before. With the flag only the pipeline state of the `intra_main`
@@ -1205,24 +1187,20 @@ block copy); the other frames do not run `intra_main` at all.
 The task's log says which build is selected:
 
 ```text
-Intra main shader: intra_main (/Od, original)
-Intra main shader: intra_main_opt (FXC optimised, -intraopt)
+Intra main shader: intra_main (-Od, original)
+Intra main shader: intra_main_opt (DXC optimised, -intraopt)
 ```
 
 ### How it is built
 
 `intra_main_opt.hlsl` and `intra_main_hbd_opt.hlsl` consist of the licence header and one
-`#include` of the upstream file. They are separate `FxCompile` items without the
-`DisableOptimizations` override, so the Release build compiles them with the project's
-default settings, like every other shader. The workflow stops if any shader other than
-`intra_main` and `intra_main_hbd` is built with `/Od`, or if the two `_opt` items are
-missing.
+`#include` of the original file. The default shader set compiles the wrappers with DXC's
+default optimisation and the two original files with `-Od`.
 
-Whether the optimised bytecode behaves like the `/Od` one on the GPU is not known from the
-build; that is what the md5 run below is for. The host-side check (`testing/intra_check`)
-runs the HLSL source as C++ and cannot tell the two builds apart.
+Use frame md5s to compare the two bytecodes on a device. The host-side check
+(`testing/intra_check`) runs the HLSL source as C++.
 
-### Timing: `/Od` against optimised
+### Historical FXC timing
 
 Both lines in `args_av1.txt`, same clip, same settings, both with `-cdefv2`; the only
 difference is the flag:
@@ -1284,13 +1262,6 @@ Package 0.2.3.0 (run 43008653829), 4K 10-bit, 1 tile, 300 frames, all tasks with
   Neither is confirmed.
 - Only `intra_main_hbd_opt` ran on the console (both clips are 10-bit); the 8-bit
   `intra_main_opt` was not tested.
-
-### Shader listings in the artifact
-
-`intra-shaders/` has `intra_main_opt.asm` and `intra_main_hbd_opt.asm` next to the `/Od`
-listings `intra_main.asm` and `intra_main_hbd.asm`, and `stats.txt` gives the counts and
-the FXC compile time of all four. After the build the workflow checks that each of the
-four listings has the bytecode compiled into the package.
 
 ## Parser (`-parser`)
 
@@ -3396,29 +3367,28 @@ it as well.
 ### Shader pick (`-shaderpick`, the DXC package)
 
 The revision 4 package (`rav1g-testplayer-dxc-x64-<run id>`, Cargo feature `shader-pick`)
-embeds three sets of compute shaders. Use it to isolate a device-compiler miscompile by
+embeds two sets of DXIL compute shaders. Use it to isolate a device-compiler miscompile by
 choosing the bytecode for individual pipeline states. Without the flag, it uses the same
 DXIL as the default package. [DXC experiment](gpu-av1-decoder.md#dxc-experiment-2026-11-15)
 
 | Set | What it is |
 | --- | --- |
-| `dxc` | DXC, `-T cs_6_0`, its default optimisation (`-Od` for `intra_main` and `intra_main_hbd`, as FXC has `/Od` for them): what every shader is without the flag |
-| `od` | DXC with `-Od` where supported. For `intra_filter_hbd` it uses the optimized legacy kernel. |
-| `fxc` | FXC's `cs_5_0` bytecode from the same HLSL sources |
+| `dxc` | The default DXC `cs_6_0` build. It uses `-Od` for `intra_main` and `intra_main_hbd` and default optimisation for the other shaders. |
+| `od` | DXC `cs_6_0` with `-Od` where supported, using the same shader sources as `dxc`. |
 
-The experiment also requires SM 6.0. It can create DXBC and DXIL pipeline states side by side.
+Both sets require Shader Model 6.0. The old `fxc=` selector is rejected. The frozen
+FXC decoder and its listing tools are on branch `fxc-sm5`.
 
 ```text
--shaderpick fxc=<list>,od=<list>,dxc=<list>
+-shaderpick od=<list>,dxc=<list>
 ```
 
 - A `<list>` is shader names separated by commas (the names of the `.hlsl` files of
   `libav1/dx/shaders`: `loopfilter_vert_hbd`), or `all`. A name may have `*` for any characters:
   `loopfilter_*`, `*_hbd`, `inter_*_hbd`.
-- Any of the three parts may be missing, and a part may come more than once. The parts apply from left
-  to right, a later one overrides an earlier one: `fxc=all,dxc=loopfilter_vert_hbd` is FXC's bytecode
-  for everything but one shader, which is the quick way to ask "is this shader alone enough to break
-  the output?"; `fxc=loopfilter_vert_hbd` asks "is it the only one?".
+- Either part may be omitted or repeated. Parts apply from left to right, so
+  `od=all,dxc=loopfilter_vert_hbd` uses the `od` set for every shader except the 10-bit
+  vertical loop filter. `od=loopfilter_vert_hbd` changes that shader alone.
 - No spaces inside the pick.
 - A nonempty pick requires the shader-pick build. An unknown shader or set is an error.
   The player logs the reason and ends the launch. `rav1g-dec` reports the error and exits with code 3.
@@ -3429,31 +3399,27 @@ does with `-sm6test`: it may stand on a line of its own or on the line of a stre
 of the file counts. One launch, one pick: a bisection is one launch per pick. In `rav1g-dec` it is a
 program flag (the command line, or `--tool-args` of `testing/conformance/run.py`).
 
-The default high-bit-depth filter intra kernel preloads the block edges and filter taps.
-Each lane predicts two adjacent samples of a 4x2 unit and writes one word with its residual.
-Two banks of group memory carry the uncorrected edges, with one group sync between diagonals.
-For an A/B in the shader-pick package, use `-shaderpick od=intra_filter_hbd` for the original
-kernel and `-shaderpick dxc=intra_filter_hbd` for the default kernel, both at the same DXC
-optimization level. The FXC set also uses the original kernel.
+`-shaderpick od=intra_filter_hbd` selects the current high-bit-depth filter-intra
+kernel compiled with `-Od`. Both sets use the kernel that preloads the edges and taps and
+predicts two adjacent samples per lane.
 
 ```text
--shaderpick fxc=loopfilter_vert_hbd
+-shaderpick od=cdef_filter_v2,loopfilter_vert_hbd
 -i <stream> -t 6 -frate -1 -queue_size 4 -nopresent -md5_frame_check
 ```
 
-**What the log says.** The library writes four lines when it creates the pipeline states (in the
+**What the log says.** The library writes three lines when it creates the pipeline states (in the
 player's log behind `MEMORY app before the pipeline states`; `rav1g-dec` prints them behind its
 `SHADERS` line): one per set with the compiler and its arguments, and the pick, with the number of
 shaders of every set and the names of all but the largest set:
 
 ```text
 SHADERSET dxc: DXC 1.9.2602.17 cs_6_0: dxc -nologo -T cs_6_0 -E main -HV 2018 -WX -Wno-ambig-lit-shift; -Od for intra_main, intra_main_hbd
-SHADERSET od: DXC 1.9.2602.17 cs_6_0: dxc -nologo -T cs_6_0 -E main -HV 2018 -WX -Wno-ambig-lit-shift -Od; intra_filter_hbd uses the optimized legacy kernel; default DXIL for intra_v2, intra_v2_hbd (64-bit values at -Od)
-SHADERSET fxc: FXC cs_5_0: fxc /nologo /T cs_5_0 /E main /Vn <name>; /Od for intra_main, intra_main_hbd
-SHADERPICK fxc=loopfilter_vert_hbd,od=cdef_filter_v2: dxc 100 (all others); od 1 (cdef_filter_v2); fxc 1 (loopfilter_vert_hbd)
+SHADERSET od: DXC 1.9.2602.17 cs_6_0: dxc -nologo -T cs_6_0 -E main -HV 2018 -WX -Wno-ambig-lit-shift -Od; default DXIL for intra_v2, intra_v2_hbd (64-bit values at -Od)
+SHADERPICK od=cdef_filter_v2,loopfilter_vert_hbd: dxc 100 (all others); od 2 (cdef_filter_v2 loopfilter_vert_hbd)
 ```
 
-Without the flag the last line is `SHADERPICK none: dxc 102 (all); od 0; fxc 0`. A pick with many names
+Without the flag the last line is `SHADERPICK none: dxc 102 (all); od 0`. A pick with many names
 goes on in lines that start with `SHADERPICK +`. The player also logs `Shader pick (-shaderpick):
 <pick>` when a task file has the flag. The `LIBRARY` line and `Experiments: shaders shader-pick` identify the build.
 
@@ -3466,7 +3432,7 @@ goes on in lines that start with `SHADERPICK +`. The player also logs `Shader pi
   the bytecode of the set <set>, <bytes> bytes of bytecode): hr 0x...`, and the launch runs no task.
   (wine's vkd3d refuses the `-Od` DXIL of `gen_pred_blocks` and `gen_pred_blocks_fast`, "invalid value
   self-reference" in its DXIL parser; WARP takes all of them.)
-- **Size.** Revision 4 embeds three arrays per shader. The default package, the uavsync
+- **Size.** Revision 4 embeds two arrays per shader. The default package, the uavsync
   package and the release DLL embed one DXC array per shader.
 
 In the interface it is `rav1g_set_shader_pick(const char *pick)` of `rav1g.h`, next to the other
@@ -3474,14 +3440,15 @@ experiment switches (`RAV1G_STATUS_INVALID_PARAM` and `rav1g_last_error` for a p
 it holds for the devices created after the call. `rav1g::switches::set_shader_pick` and
 `shader_pick_lines` in Rust.
 
-**The build.** Pass `--variant shader-pick --dxc <dxc> --fxc <fxc>` to
-`testing/shader_cache/shaders.py build`. It writes `dx/shaders/h`, `h_od` and `h_fxc` and
+**The build.** Pass `--variant shader-pick --dxc <dxc>` to
+`testing/shader_cache/shaders.py build`. It writes `dx/shaders/h` and `dx/shaders/h_od` and
 records the compiler and arguments of each set in `shader_sets.txt`. Build the library from
-that root with `--features shader-pick`. CI verifies all three sets in the experiment binaries.
+that root with `--features shader-pick`. CI verifies both sets in the experiment binaries.
 
-The `rust-dxc` CI matrix decodes the conformance set on WARP using the default DXIL, all FXC,
-all DXC `-Od`, and a mix. Each shard checks frame md5s and the reported pick. The smoke tests
-exercise the player's task-line pick and reject an unknown shader name. The matrix runs on
+The `rust-dxc` CI matrix decodes the conformance set on WARP with the default set, the
+`od` set, and a mix. Each shard checks frame md5s and the reported pick. The smoke tests
+exercise the player's task-line pick. Argument checks reject an unknown shader name and the
+retired `fxc` set. The matrix runs on
 manual, weekly and tag runs, and on branch pushes that change shader or pick inputs. Results are
 in `rav1g-dec-dxc-<case>-<run id>`.
 
@@ -3821,9 +3788,8 @@ reading in [gpu-av1-decoder.md](gpu-av1-decoder.md#shader-model-6-feasibility-20
 
 ### How it is built
 
-The test shaders are compiled by `testing/sm6test/compile.py` and by nothing else: not by the
-project files, and they are not in the shader cache, the survey or the listings scan, which see the
-decoder's shaders only.
+The script `testing/sm6test/compile.py` compiles the test shaders separately from the
+decoder shader cache.
 
 ```bat
 python testing\sm6test\compile.py --dxc "<Windows SDK>\bin\10.0.26100.0\x64\dxc.exe" --out sm6test-build
@@ -3845,57 +3811,20 @@ The comparisons have a self-test on Linux (`sh testing/sm6test/run.sh`, part of 
 job): the shaders, emulated from their HLSL with waves of 1 to 64 threads, lanes in thread order
 and reversed, must pass, and every output with one word changed must fail.
 
-## Shader survey
+## Shader build artifacts
 
-The default package carries DXIL listings in `shader-survey/asm/` and their compiler report
-in `shader-survey/build.json`. CI verifies the bytecode from those compiles in the packaged
-DLL. The shader-pick package carries listings for all three sets in `dxc-shaders/`. Its
-`shader-survey/survey.md`, `survey.csv`, and the CDEF and intra counts describe its FXC
-listings. The counts include instruction slots, registers, group memory, barriers and loops.
-They describe static code size and structure.
+The default package carries DXIL listings in `shader-survey/asm/` and the compiler report
+in `shader-survey/build.json`. The shader-pick package carries the default listings in
+`dxc-shaders/asm/`, the `-Od` listings in `dxc-shaders/asm/od/`, and its report in
+`dxc-shaders/build.json`. CI verifies the embedded bytecode against the generated headers.
 
-### Listings scan
-
-After the FXC survey the workflow reads the experiment package’s FXC listings with
-`testing/dxbc_scan/scan.py` and stops when it finds the pair of instructions that the console's
-driver compiled wrongly in the 8-bit vertical loop filter
-([gpu-av1-decoder.md](gpu-av1-decoder.md#a-paired-read-before-an-overlapping-in-place-write-2026-11-12)):
-
-- an *overlapping in-place write*: an instruction that writes components of a temp register and
-  reads, of the same register, for a written component, another component that it also writes
-  (`iadd r3.yw, r3.wwww, -r4.xxxy`: `r3.y` from `r3.w`). FXC emits about 1650 of them in the 92
-  shaders; they are counted;
-- with a *paired read before it*: the write is an arithmetic or logic instruction, and before it,
-  with no flow control instruction between the two, an instruction that does not write the
-  register reads two or more of the components the write replaces into one component of its
-  result (`iadd r2.x, r3.w, -r3.y`). This stops the run, unless the write is in
-  `testing/dxbc_scan/allow.txt`.
-
-```sh
-python3 testing/dxbc_scan/scan.py --self-test
-uv run python testing/dxbc_scan/scan.py --listings dxc-shaders/asm/fxc --out listing-scan.txt
-```
-
-The step log names every pair with its shader, the line of the listing and both instructions; the
-artifact's `shader-survey/listing-scan.txt` also has every overlapping in-place write. `--self-test`
-checks the scan itself: it must find the pair in a copy of the old listing and must not find it in
-five sequences that differ from it in one property each. An opcode the scan does not know stops it,
-so no instruction goes unread.
-
-When the step fails after a shader change: find the HLSL of the two instructions and change its form,
-not its arithmetic, until FXC no longer emits the pair. What worked so far: every output from its own
-sum instead of a running sum (`loopfilter_vert.hlsl`), another order of the terms of one sum
-(`loopfilter_hor.hlsl`), addresses of rows written as explicit vectors of another width
-(`inter_warp.hlsl`, `inter_compound_masked_hbd.hlsl`), a `[branch]` in front of an `if` that FXC had
-turned into a select (`inter_2x2chroma_hbd.hlsl`). The order of statements does not matter to FXC. A
-line in `allow.txt` needs a proof that the console runs that pair correctly, written next to it; a
-line that matches no pair any more is an error.
+The FXC listing survey, inter instruction counts and DXBC scan are available on
+`fxc-sm5`. [History of the DXBC scan](gpu-av1-decoder.md#a-paired-read-before-an-overlapping-in-place-write-2026-11-12)
 
 ### Shader cache of the workflow
 
 The action in `.github/actions/shaders` runs `testing/shader_cache/shaders.py` for the
-`.hlsl` files of `libav1/dx/shaders`. The default and uavsync variants use DXC alone.
-The shader-pick variant also calls FXC for the diagnostic set.
+`.hlsl` files of `libav1/dx/shaders`. DXC builds the default and uavsync variants and both shader-pick sets.
 
 - Each cache key covers the compiler and its libraries, the compiler options, and the
   shader source and transitive includes.

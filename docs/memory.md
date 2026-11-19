@@ -317,12 +317,9 @@ Before the change, three sets of three local runs of `rav1g-parse-check -time -t
 streams put the sink at 1.1 to 2.0 ms and 1.1 to 3.6 ms per frame. Those numbers are differences of
 runs with and without the sink.
 
-**The equality reference.** The `rust-equal` job uses `shaders.py same --candidate-changed` for
-`gen_pred_blocks`, `gen_lf_blocks_vert` and `gen_lf_blocks_hor`. The check requires these shaders to
-differ from the C++ reference and the other shared shaders to match. The legacy
-`gen_pred_blocks_fast` is built for comparison with C++. Rust uses `gen_pred_blocks_fast_packed`
-for `-interfast`, listed under `--candidate-only` with `cdef_lists` and `mi_grid_build`. The stage dump
-and per-frame md5 checks still hold the prediction, warp, loop filter and CDEF lists and the later
+**The equality reference.** Before the DXC switch, `rust-equal` checked which shader headers
+changed with the new record layout. Each executable now verifies its own compiler's bytecode.
+The stage dump and per-frame md5 checks still hold the prediction, warp, loop filter and CDEF lists and the later
 stages against the C++ decoder. `stage_dump.py` reads the 224- and 96-byte layouts by the dump's
 `record=` and compares the shared fields of `mi_grid` and `mi_pool` through the grid. With
 `--two-parsers` those differences are listed without deciding equality. Digests of mode info hold

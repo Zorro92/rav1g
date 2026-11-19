@@ -504,8 +504,8 @@ struct IntraData {
 }
 
 // Test player switch (-intraopt): the original intra path takes intra_main from the pipeline state built
-// with FXC optimisation (intra_main_opt.hlsl / intra_main_hbd_opt.hlsl, which only include the original
-// source) instead of the /Od build the project asks for. Off unless av1_set_intra_opt(1) was called.
+// by DXC with optimisation (intra_main_opt.hlsl / intra_main_hbd_opt.hlsl, which only include the original
+// source). Off unless av1_set_intra_opt(1) was called. The default pipeline uses the -Od build.
 static INTRA_OPT: AtomicI32 = AtomicI32::new(0);
 
 /// `av1_set_intra_opt` (`dx/av1_perf.h`).
@@ -1120,7 +1120,7 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
         if td.intra_iters >= 0 || have_recon {
             let constants = alloc_constants::<IntraData>(&mut td.command_buffer);
             let data = constants.data;
-            // The /Od build unless -intraopt asks for the optimised build of the same source (same layout).
+            // The -Od build unless -intraopt asks for the optimised build of the same source (same layout).
             let intra_main: *const ComputeShader = if INTRA_OPT.load(Ordering::Relaxed) != 0 {
                 &raw const (*shaders).intra_main_opt
             } else {

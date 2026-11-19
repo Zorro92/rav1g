@@ -153,29 +153,16 @@ default package of the player. The cases with a decode error are in
 Phase 1 of the Rust port kept the output of the decoder byte for byte, and CI goes on checking that
 against the C++ decoder, which is no longer in this branch:
 
-- The job **`cpp-reference`** checks out branch `cpp` at the commit that `CPP_REFERENCE_COMMIT` of
-  `.github/workflows/build.yml` names (e583067, the head of `cpp` on 2026-11-15), builds its
-  `warp_decoder` with its own shaders, and runs it with the scripts, streams and task lists of this
+- The job **`cpp-reference`** checks out branch `cpp` at the commit named by `CPP_REFERENCE_COMMIT`
+  in `.github/workflows/build.yml`. It builds `warp_decoder` with the pinned branch's own FXC
+  shaders and runs it with the scripts, streams and task lists of this
   commit: the whole set (`run.py`; it has to give the results of `expected.txt` too), the stage dumps
   of `dump_tasks.txt`, and the MEMORY lines of ten decoder configurations (`memory_lines.py`).
   Artifacts `rav1g-cpp-reference-<run id>` and `rav1g-cpp-reference-stage-dumps-<run id>`.
-- The job **`rust-equal`** first checks that the shaders of this commit are those of the pinned
-  commit (`shaders.py same`, on the reports of the two shader builds), then compares, `rav1g-dec`
-  against `warp_decoder`: the md5 of every output frame of every stream, the bytes of every stage
-  dump (`compare_md5.py`), and the MEMORY lines (`memory_lines.py compare`). The host pool is left
-  out of that comparison: the C++ decoder lies in its pool, the Rust decoder is an allocation of its
-  own next to a pool that holds only what the entropy decoder is given, so the pool of a configuration
-  is 74,688 bytes smaller by design ([rust-port.md](rust-port.md#the-host-pool-and-the-queues-2026-11-13));
-  its two numbers in the `decoder created` line are made equal and the `host memory` line, which only
-  the Rust decoder writes, is dropped. The device buffers, the frame buffers, the options, the budget
-  decision and the steps of the release are compared as before.
-
-The pin is bumped on purpose, in the workflow and here, when a change both decoders have (a shader,
-the C of the parser) is on both branches. The comparison is between two hosts that run the same
-shaders; it **ends when the shaders of the branches diverge**, which is planned for the switch to DXC
-and for phase 2 ([rust-port.md](rust-port.md#equality-reference)). `rust-equal` then fails at its
-first step and says so, and the jobs `cpp-reference` and `rust-equal` are removed; the references of
-dav1d and AOM, which every pass of the set is held against, stay.
+- The job **`rust-equal`** compares frame md5s, stage dumps, GPU prediction lists and buffer plans
+  from the DXC build of `rav1g-dec` and the FXC build of `warp_decoder`. Each build verifies
+  its embedded shader bytecode against its own headers.
+  [Equality reference](rust-port.md#equality-reference)
 
 ## Run
 

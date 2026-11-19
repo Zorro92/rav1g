@@ -144,10 +144,10 @@ pub fn shader_set() -> &'static str {
 }
 
 /// The shader-pick experiment (the feature `shader-pick`; docs/test-player.md, "Shader pick"): the
-/// library of that build has three bytecodes of every shader, and `pick` says which one the pipeline
+/// library of that build has two bytecodes of every shader, and `pick` says which one the pipeline
 /// state of a shader is made of, in the devices created after the call:
-/// `fxc=<list>,od=<list>,dxc=<list>`. `dxc` is the default build's bytecode (also used without a pick),
-/// `od` DXC's with `-Od`, `fxc` the `cs_5_0` bytecode of FXC. A list is shader
+/// `od=<list>,dxc=<list>`. `dxc` is the default build's bytecode (also used without a pick).
+/// `od` uses DXC with `-Od` where supported. A list is shader
 /// names separated by commas, `all`, or names with `*`; a later part overrides an earlier one. An empty
 /// text is no pick, and the only one a library without the feature takes. `Err` (the pick stays what it
 /// was) names what is wrong.

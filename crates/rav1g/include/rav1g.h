@@ -1257,12 +1257,12 @@ void rav1g_set_intra_edge_fix(bool enable);
 
 /*
  Experiment (a library whose `rav1g_shader_variant` is "shader-pick"): which bytecode the pipeline
- state of a shader is made of, in the devices created after the call. The build has three sets:
- `dxc`, the default build's DXC bytecode, also used without a pick; `od`, DXC with `-Od`;
- `fxc`, FXC's `cs_5_0` bytecode for compiler diagnostics.
- `pick` is "fxc=<list>,od=<list>,dxc=<list>": a list is shader names (the names of
+ state of a shader is made of, in the devices created after the call. The build has two sets.
+ `dxc` is the default build's DXC bytecode, also used without a pick.
+ `od` uses DXC with `-Od` where supported.
+ In a `pick` of the form "od=<list>,dxc=<list>", a list is shader names (the names of
  the `.hlsl` files) separated by commas, `all`, or names with `*` for any characters; a later part
- overrides an earlier one ("fxc=all,dxc=loopfilter_vert_hbd"). Null or an empty text is no pick. The
+ overrides an earlier one ("od=all,dxc=loopfilter_vert_hbd"). Null or an empty text is no pick. The
  device logs one "SHADERSET" line per bytecode set and a "SHADERPICK" line with the shaders of each.
  `RAV1G_STATUS_INVALID_PARAM` (and the reason in `rav1g_last_error`) for a text that is not a pick, a
  name no shader has, and any pick in a library that is not that build; the pick then stays what it was.

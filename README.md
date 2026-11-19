@@ -27,6 +27,10 @@ Experimental. The decoder is upstream's, plus timing instrumentation, a rewritte
 shader and a smaller memory footprint. Tested on Xbox Series consoles in UWP app mode with
 the test player (`testing/uwp_dx12_player`).
 
+`main` targets Xbox Series X|S with D3D12 and DXC Shader Model 6.0. The revision 4 test
+package compares default DXIL and DXC `-Od` per shader. The frozen FXC/Shader Model 5 line
+is on branch `fxc-sm5`. [Shader pick](docs/test-player.md#shader-pick--shaderpick-the-dxc-package)
+
 Defaults (test player and library): the rewritten CDEF shader, a decoder sized for the
 stream, one back buffer shared by all frames, two frames in flight, rav1d's parse pass as
 the parser, and no per-frame clears of a slot by the CPU (the wavefront of intra prediction
@@ -57,9 +61,8 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
   selects upstream's shader).
 - **Intra v2** (`-intrav2`) is bit-exact but 2.3–2.4x slower. It is a negative result, off by
   default and kept for reference.
-- **Intra optimisation A/B** (`-intraopt`): upstream builds its `intra_main` shader with FXC
-  optimisation disabled. With optimisation on it is no faster and decodes wrongly (a
-  timing-dependent race), which is probably why upstream turned it off. Negative result.
+- **Intra optimisation A/B** (`-intraopt`): selects the optimised DXC build of `intra_main`
+  and `intra_main_hbd`. The default build compiles those two shaders with `-Od`.
 - **A third frame in flight** (`-slots 3`) lets CPU and GPU overlap: the decode thread's wait
   for a free slot drops from 5.6–8.3 ms to 0.3–0.6 ms per frame. It only fits in memory with
   `-lowmem`. All combinations are md5-exact. On the SVT clip the CPU (entropy decoding,
@@ -128,9 +131,8 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
   rewrites those two components in place, and the console ran the first as `r3.z - r3.x`. A model of
   the filter with that one change gives the console's output of a 3840x2160 frame to the last sample
   (40240 edges in that branch); the rest of the two 8-bit filters runs as written. The branch is
-  rewritten to avoid the pair, the workflow scans the experiment package's FXC listings
-  (`testing/dxbc_scan`), and the output on WARP is unchanged
-  ([gpu-av1-decoder.md](docs/gpu-av1-decoder.md#a-paired-read-before-an-overlapping-in-place-write-2026-11-12)).
+  rewritten to avoid the pair. WARP's output was unchanged. The FXC listing scan is on
+  `fxc-sm5`. [Details of the fix](docs/gpu-av1-decoder.md#a-paired-read-before-an-overlapping-in-place-write-2026-11-12)
 - **Output that depended on what the process had decoded before** (fixed, rav1g dda14c7; found and
   verified on WARP, not yet run on the console). A decoder created behind another one in the same
   process could be wrong from its first frame on and right alone: `av1-1-b10-00-quantizer-00` behind

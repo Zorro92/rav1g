@@ -339,11 +339,11 @@ pub fn usage() {
     );
     say!("                        line per shader (docs/test-player.md); needs no stream: without -i and -list the");
     say!("                        program ends after the test");
-    say!("  -shaderpick <pick>    the shader-pick build takes fxc=<list>,od=<list>,dxc=<list> to choose pipeline");
-    say!("                        bytecode per shader. dxc: the default DXC build; od: DXC with -Od; fxc: FXC cs_5_0.");
+    say!("  -shaderpick <pick>    the shader-pick build takes od=<list>,dxc=<list> to choose pipeline");
+    say!("                        bytecode per shader. dxc is the default DXC build, od uses DXC with -Od.");
     say!("                        Without the flag every shader uses the dxc set. A list is");
     say!("                        shader names separated by commas, 'all', or names with '*'; a later part overrides");
-    say!("                        an earlier one (fxc=all,dxc=loopfilter_vert_hbd). 'SHADERSET ...' and 'SHADERPICK");
+    say!("                        an earlier one (od=all,dxc=loopfilter_vert_hbd). 'SHADERSET ...' and 'SHADERPICK");
     say!("                        ...' lines say what was taken (docs/test-player.md, \"Shader pick\")");
     say!("  -playersmoke <dir>    run the decoder code of the test player (testing/player_common) through rav1g.h on");
     say!("                        the device, with the tasks of <dir>/args/args_av1.txt as the player reads them from");

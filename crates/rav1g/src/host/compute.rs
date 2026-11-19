@@ -57,8 +57,8 @@ struct ShaderBytecode {
 
 #[cfg(feature = "shader-pick")]
 unsafe extern "C" {
-    /// `crates/rav1g-sys/shader_table.c` with `shader-pick`: the table for one of the three sets of bytecode
-    /// the library then has of every shader (0 DXC, 1 DXC with -Od, 2 FXC), all in the same order.
+    /// `crates/rav1g-sys/shader_table.c` with `shader-pick`: either the default or alternate bytecode
+    /// table (0 DXC, 1 DXC with -Od), in the same order.
     fn rav1g_shader_table_set(set: u32, count: *mut u32) -> *const ShaderBytecode;
 }
 
@@ -109,7 +109,7 @@ fn shader_names() -> Vec<&'static str> {
     shader_table(Set::Dxc).iter().map(shader_name).collect()
 }
 
-/// The shader-pick experiment (`shader_pick.rs`): which of the three bytecodes of the build
+/// The shader-pick experiment (`shader_pick.rs`): which of the two bytecodes of the build
 /// the pipeline state of a shader is made of, in the devices created after the call. An empty text is
 /// the default DXC bytecode for every shader. Only a shader-pick build accepts a nonempty pick.
 pub(crate) fn set_shader_pick(text: &str) -> Result<(), String> {
@@ -125,7 +125,7 @@ pub(crate) fn shader_pick_lines() -> Vec<String> {
     }
     let names = shader_names();
     let text = shader_pick::get();
-    let mut lines: Vec<String> = ["dxc", "od", "fxc"]
+    let mut lines: Vec<String> = ["dxc", "od"]
         .iter()
         .zip(crate::sys::SHADER_SETS)
         .map(|(set, line)| format!("SHADERSET {set}: {line}"))
@@ -559,8 +559,7 @@ pub unsafe extern "C" fn av1_create_pipeline_cache_handle(d3d12device: *mut c_vo
         ),
     );
 
-    // The shader-pick experiment: what compiled the three bytecodes of the build, and which shaders this device
-    // gets which of (docs/test-player.md, "Shader pick").
+    // The shader-pick experiment: log the compiler options of both sets and the device's pick.
     for line in shader_pick_lines() {
         log(false, &line);
     }
@@ -897,6 +896,6 @@ mod tests {
         for name in names {
             assert!(bytecode(name).is_some(), "the glue has the bytecode of {name}");
         }
-        assert!(shader_pick::resolve("fxc=gen_pred_blocks_fast", &shader_names()).is_ok());
+        assert!(shader_pick::resolve("od=gen_pred_blocks_fast", &shader_names()).is_ok());
     }
 }

@@ -85,6 +85,9 @@ output fence. Nothing has to be reset between streams.
   (`RAV1G_STATUS_INCAPABLE` in the C enum). The pointer-returning C call has no status return value.
   The default shaders require no wave intrinsics, native 16-bit operations, or optional typed UAV
   loads. This check applies to both application-supplied and decoder-created devices.
+- **The decoder on `main` uses DXC `cs_6_0` throughout.** The shader-pick test build selects
+  between default DXIL and DXC `-Od` per shader. The frozen FXC decoder and its player are on
+  branch `fxc-sm5`. [Shader pick](test-player.md#shader-pick--shaderpick-the-dxc-package)
 - **The output fence is the decoder's.** A new decoder has a new fence: open it on the D3D11 device
   again (`rav1g_decoder_output_fence`, `CreateSharedHandle`, `OpenSharedFence`), and close the handle
   of the old one.

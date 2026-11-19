@@ -10,8 +10,13 @@ Most of it was written while the decoder's D3D12 host was C++. The C++ files it 
 (`libav1/dx/av1_core.cpp`, `prediction.cpp`, `loopfilters.cpp`, `av1_compute.cpp`, `types.h`, ...) and
 `warp_decoder` are in branch `cpp` since 2026-11-13; on `main` the same code is Rust, in the modules of
 `crates/rav1g/src/host` that name those files as their origin, and the desktop program is `rav1g-dec`
-([rust-port.md](rust-port.md), [warp-decoder.md](warp-decoder.md)). The shaders and the C parser, which
-most of the findings are about, are the same files on both branches.
+([rust-port.md](rust-port.md), [warp-decoder.md](warp-decoder.md)).
+
+On current `main`, rav1d parses on the CPU and DXC `cs_6_0` compute shaders run the rest of
+the decoder on D3D12. The revision 4 shader-pick package provides the default DXIL and DXC
+`-Od` bytecode. The FXC/Shader Model 5 decoder, listing survey and scan are on the frozen
+`fxc-sm5` branch. CI still builds the pinned C++ reference with its own FXC shaders for
+output comparisons. [Shader pick](test-player.md#shader-pick--shaderpick-the-dxc-package)
 
 ## Scoping (2026-11-08)
 
@@ -479,7 +484,7 @@ between passes that touch only a thread's own samples. On WARP the conformance r
 245 of 251 streams ([warp-decoder.md](warp-decoder.md#results)).
 
 **Cost.** Static FXC counts of the 59 shaders that changed: 39545 instruction slots before,
-40483 after (+2.4%); the survey of every CI run has them per shader. The largest relative changes
+40483 after (+2.4%). The FXC survey recorded them per shader. The largest relative changes
 are in small shaders: `idct_lossless` +13%, the 20 shaders for scaled references +7 to +11%,
 `loopfilter_hor` +8 to +9%, the transforms -0.5 to +8%. What a group sync costs on the console is
 not known: a group of 64 threads is one wave there, where a sync should be free, and `intra_main`
@@ -553,8 +558,8 @@ are the same and the survey's rule costs nothing.
 **Change.** The masks come from a table (`low_bits()` in `inter_common.h`, local tables in
 `intra_filter.hlsl` and the two border shaders), which FXC compiles to a table lookup and an
 `and`: 23 shaders, same results (the conformance run on WARP and the host checks are unchanged).
-The workflow's shader survey now fails on a bit field instruction with a run-time width other
-than `ubfe` at offset 0. If the console decodes the 8-bit and the scaled-reference streams right
+The FXC workflow's survey rejected bit field instructions with a run-time width, with an exception
+for `ubfe` at offset 0. If the console decodes the 8-bit and the scaled-reference streams right
 with this build, the assumption holds; if not, the stage dumps
 ([test-player.md](test-player.md#stage-dumps--dumpstages)) say which stage differs.
 
@@ -813,7 +818,8 @@ everything that looks like it, and is not a statement that every hit is wrong.
 
 ### The pattern and the scan
 
-`testing/dxbc_scan/scan.py` reads the listings (every instruction; an opcode it does not know stops it):
+`testing/dxbc_scan/scan.py` on `fxc-sm5` reads each instruction in the FXC listings and stops
+on unknown opcodes. It looks for these two patterns.
 
 - **Overlapping in-place write**: an instruction that writes components of a temp register and reads,
   of the same register, for at least one written component, another component that it also writes
@@ -893,11 +899,11 @@ the changed shaders, and the host checks pass (the run of the commit that made t
 
 ### The check
 
-The workflow scans the listings of both variants after the survey (`Listings scan` step:
+The FXC workflow scanned the listings of both variants after the survey (`Listings scan` step:
 `scan.py --self-test`, which must find the pair above in a copy of the old listing and must not find
 it in five sequences next to it, then the scan). A pair that is not on the allow-list stops the run;
 `shader-survey/listing-scan.txt` in the artifact has every overlapping in-place write, per shader, and
-the pairs. See [test-player.md](test-player.md#listings-scan).
+the pairs. The survey and scan remain available on `fxc-sm5`.
 
 ### Not run on the console
 
@@ -916,7 +922,7 @@ from dav1d on the console or on WARP.
 
 ## Shader Model 6 feasibility (2026-11-12)
 
-All shaders are FXC shaders of Shader Model 5.0. Moving them to DXC and Shader Model 6 would give wave
+At the time, all shaders used FXC and Shader Model 5.0. Moving them to DXC and Shader Model 6 would give wave
 intrinsics (a sum or a prefix sum over the lanes of a wave without group memory and group syncs) and
 native 16-bit types (samples and coefficients as `uint16_t` and `int16_t` instead of 32-bit words). Whether that is open depends on the
 console: what its D3D12 takes in app mode, and how wide its waves are.

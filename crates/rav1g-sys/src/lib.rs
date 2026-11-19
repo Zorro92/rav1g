@@ -45,10 +45,8 @@ pub const C_BUILD: &str = env!("RAV1G_C_BUILD");
 /// What compiled the default shader set, for example "DXC 1.9.2602.17 cs_6_0".
 pub const SHADER_SET: &str = env!("RAV1G_SHADER_SET");
 
-/// The feature `shader-pick`: the compiler and the arguments of the three bytecodes the library has of every
-/// shader, in the order of the sets of the shader pick (dxc, od, fxc); empty strings without the feature.
-pub const SHADER_SETS: [&str; 3] =
-    [env!("RAV1G_SHADER_SET_DXC"), env!("RAV1G_SHADER_SET_OD"), env!("RAV1G_SHADER_SET_FXC")];
+/// The compiler and arguments of the two shader-pick sets (dxc, od). Empty strings without the feature.
+pub const SHADER_SETS: [&str; 2] = [env!("RAV1G_SHADER_SET_DXC"), env!("RAV1G_SHADER_SET_OD")];
 
 #[cfg(test)]
 mod layout_tests;

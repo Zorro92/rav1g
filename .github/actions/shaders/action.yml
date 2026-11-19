@@ -6,7 +6,7 @@ inputs:
     description: The directory of the checkout, relative to the workspace
     default: .
   sdk:
-    description: The Windows SDK supplying DXC, and FXC for shader-pick
+    description: The Windows SDK supplying DXC
     required: true
   variant:
     description: normal, uavsync, or shader-pick
@@ -31,14 +31,8 @@ runs:
         $ErrorActionPreference = 'Stop'
         $sdkBin = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin\$env:SHADER_SDK\x64"
         $dxc = Join-Path $sdkBin dxc.exe
-        $options = @('--dxc', $dxc)
         "dxc=$dxc" >> $env:GITHUB_OUTPUT
-        if ($env:SHADER_VARIANT -eq 'shader-pick') {
-          $fxc = Join-Path $sdkBin fxc.exe
-          $options += @('--fxc', $fxc)
-          "fxc=$fxc" >> $env:GITHUB_OUTPUT
-        }
-        python "$env:SHADER_REPO/testing/shader_cache/shaders.py" key @options --variants $env:SHADER_VARIANT
+        python "$env:SHADER_REPO/testing/shader_cache/shaders.py" key --dxc $dxc --variants $env:SHADER_VARIANT
         if ($LASTEXITCODE -ne 0) { throw 'The keys of the shaders could not be computed' }
 
     - name: Shader cache
@@ -56,16 +50,13 @@ runs:
         SHADER_REPO: ${{ inputs.repo }}
         SHADER_VARIANT: ${{ inputs.variant }}
         DXC: ${{ steps.key.outputs.dxc }}
-        FXC: ${{ steps.key.outputs.fxc }}
       run: |
         $ErrorActionPreference = 'Stop'
         $script = "$env:SHADER_REPO/testing/shader_cache/shaders.py"
         $cache = "shader-cache/$env:SHADER_VARIANT"
         $directory = (New-Item -ItemType Directory -Force "shader-build/$env:SHADER_VARIANT").FullName
-        $options = @('--dxc', $env:DXC)
-        if ($env:SHADER_VARIANT -eq 'shader-pick') { $options += @('--fxc', $env:FXC) }
         $report = Join-Path $directory 'report.json'
-        python $script build @options --variant $env:SHADER_VARIANT --cache $cache --root $directory `
+        python $script build --dxc $env:DXC --variant $env:SHADER_VARIANT --cache $cache --root $directory `
           --listings (Join-Path $directory 'asm') --report $report
         if ($LASTEXITCODE -ne 0) { throw "The shaders of the $env:SHADER_VARIANT build could not be compiled" }
         python $script prune --cache $cache $report

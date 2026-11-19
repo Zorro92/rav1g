@@ -792,7 +792,7 @@ int AV1Decoder::DecodeOne() {
   // -intraopt: which build of the original intra_main shader runs; independent of the two flags above.
   rav1g_set_intra_opt(params_.intraopt_ != 0);
   XB_LOGI << "Intra main shader: "
-          << (params_.intraopt_ ? "intra_main_opt (FXC optimised, -intraopt)" : "intra_main (/Od, original)");
+          << (params_.intraopt_ ? "intra_main_opt (DXC optimised, -intraopt)" : "intra_main (-Od, original)");
 
   // -slots, -parseframes, -t: fixed when the decoder was created; Start() asks for a new decoder when a
   // value changes. What the decoder has is what the library made of them.

@@ -3,10 +3,9 @@ description: >
   The shaders of the Shader Model 6 test (testing/sm6test/shaders; player flag -sm6test), compiled with the
   DXC of the Windows SDK (testing/sm6test/compile.py).
 
-# These are not shaders of the decoder. They are not in the shader cache, the survey or the listings scan
-# (.github/actions/shaders, testing/shader_cache, testing/dxbc_scan), which see the FXC shaders of
-# libav1/dx/shaders only; the programs get them through /p:Rav1gSm6TestShaders=<the directory>. DXC takes
-# a few seconds for all of them, so they are compiled in every job that builds a program, without a cache.
+# The shader cache covers libav1/dx/shaders. The programs get these separate test shaders through
+# /p:Rav1gSm6TestShaders=<the directory>. DXC takes a few seconds for all of them, so they are compiled
+# in every job that builds a program, without a cache.
 #
 # The step fails when a shader does not compile (the Shader Model 6.8 ones may: compile.py marks them
 # optional, and the test then reports them as not built) or when the bytecode has no validation hash: DXC

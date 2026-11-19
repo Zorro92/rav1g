@@ -14,10 +14,6 @@
  * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
  */
 
-#ifdef INTRA_FILTER_LEGACY
-#include "intra_filter_hbd_legacy.h"
-#else
-
 cbuffer IntraDataCommon : register(b0) {
   int4 cb_planes[3];
   int4 cb_flags;
@@ -178,5 +174,3 @@ uint4 pack_taps(int4 lo, int4 hi) {
     dst_frame.Store(frame_offset + 2 * row * stride, lo | (hi << 16));
   }
 }
-
-#endif

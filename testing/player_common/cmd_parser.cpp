@@ -79,7 +79,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        &params_.cdefv1_},
       {"intrav2", atSingle, anOptional, "intra prediction through intra_v2.hlsl (same output)", "",
        &params_.intrav2_},
-      {"intraopt", atSingle, anOptional, "original intra_main shader built with FXC optimisation (same source)", "",
+      {"intraopt", atSingle, anOptional, "original intra_main shader built with DXC optimisation (same source)", "",
        &params_.intraopt_},
       {"slots", atInt, anOptional,
        "decoder pipeline slots (frames in flight), 2..4. Default: four above 2560x1440, otherwise one "
@@ -493,7 +493,7 @@ void CParameters::GetHelp(int pos, const char* arg, std::string& errMsg, const P
   }
   // Handled before the task lines are parsed (decoder_creator.cpp), so it is not in the list above.
   errMsg += " [-sm6test]\tShader Model 6 test before the tasks; may be the only thing on its line\n";
-  errMsg += " [-shaderpick <pick>]\tthe DXC package: fxc=<list>,od=<list>,dxc=<list>, the bytecode of the named shaders "
+  errMsg += " [-shaderpick <pick>]\tthe shader-pick package: od=<list>,dxc=<list>, the bytecode of the named shaders "
             "in this launch (docs/test-player.md); may be the only thing on its line\n";
   errMsg += "\n";
 }

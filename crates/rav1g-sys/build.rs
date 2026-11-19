@@ -16,8 +16,8 @@
 //! **For a Windows target (the decoder)** one C file is compiled into `rav1g_c.lib`: `shader_table.c`,
 //! the bytecode of the shaders. `RAV1G_SHADER_DIR` names the directory with the DXC bytecode headers
 //! under `dx/shaders/h` and `shader_set.txt` (`testing/shader_cache/shaders.py build --dxc <dxc> --root
-//! <dir>`). The `shader-pick` feature embeds two extra bytecodes per shader from `dx/shaders/h_od`
-//! and `h_fxc`, which the experiment package can select per shader with `-shaderpick`.
+//! <dir>`). The `shader-pick` feature embeds the alternate DXC bytecode from `dx/shaders/h_od`,
+//! which the experiment package can select per shader with `-shaderpick`.
 //!
 //! **For a target that is not Windows** the crate is its Rust alone: the D3D12 host does not build there.
 //! `crates/rav1g-parse` and `tools/rav1g-parse-check` use the types on Linux (docs/phase2-rav1d.md,
@@ -133,31 +133,29 @@ fn shader_set(shaders: Option<&Path>) -> String {
     line.to_owned()
 }
 
-/// The feature `shader-pick`: the two extra bytecodes of each shader (`dx/shaders/h_od`, DXC with
-/// `-Od`; `dx/shaders/h_fxc`, FXC's), for the shader pick of the library. Writes `rav1g_shader_sets.inc`
-/// to `out`, which `shader_table.c` includes with `RAV1G_SHADER_SETS`: the headers and a table per set in
-/// the order of the table of `shader_table.c`. Returns the lines of `shader_sets.txt` (dxc, od, fxc): the
-/// compiler and the arguments of each set, for the log of the library.
-fn shader_sets(shaders: &Path, table: &Path, out: &Path) -> [String; 3] {
+/// For `shader-pick`, write `rav1g_shader_sets.inc` with the `dx/shaders/h_od` headers and the
+/// alternate table in the order of `shader_table.c`. Return the compiler and arguments of the
+/// `dxc` and `od` sets from `shader_sets.txt` for the library's log.
+fn shader_sets(shaders: &Path, table: &Path, out: &Path) -> [String; 2] {
     let file = shaders.join("shader_sets.txt");
     println!("cargo:rerun-if-changed={}", file.display());
     let text = fs::read_to_string(&file).unwrap_or_else(|_| {
         fail(&format!(
             "the shader-pick feature needs the shader-pick variant: there is no {} \
-             (testing/shader_cache/shaders.py build --dxc <dxc> --fxc <fxc> --variant shader-pick --root <dir>)",
+             (testing/shader_cache/shaders.py build --dxc <dxc> --variant shader-pick --root <dir>)",
             file.display()
         ))
     });
     let lines: Vec<&str> = text.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
     let line = |index: usize, prefix: &str| -> String {
         match lines.get(index).and_then(|line| line.strip_prefix(prefix)) {
-            Some(rest) if lines.len() == 3 && rest.bytes().all(|b| b == b' ' || b.is_ascii_graphic()) => {
+            Some(rest) if lines.len() == 2 && rest.bytes().all(|b| b == b' ' || b.is_ascii_graphic()) => {
                 rest.trim().to_string()
             }
-            _ => fail(&format!("{}: not the three lines dxc:, od:, fxc: of a DXC build", file.display())),
+            _ => fail(&format!("{}: expected the two lines dxc: and od: of a DXC build", file.display())),
         }
     };
-    let sets = [line(0, "dxc:"), line(1, "od:"), line(2, "fxc:")];
+    let sets = [line(0, "dxc:"), line(1, "od:")];
 
     let source = fs::read_to_string(table).unwrap_or_else(|_| fail(&format!("cannot read {}", table.display())));
     let names: Vec<&str> =
@@ -166,24 +164,23 @@ fn shader_sets(shaders: &Path, table: &Path, out: &Path) -> [String; 3] {
         fail(&format!("{}: {} RAV1G_SHADER lines", table.display(), names.len()));
     }
     let mut text = String::from("/* Written by crates/rav1g-sys/build.rs from shader_table.c for shader-pick. */\n");
-    for (directory, suffix) in [("h_od", "_od"), ("h_fxc", "_fxc")] {
-        let headers = shaders.join("dx").join("shaders").join(directory);
-        println!("cargo:rerun-if-changed={}", headers.display());
-        for name in &names {
-            if !headers.join(format!("{name}.h")).is_file() {
-                fail(&format!("the shader-pick feature: missing {}", headers.join(format!("{name}.h")).display()));
-            }
-            text += &format!("#include \"dx/shaders/{directory}/{name}.h\"\n");
+    let headers = shaders.join("dx").join("shaders").join("h_od");
+    println!("cargo:rerun-if-changed={}", headers.display());
+    for name in &names {
+        let header = headers.join(format!("{name}.h"));
+        if !header.is_file() {
+            fail(&format!("the shader-pick feature: missing {}", header.display()));
         }
-        text += &format!("static const rav1g_shader_bytecode rav1g_shaders{suffix}[] = {{\n");
-        for name in &names {
-            text += &format!("  {{ \"{name}\", {name}{suffix}, (unsigned int)sizeof({name}{suffix}) }},\n");
-        }
-        text += "};\n";
+        text += &format!("#include \"dx/shaders/h_od/{name}.h\"\n");
     }
+    text += "static const rav1g_shader_bytecode rav1g_shaders_od[] = {\n";
+    for name in &names {
+        text += &format!("  {{ \"{name}\", {name}_od, (unsigned int)sizeof({name}_od) }},\n");
+    }
+    text += "};\n";
     text += "const rav1g_shader_bytecode *rav1g_shader_table_set(unsigned int set, unsigned int *count) {\n  \
              *count = (unsigned int)(sizeof(rav1g_shaders) / sizeof(rav1g_shaders[0]));\n  \
-             return set == 1 ? rav1g_shaders_od : set == 2 ? rav1g_shaders_fxc : rav1g_shaders;\n}\n";
+             return set == 1 ? rav1g_shaders_od : rav1g_shaders;\n}\n";
     if let Err(error) = fs::write(out.join("rav1g_shader_sets.inc"), text) {
         fail(&format!("cannot write rav1g_shader_sets.inc: {error}"));
     }
@@ -239,7 +236,7 @@ fn main() {
 
     // The C of the decoder, one static library: the shader table, at /O1 /Ot whatever the cargo profile.
     let mut c_size = base_build(shaders);
-    // The shader-pick feature embeds the two extra sets.
+    // The shader-pick feature embeds the alternate -Od set.
     let sets = match shaders {
         Some(shaders) if pick => {
             c_size.define("RAV1G_SHADER_SETS", None).include(&out);
@@ -247,7 +244,7 @@ fn main() {
         }
         _ => Default::default(),
     };
-    for (name, line) in ["DXC", "OD", "FXC"].iter().zip(&sets) {
+    for (name, line) in ["DXC", "OD"].iter().zip(&sets) {
         println!("cargo:rustc-env=RAV1G_SHADER_SET_{name}={line}");
     }
     c_size.opt_level(1).flag_if_supported("/Ot");
