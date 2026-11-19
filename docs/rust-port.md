@@ -150,6 +150,11 @@ have to write the same bytes at every stage, not only the same frames.
 
 - `main`: the Rust decoder. `cpp`: the C++ decoder (tag `v0.3.0`), C++ fixes and experiments. `original`:
   upstream, frozen.
+- `fxc-sm5` (2026-11-19, at `c1de272`, the release `v0.4.0-alpha.2`): the last decoder whose shaders are
+  all FXC `cs_5_0` (Shader Model 5, D3D11-compatible bytecode). Frozen: no further work is planned there,
+  and a push to it starts no CI (a run is still possible by hand). From here on `main` is for D3D12 on
+  Xbox Series X|S only and moves its shaders to DXC and Shader Model 6. The original Xbox One gives a
+  UWP app only D3D11 feature level 10.1 (no `cs_5_0` compute), so no AV1 on it from this decoder.
 - A fix to something both branches share (shaders, the C parser, the test player, the conformance set,
   the CI scripts) is made on `cpp` and merged into `main`, and the pin of the equality reference moves to
   it. The C++ host exists on `cpp` only; a fix to it is ported to the Rust host by hand, and the
