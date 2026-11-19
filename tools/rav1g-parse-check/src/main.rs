@@ -26,6 +26,7 @@
 //! rav1g-parse-check [-threads <n>] [-frames <n>] [-parseopt <list>] [-wave <way>] [-details <n>] [-root <dir>] [-manifest <task list>] [<stream>...]
 //! rav1g-parse-check -time [-threads <n>] [-frames <n>] [-parseopt <list>] [-wave <way>] <stream>
 //! rav1g-parse-check -digest [-threads <n>] [-root <dir>] [-manifest <task list>] [<stream>...]
+//! rav1g-parse-check -lrmix [<stream>...]
 //! ```
 //!
 //! `-threads`, `-frames` and `-parseopt` are those of the run that is checked; the reference always has
@@ -85,12 +86,14 @@ struct Options {
     details: usize,
     time: bool,
     digest: bool,
+    lr_mix: bool,
     /// -wave: the wavefront in the edges of the tiles, for the reference and for the run that is checked.
     wave_edges: (bool, bool),
     streams: Vec<(String, PathBuf)>,
 }
 
 fn usage() -> ! {
+    eprintln!("usage: rav1g-parse-check -lrmix [<stream>...]  (count coded restoration units per frame and plane)");
     eprintln!(
         "usage: rav1g-parse-check [-threads <n>] [-frames <n>] [-parseopt <list>] [-wave <way>] [-details <n>] \
          [-root <dir>] [-manifest <task list>] [<stream>...]\n       rav1g-parse-check -time [-threads <n>] \
@@ -130,6 +133,7 @@ fn options() -> Options {
         details: 8,
         time: false,
         digest: false,
+        lr_mix: false,
         wave_edges: (true, true),
         streams: Vec::new(),
     };
@@ -147,6 +151,7 @@ fn options() -> Options {
             "-time" => options.time = true,
             "-parseopt" => options.parse = ParseOptions::from_words(&value()).unwrap_or_else(|| usage()),
             "-digest" => options.digest = true,
+            "-lrmix" => options.lr_mix = true,
             "-wave" => {
                 options.wave_edges = match value().as_str() {
                     "edges" => (true, true),
@@ -275,6 +280,17 @@ fn digest(options: &Options) -> ExitCode {
 
 fn main() -> ExitCode {
     let options = options();
+    if options.lr_mix {
+        let mut code = ExitCode::SUCCESS;
+        for (name, path) in &options.streams {
+            println!("LR MIX {name}");
+            if let Err(error) = lr_mix(path) {
+                eprintln!("LR MIX {name}: {error}");
+                code = ExitCode::FAILURE;
+            }
+        }
+        return code;
+    }
     if options.time {
         return timing::run(
             &options.streams[0].1,
@@ -328,4 +344,50 @@ fn main() -> ExitCode {
     let kinds: Vec<String> = total.coverage.iter().map(|(kind, count)| format!("{kind} {count}")).collect();
     println!("PARSE COVERAGE (blocks of each kind among the records compared): {}", kinds.join("; "));
     if equal == options.streams.len() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+}
+
+/// Count the coded units of planes with restoration. Copy-only planes and show-existing frames have no units.
+fn lr_mix(path: &Path) -> Result<(), String> {
+    let data = std::fs::read(path).map_err(|error| format!("cannot read the file: {error}"))?;
+    let mut parser = rhost::RustParser::new(1, 1, ParseOptions::default(), true)?;
+    let mut number = 0;
+    let mut total = [[0; 3]; 3];
+    for (tu, data) in container::read(&data)?.into_iter().enumerate() {
+        parser.send(data).map_err(|error| format!("temporal unit {tu}: {error}"))?;
+        for frame in parser.take_frames() {
+            let mut counts = [[0; 3]; 3];
+            let mut sets = [[0; 16]; 3];
+            for unit in frame.lr_units.into_inner().expect("no thread panics with it") {
+                let plane = usize::from(unit.plane);
+                let counts = &mut counts[plane];
+                match i32::from(unit.r#type) {
+                    sys::RESTORE_NONE => counts[0] += 1,
+                    sys::RESTORE_WIENER => counts[1] += 1,
+                    sys::RESTORE_SGRPROJ => {
+                        counts[2] += 1;
+                        sets[plane][unit.values[0] as usize] += 1;
+                    }
+                    kind => return Err(format!("unexpected restoration type {kind}")),
+                }
+            }
+            for (plane, [none, wiener, sgr]) in counts.into_iter().enumerate() {
+                print!("LR frame {number} plane={plane} none={none} wiener={wiener} sgr={sgr}");
+                for (set, count) in sets[plane].into_iter().enumerate().filter(|&(_, count)| count != 0) {
+                    print!(" set{set}={count}");
+                }
+                println!();
+                for (total, count) in total[plane].iter_mut().zip([none, wiener, sgr]) {
+                    *total += count;
+                }
+            }
+            number += 1;
+        }
+    }
+    if number == 0 {
+        return Err(String::from("no frame was parsed"));
+    }
+    for (plane, [none, wiener, sgr]) in total.into_iter().enumerate() {
+        println!("LR total frames={number} plane={plane} none={none} wiener={wiener} sgr={sgr}");
+    }
+    Ok(())
 }
