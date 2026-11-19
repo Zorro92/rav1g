@@ -41,7 +41,7 @@ Savings are engineering targets in **ms per film peak window / ms per `j4k40` fr
 | Shader family | Stage and current design | Candidate and minimum SM | Savings, risk / effort |
 | --- | --- | --- | --- |
 | `intra_main_hbd` | `intra`. DXC `-O3`, 256 threads and three group syncs for edge and reduction phases. Large DC/CFL reductions use integer wave sums when all participating lanes of a transform are in the same wave. The first lane combines partials serially when the wave path is unavailable. | **6.0.** Preserve directional padding, CFL rounding, palette and intra block copy in follow-up changes. | A 10% stage reduction is 39 / 0.71. High / high. |
-| `intra_main` | `intra`. DXC `-O3`, 8-bit, 256 threads and 12 group syncs, with separate shared edge and CFL phases. The host has a toggle for the above-edge filter bound. | **6.0.** Transfer the proven HBD synchronization pattern. Keep 8-bit edge defaults and packed stores. | 0 / 0. High / medium. |
+| `intra_main` | `intra`. DXC `-O3`, 8-bit, 256 threads and 12 group syncs, with separate shared edge and CFL phases. Large DC/CFL reductions vote on block membership and lane count before using a wave sum. A single lane sums and broadcasts on the existing group syncs when the vote fails or the reduction is small. | **6.0.** Compare with `-intraod`. For an `-O3` comparison of just the reductions, use the preceding filter-only commit. | Console A/B pending. |
 | `intra_main_legacy`, `intra_main_hbd_legacy` | `intra`. Include wrappers that define `INTRA_MAIN_LEGACY`. DXC compiles them with `-Od` for `-intraod`. | **6.0.** Use as controls for frame md5 comparisons. | 0 / 0. High / low. |
 | `intra_filter_hbd` | `intra`. Landed at `cff4dfb`. 32 threads, two adjacent samples per lane in a 32-bit integer, 256 bytes of shared memory, double-buffered edges and one sync per diagonal after preload. Shader pick uses this kernel in both DXC sets. | **6.0.** Use as the reference for serial-loop work placement and for the 8-bit port. Keep the uncorrected edges distinct from residual-adjusted output. | Already measured at 73 ms/peak for the landed rewrite, `j4k40` unchanged. Further rewrite deferred. |
 | `intra_filter` | `intra`. 8-bit 4×2 recursion with preloaded edges and taps and one packed dot product per lane. The diagonal sync also hands off the residual-adjusted pairs for one store per four-pixel word. | **6.0.** Compare with `-intrafilterlegacy`, which selects the old two-sync kernel and separate residual pass. | Console A/B pending. |
@@ -165,3 +165,6 @@ Results that did not land:
 
 Where the 1-tile 10-bit film's worst second stands (24 output frames, GPU busy): 982 ms before this work,
 about 785 ms after it (about 30.5 fps of headroom at 23.976 fps). Intra is now about half of it.
+
+The 8-bit intra follow-up ports packed filter intra and guarded DC/CFL reductions. Test filter intra
+with `-intrafilterlegacy` and main intra with `-intraod`. Console measurements are pending.

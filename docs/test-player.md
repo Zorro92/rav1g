@@ -1191,13 +1191,15 @@ Use the same build and task settings on both sides of the comparison.
 
 | Flag | Main intra kernel |
 | --- | --- |
-| Default or `-intraopt` | DXC `-O3` for `intra_main` and `intra_main_hbd` |
+| Default or `-intraopt` | DXC `-O3` with guarded DC/CFL wave reductions in `intra_main` and `intra_main_hbd` |
 | `-intraod` | DXC `-Od` for `intra_main_legacy` and `intra_main_hbd_legacy` |
 
 The player logs the selected kernel, and `rav1g-dec` accepts the same flags. With
 `-intrav2`, the choice applies to frames that still use the main intra path.
 The shader-pick build also supports `-shaderpick od=intra_main,intra_main_hbd`
 to use the baseline bytecode under the default shader names.
+To isolate the 8-bit reduction change at `-O3`, compare defaults with the
+preceding filter-only commit.
 
 `-intrafilterlegacy` selects the previous 8-bit filter intra shader in both the
 player and `rav1g-dec`. It controls filter intra independently of `-intraod` and

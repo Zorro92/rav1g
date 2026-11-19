@@ -161,8 +161,15 @@ intra_filter.gen.h@s/2 \* (row + 1) \* res_stride/2 * row * res_stride/@8-bit fi
 intra_filter_hbd.gen.h@s/(sum + 0x8000u)/(sum)/@high-bit-depth filter intra tap borrow
 intra_filter_hbd.gen.h@s/if (diagonal != 0) GroupMemoryBarrierWithGroupSync();/if (diagonal != 0) GroupMemoryBarrier();/@filter intra diagonal group sync as a plain barrier@races in group memory .*[1-9]
 intra_main.gen.h@/above\[loc_base + wi\] = luma.x + luma.y + luma.z + luma.w;/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/@group sync before the CFL sum of intra_main as a plain barrier@races in group memory .*[1-9]
+intra_main.gen.h@/if (wi == 0) left\[loc_base - 1\] = count/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/@8-bit group sync after DC reduction as a plain barrier@races in group memory .*[1-9]
+intra_main.gen.h@/if (wi == 0) above\[loc_base - 1\] = luma_sum;/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/@8-bit group sync after CFL reduction as a plain barrier@races in group memory .*[1-9]
 intra_main.gen.h@s/if (need_aboveleft) topleft = above/topleft = above/@reading an unprepared corner in intra_main@reads unwritten group memory
 intra_main.gen.h@s/^  filter_count = 0;/  \/\/ Keep the above filter count./@filtering an unprepared left edge in intra_main@reads unwritten group memory
+intra_main.gen.h@s/(int)WaveGetLaneCount()/64/@hard-coded wave width in the 8-bit reduction@wave reduction did not exercise waves
+intra_main.gen.h@s/WaveActiveAllEqual(base)/true/@mixing blocks in an 8-bit intra wave reduction@MISMATCH in wave reduction
+intra_main.gen.h@s/WaveActiveCountBits(true) == (uint)min(lanes, wi_count)/true/@reducing an incomplete 8-bit logical block@MISMATCH in wave reduction
+intra_main.gen.h@s/dc_sum = WaveActiveSum(dc_sum);/dc_sum += 0;/@omitting the 8-bit DC wave sum@MISMATCH in wave reduction
+intra_main.gen.h@s/luma_sum = WaveActiveSum(luma_sum);/luma_sum += 0;/@omitting the 8-bit CFL wave sum@MISMATCH in wave reduction
 intra_main_hbd.gen.h@s/(int)WaveGetLaneCount()/64/@hard-coded wave width in the intra reduction@wave reduction did not exercise waves
 intra_main_hbd.gen.h@s/WaveActiveAllEqual(base)/true/@mixing blocks in an intra wave reduction@MISMATCH in wave reduction
 intra_main_hbd.gen.h@s/WaveActiveCountBits(true) == (uint)min(lanes, wi_count)/true/@reducing an incomplete logical block@MISMATCH in wave reduction

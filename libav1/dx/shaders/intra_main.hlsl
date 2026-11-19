@@ -65,6 +65,25 @@ RWByteAddressBuffer dst_frame : register(u0);
 groupshared int above[64 * 20];
 groupshared int left[64 * 20];
 
+#ifndef INTRA_MAIN_LEGACY
+int reduction_stride(int base, int wi, int wi_count, int terms) {
+  if (terms < 32) return 1;
+  const int lanes = (int)WaveGetLaneCount();
+  if (lanes < 32 || wi >= lanes) return 1;
+
+  // The first min(lanes, wi_count) threads cover the block at wave-width
+  // strides. The vote requires that entire set to be active in one wave.
+  if (WaveActiveAllEqual(base) && WaveActiveCountBits(true) == (uint)min(lanes, wi_count)) return lanes;
+  return 1;
+}
+
+int sum_above(int base, int wi, int count, int step) {
+  int sum = 0;
+  [loop] for (int i = wi; i < count; i += step) sum += above[base + i];
+  return sum;
+}
+#endif
+
 int compute_bc(int p0, int p1, int p2, int p3, int fh, int fv) {
   int l0 = ((1 << 14) + p0 * fh + p1 * (128 - fh) + (1 << (FilterLineShift - 1))) >> FilterLineShift;
   int l1 = ((1 << 14) + p2 * fh + p3 * (128 - fh) + (1 << (FilterLineShift - 1))) >> FilterLineShift;
@@ -384,6 +403,7 @@ int intra_inter_blend(int mask, int intra, int inter) {
   }
 
   uint dc = 0;
+#ifdef INTRA_MAIN_LEGACY
   if (mode >= MODE_DC) {
     uint count = 0;
     if (above_available) {
@@ -398,8 +418,30 @@ int intra_inter_blend(int mask, int intra, int inter) {
     dc = count ? dc / count : 128;
     pixels = 0x01010101 * dc;
   }
+#else
+  if (mode >= MODE_DC) {
+    const int dc_above = above_available ? bw : 0;
+    const int dc_left = left_available ? bh : 0;
+    const int step = reduction_stride(loc_base, wi, wi_count, max(dc_above, dc_left));
+    if (step > 1 || wi == 0) {
+      int dc_sum = sum_above(loc_base, wi, dc_above, step);
+      [loop] for (int i = wi; i < dc_left; i += step) dc_sum += left[loc_base + i];
+      if (step > 1) dc_sum = WaveActiveSum(dc_sum);
+      const int count = dc_above + dc_left;
+      // The unused left corner holds the DC value across the next sync.
+      if (wi == 0) left[loc_base - 1] = count ? (dc_sum + (count >> 1)) / count : 128;
+    }
+  }
+#endif
 
   GroupMemoryBarrierWithGroupSync();
+
+#ifndef INTRA_MAIN_LEGACY
+  if (mode >= MODE_DC) {
+    dc = left[loc_base - 1];
+    pixels = 0x01010101 * dc;
+  }
+#endif
 
   int4 luma = 0;
   if (mode == MODE_CFL) {
@@ -429,6 +471,7 @@ int intra_inter_blend(int mask, int intra, int inter) {
 
   GroupMemoryBarrierWithGroupSync();
 
+#ifdef INTRA_MAIN_LEGACY
   if (mode == MODE_CFL && wi == 0) {
     // The sum of the block's luma sums, into above[loc_base]. The first thread of the block adds them up
     // between two group syncs: the sums are complete when it reads them, and the total is complete when
@@ -439,13 +482,28 @@ int intra_inter_blend(int mask, int intra, int inter) {
     for (int i = 0; i < wi_count; ++i) sum += above[loc_base + i];
     above[loc_base] = sum;
   }
+#else
+  if (mode == MODE_CFL) {
+    const int step = reduction_stride(loc_base, wi, wi_count, wi_count);
+    if (step > 1 || wi == 0) {
+      int luma_sum = sum_above(loc_base, wi, wi_count, step);
+      if (step > 1) luma_sum = WaveActiveSum(luma_sum);
+      // The total has its own slot so the luma partials stay readable.
+      if (wi == 0) above[loc_base - 1] = luma_sum;
+    }
+  }
+#endif
 
   GroupMemoryBarrierWithGroupSync();
 
   if (thread.x >= cb_wi_count) return;
 
   if (mode == MODE_CFL) {
+#ifdef INTRA_MAIN_LEGACY
     int avrg = (above[loc_base] + (2 << bsize_log)) >> (bsize_log + 2);
+#else
+    int avrg = (above[loc_base - 1] + (2 << bsize_log)) >> (bsize_log + 2);
+#endif
     int alpha = ((block.y >> 22) & 63) - 16;
 
     pixels = compute_cfl_pixel(dc, (luma.x - avrg) * alpha);

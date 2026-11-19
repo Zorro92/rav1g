@@ -143,7 +143,8 @@ static void run_group(const ShaderApi *api, uint32_t group, int threads, uint64_
   gs_state.track_unwritten = api == &intra_main_api || api == &intra_main_hbd_api || api == &intra_filter_api;
   g_tracker.require_unique_stores = api == &intra_filter_api;
   GroupContext context = { api, group };
-  gs_run_group(threads, thread_body, &context, garbage, api == &intra_main_hbd_api ? complete_waves : nullptr);
+  const bool use_waves = api == &intra_main_api || api == &intra_main_hbd_api;
+  gs_run_group(threads, thread_body, &context, garbage, use_waves ? complete_waves : nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -906,24 +907,31 @@ static bool check_filter_intra_8bit(uint64_t seed) {
   return true;
 }
 
-static bool check_wave_reductions(uint64_t seed) {
+static bool check_wave_reductions(uint64_t seed, int hbd) {
   Rng rng = {seed};
-  const Geometry g = make_geometry(&rng, 1, 48);
+  const Geometry g = make_geometry(&rng, hbd, 48);
+  const ShaderApi *legacy_api = hbd ? &intra_main_hbd_legacy_api : &intra_main_legacy_api;
+  const ShaderApi *main_api = hbd ? &intra_main_hbd_api : &intra_main_api;
   const struct {
     const char *name;
     uint32_t log_w, log_h, blocks;
     bool cfl;
+    bool above, left;
   } cases[] = {
-    {"64x64 DC", 4, 4, 1, false},
-    {"32x32 CFL", 3, 3, 1, true},
-    {"four 16x16 CFL blocks", 2, 2, 4, true},
-    {"16x8 CFL in a partial wave", 2, 1, 1, true},
+    {"64x64 DC", 4, 4, 1, false, true, true},
+    {"64x64 DC with above only", 4, 4, 1, false, true, false},
+    {"64x64 DC with left only", 4, 4, 1, false, false, true},
+    {"64x64 DC without edges", 4, 4, 1, false, false, false},
+    {"32x32 CFL", 3, 3, 1, true, true, true},
+    {"four 16x16 CFL blocks", 2, 2, 4, true, true, true},
+    {"16x8 CFL in a partial wave", 2, 1, 1, true, true, true},
   };
   for (const auto &c : cases) {
     Frame f;
     make_frame_data(g, &rng, &f);
     const uint32_t mode = c.cfl ? (1u << 3) | (15u << 6) | (28u << 22) : 14u << 6;
-    const uint32_t flags = c.log_w | mode | (1u << (10 + c.log_w)) | (1u << (16 + c.log_h));
+    const uint32_t flags = c.log_w | mode | ((uint32_t)c.above << (10 + c.log_w)) |
+                           ((uint32_t)c.left << (16 + c.log_h));
     const uint32_t limits = (g.mi_cols * 4) | ((g.mi_rows * 4) << 16);
     const int bucket = 8 - (int)(c.log_w + c.log_h);
     for (uint32_t i = 0; i < c.blocks; ++i) {
@@ -933,25 +941,33 @@ static bool check_wave_reductions(uint64_t seed) {
     order_records(g, &f);
 
     std::vector<uint8_t> legacy = f.pixels;
-    run_main(g, f, &legacy, rng.u32(), &intra_main_hbd_legacy_api, nullptr);
+    run_main(g, f, &legacy, rng.u32(), legacy_api, nullptr);
     for (WaveLayout layout : wave_layouts) {
       wave_layout = layout;
       wave_sums = 0;
       std::vector<uint8_t> actual = f.pixels;
-      const RunResult r = run_main(g, f, &actual, rng.u32(), &intra_main_hbd_api, nullptr);
+      const RunResult r = run_main(g, f, &actual, rng.u32(), main_api, nullptr);
       if (actual != legacy || r.memory_races || r.out_of_bounds || r.races_group || r.sync_errors) {
-        printf("intra_check: MISMATCH in wave reduction for %s, %d lanes%s\n",
-               c.name, layout.lanes, layout.interleaved ? ", interleaved" : "");
+        printf("intra_check: MISMATCH in wave reduction for %d-bit %s, %d lanes%s, races in group memory %ld\n",
+               8 + 2 * hbd, c.name, layout.lanes, layout.interleaved ? ", interleaved" : "", r.memory_races);
         return false;
       }
-      if (layout.lanes >= 32 && !layout.interleaved && !wave_sums) {
-        printf("intra_check: wave reduction did not exercise waves for %s, %d lanes\n", c.name, layout.lanes);
+      const bool expect_waves = layout.lanes >= 32 && !layout.interleaved && (c.cfl || c.above || c.left);
+      if (expect_waves && !wave_sums) {
+        printf("intra_check: wave reduction did not exercise waves for %d-bit %s, %d lanes\n",
+               8 + 2 * hbd, c.name, layout.lanes);
+        return false;
+      }
+      if (!expect_waves && wave_sums) {
+        printf("intra_check: MISMATCH in wave reduction participation for %d-bit %s, %d lanes%s\n",
+               8 + 2 * hbd, c.name, layout.lanes, layout.interleaved ? ", interleaved" : "");
         return false;
       }
     }
   }
   wave_layout = wave_layouts[0];
-  puts("intra_check: DC and CFL reductions match with 4, 32 and 64 lanes, including interleaved waves");
+  printf("intra_check: %d-bit DC and CFL reductions match with 4, 32 and 64 lanes, including interleaved waves\n",
+         8 + 2 * hbd);
   return true;
 }
 
@@ -1075,7 +1091,7 @@ int main(int argc, char **argv) {
     }
   }
 
-  if (!check_filter_intra_8bit(seed) || !check_wave_reductions(seed)) return 1;
+  if (!check_filter_intra_8bit(seed) || !check_wave_reductions(seed, 0) || !check_wave_reductions(seed, 1)) return 1;
 
   int failures = 0;
   long original_races = 0;
