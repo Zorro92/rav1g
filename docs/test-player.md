@@ -1145,8 +1145,10 @@ group sync. The filter and upsampler read that shared data and keep their result
 until the second sync, then put the results back in shared memory. The list generator guarantees
 that each edge is eligible for at most one of filtering and upsampling. A third sync makes the
 edge data visible to every thread before it predicts its row. Directional prediction reads just
-the edge selected for each pixel. DC and CFL use the shared memory for per-thread partial sums,
-which the first thread of the block combines for its group.
+the edge selected for each pixel. Large DC and CFL reductions use a wave when it contains all
+participating lanes of the transform. Those lanes read the shared partial sums at wave-width
+strides and combine them with an integer wave sum. The first thread combines the partials
+serially for small reductions and when the wave membership check fails.
 
 The wavefront schedule, bindings and video buffers are those of the existing frame-wide path.
 DXC optimizes the default kernel. `-intraod` selects the previous kernel built with `-Od`.

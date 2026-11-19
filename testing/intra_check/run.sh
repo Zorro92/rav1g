@@ -150,6 +150,10 @@ intra_filter_hbd.gen.h@s/if (diagonal != 0) GroupMemoryBarrierWithGroupSync();/i
 intra_main.gen.h@/above\[loc_base + wi\] = luma.x + luma.y + luma.z + luma.w;/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/@group sync before the CFL sum of intra_main as a plain barrier@races in group memory .*[1-9]
 intra_main.gen.h@s/if (need_aboveleft) topleft = above/topleft = above/@reading an unprepared corner in intra_main@reads unwritten group memory
 intra_main.gen.h@s/^  filter_count = 0;/  \/\/ Keep the above filter count./@filtering an unprepared left edge in intra_main@reads unwritten group memory
+intra_main_hbd.gen.h@s/(int)WaveGetLaneCount()/64/@hard-coded wave width in the intra reduction@wave reduction did not exercise waves
+intra_main_hbd.gen.h@s/WaveActiveAllEqual(base)/true/@mixing blocks in an intra wave reduction@MISMATCH in wave reduction
+intra_main_hbd.gen.h@s/WaveActiveCountBits(true) == (uint)min(lanes, wi_count)/true/@reducing an incomplete logical block@MISMATCH in wave reduction
+intra_main_hbd.gen.h@s/sum = WaveActiveSum(sum);/sum += 0;/@omitting the intra wave sum@MISMATCH in wave reduction
 intra_main_hbd.gen.h@/int4 next_above = 0;/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/@group sync before writing processed intra edges as a plain barrier@races in group memory .*[1-9]
 intra_v2.gen.h@0,/GroupMemoryBarrierWithGroupSync();/s//GroupMemoryBarrier();/@group sync of a pass of intra_v2 as a plain barrier@races in group memory .*[1-9]'
   mkdir "$work/mutant"

@@ -62,7 +62,8 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
 - **Intra v2** (`-intrav2`) is bit-exact but 2.3–2.4x slower. It is a negative result, off by
   default and kept for reference.
 - **Intra optimisation A/B** uses DXC-optimized `intra_main` and `intra_main_hbd` by default.
-  `-intraod` selects their legacy DXC `-Od` kernels.
+  The high-bit-depth shader uses wave sums for large DC and CFL reductions.
+  `-intraod` selects the legacy DXC `-Od` kernels.
 - **A third frame in flight** (`-slots 3`) lets CPU and GPU overlap: the decode thread's wait
   for a free slot drops from 5.6–8.3 ms to 0.3–0.6 ms per frame. It only fits in memory with
   `-lowmem`. All combinations are md5-exact. On the SVT clip the CPU (entropy decoding,

@@ -156,4 +156,9 @@ static inline void GroupMemoryBarrier() { gs_state.plain_barriers++; }
 static inline void GroupMemoryBarrierWithGroupSync() { gs_group_sync(); }
 static inline void AllMemoryBarrierWithGroupSync() { gs_group_sync(); }
 
+uint WaveGetLaneCount();
+bool WaveActiveAllEqual(int value);
+uint WaveActiveCountBits(bool value);
+int WaveActiveSum(int value);
+
 #endif /* INTRA_CHECK_HLSL_SHIM_H_ */

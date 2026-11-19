@@ -71,6 +71,27 @@ static const uint low_bits[11] = {0, 1, 3, 7, 15, 31, 63, 127, 255, 511, 1023};
 // upsampling. DC and CFL blocks use the same space for their partial sums.
 groupshared int edges[2][(WG_SIZE / 4) * 20];
 
+#ifndef INTRA_MAIN_LEGACY
+int reduction_stride(int base, int wi, int wi_count, int terms) {
+  if (terms < 32) return 1;
+  const int lanes = (int)WaveGetLaneCount();
+  if (lanes < 32 || wi >= lanes) return 1;
+
+  // The first min(lanes, wi_count) threads can read all of the block's partials
+  // at wave-width strides. Vote on their block and population before using a
+  // wave sum, since a wave may mix blocks or hold only part of these threads.
+  if (WaveActiveAllEqual(base) && WaveActiveCountBits(true) == (uint)min(lanes, wi_count)) return lanes;
+  return 1;
+}
+
+int sum_partials(int edge, int base, int wi, int count, int step) {
+  int sum = 0;
+  [loop] for (int i = wi; i < count; i += step) sum += edges[edge][base + i];
+  if (step > 1) sum = WaveActiveSum(sum);
+  return sum;
+}
+#endif
+
 int filter_edge(int edge, int base, int i, int last, int strength) {
   const int outer = (0x2000 >> (4 * strength)) & 15;
   const int inner = (0x4540 >> (4 * strength)) & 15;
@@ -373,6 +394,7 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
                               filter_above, strength_above, need_aboveleft);
     next_left = prepare_edge(EDGE_LEFT, loc_base, wi, wi_count, left_count, upsample_left,
                              filter_left, strength_left, need_aboveleft);
+#ifdef INTRA_MAIN_LEGACY
   } else if (mode >= MODE_DC && wi == 0) {
     const uint count = dc_above * 2 + dc_left;
     uint sum = count >> 1;
@@ -384,6 +406,20 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
       [loop] for (int i = 0; i < wi_count; ++i) total += edges[EDGE_LEFT][loc_base + i];
       edges[EDGE_LEFT][loc_base - 1] = (total + (2 << bsize_log)) >> (bsize_log + 2);
     }
+#else
+  } else if (mode >= MODE_DC) {
+    const int step = reduction_stride(loc_base, wi, wi_count, mode == MODE_CFL ? wi_count : dc_terms);
+    if (step > 1 || wi == 0) {
+      const uint count = dc_above * 2 + dc_left;
+      const uint dc = sum_partials(EDGE_ABOVE, loc_base, wi, dc_terms, step);
+      if (wi == 0) edges[EDGE_ABOVE][loc_base - 1] = count ? (dc + (count >> 1)) / count : 512;
+
+      if (mode == MODE_CFL) {
+        const int total = sum_partials(EDGE_LEFT, loc_base, wi, wi_count, step);
+        if (wi == 0) edges[EDGE_LEFT][loc_base - 1] = (total + (2 << bsize_log)) >> (bsize_log + 2);
+      }
+    }
+#endif
   }
 
   GroupMemoryBarrierWithGroupSync();

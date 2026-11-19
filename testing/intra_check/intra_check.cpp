@@ -49,6 +49,72 @@ AccessTracker g_tracker;
 // Thread groups: testing/common/group_sched.h
 // ---------------------------------------------------------------------------
 
+struct WaveLayout {
+  int lanes;
+  bool interleaved;
+};
+static constexpr WaveLayout wave_layouts[] = {{4, false}, {32, false}, {64, false}, {32, true}, {64, true}};
+static WaveLayout wave_layout = wave_layouts[0];
+
+enum class WaveOperation { Equal, Count, Sum };
+struct WaveCall {
+  WaveOperation operation;
+  int value;
+  int result;
+};
+static WaveCall wave_calls[256];
+static long wave_sums = 0;
+
+static int wave_call(WaveOperation operation, int value) {
+  WaveCall &call = wave_calls[gs_state.thread - 1];
+  call = {operation, value, 0};
+  gs_wave_sync();
+  return call.result;
+}
+
+uint WaveGetLaneCount() { return (uint)wave_layout.lanes; }
+bool WaveActiveAllEqual(int value) { return wave_call(WaveOperation::Equal, value) != 0; }
+uint WaveActiveCountBits(bool value) { return (uint)wave_call(WaveOperation::Count, value); }
+int WaveActiveSum(int value) { return wave_call(WaveOperation::Sum, value); }
+
+// The reduction invokes its collectives in the same order within a wave. Only
+// lanes that reached this collective participate. Others wait at the group sync.
+static bool complete_waves(int threads) {
+  using namespace gs_fibers;
+  const int lanes = wave_layout.lanes;
+  const int waves = threads / lanes;
+  bool progressed = false;
+  for (int wave = 0; wave < waves; ++wave) {
+    int members[64];
+    int count = 0;
+    for (int lane = 0; lane < lanes; ++lane) {
+      const int thread = wave_layout.interleaved ? lane * waves + wave : wave * lanes + lane;
+      if (fibers[thread].state == StAtWave) members[count++] = thread;
+    }
+    if (!count) continue;
+
+    const WaveCall &first = wave_calls[members[0]];
+    bool equal = true;
+    int sum = 0;
+    for (int i = 0; i < count; ++i) {
+      const WaveCall &call = wave_calls[members[i]];
+      if (call.operation != first.operation) {
+        fputs("intra_check: lanes of one wave reached different collectives\n", stderr);
+        exit(1);
+      }
+      equal = equal && call.value == first.value;
+      sum += call.value;
+    }
+    for (int i = 0; i < count; ++i) {
+      wave_calls[members[i]].result = first.operation == WaveOperation::Equal ? equal : sum;
+      fibers[members[i]].state = StRun;
+    }
+    wave_sums += first.operation == WaveOperation::Sum;
+    progressed = true;
+  }
+  return progressed;
+}
+
 struct GroupContext {
   const ShaderApi *api;
   uint32_t group;
@@ -74,7 +140,7 @@ static void run_group(const ShaderApi *api, uint32_t group, int threads, uint64_
                                                    : "intra_v2.hlsl";
   gs_state.track_unwritten = api == &intra_main_api || api == &intra_main_hbd_api;
   GroupContext context = { api, group };
-  gs_run_group(threads, thread_body, &context, garbage);
+  gs_run_group(threads, thread_body, &context, garbage, api == &intra_main_hbd_api ? complete_waves : nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -564,13 +630,13 @@ class Generator {
   }
 };
 
-static Geometry make_geometry(Rng *rng, int hbd) {
+static Geometry make_geometry(Rng *rng, int hbd, int fixed_cells = 0) {
   Geometry g;
   g.hbd = hbd;
   g.sb_log = 4 + rng->below(2);
   const int max_cells = rng->chance(25) ? 96 : 48;
-  g.mi_cols = 2 * (1 + rng->below(max_cells / 2));
-  g.mi_rows = 2 * (1 + rng->below(max_cells / 2));
+  g.mi_cols = fixed_cells ? fixed_cells : 2 * (1 + rng->below(max_cells / 2));
+  g.mi_rows = fixed_cells ? fixed_cells : 2 * (1 + rng->below(max_cells / 2));
   g.pad_cols = (g.mi_cols + 31) & ~31;
   g.pad_rows = (g.mi_rows + 31) & ~31;
 
@@ -800,6 +866,55 @@ static RunResult run_main(const Geometry &g, const Frame &f, std::vector<uint8_t
   return end_run();
 }
 
+static bool check_wave_reductions(uint64_t seed) {
+  Rng rng = {seed};
+  const Geometry g = make_geometry(&rng, 1, 48);
+  const struct {
+    const char *name;
+    uint32_t log_w, log_h, blocks;
+    bool cfl;
+  } cases[] = {
+    {"64x64 DC", 4, 4, 1, false},
+    {"32x32 CFL", 3, 3, 1, true},
+    {"four 16x16 CFL blocks", 2, 2, 4, true},
+    {"16x8 CFL in a partial wave", 2, 1, 1, true},
+  };
+  for (const auto &c : cases) {
+    Frame f;
+    make_frame_data(g, &rng, &f);
+    const uint32_t mode = c.cfl ? (1u << 3) | (15u << 6) | (28u << 22) : 14u << 6;
+    const uint32_t flags = c.log_w | mode | (1u << (10 + c.log_w)) | (1u << (16 + c.log_h));
+    const uint32_t limits = (g.mi_cols * 4) | ((g.mi_rows * 4) << 16);
+    const int bucket = 8 - (int)(c.log_w + c.log_h);
+    for (uint32_t i = 0; i < c.blocks; ++i) {
+      const uint32_t pos = (8 + 8 * (i & 1)) | ((8 + 8 * (i >> 1)) << 16);
+      f.blocks.push_back({pos, flags, 0, limits, 0, bucket, 0, 0});
+    }
+    order_records(g, &f);
+
+    std::vector<uint8_t> legacy = f.pixels;
+    run_main(g, f, &legacy, rng.u32(), &intra_main_hbd_legacy_api, nullptr);
+    for (WaveLayout layout : wave_layouts) {
+      wave_layout = layout;
+      wave_sums = 0;
+      std::vector<uint8_t> actual = f.pixels;
+      const RunResult r = run_main(g, f, &actual, rng.u32(), &intra_main_hbd_api, nullptr);
+      if (actual != legacy || r.memory_races || r.out_of_bounds || r.races_group || r.sync_errors) {
+        printf("intra_check: MISMATCH in wave reduction for %s, %d lanes%s\n",
+               c.name, layout.lanes, layout.interleaved ? ", interleaved" : "");
+        return false;
+      }
+      if (layout.lanes >= 32 && !layout.interleaved && !wave_sums) {
+        printf("intra_check: wave reduction did not exercise waves for %s, %d lanes\n", c.name, layout.lanes);
+        return false;
+      }
+    }
+  }
+  wave_layout = wave_layouts[0];
+  puts("intra_check: DC and CFL reductions match with 4, 32 and 64 lanes, including interleaved waves");
+  return true;
+}
+
 struct Schedule {
   std::vector<uint32_t> gpu;  // cell map, then region list
   std::vector<uint32_t> regions;
@@ -920,6 +1035,8 @@ int main(int argc, char **argv) {
     }
   }
 
+  if (!check_wave_reductions(seed)) return 1;
+
   int failures = 0;
   long original_races = 0;
   for (int hbd = 0; hbd < 2; ++hbd) {
@@ -954,6 +1071,7 @@ int main(int argc, char **argv) {
         std::vector<uint8_t> optimized = f.pixels;
         std::vector<uint8_t> v2 = f.pixels;
         const RunResult r1 = run_main(g, f, &legacy, rng.u32(), legacy_api, &cov);
+        wave_layout = wave_layouts[(layout * 3 + n) % (sizeof(wave_layouts) / sizeof(wave_layouts[0]))];
         const RunResult r1b = run_main(g, f, &optimized, rng.u32(), main_api, nullptr);
         const RunResult r2 = run_v2(g, f, &schedule, &v2, rng.u32(), &cov);
         original_races += r1.races_group;

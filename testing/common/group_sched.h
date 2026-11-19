@@ -88,9 +88,13 @@ void gs_runaway_thread();
 
 // Runs threads 0 .. threads - 1 of one thread group to the end. 'order' is the state of the generator
 // that draws the order of the threads.
-void gs_run_group(int threads, void (*body)(int thread, void *context), void *context, uint64_t *order);
+// complete_waves, if supplied, resumes lanes paused at a wave operation before the next group sync.
+void gs_run_group(int threads, void (*body)(int thread, void *context), void *context, uint64_t *order,
+                  bool (*complete_waves)(int threads) = nullptr);
 // A group sync, called from a thread of the running group.
 void gs_group_sync();
+// Pauses one lane without advancing the group memory epoch.
+void gs_wave_sync();
 
 // ---------------------------------------------------------------------------
 // Group memory
@@ -378,7 +382,7 @@ void gs_reset_report() {
 namespace gs_fibers {
 
 enum { kMaxThreads = 1024, kStackSize = 256 * 1024 };
-enum { StRun, StAtSync, StDone, StRunaway };
+enum { StRun, StAtSync, StAtWave, StDone, StRunaway };
 
 static void entry();
 
@@ -474,6 +478,11 @@ void gs_group_sync() {
   gs_fibers::suspend();
 }
 
+void gs_wave_sync() {
+  gs_fibers::fibers[gs_fibers::current].state = gs_fibers::StAtWave;
+  gs_fibers::suspend();
+}
+
 // The running thread has made more group memory accesses in one turn than any shader does: it is not
 // resumed again, and the scheduler ends its group.
 void gs_runaway_thread() {
@@ -482,7 +491,8 @@ void gs_runaway_thread() {
   abort();
 }
 
-void gs_run_group(int threads, void (*body)(int thread, void *context), void *context, uint64_t *order) {
+void gs_run_group(int threads, void (*body)(int thread, void *context), void *context, uint64_t *order,
+                  bool (*complete_waves)(int threads)) {
   using namespace gs_fibers;
   if (threads > kMaxThreads) abort();
   if (!stacks) {
@@ -529,6 +539,7 @@ void gs_run_group(int threads, void (*body)(int thread, void *context), void *co
       gs_state.runaway_groups++;
       break;
     }
+    if (complete_waves && complete_waves(threads)) continue;
     if (!at_sync) break;
     // A group sync that some threads never reach: on a GPU the group would hang or the sync would not
     // hold. It is counted, and the threads that wait go on.
