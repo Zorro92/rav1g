@@ -122,8 +122,10 @@ and a loader that finds no such export refuses it too. `rav1g_version()` is the 
 
 ## Releases
 
-A tag `v<version>` (the workspace version reported by `rav1g_version()`) runs the full CI suite.
-After it passes, the `release` job publishes a GitHub pre-release with the following files.
+A tag `v<version>` (the workspace version reported by `rav1g_version()`) runs the release checks,
+including the shader-pick and parser-switch conformance checks. The extended frame/thread matrix
+and uavsync experiments have separate triggers. After the required checks pass, the `release`
+job publishes a GitHub pre-release with the following files.
 
 | File | What |
 | --- | --- |

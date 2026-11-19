@@ -413,9 +413,13 @@ Downstream comparisons use the artifacts containing the corresponding stage dump
 
 Branch pushes run the shader-pick WARP matrix when shader or pick inputs change. Changes to
 the parser, its options and their test inputs run the parser-flip checks for both builds
-and the parse-only check. All three full-run triggers (manual dispatch, weekly schedule
-and version tags) include those checks, the extended frame/thread matrix, and the uavsync
-and flag experiments. A release waits for every full-suite check to pass.
+and the parse-only check. Manual dispatches, the weekly schedule and version tags
+always run those path-filtered checks.
+
+The weekly schedule also runs the extended frame/thread matrix. On manual dispatches,
+`frames_matrix` enables that matrix and `experiments` enables the uavsync and flag
+experiments. Both inputs default to false. Release checks include the shader-pick and
+parser-flip suites.
 
 #### Earlier CI timings
 

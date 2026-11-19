@@ -201,7 +201,7 @@ shader compiler diagnostics.
 | --- | --- | --- | --- |
 | `rav1g-testplayer-x64-<run-id>` | `0.2.<run number>.0` | `rav1g.dll`: Rust, the C compiled by clang-cl with full link time optimisation, linked by lld-link | **the default: use this one** |
 | `rav1g-testplayer-msvc-x64-<run-id>` | `0.2.<run number>.2` | linked statically: Rust, the C compiled by MSVC with `/GL` and by the player's link (`/LTCG:incremental`) | the alternative: one program without a DLL of its own; for a comparison of the two compilers |
-| `rav1g-testplayer-uavsync-x64-<run-id>` | `0.2.<run number>.1` | the default build with the uavsync shaders | built on manual, weekly and tag runs. [Experiments](#experiments) |
+| `rav1g-testplayer-uavsync-x64-<run-id>` | `0.2.<run number>.1` | the default build with the uavsync shaders | built with the `experiments` dispatch input. [Experiments](#experiments) |
 | `rav1g-testplayer-dxc-x64-<run-id>` | `0.2.<run number>.4` | the shader-pick build with the default DXIL plus alternate DXC `-Od` and FXC bytecode | compiler diagnostics with [`-shaderpick`](#shader-pick--shaderpick-the-dxc-package) |
 | `rav1g-testplayer-hevcplayback-x64-<run-id>` | `0.2.<run number>.3` | the programs of the default package, byte for byte; the manifest declares the restricted capability `hevcPlayback` | only for the memory the console gives an app with that capability; see [The two memory pools](#the-two-memory-pools-memory-pools-hevcplayback) |
 
@@ -3375,8 +3375,8 @@ conformance run decodes the whole set on WARP once more with each of them and ge
 results. The task's log has an `Experiments:` line that says what is in effect.
 
 The vertical loop filter's overlapping register write caused the 8-bit mismatch. A reference-file
-error caused the scaled-reference mismatch. CI builds the uavsync package and exercises these
-flags on manual, weekly and tag runs.
+error caused the scaled-reference mismatch. Enable the `experiments` input on a manual dispatch
+to build the uavsync package and exercise these flags. The input defaults to false.
 
 | | What it changes | Why |
 | --- | --- | --- |

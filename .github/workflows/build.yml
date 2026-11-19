@@ -3,7 +3,7 @@ name: Build
 on:
   push:
     branches: [main, cpp]
-    # A tag v<version of the workspace> runs the full suite before release publishes rav1g.dll.
+    # A tag v<version of the workspace> runs the release checks before publishing rav1g.dll.
     tags: ['v*']
     # Changes that cannot change a build, a test or a package: the docs, and the files only git and
     # GitHub read (the licence files are not here: the packages carry them).
@@ -11,7 +11,22 @@ on:
     # checkouts and has to leave this list.
     paths-ignore: ['**.md', 'docs/**', '.gitattributes', '.gitignore']
   workflow_dispatch:
-  # Dispatches, tags and the weekly run include the full suite.
+    inputs:
+      experiments:
+        description: >
+          Also build the uavsync package and decode the conformance set again with each experiment
+          flag, with poisoned buffers (-poisonmi, -poisonbuf) and with the uavsync shaders (the job
+          rust-experiments, about 20 minutes)
+        type: boolean
+        default: false
+      frames_matrix:
+        description: >
+          Also decode the conformance set with every combination of 1 to 4 frames in parse and up to 8
+          parser threads, twice each (the job frames-matrix, four jobs of about 40 minutes side by side;
+          docs/phase2-rav1d.md, "Frames in parallel")
+        type: boolean
+        default: false
+  # Weekly runs also exercise the extended frame/thread matrix.
   schedule:
     - cron: '23 3 * * 1'
 
@@ -26,7 +41,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  FULL_SUITE: ${{ github.event_name != 'push' || github.ref_type == 'tag' }}
   # The av1-xbox-one commit this repository is forked from (recorded in SOURCES.txt).
   UPSTREAM_URL: https://aomedia.googlesource.com/av1-xbox-one
   UPSTREAM_COMMIT: b5c61563b48625c261a8d627cfa928896fd10b13
@@ -151,7 +165,7 @@ jobs:
       #               into rav1g.dll, which is in the package next to the program;
       #   revision 2: MSVC with /GL, a static library, the objects compiled by the player's link
       #               (/LTCG:incremental).
-      # Revision 1 is the uavsync package of a full run. Revision 3 is the default package
+      # Revision 1 is the opt-in uavsync package. Revision 3 is the default package
       # with the hevcPlayback capability in its manifest, for the memory the system gives such an app
       # (made from the default package, behind it). Revision 4 is the shader-pick package, with two
       # extra bytecodes per shader for compiler diagnostics. A higher revision installs over a lower
@@ -466,7 +480,7 @@ jobs:
       # of 0: it installs over the default package of this run and keeps its LocalState, and the default
       # package of a later run installs over it.
       - name: DXC shaders with all-memory group syncs
-        if: env.FULL_SUITE == 'true'
+        if: ${{ inputs.experiments }}
         id: uavsync-shaders
         uses: ./src/.github/actions/shaders
         with:
@@ -475,7 +489,7 @@ jobs:
           variant: uavsync
 
       - name: Rust library for the uavsync package (rav1g.dll with the uavsync shaders)
-        if: env.FULL_SUITE == 'true'
+        if: ${{ inputs.experiments }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -483,7 +497,7 @@ jobs:
             -TargetDir target-app-uavsync -Out rust-uavsync
 
       - name: Stamp the uavsync package (same identity, revision 1)
-        if: env.FULL_SUITE == 'true'
+        if: ${{ inputs.experiments }}
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -493,7 +507,7 @@ jobs:
           $manifest.Save($path)
 
       - name: Build the signed uavsync package (all-memory group syncs)
-        if: env.FULL_SUITE == 'true'
+        if: ${{ inputs.experiments }}
         shell: pwsh
         env:
           CERT_THUMBPRINT: ${{ steps.cert.outputs.thumbprint }}
@@ -543,7 +557,7 @@ jobs:
             @($packages | ForEach-Object { $_.Name }) + @(Get-Content out-uavsync/imports/check.txt) + @('```') >> $env:GITHUB_STEP_SUMMARY
 
       - name: Preserve the uavsync package
-        if: ${{ always() && env.FULL_SUITE == 'true' }}
+        if: ${{ always() && inputs.experiments }}
         uses: actions/upload-artifact@v7
         with:
           name: rav1g-testplayer-uavsync-x64-${{ github.run_id }}
@@ -668,7 +682,6 @@ jobs:
     timeout-minutes: 30
     outputs:
       key: ${{ steps.key.outputs.key }}
-      full_suite: ${{ env.FULL_SUITE }}
       shader_pick: ${{ steps.coverage.outputs.shader_pick }}
       parser_switches: ${{ steps.coverage.outputs.parser_switches }}
     steps:
@@ -682,10 +695,11 @@ jobs:
         id: coverage
         env:
           BEFORE: ${{ github.event.before }}
+          RUN_ALL_PATH_CHECKS: ${{ github.event_name != 'push' || github.ref_type == 'tag' }}
         run: |
           set -euo pipefail
           base=
-          if [[ "$FULL_SUITE" != true && "$BEFORE" =~ ^[0-9a-f]{40}$ && "$BEFORE" =~ [1-9a-f] ]]; then
+          if [[ "$RUN_ALL_PATH_CHECKS" != true && "$BEFORE" =~ ^[0-9a-f]{40}$ && "$BEFORE" =~ [1-9a-f] ]]; then
             if git cat-file -e "$BEFORE^{commit}" 2>/dev/null || git fetch --no-tags --depth=1 origin "$BEFORE"; then
               base=$BEFORE
             fi
@@ -1040,7 +1054,7 @@ jobs:
       # rav1g-dec with the shaders of the uavsync package, for the rust-experiments job: the uavsync feature
       # of the crates and the shader headers of that variant.
       - name: DXC shaders with all-memory group syncs
-        if: env.FULL_SUITE == 'true'
+        if: ${{ inputs.experiments }}
         id: uavsync-shaders
         uses: ./.github/actions/shaders
         with:
@@ -1048,7 +1062,7 @@ jobs:
           variant: uavsync
 
       - name: Build rav1g-dec with the shaders of the uavsync package
-        if: env.FULL_SUITE == 'true'
+        if: ${{ inputs.experiments }}
         shell: pwsh
         env:
           RAV1G_SHADER_DIR: ${{ steps.uavsync-shaders.outputs.dir }}
@@ -1072,7 +1086,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Preserve rav1g-dec.exe with the shaders of the uavsync package
-        if: env.FULL_SUITE == 'true'
+        if: ${{ inputs.experiments }}
         uses: actions/upload-artifact@v7
         with:
           name: rav1g-dec-uavsync-x64-${{ github.run_id }}
@@ -1530,7 +1544,7 @@ jobs:
       # restoration, whose shader computed an address from the unit fields of a plane without restoration
       # and loaded from it, which could remove the device (docs/gpu-av1-decoder.md, "Unwritten fields of a
       # constant record"). The same part of the set as with -poisonmi has to give the results of
-      # expected.txt. On full runs rust-experiments also tests the whole set with -poisonbuf
+      # expected.txt. With the experiments input rust-experiments also tests the whole set with -poisonbuf
       # alone and alongside -interfast or -intrav2.
       - name: Conformance of the vectors with poisoned buffers and constants (-poisonbuf)
         if: ${{ !cancelled() && matrix.case == 'poisoned' }}
@@ -1984,7 +1998,7 @@ jobs:
   # recorded and submitted in decode order by a thread of the decoder. The frames have to be those of one
   # frame in parse, to the byte, whatever the threads do; the order of the threads is what differs from
   # run to run, so the set runs in several combinations here and in the job below, and in all of them,
-  # twice, in the job frames-matrix on full runs.
+  # twice, in the weekly or manually selected frames-matrix job.
   rust-frames:
     needs: [conformance-streams, rust]
     runs-on: windows-latest
@@ -2213,11 +2227,11 @@ jobs:
 
   # Every combination of frames in parse and parser threads, twice each (docs/phase2-rav1d.md, step 4:
   # "one to four frames in parse and one to eight workers, equal md5 in every combination, run
-  # repeatedly"). On a full run these are four jobs
+  # repeatedly"). On the weekly run or with the frames_matrix input these are four jobs
   # side by side, one for each number of frames in parse, with the thread counts that have room for it.
   frames-matrix:
     needs: [conformance-streams, rust]
-    if: needs.conformance-streams.outputs.full_suite == 'true'
+    if: ${{ github.event_name == 'schedule' || inputs.frames_matrix }}
     runs-on: windows-latest
     timeout-minutes: 120
     strategy:
@@ -2418,10 +2432,10 @@ jobs:
           fi
           exit "$status"
 
-  # The full suite also decodes the set with each experiment flag and the uavsync build.
+  # The experiments input enables decodes with each experiment flag and the uavsync build.
   rust-experiments:
     needs: [conformance-streams, rust]
-    if: needs.conformance-streams.outputs.full_suite == 'true'
+    if: ${{ inputs.experiments }}
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -2455,7 +2469,7 @@ jobs:
       # The experiments (docs/test-player.md, "Experiments"): on a device that follows D3D each of them
       # leaves the output as it is, so the whole set is decoded again with each flag and has to give the
       # results of expected.txt, and once more with a decoder whose shaders are those of the uavsync
-      # package. The full suite exercises these experimental paths.
+      # package. The experiments input exercises these paths.
       - name: Conformance with each experiment flag
         shell: pwsh
         run: |
@@ -3794,18 +3808,18 @@ jobs:
           path: intra-check.log
           if-no-files-found: warn
 
-  # A release (docs/integration.md, "Releases"): for a tag v<version>, when the full suite has
+  # A release (docs/integration.md, "Releases"): for a tag v<version>, when the required checks have
   # passed, rav1g.dll of the default package (the build the console runs: the C of clang, the app
   # runtime, DXC cs_6_0 shaders), its import library and symbols, the rav1g.h it was built with, the
   # licences the library needs (rav1g, AOM's patent licence, rav1d, the notices of the linked crates) and
   # SHA256SUMS, as a pre-release. The tag has to be v and the version of the workspace, which
   # rav1g_version() reports.
   release:
-    # Tags select both path-filtered suites and all full-run jobs. Keep success gating on all of them.
+    # Tags bypass the path filters. Each dependency below runs on a tag.
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     needs: [player, conformance-streams, cpp-reference, rust, rust-conformance, rust-output, rust-switches,
-      rust-parser-switches, rust-sinkgrid, rust-gpublists, rust-clears, rust-frames, rust-frames-threads, frames-matrix,
-      rust-dumps-equal, rust-experiments, shader-pick-decoder, rust-dxc, rust-equal, shader-headers,
+      rust-parser-switches, rust-sinkgrid, rust-gpublists, rust-clears, rust-frames, rust-frames-threads,
+      rust-dumps-equal, shader-pick-decoder, rust-dxc, rust-equal, shader-headers,
       rust-cross, rust-cross-run, rust-cross-run-switches, rav1d, parse-check, parse-digest, colour, sync-check,
       cdef-check, warp-check, inter-check, superres-check, tables-check, intra-check]
     runs-on: ubuntu-latest
@@ -3847,8 +3861,8 @@ jobs:
           cat rel/SHA256SUMS
           {
             echo "rav1g $version: the AV1 decoder of this repository as \`rav1g.dll\`, for a D3D12 app on Xbox Series X|S"
-            echo "that loads it at run time (docs/integration.md). Built by CI run $GITHUB_RUN_NUMBER from \`$GITHUB_SHA\`; every"
-            echo "job of the run passed before this was published."
+            echo "that loads it at run time (docs/integration.md). Built by CI run $GITHUB_RUN_NUMBER from \`$GITHUB_SHA\`; all"
+            echo "required checks passed before this was published."
             echo
             echo "- \`rav1g.dll\`: the library of the default package (the C of clang, linked by lld-link, the app"
             echo "  runtime; shaders DXC cs_6_0). \`rav1g.dll.lib\` to link it, \`rav1g.pdb\` for its symbols."
