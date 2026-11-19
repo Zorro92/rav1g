@@ -115,14 +115,8 @@ struct FilmGrainData {
     scaling_lut: [[c_int; 4]; 256],
 }
 
-/// The scaling function of a plane, component `p` of `scaling_lut`: the piecewise linear function through
-/// `points` (value, scaling), at the values 0..255.
-///
-/// # Safety
-/// `scaling_lut` is valid for writing.
-unsafe fn init_scaling_function(points: &[[c_int; 2]], scaling_lut: *mut [[c_int; 4]; 256], p: usize) {
-    // SAFETY: the caller's contract; only component `p` of the 256 entries is written.
-    let set = |index: c_int, value: c_int| unsafe { (*scaling_lut)[index as usize][p] = value };
+/// The piecewise linear scaling function through `points` (value, scaling), at the values 0..255.
+fn scaling_function(points: &[[c_int; 2]], mut set: impl FnMut(usize, c_int)) {
     let (Some(first), Some(last)) = (points.first(), points.last()) else {
         for i in 0..256 {
             set(i, 0);
@@ -130,18 +124,50 @@ unsafe fn init_scaling_function(points: &[[c_int; 2]], scaling_lut: *mut [[c_int
         return;
     };
     for i in 0..first[0] {
-        set(i, first[1]);
+        set(i as usize, first[1]);
     }
     for pair in points.windows(2) {
         let delta_y = pair[1][1] - pair[0][1];
         let delta_x = pair[1][0] - pair[0][0];
         let delta = i64::from(delta_y * ((65536 + (delta_x >> 1)) / delta_x));
         for x in 0..delta_x {
-            set(pair[0][0] + x, pair[0][1] + ((i64::from(x) * delta + 32768) >> 16) as c_int);
+            set((pair[0][0] + x) as usize, pair[0][1] + ((i64::from(x) * delta + 32768) >> 16) as c_int);
         }
     }
     for i in last[0]..256 {
-        set(i, last[1]);
+        set(i as usize, last[1]);
+    }
+}
+
+/// The original shader interpolates between 8-bit knots with signed rounding. Pack all four
+/// 10-bit results into one word so the direct-texture shader needs just one lookup.
+fn pack_10bit_scaling(scale: c_int, next: c_int) -> c_int {
+    let delta = next - scale;
+    let quarter = scale + ((delta + 2) >> 2);
+    let half = scale + ((2 * delta + 2) >> 2);
+    let three_quarters = scale + ((3 * delta + 2) >> 2);
+    scale | (quarter << 8) | (half << 16) | (three_quarters << 24)
+}
+
+/// Write component `plane` of the apply shader's scaling table.
+/// # Safety
+/// `lut` is valid for writing.
+unsafe fn write_scaling_lut(points: &[[c_int; 2]], lut: *mut [[c_int; 4]; 256], plane: usize, packed: bool) {
+    // SAFETY: the caller's contract. Only component `plane` is written.
+    let set = |index: usize, value: c_int| unsafe { (*lut)[index][plane] = value };
+    if packed {
+        // Emit a word when the next knot is available, without reading the mapped constants.
+        let mut previous = 0;
+        scaling_function(points, |index, value| {
+            if index != 0 {
+                set(index - 1, pack_10bit_scaling(previous, value));
+            }
+            previous = value;
+        });
+        // All four indices at the last knot have the same scale.
+        set(255, pack_10bit_scaling(previous, previous));
+    } else {
+        scaling_function(points, set);
     }
 }
 
@@ -316,8 +342,11 @@ pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_ch
         (*data).height = src.y_crop_height;
         (*data).random_offset_stride = (src.width / 32) + 1;
         (*data).is_10x3 = c_int::from(target == GrainTarget::Planes && (*dec).tryhdr10x3 != 0 && src.hbd != 0);
+        let direct_v2 = matches!(target, GrainTarget::SemiPlanarTexture(_)) && !FG_LEGACY.load(Ordering::Relaxed);
+
+        let packed = direct_v2 && params.bit_depth == 10;
         let scaling_lut = &raw mut (*data).scaling_lut;
-        init_scaling_function(&params.scaling_points_y[..params.num_y_points as usize], scaling_lut, 0);
+        write_scaling_lut(&params.scaling_points_y[..params.num_y_points as usize], scaling_lut, 0, packed);
         if params.chroma_scaling_from_luma != 0 {
             // Read back from the record, as the C++ did.
             for i in 0..256 {
@@ -325,8 +354,8 @@ pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_ch
                 (*scaling_lut)[i][2] = (*scaling_lut)[i][0];
             }
         } else {
-            init_scaling_function(&params.scaling_points_cb[..params.num_cb_points as usize], scaling_lut, 1);
-            init_scaling_function(&params.scaling_points_cr[..params.num_cr_points as usize], scaling_lut, 2);
+            write_scaling_lut(&params.scaling_points_cb[..params.num_cb_points as usize], scaling_lut, 1, packed);
+            write_scaling_lut(&params.scaling_points_cr[..params.num_cr_points as usize], scaling_lut, 2, packed);
         }
 
         // The random offset of every grain block of 32x32 luma samples into the grain templates.
@@ -363,7 +392,6 @@ pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_ch
             commands.write_barrier(noise);
         }
 
-        let direct_v2 = matches!(target, GrainTarget::SemiPlanarTexture(_)) && !FG_LEGACY.load(Ordering::Relaxed);
         let shader = pipeline(match target {
             GrainTarget::Planes => &raw const (*lib).shader_filmgrain_filter,
             GrainTarget::SemiPlanar => &raw const (*lib).shader_filmgrain_filter_sp,
@@ -445,9 +473,42 @@ mod tests {
                 let mut lut = [[7; 4]; 256];
                 init_scaling_function_cpp(points, points.len() as c_int, &mut expected, p);
                 // SAFETY: `lut` is a table to write.
-                unsafe { init_scaling_function(points, &mut lut, p) };
+                unsafe { write_scaling_lut(points, &mut lut, p, false) };
                 assert_eq!(lut, expected);
             }
+        }
+    }
+
+    #[test]
+    fn packed_scaling_matches_interpolation_for_every_pair_of_knots() {
+        for scale in 0..=255 {
+            for next in 0..=255 {
+                let packed = pack_10bit_scaling(scale, next) as u32;
+                for fraction in 0..4 {
+                    let expected = scale + (((next - scale) * fraction + 2) >> 2);
+                    assert_eq!(((packed >> (8 * fraction)) & 255) as c_int, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn packed_table_matches_legacy_lut_including_the_last_knot() {
+        let points = [[7, 230], [11, 40], [15, 165], [250, 5], [255, 53]];
+        let mut knots = [[0; 4]; 256];
+        let mut packed = [[0; 4]; 256];
+        // SAFETY: both tables are valid for writing, including the component used for V.
+        unsafe {
+            write_scaling_lut(&points, &mut knots, 2, false);
+            write_scaling_lut(&points, &mut packed, 2, true);
+        }
+        for index in 0..1024 {
+            let knot = index >> 2;
+            let fraction = index & 3;
+            let scale = knots[knot][2];
+            let next = knots[(knot + 1).min(255)][2];
+            let expected = scale + (((next - scale) * fraction as c_int + 2) >> 2);
+            assert_eq!(((packed[knot][2] as u32 >> (8 * fraction)) & 255) as c_int, expected, "{index}");
         }
     }
 

@@ -93,11 +93,9 @@ int2 chroma_grain(GrainTile tile, int2 local, int center, int base) {
 }
 
 int scaling(int index, int plane, int bit_shift) {
-  const int x = index >> bit_shift;
-  const int scale = data.scaling_lut[x][plane];
-  if (bit_shift == 0 || x == 255) return scale;
-  const int next = data.scaling_lut[x + 1][plane];
-  return scale + (((next - scale) * (index & 3) + 2) >> 2);
+  const uint word = (uint)data.scaling_lut[index >> bit_shift][plane];
+  // The host puts the interpolated scales of four consecutive 10-bit inputs in each word.
+  return (word >> (bit_shift == 0 ? 0 : 8 * (index & 3))) & 255u;
 }
 
 int4 load_luma(int2 pixel, bool hbd) {

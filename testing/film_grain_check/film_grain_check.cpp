@@ -276,6 +276,22 @@ static void compare(const Case &test, const Texture<T> &expected, const Texture<
   }
 }
 
+// Pack the optimized buffer using the interpolation formula of the reference HLSL.
+static void pack_p010_scaling(FilmGrainData &data) {
+  for (int i = 0; i < 256; ++i) {
+    for (int plane = 0; plane < 3; ++plane) {
+      const int scale = data.scaling_lut[i][plane];
+      const int next = data.scaling_lut[min(i + 1, 255)][plane];
+      uint word = 0;
+      for (int fraction = 0; fraction < 4; ++fraction) {
+        const int interpolated = scale + (((next - scale) * fraction + 2) >> 2);
+        word |= uint(interpolated) << (8 * fraction);
+      }
+      data.scaling_lut[i][plane] = int(word);
+    }
+  }
+}
+
 static void check_case(const Case &test, uint64_t &order) {
   const auto &data = test.constants;
   Frame expected(data.width, data.height), actual(data.width, data.height);
@@ -290,8 +306,8 @@ static void check_case(const Case &test, uint64_t &order) {
   dispatch(legacy::shader_entry, uint3(legacy::kThreadsX, legacy::kThreadsY, legacy::kThreadsZ),
            data.random_offset_stride, test.padded_height / 32 + 1, order);
 
-  // Both entries use the same constant-buffer layout.
   optimized::data = data;
+  if (data.params.bit_depth == 10) pack_p010_scaling(optimized::data);
   optimized::src = legacy::src;
   const size_t grain_samples = data.grain_offset_v + data.chroma_grain_stride * 38;
   optimized::grain_block = {reinterpret_cast<const uint8_t *>(test.grain.data()), grain_samples * sizeof(int)};
