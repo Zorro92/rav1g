@@ -886,6 +886,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     library.set_choices(&Choices {
         lr_legacy: task.lrlegacy,
         fg_legacy: task.fglegacy,
+        copy_legacy: task.copylegacy,
         inter_legacy: task.interlegacy,
         cdef_v2: !task.cdefv1,
         cdef_legacy: task.cdeflegacy,
@@ -898,6 +899,10 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         inter_fast: task.interfast,
     });
     if task.output == ImageMode::Texture {
+        say!(
+            "Direct NV12/P010 copy shader: {}",
+            if task.copylegacy { "copy_plane_sp_tex (-copylegacy)" } else { "copy_plane_sp_tex_v2 (default)" }
+        );
         say!(
             "Direct NV12/P010 film grain shader: {}",
             if task.fglegacy {

@@ -132,6 +132,7 @@ pub struct compute_shader_lib {
     // The semi-planar output (`output.rs`): into the staging area, and into the planes of a texture.
     pub shader_copy_plane_sp: ComputeShader,
     pub shader_copy_plane_sp_tex: ComputeShader,
+    pub shader_copy_plane_sp_tex_v2: ComputeShader,
     pub shader_filmgrain_filter_sp: ComputeShader,
     pub shader_filmgrain_filter_sp_tex: ComputeShader,
     pub shader_filmgrain_filter_sp_tex_v2: ComputeShader,

@@ -296,6 +296,10 @@ void av1_set_lr_legacy(int enable);
  * only while no frame is in flight. */
 void av1_set_fg_legacy(int enable);
 
+/* Process-wide. Non-zero selects the original direct NV12/P010 copy shader.
+ * Zero selects the tiled shader (default). Change it while no frame is in flight. */
+void av1_set_copy_legacy(int enable);
+
 /* Process-wide. Non-zero selects the original single-reference and
  * average/distance-weighted compound shaders for unscaled inter on the size
  * lists. Zero selects the optimized shaders (default). Change it only while

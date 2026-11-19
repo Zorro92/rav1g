@@ -156,8 +156,8 @@ const LAYOUTS: usize =
 const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
-    // 20 transforms, 33 bit-depth-independent shaders, and 34 per bit depth.
-    assert!(SHADERS == 20 + 33 + 2 * 34);
+    // 20 transforms, 34 bit-depth-independent shaders, and 34 per bit depth.
+    assert!(SHADERS == 20 + 34 + 2 * 34);
     assert!(LAYOUTS == 24);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
@@ -471,6 +471,7 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("inter_scale_obmc_left_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_scale_obmc_left),
             ("copy_plane_sp", &layouts.copy_plane_sp, &raw mut (*lib).shader_copy_plane_sp),
             ("copy_plane_sp_tex", &layouts.copy_plane_sp_tex, &raw mut (*lib).shader_copy_plane_sp_tex),
+            ("copy_plane_sp_tex_v2", &layouts.copy_plane_sp_tex, &raw mut (*lib).shader_copy_plane_sp_tex_v2),
             ("film_grain_filter_sp", &layouts.film_grain, &raw mut (*lib).shader_filmgrain_filter_sp),
             ("film_grain_filter_sp_tex", &layouts.film_grain_tex, &raw mut (*lib).shader_filmgrain_filter_sp_tex),
             ("film_grain_filter_sp_tex_v2", &layouts.film_grain_tex, &raw mut (*lib).shader_filmgrain_filter_sp_tex_v2),
@@ -903,7 +904,7 @@ mod tests {
             .filter_map(|line| line.trim().trim_start_matches('(').strip_prefix('"'))
             .map(|rest| &rest[..rest.find('"').unwrap()])
             .collect();
-        assert_eq!(names.len(), 117);
+        assert_eq!(names.len(), 118);
         let mut unique = names.clone();
         unique.sort_unstable();
         unique.dedup();

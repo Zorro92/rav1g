@@ -87,6 +87,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"intraod", atSingle, anOptional, "baseline DXC -Od intra_main shaders", "intra-main", &params_.intraod_},
       {"lrlegacy", atSingle, anOptional, "original loop restoration shader", "", &params_.lrlegacy_},
       {"fglegacy", atSingle, anOptional, "original direct NV12/P010 film grain shader", "", &params_.fglegacy_},
+      {"copylegacy", atSingle, anOptional, "original direct NV12/P010 copy shader", "", &params_.copylegacy_},
       {"interlegacy", atSingle, anOptional, "original unscaled single-reference and average/distance inter shaders",
        "", &params_.interlegacy_},
       {"slots", atInt, anOptional,
@@ -454,6 +455,7 @@ void CParameters::Reset() {
   params_.intraod_ = false;
   params_.lrlegacy_ = false;
   params_.fglegacy_ = false;
+  params_.copylegacy_ = false;
   params_.interlegacy_ = false;
   // 0: the task has no -slots (Parse() makes the default of it).
   params_.slots_ = 0;

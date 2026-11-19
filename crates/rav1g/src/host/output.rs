@@ -43,6 +43,7 @@
 //! `longjmp`, and that must not pass a Rust function.
 
 use std::ffi::c_int;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::core::{buffer, commands, perf_add, perf_gpu_mark, perf_ticks, pipeline, stage_dump_output};
 use super::film_grain::{GrainTarget, filmgrain_run};
@@ -50,13 +51,22 @@ use super::log::log;
 use super::types::Av1Core;
 use crate::gpu::d3d12::{com_ref, wrapped_ref};
 use crate::gpu::{
-    BufferRef, BufferState, Device, PlaneViews, SemiPlanar, TextureFormat, TextureRef, TextureSource, TextureState,
+    BufferRef, BufferState, Commands, Device, PlaneViews, SemiPlanar, TextureFormat, TextureRef, TextureSource,
+    TextureState,
 };
 use crate::sys::{
     AV1_COMMON, AV1_PERF_CPU_WAIT_IMAGE, AV1_PERF_CPU_WAIT_OUTPUT, AV1_PERF_GPU_COPY_PLANE, AV1_PERF_GPU_OUTPUT_COPY,
     HwFrameBuffer, HwOutputImage, av1_decoded_frame_buffer_t, fbt8bit, fbt10bit, fbt10x3, fbtNV12, fbtP010,
 };
 use windows::Win32::Graphics::Direct3D12::ID3D12Device;
+
+static COPY_LEGACY: AtomicBool = AtomicBool::new(false);
+
+/// `av1_set_copy_legacy` (`dx/av1_perf.h`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_copy_legacy(enable: c_int) {
+    COPY_LEGACY.store(enable != 0, Ordering::Relaxed);
+}
 
 /// The planes of an output image.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -443,7 +453,10 @@ unsafe fn copy_semi_planar(
         let copy_luma = !do_filmgrain;
         let copy_chroma = is_monochrome || !do_filmgrain || !film_grain_chroma;
         if copy_luma || copy_chroma {
-            let shader = pipeline(if direct.is_some() {
+            let copy_v2 = direct.is_some() && !COPY_LEGACY.load(Ordering::Relaxed);
+            let shader = pipeline(if copy_v2 {
+                &raw const (*lib).shader_copy_plane_sp_tex_v2
+            } else if direct.is_some() {
                 &raw const (*lib).shader_copy_plane_sp_tex
             } else {
                 &raw const (*lib).shader_copy_plane_sp
@@ -454,33 +467,37 @@ unsafe fn copy_semi_planar(
             if let Some((_, views, device, pair)) = direct {
                 commands.bind_write_planes(2, device, views, pair);
             }
-            let (width, height) = (src.y_crop_width as u32, src.y_crop_height as u32);
-            let dispatch = |mode: u32, groups: u32, rows: u32, src_plane: usize, dst_plane: usize| {
-                // rows, groups, mode, hbd, src_offset, src_offset_v, src_stride, dst_offset, dst_stride,
-                // width, height
-                let inline = [
-                    rows,
-                    groups,
-                    mode,
-                    u32::from(hbd),
-                    src.planes[src_plane].offset as u32,
-                    src.planes[2].offset as u32,
-                    src.planes[src_plane].stride as u32,
-                    dst_planes[dst_plane].offset as u32,
-                    dst_planes[dst_plane].stride as u32,
-                    width,
-                    height,
-                ];
-                commands.set_inline_constants(1, &inline, 0);
-                // A thread writes eight samples of a row; a group is eight by eight threads.
-                commands.dispatch(groups.div_ceil(8), rows.div_ceil(8), 1);
-            };
-            if copy_luma {
-                dispatch(0, width.div_ceil(8), height, 0, 0);
-            }
-            if copy_chroma {
-                let (width, height) = (width.div_ceil(2), height.div_ceil(2));
-                dispatch(if is_monochrome { 2 } else { 1 }, width.div_ceil(8), height, 1, 1);
+            if copy_v2 {
+                dispatch_copy_sp_tex(&commands, src, copy_luma, copy_chroma, is_monochrome);
+            } else {
+                let (width, height) = (src.y_crop_width as u32, src.y_crop_height as u32);
+                let dispatch = |mode: u32, groups: u32, rows: u32, src_plane: usize, dst_plane: usize| {
+                    // rows, groups, mode, hbd, src_offset, src_offset_v, src_stride, dst_offset, dst_stride,
+                    // width, height
+                    let inline = [
+                        rows,
+                        groups,
+                        mode,
+                        u32::from(hbd),
+                        src.planes[src_plane].offset as u32,
+                        src.planes[2].offset as u32,
+                        src.planes[src_plane].stride as u32,
+                        dst_planes[dst_plane].offset as u32,
+                        dst_planes[dst_plane].stride as u32,
+                        width,
+                        height,
+                    ];
+                    commands.set_inline_constants(1, &inline, 0);
+                    // A thread writes eight samples of a row; a group is eight by eight threads.
+                    commands.dispatch(groups.div_ceil(8), rows.div_ceil(8), 1);
+                };
+                if copy_luma {
+                    dispatch(0, width.div_ceil(8), height, 0, 0);
+                }
+                if copy_chroma {
+                    let (width, height) = (width.div_ceil(2), height.div_ceil(2));
+                    dispatch(if is_monochrome { 2 } else { 1 }, width.div_ceil(8), height, 1, 1);
+                }
             }
             commands.write_barrier(frame_buffers);
             perf_gpu_mark(dec, AV1_PERF_GPU_COPY_PLANE);
@@ -523,6 +540,29 @@ unsafe fn copy_semi_planar(
         perf_gpu_mark(dec, AV1_PERF_GPU_OUTPUT_COPY);
         stage_dump_output(dec, c"output", img, layout.size as usize);
     }
+}
+
+/// `copy_plane_sp_tex_v2.hlsl`: below the luma tiles, each pair of columns fits two UV tiles
+/// stacked vertically. A tile of either plane is 128 samples by four rows.
+fn dispatch_copy_sp_tex(commands: &Commands<'_>, src: &HwFrameBuffer, luma: bool, chroma: bool, monochrome: bool) {
+    let (width, height) = (src.y_crop_width as u32, src.y_crop_height as u32);
+    let luma_rows = if luma { height.div_ceil(4) } else { 0 };
+    let chroma_rows = if chroma { height.div_ceil(16) } else { 0 };
+    let columns = if chroma { 2 * width.div_ceil(256) } else { width.div_ceil(128) };
+    let inline = [
+        width,
+        height,
+        luma_rows,
+        u32::from(src.hbd != 0),
+        src.planes[0].offset as u32,
+        src.planes[1].offset as u32,
+        src.planes[2].offset as u32,
+        src.planes[0].stride as u32,
+        src.planes[1].stride as u32,
+        u32::from(monochrome),
+    ];
+    commands.set_inline_constants(1, &inline, 0);
+    commands.dispatch(columns, luma_rows + chroma_rows, 1);
 }
 
 #[cfg(test)]
