@@ -49,13 +49,10 @@ RAV1G_SHADER_DIR="$PWD/shader-build/normal" cargo xwin build --release --locked 
 Use a Linux DXC release with its validator library. The CI cross-build takes the Windows SDK
 DXIL headers from the artifact `rav1g-shader-headers-<run id>`.
 
-CI: the job `rust` builds the program with MSVC (artifact `rav1g-dec-x64-<run id>`), and the jobs
-`rust-conformance`, `rust-parser-c` and `rust-switches` run every check of this document with it,
-side by side ([The jobs of a push](#the-jobs-of-a-push)); `rust-cross` builds it on Linux
-(`rav1g-dec-x64-xwin-<run id>`) and `rust-cross-run` and `rust-cross-run-parsers` run that program:
-the conformance set, the player's decoder code, the decode errors, the order check, the memory
-check, `-poisonmi`, `-poisonbuf`, the set with `-interfast` and with `-gpuclear`, and all of it with
-`-parser c`; `cpp-reference` and `rust-equal` are the comparison with the C++ decoder.
+CI builds the program with MSVC in `rust` and on Linux in `rust-cross`. The Windows
+runners reuse those executables to run the conformance jobs in parallel on WARP.
+`cpp-reference` builds and runs the pinned C++ decoder. `rust-equal` compares its
+output to the MSVC build. [The jobs of a push](#the-jobs-of-a-push)
 
 ## What it shares with the test player
 
@@ -409,6 +406,19 @@ every output frame.
 
 ### The jobs of a push
 
+On `main`, the frame tests use four `rust-frames` shards and two
+`rust-frames-threads` shards. The decoder switches, GPU prediction lists, slot clears,
+output formats, MSVC conformance and Linux-build conformance also run in parallel shards.
+Downstream comparisons use the artifacts containing the corresponding stage dumps and md5s.
+
+Branch pushes run the shader-pick WARP matrix when shader or pick inputs change. Changes to
+the parser, its options and their test inputs run the parser-flip checks for both builds
+and the parse-only check. All three full-run triggers (manual dispatch, weekly schedule
+and version tags) include those checks, the extended frame/thread matrix, and the uavsync
+and flag experiments. A release waits for every full-suite check to pass.
+
+#### Earlier CI timings
+
 **Since 2026-11-14 (phase 2, step 6: the C parser left the decoder,
 [phase2-rav1d.md](phase2-rav1d.md#step-6-the-c-parser-leaves)) the jobs that existed for `-parser c`
 are gone**, and the table below is what a push was before:
@@ -483,14 +493,6 @@ change a build, a test or a package (`paths-ignore` of `build.yml`): `**.md`, `d
 packages carry them. Any other push can skip its run with `[skip ci]` in the commit message, for a
 change that is known to be safe without one (the trigger itself was changed that way, in 06bd44d).
 Every push to `main` makes GitHub count the languages again, with or without a run.
-
-Two jobs run only when the workflow is started for them (`workflow_dispatch`):
-
-- `rust-experiments`, with the `experiments` input: the whole set with each experiment flag and
-  with the poisoned buffers (seven passes), and with the program the `rust` job then also builds
-  with the shaders of the uavsync package (`rav1g-dec-experiments-<run id>`; 26.9 minutes in run
-  43540279557).
-- `parser-timing`, with the `parser_timing` input.
 
 ### The clears of a slot in CI
 

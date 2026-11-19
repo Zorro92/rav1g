@@ -201,7 +201,7 @@ shader compiler diagnostics.
 | --- | --- | --- | --- |
 | `rav1g-testplayer-x64-<run-id>` | `0.2.<run number>.0` | `rav1g.dll`: Rust, the C compiled by clang-cl with full link time optimisation, linked by lld-link | **the default: use this one** |
 | `rav1g-testplayer-msvc-x64-<run-id>` | `0.2.<run number>.2` | linked statically: Rust, the C compiled by MSVC with `/GL` and by the player's link (`/LTCG:incremental`) | the alternative: one program without a DLL of its own; for a comparison of the two compilers |
-| `rav1g-testplayer-uavsync-x64-<run-id>` | `0.2.<run number>.1` | the default build with the uavsync shaders | only with the `experiments` input; see [Experiments](#experiments) |
+| `rav1g-testplayer-uavsync-x64-<run-id>` | `0.2.<run number>.1` | the default build with the uavsync shaders | built on manual, weekly and tag runs. [Experiments](#experiments) |
 | `rav1g-testplayer-dxc-x64-<run-id>` | `0.2.<run number>.4` | the shader-pick build with the default DXIL plus alternate DXC `-Od` and FXC bytecode | compiler diagnostics with [`-shaderpick`](#shader-pick--shaderpick-the-dxc-package) |
 | `rav1g-testplayer-hevcplayback-x64-<run-id>` | `0.2.<run number>.3` | the programs of the default package, byte for byte; the manifest declares the restricted capability `hevcPlayback` | only for the memory the console gives an app with that capability; see [The two memory pools](#the-two-memory-pools-memory-pools-hevcplayback) |
 
@@ -3374,12 +3374,9 @@ Each is off by default, and on a device that follows D3D each leaves the output 
 conformance run decodes the whole set on WARP once more with each of them and gets the same
 results. The task's log has an `Experiments:` line that says what is in effect.
 
-None of them changed the console's output; the cause of the 8-bit mismatch was a different one (a
-paired read before an overlapping in-place write in the vertical loop filter), and the scaled-reference
-"bug" was a reference-file error. The flags stay in the player, but the workflow builds the uavsync
-package and decodes the set with each flag only when it is started by hand with the `experiments`
-input (`gh workflow run build.yml --ref <branch> -f experiments=true`); a push runs the conformance
-set once, which takes the job from about 15 to about 5 minutes.
+The vertical loop filter's overlapping register write caused the 8-bit mismatch. A reference-file
+error caused the scaled-reference mismatch. CI builds the uavsync package and exercises these
+flags on manual, weekly and tag runs.
 
 | | What it changes | Why |
 | --- | --- | --- |
@@ -3475,11 +3472,11 @@ it holds for the devices created after the call. `rav1g::switches::set_shader_pi
 records the compiler and arguments of each set in `shader_sets.txt`. Build the library from
 that root with `--features shader-pick`. CI verifies all three sets in the experiment binaries.
 
-**CI** (job `rust-dxc`, every push): the conformance set on WARP with every shader of the set `dxc`,
-then with `-shaderpick fxc=all`, with `-shaderpick od=all` and with a mix of the three; each has to
-give the results of `expected.txt` and the `SHADERPICK` line of its pick. The player's decoder code
-runs once with a pick on its task lines, and a pick with a name no shader has must be refused.
-(artifact `rav1g-dec-dxc-<run id>`: `conformance-dxc-pick-fxc`, `-od`, `-mixed`, `player-smoke-dxc-pick`.)
+The `rust-dxc` CI matrix decodes the conformance set on WARP using the default DXIL, all FXC,
+all DXC `-Od`, and a mix. Each shard checks frame md5s and the reported pick. The smoke tests
+exercise the player's task-line pick and reject an unknown shader name. The matrix runs on
+manual, weekly and tag runs, and on branch pushes that change shader or pick inputs. Results are
+in `rav1g-dec-dxc-<case>-<run id>`.
 
 ## Stage dumps (`-dumpstages`)
 

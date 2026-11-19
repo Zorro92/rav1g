@@ -122,8 +122,8 @@ and a loader that finds no such export refuses it too. `rav1g_version()` is the 
 
 ## Releases
 
-A tag `v<version>` (the version of the workspace, `Cargo.toml`, which `rav1g_version()` reports) runs
-every job of a push, and when all have passed the job `release` publishes a GitHub pre-release with:
+A tag `v<version>` (the workspace version reported by `rav1g_version()`) runs the full CI suite.
+After it passes, the `release` job publishes a GitHub pre-release with the following files.
 
 | File | What |
 | --- | --- |
