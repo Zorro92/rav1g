@@ -1220,7 +1220,7 @@ void rav1g_set_cdef_v2(bool enable);
 void rav1g_set_intra_v2(bool enable);
 
 /*
- The optimised build of the original intra shader.
+ The optimized intra main shaders (true, default) or the legacy kernels (false).
  */
 void rav1g_set_intra_opt(bool enable);
 

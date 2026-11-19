@@ -80,7 +80,7 @@ pub fn set_intra_v2(enable: bool) {
     crate::host::av1_set_intra_v2(c_int::from(enable))
 }
 
-/// The optimised build of the original intra shader.
+/// The optimized intra main shaders (true, default) or the legacy kernels (false).
 pub fn set_intra_opt(enable: bool) {
     crate::host::av1_set_intra_opt(c_int::from(enable))
 }

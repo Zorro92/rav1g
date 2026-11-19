@@ -284,12 +284,9 @@ void av1_set_cdef_v2(int enable);
  * default. Change it only while no frame is in flight. */
 void av1_set_intra_v2(int enable);
 
-/* Process-wide. Non-zero runs the original intra_main.hlsl (and its _hbd
- * build) from a second pipeline state compiled with DXC optimisation enabled.
- * Both builds use the same shader source. The default pipeline uses the -Od
- * build. Applies wherever the original intra path runs, so with
- * av1_set_intra_v2(1) only to the frames that keep it. Off by default. Change
- * it only while no frame is in flight. */
+/* Process-wide. Non-zero selects the DXC-optimized intra main shaders (default).
+ * Zero selects the legacy DXC -Od kernels. Applies to frames that run the main
+ * intra path. Change it only while no frame is in flight. */
 void av1_set_intra_opt(int enable);
 
 /* Process-wide. Non-zero predicts the inter blocks with one reference and the

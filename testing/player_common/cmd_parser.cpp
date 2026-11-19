@@ -79,8 +79,8 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        &params_.cdefv1_},
       {"intrav2", atSingle, anOptional, "intra prediction through intra_v2.hlsl (same output)", "",
        &params_.intrav2_},
-      {"intraopt", atSingle, anOptional, "original intra_main shader built with DXC optimisation (same source)", "",
-       &params_.intraopt_},
+      {"intraopt", atSingle, anOptional, "optimized intra_main shaders (default)", "intra-main", &params_.intraopt_},
+      {"intraod", atSingle, anOptional, "baseline DXC -Od intra_main shaders", "intra-main", &params_.intraod_},
       {"slots", atInt, anOptional,
        "decoder pipeline slots (frames in flight), 2..4. Default: four above 2560x1440, otherwise one "
        "more than frames in parse",
@@ -440,6 +440,7 @@ void CParameters::Reset() {
   params_.cdefv1_ = false;
   params_.intrav2_ = false;
   params_.intraopt_ = false;
+  params_.intraod_ = false;
   // 0: the task has no -slots (Parse() makes the default of it).
   params_.slots_ = 0;
   params_.slots_given_ = false;

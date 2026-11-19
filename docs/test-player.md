@@ -49,9 +49,9 @@ one commit each:
   Intra v2 also adds intra dispatch counters to the `-gputime` output and a
   host-side comparison of the two paths (`testing/intra_check`), which is not part of the
   player build. It is bit-exact but slower than the original path.
-- **Intra optimisation A/B**: the default DXC build uses `-Od` for `intra_main` and
-  `intra_main_hbd`. The player flag `-intraopt` selects the optimised DXC builds
-  of the same source. [Intra optimisation A/B](#intra-optimisation-ab--intraopt)
+- **Intra optimisation A/B** uses DXC-optimized `intra_main` and `intra_main_hbd` by default.
+  `-intraod` selects the previous DXC `-Od` kernels. See
+  [Intra optimisation A/B](#intra-optimisation-ab--intraod).
 - **High-bit-depth intra**: `intra_main_hbd.hlsl` prepares both edges together and shares the
   DC and CFL reductions across a block's threads in the group. It uses three group syncs. See
   [High-bit-depth intra shader](#high-bit-depth-intra-shader).
@@ -374,7 +374,7 @@ the start of every task say what is in effect.
 | Pipeline slots | 2 | `Frame slots: 2` | `-slots 3`, `-slots 4` |
 | Parser | the parse pass of rav1d, with its switches `nolfmask`, `tilethread` and (since package 0.2.197) `gpucdef` on | `Parser: the parse pass of rav1d`, `Parser switches (-parseopt): nolfmask tilethread gpucdef` | none since package 0.2.159: the entropy decoder of libaom (`-parser c`) left the decoder; up to 0.2.157 `Parser: the entropy decoder of libaom (-parser c)`; `-parseopt` for the switches; see [Parser](#parser--parser) |
 | Clears of a slot | none: the wavefront of intra prediction is kept at the edges of the tiles (since package 0.2.146.0) | `Clears: none needed (default: intra wavefront at the edges of the tiles; -gpuclear, -cpuclear and -syncclear keep it in the slot's grid and clear that)` | `-gpuclear`, `-cpuclear`, `-syncclear`: the wavefront in the slot's grid, cleared for every frame by the GPU, the completion thread (the default of 0.2.140 to 0.2.144; `-asyncclear` is the same) or the decode thread; see [Clears](#clears) |
-| Intra prediction | frame-wide wavefront, DXC `-Od` build of the main shader | `Intra shaders: intra_main + intra_filter (original)`, `Intra main shader: intra_main (-Od, original)` | `-intrav2`, `-intraopt` |
+| Intra prediction | frame-wide wavefront, DXC-optimized main shaders | `Intra main shader: intra_main (default)` | `-intrav2`, `-intraod` |
 | Inter prediction | upstream's shaders, lists by type and block size | `Inter shaders: inter_main, inter_compound (original)` | `-interfast`: see [Inter fast path](#inter-fast-path--interfast) |
 
 - **`-cdefv2` and `-fitsize` are still accepted** and change nothing: old task lines keep
@@ -1124,8 +1124,8 @@ From the repository root (needs `g++`, no GPU):
 sh testing/intra_check/run.sh --mutate
 ```
 
-It ends with `intra_check: intra_v2 output is identical to the original path on every
-frame` and one `mutant rejected as expected` line per mutation.
+It compares the default and legacy main kernels with `intra_v2` byte for byte and
+reports one `mutant rejected as expected` line per mutation.
 
 Not covered by this check: the compiled shaders and the real GPU (that is the md5 run);
 `gen_pred_blocks.hlsl` itself and the decoder's `has_top_right`/`has_bottom_left` tables
@@ -1149,8 +1149,7 @@ the edge selected for each pixel. DC and CFL use the shared memory for per-threa
 which the first thread of the block combines for its group.
 
 The wavefront schedule, bindings and video buffers are those of the existing frame-wide path.
-The DXC `-Od` build of this source is the default, and `-intraopt` selects the optimised build
-of the same source.
+DXC optimizes the default kernel. `-intraod` selects the previous kernel built with `-Od`.
 
 On the console (2026-11-18, package 0.2.218 against 0.2.220's default path, the same session after a
 restart, three runs of 300 frames each, the mean; the md5 set of 15 streams is unchanged):
@@ -1166,79 +1165,26 @@ front of the first and twice the group memory (21 KiB, behind `-parseopt intrale
 that was not merged) was slower than the default on the same console: `j4k40` intra 12.39 ms,
 51.4 fps.
 
-## Intra optimisation A/B (`-intraopt`)
+## Intra optimisation A/B (`-intraod`)
 
-The player can compare the timing and output of two DXC builds of
-`intra_main.hlsl` and `intra_main_hbd.hlsl` in one install.
+Use the same build and task settings on both sides of the comparison.
 
-| Flag | Effect |
+| Flag | Main intra kernel |
 | --- | --- |
-| `-intraopt` | Where the decoder runs `intra_main` (`intra_main_hbd` for high bit depth), it selects the pipeline state built with DXC's default optimisation. Both builds use the same shader source. |
+| Default or `-intraopt` | DXC `-O3` for `intra_main` and `intra_main_hbd` |
+| `-intraod` | DXC `-Od` for `intra_main_legacy` and `intra_main_hbd_legacy` |
 
-Off by default: without the flag the decoder uses the same pipeline states and issues
-the same dispatches as before. With the flag only the pipeline state of the `intra_main`
-dispatches changes; root signature, bindings, constants, dispatch sizes and
-`intra_filter` (which upstream already builds optimised) stay as they are.
+The player logs the selected kernel, and `rav1g-dec` accepts the same flags. With
+`-intrav2`, the choice applies to frames that still use the main intra path.
+The shader-pick build also supports `-shaderpick od=intra_main,intra_main_hbd`
+to use the baseline bytecode under the default shader names.
 
-The flag is independent of `-cdefv2` and `-intrav2` and combines freely with both. With
-`-intrav2` it applies to the frames that keep the upstream path (frames that allow intra
-block copy); the other frames do not run `intra_main` at all.
+For timing, append `-progress -gputime -nopresent` to both tasks and compare intra time,
+GPU busy time, and recording time. For validation, use `-md5_frame_check` in separate
+launches with the same reference and limit, on 8-bit and 10-bit streams. Include
+chroma-from-luma and frames with small blocks.
 
-The task's log says which build is selected:
-
-```text
-Intra main shader: intra_main (-Od, original)
-Intra main shader: intra_main_opt (DXC optimised, -intraopt)
-```
-
-### How it is built
-
-`intra_main_opt.hlsl` and `intra_main_hbd_opt.hlsl` consist of the licence header and one
-`#include` of the original file. The default shader set compiles the wrappers with DXC's
-default optimisation and the two original files with `-Od`.
-
-Use frame md5s to compare the two bytecodes on a device. The host-side check
-(`testing/intra_check`) runs the HLSL source as C++.
-
-### Historical FXC timing
-
-Both lines in `args_av1.txt`, same clip, same settings, both with `-cdefv2`; the only
-difference is the flag:
-
-```text
--i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -gputime -nopresent -cdefv2
--i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -gputime -nopresent -cdefv2 -intraopt
-```
-
-Compare the `gpu intra` row of the two summaries' stage tables, then `gpu busy` and the
-"per OUTPUT frame" line. The "intra stage per frame" line (dispatches, UAV barriers,
-thread groups) must be the same in both tasks, and every other GPU stage should be
-unchanged.
-
-### Same output: md5 of every frame
-
-As for [CDEF](#same-output-md5-of-every-frame), **in separate launches**. First launch,
-the reference from the `/Od` build (no `-intraopt`):
-
-```text
--i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -save_md5 /streams/<clip>.ivf.md5
-```
-
-Let the app exit, then a second launch with only the check task:
-
-```text
--i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -cdefv2 -intraopt -md5_frame_check
-```
-
-The rules of the CDEF section apply unchanged: the same `-limit` in both tasks, the
-`.md5` file next to the stream, no `-gputime`, no `-try10x3`. A reference file saved for
-the CDEF or intra v2 check of the same clip and `-limit` can be reused, since `-cdefv2`
-is md5-exact. The task ends with `MD5 is OK` or a list of bad frames. Run it on at least
-one 8-bit and one 10-bit clip (they use different shaders), and include a clip with
-chroma-from-luma blocks and a key frame of small blocks. A timing result of the
-optimised build counts only if its md5 check passes.
-
-### Console result (2026-11-11): wrong output, no gain
+### Historical FXC console result (2026-11-11)
 
 Package 0.2.3.0 (run 43008653829), 4K 10-bit, 1 tile, 300 frames, all tasks with `-cdefv2`:
 
@@ -1260,8 +1206,7 @@ Package 0.2.3.0 (run 43008653829), 4K 10-bit, 1 tile, 300 frames, all tasks with
   (between the left edge-filter stores and the above upsampling loads), and the CFL
   reduction relies on 64 threads running in lockstep with only `GroupMemoryBarrier()`.
   Neither is confirmed.
-- Only `intra_main_hbd_opt` ran on the console (both clips are 10-bit); the 8-bit
-  `intra_main_opt` was not tested.
+- Both clips used the 10-bit shader.
 
 ## Parser (`-parser`)
 
@@ -1557,7 +1502,7 @@ stream and shares one back buffer (see
 [Defaults and opt-out flags](#defaults-and-opt-out-flags)). `-gpuclear`, `-cpuclear` and
 `-syncclear` are the choices of one switch: two of them on one task line are an error of the
 task. Otherwise the flags are independent of each other and of `-cdefv1`, `-intrav2`,
-`-intraopt`, `-gputime`, `-nopresent` and the md5 flags.
+`-intraod`, `-gputime`, `-nopresent` and the md5 flags.
 
 **Console results so far (2026-11-11, package 0.2.5.0, app mode, both 4K 10-bit clips):**
 
@@ -3373,8 +3318,8 @@ DXIL as the default package. [DXC experiment](gpu-av1-decoder.md#dxc-experiment-
 
 | Set | What it is |
 | --- | --- |
-| `dxc` | The default DXC `cs_6_0` build. It uses `-Od` for `intra_main` and `intra_main_hbd` and default optimisation for the other shaders. |
-| `od` | DXC `cs_6_0` with `-Od` where supported, using the same shader sources as `dxc`. |
+| `dxc` | The default DXC `cs_6_0` build. DXC uses `-O3` by default and `-Od` for the two legacy main intra kernels. |
+| `od` | DXC `cs_6_0` with `-Od` for every shader. It defines `INTRA_MAIN_LEGACY` for `intra_main` and `intra_main_hbd`. |
 
 Both sets require Shader Model 6.0. The old `fxc=` selector is rejected. The frozen
 FXC decoder and its listing tools are on branch `fxc-sm5`.
@@ -3414,8 +3359,8 @@ player's log behind `MEMORY app before the pipeline states`; `rav1g-dec` prints 
 shaders of every set and the names of all but the largest set:
 
 ```text
-SHADERSET dxc: DXC 1.9.2602.17 cs_6_0: dxc -nologo -T cs_6_0 -E main -HV 2018 -WX -Wno-ambig-lit-shift; -Od for intra_main, intra_main_hbd
-SHADERSET od: DXC 1.9.2602.17 cs_6_0: dxc -nologo -T cs_6_0 -E main -HV 2018 -WX -Wno-ambig-lit-shift -Od; default DXIL for intra_v2, intra_v2_hbd (64-bit values at -Od)
+SHADERSET dxc: DXC 1.9.2602.17 cs_6_0: dxc -nologo -T cs_6_0 -E main -HV 2018 -WX -Wno-ambig-lit-shift; -Od for intra_main_hbd_legacy, intra_main_legacy
+SHADERSET od: DXC 1.9.2602.17 cs_6_0: dxc -nologo -T cs_6_0 -E main -HV 2018 -WX -Wno-ambig-lit-shift -Od; -D INTRA_MAIN_LEGACY for intra_main, intra_main_hbd; default DXIL for intra_v2, intra_v2_hbd (64-bit values at -Od)
 SHADERPICK od=cdef_filter_v2,loopfilter_vert_hbd: dxc 100 (all others); od 2 (cdef_filter_v2 loopfilter_vert_hbd)
 ```
 

@@ -43,6 +43,7 @@ enum GsRaceKind {
   GsReadAfterWrite,   // a thread reads what another thread wrote since the last group sync
   GsWriteAfterRead,   // a thread changes what another thread read since the last group sync
   GsWriteAfterWrite,  // two threads write different values to one element between two group syncs
+  GsReadUnwritten,    // a thread reads an element that the current group has never written
 };
 
 struct GsRaceSite {
@@ -55,8 +56,10 @@ struct GsRaceSite {
 
 struct GsState {
   uint32_t epoch = 1;   // goes up at every group sync and at every new group
+  uint32_t group_epoch = 1;
   uint32_t thread = 0;  // the running thread + 1; 0 outside a group
   const char *shader = "";
+  bool track_unwritten = false;
   long races = 0;
   long sync_errors = 0;     // group syncs that not all threads of the group reached
   long plain_barriers = 0;  // calls of GroupMemoryBarrier()
@@ -103,6 +106,7 @@ inline void gs_note_read(GsTag *tag, int line) {
   GsState &s = gs_state;
   if (!s.thread) return;
   if (++s.turn_accesses > kGsMaxTurnAccesses) gs_runaway_thread();
+  if (s.track_unwritten && tag->w_epoch < s.group_epoch) gs_record_race(GsReadUnwritten, line, 0);
   if (tag->w_epoch == s.epoch && tag->w_thread != s.thread) gs_record_race(GsReadAfterWrite, line, tag->w_line);
   if (tag->r_epoch != s.epoch) {
     tag->r_epoch = s.epoch;
@@ -350,10 +354,11 @@ void gs_record_race(int kind, int line, int other_line) {
 }
 
 void gs_print_races(const char *indent) {
-  static const char *const what[3] = {
+  static const char *const what[] = {
     "reads group memory that another thread wrote at line %d since the last group sync",
     "changes group memory that another thread read at line %d since the last group sync",
     "writes another value over what another thread wrote at line %d since the last group sync",
+    "reads unwritten group memory",
   };
   for (int i = 0; i < gs_state.site_count; ++i) {
     const GsRaceSite &site = gs_state.sites[i];
@@ -486,7 +491,7 @@ void gs_run_group(int threads, void (*body)(int thread, void *context), void *co
   }
   gs_fibers::body = body;
   body_context = context;
-  gs_state.epoch++;
+  gs_state.group_epoch = ++gs_state.epoch;
   for (int t = 0; t < threads; ++t) prepare(t);
   static int turn[kMaxThreads];
   long syncs = 0;

@@ -270,6 +270,10 @@ int intra_inter_blend(int mask, int intra, int inter) {
     }
   }
 
+#ifndef INTRA_MAIN_LEGACY
+  // A mode that needs no left edge has no left samples to filter.
+  filter_count = 0;
+#endif
   if (left_available && ((params.z >> NeedLeftShift) & 1)) {
     filter_count = min(left_available, bh) + ((params.z >> NeedBotShift) & 1) * bw + need_aboveleft - 1;
   }
@@ -457,7 +461,18 @@ int intra_inter_blend(int mask, int intra, int inter) {
 
     above_count <<= upsample_above;
     left_count <<= upsample_left;
+#ifdef INTRA_MAIN_LEGACY
     uint topleft = above[loc_base - 1];
+#else
+    // Only some modes prepare the corner and the far ends of the edges.
+    // Multiplying an unwritten value by zero does not make the load valid.
+    int topleft = 0;
+    if (need_aboveleft) topleft = above[loc_base - 1];
+    int bottom = 0;
+    int right = 0;
+    if (params.z & SmoothV) bottom = left[loc_base + bh - 1];
+    if (params.z & SmoothH) right = above[loc_base + bw - 1];
+#endif
 
     for (int i = 0; i < 4; ++i) {
       int x = i + x0;
@@ -549,8 +564,12 @@ int intra_inter_blend(int mask, int intra, int inter) {
       int w_b = (mode_info & SmoothV) ? 0x100 - w_t0 : 0;
       int w_r = (mode_info & SmoothH) ? 0x100 - w_l0 : 0;
 
+#ifdef INTRA_MAIN_LEGACY
       int sum = w_tl * topleft + w_b * left[loc_base + bh - 1] + w_r * above[loc_base + bw - 1] + w_l0 * l0 +
                 w_t0 * t0 + w_l1 * l1 + w_t1 * t1;
+#else
+      int sum = w_tl * topleft + w_b * bottom + w_r * right + w_l0 * l0 + w_t0 * t0 + w_l1 * l1 + w_t1 * t1;
+#endif
 
       sum += 1 << (params.w - 1);
       sum >>= params.w;

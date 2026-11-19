@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds and runs the intra prediction bit-exactness check on a Linux host
-# (g++, no GPU): the original shaders against intra_v2 (-intrav2).
+# (g++, no GPU): the optimized and legacy intra kernels against intra_v2 (-intrav2).
 #
 #   sh testing/intra_check/run.sh            the check; exit code 0 = identical
 #   sh testing/intra_check/run.sh --mutate   also proves the check can fail:
@@ -42,12 +42,15 @@ to_cpp() {
     -e 's/void main\(/void shader_main(/' \
     -e 's/\.xyz;/.xyz();/' \
     -e 's/([a-z0-9_]+)\.zw = ([a-z0-9_]+)\.yy;/\1.z = \2.y; \1.w = \2.y;/' \
+    -e 's/#include "(intra_main(_hbd)?)\.hlsl"/#include "\1.gen.h"/' \
     -e 's/#include "intra_v2\.hlsl"/#include "intra_v2.gen.h"/' \
     "$1" | sed -E -f "$here/../common/gs_groupshared.sed"
 }
 
 to_cpp "$shaders/intra_main.hlsl" > "$work/intra_main.gen.h"
 to_cpp "$shaders/intra_main_hbd.hlsl" > "$work/intra_main_hbd.gen.h"
+to_cpp "$shaders/intra_main_legacy.hlsl" > "$work/intra_main_legacy.gen.h"
+to_cpp "$shaders/intra_main_hbd_legacy.hlsl" > "$work/intra_main_hbd_legacy.gen.h"
 to_cpp "$shaders/intra_filter.hlsl" > "$work/intra_filter.gen.h"
 to_cpp "$shaders/intra_filter_hbd.hlsl" > "$work/intra_filter_hbd.gen.h"
 to_cpp "$shaders/intra_v2.hlsl" > "$work/intra_v2.gen.h"
@@ -97,11 +100,12 @@ build() {
   flags="-std=c++17 -O2 -fwrapv -Wall -Wno-unknown-pragmas -Wno-unused -Wno-parentheses -Wno-sign-compare"
   flags="$flags -I $1 -I $here -I $src/libav1/dx ${2:-}"
   rm -f "$1"/*.o
-  for shader in intra_main:0 intra_main_hbd:0 intra_filter:1 intra_filter_hbd:1 intra_v2:2 intra_v2_hbd:2; do
+  for shader in intra_main:0 intra_main_hbd:0 intra_main_legacy:0 intra_main_hbd_legacy:0 \
+    intra_filter:1 intra_filter_hbd:1 intra_v2:2 intra_v2_hbd:2; do
     name=${shader%:*}
     hbd=
     case $name in
-      *_hbd) hbd=-DSHADER_HBD ;;
+      *_hbd | *_hbd_legacy) hbd=-DSHADER_HBD ;;
     esac
     # shellcheck disable=SC2086
     g++ $flags $hbd -DSHADER_FILE="\"$name.gen.h\"" -DSHADER_NS="ns_$name" -DSHADER_API="${name}_api" \
@@ -121,7 +125,11 @@ timeout -k 10 "$check_timeout" "$work/intra_check" "$@"
 # the time, and that path gets checked too.
 build "$work" -DINTRA_V2_MAX_PASSES=6
 echo "With at most 6 passes per thread group:"
-timeout -k 10 "$check_timeout" "$work/intra_check" "$@" | grep -E 'intra_v2:|MISMATCH|FAILED|identical|reads|sync'
+if ! timeout -k 10 "$check_timeout" "$work/intra_check" "$@" > "$work/short-passes.log"; then
+  cat "$work/short-passes.log"
+  exit 1
+fi
+grep -E 'intra_v2:|identical|sync' "$work/short-passes.log"
 build "$work"
 
 if [ "$mutate" = 1 ]; then
@@ -140,6 +148,8 @@ intra_filter.gen.h@0,/GroupMemoryBarrierWithGroupSync();/s//GroupMemoryBarrier()
 intra_filter_hbd.gen.h@s/(sum + 0x8000u)/(sum)/@high-bit-depth filter intra tap borrow
 intra_filter_hbd.gen.h@s/if (diagonal != 0) GroupMemoryBarrierWithGroupSync();/if (diagonal != 0) GroupMemoryBarrier();/@filter intra diagonal group sync as a plain barrier@races in group memory .*[1-9]
 intra_main.gen.h@/above\[loc_base + wi\] = luma.x + luma.y + luma.z + luma.w;/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/@group sync before the CFL sum of intra_main as a plain barrier@races in group memory .*[1-9]
+intra_main.gen.h@s/if (need_aboveleft) topleft = above/topleft = above/@reading an unprepared corner in intra_main@reads unwritten group memory
+intra_main.gen.h@s/^  filter_count = 0;/  \/\/ Keep the above filter count./@filtering an unprepared left edge in intra_main@reads unwritten group memory
 intra_main_hbd.gen.h@/int4 next_above = 0;/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/@group sync before writing processed intra edges as a plain barrier@races in group memory .*[1-9]
 intra_v2.gen.h@0,/GroupMemoryBarrierWithGroupSync();/s//GroupMemoryBarrier();/@group sync of a pass of intra_v2 as a plain barrier@races in group memory .*[1-9]'
   mkdir "$work/mutant"
@@ -162,9 +172,9 @@ intra_v2.gen.h@0,/GroupMemoryBarrierWithGroupSync();/s//GroupMemoryBarrier();/@g
       echo "intra_check: the mutant '$what' passed, the check is not sensitive to it" >&2
       exit 1
     fi
-    # A mutant that takes a group sync away has to be caught as a race, not by chance.
+    # Mutations with a specific diagnostic must fail for that reason.
     if [ -n "$expect" ] && ! grep -q "$expect" "$work/mutant/log"; then
-      echo "intra_check: the mutant '$what' was rejected, but not for a race in group memory" >&2
+      echo "intra_check: the mutant '$what' failed without '$expect'" >&2
       tail -n 20 "$work/mutant/log" >&2
       exit 1
     fi

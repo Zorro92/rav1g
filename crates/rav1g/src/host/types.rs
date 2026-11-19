@@ -89,7 +89,7 @@ pub struct bitdepth_dependent_shaders {
     pub inter_warp_comp: ComputeShader,
     pub intra_filter: ComputeShader,
     pub intra_main: ComputeShader,
-    pub intra_main_opt: ComputeShader,
+    pub intra_main_legacy: ComputeShader,
     pub reconstruct_block: ComputeShader,
     pub inter_ext_borders: ComputeShader,
     pub loopfilter_v: ComputeShader,

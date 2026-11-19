@@ -1,7 +1,6 @@
 /*
- * Host check for the test player flag -intrav2: runs the original intra
- * prediction shaders (intra_main + intra_filter, one dispatch pair per
- * wavefront iteration) and the new one (intra_v2, scheduled by
+ * Runs the default and legacy intra main kernels (one dispatch pair per
+ * wavefront iteration) and intra_v2 (scheduled by
  * libav1/dx/intra_v2_sched.h) as C++ on generated frames and compares the
  * whole frame buffer byte for byte. 8-bit and 10-bit.
  *
@@ -22,7 +21,8 @@
  *   - the group memory records its readers and writers: a thread that reads
  *     what another thread wrote since the last group sync, or changes what
  *     another read or wrote since then, is a race, and fails the check;
- *   - the group memory starts as garbage, different in every run.
+ *   - the group memory starts as garbage, different in every run. The default
+ *     main kernels also check that every word read has been written by the group.
  * Thread groups run one after the other, so the frame buffer is watched for
  * reads that would depend on the order of groups or threads on a GPU (see
  * AccessTracker in hlsl_shim.h).
@@ -66,10 +66,13 @@ static void run_group(const ShaderApi *api, uint32_t group, int threads, uint64_
   g_tracker.group++;
   gs_state.shader = api == &intra_main_api       ? "intra_main.hlsl"
                     : api == &intra_main_hbd_api   ? "intra_main_hbd.hlsl"
+                    : api == &intra_main_legacy_api ? "intra_main_legacy.hlsl"
+                    : api == &intra_main_hbd_legacy_api ? "intra_main_hbd_legacy.hlsl"
                     : api == &intra_filter_api     ? "intra_filter.hlsl"
                     : api == &intra_filter_hbd_api ? "intra_filter_hbd.hlsl"
                     : api == &intra_v2_hbd_api     ? "intra_v2.hlsl (10-bit)"
                                                    : "intra_v2.hlsl";
+  gs_state.track_unwritten = api == &intra_main_api || api == &intra_main_hbd_api;
   GroupContext context = { api, group };
   gs_run_group(threads, thread_body, &context, garbage);
 }
@@ -735,14 +738,14 @@ static RunResult end_run() {
   r.sync_errors = gs_state.sync_errors + gs_state.runaway_groups;  // a group that does not end is no better
   r.memory_races = gs_state.races;
   r.plain_barriers = gs_state.plain_barriers;
+  if (r.memory_races) gs_print_races("    ");
   g_tracker.w_unit = nullptr;
   return r;
 }
 
 // The intra loop of av1_prediction_run_all().
-static RunResult run_original(const Geometry &g, const Frame &f, std::vector<uint8_t> *pool, uint64_t garbage,
-                              Coverage *cov) {
-  const ShaderApi *main_api = g.hbd ? &intra_main_hbd_api : &intra_main_api;
+static RunResult run_main(const Geometry &g, const Frame &f, std::vector<uint8_t> *pool, uint64_t garbage,
+                          const ShaderApi *main_api, Coverage *cov) {
   const ShaderApi *filter_api = g.hbd ? &intra_filter_hbd_api : &intra_filter_api;
   ShaderBuffers buffers = {};
   buffers.pred_blocks = (const uint8_t *)f.records1.data();
@@ -918,9 +921,10 @@ int main(int argc, char **argv) {
   }
 
   int failures = 0;
-  long garbage_dependent = 0;
   long original_races = 0;
   for (int hbd = 0; hbd < 2; ++hbd) {
+    const ShaderApi *legacy_api = hbd ? &intra_main_hbd_legacy_api : &intra_main_legacy_api;
+    const ShaderApi *main_api = hbd ? &intra_main_hbd_api : &intra_main_api;
     Coverage cov = {};
     Rng rng = { seed + (uint64_t)hbd * 7919 };
     for (int layout = 0; layout < layouts && failures < 5; ++layout) {
@@ -946,35 +950,32 @@ int main(int argc, char **argv) {
         cov.frames++;
         if (g.tiles.size() > 1) cov.multi_tile++;
 
-        std::vector<uint8_t> original = f.pixels;
-        std::vector<uint8_t> original_again = f.pixels;
+        std::vector<uint8_t> legacy = f.pixels;
+        std::vector<uint8_t> optimized = f.pixels;
         std::vector<uint8_t> v2 = f.pixels;
-        const RunResult r1 = run_original(g, f, &original, rng.u32(), &cov);
-        const RunResult r1b = run_original(g, f, &original_again, rng.u32(), nullptr);
+        const RunResult r1 = run_main(g, f, &legacy, rng.u32(), legacy_api, &cov);
+        const RunResult r1b = run_main(g, f, &optimized, rng.u32(), main_api, nullptr);
         const RunResult r2 = run_v2(g, f, &schedule, &v2, rng.u32(), &cov);
         original_races += r1.races_group;
 
         const char *problem = nullptr;
-        size_t at = 0;
-        if (original != original_again) {
-          // Not a property of the new path, but then there is no single
-          // right answer to compare with.
-          garbage_dependent++;
-          problem = "the original path depends on uninitialised group memory";
-          at = first_difference(original, original_again);
-        } else if (original != v2) {
-          problem = "MISMATCH between the original path and intra_v2";
-          at = first_difference(original, v2);
+        size_t at = legacy.size();
+        if (legacy != optimized) {
+          problem = "MISMATCH between the legacy and optimized intra kernels";
+          at = first_difference(legacy, optimized);
+        } else if (legacy != v2) {
+          problem = "MISMATCH between the legacy path and intra_v2";
+          at = first_difference(legacy, v2);
         } else if (r1.sync_errors || r1b.sync_errors || r2.sync_errors) {
           problem = "a group sync was not reached by all threads of a group";
         } else if (r1.memory_races || r1b.memory_races) {
-          problem = "the original path has a race in its group memory";
+          problem = "an intra main kernel has a group memory error";
         } else if (r2.memory_races) {
           problem = "intra_v2 has a race in its group memory";
         } else if (r1.plain_barriers || r1b.plain_barriers || r2.plain_barriers) {
           problem = "a shader calls GroupMemoryBarrier(), which makes no thread wait";
-        } else if (r2.out_of_bounds) {
-          problem = "intra_v2 reads or writes outside its buffers";
+        } else if (r1b.out_of_bounds || r2.out_of_bounds) {
+          problem = "the optimized path or intra_v2 reads or writes outside its buffers";
         } else if (r2.races_group) {
           problem = "intra_v2 reads what another thread group of the same step wrote";
         } else if (r2.races_thread) {
@@ -988,13 +989,12 @@ int main(int argc, char **argv) {
         if (problem) {
           ++failures;
           printf("  %s\n", problem);
-          if (at < original.size()) describe(g, f, schedule, at);
-          printf("  out of bounds %ld/%ld, group races %ld/%ld, thread races %ld, sync errors %ld/%ld\n",
-                 r1.out_of_bounds, r2.out_of_bounds, r1.races_group, r2.races_group, r2.races_thread, r1.sync_errors,
-                 r2.sync_errors);
-          printf("  races in group memory %ld/%ld/%ld (original, original again, intra_v2)\n", r1.memory_races,
+          if (at < legacy.size()) describe(g, f, schedule, at);
+          printf("  out of bounds %ld/%ld/%ld, group races %ld/%ld/%ld, sync errors %ld/%ld/%ld\n",
+                 r1.out_of_bounds, r1b.out_of_bounds, r2.out_of_bounds, r1.races_group, r1b.races_group, r2.races_group,
+                 r1.sync_errors, r1b.sync_errors, r2.sync_errors);
+          printf("  races in group memory %ld/%ld/%ld (legacy, optimized, intra_v2)\n", r1.memory_races,
                  r1b.memory_races, r2.memory_races);
-          gs_print_races("    ");
         }
       }
     }
@@ -1023,13 +1023,12 @@ int main(int argc, char **argv) {
            cov.v2_groups ? (double)cov.v2_group_passes / (double)cov.v2_groups : 0.0, cov.v2_max_passes);
   }
   if (original_races) printf("note: %ld order-dependent reads between thread groups in the original path\n", original_races);
-  if (garbage_dependent) printf("note: %ld frames where the original path depends on uninitialised memory\n", garbage_dependent);
   printf("group memory: %ld group syncs%s\n", g_total_group_syncs,
          failures ? "" : ", no race, every group sync reached by all threads, no plain group memory barrier");
   if (failures) {
     printf("intra_check: FAILED\n");
     return 1;
   }
-  printf("intra_check: intra_v2 output is identical to the original path on every frame\n");
+  printf("intra_check: the legacy, optimized and intra_v2 outputs are identical on every frame\n");
   return 0;
 }

@@ -679,10 +679,14 @@ fn create_decoder(
         size.bit_depth,
         if task.nofitsize { "-nofitsize" } else { "fit to the stream" },
         task.slots,
-        if task.lowmem_parts == crate::args::LOWMEM_DEFAULT { String::from("default") } else { task.lowmem_parts.to_string() },
+        if task.lowmem_parts == crate::args::LOWMEM_DEFAULT {
+            String::from("default")
+        } else {
+            task.lowmem_parts.to_string()
+        },
         if task.cdefv1 { "cdef_filter (-cdefv1)" } else { "cdef_filter_v2" },
         if task.intrav2 { "intra_v2" } else { "intra_main + intra_filter" },
-        if task.intraopt { " (intra_main_opt)" } else { "" },
+        if task.intraopt { " (optimized main)" } else { " (legacy main, -intraod)" },
         match task.clears {
             Clears::NotNeeded => "none needed",
             Clears::Gpu => "GPU (-gpuclear)",

@@ -65,7 +65,7 @@ output to the MSVC build. [The jobs of a push](#the-jobs-of-a-push)
   rounded up to 128 and its bit depth, with two pipeline slots and the shared back buffer,
   CDEF runs through `cdef_filter_v2.hlsl`. The player's flags switch the same things:
   `-cdefv1`, `-nofitsize`, `-lowmemparts <n>`, `-lowmem`, `-slots <n>`, `-intrav2`,
-  `-intraopt`, `-gpuclear`, `-cpuclear`, `-syncclear`, `-parser c`, `-parseopt <list>`,
+  `-intraod`, `-intraopt`, `-gpuclear`, `-cpuclear`, `-syncclear`, `-parser c`, `-parseopt <list>`,
   `-t <threads>`, `-parseframes <n>` (frames in parse; the `CONFIGURATION` line of a task says what
   the decoder was created with), `-limit <n>`.
 - **The output path**: the decoder asks for an output image for every frame that is output
@@ -192,7 +192,7 @@ rav1g-dec -sm6test
 | `-queue_size <n>` | output images in the pool (default 4) |
 | `-timeout <seconds>` | give up on a task after this time |
 | `-name <text>` | what the `BEGIN` and `RESULT` lines call the stream (default: its file name) |
-| `-cdefv1`, `-nofitsize`, `-lowmemparts <n>`, `-lowmem`, `-slots <n>`, `-intrav2`, `-intraopt`, `-gpuclear`, `-cpuclear` (`-asyncclear` is the same), `-syncclear` | as in the [test player](test-player.md#defaults-and-opt-out-flags); the task line of a run names the choice (`clears none needed`, `clears GPU (-gpuclear)`, `clears completion thread (-cpuclear)`, `clears decode thread (-syncclear)`) |
+| `-cdefv1`, `-nofitsize`, `-lowmemparts <n>`, `-lowmem`, `-slots <n>`, `-intrav2`, `-intraod`, `-intraopt`, `-gpuclear`, `-cpuclear` (`-asyncclear` is the same), `-syncclear` | as in the [test player](test-player.md#defaults-and-opt-out-flags); the task line of a run names the choice (`clears none needed`, `clears GPU (-gpuclear)`, `clears completion thread (-cpuclear)`, `clears decode thread (-syncclear)`) |
 | `-lfhsplit <n>`, `-intraedgefix` | the [experiments](test-player.md#experiments) of the test player; with the `experiments` input the `rust-experiments` job runs the whole set with each, and with a program built with `--features uavsync` from the shaders of the uavsync package (it prints `SHADERS uavsync`) |
 | `-poisonmi`, `-poisonbuf` | debugging, off by default: the decoder fills the mode info pool (`-poisonmi`) or every buffer the CPU writes for the shaders (`-poisonbuf`) with the byte 0xA5 when it creates it, instead of leaving what the memory held. With `-poisonbuf` it also fills the constants of every stage again in every frame, right before the stage writes them (their memory is reused from frame to frame). What the decoder clears or initialises after the creation is as in a normal run. The output must be the same; a shader that reads bytes the CPU never wrote gives another one, or loses the device. The decoder passes both. See [Order check and poisoned buffers](#order-check-and-poisoned-buffers) |
 | `-interfast`, `-interfastlists` | the [inter fast path](test-player.md#inter-fast-path--interfast) of the test player: inter blocks listed by the fraction of their motion vectors (`inter_fast`, `inter_compound_fast`; with `-interfastlists` the original shaders on those lists), same output; the `rust` job decodes the whole set once more with `-interfast` on every push |

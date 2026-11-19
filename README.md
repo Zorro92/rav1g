@@ -39,7 +39,7 @@ which is new in package 0.2.148.0 and md5-exact in CI; `-cpuclear` is the defaul
 The upstream behaviour was `-cdefv1 -nofitsize -lowmemparts 0
 -parser c -syncclear` in the test player; `-parser c`, upstream's entropy decoder, is no longer in
 the decoder (package 0.2.159). Everything else that was tried (`-slots 3`,
-`-lowmem`, `-intrav2`, `-intraopt`) stays behind its flag. The columns below name the flags the runs were made
+`-lowmem`, `-intrav2`) stays behind its flag. The columns below name the flags the runs were made
 with; `-cdefv2`, `-fitsize` and the shared back buffer of `-lowmem` are the defaults now.
 
 4K 10-bit, 1 tile, 40 Mbps, 300 frames, on the console, no presentation (ranges are over
@@ -61,8 +61,8 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
   selects upstream's shader).
 - **Intra v2** (`-intrav2`) is bit-exact but 2.3–2.4x slower. It is a negative result, off by
   default and kept for reference.
-- **Intra optimisation A/B** (`-intraopt`): selects the optimised DXC build of `intra_main`
-  and `intra_main_hbd`. The default build compiles those two shaders with `-Od`.
+- **Intra optimisation A/B** uses DXC-optimized `intra_main` and `intra_main_hbd` by default.
+  `-intraod` selects their legacy DXC `-Od` kernels.
 - **A third frame in flight** (`-slots 3`) lets CPU and GPU overlap: the decode thread's wait
   for a free slot drops from 5.6–8.3 ms to 0.3–0.6 ms per frame. It only fits in memory with
   `-lowmem`. All combinations are md5-exact. On the SVT clip the CPU (entropy decoding,

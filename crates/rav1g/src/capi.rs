@@ -1425,7 +1425,7 @@ pub extern "C" fn rav1g_set_intra_v2(enable: bool) {
     switches::set_intra_v2(enable);
 }
 
-/// The optimised build of the original intra shader.
+/// The optimized intra main shaders (true, default) or the legacy kernels (false).
 #[unsafe(no_mangle)]
 pub extern "C" fn rav1g_set_intra_opt(enable: bool) {
     switches::set_intra_opt(enable);

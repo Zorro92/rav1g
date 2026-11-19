@@ -157,7 +157,7 @@ impl Default for Task {
             budget_mib: -1,
             headroom_mib: 0,
             intrav2: false,
-            intraopt: false,
+            intraopt: true,
             clears: Clears::NotNeeded,
             lfhsplit: 0,
             intraedgefix: false,
@@ -251,7 +251,8 @@ pub fn usage() {
     say!("                        its budget guard leaves it");
     say!("  -queue_size <n>       output images in the pool, 1..{} (default {})", QUEUE_SIZE_MAX, QUEUE_SIZE_DEFAULT);
     say!("  -timeout <seconds>    give up on a task after this time (exit code {})", EXIT_TIMEOUT);
-    say!("  -cdefv1 -nofitsize -lowmemparts <n> -lowmem -slots <n> -intrav2 -intraopt");
+    say!("  -cdefv1 -nofitsize -lowmemparts <n> -lowmem -slots <n> -intrav2");
+    say!("  -intraod             use the baseline DXC -Od intra_main kernels (-intraopt restores the default)");
     say!("                        as in the test player (docs/test-player.md); -cdefv2 and -fitsize (the defaults)");
     say!("                        are accepted");
     say!("  -gpuclear -cpuclear -syncclear");
@@ -429,6 +430,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-fitsize" => task.fitsize = true,
             "-intrav2" => task.intrav2 = true,
             "-intraopt" => task.intraopt = true,
+            "-intraod" => task.intraopt = false,
             "-gpuclear" => task.clears = Clears::Gpu,
             "-cpuclear" | "-asyncclear" => task.clears = Clears::CompletionThread,
             "-syncclear" => task.clears = Clears::DecodeThread,

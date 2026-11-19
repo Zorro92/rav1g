@@ -503,10 +503,8 @@ struct IntraData {
     sm_weight_arrays: [[c_int; 4]; 128],
 }
 
-// Test player switch (-intraopt): the original intra path takes intra_main from the pipeline state built
-// by DXC with optimisation (intra_main_opt.hlsl / intra_main_hbd_opt.hlsl, which only include the original
-// source). Off unless av1_set_intra_opt(1) was called. The default pipeline uses the -Od build.
-static INTRA_OPT: AtomicI32 = AtomicI32::new(0);
+// The main intra path uses DXC's optimized build by default. -intraod selects the baseline kernel.
+static INTRA_OPT: AtomicI32 = AtomicI32::new(1);
 
 /// `av1_set_intra_opt` (`dx/av1_perf.h`).
 #[unsafe(no_mangle)]
@@ -1120,11 +1118,10 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
         if td.intra_iters >= 0 || have_recon {
             let constants = alloc_constants::<IntraData>(&mut td.command_buffer);
             let data = constants.data;
-            // The -Od build unless -intraopt asks for the optimised build of the same source (same layout).
             let intra_main: *const ComputeShader = if INTRA_OPT.load(Ordering::Relaxed) != 0 {
-                &raw const (*shaders).intra_main_opt
-            } else {
                 &raw const (*shaders).intra_main
+            } else {
+                &raw const (*shaders).intra_main_legacy
             };
 
             (*data).flags[0] = c_int::from((*cm).seq_params.enable_intra_edge_filter);

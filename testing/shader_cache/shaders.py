@@ -41,13 +41,15 @@ VARIANTS = {
     'shader-pick': [],
 }
 
+INTRA_MAIN = ['intra_main', 'intra_main_hbd']
+# The -intraod comparison kernels are built without optimization in the default set.
+UNOPTIMIZED = [name + '_legacy' for name in INTRA_MAIN]
+
 # Verify both implementations of CDEF and all the intra variants in the built binary.
 REQUIRED_BYTECODE = [
-    'cdef_filter', 'cdef_filter_v2', 'intra_main', 'intra_main_opt', 'intra_main_hbd', 'intra_main_hbd_opt',
+    'cdef_filter', 'cdef_filter_v2', *INTRA_MAIN, *UNOPTIMIZED,
     'intra_filter', 'intra_filter_hbd', 'intra_v2', 'intra_v2_hbd',
 ]
-# The upstream intra shaders are compared with their optimized builds by -intraopt.
-UNOPTIMIZED = ['intra_main', 'intra_main_hbd']
 
 # What DXC is given for every shader on top of -T, -E and -Od:
 #
@@ -86,7 +88,7 @@ def project_shaders(shaders_dir=SHADERS):
     names = sorted(name[:-5] for name in os.listdir(shaders_dir) if name.endswith('.hlsl'))
     if len(names) < 80:
         fail('only %d shaders found in %s' % (len(names), shaders_dir))
-    for name in UNOPTIMIZED + ['intra_main_opt', 'intra_main_hbd_opt']:
+    for name in INTRA_MAIN + UNOPTIMIZED:
         if name not in names:
             fail('%s is not a shader of %s' % (name, shaders_dir))
     return [(name, name in UNOPTIMIZED) for name in names]
@@ -149,19 +151,21 @@ def dxc_version(dxc):
     return text or 'version not reported', short
 
 
-def dxc_arguments(od, variant):
+def dxc_arguments(od, variant, name=None):
     """The arguments that decide DXC's output; the output files and the source path come on top. No
     -Vn: DXC writes the bytecode (-Fo), and write_header the array with the name of the shader."""
     args = ['-nologo', '-T', DXC_PROFILE, '-E', 'main'] + DXC_ARGUMENTS
     if od:
         args.append('-Od')
+        if name in INTRA_MAIN:
+            args += ['-D', 'INTRA_MAIN_LEGACY']
     for define in VARIANTS[variant]:
         args += ['-D', define]
     return args
 
 
 def shader_key(name, od, variant, identity, shaders_dir=SHADERS):
-    material = {'format': FORMAT, 'dxc': identity, 'arguments': dxc_arguments(od, variant),
+    material = {'format': FORMAT, 'dxc': identity, 'arguments': dxc_arguments(od, variant, name),
                 'name': name, 'files': source_files(name, shaders_dir)}
     return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
 
@@ -237,7 +241,7 @@ def compile_shader(compiler, cache, name, od, variant, key, shaders_dir, allow_w
     listing = os.path.join(work, name + '.asm')
     source = os.path.join(shaders_dir, name + '.hlsl')
     blob_path = os.path.join(work, name + '.dxil')
-    arguments = dxc_arguments(od, variant)
+    arguments = dxc_arguments(od, variant, name)
     command = [compiler] + arguments + ['-Fc', listing, '-Fo', blob_path, source]
     start = time.monotonic()
     done = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -373,7 +377,8 @@ def build_od_set(args, shaders, dxc_keys, identity, jobs, shader_set, report):
                         'header_sha256': sha256_file(target)})
 
     dxc_line = 'dxc: %s: dxc %s; -Od for %s' % (shader_set, report['arguments'], unoptimized)
-    od_line = 'od: %s: dxc %s' % (shader_set, report['arguments_unoptimized'])
+    od_line = 'od: %s: dxc %s; -D INTRA_MAIN_LEGACY for %s' % (
+        shader_set, report['arguments_unoptimized'], ', '.join(INTRA_MAIN))
     if wide:
         od_line += '; default DXIL for %s (64-bit values at -Od)' % ', '.join(wide)
     lines = [dxc_line, od_line]

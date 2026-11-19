@@ -14,7 +14,6 @@
  * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
  */
 
-// intra_main.hlsl, unchanged, built with FXC optimisation enabled (test player flag -intraopt).
-// The project compiles intra_main.hlsl itself with optimisation disabled; this file only exists
-// so that the same source gets a second FxCompile item with the project's default settings.
-#include "intra_main.hlsl"
+// The original kernel, compiled with optimizations disabled for -intraod.
+#define INTRA_MAIN_LEGACY
+#include "intra_main_hbd.hlsl"

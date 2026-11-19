@@ -87,9 +87,10 @@ Agreed on 2026-11-12, in addition to the steps above:
   fetches) for `x86_64-pc-windows-msvc`, the C parser through `cc` the same way, and the shaders with DXC's
   native Linux release. The UWP test player is C++/CX and stays an MSVC build in CI, as does the MSIX
   packaging. Running the decoder still needs D3D12 (WARP in CI, or the console).
-- **Signed DXIL.** DXC builds the decoder shaders for `cs_6_0`, preserving `-Od` for
-  `intra_main` and `intra_main_hbd`. The console accepts Shader Model 6.4 at most, with waves
-  of 64 lanes and no native 16-bit operations or `[WaveSize]`. WARP uses waves of 4.
+- **Signed DXIL.** DXC builds the decoder shaders for `cs_6_0`, with `-O3` by default
+  and `-Od` for `intra_main_legacy` and `intra_main_hbd_legacy`. The console accepts
+  Shader Model 6.4 at most, with waves of 64 lanes and no native 16-bit operations or
+  `[WaveSize]`. WARP uses waves of 4.
   The `shader-pick` experiment adds DXC `-Od` bytecode for driver diagnostics.
   The FXC listing scan for overlapping DXBC register writes is on branch `fxc-sm5`.
   Console md5 comparisons exercise the driver's DXIL code generation.

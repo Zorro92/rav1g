@@ -789,10 +789,9 @@ int AV1Decoder::DecodeOne() {
           << (params_.parser_options_ & PLAYER_PARSEOPT_GPU_CDEF_LISTS ? "gpucdef " : "")
           << (params_.parser_options_ & PLAYER_PARSEOPT_GPU_GRID ? "gpugrid " : "")
           << (params_.parser_options_ & PLAYER_PARSEOPT_GPU_PRED_LISTS ? "gpublists " : "");
-  // -intraopt: which build of the original intra_main shader runs; independent of the two flags above.
-  rav1g_set_intra_opt(params_.intraopt_ != 0);
+  rav1g_set_intra_opt(!params_.intraod_);
   XB_LOGI << "Intra main shader: "
-          << (params_.intraopt_ ? "intra_main_opt (DXC optimised, -intraopt)" : "intra_main (-Od, original)");
+          << (params_.intraod_ ? "intra_main_legacy (-intraod)" : "intra_main (default)");
 
   // -slots, -parseframes, -t: fixed when the decoder was created; Start() asks for a new decoder when a
   // value changes. What the decoder has is what the library made of them.

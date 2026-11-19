@@ -77,7 +77,7 @@ typedef unsigned char BYTE; /* the type of the bytecode arrays */
 #include "dx/shaders/h/inter_scale_warp_compound.h"
 #include "dx/shaders/h/intra_filter.h"
 #include "dx/shaders/h/intra_main.h"
-#include "dx/shaders/h/intra_main_opt.h"
+#include "dx/shaders/h/intra_main_legacy.h"
 #include "dx/shaders/h/inter_ext_borders.h"
 #include "dx/shaders/h/reconstruct_block.h"
 #include "dx/shaders/h/loopfilter_vert.h"
@@ -95,7 +95,7 @@ typedef unsigned char BYTE; /* the type of the bytecode arrays */
 #include "dx/shaders/h/inter_warp_hbd.h"
 #include "dx/shaders/h/intra_filter_hbd.h"
 #include "dx/shaders/h/intra_main_hbd.h"
-#include "dx/shaders/h/intra_main_hbd_opt.h"
+#include "dx/shaders/h/intra_main_hbd_legacy.h"
 #include "dx/shaders/h/inter_ext_borders_hbd.h"
 #include "dx/shaders/h/reconstruct_block_hbd.h"
 #include "dx/shaders/h/loopfilter_vert_hbd.h"
@@ -182,7 +182,7 @@ static const rav1g_shader_bytecode rav1g_shaders[] = {
   RAV1G_SHADER(inter_scale_warp_compound),
   RAV1G_SHADER(intra_filter),
   RAV1G_SHADER(intra_main),
-  RAV1G_SHADER(intra_main_opt),
+  RAV1G_SHADER(intra_main_legacy),
   RAV1G_SHADER(inter_ext_borders),
   RAV1G_SHADER(reconstruct_block),
   RAV1G_SHADER(loopfilter_vert),
@@ -200,7 +200,7 @@ static const rav1g_shader_bytecode rav1g_shaders[] = {
   RAV1G_SHADER(inter_warp_hbd),
   RAV1G_SHADER(intra_filter_hbd),
   RAV1G_SHADER(intra_main_hbd),
-  RAV1G_SHADER(intra_main_hbd_opt),
+  RAV1G_SHADER(intra_main_hbd_legacy),
   RAV1G_SHADER(inter_ext_borders_hbd),
   RAV1G_SHADER(reconstruct_block_hbd),
   RAV1G_SHADER(loopfilter_vert_hbd),
