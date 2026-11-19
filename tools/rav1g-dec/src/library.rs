@@ -162,6 +162,7 @@ pub struct Spec {
 /// The shader choices of a task.
 #[derive(Clone, Copy)]
 pub struct Choices {
+    pub lr_legacy: bool,
     pub cdef_v2: bool,
     pub intra_v2: bool,
     pub intra_opt: bool,
@@ -491,6 +492,7 @@ impl Library {
     /// The shader choices, set while no frame is in flight.
     pub fn set_choices(&self, choices: &Choices) {
         switches::set_lf_legacy(choices.lf_legacy);
+        switches::set_lr_legacy(choices.lr_legacy);
         if self.is_c() {
             capi::rav1g_set_cdef_v2(choices.cdef_v2);
             capi::rav1g_set_intra_v2(choices.intra_v2);

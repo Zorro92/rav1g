@@ -91,6 +91,7 @@ pub struct Task {
     pub headroom_mib: i64,
     pub intrav2: bool,
     pub intraopt: bool,
+    pub lrlegacy: bool,
     /// What a frame does about the clears of its slot's grids: nothing to clear without a flag;
     /// -gpuclear, -cpuclear (and -asyncclear, its older name), -syncclear.
     pub clears: Clears,
@@ -160,6 +161,7 @@ impl Default for Task {
             headroom_mib: 0,
             intrav2: false,
             intraopt: true,
+            lrlegacy: false,
             clears: Clears::NotNeeded,
             lflegacy: false,
             lfhsplit: 0,
@@ -256,6 +258,7 @@ pub fn usage() {
     say!("  -timeout <seconds>    give up on a task after this time (exit code {})", EXIT_TIMEOUT);
     say!("  -cdefv1 -nofitsize -lowmemparts <n> -lowmem -slots <n> -intrav2");
     say!("  -intraod             use the baseline DXC -Od intra_main kernels (-intraopt restores the default)");
+    say!("  -lrlegacy           use the original loop_restoration shader");
     say!("                        as in the test player (docs/test-player.md); -cdefv2 and -fitsize (the defaults)");
     say!("                        are accepted");
     say!("  -gpuclear -cpuclear -syncclear");
@@ -435,6 +438,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-intrav2" => task.intrav2 = true,
             "-intraopt" => task.intraopt = true,
             "-intraod" => task.intraopt = false,
+            "-lrlegacy" => task.lrlegacy = true,
             "-gpuclear" => task.clears = Clears::Gpu,
             "-cpuclear" | "-asyncclear" => task.clears = Clears::CompletionThread,
             "-syncclear" => task.clears = Clears::DecodeThread,

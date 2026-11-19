@@ -44,8 +44,8 @@ done
 # shader:family. Families (shader_tu.cpp): 1 inverse transforms, 2 lossless transform, 3 inter
 # prediction, 4 deblocking, 5 loop restoration, 6 film grain templates (6y: one group per chroma
 # plane), 7 film grain, 8 prediction list counts, 9 prediction list scan. The intra and CDEF
-# shaders have checks of their own with real input
-# (intra_check, cdef_check), which watch their group memory the same way.
+# shaders and optimized loop restoration have checks of their own with real input
+# (intra_check, cdef_check, restoration_check), which watch their group memory the same way.
 list=""
 for f in "$shaders"/*.hlsl; do
   name=$(basename "$f" .hlsl)
@@ -56,14 +56,14 @@ for f in "$shaders"/*.hlsl; do
     idct*) family=1 ;;
     inter_*) family=3 ;;
     loopfilter_*) family=4 ;;
-    loop_restoration) family=5 ;;
+    loop_restoration_legacy) family=5 ;;
     film_grain_gen_luma) family=6 ;;
     film_grain_gen_chroma) family=6y ;;
     film_grain_filter) family=7 ;;
     pred_list_count) family=8 ;;
     pred_list_scan) family=9 ;;
     gen_pred_blocks) continue ;; # group memory only in the pred_list_count build
-    intra_* | cdef_*) continue ;;
+    intra_* | cdef_* | loop_restoration) continue ;;
     *) echo "sync_check: $name.hlsl has group memory and no family here" >&2; exit 1 ;;
   esac
   list="$list $name:$family"

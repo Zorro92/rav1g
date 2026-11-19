@@ -115,6 +115,7 @@ pub struct compute_shader_lib {
     pub shader_idct: [ComputeShader; 20],
     pub shader_idct_sort: ComputeShader,
     pub shader_loop_rest: ComputeShader,
+    pub shader_loop_rest_legacy: ComputeShader,
     pub shader_cdef_filter: ComputeShader,
     pub shader_cdef_filter_v2: ComputeShader,
     pub shader_intra_v2: ComputeShader,

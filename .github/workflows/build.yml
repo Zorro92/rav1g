@@ -3641,6 +3641,9 @@ jobs:
           sh testing/sync_check/run.sh --mutate | tee sync-check.log
           { echo '## Thread group check'; echo '```'; cat sync-check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Compare loop restoration with its legacy shader
+        run: sh testing/restoration_check/run.sh
+
   # Host proof for CDEF v2: the original and the v2 CDEF shader source, compiled as C++,
   # must write byte-identical frames (random and edge-case input, 8-bit and high bit depth).
   cdef-check:

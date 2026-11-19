@@ -669,7 +669,7 @@ fn create_decoder(
     let (device_size, host_size) = library.memory_requirements(&spec);
     say!(
         "TASK {}: stream {}x{} {}-bit, decoder {}x{} {}-bit ({}), slots {}, low memory parts {}, CDEF {}, intra {}{}, \
-         clears {}, threads {}, output pool {}; device buffers {:.1} MiB, host memory {:.1} MiB",
+         loop restoration {}, clears {}, threads {}, output pool {}; device buffers {:.1} MiB, host memory {:.1} MiB",
         task.name,
         info.width,
         info.height,
@@ -687,6 +687,7 @@ fn create_decoder(
         if task.cdefv1 { "cdef_filter (-cdefv1)" } else { "cdef_filter_v2" },
         if task.intrav2 { "intra_v2" } else { "intra_main + intra_filter" },
         if task.intraopt { " (optimized main)" } else { " (legacy main, -intraod)" },
+        if task.lrlegacy { "loop_restoration_legacy (-lrlegacy)" } else { "loop_restoration" },
         match task.clears {
             Clears::NotNeeded => "none needed",
             Clears::Gpu => "GPU (-gpuclear)",
@@ -873,6 +874,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         );
     }
     library.set_choices(&Choices {
+        lr_legacy: task.lrlegacy,
         cdef_v2: !task.cdefv1,
         intra_v2: task.intrav2,
         intra_opt: task.intraopt,

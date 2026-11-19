@@ -44,14 +44,16 @@ VARIANTS = {
 INTRA_MAIN = ['intra_main', 'intra_main_hbd']
 # The -intraod comparison kernels are built without optimization in the default set.
 UNOPTIMIZED = [name + '_legacy' for name in INTRA_MAIN]
+LR_LEGACY = 'loop_restoration_legacy'
 
-# Verify the selectable CDEF, intra and deblocking variants in the built binary.
+# Verify the alternate kernels selected at runtime in the built binary.
 REQUIRED_BYTECODE = [
     'cdef_filter', 'cdef_filter_v2', *INTRA_MAIN, *UNOPTIMIZED,
     'intra_filter', 'intra_filter_hbd', 'intra_v2', 'intra_v2_hbd',
     'gen_lf_blocks_vert', 'gen_lf_blocks_hor', 'gen_lf_blocks_vert_legacy', 'gen_lf_blocks_hor_legacy',
     'loopfilter_vert', 'loopfilter_vert_legacy', 'loopfilter_hor', 'loopfilter_hor_legacy',
     'loopfilter_vert_hbd', 'loopfilter_vert_hbd_legacy', 'loopfilter_hor_hbd', 'loopfilter_hor_hbd_legacy',
+    'loop_restoration', LR_LEGACY,
 ]
 
 # What DXC is given for every shader on top of -T, -E and -Od:
@@ -296,7 +298,7 @@ def command_key(args):
         for name, od in shaders:
             digest.update(shader_key(name, od, variant, identity).encode())
             count += 1
-            if variant == 'shader-pick' and not od:
+            if variant == 'shader-pick' and not od and name != LR_LEGACY:
                 digest.update(shader_key(name, True, variant, identity).encode())
                 count += 1
     value = digest.hexdigest()[:32]
@@ -348,9 +350,9 @@ def build_od_set(args, shaders, dxc_keys, identity, jobs, shader_set, report):
     A shader whose -Od DXIL has 64-bit values in its code (the literal of a shift or of a ?: that DXC
     takes as 64 bits and that only its optimisation narrows; a device needs 64-bit integer shader
     operations for it) has the bytecode of the default set in the set od as well, and the line of the set
-    names it."""
+    names it. The original restoration kernel always uses its default bytecode for -lrlegacy."""
     unoptimized = ', '.join(name for name, od in shaders if od)
-    od_shaders = [(name, True) for name, _ in shaders]
+    od_shaders = [(name, name != LR_LEGACY) for name, _ in shaders]
     keys, results, missing = cache_entries(args.cache, args.dxc, args.variant, od_shaders, identity, jobs,
                                            'shader-pick, the set od', allow_wide=True)
     headers = os.path.join(args.root, 'dx', 'shaders', 'h_od')
@@ -375,7 +377,7 @@ def build_od_set(args, shaders, dxc_keys, identity, jobs, shader_set, report):
             header = entry_files(args.cache, key, name)[1]
         target = os.path.join(headers, name + '.h')
         copy_renamed_header(header, target, name, '_od')
-        entries.append({'name': name, 'od': not is_wide, 'key': keys[name], 'bytecode_key': key,
+        entries.append({'name': name, 'od': not is_wide and name != LR_LEGACY, 'key': keys[name], 'bytecode_key': key,
                         'compiled': name in results, 'seconds': meta['seconds'],
                         'header_sha256': sha256_file(target)})
 
@@ -384,9 +386,10 @@ def build_od_set(args, shaders, dxc_keys, identity, jobs, shader_set, report):
         shader_set, report['arguments_unoptimized'], ', '.join(INTRA_MAIN))
     if wide:
         od_line += '; default DXIL for %s (64-bit values at -Od)' % ', '.join(wide)
+    od_line += '; default DXIL for %s (-lrlegacy)' % LR_LEGACY
     lines = [dxc_line, od_line]
     report['sets'] = {'od': {'directory': 'h_od', 'suffix': '_od', 'line': od_line,
-                              'default_bytecode': wide, 'compiled': missing,
+                              'default_bytecode': [*wide, LR_LEGACY], 'compiled': missing,
                               'from_cache': len(shaders) - missing, 'shaders': entries}}
     print('shaders.py: shader-pick, the set od: %d shaders, %d compiled now, %d from the cache; headers in %s' %
           (len(shaders), missing, len(shaders) - missing, headers))

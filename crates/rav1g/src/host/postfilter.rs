@@ -337,6 +337,14 @@ unsafe fn cdef_filter_run(dec: *mut Av1Core, cm: &AV1_COMMON, src: *const HwFram
 // Loop restoration.
 // ---------------------------------------------------------------------------------------------------------
 
+static LR_LEGACY: AtomicI32 = AtomicI32::new(0);
+
+/// `av1_set_lr_legacy` (`dx/av1_perf.h`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_lr_legacy(enable: c_int) {
+    LR_LEGACY.store(enable, Ordering::Relaxed);
+}
+
 /// A plane in the constants of `loop_restoration.hlsl`.
 #[repr(C)]
 struct PlaneInfo1 {
@@ -387,6 +395,7 @@ unsafe fn looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON, lr_ctxt: *mut 
         if td.do_loop_rest == 0 {
             return;
         }
+        let legacy = LR_LEGACY.load(Ordering::Relaxed) != 0;
         let restored = [0, 1, 2].map(|p| u32::from((*cm).rst_info[p].frame_restoration_type) != RESTORE_NONE as u32);
         if restored.contains(&true) {
             super::libaom::loop_restoration_filter_frame_init(&mut *lr_ctxt, &raw mut (*(*cm).cur_frame).buf, &mut *cm);
@@ -496,7 +505,12 @@ unsafe fn looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON, lr_ctxt: *mut 
 
         let commands = commands(dec);
         let frame_buffers = buffer((*dec).frame_buffer_pool);
-        let shader = pipeline(&raw const (*(*dec).shader_lib).shader_loop_rest);
+        let lib = (*dec).shader_lib;
+        let shader = pipeline(if legacy {
+            &raw const (*lib).shader_loop_rest_legacy
+        } else {
+            &raw const (*lib).shader_loop_rest
+        });
         commands.set_pipeline(shader);
         commands.set_layout(shader.layout());
         commands.bind_read(0, frame_buffers.location());

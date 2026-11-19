@@ -792,6 +792,9 @@ int AV1Decoder::DecodeOne() {
   rav1g_set_intra_opt(!params_.intraod_);
   XB_LOGI << "Intra main shader: "
           << (params_.intraod_ ? "intra_main_legacy (-intraod)" : "intra_main (default)");
+  av1_set_lr_legacy(params_.lrlegacy_);
+  XB_LOGI << "Loop restoration shader: "
+          << (params_.lrlegacy_ ? "loop_restoration_legacy (-lrlegacy)" : "loop_restoration (default)");
 
   // -slots, -parseframes, -t: fixed when the decoder was created; Start() asks for a new decoder when a
   // value changes. What the decoder has is what the library made of them.
