@@ -125,6 +125,11 @@ pub fn set_intra_opt(enable: bool) {
     crate::host::av1_set_intra_opt(c_int::from(enable))
 }
 
+/// Use the previous 8-bit filter intra shader on frames that run the main intra path.
+pub fn set_intra_filter_legacy(enable: bool) {
+    crate::host::av1_set_intra_filter_legacy(c_int::from(enable))
+}
+
 /// Who clears the grids of a pipeline slot for the next frame, and whether the wavefront grid has to be
 /// cleared at all ([`Clears`]; without a call it does not). [`Clears::Gpu`] has to be set before the
 /// decoder is created.

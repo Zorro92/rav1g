@@ -22,7 +22,8 @@
  *     what another thread wrote since the last group sync, or changes what
  *     another read or wrote since then, is a race, and fails the check;
  *   - the group memory starts as garbage, different in every run. The default
- *     main kernels also check that every word read has been written by the group.
+ *     main kernels and 8-bit filter intra also check that every word read
+ *     has been written by the group.
  * Thread groups run one after the other, so the frame buffer is watched for
  * reads that would depend on the order of groups or threads on a GPU (see
  * AccessTracker in hlsl_shim.h).
@@ -135,10 +136,12 @@ static void run_group(const ShaderApi *api, uint32_t group, int threads, uint64_
                     : api == &intra_main_legacy_api ? "intra_main_legacy.hlsl"
                     : api == &intra_main_hbd_legacy_api ? "intra_main_hbd_legacy.hlsl"
                     : api == &intra_filter_api     ? "intra_filter.hlsl"
+                    : api == &intra_filter_legacy_api ? "intra_filter_legacy.hlsl"
                     : api == &intra_filter_hbd_api ? "intra_filter_hbd.hlsl"
                     : api == &intra_v2_hbd_api     ? "intra_v2.hlsl (10-bit)"
                                                    : "intra_v2.hlsl";
-  gs_state.track_unwritten = api == &intra_main_api || api == &intra_main_hbd_api;
+  gs_state.track_unwritten = api == &intra_main_api || api == &intra_main_hbd_api || api == &intra_filter_api;
+  g_tracker.require_unique_stores = api == &intra_filter_api;
   GroupContext context = { api, group };
   gs_run_group(threads, thread_body, &context, garbage, api == &intra_main_hbd_api ? complete_waves : nullptr);
 }
@@ -778,7 +781,7 @@ static void order_records(const Geometry &g, Frame *f) {
 static long g_total_group_syncs = 0;
 
 struct RunResult {
-  long out_of_bounds, races_group, races_thread, sync_errors, memory_races, plain_barriers;
+  long out_of_bounds, races_group, races_thread, sync_errors, memory_races, plain_barriers, duplicate_stores;
 };
 
 static std::vector<uint32_t> g_tags[4];
@@ -804,6 +807,7 @@ static RunResult end_run() {
   r.sync_errors = gs_state.sync_errors + gs_state.runaway_groups;  // a group that does not end is no better
   r.memory_races = gs_state.races;
   r.plain_barriers = gs_state.plain_barriers;
+  r.duplicate_stores = g_tracker.duplicate_stores;
   if (r.memory_races) gs_print_races("    ");
   g_tracker.w_unit = nullptr;
   return r;
@@ -812,7 +816,9 @@ static RunResult end_run() {
 // The intra loop of av1_prediction_run_all().
 static RunResult run_main(const Geometry &g, const Frame &f, std::vector<uint8_t> *pool, uint64_t garbage,
                           const ShaderApi *main_api, Coverage *cov) {
-  const ShaderApi *filter_api = g.hbd ? &intra_filter_hbd_api : &intra_filter_api;
+  const ShaderApi *filter_api = g.hbd ? &intra_filter_hbd_api
+                               : main_api == &intra_main_legacy_api ? &intra_filter_legacy_api
+                                                                   : &intra_filter_api;
   ShaderBuffers buffers = {};
   buffers.pred_blocks = (const uint8_t *)f.records1.data();
   buffers.pred_blocks_size = f.records1.size() * 4;
@@ -864,6 +870,40 @@ static RunResult run_main(const Geometry &g, const Frame &f, std::vector<uint8_t
   }
   if (cov) cov->v1_iterations += f.iterations;
   return end_run();
+}
+
+static bool check_filter_intra_8bit(uint64_t seed) {
+  Rng rng = {seed};
+  const Geometry g = make_geometry(&rng, 0, 8);
+  Frame f;
+  make_frame_data(g, &rng, &f);
+  // All extrema of the seven inputs to the first 4x2 unit. An 8x8 block
+  // also exercises the propagated edges, two banks and residual prefetch.
+  const int stride = g.stride[0];
+  const int base = g.offset[0] + 4 * (stride + 1);
+  const int edge[7] = {base - stride - 1, base - stride, base - stride + 1, base - stride + 2,
+                       base - stride + 3, base - 1, base + stride - 1};
+  for (uint32_t mode = 0; mode < 5; ++mode) {
+    for (uint32_t mask = 0; mask < 128; ++mask) {
+      for (int i = 0; i < 7; ++i) f.pixels[edge[i]] = mask & (1u << i) ? 255 : 0;
+      const uint32_t flags = 1u | (13u << 6) | (2u << 10) | (2u << 16) | ((mask & 1u) << 5);
+      f.blocks = {{1u | (1u << 16), flags, (mode << 4) | 1u, 0, 0, 9, 0, 0}};
+      order_records(g, &f);
+      std::vector<uint8_t> legacy = f.pixels;
+      std::vector<uint8_t> actual = f.pixels;
+      run_main(g, f, &legacy, rng.u32(), &intra_main_legacy_api, nullptr);
+      const RunResult r = run_main(g, f, &actual, rng.u32(), &intra_main_api, nullptr);
+      if (actual != legacy || r.memory_races || r.out_of_bounds || r.races_group || r.sync_errors ||
+          r.plain_barriers || r.duplicate_stores) {
+        printf("intra_check: MISMATCH in 8-bit filter intra, tap mode %u, edge mask %u, "
+               "races in group memory %ld, duplicate frame word stores %ld\n",
+               mode, mask, r.memory_races, r.duplicate_stores);
+        return false;
+      }
+    }
+  }
+  puts("intra_check: 8-bit filter intra matches for all tap modes and 128 combinations of input endpoints");
+  return true;
 }
 
 static bool check_wave_reductions(uint64_t seed) {
@@ -1035,7 +1075,7 @@ int main(int argc, char **argv) {
     }
   }
 
-  if (!check_wave_reductions(seed)) return 1;
+  if (!check_filter_intra_8bit(seed) || !check_wave_reductions(seed)) return 1;
 
   int failures = 0;
   long original_races = 0;
@@ -1094,6 +1134,8 @@ int main(int argc, char **argv) {
           problem = "a shader calls GroupMemoryBarrier(), which makes no thread wait";
         } else if (r1b.out_of_bounds || r2.out_of_bounds) {
           problem = "the optimized path or intra_v2 reads or writes outside its buffers";
+        } else if (r1b.duplicate_stores) {
+          problem = "duplicate frame word stores in 8-bit filter intra";
         } else if (r2.races_group) {
           problem = "intra_v2 reads what another thread group of the same step wrote";
         } else if (r2.races_thread) {

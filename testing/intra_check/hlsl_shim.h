@@ -82,6 +82,8 @@ struct AccessTracker {
   uint32_t *w_thread = nullptr;
   uint32_t unit = 1, group = 0;  // the phase and the thread are gs_state.epoch and gs_state.thread
   int track_phase = 0;
+  bool require_unique_stores = false;
+  long duplicate_stores = 0;
   long races_group = 0, races_thread = 0;
 };
 extern AccessTracker g_tracker;
@@ -134,6 +136,8 @@ struct RWByteAddressBuffer {
     }
     if (g_tracker.w_unit) {
       const size_t word = address >> 2;
+      if (g_tracker.require_unique_stores && g_tracker.w_unit[word] == g_tracker.unit)
+        g_tracker.duplicate_stores++;
       g_tracker.w_unit[word] = g_tracker.unit;
       g_tracker.w_group[word] = g_tracker.group;
       g_tracker.w_phase[word] = gs_state.epoch;

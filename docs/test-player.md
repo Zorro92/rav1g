@@ -1199,6 +1199,10 @@ The player logs the selected kernel, and `rav1g-dec` accepts the same flags. Wit
 The shader-pick build also supports `-shaderpick od=intra_main,intra_main_hbd`
 to use the baseline bytecode under the default shader names.
 
+`-intrafilterlegacy` selects the previous 8-bit filter intra shader in both the
+player and `rav1g-dec`. It controls filter intra independently of `-intraod` and
+applies when the frame uses the `intra_main` and `intra_filter` path.
+
 For timing, append `-progress -gputime -nopresent` to both tasks and compare intra time,
 GPU busy time, and recording time. For validation, use `-md5_frame_check` in separate
 launches with the same reference and limit, on 8-bit and 10-bit streams. Include

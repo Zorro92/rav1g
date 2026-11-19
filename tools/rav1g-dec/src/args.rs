@@ -93,6 +93,7 @@ pub struct Task {
     pub headroom_mib: i64,
     pub intrav2: bool,
     pub intraopt: bool,
+    pub intrafilterlegacy: bool,
     pub lrlegacy: bool,
     pub fglegacy: bool,
     pub copylegacy: bool,
@@ -170,6 +171,7 @@ impl Default for Task {
             headroom_mib: 0,
             intrav2: false,
             intraopt: true,
+            intrafilterlegacy: false,
             lrlegacy: false,
             fglegacy: false,
             copylegacy: false,
@@ -274,6 +276,7 @@ pub fn usage() {
     say!("  -cdeflegacy         use the previous 64x64 CDEF v2 shader");
     say!("  -cdeflistslegacy    use the previous GPU CDEF list shader");
     say!("  -intraod             use the baseline DXC -Od intra_main kernels (-intraopt restores the default)");
+    say!("  -intrafilterlegacy   use the previous 8-bit filter intra shader");
     say!("  -lrlegacy           use the original loop_restoration shader");
     say!("  -fglegacy           use the original direct NV12/P010 film grain shader");
     say!("  -copylegacy         use the original direct NV12/P010 copy shader");
@@ -461,6 +464,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-intrav2" => task.intrav2 = true,
             "-intraopt" => task.intraopt = true,
             "-intraod" => task.intraopt = false,
+            "-intrafilterlegacy" => task.intrafilterlegacy = true,
             "-lrlegacy" => task.lrlegacy = true,
             "-fglegacy" => task.fglegacy = true,
             "-copylegacy" => task.copylegacy = true,

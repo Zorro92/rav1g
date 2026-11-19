@@ -520,6 +520,14 @@ pub extern "C" fn av1_set_intra_opt(enable: c_int) {
     INTRA_OPT.store(enable, Ordering::Relaxed);
 }
 
+static INTRA_FILTER_LEGACY: AtomicI32 = AtomicI32::new(0);
+
+/// `av1_set_intra_filter_legacy` (`dx/av1_perf.h`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_intra_filter_legacy(enable: c_int) {
+    INTRA_FILTER_LEGACY.store(enable, Ordering::Relaxed);
+}
+
 // Test flag -intraedgefix: intra_main.hlsl (8-bit) stops the taps of the above edge filter at filter_count,
 // as intra_main_hbd.hlsl does, instead of at above_count. The output is the same (see the shader). Off
 // unless av1_set_intra_edge_fix(1) was called.
@@ -1268,7 +1276,11 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                 // The lists of the wavefront: per iteration nine lists by block size (64x64 down to 4x4 by
                 // area), then the filter intra blocks.
                 let offsets = block_map.add((InterCountsAll + ReconstructBlockSizes) as usize);
-                let intra_filter = &raw const (*shaders).intra_filter;
+                let intra_filter = if td.is_hbd == 0 && INTRA_FILTER_LEGACY.load(Ordering::Relaxed) != 0 {
+                    &raw const (*lib).shader_intra_filter_legacy
+                } else {
+                    &raw const (*shaders).intra_filter
+                };
                 let mut shader: *const ComputeShader = std::ptr::null();
                 for it in 0..=td.intra_iters {
                     let base = (it * IntraTypeCount) as usize;

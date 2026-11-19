@@ -327,6 +327,11 @@ void av1_set_intra_v2(int enable);
  * intra path. Change it only while no frame is in flight. */
 void av1_set_intra_opt(int enable);
 
+/* Process-wide. Non-zero selects the previous 8-bit filter intra shader.
+ * Applies to frames that run the main intra path. Off by default. Change it
+ * only while no frame is in flight. */
+void av1_set_intra_filter_legacy(int enable);
+
 /* Process-wide. Non-zero predicts the inter blocks with one reference and the
  * averaged compound blocks by the fraction of their motion vectors
  * (inter_fast.hlsl, inter_compound_fast.hlsl: a copy, one filter pass, or

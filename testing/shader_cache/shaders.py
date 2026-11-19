@@ -50,7 +50,7 @@ LR_LEGACY = 'loop_restoration_legacy'
 REQUIRED_BYTECODE = [
     'cdef_filter', 'cdef_filter_v2', 'cdef_filter_v2_legacy', *INTRA_MAIN, *UNOPTIMIZED,
     'cdef_lists', 'cdef_lists_legacy',
-    'intra_filter', 'intra_filter_hbd', 'intra_v2', 'intra_v2_hbd',
+    'intra_filter', 'intra_filter_legacy', 'intra_filter_hbd', 'intra_v2', 'intra_v2_hbd',
     'gen_lf_blocks_vert', 'gen_lf_blocks_hor', 'gen_lf_blocks_vert_legacy', 'gen_lf_blocks_hor_legacy',
     'loopfilter_vert', 'loopfilter_vert_legacy', 'loopfilter_hor', 'loopfilter_hor_legacy',
     'loopfilter_vert_hbd', 'loopfilter_vert_hbd_legacy', 'loopfilter_hor_hbd', 'loopfilter_hor_hbd_legacy',

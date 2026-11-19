@@ -34,165 +34,149 @@ ByteAddressBuffer residuals : register(t1);
 ByteAddressBuffer wedge_mask : register(t2);
 RWByteAddressBuffer dst_frame : register(u0);
 
-#define ROWS 8
-groupshared int mem[ROWS][8];
+// A 32x32 transform has up to eight columns and sixteen rows of 4x2 units.
+// Each entry carries two predicted pixels in the low half and two
+// residual-adjusted pixels in the high half, with a bank for each diagonal parity.
+#define UNIT_COLUMNS 8
+groupshared uint unit_pairs[4][2][UNIT_COLUMNS];
+groupshared uint left_edges[16];
 
-groupshared int4 loc_above[8];
-groupshared int loc_left[32];
-groupshared int loc_corner[18];
+uint load_above(int base, int stride, int col, int above_available, int left_available) {
+  uint pixels = 0x7f7f7f7f;
+  if (above_available)
+    pixels = dst_frame.Load(base - stride + min(above_available - 1, col) * 4);
+  else if (left_available)
+    pixels = dst_frame.Load(base - 4);
+  if (col >= above_available) pixels = (pixels >> 24) * 0x01010101u;
+  return pixels;
+}
 
-// One thread group predicts one block: 8 threads in x, one per sample of a 4x2 unit, and 8 in y, one per
-// row of units. The units are predicted in a wavefront: a unit needs the unit to its left and the unit
-// above it. The thread row y takes column c in step c + y + 1 of a pass, one step after the row above took it. Every
-// step has a group sync after the samples of its units are computed and another after they are handed on,
-// so the steps follow each other on any GPU. (Upstream had plain group memory barriers in thread dependent
-// loops here, which order nothing: the wavefront held only where the 64 threads of the group ran in
-// lockstep.)
-[numthreads(8, ROWS, 1)] void main(uint3 thread
-                                   : SV_DispatchThreadID, uint3 gid
-                                   : SV_GroupID) {
-  // The block is the group's, so it and the loop bounds made from it are the same for all threads of the
-  // group: the group syncs below are not in thread dependent flow control.
+uint4 pack_taps(int4 lo, int4 hi) {
+  // Keep the sign of the low tap in the packed sum by adding it as a full word.
+  return uint4((uint)lo.x + ((uint)hi.x << 16), (uint)lo.y + ((uint)hi.y << 16),
+               (uint)lo.z + ((uint)hi.z << 16), (uint)lo.w + ((uint)hi.w << 16));
+}
+
+uint predict_pair(uint above01, uint above23, uint corner, uint left0, uint left1, uint4 a, uint4 b) {
+  // Two signed dot products in one modulo-2^32 sum. In every AV1 tap row,
+  // the negative taps sum to at least -12 and the positive taps to at most
+  // 28. With 8-bit inputs and rounding (+8), each sum is in [-3052, 7148].
+  // Adding 0x8000 before extracting the high half cancels the low half's
+  // borrow. The signed shifts also perform the AV1 divide by 16.
+  const uint top_sum = (above01 & 255) * a.y + ((above01 >> 8) & 255) * a.z +
+                       (above23 & 255) * a.w + ((above23 >> 8) & 255) * b.x;
+  const uint left_sum = corner * a.x + left0 * b.y + left1 * b.z;
+  const uint sum = top_sum + left_sum + 0x00080008u;
+  const uint lo = clamp((int)(sum << 16) >> 20, 0, 255);
+  const uint hi = clamp((int)(sum + 0x8000u) >> 20, 0, 255);
+  return lo | (hi << 8);
+}
+
+uint add_residual_pair(uint pair, int residual) {
+  const uint lo = clamp((int)(pair & 255) + ((int)((uint)residual << 16) >> 16), 0, 255);
+  const uint hi = clamp((int)(pair >> 8) + (residual >> 16), 0, 255);
+  return lo | (hi << 8);
+}
+
+// Four lanes per column, each predicting one adjacent pair of pixels.
+// The right pair's lane owns the entire four-pixel frame word for its row.
+[numthreads(4, 8, 1)] void main(uint3 thread : SV_GroupThreadID, uint3 gid : SV_GroupID) {
   if (gid.x * 8 >= cb_wi_count) return;
 
-  uint3 block = pred_blocks.Load3((cb_pass_offset + gid.x) << 4);
-
-  const int wi = thread.x & 7;
-  int x = 4 * (block.x & 0xffff);
-  int y = 4 * (block.x >> 16);
-
-  //    block.y bits:
-  //    0    3        bw_log
-  //    3    2        plane
-  //    5    1        non skip
-  //    6    4        mode
-  //        all mods except intra_bc:
-  //    10    6        above_available
-  //    16    6        left_available
-  //            dir mode params:
-  //    22    2        upsample
-  //    24    2        edge_filter above
-  //    26    2        edge_filter left
-  //    28    3        mode_angle
-  //    31    1        inter_intra?
-  //            CFL:
-  //    22    4        alpha
-  //
-  //    block.z
-  //        intra_bc - mv
-  //        inter-intra    - coef. table indexes;
-  //        filter - mode_info0 = txh | (filter_mode << 4);
-  //    block.w - reserved; (prob. used for sorting);
-
-  const int bw = 1 << (block.y & 3);
-  const int bh = 2 << (block.z & 3);
+  const uint3 block = pred_blocks.Load3((cb_pass_offset + gid.x) << 4);
+  const int columns = 1 << (block.y & 3);
+  const int rows = 2 << (block.z & 3);
   const int plane = (block.y >> 3) & 3;
   const int mode = (block.z >> 4) & 7;
   const int stride = cb_planes[plane].x;
-  const int offset = cb_planes[plane].y + x + y * stride;
-
+  const int x = 4 * (block.x & 0xffff);
+  const int y = 4 * (block.x >> 16);
+  const int base = cb_planes[plane].y + x + y * stride;
   const int above_available = (block.y >> 10) & 63;
   const int left_available = ((block.y >> 16) & 63) << 2;
-  if (wi < bw) {
-    uint pixels = above_available ? dst_frame.Load(offset - stride + min(above_available - 1, wi) * 4)
-                                  : left_available ? dst_frame.Load(offset - 4) : 0x7f7f7f7f;
-    if (wi >= above_available) pixels = (pixels >> 24) * 0x01010101;
-    loc_above[wi].x = (pixels >> 0) & 255;
-    loc_above[wi].y = (pixels >> 8) & 255;
-    loc_above[wi].z = (pixels >> 16) & 255;
-    loc_above[wi].w = (pixels >> 24) & 255;
+
+  const int pair = thread.x;
+  const int col = thread.y;
+  const int lane = pair + 4 * col;
+
+  // Column c starts on diagonal c. Seed the corresponding bank with its
+  // above edge and use the unused upper word of column zero for the corner.
+  if (lane < columns) {
+    const uint pixels = load_above(base, stride, lane, above_available, left_available);
+    unit_pairs[2][lane & 1][lane] = pixels & 65535;
+    unit_pairs[3][lane & 1][lane] = pixels >> 16;
   }
-  GroupMemoryBarrierWithGroupSync();
-
-  int row;
-  for (row = wi; row < bh * 2; row += 8) {
-    const int l_addr = offset - 4 + min(row, left_available - 1) * stride;
-    int left = left_available ? (dst_frame.Load(l_addr) >> 24) : above_available ? loc_above[0].x : 129;
-
-    loc_left[row] = left;
-    if (row & 1) loc_corner[(row + 1) >> 1] = left;
-  }
-
-  if (wi == 0) {
-    loc_corner[0] = (left_available && above_available) ? (dst_frame.Load(offset - 4 - stride) >> 24)
-                                                        : (left_available || above_available) ? loc_above[0].x : 128;
-  }
-
-  GroupMemoryBarrierWithGroupSync();
-
-  int4 filter0 = cb_filter[mode][wi][0];
-  int3 filter1 = cb_filter[mode][wi][1].xyz;
-
-  for (int row0 = 0; row0 < bh; row0 += ROWS) {
-    row = row0 + thread.y;
-    for (int wave = 0; wave < bw + ROWS; ++wave) {
-      const int col = wave - (int)thread.y - 1;
-      const bool unit = row < bh && col >= 0 && col < bw;
-      int4 p14 = int4(0, 0, 0, 0);
-      if (unit) {
-        int p0 = loc_corner[row];
-        p14 = loc_above[col];
-        int p5 = loc_left[2 * row];
-        int p6 = loc_left[2 * row + 1];
-
-        int pixel = p0 * filter0.x + p14.x * filter0.y + p14.y * filter0.z + p14.z * filter0.w + p14.w * filter1.x +
-                    p5 * filter1.y + p6 * filter1.z;
-        pixel = clamp((pixel + 8) >> 4, 0, 255);
-        mem[thread.y][wi] = pixel;
-      }
-
-      GroupMemoryBarrierWithGroupSync();
-
-      if (unit && wi < 2) {
-        int4 pix;
-        pix.x = mem[thread.y][wi * 4 + 0];
-        pix.y = mem[thread.y][wi * 4 + 1];
-        pix.z = mem[thread.y][wi * 4 + 2];
-        pix.w = mem[thread.y][wi * 4 + 3];
-
-        loc_left[2 * row + wi] = pix.w;
-        if (wi == 1) {
-          loc_above[col] = pix;
-          loc_corner[row] = p14.w;
-        }
-        uint pixel4;
-        pixel4 = pix.x;
-        pixel4 |= pix.y << 8;
-        pixel4 |= pix.z << 16;
-        pixel4 |= pix.w << 24;
-
-        const int addr = offset + col * 4 + (row * 2 + wi) * stride;
-        dst_frame.Store(addr, pixel4);
-      }
-
-      GroupMemoryBarrierWithGroupSync();
+  if (lane < rows) {
+    uint left0, left1;
+    if (left_available) {
+      left0 = dst_frame.Load(base - 4 + min(2 * lane, left_available - 1) * stride) >> 24;
+      left1 = dst_frame.Load(base - 4 + min(2 * lane + 1, left_available - 1) * stride) >> 24;
+    } else {
+      left0 = 129;
+      if (above_available) left0 = dst_frame.Load(base - stride) & 255;
+      left1 = left0;
+    }
+    left_edges[lane] = left0 | (left1 << 8);
+    if (lane == 0) {
+      uint corner = left0;
+      if (above_available && left_available) corner = dst_frame.Load(base - stride - 4) >> 24;
+      if (!above_available && !left_available) corner = 128;
+      unit_pairs[1][0][0] = corner;
     }
   }
 
-  if (block.y & (1 << 5)) {
-    const int res_stride = cb_planes[plane].z;
-    const int res_offset = cb_planes[plane].w + 2 * x + y * res_stride;
-    // Every word of the block once, spread over the 64 threads of the group. (Upstream spread the words
-    // over the 8 threads of a row and let all 8 rows do the same load, add and store, which is right only
-    // where the rows run in lockstep: every row has to load before any row stores.)
-    for (int idx = wi + thread.y * 8; idx < 2 * bw * bh; idx += 8 * ROWS) {
-      // The column of the word: idx modulo the block's width in words. The mask comes from a table on
-      // purpose: FXC makes a bit field instruction of width bw_log2 out of idx & (bw - 1) and the
-      // multiplications below, and a bit field of width 0 (a block one word wide) is one of the things GPUs
-      // do not agree on.
-      static const int word_mask[4] = {0, 1, 3, 7};
-      const int wx = idx & word_mask[block.y & 3];
-      const int wy = idx >> (block.y & 3);  //(block.y & 3) = bw_log2
-      const int addr = offset + 4 * wx + stride * wy;
-      uint pix = dst_frame.Load(addr);
+  const int tap = pair * 2;
+  const uint4 a = pack_taps(cb_filter[mode][tap][0], cb_filter[mode][tap + 1][0]);
+  const uint4 b = pack_taps(cb_filter[mode][tap][1], cb_filter[mode][tap + 1][1]);
+  const bool add_residual = (block.y & (1 << 5)) != 0;
+  const int res_stride = cb_planes[plane].z;
+  const int word_row = pair >> 1;
+  const int frame_offset = base + 4 * col + word_row * stride;
+  const int res_offset = cb_planes[plane].w + 2 * x + 8 * col + (pair & 1) * 4 + (y + word_row) * res_stride;
 
-      const int res_addr = res_offset + 8 * wx + res_stride * wy;
-      int2 r = residuals.Load2(res_addr);
-      uint result = (clamp((int)((pix >> 0) & 255) + (int)((r.x << 16) >> 16), 0, 255) << 0) |
-                    (clamp((int)((pix >> 8) & 255) + (int)(r.x >> 16), 0, 255) << 8) |
-                    (clamp((int)((pix >> 16) & 255) + (int)((r.y << 16) >> 16), 0, 255) << 16) |
-                    (clamp((int)((pix >> 24) & 255) + (int)(r.y >> 16), 0, 255) << 24);
-      dst_frame.Store(addr, result);
+  int next_residual = 0;
+  if (add_residual && col < columns) next_residual = (int)residuals.Load(res_offset);
+
+  GroupMemoryBarrierWithGroupSync();
+
+  uint corner = 0;
+  if (col == 0) corner = unit_pairs[1][0][0];
+  else if (col < columns) corner = (uint)unit_pairs[3][(col - 1) & 1][col - 1] >> 8;
+
+  for (int diagonal = 0; diagonal < columns + rows - 1; ++diagonal) {
+    const int row = diagonal - col;
+    const bool active = col < columns && row >= 0 && row < rows;
+    const int previous = diagonal & 1;
+    const int current = previous ^ 1;
+    uint output = 0;
+    if (active) {
+      const int residual = next_residual;
+      if (add_residual && row + 1 < rows)
+        next_residual = (int)residuals.Load(res_offset + 2 * (row + 1) * res_stride);
+
+      const uint above01 = unit_pairs[2][previous][col];
+      const uint above23 = unit_pairs[3][previous][col];
+      uint left0, left1;
+      if (col == 0) {
+        const uint left = left_edges[row];
+        left0 = left & 255;
+        left1 = left >> 8;
+      } else {
+        left0 = ((uint)unit_pairs[1][previous][col - 1] >> 8) & 255;
+        left1 = ((uint)unit_pairs[3][previous][col - 1] >> 8) & 255;
+      }
+      const uint predicted = predict_pair(above01, above23, corner, left0, left1, a, b);
+      corner = left1;
+      output = add_residual ? add_residual_pair(predicted, residual) : predicted;
+      unit_pairs[pair][current][col] = predicted | (output << 16);
+    }
+
+    // The same sync makes the prediction visible to the next diagonal and the
+    // corrected pair visible to the word owner. The next diagonal writes the other bank.
+    GroupMemoryBarrierWithGroupSync();
+    if (active && (pair & 1)) {
+      const uint first = (uint)unit_pairs[pair - 1][current][col] >> 16;
+      dst_frame.Store(frame_offset + 2 * row * stride, first | (output << 16));
     }
   }
 }

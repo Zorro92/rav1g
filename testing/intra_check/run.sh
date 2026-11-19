@@ -52,6 +52,7 @@ to_cpp "$shaders/intra_main_hbd.hlsl" > "$work/intra_main_hbd.gen.h"
 to_cpp "$shaders/intra_main_legacy.hlsl" > "$work/intra_main_legacy.gen.h"
 to_cpp "$shaders/intra_main_hbd_legacy.hlsl" > "$work/intra_main_hbd_legacy.gen.h"
 to_cpp "$shaders/intra_filter.hlsl" > "$work/intra_filter.gen.h"
+to_cpp "$shaders/intra_filter_legacy.hlsl" > "$work/intra_filter_legacy.gen.h"
 to_cpp "$shaders/intra_filter_hbd.hlsl" > "$work/intra_filter_hbd.gen.h"
 to_cpp "$shaders/intra_v2.hlsl" > "$work/intra_v2.gen.h"
 to_cpp "$shaders/intra_v2_hbd.hlsl" > "$work/intra_v2_hbd.gen.h"
@@ -101,14 +102,18 @@ build() {
   flags="$flags -I $1 -I $here -I $src/libav1/dx ${2:-}"
   rm -f "$1"/*.o
   for shader in intra_main:0 intra_main_hbd:0 intra_main_legacy:0 intra_main_hbd_legacy:0 \
-    intra_filter:1 intra_filter_hbd:1 intra_v2:2 intra_v2_hbd:2; do
+    intra_filter:1 intra_filter_legacy:1 intra_filter_hbd:1 intra_v2:2 intra_v2_hbd:2; do
     name=${shader%:*}
     hbd=
     case $name in
       *_hbd | *_hbd_legacy) hbd=-DSHADER_HBD ;;
     esac
+    filter_layout=
+    case $name in
+      intra_filter_legacy) filter_layout=-DSHADER_FILTER_LEGACY ;;
+    esac
     # shellcheck disable=SC2086
-    g++ $flags $hbd -DSHADER_FILE="\"$name.gen.h\"" -DSHADER_NS="ns_$name" -DSHADER_API="${name}_api" \
+    g++ $flags $hbd $filter_layout -DSHADER_FILE="\"$name.gen.h\"" -DSHADER_NS="ns_$name" -DSHADER_API="${name}_api" \
       -DSHADER_KIND="${shader#*:}" -c -o "$1/$name.o" "$here/shader_tu.cpp" &
   done
   # shellcheck disable=SC2086
@@ -144,7 +149,15 @@ intra_v2.gen.h@s/return clamp((intra \* mask + inter \* (64 - mask) + 32) >> 6, 
 intra_v2.gen.h@s/const int cell_active = mine \&\& (my_pass == (int)pass_i);/const int cell_active = mine \&\& (my_pass == 0 || my_pass == (int)pass_i);/@pass order inside a region
 intra_v2_sched.h@s/need_step = intra_v2_max(need_step, step + 1);/need_step = intra_v2_max(need_step, step);/@step order between regions
 intra_v2_sched.h@s/if (step == cur) need_pass = intra_v2_max(need_pass, ((d >> 16) \& 255) + 1);/if (step == cur) need_pass = intra_v2_max(need_pass, (d >> 16) \& 255);/@pass order inside a region (host)
-intra_filter.gen.h@0,/GroupMemoryBarrierWithGroupSync();/s//GroupMemoryBarrier();/@first group sync of intra_filter as a plain barrier@races in group memory .*[1-9]
+intra_filter_legacy.gen.h@0,/GroupMemoryBarrierWithGroupSync();/s//GroupMemoryBarrier();/@first legacy filter intra group sync as a plain barrier@races in group memory .*[1-9]
+intra_filter.gen.h@0,/GroupMemoryBarrierWithGroupSync();/s//GroupMemoryBarrier();/@8-bit filter intra preload sync as a plain barrier@races in group memory .*[1-9]
+intra_filter.gen.h@s/^    GroupMemoryBarrierWithGroupSync();/    GroupMemoryBarrier();/@8-bit filter intra diagonal sync as a plain barrier@races in group memory .*[1-9]
+intra_filter.gen.h@s/(sum + 0x8000u)/(sum)/@8-bit filter intra low sum borrow@MISMATCH
+intra_filter.gen.h@s/(uint)lo.x + ((uint)hi.x << 16)/((uint)lo.x \& 65535) | ((uint)hi.x << 16)/@8-bit filter intra signed tap packing@MISMATCH
+intra_filter.gen.h@s/0x00080008u/0x00080007u/@8-bit filter intra pair rounding@MISMATCH
+intra_filter.gen.h@s/predicted | (output << 16)/output | (output << 16)/@8-bit filter intra uncorrected prediction edge@MISMATCH
+intra_filter.gen.h@/dst_frame.Store(/p@8-bit filter intra duplicate frame word store@duplicate frame word stores [1-9]
+intra_filter.gen.h@s/2 \* (row + 1) \* res_stride/2 * row * res_stride/@8-bit filter intra next-row residual@MISMATCH
 intra_filter_hbd.gen.h@s/(sum + 0x8000u)/(sum)/@high-bit-depth filter intra tap borrow
 intra_filter_hbd.gen.h@s/if (diagonal != 0) GroupMemoryBarrierWithGroupSync();/if (diagonal != 0) GroupMemoryBarrier();/@filter intra diagonal group sync as a plain barrier@races in group memory .*[1-9]
 intra_main.gen.h@/above\[loc_base + wi\] = luma.x + luma.y + luma.z + luma.w;/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/@group sync before the CFL sum of intra_main as a plain barrier@races in group memory .*[1-9]
