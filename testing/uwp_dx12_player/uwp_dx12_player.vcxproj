@@ -308,27 +308,14 @@
     </AppxManifest>
     <None Include="uwp_dx12_player_TemporaryKey.pfx" />
   </ItemGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(IntDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <ItemGroup>
-    <FxCompile Include="SamplePixelShader.hlsl">
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Pixel</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">5.0</ShaderModel>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Pixel</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">5.0</ShaderModel>
-      <VariableName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">%(Filename)</VariableName>
-      <VariableName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">%(Filename)</VariableName>
-      <HeaderFileOutput Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(ProjectDir)%(Filename).h</HeaderFileOutput>
-      <HeaderFileOutput Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(ProjectDir)%(Filename).h</HeaderFileOutput>
-    </FxCompile>
-    <FxCompile Include="SampleVertexShader.hlsl">
-      <VariableName Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">%(Filename)</VariableName>
-      <HeaderFileOutput Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">$(ProjectDir)%(Filename).h</HeaderFileOutput>
-      <VariableName Condition="'$(Configuration)|$(Platform)'=='Release|x64'">%(Filename)</VariableName>
-      <HeaderFileOutput Condition="'$(Configuration)|$(Platform)'=='Release|x64'">$(ProjectDir)%(Filename).h</HeaderFileOutput>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">Vertex</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">5.0</ShaderModel>
-      <ShaderType Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Vertex</ShaderType>
-      <ShaderModel Condition="'$(Configuration)|$(Platform)'=='Release|x64'">5.0</ShaderModel>
-    </FxCompile>
+    <None Include="SamplePixelShader.hlsl" />
+    <None Include="SampleVertexShader.hlsl" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\uwp_common\uwp_common.vcxproj">
@@ -339,6 +326,19 @@
   <Target Name="Rav1gLibraryIsGiven" BeforeTargets="PrepareForBuild">
     <Error Condition="'$(Rav1gRustDll)$(Rav1gRustLib)'==''" Text="The player links the Rust library of the Cargo workspace: build it first and pass /p:Rav1gRustDll=&lt;directory with rav1g.dll and rav1g.dll.lib&gt; or /p:Rav1gRustLib=&lt;directory with rav1g.lib, rav1g_c.lib and rav1g_c_speed.lib&gt; (docs/test-player.md, &quot;Building&quot;; .github/workflows/build.yml has the commands)." />
     <Error Condition="'$(Rav1gRustDll)'!='' And '$(Rav1gRustLib)'!=''" Text="Rav1gRustDll and Rav1gRustLib are both set: the player links one library." />
+  </Target>
+  <PropertyGroup>
+    <Rav1gDxc>$(WindowsSdkDir)bin\$(WindowsTargetPlatformVersion)\x64\dxc.exe</Rav1gDxc>
+  </PropertyGroup>
+  <Target Name="Rav1gCompilePlayerShaders" BeforeTargets="ClCompile"
+          Inputs="$(Rav1gDxc);$(MSBuildProjectFullPath);SamplePixelShader.hlsl;SampleVertexShader.hlsl;ps_cbuf.h"
+          Outputs="$(IntDir)rav1g-shaders\SamplePixelShader.h;$(IntDir)rav1g-shaders\SampleVertexShader.h">
+    <MakeDir Directories="$(IntDir)rav1g-shaders" />
+    <Exec Command="&quot;$(Rav1gDxc)&quot; -nologo -T ps_6_0 -E main -HV 2018 -WX -Vn SamplePixelShader -Fh &quot;$(IntDir)rav1g-shaders\SamplePixelShader.h&quot; &quot;$(ProjectDir)SamplePixelShader.hlsl&quot;" />
+    <Exec Command="&quot;$(Rav1gDxc)&quot; -nologo -T vs_6_0 -E main -HV 2018 -WX -Vn SampleVertexShader -Fh &quot;$(IntDir)rav1g-shaders\SampleVertexShader.h&quot; &quot;$(ProjectDir)SampleVertexShader.hlsl&quot;" />
+    <ItemGroup>
+      <FileWrites Include="$(IntDir)rav1g-shaders\SamplePixelShader.h;$(IntDir)rav1g-shaders\SampleVertexShader.h" />
+    </ItemGroup>
   </Target>
   <ImportGroup Label="ExtensionTargets">
     <Import Project="$(VSINSTALLDIR)\Common7\IDE\Extensions\Microsoft\VsGraphics\ImageContentTask.targets" />

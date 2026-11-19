@@ -193,9 +193,12 @@ fn real_main() -> i32 {
     }
     let pso_start = Instant::now();
     // The decoder's device: the program's D3D12 device and queue, and the pipeline states on it.
-    let Some(library) = Library::open(&dev, globals.capi, args::PSO_THREADS as u32) else {
-        say!("ERROR the compute pipeline states could not be created");
-        return EXIT_USAGE;
+    let library = match Library::open(&dev, globals.capi, args::PSO_THREADS as u32) {
+        Ok(library) => library,
+        Err(reason) => {
+            say!("ERROR decoder device creation: {reason}");
+            return EXIT_USAGE;
+        }
     };
     say!("PIPELINE states created in {:.0} ms", pso_start.elapsed().as_secs_f64() * 1000.0);
     if globals.capi {
@@ -203,7 +206,7 @@ fn real_main() -> i32 {
     }
     let variant = library.shader_variant();
     say!("SHADERS {} ({})", if variant.is_empty() { "normal build" } else { &variant }, rav1g::switches::shader_set());
-    // The DXC experiment: what compiled the three bytecodes of the build, and which shaders got which.
+    // The shader-pick experiment: what compiled each set and which shaders use it.
     for line in rav1g::switches::shader_pick_lines() {
         say!("{}", line);
     }

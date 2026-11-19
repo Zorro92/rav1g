@@ -2,7 +2,8 @@
 
 A fast, open-source AV1 decoder on the GPU: entropy decoding on the CPU, everything after
 it (inverse transforms, intra and inter prediction, loop filter, CDEF, loop restoration,
-super-resolution, film grain) in D3D12 compute shaders. It runs on any D3D12 GPU. The name
+super-resolution, film grain) in D3D12 compute shaders. Main targets Xbox Series X|S and requires
+Shader Model 6.0. The name
 stands for Rust AV1 GPU: the decoder on this branch is Rust (the D3D12 host and the interface,
 `crates/rav1g`, and the parser, the parse pass of rav1d in `third_party/rav1d`), HLSL
 (`libav1/dx/shaders`). libaom's C parser is no longer part of the decoder; what is left of libaom in
@@ -127,8 +128,8 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
   rewrites those two components in place, and the console ran the first as `r3.z - r3.x`. A model of
   the filter with that one change gives the console's output of a 3840x2160 frame to the last sample
   (40240 edges in that branch); the rest of the two 8-bit filters runs as written. The branch is
-  rewritten so that FXC does not emit the pair, the workflow scans the listings of all shaders for
-  such pairs (`testing/dxbc_scan`), and the output on WARP is unchanged
+  rewritten to avoid the pair, the workflow scans the experiment package's FXC listings
+  (`testing/dxbc_scan`), and the output on WARP is unchanged
   ([gpu-av1-decoder.md](docs/gpu-av1-decoder.md#a-paired-read-before-an-overlapping-in-place-write-2026-11-12)).
 - **Output that depended on what the process had decoded before** (fixed, rav1g dda14c7; found and
   verified on WARP, not yet run on the console). A decoder created behind another one in the same

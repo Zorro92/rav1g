@@ -22,8 +22,8 @@ capi = []
 # chosen with the target feature (RUSTFLAGS=-Ctarget-feature=-crt-static), not here.
 app-container = ["rav1g-sys/app-container"]
 uavsync = ["rav1g-sys/uavsync"]
-# The DXC experiment: the shaders of RAV1G_SHADER_DIR are the ones DXC compiled (the dxc variant).
-dxc = ["rav1g-sys/dxc"]
+# The alternate bytecodes for the -shaderpick experiment.
+shader-pick = ["rav1g-sys/shader-pick"]
 
 [dependencies]
 rav1g-sys = { workspace = true }

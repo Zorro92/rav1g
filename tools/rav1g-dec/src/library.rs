@@ -346,21 +346,25 @@ pub enum Library {
 }
 
 impl Library {
-    /// Starts the creation of the pipeline states on `threads` threads and waits for them. `None` when
-    /// they could not be created.
-    pub fn open(dev: &Device, capi: bool, threads: u32) -> Option<Library> {
+    /// Creates the decoder's device and waits for its pipeline states.
+    pub fn open(dev: &Device, capi: bool, threads: u32) -> Result<Library, String> {
         if capi {
             // SAFETY: the program's device and queue, which outlive the library's device.
             let device = unsafe { capi::rav1g_device_create(dev.device_ptr(), dev.queue_ptr(), threads) };
             if device.is_null() {
-                return None;
+                return Err(c_text(capi::rav1g_last_error()));
             }
             let library = Library::C(device);
             // SAFETY: a device of rav1g_device_create.
-            (unsafe { capi::rav1g_device_wait_pipelines(device) } == Rav1gStatus::Ok).then_some(library)
+            if unsafe { capi::rav1g_device_wait_pipelines(device) } != Rav1gStatus::Ok {
+                return Err(c_text(capi::rav1g_last_error()));
+            }
+            Ok(library)
         } else {
-            let device = rav1g::Device::with_d3d12(&dev.device, Some(&dev.queue), threads).ok()?;
-            device.wait_pipelines().is_ok().then_some(Library::Rust(device))
+            let device =
+                rav1g::Device::with_d3d12(&dev.device, Some(&dev.queue), threads).map_err(|e| e.to_string())?;
+            device.wait_pipelines().map_err(|e| e.to_string())?;
+            Ok(Library::Rust(device))
         }
     }
 

@@ -14,13 +14,10 @@
 //! types, no libaom headers").
 //!
 //! **For a Windows target (the decoder)** one C file is compiled into `rav1g_c.lib`: `shader_table.c`,
-//! the bytecode of the shaders. The shaders are not compiled here. `RAV1G_SHADER_DIR` names the directory
-//! whose `dx/shaders/h` has the bytecode headers of the FXC build (`testing/shader_cache/shaders.py build
-//! --root <dir>`; in CI the `normal` output of `.github/actions/shaders`). With the feature `dxc` it is
-//! the directory of the DXC build of the same sources (`--variant dxc`; docs/gpu-av1-decoder.md, "DXC
-//! experiment"), and the library says so (`SHADER_SET`). That build has three bytecodes of every shader
-//! (`dx/shaders/h`, `h_od`, `h_fxc`, and `shader_sets.txt` with the line of each): the feature compiles
-//! all three into the library (`shader_sets`), which chooses per shader (`-shaderpick`).
+//! the bytecode of the shaders. `RAV1G_SHADER_DIR` names the directory with the DXC bytecode headers
+//! under `dx/shaders/h` and `shader_set.txt` (`testing/shader_cache/shaders.py build --dxc <dxc> --root
+//! <dir>`). The `shader-pick` feature embeds two extra bytecodes per shader from `dx/shaders/h_od`
+//! and `h_fxc`, which the experiment package can select per shader with `-shaderpick`.
 //!
 //! **For a target that is not Windows** the crate is its Rust alone: the D3D12 host does not build there.
 //! `crates/rav1g-parse` and `tools/rav1g-parse-check` use the types on Linux (docs/phase2-rav1d.md,
@@ -84,9 +81,8 @@ fn fail(message: &str) -> ! {
 /// The directory with `dx/shaders/h/<shader>.h`, from `RAV1G_SHADER_DIR`.
 fn shader_dir() -> PathBuf {
     println!("cargo:rerun-if-env-changed=RAV1G_SHADER_DIR");
-    let how = "set it to the directory whose dx/shaders/h has the bytecode headers of the FXC build \
-               (testing/shader_cache/shaders.py build --root <dir>; in CI the 'normal' output of \
-               .github/actions/shaders)";
+    let how = "set it to the directory with DXC cs_6_0 bytecode headers \
+               (testing/shader_cache/shaders.py build --dxc <dxc> --root <dir>)";
     let Some(value) = env::var_os("RAV1G_SHADER_DIR").filter(|value| !value.is_empty()) else {
         fail(&format!("RAV1G_SHADER_DIR is not set: {how}"));
     };
@@ -105,7 +101,7 @@ fn shader_dir() -> PathBuf {
         .unwrap_or(0);
     if count < 80 {
         fail(&format!(
-            "RAV1G_SHADER_DIR={}: {} has {count} headers, the decoder has 92 shaders: {how}",
+            "RAV1G_SHADER_DIR={}: {} has only {count} shader headers: {how}",
             dir.display(),
             headers.display()
         ));
@@ -114,42 +110,30 @@ fn shader_dir() -> PathBuf {
     dir
 }
 
-/// What compiled the shaders, for the version text of the library: "FXC cs_5_0", or with the feature
-/// `dxc` the line of `shader_set.txt` in the directory of the shaders ("DXC 1.9.2602.17 cs_6_0"), which
-/// the DXC build of testing/shader_cache/shaders.py writes and no other. The feature and the file go
-/// together, so a library cannot say FXC about DXC's shaders or the other way round.
+/// The compiler line of the DXC build, for the version text of the library.
 fn shader_set(shaders: Option<&Path>) -> String {
-    let dxc = env::var_os("CARGO_FEATURE_DXC").is_some();
-    if dxc && env::var_os("CARGO_FEATURE_UAVSYNC").is_some() {
-        fail("the features dxc and uavsync are two builds of the shaders: one of them");
-    }
     let Some(shaders) = shaders else {
         return "none (not a Windows target)".to_string();
     };
     let file = shaders.join("shader_set.txt");
     println!("cargo:rerun-if-changed={}", file.display());
-    let text = fs::read_to_string(&file).ok().map(|text| text.trim().to_string()).filter(|text| !text.is_empty());
-    match (dxc, text) {
-        (false, None) => "FXC cs_5_0".to_string(),
-        (true, Some(text)) => {
-            if !text.starts_with("DXC ") || !text.bytes().all(|b| b == b' ' || b.is_ascii_graphic()) {
-                fail(&format!("{}: not the line of a DXC build: {text:?}", file.display()));
-            }
-            text
-        }
-        (true, None) => fail(&format!(
-            "the feature dxc needs the shaders of the dxc variant: there is no {} \
-             (testing/shader_cache/shaders.py build --variant dxc --root <dir>)",
+    let line = fs::read_to_string(&file).unwrap_or_else(|error| {
+        fail(&format!(
+            "cannot read {}: {error}; generate DXC headers with testing/shader_cache/shaders.py build --dxc <dxc>",
             file.display()
-        )),
-        (false, Some(text)) => fail(&format!(
-            "RAV1G_SHADER_DIR={} has the shaders of the dxc variant ({text}): build with the feature dxc",
-            shaders.display()
-        )),
+        ))
+    });
+    let line = line.trim();
+    if !line.starts_with("DXC ")
+        || !line.ends_with(" cs_6_0")
+        || !line.bytes().all(|b| b == b' ' || b.is_ascii_graphic())
+    {
+        fail(&format!("{}: expected the compiler line of a DXC cs_6_0 build, got {line:?}", file.display()));
     }
+    line.to_owned()
 }
 
-/// The feature `dxc`: the two other bytecodes of every shader of the DXC build (`dx/shaders/h_od`, DXC with
+/// The feature `shader-pick`: the two extra bytecodes of each shader (`dx/shaders/h_od`, DXC with
 /// `-Od`; `dx/shaders/h_fxc`, FXC's), for the shader pick of the library. Writes `rav1g_shader_sets.inc`
 /// to `out`, which `shader_table.c` includes with `RAV1G_SHADER_SETS`: the headers and a table per set in
 /// the order of the table of `shader_table.c`. Returns the lines of `shader_sets.txt` (dxc, od, fxc): the
@@ -159,8 +143,8 @@ fn shader_sets(shaders: &Path, table: &Path, out: &Path) -> [String; 3] {
     println!("cargo:rerun-if-changed={}", file.display());
     let text = fs::read_to_string(&file).unwrap_or_else(|_| {
         fail(&format!(
-            "the feature dxc needs the three shader sets of the dxc variant: there is no {} \
-             (testing/shader_cache/shaders.py build --variant dxc --root <dir>)",
+            "the shader-pick feature needs the shader-pick variant: there is no {} \
+             (testing/shader_cache/shaders.py build --dxc <dxc> --fxc <fxc> --variant shader-pick --root <dir>)",
             file.display()
         ))
     });
@@ -181,13 +165,13 @@ fn shader_sets(shaders: &Path, table: &Path, out: &Path) -> [String; 3] {
     if names.len() < 80 {
         fail(&format!("{}: {} RAV1G_SHADER lines", table.display(), names.len()));
     }
-    let mut text = String::from("/* Written by crates/rav1g-sys/build.rs from shader_table.c (the feature dxc). */\n");
+    let mut text = String::from("/* Written by crates/rav1g-sys/build.rs from shader_table.c for shader-pick. */\n");
     for (directory, suffix) in [("h_od", "_od"), ("h_fxc", "_fxc")] {
         let headers = shaders.join("dx").join("shaders").join(directory);
         println!("cargo:rerun-if-changed={}", headers.display());
         for name in &names {
             if !headers.join(format!("{name}.h")).is_file() {
-                fail(&format!("the feature dxc: there is no {}", headers.join(format!("{name}.h")).display()));
+                fail(&format!("the shader-pick feature: missing {}", headers.join(format!("{name}.h")).display()));
             }
             text += &format!("#include \"dx/shaders/{directory}/{name}.h\"\n");
         }
@@ -244,6 +228,10 @@ fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
     println!("cargo:rerun-if-changed={}", manifest.join("shader_table.c").display());
 
+    let pick = env::var_os("CARGO_FEATURE_SHADER_PICK").is_some();
+    if pick && env::var_os("CARGO_FEATURE_UAVSYNC").is_some() {
+        fail("shader-pick and uavsync require different shader builds");
+    }
     let shaders = windows.then(shader_dir);
     let shaders = shaders.as_deref();
     // What compiled the shaders, for the version text of the library.
@@ -251,9 +239,9 @@ fn main() {
 
     // The C of the decoder, one static library: the shader table, at /O1 /Ot whatever the cargo profile.
     let mut c_size = base_build(shaders);
-    // The feature dxc: three bytecodes of every shader, and what compiled each, for the shader pick.
+    // The shader-pick feature embeds the two extra sets.
     let sets = match shaders {
-        Some(shaders) if env::var_os("CARGO_FEATURE_DXC").is_some() => {
+        Some(shaders) if pick => {
             c_size.define("RAV1G_SHADER_SETS", None).include(&out);
             shader_sets(shaders, &manifest.join("shader_table.c"), &out)
         }

@@ -133,22 +133,21 @@ pub fn set_perf_detail(mode: u32) {
     crate::host::av1_set_perf_detail(mode as c_int)
 }
 
-/// Empty for the normal build of the shaders, `"uavsync"` and `"dxc"` for the experiment builds.
+/// Empty for the normal build of the shaders, `"uavsync"` and `"shader-pick"` for the experiment builds.
 pub fn shader_variant() -> String {
     crate::error::text(crate::host::av1_shader_variant())
 }
 
-/// What compiled the shaders of the library: `"FXC cs_5_0"`, or the compiler of the DXC experiment
-/// (`"DXC 1.9.2602.17 cs_6_0"`, the feature `dxc`).
+/// What compiled the default shader set of the library, for example `"DXC 1.9.2602.17 cs_6_0"`.
 pub fn shader_set() -> &'static str {
     crate::sys::SHADER_SET
 }
 
-/// The shader pick of the DXC experiment (the feature `dxc`; docs/test-player.md, "Shader pick"): the
+/// The shader-pick experiment (the feature `shader-pick`; docs/test-player.md, "Shader pick"): the
 /// library of that build has three bytecodes of every shader, and `pick` says which one the pipeline
 /// state of a shader is made of, in the devices created after the call:
-/// `fxc=<list>,od=<list>,dxc=<list>`. `dxc` is DXC's bytecode with its default optimisation (every
-/// shader, without a pick), `od` DXC's with `-Od`, `fxc` the `cs_5_0` bytecode of FXC. A list is shader
+/// `fxc=<list>,od=<list>,dxc=<list>`. `dxc` is the default build's bytecode (also used without a pick),
+/// `od` DXC's with `-Od`, `fxc` the `cs_5_0` bytecode of FXC. A list is shader
 /// names separated by commas, `all`, or names with `*`; a later part overrides an earlier one. An empty
 /// text is no pick, and the only one a library without the feature takes. `Err` (the pick stays what it
 /// was) names what is wrong.
@@ -156,9 +155,9 @@ pub fn set_shader_pick(pick: &str) -> Result<(), String> {
     crate::host::set_shader_pick(pick)
 }
 
-/// The DXC experiment: the log lines a device created now writes about its shaders, one per bytecode set
+/// The shader-pick experiment: the log lines a device created now writes about its shaders, one per bytecode set
 /// with its compiler and arguments (`SHADERSET ...`) and the pick (`SHADERPICK ...`). Empty without the
-/// feature `dxc`.
+/// feature `shader-pick`.
 pub fn shader_pick_lines() -> Vec<String> {
     crate::host::shader_pick_lines()
 }

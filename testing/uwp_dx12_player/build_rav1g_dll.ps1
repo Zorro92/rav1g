@@ -5,10 +5,10 @@
 #   build_rav1g_dll.ps1 -Shaders <dir> -Out <dir> [-Features capi,app-container] [-TargetDir <dir>]
 #
 # -Shaders   the directory whose dx/shaders/h has the bytecode headers of the shaders (RAV1G_SHADER_DIR:
-#            testing/shader_cache/shaders.py build --root <dir>)
+#            testing/shader_cache/shaders.py build --dxc <dxc> --root <dir>)
 # -Out       gets rav1g.dll, rav1g.dll.lib (the import library the player links) and rav1g.pdb; the player
 #            is then built with /p:Rav1gRustDll=<that directory>
-# -Features  the features of the rav1g crate; capi,app-container,uavsync for the uavsync shaders
+# -Features  capi,app-container, plus uavsync or shader-pick for the corresponding experiment
 #
 # Needs stable Rust with the target x86_64-pc-windows-msvc, LLVM (clang-cl, lld-link, llvm-lib; libclang
 # for bindgen) in "Program Files\LLVM", and Visual Studio with the UWP workload (the store libraries of

@@ -1,39 +1,20 @@
 #!/usr/bin/env python3
-"""The shaders of libav1 for the CI builds: compiled once, by content, and surveyed.
+"""Build the decoder's DXC cs_6_0 shaders from a content-addressed cache.
 
-FXC takes about 40 s for the shaders of libav1/dx/shaders when it runs on four at a time. A
-workflow run needs the bytecode of every shader several times (the libraries of the test player
-packages, rav1g-dec, its build on Linux) and the listing of every shader once (the survey). This script gives each of them the output of one
-FXC call per shader, kept in a cache directory by the content that decides it:
-
-    key = sha256(the FXC binaries, the arguments (profile, entry point, variable name, /Od,
-                 defines), the source file and every file it includes, directly or not)
-
-A cache entry is the header with the bytecode (/Fh) and the listing (/Fc) of that one call, and
-what FXC printed. A shader whose key is in the cache is not compiled; the others are, several
-at a time. The workflow keeps the directory with actions/cache, keyed by all keys together.
+A key covers the compiler binaries, arguments, source and transitive includes. A cache entry has
+one shader's bytecode header, listing and compiler messages.
 
     shaders.py key     the digest of all keys, for the actions/cache key
     shaders.py build   headers and listings of one variant from the cache, compiling what is missing
     shaders.py prune   drop the cache entries the given builds did not use
-    shaders.py survey  the shader survey and the CDEF and intra listings, from the listings of a build
+    shaders.py survey  the FXC survey and CDEF and intra listings of the shader-pick build
     shaders.py verify  the bytecode of the headers is in a built program
-    shaders.py same    two builds have the same shaders, with explicit exceptions for the C++ equality check
+    shaders.py same    compare two builds' shader header hashes
 
-The Rust library is built from the headers: RAV1G_SHADER_DIR=<root> (crates/rav1g-sys/build.rs).
-
-The variant dxc is the DXC experiment (docs/gpu-av1-decoder.md, "DXC experiment"): the same sources
-compiled by DXC for Shader Model 6.0 instead of by FXC for cs_5_0 (build --dxc <dxc> --variant dxc;
-DXC_ARGUMENTS has the arguments and why). Its cache entries have the same files, the header in the
-layout of FXC's (const BYTE <name>[]), and its build also writes <root>/shader_set.txt, the line the
-library of the dxc feature of the crates reports about its shaders. The survey is of FXC listings only.
-
-The build of the variant dxc has three bytecodes of every shader, for the library of the dxc feature to
-choose from per shader when it creates its pipeline states (-shaderpick, docs/test-player.md, "Shader
-pick"): dx/shaders/h (DXC as above, the one a pipeline state has unless told otherwise),
-dx/shaders/h_od (DXC with -Od for every shader, the arrays named <name>_od) and dx/shaders/h_fxc (what
-FXC writes for the variant normal, from the same cache entries by the same keys, the arrays named
-<name>_fxc). <root>/shader_sets.txt has one line per set with the compiler and its arguments.
+The Rust library takes dx/shaders/h and shader_set.txt from RAV1G_SHADER_DIR=<root>. The uavsync
+variant builds with all-memory group syncs. The shader-pick variant adds dx/shaders/h_od and
+dx/shaders/h_fxc, plus shader_sets.txt. Only that variant calls FXC. The shader-pick Cargo feature
+embeds the extra bytecode for -shaderpick (docs/test-player.md, "Shader pick").
 """
 import argparse
 import concurrent.futures
@@ -53,11 +34,12 @@ REPO = os.path.normpath(os.path.join(HERE, '..', '..'))
 SHADERS = os.path.join(REPO, 'libav1', 'dx', 'shaders')
 FORMAT = 1  # of the key material and of a cache entry; a change makes every key new
 
-# The variants of a build: the preprocessor definitions FXC gets on top of the settings of every shader.
+# DXC variants and their preprocessor definitions.
 VARIANTS = {
     'normal': [],
     # The library built with the uavsync feature of the crates takes these headers (RAV1G_SHADER_DIR).
     'uavsync': ['GroupMemoryBarrierWithGroupSync=AllMemoryBarrierWithGroupSync'],
+    'shader-pick': [],
 }
 
 # The shaders whose listings and counts go into the artifact next to the survey, and the ones
@@ -71,7 +53,7 @@ SETS = [
 ]
 UNOPTIMIZED = ['intra_main', 'intra_main_hbd']
 
-# The variant DXC compiles, and what it is given for every shader on top of -T, -E and -Od:
+# What DXC is given for every shader on top of -T, -E and -Od:
 #
 #   -T cs_6_0   Shader Model 6.0, the lowest DXIL there is: what every device with DXIL takes. Nothing in
 #               the sources asks for more.
@@ -81,19 +63,15 @@ UNOPTIMIZED = ['intra_main', 'intra_main_hbd']
 #   -WX         a warning is an error: what DXC objects to and FXC does not is to be seen and decided.
 #   -Wno-ambig-lit-shift
 #               the one warning the sources give (560 times): "1 << n" with a literal on the left, whose
-#               type DXC could take as 64 bits where FXC's is int. It never does here: compile_dxc
+#               type DXC could take as 64 bits where FXC's is int. It never does here: the build
 #               refuses a listing with a 64-bit value in it, so the shifts are 32-bit ones as in FXC.
 #   no -O       DXC's default, -O3; -Od for the shaders FXC builds with /Od.
 #   no -Gis     the shaders have no floating point arithmetic (the listings have none), so IEEE
 #               strictness has nothing to decide.
 #   nothing that strips: the container keeps its reflection part, as FXC's keeps RDEF.
-DXC_VARIANT = 'dxc'
-VARIANTS[DXC_VARIANT] = []
 DXC_PROFILE = 'cs_6_0'
 DXC_ARGUMENTS = ['-HV', '2018', '-WX', '-Wno-ambig-lit-shift']
-# The two other bytecodes of every shader in the build of the variant dxc (the shader pick of the DXC
-# experiment): (the name of the set, the directory of its headers under dx/shaders, the suffix of its
-# arrays). od: DXC with -Od for every shader; fxc: FXC's bytecode of the variant normal.
+# Extra sets of the shader-pick variant: (set name, headers under dx/shaders, array suffix).
 PICK_SETS = [('od', 'h_od', '_od'), ('fxc', 'h_fxc', '_fxc')]
 
 
@@ -110,11 +88,7 @@ def sha256_file(path):
 
 
 def project_shaders(shaders_dir=SHADERS):
-    """The shaders of the decoder: [(name, built with /Od)], by name. Every .hlsl file of libav1/dx/shaders
-    is one shader (what a shader includes is a .h file); UNOPTIMIZED lists the ones built with /Od. That is
-    what the library project of the C++ decoder (branch cpp, libav1/build/libav1.vcxproj) says with its
-    FxCompile items, so the keys, and with them the bytecode, are the same on both branches while the
-    sources are."""
+    """Every .hlsl file: [(name, built with optimizations disabled)], by name."""
     names = sorted(name[:-5] for name in os.listdir(shaders_dir) if name.endswith('.hlsl'))
     if len(names) < 80:
         fail('only %d shaders found in %s' % (len(names), shaders_dir))
@@ -160,13 +134,11 @@ def fxc_identity(fxc):
     return hashlib.sha256(json.dumps(parts).encode()).hexdigest()
 
 
-def fxc_arguments(name, od, variant):
+def fxc_arguments(name, od):
     """The arguments that decide the output; the output files and the source path come on top."""
     args = ['/nologo', '/T', 'cs_5_0', '/E', 'main', '/Vn', name]
     if od:
         args.append('/Od')
-    for define in VARIANTS[variant]:
-        args += ['/D', define]
     return args
 
 
@@ -203,7 +175,7 @@ def dxc_version(dxc):
     return text or 'version not reported', short
 
 
-def dxc_arguments(name, od, variant):
+def dxc_arguments(od, variant):
     """The arguments that decide DXC's output; the output files and the source path come on top. No
     -Vn: DXC writes the bytecode (-Fo), and write_header the array with the name of the shader."""
     args = ['-nologo', '-T', DXC_PROFILE, '-E', 'main'] + DXC_ARGUMENTS
@@ -215,12 +187,12 @@ def dxc_arguments(name, od, variant):
 
 
 def shader_key(name, od, variant, identity, shaders_dir=SHADERS):
-    if variant == DXC_VARIANT:
-        material = {'format': FORMAT, 'dxc': identity, 'arguments': dxc_arguments(name, od, variant),
-                    'name': name, 'files': source_files(name, shaders_dir)}
-    else:
-        material = {'format': FORMAT, 'fxc': identity, 'arguments': fxc_arguments(name, od, variant),
+    if variant == 'fxc':
+        material = {'format': FORMAT, 'fxc': identity, 'arguments': fxc_arguments(name, od),
                     'files': source_files(name, shaders_dir)}
+    else:
+        material = {'format': FORMAT, 'dxc': identity, 'arguments': dxc_arguments(od, variant),
+                    'name': name, 'files': source_files(name, shaders_dir)}
     return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
 
 
@@ -296,12 +268,12 @@ def compile_shader(compiler, cache, name, od, variant, key, shaders_dir, allow_w
     header = os.path.join(work, name + '.h')
     listing = os.path.join(work, name + '.asm')
     source = os.path.join(shaders_dir, name + '.hlsl')
-    dxc = variant == DXC_VARIANT
+    dxc = variant != 'fxc'
     blob_path = os.path.join(work, name + '.dxil')
     if dxc:
-        command = [compiler] + dxc_arguments(name, od, variant) + ['-Fc', listing, '-Fo', blob_path, source]
+        command = [compiler] + dxc_arguments(od, variant) + ['-Fc', listing, '-Fo', blob_path, source]
     else:
-        command = [compiler] + fxc_arguments(name, od, variant) + ['/Fc', listing, '/Fh', header, source]
+        command = [compiler] + fxc_arguments(name, od) + ['/Fc', listing, '/Fh', header, source]
     start = time.monotonic()
     done = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     seconds = round(time.monotonic() - start, 1)
@@ -318,7 +290,7 @@ def compile_shader(compiler, cache, name, od, variant, key, shaders_dir, allow_w
         else:
             write_header(header, name, blob, [
                 'Written by testing/shader_cache/shaders.py from the bytecode of',
-                'dxc ' + ' '.join(dxc_arguments(name, od, variant)) + ' ' + name + '.hlsl',
+                'dxc ' + ' '.join(dxc_arguments(od, variant)) + ' ' + name + '.hlsl',
                 'validation hash ' + blob[4:20].hex()])
     ok = done.returncode == 0 and os.path.isfile(header) and os.path.isfile(listing)
     if not ok:
@@ -344,17 +316,22 @@ def compile_shader(compiler, cache, name, od, variant, key, shaders_dir, allow_w
 def command_key(args):
     digest = hashlib.sha256()
     count = 0
+    identity = dxc_identity(args.dxc)
+    shaders = project_shaders()
     for variant in args.variants.split(','):
         if variant not in VARIANTS:
             fail('unknown variant %s' % variant)
-        identity = dxc_identity(args.dxc) if variant == DXC_VARIANT else fxc_identity(args.fxc)
-        for name, od in project_shaders():
+        pick = variant == 'shader-pick'
+        fxc_id = fxc_identity(args.fxc) if pick else None
+        for name, od in shaders:
             digest.update(shader_key(name, od, variant, identity).encode())
             count += 1
-            if variant == DXC_VARIANT and not od:
-                # The -Od bytecode of the shader pick. (Its FXC bytecode has the keys of the variant normal.)
-                digest.update(shader_key(name, True, variant, identity).encode())
+            if pick:
+                digest.update(shader_key(name, od, 'fxc', fxc_id).encode())
                 count += 1
+                if not od:
+                    digest.update(shader_key(name, True, variant, identity).encode())
+                    count += 1
     value = digest.hexdigest()[:32]
     print('shaders.py: %d shader keys (%s), digest %s' % (count, args.variants, value))
     if os.environ.get('GITHUB_OUTPUT'):
@@ -366,7 +343,7 @@ def command_key(args):
 def cache_entries(cache, compiler, variant, shaders, identity, jobs, what, allow_wide=False):
     """The cache entries of the shaders [(name, od)] of a variant, compiling the ones that are missing:
     ({name: key}, {name: the result of the compiler call of this run}, the number that were missing)."""
-    tool = 'DXC' if variant == DXC_VARIANT else 'FXC'
+    tool = 'FXC' if variant == 'fxc' else 'DXC'
     keys = {name: shader_key(name, od, variant, identity) for name, od in shaders}
     missing = [(name, od) for name, od in shaders if not entry_complete(cache, keys[name], name)]
     results = {}
@@ -400,26 +377,23 @@ def copy_renamed_header(source, target, name, suffix):
         f.write(data.replace(declaration, ('const BYTE %s%s[]' % (name, suffix)).encode()))
 
 
-def build_pick_sets(args, shaders, dxc_keys, dxc_id, jobs, shader_set, report):
-    """The two other bytecodes of every shader for the shader pick of the DXC experiment (PICK_SETS), in
-    <root>/dx/shaders/h_od and h_fxc, and <root>/shader_sets.txt, the line of every set.
+def build_pick_sets(args, shaders, dxc_keys, dxc_id, fxc_id, jobs, shader_set, report):
+    """Build the two extra sets for shader picking and write their compiler and arguments.
 
     A shader whose -Od DXIL has 64-bit values in its code (the literal of a shift or of a ?: that DXC
     takes as 64 bits and that only its optimisation narrows; a device needs 64-bit integer shader
     operations for it) has the bytecode of the default set in the set od as well, and the line of the set
     names it."""
     unoptimized = ', '.join(name for name, od in shaders if od)
-    sources = {'od': (args.dxc, DXC_VARIANT, [(name, True) for name, _ in shaders], dxc_id),
-               'fxc': (args.fxc, 'normal', shaders, None)}
+    sources = {'od': (args.dxc, args.variant, [(name, True) for name, _ in shaders], dxc_id),
+               'fxc': (args.fxc, 'fxc', shaders, fxc_id)}
     report['sets'] = {}
     lines = {'dxc': 'dxc: %s: dxc %s; -Od for %s' % (
-        shader_set, ' '.join(dxc_arguments('', False, DXC_VARIANT)), unoptimized)}
+        shader_set, ' '.join(dxc_arguments(False, args.variant)), unoptimized)}
     for set_name, directory, suffix in PICK_SETS:
         compiler, variant, set_shaders, identity = sources[set_name]
-        if identity is None:
-            identity = fxc_identity(compiler)
         keys, results, missing = cache_entries(args.cache, compiler, variant, set_shaders, identity, jobs,
-                                               'dxc, the set %s' % set_name, allow_wide=set_name == 'od')
+                                               'shader-pick, the set %s' % set_name, allow_wide=set_name == 'od')
         headers = os.path.join(args.root, 'dx', 'shaders', directory)
         os.makedirs(headers, exist_ok=True)
         listings = os.path.join(args.listings, set_name) if args.listings else None
@@ -431,7 +405,8 @@ def build_pick_sets(args, shaders, dxc_keys, dxc_id, jobs, shader_set, report):
             key = keys[name]
             _, header, listing, meta_path = entry_files(args.cache, key, name)
             with open(meta_path, encoding='utf-8') as f:
-                is_wide = bool(json.load(f).get('wide'))
+                meta = json.load(f)
+            is_wide = bool(meta.get('wide'))
             if listings:
                 shutil.copyfile(listing, os.path.join(listings, name + '.asm'))
             if is_wide:
@@ -442,18 +417,19 @@ def build_pick_sets(args, shaders, dxc_keys, dxc_id, jobs, shader_set, report):
             target = os.path.join(headers, name + '.h')
             copy_renamed_header(header, target, name, suffix)
             entries.append({'name': name, 'od': od and not is_wide, 'key': keys[name], 'bytecode_key': key,
-                            'compiled': name in results, 'header_sha256': sha256_file(target)})
+                            'compiled': name in results, 'seconds': meta['seconds'],
+                            'header_sha256': sha256_file(target)})
         if set_name == 'od':
             lines[set_name] = 'od: %s: dxc %s for every shader%s' % (
-                shader_set, ' '.join(dxc_arguments('', True, DXC_VARIANT)),
+                shader_set, ' '.join(dxc_arguments(True, args.variant)),
                 ' but %s (64-bit values at -Od: the bytecode of the set dxc)' % ', '.join(wide) if wide else '')
         else:
             lines[set_name] = 'fxc: FXC cs_5_0: fxc %s; /Od for %s' % (
-                ' '.join(fxc_arguments('<name>', False, 'normal')), unoptimized)
+                ' '.join(fxc_arguments('<name>', False)), unoptimized)
         report['sets'][set_name] = {'directory': directory, 'suffix': suffix, 'line': lines[set_name],
                                     'default_bytecode': wide, 'compiled': missing,
                                     'from_cache': len(set_shaders) - missing, 'shaders': entries}
-        print('shaders.py: dxc, the set %s: %d shaders, %d compiled now, %d from the cache; headers in %s' %
+        print('shaders.py: shader-pick, the set %s: %d shaders, %d compiled now, %d from the cache; headers in %s' %
               (set_name, len(set_shaders), missing, len(set_shaders) - missing, headers))
     lines = [lines[name] for name in ('dxc', 'od', 'fxc')]
     with open(os.path.join(args.root, 'shader_sets.txt'), 'w', encoding='ascii', newline='\n') as f:
@@ -464,40 +440,29 @@ def build_pick_sets(args, shaders, dxc_keys, dxc_id, jobs, shader_set, report):
 
 
 def command_build(args):
-    if args.variant not in VARIANTS:
-        fail('unknown variant %s' % args.variant)
     start = time.monotonic()
-    dxc = args.variant == DXC_VARIANT
-    tool = 'DXC' if dxc else 'FXC'
-    compiler = args.dxc if dxc else args.fxc
-    identity = dxc_identity(compiler) if dxc else fxc_identity(compiler)
+    identity = dxc_identity(args.dxc)
+    fxc_id = fxc_identity(args.fxc) if args.variant == 'shader-pick' else None
     shaders = project_shaders()
     jobs = max(1, args.jobs or (os.cpu_count() or 2))
-    keys, results, missing = cache_entries(args.cache, compiler, args.variant, shaders, identity, jobs,
-                                                 args.variant)
+    keys, results, missing = cache_entries(args.cache, args.dxc, args.variant, shaders, identity, jobs,
+                                           args.variant)
 
     headers = os.path.join(args.root, 'dx', 'shaders', 'h')
     os.makedirs(headers, exist_ok=True)
     if args.listings:
         os.makedirs(args.listings, exist_ok=True)
-    if dxc:
-        version, short = dxc_version(compiler)
-        shader_set = 'DXC %s %s' % (short, DXC_PROFILE)
-        report = {'format': FORMAT, 'variant': args.variant, 'dxc': compiler, 'dxc_identity': identity,
-                  'dxc_version': version, 'dxc_libraries': [os.path.basename(path) for path in dxc_libraries(compiler)],
-                  'arguments': ' '.join(dxc_arguments('', False, args.variant)),
-                  'arguments_unoptimized': ' '.join(dxc_arguments('', True, args.variant)),
-                  'shader_set': shader_set, 'jobs': jobs,
-                  'compiled': missing, 'from_cache': len(shaders) - missing, 'shaders': []}
-        # What the library of the dxc feature says about its shaders (crates/rav1g-sys/build.rs).
-        with open(os.path.join(args.root, 'shader_set.txt'), 'w', encoding='ascii', newline='\n') as f:
-            f.write(shader_set + '\n')
-        print('shaders.py: %s: %s; dxc %s; -Od instead of the default for %s' % (
-            shader_set, version, report['arguments'], ', '.join(UNOPTIMIZED)))
-        build_pick_sets(args, shaders, keys, identity, jobs, shader_set, report)
-    else:
-        report = {'format': FORMAT, 'variant': args.variant, 'fxc': args.fxc, 'fxc_identity': identity, 'jobs': jobs,
-                  'compiled': missing, 'from_cache': len(shaders) - missing, 'shaders': []}
+    version, short = dxc_version(args.dxc)
+    shader_set = 'DXC %s %s' % (short, DXC_PROFILE)
+    report = {'format': FORMAT, 'variant': args.variant, 'dxc': args.dxc, 'dxc_identity': identity,
+              'dxc_version': version, 'dxc_libraries': [os.path.basename(path) for path in dxc_libraries(args.dxc)],
+              'arguments': ' '.join(dxc_arguments(False, args.variant)),
+              'arguments_unoptimized': ' '.join(dxc_arguments(True, args.variant)),
+              'shader_set': shader_set, 'jobs': jobs,
+              'compiled': missing, 'from_cache': len(shaders) - missing, 'shaders': []}
+    print('shaders.py: %s: %s; dxc %s; -Od for %s' % (shader_set, version, report['arguments'], ', '.join(UNOPTIMIZED)))
+    if fxc_id is not None:
+        build_pick_sets(args, shaders, keys, identity, fxc_id, jobs, shader_set, report)
     for name, od in shaders:
         _, header, listing, meta_path = entry_files(args.cache, keys[name], name)
         with open(meta_path, encoding='utf-8') as f:
@@ -510,24 +475,24 @@ def command_build(args):
         report['shaders'].append({'name': name, 'od': od, 'key': keys[name], 'compiled': name in results,
                                   'seconds': meta['seconds'], 'output': messages(meta['output']),
                                   'header_sha256': sha256_file(header)})
-        # What FXC said about the shader (warnings), also when its output came from the cache.
+        # Compiler messages, also when the output came from the cache.
         for line in messages(meta['output']):
             print('%s.hlsl%s: %s' % (name, '' if name in results else ' (cached)', line))
+    with open(os.path.join(args.root, 'shader_set.txt'), 'w', encoding='ascii', newline='\n') as f:
+        f.write(shader_set + '\n')
     report['wall_seconds'] = round(time.monotonic() - start, 1)
     if args.report:
         os.makedirs(os.path.dirname(os.path.abspath(args.report)), exist_ok=True)
         with open(args.report, 'w', encoding='utf-8') as f:
             json.dump(report, f, indent=1)
     cpu = sum(results[name]['seconds'] for name in results)
-    print('shaders.py: %s: %d shaders, %d compiled now (%.1f s of %s in %.1f s), %d from the cache; headers in %s' %
-          (args.variant, len(shaders), missing, cpu, tool, report['wall_seconds'], report['from_cache'], headers))
+    print('shaders.py: %s: %d shaders, %d compiled now (%.1f s of DXC in %.1f s), %d from the cache; headers in %s' %
+          (args.variant, len(shaders), missing, cpu, report['wall_seconds'], report['from_cache'], headers))
     if os.environ.get('GITHUB_STEP_SUMMARY'):
         with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
-            f.write('- shaders, %s: %d compiled in this run (%.1f s of %s in %.1f s, up to %d at a time), %d from '
-                    'the cache%s\n' % (args.variant, missing, cpu, tool, report['wall_seconds'], jobs,
-                                       report['from_cache'],
-                                       ('; %s (`%s`), `dxc %s`' % (report['shader_set'], report['dxc_version'],
-                                                                  report['arguments'])) if dxc else ''))
+            f.write('- shaders, %s: %d compiled in this run (%.1f s of DXC in %.1f s, up to %d at a time), %d from '
+                    'the cache; %s (`%s`), `dxc %s`\n' % (args.variant, missing, cpu, report['wall_seconds'], jobs,
+                                                       report['from_cache'], shader_set, version, report['arguments']))
     return 0
 
 
@@ -537,7 +502,7 @@ def command_prune(args):
         with open(path, encoding='utf-8') as f:
             report = json.load(f)
         used.update(shader['key'] for shader in report['shaders'])
-        # The other bytecodes of the build of the variant dxc (the shader pick).
+        # The extra bytecode of the shader-pick variant.
         for other in report.get('sets', {}).values():
             used.update(shader['key'] for shader in other['shaders'])
     removed = 0
@@ -639,6 +604,10 @@ def runtime_width_bit_fields(name, code):
 def command_survey(args):
     with open(args.report, encoding='utf-8') as f:
         report = json.load(f)
+    fxc = report.get('sets', {}).get('fxc')
+    if not fxc:
+        fail('the DXBC survey needs the report of a shader-pick build')
+    report.update(fxc)
     shaders = report['shaders']
     rows = {}
     runtime_width = []
@@ -787,7 +756,7 @@ def command_verify(args):
             # The linker drops an array nothing refers to. All but a few shaders have a pipeline state.
             if len(found) < args.min_found:
                 ok = False
-            # The build of the variant dxc: the other bytecodes of the shader pick are in the program too.
+            # The shader-pick build also embeds its alternate sets.
             for set_name, other in sorted(report.get('sets', {}).items()):
                 count = 0
                 for shader in other['shaders']:
@@ -877,20 +846,20 @@ def main():
     commands = parser.add_subparsers(dest='command', required=True)
 
     key = commands.add_parser('key', help='the digest of the keys of all shaders')
-    key.add_argument('--fxc', required=True)
-    key.add_argument('--dxc', help='for the variant dxc')
-    key.add_argument('--variants', default='normal,uavsync')
+    key.add_argument('--fxc', help='for the shader-pick variant')
+    key.add_argument('--dxc', required=True)
+    key.add_argument('--variants', default='normal')
     key.set_defaults(run=command_key)
 
     build = commands.add_parser('build', help='headers and listings of one variant')
-    build.add_argument('--fxc', help='for the variants FXC compiles')
-    build.add_argument('--dxc', help='for the variant dxc')
+    build.add_argument('--fxc', help='for the shader-pick variant')
+    build.add_argument('--dxc', required=True)
     build.add_argument('--cache', required=True, help='the cache directory')
-    build.add_argument('--variant', default='normal')
+    build.add_argument('--variant', choices=VARIANTS, default='normal')
     build.add_argument('--root', required=True, help='the headers go to <root>/dx/shaders/h/<name>.h')
     build.add_argument('--listings', help='directory for the listings, <name>.asm')
-    build.add_argument('--report', help='JSON file: the key, the compile time and the FXC output of every shader')
-    build.add_argument('--jobs', type=int, default=0, help='FXC processes at a time (default: one per processor)')
+    build.add_argument('--report', help='JSON file: the key, compile time and messages of every shader')
+    build.add_argument('--jobs', type=int, default=0, help='compiler processes at a time (default: one per processor)')
     build.set_defaults(run=command_build)
 
     prune = commands.add_parser('prune', help='drop the cache entries the builds of these reports did not use')

@@ -68,7 +68,7 @@ At the end no C++ remains in the decoder: the C parser, the HLSL and Rust.
 | --- | --- |
 | `crates/rav1g` | the decoder: Rust host modules, API, `capi` feature for the C ABI (`include/rav1g.h`) |
 | `crates/rav1g-sys` | the types with a fixed shape, in Rust (the records the shaders read, the state of the host, the enums of the bitstream, the perf and stage dump types; [Own types, no libaom headers](#own-types-no-libaom-headers)), and the shader bytecode table, the one C file, built with `cc` |
-| `crates/rav1g-shaders` | planned, with the switch to DXC: shader bytecode, `build.rs` runs DXC (see Requirements) and embeds the DXIL with `include_bytes!`. Today the bytecode is the FXC headers of `RAV1G_SHADER_DIR`, in `crates/rav1g-sys/shader_table.c` |
+| `testing/shader_cache/shaders.py` | compiles and validates DXIL with DXC. `RAV1G_SHADER_DIR` supplies its generated headers to `crates/rav1g-sys/shader_table.c` |
 | `tools/rav1g-dec` | command-line decoder for conformance, md5 and stage dumps |
 | `tools/rav1g-header` | writes `rav1g.h` from `crates/rav1g/src/capi.rs` with `cbindgen`, or checks it |
 | `tools/rav1g-tables` | prints the host's copies of tables and inline functions of libaom's headers, for `testing/tables_check` (Linux; [Own types, no libaom headers](#own-types-no-libaom-headers)) |
@@ -87,14 +87,14 @@ Agreed on 2026-11-12, in addition to the steps above:
   fetches) for `x86_64-pc-windows-msvc`, the C parser through `cc` the same way, and the shaders with DXC's
   native Linux release. The UWP test player is C++/CX and stays an MSVC build in CI, as does the MSIX
   packaging. Running the decoder still needs D3D12 (WARP in CI, or the console).
-- **Shaders compiled with DXC, not FXC.** FXC exists only for Windows. The console takes DXIL signed by DXC
-  up to shader model 6.4, with waves of 64 lanes, no native 16-bit types and no `[WaveSize]`
-  ([gpu-av1-decoder.md](gpu-av1-decoder.md#shader-model-6-feasibility-2026-11-12)). Baseline `cs_6_0`; the
-  shaders must not assume a wave width (WARP has waves of 4). Before anything relies on it: the existing
-  HLSL compiled unchanged with DXC must give md5-identical output on WARP and on the console at the same
-  speed, and the Linux build of DXC must produce signed DXIL that the console accepts. The DXBC listing
-  scan (`testing/dxbc_scan`) does not read DXIL; a DXIL equivalent, or a reason why the pattern cannot
-  occur, comes with the switch.
+- **Signed DXIL.** DXC builds the decoder shaders for `cs_6_0`, preserving `-Od` for
+  `intra_main` and `intra_main_hbd`. The console accepts Shader Model 6.4 at most, with waves
+  of 64 lanes and no native 16-bit operations or `[WaveSize]`. WARP uses waves of 4. The
+  `shader-pick` experiment also embeds FXC bytecode for driver diagnostics. The overlapping
+  in-place register writes checked by `testing/dxbc_scan` are a DXBC instruction pattern.
+  DXIL assigns each SSA value once, and the driver compiles those values to machine instructions.
+  The scan still checks the experiment's FXC listings. Console md5 comparisons exercise the
+  driver's DXIL code generation. [Shader Model 6 feasibility](gpu-av1-decoder.md#shader-model-6-feasibility-2026-11-12)
 - **A GPU backend boundary.** The host talks to the GPU through one internal interface (buffers, pipeline
   states, dispatch, barriers, fences, timestamps, readback). Phase 1 implements it for D3D12 only; a
   Vulkan backend (SPIR-V from the same HLSL through DXC; Linux, Android, macOS via MoltenVK, and
@@ -103,12 +103,9 @@ Agreed on 2026-11-12, in addition to the steps above:
 ## Testing
 
 - **Every push:** the existing workflow plus `cargo build`/`cargo test` on Windows, the conformance set
-  decoded by `rav1g-dec` on WARP (md5 against dav1d/AOM), the host shader checks unchanged, the listings
-  scan unchanged (the shaders do not change).
-- **Equality with the C++ reference:** CI also builds `warp_decoder`, the desktop program of the C++
-  decoder, and checks that both produce the same md5 per frame, the same stage dumps and the same MEMORY
-  lines. Through step 5 it was built from the same commit; since the C++ host left `main` it is built
-  from branch `cpp` at a pinned commit ([Equality reference](#equality-reference)).
+  decoded by `rav1g-dec` on WARP (md5 against dav1d/AOM), and the host shader checks.
+- **Equality with the C++ reference:** CI also builds `warp_decoder` from a pinned commit of
+  branch `cpp` and compares frame hashes, stage dumps and buffer plans. [Equality reference](#equality-reference)
 - **Console:** after steps 4 and 5, the md5 set (8-bit and 10-bit, hidden frames, film grain, global
   motion, layers, size changes, scaled references, superres) and `-gputime` timing against `v0.3.0`.
 - **Local (optional):** `cargo xwin` cross-builds for Windows from Linux; running under wine with
@@ -116,15 +113,16 @@ Agreed on 2026-11-12, in addition to the steps above:
 
 ## Equality reference
 
-The gate of phase 1 was byte-identical output, and the C++ decoder is the second implementation the Rust
-decoder is held against, beyond the md5 references of dav1d and AOM: two hosts that feed the same shaders
-have to write the same bytes at every stage, not only the same frames.
+The pinned C++ decoder provides a second check beyond the frame md5 references from dav1d and AOM.
+The Rust decoder's DXC `cs_6_0` shaders and the C++ decoder's FXC `cs_5_0` shaders must produce
+the same decoded samples and matching stage dumps under the existing two-parser comparison.
 
 - **What is compared** (job `rust-equal`): `rav1g-dec` of the pushed commit against `warp_decoder` of the
-  C++ decoder, both on WARP, with the same scripts, streams and task lists: the md5 of every output frame
-  of the 252 streams of the set, the bytes of every stage dump of `testing/conformance/dump_tasks.txt`,
-  and the MEMORY lines of ten decoder configurations (the host pool left out: it is smaller in the
-  Rust decoder by design, see [The host pool and the queues](#the-host-pool-and-the-queues-2026-11-13)).
+  C++ decoder, both on WARP, with the same scripts, streams and task lists. CI compares the md5
+  of every output frame, the stage dumps of `testing/conformance/dump_tasks.txt`, and the device
+  buffer plans from the MEMORY lines. The stage-dump comparator accounts for differences in
+  the parser record layouts. The GPU prediction list checks also compare against the C++ decoder
+  and the Rust CPU lists. [The host pool and the queues](#the-host-pool-and-the-queues-2026-11-13)
 - **Where the C++ decoder comes from** (job `cpp-reference`): branch `cpp` at the commit that
   `CPP_REFERENCE_COMMIT` of `.github/workflows/build.yml` names, built with its own project files and
   its own shaders. **The pin is `19ad47b905e73de93dfe3c20cea0f45442a71b2b`** (the head of `cpp` on
@@ -137,14 +135,8 @@ have to write the same bytes at every stage, not only the same frames.
 - **The pin is bumped on purpose**, in the workflow and in this section, when a change that both decoders
   have (a shader, the C of the parser) has landed on both branches. A change on `main` alone that leaves
   the output as it is needs no bump.
-- **The shader check** (`testing/shader_cache/shaders.py same`) compares the two build reports.
-  `--candidate-changed` covers the shared readers of the packed mode info records, the legacy
-  fast generator that shares list access code, and the two intra V2 builds that take a root
-  constant for the intra list start. It also covers the two builds of `intra_main_hbd` that group
-  edge preparation and DC/CFL sums into three group syncs. `--candidate-only` includes the GPU
-  prediction list shaders and `gen_pred_blocks_fast_packed`. The `gen_pred_blocks_fast` selector
-  picks the packed build. The stage dumps check the final prediction lists and the reconstructed
-  samples against the C++ decoder.
+- **Shader build provenance.** Each decoder is checked against the headers from its own
+  compiler run. The equality gate compares the two decoders' outputs and buffer plans.
 
 ## Branches
 
@@ -152,8 +144,8 @@ have to write the same bytes at every stage, not only the same frames.
   upstream, frozen.
 - `fxc-sm5` (2026-11-19, at `c1de272`, the release `v0.4.0-alpha.2`): the last decoder whose shaders are
   all FXC `cs_5_0` (Shader Model 5, D3D11-compatible bytecode). Frozen: no further work is planned there,
-  and a push to it starts no CI (a run is still possible by hand). From here on `main` is for D3D12 on
-  Xbox Series X|S only and moves its shaders to DXC and Shader Model 6. The original Xbox One gives a
+  and a push to it starts no CI (a run is still possible by hand). Main targets D3D12 on Xbox
+  Series X|S with DXC and Shader Model 6. The original Xbox One gives a
   UWP app only D3D11 feature level 10.1 (no `cs_5_0` compute), so no AV1 on it from this decoder.
 - A fix to something both branches share (shaders, the C parser, the test player, the conformance set,
   the CI scripts) is made on `cpp` and merged into `main`, and the pin of the equality reference moves to

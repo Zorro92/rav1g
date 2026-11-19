@@ -129,6 +129,20 @@ impl<'a> Device<'a> {
         Device { device }
     }
 
+    pub fn supports_shader_model_6_0(&self) -> Result<bool, Error> {
+        let mut model = D3D12_FEATURE_DATA_SHADER_MODEL { HighestShaderModel: D3D_SHADER_MODEL_6_0 };
+        // SAFETY: the feature's in/out struct with its size.
+        unsafe {
+            self.device.CheckFeatureSupport(
+                D3D12_FEATURE_SHADER_MODEL,
+                (&raw mut model).cast(),
+                size_of_val(&model) as u32,
+            )
+        }
+        .map_err(|error| Error { step: "CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL)", code: error.code().0 })?;
+        Ok(model.HighestShaderModel.0 >= D3D_SHADER_MODEL_6_0.0)
+    }
+
     /// The name of the heap of a buffer kind in the decoder's log lines.
     pub fn heap_name(kind: MemoryKind) -> &'static str {
         ["DEFAULT", "UPLOAD", "CUSTOM L0 write-back", "READBACK", "DEFAULT", "CUSTOM L0 write-combine"][kind as usize]

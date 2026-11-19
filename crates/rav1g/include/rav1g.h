@@ -983,8 +983,7 @@ uint32_t rav1g_abi_version(void);
 
 /*
  The version of the library and what it was built with, for a log:
- "rav1g 0.4.0, the Rust host; entropy decoder: MSVC, /GL, DLL runtime; shaders: FXC cs_5_0". The
- shaders of the DXC experiment are named by their compiler: "shaders: DXC 1.9.2602.17 cs_6_0".
+ "rav1g 0.4.0, the Rust host; entropy decoder: MSVC, /GL, DLL runtime; shaders: DXC 1.9.2602.17 cs_6_0".
  */
 const char *rav1g_version(void);
 
@@ -1025,7 +1024,7 @@ size_t rav1g_color_text(const struct Rav1gColorInfo *color,
  decoders submit to, or null for a queue of the decoder's own. The decoder's compute pipeline states
  are created on `pipeline_threads` threads (6 at most) while the call returns
  (`rav1g_device_wait_pipelines`), or by this call with 0. Null when the device, the queue or a pipeline
- layout could not be created (`rav1g_last_error`).
+ layout could not be created, or the device does not support Shader Model 6.0 (`rav1g_last_error`).
 
  # Safety
  The pointers are null or valid interfaces of the kinds named.
@@ -1257,11 +1256,11 @@ void rav1g_set_lf_h_split(uint32_t mode);
 void rav1g_set_intra_edge_fix(bool enable);
 
 /*
- Experiment (the DXC package: a library whose `rav1g_shader_variant` is "dxc"): which bytecode the
- pipeline state of a shader is made of, in the devices created after the call. The library of that
- build has three of every shader: `dxc`, what DXC compiled with its default optimisation (every shader,
- without a pick); `od`, what DXC compiled with `-Od`; `fxc`, the `cs_5_0` bytecode of FXC, the one of
- the default build. `pick` is "fxc=<list>,od=<list>,dxc=<list>": a list is shader names (the names of
+ Experiment (a library whose `rav1g_shader_variant` is "shader-pick"): which bytecode the pipeline
+ state of a shader is made of, in the devices created after the call. The build has three sets:
+ `dxc`, the default build's DXC bytecode, also used without a pick; `od`, DXC with `-Od`;
+ `fxc`, FXC's `cs_5_0` bytecode for compiler diagnostics.
+ `pick` is "fxc=<list>,od=<list>,dxc=<list>": a list is shader names (the names of
  the `.hlsl` files) separated by commas, `all`, or names with `*` for any characters; a later part
  overrides an earlier one ("fxc=all,dxc=loopfilter_vert_hbd"). Null or an empty text is no pick. The
  device logs one "SHADERSET" line per bytecode set and a "SHADERPICK" line with the shaders of each.
@@ -1324,7 +1323,7 @@ void rav1g_parse_digest_result(const struct Rav1gParseDigest *digest, struct Rav
 void rav1g_parse_digest_destroy(struct Rav1gParseDigest *digest);
 
 /*
- An empty string for the normal build of the shaders, "uavsync" and "dxc" for the experiment builds
+ An empty string for the normal build of the shaders, "uavsync" and "shader-pick" for the experiment builds
  (what compiled the shaders is in the text of `rav1g_version`).
  */
 const char *rav1g_shader_variant(void);

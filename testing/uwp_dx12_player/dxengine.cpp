@@ -16,8 +16,8 @@
 
 #include "pch.h"
 #include "DXEngine.h"
-#include "SamplePixelShader.h"
-#include "SampleVertexShader.h"
+#include "rav1g-shaders/SamplePixelShader.h"
+#include "rav1g-shaders/SampleVertexShader.h"
 #include "ps_cbuf.h"
 
 using namespace Windows::Graphics::Display;

@@ -69,15 +69,27 @@ impl Device {
     /// one the decoders get a direct queue of their own. The decoder's frames reach the application's
     /// resources through command lists on this queue, so an application that uses the frames on the GPU
     /// passes the queue it renders with, or waits for the frame's fence.
+    ///
+    /// Returns [`ErrorCode::Incapable`] if the device cannot support the Shader Model 6.0 pipelines.
     pub fn with_d3d12(
         device: &ID3D12Device,
         queue: Option<&ID3D12CommandQueue>,
         pipeline_threads: u32,
     ) -> Result<Device, Error> {
+        let gpu_device = gpu::Device::new(device);
+        let sm6 = gpu_device.supports_shader_model_6_0().map_err(|error| {
+            Error::new(
+                ErrorCode::Incapable,
+                format!("D3D12 Shader Model 6.0 is required: {} failed ({:#010x})", error.step, error.code),
+            )
+        })?;
+        if !sm6 {
+            return Err(Error::new(ErrorCode::Incapable, "the D3D12 device does not support Shader Model 6.0"));
+        }
         let queue = match queue {
             Some(queue) => queue.clone(),
             None => {
-                let queue = gpu::Device::new(device).create_queue().map_err(device_error)?;
+                let queue = gpu_device.create_queue().map_err(device_error)?;
                 // SAFETY: a reference the call hands over.
                 unsafe { ID3D12CommandQueue::from_raw(queue.into_raw()) }
             }

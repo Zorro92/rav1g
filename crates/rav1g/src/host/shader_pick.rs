@@ -6,7 +6,7 @@
 // License 1.0 was not distributed with this source code in the PATENTS file, you can obtain it at
 // www.aomedia.org/license/patent.
 
-//! The shader pick of the DXC experiment (the feature `dxc`; docs/test-player.md, "Shader pick"): the
+//! The shader-pick experiment (the feature `shader-pick`; docs/test-player.md, "Shader pick"): the
 //! library of that feature has three bytecodes of every shader, and a text says which one the pipeline
 //! state of a shader is made of when a device is created:
 //!
@@ -14,8 +14,8 @@
 //! fxc=<list>,od=<list>,dxc=<list>
 //! ```
 //!
-//! `dxc` is what DXC compiled with its default optimisation (every shader, without a pick), `od` what
-//! DXC compiled with `-Od`, `fxc` the `cs_5_0` bytecode of FXC, the one of the default build. A list is
+//! `dxc` is the default build's DXC bytecode (every shader, without a pick), `od` what
+//! DXC compiled with `-Od`, and `fxc` the `cs_5_0` bytecode of FXC. A list is
 //! names of shaders separated by commas; `all` is every shader, and a name may have `*` for any
 //! characters (`loopfilter_*`, `*_hbd`). The parts apply from left to right, so a later one overrides an
 //! earlier one: `fxc=all,dxc=loopfilter_vert_hbd` is FXC's bytecode for everything but one shader.
@@ -145,9 +145,8 @@ pub(crate) fn wrap(line: &str, limit: usize) -> Vec<String> {
 pub(crate) fn set(text: &str, names: &[&str]) -> Result<(), String> {
     let text = text.trim();
     if !text.is_empty() {
-        if !cfg!(feature = "dxc") {
-            return Err("shader pick: this library has one bytecode per shader (it is not the DXC experiment build)"
-                .to_string());
+        if !cfg!(feature = "shader-pick") {
+            return Err("shader pick: alternate bytecode requires the shader-pick build".to_string());
         }
         resolve(text, names)?;
     }

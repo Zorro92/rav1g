@@ -1,4 +1,4 @@
-# The Rust port (docs/rust-port.md). Build with the shader headers of the FXC build:
+# The Rust port (docs/rust-port.md). Build with the shader headers from shaders.py build --dxc:
 #   RAV1G_SHADER_DIR=<directory with dx/shaders/h> cargo build --release
 [workspace]
 resolver = "3"

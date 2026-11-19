@@ -141,8 +141,7 @@ one commit each:
   [Layers and new sequences](#layers-and-new-sequences) and
   [the warp check](#host-side-check-of-the-warp-shaders).
 - **Shader cache of the workflow**: the CI builds take the bytecode headers of the shaders
-  from one FXC call per shader, kept by content, instead of compiling every shader in every
-  build. See [Shader cache of the workflow](#shader-cache-of-the-workflow).
+  from one DXC call per shader and variant, cached by content. See [Shader cache of the workflow](#shader-cache-of-the-workflow).
 - **Conformance run**: `rav1g-dec` (`tools/rav1g-dec`; `warp_decoder` in the C++ decoder) is
   the decoder as a desktop console program that decodes on the D3D12 WARP software adapter
   and writes or checks one md5 per output frame, and `testing/conformance` runs it in CI over
@@ -161,7 +160,8 @@ interface for C and the C of the parser, for an app container and the DLL runtim
 `av1xbox.sln` (the player and `uwp_common`; the player uses the decoder through
 `crates/rav1g/include/rav1g.h`) as Release x64 with MSBuild, the `v145` toolset and the
 `10.0.26100.0` Windows SDK. The minimum Windows version is overridden to `10.0.17763.0`. The
-decoder's shaders are FXC/Shader Model 5.0 compute shaders as in upstream. An appended
+decoder's compute shaders use DXC `cs_6_0`. MSBuild uses the SDK's DXC for the presentation
+shaders (`vs_6_0` and `ps_6_0`). An appended
 compiler option `/wd4996` suppresses the newer SDK's deprecated `GetDesktopDpi` diagnostic (promoted
 to an error by upstream's `/sdl`), without changing the player source.
 
@@ -174,7 +174,7 @@ named by one of two properties, and stops with a message when neither is given.
 | `/p:Rav1gRustLib=<dir>` | `rav1g.lib` and `rav1g_c.lib` (the shader table), linked statically | `cargo build -p rav1g --lib --features capi,app-container` with MSVC (`RAV1G_C_LIB_DIR=<dir>`), then `testing/uwp_imports/prune_import_members.py` on `rav1g.lib`; the commands are in the workflow |
 
 Both need `RAV1G_SHADER_DIR`, the directory with the bytecode headers of the shaders
-(`testing/shader_cache/shaders.py build`), and the DLL runtime
+(`testing/shader_cache/shaders.py build --dxc <dxc>`), and the DLL runtime
 (`CARGO_ENCODED_RUSTFLAGS=-Ctarget-feature=-crt-static`, with `--cfg windows_slim_errors`); the
 reasons for every part are in [rust-port.md](rust-port.md), step 5.
 
@@ -193,26 +193,24 @@ gh run download <run-id> --name rav1g-testplayer-x64-<run-id> --dir rav1g-testpl
 
 ### The packages of a run
 
-A run builds two packages of the same player and the same identity. They differ in what compiled
-the C of the parser and entropy decoder, which is where the tile threads spend their time, and in
-how the library is linked. A third is the default package again with one capability more in its
-manifest:
+The packages share the player and package identity. The default and static-library packages
+use the same DXC compute shaders. The other revisions are for memory, synchronization, and
+shader compiler diagnostics.
 
 | Artifact | Version | Library | Use |
 | --- | --- | --- | --- |
 | `rav1g-testplayer-x64-<run-id>` | `0.2.<run number>.0` | `rav1g.dll`: Rust, the C compiled by clang-cl with full link time optimisation, linked by lld-link | **the default: use this one** |
 | `rav1g-testplayer-msvc-x64-<run-id>` | `0.2.<run number>.2` | linked statically: Rust, the C compiled by MSVC with `/GL` and by the player's link (`/LTCG:incremental`) | the alternative: one program without a DLL of its own; for a comparison of the two compilers |
 | `rav1g-testplayer-uavsync-x64-<run-id>` | `0.2.<run number>.1` | the default build with the uavsync shaders | only with the `experiments` input; see [Experiments](#experiments) |
-| `rav1g-testplayer-dxc-x64-<run-id>` | `0.2.<run number>.4` | the default build with the same shader sources compiled by DXC for Shader Model 6.0 (`LIBRARY ... shaders: DXC <version> cs_6_0`) | an experiment: what the compiler alone does to the GPU time; see [gpu-av1-decoder.md](gpu-av1-decoder.md#dxc-experiment-2026-11-15). It also has FXC's bytecode and DXC's `-Od` bytecode of every shader, chosen per shader with [`-shaderpick`](#shader-pick--shaderpick-the-dxc-package) |
+| `rav1g-testplayer-dxc-x64-<run-id>` | `0.2.<run number>.4` | the shader-pick build with the default DXIL plus alternate DXC `-Od` and FXC bytecode | compiler diagnostics with [`-shaderpick`](#shader-pick--shaderpick-the-dxc-package) |
 | `rav1g-testplayer-hevcplayback-x64-<run-id>` | `0.2.<run number>.3` | the programs of the default package, byte for byte; the manifest declares the restricted capability `hevcPlayback` | only for the memory the console gives an app with that capability; see [The two memory pools](#the-two-memory-pools-memory-pools-hevcplayback) |
 
 A higher revision installs over a lower one and keeps LocalState; the default package of a later
 run installs over all of them. The log of a launch names its library in a `LIBRARY` line before the
-pipeline states (`LIBRARY rav1g <version>, the Rust host; entropy decoder: clang-cl, full LTO, DLL
-runtime; shaders: FXC cs_5_0`, or `MSVC, /GL`; the DXC package says `shaders: DXC <version> cs_6_0`). Every artifact has the package, the certificate, `SOURCES.txt` (with a
-`Variant:` line), the licences, the build log and `imports/` (the DLLs the programs of the package
-import from, checked against `testing/uwp_imports/player-dlls-allow.txt`: no `kernel32.dll`); the
-shader listings and the survey are in the default artifact only, which also has `rav1g.pdb`.
+pipeline states, including `shaders: DXC <version> cs_6_0`. Every artifact has the package,
+the certificate, `SOURCES.txt`, licences, the build log and the DLL import report. The default
+artifact has `rav1g.pdb` and the default DXIL listings. Revision 4 carries all three compute shader
+listings and the DXBC survey.
 
 Which to use: the default. On the console (2026-11-12, [rust-port.md](rust-port.md), "Console
 results of step 5") both decode the md5 set of 15 clips with matching md5; the build with the C of
@@ -233,17 +231,8 @@ The artifact `rav1g-testplayer-x64-<run-id>` contains:
   emit APPX), any emitted `Dependencies/x64/` framework packages and sideload helpers.
 - `Av1GpuTestPlayer.cer`: this run's public signing certificate.
 - `msbuild.log`: normal-verbosity build/package diagnostics, also uploaded on failure.
-- `cdef-shaders/`: FXC listings of both CDEF shaders (`cdef_filter.asm`,
-  `cdef_filter_v2.asm`) and `stats.txt`, a side-by-side count of what the listings
-  declare; see [CDEF v2 run](#cdef-v2-run--cdefv2).
-- `intra-shaders/`: the same for the intra shaders: the four upstream ones
-  (`intra_main`, `intra_filter` and their `_hbd` builds), `intra_main_opt` and
-  `intra_main_hbd_opt` (the optimised builds of the `intra_main` sources), and `intra_v2`,
-  `intra_v2_hbd`; see [Intra v2 run](#intra-v2-run--intrav2) and
-  [Intra optimisation A/B](#intra-optimisation-ab--intraopt).
-- `shader-survey/`: `survey.md` (and `survey.csv`), one line per shader of the project
-  with the same counts, and `asm/` with the FXC listing of every shader; see
-  [Shader survey](#shader-survey).
+- `shader-survey/asm/` and `shader-survey/build.json`: DXC listings, compiler arguments, and
+  header hashes. `SHADERS.txt` records the bytecode verification against the packaged DLL.
 - `sm6test-shaders/`: DXC's listings of the Shader Model 6 test shaders and the report of
   their build; see [Shader Model 6 test](#shader-model-6-test--sm6test).
 - `SOURCES.txt`: repository commit, fork point, run URL, toolset/SDK and the commits since
@@ -3397,7 +3386,7 @@ set once, which takes the job from about 15 to about 5 minutes.
 | `-lfhsplit 1` | The horizontal loop filter of a plane is no longer one dispatch: first the even rows of blocks (a block is 4 columns by 64 rows), a UAV barrier, then the odd rows. | The first edge of a block reads and writes the last rows of the block above it, which another thread group of the same dispatch filters; the vertical filter is two dispatches for the same reason. By the rules of the loop filter the rows two neighbouring edges write never overlap, and what one reads of the other's it does not use, so the single dispatch should be right; the flag tests that on the device. |
 | `-lfhsplit 2` | Every row of blocks is a dispatch of its own, top to bottom, with a UAV barrier behind each: the order WARP comes closest to. Slower (34 dispatches and barriers per plane at 2160 rows). | The same, with nothing left in parallel between rows of blocks. |
 | `-intraedgefix` | `intra_main.hlsl` (8-bit) stops the taps of the above edge filter at the last entry the filter writes, as `intra_main_hbd.hlsl` and the left edge do, instead of at the last entry that was loaded. | The two shaders differ there. The entries between the two bounds are loaded and all hold the last available sample, so the sums are the same; `testing/intra_check` passes with either bound. The flag tests that on the device. |
-| the **uavsync package** (artifact `rav1g-testplayer-uavsync-x64-<run id>`) | Every group sync of every shader is compiled as `AllMemoryBarrierWithGroupSync()` instead of `GroupMemoryBarrierWithGroupSync()` (an FXC define, no source differs; the library of the package is built from those headers with the `uavsync` feature of the crates). | A group sync of the group memory orders the group memory. Several shaders also store frame buffer words in one step and have another thread of the group load them in a later step (the horizontal loop filter from edge to edge, filter intra before its residuals are added); D3D asks for a sync of all memory for that. |
+| the **uavsync package** (artifact `rav1g-testplayer-uavsync-x64-<run id>`) | Every group sync of every shader is compiled as `AllMemoryBarrierWithGroupSync()` instead of `GroupMemoryBarrierWithGroupSync()` (a DXC define; the library of the package is built from those headers with the `uavsync` feature of the crates). | A group sync of the group memory orders the group memory. Several shaders also store frame buffer words in one step and have another thread of the group load them in a later step (the horizontal loop filter from edge to edge, filter intra before its residuals are added); D3D asks for a sync of all memory for that. |
 
 The uavsync package is the default package (`rav1g.dll`, the C of clang) with these shaders. It
 has the identity of the normal one and version `0.2.<run>.1` where the
@@ -3409,18 +3398,18 @@ it as well.
 
 ### Shader pick (`-shaderpick`, the DXC package)
 
-For finding which shader a device computes differently when DXC compiled it
-([gpu-av1-decoder.md](gpu-av1-decoder.md#dxc-experiment-2026-11-15)). The DXC package
-(`rav1g-testplayer-dxc-x64-<run id>`, the `dxc` feature of the crates) has **three bytecodes of every
-shader**, and the flag says which one the pipeline state of a shader is made of in a launch:
+The revision 4 package (`rav1g-testplayer-dxc-x64-<run id>`, Cargo feature `shader-pick`)
+embeds three sets of compute shaders. Use it to isolate a device-compiler miscompile by
+choosing the bytecode for individual pipeline states. Without the flag, it uses the same
+DXIL as the default package. [DXC experiment](gpu-av1-decoder.md#dxc-experiment-2026-11-15)
 
 | Set | What it is |
 | --- | --- |
 | `dxc` | DXC, `-T cs_6_0`, its default optimisation (`-Od` for `intra_main` and `intra_main_hbd`, as FXC has `/Od` for them): what every shader is without the flag |
 | `od` | DXC with `-Od` for every shader (DXIL as well, with next to nothing folded, merged or reordered by DXC) |
-| `fxc` | the `cs_5_0` bytecode of FXC: byte for byte the shader of the default package, from the same cache entry |
+| `fxc` | FXC's `cs_5_0` bytecode from the same HLSL sources |
 
-A device takes DXBC and DXIL pipeline states side by side, so any mix runs.
+The experiment also requires SM 6.0. It can create DXBC and DXIL pipeline states side by side.
 
 ```text
 -shaderpick fxc=<list>,od=<list>,dxc=<list>
@@ -3434,10 +3423,8 @@ A device takes DXBC and DXIL pipeline states side by side, so any mix runs.
   for everything but one shader, which is the quick way to ask "is this shader alone enough to break
   the output?"; `fxc=loopfilter_vert_hbd` asks "is it the only one?".
 - No spaces inside the pick.
-- A name no shader has, a part that is not `fxc=`, `od=` or `dxc=`, and any pick in a package that is
-  not the DXC package are refused: the player logs `-shaderpick <pick> is not allowed: <reason>` and
-  `No task was run. Bye`, `rav1g-dec` prints `ERROR -shaderpick ...` and ends with exit code 3. Nothing
-  is decoded with other shaders than the line asked for.
+- A nonempty pick requires the shader-pick build. An unknown shader or set is an error.
+  The player logs the reason and ends the launch. `rav1g-dec` reports the error and exits with code 3.
 
 **It holds for the whole launch.** The pipeline states are created once per launch, before the first
 task, so the player takes the flag (and its value) off the task lines before it parses them, as it
@@ -3447,7 +3434,7 @@ program flag (the command line, or `--tool-args` of `testing/conformance/run.py`
 
 ```text
 -shaderpick fxc=loopfilter_vert_hbd
--i /streams/syn_resize-mode.ivf -t 6 -frate -1 -queue_size 4 -nopresent -md5_frame_check
+-i <stream> -t 6 -frate -1 -queue_size 4 -nopresent -md5_frame_check
 ```
 
 **What the log says.** The library writes four lines when it creates the pipeline states (in the
@@ -3459,13 +3446,12 @@ shaders of every set and the names of all but the largest set:
 SHADERSET dxc: DXC 1.9.2602.17 cs_6_0: dxc -nologo -T cs_6_0 -E main -HV 2018 -WX -Wno-ambig-lit-shift; -Od for intra_main, intra_main_hbd
 SHADERSET od: DXC 1.9.2602.17 cs_6_0: dxc -nologo -T cs_6_0 -E main -HV 2018 -WX -Wno-ambig-lit-shift -Od for every shader but intra_v2, intra_v2_hbd (64-bit values at -Od: the bytecode of the set dxc)
 SHADERSET fxc: FXC cs_5_0: fxc /nologo /T cs_5_0 /E main /Vn <name>; /Od for intra_main, intra_main_hbd
-SHADERPICK fxc=loopfilter_vert_hbd,od=cdef_filter_v2: dxc 96 (all others); od 1 (cdef_filter_v2); fxc 1 (loopfilter_vert_hbd)
+SHADERPICK fxc=loopfilter_vert_hbd,od=cdef_filter_v2: dxc 100 (all others); od 1 (cdef_filter_v2); fxc 1 (loopfilter_vert_hbd)
 ```
 
-Without the flag the last line is `SHADERPICK none: dxc 98 (all); od 0; fxc 0`. A pick with many names
+Without the flag the last line is `SHADERPICK none: dxc 102 (all); od 0; fxc 0`. A pick with many names
 goes on in lines that start with `SHADERPICK +`. The player also logs `Shader pick (-shaderpick):
-<pick>` when a task file has the flag. The `LIBRARY` line and `Experiments: shaders dxc` are what they
-are without a pick: they name the build, not the pick.
+<pick>` when a task file has the flag. The `LIBRARY` line and `Experiments: shaders shader-pick` identify the build.
 
 - **`intra_v2` and `intra_v2_hbd` in the set `od`** are the bytecode of the set `dxc`. At `-Od` DXC
   leaves the literals of one `?:` of that source as 64-bit values (its optimisation narrows them), and
@@ -3476,22 +3462,18 @@ are without a pick: they name the build, not the pick.
   the bytecode of the set <set>, <bytes> bytes of bytecode): hr 0x...`, and the launch runs no task.
   (wine's vkd3d refuses the `-Od` DXIL of `gen_pred_blocks` and `gen_pred_blocks_fast`, "invalid value
   self-reference" in its DXIL parser; WARP takes all of them.)
-- **Size.** The library of the DXC package has all three bytecodes of the 98 shaders, about three times
-  the shader bytes of the default one. The default package, the uavsync package and every other build
-  have one bytecode per shader, their headers and their code are what they were, and they refuse the
-  flag.
+- **Size.** Revision 4 embeds three arrays per shader. The default package, the uavsync
+  package and the release DLL embed one DXC array per shader.
 
 In the interface it is `rav1g_set_shader_pick(const char *pick)` of `rav1g.h`, next to the other
 experiment switches (`RAV1G_STATUS_INVALID_PARAM` and `rav1g_last_error` for a pick that is refused);
 it holds for the devices created after the call. `rav1g::switches::set_shader_pick` and
 `shader_pick_lines` in Rust.
 
-**The build.** `testing/shader_cache/shaders.py build --variant dxc --dxc <dxc> --fxc <fxc>` writes the
-three sets: `dx/shaders/h` (DXC), `dx/shaders/h_od` (arrays `<name>_od`), `dx/shaders/h_fxc` (arrays
-`<name>_fxc`, the cache entries of the variant normal by their keys), `shader_sets.txt` (the three
-`SHADERSET` lines) and, with `--listings`, DXC's `-Od` listings in `<listings>/od`. `crates/rav1g-sys`
-with the feature `dxc` compiles all three into the shader table. `shaders.py verify` holds all three
-against the built library.
+**The build.** Pass `--variant shader-pick --dxc <dxc> --fxc <fxc>` to
+`testing/shader_cache/shaders.py build`. It writes `dx/shaders/h`, `h_od` and `h_fxc` and
+records the compiler and arguments of each set in `shader_sets.txt`. Build the library from
+that root with `--features shader-pick`. CI verifies all three sets in the experiment binaries.
 
 **CI** (job `rust-dxc`, every push): the conformance set on WARP with every shader of the set `dxc`,
 then with `-shaderpick fxc=all`, with `-shaderpick od=all` and with a mix of the three; each has to
@@ -3661,7 +3643,7 @@ the vertical filter changed; that is how the cause of the 8-bit mismatch was fou
 
 ## Shader Model 6 test (`-sm6test`)
 
-The decoder's shaders are FXC shaders of Shader Model 5.0 (`cs_5_0`). Whether they could become
+When the feasibility test was added, the decoder used FXC Shader Model 5.0 (`cs_5_0`). Whether they could become
 DXC shaders of Shader Model 6 (wave intrinsics, native 16-bit types) is a question about the
 device: what the console's D3D12 takes in app mode, and how wide its waves are. Two things in
 both players answer it, and neither touches the decoder: the test has its own shaders, root
@@ -3861,35 +3843,16 @@ and reversed, must pass, and every output with one word changed must fail.
 
 ## Shader survey
 
-To pick the next shader to look at, the workflow writes `shader-survey/survey.md` (also
-shown in the run summary) and `survey.csv` from the listings of all shaders, compiled with
-their Release x64 flags: thread group, instruction slots, temp registers, indexable temps
-(count and total size), instructions that touch them, immediate constant buffer entries and
-reads, group shared bytes, barriers (all, and those that wait for the whole group), loops
-and FXC compile time. `shader-survey/asm/` has all listings, and `shader-survey/build.json`
-the cache key, the compile time and the sha256 of the bytecode header of every shader. The
-counts are static and are not a timing.
-
-A listing and the bytecode header the package is built from come from the same FXC call
-(`/Fc` and `/Fh`). The build step then checks two things and writes the result under
-`survey.md` and the two `stats.txt` files: MSBuild ran FXC on no shader of the library, and
-the bytecode of the headers is in the program inside the package, byte for byte
-(`shaders.py verify`; of the 92 arrays the linker drops the ones no pipeline state uses, and
-the line names them).
-
-FXC runs on several shaders at a time (one per logical processor of the runner) and the
-listings are parsed afterwards in name order, so the files do not depend on which compile
-finishes first. A shader's FXC compile time is that of its own FXC process and includes
-contention with the compiles running beside it; for a shader that came from the cache it is
-the time of the run that compiled it. Compare compile times within one run only, and treat
-small differences as noise. A shader that fails to compile still stops the run, with its FXC
-output in the step log, and so does a bit field instruction with a run-time width
-([gpu-av1-decoder.md](gpu-av1-decoder.md#bit-fields-of-width-0-2026-11-12-candidate-fix-not-yet-run-on-the-console)),
-and a listing with a paired read before an overlapping in-place write ([Listings scan](#listings-scan)).
+The default package carries DXIL listings in `shader-survey/asm/` and their compiler report
+in `shader-survey/build.json`. CI verifies the bytecode from those compiles in the packaged
+DLL. The shader-pick package carries listings for all three sets in `dxc-shaders/`. Its
+`shader-survey/survey.md`, `survey.csv`, and the CDEF and intra counts describe its FXC
+listings. The counts include instruction slots, registers, group memory, barriers and loops.
+They describe static code size and structure.
 
 ### Listings scan
 
-After the survey the workflow reads the listings of both variants with
+After the FXC survey the workflow reads the experiment package’s FXC listings with
 `testing/dxbc_scan/scan.py` and stops when it finds the pair of instructions that the console's
 driver compiled wrongly in the 8-bit vertical loop filter
 ([gpu-av1-decoder.md](gpu-av1-decoder.md#a-paired-read-before-an-overlapping-in-place-write-2026-11-12)):
@@ -3906,7 +3869,7 @@ driver compiled wrongly in the 8-bit vertical loop filter
 
 ```sh
 python3 testing/dxbc_scan/scan.py --self-test
-python3 testing/dxbc_scan/scan.py --listings shader-survey/asm --out listing-scan.txt
+uv run python testing/dxbc_scan/scan.py --listings dxc-shaders/asm/fxc --out listing-scan.txt
 ```
 
 The step log names every pair with its shader, the line of the listing and both instructions; the
@@ -3926,41 +3889,23 @@ line that matches no pair any more is an error.
 
 ### Shader cache of the workflow
 
-FXC takes about 40 s for the shaders on the four processors of a runner, and MSBuild, which
-compiled them while the decoder was an MSBuild library, ran it on one shader at a time: a workflow
-run compiled every shader five times. Now a shader is compiled once per variant (normal and uavsync),
-and not at all when an earlier run has compiled the same thing (`.github/actions/shaders`,
-`testing/shader_cache/shaders.py`). The shaders are the `.hlsl` files of `libav1/dx/shaders`.
+The action in `.github/actions/shaders` runs `testing/shader_cache/shaders.py` for the
+`.hlsl` files of `libav1/dx/shaders`. The default and uavsync variants use DXC alone.
+The shader-pick variant also calls FXC for the diagnostic set.
 
-Measured on the player job: before the cache 3:42 for the job (run 43141191340); with a cold cache
-the shader step took 42 s for both variants (run 43150569680); with a warm cache 5 s, the package
-build 70 s and the whole job 2:18 (run 43153397292). How it works:
+- Each cache key covers the compiler and its libraries, the compiler options, and the
+  shader source and transitive includes.
+- A cache entry holds the generated header, the listing, and the compiler messages.
+  The action stores the set of entries under a key specific to the variant.
+- `RAV1G_SHADER_DIR` points to the build root with `dx/shaders/h` and `shader_set.txt`.
+  The latter records the DXC version and profile. The Linux cross-build in CI uses the
+  same generated DXIL as the Windows builds.
 
-- **Key of a shader**: sha256 over the FXC binaries (`fxc.exe` and the `d3dcompiler` DLL
-  beside it), the arguments that decide the output (`/T cs_5_0 /E main /Vn <name>`, `/Od`
-  for the two shaders the project builds without optimization, the define of the uavsync
-  variant), the source file and every file it includes, directly or not.
-- **Cache entry**: the header (`/Fh`) and the listing (`/Fc`) of one FXC call, and what FXC
-  printed (warnings are shown again when the entry is used).
-- **Actions cache**: the directory of entries is saved under the digest of all keys
-  (`rav1g-shaders-v1-<digest>`). A run with another digest starts from the newest saved
-  directory, compiles the shaders whose keys are not in it, on four at a time, drops the
-  entries it did not use and saves the directory under its own digest. So a change to one
-  shader compiles that shader, a change to `inter_common.h` the 42 that include it, and a
-  change to none compiles nothing.
-- **The builds**: the Rust library gets `RAV1G_SHADER_DIR=<directory>`
-  (`crates/rav1g-sys/shader_table.c` includes `dx/shaders/h/<name>.h` from it); nothing else compiles
-  a shader of the decoder, and a build without the variable stops and says so.
-- Every job that builds a program runs the step or takes its headers as an artifact; they have the
-  same keys, so the packages and `rav1g-dec` get the same bytecode, and so does `warp_decoder` of the
-  C++ decoder in the `cpp-reference` job for as long as the shaders of the two branches are the same.
-
-To run it by hand (any FXC; `--jobs` defaults to the processor count):
+Build the default shader headers and decoder on Windows:
 
 ```bat
-python testing\shader_cache\shaders.py build --fxc "<path>\fxc.exe" --cache shader-cache ^
-  --variant normal --root shader-build\normal --listings shader-build\normal\asm ^
-  --report shader-build\normal\report.json
+uv run python testing\shader_cache\shaders.py build --dxc "<path>\dxc.exe" --cache shader-cache ^
+  --root shader-build\normal --listings shader-build\normal\asm --report shader-build\normal\report.json
 set RAV1G_SHADER_DIR=%CD%\shader-build\normal
-cargo build --release
+cargo build --release --locked
 ```

@@ -78,6 +78,13 @@ output fence. Nothing has to be reset between streams.
 - **Create it early, once.** `rav1g_device_create` compiles the pipeline states (on threads, while the
   call returns); `rav1g_decoder_create` waits for them. Creating the device when the first AV1 stream
   is opened puts that wait in front of the first frame; at the start of the app it is gone by then.
+- **Shader Model 6.0 is required.** `rav1g_device_create` asks the D3D12 device for
+  `D3D12_FEATURE_SHADER_MODEL` before setting up the queue or compute pipelines. If the device
+  reports a lower model or the query fails, the call returns null. Read `rav1g_last_error()` on the
+  same thread for the reason and select another decoder. The Rust API reports `ErrorCode::Incapable`
+  (`RAV1G_STATUS_INCAPABLE` in the C enum). The pointer-returning C call has no status return value.
+  The default shaders require no wave intrinsics, native 16-bit operations, or optional typed UAV
+  loads. This check applies to both application-supplied and decoder-created devices.
 - **The output fence is the decoder's.** A new decoder has a new fence: open it on the D3D11 device
   again (`rav1g_decoder_output_fence`, `CreateSharedHandle`, `OpenSharedFence`), and close the handle
   of the old one.
@@ -120,7 +127,7 @@ every job of a push, and when all have passed the job `release` publishes a GitH
 
 | File | What |
 | --- | --- |
-| `rav1g.dll` | the library of the default package: the build the console runs (the C of clang, linked by lld-link, the app runtime, FXC `cs_5_0` shaders) |
+| `rav1g.dll` | the library of the default package (the C of clang, linked by lld-link, the app runtime, DXC `cs_6_0` shaders) |
 | `rav1g.dll.lib`, `rav1g.pdb` | its import library and its symbols |
 | `rav1g.h` | the interface it was built with (`RAV1G_ABI_VERSION`) |
 | `rav1g-licenses.zip` | the licences a redistribution carries: rav1g (BSD-2-Clause), AOM's patent licence, rav1d, the notices of the linked crates |

@@ -235,11 +235,11 @@ const rav1g_shader_bytecode *rav1g_shader_table(unsigned int *count) {
 }
 
 #ifdef RAV1G_SHADER_SETS
-/* The DXC experiment (the feature dxc; docs/test-player.md, "Shader pick"): two more bytecodes of every
+/* The shader-pick experiment (docs/test-player.md, "Shader pick"): two more bytecodes of every
  * shader of the table, for the library to choose from per shader when it creates its pipeline states.
  * rav1g_shader_sets.inc is written by build.rs from the table above: the headers of dx/shaders/h_od (DXC
  * with -Od, the arrays <name>_od) and of dx/shaders/h_fxc (FXC's cs_5_0 bytecode, <name>_fxc) of the build
- * of the variant dxc, the tables rav1g_shaders_od and rav1g_shaders_fxc in the order of rav1g_shaders,
+ * of the variant shader-pick, the tables rav1g_shaders_od and rav1g_shaders_fxc in the order of rav1g_shaders,
  * and rav1g_shader_table_set (set 0: the table above, 1: od, 2: fxc). */
 #include "rav1g_shader_sets.inc"
 #endif

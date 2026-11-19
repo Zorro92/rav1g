@@ -968,6 +968,9 @@ formats. DXIL signed by DXC 1.9 is accepted.
 
 ### DXC experiment (2026-11-15)
 
+This section records the experiment before DXC became the default on `main`.
+[Current shader-pick package](test-player.md#shader-pick--shaderpick-the-dxc-package)
+
 Before any shader is written for Shader Model 6, one question can be answered without touching a
 source: what does the compiler alone do to the GPU time? The **DXC package** is the default package
 with the same HLSL sources compiled by DXC for Shader Model 6.0 (DXIL) instead of by FXC for `cs_5_0`

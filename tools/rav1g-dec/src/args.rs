@@ -339,10 +339,9 @@ pub fn usage() {
     );
     say!("                        line per shader (docs/test-player.md); needs no stream: without -i and -list the");
     say!("                        program ends after the test");
-    say!("  -shaderpick <pick>    the build with the feature dxc (the DXC experiment), which has three bytecodes of");
-    say!("                        every shader: fxc=<list>,od=<list>,dxc=<list> says which one the pipeline state of");
-    say!("                        a shader is made of in this run. dxc: DXC's default optimisation (every shader,");
-    say!("                        without the flag); od: DXC with -Od; fxc: the cs_5_0 bytecode of FXC. A list is");
+    say!("  -shaderpick <pick>    the shader-pick build takes fxc=<list>,od=<list>,dxc=<list> to choose pipeline");
+    say!("                        bytecode per shader. dxc: the default DXC build; od: DXC with -Od; fxc: FXC cs_5_0.");
+    say!("                        Without the flag every shader uses the dxc set. A list is");
     say!("                        shader names separated by commas, 'all', or names with '*'; a later part overrides");
     say!("                        an earlier one (fxc=all,dxc=loopfilter_vert_hbd). 'SHADERSET ...' and 'SHADERPICK");
     say!("                        ...' lines say what was taken (docs/test-player.md, \"Shader pick\")");
