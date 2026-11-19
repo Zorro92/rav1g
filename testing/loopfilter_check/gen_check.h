@@ -137,8 +137,22 @@ void check_generators() {
     const ModeGrid mi = random_grid(mi_cols, mi_rows, trial);
     for (uint plane = 0; plane < 3; ++plane) {
       const GenDispatch d = gen_dispatch(mi, mi_cols, mi_rows, plane, trial);
-      compare_lists(d, false, types[0]);
-      compare_lists(d, true, types[1]);
+      const EdgeLists vertical = compare_lists(d, false, types[0]);
+      const EdgeLists horizontal = compare_lists(d, true, types[1]);
+      if (trial % 6 == 0) {
+        for (int depth : {8, 10}) {
+          Image image(4 * d.mi_cols - 1, 4 * d.mi_rows - 3, depth);
+          const int scale = 1 << (depth - 8);
+          for (int y = 0; y < int(4 * d.mi_rows); ++y) {
+            for (int x = 0; x < int(4 * d.mi_cols); ++x) {
+              image.set(x, y, (64 + (x / 4 + y / 4) % 105) * scale + rng() % (2 * scale));
+            }
+          }
+          const int sharpness = trial / 6 % 8;
+          const Image after_vertical = compare_vertical(image, vertical, sharpness, plane, false);
+          compare_horizontal(after_vertical, horizontal, sharpness, plane, 0, false);
+        }
+      }
     }
   }
   if (types[0] != 15 || types[1] != 15) {
@@ -146,4 +160,5 @@ void check_generators() {
     std::exit(1);
   }
   std::puts("PASS: vertical and horizontal edge lists, 72 randomized mode grids across all planes and delta modes");
+  std::puts("PASS: 72 generated plane cases through both vertical passes and the whole-plane horizontal pass");
 }

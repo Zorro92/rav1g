@@ -17,6 +17,10 @@ struct FilterKernel {
   void (*entry)(int, void *);
 };
 
+extern const FilterKernel loopfilter_vert;
+extern const FilterKernel loopfilter_vert_legacy;
+extern const FilterKernel loopfilter_hor;
+extern const FilterKernel loopfilter_hor_legacy;
 extern const FilterKernel loopfilter_vert_hbd;
 extern const FilterKernel loopfilter_vert_hbd_legacy;
 extern const FilterKernel loopfilter_hor_hbd;

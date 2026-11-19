@@ -84,6 +84,8 @@ typedef unsigned char BYTE; /* the type of the bytecode arrays */
 #include "dx/shaders/h/reconstruct_block.h"
 #include "dx/shaders/h/loopfilter_vert.h"
 #include "dx/shaders/h/loopfilter_hor.h"
+#include "dx/shaders/h/loopfilter_vert_legacy.h"
+#include "dx/shaders/h/loopfilter_hor_legacy.h"
 #include "dx/shaders/h/inter_compound_2x2_hbd.h"
 #include "dx/shaders/h/inter_2x2chroma_hbd.h"
 #include "dx/shaders/h/inter_compound_diff_chroma_hbd.h"
@@ -193,6 +195,8 @@ static const rav1g_shader_bytecode rav1g_shaders[] = {
   RAV1G_SHADER(reconstruct_block),
   RAV1G_SHADER(loopfilter_vert),
   RAV1G_SHADER(loopfilter_hor),
+  RAV1G_SHADER(loopfilter_vert_legacy),
+  RAV1G_SHADER(loopfilter_hor_legacy),
   RAV1G_SHADER(inter_compound_2x2_hbd),
   RAV1G_SHADER(inter_2x2chroma_hbd),
   RAV1G_SHADER(inter_compound_diff_chroma_hbd),

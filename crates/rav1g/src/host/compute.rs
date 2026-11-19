@@ -157,7 +157,7 @@ const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
     // 20 transforms, 26 shaders that do not depend on the bit depth, 30 that do for 8 bits and for more.
-    assert!(SHADERS == 20 + 30 + 2 * 30);
+    assert!(SHADERS == 20 + 28 + 2 * 32);
     assert!(LAYOUTS == 24);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
@@ -404,6 +404,8 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("reconstruct_block", &layouts.intra_pred, &raw mut (*lib).shaders_8bit.reconstruct_block),
             ("loopfilter_vert", &layouts.lf, &raw mut (*lib).shaders_8bit.loopfilter_v),
             ("loopfilter_hor", &layouts.lf, &raw mut (*lib).shaders_8bit.loopfilter_h),
+            ("loopfilter_vert_legacy", &layouts.lf, &raw mut (*lib).shaders_8bit.loopfilter_v_legacy),
+            ("loopfilter_hor_legacy", &layouts.lf, &raw mut (*lib).shaders_8bit.loopfilter_h_legacy),
             ("inter_compound_2x2_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_comp_2x2),
             ("inter_2x2chroma_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_2x2),
             ("inter_compound_diff_chroma_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_comp_diff_uv),
@@ -421,9 +423,9 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("inter_ext_borders_hbd", &layouts.common0110, &raw mut (*lib).shaders_hbd.inter_ext_borders),
             ("reconstruct_block_hbd", &layouts.intra_pred, &raw mut (*lib).shaders_hbd.reconstruct_block),
             ("loopfilter_vert_hbd", &layouts.lf, &raw mut (*lib).shaders_hbd.loopfilter_v),
-            ("loopfilter_vert_hbd_legacy", &layouts.lf, &raw mut (*lib).shader_lf_vert_hbd_legacy),
+            ("loopfilter_vert_hbd_legacy", &layouts.lf, &raw mut (*lib).shaders_hbd.loopfilter_v_legacy),
             ("loopfilter_hor_hbd", &layouts.lf, &raw mut (*lib).shaders_hbd.loopfilter_h),
-            ("loopfilter_hor_hbd_legacy", &layouts.lf, &raw mut (*lib).shader_lf_hor_hbd_legacy),
+            ("loopfilter_hor_hbd_legacy", &layouts.lf, &raw mut (*lib).shaders_hbd.loopfilter_h_legacy),
             ("inter_scale", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_scale),
             ("inter_scale_2x2chroma", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_scale_2x2),
             ("inter_scale_compound", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_scale_comp),
@@ -892,7 +894,7 @@ mod tests {
             .filter_map(|line| line.trim().trim_start_matches('(').strip_prefix('"'))
             .map(|rest| &rest[..rest.find('"').unwrap()])
             .collect();
-        assert_eq!(names.len(), 106);
+        assert_eq!(names.len(), 108);
         let mut unique = names.clone();
         unique.sort_unstable();
         unique.dedup();

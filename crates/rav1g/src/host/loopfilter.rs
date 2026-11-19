@@ -257,8 +257,8 @@ pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: 
         }
 
         // The inline constants of the filters: wicount, plane, offset_base, block_cols, block_id_offset.
-        let shader = pipeline(if lf_legacy && td.bitdepth > 8 {
-            &raw const (*lib).shader_lf_vert_hbd_legacy
+        let shader = pipeline(if lf_legacy {
+            &raw const (*td.shaders).loopfilter_v_legacy
         } else {
             &raw const (*td.shaders).loopfilter_v
         });
@@ -286,14 +286,19 @@ pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: 
         perf_gpu_mark(dec, AV1_PERF_GPU_LF_VERT);
         stage_dump_fb(dec, c"lf_vert", td.frame_buffer, std::ptr::null());
 
-        let horizontal_hbd = td.bitdepth > 8;
-        commands.set_pipeline(pipeline(if lf_legacy && horizontal_hbd {
-            &raw const (*lib).shader_lf_hor_hbd_legacy
+        commands.set_pipeline(pipeline(if lf_legacy {
+            &raw const (*td.shaders).loopfilter_h_legacy
         } else {
             &raw const (*td.shaders).loopfilter_h
         }));
-        // The new 10-bit kernel has one thread per packed word (two columns).
-        let threads_per_strip = if horizontal_hbd && !lf_legacy { 2 } else { 4 };
+        // One thread per word in the new shaders, one per sample in the originals.
+        let threads_per_strip = if lf_legacy {
+            4
+        } else if td.bitdepth > 8 {
+            2
+        } else {
+            1
+        };
         let lf_h_split = LF_H_SPLIT.load(Ordering::Relaxed);
         if lf_h_split == 0 {
             for p in (0..3).filter(|&p| filtered(p)) {

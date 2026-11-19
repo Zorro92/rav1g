@@ -102,7 +102,10 @@ void dispatch(const Kernel &kernel, const Dispatch &d, bool shuffle) {
   }
 }
 
-void compare_vertical(Image initial, const EdgeLists &edges, int sharpness, uint plane) {
+Image compare_vertical(const Image &initial, const EdgeLists &edges, int sharpness, uint plane,
+                       bool expect_change = true) {
+  const FilterKernel &old = initial.depth == 8 ? loopfilter_vert_legacy : loopfilter_vert_hbd_legacy;
+  const FilterKernel &now = initial.depth == 8 ? loopfilter_vert : loopfilter_vert_hbd;
   Image reference = initial;
   Image candidate = initial;
   auto old_dispatch = make_dispatch(reference, edges, sharpness, plane);
@@ -110,16 +113,17 @@ void compare_vertical(Image initial, const EdgeLists &edges, int sharpness, uint
   for (uint parity = 0; parity < 2; ++parity) {
     old_dispatch.work_items = new_dispatch.work_items = (edges.blocks() + 1 - parity) / 2 * 4;
     old_dispatch.block_offset = new_dispatch.block_offset = parity;
-    dispatch(loopfilter_vert_hbd_legacy, old_dispatch, false);
+    dispatch(old, old_dispatch, false);
     std::vector<WordAccess> ownership(candidate.words.size());
     new_dispatch.frame.access = ownership.data();
-    dispatch(loopfilter_vert_hbd, new_dispatch, true);
+    dispatch(now, new_dispatch, true);
     fail(parity == 0 ? "vertical even" : "vertical odd", reference, candidate);
   }
-  if (reference.words == initial.words) {
+  if (expect_change && reference.words == initial.words) {
     std::fprintf(stderr, "FAIL: vertical fixture made no changes\n");
     std::exit(1);
   }
+  return candidate;
 }
 
 // The modes of -lfhsplit: whole plane, even rows then odd rows, and rows in order.
@@ -141,13 +145,16 @@ void run_horizontal(const FilterKernel &kernel, Image &image, const EdgeLists &e
   }
 }
 
-void compare_horizontal(const Image &initial, const EdgeLists &edges, int sharpness, uint plane, int mode) {
+void compare_horizontal(const Image &initial, const EdgeLists &edges, int sharpness, uint plane, int mode,
+                        bool expect_change = true) {
+  const FilterKernel &old = initial.depth == 8 ? loopfilter_hor_legacy : loopfilter_hor_hbd_legacy;
+  const FilterKernel &now = initial.depth == 8 ? loopfilter_hor : loopfilter_hor_hbd;
   Image reference = initial;
   Image candidate = initial;
-  run_horizontal(loopfilter_hor_hbd_legacy, reference, edges, sharpness, plane, mode, 4, false);
-  run_horizontal(loopfilter_hor_hbd, candidate, edges, sharpness, plane, mode, 2, true);
+  run_horizontal(old, reference, edges, sharpness, plane, mode, 4, false);
+  run_horizontal(now, candidate, edges, sharpness, plane, mode, initial.bytes, true);
   fail("horizontal", reference, candidate);
-  if (reference.words == initial.words) {
+  if (expect_change && reference.words == initial.words) {
     std::fprintf(stderr, "FAIL: horizontal fixture made no changes\n");
     std::exit(1);
   }
@@ -231,7 +238,7 @@ void vertical_random(int depth, int trial) {
   // The unfiltered frame remains an effective oracle on the busiest random-noise trials
   // because this strip contains deliberately smooth adjacent edges.
   for (int x = 0; x < 16; ++x) {
-    for (int y = 0; y < 4; ++y) frame.set(x, y, (100 + x / 4) * scale);
+    for (int y = 0; y < 4; ++y) frame.set(x, y, (100 + x / 4 * 7) * scale);
   }
   std::fill_n(edges.words.begin() + kListBase * 8, 8, 0);
   edges.set(0, 0, 1, 0, 0);
@@ -293,13 +300,15 @@ void horizontal_random(int depth, int trial) {
 int main() {
   gs_state.track_unwritten = true;
   check_generators();
-  for (bool horizontal : {false, true}) {
-    for (int sharpness = 0; sharpness < 8; ++sharpness) filter_thresholds(10, sharpness, horizontal);
+  for (int depth : {8, 10}) {
+    for (bool horizontal : {false, true}) {
+      for (int sharpness = 0; sharpness < 8; ++sharpness) filter_thresholds(depth, sharpness, horizontal);
+    }
+    for (int trial = 0; trial < 48; ++trial) {
+      vertical_random(depth, trial);
+      horizontal_random(depth, trial);
+    }
+    std::printf("PASS: %d-bit vertical even/odd and all horizontal schedules, all levels, sharpness and lengths\n", depth);
+    std::puts("PASS: 48 randomized frames per direction with complete-word ownership");
   }
-  for (int trial = 0; trial < 48; ++trial) {
-    vertical_random(10, trial);
-    horizontal_random(10, trial);
-  }
-  std::puts("PASS: vertical even/odd and all horizontal schedules, 10-bit, all levels, sharpness settings and lengths");
-  std::puts("PASS: 48 randomized frames per direction with complete-word ownership");
 }

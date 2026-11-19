@@ -45,11 +45,12 @@ INTRA_MAIN = ['intra_main', 'intra_main_hbd']
 # The -intraod comparison kernels are built without optimization in the default set.
 UNOPTIMIZED = [name + '_legacy' for name in INTRA_MAIN]
 
-# Verify both implementations of CDEF and all the intra variants in the built binary.
+# Verify the selectable CDEF, intra and deblocking variants in the built binary.
 REQUIRED_BYTECODE = [
     'cdef_filter', 'cdef_filter_v2', *INTRA_MAIN, *UNOPTIMIZED,
     'intra_filter', 'intra_filter_hbd', 'intra_v2', 'intra_v2_hbd',
     'gen_lf_blocks_vert', 'gen_lf_blocks_hor', 'gen_lf_blocks_vert_legacy', 'gen_lf_blocks_hor_legacy',
+    'loopfilter_vert', 'loopfilter_vert_legacy', 'loopfilter_hor', 'loopfilter_hor_legacy',
     'loopfilter_vert_hbd', 'loopfilter_vert_hbd_legacy', 'loopfilter_hor_hbd', 'loopfilter_hor_hbd_legacy',
 ]
 
