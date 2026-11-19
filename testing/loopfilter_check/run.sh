@@ -16,6 +16,7 @@ translate() {
     -e 's/: *SV_[A-Za-z]+//g' \
     -e 's/: *register\([a-z0-9]+\)//g' \
     -e 's/^cbuffer +[A-Za-z_0-9]+ *\{/namespace {/' \
+    -e 's/inout ([A-Za-z_0-9]+) /\1 \&/g' \
     -e 's/void main\(/void shader_main(/' \
     -e 's/uint inter_tx_size\[4\]\)/const uint inter_tx_size[4])/' \
     -e 's/pixels\.yz/uint2(pixels.y, pixels.z)/g' \
@@ -35,7 +36,7 @@ link_and_run() {
 }
 
 { printf '#pragma once\n'; cat "$shaders/mode_info.h"; } > "$work/mode_info.h"
-for source in "$shaders"/loopfilter_*.h "$shaders"/loopfilter_vert_hbd*.hlsl "$shaders"/gen_lf_blocks*; do
+for source in "$shaders"/loopfilter_*.h "$shaders"/loopfilter_*_hbd*.hlsl "$shaders"/gen_lf_blocks*; do
   translate "$source" > "$work/${source##*/}"
 done
 "$cxx" -std=c++20 -O2 -fwrapv -I"$work" -c "$here/loopfilter_check.cpp" -o "$work/check.o"
@@ -43,8 +44,10 @@ for direction in vert hor; do
   build "gen_lf_blocks_$direction" -DGEN_SHADER
   build "gen_lf_blocks_${direction}_legacy" -DGEN_SHADER
 done
-build loopfilter_vert_hbd_legacy
-build loopfilter_vert_hbd
+for direction in vert hor; do
+  build "loopfilter_${direction}_hbd_legacy"
+  build "loopfilter_${direction}_hbd"
+done
 link_and_run
 
 if [ "${1:-}" = "--mutate" ]; then
@@ -60,6 +63,20 @@ if [ "${1:-}" = "--mutate" ]; then
   echo "PASS: rejected the preceding-MI mutation"
   mv "$work/gen_lf_blocks.ref" "$work/gen_lf_blocks.h"
   build gen_lf_blocks_vert -DGEN_SHADER
+
+  cp "$work/loopfilter_hor_main.h" "$work/loopfilter_hor_main.ref"
+  sed -i 's/dst_frame.Store(offset + stride, out_q0.y);/dst_frame.Store(offset + stride, out_q0.x);/' \
+    "$work/loopfilter_hor_main.h"
+  build loopfilter_hor_hbd
+  if link_and_run > "$work/mutant.log" 2>&1 || ! grep -q '^FAIL: horizontal' "$work/mutant.log"; then
+    cat "$work/mutant.log" >&2
+    echo "The horizontal check failed to reject an incorrectly packed row" >&2
+    exit 1
+  fi
+  cat "$work/mutant.log"
+  echo "PASS: rejected the horizontal row-pack mutation"
+  mv "$work/loopfilter_hor_main.ref" "$work/loopfilter_hor_main.h"
+  build loopfilter_hor_hbd
 
   sed -i 's/remaining &= remaining - 1;/remaining \&= remaining - 1; remaining \&= remaining - 1;/' "$work/loopfilter_vert_main.h"
   build loopfilter_vert_hbd

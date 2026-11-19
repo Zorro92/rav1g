@@ -45,6 +45,10 @@ struct EdgeLists {
 
   uint blocks() const { return block_cols * block_rows; }
 
+  uint block_id(bool horizontal, uint strip, uint across) const {
+    return horizontal ? strip * block_cols + across : across * block_cols + strip;
+  }
+
   void set(uint block, uint pos, uint step, uint type, uint level) {
     const uint edge = (step << 8) | (type << 6) | level;
     words[(kListBase + block) * 8 + pos / 2] |= edge << (16 * (pos & 1));
@@ -107,6 +111,8 @@ void compare_vertical(Image initial, const EdgeLists &edges, int sharpness, uint
     old_dispatch.work_items = new_dispatch.work_items = (edges.blocks() + 1 - parity) / 2 * 4;
     old_dispatch.block_offset = new_dispatch.block_offset = parity;
     dispatch(loopfilter_vert_hbd_legacy, old_dispatch, false);
+    std::vector<WordAccess> ownership(candidate.words.size());
+    new_dispatch.frame.access = ownership.data();
     dispatch(loopfilter_vert_hbd, new_dispatch, true);
     fail(parity == 0 ? "vertical even" : "vertical odd", reference, candidate);
   }
@@ -116,38 +122,80 @@ void compare_vertical(Image initial, const EdgeLists &edges, int sharpness, uint
   }
 }
 
-// A block row per level and a separate four-pixel row for each kind of neighborhood.
-// Put all lengths into each strip and include the first edge at interior block boundaries.
-void vertical_thresholds(int depth, int sharpness) {
-  Image frame(189, 64 * 4, depth);
-  EdgeLists edges((frame.width + 3) / 4, frame.height / 4, false);
+// The modes of -lfhsplit: whole plane, even rows then odd rows, and rows in order.
+void run_horizontal(const FilterKernel &kernel, Image &image, const EdgeLists &edges, int sharpness,
+                    uint plane, int mode, uint threads_per_strip, bool candidate) {
+  auto d = make_dispatch(image, edges, sharpness, plane);
+  const int passes = mode == 0 ? 1 : mode == 1 ? 2 : edges.block_rows;
+  const int step = mode == 1 ? 2 : edges.block_rows;
+  std::vector<WordAccess> ownership(candidate ? image.words.size() : 0);
+  d.frame.access = candidate ? ownership.data() : nullptr;
+
+  for (int pass = 0; pass < passes; ++pass) {
+    for (int row = pass; row < edges.block_rows; row += step) {
+      d.work_items = (mode == 0 ? edges.blocks() : edges.block_cols) * threads_per_strip;
+      d.block_offset = row * edges.block_cols;
+      std::fill(ownership.begin(), ownership.end(), WordAccess{});
+      dispatch(kernel, d, candidate);
+    }
+  }
+}
+
+void compare_horizontal(const Image &initial, const EdgeLists &edges, int sharpness, uint plane, int mode) {
+  Image reference = initial;
+  Image candidate = initial;
+  run_horizontal(loopfilter_hor_hbd_legacy, reference, edges, sharpness, plane, mode, 4, false);
+  run_horizontal(loopfilter_hor_hbd, candidate, edges, sharpness, plane, mode, 2, true);
+  fail("horizontal", reference, candidate);
+  if (reference.words == initial.words) {
+    std::fprintf(stderr, "FAIL: horizontal fixture made no changes\n");
+    std::exit(1);
+  }
+}
+
+void set_sample(Image &frame, bool horizontal, int along, int across, uint value) {
+  if (horizontal) {
+    frame.set(across, along, value);
+  } else {
+    frame.set(along, across, value);
+  }
+}
+
+// A row or column of blocks per level, with all four lengths in each 64-sample strip.
+// Include enabled internal strip edges and sample cases with flat, partial and failed masks.
+void filter_thresholds(int depth, int sharpness, bool horizontal) {
+  constexpr int length = 189, breadth = 64 * 4;
+  Image frame(horizontal ? breadth : length, horizontal ? length : breadth, depth);
+  EdgeLists edges((frame.width + 3) / 4, (frame.height + 3) / 4, horizontal);
   const int scale = 1 << (depth - 8);
+  const int units = (length + 3) / 4;
   for (int level = 0; level < 64; ++level) {
-    for (int block_x = 0; block_x < edges.block_cols; ++block_x) {
-      const int block = level * edges.block_cols + block_x;
-      const int limit = std::min(kStrip, (frame.width + 3) / 4 - block_x * kStrip);
-      if (block_x == 0) {
-        edges.set(block, 0, 2, 0, 0);
-      } else {
-        edges.set(block, 0, 2, 2, level);
-      }
-      for (int pos = 2; pos < limit; pos += 4) {
-        edges.set(block, pos, 4, pos / 4, level);
+    for (int strip = 0; strip * kStrip < units; ++strip) {
+      const uint block = edges.block_id(horizontal, strip, level);
+      const int limit = std::min(kStrip, units - strip * kStrip);
+      for (int pos = 0; pos < limit; pos += (pos & 3) == 2 ? 2 : 1) {
+        const int type = pos / 4;
+        uint enabled = (pos & 3) == 1 || (strip > 0 && pos == 0);
+        edges.set(block, pos, (pos & 3) == 2 ? 2 : 1, type, enabled ? level : 0);
       }
     }
-    for (int row = 0; row < 4; ++row) {
-      for (int x = 0; x < (frame.width + 3) / 4 * 4; ++x) {
-        const int along = (x + 8) % 16;
-        const int base = (level * 29 + x / 16 * 3) % 211 + 20;
-        int value = base * scale + (along >= 8 ? 3 * scale : 0);
-        if (row == 1 && (along == 3 || along == 13)) value += 2 * scale;
-        if (row == 2 && (along == 5 || along == 11)) value += 2 * scale;
-        if (row == 3) value += int(rng() % (12 * scale)) - 6 * scale;
-        frame.set(x, level * 4 + row, value);
+    for (int across = 0; across < 4; ++across) {
+      for (int along = 0; along < units * 4; ++along) {
+        const int rel = (along + 4) % 16;
+        const int base = (level * 29 + (along + 4) / 16 * 3) % 211 + 20;
+        int value = base * scale + (rel >= 8 ? 3 * scale : 0);
+        if (across == 1 && (rel == 3 || rel == 13)) value += 2 * scale;
+        if (across == 2 && (rel == 5 || rel == 10)) value += 2 * scale;
+        if (across == 3) value += int(rng() % (12 * scale)) - 6 * scale;
+        set_sample(frame, horizontal, along, level * 4 + across, value);
       }
     }
   }
-  compare_vertical(frame, edges, sharpness, sharpness % 3);
+  if (horizontal) {
+    compare_horizontal(frame, edges, sharpness, sharpness % 3, sharpness % 3);
+  } else {
+    compare_vertical(frame, edges, sharpness, sharpness % 3);
+  }
 }
 
 // Mix transform walks, zero levels, holes, tail lanes and partial blocks. Each run also
@@ -191,13 +239,67 @@ void vertical_random(int depth, int trial) {
   edges.set(0, 2, 1, 2, 63);
   compare_vertical(frame, edges, trial % 8, trial % 3);
 }
+// Adjacent edges are limited by the smaller transform on either side. Use that rule
+// across vertical strip boundaries as well, so whole-plane dispatch has no cross-strip
+// pixel dependency regardless of the order in which thread groups run.
+void horizontal_random(int depth, int trial) {
+  Image frame(65 + rng() % 127, 129 + rng() % 109, depth);
+  const int mi_cols = (frame.width + 3) / 4, mi_rows = (frame.height + 3) / 4;
+  const int scale = 1 << (depth - 8);
+  EdgeLists edges(mi_cols, mi_rows, true);
+  const uint plane = trial % 3;
+
+  for (int x = 0; x < mi_cols * 4; ++x) {
+    for (int y = 0; y < mi_rows * 4; ++y) {
+      const int base = 70 + (x / 4 * 7 + y / 4) % 110;
+      const uint sample = trial % 4 == 0 ? rng() % (256 * scale) : base * scale + rng() % (3 * scale);
+      frame.set(x, y, sample);
+    }
+  }
+
+  for (int col = 0; col < edges.block_cols; ++col) {
+    int prev_step = 0;
+    for (int by = 0; by < edges.block_rows; ++by) {
+      const int end = std::min(kStrip, mi_rows - by * kStrip);
+      const int stop = trial % 5 == 0 ? rng() % (end + 1) : end;
+      for (int pos = 0; pos < stop;) {
+        int step = 1 << (rng() % 5);
+        while (pos & (step - 1)) step >>= 1;
+        const uint level = prev_step == 0 || rng() % 4 == 0 ? 0 : 1 + rng() % 63;
+        const int size = std::min(prev_step, step);
+        const int type = size <= 1 ? 0 : plane ? 1 : size == 2 ? 2 : 3;
+        edges.set(edges.block_id(true, by, col), pos, step, type, level);
+        prev_step = step;
+        pos += step;
+      }
+    }
+  }
+
+  // Guarantee that a small near-flat patch changes even on trials with a noisy picture.
+  const uint block = edges.block_id(true, 0, 0);
+  std::fill_n(edges.words.begin() + (kListBase + block) * 8, 8, 0);
+  edges.set(block, 0, 1, 0, 0);
+  edges.set(block, 1, 1, 0, 31);
+  edges.set(block, 2, 1, 0, 63);
+  for (int x = 0; x < 4; ++x) {
+    for (int y = 0; y < 16; ++y) frame.set(x, y, (100 + y / 4 * 3) * scale);
+  }
+  compare_horizontal(frame, edges, trial % 8, plane, trial % 3);
+}
+
 #include "gen_check.h"
 }  // namespace
 
 int main() {
   gs_state.track_unwritten = true;
   check_generators();
-  for (int sharpness = 0; sharpness < 8; ++sharpness) vertical_thresholds(10, sharpness);
-  for (int trial = 0; trial < 48; ++trial) vertical_random(10, trial);
-  std::puts("PASS: vertical even and odd, 10-bit, all 64 levels, 8 sharpness settings and 4 lengths; 48 randomized frames");
+  for (bool horizontal : {false, true}) {
+    for (int sharpness = 0; sharpness < 8; ++sharpness) filter_thresholds(10, sharpness, horizontal);
+  }
+  for (int trial = 0; trial < 48; ++trial) {
+    vertical_random(10, trial);
+    horizontal_random(10, trial);
+  }
+  std::puts("PASS: vertical even/odd and all horizontal schedules, 10-bit, all levels, sharpness settings and lengths");
+  std::puts("PASS: 48 randomized frames per direction with complete-word ownership");
 }

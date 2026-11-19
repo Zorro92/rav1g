@@ -19,9 +19,14 @@ using std::min;
 // integer overload. The active strip always starts within the frame.
 inline int clamp(uint v, int lo, int hi) { return std::clamp(int(v), lo, hi); }
 
+inline uint max(uint a, GsScalarRef<uint> b) { return std::max(a, uint(b)); }
+
 struct uint2 { uint x, y; };
 struct uint3 { uint x, y, z; };
-struct uint4 { uint x, y, z, w; };
+struct uint4 {
+  uint x, y, z, w;
+  uint operator[](uint i) const { return i < 2 ? (i == 0 ? x : y) : (i == 2 ? z : w); }
+};
 struct int2 { int x, y; };
 struct int4 { int x, y, z, w; };
 
@@ -55,12 +60,41 @@ struct ByteAddressBuffer {
   uint4 Load4(uint address) const { return {Load(address), Load(address + 4), Load(address + 8), Load(address + 12)}; }
 };
 
+struct WordAccess {
+  uint64_t reader, writer;
+};
+
 struct RWByteAddressBuffer : ByteAddressBuffer {
   uint *writable;
+  WordAccess *access = nullptr;
+
+  void note(size_t word, bool write) const {
+    if (!access) return;
+    const uint64_t lane = (uint64_t(gs_state.group_epoch) << 32) | gs_state.thread;
+    auto &tag = access[word];
+    if ((tag.writer && tag.writer != lane) || (write && tag.reader && tag.reader != lane)) {
+      std::fprintf(stderr, "FAIL: %s has conflicting accesses to UAV word %zu\n", gs_state.shader, word);
+      std::exit(1);
+    }
+    if (write) {
+      tag.writer = lane;
+    } else {
+      tag.reader = tag.reader && tag.reader != lane ? ~uint64_t(0) : lane;
+    }
+  }
+
+  uint Load(uint address) const {
+    const uint value = ByteAddressBuffer::Load(address);
+    note(address / 4, false);
+    return value;
+  }
+  uint2 Load2(uint address) const { return {Load(address), Load(address + 4)}; }
+  uint4 Load4(uint address) const { return {Load(address), Load(address + 4), Load(address + 8), Load(address + 12)}; }
 
   void Store(uint address, uint value) const {
     const size_t word = address / 4;
     check_access(word, address, count);
+    note(word, true);
     writable[word] = value;
   }
 

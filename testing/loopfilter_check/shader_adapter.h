@@ -19,6 +19,8 @@ struct FilterKernel {
 
 extern const FilterKernel loopfilter_vert_hbd;
 extern const FilterKernel loopfilter_vert_hbd_legacy;
+extern const FilterKernel loopfilter_hor_hbd;
+extern const FilterKernel loopfilter_hor_hbd_legacy;
 
 #include "mode_info.h"
 

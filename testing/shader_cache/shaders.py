@@ -50,7 +50,7 @@ REQUIRED_BYTECODE = [
     'cdef_filter', 'cdef_filter_v2', *INTRA_MAIN, *UNOPTIMIZED,
     'intra_filter', 'intra_filter_hbd', 'intra_v2', 'intra_v2_hbd',
     'gen_lf_blocks_vert', 'gen_lf_blocks_hor', 'gen_lf_blocks_vert_legacy', 'gen_lf_blocks_hor_legacy',
-    'loopfilter_vert_hbd', 'loopfilter_vert_hbd_legacy',
+    'loopfilter_vert_hbd', 'loopfilter_vert_hbd_legacy', 'loopfilter_hor_hbd', 'loopfilter_hor_hbd_legacy',
 ]
 
 # What DXC is given for every shader on top of -T, -E and -Od:

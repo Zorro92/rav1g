@@ -286,12 +286,19 @@ pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: 
         perf_gpu_mark(dec, AV1_PERF_GPU_LF_VERT);
         stage_dump_fb(dec, c"lf_vert", td.frame_buffer, std::ptr::null());
 
-        commands.set_pipeline(pipeline(&raw const (*td.shaders).loopfilter_h));
+        let horizontal_hbd = td.bitdepth > 8;
+        commands.set_pipeline(pipeline(if lf_legacy && horizontal_hbd {
+            &raw const (*lib).shader_lf_hor_hbd_legacy
+        } else {
+            &raw const (*td.shaders).loopfilter_h
+        }));
+        // The new 10-bit kernel has one thread per packed word (two columns).
+        let threads_per_strip = if horizontal_hbd && !lf_legacy { 2 } else { 4 };
         let lf_h_split = LF_H_SPLIT.load(Ordering::Relaxed);
         if lf_h_split == 0 {
             for p in (0..3).filter(|&p| filtered(p)) {
                 let list = p + 3;
-                let wicount = blk_count[list] * 4;
+                let wicount = blk_count[list] * threads_per_strip;
                 commands.set_inline_constants(3, &[wicount, p as c_int, blk_offsets[list], blk_cols[list], 0], 0);
                 commands.dispatch(((wicount + 63) >> 6) as u32, 1, 1);
             }
@@ -308,7 +315,7 @@ pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: 
                 for p in (0..3).filter(|&p| filtered(p)) {
                     let list = p + 3;
                     let rows = if blk_cols[list] != 0 { blk_count[list] / blk_cols[list] } else { 0 };
-                    let wicount = blk_cols[list] * 4;
+                    let wicount = blk_cols[list] * threads_per_strip;
                     let mut row = pass;
                     while row < rows {
                         let inline = [wicount, p as c_int, blk_offsets[list], blk_cols[list], row * blk_cols[list]];
