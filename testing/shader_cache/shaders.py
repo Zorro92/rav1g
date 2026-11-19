@@ -645,9 +645,8 @@ def command_survey(args):
     for shader in shaders:
         name = shader['name']
         c = listing_counts(os.path.join(args.listings, name + '.asm'))
-        # The two -intraopt builds are test builds of a source that is otherwise built with /Od and are
-        # not held to the bit field rule.
-        if not name.endswith('_opt'):
+        # The original 8-bit -intraopt experiment still uses run-time widths.
+        if name != 'intra_main_opt':
             runtime_width += runtime_width_bit_fields(name, c['code'])
         seconds = '%.1f' % shader['seconds']
         od = shader['od']

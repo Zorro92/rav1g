@@ -2586,8 +2586,8 @@ jobs:
   # an earlier frame had there, and the layouts differ; stage_dump.py compare --two-parsers). The MEMORY
   # lines are no longer the same text: the C++ decoder has a share of the mode info and coefficient
   # buffers for each slot, this one has pools (docs/phase2-rav1d.md, step 5); what is held of them is
-  # in the last step. The shader check allows the three shaders that read the packed mode info records.
-  # Their output lists are held equal by the stage dump comparison.
+  # in the last step. The stage dump comparison also checks the output lists and intra prediction
+  # from the shaders that differ between the two builds.
   rust-equal:
     needs: [cpp-reference, rust-conformance, rust-gpublists, shader-headers]
     runs-on: ubuntu-26.04
@@ -2639,6 +2639,7 @@ jobs:
       # So is mi_grid_build, the mode info grid built by the GPU for the check of -parseopt gridcheck.
       # Three readers shared with cpp use the packed records. The legacy fast build shares the
       # refactored list access code, and intra_v2 takes an extra root constant for the GPU list base.
+      # Both FXC builds of intra_main_hbd use fewer group syncs and share DC and CFL sums by block.
       - name: Compare shaders against the reference
         run: |
           set -euo pipefail
@@ -2652,7 +2653,7 @@ jobs:
               --candidate shader-headers/report.json --reference-name "branch cpp at ${CPP_REFERENCE_COMMIT:0:7}" \
               --candidate-name 'this commit' \
               --candidate-only copy_plane_sp,copy_plane_sp_tex,film_grain_filter_sp,film_grain_filter_sp_tex,cdef_lists,mi_grid_build,gen_pred_blocks_fast_packed,pred_list_count,pred_list_scan,gen_pred_blocks_gpu \
-              --candidate-changed gen_pred_blocks,gen_pred_blocks_fast,gen_lf_blocks_vert,gen_lf_blocks_hor,intra_v2,intra_v2_hbd; then
+              --candidate-changed gen_pred_blocks,gen_pred_blocks_fast,gen_lf_blocks_vert,gen_lf_blocks_hor,intra_v2,intra_v2_hbd,intra_main_hbd,intra_main_hbd_opt; then
             echo '::error title=Shader comparison failed::Check the shader differences against the pinned cpp build and the explicit exceptions (docs/rust-port.md, "Equality reference").'
             exit 1
           fi

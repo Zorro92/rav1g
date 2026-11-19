@@ -100,8 +100,12 @@ build() {
   rm -f "$1"/*.o
   for shader in intra_main:0 intra_main_hbd:0 intra_filter:1 intra_filter_hbd:1 intra_v2:2 intra_v2_hbd:2; do
     name=${shader%:*}
+    hbd=
+    case $name in
+      *_hbd) hbd=-DSHADER_HBD ;;
+    esac
     # shellcheck disable=SC2086
-    g++ $flags -DSHADER_FILE="\"$name.gen.h\"" -DSHADER_NS="ns_$name" -DSHADER_API="${name}_api" \
+    g++ $flags $hbd -DSHADER_FILE="\"$name.gen.h\"" -DSHADER_NS="ns_$name" -DSHADER_API="${name}_api" \
       -DSHADER_KIND="${shader#*:}" -c -o "$1/$name.o" "$here/shader_tu.cpp" &
   done
   # shellcheck disable=SC2086
@@ -136,6 +140,7 @@ intra_v2_sched.h@s/if (step == cur) need_pass = intra_v2_max(need_pass, ((d >> 1
 intra_filter.gen.h@0,/GroupMemoryBarrierWithGroupSync();/s//GroupMemoryBarrier();/@first group sync of intra_filter as a plain barrier@races in group memory .*[1-9]
 intra_filter_hbd.gen.h@/mem\[thread.y\]\[wi\] = pixel;/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/@group sync inside a wavefront step of intra_filter as a plain barrier@races in group memory .*[1-9]
 intra_main.gen.h@/above\[loc_base + wi\] = luma.x + luma.y + luma.z + luma.w;/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/@group sync before the CFL sum of intra_main as a plain barrier@races in group memory .*[1-9]
+intra_main_hbd.gen.h@/int4 next_above = 0;/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/@group sync before writing processed intra edges as a plain barrier@races in group memory .*[1-9]
 intra_v2.gen.h@0,/GroupMemoryBarrierWithGroupSync();/s//GroupMemoryBarrier();/@group sync of a pass of intra_v2 as a plain barrier@races in group memory .*[1-9]'
   mkdir "$work/mutant"
   echo "$mutants" | while IFS='@' read -r file expr what expect; do

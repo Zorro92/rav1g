@@ -74,7 +74,9 @@ static void garbage(void *p, size_t size, uint64_t *state) {
 }
 
 static void scramble(uint64_t *state) {
-#if SHADER_KIND == 0
+#if SHADER_KIND == 0 && defined(SHADER_HBD)
+  garbage(edges.bytes(), edges.byte_size(), state);
+#elif SHADER_KIND == 0
   garbage(above.bytes(), above.byte_size(), state);
   garbage(left.bytes(), left.byte_size(), state);
 #elif SHADER_KIND == 1

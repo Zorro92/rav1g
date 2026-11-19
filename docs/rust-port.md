@@ -140,9 +140,11 @@ have to write the same bytes at every stage, not only the same frames.
 - **The shader check** (`testing/shader_cache/shaders.py same`) compares the two build reports.
   `--candidate-changed` covers the shared readers of the packed mode info records, the legacy
   fast generator that shares list access code, and the two intra V2 builds that take a root
-  constant for the intra list start. `--candidate-only` includes the GPU prediction list shaders
-  and `gen_pred_blocks_fast_packed`. The `gen_pred_blocks_fast` selector picks the packed build.
-  The stage dumps check the final prediction lists against the C++ decoder.
+  constant for the intra list start. It also covers the two builds of `intra_main_hbd` that group
+  edge preparation and DC/CFL sums into three group syncs. `--candidate-only` includes the GPU
+  prediction list shaders and `gen_pred_blocks_fast_packed`. The `gen_pred_blocks_fast` selector
+  picks the packed build. The stage dumps check the final prediction lists and the reconstructed
+  samples against the C++ decoder.
 
 ## Branches
 

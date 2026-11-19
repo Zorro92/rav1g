@@ -45,17 +45,19 @@ one commit each:
 - **Intra v2**: a second intra prediction path: the shader `libav1/dx/shaders/intra_v2.hlsl`
   (with `intra_v2_hbd.hlsl` for high bit depth), its scheduler `libav1/dx/intra_v2_sched.h`,
   and the player flag `-intrav2` that selects it; see [Intra v2 run](#intra-v2-run--intrav2).
-  The upstream shaders `intra_main.hlsl` and `intra_filter.hlsl` are not modified and stay
-  the default. It also adds intra dispatch counters to the `-gputime` output and a
+  The frame-wide wavefront path using `intra_main` and `intra_filter` stays the default.
+  Intra v2 also adds intra dispatch counters to the `-gputime` output and a
   host-side comparison of the two paths (`testing/intra_check`), which is not part of the
   player build. It is bit-exact but slower than the original path.
 - **Intra optimisation A/B**: upstream builds `intra_main.hlsl` and `intra_main_hbd.hlsl`
   with FXC optimisation disabled. Two wrapper files, `intra_main_opt.hlsl` and
   `intra_main_hbd_opt.hlsl`, only `#include` those sources and are compiled with the
   project's default (optimised) settings, and the player flag `-intraopt` selects them; see
-  [Intra optimisation A/B](#intra-optimisation-ab--intraopt). The upstream sources and
-  their `/Od` builds are not modified and stay the default. **The optimised build decodes
-  wrongly and is not faster**; the flag is kept only to investigate why.
+  [Intra optimisation A/B](#intra-optimisation-ab--intraopt). The `/Od` builds stay the
+  default. The earlier optimised build decoded incorrectly on the console and showed no speed gain.
+- **High-bit-depth intra**: `intra_main_hbd.hlsl` prepares both edges together and shares the
+  DC and CFL reductions across a block's threads in the group. It uses three group syncs. See
+  [High-bit-depth intra shader](#high-bit-depth-intra-shader).
 - **Pipeline slots and clears**: the number of frames the decoder keeps between CPU decode
   and GPU completion becomes a decoder creation parameter
   (`aom_codec_dec_cfg_t::frame_slots`, player flag `-slots`), and the per-frame clears of a
@@ -159,8 +161,7 @@ interface for C and the C of the parser, for an app container and the DLL runtim
 `av1xbox.sln` (the player and `uwp_common`; the player uses the decoder through
 `crates/rav1g/include/rav1g.h`) as Release x64 with MSBuild, the `v145` toolset and the
 `10.0.26100.0` Windows SDK. The minimum Windows version is overridden to `10.0.17763.0`. The
-decoder's shaders are FXC/Shader Model 5.0 compute shaders as in upstream, and with `-cdefv1` and
-without `-intrav2` and `-intraopt` the decoder runs exactly the upstream shaders. An appended
+decoder's shaders are FXC/Shader Model 5.0 compute shaders as in upstream. An appended
 compiler option `/wd4996` suppresses the newer SDK's deprecated `GetDesktopDpi` diagnostic (promoted
 to an error by upstream's `/sdl`), without changing the player source.
 
@@ -388,7 +389,7 @@ the start of every task say what is in effect.
 | Pipeline slots | 2 | `Frame slots: 2` | `-slots 3`, `-slots 4` |
 | Parser | the parse pass of rav1d, with its switches `nolfmask`, `tilethread` and (since package 0.2.197) `gpucdef` on | `Parser: the parse pass of rav1d`, `Parser switches (-parseopt): nolfmask tilethread gpucdef` | none since package 0.2.159: the entropy decoder of libaom (`-parser c`) left the decoder; up to 0.2.157 `Parser: the entropy decoder of libaom (-parser c)`; `-parseopt` for the switches; see [Parser](#parser--parser) |
 | Clears of a slot | none: the wavefront of intra prediction is kept at the edges of the tiles (since package 0.2.146.0) | `Clears: none needed (default: intra wavefront at the edges of the tiles; -gpuclear, -cpuclear and -syncclear keep it in the slot's grid and clear that)` | `-gpuclear`, `-cpuclear`, `-syncclear`: the wavefront in the slot's grid, cleared for every frame by the GPU, the completion thread (the default of 0.2.140 to 0.2.144; `-asyncclear` is the same) or the decode thread; see [Clears](#clears) |
-| Intra prediction | upstream's shaders, `/Od` build | `Intra shaders: intra_main + intra_filter (original)`, `Intra main shader: intra_main (/Od, original)` | `-intrav2`, `-intraopt` |
+| Intra prediction | frame-wide wavefront, `/Od` build of the main shader | `Intra shaders: intra_main + intra_filter (original)`, `Intra main shader: intra_main (/Od, original)` | `-intrav2`, `-intraopt` |
 | Inter prediction | upstream's shaders, lists by type and block size | `Inter shaders: inter_main, inter_compound (original)` | `-interfast`: see [Inter fast path](#inter-fast-path--interfast) |
 
 - **`-cdefv2` and `-fitsize` are still accepted** and change nothing: old task lines keep
@@ -1162,6 +1163,20 @@ with the same counts as for CDEF. After the build the workflow checks that each 
 bytecode is the one compiled into the package. The directory also has the listings of
 `intra_main_opt` and `intra_main_hbd_opt`, see
 [Intra optimisation A/B](#intra-optimisation-ab--intraopt).
+
+## High-bit-depth intra shader
+
+The default `intra_main_hbd` shader loads both edges and prepares the corner before a single
+group sync. The filter and upsampler read that shared data and keep their results in registers
+until the second sync, then put the results back in shared memory. The list generator guarantees
+that each edge is eligible for at most one of filtering and upsampling. A third sync makes the
+edge data visible to every thread before it predicts its row. Directional prediction reads just
+the edge selected for each pixel. DC and CFL use the shared memory for per-thread partial sums,
+which the first thread of the block combines for its group.
+
+The wavefront schedule, bindings and video buffers are those of the existing frame-wide path.
+The `/Od` build of this source is the default, and `-intraopt` selects the FXC-optimised build
+of the same source.
 
 ## Intra optimisation A/B (`-intraopt`)
 

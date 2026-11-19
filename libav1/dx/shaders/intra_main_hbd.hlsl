@@ -42,7 +42,6 @@ RWByteAddressBuffer dst_frame : register(u0);
 
 #define MODE_PAETH 11
 #define MODE_INTRA_BC 12
-#define MODE_FILTER 13
 #define MODE_DC 14
 #define MODE_CFL 15
 
@@ -52,7 +51,6 @@ RWByteAddressBuffer dst_frame : register(u0);
 #define NeedBotShift 7
 #define NeedAboveLeftShift 8
 #define FilterAboveLeftFlag 0x200
-#define NeedAboveLeftLUT 0x08ff
 // intra bc:
 #define SubpelBits 4
 #define FilterLineShift 3
@@ -62,8 +60,75 @@ RWByteAddressBuffer dst_frame : register(u0);
 #define SumAddVert ((1 << OffsetBits) + (1 << (OutputShift - 1)))
 #define OutputSub ((1 << (OffsetBits - OutputShift)) + (1 << (OffsetBits - OutputShift - 1)))
 
-groupshared int above[64 * 20];
-groupshared int left[64 * 20];
+#define WG_SIZE 256
+#define EDGE_ABOVE 0
+#define EDGE_LEFT 1
+
+// FXC can turn dynamic masks into bit-field instructions with run-time widths.
+static const uint low_bits[11] = {0, 1, 3, 7, 15, 31, 63, 127, 255, 511, 1023};
+
+// Each transform owns 20 words per four lanes on each edge, including room for the corner and
+// upsampling. DC and CFL blocks use the same space for their partial sums.
+groupshared int edges[2][(WG_SIZE / 4) * 20];
+
+int filter_edge(int edge, int base, int i, int last, int strength) {
+  const int outer = (0x2000 >> (4 * strength)) & 15;
+  const int inner = (0x4540 >> (4 * strength)) & 15;
+  const int center = (0x4680 >> (4 * strength)) & 15;
+  return (8 + outer * (edges[edge][base + max(i - 1, 0)] + edges[edge][base + min(i + 3, last)]) +
+          inner * (edges[edge][base + i] + edges[edge][base + min(i + 2, last)]) +
+          center * edges[edge][base + i + 1]) >> 4;
+}
+
+int upsample_edge(int p0, int p1, int p2, int p3) {
+  return clamp((-p0 + 9 * (p1 + p2) - p3 + 8) >> 4, 0, 1023);
+}
+
+// In gen_pred_blocks.hlsl, an edge is upsampled only for a small enough block and an angle
+// difference below 40, where its filter strength is zero. Each lane prepares its outputs
+// from the raw edge here, then writes them back after every lane has finished reading.
+int4 prepare_edge(int edge, int base, int wi, int wi_count, int count, int upsample,
+                  int filter_count, int strength, int need_aboveleft) {
+  int4 values = 0;
+  if (upsample && wi < (count >> 1)) {
+    const int i = wi * 2;
+    const int p0 = edges[edge][base + i - 2];
+    const int p1 = edges[edge][base + i - 1];
+    const int p2 = edges[edge][base + i];
+    const int p3 = edges[edge][base + i + 1];
+    const int p4 = edges[edge][base + min(i + 2, count - 1)];
+    values = int4(upsample_edge(p0, p1, p2, p3), p2, upsample_edge(p1, p2, p3, p4), p3);
+  } else if (strength && wi < filter_count) {
+    values.x = filter_edge(edge, base - need_aboveleft, wi, filter_count, strength);
+    if (wi + wi_count < filter_count)
+      values.y = filter_edge(edge, base - need_aboveleft, wi + wi_count, filter_count, strength);
+  }
+  return values;
+}
+
+void write_edge(int edge, int base, int wi, int wi_count, int count, int upsample,
+                int filter_count, int strength, int4 values) {
+  if (upsample && wi < (count >> 1)) {
+    const int i = base + wi * 4;
+    edges[edge][i - 1] = values.x;
+    edges[edge][i] = values.y;
+    edges[edge][i + 1] = values.z;
+    edges[edge][i + 2] = values.w;
+  } else if (strength && wi < filter_count) {
+    edges[edge][base + wi] = values.x;
+    if (wi + wi_count < filter_count) edges[edge][base + wi + wi_count] = values.y;
+  }
+}
+
+uint load_above_pair(int corner, int wi, int available) {
+  uint pair = dst_frame.Load(corner + 4 + 4 * min(wi, available - 1));
+  if (wi >= available) pair = (pair & 0xffff0000) | (pair >> 16);
+  return pair;
+}
+
+int load_left(int corner, int stride, int wi, int available) {
+  return dst_frame.Load(corner + (min(wi, available - 1) + 1) * stride) >> 16;
+}
 
 int compute_bc(int p0, int p1, int p2, int p3, int fh, int fv) {
   int l0 = ((1 << 14) + p0 * fh + p1 * (128 - fh) + (1 << (FilterLineShift - 1))) >> FilterLineShift;
@@ -80,7 +145,37 @@ uint compute_cfl_pixel(int dc, int value) {
 int intra_inter_blend(int mask, int intra, int inter) {
   return clamp((intra * mask + inter * (64 - mask) + 32) >> 6, 0, 1023);
 }
-#define WG_SIZE 256
+
+int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
+  int4 luma;
+  const int max_y = (limits >> 16) - 2;
+  const int y_stride = cb_planes[0].x;
+  const int luma_y = min((by + y) << 1, max_y);
+
+  const int max_x = ((limits & 0xffff) << 1) - 8;
+  const int luma_x = (bx + x0) << 2;
+  int y_offset = cb_planes[0].y + min(luma_x, max_x) + luma_y * y_stride;
+
+  uint4 luma0 = dst_frame.Load4(y_offset);
+  uint4 luma1 = dst_frame.Load4(y_offset + y_stride);
+
+  if (luma_x >= max_x) {
+    luma0.zw = luma0.yy;
+    luma1.zw = luma1.yy;
+    if (luma_x > max_x) {
+      luma0.x = luma0.y;
+      luma1.x = luma1.y;
+    }
+  }
+
+  luma.x = ((luma0.x >> 0) & 1023) + ((luma0.x >> 16) & 1023) + ((luma1.x >> 0) & 1023) + ((luma1.x >> 16) & 1023);
+  luma.y = ((luma0.y >> 0) & 1023) + ((luma0.y >> 16) & 1023) + ((luma1.y >> 0) & 1023) + ((luma1.y >> 16) & 1023);
+  luma.z = ((luma0.z >> 0) & 1023) + ((luma0.z >> 16) & 1023) + ((luma1.z >> 0) & 1023) + ((luma1.z >> 16) & 1023);
+  luma.w = ((luma0.w >> 0) & 1023) + ((luma0.w >> 16) & 1023) + ((luma1.w >> 0) & 1023) + ((luma1.w >> 16) & 1023);
+  luma <<= 1;
+  return luma;
+}
+
 [numthreads(WG_SIZE, 1, 1)] void main(uint3 thread
                                       : SV_DispatchThreadID) {
   int4 counts0 = cb_counts0;
@@ -89,6 +184,7 @@ int intra_inter_blend(int mask, int intra, int inter) {
   int offset = cb_pass_offset;
   int threadx = thread.x;
   uint3 block = uint3(0, 0, 0);
+  int block_lane = 0;
   int wi_count = 0;
   int wi = 1024;
   if (thread.x < cb_wi_count) {
@@ -133,10 +229,11 @@ int intra_inter_blend(int mask, int intra, int inter) {
       }
     }
 
-    int block_index = offset + (threadx >> bsize_log);
-    block = pred_blocks.Load3(block_index << 4);
+    const int block_index = threadx >> bsize_log;
+    block = pred_blocks.Load3((offset + block_index) << 4);
+    block_lane = threadx & low_bits[bsize_log];
     wi_count = min(WG_SIZE, 1 << bsize_log);
-    wi = thread.x & (wi_count - 1);
+    wi = block_lane & (WG_SIZE - 1);
   }
   const int bw_log = block.y & 7;  // 0..4
   const int bw = 4 << bw_log;
@@ -181,163 +278,124 @@ int intra_inter_blend(int mask, int intra, int inter) {
   const int corner = cb_planes[plane].y + ((bx << 1) - 4) + (by - 1) * stride;
 
   const int loc_base = (((thread.x & (WG_SIZE - 1)) - wi) >> 2) * 20 + 2;
-  int above_count = ((params.z >> NeedAboveShift) & 1) * bw + ((params.z >> NeedRightShift) & 1) * bh;
-
-  if (wi < (above_count >> 1) || wi == 0) {
-    int addr = corner + 4 + 4 * min(wi, above_available - 1);
-    uint pixels =
-        above_available ? dst_frame.Load(addr) : left_available ? dst_frame.Load(corner + stride) : 0x01ff0000;
-    if (wi >= above_available) pixels = (pixels & 0xffff0000) | (pixels >> 16);
-    above[loc_base + (wi << 1) + 0] = (pixels >> 0) & 1023;
-    above[loc_base + (wi << 1) + 1] = (pixels >> 16) & 1023;
-  }
-
-  // Left:
-  GroupMemoryBarrierWithGroupSync();
-
-  int left_count = ((params.z >> NeedLeftShift) & 1) * bh + ((params.z >> NeedBotShift) & 1) * bw;
-
-  if (wi < left_count || wi == 0) {
-    const int addr = corner + (min(wi, left_available - 1) + 1) * stride;
-    left[loc_base + wi] = left_available ? (dst_frame.Load(addr) >> 16) : above_available ? above[loc_base] : 513;
-  }
-  if (wi < (left_count - wi_count)) {
-    const int addr = corner + (min(wi + wi_count, left_available - 1) + 1) * stride;
-    left[loc_base + wi + wi_count] =
-        left_available ? (dst_frame.Load(addr) >> 16) : above_available ? above[loc_base] : 513;
-  }
-
-  GroupMemoryBarrierWithGroupSync();
-
+  const int need_above = (params.z >> NeedAboveShift) & 1;
+  const int need_right = (params.z >> NeedRightShift) & 1;
+  const int need_left = (params.z >> NeedLeftShift) & 1;
+  const int need_bot = (params.z >> NeedBotShift) & 1;
   const int need_aboveleft = (params.z >> NeedAboveLeftShift) & 1;
-  if (wi == 0 && need_aboveleft) {
-    uint t = above[loc_base];
-    uint l = left[loc_base];
-    uint topleft = (left_available && above_available) ? (dst_frame.Load(corner) >> 16)
-                                                       : left_available ? l : above_available ? t : 512;
+  const int above_count = need_above * bw + need_right * bh;
+  const int left_count = need_left * bh + need_bot * bw;
+  const int y = block_lane >> bw_log;
+  const int x0 = (block_lane & low_bits[bw_log]) << 2;
 
-    if ((params.z & FilterAboveLeftFlag) && (bw + bh >= 24) && cb_flags.x)
-      topleft = ((l + t) * 5 + topleft * 6 + 8) >> 4;
+  const int mode_info = params.z & 15;
+  const bool directional = mode_info >= Dir1 && mode_info <= Dir3;
+  const int upsample_above = directional ? ((block.y >> 22) & 1) : 0;
+  const int upsample_left = directional ? ((block.y >> 23) & 1) : 0;
+  const int strength_above = directional ? ((block.y >> 24) & 3) : 0;
+  const int strength_left = directional ? ((block.y >> 26) & 3) : 0;
+  const int filter_above = above_available && need_above
+                               ? min(above_available << 2, bw) + need_right * bh + need_aboveleft - 1
+                               : 0;
+  const int filter_left = left_available && need_left
+                              ? min(left_available, bh) + need_bot * bw + need_aboveleft - 1
+                              : 0;
 
-    above[loc_base - 1] = topleft;
-    left[loc_base - 1] = topleft;
-    above[loc_base - 2] = topleft;
-    left[loc_base - 2] = topleft;
-  }
-
-  GroupMemoryBarrierWithGroupSync();
-
-  int dir_mode = mode < MODE_DC;
-  int upsample_above = (block.y >> 22) & dir_mode;
-  int upsample_left = (block.y >> 23) & dir_mode;
-
-  int filter_count = 0;
-  if (above_available && ((params.z >> NeedAboveShift) & 1)) {
-    filter_count = min(above_available << 2, bw) + ((params.z >> NeedRightShift) & 1) * bh + need_aboveleft - 1;
-  }
-  int edge_filter = (block.y >> 24) & ((wi < filter_count && dir_mode) * 3);
-
-  int sum0 = 8;
-  int sum1 = 8;
-  const int wi1 = wi + wi_count;
-  if (edge_filter) {
-    edge_filter <<= 2;
-    const int base = loc_base - need_aboveleft;
-    const int last = filter_count;
-    //{ 0, 4, 8, 4, 0 }, { 0, 5, 6, 5, 0 }, { 2, 4, 4, 4, 2 }
-    sum0 += above[base + max(wi - 1, 0)] * ((0x2000 >> edge_filter) & 15);
-    sum0 += above[base + (wi + 0)] * ((0x4540 >> edge_filter) & 15);
-    sum0 += above[base + (wi + 1)] * ((0x4680 >> edge_filter) & 15);
-    sum0 += above[base + min(wi + 2, last)] * ((0x4540 >> edge_filter) & 15);
-    sum0 += above[base + min(wi + 3, last)] * ((0x2000 >> edge_filter) & 15);
-    if (wi1 < filter_count)  // rare, some mods for 4x4, 8x4, 4x8 blocks
-    {
-      sum1 += above[base + max(wi1 - 1, 0)] * ((0x2000 >> edge_filter) & 15);
-      sum1 += above[base + (wi1 + 0)] * ((0x4540 >> edge_filter) & 15);
-      sum1 += above[base + (wi1 + 1)] * ((0x4680 >> edge_filter) & 15);
-      sum1 += above[base + min(wi1 + 2, last)] * ((0x4540 >> edge_filter) & 15);
-      sum1 += above[base + min(wi1 + 3, last)] * ((0x2000 >> edge_filter) & 15);
+  int4 luma = 0;
+  // DC and CFL share the first two phases with edge preparation. Each active lane contributes
+  // up to two above pixels and one left pixel to DC, and four subsampled luma pixels to CFL.
+  const int dc_above = above_available ? bw >> 1 : 0;
+  const int dc_left = left_available ? bh : 0;
+  const int dc_terms = max(dc_above, dc_left);
+  if (mode >= MODE_DC) {
+    if (wi < dc_terms) {
+      int sum = 0;
+      if (wi < dc_above) {
+        const uint pair = load_above_pair(corner, wi, above_available);
+        sum = (pair & 1023) + ((pair >> 16) & 1023);
+      }
+      if (wi < dc_left) sum += load_left(corner, stride, wi, left_available);
+      edges[EDGE_ABOVE][loc_base + wi] = sum;
     }
-  }
-  GroupMemoryBarrierWithGroupSync();
-  if (edge_filter) {
-    above[loc_base + wi] = sum0 >> 4;
-    if (wi1 < filter_count) {
-      above[loc_base + wi1] = sum1 >> 4;
+    if (mode == MODE_CFL) {
+      luma = cfl_luma_row(block.z, bx, by, x0, y);
+      edges[EDGE_LEFT][loc_base + wi] = luma.x + luma.y + luma.z + luma.w;
     }
-  }
+  } else if (mode < MODE_INTRA_BC && thread.x < cb_wi_count) {
+    int first_above = 0;
+    int first_left = 0;
+    if (wi < (above_count >> 1) || wi == 0) {
+      uint pair = 511 | (511 << 16);
+      if (above_available) {
+        pair = load_above_pair(corner, wi, above_available);
+      } else if (left_available) {
+        const uint p = load_left(corner, stride, 0, left_available) & 1023;
+        pair = p | (p << 16);
+      }
+      first_above = pair & 1023;
+      edges[EDGE_ABOVE][loc_base + wi * 2] = first_above;
+      edges[EDGE_ABOVE][loc_base + wi * 2 + 1] = (pair >> 16) & 1023;
+    }
+    if (wi < left_count || wi == 0) {
+      first_left = 513;
+      if (left_available) {
+        first_left = load_left(corner, stride, wi, left_available);
+      } else if (above_available) {
+        // The missing column repeats the first above pixel. Load it directly to avoid a group sync.
+        first_left = wi == 0 ? first_above : dst_frame.Load(corner + 4) & 1023;
+      }
+      edges[EDGE_LEFT][loc_base + wi] = first_left;
+    }
+    if (wi + wi_count < left_count) {
+      int value = first_left;
+      if (left_available) value = load_left(corner, stride, wi + wi_count, left_available);
+      edges[EDGE_LEFT][loc_base + wi + wi_count] = value;
+    }
 
-  if (left_available && ((params.z >> NeedLeftShift) & 1)) {
-    filter_count = min(left_available, bh) + ((params.z >> NeedBotShift) & 1) * bw + need_aboveleft - 1;
-  }
-  edge_filter = (block.y >> 26) & ((wi < filter_count && dir_mode) * 3);
-  if (edge_filter) {
-    sum0 = 8;
-    sum1 = 8;
-    edge_filter *= 4;
-    const int base = loc_base - need_aboveleft;
-    const int last = filter_count;
-    sum0 += left[base + max(wi - 1, 0)] * ((0x2000 >> edge_filter) & 15);
-    sum0 += left[base + (wi + 0)] * ((0x4540 >> edge_filter) & 15);
-    sum0 += left[base + (wi + 1)] * ((0x4680 >> edge_filter) & 15);
-    sum0 += left[base + min(wi + 2, last)] * ((0x4540 >> edge_filter) & 15);
-    sum0 += left[base + min(wi + 3, last)] * ((0x2000 >> edge_filter) & 15);
-    if (wi1 < filter_count) {
-      sum1 += left[base + max(wi1 - 1, 0)] * ((0x2000 >> edge_filter) & 15);
-      sum1 += left[base + (wi1 + 0)] * ((0x4540 >> edge_filter) & 15);
-      sum1 += left[base + (wi1 + 1)] * ((0x4680 >> edge_filter) & 15);
-      sum1 += left[base + min(wi1 + 2, last)] * ((0x4540 >> edge_filter) & 15);
-      sum1 += left[base + min(wi1 + 3, last)] * ((0x2000 >> edge_filter) & 15);
-    }
-  }
-  GroupMemoryBarrierWithGroupSync();
-  if (edge_filter) {
-    left[loc_base + wi] = sum0 >> 4;
-    if (wi1 < filter_count) {
-      left[loc_base + wi1] = sum1 >> 4;
+    if (wi == 0 && need_aboveleft) {
+      int topleft = left_available ? first_left : above_available ? first_above : 512;
+      if (left_available && above_available) topleft = dst_frame.Load(corner) >> 16;
+      if ((params.z & FilterAboveLeftFlag) && bw + bh >= 24 && cb_flags.x)
+        topleft = ((first_left + first_above) * 5 + topleft * 6 + 8) >> 4;
+      edges[EDGE_ABOVE][loc_base - 1] = topleft;
+      edges[EDGE_ABOVE][loc_base - 2] = topleft;
+      edges[EDGE_LEFT][loc_base - 1] = topleft;
+      edges[EDGE_LEFT][loc_base - 2] = topleft;
     }
   }
 
   GroupMemoryBarrierWithGroupSync();
 
-  int p0 = 0, p1 = 0, p2 = 0, p3 = 0, p4 = 0;
-  int do_upsample = upsample_above && wi < (above_count >> 1);
-  if (do_upsample) {
-    p0 = above[loc_base + wi * 2 - 2];
-    p1 = above[loc_base + wi * 2 - 1];
-    p2 = above[loc_base + wi * 2 + 0];
-    p3 = above[loc_base + wi * 2 + 1];
-    p4 = above[loc_base + min(wi * 2 + 2, above_count - 1)];
-  }
-  GroupMemoryBarrierWithGroupSync();
-  if (do_upsample) {
-    above[loc_base - 1 + wi * 4] = clamp((-p0 + 9 * p1 + 9 * p2 - p3 + 8) >> 4, 0, 1023);
-    above[loc_base + 0 + wi * 4] = p2;
-    above[loc_base + 1 + wi * 4] = clamp((-p1 + 9 * p2 + 9 * p3 - p4 + 8) >> 4, 0, 1023);
-    above[loc_base + 2 + wi * 4] = p3;
+  int4 next_above = 0;
+  int4 next_left = 0;
+  if (directional) {
+    next_above = prepare_edge(EDGE_ABOVE, loc_base, wi, wi_count, above_count, upsample_above,
+                              filter_above, strength_above, need_aboveleft);
+    next_left = prepare_edge(EDGE_LEFT, loc_base, wi, wi_count, left_count, upsample_left,
+                             filter_left, strength_left, need_aboveleft);
+  } else if (mode >= MODE_DC && wi == 0) {
+    const uint count = dc_above * 2 + dc_left;
+    uint sum = count >> 1;
+    [loop] for (int i = 0; i < dc_terms; ++i) sum += edges[EDGE_ABOVE][loc_base + i];
+    edges[EDGE_ABOVE][loc_base - 1] = count ? sum / count : 512;
+
+    if (mode == MODE_CFL) {
+      int total = 0;
+      [loop] for (int i = 0; i < wi_count; ++i) total += edges[EDGE_LEFT][loc_base + i];
+      edges[EDGE_LEFT][loc_base - 1] = (total + (2 << bsize_log)) >> (bsize_log + 2);
+    }
   }
 
-  do_upsample = upsample_left && wi < (left_count >> 1);
-  if (do_upsample) {
-    p0 = left[loc_base + wi * 2 - 2];
-    p1 = left[loc_base + wi * 2 - 1];
-    p2 = left[loc_base + wi * 2 + 0];
-    p3 = left[loc_base + wi * 2 + 1];
-    p4 = left[loc_base + min(wi * 2 + 2, left_count - 1)];
-  }
   GroupMemoryBarrierWithGroupSync();
-  if (do_upsample) {
-    left[loc_base - 1 + wi * 4] = clamp((-p0 + 9 * p1 + 9 * p2 - p3 + 8) >> 4, 0, 1023);
-    left[loc_base + 0 + wi * 4] = p2;
-    left[loc_base + 1 + wi * 4] = clamp((-p1 + 9 * p2 + 9 * p3 - p4 + 8) >> 4, 0, 1023);
-    left[loc_base + 2 + wi * 4] = p3;
+  if (directional) {
+    write_edge(EDGE_ABOVE, loc_base, wi, wi_count, above_count, upsample_above,
+               filter_above, strength_above, next_above);
+    write_edge(EDGE_LEFT, loc_base, wi, wi_count, left_count, upsample_left,
+               filter_left, strength_left, next_left);
   }
-  GroupMemoryBarrierWithGroupSync();
 
-  // int x0 = (wi & ((1 << bw_log) - 1)) << 2;
-  // int y = wi >> bw_log;
-  int x0 = (thread.x & ((1 << bw_log) - 1)) << 2;
-  int y = (thread.x & ((1 << bsize_log) - 1)) >> bw_log;
+  GroupMemoryBarrierWithGroupSync();
+  if (thread.x >= cb_wi_count) return;
 
   uint2 pixels = uint2(0, 0);
   if (mode == MODE_INTRA_BC) {
@@ -377,194 +435,86 @@ int intra_inter_blend(int mask, int intra, int inter) {
                 << 16);
   }
 
-  uint dc = 0;
   if (mode >= MODE_DC) {
-    uint count = 0;
-    // todo: maybe some optization here?
-    if (above_available) {
-      for (int i = 0; i < bw; ++i) dc += above[loc_base + i];
-      count += bw;
+    const uint dc = edges[EDGE_ABOVE][loc_base - 1];
+    if (mode == MODE_CFL) {
+      const int avrg = edges[EDGE_LEFT][loc_base - 1];
+      const int alpha = ((block.y >> 22) & 63) - 16;
+      pixels.x = compute_cfl_pixel(dc, (luma.x - avrg) * alpha);
+      pixels.x |= compute_cfl_pixel(dc, (luma.y - avrg) * alpha) << 16;
+      pixels.y = compute_cfl_pixel(dc, (luma.z - avrg) * alpha);
+      pixels.y |= compute_cfl_pixel(dc, (luma.w - avrg) * alpha) << 16;
+    } else {
+      pixels.x = dc | (dc << 16);
+      pixels.y = pixels.x;
     }
-    if (left_available) {
-      for (int i = 0; i < bh; ++i) dc += left[loc_base + i];
-      count += bh;
-    }
-    dc += count >> 1;
-    dc = count ? dc / count : 512;
-
-    pixels.x = dc | (dc << 16);
-    pixels.y = pixels.x;
-  }
-
-  GroupMemoryBarrierWithGroupSync();
-
-  int4 luma = 0;
-  if (mode == MODE_CFL) {
-    const int max_y = (block.z >> 16) - 2;
-    const int y_stride = cb_planes[0].x;
-    const int luma_y = min((by + y) << 1, max_y);
-
-    // const int max_x = (block.z & 0xffff) - 4;
-    // const int luma_x = (bx + x0) << 1;
-    // int y_offset = cb_planes[0].y + min(luma_x, max_x) + luma_y * y_stride;
-    const int max_x = ((block.z & 0xffff) << 1) - 8;
-    const int luma_x = (bx + x0) << 2;
-    int y_offset = cb_planes[0].y + min(luma_x, max_x) + luma_y * y_stride;
-
-    uint4 luma0 = dst_frame.Load4(y_offset);
-    uint4 luma1 = dst_frame.Load4(y_offset + y_stride);
-
-    if (luma_x >= max_x) {
-      luma0.zw = luma0.yy;
-      luma1.zw = luma1.yy;
-      if (luma_x > max_x) {
-        luma0.x = luma0.y;
-        luma1.x = luma1.y;
+  } else if (mode < MODE_INTRA_BC) {
+    if (directional) {
+      const int frac_bits_x = 6 - upsample_above;
+      const int frac_bits_y = 6 - upsample_left;
+      const int min_base_x = -(1 << upsample_above);
+      const int last_x = (above_count << upsample_above) - 1;
+      const int last_y = (left_count << upsample_left) - 1;
+      const int dx = (y + 1) * params.x;
+      const int frac_x = ((dx << upsample_above) & 63) >> 1;
+      [loop] for (int i = 0; i < 4; ++i) {
+        const int x = x0 + i;
+        const int base_x = (x << upsample_above) + (dx >> frac_bits_x);
+        const bool from_above = mode_info == Dir1 || (mode_info == Dir2 && base_x >= min_base_x);
+        const int dy = (y << 6) + (x + 1) * params.y;
+        const int base = from_above ? base_x : dy >> frac_bits_y;
+        const int fraction = from_above ? frac_x : ((dy << upsample_left) & 63) >> 1;
+        const int edge = from_above ? EDGE_ABOVE : EDGE_LEFT;
+        const int last = from_above ? last_x : last_y;
+        const int p0 = edges[edge][loc_base + clamp(base, -2, last)];
+        int val = p0;
+        if (fraction) {
+          const int p1 = edges[edge][loc_base + clamp(base + 1, -2, last)];
+          val = p0 + ((fraction * (p1 - p0) + 16) >> 5);
+        }
+        const uint packed = (uint)clamp(val, 0, 1023) << ((i & 1) * 16);
+        if (i < 2) pixels.x |= packed;
+        else pixels.y |= packed;
       }
-    }
-
-    luma.x = ((luma0.x >> 0) & 1023) + ((luma0.x >> 16) & 1023) + ((luma1.x >> 0) & 1023) + ((luma1.x >> 16) & 1023);
-    luma.y = ((luma0.y >> 0) & 1023) + ((luma0.y >> 16) & 1023) + ((luma1.y >> 0) & 1023) + ((luma1.y >> 16) & 1023);
-    luma.z = ((luma0.z >> 0) & 1023) + ((luma0.z >> 16) & 1023) + ((luma1.z >> 0) & 1023) + ((luma1.z >> 16) & 1023);
-    luma.w = ((luma0.w >> 0) & 1023) + ((luma0.w >> 16) & 1023) + ((luma1.w >> 0) & 1023) + ((luma1.w >> 16) & 1023);
-    luma <<= 1;
-    above[loc_base + wi] = luma.x + luma.y + luma.z + luma.w;
-  }
-
-  GroupMemoryBarrierWithGroupSync();
-
-  if (mode == MODE_CFL && wi == 0) {
-    // The sum of the block's luma sums, into above[loc_base]. The first thread of the block adds them up
-    // between two group syncs: the sums are complete when it reads them, and the total is complete when
-    // the other threads of the block read it. (This was a pairwise reduction with one step per plain
-    // group memory barrier, which orders nothing: it gave the total only where the threads of a block ran
-    // in lockstep.)
-    int sum = 0;
-    for (int i = 0; i < wi_count; ++i) sum += above[loc_base + i];
-    above[loc_base] = sum;
-  }
-
-  GroupMemoryBarrierWithGroupSync();
-  if (thread.x >= cb_wi_count) return;
-
-  if (mode == MODE_CFL) {
-    int avrg = (above[loc_base] + (2 << bsize_log)) >> (bsize_log + 2);
-    int alpha = ((block.y >> 22) & 63) - 16;
-    pixels.x = compute_cfl_pixel(dc, (luma.x - avrg) * alpha);
-    pixels.x |= compute_cfl_pixel(dc, (luma.y - avrg) * alpha) << 16;
-    pixels.y = compute_cfl_pixel(dc, (luma.z - avrg) * alpha);
-    pixels.y |= compute_cfl_pixel(dc, (luma.w - avrg) * alpha) << 16;
-  }
-
-  if (mode < MODE_INTRA_BC) {
-    const int frac_bits_x = 6 - upsample_above;
-    const int frac_bits_y = 6 - upsample_left;
-    const int min_base_x = -(1 << upsample_above);
-
-    above_count <<= upsample_above;
-    left_count <<= upsample_left;
-    uint topleft = above[loc_base - 1];
-
-    for (int i = 0; i < 4; ++i) {
-      int x = i + x0;
-      ////1:
-      // int offset_x = (1 + y) * dx;
-      // int base_x = offset_x >> frac_bits_x;
-      //
-      ////2:
-      // int offset_x = (x << 6) - (y + 1) * dx;
-      // const int base_x = offset_x >> frac_bits_x;
-      //
-      // int offset_y = (y << 6) - (x + 1) * dy;
-      // const int base_y = offset_y >> frac_bits_y;
-      //
-      ////3:
-      // int offset_y = (1 + x) * dy;
-      // int base_y = offset_x >> frac_bits_x;
-      //
-      // int shift_y = ((offset_y << upsample_above) & 0x3F) >> 1;
-      // int shift_x = ((offset_x << upsample_above) & 0x3F) >> 1;
-      // Note:     for non dir modes:
-      //        dx = 0; dy = 0;     upsample_above = 0;     upsample_left = 0;
-
-      const int offset_x = (x << 6) + (y + 1) * params.x;
-      const int offset_y = (y << 6) + (x + 1) * params.y;
-      const int shift_x = ((offset_x << upsample_above) & 0x3F) >> 1;
-      const int shift_y = ((offset_y << upsample_left) & 0x3F) >> 1;
-
-      // Note: shift_x = 0 & shift_y = 0 if (dx == 0) & (dy == 0);
-      // maybe this can be used to simplify weight calc;
-
-      const int base_x = offset_x >> frac_bits_x;
-      int l0 = left[loc_base + clamp(offset_y >> frac_bits_y, -2, left_count - 1)];
-      int l1 = left[loc_base + clamp((offset_y >> frac_bits_y) + 1, -2, left_count - 1)];
-      int t0 = above[loc_base + clamp(base_x, -2, above_count - 1)];
-      int t1 = above[loc_base + clamp(base_x + 1, -2, above_count - 1)];
-
-      // switch(mode)
-      //{
-      //    case (SMOOTH_V | SMOOTH_H):
-      //        w_t0 = *(sm_weight_arrays + bh + y);
-      //        w_l0 = *(sm_weight_arrays + bw + x);
-      //
-      //    case SMOOTH_V:
-      //        w_t0 = *(sm_weight_arrays + bh + y);
-      //
-      //    case SMOOTH_H:
-      //        w_l0 = *(sm_weight_arrays + bw + x);
-      //
-      //    case V:
-      //    case DIR_1:
-      //        w_t0 = 32 - shift_x;
-      //
-      //    case H:
-      //    case DIR_3:
-      //        w_l0 = 32 - shift_y;
-      //
-      //    case MODE_PAETH:
-      //        int base = t0 + l0 - topleft;
-      //        int diff_t = abs(t0 - base);
-      //        int diff_l = abs(l0 - base);
-      //        int diff_tl = abs(topleft - base);
-      //        w_t0 = diff_t < diff_l && diff_t < diff_tl;
-      //        w_l0 = diff_l < diff_t && diff_l < diff_tl;
-      //};
-
-      int mode_info = params.z & 15;
-      if (mode_info == Dir2)  // eliminate dir2
-        mode_info = base_x >= min_base_x ? Dir1 : Dir3;
-
-      int w_t0 = (mode_info & SmoothV) ? cb_sm_weight_arrays[bh + y].x : (mode_info == Dir1) ? (32 - shift_x) : 0;
-      int w_l0 = (mode_info & SmoothH) ? cb_sm_weight_arrays[bw + x].x : (mode_info == Dir3) ? (32 - shift_y) : 0;
-
-      if (mode == MODE_PAETH) {
-        int diff_t = topleft - l0;
-        int diff_l = topleft - t0;
-        int diff_tl = abs(diff_t + diff_l);
-        diff_t = abs(diff_t);
-        diff_l = abs(diff_l);
-        w_l0 = diff_l <= diff_t && diff_l <= diff_tl;
-        w_t0 = diff_t < diff_l && diff_t <= diff_tl;
-        w_l0 <<= 5;
-        w_t0 <<= 5;
+    } else if (mode == MODE_PAETH) {
+      const int left = edges[EDGE_LEFT][loc_base + y];
+      const int corner_pixel = edges[EDGE_ABOVE][loc_base - 1];
+      const int diff_top = corner_pixel - left;
+      const int dt = abs(diff_top);
+      [loop] for (int i = 0; i < 4; ++i) {
+        const int top = edges[EDGE_ABOVE][loc_base + x0 + i];
+        const int diff_left = corner_pixel - top;
+        const int diff_corner = abs(diff_top + diff_left);
+        const int dl = abs(diff_left);
+        const int val = dl <= dt && dl <= diff_corner ? left : dt <= diff_corner ? top : corner_pixel;
+        const uint packed = (uint)clamp(val, 0, 1023) << ((i & 1) * 16);
+        if (i < 2) pixels.x |= packed;
+        else pixels.y |= packed;
       }
-
-      int w_tl = (mode == MODE_PAETH) ? (32 - w_t0 - w_l0) : 0;
-      int w_l1 = (mode_info == Dir3) ? shift_y : 0;
-      int w_t1 = (mode_info == Dir1) ? shift_x : 0;
-      int w_b = (mode_info & SmoothV) ? 0x100 - w_t0 : 0;
-      int w_r = (mode_info & SmoothH) ? 0x100 - w_l0 : 0;
-
-      int sum = w_tl * topleft + w_b * left[loc_base + bh - 1] + w_r * above[loc_base + bw - 1] + w_l0 * l0 +
-                w_t0 * t0 + w_l1 * l1 + w_t1 * t1;
-
-      sum += 1 << (params.w - 1);
-      sum >>= params.w;
-      int val = clamp(sum, 0, 1023) << ((i & 1) * 16);
-      if (i & 2)
-        pixels.y |= val;
-      else
-        pixels.x |= val;
+    } else {
+      // Smooth vertical and horizontal each contribute a weighted pair. The vertical weight
+      // and bottom sample are common to the row.
+      int vertical_weight = 0;
+      int bottom_term = 0;
+      int left = 0;
+      int right = 0;
+      if (mode_info & SmoothV) {
+        vertical_weight = cb_sm_weight_arrays[bh + y].x;
+        bottom_term = (256 - vertical_weight) * edges[EDGE_LEFT][loc_base + bh - 1];
+      }
+      if (mode_info & SmoothH) {
+        left = edges[EDGE_LEFT][loc_base + y];
+        right = edges[EDGE_ABOVE][loc_base + bw - 1];
+      }
+      [loop] for (int i = 0; i < 4; ++i) {
+        const int x = x0 + i;
+        int sum = bottom_term;
+        if (mode_info & SmoothV) sum += vertical_weight * edges[EDGE_ABOVE][loc_base + x];
+        if (mode_info & SmoothH) sum += 256 * right + cb_sm_weight_arrays[bw + x].x * (left - right);
+        const uint packed = (uint)clamp((sum + (1 << (params.w - 1))) >> params.w, 0, 1023) << ((i & 1) * 16);
+        if (i < 2) pixels.x |= packed;
+        else pixels.y |= packed;
+      }
     }
   }
 
