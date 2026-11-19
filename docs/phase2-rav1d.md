@@ -3197,7 +3197,26 @@ GPU-written lengths and keep the used records. The mode info comparison leaves d
 
 `-gputime -parseopt time,gpublists` shows `pred_count` and `pred_scan`. Compare them and the
 prediction stages with `-gputime -parseopt time`. The switch is off by default. WARP times are
-from a CPU rasterizer. Promotion to the default needs a console measurement.
+from a CPU rasterizer.
+
+**On the console it is slower, so it stays off** (2026-11-18, package 0.2.217, the new 4K defaults:
+two frames in parse, four slots, `gpugrid`; Bale stopped, GPU healthy, three runs of 300 frames each,
+the mean; the md5 set of 15 streams is unchanged with `gpublists`):
+
+| Clip | fps | GPU busy, ms | `pred_count` + `pred_scan`, ms | Block lists on the parse threads, ms | Thread sum, ms | Device buffers, MiB |
+| --- | --- | --- | --- | --- | --- | --- |
+| `j4k40` | 53.5 → 51.4 | 18.71 → 19.51 | 0.15 + 0.69 | 3.55 → 3.10 | 24.3 → 23.6 | 487.8 → 482.4 |
+| `d2_300` | 58.0 → 57.4 | 10.06 → 10.78 | 0.18 + 0.58 | 1.40 → 0.77 | 21.5 → 20.5 | 487.8 → 482.4 |
+
+- `j4k40` is bound by the GPU with four slots (18.7 of 18.7 ms a frame), so the 0.8 ms the two passes
+  add are 4 % of its frames. The runs of each setting were within 0.1 fps of each other.
+- `d2_300` gives up 0.6 ms of the GPU, which has room there, for 0.6 ms of the block lists and 0.9 ms
+  of the thread sum, and is still 1 % slower: with four slots its frames are not bound by the parse
+  threads' sum alone (three frames in parse on three threads did not help it either, 2026-11-18).
+- Most of the cost is `pred_scan`, a thread a list walking the groups of the frame one after the
+  other. A scan in parallel over the groups would take it to a fraction, but the passes would still
+  cost the GPU more than `j4k40` can give, for less than a millisecond of the parse. Step B (the
+  wavefront) costs the GPU more and needs a read back, so it is not taken further either.
 
 ### The split of the sink and the block lists on the console (2026-11-16)
 
