@@ -1178,6 +1178,20 @@ The wavefront schedule, bindings and video buffers are those of the existing fra
 The `/Od` build of this source is the default, and `-intraopt` selects the FXC-optimised build
 of the same source.
 
+On the console (2026-11-18, package 0.2.218 against 0.2.220's default path, the same session after a
+restart, three runs of 300 frames each, the mean; the md5 set of 15 streams is unchanged):
+
+| Clip | `gpu intra`, ms (mean / median / p95) | GPU busy, ms | fps |
+| --- | --- | --- | --- |
+| `j4k40` | 11.49 / 8.56 / 25.4 → 7.09 / 5.30 / 15.7 | 18.6 → 14.2 | 53.7 → 64.5 |
+| `d2_300` | 1.70 / 0.52 / 8.1 → 1.36 / 0.32 / 7.0 | 9.97 → 9.63 | 58.0 → 58.6 |
+
+No other stage, the recording thread and the device buffers change. `j4k40` is then bound by the
+parse threads, no longer by the GPU. A second shader with the same three syncs but its loads in
+front of the first and twice the group memory (21 KiB, behind `-parseopt intralean` on a branch
+that was not merged) was slower than the default on the same console: `j4k40` intra 12.39 ms,
+51.4 fps.
+
 ## Intra optimisation A/B (`-intraopt`)
 
 Upstream's project compiles `intra_main.hlsl` and `intra_main_hbd.hlsl` with FXC

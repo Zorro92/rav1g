@@ -127,7 +127,7 @@ every job of a push, and when all have passed the job `release` publishes a GitH
 | `SHA256SUMS` | the SHA-256 of each, for an application that pins the release |
 
 An application copies `rav1g.h` from the release (or from the tagged commit) and pins `rav1g.dll` by
-the tag and its SHA-256. The first release is `v0.4.0-alpha.1` (2026-11-18).
+the tag and its SHA-256. The first release is `v0.4.0-alpha.1` (2026-11-18). `v0.4.0-alpha.2` (2026-11-18, interface version 1 as before) has the 96-byte mode info record, four pipeline slots and the mode info grid built by the GPU above 2560x1440 (487.8 MiB of device buffers at 3840x2160 10-bit), and the high-bit-depth intra shader with three group syncs.
 
 ## A pipeline cache on disk: tried, and taken out (2026-11-18)
 
