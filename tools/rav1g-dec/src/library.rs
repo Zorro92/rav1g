@@ -165,6 +165,7 @@ pub struct Choices {
     pub cdef_v2: bool,
     pub intra_v2: bool,
     pub intra_opt: bool,
+    pub lf_legacy: bool,
     pub lf_h_split: u32,
     pub intra_edge_fix: bool,
     pub inter_fast: u32,
@@ -489,6 +490,7 @@ impl Library {
 
     /// The shader choices, set while no frame is in flight.
     pub fn set_choices(&self, choices: &Choices) {
+        switches::set_lf_legacy(choices.lf_legacy);
         if self.is_c() {
             capi::rav1g_set_cdef_v2(choices.cdef_v2);
             capi::rav1g_set_intra_v2(choices.intra_v2);

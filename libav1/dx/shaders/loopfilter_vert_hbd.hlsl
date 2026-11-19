@@ -14,13 +14,10 @@
  * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
  */
 
-#define BlockSize 32
 #define SignedPixelMin -512
 #define SignedPixelMax 511
 #define PixelGray 512
 #define Thresh10 4
-
-groupshared uint input_edges[16 * (64 / 4)];
 
 void filter_vertical_edge(RWByteAddressBuffer buffer, uint offset, int4 limits, uint type) {
   uint2 pixels0 = uint2(0, 0);
@@ -159,63 +156,6 @@ void filter_vertical_edge(RWByteAddressBuffer buffer, uint offset, int4 limits, 
   }
 }
 
-RWByteAddressBuffer dst_frame : register(u0);
-ByteAddressBuffer lf_blocks : register(t0);
-
-cbuffer LoopfilterData : register(b0) {
-  int4 cb_planes[3];
-  int4 cb_limits[64];
-};
-
-cbuffer LoopfilterSRT : register(b1) {
-  uint cb_wicount;
-  uint cb_plane;
-  uint cb_offset_base;
-  uint cb_block_cols;
-  uint cb_block_id_offset;
-};
-
-[numthreads(64, 1, 1)] void main(uint3 thread
-                                 : SV_DispatchThreadID) {
-  // A thread behind the last block of the dispatch does nothing, but it takes part in the group syncs: a
-  // group sync has to be reached by all threads of the group.
-  const bool active = thread.x < cb_wicount;
-  const int plane = cb_plane;
-  const int wi = thread.x & 3;
-  const uint block_id = ((thread.x >> 2) << 1) + cb_block_id_offset;
-  const int local_offset = (thread.x & (64 - 4)) << 2;
-  if (active) {
-    uint2 data = lf_blocks.Load2((cb_offset_base + block_id) * BlockSize + (wi << 3));
-    input_edges[local_offset + (wi << 2) + 0] = data.x & 0xffff;
-    input_edges[local_offset + (wi << 2) + 1] = (data.x >> 16);
-    input_edges[local_offset + (wi << 2) + 2] = data.y & 0xffff;
-    input_edges[local_offset + (wi << 2) + 3] = (data.y >> 16);
-  }
-
-  // The sixteen edges of a block are loaded by its four threads, four each, and every thread walks all of
-  // them. The threads of a group run in no particular order, so it takes a group sync to have the edges
-  // there before they are read. (Upstream had a plain group memory barrier, which makes no thread wait:
-  // that held only where the 64 threads of a group ran in lockstep, as one wave.)
-  GroupMemoryBarrierWithGroupSync();
-
-  const int block_x = block_id % cb_block_cols;
-  const int block_y = block_id / cb_block_cols;
-  const int stride = cb_planes[plane].x;
-  const int addr = cb_planes[plane].y + block_x * 128 + (block_y * 4 + wi) * stride;
-
-  if (!active) return;
-
-  for (int col = 0; col < 16;) {
-    uint edge = input_edges[local_offset + col];
-    if (!edge) break;
-    int level = edge & 63;
-    int filter = (edge >> 6) & 3;
-    int step = edge >> 8;
-
-    if (level) {
-      const int4 limits = cb_limits[level] << 2;
-      filter_vertical_edge(dst_frame, addr + col * 8, limits, filter);
-    }
-    col += step;
-  }
-}
+#define LfSampleBytes 2
+#define LfLimitShift 2
+#include "loopfilter_vert_main.h"

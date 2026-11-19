@@ -104,6 +104,11 @@ pub fn set_inter_fast(mode: u32) {
     crate::host::av1_set_inter_fast(mode as c_int)
 }
 
+/// Select the original deblocking kernels (false by default).
+pub fn set_lf_legacy(enable: bool) {
+    crate::host::av1_set_lf_legacy(c_int::from(enable))
+}
+
 /// Experiment: how the horizontal loop filter is dispatched, 0 (one dispatch per plane), 1 or 2.
 pub fn set_lf_h_split(mode: u32) {
     crate::host::av1_set_lf_h_split(mode as c_int)

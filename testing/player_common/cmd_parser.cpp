@@ -111,6 +111,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        "+ 32 frame buffer bound at the recording (with 1: one frame buffer less with three slots; not in -lowmem). "
        "Default: 1, and 3 for a decoder above 1920x1088; 1 for the mode info pool of the worst case, 0 for none",
        "", &params_.lowmem_parts_},
+      {"lflegacy", atSingle, anOptional, "use the original deblocking kernels", "", &params_.lflegacy_},
       {"lfhsplit", atInt, anOptional,
        "horizontal loop filter: 1 even rows of blocks, UAV barrier, odd rows; 2 every row of blocks on its "
        "own. Default 0, one dispatch per plane (same output)",
@@ -461,6 +462,7 @@ void CParameters::Reset() {
   params_.continue_on_error_ = false;
   params_.parseopt_.clear();
   params_.parser_options_ = PLAYER_PARSEOPT_DEFAULT;
+  params_.lflegacy_ = false;
   params_.lfhsplit_ = 0;
   params_.intraedgefix_ = false;
   params_.interfast_ = false;

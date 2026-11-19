@@ -876,6 +876,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         cdef_v2: !task.cdefv1,
         intra_v2: task.intrav2,
         intra_opt: task.intraopt,
+        lf_legacy: task.lflegacy,
         lf_h_split: task.lfhsplit as u32,
         intra_edge_fix: task.intraedgefix,
         inter_fast: task.interfast,
@@ -903,6 +904,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
             }
         );
     }
+    say!("Deblocking kernels: {}", if task.lflegacy { "legacy (-lflegacy)" } else { "default" });
     if task.lfhsplit != 0 || task.intraedgefix {
         say!(
             "EXPERIMENTS {}:{}{}",

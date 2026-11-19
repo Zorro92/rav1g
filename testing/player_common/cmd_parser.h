@@ -171,6 +171,7 @@ class CParameters {
     // the same decoder.
     bool continue_on_error_;
     // Experiments (docs/test-player.md): -lfhsplit 0|1|2, -intraedgefix.
+    bool lflegacy_;
     int lfhsplit_;
     bool intraedgefix_;
     // -interfast: inter blocks by the fraction of their motion vectors (docs/test-player.md);

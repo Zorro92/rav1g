@@ -94,6 +94,8 @@ pub struct Task {
     /// What a frame does about the clears of its slot's grids: nothing to clear without a flag;
     /// -gpuclear, -cpuclear (and -asyncclear, its older name), -syncclear.
     pub clears: Clears,
+    /// -lflegacy
+    pub lflegacy: bool,
     /// -lfhsplit <0|1|2>
     pub lfhsplit: i32,
     pub intraedgefix: bool,
@@ -159,6 +161,7 @@ impl Default for Task {
             intrav2: false,
             intraopt: true,
             clears: Clears::NotNeeded,
+            lflegacy: false,
             lfhsplit: 0,
             intraedgefix: false,
             poison: Poison::Off,
@@ -266,6 +269,7 @@ pub fn usage() {
     say!("  -headroom <MiB>       with -budget: what the guard should leave of it behind the decoder; a decoder");
     say!("                        that would leave less is created with fewer slots and frames in parse (MEMORY");
     say!("                        headroom lines). Default 0: the library's 128; 48 or less is the guard's margin");
+    say!("  -lflegacy           use the original deblocking kernels");
     say!("  -lfhsplit <n>         horizontal loop filter: 1 even rows of blocks, a UAV barrier, odd rows; 2 every");
     say!("                        row of blocks on its own (default 0: one dispatch per plane; same output)");
     say!("  -intraedgefix         8-bit intra: the above edge filter stops where the 10-bit one does (same output)");
@@ -434,6 +438,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-gpuclear" => task.clears = Clears::Gpu,
             "-cpuclear" | "-asyncclear" => task.clears = Clears::CompletionThread,
             "-syncclear" => task.clears = Clears::DecodeThread,
+            "-lflegacy" => task.lflegacy = true,
             "-lfhsplit" => task.lfhsplit = number()?,
             "-intraedgefix" => task.intraedgefix = true,
             "-continue_on_error" => task.continue_on_error = true,

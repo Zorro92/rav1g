@@ -49,6 +49,7 @@ UNOPTIMIZED = [name + '_legacy' for name in INTRA_MAIN]
 REQUIRED_BYTECODE = [
     'cdef_filter', 'cdef_filter_v2', *INTRA_MAIN, *UNOPTIMIZED,
     'intra_filter', 'intra_filter_hbd', 'intra_v2', 'intra_v2_hbd',
+    'loopfilter_vert_hbd', 'loopfilter_vert_hbd_legacy',
 ]
 
 # What DXC is given for every shader on top of -T, -E and -Od:

@@ -1167,6 +1167,17 @@ front of the first and twice the group memory (21 KiB, behind `-parseopt intrale
 that was not merged) was slower than the default on the same console: `j4k40` intra 12.39 ms,
 51.4 fps.
 
+## Deblocking A/B (`-lflegacy`)
+
+The test player and `rav1g-dec` select the new deblocking kernels by default.
+Add `-lflegacy` to select the original kernels. For a bit-exact comparison, keep
+the other arguments the same and compare the per-output-frame md5s. With stage
+dumps, compare `lf_blocks`, `lf_vert_even`, `lf_vert` and `lf_horz` in that order.
+With `-gputimedetail`, the GPU stage times are `lf_gen`, `lf_vert` and `lf_horz`.
+
+Run `sh testing/loopfilter_check/run.sh --mutate` for the CPU comparison and its
+negative controls.
+
 ## Intra optimisation A/B (`-intraod`)
 
 Use the same build and task settings on both sides of the comparison.

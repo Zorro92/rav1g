@@ -11,7 +11,7 @@
 //! `av1_loopfilter_gpu` of `libav1/dx/loopfilters.cpp`.
 
 use std::ffi::c_int;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use super::core::{
     alloc_constants, buffer, commands, perf_gpu_mark, pipeline, stage_dump_active, stage_dump_constants,
@@ -50,6 +50,15 @@ struct GenLfData {
     lfi_n_lvl: [[[[[c_int; 4]; 2]; 8]; 8]; 3],
 }
 
+// Test flag -lflegacy: select the original deblocking kernels for comparisons.
+static LF_LEGACY: AtomicBool = AtomicBool::new(false);
+
+/// `av1_set_lf_legacy` (`dx/av1_perf.h`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_lf_legacy(enable: c_int) {
+    LF_LEGACY.store(enable != 0, Ordering::Relaxed);
+}
+
 // Test flag -lfhsplit: how the horizontal loop filter is dispatched. loopfilter_hor works on blocks of 4
 // columns by 64 rows; the first edge of a block reads and writes the last rows of the block above it, which
 // another thread group of the same dispatch filters. 0: one dispatch per plane, as upstream. 1: the even
@@ -82,6 +91,7 @@ pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: 
         let td = &mut *(*dec).curr_frame_data;
         let dst = &*td.dst_frame_buffer;
         let lib = (*dec).shader_lib;
+        let lf_legacy = LF_LEGACY.load(Ordering::Relaxed);
         let commands = commands(dec);
         let lf_blocks = buffer((*dec).loopfilter_blocks);
         let frame_buffers = buffer((*dec).frame_buffer_pool);
@@ -236,7 +246,11 @@ pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: 
         }
 
         // The inline constants of the filters: wicount, plane, offset_base, block_cols, block_id_offset.
-        let shader = pipeline(&raw const (*td.shaders).loopfilter_v);
+        let shader = pipeline(if lf_legacy && td.bitdepth > 8 {
+            &raw const (*lib).shader_lf_vert_hbd_legacy
+        } else {
+            &raw const (*td.shaders).loopfilter_v
+        });
         commands.set_layout(shader.layout());
         commands.bind_read(0, lf_blocks.location());
         commands.bind_write(1, frame_buffers.location());

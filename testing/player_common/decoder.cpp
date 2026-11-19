@@ -827,6 +827,8 @@ int AV1Decoder::DecodeOne() {
                                 "-cpuclear and -syncclear keep it in the slot's grid and clear that)");
 
   // The experiments: set like the switches above. The shader build is fixed when the package is built.
+  av1_set_lf_legacy(params_.lflegacy_);
+  XB_LOGI << "Deblocking kernels: " << (params_.lflegacy_ ? "legacy (-lflegacy)" : "default");
   rav1g_set_lf_h_split(params_.lfhsplit_);
   rav1g_set_intra_edge_fix(params_.intraedgefix_ != 0);
   XB_LOGI << "Experiments: shaders " << (rav1g_shader_variant()[0] ? rav1g_shader_variant() : "normal build")

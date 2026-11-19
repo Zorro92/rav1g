@@ -309,6 +309,10 @@ enum {
 };
 void av1_set_inter_fast(int mode);
 
+/* Process-wide. Non-zero selects the original deblocking kernels.
+ * Zero selects the default kernels. Change it only while no frame is in flight. */
+void av1_set_lf_legacy(int enable);
+
 /* Process-wide experiments for a device whose output differs from the
  * reference (docs/gpu-av1-decoder.md). Both leave the decoded output as it
  * is on a device that follows D3D. Change them only while no frame is in

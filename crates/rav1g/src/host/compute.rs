@@ -157,7 +157,7 @@ const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
     // 20 transforms, 26 shaders that do not depend on the bit depth, 30 that do for 8 bits and for more.
-    assert!(SHADERS == 20 + 26 + 2 * 30);
+    assert!(SHADERS == 20 + 27 + 2 * 30);
     assert!(LAYOUTS == 24);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
@@ -419,6 +419,7 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("inter_ext_borders_hbd", &layouts.common0110, &raw mut (*lib).shaders_hbd.inter_ext_borders),
             ("reconstruct_block_hbd", &layouts.intra_pred, &raw mut (*lib).shaders_hbd.reconstruct_block),
             ("loopfilter_vert_hbd", &layouts.lf, &raw mut (*lib).shaders_hbd.loopfilter_v),
+            ("loopfilter_vert_hbd_legacy", &layouts.lf, &raw mut (*lib).shader_lf_vert_hbd_legacy),
             ("loopfilter_hor_hbd", &layouts.lf, &raw mut (*lib).shaders_hbd.loopfilter_h),
             ("inter_scale", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_scale),
             ("inter_scale_2x2chroma", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_scale_2x2),
@@ -888,7 +889,7 @@ mod tests {
             .filter_map(|line| line.trim().trim_start_matches('(').strip_prefix('"'))
             .map(|rest| &rest[..rest.find('"').unwrap()])
             .collect();
-        assert_eq!(names.len(), 102);
+        assert_eq!(names.len(), 103);
         let mut unique = names.clone();
         unique.sort_unstable();
         unique.dedup();
