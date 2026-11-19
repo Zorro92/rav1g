@@ -130,3 +130,38 @@ The four logs agree on **SM 6.4**, `WaveOps=1`, lanes **64–64**, `Native16BitS
 Keep wave participants active with neutral values for tail lanes. Form logical blocks explicitly, then combine partials across waves through shared memory. `SV_GroupIndex / WaveGetLaneCount()` alone cannot establish wave membership. A group sync must be reached uniformly and a cross-group dependency still needs dispatch-level ordering. When a fused pass reads another lane's UAV store, either keep the value in registers/shared memory or use device-memory ordering. [Group and wave indexing](https://microsoft.github.io/hlsl-specs/proposals/0048-group-wave-index/), [Device-memory group sync](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/devicememorybarrierwithgroupsync)
 
 Any **required** profile above 6.0 raises the check reached by `rav1g_device_create`, through `Device::with_d3d12` and `CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL)`. It also changes the DXC cache/profile and the build's `shader_set.txt` validation. An optional higher-profile PSO needs capability-based selection before pipeline creation and a `cs_6_0` fallback. Decide on a 6.4 floor only if a measured gain across target Series devices is worth the compatibility cost. A second owner decision is whether to keep experimental controls and unused entries once the live paths are ported. [Device check](../crates/rav1g/src/device.rs#L74), [D3D12 probe](../crates/rav1g/src/gpu/d3d12.rs#L132), [Shader build profile](../testing/shader_cache/shaders.py#L53), [Build validation](../crates/rav1g-sys/build.rs#L123)
+
+## Progress (2026-11-19)
+
+Every step below is bit-exact: the per-frame md5 of the 15-stream console set and of two 4K film cuts (one
+1-tile 10-bit film with film grain, one 8-tile 10-bit film) matches the reference with the new default, and
+CI's WARP conformance passes. Each step keeps the old kernel behind a test-player / `rav1g-dec` switch of the
+internal test interface (`av1_set_*` in `libav1/dx/av1_perf.h`; the public API and ABI are unchanged).
+Console timings: test player, `-frate -1 -nopresent -gputime -output p010`, 2 or 3 interleaved rounds of the
+new default against the switch, Bale stopped, GPU health-checked before and after.
+
+| Step | Commits | Switch | Measured (old → new) |
+| --- | --- | --- | --- |
+| 10-bit filter intra | `cff4dfb` | `-shaderpick od=…` (kernel since removed) | film: intra 4.09 → 3.81 ms a frame, worst second 985 → 912 ms |
+| Main intra `-O3`, wave sums for DC/CFL | `c92546c`, `8bd6d2a` | `-intraod` | j4k40: intra 7.08 → 5.47 ms (−23%), GPU busy 13.94 → 12.34 ms; `-O3` alone: no change |
+| FXC removed from main | `e8360bc` | | default DXIL byte-identical |
+| Loop filter | `9d1ab55`..`ee9ec44` | `-lflegacy` | film: `lf_vert` −10%, `lf_gen` −9% |
+| Loop restoration | `2474432`..`adc9687` | `-lrlegacy` | film: 2.44 → 1.78 ms (−27%), worst second 132 → 91 ms of restoration; j4k40 1.28 → 1.09 ms |
+| Film grain (direct NV12/P010) | `b923685`, `feb5976` | `-fglegacy` | film: 3.74 → 1.68 ms a shown frame (−55%), GPU busy −10% |
+| Inter, single and compound | `8ea54c2`, `140745a` | `-interlegacy` | film 3.14 → 1.46 ms (−54%); 8-tile film 5.51 → 3.81 ms; d2_300 5.51 → 2.49 ms; j4k40 1.34 → 0.92 ms |
+| CDEF and its lists | `82a82d9`, `dda9686` | `-cdeflegacy`, `-cdeflistslegacy` | j4k40: cdef 2.41 → 1.87 ms (−22%), lists 0.20 → 0.14 ms |
+| Output copy, small transforms, residual clear | `16215bc`, `595d450`, `86b55ba` | `-copylegacy`, `-idctlegacy`, `-clearlegacy` | j4k40: copy −2%, small transforms −3%; clear unchanged at 4K |
+
+Results that did not land:
+
+- Intra scheduling (fusing the main and filter intra dispatches of a wavefront step): dispatches halved,
+  intra 1.8% slower. A fit of the logs puts about 30 µs on each serial wavefront step; the dispatch count is
+  not the cost.
+- Loop restoration row reuse in its first form doubled the group memory of every restoration group and made
+  Wiener-only frames 52% slower; the merged form keeps the self-guided storage out of a separate Wiener/copy
+  kernel.
+- Lane exchanges (quad reads) for packed restoration stores: no measurable gain, and only the console can
+  test them (WARP's waves are 4 lanes), so they were dropped.
+
+Where the 1-tile 10-bit film's worst second stands (24 output frames, GPU busy): 982 ms before this work,
+about 785 ms after it (about 30.5 fps of headroom at 23.976 fps). Intra is now about half of it.
