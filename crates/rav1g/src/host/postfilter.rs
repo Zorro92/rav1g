@@ -374,7 +374,8 @@ struct PlaneRestorationData {
     subsampling: c_int,
     hbd: c_int,
     bit_depth: c_int,
-    pad: [c_int; 2],
+    unit_shift: c_int,
+    pad: c_int,
 }
 
 #[repr(C)]
@@ -438,20 +439,15 @@ unsafe fn looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON, lr_ctxt: *mut 
             (*plane).subsampling = subsampling;
             (*plane).hbd = td.is_hbd;
             (*plane).bit_depth = td.bitdepth;
+            (*plane).pad = 0;
 
             if !restored[p] {
-                // A plane without restoration has no units, but its record still gets a valid unit grid (one
-                // unit, the first entry of the type table). The memory of the record is the frame's constant
-                // upload memory, which is only rewound between frames, so fields left unwritten here would
-                // keep what an earlier frame put at this place. A shader that computed the unit's address
-                // from them and loaded the type table without a branch (as FXC compiled
-                // loop_restoration.hlsl, the load flattened in front of a select) read at an address made of
-                // stale data: the table is bound without bounds checking, and the read can be outside of
-                // mapped memory, which removes the device. loop_restoration.hlsl now loads under a branch for
-                // a restored plane only; these defaults keep any other reader in range.
+                // Entry zero is in range even for a copy-only plane. Keep its dummy grid initialized
+                // because the type table is a root SRV and the upload memory is reused across frames.
                 (*plane).units.rows = 1;
                 (*plane).units.cols = 1;
                 (*plane).units.size = 1;
+                (*plane).unit_shift = 0;
                 (*plane).units.stride = 1;
                 (*plane).lr_buffer_offset = 0;
                 continue;
@@ -461,6 +457,8 @@ unsafe fn looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON, lr_ctxt: *mut 
             (*plane).units.rows = rsi.vert_units_per_tile;
             (*plane).units.cols = rsi.horz_units_per_tile;
             (*plane).units.size = rsi.restoration_unit_size;
+            // The parser provides the unit size as log2, and the host stores it as a power of two.
+            (*plane).unit_shift = rsi.restoration_unit_size.trailing_zeros() as c_int;
             (*plane).units.stride = rsi.horz_units_per_tile;
             (*plane).lr_buffer_offset = lr_ptr;
 

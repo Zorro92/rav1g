@@ -14,11 +14,8 @@
  * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
  */
 
-#pragma warning(disable : 3557)
 #include "restoration.h"
 
-#define MI_SIZE 4
-#define MI_SIZE_LOG2 2
 #define Round2(value, n) (((value) + (((1 << (n)) >> 1))) >> (n))
 #define STRIPE_SIZE 64
 #define RESTORE_NONE 0
@@ -68,7 +65,8 @@ struct PlaneRestorationData {
   int subsampling;
   int hbd;
   int bit_depth;
-  int2 pad;
+  int unit_shift;  // log2(units.Size), in the first word of padding in the legacy layout
+  int pad;
 };
 cbuffer PlaneRestorationConstBuffer : register(b1) { PlaneRestorationData pl[3]; };
 
@@ -79,6 +77,8 @@ cbuffer cb_loop_rest_data : register(b2) {
 
 #define WG_WIDTH 16
 #define WG_HEIGHT 4
+#define BOX_WIDTH (WG_WIDTH + 2)
+#define BOX_HEIGHT (WG_HEIGHT + 2)
 
 groupshared int input[WG_HEIGHT + 6][WG_WIDTH + 8];
 groupshared int output[WG_HEIGHT][WG_WIDTH];
@@ -101,14 +101,11 @@ uint lookup_sgr_a2(uint z) {
 #define get_loaded_source_sample(x, y) input[y + 3][x + 4]
 // Self guided filter, pass 0, first half: the box sums A and B of the group (with a border of one), spread
 // over its threads.
-void box_sums0(int w, int h, int eps, int lx, int ly, int bit_depth) {
-  int id = ly * WG_WIDTH + lx;
-  for (int idx = id; idx < (h + 2)*(w + 2); idx += WG_HEIGHT * WG_WIDTH) {
-    // Unsigned: idx counts up from the thread's place in the group and w + 2 is the width of the group
-    // with its border, so neither is negative, and the quotient and the remainder are those of the
-    // signed division. FXC makes the signed one out of several instructions (warning X3556).
-    int i = (int)((uint)idx / (uint)(w + 2)) - 1;
-    int j = (int)((uint)idx % (uint)(w + 2)) - 1;
+void box_sums0(uint id, int eps, uint2 shifts, uint2 rounding) {
+  for (uint idx = id; idx < BOX_HEIGHT * BOX_WIDTH; idx += WG_HEIGHT * WG_WIDTH) {
+    uint row = idx / BOX_WIDTH;
+    int i = (int)row - 1;
+    int j = (int)(idx - row * BOX_WIDTH) - 1;
     uint a = 0;
     uint b = 0;
     for (int dy = -2; dy <= 2; dy++) {
@@ -118,8 +115,8 @@ void box_sums0(int w, int h, int eps, int lx, int ly, int bit_depth) {
         b += c;
       }
     }
-    a = Round2(a, 2 * (bit_depth - 8));
-    uint d = Round2(b, bit_depth - 8);
+    a = (a + rounding.y) >> shifts.y;
+    uint d = (b + rounding.x) >> shifts.x;
     uint p = max(0, int(a * 25 - d * d));
     uint z = Round2(p * eps, SGRPROJ_MTABLE_BITS);  // p*s in documentation
     uint a2 = lookup_sgr_a2(min(z, 255u));
@@ -161,11 +158,11 @@ int box_filter0(int lx, int ly) {
 
 // Self guided filter, pass 1, first half: the box sums A and B of the group (with a border of one), spread
 // over its threads.
-void box_sums1(int w, int h, int eps, int lx, int ly, int bit_depth) {
-  int id = ly * WG_WIDTH + lx;
-  for (int idx = id; idx < (h + 2)*(w + 2); idx += WG_HEIGHT * WG_WIDTH) {
-    int i = (int)((uint)idx / (uint)(w + 2)) - 1;  // unsigned, as in box_sums0
-    int j = (int)((uint)idx % (uint)(w + 2)) - 1;
+void box_sums1(uint id, int eps, uint2 shifts, uint2 rounding) {
+  for (uint idx = id; idx < BOX_HEIGHT * BOX_WIDTH; idx += WG_HEIGHT * WG_WIDTH) {
+    uint row = idx / BOX_WIDTH;
+    int i = (int)row - 1;
+    int j = (int)(idx - row * BOX_WIDTH) - 1;
     uint a = 0;
     uint b = 0;
     for (int dy = -1; dy <= 1; dy++) {
@@ -175,8 +172,8 @@ void box_sums1(int w, int h, int eps, int lx, int ly, int bit_depth) {
         b += c;
       }
     }
-    a = Round2(a, 2 * (bit_depth - 8));
-    uint d = Round2(b, bit_depth - 8);
+    a = (a + rounding.y) >> shifts.y;
+    uint d = (b + rounding.x) >> shifts.x;
     uint p = max(0, int(a * 9 - d * d));
     uint z = Round2(p * eps, SGRPROJ_MTABLE_BITS);  // p*s in documentation
     uint a2 = lookup_sgr_a2(min(z, 255u));
@@ -218,70 +215,67 @@ int box_filter1(int lx, int ly) {
 // group ran in lockstep, as one wave.) A group sync has to be reached by all threads of the group: which
 // filter a group runs, and whether it leaves early, depends on the group only (the restoration unit it is
 // in), not on the thread.
-[numthreads(WG_WIDTH, WG_HEIGHT, 1)] void main(uint3 thread
-                                               : SV_DispatchThreadID, uint3 group
-                                               : SV_GroupID) {
+[numthreads(WG_WIDTH, WG_HEIGHT, 1)]
+void main(uint3 local : SV_GroupThreadID, uint3 group : SV_GroupID, uint id : SV_GroupIndex) {
   const int gx = group.x * WG_WIDTH;
   const int gy = group.y * WG_HEIGHT;
-  const int lx = thread.x & (WG_WIDTH - 1);
-  const int ly = thread.y & (WG_HEIGHT - 1);
+  const int lx = local.x;
+  const int ly = local.y;
 
   const int subsampling = pl[plane_id].subsampling;
-  const int bit_depth = pl[plane_id].bit_depth;
-
-  // Load block
-  int stripe_id = uint((gy << subsampling) + 8) / STRIPE_SIZE;
-  int StripeStartY = ((stripe_id * STRIPE_SIZE) - 8) >> subsampling;
-  int StripeEndY = StripeStartY + (STRIPE_SIZE >> subsampling) - 1;
-
-  PlaneInfo plane = pl[plane_id].plane;
-  int block_offset = 0;
-
+  const bool hbd = pl[plane_id].hbd != 0;
+  const PlaneInfo plane = pl[plane_id].plane;
   const int dst_offset = pl[plane_id].dst_offset;
 
-  // The restoration unit of the group and its entry of the type table, for a plane that is restored only.
-  // The branch is asked for: without it FXC computes the address and loads the entry for every plane and
-  // selects afterwards, and the table is a root SRV, which has no bounds checking. For a plane without
-  // restoration the unit fields are not those of a unit grid (the host writes one unit at entry 0 now; it
-  // used to leave them unwritten, with what an earlier frame had at this place of the constant memory), so
-  // that load could be anywhere, outside of mapped memory too, and that removes the device.
+  // Copy-only planes have a dummy grid. Skip their read of the root SRV.
   int unitId = 0;
   int4 rType = int4(RESTORE_NONE, 0, 0, 0);
   [branch] if (do_restoration) {
     UnitsInfo units = pl[plane_id].units;
-    int unitCol = min(units.Cols - 1, uint(gx + 1) / units.Size);
-    int unitRow = min(units.Rows - 1, uint((gy + 1 + (8 >> subsampling))) / units.Size);
+    int shift = pl[plane_id].unit_shift;
+    int unitCol = min(units.Cols - 1, uint(gx + 1) >> shift);
+    int unitRow = min(units.Rows - 1, uint(gy + 1 + (8 >> subsampling)) >> shift);
     unitId = unitRow * units.Stride + unitCol + pl[plane_id].Lr_buffer_offset;
     rType = LrTypeSgr.Load4(unitId * 16);
   }
 
-  if (rType.x == RESTORE_NONE || !do_restoration) {
-    if ((thread.x & 3) == 0) {
-      if (pl[plane_id].hbd) {
-        uint2 input_char = src.Load2(plane.offset + plane.stride * thread.y + (thread.x << 1));
-        dst.Store2(dst_offset + plane.stride * thread.y + (thread.x << 1), input_char);
+  if (rType.x == RESTORE_NONE) {
+    if ((lx & 3) == 0) {
+      const int row_offset = (gy + ly) * plane.stride;
+      if (hbd) {
+        int at = row_offset + ((gx + lx) << 1);
+        dst.Store2(dst_offset + at, src.Load2(plane.offset + at));
       } else {
-        uint input_char = src.Load(plane.offset + plane.stride * thread.y + thread.x);
-        dst.Store(dst_offset + plane.stride * thread.y + thread.x, input_char);
+        int at = row_offset + gx + lx;
+        dst.Store(dst_offset + at, src.Load(plane.offset + at));
       }
     }
     return;
   }
 
-  for (int y = ly; y < WG_HEIGHT + 6; y += WG_HEIGHT)
-    for (int x = lx; x < WG_WIDTH / 4 + 2; x += WG_WIDTH) {
+  const int stripe_id = uint((gy << subsampling) + 8) / STRIPE_SIZE;
+  const int StripeStartY = ((stripe_id * STRIPE_SIZE) - 8) >> subsampling;
+  const int StripeEndY = StripeStartY + (STRIPE_SIZE >> subsampling) - 1;
+  const int pp_offset = pl[plane_id].pp_offset;
+  const int bit_depth = pl[plane_id].bit_depth;
+  const int sample_max = (1 << bit_depth) - 1;
+
+  if (lx < WG_WIDTH / 4 + 2) {
+    const int nc_x = (lx << 2) + gx - 4;
+    const int c_x = clamp(nc_x, 0, plane.width - 1) & ~3;
+    const int last_sample = nc_x < 0 ? 0 : plane.width - c_x - 1;
+    const int first_sample = nc_x - c_x >= 4 ? last_sample : 0;
+    const int x = lx;
+    for (int y = ly; y < WG_HEIGHT + 6; y += WG_HEIGHT) {
       int c_y = clamp(y + gy - 3, StripeStartY - 2, StripeEndY + 2);
       c_y = clamp(c_y, 0, plane.height - 1);
-      int nc_x = (x << 2) + gx - 4;
-      int c_x = clamp(nc_x, 0, plane.width - 1) & (~3);
-      int offset = (c_y < StripeStartY || c_y > StripeEndY) ? pl[plane_id].pp_offset : plane.offset;
+      int offset = (c_y < StripeStartY || c_y > StripeEndY) ? pp_offset : plane.offset;
+      offset += c_y * plane.stride;
 
-      if (pl[plane_id].hbd) {
-        int shift_max = nc_x < 0 ? 0 : (plane.width - c_x - 1) * 16;
-        int shift_min = (nc_x - c_x) >= 4 ? shift_max : 0;
-        block_offset = c_y * plane.stride + (c_x << 1);
-
-        uint2 input_char = src.Load2(offset + block_offset);
+      if (hbd) {
+        int shift_max = last_sample * 16;
+        int shift_min = first_sample * 16;
+        uint2 input_char = src.Load2(offset + (c_x << 1));
         uint4 shift = uint4(clamp(0, shift_min, shift_max), clamp(16, shift_min, shift_max),
                             clamp(32, shift_min, shift_max), clamp(48, shift_min, shift_max));
         input[y][x * 4 + 0] = (shift.x > 16 ? (input_char.y >> (shift.x - 32)) : (input_char.x >> shift.x)) & 0xffff;
@@ -289,16 +283,16 @@ int box_filter1(int lx, int ly) {
         input[y][x * 4 + 2] = (shift.z > 16 ? (input_char.y >> (shift.z - 32)) : (input_char.x >> shift.z)) & 0xffff;
         input[y][x * 4 + 3] = (shift.w > 16 ? (input_char.y >> (shift.w - 32)) : (input_char.x >> shift.w)) & 0xffff;
       } else {
-        int shift_max = nc_x < 0 ? 0 : (plane.width - c_x - 1) * 8;
-        int shift_min = (nc_x - c_x) >= 4 ? shift_max : 0;
-        block_offset = c_y * plane.stride + c_x;
-        uint input_char = src.Load(offset + block_offset);
+        int shift_max = last_sample * 8;
+        int shift_min = first_sample * 8;
+        uint input_char = src.Load(offset + c_x);
         input[y][x * 4 + 0] = (input_char >> clamp(0, shift_min, shift_max)) & 255;
         input[y][x * 4 + 1] = (input_char >> clamp(8, shift_min, shift_max)) & 255;
         input[y][x * 4 + 2] = (input_char >> clamp(16, shift_min, shift_max)) & 255;
         input[y][x * 4 + 3] = (input_char >> clamp(24, shift_min, shift_max)) & 255;
       }
     }
+  }
 
   // The first group sync also publishes the a2 table. Lookups in the box passes use group memory.
   if (rType.x == RESTORE_SGRPROJ && ly == 0) {
@@ -312,14 +306,15 @@ int box_filter1(int lx, int ly) {
   GroupMemoryBarrierWithGroupSync();
 
   if (rType.x == RESTORE_WIENER) {
-    int limit = (1 << (bit_depth + 1 + FILTER_BITS - InterRound0)) - 1;
+    const int limit = (1 << (bit_depth + 1 + FILTER_BITS - InterRound0)) - 1;
+    const int horizontal_bias = 1 << (bit_depth + FILTER_BITS - 1);
 
     int Lr_offset = unitId * 64;
     int4 hfilter0 = LrWiener.Load4(Lr_offset + 0);
     int4 hfilter1 = LrWiener.Load4(Lr_offset + 16);
 
     for (int r = ly; r < WG_HEIGHT + 6; r += WG_HEIGHT) {
-      int s = (input[r][lx + 4] << 7) + (1 << (bit_depth + 7 - 1));
+      int s = (input[r][lx + 4] << 7) + horizontal_bias;
 
       s += hfilter0.x * input[r][lx + 1];
       s += hfilter0.y * input[r][lx + 2];
@@ -348,12 +343,12 @@ int box_filter1(int lx, int ly) {
     s += vfilter1.y * intermediate[ly + 5][lx];
     s += vfilter1.z * intermediate[ly + 6][lx];
     int v = Round2(s, InterRound1);
-    output[ly][lx] = clamp(v, 0, (1 << bit_depth) - 1);  // input[ly][lx + 4];//
+    output[ly][lx] = clamp(v, 0, sample_max);
 
     GroupMemoryBarrierWithGroupSync();
 
     if (lx < WG_WIDTH / 4) {
-      if (pl[plane_id].hbd) {
+      if (hbd) {
         dst.Store2(dst_offset + (gy + ly) * plane.stride + (gx + lx * 4) * 2,
                    uint2((output[ly][lx * 4 + 0] << 0) | (output[ly][lx * 4 + 1] << 16),
                          (output[ly][lx * 4 + 2] << 0) | (output[ly][lx * 4 + 3] << 16)));
@@ -368,38 +363,38 @@ int box_filter1(int lx, int ly) {
     const int w1 = rType.z;
     const int w2 = (1 << SGRPROJ_PRJ_BITS) - w0 - w1;
 
-    int r0 = data.Sgr_Params[rType.w].x;
-    int r1 = data.Sgr_Params[rType.w].y;
-    int eps0 = data.Sgr_Params[rType.w].z;
-    int eps1 = data.Sgr_Params[rType.w].w;
+    const int4 params = data.Sgr_Params[rType.w];
+    const int sample_shift = bit_depth - 8;
+    const uint2 shifts = uint2(sample_shift, 2 * sample_shift);
+    const uint2 rounding = (uint2(1, 1) << shifts) >> 1u;
 
     int u = input[ly + 3][lx + 4] << SGRPROJ_RST_BITS;
     int v = w1 * u;
     // The two passes use the same memory for their box sums: a group sync before the sums are read, and
     // one before the next pass writes its own.
-    if (r0) {
-        box_sums0(WG_WIDTH, WG_HEIGHT, eps0, lx, ly, bit_depth);
+    if (params.x) {
+        box_sums0(id, params.z, shifts, rounding);
         GroupMemoryBarrierWithGroupSync();
         v += w0 * box_filter0(lx, ly);
         GroupMemoryBarrierWithGroupSync();
     } else {
         v += w0 * u;
     }
-    if (r1) {
-        box_sums1(WG_WIDTH, WG_HEIGHT, eps1, lx, ly, bit_depth);
+    if (params.y) {
+        box_sums1(id, params.w, shifts, rounding);
         GroupMemoryBarrierWithGroupSync();
         v += w2 * box_filter1(lx, ly);
     } else {
         v += w2 * u;
     }
-    
+
     int s = Round2(v, (SGRPROJ_RST_BITS + SGRPROJ_PRJ_BITS));
-    output[ly][lx] = clamp(s, 0, (1 << bit_depth) - 1);
+    output[ly][lx] = clamp(s, 0, sample_max);
 
     GroupMemoryBarrierWithGroupSync();
 
     if (lx < WG_WIDTH / 4) {
-      if (pl[plane_id].hbd) {
+      if (hbd) {
         dst.Store2(dst_offset + (gy + ly) * plane.stride + (gx + lx * 4) * 2,
                    uint2((output[ly][lx * 4 + 0] << 0) | (output[ly][lx * 4 + 1] << 16),
                          (output[ly][lx * 4 + 2] << 0) | (output[ly][lx * 4 + 3] << 16)));
