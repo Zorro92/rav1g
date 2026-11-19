@@ -89,6 +89,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"fglegacy", atSingle, anOptional, "original direct NV12/P010 film grain shader", "", &params_.fglegacy_},
       {"copylegacy", atSingle, anOptional, "original direct NV12/P010 copy shader", "", &params_.copylegacy_},
       {"idctlegacy", atSingle, anOptional, "original small inverse transform shaders", "", &params_.idctlegacy_},
+      {"clearlegacy", atSingle, anOptional, "clear the whole residual allocation", "", &params_.clearlegacy_},
       {"interlegacy", atSingle, anOptional, "original unscaled single-reference and average/distance inter shaders",
        "", &params_.interlegacy_},
       {"slots", atInt, anOptional,
@@ -458,6 +459,7 @@ void CParameters::Reset() {
   params_.fglegacy_ = false;
   params_.copylegacy_ = false;
   params_.idctlegacy_ = false;
+  params_.clearlegacy_ = false;
   params_.interlegacy_ = false;
   // 0: the task has no -slots (Parse() makes the default of it).
   params_.slots_ = 0;

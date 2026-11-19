@@ -104,6 +104,11 @@ pub fn set_idct_legacy(enable: bool) {
     crate::host::av1_set_idct_legacy(c_int::from(enable))
 }
 
+/// Clear the whole residual allocation before IDCT. The default clears the current frame's padded planes.
+pub fn set_clear_legacy(enable: bool) {
+    crate::host::av1_set_clear_legacy(c_int::from(enable))
+}
+
 /// Use the original single-reference and average/distance compound kernels for the unscaled inter size lists.
 pub fn set_inter_legacy(enable: bool) {
     crate::host::av1_set_inter_legacy(c_int::from(enable))

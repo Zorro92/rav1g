@@ -451,12 +451,11 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
     request!(assign, dec.restoration_info_alloc[1], mem.host(unit * uv_max_rst_units as usize));
     request!(assign, dec.restoration_info_alloc[2], mem.host(unit * uv_max_rst_units as usize));
 
-    let residuals_size = target_width * target_height
-        + 2 * ((((target_width >> 1) + 127) & !127) * (((target_height >> 1) + 127) & !127));
+    let [_, (_, u), (_, v)] = super::residual::plane_layout(target_width, target_height);
     request!(
         assign,
         dec.idct_residuals,
-        mem.buffer(size_of::<i16>() * residuals_size as usize, DeviceOnly, c"idct_residuals", -1)
+        mem.buffer(super::residual::frame_bytes(u, v), DeviceOnly, c"idct_residuals", -1)
     );
     // The buffers that grow with the frames (stage_buffers.rs): a part of the worst case, which is one
     // transform block and two prediction blocks for every 4x4 unit and a warp block for every 8x8.

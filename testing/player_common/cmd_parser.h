@@ -141,6 +141,7 @@ class CParameters {
     bool fglegacy_;
     bool copylegacy_;
     bool idctlegacy_;
+    bool clearlegacy_;
     bool interlegacy_;
     // -slots: the pipeline slots the task asks for. 0 when the task has no -slots: the library then gives
     // the decoder the slots of its frames in parse.

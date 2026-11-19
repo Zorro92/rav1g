@@ -816,6 +816,8 @@ int AV1Decoder::DecodeOne() {
           << (params_.copylegacy_ ? "copy_plane_sp_tex (-copylegacy)" : "copy_plane_sp_tex_v2 (default)");
   av1_set_idct_legacy(params_.idctlegacy_);
   XB_LOGI << "Small inverse transform shaders: " << (params_.idctlegacy_ ? "legacy (-idctlegacy)" : "default");
+  av1_set_clear_legacy(params_.clearlegacy_);
+  XB_LOGI << "Residual clear: " << (params_.clearlegacy_ ? "full allocation (-clearlegacy)" : "padded frame planes");
 
   // -slots, -parseframes, -t: fixed when the decoder was created; Start() asks for a new decoder when a
   // value changes. What the decoder has is what the library made of them.

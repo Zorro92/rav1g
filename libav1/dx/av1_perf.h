@@ -305,6 +305,11 @@ void av1_set_copy_legacy(int enable);
  * Change it while no frame is in flight. */
 void av1_set_idct_legacy(int enable);
 
+/* Process-wide. Non-zero clears the whole residual allocation before IDCT.
+ * Zero clears the padded planes of the coded frame (default). Change it while
+ * no frame is in flight. */
+void av1_set_clear_legacy(int enable);
+
 /* Process-wide. Non-zero selects the original single-reference and
  * average/distance-weighted compound shaders for unscaled inter on the size
  * lists. Zero selects the optimized shaders (default). Change it only while

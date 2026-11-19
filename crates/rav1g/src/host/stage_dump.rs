@@ -364,10 +364,7 @@ pub(crate) unsafe fn stage_dump_residuals(dec: *mut Av1Core, stage: &'static CSt
         }
         let fb = &*td.frame_buffer;
         let residuals = &*(*dec).idct_residuals;
-        // The residual planes of the frame: rows of res_stride bytes from res_offset, 128-aligned in both
-        // directions.
-        let size = fb.planes[2].res_offset as usize
-            + fb.planes[2].res_stride as usize * ((((fb.height >> 1) + 127) & !127) as usize);
+        let size = super::residual::frame_bytes(fb.planes[1].res_offset, fb.planes[2].res_offset);
         let Some(e) = copy(dec, stage, residuals.dev, 0, size.min(residuals.size)) else {
             return;
         };

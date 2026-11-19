@@ -311,8 +311,6 @@ fn layout_frame_buffer(buf: &mut HwFrameBuffer, width: c_int, height: c_int, hbd
     let uv_size = (aligned_height >> 1) * uv_stride;
     let y_width = (width + 7) & !7;
     let y_height_visible = (height + 7) & !7;
-    let uv_width = y_width >> 1;
-    let uv_height = y_height_visible >> 1;
     buf.width = y_width;
     buf.height = y_height_visible;
     buf.hbd = hbd;
@@ -326,13 +324,10 @@ fn layout_frame_buffer(buf: &mut HwFrameBuffer, width: c_int, height: c_int, hbd
     buf.planes[0].offset = (buf.base_offset as c_int).wrapping_add(h_border * bpp);
     buf.planes[1].offset = (buf.base_offset as c_int).wrapping_add((y_size + h_border) * bpp);
     buf.planes[2].offset = buf.planes[1].offset + uv_size * bpp;
-    let short = size_of::<i16>() as c_int;
-    buf.planes[0].res_stride = short * ((y_width + 127) & !127);
-    buf.planes[1].res_stride = short * ((uv_width + 127) & !127);
-    buf.planes[2].res_stride = short * ((uv_width + 127) & !127);
-    buf.planes[0].res_offset = 0;
-    buf.planes[1].res_offset = buf.planes[0].res_stride * ((y_height_visible + 127) & !127);
-    buf.planes[2].res_offset = buf.planes[1].res_offset + buf.planes[1].res_stride * ((uv_height + 127) & !127);
+    for (plane, (stride, offset)) in buf.planes.iter_mut().zip(super::residual::plane_layout(width, height)) {
+        plane.res_stride = stride;
+        plane.res_offset = offset;
+    }
 }
 
 /// `av1_reallocate_frame_buffer` (`dx/av1_core.h`): the frame buffer of the frame whose header is being

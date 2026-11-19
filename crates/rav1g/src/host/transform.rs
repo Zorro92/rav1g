@@ -24,11 +24,18 @@ use crate::sys::{
 };
 
 static IDCT_LEGACY: AtomicBool = AtomicBool::new(false);
+static CLEAR_LEGACY: AtomicBool = AtomicBool::new(false);
 
 /// `av1_set_idct_legacy` (`dx/av1_perf.h`).
 #[unsafe(no_mangle)]
 pub extern "C" fn av1_set_idct_legacy(enable: c_int) {
     IDCT_LEGACY.store(enable != 0, Ordering::Relaxed);
+}
+
+/// `av1_set_clear_legacy` (`dx/av1_perf.h`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_clear_legacy(enable: c_int) {
+    CLEAR_LEGACY.store(enable != 0, Ordering::Relaxed);
 }
 
 /// Transform types of the sort: the transform sizes and the lossless transform.
@@ -78,12 +85,23 @@ pub(crate) unsafe fn idct_run(dec: *mut Av1Core) {
         let commands = commands(dec);
         let residuals = buffer((*dec).idct_residuals);
         let blocks = buffer((*dec).idct_blocks);
+        let frame_buffer = &*td.frame_buffer;
 
         let shader = pipeline(&raw const (*lib).shader_fill_buffer);
         commands.set_layout(shader.layout());
         commands.set_pipeline(shader);
         commands.bind_write(0, residuals.location());
-        let value = [((*(*dec).idct_residuals).size >> 4) as c_int, 0];
+        // IDCT and prediction use these same planes of the coded frame. The 128-sample padding
+        // covers every destination block through the last superblock, including packed loads
+        // at the edges. Clear all three planes, also where there are no transform records.
+        // Each submitted frame clears its own extent before doing any IDCT or prediction.
+        let words = super::residual::clear_work_items(
+            (*(*dec).idct_residuals).size,
+            frame_buffer.planes[1].res_offset,
+            frame_buffer.planes[2].res_offset,
+            CLEAR_LEGACY.load(Ordering::Relaxed),
+        );
+        let value = [words, 0];
         commands.set_inline_constants(1, &value, 0);
         commands.dispatch(((value[0] + 63) / 64) as u32, 1, 1);
         perf_gpu_mark(dec, AV1_PERF_GPU_RESIDUAL_CLEAR);
@@ -113,7 +131,6 @@ pub(crate) unsafe fn idct_run(dec: *mut Av1Core) {
         perf_gpu_mark(dec, AV1_PERF_GPU_IDCT_SORT);
 
         let frame = alloc_constants::<IdctFrameData>(&mut td.command_buffer);
-        let frame_buffer = &*td.frame_buffer;
         for plane in 0..3 {
             (*frame.data).planes[plane][0] = frame_buffer.planes[plane].res_stride;
             (*frame.data).planes[plane][1] = frame_buffer.planes[plane].res_offset;

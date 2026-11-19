@@ -888,6 +888,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         fg_legacy: task.fglegacy,
         copy_legacy: task.copylegacy,
         idct_legacy: task.idctlegacy,
+        clear_legacy: task.clearlegacy,
         inter_legacy: task.interlegacy,
         cdef_v2: !task.cdefv1,
         cdef_legacy: task.cdeflegacy,
@@ -914,6 +915,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         );
     }
     say!("Small inverse transform shaders: {}", if task.idctlegacy { "legacy (-idctlegacy)" } else { "default" });
+    say!("Residual clear: {}", if task.clearlegacy { "full allocation (-clearlegacy)" } else { "padded frame planes" });
     say!(
         "PARSER {}: the parse pass of rav1d reads the bitstream, switches {} (-parseopt)",
         task.name,
