@@ -156,8 +156,8 @@ const LAYOUTS: usize =
 const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
-    // 20 transforms, 31 bit-depth-independent shaders, and 33 per bit depth.
-    assert!(SHADERS == 20 + 31 + 2 * 33);
+    // 20 transforms, 31 bit-depth-independent shaders, and 34 per bit depth.
+    assert!(SHADERS == 20 + 31 + 2 * 34);
     assert!(LAYOUTS == 24);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
@@ -390,6 +390,7 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("upscaling", &layouts.upscale, &raw mut (*lib).shader_upscale),
             ("inter_2x2chroma", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_2x2),
             ("inter_compound", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_comp),
+            ("inter_compound_v2", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_comp_v2),
             ("inter_compound_2x2", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_comp_2x2),
             ("inter_compound_diff_chroma", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_comp_diff_uv),
             ("inter_compound_diff_luma", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_comp_diff_y),
@@ -414,6 +415,7 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("inter_compound_diff_chroma_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_comp_diff_uv),
             ("inter_compound_diff_luma_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_comp_diff_y),
             ("inter_compound_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_comp),
+            ("inter_compound_v2_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_comp_v2),
             ("inter_compound_masked_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_comp_masked),
             ("inter_main_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_base),
             ("inter_main_v2_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_base_v2),
@@ -899,7 +901,7 @@ mod tests {
             .filter_map(|line| line.trim().trim_start_matches('(').strip_prefix('"'))
             .map(|rest| &rest[..rest.find('"').unwrap()])
             .collect();
-        assert_eq!(names.len(), 113);
+        assert_eq!(names.len(), 115);
         let mut unique = names.clone();
         unique.sort_unstable();
         unique.dedup();

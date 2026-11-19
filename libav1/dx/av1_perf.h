@@ -286,9 +286,10 @@ void av1_set_lr_legacy(int enable);
  * only while no frame is in flight. */
 void av1_set_fg_legacy(int enable);
 
-/* Process-wide. Non-zero selects the original single-reference shader for
- * unscaled inter on the size lists. Zero selects the optimized shader (default).
- * Change it only while no frame is in flight. */
+/* Process-wide. Non-zero selects the original single-reference and
+ * average/distance-weighted compound shaders for unscaled inter on the size
+ * lists. Zero selects the optimized shaders (default). Change it only while
+ * no frame is in flight. */
 void av1_set_inter_legacy(int enable);
 
 /* Process-wide. Non-zero runs intra prediction through intra_v2.hlsl instead

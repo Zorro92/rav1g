@@ -927,7 +927,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
             if task.interlegacy {
                 "inter_main, inter_compound (-interlegacy)"
             } else {
-                "inter_main_v2, inter_compound (default)"
+                "inter_main_v2, inter_compound_v2 (default)"
             }
         );
     }

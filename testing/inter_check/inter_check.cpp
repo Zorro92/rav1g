@@ -43,6 +43,7 @@ long g_double_ops = 0;
 
 extern const ShaderApi inter_main_api, inter_main_hbd_api, inter_compound_api, inter_compound_hbd_api;
 extern const ShaderApi inter_main_v2_api, inter_main_v2_hbd_api;
+extern const ShaderApi inter_compound_v2_api, inter_compound_v2_hbd_api;
 extern const ShaderApi inter_fast_api, inter_fast_hbd_api, inter_compound_fast_api, inter_compound_fast_hbd_api;
 extern const ShaderApi inter_ext_borders_api, inter_ext_borders_hbd_api;
 
@@ -476,7 +477,8 @@ static bool run_case(const Case &c, Stats *stats, int verbose) {
                  {static_cast<uint32_t>((1 << (w + h)) * entry.second.count),
                   static_cast<uint32_t>(pred_words.size() / 4), static_cast<uint32_t>(w), static_cast<uint32_t>(h)}};
     passes[kLegacy].push_back(pass);
-    if (!compound) pass.api = hbd ? &inter_main_v2_hbd_api : &inter_main_v2_api;
+    pass.api = compound ? (hbd ? &inter_compound_v2_hbd_api : &inter_compound_v2_api)
+                        : (hbd ? &inter_main_v2_hbd_api : &inter_main_v2_api);
     passes[kDefault].push_back(pass);
     pred_words.insert(pred_words.end(), entry.second.words.begin(), entry.second.words.end());
   }

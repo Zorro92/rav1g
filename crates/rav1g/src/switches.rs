@@ -84,7 +84,7 @@ pub fn set_fg_legacy(enable: bool) {
     crate::host::av1_set_fg_legacy(c_int::from(enable))
 }
 
-/// Use the original single-reference kernel for the unscaled inter size lists.
+/// Use the original single-reference and average/distance compound kernels for the unscaled inter size lists.
 pub fn set_inter_legacy(enable: bool) {
     crate::host::av1_set_inter_legacy(c_int::from(enable))
 }

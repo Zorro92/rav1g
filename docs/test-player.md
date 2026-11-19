@@ -374,7 +374,7 @@ The log lines at the start of each task show which defaults and opt-out flags ar
 | Parser | the parse pass of rav1d, with its switches `nolfmask`, `tilethread` and (since package 0.2.197) `gpucdef` on | `Parser: the parse pass of rav1d`, `Parser switches (-parseopt): nolfmask tilethread gpucdef` | none since package 0.2.159: the entropy decoder of libaom (`-parser c`) left the decoder; up to 0.2.157 `Parser: the entropy decoder of libaom (-parser c)`; `-parseopt` for the switches; see [Parser](#parser--parser) |
 | Clears of a slot | none: the wavefront of intra prediction is kept at the edges of the tiles (since package 0.2.146.0) | `Clears: none needed (default: intra wavefront at the edges of the tiles; -gpuclear, -cpuclear and -syncclear keep it in the slot's grid and clear that)` | `-gpuclear`, `-cpuclear`, `-syncclear`: the wavefront in the slot's grid, cleared for every frame by the GPU, the completion thread (the default of 0.2.140 to 0.2.144; `-asyncclear` is the same) or the decode thread; see [Clears](#clears) |
 | Intra prediction | frame-wide wavefront, DXC-optimized main shaders | `Intra main shader: intra_main (default)` | `-intrav2`, `-intraod` |
-| Unscaled inter prediction on size lists | `inter_main_v2` and `inter_compound`, with HBD variants | `Inter shaders: inter_main_v2, inter_compound (default)` | `-interlegacy` selects the original single-reference shader. `-interfast` selects [motion-class lists and shaders](#inter-fast-path--interfast). |
+| Unscaled single-reference and average/distance compound prediction on size lists | `inter_main_v2` and `inter_compound_v2`, with HBD variants | `Inter shaders: inter_main_v2, inter_compound_v2 (default)` | `-interlegacy` selects the original shaders. `-interfast` selects [motion-class lists and shaders](#inter-fast-path--interfast). |
 
 On a device that logs `OUTPUT P010 direct` or `OUTPUT NV12 direct`, film grain uses
 `film_grain_filter_sp_tex_v2`. Add `-fglegacy` to the same `-output p010` task to
@@ -1442,7 +1442,7 @@ The decoded output is the same. Design, formulas and the console numbers behind 
 
 | Flag | Effect |
 | --- | --- |
-| *(none)* | lists by type and block size, with phase selection inside `inter_main_v2` |
+| *(none)* | lists by type and block size, with phase selection inside `inter_main_v2` and `inter_compound_v2` |
 | `-interlegacy` | the same size lists with `inter_main` and `inter_compound` |
 | `-interfast` | lists by motion vector class and block size; `inter_fast` for the classes copy, h and v, `inter_compound_fast` for the pairs of classes of two references, the original shaders for the class with a fraction both ways. Frames with a scaled reference keep the original path. |
 | `-interfastlists` | the same lists and dispatches, but `inter_main` and `inter_compound` on every one of them: what the lists alone cost or gain (more and smaller dispatches, blocks of a class side by side), without the new kernels. |

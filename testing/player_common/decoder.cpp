@@ -772,7 +772,7 @@ int AV1Decoder::DecodeOne() {
                                                 : params_.interfast_ ? RAV1G_INTER_FAST_ON : 0);
   av1_set_inter_legacy(params_.interlegacy_);
   const char *inter_size_shaders = params_.interlegacy_ ? "inter_main, inter_compound (-interlegacy)"
-                                                      : "inter_main_v2, inter_compound (default)";
+                                                      : "inter_main_v2, inter_compound_v2 (default)";
   XB_LOGI << "Inter shaders: "
           << (params_.interfastlists_
                   ? "lists by motion vector class, inter_main and inter_compound on them (-interfastlists; "

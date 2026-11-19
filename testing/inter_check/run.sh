@@ -46,7 +46,8 @@ to_cpp() {
 
 for name in inter_common.h inter_fast_common.h inter_unscaled.h inter_main.hlsl inter_main_hbd.hlsl \
   inter_main_v2.hlsl inter_main_v2_hbd.hlsl inter_compound.hlsl \
-  inter_compound_hbd.hlsl inter_fast.hlsl inter_fast_hbd.hlsl inter_compound_fast.hlsl inter_compound_fast_hbd.hlsl \
+  inter_compound_hbd.hlsl inter_compound_v2.hlsl inter_compound_v2_hbd.hlsl \
+  inter_fast.hlsl inter_fast_hbd.hlsl inter_compound_fast.hlsl inter_compound_fast_hbd.hlsl \
   inter_ext_borders.hlsl inter_ext_borders_hbd.hlsl; do
   to_cpp "$shaders/$name" > "$work/${name%.*}.gen.h"
 done
@@ -84,7 +85,7 @@ build() {
   flags="$flags -I $1 -I $here -include $here/inter_ops.h"
   rm -f "$1"/*.o
   for shader in inter_main:3 inter_main_hbd:3 inter_main_v2:3 inter_main_v2_hbd:3 \
-    inter_compound:3 inter_compound_hbd:3 inter_fast:3 inter_fast_hbd:3 \
+    inter_compound:3 inter_compound_hbd:3 inter_compound_v2:3 inter_compound_v2_hbd:3 inter_fast:3 inter_fast_hbd:3 \
     inter_compound_fast:3 inter_compound_fast_hbd:3 inter_ext_borders:2 inter_ext_borders_hbd:2; do
     name=${shader%:*}
     # shellcheck disable=SC2086
@@ -102,11 +103,15 @@ timeout -k 10 "$check_timeout" "$work/inter_check" "$@"
 
 if [ "$mutate" = 1 ]; then
   # file @ sed expression @ what it breaks
-  mutants='inter_main_v2.gen.h@0,/phase_x == 0/s//phase_x == 1/@default single-reference copy phase
-inter_main_v2.gen.h@s/(8 - InterLineBias)/(7 - InterLineBias)/@default single-reference horizontal rounding
-inter_main_v2.gen.h@s/1024 - 128 \* InterLineBias/1023 - 128 * InterLineBias/@default single-reference two-pass rounding
+  mutants='inter_unscaled.gen.h@0,/phase_x == 0/s//phase_x == 1/@default copy phase
+inter_unscaled.gen.h@s/(8 - InterLineBias)/(7 - InterLineBias)/@default single-reference horizontal rounding
+inter_unscaled.gen.h@s/1024 - 128 \* InterLineBias/1023 - 128 * InterLineBias/@default single-reference two-pass rounding
 inter_unscaled.gen.h@s/(words.y >> shift) | ((words.z << (24 - shift)) << 8)/(words.y >> shift)/@default unaligned HBD row packing
 inter_unscaled.gen.h@s/clamp(y + input_row, 0, height)/clamp(y + input_row, 0, height + 1)/@default vertical bottom edge
+inter_unscaled.gen.h@s/(4 + prediction.row\[i\]) >> 3/(3 + prediction.row[i]) >> 3/@default compound vertical predictor rounding
+inter_compound_v2.gen.h@s/inter_predict(x, y, block.w,/inter_predict(x, y, block.z,/@default compound second reference motion
+inter_compound_v2.gen.h@s/const int weight0 = (block.y >> 17) \& 15;/const int weight0 = 8;/@default compound distance weight
+inter_compound_v2.gen.h@s/(8 - InterCompoundBias)/(7 - InterCompoundBias)/@default compound final rounding
 inter_fast.gen.h@0,/(3 << InterFastSampleShift)/s//(2 << InterFastSampleShift)/@column of the copy (one reference)
 inter_fast.gen.h@s/inter_fast_round(sum, 64, 7)/inter_fast_round(sum, 63, 7)/@rounding of the vertical pass (one reference)
 inter_fast.gen.h@s/inter_fast_round(l, 8 - InterFastLineBias, 4)/inter_fast_round(l, 7 - InterFastLineBias, 4)/@rounding of the horizontal pass (one reference)

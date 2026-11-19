@@ -56,6 +56,7 @@ REQUIRED_BYTECODE = [
     'loop_restoration', LR_LEGACY, 'loop_restoration_wiener',
     'film_grain_filter_sp_tex', 'film_grain_filter_sp_tex_v2',
     'inter_main', 'inter_main_hbd', 'inter_main_v2', 'inter_main_v2_hbd',
+    'inter_compound', 'inter_compound_hbd', 'inter_compound_v2', 'inter_compound_v2_hbd',
 ]
 
 # What DXC is given for every shader on top of -T, -E and -Od:

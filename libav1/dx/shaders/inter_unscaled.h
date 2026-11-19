@@ -1,4 +1,6 @@
 /*
+ * Copyright 2020 Google LLC
+ *
  * Copyright (c) 2020, Alliance for Open Media. All rights reserved
  *
  * This source code is subject to the terms of the BSD 2 Clause License and
@@ -14,13 +16,22 @@
 #ifdef INTER_HBD
 #define InterSampleBytes 2
 #define InterPixelMax 1023
+#define InterOffsetBits 21
 #define InterFilterLine filter_line_hbd
 #define InterLineBias (FilterLineAdd10bit >> FilterLineShift)
 #else
 #define InterSampleBytes 1
 #define InterPixelMax 255
+#define InterOffsetBits 19
 #define InterFilterLine filter_line
 #define InterLineBias (FilterLineAdd8bit >> FilterLineShift)
+#endif
+
+#ifdef INTER_COMPOUND
+// Each reference is rounded to 1/16 sample precision for the blend.
+#define InterCompoundShift 7
+#define InterCompoundOffset (1 << (InterOffsetBits - InterCompoundShift))
+#define InterCompoundBias (InterCompoundOffset + InterLineBias)
 #endif
 
 struct InterPrediction {
@@ -69,6 +80,76 @@ InterPrediction inter_vertical(int column, int stride, int y, int height, int4 h
     }
   }
   return result;
+}
+
+// All lanes of a block share the phases. Lanes in a mixed wave can take
+// different paths without exchanging samples.
+InterPrediction inter_predict(int x, int y, int mv, uint flags, int refplane, int2 dims) {
+  const int stride = cb_refplanes[refplane].x;
+  const int ref_x = x + (mv >> (16 + SUBPEL_BITS)) - 3;
+  const int ref_y = y + ((int)((uint)mv << 16) >> (16 + SUBPEL_BITS)) - 3;
+  // Clamp the window origin before moving to tap 3. Horizontal edge samples
+  // are supplied by the reference's extended border.
+  const int column = cb_refplanes[refplane].y + clamp(ref_x, -11, dims.x) * InterSampleBytes;
+  const int center = column + 3 * InterSampleBytes;
+  const int phase_x = (mv >> 16) & SUBPEL_MASK;
+  const int phase_y = mv & SUBPEL_MASK;
+  const int filter_h = (((flags >> 5) & 15) << SUBPEL_BITS) + phase_x;
+  const int filter_v = (((flags >> 9) & 15) << SUBPEL_BITS) + phase_y;
+
+  InterPrediction prediction;
+  [branch] if (phase_y == 0) {
+    [branch] if (phase_x == 0) {
+      [unroll] for (int i = 0; i < InterRows; ++i) {
+        const int4 row = inter_load_row(center + stride * clamp(ref_y + 3 + i, 0, dims.y));
+#ifdef INTER_COMPOUND
+        prediction.row[i] = InterCompoundBias + row * 16;
+#else
+        prediction.row[i] = clamp(row, 0, InterPixelMax);
+#endif
+      }
+    } else {
+      // The identity vertical tap leaves four bits after the horizontal round.
+      const int4 h0 = cb_kernels[filter_h][0];
+      const int4 h1 = cb_kernels[filter_h][1];
+      [unroll] for (int i = 0; i < InterRows; ++i) {
+        const int4 row = InterFilterLine(dst_frame, column + stride * clamp(ref_y + 3 + i, 0, dims.y), h0, h1);
+#ifdef INTER_COMPOUND
+        prediction.row[i] = InterCompoundOffset + row;
+#else
+        prediction.row[i] = clamp(((8 - InterLineBias) + row) >> 4, 0, InterPixelMax);
+#endif
+      }
+    }
+  } else {
+    const int4 v0 = cb_kernels[filter_v][0];
+    const int4 v1 = cb_kernels[filter_v][1];
+    [branch] if (phase_x == 0) {
+      const int4 unused = int4(0, 0, 0, 0);
+      prediction = inter_vertical(center, stride, ref_y, dims.y, unused, unused, v0, v1, false);
+      // The identity horizontal tap scales samples by 16. The vertical taps
+      // sum to 128, so the line bias is constant after the vertical round.
+      [unroll] for (int i = 0; i < InterRows; ++i) {
+#ifdef INTER_COMPOUND
+        prediction.row[i] = InterCompoundBias + ((4 + prediction.row[i]) >> 3);
+#else
+        prediction.row[i] = clamp((64 + prediction.row[i]) >> 7, 0, InterPixelMax);
+#endif
+      }
+    } else {
+      prediction = inter_vertical(column, stride, ref_y, dims.y, cb_kernels[filter_h][0], cb_kernels[filter_h][1],
+                                  v0, v1, true);
+      [unroll] for (int i = 0; i < InterRows; ++i) {
+#ifdef INTER_COMPOUND
+        prediction.row[i] = ((64 + (1 << InterOffsetBits)) + prediction.row[i]) >> InterCompoundShift;
+#else
+        // Cancel the legacy offsets before the final shift to sample precision.
+        prediction.row[i] = clamp((1024 - 128 * InterLineBias + prediction.row[i]) >> 11, 0, InterPixelMax);
+#endif
+      }
+    }
+  }
+  return prediction;
 }
 
 int4 inter_add_residual(int offset, int4 row) {

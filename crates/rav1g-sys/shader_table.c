@@ -71,6 +71,7 @@ typedef unsigned char BYTE; /* the type of the bytecode arrays */
 #include "dx/shaders/h/mi_grid_build.h"
 #include "dx/shaders/h/inter_2x2chroma.h"
 #include "dx/shaders/h/inter_compound.h"
+#include "dx/shaders/h/inter_compound_v2.h"
 #include "dx/shaders/h/inter_compound_2x2.h"
 #include "dx/shaders/h/inter_compound_diff_chroma.h"
 #include "dx/shaders/h/inter_compound_diff_luma.h"
@@ -95,6 +96,7 @@ typedef unsigned char BYTE; /* the type of the bytecode arrays */
 #include "dx/shaders/h/inter_compound_diff_chroma_hbd.h"
 #include "dx/shaders/h/inter_compound_diff_luma_hbd.h"
 #include "dx/shaders/h/inter_compound_hbd.h"
+#include "dx/shaders/h/inter_compound_v2_hbd.h"
 #include "dx/shaders/h/inter_compound_masked_hbd.h"
 #include "dx/shaders/h/inter_main_hbd.h"
 #include "dx/shaders/h/inter_main_v2_hbd.h"
@@ -186,6 +188,7 @@ static const rav1g_shader_bytecode rav1g_shaders[] = {
   RAV1G_SHADER(upscaling),
   RAV1G_SHADER(inter_2x2chroma),
   RAV1G_SHADER(inter_compound),
+  RAV1G_SHADER(inter_compound_v2),
   RAV1G_SHADER(inter_compound_2x2),
   RAV1G_SHADER(inter_compound_diff_chroma),
   RAV1G_SHADER(inter_compound_diff_luma),
@@ -210,6 +213,7 @@ static const rav1g_shader_bytecode rav1g_shaders[] = {
   RAV1G_SHADER(inter_compound_diff_chroma_hbd),
   RAV1G_SHADER(inter_compound_diff_luma_hbd),
   RAV1G_SHADER(inter_compound_hbd),
+  RAV1G_SHADER(inter_compound_v2_hbd),
   RAV1G_SHADER(inter_compound_masked_hbd),
   RAV1G_SHADER(inter_main_hbd),
   RAV1G_SHADER(inter_main_v2_hbd),

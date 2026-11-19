@@ -929,10 +929,10 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
             let scaled = td.scale_enable != 0;
             let wi_per_block: u32 = if scaled { 4 } else { 1 };
             let warp_comp = &raw const (*shaders).inter_warp_comp;
-            let inter_base = if INTER_LEGACY.load(Ordering::Relaxed) != 0 {
-                &raw const (*shaders).inter_base
+            let (inter_base, inter_comp) = if INTER_LEGACY.load(Ordering::Relaxed) != 0 {
+                (&raw const (*shaders).inter_base, &raw const (*shaders).inter_comp)
             } else {
-                &raw const (*shaders).inter_base_v2
+                (&raw const (*shaders).inter_base_v2, &raw const (*shaders).inter_comp_v2)
             };
             let shader_of = |list_type: c_int| -> *const ComputeShader {
                 match (list_type, scaled) {
@@ -946,7 +946,7 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                     (9, true) => &raw const (*shaders).inter_scale_obmc_left,
                     (10, true) => &raw const (*shaders).inter_scale_2x2,
                     (1, false) => inter_base,
-                    (2, false) => &raw const (*shaders).inter_comp,
+                    (2, false) => inter_comp,
                     (3, false) => &raw const (*shaders).inter_comp_diff_y,
                     (4, false) => &raw const (*shaders).inter_comp_masked,
                     (6, false) => &raw const (*shaders).inter_comp_diff_uv,

@@ -264,7 +264,7 @@ pub fn usage() {
     say!("  -intraod             use the baseline DXC -Od intra_main kernels (-intraopt restores the default)");
     say!("  -lrlegacy           use the original loop_restoration shader");
     say!("  -fglegacy           use the original direct NV12/P010 film grain shader");
-    say!("  -interlegacy        use the original unscaled single-reference inter shader on the size lists");
+    say!("  -interlegacy        use the original unscaled single-reference and average/distance inter shaders");
     say!("                        as in the test player (docs/test-player.md); -cdefv2 and -fitsize (the defaults)");
     say!("                        are accepted");
     say!("  -gpuclear -cpuclear -syncclear");
