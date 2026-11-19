@@ -3647,8 +3647,8 @@ jobs:
       - name: Compare direct-texture film grain with its legacy shader
         run: sh testing/film_grain_check/run.sh --mutate
 
-  # Host proof for CDEF v2: the original and the v2 CDEF shader source, compiled as C++,
-  # must write byte-identical frames (random and edge-case input, 8-bit and high bit depth).
+  # The CDEF filter shaders, compiled as C++, must write byte-identical frames
+  # (random and edge-case input, 8-bit and high bit depth).
   cdef-check:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
@@ -3657,7 +3657,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Compare cdef_filter_v2.hlsl with cdef_filter.hlsl
+      - name: Compare CDEF filters
         run: |
           set -euo pipefail
           sh testing/cdef_check/run.sh --mutate | tee cdef-check.log

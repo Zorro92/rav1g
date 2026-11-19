@@ -2,11 +2,8 @@
 # Builds and runs the CDEF bit-exactness check on a Linux host (g++, no GPU).
 #
 #   sh testing/cdef_check/run.sh            the check; exit code 0 = identical
-#   sh testing/cdef_check/run.sh --mutate   also proves the check can fail: a
-#                                           copy of the new shader with one tap
-#                                           weight changed must be rejected, and
-#                                           so must each shader with a group sync
-#                                           turned into a plain barrier
+#   sh testing/cdef_check/run.sh --mutate   also checks deliberate changes to
+#                                           the taps, direction, borders and syncs
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -24,7 +21,8 @@ mutant_timeout=600
 to_cpp() {
   sed -E \
     -e 's/\[numthreads\([^]]*\)\]//' \
-    -e 's/\[(unroll|loop)\]//g' \
+    -e 's/\[(unroll|loop|branch)\]//g' \
+    -e 's/\binout int4 /int4 \&/g' \
     -e 's/: *SV_[A-Za-z]+//g' \
     -e 's/: *register\([a-z0-9]+\)//g' \
     -e 's/^cbuffer +[A-Za-z_]+ *\{(.*)\}/\1/' \
@@ -37,44 +35,44 @@ build() {
 }
 
 to_cpp "$shaders/cdef_filter.hlsl" > "$work/cdef_filter.gen.h"
+to_cpp "$shaders/cdef_filter_v2_legacy.hlsl" > "$work/cdef_filter_v2_legacy.gen.h"
 to_cpp "$shaders/cdef_filter_v2.hlsl" > "$work/cdef_filter_v2.gen.h"
 build "$work"
 timeout -k 10 "$check_timeout" "$work/cdef_check"
 
-if [ "${1:-}" = "--mutate" ]; then
-  mkdir "$work/mutant"
-  cp "$work/cdef_filter.gen.h" "$work/mutant/"
-  sed -e 's/f.pri_tap0 = 4 - p_t;/f.pri_tap0 = 3 - p_t;/' "$work/cdef_filter_v2.gen.h" > "$work/mutant/cdef_filter_v2.gen.h"
-  if cmp -s "$work/cdef_filter_v2.gen.h" "$work/mutant/cdef_filter_v2.gen.h"; then
-    echo "cdef_check: mutation did not apply" >&2
+expect_rejected() {
+  file="$1.gen.h"
+  expr="$2"
+  why="$3"
+  expected="$4"
+  cp "$work"/*.gen.h "$work/mutant/"
+  sed -e "$expr" "$work/$file" > "$work/mutant/$file"
+  if cmp -s "$work/$file" "$work/mutant/$file"; then
+    echo "cdef_check: $why mutation did not apply" >&2
     exit 1
   fi
   build "$work/mutant"
-  if timeout -k 10 "$mutant_timeout" "$work/mutant/cdef_check" > "$work/mutant/log" 2>&1; then
-    echo "cdef_check: the mutated shader passed, the check is not sensitive" >&2
+  status=0
+  timeout -k 10 "$mutant_timeout" "$work/mutant/cdef_check" --fail-fast > "$work/mutant/log" 2>&1 || status=$?
+  if [ "$status" != 1 ] || ! grep -q "$expected" "$work/mutant/log"; then
+    cat "$work/mutant/log" >&2
+    echo "cdef_check: $why did not yield the expected error (exit $status)" >&2
     exit 1
   fi
-  echo "cdef_check: mutated shader rejected as expected ($(grep -c MISMATCH "$work/mutant/log") mismatches shown)"
-  # And a group sync turned into a plain barrier, the first one of the entry point of each shader: it must
-  # be rejected for a race.
-  for f in cdef_filter cdef_filter_v2; do
-    cp "$work/cdef_filter.gen.h" "$work/cdef_filter_v2.gen.h" "$work/mutant/"
-    sed -e '/void shader_main(/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/' \
-      "$work/$f.gen.h" > "$work/mutant/$f.gen.h"
-    if cmp -s "$work/$f.gen.h" "$work/mutant/$f.gen.h"; then
-      echo "cdef_check: the group sync mutation of $f did not apply" >&2
-      exit 1
-    fi
-    build "$work/mutant"
-    if timeout -k 10 "$mutant_timeout" "$work/mutant/cdef_check" > "$work/mutant/log" 2>&1; then
-      echo "cdef_check: $f with a group sync turned into a plain barrier passed" >&2
-      exit 1
-    fi
-    if ! grep -q 'races in group memory: [1-9]' "$work/mutant/log"; then
-      echo "cdef_check: $f with a group sync turned into a plain barrier was rejected, but not for a race" >&2
-      tail -n 5 "$work/mutant/log" >&2
-      exit 1
-    fi
-    echo "cdef_check: $f with its first group sync turned into a plain barrier rejected for a race"
+  echo "cdef_check: rejected $why"
+}
+
+if [ "${1:-}" = "--mutate" ]; then
+  mkdir "$work/mutant"
+  expect_rejected cdef_filter_v2 's/f.pri_tap0 = 4 - p_t;/f.pri_tap0 = 3 - p_t;/' "wrong primary tap weight" '^MISMATCH optimized'
+  expect_rejected cdef_filter_v2 's/if (cost\[i\] > best_cost)/if (cost[i] >= best_cost)/' "last-direction tie break" '^MISMATCH direction'
+  expect_rejected cdef_filter_v2 's/(best_cost - opposite_cost) >> 10/(best_cost - opposite_cost) >> 9/' "wrong variance shift" '^MISMATCH direction'
+  expect_rejected cdef_filter_v2 's/uint2(CDEF_VERY_LARGE_X2, CDEF_VERY_LARGE_X2)/uint2(0u, 0u)/' "missing border sentinel" '^MISMATCH optimized'
+  for f in cdef_filter cdef_filter_v2_legacy cdef_filter_v2; do
+    expect_rejected "$f" \
+      '/void shader_main(/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/' \
+      "$f halo sync weakened to a barrier" 'races in group memory: [1-9]'
   done
+  expect_rejected cdef_filter_v2 's/^    GroupMemoryBarrierWithGroupSync();/    GroupMemoryBarrier();/' \
+    "direction-cost sync weakened to a barrier" 'races in group memory: [1-9]'
 fi

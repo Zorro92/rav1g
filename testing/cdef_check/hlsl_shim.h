@@ -1,5 +1,5 @@
 /*
- * Just enough HLSL for cdef_filter.hlsl and cdef_filter_v2.hlsl to compile as
+ * Just enough HLSL for the CDEF shaders to compile as
  * C++ (after run.sh has stripped attributes, semantics and register
  * bindings). Integer maths wraps like on the GPU: build with -fwrapv.
  */
@@ -33,12 +33,15 @@ union int4 {
     int2 xy;
     int2 zw;
   };
+  int &operator[](int i) { return i < 2 ? (i == 0 ? x : y) : (i == 2 ? z : w); }
+  const int &operator[](int i) const { return i < 2 ? (i == 0 ? x : y) : (i == 2 ? z : w); }
 };
 
 static inline int min(int a, int b) { return a < b ? a : b; }
 static inline int max(int a, int b) { return a > b ? a : b; }
 static inline int sign(int a) { return (a > 0) - (a < 0); }
 static inline int clamp(int v, int lo, int hi) { return min(max(v, lo), hi); }
+static inline int firstbithigh(uint v) { return v ? 31 - __builtin_clz(v) : -1; }
 
 /* Counts accesses outside the bound buffer; any is a failure of the check. */
 extern long g_out_of_bounds;

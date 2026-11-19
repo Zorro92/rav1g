@@ -80,6 +80,7 @@ pub struct Task {
     pub slots_given: bool,
     pub cdefv1: bool,
     pub cdefv2: bool,
+    pub cdeflegacy: bool,
     pub nofitsize: bool,
     pub fitsize: bool,
     pub lowmem: bool,
@@ -155,6 +156,7 @@ impl Default for Task {
             parse_frames: 0,
             cdefv1: false,
             cdefv2: false,
+            cdeflegacy: false,
             nofitsize: false,
             fitsize: false,
             lowmem: false,
@@ -261,6 +263,7 @@ pub fn usage() {
     say!("  -queue_size <n>       output images in the pool, 1..{} (default {})", QUEUE_SIZE_MAX, QUEUE_SIZE_DEFAULT);
     say!("  -timeout <seconds>    give up on a task after this time (exit code {})", EXIT_TIMEOUT);
     say!("  -cdefv1 -nofitsize -lowmemparts <n> -lowmem -slots <n> -intrav2");
+    say!("  -cdeflegacy         use the previous 64x64 CDEF v2 shader");
     say!("  -intraod             use the baseline DXC -Od intra_main kernels (-intraopt restores the default)");
     say!("  -lrlegacy           use the original loop_restoration shader");
     say!("  -fglegacy           use the original direct NV12/P010 film grain shader");
@@ -439,6 +442,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-headroom" => task.headroom_mib = i64::from(number()?),
             "-cdefv1" => task.cdefv1 = true,
             "-cdefv2" => task.cdefv2 = true,
+            "-cdeflegacy" => task.cdeflegacy = true,
             "-nofitsize" => task.nofitsize = true,
             "-fitsize" => task.fitsize = true,
             "-intrav2" => task.intrav2 = true,
@@ -525,6 +529,9 @@ pub fn check_task(task: &mut Task) -> Result<(), String> {
     }
     if task.cdefv1 && task.cdefv2 {
         return Err("-cdefv1 and -cdefv2 cannot be used together".to_string());
+    }
+    if task.cdeflegacy && (task.cdefv1 || task.cdefv2) {
+        return Err("-cdeflegacy cannot be combined with -cdefv1 or -cdefv2".to_string());
     }
     if task.nofitsize && task.fitsize {
         return Err("-nofitsize and -fitsize cannot be used together".to_string());

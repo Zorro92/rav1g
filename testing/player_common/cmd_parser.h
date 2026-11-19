@@ -132,6 +132,7 @@ class CParameters {
     // The effective choice after Parse(): true unless -cdefv1 was given.
     bool cdefv2_;
     bool cdefv1_;
+    bool cdeflegacy_;
     bool intrav2_;
     bool intraopt_;
     bool intraod_;

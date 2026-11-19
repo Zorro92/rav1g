@@ -758,9 +758,13 @@ int AV1Decoder::DecodeOne() {
                     : "a timestamp behind every section of the inter stage, work counters (-gputimedetail)");
   if (params_.nopresent_)
     XB_LOGI << "GPUTIME -nopresent: decoded frames go straight back to the pool, nothing is presented";
-  // CDEF shader: also set at a point where no frame is in flight. cdef_filter_v2 unless the task has -cdefv1.
+  // Select the CDEF shader while no frame is in flight.
   rav1g_set_cdef_v2(params_.cdefv2_ != 0);
-  XB_LOGI << "CDEF shader: " << (params_.cdefv2_ ? "cdef_filter_v2 (default)" : "cdef_filter (original, -cdefv1)");
+  av1_set_cdef_legacy(params_.cdeflegacy_);
+  XB_LOGI << "CDEF shader: "
+          << (params_.cdefv1_       ? "cdef_filter (original, -cdefv1)"
+              : params_.cdeflegacy_ ? "cdef_filter_v2_legacy (-cdeflegacy)"
+                                    : "cdef_filter_v2 (default)");
   // -intrav2: the same rules, independent of the CDEF shader.
   rav1g_set_intra_v2(params_.intrav2_ != 0);
   XB_LOGI << "Intra shaders: "

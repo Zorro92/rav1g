@@ -277,6 +277,11 @@ void av1_set_perf_callback(av1_perf_frame_cb_fn_t cb, void *priv);
  * it only while no frame is in flight, like the callback above. */
 void av1_set_cdef_v2(int enable);
 
+/* Process-wide. Non-zero selects the previous 64x64 CDEF v2 kernel.
+ * Zero selects the optimized shader (default). The upstream shader selected
+ * by av1_set_cdef_v2(0) takes precedence. Change it while no frame is in flight. */
+void av1_set_cdef_legacy(int enable);
+
 /* Process-wide. Non-zero selects the original loop restoration shader.
  * Zero selects the optimized shader (default). Change it while no frame is in flight. */
 void av1_set_lr_legacy(int enable);

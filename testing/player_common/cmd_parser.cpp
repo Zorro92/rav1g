@@ -77,6 +77,8 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        &params_.cdefv2_},
       {"cdefv1", atSingle, anOptional, "CDEF through the original cdef_filter.hlsl (same output)", "cdef",
        &params_.cdefv1_},
+      {"cdeflegacy", atSingle, anOptional, "CDEF through the previous 64x64 v2 shader", "cdef",
+       &params_.cdeflegacy_},
       {"intrav2", atSingle, anOptional, "intra prediction through intra_v2.hlsl (same output)", "",
        &params_.intrav2_},
       {"intraopt", atSingle, anOptional, "optimized intra_main shaders (default)", "intra-main", &params_.intraopt_},
@@ -443,6 +445,7 @@ void CParameters::Reset() {
   params_.semi_planar_ = 0;
   params_.cdefv2_ = true;
   params_.cdefv1_ = false;
+  params_.cdeflegacy_ = false;
   params_.intrav2_ = false;
   params_.intraopt_ = false;
   params_.intraod_ = false;

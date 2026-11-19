@@ -166,6 +166,7 @@ pub struct Choices {
     pub fg_legacy: bool,
     pub inter_legacy: bool,
     pub cdef_v2: bool,
+    pub cdef_legacy: bool,
     pub intra_v2: bool,
     pub intra_opt: bool,
     pub lf_legacy: bool,
@@ -497,6 +498,7 @@ impl Library {
         switches::set_lr_legacy(choices.lr_legacy);
         switches::set_fg_legacy(choices.fg_legacy);
         switches::set_inter_legacy(choices.inter_legacy);
+        switches::set_cdef_legacy(choices.cdef_legacy);
         if self.is_c() {
             capi::rav1g_set_cdef_v2(choices.cdef_v2);
             capi::rav1g_set_intra_v2(choices.intra_v2);

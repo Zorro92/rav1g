@@ -366,7 +366,7 @@ The log lines at the start of each task show which defaults and opt-out flags ar
 
 | Setting | Default | Its log line | Other values |
 | --- | --- | --- | --- |
-| CDEF shader | `cdef_filter_v2.hlsl`, 7 to 9 times faster CDEF | `CDEF shader: cdef_filter_v2 (default)` | `-cdefv1`: upstream's `cdef_filter.hlsl`, `CDEF shader: cdef_filter (original, -cdefv1)` |
+| CDEF shader | `cdef_filter_v2.hlsl`, 64×32 luma regions | `CDEF shader: cdef_filter_v2 (default)` | `-cdeflegacy`: the previous 64×64 v2 shader. `-cdefv1`: upstream's `cdef_filter.hlsl`. |
 | Loop restoration | `loop_restoration.hlsl` on planes with SGR units, `loop_restoration_wiener.hlsl` on Wiener and copy-only planes | `Loop restoration shader: loop_restoration / loop_restoration_wiener (default)` | `-lrlegacy`: `loop_restoration_legacy.hlsl`, the original DXC kernel, in either shader set |
 | Decoder size | the stream's largest frame size, rounded up to 128, and 8-bit buffers for an 8-bit stream; see [Decoder size](#decoder-size--nofitsize) | `Decoder size: 3840x2176 10-bit (fit to the stream, default)` | `-nofitsize`: 4096x2176 10-bit for every stream, `Decoder size: 4096x2176 10-bit (fixed, -nofitsize)` |
 | Memory reductions | the library's default for the decoder's size: part 1, one back buffer shared by all frames (frame buffer pool 12 → 10), and since package 0.2.186 for a decoder above 1920x1088 part 2, the mode info pool at half (55.8 MiB less at 4K; [memory.md](memory.md#the-wait-of-the-second-frame-in-parse-in-a-pool-at-half-candidate-2)), since 0.2.191 part 32, the frame buffer bound at the recording (24.2 MiB), and since 0.2.193 part 4, the coefficient pool at four fifths (12.0 MiB); no measurable time cost; see [Smaller decoder](#smaller-decoder--lowmem) | `Low memory parts: default (the library's: 1 shared back buffer, and above 1920x1088 also 2 mode info pool at half, 4 smaller coefficient pool, 32 frame buffer bound at the recording)`; the decoder's `MEMORY decoder created options` line says which pool it is | `-lowmemparts 1`: the mode info pool of the worst case, the default up to package 0.2.185; `-lowmemparts 0`: none, every frame takes its back buffer from the pool (`Low memory parts: 0 (none, -lowmemparts 0)`); `-lowmemparts N`: exactly the parts in `N`; `-lowmem`: all three (`-lowmemparts 7`) |
@@ -785,29 +785,32 @@ that do not fit together.
 ## CDEF v2 run (`-cdefv2`)
 
 In the first timing run, upstream's CDEF shader was the largest GPU stage on 4K
-10-bit streams. CDEF v2 is its replacement: on the console it takes 5.5 to 7.2 ms per 4K
-10-bit frame where upstream's takes about 52 ms, and the output is md5-exact.
+10-bit streams. The 64×64 CDEF v2 shader took 5.5 to 7.2 ms per 4K 10-bit frame
+on the console, down from about 52 ms, with identical frame MD5s. The current
+default uses 64×32 groups and two lanes per 8×8 block.
 
 | Flag | Effect |
 | --- | --- |
 | none | CDEF runs through `cdef_filter_v2.hlsl`. **The default since package 0.2.8.0.** |
+| `-cdeflegacy` | CDEF runs through `cdef_filter_v2_legacy.hlsl`, the previous 64×64 kernel. Use this to compare the current v2 kernel with its predecessor. |
 | `-cdefv1` | CDEF runs through upstream's `cdef_filter.hlsl`: the same pipeline state and the same dispatch as upstream. For A/B runs. |
-| `-cdefv2` | Accepted, changes nothing (it was the opt-in flag up to package 0.2.7.0). Refused together with `-cdefv1`. |
+| `-cdefv2` | Alias for the default (it was the opt-in flag up to package 0.2.7.0). Use one of the three flags per task. |
 
 The task's log says which shader is in use:
 
 ```text
 CDEF shader: cdef_filter_v2 (default)
+CDEF shader: cdef_filter_v2_legacy (-cdeflegacy)
 CDEF shader: cdef_filter (original, -cdefv1)
 ```
 
-The task lines in the rest of this section are the ones the comparison was run with, when
-`-cdefv2` was the opt-in flag. With the current player the line without a flag runs CDEF
-v2: add `-cdefv1` to the line that is to run upstream's shader.
+The rest of this section describes the original comparison. To use those
+kernels with the current player, use `-cdefv1` for upstream and
+`-cdeflegacy` for the 64×64 v2 kernel.
 
 ### What changed in the shader
 
-| | `cdef_filter.hlsl` (upstream) | `cdef_filter_v2.hlsl` |
+| | `cdef_filter.hlsl` (upstream) | `cdef_filter_v2_legacy.hlsl` |
 | --- | --- | --- |
 | Thread group | 4 x 4 x 8, one group per 32x32 luma | 8 x 8 x 1, one group per 64x64 luma (one CDEF strength index) |
 | A thread's work | one 8-sample row of an 8x8 luma block, then one 4-sample row of a 4x4 chroma block (U or V) | one 8x8 luma block and its two 4x4 chroma blocks |

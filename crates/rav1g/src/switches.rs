@@ -74,6 +74,11 @@ pub fn set_cdef_v2(enable: bool) {
     crate::host::av1_set_cdef_v2(c_int::from(enable))
 }
 
+/// Use the previous 64x64 CDEF v2 kernel. Applies only to the v2 path.
+pub fn set_cdef_legacy(enable: bool) {
+    crate::host::av1_set_cdef_legacy(c_int::from(enable))
+}
+
 /// Use the original loop restoration shader. By default, use the optimized shader.
 pub fn set_lr_legacy(enable: bool) {
     crate::host::av1_set_lr_legacy(c_int::from(enable))

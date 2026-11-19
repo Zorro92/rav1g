@@ -89,7 +89,7 @@ unsafe fn superres(dec: *mut Av1Core, src: *const HwFrameBuffer, dst: *const HwF
 // CDEF.
 // ---------------------------------------------------------------------------------------------------------
 
-/// The constants of `cdef_filter.hlsl` and `cdef_filter_v2.hlsl`.
+/// The constants shared by the CDEF filter shaders.
 #[repr(C)]
 struct CdefData {
     plane: [c_int; 4],
@@ -113,15 +113,21 @@ struct CdefData {
     cdef_uv_strength: [[c_int; 4]; 16],
 }
 
-// Which CDEF shader runs. cdef_filter_v2.hlsl writes the same bytes as cdef_filter.hlsl with a different
-// work split (one group per 64x64 luma block) and is 7 to 9 times faster on 4K 10-bit streams; it is the
-// default. av1_set_cdef_v2(0) selects the original shader (test player flag -cdefv1).
+// av1_set_cdef_v2(0) selects the upstream shader (-cdefv1). The legacy
+// switch picks the previous work split when the v2 path is selected.
 static CDEF_V2: AtomicI32 = AtomicI32::new(1);
+static CDEF_LEGACY: AtomicI32 = AtomicI32::new(0);
 
 /// `av1_set_cdef_v2` (`dx/av1_perf.h`).
 #[unsafe(no_mangle)]
 pub extern "C" fn av1_set_cdef_v2(enable: c_int) {
     CDEF_V2.store(enable, Ordering::Relaxed);
+}
+
+/// `av1_set_cdef_legacy` (`dx/av1_perf.h`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_cdef_legacy(enable: c_int) {
+    CDEF_LEGACY.store(enable, Ordering::Relaxed);
 }
 
 // The two bytes of TX_INFO_WORD that cdef_lists.hlsl reads.
@@ -308,25 +314,26 @@ unsafe fn cdef_filter_run(dec: *mut Av1Core, cm: &AV1_COMMON, src: *const HwFram
 
         let commands = commands(dec);
         let frame_buffers = buffer((*dec).frame_buffer_pool);
-        let cdef_v2 = CDEF_V2.load(Ordering::Relaxed) != 0;
         let lib = (*dec).shader_lib;
-        let shader = pipeline(if cdef_v2 {
-            &raw const (*lib).shader_cdef_filter_v2
+        let (shader, x_shift, y_shift) = if CDEF_V2.load(Ordering::Relaxed) == 0 {
+            (&raw const (*lib).shader_cdef_filter, 5, 5)
+        } else if CDEF_LEGACY.load(Ordering::Relaxed) != 0 {
+            (&raw const (*lib).shader_cdef_filter_v2_legacy, 6, 6)
         } else {
-            &raw const (*lib).shader_cdef_filter
-        });
+            (&raw const (*lib).shader_cdef_filter_v2, 6, 5)
+        };
+        let shader = pipeline(shader);
         commands.set_pipeline(shader);
         commands.set_layout(shader.layout());
         commands.bind_read(0, buffer(td.cdef_indexes).location());
         commands.bind_read(1, buffer(td.cdef_skips).location());
         commands.bind_write(2, frame_buffers.location());
         commands.bind_constants(3, constants.location);
-        if cdef_v2 {
-            // The same bindings, 64x64 luma samples per group.
-            commands.dispatch(((w + 63) >> 6) as u32, ((h + 63) >> 6) as u32, 1);
-        } else {
-            commands.dispatch(((w + 31) >> 5) as u32, ((h + 31) >> 5) as u32, 1);
-        }
+        commands.dispatch(
+            ((w + (1 << x_shift) - 1) >> x_shift) as u32,
+            ((h + (1 << y_shift) - 1) >> y_shift) as u32,
+            1,
+        );
         commands.write_barrier(frame_buffers);
         perf_gpu_mark(dec, AV1_PERF_GPU_CDEF);
         stage_dump_fb(dec, c"cdef", dst, src);

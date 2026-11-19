@@ -684,7 +684,13 @@ fn create_decoder(
         } else {
             task.lowmem_parts.to_string()
         },
-        if task.cdefv1 { "cdef_filter (-cdefv1)" } else { "cdef_filter_v2" },
+        if task.cdefv1 {
+            "cdef_filter (-cdefv1)"
+        } else if task.cdeflegacy {
+            "cdef_filter_v2_legacy (-cdeflegacy)"
+        } else {
+            "cdef_filter_v2"
+        },
         if task.intrav2 { "intra_v2" } else { "intra_main + intra_filter" },
         if task.intraopt { " (optimized main)" } else { " (legacy main, -intraod)" },
         if task.lrlegacy {
@@ -882,6 +888,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         fg_legacy: task.fglegacy,
         inter_legacy: task.interlegacy,
         cdef_v2: !task.cdefv1,
+        cdef_legacy: task.cdeflegacy,
         intra_v2: task.intrav2,
         intra_opt: task.intraopt,
         lf_legacy: task.lflegacy,

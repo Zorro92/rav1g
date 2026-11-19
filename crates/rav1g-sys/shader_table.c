@@ -44,6 +44,7 @@ typedef unsigned char BYTE; /* the type of the bytecode arrays */
 #include "dx/shaders/h/film_grain_gen_chroma.h"
 #include "dx/shaders/h/cdef_filter.h"
 #include "dx/shaders/h/cdef_filter_v2.h"
+#include "dx/shaders/h/cdef_filter_v2_legacy.h"
 #include "dx/shaders/h/intra_v2.h"
 #include "dx/shaders/h/intra_v2_hbd.h"
 #include "dx/shaders/h/gen_pred_blocks.h"
@@ -168,6 +169,7 @@ static const rav1g_shader_bytecode rav1g_shaders[] = {
   RAV1G_SHADER(film_grain_gen_chroma),
   RAV1G_SHADER(cdef_filter),
   RAV1G_SHADER(cdef_filter_v2),
+  RAV1G_SHADER(cdef_filter_v2_legacy),
   RAV1G_SHADER(intra_v2),
   RAV1G_SHADER(intra_v2_hbd),
   RAV1G_SHADER(gen_pred_blocks),
