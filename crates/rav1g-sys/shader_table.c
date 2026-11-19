@@ -55,6 +55,8 @@ typedef unsigned char BYTE; /* the type of the bytecode arrays */
 #include "dx/shaders/h/inter_compound_fast_hbd.h"
 #include "dx/shaders/h/gen_lf_blocks_vert.h"
 #include "dx/shaders/h/gen_lf_blocks_hor.h"
+#include "dx/shaders/h/gen_lf_blocks_vert_legacy.h"
+#include "dx/shaders/h/gen_lf_blocks_hor_legacy.h"
 #include "dx/shaders/h/copy_plane.h"
 #include "dx/shaders/h/copy_plane_10bit10x3.h"
 #include "dx/shaders/h/upscaling.h"
@@ -167,6 +169,8 @@ static const rav1g_shader_bytecode rav1g_shaders[] = {
   RAV1G_SHADER(inter_compound_fast_hbd),
   RAV1G_SHADER(gen_lf_blocks_vert),
   RAV1G_SHADER(gen_lf_blocks_hor),
+  RAV1G_SHADER(gen_lf_blocks_vert_legacy),
+  RAV1G_SHADER(gen_lf_blocks_hor_legacy),
   RAV1G_SHADER(copy_plane),
   RAV1G_SHADER(copy_plane_10bit10x3),
   RAV1G_SHADER(upscaling),

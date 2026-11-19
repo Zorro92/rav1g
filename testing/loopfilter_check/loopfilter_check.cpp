@@ -81,7 +81,8 @@ FilterDispatch make_dispatch(Image &image, const EdgeLists &edges, int sharpness
   return d;
 }
 
-void dispatch(const FilterKernel &kernel, const FilterDispatch &d, bool shuffle) {
+template <class Kernel, class Dispatch>
+void dispatch(const Kernel &kernel, const Dispatch &d, bool shuffle) {
   kernel.bind(d);
   gs_state.shader = kernel.name;
   std::vector<uint> groups;
@@ -190,10 +191,12 @@ void vertical_random(int depth, int trial) {
   edges.set(0, 2, 1, 2, 63);
   compare_vertical(frame, edges, trial % 8, trial % 3);
 }
+#include "gen_check.h"
 }  // namespace
 
 int main() {
   gs_state.track_unwritten = true;
+  check_generators();
   for (int sharpness = 0; sharpness < 8; ++sharpness) vertical_thresholds(10, sharpness);
   for (int trial = 0; trial < 48; ++trial) vertical_random(10, trial);
   std::puts("PASS: vertical even and odd, 10-bit, all 64 levels, 8 sharpness settings and 4 lengths; 48 randomized frames");

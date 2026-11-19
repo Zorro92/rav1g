@@ -140,6 +140,8 @@ pub struct compute_shader_lib {
     pub shader_pred_list_scan: ComputeShader,
     pub shader_gen_lf_vert: ComputeShader,
     pub shader_gen_lf_hor: ComputeShader,
+    pub shader_gen_lf_vert_legacy: ComputeShader,
+    pub shader_gen_lf_hor_legacy: ComputeShader,
     pub shader_lf_vert_hbd_legacy: ComputeShader,
     pub shader_upscale: ComputeShader,
     pub shaders_8bit: bitdepth_dependent_shaders,

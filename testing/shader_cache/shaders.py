@@ -49,6 +49,7 @@ UNOPTIMIZED = [name + '_legacy' for name in INTRA_MAIN]
 REQUIRED_BYTECODE = [
     'cdef_filter', 'cdef_filter_v2', *INTRA_MAIN, *UNOPTIMIZED,
     'intra_filter', 'intra_filter_hbd', 'intra_v2', 'intra_v2_hbd',
+    'gen_lf_blocks_vert', 'gen_lf_blocks_hor', 'gen_lf_blocks_vert_legacy', 'gen_lf_blocks_hor_legacy',
     'loopfilter_vert_hbd', 'loopfilter_vert_hbd_legacy',
 ]
 

@@ -27,6 +27,9 @@ struct LoopfilterData {
     limits: [[c_int; 4]; 64],
 }
 
+// The new list shaders index the Rust grid directly as dwords.
+const _: () = assert!(crate::sys::MI_GRID_ENTRY_BYTES == 4);
+
 /// The constants of the two shaders that list the edges.
 #[repr(C)]
 struct GenLfData {
@@ -161,7 +164,11 @@ pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: 
             }
         }
 
-        let shader = pipeline(&raw const (*lib).shader_gen_lf_vert);
+        let shader = pipeline(if lf_legacy {
+            &raw const (*lib).shader_gen_lf_vert_legacy
+        } else {
+            &raw const (*lib).shader_gen_lf_vert
+        });
         commands.set_layout(shader.layout());
         commands.bind_read(0, buffer((*dec).mode_info_pool).location());
         commands.bind_read(1, buffer(td.mode_info_grid).location());
@@ -177,7 +184,11 @@ pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: 
             commands.set_inline_constants(4, &inline, 0);
             commands.dispatch(((wicount + 63) >> 6) as u32, 1, 1);
         }
-        commands.set_pipeline(pipeline(&raw const (*lib).shader_gen_lf_hor));
+        commands.set_pipeline(pipeline(if lf_legacy {
+            &raw const (*lib).shader_gen_lf_hor_legacy
+        } else {
+            &raw const (*lib).shader_gen_lf_hor
+        }));
         for plane in (0..3).filter(|&plane| filtered(plane)) {
             let (mi_cols, mi_rows) = (mi_cols(plane), mi_rows(plane));
             let wicount = mi_cols * ((mi_rows + 15) >> 4);

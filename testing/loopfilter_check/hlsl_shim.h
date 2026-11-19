@@ -15,6 +15,10 @@ using std::clamp;
 using std::max;
 using std::min;
 
+// HLSL resolves the legacy horizontal generator's mixed-sign clamp to an
+// integer overload. The active strip always starts within the frame.
+inline int clamp(uint v, int lo, int hi) { return std::clamp(int(v), lo, hi); }
+
 struct uint2 { uint x, y; };
 struct uint3 { uint x, y, z; };
 struct uint4 { uint x, y, z, w; };
@@ -72,3 +76,17 @@ struct RWByteAddressBuffer : ByteAddressBuffer {
 };
 
 inline void GroupMemoryBarrierWithGroupSync() { gs_group_sync(); }
+
+template <class T>
+struct StructuredBuffer {
+  const T *entries;
+  size_t count;
+
+  const T &operator[](size_t i) const {
+    if (i >= count) {
+      std::fprintf(stderr, "FAIL: %s mode-info index %zu (count %zu)\n", gs_state.shader, i, count);
+      std::exit(1);
+    }
+    return entries[i];
+  }
+};
