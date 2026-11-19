@@ -156,8 +156,8 @@ const LAYOUTS: usize =
 const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
-    // 20 transforms, 32 bit-depth-independent shaders, and 34 per bit depth.
-    assert!(SHADERS == 20 + 32 + 2 * 34);
+    // 20 transforms, 33 bit-depth-independent shaders, and 34 per bit depth.
+    assert!(SHADERS == 20 + 33 + 2 * 34);
     assert!(LAYOUTS == 24);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
@@ -475,6 +475,7 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("film_grain_filter_sp_tex", &layouts.film_grain_tex, &raw mut (*lib).shader_filmgrain_filter_sp_tex),
             ("film_grain_filter_sp_tex_v2", &layouts.film_grain_tex, &raw mut (*lib).shader_filmgrain_filter_sp_tex_v2),
             ("cdef_lists", &layouts.cdef_lists, &raw mut (*lib).shader_cdef_lists),
+            ("cdef_lists_legacy", &layouts.cdef_lists, &raw mut (*lib).shader_cdef_lists_legacy),
             ("mi_grid_build", &layouts.mi_grid_build, &raw mut (*lib).shader_mi_grid_build),
             ("pred_list_count", &layouts.pred_list_count, &raw mut (*lib).shader_pred_list_count),
             ("pred_list_scan", &layouts.pred_list_scan, &raw mut (*lib).shader_pred_list_scan),
@@ -902,7 +903,7 @@ mod tests {
             .filter_map(|line| line.trim().trim_start_matches('(').strip_prefix('"'))
             .map(|rest| &rest[..rest.find('"').unwrap()])
             .collect();
-        assert_eq!(names.len(), 116);
+        assert_eq!(names.len(), 117);
         let mut unique = names.clone();
         unique.sort_unstable();
         unique.dedup();

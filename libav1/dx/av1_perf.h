@@ -282,6 +282,11 @@ void av1_set_cdef_v2(int enable);
  * by av1_set_cdef_v2(0) takes precedence. Change it while no frame is in flight. */
 void av1_set_cdef_legacy(int enable);
 
+/* Process-wide. Non-zero selects the previous GPU CDEF list shader.
+ * Zero selects the optimized shader (default). Applies only to decoders
+ * that generate the CDEF lists on the GPU. Change it while no frame is in flight. */
+void av1_set_cdef_lists_legacy(int enable);
+
 /* Process-wide. Non-zero selects the original loop restoration shader.
  * Zero selects the optimized shader (default). Change it while no frame is in flight. */
 void av1_set_lr_legacy(int enable);

@@ -117,6 +117,7 @@ struct CdefData {
 // switch picks the previous work split when the v2 path is selected.
 static CDEF_V2: AtomicI32 = AtomicI32::new(1);
 static CDEF_LEGACY: AtomicI32 = AtomicI32::new(0);
+static CDEF_LISTS_LEGACY: AtomicI32 = AtomicI32::new(0);
 
 /// `av1_set_cdef_v2` (`dx/av1_perf.h`).
 #[unsafe(no_mangle)]
@@ -128,6 +129,12 @@ pub extern "C" fn av1_set_cdef_v2(enable: c_int) {
 #[unsafe(no_mangle)]
 pub extern "C" fn av1_set_cdef_legacy(enable: c_int) {
     CDEF_LEGACY.store(enable, Ordering::Relaxed);
+}
+
+/// `av1_set_cdef_lists_legacy` (`dx/av1_perf.h`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_cdef_lists_legacy(enable: c_int) {
+    CDEF_LISTS_LEGACY.store(enable, Ordering::Relaxed);
 }
 
 // The two bytes of TX_INFO_WORD that cdef_lists.hlsl reads.
@@ -157,7 +164,12 @@ unsafe fn record_cdef_lists(dec: *mut Av1Core, cm: &AV1_COMMON, sizes: [c_int; 4
     unsafe {
         let td = &mut *(*dec).curr_frame_data;
         let commands = commands(dec);
-        let shader = pipeline(&raw const (*(*dec).shader_lib).shader_cdef_lists);
+        let lib = (*dec).shader_lib;
+        let shader = pipeline(if CDEF_LISTS_LEGACY.load(Ordering::Relaxed) != 0 {
+            &raw const (*lib).shader_cdef_lists_legacy
+        } else {
+            &raw const (*lib).shader_cdef_lists
+        });
         let (indexes, skips) = (buffer(td.cdef_indexes), buffer(td.cdef_skips));
         commands.transition(indexes, BufferState::Read, BufferState::ReadWrite);
         commands.transition(skips, BufferState::Read, BufferState::ReadWrite);

@@ -58,6 +58,7 @@ struct ByteAddressBuffer {
     memcpy(&v, ptr + address, 4);
     return v;
   }
+  uint2 Load2(uint address) const { return uint2{Load(address), Load(address + 4)}; }
 };
 
 struct RWByteAddressBuffer {

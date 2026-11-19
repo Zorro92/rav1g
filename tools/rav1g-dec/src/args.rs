@@ -81,6 +81,7 @@ pub struct Task {
     pub cdefv1: bool,
     pub cdefv2: bool,
     pub cdeflegacy: bool,
+    pub cdeflistslegacy: bool,
     pub nofitsize: bool,
     pub fitsize: bool,
     pub lowmem: bool,
@@ -157,6 +158,7 @@ impl Default for Task {
             cdefv1: false,
             cdefv2: false,
             cdeflegacy: false,
+            cdeflistslegacy: false,
             nofitsize: false,
             fitsize: false,
             lowmem: false,
@@ -264,6 +266,7 @@ pub fn usage() {
     say!("  -timeout <seconds>    give up on a task after this time (exit code {})", EXIT_TIMEOUT);
     say!("  -cdefv1 -nofitsize -lowmemparts <n> -lowmem -slots <n> -intrav2");
     say!("  -cdeflegacy         use the previous 64x64 CDEF v2 shader");
+    say!("  -cdeflistslegacy    use the previous GPU CDEF list shader");
     say!("  -intraod             use the baseline DXC -Od intra_main kernels (-intraopt restores the default)");
     say!("  -lrlegacy           use the original loop_restoration shader");
     say!("  -fglegacy           use the original direct NV12/P010 film grain shader");
@@ -443,6 +446,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-cdefv1" => task.cdefv1 = true,
             "-cdefv2" => task.cdefv2 = true,
             "-cdeflegacy" => task.cdeflegacy = true,
+            "-cdeflistslegacy" => task.cdeflistslegacy = true,
             "-nofitsize" => task.nofitsize = true,
             "-fitsize" => task.fitsize = true,
             "-intrav2" => task.intrav2 = true,

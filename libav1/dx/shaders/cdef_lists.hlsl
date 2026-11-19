@@ -36,29 +36,38 @@ cbuffer cb_cdef_lists : register(b0) {
   uint cb_skip_rows;     // rows: what the host's loop writes, and no entry behind it
 };
 
-// Where the record of the block at a 4x4 unit of the frame starts in mi_pool. Every unit inside the frame
-// has a block when the frame is parsed; an entry of zeros would be a unit without one, and reads the first
-// record of the pool so that the load stays inside it (the host's loop has no such case either).
-uint record_at(uint row, uint col) {
-  const uint entry = mi_grid.Load((row * cb_mi_stride + col) * 4);
-  return entry == 0 ? 0u : entry - cb_mi_addr_base;
+// A zero grid entry reads the first record, as in the legacy shader.
+uint tx_info(uint entry) {
+  const uint record = entry == 0 ? 0u : entry - cb_mi_addr_base;
+  return mi_pool.Load(record + TX_INFO_WORD);
 }
 
-uint skip_at(uint row, uint col) { return (mi_pool.Load(record_at(row, col) + TX_INFO_WORD) >> 8) & 255; }
+bool is_skipped(uint word) { return (word & 0xff00u) != 0; }
 
 [numthreads(8, 8, 1)] void main(uint3 thread : SV_DispatchThreadID) {
   // The compiler makes the loads of a thread without work unconditional: such a thread loads what the
   // last 8x8 block of the frame loads, so that no load leaves the grid.
   const uint col = min(thread.x, cb_skip_cols - 1);
   const uint row = min(thread.y, cb_skip_rows - 1);
-  const bool skipped = skip_at(row * 2, col * 2) != 0 && skip_at(row * 2, col * 2 + 1) != 0 &&
-                       skip_at(row * 2 + 1, col * 2) != 0 && skip_at(row * 2 + 1, col * 2 + 1) != 0;
-  if (thread.x < cb_skip_cols && thread.y < cb_skip_rows) {
-    skips.Store((thread.y * cb_skips_stride + thread.x) * 4, skipped ? 1u : 0u);
+  const uint at = (row * 2 * cb_mi_stride + col * 2) * 4;
+  const uint2 top = mi_grid.Load2(at);
+  const uint2 bottom = mi_grid.Load2(at + cb_mi_stride * 4);
+  if (thread.x >= cb_skip_cols || thread.y >= cb_skip_rows) return;
+
+  const uint word = tx_info(top.x);
+  bool skipped = is_skipped(word);
+  // A block that covers all four units needs just one mode-info read.
+  [branch] if (top.x != top.y || top.x != bottom.x || top.x != bottom.y) {
+    const bool top_right = is_skipped(tx_info(top.y));
+    const bool bottom_left = is_skipped(tx_info(bottom.x));
+    const bool bottom_right = is_skipped(tx_info(bottom.y));
+    skipped = skipped && top_right && bottom_left && bottom_right;
   }
+  skips.Store((thread.y * cb_skips_stride + thread.x) * 4, skipped ? 1u : 0u);
+
   // The first thread of a group: the index of its 64x64 block, whose top left unit is inside the frame.
+  // The strength and skip bytes are in the same word.
   if ((thread.x & 7) == 0 && (thread.y & 7) == 0) {
-    const uint word = mi_pool.Load(record_at(thread.y * 2, thread.x * 2) + TX_INFO_WORD);
     const int strength = ((int)(word << 8)) >> 24;
     cdef_index.Store(((thread.y >> 3) * cb_index_stride + (thread.x >> 3)) * 4, (uint)strength);
   }

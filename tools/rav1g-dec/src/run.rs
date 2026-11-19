@@ -889,6 +889,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         inter_legacy: task.interlegacy,
         cdef_v2: !task.cdefv1,
         cdef_legacy: task.cdeflegacy,
+        cdef_lists_legacy: task.cdeflistslegacy,
         intra_v2: task.intrav2,
         intra_opt: task.intraopt,
         lf_legacy: task.lflegacy,
@@ -911,6 +912,12 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         task.name,
         task.parser_options.words()
     );
+    if task.parser_options.gpu_cdef_lists || task.parser_options.gpu_grid {
+        say!(
+            "CDEF lists shader: {}",
+            if task.cdeflistslegacy { "cdef_lists_legacy (-cdeflistslegacy)" } else { "cdef_lists (default)" }
+        );
+    }
     if task.interfast & switches::INTER_FAST_ON != 0 {
         say!(
             "INTERFAST {}: inter blocks by motion vector class, mode {} (one reference: {}; two: {}); frames with a \

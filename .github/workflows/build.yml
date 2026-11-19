@@ -3647,8 +3647,8 @@ jobs:
       - name: Compare direct-texture film grain with its legacy shader
         run: sh testing/film_grain_check/run.sh --mutate
 
-  # The CDEF filter shaders, compiled as C++, must write byte-identical frames
-  # (random and edge-case input, 8-bit and high bit depth).
+  # The CDEF shaders, compiled as C++, must write byte-identical frames and
+  # lists (random and edge-case input, 8-bit and high bit depth).
   cdef-check:
     runs-on: ubuntu-26.04
     timeout-minutes: 15
@@ -3657,7 +3657,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Compare CDEF filters
+      - name: Compare CDEF filters and lists
         run: |
           set -euo pipefail
           sh testing/cdef_check/run.sh --mutate | tee cdef-check.log

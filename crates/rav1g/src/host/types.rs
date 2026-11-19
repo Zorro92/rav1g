@@ -137,6 +137,7 @@ pub struct compute_shader_lib {
     pub shader_filmgrain_filter_sp_tex_v2: ComputeShader,
     // The lists of CDEF from the mode info (`postfilter.rs`, `Av1Core::gpu_cdef_lists`).
     pub shader_cdef_lists: ComputeShader,
+    pub shader_cdef_lists_legacy: ComputeShader,
     // The mode info grid from the records (`grid_check.rs`): the grid of the slot in a decoder whose
     // parse writes none (`Av1Core::gpu_grid`), or a second grid for the check of the pass.
     pub shader_mi_grid_build: ComputeShader,

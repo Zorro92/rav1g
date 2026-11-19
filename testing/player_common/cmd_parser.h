@@ -133,6 +133,7 @@ class CParameters {
     bool cdefv2_;
     bool cdefv1_;
     bool cdeflegacy_;
+    bool cdeflistslegacy_;
     bool intrav2_;
     bool intraopt_;
     bool intraod_;

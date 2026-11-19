@@ -761,6 +761,7 @@ int AV1Decoder::DecodeOne() {
   // Select the CDEF shader while no frame is in flight.
   rav1g_set_cdef_v2(params_.cdefv2_ != 0);
   av1_set_cdef_legacy(params_.cdeflegacy_);
+  av1_set_cdef_lists_legacy(params_.cdeflistslegacy_);
   XB_LOGI << "CDEF shader: "
           << (params_.cdefv1_       ? "cdef_filter (original, -cdefv1)"
               : params_.cdeflegacy_ ? "cdef_filter_v2_legacy (-cdeflegacy)"
@@ -796,6 +797,10 @@ int AV1Decoder::DecodeOne() {
           << (params_.parser_options_ & PLAYER_PARSEOPT_GPU_CDEF_LISTS ? "gpucdef " : "")
           << (params_.parser_options_ & PLAYER_PARSEOPT_GPU_GRID ? "gpugrid " : "")
           << (params_.parser_options_ & PLAYER_PARSEOPT_GPU_PRED_LISTS ? "gpublists " : "");
+  if (params_.parser_options_ & (PLAYER_PARSEOPT_GPU_CDEF_LISTS | PLAYER_PARSEOPT_GPU_GRID)) {
+    XB_LOGI << "CDEF lists shader: "
+            << (params_.cdeflistslegacy_ ? "cdef_lists_legacy (-cdeflistslegacy)" : "cdef_lists (default)");
+  }
   rav1g_set_intra_opt(!params_.intraod_);
   XB_LOGI << "Intra main shader: "
           << (params_.intraod_ ? "intra_main_legacy (-intraod)" : "intra_main (default)");

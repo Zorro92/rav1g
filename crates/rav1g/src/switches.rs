@@ -79,6 +79,11 @@ pub fn set_cdef_legacy(enable: bool) {
     crate::host::av1_set_cdef_legacy(c_int::from(enable))
 }
 
+/// Use the previous GPU shader for the CDEF lists.
+pub fn set_cdef_lists_legacy(enable: bool) {
+    crate::host::av1_set_cdef_lists_legacy(c_int::from(enable))
+}
+
 /// Use the original loop restoration shader. By default, use the optimized shader.
 pub fn set_lr_legacy(enable: bool) {
     crate::host::av1_set_lr_legacy(c_int::from(enable))
