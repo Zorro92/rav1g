@@ -53,7 +53,7 @@ REQUIRED_BYTECODE = [
     'gen_lf_blocks_vert', 'gen_lf_blocks_hor', 'gen_lf_blocks_vert_legacy', 'gen_lf_blocks_hor_legacy',
     'loopfilter_vert', 'loopfilter_vert_legacy', 'loopfilter_hor', 'loopfilter_hor_legacy',
     'loopfilter_vert_hbd', 'loopfilter_vert_hbd_legacy', 'loopfilter_hor_hbd', 'loopfilter_hor_hbd_legacy',
-    'loop_restoration', LR_LEGACY,
+    'loop_restoration', LR_LEGACY, 'loop_restoration_wiener',
 ]
 
 # What DXC is given for every shader on top of -T, -E and -Od:

@@ -406,6 +406,7 @@ unsafe fn looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON, lr_ctxt: *mut 
         let mut lr_ptr: c_int = 0;
         let mut pl_width = [0; 3];
         let mut pl_height = [0; 3];
+        let mut needs_general = [false; 3];
         let back_buffer1 = &raw const (*dec).back_buffer1;
         let dst_buffer = &*td.dst_frame_buffer;
         let src_buffer = &*if td.do_cdef == td.do_superres { td.frame_buffer.cast_const() } else { back_buffer1 };
@@ -466,20 +467,23 @@ unsafe fn looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON, lr_ctxt: *mut 
             let lr_wiener = (*td.loop_rest_wiener).host_ptr.cast::<c_int>();
             for u in 0..rsi.units_per_tile {
                 let unit = &*rsi.unit_info.offset(u as isize);
+                let kind = c_int::from(unit.restoration_type);
                 let dst_type = lr_type.offset((lr_ptr * 4) as isize);
                 let dst_wiener = lr_wiener.offset((lr_ptr * 16) as isize);
                 lr_ptr += 1;
-                *dst_type = c_int::from(unit.restoration_type);
+                *dst_type = kind;
                 *dst_type.add(1) = unit.sgrproj_info.xqd[0];
                 *dst_type.add(2) = unit.sgrproj_info.xqd[1];
                 *dst_type.add(3) = unit.sgrproj_info.ep;
-                if u32::from(unit.restoration_type) == RESTORE_WIENER as u32 {
+                if kind == RESTORE_WIENER {
                     for i in 0..8 {
                         *dst_wiener.add(i) = c_int::from(unit.wiener_info.hfilter[i]);
                     }
                     for i in 0..8 {
                         *dst_wiener.add(i + 8) = c_int::from(unit.wiener_info.vfilter[i]);
                     }
+                } else {
+                    needs_general[p] |= kind != RESTORE_NONE;
                 }
             }
         }
@@ -511,11 +515,18 @@ unsafe fn looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON, lr_ctxt: *mut 
         let commands = commands(dec);
         let frame_buffers = buffer((*dec).frame_buffer_pool);
         let lib = (*dec).shader_lib;
-        let shader = pipeline(if legacy {
-            &raw const (*lib).shader_loop_rest_legacy
-        } else {
-            &raw const (*lib).shader_loop_rest
+        // Keep one dispatch per plane and use the same root bindings for all three pipelines.
+        let shaders = needs_general.map(|needs_general| {
+            if legacy {
+                &raw const (*lib).shader_loop_rest_legacy
+            } else if needs_general {
+                &raw const (*lib).shader_loop_rest
+            } else {
+                &raw const (*lib).shader_loop_rest_wiener
+            }
         });
+        let mut bound = shaders[0];
+        let shader = pipeline(bound);
         commands.set_pipeline(shader);
         commands.set_layout(shader.layout());
         commands.bind_read(0, frame_buffers.location());
@@ -525,7 +536,11 @@ unsafe fn looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON, lr_ctxt: *mut 
         commands.bind_constants(4, sgr_constants);
         commands.bind_constants(5, plane_constants.location);
 
-        for p in 0..3 {
+        for (p, shader) in shaders.into_iter().enumerate() {
+            if shader != bound {
+                bound = shader;
+                commands.set_pipeline(pipeline(bound));
+            }
             // do_restoration, plane
             commands.set_inline_constants(6, &[c_int::from(restored[p]), p as c_int], 0);
             commands.dispatch(((pl_width[p] + 15) >> 4) as u32, ((pl_height[p] + 3) >> 2) as u32, 1);

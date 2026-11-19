@@ -21,9 +21,6 @@
 #define RESTORE_NONE 0
 #define RESTORE_WIENER 1
 #define RESTORE_SGRPROJ 2
-#define RESTORE_SWITCHABLE 3
-#define RESTORE_SWITCHABLE_TYPES RESTORE_SWITCHABLE
-#define RESTORE_TYPES 4
 #define WIENER_ROUND0_BITS 3
 #define FILTER_BITS 7
 #define InterRound0 WIENER_ROUND0_BITS
@@ -77,134 +74,243 @@ cbuffer cb_loop_rest_data : register(b2) {
 
 #define WG_WIDTH 16
 #define WG_HEIGHT 4
+#define WG_THREADS (WG_WIDTH * WG_HEIGHT)
+#define INPUT_WIDTH (WG_WIDTH + 8)
+#define INPUT_HEIGHT (WG_HEIGHT + 6)
+#define INPUT_WORDS (INPUT_WIDTH * INPUT_HEIGHT)
+
+#ifdef LR_WIENER_ONLY
+#define WORK_WORDS (INPUT_WORDS + WG_WIDTH * INPUT_HEIGHT)
+#else
 #define BOX_WIDTH (WG_WIDTH + 2)
 #define BOX_HEIGHT (WG_HEIGHT + 2)
+#define COLUMN5_WIDTH (BOX_WIDTH + 4)
+#define COLUMN3_WIDTH (BOX_WIDTH + 2)
+#define COLUMN5_COUNT (BOX_HEIGHT / 2 * COLUMN5_WIDTH)
+#define COLUMN3_COUNT (BOX_HEIGHT * COLUMN3_WIDTH)
+#define COLUMN5_BASE INPUT_WORDS
+#define COLUMN3_BASE (COLUMN5_BASE + 2 * COLUMN5_COUNT)
+#define A2_BASE (COLUMN3_BASE + 2 * COLUMN3_COUNT)
+#define WORK_WORDS (A2_BASE + 64)
+#define BOX3_COUNT (BOX_HEIGHT * BOX_WIDTH)
+#endif
 
-groupshared int input[WG_HEIGHT + 6][WG_WIDTH + 8];
+// The first region holds the input tile. The space after it holds the Wiener intermediate
+// or the SGR column sums and lookup table. SGR can recycle the input once all columns are ready.
+groupshared uint work[WORK_WORDS];
 groupshared int output[WG_HEIGHT][WG_WIDTH];
-groupshared int intermediate[WG_HEIGHT + 6][WG_WIDTH];
+#undef WORK_WORDS
 
-groupshared int flt[2][WG_HEIGHT][WG_WIDTH];
-groupshared int A[WG_HEIGHT + 2][WG_WIDTH + 2];
-groupshared int B[WG_HEIGHT + 2][WG_WIDTH + 2];
-groupshared uint sgr_a2[64];
+int input_sample(uint x, uint y) {
+  return int(work[y * INPUT_WIDTH + x]);
+}
 
+uint wiener_index(uint x, uint y) {
+  return INPUT_WORDS + y * WG_WIDTH + x;
+}
+
+int wiener_sample(uint x, uint y) {
+  return int(work[wiener_index(x, y)]);
+}
+
+int wiener_filter(uint lx, uint ly, int unit_id, int bit_depth) {
+  const int limit = (1 << (bit_depth + 1 + FILTER_BITS - InterRound0)) - 1;
+  const int horizontal_bias = 1 << (bit_depth + FILTER_BITS - 1);
+  const int offset = unit_id * 64;
+  const int4 hfilter0 = LrWiener.Load4(offset + 0);
+  const int4 hfilter1 = LrWiener.Load4(offset + 16);
+
+  for (uint r = ly; r < INPUT_HEIGHT; r += WG_HEIGHT) {
+    int s = (input_sample(lx + 4, r) << 7) + horizontal_bias;
+    s += hfilter0.x * input_sample(lx + 1, r);
+    s += hfilter0.y * input_sample(lx + 2, r);
+    s += hfilter0.z * input_sample(lx + 3, r);
+    s += hfilter0.w * input_sample(lx + 4, r);
+    s += hfilter1.x * input_sample(lx + 5, r);
+    s += hfilter1.y * input_sample(lx + 6, r);
+    s += hfilter1.z * input_sample(lx + 7, r);
+    work[wiener_index(lx, r)] = clamp(Round2(s, InterRound0), 0, limit);
+  }
+
+  GroupMemoryBarrierWithGroupSync();
+
+  const int4 vfilter0 = LrWiener.Load4(offset + 32);
+  const int4 vfilter1 = LrWiener.Load4(offset + 48);
+  int s = (wiener_sample(lx, ly + 3) << 7) - (1 << (bit_depth + InterRound1 - 1));
+  s += vfilter0.x * wiener_sample(lx, ly + 0);
+  s += vfilter0.y * wiener_sample(lx, ly + 1);
+  s += vfilter0.z * wiener_sample(lx, ly + 2);
+  s += vfilter0.w * wiener_sample(lx, ly + 3);
+  s += vfilter1.x * wiener_sample(lx, ly + 4);
+  s += vfilter1.y * wiener_sample(lx, ly + 5);
+  s += vfilter1.z * wiener_sample(lx, ly + 6);
+  return Round2(s, InterRound1);
+}
+
+#ifndef LR_WIENER_ONLY
 // round(2^SGRPROJ_RECIP_BITS / n), where n is the area of the box.
 static const uint SGR_RECIP_5X5 = ((1 << SGRPROJ_RECIP_BITS) + 12) / 25;
 static const uint SGR_RECIP_3X3 = ((1 << SGRPROJ_RECIP_BITS) + 4) / 9;
 
 uint lookup_sgr_a2(uint z) {
-  const uint word = sgr_a2[z >> 2];
+  const uint word = work[A2_BASE + (z >> 2)];
   return ((word >> ((z & 3) * 8)) & 255) + 1;
 }
 
-#define get_loaded_source_sample(x, y) input[y + 3][x + 4]
-// Self guided filter, pass 0, first half: the box sums A and B of the group (with a border of one), spread
-// over its threads.
-void box_sums0(uint id, int eps, uint2 shifts, uint2 rounding) {
-  for (uint idx = id; idx < BOX_HEIGHT * BOX_WIDTH; idx += WG_HEIGHT * WG_WIDTH) {
-    uint row = idx / BOX_WIDTH;
-    int i = (int)row - 1;
-    int j = (int)(idx - row * BOX_WIDTH) - 1;
-    uint a = 0;
-    uint b = 0;
-    for (int dy = -2; dy <= 2; dy++) {
-      for (int dx = -2; dx <= 2; dx++) {
-        uint c = get_loaded_source_sample(j + dx, i + dy);
-        a += c * c;
-        b += c;
-      }
+uint2 source_column3(uint x, uint y) {
+  const uint3 samples = uint3(input_sample(x, y), input_sample(x, y + 1), input_sample(x, y + 2));
+  const uint3 squares = samples * samples;
+  return uint2(samples.x + samples.y + samples.z, squares.x + squares.y + squares.z);
+}
+
+void store_column(uint at, uint count, uint2 sums) {
+  work[at] = sums.x;
+  work[at + count] = sums.y;
+}
+
+uint2 load_column(uint at, uint count) {
+  return uint2(work[at], work[at + count]);
+}
+
+void vertical_sums(uint id, bool use3) {
+  // The radius-two filter consumes only coefficient rows centered at -1, 1 and 3.
+  // Build their five-row column sums and reuse the middle three rows for radius one.
+  for (uint idx = id; idx < COLUMN5_COUNT; idx += WG_THREADS) {
+    const uint row = idx / COLUMN5_WIDTH;
+    const uint x = idx - row * COLUMN5_WIDTH;
+    const uint y = 2 * row;
+    const uint2 middle = source_column3(x + 1, y + 1);
+    const uint above = input_sample(x + 1, y);
+    const uint below = input_sample(x + 1, y + 4);
+    store_column(COLUMN5_BASE + idx, COLUMN5_COUNT, middle + uint2(above + below, above * above + below * below));
+    if (use3 && x > 0 && x < COLUMN5_WIDTH - 1) {
+      store_column(COLUMN3_BASE + y * COLUMN3_WIDTH + x - 1, COLUMN3_COUNT, middle);
     }
-    a = (a + rounding.y) >> shifts.y;
-    uint d = (b + rounding.x) >> shifts.x;
-    uint p = max(0, int(a * 25 - d * d));
-    uint z = Round2(p * eps, SGRPROJ_MTABLE_BITS);  // p*s in documentation
-    uint a2 = lookup_sgr_a2(min(z, 255u));
-    uint b2 = ((1 << SGRPROJ_SGR_BITS) - a2) * b * SGR_RECIP_5X5;
-    A[1 + i][1 + j] = a2;
-    B[1 + i][1 + j] = Round2(b2, SGRPROJ_RECIP_BITS);
+  }
+  // The remaining radius-one centers are 0, 2 and 4. Their tile has one less halo column on each side.
+  if (use3 && id < COLUMN3_COUNT / 2) {
+    const uint row = id / COLUMN3_WIDTH;
+    const uint x = id - row * COLUMN3_WIDTH;
+    const uint y = 2 * row + 1;
+    store_column(COLUMN3_BASE + y * COLUMN3_WIDTH + x, COLUMN3_COUNT, source_column3(x + 2, y + 1));
   }
 }
 
-// Second half: the filtered sample of a thread, from the box sums around it.
-int box_filter0(int lx, int ly) {
-  //for (int i = ly; i < h; i += WG_HEIGHT) {
-  { int i = ly;
-    int shift = 5;  // -((1 - stage) * (i & 1));
-    if (i & 1) {
-      shift = 4;
+uint pack_box(uint2 sums, uint area, uint reciprocal, uint strength, uint2 shifts, uint2 rounding) {
+  const uint2 normalized = (sums + rounding) >> shifts;
+  const uint variance = max(0, int(normalized.y * area - normalized.x * normalized.x));
+  const uint z = Round2(variance * strength, SGRPROJ_MTABLE_BITS);
+  const uint a2 = lookup_sgr_a2(min(z, 255u));
+  const uint b2 = ((1 << SGRPROJ_SGR_BITS) - a2) * sums.x * reciprocal;
+  // a2 can equal 256. Rounded b2 is bounded by 256 times the largest sample and fits above it.
+  return a2 | (Round2(b2, SGRPROJ_RECIP_BITS) << 9);
+}
+
+uint2 load_box(uint at) {
+  const uint packed = work[at];
+  return uint2(packed & 511, packed >> 9);
+}
+
+void box_sums5(uint id, uint strength, uint2 shifts, uint2 rounding) {
+  if (id < BOX3_COUNT / 2) {
+    const uint y = id / BOX_WIDTH;
+    const uint x = id - y * BOX_WIDTH;
+    const uint column = COLUMN5_BASE + y * COLUMN5_WIDTH + x;
+    uint2 sums = uint2(0, 0);
+    [unroll] for (uint dx = 0; dx < 5; ++dx) {
+      sums += load_column(column + dx, COLUMN5_COUNT);
     }
-    //for (int j = lx; j < w; j += WG_WIDTH) {
-    { int j = lx;
-      int a = 0;
-      int b = 0;
-      for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-          int weight = 0;
-          if ((i + dy) & 1) {
-            weight = (dx == 0) ? 6 : 5;
-          } else {
-            weight = 0;
-          }
-          a += weight * A[1 + i + dy][1 + j + dx];
-          b += weight * B[1 + i + dy][1 + j + dx];
-        }
-      }
-      int v = a * get_loaded_source_sample(j, i) + b;
-      return Round2(v, SGRPROJ_SGR_BITS + shift - SGRPROJ_RST_BITS);
-    }
+    work[BOX3_COUNT + id] = pack_box(sums, 25u, SGR_RECIP_5X5, strength, shifts, rounding);
   }
 }
 
-// Self guided filter, pass 1, first half: the box sums A and B of the group (with a border of one), spread
-// over its threads.
-void box_sums1(uint id, int eps, uint2 shifts, uint2 rounding) {
-  for (uint idx = id; idx < BOX_HEIGHT * BOX_WIDTH; idx += WG_HEIGHT * WG_WIDTH) {
-    uint row = idx / BOX_WIDTH;
-    int i = (int)row - 1;
-    int j = (int)(idx - row * BOX_WIDTH) - 1;
-    uint a = 0;
-    uint b = 0;
-    for (int dy = -1; dy <= 1; dy++) {
-      for (int dx = -1; dx <= 1; dx++) {
-        uint c = get_loaded_source_sample(j + dx, i + dy);
-        a += c * c;
-        b += c;
+void box_sums3(uint id, bool reuse_columns, uint box_base, uint strength, uint2 shifts, uint2 rounding) {
+  for (uint idx = id; idx < BOX3_COUNT; idx += WG_THREADS) {
+    const uint y = idx / BOX_WIDTH;
+    const uint x = idx - y * BOX_WIDTH;
+    uint2 sums = uint2(0, 0);
+    [branch] if (reuse_columns) {
+      const uint column = COLUMN3_BASE + y * COLUMN3_WIDTH + x;
+      [unroll] for (uint dx = 0; dx < 3; ++dx) {
+        sums += load_column(column + dx, COLUMN3_COUNT);
+      }
+    } else {
+      [unroll] for (uint dx = 0; dx < 3; ++dx) {
+        sums += source_column3(x + dx + 2, y + 1);
       }
     }
-    a = (a + rounding.y) >> shifts.y;
-    uint d = (b + rounding.x) >> shifts.x;
-    uint p = max(0, int(a * 9 - d * d));
-    uint z = Round2(p * eps, SGRPROJ_MTABLE_BITS);  // p*s in documentation
-    uint a2 = lookup_sgr_a2(min(z, 255u));
-    uint b2 = ((1 << SGRPROJ_SGR_BITS) - a2) * b * SGR_RECIP_3X3;
-    A[1 + i][1 + j] = a2;
-    B[1 + i][1 + j] = Round2(b2, SGRPROJ_RECIP_BITS);
+    work[box_base + idx] = pack_box(sums, 9u, SGR_RECIP_3X3, strength, shifts, rounding);
   }
 }
 
-// Second half: the filtered sample of a thread, from the box sums around it.
-int box_filter1(int lx, int ly) {
-  //for (i = ly; i < h; i += WG_HEIGHT) {
-  { int i = ly;
-    int shift = 5;  // -((1 - stage) * (i & 1));
-    //for (int j = lx; j < w; j += WG_WIDTH) {
-    { int j = lx;
-      int a = 0;
-      int b = 0;
-      for (int dy = -1; dy <= 1; dy++) {
-        for (int dx = -1; dx <= 1; dx++) {
-          int weight = 0;
-          weight = (dx == 0 || dy == 0) ? 4 : 3;
-          a += weight * A[1 + i + dy][1 + j + dx];
-          b += weight * B[1 + i + dy][1 + j + dx];
-        }
-      }
-      int v = a * get_loaded_source_sample(j, i) + b;
-      return Round2(v, SGRPROJ_SGR_BITS + shift - SGRPROJ_RST_BITS);
+uint2 filter5_row(uint row, uint x) {
+  const uint at = BOX3_COUNT + row * BOX_WIDTH + x;
+  return 5u * (load_box(at) + load_box(at + 2)) + 6u * load_box(at + 1);
+}
+
+int box_filter5(uint x, uint y, uint sample) {
+  const uint row = y / 2;
+  const bool even = (y & 1) == 0;
+  uint2 coefficients = filter5_row(row + 1, x);
+  if (even) {
+    coefficients += filter5_row(row, x);
+  }
+  const uint shift = even ? 5 : 4;
+  const uint v = coefficients.x * sample + coefficients.y;
+  return Round2(v, SGRPROJ_SGR_BITS + shift - SGRPROJ_RST_BITS);
+}
+
+int box_filter3(uint x, uint y, uint sample, uint box_base) {
+  uint2 coefficients = uint2(0, 0);
+  [unroll] for (uint dy = 0; dy < 3; ++dy) {
+    [unroll] for (uint dx = 0; dx < 3; ++dx) {
+      const uint2 box = load_box(box_base + (y + dy) * BOX_WIDTH + x + dx);
+      coefficients += (dx == 1 || dy == 1 ? 4u : 3u) * box;
     }
   }
+  const uint v = coefficients.x * sample + coefficients.y;
+  return Round2(v, SGRPROJ_SGR_BITS + 5 - SGRPROJ_RST_BITS);
 }
+
+int sgr_filter(uint lx, uint ly, uint id, int4 rType, int bit_depth) {
+  const int4 params = data.Sgr_Params[rType.w];
+  const int sample_shift = bit_depth - 8;
+  const uint2 shifts = uint2(sample_shift, 2 * sample_shift);
+  const uint2 rounding = (uint2(1, 1) << shifts) >> 1u;
+
+  const bool use5 = params.x != 0;
+  const bool use3 = params.y != 0;
+  const int sample = input_sample(lx + 4, ly + 3);
+  const int u = sample << SGRPROJ_RST_BITS;
+
+  // With radius two, the column barrier also ends all input reads. Without it,
+  // write radius-one coefficients into the unused column area.
+  const uint box_base = use5 ? 0 : COLUMN5_BASE;
+  if (use5) {
+    vertical_sums(id, use3);
+    GroupMemoryBarrierWithGroupSync();
+    box_sums5(id, params.z, shifts, rounding);
+  }
+  if (use3) {
+    box_sums3(id, use5, box_base, params.w, shifts, rounding);
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  int filtered5 = u;
+  int filtered3 = u;
+  [branch] if (use5) {
+    filtered5 = box_filter5(lx, ly, sample);
+  }
+  [branch] if (use3) {
+    filtered3 = box_filter3(lx, ly, sample, box_base);
+  }
+  const int w0 = rType.y;
+  const int w1 = rType.z;
+  const int w2 = (1 << SGRPROJ_PRJ_BITS) - w0 - w1;
+  const int v = w1 * u + w0 * filtered5 + w2 * filtered3;
+  return Round2(v, SGRPROJ_RST_BITS + SGRPROJ_PRJ_BITS);
+}
+#endif
 
 // One thread group restores 16x4 samples, one thread each. The work goes in passes, and a pass reads from
 // the group memory what all threads of the group wrote in the pass before: the samples around the group,
@@ -236,7 +342,11 @@ void main(uint3 local : SV_GroupThreadID, uint3 group : SV_GroupID, uint id : SV
     int unitCol = min(units.Cols - 1, uint(gx + 1) >> shift);
     int unitRow = min(units.Rows - 1, uint(gy + 1 + (8 >> subsampling)) >> shift);
     unitId = unitRow * units.Stride + unitCol + pl[plane_id].Lr_buffer_offset;
+#ifdef LR_WIENER_ONLY
+    rType.x = LrTypeSgr.Load(unitId * 16);
+#else
     rType = LrTypeSgr.Load4(unitId * 16);
+#endif
   }
 
   if (rType.x == RESTORE_NONE) {
@@ -265,8 +375,8 @@ void main(uint3 local : SV_GroupThreadID, uint3 group : SV_GroupID, uint id : SV
     const int c_x = clamp(nc_x, 0, plane.width - 1) & ~3;
     const int last_sample = nc_x < 0 ? 0 : plane.width - c_x - 1;
     const int first_sample = nc_x - c_x >= 4 ? last_sample : 0;
-    const int x = lx;
-    for (int y = ly; y < WG_HEIGHT + 6; y += WG_HEIGHT) {
+    for (int y = ly; y < INPUT_HEIGHT; y += WG_HEIGHT) {
+      const int at = y * INPUT_WIDTH + 4 * lx;
       int c_y = clamp(y + gy - 3, StripeStartY - 2, StripeEndY + 2);
       c_y = clamp(c_y, 0, plane.height - 1);
       int offset = (c_y < StripeStartY || c_y > StripeEndY) ? pp_offset : plane.offset;
@@ -278,131 +388,60 @@ void main(uint3 local : SV_GroupThreadID, uint3 group : SV_GroupID, uint id : SV
         uint2 input_char = src.Load2(offset + (c_x << 1));
         uint4 shift = uint4(clamp(0, shift_min, shift_max), clamp(16, shift_min, shift_max),
                             clamp(32, shift_min, shift_max), clamp(48, shift_min, shift_max));
-        input[y][x * 4 + 0] = (shift.x > 16 ? (input_char.y >> (shift.x - 32)) : (input_char.x >> shift.x)) & 0xffff;
-        input[y][x * 4 + 1] = (shift.y > 16 ? (input_char.y >> (shift.y - 32)) : (input_char.x >> shift.y)) & 0xffff;
-        input[y][x * 4 + 2] = (shift.z > 16 ? (input_char.y >> (shift.z - 32)) : (input_char.x >> shift.z)) & 0xffff;
-        input[y][x * 4 + 3] = (shift.w > 16 ? (input_char.y >> (shift.w - 32)) : (input_char.x >> shift.w)) & 0xffff;
+        work[at + 0] = (shift.x > 16 ? (input_char.y >> (shift.x - 32)) : (input_char.x >> shift.x)) & 0xffff;
+        work[at + 1] = (shift.y > 16 ? (input_char.y >> (shift.y - 32)) : (input_char.x >> shift.y)) & 0xffff;
+        work[at + 2] = (shift.z > 16 ? (input_char.y >> (shift.z - 32)) : (input_char.x >> shift.z)) & 0xffff;
+        work[at + 3] = (shift.w > 16 ? (input_char.y >> (shift.w - 32)) : (input_char.x >> shift.w)) & 0xffff;
       } else {
         int shift_max = last_sample * 8;
         int shift_min = first_sample * 8;
         uint input_char = src.Load(offset + c_x);
-        input[y][x * 4 + 0] = (input_char >> clamp(0, shift_min, shift_max)) & 255;
-        input[y][x * 4 + 1] = (input_char >> clamp(8, shift_min, shift_max)) & 255;
-        input[y][x * 4 + 2] = (input_char >> clamp(16, shift_min, shift_max)) & 255;
-        input[y][x * 4 + 3] = (input_char >> clamp(24, shift_min, shift_max)) & 255;
+        work[at + 0] = (input_char >> clamp(0, shift_min, shift_max)) & 255;
+        work[at + 1] = (input_char >> clamp(8, shift_min, shift_max)) & 255;
+        work[at + 2] = (input_char >> clamp(16, shift_min, shift_max)) & 255;
+        work[at + 3] = (input_char >> clamp(24, shift_min, shift_max)) & 255;
       }
     }
   }
 
+#ifndef LR_WIENER_ONLY
   // The first group sync also publishes the a2 table. Lookups in the box passes use group memory.
   if (rType.x == RESTORE_SGRPROJ && ly == 0) {
     const uint4 packed = data.Sgr_A2Packed[lx];
-    sgr_a2[4 * lx] = packed.x;
-    sgr_a2[4 * lx + 1] = packed.y;
-    sgr_a2[4 * lx + 2] = packed.z;
-    sgr_a2[4 * lx + 3] = packed.w;
+    work[A2_BASE + 4 * lx] = packed.x;
+    work[A2_BASE + 4 * lx + 1] = packed.y;
+    work[A2_BASE + 4 * lx + 2] = packed.z;
+    work[A2_BASE + 4 * lx + 3] = packed.w;
   }
+#endif
 
   GroupMemoryBarrierWithGroupSync();
 
-  if (rType.x == RESTORE_WIENER) {
-    const int limit = (1 << (bit_depth + 1 + FILTER_BITS - InterRound0)) - 1;
-    const int horizontal_bias = 1 << (bit_depth + FILTER_BITS - 1);
-
-    int Lr_offset = unitId * 64;
-    int4 hfilter0 = LrWiener.Load4(Lr_offset + 0);
-    int4 hfilter1 = LrWiener.Load4(Lr_offset + 16);
-
-    for (int r = ly; r < WG_HEIGHT + 6; r += WG_HEIGHT) {
-      int s = (input[r][lx + 4] << 7) + horizontal_bias;
-
-      s += hfilter0.x * input[r][lx + 1];
-      s += hfilter0.y * input[r][lx + 2];
-      s += hfilter0.z * input[r][lx + 3];
-      s += hfilter0.w * input[r][lx + 4];
-      s += hfilter1.x * input[r][lx + 5];
-      s += hfilter1.y * input[r][lx + 6];
-      s += hfilter1.z * input[r][lx + 7];
-
-      int v = Round2(s, InterRound0);
-      intermediate[r][lx] = clamp(v, 0, limit);
-    }
-
-    GroupMemoryBarrierWithGroupSync();
-
-    int4 vfilter0 = LrWiener.Load4(Lr_offset + 32);
-    int4 vfilter1 = LrWiener.Load4(Lr_offset + 48);
-
-    int s = (intermediate[ly + 3][lx] << 7) - (1 << (bit_depth + InterRound1 - 1));
-
-    s += vfilter0.x * intermediate[ly + 0][lx];
-    s += vfilter0.y * intermediate[ly + 1][lx];
-    s += vfilter0.z * intermediate[ly + 2][lx];
-    s += vfilter0.w * intermediate[ly + 3][lx];
-    s += vfilter1.x * intermediate[ly + 4][lx];
-    s += vfilter1.y * intermediate[ly + 5][lx];
-    s += vfilter1.z * intermediate[ly + 6][lx];
-    int v = Round2(s, InterRound1);
-    output[ly][lx] = clamp(v, 0, sample_max);
-
-    GroupMemoryBarrierWithGroupSync();
-
-    if (lx < WG_WIDTH / 4) {
-      if (hbd) {
-        dst.Store2(dst_offset + (gy + ly) * plane.stride + (gx + lx * 4) * 2,
-                   uint2((output[ly][lx * 4 + 0] << 0) | (output[ly][lx * 4 + 1] << 16),
-                         (output[ly][lx * 4 + 2] << 0) | (output[ly][lx * 4 + 3] << 16)));
-      } else {
-        dst.Store(dst_offset + (gy + ly) * plane.stride + gx + lx * 4,
-                  (output[ly][lx * 4 + 0] << 0) | (output[ly][lx * 4 + 1] << 8) | (output[ly][lx * 4 + 2] << 16) |
-                      (output[ly][lx * 4 + 3] << 24));
-      }
-    }
+#ifdef LR_WIENER_ONLY
+  (void)id;
+  const int filtered = wiener_filter(lx, ly, unitId, bit_depth);
+#else
+  int filtered;
+  [branch] if (rType.x == RESTORE_WIENER) {
+    filtered = wiener_filter(lx, ly, unitId, bit_depth);
   } else if (rType.x == RESTORE_SGRPROJ) {
-    const int w0 = rType.y;
-    const int w1 = rType.z;
-    const int w2 = (1 << SGRPROJ_PRJ_BITS) - w0 - w1;
+    filtered = sgr_filter(lx, ly, id, rType, bit_depth);
+  } else {
+    return;
+  }
+#endif
+  output[ly][lx] = clamp(filtered, 0, sample_max);
+  GroupMemoryBarrierWithGroupSync();
 
-    const int4 params = data.Sgr_Params[rType.w];
-    const int sample_shift = bit_depth - 8;
-    const uint2 shifts = uint2(sample_shift, 2 * sample_shift);
-    const uint2 rounding = (uint2(1, 1) << shifts) >> 1u;
-
-    int u = input[ly + 3][lx + 4] << SGRPROJ_RST_BITS;
-    int v = w1 * u;
-    // The two passes use the same memory for their box sums: a group sync before the sums are read, and
-    // one before the next pass writes its own.
-    if (params.x) {
-        box_sums0(id, params.z, shifts, rounding);
-        GroupMemoryBarrierWithGroupSync();
-        v += w0 * box_filter0(lx, ly);
-        GroupMemoryBarrierWithGroupSync();
+  if (lx < WG_WIDTH / 4) {
+    if (hbd) {
+      dst.Store2(dst_offset + (gy + ly) * plane.stride + (gx + lx * 4) * 2,
+                 uint2((output[ly][lx * 4 + 0] << 0) | (output[ly][lx * 4 + 1] << 16),
+                       (output[ly][lx * 4 + 2] << 0) | (output[ly][lx * 4 + 3] << 16)));
     } else {
-        v += w0 * u;
-    }
-    if (params.y) {
-        box_sums1(id, params.w, shifts, rounding);
-        GroupMemoryBarrierWithGroupSync();
-        v += w2 * box_filter1(lx, ly);
-    } else {
-        v += w2 * u;
-    }
-
-    int s = Round2(v, (SGRPROJ_RST_BITS + SGRPROJ_PRJ_BITS));
-    output[ly][lx] = clamp(s, 0, sample_max);
-
-    GroupMemoryBarrierWithGroupSync();
-
-    if (lx < WG_WIDTH / 4) {
-      if (hbd) {
-        dst.Store2(dst_offset + (gy + ly) * plane.stride + (gx + lx * 4) * 2,
-                   uint2((output[ly][lx * 4 + 0] << 0) | (output[ly][lx * 4 + 1] << 16),
-                         (output[ly][lx * 4 + 2] << 0) | (output[ly][lx * 4 + 3] << 16)));
-      } else {
-        dst.Store(dst_offset + (gy + ly) * plane.stride + gx + lx * 4,
-                  (output[ly][lx * 4 + 0] << 0) | (output[ly][lx * 4 + 1] << 8) | (output[ly][lx * 4 + 2] << 16) |
-                      (output[ly][lx * 4 + 3] << 24));
-      }
+      dst.Store(dst_offset + (gy + ly) * plane.stride + gx + lx * 4,
+                (output[ly][lx * 4 + 0] << 0) | (output[ly][lx * 4 + 1] << 8) | (output[ly][lx * 4 + 2] << 16) |
+                    (output[ly][lx * 4 + 3] << 24));
     }
   }
 }

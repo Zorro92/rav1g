@@ -687,7 +687,11 @@ fn create_decoder(
         if task.cdefv1 { "cdef_filter (-cdefv1)" } else { "cdef_filter_v2" },
         if task.intrav2 { "intra_v2" } else { "intra_main + intra_filter" },
         if task.intraopt { " (optimized main)" } else { " (legacy main, -intraod)" },
-        if task.lrlegacy { "loop_restoration_legacy (-lrlegacy)" } else { "loop_restoration" },
+        if task.lrlegacy {
+            "loop_restoration_legacy (-lrlegacy)"
+        } else {
+            "loop_restoration / loop_restoration_wiener"
+        },
         match task.clears {
             Clears::NotNeeded => "none needed",
             Clears::Gpu => "GPU (-gpuclear)",

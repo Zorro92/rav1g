@@ -57,6 +57,19 @@ namespace optimized {
 #undef LR_OPTIMIZED
 }
 
+namespace wiener {
+#define LR_OPTIMIZED
+// The same specialization as loop_restoration_wiener.hlsl.
+#define LR_WIENER_ONLY
+#include "optimized.gen.h"
+#include "optimized.entry.h"
+#include "shader_adapter.h"
+#undef LR_WIENER_ONLY
+#undef LR_OPTIMIZED
+}
+
+static constexpr int WIENER_OR_NONE = RESTORE_TYPES;
+
 static Case make_case(Size size, int ss, int depth, int unit_size, int kind, int param, int pattern,
                       std::mt19937 &random) {
   Case c{};
@@ -106,7 +119,7 @@ static Case make_case(Size size, int ss, int depth, int unit_size, int kind, int
   c.types.resize(c.first_unit + c.rows * c.cols);
   c.taps.resize(c.types.size());
   for (size_t i = c.first_unit; i < c.types.size(); ++i) {
-    const int type = kind == RESTORE_SWITCHABLE ? sample(3) : kind;
+    const int type = kind == RESTORE_SWITCHABLE ? sample(3) : kind == WIENER_OR_NONE ? sample(2) : kind;
     const int ep = (param + i - c.first_unit) % SGRPROJ_PARAMS;
     int w0 = sgr_params[ep].radius[0] ? sample(128) + SGRPROJ_PRJ_MIN0 : 0;
     int w1 = sgr_params[ep].radius[1] ? sample(128) + SGRPROJ_PRJ_MIN1 : SGRPROJ_PRJ_MAX1;
@@ -141,18 +154,29 @@ static bool checked_dispatch(const Case &c, void (*run)(const Case &, std::vecto
   return true;
 }
 
-static bool check(const Case &c, uint64_t order) {
-  auto reference = c.pixels;
+static bool check_output(const Case &c, const std::vector<uint8_t> &reference, uint64_t order,
+                         void (*run)(const Case &, std::vector<uint8_t> &, uint64_t), const char *shader) {
   auto result = c.pixels;
-  if (!checked_dispatch(c, legacy::dispatch, reference, order, "legacy") ||
-      !checked_dispatch(c, optimized::dispatch, result, ~order, "optimized")) {
+  if (!checked_dispatch(c, run, result, order, shader)) {
     return false;
   }
   const auto mismatch = std::mismatch(reference.begin(), reference.end(), result.begin());
   if (mismatch.first == reference.end()) return true;
-  fprintf(stderr, "mismatch at byte %zu: legacy %u, optimized %u\n",
-          static_cast<size_t>(mismatch.first - reference.begin()), *mismatch.first, *mismatch.second);
+  fprintf(stderr, "mismatch at byte %zu: legacy %u, %s %u\n",
+          static_cast<size_t>(mismatch.first - reference.begin()), *mismatch.first, shader, *mismatch.second);
   return false;
+}
+
+static bool check(const Case &c, uint64_t order) {
+  auto reference = c.pixels;
+  if (!checked_dispatch(c, legacy::dispatch, reference, order, "legacy") ||
+      !check_output(c, reference, ~order, optimized::dispatch, "optimized")) {
+    return false;
+  }
+  const bool wiener_or_none = std::all_of(c.types.begin(), c.types.end(), [](const auto &unit) {
+    return unit[0] == RESTORE_WIENER || unit[0] == RESTORE_NONE;
+  });
+  return !wiener_or_none || check_output(c, reference, ~order, wiener::dispatch, "wiener");
 }
 
 int main() {
@@ -168,8 +192,8 @@ int main() {
         const Size edges{width, param < 4 ? param + 1 : first_stripe - 2 + param % 5};
         const int merged_edge = unit_size * 3 / 2 + param % 4 - 1;
         const Size grid{merged_edge, std::max(stripe + first_stripe + 2, merged_edge)};
-        for (int kind : {-1, RESTORE_NONE, RESTORE_WIENER, RESTORE_SGRPROJ, RESTORE_SWITCHABLE}) {
-          const Size size = kind == RESTORE_SWITCHABLE ? grid : edges;
+        for (int kind : {-1, RESTORE_NONE, RESTORE_WIENER, RESTORE_SGRPROJ, RESTORE_SWITCHABLE, WIENER_OR_NONE}) {
+          const Size size = kind == RESTORE_SWITCHABLE || kind == WIENER_OR_NONE ? grid : edges;
           const Case c = make_case(size, ss, depth, unit_size, kind, param, (param / 2) % 5, random);
           if (!check(c, random())) {
             fprintf(stderr, "case %d: %dx%d depth %d subsampling %d unit %d type %d SGR set %d\n", cases,
