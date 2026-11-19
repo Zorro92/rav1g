@@ -54,6 +54,7 @@ REQUIRED_BYTECODE = [
     'loopfilter_vert', 'loopfilter_vert_legacy', 'loopfilter_hor', 'loopfilter_hor_legacy',
     'loopfilter_vert_hbd', 'loopfilter_vert_hbd_legacy', 'loopfilter_hor_hbd', 'loopfilter_hor_hbd_legacy',
     'loop_restoration', LR_LEGACY, 'loop_restoration_wiener',
+    'film_grain_filter_sp_tex', 'film_grain_filter_sp_tex_v2',
 ]
 
 # What DXC is given for every shader on top of -T, -E and -Od:

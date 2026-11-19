@@ -796,6 +796,9 @@ int AV1Decoder::DecodeOne() {
   XB_LOGI << "Loop restoration shader: "
           << (params_.lrlegacy_ ? "loop_restoration_legacy (-lrlegacy)"
                               : "loop_restoration / loop_restoration_wiener (default)");
+  av1_set_fg_legacy(params_.fglegacy_);
+  XB_LOGI << "Direct NV12/P010 film grain shader: "
+          << (params_.fglegacy_ ? "film_grain_filter_sp_tex (-fglegacy)" : "film_grain_filter_sp_tex_v2 (default)");
 
   // -slots, -parseframes, -t: fixed when the decoder was created; Start() asks for a new decoder when a
   // value changes. What the decoder has is what the library made of them.

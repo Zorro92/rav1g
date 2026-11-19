@@ -3644,6 +3644,9 @@ jobs:
       - name: Compare loop restoration with its legacy shader
         run: sh testing/restoration_check/run.sh
 
+      - name: Compare direct-texture film grain with its legacy shader
+        run: sh testing/film_grain_check/run.sh --mutate
+
   # Host proof for CDEF v2: the original and the v2 CDEF shader source, compiled as C++,
   # must write byte-identical frames (random and edge-case input, 8-bit and high bit depth).
   cdef-check:

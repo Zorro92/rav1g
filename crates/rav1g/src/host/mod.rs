@@ -43,6 +43,7 @@ pub(crate) use compute::{
     av1_create_pipeline_cache_handle, av1_destroy_pipeline_cache_handle, av1_wait_pipeline_cache_handle,
     set_shader_pick, shader_pick_lines,
 };
+pub(crate) use film_grain::av1_set_fg_legacy;
 pub(crate) use frame::{av1_set_clears, av1_set_intra_v2, av1_shader_variant};
 pub(crate) use loopfilter::{av1_set_lf_h_split, av1_set_lf_legacy};
 pub(crate) use memory::{av1_log_video_memory_now, av1_set_poison_buffers};

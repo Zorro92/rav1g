@@ -10,6 +10,7 @@
 //! way into the output image. From `av1_filmgrain_run` of `libav1/dx/loopfilters.cpp`.
 
 use std::ffi::c_int;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::core::{alloc_constants, buffer, commands, perf_gpu_mark, pipeline};
 use super::types::Av1Core;
@@ -17,6 +18,14 @@ use crate::gpu::d3d12::{com_ref, wrapped_ref};
 use crate::gpu::{Device, PlaneViews};
 use crate::sys::{AOM_CICP_MC_IDENTITY, AV1_COMMON, AV1_PERF_GPU_FILM_GRAIN, HwFrameBuffer};
 use windows::Win32::Graphics::Direct3D12::ID3D12Device;
+
+static FG_LEGACY: AtomicBool = AtomicBool::new(false);
+
+/// `av1_set_fg_legacy` (`dx/av1_perf.h`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_fg_legacy(enable: c_int) {
+    FG_LEGACY.store(enable != 0, Ordering::Relaxed);
+}
 
 /// The film grain parameters of a frame as the shaders read them.
 #[repr(C)]
@@ -354,9 +363,11 @@ pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_ch
             commands.write_barrier(noise);
         }
 
+        let direct_v2 = matches!(target, GrainTarget::SemiPlanarTexture(_)) && !FG_LEGACY.load(Ordering::Relaxed);
         let shader = pipeline(match target {
             GrainTarget::Planes => &raw const (*lib).shader_filmgrain_filter,
             GrainTarget::SemiPlanar => &raw const (*lib).shader_filmgrain_filter_sp,
+            GrainTarget::SemiPlanarTexture(_) if direct_v2 => &raw const (*lib).shader_filmgrain_filter_sp_tex_v2,
             GrainTarget::SemiPlanarTexture(_) => &raw const (*lib).shader_filmgrain_filter_sp_tex,
         });
         commands.set_pipeline(shader);
@@ -374,7 +385,11 @@ pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_ch
             commands.bind_write(3, frame_buffers.location());
             commands.bind_constants(4, constants.location);
         }
-        commands.dispatch((src.width / 32 + 1) as u32, (src.height / 32 + 1) as u32, 1);
+        if direct_v2 {
+            commands.dispatch((src.y_crop_width as u32).div_ceil(32), (src.y_crop_height as u32).div_ceil(32), 1);
+        } else {
+            commands.dispatch((src.width / 32 + 1) as u32, (src.height / 32 + 1) as u32, 1);
+        }
         commands.write_barrier(frame_buffers);
 
         perf_gpu_mark(dec, AV1_PERF_GPU_FILM_GRAIN);

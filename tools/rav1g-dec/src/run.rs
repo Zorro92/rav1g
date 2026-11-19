@@ -23,7 +23,7 @@ use crate::args::{self, EXIT_ERROR, EXIT_MISMATCH, EXIT_PASS, Task};
 use crate::device::{Device, hex32};
 use crate::library::{Choices, Colour, Library, Picture, Sink, Spec, TaskDecoder};
 use crate::md5::Md5;
-use crate::pool::{OutputPool, Rented, Request};
+use crate::pool::{ImageMode, OutputPool, Rented, Request};
 use crate::say;
 use crate::shim;
 
@@ -879,6 +879,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     }
     library.set_choices(&Choices {
         lr_legacy: task.lrlegacy,
+        fg_legacy: task.fglegacy,
         cdef_v2: !task.cdefv1,
         intra_v2: task.intrav2,
         intra_opt: task.intraopt,
@@ -887,6 +888,16 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         intra_edge_fix: task.intraedgefix,
         inter_fast: task.interfast,
     });
+    if task.output == ImageMode::Texture {
+        say!(
+            "Direct NV12/P010 film grain shader: {}",
+            if task.fglegacy {
+                "film_grain_filter_sp_tex (-fglegacy)"
+            } else {
+                "film_grain_filter_sp_tex_v2 (default)"
+            }
+        );
+    }
     say!(
         "PARSER {}: the parse pass of rav1d reads the bitstream, switches {} (-parseopt)",
         task.name,

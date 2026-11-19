@@ -92,6 +92,7 @@ pub struct Task {
     pub intrav2: bool,
     pub intraopt: bool,
     pub lrlegacy: bool,
+    pub fglegacy: bool,
     /// What a frame does about the clears of its slot's grids: nothing to clear without a flag;
     /// -gpuclear, -cpuclear (and -asyncclear, its older name), -syncclear.
     pub clears: Clears,
@@ -162,6 +163,7 @@ impl Default for Task {
             intrav2: false,
             intraopt: true,
             lrlegacy: false,
+            fglegacy: false,
             clears: Clears::NotNeeded,
             lflegacy: false,
             lfhsplit: 0,
@@ -259,6 +261,7 @@ pub fn usage() {
     say!("  -cdefv1 -nofitsize -lowmemparts <n> -lowmem -slots <n> -intrav2");
     say!("  -intraod             use the baseline DXC -Od intra_main kernels (-intraopt restores the default)");
     say!("  -lrlegacy           use the original loop_restoration shader");
+    say!("  -fglegacy           use the original direct NV12/P010 film grain shader");
     say!("                        as in the test player (docs/test-player.md); -cdefv2 and -fitsize (the defaults)");
     say!("                        are accepted");
     say!("  -gpuclear -cpuclear -syncclear");
@@ -439,6 +442,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-intraopt" => task.intraopt = true,
             "-intraod" => task.intraopt = false,
             "-lrlegacy" => task.lrlegacy = true,
+            "-fglegacy" => task.fglegacy = true,
             "-gpuclear" => task.clears = Clears::Gpu,
             "-cpuclear" | "-asyncclear" => task.clears = Clears::CompletionThread,
             "-syncclear" => task.clears = Clears::DecodeThread,
@@ -647,6 +651,9 @@ mod tests {
         assert_eq!(task.save_md5, "out dir/x.md5");
         assert_eq!((task.threads, task.timeout_s, task.interfast, task.aom_md5), (4, 300, 1, true));
         assert_eq!(globals.list, "tasks.list");
+        assert!(!task.fglegacy);
+        parse_args(&strings(&["-fglegacy"]), &mut task, None).unwrap();
+        assert!(task.fglegacy);
         assert_eq!(task.poison, Poison::Off);
         parse_args(&strings(&["-poisonmi"]), &mut task, None).unwrap();
         assert_eq!(task.poison, Poison::ModeInfo);

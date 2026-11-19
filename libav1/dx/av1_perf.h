@@ -282,6 +282,11 @@ void av1_set_cdef_v2(int enable);
  * Zero selects the optimized shader (default). Change it while no frame is in flight. */
 void av1_set_lr_legacy(int enable);
 
+/* Process-wide. Non-zero selects the original film grain apply shader for
+ * direct NV12/P010 textures. Zero selects the default shader. Change it
+ * only while no frame is in flight. */
+void av1_set_fg_legacy(int enable);
+
 /* Process-wide. Non-zero runs intra prediction through intra_v2.hlsl instead
  * of intra_main.hlsl + intra_filter.hlsl; the decoded output is the same.
  * Frames that allow intra block copy keep the original shaders. Off by

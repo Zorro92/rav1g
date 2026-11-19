@@ -79,6 +79,11 @@ pub fn set_lr_legacy(enable: bool) {
     crate::host::av1_set_lr_legacy(c_int::from(enable))
 }
 
+/// Use the original direct NV12/P010 film grain apply shader.
+pub fn set_fg_legacy(enable: bool) {
+    crate::host::av1_set_fg_legacy(c_int::from(enable))
+}
+
 /// Intra prediction through `intra_v2.hlsl`; only in a decoder that was created with
 /// [`crate::Settings::intra_v2`].
 pub fn set_intra_v2(enable: bool) {

@@ -378,6 +378,10 @@ the start of every task say what is in effect.
 | Intra prediction | frame-wide wavefront, DXC-optimized main shaders | `Intra main shader: intra_main (default)` | `-intrav2`, `-intraod` |
 | Inter prediction | upstream's shaders, lists by type and block size | `Inter shaders: inter_main, inter_compound (original)` | `-interfast`: see [Inter fast path](#inter-fast-path--interfast) |
 
+On a device that logs `OUTPUT P010 direct` or `OUTPUT NV12 direct`, film grain uses
+`film_grain_filter_sp_tex_v2`. Add `-fglegacy` to the same `-output p010` task to
+select the original `film_grain_filter_sp_tex` and compare per-frame MD5s.
+
 - **`-cdefv2` and `-fitsize` are still accepted** and change nothing: old task lines keep
   working. `-lowmem` is still all three parts. Parts 2 and 4 stay opt-in because they can
   turn a pathological stream into a decode error (see the table under

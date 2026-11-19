@@ -38,34 +38,7 @@ RWByteAddressBuffer dst : register(u0);
 #define IS_10X3 data.is_10x3
 #endif
 
-struct FilmGrainData {
-  GrainParams params;
-
-  int4 src_planes[3];
-  int4 dst_planes[3];
-
-  int enable_chroma;
-  int random_offset_stride;
-  int width;
-  int height;
-
-  int mc_identity;
-  int luma_grain_stride;
-  int chroma_grain_stride;
-  int left_pad;
-
-  int right_pad;
-  int top_pad;
-  int bottom_pad;
-  int ar_padding;
-
-  int grain_offset_u;
-  int grain_offset_v;
-  int is_10x3;
-  int pad;
-
-  int4 scaling_lut[256];
-};
+#include "film_grain_apply.h"
 
 cbuffer cb_film_grain_data : register(b0) { FilmGrainData data; };
 
