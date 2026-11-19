@@ -1,22 +1,22 @@
 /*
- * Check of the fast inter prediction shaders (test flag -interfast) against the original shaders and
- * against libaom's C code.
+ * Check of the unscaled inter prediction shaders against the original shaders and libaom's C code.
  *
  * With -interfast the blocks with one reference and the averaged compound blocks are listed by the
  * fraction of their motion vectors and predicted by inter_fast.hlsl and inter_compound_fast.hlsl, which
  * leave out the filter passes a vector without a fraction does not need (libav1/dx/shaders/
  * inter_fast_common.h). Here the shaders are compiled as C++ (run.sh) and run on generated frames laid
  * out like the decoder's frame pool: block records as gen_pred_blocks.hlsl writes them, constants as
- * prediction.cpp sets them, reference frames with the border inter_ext_borders extends. Every frame is
- * predicted three times:
+ * the decoder sets them, reference frames with the border inter_ext_borders extends. Each frame is
+ * predicted four times:
  *
  *   - by libaom's C code of this tree (testing/warp_check/ref_glue.c: av1_make_inter_predictor);
  *   - by the original shaders, inter_main and inter_compound, from lists by block size;
  *   - the way -interfast runs it: lists by class and block size, the class from inter_fast_class() of
  *     gen_pred_blocks.hlsl, inter_fast and inter_compound_fast for all classes but the last, the
- *     original shaders for that one.
+ *     original shaders for that one;
+ *   - by the default shaders from the same size lists as the original shaders.
  *
- * The three pools, padding and reference frames included, must be byte identical. The cases cover every
+ * The four pools, padding and reference frames included, must be byte identical. The cases cover every
  * block size, 8 and 10 bits, all fractions of luma and chroma vectors with every pair of filters, both
  * references of a compound block in every pair of classes, distance weights, residuals, sample values at
  * both ends of the range, and vectors that point far outside the frame on every side.
@@ -42,6 +42,7 @@ int g_double_model = 1;
 long g_double_ops = 0;
 
 extern const ShaderApi inter_main_api, inter_main_hbd_api, inter_compound_api, inter_compound_hbd_api;
+extern const ShaderApi inter_main_v2_api, inter_main_v2_hbd_api;
 extern const ShaderApi inter_fast_api, inter_fast_hbd_api, inter_compound_fast_api, inter_compound_fast_hbd_api;
 extern const ShaderApi inter_ext_borders_api, inter_ext_borders_hbd_api;
 
@@ -284,17 +285,18 @@ static void coverage_case(Case *c, const int *size, int hbd, int by_chroma) {
   }
 }
 
-// A frame of 256 blocks of 8x8 with one pair of filters: the components of the vectors run through 0..15
+// A frame of 256 blocks of one size and filter pair: the components of the vectors run through 0..15
 // in 1/8 luma sample, which is every fraction of a luma vector (twice) and of a chroma vector, in every
 // combination of row and column. The second reference of the compound blocks has another combination.
-static void sweep_case(Case *c, int hbd, int filter_x, int filter_y, int compound) {
-  set_layouts(c, 128, 128, hbd);
+static void sweep_case(Case *c, int hbd, int size_log, int filter_x, int filter_y, int compound) {
+  const int frame_size = 16 * (4 << size_log);
+  set_layouts(c, frame_size, frame_size, hbd);
   c->content = rnd(5);
   for (int k = 0; k < 256; k++) {
     Block b = {};
-    b.bw_log = b.bh_log = 1;
-    b.mi_col = (k & 15) * 2;
-    b.mi_row = (k >> 4) * 2;
+    b.bw_log = b.bh_log = size_log;
+    b.mi_col = (k & 15) << size_log;
+    b.mi_row = (k >> 4) << size_log;
     random_block_modes(&b, 0);
     b.refs = 1 + compound;
     b.filter_x = filter_x;
@@ -309,13 +311,17 @@ static void sweep_case(Case *c, int hbd, int filter_x, int filter_y, int compoun
 }
 
 // ---------------------------------------------------------------------------
-// One case: the pool, the block records, libaom, the original shaders, the fast path, the comparison.
+// One case: the pool, the block records, the predictors and their comparison.
 // ---------------------------------------------------------------------------
 static int g_kernels[8 * 16][8];
 
+enum Path { kLegacy, kFast, kDefault, kPathCount };
+static const char *const kPathNames[kPathCount] = {
+    "the original shaders", "the fast path (-interfast)", "the default shaders"};
+
 struct Stats {
   long cases = 0, blocks = 0, records = 0;
-  long mismatches[2] = {0, 0};  // cases in which the original shaders, the fast path differ from libaom
+  long mismatches[kPathCount] = {};
   long shown = 0;
   // Block records by plane kind (luma, chroma), class (one reference: 0..3; two: 4 + pair) and list size.
   std::map<std::tuple<int, int, int, int>, long> coverage;
@@ -458,18 +464,20 @@ static bool run_case(const Case &c, Stats *stats, int verbose) {
       stats->coverage[std::make_tuple(ss, compound ? 4 + cls : cls, w_log, h_log)]++;
     }
   }
-  // The passes of the two paths, as av1_prediction_run_all() dispatches them: a thread of a compound shader
+  // The passes as av1_prediction_run_all() dispatches them: a thread of a compound shader
   // predicts 4x2 samples, so its lists are one unit higher.
   std::vector<uint32_t> pred_words;
-  std::vector<Pass> passes[2];
+  std::vector<Pass> passes[kPathCount];
   for (auto &entry : lists) {
     const int compound = std::get<0>(entry.first), w = std::get<1>(entry.first), h = std::get<2>(entry.first) + compound;
     const ShaderApi *api = compound ? (hbd ? &inter_compound_hbd_api : &inter_compound_api)
                                     : (hbd ? &inter_main_hbd_api : &inter_main_api);
-    passes[0].push_back({api,
-                         {static_cast<uint32_t>((1 << (w + h)) * entry.second.count),
-                          static_cast<uint32_t>(pred_words.size() / 4), static_cast<uint32_t>(w),
-                          static_cast<uint32_t>(h)}});
+    Pass pass = {api,
+                 {static_cast<uint32_t>((1 << (w + h)) * entry.second.count),
+                  static_cast<uint32_t>(pred_words.size() / 4), static_cast<uint32_t>(w), static_cast<uint32_t>(h)}};
+    passes[kLegacy].push_back(pass);
+    if (!compound) pass.api = hbd ? &inter_main_v2_hbd_api : &inter_main_v2_api;
+    passes[kDefault].push_back(pass);
     pred_words.insert(pred_words.end(), entry.second.words.begin(), entry.second.words.end());
   }
   for (auto &entry : fast_lists) {
@@ -484,10 +492,10 @@ static bool run_case(const Case &c, Stats *stats, int verbose) {
       api = compound ? (hbd ? &inter_compound_fast_hbd_api : &inter_compound_fast_api)
                      : (hbd ? &inter_fast_hbd_api : &inter_fast_api);
     (original ? stats->original_records : stats->fast_records) += entry.second.count;
-    passes[1].push_back({api,
-                         {static_cast<uint32_t>((1 << (w + h)) * entry.second.count),
-                          static_cast<uint32_t>(pred_words.size() / 4),
-                          static_cast<uint32_t>(original ? w : w | (cls << 8)), static_cast<uint32_t>(h)}});
+    passes[kFast].push_back({api,
+                            {static_cast<uint32_t>((1 << (w + h)) * entry.second.count),
+                             static_cast<uint32_t>(pred_words.size() / 4),
+                             static_cast<uint32_t>(original ? w : w | (cls << 8)), static_cast<uint32_t>(h)}});
     pred_words.insert(pred_words.end(), entry.second.words.begin(), entry.second.words.end());
   }
   // The lists are followed by garbage: a thread that looks past its list must not get a valid block.
@@ -544,7 +552,7 @@ static bool run_case(const Case &c, Stats *stats, int verbose) {
   memcpy(consts.kernels, g_kernels, sizeof(consts.kernels));
 
   // What libaom makes of the same blocks.
-  std::vector<uint8_t> expected(pool);
+  std::vector<uint8_t> aom_result(pool);
   std::vector<uint16_t> block16(128 * 128);
   std::vector<uint8_t> block8(128 * 128);
   for (const Block &b : c.blocks) {
@@ -596,15 +604,19 @@ static bool run_case(const Case &c, Stats *stats, int verbose) {
             v = std::min(max, std::max(0, v + r));
           }
           put_sample(
-              &expected[l.offset(p) + static_cast<size_t>(py + y) * l.stride(p) + static_cast<size_t>(px + x) * bpp],
+              &aom_result[l.offset(p) + static_cast<size_t>(py + y) * l.stride(p) + static_cast<size_t>(px + x) * bpp],
               hbd, v);
         }
     }
   }
 
   bool ok = true;
-  for (int path = 0; path < 2; path++) {
-    std::vector<uint8_t> result(pool);
+  std::vector<uint8_t> legacy_result, other_result;
+  for (int path = 0; path < kPathCount; path++) {
+    std::vector<uint8_t> &result = path == kLegacy ? legacy_result : other_result;
+    result = pool;
+    const std::vector<uint8_t> &expected = path == kDefault ? legacy_result : aom_result;
+    const char *reference = path == kDefault ? "original shader" : "libaom";
     buffers.frame = result.data();
     const long oob_before = g_out_of_bounds;
     for (const Pass &pass : passes[path]) {
@@ -619,8 +631,7 @@ static bool run_case(const Case &c, Stats *stats, int verbose) {
     stats->mismatches[path]++;
     if (stats->shown >= 12 && !verbose) continue;
     stats->shown++;
-    printf("MISMATCH %s, %dx%d %d-bit, %s", c.name.c_str(), l.w, l.h, c.bit_depth,
-           path ? "the fast path (-interfast)" : "the original shaders");
+    printf("MISMATCH %s, %dx%d %d-bit, %s vs %s", c.name.c_str(), l.w, l.h, c.bit_depth, kPathNames[path], reference);
     if (g_out_of_bounds != oob_before) printf(", %ld accesses outside the buffers", g_out_of_bounds - oob_before);
     printf("\n");
     if (same) continue;
@@ -642,8 +653,8 @@ static bool run_case(const Case &c, Stats *stats, int verbose) {
           got |= result[(at & ~static_cast<size_t>(1)) + 1] << 8;
           want |= expected[(at & ~static_cast<size_t>(1)) + 1] << 8;
         }
-        printf("  %ld bytes differ; first in %s, plane %d, x %d y %d: shader %d, libaom %d\n", wrong,
-               frame ? "a reference frame" : "the frame", p, x, y, got, want);
+        printf("  %ld bytes differ; first in %s, plane %d, x %d y %d: shader %d, %s %d\n", wrong,
+               frame ? "a reference frame" : "the frame", p, x, y, got, reference, want);
         if (frame) continue;
         for (const Block &b : c.blocks) {
           const int ss = p > 0;
@@ -695,6 +706,7 @@ static long check_classes(long *checked) {
 
 int main(int argc, char **argv) {
   int random_cases = 40, verbose = 0;
+  bool fail_fast = false;
   for (int i = 1; i < argc; i++) {
     if (!strcmp(argv[i], "--cases") && i + 1 < argc) {
       random_cases = atoi(argv[++i]);
@@ -702,8 +714,10 @@ int main(int argc, char **argv) {
       g_rng ^= strtoull(argv[++i], nullptr, 0) * 0x9e3779b97f4a7c15ull;
     } else if (!strcmp(argv[i], "-v")) {
       verbose = 1;
+    } else if (!strcmp(argv[i], "--fail-fast")) {
+      fail_fast = true;
     } else {
-      fprintf(stderr, "usage: inter_check [--cases N] [--seed S] [-v]\n");
+      fprintf(stderr, "usage: inter_check [--cases N] [--seed S] [-v] [--fail-fast]\n");
       return 2;
     }
   }
@@ -711,19 +725,30 @@ int main(int argc, char **argv) {
   ref_kernels(g_kernels);
   bool ok = true;
 
-  // What the classes rest on: the kernel of fraction 0 only passes the sample on, for every filter type.
-  for (int type = 0; type < 6; type++)
+  // Identity phases pass through tap 3. The vertical-only bias cancellation
+  // also relies on the sum of the taps being exactly 128 for every phase.
+  for (int type = 0; type < 6; type++) {
     for (int tap = 0; tap < 8; tap++)
       if (g_kernels[type * 16][tap] != (tap == 3 ? 128 : 0)) {
         printf("MISMATCH the kernel of fraction 0 of filter type %d is not {0, 0, 0, 128, 0, 0, 0, 0}\n", type);
         ok = false;
       }
+    for (int phase = 0; phase < 16; phase++) {
+      int sum = 0;
+      for (int tap : g_kernels[type * 16 + phase]) sum += tap;
+      if (sum != 128) {
+        printf("MISMATCH filter type %d phase %d has tap sum %d, expected 128\n", type, phase, sum);
+        ok = false;
+      }
+    }
+  }
 
   long class_values = 0;
   const long class_wrong = check_classes(&class_values);
   printf("inter_check: class of a motion vector, shader (block record) against host (mode info), %ld values: %s\n",
          class_values, class_wrong ? "DIFFERENT" : "identical");
   ok = ok && !class_wrong;
+  if (!ok && fail_fast) return 1;
 
   Stats stats;
   char name[160];
@@ -737,20 +762,24 @@ int main(int argc, char **argv) {
                  by_chroma ? "chroma" : "luma");
         c.name = name;
         ok = run_case(c, &stats, verbose) && ok;
+        if (!ok && fail_fast) return 1;
       }
-    // Every fraction with every pair of filters.
-    for (int filter_x = 0; filter_x < 4; filter_x++)
-      for (int filter_y = 0; filter_y < 4; filter_y++)
-        for (int compound = 0; compound < 2; compound++) {
-          Case c;
-          sweep_case(&c, hbd, filter_x, filter_y, compound);
-          snprintf(name, sizeof(name), "all fractions, filters x %d y %d, %s", filter_x, filter_y,
-                   compound ? "two references" : "one reference");
-          c.name = name;
-          ok = run_case(c, &stats, verbose) && ok;
-        }
+    // Every fraction with every pair of filters. 8x8 and 16x16 luma blocks
+    // exercise both four- and eight-tap chroma tables with all 16 phases.
+    for (int size_log = 1; size_log <= 2; size_log++)
+      for (int filter_x = 0; filter_x < 4; filter_x++)
+        for (int filter_y = 0; filter_y < 4; filter_y++)
+          for (int compound = 0; compound < 2; compound++) {
+            Case c;
+            sweep_case(&c, hbd, size_log, filter_x, filter_y, compound);
+            snprintf(name, sizeof(name), "all fractions, filters x %d y %d, %s", filter_x, filter_y,
+                     compound ? "two references" : "one reference");
+            c.name = name;
+            ok = run_case(c, &stats, verbose) && ok;
+            if (!ok && fail_fast) return 1;
+          }
     // Frames of mixed blocks, small ones too: every block is near an edge there.
-    static const int sizes[][2] = {{16, 16}, {24, 40}, {64, 64}, {72, 40}, {130, 98}, {200, 136}, {264, 200}, {36, 20}};
+    static const int sizes[][2] = {{16, 16}, {24, 40}, {64, 64}, {72, 40}, {133, 99}, {200, 136}, {264, 200}, {37, 21}};
     for (int i = 0; i < random_cases; i++) {
       Case c;
       const int *wh = sizes[i % 8];
@@ -758,6 +787,7 @@ int main(int argc, char **argv) {
       snprintf(name, sizeof(name), "mixed blocks %d", i);
       c.name = name;
       ok = run_case(c, &stats, verbose) && ok;
+      if (!ok && fail_fast) return 1;
     }
   }
 
@@ -789,9 +819,11 @@ int main(int argc, char **argv) {
          "pairs of classes)\n",
          missing);
   printf("inter_check: frames that differ from libaom: %ld with the original shaders, %ld with the fast path\n",
-         stats.mismatches[0], stats.mismatches[1]);
+         stats.mismatches[kLegacy], stats.mismatches[kFast]);
+  printf("inter_check: frames that differ from the original shaders: %ld with the default shaders\n",
+         stats.mismatches[kDefault]);
   if (g_out_of_bounds) printf("inter_check: %ld accesses outside the buffers\n", g_out_of_bounds);
-  ok = ok && !g_out_of_bounds && !stats.mismatches[0] && !stats.mismatches[1];
+  ok = ok && !g_out_of_bounds;
   printf("inter_check: %s\n", ok ? "PASS" : "FAIL");
   return ok ? 0 : 1;
 }

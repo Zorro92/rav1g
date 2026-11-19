@@ -770,13 +770,16 @@ int AV1Decoder::DecodeOne() {
   // -interfastlists: the same lists, the original shaders on every one of them (what the lists alone cost).
   rav1g_set_inter_fast(params_.interfastlists_ ? RAV1G_INTER_FAST_LISTS_ONLY
                                                 : params_.interfast_ ? RAV1G_INTER_FAST_ON : 0);
+  av1_set_inter_legacy(params_.interlegacy_);
+  const char *inter_size_shaders = params_.interlegacy_ ? "inter_main, inter_compound (-interlegacy)"
+                                                      : "inter_main_v2, inter_compound (default)";
   XB_LOGI << "Inter shaders: "
           << (params_.interfastlists_
                   ? "lists by motion vector class, inter_main and inter_compound on them (-interfastlists; "
                     "frames with a scaled reference keep the original lists)"
                   : params_.interfast_ ? "by motion vector class: inter_fast, inter_compound_fast (-interfast; "
                                          "frames with a scaled reference keep the original shaders)"
-                                       : "inter_main, inter_compound (original)");
+                                       : inter_size_shaders);
   XB_LOGI << "Parser: the parse pass of rav1d";
   // -parseopt: fixed when the decoder was created. The default is nolfmask tilethread gpucdef gpugrid.
   XB_LOGI << "Parser switches (-parseopt): "

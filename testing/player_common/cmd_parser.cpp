@@ -83,6 +83,8 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"intraod", atSingle, anOptional, "baseline DXC -Od intra_main shaders", "intra-main", &params_.intraod_},
       {"lrlegacy", atSingle, anOptional, "original loop restoration shader", "", &params_.lrlegacy_},
       {"fglegacy", atSingle, anOptional, "original direct NV12/P010 film grain shader", "", &params_.fglegacy_},
+      {"interlegacy", atSingle, anOptional, "original unscaled single-reference inter shader on the size lists",
+       "", &params_.interlegacy_},
       {"slots", atInt, anOptional,
        "decoder pipeline slots (frames in flight), 2..4. Default: four above 2560x1440, otherwise one "
        "more than frames in parse",
@@ -446,6 +448,7 @@ void CParameters::Reset() {
   params_.intraod_ = false;
   params_.lrlegacy_ = false;
   params_.fglegacy_ = false;
+  params_.interlegacy_ = false;
   // 0: the task has no -slots (Parse() makes the default of it).
   params_.slots_ = 0;
   params_.slots_given_ = false;

@@ -76,6 +76,7 @@ typedef unsigned char BYTE; /* the type of the bytecode arrays */
 #include "dx/shaders/h/inter_compound_diff_luma.h"
 #include "dx/shaders/h/inter_compound_masked.h"
 #include "dx/shaders/h/inter_main.h"
+#include "dx/shaders/h/inter_main_v2.h"
 #include "dx/shaders/h/inter_obmc_above.h"
 #include "dx/shaders/h/inter_obmc_left.h"
 #include "dx/shaders/h/inter_warp.h"
@@ -96,6 +97,7 @@ typedef unsigned char BYTE; /* the type of the bytecode arrays */
 #include "dx/shaders/h/inter_compound_hbd.h"
 #include "dx/shaders/h/inter_compound_masked_hbd.h"
 #include "dx/shaders/h/inter_main_hbd.h"
+#include "dx/shaders/h/inter_main_v2_hbd.h"
 #include "dx/shaders/h/inter_obmc_above_hbd.h"
 #include "dx/shaders/h/inter_obmc_left_hbd.h"
 #include "dx/shaders/h/inter_scale_warp_compound_hbd.h"
@@ -189,6 +191,7 @@ static const rav1g_shader_bytecode rav1g_shaders[] = {
   RAV1G_SHADER(inter_compound_diff_luma),
   RAV1G_SHADER(inter_compound_masked),
   RAV1G_SHADER(inter_main),
+  RAV1G_SHADER(inter_main_v2),
   RAV1G_SHADER(inter_obmc_above),
   RAV1G_SHADER(inter_obmc_left),
   RAV1G_SHADER(inter_warp),
@@ -209,6 +212,7 @@ static const rav1g_shader_bytecode rav1g_shaders[] = {
   RAV1G_SHADER(inter_compound_hbd),
   RAV1G_SHADER(inter_compound_masked_hbd),
   RAV1G_SHADER(inter_main_hbd),
+  RAV1G_SHADER(inter_main_v2_hbd),
   RAV1G_SHADER(inter_obmc_above_hbd),
   RAV1G_SHADER(inter_obmc_left_hbd),
   RAV1G_SHADER(inter_scale_warp_compound_hbd),

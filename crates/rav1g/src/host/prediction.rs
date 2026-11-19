@@ -503,6 +503,14 @@ struct IntraData {
     sm_weight_arrays: [[c_int; 4]; 128],
 }
 
+static INTER_LEGACY: AtomicI32 = AtomicI32::new(0);
+
+/// `av1_set_inter_legacy` (`dx/av1_perf.h`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_inter_legacy(enable: c_int) {
+    INTER_LEGACY.store(enable, Ordering::Relaxed);
+}
+
 // The main intra path uses DXC's optimized build by default. -intraod selects the baseline kernel.
 static INTRA_OPT: AtomicI32 = AtomicI32::new(1);
 
@@ -536,12 +544,11 @@ struct InterDetailRec<'a> {
 }
 
 impl InterDetailRec<'_> {
-    /// The loads of the reference rows, from the shaders (docs/gpu-av1-decoder.md, "Inter prediction
-    /// breakdown"): rows per thread and reference times the bytes of the Load4/Load3/Load2/Load of one row.
-    /// They do not depend on the motion vector or the filter: every shader reads the rows of an 8-tap
-    /// filter in both directions. A shader for scaled references reads 8 rows plus what its 4 output rows
-    /// step over, which is 11 for a reference of the frame's size and more for a larger one: the estimate
-    /// takes the largest step of the frame's references.
+    /// Estimate of reference bytes from rows per thread and reference times bytes loaded per row.
+    /// The unscaled size lists use the two-pass load count, an upper bound
+    /// when the shader skips an identity phase. The opt-in fast lists give
+    /// the motion class, so their estimates account for skipped passes.
+    /// For scaled references use the largest step of the frame's references.
     ///
     /// # Safety
     /// `self.d` is null or the breakdown of the frame.
@@ -922,6 +929,11 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
             let scaled = td.scale_enable != 0;
             let wi_per_block: u32 = if scaled { 4 } else { 1 };
             let warp_comp = &raw const (*shaders).inter_warp_comp;
+            let inter_base = if INTER_LEGACY.load(Ordering::Relaxed) != 0 {
+                &raw const (*shaders).inter_base
+            } else {
+                &raw const (*shaders).inter_base_v2
+            };
             let shader_of = |list_type: c_int| -> *const ComputeShader {
                 match (list_type, scaled) {
                     (0, _) => &raw const (*shaders).inter_warp,
@@ -933,7 +945,7 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                     (8, true) => &raw const (*shaders).inter_scale_obmc_above,
                     (9, true) => &raw const (*shaders).inter_scale_obmc_left,
                     (10, true) => &raw const (*shaders).inter_scale_2x2,
-                    (1, false) => &raw const (*shaders).inter_base,
+                    (1, false) => inter_base,
                     (2, false) => &raw const (*shaders).inter_comp,
                     (3, false) => &raw const (*shaders).inter_comp_diff_y,
                     (4, false) => &raw const (*shaders).inter_comp_masked,

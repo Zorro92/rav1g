@@ -221,9 +221,8 @@ typedef struct av1_perf_inter_section {
   int64_t threads;
   int64_t records;
   int64_t pixels;       /* samples the records cover: records * width * height */
-  int64_t loaded_bytes; /* reference bytes the threads load: threads times what one thread of the shader
-                           loads for its reference rows, whatever the motion vector (an estimate for the
-                           shaders of scaled references, whose row count depends on the block) */
+  int64_t loaded_bytes; /* estimated reference bytes: threads times reference load bytes per thread.
+                           Unscaled size lists use the two-pass upper bound. */
   av1_perf_inter_work work;
   av1_perf_inter_list lists[AV1_PERF_INTER_LISTS];
 } av1_perf_inter_section;
@@ -286,6 +285,11 @@ void av1_set_lr_legacy(int enable);
  * direct NV12/P010 textures. Zero selects the default shader. Change it
  * only while no frame is in flight. */
 void av1_set_fg_legacy(int enable);
+
+/* Process-wide. Non-zero selects the original single-reference shader for
+ * unscaled inter on the size lists. Zero selects the optimized shader (default).
+ * Change it only while no frame is in flight. */
+void av1_set_inter_legacy(int enable);
 
 /* Process-wide. Non-zero runs intra prediction through intra_v2.hlsl instead
  * of intra_main.hlsl + intra_filter.hlsl; the decoded output is the same.

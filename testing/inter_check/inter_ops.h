@@ -10,6 +10,7 @@
 
 static inline int4 operator*(const int4 &a, int b) { return int4(a.x * b, a.y * b, a.z * b, a.w * b); }
 static inline int4 operator+(const int4 &a, const int4 &b) { return int4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w); }
+static inline int4 operator>>(const int4 &a, int bits) { return int4(a.x >> bits, a.y >> bits, a.z >> bits, a.w >> bits); }
 static inline int4 &operator+=(int4 &a, const int4 &b) {
   a = a + b;
   return a;

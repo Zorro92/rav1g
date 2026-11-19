@@ -1,6 +1,6 @@
 #!/bin/sh
-# Builds and runs the check of the fast inter prediction shaders (test flag -interfast) against the
-# original shaders and against libaom's C code on a Linux host (gcc, g++, no GPU).
+# Compares the default and -interfast kernels with the original unscaled inter shaders
+# and libaom's C code on a Linux host (gcc, g++, no GPU).
 #
 #   sh testing/inter_check/run.sh            the check; exit code 0 = identical
 #   sh testing/inter_check/run.sh --mutate   also proves the check can fail:
@@ -44,7 +44,8 @@ to_cpp() {
     "$1"
 }
 
-for name in inter_common.h inter_fast_common.h inter_main.hlsl inter_main_hbd.hlsl inter_compound.hlsl \
+for name in inter_common.h inter_fast_common.h inter_unscaled.h inter_main.hlsl inter_main_hbd.hlsl \
+  inter_main_v2.hlsl inter_main_v2_hbd.hlsl inter_compound.hlsl \
   inter_compound_hbd.hlsl inter_fast.hlsl inter_fast_hbd.hlsl inter_compound_fast.hlsl inter_compound_fast_hbd.hlsl \
   inter_ext_borders.hlsl inter_ext_borders_hbd.hlsl; do
   to_cpp "$shaders/$name" > "$work/${name%.*}.gen.h"
@@ -82,7 +83,8 @@ build() {
   flags="-std=c++17 -O2 -fwrapv -Wall -Wno-unknown-pragmas -Wno-unused -Wno-parentheses -Wno-sign-compare"
   flags="$flags -I $1 -I $here -include $here/inter_ops.h"
   rm -f "$1"/*.o
-  for shader in inter_main:3 inter_main_hbd:3 inter_compound:3 inter_compound_hbd:3 inter_fast:3 inter_fast_hbd:3 \
+  for shader in inter_main:3 inter_main_hbd:3 inter_main_v2:3 inter_main_v2_hbd:3 \
+    inter_compound:3 inter_compound_hbd:3 inter_fast:3 inter_fast_hbd:3 \
     inter_compound_fast:3 inter_compound_fast_hbd:3 inter_ext_borders:2 inter_ext_borders_hbd:2; do
     name=${shader%:*}
     # shellcheck disable=SC2086
@@ -100,7 +102,12 @@ timeout -k 10 "$check_timeout" "$work/inter_check" "$@"
 
 if [ "$mutate" = 1 ]; then
   # file @ sed expression @ what it breaks
-  mutants='inter_fast.gen.h@0,/(3 << InterFastSampleShift)/s//(2 << InterFastSampleShift)/@column of the copy (one reference)
+  mutants='inter_main_v2.gen.h@0,/phase_x == 0/s//phase_x == 1/@default single-reference copy phase
+inter_main_v2.gen.h@s/(8 - InterLineBias)/(7 - InterLineBias)/@default single-reference horizontal rounding
+inter_main_v2.gen.h@s/1024 - 128 \* InterLineBias/1023 - 128 * InterLineBias/@default single-reference two-pass rounding
+inter_unscaled.gen.h@s/(words.y >> shift) | ((words.z << (24 - shift)) << 8)/(words.y >> shift)/@default unaligned HBD row packing
+inter_unscaled.gen.h@s/clamp(y + input_row, 0, height)/clamp(y + input_row, 0, height + 1)/@default vertical bottom edge
+inter_fast.gen.h@0,/(3 << InterFastSampleShift)/s//(2 << InterFastSampleShift)/@column of the copy (one reference)
 inter_fast.gen.h@s/inter_fast_round(sum, 64, 7)/inter_fast_round(sum, 63, 7)/@rounding of the vertical pass (one reference)
 inter_fast.gen.h@s/inter_fast_round(l, 8 - InterFastLineBias, 4)/inter_fast_round(l, 7 - InterFastLineBias, 4)/@rounding of the horizontal pass (one reference)
 inter_fast.gen.h@s/rows\[i\] = inter_fast_row(dst_frame, column + ref_stride \* clamp(mvy + i, 0, dims.y))/rows[i] = inter_fast_row(dst_frame, column + ref_stride * clamp(mvy + i, 0, dims.y + 1))/@bottom edge clamp of the vertical pass (one reference)
@@ -126,8 +133,12 @@ inter_fast_class.gen.h@s/(mv \& 15) != 0 ? 2 : 0/(mv \& 7) != 0 ? 2 : 0/@class o
       exit 1
     fi
     build "$work/mutant"
-    if timeout -k 10 "$mutant_timeout" "$work/mutant/inter_check" "$@" > "$work/mutant/log" 2>&1; then
-      echo "inter_check: the mutant '$what' passed, the check is not sensitive to it" >&2
+    status=0
+    timeout -k 10 "$mutant_timeout" "$work/mutant/inter_check" "$@" --fail-fast > "$work/mutant/log" 2>&1 ||
+      status=$?
+    if [ "$status" != 1 ] || ! grep -q '^MISMATCH' "$work/mutant/log"; then
+      cat "$work/mutant/log" >&2
+      echo "inter_check: the mutant '$what' did not yield a mismatch (exit $status)" >&2
       exit 1
     fi
     echo "inter_check: mutant rejected as expected: $what"

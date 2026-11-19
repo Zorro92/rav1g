@@ -3682,12 +3682,9 @@ jobs:
           sh testing/warp_check/run.sh --mutate | tee warp-check.log
           { echo '## Warp check'; echo '```'; tail -n 15 warp-check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
-  # Host check of the fast inter prediction shaders (inter_fast.hlsl, inter_compound_fast.hlsl and their
-  # _hbd builds; test flag -interfast) against the original shaders and against libaom's C code of this
-  # tree: the shaders, compiled as C++, predict generated frames from lists by motion vector class as
-  # gen_pred_blocks_fast_packed.hlsl makes them, and the frame must be what inter_main and inter_compound write
-  # and what libaom writes, for every block size, class, pair of classes, fraction and filter, 8-bit and
-  # 10-bit, at the edges of the frame; seventeen mutated copies must fail.
+  # Host check of the default and -interfast kernels against the original unscaled inter shaders and
+  # libaom. The shaders run as C++ with generated 8-bit and 10-bit block records covering sizes,
+  # phases, filters, compound weights and frame edges. Deliberate kernel mutations must fail.
   inter-check:
     runs-on: ubuntu-26.04
     timeout-minutes: 20
@@ -3696,11 +3693,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Compare the fast inter shaders with the original shaders and libaom
+      - name: Compare unscaled inter shaders with the original shaders and libaom
         run: |
           set -euo pipefail
           sh testing/inter_check/run.sh --mutate | tee inter-check.log
-          { echo '## Inter fast path check'; echo '```'; tail -n 24 inter-check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo '## Unscaled inter check'; echo '```'; cat inter-check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   # Host check of the super-resolution shader (upscaling.hlsl) against libaom's normative upscale of
   # this tree, which is the upscaling process of the specification: the shader, compiled as C++,

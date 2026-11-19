@@ -156,8 +156,8 @@ const LAYOUTS: usize =
 const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
-    // 20 transforms, 31 bit-depth-independent shaders, and 32 per bit depth.
-    assert!(SHADERS == 20 + 31 + 2 * 32);
+    // 20 transforms, 31 bit-depth-independent shaders, and 33 per bit depth.
+    assert!(SHADERS == 20 + 31 + 2 * 33);
     assert!(LAYOUTS == 24);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
@@ -395,6 +395,7 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("inter_compound_diff_luma", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_comp_diff_y),
             ("inter_compound_masked", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_comp_masked),
             ("inter_main", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_base),
+            ("inter_main_v2", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_base_v2),
             ("inter_obmc_above", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_obmc_above),
             ("inter_obmc_left", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_obmc_left),
             ("inter_warp", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_warp),
@@ -415,6 +416,7 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("inter_compound_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_comp),
             ("inter_compound_masked_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_comp_masked),
             ("inter_main_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_base),
+            ("inter_main_v2_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_base_v2),
             ("inter_obmc_above_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_obmc_above),
             ("inter_obmc_left_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_obmc_left),
             ("inter_scale_warp_compound_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_warp_comp),
@@ -897,7 +899,7 @@ mod tests {
             .filter_map(|line| line.trim().trim_start_matches('(').strip_prefix('"'))
             .map(|rest| &rest[..rest.find('"').unwrap()])
             .collect();
-        assert_eq!(names.len(), 111);
+        assert_eq!(names.len(), 113);
         let mut unique = names.clone();
         unique.sort_unstable();
         unique.dedup();

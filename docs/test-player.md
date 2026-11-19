@@ -362,9 +362,7 @@ for these tests.
 
 ## Defaults and opt-out flags
 
-Since package 0.2.8.0 a task line without any of the flags below runs what the console
-runs proved (4K 10-bit, md5-exact on both 4K test clips in every case). The log lines at
-the start of every task say what is in effect.
+The log lines at the start of each task show which defaults and opt-out flags are in effect.
 
 | Setting | Default | Its log line | Other values |
 | --- | --- | --- | --- |
@@ -376,7 +374,7 @@ the start of every task say what is in effect.
 | Parser | the parse pass of rav1d, with its switches `nolfmask`, `tilethread` and (since package 0.2.197) `gpucdef` on | `Parser: the parse pass of rav1d`, `Parser switches (-parseopt): nolfmask tilethread gpucdef` | none since package 0.2.159: the entropy decoder of libaom (`-parser c`) left the decoder; up to 0.2.157 `Parser: the entropy decoder of libaom (-parser c)`; `-parseopt` for the switches; see [Parser](#parser--parser) |
 | Clears of a slot | none: the wavefront of intra prediction is kept at the edges of the tiles (since package 0.2.146.0) | `Clears: none needed (default: intra wavefront at the edges of the tiles; -gpuclear, -cpuclear and -syncclear keep it in the slot's grid and clear that)` | `-gpuclear`, `-cpuclear`, `-syncclear`: the wavefront in the slot's grid, cleared for every frame by the GPU, the completion thread (the default of 0.2.140 to 0.2.144; `-asyncclear` is the same) or the decode thread; see [Clears](#clears) |
 | Intra prediction | frame-wide wavefront, DXC-optimized main shaders | `Intra main shader: intra_main (default)` | `-intrav2`, `-intraod` |
-| Inter prediction | upstream's shaders, lists by type and block size | `Inter shaders: inter_main, inter_compound (original)` | `-interfast`: see [Inter fast path](#inter-fast-path--interfast) |
+| Unscaled inter prediction on size lists | `inter_main_v2` and `inter_compound`, with HBD variants | `Inter shaders: inter_main_v2, inter_compound (default)` | `-interlegacy` selects the original single-reference shader. `-interfast` selects [motion-class lists and shaders](#inter-fast-path--interfast). |
 
 On a device that logs `OUTPUT P010 direct` or `OUTPUT NV12 direct`, film grain uses
 `film_grain_filter_sp_tex_v2`. Add `-fglegacy` to the same `-output p010` task to
@@ -691,7 +689,7 @@ inter stage and has no share; it is also timed in intra frames that have palette
 | `blocksY`, `blocksUV` | prediction blocks of the section, counted by the tile threads where they push them; a chroma block is counted once |
 | `kpxY`, `kpxUV` | thousand samples predicted: luma, chroma of both planes |
 | `refblk` | reference blocks fetched: one per prediction block, plane and reference |
-| `loadMB` | reference bytes the threads of the section load: threads x what one thread of the shader loads for its reference rows. The shaders load the rows of an 8-tap filter in both directions whatever the motion vector and the filter are, and every thread loads its own rows. An estimate for the scaled shaders, whose row count depends on the scale |
+| `loadMB` | estimated reference bytes, from the thread count and bytes read per thread. The unscaled size lists assume both 8-tap passes, giving an upper bound for the default kernels. The `-interfast` lists use the class-specific load sizes. The scaled estimate uses the largest reference scale step. |
 | `footMB` | the references' areas those fetches cover with 8 taps both ways: `(w + 7) x (h + 7)` samples per reference block. What a shader would load that read each reference sample of a block once |
 | `mvMB` | the same with the 7 extra only in a direction in which the motion vector has a fraction: what a shader that looked at the vector would have to read |
 | `ns/px` | the section's time per sample predicted |
@@ -1444,14 +1442,14 @@ The decoded output is the same. Design, formulas and the console numbers behind 
 
 | Flag | Effect |
 | --- | --- |
-| *(none)* | the original path: `inter_main`, `inter_compound`; lists by type and block size |
+| *(none)* | lists by type and block size, with phase selection inside `inter_main_v2` |
+| `-interlegacy` | the same size lists with `inter_main` and `inter_compound` |
 | `-interfast` | lists by motion vector class and block size; `inter_fast` for the classes copy, h and v, `inter_compound_fast` for the pairs of classes of two references, the original shaders for the class with a fraction both ways. Frames with a scaled reference keep the original path. |
 | `-interfastlists` | the same lists and dispatches, but `inter_main` and `inter_compound` on every one of them: what the lists alone cost or gain (more and smaller dispatches, blocks of a class side by side), without the new kernels. |
 
 - Log line of the task: `Inter shaders: by motion vector class: inter_fast, inter_compound_fast
-  (-interfast; frames with a scaled reference keep the original shaders)`, or `Inter shaders:
-  inter_main, inter_compound (original)`. `warp_decoder` prints `INTERFAST <task>: ...` with
-  the flag.
+  (-interfast; frames with a scaled reference keep the original shaders)`. `rav1g-dec` prints
+  `INTERFAST <task>: ...` with the flag.
 - `-interfastlists` logs `Inter shaders: lists by motion vector class, inter_main and
   inter_compound on them (-interfastlists; ...)`.
 - A decoder that was created without either flag is replaced when a task asks for one (the
@@ -1469,23 +1467,22 @@ The decoded output is the same. Design, formulas and the console numbers behind 
 own, against a reference that is already next to the stream):
 
 ```text
--i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputimedetail
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputimedetail -interlegacy
 -i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputimedetail -interfast
 ```
 
-Optional third line of the pair, to split a difference into lists and kernels: the same with
-`-interfastlists` in place of `-interfast`.
+Add a third run with `-interfastlists` in place of `-interfast` to isolate the cost of the extra lists.
 
 ```text
 -i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -interfast -md5_frame_check
 ```
 
 Compare `gpu inter` and `gpu busy` of the pair, and per class the `ns/px` of `single.*`
-and `comp_avg.*` with the `single` and `comp_avg` rows of the run without the flag.
+and `comp_avg.*` with the `single` and `comp_avg` rows of the `-interlegacy` run.
 
-**Checked without a console:** `testing/inter_check` (the fast shaders, the original shaders
-and libaom write the same frames; `sh testing/inter_check/run.sh --mutate`), and the
-conformance job, which decodes the whole set on WARP once more with `-interfast` (251 of 251
+**Host checks:** `sh testing/inter_check/run.sh --mutate` compares the default shaders with the
+original shaders, and the original and fast shaders with libaom. The conformance job decodes
+the whole set on WARP once more with `-interfast` (251 of 251
 streams) and three streams with `-gputimedetail -interfast` and `-gputimedetail -interfastlists`.
 
 **Console results:** pending.

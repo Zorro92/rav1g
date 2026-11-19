@@ -137,6 +137,7 @@ class CParameters {
     bool intraod_;
     bool lrlegacy_;
     bool fglegacy_;
+    bool interlegacy_;
     // -slots: the pipeline slots the task asks for. 0 when the task has no -slots: the library then gives
     // the decoder the slots of its frames in parse.
     int slots_;

@@ -880,6 +880,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     library.set_choices(&Choices {
         lr_legacy: task.lrlegacy,
         fg_legacy: task.fglegacy,
+        inter_legacy: task.interlegacy,
         cdef_v2: !task.cdefv1,
         intra_v2: task.intrav2,
         intra_opt: task.intraopt,
@@ -918,6 +919,15 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
                 "inter_compound on every list"
             } else {
                 "inter_compound_fast"
+            }
+        );
+    } else {
+        say!(
+            "Inter shaders: {}",
+            if task.interlegacy {
+                "inter_main, inter_compound (-interlegacy)"
+            } else {
+                "inter_main_v2, inter_compound (default)"
             }
         );
     }

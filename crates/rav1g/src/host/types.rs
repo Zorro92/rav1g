@@ -77,6 +77,7 @@ pub struct ComputeShader {
 #[repr(C)]
 pub struct bitdepth_dependent_shaders {
     pub inter_base: ComputeShader,
+    pub inter_base_v2: ComputeShader,
     pub inter_2x2: ComputeShader,
     pub inter_comp: ComputeShader,
     pub inter_comp_diff_y: ComputeShader,
