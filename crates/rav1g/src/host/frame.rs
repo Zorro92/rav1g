@@ -1260,6 +1260,7 @@ pub(crate) unsafe fn setup_tile(
 
         t.intra_iter_max = -1;
         t.intra_iter_max_uv = -1;
+        t.intrabc_sb = -1;
         t.dq_buffer_base = (*(*dec).idct_coefs).host_ptr.cast();
         t.mi_count = 0;
         t.dq_buffer_offset = 0;

@@ -951,6 +951,20 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
             }
         }
         if !is_inter || is_inter_intra {
+            // AV1 spec 6.10.25 (is_mv_valid): an IntraBC motion vector cannot reference samples
+            // within the current superblock (srcSbRow < activeSbRow, or srcSbRow == activeSbRow
+            // with srcSb64Col < activeSb64Col - INTRABC_DELAY_SB64). Snapshot the highest
+            // iteration reached before entering each superblock so all IntraBC blocks in the
+            // same superblock share one wavefront iteration instead of serializing block by block.
+            if (*cm).allow_intrabc != 0 {
+                let sb_shift = (*cm).seq_params.mib_size_log2;
+                let sb_key = ((mi_row >> sb_shift) << 16) | (mi_col >> sb_shift);
+                if sb_key != tile.intrabc_sb {
+                    tile.intrabc_sb = sb_key;
+                    tile.intra_iter_max = tile.gen_intra_iter_y;
+                    tile.intra_iter_max_uv = tile.gen_intra_iter_uv;
+                }
+            }
             let is_intrabc = mi.use_intrabc != 0;
             let bsize_uv = scale_chroma_bsize_420(bsize);
             // av1_get_tx_size: 4x4 for a lossless segment, else the block's transform size for luma and the
@@ -1148,7 +1162,7 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
                                         above_available,
                                         left_available,
                                         NO_ITERATION,
-                                        tile.gen_intra_iter_y,
+                                        tile.intra_iter_max,
                                         tile.gen_intra_max_iter,
                                     );
                                     tile.gen_intra_iter_y = iter.max(tile.gen_intra_iter_y);
@@ -1163,7 +1177,7 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
                                         above_available,
                                         left_available,
                                         -1,
-                                        tile.gen_intra_iter_y,
+                                        tile.intra_iter_max,
                                         tile.gen_intra_max_iter,
                                     );
                                     tile.gen_intra_iter_y = iter.max(tile.gen_intra_iter_y);
@@ -1319,7 +1333,7 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
                                         left_available,
                                         // A CFL block also reads the luma under it.
                                         if is_cfl { luma_under } else { NO_ITERATION },
-                                        tile.gen_intra_iter_uv,
+                                        tile.intra_iter_max_uv,
                                         tile.gen_intra_max_iter,
                                     );
                                     tile.gen_intra_iter_uv = iter.max(tile.gen_intra_iter_uv);
@@ -1349,7 +1363,7 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
                                         above_available,
                                         left_available,
                                         luma_iter,
-                                        tile.gen_intra_iter_uv,
+                                        tile.intra_iter_max_uv,
                                         tile.gen_intra_max_iter,
                                     );
                                     tile.gen_intra_iter_uv = iter.max(tile.gen_intra_iter_uv);

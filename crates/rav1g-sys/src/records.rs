@@ -217,6 +217,7 @@ pub struct av1_tile_data {
     pub mi_count: c_int,
     pub mi_col_start: c_int,
     pub mi_row_start: c_int,
+    pub intrabc_sb: c_int,
     pub perf_inter: *mut c_void,
     pub wave_edges: *mut c_void,
     pub frame_data: *mut c_void,

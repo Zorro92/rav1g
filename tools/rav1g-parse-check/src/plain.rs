@@ -331,6 +331,7 @@ impl Arena {
             let blocks_4x4_count = (mi_offset * 3 + 1) >> 1;
             t.intra_iter_max = -1;
             t.intra_iter_max_uv = -1;
+            t.intrabc_sb = -1;
             t.blocks_offset = blocks_4x4_count;
             t.idct_blocks_host = self.tx_blocks.ptr().add(blocks_4x4_count as usize);
             assert!((blocks_4x4_count + (mi_max * 3 + 1) / 2) as usize <= self.tx_blocks.len());

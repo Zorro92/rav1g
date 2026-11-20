@@ -848,6 +848,7 @@ impl<H: SinkHost> ParseSink for Sink<H> {
             cm.seq_params.sb_size = if header.seq_hdr.sb128 != 0 { 15 } else { 12 };
             cm.seq_params.mib_size_log2 = if header.seq_hdr.sb128 != 0 { 5 } else { 4 };
             cm.seq_params.mib_size = 1 << cm.seq_params.mib_size_log2;
+            cm.allow_intrabc = c_int::from(header.frame_hdr.allow_intrabc);
             *place.frame.get() = Some(FrameState {
                 hdr: header.frame_hdr.clone(),
                 mi_cols: header.bw,
