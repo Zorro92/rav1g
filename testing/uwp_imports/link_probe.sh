@@ -18,11 +18,14 @@ here=$(dirname "$0")
 mkdir -p "$out"
 exports=$(grep -o 'rav1g_[a-z0-9_]*(' "$here/../../crates/rav1g/include/rav1g.h" | tr -d '(' | sort -u | sed 's|^|/export:|')
 test -n "$exports"
-# ntdll.lib and userenv.lib are for functions of the standard library that are in the objects the linker
-# loads and not in the DLL it writes (file and pipe calls, the home directory).
+# msvcrt.lib is the DLL C runtime (it names vcruntime.lib, ucrt.lib and kernel32.lib in turn): a Rust
+# static library carries no /DEFAULTLIB of its runtime, rustc names it on the links it does itself (the
+# C the library had until its shader table became Rust carried it). ntdll.lib and userenv.lib are for
+# functions of the standard library that are in the objects the linker loads and not in the DLL it
+# writes (file and pipe calls, the home directory).
 # shellcheck disable=SC2086
 lld-link /dll /appcontainer "/out:$out/probe.dll" /opt:ref /opt:icf /machine:x64 $exports \
   "/libpath:$xwin/crt/lib/x86_64" "/libpath:$xwin/sdk/lib/um/x86_64" "/libpath:$xwin/sdk/lib/ucrt/x86_64" \
   WindowsApp.lib "$lib" \
-  d3d12.lib dxgi.lib dxguid.lib ntdll.lib userenv.lib
+  d3d12.lib dxgi.lib dxguid.lib msvcrt.lib ntdll.lib userenv.lib
 echo "linked $out/probe.dll with $(echo "$exports" | wc -l) functions of rav1g.h"
