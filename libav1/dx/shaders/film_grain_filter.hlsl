@@ -100,6 +100,9 @@ groupshared int cb_grain_temp[3][16 * 16];
   int grain_min = 0 - grain_center;
   int grain_max = (256 << (bit_depth - 8)) - 1 - grain_center;
   const int enable_chroma = data.enable_chroma;
+  // The visible chroma planes include the sample for a final unpaired luma row or column.
+  const int chroma_width = (data.width + chroma_subsamp_x) >> chroma_subsamp_x;
+  const int chroma_height = (data.height + chroma_subsamp_y) >> chroma_subsamp_y;
 
   {
     int y = ii * luma_subblock_size_y;
@@ -447,8 +450,8 @@ groupshared int cb_grain_temp[3][16 * 16];
 #ifdef SEMI_PLANAR
                 sp_cb = out_cb;
 #else
-                if ((((y >> chroma_subsamp_y) + i) < (data.height >> chroma_subsamp_y)) &&
-                    (((x >> chroma_subsamp_x) + j) < (data.width >> chroma_subsamp_x))) {
+                if (((y >> chroma_subsamp_y) + i) < chroma_height &&
+                    ((x >> chroma_subsamp_x) + j) < chroma_width) {
                   chroma_plane = data.dst_planes[1].xy;
                   if (bit_depth == 8) {
                     dst.Store(
@@ -526,11 +529,11 @@ groupshared int cb_grain_temp[3][16 * 16];
 #ifdef SEMI_PLANAR
                 // U and V of a sample lie side by side: one store for both, by the thread that has both.
                 sp_store_chroma((x >> chroma_subsamp_x) + j, (y >> chroma_subsamp_y) + i, sp_cb, out_cr,
-                                (data.width + 1) >> 1, (data.height + 1) >> 1, bit_depth != 8,
+                                chroma_width, chroma_height, bit_depth != 8,
                                 data.dst_planes[1].xy);
 #else
-                if ((((y >> chroma_subsamp_y) + i) < (data.height >> chroma_subsamp_y)) &&
-                    (((x >> chroma_subsamp_x) + j) < (data.width >> chroma_subsamp_x))) {
+                if (((y >> chroma_subsamp_y) + i) < chroma_height &&
+                    ((x >> chroma_subsamp_x) + j) < chroma_width) {
                   chroma_plane = data.dst_planes[2].xy;
                   if (bit_depth == 8) {
                     dst.Store(
@@ -566,7 +569,7 @@ groupshared int cb_grain_temp[3][16 * 16];
                 res.z =
                     cb_grain_temp[(j3 * 3 + 2) / (uint)true_chroma_subblock_size_x]
                                  [i * true_chroma_subblock_size_x + (j3 * 3 + 2) % (uint)true_chroma_subblock_size_x];
-                if ((((y >> 1) + i) < (data.height >> 1)) && ((x3 + j3 * 3) < (data.width >> 1))) {
+                if (((y >> 1) + i) < chroma_height && (x3 + j3 * 3) < chroma_width) {
                   dst.Store(chroma_plane.y + ((y >> 1) + i) * chroma_plane.x + 4 * x3 / 3U + j3 * 4,
                             ((res.z & 0x3ff) << 20) | ((res.y & 0x3ff) << 10) | (res.x & 0x3ff));
                 }
@@ -586,7 +589,7 @@ groupshared int cb_grain_temp[3][16 * 16];
                 res.z =
                     cr_grain_temp[(j3 * 3 + 2) / (uint)chroma_subblock_size_x]
                                  [i * true_chroma_subblock_size_x + (j3 * 3 + 2) % (uint)true_chroma_subblock_size_x];
-                if ((((y >> 1) + i) < (data.height >> 1)) && ((x3 + j3 * 3) < (data.width >> 1))) {
+                if (((y >> 1) + i) < chroma_height && (x3 + j3 * 3) < chroma_width) {
                   dst.Store(chroma_plane.y + (y / 2U + i) * chroma_plane.x + 4 * x3 / 3U + j3 * 4,
                             ((res.z & 0x3ff) << 20) | ((res.y & 0x3ff) << 10) | (res.x & 0x3ff));
                 }
