@@ -87,14 +87,23 @@ struct OutputLayout {
 
 /// The layout of the output image of a frame: rows of a multiple of 256 bytes, the luma row twice the
 /// chroma row, planes of a multiple of 512 bytes.
-fn output_layout(src: &HwFrameBuffer, is_monochrome: bool, is_10x3: bool, semi_planar: bool) -> OutputLayout {
+fn output_layout(
+    width: c_int,
+    height: c_int,
+    hbd: bool,
+    is_monochrome: bool,
+    is_10x3: bool,
+    semi_planar: bool,
+) -> OutputLayout {
     const ALIGN1: c_int = 255;
     if semi_planar {
-        return semi_planar_layout(src);
+        return semi_planar_layout(width, height, hbd);
     }
-    let bpp = if src.hbd != 0 { if is_10x3 { 4 } else { 2 } } else { 1 };
-    let y_texture_width = if is_10x3 { (src.y_crop_width + 2) / 3 } else { src.y_crop_width };
-    let uv_texture_width = if is_10x3 { (src.uv_crop_width + 2) / 3 } else { src.uv_crop_width };
+    let bpp = if hbd { if is_10x3 { 4 } else { 2 } } else { 1 };
+    let uv_width = (width + 1) >> 1;
+    let uv_height = (height + 1) >> 1;
+    let y_texture_width = if is_10x3 { (width + 2) / 3 } else { width };
+    let uv_texture_width = if is_10x3 { (uv_width + 2) / 3 } else { uv_width };
     let (y_stride, uv_stride) = if is_monochrome {
         ((y_texture_width * bpp + ALIGN1) & !ALIGN1, 0)
     } else {
@@ -102,8 +111,8 @@ fn output_layout(src: &HwFrameBuffer, is_monochrome: bool, is_10x3: bool, semi_p
         (uv_stride * 2, uv_stride)
     };
     let num_planes = if is_monochrome { 1 } else { 3 };
-    let y_size = (y_stride * src.y_crop_height + 511) & !511;
-    let uv_size = (uv_stride * src.uv_crop_height + 511) & !511;
+    let y_size = (y_stride * height + 511) & !511;
+    let uv_size = (uv_stride * uv_height + 511) & !511;
     OutputLayout {
         bpp,
         num_planes,
@@ -121,10 +130,10 @@ fn output_layout(src: &HwFrameBuffer, is_monochrome: bool, is_10x3: bool, semi_p
 /// or a P010 texture of the frame size, both rounded up to even, has them. Rows of a multiple of 256
 /// bytes and planes of a multiple of 512, which is what a copy into a texture asks. A monochrome frame
 /// has the same two planes.
-fn semi_planar_layout(src: &HwFrameBuffer) -> OutputLayout {
-    let bpp = if src.hbd != 0 { 2 } else { 1 };
-    let width = (src.y_crop_width + 1) & !1;
-    let height = (src.y_crop_height + 1) & !1;
+fn semi_planar_layout(width: c_int, height: c_int, hbd: bool) -> OutputLayout {
+    let bpp = if hbd { 2 } else { 1 };
+    let width = (width + 1) & !1;
+    let height = (height + 1) & !1;
     let stride = (width * bpp + 255) & !255;
     let y_size = (stride * height + 511) & !511;
     let uv_size = (stride * (height / 2) + 511) & !511;
@@ -141,6 +150,12 @@ fn semi_planar_layout(src: &HwFrameBuffer) -> OutputLayout {
     }
 }
 
+/// Output staging capacity for the decoder's maximum dimensions and bit depth. Full chroma and
+/// unpacked samples cover monochrome and packed 10-bit output as well.
+pub(super) fn staging_size(width: c_int, height: c_int, hbd: bool, semi_planar: bool) -> c_int {
+    output_layout(width, height, hbd, false, false, semi_planar).size
+}
+
 /// What both calls need of the frame.
 ///
 /// # Safety
@@ -152,7 +167,9 @@ unsafe fn frame_layout(dec: *mut Av1Core, cm: *const AV1_COMMON) -> (bool, bool,
         let is_monochrome = (*(*cm).cur_frame).buf.monochrome != 0;
         let semi_planar = (*dec).output_kind != 0;
         let is_10x3 = !semi_planar && (*dec).tryhdr10x3 != 0 && src.hbd != 0;
-        (is_monochrome, is_10x3, output_layout(src, is_monochrome, is_10x3, semi_planar))
+        let layout =
+            output_layout(src.y_crop_width, src.y_crop_height, src.hbd != 0, is_monochrome, is_10x3, semi_planar);
+        (is_monochrome, is_10x3, layout)
     }
 }
 
@@ -299,6 +316,7 @@ pub(crate) unsafe fn copy_output(dec: *mut Av1Core, cm: *mut AV1_COMMON, fb: *co
 
         // The image is put together at the start of the back buffer.
         let dst = &mut (*dec).back_buffer1;
+        debug_assert!(size as usize <= dst.size);
         for plane in 0..3 {
             dst.planes[plane].stride = img.planes[plane].stride;
             dst.planes[plane].offset = (img.planes[plane].offset as usize + dst.base_offset) as c_int;
@@ -603,19 +621,14 @@ mod tests {
 
     #[test]
     fn semi_planar_layout_is_that_of_the_texture() {
-        // SAFETY: a frame buffer is numbers and two pointers the layout does not read.
-        let mut src: HwFrameBuffer = unsafe { std::mem::zeroed() };
         for (width, height, hbd, stride, y_size, uv_size) in [
-            (352, 288, 0, 512, 147456, 73728),
-            (3840, 2160, 1, 7680, 16588800, 8294400),
+            (352, 288, false, 512, 147456, 73728),
+            (3840, 2160, true, 7680, 16588800, 8294400),
             // Odd sizes: the planes of a 226x226 and of a 66x68 texture.
-            (225, 225, 0, 256, 57856, 29184),
-            (65, 67, 1, 256, 17408, 8704),
+            (225, 225, false, 256, 57856, 29184),
+            (65, 67, true, 256, 17408, 8704),
         ] {
-            src.hbd = hbd;
-            src.y_crop_width = width;
-            src.y_crop_height = height;
-            let layout = output_layout(&src, false, false, true);
+            let layout = output_layout(width, height, hbd, false, false, true);
             assert_eq!((layout.y_stride, layout.uv_stride), (stride, stride));
             assert_eq!((layout.y_size, layout.uv_size, layout.size), (y_size, uv_size, y_size + uv_size));
             assert_eq!(layout.y_texture_width, (width + 1) & !1);
@@ -637,7 +650,7 @@ mod tests {
                 for is_monochrome in [false, true] {
                     for is_10x3 in [false, hbd != 0] {
                         assert_eq!(
-                            output_layout(&src, is_monochrome, is_10x3, false),
+                            output_layout(width, height, hbd != 0, is_monochrome, is_10x3, false),
                             layout_cpp(&src, is_monochrome, is_10x3)
                         );
                     }

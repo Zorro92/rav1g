@@ -110,6 +110,7 @@ struct ResourceConfig {
     ref_fb_count: i32,
     gpu_pipeline_depth: i32,
     enable_superres: i32,
+    semi_planar: bool,
     /// Create the buffers of the -intrav2 path.
     intra_v2: bool,
     /// Room in the block maps for the lists of the -interfast path.
@@ -331,6 +332,7 @@ impl ResourceConfig {
             ref_fb_count,
             gpu_pipeline_depth,
             enable_superres: 1,
+            semi_planar: cfg.output_kind == 1,
             intra_v2: cfg.intra_v2 != 0,
             inter_fast: cfg.inter_fast != 0,
             low_memory,
@@ -507,7 +509,8 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
     let y_size = y_stride * target_height;
     let uv_stride = (target_width >> 1) + border * 2;
     let uv_size = uv_stride * (target_height >> 1);
-    let bpp = if cfg.bitdepth > 8 { 2 } else { 1 };
+    let hbd = cfg.bitdepth > 8;
+    let bpp = if hbd { 2 } else { 1 };
     let fb_size = ((y_size + 2 * uv_size) * bpp + 255) & !255;
 
     // The pool buffer starts with the back buffers that are not handed out: back_buffer1, and behind it the
@@ -516,7 +519,12 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
     dec.low_memory = cfg.low_memory;
     dec.late_frame_buffer = i32::from(late_frame_buffer(cfg.low_memory));
     dec.fb_size = fb_size;
-    dec.fb_offset = if dec.shared_back_buffer != 0 { 2 * fb_size } else { fb_size };
+    // On narrow frames the output row pitch can be larger than the decoded row pitch.
+    // Keep the entire staging layout ahead of the other frames in the pool.
+    let staging_size = super::output::staging_size(target_width, target_height, hbd, cfg.semi_planar);
+    let back_buffer1_size = fb_size.max(staging_size);
+    dec.back_buffer1.size = back_buffer1_size as usize;
+    dec.fb_offset = back_buffer1_size + dec.shared_back_buffer * fb_size;
     dec.enable_superres = cfg.enable_superres;
     request!(
         assign,
@@ -911,11 +919,14 @@ unsafe fn log_memory_summary(is_error: bool, label: &str, dec: &Av1Core, rcfg: &
     let buffers = mem.buffers();
     let total = mem.device_bytes();
     let shared = dec.shared_back_buffer != 0;
+    let staging_extra = dec.back_buffer1.size.saturating_sub(dec.fb_size as usize);
+    let staging_extra =
+        if staging_extra == 0 { String::new() } else { format!(", plus {staging_extra} bytes for output staging") };
     log(
         is_error,
         &format!(
             "MEMORY {label}: {}x{} {}-bit, slots {}, frame buffers {} + {} back buffer{} of {} bytes ({:.1} MiB) \
-             each; {} device buffers, {total} bytes ({:.1} MiB); host pool {} of {} bytes ({:.1} MiB) in use",
+             each{staging_extra}; {} device buffers, {total} bytes ({:.1} MiB); host pool {} of {} bytes ({:.1} MiB) in use",
             rcfg.width as u32,
             rcfg.height as u32,
             rcfg.bitdepth as u32,
@@ -1557,11 +1568,10 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
         }
 
         let fb_size = (*dec).fb_size;
-        (*dec).back_buffer1.size = fb_size as _;
         (*dec).back_buffer1.base_offset = 0;
         // Only used with shared_back_buffer; the pool buffer has the room for it only then.
         (*dec).back_buffer0.size = fb_size as _;
-        (*dec).back_buffer0.base_offset = fb_size as _;
+        (*dec).back_buffer0.base_offset = (*dec).back_buffer1.size;
         for i in 0..rcfg.ref_fb_count {
             let offset = (*dec).fb_offset + fb_size * i;
             let fb = &raw mut (*dec).fb_pool_src[i as usize];
@@ -1888,6 +1898,27 @@ mod tests {
             (cfg.low_memory, cfg.frame_slots) = (parts, slots);
             let rcfg = ResourceConfig::from_cfg(&cfg);
             assert_eq!((rcfg.ref_fb_count, rcfg.low_memory), (buffers, parts), "parts {parts}, {slots} slots");
+        }
+    }
+
+    #[test]
+    fn narrow_output_staging_sits_ahead_of_the_frame_buffers() {
+        // SAFETY: a configuration is numbers and pointers.
+        let mut cfg: aom_codec_dec_cfg_t = unsafe { std::mem::zeroed() };
+        (cfg.width, cfg.height, cfg.bitdepth) = (33, 610, 8);
+        for (output_kind, staging) in [(0, 491_520), (1, 245_760)] {
+            cfg.output_kind = output_kind;
+            for low_memory in [AV1_LOW_MEMORY_SHARED_BACK_BUFFER as i32, crate::sys::AV1_LOW_MEMORY_NONE as i32] {
+                cfg.low_memory = low_memory;
+                let rcfg = ResourceConfig::from_cfg(&cfg);
+                let mut dec = Av1Core::new().unwrap();
+                let mut plan = Requests::plan();
+                // SAFETY: the plan only computes sizes for this decoder.
+                assert!(unsafe { allocate_buffers(&raw mut *dec, &mut plan, &rcfg) });
+                assert_eq!(dec.back_buffer1.size, staging);
+                assert_eq!(dec.fb_size, 163_840);
+                assert_eq!(dec.fb_offset as usize, staging + dec.shared_back_buffer as usize * 163_840);
+            }
         }
     }
 }
