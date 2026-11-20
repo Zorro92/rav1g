@@ -5,6 +5,9 @@ The vectors cover AV1 v1.0.0-errata1, with reference output from libaom
 `v1.0.0-errata1`. The six Profile 0 folders use about 1.47 GB of file
 contents. Keep the extracted data outside the repository.
 
+See the [Profile 0 run results](RESULTS.md) for coverage, exclusions, and
+diagnostics for the first differing frame.
+
 ```powershell
 python testing/argon/fetch.py --out ../argon-v2.1.1
 python testing/argon/run.py --tool target/release/rav1g-dec.exe --streams ../argon-v2.1.1 --out ../argon-results
