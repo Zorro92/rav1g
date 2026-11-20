@@ -7,3 +7,6 @@ __pycache__/
 
 # The build directory of the tool that is not part of the workspace (testing/rav1d_md5).
 /testing/rav1d_md5/target/
+
+# Cached conformance data from the Argon Streams release.
+/argon-streams/

@@ -26,6 +26,10 @@ on:
           docs/phase2-rav1d.md, "Frames in parallel")
         type: boolean
         default: false
+      argon:
+        description: Run the Argon Streams AV1 Profile 0 conformance suite on WARP
+        type: boolean
+        default: false
   # Weekly runs also exercise the extended frame/thread matrix.
   schedule:
     - cron: '23 3 * * 1'
@@ -2262,6 +2266,78 @@ jobs:
         with:
           name: rav1g-dec-frames-matrix-${{ matrix.frames }}-${{ github.run_id }}
           path: out/conformance-*/
+          if-no-files-found: warn
+
+  # The public Argon release is a multipart ZIP. Cache the six Profile 0 folders,
+  # including layered references, and share the same cache across all Windows shards.
+  argon-streams:
+    if: github.event_name == 'workflow_dispatch' && inputs.argon
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    outputs:
+      key: ${{ steps.key.outputs.key }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Profile 0 cache key
+        id: key
+        run: echo "key=argon-av1-v2.1.1-profile0-${{ hashFiles('testing/argon/fetch.py', 'testing/argon/suite.py') }}" >> "$GITHUB_OUTPUT"
+
+      - name: Argon Profile 0 from the cache
+        id: argon
+        uses: actions/cache@v6
+        with:
+          path: argon-streams
+          key: ${{ steps.key.outputs.key }}
+          enableCrossOsArchive: true
+
+      - name: Download Profile 0 by ZIP ranges
+        if: steps.argon.outputs.cache-hit != 'true'
+        run: python3 testing/argon/fetch.py --out argon-streams
+
+  argon-conformance:
+    if: github.event_name == 'workflow_dispatch' && inputs.argon
+    needs: [argon-streams, rust]
+    runs-on: windows-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: rav1g-dec.exe of the rust job
+        uses: actions/download-artifact@v8
+        with:
+          name: rav1g-dec-x64-${{ github.run_id }}
+          path: out/rav1g-dec
+
+      - name: Argon Profile 0 from the cache
+        uses: actions/cache/restore@v6
+        with:
+          path: argon-streams
+          key: ${{ needs.argon-streams.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+
+      - name: Argon Profile 0 on WARP
+        run: >-
+          python testing/argon/run.py --tool out/rav1g-dec/rav1g-dec.exe
+          --streams argon-streams --out out/argon --shards 8 --shard ${{ matrix.shard }} --timeout 300
+
+      - name: Preserve the result table
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: argon-profile0-${{ github.run_id }}-shard-${{ matrix.shard }}
+          path: |
+            out/argon/results.tsv
+            out/argon/summary.md
           if-no-files-found: warn
 
   # What the jobs above wrote, held against each other; no decoder runs here. It runs also when one of
