@@ -15,6 +15,7 @@
 use std::ffi::c_int;
 use std::sync::atomic::{AtomicI32, Ordering};
 
+use super::blocks::IntraMain;
 use super::core::{
     alloc_constants, buffer, commands, perf_gpu_mark, perf_inter_begin, perf_inter_mark, pipeline, stage_dump_active,
     stage_dump_data, stage_dump_fb, stage_dump_mode_info,
@@ -30,8 +31,8 @@ use super::tables::{
 };
 use super::types::{
     Av1Core, CasualInter, CompoundDiffUv, CompoundDiffUvGlobalWarp, CompoundGlobalWarp, CompoundMasked, ComputeShader,
-    Inter2x2ArrOffset, InterCountsAll, InterFast2D, InterFastClasses, InterFastLists, InterSizesAllCommon, IntraMain,
-    IntraSizes, IntraTypeCount, ObmcAbove, ObmcLeft, ReconBlockOffset, ReconstructBlockSizes, ScaleFactor, Warp,
+    Inter2x2ArrOffset, InterCountsAll, InterFast2D, InterFastClasses, InterFastLists, InterSizesAllCommon, IntraSizes,
+    IntraTypeCount, ObmcAbove, ObmcLeft, ReconBlockOffset, ReconstructBlockSizes, ScaleFactor, Warp,
     av1_frame_thread_data, av1_perf_inter_tile, av1_stage_dump_region,
 };
 use crate::gpu::{BufferRef, Commands};

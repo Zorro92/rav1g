@@ -17,6 +17,7 @@ use std::sync::RwLock;
 
 use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 
+use super::blocks::IntraMain;
 use super::core::commands;
 use super::log::log;
 use super::types::{
@@ -26,6 +27,15 @@ use crate::gpu::d3d12::{com_ref, com_release, com_store, wrapped_ref};
 use crate::gpu::{BufferRef, BufferState, Device, Readback};
 use crate::sys;
 use crate::sys::{AV1_COMMON, HwFrameBuffer, HwOutputImage, MB_MODE_INFO};
+
+impl IntraMain {
+    pub(super) fn dump_order(self) -> &'static str {
+        match self {
+            Self::Tight => " order=angle_wavefront",
+            _ => "",
+        }
+    }
+}
 
 /// Frames a dump can be asked for (`StageDumpFramesMax`).
 const FRAMES_MAX: usize = 256;

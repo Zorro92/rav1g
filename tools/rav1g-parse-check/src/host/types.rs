@@ -8,6 +8,7 @@
 
 use std::ffi::c_int;
 
+use super::blocks::IntraMain;
 pub use crate::sys::{av1_perf_inter_blocks, av1_perf_inter_work};
 
 include!(concat!(env!("OUT_DIR"), "/host_constants.rs"));
@@ -43,6 +44,7 @@ pub struct av1_frame_thread_data {
     pub iter_grid_stride: c_int,
     pub iter_grid_stride_uv: c_int,
     pub intra_v2: c_int,
+    pub intra_main: IntraMain,
     pub intra_v2_sched: IntraV2Sched,
     pub scale_factors: [ScaleFactor; 8],
     pub scale_enable: c_int,

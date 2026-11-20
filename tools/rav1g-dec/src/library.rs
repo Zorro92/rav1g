@@ -11,7 +11,7 @@
 //! application links, the UWP test player among them. The program is the same behind both, so a
 //! conformance run with `-capi` holds the C interface to the references.
 
-use std::ffi::{CStr, c_char, c_void};
+use std::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::Arc;
 
 use rav1g::capi::{self, Rav1gStatus};
@@ -28,6 +28,11 @@ use windows::core::Interface;
 use crate::device::Device;
 use crate::pool::{Rented, Request};
 use crate::shim::Dumps;
+
+unsafe extern "C" {
+    /// The A/B switch in libav1/dx/av1_perf.h.
+    fn av1_set_intra_schedule_legacy(enable: c_int);
+}
 
 /// What a frame says about its colour: the description of its sequence header and its HDR metadata.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -513,7 +518,8 @@ impl Library {
         switches::set_cdef_legacy(choices.cdef_legacy);
         switches::set_cdef_lists_legacy(choices.cdef_lists_legacy);
         switches::set_intra_filter_legacy(choices.intra_filter_legacy);
-        switches::set_intra_schedule_legacy(choices.intra_schedule_legacy);
+        // SAFETY: the setter takes an integer and only changes the test flag, with no frames in flight.
+        unsafe { av1_set_intra_schedule_legacy(c_int::from(choices.intra_schedule_legacy)) };
         if self.is_c() {
             capi::rav1g_set_cdef_v2(choices.cdef_v2);
             capi::rav1g_set_intra_v2(choices.intra_v2);

@@ -31,7 +31,7 @@ use windows::Win32::Graphics::Direct3D12::{
     ID3D12CommandQueue, ID3D12Device, ID3D12PipelineState, ID3D12RootSignature,
 };
 
-use super::blocks::WaveEdges;
+use super::blocks::{IntraMain, WaveEdges};
 use super::memory::Allocator;
 use super::pool::{KINDS, Pools};
 use super::thread::{FramePool, Queue};
@@ -258,23 +258,6 @@ pub struct av1_stage_dump_entry {
     pub size: usize,
     pub gpu_record_size: usize,
     pub planes: [av1_stage_dump_plane; 3],
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum IntraMain {
-    Tight,
-    Legacy,
-    Unoptimized,
-}
-
-impl IntraMain {
-    pub fn dump_order(self) -> &'static str {
-        match self {
-            Self::Tight => " order=angle_wavefront",
-            _ => "",
-        }
-    }
 }
 
 #[repr(C)]

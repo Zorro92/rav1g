@@ -130,11 +130,6 @@ pub fn set_intra_opt(enable: bool) {
     crate::host::av1_set_intra_opt(c_int::from(enable))
 }
 
-/// Use the conservative wavefront dependencies and the previous exact V/H prediction path.
-pub fn set_intra_schedule_legacy(enable: bool) {
-    crate::host::av1_set_intra_schedule_legacy(c_int::from(enable))
-}
-
 /// Use the previous 8-bit filter intra shader on frames that run the main intra path.
 pub fn set_intra_filter_legacy(enable: bool) {
     crate::host::av1_set_intra_filter_legacy(c_int::from(enable))

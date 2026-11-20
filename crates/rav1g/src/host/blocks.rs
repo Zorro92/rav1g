@@ -74,8 +74,8 @@ use super::tables::{
 };
 use super::types::{
     CompoundAvrg, CompoundDiff, CompoundDiffUv, CompoundDiffUvGlobalWarp, CompoundGlobalWarp, CompoundMasked,
-    Inter2x2ArrOffset, InterFastCompound, InterSizesAllCommon, IntraBlockOffset, IntraMain, IntraSizes, IntraTypeCount,
-    ObmcAbove, ObmcLeft, ReconBlockOffset, av1_frame_thread_data, av1_perf_inter_tile,
+    Inter2x2ArrOffset, InterFastCompound, InterSizesAllCommon, IntraBlockOffset, IntraSizes, IntraTypeCount, ObmcAbove,
+    ObmcLeft, ReconBlockOffset, av1_frame_thread_data, av1_perf_inter_tile,
 };
 use crate::sys::{
     AV1_COMMON, AV1_PERF_INTER_CHROMA_2X2, AV1_PERF_INTER_COMP_AVG, AV1_PERF_INTER_COMP_AVG_FAST,
@@ -529,6 +529,16 @@ impl WaveEdges {
             plane.rows = [[NO_ITERATION; 2]; WAVE_ROWS];
         }
     }
+}
+
+/// Which main predictor reads the edges the scheduler is counting.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+#[allow(dead_code, reason = "the parser-only tools build this file and use the default schedule")]
+pub enum IntraMain {
+    Tight,
+    Legacy,
+    Unoptimized,
 }
 
 /// What the intra part needs to know of a plane of the block.
