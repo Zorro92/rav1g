@@ -912,6 +912,7 @@ pub(crate) unsafe fn setup_frame_begin(
         td.gen_intra_iter_uv = td.gen_intra_iter_y.add(td.iter_grid_offset_uv as usize);
         td.intra_stats = [0; 4];
         td.intra_v2 = intra_v2_setup_frame(dec, cm, td);
+        td.intra_main = super::prediction::intra_main_for_frame(td.intra_v2 != 0);
         // With -intrav2 nothing scans the iteration grid; av1_mi_push_block() writes the one entry per
         // block that gen_pred_blocks.hlsl reads. The same without a switch for the clears: the tiles keep
         // the wavefront in their edges, the grid gets that one entry per block, and nothing of it is

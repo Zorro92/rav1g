@@ -151,6 +151,18 @@ int load_left(int corner, int stride, int wi, int available) {
   return dst_frame.Load(corner + (min(wi, available - 1) + 1) * stride) >> 16;
 }
 
+uint2 predict_straight(bool vertical, int corner, int stride, int x, int y, int above, int left) {
+  [branch] if (vertical && above) {
+    const int pair = x >> 1;
+    return uint2(load_above_pair(corner, pair, above), load_above_pair(corner, pair + 1, above));
+  }
+  uint sample = vertical ? 511 : 513;
+  [branch] if (left) sample = load_left(corner, stride, vertical ? 0 : y, left);
+  else [branch] if (above) sample = dst_frame.Load(corner + 4) & 1023;
+  sample |= sample << 16;
+  return uint2(sample, sample);
+}
+
 int compute_bc(int p0, int p1, int p2, int p3, int fh, int fv) {
   int l0 = ((1 << 14) + p0 * fh + p1 * (128 - fh) + (1 << (FilterLineShift - 1))) >> FilterLineShift;
   int l1 = ((1 << 14) + p2 * fh + p3 * (128 - fh) + (1 << (FilterLineShift - 1))) >> FilterLineShift;
@@ -271,6 +283,11 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
 
   const int mode_angle = (block.y >> 28) & 7;
   int4 params = cb_mode_params_lut[mode][mode_angle];
+#ifdef INTRA_TIGHT
+  const bool straight = mode < 2 && mode_angle == 3 && thread.x < cb_wi_count;
+#else
+  const bool straight = false;
+#endif
 
   //    block.y bits:
   //    0    3        bw_log
@@ -310,7 +327,7 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
   const int x0 = (block_lane & low_bits[bw_log]) << 2;
 
   const int mode_info = params.z & 15;
-  const bool directional = mode_info >= Dir1 && mode_info <= Dir3;
+  const bool directional = !straight && mode_info >= Dir1 && mode_info <= Dir3;
   const int upsample_above = directional ? ((block.y >> 22) & 1) : 0;
   const int upsample_left = directional ? ((block.y >> 23) & 1) : 0;
   const int strength_above = directional ? ((block.y >> 24) & 3) : 0;
@@ -342,7 +359,7 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
       luma = cfl_luma_row(block.z, bx, by, x0, y);
       edges[EDGE_LEFT][loc_base + wi] = luma.x + luma.y + luma.z + luma.w;
     }
-  } else if (mode < MODE_INTRA_BC && thread.x < cb_wi_count) {
+  } else if (mode < MODE_INTRA_BC && !straight && thread.x < cb_wi_count) {
     int first_above = 0;
     int first_left = 0;
     if (wi < (above_count >> 1) || wi == 0) {
@@ -471,7 +488,9 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
                 << 16);
   }
 
-  if (mode >= MODE_DC) {
+  if (straight) {
+    pixels = predict_straight(mode == 0, corner, stride, x0, y, above_available, left_available);
+  } else if (mode >= MODE_DC) {
     const uint dc = edges[EDGE_ABOVE][loc_base - 1];
     if (mode == MODE_CFL) {
       const int avrg = edges[EDGE_LEFT][loc_base - 1];

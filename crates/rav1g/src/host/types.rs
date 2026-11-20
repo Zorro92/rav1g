@@ -91,6 +91,7 @@ pub struct bitdepth_dependent_shaders {
     pub inter_warp_comp: ComputeShader,
     pub intra_filter: ComputeShader,
     pub intra_main: ComputeShader,
+    pub intra_main_tight: ComputeShader,
     pub intra_main_legacy: ComputeShader,
     pub reconstruct_block: ComputeShader,
     pub inter_ext_borders: ComputeShader,
@@ -259,6 +260,23 @@ pub struct av1_stage_dump_entry {
     pub planes: [av1_stage_dump_plane; 3],
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum IntraMain {
+    Tight,
+    Legacy,
+    Unoptimized,
+}
+
+impl IntraMain {
+    pub fn dump_order(self) -> &'static str {
+        match self {
+            Self::Tight => " order=angle_wavefront",
+            _ => "",
+        }
+    }
+}
+
 #[repr(C)]
 pub struct av1_frame_thread_data {
     pub command_buffer: ComputeCommandBuffer,
@@ -288,6 +306,7 @@ pub struct av1_frame_thread_data {
     pub intra_v2_sched: IntraV2Sched,
     pub intra_v2_list_count: c_long,
     pub intra_v2: c_int,
+    pub intra_main: IntraMain,
     pub intra_v2_cells: c_int,
     pub intra_v2_cols: c_int,
     pub intra_v2_rows: c_int,

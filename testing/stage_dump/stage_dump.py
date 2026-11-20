@@ -642,7 +642,7 @@ def data_crcs(d, dumps):
     return list(struct.unpack_from("<%dI" % (len(body) // 4), body, 0))
 
 
-def compare_records(da, db, dumps_a, dumps_b, limit, out):
+def compare_records(da, db, dumps_a, dumps_b, limit, out, reordered):
     """Buffers without a decoder of their own: records of the layout's size, shown as words."""
     record = max(4, da.num("record", 32))
     if da.crcs is not None or db.crcs is not None:
@@ -652,12 +652,20 @@ def compare_records(da, db, dumps_a, dumps_b, limit, out):
         if not bad and len(ca) == len(cb):
             out("      equal (%d records, by CRC)" % len(ca))
             return True
+        if reordered and record == db.num("record") and sorted(ca) == sorted(cb):
+            out("      equal (%d records, by CRC across wavefront orders)" % len(ca))
+            return True
         out("      %d of %d records DIFFER (A has %d, B %d; one side is a digest); first: %s"
             % (len(bad), min(len(ca), len(cb)), len(ca), len(cb), " ".join(str(i) for i in bad[:limit])))
         return False
     na, nb = len(da.data) // record, len(db.data) // record
     if da.data == db.data:
         out("      equal (%d records of %d bytes)" % (na, record))
+        return True
+    if reordered and record == db.num("record") and sorted(
+        da.data[i:i + record] for i in range(0, len(da.data), record)
+    ) == sorted(db.data[i:i + record] for i in range(0, len(db.data), record)):
+        out("      equal (%d records across wavefront orders)" % na)
         return True
     bad = [i for i in range(min(na, nb))
            if da.data[i * record:(i + 1) * record] != db.data[i * record:(i + 1) * record]]
@@ -737,7 +745,7 @@ def compare_lr_info(da, db, limit, out):
     return False
 
 
-def compare_data(da, db, dumps_a, dumps_b, limit, out):
+def compare_data(da, db, dumps_a, dumps_b, limit, out, reordered=False):
     """Compares two data buffers of the same name. Returns True when they are equal."""
     if da.stage == "mi_pool":
         out("      the records are compared through mi_grid, unit by unit")
@@ -753,7 +761,7 @@ def compare_data(da, db, dumps_a, dumps_b, limit, out):
             return compare_cdef_info(da, db, limit, out)
         if da.stage == "lr_info":
             return compare_lr_info(da, db, limit, out)
-    return compare_records(da, db, dumps_a, dumps_b, limit, out)
+    return compare_records(da, db, dumps_a, dumps_b, limit, out, reordered)
 
 
 def stage_files(path):
@@ -1051,7 +1059,13 @@ def cmd_compare(args):
             if da.is_data():
                 # A buffer a stage reads besides the frame: always with its decoded differences.
                 lines = []
-                equal = compare_data(da, db, dumps_a, dumps_b, args.samples, lines.append)
+                # The angle-specific wavefront can change list order and which tile supplies the
+                # list starts. Against the old decoder, compare the full multiset of records.
+                # Same-schedule comparisons still require the same order.
+                orders = {da.fields.get("order"), db.fields.get("order")}
+                reordered = (args.two_parsers and da.stage in ("pred_blocks", "pred_blocks_warp")
+                             and orders == {None, "angle_wavefront"})
+                equal = compare_data(da, db, dumps_a, dumps_b, args.samples, lines.append, reordered)
                 # --two-parsers: the records themselves are listed and do not decide; what the stages make
                 # of them (pred_blocks, lf_blocks, cdef_info) is compared like every other buffer.
                 listed = not equal and args.two_parsers and da.stage in ("mi_grid", "mi_pool")

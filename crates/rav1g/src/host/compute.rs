@@ -124,8 +124,8 @@ const LAYOUTS: usize =
 const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
-    // 24 transform pipelines, 34 shared shaders, 34 per bit depth and one 8-bit filter intra control.
-    assert!(SHADERS == 24 + 34 + 2 * 34 + 1);
+    // 24 transform pipelines, 34 shared shaders, 35 per bit depth and one 8-bit filter intra control.
+    assert!(SHADERS == 24 + 34 + 2 * 35 + 1);
     assert!(LAYOUTS == 24);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
@@ -377,6 +377,7 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("intra_filter", &layouts.intra_pred, &raw mut (*lib).shaders_8bit.intra_filter),
             ("intra_filter_legacy", &layouts.intra_pred, &raw mut (*lib).shader_intra_filter_legacy),
             ("intra_main", &layouts.intra_pred, &raw mut (*lib).shaders_8bit.intra_main),
+            ("intra_main_tight", &layouts.intra_pred, &raw mut (*lib).shaders_8bit.intra_main_tight),
             ("intra_main_legacy", &layouts.intra_pred, &raw mut (*lib).shaders_8bit.intra_main_legacy),
             ("inter_ext_borders", &layouts.common0110, &raw mut (*lib).shaders_8bit.inter_ext_borders),
             ("reconstruct_block", &layouts.intra_pred, &raw mut (*lib).shaders_8bit.reconstruct_block),
@@ -399,6 +400,7 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("inter_warp_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_warp),
             ("intra_filter_hbd", &layouts.intra_pred, &raw mut (*lib).shaders_hbd.intra_filter),
             ("intra_main_hbd", &layouts.intra_pred, &raw mut (*lib).shaders_hbd.intra_main),
+            ("intra_main_tight_hbd", &layouts.intra_pred, &raw mut (*lib).shaders_hbd.intra_main_tight),
             ("intra_main_hbd_legacy", &layouts.intra_pred, &raw mut (*lib).shaders_hbd.intra_main_legacy),
             ("inter_ext_borders_hbd", &layouts.common0110, &raw mut (*lib).shaders_hbd.inter_ext_borders),
             ("reconstruct_block_hbd", &layouts.intra_pred, &raw mut (*lib).shaders_hbd.reconstruct_block),

@@ -87,6 +87,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"intraopt", atSingle, anOptional, "optimized intra_main shaders (default)", "intra-main", &params_.intraopt_},
       {"intraod", atSingle, anOptional, "baseline DXC -Od intra_main shaders", "intra-main", &params_.intraod_},
       {"intrafilterlegacy", atSingle, anOptional, "previous 8-bit filter intra shader", "", &params_.intrafilterlegacy_},
+      {"intraschedulelegacy", atSingle, anOptional, "previous intra wavefront and exact V/H predictors", "", &params_.intraschedulelegacy_},
       {"lrlegacy", atSingle, anOptional, "original loop restoration shader", "", &params_.lrlegacy_},
       {"fglegacy", atSingle, anOptional, "original direct NV12/P010 film grain shader", "", &params_.fglegacy_},
       {"copylegacy", atSingle, anOptional, "original direct NV12/P010 copy shader", "", &params_.copylegacy_},
@@ -459,6 +460,7 @@ void CParameters::Reset() {
   params_.intraopt_ = false;
   params_.intraod_ = false;
   params_.intrafilterlegacy_ = false;
+  params_.intraschedulelegacy_ = false;
   params_.lrlegacy_ = false;
   params_.fglegacy_ = false;
   params_.copylegacy_ = false;

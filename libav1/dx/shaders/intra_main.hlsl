@@ -99,6 +99,19 @@ uint compute_cfl_pixel(int dc, int value) {
 int intra_inter_blend(int mask, int intra, int inter) {
   return clamp((intra * mask + inter * (64 - mask) + 32) >> 6, 0, 255);
 }
+
+uint predict_straight(bool vertical, int corner, int stride, int x, int y, int above, int left) {
+  [branch] if (vertical && above) {
+    const int word = x >> 2;
+    uint samples = dst_frame.Load(corner + 4 + 4 * min(word, above - 1));
+    return word < above ? samples : (samples >> 24) * 0x01010101;
+  }
+  uint sample = vertical ? 127 : 129;
+  [branch] if (left) sample = dst_frame.Load(corner + (min(vertical ? 0 : y, left - 1) + 1) * stride) >> 24;
+  else [branch] if (above) sample = dst_frame.Load(corner + 4) & 255;
+  return sample * 0x01010101;
+}
+
 #define WG_SIZE 256
 [numthreads(256, 1, 1)] void main(uint3 thread
                                   : SV_DispatchThreadID) {
@@ -169,6 +182,11 @@ int intra_inter_blend(int mask, int intra, int inter) {
   const int mode = (block.y >> 6) & 15;
   const int mode_angle = (block.y >> 28) & 7;
   int4 params = cb_mode_params_lut[mode][mode_angle];
+#ifdef INTRA_TIGHT
+  const bool straight = mode < 2 && mode_angle == 3 && thread.x < cb_wi_count;
+#else
+  const bool straight = false;
+#endif
 
   //    block.y bits:
   //    0    3        bw_log
@@ -199,7 +217,7 @@ int intra_inter_blend(int mask, int intra, int inter) {
   const int loc_base = (((thread.x & (WG_SIZE - 1)) - wi) >> 2) * 20 + 2;
   int above_count = ((params.z >> NeedAboveShift) & 1) * bw + ((params.z >> NeedRightShift) & 1) * bh;
   // Above:
-  if (wi < (above_count >> 2) || wi == 0) {
+  if (!straight && (wi < (above_count >> 2) || wi == 0)) {
     int addr = corner + 4 + 4 * min(wi, above_available - 1);
     uint pixels =
         above_available ? dst_frame.Load(addr) : left_available ? dst_frame.Load(corner + stride) : 0x7f7f7f7f;
@@ -215,11 +233,11 @@ int intra_inter_blend(int mask, int intra, int inter) {
 
   int left_count = ((params.z >> NeedLeftShift) & 1) * bh + ((params.z >> NeedBotShift) & 1) * bw;
 
-  if (wi < left_count || wi == 0) {
+  if (!straight && (wi < left_count || wi == 0)) {
     const int addr = corner + (min(wi, left_available - 1) + 1) * stride;
     left[loc_base + wi] = left_available ? (dst_frame.Load(addr) >> 24) : above_available ? above[loc_base] : 129;
   }
-  if (wi < (left_count - wi_count)) {
+  if (!straight && wi < (left_count - wi_count)) {
     const int addr = corner + (min(wi + wi_count, left_available - 1) + 1) * stride;
     left[loc_base + wi + wi_count] =
         left_available ? (dst_frame.Load(addr) >> 24) : above_available ? above[loc_base] : 129;
@@ -228,7 +246,7 @@ int intra_inter_blend(int mask, int intra, int inter) {
   GroupMemoryBarrierWithGroupSync();
 
   const int need_aboveleft = (params.z >> NeedAboveLeftShift) & 1;
-  if (wi == 0 && need_aboveleft) {
+  if (!straight && wi == 0 && need_aboveleft) {
     uint t = above[loc_base];
     uint l = left[loc_base];
     uint topleft = (left_available && above_available) ? (dst_frame.Load(corner) >> 24)
@@ -245,7 +263,7 @@ int intra_inter_blend(int mask, int intra, int inter) {
 
   GroupMemoryBarrierWithGroupSync();
 
-  int dir_mode = mode < MODE_DC;
+  int dir_mode = !straight && mode < MODE_DC;
   int upsample_above = (block.y >> 22) & dir_mode;
   int upsample_left = (block.y >> 23) & dir_mode;
 
@@ -512,7 +530,9 @@ int intra_inter_blend(int mask, int intra, int inter) {
     pixels |= compute_cfl_pixel(dc, (luma.w - avrg) * alpha) << 24;
   }
 
-  if (mode < MODE_INTRA_BC) {
+  if (straight) {
+    pixels = predict_straight(mode == 0, corner, stride, x0, y, above_available, left_available);
+  } else if (mode < MODE_INTRA_BC) {
     const int frac_bits_x = 6 - upsample_above;
     const int frac_bits_y = 6 - upsample_left;
     const int min_base_x = -(1 << upsample_above);

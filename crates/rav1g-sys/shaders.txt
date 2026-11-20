@@ -72,6 +72,7 @@ intra_filter
 intra_filter_legacy
 intra_main
 intra_main_legacy
+intra_main_tight
 inter_ext_borders
 reconstruct_block
 loopfilter_vert
@@ -94,6 +95,7 @@ inter_warp_hbd
 intra_filter_hbd
 intra_main_hbd
 intra_main_hbd_legacy
+intra_main_tight_hbd
 inter_ext_borders_hbd
 reconstruct_block_hbd
 loopfilter_vert_hbd

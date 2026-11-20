@@ -52,6 +52,7 @@ pub(crate) use perf::{av1_set_inter_fast, av1_set_perf_callback, av1_set_perf_de
 pub(crate) use postfilter::{av1_set_cdef_legacy, av1_set_cdef_lists_legacy, av1_set_cdef_v2, av1_set_lr_legacy};
 pub(crate) use prediction::{
     av1_set_inter_legacy, av1_set_intra_edge_fix, av1_set_intra_filter_legacy, av1_set_intra_opt,
+    av1_set_intra_schedule_legacy,
 };
 pub(crate) use stage_dump::av1_set_stage_dump;
 pub(crate) use transform::{av1_set_clear_legacy, av1_set_idct_legacy};

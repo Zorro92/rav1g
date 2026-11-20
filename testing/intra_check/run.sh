@@ -108,6 +108,9 @@ build() {
     case $name in
       *_hbd | *_hbd_legacy) hbd=-DSHADER_HBD ;;
     esac
+    case $name in
+      intra_main | intra_main_hbd) hbd="$hbd -DINTRA_TIGHT" ;;
+    esac
     filter_layout=
     case $name in
       intra_filter_legacy) filter_layout=-DSHADER_FILTER_LEGACY ;;

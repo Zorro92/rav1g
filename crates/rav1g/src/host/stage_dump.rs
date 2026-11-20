@@ -479,6 +479,7 @@ pub(crate) unsafe fn stage_dump_frame_info(dec: *mut Av1Core, cm: *const AV1_COM
 /// # Safety
 /// `td` is the slot of a frame that has completed on the GPU and is not back in its pool.
 pub(crate) unsafe fn stage_dump_deliver(td: &mut av1_frame_thread_data) {
+    let order = td.intra_main.dump_order();
     let (callback, context) = {
         let wanted = WANTED.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         wanted.as_ref().map_or((None, 0), |wanted| (Some(wanted.callback), wanted.context))
@@ -533,9 +534,11 @@ pub(crate) unsafe fn stage_dump_deliver(td: &mut av1_frame_thread_data) {
                                 empty += 1;
                                 return;
                             }
-                            layout =
-                                CString::new(format!("buffer={stage} record={} count={count}\n", e.gpu_record_size))
-                                    .expect("a stage dump layout");
+                            layout = CString::new(format!(
+                                "buffer={stage} record={} count={count}{order}\n",
+                                e.gpu_record_size
+                            ))
+                            .expect("a stage dump layout");
                             dump.data = rest.as_ptr();
                             dump.size = size;
                             dump.layout = layout.as_ptr();

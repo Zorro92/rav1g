@@ -30,8 +30,8 @@ use super::tables::{
 };
 use super::types::{
     Av1Core, CasualInter, CompoundDiffUv, CompoundDiffUvGlobalWarp, CompoundGlobalWarp, CompoundMasked, ComputeShader,
-    Inter2x2ArrOffset, InterCountsAll, InterFast2D, InterFastClasses, InterFastLists, InterSizesAllCommon, IntraSizes,
-    IntraTypeCount, ObmcAbove, ObmcLeft, ReconBlockOffset, ReconstructBlockSizes, ScaleFactor, Warp,
+    Inter2x2ArrOffset, InterCountsAll, InterFast2D, InterFastClasses, InterFastLists, InterSizesAllCommon, IntraMain,
+    IntraSizes, IntraTypeCount, ObmcAbove, ObmcLeft, ReconBlockOffset, ReconstructBlockSizes, ScaleFactor, Warp,
     av1_frame_thread_data, av1_perf_inter_tile, av1_stage_dump_region,
 };
 use crate::gpu::{BufferRef, Commands};
@@ -427,6 +427,7 @@ pub(super) unsafe fn prediction_gen_blocks<'a>(pbi: *mut AV1Decoder, dec: *mut A
         // -dumpstages: the block records gen_pred_blocks has just written, as the prediction stages read
         // them.
         if stage_dump_active(dec) {
+            let order = td.intra_main.dump_order();
             for (i, (stage, object, stride, count)) in [
                 (c"pred_blocks", (*dec).prediction_blocks, 16, pred_block_total),
                 (c"pred_blocks_warp", (*dec).prediction_blocks_warp, 48, pred_warp_count),
@@ -446,7 +447,7 @@ pub(super) unsafe fn prediction_gen_blocks<'a>(pbi: *mut AV1Decoder, dec: *mut A
                     stage_dump_gpu_records(dec, stage, counts, region, stride);
                 } else {
                     let layout =
-                        format!("buffer={} record={stride} count={}\n", stage.to_string_lossy(), size / stride);
+                        format!("buffer={} record={stride} count={}{order}\n", stage.to_string_lossy(), size / stride);
                     stage_dump_data(dec, stage, &layout, 160, &[region]);
                 }
             }
@@ -513,6 +514,25 @@ pub extern "C" fn av1_set_inter_legacy(enable: c_int) {
 
 // The main intra path uses DXC's optimized build by default. -intraod selects the baseline kernel.
 static INTRA_OPT: AtomicI32 = AtomicI32::new(1);
+
+static INTRA_SCHEDULE_LEGACY: AtomicI32 = AtomicI32::new(0);
+
+/// `av1_set_intra_schedule_legacy` (`dx/av1_perf.h`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_intra_schedule_legacy(enable: c_int) {
+    INTRA_SCHEDULE_LEGACY.store(enable, Ordering::Relaxed);
+}
+
+// The parse and the main shader must agree on whether the straight predictors read the corner.
+pub(super) fn intra_main_for_frame(intra_v2: bool) -> IntraMain {
+    if INTRA_OPT.load(Ordering::Relaxed) == 0 {
+        IntraMain::Unoptimized
+    } else if intra_v2 || INTRA_SCHEDULE_LEGACY.load(Ordering::Relaxed) != 0 {
+        IntraMain::Legacy
+    } else {
+        IntraMain::Tight
+    }
+}
 
 /// `av1_set_intra_opt` (`dx/av1_perf.h`).
 #[unsafe(no_mangle)]
@@ -1138,10 +1158,10 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
         if td.intra_iters >= 0 || have_recon {
             let constants = alloc_constants::<IntraData>(&mut td.command_buffer);
             let data = constants.data;
-            let intra_main: *const ComputeShader = if INTRA_OPT.load(Ordering::Relaxed) != 0 {
-                &raw const (*shaders).intra_main
-            } else {
-                &raw const (*shaders).intra_main_legacy
+            let intra_main: *const ComputeShader = match td.intra_main {
+                IntraMain::Tight => &raw const (*shaders).intra_main_tight,
+                IntraMain::Legacy => &raw const (*shaders).intra_main,
+                IntraMain::Unoptimized => &raw const (*shaders).intra_main_legacy,
             };
 
             (*data).flags[0] = c_int::from((*cm).seq_params.enable_intra_edge_filter);

@@ -940,6 +940,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         intra_v2: task.intrav2,
         intra_opt: task.intraopt,
         intra_filter_legacy: task.intrafilterlegacy,
+        intra_schedule_legacy: task.intraschedulelegacy,
         lf_legacy: task.lflegacy,
         lf_h_split: task.lfhsplit as u32,
         intra_edge_fix: task.intraedgefix,
@@ -965,6 +966,12 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         "8-bit filter intra shader: {}",
         if task.intrafilterlegacy { "intra_filter_legacy (-intrafilterlegacy)" } else { "intra_filter (default)" }
     );
+    if !task.intrav2 {
+        say!(
+            "Intra wavefront: {}",
+            if task.intraschedulelegacy || !task.intraopt { "conservative" } else { "angle-specific" }
+        );
+    }
     say!(
         "PARSER {}: the parse pass of rav1d reads the bitstream, switches {} (-parseopt)",
         task.name,

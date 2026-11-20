@@ -69,13 +69,13 @@ pub extern "C" fn rav1g_intra_list_stamps(count: bool) -> u64 {
 use super::intra_v2;
 use super::libaom::{has_bottom_left, has_top_right};
 use super::tables::{
-    INTER_BLOCK_SIZE_INDEX_LUT, INTERINTRA_TO_INTRA_MODE, MAX_NEIGHBOR_OBMC, MAX_TXSIZE_RECT_LOOKUP, MI_SIZE_HIGH_LOG2,
-    MI_SIZE_WIDE_LOG2, SS_SIZE_LOOKUP, TX_SIZE_HIGH_LOG2, TX_SIZE_WIDE_LOG2,
+    INTER_BLOCK_SIZE_INDEX_LUT, INTERINTRA_TO_INTRA_MODE, INTRA_MODE_SHADER_PARAMS, MAX_NEIGHBOR_OBMC,
+    MAX_TXSIZE_RECT_LOOKUP, MI_SIZE_HIGH_LOG2, MI_SIZE_WIDE_LOG2, SS_SIZE_LOOKUP, TX_SIZE_HIGH_LOG2, TX_SIZE_WIDE_LOG2,
 };
 use super::types::{
     CompoundAvrg, CompoundDiff, CompoundDiffUv, CompoundDiffUvGlobalWarp, CompoundGlobalWarp, CompoundMasked,
-    Inter2x2ArrOffset, InterFastCompound, InterSizesAllCommon, IntraBlockOffset, IntraSizes, IntraTypeCount, ObmcAbove,
-    ObmcLeft, ReconBlockOffset, av1_frame_thread_data, av1_perf_inter_tile,
+    Inter2x2ArrOffset, InterFastCompound, InterSizesAllCommon, IntraBlockOffset, IntraMain, IntraSizes, IntraTypeCount,
+    ObmcAbove, ObmcLeft, ReconBlockOffset, av1_frame_thread_data, av1_perf_inter_tile,
 };
 use crate::sys::{
     AV1_COMMON, AV1_PERF_INTER_CHROMA_2X2, AV1_PERF_INTER_COMP_AVG, AV1_PERF_INTER_COMP_AVG_FAST,
@@ -546,6 +546,61 @@ struct IntraPlane {
 impl IntraPlane {
     fn need(&self, lut: u32) -> bool {
         (lut >> self.mode) & 1 != 0
+    }
+
+    /// Bounds on the edges read from the frame, in 4x4 units. Availability in the block record
+    /// still describes the decoded neighbours. The bounds only affect when the block can run.
+    #[inline]
+    fn edge_limits(&self, main: IntraMain, delta: i8, filter: bool) -> IntraEdgeLimits {
+        let corner = self.need(NEED_ABOVE_LEFT_LUT) && !self.is_intrabc;
+        let mut limits = IntraEdgeLimits { above: c_int::MAX, left: c_int::MAX, corner, clipped_corner: corner };
+        if main != IntraMain::Tight || self.is_intrabc || filter {
+            return limits;
+        }
+        if self.mode == 0 {
+            // DC uses sums of the two edges. Filter intra uses DC's mode number but reads the corner.
+            limits.corner = false;
+        } else if (1..=8).contains(&self.mode) {
+            let (w, h) = (1 << self.txw, 1 << self.txh);
+            if self.mode <= 2 && delta == 0 {
+                // The exact vertical and horizontal predictors copy one edge. A zero limit keeps
+                // the first sample of the opposite edge only when it supplies a missing edge.
+                let vertical = self.mode == 1;
+                limits.above = if vertical { w } else { 0 };
+                limits.left = if vertical { 0 } else { h };
+                limits.corner = false;
+            } else {
+                // gen_pred_blocks keeps the availability for the mode family. The main shaders
+                // actually load the lengths for this angle, with at least one unit per side for
+                // the corner and missing-edge preparation.
+                let flags = INTRA_MODE_SHADER_PARAMS[((self.mode as usize - 1) * 7 + (delta + 3) as usize) * 4 + 2];
+                limits.above = ((((flags >> 4) & 1) * w) + (((flags >> 5) & 1) * h)).max(1);
+                limits.left = ((((flags >> 6) & 1) * h) + (((flags >> 7) & 1) * w)).max(1);
+            }
+        }
+        limits
+    }
+}
+
+struct IntraEdgeLimits {
+    above: c_int,
+    left: c_int,
+    corner: bool,
+    clipped_corner: bool,
+}
+
+impl IntraEdgeLimits {
+    #[inline(always)]
+    fn dependencies(&self, have_top: bool, have_left: bool, above: c_int, left: c_int) -> (c_int, c_int, c_int) {
+        // Chroma transform units clipped outside the frame can have negative availability.
+        // Keep the conservative dependencies there.
+        if above < 0 || left < 0 {
+            return (c_int::from(have_top && have_left && self.clipped_corner), above, left);
+        }
+        let corner = c_int::from(have_top && have_left && self.corner);
+        let above_limit = self.above.max(c_int::from(left == 0));
+        let left_limit = self.left.max(c_int::from(above == 0));
+        (corner, above.min(above_limit), left.min(left_limit))
     }
 }
 
@@ -1049,8 +1104,8 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
                 let need_left = plane.need(NEED_LEFT_LUT) && !is_intrabc;
                 let need_right = plane.need(NEED_RIGHT_LUT);
                 let need_bot = plane.need(NEED_BOT_LUT);
-                let need_aboveleft = plane.need(NEED_ABOVE_LEFT_LUT) && !is_intrabc;
                 let use_filter = mi.flags & MB_MODE_INFO::USE_FILTER_INTRA != 0;
+                let edges = plane.edge_limits(td.intra_main, mi.angle_delta[0], use_filter);
 
                 let type_size = txw + txh;
                 let type_idx_base = if use_filter { IntraBlockOffset } else { IntraBlockOffset - 1 - type_size };
@@ -1129,7 +1184,8 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
 
                                 let iter_grid_blk =
                                     plane.iter_grid.offset((subblk_w * x + subblk_h * y * iter_grid_stride) as isize);
-                                let above_left = c_int::from(have_top && have_left && need_aboveleft);
+                                let (above_left, above_available, left_available) =
+                                    edges.dependencies(have_top, have_left, above_available, left_available);
                                 let iter;
                                 if td.intra_v2 != 0 {
                                     // -intrav2: no wavefront iteration. The block gets a step and a pass from the
@@ -1224,7 +1280,7 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
                 let need_left = plane.need(NEED_LEFT_LUT) && !is_intrabc;
                 let need_right = plane.need(NEED_RIGHT_LUT);
                 let need_bot = plane.need(NEED_BOT_LUT);
-                let need_aboveleft = plane.need(NEED_ABOVE_LEFT_LUT) && !is_intrabc;
+                let edges = plane.edge_limits(td.intra_main, mi.angle_delta[1], false);
                 let is_cfl = plane.mode == UV_CFL_PRED as u32;
 
                 let cnt_y = 1 << (bh_log_uv - txh - unit_y_log);
@@ -1300,7 +1356,8 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
                                 let iter_grid_blk = plane
                                     .iter_grid
                                     .offset((subblk_w * x + subblk_h * y * iter_grid_stride_uv) as isize);
-                                let above_left = c_int::from(need_aboveleft && have_top && have_left);
+                                let (above_left, above_available, left_available) =
+                                    edges.dependencies(have_top, have_left, above_available, left_available);
                                 let iter;
                                 if td.intra_v2 != 0 {
                                     // -intrav2, as for luma. U and V share the place; CFL also waits for the luma
