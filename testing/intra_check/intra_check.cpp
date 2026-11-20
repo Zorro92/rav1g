@@ -907,6 +907,43 @@ static bool check_filter_intra_8bit(uint64_t seed) {
   return true;
 }
 
+static bool check_intrabc_10bit(uint64_t seed) {
+  Rng rng = {seed};
+  const Geometry g = make_geometry(&rng, 1, 48);
+  Frame f;
+  make_frame_data(g, &rng, &f);
+  const int x = 32, y = 48;
+  const int src_x = 15, src_y = 8;
+  // A 4x4 chroma block with a half-sample displacement in both directions.
+  const uint32_t dx = (uint16_t)((src_x - x) * 16 + 8);
+  const uint32_t dy = (uint16_t)((src_y - y) * 16 + 8);
+  const uint32_t position = (x / 4) | ((y / 4) << 16);
+  const uint32_t mode = 12u << 6;
+  f.blocks.push_back({position, mode | (1u << 3), mode | (2u << 3), (dx << 16) | dy, 1, 8, 0, 0});
+  order_records(g, &f);
+
+  std::vector<uint8_t> actual = f.pixels;
+  run_main(g, f, &actual, rng.u32(), &intra_main_hbd_api, nullptr);
+  for (int p = 1; p < 3; ++p) {
+    const auto sample = [&](const std::vector<uint8_t> &frame, int col, int row) {
+      const size_t at = g.offset[p] + row * g.stride[p] + col * 2;
+      return frame[at] | (frame[at + 1] << 8);
+    };
+    for (int row = 0; row < 4; ++row) {
+      for (int col = 0; col < 4; ++col) {
+        const int u = src_x + col, v = src_y + row;
+        const int sum = sample(f.pixels, u, v) + sample(f.pixels, u + 1, v) +
+                        sample(f.pixels, u, v + 1) + sample(f.pixels, u + 1, v + 1);
+        if (sample(actual, x + col, y + row) != ((sum + 2) >> 2)) {
+          printf("intra_check: MISMATCH in 10-bit intra block copy, plane %d, sample (%d,%d)\n", p, col, row);
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
 static bool check_wave_reductions(uint64_t seed, int hbd) {
   Rng rng = {seed};
   const Geometry g = make_geometry(&rng, hbd, 48);
@@ -1091,7 +1128,8 @@ int main(int argc, char **argv) {
     }
   }
 
-  if (!check_filter_intra_8bit(seed) || !check_wave_reductions(seed, 0) || !check_wave_reductions(seed, 1)) return 1;
+  if (!check_filter_intra_8bit(seed) || !check_intrabc_10bit(seed) ||
+      !check_wave_reductions(seed, 0) || !check_wave_reductions(seed, 1)) return 1;
 
   int failures = 0;
   long original_races = 0;

@@ -460,7 +460,7 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
     pixels.x = (compute_bc((ref0.x >> 0) & 1023, (ref0.x >> 16) & 1023, (ref1.x >> 0) & 1023, (ref1.x >> 16) & 1023,
                            filt_h, filt_v)
                 << 0) |
-               (compute_bc((ref0.x >> 16) & 1023, (ref0.y >> 0) & 1023, (ref1.x >> 8) & 1023, (ref1.y >> 0) & 1023,
+               (compute_bc((ref0.x >> 16) & 1023, (ref0.y >> 0) & 1023, (ref1.x >> 16) & 1023, (ref1.y >> 0) & 1023,
                            filt_h, filt_v)
                 << 16);
     pixels.y = (compute_bc((ref0.y >> 0) & 1023, (ref0.y >> 16) & 1023, (ref1.y >> 0) & 1023, (ref1.y >> 16) & 1023,
