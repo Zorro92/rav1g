@@ -1392,15 +1392,16 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
             });
         }
 
-        // A block with residuals whose prediction is not written together with them (palette, overlapped
-        // prediction) gets a reconstruction block.
-        if !GPU_PRED_LISTS && mi.skip == 0 {
-            if y_use_palette || is_obmc {
+        // Palette prediction is copied even when the block has no residual. OBMC needs this pass
+        // only to add a residual after blending. Match the records in gen_pred_blocks.hlsl.
+        if !GPU_PRED_LISTS {
+            let obmc_residual = is_obmc && mi.skip == 0;
+            if y_use_palette || obmc_residual {
                 let type_index = ReconBlockOffset + bw_log + 6 * bh_log;
                 *index_arr.offset(tile.gen_index_ptr as isize) = take(map.offset(type_index as isize), 1) as u32;
                 tile.gen_index_ptr += 1;
             }
-            if uv_use_palette || (is_obmc && !is_chroma_ref) {
+            if (uv_use_palette || obmc_residual) && !is_chroma_ref {
                 let type_index = ReconBlockOffset + bw_log_uv + 6 * bh_log_uv;
                 *index_arr.offset(tile.gen_index_ptr as isize) = take(map.offset(type_index as isize), 2) as u32;
                 tile.gen_index_ptr += 1;
