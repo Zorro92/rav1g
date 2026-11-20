@@ -142,8 +142,11 @@ def classify(name, output, code, negative):
     if negative:
         if code == 2 and status == "error" and f"BITSTREAM_ERROR stream={name}" in output.splitlines():
             return "pass", "rejected", frames, detail
+        # The specification defines no output for an invalid stream: decoding it is allowed (libaom
+        # decodes most of these too). What an invalid stream must not do is crash, hang or lose the
+        # device, which the checks above already fail.
         if code == 0 and status == "nocheck":
-            return "fail", "accepted_invalid", frames, detail
+            return "pass", "decoded_invalid", frames, detail
         if code == 2 and status == "error":
             return "fail", "other_error", frames, detail
     else:

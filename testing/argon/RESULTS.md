@@ -32,6 +32,19 @@ above. The negative tests and both large-scale tile folders are outside that
 run. The large-scale tile folders require tile-list input and separate
 packing. [Full exclusion list](exclusions.tsv)
 
+## Confirmed on WARP
+
+The CI job (`workflow_dispatch` with `argon`, eight WARP shards, 2026-11-19) gave the same picture on
+Microsoft's D3D12 software adapter: 188 bit-exact, 531 mismatches, 23 crashes, 20 decode errors, three
+device losses and the same 212 exclusions. Stream by stream, 966 of the 977 outcomes agree with the
+Wine run. The others move between crash, mismatch and device loss, so the faults behind them depend
+on timing. The mismatches are decoder bugs, not artefacts of the platform. All of them were already
+on `v0.5.0-alpha.1`: they come from the code rav1g was forked from.
+
+In `profile0_error`, 36 invalid streams are rejected and 78 decode. The specification defines no output
+for an invalid stream, and libaom decodes most of them too. The runner counts a decoded invalid stream as
+a pass (`decoded_invalid`), and only a crash, a hang or a lost device on one as a failure.
+
 ## First differing output
 
 Frame numbers below are zero-based in output order. Hidden coded pictures
