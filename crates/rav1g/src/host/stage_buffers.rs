@@ -35,21 +35,23 @@ use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12Device};
 use super::create::to_mib;
 use super::gpu_pred_lists::FrameLayout;
 use super::log::log;
+use super::pool::Kind;
 use super::prediction::pred_block_counts;
 use super::types::{Av1Core, GpuBufferObject, av1_frame_thread_data};
 use crate::gpu::d3d12::com_ref;
 use crate::gpu::{Device, Event, Queue};
 
-/// The buffers that grow, in the order of `Av1Core::stage_worst`; the last one is a buffer of each slot.
-pub(crate) const STAGE_BUFFERS: usize = 6;
+/// The buffers that grow, in the order of `Av1Core::stage_worst`.
+pub(crate) const STAGE_BUFFERS: usize = 7;
 pub(crate) const IDCT_BLOCKS: usize = 0;
 pub(crate) const PRED_BLOCKS: usize = 1;
 pub(crate) const PRED_BLOCKS_WARP: usize = 2;
 pub(crate) const INDEX_LIST: usize = 3;
 pub(crate) const GPU_PRED_SCRATCH: usize = 4;
 pub(crate) const GPU_PRED_TEMPLATES: usize = 5;
+pub(crate) const GRID_RUNS: usize = 6;
 /// The bytes of a record of each.
-pub(crate) const RECORD: [usize; STAGE_BUFFERS] = [16, 16, 48, 4, 1, 1];
+pub(crate) const RECORD: [usize; STAGE_BUFFERS] = [16, 16, 48, 4, 1, 1, 2 * size_of::<u32>()];
 
 /// The part of the worst case a decoder is created with.
 const INITIAL_DIVISOR: usize = 4;
@@ -142,7 +144,13 @@ unsafe fn wait_for_queue(dec: *mut Av1Core) -> bool {
 pub(crate) unsafe fn for_frame(dec: *mut Av1Core, td: *const av1_frame_thread_data) -> bool {
     // SAFETY: the caller's contract, for all of this function.
     unsafe {
-        let records = frame_records(&*td);
+        let mut records = frame_records(&*td);
+        // At creation the run list holds at least one entry for each mode info chunk. After
+        // a pool growth, make room for the frame's pieces before writing the run list.
+        if !(*td).mi_runs.is_null() && (*td).parse_buffers[Kind::ModeInfo as usize] != (*dec).mode_info_pool {
+            records[GRID_RUNS] =
+                (&(*td).pieces)[..(*td).tile_count as usize].iter().map(|tile| tile.mode_info.len()).sum();
+        }
         let objects: [*mut GpuBufferObject; STAGE_BUFFERS] = [
             (*dec).idct_blocks,
             (*dec).prediction_blocks,
@@ -150,6 +158,7 @@ pub(crate) unsafe fn for_frame(dec: *mut Av1Core, td: *const av1_frame_thread_da
             (*td).gen_mi_block_indexes,
             (*dec).gpu_pred_scratch,
             (*td).gpu_pred_templates,
+            (*td).mi_runs,
         ];
         let mut waited = false;
         for index in 0..STAGE_BUFFERS {
@@ -159,6 +168,9 @@ pub(crate) unsafe fn for_frame(dec: *mut Av1Core, td: *const av1_frame_thread_da
                 continue;
             }
             let (current, worst) = ((*object).size, (*dec).stage_worst[index]);
+            if index == GRID_RUNS && records[index] * RECORD[index] <= current {
+                continue;
+            }
             let Some(size) = grown_bytes(current, records[index], RECORD[index], worst) else {
                 continue;
             };
@@ -189,7 +201,7 @@ pub(crate) unsafe fn for_frame(dec: *mut Av1Core, td: *const av1_frame_thread_da
                 }
             }
             // Other frames in flight use shared buffers. The index list and templates belong to this slot.
-            if !waited && index != INDEX_LIST && index != GPU_PRED_TEMPLATES {
+            if !waited && !matches!(index, INDEX_LIST | GPU_PRED_TEMPLATES | GRID_RUNS) {
                 if !wait_for_queue(dec) {
                     log(
                         true,
@@ -210,12 +222,13 @@ pub(crate) unsafe fn for_frame(dec: *mut Av1Core, td: *const av1_frame_thread_da
                 false,
                 &format!(
                     "MEMORY buffer {name} grown for frame {frame}, which writes {} records: {:.1} to {:.1} MiB of \
-                     the {:.1} MiB of the worst case; device buffers now {:.1} MiB",
+                     the {:.1} MiB of the worst case; device buffers now {:.1} MiB ({} bytes)",
                     records[index],
                     to_mib(current as u64),
                     to_mib(size as u64),
                     to_mib(worst as u64),
-                    to_mib(memory.device_bytes() as u64)
+                    to_mib(memory.device_bytes() as u64),
+                    memory.device_bytes()
                 ),
             );
         }
@@ -227,9 +240,8 @@ pub(crate) unsafe fn for_frame(dec: *mut Av1Core, td: *const av1_frame_thread_da
 mod tests {
     use super::*;
 
-    const _: () = assert!(
-        STAGE_BUFFERS == GPU_PRED_TEMPLATES + 1 && PRED_BLOCKS_WARP == 2 && PRED_BLOCKS == 1 && IDCT_BLOCKS == 0
-    );
+    const _: () =
+        assert!(STAGE_BUFFERS == GRID_RUNS + 1 && PRED_BLOCKS_WARP == 2 && PRED_BLOCKS == 1 && IDCT_BLOCKS == 0);
 
     #[test]
     fn a_buffer_grows_only_for_a_frame_that_needs_more() {

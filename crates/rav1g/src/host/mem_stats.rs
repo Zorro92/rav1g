@@ -482,16 +482,20 @@ pub(crate) unsafe fn summary(dec: *mut Av1Core) {
             (*dec).frames_in_parse
         ));
         // The pools.
-        let pool_buffers = [(*dec).mode_info_pool, (*dec).idct_coefs, (*dec).idct_blocks_pool];
         let pool_names = ["mode_info_pool", "idct_coefs", "idct_blocks_unordered"];
-        for kind in 0..KINDS {
-            let total = (*dec).pool_total[kind];
+        let totals = (*dec).pools.as_deref().map_or((*dec).pool_total, |pools| pools.stats().total);
+        for pool in Kind::ALL {
+            let kind = pool as usize;
+            let total = totals[kind];
             // A pool below the worst case of a frame (the low memory parts) says so.
             let cells = (((*dec).max_width >> 6) * ((*dec).max_height >> 6)).max(1) as usize;
             let rule = (*dec).pool_rule[kind];
-            let share =
-                if rule < cells { format!(" ({rule}/{cells} of the worst case of a frame)") } else { String::new() };
-            let bytes = size(pool_buffers[kind]) as f64;
+            let share = if total == (*dec).pool_total[kind] && rule < cells {
+                format!(" ({rule}/{cells} of the worst case of a frame)")
+            } else {
+                String::new()
+            };
+            let bytes = (total * super::pool_buffers::chunk_bytes(pool)) as f64;
             let chunk_mib = mib(bytes) / total.max(1) as f64;
             let capacity = (total * CHUNK_ITEMS[kind]) as f64;
             say(format!(
@@ -521,7 +525,12 @@ pub(crate) unsafe fn summary(dec: *mut Av1Core) {
         }
         // The buffers of the stages and of a slot: what a frame writes against the worst case the buffer
         // can hold; those that grow with the frames say what they have now and how often they grew.
-        let buffer = |name: &str, bytes: usize, record: usize, per_slot: bool, series: &Series, now: Option<(usize, u32)>| {
+        let buffer = |name: &str,
+                      bytes: usize,
+                      record: usize,
+                      per_slot: bool,
+                      series: &Series,
+                      now: Option<(usize, u32)>| {
             let records = (bytes / record) as f64;
             say(format!(
                 "buffer {name}: {:.1} MiB{}{}, {records:.0} records of {record} bytes; of a frame peak {} ({:.1} %, \

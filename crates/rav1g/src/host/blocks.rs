@@ -85,7 +85,7 @@ use crate::sys::{
     BLOCK_8X8, BLOCK_8X16, BLOCK_16X4, BLOCK_16X8, BLOCK_32X32, COMPOUND_DIFFWTD, COMPOUND_WEDGE, GLOBAL_GLOBALMV,
     GLOBALMV, INTRA_FRAME, MACROBLOCKD, MB_MODE_INFO, MI_LEFT_EDGE, OBMC_CAUSAL, REF_NO_SCALE, SCALE_SUBPEL_BITS,
     SINGLE_INTER_MODE_END, SINGLE_INTER_MODE_START, TX_4X4, TX_16X32, TX_16X64, TX_32X16, TX_32X32, TX_32X64, TX_64X16,
-    TX_64X32, TX_64X64, UV_CFL_PRED, WARPED_CAUSAL, av1_tile_data, int_mv, mi_grid_record,
+    TX_64X32, TX_64X64, UV_CFL_PRED, WARPED_CAUSAL, av1_tile_data, int_mv, mi_grid_record_in_chunks,
 };
 
 // What an intra mode reads of its neighbours, one bit per mode. testing/intra_check reads these five lines
@@ -594,10 +594,10 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
         // The edges of the tile's wavefront; null when the frame keeps the wavefront in the slot's grid.
         let wave = tile.wave_edges.cast::<WaveEdges>();
 
-        // The grid has the entries of the records (`mi_grid_record`). A parse without a grid (the GPU
+        // The grid has the entries of the records (`mi_grid_record_in_chunks`). A parse without a grid (the GPU
         // builds it, `-parseopt gpugrid`) gives the block's record by itself.
         let has_grid = HAS_GRID;
-        let own = if has_grid { mi_grid_record(xd.mi_pool, *xd.mi) } else { xd.mi_record };
+        let own = if has_grid { mi_grid_record_in_chunks(xd.mi_chunks, *xd.mi) } else { xd.mi_record };
         (*own).index_base = tile.gen_index_ptr;
         let mi = &*own;
         let mi_row = i32::from(mi.mi_row);
@@ -611,7 +611,7 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
         // 8x8 for the one unit that is above and to the left.
         let neighbour = |rows: c_int, cols: c_int| -> &MB_MODE_INFO {
             if has_grid {
-                &*mi_grid_record(xd.mi_pool, *xd.mi.offset((rows * xd.mi_stride + cols) as isize))
+                &*mi_grid_record_in_chunks(xd.mi_chunks, *xd.mi.offset((rows * xd.mi_stride + cols) as isize))
             } else if rows < 0 {
                 if cols < 0 { &*xd.mi_above_left } else { &**xd.mi_above.offset(cols as isize) }
             } else if cols < 0 {

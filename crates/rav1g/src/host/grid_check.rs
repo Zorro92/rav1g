@@ -106,7 +106,7 @@ pub(crate) unsafe fn record(dec: *mut Av1Core, cm: *const AV1_COMMON) {
         commands.transition(grid, BufferState::Read, BufferState::ReadWrite);
         commands.set_layout(shader.layout());
         commands.set_pipeline(shader);
-        commands.bind_read(0, buffer((*dec).mode_info_pool).location());
+        commands.bind_read(0, buffer(td.parse_buffers[super::pool::Kind::ModeInfo as usize]).location());
         commands.bind_read(1, buffer(td.mi_runs).location());
         commands.bind_write(2, grid.location());
         // run_count, records, mi_stride, mi_cols, mi_rows, mi_addr_base, record_bytes

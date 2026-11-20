@@ -70,6 +70,7 @@ pub(crate) mod obu;
 mod output;
 mod perf;
 mod pool;
+mod pool_buffers;
 mod postfilter;
 mod prediction;
 mod rav1d_frames;

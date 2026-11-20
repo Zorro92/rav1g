@@ -197,8 +197,8 @@ unsafe fn completion_thread(dec: *mut Av1Core) {
                 }
                 // What the frame took of the pools is free for the frames in parse. Its coefficients
                 // are zero again: the transform stage clears what it reads.
-                if let (0, Some(pools)) = (td.output_only, (*dec).pools.as_deref()) {
-                    pools.release(td.slot_index as usize, |_, _, _| {});
+                if td.output_only == 0 {
+                    super::pool_buffers::release(dec, td, true);
                 }
                 super::mem_stats::frame_released(dec, td);
                 // -parseopt gridcheck: the grid the GPU built against the parse's, before anything

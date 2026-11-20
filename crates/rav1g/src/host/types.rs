@@ -368,6 +368,8 @@ pub struct av1_frame_thread_data {
     /// parse; each tile's thread writes the element of its tile, through `tile_pieces`.
     pub pieces: Vec<TilePieces>,
     pub tile_pieces: *mut TilePieces,
+    /// The contiguous backing of each pool for the recorded stages of this frame.
+    pub parse_buffers: [*mut GpuBufferObject; KINDS],
     pub dump_active: c_int,
     pub dump_count: c_int,
     pub dump_is_sef: c_int,
@@ -393,6 +395,9 @@ pub struct TilePieces {
     pub txb: Vec<Run>,
     /// The piece the tile is writing, by `pool::Kind`: its first chunk and its chunks; none: 0 chunks.
     pub piece: [(usize, usize); KINDS],
+    /// The tile's capacity in 64x64 areas and the chunks it has taken of each pool.
+    pub cells: usize,
+    pub chunks_taken: [usize; KINDS],
     /// The cells (64x64 areas) of the tile that are not parsed yet: what it can still need of a pool,
     /// in chunks.
     pub cells_left: c_int,
@@ -487,6 +492,10 @@ pub struct Av1Core {
     /// rule of `Pools::take`; 0 without pools.
     pub pool_total: [usize; KINDS],
     pub pool_rule: [usize; KINDS],
+    /// Published once per pool, if it runs out of chunks during parse.
+    pub grown_pools: [std::sync::atomic::AtomicPtr<GpuBufferObject>; KINDS],
+    /// Only for the CPU-built mode info grid: the mapping of each live chunk.
+    pub mi_chunks: Vec<std::cell::Cell<*mut crate::sys::MB_MODE_INFO>>,
     pub filmgrain_noise: *mut GpuBufferObject,
     pub filmgrain_gaus: *mut GpuBufferObject,
     pub filmgrain_random_luma: *mut GpuBufferObject,
@@ -639,6 +648,8 @@ impl Av1Core {
             (&raw mut (*dec).perf_detail_out).write(None);
             (&raw mut (*dec).rav1d).write(None);
             (&raw mut (*dec).pools).write(None);
+            (&raw mut (*dec).grown_pools).write(std::array::from_fn(|_| std::sync::atomic::AtomicPtr::default()));
+            (&raw mut (*dec).mi_chunks).write(Vec::new());
             (&raw mut (*dec).mem_stats).write(super::mem_stats::MemStats::new());
             (&raw mut (*dec).memory_lock).write(std::sync::Mutex::new(()));
             let no_edges = || WaveStore { tiles: Vec::new(), above: Vec::new(), above_end: Vec::new(), frames: 0 };

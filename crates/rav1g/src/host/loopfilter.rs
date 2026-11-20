@@ -170,7 +170,7 @@ pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: 
             &raw const (*lib).shader_gen_lf_vert
         });
         commands.set_layout(shader.layout());
-        commands.bind_read(0, buffer((*dec).mode_info_pool).location());
+        commands.bind_read(0, buffer(td.parse_buffers[super::pool::Kind::ModeInfo as usize]).location());
         commands.bind_read(1, buffer(td.mode_info_grid).location());
         commands.bind_write(2, lf_blocks.location());
         commands.bind_constants(3, gen_constants.location);

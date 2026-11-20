@@ -337,7 +337,7 @@ pub(super) unsafe fn prediction_gen_blocks<'a>(pbi: *mut AV1Decoder, dec: *mut A
 
         let commands = commands(dec);
         let lib = (*dec).shader_lib;
-        let mode_info = buffer((*dec).mode_info_pool).location();
+        let mode_info = buffer(td.parse_buffers[super::pool::Kind::ModeInfo as usize]).location();
         let mi_grid = buffer(td.mode_info_grid).location();
         let blocks = buffer((*dec).prediction_blocks);
         let warp_blocks = buffer((*dec).prediction_blocks_warp);
@@ -1172,7 +1172,11 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                 // A slot has a palette buffer once a frame that allows screen content tools has used it.
                 // Without one the frame has no palette block, and the shader loads from this buffer for palette
                 // blocks only; the binding still needs a buffer, so it gets another upload buffer of the decoder.
-                let palette = if !td.palette_buffer.is_null() { td.palette_buffer } else { (*dec).idct_blocks_pool };
+                let palette = if !td.palette_buffer.is_null() {
+                    td.palette_buffer
+                } else {
+                    td.parse_buffers[super::pool::Kind::Txb as usize]
+                };
                 commands.bind_read(2, buffer(palette).location());
                 let fb_base_offset = (*td.frame_buffer).base_offset as c_int;
                 if let Some(gpu) = &mut pass.gpu {

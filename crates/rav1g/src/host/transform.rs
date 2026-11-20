@@ -111,7 +111,7 @@ pub(crate) unsafe fn idct_run(dec: *mut Av1Core) {
         commands.set_pipeline(shader);
         // The records of the tiles: the pool of all frames, where a tile's records are in pieces: a
         // dispatch for each run of pieces that follow each other.
-        commands.bind_read(0, buffer((*dec).idct_blocks_pool).location());
+        commands.bind_read(0, buffer(td.parse_buffers[super::pool::Kind::Txb as usize]).location());
         commands.bind_write(1, blocks.location());
         for (index, tile) in tiles.iter().enumerate() {
             for run in joined_runs(&td.pieces[index].txb) {
@@ -140,7 +140,7 @@ pub(crate) unsafe fn idct_run(dec: *mut Av1Core) {
         commands.set_layout(layout(&raw const (*lib).sig_idct));
         commands.bind_read(0, blocks.location());
         commands.bind_write(1, residuals.location());
-        commands.bind_write(2, buffer((*dec).idct_coefs).location());
+        commands.bind_write(2, buffer(td.parse_buffers[super::pool::Kind::Coefs as usize]).location());
         commands.bind_constants(4, frame.location);
         // The first tile has the start of each type in the list of the frame.
         let starts = tiles[0].idct_blocks_sizes;

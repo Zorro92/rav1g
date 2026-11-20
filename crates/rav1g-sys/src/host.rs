@@ -179,8 +179,8 @@ pub struct macroblockd {
     /// when the parse threads have no grid (the GPU builds it): the block's record and the records
     /// around it are then in the four fields at the end.
     pub mi: *mut MiGridEntry,
-    /// The pool the entries of the grid name records of ([`mi_grid_record`]).
-    pub mi_pool: *mut MB_MODE_INFO,
+    /// Where the logical mode info chunks are mapped during parse.
+    pub mi_chunks: *const std::cell::Cell<*mut MB_MODE_INFO>,
     pub up_available: c_int,
     pub left_available: c_int,
     pub chroma_up_available: c_int,
@@ -520,15 +520,31 @@ pub type MiGridEntry = u32;
 pub const MI_GRID_BASE: u32 = size_of::<MB_MODE_INFO>() as u32;
 /// The bytes of an entry, as the shaders are told (`cb_mi_grid_entry`).
 pub const MI_GRID_ENTRY_BYTES: u32 = size_of::<MiGridEntry>() as u32;
+/// Mode info records in a pool chunk, one for each 4x4 unit of a 64x64 area.
+pub const MI_POOL_CHUNK_RECORDS: usize = 256;
 
-/// The entry of the record `mi` of the pool at `pool`.
+/// The entry of a record with logical index `index` in a pool smaller than 4 GiB.
+#[inline]
+pub fn mi_grid_entry(index: usize) -> MiGridEntry {
+    (index as u32 + 1) * MI_GRID_BASE
+}
+
+/// Looks up a tile's record while its chunks can be in different buffers.
 ///
 /// # Safety
-/// `mi` is a record of the pool that starts at `pool`, which is smaller than 4 GiB.
+/// The tile owns the chunk containing `entry`, and its mapping is set in `chunks`.
 #[inline]
-pub unsafe fn mi_grid_entry(pool: *const MB_MODE_INFO, mi: *const MB_MODE_INFO) -> MiGridEntry {
-    // SAFETY: the caller's contract.
-    (unsafe { mi.byte_offset_from(pool) }) as u32 + MI_GRID_BASE
+pub unsafe fn mi_grid_record_in_chunks(
+    chunks: *const std::cell::Cell<*mut MB_MODE_INFO>,
+    entry: MiGridEntry,
+) -> *mut MB_MODE_INFO {
+    if entry == 0 {
+        std::ptr::null_mut()
+    } else {
+        let index = ((entry - MI_GRID_BASE) / MI_GRID_BASE) as usize;
+        // SAFETY: the caller's contract.
+        unsafe { (*chunks.add(index / MI_POOL_CHUNK_RECORDS)).get().add(index % MI_POOL_CHUNK_RECORDS) }
+    }
 }
 
 /// The record an entry names in the pool at `pool`; null for the entry of a unit without a block.

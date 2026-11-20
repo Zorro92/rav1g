@@ -175,7 +175,7 @@ unsafe fn record_cdef_lists(dec: *mut Av1Core, cm: &AV1_COMMON, sizes: [c_int; 4
         commands.transition(skips, BufferState::Read, BufferState::ReadWrite);
         commands.set_layout(shader.layout());
         commands.set_pipeline(shader);
-        commands.bind_read(0, buffer((*dec).mode_info_pool).location());
+        commands.bind_read(0, buffer(td.parse_buffers[super::pool::Kind::ModeInfo as usize]).location());
         commands.bind_read(1, buffer(td.mode_info_grid).location());
         commands.bind_write(2, indexes.location());
         commands.bind_write(3, skips.location());

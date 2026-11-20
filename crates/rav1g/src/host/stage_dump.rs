@@ -279,7 +279,7 @@ pub(crate) unsafe fn stage_dump_mode_info(dec: *mut Av1Core, cm: *const AV1_COMM
         }
         let cm = &*cm;
         let grid_object = &*td.mode_info_grid;
-        let pool = &*(*dec).mode_info_pool;
+        let pool = &*td.parse_buffers[super::pool::Kind::ModeInfo as usize];
         let record = size_of::<MB_MODE_INFO>();
         let entry = size_of::<crate::sys::MiGridEntry>();
         let grid_bytes = (entry * cm.mi_stride as usize * cm.mi_rows as usize).min(grid_object.size);

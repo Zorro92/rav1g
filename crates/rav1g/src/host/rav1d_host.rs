@@ -908,7 +908,7 @@ impl SlotHost {
             Ok(FrameMemory {
                 mi_grid: entry.header.common.mi_grid_base,
                 mi_stride: entry.header.common.mi_stride,
-                mi_pool: entry.header.common.mi,
+                mi_chunks: (*dec).mi_chunks.as_ptr(),
             })
         }
     }
@@ -1168,7 +1168,11 @@ impl SinkHost for SlotHost {
             state.cur = cur;
             state.refresh = hdr.refresh_frame_flags;
             state.parse_start = av1_perf_ticks();
-            Ok(FrameMemory { mi_grid: (*cm).mi_grid_base, mi_stride: (*cm).mi_stride, mi_pool: (*cm).mi })
+            Ok(FrameMemory {
+                mi_grid: (*cm).mi_grid_base,
+                mi_stride: (*cm).mi_stride,
+                mi_chunks: (*dec).mi_chunks.as_ptr(),
+            })
         }
     }
 
@@ -1269,9 +1273,7 @@ impl SinkHost for SlotHost {
                 perf_add(self.dec, sys::AV1_PERF_CPU_ENTROPY_WALL as usize, entry.parse_start);
                 // The frame takes no more of the pools: the frames behind it are held against the
                 // next frame in parse.
-                if let Some(pools) = (*self.dec).pools.as_deref() {
-                    pools.parsed((*entry.td).slot_index as usize);
-                }
+                super::pool_buffers::parsed(self.dec, entry.td, ok);
             }
             frames.parsed(index, ok);
             return ok;
@@ -1286,9 +1288,7 @@ impl SinkHost for SlotHost {
                 return false;
             }
             perf_add(dec, sys::AV1_PERF_CPU_ENTROPY_WALL as usize, state.parse_start);
-            if let (Some(pools), Some(td)) = ((*dec).pools.as_deref(), (*dec).curr_frame_data.as_ref()) {
-                pools.parsed(td.slot_index as usize);
-            }
+            super::pool_buffers::parsed(dec, (*dec).curr_frame_data, ok);
             let pbi: *mut AV1Decoder = &raw mut *state.pbi;
             // A buffer of the stages that the frame needs larger and does not get (a "MEMORY" line says
             // why) fails the frame as a failed parse does, with its own error.

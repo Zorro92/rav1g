@@ -215,6 +215,10 @@ impl Allocator {
         self.dev_bytes.iter().sum()
     }
 
+    pub(crate) fn device_count(&self) -> c_int {
+        self.dev_count.iter().sum()
+    }
+
     /// The descriptors of the device buffers that exist.
     pub(crate) fn buffers(&self) -> &[GpuBufferObject] {
         &self.dev_buffer_pool[..usize::try_from(self.dev_obj_count).unwrap_or(0)]
@@ -391,6 +395,26 @@ impl Allocator {
         let ptr = self.host_base_addr.wrapping_add(self.host_offset + gap);
         self.host_offset += size;
         ptr.cast()
+    }
+
+    /// Releases the backing of a pool that has grown. The descriptor is kept at its original address.
+    ///
+    /// # Safety
+    /// `obj` belongs to this allocator and nobody uses the resource or its mapping.
+    pub(crate) unsafe fn retire_buffer(&mut self, obj: *mut GpuBufferObject) {
+        // SAFETY: the caller's contract, for the descriptor and the COM reference it owns.
+        unsafe {
+            let obj = &mut *obj;
+            let kind = MemoryKind::from_raw(obj.memtype).expect("a pool has a memory type");
+            if !obj.host_ptr.is_null() {
+                BufferRef::from_raw(&obj.dev).expect("a mapped buffer").unmap();
+                obj.host_ptr = std::ptr::null_mut();
+            }
+            BufferRef::release(obj.dev.cast());
+            obj.dev = std::ptr::null_mut();
+            self.dev_bytes[kind as usize] -= std::mem::take(&mut obj.size);
+            self.dev_count[kind as usize] -= 1;
+        }
     }
 
     /// Releases the buffers of one memory type and returns their bytes and their number. For a release

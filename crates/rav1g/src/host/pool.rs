@@ -32,15 +32,15 @@
 //! the frames behind the oldest frame in parse cannot give anything back before that frame is
 //! submitted, so they must leave it what it can still need. What a frame in parse can still need is
 //! known as it goes: `held + cells that are not parsed`, at most what it was when the frame began (all
-//! its cells) and never rising. The rule ([`Pools::take`]): a frame takes chunks only while, for every
+//! its cells) and never rising. The rule ([`Pools::take_growing`]): a frame takes chunks only while, for every
 //! frame in parse in front of it, that frame's bound and what the frames behind that frame hold fit
 //! the pool. The oldest frame in parse takes whatever is free. So frames that are parsed side by side
 //! share the room the worst case leaves, which is nearly all of it: a second frame in parse costs no
 //! memory, and waits for the first one only where the first one really is a worst case.
 //!
-//! A frame that cannot fit (a pool made smaller with `AV1_LOW_MEMORY_*`) fails when it is the oldest,
-//! nothing in front of it holds a chunk and none is free: a decode error of that frame, as a frame that
-//! outgrew its two shares was.
+//! When the oldest frame needs more and nothing in front can return a chunk, the pool can grow. The
+//! indices of existing pieces stay fixed. New pieces use the new backing buffer, and the recording
+//! sees a single buffer after the old pieces of the frame are copied across (pool_buffers.rs).
 //!
 //! **A pool below the worst case of a frame** (the same `AV1_LOW_MEMORY_*`: half the mode info pool,
 //! four fifths of the coefficient pool; the rule is the same for every pool, by its own chunks).
@@ -52,7 +52,7 @@
 //! frame`, [`Frame::can_need`]). At its begin that is the whole pool, as `cells` is in a pool of the
 //! worst case, and it falls as the frame is parsed. What this gives up: a frame that has more than
 //! that share in its last part, behind a part with less, can find the room taken by the frame behind
-//! it and fail, where alone it would have fit. A frame whose cells are no more than the pool is held
+//! it and need growth, where alone it would have fit. A frame whose cells are no more than the pool is held
 //! against its cells, as ever. The waits are counted by pool (`-memstats`, [`Pools::take_stat_waits`]).
 //!
 //! **The test switch** (`AV1_PARSER_OPTION_TEST_POOL_WAIT`, `-parseopt poolwait`). A pool that holds
@@ -75,8 +75,27 @@ pub(crate) enum Kind {
     Txb = 2,
 }
 
+impl Kind {
+    pub(crate) const ALL: [Kind; KINDS] = [Kind::ModeInfo, Kind::Coefs, Kind::Txb];
+
+    /// A bound across all tiles, including the tail of each piece a transform cannot fit into.
+    pub(crate) fn worst(self, cells: usize) -> usize {
+        if self == Self::Coefs { cells + cells / 2 } else { cells }
+    }
+
+    /// A bound for one tile. A coefficient record is at most 1028 values (32x32 plus padding).
+    /// The unsuccessful append that opens another piece leaves at most 1024 values of its
+    /// previous piece unused. Before a tile takes chunk k+1, it must therefore need more than
+    /// k * COEF_CHUNK - (k - 1) * 1024 values. A 4:2:0 tile of c cells writes at most
+    /// c * COEF_CHUNK values, so at most c + ceil((c-1)*1024 / (COEF_CHUNK-1024)) chunks.
+    /// The extra term is bounded by floor(c/2), even when the frame is split into tiles.
+    pub(crate) fn tile_limit(self, cells: usize) -> usize {
+        if self == Self::Coefs { cells + (cells.saturating_sub(1) * 1024).div_ceil(COEF_CHUNK - 1024) } else { cells }
+    }
+}
+
 /// The mode info records of a chunk: a 64x64 area of 4x4 blocks.
-pub(crate) const MODE_INFO_CHUNK: usize = 256;
+pub(crate) const MODE_INFO_CHUNK: usize = crate::sys::MI_POOL_CHUNK_RECORDS;
 /// The coefficients of a chunk: 30 for each 4x4 unit of a 64x64 area.
 pub(crate) const COEF_CHUNK: usize = 256 * 30;
 /// The transform block records of a chunk: one for each 4x4 block of luma and of both chroma planes.
@@ -90,13 +109,15 @@ pub(crate) const PIECE_CHUNKS: [usize; KINDS] = [16, 16, 64];
 /// The pipeline slots a decoder has at most (`FrameThreadDataCount`): the frames that hold pieces.
 const SLOTS: usize = 4;
 
-/// What [`Pools::take`] gave.
+/// What [`Pools::take_growing`] gave.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Take {
     /// Chunks `first..first + chunks`.
-    Piece { first: usize, chunks: usize },
+    Piece { first: usize, chunks: usize, grown: bool },
     /// The frame does not fit the pool.
     Full,
+    /// The replacement buffer did not fit the memory budget or could not be allocated.
+    Refused,
     /// The pools are closed: the decoder is being released, or it stopped with a panic.
     Stopped,
 }
@@ -105,13 +126,14 @@ pub(crate) enum Take {
 #[derive(Clone, Copy)]
 struct Piece {
     kind: Kind,
+    grown: bool,
     first: u32,
     chunks: u32,
 }
 
 /// The chunks of one pool.
 struct Chunks {
-    /// The chunks a frame in parse behind another one is held against (the rule of [`Pools::take`]).
+    /// The chunks a frame in parse behind another one is held against (the rule of [`Pools::take_growing`]).
     rule: usize,
     /// One bit a chunk, set while it is free.
     free: Vec<u64>,
@@ -181,6 +203,13 @@ impl Chunks {
         }
         self.free_count += chunks;
     }
+
+    fn grow(&mut self, total: usize) {
+        self.free.resize(total.div_ceil(64), 0);
+        self.give(self.total, total - self.total);
+        self.total = total;
+        self.rule = total;
+    }
 }
 
 /// The frame of a pipeline slot, as the pools see it.
@@ -198,6 +227,11 @@ struct Frame {
     /// Its cells.
     cells: usize,
     pieces: Vec<Piece>,
+    /// Buffers prepared for recording on this slot, before or after growth.
+    old_bindings: u8,
+    new_bindings: u8,
+    /// A growth refused for this frame is reported once, even when many tiles need it.
+    refused: u8,
 }
 
 impl Frame {
@@ -218,6 +252,8 @@ struct State {
     stop: bool,
     /// The test switch: see the module.
     test_wait: bool,
+    grown: u8,
+    retiring: u8,
     /// The takes that waited, by [`Kind`]: for a chunk to come back from the GPU, and for a frame in
     /// front.
     waits: [[u64; 2]; KINDS],
@@ -241,7 +277,7 @@ pub(crate) struct Stats {
 pub(crate) struct Pools {
     state: Mutex<State>,
     changed: Condvar,
-    /// The threads that wait in [`Pools::take`]: the progress of a frame wakes them only when there are
+    /// The threads that wait in [`Pools::take_growing`]: the progress of a frame wakes them only when there are
     /// any.
     waiting: AtomicUsize,
     /// The cells of a slot's frame that are not parsed yet.
@@ -252,7 +288,7 @@ pub(crate) struct Pools {
 
 impl Pools {
     /// Pools of `total` chunks each. `rule`: the chunks of each that frames in parse share under the
-    /// rule of [`Pools::take`] (at most the total; what is above it is for the oldest frame in parse
+    /// rule of [`Pools::take_growing`] (at most the total; what is above it is for the oldest frame in parse
     /// alone).
     #[cfg(test)]
     pub(crate) fn new(total: [usize; KINDS], rule: [usize; KINDS]) -> Pools {
@@ -261,8 +297,17 @@ impl Pools {
 
     /// [`Pools::new`], with the test switch (see the module).
     pub(crate) fn with_test_wait(total: [usize; KINDS], rule: [usize; KINDS], test_wait: bool) -> Pools {
-        let frame =
-            || Frame { order: 0, in_parse: false, held: [0; KINDS], bound: [0; KINDS], cells: 0, pieces: Vec::with_capacity(64) };
+        let frame = || Frame {
+            order: 0,
+            in_parse: false,
+            held: [0; KINDS],
+            bound: [0; KINDS],
+            cells: 0,
+            pieces: Vec::with_capacity(64),
+            old_bindings: 0,
+            new_bindings: 0,
+            refused: 0,
+        };
         Pools {
             state: Mutex::new(State {
                 chunks: [0, 1, 2].map(|kind| Chunks::new(total[kind], rule[kind])),
@@ -270,6 +315,8 @@ impl Pools {
                 begun: 0,
                 stop: false,
                 test_wait,
+                grown: 0,
+                retiring: 0,
                 waits: [[0; 2]; KINDS],
                 stat_waits: [[0; 2]; KINDS],
             }),
@@ -304,6 +351,7 @@ impl Pools {
         frame.in_parse = true;
         frame.held = [0; KINDS];
         frame.cells = cells;
+        frame.refused = 0;
         frame.bound = rules.map(|rule| frame.can_need(cells, rule));
         self.remaining[slot].store(cells as i32, Ordering::Release);
     }
@@ -320,18 +368,39 @@ impl Pools {
 
     /// The parse of the slot's frame has ended: it takes no more, and the frames behind it are held
     /// against the next frame in parse, or against none.
-    pub(crate) fn parsed(&self, slot: usize) {
+    pub(crate) fn finish_parse(&self, slot: usize, ok: bool, mut copy: impl FnMut(Kind, usize, usize)) -> u8 {
         let mut state = self.state();
-        state.frames[slot].in_parse = false;
+        let grown = state.grown;
+        let frame = &mut state.frames[slot];
+        frame.in_parse = false;
+        if ok {
+            if grown != 0 {
+                for piece in &frame.pieces {
+                    if !piece.grown && grown & (1 << piece.kind as usize) != 0 {
+                        copy(piece.kind, piece.first as usize, piece.chunks as usize);
+                    }
+                }
+            }
+            frame.new_bindings = grown;
+        }
         self.remaining[slot].store(0, Ordering::Release);
         drop(state);
         self.changed.notify_all();
+        grown
     }
 
     /// Up to `want` chunks that follow each other for the frame of the slot; waits until the frame may
     /// take a chunk and one is free (see the module).
-    pub(crate) fn take(&self, slot: usize, kind: Kind, want: usize) -> Take {
+    pub(crate) fn take_growing(
+        &self,
+        slot: usize,
+        kind: Kind,
+        want: usize,
+        worst: usize,
+        mut grow: impl FnMut(usize) -> bool,
+    ) -> Take {
         let k = kind as usize;
+        let bit = 1 << k;
         let want = want.max(1);
         let mut state = self.state();
         let mut waited = [false; 2];
@@ -339,7 +408,11 @@ impl Pools {
             if state.stop {
                 break Take::Stopped;
             }
+            if state.frames[slot].refused & bit != 0 {
+                break Take::Refused;
+            }
             let order = state.frames[slot].order;
+            let grown = state.grown & bit != 0;
             // What the frames in parse in front of this one leave it.
             let mut allowed = want;
             for other in 0..SLOTS {
@@ -347,8 +420,12 @@ impl Pools {
                 if !front.in_parse || front.order == 0 || front.order >= order {
                     continue;
                 }
-                let remaining = usize::try_from(self.remaining[other].load(Ordering::Acquire)).unwrap_or(0);
-                let bound = front.bound[k].min(front.held[k] + front.can_need(remaining, state.chunks[k].rule));
+                let bound = if grown {
+                    kind.worst(front.cells)
+                } else {
+                    let remaining = usize::try_from(self.remaining[other].load(Ordering::Acquire)).unwrap_or(0);
+                    front.bound[k].min(front.held[k] + front.can_need(remaining, state.chunks[k].rule))
+                };
                 let front_order = front.order;
                 state.frames[other].bound[k] = bound;
                 let behind: usize =
@@ -368,12 +445,32 @@ impl Pools {
                     let frame = &mut state.frames[slot];
                     frame.bound[k] = frame.bound[k].min(frame.held[k] + frame.can_need(remaining, rule));
                     frame.held[k] += chunks;
-                    frame.pieces.push(Piece { kind, first: first as u32, chunks: chunks as u32 });
-                    break Take::Piece { first, chunks };
+                    frame.pieces.push(Piece { kind, first: first as u32, chunks: chunks as u32, grown });
+                    break Take::Piece { first, chunks, grown };
                 }
                 // No chunk is free. The frames in front give theirs back by themselves; when none of
                 // them holds one, nothing ever comes back to this frame.
                 if !in_front {
+                    // The smaller pool let younger frames take pieces against a proportional bound.
+                    // Keep their offsets and add room for the oldest frame's full bound.
+                    let behind = state.chunks[k].total - state.frames[slot].held[k];
+                    let total = worst + behind;
+                    if !grown && worst != 0 && total > state.chunks[k].total {
+                        if grow(total) {
+                            state.chunks[k].grow(total);
+                            state.grown |= bit;
+                            state.retiring |= bit;
+                            for frame in &mut state.frames {
+                                if !frame.in_parse && frame.order != 0 {
+                                    frame.old_bindings |= bit;
+                                }
+                            }
+                            self.changed.notify_all();
+                            continue;
+                        }
+                        state.frames[slot].refused |= bit;
+                        break Take::Refused;
+                    }
                     break Take::Full;
                 }
                 waited[0] = true;
@@ -417,17 +514,38 @@ impl Pools {
 
     /// The frame of the slot is through, on the GPU or because it failed: its pieces are free again.
     /// `each` gets every piece first (kind, first chunk, chunks), under the lock of the pools.
-    pub(crate) fn release(&self, slot: usize, mut each: impl FnMut(Kind, usize, usize)) {
+    pub(crate) fn release_with(
+        &self,
+        slot: usize,
+        mut each: impl FnMut(Kind, usize, usize, bool),
+        mut retire: impl FnMut(Kind),
+    ) {
         let mut state = self.state();
         let state = &mut *state;
         let frame = &mut state.frames[slot];
         for piece in frame.pieces.drain(..) {
-            each(piece.kind, piece.first as usize, piece.chunks as usize);
+            let grown = piece.grown || frame.new_bindings & (1 << piece.kind as usize) != 0;
+            each(piece.kind, piece.first as usize, piece.chunks as usize, grown);
             state.chunks[piece.kind as usize].give(piece.first as usize, piece.chunks as usize);
         }
         frame.order = 0;
         frame.in_parse = false;
         frame.held = [0; KINDS];
+        frame.old_bindings = 0;
+        frame.new_bindings = 0;
+        if state.retiring != 0 {
+            for kind in Kind::ALL {
+                let bit = 1 << kind as usize;
+                if state.retiring & bit != 0
+                    && !state.frames.iter().any(|frame| {
+                        frame.old_bindings & bit != 0 || frame.pieces.iter().any(|p| p.kind == kind && !p.grown)
+                    })
+                {
+                    retire(kind);
+                    state.retiring &= !bit;
+                }
+            }
+        }
         self.remaining[slot].store(0, Ordering::Release);
         self.changed.notify_all();
     }
@@ -479,6 +597,21 @@ impl Pools {
 }
 
 #[cfg(test)]
+impl Pools {
+    fn take(&self, slot: usize, kind: Kind, want: usize) -> Take {
+        self.take_growing(slot, kind, want, 0, |_| unreachable!())
+    }
+
+    fn parsed(&self, slot: usize) {
+        self.finish_parse(slot, true, |_, _, _| unreachable!());
+    }
+
+    fn release(&self, slot: usize, mut each: impl FnMut(Kind, usize, usize)) {
+        self.release_with(slot, |kind, first, chunks, _| each(kind, first, chunks), |_| unreachable!());
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
@@ -489,7 +622,7 @@ mod tests {
 
     fn piece(take: Take) -> (usize, usize) {
         match take {
-            Take::Piece { first, chunks } => (first, chunks),
+            Take::Piece { first, chunks, .. } => (first, chunks),
             other => panic!("no piece: {other:?}"),
         }
     }
@@ -629,8 +762,63 @@ mod tests {
     }
 
     #[test]
+    fn growth_keeps_younger_pieces_and_pending_bindings_live() {
+        let kind = Kind::ModeInfo;
+        let pools = Pools::new([8; KINDS], [8; KINDS]);
+        pools.begin(0, 16);
+        // Even a recording with no pieces can bind the initial buffer.
+        pools.parsed(0);
+        pools.begin(1, 16);
+        assert_eq!(piece(pools.take(1, kind, 2)), (0, 2));
+        pools.begin(2, 16);
+        pools.progress(1, 8);
+        assert_eq!(piece(pools.take(2, kind, 2)), (2, 2));
+        assert_eq!(piece(pools.take(1, kind, 4)), (4, 4));
+        assert_eq!(
+            pools.take_growing(1, kind, 10, 16, |total| {
+                assert_eq!(total, 16 + 2);
+                true
+            }),
+            Take::Piece { first: 8, chunks: 10, grown: true }
+        );
+        let mut copies = Vec::new();
+        assert_eq!(pools.finish_parse(1, true, |kind, first, chunks| copies.push((kind, first, chunks))), 1);
+        assert_eq!(copies, [(kind, 0, 2), (kind, 4, 4)]);
+        pools.release_with(1, |_, _, _, grown| assert!(grown), |_| panic!("slot 2 is parsing"));
+        pools.release_with(2, |_, _, _, grown| assert!(!grown), |_| panic!("slot 0 is recorded"));
+        let mut retired = Vec::new();
+        pools.release_with(0, |_, _, _, _| unreachable!(), |kind| retired.push(kind));
+        assert_eq!(retired, [kind]);
+    }
+
+    #[test]
+    fn a_refused_growth_leaves_the_pool_usable() {
+        let kind = Kind::Coefs;
+        let pools = Pools::new([8; KINDS], [8; KINDS]);
+        pools.begin(0, 16);
+        assert_eq!(piece(pools.take(0, kind, 8)), (0, 8));
+        assert_eq!(pools.take_growing(0, kind, 1, 24, |_| false), Take::Refused);
+        assert_eq!(pools.take_growing(0, kind, 1, 24, |_| unreachable!()), Take::Refused);
+        assert_eq!(pools.stats().total, [8; KINDS]);
+        pools.release_with(0, |_, _, _, grown| assert!(!grown), |_| unreachable!());
+        pools.begin(0, 16);
+        assert_eq!(piece(pools.take(0, kind, 8)), (0, 8));
+        assert_eq!(pools.take_growing(0, kind, 1, 24, |_| true), Take::Piece { first: 8, chunks: 1, grown: true });
+    }
+
+    #[test]
     fn the_share_of_a_frame_in_a_pool() {
-        let frame = |cells| Frame { order: 1, in_parse: true, held: [0; KINDS], bound: [0; KINDS], cells, pieces: Vec::new() };
+        let frame = |cells| Frame {
+            order: 1,
+            in_parse: true,
+            held: [0; KINDS],
+            bound: [0; KINDS],
+            cells,
+            pieces: Vec::new(),
+            old_bindings: 0,
+            new_bindings: 0,
+            refused: 0,
+        };
         // A pool of the frame's cells, or of more: a chunk a cell.
         assert_eq!(frame(2040).can_need(2040, 2040), 2040);
         assert_eq!(frame(2040).can_need(700, 2040), 700);

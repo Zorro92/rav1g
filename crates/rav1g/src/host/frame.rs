@@ -40,8 +40,8 @@ use super::stage_buffers::MEMORY_GUARD_MARGIN_BUFFER;
 use super::stage_dump::{stage_dump_begin, stage_dump_frame_info};
 use super::transform::idct_run;
 use super::types::{
-    Av1Core, DeviceUpload, EntropyThreadCount, GpuWorkItem, InterFastMapSize, IntraV2MaxRegions, Run, TilePieces,
-    av1_frame_thread_data,
+    Av1Core, DeviceUpload, EntropyThreadCount, GpuBufferObject, GpuWorkItem, InterFastMapSize, IntraV2MaxRegions, Run,
+    TilePieces, av1_frame_thread_data,
 };
 use crate::gpu::d3d12::{com_ref, wrapped_ref};
 use crate::gpu::{BufferState, CommandAllocator, CommandList, Event, Fence, Queue};
@@ -544,12 +544,12 @@ unsafe fn palette_buffer_for_frame(dec: *mut Av1Core, cm: &AV1_COMMON, td: &mut 
             false,
             &format!(
                 "MEMORY palette buffer of slot {} created for frame {}, the first on the slot that allows screen \
-                 content tools: {:.1} MiB; device buffers now {:.1} MiB in {} buffers",
+                 content tools: {:.1} MiB; device buffers now {:.1} MiB in {} buffers ({total} bytes)",
                 td.slot_index,
                 td.frame_number,
                 to_mib(size),
                 to_mib(total as u64),
-                memory.dev_obj_count
+                memory.device_count()
             ),
         );
     }
@@ -707,18 +707,7 @@ pub(crate) unsafe fn release_frame(dec: *mut Av1Core, td: *mut av1_frame_thread_
             (*dec).output_data_pool.push(td_ptr);
             return;
         }
-        // The coefficients of a submitted frame are zeroed by the IDCT shaders as they read them (the
-        // parser writes only the non-zero ones and relies on the rest being zero). This frame never
-        // reached the GPU, so the pieces it took of the coefficient pool are cleared here, and then go
-        // back with the others.
-        let coef_buf = (*(*dec).idct_coefs).host_ptr.cast::<i32>();
-        if let Some(pools) = (*dec).pools.as_deref() {
-            pools.release(td.slot_index as usize, |kind, first, chunks| {
-                if kind == Kind::Coefs {
-                    coef_buf.add(first * COEF_CHUNK).write_bytes(0, chunks * COEF_CHUNK);
-                }
-            });
-        }
+        super::pool_buffers::release(dec, td, false);
         super::mem_stats::frame_released(dec, td_ptr);
         // Its grids stay dirty and are not marked clean, so the next frame on this slot clears them itself,
         // whoever does the clears otherwise.
@@ -822,8 +811,6 @@ pub(crate) unsafe fn setup_frame_begin(
 
         cm.mi_grid_base = (*td.mode_info_grid).host_ptr.cast();
         cm.mi_grid_visible = cm.mi_grid_base;
-        // The pool the entries of the grid name records of.
-        cm.mi = (*(*dec).mode_info_pool).host_ptr.cast();
         cm.mi_alloc_size = cm.mi_stride * ((cm.mi_rows + 31) & !31);
         // The two grids of the slot that a frame clears (this grid and the wavefront grid below), and who
         // clears them (`AV1_CLEARS_*`, `av1_set_clears`). The clears are sized from the frame, which whoever
@@ -895,6 +882,7 @@ pub(crate) unsafe fn setup_frame_begin(
                 pieces.mode_info.clear();
                 pieces.txb.clear();
                 pieces.piece = [(0, 0); 3];
+                pieces.chunks_taken = [0; 3];
                 pieces.cells_left = 0;
                 pieces.coef_values = 0;
                 pieces.coef_run = 0;
@@ -1261,7 +1249,6 @@ pub(crate) unsafe fn setup_tile(
         t.intra_iter_max = -1;
         t.intra_iter_max_uv = -1;
         t.intrabc_sb = -1;
-        t.dq_buffer_base = (*(*dec).idct_coefs).host_ptr.cast();
         t.mi_count = 0;
         t.dq_buffer_offset = 0;
         t.dq_buffer_ptr = 0;
@@ -1269,12 +1256,12 @@ pub(crate) unsafe fn setup_tile(
         t.dq_buffer_size = 0;
         t.dq_buffer_end = 0;
         t.blocks_offset = 0;
-        t.idct_blocks_host = (*(*dec).idct_blocks_pool).host_ptr.cast();
         t.mi_offset = 0;
         let pieces = &mut *td.tile_pieces.add(tile_id as usize);
         pieces.col_end = tile.mi_col_end.min(cm.mi_cols);
         pieces.row_end = tile.mi_row_end.min(cm.mi_rows);
         pieces.cells_left = cells(pieces.col_end - tile.mi_col_start) * cells(pieces.row_end - tile.mi_row_start);
+        pieces.cells = pieces.cells_left as usize;
         let setup = TileSetup { tile_data: t_ptr };
 
         t.mi_col_start = tile.mi_col_start;
@@ -1353,7 +1340,7 @@ fn frame_cells(cm: &AV1_COMMON) -> usize {
 }
 
 /// A piece of a pool for a tile of the frame on the slot `td`: its first chunk and its chunks. Waits
-/// until the frame may have one and one is free (`Pools::take`). `None`: the frame does not fit the
+/// until the frame may have one and one is free (`Pools::take_growing`). `None`: the frame does not fit the
 /// pool, or the decoder is being released; the frame fails.
 ///
 /// # Safety
@@ -1364,19 +1351,28 @@ unsafe fn take_piece(
     td: *const av1_frame_thread_data,
     pieces: &mut TilePieces,
     kind: Kind,
-) -> Option<(usize, usize)> {
+) -> Option<(usize, usize, *mut GpuBufferObject)> {
     // SAFETY: the caller's contract.
     unsafe {
         let pools = (*dec).pools.as_deref()?;
+        let k = kind as usize;
         // A piece, and never more than the tile can still need: a chunk is the worst case of a cell.
-        let want = pools.piece(kind, usize::try_from(pieces.cells_left).unwrap_or(0));
+        let limit = kind.tile_limit(pieces.cells) - pieces.chunks_taken[k];
+        let want = pools.piece(kind, usize::try_from(pieces.cells_left).unwrap_or(0)).min(limit);
+        if want == 0 {
+            return None;
+        }
         let perf_t = super::perf::av1_perf_ticks();
-        let taken = pools.take((*td).slot_index as usize, kind, want);
+        let worst = super::pool_buffers::worst(&*dec, kind);
+        let taken = pools.take_growing((*td).slot_index as usize, kind, want, worst, |chunks| {
+            super::pool_buffers::grow(dec, td, kind, chunks)
+        });
         perf_add(dec, sys::AV1_PERF_CPU_WAIT_SEC_SLOT as usize, perf_t);
         match taken {
-            Take::Piece { first, chunks } => {
-                pieces.piece[kind as usize] = (first, chunks);
-                Some((first, chunks))
+            Take::Piece { first, chunks, grown } => {
+                pieces.piece[k] = (first, chunks);
+                pieces.chunks_taken[k] += chunks;
+                Some((first, chunks, super::pool_buffers::backing(dec, kind, grown)))
             }
             Take::Full => {
                 let what = match kind {
@@ -1392,13 +1388,13 @@ unsafe fn take_piece(
                         "MEMORY FAILED frame {}: its {what} ({} chunks of {} items, of which the frames in parse \
                          behind it hold {behind}); the frame is a decode error",
                         (*td).frame_number,
-                        (*dec).pool_total[kind as usize],
-                        CHUNK_ITEMS[kind as usize]
+                        pools.stats().total[k],
+                        CHUNK_ITEMS[k]
                     ),
                 );
                 None
             }
-            Take::Stopped => None,
+            Take::Refused | Take::Stopped => None,
         }
     }
 }
@@ -1417,7 +1413,7 @@ pub(crate) unsafe fn more_mode_info(
     // SAFETY: the caller's contract; the piece is inside the pool's buffer.
     unsafe {
         let pieces = &mut *(*td).tile_pieces.add(tile_id);
-        let (first, chunks) = take_piece(dec, td, pieces, Kind::ModeInfo)?;
+        let (first, chunks, backing) = take_piece(dec, td, pieces, Kind::ModeInfo)?;
         let run = Run {
             first: (first * CHUNK_ITEMS[Kind::ModeInfo as usize]) as c_int,
             count: (chunks * CHUNK_ITEMS[Kind::ModeInfo as usize]) as c_int,
@@ -1426,7 +1422,15 @@ pub(crate) unsafe fn more_mode_info(
         pieces.mode_info.push(run);
         t.mi_offset = run.first;
         t.mi_count = 0;
-        let records = (*(*dec).mode_info_pool).host_ptr.cast::<MB_MODE_INFO>().add(run.first as usize);
+        let records = (*backing).host_ptr.cast::<MB_MODE_INFO>().add(run.first as usize);
+        if (*dec).gpu_grid == 0 {
+            // With a CPU grid, neighbouring blocks may live in different mappings. The pool's
+            // allocation gives this tile exclusive access to these chunk entries until its fence.
+            let map = (*dec).mi_chunks.as_ptr().add(first);
+            for chunk in 0..chunks {
+                (*map.add(chunk)).set(records.add(chunk * CHUNK_ITEMS[Kind::ModeInfo as usize]));
+            }
+        }
         Some((records, run.count))
     }
 }
@@ -1449,7 +1453,7 @@ pub(crate) unsafe fn more_transform_blocks(
         if let Some(last) = pieces.txb.last_mut() {
             last.count = t.idct_blocks_ptr;
         }
-        let Some((first, chunks)) = take_piece(dec, td, pieces, Kind::Txb) else {
+        let Some((first, chunks, backing)) = take_piece(dec, td, pieces, Kind::Txb) else {
             return 0;
         };
         let run = Run {
@@ -1458,8 +1462,7 @@ pub(crate) unsafe fn more_transform_blocks(
         };
         pieces.txb.push(Run { first: run.first, count: 0 });
         t.blocks_offset = run.first;
-        t.idct_blocks_host =
-            (*(*dec).idct_blocks_pool).host_ptr.cast::<crate::sys::tx_block_info_gpu>().add(run.first as usize);
+        t.idct_blocks_host = (*backing).host_ptr.cast::<crate::sys::tx_block_info_gpu>().add(run.first as usize);
         t.idct_blocks_ptr = 0;
         run.count
     }
@@ -1480,16 +1483,18 @@ pub(crate) unsafe fn more_coefs(
     // SAFETY: the caller's contract.
     unsafe {
         let pieces = &mut *(*td).tile_pieces.add(tile_id);
-        let Some((first, chunks)) = take_piece(dec, td, pieces, Kind::Coefs) else {
+        let Some((first, chunks, backing)) = take_piece(dec, td, pieces, Kind::Coefs) else {
             return false;
         };
         let start = (first * COEF_CHUNK) as c_int;
-        if t.dq_buffer_end != start || t.dq_buffer_end == 0 {
+        let base = (*backing).host_ptr.cast::<i32>();
+        if t.dq_buffer_end != start || t.dq_buffer_base != base {
             // What is left of the piece before stays empty, and zero.
             pieces.coef_values += i64::from(t.dq_buffer_ptr - pieces.coef_run);
             pieces.coef_run = start;
             t.dq_buffer_ptr = start;
         }
+        t.dq_buffer_base = base;
         t.dq_buffer_end = start + (chunks * COEF_CHUNK) as c_int;
         true
     }
@@ -1726,6 +1731,8 @@ pub(crate) unsafe fn decode_frame_record(
     unsafe {
         let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
         let cm = &raw mut (*pbi).common;
+        let td = (*dec).curr_frame_data;
+        (*cm).mi = (*(*td).parse_buffers[Kind::ModeInfo as usize]).host_ptr.cast();
         let mut perf_t = super::perf::av1_perf_ticks();
         prepare_command_buffer(dec);
         stage_dump_frame_info(dec, cm);

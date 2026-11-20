@@ -32,7 +32,7 @@ use super::log::{clear_create_error, log, log_create_error};
 use super::memory::{Allocator, Plan, log_video_memory, memory_type_name};
 use super::pool::{COEF_CHUNK, KINDS, Kind, MODE_INFO_CHUNK, Pools, TXB_CHUNK};
 use super::stage_buffers::{
-    GPU_PRED_SCRATCH, GPU_PRED_TEMPLATES, IDCT_BLOCKS, INDEX_LIST, PRED_BLOCKS, PRED_BLOCKS_WARP,
+    GPU_PRED_SCRATCH, GPU_PRED_TEMPLATES, GRID_RUNS, IDCT_BLOCKS, INDEX_LIST, PRED_BLOCKS, PRED_BLOCKS_WARP, RECORD,
     gpu_list_initial_bytes, initial_bytes,
 };
 use super::types::{
@@ -153,19 +153,17 @@ fn late_frame_buffer(low_memory: i32) -> bool {
 }
 
 /// The chunks of the pools of a decoder for frames of `cells` 64x64 areas: the chunks the frames in
-/// parse share under the rule of `Pools::take`, and all of them.
+/// parse share under the rule of `Pools::take_growing`, and all of them.
 ///
-/// A chunk is the worst case of a cell, so `cells` chunks hold any frame. The coefficients have a
-/// thirty-second more, outside the rule: the coefficients of a transform block are not split, so the
-/// end of a piece can stay empty (at most 1027 values of 7680), which only a stream that is made for
-/// it can add up to more than the worst case leaves over.
+/// A cell takes at most one chunk of records (AV1 5.9.15 and 5.11). The coefficient pool starts
+/// with an extra thirty-second outside the rule, since the coefficients of a transform block
+/// cannot be split across pieces.
 ///
 /// `AV1_LOW_MEMORY_MODE_INFO` halves the mode info pool (the default of a decoder above 1920x1088,
 /// [`default_low_memory`]); `AV1_LOW_MEMORY_COEFS` sizes the coefficient pool for 24 values a 4x4 unit
 /// and not 30 (four fifths: every coefficient of a 4:2:0 frame without the padding of the counts; 12.0
-/// MiB at 3840x2176; docs/memory.md, candidate 6). Such a pool no longer holds every frame: a frame that
-/// does not fit is a decode error. The pool is one buffer that the tiles in parse write through a
-/// pointer and the frames on the GPU read by offsets, so it is not made larger for such a frame.
+/// MiB at 3840x2176; docs/memory.md, candidate 6). These are starting capacities. The pools grow
+/// only when the oldest frame cannot take another piece (pool_buffers.rs).
 fn pool_chunks(cells: usize, low_memory: i32) -> ([usize; KINDS], [usize; KINDS]) {
     let mut rule = [cells.max(1); KINDS];
     if low_memory & AV1_LOW_MEMORY_MODE_INFO as i32 != 0 {
@@ -471,6 +469,7 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
         size_of::<i32>() * block_count_4x4 as usize * 2,
         0,
         0,
+        0,
     ];
     request!(
         assign,
@@ -548,6 +547,9 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
         + (target_height / 128) * (target_width / 8) * 2; // horizontal edges, chroma
 
     let max_tiles = max_tile_cols * max_tile_rows;
+    if gpu_grid || gpu_grid_check {
+        stage_worst[GRID_RUNS] = RECORD[GRID_RUNS] * (max_tiles as usize + 1);
+    }
     let gpu_pred = gpu_pred_lists::enabled(dec.parser_options);
     if gpu_pred {
         let capacity = FrameLayout::worst(mi_size as u32, max_tiles as u32, cfg.inter_fast, cfg.intra_v2);
@@ -583,8 +585,7 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
     // coefficients and the transform block records of all frames in flight, in chunks of what a 64x64
     // area needs at worst. A frame has at most one mode info record per 4x4 unit and 24 coefficients
     // (16 luma + 2 * 4 chroma) per 4x4 unit, a little more with their counts; a pool holds that for
-    // one frame, or less with the low memory parts, and then a frame that does not fit is a decode
-    // error. No slot has a share of them.
+    // one frame, or less with the low memory parts. No slot has a share of them.
     let (rule, total) = pool_chunks(max_tiles as usize, cfg.low_memory);
     dec.pool_rule = rule;
     dec.pool_total = total;
@@ -712,7 +713,7 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
             request!(
                 assign,
                 td.mi_runs,
-                mem.buffer(2 * size_of::<u32>() * (dec.pool_total[Kind::ModeInfo as usize] + 1), HostRW, c"mi_runs", i)
+                mem.buffer(RECORD[GRID_RUNS] * (dec.pool_total[Kind::ModeInfo as usize] + 1), HostRW, c"mi_runs", i)
             );
         }
         // The two lists of CDEF: written by the thread that records a frame, or, in a decoder for it
@@ -822,11 +823,11 @@ unsafe fn settled_budget(
 }
 
 /// The bytes a decoder may add to its device buffers later, when a stream needs them: a palette buffer
-/// for each slot, and what the buffers of the stages that are created with a part of their worst case
-/// can grow by (`stage_buffers.rs`).
+/// for each slot, the stage buffer growth, and the peak while the replacement pools coexist with
+/// the initial buffers.
 fn deferred_device_bytes(dec: &Av1Core, rcfg: &ResourceConfig) -> usize {
     let slots = rcfg.gpu_pipeline_depth as usize;
-    slots * ((dec.palette_size + 255) & !255) + stage_growth_bytes(dec, slots)
+    slots * ((dec.palette_size + 255) & !255) + stage_growth_bytes(dec, slots) + super::pool_buffers::growth_bytes(dec)
 }
 
 fn configure_parser_buffers(dec: &mut Av1Core, bits: c_int) {
@@ -854,7 +855,11 @@ fn stage_growth_bytes(dec: &Av1Core, slots: usize) -> usize {
         + growth(PRED_BLOCKS)
         + growth(PRED_BLOCKS_WARP)
         + growth(GPU_PRED_SCRATCH)
-        + slots * (growth(INDEX_LIST) + growth(GPU_PRED_TEMPLATES))
+        + slots
+            * (growth(INDEX_LIST)
+                + growth(GPU_PRED_TEMPLATES)
+                + aligned(dec.stage_worst[GRID_RUNS])
+                    .saturating_sub(aligned(RECORD[GRID_RUNS] * (dec.pool_total[Kind::ModeInfo as usize] + 1))))
 }
 
 /// The device bytes [`allocate_buffers`] creates for `rcfg`, and the bytes of the buffers that are created
@@ -1476,8 +1481,8 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
                     false,
                     &format!(
                         "MEMORY budget: device buffers {:.1} MiB + margin {:.1} MiB = {:.1} MiB, the application \
-                         has {:.1} MiB left for the decoder: accepted; palette buffers on first use and stage \
-                         buffers that grow would add up to {:.1} MiB",
+                         has {:.1} MiB left for the decoder: accepted; palette buffers and growth of pools and stage \
+                         buffers can add up to {:.1} MiB",
                         to_mib(planned as u64),
                         to_mib(MEMORY_GUARD_MARGIN),
                         to_mib(needed),
@@ -1489,8 +1494,8 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
                 log(
                     false,
                     &format!(
-                        "MEMORY budget: not checked ({}); device buffers {:.1} MiB, palette buffers on first use \
-                         and stage buffers that grow would add up to {:.1} MiB",
+                        "MEMORY budget: not checked ({}); device buffers {:.1} MiB, palette buffers and growth \
+                         of pools and stage buffers can add up to {:.1} MiB",
                         if callback.is_some() {
                             "the application's callback does not know what is left"
                         } else {
@@ -1509,6 +1514,14 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
         }
         let coefs = &*(*dec).idct_coefs;
         coefs.host_ptr.cast::<u8>().write_bytes(0, coefs.size);
+        if (*dec).gpu_grid == 0 {
+            let mode = Kind::ModeInfo;
+            let chunks = super::pool_buffers::worst(&*dec, mode) + (*dec).pool_total[mode as usize];
+            if (*dec).mi_chunks.try_reserve_exact(chunks).is_err() {
+                return create_failed(dec, &rcfg, Some(&vm_before), "mode info chunk mappings", 0);
+            }
+            (*dec).mi_chunks.resize_with(chunks, Default::default);
+        }
         let pools = Pools::with_test_wait((*dec).pool_total, (*dec).pool_rule, rcfg.pool_test_wait);
         (*dec).pools = Some(Box::new(pools));
 
