@@ -175,12 +175,16 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
   grain, global motion, spatial layers, size changes, scaled references and superres.
   The 10-bit stream with scaled references that stood here as wrong on the console is right: its md5
   references had been made with ffmpeg scaling every frame to the size of the first.
-- **Not yet conformant on every Argon stream** (2026-11-19, first run of the Profile 0 set, see
-  [References](#references)): 34 of the first ~340 valid streams decode to output that differs from
-  the expected md5s, most of them with frame sizes that change within the stream (scaled
-  references), some with one frame fewer than expected or one wrong plane; one stream stops the
-  decoder. All of them differ the same way on v0.5.0-alpha.1: they come from the code rav1g was
-  forked from. The full run and the fixes are in progress.
+- **Conformant on the Argon Profile 0 set** (2026-11-20, see [References](#references) and
+  [testing/argon/RESULTS.md](testing/argon/RESULTS.md)): all 765 valid streams within the decoder's
+  4096x2176 limit decode bit-exact on WARP, every frame against the expected md5s, and all 114 invalid
+  streams are decoded or rejected without a crash, hang or device loss. The 212 streams with larger
+  frames are outside the decoder's limit; Profiles 1 and 2 (4:4:4, 12-bit) are out of scope. The bugs
+  the set found came from the code rav1g was forked from: palette blocks without a residual, a sample
+  of 10-bit intra block copy, overlapped prediction from 128-sample neighbours, film grain chroma on
+  odd sizes, restoration and output buffers too small for 32x32 chroma restoration units and narrow
+  pictures, and mode info pools too small for the densest frames (they now grow when a frame needs
+  it, and normal video uses the same memory as before). CI runs the set on request (`-f argon=true`).
 
 **The Rust port, phase 1, is complete** ([docs/rust-port.md](docs/rust-port.md), 2026-11-12 to
 2026-11-13): the whole D3D12 host is Rust, from the creation of a decoder to the completion thread, with
