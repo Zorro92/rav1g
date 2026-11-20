@@ -1,214 +1,214 @@
-profile0_core	test10051.obu	Sequence maximum 8192x1088 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10053_10523.obu	Sequence maximum 175x2273, 5504x192 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10054_5951.obu	Sequence maximum 7843x1136 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10062.obu	Sequence maximum 5307x200 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10072_2027.obu	Sequence maximum 5504x193 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10075.obu	Sequence maximum 682x3456 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10100_579_8614.obu	Sequence maximum 5520x427 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10101_6947_3480.obu	Sequence maximum 344x3096 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10103.obu	Sequence maximum 6144x384 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10111.obu	Sequence maximum 272x2448 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10121_9817.obu	Sequence maximum 128x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10133.obu	Sequence maximum 128x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10147.obu	Sequence maximum 128x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10152.obu	Sequence maximum 128x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10155.obu	Sequence maximum 128x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10161.obu	Sequence maximum 128x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10162_8919.obu	Sequence maximum 128x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10179.obu	Sequence maximum 103x3096 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10186.obu	Sequence maximum 6144x384 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10190.obu	Sequence maximum 2323x3836 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10192.obu	Sequence maximum 7261x1227 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10197_10063.obu	Sequence maximum 7564x1178 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10198_2305.obu	Sequence maximum 2365x3768 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10202.obu	Sequence maximum 381x2792 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10204.obu	Sequence maximum 682x3456 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10218_6914.obu	Sequence maximum 7396x1205 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10220.obu	Sequence maximum 8192x1088 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10222.obu	Sequence maximum 175x2272 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10230.obu	Sequence maximum 4531x235 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10235_6646_8041.obu	Sequence maximum 8021x1111 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10265_10066_9716.obu	Sequence maximum 381x2791 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10267_88_10509.obu	Sequence maximum 5266x202 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10373_10136.obu	Sequence maximum 128x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10406_9013_10089.obu	Sequence maximum 5613x420 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10434_6644.obu	Sequence maximum 301x3456 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10440.obu	Sequence maximum 682x3456 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10444_10224_831.obu	Sequence maximum 2441x3212, 286x2326 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10446_512_421.obu	Sequence maximum 217x2720 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10455.obu	Sequence maximum 2512x2470 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10460_122_8193.obu	Sequence maximum 502x2455 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10461.obu	Sequence maximum 113x2920 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10467.obu	Sequence maximum 23x3456 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10468_4010_8324.obu	Sequence maximum 871x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10469.obu	Sequence maximum 53x2448 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10482.obu	Sequence maximum 173x2880 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10484.obu	Sequence maximum 256x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10485.obu	Sequence maximum 297x3096 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10487.obu	Sequence maximum 344x3096 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10490_1166.obu	Sequence maximum 172x3556 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10505.obu	Sequence maximum 8192x1088 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10506.obu	Sequence maximum 686x3437 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10516.obu	Sequence maximum 6144x230 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10528_3797_7975.obu	Sequence maximum 7852x1135 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10530.obu	Sequence maximum 8192x1088 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10537_4560.obu	Sequence maximum 6482x1375 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10561.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10567_10791.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10570.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10571_10597_10562.obu	Sequence maximum 16384x2176, 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10572.obu	Sequence maximum 16384x2176 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10573_11003.obu	Sequence maximum 16384x2176 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10574.obu	Sequence maximum 16384x2176 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10575.obu	Sequence maximum 16384x2176 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10576.obu	Sequence maximum 16384x2176 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10577.obu	Sequence maximum 16384x2176 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10578_10581_10610.obu	Sequence maximum 16384x2176, 4096x8704 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10580_10588.obu	Sequence maximum 16384x2176, 4096x8704 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10583.obu	Sequence maximum 4096x8704 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10586.obu	Sequence maximum 4096x8704 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10587.obu	Sequence maximum 4096x8704 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10684_10584.obu	Sequence maximum 4096x8704 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10792_10582_10779.obu	Sequence maximum 4096x8704 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10842_10989_10590.obu	Sequence maximum 4096x8704 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10901_10579_10569.obu	Sequence maximum 16384x2176, 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10981_10589.obu	Sequence maximum 4096x8704 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test10982_10568.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11016_11097.obu	Sequence maximum 16384x2470, 75x8960 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11022_11065_11078.obu	Sequence maximum 16640x2264, 1710x8960, 198x8960 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11023.obu	Sequence maximum 6656x6080 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11030_11013.obu	Sequence maximum 6080x6656 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11044_11059.obu	Sequence maximum 2530x8960, 4352x153 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11050_11095.obu	Sequence maximum 16640x2162, 2048x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11051.obu	Sequence maximum 2012x8960 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11056_11077_11026.obu	Sequence maximum 436x8960, 5120x7904 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11060.obu	Sequence maximum 16640x1267 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11062.obu	Sequence maximum 3391x8960 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11069_11024.obu	Sequence maximum 4940x8192, 5120x7904 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11076_11125_11120.obu	Sequence maximum 13312x3040, 4096x8704, 4864x8320 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11079_11110.obu	Sequence maximum 16640x961, 9728x4160 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11082.obu	Sequence maximum 16384x2176 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11089.obu	Sequence maximum 16384x2470 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11098.obu	Sequence maximum 16384x2176 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11099.obu	Sequence maximum 2204x8960 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11100_11103.obu	Sequence maximum 327x8960 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11105_11061.obu	Sequence maximum 2312x3854, 4940x8192 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11106_11154_11129.obu	Sequence maximum 3356x8960, 346x8960, 9728x4160 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11107_11171_11119.obu	Sequence maximum 16640x342, 4252x8384 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11115_11036_11121.obu	Sequence maximum 608x8960, 6656x6080, 707x8960 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11117.obu	Sequence maximum 9880x4096 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11123.obu	Sequence maximum 2953x8960 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11126_11163.obu	Sequence maximum 7904x5120 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11131_11057_11015.obu	Sequence maximum 16640x2432, 4864x8320, 5504x192 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11132_11109_11047.obu	Sequence maximum 1808x8960, 4864x8320, 6994x5097 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11138_11173_11037.obu	Sequence maximum 16640x2267, 5120x7904, 9728x4160 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11142.obu	Sequence maximum 16384x2176 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11144_11035_11111.obu	Sequence maximum 16640x269, 8192x1088, 9880x4096 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11145.obu	Sequence maximum 6656x6080 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11147.obu	Sequence maximum 2464x3617 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11153.obu	Sequence maximum 8320x4864 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11159_11088.obu	Sequence maximum 16640x604, 6707x1328 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11160_11108_11137.obu	Sequence maximum 16640x1151, 184x8960, 4096x8704 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11166_11017.obu	Sequence maximum 8032x1109, 8320x4864 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11168_11073.obu	Sequence maximum 16640x361, 4940x8192 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11169.obu	Sequence maximum 16640x2277 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11174.obu	Sequence maximum 4940x8192 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11175_11064_11019.obu	Sequence maximum 12160x3328, 354x3004 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11176.obu	Sequence maximum 16640x738 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test11180.obu	Sequence maximum 6080x6656 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test1350_10519_8249.obu	Sequence maximum 4352x153 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test20047.obu	Sequence maximum 1096x8136 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test20049.obu	Sequence maximum 1096x8136 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test2398_10553_1941.obu	Sequence maximum 6848x1301 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test249_10512_868.obu	Sequence maximum 2048x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test3014_10526.obu	Sequence maximum 7192x1239 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test3641_10492_9882.obu	Sequence maximum 2560x3479 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test3731_10470.obu	Sequence maximum 598x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test4918_4715_10166.obu	Sequence maximum 128x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test5062_10236_10250.obu	Sequence maximum 693x3402 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test5787_1353_10447.obu	Sequence maximum 1407x3519 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test6097_8804_10466.obu	Sequence maximum 2176x4095 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test6664_10226_10061.obu	Sequence maximum 2048x4339, 2092x4259 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test6720_10533.obu	Sequence maximum 7135x1249 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test6935_9448_10117.obu	Sequence maximum 128x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test700_9891_10448.obu	Sequence maximum 209x2800 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test7365_1104_10164.obu	Sequence maximum 128x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test7656_9398_10120.obu	Sequence maximum 128x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test7757_10452.obu	Sequence maximum 31x3404 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test8061_10522_1700.obu	Sequence maximum 741x3183 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test8103_10321_10481.obu	Sequence maximum 401x2653 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test8541_2348_10547.obu	Sequence maximum 5363x192 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test9009_2932_10109.obu	Sequence maximum 4352x153 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test9170_9201_10495.obu	Sequence maximum 32x3247 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core	test926_3529_10074.obu	Sequence maximum 6704x1329 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core_special	test15.obu	Sequence maximum 4096x3072 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core_special	test16.obu	Sequence maximum 4096x3072 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core_special	test17.obu	Sequence maximum 8192x4320 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core_special	test18.obu	Sequence maximum 8192x4320 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core_special	test25.obu	Sequence maximum 7680x4320 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core_special	test52.obu	Sequence maximum 4096x2304 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core_special	test53.obu	Sequence maximum 7680x4320 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core_special	test54.obu	Sequence maximum 8192x4096 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_core_special	test55.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_not_annexb	test12258_12326.obu	Sequence maximum 682x3456 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_not_annexb	test12293_12304.obu	Sequence maximum 2225x4004, 4790x222 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_not_annexb	test12294.obu	Sequence maximum 8192x1088 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_not_annexb	test12297.obu	Sequence maximum 6716x1327 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_not_annexb	test12301.obu	Sequence maximum 2048x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_not_annexb	test12318.obu	Sequence maximum 409x3456 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_not_annexb	test12319_12313_12198.obu	Sequence maximum 373x2855 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_not_annexb_special	test15.obu	Sequence maximum 4096x3072 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_not_annexb_special	test16.obu	Sequence maximum 4096x3072 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_not_annexb_special	test17.obu	Sequence maximum 8192x4320 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_not_annexb_special	test18.obu	Sequence maximum 8192x4320 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_not_annexb_special	test25.obu	Sequence maximum 7680x4320 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_not_annexb_special	test52.obu	Sequence maximum 4096x2304 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_not_annexb_special	test53.obu	Sequence maximum 7680x4320 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_not_annexb_special	test54.obu	Sequence maximum 8192x4096 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_not_annexb_special	test55.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test1135.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test12603.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test1502.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test17831.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test23792.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test24029.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test26231.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test27171.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test27916.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test27989.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test29600.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test31182.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test32466.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test33955.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test3427.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test40568.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test40780.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test42333.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test45934.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test50688.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test50799.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test52323.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test53178.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test57766.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test59000.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test60489.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test63365.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test6374.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test65566.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test65749.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test6821.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test69743.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test71301.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test77342.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test777.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test77845.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test79399.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test80007.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test80945.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test82955.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test85450.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test91416.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test92769.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
-profile0_stress	test99320.obu	Sequence maximum 8192x4352 exceeds rav1g-dec's 4096x2176 allocation ceiling
+profile0_core	test10051.obu	Sequence header width above 4096 (declared maxima 8192x1088)
+profile0_core	test10053_10523.obu	Sequence header width above 4096 and height above 2176 (declared maxima 175x2273, 5504x192)
+profile0_core	test10054_5951.obu	Sequence header width above 4096 (declared maxima 7843x1136)
+profile0_core	test10062.obu	Sequence header width above 4096 (declared maxima 5307x200)
+profile0_core	test10072_2027.obu	Sequence header width above 4096 (declared maxima 5504x193)
+profile0_core	test10075.obu	Sequence header height above 2176 (declared maxima 682x3456)
+profile0_core	test10100_579_8614.obu	Sequence header width above 4096 (declared maxima 5520x427)
+profile0_core	test10101_6947_3480.obu	Sequence header height above 2176 (declared maxima 344x3096)
+profile0_core	test10103.obu	Sequence header width above 4096 (declared maxima 6144x384)
+profile0_core	test10111.obu	Sequence header height above 2176 (declared maxima 272x2448)
+profile0_core	test10121_9817.obu	Sequence header height above 2176 (declared maxima 128x4352)
+profile0_core	test10133.obu	Sequence header height above 2176 (declared maxima 128x4352)
+profile0_core	test10147.obu	Sequence header height above 2176 (declared maxima 128x4352)
+profile0_core	test10152.obu	Sequence header height above 2176 (declared maxima 128x4352)
+profile0_core	test10155.obu	Sequence header height above 2176 (declared maxima 128x4352)
+profile0_core	test10161.obu	Sequence header height above 2176 (declared maxima 128x4352)
+profile0_core	test10162_8919.obu	Sequence header height above 2176 (declared maxima 128x4352)
+profile0_core	test10179.obu	Sequence header height above 2176 (declared maxima 103x3096)
+profile0_core	test10186.obu	Sequence header width above 4096 (declared maxima 6144x384)
+profile0_core	test10190.obu	Sequence header height above 2176 (declared maxima 2323x3836)
+profile0_core	test10192.obu	Sequence header width above 4096 (declared maxima 7261x1227)
+profile0_core	test10197_10063.obu	Sequence header width above 4096 (declared maxima 7564x1178)
+profile0_core	test10198_2305.obu	Sequence header height above 2176 (declared maxima 2365x3768)
+profile0_core	test10202.obu	Sequence header height above 2176 (declared maxima 381x2792)
+profile0_core	test10204.obu	Sequence header height above 2176 (declared maxima 682x3456)
+profile0_core	test10218_6914.obu	Sequence header width above 4096 (declared maxima 7396x1205)
+profile0_core	test10220.obu	Sequence header width above 4096 (declared maxima 8192x1088)
+profile0_core	test10222.obu	Sequence header height above 2176 (declared maxima 175x2272)
+profile0_core	test10230.obu	Sequence header width above 4096 (declared maxima 4531x235)
+profile0_core	test10235_6646_8041.obu	Sequence header width above 4096 (declared maxima 8021x1111)
+profile0_core	test10265_10066_9716.obu	Sequence header height above 2176 (declared maxima 381x2791)
+profile0_core	test10267_88_10509.obu	Sequence header width above 4096 (declared maxima 5266x202)
+profile0_core	test10373_10136.obu	Sequence header height above 2176 (declared maxima 128x4352)
+profile0_core	test10406_9013_10089.obu	Sequence header width above 4096 (declared maxima 5613x420)
+profile0_core	test10434_6644.obu	Sequence header height above 2176 (declared maxima 301x3456)
+profile0_core	test10440.obu	Sequence header height above 2176 (declared maxima 682x3456)
+profile0_core	test10444_10224_831.obu	Sequence header height above 2176 (declared maxima 2441x3212, 286x2326)
+profile0_core	test10446_512_421.obu	Sequence header height above 2176 (declared maxima 217x2720)
+profile0_core	test10455.obu	Sequence header height above 2176 (declared maxima 2512x2470)
+profile0_core	test10460_122_8193.obu	Sequence header height above 2176 (declared maxima 502x2455)
+profile0_core	test10461.obu	Sequence header height above 2176 (declared maxima 113x2920)
+profile0_core	test10467.obu	Sequence header height above 2176 (declared maxima 23x3456)
+profile0_core	test10468_4010_8324.obu	Sequence header height above 2176 (declared maxima 871x4352)
+profile0_core	test10469.obu	Sequence header height above 2176 (declared maxima 53x2448)
+profile0_core	test10482.obu	Sequence header height above 2176 (declared maxima 173x2880)
+profile0_core	test10484.obu	Sequence header height above 2176 (declared maxima 256x4352)
+profile0_core	test10485.obu	Sequence header height above 2176 (declared maxima 297x3096)
+profile0_core	test10487.obu	Sequence header height above 2176 (declared maxima 344x3096)
+profile0_core	test10490_1166.obu	Sequence header height above 2176 (declared maxima 172x3556)
+profile0_core	test10505.obu	Sequence header width above 4096 (declared maxima 8192x1088)
+profile0_core	test10506.obu	Sequence header height above 2176 (declared maxima 686x3437)
+profile0_core	test10516.obu	Sequence header width above 4096 (declared maxima 6144x230)
+profile0_core	test10528_3797_7975.obu	Sequence header width above 4096 (declared maxima 7852x1135)
+profile0_core	test10530.obu	Sequence header width above 4096 (declared maxima 8192x1088)
+profile0_core	test10537_4560.obu	Sequence header width above 4096 (declared maxima 6482x1375)
+profile0_core	test10561.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_core	test10567_10791.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_core	test10570.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_core	test10571_10597_10562.obu	Sequence header width above 4096 and height above 2176 (declared maxima 16384x2176, 8192x4352)
+profile0_core	test10572.obu	Sequence header width above 4096 (declared maxima 16384x2176)
+profile0_core	test10573_11003.obu	Sequence header width above 4096 (declared maxima 16384x2176)
+profile0_core	test10574.obu	Sequence header width above 4096 (declared maxima 16384x2176)
+profile0_core	test10575.obu	Sequence header width above 4096 (declared maxima 16384x2176)
+profile0_core	test10576.obu	Sequence header width above 4096 (declared maxima 16384x2176)
+profile0_core	test10577.obu	Sequence header width above 4096 (declared maxima 16384x2176)
+profile0_core	test10578_10581_10610.obu	Sequence header width above 4096 and height above 2176 (declared maxima 16384x2176, 4096x8704)
+profile0_core	test10580_10588.obu	Sequence header width above 4096 and height above 2176 (declared maxima 16384x2176, 4096x8704)
+profile0_core	test10583.obu	Sequence header height above 2176 (declared maxima 4096x8704)
+profile0_core	test10586.obu	Sequence header height above 2176 (declared maxima 4096x8704)
+profile0_core	test10587.obu	Sequence header height above 2176 (declared maxima 4096x8704)
+profile0_core	test10684_10584.obu	Sequence header height above 2176 (declared maxima 4096x8704)
+profile0_core	test10792_10582_10779.obu	Sequence header height above 2176 (declared maxima 4096x8704)
+profile0_core	test10842_10989_10590.obu	Sequence header height above 2176 (declared maxima 4096x8704)
+profile0_core	test10901_10579_10569.obu	Sequence header width above 4096 and height above 2176 (declared maxima 16384x2176, 8192x4352)
+profile0_core	test10981_10589.obu	Sequence header height above 2176 (declared maxima 4096x8704)
+profile0_core	test10982_10568.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_core	test11016_11097.obu	Sequence header width above 4096 and height above 2176 (declared maxima 16384x2470, 75x8960)
+profile0_core	test11022_11065_11078.obu	Sequence header width above 4096 and height above 2176 (declared maxima 16640x2264, 1710x8960, 198x8960)
+profile0_core	test11023.obu	Sequence header width above 4096 and height above 2176 (declared maxima 6656x6080)
+profile0_core	test11030_11013.obu	Sequence header width above 4096 and height above 2176 (declared maxima 6080x6656)
+profile0_core	test11044_11059.obu	Sequence header width above 4096 and height above 2176 (declared maxima 2530x8960, 4352x153)
+profile0_core	test11050_11095.obu	Sequence header width above 4096 and height above 2176 (declared maxima 16640x2162, 2048x4352)
+profile0_core	test11051.obu	Sequence header height above 2176 (declared maxima 2012x8960)
+profile0_core	test11056_11077_11026.obu	Sequence header width above 4096 and height above 2176 (declared maxima 436x8960, 5120x7904)
+profile0_core	test11060.obu	Sequence header width above 4096 (declared maxima 16640x1267)
+profile0_core	test11062.obu	Sequence header height above 2176 (declared maxima 3391x8960)
+profile0_core	test11069_11024.obu	Sequence header width above 4096 and height above 2176 (declared maxima 4940x8192, 5120x7904)
+profile0_core	test11076_11125_11120.obu	Sequence header width above 4096 and height above 2176 (declared maxima 13312x3040, 4096x8704, 4864x8320)
+profile0_core	test11079_11110.obu	Sequence header width above 4096 and height above 2176 (declared maxima 16640x961, 9728x4160)
+profile0_core	test11082.obu	Sequence header width above 4096 (declared maxima 16384x2176)
+profile0_core	test11089.obu	Sequence header width above 4096 and height above 2176 (declared maxima 16384x2470)
+profile0_core	test11098.obu	Sequence header width above 4096 (declared maxima 16384x2176)
+profile0_core	test11099.obu	Sequence header height above 2176 (declared maxima 2204x8960)
+profile0_core	test11100_11103.obu	Sequence header height above 2176 (declared maxima 327x8960)
+profile0_core	test11105_11061.obu	Sequence header width above 4096 and height above 2176 (declared maxima 2312x3854, 4940x8192)
+profile0_core	test11106_11154_11129.obu	Sequence header width above 4096 and height above 2176 (declared maxima 3356x8960, 346x8960, 9728x4160)
+profile0_core	test11107_11171_11119.obu	Sequence header width above 4096 and height above 2176 (declared maxima 16640x342, 4252x8384)
+profile0_core	test11115_11036_11121.obu	Sequence header width above 4096 and height above 2176 (declared maxima 608x8960, 6656x6080, 707x8960)
+profile0_core	test11117.obu	Sequence header width above 4096 and height above 2176 (declared maxima 9880x4096)
+profile0_core	test11123.obu	Sequence header height above 2176 (declared maxima 2953x8960)
+profile0_core	test11126_11163.obu	Sequence header width above 4096 and height above 2176 (declared maxima 7904x5120)
+profile0_core	test11131_11057_11015.obu	Sequence header width above 4096 and height above 2176 (declared maxima 16640x2432, 4864x8320, 5504x192)
+profile0_core	test11132_11109_11047.obu	Sequence header width above 4096 and height above 2176 (declared maxima 1808x8960, 4864x8320, 6994x5097)
+profile0_core	test11138_11173_11037.obu	Sequence header width above 4096 and height above 2176 (declared maxima 16640x2267, 5120x7904, 9728x4160)
+profile0_core	test11142.obu	Sequence header width above 4096 (declared maxima 16384x2176)
+profile0_core	test11144_11035_11111.obu	Sequence header width above 4096 and height above 2176 (declared maxima 16640x269, 8192x1088, 9880x4096)
+profile0_core	test11145.obu	Sequence header width above 4096 and height above 2176 (declared maxima 6656x6080)
+profile0_core	test11147.obu	Sequence header height above 2176 (declared maxima 2464x3617)
+profile0_core	test11153.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8320x4864)
+profile0_core	test11159_11088.obu	Sequence header width above 4096 (declared maxima 16640x604, 6707x1328)
+profile0_core	test11160_11108_11137.obu	Sequence header width above 4096 and height above 2176 (declared maxima 16640x1151, 184x8960, 4096x8704)
+profile0_core	test11166_11017.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8032x1109, 8320x4864)
+profile0_core	test11168_11073.obu	Sequence header width above 4096 and height above 2176 (declared maxima 16640x361, 4940x8192)
+profile0_core	test11169.obu	Sequence header width above 4096 and height above 2176 (declared maxima 16640x2277)
+profile0_core	test11174.obu	Sequence header width above 4096 and height above 2176 (declared maxima 4940x8192)
+profile0_core	test11175_11064_11019.obu	Sequence header width above 4096 and height above 2176 (declared maxima 12160x3328, 354x3004)
+profile0_core	test11176.obu	Sequence header width above 4096 (declared maxima 16640x738)
+profile0_core	test11180.obu	Sequence header width above 4096 and height above 2176 (declared maxima 6080x6656)
+profile0_core	test1350_10519_8249.obu	Sequence header width above 4096 (declared maxima 4352x153)
+profile0_core	test20047.obu	Sequence header height above 2176 (declared maxima 1096x8136)
+profile0_core	test20049.obu	Sequence header height above 2176 (declared maxima 1096x8136)
+profile0_core	test2398_10553_1941.obu	Sequence header width above 4096 (declared maxima 6848x1301)
+profile0_core	test249_10512_868.obu	Sequence header height above 2176 (declared maxima 2048x4352)
+profile0_core	test3014_10526.obu	Sequence header width above 4096 (declared maxima 7192x1239)
+profile0_core	test3641_10492_9882.obu	Sequence header height above 2176 (declared maxima 2560x3479)
+profile0_core	test3731_10470.obu	Sequence header height above 2176 (declared maxima 598x4352)
+profile0_core	test4918_4715_10166.obu	Sequence header height above 2176 (declared maxima 128x4352)
+profile0_core	test5062_10236_10250.obu	Sequence header height above 2176 (declared maxima 693x3402)
+profile0_core	test5787_1353_10447.obu	Sequence header height above 2176 (declared maxima 1407x3519)
+profile0_core	test6097_8804_10466.obu	Sequence header height above 2176 (declared maxima 2176x4095)
+profile0_core	test6664_10226_10061.obu	Sequence header height above 2176 (declared maxima 2048x4339, 2092x4259)
+profile0_core	test6720_10533.obu	Sequence header width above 4096 (declared maxima 7135x1249)
+profile0_core	test6935_9448_10117.obu	Sequence header height above 2176 (declared maxima 128x4352)
+profile0_core	test700_9891_10448.obu	Sequence header height above 2176 (declared maxima 209x2800)
+profile0_core	test7365_1104_10164.obu	Sequence header height above 2176 (declared maxima 128x4352)
+profile0_core	test7656_9398_10120.obu	Sequence header height above 2176 (declared maxima 128x4352)
+profile0_core	test7757_10452.obu	Sequence header height above 2176 (declared maxima 31x3404)
+profile0_core	test8061_10522_1700.obu	Sequence header height above 2176 (declared maxima 741x3183)
+profile0_core	test8103_10321_10481.obu	Sequence header height above 2176 (declared maxima 401x2653)
+profile0_core	test8541_2348_10547.obu	Sequence header width above 4096 (declared maxima 5363x192)
+profile0_core	test9009_2932_10109.obu	Sequence header width above 4096 (declared maxima 4352x153)
+profile0_core	test9170_9201_10495.obu	Sequence header height above 2176 (declared maxima 32x3247)
+profile0_core	test926_3529_10074.obu	Sequence header width above 4096 (declared maxima 6704x1329)
+profile0_core_special	test15.obu	Sequence header height above 2176 (declared maxima 4096x3072)
+profile0_core_special	test16.obu	Sequence header height above 2176 (declared maxima 4096x3072)
+profile0_core_special	test17.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4320)
+profile0_core_special	test18.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4320)
+profile0_core_special	test25.obu	Sequence header width above 4096 and height above 2176 (declared maxima 7680x4320)
+profile0_core_special	test52.obu	Sequence header height above 2176 (declared maxima 4096x2304)
+profile0_core_special	test53.obu	Sequence header width above 4096 and height above 2176 (declared maxima 7680x4320)
+profile0_core_special	test54.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4096)
+profile0_core_special	test55.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_not_annexb	test12258_12326.obu	Sequence header height above 2176 (declared maxima 682x3456)
+profile0_not_annexb	test12293_12304.obu	Sequence header width above 4096 and height above 2176 (declared maxima 2225x4004, 4790x222)
+profile0_not_annexb	test12294.obu	Sequence header width above 4096 (declared maxima 8192x1088)
+profile0_not_annexb	test12297.obu	Sequence header width above 4096 (declared maxima 6716x1327)
+profile0_not_annexb	test12301.obu	Sequence header height above 2176 (declared maxima 2048x4352)
+profile0_not_annexb	test12318.obu	Sequence header height above 2176 (declared maxima 409x3456)
+profile0_not_annexb	test12319_12313_12198.obu	Sequence header height above 2176 (declared maxima 373x2855)
+profile0_not_annexb_special	test15.obu	Sequence header height above 2176 (declared maxima 4096x3072)
+profile0_not_annexb_special	test16.obu	Sequence header height above 2176 (declared maxima 4096x3072)
+profile0_not_annexb_special	test17.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4320)
+profile0_not_annexb_special	test18.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4320)
+profile0_not_annexb_special	test25.obu	Sequence header width above 4096 and height above 2176 (declared maxima 7680x4320)
+profile0_not_annexb_special	test52.obu	Sequence header height above 2176 (declared maxima 4096x2304)
+profile0_not_annexb_special	test53.obu	Sequence header width above 4096 and height above 2176 (declared maxima 7680x4320)
+profile0_not_annexb_special	test54.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4096)
+profile0_not_annexb_special	test55.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test1135.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test12603.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test1502.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test17831.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test23792.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test24029.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test26231.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test27171.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test27916.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test27989.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test29600.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test31182.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test32466.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test33955.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test3427.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test40568.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test40780.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test42333.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test45934.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test50688.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test50799.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test52323.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test53178.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test57766.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test59000.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test60489.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test63365.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test6374.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test65566.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test65749.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test6821.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test69743.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test71301.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test77342.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test777.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test77845.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test79399.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test80007.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test80945.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test82955.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test85450.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test91416.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test92769.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
+profile0_stress	test99320.obu	Sequence header width above 4096 and height above 2176 (declared maxima 8192x4352)
 profile0_large_scale_tile	*	Large-scale tile packing and tile-list decoding are outside the supported suite
 profile0_large_scale_tile_special	*	Large-scale tile packing and tile-list decoding are outside the supported suite
