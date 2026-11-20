@@ -69,7 +69,13 @@ static const uint low_bits[11] = {0, 1, 3, 7, 15, 31, 63, 127, 255, 511, 1023};
 
 // Each transform owns 20 words per four lanes on each edge, including room for the corner and
 // upsampling. DC and CFL blocks use the same space for their partial sums.
+#ifdef INTRA_EDGE_BANKS
+groupshared int edges[WG_SIZE * 10];
+#define EDGE(side, index) edges[index]
+#else
 groupshared int edges[2][(WG_SIZE / 4) * 20];
+#define EDGE(side, index) edges[side][index]
+#endif
 
 #ifndef INTRA_MAIN_LEGACY
 int reduction_stride(int base, int wi, int wi_count, int terms) {
@@ -86,7 +92,7 @@ int reduction_stride(int base, int wi, int wi_count, int terms) {
 
 int sum_partials(int edge, int base, int wi, int count, int step) {
   int sum = 0;
-  [loop] for (int i = wi; i < count; i += step) sum += edges[edge][base + i];
+  [loop] for (int i = wi; i < count; i += step) sum += EDGE(edge, base + i);
   if (step > 1) sum = WaveActiveSum(sum);
   return sum;
 }
@@ -96,15 +102,47 @@ int filter_edge(int edge, int base, int i, int last, int strength) {
   const int outer = (0x2000 >> (4 * strength)) & 15;
   const int inner = (0x4540 >> (4 * strength)) & 15;
   const int center = (0x4680 >> (4 * strength)) & 15;
-  return (8 + outer * (edges[edge][base + max(i - 1, 0)] + edges[edge][base + min(i + 3, last)]) +
-          inner * (edges[edge][base + i] + edges[edge][base + min(i + 2, last)]) +
-          center * edges[edge][base + i + 1]) >> 4;
+  return (8 + outer * (EDGE(edge, base + max(i - 1, 0)) + EDGE(edge, base + min(i + 3, last))) +
+          inner * (EDGE(edge, base + i) + EDGE(edge, base + min(i + 2, last))) +
+          center * EDGE(edge, base + i + 1)) >> 4;
 }
 
 int upsample_edge(int p0, int p1, int p2, int p3) {
   return clamp((-p0 + 9 * (p1 + p2) - p3 + 8) >> 4, 0, 1023);
 }
 
+#ifdef INTRA_EDGE_BANKS
+// Read the raw edge and publish the prepared samples in a disjoint range.
+// Filtering and upsampling are mutually exclusive for a given edge in
+// gen_pred_blocks. Upsampling preserves the original even samples.
+void prepare_bank(int raw, int prepared, int wi, int wi_count, int count, int upsample,
+                  int filter_count, int strength, int need_corner) {
+  if (raw == prepared) return;
+  if (wi == 0 && need_corner) {
+    EDGE(0, prepared - 2) = EDGE(0, raw - 2);
+    if (!upsample) EDGE(0, prepared - 1) = EDGE(0, raw - 1);
+  }
+  if (upsample) {
+    if (wi >= (count >> 1)) return;
+    const int i = wi * 2;
+    const int p0 = EDGE(0, raw + i - 2);
+    const int p1 = EDGE(0, raw + i - 1);
+    const int p2 = EDGE(0, raw + i);
+    const int p3 = EDGE(0, raw + i + 1);
+    const int p4 = EDGE(0, raw + min(i + 2, count - 1));
+    EDGE(0, prepared + 2 * i - 1) = upsample_edge(p0, p1, p2, p3);
+    EDGE(0, prepared + 2 * i) = p2;
+    EDGE(0, prepared + 2 * i + 1) = upsample_edge(p1, p2, p3, p4);
+    EDGE(0, prepared + 2 * i + 2) = p3;
+  } else {
+    [loop] for (int i = wi; i < count; i += wi_count) {
+      EDGE(0, prepared + i) = i < filter_count
+        ? filter_edge(0, raw - need_corner, i, filter_count, strength)
+        : EDGE(0, raw + i);
+    }
+  }
+}
+#else
 // In gen_pred_blocks.hlsl, an edge is upsampled only for a small enough block and an angle
 // difference below 40, where its filter strength is zero. Each lane prepares its outputs
 // from the raw edge here, then writes them back after every lane has finished reading.
@@ -113,11 +151,11 @@ int4 prepare_edge(int edge, int base, int wi, int wi_count, int count, int upsam
   int4 values = 0;
   if (upsample && wi < (count >> 1)) {
     const int i = wi * 2;
-    const int p0 = edges[edge][base + i - 2];
-    const int p1 = edges[edge][base + i - 1];
-    const int p2 = edges[edge][base + i];
-    const int p3 = edges[edge][base + i + 1];
-    const int p4 = edges[edge][base + min(i + 2, count - 1)];
+    const int p0 = EDGE(edge, base + i - 2);
+    const int p1 = EDGE(edge, base + i - 1);
+    const int p2 = EDGE(edge, base + i);
+    const int p3 = EDGE(edge, base + i + 1);
+    const int p4 = EDGE(edge, base + min(i + 2, count - 1));
     values = int4(upsample_edge(p0, p1, p2, p3), p2, upsample_edge(p1, p2, p3, p4), p3);
   } else if (strength && wi < filter_count) {
     values.x = filter_edge(edge, base - need_aboveleft, wi, filter_count, strength);
@@ -131,15 +169,17 @@ void write_edge(int edge, int base, int wi, int wi_count, int count, int upsampl
                 int filter_count, int strength, int4 values) {
   if (upsample && wi < (count >> 1)) {
     const int i = base + wi * 4;
-    edges[edge][i - 1] = values.x;
-    edges[edge][i] = values.y;
-    edges[edge][i + 1] = values.z;
-    edges[edge][i + 2] = values.w;
+    EDGE(edge, i - 1) = values.x;
+    EDGE(edge, i) = values.y;
+    EDGE(edge, i + 1) = values.z;
+    EDGE(edge, i + 2) = values.w;
   } else if (strength && wi < filter_count) {
-    edges[edge][base + wi] = values.x;
-    if (wi + wi_count < filter_count) edges[edge][base + wi + wi_count] = values.y;
+    EDGE(edge, base + wi) = values.x;
+    if (wi + wi_count < filter_count) EDGE(edge, base + wi + wi_count) = values.y;
   }
 }
+
+#endif
 
 uint load_above_pair(int corner, int wi, int available) {
   uint pair = dst_frame.Load(corner + 4 + 4 * min(wi, available - 1));
@@ -280,6 +320,13 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
   const int left_available = ((block.y >> 16) & 63) << 2;
 
   const int mode = (block.y >> 6) & 15;
+#ifdef INTRA_EDGE_BANKS
+  // A zero CfL alpha adds zero to the DC prediction. The sibling chroma
+  // plane keeps its own alpha, and the scheduler still accounts for luma.
+  const bool cfl = mode == MODE_CFL && ((block.y >> 22) & 63) != 16;
+#else
+#define cfl (mode == MODE_CFL)
+#endif
 
   const int mode_angle = (block.y >> 28) & 7;
   int4 params = cb_mode_params_lut[mode][mode_angle];
@@ -315,7 +362,11 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
   const int stride = cb_planes[plane].x;
   const int corner = cb_planes[plane].y + ((bx << 1) - 4) + (by - 1) * stride;
 
+#ifdef INTRA_EDGE_BANKS
+  const int local_start = (thread.x & (WG_SIZE - 1)) - wi;
+#else
   const int loc_base = (((thread.x & (WG_SIZE - 1)) - wi) >> 2) * 20 + 2;
+#endif
   const int need_above = (params.z >> NeedAboveShift) & 1;
   const int need_right = (params.z >> NeedRightShift) & 1;
   const int need_left = (params.z >> NeedLeftShift) & 1;
@@ -339,6 +390,26 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
                               ? min(left_available, bh) + need_bot * bw + need_aboveleft - 1
                               : 0;
 
+#ifdef INTRA_EDGE_BANKS
+  // Keep the same 40 words per four lanes: 10 for each raw edge and 20 for
+  // preparation, including each edge's two corner slots. For 4x4, a zone 1/3
+  // edge can span eight raw or sixteen prepared samples; it takes the entire
+  // prepared range. With both edges (zone 2) each fits in half. Larger
+  // transforms have proportionally more space, since the range scales with area.
+  const int raw_above = local_start * 10 + 2;
+  const int raw_stride = (wi_count >> 1) * 5;
+  const int raw_left = raw_above + raw_stride;
+  const int bank_start = raw_left + raw_stride;
+  const bool process_above = above_count && (upsample_above || (strength_above && filter_above));
+  const bool process_left = left_count && (upsample_left || (strength_left && filter_left));
+  const int prepared_above = process_above ? bank_start : raw_above;
+  const int prepared_left = process_left ? bank_start + (process_above ? raw_stride : 0) : raw_left;
+#else
+#define raw_above loc_base
+#define raw_left loc_base
+#define edge_base loc_base
+#endif
+
   int4 luma = 0;
   // DC and CFL share the first two phases with edge preparation. Each active lane contributes
   // up to two above pixels and one left pixel to DC, and four subsampled luma pixels to CFL.
@@ -353,11 +424,11 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
         sum = (pair & 1023) + ((pair >> 16) & 1023);
       }
       if (wi < dc_left) sum += load_left(corner, stride, wi, left_available);
-      edges[EDGE_ABOVE][loc_base + wi] = sum;
+      EDGE(EDGE_ABOVE, raw_above + wi) = sum;
     }
-    if (mode == MODE_CFL) {
+    if (cfl) {
       luma = cfl_luma_row(block.z, bx, by, x0, y);
-      edges[EDGE_LEFT][loc_base + wi] = luma.x + luma.y + luma.z + luma.w;
+      EDGE(EDGE_LEFT, raw_left + wi) = luma.x + luma.y + luma.z + luma.w;
     }
   } else if (mode < MODE_INTRA_BC && !straight && thread.x < cb_wi_count) {
     int first_above = 0;
@@ -371,8 +442,8 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
         pair = p | (p << 16);
       }
       first_above = pair & 1023;
-      edges[EDGE_ABOVE][loc_base + wi * 2] = first_above;
-      edges[EDGE_ABOVE][loc_base + wi * 2 + 1] = (pair >> 16) & 1023;
+      EDGE(EDGE_ABOVE, raw_above + wi * 2) = first_above;
+      EDGE(EDGE_ABOVE, raw_above + wi * 2 + 1) = (pair >> 16) & 1023;
     }
     if (wi < left_count || wi == 0) {
       first_left = 513;
@@ -382,12 +453,12 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
         // The missing column repeats the first above pixel. Load it directly to avoid a group sync.
         first_left = wi == 0 ? first_above : dst_frame.Load(corner + 4) & 1023;
       }
-      edges[EDGE_LEFT][loc_base + wi] = first_left;
+      EDGE(EDGE_LEFT, raw_left + wi) = first_left;
     }
     if (wi + wi_count < left_count) {
       int value = first_left;
       if (left_available) value = load_left(corner, stride, wi + wi_count, left_available);
-      edges[EDGE_LEFT][loc_base + wi + wi_count] = value;
+      EDGE(EDGE_LEFT, raw_left + wi + wi_count) = value;
     }
 
     if (wi == 0 && need_aboveleft) {
@@ -395,57 +466,67 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
       if (left_available && above_available) topleft = dst_frame.Load(corner) >> 16;
       if ((params.z & FilterAboveLeftFlag) && bw + bh >= 24 && cb_flags.x)
         topleft = ((first_left + first_above) * 5 + topleft * 6 + 8) >> 4;
-      edges[EDGE_ABOVE][loc_base - 1] = topleft;
-      edges[EDGE_ABOVE][loc_base - 2] = topleft;
-      edges[EDGE_LEFT][loc_base - 1] = topleft;
-      edges[EDGE_LEFT][loc_base - 2] = topleft;
+      EDGE(EDGE_ABOVE, raw_above - 1) = topleft;
+      EDGE(EDGE_ABOVE, raw_above - 2) = topleft;
+      EDGE(EDGE_LEFT, raw_left - 1) = topleft;
+      EDGE(EDGE_LEFT, raw_left - 2) = topleft;
     }
   }
 
   GroupMemoryBarrierWithGroupSync();
 
+#ifndef INTRA_EDGE_BANKS
   int4 next_above = 0;
   int4 next_left = 0;
   if (directional) {
-    next_above = prepare_edge(EDGE_ABOVE, loc_base, wi, wi_count, above_count, upsample_above,
+    next_above = prepare_edge(EDGE_ABOVE, raw_above, wi, wi_count, above_count, upsample_above,
                               filter_above, strength_above, need_aboveleft);
-    next_left = prepare_edge(EDGE_LEFT, loc_base, wi, wi_count, left_count, upsample_left,
+    next_left = prepare_edge(EDGE_LEFT, raw_left, wi, wi_count, left_count, upsample_left,
                              filter_left, strength_left, need_aboveleft);
+#else
+  if (directional) {
+    prepare_bank(raw_above, prepared_above, wi, wi_count, above_count, upsample_above,
+                 filter_above, strength_above, need_aboveleft);
+    prepare_bank(raw_left, prepared_left, wi, wi_count, left_count, upsample_left,
+                 filter_left, strength_left, need_aboveleft);
+#endif
 #ifdef INTRA_MAIN_LEGACY
   } else if (mode >= MODE_DC && wi == 0) {
     const uint count = dc_above * 2 + dc_left;
     uint sum = count >> 1;
-    [loop] for (int i = 0; i < dc_terms; ++i) sum += edges[EDGE_ABOVE][loc_base + i];
-    edges[EDGE_ABOVE][loc_base - 1] = count ? sum / count : 512;
+    [loop] for (int i = 0; i < dc_terms; ++i) sum += EDGE(EDGE_ABOVE, raw_above + i);
+    EDGE(EDGE_ABOVE, raw_above - 1) = count ? sum / count : 512;
 
-    if (mode == MODE_CFL) {
+    if (cfl) {
       int total = 0;
-      [loop] for (int i = 0; i < wi_count; ++i) total += edges[EDGE_LEFT][loc_base + i];
-      edges[EDGE_LEFT][loc_base - 1] = (total + (2 << bsize_log)) >> (bsize_log + 2);
+      [loop] for (int i = 0; i < wi_count; ++i) total += EDGE(EDGE_LEFT, raw_left + i);
+      EDGE(EDGE_LEFT, raw_left - 1) = (total + (2 << bsize_log)) >> (bsize_log + 2);
     }
 #else
   } else if (mode >= MODE_DC) {
-    const int step = reduction_stride(loc_base, wi, wi_count, mode == MODE_CFL ? wi_count : dc_terms);
+    const int step = reduction_stride(raw_above, wi, wi_count, cfl ? wi_count : dc_terms);
     if (step > 1 || wi == 0) {
       const uint count = dc_above * 2 + dc_left;
-      const uint dc = sum_partials(EDGE_ABOVE, loc_base, wi, dc_terms, step);
-      if (wi == 0) edges[EDGE_ABOVE][loc_base - 1] = count ? (dc + (count >> 1)) / count : 512;
+      const uint dc = sum_partials(EDGE_ABOVE, raw_above, wi, dc_terms, step);
+      if (wi == 0) EDGE(EDGE_ABOVE, raw_above - 1) = count ? (dc + (count >> 1)) / count : 512;
 
-      if (mode == MODE_CFL) {
-        const int total = sum_partials(EDGE_LEFT, loc_base, wi, wi_count, step);
-        if (wi == 0) edges[EDGE_LEFT][loc_base - 1] = (total + (2 << bsize_log)) >> (bsize_log + 2);
+      if (cfl) {
+        const int total = sum_partials(EDGE_LEFT, raw_left, wi, wi_count, step);
+        if (wi == 0) EDGE(EDGE_LEFT, raw_left - 1) = (total + (2 << bsize_log)) >> (bsize_log + 2);
       }
     }
 #endif
   }
 
+#ifndef INTRA_EDGE_BANKS
   GroupMemoryBarrierWithGroupSync();
   if (directional) {
-    write_edge(EDGE_ABOVE, loc_base, wi, wi_count, above_count, upsample_above,
+    write_edge(EDGE_ABOVE, raw_above, wi, wi_count, above_count, upsample_above,
                filter_above, strength_above, next_above);
-    write_edge(EDGE_LEFT, loc_base, wi, wi_count, left_count, upsample_left,
+    write_edge(EDGE_LEFT, raw_left, wi, wi_count, left_count, upsample_left,
                filter_left, strength_left, next_left);
   }
+#endif
 
   GroupMemoryBarrierWithGroupSync();
   if (thread.x >= cb_wi_count) return;
@@ -491,9 +572,9 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
   if (straight) {
     pixels = predict_straight(mode == 0, corner, stride, x0, y, above_available, left_available);
   } else if (mode >= MODE_DC) {
-    const uint dc = edges[EDGE_ABOVE][loc_base - 1];
-    if (mode == MODE_CFL) {
-      const int avrg = edges[EDGE_LEFT][loc_base - 1];
+    const uint dc = EDGE(EDGE_ABOVE, raw_above - 1);
+    if (cfl) {
+      const int avrg = EDGE(EDGE_LEFT, raw_left - 1);
       const int alpha = ((block.y >> 22) & 63) - 16;
       pixels.x = compute_cfl_pixel(dc, (luma.x - avrg) * alpha);
       pixels.x |= compute_cfl_pixel(dc, (luma.y - avrg) * alpha) << 16;
@@ -521,10 +602,13 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
         const int fraction = from_above ? frac_x : ((dy << upsample_left) & 63) >> 1;
         const int edge = from_above ? EDGE_ABOVE : EDGE_LEFT;
         const int last = from_above ? last_x : last_y;
-        const int p0 = edges[edge][loc_base + clamp(base, -2, last)];
+#ifdef INTRA_EDGE_BANKS
+        const int edge_base = from_above ? prepared_above : prepared_left;
+#endif
+        const int p0 = EDGE(edge, edge_base + clamp(base, -2, last));
         int val = p0;
         if (fraction) {
-          const int p1 = edges[edge][loc_base + clamp(base + 1, -2, last)];
+          const int p1 = EDGE(edge, edge_base + clamp(base + 1, -2, last));
           val = p0 + ((fraction * (p1 - p0) + 16) >> 5);
         }
         const uint packed = (uint)clamp(val, 0, 1023) << ((i & 1) * 16);
@@ -532,12 +616,12 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
         else pixels.y |= packed;
       }
     } else if (mode == MODE_PAETH) {
-      const int left = edges[EDGE_LEFT][loc_base + y];
-      const int corner_pixel = edges[EDGE_ABOVE][loc_base - 1];
+      const int left = EDGE(EDGE_LEFT, raw_left + y);
+      const int corner_pixel = EDGE(EDGE_ABOVE, raw_above - 1);
       const int diff_top = corner_pixel - left;
       const int dt = abs(diff_top);
       [loop] for (int i = 0; i < 4; ++i) {
-        const int top = edges[EDGE_ABOVE][loc_base + x0 + i];
+        const int top = EDGE(EDGE_ABOVE, raw_above + x0 + i);
         const int diff_left = corner_pixel - top;
         const int diff_corner = abs(diff_top + diff_left);
         const int dl = abs(diff_left);
@@ -555,16 +639,16 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
       int right = 0;
       if (mode_info & SmoothV) {
         vertical_weight = cb_sm_weight_arrays[bh + y].x;
-        bottom_term = (256 - vertical_weight) * edges[EDGE_LEFT][loc_base + bh - 1];
+        bottom_term = (256 - vertical_weight) * EDGE(EDGE_LEFT, raw_left + bh - 1);
       }
       if (mode_info & SmoothH) {
-        left = edges[EDGE_LEFT][loc_base + y];
-        right = edges[EDGE_ABOVE][loc_base + bw - 1];
+        left = EDGE(EDGE_LEFT, raw_left + y);
+        right = EDGE(EDGE_ABOVE, raw_above + bw - 1);
       }
       [loop] for (int i = 0; i < 4; ++i) {
         const int x = x0 + i;
         int sum = bottom_term;
-        if (mode_info & SmoothV) sum += vertical_weight * edges[EDGE_ABOVE][loc_base + x];
+        if (mode_info & SmoothV) sum += vertical_weight * EDGE(EDGE_ABOVE, raw_above + x);
         if (mode_info & SmoothH) sum += 256 * right + cb_sm_weight_arrays[bw + x].x * (left - right);
         const uint packed = (uint)clamp((sum + (1 << (params.w - 1))) >> params.w, 0, 1023) << ((i & 1) * 16);
         if (i < 2) pixels.x |= packed;

@@ -49,6 +49,7 @@ to_cpp() {
 
 to_cpp "$shaders/intra_main.hlsl" > "$work/intra_main.gen.h"
 to_cpp "$shaders/intra_main_hbd.hlsl" > "$work/intra_main_hbd.gen.h"
+to_cpp "$shaders/intra_main_banked_hbd.hlsl" > "$work/intra_main_banked_hbd.gen.h"
 to_cpp "$shaders/intra_main_legacy.hlsl" > "$work/intra_main_legacy.gen.h"
 to_cpp "$shaders/intra_main_hbd_legacy.hlsl" > "$work/intra_main_hbd_legacy.gen.h"
 to_cpp "$shaders/intra_filter.hlsl" > "$work/intra_filter.gen.h"
@@ -102,7 +103,7 @@ build() {
   flags="$flags -I $1 -I $here -I $src/libav1/dx ${2:-}"
   rm -f "$1"/*.o
   for shader in intra_main:0 intra_main_hbd:0 intra_main_legacy:0 intra_main_hbd_legacy:0 \
-    intra_filter:1 intra_filter_legacy:1 intra_filter_hbd:1 intra_v2:2 intra_v2_hbd:2; do
+    intra_filter:1 intra_filter_legacy:1 intra_filter_hbd:1 intra_main_banked_hbd:0 intra_v2:2 intra_v2_hbd:2; do
     name=${shader%:*}
     hbd=
     case $name in

@@ -133,6 +133,7 @@ static void run_group(const ShaderApi *api, uint32_t group, int threads, uint64_
   g_tracker.group++;
   gs_state.shader = api == &intra_main_api       ? "intra_main.hlsl"
                     : api == &intra_main_hbd_api   ? "intra_main_hbd.hlsl"
+                    : api == &intra_main_banked_hbd_api ? "intra_main_banked_hbd.hlsl"
                     : api == &intra_main_legacy_api ? "intra_main_legacy.hlsl"
                     : api == &intra_main_hbd_legacy_api ? "intra_main_hbd_legacy.hlsl"
                     : api == &intra_filter_api     ? "intra_filter.hlsl"
@@ -140,10 +141,10 @@ static void run_group(const ShaderApi *api, uint32_t group, int threads, uint64_
                     : api == &intra_filter_hbd_api ? "intra_filter_hbd.hlsl"
                     : api == &intra_v2_hbd_api     ? "intra_v2.hlsl (10-bit)"
                                                    : "intra_v2.hlsl";
-  gs_state.track_unwritten = api == &intra_main_api || api == &intra_main_hbd_api || api == &intra_filter_api;
+  const bool use_waves = api == &intra_main_api || api == &intra_main_hbd_api || api == &intra_main_banked_hbd_api;
+  gs_state.track_unwritten = use_waves || api == &intra_filter_api;
   g_tracker.require_unique_stores = api == &intra_filter_api;
   GroupContext context = { api, group };
-  const bool use_waves = api == &intra_main_api || api == &intra_main_hbd_api;
   gs_run_group(threads, thread_body, &context, garbage, use_waves ? complete_waves : nullptr);
 }
 
@@ -1168,6 +1169,12 @@ int main(int argc, char **argv) {
         wave_layout = wave_layouts[(layout * 3 + n) % (sizeof(wave_layouts) / sizeof(wave_layouts[0]))];
         const RunResult r1b = run_main(g, f, &optimized, rng.u32(), main_api, nullptr);
         const RunResult r2 = run_v2(g, f, &schedule, &v2, rng.u32(), &cov);
+        std::vector<uint8_t> banked;
+        RunResult rb = {};
+        if (hbd) {
+          banked = f.pixels;
+          rb = run_main(g, f, &banked, rng.state, &intra_main_banked_hbd_api, nullptr);
+        }
         original_races += r1.races_group;
 
         const char *problem = nullptr;
@@ -1194,6 +1201,11 @@ int main(int argc, char **argv) {
           problem = "intra_v2 reads what another thread group of the same step wrote";
         } else if (r2.races_thread) {
           problem = "intra_v2 reads what another thread wrote in the same pass";
+        } else if (hbd && legacy != banked) {
+          problem = "MISMATCH in the banked 10-bit shader";
+          at = first_difference(legacy, banked);
+        } else if (rb.memory_races || rb.sync_errors || rb.out_of_bounds || rb.plain_barriers) {
+          problem = "invalid group memory access or sync in the banked 10-bit shader";
         }
         if (verbose || problem) {
           printf("%s layout %d frame %d: %dx%d, %zu tile(s), sb %d, %zu blocks, %d iterations -> %ld region entries\n",
@@ -1243,6 +1255,6 @@ int main(int argc, char **argv) {
     printf("intra_check: FAILED\n");
     return 1;
   }
-  printf("intra_check: the legacy, optimized and intra_v2 outputs are identical on every frame\n");
+  printf("intra_check: the legacy, optimized, banked and intra_v2 outputs are identical on every frame\n");
   return 0;
 }

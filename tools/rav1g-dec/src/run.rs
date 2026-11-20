@@ -941,6 +941,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         intra_opt: task.intraopt,
         intra_filter_legacy: task.intrafilterlegacy,
         intra_schedule_legacy: task.intraschedulelegacy,
+        intra_bank_legacy: task.intrabanklegacy,
         lf_legacy: task.lflegacy,
         lf_h_split: task.lfhsplit as u32,
         intra_edge_fix: task.intraedgefix,
@@ -969,7 +970,13 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     if !task.intrav2 {
         say!(
             "Intra wavefront: {}",
-            if task.intraschedulelegacy || !task.intraopt { "conservative" } else { "angle-specific" }
+            if task.intraschedulelegacy || !task.intraopt {
+                "conservative"
+            } else if task.intrabanklegacy {
+                "angle-specific (-intrabanklegacy)"
+            } else {
+                "angle-specific, with separate edge banks at high bit depth"
+            }
         );
     }
     say!(

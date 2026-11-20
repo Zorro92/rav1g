@@ -128,6 +128,7 @@ pub struct compute_shader_lib {
     pub shader_cdef_filter_v2: ComputeShader,
     pub shader_cdef_filter_v2_legacy: ComputeShader,
     pub shader_intra_filter_legacy: ComputeShader,
+    pub shader_intra_main_banked_hbd: ComputeShader,
     pub shader_intra_v2: ComputeShader,
     pub shader_intra_v2_hbd: ComputeShader,
     pub shader_filmgrain_luma_gen: ComputeShader,

@@ -1505,7 +1505,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        case: [poisoned, interfast, syncclear, gridcheck, intraschedulelegacy]
+        case: [poisoned, interfast, syncclear, gridcheck, intraschedulelegacy, intrabanklegacy]
     steps:
       - name: Disable newline conversion
         run: git config --global core.autocrlf false
@@ -1615,14 +1615,16 @@ jobs:
           if ($lines.Count -lt 200 -or $frames -lt 500) { $failed += "only $($lines.Count) GRIDCHECK lines and $frames frames checked" }
           if ($failed.Count) { throw "the grid built by the GPU: $($failed -join '; ')" }
 
-      - name: Conformance with the previous intra wavefront
-        if: ${{ !cancelled() && matrix.case == 'intraschedulelegacy' }}
+      - name: Conformance with a legacy intra switch
+        if: ${{ !cancelled() && (matrix.case == 'intraschedulelegacy' || matrix.case == 'intrabanklegacy') }}
         shell: pwsh
+        env:
+          INTRA_SWITCH: ${{ matrix.case }}
         run: |
           python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/conformance-intraschedulelegacy --threads 4 "--tool-args=-intraschedulelegacy" `
-            "--title=rav1g-dec with -intraschedulelegacy"
-          if ($LASTEXITCODE -ne 0) { throw "conformance with -intraschedulelegacy: exit code $LASTEXITCODE" }
+            --out "out/conformance-${env:INTRA_SWITCH}" --threads 4 "--tool-args=-${env:INTRA_SWITCH}" `
+            "--title=rav1g-dec with -${env:INTRA_SWITCH}"
+          if ($LASTEXITCODE -ne 0) { throw "conformance with -${env:INTRA_SWITCH}: exit code $LASTEXITCODE" }
 
       - name: Preserve the results, per-stream logs and md5 files of the switch
         if: always()
@@ -2362,12 +2364,12 @@ jobs:
           python testing/argon/run.py --tool out/rav1g-dec/rav1g-dec.exe
           --streams argon-streams --out out/argon --shards 8 --shard ${{ matrix.shard }} --timeout 300
 
-      - name: Argon Profile 0 on WARP with the previous intra wavefront
+      - name: Argon Profile 0 on WARP with the previous 10-bit intra edge preparation
         if: ${{ !cancelled() }}
         run: >-
           python testing/argon/run.py --tool out/rav1g-dec/rav1g-dec.exe
           --streams argon-streams --out out/argon-legacy --shards 8 --shard ${{ matrix.shard }} --timeout 300
-          --decoder-arg=-intraschedulelegacy
+          --decoder-arg=-intrabanklegacy
 
       - name: Preserve the result table
         if: always()

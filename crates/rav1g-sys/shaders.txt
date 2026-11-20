@@ -96,6 +96,7 @@ intra_filter_hbd
 intra_main_hbd
 intra_main_hbd_legacy
 intra_main_tight_hbd
+intra_main_banked_hbd
 inter_ext_borders_hbd
 reconstruct_block_hbd
 loopfilter_vert_hbd

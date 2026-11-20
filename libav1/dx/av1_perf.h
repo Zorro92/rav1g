@@ -333,6 +333,8 @@ void av1_set_intra_opt(int enable);
 /* Nonzero restores the conservative wavefront and the previous exact V/H
  * prediction path (-intraschedulelegacy). Set before decoding. */
 void av1_set_intra_schedule_legacy(int enable);
+/* Use the previous 10-bit intra edge preparation (-intrabanklegacy). Set before decoding. */
+void av1_set_intra_bank_legacy(int enable);
 
 /* Process-wide. Non-zero selects the previous 8-bit filter intra shader.
  * Applies to frames that run the main intra path. Off by default. Change it

@@ -140,6 +140,7 @@ class CParameters {
     bool intraod_;
     bool intrafilterlegacy_;
     bool intraschedulelegacy_;
+    bool intrabanklegacy_;
     bool lrlegacy_;
     bool fglegacy_;
     bool copylegacy_;

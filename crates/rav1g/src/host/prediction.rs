@@ -516,6 +516,14 @@ pub extern "C" fn av1_set_inter_legacy(enable: c_int) {
 // The main intra path uses DXC's optimized build by default. -intraod selects the baseline kernel.
 static INTRA_OPT: AtomicI32 = AtomicI32::new(1);
 
+static INTRA_BANK_LEGACY: AtomicI32 = AtomicI32::new(0);
+
+/// `av1_set_intra_bank_legacy` (`dx/av1_perf.h`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_intra_bank_legacy(enable: c_int) {
+    INTRA_BANK_LEGACY.store(enable, Ordering::Relaxed);
+}
+
 static INTRA_SCHEDULE_LEGACY: AtomicI32 = AtomicI32::new(0);
 
 /// `av1_set_intra_schedule_legacy` (`dx/av1_perf.h`).
@@ -1160,6 +1168,9 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
             let constants = alloc_constants::<IntraData>(&mut td.command_buffer);
             let data = constants.data;
             let intra_main: *const ComputeShader = match td.intra_main {
+                IntraMain::Tight if td.is_hbd != 0 && INTRA_BANK_LEGACY.load(Ordering::Relaxed) == 0 => {
+                    &raw const (*lib).shader_intra_main_banked_hbd
+                }
                 IntraMain::Tight => &raw const (*shaders).intra_main_tight,
                 IntraMain::Legacy => &raw const (*shaders).intra_main,
                 IntraMain::Unoptimized => &raw const (*shaders).intra_main_legacy,

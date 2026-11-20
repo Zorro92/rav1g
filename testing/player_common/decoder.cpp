@@ -805,9 +805,11 @@ int AV1Decoder::DecodeOne() {
   XB_LOGI << "Intra main shader: "
           << (params_.intraod_ ? "intra_main_legacy (-intraod)"
                                : params_.intraschedulelegacy_ ? "intra_main (-intraschedulelegacy)"
-                                                             : "intra_main_tight (default)");
+                               : params_.intrabanklegacy_ ? "intra_main_tight (-intrabanklegacy)"
+                                                          : "intra_main_tight, with separate edge banks at high bit depth");
   av1_set_intra_filter_legacy(params_.intrafilterlegacy_);
   av1_set_intra_schedule_legacy(params_.intraschedulelegacy_);
+  av1_set_intra_bank_legacy(params_.intrabanklegacy_);
   XB_LOGI << "8-bit filter intra shader: "
           << (params_.intrafilterlegacy_ ? "intra_filter_legacy (-intrafilterlegacy)" : "intra_filter (default)");
   av1_set_lr_legacy(params_.lrlegacy_);

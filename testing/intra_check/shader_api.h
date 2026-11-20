@@ -43,6 +43,7 @@ struct ShaderApi {
 
 extern const ShaderApi intra_main_api;
 extern const ShaderApi intra_main_hbd_api;
+extern const ShaderApi intra_main_banked_hbd_api;
 extern const ShaderApi intra_main_legacy_api;
 extern const ShaderApi intra_main_hbd_legacy_api;
 extern const ShaderApi intra_filter_api;

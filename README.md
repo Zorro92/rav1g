@@ -75,6 +75,9 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
   exact vertical and horizontal angles. `-intraschedulelegacy` selects the previous wavefront and
   optimized kernels. `-intraod` also selects the previous wavefront, with the DXC `-Od` kernels.
   The optimized high-bit-depth kernels use wave sums for large DC and CFL reductions.
+  The default 10-bit shader prepares filtered and upsampled samples in separate ranges of
+  group memory, cutting one group sync. A chroma-from-luma plane with zero alpha uses
+  DC without reading luma. Use `-intrabanklegacy` to compare the previous shader.
 - **A third frame in flight** (`-slots 3`) lets CPU and GPU overlap: the decode thread's wait
   for a free slot drops from 5.6–8.3 ms to 0.3–0.6 ms per frame. It only fits in memory with
   `-lowmem`. All combinations are md5-exact. On the SVT clip the CPU (entropy decoding,
