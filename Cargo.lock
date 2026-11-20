@@ -401,9 +401,6 @@ dependencies = [
 [[package]]
 name = "rav1g-sys"
 version = "0.5.0-alpha.1"
-dependencies = [
- "cc",
-]
 
 [[package]]
 name = "rav1g-tables"

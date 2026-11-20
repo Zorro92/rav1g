@@ -2568,7 +2568,8 @@ the output never depended on it; the Rust writes 0 there.
 - `RAV1G_PARSER_LIBAOM` and `RAV1G_PARSER_RAV1D` are gone.
 - `Rav1gMemoryRequirements::host_size` is smaller.
 - An application that links the static library links `rav1g.lib` and `rav1g_c.lib`;
-  `rav1g_c_speed.lib` no longer exists.
+  `rav1g_c_speed.lib` no longer exists. (Since 2026-11-19 `rav1g.lib` alone: the shader table is Rust,
+  docs/rust-port.md, "No C in the library".)
 - The Rust interface: `Settings::parser` and `Parser` are gone; `set_operating_point` and
   `set_output_all_layers` take effect with the next `decode`, as they did.
 

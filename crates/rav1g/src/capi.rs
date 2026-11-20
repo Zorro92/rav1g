@@ -798,9 +798,9 @@ pub extern "C" fn rav1g_version() -> *const c_char {
     static TEXT: std::sync::OnceLock<CString> = std::sync::OnceLock::new();
     TEXT.get_or_init(|| {
         c_string(&format!(
-            "rav1g {}, the Rust host; entropy decoder: {}; shaders: {}",
+            "rav1g {}, the Rust host; entropy decoder: rav1d (Rust, assembly), {}; shaders: {}",
             env!("CARGO_PKG_VERSION"),
-            crate::sys::C_BUILD,
+            crate::sys::RUNTIME,
             crate::sys::SHADER_SET
         ))
     })

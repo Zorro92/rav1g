@@ -12,10 +12,10 @@
 //!
 //! The library is the C++ struct `compute_shader_lib`, whose pipeline states and root signatures the
 //! frame pipeline reads; it is created here, zeroed as its C++ constructor leaves it, inside a Rust
-//! value that also holds the threads that create the pipelines. The shader headers are embedded in
-//! `crates/rav1g-sys/shader_table.c`, which hands them over as a table.
+//! value that also holds the threads that create the pipelines. The bytecode of the shaders is the
+//! table of `crates/rav1g-sys/src/shaders.rs`: the files of the DXC build, embedded as they are.
 
-use std::ffi::{CStr, c_char, c_int, c_void};
+use std::ffi::{c_int, c_void};
 use std::mem::offset_of;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -34,6 +34,7 @@ use super::thread::spawn_thread;
 use super::types::{Av1Core, ComputeShader, GpuBufferObject, compute_shader_lib};
 use crate::gpu::d3d12::{com_ref, com_release, com_store};
 use crate::gpu::{self, BufferRef, Device, Layout, LayoutDesc, OwnedDevice, Queue, Upload};
+use crate::sys::shaders::Shader;
 use crate::sys::{
     BLOCK_SIZES_ALL, TX_4X4, TX_4X8, TX_4X16, TX_8X4, TX_8X8, TX_8X16, TX_8X32, TX_16X4, TX_16X8, TX_16X16, TX_16X32,
     TX_16X64, TX_32X8, TX_32X16, TX_32X32, TX_32X64, TX_64X16, TX_64X32, TX_64X64, TX_SIZES_ALL,
@@ -42,46 +43,19 @@ use crate::sys::{
 /// Threads that create pipelines at most (`MAX_CREATE_SHADER_THREADS` of the C++).
 const MAX_CREATE_THREADS: c_int = 6;
 
-#[cfg(not(feature = "shader-pick"))]
-unsafe extern "C" {
-    /// `crates/rav1g-sys/shader_table.c`: the bytecode of the shaders from the DXC build.
-    fn rav1g_shader_table(count: *mut u32) -> *const ShaderBytecode;
-}
-
-#[repr(C)]
-struct ShaderBytecode {
-    name: *const c_char,
-    code: *const u8,
-    size: u32,
-}
-
-#[cfg(feature = "shader-pick")]
-unsafe extern "C" {
-    /// `crates/rav1g-sys/shader_table.c` with `shader-pick`: either the default or alternate bytecode
-    /// table (0 DXC, 1 DXC with -Od), in the same order.
-    fn rav1g_shader_table_set(set: u32, count: *mut u32) -> *const ShaderBytecode;
-}
-
 /// The bytecode table for this set. Only shader-pick builds have alternate sets.
-fn shader_table(set: Set) -> &'static [ShaderBytecode] {
-    let mut count = 0u32;
-    // SAFETY: a static table of `count` entries with static names and bytecode.
-    unsafe {
-        #[cfg(feature = "shader-pick")]
-        let table = rav1g_shader_table_set(set as u32, &mut count);
-        #[cfg(not(feature = "shader-pick"))]
-        let table = {
-            let _ = set;
-            rav1g_shader_table(&mut count)
-        };
-        std::slice::from_raw_parts(table, count as usize)
+fn shader_table(set: Set) -> &'static [Shader] {
+    #[cfg(feature = "shader-pick")]
+    if set == Set::Od {
+        return crate::sys::shaders::SHADERS_OD;
     }
+    let _ = set;
+    crate::sys::shaders::SHADERS
 }
 
 /// The pipeline name used by `-shaderpick`. The fast pipeline reads packed records.
-fn shader_name(entry: &'static ShaderBytecode) -> &'static str {
-    // SAFETY: the shader table has static names.
-    match unsafe { CStr::from_ptr(entry.name) }.to_str().unwrap_or("") {
+fn shader_name(entry: &'static Shader) -> &'static str {
+    match entry.name {
         "gen_pred_blocks_fast_packed" => "gen_pred_blocks_fast",
         name => name,
     }
@@ -89,13 +63,7 @@ fn shader_name(entry: &'static ShaderBytecode) -> &'static str {
 
 /// The bytecode of a shader by its pipeline name, of one of the sets of the build.
 fn bytecode_of(name: &str, set: Set) -> Option<&'static [u8]> {
-    // SAFETY: static names and bytecode (see `shader_table`).
-    unsafe {
-        shader_table(set)
-            .iter()
-            .find(|entry| shader_name(entry) == name)
-            .map(|entry| std::slice::from_raw_parts(entry.code, entry.size as usize))
-    }
+    shader_table(set).iter().find(|entry| shader_name(entry) == name).map(|entry| entry.code)
 }
 
 /// The bytecode a pipeline state has without a pick.
@@ -915,7 +883,7 @@ mod tests {
         unique.dedup();
         assert_eq!(unique.len(), names.len());
         for name in names {
-            assert!(bytecode(name).is_some(), "the glue has the bytecode of {name}");
+            assert!(bytecode(name).is_some(), "the table has the bytecode of {name}");
         }
         assert!(shader_pick::resolve("od=gen_pred_blocks_fast", &shader_names()).is_ok());
     }

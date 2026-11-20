@@ -1,10 +1,10 @@
 # Builds the Rust library as rav1g.dll for the test player's package (docs/test-player.md, "Building"):
-# the C of the parser and entropy decoder compiled by clang-cl with full link time optimisation, linked
-# with the Rust by lld-link for an app container, against the app runtime (VCLibs).
+# linked by lld-link for an app container, against the app runtime (VCLibs). The library has no C
+# (docs/rust-port.md, "No C in the library"); clang-cl is named to cargo for the build scripts that ask.
 #
 #   build_rav1g_dll.ps1 -Shaders <dir> -Out <dir> [-Features capi,app-container] [-TargetDir <dir>]
 #
-# -Shaders   the directory whose dx/shaders/h has the bytecode headers of the shaders (RAV1G_SHADER_DIR:
+# -Shaders   the directory whose dx/shaders/dxil has the bytecode of the shaders (RAV1G_SHADER_DIR:
 #            testing/shader_cache/shaders.py build --dxc <dxc> --root <dir>)
 # -Out       gets rav1g.dll, rav1g.dll.lib (the import library the player links) and rav1g.pdb; the player
 #            is then built with /p:Rav1gRustDll=<that directory>

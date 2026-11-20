@@ -2,17 +2,17 @@
 """Build the decoder's DXC cs_6_0 shaders from a content-addressed cache.
 
 A key covers the compiler binaries, arguments, source and transitive includes. A cache entry has
-one shader's bytecode header, listing and compiler messages.
+one shader's bytecode (the file DXC wrote, as it wrote it), listing and compiler messages.
 
     shaders.py key     the digest of all keys, for the actions/cache key
-    shaders.py build   headers and listings of one variant from the cache, compiling what is missing
+    shaders.py build   bytecode and listings of one variant from the cache, compiling what is missing
     shaders.py prune   drop the cache entries the given builds did not use
-    shaders.py verify  the bytecode of the headers is in a built program
-    shaders.py same    compare two builds' shader header hashes
+    shaders.py verify  the bytecode of a build is in a built program
+    shaders.py same    compare two builds' shader bytecode hashes
 
-The Rust library takes dx/shaders/h and shader_set.txt from RAV1G_SHADER_DIR=<root>. The uavsync
-variant builds with all-memory group syncs. The shader-pick variant adds dx/shaders/h_od and
-shader_sets.txt. The shader-pick Cargo feature embeds the extra DXC bytecode for -shaderpick
+The Rust library takes dx/shaders/dxil/<name>.dxil and shader_set.txt from RAV1G_SHADER_DIR=<root>
+(crates/rav1g-sys/build.rs embeds the files as they are). The uavsync variant builds with all-memory
+group syncs. The shader-pick variant adds dx/shaders/dxil_od and shader_sets.txt. The shader-pick Cargo feature embeds the extra DXC bytecode for -shaderpick
 (docs/test-player.md, "Shader pick").
 """
 import argparse
@@ -31,12 +31,13 @@ import zipfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, '..', '..'))
 SHADERS = os.path.join(REPO, 'libav1', 'dx', 'shaders')
-FORMAT = 1  # of the key material and of a cache entry; a change makes every key new
+FORMAT = 2  # of the key material and of a cache entry; a change makes every key new
+BYTECODE = 'dxil'  # <root>/dx/shaders/dxil/<name>.dxil; the set od of the shader pick in dxil_od
 
 # DXC variants and their preprocessor definitions.
 VARIANTS = {
     'normal': [],
-    # The library built with the uavsync feature of the crates takes these headers (RAV1G_SHADER_DIR).
+    # The library built with the uavsync feature of the crates takes this bytecode (RAV1G_SHADER_DIR).
     'uavsync': ['GroupMemoryBarrierWithGroupSync=AllMemoryBarrierWithGroupSync'],
     'shader-pick': [],
 }
@@ -163,8 +164,8 @@ def dxc_version(dxc):
 
 
 def dxc_arguments(od, variant, name=None):
-    """The arguments that decide DXC's output; the output files and the source path come on top. No
-    -Vn: DXC writes the bytecode (-Fo), and write_header the array with the name of the shader."""
+    """The arguments that decide DXC's output; the output files and the source path come on top. DXC
+    writes the bytecode (-Fo), and that file is what the library embeds."""
     args = ['-nologo', '-T', DXC_PROFILE, '-E', 'main'] + DXC_ARGUMENTS
     if od:
         args.append('-Od')
@@ -183,13 +184,13 @@ def shader_key(name, od, variant, identity, shaders_dir=SHADERS):
 
 def entry_files(cache, key, name):
     directory = os.path.join(cache, key)
-    return directory, os.path.join(directory, name + '.h'), os.path.join(directory, name + '.asm'), os.path.join(
+    return directory, os.path.join(directory, name + '.dxil'), os.path.join(directory, name + '.asm'), os.path.join(
         directory, 'meta.json')
 
 
 def entry_complete(cache, key, name):
-    _, header, listing, meta = entry_files(cache, key, name)
-    return all(os.path.isfile(p) and os.path.getsize(p) > 0 for p in (header, listing, meta))
+    _, bytecode, listing, meta = entry_files(cache, key, name)
+    return all(os.path.isfile(p) and os.path.getsize(p) > 0 for p in (bytecode, listing, meta))
 
 
 def messages(lines):
@@ -231,24 +232,13 @@ def dxil_wide(listing):
     return None
 
 
-def write_header(path, name, blob, comment):
-    """The bytecode as a const BYTE array for shader_table.c."""
-    lines = ['// ' + line for line in comment] + ['', 'const BYTE %s[] =' % name, '{']
-    for start in range(0, len(blob), 16):
-        lines.append('  ' + ', '.join('%3d' % b for b in blob[start:start + 16]) +
-                     (',' if start + 16 < len(blob) else ''))
-    lines += ['};', '']
-    with open(path, 'w', encoding='ascii', newline='\n') as f:
-        f.write('\n'.join(lines))
-
-
 def compile_shader(compiler, cache, name, od, variant, key, shaders_dir, allow_wide=False):
-    """One compiler call: the header and the listing of the shader, into a new cache entry. allow_wide
+    """One compiler call: the bytecode and the listing of the shader, into a new cache entry. The
+    bytecode is the file DXC wrote (-Fo), kept as it is: nothing rewrites it on its way into the library. allow_wide
     (the -Od set of the shader pick): DXIL with 64-bit values in its code is kept, and the entry says so
     ('wide' in meta.json); see build_od_set."""
     os.makedirs(cache, exist_ok=True)
     work = tempfile.mkdtemp(prefix='new-', dir=cache)
-    header = os.path.join(work, name + '.h')
     listing = os.path.join(work, name + '.asm')
     source = os.path.join(shaders_dir, name + '.hlsl')
     blob_path = os.path.join(work, name + '.dxil')
@@ -262,22 +252,19 @@ def compile_shader(compiler, cache, name, od, variant, key, shaders_dir, allow_w
     if done.returncode == 0 and os.path.isfile(blob_path) and os.path.isfile(listing):
         with open(blob_path, 'rb') as f:
             blob = f.read()
-        os.remove(blob_path)
         problem = dxil_problem(blob, listing, allow_wide)
         wide = dxil_wide(listing)
         if problem:
             output.append(problem)
-        else:
-            write_header(header, name, blob, [
-                'Written by testing/shader_cache/shaders.py from the bytecode of',
-                'dxc ' + ' '.join(arguments) + ' ' + name + '.hlsl',
-                'validation hash ' + blob[4:20].hex()])
-    ok = done.returncode == 0 and os.path.isfile(header) and os.path.isfile(listing)
+            os.remove(blob_path)
+    ok = done.returncode == 0 and os.path.isfile(blob_path) and os.path.isfile(listing)
     if not ok:
         shutil.rmtree(work, ignore_errors=True)
         return {'ok': False, 'seconds': seconds, 'output': output, 'exit': done.returncode}
     with open(os.path.join(work, 'meta.json'), 'w', encoding='utf-8') as f:
-        meta = {'format': FORMAT, 'name': name, 'variant': variant, 'od': od, 'seconds': seconds, 'output': output}
+        meta = {'format': FORMAT, 'name': name, 'variant': variant, 'od': od, 'seconds': seconds, 'output': output,
+                'command': 'dxc ' + ' '.join(arguments) + ' ' + name + '.hlsl', 'validation_hash': blob[4:20].hex(),
+                'bytecode_sha256': hashlib.sha256(blob).hexdigest()}
         if wide:
             meta['wide'] = wide
         json.dump(meta, f, indent=1)
@@ -339,15 +326,25 @@ def cache_entries(cache, compiler, variant, shaders, identity, jobs, what, allow
     return keys, results, len(missing)
 
 
-def copy_renamed_header(source, target, name, suffix):
-    """Rename the cached array to <name><suffix> so both bytecodes can be in one program."""
-    with open(source, 'rb') as f:
-        data = f.read()
-    declaration = ('const BYTE %s[]' % name).encode()
-    if data.count(declaration) != 1:
-        fail('%s: not one "%s"' % (source, declaration.decode()))
-    with open(target, 'wb') as f:
-        f.write(data.replace(declaration, ('const BYTE %s%s[]' % (name, suffix)).encode()))
+def copy_bytecode(source, target, expected=None):
+    """The bytecode of a cache entry into a build, byte for byte: the SHA-256 of the copy. expected: the
+    hash the entry recorded when DXC wrote the file."""
+    shutil.copyfile(source, target)
+    digest = sha256_file(target)
+    if expected and digest != expected:
+        fail('%s is not the bytecode DXC wrote into the cache entry (SHA-256 %s, recorded %s)' % (
+            source, digest, expected))
+    with open(target, 'rb') as f:
+        if f.read(4) != b'DXBC':
+            fail('%s is not a DXBC container' % target)
+    return digest
+
+
+def fresh_directory(path):
+    """An empty directory: a build has the bytecode of its own shaders and of no earlier build."""
+    shutil.rmtree(path, ignore_errors=True)
+    os.makedirs(path)
+    return path
 
 
 def build_od_set(args, shaders, dxc_keys, identity, jobs, shader_set, report):
@@ -361,8 +358,8 @@ def build_od_set(args, shaders, dxc_keys, identity, jobs, shader_set, report):
     od_shaders = [(name, name != LR_LEGACY) for name, _ in shaders]
     keys, results, missing = cache_entries(args.cache, args.dxc, args.variant, od_shaders, identity, jobs,
                                            'shader-pick, the set od', allow_wide=True)
-    headers = os.path.join(args.root, 'dx', 'shaders', 'h_od')
-    os.makedirs(headers, exist_ok=True)
+    directory = BYTECODE + '_od'
+    bytecodes = fresh_directory(os.path.join(args.root, 'dx', 'shaders', directory))
     listings = os.path.join(args.listings, 'od') if args.listings else None
     if listings:
         os.makedirs(listings, exist_ok=True)
@@ -370,9 +367,10 @@ def build_od_set(args, shaders, dxc_keys, identity, jobs, shader_set, report):
     wide = []
     for name, _ in shaders:
         key = keys[name]
-        _, header, listing, meta_path = entry_files(args.cache, key, name)
+        _, bytecode, listing, meta_path = entry_files(args.cache, key, name)
         with open(meta_path, encoding='utf-8') as f:
             meta = json.load(f)
+        expected = meta['bytecode_sha256']
         is_wide = bool(meta.get('wide'))
         if listings:
             shutil.copyfile(listing, os.path.join(listings, name + '.asm'))
@@ -380,12 +378,13 @@ def build_od_set(args, shaders, dxc_keys, identity, jobs, shader_set, report):
             # The bytecode of the default set instead (the listing stays the one of -Od).
             wide.append(name)
             key = dxc_keys[name]
-            header = entry_files(args.cache, key, name)[1]
-        target = os.path.join(headers, name + '.h')
-        copy_renamed_header(header, target, name, '_od')
+            _, bytecode, _, default_meta = entry_files(args.cache, key, name)
+            with open(default_meta, encoding='utf-8') as f:
+                expected = json.load(f)['bytecode_sha256']
+        digest = copy_bytecode(bytecode, os.path.join(bytecodes, name + '.dxil'), expected)
         entries.append({'name': name, 'od': not is_wide and name != LR_LEGACY, 'key': keys[name], 'bytecode_key': key,
                         'compiled': name in results, 'seconds': meta['seconds'],
-                        'header_sha256': sha256_file(target)})
+                        'bytecode_sha256': digest})
 
     dxc_line = 'dxc: %s: dxc %s; -Od for %s' % (shader_set, report['arguments'], unoptimized)
     od_line = 'od: %s: dxc %s; -D INTRA_MAIN_LEGACY for %s' % (
@@ -394,11 +393,11 @@ def build_od_set(args, shaders, dxc_keys, identity, jobs, shader_set, report):
         od_line += '; default DXIL for %s (64-bit values at -Od)' % ', '.join(wide)
     od_line += '; default DXIL for %s (-lrlegacy)' % LR_LEGACY
     lines = [dxc_line, od_line]
-    report['sets'] = {'od': {'directory': 'h_od', 'suffix': '_od', 'line': od_line,
+    report['sets'] = {'od': {'directory': directory, 'line': od_line,
                               'default_bytecode': [*wide, LR_LEGACY], 'compiled': missing,
                               'from_cache': len(shaders) - missing, 'shaders': entries}}
-    print('shaders.py: shader-pick, the set od: %d shaders, %d compiled now, %d from the cache; headers in %s' %
-          (len(shaders), missing, len(shaders) - missing, headers))
+    print('shaders.py: shader-pick, the set od: %d shaders, %d compiled now, %d from the cache; bytecode in %s' %
+          (len(shaders), missing, len(shaders) - missing, bytecodes))
     with open(os.path.join(args.root, 'shader_sets.txt'), 'w', encoding='ascii', newline='\n') as f:
         f.write('\n'.join(lines) + '\n')
     report['set_lines'] = lines
@@ -414,8 +413,7 @@ def command_build(args):
     keys, results, missing = cache_entries(args.cache, args.dxc, args.variant, shaders, identity, jobs,
                                            args.variant)
 
-    headers = os.path.join(args.root, 'dx', 'shaders', 'h')
-    os.makedirs(headers, exist_ok=True)
+    bytecodes = fresh_directory(os.path.join(args.root, 'dx', 'shaders', BYTECODE))
     if args.listings:
         os.makedirs(args.listings, exist_ok=True)
     version, short = dxc_version(args.dxc)
@@ -430,17 +428,17 @@ def command_build(args):
     if args.variant == 'shader-pick':
         build_od_set(args, shaders, keys, identity, jobs, shader_set, report)
     for name, od in shaders:
-        _, header, listing, meta_path = entry_files(args.cache, keys[name], name)
+        _, bytecode, listing, meta_path = entry_files(args.cache, keys[name], name)
         with open(meta_path, encoding='utf-8') as f:
             meta = json.load(f)
         if meta.get('wide'):
             fail('%s: the cache entry has 64-bit values in its code (%s)' % (name, meta['wide']))
-        shutil.copyfile(header, os.path.join(headers, name + '.h'))
+        digest = copy_bytecode(bytecode, os.path.join(bytecodes, name + '.dxil'), meta['bytecode_sha256'])
         if args.listings:
             shutil.copyfile(listing, os.path.join(args.listings, name + '.asm'))
         report['shaders'].append({'name': name, 'od': od, 'key': keys[name], 'compiled': name in results,
                                   'seconds': meta['seconds'], 'output': messages(meta['output']),
-                                  'header_sha256': sha256_file(header)})
+                                  'validation_hash': meta['validation_hash'], 'bytecode_sha256': digest})
         # Compiler messages, also when the output came from the cache.
         for line in messages(meta['output']):
             print('%s.hlsl%s: %s' % (name, '' if name in results else ' (cached)', line))
@@ -452,8 +450,8 @@ def command_build(args):
         with open(args.report, 'w', encoding='utf-8') as f:
             json.dump(report, f, indent=1)
     cpu = sum(results[name]['seconds'] for name in results)
-    print('shaders.py: %s: %d shaders, %d compiled now (%.1f s of DXC in %.1f s), %d from the cache; headers in %s' %
-          (args.variant, len(shaders), missing, cpu, report['wall_seconds'], report['from_cache'], headers))
+    print('shaders.py: %s: %d shaders, %d compiled now (%.1f s of DXC in %.1f s), %d from the cache; bytecode in %s' %
+          (args.variant, len(shaders), missing, cpu, report['wall_seconds'], report['from_cache'], bytecodes))
     if os.environ.get('GITHUB_STEP_SUMMARY'):
         with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
             f.write('- shaders, %s: %d compiled in this run (%.1f s of DXC in %.1f s, up to %d at a time), %d from '
@@ -487,18 +485,20 @@ def command_prune(args):
 
 
 # ---------------------------------------------------------------------------------------------
-# The bytecode of the headers is in the program that was built from them.
+# The bytecode of a build is in the program that was built from it.
 # ---------------------------------------------------------------------------------------------
-def header_bytecode(path):
-    with open(path, encoding='utf-8', errors='replace') as f:
-        text = f.read()
-    start = text.find('const BYTE')
-    if start < 0:
-        fail('no bytecode array in %s' % path)
-    body = text[text.index('{', start) + 1:text.index('}', start)]
-    data = bytes(int(n) for n in re.findall(r'\d+', body))
+def built_bytecode(root, directory, shader):
+    """The bytecode of a shader of a build, which has to be the file the build of the report wrote."""
+    path = os.path.join(root, 'dx', 'shaders', directory, shader['name'] + '.dxil')
+    try:
+        with open(path, 'rb') as f:
+            data = f.read()
+    except OSError as error:
+        fail('the bytecode of %s: %s' % (shader['name'], error))
+    if hashlib.sha256(data).hexdigest() != shader['bytecode_sha256']:
+        fail('%s is not the bytecode the build of the report wrote' % path)
     if data[:4] != b'DXBC':
-        fail('%s: the array is not a DXBC container' % path)
+        fail('%s is not a DXBC container' % path)
     return data
 
 
@@ -517,7 +517,6 @@ def program_bytes(path):
 def command_verify(args):
     with open(args.report, encoding='utf-8') as f:
         report = json.load(f)
-    headers = os.path.join(args.root, 'dx', 'shaders', 'h')
     lines = []
     ok = True
     for binary in args.binary:
@@ -525,28 +524,22 @@ def command_verify(args):
             found = []
             absent = []
             for shader in report['shaders']:
-                header = os.path.join(headers, shader['name'] + '.h')
-                if sha256_file(header) != shader['header_sha256']:
-                    fail('%s is not the header the build of the report wrote' % header)
-                (found if header_bytecode(header) in data else absent).append(shader['name'])
-            line = ('%s (%s): the bytecode of %d of the %d shader headers of the %s build is in the program, byte for '
+                (found if built_bytecode(args.root, BYTECODE, shader) in data else absent).append(shader['name'])
+            line = ('%s (%s): the bytecode of %d of the %d shaders of the %s build is in the program, byte for '
                     'byte' % (program, os.path.basename(binary), len(found), len(report['shaders']), report['variant']))
             if absent:
-                line += '; not in it, as no pipeline state uses them: ' + ', '.join(absent)
+                line += '; not in it, as the table of the library does not name them: ' + ', '.join(absent)
             lines.append(line)
             print('shaders.py: ' + line)
-            # The linker drops an array nothing refers to. All but a few shaders have a pipeline state.
+            # The library embeds the shaders of its table (crates/rav1g-sys/shaders.txt): all but a few.
             if len(found) < args.min_found:
                 ok = False
             # The shader-pick build also embeds its alternate sets.
             for set_name, other in sorted(report.get('sets', {}).items()):
                 count = 0
                 for shader in other['shaders']:
-                    header = os.path.join(args.root, 'dx', 'shaders', other['directory'], shader['name'] + '.h')
-                    if sha256_file(header) != shader['header_sha256']:
-                        fail('%s is not the header the build of the report wrote' % header)
-                    count += header_bytecode(header) in data
-                line = '%s (%s): the bytecode of %d of the %d shader headers of the set %s is in the program' % (
+                    count += built_bytecode(args.root, other['directory'], shader) in data
+                line = '%s (%s): the bytecode of %d of the %d shaders of the set %s is in the program' % (
                     program, os.path.basename(binary), count, len(other['shaders']), other['line'])
                 lines.append(line)
                 print('shaders.py: ' + line)
@@ -564,12 +557,12 @@ def command_verify(args):
         with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as f:
             f.write('\n'.join([''] + ['- ' + line for line in lines]) + '\n')
     if not ok:
-        fail('the program was not built from the shader headers of this run')
+        fail('the program was not built from the shader bytecode of this run')
     return 0
 
 
 def command_same(args):
-    """Compare the build reports by shader header hash."""
+    """Compare the build reports by shader bytecode hash."""
     builds = []
     for path in (args.reference, args.candidate):
         with open(path, encoding='utf-8') as f:
@@ -591,7 +584,7 @@ def command_same(args):
             if a is None or b is None:
                 missing = args.reference_name if a is None else args.candidate_name
                 different.append('%s: named as changed on purpose but missing from %s' % (name, missing))
-            elif a['header_sha256'] == b['header_sha256']:
+            elif a['bytecode_sha256'] == b['bytecode_sha256']:
                 different.append('%s: named as changed on purpose but identical' % name)
             else:
                 changed.append(name)
@@ -600,8 +593,8 @@ def command_same(args):
             continue
         if a is None or b is None:
             different.append('%s: only in %s' % (name, args.candidate_name if a is None else args.reference_name))
-        elif a['header_sha256'] != b['header_sha256']:
-            different.append('%s: headers differ (key %s.. in %s, %s.. in %s)' % (
+        elif a['bytecode_sha256'] != b['bytecode_sha256']:
+            different.append('%s: bytecode differs (key %s.. in %s, %s.. in %s)' % (
                 name, a['key'][:12], args.reference_name, b['key'][:12], args.candidate_name))
     for name in changed:
         print('CHANGED ON PURPOSE ' + name)
@@ -631,11 +624,11 @@ def main():
     key.add_argument('--variants', default='normal')
     key.set_defaults(run=command_key)
 
-    build = commands.add_parser('build', help='headers and listings of one variant')
+    build = commands.add_parser('build', help='bytecode and listings of one variant')
     build.add_argument('--dxc', required=True)
     build.add_argument('--cache', required=True, help='the cache directory')
     build.add_argument('--variant', choices=VARIANTS, default='normal')
-    build.add_argument('--root', required=True, help='the headers go to <root>/dx/shaders/h/<name>.h')
+    build.add_argument('--root', required=True, help='the bytecode goes to <root>/dx/shaders/dxil/<name>.dxil')
     build.add_argument('--listings', help='directory for the listings, <name>.asm')
     build.add_argument('--report', help='JSON file: the key, compile time and messages of every shader')
     build.add_argument('--jobs', type=int, default=0, help='compiler processes at a time (default: one per processor)')
@@ -646,7 +639,7 @@ def main():
     prune.add_argument('reports', nargs='+')
     prune.set_defaults(run=command_prune)
 
-    verify = commands.add_parser('verify', help='the bytecode of the headers is in a built program')
+    verify = commands.add_parser('verify', help='the bytecode of a build is in a built program')
     verify.add_argument('--report', required=True)
     verify.add_argument('--root', required=True)
     verify.add_argument('--min-found', type=int, default=80)

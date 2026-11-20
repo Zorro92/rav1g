@@ -132,7 +132,7 @@ job publishes a GitHub pre-release with the following files.
 
 | File | What |
 | --- | --- |
-| `rav1g.dll` | the library of the default package (the C of clang, linked by lld-link, the app runtime, DXC `cs_6_0` shaders) |
+| `rav1g.dll` | the library of the default package (no C, linked by lld-link, the app runtime, DXC `cs_6_0` shaders) |
 | `rav1g.dll.lib`, `rav1g.pdb` | its import library and its symbols |
 | `rav1g.h` | the interface it was built with (`RAV1G_ABI_VERSION`) |
 | `rav1g-licenses.zip` | the licences a redistribution carries: rav1g (BSD-2-Clause), AOM's patent licence, rav1d, the notices of the linked crates |

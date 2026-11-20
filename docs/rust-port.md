@@ -67,15 +67,15 @@ At the end no C++ remains in the decoder: the C parser, the HLSL and Rust.
 | Path | What |
 | --- | --- |
 | `crates/rav1g` | the decoder: Rust host modules, API, `capi` feature for the C ABI (`include/rav1g.h`) |
-| `crates/rav1g-sys` | the types with a fixed shape, in Rust (the records the shaders read, the state of the host, the enums of the bitstream, the perf and stage dump types; [Own types, no libaom headers](#own-types-no-libaom-headers)), and the shader bytecode table, the one C file, built with `cc` |
-| `testing/shader_cache/shaders.py` | compiles and validates DXIL with DXC. `RAV1G_SHADER_DIR` supplies its generated headers to `crates/rav1g-sys/shader_table.c` |
+| `crates/rav1g-sys` | the types with a fixed shape, in Rust (the records the shaders read, the state of the host, the enums of the bitstream, the perf and stage dump types; [Own types, no libaom headers](#own-types-no-libaom-headers)), and the shader bytecode table (`shaders.txt`, `src/shaders.rs`): Rust that `build.rs` writes, one `include_bytes!` per shader ([No C in the library](#no-c-in-the-library-2026-11-19)) |
+| `testing/shader_cache/shaders.py` | compiles and validates DXIL with DXC. `RAV1G_SHADER_DIR` names its build: `crates/rav1g-sys/build.rs` embeds the files DXC wrote (`dx/shaders/dxil/<name>.dxil`) |
 | `tools/rav1g-dec` | command-line decoder for conformance, md5 and stage dumps |
 | `tools/rav1g-header` | writes `rav1g.h` from `crates/rav1g/src/capi.rs` with `cbindgen`, or checks it |
 | `tools/rav1g-tables` | prints the host's copies of tables and inline functions of libaom's headers, for `testing/tables_check` (Linux; [Own types, no libaom headers](#own-types-no-libaom-headers)) |
 | `libav1/` | the shaders (`dx/shaders`), `dx/av1_perf.h` (the records of the timing run and of the stage dumps, for the test player) and `dx/intra_v2_sched.h` (for the intra check), and what is left of libaom: the 17 C files and 75 headers that the shader checks of `testing/` compile as the reference, the readers of the test player include, or `crates/rav1g/build.rs` and the tests read as text. Nothing of it is compiled into the decoder |
 | `testing/` | the test player (C++, on `rav1g.h`), the conformance scripts, the host checks of the shaders |
 
-Dependencies: `windows` (D3D12/DXGI bindings), `cc`, `cbindgen` (`bindgen` until 2026-11-14). Edition 2024, stable Rust.
+Dependencies: `windows` (D3D12/DXGI bindings), `cc` (for the C++ of `rav1g-dec` and for rav1d's assembly; the library compiles no C), `cbindgen` (`bindgen` until 2026-11-14). Edition 2024, stable Rust.
 Target `x86_64-pc-windows-msvc`, and the UWP target for the console build of the test player.
 
 ## Requirements
@@ -224,7 +224,8 @@ directory whose `dx/shaders/h` has them (what MSBuild gets as `/p:Rav1gPrebuiltS
 output of `.github/actions/shaders`), and the build stops with a message when it is not set or has no headers.
 CI checks with `shaders.py verify` that `rav1g-dec.exe` holds the bytecode of this run's headers, byte for
 byte, as it does for the player and `warp_decoder`. The feature `uavsync` defines `RAV1G_UAVSYNC` for a build
-from the headers of that variant.
+from the headers of that variant. (Since 2026-11-19 the directory is `dx/shaders/dxil` with the DXIL
+files themselves: [No C in the library](#no-c-in-the-library-2026-11-19).)
 
 `rav1g-dec` is Rust for what the program does itself: arguments and task lists, the D3D12 device (the `windows`
 crate), the pool of readback buffers behind the output callbacks, the md5 of a frame, the comparison with a
@@ -245,7 +246,8 @@ CI (`.github/workflows/build.yml`), next to the unchanged `conformance` job with
 - `rust-equal`: `compare_md5.py` on the artifacts of `conformance` and `rust`. Every stream of the manifest
   must be in both runs with the same md5 file, byte for byte, and the stage dumps of the frames in
   `dump_tasks.txt` must compare equal.
-- `shader-headers` (Windows): the headers of the Shaders step as an artifact, for the Linux build.
+- `shader-headers` (Windows; `shader-bytecode` since 2026-11-19): the headers of the Shaders step as an
+  artifact, for the Linux build.
 - `rust-cross` (Linux, `ubuntu-26.04` like the other Linux jobs): `cargo xwin build --release --target
   x86_64-pc-windows-msvc`, that is clang-cl and
   lld-link with the SDK and C runtime xwin fetches (kept in the Actions cache), and the shader check on the
@@ -1107,6 +1109,10 @@ cargo build --release -p rav1g --lib --features capi,app-container --target-dir 
 - Which runtime DLL the program then imports from is decided by its link: with the import libraries of
   the player's MSBuild environment (the `store` directory of the toolset) it is `vcruntime140_app.dll`.
 
+Since 2026-11-19 the library has no C ([No C in the library](#no-c-in-the-library-2026-11-19)):
+`RAV1G_C_LIB_DIR` and `rav1g_c.lib` are gone, an application links `rav1g.lib` alone, and the feature
+`app-container` no longer changes what is compiled.
+
 **The app container.** The question was whether the standard library of `x86_64-pc-windows-msvc`, which
 does not care about app containers, can be in a UWP app, or whether the tier-3 target
 `x86_64-uwp-windows-msvc` (nightly, `-Zbuild-std`) is needed. Answer: the stable target is used. The
@@ -1896,6 +1902,55 @@ sh testing/tables_check/run.sh            # the check
 sh testing/tables_check/run.sh --mutate   # and 18 mutated copies of the host's files, which must all fail
 ```
 
+
+## No C in the library (2026-11-19)
+
+The last C file of the decoder library was `crates/rav1g-sys/shader_table.c`: 284 lines that included
+the bytecode headers of the shader build (`dx/shaders/h/<name>.h`, a `const BYTE` array each, written by
+`shaders.py` from DXC's output) and handed them to the Rust host as a table by name. `cc` compiled it
+into `rav1g_c.lib`, with the link time optimisation that was chosen for the entropy decoder. It is
+replaced by Rust:
+
+- `testing/shader_cache/shaders.py build` keeps the file DXC wrote (`-Fo`) as it is:
+  `<root>/dx/shaders/dxil/<name>.dxil`, and `dxil_od` for the `-Od` set of the shader-pick variant. No
+  header is written any more. A cache entry holds that file (format 2: the first build after the change
+  compiles every shader once), and `report.json` has its `bytecode_sha256` where it had
+  `header_sha256`. `shaders.py verify` reads the files, holds each against its hash in the report and
+  looks for it in the program, as it did with the arrays of the headers.
+- `crates/rav1g-sys/shaders.txt` names the shaders of the table, in the order `shader_table.c` had.
+  `build.rs` writes `shader_table.rs` into `OUT_DIR`: `SHADERS`, and `SHADERS_OD` with the feature
+  `shader-pick`, one `include_bytes!` per shader. It checks every file first (a DXBC container of the
+  length its header gives, with a DXIL part and the validator's hash) and stops with a message for a
+  missing or incomplete `RAV1G_SHADER_DIR`, as before. `src/shaders.rs` includes the table;
+  `host/compute.rs` reads it where it called `rav1g_shader_table` and `rav1g_shader_table_set`.
+- `rav1g-sys` has no `cc` dependency, no `rav1g_c.lib`, no `RAV1G_C_LTO` and no `RAV1G_C_LIB_DIR`. An
+  application that links the static library links `rav1g.lib` alone (the player project and
+  `testing/uwp_imports/link_probe.sh` do). `tools/rav1g-dec` still compiles the C++ of the test player
+  with `cc`, and has its own `RAV1G_C_LTO`.
+- `rav1g_version()` says "entropy decoder: rav1d (Rust, assembly), DLL runtime" (or "static runtime")
+  where it named the compiler of the C. `rav1g.h` and the ABI are unchanged.
+
+**Byte identity.** `include_bytes!` embeds a file as it is, so nothing stands between DXC's output and
+the library but a copy of the file. Three checks hold that: the test
+`embedded_bytecode_is_the_file_of_the_shader_build` of `rav1g-sys` (the embedded bytes of every shader
+of both sets against the length and hash the build script took from the files, and each a whole signed
+container), `shaders.py verify` in CI on every program and package, and the comparison made for the
+change: the same sources compiled by the same DXC (1.8, the Linux release) with `shaders.py` before and
+after, 128 shaders of the default set and 128 of the set od, every array of the headers equal to its
+`.dxil` file; and every DXBC container cut out of `rav1g.dll` and `rav1g-dec.exe` before and after
+(cargo xwin builds), the same set in both: 123 in the default build, 239 in the shader-pick build. The
+shader-pick programs had 246 before: seven shaders have the same bytes in both sets or as another
+shader, and the linker now keeps one copy of each (the programs are 120 KB smaller).
+
+**The two packages.** The default package (`.0`, `rav1g.dll` linked by lld-link) and the alternative
+(`.2`, the static library linked by the player's link) were kept apart by what compiled the C: clang
+with full link time optimisation, or MSVC with `/GL`. With no C in the library they differ only in the
+link: a DLL of its own made by lld-link, or the library's objects in the program, linked by `link.exe`
+with `/LTCG:incremental` (which finds no `/GL` objects in the library any more). clang-cl is still named to cargo
+for the default package (`CC`), and compiles nothing of the library.
+
+**The language bar** (`testing/language_bar/language_bar.py`) takes the shaders from the bytecode files
+the dependency file of `rav1g-sys` names, and has no C: a language without files is not in the bar.
 
 ## Estimate
 

@@ -163,11 +163,12 @@ jobs:
       # decoder behind them is the Rust library of the Cargo workspace (docs/rust-port.md). Two packages
       # of the same identity per run. They differed in what compiled the C of the entropy decoder, which
       # is where the tile threads spent their time; since step 6 of docs/phase2-rav1d.md the library has
-      # none of that C (its parser is rav1d's parse pass), and what is left of the difference is how the
-      # library is linked (docs/test-player.md):
-      #   revision 0, the default: clang with link time optimisation, linked with the Rust by lld-link
-      #               into rav1g.dll, which is in the package next to the program;
-      #   revision 2: MSVC with /GL, a static library, the objects compiled by the player's link
+      # none of that C (its parser is rav1d's parse pass), and since its shader table became Rust it has
+      # no C at all (docs/rust-port.md, "No C in the library"). What is left of the difference is how
+      # the library is linked (docs/test-player.md):
+      #   revision 0, the default: linked by lld-link into rav1g.dll, which is in the package next to
+      #               the program;
+      #   revision 2: a static library, linked into the program by the player's link
       #               (/LTCG:incremental).
       # Revision 1 is the opt-in uavsync package. Revision 3 is the default package
       # with the hevcPlayback capability in its manifest, for the memory the system gives such an app
@@ -176,7 +177,7 @@ jobs:
       # one and keeps LocalState.
       # ---------------------------------------------------------------------------------------------
 
-      # Stable Rust, as in the rust job, and the LLVM of the runner for the C of the default package.
+      # Stable Rust, as in the rust job, and the LLVM of the runner for the link of the default package.
       - name: Rust toolchain
         shell: pwsh
         run: |
@@ -201,16 +202,14 @@ jobs:
           workspaces: src
           key: player
 
-      # The C compiled by clang-cl with full link time optimisation: on the console the build whose tile
-      # threads are 1.5 to 4 % faster than those of the MSVC build (docs/rust-port.md, "Console results of
-      # step 5"). Its objects are LLVM bitcode, which the player's link.exe cannot read; and lld-link, which
-      # can, cannot link the player: it reads neither the /GL objects the player is made of nor the options
-      # that write the Windows metadata of a C++/CX program (/WINMD; docs/rust-port.md, step 5, part 3). So
-      # the library is linked by lld-link into a DLL, rav1g.dll, with the functions of rav1g.h and the few
-      # functions of the C that the player's stream readers call, and the player links its import library.
-      # WindowsApp.lib is first on that link, the runtime is the app runtime (the store directory of the
-      # toolset): testing/uwp_dx12_player/build_rav1g_dll.ps1.
-      - name: Rust library for the default package, C of clang (rav1g.dll)
+      # The library as a DLL of its own, linked by lld-link. It became the default package when the
+      # library had C that clang-cl compiled with full link time optimisation (LLVM bitcode, which the
+      # player's link.exe cannot read; lld-link cannot link the player, whose objects are /GL and whose
+      # link writes the Windows metadata of a C++/CX program: docs/rust-port.md, step 5, part 3). The
+      # library has no C any more; the package stays as it is, rav1g.dll with the functions of rav1g.h,
+      # and the player links its import library. WindowsApp.lib is first on that link, the runtime is
+      # the app runtime (the store directory of the toolset): testing/uwp_dx12_player/build_rav1g_dll.ps1.
+      - name: Rust library for the default package, linked by lld-link (rav1g.dll)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -218,7 +217,7 @@ jobs:
           $clock = [Diagnostics.Stopwatch]::StartNew()
           & src/testing/uwp_dx12_player/build_rav1g_dll.ps1 -Shaders '${{ steps.shaders.outputs.dir }}' -Features 'capi,app-container' `
             -TargetDir target-app-clang -Out rust-clang
-          "## Rust library for the default package, C of clang", '', "cargo rustc: $([math]::Round($clock.Elapsed.TotalMinutes, 1)) min ($(rustc --version); $(& (Join-Path $llvm 'clang-cl.exe') --version | Select-Object -First 1))." >> $env:GITHUB_STEP_SUMMARY
+          "## Rust library for the default package, linked by lld-link", '', "cargo rustc: $([math]::Round($clock.Elapsed.TotalMinutes, 1)) min ($(rustc --version); $(& (Join-Path $llvm 'lld-link.exe') --version | Select-Object -First 1))." >> $env:GITHUB_STEP_SUMMARY
 
       # What that rav1g.dll is built from, by language (the bar of the README): the source files this build
       # recorded (the dependency files of rustc, what the build scripts named to cargo, the shader sources
@@ -244,7 +243,7 @@ jobs:
             language-bar/languages.svg
           if-no-files-found: error
 
-      - name: Build the signed default package (Release x64, rav1g.dll with the C of clang)
+      - name: Build the signed default package (Release x64, rav1g.dll linked by lld-link)
         shell: pwsh
         env:
           CERT_THUMBPRINT: ${{ steps.cert.outputs.thumbprint }}
@@ -286,15 +285,15 @@ jobs:
           # Verify that the packaged DLL embeds the DXIL described by the compiler listings.
           python src/testing/shader_cache/shaders.py verify --report shader-build/normal/report.json `
             --root shader-build/normal --note out/SHADERS.txt out/imports/unpacked/rav1g.dll
-          if ($LASTEXITCODE -ne 0) { throw 'The rav1g.dll of the package was not built from the shader headers of this run' }
+          if ($LASTEXITCODE -ne 0) { throw 'The rav1g.dll of the package was not built from the shader bytecode of this run' }
           Remove-Item out/imports/unpacked -Recurse -Force
           $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
           $set = (Get-Content shader-build/normal/shader_set.txt -Raw).Trim()
-          "Variant: default: the Rust library (rav1g.dll, $(rustc --version)), linked by lld-link, its shader table compiled by $(& (Join-Path $llvm 'clang-cl.exe') --version | Select-Object -First 1); no C of libaom (the parser is rav1d's parse pass); shaders: $set; package version 0.2.$env:GITHUB_RUN_NUMBER.0" |
+          "Variant: default: the Rust library (rav1g.dll, $(rustc --version)), linked by $(& (Join-Path $llvm 'lld-link.exe') --version | Select-Object -First 1); no C (the parser is rav1d's parse pass, the shader table is Rust); shaders: $set; package version 0.2.$env:GITHUB_RUN_NUMBER.0" |
             Add-Content out/SOURCES.txt -Encoding utf8
           Copy-Item rust-clang/rav1g.pdb out/
           @('## rav1g test player', '', 'CI build only; console timings are taken separately.', '',
-            "Two packages of the same player and the same identity (docs/test-player.md): this one, version 0.2.$env:GITHUB_RUN_NUMBER.0, the default, with the Rust library as rav1g.dll and the C of clang. Shaders: $set. 0.2.$env:GITHUB_RUN_NUMBER.2 with the Rust library linked statically and the C of MSVC.", '',
+            "Two packages of the same player and the same identity (docs/test-player.md): this one, version 0.2.$env:GITHUB_RUN_NUMBER.0, the default, with the Rust library as rav1g.dll, linked by lld-link. Shaders: $set. 0.2.$env:GITHUB_RUN_NUMBER.2 with the Rust library linked statically by the player's link.", '',
             '```') + @($packages | ForEach-Object { $_.Name }) + @(Get-Content out/imports/check.txt) + @('```', '',
             '### Artifact files', '```') +
             @(Get-ChildItem out -Recurse -File | ForEach-Object { [IO.Path]::GetRelativePath((Resolve-Path out), $_.FullName) }) +
@@ -413,9 +412,9 @@ jobs:
           if-no-files-found: warn
 
       # The alternative package (docs/rust-port.md, "The C runtime"): the static library with the interface
-      # for C, for the DLL runtime, the C compiled by MSVC with /GL for the app family of the Windows API
-      # and by the player's link.
-      - name: Rust library for the alternative package, C of MSVC (static library)
+      # for C, for the DLL runtime, linked into the program by the player's link. (It had the C of the
+      # library compiled by MSVC with /GL; the library has no C any more.)
+      - name: Rust library for the alternative package, linked by the player (static library)
         shell: pwsh
         env:
           RAV1G_SHADER_DIR: ${{ steps.shaders.outputs.dir }}
@@ -423,7 +422,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $separator = [char]0x1f
           $env:CARGO_ENCODED_RUSTFLAGS = "-Ctarget-feature=-crt-static${separator}--cfg${separator}windows_slim_errors"
-          $env:RAV1G_C_LIB_DIR = Join-Path $env:GITHUB_WORKSPACE 'rust-msvc'
+          New-Item -ItemType Directory -Force rust-msvc | Out-Null
           $clock = [Diagnostics.Stopwatch]::StartNew()
           cargo build --manifest-path src/Cargo.toml --release --locked -p rav1g --lib --features capi,app-container `
             --target-dir target-app-msvc
@@ -434,9 +433,9 @@ jobs:
           python src/testing/uwp_imports/prune_import_members.py --ar (Join-Path $env:ProgramFiles 'LLVM\bin\llvm-ar.exe') rust-msvc/rav1g.lib
           if ($LASTEXITCODE -ne 0) { throw 'The import members could not be taken out of rav1g.lib' }
           Get-ChildItem rust-msvc | ForEach-Object { Write-Host "$($_.Name): $($_.Length) bytes" }
-          "## Rust library for the alternative package, C of MSVC", '', "cargo build: $([math]::Round($clock.Elapsed.TotalMinutes, 1)) min ($(rustc --version))." >> $env:GITHUB_STEP_SUMMARY
+          "## Rust library for the alternative package, static library", '', "cargo build: $([math]::Round($clock.Elapsed.TotalMinutes, 1)) min ($(rustc --version))." >> $env:GITHUB_STEP_SUMMARY
 
-      - name: Stamp the alternative package, C of MSVC (same identity, revision 2)
+      - name: Stamp the alternative package, static library (same identity, revision 2)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -445,7 +444,7 @@ jobs:
           $manifest.Package.Identity.Version = "0.2.$env:GITHUB_RUN_NUMBER.2"
           $manifest.Save($path)
 
-      - name: Build the signed alternative package (rav1g.lib with the C of MSVC)
+      - name: Build the signed alternative package (rav1g.lib, linked by the player)
         shell: pwsh
         env:
           CERT_THUMBPRINT: ${{ steps.cert.outputs.thumbprint }}
@@ -465,16 +464,16 @@ jobs:
             "/p:PackageCertificateThumbprint=$env:CERT_THUMBPRINT" "/p:Rav1gRustLib=$library" `
             "/p:Rav1gSm6TestShaders=${{ steps.sm6.outputs.dir }}" `
             /fl "/flp:logfile=$buildLog;verbosity=normal"
-          if ($LASTEXITCODE -ne 0) { throw 'The player with the static Rust library (C of MSVC) did not build; see out-msvc/msbuild.log' }
+          if ($LASTEXITCODE -ne 0) { throw 'The player with the static Rust library did not build; see out-msvc/msbuild.log' }
           $packages = @(Get-ChildItem out-msvc/packages -Recurse -File | Where-Object {
             $_.Extension -in @('.msix', '.msixbundle', '.appx', '.appxbundle') -and
             $_.FullName -notmatch '[\\/]Dependencies[\\/]'
           })
-          if (-not $packages.Count) { throw 'No sideload package with the static Rust library (C of MSVC) was produced' }
+          if (-not $packages.Count) { throw 'No sideload package with the static Rust library was produced' }
           # The Rust library has the shaders of this run: their bytecode is in the program of the package.
           python src/testing/shader_cache/shaders.py verify --report shader-build/normal/report.json `
             --root shader-build/normal --note out-msvc/SHADERS.txt @($packages | ForEach-Object { $_.FullName })
-          if ($LASTEXITCODE -ne 0) { throw 'The package with the static Rust library was not built from the shader headers of this run' }
+          if ($LASTEXITCODE -ne 0) { throw 'The package with the static Rust library was not built from the shader bytecode of this run' }
           python src/testing/sm6test/compile.py --verify sm6test-build @($packages | ForEach-Object { $_.FullName })
           if ($LASTEXITCODE -ne 0) { throw 'The package does not have the Shader Model 6 test shaders of this run' }
           python src/testing/uwp_imports/check_package.py --out out-msvc/imports out-msvc/packages
@@ -486,12 +485,12 @@ jobs:
             Copy-Item $item.FullName out-msvc/ -Recurse
           }
           (Get-Content out-msvc/SOURCES.txt) -notmatch '^Variant: ' | Set-Content out-msvc/SOURCES.txt -Encoding utf8
-          "Variant: alternative: the Rust library (static, $(rustc --version)), linked by the player's link (/LTCG:incremental), its shader table compiled by MSVC with /GL; no C of libaom (the parser is rav1d's parse pass); package version 0.2.$env:GITHUB_RUN_NUMBER.2" |
+          "Variant: alternative: the Rust library (static, $(rustc --version)), linked by the player's link (/LTCG:incremental); no C (the parser is rav1d's parse pass, the shader table is Rust); package version 0.2.$env:GITHUB_RUN_NUMBER.2" |
             Add-Content out-msvc/SOURCES.txt -Encoding utf8
-          @('## Alternative package: static Rust library, C of MSVC', '', "Version 0.2.$env:GITHUB_RUN_NUMBER.2: installs over 0.2.$env:GITHUB_RUN_NUMBER.0.", '', '```') +
+          @('## Alternative package: static Rust library, linked by the player', '', "Version 0.2.$env:GITHUB_RUN_NUMBER.2: installs over 0.2.$env:GITHUB_RUN_NUMBER.0.", '', '```') +
             @($packages | ForEach-Object { $_.Name }) + @(Get-Content out-msvc/imports/check.txt) + @('```') >> $env:GITHUB_STEP_SUMMARY
 
-      - name: Preserve the alternative package (C of MSVC)
+      - name: Preserve the alternative package (static library)
         if: always()
         uses: actions/upload-artifact@v7
         with:
@@ -500,7 +499,7 @@ jobs:
           if-no-files-found: warn
 
       # The uavsync package: the default package with every group sync of the shaders compiled as a sync
-      # of all memory (AllMemoryBarrierWithGroupSync): rav1g.dll built from the shader headers of the
+      # of all memory (AllMemoryBarrierWithGroupSync): rav1g.dll built from the shader bytecode of the
       # uavsync variant of the Shaders step, with the uavsync feature of the crates, which makes the
       # library say which shaders it has. An experiment for a device on which a frame buffer store of one
       # thread is not seen by another thread of the group behind a sync of the group memory alone
@@ -563,14 +562,14 @@ jobs:
           if (-not $packages.Count) { throw 'No uavsync sideload package was produced' }
           python src/testing/uwp_imports/check_package.py --out out-uavsync/imports --need rav1g.dll --also rav1g.dll out-uavsync/packages
           if ($LASTEXITCODE -ne 0) { throw 'A program of the uavsync package imports from a DLL that is not in testing/uwp_imports/player-dlls-allow.txt, or rav1g.dll is not in the package' }
-          if ((Get-FileHash shader-build/normal/dx/shaders/h/loopfilter_hor.h).Hash -eq
-              (Get-FileHash shader-build/uavsync/dx/shaders/h/loopfilter_hor.h).Hash) {
+          if ((Get-FileHash shader-build/normal/dx/shaders/dxil/loopfilter_hor.dxil).Hash -eq
+              (Get-FileHash shader-build/uavsync/dx/shaders/dxil/loopfilter_hor.dxil).Hash) {
             throw 'The uavsync build did not change the group barrier bytecode'
           }
           # Verify the uavsync bytecode in the packaged DLL.
           python src/testing/shader_cache/shaders.py verify --report shader-build/uavsync/report.json `
             --root shader-build/uavsync --note out-uavsync/SHADERS.txt out-uavsync/imports/unpacked/rav1g.dll
-          if ($LASTEXITCODE -ne 0) { throw 'The rav1g.dll of the uavsync package was not built from the uavsync shader headers of this run' }
+          if ($LASTEXITCODE -ne 0) { throw 'The rav1g.dll of the uavsync package was not built from the uavsync shader bytecode of this run' }
           Remove-Item out-uavsync/imports/unpacked -Recurse -Force
           # The certificate, the notices and the record of the sources of the default package apply.
           foreach ($item in @(Get-ChildItem out | Where-Object { $_.Name -notin @('packages', 'msbuild.log', 'shader-survey',
@@ -578,7 +577,7 @@ jobs:
             Copy-Item $item.FullName out-uavsync/ -Recurse
           }
           (Get-Content out-uavsync/SOURCES.txt) -notmatch '^Variant: ' | Set-Content out-uavsync/SOURCES.txt -Encoding utf8
-          "Variant: uavsync: the default build (rav1g.dll, C of clang) with the shaders compiled with GroupMemoryBarrierWithGroupSync=AllMemoryBarrierWithGroupSync; package version 0.2.$env:GITHUB_RUN_NUMBER.1" |
+          "Variant: uavsync: the default build (rav1g.dll, linked by lld-link) with the shaders compiled with GroupMemoryBarrierWithGroupSync=AllMemoryBarrierWithGroupSync; package version 0.2.$env:GITHUB_RUN_NUMBER.1" |
             Add-Content out-uavsync/SOURCES.txt -Encoding utf8
           Copy-Item rust-uavsync/rav1g.pdb out-uavsync/
           @('## uavsync package', '', "Version 0.2.$env:GITHUB_RUN_NUMBER.1: installs over 0.2.$env:GITHUB_RUN_NUMBER.0.", '', '```') +
@@ -649,7 +648,7 @@ jobs:
           # Verify both bytecode sets in the packaged DLL.
           python src/testing/shader_cache/shaders.py verify --report shader-build/shader-pick/report.json `
             --root shader-build/shader-pick --note out-dxc/SHADERS.txt out-dxc/imports/unpacked/rav1g.dll
-          if ($LASTEXITCODE -ne 0) { throw 'The rav1g.dll of the shader-pick package was not built from the DXC shader headers of this run' }
+          if ($LASTEXITCODE -ne 0) { throw 'The rav1g.dll of the shader-pick package was not built from the DXC shader bytecode of this run' }
           $set = (Get-Content shader-build/shader-pick/shader_set.txt -Raw).Trim()
           Remove-Item out-dxc/imports/unpacked -Recurse -Force
           # The certificate, the notices and the record of the sources of the default package apply.
@@ -664,7 +663,7 @@ jobs:
           Copy-Item shader-build/shader-pick/shader_sets.txt out-dxc/dxc-shaders/
           $report = Get-Content shader-build/shader-pick/report.json -Raw | ConvertFrom-Json
           (Get-Content out-dxc/SOURCES.txt) -notmatch '^Variant: ' | Set-Content out-dxc/SOURCES.txt -Encoding utf8
-          "Variant: shader-pick: the default build (rav1g.dll, C of clang) with an alternate DXC -Od shader set. Package version 0.2.$env:GITHUB_RUN_NUMBER.4.",
+          "Variant: shader-pick: the default build (rav1g.dll, linked by lld-link) with an alternate DXC -Od shader set. Package version 0.2.$env:GITHUB_RUN_NUMBER.4.",
             "The task flag -shaderpick od=<list>,dxc=<list> selects bytecode per shader (docs/test-player.md, 'Shader pick'). The default set is dxc." |
             Add-Content out-dxc/SOURCES.txt -Encoding utf8
           Get-Content shader-build/shader-pick/shader_sets.txt | ForEach-Object { "  $_" } | Add-Content out-dxc/SOURCES.txt -Encoding utf8
@@ -727,7 +726,7 @@ jobs:
             testing/conformance/{run.py,player_smoke.py,streams.txt,expected.txt}
           )
           shader_pick=$(changed "${shared[@]}" .github/actions/shaders libav1/dx/shaders \
-            crates/rav1g-sys/{Cargo.toml,build.rs,shader_table.c,src/lib.rs} crates/rav1g/src/device.rs \
+            crates/rav1g-sys/{Cargo.toml,build.rs,shaders.txt,src/lib.rs,src/shaders.rs} crates/rav1g/src/device.rs \
             crates/rav1g/src/host/{compute,frame,shader_pick}.rs testing/shader_cache)
           parser_switches=$(changed "${shared[@]}" crates/rav1g-parse third_party/rav1d \
             tools/rav1g-parse-check tools/rav1g-dec/src/run.rs testing/stage_dump \
@@ -918,7 +917,7 @@ jobs:
           if-no-files-found: warn
 
   # The decoder as a desktop console program (docs/rust-port.md): the Cargo workspace builds the Rust library
-  # (its parser is rav1d's parse pass; crates/rav1g-sys compiles the shader table from the shader headers of
+  # (its parser is rav1d's parse pass; crates/rav1g-sys embeds the shader table from the DXC bytecode of
   # the Shaders step, and no C of libaom) and rav1g-dec (tools/rav1g-dec) with MSVC. This job builds the program once, runs the unit tests
   # and the Shader Model 6 test, and keeps the program as an artifact. The jobs behind it take the program
   # from there and run side by side, each on its own runner, every check on the D3D12 WARP software adapter
@@ -994,10 +993,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'cargo build failed' }
           $built = [math]::Round($clock.Elapsed.TotalMinutes, 1)
           if (-not (Test-Path target/release/rav1g-dec.exe)) { throw 'rav1g-dec.exe was not produced' }
-          # Built from the headers of the Shaders step: their bytecode is in the program, byte for byte.
+          # Built from the bytecode of the Shaders step: it is in the program, byte for byte.
           python testing/shader_cache/shaders.py verify --report shader-build/normal/report.json `
             --root shader-build/normal target/release/rav1g-dec.exe
-          if ($LASTEXITCODE -ne 0) { throw 'rav1g-dec was not built from the shader headers of this run' }
+          if ($LASTEXITCODE -ne 0) { throw 'rav1g-dec was not built from the shader bytecode of this run' }
           python testing/sm6test/compile.py --verify sm6test-build target/release/rav1g-dec.exe
           if ($LASTEXITCODE -ne 0) { throw 'rav1g-dec does not have the Shader Model 6 test shaders of this run' }
           Copy-Item target/release/rav1g-dec.exe, target/release/rav1g_dec.pdb -Destination out/rav1g-dec/
@@ -1060,7 +1059,7 @@ jobs:
           foreach ($line in $failed) { Write-Host "::warning title=Shader Model 6 test on WARP::$line" }
 
       # rav1g-dec with the shaders of the uavsync package, for the rust-experiments job: the uavsync feature
-      # of the crates and the shader headers of that variant.
+      # of the crates and the shader bytecode of that variant.
       - name: DXC shaders with all-memory group syncs
         if: ${{ inputs.experiments }}
         id: uavsync-shaders
@@ -1083,7 +1082,7 @@ jobs:
           Copy-Item target-uavsync/release/rav1g-dec.exe out/rav1g-dec-uavsync/
           python testing/shader_cache/shaders.py verify --report shader-build/uavsync/report.json `
             --root shader-build/uavsync out/rav1g-dec-uavsync/rav1g-dec.exe
-          if ($LASTEXITCODE -ne 0) { throw 'The uavsync rav1g-dec was not built from the uavsync shader headers of this run' }
+          if ($LASTEXITCODE -ne 0) { throw 'The uavsync rav1g-dec was not built from the uavsync shader bytecode of this run' }
 
       - name: Preserve the log of the Shader Model 6 test
         if: always()
@@ -2651,7 +2650,7 @@ jobs:
           # Verify the embedded bytecode of both sets.
           python testing/shader_cache/shaders.py verify --report shader-build/shader-pick/report.json `
             --root shader-build/shader-pick out/rav1g-dec-dxc/rav1g-dec.exe
-          if ($LASTEXITCODE -ne 0) { throw 'The DXC rav1g-dec was not built from the DXC shader headers of this run' }
+          if ($LASTEXITCODE -ne 0) { throw 'The DXC rav1g-dec was not built from the DXC shader bytecode of this run' }
           Copy-Item shader-build/shader-pick/shader_set.txt out/rav1g-dec-dxc/
           # Listings and compiler report for both sets.
           New-Item -ItemType Directory -Force out/dxc-shaders | Out-Null
@@ -2725,7 +2724,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Conformance of $env:PICK_CASE: exit code $LASTEXITCODE" }
           $log = "$out/lists/run001.log"
           $set = (Get-Content out/rav1g-dec-dxc/shader_set.txt -Raw).Trim()
-          $count = @(Select-String -Path crates/rav1g-sys/shader_table.c -Pattern '^\s*RAV1G_SHADER\(').Count
+          $count = @(Select-String -Path crates/rav1g-sys/shaders.txt -Pattern '^[a-z0-9_]+$').Count
           $line = switch ($env:PICK_CASE) {
             'dxc' { "SHADERPICK none: dxc $count (all); od 0" }
             'od' { "SHADERPICK od=all: dxc 0; od $count (all)" }
@@ -2775,7 +2774,7 @@ jobs:
           python testing/conformance/player_smoke.py --tool out/rav1g-dec-dxc/rav1g-dec.exe --streams conformance-streams `
             --out out/player-smoke-dxc-pick "--player-args=-shaderpick $pick" "--title=the player's shader-pick build"
           if ($LASTEXITCODE -ne 0) { throw "the player's decoder code with a shader pick: exit code $LASTEXITCODE" }
-          $count = @(Select-String -Path crates/rav1g-sys/shader_table.c -Pattern '^\s*RAV1G_SHADER\(').Count
+          $count = @(Select-String -Path crates/rav1g-sys/shaders.txt -Pattern '^[a-z0-9_]+$').Count
           if (-not (Get-ChildItem out/player-smoke-dxc-pick -Recurse -File | Select-String -SimpleMatch `
               "SHADERPICK ${pick}: dxc $($count - 2) (all others); od 2 (cdef_filter_v2 loopfilter_vert_hbd)" -Quiet)) {
             throw "The player's log does not have the SHADERPICK line of the pick of its task lines"
@@ -2876,7 +2875,7 @@ jobs:
             --pools rav1g-dec/memory-lines | tee -a "$GITHUB_STEP_SUMMARY"
 
   # Share the Windows SDK DXIL and its report with the Linux cross-build.
-  shader-headers:
+  shader-bytecode:
     runs-on: windows-latest
     timeout-minutes: 20
     env:
@@ -2895,23 +2894,23 @@ jobs:
         with:
           sdk: ${{ env.WINDOWS_SDK }}
 
-      - name: Preserve the shader headers of the normal build
+      - name: Preserve the shader bytecode of the normal build
         uses: actions/upload-artifact@v7
         with:
-          name: rav1g-shader-headers-${{ github.run_id }}
+          name: rav1g-shader-bytecode-${{ github.run_id }}
           path: |
-            shader-build/normal/dx/shaders/h/
+            shader-build/normal/dx/shaders/dxil/
             shader-build/normal/report.json
             shader-build/normal/shader_set.txt
           if-no-files-found: error
 
   # Linux-native build (docs/rust-port.md, "Requirements"): the workspace for x86_64-pc-windows-msvc on a
   # Linux runner with cargo xwin, which is clang-cl and lld-link with the Windows SDK and C runtime that xwin
-  # fetches; no wine, no MSVC. The shader table and the C++ of the test player that rav1g-dec has for
-  # -playersmoke are compiled by cc the same way. The shaders are the DXC headers of the
-  # shader-headers job.
+  # fetches; no wine, no MSVC. The C++ of the test player that rav1g-dec has for
+  # -playersmoke is compiled by cc the same way. The shaders are the DXC bytecode of the
+  # shader-bytecode job.
   rust-cross:
-    needs: shader-headers
+    needs: shader-bytecode
     runs-on: ubuntu-26.04
     timeout-minutes: 45
     env:
@@ -2923,8 +2922,8 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: rav1g-shader-headers-${{ github.run_id }}
-          path: shader-headers
+          name: rav1g-shader-bytecode-${{ github.run_id }}
+          path: shader-bytecode
 
       # clang-cl, lld-link and llvm-lib. The C++ standard library of the MSVC runtime
       # that xwin fetches (the stream readers and the player's code are C++) wants Clang 19 or newer.
@@ -2972,15 +2971,15 @@ jobs:
 
       - name: Build the workspace for x86_64-pc-windows-msvc (cargo xwin, release)
         env:
-          RAV1G_SHADER_DIR: ${{ github.workspace }}/shader-headers
+          RAV1G_SHADER_DIR: ${{ github.workspace }}/shader-bytecode
         run: |
           set -euo pipefail
           start=$(date +%s)
           cargo xwin build --release --locked --target x86_64-pc-windows-msvc
           exe=target/x86_64-pc-windows-msvc/release/rav1g-dec.exe
           test -f "$exe"
-          # Built from the headers of this run: their bytecode is in the program, byte for byte.
-          python3 testing/shader_cache/shaders.py verify --report shader-headers/report.json --root shader-headers "$exe"
+          # Built from the bytecode of this run: it is in the program, byte for byte.
+          python3 testing/shader_cache/shaders.py verify --report shader-bytecode/report.json --root shader-bytecode "$exe"
           mkdir -p out/rav1g-dec-xwin
           cp "$exe" target/x86_64-pc-windows-msvc/release/rav1g_dec.pdb out/rav1g-dec-xwin/
           # The notices of the crates the library links are those of Cargo.lock.
@@ -3007,23 +3006,23 @@ jobs:
         run: cargo run --release --locked -p rav1g-header -- --check
 
       # The library as an application in an app container links it (docs/rust-port.md, "The app
-      # container"): the static library with the interface for C, the C compiled for the app family of the
-      # Windows API, both for the DLL runtime. It is linked here into a DLL that has every function of
+      # container"): the static library with the interface for C, for the DLL runtime (the library has no C
+      # of its own to compile for the app family of the Windows API). It is linked here into a DLL that has every function of
       # rav1g.h, WindowsApp.lib first, and the DLLs that program imports from are held against the list
       # of the test player (testing/uwp_imports): no kernel32.dll, and of ntdll.dll two functions. The
       # player job does the same with the programs of its packages.
       - name: Library for an app container application, and the DLLs it imports from
         env:
-          RAV1G_SHADER_DIR: ${{ github.workspace }}/shader-headers
+          RAV1G_SHADER_DIR: ${{ github.workspace }}/shader-bytecode
         run: |
           set -euo pipefail
           separator=$(printf '\037')
           CARGO_ENCODED_RUSTFLAGS="-Ctarget-feature=-crt-static${separator}--cfg${separator}windows_slim_errors" \
-            RAV1G_C_LIB_DIR="$PWD/out/app-container" \
             cargo xwin build --release --locked -p rav1g --lib --features capi,app-container \
             --target x86_64-pc-windows-msvc --target-dir target/app-container
+          mkdir -p out/app-container
           cp target/app-container/x86_64-pc-windows-msvc/release/rav1g.lib out/app-container/
-          sh testing/uwp_imports/link_probe.sh out/app-container/rav1g.lib out/app-container \
+          sh testing/uwp_imports/link_probe.sh out/app-container/rav1g.lib \
             "$HOME/.cache/cargo-xwin/xwin" out/app-container-probe
           pipx install uv
           uv run --with pefile==2024.8.26 python testing/uwp_imports/check_imports.py \
@@ -3056,7 +3055,7 @@ jobs:
 
   # The program of the Linux build is a Windows program like the other: it decodes the conformance set on
   # WARP against the same references and expected.txt, and runs the decoder code of the test player, which
-  # in this program is compiled by clang-cl, as the C of the default package of the player is. The checks
+  # in this program is compiled by clang-cl. The checks
   # of rust-conformance and rust-switches also run on the Linux build, in parallel shards.
   # rust-cross-run-switches flips the parser options when the coverage check selects it.
   rust-cross-run:
@@ -3931,7 +3930,7 @@ jobs:
           git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges:badges
 
   # A release (docs/integration.md, "Releases"): for a tag v<version>, when the required checks have
-  # passed, rav1g.dll of the default package (the build the console runs: the C of clang, the app
+  # passed, rav1g.dll of the default package (the build the console runs: linked by lld-link, the app
   # runtime, DXC cs_6_0 shaders), its import library and symbols, the rav1g.h it was built with, the
   # licences the library needs (rav1g, AOM's patent licence, rav1d, the notices of the linked crates) and
   # SHA256SUMS, as a pre-release. The tag has to be v and the version of the workspace, which
@@ -3941,7 +3940,7 @@ jobs:
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     needs: [player, conformance-streams, cpp-reference, rust, rust-conformance, rust-output, rust-switches,
       rust-parser-switches, rust-sinkgrid, rust-gpublists, rust-clears, rust-frames, rust-frames-threads,
-      rust-dumps-equal, shader-pick-decoder, rust-dxc, rust-equal, shader-headers,
+      rust-dumps-equal, shader-pick-decoder, rust-dxc, rust-equal, shader-bytecode,
       rust-cross, rust-cross-run, rust-cross-run-switches, rav1d, parse-check, parse-digest, colour, sync-check,
       cdef-check, warp-check, inter-check, superres-check, tables-check, intra-check]
     runs-on: ubuntu-latest
@@ -3986,7 +3985,7 @@ jobs:
             echo "that loads it at run time (docs/integration.md). Built by CI run $GITHUB_RUN_NUMBER from \`$GITHUB_SHA\`; all"
             echo "required checks passed before this was published."
             echo
-            echo "- \`rav1g.dll\`: the library of the default package (the C of clang, linked by lld-link, the app"
+            echo "- \`rav1g.dll\`: the library of the default package (no C, linked by lld-link, the app"
             echo "  runtime; shaders DXC cs_6_0). \`rav1g.dll.lib\` to link it, \`rav1g.pdb\` for its symbols."
             echo "- \`rav1g.h\`: the interface it was built with, \`RAV1G_ABI_VERSION\` $abi; a loader compares"
             echo "  \`rav1g_abi_version()\` with it."

@@ -15,7 +15,7 @@ Built from (measured from the CI build of `rav1g.dll`):
 [![The languages rav1g.dll is built from](https://raw.githubusercontent.com/Zorro92/rav1g/badges/languages.svg)](https://github.com/Zorro92/rav1g/blob/badges/languages.json)
 
 The bar counts the bytes of the source files that the release build of the library recorded as its
-inputs (Rust, the assembly of rav1d's parse pass, the HLSL of the shaders in it, its C), written by
+inputs (Rust, the assembly of rav1d's parse pass, the HLSL of the shaders in it; no C), written by
 `testing/language_bar/language_bar.py` for every push to `main`; the JSON behind it has the numbers
 and the list of files. GitHub's own language bar of this repository goes by file paths
 (`.gitattributes`) and is an approximation of the same.
@@ -227,7 +227,7 @@ memory as possible left to the application.
   the same program of the C++ decoder.
 - [docs/rust-port.md](docs/rust-port.md): the Rust port, phase 1: its steps, gates and progress, what
   was removed at its end and what is open. The workspace builds with
-  `RAV1G_SHADER_DIR=<shader headers> cargo build --release` on Windows and with
+  `RAV1G_SHADER_DIR=<shader build> cargo build --release` on Windows and with
   `cargo xwin build --target x86_64-pc-windows-msvc` on Linux.
 - [docs/memory.md](docs/memory.md): what streams really use of the decoder's memory (`-memstats`), and
   the reductions that follow from it, ranked.

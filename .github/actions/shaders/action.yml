@@ -14,7 +14,7 @@ inputs:
 
 outputs:
   dir:
-    description: Build root with dx/shaders/h, shader_set.txt, asm and report.json
+    description: Build root with dx/shaders/dxil, shader_set.txt, asm and report.json
     value: ${{ steps.build.outputs.dir }}
 
 runs:
@@ -43,7 +43,7 @@ runs:
         restore-keys: |
           rav1g-shaders-v1-${{ inputs.variant }}-
 
-    - name: Headers and listings, compiling what the cache does not have
+    - name: Bytecode and listings, compiling what the cache does not have
       id: build
       shell: pwsh
       env:

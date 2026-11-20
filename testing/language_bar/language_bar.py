@@ -11,21 +11,26 @@ after the release build of rav1g.dll and takes the source files from what that b
             counted, nor are build scripts).
   Assembly  the files rav1d's build script named to cargo (cargo:rerun-if-changed in the output
             cargo keeps of it) and what they %include.
-  C         the same for the build script of rav1g-sys, and what the files #include.
-  HLSL      for every bytecode header the C includes (dx/shaders/h/<shader>.h of RAV1G_SHADER_DIR):
-            the shader's source and its includes, as testing/shader_cache/shaders.py takes them for
-            its cache keys. The key is computed again and held against the one in the report of the
-            shader build, so the files counted are the files that were compiled.
+  HLSL      for every bytecode file the Rust embeds (include_bytes! of dx/shaders/dxil/<shader>.dxil
+            of RAV1G_SHADER_DIR, which rustc names in the dependency file of rav1g-sys): the shader's
+            source and its includes, as testing/shader_cache/shaders.py takes them for its cache
+            keys. The key is computed again and held against the one in the report of the shader
+            build, so the files counted are the files that were compiled.
+  C         what a build script of BUILD_SCRIPTS compiles as C, and what the files #include. The
+            library has had none since its shader table became Rust (2026-11-19), and a language
+            without files is not in the bar.
 
-A file the build wrote itself (the tables build.rs of rav1g writes, config.asm, the bytecode
-headers) is listed in the JSON and not counted. Bytes decide the percentages, as on GitHub.
+A file the build wrote itself (the tables build.rs of rav1g writes, the shader table build.rs of
+rav1g-sys writes, config.asm) is listed in the JSON and not counted, and neither is the bytecode
+(the HLSL behind it is). Bytes decide the percentages, as on GitHub.
 
 cargo has two layouts of a build directory, and both are read: deps/<crate>-<hash>.d with
 build/<package>-<hash>/output and out, and build/<package>/<hash>/out/<crate>-<hash>.d with
 build/<package>/<hash>/run/stdout and out.
 
 Any of these is an error: a crate or build script without its record, a recorded file that is not
-there, a file of a kind the script does not know, a language without files.
+there, a file of a kind the script does not know, no source files at all, no Rust, no HLSL or no
+Assembly (the languages the library cannot be without).
 """
 import argparse
 import datetime
@@ -42,6 +47,8 @@ REPO = os.path.normpath(os.path.join(HERE, '..', '..'))
 
 # GitHub's colours of the languages (github-linguist, languages.yml).
 COLOURS = {'Rust': '#dea584', 'HLSL': '#aace60', 'Assembly': '#6E4C13', 'C': '#555555'}
+# The languages a build of the library has to have: without one of them the records were misread.
+REQUIRED = ['Rust', 'HLSL', 'Assembly']
 
 # What rustc may name in a dependency file of a crate of this repository.
 RUST_EXTENSIONS = {'.rs': 'Rust'}
@@ -52,8 +59,9 @@ RUST_EXTENSIONS = {'.rs': 'Rust'}
 BUILD_SCRIPTS = {
     # nasm: the entropy decoder and the motion vector lists of the parse pass.
     'rav1d': {'.asm': 'Assembly'},
-    # cc: the shader table.
-    'rav1g-sys': {'.c': 'C'},
+    # Compiles nothing: it writes the shader table as Rust (a file of the build, not counted) with an
+    # include_bytes! per shader, which the dependency file of the crate names.
+    'rav1g-sys': {},
     # Compiles nothing: it reads tables of libaom's C files as text and writes them as Rust, which
     # is in the dependency file of the crate as a file of the build (not counted).
     'rav1g': {},
@@ -67,7 +75,8 @@ INCLUDE = {
     'Assembly': re.compile(rb'^[ \t]*%[ \t]*include[ \t]+"([^"]+)"', re.M | re.I),
     'C': re.compile(rb'^[ \t]*#[ \t]*include[ \t]*"([^"]+)"', re.M),
 }
-SHADER_HEADER = re.compile(r'^dx/shaders/h/([A-Za-z0-9_]+)\.h$')
+# The bytecode of a shader in RAV1G_SHADER_DIR, of the default set or of the set od of the shader pick.
+SHADER_BYTECODE = re.compile(r'(?:^|[\\/])dx[\\/]shaders[\\/](dxil|dxil_od)[\\/]([A-Za-z0-9_]+)\.dxil$')
 
 
 def fail(message):
@@ -179,6 +188,9 @@ def dependency_file(path):
 
 
 def rust_sources(sources, crates, workspace_root):
+    """The Rust of the crates. The bytecode files the crates embed (include_bytes!), which their
+    dependency files name as well: [(path, directory of the set, shader)]."""
+    embedded = []
     for name, crate, directory, _ in crates:
         files = ['%s-%s\\.d' % (re.escape(crate), HASH), re.escape(crate) + '\\.d']
         record = newest(sources.release_dir, [['deps', file] for file in files] +
@@ -190,12 +202,17 @@ def rust_sources(sources, crates, workspace_root):
             # rustc runs in the directory of the workspace and names the files of a crate from there.
             path = listed if os.path.isabs(listed) else os.path.join(workspace_root, listed)
             extension = os.path.splitext(path)[1].lower()
+            bytecode = SHADER_BYTECODE.search(path)
+            if bytecode:
+                embedded.append((path, bytecode.group(1), bytecode.group(2)))
+                continue
             if extension not in RUST_EXTENSIONS:
                 fail('%s names %s: what language is %s?' % (record, listed, extension or 'a file without extension'))
             counted += sources.add(path, RUST_EXTENSIONS[extension], record)
         if not counted:
             fail('%s names no file of the repository' % record)
         print('language_bar.py: %s: %d files of the repository in %s' % (name, counted, os.path.basename(record)))
+    return embedded
 
 
 def build_script_inputs(sources, name, directory):
@@ -215,10 +232,9 @@ def build_script_inputs(sources, name, directory):
 
 
 def compiled_sources(sources, crates):
-    """The files the build scripts compile, with their includes. The directory of the bytecode
-    headers and the names of the shaders whose header the C includes."""
+    """The files the build scripts compile, with their includes. The directory of the shader build
+    (RAV1G_SHADER_DIR), which the build script of rav1g-sys names by its shader_set.txt."""
     shader_root = None
-    embedded = []
     for name, _, directory, has_script in crates:
         if not has_script:
             continue
@@ -231,7 +247,7 @@ def compiled_sources(sources, crates):
                 fail('%s names %d shader_set.txt' % (output, len(roots)))
             shader_root = roots[0]
         search = [directory] + [os.path.join(directory, extra) for extra in INCLUDE_DIRECTORIES.get(name, [])]
-        search += [out_dir] + ([shader_root] if name == 'rav1g-sys' else [])
+        search += [out_dir]
         counted = 0
         todo = [(path, BUILD_SCRIPTS[name][os.path.splitext(path)[1].lower()]) for path in named
                 if os.path.splitext(path)[1].lower() in BUILD_SCRIPTS[name]]
@@ -250,21 +266,17 @@ def compiled_sources(sources, crates):
                 data = f.read()
             for match in INCLUDE[language].finditer(data):
                 include = match.group(1).decode('utf-8')
-                shader = SHADER_HEADER.match(include)
                 found = [os.path.join(where, include) for where in [os.path.dirname(path)] + search
                          if os.path.isfile(os.path.join(where, include))]
                 if found:
-                    if shader:
-                        embedded.append(shader.group(1))
-                    else:
-                        todo.append((found[0], language))
+                    todo.append((found[0], language))
                 elif conditional(data, match.start()):
                     print('language_bar.py: %s: "%s" is not there and is behind a condition: not in this build' % (
                         os.path.basename(path), include))
                 else:
                     fail('%s includes "%s", which is in none of %s' % (path, include, ', '.join(search)))
         print('language_bar.py: %s: %d files compiled by its build script' % (name, counted))
-    return shader_root, embedded
+    return shader_root
 
 
 def conditional(data, position):
@@ -280,7 +292,7 @@ def conditional(data, position):
 def shader_sources(sources, shader_root, embedded, report_path):
     """The sources of the shaders whose bytecode the library has."""
     if not shader_root or not embedded:
-        fail('the C of the build includes no bytecode header (dx/shaders/h/<shader>.h)')
+        fail('the Rust of the build embeds no bytecode (include_bytes! of dx/shaders/dxil/<shader>.dxil)')
     spec = importlib.util.spec_from_file_location('shaders', os.path.join(REPO, 'testing', 'shader_cache', 'shaders.py'))
     shaders = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(shaders)
@@ -290,23 +302,33 @@ def shader_sources(sources, shader_root, embedded, report_path):
             report = json.load(f)
     except OSError as error:
         fail('the report of the shader build: %s' % error)
-    built = {shader['name']: shader for shader in report['shaders']}
+    # The sets of the build by their directory: the default one, and the set od of a shader-pick build.
+    built = {shaders.BYTECODE: (report['shaders'], lambda shader: shader['od'])}
+    for other in report.get('sets', {}).values():
+        built[other['directory']] = (other['shaders'], lambda shader: shader['name'] != shaders.LR_LEGACY)
     counted = set()
-    for name in embedded:
-        if name not in built:
-            fail('the library includes %s.h, which the shader build of %s does not have' % (name, report_path))
-        header = os.path.join(shader_root, 'dx', 'shaders', 'h', name + '.h')
-        if shaders.sha256_file(header) != built[name]['header_sha256']:
-            fail('%s is not the header the build of %s wrote' % (header, report_path))
-        key = shaders.shader_key(name, built[name]['od'], report['variant'], report['dxc_identity'])
-        if key != built[name]['key']:
-            fail('%s: the sources in the repository are not the ones %s was compiled from' % (name, header))
+    names = set()
+    for path, directory, name in embedded:
+        expected = os.path.join(shader_root, 'dx', 'shaders', directory, name + '.dxil')
+        if canonical(path) != canonical(expected):
+            fail('the library embeds %s, which is not in the shader build %s' % (path, shader_root))
+        entries, od = built.get(directory, ([], None))
+        entry = [shader for shader in entries if shader['name'] == name]
+        if len(entry) != 1:
+            fail('the library embeds %s, which the shader build of %s does not have' % (path, report_path))
+        if shaders.sha256_file(path) != entry[0]['bytecode_sha256']:
+            fail('%s is not the bytecode the build of %s wrote' % (path, report_path))
+        # 'key' is of the compiler call the set made for the shader; the bytecode may be of another
+        # ('bytecode_key': the default bytecode where the set od cannot have its own).
+        if shaders.shader_key(name, od(entry[0]), report['variant'], report['dxc_identity']) != entry[0]['key']:
+            fail('%s: the sources in the repository are not the ones %s was compiled from' % (name, path))
         for relative, _ in shaders.source_files(name):
             sources.add(os.path.join(shaders.SHADERS, relative), 'HLSL', 'shaders.py, ' + name)
             counted.add(relative)
+        names.add(name)
     print('language_bar.py: HLSL: %d files behind the %d shaders in the library (%d shaders compiled, %s)' % (
-        len(counted), len(set(embedded)), len(built), report['shader_set']))
-    return {'compiler': report['shader_set'], 'in_library': len(set(embedded)), 'compiled': len(built)}
+        len(counted), len(names), len(report['shaders']), report['shader_set']))
+    return {'compiler': report['shader_set'], 'in_library': len(names), 'compiled': len(report['shaders'])}
 
 
 def measure(sources):
@@ -321,7 +343,7 @@ def measure(sources):
         entry['bytes'] += len(data)
         entry['lines'] += data.count(b'\n') + (1 if data and not data.endswith(b'\n') else 0)
         entry['files'] += 1
-    for language in COLOURS:
+    for language in REQUIRED:
         if language not in languages or not languages[language]['bytes']:
             fail('the build has no %s' % language)
     ordered = sorted(languages.values(), key=lambda entry: (-entry['bytes'], entry['name']))
@@ -411,8 +433,8 @@ def main():
         fail('%s has no build directory: not the release directory of a build' % args.release_dir)
     sources = Sources(args.release_dir)
     crates, workspace_root = library_crates(args.package, args.target)
-    rust_sources(sources, crates, workspace_root)
-    shader_root, embedded = compiled_sources(sources, crates)
+    embedded = rust_sources(sources, crates, workspace_root)
+    shader_root = compiled_sources(sources, crates)
     shader_set = shader_sources(sources, shader_root, embedded, args.shader_report)
     if not sources.files:
         fail('the build has no source files')

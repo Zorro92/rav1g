@@ -24,7 +24,7 @@
 
 use std::sync::RwLock;
 
-/// The bytecodes of a shader, in the order of `rav1g_shader_table_set` of `shader_table.c`.
+/// The bytecodes of a shader: `SHADERS` and `SHADERS_OD` of `crates/rav1g-sys/src/shaders.rs`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Set {
     Dxc = 0,

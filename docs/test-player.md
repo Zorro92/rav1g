@@ -166,10 +166,10 @@ named by one of two properties, and stops with a message when neither is given.
 
 | Property | Library | How it is built |
 | --- | --- | --- |
-| `/p:Rav1gRustDll=<dir>` | `rav1g.dll` with its import library `rav1g.dll.lib`; the DLL is in the package next to the program | `testing/uwp_dx12_player/build_rav1g_dll.ps1 -Shaders <shader headers> -Out <dir>`: `cargo rustc --crate-type cdylib` with clang-cl (full link time optimisation for the C) and lld-link |
-| `/p:Rav1gRustLib=<dir>` | `rav1g.lib` and `rav1g_c.lib` (the shader table), linked statically | `cargo build -p rav1g --lib --features capi,app-container` with MSVC (`RAV1G_C_LIB_DIR=<dir>`), then `testing/uwp_imports/prune_import_members.py` on `rav1g.lib`; the commands are in the workflow |
+| `/p:Rav1gRustDll=<dir>` | `rav1g.dll` with its import library `rav1g.dll.lib`; the DLL is in the package next to the program | `testing/uwp_dx12_player/build_rav1g_dll.ps1 -Shaders <shader build> -Out <dir>`: `cargo rustc --crate-type cdylib`, linked by lld-link |
+| `/p:Rav1gRustLib=<dir>` | `rav1g.lib`, linked statically | `cargo build -p rav1g --lib --features capi,app-container` with MSVC, then `testing/uwp_imports/prune_import_members.py` on `rav1g.lib`; the commands are in the workflow |
 
-Both need `RAV1G_SHADER_DIR`, the directory with the bytecode headers of the shaders
+Both need `RAV1G_SHADER_DIR`, the directory with the bytecode of the shaders
 (`testing/shader_cache/shaders.py build --dxc <dxc>`), and the DLL runtime
 (`CARGO_ENCODED_RUSTFLAGS=-Ctarget-feature=-crt-static`, with `--cfg windows_slim_errors`); the
 reasons for every part are in [rust-port.md](rust-port.md), step 5.
@@ -3411,7 +3411,7 @@ it holds for the devices created after the call. `rav1g::switches::set_shader_pi
 `shader_pick_lines` in Rust.
 
 **The build.** Pass `--variant shader-pick --dxc <dxc>` to
-`testing/shader_cache/shaders.py build`. It writes `dx/shaders/h` and `dx/shaders/h_od` and
+`testing/shader_cache/shaders.py build`. It writes `dx/shaders/dxil` and `dx/shaders/dxil_od` and
 records the compiler and arguments of each set in `shader_sets.txt`. Build the library from
 that root with `--features shader-pick`. CI verifies both sets in the experiment binaries.
 
@@ -3798,13 +3798,15 @@ The action in `.github/actions/shaders` runs `testing/shader_cache/shaders.py` f
 
 - Each cache key covers the compiler and its libraries, the compiler options, and the
   shader source and transitive includes.
-- A cache entry holds the generated header, the listing, and the compiler messages.
+- A cache entry holds the bytecode as DXC wrote it (`<name>.dxil`), the listing, and the compiler
+  messages.
   The action stores the set of entries under a key specific to the variant.
-- `RAV1G_SHADER_DIR` points to the build root with `dx/shaders/h` and `shader_set.txt`.
+- `RAV1G_SHADER_DIR` points to the build root with `dx/shaders/dxil` and `shader_set.txt`.
+  `crates/rav1g-sys/build.rs` embeds the `.dxil` files as they are (`include_bytes!`).
   The latter records the DXC version and profile. The Linux cross-build in CI uses the
   same generated DXIL as the Windows builds.
 
-Build the default shader headers and decoder on Windows:
+Build the default shaders and decoder on Windows:
 
 ```bat
 uv run python testing\shader_cache\shaders.py build --dxc "<path>\dxc.exe" --cache shader-cache ^

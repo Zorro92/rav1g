@@ -21,8 +21,8 @@
 //! Everything is also at the top level, under the names the C had (`rav1g_sys::MB_MODE_INFO`). They live
 //! in this crate because the sink of the parser (`rav1g-parse`) and the decoder (`rav1g`) both use them.
 //!
-//! `build.rs` builds the one C file the decoder has, for Windows: the shader table (`shader_table.c`, the
-//! bytecode of the shaders of `RAV1G_SHADER_DIR`), which the host reads through its own declaration.
+//! [`shaders`] is the shader table: the bytecode of the shaders of `RAV1G_SHADER_DIR`, which `build.rs`
+//! embeds for Windows as DXC wrote it. The crate has no C and compiles none.
 
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
 
@@ -31,6 +31,7 @@ pub mod bitstream;
 pub mod host;
 pub mod perf;
 pub mod records;
+pub mod shaders;
 
 pub use api::*;
 pub use bitstream::*;
@@ -38,9 +39,9 @@ pub use host::*;
 pub use perf::*;
 pub use records::*;
 
-/// What built the C of this library: the compiler, its link time optimisation and the C runtime, as a
-/// text ("MSVC, /GL, static runtime").
-pub const C_BUILD: &str = env!("RAV1G_C_BUILD");
+/// The C runtime the library is built for, as a text: "static runtime" or "DLL runtime". (Until
+/// 2026-11-19 `C_BUILD`, which also named the compiler of the C the library had.)
+pub const RUNTIME: &str = env!("RAV1G_RUNTIME");
 
 /// What compiled the default shader set, for example "DXC 1.9.2602.17 cs_6_0".
 pub const SHADER_SET: &str = env!("RAV1G_SHADER_SET");
