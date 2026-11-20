@@ -347,9 +347,15 @@ pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_ch
         (*data).ar_padding = ar_padding;
         (*data).width = src.y_crop_width;
         (*data).height = src.y_crop_height;
-        (*data).random_offset_stride = (src.width / 32) + 1;
         (*data).is_10x3 = c_int::from(target == GrainTarget::Planes && (*dec).tryhdr10x3 != 0 && src.hbd != 0);
         let direct_v2 = matches!(target, GrainTarget::SemiPlanarTexture(_)) && !FG_LEGACY.load(Ordering::Relaxed);
+        // The shared-memory shader processes three adjacent grain blocks per group. The direct
+        // shader processes one. Both read the offsets of every block they process.
+        let blocks_per_group = if direct_v2 { 1 } else { 3 };
+        let groups_x = (src.y_crop_width as u32).div_ceil(luma_subblock_size_x as u32 * blocks_per_group);
+        let groups_y = (src.y_crop_height as u32).div_ceil(luma_subblock_size_y as u32);
+        let stride = groups_x * blocks_per_group;
+        (*data).random_offset_stride = stride as c_int;
 
         let packed = direct_v2 && params.bit_depth == 10;
         let scaling_lut = &raw mut (*data).scaling_lut;
@@ -365,19 +371,14 @@ pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_ch
             write_scaling_lut(&params.scaling_points_cr[..params.num_cr_points as usize], scaling_lut, 2, packed);
         }
 
-        // The random offset of every grain block of 32x32 luma samples into the grain templates.
+        // Start the random register at each visible stripe (AV1 7.18.3.5). Continue it through
+        // any extra blocks in the final group so all shader reads have initialized offsets.
         let random_offset = (*td.filmgrain_rand_offset).host_ptr.cast::<c_int>();
-        let stride = (*data).random_offset_stride;
-        let step = luma_subblock_size_y >> 1;
-        let mut y = 0;
-        while y < src.height / 2 {
-            let mut rng = Rng::new(y * 2, params.random_seed);
-            let mut x = 0;
-            while x < src.width / 2 {
-                *random_offset.offset(((y / step) * stride + x / step) as isize) = rng.get_random_number(8);
-                x += step;
+        for row in 0..groups_y {
+            let mut rng = Rng::new(row as c_int * luma_subblock_size_y, params.random_seed);
+            for col in 0..stride {
+                *random_offset.add((row * stride + col) as usize) = rng.get_random_number(8);
             }
-            y += step;
         }
 
         let commands = commands(dec);
@@ -420,11 +421,7 @@ pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_ch
             commands.bind_write(3, frame_buffers.location());
             commands.bind_constants(4, constants.location);
         }
-        if direct_v2 {
-            commands.dispatch((src.y_crop_width as u32).div_ceil(32), (src.y_crop_height as u32).div_ceil(32), 1);
-        } else {
-            commands.dispatch((src.width / 32 + 1) as u32, (src.height / 32 + 1) as u32, 1);
-        }
+        commands.dispatch(groups_x, groups_y, 1);
         commands.write_barrier(frame_buffers);
 
         perf_gpu_mark(dec, AV1_PERF_GPU_FILM_GRAIN);

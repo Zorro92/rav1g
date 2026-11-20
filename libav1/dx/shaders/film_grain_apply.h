@@ -37,3 +37,11 @@ struct FilmGrainData {
 
   int4 scaling_lut[256];
 };
+
+// Chroma uses pairs of ungrained luma samples (AV1 7.18.3.5). At the right edge
+// of an odd-width frame the last sample supplies both values of its pair.
+int2 chroma_luma_average(int4 luma, int x, int width) {
+  const int remaining = width - x;
+  const int2 next = int2(remaining == 1 ? luma.x : luma.y, remaining == 3 ? luma.z : luma.w);
+  return (int2(luma.x, luma.z) + next + 1) >> 1;
+}

@@ -185,7 +185,7 @@ void main(int3 group : SV_GroupID, int3 lane : SV_GroupThreadID) {
 
   if (data.enable_chroma && (local.y & 1) == 0) {
     const int2 uv = pixel >> 1;
-    const int2 mean_luma = int2(input.x + input.y + 1, input.z + input.w + 1) >> 1;
+    const int2 mean_luma = chroma_luma_average(input, pixel.x, data.width);
     const int2 cb = apply_chroma(tile, local >> 1, uv, mean_luma, 1, bit_shift, center);
     const int2 cr = apply_chroma(tile, local >> 1, uv, mean_luma, 2, bit_shift, center);
     const int shift = bit_shift != 0 ? 6 : 0;

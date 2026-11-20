@@ -373,8 +373,9 @@ groupshared int cb_grain_temp[3][16 * 16];
           // Mean luma calculation
           if (chroma_subsamp_x) {
             if ((i & 1) == 0) {
-              avarage_luma[lid][(i >> 1) * chroma_subblock_size_x + (j >> 1) + 0] = (in_luma.x + in_luma.y + 1) >> 1;
-              avarage_luma[lid][(i >> 1) * chroma_subblock_size_x + (j >> 1) + 1] = (in_luma.z + in_luma.w + 1) >> 1;
+              const int2 mean_luma = chroma_luma_average(in_luma, x + j, data.width);
+              avarage_luma[lid][(i >> 1) * chroma_subblock_size_x + (j >> 1) + 0] = mean_luma.x;
+              avarage_luma[lid][(i >> 1) * chroma_subblock_size_x + (j >> 1) + 1] = mean_luma.y;
             }
           } else {
             avarage_luma[lid][i * chroma_subblock_size_x + j + 0] = in_luma.x;
