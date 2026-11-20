@@ -160,9 +160,8 @@ fn late_frame_buffer(low_memory: i32) -> bool {
 /// cannot be split across pieces.
 ///
 /// `AV1_LOW_MEMORY_MODE_INFO` halves the mode info pool (the default of a decoder above 1920x1088,
-/// [`default_low_memory`]); `AV1_LOW_MEMORY_COEFS` sizes the coefficient pool for 24 values a 4x4 unit
-/// and not 30 (four fifths: every coefficient of a 4:2:0 frame without the padding of the counts; 12.0
-/// MiB at 3840x2176; docs/memory.md, candidate 6). These are starting capacities. The pools grow
+/// [`default_low_memory`]); `AV1_LOW_MEMORY_COEFS` starts the coefficient pool at four fifths before
+/// the extra chunks (12.0 MiB saved at 3840x2176; docs/memory.md, candidate 6). The pools grow
 /// only when the oldest frame cannot take another piece (pool_buffers.rs).
 fn pool_chunks(cells: usize, low_memory: i32) -> ([usize; KINDS], [usize; KINDS]) {
     let mut rule = [cells.max(1); KINDS];
@@ -1515,8 +1514,7 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
         let coefs = &*(*dec).idct_coefs;
         coefs.host_ptr.cast::<u8>().write_bytes(0, coefs.size);
         if (*dec).gpu_grid == 0 {
-            let mode = Kind::ModeInfo;
-            let chunks = super::pool_buffers::worst(&*dec, mode) + (*dec).pool_total[mode as usize];
+            let chunks = super::pool_buffers::worst(&*dec) + (*dec).pool_total[Kind::ModeInfo as usize];
             if (*dec).mi_chunks.try_reserve_exact(chunks).is_err() {
                 return create_failed(dec, &rcfg, Some(&vm_before), "mode info chunk mappings", 0);
             }

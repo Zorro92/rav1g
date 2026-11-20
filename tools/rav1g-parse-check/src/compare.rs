@@ -282,7 +282,7 @@ pub fn build_grid(arena: &Arena) {
                 let wide = 1 << crate::host::tables::MI_SIZE_WIDE_LOG2[(*mi).sb_type as usize];
                 let high = 1 << crate::host::tables::MI_SIZE_HIGH_LOG2[(*mi).sb_type as usize];
                 let (row, col) = (i32::from((*mi).mi_row), i32::from((*mi).mi_col));
-                let entry = crate::sys::mi_grid_entry(arena.mi_pool.ptr(), mi);
+                let entry = crate::sys::mi_grid_entry(data.mi_offset as usize + index);
                 for y in row..(row + high).min(arena.size.mi_rows) {
                     for x in col..(col + wide).min(arena.size.mi_cols) {
                         arena.mi_grid.ptr().add((y * stride + x) as usize).write(entry);

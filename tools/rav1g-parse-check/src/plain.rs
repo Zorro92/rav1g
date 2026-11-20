@@ -17,12 +17,13 @@
 //! the lists). The parsed frame is the arena: the arenas the two runs have of a frame are compared whole.
 
 use std::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
+use std::cell::Cell;
 use std::ffi::c_int;
 use std::sync::Mutex;
 
 use crate::host::blocks::WaveEdges;
 use crate::host::types::av1_frame_thread_data;
-use crate::sys::{MB_MODE_INFO, MiGridEntry, av1_tile_data, tx_block_info_gpu};
+use crate::sys::{MB_MODE_INFO, MI_POOL_CHUNK_RECORDS, MiGridEntry, av1_tile_data, tx_block_info_gpu};
 
 /// Coefficients a 4x4 unit of the frame can have: 16 of luma and two times 4 of chroma
 /// (`IDCT_COEF_COUNT_DENUM` of the host).
@@ -155,6 +156,7 @@ pub struct LrUnit {
 pub struct Arena {
     pub size: FrameSize,
     pub mi_pool: Buffer<MB_MODE_INFO>,
+    pub mi_chunks: Buffer<Cell<*mut MB_MODE_INFO>>,
     pub mi_grid: Buffer<MiGridEntry>,
     pub coefs: Buffer<i32>,
     pub tx_blocks: Buffer<tx_block_info_gpu>,
@@ -205,9 +207,12 @@ impl Arena {
         let grid_w = (((size.mi_cols * 4 + 63) & !63) >> 2) + 2 + 128;
         let grid_h = (((size.mi_rows * 4 + 63) & !63) >> 2) + 2 + 128;
         let pred_map_size = (256 + 32) * size.tile_count() + (units as c_int >> 2) * 10 + 1024;
+        let mi_pool = Buffer::new((stride * ((size.mi_rows + 31) & !31)) as usize + 64);
+        let mi_chunks = Buffer::new(mi_pool.len().div_ceil(MI_POOL_CHUNK_RECORDS));
         let arena = Self {
             size,
-            mi_pool: Buffer::new((stride * ((size.mi_rows + 31) & !31)) as usize + 64),
+            mi_pool,
+            mi_chunks,
             mi_grid: Buffer::new((stride * ((size.mi_rows + 31) & !31)) as usize),
             coefs: Buffer::new(units * COEFS_PER_UNIT as usize + 64),
             tx_blocks: Buffer::new((units * 3).div_ceil(2) + 64),
@@ -246,6 +251,10 @@ impl Arena {
         // SAFETY: the buffers of the edges, which nothing else works on. Filled once: the host does not
         // clear them between frames either.
         unsafe {
+            for chunk in 0..arena.mi_chunks.len() {
+                let records = arena.mi_pool.ptr().add(chunk * MI_POOL_CHUNK_RECORDS);
+                (*arena.mi_chunks.ptr().add(chunk)).set(records);
+            }
             for i in 0..arena.wave_above.len() {
                 arena.wave_above.ptr().add(i).write(WAVE_PATTERN);
             }

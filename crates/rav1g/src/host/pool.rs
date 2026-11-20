@@ -18,7 +18,7 @@
 //! | Pool | A chunk | Why |
 //! | --- | --- | --- |
 //! | mode info | 256 records | a block is 4x4 or larger |
-//! | coefficients | 7680 values | a 4x4 transform block with 16 coefficients takes 20 (its count is rounded up to the next multiple of four above it), four of luma and two of chroma an 8x8 area |
+//! | coefficients | 7680 values | at most 6144 per 64x64 of 4:2:0, with room for the unused end of a piece |
 //! | transform block records | 384 records | 256 of luma, 64 of each chroma plane |
 //!
 //! A tile takes a piece when it needs room: up to [`PIECE_CHUNKS`] chunks that follow each other, fewer
@@ -77,27 +77,17 @@ pub(crate) enum Kind {
 
 impl Kind {
     pub(crate) const ALL: [Kind; KINDS] = [Kind::ModeInfo, Kind::Coefs, Kind::Txb];
-
-    /// A bound across all tiles, including the tail of each piece a transform cannot fit into.
-    pub(crate) fn worst(self, cells: usize) -> usize {
-        if self == Self::Coefs { cells + cells / 2 } else { cells }
-    }
-
-    /// A bound for one tile. A coefficient record is at most 1028 values (32x32 plus padding).
-    /// The unsuccessful append that opens another piece leaves at most 1024 values of its
-    /// previous piece unused. Before a tile takes chunk k+1, it must therefore need more than
-    /// k * COEF_CHUNK - (k - 1) * 1024 values. A 4:2:0 tile of c cells writes at most
-    /// c * COEF_CHUNK values, so at most c + ceil((c-1)*1024 / (COEF_CHUNK-1024)) chunks.
-    /// The extra term is bounded by floor(c/2), even when the frame is split into tiles.
-    pub(crate) fn tile_limit(self, cells: usize) -> usize {
-        if self == Self::Coefs { cells + (cells.saturating_sub(1) * 1024).div_ceil(COEF_CHUNK - 1024) } else { cells }
-    }
 }
 
 /// The mode info records of a chunk: a 64x64 area of 4x4 blocks.
 pub(crate) const MODE_INFO_CHUNK: usize = crate::sys::MI_POOL_CHUNK_RECORDS;
-/// The coefficients of a chunk: 30 for each 4x4 unit of a 64x64 area.
+/// AV1 5.11 limits a transform to 32x32 coded coefficients. The sink rounds the last
+/// coefficient's index plus one up to four, within the transform's area. A 64x64 4:2:0
+/// area therefore writes at most 6144 values. An append that needs another piece leaves
+/// fewer than 1024 values unused. Even at one chunk per piece, a tile that already
+/// holds as many chunks as it has cells always has room for its next transform.
 pub(crate) const COEF_CHUNK: usize = 256 * 30;
+const _: () = assert!(COEF_CHUNK - 32 * 32 >= 64 * 64 + 2 * 32 * 32);
 /// The transform block records of a chunk: one for each 4x4 block of luma and of both chroma planes.
 pub(crate) const TXB_CHUNK: usize = 384;
 /// The items of a chunk, by [`Kind`].
@@ -421,7 +411,7 @@ impl Pools {
                     continue;
                 }
                 let bound = if grown {
-                    kind.worst(front.cells)
+                    front.cells
                 } else {
                     let remaining = usize::try_from(self.remaining[other].load(Ordering::Acquire)).unwrap_or(0);
                     front.bound[k].min(front.held[k] + front.can_need(remaining, state.chunks[k].rule))

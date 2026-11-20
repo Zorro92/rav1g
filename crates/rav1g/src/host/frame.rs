@@ -1357,13 +1357,13 @@ unsafe fn take_piece(
         let pools = (*dec).pools.as_deref()?;
         let k = kind as usize;
         // A piece, and never more than the tile can still need: a chunk is the worst case of a cell.
-        let limit = kind.tile_limit(pieces.cells) - pieces.chunks_taken[k];
+        let limit = pieces.cells - pieces.chunks_taken[k];
         let want = pools.piece(kind, usize::try_from(pieces.cells_left).unwrap_or(0)).min(limit);
         if want == 0 {
             return None;
         }
         let perf_t = super::perf::av1_perf_ticks();
-        let worst = super::pool_buffers::worst(&*dec, kind);
+        let worst = super::pool_buffers::worst(&*dec);
         let taken = pools.take_growing((*td).slot_index as usize, kind, want, worst, |chunks| {
             super::pool_buffers::grow(dec, td, kind, chunks)
         });

@@ -33,12 +33,12 @@ pub(crate) const fn chunk_bytes(kind: Kind) -> usize {
 }
 
 /// The logical capacity of the largest frame that fits the decoder.
-pub(crate) fn worst(dec: &Av1Core, kind: Kind) -> usize {
-    kind.worst(((dec.max_width >> 6) * (dec.max_height >> 6)) as usize)
+pub(crate) fn worst(dec: &Av1Core) -> usize {
+    ((dec.max_width >> 6) * (dec.max_height >> 6)) as usize
 }
 
 pub(crate) fn growth_bytes(dec: &Av1Core) -> usize {
-    Kind::ALL.into_iter().map(|kind| (worst(dec, kind) + dec.pool_total[kind as usize]) * chunk_bytes(kind)).sum()
+    Kind::ALL.into_iter().map(|kind| (worst(dec) + dec.pool_total[kind as usize]) * chunk_bytes(kind)).sum()
 }
 
 /// The buffer a piece came from. It stays mapped until the last frame holding a piece or a
