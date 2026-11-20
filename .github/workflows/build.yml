@@ -225,6 +225,8 @@ jobs:
       # of the report), counted by testing/language_bar/language_bar.py. The job language-bar publishes
       # the two files for a push to main.
       - name: Languages of rav1g.dll
+        # A measurement for the README: it never fails the packages of this job.
+        continue-on-error: true
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -233,6 +235,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'The languages of rav1g.dll could not be measured' }
 
       - name: Preserve the languages of rav1g.dll
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: rav1g-languages-${{ github.run_id }}
