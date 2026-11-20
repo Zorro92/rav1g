@@ -33,7 +33,7 @@ unsafe extern "C" {
     fn rd_process_init();
     fn rd_set_log_verbose(verbose: c_int);
 
-    fn rd_reader_open(path: *const c_char) -> *mut RdReader;
+    fn rd_reader_open(path: *const c_char, annexb: c_int, status: *mut c_int) -> *mut RdReader;
     fn rd_reader_next(reader: *mut RdReader, data: *mut *const u8, size: *mut usize) -> c_int;
     fn rd_reader_close(reader: *mut RdReader);
 
@@ -106,27 +106,55 @@ pub struct Reader {
     size: usize,
 }
 
+#[derive(Debug)]
+pub enum InputError {
+    Open,
+    Format,
+    MalformedObu,
+    Read,
+}
+
+impl InputError {
+    pub fn is_bitstream(&self) -> bool {
+        matches!(self, Self::Format | Self::MalformedObu)
+    }
+}
+
+impl std::fmt::Display for InputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Open => "cannot open the stream",
+            Self::Format => "unrecognized input format",
+            Self::MalformedObu => "invalid or truncated OBU framing",
+            Self::Read => "input read or allocation failure",
+        })
+    }
+}
+
 impl Reader {
-    /// `None` when the file cannot be opened or its container is none of the four.
-    pub fn open(path: &str) -> Option<Reader> {
+    pub fn open(path: &str, annexb: bool) -> Result<Reader, InputError> {
         let path = c_string(path);
-        // SAFETY: path is a NUL-terminated string.
-        let reader = unsafe { rd_reader_open(path.as_ptr()) };
-        if reader.is_null() { None } else { Some(Reader { reader, data: std::ptr::null(), size: 0 }) }
-    }
-
-    /// Reads the next temporal unit. False at the end of the stream.
-    pub fn next(&mut self) -> bool {
-        // SAFETY: the reader is valid; data and size are written by the call.
-        let have = unsafe { rd_reader_next(self.reader, &mut self.data, &mut self.size) } != 0;
-        if !have {
-            self.data = std::ptr::null();
-            self.size = 0;
+        let mut status = 0;
+        // SAFETY: path is a NUL-terminated string and status is writable.
+        let reader = unsafe { rd_reader_open(path.as_ptr(), annexb.into(), &mut status) };
+        if reader.is_null() {
+            return Err(if status == -2 { InputError::Format } else { InputError::Open });
         }
-        have
+        Ok(Reader { reader, data: std::ptr::null(), size: 0 })
     }
 
-    /// The temporal unit of the last `next` that returned true.
+    /// Reads the next temporal unit. `Ok(false)` at EOF.
+    pub fn next(&mut self) -> Result<bool, InputError> {
+        // SAFETY: the reader is valid; data and size are written by the call.
+        match unsafe { rd_reader_next(self.reader, &mut self.data, &mut self.size) } {
+            1 => Ok(true),
+            0 => Ok(false),
+            -1 => Err(InputError::MalformedObu),
+            _ => Err(InputError::Read),
+        }
+    }
+
+    /// The temporal unit of the last `next` that returned `Ok(true)`.
     pub fn data(&self) -> &[u8] {
         if self.data.is_null() {
             &[]
@@ -294,4 +322,28 @@ pub unsafe fn player_smoke(device: *mut c_void, root: &str, timeout_s: i32) -> i
     let root = c_string(root);
     // SAFETY: the caller's contract; root is a NUL-terminated string.
     unsafe { rd_player_smoke(device, root.as_ptr(), timeout_s as c_int) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn annexb_preserves_temporal_units_and_checks_nested_sizes() {
+        use std::io::Write;
+
+        let path = std::env::temp_dir().join(format!("rav1g-annexb-{}.obu", std::process::id()));
+        // TU 1: delimiter and a sized OBU in one frame unit, then an OBU with an extension and
+        // no size field in another. TU 2: delimiter only. TU 3: OBU length crosses its frame unit.
+        let units = [13, 6, 1, 0x10, 3, 0x7a, 1, 0x80, 5, 4, 0x7c, 0x08, 0xff, 0x80, 3, 2, 1, 0x10, 3, 2, 2, 0x10];
+        std::fs::File::create(&path).unwrap().write_all(&units).unwrap();
+        let mut reader = Reader::open(path.to_str().unwrap(), true).unwrap();
+        assert!(reader.next().unwrap());
+        assert_eq!(reader.data(), &[0x12, 0, 0x7a, 1, 0x80, 0x7e, 0x08, 2, 0xff, 0x80]);
+        assert!(reader.next().unwrap());
+        assert_eq!(reader.data(), &[0x12, 0]);
+        assert!(matches!(reader.next(), Err(InputError::MalformedObu)));
+        drop(reader);
+        std::fs::remove_file(path).unwrap();
+    }
 }

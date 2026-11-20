@@ -43,11 +43,11 @@ void rd_process_init(void);
 /* The log priority of testing/common/log: errors only, or everything from LOG_INFO with |verbose|. */
 void rd_set_log_verbose(int verbose);
 
-/* Stream reader. rd_reader_open: NULL when the file cannot be opened or its container is not IVF, WebM,
- * OBU or MP4. rd_reader_next: 1 and the next temporal unit, valid until the next call or the close; 0 at
- * the end of the stream. */
+/* Stream reader. rd_reader_open: NULL on failure, with status -2 for unrecognized framing.
+ * rd_reader_next: 1 and the next temporal unit, valid until the next call or the close;
+ * 0 at EOF, -1 for malformed OBU framing, and -2 for an input or allocation failure. */
 typedef struct rd_reader rd_reader;
-rd_reader *rd_reader_open(const char *path);
+rd_reader *rd_reader_open(const char *path, int annexb, int *status);
 int rd_reader_next(rd_reader *reader, const uint8_t **data, size_t *size);
 void rd_reader_close(rd_reader *reader);
 

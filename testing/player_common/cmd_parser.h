@@ -105,6 +105,7 @@ class CParameters {
     bool needReadBack_;
     bool md5_;
     bool md5_frame_check_;
+    bool annexb_;
     int scheme_;
     int player_queue_size_;
     int extra_fb_num_;

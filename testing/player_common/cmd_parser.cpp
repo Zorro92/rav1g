@@ -37,6 +37,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        "writes for a frame; with -progress a line for every frame. Same output",
        "", &params_.memstats_},
       {"save_md5", atString, anOptional, "Save md5 for each frame", "", &params_.save_md5_},
+      {"annexb", atSingle, anOptional, "Read a length-delimited AV1 Annex B stream", "", &params_.annexb_},
       {"md5_frame_check", atSingle, anOptional, "Calculate md5 for each frame & compare it with md5 file", "",
        &params_.md5_frame_check_},
       {"start", atInt, anOptional, "Start from frame No", "", &params_.start_frame_},
@@ -429,6 +430,7 @@ void CParameters::Reset() {
   params_.needReadBack_ = false;
   params_.md5_ = false;
   params_.md5_frame_check_ = false;
+  params_.annexb_ = false;
   params_.scheme_ = 0;
   params_.player_queue_size_ = PLAYER_QUEUE_SIZE;
   params_.extra_fb_num_ = 0;

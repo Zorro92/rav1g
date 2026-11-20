@@ -29,8 +29,10 @@ use crate::shim;
 
 /// What a task collects, from the decoder's threads.
 struct State {
-    /// One per output frame, in output order.
+    frames: i32,
+    /// One per output frame when per-frame hashes are needed.
     md5: Vec<String>,
+    stream_check: Option<(Md5, String)>,
     /// The reference, when there is one.
     reference: Vec<String>,
     have_ref: bool,
@@ -333,15 +335,10 @@ impl Sink for Run {
             let start = *run.perf_start.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             run.perf.add_output(ms_since(start));
         }
-        let mut ctx = Md5::new();
-        let complete = for_each_row(frame, task.aom_md5, |row| ctx.update(row));
-        let md5 = ctx.finish_hex();
         // What the image and the fence of the frame have to be, besides the samples.
         let mut fault = None;
         if frame.semi_planar != task.output.is_semi_planar() {
             fault = Some("the frame is not in the kind of image the task asked for".to_string());
-        } else if !complete {
-            fault = Some("the frame has no planes to read".to_string());
         } else if frame.semi_planar {
             fault = semi_planar_fault(frame).map(|fault| format!("semi-planar image: {fault}"));
         }
@@ -379,7 +376,20 @@ impl Sink for Run {
         }
         {
             let mut state = run.state();
-            let n = state.md5.len() as i32;
+            let n = state.frames;
+            let mut frame_hash = (state.stream_check.is_none() || !task.save_md5.is_empty()).then(Md5::new);
+            let complete = for_each_row(frame, task.aom_md5, |row| {
+                if let Some(hash) = &mut frame_hash {
+                    hash.update(row);
+                }
+                if let Some((hash, _)) = &mut state.stream_check {
+                    hash.update(row);
+                }
+            });
+            let md5 = frame_hash.map(Md5::finish_hex);
+            if fault.is_none() && !complete {
+                fault = Some("the frame has no planes to read".to_string());
+            }
             if fault.is_none() && fence_value <= state.fence_value {
                 fault = Some(format!(
                     "the fence value {fence_value} is not above the {} of the frame before",
@@ -422,7 +432,9 @@ impl Sink for Run {
                 say!("COLOUR {} frame {}: {}", task.name, n, frame.colour.text());
             }
             let mut wrong = false;
-            if state.have_ref {
+            if state.have_ref
+                && let Some(md5) = &md5
+            {
                 let expected = state.reference.get(n as usize).cloned();
                 if expected.as_deref() == Some(md5.as_str()) {
                     state.matched += 1;
@@ -450,8 +462,11 @@ impl Sink for Run {
                     state.mismatch_lines += 1;
                 }
             }
-            state.md5.push(md5);
-            run.frames.store(n + 1, Ordering::Relaxed);
+            if let Some(md5) = md5 {
+                state.md5.push(md5);
+            }
+            state.frames += 1;
+            run.frames.store(state.frames, Ordering::Relaxed);
             if state.io_error.is_empty()
                 && let Some(file) = state.out_file.as_mut()
                 && !write_frame(frame, task.aom_md5, file)
@@ -487,6 +502,17 @@ fn read_reference(path: &str) -> Option<Vec<String>> {
         out.push(String::from_utf8_lossy(&line[..32]).to_ascii_lowercase());
     }
     Some(out)
+}
+
+/// A single MD5, optionally followed by the file name (as in md5sum output).
+fn read_stream_reference(path: &str) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let hash = lines.next()?.split_whitespace().next()?;
+    if hash.len() != 32 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) || lines.next().is_some() {
+        return None;
+    }
+    Some(hash.to_ascii_lowercase())
 }
 
 /// One line with the memory of the process and of the machine: the tasks of a list run in one process, and
@@ -738,7 +764,9 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         pool: OutputPool::new(&dev.device, &dev.queue, task.queue_size, task.output),
         shared_fence: Mutex::new(None),
         state: Mutex::new(State {
+            frames: 0,
             md5: Vec::new(),
+            stream_check: None,
             reference: Vec::new(),
             have_ref: false,
             matched: 0,
@@ -772,12 +800,16 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
 
     let mut create_ms = 0.0f64;
     let mut decode_ms = 0.0f64;
-    let fail = |detail: &str, decode_ms: f64, create_ms: f64| -> i32 {
+    let fail = |detail: &str, bitstream: bool, decode_ms: f64, create_ms: f64| -> i32 {
+        // SAFETY: a plain call on the live device, before a decoder exists.
+        if bitstream && unsafe { dev.device.GetDeviceRemovedReason() }.is_ok() {
+            say!("BITSTREAM_ERROR stream={}", task.name);
+        }
         let state = run.state();
         result_line(
             &task.name,
             "error",
-            state.md5.len() as i32,
+            state.frames,
             state.matched,
             state.first_bad,
             if state.have_ref { state.reference.len() as i32 } else { 0 },
@@ -793,10 +825,10 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
 
     if !task.check.is_empty() {
         let Some(reference) = read_reference(&task.check) else {
-            return fail(&format!("cannot read the reference {}", task.check), decode_ms, create_ms);
+            return fail(&format!("cannot read the reference {}", task.check), false, decode_ms, create_ms);
         };
         if reference.is_empty() {
-            return fail(&format!("no md5 lines in the reference {}", task.check), decode_ms, create_ms);
+            return fail(&format!("no md5 lines in the reference {}", task.check), false, decode_ms, create_ms);
         }
         run.ref_frames.store(reference.len() as i32, Ordering::Relaxed);
         let mut state = run.state();
@@ -804,16 +836,26 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         state.have_ref = true;
     }
 
-    let Some(mut reader) = shim::Reader::open(&task.input) else {
-        return fail("cannot open the stream, or its container is not IVF, WebM, OBU or MP4", decode_ms, create_ms);
+    if !task.check_stream.is_empty() {
+        let Some(reference) = read_stream_reference(&task.check_stream) else {
+            return fail(&format!("expected one MD5 line in {}", task.check_stream), false, decode_ms, create_ms);
+        };
+        run.state().stream_check = Some((Md5::new(), reference));
+    }
+
+    let mut reader = match shim::Reader::open(&task.input, task.annexb) {
+        Ok(reader) => reader,
+        Err(error) => return fail(&error.to_string(), error.is_bitstream(), decode_ms, create_ms),
     };
 
     // The first key frame is looked for before the decoder exists: its sequence header says how large the
     // frames of the stream are and how many bits a sample has.
     let mut skipped = 0;
     let si = loop {
-        if !reader.next() {
-            return fail("end of the stream before a key frame", decode_ms, create_ms);
+        match reader.next() {
+            Ok(true) => {}
+            Ok(false) => return fail("end of the stream before a key frame", true, decode_ms, create_ms),
+            Err(error) => return fail(&error.to_string(), error.is_bitstream(), decode_ms, create_ms),
         }
         match library.peek(reader.data()) {
             Some(si) if si.is_key_frame => break si,
@@ -821,6 +863,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
             None => {
                 return fail(
                     &format!("no sequence header could be read from temporal unit {skipped}"),
+                    true,
                     decode_ms,
                     create_ms,
                 );
@@ -833,7 +876,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     if !task.out_yuv.is_empty() {
         match File::create(&task.out_yuv) {
             Ok(file) => run.state().out_file = Some(BufWriter::new(file)),
-            Err(_) => return fail(&format!("cannot write {}", task.out_yuv), decode_ms, create_ms),
+            Err(_) => return fail(&format!("cannot write {}", task.out_yuv), false, decode_ms, create_ms),
         }
     }
 
@@ -861,7 +904,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     let stage_dumps = shim::Dumps::new();
     let mut decoder = match create_decoder(&run, library, size, &si, &mut create_ms) {
         Ok(decoder) => Some(decoder),
-        Err(create_error) => return fail(&create_error, decode_ms, create_ms),
+        Err(create_error) => return fail(&create_error, false, decode_ms, create_ms),
     };
 
     // Process-wide switches, set while no frame is in flight, as the player does at the start of a task.
@@ -886,6 +929,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     library.set_choices(&Choices {
         lr_legacy: task.lrlegacy,
         fg_legacy: task.fglegacy,
+        skip_film_grain: task.skip_film_grain,
         copy_legacy: task.copylegacy,
         idct_legacy: task.idctlegacy,
         clear_legacy: task.clearlegacy,
@@ -983,6 +1027,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     }
 
     let mut decode_error = String::new();
+    let mut bitstream_error = false;
     // -continue_on_error: the decode calls that failed, and the temporal units decoded behind the first.
     let mut decode_errors = 0;
     let mut units_after_error = 0;
@@ -990,11 +1035,10 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     let mut limit = task.limit;
     let mut decoders = 1;
     let decode_start = Instant::now();
-    let mut have = true;
     // The number of the temporal unit, from 1, as the user data of the decode call: the frames have to
     // bring it back, in order (`picture`).
     let mut unit_number: u64 = 0;
-    while have && limit != 0 {
+    while limit != 0 {
         limit = limit.wrapping_sub(1);
         unit_number += 1;
         let Some(current) = decoder.as_mut() else {
@@ -1017,6 +1061,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
             let new_si = match library.peek(reader.data()) {
                 Some(new_si) if new_si.is_key_frame => new_si,
                 _ => {
+                    bitstream_error = true;
                     decode_error = format!(
                         "temporal unit {unit} needs another decoder ({why}) and does not start a sequence with a key \
                          frame"
@@ -1027,6 +1072,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
             let old_size = size;
             size.grow_for(task.nofitsize, &new_si);
             if size == old_size {
+                bitstream_error = true;
                 decode_error = format!(
                     "temporal unit {unit} needs a larger decoder ({why}) than this program creates{}",
                     if task.nofitsize { " with -nofitsize" } else { "" }
@@ -1037,6 +1083,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
                 // With more than one frame in parse, frames of the sequence before may still fail.
                 while let Err(error) = old.drain() {
                     if !task.continue_on_error {
+                        bitstream_error = error.bitstream;
                         decode_error = format!(
                             "decoding failed in a frame before temporal unit {}: {}",
                             skipped + units,
@@ -1103,6 +1150,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
                 );
             }
             Err(error) => {
+                bitstream_error = error.bitstream;
                 decode_error = format!("decoding failed on temporal unit {}: {}", skipped + units, error.text);
                 break;
             }
@@ -1110,7 +1158,18 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
             Ok(()) => {}
         }
         units += 1;
-        have = reader.next();
+        if limit == 0 {
+            break;
+        }
+        match reader.next() {
+            Ok(true) => {}
+            Ok(false) => break,
+            Err(error) => {
+                bitstream_error = error.is_bitstream();
+                decode_error = format!("reading temporal unit {}: {error}", skipped + units);
+                break;
+            }
+        }
     }
     // Drain: joins the decoder's GPU completion thread, so every frame that was submitted has been handed
     // over.
@@ -1126,7 +1185,8 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
                     decode_errors,
                     error.text
                 );
-            } else if decode_error.is_empty() {
+            } else if decode_error.is_empty() || (bitstream_error && !error.bitstream) {
+                bitstream_error = error.bitstream;
                 decode_error = format!("decoding failed in a frame that was in parse at the end: {}", error.text);
             }
         }
@@ -1174,7 +1234,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     {
         state.io_error = "write error".to_string();
     }
-    let frames = state.md5.len() as i32;
+    let frames = state.frames;
     if !task.save_md5.is_empty() {
         // The player's format: "<md5>   <n>" and a line end of CR LF.
         let mut text = String::with_capacity(state.md5.len() * 44);
@@ -1191,7 +1251,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     if !state.pool_error.is_empty() && !decode_error.is_empty() {
         decode_error = format!("{decode_error} ({})", state.pool_error);
     }
-    if let Err(error) = removed {
+    if let Err(error) = &removed {
         if !decode_error.is_empty() {
             decode_error.push_str("; ");
         }
@@ -1222,6 +1282,9 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     }
     let (width, height, bit_depth) = (state.width, state.height, state.bit_depth);
     if !decode_error.is_empty() {
+        if bitstream_error && removed.is_ok() && state.pool_error.is_empty() && state.io_error.is_empty() {
+            say!("BITSTREAM_ERROR stream={}", task.name);
+        }
         result_line(
             &task.name,
             "error",
@@ -1254,6 +1317,26 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
             &state.io_error,
         );
         return EXIT_ERROR;
+    }
+    if let Some((hash, reference)) = state.stream_check.take() {
+        let actual = hash.finish_hex();
+        say!("STREAM_MD5 stream={} expected={reference} actual={actual}", task.name);
+        let pass = actual == reference;
+        result_line(
+            &task.name,
+            if pass { "pass" } else { "mismatch" },
+            frames,
+            0,
+            -1,
+            0,
+            decode_ms,
+            create_ms,
+            width,
+            height,
+            bit_depth,
+            &sizes,
+        );
+        return if pass { EXIT_PASS } else { EXIT_MISMATCH };
     }
     if !state.have_ref {
         result_line(&task.name, "nocheck", frames, 0, -1, 0, decode_ms, create_ms, width, height, bit_depth, &sizes);

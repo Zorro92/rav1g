@@ -46,10 +46,14 @@ pub const EXIT_TIMEOUT: i32 = 4;
 #[derive(Clone)]
 pub struct Task {
     pub input: String,
+    pub annexb: bool,
     /// -name, or the file name of the input: what the result line calls the stream.
     pub name: String,
     /// -check: reference md5 file.
     pub check: String,
+    /// -check_stream: one MD5 of the concatenated visible output frames.
+    pub check_stream: String,
+    pub skip_film_grain: bool,
     /// -md5_frame_check: the reference is <input>.md5, as in the player.
     pub md5_frame_check: bool,
     pub save_md5: String,
@@ -143,8 +147,11 @@ impl Default for Task {
     fn default() -> Task {
         Task {
             input: String::new(),
+            annexb: false,
             name: String::new(),
             check: String::new(),
+            check_stream: String::new(),
+            skip_film_grain: false,
             md5_frame_check: false,
             save_md5: String::new(),
             out_yuv: String::new(),
@@ -238,10 +245,13 @@ pub fn usage() {
     say!("");
     say!("Task flags:");
     say!("  -i <file>             the stream: .ivf, .mkv/.webm, .obu, .mp4");
+    say!("  -annexb               input is a length-delimited AV1 Annex B stream");
     say!("  -name <text>          what the BEGIN and RESULT lines call the stream (default: its file name)");
     say!("  -check <file>         compare with this md5 file: the first 32 characters of each line are the md5 of");
     say!("                        one output frame (the player's format and that of AOM's test vectors)");
     say!("  -md5_frame_check      the same with <stream>.md5, as in the player");
+    say!("  -check_stream <file>  compare one MD5 of all visible frames, in output order (Argon Streams)");
+    say!("  -skip-film-grain      disable film grain synthesis");
     say!("  -save_md5 <file>      write the md5 of every output frame in the player's format");
     say!("  -aom_md5              hash a monochrome frame with two grey chroma planes, as aomdec --i420 does");
     say!("  -output <kind>        the output images (docs/output.md): planes (the default: a buffer with the");
@@ -427,8 +437,11 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
         };
         match a {
             "-i" => task.input = value()?,
+            "-annexb" => task.annexb = true,
             "-name" => task.name = value()?,
             "-check" => task.check = value()?,
+            "-check_stream" => task.check_stream = value()?,
+            "-skip-film-grain" => task.skip_film_grain = true,
             "-md5_frame_check" => task.md5_frame_check = true,
             "-save_md5" => task.save_md5 = value()?,
             "-aom_md5" => task.aom_md5 = true,
@@ -599,6 +612,14 @@ pub fn check_task(task: &mut Task) -> Result<(), String> {
                     task.dumpstages
                 ));
             }
+        }
+    }
+    if !task.check_stream.is_empty() {
+        if !task.check.is_empty() || task.md5_frame_check {
+            return Err("-check_stream and per-frame comparisons are mutually exclusive".to_string());
+        }
+        if task.limit >= 0 {
+            return Err("-check_stream requires the whole stream".to_string());
         }
     }
     if task.md5_frame_check && task.check.is_empty() {

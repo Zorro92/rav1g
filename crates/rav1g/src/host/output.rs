@@ -46,7 +46,7 @@ use std::ffi::c_int;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::core::{buffer, commands, perf_add, perf_gpu_mark, perf_ticks, pipeline, stage_dump_output};
-use super::film_grain::{GrainTarget, filmgrain_run};
+use super::film_grain::{GrainTarget, SKIP_FILM_GRAIN, filmgrain_run};
 use super::log::log;
 use super::types::Av1Core;
 use crate::gpu::d3d12::{com_ref, wrapped_ref};
@@ -293,7 +293,7 @@ pub(crate) unsafe fn copy_output(dec: *mut Av1Core, cm: *mut AV1_COMMON, fb: *co
         (*(*cm).cur_frame).buf.hw_show_image = img;
 
         let grain = &(*cm).film_grain_params;
-        let do_filmgrain = td.do_filmgrain != 0;
+        let do_filmgrain = td.do_filmgrain != 0 && !SKIP_FILM_GRAIN.load(Ordering::Relaxed);
         let film_grain_chroma =
             do_filmgrain && !is_monochrome && (grain.num_cb_points != 0 || grain.chroma_scaling_from_luma != 0);
 
@@ -327,7 +327,7 @@ pub(crate) unsafe fn copy_output(dec: *mut Av1Core, cm: *mut AV1_COMMON, fb: *co
             commands.set_pipeline(shader);
             commands.bind_write(0, frame_buffers.location());
 
-            for plane in td.do_filmgrain as usize..num_planes as usize {
+            for plane in usize::from(do_filmgrain)..num_planes as usize {
                 let crop_width = if plane == 0 { img.y_crop_width } else { img.uv_crop_width };
                 let w = if is_10x3 { (crop_width + 23) / 24 } else { (crop_width * bpp + 15) >> 4 };
                 let h = if plane == 0 { img.y_crop_height } else { img.uv_crop_height };

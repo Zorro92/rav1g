@@ -164,6 +164,7 @@ pub struct Spec {
 pub struct Choices {
     pub lr_legacy: bool,
     pub fg_legacy: bool,
+    pub skip_film_grain: bool,
     pub copy_legacy: bool,
     pub idct_legacy: bool,
     pub clear_legacy: bool,
@@ -184,6 +185,7 @@ pub struct Choices {
 pub struct DecodeError {
     /// The stream went on with a sequence the decoder does not fit.
     pub needs_reconfigure: bool,
+    pub bitstream: bool,
     /// What the decoder said about it.
     pub detail: String,
     /// The kind and the detail, as one text.
@@ -502,6 +504,7 @@ impl Library {
         switches::set_lf_legacy(choices.lf_legacy);
         switches::set_lr_legacy(choices.lr_legacy);
         switches::set_fg_legacy(choices.fg_legacy);
+        switches::set_skip_film_grain(choices.skip_film_grain);
         switches::set_copy_legacy(choices.copy_legacy);
         switches::set_idct_legacy(choices.idct_legacy);
         switches::set_clear_legacy(choices.clear_legacy);
@@ -670,6 +673,10 @@ impl<S: Sink> TaskDecoder<S> {
         match self {
             TaskDecoder::Rust(decoder) => decoder.decode(data, user_data).map_err(|error| DecodeError {
                 needs_reconfigure: error.code == ErrorCode::NeedsReconfigure,
+                bitstream: matches!(
+                    error.code,
+                    ErrorCode::UnsupportedBitstream | ErrorCode::UnsupportedFeature | ErrorCode::CorruptFrame
+                ),
                 text: error.to_string(),
                 detail: error.detail,
             }),
@@ -687,7 +694,15 @@ impl<S: Sink> TaskDecoder<S> {
                 if !detail.is_empty() {
                     text = format!("{text}: {detail}");
                 }
-                Err(DecodeError { needs_reconfigure: status == Rav1gStatus::NeedsReconfigure, detail, text })
+                Err(DecodeError {
+                    needs_reconfigure: status == Rav1gStatus::NeedsReconfigure,
+                    bitstream: matches!(
+                        status,
+                        Rav1gStatus::UnsupportedBitstream | Rav1gStatus::UnsupportedFeature | Rav1gStatus::CorruptFrame
+                    ),
+                    detail,
+                    text,
+                })
             }
         }
     }
@@ -699,6 +714,10 @@ impl<S: Sink> TaskDecoder<S> {
         match self {
             TaskDecoder::Rust(decoder) => decoder.drain().map_err(|error| DecodeError {
                 needs_reconfigure: false,
+                bitstream: matches!(
+                    error.code,
+                    ErrorCode::UnsupportedBitstream | ErrorCode::UnsupportedFeature | ErrorCode::CorruptFrame
+                ),
                 text: error.to_string(),
                 detail: error.detail,
             }),
@@ -716,7 +735,15 @@ impl<S: Sink> TaskDecoder<S> {
                 if !detail.is_empty() {
                     text = format!("{text}: {detail}");
                 }
-                Err(DecodeError { needs_reconfigure: false, detail, text })
+                Err(DecodeError {
+                    needs_reconfigure: false,
+                    bitstream: matches!(
+                        status,
+                        Rav1gStatus::UnsupportedBitstream | Rav1gStatus::UnsupportedFeature | Rav1gStatus::CorruptFrame
+                    ),
+                    detail,
+                    text,
+                })
             }
         }
     }

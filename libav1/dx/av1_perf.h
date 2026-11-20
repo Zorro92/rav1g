@@ -296,6 +296,9 @@ void av1_set_lr_legacy(int enable);
  * only while no frame is in flight. */
 void av1_set_fg_legacy(int enable);
 
+/* Process-wide. Set while no frame is in flight. Non-zero skips film grain synthesis. */
+void av1_set_skip_film_grain(int enable);
+
 /* Process-wide. Non-zero selects the original direct NV12/P010 copy shader.
  * Zero selects the tiled shader (default). Change it while no frame is in flight. */
 void av1_set_copy_legacy(int enable);

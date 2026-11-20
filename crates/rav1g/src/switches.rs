@@ -89,6 +89,11 @@ pub fn set_lr_legacy(enable: bool) {
     crate::host::av1_set_lr_legacy(c_int::from(enable))
 }
 
+/// Skip film grain synthesis. Set while no frame is in flight.
+pub fn set_skip_film_grain(enable: bool) {
+    crate::host::av1_set_skip_film_grain(c_int::from(enable))
+}
+
 /// Use the original direct NV12/P010 film grain apply shader.
 pub fn set_fg_legacy(enable: bool) {
     crate::host::av1_set_fg_legacy(c_int::from(enable))

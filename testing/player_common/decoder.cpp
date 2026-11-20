@@ -404,7 +404,7 @@ int AV1Decoder::DecodeOne() {
     return -1;
   }
   std::string source_path(params_.source_file_);
-  if (reader.Start(source_path)) {
+  if (reader.Start(source_path, params_.annexb_)) {
     XB_LOGE << "Unable to start file reader for " << source_path;
     return -1;
   }
@@ -989,6 +989,11 @@ int AV1Decoder::DecodeOne() {
       ++memory_mark;
     }
     buffer = reader.GetData();
+  }
+  if (!buffer && reader.ReadStatus() < 0) {
+    XB_LOGE << "Error reading the input stream";
+    has_error = 1;
+    output_queue_->hasFatalError_ = 1;
   }
   LogMemory("before the drain");
   // drain. With more than one frame in parse (-parseframes) a frame that was still in parse when its

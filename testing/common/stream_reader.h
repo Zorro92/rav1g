@@ -16,6 +16,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstdlib>
 #include <thread>
 #include <mutex>
 #include <memory>
@@ -110,10 +112,15 @@ class StreamReader {
       ivf_free_buffer(&buf_);
     else if (aom_input_ctx_.file_type == FILE_TYPE_WEBM)
       webm_free(&webm_ctx_);
-    else if (aom_input_ctx_.file_type == FILE_TYPE_OBU)
+    else if (aom_input_ctx_.file_type == FILE_TYPE_OBU) {
       obudec_free(&obu_ctx_);
+      std::free(buf_);
+    }
   }
-  int Start(std::string& source_path);
+  int Start(std::string& source_path, bool annexb = false);
+  // Available when GetData returns null: 1 is EOF, -1 is invalid OBU framing,
+  // and -2 indicates an I/O or allocation error.
+  int ReadStatus() const { return read_status_; }
 
   void Stop() {
     if (!stop_) {
@@ -150,7 +157,7 @@ class StreamReader {
   std::mutex cs_;
   myqueue<reader_buffer_ptr> reader_queue_;
   myqueue<reader_buffer_ptr> ready_queue_;
-  int eof_ = 0;
+  std::atomic<int> read_status_{0};
   size_t input_buffer_capacity_ = 0;
   uint8_t* buf_ = 0;
   uint32_t mode_ = 0;

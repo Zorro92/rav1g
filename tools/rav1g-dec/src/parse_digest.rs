@@ -25,10 +25,13 @@ use crate::shim::Reader;
 pub fn run(tasks: &[Task]) -> i32 {
     let mut exit_code = EXIT_PASS;
     for task in tasks {
-        let Some(mut reader) = Reader::open(&task.input) else {
-            say!("ERROR {}: cannot open the stream, or its container is not IVF, WebM, OBU or MP4", task.name);
-            exit_code = EXIT_ERROR;
-            continue;
+        let mut reader = match Reader::open(&task.input, task.annexb) {
+            Ok(reader) => reader,
+            Err(error) => {
+                say!("ERROR {}: {error}", task.name);
+                exit_code = EXIT_ERROR;
+                continue;
+            }
         };
         let parser = capi::rav1g_parse_digest_create(task.threads.max(1) as u32);
         if parser.is_null() {
@@ -36,10 +39,20 @@ pub fn run(tasks: &[Task]) -> i32 {
             exit_code = EXIT_ERROR;
             continue;
         }
-        while reader.next() {
-            let data = reader.data();
-            // SAFETY: a parser of rav1g_parse_digest_create; the temporal unit of the reader.
-            unsafe { capi::rav1g_parse_digest_send(parser, data.as_ptr(), data.len()) };
+        loop {
+            match reader.next() {
+                Ok(true) => {
+                    let data = reader.data();
+                    // SAFETY: a parser of rav1g_parse_digest_create; the temporal unit of the reader.
+                    unsafe { capi::rav1g_parse_digest_send(parser, data.as_ptr(), data.len()) };
+                }
+                Ok(false) => break,
+                Err(error) => {
+                    say!("ERROR {}: {error}", task.name);
+                    exit_code = EXIT_ERROR;
+                    break;
+                }
+            }
         }
         let mut result = capi::Rav1gParseDigestResult::default();
         // SAFETY: the parser, which is not used after its destruction.

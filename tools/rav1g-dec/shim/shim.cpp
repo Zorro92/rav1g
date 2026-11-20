@@ -71,11 +71,13 @@ struct rd_reader {
   ReadBufferWrapper buffer;
 };
 
-rd_reader* rd_reader_open(const char* path) {
+rd_reader* rd_reader_open(const char* path, int annexb, int* status) {
+  *status = -1;
   rd_reader* r = new (std::nothrow) rd_reader();
   if (!r) return NULL;
   std::string source(path ? path : "");
-  if (r->reader.Start(source)) {
+  *status = r->reader.Start(source, annexb != 0);
+  if (*status) {
     delete r;
     return NULL;
   }
@@ -89,7 +91,8 @@ int rd_reader_next(rd_reader* reader, const uint8_t** data, size_t* size) {
   if (!reader->buffer) {
     *data = NULL;
     *size = 0;
-    return 0;
+    const int status = reader->reader.ReadStatus();
+    return status < 0 ? status : 0;
   }
   *data = reader->buffer->Data();
   *size = reader->buffer->Size();

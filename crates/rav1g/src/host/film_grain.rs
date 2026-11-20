@@ -19,12 +19,19 @@ use crate::gpu::{Device, PlaneViews};
 use crate::sys::{AOM_CICP_MC_IDENTITY, AV1_COMMON, AV1_PERF_GPU_FILM_GRAIN, HwFrameBuffer};
 use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 
+pub(super) static SKIP_FILM_GRAIN: AtomicBool = AtomicBool::new(false);
 static FG_LEGACY: AtomicBool = AtomicBool::new(false);
 
 /// `av1_set_fg_legacy` (`dx/av1_perf.h`).
 #[unsafe(no_mangle)]
 pub extern "C" fn av1_set_fg_legacy(enable: c_int) {
     FG_LEGACY.store(enable != 0, Ordering::Relaxed);
+}
+
+/// `av1_set_skip_film_grain` (`dx/av1_perf.h`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_skip_film_grain(enable: c_int) {
+    SKIP_FILM_GRAIN.store(enable != 0, Ordering::Relaxed);
 }
 
 /// The film grain parameters of a frame as the shaders read them.

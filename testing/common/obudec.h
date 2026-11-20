@@ -25,16 +25,13 @@ struct ObuDecInputContext {
   int is_annexb;
 };
 
-// Returns 1 when file data starts (if Annex B stream, after reading the
-// size of the OBU) with what appears to be a Temporal Delimiter
-// OBU as defined by Section 5 of the AV1 bitstream specification.
+// Probes a low-overhead stream for an initial delimiter or sequence header.
 int file_is_obu(struct ObuDecInputContext *obu_ctx);
 
 // Reads one Temporal Unit from the input file. Returns 0 when a TU is
-// successfully read, 1 when end of file is reached, and less than 0 when an
-// error occurs. Stores TU data in 'buffer'. Reallocs buffer to match TU size,
-// returns buffer capacity via 'buffer_size', and returns size of buffered data
-// via 'bytes_read'.
+// successfully read, 1 at EOF, -1 for invalid framing, and -2 for I/O or
+// allocation failure. Annex B units are converted to low-overhead OBUs.
+// The caller owns 'buffer', with capacity in 'buffer_size'.
 int obudec_read_temporal_unit(struct ObuDecInputContext *obu_ctx, uint8_t **buffer, size_t *bytes_read,
                               size_t *buffer_size);
 
