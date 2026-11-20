@@ -47,7 +47,7 @@ expect_rejected() {
 
 if [ "${1:-}" = "--mutate" ]; then
   expect_rejected "upper-left blend" 's/blend_luma_x(above_left, above.xy, center)/blend_luma_x(above.xy, above_left, center)/'
-  expect_rejected "grained luma for chroma scaling" 's/int2(input.x + input.y + 1, input.z + input.w + 1)/int2(output.x + output.y + 1, output.z + output.w + 1)/'
+  expect_rejected "grained luma for chroma scaling" 's/chroma_luma_average(input, pixel.x, data.width)/chroma_luma_average(output, pixel.x, data.width)/'
   expect_rejected "restricted luma range" 's/max_luma_legal_range << bit_shift/max_chroma_legal_range << bit_shift/'
   expect_rejected "missing last column" 's/pixel.x >= data.width/pixel.x >= data.width - 1/'
   expect_rejected "10-bit scale fraction" 's/8 \* (index & 3)/8 * (index \& 2)/'
