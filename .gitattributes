@@ -1,5 +1,14 @@
-# Code of other projects kept in this tree, marked for GitHub's language statistics. The decoder is
-# Rust and HLSL; none of the files below is compiled into it.
+# GitHub's language statistics show what the decoder library is built from: rav1g's Rust host, its
+# HLSL shaders and C header, and the vendored copy of rav1d whose parse pass (Rust, plus dav1d's x86
+# assembly for the entropy decoder and the motion vector lists) is compiled into it. Linguist treats
+# every third_party/ path as vendored and leaves it out, so rav1d is counted explicitly here. Code
+# that only the tests or the test player use is marked below and stays out.
+third_party/rav1d/** linguist-vendored=false
+# rav1d's build script and its patch-check script are build tooling, not part of the library.
+third_party/rav1d/build.rs linguist-detectable=false
+third_party/rav1d/upstream_diff.sh linguist-detectable=false
+
+# Code of other projects kept in this tree that is not compiled into the decoder.
 
 # libaom: the reference the shader checks of testing/ hold the shaders against, and the files the
 # decoder's build and tests read tables from as text. Its shaders (libav1/dx) are rav1g's own.
