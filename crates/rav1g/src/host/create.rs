@@ -444,12 +444,14 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
     dec.max_height = target_height;
     dec.max_bitdepth = cfg.bitdepth;
 
-    let y_max_rst_units = max_tile_cols * max_tile_rows;
-    let uv_max_rst_units = (max_tile_cols >> 1) * (max_tile_rows >> 1);
+    // AV1 5.9.20 allows 64x64 luma restoration units and, with lr_uv_shift,
+    // 32x32 chroma units in 4:2:0. Both grids can have one unit per 64x64 luma area.
+    let max_rst_units_per_plane = (max_tile_cols * max_tile_rows) as usize;
+    let max_rst_units = 3 * max_rst_units_per_plane;
     let unit = size_of::<RestorationUnitInfo>();
-    request!(assign, dec.restoration_info_alloc[0], mem.host(unit * y_max_rst_units as usize));
-    request!(assign, dec.restoration_info_alloc[1], mem.host(unit * uv_max_rst_units as usize));
-    request!(assign, dec.restoration_info_alloc[2], mem.host(unit * uv_max_rst_units as usize));
+    for units in &mut dec.restoration_info_alloc {
+        request!(assign, *units, mem.host(unit * max_rst_units_per_plane));
+    }
 
     let [_, (_, u), (_, v)] = super::residual::plane_layout(target_width, target_height);
     request!(
@@ -728,12 +730,12 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
         request!(
             assign,
             td.loop_rest_types,
-            mem.buffer((16 * (block_count_4x4 >> 8)) as usize, DeviceUpload, c"loop_rest_types", i)
+            mem.buffer(size_of::<[c_int; 4]>() * max_rst_units, DeviceUpload, c"loop_rest_types", i)
         );
         request!(
             assign,
             td.loop_rest_wiener,
-            mem.buffer((64 * (block_count_4x4 >> 8)) as usize, DeviceUpload, c"loop_rest_wiener", i)
+            mem.buffer(size_of::<[c_int; 16]>() * max_rst_units, DeviceUpload, c"loop_rest_wiener", i)
         );
         request!(
             assign,
