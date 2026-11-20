@@ -698,11 +698,13 @@ void generate_blocks(uint record, uint lane, uint group, inout uint event) {
           w = 1;
           mi_addr_above = get_mi_index(mi_grid, mi_col + col + 1 + (mi_row - 1) * cb_mi_stride, cb_mi_addr_base);
         }
-        if (w > bw_log) w = bw_log;
+        // AV1 spec 7.11.3.9: step4 = Clip3(2, 16, Num_4x4_Blocks_Wide[candSz]),
+        // capping each above OBMC neighbor block at 64 samples (w <= 4).
+        w = min(w, min(bw_log, 4));
 
         uint above_ref = ((int)buffer_mi[mi_addr_above].block_type << 8) >> 24;
         if (above_ref > 0) {
-          count += 1 + (w == 5);
+          count += 1;
           const int filters = MI_INTERP_FILTERS(buffer_mi[mi_addr_above]);
 
           uint filter_type_h = (InterFilterLut >> ((MI_FILTER_H(filters) << 2) + ((w > 0) << 4))) & 7;
@@ -752,11 +754,13 @@ void generate_blocks(uint record, uint lane, uint group, inout uint event) {
           // left += xd->mi_stride;
           mi_addr_left = get_mi_index(mi_grid, mi_col - 1 + (mi_row + row + 1) * cb_mi_stride, cb_mi_addr_base);
         }
-        if (h > bh_log) h = bh_log;
+        // AV1 spec 7.11.3.9: step4 = Clip3(2, 16, Num_4x4_Blocks_High[candSz]),
+        // capping each left OBMC neighbor block at 64 samples (h <= 4).
+        h = min(h, min(bh_log, 4));
 
         uint left_ref = ((int)buffer_mi[mi_addr_left].block_type << 8) >> 24;
         if (left_ref > 0) {
-          count += 1 + (h == 5);
+          count += 1;
 
           const int filters = MI_INTERP_FILTERS(buffer_mi[mi_addr_left]);
           uint filter_type_h = (InterFilterLut >> ((MI_FILTER_H(filters) << 2) + ((w > 0) << 4))) & 7;

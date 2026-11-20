@@ -839,12 +839,13 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
                             w = 1;
                             above += 1;
                         }
-                        if w > bw_log {
-                            w = bw_log;
-                        }
+                        // AV1 spec 7.11.3.9 (Overlapped motion compensation process):
+                        // step4 = Clip3(2, 16, Num_4x4_Blocks_Wide[candSz]), capping each OBMC
+                        // neighbor block at 64 samples (w <= 4) so scaled motion resets every 64 px.
+                        w = w.min(bw_log).min(4);
                         let above_mi = neighbour(-1, above);
                         if above_mi.ref_frame[0] > INTRA {
-                            count += 1 + c_int::from(w == 5);
+                            count += 1;
                             let type_index_y = (ObmcAbove - 1) * SIZES + ((w << 2) | h);
                             push(take(map.offset(type_index_y as isize), 1));
                             if let Some(pc) = pc.as_deref_mut() {
@@ -896,12 +897,12 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
                             h = 1;
                             left += 1;
                         }
-                        if h > bh_log {
-                            h = bh_log;
-                        }
+                        // AV1 spec 7.11.3.9: step4 = Clip3(2, 16, Num_4x4_Blocks_High[candSz]),
+                        // capping each left OBMC neighbor block at 64 samples (h <= 4).
+                        h = h.min(bh_log).min(4);
                         let left_mi = neighbour(left, -1);
                         if left_mi.ref_frame[0] > INTRA {
-                            count += 1 + c_int::from(h == 5);
+                            count += 1;
 
                             let type_index_y = (ObmcLeft - 1) * SIZES + ((h << 2) | w);
                             let type_index_uv = (ObmcLeft - 1) * SIZES + (((h - 1) << 2) | wuv);
