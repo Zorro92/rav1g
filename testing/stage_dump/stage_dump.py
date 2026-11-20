@@ -1032,6 +1032,9 @@ def cmd_compare(args):
             return out
 
         ka, kb = keyed(dumps_a), keyed(dumps_b)
+        intra_key = ("intra", 0, 1)
+        intra_a, intra_b = dict(ka).get(intra_key), dict(kb).get(intra_key)
+        intra_equal = None
         map_b = dict(kb)
         first_bad = None
         data_bad = []
@@ -1065,9 +1068,22 @@ def cmd_compare(args):
             detail = args.all or first_bad is None
             lines = []
             equal = compare_dumps(da, db, detail, args.samples, lines.append)
-            print("  stage %-13s %s" % (da.label(), "equal" if equal else "DIFFERS"))
+            partial = False
+            if (not equal and args.two_parsers and da.stage in ("inter", "recon")
+                    and not da.is_sef and intra_a is not None and intra_b is not None
+                    and da.bytes_per_sample == db.bytes_per_sample
+                    and [p[2:] for p in da.planes] == [p[2:] for p in db.planes]):
+                # The whole-plane dumps include intra blocks that these passes have not
+                # written. Their old samples depend on how the implementations reuse
+                # frame buffers. Still require equality after intra has filled them in.
+                if intra_equal is None:
+                    intra_equal = compare_dumps(intra_a, intra_b, False, args.samples, lambda _: None)
+                partial = intra_equal
+            print("  stage %-13s %s" % (da.label(), "equal" if equal else
+                                        "differs (partial frame, intra matches)" if partial else "DIFFERS"))
             if not equal:
-                all_equal = False
+                if not partial:
+                    all_equal = False
                 if first_bad is None:
                     first_bad = da.label()
                     print("  ^ first stage that differs; its pattern:")
@@ -1231,8 +1247,8 @@ def main_with(argv):
     p.add_argument("--strict-data", action="store_true", help="require matching data stages on both sides")
     p.add_argument("--two-parsers", action="store_true",
                    help="list mode info differences for the two parsers without failing the comparison. "
-                        "Their record layouts and the contents of unused fields differ. The prediction, "
-                        "loop filter and CDEF lists and the frame buffers must still match")
+                        "List partial inter and recon differences when the completed intra stage matches. "
+                        "The prediction, loop filter and CDEF lists must still match")
     p.add_argument("--samples", type=int, default=12,
                    help="how many differing samples, blocks, units or records to list (default 12)")
     p.set_defaults(func=cmd_compare)
