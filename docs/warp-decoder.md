@@ -177,6 +177,9 @@ rav1g-dec -sm6test
 | Flag | |
 | --- | --- |
 | `-i <file>` | the stream: `.ivf`, `.mkv`/`.webm`, `.obu`, `.mp4` |
+| `-annexb` | read a length-delimited AV1 Annex B stream |
+| `-check_stream <file>` | compare a single MD5 of the whole planar output with the reference; see the [Argon Streams runner](../testing/argon/README.md) |
+| `-skip-film-grain` | skip film grain synthesis, for comparison with a grain-free reference |
 | `-check <file>` | compare with this md5 file: the first 32 characters of each line are the md5 of one output frame, in output order. Reads the player's format and AOM's |
 | `-md5_frame_check` | the same with `<stream>.md5`, as in the player |
 | `-save_md5 <file>` | write the md5 of every output frame in the player's format, `<md5>   <n>\r\n` |
