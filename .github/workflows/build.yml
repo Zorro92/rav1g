@@ -220,6 +220,27 @@ jobs:
             -TargetDir target-app-clang -Out rust-clang
           "## Rust library for the default package, C of clang", '', "cargo rustc: $([math]::Round($clock.Elapsed.TotalMinutes, 1)) min ($(rustc --version); $(& (Join-Path $llvm 'clang-cl.exe') --version | Select-Object -First 1))." >> $env:GITHUB_STEP_SUMMARY
 
+      # What that rav1g.dll is built from, by language (the bar of the README): the source files this build
+      # recorded (the dependency files of rustc, what the build scripts named to cargo, the shader sources
+      # of the report), counted by testing/language_bar/language_bar.py. The job language-bar publishes
+      # the two files for a push to main.
+      - name: Languages of rav1g.dll
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python src/testing/language_bar/language_bar.py --release-dir target-app-clang/x86_64-pc-windows-msvc/release `
+            --shader-report shader-build/normal/report.json --out language-bar
+          if ($LASTEXITCODE -ne 0) { throw 'The languages of rav1g.dll could not be measured' }
+
+      - name: Preserve the languages of rav1g.dll
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-languages-${{ github.run_id }}
+          path: |
+            language-bar/languages.json
+            language-bar/languages.svg
+          if-no-files-found: error
+
       - name: Build the signed default package (Release x64, rav1g.dll with the C of clang)
         shell: pwsh
         env:
@@ -3869,6 +3890,42 @@ jobs:
           name: rav1g-intra-check-${{ github.run_id }}
           path: intra-check.log
           if-no-files-found: warn
+
+  # The language bar of the README: languages.svg and languages.json of the player job (what rav1g.dll
+  # of this commit is built from, by language) as the one commit of the branch badges, which the README
+  # of main shows. For a push to main only: not for a tag, a dispatch, the weekly run or the branch
+  # cpp. The push to badges starts no run: the workflow runs for the branches main and cpp (on.push.branches),
+  # and a push with GITHUB_TOKEN starts none anyway.
+  language-bar:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: player
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # The one thing this job is given: to push the branch.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: rav1g-languages-${{ github.run_id }}
+          path: badges
+
+      # A new history of one commit each time, pushed over the old one: the branch stays two small files.
+      - name: Publish to the branch badges
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd badges
+          test -s languages.json
+          test -s languages.svg
+          printf '%s\n' "Written by the workflow of main (.github/workflows/build.yml, job language-bar): what rav1g.dll is built from, by language, for commit $GITHUB_SHA. One commit, replaced by every push to main." > README.md
+          git init --quiet --initial-branch=badges
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add languages.json languages.svg README.md
+          git commit --quiet -m "Languages of rav1g.dll at $GITHUB_SHA"
+          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges:badges
 
   # A release (docs/integration.md, "Releases"): for a tag v<version>, when the required checks have
   # passed, rav1g.dll of the default package (the build the console runs: the C of clang, the app

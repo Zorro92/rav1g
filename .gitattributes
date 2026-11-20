@@ -1,5 +1,8 @@
 # Code of other projects kept in this tree, marked for GitHub's language statistics. The decoder is
 # Rust and HLSL; none of the files below is compiled into it.
+# GitHub's statistics go by path and are an approximation: third_party/ is left out of them as a whole,
+# with the parse pass of rav1d that is in the library. The measured ones are the bar in the README: the
+# files the CI build of rav1g.dll recorded as its inputs (testing/language_bar/language_bar.py).
 
 # libaom: the reference the shader checks of testing/ hold the shaders against, and the files the
 # decoder's build and tests read tables from as text. Its shaders (libav1/dx) are rav1g's own.

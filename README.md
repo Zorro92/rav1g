@@ -10,6 +10,16 @@ stands for Rust AV1 GPU: the decoder on this branch is Rust (the D3D12 host and 
 `libav1` is the reference the shader checks of `testing/` compile. There is no C++ host on `main` any more ([docs/rust-port.md](docs/rust-port.md));
 the C++ decoder it was ported from lives on in branch `cpp` (release `v0.3.0`).
 
+Built from (measured from the CI build of `rav1g.dll`):
+
+[![The languages rav1g.dll is built from](https://raw.githubusercontent.com/Zorro92/rav1g/badges/languages.svg)](https://github.com/Zorro92/rav1g/blob/badges/languages.json)
+
+The bar counts the bytes of the source files that the release build of the library recorded as its
+inputs (Rust, the assembly of rav1d's parse pass, the HLSL of the shaders in it, its C), written by
+`testing/language_bar/language_bar.py` for every push to `main`; the JSON behind it has the numbers
+and the list of files. GitHub's own language bar of this repository goes by file paths
+(`.gitattributes`) and is an approximation of the same.
+
 rav1g is a fork of AOMedia's [av1-xbox-one](https://aomedia.googlesource.com/av1-xbox-one)
 (commit `b5c61563b48625c261a8d627cfa928896fd10b13`, August 2021), with upstream's history
 kept. Upstream's own description, `README.pdf`, is on branches `original` and `cpp`.
