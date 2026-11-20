@@ -165,6 +165,12 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
   grain, global motion, spatial layers, size changes, scaled references and superres.
   The 10-bit stream with scaled references that stood here as wrong on the console is right: its md5
   references had been made with ffmpeg scaling every frame to the size of the first.
+- **Not yet conformant on every Argon stream** (2026-11-19, first run of the Profile 0 set, see
+  [References](#references)): 34 of the first ~340 valid streams decode to output that differs from
+  the expected md5s, most of them with frame sizes that change within the stream (scaled
+  references), some with one frame fewer than expected or one wrong plane; one stream stops the
+  decoder. All of them differ the same way on v0.5.0-alpha.1: they come from the code rav1g was
+  forked from. The full run and the fixes are in progress.
 
 **The Rust port, phase 1, is complete** ([docs/rust-port.md](docs/rust-port.md), 2026-11-12 to
 2026-11-13): the whole D3D12 host is Rust, from the creation of a decoder to the completion thread, with
@@ -228,6 +234,28 @@ memory as possible left to the application.
   C parser, and its progress.
 - [third_party/rav1d/PATCHES.md](third_party/rav1d/PATCHES.md): the copy of rav1d, what was changed
   against upstream and how to check it.
+
+## References
+
+What decides whether rav1g decodes correctly, in this order:
+
+1. **The AV1 specification**, the normative definition of every output sample: the AV1 Bitstream
+   and Decoding Process Specification, version 1.0.0 with Errata 1, from the Alliance for Open Media
+   ([specifications page](https://aomedia.org/specifications/av1/)). Its source is Markdown, one file
+   per section, at the release tag
+   [`v1.0.0-errata1` of AOMediaCodec/av1-spec](https://github.com/AOMediaCodec/av1-spec/releases/tag/v1.0.0-errata1).
+   Cite sections from that tag: the repository's `master` has edits made after the errata.
+2. **Argon Streams AV1**, AOMedia's conformance suite for that specification
+   ([AV1 video decoder verification tool](https://aomedia.org/av1-video-decoder-verification-tool/)):
+   streams that cover every syntax element and decoding path, with expected output md5s made by
+   libaom at tag `v1.0.0-errata1`. rav1g is checked against the Profile 0 part (8- and 10-bit
+   4:2:0). The generator and coverage tool are at
+   [AOMediaCodec/argon-streams](https://gitlab.com/AOMediaCodec/argon-streams).
+3. **dav1d**, an independent decoder that passes Argon, makes the md5 references of the clips that have
+   no conformance md5 of their own (`testing/md5ref/make_md5_ref.sh`).
+
+[av1-xbox-one](https://aomedia.googlesource.com/av1-xbox-one), which rav1g is forked from, is not a
+reference: where its code and the specification disagree, the code is wrong.
 
 ## Licence
 
