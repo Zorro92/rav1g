@@ -211,8 +211,8 @@ fn for_each_row(frame: &Picture<'_>, aom_md5: bool, mut sink: impl FnMut(&[u8]))
     };
     rows(luma);
     if !frame.monochrome {
-        for index in 1..3 {
-            let Some(plane) = &frame.planes[index] else {
+        for plane in &frame.planes[1..3] {
+            let Some(plane) = plane else {
                 return false;
             };
             rows(plane);

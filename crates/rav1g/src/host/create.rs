@@ -1436,26 +1436,24 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
             // Not refused at once: the answer is asked again for as long as it keeps growing
             // (`settled_budget`).
             let (first, available, waited_ms) = settled_budget(callback, private, needed);
-            if callback.is_some() && first >= 0 && needed > first as u64 {
-                if available >= 0 {
-                    log(
-                        false,
-                        &format!(
-                            "MEMORY budget: {:.1} MiB needed and {:.1} MiB left for the decoder, waited {waited_ms} \
-                             ms for memory the system may still be returning: {:.1} MiB left now ({})",
-                            to_mib(needed),
-                            to_mib(first as u64),
-                            to_mib(available as u64),
-                            if needed <= available as u64 {
-                                "enough"
-                            } else if waited_ms >= AV1_MEMORY_GUARD_WAIT_MS {
-                                "still growing at the end of the wait"
-                            } else {
-                                "no longer growing"
-                            }
-                        ),
-                    );
-                }
+            if callback.is_some() && first >= 0 && needed > first as u64 && available >= 0 {
+                log(
+                    false,
+                    &format!(
+                        "MEMORY budget: {:.1} MiB needed and {:.1} MiB left for the decoder, waited {waited_ms} \
+                         ms for memory the system may still be returning: {:.1} MiB left now ({})",
+                        to_mib(needed),
+                        to_mib(first as u64),
+                        to_mib(available as u64),
+                        if needed <= available as u64 {
+                            "enough"
+                        } else if waited_ms >= AV1_MEMORY_GUARD_WAIT_MS {
+                            "still growing at the end of the wait"
+                        } else {
+                            "no longer growing"
+                        }
+                    ),
+                );
             }
             if available >= 0 && needed > available as u64 {
                 log_create_error(&format!(

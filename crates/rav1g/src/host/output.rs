@@ -409,7 +409,7 @@ unsafe fn copy_semi_planar(
     unsafe {
         let td = &*(*dec).curr_frame_data;
         let src = &*td.dst_frame_buffer;
-        let img: &HwOutputImage = &*(*(*cm).cur_frame).buf.hw_show_image;
+        let img: &HwOutputImage = &*(*cm.cur_frame).buf.hw_show_image;
         let is_monochrome = img.monochrome != 0;
         let hbd = src.hbd != 0;
         let format = if hbd { SemiPlanar::P010 } else { SemiPlanar::Nv12 };
