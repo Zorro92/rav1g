@@ -36,17 +36,14 @@
 //! the only chroma layout the decoder has).
 //!
 //! The filter is a recurrence through the whole template: every sample reads the filtered samples to
-//! its left and in the rows above. On the GPU that is one thread group with a step and a group sync for
-//! every sample along a wavefront (`film_grain_gen_luma.hlsl`, `film_grain_gen_chroma.hlsl`, still the
-//! path of `av1_set_fg_gen_legacy`); here it is about 0.2 million multiply-adds a frame (lag 3), most of
-//! them without a dependence between them ([`Filter`]).
+//! its left and in the rows above. At lag 3 this takes about 0.2 million multiply-adds per frame. The
+//! independent terms from the rows above are computed first so they can be vectorized ([`Filter`]).
 //!
 //! What differs from rav1d's code is the order of the sums of the filter ([`Filter`], the same values),
 //! and what the specification says and dav1d leaves out because those
 //! templates are not read: a plane without scaling points has the template 0 (7.18.3.3: "g = 0", and the
 //! filter of zeros is zeros; dav1d makes the noise and filters it), and the luma term of the chroma
-//! filter is only there with luma points (7.18.3.3, `num_y_points > 0`). That keeps the templates those
-//! of the GPU path, value for value, also where they are not read.
+//! filter is only there with luma points (7.18.3.3, `num_y_points > 0`).
 
 use std::ffi::c_int;
 

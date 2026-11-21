@@ -102,12 +102,9 @@ pub struct Task {
     pub intrabanklegacy: bool,
     pub intrasteplegacy: bool,
     pub intrasingleedgelegacy: bool,
-    pub parsecoeflegacy: bool,
     pub intralistslegacy: bool,
-    pub parserefrowslegacy: bool,
     pub lrlegacy: bool,
     pub fglegacy: bool,
-    pub fggenlegacy: bool,
     pub copylegacy: bool,
     pub idctlegacy: bool,
     pub clearlegacy: bool,
@@ -196,12 +193,9 @@ impl Default for Task {
             intrabanklegacy: false,
             intrasteplegacy: false,
             intrasingleedgelegacy: false,
-            parsecoeflegacy: false,
             intralistslegacy: false,
-            parserefrowslegacy: false,
             lrlegacy: false,
             fglegacy: false,
-            fggenlegacy: false,
             copylegacy: false,
             idctlegacy: false,
             clearlegacy: false,
@@ -321,12 +315,9 @@ pub fn usage() {
     say!("  -intrabanklegacy      use the previous 10-bit intra edge preparation");
     say!("  -intrasteplegacy      use the previous intra wavefront step (main before round 4)");
     say!("  -intrasingleedgelegacy use the previous directional wavefront with prefetching");
-    say!("  -parsecoeflegacy     use the previous linked list of AC coefficient tokens");
     say!("  -intralistslegacy    count the intra block lists with the previous loops and wavefront edges");
-    say!("  -parserefrowslegacy  wait for all reference rows during frame-parallel parsing");
     say!("  -lrlegacy           use the original loop_restoration shader");
     say!("  -fglegacy           use the original direct NV12/P010 film grain shader");
-    say!("  -fggenlegacy        make the film grain templates on the GPU (film_grain_gen_luma/chroma), not the CPU");
     say!("  -copylegacy         use the original direct NV12/P010 copy shader");
     say!("  -idctlegacy         use the original small inverse transform shaders");
     say!("  -clearlegacy        clear the whole residual allocation before IDCT");
@@ -522,12 +513,9 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-intrabanklegacy" => task.intrabanklegacy = true,
             "-intrasteplegacy" => task.intrasteplegacy = true,
             "-intrasingleedgelegacy" => task.intrasingleedgelegacy = true,
-            "-parsecoeflegacy" => task.parsecoeflegacy = true,
             "-intralistslegacy" => task.intralistslegacy = true,
-            "-parserefrowslegacy" => task.parserefrowslegacy = true,
             "-lrlegacy" => task.lrlegacy = true,
             "-fglegacy" => task.fglegacy = true,
-            "-fggenlegacy" => task.fggenlegacy = true,
             "-copylegacy" => task.copylegacy = true,
             "-idctlegacy" => task.idctlegacy = true,
             "-clearlegacy" => task.clearlegacy = true,
@@ -768,9 +756,6 @@ mod tests {
         assert!(!task.fglegacy);
         parse_args(&strings(&["-fglegacy"]), &mut task, None).unwrap();
         assert!(task.fglegacy);
-        assert!(!task.fggenlegacy);
-        parse_args(&strings(&["-fggenlegacy"]), &mut task, None).unwrap();
-        assert!(task.fggenlegacy);
         assert!(!task.copylegacy);
         parse_args(&strings(&["-copylegacy"]), &mut task, None).unwrap();
         assert!(task.copylegacy);

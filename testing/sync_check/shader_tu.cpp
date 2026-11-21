@@ -222,8 +222,8 @@ static void setup(World *w, Rng *rng, Dispatch *d) {
   d->groups_y = 4;
 }
 
-#elif SHADER_FAMILY == 6 || SHADER_FAMILY == 7
-// Film grain: the grain templates (6) and their application to the picture (7).
+#elif SHADER_FAMILY == 7
+// Film grain: apply the templates to the picture.
 static void grain_params(GrainParams *params, Rng *rng) {
   memset((void *)params, 0, sizeof(*params));
   params->num_y_points = rng->below(3);
@@ -250,57 +250,8 @@ static void grain_params(GrainParams *params, Rng *rng) {
 }
 
 static void setup(World *w, Rng *rng, Dispatch *d) {
-  int *ints0 = (int *)w->ro[0];
   int *ints1 = (int *)w->ro[1];
   int *ints2 = (int *)w->ro[2];
-  int *out = (int *)w->rw[0];
-#if SHADER_FAMILY == 6
-  random.ptr = ints0;
-  random.count = 65536;
-  random_uv.ptr = ints1;
-  random_uv.count = 65536;
-  gaussian_sequence.ptr = ints2;
-  gaussian_sequence.count = 2048;
-  dst.ptr = out;
-  dst.count = kRwSize / 4;
-  for (int i = 0; i < 65536; ++i) {
-    ints0[i] = rng->below(65536);
-    ints1[i] = rng->below(65536);
-  }
-  for (int i = 0; i < 2048; ++i) ints2[i] = rng->below(4096) - 2048;
-  for (int i = 0; i < 16384; ++i) out[i] = rng->below(512) - 256;
-  grain_params(&data.params, rng);
-  // The sizes and paddings of the decoder (loopfilters.cpp).
-  data.luma_block_size_y = 73;
-  data.luma_block_size_x = 82;
-  data.luma_grain_stride = 82;
-  data.chroma_block_size_y = 38;
-  data.chroma_block_size_x = 44;
-  data.chroma_grain_stride = 44;
-  data.left_pad = 3;
-  data.top_pad = 3;
-  data.right_pad = 3;
-  data.bottom_pad = 0;
-  data.dst_offset_u = 73 * 82;
-  data.dst_offset_v = 73 * 82 + 38 * 44;
-  memset((void *)&data.pred_pos, 0, sizeof(data.pred_pos));
-  const int lag = data.params.ar_coeff_lag;
-  int pos = 0;
-  for (int row = -lag; row < 0; ++row) {
-    for (int col = -lag; col < lag + 1; ++col) {
-      data.pred_pos.data[pos].data[0] = int4(row, row, 0, 0);
-      data.pred_pos.data[pos].data[1] = int4(col, col, 0, 0);
-      ++pos;
-    }
-  }
-  for (int col = -lag; col < 0; ++col) {
-    data.pred_pos.data[pos].data[0] = int4(0, 0, 0, 0);
-    data.pred_pos.data[pos].data[1] = int4(col, col, 0, 0);
-    ++pos;
-  }
-  if (data.params.num_y_points > 0) data.pred_pos.data[pos].data[2] = int4(0, 1, 0, 0);
-  d->groups_y = SHADER_GROUPS_Y;
-#else
   src.ptr = w->ro[0];
   src.size = kRoSize;
   grain_block.ptr = ints1;
@@ -335,7 +286,6 @@ static void setup(World *w, Rng *rng, Dispatch *d) {
   for (int i = 0; i < 256; ++i) data.scaling_lut.data[i] = int4(rng->below(256), rng->below(256), rng->below(256), 0);
   d->groups_x = 2;
   d->groups_y = 2;
-#endif
 }
 #elif SHADER_FAMILY == 8
 #include "pred_list_common.gen.h"

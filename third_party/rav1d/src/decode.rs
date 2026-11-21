@@ -3880,7 +3880,6 @@ pub(crate) fn rav1d_decode_frame_init(c: &Rav1dContext, fc: &Rav1dFrameContext) 
             frame_hdr,
             &f.rf,
             f.prev_segmap.is_some(),
-            c.parse_legacy_ref_rows,
         );
     }
 
@@ -4501,7 +4500,7 @@ pub fn rav1d_submit_frame(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResu
     f.sbh = f.bh + f.sb_step - 1 >> f.sb_shift;
     f.b4_stride = (f.bw + 31 & !31) as ptrdiff_t;
     f.bitdepth_max = (1 << f.cur.p.bpc) - 1;
-    f.bd_fn = Rav1dFrameContextBdFn::get(BPC::from_bitdepth_max(f.bitdepth_max), c.parse_legacy_coef_tokens);
+    f.bd_fn = Rav1dFrameContextBdFn::get(BPC::from_bitdepth_max(f.bitdepth_max));
     fc.task_thread.error.store(0, Ordering::Relaxed);
     let uses_2pass = (c.fc.len() > 1) as c_int;
     let cols = frame_hdr.tiling.cols;

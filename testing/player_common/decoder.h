@@ -386,8 +386,6 @@ class AV1Decoder {
   bool created_intrav2_ = false;
   bool created_interfast_ = false;
   unsigned created_parser_options_ = 0;
-  bool created_parsecoeflegacy_ = false;
-  bool created_parserefrowslegacy_ = false;
   int created_lowmem_ = 0;
   bool created_packed_10x3_ = false;
   bool created_noguard_ = false;

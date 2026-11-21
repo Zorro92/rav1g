@@ -250,15 +250,9 @@ impl SinkHost for PlainHost {
     }
 }
 
-/// rav1d's parse pass with the sink and the plain host.
-/// The previous paths of the parse (`-coeflegacy`, `-refrowslegacy`; the decoder's -parsecoeflegacy and
-/// -parserefrowslegacy) and of the block lists (`-intralistslegacy`, the decoder's -intralistslegacy).
+/// Select the previous path of the intra block lists (`-intralistslegacy`).
 #[derive(Clone, Copy, Default)]
 pub struct Legacy {
-    /// The linked list of AC coefficient tokens (`ParseSettings::legacy_coef_tokens`).
-    pub coef_tokens: bool,
-    /// A frame in parse waits for the rows of all seven references (`ParseSettings::legacy_ref_rows`).
-    pub ref_rows: bool,
     /// The loops of `av1_mi_push_block` for the transform blocks of intra prediction as they were before
     /// `intra_txbs_edges` (`av1_frame_thread_data::intra_lists_legacy`).
     pub intra_lists: bool,
@@ -304,13 +298,7 @@ impl RustParser {
             options.sink(),
             usize::from(frames),
         ));
-        let mut settings = ParseSettings {
-            threads,
-            frames,
-            legacy_coef_tokens: legacy.coef_tokens,
-            legacy_ref_rows: legacy.ref_rows,
-            ..Default::default()
-        };
+        let mut settings = ParseSettings { threads, frames, ..Default::default() };
         options.apply(&mut settings);
         let parser =
             Parser::new(&settings, sink.clone()).map_err(|error| format!("rav1d was not created: {error:?}"))?;

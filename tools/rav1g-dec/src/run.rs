@@ -988,7 +988,6 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     library.set_choices(&Choices {
         lr_legacy: task.lrlegacy,
         fg_legacy: task.fglegacy,
-        fg_gen_legacy: task.fggenlegacy,
         skip_film_grain: task.skip_film_grain,
         copy_legacy: task.copylegacy,
         idct_legacy: task.idctlegacy,
@@ -1004,9 +1003,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         intra_bank_legacy: task.intrabanklegacy,
         intra_step_legacy: task.intrasteplegacy,
         intra_single_edge_legacy: task.intrasingleedgelegacy,
-        parse_coef_legacy: task.parsecoeflegacy,
         intra_lists_legacy: task.intralistslegacy,
-        parse_ref_rows_legacy: task.parserefrowslegacy,
         lf_legacy: task.lflegacy,
         lf_h_split: task.lfhsplit as u32,
         intra_edge_fix: task.intraedgefix,
@@ -1026,14 +1023,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
             }
         );
     }
-    say!(
-        "Film grain templates: {}",
-        if task.fggenlegacy {
-            "GPU, film_grain_gen_luma/chroma (-fggenlegacy)"
-        } else {
-            "CPU, uploaded with the random offsets (default)"
-        }
-    );
+    say!("Film grain templates: CPU, uploaded with the random offsets");
     say!("Small inverse transform shaders: {}", if task.idctlegacy { "legacy (-idctlegacy)" } else { "default" });
     say!("Residual clear: {}", if task.clearlegacy { "full allocation (-clearlegacy)" } else { "padded frame planes" });
     say!(
@@ -1061,14 +1051,8 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         task.name,
         task.parser_options.words()
     );
-    if task.parsecoeflegacy {
-        say!("PARSER {}: linked AC coefficient tokens (-parsecoeflegacy)", task.name);
-    }
     if task.intralistslegacy {
         say!("PARSER {}: the previous intra list loops and wavefront edges (-intralistslegacy)", task.name);
-    }
-    if task.parserefrowslegacy {
-        say!("PARSER {}: wait for all reference rows (-parserefrowslegacy)", task.name);
     }
     if task.parser_options.gpu_cdef_lists || task.parser_options.gpu_grid {
         say!(

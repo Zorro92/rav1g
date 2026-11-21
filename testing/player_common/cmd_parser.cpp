@@ -96,14 +96,10 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"intrabanklegacy", atSingle, anOptional, "use the previous 10-bit intra edge preparation", "", &params_.intrabanklegacy_},
       {"intrasteplegacy", atSingle, anOptional, "use the previous intra wavefront step", "", &params_.intrasteplegacy_},
       {"intrasingleedgelegacy", atSingle, anOptional, "use the previous directional wavefront with prefetching", "", &params_.intrasingleedgelegacy_},
-      {"parsecoeflegacy", atSingle, anOptional, "use the previous linked list of AC coefficient tokens", "", &params_.parsecoeflegacy_},
       {"intralistslegacy", atSingle, anOptional, "count the intra block lists with the previous loops and wavefront edges", "", &params_.intralistslegacy_},
-      {"parserefrowslegacy", atSingle, anOptional, "wait for all reference rows during frame-parallel parsing", "", &params_.parserefrowslegacy_},
       {"intraschedulelegacy", atSingle, anOptional, "previous intra wavefront and exact V/H predictors", "", &params_.intraschedulelegacy_},
       {"lrlegacy", atSingle, anOptional, "original loop restoration shader", "", &params_.lrlegacy_},
       {"fglegacy", atSingle, anOptional, "original direct NV12/P010 film grain shader", "", &params_.fglegacy_},
-      {"fggenlegacy", atSingle, anOptional, "film grain templates on the GPU (film_grain_gen_luma/chroma)", "",
-       &params_.fggenlegacy_},
       {"copylegacy", atSingle, anOptional, "original direct NV12/P010 copy shader", "", &params_.copylegacy_},
       {"idctlegacy", atSingle, anOptional, "original small inverse transform shaders", "", &params_.idctlegacy_},
       {"clearlegacy", atSingle, anOptional, "clear the whole residual allocation", "", &params_.clearlegacy_},
@@ -486,12 +482,9 @@ void CParameters::Reset() {
   params_.intrabanklegacy_ = false;
   params_.intrasteplegacy_ = false;
   params_.intrasingleedgelegacy_ = false;
-  params_.parsecoeflegacy_ = false;
   params_.intralistslegacy_ = false;
-  params_.parserefrowslegacy_ = false;
   params_.lrlegacy_ = false;
   params_.fglegacy_ = false;
-  params_.fggenlegacy_ = false;
   params_.copylegacy_ = false;
   params_.idctlegacy_ = false;
   params_.clearlegacy_ = false;

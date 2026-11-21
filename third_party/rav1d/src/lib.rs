@@ -350,8 +350,6 @@ pub(crate) fn rav1d_open(
         sink,
         parse_lf_masks: parse.lf_masks,
         parse_tile_keeps_thread: parse.tile_keeps_thread,
-        parse_legacy_coef_tokens: parse.legacy_coef_tokens,
-        parse_legacy_ref_rows: parse.legacy_ref_rows,
         broken: Default::default(),
         dsp: Default::default(),
         flush: Default::default(),

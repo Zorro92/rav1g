@@ -11,18 +11,12 @@
 //! on the GPU. From `av1_filmgrain_run` of `libav1/dx/loopfilters.cpp`.
 //!
 //! **The templates on the CPU** (`grain_template.rs`, rav1d's `generate_grain_y` and
-//! `generate_grain_uv`). They depend on the grain parameters of the header and on nothing decoded. On
-//! the GPU (`film_grain_gen_luma.hlsl` and `film_grain_gen_chroma.hlsl`, the path of
-//! `av1_set_fg_gen_legacy`) they were two dependent dispatches of one thread group each, a group sync
-//! for every step of a wavefront through the template: the GPU's worst case, in front of the apply pass
-//! of every grain frame, where each dependent step costs about 18 us fixed (AGENTS.md, "Dependent
-//! dispatches"). On the CPU they are about 0.15 million multiply-adds a frame, on the thread that records
-//! the frame: the submission thread with more than one frame in parse, so not a parse thread (the CPU
-//! limit on high-bitrate streams), and the decode thread with one. The templates go to the GPU in the
+//! `generate_grain_uv`). They depend only on the grain parameters of the header. Generation takes about
+//! 0.15 million multiply-adds a frame on the thread that records the frame: the submission thread with
+//! more than one frame in parse and the decode thread with one. The templates go to the GPU in the
 //! frame's grain buffer, the upload buffer that has its random offsets (37,320 bytes in front of them: 73
 //! rows of 82 ints for luma, 2 x 38 rows of 44 for chroma), written once through the mapping from a copy
-//! on the stack, and the apply shaders read them there: no copy pass, no extra dispatch, no barrier. The
-//! layout is that of the GPU path's `filmgrain_noise`, so the apply shaders are unchanged.
+//! on the stack. The apply shaders read the templates directly from that buffer.
 
 use std::ffi::c_int;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,30 +27,21 @@ use super::types::Av1Core;
 use crate::gpu::d3d12::{com_ref, wrapped_ref};
 use crate::gpu::{Device, PlaneViews};
 use crate::sys::{
-    AOM_CICP_MC_IDENTITY, AV1_COMMON, AV1_PERF_CPU_GRAIN_TEMPLATE, AV1_PERF_GPU_FILM_GRAIN,
-    AV1_PERF_GPU_FILM_GRAIN_GEN, HwFrameBuffer,
+    AOM_CICP_MC_IDENTITY, AV1_COMMON, AV1_PERF_CPU_GRAIN_TEMPLATE, AV1_PERF_GPU_FILM_GRAIN, HwFrameBuffer,
 };
 use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 
 pub(super) static SKIP_FILM_GRAIN: AtomicBool = AtomicBool::new(false);
 static FG_LEGACY: AtomicBool = AtomicBool::new(false);
-static FG_GEN_LEGACY: AtomicBool = AtomicBool::new(false);
 
 /// The bytes of a frame's grain buffer (`filmgrain_rand_offset` of a slot or output context) that come
-/// before its random offsets: the templates of the CPU path.
+/// before its random offsets: the grain templates.
 pub(super) const GRAIN_BUFFER_TEMPLATE_BYTES: usize = TEMPLATE_BYTES;
 
 /// `av1_set_fg_legacy` (`dx/av1_perf.h`).
 #[unsafe(no_mangle)]
 pub extern "C" fn av1_set_fg_legacy(enable: c_int) {
     FG_LEGACY.store(enable != 0, Ordering::Relaxed);
-}
-
-/// `av1_set_fg_gen_legacy` (`dx/av1_perf.h`): the grain templates made on the GPU, by the two shaders
-/// of the C++ decoder, instead of on the CPU.
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_fg_gen_legacy(enable: c_int) {
-    FG_GEN_LEGACY.store(enable != 0, Ordering::Relaxed);
 }
 
 /// `av1_set_skip_film_grain` (`dx/av1_perf.h`).
@@ -97,29 +82,6 @@ struct GrainParams {
     // x: y, cb, cr
     scaling_points: [[[c_int; 4]; 2]; 14],
     ar_coeffs: [[[c_int; 4]; 25]; 3],
-}
-
-/// The constants of `film_grain_gen_luma.hlsl` and `film_grain_gen_chroma.hlsl`.
-#[repr(C)]
-struct FilmGrainGenData {
-    params: GrainParams,
-
-    luma_block_size_y: c_int,
-    luma_block_size_x: c_int,
-    luma_grain_stride: c_int,
-    chroma_block_size_y: c_int,
-
-    chroma_block_size_x: c_int,
-    chroma_grain_stride: c_int,
-    left_pad: c_int,
-    top_pad: c_int,
-
-    right_pad: c_int,
-    bottom_pad: c_int,
-    dst_offset_u: c_int,
-    dst_offset_v: c_int,
-
-    pred_pos: [[[c_int; 4]; 3]; 25],
 }
 
 /// The constants of `film_grain_filter.hlsl`.
@@ -242,86 +204,6 @@ pub(crate) enum GrainTarget {
     SemiPlanarTexture(u32),
 }
 
-/// The GPU path of the templates (`av1_set_fg_gen_legacy`): `film_grain_gen_luma.hlsl`, then
-/// `film_grain_gen_chroma.hlsl` (whose filter reads the luma template), into `filmgrain_noise`, one thread
-/// group each (chroma: one a plane). Their time is the stage `film_grain_gen` of the timing run.
-///
-/// # Safety
-/// As for [`filmgrain_run`].
-unsafe fn record_gpu_templates(
-    dec: *mut Av1Core,
-    grain: &GrainParams,
-    luma_block_size_x: c_int,
-    luma_block_size_y: c_int,
-    chroma_block_size_x: c_int,
-    chroma_block_size_y: c_int,
-) {
-    // SAFETY: the caller's contract.
-    unsafe {
-        let td = &mut *(*dec).curr_frame_data;
-        let gen_constants = alloc_constants::<FilmGrainGenData>(&mut td.command_buffer);
-        let gen_data = gen_constants.data;
-        (*gen_data).params = *grain;
-        let (left_pad, right_pad, top_pad, bottom_pad) = (3, 3, 3, 0);
-        (*gen_data).luma_block_size_y = luma_block_size_y;
-        (*gen_data).luma_block_size_x = luma_block_size_x;
-        (*gen_data).luma_grain_stride = luma_block_size_x;
-        (*gen_data).chroma_block_size_y = chroma_block_size_y;
-        (*gen_data).chroma_block_size_x = chroma_block_size_x;
-        (*gen_data).chroma_grain_stride = chroma_block_size_x;
-        (*gen_data).left_pad = left_pad;
-        (*gen_data).top_pad = top_pad;
-        (*gen_data).right_pad = right_pad;
-        (*gen_data).bottom_pad = bottom_pad;
-        (*gen_data).dst_offset_u = CHROMA_OFFSET_INTS[0] as c_int;
-        (*gen_data).dst_offset_v = CHROMA_OFFSET_INTS[1] as c_int;
-        // The positions the auto-regression of a sample reads: the rows above, then the samples to its left;
-        // for chroma also the luma sample at its place, when luma has grain.
-        let lag = grain.ar_coeff_lag;
-        let mut pos_ar_index = 0usize;
-        let mut position = |row: c_int, col: c_int| {
-            for component in 0..2 {
-                (*gen_data).pred_pos[pos_ar_index][0][component] = row;
-                (*gen_data).pred_pos[pos_ar_index][1][component] = col;
-                (*gen_data).pred_pos[pos_ar_index][2][component] = 0;
-            }
-            pos_ar_index += 1;
-        };
-        for row in -lag..0 {
-            for col in -lag..lag + 1 {
-                position(row, col);
-            }
-        }
-        for col in -lag..0 {
-            position(0, col);
-        }
-        if grain.num_y_points > 0 {
-            (*gen_data).pred_pos[pos_ar_index][0][1] = 0;
-            (*gen_data).pred_pos[pos_ar_index][1][1] = 0;
-            (*gen_data).pred_pos[pos_ar_index][2][1] = 1;
-        }
-
-        let commands = commands(dec);
-        let lib = (*dec).shader_lib;
-        let noise = buffer((*dec).filmgrain_noise);
-        for (shader, groups_y) in [
-            (pipeline(&raw const (*lib).shader_filmgrain_luma_gen), 1),
-            (pipeline(&raw const (*lib).shader_filmgrain_chroma_gen), 2),
-        ] {
-            commands.set_pipeline(shader);
-            commands.set_layout(shader.layout());
-            commands.bind_read(0, buffer((*dec).filmgrain_random_luma).location());
-            commands.bind_read(1, buffer((*dec).filmgrain_random_chroma).location());
-            commands.bind_read(2, buffer((*dec).filmgrain_gaus).location());
-            commands.bind_write(3, noise.location());
-            commands.bind_constants(4, gen_constants.location);
-            commands.dispatch(1, groups_y, 1);
-            commands.write_barrier(noise);
-        }
-        perf_gpu_mark(dec, AV1_PERF_GPU_FILM_GRAIN_GEN);
-    }
-}
-
 /// `av1_filmgrain_run` of the C++: records the grain synthesis for the output of the frame of the
 /// current command list. The frame with grain goes into the layout the decoder's back buffer has, which
 /// is that of the output image. Without `enable_chroma` only luma gets grain.
@@ -399,21 +281,11 @@ pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_ch
         let [grain_offset_u, grain_offset_v] = CHROMA_OFFSET_INTS.map(|ints| ints as c_int);
         debug_assert_eq!(grain_offset_v - grain_offset_u, chroma_block_size_x * chroma_block_size_y);
 
-        // The frame's grain buffer: the templates of the CPU path, then the random offsets.
+        // The frame's grain buffer: the templates, then the random offsets.
         let grain_buffer = (*td.filmgrain_rand_offset).host_ptr.cast::<u8>();
         let commands = commands(dec);
         let lib = (*dec).shader_lib;
-        let template_location = if FG_GEN_LEGACY.load(Ordering::Relaxed) {
-            record_gpu_templates(
-                dec,
-                &grain,
-                luma_block_size_x,
-                luma_block_size_y,
-                chroma_block_size_x,
-                chroma_block_size_y,
-            );
-            buffer((*dec).filmgrain_noise).location()
-        } else {
+        let template_location = {
             let start = perf_ticks();
             let mut templates = Templates::zeroed();
             templates.generate(params);

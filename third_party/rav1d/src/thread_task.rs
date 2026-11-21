@@ -48,12 +48,7 @@ impl EntropyReferences {
         header: &Rav1dFrameHeader,
         rf: &RefMvsFrame,
         has_prev_segmap: bool,
-        legacy: bool,
     ) -> Self {
-        if legacy {
-            return Self { check: ALL_REF_TYPES, wait: ALL_REF_TYPES };
-        }
-
         let mut wait_slots = 0u8;
         // The parser keeps a previous map when a block can read it. It comes from the
         // primary reference, including when that reference itself inherited the map.
@@ -103,20 +98,16 @@ mod entropy_ref_tests {
             ..Default::default()
         };
 
-        let refs = EntropyReferences::for_frame(&header, &rf, false, false);
+        let refs = EntropyReferences::for_frame(&header, &rf, false);
         assert_eq!(refs.check, 0b0011011);
         assert_eq!(refs.wait, 0);
 
-        let refs = EntropyReferences::for_frame(&header, &rf, true, false);
+        let refs = EntropyReferences::for_frame(&header, &rf, true);
         assert_eq!(refs.wait, 0b0000010);
 
         header.use_ref_frame_mvs = 1;
-        let refs = EntropyReferences::for_frame(&header, &rf, true, false);
+        let refs = EntropyReferences::for_frame(&header, &rf, true);
         assert_eq!(refs.wait, 0b0001011);
-
-        let refs = EntropyReferences::for_frame(&header, &rf, false, true);
-        assert_eq!(refs.check, ALL_REF_TYPES);
-        assert_eq!(refs.wait, ALL_REF_TYPES);
     }
 }
 

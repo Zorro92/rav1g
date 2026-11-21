@@ -29,7 +29,7 @@ use windows::core::Interface;
 use super::libaom::{II_SIZE_SCALES, II_WEIGHTS1D, WARPED_FILTER, WedgeMasks};
 use super::log::log;
 use super::shader_pick::{self, Set};
-use super::tables::{BLOCK_SIZE_HIGH, BLOCK_SIZE_WIDE, GAUSSIAN_SEQUENCE, SS_SIZE_420};
+use super::tables::{BLOCK_SIZE_HIGH, BLOCK_SIZE_WIDE, SS_SIZE_420};
 use super::thread::spawn_thread;
 use super::types::{Av1Core, ComputeShader, GpuBufferObject, compute_shader_lib};
 use crate::gpu::d3d12::{com_ref, com_release, com_store};
@@ -124,8 +124,8 @@ const LAYOUTS: usize =
 const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
-    // 24 transform pipelines, 34 shared shaders, 35 per bit depth and eight bit-depth-specific intra shaders.
-    assert!(SHADERS == 24 + 34 + 2 * 35 + 8);
+    // 24 transform pipelines, 32 shared shaders, 35 per bit depth and eight bit-depth-specific intra shaders.
+    assert!(SHADERS == 24 + 32 + 2 * 35 + 8);
     assert!(LAYOUTS == 24);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
@@ -341,8 +341,6 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("loop_restoration_legacy", &layouts.loop_rest, &raw mut (*lib).shader_loop_rest_legacy),
             ("loop_restoration_wiener", &layouts.loop_rest, &raw mut (*lib).shader_loop_rest_wiener),
             ("film_grain_filter", &layouts.film_grain, &raw mut (*lib).shader_filmgrain_filter),
-            ("film_grain_gen_luma", &layouts.film_grain, &raw mut (*lib).shader_filmgrain_luma_gen),
-            ("film_grain_gen_chroma", &layouts.film_grain, &raw mut (*lib).shader_filmgrain_chroma_gen),
             ("cdef_filter", &layouts.cdef_filter, &raw mut (*lib).shader_cdef_filter),
             ("cdef_filter_v2", &layouts.cdef_filter, &raw mut (*lib).shader_cdef_filter_v2),
             ("cdef_filter_v2_legacy", &layouts.cdef_filter, &raw mut (*lib).shader_cdef_filter_v2_legacy),
@@ -657,23 +655,10 @@ pub unsafe extern "C" fn av1_destroy_pipeline_cache_handle(handle: *mut c_void) 
 // The constant tables of the shaders.
 // ---------------------------------------------------------------------------------------------------------
 
-/// One step of the random register of the film grain synthesis (the specification's get_random_number
-/// without the reduction to the bits asked for).
-fn random_register_step(value: u32) -> u32 {
-    let bit = (value ^ (value >> 1) ^ (value >> 3) ^ (value >> 12)) & 1;
-    (value >> 1) | (bit << 15)
-}
-
 fn write_ints(bytes: &mut [u8], values: impl Iterator<Item = i32>) {
     for (chunk, value) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(values) {
         *chunk = value.to_ne_bytes();
     }
-}
-
-/// For every 16-bit state of the random register, its state `steps` steps later: the shaders look up
-/// where the generator of a grain block stands instead of stepping it.
-fn fill_random_lut(bytes: &mut [u8], steps: u32) {
-    write_ints(bytes, (0..65536u32).map(|start| (0..steps).fold(start, |value, _| random_register_step(value)) as i32));
 }
 
 /// The masks of compound prediction with a wedge and of inter-intra prediction, for luma blocks and then
@@ -743,12 +728,11 @@ fn fill_mask_lut(ptr: &mut [u8], offsets: &mut [[c_int; 2]; BLOCK_SIZES_ALL as u
     }
 }
 
-/// `av1_upload_luts` of the C++: fills the constant tables of the decoder (random register of the film
-/// grain for luma and chroma, the Gaussian sequence, the masks, the warp filter) and the offsets of the
-/// masks in `Av1Core`. Returns 0 or the `HRESULT` of the call that failed.
+/// `av1_upload_luts` of the C++: fills the prediction masks and warp filter tables and the offsets of
+/// the masks in `Av1Core`. Returns 0 or the `HRESULT` of the call that failed.
 ///
 /// # Safety
-/// `dec` is the decoder with its device, its direct queue and the five buffers, created as
+/// `dec` is the decoder with its device, its direct queue and both buffers, created as
 /// `DeviceOnlyConst`.
 pub(crate) unsafe fn upload_luts(dec: *mut Av1Core) -> i32 {
     // SAFETY: the caller's contract.
@@ -764,20 +748,10 @@ pub(crate) unsafe fn upload_luts(dec: *mut Av1Core) -> i32 {
     let buffer = |object: *mut GpuBufferObject| unsafe {
         object.as_ref().and_then(|object| Some((BufferRef::from_raw(&object.dev)?, object.size)))
     };
-    let (Some(luma), Some(chroma), Some(gaussian), Some(masks), Some(warp)) = (
-        buffer(dec.filmgrain_random_luma),
-        buffer(dec.filmgrain_random_chroma),
-        buffer(dec.filmgrain_gaus),
-        buffer(dec.inter_mask_lut),
-        buffer(dec.inter_warp_filter),
-    ) else {
+    let (Some(masks), Some(warp)) = (buffer(dec.inter_mask_lut), buffer(dec.inter_warp_filter)) else {
         return E_POINTER.0;
     };
 
-    // The register of a luma grain block is read 82 steps behind its seed, that of a chroma block 44.
-    let mut fill_luma = |bytes: &mut [u8]| fill_random_lut(bytes, 82);
-    let mut fill_chroma = |bytes: &mut [u8]| fill_random_lut(bytes, 44);
-    let mut fill_gaussian = |bytes: &mut [u8]| write_ints(bytes, GAUSSIAN_SEQUENCE.iter().copied());
     let mut fill_warp = |bytes: &mut [u8]| {
         write_ints(bytes, WARPED_FILTER.iter().flatten().map(|&tap| i32::from(tap)));
     };
@@ -786,9 +760,6 @@ pub(crate) unsafe fn upload_luts(dec: *mut Av1Core) -> i32 {
         fill_mask_lut(bytes, wedge_offsets);
     };
     let mut uploads = [
-        Upload { dst: luma.0, size: luma.1, fill: &mut fill_luma },
-        Upload { dst: chroma.0, size: chroma.1, fill: &mut fill_chroma },
-        Upload { dst: gaussian.0, size: gaussian.1, fill: &mut fill_gaussian },
         Upload { dst: masks.0, size: masks.1, fill: &mut fill_masks },
         Upload { dst: warp.0, size: warp.1, fill: &mut fill_warp },
     ];
@@ -848,33 +819,6 @@ mod tests {
         assert_eq!(second.join().unwrap(), 0);
         // SAFETY: the box of this test; no thread uses it any more.
         drop(unsafe { Box::from_raw(lib) });
-    }
-
-    /// `get_random_number_test` of the C++, as it was written.
-    fn get_random_number_test(mut val: i32) -> i32 {
-        let bit = (val ^ (val >> 1) ^ (val >> 3) ^ (val >> 12)) & 1;
-        val = (val >> 1) | (bit << 15);
-        val
-    }
-
-    #[test]
-    fn random_lut_as_in_cpp() {
-        for steps in [82u32, 44] {
-            let mut bytes = vec![0u8; 65536 * 4];
-            fill_random_lut(&mut bytes, steps);
-            for start in (0..65536).step_by(257).chain([1, 2, 65535]) {
-                let mut register = start as i32;
-                for _ in 0..steps {
-                    register = get_random_number_test(register);
-                }
-                let at = start * 4;
-                assert_eq!(
-                    i32::from_ne_bytes(bytes[at..at + 4].try_into().unwrap()),
-                    register,
-                    "{steps} steps from {start}"
-                );
-            }
-        }
     }
 
     #[test]

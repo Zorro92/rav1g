@@ -61,14 +61,6 @@ const MEMORY_GUARD_HEADROOM: u64 = 128 << 20;
 /// How often the budget is asked again while it grows (`PollMs`).
 const GUARD_POLL_MS: u32 = 20;
 
-/// Words of the film grain templates the GPU makes (`av1_set_fg_gen_legacy`; 73x82 luma and two chroma
-/// planes of 38x44 are used): 96x96 luma and two chroma planes of 48x48.
-const FILMGRAIN_NOISE_INTS: usize = 96 * 96 + 48 * 48 * 2;
-/// The Gaussian sequence of the film grain, as ints (`dx_gaussian_sequence`).
-const GAUSSIAN_SEQUENCE_BYTES: usize = size_of::<[i32; 2048]>();
-/// Entries of a random register table of the film grain.
-const FILMGRAIN_RANDOM_INTS: usize = 65536 + 1;
-
 pub(crate) fn to_mib(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
 }
@@ -483,23 +475,6 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
         assign,
         dec.inter_warp_filter,
         mem.buffer(warped_filter_bytes * 2, DeviceOnlyConst, c"inter_warp_filter", -1)
-    );
-
-    request!(
-        assign,
-        dec.filmgrain_noise,
-        mem.buffer(size_of::<i32>() * FILMGRAIN_NOISE_INTS, DeviceOnly, c"filmgrain_noise", -1)
-    );
-    request!(assign, dec.filmgrain_gaus, mem.buffer(GAUSSIAN_SEQUENCE_BYTES, DeviceOnlyConst, c"filmgrain_gaus", -1));
-    request!(
-        assign,
-        dec.filmgrain_random_luma,
-        mem.buffer(size_of::<i32>() * FILMGRAIN_RANDOM_INTS, DeviceOnlyConst, c"filmgrain_random_luma", -1)
-    );
-    request!(
-        assign,
-        dec.filmgrain_random_chroma,
-        mem.buffer(size_of::<i32>() * FILMGRAIN_RANDOM_INTS, DeviceOnlyConst, c"filmgrain_random_chroma", -1)
     );
 
     // Frame buffer size.

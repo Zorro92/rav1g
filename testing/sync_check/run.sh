@@ -42,8 +42,8 @@ while [ $# -gt 0 ]; do
 done
 
 # shader:family. Families (shader_tu.cpp): 1 inverse transforms, 2 lossless transform, 3 inter
-# prediction, 4 deblocking, 5 loop restoration, 6 film grain templates (6y: one group per chroma
-# plane), 7 film grain, 8 prediction list counts, 9 prediction list scan. The intra and CDEF
+# prediction, 4 deblocking, 5 loop restoration, 7 film grain, 8 prediction list counts,
+# 9 prediction list scan. The intra and CDEF
 # shaders and optimized loop restoration have checks of their own with real input
 # (intra_check, cdef_check, restoration_check), which watch their group memory the same way.
 list=""
@@ -57,8 +57,6 @@ for f in "$shaders"/*.hlsl; do
     inter_*) family=3 ;;
     loopfilter_*) family=4 ;;
     loop_restoration_legacy) family=5 ;;
-    film_grain_gen_luma) family=6 ;;
-    film_grain_gen_chroma) family=6y ;;
     film_grain_filter) family=7 ;;
     pred_list_count) family=8 ;;
     pred_list_scan) family=9 ;;
@@ -91,12 +89,9 @@ convert() {
 
 # $1: directory, $2: shader name, $3: family.
 compile_shader() {
-  groups_y=1
-  family=$3
-  if [ "$family" = 6y ]; then family=6; groups_y=2; fi
   # shellcheck disable=SC2086
   g++ $flags -I "$1" -DSHADER_FILE="\"$2.gen.h\"" -DSHADER_ENTRY="\"$2.entry.h\"" -DSHADER_NS="ns_$2" \
-    -DSHADER_NAME="\"$2.hlsl\"" -DSHADER_FAMILY="$family" -DSHADER_GROUPS_Y="$groups_y" -c -o "$1/$2.o" \
+    -DSHADER_NAME="\"$2.hlsl\"" -DSHADER_FAMILY="$3" -c -o "$1/$2.o" \
     "$here/shader_tu.cpp"
 }
 

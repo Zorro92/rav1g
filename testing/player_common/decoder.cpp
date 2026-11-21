@@ -485,8 +485,6 @@ int AV1Decoder::DecodeOne() {
                        created_intrav2_ != params_.intrav2_ ||
                        created_interfast_ != (params_.interfast_ || params_.interfastlists_) ||
                        created_parser_options_ != params_.parser_options_ ||
-                       created_parsecoeflegacy_ != params_.parsecoeflegacy_ ||
-                       created_parserefrowslegacy_ != params_.parserefrowslegacy_ ||
                        created_lowmem_ != params_.lowmem_parts_ || created_packed_10x3_ != params_.hdr10x3_ ||
                        created_semi_planar_ != (params_.semi_planar_ | (params_.interop_ ? 16 : 0)) ||
                        created_noguard_ != params_.noguard_ || created_headroom_ != params_.headroom_mib_ ||
@@ -679,8 +677,6 @@ int AV1Decoder::DecodeOne() {
       created_intrav2_ = params_.intrav2_;
       created_interfast_ = params_.interfast_ || params_.interfastlists_;
       created_parser_options_ = params_.parser_options_;
-      created_parsecoeflegacy_ = params_.parsecoeflegacy_;
-      created_parserefrowslegacy_ = params_.parserefrowslegacy_;
       created_lowmem_ = params_.lowmem_parts_;
       created_packed_10x3_ = params_.hdr10x3_;
       created_semi_planar_ = params_.semi_planar_ | (params_.interop_ ? 16 : 0);
@@ -790,12 +786,8 @@ int AV1Decoder::DecodeOne() {
                                          "frames with a scaled reference keep the original shaders)"
                                        : inter_size_shaders);
   XB_LOGI << "Parser: the parse pass of rav1d";
-  av1_set_parse_coef_legacy(params_.parsecoeflegacy_);
-  if (params_.parsecoeflegacy_) XB_LOGI << "Parser: linked AC coefficient tokens (-parsecoeflegacy)";
   av1_set_intra_lists_legacy(params_.intralistslegacy_);
   if (params_.intralistslegacy_) XB_LOGI << "Block lists: the previous intra loops and wavefront edges (-intralistslegacy)";
-  av1_set_parse_ref_rows_legacy(params_.parserefrowslegacy_);
-  if (params_.parserefrowslegacy_) XB_LOGI << "Parser: wait for all reference rows (-parserefrowslegacy)";
   // -parseopt: fixed when the decoder was created. The default is nolfmask tilethread gpucdef gpugrid.
   XB_LOGI << "Parser switches (-parseopt): "
           << (params_.parser_options_ & PLAYER_PARSEOPT_DEFAULT ? "" : "none ")
@@ -833,10 +825,7 @@ int AV1Decoder::DecodeOne() {
   av1_set_fg_legacy(params_.fglegacy_);
   XB_LOGI << "Direct NV12/P010 film grain shader: "
           << (params_.fglegacy_ ? "film_grain_filter_sp_tex (-fglegacy)" : "film_grain_filter_sp_tex_v2 (default)");
-  av1_set_fg_gen_legacy(params_.fggenlegacy_);
-  XB_LOGI << "Film grain templates: "
-          << (params_.fggenlegacy_ ? "GPU, film_grain_gen_luma/chroma (-fggenlegacy)"
-                                   : "CPU, uploaded with the random offsets (default)");
+  XB_LOGI << "Film grain templates: CPU, uploaded with the random offsets";
   av1_set_copy_legacy(params_.copylegacy_);
   XB_LOGI << "Direct NV12/P010 copy shader: "
           << (params_.copylegacy_ ? "copy_plane_sp_tex (-copylegacy)" : "copy_plane_sp_tex_v2 (default)");

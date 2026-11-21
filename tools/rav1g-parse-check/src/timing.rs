@@ -119,7 +119,7 @@ fn milliseconds(duration: Duration, frames: u64) -> f64 {
 }
 
 /// `wave_edges`: the wavefront in the edges of the tiles (the default of the decoder), not in the grids.
-/// `legacy`: the previous paths of the parse. `frame_times`: a `FRAMETIME` line per frame of every run with
+/// `legacy`: the previous intra block lists. `frame_times`: a `FRAMETIME` line per frame of every run with
 /// the sink (rav1d's `parse_stats`).
 pub fn run(
     path: &Path,
@@ -160,13 +160,7 @@ pub fn run(
             height: AtomicU64::new(0),
             layouts: None,
         });
-        let mut settings = ParseSettings {
-            threads,
-            frames: frames_in_parse,
-            legacy_coef_tokens: legacy.coef_tokens,
-            legacy_ref_rows: legacy.ref_rows,
-            ..Default::default()
-        };
+        let mut settings = ParseSettings { threads, frames: frames_in_parse, ..Default::default() };
         options.apply(&mut settings);
         let Ok(parser) = Parser::new(&settings, sink.clone()) else {
             eprintln!("rav1g-parse-check: rav1d was not created");

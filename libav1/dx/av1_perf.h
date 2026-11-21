@@ -44,11 +44,6 @@ enum {
                                   AV1_PERF_GPU_CDEF in the command list */
   AV1_PERF_GPU_PRED_COUNT,    /* group counts and record ranks for -parseopt gpublists */
   AV1_PERF_GPU_PRED_SCAN,     /* scan the group counts and write indirect arguments */
-  AV1_PERF_GPU_FILM_GRAIN_GEN, /* the grain templates on the GPU (av1_set_fg_gen_legacy): the two
-                                  dispatches of film_grain_gen_luma/chroma, in front of
-                                  AV1_PERF_GPU_FILM_GRAIN (the apply pass) in the command list; not
-                                  dispatched on the default path, which makes them on the CPU
-                                  (AV1_PERF_CPU_GRAIN_TEMPLATE) */
   AV1_PERF_GPU_STAGE_COUNT,
   AV1_PERF_GPU_BEGIN = 255     /* first timestamp of a command list */
 };
@@ -100,7 +95,7 @@ enum {
   /* the thread that records the frame (the submission thread with more than one frame in parse, the
      decode thread with one); part of AV1_PERF_CPU_REC_COPY */
   AV1_PERF_CPU_GRAIN_TEMPLATE, /* the film grain templates of a grain frame made on the CPU and written into
-                                  its upload buffer (7.18.3.3; 0 with av1_set_fg_gen_legacy) */
+                                  its upload buffer (7.18.3.3) */
   AV1_PERF_CPU_COUNT
 };
 
@@ -305,12 +300,6 @@ void av1_set_lr_legacy(int enable);
  * only while no frame is in flight. */
 void av1_set_fg_legacy(int enable);
 
-/* Process-wide. Non-zero makes the film grain templates (AV1 7.18.3.3) on the GPU, with the two
- * shaders film_grain_gen_luma and film_grain_gen_chroma in front of the apply pass (stage
- * AV1_PERF_GPU_FILM_GRAIN_GEN). Zero makes them on the CPU while the frame is recorded and uploads them
- * with its random offsets (default). Change it only while no frame is in flight. */
-void av1_set_fg_gen_legacy(int enable);
-
 /* Process-wide. Set while no frame is in flight. Non-zero skips film grain synthesis. */
 void av1_set_skip_film_grain(int enable);
 
@@ -357,21 +346,11 @@ void av1_set_intra_step_legacy(int enable);
 /* Use the prefetch shaders with the previous angle-specific wavefront. */
 void av1_set_intra_single_edge_legacy(int enable);
 
-/* Process-wide. Nonzero uses the previous linked list of AC coefficient tokens
- * (-parsecoeflegacy); zero uses packed tokens in scan order. Set before the
- * decoder's first decode call. A running parser keeps its selection. */
-void av1_set_parse_coef_legacy(int enable);
-
 /* Process-wide. Nonzero counts the intra block lists with the previous loops of
  * av1_mi_push_block and the previous edges of the wavefront, four arrays with the
  * frame's stamp (-intralistslegacy); zero uses intra_block_edges and the packed edges.
  * The lists are the same. A frame takes it at its setup. */
 void av1_set_intra_lists_legacy(int enable);
-
-/* Process-wide. Nonzero restores the row waits for all reference types when
- * frames are parsed in parallel (-parserefrowslegacy). Set before the
- * decoder's first decode call. A running parser keeps its selection. */
-void av1_set_parse_ref_rows_legacy(int enable);
 
 /* ---------------------------------------------------------------------------
  * Intra step timing (test flags -intrasteptime and -intrastepmin; docs/test-player.md, "Intra step

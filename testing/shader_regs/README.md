@@ -28,7 +28,7 @@ For each shader of `crates/rav1g-sys/shaders.txt` (`shader_regs.py measure`):
    VGPRs, LDS and scratch.
 4. The theoretical waves per SIMD follow from these (below).
 
-`measure` takes about 45 s for the 130 shaders with 4 jobs.
+`measure` takes about 45 s for the 128 shaders with 4 jobs.
 
 **Wave size: wave64**, as the console runs. One exception: LLPC makes wave32 code for a thread group of
 at most 32 threads, whatever `waveSize`, `subgroupSize` or `--native-wave-size` say. These shaders

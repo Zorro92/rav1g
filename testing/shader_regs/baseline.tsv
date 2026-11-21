@@ -29,8 +29,6 @@ loop_restoration	64	64	24	57	3072	0	10.5	lds
 loop_restoration_legacy	64	64	36	59	3072	0	10.5	lds
 loop_restoration_wiener	64	64	21	49	2048	0	16	waves
 film_grain_filter	768	64	41	51	30720	0	6	vgprs
-film_grain_gen_luma	64	64	28	55	24064	0	1	lds
-film_grain_gen_chroma	64	64	30	90	28160	0	1	lds
 cdef_filter	128	64	106	48	12288	0	4	vgprs
 cdef_filter_v2	64	64	92	53	9728	0	3	lds
 cdef_filter_v2_legacy	64	64	126	48	15872	0	2	lds

@@ -32,8 +32,6 @@ loop_restoration
 loop_restoration_legacy
 loop_restoration_wiener
 film_grain_filter
-film_grain_gen_luma
-film_grain_gen_chroma
 cdef_filter
 cdef_filter_v2
 cdef_filter_v2_legacy

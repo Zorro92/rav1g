@@ -89,6 +89,11 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
   `-intrasingleedgelegacy` to select the original prefetch kernels and wavefront for an A/B.
   The C++ stage-dump comparison compares prediction-record contents across wavefront orders,
   and still compares every frame MD5.
+- **Entropy parsing** packs AC coefficient tokens in scan order and waits only for the
+  reference rows whose motion fields or segmentation map the parser reads. On the console,
+  the two changes cut mean parse wall time from 32.2 to 26.2 ms on a 4K 10-bit 50 fps stream.
+- **Film grain** templates are generated while the CPU records the frame (AV1 7.18.3.3).
+  The GPU applies them from the frame's upload buffer, alongside its random offsets.
 - **A third frame in flight** (`-slots 3`) lets CPU and GPU overlap: the decode thread's wait
   for a free slot drops from 5.6–8.3 ms to 0.3–0.6 ms per frame. It only fits in memory with
   `-lowmem`. All combinations are md5-exact. On the SVT clip the CPU (entropy decoding,
