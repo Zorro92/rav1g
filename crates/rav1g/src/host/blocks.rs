@@ -324,43 +324,62 @@ const NO_ITERATION: c_int = -1;
 /// as in a grid that was cleared for the frame), and the blocks of a tile decoded in an order in which a
 /// block comes behind every block above it and every block to its left:
 ///
-/// - `above[c]` is `G` at the lowest decoded unit of column `c`, and `above_end[c]` the row below that
-///   unit;
+/// - `above[c]` has `G` at the lowest decoded unit of column `c`, and the row below that unit
+///   ([`WaveColumn`]);
 /// - `rows[r & 31]` has, for the rows of the superblock row that is being decoded, `G` at the rightmost
-///   decoded unit of row `r` ([`LEFT`]) and `G` at the unit above that one ([`CORNER`]): the unit above
-///   and to the left of the block that comes next in row `r`, if `r` is that block's first row;
-///   `left_end[r & 31]` is the column to the right of the rightmost decoded unit.
+///   decoded unit of row `r`, `G` at the unit above that one (the unit above and to the left of the block
+///   that comes next in row `r`, if `r` is that block's first row), and the column to the right of the
+///   rightmost decoded unit ([`WaveRow`]).
 ///
 /// Every block of the tile is entered when it is decoded, while the tile is not idle ([`WaveEdges`]): a
-/// transform block with its iteration
-/// ([`WavePlane::commit`]), a block without one as "no iteration" ([`WavePlane::pass`]). The units above
-/// a block (over its width), to its left (over its height) and at its
-/// corner are decoded whenever the block may read them, so their entries were written by the blocks
+/// transform block with its iteration ([`WavePlane::commit`]), a block without one as "no iteration"
+/// ([`WavePlane::pass`]). The units above a block (over its width), to its left (over its height) and at
+/// its corner are decoded whenever the block may read them, so their entries were written by the blocks
 /// that lie there in this frame. The units further to the right in the row above, and further down in the
 /// column to the left, are read on the word of `has_top_right` and `has_bottom_left`, which for an
 /// inter-intra block are asked with the size of its residual transform and can name units that are not
-/// decoded yet (a cleared grid has "no iteration" there). For those the ends say whether the unit is
-/// the decoded one: the ends carry the stamp of the frame (`stamp`: the frame's number on its slot,
-/// shifted left by 32), so an entry of an earlier frame never says so, and one of an earlier superblock
-/// row or of a block further up names another row or column. So nothing has to be cleared between
-/// frames.
+/// decoded yet (a cleared grid has "no iteration" there). For those the ends say whether the unit is the
+/// decoded one: an end of an earlier superblock row or of a block further up names another row or column,
+/// and the ends of earlier frames are cleared when the tile wakes ([`WaveEdges::reset`]), before it reads
+/// any. So nothing has to be cleared between frames.
+///
+/// An entry holds the iteration and the end together, so that a transform block writes one entry per
+/// column and one per row: [`wavefront_iteration_edges`] was half of the CPU time of a heavy key frame's
+/// block lists when they were four arrays, and the ends carried a stamp of the frame in place of the
+/// clear (docs/phase2-rav1d.md, "The block lists on the CPU").
 #[repr(C)]
 pub struct WavePlane {
     /// By the column of the plane in the frame; valid for the columns of the tile, and for those of a
     /// block that reaches past the right edge of the frame.
-    pub above: *mut c_int,
-    pub above_end: *mut i64,
-    pub rows: [[c_int; 2]; WAVE_ROWS],
-    pub left_end: [i64; WAVE_ROWS],
-    pub stamp: i64,
+    pub above: *mut WaveColumn,
+    pub rows: [WaveRow; WAVE_ROWS],
 }
 
-/// In [`WavePlane::rows`]: the iteration at the rightmost decoded unit of the row.
-const LEFT: usize = 0;
-/// In [`WavePlane::rows`]: the iteration at the unit above that one.
-const CORNER: usize = 1;
+/// A column of [`WavePlane::above`]: the iteration at its lowest decoded unit, and the row below that unit.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct WaveColumn {
+    pub iter: c_int,
+    pub end: c_int,
+}
 
-/// `count` numbers from `first` on become `value`. The counts of a block are powers of two; the small ones,
+/// A row of [`WavePlane::rows`]: the iteration at its rightmost decoded unit (`left`), the iteration at the
+/// unit above that one (`corner`), and the column to the right of the rightmost decoded unit.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct WaveRow {
+    pub left: c_int,
+    pub corner: c_int,
+    pub end: c_int,
+    pub unused: c_int,
+}
+
+/// What [`WaveEdges::reset`] makes of an entry, and what a host may fill a new one with: no iteration,
+/// and an end no unit has.
+pub const WAVE_COLUMN_RESET: WaveColumn = WaveColumn { iter: NO_ITERATION, end: -1 };
+pub const WAVE_ROW_RESET: WaveRow = WaveRow { left: NO_ITERATION, corner: NO_ITERATION, end: -1, unused: 0 };
+
+/// `count` values from `first` on become `value`. The counts of a block are powers of two; the small ones,
 /// which most blocks have, are a store or two here and not a call.
 ///
 /// # Safety
@@ -384,6 +403,110 @@ unsafe fn fill<T: Copy>(first: *mut T, count: usize, value: T) {
 }
 
 impl WavePlane {
+    /// A transform block of `w` x `h` units at `col`, `row` of the plane is decoded, with its iteration:
+    /// the iteration at the lowest unit of its columns and at the rightmost unit of its rows, and where the
+    /// decoded units of its columns and rows end now.
+    ///
+    /// # Safety
+    /// `above` is valid for the columns of the block.
+    #[inline(always)]
+    unsafe fn commit(&mut self, col: c_int, row: c_int, w: c_int, h: c_int, iter: c_int) {
+        let (first, w, h) = (row as usize & WAVE_ROW_MASK, w as usize, h as usize);
+        // SAFETY: the caller's contract, and the rows of the block when they do not wrap.
+        unsafe {
+            let above = self.above.offset(col as isize);
+            // What was above the block's right column is above and to the left of the block that follows
+            // in the block's first row; in its other rows that unit is one of the block's own.
+            let above_right = (*above.add(w - 1)).iter;
+            fill(above, w, WaveColumn { iter, end: row + h as c_int });
+            let entry = WaveRow { left: iter, corner: iter, end: col + w as c_int, unused: 0 };
+            if first + h <= WAVE_ROWS {
+                // A block lies at a multiple of its height: its rows do not wrap.
+                fill(self.rows.as_mut_ptr().add(first), h, entry);
+            } else {
+                for it in 0..h {
+                    self.rows[(first + it) & WAVE_ROW_MASK] = entry;
+                }
+            }
+            self.rows[first].corner = above_right;
+        }
+    }
+
+    /// A block of `w` x `h` units at `col`, `row` of the plane that is none of the wavefront is decoded
+    /// (an inter block, a palette block): [`NO_ITERATION`] at the lowest unit of its columns and at the
+    /// rightmost unit of its rows. Where the decoded units end is left as it was: the ends are asked only
+    /// about units that may not be decoded, which read as "no iteration" as well, and an end that an
+    /// earlier transform block left names a unit further up or further left than the one that is asked
+    /// for, or the entry it is asked about holds this block's "no iteration" by now.
+    ///
+    /// # Safety
+    /// `above` is valid for the columns of the block.
+    #[inline(always)]
+    unsafe fn pass(&mut self, col: c_int, row: c_int, w: c_int, h: c_int) {
+        let (first, w, h) = (row as usize & WAVE_ROW_MASK, w as usize, h as usize);
+        // SAFETY: the caller's contract, and the rows of the block when they do not wrap.
+        unsafe {
+            let above = self.above.offset(col as isize);
+            let above_right = (*above.add(w - 1)).iter;
+            for it in 0..w {
+                (*above.add(it)).iter = NO_ITERATION;
+            }
+            for it in 0..h {
+                let entry = &mut self.rows[(first + it) & WAVE_ROW_MASK];
+                entry.left = NO_ITERATION;
+                entry.corner = NO_ITERATION;
+            }
+            self.rows[first].corner = above_right;
+        }
+    }
+}
+
+/// `-intralistslegacy` ([`av1_set_intra_lists_legacy`]): the edges of a tile's intra wavefront in one plane as
+/// they were before [`WavePlane`], four arrays, with the ends stamped with the frame: what the wavefront grid holds at the units a
+/// transform block can still read, which are the ones along the border of what the tile has decoded.
+///
+/// With `G(c, r)` for the iteration of the transform block at the unit in column `c` and row `r` of the
+/// plane ([`NO_ITERATION`] where the block is none of the wavefront, and where nothing is decoded yet,
+/// as in a grid that was cleared for the frame), and the blocks of a tile decoded in an order in which a
+/// block comes behind every block above it and every block to its left:
+///
+/// - `above[c]` is `G` at the lowest decoded unit of column `c`, and `above_end[c]` the row below that
+///   unit;
+/// - `rows[r & 31]` has, for the rows of the superblock row that is being decoded, `G` at the rightmost
+///   decoded unit of row `r` ([`LEFT`]) and `G` at the unit above that one ([`CORNER`]): the unit above
+///   and to the left of the block that comes next in row `r`, if `r` is that block's first row;
+///   `left_end[r & 31]` is the column to the right of the rightmost decoded unit.
+///
+/// Every block of the tile is entered when it is decoded, while the tile is not idle ([`WaveEdges`]): a
+/// transform block with its iteration
+/// ([`LegacyWavePlane::commit`]), a block without one as "no iteration" ([`LegacyWavePlane::pass`]). The units above
+/// a block (over its width), to its left (over its height) and at its
+/// corner are decoded whenever the block may read them, so their entries were written by the blocks
+/// that lie there in this frame. The units further to the right in the row above, and further down in the
+/// column to the left, are read on the word of `has_top_right` and `has_bottom_left`, which for an
+/// inter-intra block are asked with the size of its residual transform and can name units that are not
+/// decoded yet (a cleared grid has "no iteration" there). For those the ends say whether the unit is
+/// the decoded one: the ends carry the stamp of the frame (`stamp`: the frame's number on its slot,
+/// shifted left by 32), so an entry of an earlier frame never says so, and one of an earlier superblock
+/// row or of a block further up names another row or column. So nothing has to be cleared between
+/// frames.
+#[repr(C)]
+pub struct LegacyWavePlane {
+    /// By the column of the plane in the frame; valid for the columns of the tile, and for those of a
+    /// block that reaches past the right edge of the frame.
+    pub above: *mut c_int,
+    pub above_end: *mut i64,
+    pub rows: [[c_int; 2]; WAVE_ROWS],
+    pub left_end: [i64; WAVE_ROWS],
+    pub stamp: i64,
+}
+
+/// In [`LegacyWavePlane::rows`]: the iteration at the rightmost decoded unit of the row.
+const LEFT: usize = 0;
+/// In [`LegacyWavePlane::rows`]: the iteration at the unit above that one.
+const CORNER: usize = 1;
+
+impl LegacyWavePlane {
     /// The iterations of a block of `w` x `h` units at `col`, `row` of the plane that is decoded: `iter` at
     /// the lowest unit of its columns and at the rightmost unit of its rows.
     ///
@@ -465,6 +588,9 @@ impl WavePlane {
 #[repr(C)]
 pub struct WaveEdges {
     pub planes: [WavePlane; 2],
+    /// `-intralistslegacy` (and the paths that take the loops of [`push_block`]: the intra step timing):
+    /// the edges as they were before [`WavePlane`].
+    pub legacy: [LegacyWavePlane; 2],
     /// Not 0: the edges are not kept (see above); what they hold is not read.
     pub idle: c_int,
     /// The superblock row of the block the tile was at last, and the last one with a transform block of
@@ -520,6 +646,16 @@ impl WaveEdges {
     unsafe fn reset(&mut self) {
         self.idle = 0;
         for (plane, shift) in self.planes.iter_mut().zip([0, 1]) {
+            let first = self.first_col >> shift;
+            let end = (self.first_col + self.cols + shift) >> shift;
+            // SAFETY: the caller's contract.
+            unsafe {
+                std::slice::from_raw_parts_mut(plane.above.offset(first as isize), (end - first) as usize)
+                    .fill(WAVE_COLUMN_RESET);
+            }
+            plane.rows = [WAVE_ROW_RESET; WAVE_ROWS];
+        }
+        for (plane, shift) in self.legacy.iter_mut().zip([0, 1]) {
             let first = self.first_col >> shift;
             let end = (self.first_col + self.cols + shift) >> shift;
             // SAFETY: the caller's contract.
@@ -666,6 +802,11 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
         let map = tile.gen_block_map;
         // The edges of the tile's wavefront; null when the frame keeps the wavefront in the slot's grid.
         let wave = tile.wave_edges.cast::<WaveEdges>();
+        // The transform blocks of intra prediction go through [`intra_block_edges`] and the edges are
+        // [`WaveEdges::planes`], unless the frame has -intrav2 (no edges), the tile the intra step timing,
+        // or -intralistslegacy (for an A/B): then the loops below and [`WaveEdges::legacy`]. The same for
+        // all blocks of a tile.
+        let fast_txbs = td.intra_v2 == 0 && tile.perf_steps.is_null() && td.intra_lists_legacy == 0;
 
         // The grid has the entries of the records (`mi_grid_record_in_chunks`). A parse without a grid (the GPU
         // builds it, `-parseopt gpugrid`) gives the block's record by itself.
@@ -1070,432 +1211,488 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
                 && u32::from(mi.uv_mode) == UV_CFL_PRED as u32
                 && (bw == 1 || bh == 1)
             {
-                let luma = &edges.planes[0];
+                let (luma, legacy) = (&edges.planes[0], &edges.legacy[0]);
+                let left = |row: c_int| {
+                    if fast_txbs {
+                        luma.rows[row as usize & WAVE_ROW_MASK].left
+                    } else {
+                        legacy.rows[row as usize & WAVE_ROW_MASK][LEFT]
+                    }
+                };
                 // The luma units under the chroma transform block: twice its size, from the even unit.
                 let (first_col, first_row) = (mi_col & !1, mi_row & !1);
                 let end_col = first_col + (2 << (TX_SIZE_WIDE_LOG2[tx_sizes[1] as usize] - 2));
                 let end_row = first_row + (2 << (TX_SIZE_HIGH_LOG2[tx_sizes[1] as usize] - 2));
                 if mi_col > first_col {
                     for row in mi_row..end_row {
-                        luma_under = luma_under.max(luma.rows[row as usize & WAVE_ROW_MASK][LEFT]);
+                        luma_under = luma_under.max(left(row));
                     }
                 }
                 if mi_row > first_row {
                     for col in mi_col..end_col {
-                        luma_under = luma_under.max(*luma.above.offset(col as isize));
+                        luma_under = luma_under.max(if fast_txbs {
+                            (*luma.above.offset(col as isize)).iter
+                        } else {
+                            *legacy.above.offset(col as isize)
+                        });
                     }
                 }
                 if mi_col > first_col && mi_row > first_row {
-                    luma_under = luma_under.max(luma.rows[mi_row as usize & WAVE_ROW_MASK][CORNER]);
+                    luma_under = luma_under.max(if fast_txbs {
+                        luma.rows[mi_row as usize & WAVE_ROW_MASK].corner
+                    } else {
+                        legacy.rows[mi_row as usize & WAVE_ROW_MASK][CORNER]
+                    });
                 }
             }
-            if !y_use_palette {
-                let txw = if is_intrabc {
-                    bw_log.min(4)
-                } else if is_inter_intra {
-                    bw_log
-                } else {
-                    TX_SIZE_WIDE_LOG2[tx_sizes[0] as usize] - 2
-                };
-                let txh = if is_intrabc {
-                    bh_log.min(4)
-                } else if is_inter_intra {
-                    bh_log
-                } else {
-                    TX_SIZE_HIGH_LOG2[tx_sizes[0] as usize] - 2
-                };
-                let max_cnt_x = ((*cm).mi_cols - mi_col + (1 << txw) - 1) >> txw;
-                let max_cnt_y = ((*cm).mi_rows - mi_row + (1 << txh) - 1) >> txh;
-                let cnt_y = (1 << (bh_log - txh)) >> unit_y_log;
-                let cnt_x = (1 << (bw_log - txw)) >> unit_x_log;
-                let iter_grid_stride = td.iter_grid_stride;
-                let plane = IntraPlane {
-                    iter_grid: td.gen_intra_iter_y.offset((mi_col + mi_row * iter_grid_stride) as isize),
-                    iter_grid_stride,
-                    mode: if is_inter_intra { interintra_mode } else { u32::from(mi.mode) },
-                    txw,
-                    txh,
+            if fast_txbs && let Some(edges) = wave.as_mut() {
+                let block = IntraBlock {
+                    bsize,
+                    bsize_uv,
+                    bw_log,
+                    bh_log,
                     is_intrabc,
+                    is_inter_intra,
+                    interintra_mode,
+                    tx_sizes,
+                    unit_x_log,
+                    unit_y_log,
+                    y_use_palette,
+                    uv_use_palette,
+                    is_chroma_ref,
+                    luma_under,
                 };
+                intra_block_edges(cm, xd, mi, td, tile, edges, map, &block);
+            } else {
+                if !y_use_palette {
+                    let txw = if is_intrabc {
+                        bw_log.min(4)
+                    } else if is_inter_intra {
+                        bw_log
+                    } else {
+                        TX_SIZE_WIDE_LOG2[tx_sizes[0] as usize] - 2
+                    };
+                    let txh = if is_intrabc {
+                        bh_log.min(4)
+                    } else if is_inter_intra {
+                        bh_log
+                    } else {
+                        TX_SIZE_HIGH_LOG2[tx_sizes[0] as usize] - 2
+                    };
+                    let max_cnt_x = ((*cm).mi_cols - mi_col + (1 << txw) - 1) >> txw;
+                    let max_cnt_y = ((*cm).mi_rows - mi_row + (1 << txh) - 1) >> txh;
+                    let cnt_y = (1 << (bh_log - txh)) >> unit_y_log;
+                    let cnt_x = (1 << (bw_log - txw)) >> unit_x_log;
+                    let iter_grid_stride = td.iter_grid_stride;
+                    let plane = IntraPlane {
+                        iter_grid: td.gen_intra_iter_y.offset((mi_col + mi_row * iter_grid_stride) as isize),
+                        iter_grid_stride,
+                        mode: if is_inter_intra { interintra_mode } else { u32::from(mi.mode) },
+                        txw,
+                        txh,
+                        is_intrabc,
+                    };
 
-                let need_above = plane.need(NEED_ABOVE_LUT) && !is_intrabc;
-                let need_left = plane.need(NEED_LEFT_LUT) && !is_intrabc;
-                let need_right = plane.need(NEED_RIGHT_LUT);
-                let need_bot = plane.need(NEED_BOT_LUT);
-                let use_filter = mi.flags & MB_MODE_INFO::USE_FILTER_INTRA != 0;
-                let edges =
-                    plane.edge_limits(td.intra_main, mi.angle_delta[0], use_filter, &mut tile.intra_single_edge);
+                    let need_above = plane.need(NEED_ABOVE_LUT) && !is_intrabc;
+                    let need_left = plane.need(NEED_LEFT_LUT) && !is_intrabc;
+                    let need_right = plane.need(NEED_RIGHT_LUT);
+                    let need_bot = plane.need(NEED_BOT_LUT);
+                    let use_filter = mi.flags & MB_MODE_INFO::USE_FILTER_INTRA != 0;
+                    let edges =
+                        plane.edge_limits(td.intra_main, mi.angle_delta[0], use_filter, &mut tile.intra_single_edge);
 
-                let type_size = txw + txh;
-                let type_idx_base = if use_filter { IntraBlockOffset } else { IntraBlockOffset - 1 - type_size };
-                // The size of a transform block in 4x4 units. (The C++ had to declare these outside its loops:
-                // MSVC 14.51 at /O1 /Ot without /GL read subblk_w from a stack temporary it had not written
-                // yet when the declaration was in the innermost loop; docs/rust-port.md has the listing.)
-                let subblk_w = 1 << txw;
-                let subblk_h = 1 << txh;
+                    let type_size = txw + txh;
+                    let type_idx_base = if use_filter { IntraBlockOffset } else { IntraBlockOffset - 1 - type_size };
+                    // The size of a transform block in 4x4 units. (The C++ had to declare these outside its loops:
+                    // MSVC 14.51 at /O1 /Ot without /GL read subblk_w from a stack temporary it had not written
+                    // yet when the declaration was in the innermost loop; docs/rust-port.md has the listing.)
+                    let subblk_w = 1 << txw;
+                    let subblk_h = 1 << txh;
 
-                for unit_y in 0..=unit_y_log {
-                    for unit_x in 0..=unit_x_log {
-                        let x_start = unit_x * cnt_x;
-                        let x_end = (x_start + cnt_x).min(max_cnt_x);
-                        let y_start = unit_y * cnt_y;
-                        let y_end = (y_start + cnt_y).min(max_cnt_y);
-                        for y in y_start..y_end {
-                            for x in x_start..x_end {
-                                let col_off = x << txw;
-                                let row_off = y << txh;
-                                let have_top = y != 0 || xd.up_available != 0;
-                                let have_left = x != 0 || xd.left_available != 0;
+                    for unit_y in 0..=unit_y_log {
+                        for unit_x in 0..=unit_x_log {
+                            let x_start = unit_x * cnt_x;
+                            let x_end = (x_start + cnt_x).min(max_cnt_x);
+                            let y_start = unit_y * cnt_y;
+                            let y_end = (y_start + cnt_y).min(max_cnt_y);
+                            for y in y_start..y_end {
+                                for x in x_start..x_end {
+                                    let col_off = x << txw;
+                                    let row_off = y << txh;
+                                    let have_top = y != 0 || xd.up_available != 0;
+                                    let have_left = x != 0 || xd.left_available != 0;
 
-                                // Units above the block that are decoded, with those to the right of it.
-                                let mut above_available = c_int::from(have_top);
-                                let mut have_top_right = 0;
-                                if need_above {
-                                    let xr = (xd.mb_to_right_edge >> 3) + ((4 << bw_log) - (col_off << 2) - (4 << txw));
-                                    if need_right {
-                                        let right_available = mi_col + (col_off + subblk_w) < xd.tile.mi_col_end;
-                                        have_top_right = has_top_right(
-                                            cm,
-                                            bsize,
-                                            mi_row,
-                                            mi_col,
-                                            c_int::from(have_top),
-                                            c_int::from(right_available),
-                                            mi.partition,
-                                            tx_sizes[0],
-                                            row_off,
-                                            col_off,
-                                            0,
-                                            0,
-                                        );
+                                    // Units above the block that are decoded, with those to the right of it.
+                                    let mut above_available = c_int::from(have_top);
+                                    let mut have_top_right = 0;
+                                    if need_above {
+                                        let xr =
+                                            (xd.mb_to_right_edge >> 3) + ((4 << bw_log) - (col_off << 2) - (4 << txw));
+                                        if need_right {
+                                            let right_available = mi_col + (col_off + subblk_w) < xd.tile.mi_col_end;
+                                            have_top_right = has_top_right(
+                                                cm,
+                                                bsize,
+                                                mi_row,
+                                                mi_col,
+                                                c_int::from(have_top),
+                                                c_int::from(right_available),
+                                                mi.partition,
+                                                tx_sizes[0],
+                                                row_off,
+                                                col_off,
+                                                0,
+                                                0,
+                                            );
+                                        }
+                                        above_available =
+                                            (if have_top { subblk_w.min(subblk_w + (xr >> 2)) } else { 0 })
+                                                + (if have_top_right != 0 { subblk_w.min(xr >> 2) } else { 0 });
                                     }
-                                    above_available = (if have_top { subblk_w.min(subblk_w + (xr >> 2)) } else { 0 })
-                                        + (if have_top_right != 0 { subblk_w.min(xr >> 2) } else { 0 });
-                                }
 
-                                // The same to the left, with the units below.
-                                let mut left_available = c_int::from(have_left);
-                                let mut have_bottom_left = 0;
-                                if need_left {
-                                    let yd =
-                                        (xd.mb_to_bottom_edge >> 3) + ((4 << bh_log) - (row_off << 2) - (4 << txh));
-                                    if need_bot {
-                                        let bottom_available =
-                                            yd > 0 && (mi_row + row_off + subblk_h) < xd.tile.mi_row_end;
-                                        have_bottom_left = has_bottom_left(
-                                            cm,
-                                            bsize,
-                                            mi_row,
-                                            mi_col,
-                                            c_int::from(bottom_available),
-                                            c_int::from(have_left),
-                                            mi.partition,
-                                            tx_sizes[0],
-                                            row_off,
-                                            col_off,
-                                            0,
-                                            0,
-                                        );
+                                    // The same to the left, with the units below.
+                                    let mut left_available = c_int::from(have_left);
+                                    let mut have_bottom_left = 0;
+                                    if need_left {
+                                        let yd =
+                                            (xd.mb_to_bottom_edge >> 3) + ((4 << bh_log) - (row_off << 2) - (4 << txh));
+                                        if need_bot {
+                                            let bottom_available =
+                                                yd > 0 && (mi_row + row_off + subblk_h) < xd.tile.mi_row_end;
+                                            have_bottom_left = has_bottom_left(
+                                                cm,
+                                                bsize,
+                                                mi_row,
+                                                mi_col,
+                                                c_int::from(bottom_available),
+                                                c_int::from(have_left),
+                                                mi.partition,
+                                                tx_sizes[0],
+                                                row_off,
+                                                col_off,
+                                                0,
+                                                0,
+                                            );
+                                        }
+                                        left_available =
+                                            (if have_left { subblk_h.min(subblk_h + (yd >> 2)) } else { 0 })
+                                                + (if have_bottom_left != 0 { subblk_h.min(yd >> 2) } else { 0 });
                                     }
-                                    left_available = (if have_left { subblk_h.min(subblk_h + (yd >> 2)) } else { 0 })
-                                        + (if have_bottom_left != 0 { subblk_h.min(yd >> 2) } else { 0 });
-                                }
 
-                                let iter_grid_blk =
-                                    plane.iter_grid.offset((subblk_w * x + subblk_h * y * iter_grid_stride) as isize);
-                                let (above_left, above_available, left_available) =
-                                    edges.dependencies(have_top, have_left, above_available, left_available);
-                                let iter;
-                                if td.intra_v2 != 0 {
-                                    // -intrav2: no wavefront iteration. The block gets a step and a pass from the
-                                    // same neighbours and counts as iteration 0; gen_pred_blocks.hlsl reads that
-                                    // from this entry.
-                                    intra_v2::place(
-                                        &td.intra_v2_sched,
-                                        (tile.gen_block_map_offset + IntraBlockOffset - IntraSizes) as u32,
-                                        false,
-                                        mi_col + col_off,
-                                        mi_row + row_off,
-                                        txw,
-                                        txh,
-                                        above_left,
-                                        above_available,
-                                        left_available,
-                                        false,
-                                        (type_idx_base - (IntraBlockOffset - IntraSizes)) as u32,
-                                        *map.offset(type_idx_base as isize) as u32,
-                                    );
-                                    iter = 0;
-                                    tile.gen_intra_iter_y = iter.max(tile.gen_intra_iter_y);
-                                    *iter_grid_blk.offset((iter_grid_stride + subblk_w) as isize) = iter;
-                                } else if let Some(edges) = wave.as_mut() {
-                                    iter = wavefront_iteration_edges(
-                                        &plane,
-                                        &mut edges.planes[0],
-                                        mi_col + col_off,
-                                        mi_row + row_off,
-                                        above_left,
-                                        above_available,
-                                        left_available,
-                                        NO_ITERATION,
-                                        tile.intra_iter_max,
-                                        tile.gen_intra_max_iter,
-                                    );
-                                    tile.gen_intra_iter_y = iter.max(tile.gen_intra_iter_y);
-                                    luma_under = luma_under.max(iter);
-                                    // The one entry of the grid that gen_pred_blocks.hlsl reads.
-                                    *iter_grid_blk.offset((iter_grid_stride + subblk_w) as isize) = iter;
-                                } else {
-                                    iter = wavefront_iteration(
-                                        &plane,
-                                        iter_grid_blk,
-                                        above_left,
-                                        above_available,
-                                        left_available,
-                                        -1,
-                                        tile.intra_iter_max,
-                                        tile.gen_intra_max_iter,
-                                    );
-                                    tile.gen_intra_iter_y = iter.max(tile.gen_intra_iter_y);
-                                }
+                                    let iter_grid_blk = plane
+                                        .iter_grid
+                                        .offset((subblk_w * x + subblk_h * y * iter_grid_stride) as isize);
+                                    let (above_left, above_available, left_available) =
+                                        edges.dependencies(have_top, have_left, above_available, left_available);
+                                    let iter;
+                                    if td.intra_v2 != 0 {
+                                        // -intrav2: no wavefront iteration. The block gets a step and a pass from the
+                                        // same neighbours and counts as iteration 0; gen_pred_blocks.hlsl reads that
+                                        // from this entry.
+                                        intra_v2::place(
+                                            &td.intra_v2_sched,
+                                            (tile.gen_block_map_offset + IntraBlockOffset - IntraSizes) as u32,
+                                            false,
+                                            mi_col + col_off,
+                                            mi_row + row_off,
+                                            txw,
+                                            txh,
+                                            above_left,
+                                            above_available,
+                                            left_available,
+                                            false,
+                                            (type_idx_base - (IntraBlockOffset - IntraSizes)) as u32,
+                                            *map.offset(type_idx_base as isize) as u32,
+                                        );
+                                        iter = 0;
+                                        tile.gen_intra_iter_y = iter.max(tile.gen_intra_iter_y);
+                                        *iter_grid_blk.offset((iter_grid_stride + subblk_w) as isize) = iter;
+                                    } else if let Some(edges) = wave.as_mut() {
+                                        iter = wavefront_iteration_edges_legacy(
+                                            &plane,
+                                            &mut edges.legacy[0],
+                                            mi_col + col_off,
+                                            mi_row + row_off,
+                                            above_left,
+                                            above_available,
+                                            left_available,
+                                            NO_ITERATION,
+                                            tile.intra_iter_max,
+                                            tile.gen_intra_max_iter,
+                                        );
+                                        tile.gen_intra_iter_y = iter.max(tile.gen_intra_iter_y);
+                                        luma_under = luma_under.max(iter);
+                                        // The one entry of the grid that gen_pred_blocks.hlsl reads.
+                                        *iter_grid_blk.offset((iter_grid_stride + subblk_w) as isize) = iter;
+                                    } else {
+                                        iter = wavefront_iteration(
+                                            &plane,
+                                            iter_grid_blk,
+                                            above_left,
+                                            above_available,
+                                            left_available,
+                                            -1,
+                                            tile.intra_iter_max,
+                                            tile.gen_intra_max_iter,
+                                        );
+                                        tile.gen_intra_iter_y = iter.max(tile.gen_intra_iter_y);
+                                    }
 
-                                // Intra step timing (step_time.rs): the block's kind into its step.
-                                if !tile.perf_steps.is_null() {
-                                    let kind = step_time::kind(
-                                        plane.mode,
-                                        mi.angle_delta[0],
-                                        use_filter,
-                                        is_intrabc,
-                                        is_inter_intra,
-                                    );
-                                    // Filter intra runs its 4x2 units in diagonals: columns + rows - 1.
-                                    let diagonals = if use_filter { ((1 << txw) + (2 << txh) - 1) as u32 } else { 0 };
-                                    step_time::count(tile.perf_steps, iter, 0, kind, diagonals);
-                                }
-                                // The first block of an iteration the tile has not had: its lists start empty.
-                                if iter > tile.gen_intra_iter_set {
-                                    clear_iteration_lists(map, tile, iter);
-                                }
+                                    // Intra step timing (step_time.rs): the block's kind into its step.
+                                    if !tile.perf_steps.is_null() {
+                                        let kind = step_time::kind(
+                                            plane.mode,
+                                            mi.angle_delta[0],
+                                            use_filter,
+                                            is_intrabc,
+                                            is_inter_intra,
+                                        );
+                                        // Filter intra runs its 4x2 units in diagonals: columns + rows - 1.
+                                        let diagonals =
+                                            if use_filter { ((1 << txw) + (2 << txh) - 1) as u32 } else { 0 };
+                                        step_time::count(tile.perf_steps, iter, 0, kind, diagonals);
+                                    }
+                                    // The first block of an iteration the tile has not had: its lists start empty.
+                                    if iter > tile.gen_intra_iter_set {
+                                        clear_iteration_lists(map, tile, iter);
+                                    }
 
-                                let type_index = iter * IntraTypeCount + type_idx_base;
-                                let list = map.offset(type_index as isize);
-                                *index_arr.offset(tile.gen_index_ptr as isize) =
-                                    ((take(list, 1) << 2) | have_top_right | (have_bottom_left << 1)) as u32;
-                                tile.gen_index_ptr += 1;
+                                    let type_index = iter * IntraTypeCount + type_idx_base;
+                                    let list = map.offset(type_index as isize);
+                                    *index_arr.offset(tile.gen_index_ptr as isize) =
+                                        ((take(list, 1) << 2) | have_top_right | (have_bottom_left << 1)) as u32;
+                                    tile.gen_index_ptr += 1;
+                                }
                             }
                         }
                     }
+                } else if let Some(edges) = wave.as_mut() {
+                    // The luma of a palette block is not of the wavefront.
+                    edges.legacy[0].pass(mi_col, mi_row, bw, bh);
                 }
-            } else if let Some(edges) = wave.as_mut() {
-                // The luma of a palette block is not of the wavefront.
-                edges.planes[0].pass(mi_col, mi_row, bw, bh);
-            }
 
-            if !uv_use_palette && !is_chroma_ref {
-                let mi_col_uv = mi_col >> 1;
-                let mi_row_uv = mi_row >> 1;
-                let iter_grid_stride_uv = td.iter_grid_stride_uv;
-                let txw =
-                    if is_intrabc || is_inter_intra { bw_log_uv } else { TX_SIZE_WIDE_LOG2[tx_sizes[1] as usize] - 2 };
-                let txh =
-                    if is_intrabc || is_inter_intra { bh_log_uv } else { TX_SIZE_HIGH_LOG2[tx_sizes[1] as usize] - 2 };
-                let plane = IntraPlane {
-                    iter_grid: td.gen_intra_iter_uv.offset((mi_col_uv + mi_row_uv * iter_grid_stride_uv) as isize),
-                    iter_grid_stride: iter_grid_stride_uv,
-                    mode: if is_inter_intra { interintra_mode } else { u32::from(mi.uv_mode) },
-                    txw,
-                    txh,
-                    is_intrabc,
-                };
+                if !uv_use_palette && !is_chroma_ref {
+                    let mi_col_uv = mi_col >> 1;
+                    let mi_row_uv = mi_row >> 1;
+                    let iter_grid_stride_uv = td.iter_grid_stride_uv;
+                    let txw = if is_intrabc || is_inter_intra {
+                        bw_log_uv
+                    } else {
+                        TX_SIZE_WIDE_LOG2[tx_sizes[1] as usize] - 2
+                    };
+                    let txh = if is_intrabc || is_inter_intra {
+                        bh_log_uv
+                    } else {
+                        TX_SIZE_HIGH_LOG2[tx_sizes[1] as usize] - 2
+                    };
+                    let plane = IntraPlane {
+                        iter_grid: td.gen_intra_iter_uv.offset((mi_col_uv + mi_row_uv * iter_grid_stride_uv) as isize),
+                        iter_grid_stride: iter_grid_stride_uv,
+                        mode: if is_inter_intra { interintra_mode } else { u32::from(mi.uv_mode) },
+                        txw,
+                        txh,
+                        is_intrabc,
+                    };
 
-                let need_above = plane.need(NEED_ABOVE_LUT) && !is_intrabc;
-                let need_left = plane.need(NEED_LEFT_LUT) && !is_intrabc;
-                let need_right = plane.need(NEED_RIGHT_LUT);
-                let need_bot = plane.need(NEED_BOT_LUT);
-                let edges = plane.edge_limits(td.intra_main, mi.angle_delta[1], false, &mut tile.intra_single_edge);
-                let is_cfl = plane.mode == UV_CFL_PRED as u32;
+                    let need_above = plane.need(NEED_ABOVE_LUT) && !is_intrabc;
+                    let need_left = plane.need(NEED_LEFT_LUT) && !is_intrabc;
+                    let need_right = plane.need(NEED_RIGHT_LUT);
+                    let need_bot = plane.need(NEED_BOT_LUT);
+                    let edges = plane.edge_limits(td.intra_main, mi.angle_delta[1], false, &mut tile.intra_single_edge);
+                    let is_cfl = plane.mode == UV_CFL_PRED as u32;
 
-                let cnt_y = 1 << (bh_log_uv - txh - unit_y_log);
-                let cnt_x = 1 << (bw_log_uv - txw - unit_x_log);
+                    let cnt_y = 1 << (bh_log_uv - txh - unit_y_log);
+                    let cnt_x = 1 << (bw_log_uv - txw - unit_x_log);
 
-                let type_size = txw + txh;
-                let subblk_w = 1 << txw;
-                let subblk_h = 1 << txh;
+                    let type_size = txw + txh;
+                    let subblk_w = 1 << txw;
+                    let subblk_h = 1 << txh;
 
-                for unit_y in 0..=unit_y_log {
-                    for unit_x in 0..=unit_x_log {
-                        for suby in 0..cnt_y {
-                            for subx in 0..cnt_x {
-                                let x = subx + unit_x * cnt_x;
-                                let y = suby + unit_y * cnt_y;
-                                let col_off = x << txw;
-                                let row_off = y << txh;
-                                let have_top = y != 0 || xd.chroma_up_available != 0;
-                                let have_left = x != 0 || xd.chroma_left_available != 0;
-                                let mut above_available = c_int::from(have_top);
-                                let mut have_top_right = 0;
-                                if need_above {
-                                    let xr =
-                                        (xd.mb_to_right_edge >> 4) + ((4 << bw_log_uv) - (col_off << 2) - (4 << txw));
-                                    if need_right {
-                                        let right_available = mi_col + ((col_off + subblk_w) << 1) < xd.tile.mi_col_end;
-                                        have_top_right = has_top_right(
-                                            cm,
-                                            bsize_uv,
-                                            mi_row,
-                                            mi_col,
-                                            c_int::from(have_top),
-                                            c_int::from(right_available),
-                                            mi.partition,
-                                            tx_sizes[1],
-                                            row_off,
-                                            col_off,
-                                            1,
-                                            1,
-                                        );
+                    for unit_y in 0..=unit_y_log {
+                        for unit_x in 0..=unit_x_log {
+                            for suby in 0..cnt_y {
+                                for subx in 0..cnt_x {
+                                    let x = subx + unit_x * cnt_x;
+                                    let y = suby + unit_y * cnt_y;
+                                    let col_off = x << txw;
+                                    let row_off = y << txh;
+                                    let have_top = y != 0 || xd.chroma_up_available != 0;
+                                    let have_left = x != 0 || xd.chroma_left_available != 0;
+                                    let mut above_available = c_int::from(have_top);
+                                    let mut have_top_right = 0;
+                                    if need_above {
+                                        let xr = (xd.mb_to_right_edge >> 4)
+                                            + ((4 << bw_log_uv) - (col_off << 2) - (4 << txw));
+                                        if need_right {
+                                            let right_available =
+                                                mi_col + ((col_off + subblk_w) << 1) < xd.tile.mi_col_end;
+                                            have_top_right = has_top_right(
+                                                cm,
+                                                bsize_uv,
+                                                mi_row,
+                                                mi_col,
+                                                c_int::from(have_top),
+                                                c_int::from(right_available),
+                                                mi.partition,
+                                                tx_sizes[1],
+                                                row_off,
+                                                col_off,
+                                                1,
+                                                1,
+                                            );
+                                        }
+                                        above_available =
+                                            (if have_top { subblk_w.min(subblk_w + (xr >> 2)) } else { 0 })
+                                                + (if have_top_right != 0 { subblk_w.min(xr >> 2) } else { 0 });
                                     }
-                                    above_available = (if have_top { subblk_w.min(subblk_w + (xr >> 2)) } else { 0 })
-                                        + (if have_top_right != 0 { subblk_w.min(xr >> 2) } else { 0 });
-                                }
 
-                                let mut left_available = c_int::from(have_left);
-                                let mut have_bottom_left = 0;
-                                if need_left {
-                                    let yd =
-                                        (xd.mb_to_bottom_edge >> 4) + ((4 << bh_log_uv) - (row_off << 2) - (4 << txh));
-                                    if need_bot {
-                                        let bottom_available =
-                                            yd > 0 && (mi_row + ((row_off + subblk_h) << 1)) < xd.tile.mi_row_end;
-                                        have_bottom_left = has_bottom_left(
-                                            cm,
-                                            bsize_uv,
-                                            mi_row,
-                                            mi_col,
-                                            c_int::from(bottom_available),
-                                            c_int::from(have_left),
-                                            mi.partition,
-                                            tx_sizes[1],
-                                            row_off,
-                                            col_off,
-                                            1,
-                                            1,
-                                        );
+                                    let mut left_available = c_int::from(have_left);
+                                    let mut have_bottom_left = 0;
+                                    if need_left {
+                                        let yd = (xd.mb_to_bottom_edge >> 4)
+                                            + ((4 << bh_log_uv) - (row_off << 2) - (4 << txh));
+                                        if need_bot {
+                                            let bottom_available =
+                                                yd > 0 && (mi_row + ((row_off + subblk_h) << 1)) < xd.tile.mi_row_end;
+                                            have_bottom_left = has_bottom_left(
+                                                cm,
+                                                bsize_uv,
+                                                mi_row,
+                                                mi_col,
+                                                c_int::from(bottom_available),
+                                                c_int::from(have_left),
+                                                mi.partition,
+                                                tx_sizes[1],
+                                                row_off,
+                                                col_off,
+                                                1,
+                                                1,
+                                            );
+                                        }
+                                        left_available =
+                                            (if have_left { subblk_h.min(subblk_h + (yd >> 2)) } else { 0 })
+                                                + (if have_bottom_left != 0 { subblk_h.min(yd >> 2) } else { 0 });
                                     }
-                                    left_available = (if have_left { subblk_h.min(subblk_h + (yd >> 2)) } else { 0 })
-                                        + (if have_bottom_left != 0 { subblk_h.min(yd >> 2) } else { 0 });
-                                }
 
-                                let iter_grid_blk = plane
-                                    .iter_grid
-                                    .offset((subblk_w * x + subblk_h * y * iter_grid_stride_uv) as isize);
-                                let (above_left, above_available, left_available) =
-                                    edges.dependencies(have_top, have_left, above_available, left_available);
-                                let iter;
-                                if td.intra_v2 != 0 {
-                                    // -intrav2, as for luma. U and V share the place; CFL also waits for the luma
-                                    // under the block.
-                                    intra_v2::place(
-                                        &td.intra_v2_sched,
-                                        (tile.gen_block_map_offset + IntraBlockOffset - IntraSizes) as u32,
-                                        true,
-                                        mi_col_uv + col_off,
-                                        mi_row_uv + row_off,
-                                        txw,
-                                        txh,
-                                        above_left,
-                                        above_available,
-                                        left_available,
-                                        is_cfl,
-                                        (IntraSizes - 1 - type_size) as u32,
-                                        *map.offset((IntraBlockOffset - 1 - type_size) as isize) as u32,
-                                    );
-                                    iter = 0;
-                                    tile.gen_intra_iter_uv = iter.max(tile.gen_intra_iter_uv);
-                                    *iter_grid_blk.offset((iter_grid_stride_uv + subblk_w) as isize) = iter;
-                                } else if let Some(edges) = wave.as_mut() {
-                                    iter = wavefront_iteration_edges(
-                                        &plane,
-                                        &mut edges.planes[1],
-                                        mi_col_uv + col_off,
-                                        mi_row_uv + row_off,
-                                        above_left,
-                                        above_available,
-                                        left_available,
+                                    let iter_grid_blk = plane
+                                        .iter_grid
+                                        .offset((subblk_w * x + subblk_h * y * iter_grid_stride_uv) as isize);
+                                    let (above_left, above_available, left_available) =
+                                        edges.dependencies(have_top, have_left, above_available, left_available);
+                                    let iter;
+                                    if td.intra_v2 != 0 {
+                                        // -intrav2, as for luma. U and V share the place; CFL also waits for the luma
+                                        // under the block.
+                                        intra_v2::place(
+                                            &td.intra_v2_sched,
+                                            (tile.gen_block_map_offset + IntraBlockOffset - IntraSizes) as u32,
+                                            true,
+                                            mi_col_uv + col_off,
+                                            mi_row_uv + row_off,
+                                            txw,
+                                            txh,
+                                            above_left,
+                                            above_available,
+                                            left_available,
+                                            is_cfl,
+                                            (IntraSizes - 1 - type_size) as u32,
+                                            *map.offset((IntraBlockOffset - 1 - type_size) as isize) as u32,
+                                        );
+                                        iter = 0;
+                                        tile.gen_intra_iter_uv = iter.max(tile.gen_intra_iter_uv);
+                                        *iter_grid_blk.offset((iter_grid_stride_uv + subblk_w) as isize) = iter;
+                                    } else if let Some(edges) = wave.as_mut() {
+                                        iter = wavefront_iteration_edges_legacy(
+                                            &plane,
+                                            &mut edges.legacy[1],
+                                            mi_col_uv + col_off,
+                                            mi_row_uv + row_off,
+                                            above_left,
+                                            above_available,
+                                            left_available,
+                                            // A CFL block also reads the luma under it.
+                                            if is_cfl { luma_under } else { NO_ITERATION },
+                                            tile.intra_iter_max_uv,
+                                            tile.gen_intra_max_iter,
+                                        );
+                                        tile.gen_intra_iter_uv = iter.max(tile.gen_intra_iter_uv);
+                                        // The one entry of the grid that gen_pred_blocks.hlsl reads.
+                                        *iter_grid_blk.offset((iter_grid_stride_uv + subblk_w) as isize) = iter;
+                                    } else {
                                         // A CFL block also reads the luma under it.
-                                        if is_cfl { luma_under } else { NO_ITERATION },
-                                        tile.intra_iter_max_uv,
-                                        tile.gen_intra_max_iter,
-                                    );
-                                    tile.gen_intra_iter_uv = iter.max(tile.gen_intra_iter_uv);
-                                    // The one entry of the grid that gen_pred_blocks.hlsl reads.
-                                    *iter_grid_blk.offset((iter_grid_stride_uv + subblk_w) as isize) = iter;
-                                } else {
-                                    // A CFL block also reads the luma under it.
-                                    let mut luma_iter = -1;
-                                    if is_cfl {
-                                        let iter_grid_stride = td.iter_grid_stride;
-                                        let y_grid = td.gen_intra_iter_y.offset(
-                                            (((mi_col_uv + col_off) << 1)
-                                                + ((mi_row_uv + row_off) << 1) * iter_grid_stride)
-                                                as isize,
-                                        );
-                                        for yit in 1..=(subblk_h << 1) {
-                                            for xit in 1..=(subblk_w << 1) {
-                                                luma_iter = luma_iter
-                                                    .max(*y_grid.offset((xit + yit * iter_grid_stride) as isize));
+                                        let mut luma_iter = -1;
+                                        if is_cfl {
+                                            let iter_grid_stride = td.iter_grid_stride;
+                                            let y_grid = td.gen_intra_iter_y.offset(
+                                                (((mi_col_uv + col_off) << 1)
+                                                    + ((mi_row_uv + row_off) << 1) * iter_grid_stride)
+                                                    as isize,
+                                            );
+                                            for yit in 1..=(subblk_h << 1) {
+                                                for xit in 1..=(subblk_w << 1) {
+                                                    luma_iter = luma_iter
+                                                        .max(*y_grid.offset((xit + yit * iter_grid_stride) as isize));
+                                                }
                                             }
                                         }
+                                        iter = wavefront_iteration(
+                                            &plane,
+                                            iter_grid_blk,
+                                            above_left,
+                                            above_available,
+                                            left_available,
+                                            luma_iter,
+                                            tile.intra_iter_max_uv,
+                                            tile.gen_intra_max_iter,
+                                        );
+                                        tile.gen_intra_iter_uv = iter.max(tile.gen_intra_iter_uv);
                                     }
-                                    iter = wavefront_iteration(
-                                        &plane,
-                                        iter_grid_blk,
-                                        above_left,
-                                        above_available,
-                                        left_available,
-                                        luma_iter,
-                                        tile.intra_iter_max_uv,
-                                        tile.gen_intra_max_iter,
-                                    );
-                                    tile.gen_intra_iter_uv = iter.max(tile.gen_intra_iter_uv);
-                                }
 
-                                // Intra step timing (step_time.rs): the block's kind into its step.
-                                if !tile.perf_steps.is_null() {
-                                    let kind = step_time::kind(
-                                        plane.mode,
-                                        mi.angle_delta[1],
-                                        false,
-                                        is_intrabc,
-                                        is_inter_intra,
-                                    );
-                                    step_time::count(tile.perf_steps, iter, 1, kind, 0);
-                                }
-                                // The first block of an iteration the tile has not had: its lists start empty.
-                                if iter > tile.gen_intra_iter_set {
-                                    clear_iteration_lists(map, tile, iter);
-                                }
+                                    // Intra step timing (step_time.rs): the block's kind into its step.
+                                    if !tile.perf_steps.is_null() {
+                                        let kind = step_time::kind(
+                                            plane.mode,
+                                            mi.angle_delta[1],
+                                            false,
+                                            is_intrabc,
+                                            is_inter_intra,
+                                        );
+                                        step_time::count(tile.perf_steps, iter, 1, kind, 0);
+                                    }
+                                    // The first block of an iteration the tile has not had: its lists start empty.
+                                    if iter > tile.gen_intra_iter_set {
+                                        clear_iteration_lists(map, tile, iter);
+                                    }
 
-                                let type_index = iter * IntraTypeCount + IntraBlockOffset - 1 - type_size;
-                                let list = map.offset(type_index as isize);
-                                *index_arr.offset(tile.gen_index_ptr as isize) =
-                                    ((take(list, 2) << 2) | have_top_right | (have_bottom_left << 1)) as u32;
-                                tile.gen_index_ptr += 1;
+                                    let type_index = iter * IntraTypeCount + IntraBlockOffset - 1 - type_size;
+                                    let list = map.offset(type_index as isize);
+                                    *index_arr.offset(tile.gen_index_ptr as isize) =
+                                        ((take(list, 2) << 2) | have_top_right | (have_bottom_left << 1)) as u32;
+                                    tile.gen_index_ptr += 1;
+                                }
                             }
                         }
                     }
+                } else if !is_chroma_ref && let Some(edges) = wave.as_mut() {
+                    // The chroma of a palette block.
+                    edges.legacy[1].pass(mi_col >> 1, mi_row >> 1, 1 << bw_log_uv, 1 << bh_log_uv);
                 }
-            } else if !is_chroma_ref && let Some(edges) = wave.as_mut() {
-                // The chroma of a palette block.
-                edges.planes[1].pass(mi_col >> 1, mi_row >> 1, 1 << bw_log_uv, 1 << bh_log_uv);
             }
         } else if let Some(edges) = wave.as_mut()
             && edges.idle == 0
         {
             // An inter block is predicted before the wavefront: the intra blocks next to it do not wait
             // for it. (Nothing to enter while the tile is idle.)
-            edges.planes[0].pass(mi_col, mi_row, bw, bh);
-            if !is_chroma_ref {
-                edges.planes[1].pass(mi_col >> 1, mi_row >> 1, 1 << bw_log_uv, 1 << bh_log_uv);
+            if fast_txbs {
+                edges.planes[0].pass(mi_col, mi_row, bw, bh);
+                if !is_chroma_ref {
+                    edges.planes[1].pass(mi_col >> 1, mi_row >> 1, 1 << bw_log_uv, 1 << bh_log_uv);
+                }
+            } else {
+                edges.legacy[0].pass(mi_col, mi_row, bw, bh);
+                if !is_chroma_ref {
+                    edges.legacy[1].pass(mi_col >> 1, mi_row >> 1, 1 << bw_log_uv, 1 << bh_log_uv);
+                }
             }
         }
 
@@ -1627,6 +1824,369 @@ unsafe fn wavefront_iteration(
 unsafe fn wavefront_iteration_edges(
     plane: &IntraPlane,
     edges: &mut WavePlane,
+    col: c_int,
+    row: c_int,
+    above_left: c_int,
+    above_available: c_int,
+    left_available: c_int,
+    other: c_int,
+    last_iter: c_int,
+    max_iter: c_int,
+) -> c_int {
+    let (w, h) = (1 << plane.txw, 1 << plane.txh);
+    // SAFETY: the caller's contract: the columns read are columns of the tile.
+    unsafe {
+        let above = edges.above.offset(col as isize);
+        let mut iter = other;
+        // (The grid version reads the row above from the corner to the last unit that counts: for a
+        // chroma block outside the frame, whose count is below 0, not even the corner.)
+        if above_left != 0 && above_available >= 0 {
+            iter = iter.max(edges.rows[row as usize & WAVE_ROW_MASK].corner);
+        }
+        // Over the width of the block the row above is decoded; further to the right a unit counts if it
+        // is the decoded one of its column.
+        for it in 0..above_available.min(w) {
+            iter = iter.max((*above.offset(it as isize)).iter);
+        }
+        for it in w..above_available {
+            let column = *above.offset(it as isize);
+            if column.end == row {
+                iter = iter.max(column.iter);
+            }
+        }
+        // The same for the column to the left, over the height of the block and further down. (The
+        // counts are below 0 for a chroma block outside the frame: nothing is read then.)
+        for it in 0..left_available.min(h) {
+            iter = iter.max(edges.rows[(row + it) as usize & WAVE_ROW_MASK].left);
+        }
+        for it in h..left_available {
+            let entry = edges.rows[(row + it) as usize & WAVE_ROW_MASK];
+            if entry.end == col {
+                iter = iter.max(entry.left);
+            }
+        }
+        iter = iter.max(NO_ITERATION) + 1;
+        if plane.is_intrabc {
+            iter = last_iter + 1;
+        }
+        iter = iter.min(max_iter);
+        edges.commit(col, row, w, h, iter);
+        iter
+    }
+}
+
+/// `-intralistslegacy` (`av1_set_intra_lists_legacy`): the transform blocks of intra prediction go
+/// through the loops of [`av1_mi_push_block`] as they did before [`intra_block_edges`]. The lists are the
+/// same either way.
+static INTRA_LISTS_LEGACY: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// `av1_set_intra_lists_legacy` (`dx/av1_perf.h`); a frame takes it at its setup
+/// (`av1_frame_thread_data::intra_lists_legacy`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_intra_lists_legacy(enable: c_int) {
+    INTRA_LISTS_LEGACY.store(enable, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// What [`av1_set_intra_lists_legacy`] was last given.
+#[allow(dead_code, reason = "the parser-only tools set the frame's field themselves")]
+pub(crate) fn intra_lists_legacy() -> c_int {
+    INTRA_LISTS_LEGACY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// What [`av1_mi_push_block`] has worked out of an intra block (or the intra part of an inter-intra
+/// block) for [`intra_block_edges`].
+struct IntraBlock {
+    bsize: u8,
+    bsize_uv: u8,
+    bw_log: c_int,
+    bh_log: c_int,
+    is_intrabc: bool,
+    is_inter_intra: bool,
+    interintra_mode: u32,
+    tx_sizes: [u8; 2],
+    unit_x_log: c_int,
+    unit_y_log: c_int,
+    y_use_palette: bool,
+    uv_use_palette: bool,
+    is_chroma_ref: bool,
+    /// The highest iteration of the luma under the block's chroma before the block's own luma.
+    luma_under: c_int,
+}
+
+/// The wavefront and the intra lists of a block, with the wavefront at the edges of the tile
+/// ([`WaveEdges`]): what the loops of [`av1_mi_push_block`] do for its luma and its chroma, transform block
+/// by transform block in the same order and with the same arithmetic, in a function of its own.
+///
+/// In the body of `push_block` the tile, the edges and the lists are all reached through raw pointers,
+/// so every store into a list made the compiler read the tile's fields and the loop's values again, and
+/// the body has more values than registers: a block of a heavy key frame took about 1700 instructions
+/// there (docs/phase2-rav1d.md, "The block lists on the CPU"). Here the tile and the edges are references
+/// the lists cannot alias, and the tile's counters stay in registers through the loop.
+///
+/// # Safety
+/// As the loops of [`push_block`]: `edges` are the edges of the block's tile, `map` its block map, and its
+/// index list has room for an entry for each transform block.
+#[expect(clippy::too_many_arguments, reason = "what push_block has worked out of the block")]
+#[inline(never)]
+unsafe fn intra_block_edges(
+    cm: *mut AV1_COMMON,
+    xd: &MACROBLOCKD,
+    mi: &MB_MODE_INFO,
+    td: &av1_frame_thread_data,
+    tile: &mut av1_tile_data,
+    edges: &mut WaveEdges,
+    map: *mut c_int,
+    b: &IntraBlock,
+) {
+    let mi_row = i32::from(mi.mi_row);
+    let mi_col = i32::from(mi.mi_col);
+    // SAFETY: the caller's contract.
+    unsafe {
+        let mut luma_under = b.luma_under;
+        if !b.y_use_palette {
+            let highest = intra_plane_edges::<false>(cm, xd, mi, td, tile, &mut edges.planes[0], map, b, NO_ITERATION);
+            luma_under = luma_under.max(highest);
+        } else {
+            // The luma of a palette block is not of the wavefront.
+            edges.planes[0].pass(mi_col, mi_row, 1 << b.bw_log, 1 << b.bh_log);
+        }
+        let bw_log_uv = (b.bw_log - 1).max(0);
+        let bh_log_uv = (b.bh_log - 1).max(0);
+        if !b.uv_use_palette && !b.is_chroma_ref {
+            intra_plane_edges::<true>(cm, xd, mi, td, tile, &mut edges.planes[1], map, b, luma_under);
+        } else if !b.is_chroma_ref {
+            // The chroma of a palette block.
+            edges.planes[1].pass(mi_col >> 1, mi_row >> 1, 1 << bw_log_uv, 1 << bh_log_uv);
+        }
+    }
+}
+
+/// [`intra_block_edges`] for one plane: luma, or the chroma of 4:2:0 (`CHROMA`). `luma_under` is what a CFL
+/// block of chroma waits for besides its neighbours. Returns the highest iteration it gave.
+///
+/// # Safety
+/// As for [`intra_block_edges`].
+#[expect(clippy::too_many_arguments, reason = "the arguments of intra_block_edges, and the plane")]
+#[inline(always)]
+unsafe fn intra_plane_edges<const CHROMA: bool>(
+    cm: *mut AV1_COMMON,
+    xd: &MACROBLOCKD,
+    mi: &MB_MODE_INFO,
+    td: &av1_frame_thread_data,
+    tile: &mut av1_tile_data,
+    edges: &mut WavePlane,
+    map: *mut c_int,
+    b: &IntraBlock,
+    luma_under: c_int,
+) -> c_int {
+    let mi_row = i32::from(mi.mi_row);
+    let mi_col = i32::from(mi.mi_col);
+    let ss = c_int::from(CHROMA);
+    // SAFETY: the caller's contract.
+    unsafe {
+        // What the loops of push_block work out for the plane before its transform blocks.
+        let (bw_log, bh_log) =
+            if CHROMA { ((b.bw_log - 1).max(0), (b.bh_log - 1).max(0)) } else { (b.bw_log, b.bh_log) };
+        let tx_size = b.tx_sizes[usize::from(CHROMA)];
+        let (txw, txh) = if CHROMA {
+            if b.is_intrabc || b.is_inter_intra {
+                (bw_log, bh_log)
+            } else {
+                (TX_SIZE_WIDE_LOG2[tx_size as usize] - 2, TX_SIZE_HIGH_LOG2[tx_size as usize] - 2)
+            }
+        } else if b.is_intrabc {
+            (bw_log.min(4), bh_log.min(4))
+        } else if b.is_inter_intra {
+            (bw_log, bh_log)
+        } else {
+            (TX_SIZE_WIDE_LOG2[tx_size as usize] - 2, TX_SIZE_HIGH_LOG2[tx_size as usize] - 2)
+        };
+        let (cnt_x, cnt_y, max_cnt_x, max_cnt_y) = if CHROMA {
+            (1 << (bw_log - txw - b.unit_x_log), 1 << (bh_log - txh - b.unit_y_log), c_int::MAX, c_int::MAX)
+        } else {
+            (
+                (1 << (bw_log - txw)) >> b.unit_x_log,
+                (1 << (bh_log - txh)) >> b.unit_y_log,
+                ((*cm).mi_cols - mi_col + (1 << txw) - 1) >> txw,
+                ((*cm).mi_rows - mi_row + (1 << txh) - 1) >> txh,
+            )
+        };
+        let (plane_col, plane_row) = (mi_col >> ss, mi_row >> ss);
+        let stride = if CHROMA { td.iter_grid_stride_uv } else { td.iter_grid_stride };
+        let grid = if CHROMA { td.gen_intra_iter_uv } else { td.gen_intra_iter_y };
+        let plane = IntraPlane {
+            iter_grid: grid.offset((plane_col + plane_row * stride) as isize),
+            iter_grid_stride: stride,
+            mode: if b.is_inter_intra {
+                b.interintra_mode
+            } else if CHROMA {
+                u32::from(mi.uv_mode)
+            } else {
+                u32::from(mi.mode)
+            },
+            txw,
+            txh,
+            is_intrabc: b.is_intrabc,
+        };
+        let need_above = plane.need(NEED_ABOVE_LUT) && !b.is_intrabc;
+        let need_left = plane.need(NEED_LEFT_LUT) && !b.is_intrabc;
+        let need_right = plane.need(NEED_RIGHT_LUT);
+        let need_bot = plane.need(NEED_BOT_LUT);
+        let use_filter = !CHROMA && mi.flags & MB_MODE_INFO::USE_FILTER_INTRA != 0;
+        let limits = plane.edge_limits(
+            td.intra_main,
+            mi.angle_delta[usize::from(CHROMA)],
+            use_filter,
+            &mut tile.intra_single_edge,
+        );
+        let type_base = if use_filter { IntraBlockOffset } else { IntraBlockOffset - 1 - (txw + txh) };
+        // A CFL block also reads the luma under it.
+        let other = if CHROMA && plane.mode == UV_CFL_PRED as u32 { luma_under } else { NO_ITERATION };
+        let (up_available, left_available) = if CHROMA {
+            (xd.chroma_up_available != 0, xd.chroma_left_available != 0)
+        } else {
+            (xd.up_available != 0, xd.left_available != 0)
+        };
+        let bsize = if CHROMA { b.bsize_uv } else { b.bsize };
+        let last_iter = if CHROMA { tile.intra_iter_max_uv } else { tile.intra_iter_max };
+        let take_by = 1 + c_int::from(CHROMA);
+        let (tile_col_end, tile_row_end) = (xd.tile.mi_col_end, xd.tile.mi_row_end);
+        let subblk_w = 1 << txw;
+        let subblk_h = 1 << txh;
+        // Of `xr` and `yd` (from a transform block's right and bottom edge to the frame's, in samples of the
+        // plane), what is the same for every transform block of the block.
+        let xr_base = (xd.mb_to_right_edge >> (3 + ss)) + (4 << bw_log) - (4 << txw);
+        let yd_base = (xd.mb_to_bottom_edge >> (3 + ss)) + (4 << bh_log) - (4 << txh);
+
+        let index_arr = tile.gen_indexes;
+        let mut index_ptr = tile.gen_index_ptr;
+        let mut iter_high = if CHROMA { tile.gen_intra_iter_uv } else { tile.gen_intra_iter_y };
+        let mut iter_set = tile.gen_intra_iter_set;
+        let max_iter = tile.gen_intra_max_iter;
+        let mut highest = NO_ITERATION;
+        for unit_y in 0..=b.unit_y_log {
+            for unit_x in 0..=b.unit_x_log {
+                let x_start = unit_x * cnt_x;
+                let x_end = (x_start + cnt_x).min(max_cnt_x);
+                let y_start = unit_y * cnt_y;
+                let y_end = (y_start + cnt_y).min(max_cnt_y);
+                for y in y_start..y_end {
+                    let row_off = y << txh;
+                    let have_top = y != 0 || up_available;
+                    let yd = yd_base - (row_off << 2);
+                    for x in x_start..x_end {
+                        let col_off = x << txw;
+                        let have_left = x != 0 || left_available;
+
+                        // Units above the block that are decoded, with those to the right of it.
+                        let mut above_available = c_int::from(have_top);
+                        let mut have_top_right = 0;
+                        if need_above {
+                            let xr = xr_base - (col_off << 2);
+                            if need_right {
+                                let right_available = mi_col + ((col_off + subblk_w) << ss) < tile_col_end;
+                                have_top_right = has_top_right(
+                                    cm,
+                                    bsize,
+                                    mi_row,
+                                    mi_col,
+                                    c_int::from(have_top),
+                                    c_int::from(right_available),
+                                    mi.partition,
+                                    tx_size,
+                                    row_off,
+                                    col_off,
+                                    ss,
+                                    ss,
+                                );
+                            }
+                            above_available = (if have_top { subblk_w.min(subblk_w + (xr >> 2)) } else { 0 })
+                                + (if have_top_right != 0 { subblk_w.min(xr >> 2) } else { 0 });
+                        }
+
+                        // The same to the left, with the units below.
+                        let mut left_available = c_int::from(have_left);
+                        let mut have_bottom_left = 0;
+                        if need_left {
+                            if need_bot {
+                                let bottom_available = yd > 0 && mi_row + ((row_off + subblk_h) << ss) < tile_row_end;
+                                have_bottom_left = has_bottom_left(
+                                    cm,
+                                    bsize,
+                                    mi_row,
+                                    mi_col,
+                                    c_int::from(bottom_available),
+                                    c_int::from(have_left),
+                                    mi.partition,
+                                    tx_size,
+                                    row_off,
+                                    col_off,
+                                    ss,
+                                    ss,
+                                );
+                            }
+                            left_available = (if have_left { subblk_h.min(subblk_h + (yd >> 2)) } else { 0 })
+                                + (if have_bottom_left != 0 { subblk_h.min(yd >> 2) } else { 0 });
+                        }
+
+                        let (above_left, above_available, left_available) =
+                            limits.dependencies(have_top, have_left, above_available, left_available);
+                        let iter = wavefront_iteration_edges(
+                            &plane,
+                            edges,
+                            plane_col + col_off,
+                            plane_row + row_off,
+                            above_left,
+                            above_available,
+                            left_available,
+                            other,
+                            last_iter,
+                            max_iter,
+                        );
+                        iter_high = iter_high.max(iter);
+                        highest = highest.max(iter);
+                        // The one entry of the grid that gen_pred_blocks.hlsl reads.
+                        *plane.iter_grid.offset((subblk_w * x + subblk_h * y * stride + stride + subblk_w) as isize) =
+                            iter;
+                        // The first block of an iteration the tile has not had: its lists start empty.
+                        if iter > iter_set {
+                            clear_iteration_lists(map, tile, iter);
+                            iter_set = tile.gen_intra_iter_set;
+                        }
+                        let list = map.offset((iter * IntraTypeCount + type_base) as isize);
+                        *index_arr.offset(index_ptr as isize) =
+                            ((take(list, take_by) << 2) | have_top_right | (have_bottom_left << 1)) as u32;
+                        index_ptr += 1;
+                    }
+                }
+            }
+        }
+        tile.gen_index_ptr = index_ptr;
+        if CHROMA {
+            tile.gen_intra_iter_uv = iter_high;
+        } else {
+            tile.gen_intra_iter_y = iter_high;
+        }
+        highest
+    }
+}
+
+/// `-intralistslegacy`: [`wavefront_iteration_edges`] on [`LegacyWavePlane`]. [`wavefront_iteration`] with the
+/// iterations of the neighbours at the edges of the tile instead of in
+/// the wavefront grid: the transform block of `plane` at `col`, `row` of the plane takes its iteration
+/// from the units the grid version reads (the row above from the unit above and to the left, if
+/// `above_left`, to `above_available` units; `left_available` units of the column to the left; `other`),
+/// and is entered at the edges with it.
+///
+/// # Safety
+/// `edges` are the edges of the block's tile in the plane, with every block the tile has decoded; the
+/// units over the block's width in the row above are decoded if `above_available` is not 0, the ones over
+/// its height in the column to its left if `left_available` is not 0, and the corner if `above_left`.
+#[expect(clippy::too_many_arguments, reason = "the arguments of wavefront_iteration, and where the block is")]
+#[inline(always)]
+unsafe fn wavefront_iteration_edges_legacy(
+    plane: &IntraPlane,
+    edges: &mut LegacyWavePlane,
     col: c_int,
     row: c_int,
     above_left: c_int,

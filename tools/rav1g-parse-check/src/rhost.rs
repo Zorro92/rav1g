@@ -48,6 +48,8 @@ struct Frames {
 pub struct PlainHost {
     /// The frames keep the wavefront in the edges of their tiles, not in the grids.
     wave_edges: bool,
+    /// [`Legacy::intra_lists`].
+    intra_lists_legacy: bool,
     /// The frames in parse, by the number the sink gave them. An entry is written by `frame_begin` and
     /// `frame_end` of its frame, while no tile of that frame is in parse; the tiles read the arena,
     /// whose buffers they write each in its own part.
@@ -130,6 +132,8 @@ impl SinkHost for PlainHost {
                 arena
             }
         };
+        let mut arena = arena;
+        arena.set_intra_lists_legacy(self.intra_lists_legacy);
         let memory =
             FrameMemory { mi_grid: arena.mi_grid.ptr(), mi_stride: size.mi_stride(), mi_chunks: arena.mi_chunks.ptr() };
         // SAFETY: the place is this frame's and none of its tiles is in parse (the contract of
@@ -248,13 +252,16 @@ impl SinkHost for PlainHost {
 
 /// rav1d's parse pass with the sink and the plain host.
 /// The previous paths of the parse (`-coeflegacy`, `-refrowslegacy`; the decoder's -parsecoeflegacy and
-/// -parserefrowslegacy).
+/// -parserefrowslegacy) and of the block lists (`-intralistslegacy`, the decoder's -intralistslegacy).
 #[derive(Clone, Copy, Default)]
 pub struct Legacy {
     /// The linked list of AC coefficient tokens (`ParseSettings::legacy_coef_tokens`).
     pub coef_tokens: bool,
     /// A frame in parse waits for the rows of all seven references (`ParseSettings::legacy_ref_rows`).
     pub ref_rows: bool,
+    /// The loops of `av1_mi_push_block` for the transform blocks of intra prediction as they were before
+    /// `intra_txbs_edges` (`av1_frame_thread_data::intra_lists_legacy`).
+    pub intra_lists: bool,
 }
 
 pub struct RustParser {
@@ -284,6 +291,7 @@ impl RustParser {
         let sink = Arc::new(Sink::with_frames(
             PlainHost {
                 wave_edges,
+                intra_lists_legacy: legacy.intra_lists,
                 places: (0..frames).map(|_| UnsafeCell::new(None)).collect(),
                 frames: Mutex::new(Frames::default()),
                 arena_nanos: AtomicU64::new(0),

@@ -362,6 +362,12 @@ void av1_set_intra_single_edge_legacy(int enable);
  * decoder's first decode call. A running parser keeps its selection. */
 void av1_set_parse_coef_legacy(int enable);
 
+/* Process-wide. Nonzero counts the intra block lists with the previous loops of
+ * av1_mi_push_block and the previous edges of the wavefront, four arrays with the
+ * frame's stamp (-intralistslegacy); zero uses intra_block_edges and the packed edges.
+ * The lists are the same. A frame takes it at its setup. */
+void av1_set_intra_lists_legacy(int enable);
+
 /* Process-wide. Nonzero restores the row waits for all reference types when
  * frames are parsed in parallel (-parserefrowslegacy). Set before the
  * decoder's first decode call. A running parser keeps its selection. */

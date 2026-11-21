@@ -45,6 +45,9 @@ pub struct av1_frame_thread_data {
     pub iter_grid_stride_uv: c_int,
     pub intra_v2: c_int,
     pub intra_main: IntraMain,
+    /// `-intralistslegacy` (`av1_set_intra_lists_legacy`): the loops of `av1_mi_push_block` for the
+    /// transform blocks of intra prediction as they were before `intra_txbs_edges`.
+    pub intra_lists_legacy: c_int,
     pub intra_v2_sched: IntraV2Sched,
     pub scale_factors: [ScaleFactor; 8],
     pub scale_enable: c_int,

@@ -1005,6 +1005,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         intra_step_legacy: task.intrasteplegacy,
         intra_single_edge_legacy: task.intrasingleedgelegacy,
         parse_coef_legacy: task.parsecoeflegacy,
+        intra_lists_legacy: task.intralistslegacy,
         parse_ref_rows_legacy: task.parserefrowslegacy,
         lf_legacy: task.lflegacy,
         lf_h_split: task.lfhsplit as u32,
@@ -1062,6 +1063,9 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     );
     if task.parsecoeflegacy {
         say!("PARSER {}: linked AC coefficient tokens (-parsecoeflegacy)", task.name);
+    }
+    if task.intralistslegacy {
+        say!("PARSER {}: the previous intra list loops and wavefront edges (-intralistslegacy)", task.name);
     }
     if task.parserefrowslegacy {
         say!("PARSER {}: wait for all reference rows (-parserefrowslegacy)", task.name);

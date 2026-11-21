@@ -22,7 +22,7 @@ use std::ffi::c_int;
 use std::sync::Mutex;
 
 use crate::host::blocks::IntraMain;
-use crate::host::blocks::WaveEdges;
+use crate::host::blocks::{WaveColumn, WaveEdges, WaveRow};
 use crate::host::types::av1_frame_thread_data;
 use crate::sys::{MB_MODE_INFO, MI_POOL_CHUNK_RECORDS, MiGridEntry, av1_tile_data, tx_block_info_gpu};
 
@@ -173,10 +173,12 @@ pub struct Arena {
     /// The edges of the tiles, and the rows above them with where the decoded units end: for every row
     /// of tiles the columns of luma, then those of chroma.
     pub wave_tiles: Buffer<WaveEdges>,
+    pub wave_columns: Buffer<WaveColumn>,
+    /// The same for `-intralistslegacy` (`WaveEdges::legacy`), and the number of the frame in this arena,
+    /// as the host counts the frames of a slot: the edges of an earlier frame do not count as decoded
+    /// units of this one.
     pub wave_above: Buffer<c_int>,
     pub wave_above_end: Buffer<i64>,
-    /// The number of the frame in this arena, as the host counts the frames of a slot: the edges of an
-    /// earlier frame do not count as decoded units of this one.
     pub wave_stamp: i64,
     pub tiles: Buffer<av1_tile_data>,
     /// The palette blocks of each tile in the order they were read.
@@ -224,6 +226,7 @@ impl Arena {
             iter_grid_offset_uv: grid_w * grid_h,
             wave_edges,
             wave_tiles: Buffer::new(tiles),
+            wave_columns: Buffer::new(Self::wave_cols(&size) * 3 / 2 * size.tile_rows as usize),
             wave_above: Buffer::new(Self::wave_cols(&size) * 3 / 2 * size.tile_rows as usize),
             wave_above_end: Buffer::new(Self::wave_cols(&size) * 3 / 2 * size.tile_rows as usize),
             wave_stamp: 1,
@@ -239,6 +242,7 @@ impl Arena {
                 iter_grid_stride_uv: grid_w >> 1,
                 intra_v2: 0,
                 intra_main: IntraMain::SingleEdge,
+                intra_lists_legacy: 0,
                 intra_v2_sched: Default::default(),
                 scale_factors: Default::default(),
                 scale_enable: 0,
@@ -257,11 +261,15 @@ impl Arena {
                 let records = arena.mi_pool.ptr().add(chunk * MI_POOL_CHUNK_RECORDS);
                 (*arena.mi_chunks.ptr().add(chunk)).set(records);
             }
-            for i in 0..arena.wave_above.len() {
+            for i in 0..arena.wave_columns.len() {
+                arena.wave_columns.ptr().add(i).write(WaveColumn { iter: WAVE_PATTERN, end: WAVE_PATTERN });
                 arena.wave_above.ptr().add(i).write(WAVE_PATTERN);
             }
             for edges in std::slice::from_raw_parts_mut(arena.wave_tiles.ptr(), arena.wave_tiles.len()) {
                 for plane in &mut edges.planes {
+                    plane.rows.fill(WaveRow { left: WAVE_PATTERN, corner: WAVE_PATTERN, end: WAVE_PATTERN, unused: 0 });
+                }
+                for plane in &mut edges.legacy {
                     plane.rows.fill([WAVE_PATTERN; 2]);
                 }
             }
@@ -307,6 +315,12 @@ impl Arena {
     pub fn set_gm_warp(&mut self, gm_warp: [c_int; 8]) {
         self.gm_warp = gm_warp;
         self.frame_data.gm_warp = gm_warp;
+    }
+
+    /// The loops of `av1_mi_push_block` for the transform blocks of intra prediction as they were before
+    /// `intra_txbs_edges` (`-intralistslegacy`), for the frame's tiles.
+    pub fn set_intra_lists_legacy(&mut self, legacy: bool) {
+        self.frame_data.intra_lists_legacy = c_int::from(legacy);
     }
 
     /// A tile's cursors into the buffers, as `av1_setup_macroblockd` of the host sets them. Returns the
@@ -380,11 +394,15 @@ impl Arena {
                 // The tile's edges, with the rows above it in the part of its row of tiles.
                 let cols = Self::wave_cols(size);
                 let first = cols * 3 / 2 * (tile.index / size.tile_cols as usize);
+                let columns = self.wave_columns.ptr().add(first);
                 let above = self.wave_above.ptr().add(first);
                 let above_end = self.wave_above_end.ptr().add(first);
                 let edges = &mut *self.wave_tiles.ptr().add(tile.index);
                 edges.start(tile.col_start, tile.col_end - tile.col_start);
                 for (plane, at) in edges.planes.iter_mut().zip([0, cols]) {
+                    plane.above = columns.add(at);
+                }
+                for (plane, at) in edges.legacy.iter_mut().zip([0, cols]) {
                     plane.above = above.add(at);
                     plane.above_end = above_end.add(at);
                     plane.stamp = self.wave_stamp << 32;

@@ -34,7 +34,9 @@
 //! one thread, one frame in parse and the sink-written grid. `-coeflegacy` and `-refrowslegacy` give the
 //! run that is checked (or timed) the previous paths of the parse, the decoder's -parsecoeflegacy and
 //! -parserefrowslegacy: the linked list of AC coefficient tokens, and the wait of a frame in parse for the
-//! rows of all seven references.
+//! rows of all seven references. `-intralistslegacy` gives it the previous loops of the block lists for
+//! the transform blocks of intra prediction (the decoder's -intralistslegacy); the reference has those,
+//! so the default run is held against them.
 //!
 //! `-frametimes`, with `-time`: one line per frame of every run with the sink, `FRAMETIME run=<r> no=<n>`
 //! and the frame's times in milliseconds (rav1d's `parse_stats`): `admit` its wait for a frame context,
@@ -103,7 +105,8 @@ struct Options {
     lr_mix: bool,
     /// -wave: the wavefront in the edges of the tiles, for the reference and for the run that is checked.
     wave_edges: (bool, bool),
-    /// -coeflegacy, -refrowslegacy: the previous paths of the parse, for the run that is checked.
+    /// -coeflegacy, -refrowslegacy, -intralistslegacy: the previous paths of the parse and of the intra
+    /// block lists, for the run that is checked.
     legacy: rhost::Legacy,
     /// -frametimes (with -time): a line with the times of every frame of every run with the sink.
     frame_times: bool,
@@ -124,7 +127,8 @@ fn usage() -> ! {
          separated by commas: nolfmask, tilethread (both on by default); none; default; latelists; time (with \
          -time)\n-wave: where the wavefront of intra prediction is kept: edges (default), grid, check (the grid for \
          the reference, the edges for the run that is checked)\n-coeflegacy, -refrowslegacy: the previous linked AC tokens, \
-         the previous wait for the rows of all references\n-frametimes: with -time, a FRAMETIME line per frame of every run"
+         the previous wait for the rows of all references\n-intralistslegacy: the previous loops of the intra \
+         block lists\n-frametimes: with -time, a FRAMETIME line per frame of every run"
     );
     std::process::exit(2);
 }
@@ -178,6 +182,7 @@ fn options() -> Options {
             "-tiles" => options.tiles = true,
             "-coeflegacy" => options.legacy.coef_tokens = true,
             "-refrowslegacy" => options.legacy.ref_rows = true,
+            "-intralistslegacy" => options.legacy.intra_lists = true,
             "-parseopt" => options.parse = ParseOptions::from_words(&value()).unwrap_or_else(|| usage()),
             "-digest" => options.digest = true,
             "-lrmix" => options.lr_mix = true,
@@ -215,10 +220,11 @@ fn options() -> Options {
 fn check(path: &Path, options: &Options) -> Result<Report, String> {
     let data = std::fs::read(path).map_err(|error| format!("cannot read the file: {error}"))?;
     let units = container::read(&data)?;
-    // Keep the sink-written grid to check the edge readers, and the linked AC token list to
-    // compare the default packed path's transform records and coefficients to the previous path.
+    // Keep the sink-written grid to check the edge readers, the linked AC token list to compare the
+    // default packed path's transform records and coefficients to the previous path, and the previous
+    // loops of the intra block lists to compare those of `intra_txbs_edges` to.
     let reference_options = ParseOptions { gpu_grid: false, ..ParseOptions::default() };
-    let legacy = rhost::Legacy { coef_tokens: true, ref_rows: false };
+    let legacy = rhost::Legacy { coef_tokens: true, ref_rows: false, intra_lists: true };
     let mut reference = rhost::RustParser::with_clock(1, 1, reference_options, false, options.wave_edges.0, legacy)?;
     let mut checked = rhost::RustParser::with_clock(
         options.threads,

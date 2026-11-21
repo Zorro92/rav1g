@@ -31,7 +31,7 @@ use windows::Win32::Graphics::Direct3D12::{
     ID3D12CommandQueue, ID3D12Device, ID3D12PipelineState, ID3D12RootSignature,
 };
 
-use super::blocks::{IntraMain, WaveEdges};
+use super::blocks::{IntraMain, WaveColumn, WaveEdges};
 use super::memory::Allocator;
 use super::pool::{KINDS, Pools};
 use super::thread::{FramePool, Queue};
@@ -297,6 +297,9 @@ pub struct av1_frame_thread_data {
     pub intra_v2_list_count: c_long,
     pub intra_v2: c_int,
     pub intra_main: IntraMain,
+    /// `-intralistslegacy` (`av1_set_intra_lists_legacy`): the loops of `av1_mi_push_block` for the
+    /// transform blocks of intra prediction as they were before `intra_txbs_edges`.
+    pub intra_lists_legacy: c_int,
     pub intra_v2_cells: c_int,
     pub intra_v2_cols: c_int,
     pub intra_v2_rows: c_int,
@@ -352,12 +355,15 @@ pub struct av1_frame_thread_data {
     /// and the columns of their tile in the rows above (`setup_tile`). The memory is `wave`'s.
     pub wave_edges: c_int,
     pub wave_tiles: *mut WaveEdges,
+    /// The rows above (`blocks::WavePlane::above`), and those of `blocks::WaveEdges::legacy` with where
+    /// their decoded units end.
+    pub wave_columns: *mut WaveColumn,
     pub wave_above: *mut c_int,
     pub wave_above_end: *mut i64,
     /// The columns of luma a row of tiles has in the rows above; chroma has half of them behind those.
     pub wave_cols: usize,
     /// The stamp of the frame in the edges: the number of the frame among those that kept their
-    /// wavefront on this slot, shifted left by 32 (`blocks::WavePlane::stamp`).
+    /// wavefront on this slot, shifted left by 32 (`blocks::LegacyWavePlane::stamp`).
     pub wave_stamp: i64,
     pub wave: WaveStore,
     pub scale_enable: c_int,
@@ -434,6 +440,8 @@ pub struct TilePieces {
 pub struct WaveStore {
     /// The edges of each tile.
     pub tiles: Vec<WaveEdges>,
+    /// The rows above the tiles: for every row of tiles the columns of luma, then those of chroma.
+    pub columns: Vec<WaveColumn>,
     /// The rows above the tiles and where their decoded units end: for every row of tiles the columns of
     /// luma, then those of chroma.
     pub above: Vec<c_int>,
@@ -664,7 +672,13 @@ impl Av1Core {
             (&raw mut (*dec).mi_chunks).write(Vec::new());
             (&raw mut (*dec).mem_stats).write(super::mem_stats::MemStats::new());
             (&raw mut (*dec).memory_lock).write(std::sync::Mutex::new(()));
-            let no_edges = || WaveStore { tiles: Vec::new(), above: Vec::new(), above_end: Vec::new(), frames: 0 };
+            let no_edges = || WaveStore {
+                tiles: Vec::new(),
+                columns: Vec::new(),
+                above: Vec::new(),
+                above_end: Vec::new(),
+                frames: 0,
+            };
             for slot in 0..FrameThreadDataCount as usize {
                 (&raw mut (*dec).frame_thread_data[slot].perf.detail).write(None);
                 (&raw mut (*dec).frame_thread_data[slot].wave).write(no_edges());

@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12Device};
 
-use super::blocks::WaveEdges;
+use super::blocks::{WAVE_COLUMN_RESET, WaveColumn, WaveEdges};
 use super::completion::start_completion_thread;
 use super::core::{buffer, commands, pipeline};
 use super::create::to_mib;
@@ -570,9 +570,13 @@ fn wave_edges_for_frame(cm: &AV1_COMMON, td: &mut av1_frame_thread_data) -> bool
     let store = &mut td.wave;
     if store.above.len() < columns {
         let more = columns - store.above.len();
-        if store.above.try_reserve(more).is_err() || store.above_end.try_reserve(more).is_err() {
+        if store.columns.try_reserve(more).is_err()
+            || store.above.try_reserve(more).is_err()
+            || store.above_end.try_reserve(more).is_err()
+        {
             return false;
         }
+        store.columns.resize(columns, WAVE_COLUMN_RESET);
         store.above.resize(columns, -1);
         store.above_end.resize(columns, 0);
     }
@@ -587,14 +591,16 @@ fn wave_edges_for_frame(cm: &AV1_COMMON, td: &mut av1_frame_thread_data) -> bool
     td.wave_stamp = store.frames << 32;
     td.wave_cols = cols;
     td.wave_tiles = store.tiles.as_mut_ptr();
+    td.wave_columns = store.columns.as_mut_ptr();
     td.wave_above = store.above.as_mut_ptr();
     td.wave_above_end = store.above_end.as_mut_ptr();
     // -poisonbuf: the edges hold what earlier frames left there, mostly plausible iterations. Filled
     // again for every frame, an entry that is read without having been written by this frame is "no
     // iteration" (the byte is negative) where the block there has one, and no decoded unit at all.
-    // SAFETY: the three vectors, over the part this frame uses.
+    // SAFETY: the four vectors, over the part this frame uses.
     unsafe {
         poison_constants(td.wave_tiles.cast(), size_of::<WaveEdges>() * tiles);
+        poison_constants(td.wave_columns.cast(), size_of::<WaveColumn>() * columns);
         poison_constants(td.wave_above.cast(), size_of::<c_int>() * columns);
         poison_constants(td.wave_above_end.cast(), size_of::<i64>() * columns);
     }
@@ -916,6 +922,7 @@ pub(crate) unsafe fn setup_frame_begin(
         td.intra_stats = [0; 4];
         td.intra_v2 = intra_v2_setup_frame(dec, cm, td);
         td.intra_main = super::prediction::intra_main_for_frame(td.intra_v2 != 0);
+        td.intra_lists_legacy = super::blocks::intra_lists_legacy();
         // With -intrav2 nothing scans the iteration grid; av1_mi_push_block() writes the one entry per
         // block that gen_pred_blocks.hlsl reads. The same without a switch for the clears: the tiles keep
         // the wavefront in their edges, the grid gets that one entry per block, and nothing of it is
@@ -1314,6 +1321,9 @@ pub(crate) unsafe fn setup_tile(
             edges.start(tile.mi_col_start, tile.mi_col_end - tile.mi_col_start);
             let first = td.wave_cols * 3 / 2 * tile.tile_row as usize;
             for (plane, at) in edges.planes.iter_mut().zip([0, td.wave_cols]) {
+                plane.above = td.wave_columns.add(first + at);
+            }
+            for (plane, at) in edges.legacy.iter_mut().zip([0, td.wave_cols]) {
                 plane.above = td.wave_above.add(first + at);
                 plane.above_end = td.wave_above_end.add(first + at);
                 plane.stamp = td.wave_stamp;

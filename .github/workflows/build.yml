@@ -1505,7 +1505,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        case: [poisoned, interfast, syncclear, gridcheck, intraschedulelegacy, intrabanklegacy, intrasteplegacy, intrasingleedgelegacy, steptime]
+        case: [poisoned, interfast, syncclear, gridcheck, intraschedulelegacy, intrabanklegacy, intrasteplegacy, intrasingleedgelegacy, intralistslegacy, steptime]
     steps:
       - name: Disable newline conversion
         run: git config --global core.autocrlf false
@@ -2377,7 +2377,8 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.argon
     needs: [argon-streams, rust]
     runs-on: windows-latest
-    timeout-minutes: 120
+    # Five passes of the set a shard: with three the slowest shard took 63 minutes (the 4K stress streams).
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -2434,6 +2435,15 @@ jobs:
           --streams argon-streams --out out/argon-fggenlegacy --shards 8 --shard ${{ matrix.shard }} --timeout 450
           --decoder-arg=-fggenlegacy
 
+      # -intralistslegacy, with the frames in parse the library chooses: the intra block lists counted by
+      # the previous loops of av1_mi_push_block over the previous wavefront edges.
+      - name: Argon Profile 0 on WARP with the previous intra list loops
+        if: ${{ !cancelled() }}
+        run: >-
+          python testing/argon/run.py --tool out/rav1g-dec/rav1g-dec.exe
+          --streams argon-streams --out out/argon-intralistslegacy --shards 8 --shard ${{ matrix.shard }} --timeout 450
+          --decoder-arg=-intralistslegacy
+
       - name: Preserve the result table
         if: always()
         uses: actions/upload-artifact@v7
@@ -2448,6 +2458,8 @@ jobs:
             out/argon-coeflegacy/summary.md
             out/argon-fggenlegacy/results.tsv
             out/argon-fggenlegacy/summary.md
+            out/argon-intralistslegacy/results.tsv
+            out/argon-intralistslegacy/summary.md
           if-no-files-found: warn
 
   # What the jobs above wrote, held against each other; no decoder runs here. It runs also when one of

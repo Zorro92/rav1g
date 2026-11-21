@@ -36,6 +36,7 @@ unsafe extern "C" {
     fn av1_set_intra_step_legacy(enable: c_int);
     fn av1_set_intra_single_edge_legacy(enable: c_int);
     fn av1_set_parse_coef_legacy(enable: c_int);
+    fn av1_set_intra_lists_legacy(enable: c_int);
     fn av1_set_parse_ref_rows_legacy(enable: c_int);
 }
 
@@ -191,6 +192,7 @@ pub struct Choices {
     pub intra_step_legacy: bool,
     pub intra_single_edge_legacy: bool,
     pub parse_coef_legacy: bool,
+    pub intra_lists_legacy: bool,
     pub parse_ref_rows_legacy: bool,
     pub lf_legacy: bool,
     pub lf_h_split: u32,
@@ -537,6 +539,7 @@ impl Library {
             av1_set_intra_step_legacy(c_int::from(choices.intra_step_legacy));
             av1_set_intra_single_edge_legacy(c_int::from(choices.intra_single_edge_legacy));
             av1_set_parse_coef_legacy(c_int::from(choices.parse_coef_legacy));
+            av1_set_intra_lists_legacy(c_int::from(choices.intra_lists_legacy));
             av1_set_parse_ref_rows_legacy(c_int::from(choices.parse_ref_rows_legacy));
         }
         if self.is_c() {

@@ -792,6 +792,8 @@ int AV1Decoder::DecodeOne() {
   XB_LOGI << "Parser: the parse pass of rav1d";
   av1_set_parse_coef_legacy(params_.parsecoeflegacy_);
   if (params_.parsecoeflegacy_) XB_LOGI << "Parser: linked AC coefficient tokens (-parsecoeflegacy)";
+  av1_set_intra_lists_legacy(params_.intralistslegacy_);
+  if (params_.intralistslegacy_) XB_LOGI << "Block lists: the previous intra loops and wavefront edges (-intralistslegacy)";
   av1_set_parse_ref_rows_legacy(params_.parserefrowslegacy_);
   if (params_.parserefrowslegacy_) XB_LOGI << "Parser: wait for all reference rows (-parserefrowslegacy)";
   // -parseopt: fixed when the decoder was created. The default is nolfmask tilethread gpucdef gpugrid.
