@@ -32,17 +32,10 @@ use crate::sys::{
 use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 
 pub(super) static SKIP_FILM_GRAIN: AtomicBool = AtomicBool::new(false);
-static FG_LEGACY: AtomicBool = AtomicBool::new(false);
 
 /// The bytes of a frame's grain buffer (`filmgrain_rand_offset` of a slot or output context) that come
 /// before its random offsets: the grain templates.
 pub(super) const GRAIN_BUFFER_TEMPLATE_BYTES: usize = TEMPLATE_BYTES;
-
-/// `av1_set_fg_legacy` (`dx/av1_perf.h`).
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_fg_legacy(enable: c_int) {
-    FG_LEGACY.store(enable != 0, Ordering::Relaxed);
-}
 
 /// `av1_set_skip_film_grain` (`dx/av1_perf.h`).
 #[unsafe(no_mangle)]
@@ -323,16 +316,16 @@ pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_ch
         (*data).width = src.y_crop_width;
         (*data).height = src.y_crop_height;
         (*data).is_10x3 = c_int::from(target == GrainTarget::Planes && (*dec).tryhdr10x3 != 0 && src.hbd != 0);
-        let direct_v2 = matches!(target, GrainTarget::SemiPlanarTexture(_)) && !FG_LEGACY.load(Ordering::Relaxed);
+        let direct = matches!(target, GrainTarget::SemiPlanarTexture(_));
         // The shared-memory shader processes three adjacent grain blocks per group. The direct
         // shader processes one. Both read the offsets of every block they process.
-        let blocks_per_group = if direct_v2 { 1 } else { 3 };
+        let blocks_per_group = if direct { 1 } else { 3 };
         let groups_x = (src.y_crop_width as u32).div_ceil(luma_subblock_size_x as u32 * blocks_per_group);
         let groups_y = (src.y_crop_height as u32).div_ceil(luma_subblock_size_y as u32);
         let stride = groups_x * blocks_per_group;
         (*data).random_offset_stride = stride as c_int;
 
-        let packed = direct_v2 && params.bit_depth == 10;
+        let packed = direct && params.bit_depth == 10;
         let scaling_lut = &raw mut (*data).scaling_lut;
         write_scaling_lut(&params.scaling_points_y[..params.num_y_points as usize], scaling_lut, 0, packed);
         if params.chroma_scaling_from_luma != 0 {
@@ -360,8 +353,7 @@ pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_ch
         let shader = pipeline(match target {
             GrainTarget::Planes => &raw const (*lib).shader_filmgrain_filter,
             GrainTarget::SemiPlanar => &raw const (*lib).shader_filmgrain_filter_sp,
-            GrainTarget::SemiPlanarTexture(_) if direct_v2 => &raw const (*lib).shader_filmgrain_filter_sp_tex_v2,
-            GrainTarget::SemiPlanarTexture(_) => &raw const (*lib).shader_filmgrain_filter_sp_tex,
+            GrainTarget::SemiPlanarTexture(_) => &raw const (*lib).shader_filmgrain_filter_sp_tex_v2,
         });
         commands.set_pipeline(shader);
         commands.set_layout(shader.layout());

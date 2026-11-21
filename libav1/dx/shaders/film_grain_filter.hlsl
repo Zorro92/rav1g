@@ -19,19 +19,12 @@
 ByteAddressBuffer src : register(t0);
 StructuredBuffer<int> grain_block : register(t1);
 StructuredBuffer<int> random_offset : register(t2);
-// SEMI_PLANAR (film_grain_filter_sp.hlsl, film_grain_filter_sp_tex.hlsl): the frame goes into the
-// semi-planar output, a luma plane and a chroma plane of U and V side by side, which never has the
-// packed samples. With SP_TEXTURE the planes are those of a texture and nothing is written to `dst`.
+// SEMI_PLANAR (film_grain_filter_sp.hlsl): write the luma plane and the interleaved chroma
+// plane into the staging buffer. This layout does not use 10x3 packing.
 #ifdef SEMI_PLANAR
 #define IS_10X3 0
-#ifdef SP_TEXTURE
-RWByteAddressBuffer dst : register(u2);
-#define SP_LUMA_REGISTER u0
-#define SP_CHROMA_REGISTER u1
-#else
 RWByteAddressBuffer dst : register(u0);
 #define SP_BUFFER dst
-#endif
 #include "output_sp.h"
 #else
 RWByteAddressBuffer dst : register(u0);

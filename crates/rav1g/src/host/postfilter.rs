@@ -113,28 +113,12 @@ struct CdefData {
     cdef_uv_strength: [[c_int; 4]; 16],
 }
 
-// av1_set_cdef_v2(0) selects the upstream shader (-cdefv1). The legacy
-// switch picks the previous work split when the v2 path is selected.
+// av1_set_cdef_v2(0) selects the upstream shader (-cdefv1).
 static CDEF_V2: AtomicI32 = AtomicI32::new(1);
-static CDEF_LEGACY: AtomicI32 = AtomicI32::new(0);
-static CDEF_LISTS_LEGACY: AtomicI32 = AtomicI32::new(0);
-
 /// `av1_set_cdef_v2` (`dx/av1_perf.h`).
 #[unsafe(no_mangle)]
 pub extern "C" fn av1_set_cdef_v2(enable: c_int) {
     CDEF_V2.store(enable, Ordering::Relaxed);
-}
-
-/// `av1_set_cdef_legacy` (`dx/av1_perf.h`).
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_cdef_legacy(enable: c_int) {
-    CDEF_LEGACY.store(enable, Ordering::Relaxed);
-}
-
-/// `av1_set_cdef_lists_legacy` (`dx/av1_perf.h`).
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_cdef_lists_legacy(enable: c_int) {
-    CDEF_LISTS_LEGACY.store(enable, Ordering::Relaxed);
 }
 
 // The two bytes of TX_INFO_WORD that cdef_lists.hlsl reads.
@@ -165,11 +149,7 @@ unsafe fn record_cdef_lists(dec: *mut Av1Core, cm: &AV1_COMMON, sizes: [c_int; 4
         let td = &mut *(*dec).curr_frame_data;
         let commands = commands(dec);
         let lib = (*dec).shader_lib;
-        let shader = pipeline(if CDEF_LISTS_LEGACY.load(Ordering::Relaxed) != 0 {
-            &raw const (*lib).shader_cdef_lists_legacy
-        } else {
-            &raw const (*lib).shader_cdef_lists
-        });
+        let shader = pipeline(&raw const (*lib).shader_cdef_lists);
         let (indexes, skips) = (buffer(td.cdef_indexes), buffer(td.cdef_skips));
         commands.transition(indexes, BufferState::Read, BufferState::ReadWrite);
         commands.transition(skips, BufferState::Read, BufferState::ReadWrite);
@@ -329,8 +309,6 @@ unsafe fn cdef_filter_run(dec: *mut Av1Core, cm: &AV1_COMMON, src: *const HwFram
         let lib = (*dec).shader_lib;
         let (shader, x_shift, y_shift) = if CDEF_V2.load(Ordering::Relaxed) == 0 {
             (&raw const (*lib).shader_cdef_filter, 5, 5)
-        } else if CDEF_LEGACY.load(Ordering::Relaxed) != 0 {
-            (&raw const (*lib).shader_cdef_filter_v2_legacy, 6, 6)
         } else {
             (&raw const (*lib).shader_cdef_filter_v2, 6, 5)
         };
@@ -355,14 +333,6 @@ unsafe fn cdef_filter_run(dec: *mut Av1Core, cm: &AV1_COMMON, src: *const HwFram
 // ---------------------------------------------------------------------------------------------------------
 // Loop restoration.
 // ---------------------------------------------------------------------------------------------------------
-
-static LR_LEGACY: AtomicI32 = AtomicI32::new(0);
-
-/// `av1_set_lr_legacy` (`dx/av1_perf.h`).
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_lr_legacy(enable: c_int) {
-    LR_LEGACY.store(enable, Ordering::Relaxed);
-}
 
 /// A plane in the constants of `loop_restoration.hlsl`.
 #[repr(C)]
@@ -416,7 +386,6 @@ unsafe fn looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON, lr_ctxt: *mut 
         if td.do_loop_rest == 0 {
             return;
         }
-        let legacy = LR_LEGACY.load(Ordering::Relaxed) != 0;
         let restored = [0, 1, 2].map(|p| u32::from((*cm).rst_info[p].frame_restoration_type) != RESTORE_NONE as u32);
         if restored.contains(&true) {
             super::libaom::loop_restoration_filter_frame_init(&mut *lr_ctxt, &raw mut (*(*cm).cur_frame).buf, &mut *cm);
@@ -431,16 +400,9 @@ unsafe fn looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON, lr_ctxt: *mut 
         let src_buffer = &*if td.do_cdef == td.do_superres { td.frame_buffer.cast_const() } else { back_buffer1 };
         let pp_buffer = &*if td.do_superres != 0 { back_buffer1 } else { td.frame_buffer.cast_const() };
 
-        let sgr_constants = if legacy {
-            let constants = alloc_constants::<[[c_int; 4]; 16]>(&mut td.command_buffer);
-            *constants.data = super::libaom::SGR_PARAMS;
-            constants.location
-        } else {
-            let constants = alloc_constants::<RestorationData>(&mut td.command_buffer);
-            *constants.data =
-                RestorationData { sgr_params: super::libaom::SGR_PARAMS, sgr_a2_packed: super::libaom::SGR_A2_PACKED };
-            constants.location
-        };
+        let sgr_constants = alloc_constants::<RestorationData>(&mut td.command_buffer);
+        *sgr_constants.data =
+            RestorationData { sgr_params: super::libaom::SGR_PARAMS, sgr_a2_packed: super::libaom::SGR_A2_PACKED };
         let plane_constants = alloc_constants::<[PlaneRestorationData; 3]>(&mut td.command_buffer);
         let pl_data = plane_constants.data.cast::<PlaneRestorationData>();
 
@@ -534,15 +496,9 @@ unsafe fn looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON, lr_ctxt: *mut 
         let commands = commands(dec);
         let frame_buffers = buffer((*dec).frame_buffer_pool);
         let lib = (*dec).shader_lib;
-        // Keep one dispatch per plane and use the same root bindings for all three pipelines.
+        // Keep one dispatch per plane and use the same root bindings for both pipelines.
         let shaders = needs_general.map(|needs_general| {
-            if legacy {
-                &raw const (*lib).shader_loop_rest_legacy
-            } else if needs_general {
-                &raw const (*lib).shader_loop_rest
-            } else {
-                &raw const (*lib).shader_loop_rest_wiener
-            }
+            if needs_general { &raw const (*lib).shader_loop_rest } else { &raw const (*lib).shader_loop_rest_wiener }
         });
         let mut bound = shaders[0];
         let shader = pipeline(bound);
@@ -552,7 +508,7 @@ unsafe fn looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON, lr_ctxt: *mut 
         commands.bind_read(1, buffer(td.loop_rest_types).location());
         commands.bind_read(2, buffer(td.loop_rest_wiener).location());
         commands.bind_write(3, frame_buffers.location());
-        commands.bind_constants(4, sgr_constants);
+        commands.bind_constants(4, sgr_constants.location);
         commands.bind_constants(5, plane_constants.location);
 
         for (p, shader) in shaders.into_iter().enumerate() {

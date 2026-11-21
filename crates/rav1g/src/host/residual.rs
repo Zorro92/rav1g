@@ -29,8 +29,8 @@ pub(crate) fn frame_bytes(u_offset: c_int, v_offset: c_int) -> usize {
 }
 
 /// Number of Store4 operations in the residual clear. Every plane size is a multiple of 16 bytes.
-pub(crate) fn clear_work_items(allocated: usize, u_offset: c_int, v_offset: c_int, legacy: bool) -> c_int {
-    let bytes = if legacy { allocated } else { frame_bytes(u_offset, v_offset).min(allocated) };
+pub(crate) fn clear_work_items(allocated: usize, u_offset: c_int, v_offset: c_int) -> c_int {
+    let bytes = frame_bytes(u_offset, v_offset).min(allocated);
     (bytes / size_of::<[u32; 4]>()) as c_int
 }
 
@@ -75,29 +75,27 @@ mod tests {
     fn clears_active_planes_on_slot_reuse() {
         let (max_width, max_height) = (512, 640);
         let (_, allocated) = original_layout(max_width, max_height);
-        let mut legacy = vec![0xcd; allocated];
-        let mut ranged = legacy.clone();
+        let mut reference = vec![0xcd; allocated];
+        let mut ranged = reference.clone();
         let mut seed = 0x6d538c54;
         // Alternate growth and shrinkage, including an odd crop and a minimum-sized frame.
         let sizes = [(512, 640), (131, 127), (1, 1), (256, 257), (385, 513), (383, 65), (512, 640)];
         for (w, h) in sizes {
             let (planes, bytes) = original_layout(w, h);
             let [_, (_, u), (_, v)] = plane_layout(w, h);
-            let whole = clear_work_items(allocated, u, v, true) as usize * 16;
-            let prefix = clear_work_items(allocated, u, v, false) as usize * 16;
+            let prefix = clear_work_items(allocated, u, v) as usize * 16;
             if bytes < allocated {
                 // A larger frame or a previous use of this memory could have left dirty data here.
-                legacy[bytes] = 0x43;
+                reference[bytes] = 0x43;
                 ranged[bytes] = 0x43;
             }
-            assert_eq!(whole, allocated);
             assert_eq!(prefix, bytes);
             // fill_buffer.hlsl writes one 16-byte word per work item to the start of the buffer.
-            legacy[..whole].fill(0);
+            reference.fill(0);
             ranged[..prefix].fill(0);
-            assert!(legacy[..bytes] == ranged[..bytes]);
+            assert!(reference[..bytes] == ranged[..bytes]);
             if bytes < allocated {
-                assert_eq!(legacy[bytes], 0);
+                assert_eq!(reference[bytes], 0);
                 assert_eq!(ranged[bytes], 0x43);
             }
 
@@ -110,13 +108,13 @@ mod tests {
                     let y = random(&mut seed, h as u32) as c_int;
                     let address = (offset + y * stride + 2 * x) as usize;
                     let word = (1 + random(&mut seed, 65535) as u16).to_le_bytes();
-                    legacy[address..address + 2].copy_from_slice(&word);
+                    reference[address..address + 2].copy_from_slice(&word);
                     ranged[address..address + 2].copy_from_slice(&word);
                 }
             }
             // The next smaller frame can leave the discarded tail dirty. A frame that grows
             // clears that tail before any predictor reads it again.
-            assert!(legacy[..bytes] == ranged[..bytes]);
+            assert!(reference[..bytes] == ranged[..bytes]);
         }
     }
 }

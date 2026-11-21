@@ -762,31 +762,24 @@ int AV1Decoder::DecodeOne() {
     XB_LOGI << "GPUTIME -nopresent: decoded frames go straight back to the pool, nothing is presented";
   // Select the CDEF shader while no frame is in flight.
   rav1g_set_cdef_v2(params_.cdefv2_ != 0);
-  av1_set_cdef_legacy(params_.cdeflegacy_);
-  av1_set_cdef_lists_legacy(params_.cdeflistslegacy_);
   XB_LOGI << "CDEF shader: "
-          << (params_.cdefv1_       ? "cdef_filter (original, -cdefv1)"
-              : params_.cdeflegacy_ ? "cdef_filter_v2_legacy (-cdeflegacy)"
-                                    : "cdef_filter_v2 (default)");
+          << (params_.cdefv1_ ? "cdef_filter (original, -cdefv1)" : "cdef_filter_v2 (default)");
   // -intrav2: the same rules, independent of the CDEF shader.
   rav1g_set_intra_v2(params_.intrav2_ != 0);
   XB_LOGI << "Intra shaders: "
-          << (params_.intrav2_ ? "intra_v2 (-intrav2; frames with intra block copy keep the original shaders)"
-                               : "intra_main + intra_filter (original)");
+          << (params_.intrav2_ ? "intra_v2 (-intrav2; frames with intra block copy use the frame-wide wavefront)"
+                               : "frame-wide wavefront");
   // -interfast: the same rules. The decoder was created with room for the lists (cfg.inter_fast above).
-  // -interfastlists: the same lists, the original shaders on every one of them (what the lists alone cost).
+  // -interfastlists: the same lists, the size-list shaders on every one of them (what the lists alone cost).
   rav1g_set_inter_fast(params_.interfastlists_ ? RAV1G_INTER_FAST_LISTS_ONLY
                                                 : params_.interfast_ ? RAV1G_INTER_FAST_ON : 0);
-  av1_set_inter_legacy(params_.interlegacy_);
-  const char *inter_size_shaders = params_.interlegacy_ ? "inter_main, inter_compound (-interlegacy)"
-                                                      : "inter_main_v2, inter_compound_v2 (default)";
   XB_LOGI << "Inter shaders: "
           << (params_.interfastlists_
-                  ? "lists by motion vector class, inter_main and inter_compound on them (-interfastlists; "
+                  ? "lists by motion vector class, inter_main_v2 and inter_compound_v2 on them (-interfastlists; "
                     "frames with a scaled reference keep the original lists)"
                   : params_.interfast_ ? "by motion vector class: inter_fast, inter_compound_fast (-interfast; "
                                          "frames with a scaled reference keep the original shaders)"
-                                       : inter_size_shaders);
+                                       : "inter_main_v2, inter_compound_v2 (default)");
   XB_LOGI << "Parser: the parse pass of rav1d";
   av1_set_intra_lists_legacy(params_.intralistslegacy_);
   if (params_.intralistslegacy_) XB_LOGI << "Block lists: the previous intra loops and wavefront edges (-intralistslegacy)";
@@ -804,39 +797,21 @@ int AV1Decoder::DecodeOne() {
           << (params_.parser_options_ & PLAYER_PARSEOPT_GPU_GRID ? "gpugrid " : "")
           << (params_.parser_options_ & PLAYER_PARSEOPT_GPU_PRED_LISTS ? "gpublists " : "");
   if (params_.parser_options_ & (PLAYER_PARSEOPT_GPU_CDEF_LISTS | PLAYER_PARSEOPT_GPU_GRID)) {
-    XB_LOGI << "CDEF lists shader: "
-            << (params_.cdeflistslegacy_ ? "cdef_lists_legacy (-cdeflistslegacy)" : "cdef_lists (default)");
+    XB_LOGI << "CDEF lists shader: cdef_lists (default)";
   }
   rav1g_set_intra_opt(!params_.intraod_);
   XB_LOGI << "Intra main shader: "
           << (params_.intraod_ ? "intra_main_legacy (-intraod)"
-                               : params_.intraschedulelegacy_ ? "intra_main (-intraschedulelegacy)"
-                               : params_.intrabanklegacy_ ? "intra_main_tight (-intrabanklegacy)"
-                               : params_.intrasteplegacy_ ? "intra_main_tight, with separate edge banks at high bit depth (-intrasteplegacy)"
                                : params_.intrasingleedgelegacy_ ? "prefetching (-intrasingleedgelegacy)"
                                                           : "prefetching with single-edge dependencies");
   av1_set_intra_filter_legacy(params_.intrafilterlegacy_);
-  av1_set_intra_schedule_legacy(params_.intraschedulelegacy_);
-  av1_set_intra_bank_legacy(params_.intrabanklegacy_);
-  av1_set_intra_step_legacy(params_.intrasteplegacy_);
   av1_set_intra_single_edge_legacy(params_.intrasingleedgelegacy_);
   XB_LOGI << "8-bit filter intra shader: "
-          << (params_.intrafilterlegacy_ ? "intra_filter_legacy (-intrafilterlegacy)" : "intra_filter (default)");
-  av1_set_lr_legacy(params_.lrlegacy_);
-  XB_LOGI << "Loop restoration shader: "
-          << (params_.lrlegacy_ ? "loop_restoration_legacy (-lrlegacy)"
-                              : "loop_restoration / loop_restoration_wiener (default)");
-  av1_set_fg_legacy(params_.fglegacy_);
-  XB_LOGI << "Direct NV12/P010 film grain shader: "
-          << (params_.fglegacy_ ? "film_grain_filter_sp_tex (-fglegacy)" : "film_grain_filter_sp_tex_v2 (default)");
+          << (params_.intrafilterlegacy_ ? "intra_filter_legacy (-intrafilterlegacy)" : "intra_filter_prefetch (default)");
+  XB_LOGI << "Loop restoration shader: loop_restoration / loop_restoration_wiener (default)";
+  XB_LOGI << "Direct NV12/P010 film grain shader: film_grain_filter_sp_tex_v2 (default)";
   XB_LOGI << "Film grain templates: CPU, uploaded with the random offsets";
-  av1_set_copy_legacy(params_.copylegacy_);
-  XB_LOGI << "Direct NV12/P010 copy shader: "
-          << (params_.copylegacy_ ? "copy_plane_sp_tex (-copylegacy)" : "copy_plane_sp_tex_v2 (default)");
-  av1_set_idct_legacy(params_.idctlegacy_);
-  XB_LOGI << "Small inverse transform shaders: " << (params_.idctlegacy_ ? "legacy (-idctlegacy)" : "default");
-  av1_set_clear_legacy(params_.clearlegacy_);
-  XB_LOGI << "Residual clear: " << (params_.clearlegacy_ ? "full allocation (-clearlegacy)" : "padded frame planes");
+  XB_LOGI << "Direct NV12/P010 copy shader: copy_plane_sp_tex_v2 (default)";
 
   // -slots, -parseframes, -t: fixed when the decoder was created; Start() asks for a new decoder when a
   // value changes. What the decoder has is what the library made of them.
@@ -872,8 +847,6 @@ int AV1Decoder::DecodeOne() {
                                 "-cpuclear and -syncclear keep it in the slot's grid and clear that)");
 
   // The experiments: set like the switches above. The shader build is fixed when the package is built.
-  av1_set_lf_legacy(params_.lflegacy_);
-  XB_LOGI << "Deblocking kernels: " << (params_.lflegacy_ ? "legacy (-lflegacy)" : "default");
   rav1g_set_lf_h_split(params_.lfhsplit_);
   rav1g_set_intra_edge_fix(params_.intraedgefix_ != 0);
   XB_LOGI << "Experiments: shaders " << (rav1g_shader_variant()[0] ? rav1g_shader_variant() : "normal build")

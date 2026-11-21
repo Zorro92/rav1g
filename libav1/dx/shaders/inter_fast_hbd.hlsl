@@ -9,6 +9,6 @@
  * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
  */
 
-// Test flag -interfast: inter_fast.hlsl for frame buffers of 16-bit samples (inter_main_hbd.hlsl's blocks).
+// Test flag -interfast: inter_fast.hlsl for frame buffers of 16-bit samples (inter_main_v2_hbd.hlsl's blocks).
 #define INTER_FAST_HBD 1
 #include "inter_fast.hlsl"

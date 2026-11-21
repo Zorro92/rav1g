@@ -28,12 +28,11 @@ For each shader of `crates/rav1g-sys/shaders.txt` (`shader_regs.py measure`):
    VGPRs, LDS and scratch.
 4. The theoretical waves per SIMD follow from these (below).
 
-`measure` takes about 45 s for the 128 shaders with 4 jobs.
+`measure` takes about 45 s for the embedded shaders with 4 jobs.
 
 **Wave size: wave64**, as the console runs. One exception: LLPC makes wave32 code for a thread group of
 at most 32 threads, whatever `waveSize`, `subgroupSize` or `--native-wave-size` say. These shaders
-(today `intra_filter`, `intra_filter_hbd`, `intra_filter_prefetch`, `intra_filter_prefetch_hbd`, groups
-of 4x8) have `32` in the column `wave`; their occupancy is computed as one wave64 per group, as on the
+(today `intra_filter_prefetch` and `intra_filter_prefetch_hbd`, groups of 4x8) have `32` in the column `wave`; their occupancy is computed as one wave64 per group, as on the
 console, from the register count of the wave32 code.
 
 **Target: gfx1030** (Navi 21), the nearest public target to the console's GPU (RDNA2).

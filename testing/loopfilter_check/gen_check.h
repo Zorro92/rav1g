@@ -99,6 +99,106 @@ GenDispatch gen_dispatch(const ModeGrid &mi, int mi_cols, int mi_rows, uint plan
   return d;
 }
 
+// AV1 7.14.2–5 on the fixture's mode-info grid. Look up both sides of every
+// transform boundary independently. Pack the result into the shader's edge-list format.
+struct ReferenceMi {
+  int tx_extent, level;
+  bool skip_inter, pred_edge;
+};
+
+ReferenceMi reference_mi(const GenDispatch &d, bool horizontal, int col, int row, uint address) {
+  const auto &mi = d.pool[(address - d.mi_addr_base) / ModeInfoSize];
+  const int bsize = mi.block_type & 255, ref = (mi.block_type >> 16) & 255;
+  const int segment = (mi.tx_info >> 24) & 7;
+  const bool inter = ref > 0 || (mi.intra_mode_flags & 0x100);
+  const bool skipped = (mi.tx_info & 0xff00) != 0;
+  const int mode = mi.modes & 255;
+  const bool mode_delta = mode == 13 || mode == 14 || (mode >= 16 && mode <= 22) || mode == 24;
+  constexpr int blocks[][2] = {
+      {1, 1}, {1, 2}, {2, 1}, {2, 2}, {2, 4}, {4, 2}, {4, 4}, {4, 8}, {8, 4}, {8, 8}, {8, 16},
+      {16, 8}, {16, 16}, {16, 32}, {32, 16}, {32, 32}, {1, 4}, {4, 1}, {2, 8}, {8, 2}, {4, 16}, {16, 4}};
+  const auto &block = blocks[bsize];
+  const int axis = horizontal;
+  const int sub = d.plane != 0;
+  const int coord = (horizontal ? row : col) >> sub;
+  const int block_extent = std::max(1, block[axis] >> sub);
+
+  int tx_extent = 1;
+  if (!d.seg_features[segment].x) {
+    if (sub) {
+      tx_extent = std::min(block_extent, 8);
+    } else {
+      uint tx = mi.tx_info & 255;
+      if (inter && !skipped) {
+        const int w = std::min(16, block[0]), h = std::min(16, block[1]);
+        const int cell_w = std::max(1, w / (w >= h ? 2 : 1));
+        const int cell_h = std::max(1, h / (h >= w ? 2 : 1));
+        const int idx = (row % block[1] / cell_h) * (block[0] / cell_w) + col % block[0] / cell_w;
+        tx = (mi.inter_tx_size[idx / 4] >> (idx % 4 * 8)) & 255;
+      }
+      constexpr int sizes[][2] = {
+          {1, 1}, {2, 2}, {4, 4}, {8, 8}, {16, 16}, {1, 2}, {2, 1}, {2, 4}, {4, 2}, {4, 8},
+          {8, 4}, {8, 16}, {16, 8}, {1, 4}, {4, 1}, {2, 8}, {8, 2}, {4, 16}, {16, 4}};
+      tx_extent = sizes[tx][axis];
+    }
+  }
+
+  int level;
+  if (d.delta_present) {
+    const int levels[] = {d.filter_level.x, d.filter_level.y, d.filter_level_u, d.filter_level_v};
+    const int index = sub ? d.plane + 1 : axis;
+    const uint delta_word = d.delta_multi ? mi.delta_lf >> (8 * index) : mi.intra_params;
+    level = std::clamp(levels[index] + int(int8_t(delta_word & 255)), 0, 63);
+    if (d.seg_features[segment].y & (2 << index)) {
+      level = std::clamp(level + d.seg_data[segment * 8 + index + 1].x, 0, 63);
+    }
+    if (d.mode_ref_delta) {
+      const int multiplier = level < 32 ? 1 : 2;
+      level = std::clamp(level + multiplier * (d.ref_deltas[ref].x + (ref ? d.mode_deltas[mode_delta].x : 0)), 0, 63);
+    }
+  } else {
+    const auto &levels = d.levels[((d.plane * 8 + segment) * 8 + ref) * 2 + mode_delta];
+    level = horizontal ? levels.y : levels.x;
+  }
+  return {tx_extent, level, inter && skipped, coord % block_extent == 0};
+}
+
+void reference_lists(const GenDispatch &d, bool horizontal, EdgeLists &lists) {
+  const int unit = d.plane ? 2 : 1;
+  const int extent = horizontal ? d.mi_rows : d.mi_cols;
+  for (uint block = 0; block < lists.blocks(); ++block) {
+    std::fill_n(lists.words.begin() + (kListBase + block) * 8, 8, 0);
+    const int bx = block % lists.block_cols, by = block / lists.block_cols;
+    const int start = (horizontal ? by : bx) * kStrip;
+    const auto coords = [&](int along) -> std::pair<int, int> {
+      const int x = horizontal ? bx : along, y = horizontal ? along : by;
+      return {x * unit + unit - 1, y * unit + unit - 1};
+    };
+    const auto address_at = [&](int x, int y) { return d.grid.words[std::min(y * d.mi_stride + x, d.mi_grid_last)]; };
+    for (int along = start; along < std::min(start + kStrip, extent);) {
+      const auto [col, row] = coords(along);
+      const uint address = address_at(col, row);
+      if (!address) break;
+      const auto mi = reference_mi(d, horizontal, col, row, address);
+      if (along % mi.tx_extent != 0) break;
+      int length = 0, level = 0;
+      if (along > 0) {
+        const auto [prev_col, prev_row] = coords(along - 1);
+        const uint prev_address = address_at(prev_col, prev_row);
+        if (!prev_address) break;
+        const auto prev = reference_mi(d, horizontal, prev_col, prev_row, prev_address);
+        if ((mi.level || prev.level) && (!mi.skip_inter || !prev.skip_inter || mi.pred_edge)) {
+          level = mi.level ? mi.level : prev.level;
+          const int width = std::min(mi.tx_extent, prev.tx_extent);
+          length = width == 1 ? 0 : d.plane ? 1 : width == 2 ? 2 : 3;
+        }
+      }
+      lists.set(block, along - start, mi.tx_extent, length, level);
+      along += mi.tx_extent;
+    }
+  }
+}
+
 EdgeLists compare_lists(GenDispatch d, bool horizontal, uint &types) {
   EdgeLists expected(d.mi_cols, d.mi_rows, horizontal);
   std::fill(expected.words.begin(), expected.words.end(), kGuard);
@@ -106,11 +206,9 @@ EdgeLists compare_lists(GenDispatch d, bool horizontal, uint &types) {
   d.work_items = expected.blocks();
   d.dst_offset = kListBase * 32;
   d.dst_stride = expected.block_cols * (horizontal ? 2 : 32);
-  const GenKernel &old = horizontal ? gen_lf_blocks_hor_legacy : gen_lf_blocks_vert_legacy;
   const GenKernel &now = horizontal ? gen_lf_blocks_hor : gen_lf_blocks_vert;
 
-  d.edges = {{expected.words.data(), expected.words.size()}, expected.words.data()};
-  dispatch(old, d, false);
+  reference_lists(d, horizontal, expected);
   d.edges = {{actual.words.data(), actual.words.size()}, actual.words.data()};
   dispatch(now, d, true);
   if (expected.words != actual.words) {
@@ -159,6 +257,6 @@ void check_generators() {
     std::fprintf(stderr, "FAIL: list fixtures missed a filter length (%x/%x)\n", types[0], types[1]);
     std::exit(1);
   }
-  std::puts("PASS: vertical and horizontal edge lists, 72 randomized mode grids across all planes and delta modes");
+  std::puts("PASS: vertical and horizontal edge lists match the scalar reference on 72 randomized mode grids");
   std::puts("PASS: 72 generated plane cases through both vertical passes and the whole-plane horizontal pass");
 }

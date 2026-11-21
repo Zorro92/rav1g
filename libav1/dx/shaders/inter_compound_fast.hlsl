@@ -9,20 +9,20 @@
  * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
  */
 
-// Test flag -interfast: inter_compound.hlsl (two references, averaged or distance weighted) for the blocks
+// Test flag -interfast: inter_compound_v2.hlsl (two references, averaged or distance weighted) for the blocks
 // in which the motion vector of one reference or of both has no fraction in x, in y, or in both. Each
 // reference has a class of its own (inter_fast_common.h); the blocks with two references of class 3 stay with
-// inter_compound.hlsl. The block records, the thread layout (a thread predicts 4x2 samples), the clamps,
-// the weights and the residual are those of inter_compound.hlsl; the output is the same.
+// inter_compound_v2.hlsl. The block records, the thread layout (a thread predicts 4x2 samples), the clamps,
+// the weights and the residual are those of inter_compound_v2.hlsl; the output is the same.
 // inter_compound_fast_hbd.hlsl builds this file for 16-bit samples.
 //
-// inter_compound.hlsl keeps four more bits of each reference than a sample has and blends
+// inter_compound_v2.hlsl keeps four more bits of each reference than a sample has and blends
 //   src = (vertical sum + OutputRoundAdd) >> 7,  9 rows of 11 samples per reference.
 // That value is here, with p a sample and sum a plain sum of taps times samples:
 //   copy  16 * p + OutputSub             2 rows of 4 samples
 //   h     ((sum + 4) >> 3) + OutputSub   2 rows of 11 samples; filter_line() has the first part
 //   v     ((sum + 4) >> 3) + OutputSub   9 rows of 4 samples
-//   2d    as in inter_compound.hlsl      9 rows of 11 samples
+//   2d    as in inter_compound_v2.hlsl      9 rows of 11 samples
 
 #include "inter_common.h"
 #include "inter_fast_common.h"
@@ -37,7 +37,7 @@
 #define OutputRoundAdd ((1 << (OutputShift - 1)) + (1 << OffsetBits))
 #else
 #define OffsetBits 19
-// inter_compound.hlsl starts its sums at 1 << OffsetBits; here it is part of the rounding term.
+// The compound offset is part of the rounding term.
 #define OutputRoundAdd ((1 << (OutputShift - 1)) + (1 << OffsetBits))
 #endif
 #define OutputSub ((1 << (OffsetBits - OutputShift)) + (1 << (OffsetBits - OutputShift - 1)))
@@ -95,7 +95,7 @@ InterFastRows comp_fast_ref(int frac_class, int x, int y, int mv, int filters, i
     rows.row[1] = comp_fast_scale(inter_fast_taps(r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], kernel_v0, kernel_v1), 1,
                                 4, 3, OutputSub);
   } else {
-    // Both passes, as inter_compound.hlsl runs them.
+    // Both passes, as inter_compound_v2.hlsl runs them.
     const int4 kernel_h0 = cb_kernels[filter_h][0];
     const int4 kernel_h1 = cb_kernels[filter_h][1];
     const int4 kernel_v0 = cb_kernels[filter_v][0];
@@ -111,7 +111,7 @@ InterFastRows comp_fast_ref(int frac_class, int x, int y, int mv, int filters, i
   return rows;
 }
 
-// blend() of inter_compound.hlsl behind its first two lines.
+// Compound weighting and final rounding.
 int blend(int src0, int src1, int coef0, int coef1) {
   int result = (src0 * coef0 + src1 * coef1) >> DistBits;
   result = (result - OutputSub + (1 << (RoundFinal - 1))) >> RoundFinal;
@@ -129,7 +129,7 @@ int blend(int src0, int src1, int coef0, int coef1) {
   const int subblock = thread.x & ((1 << (w_log + h_log)) - 1);
   const int block_index = cb_pass_offset + (thread.x >> (w_log + h_log));
   uint4 block = pred_blocks.Load4(block_index * 16);
-  // The record of inter_compound.hlsl: block.x position, block.y plane, references, filters, skip and
+  // The record of inter_compound_v2.hlsl: block.x position, block.y plane, references, filters, skip and
   // weights, block.z and block.w the vectors.
   int x = SubblockW * ((block.x & 0xffff) + (subblock & ((1 << w_log) - 1)));
   int y = SubblockH * (((block.x >> 16) << 1) + (subblock >> w_log));

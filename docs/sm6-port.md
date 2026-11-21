@@ -2,6 +2,9 @@
 
 ## Cost and dispatch map
 
+The timings and optimization candidates below describe the start of the SM6 port. Current results
+are recorded under [Progress](#progress-2026-11-19).
+
 | `GPUTIME` stage | Film peak, ms / 24 outputs | Film, ms/output | Film, % GPU busy | `j4k40`, ms/active frame | `j4k40`, ms/frame | `j4k40`, % GPU busy | Rust recording and shader entry points |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | `intra` | 387.62 | 16.151 | 42.7 | 7.077 | 7.052 | 50.6 | `intra_main`, `intra_filter`, optional legacy main kernels and `intra_v2`. [prediction.rs](../crates/rav1g/src/host/prediction.rs#L1200) |
@@ -14,7 +17,7 @@
 | `cdef` | 37.44 | 1.560 | 4.1 | 2.406 | 2.348 | 16.8 | `cdef_filter_v2` by default, `cdef_filter` with `-cdefv1`. [postfilter.rs](../crates/rav1g/src/host/postfilter.rs#L311) |
 | `idct` | 23.91 | 0.996 | 2.6 | 0.784 | 0.784 | 5.6 | `idct*` transforms by size, including `idct_lossless`. [transform.rs](../crates/rav1g/src/host/transform.rs#L111) |
 | `gen_blocks` | 10.92 | 0.455 | 1.2 | 0.368 | 0.368 | 2.6 | `mi_grid_build` ahead of `gen_pred_blocks` or its fast/GPU lists variant. [frame.rs](../crates/rav1g/src/host/frame.rs#L1736), [prediction.rs](../crates/rav1g/src/host/prediction.rs#L401) |
-| `copy_plane` | 10.92 | 0.455 | 1.2 | 1.134 | 1.134 | 8.1 | `copy_plane`, `_10bit10x3`, `_sp` or `_sp_tex`. Direct P010 uses `_sp_tex` for planes the grain pass leaves alone. [output.rs](../crates/rav1g/src/host/output.rs#L307), [semi-planar path](../crates/rav1g/src/host/output.rs#L427) |
+| `copy_plane` | 10.92 | 0.455 | 1.2 | 1.134 | 1.134 | 8.1 | `copy_plane`, `_10bit10x3`, `_sp` or `_sp_tex_v2`. Direct P010 uses `_sp_tex_v2` for planes the grain pass leaves alone. [output.rs](../crates/rav1g/src/host/output.rs#L307), [semi-planar path](../crates/rav1g/src/host/output.rs#L427) |
 | `residual_clear` | 7.91 | 0.330 | 0.9 | 0.327 | 0.327 | 2.3 | `fill_buffer`, `Store4` zeroing before transforms. [transform.rs](../crates/rav1g/src/host/transform.rs#L65) |
 | `cdef_lists` | 3.51 | 0.146 | 0.4 | 0.193 | 0.189 | 1.4 | `cdef_lists` writes strength indices and skip flags. [postfilter.rs](../crates/rav1g/src/host/postfilter.rs#L134) |
 | `ext_borders` | 1.09 | 0.045 | 0.1 | 0.048 | 0.048 | 0.3 | `inter_ext_borders` extends the filtered reference. [prediction.rs](../crates/rav1g/src/host/prediction.rs#L1351) |
@@ -134,22 +137,25 @@ Any **required** profile above 6.0 raises the check reached by `rav1g_device_cre
 
 Every step below is bit-exact: the per-frame md5 of the 15-stream console set and of two 4K film cuts (one
 1-tile 10-bit film with film grain, one 8-tile 10-bit film) matches the reference with the new default, and
-CI's WARP conformance passes. Each step keeps the old kernel behind a test-player / `rav1g-dec` switch of the
-internal test interface (`av1_set_*` in `libav1/dx/av1_perf.h`; the public API and ABI are unchanged).
+CI's WARP conformance passes. The variants were compared using the test player and `rav1g-dec`.
+The old paths in the table were retired after measurement, except the main `-Od` intra control.
 Console timings: test player, `-frate -1 -nopresent -gputime -output p010`, 2 or 3 interleaved rounds of the
 new default against the switch, Bale stopped, GPU health-checked before and after.
 
-| Step | Commits | Switch | Measured (old → new) |
-| --- | --- | --- | --- |
-| 10-bit filter intra | `cff4dfb` | `-shaderpick od=…` (kernel since removed) | film: intra 4.09 → 3.81 ms a frame, worst second 985 → 912 ms |
-| Main intra `-O3`, wave sums for DC/CFL | `c92546c`, `8bd6d2a` | `-intraod` | j4k40: intra 7.08 → 5.47 ms (−23%), GPU busy 13.94 → 12.34 ms; `-O3` alone: no change |
-| FXC removed from main | `e8360bc` | | default DXIL byte-identical |
-| Loop filter | `9d1ab55`..`ee9ec44` | `-lflegacy` | film: `lf_vert` −10%, `lf_gen` −9% |
-| Loop restoration | `2474432`..`adc9687` | `-lrlegacy` | film: 2.44 → 1.78 ms (−27%), worst second 132 → 91 ms of restoration; j4k40 1.28 → 1.09 ms |
-| Film grain (direct NV12/P010) | `b923685`, `feb5976` | `-fglegacy` | film: 3.74 → 1.68 ms a shown frame (−55%), GPU busy −10% |
-| Inter, single and compound | `8ea54c2`, `140745a` | `-interlegacy` | film 3.14 → 1.46 ms (−54%); 8-tile film 5.51 → 3.81 ms; d2_300 5.51 → 2.49 ms; j4k40 1.34 → 0.92 ms |
-| CDEF and its lists | `82a82d9`, `dda9686` | `-cdeflegacy`, `-cdeflistslegacy` | j4k40: cdef 2.41 → 1.87 ms (−22%), lists 0.20 → 0.14 ms |
-| Output copy, small transforms, residual clear | `16215bc`, `595d450`, `86b55ba` | `-copylegacy`, `-idctlegacy`, `-clearlegacy` | j4k40: copy −2%, small transforms −3%; clear unchanged at 4K |
+| Step | Commits | Measured (old → new) |
+| --- | --- | --- |
+| 10-bit filter intra | `cff4dfb` | film: intra 4.09 → 3.81 ms a frame, worst second 985 → 912 ms |
+| Main intra `-O3`, wave sums for DC/CFL | `c92546c`, `8bd6d2a` | j4k40: intra 7.08 → 5.47 ms (−23%), GPU busy 13.94 → 12.34 ms; `-O3` alone: no change |
+| FXC removed from main | `e8360bc` | default DXIL byte-identical |
+| Loop filter | `9d1ab55`..`ee9ec44` | film: `lf_vert` −10%, `lf_gen` −9% |
+| Loop restoration | `2474432`..`adc9687` | film: 2.44 → 1.78 ms (−27%), worst second 132 → 91 ms of restoration; j4k40 1.28 → 1.09 ms |
+| Film grain (direct NV12/P010) | `b923685`, `feb5976` | film: 3.74 → 1.68 ms a shown frame (−55%), GPU busy −10% |
+| Inter, single and compound | `8ea54c2`, `140745a` | film 3.14 → 1.46 ms (−54%); 8-tile film 5.51 → 3.81 ms; d2_300 5.51 → 2.49 ms; j4k40 1.34 → 0.92 ms |
+| CDEF and its lists | `82a82d9`, `dda9686` | j4k40: cdef 2.41 → 1.87 ms (−22%), lists 0.20 → 0.14 ms |
+| Output copy, small transforms, residual clear | `16215bc`, `595d450`, `86b55ba` | j4k40: copy −2%, small transforms −3%; clear unchanged at 4K |
+| Angle-specific intra wavefront | `f0b5046` | intra −18% at 4K60 and −15% on film |
+| Separate 10-bit intra edge banks and zero-alpha CfL | `910ff2f` | 4K intra 4.462 → 4.354 ms/frame |
+| Intra step prefetching | `aeb6c21` | film heaviest second 729.8 → 699.5 ms, peak 8-bit frame 65.3 → 58.5 ms |
 
 Results that did not land:
 
@@ -165,5 +171,6 @@ Results that did not land:
 Where the 1-tile 10-bit film's worst second stands (24 output frames, GPU busy): 982 ms before this work,
 about 785 ms after it (about 30.5 fps of headroom at 23.976 fps). Intra is now about half of it.
 
-The 8-bit intra follow-up ports packed filter intra and guarded DC/CFL reductions. Test filter intra
-with `-intrafilterlegacy` and main intra with `-intraod`. Console measurements are pending.
+The 8-bit intra follow-up ports packed filter intra and guarded DC/CFL reductions. The separate
+8-bit filter intra control is `-intrafilterlegacy`. `-intraod` uses the conservative wavefront and
+DXC `-Od` main shader.

@@ -43,7 +43,7 @@
 //! `longjmp`, and that must not pass a Rust function.
 
 use std::ffi::c_int;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 
 use super::core::{buffer, commands, perf_add, perf_gpu_mark, perf_ticks, pipeline, stage_dump_output};
 use super::film_grain::{GrainTarget, SKIP_FILM_GRAIN, filmgrain_run};
@@ -59,14 +59,6 @@ use crate::sys::{
     HwFrameBuffer, HwOutputImage, av1_decoded_frame_buffer_t, fbt8bit, fbt10bit, fbt10x3, fbtNV12, fbtP010,
 };
 use windows::Win32::Graphics::Direct3D12::ID3D12Device;
-
-static COPY_LEGACY: AtomicBool = AtomicBool::new(false);
-
-/// `av1_set_copy_legacy` (`dx/av1_perf.h`).
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_copy_legacy(enable: c_int) {
-    COPY_LEGACY.store(enable != 0, Ordering::Relaxed);
-}
 
 /// The planes of an output image.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -471,11 +463,8 @@ unsafe fn copy_semi_planar(
         let copy_luma = !do_filmgrain;
         let copy_chroma = is_monochrome || !do_filmgrain || !film_grain_chroma;
         if copy_luma || copy_chroma {
-            let copy_v2 = direct.is_some() && !COPY_LEGACY.load(Ordering::Relaxed);
-            let shader = pipeline(if copy_v2 {
+            let shader = pipeline(if direct.is_some() {
                 &raw const (*lib).shader_copy_plane_sp_tex_v2
-            } else if direct.is_some() {
-                &raw const (*lib).shader_copy_plane_sp_tex
             } else {
                 &raw const (*lib).shader_copy_plane_sp
             });
@@ -484,8 +473,6 @@ unsafe fn copy_semi_planar(
             commands.bind_write(0, frame_buffers.location());
             if let Some((_, views, device, pair)) = direct {
                 commands.bind_write_planes(2, device, views, pair);
-            }
-            if copy_v2 {
                 dispatch_copy_sp_tex(&commands, src, copy_luma, copy_chroma, is_monochrome);
             } else {
                 let (width, height) = (src.y_crop_width as u32, src.y_crop_height as u32);

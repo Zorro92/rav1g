@@ -1,5 +1,5 @@
 #!/bin/sh
-# Compare the new and legacy HLSL on the CPU. Run with --mutate to exercise negative controls.
+# Compare the deblocking shaders with scalar AV1 models. Run with --mutate for negative controls.
 # TMPDIR controls where the translated sources and objects go. Requires a Linux C++20 compiler.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
@@ -42,9 +42,7 @@ done
 "$cxx" -std=c++20 -O2 -fwrapv -I"$work" -c "$here/loopfilter_check.cpp" -o "$work/check.o"
 for direction in vert hor; do
   build "gen_lf_blocks_$direction" -DGEN_SHADER
-  build "gen_lf_blocks_${direction}_legacy" -DGEN_SHADER
   for depth in '' _hbd; do
-    build "loopfilter_${direction}${depth}_legacy"
     build "loopfilter_${direction}${depth}"
   done
 done
@@ -62,6 +60,16 @@ expect_rejected() {
 }
 
 if [ "${1:-}" = "--mutate" ]; then
+  for axis in vert hor; do
+    source="$work/loopfilter_${axis}_main.h"
+    cp "$source" "$source.ref"
+    sed -i 's/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/' "$source"
+    build "loopfilter_$axis"
+    expect_rejected "$axis group sync" 'group scheduling or shared memory'
+    mv "$source.ref" "$source"
+    build "loopfilter_$axis"
+  done
+
   cp "$work/gen_lf_blocks.h" "$work/gen_lf_blocks.ref"
   sed -i 's/previous = preceding;/previous = current;/' "$work/gen_lf_blocks.h"
   build gen_lf_blocks_vert -DGEN_SHADER

@@ -71,12 +71,8 @@ uint4 pack_taps(int4 lo, int4 hi) {
   const int rows = 2 << (block.z & 3);
   const int plane = (block.y >> 3) & 3;
   const int mode = (block.z >> 4) & 7;
-#ifdef INTRA_FILTER_PREFETCH
   // The plane's constants by a select, not by a load that waits for the record (filter intra is luma).
   const int4 plane_cb = plane == 0 ? cb_planes[0] : plane == 1 ? cb_planes[1] : cb_planes[2];
-#else
-#define plane_cb cb_planes[plane]
-#endif
   const int stride = plane_cb.x;
   const int x = 8 * (block.x & 0xffff);
   const int y = 4 * (block.x >> 16);
@@ -127,7 +123,6 @@ uint4 pack_taps(int4 lo, int4 hi) {
 
   // Keep one residual read ahead of the wavefront. The residual belongs
   // only to the frame store, while the next diagonal uses the prediction.
-#ifdef INTRA_FILTER_PREFETCH
   // All residual words of the lane's column, loaded here at once: a lane visits one unit row per
   // diagonal, and a load issued one diagonal ahead waits out most of its latency in every diagonal of
   // a tall block. The queue is shifted by one per row, so that it stays in registers.
@@ -136,10 +131,6 @@ uint4 pack_taps(int4 lo, int4 hi) {
     queue[q] = 0;
     if (add_residual && col < columns && q < rows) queue[q] = (int)residuals.Load(res_offset + 2 * q * res_stride);
   }
-#else
-  int next_residual = 0;
-  if (add_residual && col < columns) next_residual = (int)residuals.Load(res_offset);
-#endif
 
   GroupMemoryBarrierWithGroupSync();
 
@@ -153,14 +144,8 @@ uint4 pack_taps(int4 lo, int4 hi) {
     if (col >= columns || row < 0 || row >= rows) continue;
     const int previous = diagonal & 1;
 
-#ifdef INTRA_FILTER_PREFETCH
     const int residual = queue[0];
     [unroll] for (int q = 0; q < 15; ++q) queue[q] = queue[q + 1];
-#else
-    const int residual = next_residual;
-    if (add_residual && row + 1 < rows)
-      next_residual = (int)residuals.Load(res_offset + 2 * (row + 1) * res_stride);
-#endif
 
     const uint above01 = unit_edges[1][previous][col];
     const uint above23 = unit_edges[2][previous][col];

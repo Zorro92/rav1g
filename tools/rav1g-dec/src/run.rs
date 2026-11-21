@@ -750,20 +750,10 @@ fn create_decoder(
         } else {
             task.lowmem_parts.to_string()
         },
-        if task.cdefv1 {
-            "cdef_filter (-cdefv1)"
-        } else if task.cdeflegacy {
-            "cdef_filter_v2_legacy (-cdeflegacy)"
-        } else {
-            "cdef_filter_v2"
-        },
-        if task.intrav2 { "intra_v2" } else { "intra_main + intra_filter" },
+        if task.cdefv1 { "cdef_filter (-cdefv1)" } else { "cdef_filter_v2" },
+        if task.intrav2 { "intra_v2" } else { "frame-wide wavefront" },
         if task.intraopt { " (optimized main)" } else { " (legacy main, -intraod)" },
-        if task.lrlegacy {
-            "loop_restoration_legacy (-lrlegacy)"
-        } else {
-            "loop_restoration / loop_restoration_wiener"
-        },
+        "loop_restoration / loop_restoration_wiener",
         match task.clears {
             Clears::NotNeeded => "none needed",
             Clears::Gpu => "GPU (-gpuclear)",
@@ -986,60 +976,36 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         );
     }
     library.set_choices(&Choices {
-        lr_legacy: task.lrlegacy,
-        fg_legacy: task.fglegacy,
         skip_film_grain: task.skip_film_grain,
-        copy_legacy: task.copylegacy,
-        idct_legacy: task.idctlegacy,
-        clear_legacy: task.clearlegacy,
-        inter_legacy: task.interlegacy,
         cdef_v2: !task.cdefv1,
-        cdef_legacy: task.cdeflegacy,
-        cdef_lists_legacy: task.cdeflistslegacy,
         intra_v2: task.intrav2,
         intra_opt: task.intraopt,
         intra_filter_legacy: task.intrafilterlegacy,
-        intra_schedule_legacy: task.intraschedulelegacy,
-        intra_bank_legacy: task.intrabanklegacy,
-        intra_step_legacy: task.intrasteplegacy,
         intra_single_edge_legacy: task.intrasingleedgelegacy,
         intra_lists_legacy: task.intralistslegacy,
         parse_lists_legacy: task.parselistslegacy,
-        lf_legacy: task.lflegacy,
         lf_h_split: task.lfhsplit as u32,
         intra_edge_fix: task.intraedgefix,
         inter_fast: task.interfast,
     });
     if task.output == ImageMode::Texture {
-        say!(
-            "Direct NV12/P010 copy shader: {}",
-            if task.copylegacy { "copy_plane_sp_tex (-copylegacy)" } else { "copy_plane_sp_tex_v2 (default)" }
-        );
-        say!(
-            "Direct NV12/P010 film grain shader: {}",
-            if task.fglegacy {
-                "film_grain_filter_sp_tex (-fglegacy)"
-            } else {
-                "film_grain_filter_sp_tex_v2 (default)"
-            }
-        );
+        say!("Direct NV12/P010 copy shader: copy_plane_sp_tex_v2 (default)");
+        say!("Direct NV12/P010 film grain shader: film_grain_filter_sp_tex_v2 (default)");
     }
     say!("Film grain templates: CPU, uploaded with the random offsets");
-    say!("Small inverse transform shaders: {}", if task.idctlegacy { "legacy (-idctlegacy)" } else { "default" });
-    say!("Residual clear: {}", if task.clearlegacy { "full allocation (-clearlegacy)" } else { "padded frame planes" });
     say!(
         "8-bit filter intra shader: {}",
-        if task.intrafilterlegacy { "intra_filter_legacy (-intrafilterlegacy)" } else { "intra_filter (default)" }
+        if task.intrafilterlegacy {
+            "intra_filter_legacy (-intrafilterlegacy)"
+        } else {
+            "intra_filter_prefetch (default)"
+        }
     );
     if !task.intrav2 {
         say!(
             "Intra wavefront: {}",
-            if task.intraschedulelegacy || !task.intraopt {
+            if !task.intraopt {
                 "conservative"
-            } else if task.intrabanklegacy {
-                "angle-specific (-intrabanklegacy)"
-            } else if task.intrasteplegacy {
-                "angle-specific, with separate edge banks at high bit depth (-intrasteplegacy)"
             } else if task.intrasingleedgelegacy {
                 "angle-specific with prefetching (-intrasingleedgelegacy)"
             } else {
@@ -1059,10 +1025,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         say!("PARSER {}: block lists on the tile's thread (-parselistslegacy)", task.name);
     }
     if task.parser_options.gpu_cdef_lists || task.parser_options.gpu_grid {
-        say!(
-            "CDEF lists shader: {}",
-            if task.cdeflistslegacy { "cdef_lists_legacy (-cdeflistslegacy)" } else { "cdef_lists (default)" }
-        );
+        say!("CDEF lists shader: cdef_lists (default)");
     }
     if task.interfast & switches::INTER_FAST_ON != 0 {
         say!(
@@ -1071,27 +1034,19 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
             task.name,
             task.interfast & 7,
             if task.interfast & switches::INTER_FAST_SINGLE_ORIGINAL != 0 {
-                "inter_main on every list"
+                "inter_main_v2 on every list"
             } else {
                 "inter_fast"
             },
             if task.interfast & switches::INTER_FAST_COMPOUND_ORIGINAL != 0 {
-                "inter_compound on every list"
+                "inter_compound_v2 on every list"
             } else {
                 "inter_compound_fast"
             }
         );
     } else {
-        say!(
-            "Inter shaders: {}",
-            if task.interlegacy {
-                "inter_main, inter_compound (-interlegacy)"
-            } else {
-                "inter_main_v2, inter_compound_v2 (default)"
-            }
-        );
+        say!("Inter shaders: inter_main_v2, inter_compound_v2 (default)");
     }
-    say!("Deblocking kernels: {}", if task.lflegacy { "legacy (-lflegacy)" } else { "default" });
     if task.lfhsplit != 0 || task.intraedgefix {
         say!(
             "EXPERIMENTS {}:{}{}",

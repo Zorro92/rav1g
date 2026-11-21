@@ -1,5 +1,5 @@
 #!/bin/sh
-# Run the original and tiled direct NV12/P010 shaders as C++ on a Linux host.
+# Compare direct NV12/P010 copy with a per-pixel CPU reference on a Linux host.
 # Pass --mutate to also verify that deliberate errors produce pixel mismatches.
 set -eu
 
@@ -11,9 +11,8 @@ trap 'rm -rf "$work"' EXIT
 trap 'exit 130' INT TERM HUP
 
 python3 "$sync/to_cpp.py" "$shaders/output_sp.h" "$work/output_sp.gen.h"
-for name in copy_plane_sp copy_plane_sp_tex_v2; do
-  python3 "$sync/to_cpp.py" "$shaders/$name.hlsl" "$work/$name.gen.h" "$work/$name.entry.h"
-done
+name=copy_plane_sp_tex_v2
+python3 "$sync/to_cpp.py" "$shaders/$name.hlsl" "$work/$name.gen.h" "$work/$name.entry.h"
 
 build() {
   "${CXX:-c++}" -std=c++17 -O2 -fwrapv -I "$sync" -I "$work" "$here/copy_check.cpp" -o "$work/check"

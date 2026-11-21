@@ -1,5 +1,5 @@
 /*
- * Check of the unscaled inter prediction shaders against the original shaders and libaom's C code.
+ * Check of the unscaled inter prediction shaders against libaom's C code.
  *
  * With -interfast the blocks with one reference and the averaged compound blocks are listed by the
  * fraction of their motion vectors and predicted by inter_fast.hlsl and inter_compound_fast.hlsl, which
@@ -7,14 +7,12 @@
  * inter_fast_common.h). Here the shaders are compiled as C++ (run.sh) and run on generated frames laid
  * out like the decoder's frame pool: block records as gen_pred_blocks.hlsl writes them, constants as
  * the decoder sets them, reference frames with the border inter_ext_borders extends. Each frame is
- * predicted four times:
+ * predicted by libaom's C code of this tree (testing/warp_check/ref_glue.c: av1_make_inter_predictor)
+ * and by these shader paths:
  *
- *   - by libaom's C code of this tree (testing/warp_check/ref_glue.c: av1_make_inter_predictor);
- *   - by the original shaders, inter_main and inter_compound, from lists by block size;
- *   - the way -interfast runs it: lists by class and block size, the class from inter_fast_class() of
- *     gen_pred_blocks.hlsl, inter_fast and inter_compound_fast for all classes but the last, the
- *     original shaders for that one;
- *   - by the default shaders from the same size lists as the original shaders.
+ *   - the default size lists with inter_main_v2 and inter_compound_v2;
+ *   - the class-specific lists and kernels of -interfast, with the size-list kernels for the last class;
+ *   - the class-specific lists of -interfastlists with the size-list kernels on every class.
  *
  * The four pools, padding and reference frames included, must be byte identical. The cases cover every
  * block size, 8 and 10 bits, all fractions of luma and chroma vectors with every pair of filters, both
@@ -41,7 +39,6 @@ long g_out_of_bounds = 0;
 int g_double_model = 1;
 long g_double_ops = 0;
 
-extern const ShaderApi inter_main_api, inter_main_hbd_api, inter_compound_api, inter_compound_hbd_api;
 extern const ShaderApi inter_main_v2_api, inter_main_v2_hbd_api;
 extern const ShaderApi inter_compound_v2_api, inter_compound_v2_hbd_api;
 extern const ShaderApi inter_fast_api, inter_fast_hbd_api, inter_compound_fast_api, inter_compound_fast_hbd_api;
@@ -316,9 +313,9 @@ static void sweep_case(Case *c, int hbd, int size_log, int filter_x, int filter_
 // ---------------------------------------------------------------------------
 static int g_kernels[8 * 16][8];
 
-enum Path { kLegacy, kFast, kDefault, kPathCount };
+enum Path { kDefault, kFast, kFastLists, kPathCount };
 static const char *const kPathNames[kPathCount] = {
-    "the original shaders", "the fast path (-interfast)", "the default shaders"};
+    "the default shaders", "-interfast", "-interfastlists"};
 
 struct Stats {
   long cases = 0, blocks = 0, records = 0;
@@ -326,7 +323,7 @@ struct Stats {
   long shown = 0;
   // Block records by plane kind (luma, chroma), class (one reference: 0..3; two: 4 + pair) and list size.
   std::map<std::tuple<int, int, int, int>, long> coverage;
-  long fast_records = 0, original_records = 0;  // records of the fast path by the shader that ran them
+  long fast_records = 0, size_list_records = 0;  // records of the fast path by the shader that ran them
 };
 
 static void put_sample(uint8_t *p, int hbd, int v) {
@@ -469,35 +466,33 @@ static bool run_case(const Case &c, Stats *stats, int verbose) {
   // predicts 4x2 samples, so its lists are one unit higher.
   std::vector<uint32_t> pred_words;
   std::vector<Pass> passes[kPathCount];
+  const ShaderApi *single = hbd ? &inter_main_v2_hbd_api : &inter_main_v2_api;
+  const ShaderApi *compound = hbd ? &inter_compound_v2_hbd_api : &inter_compound_v2_api;
+  const ShaderApi *fast_single = hbd ? &inter_fast_hbd_api : &inter_fast_api;
+  const ShaderApi *fast_compound = hbd ? &inter_compound_fast_hbd_api : &inter_compound_fast_api;
   for (auto &entry : lists) {
-    const int compound = std::get<0>(entry.first), w = std::get<1>(entry.first), h = std::get<2>(entry.first) + compound;
-    const ShaderApi *api = compound ? (hbd ? &inter_compound_hbd_api : &inter_compound_api)
-                                    : (hbd ? &inter_main_hbd_api : &inter_main_api);
-    Pass pass = {api,
-                 {static_cast<uint32_t>((1 << (w + h)) * entry.second.count),
-                  static_cast<uint32_t>(pred_words.size() / 4), static_cast<uint32_t>(w), static_cast<uint32_t>(h)}};
-    passes[kLegacy].push_back(pass);
-    pass.api = compound ? (hbd ? &inter_compound_v2_hbd_api : &inter_compound_v2_api)
-                        : (hbd ? &inter_main_v2_hbd_api : &inter_main_v2_api);
-    passes[kDefault].push_back(pass);
+    const int two_refs = std::get<0>(entry.first);
+    const int w = std::get<1>(entry.first), h = std::get<2>(entry.first) + two_refs;
+    passes[kDefault].push_back({two_refs ? compound : single,
+                                {static_cast<uint32_t>((1 << (w + h)) * entry.second.count),
+                                 static_cast<uint32_t>(pred_words.size() / 4), static_cast<uint32_t>(w),
+                                 static_cast<uint32_t>(h)}});
     pred_words.insert(pred_words.end(), entry.second.words.begin(), entry.second.words.end());
   }
   for (auto &entry : fast_lists) {
-    const int compound = std::get<0>(entry.first), cls = std::get<1>(entry.first);
-    const int w = std::get<2>(entry.first), h = std::get<3>(entry.first) + compound;
-    const int original = cls == (compound ? 15 : 3);
-    const ShaderApi *api;
-    if (original)
-      api = compound ? (hbd ? &inter_compound_hbd_api : &inter_compound_api)
-                     : (hbd ? &inter_main_hbd_api : &inter_main_api);
-    else
-      api = compound ? (hbd ? &inter_compound_fast_hbd_api : &inter_compound_fast_api)
-                     : (hbd ? &inter_fast_hbd_api : &inter_fast_api);
-    (original ? stats->original_records : stats->fast_records) += entry.second.count;
-    passes[kFast].push_back({api,
-                            {static_cast<uint32_t>((1 << (w + h)) * entry.second.count),
-                             static_cast<uint32_t>(pred_words.size() / 4),
-                             static_cast<uint32_t>(original ? w : w | (cls << 8)), static_cast<uint32_t>(h)}});
+    const int two_refs = std::get<0>(entry.first), cls = std::get<1>(entry.first);
+    const int w = std::get<2>(entry.first), h = std::get<3>(entry.first) + two_refs;
+    const bool last_class = cls == (two_refs ? 15 : 3);
+    Pass pass = {two_refs ? compound : single,
+                 {static_cast<uint32_t>((1 << (w + h)) * entry.second.count),
+                  static_cast<uint32_t>(pred_words.size() / 4), static_cast<uint32_t>(w), static_cast<uint32_t>(h)}};
+    passes[kFastLists].push_back(pass);
+    if (!last_class) {
+      pass.api = two_refs ? fast_compound : fast_single;
+      pass.srt[2] |= static_cast<uint32_t>(cls) << 8;
+    }
+    (last_class ? stats->size_list_records : stats->fast_records) += entry.second.count;
+    passes[kFast].push_back(pass);
     pred_words.insert(pred_words.end(), entry.second.words.begin(), entry.second.words.end());
   }
   // The lists are followed by garbage: a thread that looks past its list must not get a valid block.
@@ -613,12 +608,10 @@ static bool run_case(const Case &c, Stats *stats, int verbose) {
   }
 
   bool ok = true;
-  std::vector<uint8_t> legacy_result, other_result;
+  const auto &expected = aom_result;
+  const char *reference = "libaom";
   for (int path = 0; path < kPathCount; path++) {
-    std::vector<uint8_t> &result = path == kLegacy ? legacy_result : other_result;
-    result = pool;
-    const std::vector<uint8_t> &expected = path == kDefault ? legacy_result : aom_result;
-    const char *reference = path == kDefault ? "original shader" : "libaom";
+    auto result = pool;
     buffers.frame = result.data();
     const long oob_before = g_out_of_bounds;
     for (const Pass &pass : passes[path]) {
@@ -815,15 +808,14 @@ int main(int argc, char **argv) {
   printf("inter_check: %ld frames, %ld blocks, %ld block records (luma, U, V), 8 and 10 bits\n", stats.cases,
          stats.blocks, stats.records);
   printf("inter_check: fast path: %ld records through inter_fast and inter_compound_fast, %ld of the last class "
-         "through the original shaders\n",
-         stats.fast_records, stats.original_records);
+         "through the size-list shaders\n",
+         stats.fast_records, stats.size_list_records);
   printf("inter_check: lists not covered: %ld (of 22 luma and 17 chroma sizes x 4 classes, and 17 + 17 sizes x 16 "
          "pairs of classes)\n",
          missing);
-  printf("inter_check: frames that differ from libaom: %ld with the original shaders, %ld with the fast path\n",
-         stats.mismatches[kLegacy], stats.mismatches[kFast]);
-  printf("inter_check: frames that differ from the original shaders: %ld with the default shaders\n",
-         stats.mismatches[kDefault]);
+  for (int path = 0; path < kPathCount; ++path) {
+    printf("inter_check: %ld frames differ from libaom with %s\n", stats.mismatches[path], kPathNames[path]);
+  }
   if (g_out_of_bounds) printf("inter_check: %ld accesses outside the buffers\n", g_out_of_bounds);
   ok = ok && !g_out_of_bounds;
   printf("inter_check: %s\n", ok ? "PASS" : "FAIL");

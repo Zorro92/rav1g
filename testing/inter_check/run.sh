@@ -1,6 +1,5 @@
 #!/bin/sh
-# Compares the default and -interfast kernels with the original unscaled inter shaders
-# and libaom's C code on a Linux host (gcc, g++, no GPU).
+# Compares unscaled inter kernels with libaom's C code on a Linux host (gcc, g++, no GPU).
 #
 #   sh testing/inter_check/run.sh            the check; exit code 0 = identical
 #   sh testing/inter_check/run.sh --mutate   also proves the check can fail:
@@ -44,9 +43,9 @@ to_cpp() {
     "$1"
 }
 
-for name in inter_common.h inter_fast_common.h inter_unscaled.h inter_main.hlsl inter_main_hbd.hlsl \
-  inter_main_v2.hlsl inter_main_v2_hbd.hlsl inter_compound.hlsl \
-  inter_compound_hbd.hlsl inter_compound_v2.hlsl inter_compound_v2_hbd.hlsl \
+for name in inter_common.h inter_fast_common.h inter_unscaled.h \
+  inter_main_v2.hlsl inter_main_v2_hbd.hlsl \
+  inter_compound_v2.hlsl inter_compound_v2_hbd.hlsl \
   inter_fast.hlsl inter_fast_hbd.hlsl inter_compound_fast.hlsl inter_compound_fast_hbd.hlsl \
   inter_ext_borders.hlsl inter_ext_borders_hbd.hlsl; do
   to_cpp "$shaders/$name" > "$work/${name%.*}.gen.h"
@@ -84,8 +83,8 @@ build() {
   flags="-std=c++17 -O2 -fwrapv -Wall -Wno-unknown-pragmas -Wno-unused -Wno-parentheses -Wno-sign-compare"
   flags="$flags -I $1 -I $here -include $here/inter_ops.h"
   rm -f "$1"/*.o
-  for shader in inter_main:3 inter_main_hbd:3 inter_main_v2:3 inter_main_v2_hbd:3 \
-    inter_compound:3 inter_compound_hbd:3 inter_compound_v2:3 inter_compound_v2_hbd:3 inter_fast:3 inter_fast_hbd:3 \
+  for shader in inter_main_v2:3 inter_main_v2_hbd:3 \
+    inter_compound_v2:3 inter_compound_v2_hbd:3 inter_fast:3 inter_fast_hbd:3 \
     inter_compound_fast:3 inter_compound_fast_hbd:3 inter_ext_borders:2 inter_ext_borders_hbd:2; do
     name=${shader%:*}
     # shellcheck disable=SC2086

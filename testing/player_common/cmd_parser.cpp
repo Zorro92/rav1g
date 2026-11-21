@@ -84,28 +84,14 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        &params_.cdefv2_},
       {"cdefv1", atSingle, anOptional, "CDEF through the original cdef_filter.hlsl (same output)", "cdef",
        &params_.cdefv1_},
-      {"cdeflegacy", atSingle, anOptional, "CDEF through the previous 64x64 v2 shader", "cdef",
-       &params_.cdeflegacy_},
-      {"cdeflistslegacy", atSingle, anOptional, "previous GPU CDEF list shader", "",
-       &params_.cdeflistslegacy_},
       {"intrav2", atSingle, anOptional, "intra prediction through intra_v2.hlsl (same output)", "",
        &params_.intrav2_},
       {"intraopt", atSingle, anOptional, "optimized intra_main shaders (default)", "intra-main", &params_.intraopt_},
       {"intraod", atSingle, anOptional, "baseline DXC -Od intra_main shaders", "intra-main", &params_.intraod_},
       {"intrafilterlegacy", atSingle, anOptional, "previous 8-bit filter intra shader", "", &params_.intrafilterlegacy_},
-      {"intrabanklegacy", atSingle, anOptional, "use the previous 10-bit intra edge preparation", "", &params_.intrabanklegacy_},
-      {"intrasteplegacy", atSingle, anOptional, "use the previous intra wavefront step", "", &params_.intrasteplegacy_},
       {"intrasingleedgelegacy", atSingle, anOptional, "use the previous directional wavefront with prefetching", "", &params_.intrasingleedgelegacy_},
       {"intralistslegacy", atSingle, anOptional, "count the intra block lists with the previous loops and wavefront edges", "", &params_.intralistslegacy_},
       {"parselistslegacy", atSingle, anOptional, "count the block lists on the tile's parse thread, superblock by superblock", "", &params_.parselistslegacy_},
-      {"intraschedulelegacy", atSingle, anOptional, "previous intra wavefront and exact V/H predictors", "", &params_.intraschedulelegacy_},
-      {"lrlegacy", atSingle, anOptional, "original loop restoration shader", "", &params_.lrlegacy_},
-      {"fglegacy", atSingle, anOptional, "original direct NV12/P010 film grain shader", "", &params_.fglegacy_},
-      {"copylegacy", atSingle, anOptional, "original direct NV12/P010 copy shader", "", &params_.copylegacy_},
-      {"idctlegacy", atSingle, anOptional, "original small inverse transform shaders", "", &params_.idctlegacy_},
-      {"clearlegacy", atSingle, anOptional, "clear the whole residual allocation", "", &params_.clearlegacy_},
-      {"interlegacy", atSingle, anOptional, "original unscaled single-reference and average/distance inter shaders",
-       "", &params_.interlegacy_},
       {"slots", atInt, anOptional,
        "decoder pipeline slots (frames in flight), 2..4. Default: four above 2560x1440, otherwise one "
        "more than frames in parse",
@@ -136,7 +122,6 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        "+ 32 frame buffer bound at the recording (with 1: one frame buffer less with three slots; not in -lowmem). "
        "Default: 1, and 3 for a decoder above 1920x1088; 1 for the mode info pool of the worst case, 0 for none",
        "", &params_.lowmem_parts_},
-      {"lflegacy", atSingle, anOptional, "use the original deblocking kernels", "", &params_.lflegacy_},
       {"lfhsplit", atInt, anOptional,
        "horizontal loop filter: 1 even rows of blocks, UAV barrier, odd rows; 2 every row of blocks on its "
        "own. Default 0, one dispatch per plane (same output)",
@@ -148,7 +133,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        "inter prediction by the fraction of the motion vector: a copy, one filter pass, or both (same output)", "",
        &params_.interfast_},
       {"interfastlists", atSingle, anOptional,
-       "the block lists of -interfast with the original inter shaders on them (same output)", "",
+       "the block lists of -interfast with the size-list shaders on them (same output)", "",
        &params_.interfastlists_},
       {"alllayers", atSingle, anOptional,
        "a stream with spatial layers: output the frame of every layer of a temporal unit (default: one frame "
@@ -473,24 +458,13 @@ void CParameters::Reset() {
   params_.semi_planar_ = 0;
   params_.cdefv2_ = true;
   params_.cdefv1_ = false;
-  params_.cdeflegacy_ = false;
-  params_.cdeflistslegacy_ = false;
   params_.intrav2_ = false;
   params_.intraopt_ = false;
   params_.intraod_ = false;
   params_.intrafilterlegacy_ = false;
-  params_.intraschedulelegacy_ = false;
-  params_.intrabanklegacy_ = false;
-  params_.intrasteplegacy_ = false;
   params_.intrasingleedgelegacy_ = false;
   params_.intralistslegacy_ = false;
   params_.parselistslegacy_ = false;
-  params_.lrlegacy_ = false;
-  params_.fglegacy_ = false;
-  params_.copylegacy_ = false;
-  params_.idctlegacy_ = false;
-  params_.clearlegacy_ = false;
-  params_.interlegacy_ = false;
   // 0: the task has no -slots (Parse() makes the default of it).
   params_.slots_ = 0;
   params_.slots_given_ = false;
@@ -511,7 +485,6 @@ void CParameters::Reset() {
   params_.continue_on_error_ = false;
   params_.parseopt_.clear();
   params_.parser_options_ = PLAYER_PARSEOPT_DEFAULT;
-  params_.lflegacy_ = false;
   params_.lfhsplit_ = 0;
   params_.intraedgefix_ = false;
   params_.interfast_ = false;

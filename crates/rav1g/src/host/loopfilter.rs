@@ -11,7 +11,7 @@
 //! `av1_loopfilter_gpu` of `libav1/dx/loopfilters.cpp`.
 
 use std::ffi::c_int;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use super::core::{
     alloc_constants, buffer, commands, perf_gpu_mark, pipeline, stage_dump_active, stage_dump_constants,
@@ -53,15 +53,6 @@ struct GenLfData {
     lfi_n_lvl: [[[[[c_int; 4]; 2]; 8]; 8]; 3],
 }
 
-// Test flag -lflegacy: select the original deblocking kernels for comparisons.
-static LF_LEGACY: AtomicBool = AtomicBool::new(false);
-
-/// `av1_set_lf_legacy` (`dx/av1_perf.h`).
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_lf_legacy(enable: c_int) {
-    LF_LEGACY.store(enable != 0, Ordering::Relaxed);
-}
-
 // Test flag -lfhsplit: how the horizontal loop filter is dispatched. loopfilter_hor works on blocks of 4
 // columns by 64 rows; the first edge of a block reads and writes the last rows of the block above it, which
 // another thread group of the same dispatch filters. 0: one dispatch per plane, as upstream. 1: the even
@@ -94,7 +85,6 @@ pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: 
         let td = &mut *(*dec).curr_frame_data;
         let dst = &*td.dst_frame_buffer;
         let lib = (*dec).shader_lib;
-        let lf_legacy = LF_LEGACY.load(Ordering::Relaxed);
         let commands = commands(dec);
         let lf_blocks = buffer((*dec).loopfilter_blocks);
         let frame_buffers = buffer((*dec).frame_buffer_pool);
@@ -164,11 +154,7 @@ pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: 
             }
         }
 
-        let shader = pipeline(if lf_legacy {
-            &raw const (*lib).shader_gen_lf_vert_legacy
-        } else {
-            &raw const (*lib).shader_gen_lf_vert
-        });
+        let shader = pipeline(&raw const (*lib).shader_gen_lf_vert);
         commands.set_layout(shader.layout());
         commands.bind_read(0, buffer(td.parse_buffers[super::pool::Kind::ModeInfo as usize]).location());
         commands.bind_read(1, buffer(td.mode_info_grid).location());
@@ -184,11 +170,7 @@ pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: 
             commands.set_inline_constants(4, &inline, 0);
             commands.dispatch(((wicount + 63) >> 6) as u32, 1, 1);
         }
-        commands.set_pipeline(pipeline(if lf_legacy {
-            &raw const (*lib).shader_gen_lf_hor_legacy
-        } else {
-            &raw const (*lib).shader_gen_lf_hor
-        }));
+        commands.set_pipeline(pipeline(&raw const (*lib).shader_gen_lf_hor));
         for plane in (0..3).filter(|&plane| filtered(plane)) {
             let (mi_cols, mi_rows) = (mi_cols(plane), mi_rows(plane));
             let wicount = mi_cols * ((mi_rows + 15) >> 4);
@@ -257,11 +239,7 @@ pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: 
         }
 
         // The inline constants of the filters: wicount, plane, offset_base, block_cols, block_id_offset.
-        let shader = pipeline(if lf_legacy {
-            &raw const (*td.shaders).loopfilter_v_legacy
-        } else {
-            &raw const (*td.shaders).loopfilter_v
-        });
+        let shader = pipeline(&raw const (*td.shaders).loopfilter_v);
         commands.set_layout(shader.layout());
         commands.bind_read(0, lf_blocks.location());
         commands.bind_write(1, frame_buffers.location());
@@ -286,19 +264,9 @@ pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: 
         perf_gpu_mark(dec, AV1_PERF_GPU_LF_VERT);
         stage_dump_fb(dec, c"lf_vert", td.frame_buffer, std::ptr::null());
 
-        commands.set_pipeline(pipeline(if lf_legacy {
-            &raw const (*td.shaders).loopfilter_h_legacy
-        } else {
-            &raw const (*td.shaders).loopfilter_h
-        }));
-        // One thread per word in the new shaders, one per sample in the originals.
-        let threads_per_strip = if lf_legacy {
-            4
-        } else if td.bitdepth > 8 {
-            2
-        } else {
-            1
-        };
+        commands.set_pipeline(pipeline(&raw const (*td.shaders).loopfilter_h));
+        // One thread per packed word, four samples at 8 bits or two at high bit depth.
+        let threads_per_strip = if td.bitdepth > 8 { 2 } else { 1 };
         let lf_h_split = LF_H_SPLIT.load(Ordering::Relaxed);
         if lf_h_split == 0 {
             for p in (0..3).filter(|&p| filtered(p)) {

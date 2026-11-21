@@ -192,7 +192,7 @@ typedef struct av1_stage_dump av1_stage_dump;
 #define RAV1G_INTER_FAST_ON 1
 
 /*
- With `RAV1G_INTER_FAST_ON`: the blocks with one reference are listed and predicted by the original
+ With `RAV1G_INTER_FAST_ON`: the blocks with one reference are listed and predicted by the size-list
  shader.
  */
 #define RAV1G_INTER_FAST_SINGLE_ORIGINAL 2
@@ -203,7 +203,7 @@ typedef struct av1_stage_dump av1_stage_dump;
 #define RAV1G_INTER_FAST_COMPOUND_ORIGINAL 4
 
 /*
- The lists of the fast inter path with the original shaders on all of them.
+ The lists of the fast inter path with the size-list shaders on all of them.
  */
 #define RAV1G_INTER_FAST_LISTS_ONLY 7
 

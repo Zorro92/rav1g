@@ -110,12 +110,12 @@ pub const RAV1G_PARSER_OPTIONS_DEFAULT: u32 = 2566;
 
 /// `rav1g_set_inter_fast`: the fast inter path is on.
 pub const RAV1G_INTER_FAST_ON: u32 = 1;
-/// With `RAV1G_INTER_FAST_ON`: the blocks with one reference are listed and predicted by the original
+/// With `RAV1G_INTER_FAST_ON`: the blocks with one reference are listed and predicted by the size-list
 /// shader.
 pub const RAV1G_INTER_FAST_SINGLE_ORIGINAL: u32 = 2;
 /// With `RAV1G_INTER_FAST_ON`: the same for the averaged compound blocks.
 pub const RAV1G_INTER_FAST_COMPOUND_ORIGINAL: u32 = 4;
-/// The lists of the fast inter path with the original shaders on all of them.
+/// The lists of the fast inter path with the size-list shaders on all of them.
 pub const RAV1G_INTER_FAST_LISTS_ONLY: u32 = 7;
 
 /// `rav1g_set_clears`, the default: the wavefront of intra prediction is kept in a few KB at the edges of

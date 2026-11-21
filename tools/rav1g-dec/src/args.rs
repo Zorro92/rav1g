@@ -84,8 +84,6 @@ pub struct Task {
     pub slots_given: bool,
     pub cdefv1: bool,
     pub cdefv2: bool,
-    pub cdeflegacy: bool,
-    pub cdeflistslegacy: bool,
     pub nofitsize: bool,
     pub fitsize: bool,
     pub lowmem: bool,
@@ -98,23 +96,12 @@ pub struct Task {
     pub intrav2: bool,
     pub intraopt: bool,
     pub intrafilterlegacy: bool,
-    pub intraschedulelegacy: bool,
-    pub intrabanklegacy: bool,
-    pub intrasteplegacy: bool,
     pub intrasingleedgelegacy: bool,
     pub intralistslegacy: bool,
     pub parselistslegacy: bool,
-    pub lrlegacy: bool,
-    pub fglegacy: bool,
-    pub copylegacy: bool,
-    pub idctlegacy: bool,
-    pub clearlegacy: bool,
-    pub interlegacy: bool,
     /// What a frame does about the clears of its slot's grids: nothing to clear without a flag;
     /// -gpuclear, -cpuclear (and -asyncclear, its older name), -syncclear.
     pub clears: Clears,
-    /// -lflegacy
-    pub lflegacy: bool,
     /// -lfhsplit <0|1|2>
     pub lfhsplit: i32,
     pub intraedgefix: bool,
@@ -179,8 +166,6 @@ impl Default for Task {
             parse_frames: 0,
             cdefv1: false,
             cdefv2: false,
-            cdeflegacy: false,
-            cdeflistslegacy: false,
             nofitsize: false,
             fitsize: false,
             lowmem: false,
@@ -190,20 +175,10 @@ impl Default for Task {
             intrav2: false,
             intraopt: true,
             intrafilterlegacy: false,
-            intraschedulelegacy: false,
-            intrabanklegacy: false,
-            intrasteplegacy: false,
             intrasingleedgelegacy: false,
             intralistslegacy: false,
             parselistslegacy: false,
-            lrlegacy: false,
-            fglegacy: false,
-            copylegacy: false,
-            idctlegacy: false,
-            clearlegacy: false,
-            interlegacy: false,
             clears: Clears::NotNeeded,
-            lflegacy: false,
             lfhsplit: 0,
             intraedgefix: false,
             poison: Poison::Off,
@@ -309,22 +284,11 @@ pub fn usage() {
     say!("  -queue_size <n>       output images in the pool, 1..{} (default {})", QUEUE_SIZE_MAX, QUEUE_SIZE_DEFAULT);
     say!("  -timeout <seconds>    give up on a task after this time (exit code {})", EXIT_TIMEOUT);
     say!("  -cdefv1 -nofitsize -lowmemparts <n> -lowmem -slots <n> -intrav2");
-    say!("  -cdeflegacy         use the previous 64x64 CDEF v2 shader");
-    say!("  -cdeflistslegacy    use the previous GPU CDEF list shader");
     say!("  -intraod             use the baseline DXC -Od intra_main kernels (-intraopt restores the default)");
     say!("  -intrafilterlegacy   use the previous 8-bit filter intra shader");
-    say!("  -intraschedulelegacy use the previous intra wavefront and exact V/H predictors");
-    say!("  -intrabanklegacy      use the previous 10-bit intra edge preparation");
-    say!("  -intrasteplegacy      use the previous intra wavefront step (main before round 4)");
     say!("  -intrasingleedgelegacy use the previous directional wavefront with prefetching");
     say!("  -intralistslegacy    count the intra block lists with the previous loops and wavefront edges");
     say!("  -parselistslegacy    count the block lists on the tile's thread, superblock by superblock");
-    say!("  -lrlegacy           use the original loop_restoration shader");
-    say!("  -fglegacy           use the original direct NV12/P010 film grain shader");
-    say!("  -copylegacy         use the original direct NV12/P010 copy shader");
-    say!("  -idctlegacy         use the original small inverse transform shaders");
-    say!("  -clearlegacy        clear the whole residual allocation before IDCT");
-    say!("  -interlegacy        use the original unscaled single-reference and average/distance inter shaders");
     say!("                        as in the test player (docs/test-player.md); -cdefv2 and -fitsize (the defaults)");
     say!("                        are accepted");
     say!("  -gpuclear -cpuclear -syncclear");
@@ -338,7 +302,6 @@ pub fn usage() {
     say!("  -headroom <MiB>       with -budget: what the guard should leave of it behind the decoder; a decoder");
     say!("                        that would leave less is created with fewer slots and frames in parse (MEMORY");
     say!("                        headroom lines). Default 0: the library's 128; 48 or less is the guard's margin");
-    say!("  -lflegacy           use the original deblocking kernels");
     say!("  -lfhsplit <n>         horizontal loop filter: 1 even rows of blocks, a UAV barrier, odd rows; 2 every");
     say!("                        row of blocks on its own (default 0: one dispatch per plane; same output)");
     say!("  -intraedgefix         8-bit intra: the above edge filter stops where the 10-bit one does (same output)");
@@ -365,9 +328,9 @@ pub fn usage() {
     say!("                        gpublists: the GPU builds inter, warp and reconstruction lists (off by default).");
     say!("  -interfast            inter prediction by the fraction of the motion vector: a copy, one filter pass, or");
     say!("                        both (inter_fast, inter_compound_fast; same output)");
-    say!("  -interfastlists       the block lists of -interfast with the original shaders on them (same output)");
+    say!("  -interfastlists       the block lists of -interfast with the size-list shaders on them (same output)");
     say!(
-        "  -interfastmode <n>    av1_set_inter_fast(n): 1 -interfast, +2 original shader for one reference, +4 for two;"
+        "  -interfastmode <n>    av1_set_inter_fast(n): 1 -interfast, +2 size-list shader for one reference, +4 for two;"
     );
     say!("                        8: only the room for the lists in the block maps, the path stays off (diagnostic)");
     say!("  -gputime              the timing run of the test player: GPU timestamps per stage and CPU timers, the");
@@ -504,30 +467,18 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-headroom" => task.headroom_mib = i64::from(number()?),
             "-cdefv1" => task.cdefv1 = true,
             "-cdefv2" => task.cdefv2 = true,
-            "-cdeflegacy" => task.cdeflegacy = true,
-            "-cdeflistslegacy" => task.cdeflistslegacy = true,
             "-nofitsize" => task.nofitsize = true,
             "-fitsize" => task.fitsize = true,
             "-intrav2" => task.intrav2 = true,
             "-intraopt" => task.intraopt = true,
             "-intraod" => task.intraopt = false,
             "-intrafilterlegacy" => task.intrafilterlegacy = true,
-            "-intraschedulelegacy" => task.intraschedulelegacy = true,
-            "-intrabanklegacy" => task.intrabanklegacy = true,
-            "-intrasteplegacy" => task.intrasteplegacy = true,
             "-intrasingleedgelegacy" => task.intrasingleedgelegacy = true,
             "-intralistslegacy" => task.intralistslegacy = true,
             "-parselistslegacy" => task.parselistslegacy = true,
-            "-lrlegacy" => task.lrlegacy = true,
-            "-fglegacy" => task.fglegacy = true,
-            "-copylegacy" => task.copylegacy = true,
-            "-idctlegacy" => task.idctlegacy = true,
-            "-clearlegacy" => task.clearlegacy = true,
-            "-interlegacy" => task.interlegacy = true,
             "-gpuclear" => task.clears = Clears::Gpu,
             "-cpuclear" | "-asyncclear" => task.clears = Clears::CompletionThread,
             "-syncclear" => task.clears = Clears::DecodeThread,
-            "-lflegacy" => task.lflegacy = true,
             "-lfhsplit" => task.lfhsplit = number()?,
             "-intraedgefix" => task.intraedgefix = true,
             "-continue_on_error" => task.continue_on_error = true,
@@ -602,9 +553,6 @@ pub fn check_task(task: &mut Task) -> Result<(), String> {
     }
     if task.cdefv1 && task.cdefv2 {
         return Err("-cdefv1 and -cdefv2 cannot be used together".to_string());
-    }
-    if task.cdeflegacy && (task.cdefv1 || task.cdefv2) {
-        return Err("-cdeflegacy cannot be combined with -cdefv1 or -cdefv2".to_string());
     }
     if task.nofitsize && task.fitsize {
         return Err("-nofitsize and -fitsize cannot be used together".to_string());
@@ -757,21 +705,6 @@ mod tests {
         assert_eq!(task.save_md5, "out dir/x.md5");
         assert_eq!((task.threads, task.timeout_s, task.interfast, task.aom_md5), (4, 300, 1, true));
         assert_eq!(globals.list, "tasks.list");
-        assert!(!task.fglegacy);
-        parse_args(&strings(&["-fglegacy"]), &mut task, None).unwrap();
-        assert!(task.fglegacy);
-        assert!(!task.copylegacy);
-        parse_args(&strings(&["-copylegacy"]), &mut task, None).unwrap();
-        assert!(task.copylegacy);
-        assert!(!task.idctlegacy);
-        parse_args(&strings(&["-idctlegacy"]), &mut task, None).unwrap();
-        assert!(task.idctlegacy);
-        assert!(!task.clearlegacy);
-        parse_args(&strings(&["-clearlegacy"]), &mut task, None).unwrap();
-        assert!(task.clearlegacy);
-        assert!(!task.interlegacy);
-        parse_args(&strings(&["-interlegacy"]), &mut task, None).unwrap();
-        assert!(task.interlegacy);
         assert_eq!(task.poison, Poison::Off);
         parse_args(&strings(&["-poisonmi"]), &mut task, None).unwrap();
         assert_eq!(task.poison, Poison::ModeInfo);

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Compare the original and optimized direct-texture film grain HLSL on a Linux host.
+# Compare direct-texture film grain with a scalar AV1 reference on a Linux host.
 # Requires a C++17 compiler and python3. Pass --mutate to check that deliberate errors are rejected.
 set -eu
 
@@ -13,12 +13,11 @@ trap 'exit 130' INT TERM HUP
 for header in film_grain_const film_grain_apply output_sp; do
   python3 "$sync/to_cpp.py" "$shaders/$header.h" "$work/$header.gen.h"
 done
-# The two apply shaders use the same layout types. The resource declarations and entry points
-# are included in separate namespaces.
+# The reference and the apply shader share the constant-buffer layout.
 for header in film_grain_const film_grain_apply; do
   sed -i '1i #pragma once' "$work/$header.gen.h"
 done
-for shader in film_grain_filter film_grain_filter_sp_tex_v2 copy_plane_sp; do
+for shader in film_grain_filter_sp_tex_v2 copy_plane_sp_tex_v2; do
   python3 "$sync/to_cpp.py" "$shaders/$shader.hlsl" "$work/$shader.gen.h" "$work/$shader.entry.h"
 done
 

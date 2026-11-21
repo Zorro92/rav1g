@@ -133,7 +133,6 @@ static void run_group(const ShaderApi *api, uint32_t group, int threads, uint64_
   g_tracker.group++;
   gs_state.shader = api == &intra_main_api       ? "intra_main.hlsl"
                     : api == &intra_main_hbd_api   ? "intra_main_hbd.hlsl"
-                    : api == &intra_main_banked_hbd_api ? "intra_main_banked_hbd.hlsl"
                     : api == &intra_main_prefetch_hbd_api ? "intra_main_prefetch_hbd.hlsl"
                     : api == &intra_main_prefetch_api ? "intra_main_prefetch.hlsl"
                     : api == &intra_main_prefetch_double_hbd_api ? "intra_main_prefetch_hbd.hlsl (twice the edge count)"
@@ -142,19 +141,17 @@ static void run_group(const ShaderApi *api, uint32_t group, int threads, uint64_
                     : api == &intra_main_single_edge_hbd_api ? "intra_main_single_edge_hbd.hlsl"
                     : api == &intra_main_legacy_api ? "intra_main_legacy.hlsl"
                     : api == &intra_main_hbd_legacy_api ? "intra_main_hbd_legacy.hlsl"
-                    : api == &intra_filter_api     ? "intra_filter.hlsl"
                     : api == &intra_filter_legacy_api ? "intra_filter_legacy.hlsl"
-                    : api == &intra_filter_hbd_api ? "intra_filter_hbd.hlsl"
                     : api == &intra_filter_prefetch_api ? "intra_filter_prefetch.hlsl"
                     : api == &intra_filter_prefetch_hbd_api ? "intra_filter_prefetch_hbd.hlsl"
                     : api == &intra_v2_hbd_api     ? "intra_v2.hlsl (10-bit)"
                                                    : "intra_v2.hlsl";
-  const bool use_waves = api == &intra_main_api || api == &intra_main_hbd_api || api == &intra_main_banked_hbd_api ||
+  const bool use_waves = api == &intra_main_api || api == &intra_main_hbd_api ||
                          api == &intra_main_prefetch_hbd_api || api == &intra_main_prefetch_api ||
                          api == &intra_main_prefetch_double_hbd_api || api == &intra_main_prefetch_double_api ||
                          api == &intra_main_single_edge_hbd_api || api == &intra_main_single_edge_api;
-  gs_state.track_unwritten = use_waves || api == &intra_filter_api || api == &intra_filter_prefetch_api;
-  g_tracker.require_unique_stores = api == &intra_filter_api || api == &intra_filter_prefetch_api;
+  gs_state.track_unwritten = use_waves || api == &intra_filter_prefetch_api;
+  g_tracker.require_unique_stores = api == &intra_filter_prefetch_api;
   GroupContext context = { api, group };
   gs_run_group(threads, thread_body, &context, garbage, use_waves ? complete_waves : nullptr);
 }
@@ -863,15 +860,9 @@ static RunResult end_run() {
 // The intra loop of av1_prediction_run_all().
 static RunResult run_main(const Geometry &g, const Frame &f, std::vector<uint8_t> *pool, uint64_t garbage,
                           const ShaderApi *main_api, Coverage *cov, const ShaderApi *filter_override = nullptr) {
-  // The prefetching main shader runs with the prefetching filter intra shader, as the host pairs them.
-  const ShaderApi *filter_api = filter_override                          ? filter_override
-                               : (main_api == &intra_main_prefetch_hbd_api || main_api == &intra_main_single_edge_hbd_api) ? &intra_filter_prefetch_hbd_api
-                               : (main_api == &intra_main_prefetch_api || main_api == &intra_main_single_edge_api) ? &intra_filter_prefetch_api
-                               : main_api == &intra_main_prefetch_double_hbd_api ? &intra_filter_prefetch_hbd_api
-                               : main_api == &intra_main_prefetch_double_api ? &intra_filter_prefetch_api
-                               : g.hbd                                   ? &intra_filter_hbd_api
-                               : main_api == &intra_main_legacy_api ? &intra_filter_legacy_api
-                                                                   : &intra_filter_api;
+  const ShaderApi *filter_api = filter_override ? filter_override
+                              : g.hbd ? &intra_filter_prefetch_hbd_api
+                                      : &intra_filter_prefetch_api;
   ShaderBuffers buffers = {};
   buffers.pred_blocks = (const uint8_t *)f.records1.data();
   buffers.pred_blocks_size = f.records1.size() * 4;
@@ -944,7 +935,7 @@ static bool check_filter_intra_8bit(uint64_t seed) {
       order_records(g, &f);
       std::vector<uint8_t> legacy = f.pixels;
       std::vector<uint8_t> actual = f.pixels;
-      run_main(g, f, &legacy, rng.u32(), &intra_main_legacy_api, nullptr);
+      run_main(g, f, &legacy, rng.u32(), &intra_main_legacy_api, nullptr, &intra_filter_legacy_api);
       const RunResult r = run_main(g, f, &actual, rng.u32(), &intra_main_api, nullptr);
       if (actual != legacy || r.memory_races || r.out_of_bounds || r.races_group || r.sync_errors ||
           r.plain_barriers || r.duplicate_stores) {
@@ -1282,25 +1273,18 @@ int main(int argc, char **argv) {
         std::vector<uint8_t> legacy = f.pixels;
         std::vector<uint8_t> optimized = f.pixels;
         std::vector<uint8_t> v2 = f.pixels;
-        const RunResult r1 = run_main(g, f, &legacy, rng.u32(), legacy_api, &cov);
+        const RunResult r1 = run_main(g, f, &legacy, rng.u32(), legacy_api, &cov,
+                                      hbd ? nullptr : &intra_filter_legacy_api);
         wave_layout = wave_layouts[(layout * 3 + n) % (sizeof(wave_layouts) / sizeof(wave_layouts[0]))];
         const RunResult r1b = run_main(g, f, &optimized, rng.u32(), main_api, nullptr);
         const RunResult r2 = run_v2(g, f, &schedule, &v2, rng.u32(), &cov);
-        std::vector<uint8_t> banked, prefetch, other_count;
-        RunResult rb = {}, rp = {}, rc = {};
-        if (hbd) {
-          banked = f.pixels;
-          rb = run_main(g, f, &banked, rng.state, &intra_main_banked_hbd_api, nullptr);
-          prefetch = f.pixels;
-          rp = run_main(g, f, &prefetch, rng.state, &intra_main_single_edge_hbd_api, nullptr);
-        } else {
-          prefetch = f.pixels;
-          rp = run_main(g, f, &prefetch, rng.state, &intra_main_single_edge_api, nullptr);
-        }
+        auto prefetch = f.pixels;
+        const RunResult rp = run_main(g, f, &prefetch, rng.state,
+                                      hbd ? &intra_main_single_edge_hbd_api : &intra_main_single_edge_api, nullptr);
         // The prefetching shader with twice the specification's count of edge samples of the row above
         // (run.sh), which the layouts have to tell from it, inside the frame too.
-        other_count = f.pixels;
-        rc = run_main(g, f, &other_count, rng.state,
+        auto other_count = f.pixels;
+        const RunResult rc = run_main(g, f, &other_count, rng.state,
                       hbd ? &intra_main_prefetch_double_hbd_api : &intra_main_prefetch_double_api, nullptr);
         if (other_count != prefetch) cov.double_count_frames++;
         if (first_difference_in_frame(g, prefetch, other_count) < prefetch.size()) cov.double_count_in_frame++;
@@ -1330,11 +1314,6 @@ int main(int argc, char **argv) {
           problem = "intra_v2 reads what another thread group of the same step wrote";
         } else if (r2.races_thread) {
           problem = "intra_v2 reads what another thread wrote in the same pass";
-        } else if (hbd && legacy != banked) {
-          problem = "MISMATCH in the banked 10-bit shader";
-          at = first_difference(legacy, banked);
-        } else if (rb.memory_races || rb.sync_errors || rb.out_of_bounds || rb.plain_barriers) {
-          problem = "invalid group memory access or sync in the banked 10-bit shader";
         } else if (legacy != prefetch) {
           problem = hbd ? "MISMATCH in the prefetching 10-bit shaders" : "MISMATCH in the prefetching 8-bit shaders";
           at = first_difference(legacy, prefetch);
@@ -1398,6 +1377,6 @@ int main(int argc, char **argv) {
     printf("intra_check: FAILED\n");
     return 1;
   }
-  printf("intra_check: the legacy, optimized, banked, prefetching and intra_v2 outputs are identical on every frame\n");
+  printf("intra_check: the conservative, prefetching and intra_v2 outputs are identical on every frame\n");
   return 0;
 }

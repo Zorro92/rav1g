@@ -42,10 +42,8 @@ while [ $# -gt 0 ]; do
 done
 
 # shader:family. Families (shader_tu.cpp): 1 inverse transforms, 2 lossless transform, 3 inter
-# prediction, 4 deblocking, 5 loop restoration, 7 film grain, 8 prediction list counts,
-# 9 prediction list scan. The intra and CDEF
-# shaders and optimized loop restoration have checks of their own with real input
-# (intra_check, cdef_check, restoration_check), which watch their group memory the same way.
+# prediction, 7 film grain, 8 prediction list counts, 9 prediction list scan. The intra, CDEF,
+# deblocking and restoration checks watch their own group memory with real inputs.
 list=""
 for f in "$shaders"/*.hlsl; do
   name=$(basename "$f" .hlsl)
@@ -55,13 +53,11 @@ for f in "$shaders"/*.hlsl; do
     idct_lossless) family=2 ;;
     idct*) family=1 ;;
     inter_*) family=3 ;;
-    loopfilter_*) family=4 ;;
-    loop_restoration_legacy) family=5 ;;
     film_grain_filter) family=7 ;;
     pred_list_count) family=8 ;;
     pred_list_scan) family=9 ;;
     gen_pred_blocks) continue ;; # group memory only in the pred_list_count build
-    intra_* | cdef_* | loop_restoration) continue ;;
+    intra_* | cdef_* | loopfilter_* | loop_restoration) continue ;;
     *) echo "sync_check: $name.hlsl has group memory and no family here" >&2; exit 1 ;;
   esac
   list="$list $name:$family"
@@ -160,7 +156,7 @@ if [ "$mutate" = 1 ]; then
     family=${item#*:}
     file="$name.gen.h"
     case "$name" in
-      idct4x4 | idct16x32 | idct64x64) file="idct_shader_common.gen.h" ;;
+      idct4x16 | idct16x32 | idct64x64) file="idct_shader_common.gen.h" ;;
       idct_lossless) ;;
       idct*) continue ;;
     esac

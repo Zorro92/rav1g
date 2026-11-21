@@ -1,5 +1,5 @@
 #!/bin/sh
-# Run the original and per-thread small inverse transforms as C++ on a Linux host.
+# Compare the small inverse transform shaders with a scalar AV1 reference on Linux.
 # Pass --mutate to also verify that deliberate errors produce mismatches.
 set -eu
 
@@ -18,16 +18,14 @@ done
 build() {
   name="idct$1"
   "${CXX:-c++}" -std=c++20 -O2 -fwrapv -I "$sync" -I "$work" \
-    -DLEGACY="\"$name.gen.h\"" -DLEGACY_ENTRY="\"$name.entry.h\"" \
     -DCANDIDATE="\"${name}_v2.gen.h\"" -DCANDIDATE_ENTRY="\"${name}_v2.entry.h\"" \
     -DSCANS="\"$name.scans.h\"" "$here/idct_check.cpp" -o "$work/check"
 }
 
 for size in 4x4 4x8 8x4 8x8; do
-  for name in "idct$size" "idct${size}_v2"; do
-    python3 "$sync/to_cpp.py" "$shaders/$name.hlsl" "$work/$name.gen.h" "$work/$name.entry.h"
-  done
-  # Use the C tables that the host reads to build the original shaders' constants.
+  name="idct${size}_v2"
+  python3 "$sync/to_cpp.py" "$shaders/$name.hlsl" "$work/$name.gen.h" "$work/$name.entry.h"
+  # Use the AV1 scan tables from libaom.
   sed -nE "/^DECLARE_ALIGNED\(16, static const int16_t, (default|mrow|mcol)_scan_$size\[/,/^};/ {
     s/^DECLARE_ALIGNED\(16, static const int16_t, (.*)\)/static const int \1/
     p

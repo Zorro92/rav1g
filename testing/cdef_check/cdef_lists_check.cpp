@@ -1,5 +1,5 @@
 /*
- * Compare the GPU CDEF list shaders, compiled as C++, with the host's list
+ * Compare the GPU CDEF list shader, compiled as C++, with the host's list
  * rules. Check the full buffers, including the untouched skip-row padding.
  */
 #define GROUP_SCHED_IMPLEMENTATION
@@ -10,10 +10,7 @@
 
 long g_out_of_bounds = 0;
 
-namespace legacy {
-#include "cdef_lists_legacy.gen.h"
-}
-namespace optimized {
+namespace shader {
 #include "cdef_lists.gen.h"
 }
 
@@ -35,36 +32,20 @@ static Lists empty_lists(const Shape &s) {
           std::vector<uint>(s.index_stride * 16 * s.index_rows * 8 + 1, poison)};
 }
 
-struct ListShader {
-  void (*thread)(uint3);
-  ByteAddressBuffer &pool, &grid;
-  RWByteAddressBuffer &indices, &skips;
-  uint &mi_stride, &mi_addr_base, &index_stride, &skips_stride, &skip_cols, &skip_rows;
-};
-
-static const ListShader legacy_shader = {legacy::shader_main, legacy::mi_pool, legacy::mi_grid, legacy::cdef_index,
-                                         legacy::skips, legacy::cb_mi_stride, legacy::cb_mi_addr_base,
-                                         legacy::cb_index_stride, legacy::cb_skips_stride, legacy::cb_skip_cols,
-                                         legacy::cb_skip_rows};
-static const ListShader optimized_shader = {
-    optimized::shader_main, optimized::mi_pool, optimized::mi_grid, optimized::cdef_index, optimized::skips,
-    optimized::cb_mi_stride, optimized::cb_mi_addr_base, optimized::cb_index_stride, optimized::cb_skips_stride,
-    optimized::cb_skip_cols, optimized::cb_skip_rows};
-
-static Lists run(const ListShader &shader, const Shape &s, const std::vector<uint> &pool, const std::vector<uint> &grid) {
+static Lists run(const Shape &s, const std::vector<uint> &pool, const std::vector<uint> &grid) {
   Lists lists = empty_lists(s);
-  shader.pool = {reinterpret_cast<const uint8_t *>(pool.data()), pool.size() * 4};
-  shader.grid = {reinterpret_cast<const uint8_t *>(grid.data()), grid.size() * 4};
-  shader.indices = {reinterpret_cast<uint8_t *>(lists.indices.data()), lists.indices.size() * 4};
-  shader.skips = {reinterpret_cast<uint8_t *>(lists.skips.data()), lists.skips.size() * 4};
-  shader.mi_stride = s.mi_stride;
-  shader.mi_addr_base = ModeInfoSize;
-  shader.index_stride = s.index_stride;
-  shader.skips_stride = s.index_stride * 16;
-  shader.skip_cols = s.cols;
-  shader.skip_rows = s.rows;
+  shader::mi_pool = {reinterpret_cast<const uint8_t *>(pool.data()), pool.size() * 4};
+  shader::mi_grid = {reinterpret_cast<const uint8_t *>(grid.data()), grid.size() * 4};
+  shader::cdef_index = {reinterpret_cast<uint8_t *>(lists.indices.data()), lists.indices.size() * 4};
+  shader::skips = {reinterpret_cast<uint8_t *>(lists.skips.data()), lists.skips.size() * 4};
+  shader::cb_mi_stride = s.mi_stride;
+  shader::cb_mi_addr_base = ModeInfoSize;
+  shader::cb_index_stride = s.index_stride;
+  shader::cb_skips_stride = s.index_stride * 16;
+  shader::cb_skip_cols = s.cols;
+  shader::cb_skip_rows = s.rows;
   for (uint y = 0; y < s.index_rows * 8; y++) {
-    for (uint x = 0; x < s.index_stride * 8; x++) shader.thread(uint3{x, y, 0});
+    for (uint x = 0; x < s.index_stride * 8; x++) shader::shader_main(uint3{x, y, 0});
   }
   return lists;
 }
@@ -127,12 +108,9 @@ static bool check_case(uint cols, uint rows, std::mt19937 &rng, bool sweep) {
       }
     }
   }
-  const bool legacy_ok = run(legacy_shader, s, pool, grid) == expected;
-  const bool optimized_ok = run(optimized_shader, s, pool, grid) == expected;
-  if (!legacy_ok || !optimized_ok) {
-    printf("MISMATCH %s lists on a %ux%u grid of 8x8 blocks\n", legacy_ok ? "optimized" : "legacy", cols, rows);
-  }
-  return legacy_ok && optimized_ok;
+  if (run(s, pool, grid) == expected) return true;
+  printf("MISMATCH optimized lists on a %ux%u grid of 8x8 blocks\n", cols, rows);
+  return false;
 }
 
 int main() {
@@ -147,6 +125,6 @@ int main() {
   }
   printf("cdef_lists_check: out-of-bounds buffer accesses %ld\n", g_out_of_bounds);
   if (!ok || g_out_of_bounds != 0) return 1;
-  printf("cdef_lists_check: %d grids, strength and skip buffers match the legacy shader and CPU rules\n", count + 1);
+  printf("cdef_lists_check: %d grids, strength and skip buffers match the CPU rules\n", count + 1);
   return 0;
 }

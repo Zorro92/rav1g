@@ -10,7 +10,6 @@
 //! sorted by transform size, and one dispatch per size transforms them. From `libav1/dx/transform.cpp`.
 
 use std::ffi::c_int;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::core::{
     alloc_constant_bytes, alloc_constants, buffer, commands, layout, perf_gpu_mark, pipeline, stage_dump_residuals,
@@ -22,21 +21,6 @@ use crate::sys::{
     AV1_PERF_GPU_IDCT, AV1_PERF_GPU_IDCT_SORT, AV1_PERF_GPU_RESIDUAL_CLEAR, TX_4X4, TX_4X8, TX_8X4, TX_8X8,
     TX_SIZES_ALL,
 };
-
-static IDCT_LEGACY: AtomicBool = AtomicBool::new(false);
-static CLEAR_LEGACY: AtomicBool = AtomicBool::new(false);
-
-/// `av1_set_idct_legacy` (`dx/av1_perf.h`).
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_idct_legacy(enable: c_int) {
-    IDCT_LEGACY.store(enable != 0, Ordering::Relaxed);
-}
-
-/// `av1_set_clear_legacy` (`dx/av1_perf.h`).
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_clear_legacy(enable: c_int) {
-    CLEAR_LEGACY.store(enable != 0, Ordering::Relaxed);
-}
 
 /// Transform types of the sort: the transform sizes and the lossless transform.
 const TX_TYPES: usize = TX_SIZES_ALL as usize + 1;
@@ -99,7 +83,6 @@ pub(crate) unsafe fn idct_run(dec: *mut Av1Core) {
             (*(*dec).idct_residuals).size,
             frame_buffer.planes[1].res_offset,
             frame_buffer.planes[2].res_offset,
-            CLEAR_LEGACY.load(Ordering::Relaxed),
         );
         let value = [words, 0];
         commands.set_inline_constants(1, &value, 0);
@@ -144,28 +127,19 @@ pub(crate) unsafe fn idct_run(dec: *mut Av1Core) {
         commands.bind_constants(4, frame.location);
         // The first tile has the start of each type in the list of the frame.
         let starts = tiles[0].idct_blocks_sizes;
-        let use_small = !IDCT_LEGACY.load(Ordering::Relaxed);
         for tx_type in 0..TX_TYPES {
             let offset = starts[tx_type];
             let count = starts[tx_type + 1] - offset;
             if count == 0 {
                 continue;
             }
-            if use_small {
-                let shader = match tx_type as c_int {
-                    TX_4X4 => Some(&raw const (*lib).shader_idct4x4_v2),
-                    TX_4X8 => Some(&raw const (*lib).shader_idct4x8_v2),
-                    TX_8X4 => Some(&raw const (*lib).shader_idct8x4_v2),
-                    TX_8X8 => Some(&raw const (*lib).shader_idct8x8_v2),
-                    _ => None,
-                };
-                if let Some(shader) = shader {
-                    // One lane per block; the small kernels encode the scans in the shader.
-                    commands.set_pipeline(pipeline(shader));
-                    commands.set_inline_constants(5, &[offset, count], 0);
-                    commands.dispatch((count as u32).div_ceil(64), 1, 1);
-                    continue;
-                }
+            let shader = pipeline(&raw const (*lib).shader_idct[tx_type]);
+            if matches!(tx_type as c_int, TX_4X4 | TX_4X8 | TX_8X4 | TX_8X8) {
+                // One lane per block; the small kernels encode the scans in the shader.
+                commands.set_pipeline(shader);
+                commands.set_inline_constants(5, &[offset, count], 0);
+                commands.dispatch((count as u32).div_ceil(64), 1, 1);
+                continue;
             }
             // The lossless transform is 4x4.
             let tx_size = if tx_type == TX_SIZES_ALL as usize { TX_4X4 as usize } else { tx_type };
@@ -197,7 +171,7 @@ pub(crate) unsafe fn idct_run(dec: *mut Av1Core) {
             }
 
             let inline = [offset, work_items_per_block * count];
-            commands.set_pipeline(pipeline(&raw const (*lib).shader_idct[tx_type]));
+            commands.set_pipeline(shader);
             commands.bind_constants(3, scans.location);
             commands.set_inline_constants(5, &inline, 0);
             commands.dispatch(((inline[1] + 63) / 64) as u32, 1, 1);

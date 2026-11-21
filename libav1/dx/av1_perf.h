@@ -281,50 +281,11 @@ void av1_set_perf_callback(av1_perf_frame_cb_fn_t cb, void *priv);
  * it only while no frame is in flight, like the callback above. */
 void av1_set_cdef_v2(int enable);
 
-/* Process-wide. Non-zero selects the previous 64x64 CDEF v2 kernel.
- * Zero selects the optimized shader (default). The upstream shader selected
- * by av1_set_cdef_v2(0) takes precedence. Change it while no frame is in flight. */
-void av1_set_cdef_legacy(int enable);
-
-/* Process-wide. Non-zero selects the previous GPU CDEF list shader.
- * Zero selects the optimized shader (default). Applies only to decoders
- * that generate the CDEF lists on the GPU. Change it while no frame is in flight. */
-void av1_set_cdef_lists_legacy(int enable);
-
-/* Process-wide. Non-zero selects the original loop restoration shader.
- * Zero selects the optimized shader (default). Change it while no frame is in flight. */
-void av1_set_lr_legacy(int enable);
-
-/* Process-wide. Non-zero selects the original film grain apply shader for
- * direct NV12/P010 textures. Zero selects the default shader. Change it
- * only while no frame is in flight. */
-void av1_set_fg_legacy(int enable);
-
 /* Process-wide. Set while no frame is in flight. Non-zero skips film grain synthesis. */
 void av1_set_skip_film_grain(int enable);
 
-/* Process-wide. Non-zero selects the original direct NV12/P010 copy shader.
- * Zero selects the tiled shader (default). Change it while no frame is in flight. */
-void av1_set_copy_legacy(int enable);
-
-/* Process-wide. Non-zero selects the original lossy 4x4, 4x8, 8x4 and 8x8
- * transform shaders. Zero selects the per-thread shaders (default).
- * Change it while no frame is in flight. */
-void av1_set_idct_legacy(int enable);
-
-/* Process-wide. Non-zero clears the whole residual allocation before IDCT.
- * Zero clears the padded planes of the coded frame (default). Change it while
- * no frame is in flight. */
-void av1_set_clear_legacy(int enable);
-
-/* Process-wide. Non-zero selects the original single-reference and
- * average/distance-weighted compound shaders for unscaled inter on the size
- * lists. Zero selects the optimized shaders (default). Change it only while
- * no frame is in flight. */
-void av1_set_inter_legacy(int enable);
-
 /* Process-wide. Non-zero runs intra prediction through intra_v2.hlsl instead
- * of intra_main.hlsl + intra_filter.hlsl; the decoded output is the same.
+ * of the frame-wide wavefront kernels; the decoded output is the same.
  * Frames that allow intra block copy keep the original shaders. Off by
  * default. Change it only while no frame is in flight. */
 void av1_set_intra_v2(int enable);
@@ -334,15 +295,6 @@ void av1_set_intra_v2(int enable);
  * intra path. Change it only while no frame is in flight. */
 void av1_set_intra_opt(int enable);
 
-/* Nonzero restores the conservative wavefront and the previous exact V/H
- * prediction path (-intraschedulelegacy). Set before decoding. */
-void av1_set_intra_schedule_legacy(int enable);
-/* Use the previous 10-bit intra edge preparation (-intrabanklegacy). Set before decoding. */
-void av1_set_intra_bank_legacy(int enable);
-/* Use the previous intra wavefront step (-intrasteplegacy): the 10-bit main shader of
- * -intrabanklegacy's default, which looks up the mode parameters behind the record and loads the
- * residual and the other inputs behind its group syncs. Set before decoding. */
-void av1_set_intra_step_legacy(int enable);
 /* Use the prefetch shaders with the previous angle-specific wavefront. */
 void av1_set_intra_single_edge_legacy(int enable);
 
@@ -442,7 +394,7 @@ void av1_set_intra_filter_legacy(int enable);
  * that of the kernels, AV1_INTER_FAST_SINGLE_ORIGINAL and/or
  * AV1_INTER_FAST_COMPOUND_ORIGINAL: the blocks are still listed and
  * dispatched by class, but those with one reference, or with two, are
- * predicted by the original shader whatever their class. */
+ * predicted by the size-list shader whatever their class. */
 enum {
   AV1_INTER_FAST_ON = 1,
   AV1_INTER_FAST_SINGLE_ORIGINAL = 2,
@@ -450,10 +402,6 @@ enum {
   AV1_INTER_FAST_LISTS_ONLY = 7
 };
 void av1_set_inter_fast(int mode);
-
-/* Process-wide. Non-zero selects the original deblocking kernels.
- * Zero selects the default kernels. Change it only while no frame is in flight. */
-void av1_set_lf_legacy(int enable);
 
 /* Process-wide experiments for a device whose output differs from the
  * reference (docs/gpu-av1-decoder.md). Both leave the decoded output as it

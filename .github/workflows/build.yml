@@ -1509,7 +1509,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        case: [poisoned, interfast, syncclear, gridcheck, intraschedulelegacy, intrabanklegacy, intrasteplegacy, intrasingleedgelegacy, intralistslegacy, parselistslegacy, steptime]
+        case: [poisoned, interfast, syncclear, gridcheck, intrasingleedgelegacy, intralistslegacy, parselistslegacy, steptime]
     steps:
       - name: Disable newline conversion
         run: git config --global core.autocrlf false
@@ -3809,7 +3809,7 @@ jobs:
   # Every shader with group memory, compiled as C++, runs with its thread groups under an adversarial
   # schedule and its group memory watched for races; a plain GroupMemoryBarrier() is rejected; and
   # for every group sync a copy of the shader with that sync turned into a plain barrier must be
-  # rejected for a race. (The CDEF, intra and warp checks below run their shaders the same way.)
+  # rejected for a race. The restoration, deblocking, CDEF, intra and warp checks watch their own shaders.
   sync-check:
     runs-on: ubuntu-26.04
     timeout-minutes: 30
@@ -3824,10 +3824,13 @@ jobs:
           sh testing/sync_check/run.sh --mutate | tee sync-check.log
           { echo '## Thread group check'; echo '```'; cat sync-check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Compare loop restoration with its legacy shader
-        run: sh testing/restoration_check/run.sh
+      - name: Compare loop restoration with a scalar reference
+        run: sh testing/restoration_check/run.sh --mutate
 
-      - name: Compare direct-texture film grain with its legacy shader
+      - name: Compare deblocking filters and edge lists with scalar references
+        run: sh testing/loopfilter_check/run.sh --mutate
+
+      - name: Compare direct-texture film grain with a scalar reference
         run: sh testing/film_grain_check/run.sh --mutate
 
   # The CDEF shaders, compiled as C++, must write byte-identical frames and
@@ -3865,8 +3868,7 @@ jobs:
           sh testing/warp_check/run.sh --mutate | tee warp-check.log
           { echo '## Warp check'; echo '```'; tail -n 15 warp-check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
-  # Host check of the default and -interfast kernels against the original unscaled inter shaders and
-  # libaom. The shaders run as C++ with generated 8-bit and 10-bit block records covering sizes,
+  # Host check of the default and -interfast kernels against libaom. The shaders run as C++ with generated 8-bit and 10-bit block records covering sizes,
   # phases, filters, compound weights and frame edges. Deliberate kernel mutations must fail.
   inter-check:
     runs-on: ubuntu-26.04
@@ -3876,7 +3878,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Compare unscaled inter shaders with the original shaders and libaom
+      - name: Compare unscaled inter shaders with libaom
         run: |
           set -euo pipefail
           sh testing/inter_check/run.sh --mutate | tee inter-check.log
@@ -3929,9 +3931,8 @@ jobs:
           sh testing/tables_check/run.sh --mutate | tee tables-check.log
           { echo '## Tables and inline functions of libaom'; echo '```'; cat tables-check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
-  # Host proof for intra v2: the original intra shaders (intra_main + intra_filter, with the
-  # wavefront iterations of the original host code) and intra_v2 with its scheduler, compiled as
-  # C++, must write byte-identical frames on generated block layouts, 8-bit and 10-bit.
+  # The conservative and prefetching wavefront kernels and intra_v2 with its scheduler
+  # must write byte-identical frames on generated 8-bit and 10-bit block layouts.
   intra-check:
     runs-on: ubuntu-26.04
     timeout-minutes: 30
@@ -3940,7 +3941,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Compare intra_v2.hlsl with intra_main.hlsl and intra_filter.hlsl
+      - name: Compare the intra wavefront kernels with intra_v2
         run: |
           set -euo pipefail
           sh testing/intra_check/run.sh --mutate --layouts 400 | tee intra-check.log

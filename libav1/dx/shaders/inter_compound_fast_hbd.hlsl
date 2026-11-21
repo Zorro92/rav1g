@@ -10,6 +10,6 @@
  */
 
 // Test flag -interfast: inter_compound_fast.hlsl for frame buffers of 16-bit samples
-// (inter_compound_hbd.hlsl's blocks).
+// (inter_compound_v2_hbd.hlsl's blocks).
 #define INTER_FAST_HBD 1
 #include "inter_compound_fast.hlsl"

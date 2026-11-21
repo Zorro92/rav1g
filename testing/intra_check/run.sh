@@ -42,14 +42,13 @@ to_cpp() {
     -e 's/void main\(/void shader_main(/' \
     -e 's/\.xyz;/.xyz();/' \
     -e 's/([a-z0-9_]+)\.zw = ([a-z0-9_]+)\.yy;/\1.z = \2.y; \1.w = \2.y;/' \
-    -e 's/#include "(intra_main(_hbd)?|intra_filter(_hbd)?)\.hlsl"/#include "\1.gen.h"/' \
+    -e 's/#include "(intra_main(_hbd)?|intra_filter(_hbd)?)\.(hlsl|h)"/#include "\1.gen.h"/' \
     -e 's/#include "intra_v2\.hlsl"/#include "intra_v2.gen.h"/' \
     "$1" | sed -E -f "$here/../common/gs_groupshared.sed"
 }
 
 to_cpp "$shaders/intra_main.hlsl" > "$work/intra_main.gen.h"
 to_cpp "$shaders/intra_main_hbd.hlsl" > "$work/intra_main_hbd.gen.h"
-to_cpp "$shaders/intra_main_banked_hbd.hlsl" > "$work/intra_main_banked_hbd.gen.h"
 to_cpp "$shaders/intra_main_prefetch_hbd.hlsl" > "$work/intra_main_prefetch_hbd.gen.h"
 to_cpp "$shaders/intra_main_prefetch.hlsl" > "$work/intra_main_prefetch.gen.h"
 to_cpp "$shaders/intra_main_single_edge.hlsl" > "$work/intra_main_single_edge.gen.h"
@@ -76,9 +75,9 @@ to_cpp "$shaders/intra_filter_prefetch.hlsl" > "$work/intra_filter_prefetch.gen.
 to_cpp "$shaders/intra_filter_prefetch_hbd.hlsl" > "$work/intra_filter_prefetch_hbd.gen.h"
 to_cpp "$shaders/intra_main_legacy.hlsl" > "$work/intra_main_legacy.gen.h"
 to_cpp "$shaders/intra_main_hbd_legacy.hlsl" > "$work/intra_main_hbd_legacy.gen.h"
-to_cpp "$shaders/intra_filter.hlsl" > "$work/intra_filter.gen.h"
+to_cpp "$shaders/intra_filter.h" > "$work/intra_filter.gen.h"
 to_cpp "$shaders/intra_filter_legacy.hlsl" > "$work/intra_filter_legacy.gen.h"
-to_cpp "$shaders/intra_filter_hbd.hlsl" > "$work/intra_filter_hbd.gen.h"
+to_cpp "$shaders/intra_filter_hbd.h" > "$work/intra_filter_hbd.gen.h"
 to_cpp "$shaders/intra_v2.hlsl" > "$work/intra_v2.gen.h"
 to_cpp "$shaders/intra_v2_hbd.hlsl" > "$work/intra_v2_hbd.gen.h"
 # All group memory has to be the kind that is watched (testing/common/group_sched.h).
@@ -127,7 +126,7 @@ build() {
   flags="$flags -I $1 -I $here -I $src/libav1/dx ${2:-}"
   rm -f "$1"/*.o
   for shader in intra_main:0 intra_main_hbd:0 intra_main_legacy:0 intra_main_hbd_legacy:0 \
-    intra_filter:1 intra_filter_legacy:1 intra_filter_hbd:1 intra_main_banked_hbd:0 intra_main_prefetch_hbd:0 intra_main_prefetch:0 \
+    intra_filter_legacy:1 intra_main_prefetch_hbd:0 intra_main_prefetch:0 \
     intra_main_prefetch_double_hbd:0 intra_main_prefetch_double:0 intra_main_single_edge:0 intra_main_single_edge_hbd:0 \
     intra_filter_prefetch:1 intra_filter_prefetch_hbd:1 intra_v2:2 intra_v2_hbd:2; do
     name=${shader%:*}
@@ -135,9 +134,6 @@ build() {
     case $name in
       # (SHADER_HBD names the group memory to scramble: the 8-bit prefetching shader has the 10-bit one's.)
       *_hbd | *_hbd_legacy | intra_main_prefetch | intra_main_prefetch_double | intra_main_single_edge) hbd=-DSHADER_HBD ;;
-    esac
-    case $name in
-      intra_main | intra_main_hbd) hbd="$hbd -DINTRA_TIGHT" ;;
     esac
     filter_layout=
     case $name in
@@ -188,7 +184,7 @@ intra_filter.gen.h@s/(uint)lo.x + ((uint)hi.x << 16)/((uint)lo.x \& 65535) | ((u
 intra_filter.gen.h@s/0x00080008u/0x00080007u/@8-bit filter intra pair rounding@MISMATCH
 intra_filter.gen.h@s/predicted | (output << 16)/output | (output << 16)/@8-bit filter intra uncorrected prediction edge@MISMATCH
 intra_filter.gen.h@/dst_frame.Store(/p@8-bit filter intra duplicate frame word store@duplicate frame word stores [1-9]
-intra_filter.gen.h@s/2 \* (row + 1) \* res_stride/2 * row * res_stride/@8-bit filter intra next-row residual@MISMATCH
+intra_filter.gen.h@s/2 \* q \* res_stride/q * res_stride/@8-bit filter intra preloaded residual stride@MISMATCH
 intra_filter_hbd.gen.h@s/(sum + 0x8000u)/(sum)/@high-bit-depth filter intra tap borrow
 intra_filter_hbd.gen.h@s/if (diagonal != 0) GroupMemoryBarrierWithGroupSync();/if (diagonal != 0) GroupMemoryBarrier();/@filter intra diagonal group sync as a plain barrier@races in group memory .*[1-9]
 intra_main.gen.h@/above\[loc_base + wi\] = luma.x + luma.y + luma.z + luma.w;/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/@group sync before the CFL sum of intra_main as a plain barrier@races in group memory .*[1-9]
@@ -214,8 +210,8 @@ intra_main_hbd.gen.h@s/smooth_h_weights\[i\] \* (left - right)/smooth_h_weights[
 intra_main_hbd.gen.h@s/min(above_available << 1, bw) + need_right/min(above_available << 2, bw) + need_right/@edge sample count of the row above twice the specification (AV1 7.11.2.4 numPx)@MISMATCH in the prefetching 8-bit shaders
 intra_v2.gen.h@s/min(aa_cells << 2, b.bw)/min(aa_cells << 3, b.bw)/@intra_v2 edge sample count of the row above twice the specification@MISMATCH between the legacy path and intra_v2
 intra_main_hbd_double.gen.h@s/min(above_available << 2, bw) + need_right/min(above_available << 1, bw) + need_right/@coverage of a row above across maxX that changes the frame@no layout reached
-intra_filter_hbd.gen.h@s/queue\[q\] = queue\[q + 1\];/queue[q] = queue[q];/@10-bit filter intra residual queue@MISMATCH in the prefetching
-intra_filter.gen.h@s/queue\[q\] = queue\[q + 1\];/queue[q] = queue[q];/@8-bit filter intra residual queue@MISMATCH in the prefetching'
+intra_filter_hbd.gen.h@s/queue\[q\] = queue\[q + 1\];/queue[q] = queue[q];/@10-bit filter intra residual queue@MISMATCH between the legacy path and intra_v2
+intra_filter.gen.h@s/queue\[q\] = queue\[q + 1\];/queue[q] = queue[q];/@8-bit filter intra residual queue@MISMATCH'
   mkdir "$work/mutant"
   echo "$mutants" | while IFS='@' read -r file expr what expect; do
     cp "$work"/*.gen.h "$work/mutant/"

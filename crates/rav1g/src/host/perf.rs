@@ -86,7 +86,7 @@ pub(crate) fn perf_detail_mode() -> c_int {
 static INTER_FAST: AtomicI32 = AtomicI32::new(0);
 
 /// `av1_set_inter_fast` (`dx/av1_perf.h`). `mode`: 0 off, or `AV1_INTER_FAST_ON` with the bits that keep
-/// the original shader on the lists by class.
+/// the size-list shader on the lists by class.
 #[unsafe(no_mangle)]
 pub extern "C" fn av1_set_inter_fast(mode: c_int) {
     let on = mode & sys::AV1_INTER_FAST_ON as c_int != 0;

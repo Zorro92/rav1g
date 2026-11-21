@@ -45,7 +45,7 @@ one commit each:
 - **Intra v2**: a second intra prediction path: the shader `libav1/dx/shaders/intra_v2.hlsl`
   (with `intra_v2_hbd.hlsl` for high bit depth), its scheduler `libav1/dx/intra_v2_sched.h`,
   and the player flag `-intrav2` that selects it; see [Intra v2 run](#intra-v2-run--intrav2).
-  The frame-wide wavefront path using `intra_main` and `intra_filter` stays the default.
+  The frame-wide wavefront with prefetching stays the default.
   Intra v2 also adds intra dispatch counters to the `-gputime` output and a
   host-side comparison of the two paths (`testing/intra_check`), which is not part of the
   player build. It is bit-exact but slower than the original path.
@@ -264,10 +264,10 @@ changes what another read or wrote since then, is a race, reported with the shad
 source line of both accesses, whatever order the threads were run in. A group sync that not
 all threads of the group reach is an error, and so is a group that does not end.
 
-`cdef_check`, `intra_check` and `warp_check` run their shaders this way and fail on a race, a
-plain barrier or a sync error as they do on a wrong frame. `testing/sync_check` does it for
-every shader with group memory that has no reference check (the transforms, inter prediction,
-deblocking, loop restoration, film grain): the shader sources are turned into C++ by
+The CDEF, intra, deblocking, restoration and warp checks fail on a race, a plain barrier or
+a sync error as they do on a wrong frame. `testing/sync_check` covers other shaders with group
+memory, including the cooperative transforms, inter prediction and shared film grain apply.
+The shader sources are turned into C++ by
 `testing/sync_check/to_cpp.py` (line numbers are kept), and run on generated input (constants,
 block records and buffers shaped so that every path is taken and two groups never write the
 same words). Every case runs twice with two thread orders and must write the same bytes. It
@@ -281,13 +281,13 @@ sh testing/sync_check/run.sh --mutate    # and, for every group sync, a copy of 
 sh testing/sync_check/run.sh --shaders <dir>   # the shaders of another directory
 ```
 
-On the shaders before the fix (`--shaders` with a checkout of rav1g 7ff22d5) 53 of 58 fail.
-The mutation run ends with
+In the original check, 53 of 58 shaders from rav1g 7ff22d5 failed.
+The current mutation run reports
 
 ```text
-sync_check: 58 shaders, 15660 thread groups: no race in group memory, every group sync reached by all threads,
+sync_check: 49 shaders, 11834 thread groups: no race in group memory, every group sync reached by all threads,
 no plain group memory barrier, output independent of the thread order
-sync_check: 113 mutants, each with one group sync turned into a plain barrier: 111 rejected for a race, 0 because they did not end, 2 pass as listed (group syncs of upstream that order nothing)
+sync_check: 93 mutants, each with one group sync turned into a plain barrier: 91 rejected for a race, 0 because they did not end, 2 pass as listed (group syncs of upstream that order nothing)
 ```
 
 No run can hang: the scheduler ends a thread group that makes more group syncs, or a thread
@@ -366,21 +366,21 @@ The log lines at the start of each task show which defaults and opt-out flags ar
 
 | Setting | Default | Its log line | Other values |
 | --- | --- | --- | --- |
-| CDEF shader | `cdef_filter_v2.hlsl`, 64×32 luma regions | `CDEF shader: cdef_filter_v2 (default)` | `-cdeflegacy`: the previous 64×64 v2 shader. `-cdefv1`: upstream's `cdef_filter.hlsl`. |
-| GPU CDEF lists | `cdef_lists.hlsl`, reuses mode info within an 8×8 block | `CDEF lists shader: cdef_lists (default)` | `-cdeflistslegacy`: the previous GPU list shader. Can be combined with `-cdeflegacy`. |
-| Loop restoration | `loop_restoration.hlsl` on planes with SGR units, `loop_restoration_wiener.hlsl` on Wiener and copy-only planes | `Loop restoration shader: loop_restoration / loop_restoration_wiener (default)` | `-lrlegacy`: `loop_restoration_legacy.hlsl`, the original DXC kernel, in either shader set |
+| CDEF shader | `cdef_filter_v2.hlsl`, 64×32 luma regions | `CDEF shader: cdef_filter_v2 (default)` | `-cdefv1`: upstream's `cdef_filter.hlsl`. |
+| CDEF lists | `cdef_lists.hlsl`, reuses mode info within an 8×8 block | `CDEF lists shader: cdef_lists (default)` | `-parseopt none` uses the CPU list builder. |
+| Loop restoration | `loop_restoration.hlsl` on planes with SGR units, `loop_restoration_wiener.hlsl` on Wiener and copy-only planes | `Loop restoration shader: loop_restoration / loop_restoration_wiener (default)` | |
 | Decoder size | the stream's largest frame size, rounded up to 128, and 8-bit buffers for an 8-bit stream; see [Decoder size](#decoder-size--nofitsize) | `Decoder size: 3840x2176 10-bit (fit to the stream, default)` | `-nofitsize`: 4096x2176 10-bit for every stream, `Decoder size: 4096x2176 10-bit (fixed, -nofitsize)` |
 | Memory reductions | the library's default for the decoder's size: part 1, one back buffer shared by all frames (frame buffer pool 12 → 10), and since package 0.2.186 for a decoder above 1920x1088 part 2, the mode info pool at half (55.8 MiB less at 4K; [memory.md](memory.md#the-wait-of-the-second-frame-in-parse-in-a-pool-at-half-candidate-2)), since 0.2.191 part 32, the frame buffer bound at the recording (24.2 MiB), and since 0.2.193 part 4, the coefficient pool at four fifths (12.0 MiB); no measurable time cost; see [Smaller decoder](#smaller-decoder--lowmem) | `Low memory parts: default (the library's: 1 shared back buffer, and above 1920x1088 also 2 mode info pool at half, 4 smaller coefficient pool, 32 frame buffer bound at the recording)`; the decoder's `MEMORY decoder created options` line says which pool it is | `-lowmemparts 1`: the mode info pool of the worst case, the default up to package 0.2.185; `-lowmemparts 0`: none, every frame takes its back buffer from the pool (`Low memory parts: 0 (none, -lowmemparts 0)`); `-lowmemparts N`: exactly the parts in `N`; `-lowmem`: all three (`-lowmemparts 7`) |
 | Pipeline slots | 2 | `Frame slots: 2` | `-slots 3`, `-slots 4` |
 | Parser | the parse pass of rav1d, with its switches `nolfmask`, `tilethread` and (since package 0.2.197) `gpucdef` on | `Parser: the parse pass of rav1d`, `Parser switches (-parseopt): nolfmask tilethread gpucdef` | none since package 0.2.159: the entropy decoder of libaom (`-parser c`) left the decoder; up to 0.2.157 `Parser: the entropy decoder of libaom (-parser c)`; `-parseopt` for the switches; see [Parser](#parser--parser) |
 | Clears of a slot | none: the wavefront of intra prediction is kept at the edges of the tiles (since package 0.2.146.0) | `Clears: none needed (default: intra wavefront at the edges of the tiles; -gpuclear, -cpuclear and -syncclear keep it in the slot's grid and clear that)` | `-gpuclear`, `-cpuclear`, `-syncclear`: the wavefront in the slot's grid, cleared for every frame by the GPU, the completion thread (the default of 0.2.140 to 0.2.144; `-asyncclear` is the same) or the decode thread; see [Clears](#clears) |
-| Intra prediction | frame-wide wavefront, DXC-optimized main shaders | `Intra main shader: intra_main (default)` | `-intrav2`, `-intraod` |
-| Unscaled single-reference and average/distance compound prediction on size lists | `inter_main_v2` and `inter_compound_v2`, with HBD variants | `Inter shaders: inter_main_v2, inter_compound_v2 (default)` | `-interlegacy` selects the original shaders. `-interfast` selects [motion-class lists and shaders](#inter-fast-path--interfast). |
+| Intra prediction | frame-wide wavefront with prefetching and single-edge dependencies | `Intra main shader: prefetching with single-edge dependencies` | `-intrav2`, `-intraod`, `-intrasingleedgelegacy` |
+| Unscaled single-reference and average/distance compound prediction on size lists | `inter_main_v2` and `inter_compound_v2`, with HBD variants | `Inter shaders: inter_main_v2, inter_compound_v2 (default)` | `-interfast` selects [motion-class lists and shaders](#inter-fast-path--interfast). |
 
 
 On a device that logs `OUTPUT P010 direct` or `OUTPUT NV12 direct`, film grain uses
-`film_grain_filter_sp_tex_v2`. Add `-fglegacy` to the same `-output p010` task to
-select the original `film_grain_filter_sp_tex` and compare per-frame MD5s.
+`film_grain_filter_sp_tex_v2`. The planes that do not get grain use
+`copy_plane_sp_tex_v2`.
 
 - **`-cdefv2` and `-fitsize` are still accepted** and change nothing: old task lines keep
   working. `-lowmem` is still all three parts. Parts 2 and 4 stay opt-in because they can
@@ -899,46 +899,32 @@ default uses 64×32 groups and two lanes per 8×8 block.
 | Flag | Effect |
 | --- | --- |
 | none | CDEF runs through `cdef_filter_v2.hlsl`. **The default since package 0.2.8.0.** |
-| `-cdeflegacy` | CDEF runs through `cdef_filter_v2_legacy.hlsl`, the previous 64×64 kernel. Use this to compare the current v2 kernel with its predecessor. |
 | `-cdefv1` | CDEF runs through upstream's `cdef_filter.hlsl`: the same pipeline state and the same dispatch as upstream. For A/B runs. |
-| `-cdefv2` | Alias for the default (it was the opt-in flag up to package 0.2.7.0). Use one of the three flags per task. |
+| `-cdefv2` | Alias for the default (it was the opt-in flag up to package 0.2.7.0). Use at most one CDEF flag per task. |
 
 The task's log says which shader is in use:
 
 ```text
 CDEF shader: cdef_filter_v2 (default)
-CDEF shader: cdef_filter_v2_legacy (-cdeflegacy)
 CDEF shader: cdef_filter (original, -cdefv1)
 ```
 
-The rest of this section describes the original comparison. To use those
-kernels with the current player, use `-cdefv1` for upstream and
-`-cdeflegacy` for the 64×64 v2 kernel.
-
 ### What changed in the shader
 
-| | `cdef_filter.hlsl` (upstream) | `cdef_filter_v2_legacy.hlsl` |
-| --- | --- | --- |
-| Thread group | 4 x 4 x 8, one group per 32x32 luma | 8 x 8 x 1, one group per 64x64 luma (one CDEF strength index) |
-| A thread's work | one 8-sample row of an 8x8 luma block, then one 4-sample row of a 4x4 chroma block (U or V) | one 8x8 luma block and its two 4x4 chroma blocks |
-| 64x64 with zero strengths or no index | full load, direction search, filter with zero strengths (a copy) and store | the group copies its samples and does nothing else |
-| 8x8 block with zero primary strengths | direction search still runs | no direction search |
-| Direction search | on 16 of the 128 threads, a loop over 64 samples into an indexed array, while the other threads wait at a barrier | on every thread for its own block, fully unrolled |
-| Group shared memory | 32-bit per sample, an input window and an output array; results are written to shared memory, read back and then stored | two 16-bit samples per word, input window only; each thread stores its own result |
-| Barriers per group | six in the source, five after FXC | one |
-| Primary tap weights | constant table (immediate constant buffer) | computed |
-
-Bindings, the constant buffer and the frame buffers are the same, so the host change
-is the choice of pipeline state and the dispatch size (`(w + 63) >> 6` by
-`(h + 63) >> 6` groups instead of `(w + 31) >> 5` by `(h + 31) >> 5`).
+The default splits 64×64 luma regions into two 64×32 groups that use the same CDEF
+strength index. Two lanes share direction search for each 8×8 luma block. The group
+copies its portion when both strengths are zero, and skips direction search for blocks
+without primary strength. The earlier 64×64 implementation assigned the whole 8×8 block
+and its chroma to one lane. The 64×32 groups cut CDEF time from 2.41 to 1.87 ms per
+frame in the 4K console run.
 
 ### Timing: old against new
 
 Both lines in `args_av1.txt`, same clip, same settings; the only difference is the flag:
 
 ```text
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -gputime -nopresent -cdefv1
 -i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -gputime -nopresent
--i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -gputime -nopresent -cdefv2
 ```
 
 Compare the `gpu cdef` row of the two summaries' stage tables, then `gpu busy` and the
@@ -952,8 +938,8 @@ shader is checked against it. A reference that does not come from this decoder a
 better where one can be made: see [md5 references from dav1d](#md5-references-from-dav1d).
 
 ```text
--i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -save_md5 /streams/<clip>.ivf.md5
--i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -cdefv2 -md5_frame_check
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -cdefv1 -save_md5 /streams/<clip>.ivf.md5
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -md5_frame_check
 ```
 
 - `-save_md5` takes a path below LocalState, like `-i`. `-md5_frame_check` takes no
@@ -1050,9 +1036,9 @@ From the repository root (needs `g++`, no GPU):
 sh testing/cdef_check/run.sh --mutate
 ```
 
-It ends with `cdef_check: OK, cdef_filter_v2.hlsl output is byte-identical to
-cdef_filter.hlsl`. This proves the HLSL logic; the md5 run above is the proof for the
-compiled shader on the console.
+It checks direction and in-frame filtering against a scalar AV1 model, frame pool bytes
+against `cdef_filter.hlsl`, and GPU strength and skip lists against the CPU rules.
+The per-frame MD5 run checks the compiled shaders on the console.
 
 ### Shader listings in the artifact
 
@@ -1086,17 +1072,16 @@ replacement to measure against it.
 
 | Flag | Effect |
 | --- | --- |
-| `-intrav2` | Intra prediction runs through `intra_v2.hlsl` (`intra_v2_hbd.hlsl` for high bit depth) instead of `intra_main.hlsl` + `intra_filter.hlsl`. Decoded output is meant to be identical. |
+| `-intrav2` | Intra prediction runs through `intra_v2.hlsl` (`intra_v2_hbd.hlsl` for high bit depth) instead of the default wavefront kernels. Decoded output is meant to be identical. |
 
-Off by default: without the flag the decoder takes the upstream code path, shaders and
-dispatches. The flag is independent of `-cdefv2`; the two can be combined freely. A
+The flag is off by default. It is independent of `-cdefv2`. A
 frame that allows intra block copy (screen content) keeps the upstream shaders even
 with the flag; `iv2` in the per-frame line says which path a frame took. The task's log
 says which path is selected:
 
 ```text
-Intra shaders: intra_main + intra_filter (original)
-Intra shaders: intra_v2 (-intrav2; frames with intra block copy keep the original shaders)
+Intra shaders: frame-wide wavefront
+Intra shaders: intra_v2 (-intrav2; frames with intra block copy use the frame-wide wavefront)
 ```
 
 ### What changed
@@ -1280,16 +1265,14 @@ front of the first and twice the group memory (21 KiB, behind `-parseopt intrale
 that was not merged) was slower than the default on the same console: `j4k40` intra 12.39 ms,
 51.4 fps.
 
-## Deblocking A/B (`-lflegacy`)
+## Deblocking checks
 
-The test player and `rav1g-dec` select the new deblocking kernels by default.
-Add `-lflegacy` to select the original kernels. For a bit-exact comparison, keep
-the other arguments the same and compare the per-output-frame md5s. With stage
-dumps, compare `lf_blocks`, `lf_vert_even`, `lf_vert` and `lf_horz` in that order.
-With `-gputimedetail`, the GPU stage times are `lf_gen`, `lf_vert` and `lf_horz`.
+With stage dumps, compare `lf_blocks`, `lf_vert_even`, `lf_vert` and `lf_horz`
+in that order. The GPU timing stages are `lf_gen`, `lf_vert` and `lf_horz`.
 
-Run `sh testing/loopfilter_check/run.sh --mutate` for the CPU comparison and its
-negative controls.
+Run `sh testing/loopfilter_check/run.sh --mutate` for scalar references for
+the edge lists and the filter stages. The check covers both bit depths, vertical even
+and odd passes, and all three horizontal schedules.
 
 ## Intra optimisation A/B (`-intraod`)
 
@@ -1297,19 +1280,18 @@ Use the same build and task settings on both sides of the comparison.
 
 | Flag | Main intra kernel |
 | --- | --- |
-| Default or `-intraopt` | DXC `-O3` with guarded DC/CFL wave reductions in `intra_main` and `intra_main_hbd` |
-| `-intraod` | DXC `-Od` for `intra_main_legacy` and `intra_main_hbd_legacy` |
+| Default or `-intraopt` | DXC `-O3` with guarded DC/CFL wave reductions, prefetching and single-edge dependencies |
+| `-intraod` | Conservative wavefront with DXC `-Od` for `intra_main_legacy` and `intra_main_hbd_legacy` |
 
 The player logs the selected kernel, and `rav1g-dec` accepts the same flags. With
 `-intrav2`, the choice applies to frames that still use the main intra path.
 The shader-pick build also supports `-shaderpick od=intra_main,intra_main_hbd`
-to use the baseline bytecode under the default shader names.
-To isolate the 8-bit reduction change at `-O3`, compare defaults with the
-preceding filter-only commit.
+to select the unoptimized bytecode for the conservative kernels used by
+`-intrav2` on frames with intra block copy.
 
 `-intrafilterlegacy` selects the previous 8-bit filter intra shader in both the
 player and `rav1g-dec`. It controls filter intra independently of `-intraod` and
-applies when the frame uses the `intra_main` and `intra_filter` path.
+applies when the frame uses the main wavefront path.
 
 For timing, append `-progress -gputime -nopresent` to both tasks and compare intra time,
 GPU busy time, and recording time. For validation, use `-md5_frame_check` in separate
@@ -1569,26 +1551,24 @@ the `MEMORY app` lines after the creation and at the first frame (the app's memo
 
 ## Inter fast path (`-interfast`)
 
-Two thirds of the reference fetches of the 4K clips have a motion vector without a fraction,
-and the original inter shaders run both 8-tap passes for them all the same. With this flag
-the blocks with one reference and the averaged (or distance weighted) compound blocks are
-listed by the fraction of their motion vectors and predicted by `inter_fast.hlsl` and
-`inter_compound_fast.hlsl`, which copy, or run one pass, where that is all the vector needs.
+With this flag, the blocks with one reference and the averaged or distance-weighted compound
+blocks are listed by the fraction of their motion vectors. The class-specific kernels
+`inter_fast.hlsl` and `inter_compound_fast.hlsl` use that class to select the filtering work.
+The default size-list shaders choose the required passes from the vector in each record.
 The decoded output is the same. Design, formulas and the console numbers behind it:
 [gpu-av1-decoder.md](gpu-av1-decoder.md#inter-prediction-breakdown-and-fast-paths-2026-11-12).
 
 | Flag | Effect |
 | --- | --- |
 | *(none)* | lists by type and block size, with phase selection inside `inter_main_v2` and `inter_compound_v2` |
-| `-interlegacy` | the same size lists with `inter_main` and `inter_compound` |
-| `-interfast` | lists by motion vector class and block size; `inter_fast` for the classes copy, h and v, `inter_compound_fast` for the pairs of classes of two references, the original shaders for the class with a fraction both ways. Frames with a scaled reference keep the original path. |
-| `-interfastlists` | the same lists and dispatches, but `inter_main` and `inter_compound` on every one of them: what the lists alone cost or gain (more and smaller dispatches, blocks of a class side by side), without the new kernels. |
+| `-interfast` | lists by motion vector class and block size; `inter_fast` for the classes copy, h and v, `inter_compound_fast` for the pairs of classes of two references, the size-list shaders for the class with a fraction both ways. Scaled references use the scaled shaders. |
+| `-interfastlists` | the same lists and dispatches, but `inter_main_v2` and `inter_compound_v2` on every one of them: what the lists alone cost or gain (more and smaller dispatches, blocks of a class side by side), without the new kernels. |
 
 - Log line of the task: `Inter shaders: by motion vector class: inter_fast, inter_compound_fast
   (-interfast; frames with a scaled reference keep the original shaders)`. `rav1g-dec` prints
   `INTERFAST <task>: ...` with the flag.
-- `-interfastlists` logs `Inter shaders: lists by motion vector class, inter_main and
-  inter_compound on them (-interfastlists; ...)`.
+- `-interfastlists` logs `Inter shaders: lists by motion vector class, inter_main_v2 and
+  inter_compound_v2 on them (-interfastlists; ...)`.
 - A decoder that was created without either flag is replaced when a task asks for one (the
   lists by class need room in the block maps: 1984 bytes per tile the decoder size can have, one
   per 64x64, and pipeline slot; 1.0 MiB per slot at 1080p, 3.9 MiB at 4K).
@@ -1604,7 +1584,7 @@ The decoded output is the same. Design, formulas and the console numbers behind 
 own, against a reference that is already next to the stream):
 
 ```text
--i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputimedetail -interlegacy
+-i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputimedetail
 -i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputimedetail -interfast
 ```
 
@@ -1615,10 +1595,10 @@ Add a third run with `-interfastlists` in place of `-interfast` to isolate the c
 ```
 
 Compare `gpu inter` and `gpu busy` of the pair, and per class the `ns/px` of `single.*`
-and `comp_avg.*` with the `single` and `comp_avg` rows of the `-interlegacy` run.
+and `comp_avg.*` with the `single` and `comp_avg` rows of the default run.
 
-**Host checks:** `sh testing/inter_check/run.sh --mutate` compares the default shaders with the
-original shaders, and the original and fast shaders with libaom. The conformance job decodes
+**Host checks:** `sh testing/inter_check/run.sh --mutate` compares default, `-interfast`
+and `-interfastlists` output with libaom. The conformance job decodes
 the whole set on WARP once more with `-interfast` (251 of 251
 streams) and three streams with `-gputimedetail -interfast` and `-gputimedetail -interfastlists`.
 
@@ -3496,7 +3476,7 @@ does with `-sm6test`: it may stand on a line of its own or on the line of a stre
 of the file counts. One launch, one pick: a bisection is one launch per pick. In `rav1g-dec` it is a
 program flag (the command line, or `--tool-args` of `testing/conformance/run.py`).
 
-`-shaderpick od=intra_filter_hbd` selects the current high-bit-depth filter-intra
+`-shaderpick od=intra_filter_prefetch_hbd` selects the high-bit-depth filter-intra
 kernel compiled with `-Od`. Both sets use the kernel that preloads the edges and taps and
 predicts two adjacent samples per lane.
 

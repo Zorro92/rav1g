@@ -4,6 +4,7 @@
 
 #include <array>
 #include <random>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -31,6 +32,11 @@ struct Image {
     word = (word & ~(((1u << (8 * bytes)) - 1) << shift)) | ((value & mask) << shift);
   }
 
+  int sample(int x, int y) const {
+    const int address = (y + kPad) * stride + (x + kPad) * bytes;
+    return (words[address / 4] >> ((address & 3) * 8)) & ((1u << (bytes * 8)) - 1);
+  }
+
   RWByteAddressBuffer buffer() { return {{words.data(), words.size()}, words.data()}; }
 };
 
@@ -52,6 +58,10 @@ struct EdgeLists {
   void set(uint block, uint pos, uint step, uint type, uint level) {
     const uint edge = (step << 8) | (type << 6) | level;
     words[(kListBase + block) * 8 + pos / 2] |= edge << (16 * (pos & 1));
+  }
+
+  uint at(uint block, uint pos) const {
+    return (words[(kListBase + block) * 8 + pos / 2] >> (16 * (pos & 1))) & 0xffff;
   }
 
   ByteAddressBuffer buffer() const { return {words.data(), words.size()}; }
@@ -102,18 +112,84 @@ void dispatch(const Kernel &kernel, const Dispatch &d, bool shuffle) {
   }
 }
 
+// AV1 7.14.6. Evaluate one edge as scalar samples, with the wide filter's
+// symmetric window rather than the packed and unrolled shader expressions.
+void filter_sample(Image &image, int x, int y, bool horizontal, int type, int4 limits) {
+  const int scale = 1 << (image.depth - 8);
+  const auto get = [&](int n) { return image.sample(x + (horizontal ? 0 : n), y + (horizontal ? n : 0)); };
+  const auto put = [&](int n, int value) { image.set(x + (horizontal ? 0 : n), y + (horizontal ? n : 0), value); };
+  const int p0 = get(-1), p1 = get(-2), q0 = get(0), q1 = get(1);
+  if (2 * std::abs(p0 - q0) + std::abs(p1 - q1) / 2 > limits.y * scale) return;
+
+  const int neighbors = std::min(4, type + 2);
+  for (int i = 1; i < neighbors; ++i) {
+    if (std::abs(get(-1 - i) - get(-i)) > limits.x * scale ||
+        std::abs(get(i) - get(i - 1)) > limits.x * scale) return;
+  }
+  const auto flat = [&](int count) {
+    for (int i = 1; i < count; ++i) {
+      if (std::abs(get(-1 - i) - p0) > scale || std::abs(get(i) - q0) > scale) return false;
+    }
+    return true;
+  };
+
+  if (type != 0 && flat(neighbors)) {
+    const int radius = type == 3 && flat(7) ? 6 : type == 1 ? 2 : 3;
+    const int total = radius == 6 ? 16 : 8;
+    const int double_tap = radius == 3 ? 0 : 1;
+    int result[12];
+    for (int i = -radius; i < radius; ++i) {
+      int sum = 0;
+      for (int j = -radius; j <= radius; ++j) {
+        const int pos = std::clamp(i + j, -radius - 1, radius);
+        sum += get(pos) * (1 + (std::abs(j) <= double_tap));
+      }
+      result[i + radius] = (sum + total / 2) / total;
+    }
+    for (int i = -radius; i < radius; ++i) put(i, result[i + radius]);
+    return;
+  }
+
+  const bool hev = std::max(std::abs(p1 - p0), std::abs(q1 - q0)) > limits.z * scale;
+  const int center = 128 * scale;
+  const auto clip = [=](int value) { return std::clamp(value, -center, center - 1); };
+  const auto pixel = [=](int value) { return std::clamp(value, 0, 2 * center - 1); };
+  const int filter = clip((hev ? clip(p1 - q1) : 0) + 3 * (q0 - p0));
+  const int a = clip(filter + 4) >> 3;
+  const int b = clip(filter + 3) >> 3;
+  put(-1, pixel(p0 + b));
+  put(0, pixel(q0 - a));
+  if (!hev) {
+    const int adjust = (a + 1) >> 1;
+    put(-2, pixel(p1 + adjust));
+    put(1, pixel(q1 - adjust));
+  }
+}
+
+void reference_strip(Image &image, const EdgeLists &edges, uint block, bool horizontal, const int4 *limits) {
+  const int bx = block % edges.block_cols, by = block / edges.block_cols;
+  for (int i = 0; i < kStrip; ++i) {
+    const uint edge = edges.at(block, i), level = edge & 63;
+    if (!level) continue;
+    for (int lane = 0; lane < 4; ++lane) {
+      const int x = horizontal ? bx * 4 + lane : bx * 64 + 4 * i;
+      const int y = horizontal ? by * 64 + 4 * i : by * 4 + lane;
+      filter_sample(image, x, y, horizontal, (edge >> 6) & 3, limits[level]);
+    }
+  }
+}
+
 Image compare_vertical(const Image &initial, const EdgeLists &edges, int sharpness, uint plane,
                        bool expect_change = true) {
-  const FilterKernel &old = initial.depth == 8 ? loopfilter_vert_legacy : loopfilter_vert_hbd_legacy;
   const FilterKernel &now = initial.depth == 8 ? loopfilter_vert : loopfilter_vert_hbd;
   Image reference = initial;
   Image candidate = initial;
-  auto old_dispatch = make_dispatch(reference, edges, sharpness, plane);
   auto new_dispatch = make_dispatch(candidate, edges, sharpness, plane);
   for (uint parity = 0; parity < 2; ++parity) {
-    old_dispatch.work_items = new_dispatch.work_items = (edges.blocks() + 1 - parity) / 2 * 4;
-    old_dispatch.block_offset = new_dispatch.block_offset = parity;
-    dispatch(old, old_dispatch, false);
+    new_dispatch.work_items = (edges.blocks() + 1 - parity) / 2 * 4;
+    new_dispatch.block_offset = parity;
+    for (uint block = parity; block < edges.blocks(); block += 2)
+      reference_strip(reference, edges, block, false, new_dispatch.limits);
     std::vector<WordAccess> ownership(candidate.words.size());
     new_dispatch.frame.access = ownership.data();
     dispatch(now, new_dispatch, true);
@@ -128,31 +204,32 @@ Image compare_vertical(const Image &initial, const EdgeLists &edges, int sharpne
 
 // The modes of -lfhsplit: whole plane, even rows then odd rows, and rows in order.
 void run_horizontal(const FilterKernel &kernel, Image &image, const EdgeLists &edges, int sharpness,
-                    uint plane, int mode, uint threads_per_strip, bool candidate) {
+                    uint plane, int mode, uint threads_per_strip) {
   auto d = make_dispatch(image, edges, sharpness, plane);
   const int passes = mode == 0 ? 1 : mode == 1 ? 2 : edges.block_rows;
   const int step = mode == 1 ? 2 : edges.block_rows;
-  std::vector<WordAccess> ownership(candidate ? image.words.size() : 0);
-  d.frame.access = candidate ? ownership.data() : nullptr;
+  std::vector<WordAccess> ownership(image.words.size());
+  d.frame.access = ownership.data();
 
   for (int pass = 0; pass < passes; ++pass) {
     for (int row = pass; row < edges.block_rows; row += step) {
       d.work_items = (mode == 0 ? edges.blocks() : edges.block_cols) * threads_per_strip;
       d.block_offset = row * edges.block_cols;
       std::fill(ownership.begin(), ownership.end(), WordAccess{});
-      dispatch(kernel, d, candidate);
+      dispatch(kernel, d, true);
     }
   }
 }
 
 void compare_horizontal(const Image &initial, const EdgeLists &edges, int sharpness, uint plane, int mode,
                         bool expect_change = true) {
-  const FilterKernel &old = initial.depth == 8 ? loopfilter_hor_legacy : loopfilter_hor_hbd_legacy;
   const FilterKernel &now = initial.depth == 8 ? loopfilter_hor : loopfilter_hor_hbd;
   Image reference = initial;
   Image candidate = initial;
-  run_horizontal(old, reference, edges, sharpness, plane, mode, 4, false);
-  run_horizontal(now, candidate, edges, sharpness, plane, mode, initial.bytes, true);
+  const auto d = make_dispatch(reference, edges, sharpness, plane);
+  for (uint block = 0; block < edges.blocks(); ++block)
+    reference_strip(reference, edges, block, true, d.limits);
+  run_horizontal(now, candidate, edges, sharpness, plane, mode, initial.bytes);
   fail("horizontal", reference, candidate);
   if (expect_change && reference.words == initial.words) {
     std::fprintf(stderr, "FAIL: horizontal fixture made no changes\n");

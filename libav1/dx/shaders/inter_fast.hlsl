@@ -9,10 +9,10 @@
  * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
  */
 
-// Test flag -interfast: inter_main.hlsl for the blocks whose motion vector has no fraction in x, in y, or
-// in both (classes 0 to 2 of inter_fast_common.h; the blocks of class 3 stay with inter_main.hlsl). The block
+// Test flag -interfast: inter_main_v2.hlsl for the blocks whose motion vector has no fraction in x, in y, or
+// in both (classes 0 to 2 of inter_fast_common.h; the blocks of class 3 stay with inter_main_v2.hlsl). The block
 // records, the thread layout (a thread predicts 4x4 samples), the clamps and the residual are those of
-// inter_main.hlsl; the output is the same. inter_fast_hbd.hlsl builds this file for 16-bit samples.
+// inter_main_v2.hlsl; the output is the same. inter_fast_hbd.hlsl builds this file for 16-bit samples.
 //
 // What a thread loads and computes, against the 11 rows of 11 samples and the two passes of inter_main:
 //   copy  4 rows of 4 samples, stored as they are
@@ -35,7 +35,7 @@
   const int subblock = thread.x & ((1 << (w_log + h_log)) - 1);
   const int block_index = cb_pass_offset + (thread.x >> (w_log + h_log));
   uint4 block = pred_blocks.Load4(block_index << 4);
-  // The record of inter_main.hlsl: block.x position, block.y plane, reference, filters, skip, block.z vector.
+  // The record of inter_main_v2.hlsl: block.x position, block.y plane, reference, filters, skip, block.z vector.
 
   int x = SubblockW * ((block.x & 0xffff) + (subblock & ((1 << w_log) - 1)));
   int y = SubblockH * ((block.x >> 16) + (subblock >> w_log));

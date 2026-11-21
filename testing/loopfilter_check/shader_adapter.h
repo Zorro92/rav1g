@@ -18,13 +18,9 @@ struct FilterKernel {
 };
 
 extern const FilterKernel loopfilter_vert;
-extern const FilterKernel loopfilter_vert_legacy;
 extern const FilterKernel loopfilter_hor;
-extern const FilterKernel loopfilter_hor_legacy;
 extern const FilterKernel loopfilter_vert_hbd;
-extern const FilterKernel loopfilter_vert_hbd_legacy;
 extern const FilterKernel loopfilter_hor_hbd;
-extern const FilterKernel loopfilter_hor_hbd_legacy;
 
 #include "mode_info.h"
 
@@ -48,6 +44,4 @@ struct GenKernel {
 };
 
 extern const GenKernel gen_lf_blocks_vert;
-extern const GenKernel gen_lf_blocks_vert_legacy;
 extern const GenKernel gen_lf_blocks_hor;
-extern const GenKernel gen_lf_blocks_hor_legacy;

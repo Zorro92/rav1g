@@ -2701,11 +2701,9 @@ copy shader storing into the two plane slices of the application's texture (`R8_
 `R16_UINT`/`R16G16_UINT` views; no back buffer, no copy), for a texture with
 `ALLOW_UNORDERED_ACCESS` on a device that has typed unordered access on these formats; **staged**,
 the same shaders writing the layout of the texture into the back buffer and two `CopyTextureRegion`,
-for every other texture and for a buffer. Four shaders were added (`copy_plane_sp`,
-`copy_plane_sp_tex`, `film_grain_filter_sp`, `film_grain_filter_sp_tex`; the two film grain ones are
-`film_grain_filter.hlsl` compiled with a define, and the bytecode of `film_grain_filter` itself is
-byte for byte what it was), the first descriptor heap and descriptor table of the decoder (every
-other binding is a root descriptor, which a texture cannot be), and one **output fence** a decoder,
+for every other texture and for a buffer. The staged shaders are `copy_plane_sp` and
+`film_grain_filter_sp`, and the direct shaders are `copy_plane_sp_tex_v2` and `film_grain_filter_sp_tex_v2`.
+Direct output uses a descriptor heap and table for the texture views. A decoder has one **output fence**,
 signalled behind every command list in front of the slot's own fence; `Rav1gFrame::d3d12_fence` is
 that fence now, in every kind, and `Rav1gSettings::shared_fence` creates it shareable.
 

@@ -182,11 +182,8 @@ uint predict_straight(bool vertical, int corner, int stride, int x, int y, int a
   const int mode = (block.y >> 6) & 15;
   const int mode_angle = (block.y >> 28) & 7;
   int4 params = cb_mode_params_lut[mode][mode_angle];
-#ifdef INTRA_TIGHT
-  const bool straight = mode < 2 && mode_angle == 3 && thread.x < cb_wi_count;
-#else
+  // Keep the inactive branch in the -Od control bytecode.
   const bool straight = false;
-#endif
 
   //    block.y bits:
   //    0    3        bw_log

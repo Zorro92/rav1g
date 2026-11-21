@@ -23,7 +23,7 @@ cd "$repo"
 
 # The mapping, the one place that decides what runs: name|command|paths. A check runs when a changed
 # file matches one of its paths (shell patterns, in which * also matches /). The commands are the ones
-# of build.yml; the four checks that CI does not run (copy, idct, loopfilter, residual_clear) run with
+# of build.yml; the three checks that CI does not run (copy, idct, residual_clear) run with
 # --mutate. Heaviest first, so that they start first. "@" in the paths of a check means always.
 # When unsure, a path is listed: a missed check costs more than a spare one.
 SHADERS='libav1/dx/shaders/'
@@ -46,7 +46,7 @@ loopfilter|sh testing/loopfilter_check/run.sh --mutate|testing/loopfilter_check/
 idct|sh testing/idct_check/run.sh --mutate|testing/idct_check/* ${SHADERS}idct* libav1/av1/common/scan.c $SHADER_COMMON
 film_grain|sh testing/film_grain_check/run.sh --mutate|testing/film_grain_check/* ${SHADERS}film_grain* ${SHADERS}copy_plane_sp* $SHADER_COMMON
 shader_regs|precheck_shader_regs|testing/shader_regs/* testing/shader_cache/shaders.py crates/rav1g-sys/shaders.txt ${SHADERS}*
-restoration|sh testing/restoration_check/run.sh|testing/restoration_check/* ${SHADERS}loop_restoration* ${SHADERS}restoration* libav1/av1/common/restoration.c $SHADER_COMMON
+restoration|sh testing/restoration_check/run.sh --mutate|testing/restoration_check/* ${SHADERS}loop_restoration* ${SHADERS}restoration* libav1/av1/common/restoration.c $SHADER_COMMON
 copy|sh testing/copy_check/run.sh --mutate|testing/copy_check/* ${SHADERS}copy_plane_sp* $SHADER_COMMON
 seq_header|sh testing/seq_header_check/run.sh --mutate|testing/seq_header_check/* libav1/av1/common/seq_header_peek.h $LIBAOM
 residual_clear|sh testing/residual_clear_check/run.sh --mutate|testing/residual_clear_check/* crates/rav1g/src/host/residual*

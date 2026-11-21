@@ -45,25 +45,24 @@ VARIANTS = {
 INTRA_MAIN = ['intra_main', 'intra_main_hbd']
 # The -intraod comparison kernels are built without optimization in the default set.
 UNOPTIMIZED = [name + '_legacy' for name in INTRA_MAIN]
-LR_LEGACY = 'loop_restoration_legacy'
 
 # Verify the alternate kernels selected at runtime in the built binary.
 REQUIRED_BYTECODE = [
-    'cdef_filter', 'cdef_filter_v2', 'cdef_filter_v2_legacy', *INTRA_MAIN, *UNOPTIMIZED,
-    'intra_main_tight', 'intra_main_tight_hbd', 'intra_main_banked_hbd', 'intra_main_prefetch_hbd', 'intra_main_prefetch',
+    'cdef_filter', 'cdef_filter_v2', *INTRA_MAIN, *UNOPTIMIZED,
+    'intra_main_prefetch_hbd', 'intra_main_prefetch',
     'intra_main_single_edge', 'intra_main_single_edge_hbd',
     'intra_filter_prefetch', 'intra_filter_prefetch_hbd',
-    'cdef_lists', 'cdef_lists_legacy',
-    'intra_filter', 'intra_filter_legacy', 'intra_filter_hbd', 'intra_v2', 'intra_v2_hbd',
-    'gen_lf_blocks_vert', 'gen_lf_blocks_hor', 'gen_lf_blocks_vert_legacy', 'gen_lf_blocks_hor_legacy',
-    'loopfilter_vert', 'loopfilter_vert_legacy', 'loopfilter_hor', 'loopfilter_hor_legacy',
-    'loopfilter_vert_hbd', 'loopfilter_vert_hbd_legacy', 'loopfilter_hor_hbd', 'loopfilter_hor_hbd_legacy',
-    'loop_restoration', LR_LEGACY, 'loop_restoration_wiener',
-    'film_grain_filter_sp_tex', 'film_grain_filter_sp_tex_v2',
-    'copy_plane_sp_tex', 'copy_plane_sp_tex_v2',
-    'idct4x4', 'idct4x4_v2', 'idct4x8', 'idct4x8_v2', 'idct8x4', 'idct8x4_v2', 'idct8x8', 'idct8x8_v2',
-    'inter_main', 'inter_main_hbd', 'inter_main_v2', 'inter_main_v2_hbd',
-    'inter_compound', 'inter_compound_hbd', 'inter_compound_v2', 'inter_compound_v2_hbd',
+    'cdef_lists',
+    'intra_filter_legacy', 'intra_v2', 'intra_v2_hbd',
+    'gen_lf_blocks_vert', 'gen_lf_blocks_hor',
+    'loopfilter_vert', 'loopfilter_hor',
+    'loopfilter_vert_hbd', 'loopfilter_hor_hbd',
+    'loop_restoration', 'loop_restoration_wiener',
+    'film_grain_filter_sp_tex_v2',
+    'copy_plane_sp_tex_v2',
+    'idct4x4_v2', 'idct4x8_v2', 'idct8x4_v2', 'idct8x8_v2',
+    'inter_main_v2', 'inter_main_v2_hbd',
+    'inter_compound_v2', 'inter_compound_v2_hbd',
 ]
 
 # What DXC is given for every shader on top of -T, -E and -Od:
@@ -294,7 +293,7 @@ def command_key(args):
         for name, od in shaders:
             digest.update(shader_key(name, od, variant, identity).encode())
             count += 1
-            if variant == 'shader-pick' and not od and name != LR_LEGACY:
+            if variant == 'shader-pick' and not od:
                 digest.update(shader_key(name, True, variant, identity).encode())
                 count += 1
     value = digest.hexdigest()[:32]
@@ -356,9 +355,9 @@ def build_od_set(args, shaders, dxc_keys, identity, jobs, shader_set, report):
     A shader whose -Od DXIL has 64-bit values in its code (the literal of a shift or of a ?: that DXC
     takes as 64 bits and that only its optimisation narrows; a device needs 64-bit integer shader
     operations for it) has the bytecode of the default set in the set od as well, and the line of the set
-    names it. The original restoration kernel always uses its default bytecode for -lrlegacy."""
+    names it."""
     unoptimized = ', '.join(name for name, od in shaders if od)
-    od_shaders = [(name, name != LR_LEGACY) for name, _ in shaders]
+    od_shaders = [(name, True) for name, _ in shaders]
     keys, results, missing = cache_entries(args.cache, args.dxc, args.variant, od_shaders, identity, jobs,
                                            'shader-pick, the set od', allow_wide=True)
     directory = BYTECODE + '_od'
@@ -385,7 +384,7 @@ def build_od_set(args, shaders, dxc_keys, identity, jobs, shader_set, report):
             with open(default_meta, encoding='utf-8') as f:
                 expected = json.load(f)['bytecode_sha256']
         digest = copy_bytecode(bytecode, os.path.join(bytecodes, name + '.dxil'), expected)
-        entries.append({'name': name, 'od': not is_wide and name != LR_LEGACY, 'key': keys[name], 'bytecode_key': key,
+        entries.append({'name': name, 'od': not is_wide, 'key': keys[name], 'bytecode_key': key,
                         'compiled': name in results, 'seconds': meta['seconds'],
                         'bytecode_sha256': digest})
 
@@ -394,10 +393,9 @@ def build_od_set(args, shaders, dxc_keys, identity, jobs, shader_set, report):
         shader_set, report['arguments_unoptimized'], ', '.join(INTRA_MAIN))
     if wide:
         od_line += '; default DXIL for %s (64-bit values at -Od)' % ', '.join(wide)
-    od_line += '; default DXIL for %s (-lrlegacy)' % LR_LEGACY
     lines = [dxc_line, od_line]
     report['sets'] = {'od': {'directory': directory, 'line': od_line,
-                              'default_bytecode': [*wide, LR_LEGACY], 'compiled': missing,
+                              'default_bytecode': wide, 'compiled': missing,
                               'from_cache': len(shaders) - missing, 'shaders': entries}}
     print('shaders.py: shader-pick, the set od: %d shaders, %d compiled now, %d from the cache; bytecode in %s' %
           (len(shaders), missing, len(shaders) - missing, bytecodes))

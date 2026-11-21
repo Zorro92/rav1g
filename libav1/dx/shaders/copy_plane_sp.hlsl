@@ -11,17 +11,10 @@
 // The planes of a frame that get no film grain, into the semi-planar output (output_sp.h): the luma
 // plane, or the chroma plane from the U and the V plane of the frame, or a chroma plane of the middle
 // value for a frame that has none. A thread writes eight samples of a row, or eight of U and of V.
-//
-// copy_plane_sp_tex.hlsl is this file with SP_TEXTURE: the planes are those of the application's texture.
 
 RWByteAddressBuffer pool : register(u0);
 
-#ifdef SP_TEXTURE
-#define SP_LUMA_REGISTER u1
-#define SP_CHROMA_REGISTER u2
-#else
 #define SP_BUFFER pool
-#endif
 #include "output_sp.h"
 
 #define SP_MODE_LUMA 0

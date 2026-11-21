@@ -17,7 +17,7 @@
 // Two lanes per 8x8 luma block, one group per 64x32 region. The lanes compute
 // complementary direction costs and share them through LDS. Each lane writes
 // four columns of luma and one chroma plane. All decisions are independent of
-// wave size and lane order. The bindings and output match cdef_filter_v2_legacy.hlsl.
+// wave size and lane order. The bindings are shared with cdef_filter.hlsl.
 
 #pragma warning(disable : 4714)
 ByteAddressBuffer cdef_index : register(t0);

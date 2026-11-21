@@ -36,7 +36,7 @@ cbuffer cb_cdef_lists : register(b0) {
   uint cb_skip_rows;     // rows: what the host's loop writes, and no entry behind it
 };
 
-// A zero grid entry reads the first record, as in the legacy shader.
+// A zero grid entry reads the first record.
 uint tx_info(uint entry) {
   const uint record = entry == 0 ? 0u : entry - cb_mi_addr_base;
   return mi_pool.Load(record + TX_INFO_WORD);

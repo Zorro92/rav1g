@@ -167,7 +167,8 @@ pub(crate) fn get() -> String {
 mod tests {
     use super::*;
 
-    const NAMES: [&str; 5] = ["idct4x4", "loopfilter_vert", "loopfilter_vert_hbd", "loopfilter_hor_hbd", "inter_main"];
+    const NAMES: [&str; 5] =
+        ["idct4x4_v2", "loopfilter_vert", "loopfilter_vert_hbd", "loopfilter_hor_hbd", "inter_main_v2"];
 
     #[test]
     fn patterns() {
@@ -175,9 +176,9 @@ mod tests {
         assert!(matches("*_hbd", "loopfilter_vert_hbd"));
         assert!(!matches("*_hbd", "loopfilter_vert"));
         assert!(matches("loop*vert*", "loopfilter_vert_hbd"));
-        assert!(matches("*", "idct4x4"));
+        assert!(matches("*", "idct4x4_v2"));
         assert!(!matches("loopfilter_vert", "loopfilter_vert_hbd"));
-        assert!(matches("inter_main", "inter_main"));
+        assert!(matches("inter_main_v2", "inter_main_v2"));
         assert!(!matches("a*a", "a"));
     }
 
@@ -186,15 +187,18 @@ mod tests {
         use Set::*;
         assert_eq!(resolve("", &NAMES).unwrap(), [Dxc; 5]);
         assert_eq!(resolve("od=all", &NAMES).unwrap(), [Od; 5]);
-        assert_eq!(resolve("od=loopfilter_vert_hbd,idct4x4,dxc=inter_main", &NAMES).unwrap(), [Od, Dxc, Od, Dxc, Dxc]);
+        assert_eq!(
+            resolve("od=loopfilter_vert_hbd,idct4x4_v2,dxc=inter_main_v2", &NAMES).unwrap(),
+            [Od, Dxc, Od, Dxc, Dxc]
+        );
         assert_eq!(resolve("od=all,dxc=loopfilter_vert_hbd", &NAMES).unwrap(), [Od, Od, Dxc, Od, Od]);
         assert_eq!(resolve("od=*_hbd, dxc=loopfilter_hor*", &NAMES).unwrap(), [Dxc, Dxc, Od, Dxc, Dxc]);
         assert!(resolve("od=nothing", &NAMES).is_err());
-        assert!(resolve("idct4x4", &NAMES).is_err());
+        assert!(resolve("idct4x4_v2", &NAMES).is_err());
         assert!(resolve("o3=all", &NAMES).is_err());
         assert!(resolve("od=", &NAMES).is_err());
         assert_eq!(
-            set("od=all,fxc=inter_main", &NAMES).unwrap_err(),
+            set("od=all,fxc=inter_main_v2", &NAMES).unwrap_err(),
             "shader pick: the 'fxc' set has been removed. Use dxc or od."
         );
     }
@@ -214,8 +218,8 @@ mod tests {
         assert_eq!(line(""), "SHADERPICK none: dxc 5 (all); od 0");
         assert_eq!(line("od=all"), "SHADERPICK od=all: dxc 0; od 5 (all)");
         assert_eq!(
-            line("od=loopfilter_vert_hbd,inter_main"),
-            "SHADERPICK od=loopfilter_vert_hbd,inter_main: dxc 3 (all others); od 2 (loopfilter_vert_hbd inter_main)"
+            line("od=loopfilter_vert_hbd,inter_main_v2"),
+            "SHADERPICK od=loopfilter_vert_hbd,inter_main_v2: dxc 3 (all others); od 2 (loopfilter_vert_hbd inter_main_v2)"
         );
         assert_eq!(
             line("od=all,dxc=loopfilter_*_hbd"),

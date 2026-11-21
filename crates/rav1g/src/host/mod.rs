@@ -43,19 +43,15 @@ pub(crate) use compute::{
     av1_create_pipeline_cache_handle, av1_destroy_pipeline_cache_handle, av1_wait_pipeline_cache_handle,
     set_shader_pick, shader_pick_lines,
 };
-pub(crate) use film_grain::{av1_set_fg_legacy, av1_set_skip_film_grain};
+pub(crate) use film_grain::av1_set_skip_film_grain;
 pub(crate) use frame::{av1_set_clears, av1_set_intra_v2, av1_shader_variant};
-pub(crate) use loopfilter::{av1_set_lf_h_split, av1_set_lf_legacy};
+pub(crate) use loopfilter::av1_set_lf_h_split;
 pub(crate) use memory::{av1_log_video_memory_now, av1_set_poison_buffers};
-pub(crate) use output::av1_set_copy_legacy;
 pub(crate) use perf::{av1_set_inter_fast, av1_set_perf_callback, av1_set_perf_detail};
-pub(crate) use postfilter::{av1_set_cdef_legacy, av1_set_cdef_lists_legacy, av1_set_cdef_v2, av1_set_lr_legacy};
-pub(crate) use prediction::{
-    av1_set_inter_legacy, av1_set_intra_edge_fix, av1_set_intra_filter_legacy, av1_set_intra_opt,
-};
+pub(crate) use postfilter::av1_set_cdef_v2;
+pub(crate) use prediction::{av1_set_intra_edge_fix, av1_set_intra_filter_legacy, av1_set_intra_opt};
 pub(crate) use stage_dump::av1_set_stage_dump;
 pub(crate) use step_time::av1_set_intra_step_timing;
-pub(crate) use transform::{av1_set_clear_legacy, av1_set_idct_legacy};
 mod film_grain;
 mod frame;
 mod gpu_pred_lists;

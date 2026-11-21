@@ -138,24 +138,13 @@ class CParameters {
     // The effective choice after Parse(): true unless -cdefv1 was given.
     bool cdefv2_;
     bool cdefv1_;
-    bool cdeflegacy_;
-    bool cdeflistslegacy_;
     bool intrav2_;
     bool intraopt_;
     bool intraod_;
     bool intrafilterlegacy_;
-    bool intraschedulelegacy_;
-    bool intrabanklegacy_;
-    bool intrasteplegacy_;
     bool intrasingleedgelegacy_;
     bool intralistslegacy_;
     bool parselistslegacy_;
-    bool lrlegacy_;
-    bool fglegacy_;
-    bool copylegacy_;
-    bool idctlegacy_;
-    bool clearlegacy_;
-    bool interlegacy_;
     // -slots: the pipeline slots the task asks for. 0 when the task has no -slots: the library then gives
     // the decoder the slots of its frames in parse.
     int slots_;
@@ -192,7 +181,6 @@ class CParameters {
     // the same decoder.
     bool continue_on_error_;
     // Experiments (docs/test-player.md): -lfhsplit 0|1|2, -intraedgefix.
-    bool lflegacy_;
     int lfhsplit_;
     bool intraedgefix_;
     // -interfast: inter blocks by the fraction of their motion vectors (docs/test-player.md);

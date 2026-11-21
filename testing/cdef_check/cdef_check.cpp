@@ -1,6 +1,6 @@
 /*
- * Bit-exactness check of the optimized CDEF filter against the previous v2
- * shader, and of the previous v2 shader against the upstream shader.
+ * Bit-exactness check of the optimized CDEF filter against the upstream shader.
+ * Direction costs and filtering inside the frame are also checked against AV1 7.15.
  *
  * The shaders are compiled as C++ (see run.sh and hlsl_shim.h) and run over
  * the same frames, one dispatch each. The whole frame pool, padding
@@ -14,6 +14,8 @@
  * Runs on a Linux host, no GPU:  sh testing/cdef_check/run.sh
  */
 #define GROUP_SCHED_IMPLEMENTATION
+#include <algorithm>
+#include <bit>
 #include <random>
 #include <vector>
 
@@ -23,9 +25,6 @@ long g_out_of_bounds = 0;
 
 namespace v1 {
 #include "cdef_filter.gen.h"
-}
-namespace legacy {
-#include "cdef_filter_v2_legacy.gen.h"
 }
 #undef LUMA_ROWS
 #undef CHROMA_ROWS
@@ -73,7 +72,6 @@ struct HostCDefData {  // CDefData of libav1/dx/loopfilters.cpp
   int cdef_uv_strength[16][4];
 };
 static_assert(sizeof(HostCDefData) == sizeof(v1::CDefData), "constant buffer layout");
-static_assert(sizeof(HostCDefData) == sizeof(legacy::CDefData), "constant buffer layout");
 static_assert(sizeof(HostCDefData) == sizeof(v2::CDefData), "constant buffer layout");
 
 struct Case {
@@ -242,7 +240,7 @@ static void make_frame(const Case &c, Frame &f) {
 }
 
 // ---------------------------------------------------------------------------
-// The three dispatches.
+// The two dispatches.
 // ---------------------------------------------------------------------------
 static uint3 g_group;
 
@@ -257,11 +255,6 @@ static void v1_thread(int t) {
   const uint3 gtid = {static_cast<uint>(t & 3), static_cast<uint>((t >> 2) & 3), static_cast<uint>(t >> 4)};
   const uint3 dtid = {g_group.x * 4 + gtid.x, g_group.y * 4 + gtid.y, gtid.z};
   v1::shader_main(g_group, dtid, gtid, static_cast<uint>(t));
-}
-
-static void legacy_thread(int t) {
-  const uint3 gtid = {static_cast<uint>(t & 7), static_cast<uint>(t >> 3), 0};
-  legacy::shader_main(g_group, gtid);
 }
 
 static void v2_thread(int t) {
@@ -292,20 +285,6 @@ static void run_v1(Frame &f) {
   }
 }
 
-static void run_legacy(Frame &f) {
-  gs_state.shader = "cdef_filter_v2_legacy.hlsl";
-  bind_frame(f, legacy::cdef_index, legacy::skips, legacy::dst);
-  memcpy(&legacy::data, &f.cb, sizeof(f.cb));
-  // Dispatch((w + 63) >> 6, (h + 63) >> 6, 1), numthreads(8, 8, 1)
-  for (uint gy = 0; gy < static_cast<uint>((f.cb.plane[3] + 63) >> 6); gy++) {
-    for (uint gx = 0; gx < static_cast<uint>((f.cb.plane[2] + 63) >> 6); gx++) {
-      g_group = uint3{gx, gy, 0};
-      scramble(legacy::window);
-      run_group(64, legacy_thread);
-    }
-  }
-}
-
 static void run_v2(Frame &f) {
   gs_state.shader = "cdef_filter_v2.hlsl";
   gs_state.track_unwritten = true;
@@ -323,9 +302,126 @@ static void run_v2(Frame &f) {
   gs_state.track_unwritten = false;
 }
 
+// AV1 7.15.2. Sum pixels on each line, then normalize its squared sum by its length.
+static int2 reference_direction(const int (&pixels)[8][8], int coeff_shift) {
+  int cost[8] = {};
+  for (int dir = 0; dir < 8; ++dir) {
+    int sums[15] = {}, counts[15] = {};
+    for (int y = 0; y < 8; ++y) {
+      for (int x = 0; x < 8; ++x) {
+        const int line[] = {y + x, y + x / 2, y, y + 3 - x / 2, y + 7 - x, x + 3 - y / 2, x, x + y / 2};
+        sums[line[dir]] += (pixels[y][x] >> coeff_shift) - 128;
+        ++counts[line[dir]];
+      }
+    }
+    for (int i = 0; i < 15; ++i) {
+      if (counts[i]) cost[dir] += sums[i] * sums[i] * (840 / counts[i]);
+    }
+  }
+  const int best = std::max_element(cost, cost + 8) - cost;
+  return {best, (cost[best] - cost[(best + 4) % 8]) >> 10};
+}
+
+static int sample_at(const Frame &f, int offset, int stride, int x, int y) {
+  const int bpp = f.cb.hbd ? 2 : 1;
+  const auto *p = &f.pool[offset + y * stride + x * bpp];
+  return bpp == 2 ? (p[0] + 256 * p[1]) & 1023 : p[0];
+}
+
+// AV1 7.15.3, one sample at a time. Neighbors outside the picture do not contribute.
+static int filter_sample(const Frame &f, int plane, int x, int y, int dir, int primary, int secondary) {
+  const int sub = plane != 0;
+  const int width = f.cb.plane[2] >> sub, height = f.cb.plane[3] >> sub;
+  const int offset = plane ? f.cb.uv_offset[plane - 1] : f.cb.plane[1];
+  const int stride = plane ? f.cb.uv_stride : f.cb.plane[0];
+  const int coeff_shift = f.cb.bit_depth - 8;
+  const int damping = f.cb.pri_damping + coeff_shift - sub;
+  const int center = sample_at(f, offset, stride, x, y);
+  int min_sample = center, max_sample = center, sum = 0;
+
+  constexpr int d[8][2][2] = {
+      {{1, -1}, {2, -2}}, {{1, 0}, {2, -1}}, {{1, 0}, {2, 0}}, {{1, 0}, {2, 1}},
+      {{1, 1}, {2, 2}}, {{0, 1}, {1, 2}}, {{0, 1}, {0, 2}}, {{0, 1}, {-1, 2}},
+  };
+  const auto add = [&](int direction, int tap, int strength, int weight) {
+    if (!strength) return;
+    const int shift = std::max(0, damping - int(std::bit_width(unsigned(strength))) + 1);
+    for (int sign : {-1, 1}) {
+      const int sx = x + sign * d[direction][tap][0], sy = y + sign * d[direction][tap][1];
+      if (sx < 0 || sx >= width || sy < 0 || sy >= height) continue;
+      const int neighbor = sample_at(f, offset, stride, sx, sy);
+      min_sample = std::min(min_sample, neighbor);
+      max_sample = std::max(max_sample, neighbor);
+      const int diff = neighbor - center, magnitude = std::abs(diff);
+      const int constrained = std::clamp(strength - (magnitude >> shift), 0, magnitude);
+      sum += weight * (diff < 0 ? -constrained : constrained);
+    }
+  };
+  const bool odd = (primary >> coeff_shift) & 1;
+  for (int tap = 0; tap < 2; ++tap) {
+    add(dir, tap, primary, tap ? 2 + odd : 4 - odd);
+    add((dir + 2) % 8, tap, secondary, 2 - tap);
+    add((dir + 6) % 8, tap, secondary, 2 - tap);
+  }
+  return std::clamp(center + ((sum + 8 - (sum < 0)) >> 4), min_sample, max_sample);
+}
+
+static bool check_filtered_samples(const Frame &input, const Frame &output) {
+  const auto &cb = input.cb;
+  const int coeff_shift = cb.bit_depth - 8;
+  // The host passes whole 8x8 blocks. The separate v1 comparison also covers
+  // synthetic partial blocks and the byte patterns written into the padding.
+  if ((cb.plane[2] | cb.plane[3]) & 7) return true;
+  for (int y = 0; y < cb.plane[3]; y += 8) {
+    for (int x = 0; x < cb.plane[2]; x += 8) {
+      const int index = input.indexes[(y / 64) * cb.index_stride + x / 64];
+      const bool enabled = index >= 0 && index < 16 && input.skips[(y / 8) * cb.skips_stride + x / 8] == 0;
+      const int luma_strength = enabled ? cb.cdef_strength[index][0] : 0;
+      const int chroma_strength = enabled ? cb.cdef_uv_strength[index][0] : 0;
+      int2 direction = {0, 0};
+      if ((luma_strength | chroma_strength) >> 2) {
+        int samples[8][8];
+        for (int row = 0; row < 8; ++row)
+          for (int col = 0; col < 8; ++col)
+            samples[row][col] = sample_at(input, cb.plane[1], cb.plane[0], x + col, y + row);
+        direction = reference_direction(samples, coeff_shift);
+      }
+      for (int plane = 0; plane < 3; ++plane) {
+        const int sub = plane != 0;
+        const int strength = plane ? chroma_strength : luma_strength;
+        int primary = (strength / 4) << coeff_shift;
+        const int dir = primary ? direction.x : 0;
+        if (plane == 0) {
+          const int variance_bits = std::bit_width(unsigned(direction.y >> 6));
+          const int adjustment = std::clamp(variance_bits - 1, 0, 12);
+          primary = direction.y ? (primary * (4 + adjustment) + 8) / 16 : 0;
+        }
+        const int sec = strength % 4;
+        const int secondary = (sec == 3 ? 4 : sec) << coeff_shift;
+        const int stride = plane ? cb.uv_stride : cb.plane[0];
+        const int extent = 8 >> sub;
+        for (int j = 0; j < extent; ++j) {
+          for (int i = 0; i < extent; ++i) {
+            const int sx = (x >> sub) + i, sy = (y >> sub) + j;
+            const int expected = filter_sample(input, plane, sx, sy, dir, primary, secondary);
+            const int actual = sample_at(output, cb.dst_offset[plane], stride, sx, sy);
+            if (expected != actual) {
+              printf("MISMATCH optimized CDEF vs scalar reference at plane %d (%d,%d): %d vs %d\n",
+                     plane, sx, sy, actual, expected);
+              return false;
+            }
+          }
+        }
+      }
+    }
+  }
+  return true;
+}
+
 static bool check_directions(int coeff_shift) {
   bool ok = true;
   for (int pattern = 0; pattern < 11; pattern++) {
+    int pixels[8][8];
     for (int y = 0; y < 8; y++) {
       for (int n = 0; n < 4; n++) {
         uint pair = 0;
@@ -338,14 +434,14 @@ static bool check_directions(int coeff_shift) {
           if (pattern == 8) sample += (y + min(x, 7 - x) / 2) % 4 == 1 ? 26 : -8;
           // Both flat cases pick direction 0, for nonzero and zero costs, respectively.
           if (pattern == 9) sample = 73;
-          pair |= static_cast<uint>(sample << coeff_shift) << (k * 16);
+          pixels[y][x] = sample << coeff_shift;
+          pair |= static_cast<uint>(pixels[y][x]) << (k * 16);
         }
-        legacy::window[y * (72 / 2) + n] = pair;
         v2::window[y * (72 / 2) + n] = pair;
       }
     }
     const int expected_dir = pattern < 8 ? pattern : (pattern == 8 ? 1 : 0);
-    const int2 expected = legacy::block_dir(0, coeff_shift);
+    const int2 expected = reference_direction(pixels, coeff_shift);
     const int2 actual = v2::choose_direction(v2::direction_costs(0, coeff_shift, 0),
                                               v2::direction_costs(0, coeff_shift, 1));
     if (expected.x != expected_dir || (pattern == 8 && expected.y == 0) ||
@@ -383,16 +479,14 @@ int main(int argc, char **argv) {
     Frame input;
     make_frame(c, input);
     Frame upstream = input;
-    Frame reference = input;
     Frame optimized = input;
     run_v1(upstream);
-    run_legacy(reference);
     run_v2(optimized);
     cases++;
     bytes += static_cast<long>(input.pool.size());
-    for (size_t i = 0; i < input.pool.size(); i++) changed += reference.pool[i] != input.pool[i];
-    if (!compare_pool(upstream, reference, c, "legacy vs upstream", failed < 20)) failed++;
-    if (!compare_pool(reference, optimized, c, "optimized vs legacy", failed < 20)) failed++;
+    for (size_t i = 0; i < input.pool.size(); i++) changed += optimized.pool[i] != input.pool[i];
+    if (!compare_pool(upstream, optimized, c, "optimized vs upstream", failed < 20) ||
+        (failed < 20 && !check_filtered_samples(input, optimized))) failed++;
     return fail_fast && (failed || gs_state.races || gs_state.sync_errors ||
                          gs_state.runaway_groups || gs_state.out_of_bounds || g_out_of_bounds);
   };
@@ -445,6 +539,6 @@ int main(int argc, char **argv) {
     printf("cdef_check: FAILED\n");
     return 1;
   }
-  printf("cdef_check: OK, cdef_filter_v2.hlsl output is byte-identical to cdef_filter.hlsl\n");
+  printf("cdef_check: OK, cdef_filter_v2.hlsl matches the scalar AV1 reference and cdef_filter.hlsl\n");
   return 0;
 }

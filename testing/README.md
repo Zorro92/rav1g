@@ -3,8 +3,7 @@
 ## `precheck.sh`: before every push
 
 A CI run takes about 25 minutes. Many of its checks run natively on Linux in seconds or minutes: the
-`testing/*/run.sh` scripts, which compile shaders as C++ and hold them against their legacy forms or
-libaom. `testing/precheck.sh` runs the ones a change touches, with the flags CI gives them, so that a
+`testing/*/run.sh` scripts, which compile shaders as C++ and compare their output with CPU models, libaom, or independent shader paths. `testing/precheck.sh` runs the ones a change touches, with the flags CI gives them, so that a
 failure shows up before the push and not a CI cycle later.
 
 ```sh
@@ -23,7 +22,7 @@ Windows-only scripts) starts every check. `--check-mapping` (the CI job `prechec
 What runs, at most 4 at a time (`-j N` for fewer), heaviest first:
 
 - the `run.sh` checks, with CI's flags (`intra_check --mutate --layouts 400`, `--mutate` for the
-  others that CI runs that way). `copy_check`, `idct_check`, `loopfilter_check` and
+  others that CI runs that way). `copy_check`, `idct_check` and
   `residual_clear_check` are not in CI; here they run with `--mutate`.
 - the timing summary self-test of the job `intra-check` (`perf_stats`),
 - `cargo fmt --check` of the first-party packages (`third_party/rav1d` keeps its upstream's format),

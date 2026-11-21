@@ -40,15 +40,6 @@ struct RWTexture2D {
   T &operator[](int2 pos) const { return texture->store(pos); }
 };
 
-namespace legacy {
-#define SP_TEXTURE
-#include "copy_plane_sp.gen.h"
-#include "copy_plane_sp.entry.h"
-#undef SP_TEXTURE
-#undef SP_LUMA_REGISTER
-#undef SP_CHROMA_REGISTER
-}
-
 namespace tiled {
 #include "copy_plane_sp_tex_v2.gen.h"
 #include "copy_plane_sp_tex_v2.entry.h"
@@ -102,26 +93,6 @@ static void dispatch(void (*entry)(uint3, uint3), uint columns, uint rows, uint 
           entry(uint3(gx, gy, 0), uint3(lx, ly, 0));
 }
 
-static void run_legacy(Input &input, Output &out, bool luma, bool chroma, bool mono) {
-  using namespace legacy;
-  pool = {input.bytes.data(), input.bytes.size()};
-  sp_luma = {&out.y};
-  sp_chroma = {&out.uv};
-  cb_width = input.width;
-  cb_height = input.height;
-  cb_hbd = input.bpp == 2;
-  cb_src_offset_v = input.offsets[2];
-  for (uint plane = 0; plane < 2; ++plane) {
-    if (plane ? !chroma : !luma) continue;
-    cb_src_offset = input.offsets[plane];
-    cb_src_stride = input.strides[plane];
-    cb_mode = plane ? (mono ? SP_MODE_CHROMA_NEUTRAL : SP_MODE_CHROMA) : SP_MODE_LUMA;
-    cb_groups = ceil_div(plane ? out.uv.width : input.width, 8);
-    cb_rows = plane ? out.uv.height : input.height;
-    dispatch(shader_entry, ceil_div(cb_groups, kThreadsX), ceil_div(cb_rows, kThreadsY), kThreadsX, kThreadsY);
-  }
-}
-
 static void run_tiled(Input &input, Output &out, bool luma, bool chroma, bool mono) {
   using namespace tiled;
   pool = {input.bytes.data(), input.bytes.size()};
@@ -150,8 +121,7 @@ static void mismatch(const Input &input, const char *plane, uint x, uint y) {
 }
 
 static void check(Input &input, bool luma, bool chroma, bool mono) {
-  Output expected(input.width, input.height), actual(input.width, input.height);
-  run_legacy(input, expected, luma, chroma, mono);
+  Output actual(input.width, input.height);
   run_tiled(input, actual, luma, chroma, mono);
   if (g_out_of_bounds) {
     std::fprintf(stderr, "copy_check: %ld out-of-bounds raw accesses\n", g_out_of_bounds);
@@ -161,8 +131,7 @@ static void check(Input &input, bool luma, bool chroma, bool mono) {
     for (uint x = 0; x < actual.y.width; ++x) {
       const uint i = y * actual.y.width + x;
       const uint oracle = luma ? input.sample(0, std::min(x, input.width - 1), std::min(y, input.height - 1)) : 0;
-      if (expected.y.writes[i] != uint(luma) || actual.y.writes[i] != uint(luma) ||
-          expected.y.samples[i] != oracle || actual.y.samples[i] != oracle) {
+      if (actual.y.writes[i] != uint(luma) || actual.y.samples[i] != oracle) {
         mismatch(input, "Y", x, y);
       }
     }
@@ -173,9 +142,7 @@ static void check(Input &input, bool luma, bool chroma, bool mono) {
       const uint i = y * actual.uv.width + x;
       const uint u = chroma ? (mono ? neutral : input.sample(1, x, y)) : 0;
       const uint v = chroma ? (mono ? neutral : input.sample(2, x, y)) : 0;
-      if (expected.uv.writes[i] != uint(chroma) || actual.uv.writes[i] != uint(chroma) ||
-          expected.uv.samples[i].x != u || actual.uv.samples[i].x != u ||
-          expected.uv.samples[i].y != v || actual.uv.samples[i].y != v) {
+      if (actual.uv.writes[i] != uint(chroma) || actual.uv.samples[i].x != u || actual.uv.samples[i].y != v) {
         mismatch(input, "UV", x, y);
       }
     }
@@ -204,5 +171,5 @@ int main() {
     check(input, true, true, false);
     ++cases;
   }
-  std::printf("copy_check: %u NV12/P010 cases matched the legacy shaders and the pixel reference\n", cases);
+  std::printf("copy_check: %u NV12/P010 cases matched the pixel reference\n", cases);
 }

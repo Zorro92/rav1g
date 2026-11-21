@@ -305,7 +305,7 @@ def shader_sources(sources, shader_root, embedded, report_path):
     # The sets of the build by their directory: the default one, and the set od of a shader-pick build.
     built = {shaders.BYTECODE: (report['shaders'], lambda shader: shader['od'])}
     for other in report.get('sets', {}).values():
-        built[other['directory']] = (other['shaders'], lambda shader: shader['name'] != shaders.LR_LEGACY)
+        built[other['directory']] = (other['shaders'], lambda _: True)
     counted = set()
     names = set()
     for path, directory, name in embedded:

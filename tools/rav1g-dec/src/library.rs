@@ -31,9 +31,6 @@ use crate::shim::Dumps;
 
 unsafe extern "C" {
     /// The A/B switch in libav1/dx/av1_perf.h.
-    fn av1_set_intra_schedule_legacy(enable: c_int);
-    fn av1_set_intra_bank_legacy(enable: c_int);
-    fn av1_set_intra_step_legacy(enable: c_int);
     fn av1_set_intra_single_edge_legacy(enable: c_int);
     fn av1_set_intra_lists_legacy(enable: c_int);
     fn av1_set_parse_lists_legacy(enable: c_int);
@@ -172,26 +169,14 @@ pub struct Spec {
 /// The decoder experiments of a task.
 #[derive(Clone, Copy)]
 pub struct Choices {
-    pub lr_legacy: bool,
-    pub fg_legacy: bool,
     pub skip_film_grain: bool,
-    pub copy_legacy: bool,
-    pub idct_legacy: bool,
-    pub clear_legacy: bool,
-    pub inter_legacy: bool,
     pub cdef_v2: bool,
-    pub cdef_legacy: bool,
-    pub cdef_lists_legacy: bool,
     pub intra_v2: bool,
     pub intra_opt: bool,
     pub intra_filter_legacy: bool,
-    pub intra_schedule_legacy: bool,
-    pub intra_bank_legacy: bool,
-    pub intra_step_legacy: bool,
     pub intra_single_edge_legacy: bool,
     pub intra_lists_legacy: bool,
     pub parse_lists_legacy: bool,
-    pub lf_legacy: bool,
     pub lf_h_split: u32,
     pub intra_edge_fix: bool,
     pub inter_fast: u32,
@@ -517,22 +502,10 @@ impl Library {
 
     /// The shader choices, set while no frame is in flight.
     pub fn set_choices(&self, choices: &Choices) {
-        switches::set_lf_legacy(choices.lf_legacy);
-        switches::set_lr_legacy(choices.lr_legacy);
-        switches::set_fg_legacy(choices.fg_legacy);
         switches::set_skip_film_grain(choices.skip_film_grain);
-        switches::set_copy_legacy(choices.copy_legacy);
-        switches::set_idct_legacy(choices.idct_legacy);
-        switches::set_clear_legacy(choices.clear_legacy);
-        switches::set_inter_legacy(choices.inter_legacy);
-        switches::set_cdef_legacy(choices.cdef_legacy);
-        switches::set_cdef_lists_legacy(choices.cdef_lists_legacy);
         switches::set_intra_filter_legacy(choices.intra_filter_legacy);
         // SAFETY: the setter takes an integer and only changes the test flag, with no frames in flight.
         unsafe {
-            av1_set_intra_schedule_legacy(c_int::from(choices.intra_schedule_legacy));
-            av1_set_intra_bank_legacy(c_int::from(choices.intra_bank_legacy));
-            av1_set_intra_step_legacy(c_int::from(choices.intra_step_legacy));
             av1_set_intra_single_edge_legacy(c_int::from(choices.intra_single_edge_legacy));
             av1_set_intra_lists_legacy(c_int::from(choices.intra_lists_legacy));
             av1_set_parse_lists_legacy(c_int::from(choices.parse_lists_legacy));

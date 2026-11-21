@@ -505,24 +505,8 @@ struct IntraData {
     sm_weight_arrays: [[c_int; 4]; 128],
 }
 
-static INTER_LEGACY: AtomicI32 = AtomicI32::new(0);
-
-/// `av1_set_inter_legacy` (`dx/av1_perf.h`).
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_inter_legacy(enable: c_int) {
-    INTER_LEGACY.store(enable, Ordering::Relaxed);
-}
-
 // The main intra path uses DXC's optimized build by default. -intraod selects the baseline kernel.
 static INTRA_OPT: AtomicI32 = AtomicI32::new(1);
-
-static INTRA_BANK_LEGACY: AtomicI32 = AtomicI32::new(0);
-
-/// `av1_set_intra_bank_legacy` (`dx/av1_perf.h`).
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_intra_bank_legacy(enable: c_int) {
-    INTRA_BANK_LEGACY.store(enable, Ordering::Relaxed);
-}
 
 static INTRA_SINGLE_EDGE_LEGACY: AtomicI32 = AtomicI32::new(0);
 
@@ -532,32 +516,13 @@ pub extern "C" fn av1_set_intra_single_edge_legacy(enable: c_int) {
     INTRA_SINGLE_EDGE_LEGACY.store(enable, Ordering::Relaxed);
 }
 
-static INTRA_STEP_LEGACY: AtomicI32 = AtomicI32::new(0);
-
-/// `av1_set_intra_step_legacy` (`dx/av1_perf.h`).
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_intra_step_legacy(enable: c_int) {
-    INTRA_STEP_LEGACY.store(enable, Ordering::Relaxed);
-}
-
-static INTRA_SCHEDULE_LEGACY: AtomicI32 = AtomicI32::new(0);
-
-/// `av1_set_intra_schedule_legacy` (`dx/av1_perf.h`).
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_intra_schedule_legacy(enable: c_int) {
-    INTRA_SCHEDULE_LEGACY.store(enable, Ordering::Relaxed);
-}
-
 // The parse and the main shader must agree on the edges read by each coded angle.
 pub(super) fn intra_main_for_frame(intra_v2: bool) -> IntraMain {
     if INTRA_OPT.load(Ordering::Relaxed) == 0 {
         IntraMain::Unoptimized
-    } else if intra_v2 || INTRA_SCHEDULE_LEGACY.load(Ordering::Relaxed) != 0 {
+    } else if intra_v2 {
         IntraMain::Legacy
-    } else if INTRA_SINGLE_EDGE_LEGACY.load(Ordering::Relaxed) == 0
-        && INTRA_STEP_LEGACY.load(Ordering::Relaxed) == 0
-        && INTRA_BANK_LEGACY.load(Ordering::Relaxed) == 0
-    {
+    } else if INTRA_SINGLE_EDGE_LEGACY.load(Ordering::Relaxed) == 0 {
         IntraMain::SingleEdge
     } else {
         IntraMain::Tight
@@ -635,8 +600,7 @@ impl InterDetailRec<'_> {
             let row4 = if hbd { 16 } else { 8 };
             let rows4x4 = [4 * row4, 4 * row, 11 * row4, 11 * row];
             let rows4x2 = [2 * row4, 2 * row, 9 * row4, 9 * row];
-            // With the original shader on the lists (av1_set_inter_fast, the lists without the kernels)
-            // every class loads what the last one does.
+            // For the size-list shaders, keep the same two-pass upper bound as for the default lists.
             let single_original = (td.inter_fast & AV1_INTER_FAST_SINGLE_ORIGINAL) != 0;
             let compound_original = (td.inter_fast & AV1_INTER_FAST_COMPOUND_ORIGINAL) != 0;
             for c in 0..InterFastClasses {
@@ -987,11 +951,6 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
             let scaled = td.scale_enable != 0;
             let wi_per_block: u32 = if scaled { 4 } else { 1 };
             let warp_comp = &raw const (*shaders).inter_warp_comp;
-            let (inter_base, inter_comp) = if INTER_LEGACY.load(Ordering::Relaxed) != 0 {
-                (&raw const (*shaders).inter_base, &raw const (*shaders).inter_comp)
-            } else {
-                (&raw const (*shaders).inter_base_v2, &raw const (*shaders).inter_comp_v2)
-            };
             let shader_of = |list_type: c_int| -> *const ComputeShader {
                 match (list_type, scaled) {
                     (0, _) => &raw const (*shaders).inter_warp,
@@ -1003,8 +962,8 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                     (8, true) => &raw const (*shaders).inter_scale_obmc_above,
                     (9, true) => &raw const (*shaders).inter_scale_obmc_left,
                     (10, true) => &raw const (*shaders).inter_scale_2x2,
-                    (1, false) => inter_base,
-                    (2, false) => inter_comp,
+                    (1, false) => &raw const (*shaders).inter_base,
+                    (2, false) => &raw const (*shaders).inter_comp,
                     (3, false) => &raw const (*shaders).inter_comp_diff_y,
                     (4, false) => &raw const (*shaders).inter_comp_masked,
                     (6, false) => &raw const (*shaders).inter_comp_diff_uv,
@@ -1059,20 +1018,20 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
             // -interfast: the lists by motion vector class, which have the blocks of the types CasualInter and
             // CompoundAvrg on such a frame (their lists by type are empty). One dispatch per class and block
             // size. The class goes to the fast shaders in the bits 8 and up of width_log2; the lists of class 3
-            // (both references of class 3 for a compound block) run the original shaders, which do the same
+            // (both references of class 3 for a compound block) run the size-list shaders, which do the same
             // for any class.
             if inter_fast {
                 for list in 0..InterFastLists / InterSizesAllCommon {
                     let compound = list >= InterFastClasses;
                     let cls = if compound { list - InterFastClasses } else { list };
-                    // The last class has the original shader anyway; so have all classes when the mode asks for
+                    // The last class always uses the size-list shader. All classes use it when the mode asks for
                     // it (av1_set_inter_fast: the lists without the kernels).
-                    let original = cls
+                    let use_size_list_shader = cls
                         == (if compound { InterFastClasses * InterFastClasses - 1 } else { InterFast2D })
                         || (td.inter_fast
                             & if compound { AV1_INTER_FAST_COMPOUND_ORIGINAL } else { AV1_INTER_FAST_SINGLE_ORIGINAL })
                             != 0;
-                    let list_shader = match (compound, original) {
+                    let list_shader = match (compound, use_size_list_shader) {
                         (true, true) => &raw const (*shaders).inter_comp,
                         (true, false) => &raw const (*shaders).inter_comp_fast,
                         (false, true) => &raw const (*shaders).inter_base,
@@ -1089,7 +1048,7 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                         section,
                         |i| {
                             let mut work = ListWork::inter_size(i, u32::from(compound), 1);
-                            if !original {
+                            if !use_size_list_shader {
                                 work.width_log2 |= (cls as u32) << 8;
                             }
                             work
@@ -1201,20 +1160,13 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                         (true, true) => &raw const (*lib).shader_intra_main_single_edge_hbd,
                     }
                 }
-                IntraMain::Tight
-                    if INTRA_BANK_LEGACY.load(Ordering::Relaxed) == 0
-                        && INTRA_STEP_LEGACY.load(Ordering::Relaxed) == 0 =>
-                {
+                IntraMain::Tight => {
                     if td.is_hbd != 0 {
                         &raw const (*lib).shader_intra_main_prefetch_hbd
                     } else {
                         &raw const (*lib).shader_intra_main_prefetch
                     }
                 }
-                IntraMain::Tight if td.is_hbd != 0 && INTRA_BANK_LEGACY.load(Ordering::Relaxed) == 0 => {
-                    &raw const (*lib).shader_intra_main_banked_hbd
-                }
-                IntraMain::Tight => &raw const (*shaders).intra_main_tight,
                 IntraMain::Legacy => &raw const (*shaders).intra_main,
                 IntraMain::Unoptimized => &raw const (*shaders).intra_main_legacy,
             };
@@ -1357,8 +1309,6 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                 let offsets = block_map.add((InterCountsAll + ReconstructBlockSizes) as usize);
                 let intra_filter = if td.is_hbd == 0 && INTRA_FILTER_LEGACY.load(Ordering::Relaxed) != 0 {
                     &raw const (*lib).shader_intra_filter_legacy
-                } else if INTRA_STEP_LEGACY.load(Ordering::Relaxed) != 0 {
-                    &raw const (*shaders).intra_filter
                 } else if td.is_hbd != 0 {
                     &raw const (*lib).shader_intra_filter_prefetch_hbd
                 } else {

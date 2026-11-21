@@ -36,9 +36,7 @@ build() {
 }
 
 to_cpp "$shaders/cdef_filter.hlsl" > "$work/cdef_filter.gen.h"
-to_cpp "$shaders/cdef_filter_v2_legacy.hlsl" > "$work/cdef_filter_v2_legacy.gen.h"
 to_cpp "$shaders/cdef_filter_v2.hlsl" > "$work/cdef_filter_v2.gen.h"
-to_cpp "$shaders/cdef_lists_legacy.hlsl" > "$work/cdef_lists_legacy.gen.h"
 to_cpp "$shaders/cdef_lists.hlsl" > "$work/cdef_lists.gen.h"
 build "$work" cdef_check
 timeout -k 10 "$check_timeout" "$work/cdef_check"
@@ -74,7 +72,7 @@ if [ "${1:-}" = "--mutate" ]; then
   expect_rejected cdef_filter_v2 's/if (cost\[i\] > best_cost)/if (cost[i] >= best_cost)/' "last-direction tie break" '^MISMATCH direction'
   expect_rejected cdef_filter_v2 's/(best_cost - opposite_cost) >> 10/(best_cost - opposite_cost) >> 9/' "wrong variance shift" '^MISMATCH direction'
   expect_rejected cdef_filter_v2 's/uint2(CDEF_VERY_LARGE_X2, CDEF_VERY_LARGE_X2)/uint2(0u, 0u)/' "missing border sentinel" '^MISMATCH optimized'
-  for f in cdef_filter cdef_filter_v2_legacy cdef_filter_v2; do
+  for f in cdef_filter cdef_filter_v2; do
     expect_rejected "$f" \
       '/void shader_main(/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/' \
       "$f halo sync weakened to a barrier" 'races in group memory: [1-9]'

@@ -46,30 +46,8 @@ vec<uint, N> operator<<(const vec<uint, N> &v, int shift) {
 
 long g_out_of_bounds = 0;
 
-// Start legacy shared memory with nonzero data while checking that every read has a writer.
-static void scramble_bytes(void *buffer, size_t size, uint64_t *state) {
-  auto *bytes = static_cast<uint8_t *>(buffer);
-  for (size_t i = 0; i < size; ++i) {
-    *state = *state * 6364136223846793005ULL + 1;
-    bytes[i] = *state >> 56;
-  }
-}
-
 #include "film_grain_const.gen.h"
 #include "film_grain_apply.gen.h"
-
-namespace legacy {
-#define SEMI_PLANAR
-#define SP_TEXTURE
-#define SP_LUMA_REGISTER u0
-#define SP_CHROMA_REGISTER u1
-#include "film_grain_filter.gen.h"
-#include "film_grain_filter.entry.h"
-#undef SP_CHROMA_REGISTER
-#undef SP_LUMA_REGISTER
-#undef SP_TEXTURE
-#undef SEMI_PLANAR
-}
 
 namespace optimized {
 #include "film_grain_filter_sp_tex_v2.gen.h"
@@ -80,9 +58,8 @@ namespace optimized {
 }
 
 namespace copy_plane {
-#define SP_TEXTURE
-#include "copy_plane_sp.gen.h"
-#include "copy_plane_sp.entry.h"
+#include "copy_plane_sp_tex_v2.gen.h"
+#include "copy_plane_sp_tex_v2.entry.h"
 #undef SP_CHROMA_REGISTER
 #undef SP_LUMA_REGISTER
 #undef SP_TEXTURE
@@ -100,11 +77,9 @@ struct Frame {
 
 struct Case {
   FilmGrainData constants;
-  int padded_width, padded_height;
   Grain mode;
   std::vector<uint8_t> pixels;
   std::vector<int> grain, offsets;
-  size_t offset_count;  // Entries initialized for the image, before slack for the original dispatch.
 };
 
 static int ceil_div(int n, int d) { return (n + d - 1) / d; }
@@ -137,8 +112,6 @@ static Case make_case(int width, int height, uint depth, Grain mode, bool overla
   Case test{};
   auto &data = test.constants;
   auto &p = data.params;
-  test.padded_width = ceil_div(width, 8) * 8;
-  test.padded_height = ceil_div(height, 8) * 8;
   test.mode = mode;
   data.width = width;
   data.height = height;
@@ -171,43 +144,39 @@ static Case make_case(int width, int height, uint depth, Grain mode, bool overla
     make_scaling(test, 2, p.num_cr_points, rng);
   }
 
-  // Real template geometry with randomized, in-range grain samples. The generators are shared by both paths.
+  // Real template geometry with randomized, in-range grain samples.
   data.left_pad = data.top_pad = data.right_pad = data.ar_padding = 3;
   data.luma_grain_stride = 82;
   data.chroma_grain_stride = 44;
   data.grain_offset_u = 82 * 73;
   data.grain_offset_v = data.grain_offset_u + 44 * 38;
   const int center = 1 << (depth - 1);
-  // The original Y-overlap pass speculatively fetches upper-left samples across a row,
-  // even though only the first column uses them. Use the decoder's padded buffer size.
-  test.grain.resize(96 * 96 + 48 * 48 * 2);
+  test.grain.resize(data.grain_offset_v + 44 * 38);
   for (int &value : test.grain) value = int(rng() & (2 * center - 1)) - center;
 
-  data.random_offset_stride = test.padded_width / 32 + 1;
-  const int offset_rows = test.padded_height / 32 + 1;
-  test.offset_count = data.random_offset_stride * offset_rows;
-  test.offsets.resize(test.offset_count + 2 * data.random_offset_stride);
-  for (int &offset : test.offsets) offset = rng() & 255;
-  for (int y = 0; y < ceil_div(test.padded_height, 32); ++y) {
+  data.random_offset_stride = ceil_div(width, 32);
+  const int offset_rows = ceil_div(height, 32);
+  test.offsets.resize(data.random_offset_stride * offset_rows);
+  for (int y = 0; y < offset_rows; ++y) {
     uint state = p.random_seed ^ (((y * 37 + 178) & 255) << 8) ^ ((y * 173 + 105) & 255);
-    for (int x = 0; x < ceil_div(test.padded_width, 32); ++x) {
+    for (int x = 0; x < data.random_offset_stride; ++x) {
       const uint bit = (state ^ (state >> 1) ^ (state >> 3) ^ (state >> 12)) & 1;
       state = (state >> 1) | (bit << 15);
       test.offsets[y * data.random_offset_stride + x] = state >> 8;
     }
   }
 
-  // The old dispatch may read whole blocks beyond the visible frame. Provide backing storage there.
   const int bytes = depth == 8 ? 1 : 2;
   for (int plane = 0; plane < 3; ++plane) {
-    const int width = ceil_div((96 * data.random_offset_stride) >> (plane != 0), 16) * 16;
-    const int height = (32 * offset_rows) >> (plane != 0);
+    const int plane_width = ceil_div(width, plane ? 2 : 1);
+    const int plane_height = ceil_div(height, plane ? 2 : 1);
+    // Packed shader loads may read into the padding of the last word of a row.
+    const int stride = ceil_div(plane_width, 16) * 16 * bytes + 64;
     const int offset = test.pixels.size() + 128;
-    const int stride = width * bytes + 64;
     data.src_planes[plane] = int4(stride, offset, 0, 0);
-    test.pixels.resize(offset + stride * height);
-    for (int y = 0; y < height; ++y) {
-      for (int x = 0; x < width; ++x) {
+    test.pixels.resize(offset + stride * plane_height);
+    for (int y = 0; y < plane_height; ++y) {
+      for (int x = 0; x < stride / bytes; ++x) {
         // Exercise the last 8-bit knot and all four 10-bit indices that map to it.
         const uint value = (x % 16 == 0) ? (2 * center - 1 - (y & 3)) : rng() & (2 * center - 1);
         auto *pixel = &test.pixels[offset + y * stride + x * bytes];
@@ -248,15 +217,98 @@ static void copy_chroma(const Case &test, Frame &frame, uint64_t &order) {
   sp_chroma = {&frame.uv};
   cb_width = test.constants.width;
   cb_height = test.constants.height;
-  cb_groups = ceil_div(frame.uv.width, 8);
-  cb_rows = frame.uv.height;
+  cb_luma_group_rows = 0;
   cb_hbd = test.constants.params.bit_depth == 10;
-  cb_mode = test.mode == Monochrome ? SP_MODE_CHROMA_NEUTRAL : SP_MODE_CHROMA;
-  cb_src_stride = test.constants.src_planes[1].x;
-  cb_src_offset = test.constants.src_planes[1].y;
-  cb_src_offset_v = test.constants.src_planes[2].y;
-  dispatch(shader_entry, uint3(kThreadsX, kThreadsY, kThreadsZ), ceil_div(cb_groups, kThreadsX),
-           ceil_div(cb_rows, kThreadsY), order);
+  cb_neutral_chroma = test.mode == Monochrome;
+  cb_u_offset = test.constants.src_planes[1].y;
+  cb_v_offset = test.constants.src_planes[2].y;
+  cb_uv_stride = test.constants.src_planes[1].x;
+  dispatch(shader_entry, uint3(kThreadsX, kThreadsY, kThreadsZ),
+           2 * ceil_div(cb_width, 256), ceil_div(cb_height, 16), order);
+}
+
+static int sample(const Case &test, int plane, int x, int y) {
+  const auto &data = test.constants;
+  const int bytes = data.params.bit_depth == 8 ? 1 : 2;
+  const auto *p = &test.pixels[data.src_planes[plane].y + y * data.src_planes[plane].x + x * bytes];
+  return bytes == 1 ? p[0] : p[0] + 256 * p[1];
+}
+
+// AV1 7.18.3.5. Look up a sample in the current patch of the grain template and blend with
+// its neighbors at a block boundary. The horizontal blends are clipped before the vertical blend.
+static int reference_grain(const Case &test, int plane, int x, int y, int center) {
+  const auto &data = test.constants;
+  const int sub = plane != 0;
+  const int block_size = 32 >> sub;
+  const int bx = x / block_size, by = y / block_size;
+  const int lx = x % block_size, ly = y % block_size;
+  const int base = plane == 0 ? 0 : plane == 1 ? data.grain_offset_u : data.grain_offset_v;
+  const int stride = sub ? data.chroma_grain_stride : data.luma_grain_stride;
+  const auto patch = [&](int dx, int dy) {
+    const int random = test.offsets[(by + dy) * data.random_offset_stride + bx + dx];
+    const int u = data.left_pad + (2 * data.ar_padding >> sub) + (random / 16 << (1 - sub)) + lx - dx * block_size;
+    const int v = data.top_pad + (2 * data.ar_padding >> sub) + (random % 16 << (1 - sub)) + ly - dy * block_size;
+    return test.grain[base + v * stride + u];
+  };
+  const auto blend = [&](int previous, int current, int position) {
+    const int prev_weight = sub ? 23 : position == 0 ? 27 : 17;
+    const int cur_weight = sub ? 22 : position == 0 ? 17 : 27;
+    return std::clamp((previous * prev_weight + current * cur_weight + 16) >> 5, -center, center - 1);
+  };
+  const bool overlap_x = data.params.overlap_flag && bx > 0 && lx < (2 >> sub);
+  const auto horizontal = [&](int dy) {
+    const int current = patch(0, dy);
+    return overlap_x ? blend(patch(-1, dy), current, lx) : current;
+  };
+  const int value = horizontal(0);
+  return data.params.overlap_flag && by > 0 && ly < (2 >> sub)
+           ? blend(horizontal(-1), value, ly)
+           : value;
+}
+
+static uint reference_pixel(const Case &test, int plane, int x, int y) {
+  const auto &data = test.constants;
+  const auto &p = data.params;
+  const int shift = p.bit_depth - 8;
+  const int center = 128 << shift;
+  const int maximum = 2 * center - 1;
+  const int output_shift = shift ? 6 : 0;
+  if (plane && test.mode == Monochrome) return uint(center) << output_shift;
+  const int input = sample(test, plane, x, y);
+  const int points[] = {p.num_y_points, p.num_cb_points, p.num_cr_points};
+  if (!points[plane] && !(plane && p.chroma_scaling_from_luma)) return uint(input) << output_shift;
+
+  int index = input;
+  if (plane) {
+    const int left = x * 2, right = std::min(left + 1, data.width - 1);
+    index = (sample(test, 0, left, y * 2) + sample(test, 0, right, y * 2) + 1) / 2;
+    if (!p.chroma_scaling_from_luma) {
+      const int luma_weight = (plane == 1 ? p.cb_luma_mult : p.cr_luma_mult) - 128;
+      const int uv_weight = (plane == 1 ? p.cb_mult : p.cr_mult) - 128;
+      const int offset = (plane == 1 ? p.cb_offset : p.cr_offset) - 256;
+      index = std::clamp(((index * luma_weight + input * uv_weight) >> 6) + offset * (1 << shift), 0, maximum);
+    }
+  }
+
+  const int step = 1 << shift;
+  const int knot = index / step, remainder = index % step;
+  const int a = data.scaling_lut[knot][plane], b = data.scaling_lut[std::min(knot + 1, 255)][plane];
+  const int scale = (a * (step - remainder) + b * remainder + step / 2) / step;
+  const int grain = reference_grain(test, plane, x, y, center);
+  const int delta = (scale * grain + (1 << (p.scaling_shift - 1))) >> p.scaling_shift;
+  const int low = p.clip_to_restricted_range ? 16 << shift : 0;
+  const int high = p.clip_to_restricted_range ? (plane && !data.mc_identity ? 240 : 235) << shift : maximum;
+  return uint(std::clamp(input + delta, low, high)) << output_shift;
+}
+
+static void reference_frame(const Case &test, Frame &frame) {
+  for (int y = 0; y < frame.y.height; ++y)
+    for (int x = 0; x < frame.y.width; ++x)
+      frame.y.store(int2(x, y)) = reference_pixel(test, 0, std::min(x, test.constants.width - 1),
+                                                    std::min(y, test.constants.height - 1));
+  for (int y = 0; y < frame.uv.height; ++y)
+    for (int x = 0; x < frame.uv.width; ++x)
+      frame.uv.store(int2(x, y)) = uint2(reference_pixel(test, 1, x, y), reference_pixel(test, 2, x, y));
 }
 
 static bool same(uint a, uint b) { return a == b; }
@@ -276,7 +328,7 @@ static void compare(const Case &test, const Texture<T> &expected, const Texture<
   }
 }
 
-// Pack the optimized buffer using the interpolation formula of the reference HLSL.
+// Pack the extra 10-bit scale indices as the host does.
 static void pack_p010_scaling(FilmGrainData &data) {
   for (int i = 0; i < 256; ++i) {
     for (int plane = 0; plane < 3; ++plane) {
@@ -295,31 +347,20 @@ static void pack_p010_scaling(FilmGrainData &data) {
 static void check_case(const Case &test, uint64_t &order) {
   const auto &data = test.constants;
   Frame expected(data.width, data.height), actual(data.width, data.height);
-  legacy::data = data;
-  legacy::src = {test.pixels.data(), test.pixels.size()};
-  legacy::grain_block = {test.grain.data(), test.grain.size()};
-  legacy::random_offset = {test.offsets.data(), test.offsets.size()};
-  legacy::sp_luma = {&expected.y};
-  legacy::sp_chroma = {&expected.uv};
-  gs_state.shader = "film_grain_filter_sp_tex";
-  legacy::shader_scramble(&order);
-  dispatch(legacy::shader_entry, uint3(legacy::kThreadsX, legacy::kThreadsY, legacy::kThreadsZ),
-           data.random_offset_stride, test.padded_height / 32 + 1, order);
+  reference_frame(test, expected);
 
   optimized::data = data;
   if (data.params.bit_depth == 10) pack_p010_scaling(optimized::data);
-  optimized::src = legacy::src;
-  const size_t grain_samples = data.grain_offset_v + data.chroma_grain_stride * 38;
-  optimized::grain_block = {reinterpret_cast<const uint8_t *>(test.grain.data()), grain_samples * sizeof(int)};
-  optimized::random_offset = {test.offsets.data(), test.offset_count};
+  optimized::src = {test.pixels.data(), test.pixels.size()};
+  optimized::grain_block = {reinterpret_cast<const uint8_t *>(test.grain.data()), test.grain.size() * sizeof(int)};
+  optimized::random_offset = {test.offsets.data(), test.offsets.size()};
   optimized::sp_luma = {&actual.y};
   optimized::sp_chroma = {&actual.uv};
   gs_state.shader = "film_grain_filter_sp_tex_v2";
   dispatch(optimized::shader_entry, uint3(optimized::kThreadsX, optimized::kThreadsY, optimized::kThreadsZ),
            ceil_div(data.width, 32), ceil_div(data.height, 32), order);
   if (!data.enable_chroma) {
-    gs_state.shader = "copy_plane_sp_tex";
-    copy_chroma(test, expected, order);
+    gs_state.shader = "copy_plane_sp_tex_v2";
     copy_chroma(test, actual, order);
   }
 
@@ -352,5 +393,5 @@ int main() {
       }
     }
   }
-  std::printf("PASS: %d NV12/P010 cases matched at every luma and chroma texel\n", count);
+  std::printf("PASS: %d NV12/P010 cases matched the scalar reference at every texel\n", count);
 }

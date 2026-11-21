@@ -71,19 +71,19 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
   selects upstream's shader).
 - **Intra v2** (`-intrav2`) is bit-exact but 2.3–2.4x slower. It is a negative result, off by
   default and kept for reference.
-- **Intra optimisation A/B** uses angle-specific wavefront dependencies and direct prediction for
-  exact vertical and horizontal angles. `-intraschedulelegacy` selects the previous wavefront and
-  optimized kernels. `-intraod` also selects the previous wavefront, with the DXC `-Od` kernels.
+- **Intra prediction** uses angle-specific wavefront dependencies and direct prediction for
+  exact vertical and horizontal angles. `-intraod` selects the conservative wavefront with the
+  DXC `-Od` kernels.
   The optimized high-bit-depth kernels use wave sums for large DC and CFL reductions.
   The default 10-bit shader prepares filtered and upsampled samples in separate ranges of
   group memory, cutting one group sync. A chroma-from-luma plane with zero alpha uses
-  DC without reading luma. Use `-intrabanklegacy` to compare the previous shader.
+  DC without reading luma.
   A wavefront step now waits for two loads in a row instead of four: the main shader derives
   the mode's flags from the record with arithmetic instead of a table load behind it, and loads
   its residual and its other inputs beside its edges, before the first group sync. 8-bit frames
   take the same shader (two group syncs instead of eight), with 8-bit loads and stores. Filter
   intra (both bit depths) loads all residuals of a lane at the start instead of one diagonal
-  ahead. Use `-intrasteplegacy` to compare the previous step.
+  ahead.
   For one-edge angles, both bit depths wait for the opposite edge only when it supplies a missing
   primary edge. Frames without those angles use the original prefetch kernel. Use
   `-intrasingleedgelegacy` to select the original prefetch kernels and wavefront for an A/B.

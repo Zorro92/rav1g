@@ -31,11 +31,11 @@ pub type IntraStep = sys::av1_intra_step;
 
 /// The fast inter path is on ([`set_inter_fast`]).
 pub const INTER_FAST_ON: u32 = sys::AV1_INTER_FAST_ON as u32;
-/// With [`INTER_FAST_ON`]: the blocks with one reference are listed and predicted by the original shader.
+/// With [`INTER_FAST_ON`]: the blocks with one reference are listed and predicted by the size-list shader.
 pub const INTER_FAST_SINGLE_ORIGINAL: u32 = sys::AV1_INTER_FAST_SINGLE_ORIGINAL as u32;
 /// With [`INTER_FAST_ON`]: the same for the averaged compound blocks.
 pub const INTER_FAST_COMPOUND_ORIGINAL: u32 = sys::AV1_INTER_FAST_COMPOUND_ORIGINAL as u32;
-/// The lists of the fast inter path with the original shaders on all of them.
+/// The lists of the fast inter path with the size-list shaders on all of them.
 pub const INTER_FAST_LISTS_ONLY: u32 = sys::AV1_INTER_FAST_LISTS_ONLY as u32;
 
 /// What [`set_poison_buffers`] fills.
@@ -78,49 +78,9 @@ pub fn set_cdef_v2(enable: bool) {
     crate::host::av1_set_cdef_v2(c_int::from(enable))
 }
 
-/// Use the previous 64x64 CDEF v2 kernel. Applies only to the v2 path.
-pub fn set_cdef_legacy(enable: bool) {
-    crate::host::av1_set_cdef_legacy(c_int::from(enable))
-}
-
-/// Use the previous GPU shader for the CDEF lists.
-pub fn set_cdef_lists_legacy(enable: bool) {
-    crate::host::av1_set_cdef_lists_legacy(c_int::from(enable))
-}
-
-/// Use the original loop restoration shader. By default, use the optimized shader.
-pub fn set_lr_legacy(enable: bool) {
-    crate::host::av1_set_lr_legacy(c_int::from(enable))
-}
-
 /// Skip film grain synthesis. Set while no frame is in flight.
 pub fn set_skip_film_grain(enable: bool) {
     crate::host::av1_set_skip_film_grain(c_int::from(enable))
-}
-
-/// Use the original direct NV12/P010 film grain apply shader.
-pub fn set_fg_legacy(enable: bool) {
-    crate::host::av1_set_fg_legacy(c_int::from(enable))
-}
-
-/// Use the original copy shader for direct NV12/P010 textures.
-pub fn set_copy_legacy(enable: bool) {
-    crate::host::av1_set_copy_legacy(c_int::from(enable))
-}
-
-/// Use the original shaders for lossy 4x4, 4x8, 8x4 and 8x8 transforms.
-pub fn set_idct_legacy(enable: bool) {
-    crate::host::av1_set_idct_legacy(c_int::from(enable))
-}
-
-/// Clear the whole residual allocation before IDCT. The default clears the current frame's padded planes.
-pub fn set_clear_legacy(enable: bool) {
-    crate::host::av1_set_clear_legacy(c_int::from(enable))
-}
-
-/// Use the original single-reference and average/distance compound kernels for the unscaled inter size lists.
-pub fn set_inter_legacy(enable: bool) {
-    crate::host::av1_set_inter_legacy(c_int::from(enable))
 }
 
 /// Intra prediction through `intra_v2.hlsl`; only in a decoder that was created with
@@ -156,11 +116,6 @@ pub fn set_async_clear(enable: bool) {
 /// created with [`crate::Settings::inter_fast`].
 pub fn set_inter_fast(mode: u32) {
     crate::host::av1_set_inter_fast(mode as c_int)
-}
-
-/// Select the original deblocking kernels (false by default).
-pub fn set_lf_legacy(enable: bool) {
-    crate::host::av1_set_lf_legacy(c_int::from(enable))
 }
 
 /// Experiment: how the horizontal loop filter is dispatched, 0 (one dispatch per plane), 1 or 2.
