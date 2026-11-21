@@ -10,13 +10,13 @@ Rust host and rav1d's parse pass. These rules apply to every change in this repo
   console's limits below. Earlier design choices, the code rav1g was forked from and the layout of
   internal data bind nothing.
 - Output must stay bit-exact: every frame's md5 identical to the reference. Any code may change as long
-  as that holds.
+  as that holds. The reference is the AV1 specification v1.0.0 with Errata 1 and the Argon Streams AV1
+  conformance set (README, "References"); dav1d is the backup. The code rav1g was forked from
+  (branch `original`) is not a reference.
 - CI checks that compare internal state (the stage dumps and CRCs `rust-equal` holds against the C++
   decoder of branch `cpp`) are guard rails from the port, not references. When a change alters an internal
   layout, give the check a documented exception for that stage. Keep the per-frame md5 checks and the
-  Argon results as they are: those are the gates. The reference is the AV1 specification v1.0.0 with Errata 1 and the Argon Streams AV1
-  conformance set (README, "References"); dav1d is the backup. The code rav1g was forked from
-  (branch `original`) is not a reference.
+  Argon results as they are: those are the gates.
 - The public API and ABI (`crates/rav1g/include/rav1g.h`, `tools/rav1g-header/abi.txt`) may change too
   when a change needs it; the project is still in heavy development. Bale builds against them, so such a
   change raises `RAV1G_ABI_VERSION`, records the new fingerprint in `abi.txt`, updates
