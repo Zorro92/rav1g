@@ -942,6 +942,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         intra_filter_legacy: task.intrafilterlegacy,
         intra_schedule_legacy: task.intraschedulelegacy,
         intra_bank_legacy: task.intrabanklegacy,
+        intra_step_legacy: task.intrasteplegacy,
         lf_legacy: task.lflegacy,
         lf_h_split: task.lfhsplit as u32,
         intra_edge_fix: task.intraedgefix,
@@ -974,6 +975,8 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
                 "conservative"
             } else if task.intrabanklegacy {
                 "angle-specific (-intrabanklegacy)"
+            } else if task.intrasteplegacy {
+                "angle-specific, with separate edge banks at high bit depth (-intrasteplegacy)"
             } else {
                 "angle-specific, with separate edge banks at high bit depth"
             }

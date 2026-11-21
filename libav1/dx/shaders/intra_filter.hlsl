@@ -88,10 +88,16 @@ uint add_residual_pair(uint pair, int residual) {
   const int rows = 2 << (block.z & 3);
   const int plane = (block.y >> 3) & 3;
   const int mode = (block.z >> 4) & 7;
-  const int stride = cb_planes[plane].x;
+#ifdef INTRA_FILTER_PREFETCH
+  // The plane's constants by a select, not by a load that waits for the record (filter intra is luma).
+  const int4 plane_cb = plane == 0 ? cb_planes[0] : plane == 1 ? cb_planes[1] : cb_planes[2];
+#else
+#define plane_cb cb_planes[plane]
+#endif
+  const int stride = plane_cb.x;
   const int x = 4 * (block.x & 0xffff);
   const int y = 4 * (block.x >> 16);
-  const int base = cb_planes[plane].y + x + y * stride;
+  const int base = plane_cb.y + x + y * stride;
   const int above_available = (block.y >> 10) & 63;
   const int left_available = ((block.y >> 16) & 63) << 2;
 
@@ -129,13 +135,24 @@ uint add_residual_pair(uint pair, int residual) {
   const uint4 a = pack_taps(cb_filter[mode][tap][0], cb_filter[mode][tap + 1][0]);
   const uint4 b = pack_taps(cb_filter[mode][tap][1], cb_filter[mode][tap + 1][1]);
   const bool add_residual = (block.y & (1 << 5)) != 0;
-  const int res_stride = cb_planes[plane].z;
+  const int res_stride = plane_cb.z;
   const int word_row = pair >> 1;
   const int frame_offset = base + 4 * col + word_row * stride;
-  const int res_offset = cb_planes[plane].w + 2 * x + 8 * col + (pair & 1) * 4 + (y + word_row) * res_stride;
+  const int res_offset = plane_cb.w + 2 * x + 8 * col + (pair & 1) * 4 + (y + word_row) * res_stride;
 
+#ifdef INTRA_FILTER_PREFETCH
+  // All residual words of the lane's column, loaded here at once: a lane visits one unit row per
+  // diagonal, and a load issued one diagonal ahead waits out most of its latency in every diagonal of
+  // a tall block. The queue is shifted by one per row, so that it stays in registers.
+  int queue[16];
+  [unroll] for (int q = 0; q < 16; ++q) {
+    queue[q] = 0;
+    if (add_residual && col < columns && q < rows) queue[q] = (int)residuals.Load(res_offset + 2 * q * res_stride);
+  }
+#else
   int next_residual = 0;
   if (add_residual && col < columns) next_residual = (int)residuals.Load(res_offset);
+#endif
 
   GroupMemoryBarrierWithGroupSync();
 
@@ -150,9 +167,14 @@ uint add_residual_pair(uint pair, int residual) {
     const int current = previous ^ 1;
     uint output = 0;
     if (active) {
+#ifdef INTRA_FILTER_PREFETCH
+      const int residual = queue[0];
+      [unroll] for (int q = 0; q < 15; ++q) queue[q] = queue[q + 1];
+#else
       const int residual = next_residual;
       if (add_residual && row + 1 < rows)
         next_residual = (int)residuals.Load(res_offset + 2 * (row + 1) * res_stride);
+#endif
 
       const uint above01 = unit_pairs[2][previous][col];
       const uint above23 = unit_pairs[3][previous][col];

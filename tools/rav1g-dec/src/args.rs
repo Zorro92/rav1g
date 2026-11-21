@@ -100,6 +100,7 @@ pub struct Task {
     pub intrafilterlegacy: bool,
     pub intraschedulelegacy: bool,
     pub intrabanklegacy: bool,
+    pub intrasteplegacy: bool,
     pub lrlegacy: bool,
     pub fglegacy: bool,
     pub copylegacy: bool,
@@ -183,6 +184,7 @@ impl Default for Task {
             intrafilterlegacy: false,
             intraschedulelegacy: false,
             intrabanklegacy: false,
+            intrasteplegacy: false,
             lrlegacy: false,
             fglegacy: false,
             copylegacy: false,
@@ -293,6 +295,7 @@ pub fn usage() {
     say!("  -intrafilterlegacy   use the previous 8-bit filter intra shader");
     say!("  -intraschedulelegacy use the previous intra wavefront and exact V/H predictors");
     say!("  -intrabanklegacy      use the previous 10-bit intra edge preparation");
+    say!("  -intrasteplegacy      use the previous intra wavefront step (main before round 4)");
     say!("  -lrlegacy           use the original loop_restoration shader");
     say!("  -fglegacy           use the original direct NV12/P010 film grain shader");
     say!("  -copylegacy         use the original direct NV12/P010 copy shader");
@@ -486,6 +489,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-intrafilterlegacy" => task.intrafilterlegacy = true,
             "-intraschedulelegacy" => task.intraschedulelegacy = true,
             "-intrabanklegacy" => task.intrabanklegacy = true,
+            "-intrasteplegacy" => task.intrasteplegacy = true,
             "-lrlegacy" => task.lrlegacy = true,
             "-fglegacy" => task.fglegacy = true,
             "-copylegacy" => task.copylegacy = true,

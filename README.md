@@ -78,6 +78,12 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
   The default 10-bit shader prepares filtered and upsampled samples in separate ranges of
   group memory, cutting one group sync. A chroma-from-luma plane with zero alpha uses
   DC without reading luma. Use `-intrabanklegacy` to compare the previous shader.
+  A wavefront step now waits for two loads in a row instead of four: the main shader derives
+  the mode's flags from the record with arithmetic instead of a table load behind it, and loads
+  its residual and its other inputs beside its edges, before the first group sync. 8-bit frames
+  take the same shader (two group syncs instead of eight), with 8-bit loads and stores. Filter
+  intra (both bit depths) loads all residuals of a lane at the start instead of one diagonal
+  ahead. Use `-intrasteplegacy` to compare the previous step.
 - **A third frame in flight** (`-slots 3`) lets CPU and GPU overlap: the decode thread's wait
   for a free slot drops from 5.6–8.3 ms to 0.3–0.6 ms per frame. It only fits in memory with
   `-lowmem`. All combinations are md5-exact. On the SVT clip the CPU (entropy decoding,

@@ -97,6 +97,10 @@ intra_main_hbd
 intra_main_hbd_legacy
 intra_main_tight_hbd
 intra_main_banked_hbd
+intra_main_prefetch_hbd
+intra_main_prefetch
+intra_filter_prefetch
+intra_filter_prefetch_hbd
 inter_ext_borders_hbd
 reconstruct_block_hbd
 loopfilter_vert_hbd

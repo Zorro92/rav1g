@@ -50,7 +50,8 @@ LR_LEGACY = 'loop_restoration_legacy'
 # Verify the alternate kernels selected at runtime in the built binary.
 REQUIRED_BYTECODE = [
     'cdef_filter', 'cdef_filter_v2', 'cdef_filter_v2_legacy', *INTRA_MAIN, *UNOPTIMIZED,
-    'intra_main_tight', 'intra_main_tight_hbd', 'intra_main_banked_hbd',
+    'intra_main_tight', 'intra_main_tight_hbd', 'intra_main_banked_hbd', 'intra_main_prefetch_hbd', 'intra_main_prefetch',
+    'intra_filter_prefetch', 'intra_filter_prefetch_hbd',
     'cdef_lists', 'cdef_lists_legacy',
     'intra_filter', 'intra_filter_legacy', 'intra_filter_hbd', 'intra_v2', 'intra_v2_hbd',
     'gen_lf_blocks_vert', 'gen_lf_blocks_hor', 'gen_lf_blocks_vert_legacy', 'gen_lf_blocks_hor_legacy',

@@ -50,6 +50,7 @@ struct int4 {
   int4(int v) : x(v), y(v), z(v), w(v) {}
   int4(int a, int b, int c, int d) : x(a), y(b), z(c), w(d) {}
   int3 xyz() const { return int3(x, y, z); }
+  int &operator[](int i) { return i == 0 ? x : i == 1 ? y : i == 2 ? z : w; }
   int4 &operator<<=(int s) {
     x <<= s;
     y <<= s;
@@ -102,6 +103,9 @@ struct ByteAddressBuffer {
   }
   uint2 Load2(uint address) const { return uint2(Load(address), Load(address + 4)); }
   uint3 Load3(uint address) const { return uint3(Load(address), Load(address + 4), Load(address + 8)); }
+  uint4 Load4(uint address) const {
+    return uint4(Load(address), Load(address + 4), Load(address + 8), Load(address + 12));
+  }
 };
 
 struct RWByteAddressBuffer {

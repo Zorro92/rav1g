@@ -64,6 +64,20 @@ RWByteAddressBuffer dst_frame : register(u0);
 #define EDGE_ABOVE 0
 #define EDGE_LEFT 1
 
+// INTRA_8BIT (intra_main_prefetch.hlsl, with INTRA_PREFETCH): the same shader for 8-bit frames. It keeps
+// the samples it predicts as this one does, two to a word of 16-bit halves, and reads and writes the
+// frame's 8-bit samples (four to a word) at the edges of that: the loads of the edges, of the luma of
+// CFL, of an intra block copy and of an inter-intra block's inter prediction, and the store.
+#ifdef INTRA_8BIT
+#define PIXEL_MAX 255
+#define PIXEL_MID 128
+#define LEFT_SHIFT 24
+#else
+#define PIXEL_MAX 1023
+#define PIXEL_MID 512
+#define LEFT_SHIFT 16
+#endif
+
 // FXC can turn dynamic masks into bit-field instructions with run-time widths.
 static const uint low_bits[11] = {0, 1, 3, 7, 15, 31, 63, 127, 255, 511, 1023};
 
@@ -108,7 +122,7 @@ int filter_edge(int edge, int base, int i, int last, int strength) {
 }
 
 int upsample_edge(int p0, int p1, int p2, int p3) {
-  return clamp((-p0 + 9 * (p1 + p2) - p3 + 8) >> 4, 0, 1023);
+  return clamp((-p0 + 9 * (p1 + p2) - p3 + 8) >> 4, 0, PIXEL_MAX);
 }
 
 #ifdef INTRA_EDGE_BANKS
@@ -181,14 +195,36 @@ void write_edge(int edge, int base, int wi, int wi_count, int count, int upsampl
 
 #endif
 
+#ifdef INTRA_8BIT
+// The pair of samples wi of the row above (available: the pairs that are there), as two 16-bit halves.
+uint load_above_pair(int corner, int wi, int available) {
+  const int at = min(wi, available - 1);
+  const uint word = dst_frame.Load(corner + 4 + 4 * (at >> 1));
+  const uint half_word = (at & 1) ? word >> 16 : word & 0xffff;
+  uint pair = (half_word & 255) | ((half_word >> 8) << 16);
+  if (wi >= available) pair = (pair & 0xffff0000) | (pair >> 16);
+  return pair;
+}
+
+// Four 8-bit samples of a frame word as two words of 16-bit halves, and back.
+uint2 unpack_samples(uint word) {
+  return uint2((word & 255) | (((word >> 8) & 255) << 16), ((word >> 16) & 255) | ((word >> 24) << 16));
+}
+
+uint pack_samples(uint2 pixels) {
+  return (pixels.x & 255) | (((pixels.x >> 16) & 255) << 8) | ((pixels.y & 255) << 16) |
+         (((pixels.y >> 16) & 255) << 24);
+}
+#else
 uint load_above_pair(int corner, int wi, int available) {
   uint pair = dst_frame.Load(corner + 4 + 4 * min(wi, available - 1));
   if (wi >= available) pair = (pair & 0xffff0000) | (pair >> 16);
   return pair;
 }
+#endif
 
 int load_left(int corner, int stride, int wi, int available) {
-  return dst_frame.Load(corner + (min(wi, available - 1) + 1) * stride) >> 16;
+  return dst_frame.Load(corner + (min(wi, available - 1) + 1) * stride) >> LEFT_SHIFT;
 }
 
 uint2 predict_straight(bool vertical, int corner, int stride, int x, int y, int above, int left) {
@@ -196,9 +232,9 @@ uint2 predict_straight(bool vertical, int corner, int stride, int x, int y, int 
     const int pair = x >> 1;
     return uint2(load_above_pair(corner, pair, above), load_above_pair(corner, pair + 1, above));
   }
-  uint sample = vertical ? 511 : 513;
+  uint sample = vertical ? PIXEL_MID - 1 : PIXEL_MID + 1;
   [branch] if (left) sample = load_left(corner, stride, vertical ? 0 : y, left);
-  else [branch] if (above) sample = dst_frame.Load(corner + 4) & 1023;
+  else [branch] if (above) sample = dst_frame.Load(corner + 4) & PIXEL_MAX;
   sample |= sample << 16;
   return uint2(sample, sample);
 }
@@ -207,18 +243,137 @@ int compute_bc(int p0, int p1, int p2, int p3, int fh, int fv) {
   int l0 = ((1 << 14) + p0 * fh + p1 * (128 - fh) + (1 << (FilterLineShift - 1))) >> FilterLineShift;
   int l1 = ((1 << 14) + p2 * fh + p3 * (128 - fh) + (1 << (FilterLineShift - 1))) >> FilterLineShift;
   int output = SumAddVert + l0 * fv + l1 * (128 - fv);
-  return clamp((output >> OutputShift) - OutputSub, 0, 1023);
+  return clamp((output >> OutputShift) - OutputSub, 0, PIXEL_MAX);
 }
+
+#ifdef INTRA_PREFETCH
+// The flags of cb_mode_params_lut[mode][mode_angle] (its z), which host/tables.rs has: for the
+// directional modes by the zone of the angle (the nominal angle of V H D45 D135 D113 D157 D203 D67 and
+// 3 degrees a step of mode_angle - 3), for the others by the mode.
+int intra_mode_flags(int mode, int mode_angle) {
+  if (mode < 8) {
+    const uint nominal = ((mode < 4 ? 0x872DB45Au : 0x43CB9D71u) >> (8 * (mode & 3))) & 255;
+    const int angle = (int)nominal + 3 * (mode_angle - 3);
+    return angle < 90 ? 305 : angle == 90 ? 273 : angle < 180 ? 850 : angle == 180 ? 323 : 451;
+  }
+  return mode == 8 ? 92 : mode == 9 ? 84 : mode == 10 ? 88 : mode == MODE_PAETH ? 336 : mode == MODE_INTRA_BC ? 0 : 80;
+}
+#endif
+
+#if defined(INTRA_PREFETCH) && defined(INTRA_8BIT)
+// The four samples at (x, y) of an intra block copy block: the motion vector in block.z.
+uint2 predict_intra_bc(uint3 block, int4 plane_cb, int stride, int x, int y) {
+  const int mv = (int)block.z;
+  const int mvx = x + (mv >> (16 + SubpelBits));
+  const int mvy = y + ((mv << 16) >> (16 + SubpelBits));
+  const int filt_h = 128 >> ((mv >> 19) & 1);
+  const int filt_v = 128 >> ((mv >> 3) & 1);
+  int addr = plane_cb.y + mvx + mvy * stride;
+  uint2 ref0, ref1 = 0;
+
+  const uint shift = (addr & 3) << 3;
+  addr &= ~3;
+  ref0 = dst_frame.Load2(addr);
+  ref0.x = (ref0.x >> shift) | ((ref0.y << (24 - shift)) << 8);
+  ref0.y = ref0.y >> shift;
+
+  if (filt_v != 128) {
+    ref1 = dst_frame.Load2(addr + stride);
+    ref1.x = (ref1.x >> shift) | ((ref1.y << (24 - shift)) << 8);
+    ref1.y = ref1.y >> shift;
+  }
+
+  uint2 pixels;
+  pixels.x = compute_bc((ref0.x >> 0) & 255, (ref0.x >> 8) & 255, (ref1.x >> 0) & 255, (ref1.x >> 8) & 255, filt_h,
+                        filt_v) |
+             (compute_bc((ref0.x >> 8) & 255, (ref0.x >> 16) & 255, (ref1.x >> 8) & 255, (ref1.x >> 16) & 255,
+                         filt_h, filt_v)
+              << 16);
+  pixels.y = compute_bc((ref0.x >> 16) & 255, (ref0.x >> 24) & 255, (ref1.x >> 16) & 255, (ref1.x >> 24) & 255,
+                        filt_h, filt_v) |
+             (compute_bc((ref0.x >> 24) & 255, (ref0.y >> 0) & 255, (ref1.x >> 24) & 255, (ref1.y >> 0) & 255,
+                         filt_h, filt_v)
+              << 16);
+  return pixels;
+}
+#elif defined(INTRA_PREFETCH)
+// The four samples at (x, y) of an intra block copy block: the motion vector in block.z.
+uint2 predict_intra_bc(uint3 block, int4 plane_cb, int stride, int x, int y) {
+  const int mv = (int)block.z;
+  const int mvx = x + (mv >> (16 + SubpelBits));
+  const int mvy = y + ((mv << 16) >> (16 + SubpelBits));
+  const int filt_h = 128 >> ((mv >> 19) & 1);
+  const int filt_v = 128 >> ((mv >> 3) & 1);
+  int addr = plane_cb.y + (mvx << 1) + mvy * stride;
+  uint3 ref0, ref1 = 0;
+
+  const uint shift = (addr & 2) << 3;
+  addr &= ~3;
+  ref0 = dst_frame.Load3(addr);
+  ref0.x = (ref0.x >> shift) | ((ref0.y << (24 - shift)) << 8);
+  ref0.y = (ref0.y >> shift) | ((ref0.z << (24 - shift)) << 8);
+  ref0.z = ref0.z >> shift;
+
+  if (filt_v != 128) {
+    ref1 = dst_frame.Load3(addr + stride);
+    ref1.x = (ref1.x >> shift) | ((ref1.y << (24 - shift)) << 8);
+    ref1.y = (ref1.y >> shift) | ((ref1.z << (24 - shift)) << 8);
+    ref1.z = ref1.z >> shift;
+  }
+
+  uint2 pixels;
+  pixels.x = compute_bc((ref0.x >> 0) & 1023, (ref0.x >> 16) & 1023, (ref1.x >> 0) & 1023, (ref1.x >> 16) & 1023,
+                        filt_h, filt_v) |
+             (compute_bc((ref0.x >> 16) & 1023, (ref0.y >> 0) & 1023, (ref1.x >> 16) & 1023, (ref1.y >> 0) & 1023,
+                         filt_h, filt_v)
+              << 16);
+  pixels.y = compute_bc((ref0.y >> 0) & 1023, (ref0.y >> 16) & 1023, (ref1.y >> 0) & 1023, (ref1.y >> 16) & 1023,
+                        filt_h, filt_v) |
+             (compute_bc((ref0.y >> 16) & 1023, (ref0.z >> 0) & 1023, (ref1.y >> 16) & 1023, (ref1.z >> 0) & 1023,
+                         filt_h, filt_v)
+              << 16);
+  return pixels;
+}
+#endif
 
 uint compute_cfl_pixel(int dc, int value) {
   value = (value < 0) ? -((-value + (1 << 5)) >> 6) : ((value + (1 << 5)) >> 6);
-  return clamp(dc + value, 0, 1023);
+  return clamp(dc + value, 0, PIXEL_MAX);
 }
 
 int intra_inter_blend(int mask, int intra, int inter) {
-  return clamp((intra * mask + inter * (64 - mask) + 32) >> 6, 0, 1023);
+  return clamp((intra * mask + inter * (64 - mask) + 32) >> 6, 0, PIXEL_MAX);
 }
 
+#ifdef INTRA_8BIT
+// The sums of the 2x2 luma samples under four chroma samples, doubled (as the 8-bit intra_main.hlsl
+// takes them).
+int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
+  int4 luma;
+  const int max_x = (limits & 0xffff) - 4;
+  const int max_y = (limits >> 16) - 2;
+  const int y_stride = cb_planes[0].x;
+  const int luma_x = (bx + x0) << 1;
+  const int luma_y = min((by + y) << 1, max_y);
+  const int y_offset = cb_planes[0].y + min(luma_x, max_x) + luma_y * y_stride;
+  uint2 luma0 = dst_frame.Load2(y_offset);
+  uint2 luma1 = dst_frame.Load2(y_offset + y_stride);
+  if (luma_x >= max_x) {
+    luma0.y = (luma0.x >> 16) | (luma0.x & 0xffff0000);
+    luma1.y = (luma1.x >> 16) | (luma1.x & 0xffff0000);
+    if (luma_x > max_x) {
+      luma0.x = luma0.y;
+      luma1.x = luma1.y;
+    }
+  }
+  luma.x = ((luma0.x >> 0) & 255) + ((luma0.x >> 8) & 255) + ((luma1.x >> 0) & 255) + ((luma1.x >> 8) & 255);
+  luma.y = ((luma0.x >> 16) & 255) + ((luma0.x >> 24) & 255) + ((luma1.x >> 16) & 255) + ((luma1.x >> 24) & 255);
+  luma.z = ((luma0.y >> 0) & 255) + ((luma0.y >> 8) & 255) + ((luma1.y >> 0) & 255) + ((luma1.y >> 8) & 255);
+  luma.w = ((luma0.y >> 16) & 255) + ((luma0.y >> 24) & 255) + ((luma1.y >> 16) & 255) + ((luma1.y >> 24) & 255);
+  luma <<= 1;
+  return luma;
+}
+#else
 int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
   int4 luma;
   const int max_y = (limits >> 16) - 2;
@@ -248,6 +403,7 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
   luma <<= 1;
   return luma;
 }
+#endif
 
 [numthreads(WG_SIZE, 1, 1)] void main(uint3 thread
                                       : SV_DispatchThreadID) {
@@ -330,6 +486,15 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
 
   const int mode_angle = (block.y >> 28) & 7;
   int4 params = cb_mode_params_lut[mode][mode_angle];
+#ifdef INTRA_PREFETCH
+  // What the edges and the loads before the first sync depend on, the flags of the table's entry (z),
+  // follow from the mode and the angle; the entry itself (the steps of a directional predictor, the
+  // shift of a smooth one) is only read behind the syncs. A lane loads its edges without waiting for
+  // a second load behind the record.
+  const int mode_flags = intra_mode_flags(mode, mode_angle);
+#else
+#define mode_flags params.z
+#endif
 #ifdef INTRA_TIGHT
   const bool straight = mode < 2 && mode_angle == 3 && thread.x < cb_wi_count;
 #else
@@ -359,33 +524,54 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
   //        filter - bh_log | filter_mode;
   //    block.w - reserved; (prob. used for sorting);
 
-  const int stride = cb_planes[plane].x;
-  const int corner = cb_planes[plane].y + ((bx << 1) - 4) + (by - 1) * stride;
+#ifdef INTRA_PREFETCH
+  // The plane's constants by a select of the three, which the shader loads at its start, and not by
+  // a load that waits for the record.
+  const int4 plane_cb = plane == 0 ? cb_planes[0] : plane == 1 ? cb_planes[1] : cb_planes[2];
+#else
+#define plane_cb cb_planes[plane]
+#endif
+  const int stride = plane_cb.x;
+#ifdef INTRA_8BIT
+  const int corner = plane_cb.y + (bx - 4) + (by - 1) * stride;
+#else
+  const int corner = plane_cb.y + ((bx << 1) - 4) + (by - 1) * stride;
+#endif
 
 #ifdef INTRA_EDGE_BANKS
   const int local_start = (thread.x & (WG_SIZE - 1)) - wi;
 #else
   const int loc_base = (((thread.x & (WG_SIZE - 1)) - wi) >> 2) * 20 + 2;
 #endif
-  const int need_above = (params.z >> NeedAboveShift) & 1;
-  const int need_right = (params.z >> NeedRightShift) & 1;
-  const int need_left = (params.z >> NeedLeftShift) & 1;
-  const int need_bot = (params.z >> NeedBotShift) & 1;
-  const int need_aboveleft = (params.z >> NeedAboveLeftShift) & 1;
+  const int need_above = (mode_flags >> NeedAboveShift) & 1;
+  const int need_right = (mode_flags >> NeedRightShift) & 1;
+  const int need_left = (mode_flags >> NeedLeftShift) & 1;
+  const int need_bot = (mode_flags >> NeedBotShift) & 1;
+  const int need_aboveleft = (mode_flags >> NeedAboveLeftShift) & 1;
   const int above_count = need_above * bw + need_right * bh;
   const int left_count = need_left * bh + need_bot * bw;
   const int y = block_lane >> bw_log;
   const int x0 = (block_lane & low_bits[bw_log]) << 2;
 
-  const int mode_info = params.z & 15;
+  const int mode_info = mode_flags & 15;
   const bool directional = !straight && mode_info >= Dir1 && mode_info <= Dir3;
   const int upsample_above = directional ? ((block.y >> 22) & 1) : 0;
   const int upsample_left = directional ? ((block.y >> 23) & 1) : 0;
   const int strength_above = directional ? ((block.y >> 24) & 3) : 0;
   const int strength_left = directional ? ((block.y >> 26) & 3) : 0;
+#ifdef INTRA_8BIT
+  // The filtered samples of the row above, from the samples that are there (above_available counts
+  // pairs), as the 8-bit intra_main.hlsl counts them. The 10-bit shaders count twice the pairs here
+  // (intra_v2.hlsl does the same at high bit depth); the 8-bit outputs differ when only part of a
+  // block's row above is in the frame.
+  const int filter_above = above_available && need_above
+                               ? min(above_available << 1, bw) + need_right * bh + need_aboveleft - 1
+                               : 0;
+#else
   const int filter_above = above_available && need_above
                                ? min(above_available << 2, bw) + need_right * bh + need_aboveleft - 1
                                : 0;
+#endif
   const int filter_left = left_available && need_left
                               ? min(left_available, bh) + need_bot * bw + need_aboveleft - 1
                               : 0;
@@ -408,6 +594,48 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
 #define raw_above loc_base
 #define raw_left loc_base
 #define edge_base loc_base
+#endif
+
+#ifdef INTRA_PREFETCH
+  // Everything a lane reads from memory other than the edges it prepares is loaded here, at the same
+  // time as the edges, and not behind the group syncs: the residual, the weights of the smooth
+  // predictors, the inter prediction and mask of an inter-intra block, the edge an exact vertical or
+  // horizontal predictor copies, and the samples an intra block copy reads. Behind the last sync a lane
+  // then only reads group memory, computes and stores, and a wavefront step waits for two loads in a
+  // row (the record, then the rest) instead of four.
+#ifdef INTRA_8BIT
+  const int addr = corner + 4 + x0 + (y + 1) * stride;
+#else
+  const int addr = corner + 4 + (x0 << 1) + (y + 1) * stride;
+#endif
+  int2 res = 0;
+  [branch] if (block.y & (1 << 5)) {
+    res = residuals.Load2(plane_cb.w + ((bx + x0) << 1) + (by + y) * plane_cb.z);
+  }
+  uint wedge = 0;
+  uint2 inter = uint2(0, 0);
+  [branch] if (block.y & 0x80000000) {  // inter-intra
+    wedge = wedge_mask.Load((block.z << 6) + x0 + y * bw);
+#ifdef INTRA_8BIT
+    inter = unpack_samples(dst_frame.Load(addr));
+#else
+    inter = dst_frame.Load2(addr);
+#endif
+  }
+  int smooth_v_weight = 0;
+  int4 smooth_h_weights = 0;
+  if (!directional && mode < MODE_PAETH) {
+    if (mode_info & SmoothV) smooth_v_weight = cb_sm_weight_arrays[bh + y].x;
+    if (mode_info & SmoothH)
+      smooth_h_weights = int4(cb_sm_weight_arrays[bw + x0].x, cb_sm_weight_arrays[bw + x0 + 1].x,
+                              cb_sm_weight_arrays[bw + x0 + 2].x, cb_sm_weight_arrays[bw + x0 + 3].x);
+  }
+  uint2 early_pixels = uint2(0, 0);
+  [branch] if (straight) {
+    early_pixels = predict_straight(mode == 0, corner, stride, x0, y, above_available, left_available);
+  } else if (mode == MODE_INTRA_BC) {
+    early_pixels = predict_intra_bc(block, plane_cb, stride, bx + x0, by + y);
+  }
 #endif
 
   int4 luma = 0;
@@ -434,7 +662,7 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
     int first_above = 0;
     int first_left = 0;
     if (wi < (above_count >> 1) || wi == 0) {
-      uint pair = 511 | (511 << 16);
+      uint pair = (PIXEL_MID - 1) | ((PIXEL_MID - 1) << 16);
       if (above_available) {
         pair = load_above_pair(corner, wi, above_available);
       } else if (left_available) {
@@ -446,12 +674,12 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
       EDGE(EDGE_ABOVE, raw_above + wi * 2 + 1) = (pair >> 16) & 1023;
     }
     if (wi < left_count || wi == 0) {
-      first_left = 513;
+      first_left = PIXEL_MID + 1;
       if (left_available) {
         first_left = load_left(corner, stride, wi, left_available);
       } else if (above_available) {
         // The missing column repeats the first above pixel. Load it directly to avoid a group sync.
-        first_left = wi == 0 ? first_above : dst_frame.Load(corner + 4) & 1023;
+        first_left = wi == 0 ? first_above : dst_frame.Load(corner + 4) & PIXEL_MAX;
       }
       EDGE(EDGE_LEFT, raw_left + wi) = first_left;
     }
@@ -462,9 +690,9 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
     }
 
     if (wi == 0 && need_aboveleft) {
-      int topleft = left_available ? first_left : above_available ? first_above : 512;
-      if (left_available && above_available) topleft = dst_frame.Load(corner) >> 16;
-      if ((params.z & FilterAboveLeftFlag) && bw + bh >= 24 && cb_flags.x)
+      int topleft = left_available ? first_left : above_available ? first_above : PIXEL_MID;
+      if (left_available && above_available) topleft = dst_frame.Load(corner) >> LEFT_SHIFT;
+      if ((mode_flags & FilterAboveLeftFlag) && bw + bh >= 24 && cb_flags.x)
         topleft = ((first_left + first_above) * 5 + topleft * 6 + 8) >> 4;
       EDGE(EDGE_ABOVE, raw_above - 1) = topleft;
       EDGE(EDGE_ABOVE, raw_above - 2) = topleft;
@@ -508,7 +736,7 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
     if (step > 1 || wi == 0) {
       const uint count = dc_above * 2 + dc_left;
       const uint dc = sum_partials(EDGE_ABOVE, raw_above, wi, dc_terms, step);
-      if (wi == 0) EDGE(EDGE_ABOVE, raw_above - 1) = count ? (dc + (count >> 1)) / count : 512;
+      if (wi == 0) EDGE(EDGE_ABOVE, raw_above - 1) = count ? (dc + (count >> 1)) / count : PIXEL_MID;
 
       if (cfl) {
         const int total = sum_partials(EDGE_LEFT, raw_left, wi, wi_count, step);
@@ -532,6 +760,9 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
   if (thread.x >= cb_wi_count) return;
 
   uint2 pixels = uint2(0, 0);
+#ifdef INTRA_PREFETCH
+  if (mode == MODE_INTRA_BC || straight) pixels = early_pixels;
+#else
   if (mode == MODE_INTRA_BC) {
     int mv = (int)block.z;
     int mvx = bx + x0 + ((mv) >> (16 + SubpelBits));
@@ -569,9 +800,16 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
                 << 16);
   }
 
+#endif
+
+#ifdef INTRA_PREFETCH
+  if (straight) {
+  } else if (mode >= MODE_DC) {
+#else
   if (straight) {
     pixels = predict_straight(mode == 0, corner, stride, x0, y, above_available, left_available);
   } else if (mode >= MODE_DC) {
+#endif
     const uint dc = EDGE(EDGE_ABOVE, raw_above - 1);
     if (cfl) {
       const int avrg = EDGE(EDGE_LEFT, raw_left - 1);
@@ -611,7 +849,7 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
           const int p1 = EDGE(edge, edge_base + clamp(base + 1, -2, last));
           val = p0 + ((fraction * (p1 - p0) + 16) >> 5);
         }
-        const uint packed = (uint)clamp(val, 0, 1023) << ((i & 1) * 16);
+        const uint packed = (uint)clamp(val, 0, PIXEL_MAX) << ((i & 1) * 16);
         if (i < 2) pixels.x |= packed;
         else pixels.y |= packed;
       }
@@ -626,7 +864,7 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
         const int diff_corner = abs(diff_top + diff_left);
         const int dl = abs(diff_left);
         const int val = dl <= dt && dl <= diff_corner ? left : dt <= diff_corner ? top : corner_pixel;
-        const uint packed = (uint)clamp(val, 0, 1023) << ((i & 1) * 16);
+        const uint packed = (uint)clamp(val, 0, PIXEL_MAX) << ((i & 1) * 16);
         if (i < 2) pixels.x |= packed;
         else pixels.y |= packed;
       }
@@ -638,7 +876,11 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
       int left = 0;
       int right = 0;
       if (mode_info & SmoothV) {
+#ifdef INTRA_PREFETCH
+        vertical_weight = smooth_v_weight;
+#else
         vertical_weight = cb_sm_weight_arrays[bh + y].x;
+#endif
         bottom_term = (256 - vertical_weight) * EDGE(EDGE_LEFT, raw_left + bh - 1);
       }
       if (mode_info & SmoothH) {
@@ -649,20 +891,29 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
         const int x = x0 + i;
         int sum = bottom_term;
         if (mode_info & SmoothV) sum += vertical_weight * EDGE(EDGE_ABOVE, raw_above + x);
+#ifdef INTRA_PREFETCH
+        if (mode_info & SmoothH) sum += 256 * right + smooth_h_weights[i] * (left - right);
+#else
         if (mode_info & SmoothH) sum += 256 * right + cb_sm_weight_arrays[bw + x].x * (left - right);
-        const uint packed = (uint)clamp((sum + (1 << (params.w - 1))) >> params.w, 0, 1023) << ((i & 1) * 16);
+#endif
+        const uint packed = (uint)clamp((sum + (1 << (params.w - 1))) >> params.w, 0, PIXEL_MAX) << ((i & 1) * 16);
         if (i < 2) pixels.x |= packed;
         else pixels.y |= packed;
       }
     }
   }
 
+#ifdef INTRA_PREFETCH
+  if (block.y & 0x80000000)  // inter-intra
+  {
+#else
   const int addr = corner + 4 + (x0 << 1) + (y + 1) * stride;
   if (block.y & 0x80000000)  // inter-intra
   {
     int wedge_addr = (block.z << 6) + x0 + y * bw;
     uint wedge = wedge_mask.Load(wedge_addr);
     uint2 inter = dst_frame.Load2(addr);
+#endif
 
     pixels.x = intra_inter_blend((wedge >> 0) & 255, (pixels.x >> 0) & 1023, (inter.x >> 0) & 1023) |
                (intra_inter_blend((wedge >> 8) & 255, (pixels.x >> 16) & 1023, (inter.x >> 16) & 1023) << 16);
@@ -671,14 +922,20 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
   }
 
   if (block.y & (1 << 5)) {
+#ifndef INTRA_PREFETCH
     const int res_stride = cb_planes[plane].z;
     const int res_addr = cb_planes[plane].w + ((bx + x0) << 1) + (by + y) * res_stride;
     int2 res = residuals.Load2(res_addr);
-    pixels.x = clamp((int)((pixels.x >> 0) & 1023) + (int)((res.x << 16) >> 16), 0, 1023) |
-               (clamp((int)((pixels.x >> 16) & 1023) + (int)(res.x >> 16), 0, 1023) << 16);
-    pixels.y = clamp((int)((pixels.y >> 0) & 1023) + (int)((res.y << 16) >> 16), 0, 1023) |
-               (clamp((int)((pixels.y >> 16) & 1023) + (int)(res.y >> 16), 0, 1023) << 16);
+#endif
+    pixels.x = clamp((int)((pixels.x >> 0) & 1023) + (int)((res.x << 16) >> 16), 0, PIXEL_MAX) |
+               (clamp((int)((pixels.x >> 16) & 1023) + (int)(res.x >> 16), 0, PIXEL_MAX) << 16);
+    pixels.y = clamp((int)((pixels.y >> 0) & 1023) + (int)((res.y << 16) >> 16), 0, PIXEL_MAX) |
+               (clamp((int)((pixels.y >> 16) & 1023) + (int)(res.y >> 16), 0, PIXEL_MAX) << 16);
   }
 
+#ifdef INTRA_8BIT
+  dst_frame.Store(addr, pack_samples(pixels));
+#else
   dst_frame.Store2(addr, pixels);
+#endif
 }

@@ -42,7 +42,7 @@ to_cpp() {
     -e 's/void main\(/void shader_main(/' \
     -e 's/\.xyz;/.xyz();/' \
     -e 's/([a-z0-9_]+)\.zw = ([a-z0-9_]+)\.yy;/\1.z = \2.y; \1.w = \2.y;/' \
-    -e 's/#include "(intra_main(_hbd)?)\.hlsl"/#include "\1.gen.h"/' \
+    -e 's/#include "(intra_main(_hbd)?|intra_filter(_hbd)?)\.hlsl"/#include "\1.gen.h"/' \
     -e 's/#include "intra_v2\.hlsl"/#include "intra_v2.gen.h"/' \
     "$1" | sed -E -f "$here/../common/gs_groupshared.sed"
 }
@@ -50,6 +50,10 @@ to_cpp() {
 to_cpp "$shaders/intra_main.hlsl" > "$work/intra_main.gen.h"
 to_cpp "$shaders/intra_main_hbd.hlsl" > "$work/intra_main_hbd.gen.h"
 to_cpp "$shaders/intra_main_banked_hbd.hlsl" > "$work/intra_main_banked_hbd.gen.h"
+to_cpp "$shaders/intra_main_prefetch_hbd.hlsl" > "$work/intra_main_prefetch_hbd.gen.h"
+to_cpp "$shaders/intra_main_prefetch.hlsl" > "$work/intra_main_prefetch.gen.h"
+to_cpp "$shaders/intra_filter_prefetch.hlsl" > "$work/intra_filter_prefetch.gen.h"
+to_cpp "$shaders/intra_filter_prefetch_hbd.hlsl" > "$work/intra_filter_prefetch_hbd.gen.h"
 to_cpp "$shaders/intra_main_legacy.hlsl" > "$work/intra_main_legacy.gen.h"
 to_cpp "$shaders/intra_main_hbd_legacy.hlsl" > "$work/intra_main_hbd_legacy.gen.h"
 to_cpp "$shaders/intra_filter.hlsl" > "$work/intra_filter.gen.h"
@@ -103,11 +107,12 @@ build() {
   flags="$flags -I $1 -I $here -I $src/libav1/dx ${2:-}"
   rm -f "$1"/*.o
   for shader in intra_main:0 intra_main_hbd:0 intra_main_legacy:0 intra_main_hbd_legacy:0 \
-    intra_filter:1 intra_filter_legacy:1 intra_filter_hbd:1 intra_main_banked_hbd:0 intra_v2:2 intra_v2_hbd:2; do
+    intra_filter:1 intra_filter_legacy:1 intra_filter_hbd:1 intra_main_banked_hbd:0 intra_main_prefetch_hbd:0 intra_main_prefetch:0 intra_filter_prefetch:1 intra_filter_prefetch_hbd:1 intra_v2:2 intra_v2_hbd:2; do
     name=${shader%:*}
     hbd=
     case $name in
-      *_hbd | *_hbd_legacy) hbd=-DSHADER_HBD ;;
+      # (SHADER_HBD names the group memory to scramble: the 8-bit prefetching shader has the 10-bit one's.)
+      *_hbd | *_hbd_legacy | intra_main_prefetch) hbd=-DSHADER_HBD ;;
     esac
     case $name in
       intra_main | intra_main_hbd) hbd="$hbd -DINTRA_TIGHT" ;;
@@ -179,7 +184,12 @@ intra_main_hbd.gen.h@s/WaveActiveAllEqual(base)/true/@mixing blocks in an intra 
 intra_main_hbd.gen.h@s/WaveActiveCountBits(true) == (uint)min(lanes, wi_count)/true/@reducing an incomplete logical block@MISMATCH in wave reduction
 intra_main_hbd.gen.h@s/sum = WaveActiveSum(sum);/sum += 0;/@omitting the intra wave sum@MISMATCH in wave reduction
 intra_main_hbd.gen.h@/int4 next_above = 0;/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/@group sync before writing processed intra edges as a plain barrier@races in group memory .*[1-9]
-intra_v2.gen.h@0,/GroupMemoryBarrierWithGroupSync();/s//GroupMemoryBarrier();/@group sync of a pass of intra_v2 as a plain barrier@races in group memory .*[1-9]'
+intra_v2.gen.h@0,/GroupMemoryBarrierWithGroupSync();/s//GroupMemoryBarrier();/@group sync of a pass of intra_v2 as a plain barrier@races in group memory .*[1-9]
+intra_main_hbd.gen.h@s/angle < 180 ? 850/angle <= 180 ? 850/@exact horizontal flags by arithmetic (prefetch)@MISMATCH in the prefetching
+intra_main_hbd.gen.h@s/0x43CB9D71u/0x43CB9D70u/@nominal angle of D113 (prefetch)@MISMATCH in the prefetching
+intra_main_hbd.gen.h@s/smooth_h_weights\[i\] \* (left - right)/smooth_h_weights[0] * (left - right)/@prefetched smooth weights@MISMATCH in the prefetching
+intra_filter_hbd.gen.h@s/queue\[q\] = queue\[q + 1\];/queue[q] = queue[q];/@10-bit filter intra residual queue@MISMATCH in the prefetching
+intra_filter.gen.h@s/queue\[q\] = queue\[q + 1\];/queue[q] = queue[q];/@8-bit filter intra residual queue@MISMATCH in the prefetching'
   mkdir "$work/mutant"
   echo "$mutants" | while IFS='@' read -r file expr what expect; do
     cp "$work"/*.gen.h "$work/mutant/"

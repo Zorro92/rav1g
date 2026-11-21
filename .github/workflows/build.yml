@@ -1505,7 +1505,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        case: [poisoned, interfast, syncclear, gridcheck, intraschedulelegacy, intrabanklegacy]
+        case: [poisoned, interfast, syncclear, gridcheck, intraschedulelegacy, intrabanklegacy, intrasteplegacy]
     steps:
       - name: Disable newline conversion
         run: git config --global core.autocrlf false
@@ -1616,7 +1616,7 @@ jobs:
           if ($failed.Count) { throw "the grid built by the GPU: $($failed -join '; ')" }
 
       - name: Conformance with a legacy intra switch
-        if: ${{ !cancelled() && (matrix.case == 'intraschedulelegacy' || matrix.case == 'intrabanklegacy') }}
+        if: ${{ !cancelled() && (matrix.case == 'intraschedulelegacy' || matrix.case == 'intrabanklegacy' || matrix.case == 'intrasteplegacy') }}
         shell: pwsh
         env:
           INTRA_SWITCH: ${{ matrix.case }}
@@ -2364,12 +2364,12 @@ jobs:
           python testing/argon/run.py --tool out/rav1g-dec/rav1g-dec.exe
           --streams argon-streams --out out/argon --shards 8 --shard ${{ matrix.shard }} --timeout 300
 
-      - name: Argon Profile 0 on WARP with the previous 10-bit intra edge preparation
+      - name: Argon Profile 0 on WARP with the previous intra wavefront step
         if: ${{ !cancelled() }}
         run: >-
           python testing/argon/run.py --tool out/rav1g-dec/rav1g-dec.exe
           --streams argon-streams --out out/argon-legacy --shards 8 --shard ${{ matrix.shard }} --timeout 300
-          --decoder-arg=-intrabanklegacy
+          --decoder-arg=-intrasteplegacy
 
       - name: Preserve the result table
         if: always()

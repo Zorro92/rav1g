@@ -134,16 +134,21 @@ static void run_group(const ShaderApi *api, uint32_t group, int threads, uint64_
   gs_state.shader = api == &intra_main_api       ? "intra_main.hlsl"
                     : api == &intra_main_hbd_api   ? "intra_main_hbd.hlsl"
                     : api == &intra_main_banked_hbd_api ? "intra_main_banked_hbd.hlsl"
+                    : api == &intra_main_prefetch_hbd_api ? "intra_main_prefetch_hbd.hlsl"
+                    : api == &intra_main_prefetch_api ? "intra_main_prefetch.hlsl"
                     : api == &intra_main_legacy_api ? "intra_main_legacy.hlsl"
                     : api == &intra_main_hbd_legacy_api ? "intra_main_hbd_legacy.hlsl"
                     : api == &intra_filter_api     ? "intra_filter.hlsl"
                     : api == &intra_filter_legacy_api ? "intra_filter_legacy.hlsl"
                     : api == &intra_filter_hbd_api ? "intra_filter_hbd.hlsl"
+                    : api == &intra_filter_prefetch_api ? "intra_filter_prefetch.hlsl"
+                    : api == &intra_filter_prefetch_hbd_api ? "intra_filter_prefetch_hbd.hlsl"
                     : api == &intra_v2_hbd_api     ? "intra_v2.hlsl (10-bit)"
                                                    : "intra_v2.hlsl";
-  const bool use_waves = api == &intra_main_api || api == &intra_main_hbd_api || api == &intra_main_banked_hbd_api;
-  gs_state.track_unwritten = use_waves || api == &intra_filter_api;
-  g_tracker.require_unique_stores = api == &intra_filter_api;
+  const bool use_waves = api == &intra_main_api || api == &intra_main_hbd_api || api == &intra_main_banked_hbd_api ||
+                         api == &intra_main_prefetch_hbd_api || api == &intra_main_prefetch_api;
+  gs_state.track_unwritten = use_waves || api == &intra_filter_api || api == &intra_filter_prefetch_api;
+  g_tracker.require_unique_stores = api == &intra_filter_api || api == &intra_filter_prefetch_api;
   GroupContext context = { api, group };
   gs_run_group(threads, thread_body, &context, garbage, use_waves ? complete_waves : nullptr);
 }
@@ -817,8 +822,12 @@ static RunResult end_run() {
 
 // The intra loop of av1_prediction_run_all().
 static RunResult run_main(const Geometry &g, const Frame &f, std::vector<uint8_t> *pool, uint64_t garbage,
-                          const ShaderApi *main_api, Coverage *cov) {
-  const ShaderApi *filter_api = g.hbd ? &intra_filter_hbd_api
+                          const ShaderApi *main_api, Coverage *cov, const ShaderApi *filter_override = nullptr) {
+  // The prefetching main shader runs with the prefetching filter intra shader, as the host pairs them.
+  const ShaderApi *filter_api = filter_override                          ? filter_override
+                               : main_api == &intra_main_prefetch_hbd_api ? &intra_filter_prefetch_hbd_api
+                               : main_api == &intra_main_prefetch_api     ? &intra_filter_prefetch_api
+                               : g.hbd                                   ? &intra_filter_hbd_api
                                : main_api == &intra_main_legacy_api ? &intra_filter_legacy_api
                                                                    : &intra_filter_api;
   ShaderBuffers buffers = {};
@@ -1169,11 +1178,16 @@ int main(int argc, char **argv) {
         wave_layout = wave_layouts[(layout * 3 + n) % (sizeof(wave_layouts) / sizeof(wave_layouts[0]))];
         const RunResult r1b = run_main(g, f, &optimized, rng.u32(), main_api, nullptr);
         const RunResult r2 = run_v2(g, f, &schedule, &v2, rng.u32(), &cov);
-        std::vector<uint8_t> banked;
-        RunResult rb = {};
+        std::vector<uint8_t> banked, prefetch;
+        RunResult rb = {}, rp = {};
         if (hbd) {
           banked = f.pixels;
           rb = run_main(g, f, &banked, rng.state, &intra_main_banked_hbd_api, nullptr);
+          prefetch = f.pixels;
+          rp = run_main(g, f, &prefetch, rng.state, &intra_main_prefetch_hbd_api, nullptr);
+        } else {
+          prefetch = f.pixels;
+          rp = run_main(g, f, &prefetch, rng.state, &intra_main_prefetch_api, nullptr);
         }
         original_races += r1.races_group;
 
@@ -1206,6 +1220,11 @@ int main(int argc, char **argv) {
           at = first_difference(legacy, banked);
         } else if (rb.memory_races || rb.sync_errors || rb.out_of_bounds || rb.plain_barriers) {
           problem = "invalid group memory access or sync in the banked 10-bit shader";
+        } else if (legacy != prefetch) {
+          problem = hbd ? "MISMATCH in the prefetching 10-bit shaders" : "MISMATCH in the prefetching 8-bit shaders";
+          at = first_difference(legacy, prefetch);
+        } else if (rp.memory_races || rp.sync_errors || rp.out_of_bounds || rp.plain_barriers) {
+          problem = "invalid group memory access or sync in the prefetching shaders";
         }
         if (verbose || problem) {
           printf("%s layout %d frame %d: %dx%d, %zu tile(s), sb %d, %zu blocks, %d iterations -> %ld region entries\n",
@@ -1255,6 +1274,6 @@ int main(int argc, char **argv) {
     printf("intra_check: FAILED\n");
     return 1;
   }
-  printf("intra_check: the legacy, optimized, banked and intra_v2 outputs are identical on every frame\n");
+  printf("intra_check: the legacy, optimized, banked, prefetching and intra_v2 outputs are identical on every frame\n");
   return 0;
 }

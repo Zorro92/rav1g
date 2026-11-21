@@ -524,6 +524,14 @@ pub extern "C" fn av1_set_intra_bank_legacy(enable: c_int) {
     INTRA_BANK_LEGACY.store(enable, Ordering::Relaxed);
 }
 
+static INTRA_STEP_LEGACY: AtomicI32 = AtomicI32::new(0);
+
+/// `av1_set_intra_step_legacy` (`dx/av1_perf.h`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_intra_step_legacy(enable: c_int) {
+    INTRA_STEP_LEGACY.store(enable, Ordering::Relaxed);
+}
+
 static INTRA_SCHEDULE_LEGACY: AtomicI32 = AtomicI32::new(0);
 
 /// `av1_set_intra_schedule_legacy` (`dx/av1_perf.h`).
@@ -1168,6 +1176,16 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
             let constants = alloc_constants::<IntraData>(&mut td.command_buffer);
             let data = constants.data;
             let intra_main: *const ComputeShader = match td.intra_main {
+                IntraMain::Tight
+                    if INTRA_BANK_LEGACY.load(Ordering::Relaxed) == 0
+                        && INTRA_STEP_LEGACY.load(Ordering::Relaxed) == 0 =>
+                {
+                    if td.is_hbd != 0 {
+                        &raw const (*lib).shader_intra_main_prefetch_hbd
+                    } else {
+                        &raw const (*lib).shader_intra_main_prefetch
+                    }
+                }
                 IntraMain::Tight if td.is_hbd != 0 && INTRA_BANK_LEGACY.load(Ordering::Relaxed) == 0 => {
                     &raw const (*lib).shader_intra_main_banked_hbd
                 }
@@ -1314,8 +1332,12 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                 let offsets = block_map.add((InterCountsAll + ReconstructBlockSizes) as usize);
                 let intra_filter = if td.is_hbd == 0 && INTRA_FILTER_LEGACY.load(Ordering::Relaxed) != 0 {
                     &raw const (*lib).shader_intra_filter_legacy
-                } else {
+                } else if INTRA_STEP_LEGACY.load(Ordering::Relaxed) != 0 {
                     &raw const (*shaders).intra_filter
+                } else if td.is_hbd != 0 {
+                    &raw const (*lib).shader_intra_filter_prefetch_hbd
+                } else {
+                    &raw const (*lib).shader_intra_filter_prefetch
                 };
                 let mut shader: *const ComputeShader = std::ptr::null();
                 for it in 0..=td.intra_iters {

@@ -124,8 +124,8 @@ const LAYOUTS: usize =
 const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
-    // 24 transform pipelines, 34 shared shaders, 35 per bit depth and two bit-depth-specific intra shaders.
-    assert!(SHADERS == 24 + 34 + 2 * 35 + 2);
+    // 24 transform pipelines, 34 shared shaders, 35 per bit depth and six bit-depth-specific intra shaders.
+    assert!(SHADERS == 24 + 34 + 2 * 35 + 6);
     assert!(LAYOUTS == 24);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
@@ -401,6 +401,10 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("intra_filter_hbd", &layouts.intra_pred, &raw mut (*lib).shaders_hbd.intra_filter),
             ("intra_main_hbd", &layouts.intra_pred, &raw mut (*lib).shaders_hbd.intra_main),
             ("intra_main_banked_hbd", &layouts.intra_pred, &raw mut (*lib).shader_intra_main_banked_hbd),
+            ("intra_main_prefetch_hbd", &layouts.intra_pred, &raw mut (*lib).shader_intra_main_prefetch_hbd),
+            ("intra_main_prefetch", &layouts.intra_pred, &raw mut (*lib).shader_intra_main_prefetch),
+            ("intra_filter_prefetch", &layouts.intra_pred, &raw mut (*lib).shader_intra_filter_prefetch),
+            ("intra_filter_prefetch_hbd", &layouts.intra_pred, &raw mut (*lib).shader_intra_filter_prefetch_hbd),
             ("intra_main_tight_hbd", &layouts.intra_pred, &raw mut (*lib).shaders_hbd.intra_main_tight),
             ("intra_main_hbd_legacy", &layouts.intra_pred, &raw mut (*lib).shaders_hbd.intra_main_legacy),
             ("inter_ext_borders_hbd", &layouts.common0110, &raw mut (*lib).shaders_hbd.inter_ext_borders),
@@ -880,7 +884,7 @@ mod tests {
             .filter_map(|line| line.trim().trim_start_matches('(').strip_prefix('"'))
             .map(|rest| &rest[..rest.find('"').unwrap()])
             .collect();
-        assert_eq!(names.len(), 126);
+        assert_eq!(names.len(), 130);
         let mut unique = names.clone();
         unique.sort_unstable();
         unique.dedup();
