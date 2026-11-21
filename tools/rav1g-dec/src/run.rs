@@ -988,6 +988,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     library.set_choices(&Choices {
         lr_legacy: task.lrlegacy,
         fg_legacy: task.fglegacy,
+        fg_gen_legacy: task.fggenlegacy,
         skip_film_grain: task.skip_film_grain,
         copy_legacy: task.copylegacy,
         idct_legacy: task.idctlegacy,
@@ -1022,6 +1023,14 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
             }
         );
     }
+    say!(
+        "Film grain templates: {}",
+        if task.fggenlegacy {
+            "GPU, film_grain_gen_luma/chroma (-fggenlegacy)"
+        } else {
+            "CPU, uploaded with the random offsets (default)"
+        }
+    );
     say!("Small inverse transform shaders: {}", if task.idctlegacy { "legacy (-idctlegacy)" } else { "default" });
     say!("Residual clear: {}", if task.clearlegacy { "full allocation (-clearlegacy)" } else { "padded frame planes" });
     say!(

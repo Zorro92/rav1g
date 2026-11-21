@@ -377,6 +377,8 @@ The log lines at the start of each task show which defaults and opt-out flags ar
 | Intra prediction | frame-wide wavefront, DXC-optimized main shaders | `Intra main shader: intra_main (default)` | `-intrav2`, `-intraod` |
 | Unscaled single-reference and average/distance compound prediction on size lists | `inter_main_v2` and `inter_compound_v2`, with HBD variants | `Inter shaders: inter_main_v2, inter_compound_v2 (default)` | `-interlegacy` selects the original shaders. `-interfast` selects [motion-class lists and shaders](#inter-fast-path--interfast). |
 
+| Film grain templates | made on the CPU while the frame is recorded (AV1 7.18.3.3, rav1d's `generate_grain_y`/`generate_grain_uv`) and uploaded in front of the random offsets; the CPU timer `grain_template` | `Film grain templates: CPU, uploaded with the random offsets (default)` | `-fggenlegacy`: on the GPU, `film_grain_gen_luma` and `film_grain_gen_chroma` in front of the apply pass (stage `film_grain_gen`), `Film grain templates: GPU, film_grain_gen_luma/chroma (-fggenlegacy)` |
+
 On a device that logs `OUTPUT P010 direct` or `OUTPUT NV12 direct`, film grain uses
 `film_grain_filter_sp_tex_v2`. Add `-fglegacy` to the same `-output p010` task to
 select the original `film_grain_filter_sp_tex` and compare per-frame MD5s.
@@ -473,7 +475,8 @@ span exactly**, and any gap between two stages is counted in the later one.
 | `lf_gen`, `lf_vert`, `lf_horz` | loop filter: block generation, vertical edges (two passes), horizontal edges |
 | `cdef`, `superres`, `loop_rest` | CDEF, super-resolution, loop restoration |
 | `ext_borders` | reference border extension |
-| `film_grain` | film grain |
+| `film_grain_gen` | with `-fggenlegacy`: the grain templates on the GPU (`film_grain_gen_luma`, `film_grain_gen_chroma`, one thread group each); by default the CPU makes them (CPU timer `grain_template`) and the stage is not dispatched |
+| `film_grain` | film grain: the apply pass (`film_grain_filter*`); before the stage `film_grain_gen` it also held the templates |
 | `copy_plane`, `output_copy` | copy shader into the staging area, then the copy into the output buffer or textures |
 | `slot_clear` | with `-gpuclear`: the grids of the frame's slot cleared at the end of the command list |
 | `cdef_lists` | the two lists CDEF reads (the default; not with `-parseopt nolfmask,tilethread` or `none`), written from the mode info in front of `cdef` (it is the last line of the table, not where it runs) |
@@ -498,6 +501,7 @@ CPU timers (QueryPerformanceCounter, all in ms per frame):
 | `wait_output` | blocked in the player's output buffer callback (pool of `-queue_size`) |
 | `wait_fb`, `wait_image`, `wait_item` | blocked on the reference frame pool, the output image pool, the GPU work item pool |
 | `fence_wait`, `gpu_latency` | completion thread: time blocked on the frame's fence, and submit-to-fence time |
+| `grain_template` | a frame with film grain: its grain templates made on the CPU and written into its upload buffer (part of `rec_copy`, on the thread that records the frame; 0 with `-fggenlegacy`) |
 | `notify` | time inside the frame-ready callback. With `-progress` this includes its two log writes per frame. |
 | `async_clear` | completion thread: the slot's clears after the frame's fence. With `-cpuclear`; without a flag only what a frame still has to clear (nothing with rav1d's parse, the mode info grid with `-parser c`). Zero with `-syncclear` and `-gpuclear`. |
 
@@ -2938,15 +2942,16 @@ Why the copy is right:
 frames in front of it on the queue, and for that time one frame less could be in flight,
 at every second frame of a random-access stream. The decoder has two output contexts
 instead (`OutputThreadDataCount` in `libav1/dx/types.h`): a command allocator and a fence
-each, 32 KiB for the film grain constants and a buffer for the film grain offsets, four
-buffers of 0.13 MiB together at 3840x2176. A third `show_existing_frame` while two copies
+each, 32 KiB for the film grain constants and a buffer for the film grain templates (36.4 KiB)
+and offsets, four buffers of 0.20 MiB together at 3840x2176. A third `show_existing_frame` while two copies
 are in flight waits for the first (`wait_slot` in its record). A copy in flight keeps the
 frame buffer it reads out of the frame buffer pool, like a reference of a frame in
 flight; that can cost a wait for a frame buffer (`wait_fb`), not a deadlock.
 
 **Timing lines.** A copy has a `-gputime` record of its own (`sef=1` in the frame lines,
 stages `film_grain`, `copy_plane`, `output_copy`). In the summary the copies have their
-own line and are not in the per-frame lines; see [Log lines](#log-lines). A hidden frame
+own line and are not in the per-frame lines; see [Log lines](#log-lines). With `-fggenlegacy` it
+also has `film_grain_gen`. A hidden frame
 no longer has `copy_plane` and `output_copy` stages, so its GPU time is that much
 shorter and the copy's is that much longer: the work per output frame is the same.
 

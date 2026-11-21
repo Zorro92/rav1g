@@ -61,7 +61,8 @@ const MEMORY_GUARD_HEADROOM: u64 = 128 << 20;
 /// How often the budget is asked again while it grows (`PollMs`).
 const GUARD_POLL_MS: u32 = 20;
 
-/// Words of the film grain template: 96x96 luma and two chroma planes of 48x48.
+/// Words of the film grain templates the GPU makes (`av1_set_fg_gen_legacy`; 73x82 luma and two chroma
+/// planes of 38x44 are used): 96x96 luma and two chroma planes of 48x48.
 const FILMGRAIN_NOISE_INTS: usize = 96 * 96 + 48 * 48 * 2;
 /// The Gaussian sequence of the film grain, as ints (`dx_gaussian_sequence`).
 const GAUSSIAN_SEQUENCE_BYTES: usize = size_of::<[i32; 2048]>();
@@ -613,7 +614,10 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
             -1
         )
     );
-    let grain_offsets = size_of::<i32>() * ((target_width / 32 + 4) * (target_height / 32 + 1)) as usize;
+    // The grain buffer of a slot or output context: the templates the CPU makes (37,320 bytes,
+    // `film_grain.rs`), then the random offsets of the 32x32 blocks of the largest frame.
+    let grain_offsets = super::film_grain::GRAIN_BUFFER_TEMPLATE_BYTES
+        + size_of::<i32>() * ((target_width / 32 + 4) * (target_height / 32 + 1)) as usize;
     for i in 0..cfg.gpu_pipeline_depth {
         let td = &mut dec.frame_thread_data[i as usize];
         td.slot_index = i;

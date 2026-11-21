@@ -23,7 +23,7 @@ static const char* const kGpuStageNames[] = {
     "gen_blocks",   "residual_clear", "idct_sort",  "idct",        "inter",      "recon",
     "intra",        "lf_gen",         "lf_vert",    "lf_horz",     "cdef",       "superres",
     "loop_rest",    "ext_borders",    "film_grain", "copy_plane",  "output_copy", "slot_clear",
-    "cdef_lists", "pred_count", "pred_scan"};
+    "cdef_lists", "pred_count", "pred_scan", "film_grain_gen"};
 static_assert(sizeof(kGpuStageNames) / sizeof(kGpuStageNames[0]) == AV1_PERF_GPU_STAGE_COUNT,
               "GPU stage names out of step with av1_perf.h");
 
@@ -32,7 +32,7 @@ static const char* const kCpuNames[] = {
     "setup",         "memset",        "memset_tile",    "entropy_wall",   "entropy_sum", "record",
     "rec_gen_blocks", "rec_idct",     "rec_pred",       "rec_loopfilter", "rec_cdef_lr", "rec_borders",
     "rec_copy",      "submit",        "frame",          "fence_wait",     "gpu_latency", "notify",
-    "async_clear",   "sink_lists",    "sink_calls",     "sink_grid",      "sink_intra"};
+    "async_clear",   "sink_lists",    "sink_calls",     "sink_grid",      "sink_intra",  "grain_template"};
 static_assert(sizeof(kCpuNames) / sizeof(kCpuNames[0]) == AV1_PERF_CPU_COUNT,
               "CPU timer names out of step with av1_perf.h");
 

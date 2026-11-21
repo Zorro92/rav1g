@@ -2408,12 +2408,12 @@ jobs:
           python testing/argon/run.py --tool out/rav1g-dec/rav1g-dec.exe
           --streams argon-streams --out out/argon --shards 8 --shard ${{ matrix.shard }} --timeout 450
 
-      - name: Argon Profile 0 on WARP with the previous directional intra wavefront
+      - name: Argon Profile 0 on WARP with the film grain templates on the GPU
         if: ${{ !cancelled() }}
         run: >-
           python testing/argon/run.py --tool out/rav1g-dec/rav1g-dec.exe
           --streams argon-streams --out out/argon-legacy --shards 8 --shard ${{ matrix.shard }} --timeout 450
-          --decoder-arg=-intrasingleedgelegacy
+          --decoder-arg=-fggenlegacy
 
       - name: Preserve the result table
         if: always()

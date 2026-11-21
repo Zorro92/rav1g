@@ -6,26 +6,57 @@
 // License 1.0 was not distributed with this source code in the PATENTS file, you can obtain it at
 // www.aomedia.org/license/patent.
 
-//! Film grain: the grain templates of the frame are generated on the GPU and added to the frame on its
-//! way into the output image. From `av1_filmgrain_run` of `libav1/dx/loopfilters.cpp`.
+//! Film grain (AV1 7.18.3): the grain templates of the frame (7.18.3.3) are made on the CPU while the
+//! frame's command list is recorded, and added to the frame on its way into the output image (7.18.3.5),
+//! on the GPU. From `av1_filmgrain_run` of `libav1/dx/loopfilters.cpp`.
+//!
+//! **The templates on the CPU** (`grain_template.rs`, rav1d's `generate_grain_y` and
+//! `generate_grain_uv`). They depend on the grain parameters of the header and on nothing decoded. On
+//! the GPU (`film_grain_gen_luma.hlsl` and `film_grain_gen_chroma.hlsl`, the path of
+//! `av1_set_fg_gen_legacy`) they were two dependent dispatches of one thread group each, a group sync
+//! for every step of a wavefront through the template: the GPU's worst case, in front of the apply pass
+//! of every grain frame, where each dependent step costs about 18 us fixed (AGENTS.md, "Dependent
+//! dispatches"). On the CPU they are about 0.15 million multiply-adds a frame, on the thread that records
+//! the frame: the submission thread with more than one frame in parse, so not a parse thread (the CPU
+//! limit on high-bitrate streams), and the decode thread with one. The templates go to the GPU in the
+//! frame's grain buffer, the upload buffer that has its random offsets (37,320 bytes in front of them: 73
+//! rows of 82 ints for luma, 2 x 38 rows of 44 for chroma), written once through the mapping from a copy
+//! on the stack, and the apply shaders read them there: no copy pass, no extra dispatch, no barrier. The
+//! layout is that of the GPU path's `filmgrain_noise`, so the apply shaders are unchanged.
 
 use std::ffi::c_int;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::core::{alloc_constants, buffer, commands, perf_gpu_mark, pipeline};
+use super::core::{alloc_constants, buffer, commands, perf_add, perf_gpu_mark, perf_ticks, pipeline};
+use super::grain_template::{CHROMA_OFFSET_INTS, GRAIN_HEIGHT, GRAIN_WIDTH, TEMPLATE_BYTES, Templates};
 use super::types::Av1Core;
 use crate::gpu::d3d12::{com_ref, wrapped_ref};
 use crate::gpu::{Device, PlaneViews};
-use crate::sys::{AOM_CICP_MC_IDENTITY, AV1_COMMON, AV1_PERF_GPU_FILM_GRAIN, HwFrameBuffer};
+use crate::sys::{
+    AOM_CICP_MC_IDENTITY, AV1_COMMON, AV1_PERF_CPU_GRAIN_TEMPLATE, AV1_PERF_GPU_FILM_GRAIN,
+    AV1_PERF_GPU_FILM_GRAIN_GEN, HwFrameBuffer,
+};
 use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 
 pub(super) static SKIP_FILM_GRAIN: AtomicBool = AtomicBool::new(false);
 static FG_LEGACY: AtomicBool = AtomicBool::new(false);
+static FG_GEN_LEGACY: AtomicBool = AtomicBool::new(false);
+
+/// The bytes of a frame's grain buffer (`filmgrain_rand_offset` of a slot or output context) that come
+/// before its random offsets: the templates of the CPU path.
+pub(super) const GRAIN_BUFFER_TEMPLATE_BYTES: usize = TEMPLATE_BYTES;
 
 /// `av1_set_fg_legacy` (`dx/av1_perf.h`).
 #[unsafe(no_mangle)]
 pub extern "C" fn av1_set_fg_legacy(enable: c_int) {
     FG_LEGACY.store(enable != 0, Ordering::Relaxed);
+}
+
+/// `av1_set_fg_gen_legacy` (`dx/av1_perf.h`): the grain templates made on the GPU, by the two shaders
+/// of the C++ decoder, instead of on the CPU.
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_fg_gen_legacy(enable: c_int) {
+    FG_GEN_LEGACY.store(enable != 0, Ordering::Relaxed);
 }
 
 /// `av1_set_skip_film_grain` (`dx/av1_perf.h`).
@@ -36,7 +67,7 @@ pub extern "C" fn av1_set_skip_film_grain(enable: c_int) {
 
 /// The film grain parameters of a frame as the shaders read them.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct GrainParams {
     apply_grain: c_int,
     update_parameters: c_int,
@@ -211,75 +242,27 @@ pub(crate) enum GrainTarget {
     SemiPlanarTexture(u32),
 }
 
-/// `av1_filmgrain_run` of the C++: records the grain synthesis for the output of the frame of the
-/// current command list. The frame with grain goes into the layout the decoder's back buffer has, which
-/// is that of the output image. Without `enable_chroma` only luma gets grain.
+/// The GPU path of the templates (`av1_set_fg_gen_legacy`): `film_grain_gen_luma.hlsl`, then
+/// `film_grain_gen_chroma.hlsl` (whose filter reads the luma template), into `filmgrain_noise`, one thread
+/// group each (chroma: one a plane). Their time is the stage `film_grain_gen` of the timing run.
 ///
 /// # Safety
-/// `dec` is the decoder while it records a frame that is output; `cm` is the frame's.
-pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_chroma: c_int, target: GrainTarget) {
-    // SAFETY: the caller's contract; the random offsets are a mapped buffer of the slot, sized for the
-    // largest frame of the decoder.
+/// As for [`filmgrain_run`].
+unsafe fn record_gpu_templates(
+    dec: *mut Av1Core,
+    grain: &GrainParams,
+    luma_block_size_x: c_int,
+    luma_block_size_y: c_int,
+    chroma_block_size_x: c_int,
+    chroma_block_size_y: c_int,
+) {
+    // SAFETY: the caller's contract.
     unsafe {
         let td = &mut *(*dec).curr_frame_data;
-        let params = &cm.film_grain_params;
-
         let gen_constants = alloc_constants::<FilmGrainGenData>(&mut td.command_buffer);
         let gen_data = gen_constants.data;
-
-        (*gen_data).params.apply_grain = params.apply_grain;
-        (*gen_data).params.ar_coeff_lag = params.ar_coeff_lag;
-        (*gen_data).params.ar_coeff_shift = params.ar_coeff_shift;
-        (*gen_data).params.bit_depth = params.bit_depth;
-        (*gen_data).params.cb_luma_mult = params.cb_luma_mult;
-        (*gen_data).params.cb_mult = params.cb_mult;
-        (*gen_data).params.cb_offset = params.cb_offset;
-        (*gen_data).params.chroma_scaling_from_luma = params.chroma_scaling_from_luma;
-        (*gen_data).params.clip_to_restricted_range = params.clip_to_restricted_range;
-        (*gen_data).params.cr_luma_mult = params.cr_luma_mult;
-        (*gen_data).params.cr_mult = params.cr_mult;
-        (*gen_data).params.cr_offset = params.cr_offset;
-        (*gen_data).params.grain_scale_shift = params.grain_scale_shift;
-        (*gen_data).params.num_cb_points = params.num_cb_points;
-        (*gen_data).params.num_cr_points = params.num_cr_points;
-        (*gen_data).params.num_y_points = params.num_y_points;
-        (*gen_data).params.overlap_flag = params.overlap_flag;
-        (*gen_data).params.random_seed = u32::from(params.random_seed);
-        (*gen_data).params.update_parameters = params.update_parameters;
-        (*gen_data).params.scaling_shift = params.scaling_shift;
-        for i in 0..24 {
-            (*gen_data).params.ar_coeffs[0][i][0] = params.ar_coeffs_y[i];
-            (*gen_data).params.ar_coeffs[1][i][0] = params.ar_coeffs_cb[i];
-            (*gen_data).params.ar_coeffs[2][i][0] = params.ar_coeffs_cr[i];
-        }
-        (*gen_data).params.ar_coeffs[1][24][0] = params.ar_coeffs_cb[24];
-        (*gen_data).params.ar_coeffs[2][24][0] = params.ar_coeffs_cr[24];
-
-        for i in 0..14 {
-            (*gen_data).params.scaling_points[i][0][0] = params.scaling_points_y[i][0];
-            (*gen_data).params.scaling_points[i][1][0] = params.scaling_points_y[i][1];
-            if i < 10 {
-                (*gen_data).params.scaling_points[i][0][1] = params.scaling_points_cb[i][0];
-                (*gen_data).params.scaling_points[i][1][1] = params.scaling_points_cb[i][1];
-                (*gen_data).params.scaling_points[i][0][2] = params.scaling_points_cr[i][0];
-                (*gen_data).params.scaling_points[i][1][2] = params.scaling_points_cr[i][1];
-            }
-        }
-
-        let left_pad = 3;
-        let right_pad = 3; // padding to offset for AR coefficients
-        let top_pad = 3;
-        let bottom_pad = 0;
-        let ar_padding = 3; // maximum lag used for stabilization of AR coefficients
-        let luma_subblock_size_y = 32;
-        let luma_subblock_size_x = 32;
-        let chroma_subblock_size_y = luma_subblock_size_y >> 1;
-        let chroma_subblock_size_x = luma_subblock_size_x >> 1;
-        let luma_block_size_y = top_pad + 2 * ar_padding + luma_subblock_size_y * 2 + bottom_pad;
-        let luma_block_size_x = left_pad + 2 * ar_padding + luma_subblock_size_x * 2 + 2 * ar_padding + right_pad;
-        let chroma_block_size_y = top_pad + ar_padding + chroma_subblock_size_y * 2 + bottom_pad;
-        let chroma_block_size_x = left_pad + ar_padding + chroma_subblock_size_x * 2 + ar_padding + right_pad;
-
+        (*gen_data).params = *grain;
+        let (left_pad, right_pad, top_pad, bottom_pad) = (3, 3, 3, 0);
         (*gen_data).luma_block_size_y = luma_block_size_y;
         (*gen_data).luma_block_size_x = luma_block_size_x;
         (*gen_data).luma_grain_stride = luma_block_size_x;
@@ -290,11 +273,11 @@ pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_ch
         (*gen_data).top_pad = top_pad;
         (*gen_data).right_pad = right_pad;
         (*gen_data).bottom_pad = bottom_pad;
-        (*gen_data).dst_offset_u = luma_block_size_x * luma_block_size_y;
-        (*gen_data).dst_offset_v = luma_block_size_x * luma_block_size_y + chroma_block_size_x * chroma_block_size_y;
+        (*gen_data).dst_offset_u = CHROMA_OFFSET_INTS[0] as c_int;
+        (*gen_data).dst_offset_v = CHROMA_OFFSET_INTS[1] as c_int;
         // The positions the auto-regression of a sample reads: the rows above, then the samples to its left;
         // for chroma also the luma sample at its place, when luma has grain.
-        let lag = params.ar_coeff_lag;
+        let lag = grain.ar_coeff_lag;
         let mut pos_ar_index = 0usize;
         let mut position = |row: c_int, col: c_int| {
             for component in 0..2 {
@@ -312,18 +295,138 @@ pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_ch
         for col in -lag..0 {
             position(0, col);
         }
-        if params.num_y_points > 0 {
+        if grain.num_y_points > 0 {
             (*gen_data).pred_pos[pos_ar_index][0][1] = 0;
             (*gen_data).pred_pos[pos_ar_index][1][1] = 0;
             (*gen_data).pred_pos[pos_ar_index][2][1] = 1;
         }
 
+        let commands = commands(dec);
+        let lib = (*dec).shader_lib;
+        let noise = buffer((*dec).filmgrain_noise);
+        for (shader, groups_y) in [
+            (pipeline(&raw const (*lib).shader_filmgrain_luma_gen), 1),
+            (pipeline(&raw const (*lib).shader_filmgrain_chroma_gen), 2),
+        ] {
+            commands.set_pipeline(shader);
+            commands.set_layout(shader.layout());
+            commands.bind_read(0, buffer((*dec).filmgrain_random_luma).location());
+            commands.bind_read(1, buffer((*dec).filmgrain_random_chroma).location());
+            commands.bind_read(2, buffer((*dec).filmgrain_gaus).location());
+            commands.bind_write(3, noise.location());
+            commands.bind_constants(4, gen_constants.location);
+            commands.dispatch(1, groups_y, 1);
+            commands.write_barrier(noise);
+        }
+        perf_gpu_mark(dec, AV1_PERF_GPU_FILM_GRAIN_GEN);
+    }
+}
+
+/// `av1_filmgrain_run` of the C++: records the grain synthesis for the output of the frame of the
+/// current command list. The frame with grain goes into the layout the decoder's back buffer has, which
+/// is that of the output image. Without `enable_chroma` only luma gets grain.
+///
+/// # Safety
+/// `dec` is the decoder while it records a frame that is output; `cm` is the frame's.
+pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_chroma: c_int, target: GrainTarget) {
+    // SAFETY: the caller's contract; the random offsets are a mapped buffer of the slot, sized for the
+    // largest frame of the decoder.
+    unsafe {
+        let td = &mut *(*dec).curr_frame_data;
+        let params = &cm.film_grain_params;
+
+        let mut grain = GrainParams {
+            apply_grain: params.apply_grain,
+            update_parameters: params.update_parameters,
+            num_y_points: params.num_y_points,
+            num_cb_points: params.num_cb_points,
+            num_cr_points: params.num_cr_points,
+            scaling_shift: params.scaling_shift,
+            ar_coeff_lag: params.ar_coeff_lag,
+            ar_coeff_shift: params.ar_coeff_shift,
+            cb_mult: params.cb_mult,
+            cb_luma_mult: params.cb_luma_mult,
+            cb_offset: params.cb_offset,
+            cr_mult: params.cr_mult,
+            cr_luma_mult: params.cr_luma_mult,
+            cr_offset: params.cr_offset,
+            overlap_flag: params.overlap_flag,
+            clip_to_restricted_range: params.clip_to_restricted_range,
+            bit_depth: params.bit_depth,
+            chroma_scaling_from_luma: params.chroma_scaling_from_luma,
+            grain_scale_shift: params.grain_scale_shift,
+            random_seed: u32::from(params.random_seed),
+            ..GrainParams::default()
+        };
+        for i in 0..24 {
+            grain.ar_coeffs[0][i][0] = params.ar_coeffs_y[i];
+            grain.ar_coeffs[1][i][0] = params.ar_coeffs_cb[i];
+            grain.ar_coeffs[2][i][0] = params.ar_coeffs_cr[i];
+        }
+        grain.ar_coeffs[1][24][0] = params.ar_coeffs_cb[24];
+        grain.ar_coeffs[2][24][0] = params.ar_coeffs_cr[24];
+        for i in 0..14 {
+            grain.scaling_points[i][0][0] = params.scaling_points_y[i][0];
+            grain.scaling_points[i][1][0] = params.scaling_points_y[i][1];
+            if i < 10 {
+                grain.scaling_points[i][0][1] = params.scaling_points_cb[i][0];
+                grain.scaling_points[i][1][1] = params.scaling_points_cb[i][1];
+                grain.scaling_points[i][0][2] = params.scaling_points_cr[i][0];
+                grain.scaling_points[i][1][2] = params.scaling_points_cr[i][1];
+            }
+        }
+
+        // The templates (7.18.3.3) as the apply shaders read them: luma 73 rows of 82 samples, then the two
+        // chroma templates, 38 rows of 44. The pads are the columns and rows the filter of the template
+        // does not write (3 left, right and top), around the 64x64 (luma) and 32x32 (chroma) samples a
+        // 32x32 block of the frame takes its grain from, at an offset of up to 2 x 3 + 2 x 3 more.
+        let left_pad = 3;
+        let right_pad = 3; // padding to offset for AR coefficients
+        let top_pad = 3;
+        let bottom_pad = 0;
+        let ar_padding = 3; // maximum lag used for stabilization of AR coefficients
+        let luma_subblock_size_y = 32;
+        let luma_subblock_size_x = 32;
+        let luma_block_size_y = GRAIN_HEIGHT as c_int;
+        let luma_block_size_x = GRAIN_WIDTH as c_int;
+        let chroma_block_size_y = top_pad + ar_padding + (luma_subblock_size_y >> 1) * 2 + bottom_pad;
+        let chroma_block_size_x = left_pad + ar_padding + (luma_subblock_size_x >> 1) * 2 + ar_padding + right_pad;
+        debug_assert_eq!(luma_block_size_y, top_pad + 2 * ar_padding + luma_subblock_size_y * 2 + bottom_pad);
+        debug_assert_eq!(
+            luma_block_size_x,
+            left_pad + 2 * ar_padding + luma_subblock_size_x * 2 + 2 * ar_padding + right_pad
+        );
+        let [grain_offset_u, grain_offset_v] = CHROMA_OFFSET_INTS.map(|ints| ints as c_int);
+        debug_assert_eq!(grain_offset_v - grain_offset_u, chroma_block_size_x * chroma_block_size_y);
+
+        // The frame's grain buffer: the templates of the CPU path, then the random offsets.
+        let grain_buffer = (*td.filmgrain_rand_offset).host_ptr.cast::<u8>();
+        let commands = commands(dec);
+        let lib = (*dec).shader_lib;
+        let template_location = if FG_GEN_LEGACY.load(Ordering::Relaxed) {
+            record_gpu_templates(
+                dec,
+                &grain,
+                luma_block_size_x,
+                luma_block_size_y,
+                chroma_block_size_x,
+                chroma_block_size_y,
+            );
+            buffer((*dec).filmgrain_noise).location()
+        } else {
+            let start = perf_ticks();
+            let mut templates = Templates::zeroed();
+            templates.generate(params);
+            // One pass of writes through the mapping, which is write-combined: the filter reads what it
+            // has written, which it does in the copy on the stack.
+            grain_buffer.copy_from_nonoverlapping((&raw const templates).cast::<u8>(), TEMPLATE_BYTES);
+            perf_add(dec, AV1_PERF_CPU_GRAIN_TEMPLATE, start);
+            buffer(td.filmgrain_rand_offset).location()
+        };
+
         let constants = alloc_constants::<FilmGrainData>(&mut td.command_buffer);
         let data = constants.data;
-
-        // The parameters as the first record has them, every byte of them: the record of the filter is
-        // compared between decoders with what it holds besides the fields written above.
-        (&raw mut (*data).params).copy_from_nonoverlapping(&raw const (*gen_data).params, 1);
+        (*data).params = grain;
         (*data).enable_chroma = enable_chroma;
 
         let plane_words = |buffer: &HwFrameBuffer| {
@@ -336,8 +439,8 @@ pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_ch
 
         (*data).luma_grain_stride = luma_block_size_x;
         (*data).chroma_grain_stride = chroma_block_size_x;
-        (*data).grain_offset_u = luma_block_size_x * luma_block_size_y;
-        (*data).grain_offset_v = luma_block_size_x * luma_block_size_y + chroma_block_size_x * chroma_block_size_y;
+        (*data).grain_offset_u = grain_offset_u;
+        (*data).grain_offset_v = grain_offset_v;
         (*data).mc_identity =
             c_int::from((*cm.cur_frame).buf.matrix_coefficients as u32 == AOM_CICP_MC_IDENTITY as u32);
         (*data).left_pad = left_pad;
@@ -373,7 +476,7 @@ pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_ch
 
         // Start the random register at each visible stripe (AV1 7.18.3.5). Continue it through
         // any extra blocks in the final group so all shader reads have initialized offsets.
-        let random_offset = (*td.filmgrain_rand_offset).host_ptr.cast::<c_int>();
+        let random_offset = grain_buffer.add(GRAIN_BUFFER_TEMPLATE_BYTES).cast::<c_int>();
         for row in 0..groups_y {
             let mut rng = Rng::new(row as c_int * luma_subblock_size_y, params.random_seed);
             for col in 0..stride {
@@ -381,25 +484,7 @@ pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_ch
             }
         }
 
-        let commands = commands(dec);
-        let lib = (*dec).shader_lib;
-        let noise = buffer((*dec).filmgrain_noise);
         let frame_buffers = buffer((*dec).frame_buffer_pool);
-        for (shader, groups_y) in [
-            (pipeline(&raw const (*lib).shader_filmgrain_luma_gen), 1),
-            (pipeline(&raw const (*lib).shader_filmgrain_chroma_gen), 2),
-        ] {
-            commands.set_pipeline(shader);
-            commands.set_layout(shader.layout());
-            commands.bind_read(0, buffer((*dec).filmgrain_random_luma).location());
-            commands.bind_read(1, buffer((*dec).filmgrain_random_chroma).location());
-            commands.bind_read(2, buffer((*dec).filmgrain_gaus).location());
-            commands.bind_write(3, noise.location());
-            commands.bind_constants(4, gen_constants.location);
-            commands.dispatch(1, groups_y, 1);
-            commands.write_barrier(noise);
-        }
-
         let shader = pipeline(match target {
             GrainTarget::Planes => &raw const (*lib).shader_filmgrain_filter,
             GrainTarget::SemiPlanar => &raw const (*lib).shader_filmgrain_filter_sp,
@@ -409,8 +494,8 @@ pub(crate) unsafe fn filmgrain_run(dec: *mut Av1Core, cm: &AV1_COMMON, enable_ch
         commands.set_pipeline(shader);
         commands.set_layout(shader.layout());
         commands.bind_read(0, frame_buffers.location());
-        commands.bind_read(1, noise.location());
-        commands.bind_read(2, buffer(td.filmgrain_rand_offset).location());
+        commands.bind_read(1, template_location);
+        commands.bind_read(2, buffer(td.filmgrain_rand_offset).location().offset(GRAIN_BUFFER_TEMPLATE_BYTES as u64));
         if let GrainTarget::SemiPlanarTexture(pair) = target {
             // The layout without a buffer to write: the constants, then the planes of the texture.
             let views = wrapped_ref::<_, PlaneViews>(&(*dec).plane_views).expect("a direct frame has its views");

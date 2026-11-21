@@ -104,6 +104,7 @@ pub struct Task {
     pub intrasingleedgelegacy: bool,
     pub lrlegacy: bool,
     pub fglegacy: bool,
+    pub fggenlegacy: bool,
     pub copylegacy: bool,
     pub idctlegacy: bool,
     pub clearlegacy: bool,
@@ -194,6 +195,7 @@ impl Default for Task {
             intrasingleedgelegacy: false,
             lrlegacy: false,
             fglegacy: false,
+            fggenlegacy: false,
             copylegacy: false,
             idctlegacy: false,
             clearlegacy: false,
@@ -315,6 +317,7 @@ pub fn usage() {
     say!("  -intrasingleedgelegacy use the previous directional wavefront with prefetching");
     say!("  -lrlegacy           use the original loop_restoration shader");
     say!("  -fglegacy           use the original direct NV12/P010 film grain shader");
+    say!("  -fggenlegacy        make the film grain templates on the GPU (film_grain_gen_luma/chroma), not the CPU");
     say!("  -copylegacy         use the original direct NV12/P010 copy shader");
     say!("  -idctlegacy         use the original small inverse transform shaders");
     say!("  -clearlegacy        clear the whole residual allocation before IDCT");
@@ -512,6 +515,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-intrasingleedgelegacy" => task.intrasingleedgelegacy = true,
             "-lrlegacy" => task.lrlegacy = true,
             "-fglegacy" => task.fglegacy = true,
+            "-fggenlegacy" => task.fggenlegacy = true,
             "-copylegacy" => task.copylegacy = true,
             "-idctlegacy" => task.idctlegacy = true,
             "-clearlegacy" => task.clearlegacy = true,
@@ -752,6 +756,9 @@ mod tests {
         assert!(!task.fglegacy);
         parse_args(&strings(&["-fglegacy"]), &mut task, None).unwrap();
         assert!(task.fglegacy);
+        assert!(!task.fggenlegacy);
+        parse_args(&strings(&["-fggenlegacy"]), &mut task, None).unwrap();
+        assert!(task.fggenlegacy);
         assert!(!task.copylegacy);
         parse_args(&strings(&["-copylegacy"]), &mut task, None).unwrap();
         assert!(task.copylegacy);
