@@ -2359,16 +2359,18 @@ jobs:
           enableCrossOsArchive: true
           fail-on-cache-miss: true
 
+      # The 4K stress stream test22266 can reach five minutes on hosted WARP.
+      # Give both paths the same watchdog and compare the full stream hash.
       - name: Argon Profile 0 on WARP
         run: >-
           python testing/argon/run.py --tool out/rav1g-dec/rav1g-dec.exe
-          --streams argon-streams --out out/argon --shards 8 --shard ${{ matrix.shard }} --timeout 300
+          --streams argon-streams --out out/argon --shards 8 --shard ${{ matrix.shard }} --timeout 450
 
       - name: Argon Profile 0 on WARP with the previous directional intra wavefront
         if: ${{ !cancelled() }}
         run: >-
           python testing/argon/run.py --tool out/rav1g-dec/rav1g-dec.exe
-          --streams argon-streams --out out/argon-legacy --shards 8 --shard ${{ matrix.shard }} --timeout 300
+          --streams argon-streams --out out/argon-legacy --shards 8 --shard ${{ matrix.shard }} --timeout 450
           --decoder-arg=-intrasingleedgelegacy
 
       - name: Preserve the result table
