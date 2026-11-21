@@ -124,7 +124,9 @@ const LAYOUTS: usize =
 const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
-    assert!(SHADERS == crate::sys::SHADERS.len());
+    // 20 transform pipelines, 32 shared shaders and 27 per bit depth: one slot per pipeline of
+    // `create_tasks` (the test `every_pipeline_names_its_shader_once`).
+    assert!(SHADERS == 20 + 32 + 2 * 27);
     assert!(LAYOUTS == 24);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
@@ -807,6 +809,7 @@ mod tests {
             .collect();
         let embedded = shader_names();
         assert_eq!(names.len(), embedded.len());
+        assert_eq!(names.len(), SHADERS, "one pipeline per slot of the library");
         let mut unique = names.clone();
         unique.sort_unstable();
         unique.dedup();

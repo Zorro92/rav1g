@@ -99,10 +99,8 @@ pub struct bitdepth_dependent_shaders {
     pub inter_scale_comp_diff_y: ComputeShader,
     pub inter_scale_comp_diff_uv: ComputeShader,
     pub inter_scale_comp_masked: ComputeShader,
-    pub inter_scale_comp_2x2: ComputeShader,
     pub inter_scale_obmc_above: ComputeShader,
     pub inter_scale_obmc_left: ComputeShader,
-    pub inter_scale_warp_comp: ComputeShader,
     pub inter_fast: ComputeShader,
     pub inter_comp_fast: ComputeShader,
 }
