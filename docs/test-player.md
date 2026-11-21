@@ -1424,6 +1424,14 @@ and the previous segmentation map when the parser reads them. The flag also work
 `rav1g-dec` and can be combined with `-parsecoeflegacy`. Changing either flag between
 player tasks creates a fresh parser.
 
+For a block list A/B, add `-intralistslegacy` to count the intra block lists with the
+previous loops of `av1_mi_push_block` and the previous edges of the wavefront (four
+arrays with the frame's stamp). The default counts them in `intra_block_edges` over
+packed edges ([phase2-rav1d.md](phase2-rav1d.md#the-block-lists-on-the-cpu-2026-11-21)).
+The lists are the same, so the output and the GPU work are too; only the parse threads'
+CPU time differs. A frame takes the flag at its setup, so it needs no fresh decoder. The
+flag also works in `rav1g-dec`.
+
 With rav1d's parse the `-gputime` summary splits the tile decode further. All three lines are parts
 of `cpu entropy/tile decode, thread sum`, summed over the tile threads, and zero with `-parser c`
 (the C parser does the same work without timers of its own):

@@ -3445,3 +3445,68 @@ the frame sizes of the IVF file.
 - **Checked:** on the 244 public streams the new tool gives the frames, records, transform blocks,
   coefficients, palette planes, loop restoration units and coverage counts the old one gave, equal
   in every configuration CI runs, and the same parse digests.
+
+### The block lists on the CPU (2026-11-21)
+
+What the sink costs the parse threads, and the first change to its largest part. Measured with
+`rav1g-parse-check -time` and perf (cycles and instructions per function) on a laptop CPU (4 cores,
+up to 4.9 GHz), one worker, one frame in parse; the console runs the same code more slowly, and
+its RAM is slower still in the idle state.
+
+**`-parseopt time` costs more than it measures.** It reads the time stamp counter twice for every
+block call, transform block call and intra part of a block. On j4k40 the sink is 3.0 ms a frame
+without it and 5.7 ms with it: the console's `sink calls` and `of the lists: intra` lines include
+that cost, and the real split there is closer to the one below.
+
+**Where the sink's own CPU time goes**, as a share of the cycles of its functions (base `main`,
+without `time`):
+
+| Stream | Sink, ms/frame | Intra lists and wavefront (`av1_mi_push_block`) | Per-block bookkeeping (`count_lists`) | Mode info records (`block_call`) | Transform block records (`txb_call`) | Superblock, palette, other |
+| --- | --- | --- | --- | --- | --- | --- |
+| d2, its three key frames | 21.2 | 72 % | 5 % | 6 % | 9 % | 8 % |
+| j4k40 (4K60, 40 Mbps), first 600 frames | 3.0 | 65 % | 9 % | 13 % | 6 % | 7 % |
+| jf4k100m (4K60, 100 Mbps), first 600 frames | 4.3 | 64 % | 9 % | 12 % | 8 % | 6 % |
+
+- The rest of the sink's time is the parse itself running slower next to it (caches and memory),
+  about 15 % on j4k40. The clears of the lists' iterations (`clear_iteration_lists`) are below 0.1 %.
+- A key frame of d2 has 63k blocks, all intra, with 110k transform blocks of luma and 63k of
+  chroma. `av1_mi_push_block` took about 1700 instructions a block (IPC 2.5), spread over the whole
+  function with no single hot spot. Taking parts out showed where: the reads and writes of the
+  wavefront's edges were 59 % of the intra part, `has_top_right`, `has_bottom_left`, the
+  availability and the lists the rest.
+
+**The change** (`-intralistslegacy` for the previous code, `av1_set_intra_lists_legacy`):
+
+- `WavePlane` keeps an entry per column (iteration and end of the decoded units, 8 bytes) and per
+  row (16 bytes) in place of the four arrays of "No clears by the CPU": a transform block writes
+  two runs of entries instead of four. The ends no longer carry the frame's stamp; the tile clears
+  them with the iterations when it wakes (`WaveEdges::reset`), before it reads any, so an end of an
+  earlier frame is never read. Within a frame the comparisons are the ones of the stamped ends, and
+  the lists are the same.
+- The loops over the transform blocks of an intra block are a function of their own
+  (`intra_block_edges`): in the body of `push_block` every store into a list made the compiler
+  read the tile's fields again, and the body has more values than registers. Alone this saved
+  little; with the packed edges it is the part that reads them.
+- The previous edges (`LegacyWavePlane`) stay for the switch and for the intra step timing, which
+  keeps the previous loops: 29.8 KB of both a row of tiles for 4K, in the cache.
+
+Cycles of the intra lists (`av1_mi_push_block` and `intra_block_edges`), with the same binary for
+the default and `-intralistslegacy`:
+
+| Stream | Before | After | With `-intralistslegacy` |
+| --- | --- | --- | --- |
+| d2, key frames | 100 % | 90 % (instructions 87 %) | 102 % |
+| j4k40, first 600 frames | 100 % | 93 % (instructions 94 %) | 101 % |
+| jf4k100m, first 600 frames | 100 % | 90 % (instructions 93 %) | 111 % |
+
+That is about 1.5 ms of a 4K key frame of d2 and 0.1 to 0.2 ms of an average 4K frame on this
+CPU. `rav1g-parse-check`'s reference counts with the previous code, so every check holds the
+lists against it: equal on the 244 public streams (one thread; four with two frames in parse) and
+on five local 4K and 1080p clips; a mutant that gives chroma one iteration more is reported.
+
+What is left: the intra part is still about 450 instructions a transform block, inherent to
+deriving each block's iteration from its neighbours one by one. The larger lever is where it
+runs: the lists of a tile need only the records, in order, so they could be counted by another
+parse thread a superblock row behind the entropy decoder, off the path of a one-tile frame (and of
+the next frame's wait for its CDFs). On one-tile 4K streams with two frames in parse two of the
+four workers are free. Not done here.
