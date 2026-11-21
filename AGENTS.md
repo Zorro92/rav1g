@@ -42,7 +42,7 @@ is "Measured limits" in [Bale's docs/gpu-tone-map.md](https://github.com/Zorro92
 | Idle state | about 10 s after the last input, the state real playback runs in: CPU about 21-25% slower, CPU RAM copies 3.6-4x slower, GPU copies 2.4x slower (97 to 40 GB/s, uploads 68 to 37 GB/s); GPU compute is not slowed |
 | GPU features | shader model 6.4 at most, wave64 only, no native 16-bit arithmetic (WARP in CI uses small waves: wave paths are tested only on the console) |
 | D3D12 pipeline caches | `ID3D12PipelineLibrary` and `GetCachedBlob` remove the device: don't use them |
-| Dependent dispatches | about 30 us of GPU time per step of a chain of dependent compute dispatches |
+| Dependent dispatches | each step of a chain of dependent compute dispatches costs about 18 us fixed (dispatch and barrier) plus the latency of its slowest thread group; an intra wavefront step on heavy 4K frames takes 40-45 us, and each extra group in a step adds only about 0.1 us (measured with `-intrasteptime`, docs/test-player.md "Intra step timing") |
 
 **rav1g's envelope during 4K AV1 playback in Bale** ("Now: rav1g's envelope" in
 [Bale's docs/resource-budget.md](https://github.com/Zorro92/bale-for-silo/blob/main/docs/resource-budget.md)).
