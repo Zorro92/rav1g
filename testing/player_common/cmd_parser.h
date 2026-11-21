@@ -90,6 +90,11 @@ class CParameters {
     std::string dumpstages_;
     std::string dumpdir_;
     std::vector<int> dump_frames_;
+    // -intrasteptime: the frames whose intra wavefront steps are timed (decoding order), as given and as
+    // numbers; -intrastepmin: also every frame with more than this many steps (-1: none).
+    std::string intrasteptime_;
+    std::vector<int> step_frames_;
+    int intrastepmin_;
     bool isDirectory_;
     bool isSubList_;
     bool showIt_;

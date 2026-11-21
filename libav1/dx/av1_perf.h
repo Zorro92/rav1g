@@ -342,6 +342,73 @@ void av1_set_intra_step_legacy(int enable);
 /* Use the prefetch shaders with the previous angle-specific wavefront. */
 void av1_set_intra_single_edge_legacy(int enable);
 
+/* ---------------------------------------------------------------------------
+ * Intra step timing (test flags -intrasteptime and -intrastepmin; docs/test-player.md, "Intra step
+ * timing"). Nothing here changes what is decoded.
+ *
+ * The intra stage of a frame is a row of wavefront steps: per step a dispatch of the main shader and one
+ * of filter intra (each when it has blocks), then a UAV barrier. For a frame that is timed, the host puts
+ * a GPU timestamp in front of the first step and one behind the barrier of every step, in the frame's own
+ * command list, and resolves them behind the last step; they are read back on the completion thread after
+ * the frame's fence. A step's time is its timestamp minus the one before it: its dispatches and its
+ * barrier, as the steps run one after the other.
+ *
+ * What a step holds comes from the host's schedule, not from the GPU: the records of its lists (what the
+ * dispatches get) and the transform blocks the tile threads put into it, by kind and plane. The kinds are
+ * counted where the tiles push their blocks while the timing is on (a few additions per transform block
+ * on the tile threads), for every frame, since the selection by steps is known only when the frame is
+ * recorded.
+ * ------------------------------------------------------------------------- */
+enum {
+  AV1_INTRA_KIND_DC = 0,       /* DC_PRED (not filter intra, not CFL) */
+  AV1_INTRA_KIND_STRAIGHT,     /* V_PRED and H_PRED with angle delta 0 */
+  AV1_INTRA_KIND_ZONE1,        /* directional, angle below 90 degrees (reads the row above, to the right) */
+  AV1_INTRA_KIND_ZONE2,        /* directional, between 90 and 180 degrees (both edges and the corner) */
+  AV1_INTRA_KIND_ZONE3,        /* directional, above 180 degrees (the left column, below) */
+  AV1_INTRA_KIND_SMOOTH,       /* SMOOTH_PRED, SMOOTH_V_PRED, SMOOTH_H_PRED */
+  AV1_INTRA_KIND_PAETH,
+  AV1_INTRA_KIND_CFL,          /* UV_CFL_PRED */
+  AV1_INTRA_KIND_FILTER,       /* filter intra (the filter dispatch) */
+  AV1_INTRA_KIND_INTRABC,      /* intra block copy */
+  AV1_INTRA_KIND_INTERINTRA,   /* the intra part of an inter-intra block */
+  AV1_INTRA_KIND_COUNT
+};
+
+/* The lists of a step: the records of the main shader's nine lists by block area (64x64, 32x64 and 64x32,
+ * 32x32, ... down to 4x4: 1024 down to 4 threads a block), then those of the filter intra dispatch. A
+ * chroma block has two records, U and V. */
+enum { AV1_INTRA_STEP_LISTS = 10 };
+
+typedef struct av1_intra_step {
+  double gpu_ms;     /* GPU time of the step: its timestamp minus the one before it */
+  int groups;        /* thread groups of its dispatches */
+  int dispatches;    /* 1 or 2 */
+  int lists[AV1_INTRA_STEP_LISTS];
+  int blocks[2][AV1_INTRA_KIND_COUNT]; /* transform blocks by plane (luma, chroma: U and V are one) and kind */
+  int filter_diagonals; /* the longest serial chain of filter intra in the step: columns + rows - 1 of its
+                           largest block in 4x2 units (23 for a 32x32 block), 0 without filter intra */
+} av1_intra_step;
+
+typedef struct av1_intra_steps {
+  int frame_number;   /* decoder frame counter, as av1_perf_frame::frame_number */
+  int show_frame;
+  int intra_frame;    /* key or intra-only frame */
+  int bit_depth;      /* 8 or 10: of the frame buffers */
+  int tile_count;
+  int step_count;     /* steps of the frame, all timed */
+  double gpu_ms;      /* first to last timestamp: the whole wavefront */
+  const av1_intra_step *steps; /* step_count steps, valid during the callback only */
+} av1_intra_steps;
+
+/* Called on the GPU completion thread, once per timed frame, after the frame's fence. */
+typedef void (*av1_intra_steps_cb_fn_t)(void *priv, const av1_intra_steps *frame);
+
+/* Process-wide. A frame is timed when its number is one of the count numbers of frames (copied by the
+ * call), or when min_steps >= 0 and the frame has more than min_steps steps. NULL for cb switches the
+ * timing off. Frames of -intrav2 are not timed. Change it only while no frame
+ * is in flight, like the perf callback. */
+void av1_set_intra_step_timing(av1_intra_steps_cb_fn_t cb, void *priv, int min_steps, const int *frames, int count);
+
 /* Process-wide. Non-zero selects the previous 8-bit filter intra shader.
  * Applies to frames that run the main intra path. Off by default. Change it
  * only while no frame is in flight. */

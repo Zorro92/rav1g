@@ -1365,6 +1365,14 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                     &raw const (*lib).shader_intra_filter_prefetch
                 };
                 let mut shader: *const ComputeShader = std::ptr::null();
+                // Intra step timing (step_time.rs): a timestamp in front of the first step of a timed frame.
+                let frame_type = (*cm).current_frame.frame_type as c_int;
+                super::step_time::begin(
+                    dec,
+                    td.intra_iters + 1,
+                    (*cm).show_frame,
+                    c_int::from(frame_type == 0 || frame_type == 2), // frame_is_intra_only()
+                );
                 for it in 0..=td.intra_iters {
                     let base = (it * IntraTypeCount) as usize;
                     let offset = *offsets.add(base);
@@ -1424,7 +1432,13 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                     assert!(count != 0 || wi_count != 0, "a wavefront iteration has blocks");
                     commands.write_barrier(frame_buffers);
                     td.intra_stats[1] += 1;
+                    // Behind the step's barrier: its timestamp, and what it dispatched.
+                    let lists = [srt[0], srt[1], srt[2], srt[3], srt[4], srt[5], srt[6], srt[7], counts8, count];
+                    let groups = ((wi_count + 255) >> 8) + count;
+                    let dispatches = c_int::from(wi_count != 0) + c_int::from(count != 0);
+                    super::step_time::step(dec, it, &lists, groups, dispatches);
                 }
+                super::step_time::end(dec);
                 td.intra_stats[3] = td.intra_stats[2]; // one pass per thread group
                 perf_gpu_mark(dec, AV1_PERF_GPU_INTRA);
                 stage_dump_fb(dec, c"intra", td.frame_buffer, std::ptr::null());

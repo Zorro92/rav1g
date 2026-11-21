@@ -875,6 +875,22 @@ int AV1Decoder::DecodeOne() {
                                      : params_.lfhsplit_ == 2 ? "row of blocks by row (-lfhsplit 2)"
                                                               : "one dispatch per plane (default)")
           << "; 8-bit above edge filter bound " << (params_.intraedgefix_ ? "filter_count (-intraedgefix)" : "above_count (default)");
+  // -intrasteptime, -intrastepmin: like the switches above, set while no frame is in flight.
+  {
+    std::lock_guard<std::mutex> lock(steps_cs_);
+    step_lines_.clear();
+    step_frames_timed_ = 0;
+  }
+  if (!params_.step_frames_.empty() || params_.intrastepmin_ >= 0) {
+    av1_set_intra_step_timing(IntraSteps, this, params_.intrastepmin_, params_.step_frames_.data(),
+                              (int)params_.step_frames_.size());
+    steps_installed_ = 1;
+    XB_LOGI << "STEPTIME intra step timing: frames " << (params_.intrasteptime_.empty() ? "-" : params_.intrasteptime_)
+            << " (decoding order), more than " << params_.intrastepmin_ << " steps";
+  } else {
+    av1_set_intra_step_timing(NULL, NULL, -1, NULL, 0);
+    steps_installed_ = 0;
+  }
   // -dumpstages: like the switches above, set while no frame is in flight.
   if (!params_.dump_frames_.empty()) {
     _mkdir(params_.dumpdir_.c_str());
@@ -1035,6 +1051,20 @@ int AV1Decoder::DecodeOne() {
             << params_.dumpdir_;
     if (!stage_dumps_.Error().empty()) XB_LOGE << "DUMPSTAGES " << stage_dumps_.Error();
   }
+  // The drain joins the decoder's GPU completion thread: every timed frame's steps are in.
+  if (steps_installed_) {
+    av1_set_intra_step_timing(NULL, NULL, -1, NULL, 0);
+    steps_installed_ = 0;
+    std::vector<std::string> lines;
+    int frames = 0;
+    {
+      std::lock_guard<std::mutex> lock(steps_cs_);
+      lines.swap(step_lines_);
+      frames = step_frames_timed_;
+    }
+    for (size_t i = 0; i < lines.size(); ++i) XB_LOGI << lines[i];
+    XB_LOGI << "STEPTIME " << frames << " frames timed, " << (lines.size() - frames) << " steps";
+  }
   // The drain joins the decoder's GPU completion thread, so every frame record is in.
   if (params_.gputime_ || params_.nopresent_) PerfReport();
   need_preload_ = 0;
@@ -1079,6 +1109,39 @@ int AV1Decoder::DecodeOne() {
   }
 
   return 0;
+}
+
+// The lines of a timed frame, as rav1g-dec writes them (tools/rav1g-dec/src/run.rs, step_lines): a frame
+// line, then one line per step (docs/test-player.md, "Intra step timing").
+void AV1Decoder::IntraSteps(void* priv, const av1_intra_steps* frame) {
+  if (!priv || !frame) return;
+  AV1Decoder* This = static_cast<AV1Decoder*>(priv);
+  const size_t name_pos = This->params_.source_file_.find_last_of("\\/");
+  const std::string name =
+      name_pos == std::string::npos ? This->params_.source_file_ : This->params_.source_file_.substr(name_pos + 1);
+  std::vector<std::string> lines;
+  lines.reserve((size_t)frame->step_count + 1);
+  char b[512];
+  snprintf(b, sizeof(b), "STEPTIME frame name=%s no=%d show=%d intra=%d bd=%d tiles=%d steps=%d gpu_ms=%.3f",
+           name.c_str(), frame->frame_number, frame->show_frame, frame->intra_frame, frame->bit_depth,
+           frame->tile_count, frame->step_count, frame->gpu_ms);
+  lines.push_back(b);
+  for (int i = 0; i < frame->step_count && frame->steps; ++i) {
+    const av1_intra_step& s = frame->steps[i];
+    int len = snprintf(b, sizeof(b), "STEPTIME step no=%d i=%d us=%.1f groups=%d disp=%d lists=", frame->frame_number,
+                       i, s.gpu_ms * 1000.0, s.groups, s.dispatches);
+    for (int k = 0; k < AV1_INTRA_STEP_LISTS && len < (int)sizeof(b); ++k)
+      len += snprintf(b + len, sizeof(b) - len, k ? ",%d" : "%d", s.lists[k]);
+    for (int plane = 0; plane < 2; ++plane) {
+      for (int k = 0; k < AV1_INTRA_KIND_COUNT && len < (int)sizeof(b); ++k)
+        len += snprintf(b + len, sizeof(b) - len, k ? ",%d" : (plane ? " c=%d" : " y=%d"), s.blocks[plane][k]);
+    }
+    if (len < (int)sizeof(b)) snprintf(b + len, sizeof(b) - len, " fdiag=%d", s.filter_diagonals);
+    lines.push_back(b);
+  }
+  std::lock_guard<std::mutex> lock(This->steps_cs_);
+  This->step_frames_timed_++;
+  This->step_lines_.insert(This->step_lines_.end(), lines.begin(), lines.end());
 }
 
 void AV1Decoder::PerfReport() {

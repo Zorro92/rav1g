@@ -223,9 +223,12 @@ pub struct av1_tile_data {
     pub frame_data: *mut c_void,
     /// The tile schedules a one-edge angle with the single-edge shader.
     pub intra_single_edge: c_int,
+    /// Intra step timing (`av1_set_intra_step_timing`): the tile's counts by step (the host's
+    /// `step_time::TileSteps`); null while the switch is off.
+    pub perf_steps: *mut c_void,
 }
 const _: () = {
-    assert!(size_of::<av1_tile_data>() == 288);
+    assert!(size_of::<av1_tile_data>() == 296);
     assert!(align_of::<av1_tile_data>() == 8);
     assert!(offset_of!(av1_tile_data, idct_blocks_host) == 0);
     assert!(offset_of!(av1_tile_data, dq_buffer_base) == 8);
@@ -268,6 +271,7 @@ const _: () = {
     assert!(offset_of!(av1_tile_data, wave_edges) == 264);
     assert!(offset_of!(av1_tile_data, frame_data) == 272);
     assert!(offset_of!(av1_tile_data, intra_single_edge) == 280);
+    assert!(offset_of!(av1_tile_data, perf_steps) == 288);
 };
 impl Default for av1_tile_data {
     fn default() -> Self {

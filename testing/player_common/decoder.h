@@ -243,6 +243,7 @@ class AV1Decoder {
     }
     if (perf_installed_) rav1g_set_perf_callback(NULL, NULL);
     if (dumps_installed_) rav1g_set_stage_dump(NULL, NULL, NULL, 0);
+    if (steps_installed_) av1_set_intra_step_timing(NULL, NULL, -1, NULL, 0);
   }
   // "MEMORY app <where>" and "MEMORY dxgi <where>": the memory of the app (Windows::System::MemoryManager)
   // and the video memory of the device's adapter, at a step of the launch or of a task (decoder.cpp).
@@ -306,6 +307,9 @@ class AV1Decoder {
     else
       XB_LOGI << line;
   }
+  // -intrasteptime, -intrastepmin: the steps of a timed frame, from the decoder's GPU completion thread. The
+  // lines are kept in memory and written to the log after the task's drain, like the per-frame GPUTIME lines.
+  static void IntraSteps(void* priv, const av1_intra_steps* frame);
   // -gputime: one record per decoded frame, from the decoder's GPU completion thread.
   static void PerfFrame(void* priv, const av1_perf_frame* frame) {
     if (!priv || !frame) return;
@@ -396,4 +400,9 @@ class AV1Decoder {
   // -dumpstages: the files of the task's stage dumps.
   StageDumpWriter stage_dumps_;
   int dumps_installed_ = 0;
+  // -intrasteptime, -intrastepmin: the STEPTIME lines of the task, and the frames they are of.
+  std::vector<std::string> step_lines_;
+  int step_frames_timed_ = 0;
+  std::mutex steps_cs_;
+  int steps_installed_ = 0;
 };

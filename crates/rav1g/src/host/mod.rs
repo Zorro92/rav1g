@@ -54,6 +54,7 @@ pub(crate) use prediction::{
     av1_set_inter_legacy, av1_set_intra_edge_fix, av1_set_intra_filter_legacy, av1_set_intra_opt,
 };
 pub(crate) use stage_dump::av1_set_stage_dump;
+pub(crate) use step_time::av1_set_intra_step_timing;
 pub(crate) use transform::{av1_set_clear_legacy, av1_set_idct_legacy};
 mod film_grain;
 mod frame;
@@ -79,6 +80,7 @@ mod residual;
 mod shader_pick;
 mod stage_buffers;
 mod stage_dump;
+mod step_time;
 mod tables;
 mod thread;
 mod transform;

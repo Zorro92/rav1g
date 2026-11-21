@@ -27,6 +27,46 @@ use crate::pool::{ImageMode, OutputPool, Rented, Request};
 use crate::say;
 use crate::shim;
 
+/// -intrasteptime, -intrastepmin: the lines of a timed frame (docs/test-player.md, "Intra step timing"),
+/// the same as the test player writes. A frame line, then one line per step:
+///   STEPTIME frame name=<task> no=<frame number> show=<0|1> intra=<0|1> bd=<8|10> tiles=<n> steps=<n>
+///     gpu_ms=<first to last timestamp>
+///   STEPTIME step no=<frame number> i=<step> us=<GPU time> groups=<n> disp=<1|2> lists=<10 counts>
+///     y=<11 counts> c=<11 counts> fdiag=<n>
+/// lists: the records of the main shader's lists by block area (64x64 ... 4x4) and of filter intra; y and
+/// c: the transform blocks of luma and chroma by kind (DC, V/H, zone 1, zone 2, zone 3, smooth, Paeth,
+/// CFL, filter intra, intra block copy, inter-intra; AV1_INTRA_KIND_* of dx/av1_perf.h).
+pub fn step_lines(name: &str, frame: &switches::IntraSteps, steps: &[switches::IntraStep]) -> Vec<String> {
+    let join = |values: &[i32]| values.iter().map(i32::to_string).collect::<Vec<_>>().join(",");
+    let mut lines = Vec::with_capacity(steps.len() + 1);
+    lines.push(format!(
+        "STEPTIME frame name={} no={} show={} intra={} bd={} tiles={} steps={} gpu_ms={:.3}",
+        name,
+        frame.frame_number,
+        frame.show_frame,
+        frame.intra_frame,
+        frame.bit_depth,
+        frame.tile_count,
+        frame.step_count,
+        frame.gpu_ms
+    ));
+    for (i, step) in steps.iter().enumerate() {
+        lines.push(format!(
+            "STEPTIME step no={} i={} us={:.1} groups={} disp={} lists={} y={} c={} fdiag={}",
+            frame.frame_number,
+            i,
+            step.gpu_ms * 1000.0,
+            step.groups,
+            step.dispatches,
+            join(&step.lists),
+            join(&step.blocks[0]),
+            join(&step.blocks[1]),
+            step.filter_diagonals
+        ));
+    }
+    lines
+}
+
 /// What a task collects, from the decoder's threads.
 struct State {
     frames: i32,
@@ -915,6 +955,25 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     // SAFETY: the Run lives to the end of this function, and the timing is switched off below, behind
     // the drain.
     unsafe { library.set_perf(task.gputime.then_some(&run), task.gputime_detail as u32) };
+    // -intrasteptime, -intrastepmin: the lines of the timed frames, from the completion thread; printed
+    // behind the drain.
+    let step_frames: Arc<Mutex<(usize, Vec<String>)>> = Arc::new(Mutex::new((0, Vec::new())));
+    let step_timing = !task.step_frames.is_empty() || task.step_min >= 0;
+    if step_timing {
+        let lines = step_frames.clone();
+        let name = task.name.clone();
+        switches::set_intra_step_timing(
+            Some(Arc::new(move |frame, steps| {
+                let mut lines = lines.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                lines.0 += 1;
+                lines.1.extend(step_lines(&name, frame, steps));
+            })),
+            task.step_min,
+            &task.step_frames,
+        );
+    } else {
+        switches::set_intra_step_timing(None, -1, &[]);
+    }
     if task.gputime {
         say!(
             "GPUTIME {}: timing run{}; on WARP the times are those of a CPU rasterizer",
@@ -1223,6 +1282,22 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     unsafe {
         library.set_stage_dump(None, &[]);
         library.set_perf::<Run>(None, 0);
+    }
+    if step_timing {
+        switches::set_intra_step_timing(None, -1, &[]);
+        let (frames, lines) = std::mem::take(&mut *step_frames.lock().unwrap_or_else(|poisoned| poisoned.into_inner()));
+        let steps = lines.len() - frames;
+        for line in lines {
+            say!("{}", line);
+        }
+        say!(
+            "STEPTIME {}: {} frames timed, {} steps (frames {}, more than {} steps)",
+            task.name,
+            frames,
+            steps,
+            if task.intrasteptime.is_empty() { "-" } else { &task.intrasteptime },
+            task.step_min
+        );
     }
     if task.gputime {
         for line in run.perf.lines(task.progress) {

@@ -1505,7 +1505,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        case: [poisoned, interfast, syncclear, gridcheck, intraschedulelegacy, intrabanklegacy, intrasteplegacy, intrasingleedgelegacy]
+        case: [poisoned, interfast, syncclear, gridcheck, intraschedulelegacy, intrabanklegacy, intrasteplegacy, intrasingleedgelegacy, steptime]
     steps:
       - name: Disable newline conversion
         run: git config --global core.autocrlf false
@@ -1625,6 +1625,48 @@ jobs:
             --out "out/conformance-${env:INTRA_SWITCH}" --threads 4 "--tool-args=-${env:INTRA_SWITCH}" `
             "--title=rav1g-dec with -${env:INTRA_SWITCH}"
           if ($LASTEXITCODE -ne 0) { throw "conformance with -${env:INTRA_SWITCH}: exit code $LASTEXITCODE" }
+
+      # -intrastepmin 0 (step_time.rs, docs/test-player.md "Intra step timing"): a timestamp behind every intra
+      # wavefront step of every frame with intra. The whole set with it: the frames against the references
+      # (the switch changes no output), STEPTIME lines in the logs that testing/steptime/steptime.py reads,
+      # and the cost of the switch on WARP: the 4K stream with and without it (-gputime, the intra stage).
+      - name: Conformance with the intra step timing (-intrastepmin 0)
+        if: ${{ !cancelled() && matrix.case == 'steptime' }}
+        shell: pwsh
+        run: |
+          $failed = @()
+          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/conformance-steptime --threads 4 "--tool-args=-intrastepmin 0" "--title=rav1g-dec with -intrastepmin 0"
+          if ($LASTEXITCODE -ne 0) { $failed += "conformance with -intrastepmin 0: exit code $LASTEXITCODE" }
+          $logs = @(Get-ChildItem out/conformance-steptime/lists -Filter *.log | ForEach-Object { $_.FullName })
+          $frames = @($logs | Select-String -Pattern '^STEPTIME frame ').Count
+          $steps = @($logs | Select-String -Pattern '^STEPTIME step ').Count
+          Write-Output "STEPTIME: $frames frames timed, $steps steps"
+          if ($frames -lt 100 -or $steps -lt 1000) { $failed += "only $frames frames and $steps steps timed" }
+          python testing/steptime/steptime.py fit @logs
+          if ($LASTEXITCODE -ne 0) { $failed += "steptime.py fit: exit code $LASTEXITCODE" }
+          $tool = (Resolve-Path out/rav1g-dec/rav1g-dec.exe).Path
+          $logDir = New-Item -Force -ItemType Directory out/conformance-steptime/cost
+          Push-Location conformance-streams
+          try {
+            $task = Select-String -Path manifest.txt -Pattern '-name nf-dvbdash-d2-10b-2160p\.ivf ' | Select-Object -First 1
+            $inputPath = [regex]::Match($task.Line, '(?:^|\s)-i\s+(\S+)').Groups[1].Value
+            foreach ($round in 1..2) {
+              foreach ($mode in @('off', 'on')) {
+                $extra = if ($mode -eq 'on') { @('-intrastepmin', '0') } else { @() }
+                $out = Join-Path $logDir.FullName "$mode-$round.log"
+                & $tool -i $inputPath -limit 24 -gputime @extra > $out
+                if ($LASTEXITCODE -ne 0) { $failed += "the 4K stream with the step timing $mode" }
+                $intra = Select-String -Path $out -Pattern '^GPUTIME gpu intra ' | Select-Object -First 1
+                $result = Select-String -Path $out -Pattern '^RESULT ' | Select-Object -First 1
+                Write-Output "step timing $mode, round ${round}: $($intra.Line)"
+                Write-Output "  $($result.Line)"
+              }
+            }
+          } finally {
+            Pop-Location
+          }
+          if ($failed.Count) { throw "with -intrastepmin 0: $($failed -join '; ')" }
 
       - name: Preserve the results, per-stream logs and md5 files of the switch
         if: always()
@@ -3889,6 +3931,10 @@ jobs:
           set -euo pipefail
           g++ -std=c++14 -Wall -Wextra -I libav1 -o perf_stats_test testing/player_common/perf_stats_test.cpp
           ./perf_stats_test
+
+      # The intra step timing script (testing/steptime/steptime.py): its parser and its fit on made-up steps.
+      - name: Intra step timing script self-test
+        run: sh testing/steptime/run.sh
 
       # The sequence header peek behind aom_codec_peek_stream_info and the player's -fitsize:
       # headers written by hand from the specification's syntax must be read back with their

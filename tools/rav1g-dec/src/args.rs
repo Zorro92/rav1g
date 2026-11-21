@@ -145,6 +145,11 @@ pub struct Task {
     pub dumpdir: String,
     /// The frames of -dumpstages.
     pub dump_frames: Vec<i32>,
+    /// -intrasteptime <frame list>: the frames whose intra steps are timed.
+    pub intrasteptime: String,
+    pub step_frames: Vec<i32>,
+    /// -intrastepmin <n>: also time every frame with more than n intra steps (-1: none).
+    pub step_min: i32,
 }
 
 impl Default for Task {
@@ -211,6 +216,9 @@ impl Default for Task {
             dumpstages: String::new(),
             dumpdir: "dumps".to_string(),
             dump_frames: Vec::new(),
+            intrasteptime: String::new(),
+            step_frames: Vec::new(),
+            step_min: -1,
         }
     }
 }
@@ -277,6 +285,12 @@ pub fn usage() {
     say!("                        (mode info, block records, loop filter edge lists) to <dir>/<name>_f<n>.stages,");
     say!("                        as the player does; compare two runs with testing/stage_dump/stage_dump.py");
     say!("  -dumpdir <dir>        where -dumpstages writes (default dumps; created when it is not there)");
+    say!("  -intrasteptime <frames>");
+    say!("                        a GPU timestamp behind every intra wavefront step of these frames (decoding order,");
+    say!("                        from 0, like 0,3,10-12; the no= of 'GPUTIME frame' lines), with what each step");
+    say!("                        holds: one 'STEPTIME frame' line per frame and one 'STEPTIME step' line per step");
+    say!("                        (docs/test-player.md, \"Intra step timing\"; same output)");
+    say!("  -intrastepmin <n>     the same for every frame with more than n intra steps (with -intrasteptime: both)");
     say!("  -limit <n>            decode only the first n temporal units of the stream");
     say!("  -t <n>                decoder threads: the tiles of a frame and, with more than one frame in");
     say!("                        parse, the frames. Without it, or 0: the library's default for the frame");
@@ -466,6 +480,8 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-save_wrong_yuv" => task.save_wrong_yuv = value()?,
             "-wrong_limit" => task.wrong_limit = number()?,
             "-dumpstages" => task.dumpstages = value()?,
+            "-intrasteptime" => task.intrasteptime = value()?,
+            "-intrastepmin" => task.step_min = number()?,
             "-dumpdir" => task.dumpdir = value()?,
             "-limit" => task.limit = number()?,
             "-t" => task.threads = number()?,
@@ -629,6 +645,20 @@ pub fn check_task(task: &mut Task) -> Result<(), String> {
                 ));
             }
         }
+    }
+    if !task.intrasteptime.is_empty() {
+        match shim::parse_dump_frames(&task.intrasteptime) {
+            Some(frames) => task.step_frames = frames,
+            None => {
+                return Err(format!(
+                    "-intrasteptime {} is not a frame list like 0,3,10-12 of at most 256 frames",
+                    task.intrasteptime
+                ));
+            }
+        }
+    }
+    if task.step_min < -1 {
+        task.step_min = -1;
     }
     if !task.check_stream.is_empty() {
         if !task.check.is_empty() || task.md5_frame_check {

@@ -68,6 +68,7 @@ pub extern "C" fn rav1g_intra_list_stamps(count: bool) -> u64 {
 
 use super::intra_v2;
 use super::libaom::{has_bottom_left, has_top_right};
+use super::step_time;
 use super::tables::{
     INTER_BLOCK_SIZE_INDEX_LUT, INTERINTRA_TO_INTRA_MODE, INTRA_MODE_SHADER_PARAMS, MAX_NEIGHBOR_OBMC,
     MAX_TXSIZE_RECT_LOOKUP, MI_SIZE_HIGH_LOG2, MI_SIZE_WIDE_LOG2, SS_SIZE_LOOKUP, TX_SIZE_HIGH_LOG2, TX_SIZE_WIDE_LOG2,
@@ -1258,6 +1259,19 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
                                     tile.gen_intra_iter_y = iter.max(tile.gen_intra_iter_y);
                                 }
 
+                                // Intra step timing (step_time.rs): the block's kind into its step.
+                                if !tile.perf_steps.is_null() {
+                                    let kind = step_time::kind(
+                                        plane.mode,
+                                        mi.angle_delta[0],
+                                        use_filter,
+                                        is_intrabc,
+                                        is_inter_intra,
+                                    );
+                                    // Filter intra runs its 4x2 units in diagonals: columns + rows - 1.
+                                    let diagonals = if use_filter { ((1 << txw) + (2 << txh) - 1) as u32 } else { 0 };
+                                    step_time::count(tile.perf_steps, iter, 0, kind, diagonals);
+                                }
                                 // The first block of an iteration the tile has not had: its lists start empty.
                                 if iter > tile.gen_intra_iter_set {
                                     clear_iteration_lists(map, tile, iter);
@@ -1445,6 +1459,17 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
                                     tile.gen_intra_iter_uv = iter.max(tile.gen_intra_iter_uv);
                                 }
 
+                                // Intra step timing (step_time.rs): the block's kind into its step.
+                                if !tile.perf_steps.is_null() {
+                                    let kind = step_time::kind(
+                                        plane.mode,
+                                        mi.angle_delta[1],
+                                        false,
+                                        is_intrabc,
+                                        is_inter_intra,
+                                    );
+                                    step_time::count(tile.perf_steps, iter, 1, kind, 0);
+                                }
                                 // The first block of an iteration the tile has not had: its lists start empty.
                                 if iter > tile.gen_intra_iter_set {
                                     clear_iteration_lists(map, tile, iter);

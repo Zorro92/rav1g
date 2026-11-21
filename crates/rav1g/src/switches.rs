@@ -24,6 +24,10 @@ use crate::sys;
 pub type PerfFrame = sys::av1_perf_frame;
 /// The buffers behind a GPU stage of a frame (`av1_stage_dump`).
 pub type StageDump = sys::av1_stage_dump;
+/// The steps of a frame of the intra step timing ([`set_intra_step_timing`]).
+pub type IntraSteps = sys::av1_intra_steps;
+/// A step of [`IntraSteps`].
+pub type IntraStep = sys::av1_intra_step;
 
 /// The fast inter path is on ([`set_inter_fast`]).
 pub const INTER_FAST_ON: u32 = sys::AV1_INTER_FAST_ON as u32;
@@ -221,12 +225,15 @@ pub fn shader_pick_lines() -> Vec<String> {
 pub type PerfCallback = Arc<dyn Fn(&PerfFrame) + Send + Sync>;
 /// What gets the stage dumps ([`set_stage_dump`]).
 pub type DumpCallback = Arc<dyn Fn(&StageDump) + Send + Sync>;
+/// What gets the intra step timing ([`set_intra_step_timing`]): a frame and its steps.
+pub type StepCallback = Arc<dyn Fn(&IntraSteps, &[IntraStep]) + Send + Sync>;
 /// What gets the log lines ([`set_log_callback`]): whether the line is an error, and the line.
 pub type LogCallback = Arc<dyn Fn(bool, &str) + Send + Sync>;
 
 static PERF: RwLock<Option<PerfCallback>> = RwLock::new(None);
 static DUMP: RwLock<Option<DumpCallback>> = RwLock::new(None);
 static LOG: RwLock<Option<LogCallback>> = RwLock::new(None);
+static STEPS: RwLock<Option<StepCallback>> = RwLock::new(None);
 
 fn current<T: Clone>(slot: &RwLock<Option<T>>) -> Option<T> {
     slot.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
@@ -247,6 +254,19 @@ unsafe extern "C" fn stage_dump(_context: *mut c_void, dump: *const sys::av1_sta
     // SAFETY: the decoder passes a dump that is valid during the call.
     if let (Some(callback), Some(dump)) = (current(&DUMP), unsafe { dump.as_ref() }) {
         callback(dump);
+    }
+}
+
+unsafe extern "C" fn intra_steps(_context: *mut c_void, frame: *const sys::av1_intra_steps) {
+    // SAFETY: the decoder passes a record whose steps are valid during the call.
+    if let (Some(callback), Some(frame)) = (current(&STEPS), unsafe { frame.as_ref() }) {
+        let steps = if frame.steps.is_null() || frame.step_count <= 0 {
+            &[][..]
+        } else {
+            // SAFETY: as above, step_count steps.
+            unsafe { std::slice::from_raw_parts(frame.steps, frame.step_count as usize) }
+        };
+        callback(frame, steps);
     }
 }
 
@@ -299,6 +319,34 @@ pub fn set_stage_dump(callback: Option<DumpCallback>, frames: &[i32]) {
             None => {
                 crate::host::av1_set_stage_dump(None, std::ptr::null_mut(), std::ptr::null(), 0);
                 store(&DUMP, None);
+            }
+        }
+    }
+}
+
+/// The intra step timing (the `-intrasteptime` and `-intrastepmin` of the test programs, `dx/av1_perf.h`):
+/// a GPU timestamp behind every intra wavefront step of the frames whose numbers (in decoding order, from 0
+/// per decoder) are in `frames`, or that have more than `min_steps` steps when `min_steps` is 0 or more,
+/// with what each step holds; the callback gets them on the decoder's completion thread. `None` switches it
+/// off. The decoded output is the same.
+pub fn set_intra_step_timing(callback: Option<StepCallback>, min_steps: i32, frames: &[i32]) {
+    // SAFETY: the function given is valid for the life of the process and takes no context; the frame
+    // numbers are copied by the call.
+    unsafe {
+        match callback {
+            Some(callback) => {
+                store(&STEPS, Some(callback));
+                crate::host::av1_set_intra_step_timing(
+                    Some(intra_steps),
+                    std::ptr::null_mut(),
+                    min_steps,
+                    frames.as_ptr(),
+                    frames.len() as c_int,
+                );
+            }
+            None => {
+                crate::host::av1_set_intra_step_timing(None, std::ptr::null_mut(), -1, std::ptr::null(), 0);
+                store(&STEPS, None);
             }
         }
     }

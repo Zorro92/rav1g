@@ -50,6 +50,12 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        "", &params_.dumpstages_},
       {"dumpdir", atString, anOptional, "directory of -dumpstages under LocalState, default /dumps", "",
        &params_.dumpdir_},
+      {"intrasteptime", atString, anOptional,
+       "frame list like 0,3,10-12 (decoding order, the no= of GPUTIME frame lines): a GPU timestamp behind "
+       "every intra wavefront step of these frames, STEPTIME lines in the log after the task",
+       "", &params_.intrasteptime_},
+      {"intrastepmin", atInt, anOptional, "time the intra steps of every frame with more than this many steps",
+       "", &params_.intrastepmin_},
       {"frate", atInt, anOptional,
        "Frame rate. 0 - webm header framerate(for webm only), -1 - maximum frate, default 0", "", &params_.frate_},
       {"dropinfo", atSingle, anOptional, "Show all drops", "", &params_.show_drops_},
@@ -377,6 +383,11 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     Err += ss;
     return -1;
   }
+  if (!params_.intrasteptime_.empty() && !ParseStageDumpFrames(params_.intrasteptime_, &params_.step_frames_)) {
+    Err += "-intrasteptime " + params_.intrasteptime_ + " is not a frame list like 0,3,10-12 of at most 256 frames.";
+    return -1;
+  }
+  if (params_.intrastepmin_ < -1) params_.intrastepmin_ = -1;
   if (!params_.dumpstages_.empty() && !ParseStageDumpFrames(params_.dumpstages_, &params_.dump_frames_)) {
     Err += "-dumpstages " + params_.dumpstages_ + " is not a frame list like 0,3,10-12 of at most 256 frames.";
     return -1;
@@ -420,6 +431,9 @@ void CParameters::Reset() {
   params_.dumpstages_.clear();
   params_.dumpdir_.clear();
   params_.dump_frames_.clear();
+  params_.intrasteptime_.clear();
+  params_.step_frames_.clear();
+  params_.intrastepmin_ = -1;
   params_.isDirectory_ = false;
   params_.isSubList_ = false;
   params_.showIt_ = false;

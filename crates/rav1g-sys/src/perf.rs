@@ -313,6 +313,58 @@ impl Default for av1_perf_inter_detail {
     }
 }
 pub type av1_perf_frame_cb_fn_t = Option<unsafe extern "C" fn(priv_: *mut c_void, frame: *const av1_perf_frame)>;
+pub const AV1_INTRA_KIND_DC: c_int = 0;
+pub const AV1_INTRA_KIND_STRAIGHT: c_int = 1;
+pub const AV1_INTRA_KIND_ZONE1: c_int = 2;
+pub const AV1_INTRA_KIND_ZONE2: c_int = 3;
+pub const AV1_INTRA_KIND_ZONE3: c_int = 4;
+pub const AV1_INTRA_KIND_SMOOTH: c_int = 5;
+pub const AV1_INTRA_KIND_PAETH: c_int = 6;
+pub const AV1_INTRA_KIND_CFL: c_int = 7;
+pub const AV1_INTRA_KIND_FILTER: c_int = 8;
+pub const AV1_INTRA_KIND_INTRABC: c_int = 9;
+pub const AV1_INTRA_KIND_INTERINTRA: c_int = 10;
+pub const AV1_INTRA_KIND_COUNT: c_int = 11;
+pub const AV1_INTRA_STEP_LISTS: c_int = 10;
+/// A step of the intra wavefront of a timed frame (`av1_set_intra_step_timing`).
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct av1_intra_step {
+    pub gpu_ms: f64,
+    pub groups: c_int,
+    pub dispatches: c_int,
+    pub lists: [c_int; AV1_INTRA_STEP_LISTS as usize],
+    pub blocks: [[c_int; AV1_INTRA_KIND_COUNT as usize]; 2],
+    pub filter_diagonals: c_int,
+}
+const _: () = {
+    assert!(size_of::<av1_intra_step>() == 152);
+    assert!(offset_of!(av1_intra_step, groups) == 8);
+    assert!(offset_of!(av1_intra_step, dispatches) == 12);
+    assert!(offset_of!(av1_intra_step, lists) == 16);
+    assert!(offset_of!(av1_intra_step, blocks) == 56);
+    assert!(offset_of!(av1_intra_step, filter_diagonals) == 144);
+};
+/// The steps of a timed frame.
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct av1_intra_steps {
+    pub frame_number: c_int,
+    pub show_frame: c_int,
+    pub intra_frame: c_int,
+    pub bit_depth: c_int,
+    pub tile_count: c_int,
+    pub step_count: c_int,
+    pub gpu_ms: f64,
+    pub steps: *const av1_intra_step,
+}
+const _: () = {
+    assert!(size_of::<av1_intra_steps>() == 40);
+    assert!(offset_of!(av1_intra_steps, step_count) == 20);
+    assert!(offset_of!(av1_intra_steps, gpu_ms) == 24);
+    assert!(offset_of!(av1_intra_steps, steps) == 32);
+};
+pub type av1_intra_steps_cb_fn_t = Option<unsafe extern "C" fn(priv_: *mut c_void, frame: *const av1_intra_steps)>;
 pub const AV1_INTER_FAST_ON: c_int = 1;
 pub const AV1_INTER_FAST_SINGLE_ORIGINAL: c_int = 2;
 pub const AV1_INTER_FAST_COMPOUND_ORIGINAL: c_int = 4;

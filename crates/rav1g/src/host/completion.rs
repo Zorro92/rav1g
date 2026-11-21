@@ -169,6 +169,8 @@ unsafe fn completion_thread(dec: *mut Av1Core) {
                 if td.dump_count != 0 {
                     stage_dump_deliver(td);
                 }
+                // Intra step timing: the steps of a timed frame, read while the slot is still this frame's.
+                super::step_time::deliver(td);
                 if perf_wait_start != 0 {
                     // The frame's timestamps are read now: its fence is done and the slot has not gone back
                     // to the pool yet.

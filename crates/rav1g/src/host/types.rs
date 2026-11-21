@@ -372,6 +372,9 @@ pub struct av1_frame_thread_data {
     /// vector when the tiles are done. They are the frame's, so they are in its slot.
     pub perf_inter_tiles: Vec<av1_perf_inter_tile>,
     pub perf_inter_mode: c_int,
+    /// Intra step timing (`av1_set_intra_step_timing`): the tiles' counts by step, the slot's timestamps
+    /// and the steps of its frame when the frame is timed.
+    pub step_time: super::step_time::SlotSteps,
     /// A decoder with pools (`Av1Core::pools`): what each tile of the slot's frame has taken of them.
     /// The vector is sized at the frame's setup and not touched while the tiles of the frame are in
     /// parse; each tile's thread writes the element of its tile, through `tile_pieces`.
@@ -666,12 +669,14 @@ impl Av1Core {
                 (&raw mut (*dec).frame_thread_data[slot].perf.detail).write(None);
                 (&raw mut (*dec).frame_thread_data[slot].wave).write(no_edges());
                 (&raw mut (*dec).frame_thread_data[slot].perf_inter_tiles).write(Vec::new());
+                (&raw mut (*dec).frame_thread_data[slot].step_time).write(Default::default());
                 (&raw mut (*dec).frame_thread_data[slot].pieces).write(Vec::new());
             }
             for context in 0..OutputThreadDataCount as usize {
                 (&raw mut (*dec).output_thread_data[context].perf.detail).write(None);
                 (&raw mut (*dec).output_thread_data[context].wave).write(no_edges());
                 (&raw mut (*dec).output_thread_data[context].perf_inter_tiles).write(Vec::new());
+                (&raw mut (*dec).output_thread_data[context].step_time).write(Default::default());
                 (&raw mut (*dec).output_thread_data[context].pieces).write(Vec::new());
             }
             Some(Box::from_raw(dec))

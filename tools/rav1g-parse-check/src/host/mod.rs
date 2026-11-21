@@ -4,7 +4,8 @@
 //! are the files of the D3D12 host (`crates/rav1g/src/host`), compiled here by path and unchanged. What
 //! `blocks.rs` uses of the host's other modules is here in the form this program needs: `types` (the
 //! names of the lists, read from the host's file by build.rs, and the struct of the host the function
-//! reads the frame from) and `intra_v2` (a path of the host this program does not take). Of `libaom.rs`
+//! reads the frame from), `intra_v2` (a path of the host this program does not take) and `step_time` (the
+//! intra step timing, which needs the GPU). Of `libaom.rs`
 //! the block lists ask two functions (which blocks have their top right and their bottom left decoded);
 //! its tables are written by the host's build script, which the build script of this program runs.
 
@@ -15,6 +16,7 @@ pub mod intra_v2;
 #[path = "../../../../crates/rav1g/src/host/libaom.rs"]
 #[allow(dead_code, clippy::needless_range_loop, reason = "the host's file: this program uses two functions of it")]
 pub mod libaom;
+pub mod step_time;
 #[path = "../../../../crates/rav1g/src/host/tables.rs"]
 #[allow(dead_code)]
 pub mod tables;

@@ -907,6 +907,9 @@ pub(crate) unsafe fn setup_frame_begin(
             }
         }
 
+        // Intra step timing: the tiles count their steps while the switch is on.
+        super::step_time::setup_frame(td);
+
         td.gen_intra_iter_y = (*td.gen_intra_inter_grid).host_ptr.cast();
         td.iter_grid_offset_uv = grid_w * grid_h;
         td.gen_intra_iter_uv = td.gen_intra_iter_y.add(td.iter_grid_offset_uv as usize);
@@ -1233,6 +1236,9 @@ pub(crate) unsafe fn setup_tile(
     // SAFETY: the caller's contract, for all of this function.
     unsafe {
         let tile_id = tile.tile_col + tile.tile_row * cm.tile_cols;
+        // The tile's counts of the intra step timing; the vector of vectors is not touched while the tiles
+        // of the frame run.
+        let perf_steps = super::step_time::tile_counts(&mut *td, tile_id as usize);
         let td = &*td;
         let t_ptr = td.tile_data.add(tile_id as usize);
         let mut perf_t = super::perf::av1_perf_ticks();
@@ -1243,6 +1249,7 @@ pub(crate) unsafe fn setup_tile(
             // The tile's own counters; the vector is not touched while the tiles of the frame run.
             t.perf_inter = td.perf_inter_tiles.as_ptr().add(tile_id as usize).cast_mut().cast();
         }
+        t.perf_steps = perf_steps;
         let tile_rows = (tile.mi_row_end - tile.mi_row_start + 15) & !15;
         let tile_cols = (tile.mi_col_end - tile.mi_col_start + 15) & !15;
         let mi_offset = tile.mi_row_start * ((cm.mi_cols + 15) & !15) + tile.mi_col_start * tile_rows;

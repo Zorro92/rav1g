@@ -52,6 +52,7 @@ seq_header|sh testing/seq_header_check/run.sh --mutate|testing/seq_header_check/
 residual_clear|sh testing/residual_clear_check/run.sh --mutate|testing/residual_clear_check/* crates/rav1g/src/host/residual*
 sm6test|sh testing/sm6test/run.sh|testing/sm6test/*
 perf_stats|precheck_perf_stats|testing/player_common/* $LIBAOM
+steptime|sh testing/steptime/run.sh|testing/steptime/*
 fmt|precheck_fmt|@
 mapping|sh testing/precheck.sh --check-mapping|@
 "

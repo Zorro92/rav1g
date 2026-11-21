@@ -783,6 +783,108 @@ It covers the inter breakdown as well: the tables of both modes, the frames with
 references, a frame without an inter stage, a frame without GPU timestamps, and counters
 that do not fit together.
 
+### Intra step timing (`-intrasteptime`, `-intrastepmin`)
+
+The intra stage is a chain of wavefront steps: per step a dispatch of the main shader and one of filter
+intra (each when the step has blocks for it), then a UAV barrier. A dependent step costs about 30 us on the
+console, and the heavy frames have hundreds of them, so the next intra rounds want the cost of a step and
+what it depends on from the console itself, not from proxies. The step timing gives it:
+
+| Flag | |
+| --- | --- |
+| `-intrasteptime <frames>` | time the steps of these frames: a list like `0,3,10-12` (at most 256 frames) of decoder frame numbers, in decoding order from 0, hidden frames included: the `no=` of the `GPUTIME frame` lines of `-gputime -progress` |
+| `-intrastepmin <n>` | time the steps of every frame with more than n steps (`0`: every frame with intra) |
+
+Both may be given (a frame is timed if either selects it), with or without `-gputime`. rav1g-dec has the
+same flags. The switch is `av1_set_intra_step_timing` of `dx/av1_perf.h` (no change to `rav1g.h`); it
+changes no output (CI runs the conformance set with `-intrastepmin 0` against the references).
+
+**What it does.** For a timed frame the host puts a GPU timestamp in front of the first step and one behind
+the barrier of every step, in the frame's own command list, resolves them behind the last step, and reads
+them back on the completion thread after the frame's fence (`crates/rav1g/src/host/step_time.rs`). A
+step's time is its timestamp minus the one before it. What a step holds comes from the host's schedule,
+not from the GPU: the records of its ten lists (what the dispatches get), its thread groups and
+dispatches, and the transform blocks the tile threads put into it, by plane and kind, counted where the
+tiles push their blocks.
+
+**What it costs.** Per timed step one timestamp (an `EndQuery` behind the barrier the step has anyway) and
+8 bytes of readback; per timed frame one `ResolveQueryData`. A slot gets its query heap and readback buffer
+the first time it times a frame (for 1024 steps or the next power of two, 8 KiB and up). While the switch
+is on, the tile threads count every transform block of every frame (a few additions each): which frames
+are timed by `-intrastepmin` is known only when the frame is recorded. The lines stay in memory until the
+task has drained and are then written to the log, so no log I/O falls into the decode (about 140 bytes a
+step). On WARP (CI, the job `rust-switches (steptime)`, 24 frames of the 4K stream `nf-dvbdash-d2-10b-2160p`
+with `-gputime` with and without `-intrastepmin 0`) the intra stage took STEPTIME_WARP_COST; the console's
+cost is the same comparison there: a run with the flags against one without.
+
+**The first step** starts at the timestamp in front of the stage. If the GPU takes a timestamp before what
+was recorded in front of it has drained, the first step holds the end of the work before it (lavapipe does
+that: its first step is hundreds of ms). The script leaves the first step out of its fit and reports it
+apart.
+
+**Lines.** A frame line, then one line per step, behind the task:
+
+```text
+STEPTIME frame name=film_a.ivf no=481 show=0 intra=0 bd=10 tiles=1 steps=531 gpu_ms=<ms>
+STEPTIME step no=481 i=0 us=<us> groups=6 disp=1 lists=1,0,2,0,0,0,0,0,0,0 y=1,0,0,0,0,0,0,0,0,0,0 c=1,0,0,0,0,0,0,0,0,0,0 fdiag=0
+...
+STEPTIME 30 frames timed, 8309 steps
+```
+
+| Field | |
+| --- | --- |
+| `no`, `show`, `intra`, `bd`, `tiles` | the decoder's frame number, shown now, key or intra-only, bit depth of the frame buffers (8 or 10), tiles |
+| `steps`, `gpu_ms` | the frame's steps, and its first to last timestamp: the whole wavefront |
+| `i`, `us` | the step and its GPU time in microseconds |
+| `groups`, `disp` | thread groups of its dispatches, and 1 or 2 dispatches |
+| `lists` | records of the main shader's lists by block area (64x64, 32x64/64x32, 32x32, 16x32/32x16, 16x16, 8x16/16x8, 8x8, 4x8/8x4, 4x4), then of filter intra; a chroma block is two records (U, V) |
+| `y`, `c` | transform blocks of luma and chroma by kind: DC, V/H (angle 90 or 180), zone 1 (< 90 degrees), zone 2 (90 to 180), zone 3 (> 180), smooth (all three), Paeth, CfL, filter intra, intra block copy, inter-intra (`AV1_INTRA_KIND_*`) |
+| `fdiag` | the longest serial chain of filter intra in the step: columns + rows - 1 of its largest block in 4x2 units (23 for 32x32), 0 without |
+
+Frames of `-intrav2` are not timed.
+
+**Console runs.** The task lines of the A/B batches, with the timing added; each is a launch of its own
+(the test player's log keeps the lines of every task):
+
+```text
+-i /streams/film_a.ivf -frate -1 -limit 1199 -queue_size 4 -progress -nopresent -gputime -output p010 -intrasteptime 476-505
+-i /streams/film_a.ivf -frate -1 -limit 1199 -queue_size 4 -progress -nopresent -gputime -output p010 -intrastepmin 400
+-i /streams/d2_300.ivf -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -output p010 -intrastepmin 0
+-i /streams/a1_8b4k_300.ivf -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputime -output p010 -intrastepmin 0
+```
+
+`476-505` are the decoder frames behind output frames 478 to 500 of film_a, the heaviest second (hidden
+frames 481-483, 489-491 and 497-499 have 450 to 540 steps each): about 8300 steps, 1.2 MB of lines.
+`-intrastepmin 400` takes the heaviest frames of the whole film (about 50 frames, 3-4 MB). d2_300 and
+a1_8b4k_300 with every frame with intra: about 2.6 MB and 0.9 MB. For the cost of the switch, the same
+lines without the timing flags.
+
+**The script.** `testing/steptime/steptime.py` (plain Python 3) reads the lines from any log:
+
+```sh
+python3 testing/steptime/steptime.py fit player.log --save console.json   # the cost model, with the fit
+python3 testing/steptime/steptime.py report player.log --model console.json --frames 5 --slowest 10
+python3 testing/steptime/steptime.py predict --model console.json local.log # a run anywhere: estimates
+```
+
+- `fit` fits the time of a step (first steps left out) as a fixed cost, plus a cost per thread group,
+  plus a cost per diagonal of the longest filter intra chain, plus a cost for each kind the step has at
+  all (a step lasts as long as its slowest group, so a kind adds once, not per block), plus a cost for a
+  10-bit frame; non-negative least squares. A term that is the same in every step (one bit depth, a kind
+  every step has) cannot be told from the fixed cost and is not fitted. It also fits a frame model,
+  `ms = a * steps + b * thread groups + c * dispatches`, the counts of the `GPUTIME frame` lines.
+- `report` prints, for the heaviest timed frames, the steps, the median and slowest step times, the share
+  of the fixed cost, the time of the steps by what dominates them (by the model), and the slowest steps
+  with what they hold.
+- `predict` estimates the intra time of each frame on the console with a saved model: from STEPTIME lines
+  of a run anywhere (a local run under WARP or lavapipe has the same steps and counts; its times are not
+  used), or, without them, from the `GPUTIME frame` lines of `-gputime -progress` (steps, groups,
+  dispatches). So a delegate can run a change locally with `-intrastepmin 0` and compare the estimate with
+  the same run of main before the console.
+
+`sh testing/steptime/run.sh` is the script's self-test (CI, `testing/precheck.sh`): the parser and the fit
+on made-up steps with known costs.
+
 ## CDEF v2 run (`-cdefv2`)
 
 In the first timing run, upstream's CDEF shader was the largest GPU stage on 4K
