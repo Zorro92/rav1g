@@ -17,7 +17,7 @@ out=${2:-}
 
 CHANGED="Cargo.toml build.rs src/cpu.rs src/decode.rs src/internal.rs src/lib.rs src/msac.rs src/obu.rs src/picture.rs
 src/recon.rs src/refmvs.rs src/tables.rs src/thread_task.rs"
-ADDED="PATCHES.md UPSTREAM upstream_diff.sh src/parse.rs"
+ADDED="PATCHES.md UPSTREAM upstream_diff.sh src/parse.rs src/parse_stats.rs"
 
 commit=$(awk '$1 == "commit" { print $2 }' "$here/UPSTREAM")
 head=$(git -C "$upstream" rev-parse HEAD)
