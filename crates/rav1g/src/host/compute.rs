@@ -830,7 +830,8 @@ mod tests {
             .filter_map(|line| line.trim().trim_start_matches('(').strip_prefix('"'))
             .map(|rest| &rest[..rest.find('"').unwrap()])
             .collect();
-        assert_eq!(names.len(), SHADERS);
+        let embedded = shader_names();
+        assert_eq!(names.len(), embedded.len());
         let mut unique = names.clone();
         unique.sort_unstable();
         unique.dedup();
@@ -838,6 +839,6 @@ mod tests {
         for name in names {
             assert!(bytecode(name).is_some(), "the table has the bytecode of {name}");
         }
-        assert!(shader_pick::resolve("od=gen_pred_blocks_fast", &shader_names()).is_ok());
+        assert!(shader_pick::resolve("od=gen_pred_blocks_fast", &embedded).is_ok());
     }
 }
