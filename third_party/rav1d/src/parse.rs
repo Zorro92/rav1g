@@ -81,6 +81,10 @@ pub struct ParseFrame<'a> {
     pub data_left: usize,
     /// The HDR metadata of the frame.
     pub hdr: ParseHdrMetadata<'a>,
+    /// The tiles of the frame are parsed by the worker threads (more than one thread): each tile's
+    /// [`ParseSink::tile_finish`] comes behind its [`ParseSink::tile_end`], and a worker without a task
+    /// asks the sink for work ([`ParseSink::idle_work`]).
+    pub tile_tasks: bool,
 }
 
 /// A frame header with `show_existing_frame`: the frame in a reference slot is shown.
@@ -254,6 +258,26 @@ pub trait ParseSink: Send + Sync {
 
     /// The last superblock row of a tile is parsed.
     fn tile_end(&self, frame: usize, tile: usize);
+
+    /// With [`ParseFrame::tile_tasks`]: the thread of a tile's last superblock row is through with the
+    /// tile, after its `tile_end` (if the tile got that far) and after the frame's CDFs were saved from
+    /// it (AV1 7.20) and made available to the frames that load them. Comes for every tile of the frame
+    /// before the frame's `frame_end`, also for a tile whose parse failed or did not begin, without the
+    /// lock of the scheduler.
+    fn tile_finish(&self, _frame: usize, _tile: usize) {}
+
+    /// Whether the sink has work for a worker thread that has no task of the parser
+    /// ([`Self::idle_work`]). Asked often: it should be one load.
+    fn idle_work_pending(&self) -> bool {
+        false
+    }
+
+    /// A worker thread has no task of the parser: the sink may give it a piece of its own work, and
+    /// returns whether it did. Without the lock of the scheduler; a piece should be short, since the
+    /// thread looks for tasks again behind it.
+    fn idle_work(&self) -> bool {
+        false
+    }
 
     /// The parse of the frame has ended, with or without an error. Returns whether the frame stands:
     /// `false` fails a frame whose parse was good (the sink could not take it), and the parser then

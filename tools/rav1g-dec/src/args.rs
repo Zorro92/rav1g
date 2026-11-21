@@ -105,6 +105,7 @@ pub struct Task {
     pub parsecoeflegacy: bool,
     pub intralistslegacy: bool,
     pub parserefrowslegacy: bool,
+    pub parselistslegacy: bool,
     pub lrlegacy: bool,
     pub fglegacy: bool,
     pub fggenlegacy: bool,
@@ -199,6 +200,7 @@ impl Default for Task {
             parsecoeflegacy: false,
             intralistslegacy: false,
             parserefrowslegacy: false,
+            parselistslegacy: false,
             lrlegacy: false,
             fglegacy: false,
             fggenlegacy: false,
@@ -324,6 +326,7 @@ pub fn usage() {
     say!("  -parsecoeflegacy     use the previous linked list of AC coefficient tokens");
     say!("  -intralistslegacy    count the intra block lists with the previous loops and wavefront edges");
     say!("  -parserefrowslegacy  wait for all reference rows during frame-parallel parsing");
+    say!("  -parselistslegacy    count the block lists on the tile's thread, superblock by superblock");
     say!("  -lrlegacy           use the original loop_restoration shader");
     say!("  -fglegacy           use the original direct NV12/P010 film grain shader");
     say!("  -fggenlegacy        make the film grain templates on the GPU (film_grain_gen_luma/chroma), not the CPU");
@@ -525,6 +528,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-parsecoeflegacy" => task.parsecoeflegacy = true,
             "-intralistslegacy" => task.intralistslegacy = true,
             "-parserefrowslegacy" => task.parserefrowslegacy = true,
+            "-parselistslegacy" => task.parselistslegacy = true,
             "-lrlegacy" => task.lrlegacy = true,
             "-fglegacy" => task.fglegacy = true,
             "-fggenlegacy" => task.fggenlegacy = true,

@@ -151,6 +151,7 @@ class CParameters {
     bool parsecoeflegacy_;
     bool intralistslegacy_;
     bool parserefrowslegacy_;
+    bool parselistslegacy_;
     bool lrlegacy_;
     bool fglegacy_;
     bool fggenlegacy_;

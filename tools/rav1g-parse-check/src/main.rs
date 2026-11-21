@@ -34,7 +34,9 @@
 //! one thread, one frame in parse and the sink-written grid. `-coeflegacy` and `-refrowslegacy` give the
 //! run that is checked (or timed) the previous paths of the parse, the decoder's -parsecoeflegacy and
 //! -parserefrowslegacy: the linked list of AC coefficient tokens, and the wait of a frame in parse for the
-//! rows of all seven references. `-intralistslegacy` gives it the previous loops of the block lists for
+//! rows of all seven references. `-listslegacy` counts the block lists of a tile on its thread superblock
+//! by superblock, not a superblock row behind it on threads without a task (the decoder's
+//! -parselistslegacy; the reference, with one thread, counts them on its thread). `-intralistslegacy` gives it the previous loops of the block lists for
 //! the transform blocks of intra prediction (the decoder's -intralistslegacy); the reference has those,
 //! so the default run is held against them.
 //!
@@ -128,7 +130,7 @@ fn usage() -> ! {
          -time)\n-wave: where the wavefront of intra prediction is kept: edges (default), grid, check (the grid for \
          the reference, the edges for the run that is checked)\n-coeflegacy, -refrowslegacy: the previous linked AC tokens, \
          the previous wait for the rows of all references\n-intralistslegacy: the previous loops of the intra \
-         block lists\n-frametimes: with -time, a FRAMETIME line per frame of every run"
+         block lists\n-listslegacy: the block lists on the tile's thread, superblock by superblock\n-frametimes: with -time, a FRAMETIME line per frame of every run"
     );
     std::process::exit(2);
 }
@@ -183,6 +185,7 @@ fn options() -> Options {
             "-coeflegacy" => options.legacy.coef_tokens = true,
             "-refrowslegacy" => options.legacy.ref_rows = true,
             "-intralistslegacy" => options.legacy.intra_lists = true,
+            "-listslegacy" => options.legacy.lists = true,
             "-parseopt" => options.parse = ParseOptions::from_words(&value()).unwrap_or_else(|| usage()),
             "-digest" => options.digest = true,
             "-lrmix" => options.lr_mix = true,
@@ -224,7 +227,7 @@ fn check(path: &Path, options: &Options) -> Result<Report, String> {
     // default packed path's transform records and coefficients to the previous path, and the previous
     // loops of the intra block lists to compare those of `intra_txbs_edges` to.
     let reference_options = ParseOptions { gpu_grid: false, ..ParseOptions::default() };
-    let legacy = rhost::Legacy { coef_tokens: true, ref_rows: false, intra_lists: true };
+    let legacy = rhost::Legacy { coef_tokens: true, ref_rows: false, intra_lists: true, lists: false };
     let mut reference = rhost::RustParser::with_clock(1, 1, reference_options, false, options.wave_edges.0, legacy)?;
     let mut checked = rhost::RustParser::with_clock(
         options.threads,

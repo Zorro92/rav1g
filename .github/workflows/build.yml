@@ -1505,7 +1505,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        case: [poisoned, interfast, syncclear, gridcheck, intraschedulelegacy, intrabanklegacy, intrasteplegacy, intrasingleedgelegacy, intralistslegacy, steptime]
+        case: [poisoned, interfast, syncclear, gridcheck, intraschedulelegacy, intrabanklegacy, intrasteplegacy, intrasingleedgelegacy, intralistslegacy, parselistslegacy, steptime]
     steps:
       - name: Disable newline conversion
         run: git config --global core.autocrlf false
@@ -1615,8 +1615,8 @@ jobs:
           if ($lines.Count -lt 200 -or $frames -lt 500) { $failed += "only $($lines.Count) GRIDCHECK lines and $frames frames checked" }
           if ($failed.Count) { throw "the grid built by the GPU: $($failed -join '; ')" }
 
-      - name: Conformance with a legacy intra switch
-        if: ${{ !cancelled() && startsWith(matrix.case, 'intra') }}
+      - name: Conformance with a legacy intra or parser switch
+        if: ${{ !cancelled() && (startsWith(matrix.case, 'intra') || matrix.case == 'parselistslegacy') }}
         shell: pwsh
         env:
           INTRA_SWITCH: ${{ matrix.case }}
@@ -2377,7 +2377,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.argon
     needs: [argon-streams, rust]
     runs-on: windows-latest
-    # Five passes of the set a shard: with three the slowest shard took 63 minutes (the 4K stress streams).
+    # Six passes of the set a shard: with five the slowest shard took 72 minutes (the 4K stress streams).
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -2444,6 +2444,15 @@ jobs:
           --streams argon-streams --out out/argon-intralistslegacy --shards 8 --shard ${{ matrix.shard }} --timeout 450
           --decoder-arg=-intralistslegacy
 
+      # -parselistslegacy, with the frames in parse the library chooses: the block lists of a tile counted
+      # on its parse thread superblock by superblock, not a superblock row behind it on idle workers.
+      - name: Argon Profile 0 on WARP with the block lists on the tile's thread
+        if: ${{ !cancelled() }}
+        run: >-
+          python testing/argon/run.py --tool out/rav1g-dec/rav1g-dec.exe
+          --streams argon-streams --out out/argon-parselistslegacy --shards 8 --shard ${{ matrix.shard }} --timeout 450
+          --decoder-arg=-parselistslegacy
+
       - name: Preserve the result table
         if: always()
         uses: actions/upload-artifact@v7
@@ -2460,6 +2469,8 @@ jobs:
             out/argon-fggenlegacy/summary.md
             out/argon-intralistslegacy/results.tsv
             out/argon-intralistslegacy/summary.md
+            out/argon-parselistslegacy/results.tsv
+            out/argon-parselistslegacy/summary.md
           if-no-files-found: warn
 
   # What the jobs above wrote, held against each other; no decoder runs here. It runs also when one of

@@ -368,6 +368,13 @@ void av1_set_parse_coef_legacy(int enable);
  * The lists are the same. A frame takes it at its setup. */
 void av1_set_intra_lists_legacy(int enable);
 
+/* Process-wide. Nonzero counts the block lists of a tile on its parse thread,
+ * superblock by superblock (-parselistslegacy); zero counts them a superblock row
+ * behind the entropy decoder on parse threads that have no task, and the rest when
+ * the tile is through, behind the save of the frame's CDFs. The lists are the same.
+ * Set before the decoder's first decode call. A running parser keeps its selection. */
+void av1_set_parse_lists_legacy(int enable);
+
 /* Process-wide. Nonzero restores the row waits for all reference types when
  * frames are parsed in parallel (-parserefrowslegacy). Set before the
  * decoder's first decode call. A running parser keeps its selection. */

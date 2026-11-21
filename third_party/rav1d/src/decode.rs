@@ -4624,6 +4624,7 @@ pub fn rav1d_submit_frame(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResu
                 content_light: state.content_light.as_deref(),
                 mastering_display: state.mastering_display.as_deref(),
             },
+            tile_tasks: c.tc.len() > 1,
         };
         match c.sink.frame_begin(&parse_frame) {
             Ok(sink_frame) => {

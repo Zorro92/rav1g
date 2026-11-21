@@ -195,6 +195,9 @@ impl ParseOptions {
             test_panic: self.test_panic,
             gpu_grid: self.gpu_grid,
             gpu_pred_lists: self.gpu_pred_lists,
+            // Not a switch of these (they are bits of `rav1g.h`): the hosts turn it off for
+            // -parselistslegacy (`av1_set_parse_lists_legacy`).
+            pipe_lists: true,
         }
     }
 

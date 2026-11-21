@@ -38,6 +38,7 @@ unsafe extern "C" {
     fn av1_set_parse_coef_legacy(enable: c_int);
     fn av1_set_intra_lists_legacy(enable: c_int);
     fn av1_set_parse_ref_rows_legacy(enable: c_int);
+    fn av1_set_parse_lists_legacy(enable: c_int);
 }
 
 /// What a frame says about its colour: the description of its sequence header and its HDR metadata.
@@ -194,6 +195,7 @@ pub struct Choices {
     pub parse_coef_legacy: bool,
     pub intra_lists_legacy: bool,
     pub parse_ref_rows_legacy: bool,
+    pub parse_lists_legacy: bool,
     pub lf_legacy: bool,
     pub lf_h_split: u32,
     pub intra_edge_fix: bool,
@@ -541,6 +543,7 @@ impl Library {
             av1_set_parse_coef_legacy(c_int::from(choices.parse_coef_legacy));
             av1_set_intra_lists_legacy(c_int::from(choices.intra_lists_legacy));
             av1_set_parse_ref_rows_legacy(c_int::from(choices.parse_ref_rows_legacy));
+            av1_set_parse_lists_legacy(c_int::from(choices.parse_lists_legacy));
         }
         if self.is_c() {
             capi::rav1g_set_cdef_v2(choices.cdef_v2);

@@ -894,6 +894,8 @@ pub(crate) unsafe fn setup_frame_begin(
                 pieces.coef_run = 0;
             }
             td.tile_pieces = td.pieces.as_mut_ptr();
+            td.index_lists.resize_with(tiles.max(td.index_lists.len()), Vec::new);
+            td.tile_index_lists = td.index_lists.as_mut_ptr();
             pools.begin(td.slot_index as usize, frame_cells(cm));
         }
         // Inter breakdown (-gputimedetail): the tile threads count the blocks they push, each tile into its
@@ -1281,12 +1283,14 @@ pub(crate) unsafe fn setup_tile(
 
         t.mi_col_start = tile.mi_col_start;
         t.mi_row_start = tile.mi_row_start;
-        // The tile's block index list is its own memory (`TilePieces::indexes`) and grows with its blocks
-        // (`av1_mi_push_block`); where it starts in the slot's buffer is known when the frame is recorded.
+        // The tile's block index list is its own memory (`av1_frame_thread_data::index_lists`) and grows
+        // with its blocks (`av1_mi_push_block`); where it starts in the slot's buffer is known when the
+        // frame is recorded.
         t.gen_index_ptr = 0;
         t.gen_index_base = 0;
-        pieces.indexes.clear();
-        t.gen_indexes = pieces.indexes.as_mut_ptr();
+        let indexes = &mut *td.tile_index_lists.add(tile_id as usize);
+        indexes.clear();
+        t.gen_indexes = indexes.as_mut_ptr();
         t.gen_block_warp_offset = tile_id * (256 + 32) + (mi_offset >> 2) * 10;
         t.gen_block_map_offset = t.gen_block_warp_offset + 32;
         let block_map = (*td.gen_block_map).host_ptr.cast::<c_int>();
