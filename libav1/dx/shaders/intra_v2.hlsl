@@ -386,7 +386,8 @@ void finish_row(uint3 block, int plane, int addr, int px, int py, int4 value, in
   b.filt_a = dir_mode ? ((block.y >> 24) & 3) : 0;
   b.filt_l = dir_mode ? ((block.y >> 26) & 3) : 0;
   b.fc_a = 0;
-  if (aa_cells && need_above) b.fc_a = min(aa_cells << (2 + PX_SHIFT), b.bw) + need_right * b.bh + b.need_al - 1;
+  // AV1 7.11.2.4: numPx of the row above counts the samples in the frame, aa_cells << 2, at every bit depth.
+  if (aa_cells && need_above) b.fc_a = min(aa_cells << 2, b.bw) + need_right * b.bh + b.need_al - 1;
   b.fc_l = b.fc_a;
   if (b.la && need_left) b.fc_l = min(b.la, b.bh) + need_bot * b.bw + b.need_al - 1;
 #ifdef HBD

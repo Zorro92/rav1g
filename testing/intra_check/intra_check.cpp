@@ -136,6 +136,8 @@ static void run_group(const ShaderApi *api, uint32_t group, int threads, uint64_
                     : api == &intra_main_banked_hbd_api ? "intra_main_banked_hbd.hlsl"
                     : api == &intra_main_prefetch_hbd_api ? "intra_main_prefetch_hbd.hlsl"
                     : api == &intra_main_prefetch_api ? "intra_main_prefetch.hlsl"
+                    : api == &intra_main_prefetch_double_hbd_api ? "intra_main_prefetch_hbd.hlsl (twice the edge count)"
+                    : api == &intra_main_prefetch_double_api ? "intra_main_prefetch.hlsl (twice the edge count)"
                     : api == &intra_main_legacy_api ? "intra_main_legacy.hlsl"
                     : api == &intra_main_hbd_legacy_api ? "intra_main_hbd_legacy.hlsl"
                     : api == &intra_filter_api     ? "intra_filter.hlsl"
@@ -146,7 +148,8 @@ static void run_group(const ShaderApi *api, uint32_t group, int threads, uint64_
                     : api == &intra_v2_hbd_api     ? "intra_v2.hlsl (10-bit)"
                                                    : "intra_v2.hlsl";
   const bool use_waves = api == &intra_main_api || api == &intra_main_hbd_api || api == &intra_main_banked_hbd_api ||
-                         api == &intra_main_prefetch_hbd_api || api == &intra_main_prefetch_api;
+                         api == &intra_main_prefetch_hbd_api || api == &intra_main_prefetch_api ||
+                         api == &intra_main_prefetch_double_hbd_api || api == &intra_main_prefetch_double_api;
   gs_state.track_unwritten = use_waves || api == &intra_filter_api || api == &intra_filter_prefetch_api;
   g_tracker.require_unique_stores = api == &intra_filter_api || api == &intra_filter_prefetch_api;
   GroupContext context = { api, group };
@@ -206,6 +209,12 @@ struct Coverage {
   long inter_intra, top_right, bottom_left, upsample, edge_filter, corner_filter, residual, clipped, multi_tile;
   long v1_iterations, v1_dispatches, v1_groups;
   long v2_steps, v2_dispatches, v2_groups, v2_group_passes, v2_max_passes;
+  // Transform blocks of a directional mode between 90 and 180 degrees whose row above is only partly in
+  // the frame (it crosses maxX of AV1 7.11.2), filtered with strength 3: where an edge filter that takes
+  // more samples of the row above than the specification's numPx (7.11.2.4) gives other edge samples.
+  // And the frames where the shader with twice the count (the 10-bit shaders before 2026-11) gave other
+  // samples, and other samples inside the frame (chroma from luma reads luma right of maxX, 7.11.5).
+  long partial_above, double_count_frames, double_count_in_frame;
 };
 
 // The sizes of everything that depends on the frame size only.
@@ -271,6 +280,16 @@ class Generator {
   Coverage *cov_;
   Frame *frame_;
   int p_intra_ = 100, p_inter_intra_ = 0, p_split_ = 50;
+
+ public:
+  // The layout of the right frame edge (make_geometry's edge_layout): a block that crosses maxX is not
+  // split where the partition allows it whole, and is intra with a directional mode between 90 and 180
+  // degrees, so that its transform blocks have a row above only partly in the frame (AV1 7.11.2.4).
+  bool edge_layout_ = false;
+
+ private:
+  bool crosses_right_edge(int mi_col, int bw) const { return edge_layout_ && mi_col + bw > geo_.mi_cols; }
+  int zone2_mode() { static const int modes[3] = { D135_PRED, D113_PRED, D157_PRED }; return modes[rng_.below(3)]; }
   Tile tile_ = {};
   int tile_index_ = 0;
   uint32_t counters_[IntraTypeCount] = {};
@@ -337,6 +356,15 @@ class Generator {
       if (y & (3 << 22)) cov_->upsample++;
       if (y & (15 << 24)) cov_->edge_filter++;
     }
+  }
+
+  // A transform block whose row above crosses the right edge of the frame (maxX), in zone 2, with the
+  // strongest edge filter (Coverage::partial_above). above_available and w are in 4x4 units.
+  void count_partial_above(int mode, int delta, int have_top, int above_available, int w, int strength) {
+    static const int mode_to_angle_map[] = { 0, 90, 180, 45, 135, 113, 157, 203, 67 };
+    if (mode < V_PRED || mode > D67_PRED || !have_top) return;
+    const int angle = mode_to_angle_map[mode] + delta * 3;
+    if (angle > 90 && angle < 180 && above_available < w && strength == 3) cov_->partial_above++;
   }
 
   // The edge bits of a directional mode, as gen_pred_blocks.hlsl sets them.
@@ -427,6 +455,7 @@ class Generator {
               left_available =
                   (have_left ? std::min(subblk_h, subblk_h + yd) : 0) + (have_bottom_left ? std::min(subblk_h, yd) : 0);
             }
+            count_partial_above(mode, delta, have_top, above_available, subblk_w, filter_above);
             const uint32_t word = flags | ((uint32_t)above_available << 10) | ((uint32_t)left_available << 16) |
                                   (above_available ? ((uint32_t)filter_above << 24) : 0) |
                                   (left_available ? ((uint32_t)filter_left << 26) : 0);
@@ -514,6 +543,7 @@ class Generator {
               left_available =
                   (have_left ? std::min(subblk_h, subblk_h + yd) : 0) + (have_bottom_left ? std::min(subblk_h, yd) : 0);
             }
+            count_partial_above(mode, delta, have_top, above_available, subblk_w, filter_above);
             const uint32_t word = flags | ((uint32_t)above_available << 10) | ((uint32_t)left_available << 16) |
                                   (above_available ? ((uint32_t)filter_above << 24) : 0) |
                                   (left_available ? ((uint32_t)filter_left << 26) : 0);
@@ -530,20 +560,23 @@ class Generator {
     static const int interintra_to_intra_mode[4] = { DC_PRED, V_PRED, H_PRED, SMOOTH_PRED };
     const int bw = 1 << bwl;
     const int bh = 1 << bhl;
-    const int is_intra = rng_.chance(p_intra_);
+    const bool edge = crosses_right_edge(mi_col, bw);
+    const int is_intra = edge || rng_.chance(p_intra_);
     const int inter_intra =
         !is_intra && bwl >= 1 && bwl <= 3 && bhl >= 1 && bhl <= 3 && abs(bwl - bhl) <= 1 && rng_.chance(p_inter_intra_);
     const int interintra_mode = rng_.below(4);
     const int nonskip = rng_.chance(70);
     const int palette_allowed = is_intra && bwl >= 1 && bhl >= 1 && bwl <= 4 && bhl <= 4;
-    const int y_use_palette = palette_allowed && rng_.chance(4);
-    const int uv_use_palette = palette_allowed && rng_.chance(4);
+    const int y_use_palette = !edge && palette_allowed && rng_.chance(4);
+    const int uv_use_palette = !edge && palette_allowed && rng_.chance(4);
     const int angles = bwl >= 1 && bhl >= 1;  // angle deltas from 8x8
 
     // Luma transform size: the largest of the block, split up to twice.
     int txw = std::min(bwl, 4);
     int txh = std::min(bhl, 4);
-    if (!inter_intra) {
+    // (A block of the edge layout keeps its transform size: a split leaves no transform block across maxX
+    // for chroma from luma to read past it.)
+    if (!inter_intra && !edge) {
       for (int depth = rng_.below(3); depth > 0; --depth) {
         if (txw > txh) {
           --txw;
@@ -561,7 +594,7 @@ class Generator {
     const uint32_t cfl_max_y = (uint32_t)(mi_row + (std::min(1 << (bhl - txh), max_cnt_y) << txh)) << 2;
 
     if ((is_intra || inter_intra) && !y_use_palette) {
-      const int mode = inter_intra ? interintra_to_intra_mode[interintra_mode] : rng_.below(13);
+      const int mode = edge ? zone2_mode() : inter_intra ? interintra_to_intra_mode[interintra_mode] : rng_.below(13);
       const int use_filter = is_intra && mode == DC_PRED && bwl <= 3 && bhl <= 3 && rng_.chance(35);
       const int delta = (is_intra && angles) ? rng_.below(7) - 3 : 0;
       luma(mi_row, mi_col, bwl, bhl, txw, txh, mode, delta, use_filter, inter_intra, nonskip);
@@ -574,8 +607,8 @@ class Generator {
     if (no_chroma) return;
     if ((is_intra || inter_intra) && !uv_use_palette) {
       const int cfl_allowed = is_intra && bwl <= 3 && bhl <= 3;
-      int mode = inter_intra ? interintra_to_intra_mode[interintra_mode] : rng_.below(13);
-      if (cfl_allowed && rng_.chance(25)) mode = UV_CFL_PRED;
+      int mode = edge ? zone2_mode() : inter_intra ? interintra_to_intra_mode[interintra_mode] : rng_.below(13);
+      if (cfl_allowed && rng_.chance(edge ? 100 : 25)) mode = UV_CFL_PRED;
       const int delta = (is_intra && angles) ? rng_.below(7) - 3 : 0;
       chroma(mi_row, mi_col, bwl, bhl, mode, delta, inter_intra, nonskip, cfl_max_x | (cfl_max_y << 16));
     }
@@ -591,7 +624,9 @@ class Generator {
     const int has_rows = mi_row + hbs < geo_.mi_rows;
     const int has_cols = mi_col + hbs < geo_.mi_cols;
     int type = Split;
-    if (has_rows && has_cols) {
+    if (has_rows && has_cols && bsl >= 3 && crosses_right_edge(mi_col, 1 << bsl)) {
+      type = None;
+    } else if (has_rows && has_cols) {
       if (!rng_.chance(std::min(95, p_split_ + 8 * (bsl - 1)))) {
         const int r = rng_.below(10);
         type = r < 5 ? None : r < 7 ? Horz : r < 9 ? Vert : (bsl >= 2 && bsl <= 4) ? (rng_.below(2) ? Horz4 : Vert4) : None;
@@ -640,12 +675,14 @@ class Generator {
   }
 };
 
-static Geometry make_geometry(Rng *rng, int hbd, int fixed_cells = 0) {
+// edge_layout: a frame 216 samples wide (54 units: the last superblock column of 64 has 24 in the frame,
+// that of 128 has 88), of one tile column, for Generator::edge_layout_.
+static Geometry make_geometry(Rng *rng, int hbd, int fixed_cells = 0, bool edge_layout = false) {
   Geometry g;
   g.hbd = hbd;
   g.sb_log = 4 + rng->below(2);
   const int max_cells = rng->chance(25) ? 96 : 48;
-  g.mi_cols = fixed_cells ? fixed_cells : 2 * (1 + rng->below(max_cells / 2));
+  g.mi_cols = edge_layout ? 54 : fixed_cells ? fixed_cells : 2 * (1 + rng->below(max_cells / 2));
   g.mi_rows = fixed_cells ? fixed_cells : 2 * (1 + rng->below(max_cells / 2));
   g.pad_cols = (g.mi_cols + 31) & ~31;
   g.pad_rows = (g.mi_rows + 31) & ~31;
@@ -654,7 +691,7 @@ static Geometry make_geometry(Rng *rng, int hbd, int fixed_cells = 0) {
   const int sb = 1 << g.sb_log;
   int col_cut = 0;
   int row_cut = 0;
-  if (g.mi_cols > sb && rng->chance(50)) col_cut = sb * (1 + rng->below((g.mi_cols - 1) / sb));
+  if (!edge_layout && g.mi_cols > sb && rng->chance(50)) col_cut = sb * (1 + rng->below((g.mi_cols - 1) / sb));
   if (g.mi_rows > sb && rng->chance(50)) row_cut = sb * (1 + rng->below((g.mi_rows - 1) / sb));
   for (int r = 0; r <= (row_cut != 0); ++r) {
     for (int c = 0; c <= (col_cut != 0); ++c) {
@@ -827,6 +864,8 @@ static RunResult run_main(const Geometry &g, const Frame &f, std::vector<uint8_t
   const ShaderApi *filter_api = filter_override                          ? filter_override
                                : main_api == &intra_main_prefetch_hbd_api ? &intra_filter_prefetch_hbd_api
                                : main_api == &intra_main_prefetch_api     ? &intra_filter_prefetch_api
+                               : main_api == &intra_main_prefetch_double_hbd_api ? &intra_filter_prefetch_hbd_api
+                               : main_api == &intra_main_prefetch_double_api ? &intra_filter_prefetch_api
                                : g.hbd                                   ? &intra_filter_hbd_api
                                : main_api == &intra_main_legacy_api ? &intra_filter_legacy_api
                                                                    : &intra_filter_api;
@@ -1114,6 +1153,25 @@ static void describe(const Geometry &g, const Frame &f, const Schedule &s, size_
   printf("    byte %zu is outside the planes\n", byte);
 }
 
+// The first byte of a sample in the frame that differs: of the planes over the frame's size, MiCols *
+// MI_SIZE by MiRows * MI_SIZE at full resolution (AV1 7.11.2: maxX and maxY), and not right of it or
+// below. a.size() if there is none.
+static size_t first_difference_in_frame(const Geometry &g, const std::vector<uint8_t> &a,
+                                        const std::vector<uint8_t> &b) {
+  const int bytes = 1 + g.hbd;
+  for (int p = 0; p < 3; ++p) {
+    const int width = (g.mi_cols * 4) >> (p > 0);
+    const int height = (g.mi_rows * 4) >> (p > 0);
+    for (int y = 0; y < height; ++y) {
+      const size_t row = (size_t)g.offset[p] + (size_t)y * g.stride[p];
+      for (size_t i = row; i < row + (size_t)width * bytes; ++i) {
+        if (a[i] != b[i]) return i;
+      }
+    }
+  }
+  return a.size();
+}
+
 static size_t first_difference(const std::vector<uint8_t> &a, const std::vector<uint8_t> &b) {
   for (size_t i = 0; i < a.size(); ++i) {
     if (a[i] != b[i]) return i;
@@ -1149,7 +1207,9 @@ int main(int argc, char **argv) {
     Coverage cov = {};
     Rng rng = { seed + (uint64_t)hbd * 7919 };
     for (int layout = 0; layout < layouts && failures < 5; ++layout) {
-      const Geometry g = make_geometry(&rng, hbd);
+      // Every fourth layout is the one of the right frame edge (make_geometry, Generator::edge_layout_).
+      const bool edge_layout = layout % 4 == 0;
+      const Geometry g = make_geometry(&rng, hbd, 0, edge_layout);
       Schedule schedule;
       make_schedule(g, &schedule);
       // Three frames share the schedule buffers, like the frames of a
@@ -1164,6 +1224,7 @@ int main(int argc, char **argv) {
         Frame f;
         make_frame_data(g, &rng, &f);
         Generator gen(g, &rng, &schedule.sched, &cov, &f);
+        gen.edge_layout_ = edge_layout;
         // A key frame, then frames with less and less intra.
         static const int intra_percent[3] = { 100, 45, 12 };
         gen.run(intra_percent[n], rng.below(3) * 20, 15 + rng.below(4) * 20);
@@ -1178,8 +1239,8 @@ int main(int argc, char **argv) {
         wave_layout = wave_layouts[(layout * 3 + n) % (sizeof(wave_layouts) / sizeof(wave_layouts[0]))];
         const RunResult r1b = run_main(g, f, &optimized, rng.u32(), main_api, nullptr);
         const RunResult r2 = run_v2(g, f, &schedule, &v2, rng.u32(), &cov);
-        std::vector<uint8_t> banked, prefetch;
-        RunResult rb = {}, rp = {};
+        std::vector<uint8_t> banked, prefetch, other_count;
+        RunResult rb = {}, rp = {}, rc = {};
         if (hbd) {
           banked = f.pixels;
           rb = run_main(g, f, &banked, rng.state, &intra_main_banked_hbd_api, nullptr);
@@ -1189,6 +1250,13 @@ int main(int argc, char **argv) {
           prefetch = f.pixels;
           rp = run_main(g, f, &prefetch, rng.state, &intra_main_prefetch_api, nullptr);
         }
+        // The prefetching shader with twice the specification's count of edge samples of the row above
+        // (run.sh), which the layouts have to tell from it, inside the frame too.
+        other_count = f.pixels;
+        rc = run_main(g, f, &other_count, rng.state,
+                      hbd ? &intra_main_prefetch_double_hbd_api : &intra_main_prefetch_double_api, nullptr);
+        if (other_count != prefetch) cov.double_count_frames++;
+        if (first_difference_in_frame(g, prefetch, other_count) < prefetch.size()) cov.double_count_in_frame++;
         original_races += r1.races_group;
 
         const char *problem = nullptr;
@@ -1225,6 +1293,8 @@ int main(int argc, char **argv) {
           at = first_difference(legacy, prefetch);
         } else if (rp.memory_races || rp.sync_errors || rp.out_of_bounds || rp.plain_barriers) {
           problem = "invalid group memory access or sync in the prefetching shaders";
+        } else if (rc.memory_races || rc.sync_errors || rc.out_of_bounds || rc.plain_barriers) {
+          problem = "invalid group memory access or sync in the shader with twice the edge sample count";
         }
         if (verbose || problem) {
           printf("%s layout %d frame %d: %dx%d, %zu tile(s), sb %d, %zu blocks, %d iterations -> %ld region entries\n",
@@ -1261,6 +1331,13 @@ int main(int argc, char **argv) {
     printf("\n  inter-intra %ld, with residual %ld, top-right %ld, bottom-left %ld, edge filter %ld, upsampling %ld,\n"
            "  blocks cut by the frame edge %ld\n",
            cov.inter_intra, cov.residual, cov.top_right, cov.bottom_left, cov.edge_filter, cov.upsample, cov.clipped);
+    printf("  zone 2 blocks with strength 3 whose row above crosses maxX %ld; frames where twice the edge sample\n"
+           "  count gives other samples %ld, inside the frame %ld\n",
+           cov.partial_above, cov.double_count_frames, cov.double_count_in_frame);
+    if (!cov.partial_above || !cov.double_count_in_frame) {
+      printf("  no layout reached a row above that the two edge sample counts filter differently\n");
+      ++failures;
+    }
     printf("  original: %ld iterations (UAV barriers), %ld dispatches, %ld thread groups\n", cov.v1_iterations,
            cov.v1_dispatches, cov.v1_groups);
     printf("  intra_v2: %ld steps (UAV barriers), %ld dispatches, %ld thread groups, %.1f passes per group, at most %ld\n",

@@ -559,19 +559,14 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
   const int upsample_left = directional ? ((block.y >> 23) & 1) : 0;
   const int strength_above = directional ? ((block.y >> 24) & 3) : 0;
   const int strength_left = directional ? ((block.y >> 26) & 3) : 0;
-#ifdef INTRA_8BIT
-  // The filtered samples of the row above, from the samples that are there (above_available counts
-  // pairs), as the 8-bit intra_main.hlsl counts them. The 10-bit shaders count twice the pairs here
-  // (intra_v2.hlsl does the same at high bit depth); the 8-bit outputs differ when only part of a
-  // block's row above is in the frame.
+  // AV1 7.11.2.4: the edge filter of the row above takes numPx = Min(w, maxX - x + 1) + (pAngle < 90 ?
+  // h : 0) + 1 samples, the corner included: those of the row above that are in the frame (above_available
+  // counts them in pairs), not more. Samples right of maxX that a larger count filters are read by the
+  // predictor of the samples right of maxX, which chroma from luma reads (MaxLumaW runs to the end of the
+  // luma transform block, 7.11.5).
   const int filter_above = above_available && need_above
                                ? min(above_available << 1, bw) + need_right * bh + need_aboveleft - 1
                                : 0;
-#else
-  const int filter_above = above_available && need_above
-                               ? min(above_available << 2, bw) + need_right * bh + need_aboveleft - 1
-                               : 0;
-#endif
   const int filter_left = left_available && need_left
                               ? min(left_available, bh) + need_bot * bw + need_aboveleft - 1
                               : 0;

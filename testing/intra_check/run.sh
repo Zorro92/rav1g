@@ -52,6 +52,24 @@ to_cpp "$shaders/intra_main_hbd.hlsl" > "$work/intra_main_hbd.gen.h"
 to_cpp "$shaders/intra_main_banked_hbd.hlsl" > "$work/intra_main_banked_hbd.gen.h"
 to_cpp "$shaders/intra_main_prefetch_hbd.hlsl" > "$work/intra_main_prefetch_hbd.gen.h"
 to_cpp "$shaders/intra_main_prefetch.hlsl" > "$work/intra_main_prefetch.gen.h"
+
+# The count of edge samples the intra edge filter takes from the row above (AV1 7.11.2.4, numPx =
+# Min(w, maxX - x + 1) + ...): the samples of the row above that are in the frame. The 10-bit shaders took
+# twice that until 2026-11 (above_available counts pairs). Copies of the prefetching shaders with that
+# count must give other samples, inside the frame too, where a block's row above crosses maxX (chroma
+# from luma reads the luma right of maxX, 7.11.5): the check counts the frames where they do.
+spec_count='min(above_available << 1, bw) + need_right'
+double_count='min(above_available << 2, bw) + need_right'
+sed -e "s/$spec_count/$double_count/" "$work/intra_main_hbd.gen.h" > "$work/intra_main_hbd_double.gen.h"
+if [ "$(grep -c "$double_count" "$work/intra_main_hbd_double.gen.h")" != 1 ] ||
+  cmp -s "$work/intra_main_hbd.gen.h" "$work/intra_main_hbd_double.gen.h"; then
+  echo "intra_check: the edge sample count of intra_main_hbd.hlsl is not where run.sh expects it" >&2
+  exit 1
+fi
+sed -e 's/intra_main_hbd\.gen\.h/intra_main_hbd_double.gen.h/' "$work/intra_main_prefetch_hbd.gen.h" \
+  > "$work/intra_main_prefetch_double_hbd.gen.h"
+sed -e 's/intra_main_hbd\.gen\.h/intra_main_hbd_double.gen.h/' "$work/intra_main_prefetch.gen.h" \
+  > "$work/intra_main_prefetch_double.gen.h"
 to_cpp "$shaders/intra_filter_prefetch.hlsl" > "$work/intra_filter_prefetch.gen.h"
 to_cpp "$shaders/intra_filter_prefetch_hbd.hlsl" > "$work/intra_filter_prefetch_hbd.gen.h"
 to_cpp "$shaders/intra_main_legacy.hlsl" > "$work/intra_main_legacy.gen.h"
@@ -107,12 +125,12 @@ build() {
   flags="$flags -I $1 -I $here -I $src/libav1/dx ${2:-}"
   rm -f "$1"/*.o
   for shader in intra_main:0 intra_main_hbd:0 intra_main_legacy:0 intra_main_hbd_legacy:0 \
-    intra_filter:1 intra_filter_legacy:1 intra_filter_hbd:1 intra_main_banked_hbd:0 intra_main_prefetch_hbd:0 intra_main_prefetch:0 intra_filter_prefetch:1 intra_filter_prefetch_hbd:1 intra_v2:2 intra_v2_hbd:2; do
+    intra_filter:1 intra_filter_legacy:1 intra_filter_hbd:1 intra_main_banked_hbd:0 intra_main_prefetch_hbd:0 intra_main_prefetch:0 intra_main_prefetch_double_hbd:0 intra_main_prefetch_double:0 intra_filter_prefetch:1 intra_filter_prefetch_hbd:1 intra_v2:2 intra_v2_hbd:2; do
     name=${shader%:*}
     hbd=
     case $name in
       # (SHADER_HBD names the group memory to scramble: the 8-bit prefetching shader has the 10-bit one's.)
-      *_hbd | *_hbd_legacy | intra_main_prefetch) hbd=-DSHADER_HBD ;;
+      *_hbd | *_hbd_legacy | intra_main_prefetch | intra_main_prefetch_double) hbd=-DSHADER_HBD ;;
     esac
     case $name in
       intra_main | intra_main_hbd) hbd="$hbd -DINTRA_TIGHT" ;;
@@ -188,7 +206,9 @@ intra_v2.gen.h@0,/GroupMemoryBarrierWithGroupSync();/s//GroupMemoryBarrier();/@g
 intra_main_hbd.gen.h@s/angle < 90 ? 305/angle < 87 ? 305/@zone of an angle by arithmetic (prefetch)@MISMATCH in the prefetching
 intra_main_hbd.gen.h@s/0x43CB9D71u/0x43B39D71u/@nominal angle of D203 (prefetch)@MISMATCH in the prefetching
 intra_main_hbd.gen.h@s/smooth_h_weights\[i\] \* (left - right)/smooth_h_weights[0] * (left - right)/@prefetched smooth weights@MISMATCH in the prefetching
-intra_main_hbd.gen.h@s/min(above_available << 1, bw)/min(above_available << 2, bw)/@8-bit edge filter count of a partial row above (prefetch)@MISMATCH in the prefetching 8-bit
+intra_main_hbd.gen.h@s/min(above_available << 1, bw) + need_right/min(above_available << 2, bw) + need_right/@edge sample count of the row above twice the specification (AV1 7.11.2.4 numPx)@MISMATCH in the prefetching 8-bit shaders
+intra_v2.gen.h@s/min(aa_cells << 2, b.bw)/min(aa_cells << 3, b.bw)/@intra_v2 edge sample count of the row above twice the specification@MISMATCH between the legacy path and intra_v2
+intra_main_hbd_double.gen.h@s/min(above_available << 2, bw) + need_right/min(above_available << 1, bw) + need_right/@coverage of a row above across maxX that changes the frame@no layout reached
 intra_filter_hbd.gen.h@s/queue\[q\] = queue\[q + 1\];/queue[q] = queue[q];/@10-bit filter intra residual queue@MISMATCH in the prefetching
 intra_filter.gen.h@s/queue\[q\] = queue\[q + 1\];/queue[q] = queue[q];/@8-bit filter intra residual queue@MISMATCH in the prefetching'
   mkdir "$work/mutant"
