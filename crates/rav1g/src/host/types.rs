@@ -459,18 +459,18 @@ pub struct GpuWorkItem {
 }
 
 impl av1_frame_thread_data {
-    /// The block index list of `tile`, a tile of the slot's frame, has room for `room` entries behind
-    /// the ones the tile has written: the list is the tile's own memory (`TilePieces::indexes`), which
-    /// grows here, and `av1_tile_data::gen_indexes` follows it.
+    /// The block index list of `tile`, the tile `index` of the slot's frame (raster order), has room for
+    /// `room` entries behind the ones the tile has written: the list is the tile's own memory
+    /// (`index_lists`), which grows here, and `av1_tile_data::gen_indexes` follows it. `tile` is the
+    /// record the block lists have (`rav1g_parse::sink`: a copy of the host's while they are counted).
     ///
     /// # Safety
     /// The thread that counts the tile's block lists (the tile's thread, or the one that holds the claim
-    /// of its lists, `rav1g_parse::sink`), the tile being one of the tiles of the frame on this slot.
-    pub(crate) unsafe fn index_list_room(&self, tile: &mut crate::sys::av1_tile_data, room: usize) {
+    /// of its lists), the tile being one of the tiles of the frame on this slot.
+    pub(crate) unsafe fn index_list_room(&self, tile: &mut crate::sys::av1_tile_data, index: usize, room: usize) {
         // SAFETY: the caller's contract: the index list of the tile is that thread's.
         unsafe {
-            let indexes =
-                &mut *self.tile_index_lists.offset(std::ptr::from_mut(tile).cast_const().offset_from(self.tile_data));
+            let indexes = &mut *self.tile_index_lists.add(index);
             let written = tile.gen_index_ptr.max(0) as usize;
             if written + room > indexes.capacity() {
                 indexes.set_len(written);

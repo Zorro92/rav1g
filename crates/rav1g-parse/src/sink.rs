@@ -354,8 +354,18 @@ struct TileLists {
 
 /// What the thread that counts a tile's lists keeps.
 struct ListState {
-    /// The block context `av1_mi_push_block` reads, cleared, with the tile's constants set.
+    /// The block context `av1_mi_push_block` reads, cleared, with the tile's constants set. Its
+    /// `tile_data` is [`Self::tile`], and `tile.tile_col` is the tile's index in the frame (the host's
+    /// `index_list_room` finds the tile's index list by it).
     xd: Box<MACROBLOCKD>,
+    /// With [`FrameState::pipe_lists`], the tile's `av1_tile_data` as the lists have it: a copy of the
+    /// host's, taken when the tile begins, whose fields of the lists ([`lists_back`]) go back to the
+    /// host's when the lists are counted. The entropy decoder writes the host's record at the same time
+    /// (its cursors into the pools), so the thread that counts must not form a reference to that record:
+    /// it has a record of its own. Without `pipe_lists` the lists are counted on the host's record (one
+    /// thread does all of the tile), which is also what `rav1g-parse-check`'s reference, with one thread,
+    /// holds this way against.
+    tile: av1_tile_data,
     /// The records whose lists are counted: the piece, and the records of that piece.
     listed: (usize, c_int),
     /// The pieces of [`TileLists::pieces`] it has looked up.
@@ -387,6 +397,8 @@ impl TileLists {
             pieces: Mutex::new(Vec::new()),
             state: UnsafeCell::new(ListState {
                 xd: zeroed_box(),
+                // SAFETY: a C struct of numbers and pointers, for which all zero bytes are a value.
+                tile: unsafe { std::mem::zeroed() },
                 listed: (0, 0),
                 pieces: Vec::new(),
                 timed: false,
@@ -412,6 +424,31 @@ impl TileLists {
 /// [`TileLists::ready`] of a tile whose entropy decoder has written these pieces.
 fn ready_of(pieces: &[Records]) -> u64 {
     pieces.last().map_or(0, |records| ((pieces.len() as u64 - 1) << 32) | records.count as u32 as u64)
+}
+
+/// The fields of a tile's `av1_tile_data` that the lists write (`av1_mi_push_block` and what it calls:
+/// the index list, the wavefront's iterations and the clears of their lists, intra block copy's
+/// superblock, the single-edge schedule), from the lists' copy ([`ListState::tile`]) into the host's
+/// record. `have_inter` is written by both sides (the entropy decoder with
+/// [`SinkOptions::gpu_pred_lists`]), so it is the one that either set.
+///
+/// # Safety
+/// `host` is the tile's record, which no other thread uses; the lists are through.
+unsafe fn lists_back(host: *mut av1_tile_data, lists: &av1_tile_data) {
+    // SAFETY: the caller's contract.
+    let host = unsafe { &mut *host };
+    host.gen_indexes = lists.gen_indexes;
+    host.gen_index_ptr = lists.gen_index_ptr;
+    host.gen_intra_iter_y = lists.gen_intra_iter_y;
+    host.gen_intra_iter_uv = lists.gen_intra_iter_uv;
+    host.gen_intra_iter_set = lists.gen_intra_iter_set;
+    host.gen_iter_clear_offset = lists.gen_iter_clear_offset;
+    host.gen_iter_clear_size = lists.gen_iter_clear_size;
+    host.intra_iter_max = lists.intra_iter_max;
+    host.intra_iter_max_uv = lists.intra_iter_max_uv;
+    host.intrabc_sb = lists.intrabc_sb;
+    host.intra_single_edge = lists.intra_single_edge;
+    host.have_inter |= lists.have_inter;
 }
 
 /// A piece of a tile's mode info records.
@@ -1158,9 +1195,18 @@ impl<H: SinkHost> ParseSink for Sink<H> {
                 mi_col_start: tile.col_start,
                 mi_col_end: tile.col_end,
                 tile_row: 0,
-                tile_col: 0,
+                tile_col: tile.index as c_int,
             };
-            xd.tile_data = memory.tile_data;
+            // With `pipe_lists` the lists have a copy of the tile's record, which the host has set up and
+            // the lines above have finished; nothing writes the host's record's fields of the lists from
+            // here on. Otherwise the tile's thread counts them on the host's record, as no other thread
+            // does anything of the tile.
+            if frame.pipe_lists {
+                list_state.tile = *memory.tile_data;
+                xd.tile_data = &raw mut list_state.tile;
+            } else {
+                xd.tile_data = memory.tile_data;
+            }
             xd.mi_stride = frame.mi_stride;
             xd.cur_frame_force_integer_mv = frame.hdr.force_integer_mv.into();
             for (dst, lossless) in xd.lossless.iter_mut().zip(frame.hdr.segmentation.lossless) {
@@ -1275,6 +1321,9 @@ impl<H: SinkHost> ParseSink for Sink<H> {
             let ended = state.ended && !state.failed;
             if ended {
                 self.count_lists(frame, lists, ready_of(&state.pieces));
+                // The claim is this thread's, and the tile's entropy decoder (this thread) is through:
+                // the lists' fields go back to the host's record, which the host reads from here on.
+                lists_back(state.memory.tile_data, &(*lists.state.get()).tile);
             }
             // Held from here on: no thread counts the tile's lists any more in this frame.
             if ended {
