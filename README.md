@@ -84,6 +84,11 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
   take the same shader (two group syncs instead of eight), with 8-bit loads and stores. Filter
   intra (both bit depths) loads all residuals of a lane at the start instead of one diagonal
   ahead. Use `-intrasteplegacy` to compare the previous step.
+  For one-edge angles, both bit depths wait for the opposite edge only when it supplies a missing
+  primary edge. Frames without those angles use the original prefetch kernel. Use
+  `-intrasingleedgelegacy` to select the original prefetch kernels and wavefront for an A/B.
+  The C++ stage-dump comparison compares prediction-record contents across wavefront orders,
+  and still compares every frame MD5.
 - **A third frame in flight** (`-slots 3`) lets CPU and GPU overlap: the decode thread's wait
   for a free slot drops from 5.6–8.3 ms to 0.3–0.6 ms per frame. It only fits in memory with
   `-lowmem`. All combinations are md5-exact. On the SVT clip the CPU (entropy decoding,

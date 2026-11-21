@@ -1284,6 +1284,7 @@ pub(crate) unsafe fn setup_tile(
             t.gen_block_map_fast = block_map.offset(t.gen_block_fast_offset as isize);
             t.gen_block_map_fast.write_bytes(0, InterFastMapSize as usize);
         }
+        t.intra_single_edge = 0;
         t.gen_intra_iter_y = -1;
         t.gen_intra_iter_uv = -1;
         t.have_inter = 0;

@@ -524,6 +524,14 @@ pub extern "C" fn av1_set_intra_bank_legacy(enable: c_int) {
     INTRA_BANK_LEGACY.store(enable, Ordering::Relaxed);
 }
 
+static INTRA_SINGLE_EDGE_LEGACY: AtomicI32 = AtomicI32::new(0);
+
+/// `av1_set_intra_single_edge_legacy` (`dx/av1_perf.h`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_intra_single_edge_legacy(enable: c_int) {
+    INTRA_SINGLE_EDGE_LEGACY.store(enable, Ordering::Relaxed);
+}
+
 static INTRA_STEP_LEGACY: AtomicI32 = AtomicI32::new(0);
 
 /// `av1_set_intra_step_legacy` (`dx/av1_perf.h`).
@@ -540,12 +548,17 @@ pub extern "C" fn av1_set_intra_schedule_legacy(enable: c_int) {
     INTRA_SCHEDULE_LEGACY.store(enable, Ordering::Relaxed);
 }
 
-// The parse and the main shader must agree on whether the straight predictors read the corner.
+// The parse and the main shader must agree on the edges read by each coded angle.
 pub(super) fn intra_main_for_frame(intra_v2: bool) -> IntraMain {
     if INTRA_OPT.load(Ordering::Relaxed) == 0 {
         IntraMain::Unoptimized
     } else if intra_v2 || INTRA_SCHEDULE_LEGACY.load(Ordering::Relaxed) != 0 {
         IntraMain::Legacy
+    } else if INTRA_SINGLE_EDGE_LEGACY.load(Ordering::Relaxed) == 0
+        && INTRA_STEP_LEGACY.load(Ordering::Relaxed) == 0
+        && INTRA_BANK_LEGACY.load(Ordering::Relaxed) == 0
+    {
+        IntraMain::SingleEdge
     } else {
         IntraMain::Tight
     }
@@ -1176,6 +1189,18 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
             let constants = alloc_constants::<IntraData>(&mut td.command_buffer);
             let data = constants.data;
             let intra_main: *const ComputeShader = match td.intra_main {
+                IntraMain::SingleEdge => {
+                    // Frames without one-edge angles keep the original prefetch shader verbatim.
+                    let single_edge = std::slice::from_raw_parts(tiles, tile_count as usize)
+                        .iter()
+                        .any(|tile| tile.intra_single_edge != 0);
+                    match (td.is_hbd != 0, single_edge) {
+                        (false, false) => &raw const (*lib).shader_intra_main_prefetch,
+                        (true, false) => &raw const (*lib).shader_intra_main_prefetch_hbd,
+                        (false, true) => &raw const (*lib).shader_intra_main_single_edge,
+                        (true, true) => &raw const (*lib).shader_intra_main_single_edge_hbd,
+                    }
+                }
                 IntraMain::Tight
                     if INTRA_BANK_LEGACY.load(Ordering::Relaxed) == 0
                         && INTRA_STEP_LEGACY.load(Ordering::Relaxed) == 0 =>

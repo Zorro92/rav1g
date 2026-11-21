@@ -656,7 +656,15 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
   } else if (mode < MODE_INTRA_BC && !straight && thread.x < cb_wi_count) {
     int first_above = 0;
     int first_left = 0;
+#ifdef INTRA_SINGLE_EDGE
+    // Zones 1 and 3 use the opposite edge to supply a missing primary edge.
+    // With both present they use the corner sample itself; only zone 2 filters it.
+    const bool read_first_above = mode_info != Dir3 || left_available == 0;
+    const bool read_first_left = mode_info != Dir1 || above_available == 0;
+    if (wi < (above_count >> 1) || (wi == 0 && read_first_above)) {
+#else
     if (wi < (above_count >> 1) || wi == 0) {
+#endif
       uint pair = (PIXEL_MID - 1) | ((PIXEL_MID - 1) << 16);
       if (above_available) {
         pair = load_above_pair(corner, wi, above_available);
@@ -668,7 +676,11 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
       EDGE(EDGE_ABOVE, raw_above + wi * 2) = first_above;
       EDGE(EDGE_ABOVE, raw_above + wi * 2 + 1) = (pair >> 16) & 1023;
     }
+#ifdef INTRA_SINGLE_EDGE
+    if (wi < left_count || (wi == 0 && read_first_left)) {
+#else
     if (wi < left_count || wi == 0) {
+#endif
       first_left = PIXEL_MID + 1;
       if (left_available) {
         first_left = load_left(corner, stride, wi, left_available);

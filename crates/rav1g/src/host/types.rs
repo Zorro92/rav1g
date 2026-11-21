@@ -130,6 +130,8 @@ pub struct compute_shader_lib {
     pub shader_intra_filter_legacy: ComputeShader,
     pub shader_intra_main_banked_hbd: ComputeShader,
     pub shader_intra_main_prefetch_hbd: ComputeShader,
+    pub shader_intra_main_single_edge: ComputeShader,
+    pub shader_intra_main_single_edge_hbd: ComputeShader,
     pub shader_intra_main_prefetch: ComputeShader,
     pub shader_intra_filter_prefetch: ComputeShader,
     pub shader_intra_filter_prefetch_hbd: ComputeShader,

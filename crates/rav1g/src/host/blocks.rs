@@ -537,6 +537,7 @@ impl WaveEdges {
 #[allow(dead_code, reason = "the parser-only tools build this file and use the default schedule")]
 pub enum IntraMain {
     Tight,
+    SingleEdge,
     Legacy,
     Unoptimized,
 }
@@ -561,10 +562,10 @@ impl IntraPlane {
     /// Bounds on the edges read from the frame, in 4x4 units. Availability in the block record
     /// still describes the decoded neighbours. The bounds only affect when the block can run.
     #[inline]
-    fn edge_limits(&self, main: IntraMain, delta: i8, filter: bool) -> IntraEdgeLimits {
+    fn edge_limits(&self, main: IntraMain, delta: i8, filter: bool, single_edge: &mut c_int) -> IntraEdgeLimits {
         let corner = self.need(NEED_ABOVE_LEFT_LUT) && !self.is_intrabc;
         let mut limits = IntraEdgeLimits { above: c_int::MAX, left: c_int::MAX, corner, clipped_corner: corner };
-        if main != IntraMain::Tight || self.is_intrabc || filter {
+        if !matches!(main, IntraMain::Tight | IntraMain::SingleEdge) || self.is_intrabc || filter {
             return limits;
         }
         if self.mode == 0 {
@@ -581,11 +582,17 @@ impl IntraPlane {
                 limits.corner = false;
             } else {
                 // gen_pred_blocks keeps the availability for the mode family. The main shaders
-                // actually load the lengths for this angle, with at least one unit per side for
-                // the corner and missing-edge preparation.
+                // load the lengths for this angle. Only the single-edge shader can omit the
+                // other side when both exist. dependencies() still keeps a missing edge's fallback.
                 let flags = INTRA_MODE_SHADER_PARAMS[((self.mode as usize - 1) * 7 + (delta + 3) as usize) * 4 + 2];
-                limits.above = ((((flags >> 4) & 1) * w) + (((flags >> 5) & 1) * h)).max(1);
-                limits.left = ((((flags >> 6) & 1) * h) + (((flags >> 7) & 1) * w)).max(1);
+                limits.above = ((flags >> 4) & 1) * w + ((flags >> 5) & 1) * h;
+                limits.left = ((flags >> 6) & 1) * h + ((flags >> 7) & 1) * w;
+                if main == IntraMain::Tight {
+                    limits.above = limits.above.max(1);
+                    limits.left = limits.left.max(1);
+                } else if limits.above == 0 || limits.left == 0 {
+                    *single_edge = 1;
+                }
             }
         }
         limits
@@ -1115,7 +1122,8 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
                 let need_right = plane.need(NEED_RIGHT_LUT);
                 let need_bot = plane.need(NEED_BOT_LUT);
                 let use_filter = mi.flags & MB_MODE_INFO::USE_FILTER_INTRA != 0;
-                let edges = plane.edge_limits(td.intra_main, mi.angle_delta[0], use_filter);
+                let edges =
+                    plane.edge_limits(td.intra_main, mi.angle_delta[0], use_filter, &mut tile.intra_single_edge);
 
                 let type_size = txw + txh;
                 let type_idx_base = if use_filter { IntraBlockOffset } else { IntraBlockOffset - 1 - type_size };
@@ -1290,7 +1298,7 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
                 let need_left = plane.need(NEED_LEFT_LUT) && !is_intrabc;
                 let need_right = plane.need(NEED_RIGHT_LUT);
                 let need_bot = plane.need(NEED_BOT_LUT);
-                let edges = plane.edge_limits(td.intra_main, mi.angle_delta[1], false);
+                let edges = plane.edge_limits(td.intra_main, mi.angle_delta[1], false, &mut tile.intra_single_edge);
                 let is_cfl = plane.mode == UV_CFL_PRED as u32;
 
                 let cnt_y = 1 << (bh_log_uv - txh - unit_y_log);

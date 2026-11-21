@@ -943,6 +943,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         intra_schedule_legacy: task.intraschedulelegacy,
         intra_bank_legacy: task.intrabanklegacy,
         intra_step_legacy: task.intrasteplegacy,
+        intra_single_edge_legacy: task.intrasingleedgelegacy,
         lf_legacy: task.lflegacy,
         lf_h_split: task.lfhsplit as u32,
         intra_edge_fix: task.intraedgefix,
@@ -977,8 +978,10 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
                 "angle-specific (-intrabanklegacy)"
             } else if task.intrasteplegacy {
                 "angle-specific, with separate edge banks at high bit depth (-intrasteplegacy)"
+            } else if task.intrasingleedgelegacy {
+                "angle-specific with prefetching (-intrasingleedgelegacy)"
             } else {
-                "angle-specific, with separate edge banks at high bit depth"
+                "angle-specific with prefetching and single-edge dependencies"
             }
         );
     }

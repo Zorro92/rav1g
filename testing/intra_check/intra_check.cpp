@@ -138,6 +138,8 @@ static void run_group(const ShaderApi *api, uint32_t group, int threads, uint64_
                     : api == &intra_main_prefetch_api ? "intra_main_prefetch.hlsl"
                     : api == &intra_main_prefetch_double_hbd_api ? "intra_main_prefetch_hbd.hlsl (twice the edge count)"
                     : api == &intra_main_prefetch_double_api ? "intra_main_prefetch.hlsl (twice the edge count)"
+                    : api == &intra_main_single_edge_api ? "intra_main_single_edge.hlsl"
+                    : api == &intra_main_single_edge_hbd_api ? "intra_main_single_edge_hbd.hlsl"
                     : api == &intra_main_legacy_api ? "intra_main_legacy.hlsl"
                     : api == &intra_main_hbd_legacy_api ? "intra_main_hbd_legacy.hlsl"
                     : api == &intra_filter_api     ? "intra_filter.hlsl"
@@ -149,7 +151,8 @@ static void run_group(const ShaderApi *api, uint32_t group, int threads, uint64_
                                                    : "intra_v2.hlsl";
   const bool use_waves = api == &intra_main_api || api == &intra_main_hbd_api || api == &intra_main_banked_hbd_api ||
                          api == &intra_main_prefetch_hbd_api || api == &intra_main_prefetch_api ||
-                         api == &intra_main_prefetch_double_hbd_api || api == &intra_main_prefetch_double_api;
+                         api == &intra_main_prefetch_double_hbd_api || api == &intra_main_prefetch_double_api ||
+                         api == &intra_main_single_edge_hbd_api || api == &intra_main_single_edge_api;
   gs_state.track_unwritten = use_waves || api == &intra_filter_api || api == &intra_filter_prefetch_api;
   g_tracker.require_unique_stores = api == &intra_filter_api || api == &intra_filter_prefetch_api;
   GroupContext context = { api, group };
@@ -862,8 +865,8 @@ static RunResult run_main(const Geometry &g, const Frame &f, std::vector<uint8_t
                           const ShaderApi *main_api, Coverage *cov, const ShaderApi *filter_override = nullptr) {
   // The prefetching main shader runs with the prefetching filter intra shader, as the host pairs them.
   const ShaderApi *filter_api = filter_override                          ? filter_override
-                               : main_api == &intra_main_prefetch_hbd_api ? &intra_filter_prefetch_hbd_api
-                               : main_api == &intra_main_prefetch_api     ? &intra_filter_prefetch_api
+                               : (main_api == &intra_main_prefetch_hbd_api || main_api == &intra_main_single_edge_hbd_api) ? &intra_filter_prefetch_hbd_api
+                               : (main_api == &intra_main_prefetch_api || main_api == &intra_main_single_edge_api) ? &intra_filter_prefetch_api
                                : main_api == &intra_main_prefetch_double_hbd_api ? &intra_filter_prefetch_hbd_api
                                : main_api == &intra_main_prefetch_double_api ? &intra_filter_prefetch_api
                                : g.hbd                                   ? &intra_filter_hbd_api
@@ -985,6 +988,49 @@ static bool check_intrabc_10bit(uint64_t seed) {
                         sample(f.pixels, u, v + 1) + sample(f.pixels, u + 1, v + 1);
         if (sample(actual, x + col, y + row) != ((sum + 2) >> 2)) {
           printf("intra_check: MISMATCH in 10-bit intra block copy, plane %d, sample (%d,%d)\n", p, col, row);
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
+static bool check_single_edge(uint64_t seed, int hbd) {
+  Rng rng = {seed};
+  const Geometry g = make_geometry(&rng, hbd, 48);
+  const ShaderApi *legacy = hbd ? &intra_main_prefetch_hbd_api : &intra_main_prefetch_api;
+  const ShaderApi *single_edge = hbd ? &intra_main_single_edge_hbd_api : &intra_main_single_edge_api;
+  for (bool from_above : {false, true}) {
+    for (bool have_primary : {false, true}) {
+      // Raw, upsampled and filtered primary edges. The first group writes
+      // the other edge of the 4x4. The top-left corner is outside that group.
+      const uint32_t prep[] = {
+          0, 1u << (from_above ? 22 : 23), 2u << (from_above ? 24 : 26),
+      };
+      const int cases = have_primary ? 3 : 2;
+      for (int test = 0; test < cases; ++test) {
+        Frame f;
+        make_frame_data(g, &rng, &f);
+        const uint32_t other = from_above ? 8u << 16 : 8;
+        const uint32_t pos = 8 | (8u << 16);
+        const uint32_t mode = from_above ? 7 : 6;  // D67, D203
+        const uint32_t above = from_above ? (have_primary ? 2 : 0) : 1;
+        const uint32_t left = from_above ? 1 : (have_primary ? 2 : 0);
+        const uint32_t flags = (mode << 6) | (above << 10) | (left << 16) | prep[test] | (3u << 28);
+        f.blocks = {{other, 3 | (14u << 6), 0, 0, 0, 2, 0, 0}, {pos, flags, 0, 0, 0, 8, 0, 1}};
+        order_records(g, &f);
+        auto expected = f.pixels;
+        run_main(g, f, &expected, rng.u32(), legacy, nullptr);
+
+        f.blocks.back().iter = have_primary ? 0 : 1;
+        order_records(g, &f);
+        auto actual = f.pixels;
+        const RunResult r = run_main(g, f, &actual, rng.u32(), single_edge, nullptr);
+        if (actual != expected || r.races_group || r.memory_races || r.sync_errors || r.out_of_bounds) {
+          printf("intra_check: MISMATCH in the prefetching single-edge %d-bit shader, "
+                 "from above %d, primary available %d, prep %u, group races %ld\n",
+                 hbd ? 10 : 8, from_above, have_primary, prep[test], r.races_group);
           return false;
         }
       }
@@ -1197,6 +1243,7 @@ int main(int argc, char **argv) {
   }
 
   if (!check_filter_intra_8bit(seed) || !check_intrabc_10bit(seed) ||
+      !check_single_edge(seed, 0) || !check_single_edge(seed, 1) ||
       !check_wave_reductions(seed, 0) || !check_wave_reductions(seed, 1)) return 1;
 
   int failures = 0;
@@ -1245,10 +1292,10 @@ int main(int argc, char **argv) {
           banked = f.pixels;
           rb = run_main(g, f, &banked, rng.state, &intra_main_banked_hbd_api, nullptr);
           prefetch = f.pixels;
-          rp = run_main(g, f, &prefetch, rng.state, &intra_main_prefetch_hbd_api, nullptr);
+          rp = run_main(g, f, &prefetch, rng.state, &intra_main_single_edge_hbd_api, nullptr);
         } else {
           prefetch = f.pixels;
-          rp = run_main(g, f, &prefetch, rng.state, &intra_main_prefetch_api, nullptr);
+          rp = run_main(g, f, &prefetch, rng.state, &intra_main_single_edge_api, nullptr);
         }
         // The prefetching shader with twice the specification's count of edge samples of the row above
         // (run.sh), which the layouts have to tell from it, inside the frame too.

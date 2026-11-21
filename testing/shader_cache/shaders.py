@@ -51,6 +51,7 @@ LR_LEGACY = 'loop_restoration_legacy'
 REQUIRED_BYTECODE = [
     'cdef_filter', 'cdef_filter_v2', 'cdef_filter_v2_legacy', *INTRA_MAIN, *UNOPTIMIZED,
     'intra_main_tight', 'intra_main_tight_hbd', 'intra_main_banked_hbd', 'intra_main_prefetch_hbd', 'intra_main_prefetch',
+    'intra_main_single_edge', 'intra_main_single_edge_hbd',
     'intra_filter_prefetch', 'intra_filter_prefetch_hbd',
     'cdef_lists', 'cdef_lists_legacy',
     'intra_filter', 'intra_filter_legacy', 'intra_filter_hbd', 'intra_v2', 'intra_v2_hbd',

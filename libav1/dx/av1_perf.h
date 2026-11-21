@@ -339,6 +339,8 @@ void av1_set_intra_bank_legacy(int enable);
  * -intrabanklegacy's default, which looks up the mode parameters behind the record and loads the
  * residual and the other inputs behind its group syncs. Set before decoding. */
 void av1_set_intra_step_legacy(int enable);
+/* Use the prefetch shaders with the previous angle-specific wavefront. */
+void av1_set_intra_single_edge_legacy(int enable);
 
 /* Process-wide. Non-zero selects the previous 8-bit filter intra shader.
  * Applies to frames that run the main intra path. Off by default. Change it

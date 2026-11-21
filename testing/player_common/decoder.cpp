@@ -807,11 +807,13 @@ int AV1Decoder::DecodeOne() {
                                : params_.intraschedulelegacy_ ? "intra_main (-intraschedulelegacy)"
                                : params_.intrabanklegacy_ ? "intra_main_tight (-intrabanklegacy)"
                                : params_.intrasteplegacy_ ? "intra_main_tight, with separate edge banks at high bit depth (-intrasteplegacy)"
-                                                          : "intra_main_tight, 10-bit: intra_main_prefetch_hbd");
+                               : params_.intrasingleedgelegacy_ ? "prefetching (-intrasingleedgelegacy)"
+                                                          : "prefetching with single-edge dependencies");
   av1_set_intra_filter_legacy(params_.intrafilterlegacy_);
   av1_set_intra_schedule_legacy(params_.intraschedulelegacy_);
   av1_set_intra_bank_legacy(params_.intrabanklegacy_);
   av1_set_intra_step_legacy(params_.intrasteplegacy_);
+  av1_set_intra_single_edge_legacy(params_.intrasingleedgelegacy_);
   XB_LOGI << "8-bit filter intra shader: "
           << (params_.intrafilterlegacy_ ? "intra_filter_legacy (-intrafilterlegacy)" : "intra_filter (default)");
   av1_set_lr_legacy(params_.lrlegacy_);

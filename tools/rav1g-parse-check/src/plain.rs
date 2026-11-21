@@ -238,7 +238,7 @@ impl Arena {
                 iter_grid_stride: grid_w,
                 iter_grid_stride_uv: grid_w >> 1,
                 intra_v2: 0,
-                intra_main: IntraMain::Tight,
+                intra_main: IntraMain::SingleEdge,
                 intra_v2_sched: Default::default(),
                 scale_factors: Default::default(),
                 scale_enable: 0,
