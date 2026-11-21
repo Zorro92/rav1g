@@ -24,13 +24,24 @@
 //!
 //! ```text
 //! rav1g-parse-check [-threads <n>] [-frames <n>] [-parseopt <list>] [-wave <way>] [-details <n>] [-root <dir>] [-manifest <task list>] [<stream>...]
-//! rav1g-parse-check -time [-threads <n>] [-frames <n>] [-parseopt <list>] [-wave <way>] <stream>
+//! rav1g-parse-check -time [-frametimes] [-threads <n>] [-frames <n>] [-parseopt <list>] [-wave <way>] <stream>
 //! rav1g-parse-check -digest [-threads <n>] [-root <dir>] [-manifest <task list>] [<stream>...]
 //! rav1g-parse-check -lrmix [<stream>...]
+//! rav1g-parse-check -tiles [<stream>...]
 //! ```
 //!
 //! `-threads`, `-frames` and `-parseopt` are those of the run that is checked; the reference always has
-//! one thread, one frame in parse and the sink-written grid.
+//! one thread, one frame in parse and the sink-written grid. `-coeflegacy` and `-refrowslegacy` give the
+//! run that is checked (or timed) the previous paths of the parse, the decoder's -parsecoeflegacy and
+//! -parserefrowslegacy: the linked list of AC coefficient tokens, and the wait of a frame in parse for the
+//! rows of all seven references.
+//!
+//! `-frametimes`, with `-time`: one line per frame of every run with the sink, `FRAMETIME run=<r> no=<n>`
+//! and the frame's times in milliseconds (rav1d's `parse_stats`): `admit` its wait for a frame context,
+//! `wall` from then to its end, `pre` up to its first task, `init` its `Init` and `InitCdf` tasks, `cdf` the
+//! wait between them for the CDFs it loads, `tile` its entropy tile tasks (summed over its tiles), `ref` the
+//! time without a tile running after a tile waited for the rows of a reference, `idle` the rest of the time
+//! without a tile running. With one frame in parse a frame has `admit` and `wall` only.
 //!
 //! `-parseopt` takes the switches of the parser of phase 2 (`rav1g_parse::options`: `nolfmask` and
 //! `tilethread`, which are on without it, `none`, `default`, `latelists`), separated by commas: the
@@ -45,6 +56,9 @@
 //! the grids for the reference and the edges for the run that is checked. With `check` the block lists
 //! are equal only if every transform block gets the same iteration either way, and the entries of the
 //! grid the edges' side writes (the ones the shader reads) have to be those of the grid.
+//!
+//! `-tiles` prints the tile layouts of every stream (AV1 5.9.15, tile_info): one `TILES` line per layout,
+//! with the frames that have it.
 //!
 //! `-digest` prints for every stream the line `rav1g-dec -parsedigest` prints on Windows: what rav1d's
 //! parse pass reads from it, folded into one number (`rav1g_parse::digest`).
@@ -89,20 +103,28 @@ struct Options {
     lr_mix: bool,
     /// -wave: the wavefront in the edges of the tiles, for the reference and for the run that is checked.
     wave_edges: (bool, bool),
+    /// -coeflegacy, -refrowslegacy: the previous paths of the parse, for the run that is checked.
+    legacy: rhost::Legacy,
+    /// -frametimes (with -time): a line with the times of every frame of every run with the sink.
+    frame_times: bool,
+    /// -tiles: the tile layouts of the streams.
+    tiles: bool,
     streams: Vec<(String, PathBuf)>,
 }
 
 fn usage() -> ! {
     eprintln!("usage: rav1g-parse-check -lrmix [<stream>...]  (count coded restoration units per frame and plane)");
+    eprintln!("usage: rav1g-parse-check -tiles [<stream>...]  (the tile layouts of the frames, AV1 5.9.15)");
     eprintln!(
         "usage: rav1g-parse-check [-threads <n>] [-frames <n>] [-parseopt <list>] [-wave <way>] [-details <n>] \
-         [-root <dir>] [-manifest <task list>] [<stream>...]\n       rav1g-parse-check -time [-threads <n>] \
+         [-root <dir>] [-manifest <task list>] [<stream>...]\n       rav1g-parse-check -time [-frametimes] [-threads <n>] \
          [-frames <n>] [-parseopt <list>] [-wave <way>] <stream>\nThe parse with -threads, -frames and -parseopt is \
          held against the parse with one thread, one frame in parse and the default switches.\n-frames: the frames \
          rav1d may have in parse at once (default 1; at most the threads)\n-parseopt: the switches of the parser, \
          separated by commas: nolfmask, tilethread (both on by default); none; default; latelists; time (with \
          -time)\n-wave: where the wavefront of intra prediction is kept: edges (default), grid, check (the grid for \
-         the reference, the edges for the run that is checked)"
+         the reference, the edges for the run that is checked)\n-coeflegacy, -refrowslegacy: the previous linked AC tokens, \
+         the previous wait for the rows of all references\n-frametimes: with -time, a FRAMETIME line per frame of every run"
     );
     std::process::exit(2);
 }
@@ -135,6 +157,9 @@ fn options() -> Options {
         digest: false,
         lr_mix: false,
         wave_edges: (true, true),
+        legacy: rhost::Legacy::default(),
+        frame_times: false,
+        tiles: false,
         streams: Vec::new(),
     };
     let mut root = PathBuf::from(".");
@@ -149,6 +174,10 @@ fn options() -> Options {
             "-root" => root = PathBuf::from(value()),
             "-manifest" => manifests.push(PathBuf::from(value())),
             "-time" => options.time = true,
+            "-frametimes" => options.frame_times = true,
+            "-tiles" => options.tiles = true,
+            "-coeflegacy" => options.legacy.coef_tokens = true,
+            "-refrowslegacy" => options.legacy.ref_rows = true,
             "-parseopt" => options.parse = ParseOptions::from_words(&value()).unwrap_or_else(|| usage()),
             "-digest" => options.digest = true,
             "-lrmix" => options.lr_mix = true,
@@ -189,8 +218,16 @@ fn check(path: &Path, options: &Options) -> Result<Report, String> {
     // Keep the sink-written grid to check the edge readers, and the linked AC token list to
     // compare the default packed path's transform records and coefficients to the previous path.
     let reference_options = ParseOptions { gpu_grid: false, ..ParseOptions::default() };
-    let mut reference = rhost::RustParser::with_clock(1, 1, reference_options, false, options.wave_edges.0, true)?;
-    let mut checked = rhost::RustParser::new(options.threads, options.frames, options.parse, options.wave_edges.1)?;
+    let legacy = rhost::Legacy { coef_tokens: true, ref_rows: false };
+    let mut reference = rhost::RustParser::with_clock(1, 1, reference_options, false, options.wave_edges.0, legacy)?;
+    let mut checked = rhost::RustParser::with_clock(
+        options.threads,
+        options.frames,
+        options.parse,
+        false,
+        options.wave_edges.1,
+        options.legacy,
+    )?;
     let mut report = Report::new(options.details);
     let mut number = 0;
     // With one frame in parse the two are held against each other temporal unit by temporal unit. With
@@ -292,6 +329,15 @@ fn main() -> ExitCode {
         }
         return code;
     }
+    if options.tiles {
+        let mut code = ExitCode::SUCCESS;
+        for (_, path) in &options.streams {
+            if timing::tiles(path) != ExitCode::SUCCESS {
+                code = ExitCode::FAILURE;
+            }
+        }
+        return code;
+    }
     if options.time {
         return timing::run(
             &options.streams[0].1,
@@ -299,6 +345,8 @@ fn main() -> ExitCode {
             options.frames,
             options.parse,
             options.wave_edges.1,
+            options.legacy,
+            options.frame_times,
         );
     }
     if options.digest {

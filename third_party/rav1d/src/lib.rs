@@ -132,6 +132,7 @@ mod msac;
 mod obu;
 /// rav1g: the parse pass behind a sink.
 pub mod parse;
+pub mod parse_stats;
 mod picture;
 mod pool;
 mod qm;

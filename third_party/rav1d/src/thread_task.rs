@@ -639,6 +639,8 @@ fn check_tile(
                 let p3 = f.refp[n].progress.as_ref().unwrap()[!tp as usize]
                     .load(Ordering::SeqCst);
                 if p3 < lowest {
+                    // rav1g: the frame waits for the rows of a reference (`parse_stats.rs`).
+                    task_thread.stats.blocked_by_refs();
                     return 1;
                 }
                 task_thread
@@ -954,7 +956,9 @@ fn worker_task(c: &Rav1dContext, task_thread: Arc<Rav1dTaskContextTaskThread>) {
                         if !(c.fc.len() > 1) {
                             unreachable!();
                         }
+                        let stats_start = fc.task_thread.stats.init_start();
                         let res = rav1d_decode_frame_init(c, fc);
+                        fc.task_thread.stats.init_done(stats_start);
                         let p1_3 = (if let Some(progress) = fc.in_cdf().progress() {
                             progress.load(Ordering::SeqCst)
                         } else {
@@ -981,10 +985,12 @@ fn worker_task(c: &Rav1dContext, task_thread: Arc<Rav1dTaskContextTaskThread>) {
                             unreachable!();
                         }
                         let mut res_0 = Err(Rav1dError::InvalidArgument);
+                        let stats_start = fc.task_thread.stats.cdf_start();
                         let mut f = fc.data.try_write().unwrap();
                         if fc.task_thread.error.load(Ordering::SeqCst) == 0 {
                             res_0 = rav1d_decode_frame_init_cdf(c, fc, &mut f, &fc.in_cdf());
                         }
+                        fc.task_thread.stats.cdf_done(stats_start);
                         let frame_hdr = &***f.frame_hdr.as_ref().unwrap();
                         if frame_hdr.refresh_context != 0 && !fc.task_thread.update_set.get() {
                             f.out_cdf.progress().unwrap().store(
@@ -1077,10 +1083,12 @@ fn worker_task(c: &Rav1dContext, task_thread: Arc<Rav1dTaskContextTaskThread>) {
                         if error_0 == 0 {
                             // rav1g: the time of the parse, for the sink.
                             let start = c.sink.ticks();
+                            let stats_start = if p_1 { fc.task_thread.stats.tile_start() } else { 0 };
                             error_0 = match rav1d_decode_tile_sbrow(c, &mut tc, &f) {
                                 Ok(()) => 0,
                                 Err(()) => 1,
                             };
+                            fc.task_thread.stats.tile_end(stats_start);
                             c.sink.tile_time(f.sink_frame, start);
                         }
                         let progress = if error_0 != 0 { TILE_ERROR } else { 1 + sby };

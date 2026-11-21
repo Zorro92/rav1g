@@ -538,6 +538,8 @@ pub(crate) struct Rav1dFrameContextTaskThread {
     pub update_set: RelaxedAtomic<bool>, // whether we need to update CDF reference
     pub error: AtomicI32,
     pub task_counter: AtomicI32,
+    /// rav1g: the times of the frame for `rav1g-parse-check -frametimes` (`parse_stats.rs`).
+    pub stats: crate::parse_stats::FrameStats,
 }
 
 #[derive(Default)]

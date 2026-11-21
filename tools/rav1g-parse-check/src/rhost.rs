@@ -247,6 +247,16 @@ impl SinkHost for PlainHost {
 }
 
 /// rav1d's parse pass with the sink and the plain host.
+/// The previous paths of the parse (`-coeflegacy`, `-refrowslegacy`; the decoder's -parsecoeflegacy and
+/// -parserefrowslegacy).
+#[derive(Clone, Copy, Default)]
+pub struct Legacy {
+    /// The linked list of AC coefficient tokens (`ParseSettings::legacy_coef_tokens`).
+    pub coef_tokens: bool,
+    /// A frame in parse waits for the rows of all seven references (`ParseSettings::legacy_ref_rows`).
+    pub ref_rows: bool,
+}
+
 pub struct RustParser {
     parser: Parser,
     sink: Arc<Sink<PlainHost>>,
@@ -256,7 +266,7 @@ impl RustParser {
     /// `frames`: the frames that may be in parse at once. `wave_edges`: the frames keep the wavefront
     /// in the edges of their tiles (the host's default), not in the grids.
     pub fn new(threads: u16, frames: u16, options: ParseOptions, wave_edges: bool) -> Result<Self, String> {
-        Self::with_clock(threads, frames, options, false, wave_edges, false)
+        Self::with_clock(threads, frames, options, false, wave_edges, Legacy::default())
     }
 
     /// `timed`: the host has a clock, so the sink measures its block lists (and with `-parseopt time` its
@@ -267,7 +277,7 @@ impl RustParser {
         options: ParseOptions,
         timed: bool,
         wave_edges: bool,
-        legacy_coef_tokens: bool,
+        legacy: Legacy,
     ) -> Result<Self, String> {
         // What rav1d makes of the two numbers: at most as many frames as threads.
         let frames = frames.clamp(1, threads.max(1));
@@ -286,7 +296,13 @@ impl RustParser {
             options.sink(),
             usize::from(frames),
         ));
-        let mut settings = ParseSettings { threads, frames, legacy_coef_tokens, ..Default::default() };
+        let mut settings = ParseSettings {
+            threads,
+            frames,
+            legacy_coef_tokens: legacy.coef_tokens,
+            legacy_ref_rows: legacy.ref_rows,
+            ..Default::default()
+        };
         options.apply(&mut settings);
         let parser =
             Parser::new(&settings, sink.clone()).map_err(|error| format!("rav1d was not created: {error:?}"))?;

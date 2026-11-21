@@ -4157,6 +4157,7 @@ pub(crate) fn rav1d_decode_frame_exit(
     let _ = mem::take(&mut f.seq_hdr);
     let _ = mem::take(&mut f.frame_hdr);
     f.tiles.clear();
+    task_thread.stats.finished();
     task_thread.finished.store(true, Ordering::SeqCst);
     *task_thread.retval.try_lock().unwrap() = retval.err();
     retval
@@ -4225,6 +4226,8 @@ fn get_upscale_x0(in_w: c_int, out_w: c_int, step: c_int) -> c_int {
 
 pub fn rav1d_submit_frame(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResult {
     // wait for c->out_delayed[next] and move into c->out if visible
+    // rav1g: when the frame asks for its frame context (`parse_stats.rs`).
+    let submit = crate::parse_stats::now();
     let (fc, out) = if c.fc.len() > 1 {
         let mut task_thread_lock = c.task_thread.lock.lock();
         let next = state.frame_thread.next;
@@ -4238,6 +4241,7 @@ pub fn rav1d_submit_frame(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResu
             }
             fc.task_thread.cond.wait(&mut task_thread_lock);
         }
+        fc.task_thread.stats.admitted(submit);
         let out_delayed = &mut state.frame_thread.out_delayed[next as usize];
         if out_delayed.p.data.is_some() || fc.task_thread.error.load(Ordering::SeqCst) != 0 {
             let first = c.task_thread.first.load(Ordering::SeqCst);
@@ -4279,6 +4283,7 @@ pub fn rav1d_submit_frame(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResu
         drop(task_thread_lock);
         (fc, out_delayed)
     } else {
+        c.fc[0].task_thread.stats.admitted(submit);
         (&c.fc[0], &mut state.out)
     };
 

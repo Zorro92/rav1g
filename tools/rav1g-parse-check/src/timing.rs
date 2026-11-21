@@ -12,10 +12,11 @@
 //! the parser writes memory the process already has, as it would write mapped buffers.
 
 use std::cell::UnsafeCell;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rav1g_parse::rav1d::parse::{
@@ -23,9 +24,10 @@ use rav1g_parse::rav1d::parse::{
 };
 
 use rav1g_parse::options::ParseOptions;
+use rav1g_parse::rav1d::parse_stats;
 
 use crate::container;
-use crate::rhost::RustParser;
+use crate::rhost::{Legacy, RustParser};
 
 /// The largest number of coefficients a transform block has (32x32 coded).
 const MAX_COEFS: usize = 1024;
@@ -38,6 +40,8 @@ struct NullSink {
     frames: AtomicU64,
     width: AtomicU64,
     height: AtomicU64,
+    /// `-tiles`: the tile layouts of the frames, and how many frames have each.
+    layouts: Option<Mutex<BTreeMap<String, u64>>>,
 }
 
 // SAFETY: the vector of a place is written by the `frame_begin` of the frame that has the place, while
@@ -63,6 +67,28 @@ impl ParseSink for NullSink {
         }
         self.width.store(frame.bw as u64 * 4, Ordering::Relaxed);
         self.height.store(frame.bh as u64 * 4, Ordering::Relaxed);
+        if let Some(layouts) = &self.layouts {
+            // AV1 5.9.15 (tile_info): the tile columns and rows, whether they are spaced uniformly, and
+            // where each starts, in superblocks.
+            let t = &frame.frame_hdr.tiling;
+            let starts = |starts: &[u16], count: u8| {
+                starts[..=usize::from(count)].iter().map(u16::to_string).collect::<Vec<_>>().join(",")
+            };
+            let layout = format!(
+                "{}x{} sb{} cols={} rows={} uniform={} log2_cols={} log2_rows={} col_start_sb={} row_start_sb={}",
+                frame.bw * 4,
+                frame.bh * 4,
+                if frame.seq_hdr.sb128 != 0 { 128 } else { 64 },
+                t.cols,
+                t.rows,
+                t.uniform,
+                t.log2_cols,
+                t.log2_rows,
+                starts(&t.col_start_sb, t.cols),
+                starts(&t.row_start_sb, t.rows)
+            );
+            *layouts.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).entry(layout).or_default() += 1;
+        }
         Ok(number)
     }
 
@@ -93,7 +119,17 @@ fn milliseconds(duration: Duration, frames: u64) -> f64 {
 }
 
 /// `wave_edges`: the wavefront in the edges of the tiles (the default of the decoder), not in the grids.
-pub fn run(path: &Path, threads: u16, frames_in_parse: u16, options: ParseOptions, wave_edges: bool) -> ExitCode {
+/// `legacy`: the previous paths of the parse. `frame_times`: a `FRAMETIME` line per frame of every run with
+/// the sink (rav1d's `parse_stats`).
+pub fn run(
+    path: &Path,
+    threads: u16,
+    frames_in_parse: u16,
+    options: ParseOptions,
+    wave_edges: bool,
+    legacy: Legacy,
+    frame_times: bool,
+) -> ExitCode {
     // What rav1d makes of the two numbers: at most as many frames as threads.
     let frames_in_parse = frames_in_parse.clamp(1, threads.max(1));
     let data = match std::fs::read(path) {
@@ -122,8 +158,15 @@ pub fn run(path: &Path, threads: u16, frames_in_parse: u16, options: ParseOption
             frames: AtomicU64::new(0),
             width: AtomicU64::new(0),
             height: AtomicU64::new(0),
+            layouts: None,
         });
-        let mut settings = ParseSettings { threads, frames: frames_in_parse, ..Default::default() };
+        let mut settings = ParseSettings {
+            threads,
+            frames: frames_in_parse,
+            legacy_coef_tokens: legacy.coef_tokens,
+            legacy_ref_rows: legacy.ref_rows,
+            ..Default::default()
+        };
         options.apply(&mut settings);
         let Ok(parser) = Parser::new(&settings, sink.clone()) else {
             eprintln!("rav1g-parse-check: rav1d was not created");
@@ -147,8 +190,8 @@ pub fn run(path: &Path, threads: u16, frames_in_parse: u16, options: ParseOption
     let mut sink_calls = Duration::ZERO;
     let mut sink_grid = Duration::ZERO;
     let mut lists_intra = Duration::ZERO;
-    for _ in 0..RUNS {
-        let mut parser = match RustParser::with_clock(threads, frames_in_parse, options, true, wave_edges, false) {
+    for run in 0..RUNS {
+        let mut parser = match RustParser::with_clock(threads, frames_in_parse, options, true, wave_edges, legacy) {
             Ok(parser) => parser,
             Err(error) => {
                 eprintln!("rav1g-parse-check: {error}");
@@ -156,6 +199,9 @@ pub fn run(path: &Path, threads: u16, frames_in_parse: u16, options: ParseOption
             }
         };
         parser.recycle();
+        if frame_times {
+            parse_stats::set_enabled(true);
+        }
         let mut total = Duration::ZERO;
         for unit in &units {
             let start = Instant::now();
@@ -168,6 +214,17 @@ pub fn run(path: &Path, threads: u16, frames_in_parse: u16, options: ParseOption
         let start = Instant::now();
         parser.wait();
         total += start.elapsed();
+        if frame_times {
+            let records = parse_stats::take();
+            parse_stats::set_enabled(false);
+            for t in records {
+                println!(
+                    "FRAMETIME run={run} no={} admit={:.3} wall={:.3} pre={:.3} init={:.3} cdf={:.3} tile={:.3} \
+                     ref={:.3} idle={:.3}",
+                    t.number, t.admit_wait, t.wall, t.pre, t.init, t.cdf_wait, t.tile, t.ref_wait, t.idle
+                );
+            }
+        }
         // The arena of a frame is made ready inside `send`: that time is the host's, not the sink's. With
         // more than one frame in parse it runs next to the parse of the other frames, so it is not time
         // the parse took, and it stays in: the number is then the wall time of the stream, a frame.
@@ -208,5 +265,46 @@ pub fn run(path: &Path, threads: u16, frames_in_parse: u16, options: ParseOption
             String::new()
         },
     );
+    ExitCode::SUCCESS
+}
+
+/// `-tiles`: the tile layouts of a stream (AV1 5.9.15): one line per layout with the frames that have it,
+/// from one parse with one thread and a sink that keeps nothing.
+pub fn tiles(path: &Path) -> ExitCode {
+    let data = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(error) => {
+            eprintln!("rav1g-parse-check: cannot read {}: {error}", path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let units = match container::read(&data) {
+        Ok(units) => units,
+        Err(error) => {
+            eprintln!("rav1g-parse-check: {}: {error}", path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let sink = Arc::new(NullSink {
+        places: (0..1).map(|_| (AtomicBool::new(false), UnsafeCell::new(Vec::new()))).collect(),
+        frames: AtomicU64::new(0),
+        width: AtomicU64::new(0),
+        height: AtomicU64::new(0),
+        layouts: Some(Mutex::new(BTreeMap::new())),
+    });
+    let Ok(parser) = Parser::new(&ParseSettings::default(), sink.clone()) else {
+        eprintln!("rav1g-parse-check: rav1d was not created");
+        return ExitCode::FAILURE;
+    };
+    for unit in &units {
+        let _ = parser.send(unit);
+    }
+    parser.wait();
+    let name = path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+    let layouts =
+        sink.layouts.as_ref().map(|layouts| std::mem::take(&mut *layouts.lock().unwrap())).unwrap_or_default();
+    for (layout, frames) in layouts {
+        println!("TILES {name}: {frames} frames: {layout}");
+    }
     ExitCode::SUCCESS
 }

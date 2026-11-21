@@ -2417,6 +2417,15 @@ jobs:
           --streams argon-streams --out out/argon-legacy --shards 8 --shard ${{ matrix.shard }} --timeout 450
           --decoder-arg=-parseframes --decoder-arg=2 --decoder-arg=-parserefrowslegacy
 
+      # -parsecoeflegacy, with the frames in parse the library chooses (one at the sizes of the set): the
+      # previous linked list of AC coefficient tokens, and the default frames in parse.
+      - name: Argon Profile 0 on WARP with the previous AC coefficient tokens
+        if: ${{ !cancelled() }}
+        run: >-
+          python testing/argon/run.py --tool out/rav1g-dec/rav1g-dec.exe
+          --streams argon-streams --out out/argon-coeflegacy --shards 8 --shard ${{ matrix.shard }} --timeout 450
+          --decoder-arg=-parsecoeflegacy
+
       - name: Preserve the result table
         if: always()
         uses: actions/upload-artifact@v7
@@ -2427,6 +2436,8 @@ jobs:
             out/argon/summary.md
             out/argon-legacy/results.tsv
             out/argon-legacy/summary.md
+            out/argon-coeflegacy/results.tsv
+            out/argon-coeflegacy/summary.md
           if-no-files-found: warn
 
   # What the jobs above wrote, held against each other; no decoder runs here. It runs also when one of
