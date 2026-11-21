@@ -3965,6 +3965,20 @@ jobs:
           path: out/shader-regs/
           if-no-files-found: warn
 
+  # testing/precheck.sh, the local check before a push, runs the checks of testing/*/run.sh that a change
+  # touches: each of them has to be in its mapping, so that a new check is not left out. (The checks
+  # themselves run in the jobs above; CI does not run precheck.sh.)
+  precheck-mapping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Every testing/*/run.sh is in the mapping of testing/precheck.sh
+        run: sh testing/precheck.sh --check-mapping
+
   # The language bar of the README: languages.svg and languages.json of the player job (what rav1g.dll
   # of this commit is built from, by language) as the one commit of the branch badges, which the README
   # of main shows. For a push to main only: not for a tag, a dispatch, the weekly run or the branch
@@ -4014,7 +4028,8 @@ jobs:
       rust-parser-switches, rust-sinkgrid, rust-gpublists, rust-clears, rust-frames, rust-frames-threads,
       rust-dumps-equal, shader-pick-decoder, rust-dxc, rust-equal, shader-bytecode,
       rust-cross, rust-cross-run, rust-cross-run-switches, rav1d, parse-check, parse-digest, colour, sync-check,
-      cdef-check, warp-check, inter-check, superres-check, tables-check, intra-check, shader-regs]
+      cdef-check, warp-check, inter-check, superres-check, tables-check, intra-check, shader-regs,
+      precheck-mapping]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

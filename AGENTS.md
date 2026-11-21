@@ -73,3 +73,4 @@ What follows from them:
 
 - Never commit IP addresses, tokens, local absolute paths, media titles, test clips or Argon data.
 - Commit messages cite the specification section a fix follows.
+- Run `sh testing/precheck.sh` before each push (`testing/README.md`): it runs the checks a change touches.
