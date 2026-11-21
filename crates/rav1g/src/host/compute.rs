@@ -830,7 +830,7 @@ mod tests {
             .filter_map(|line| line.trim().trim_start_matches('(').strip_prefix('"'))
             .map(|rest| &rest[..rest.find('"').unwrap()])
             .collect();
-        assert_eq!(names.len(), 132);
+        assert_eq!(names.len(), SHADERS);
         let mut unique = names.clone();
         unique.sort_unstable();
         unique.dedup();
