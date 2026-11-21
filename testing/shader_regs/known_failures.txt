@@ -1,0 +1,4 @@
+# Shaders of crates/rav1g-sys/shaders.txt that DXC cannot turn into SPIR-V or LLPC cannot compile for
+# gfx1030, one a line: <name><TAB><why it is here>. The job shader-regs lists them instead of failing.
+# A shader that does not compile and is not here fails the job; one that is here and compiles is
+# reported, to be taken out. Every shader compiles today: the list is empty.

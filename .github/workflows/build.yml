@@ -3913,6 +3913,58 @@ jobs:
           path: intra-check.log
           if-no-files-found: warn
 
+  # Registers, group memory (LDS), scratch and theoretical waves per SIMD of every shader of
+  # crates/rav1g-sys/shaders.txt, compiled offline for RDNA2 (gfx1030, wave64): DXC to SPIR-V with the
+  # arguments of the real build, then the LLPC of AMD's Radeon GPU Analyzer, and RGA's analysis of the
+  # code object (testing/shader_regs/README.md). No GPU. AMD's desktop compiler, not the console's: a
+  # change from one commit to the next means something, the absolute numbers are approximate. Fails when
+  # a shader has fewer waves per SIMD or more scratch than testing/shader_regs/baseline.tsv says, so that
+  # such a change comes with a new baseline in the same commit, and the commit message says why.
+  shader-regs:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Key of the pinned RGA and DXC
+        id: tools
+        run: python3 testing/shader_regs/shader_regs.py key >> "$GITHUB_OUTPUT"
+
+      # The archives, about 270 MB: their SHA-256 is checked against the pins on every run.
+      - name: RGA and DXC from the cache
+        uses: actions/cache@v6
+        with:
+          path: shader-regs-downloads
+          key: ${{ steps.tools.outputs.key }}
+
+      - name: Measure every shader for gfx1030
+        run: |
+          set -euo pipefail
+          tools="$RUNNER_TEMP/shader-regs-tools"
+          python3 testing/shader_regs/shader_regs.py fetch --tools "$tools" --downloads shader-regs-downloads
+          mkdir -p out/shader-regs
+          python3 testing/shader_regs/shader_regs.py measure --tools "$tools" --jobs 4 \
+            --out out/shader-regs/shader_regs.tsv --failures out/shader-regs/failures.tsv
+
+      - name: Compare with the baseline
+        run: |
+          set -euo pipefail
+          status=0
+          python3 testing/shader_regs/shader_regs.py compare --failures out/shader-regs/failures.tsv \
+            --summary out/shader-regs/summary.md out/shader-regs/shader_regs.tsv | tee out/shader-regs/compare.txt || status=$?
+          cat out/shader-regs/summary.md >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      - name: Preserve the measurements
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rav1g-shader-regs-${{ github.run_id }}
+          path: out/shader-regs/
+          if-no-files-found: warn
+
   # The language bar of the README: languages.svg and languages.json of the player job (what rav1g.dll
   # of this commit is built from, by language) as the one commit of the branch badges, which the README
   # of main shows. For a push to main only: not for a tag, a dispatch, the weekly run or the branch
@@ -3962,7 +4014,7 @@ jobs:
       rust-parser-switches, rust-sinkgrid, rust-gpublists, rust-clears, rust-frames, rust-frames-threads,
       rust-dumps-equal, shader-pick-decoder, rust-dxc, rust-equal, shader-bytecode,
       rust-cross, rust-cross-run, rust-cross-run-switches, rav1d, parse-check, parse-digest, colour, sync-check,
-      cdef-check, warp-check, inter-check, superres-check, tables-check, intra-check]
+      cdef-check, warp-check, inter-check, superres-check, tables-check, intra-check, shader-regs]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
