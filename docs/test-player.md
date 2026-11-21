@@ -814,8 +814,10 @@ is on, the tile threads count every transform block of every frame (a few additi
 are timed by `-intrastepmin` is known only when the frame is recorded. The lines stay in memory until the
 task has drained and are then written to the log, so no log I/O falls into the decode (about 140 bytes a
 step). On WARP (CI, the job `rust-switches (steptime)`, 24 frames of the 4K stream `nf-dvbdash-d2-10b-2160p`
-with `-gputime` with and without `-intrastepmin 0`) the intra stage took STEPTIME_WARP_COST; the console's
-cost is the same comparison there: a run with the flags against one without.
+with `-gputime` with and without `-intrastepmin 0`, two rounds, run 44877130140) the intra stage took 2.610
+and 2.572 ms per frame without the timing and 2.631 and 2.654 ms with it (+2%, within the spread of
+WARP), with the same wall time; the console's cost is the same comparison there: a run with the flags
+against one without.
 
 **The first step** starts at the timestamp in front of the stage. If the GPU takes a timestamp before what
 was recorded in front of it has drained, the first step holds the end of the work before it (lavapipe does

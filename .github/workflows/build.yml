@@ -1639,8 +1639,8 @@ jobs:
             --out out/conformance-steptime --threads 4 "--tool-args=-intrastepmin 0" "--title=rav1g-dec with -intrastepmin 0"
           if ($LASTEXITCODE -ne 0) { $failed += "conformance with -intrastepmin 0: exit code $LASTEXITCODE" }
           $logs = @(Get-ChildItem out/conformance-steptime/lists -Filter *.log | ForEach-Object { $_.FullName })
-          $frames = @($logs | Select-String -Pattern '^STEPTIME frame ').Count
-          $steps = @($logs | Select-String -Pattern '^STEPTIME step ').Count
+          $frames = @(Select-String -Path $logs -Pattern '^STEPTIME frame ').Count
+          $steps = @(Select-String -Path $logs -Pattern '^STEPTIME step ').Count
           Write-Output "STEPTIME: $frames frames timed, $steps steps"
           if ($frames -lt 100 -or $steps -lt 1000) { $failed += "only $frames frames and $steps steps timed" }
           python testing/steptime/steptime.py fit @logs
