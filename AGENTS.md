@@ -17,9 +17,12 @@ Rust host and rav1d's parse pass. These rules apply to every change in this repo
   Argon results as they are: those are the gates. The reference is the AV1 specification v1.0.0 with Errata 1 and the Argon Streams AV1
   conformance set (README, "References"); dav1d is the backup. The code rav1g was forked from
   (branch `original`) is not a reference.
-- No change to the public API or ABI (`crates/rav1g/include/rav1g.h`, `tools/rav1g-header/abi.txt`) unless
-  the task asks for it. Switches for A/B tests go through the internal `av1_*` setters in
-  `libav1/dx/av1_perf.h`.
+- The public API and ABI (`crates/rav1g/include/rav1g.h`, `tools/rav1g-header/abi.txt`) may change too
+  when a change needs it; the project is still in heavy development. Bale builds against them, so such a
+  change raises `RAV1G_ABI_VERSION`, records the new fingerprint in `abi.txt`, updates
+  `docs/integration.md`, and Bale's thread is told what changed and what it must adjust (a delegated
+  agent says so in its report; the parent thread sends the note). Switches for A/B tests are not a reason
+  to change the ABI: they go through the internal `av1_*` setters in `libav1/dx/av1_perf.h`.
 
 ## Design against the console's resource limits
 
