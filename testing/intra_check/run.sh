@@ -185,9 +185,10 @@ intra_main_hbd.gen.h@s/WaveActiveCountBits(true) == (uint)min(lanes, wi_count)/t
 intra_main_hbd.gen.h@s/sum = WaveActiveSum(sum);/sum += 0;/@omitting the intra wave sum@MISMATCH in wave reduction
 intra_main_hbd.gen.h@/int4 next_above = 0;/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/@group sync before writing processed intra edges as a plain barrier@races in group memory .*[1-9]
 intra_v2.gen.h@0,/GroupMemoryBarrierWithGroupSync();/s//GroupMemoryBarrier();/@group sync of a pass of intra_v2 as a plain barrier@races in group memory .*[1-9]
-intra_main_hbd.gen.h@s/angle < 180 ? 850/angle <= 180 ? 850/@exact horizontal flags by arithmetic (prefetch)@MISMATCH in the prefetching
-intra_main_hbd.gen.h@s/0x43CB9D71u/0x43CB9D70u/@nominal angle of D113 (prefetch)@MISMATCH in the prefetching
+intra_main_hbd.gen.h@s/angle < 90 ? 305/angle < 87 ? 305/@zone of an angle by arithmetic (prefetch)@MISMATCH in the prefetching
+intra_main_hbd.gen.h@s/0x43CB9D71u/0x43B39D71u/@nominal angle of D203 (prefetch)@MISMATCH in the prefetching
 intra_main_hbd.gen.h@s/smooth_h_weights\[i\] \* (left - right)/smooth_h_weights[0] * (left - right)/@prefetched smooth weights@MISMATCH in the prefetching
+intra_main_hbd.gen.h@s/min(above_available << 1, bw)/min(above_available << 2, bw)/@8-bit edge filter count of a partial row above (prefetch)@MISMATCH in the prefetching 8-bit
 intra_filter_hbd.gen.h@s/queue\[q\] = queue\[q + 1\];/queue[q] = queue[q];/@10-bit filter intra residual queue@MISMATCH in the prefetching
 intra_filter.gen.h@s/queue\[q\] = queue\[q + 1\];/queue[q] = queue[q];/@8-bit filter intra residual queue@MISMATCH in the prefetching'
   mkdir "$work/mutant"
