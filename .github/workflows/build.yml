@@ -30,6 +30,10 @@ on:
         description: Run the Argon Streams AV1 Profile 0 conformance suite on WARP
         type: boolean
         default: false
+      argon_switches:
+        description: Comma-separated decoder switches to test in extra Argon passes (one flag per pass)
+        type: string
+        default: ''
   # Weekly runs also exercise the extended frame/thread matrix.
   schedule:
     - cron: '23 3 * * 1'
@@ -2377,7 +2381,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && inputs.argon
     needs: [argon-streams, rust]
     runs-on: windows-latest
-    # Five passes of the set a shard: with three the slowest shard took 63 minutes (the 4K stress streams).
+    # Allow time for manual runs with several opt-in passes, including the 4K stress streams.
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -2403,46 +2407,35 @@ jobs:
           fail-on-cache-miss: true
 
       # The 4K stress stream test22266 can reach five minutes on hosted WARP.
-      # Exercise frame-parallel parsing on small streams too. Give both schedules
-      # the same watchdog and compare the full stream hash.
+      # Exercise frame-parallel parsing on small streams too and compare the full stream hash.
       - name: Argon Profile 0 on WARP
         run: >-
           python testing/argon/run.py --tool out/rav1g-dec/rav1g-dec.exe
-          --streams argon-streams --out out/argon --shards 8 --shard ${{ matrix.shard }} --timeout 450
+          --streams argon-streams --out out/argon/default --shards 8 --shard ${{ matrix.shard }} --timeout 450
           --decoder-arg=-parseframes --decoder-arg=2
 
-      - name: Argon Profile 0 on WARP with the previous reference-row waits
-        if: ${{ !cancelled() }}
-        run: >-
-          python testing/argon/run.py --tool out/rav1g-dec/rav1g-dec.exe
-          --streams argon-streams --out out/argon-legacy --shards 8 --shard ${{ matrix.shard }} --timeout 450
-          --decoder-arg=-parseframes --decoder-arg=2 --decoder-arg=-parserefrowslegacy
-
-      # -parsecoeflegacy, with the frames in parse the library chooses (one at the sizes of the set): the
-      # previous linked list of AC coefficient tokens, and the default frames in parse.
-      - name: Argon Profile 0 on WARP with the previous AC coefficient tokens
-        if: ${{ !cancelled() }}
-        run: >-
-          python testing/argon/run.py --tool out/rav1g-dec/rav1g-dec.exe
-          --streams argon-streams --out out/argon-coeflegacy --shards 8 --shard ${{ matrix.shard }} --timeout 450
-          --decoder-arg=-parsecoeflegacy
-
-      # -fggenlegacy: the film grain templates built by the GPU shaders instead of on the CPU (7.18.3.3).
-      - name: Argon Profile 0 on WARP with the film grain templates on the GPU
-        if: ${{ !cancelled() }}
-        run: >-
-          python testing/argon/run.py --tool out/rav1g-dec/rav1g-dec.exe
-          --streams argon-streams --out out/argon-fggenlegacy --shards 8 --shard ${{ matrix.shard }} --timeout 450
-          --decoder-arg=-fggenlegacy
-
-      # -intralistslegacy, with the frames in parse the library chooses: the intra block lists counted by
-      # the previous loops of av1_mi_push_block over the previous wavefront edges.
-      - name: Argon Profile 0 on WARP with the previous intra list loops
-        if: ${{ !cancelled() }}
-        run: >-
-          python testing/argon/run.py --tool out/rav1g-dec/rav1g-dec.exe
-          --streams argon-streams --out out/argon-intralistslegacy --shards 8 --shard ${{ matrix.shard }} --timeout 450
-          --decoder-arg=-intralistslegacy
+      - name: Argon Profile 0 on WARP with opt-in decoder switches
+        if: ${{ !cancelled() && inputs.argon_switches != '' }}
+        shell: pwsh
+        env:
+          ARGON_SWITCHES: ${{ inputs.argon_switches }}
+        run: |
+          $switches = $env:ARGON_SWITCHES -split ',' | ForEach-Object { $_.Trim() } | Select-Object -Unique
+          foreach ($decoderSwitch in $switches) {
+            if ($decoderSwitch -cnotmatch '\A-[a-z][a-z0-9_-]*\z') {
+              throw 'argon_switches needs comma-separated decoder flags without arguments (for example -intralistslegacy)'
+            }
+          }
+          $PSNativeCommandUseErrorActionPreference = $false
+          $failed = $false
+          foreach ($decoderSwitch in $switches) {
+            Write-Host "Argon on WARP with $decoderSwitch"
+            python testing/argon/run.py --tool out/rav1g-dec/rav1g-dec.exe `
+              --streams argon-streams --out "out/argon/$decoderSwitch" --shards 8 --shard ${{ matrix.shard }} --timeout 450 `
+              --decoder-arg=-parseframes --decoder-arg=2 "--decoder-arg=$decoderSwitch"
+            if ($LASTEXITCODE -ne 0) { $failed = $true }
+          }
+          if ($failed) { exit 1 }
 
       - name: Preserve the result table
         if: always()
@@ -2450,16 +2443,8 @@ jobs:
         with:
           name: argon-profile0-${{ github.run_id }}-shard-${{ matrix.shard }}
           path: |
-            out/argon/results.tsv
-            out/argon/summary.md
-            out/argon-legacy/results.tsv
-            out/argon-legacy/summary.md
-            out/argon-coeflegacy/results.tsv
-            out/argon-coeflegacy/summary.md
-            out/argon-fggenlegacy/results.tsv
-            out/argon-fggenlegacy/summary.md
-            out/argon-intralistslegacy/results.tsv
-            out/argon-intralistslegacy/summary.md
+            out/argon/*/results.tsv
+            out/argon/*/summary.md
           if-no-files-found: warn
 
   # What the jobs above wrote, held against each other; no decoder runs here. It runs also when one of
