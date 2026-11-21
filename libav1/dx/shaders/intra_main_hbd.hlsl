@@ -64,6 +64,9 @@ RWByteAddressBuffer dst_frame : register(u0);
 #define EDGE_ABOVE 0
 #define EDGE_LEFT 1
 
+// INTRA_PREFETCH (intra_main_single_edge*.hlsl, the default, and intra_main_prefetch*.hlsl): each
+// lane loads its edges and the plane's constants before the first sync, the prepared edges go to a
+// bank per transform, and V and H prediction without an angle delta copies the edge samples directly.
 // INTRA_8BIT (intra_main_prefetch.hlsl, with INTRA_PREFETCH): the same shader for 8-bit frames. It keeps
 // the samples it predicts as this one does, two to a word of 16-bit halves, and reads and writes the
 // frame's 8-bit samples (four to a word) at the edges of that: the loads of the edges, of the luma of
@@ -83,7 +86,7 @@ static const uint low_bits[11] = {0, 1, 3, 7, 15, 31, 63, 127, 255, 511, 1023};
 
 // Each transform owns 20 words per four lanes on each edge, including room for the corner and
 // upsampling. DC and CFL blocks use the same space for their partial sums.
-#ifdef INTRA_EDGE_BANKS
+#ifdef INTRA_PREFETCH
 groupshared int edges[WG_SIZE * 10];
 #define EDGE(side, index) edges[index]
 #else
@@ -125,7 +128,7 @@ int upsample_edge(int p0, int p1, int p2, int p3) {
   return clamp((-p0 + 9 * (p1 + p2) - p3 + 8) >> 4, 0, PIXEL_MAX);
 }
 
-#ifdef INTRA_EDGE_BANKS
+#ifdef INTRA_PREFETCH
 // Read the raw edge and publish the prepared samples in a disjoint range.
 // Filtering and upsampling are mutually exclusive for a given edge in
 // gen_pred_blocks. Upsampling preserves the original even samples.
@@ -476,7 +479,7 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
   const int left_available = ((block.y >> 16) & 63) << 2;
 
   const int mode = (block.y >> 6) & 15;
-#ifdef INTRA_EDGE_BANKS
+#ifdef INTRA_PREFETCH
   // A zero CfL alpha adds zero to the DC prediction. The sibling chroma
   // plane keeps its own alpha, and the scheduler still accounts for luma.
   const bool cfl = mode == MODE_CFL && ((block.y >> 22) & 63) != 16;
@@ -492,12 +495,9 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
   // shift of a smooth one) is only read behind the syncs. A lane loads its edges without waiting for
   // a second load behind the record.
   const int mode_flags = intra_mode_flags(mode, mode_angle);
-#else
-#define mode_flags params.z
-#endif
-#ifdef INTRA_TIGHT
   const bool straight = mode < 2 && mode_angle == 3 && thread.x < cb_wi_count;
 #else
+#define mode_flags params.z
   const bool straight = false;
 #endif
 
@@ -538,7 +538,7 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
   const int corner = plane_cb.y + ((bx << 1) - 4) + (by - 1) * stride;
 #endif
 
-#ifdef INTRA_EDGE_BANKS
+#ifdef INTRA_PREFETCH
   const int local_start = (thread.x & (WG_SIZE - 1)) - wi;
 #else
   const int loc_base = (((thread.x & (WG_SIZE - 1)) - wi) >> 2) * 20 + 2;
@@ -571,7 +571,7 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
                               ? min(left_available, bh) + need_bot * bw + need_aboveleft - 1
                               : 0;
 
-#ifdef INTRA_EDGE_BANKS
+#ifdef INTRA_PREFETCH
   // Keep the same 40 words per four lanes: 10 for each raw edge and 20 for
   // preparation, including each edge's two corner slots. For 4x4, a zone 1/3
   // edge can span eight raw or sixteen prepared samples; it takes the entire
@@ -710,7 +710,7 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
 
   GroupMemoryBarrierWithGroupSync();
 
-#ifndef INTRA_EDGE_BANKS
+#ifndef INTRA_PREFETCH
   int4 next_above = 0;
   int4 next_left = 0;
   if (directional) {
@@ -753,7 +753,7 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
 #endif
   }
 
-#ifndef INTRA_EDGE_BANKS
+#ifndef INTRA_PREFETCH
   GroupMemoryBarrierWithGroupSync();
   if (directional) {
     write_edge(EDGE_ABOVE, raw_above, wi, wi_count, above_count, upsample_above,
@@ -847,7 +847,7 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
         const int fraction = from_above ? frac_x : ((dy << upsample_left) & 63) >> 1;
         const int edge = from_above ? EDGE_ABOVE : EDGE_LEFT;
         const int last = from_above ? last_x : last_y;
-#ifdef INTRA_EDGE_BANKS
+#ifdef INTRA_PREFETCH
         const int edge_base = from_above ? prepared_above : prepared_left;
 #endif
         const int p0 = EDGE(edge, edge_base + clamp(base, -2, last));
