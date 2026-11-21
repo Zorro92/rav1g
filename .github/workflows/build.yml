@@ -2426,6 +2426,14 @@ jobs:
           --streams argon-streams --out out/argon-coeflegacy --shards 8 --shard ${{ matrix.shard }} --timeout 450
           --decoder-arg=-parsecoeflegacy
 
+      # -fggenlegacy: the film grain templates built by the GPU shaders instead of on the CPU (7.18.3.3).
+      - name: Argon Profile 0 on WARP with the film grain templates on the GPU
+        if: ${{ !cancelled() }}
+        run: >-
+          python testing/argon/run.py --tool out/rav1g-dec/rav1g-dec.exe
+          --streams argon-streams --out out/argon-fggenlegacy --shards 8 --shard ${{ matrix.shard }} --timeout 450
+          --decoder-arg=-fggenlegacy
+
       - name: Preserve the result table
         if: always()
         uses: actions/upload-artifact@v7
@@ -2438,6 +2446,8 @@ jobs:
             out/argon-legacy/summary.md
             out/argon-coeflegacy/results.tsv
             out/argon-coeflegacy/summary.md
+            out/argon-fggenlegacy/results.tsv
+            out/argon-fggenlegacy/summary.md
           if-no-files-found: warn
 
   # What the jobs above wrote, held against each other; no decoder runs here. It runs also when one of

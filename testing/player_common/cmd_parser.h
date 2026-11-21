@@ -152,6 +152,7 @@ class CParameters {
     bool parserefrowslegacy_;
     bool lrlegacy_;
     bool fglegacy_;
+    bool fggenlegacy_;
     bool copylegacy_;
     bool idctlegacy_;
     bool clearlegacy_;

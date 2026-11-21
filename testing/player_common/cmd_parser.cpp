@@ -101,6 +101,8 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"intraschedulelegacy", atSingle, anOptional, "previous intra wavefront and exact V/H predictors", "", &params_.intraschedulelegacy_},
       {"lrlegacy", atSingle, anOptional, "original loop restoration shader", "", &params_.lrlegacy_},
       {"fglegacy", atSingle, anOptional, "original direct NV12/P010 film grain shader", "", &params_.fglegacy_},
+      {"fggenlegacy", atSingle, anOptional, "film grain templates on the GPU (film_grain_gen_luma/chroma)", "",
+       &params_.fggenlegacy_},
       {"copylegacy", atSingle, anOptional, "original direct NV12/P010 copy shader", "", &params_.copylegacy_},
       {"idctlegacy", atSingle, anOptional, "original small inverse transform shaders", "", &params_.idctlegacy_},
       {"clearlegacy", atSingle, anOptional, "clear the whole residual allocation", "", &params_.clearlegacy_},
@@ -487,6 +489,7 @@ void CParameters::Reset() {
   params_.parserefrowslegacy_ = false;
   params_.lrlegacy_ = false;
   params_.fglegacy_ = false;
+  params_.fggenlegacy_ = false;
   params_.copylegacy_ = false;
   params_.idctlegacy_ = false;
   params_.clearlegacy_ = false;

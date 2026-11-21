@@ -831,6 +831,10 @@ int AV1Decoder::DecodeOne() {
   av1_set_fg_legacy(params_.fglegacy_);
   XB_LOGI << "Direct NV12/P010 film grain shader: "
           << (params_.fglegacy_ ? "film_grain_filter_sp_tex (-fglegacy)" : "film_grain_filter_sp_tex_v2 (default)");
+  av1_set_fg_gen_legacy(params_.fggenlegacy_);
+  XB_LOGI << "Film grain templates: "
+          << (params_.fggenlegacy_ ? "GPU, film_grain_gen_luma/chroma (-fggenlegacy)"
+                                   : "CPU, uploaded with the random offsets (default)");
   av1_set_copy_legacy(params_.copylegacy_);
   XB_LOGI << "Direct NV12/P010 copy shader: "
           << (params_.copylegacy_ ? "copy_plane_sp_tex (-copylegacy)" : "copy_plane_sp_tex_v2 (default)");

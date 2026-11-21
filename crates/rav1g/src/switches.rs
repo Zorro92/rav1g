@@ -98,6 +98,12 @@ pub fn set_skip_film_grain(enable: bool) {
     crate::host::av1_set_skip_film_grain(c_int::from(enable))
 }
 
+/// Make the film grain templates on the GPU (`film_grain_gen_luma`, `film_grain_gen_chroma`) instead of
+/// on the CPU. Set while no frame is in flight.
+pub fn set_fg_gen_legacy(enable: bool) {
+    crate::host::av1_set_fg_gen_legacy(c_int::from(enable))
+}
+
 /// Use the original direct NV12/P010 film grain apply shader.
 pub fn set_fg_legacy(enable: bool) {
     crate::host::av1_set_fg_legacy(c_int::from(enable))

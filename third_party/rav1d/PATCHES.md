@@ -47,7 +47,10 @@ there).
   `src/x86/cpuid.asm` is not needed either: the CPU features come from the `raw-cpuid` crate.
 - The pixel code: `cdef.rs`, `cdef_apply.rs`, `fg_apply.rs`, `filmgrain.rs`, `ipred.rs`,
   `ipred_prepare.rs`, `itx.rs`, `itx_1d.rs`, `lf_apply.rs`, `loopfilter.rs`, `looprestoration.rs`,
-  `lr_apply.rs`, `mc.rs`, `pal.rs`, `wedge.rs`, `pic_or_buf.rs`.
+  `lr_apply.rs`, `mc.rs`, `pal.rs`, `wedge.rs`, `pic_or_buf.rs`. Of `filmgrain.rs` the generation of the
+  grain templates (`generate_grain_y_rust`, `generate_grain_uv_rust`, 4:2:0) is in the host of rav1g,
+  `crates/rav1g/src/host/grain_template.rs`, with this licence in its header: the decoder makes the
+  templates on the CPU and applies the grain on the GPU.
 - `rust_api.rs`, the safe wrapper around the C API.
 
 ## Changed files

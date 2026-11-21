@@ -174,6 +174,7 @@ pub struct Spec {
 pub struct Choices {
     pub lr_legacy: bool,
     pub fg_legacy: bool,
+    pub fg_gen_legacy: bool,
     pub skip_film_grain: bool,
     pub copy_legacy: bool,
     pub idct_legacy: bool,
@@ -520,6 +521,7 @@ impl Library {
         switches::set_lf_legacy(choices.lf_legacy);
         switches::set_lr_legacy(choices.lr_legacy);
         switches::set_fg_legacy(choices.fg_legacy);
+        switches::set_fg_gen_legacy(choices.fg_gen_legacy);
         switches::set_skip_film_grain(choices.skip_film_grain);
         switches::set_copy_legacy(choices.copy_legacy);
         switches::set_idct_legacy(choices.idct_legacy);

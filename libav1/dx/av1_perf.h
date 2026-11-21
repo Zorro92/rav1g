@@ -44,6 +44,11 @@ enum {
                                   AV1_PERF_GPU_CDEF in the command list */
   AV1_PERF_GPU_PRED_COUNT,    /* group counts and record ranks for -parseopt gpublists */
   AV1_PERF_GPU_PRED_SCAN,     /* scan the group counts and write indirect arguments */
+  AV1_PERF_GPU_FILM_GRAIN_GEN, /* the grain templates on the GPU (av1_set_fg_gen_legacy): the two
+                                  dispatches of film_grain_gen_luma/chroma, in front of
+                                  AV1_PERF_GPU_FILM_GRAIN (the apply pass) in the command list; not
+                                  dispatched on the default path, which makes them on the CPU
+                                  (AV1_PERF_CPU_GRAIN_TEMPLATE) */
   AV1_PERF_GPU_STAGE_COUNT,
   AV1_PERF_GPU_BEGIN = 255     /* first timestamp of a command list */
 };
@@ -92,6 +97,10 @@ enum {
                                  grid the block calls write */
   AV1_PERF_CPU_SINK_LISTS_INTRA, /* AV1_PARSER_OPTION_TIME_CALLS: of SINK_LISTS, the wavefront and the lists
                                  of intra prediction (the part of av1_mi_push_block behind the inter lists) */
+  /* the thread that records the frame (the submission thread with more than one frame in parse, the
+     decode thread with one); part of AV1_PERF_CPU_REC_COPY */
+  AV1_PERF_CPU_GRAIN_TEMPLATE, /* the film grain templates of a grain frame made on the CPU and written into
+                                  its upload buffer (7.18.3.3; 0 with av1_set_fg_gen_legacy) */
   AV1_PERF_CPU_COUNT
 };
 
@@ -295,6 +304,12 @@ void av1_set_lr_legacy(int enable);
  * direct NV12/P010 textures. Zero selects the default shader. Change it
  * only while no frame is in flight. */
 void av1_set_fg_legacy(int enable);
+
+/* Process-wide. Non-zero makes the film grain templates (AV1 7.18.3.3) on the GPU, with the two
+ * shaders film_grain_gen_luma and film_grain_gen_chroma in front of the apply pass (stage
+ * AV1_PERF_GPU_FILM_GRAIN_GEN). Zero makes them on the CPU while the frame is recorded and uploads them
+ * with its random offsets (default). Change it only while no frame is in flight. */
+void av1_set_fg_gen_legacy(int enable);
 
 /* Process-wide. Set while no frame is in flight. Non-zero skips film grain synthesis. */
 void av1_set_skip_film_grain(int enable);

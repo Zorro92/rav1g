@@ -57,7 +57,8 @@ pub const AV1_PERF_GPU_SLOT_CLEAR: c_int = 17;
 pub const AV1_PERF_GPU_CDEF_LISTS: c_int = 18;
 pub const AV1_PERF_GPU_PRED_COUNT: c_int = 19;
 pub const AV1_PERF_GPU_PRED_SCAN: c_int = 20;
-pub const AV1_PERF_GPU_STAGE_COUNT: c_int = 21;
+pub const AV1_PERF_GPU_FILM_GRAIN_GEN: c_int = 21;
+pub const AV1_PERF_GPU_STAGE_COUNT: c_int = 22;
 pub const AV1_PERF_GPU_BEGIN: c_int = 255;
 pub const AV1_PERF_CPU_WAIT_SLOT: c_int = 0;
 pub const AV1_PERF_CPU_WAIT_SEC_SLOT: c_int = 1;
@@ -88,7 +89,8 @@ pub const AV1_PERF_CPU_SINK_LISTS: c_int = 25;
 pub const AV1_PERF_CPU_SINK_CALLS: c_int = 26;
 pub const AV1_PERF_CPU_SINK_GRID: c_int = 27;
 pub const AV1_PERF_CPU_SINK_LISTS_INTRA: c_int = 28;
-pub const AV1_PERF_CPU_COUNT: c_int = 29;
+pub const AV1_PERF_CPU_GRAIN_TEMPLATE: c_int = 29;
+pub const AV1_PERF_CPU_COUNT: c_int = 30;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct av1_perf_frame {
@@ -112,7 +114,7 @@ pub struct av1_perf_frame {
     pub gpu_span_ms: f64,
     pub gpu_sum_ms: f64,
     pub gpu_gap_ms: f64,
-    pub cpu_ms: [f64; 29],
+    pub cpu_ms: [f64; AV1_PERF_CPU_COUNT as usize],
     pub memset_bytes: i64,
     pub async_clear_bytes: i64,
     pub gpu_clear_bytes: i64,
@@ -120,7 +122,7 @@ pub struct av1_perf_frame {
     pub inter: *const av1_perf_inter_detail,
 }
 const _: () = {
-    assert!(size_of::<av1_perf_frame>() == 616);
+    assert!(size_of::<av1_perf_frame>() == 632);
     assert!(align_of::<av1_perf_frame>() == 8);
     assert!(offset_of!(av1_perf_frame, frame_number) == 0);
     assert!(offset_of!(av1_perf_frame, show_frame) == 4);
@@ -138,16 +140,16 @@ const _: () = {
     assert!(offset_of!(av1_perf_frame, gpu_valid) == 52);
     assert!(offset_of!(av1_perf_frame, gpu_marks) == 56);
     assert!(offset_of!(av1_perf_frame, gpu_stage_ms) == 64);
-    assert!(offset_of!(av1_perf_frame, gpu_stage_hits) == 232);
-    assert!(offset_of!(av1_perf_frame, gpu_span_ms) == 320);
-    assert!(offset_of!(av1_perf_frame, gpu_sum_ms) == 328);
-    assert!(offset_of!(av1_perf_frame, gpu_gap_ms) == 336);
-    assert!(offset_of!(av1_perf_frame, cpu_ms) == 344);
-    assert!(offset_of!(av1_perf_frame, memset_bytes) == 576);
-    assert!(offset_of!(av1_perf_frame, async_clear_bytes) == 584);
-    assert!(offset_of!(av1_perf_frame, gpu_clear_bytes) == 592);
-    assert!(offset_of!(av1_perf_frame, complete_ms) == 600);
-    assert!(offset_of!(av1_perf_frame, inter) == 608);
+    assert!(offset_of!(av1_perf_frame, gpu_stage_hits) == 240);
+    assert!(offset_of!(av1_perf_frame, gpu_span_ms) == 328);
+    assert!(offset_of!(av1_perf_frame, gpu_sum_ms) == 336);
+    assert!(offset_of!(av1_perf_frame, gpu_gap_ms) == 344);
+    assert!(offset_of!(av1_perf_frame, cpu_ms) == 352);
+    assert!(offset_of!(av1_perf_frame, memset_bytes) == 592);
+    assert!(offset_of!(av1_perf_frame, async_clear_bytes) == 600);
+    assert!(offset_of!(av1_perf_frame, gpu_clear_bytes) == 608);
+    assert!(offset_of!(av1_perf_frame, complete_ms) == 616);
+    assert!(offset_of!(av1_perf_frame, inter) == 624);
 };
 impl Default for av1_perf_frame {
     fn default() -> Self {
