@@ -35,6 +35,7 @@ unsafe extern "C" {
     fn av1_set_intra_bank_legacy(enable: c_int);
     fn av1_set_intra_step_legacy(enable: c_int);
     fn av1_set_intra_single_edge_legacy(enable: c_int);
+    fn av1_set_parse_coef_legacy(enable: c_int);
 }
 
 /// What a frame says about its colour: the description of its sequence header and its HDR metadata.
@@ -167,7 +168,7 @@ pub struct Spec {
     pub shared_fence: bool,
 }
 
-/// The shader choices of a task.
+/// The decoder experiments of a task.
 #[derive(Clone, Copy)]
 pub struct Choices {
     pub lr_legacy: bool,
@@ -187,6 +188,7 @@ pub struct Choices {
     pub intra_bank_legacy: bool,
     pub intra_step_legacy: bool,
     pub intra_single_edge_legacy: bool,
+    pub parse_coef_legacy: bool,
     pub lf_legacy: bool,
     pub lf_h_split: u32,
     pub intra_edge_fix: bool,
@@ -530,6 +532,7 @@ impl Library {
             av1_set_intra_bank_legacy(c_int::from(choices.intra_bank_legacy));
             av1_set_intra_step_legacy(c_int::from(choices.intra_step_legacy));
             av1_set_intra_single_edge_legacy(c_int::from(choices.intra_single_edge_legacy));
+            av1_set_parse_coef_legacy(c_int::from(choices.parse_coef_legacy));
         }
         if self.is_c() {
             capi::rav1g_set_cdef_v2(choices.cdef_v2);

@@ -282,6 +282,8 @@ pub struct ParseSettings {
     /// thread that takes it next may be another one. With one frame in parse nothing waits for the
     /// progress of a tile row by row, so the other threads are not woken for it either.
     pub tile_keeps_thread: bool,
+    /// Use the previous raster-indexed linked list for AC coefficient tokens.
+    pub legacy_coef_tokens: bool,
 }
 
 impl Default for ParseSettings {
@@ -293,6 +295,7 @@ impl Default for ParseSettings {
             frame_size_limit: 0,
             lf_masks: true,
             tile_keeps_thread: false,
+            legacy_coef_tokens: false,
         }
     }
 }
@@ -321,7 +324,7 @@ impl Parser {
             decode_frame_type: Rav1dDecodeFrameType::All,
         };
         Ok(Self {
-            c: rav1d_open(&s, sink, settings.lf_masks, settings.tile_keeps_thread)?,
+            c: rav1d_open(&s, sink, settings)?,
         })
     }
 

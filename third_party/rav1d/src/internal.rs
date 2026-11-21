@@ -224,6 +224,7 @@ pub struct Rav1dContext {
     /// rav1g: the switches of `crate::parse::ParseSettings`.
     pub(crate) parse_lf_masks: bool,
     pub(crate) parse_tile_keeps_thread: bool,
+    pub(crate) parse_legacy_coef_tokens: bool,
     /// rav1g: a worker thread ended with a panic (`thread_task::rav1d_worker_task`). Nothing waits
     /// for a frame any more and no task is taken; the context is good for `rav1d_close` only.
     pub(crate) broken: AtomicBool,
@@ -338,9 +339,9 @@ pub(crate) struct Rav1dFrameContextBdFn {
 }
 
 impl Rav1dFrameContextBdFn {
-    pub const fn new<BD: BitDepth>() -> Self {
+    const fn new<BD: BitDepth, const PACKED: bool>() -> Self {
         Self {
-            read_coef_blocks: rav1d_read_coef_blocks::<BD>,
+            read_coef_blocks: rav1d_read_coef_blocks::<BD, PACKED>,
             copy_pal_block_y: rav1d_copy_pal_block_y::<BD>,
             copy_pal_block_uv: rav1d_copy_pal_block_uv::<BD>,
             read_pal_plane: rav1d_read_pal_plane::<BD>,
@@ -348,13 +349,23 @@ impl Rav1dFrameContextBdFn {
         }
     }
 
-    pub const fn get(bpc: BPC) -> &'static Self {
-        const BPC8: Rav1dFrameContextBdFn = Rav1dFrameContextBdFn::new::<BitDepth8>();
-        const BPC16: Rav1dFrameContextBdFn = Rav1dFrameContextBdFn::new::<BitDepth16>();
-        match bpc {
-            BPC::BPC8 => &BPC8,
-            BPC::BPC16 => &BPC16,
+    pub const fn get(bpc: BPC, legacy: bool) -> &'static Self {
+        const PACKED_8: Rav1dFrameContextBdFn = Rav1dFrameContextBdFn::new::<BitDepth8, true>();
+        const PACKED_16: Rav1dFrameContextBdFn = Rav1dFrameContextBdFn::new::<BitDepth16, true>();
+        const LINKED_8: Rav1dFrameContextBdFn = Rav1dFrameContextBdFn::new::<BitDepth8, false>();
+        const LINKED_16: Rav1dFrameContextBdFn = Rav1dFrameContextBdFn::new::<BitDepth16, false>();
+        match (bpc, legacy) {
+            (BPC::BPC8, false) => &PACKED_8,
+            (BPC::BPC16, false) => &PACKED_16,
+            (BPC::BPC8, true) => &LINKED_8,
+            (BPC::BPC16, true) => &LINKED_16,
         }
+    }
+}
+
+impl Default for &'static Rav1dFrameContextBdFn {
+    fn default() -> Self {
+        Rav1dFrameContextBdFn::get(BPC::BPC8, false)
     }
 }
 
@@ -575,6 +586,7 @@ impl Rav1dFrameContext {
 #[derive(Default)]
 #[repr(C)]
 pub(crate) struct Rav1dFrameData {
+    pub bd_fn: &'static Rav1dFrameContextBdFn,
     pub seq_hdr: Option<Arc<DRav1d<Rav1dSequenceHeader, Dav1dSequenceHeader>>>,
     pub frame_hdr: Option<Arc<DRav1d<Rav1dFrameHeader, Dav1dFrameHeader>>>,
     pub refp: [Rav1dThreadPicture; 7],
@@ -627,11 +639,6 @@ pub(crate) struct Rav1dFrameData {
 }
 
 impl Rav1dFrameData {
-    pub fn bd_fn(&self) -> &'static Rav1dFrameContextBdFn {
-        let bpc = BPC::from_bitdepth_max(self.bitdepth_max);
-        Rav1dFrameContextBdFn::get(bpc)
-    }
-
     pub fn frame_hdr(&self) -> &Rav1dFrameHeader {
         self.frame_hdr.as_ref().unwrap()
     }

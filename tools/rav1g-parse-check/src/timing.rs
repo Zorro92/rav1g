@@ -148,7 +148,7 @@ pub fn run(path: &Path, threads: u16, frames_in_parse: u16, options: ParseOption
     let mut sink_grid = Duration::ZERO;
     let mut lists_intra = Duration::ZERO;
     for _ in 0..RUNS {
-        let mut parser = match RustParser::with_clock(threads, frames_in_parse, options, true, wave_edges) {
+        let mut parser = match RustParser::with_clock(threads, frames_in_parse, options, true, wave_edges, false) {
             Ok(parser) => parser,
             Err(error) => {
                 eprintln!("rav1g-parse-check: {error}");

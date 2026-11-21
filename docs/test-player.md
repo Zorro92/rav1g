@@ -1409,6 +1409,11 @@ The log has `Parser switches (-parseopt): ...` behind the `Parser:` line (`nolfm
 for a task without the flag, `none` with `-parseopt none`). A task with other switches than the task
 before gets a new decoder.
 
+For a coefficient parsing A/B, add `-parsecoeflegacy` to use the previous linked AC
+token list. The default packs the nonzero AC tokens into scan order in the parser's
+scratch block. Both paths emit the same coefficient records. The flag also works
+in `rav1g-dec`. The player creates a fresh parser when the flag changes between tasks.
+
 With rav1d's parse the `-gputime` summary splits the tile decode further. All three lines are parts
 of `cpu entropy/tile decode, thread sum`, summed over the tile threads, and zero with `-parser c`
 (the C parser does the same work without timers of its own):

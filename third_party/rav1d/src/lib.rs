@@ -246,8 +246,7 @@ pub(crate) fn rav1d_get_frame_delay(s: &Rav1dSettings) -> u16 {
 pub(crate) fn rav1d_open(
     s: &Rav1dSettings,
     sink: Arc<dyn crate::parse::ParseSink>,
-    parse_lf_masks: bool,
-    parse_tile_keeps_thread: bool,
+    parse: &crate::parse::ParseSettings,
 ) -> Rav1dResult<Arc<Rav1dContext>> {
     static INITTED: Once = Once::new();
     INITTED.call_once(|| init_internal());
@@ -348,8 +347,9 @@ pub(crate) fn rav1d_open(
         state,
         tc,
         sink,
-        parse_lf_masks,
-        parse_tile_keeps_thread,
+        parse_lf_masks: parse.lf_masks,
+        parse_tile_keeps_thread: parse.tile_keeps_thread,
+        parse_legacy_coef_tokens: parse.legacy_coef_tokens,
         broken: Default::default(),
         dsp: Default::default(),
         flush: Default::default(),

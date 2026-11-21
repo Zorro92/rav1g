@@ -1003,6 +1003,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         intra_bank_legacy: task.intrabanklegacy,
         intra_step_legacy: task.intrasteplegacy,
         intra_single_edge_legacy: task.intrasingleedgelegacy,
+        parse_coef_legacy: task.parsecoeflegacy,
         lf_legacy: task.lflegacy,
         lf_h_split: task.lfhsplit as u32,
         intra_edge_fix: task.intraedgefix,
@@ -1049,6 +1050,9 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         task.name,
         task.parser_options.words()
     );
+    if task.parsecoeflegacy {
+        say!("PARSER {}: linked AC coefficient tokens (-parsecoeflegacy)", task.name);
+    }
     if task.parser_options.gpu_cdef_lists || task.parser_options.gpu_grid {
         say!(
             "CDEF lists shader: {}",

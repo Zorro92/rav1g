@@ -43,7 +43,7 @@ use crate::parse::{
 };
 use crate::internal::{
     Bxy, Rav1dContext, Rav1dContextTaskType, Rav1dFrameContext,
-    Rav1dFrameContextFrameThread, Rav1dFrameContextLf, Rav1dFrameData, Rav1dState,
+    Rav1dFrameContextBdFn, Rav1dFrameContextFrameThread, Rav1dFrameContextLf, Rav1dFrameData, Rav1dState,
     Rav1dTaskContext, Rav1dTileState, Rav1dTileStateContext, ScalableMotionParams, ScratchPal,
     TileStateRef,
 };
@@ -921,7 +921,7 @@ fn decode_b(
 
     let ts = &f.ts[t.ts];
     let ta = &f.a[t.a];
-    let bd_fn = f.bd_fn();
+    let bd_fn = f.bd_fn;
     let b_dim = bs.dimensions();
     let bx4 = t.b.x & 31;
     let by4 = t.b.y & 31;
@@ -4487,6 +4487,7 @@ pub fn rav1d_submit_frame(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResu
     f.sbh = f.bh + f.sb_step - 1 >> f.sb_shift;
     f.b4_stride = (f.bw + 31 & !31) as ptrdiff_t;
     f.bitdepth_max = (1 << f.cur.p.bpc) - 1;
+    f.bd_fn = Rav1dFrameContextBdFn::get(BPC::from_bitdepth_max(f.bitdepth_max), c.parse_legacy_coef_tokens);
     fc.task_thread.error.store(0, Ordering::Relaxed);
     let uses_2pass = (c.fc.len() > 1) as c_int;
     let cols = frame_hdr.tiling.cols;

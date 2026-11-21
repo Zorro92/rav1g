@@ -342,6 +342,11 @@ void av1_set_intra_step_legacy(int enable);
 /* Use the prefetch shaders with the previous angle-specific wavefront. */
 void av1_set_intra_single_edge_legacy(int enable);
 
+/* Process-wide. Nonzero uses the previous linked list of AC coefficient tokens
+ * (-parsecoeflegacy); zero uses packed tokens in scan order. Set before the
+ * decoder's first decode call. A running parser keeps its selection. */
+void av1_set_parse_coef_legacy(int enable);
+
 /* ---------------------------------------------------------------------------
  * Intra step timing (test flags -intrasteptime and -intrastepmin; docs/test-player.md, "Intra step
  * timing"). Nothing here changes what is decoded.

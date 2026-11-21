@@ -1,7 +1,6 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use std::ffi::{c_int, c_uint};
-use std::hint::assert_unchecked;
 use std::ops::BitOr;
 use std::cmp;
 use std::sync::OnceLock;
@@ -13,7 +12,7 @@ use to_method::To as _;
 use crate::ctx::CaseSet;
 use crate::env::get_uv_inter_txtp;
 use crate::in_range::InRange;
-use crate::include::common::bitdepth::{AsPrimitive, BitDepth, ToPrimitive, BPC};
+use crate::include::common::bitdepth::{AsPrimitive, BitDepth, BitDepth8, BPC};
 use crate::include::common::dump::{ac_dump, coef_dump, hex_dump, hex_dump_pic};
 use crate::include::common::intops::{apply_sign64, clip, ulog2};
 use crate::include::dav1d::dav1d::Rav1dInloopFilterType;
@@ -510,13 +509,74 @@ fn inverse_scan(tx: TxfmSize, tx_class: TxClass) -> &'static [u16] {
     &tables[tx as usize * 3 + tx_class as usize]
 }
 
-/// rav1g: the coefficients do not stay in the task's or the frame's block (`cf` of upstream). The token
-/// loop uses the task's block as before; the loop that reads signs and remainders writes each
-/// dequantised coefficient where the sink says, at its index in scan order, 32 bits wide and not
-/// clamped to the range of the bit depth, and leaves the task's block zero. `pos` is the position of
-/// the transform block in 4x4 units of its plane. The result is the index of the last coefficient, -1
-/// for a block without one; `Err` when the sink has no room.
-fn decode_coefs<BD: BitDepth>(
+/// The position a quantization matrix uses for a coefficient in scan order.
+fn quant_matrix_index(tx: TxfmSize, tx_class: TxClass, index: u16) -> usize {
+    match tx_class {
+        TxClass::TwoD => DAV1D_SCANS[tx as usize][index as usize].get() as usize,
+        TxClass::H => index as usize,
+        TxClass::V => {
+            let dim = &DAV1D_TXFM_DIMENSIONS[tx as usize];
+            let sx = cmp::min(dim.lw, TxfmSize::S32x32 as u8) + 2;
+            let sy = cmp::min(dim.lh, TxfmSize::S32x32 as u8) + 2;
+            let x = index & ((1 << sx) - 1);
+            let y = index >> sx;
+            (x as usize) << sy | y as usize
+        }
+    }
+}
+
+/// Scratch for the AC magnitudes. The packed path appends nonzero tokens in reverse scan order.
+/// The legacy path links them by their positions in the block. The signs and Golomb remainders
+/// visit the same AC coefficients in forward scan order on either path.
+struct AcTokens<'a, BD, const PACKED: bool> {
+    scratch: &'a mut Cf,
+    bit_depth: std::marker::PhantomData<BD>,
+}
+
+impl<BD: BitDepth, const PACKED: bool> AcTokens<'_, BD, PACKED> {
+    #[inline(always)]
+    fn push(&mut self, cursor: usize, scan: u16, raster: u16, level: u8) -> usize {
+        if PACKED {
+            // The largest coded transform has 1024 positions. AC excludes DC, so
+            // the scan index and the list cursor both fit in 10 bits. A zero level
+            // leaves the cursor where it is so the next push overwrites that entry.
+            let token = (u16::from(level) << 10) | scan;
+            self.scratch.select_mut::<BitDepth8>()[cursor & 0x3ff] = token as i16;
+            cursor + usize::from(level != 0)
+        } else {
+            let mask = 0usize.wrapping_sub(usize::from(level != 0));
+            let token = ((usize::from(level) << 11) | cursor) & mask;
+            self.scratch.select_mut::<BD>()[usize::from(raster & 0x3ff)] = (token as u16).as_();
+            (usize::from(raster) & mask) | (cursor & !mask)
+        }
+    }
+
+    #[inline(always)]
+    fn for_each(&mut self, mut cursor: usize, mut consume: impl FnMut(u16, c_uint)) {
+        if PACKED {
+            let tokens = self.scratch.select::<BitDepth8>();
+            for &token in tokens[..cursor].iter().rev() {
+                let token = token as u16;
+                consume(token & 0x3ff, c_uint::from(token >> 10));
+            }
+        } else {
+            let tokens = self.scratch.select_mut::<BD>();
+            while cursor != 0 {
+                let position = cursor & 0x3ff;
+                let token: i32 = tokens[position].into();
+                let token = token as c_uint;
+                consume(position as u16, token >> 11);
+                tokens[position] = 0i16.as_();
+                cursor = token as usize & 0x3ff;
+            }
+        }
+    }
+}
+
+/// Parse the coefficients and write dequantized values into the sink's scan-ordered 32-bit buffer.
+/// `pos` is in 4x4 units of its plane. Returns the last scan index or -1 for a block without
+/// coefficients, and `Err` when the sink has no room.
+fn decode_coefs<BD: BitDepth, const PACKED: bool>(
     c: &Rav1dContext,
     pos: (c_int, c_int),
     f: &Rav1dFrameData,
@@ -721,33 +781,6 @@ fn decode_coefs<BD: BitDepth>(
         eob_bin as u16
     };
 
-    struct Cf<'a, BD: BitDepth>(&'a mut [BD::Coef]);
-
-    impl<'a, BD: BitDepth> Cf<'a, BD> {
-        fn index(&self, rc: u16) -> usize {
-            let i = rc as usize & (self.0.len() - 1);
-            // SAFETY: `self.0.len()` is either `cf_len` or `CF_LEN`,
-            // both of which are powers of 2.
-            // `cf_len` is a power of 2 since it's from `1 << n`, etc.
-            // Thus, `& (self.0.len() - 1)` is the same as `% self.0.len()`.
-            unsafe { assert_unchecked(i < self.0.len()) };
-            i
-        }
-
-        #[cfg_attr(debug_assertions, track_caller)]
-        pub fn get(&self, rc: u16) -> i32 {
-            self.0[self.index(rc)].into()
-        }
-
-        #[cfg_attr(debug_assertions, track_caller)]
-        pub fn set<T: ToPrimitive<BD::Coef>>(&mut self, rc: u16, value: T) {
-            self.0[self.index(rc)] = value.as_();
-        }
-    }
-
-    let cf = t_cf.select_mut::<BD>();
-    let mut cf = Cf::<BD>(cf);
-
     // rav1g: the transform block goes to the sink, which says where its coefficients go.
     let dst = c.sink.txb(
         f.sink_frame,
@@ -764,21 +797,26 @@ fn decode_coefs<BD: BitDepth>(
     if dst.is_null() {
         return Err(());
     }
-    let inverse = inverse_scan(tx, tx_class);
-    // The coefficient at `rc` of the task's block: written to the sink's buffer, zero in the block.
-    let put = |cf: &mut Cf<BD>, rc: u16, value: c_int| {
-        cf.set(rc, 0);
+    let inverse = (!PACKED).then(|| inverse_scan(tx, tx_class));
+    let put = |position: u16, value: c_int| {
+        let index = if let Some(inverse) = inverse {
+            inverse[usize::from(position) & (inverse.len() - 1)]
+        } else {
+            position
+        };
         // SAFETY: the sink's buffer has room for the coefficients up to `eob` (`ParseSink::txb`), and
-        // the coefficient at `rc` is one of them: `inverse` has the scan index of every position.
-        unsafe { dst.add(inverse[rc as usize & (inverse.len() - 1)] as usize).write(value) };
+        // the token list contains only scan positions up to that index.
+        debug_assert!(index <= eob);
+        unsafe { dst.add(usize::from(index)).write(value) };
     };
 
     // base tokens
-    let mut rc;
+    let mut tokens = AcTokens::<BD, PACKED> { scratch: t_cf, bit_depth: std::marker::PhantomData };
+    let cursor;
     let mut dc_tok;
 
     #[inline]
-    fn decode_coefs_class<const TX_CLASS: usize, BD: BitDepth>(
+    fn decode_coefs_class<const TX_CLASS: usize, BD: BitDepth, const PACKED: bool>(
         ts_c: &mut Rav1dTileStateContext,
         t_dim: &TxfmInfo,
         chroma: usize,
@@ -786,8 +824,8 @@ fn decode_coefs<BD: BitDepth>(
         eob: u16,
         tx: TxfmSize,
         dbg: bool,
-        cf: &mut Cf<BD>,
-    ) -> (u16, u32) {
+        tokens: &mut AcTokens<BD, PACKED>,
+    ) -> (usize, u32) {
         let tx_class = const { TxClass::from_repr(TX_CLASS) }.unwrap();
 
         let eob_cdf = &mut ts_c.cdf.coef.eob_base_tok[t_dim.ctx as usize][chroma];
@@ -898,7 +936,7 @@ fn decode_coefs<BD: BitDepth>(
         // so there's also no bounds check.
         levels[..end].fill(0);
 
-        let mut rc;
+        let rc;
         let mut x;
         let mut y;
         match tx_class {
@@ -950,7 +988,7 @@ fn decode_coefs<BD: BitDepth>(
                 );
             }
         }
-        cf.set(rc, tok.to::<i16>() << 11);
+        let mut cursor = tokens.push(0, eob, rc, tok);
         let level_off = if tx_class == TxClass::TwoD {
             rc as usize
         } else {
@@ -1032,29 +1070,10 @@ fn decode_coefs<BD: BitDepth>(
                     );
                 }
                 level[0] = (tok + (3 << 6)) as u8;
-                cf.set(rc_i, ((tok as u16) << 11) | rc);
-                rc = rc_i;
             } else {
-                // `0x1` for `tok`, `0x7ff` as bitmask for `rc`, `0x41` for `level_tok`.
-                let tok = tok as u32 * 0x17ff41;
-                level[0] = tok as u8;
-
-                let tok_check = if tok != 0 {
-                    ((tok as u16) << 11) | rc
-                } else {
-                    0
-                };
-
-                // This is optimized differently from C to avoid branches,
-                // as simple branches are not always optimized to branchless `cmov`s.
-                let mask = tok >> 9;
-                let tok = mask & (rc as u32 + !0x7ff);
-                let mask = mask as u16;
-                rc = (rc_i & mask) | (rc & !mask);
-
-                debug_assert!(tok == tok_check as u32);
-                cf.set(rc_i, tok);
+                level[0] = tok * 0x41;
             }
+            cursor = tokens.push(cursor, i, rc_i, tok);
         }
         // dc
         let lo_ctx = if tx_class == TxClass::TwoD {
@@ -1094,20 +1113,19 @@ fn decode_coefs<BD: BitDepth>(
             }
         }
 
-        (rc, dc_tok)
+        (cursor, dc_tok)
     }
 
     if eob != 0 {
-        let cf = &mut cf;
-        (rc, dc_tok) = match tx_class {
-            TxClass::TwoD => decode_coefs_class::<{ TxClass::TwoD as _ }, BD>(
-                ts_c, t_dim, chroma, scratch, eob, tx, dbg, cf,
+        (cursor, dc_tok) = match tx_class {
+            TxClass::TwoD => decode_coefs_class::<{ TxClass::TwoD as _ }, BD, PACKED>(
+                ts_c, t_dim, chroma, scratch, eob, tx, dbg, &mut tokens,
             ),
-            TxClass::H => decode_coefs_class::<{ TxClass::H as _ }, BD>(
-                ts_c, t_dim, chroma, scratch, eob, tx, dbg, cf,
+            TxClass::H => decode_coefs_class::<{ TxClass::H as _ }, BD, PACKED>(
+                ts_c, t_dim, chroma, scratch, eob, tx, dbg, &mut tokens,
             ),
-            TxClass::V => decode_coefs_class::<{ TxClass::V as _ }, BD>(
-                ts_c, t_dim, chroma, scratch, eob, tx, dbg, cf,
+            TxClass::V => decode_coefs_class::<{ TxClass::V as _ }, BD, PACKED>(
+                ts_c, t_dim, chroma, scratch, eob, tx, dbg, &mut tokens,
             ),
         };
     } else {
@@ -1135,7 +1153,7 @@ fn decode_coefs<BD: BitDepth>(
                 );
             }
         }
-        rc = 0;
+        cursor = 0;
     }
 
     // residual and sign
@@ -1207,9 +1225,9 @@ fn decode_coefs<BD: BitDepth>(
             }
             cul_level = dc_tok;
             dc_dq >>= dq_shift;
-            put(&mut cf, 0, if dc_sign != 0 { -dc_dq } else { dc_dq });
+            put(0, if dc_sign != 0 { -dc_dq } else { dc_dq });
 
-            ac = if rc != 0 { Some(Ac::Qm(qm_tbl)) } else { None };
+            ac = if cursor != 0 { Some(Ac::Qm(qm_tbl)) } else { None };
         } else {
             // non-qmatrix is the common case and allows for additional optimizations
             if dc_tok == 15 {
@@ -1232,28 +1250,31 @@ fn decode_coefs<BD: BitDepth>(
                 assert!(dc_dq <= cf_max);
             }
             cul_level = dc_tok;
-            put(&mut cf, 0, if dc_sign != 0 { -dc_dq } else { dc_dq });
+            put(0, if dc_sign != 0 { -dc_dq } else { dc_dq });
 
-            ac = if rc != 0 { Some(Ac::NoQm) } else { None };
+            ac = if cursor != 0 { Some(Ac::NoQm) } else { None };
+        }
+        if !PACKED {
+            tokens.scratch.select_mut::<BD>()[0] = 0i16.as_();
         }
     }
     match ac {
         Some(Ac::Qm(qm_tbl)) => {
             let ac_dq: c_uint = dq_tbl[1].get() as c_uint;
-            loop {
+            tokens.for_each(cursor, |rc, base| {
                 let sign = rav1d_msac_decode_bool_equi(&mut ts_c.msac);
                 if dbg {
                     println!("Post-sign[{}={}]: r={}", rc, sign, ts_c.msac.rng);
                 }
-                let rc_tok = cf.get(rc) as u32;
                 let mut tok;
+                let qm_index = if PACKED { quant_matrix_index(tx, tx_class, rc) } else { rc as usize };
                 let mut dq: c_uint = ac_dq
-                    .wrapping_mul(qm_tbl[rc as usize] as c_uint)
+                    .wrapping_mul(qm_tbl[qm_index] as c_uint)
                     .wrapping_add(16)
                     >> 5;
                 let dq_sat;
 
-                if rc_tok >= 15 << 11 {
+                if base == 15 {
                     tok = (read_golomb(&mut ts_c.msac)).wrapping_add(15);
                     if dbg {
                         println!(
@@ -1268,34 +1289,28 @@ fn decode_coefs<BD: BitDepth>(
                     tok &= 0xfffff;
                     dq = dq.wrapping_mul(tok) & 0xffffff;
                 } else {
-                    tok = rc_tok >> 11;
+                    tok = base;
                     dq = dq.wrapping_mul(tok);
                     assert!(dq <= 0xffffff); // Optimized out.
                 }
                 cul_level = cul_level.wrapping_add(tok);
                 dq >>= dq_shift;
                 dq_sat = dq as c_int;
-                put(&mut cf, rc, if sign { -dq_sat } else { dq_sat });
-
-                rc = rc_tok as u16 & 0x3ff;
-                if !(rc != 0) {
-                    break;
-                }
-            }
+                put(rc, if sign { -dq_sat } else { dq_sat });
+            });
         }
         Some(Ac::NoQm) => {
             let ac_dq: c_uint = dq_tbl[1].get() as c_uint;
-            loop {
+            tokens.for_each(cursor, |rc, base| {
                 let sign = rav1d_msac_decode_bool_equi(&mut ts_c.msac) as c_int;
                 if dbg {
                     println!("Post-sign[{}={}]: r={}", rc, sign, ts_c.msac.rng);
                 }
-                let rc_tok = cf.get(rc) as u32;
                 let mut tok: c_uint;
                 let mut dq;
 
                 // residual
-                if rc_tok >= 15 << 11 {
+                if base == 15 {
                     tok = (read_golomb(&mut ts_c.msac)).wrapping_add(15);
                     if dbg {
                         println!(
@@ -1314,18 +1329,13 @@ fn decode_coefs<BD: BitDepth>(
                     dq = ((ac_dq.wrapping_mul(tok) & 0xffffff) >> dq_shift) as c_int;
                 } else {
                     // cannot exceed `cf_max`, so we can avoid the clipping
-                    tok = rc_tok >> 11;
+                    tok = base;
                     dq = (ac_dq.wrapping_mul(tok) >> dq_shift) as c_int;
                     assert!(dq <= cf_max);
                 }
                 cul_level = cul_level.wrapping_add(tok);
-                put(&mut cf, rc, if sign != 0 { -dq } else { dq });
-
-                rc = rc_tok as u16 & 0x3ff; // next non-zero `rc`, zero if `eob`
-                if !(rc != 0) {
-                    break;
-                }
-            }
+                put(rc, if sign != 0 { -dq } else { dq });
+            });
         }
         None => {}
     }
@@ -1336,7 +1346,7 @@ fn decode_coefs<BD: BitDepth>(
     Ok(eob as i32)
 }
 
-fn read_coef_tree<BD: BitDepth>(
+fn read_coef_tree<BD: BitDepth, const PACKED: bool>(
     c: &Rav1dContext,
     f: &Rav1dFrameData,
     t: &mut Rav1dTaskContext,
@@ -1362,7 +1372,7 @@ fn read_coef_tree<BD: BitDepth>(
         let txsw = sub_t_dim.w;
         let txsh = sub_t_dim.h;
 
-        read_coef_tree::<BD>(
+        read_coef_tree::<BD, PACKED>(
             c,
             f,
             t,
@@ -1377,7 +1387,7 @@ fn read_coef_tree<BD: BitDepth>(
         )?;
         t.b.x += txsw as c_int;
         if txw >= txh && t.b.x < f.bw {
-            read_coef_tree::<BD>(
+            read_coef_tree::<BD, PACKED>(
                 c,
                 f,
                 t,
@@ -1394,7 +1404,7 @@ fn read_coef_tree<BD: BitDepth>(
         t.b.x -= txsw as c_int;
         t.b.y += txsh as c_int;
         if txh >= txw && t.b.y < f.bh {
-            read_coef_tree::<BD>(
+            read_coef_tree::<BD, PACKED>(
                 c,
                 f,
                 t,
@@ -1409,7 +1419,7 @@ fn read_coef_tree<BD: BitDepth>(
             )?;
             t.b.x += txsw as c_int;
             if txw >= txh && t.b.x < f.bw {
-                read_coef_tree::<BD>(
+                read_coef_tree::<BD, PACKED>(
                     c,
                     f,
                     t,
@@ -1433,7 +1443,7 @@ fn read_coef_tree<BD: BitDepth>(
         let mut cf_ctx = 0;
 
         // rav1g: the parse of upstream's first pass; the coefficients go to the sink.
-        let eob = decode_coefs::<BD>(
+        let eob = decode_coefs::<BD, PACKED>(
             c,
             (t.b.x, t.b.y),
             f,
@@ -1479,7 +1489,7 @@ fn read_coef_tree<BD: BitDepth>(
     Ok(())
 }
 
-pub(crate) fn rav1d_read_coef_blocks<BD: BitDepth>(
+pub(crate) fn rav1d_read_coef_blocks<BD: BitDepth, const PACKED: bool>(
     c: &Rav1dContext,
     f: &Rav1dFrameData,
     t: &mut Rav1dTaskContext,
@@ -1554,7 +1564,7 @@ pub(crate) fn rav1d_read_coef_blocks<BD: BitDepth>(
                     match &b.ii {
                         Av1BlockIntraInter::Inter(inter) => {
                             let tx_split = [inter.tx_split0 as u16, inter.tx_split1];
-                            read_coef_tree::<BD>(
+                            read_coef_tree::<BD, PACKED>(
                                 c,
                                 f,
                                 t,
@@ -1575,7 +1585,7 @@ pub(crate) fn rav1d_read_coef_blocks<BD: BitDepth>(
                             let a_len = t_dim.w as usize;
                             let l_start = by4 + y as usize;
                             let l_len = t_dim.h as usize;
-                            let eob = decode_coefs::<BD>(
+                            let eob = decode_coefs::<BD, PACKED>(
                                 c,
                                 (t.b.x, t.b.y),
                                 f,
@@ -1653,7 +1663,7 @@ pub(crate) fn rav1d_read_coef_blocks<BD: BitDepth>(
                         let l_start = cby4 + y as usize;
                         let l_len = uv_t_dim.h as usize;
                         let l_ccoef = &t.l.ccoef[pl];
-                        let eob = decode_coefs::<BD>(
+                        let eob = decode_coefs::<BD, PACKED>(
                             c,
                             (t.b.x >> ss_hor, t.b.y >> ss_ver),
                             f,

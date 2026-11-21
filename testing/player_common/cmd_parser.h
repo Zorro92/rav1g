@@ -148,6 +148,7 @@ class CParameters {
     bool intrabanklegacy_;
     bool intrasteplegacy_;
     bool intrasingleedgelegacy_;
+    bool parsecoeflegacy_;
     bool lrlegacy_;
     bool fglegacy_;
     bool copylegacy_;

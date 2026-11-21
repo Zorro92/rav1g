@@ -186,9 +186,10 @@ fn options() -> Options {
 fn check(path: &Path, options: &Options) -> Result<Report, String> {
     let data = std::fs::read(path).map_err(|error| format!("cannot read the file: {error}"))?;
     let units = container::read(&data)?;
-    // Keep the sink-written grid in the reference to check the edge readers on the default path.
+    // Keep the sink-written grid to check the edge readers, and the linked AC token list to
+    // compare the default packed path's transform records and coefficients to the previous path.
     let reference_options = ParseOptions { gpu_grid: false, ..ParseOptions::default() };
-    let mut reference = rhost::RustParser::new(1, 1, reference_options, options.wave_edges.0)?;
+    let mut reference = rhost::RustParser::with_clock(1, 1, reference_options, false, options.wave_edges.0, true)?;
     let mut checked = rhost::RustParser::new(options.threads, options.frames, options.parse, options.wave_edges.1)?;
     let mut report = Report::new(options.details);
     let mut number = 0;
