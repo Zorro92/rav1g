@@ -284,6 +284,8 @@ pub struct ParseSettings {
     pub tile_keeps_thread: bool,
     /// Use the previous raster-indexed linked list for AC coefficient tokens.
     pub legacy_coef_tokens: bool,
+    /// Wait for the same row of all seven reference types during frame threading.
+    pub legacy_ref_rows: bool,
 }
 
 impl Default for ParseSettings {
@@ -296,6 +298,7 @@ impl Default for ParseSettings {
             lf_masks: true,
             tile_keeps_thread: false,
             legacy_coef_tokens: false,
+            legacy_ref_rows: false,
         }
     }
 }

@@ -1414,6 +1414,12 @@ token list. The default packs the nonzero AC tokens into scan order in the parse
 scratch block. Both paths emit the same coefficient records. The flag also works
 in `rav1g-dec`. The player creates a fresh parser when the flag changes between tasks.
 
+For a frame-parallel scheduling A/B, add `-parserefrowslegacy` to wait for all seven
+reference types at each entropy row. The default waits for the motion-field sources
+and the previous segmentation map when the parser reads them. The flag also works in
+`rav1g-dec` and can be combined with `-parsecoeflegacy`. Changing either flag between
+player tasks creates a fresh parser.
+
 With rav1d's parse the `-gputime` summary splits the tile decode further. All three lines are parts
 of `cpu entropy/tile decode, thread sum`, summed over the tile threads, and zero with `-parser c`
 (the C parser does the same work without timers of its own):

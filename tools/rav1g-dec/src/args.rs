@@ -103,6 +103,7 @@ pub struct Task {
     pub intrasteplegacy: bool,
     pub intrasingleedgelegacy: bool,
     pub parsecoeflegacy: bool,
+    pub parserefrowslegacy: bool,
     pub lrlegacy: bool,
     pub fglegacy: bool,
     pub copylegacy: bool,
@@ -194,6 +195,7 @@ impl Default for Task {
             intrasteplegacy: false,
             intrasingleedgelegacy: false,
             parsecoeflegacy: false,
+            parserefrowslegacy: false,
             lrlegacy: false,
             fglegacy: false,
             copylegacy: false,
@@ -316,6 +318,7 @@ pub fn usage() {
     say!("  -intrasteplegacy      use the previous intra wavefront step (main before round 4)");
     say!("  -intrasingleedgelegacy use the previous directional wavefront with prefetching");
     say!("  -parsecoeflegacy     use the previous linked list of AC coefficient tokens");
+    say!("  -parserefrowslegacy  wait for all reference rows during frame-parallel parsing");
     say!("  -lrlegacy           use the original loop_restoration shader");
     say!("  -fglegacy           use the original direct NV12/P010 film grain shader");
     say!("  -copylegacy         use the original direct NV12/P010 copy shader");
@@ -514,6 +517,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-intrasteplegacy" => task.intrasteplegacy = true,
             "-intrasingleedgelegacy" => task.intrasingleedgelegacy = true,
             "-parsecoeflegacy" => task.parsecoeflegacy = true,
+            "-parserefrowslegacy" => task.parserefrowslegacy = true,
             "-lrlegacy" => task.lrlegacy = true,
             "-fglegacy" => task.fglegacy = true,
             "-copylegacy" => task.copylegacy = true,

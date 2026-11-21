@@ -486,6 +486,7 @@ int AV1Decoder::DecodeOne() {
                        created_interfast_ != (params_.interfast_ || params_.interfastlists_) ||
                        created_parser_options_ != params_.parser_options_ ||
                        created_parsecoeflegacy_ != params_.parsecoeflegacy_ ||
+                       created_parserefrowslegacy_ != params_.parserefrowslegacy_ ||
                        created_lowmem_ != params_.lowmem_parts_ || created_packed_10x3_ != params_.hdr10x3_ ||
                        created_semi_planar_ != (params_.semi_planar_ | (params_.interop_ ? 16 : 0)) ||
                        created_noguard_ != params_.noguard_ || created_headroom_ != params_.headroom_mib_ ||
@@ -679,6 +680,7 @@ int AV1Decoder::DecodeOne() {
       created_interfast_ = params_.interfast_ || params_.interfastlists_;
       created_parser_options_ = params_.parser_options_;
       created_parsecoeflegacy_ = params_.parsecoeflegacy_;
+      created_parserefrowslegacy_ = params_.parserefrowslegacy_;
       created_lowmem_ = params_.lowmem_parts_;
       created_packed_10x3_ = params_.hdr10x3_;
       created_semi_planar_ = params_.semi_planar_ | (params_.interop_ ? 16 : 0);
@@ -790,6 +792,8 @@ int AV1Decoder::DecodeOne() {
   XB_LOGI << "Parser: the parse pass of rav1d";
   av1_set_parse_coef_legacy(params_.parsecoeflegacy_);
   if (params_.parsecoeflegacy_) XB_LOGI << "Parser: linked AC coefficient tokens (-parsecoeflegacy)";
+  av1_set_parse_ref_rows_legacy(params_.parserefrowslegacy_);
+  if (params_.parserefrowslegacy_) XB_LOGI << "Parser: wait for all reference rows (-parserefrowslegacy)";
   // -parseopt: fixed when the decoder was created. The default is nolfmask tilethread gpucdef gpugrid.
   XB_LOGI << "Parser switches (-parseopt): "
           << (params_.parser_options_ & PLAYER_PARSEOPT_DEFAULT ? "" : "none ")

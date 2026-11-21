@@ -70,11 +70,18 @@ use super::types::{Av1Core, av1_frame_thread_data};
 use crate::sys;
 
 static LEGACY_COEF_TOKENS: AtomicBool = AtomicBool::new(false);
+static LEGACY_REF_ROWS: AtomicBool = AtomicBool::new(false);
 
 /// Internal test switch from `dx/av1_perf.h`. The parser reads it when first created.
 #[unsafe(no_mangle)]
 pub extern "C" fn av1_set_parse_coef_legacy(enable: c_int) {
     LEGACY_COEF_TOKENS.store(enable != 0, Ordering::Relaxed);
+}
+
+/// Internal test switch from `dx/av1_perf.h`. The parser reads it when first created.
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_parse_ref_rows_legacy(enable: c_int) {
+    LEGACY_REF_ROWS.store(enable != 0, Ordering::Relaxed);
 }
 use crate::sys::{
     AV1_COMMON, AV1Decoder, INVALID_IDX, REF_NO_SCALE, RESTORE_NONE, RESTORE_SGRPROJ, RESTORE_SWITCHABLE,
@@ -1419,6 +1426,7 @@ impl Rav1dHost {
             operating_point: u8::try_from(operating_point).ok().filter(|&point| point < 32).unwrap_or(0),
             frame_size_limit: 0,
             legacy_coef_tokens: LEGACY_COEF_TOKENS.load(Ordering::Relaxed),
+            legacy_ref_rows: LEGACY_REF_ROWS.load(Ordering::Relaxed),
             ..Default::default()
         };
         options.apply(&mut settings);

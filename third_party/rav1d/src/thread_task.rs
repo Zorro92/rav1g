@@ -20,7 +20,7 @@ use crate::include::common::bitdepth::BitDepth16;
 #[cfg(feature = "bitdepth_8")]
 use crate::include::common::bitdepth::BitDepth8;
 use crate::include::common::intops::iclip;
-use crate::include::dav1d::headers::Rav1dPixelLayout;
+use crate::include::dav1d::headers::{Rav1dFrameHeader, Rav1dPixelLayout};
 use crate::include::dav1d::picture::Rav1dPicture;
 use crate::internal::{
     Rav1dContext, Rav1dFrameContext, Rav1dFrameContextTaskThread,
@@ -28,10 +28,97 @@ use crate::internal::{
     TaskType,
 };
 use crate::iter::wrapping_iter;
+use crate::refmvs::RefMvsFrame;
 use crate::relaxed_atomic::RelaxedAtomic;
 
 pub const FRAME_ERROR: u32 = u32::MAX - 1;
 pub const TILE_ERROR: i32 = i32::MAX - 1;
+
+const ALL_REF_TYPES: u8 = 0x7f;
+
+/// Bits index the frame's reference types. A slot named by several types uses its first type.
+#[derive(Default)]
+pub(crate) struct EntropyReferences {
+    check: u8,
+    wait: u8,
+}
+
+impl EntropyReferences {
+    pub(crate) fn for_frame(
+        header: &Rav1dFrameHeader,
+        rf: &RefMvsFrame,
+        has_prev_segmap: bool,
+        legacy: bool,
+    ) -> Self {
+        if legacy {
+            return Self { check: ALL_REF_TYPES, wait: ALL_REF_TYPES };
+        }
+
+        let mut wait_slots = 0u8;
+        // The parser keeps a previous map when a block can read it. It comes from the
+        // primary reference, including when that reference itself inherited the map.
+        if has_prev_segmap {
+            wait_slots |= 1 << header.refidx[header.primary_ref_frame as usize];
+        }
+        if header.use_ref_frame_mvs != 0 {
+            for n in 0..rf.n_mfmvs as usize {
+                // Both implementations of load_tmvs skip projections beyond the order hint range.
+                if rf.mfmv_ref2cur[n] != i32::MIN {
+                    wait_slots |= 1 << header.refidx[rf.mfmv_ref[n] as usize];
+                }
+            }
+        }
+
+        let mut seen = 0u8;
+        let mut refs = Self::default();
+        for (n, &slot) in header.refidx.iter().enumerate() {
+            let slot_bit = 1 << slot;
+            if seen & slot_bit == 0 {
+                seen |= slot_bit;
+                refs.check |= 1 << n;
+                if wait_slots & slot_bit != 0 {
+                    refs.wait |= 1 << n;
+                }
+            }
+        }
+        refs
+    }
+}
+
+#[cfg(test)]
+mod entropy_ref_tests {
+    use super::*;
+
+    #[test]
+    fn waits_follow_the_maps_the_parser_reads() {
+        let mut header = Rav1dFrameHeader {
+            refidx: [3, 6, 3, 1, 2, 6, 1],
+            primary_ref_frame: 5,
+            ..Default::default()
+        };
+        let rf = RefMvsFrame {
+            n_mfmvs: 3,
+            mfmv_ref: [2, 4, 6],
+            mfmv_ref2cur: [1, i32::MIN, 3],
+            ..Default::default()
+        };
+
+        let refs = EntropyReferences::for_frame(&header, &rf, false, false);
+        assert_eq!(refs.check, 0b0011011);
+        assert_eq!(refs.wait, 0);
+
+        let refs = EntropyReferences::for_frame(&header, &rf, true, false);
+        assert_eq!(refs.wait, 0b0000010);
+
+        header.use_ref_frame_mvs = 1;
+        let refs = EntropyReferences::for_frame(&header, &rf, true, false);
+        assert_eq!(refs.wait, 0b0001011);
+
+        let refs = EntropyReferences::for_frame(&header, &rf, false, true);
+        assert_eq!(refs.check, ALL_REF_TYPES);
+        assert_eq!(refs.wait, ALL_REF_TYPES);
+    }
+}
 
 /// This function resets the cur pointer to the first frame theoretically
 /// executable after a task completed (ie. each time we update some progress or
@@ -512,40 +599,44 @@ fn check_tile(
     }
     let frame_hdr = &***f.frame_hdr.as_ref().unwrap();
     if error == 0 && frame_mt != 0 && !frame_hdr.frame_type.is_key_or_intra() {
-        // check reference state
-        let p = &f.sr_cur;
-        let ss_ver = (p.p.p.layout == Rav1dPixelLayout::I420) as c_int;
+        // Entropy waits for the reference rows it reads. Check the other named slots for
+        // FRAME_ERROR as well. The host checks reference failures again in decode order
+        // before recording, including failures that arrive after this frame has parsed.
+        let check = if tp { f.entropy_refs.check } else { ALL_REF_TYPES };
+        let mut refs = u32::from(check) & (u32::MAX << t.deps_skip.get());
         let p_b = ((t.sby + 1) << f.sb_shift + 2) as c_uint;
-        let tile_sby = t.sby - (ts.tiling.row_start >> f.sb_shift);
-        let lowest_px = f
-            .lowest_pixel_mem
-            .index(ts.lowest_pixel + tile_sby as usize);
-        for n in t.deps_skip.get()..7 {
+        let lowest_px = (!tp).then(|| {
+            let tile_sby = t.sby - (ts.tiling.row_start >> f.sb_shift);
+            f.lowest_pixel_mem.index(ts.lowest_pixel + tile_sby as usize)
+        });
+        while refs != 0 {
+            let n = refs.trailing_zeros() as usize;
+            refs &= refs - 1;
             'next: {
-                let lowest = if tp {
-                    // if temporal mv refs are disabled, we only need this
-                    // for the primary ref; if segmentation is disabled, we
-                    // don't even need that
-                    p_b
-                } else {
+                let lowest = if let Some(lowest_px) = &lowest_px {
                     // +8 is postfilter-induced delay
-                    let y = if lowest_px[n as usize][0] == i32::MIN {
+                    let ss_ver = (f.sr_cur.p.p.layout == Rav1dPixelLayout::I420) as c_int;
+                    let y = if lowest_px[n][0] == i32::MIN {
                         i32::MIN
                     } else {
-                        lowest_px[n as usize][0] + 8
+                        lowest_px[n][0] + 8
                     };
-                    let uv = if lowest_px[n as usize][1] == i32::MIN {
+                    let uv = if lowest_px[n][1] == i32::MIN {
                         i32::MIN
                     } else {
-                        lowest_px[n as usize][1] * ((1 as c_int) << ss_ver) + 8
+                        lowest_px[n][1] * ((1 as c_int) << ss_ver) + 8
                     };
                     let max = cmp::max(y, uv);
                     if max == i32::MIN {
                         break 'next;
                     }
-                    iclip(max, 1 as c_int, f.refp[n as usize].p.p.h) as c_uint
+                    iclip(max, 1 as c_int, f.refp[n].p.p.h) as c_uint
+                } else if f.entropy_refs.wait & (1 << n) != 0 {
+                    p_b
+                } else {
+                    0
                 };
-                let p3 = f.refp[n as usize].progress.as_ref().unwrap()[!tp as usize]
+                let p3 = f.refp[n].progress.as_ref().unwrap()[!tp as usize]
                     .load(Ordering::SeqCst);
                 if p3 < lowest {
                     return 1;
@@ -555,7 +646,7 @@ fn check_tile(
                     .fetch_or((p3 == FRAME_ERROR) as c_int, Ordering::SeqCst);
             }
             // next:
-            t.deps_skip.update(|it| it + 1);
+            t.deps_skip.set(n as c_int + 1);
         }
     }
     return 0;

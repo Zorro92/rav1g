@@ -347,6 +347,11 @@ void av1_set_intra_single_edge_legacy(int enable);
  * decoder's first decode call. A running parser keeps its selection. */
 void av1_set_parse_coef_legacy(int enable);
 
+/* Process-wide. Nonzero restores the row waits for all reference types when
+ * frames are parsed in parallel (-parserefrowslegacy). Set before the
+ * decoder's first decode call. A running parser keeps its selection. */
+void av1_set_parse_ref_rows_legacy(int enable);
+
 /* ---------------------------------------------------------------------------
  * Intra step timing (test flags -intrasteptime and -intrastepmin; docs/test-player.md, "Intra step
  * timing"). Nothing here changes what is decoded.

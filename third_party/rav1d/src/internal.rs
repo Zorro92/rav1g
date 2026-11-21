@@ -38,7 +38,7 @@ use crate::recon::{
 };
 use crate::refmvs::{Rav1dRefmvsDSPContext, RefMvsFrame, RefMvsTemporalBlock, RefmvsTile};
 use crate::relaxed_atomic::RelaxedAtomic;
-use crate::thread_task::{Rav1dTaskIndex, Rav1dTasks};
+use crate::thread_task::{EntropyReferences, Rav1dTaskIndex, Rav1dTasks};
 
 #[derive(Default)]
 pub struct Rav1dDSPContext {
@@ -225,6 +225,7 @@ pub struct Rav1dContext {
     pub(crate) parse_lf_masks: bool,
     pub(crate) parse_tile_keeps_thread: bool,
     pub(crate) parse_legacy_coef_tokens: bool,
+    pub(crate) parse_legacy_ref_rows: bool,
     /// rav1g: a worker thread ended with a panic (`thread_task::rav1d_worker_task`). Nothing waits
     /// for a frame any more and no task is taken; the context is good for `rav1d_close` only.
     pub(crate) broken: AtomicBool,
@@ -614,6 +615,7 @@ pub(crate) struct Rav1dFrameData {
     /// rav1g: the number the sink gave the frame (`ParseSink::frame_begin`), and whether it has.
     pub sink_frame: usize,
     pub sink_begun: bool,
+    pub entropy_refs: EntropyReferences,
 
     pub b4_stride: ptrdiff_t,
     pub w4: c_int,

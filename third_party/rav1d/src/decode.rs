@@ -82,7 +82,7 @@ use crate::tables::{
     DAV1D_YMODE_SIZE_CONTEXT, INTERINTRA_ALLOWED_MASK, WEDGE_ALLOWED_MASK,
 };
 use crate::thread_task::{
-    rav1d_task_create_tile_sbrow, rav1d_task_frame_init, FRAME_ERROR, TILE_ERROR,
+    rav1d_task_create_tile_sbrow, rav1d_task_frame_init, EntropyReferences, FRAME_ERROR, TILE_ERROR,
 };
 use crate::warpmv::{rav1d_find_affine_int, rav1d_get_shear_params, rav1d_set_affine_mv2d};
 
@@ -3873,6 +3873,15 @@ pub(crate) fn rav1d_decode_frame_init(c: &Rav1dContext, fc: &Rav1dFrameContext) 
             c.tc.len() as u32,
             c.fc.len() as u32,
         )?;
+    }
+
+    if c.fc.len() > 1 && frame_hdr.frame_type.is_inter_or_switch() {
+        f.entropy_refs = EntropyReferences::for_frame(
+            frame_hdr,
+            &f.rf,
+            f.prev_segmap.is_some(),
+            c.parse_legacy_ref_rows,
+        );
     }
 
     // setup dequant tables
