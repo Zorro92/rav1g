@@ -485,6 +485,7 @@ int AV1Decoder::DecodeOne() {
                        created_intrav2_ != params_.intrav2_ ||
                        created_interfast_ != (params_.interfast_ || params_.interfastlists_) ||
                        created_parser_options_ != params_.parser_options_ ||
+                       created_parselistslegacy_ != params_.parselistslegacy_ ||
                        created_lowmem_ != params_.lowmem_parts_ || created_packed_10x3_ != params_.hdr10x3_ ||
                        created_semi_planar_ != (params_.semi_planar_ | (params_.interop_ ? 16 : 0)) ||
                        created_noguard_ != params_.noguard_ || created_headroom_ != params_.headroom_mib_ ||
@@ -677,6 +678,7 @@ int AV1Decoder::DecodeOne() {
       created_intrav2_ = params_.intrav2_;
       created_interfast_ = params_.interfast_ || params_.interfastlists_;
       created_parser_options_ = params_.parser_options_;
+      created_parselistslegacy_ = params_.parselistslegacy_;
       created_lowmem_ = params_.lowmem_parts_;
       created_packed_10x3_ = params_.hdr10x3_;
       created_semi_planar_ = params_.semi_planar_ | (params_.interop_ ? 16 : 0);
@@ -788,6 +790,8 @@ int AV1Decoder::DecodeOne() {
   XB_LOGI << "Parser: the parse pass of rav1d";
   av1_set_intra_lists_legacy(params_.intralistslegacy_);
   if (params_.intralistslegacy_) XB_LOGI << "Block lists: the previous intra loops and wavefront edges (-intralistslegacy)";
+  av1_set_parse_lists_legacy(params_.parselistslegacy_);
+  if (params_.parselistslegacy_) XB_LOGI << "Parser: block lists on the tile's thread (-parselistslegacy)";
   // -parseopt: fixed when the decoder was created. The default is nolfmask tilethread gpucdef gpugrid.
   XB_LOGI << "Parser switches (-parseopt): "
           << (params_.parser_options_ & PLAYER_PARSEOPT_DEFAULT ? "" : "none ")

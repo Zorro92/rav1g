@@ -1004,6 +1004,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         intra_step_legacy: task.intrasteplegacy,
         intra_single_edge_legacy: task.intrasingleedgelegacy,
         intra_lists_legacy: task.intralistslegacy,
+        parse_lists_legacy: task.parselistslegacy,
         lf_legacy: task.lflegacy,
         lf_h_split: task.lfhsplit as u32,
         intra_edge_fix: task.intraedgefix,
@@ -1053,6 +1054,9 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     );
     if task.intralistslegacy {
         say!("PARSER {}: the previous intra list loops and wavefront edges (-intralistslegacy)", task.name);
+    }
+    if task.parselistslegacy {
+        say!("PARSER {}: block lists on the tile's thread (-parselistslegacy)", task.name);
     }
     if task.parser_options.gpu_cdef_lists || task.parser_options.gpu_grid {
         say!(

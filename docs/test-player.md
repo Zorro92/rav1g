@@ -1416,6 +1416,14 @@ dequantized coefficients to the GPU records in scan order. In frame-parallel par
 an entropy row waits for the reference motion fields and the previous segmentation map
 it reads. Each named reference is still checked for errors.
 
+For a parse scheduling A/B, add `-parselistslegacy` to count the block lists of a
+tile on its parse thread superblock by superblock. The default counts them a
+superblock row behind the entropy decoder on parse threads that have no task, and the
+rest when the tile is through, behind the save of the frame's CDFs
+([phase2-rav1d.md](phase2-rav1d.md#the-block-lists-behind-the-entropy-decoder-2026-11-21)).
+The lists are the same. The player creates a fresh parser when the flag changes
+between tasks; the flag also works in `rav1g-dec`.
+
 For a block list A/B, add `-intralistslegacy` to count the intra block lists with the
 previous loops of `av1_mi_push_block` and the previous edges of the wavefront (four
 arrays with the frame's stamp). The default counts them in `intra_block_edges` over

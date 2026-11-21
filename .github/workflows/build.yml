@@ -1509,7 +1509,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        case: [poisoned, interfast, syncclear, gridcheck, intraschedulelegacy, intrabanklegacy, intrasteplegacy, intrasingleedgelegacy, intralistslegacy, steptime]
+        case: [poisoned, interfast, syncclear, gridcheck, intraschedulelegacy, intrabanklegacy, intrasteplegacy, intrasingleedgelegacy, intralistslegacy, parselistslegacy, steptime]
     steps:
       - name: Disable newline conversion
         run: git config --global core.autocrlf false
@@ -1619,8 +1619,8 @@ jobs:
           if ($lines.Count -lt 200 -or $frames -lt 500) { $failed += "only $($lines.Count) GRIDCHECK lines and $frames frames checked" }
           if ($failed.Count) { throw "the grid built by the GPU: $($failed -join '; ')" }
 
-      - name: Conformance with a legacy intra switch
-        if: ${{ !cancelled() && startsWith(matrix.case, 'intra') }}
+      - name: Conformance with a legacy intra or parser switch
+        if: ${{ !cancelled() && (startsWith(matrix.case, 'intra') || matrix.case == 'parselistslegacy') }}
         shell: pwsh
         env:
           INTRA_SWITCH: ${{ matrix.case }}

@@ -31,9 +31,11 @@
 //! ```
 //!
 //! `-threads`, `-frames` and `-parseopt` are those of the run that is checked; the reference always has
-//! one thread, one frame in parse and the sink-written grid. `-intralistslegacy` gives the run that is
-//! checked or timed the previous loops for the intra transform block lists. The reference uses those
-//! loops to check the default.
+//! one thread, one frame in parse and the sink-written grid. `-listslegacy` counts the block lists of a
+//! tile on its thread superblock by superblock, not a superblock row behind it on threads without a task
+//! (the decoder's -parselistslegacy; the reference, with one thread, counts them on its thread).
+//! `-intralistslegacy` gives the run that is checked or timed the previous loops for the intra transform
+//! block lists. The reference uses those loops to check the default.
 //!
 //! `-frametimes`, with `-time`: one line per frame of every run with the sink, `FRAMETIME run=<r> no=<n>`
 //! and the frame's times in milliseconds (rav1d's `parse_stats`): `admit` its wait for a frame context,
@@ -123,7 +125,7 @@ fn usage() -> ! {
          separated by commas: nolfmask, tilethread (both on by default); none; default; latelists; time (with \
          -time)\n-wave: where the wavefront of intra prediction is kept: edges (default), grid, check (the grid for \
          the reference, the edges for the run that is checked)\n-intralistslegacy: the previous loops of the intra \
-         block lists\n-frametimes: with -time, a FRAMETIME line per frame of every run"
+         block lists\n-listslegacy: the block lists on the tile's thread, superblock by superblock\n-frametimes: with -time, a FRAMETIME line per frame of every run"
     );
     std::process::exit(2);
 }
@@ -176,6 +178,7 @@ fn options() -> Options {
             "-frametimes" => options.frame_times = true,
             "-tiles" => options.tiles = true,
             "-intralistslegacy" => options.legacy.intra_lists = true,
+            "-listslegacy" => options.legacy.lists = true,
             "-parseopt" => options.parse = ParseOptions::from_words(&value()).unwrap_or_else(|| usage()),
             "-digest" => options.digest = true,
             "-lrmix" => options.lr_mix = true,
@@ -216,7 +219,7 @@ fn check(path: &Path, options: &Options) -> Result<Report, String> {
     // Keep the sink-written grid to check the edge readers and the previous loops of the intra block
     // lists to compare those of `intra_txbs_edges` to.
     let reference_options = ParseOptions { gpu_grid: false, ..ParseOptions::default() };
-    let legacy = rhost::Legacy { intra_lists: true };
+    let legacy = rhost::Legacy { intra_lists: true, lists: false };
     let mut reference = rhost::RustParser::with_clock(1, 1, reference_options, false, options.wave_edges.0, legacy)?;
     let mut checked = rhost::RustParser::with_clock(
         options.threads,

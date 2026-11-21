@@ -57,7 +57,8 @@
 use std::alloc::{Layout, alloc_zeroed, handle_alloc_error};
 use std::cell::UnsafeCell;
 use std::ffi::c_int;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError, RwLock};
 
 use rav1d::include::dav1d::headers::Rav1dSequenceHeader;
 use rav1d::include::dav1d::headers::{Rav1dFrameHeader, Rav1dPixelLayout};
@@ -123,6 +124,14 @@ pub struct SinkOptions {
     pub gpu_grid: bool,
     /// The sink bounds the number of GPU prediction records and counts only the intra lists.
     pub gpu_pred_lists: bool,
+    /// The block lists of a tile are counted a superblock row behind its entropy decoder, by a parse
+    /// thread that has no task of the parser (`ParseSink::idle_work`), or by the tile's thread itself
+    /// when a row has waited for one a row long, and the rest of them when the tile is through
+    /// (`ParseSink::tile_finish`), behind the save of the frame's CDFs. For frames whose tiles are
+    /// parsed by the worker threads (`ParseFrame::tile_tasks`), and not with [`Self::late_lists`] or
+    /// [`Self::gpu_pred_lists`]; otherwise, and off, the tile's thread counts them superblock by
+    /// superblock. The lists are the same.
+    pub pipe_lists: bool,
 }
 
 /// What the sink measures for a host with a clock ([`SinkHost::add_time`]).
@@ -279,12 +288,14 @@ struct FrameState {
     cdef_coded: bool,
     /// [`SinkOptions::test_panic`]: this is the frame that panics.
     panics: bool,
+    /// [`SinkOptions::pipe_lists`] for this frame.
+    pipe_lists: bool,
 }
 
 /// What the sink keeps of a tile in parse. One thread at a time works on a tile.
 struct TileState {
-    /// The block context `av1_mi_push_block` reads, cleared, with the tile's constants set.
-    xd: Box<MACROBLOCKD>,
+    /// The tile's block lists, in its frame's place; set at the tile's begin.
+    lists: *const TileLists,
     memory: TileMemory,
     /// The pieces of the tile's mode info records in the order they were written; the last one is the
     /// one in use, the others are full.
@@ -295,19 +306,65 @@ struct TileState {
     lossless: bool,
     /// The tile ran out of room: its frame fails.
     failed: bool,
-    /// The records of the tile whose block lists are counted: the piece, and the records of that piece.
-    listed: (usize, c_int),
-    /// For a host with a clock: the time stamps the calls of the tile took ([`SinkOptions::time_calls`])
-    /// and those its block lists took, and the clock and the time stamp at the tile's begin, which give
-    /// the length of a time stamp.
+    /// The tile's last superblock row was parsed (`tile_end`), and the tile is through
+    /// (`tile_finish`).
+    ended: bool,
+    finished: bool,
+    /// Where the tile's superblock rows end, in 4x4 units, and the width of a superblock.
+    col_end: c_int,
+    sb_size: c_int,
+    /// For a host with a clock: the time stamps the calls of the tile took ([`SinkOptions::time_calls`]),
+    /// and the clock and the time stamp at the tile's begin, which give the length of a time stamp.
     call_stamps: u64,
-    list_stamps: u64,
-    /// Parts of the two with [`SinkOptions::time_calls`]: the grid's entries, and the wavefront and
-    /// intra part of the block lists.
+    /// Part of it with [`SinkOptions::time_calls`]: the grid's entries.
     grid_stamps: u64,
-    intra_stamps: u64,
     begin_ticks: i64,
     begin_stamp: u64,
+    /// With [`SinkOptions::gpu_grid`]: the records of the blocks at the top left of the 64x64 areas of
+    /// the superblock in parse (four areas of a 128x128 superblock, by column and row; the first entry
+    /// alone for a 64x64 one), null where no block has been read: where libaom keeps the CDEF index.
+    cdef_records: [*mut MB_MODE_INFO; 4],
+}
+
+/// The block lists of a tile: what counts them, which is the tile's thread or, with
+/// [`SinkOptions::pipe_lists`], whichever parse thread holds [`Self::claim`].
+///
+/// The entropy decoder of the tile writes the records and says how far it is ([`Self::ready`], at the
+/// end of every superblock row); the thread that counts reads the records up to there, in order, and
+/// writes the lists of the tile (its block map, index list and wavefront: `av1_mi_push_block`), which
+/// the entropy decoder does not touch. New with it: 48 bytes a tile and two lists of the tile's pieces
+/// (16 bytes a piece each, a piece being 256 records: 8 KB a tile for a heavy 4K key frame of 63k
+/// blocks), besides the block context and the edges, which were the tile's before. The entropy decoder
+/// and the thread that counts write different fields of the tile's `av1_tile_data` (the cursors of the
+/// coefficients and transform block records; the lists'), and different parts of the host's memory.
+struct TileLists {
+    /// Held by the one thread that counts the tile's lists ([`Self::state`] is its while it holds it).
+    claim: AtomicBool,
+    /// [`Self::ready`] has records no thread has taken up to count: the tile is in
+    /// [`Sink::queued_tiles`].
+    queued: AtomicBool,
+    /// How far the entropy decoder is through with the records: the piece in the high 32 bits, the
+    /// records of that piece in the low ones.
+    ready: AtomicU64,
+    /// The pieces of the tile's records as the entropy decoder took them: the first record and how many
+    /// there is room for. A piece before the one of [`Self::ready`] is full.
+    pieces: Mutex<Vec<(*mut MB_MODE_INFO, c_int)>>,
+    state: UnsafeCell<ListState>,
+}
+
+/// What the thread that counts a tile's lists keeps.
+struct ListState {
+    /// The block context `av1_mi_push_block` reads, cleared, with the tile's constants set.
+    xd: Box<MACROBLOCKD>,
+    /// The records whose lists are counted: the piece, and the records of that piece.
+    listed: (usize, c_int),
+    /// The pieces of [`TileLists::pieces`] it has looked up.
+    pieces: Vec<(*mut MB_MODE_INFO, c_int)>,
+    /// The tile is timed (a host with a clock): the time stamps its block lists took, and with
+    /// [`SinkOptions::time_calls`] the wavefront and intra part of them.
+    timed: bool,
+    list_stamps: u64,
+    intra_stamps: u64,
     /// With [`SinkOptions::gpu_grid`], what the block lists read where the grid was: for every 4x4
     /// column of the tile the record of the lowest block whose lists are counted, and for every 4x4 row
     /// of a superblock row (by the row's number modulo [`MI_LEFT_EDGE`]) that of the rightmost. The
@@ -319,10 +376,42 @@ struct TileState {
     /// The last 4x4 block counted in an even row and column: the first of the four 4x4 blocks of an 8x8,
     /// which the last of them (odd row and column) reads for its chroma.
     above_left: *mut MB_MODE_INFO,
-    /// With [`SinkOptions::gpu_grid`]: the records of the blocks at the top left of the 64x64 areas of
-    /// the superblock in parse (four areas of a 128x128 superblock, by column and row; the first entry
-    /// alone for a 64x64 one), null where no block has been read: where libaom keeps the CDEF index.
-    cdef_records: [*mut MB_MODE_INFO; 4],
+}
+
+impl TileLists {
+    fn new() -> Self {
+        Self {
+            claim: AtomicBool::new(false),
+            queued: AtomicBool::new(false),
+            ready: AtomicU64::new(0),
+            pieces: Mutex::new(Vec::new()),
+            state: UnsafeCell::new(ListState {
+                xd: zeroed_box(),
+                listed: (0, 0),
+                pieces: Vec::new(),
+                timed: false,
+                list_stamps: 0,
+                intra_stamps: 0,
+                above: Vec::new(),
+                left: [std::ptr::null_mut(); MI_LEFT_EDGE],
+                above_left: std::ptr::null_mut(),
+            }),
+        }
+    }
+
+    /// Takes the claim if no thread holds it.
+    fn try_claim(&self) -> bool {
+        self.claim.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_ok()
+    }
+
+    fn release(&self) {
+        self.claim.store(false, Ordering::Release);
+    }
+}
+
+/// [`TileLists::ready`] of a tile whose entropy decoder has written these pieces.
+fn ready_of(pieces: &[Records]) -> u64 {
+    pieces.last().map_or(0, |records| ((pieces.len() as u64 - 1) << 32) | records.count as u32 as u64)
 }
 
 /// A piece of a tile's mode info records.
@@ -405,6 +494,9 @@ struct FramePlace {
     cm: UnsafeCell<Box<AV1_COMMON>>,
     /// The tiles of the frame; the vector is written by `frame_begin`, an element by its tile's thread.
     tiles: UnsafeCell<Vec<UnsafeCell<Option<TileState>>>>,
+    /// The block lists of the tiles. Written (the vector) by `frame_begin` and given back by `frame_end`
+    /// under the write lock; the threads that look for lists to count ([`Sink::idle_work`]) read it.
+    lists: RwLock<Vec<TileLists>>,
 }
 
 /// The sink.
@@ -415,6 +507,9 @@ pub struct Sink<H: SinkHost> {
     /// The frames that have begun.
     begun: AtomicU64,
     options: SinkOptions,
+    /// The tiles of the frames in parse with records whose lists no thread has taken up to count
+    /// ([`TileLists::queued`]).
+    queued_tiles: AtomicUsize,
 }
 
 // SAFETY: the calls of a `ParseSink` come as its contract says: `frame_begin` and `frame_end` while no
@@ -443,9 +538,10 @@ impl<H: SinkHost> Sink<H> {
                 frame: UnsafeCell::new(None),
                 cm: UnsafeCell::new(zeroed_box()),
                 tiles: UnsafeCell::new(Vec::new()),
+                lists: RwLock::new(Vec::new()),
             })
             .collect();
-        Self { host, frames, begun: AtomicU64::new(0), options }
+        Self { host, frames, begun: AtomicU64::new(0), options, queued_tiles: AtomicUsize::new(0) }
     }
 
     /// The frames that may be in parse at once.
@@ -505,25 +601,27 @@ impl<H: SinkHost> Sink<H> {
 
 /// The calls of a tile, without their timing.
 impl<H: SinkHost> Sink<H> {
-    /// Counts the block lists of the records of a tile that are not counted yet: all that were read
-    /// since the last call, in the order they were read.
+    /// Counts the block lists of the records of a tile that are not counted yet, up to `ready` (as
+    /// [`TileLists::ready`] has it), in the order they were read.
     ///
     /// # Safety
-    /// The tile's thread, inside the frame. The block context is set for each block as
-    /// `set_offsets_for_pred_and_recon` and `set_mi_row_col` of the entropy decoder set it;
-    /// `av1_mi_push_block` reads the size of the frame through `cm`, which no thread writes while tiles
-    /// of the frame are in parse. With [`SinkOptions::gpu_grid`] the block context has the block's record
-    /// and the tile's edges in place of the grid, and each block that is counted goes into the edges.
-    unsafe fn count_lists(&self, frame_number: usize, tile: usize) {
+    /// Inside the frame, on the thread that holds the tile's claim, or on the tile's thread when the
+    /// frame does not have [`FrameState::pipe_lists`]; the records up to `ready` are written. The block
+    /// context is set for each block as `set_offsets_for_pred_and_recon` and `set_mi_row_col` of the
+    /// entropy decoder set it; `av1_mi_push_block` reads the size of the frame through `cm`, which no
+    /// thread writes while tiles of the frame are in parse. With [`SinkOptions::gpu_grid`] the block
+    /// context has the block's record and the tile's edges in place of the grid, and each block that is
+    /// counted goes into the edges.
+    unsafe fn count_lists(&self, frame_number: usize, lists: &TileLists, ready: u64) {
         // The loop twice, so that the one with the grid is the code it was before there was another way.
         // SAFETY: the caller's contract.
         unsafe {
             if self.options.gpu_pred_lists {
-                self.count_lists_way::<true, true>(frame_number, tile);
+                self.count_lists_way::<true, true>(frame_number, lists, ready);
             } else if self.options.gpu_grid {
-                self.count_lists_way::<true, false>(frame_number, tile);
+                self.count_lists_way::<true, false>(frame_number, lists, ready);
             } else {
-                self.count_lists_way::<false, false>(frame_number, tile);
+                self.count_lists_way::<false, false>(frame_number, lists, ready);
             }
         }
     }
@@ -535,19 +633,21 @@ impl<H: SinkHost> Sink<H> {
     unsafe fn count_lists_way<const GPU_GRID: bool, const GPU_PRED_LISTS: bool>(
         &self,
         frame_number: usize,
-        tile: usize,
+        lists: &TileLists,
+        ready: u64,
     ) {
         // SAFETY: the caller's contract; the records are those the tile has written into its parts of
         // the pool, and each is in the grid.
         unsafe {
-            let state = self.tile(frame_number, tile).as_mut().expect("the tile has begun");
+            let state = &mut *lists.state.get();
+            let (ready_piece, ready_count) = ((ready >> 32) as usize, ready as u32 as c_int);
             let (mut piece, mut index) = state.listed;
-            // Nothing to count: the piece the count stopped in has no new record and is the last one.
-            if state.pieces.get(piece).is_none_or(|records| index >= records.count && piece + 1 == state.pieces.len()) {
+            // Nothing to count: the count stopped where the records end.
+            if (piece, index) >= (ready_piece, ready_count) {
                 return;
             }
             let frame = self.frame(frame_number);
-            let stamp = if state.begin_ticks != 0 { time_stamp() } else { 0 };
+            let stamp = if state.timed { time_stamp() } else { 0 };
             let time_intra = stamp != 0 && self.options.time_calls;
             if time_intra {
                 rav1g_intra_list_stamps(true);
@@ -558,19 +658,24 @@ impl<H: SinkHost> Sink<H> {
             let cm: *mut AV1_COMMON = &raw mut **self.frames[frame_number].cm.get();
             let xd: *mut MACROBLOCKD = &raw mut *state.xd;
             let (row_start, col_start) = ((*xd).tile.mi_row_start, (*xd).tile.mi_col_start);
-            // The records piece by piece, in the order they were written. A piece that is not the last
-            // one is full.
+            // The records piece by piece, in the order they were written. A piece before the one of
+            // `ready` is full.
             loop {
-                let records = &state.pieces[piece];
-                if index >= records.count {
-                    if piece + 1 == state.pieces.len() {
-                        break;
-                    }
+                if (piece, index) >= (ready_piece, ready_count) {
+                    break;
+                }
+                if piece >= state.pieces.len() {
+                    let shared = lists.pieces.lock().unwrap_or_else(PoisonError::into_inner);
+                    state.pieces.extend_from_slice(&shared[state.pieces.len()..]);
+                }
+                let (pool, max) = state.pieces[piece];
+                let end = if piece < ready_piece { max } else { ready_count };
+                if index >= end {
                     piece += 1;
                     index = 0;
                     continue;
                 }
-                let record = records.pool.add(index as usize);
+                let record = pool.add(index as usize);
                 let mi = &*record;
                 index += 1;
                 let (mi_row, mi_col) = (i32::from(mi.mi_row), i32::from(mi.mi_col));
@@ -630,6 +735,73 @@ impl<H: SinkHost> Sink<H> {
         }
     }
 
+    /// With [`FrameState::pipe_lists`]: the claim of a tile's lists is taken, and the tile leaves
+    /// [`Self::queued_tiles`]; its lists are counted up to where its entropy decoder is, and the claim is
+    /// given back. `false` when another thread holds the claim.
+    ///
+    /// # Safety
+    /// Inside the frame, which holds the tile's lists.
+    unsafe fn count_claimed(&self, frame_number: usize, lists: &TileLists) -> bool {
+        if !lists.try_claim() {
+            return false;
+        }
+        if lists.queued.swap(false, Ordering::SeqCst) {
+            self.queued_tiles.fetch_sub(1, Ordering::SeqCst);
+        }
+        // SAFETY: the caller's contract, and the claim is this thread's.
+        unsafe { self.count_lists(frame_number, lists, lists.ready.load(Ordering::Acquire)) };
+        lists.release();
+        true
+    }
+
+    /// With [`FrameState::pipe_lists`]: the entropy decoder of a tile is through with a superblock row.
+    /// The records up to here are the lists'; a parse thread without a task takes them up. When the
+    /// row before is still there (no thread took it up a row long), the tile's thread counts both.
+    ///
+    /// # Safety
+    /// The tile's thread, inside the frame.
+    unsafe fn publish_row(&self, frame_number: usize, state: &TileState) {
+        // SAFETY: the caller's contract; the lists are the tile's, in its frame's place.
+        unsafe {
+            let lists = &*state.lists;
+            lists.ready.store(ready_of(&state.pieces), Ordering::Release);
+            if !lists.queued.swap(true, Ordering::SeqCst) {
+                self.queued_tiles.fetch_add(1, Ordering::SeqCst);
+            } else {
+                self.count_claimed(frame_number, lists);
+            }
+        }
+    }
+
+    /// The timers of a tile, for a host with a clock: when the tile and its lists are through.
+    ///
+    /// # Safety
+    /// The tile's thread, inside the frame, with no other thread counting the tile's lists.
+    unsafe fn tile_timers(&self, frame: usize, tile: usize) {
+        // SAFETY: the caller's contract.
+        unsafe {
+            let state = self.tile(frame, tile).as_mut().expect("the tile has begun");
+            let lists = &*(*state.lists).state.get();
+            if state.begin_ticks != 0 {
+                let stamps = time_stamp().wrapping_sub(state.begin_stamp);
+                let ticks = self.host.ticks() - state.begin_ticks;
+                if stamps != 0 {
+                    let ticks_a_stamp = ticks as f64 / stamps as f64;
+                    if self.options.time_calls {
+                        self.host.add_time(frame, SinkTimer::Calls, (state.call_stamps as f64 * ticks_a_stamp) as i64);
+                        self.host.add_time(frame, SinkTimer::Grid, (state.grid_stamps as f64 * ticks_a_stamp) as i64);
+                        self.host.add_time(
+                            frame,
+                            SinkTimer::ListsIntra,
+                            (lists.intra_stamps as f64 * ticks_a_stamp) as i64,
+                        );
+                    }
+                    self.host.add_time(frame, SinkTimer::Lists, (lists.list_stamps as f64 * ticks_a_stamp) as i64);
+                }
+            }
+        }
+    }
+
     fn block_call(&self, frame_number: usize, tile: usize, block: &ParseBlock<'_>) {
         // SAFETY: a call of the tile's thread between the frame's begin and end; the record is the next
         // one of the tile's part of the pool, and the grid is written inside the tile.
@@ -647,6 +819,11 @@ impl<H: SinkHost> Sink<H> {
                 match self.host.more_mode_info(frame_number, tile, td) {
                     Some(piece) if piece.count > 0 => {
                         state.pieces.push(Records { pool: piece.mi_pool, count: 0, max: piece.count });
+                        (*state.lists)
+                            .pieces
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .push((piece.mi_pool, piece.count));
                     }
                     _ => {
                         state.failed = true;
@@ -674,7 +851,8 @@ impl<H: SinkHost> Sink<H> {
 
             let bsize = BLOCK_SIZE_OF[block.bs as usize] as usize;
             if self.options.gpu_pred_lists {
-                gpu_prediction_bounds(&mut *state.memory.tile_data, &*mi, &state.xd);
+                // The block context is the tile's thread's: no frame with these lists has `pipe_lists`.
+                gpu_prediction_bounds(&mut *state.memory.tile_data, &*mi, &(*(*state.lists).state.get()).xd);
             }
             if self.options.gpu_grid {
                 // No grid. The 64x64 areas whose top left unit is the block's: the block's first unit and,
@@ -865,6 +1043,10 @@ impl<H: SinkHost> ParseSink for Sink<H> {
                 sb128: header.seq_hdr.sb128 != 0,
                 cdef_coded: !(header.frame_hdr.all_lossless || header.frame_hdr.allow_intrabc),
                 panics: self.options.test_panic && self.begun.fetch_add(1, Ordering::Relaxed) + 1 == TEST_PANIC_FRAME,
+                pipe_lists: self.options.pipe_lists
+                    && header.tile_tasks
+                    && !self.options.late_lists
+                    && !self.options.gpu_pred_lists,
             });
             let states = &mut *place.tiles.get();
             for state in states.iter_mut() {
@@ -877,6 +1059,17 @@ impl<H: SinkHost> ParseSink for Sink<H> {
             while states.len() < tiles {
                 states.push(UnsafeCell::new(None));
             }
+            // The lists of the tiles, under the write lock: a thread that looks for lists to count may be
+            // reading the vector (it finds none of this place's tiles queued).
+            let mut lists = place.lists.write().unwrap_or_else(PoisonError::into_inner);
+            for tile in lists.iter() {
+                debug_assert!(!tile.queued.load(Ordering::Relaxed));
+                tile.claim.store(false, Ordering::Relaxed);
+                tile.ready.store(0, Ordering::Relaxed);
+            }
+            while lists.len() < tiles {
+                lists.push(TileLists::new());
+            }
         }
         Ok(number)
     }
@@ -888,7 +1081,7 @@ impl<H: SinkHost> ParseSink for Sink<H> {
             let frame = self.frame(frame_number);
             let slot = self.tile(frame_number, tile.index);
             let state = slot.get_or_insert_with(|| TileState {
-                xd: zeroed_box(),
+                lists: std::ptr::null(),
                 memory: TileMemory {
                     tile_data: std::ptr::null_mut(),
                     mi_pool: std::ptr::null_mut(),
@@ -899,32 +1092,50 @@ impl<H: SinkHost> ParseSink for Sink<H> {
                 txb_room: 0,
                 lossless: false,
                 failed: false,
-                listed: (0, 0),
+                ended: false,
+                finished: false,
+                col_end: 0,
+                sb_size: 0,
                 call_stamps: 0,
-                list_stamps: 0,
                 grid_stamps: 0,
-                intra_stamps: 0,
                 begin_ticks: 0,
                 begin_stamp: 0,
-                above: Vec::new(),
-                left: [std::ptr::null_mut(); MI_LEFT_EDGE],
-                above_left: std::ptr::null_mut(),
                 cdef_records: [std::ptr::null_mut(); 4],
             });
+            // The tile's lists: the vector of the place is not written while tiles of the frame are in
+            // parse, and no thread takes up the lists before the first superblock row is published below
+            // this (`TileLists::queued`), so their state is this thread's here.
+            let lists = &(*self.frames[frame_number].lists.read().unwrap_or_else(PoisonError::into_inner))[tile.index]
+                as *const TileLists;
+            state.lists = lists;
+            let lists = &*lists;
+            let list_state = &mut *lists.state.get();
             // A host with a clock (a timing run): what a time stamp is worth is taken over the tile.
             state.call_stamps = 0;
-            state.list_stamps = 0;
             state.grid_stamps = 0;
-            state.intra_stamps = 0;
             state.begin_ticks = self.host.ticks();
             state.begin_stamp = if state.begin_ticks != 0 { time_stamp() } else { 0 };
-            state.listed = (0, 0);
+            list_state.timed = state.begin_ticks != 0;
+            list_state.list_stamps = 0;
+            list_state.intra_stamps = 0;
+            list_state.listed = (0, 0);
+            list_state.pieces.clear();
             state.pieces.clear();
-            if memory.mi_count_max > 0 {
-                state.pieces.push(Records { pool: memory.mi_pool, count: 0, max: memory.mi_count_max });
+            {
+                let mut pieces = lists.pieces.lock().unwrap_or_else(PoisonError::into_inner);
+                pieces.clear();
+                if memory.mi_count_max > 0 {
+                    state.pieces.push(Records { pool: memory.mi_pool, count: 0, max: memory.mi_count_max });
+                    pieces.push((memory.mi_pool, memory.mi_count_max));
+                }
             }
+            lists.ready.store(0, Ordering::Relaxed);
             state.txb_room = memory.txb_room;
             state.failed = false;
+            state.ended = false;
+            state.finished = false;
+            state.col_end = tile.col_end;
+            state.sb_size = if frame.sb128 { 32 } else { 16 };
             let tile_data = &mut *memory.tile_data;
             tile_data.gpu_pred_lists = self.options.gpu_pred_lists.into();
             tile_data.pred_block_bound = 0;
@@ -934,13 +1145,13 @@ impl<H: SinkHost> ParseSink for Sink<H> {
                 // The edges of the tile: nothing is read of them before a block of this tile has written
                 // it (a block reads above and to the left only inside the tile).
                 let columns = (tile.col_end - tile.col_start).max(0) as usize + MI_LEFT_EDGE + 1;
-                state.above.clear();
-                state.above.resize(columns, std::ptr::null_mut());
-                state.left = [std::ptr::null_mut(); MI_LEFT_EDGE];
-                state.above_left = std::ptr::null_mut();
+                list_state.above.clear();
+                list_state.above.resize(columns, std::ptr::null_mut());
+                list_state.left = [std::ptr::null_mut(); MI_LEFT_EDGE];
+                list_state.above_left = std::ptr::null_mut();
             }
             state.cdef_records = [std::ptr::null_mut(); 4];
-            let xd = &mut *state.xd;
+            let xd = &mut *list_state.xd;
             xd.tile = TileInfo {
                 mi_row_start: tile.row_start,
                 mi_row_end: tile.row_end,
@@ -990,11 +1201,20 @@ impl<H: SinkHost> ParseSink for Sink<H> {
         self.superblock_call(frame, tile, superblock);
         // SAFETY: as above.
         unsafe { self.call_end(frame, tile, begin) };
-        // The block lists of the superblock, while its records are at hand. They have a timer of their
-        // own, so they are not inside the timed call.
-        if !self.options.late_lists {
-            // SAFETY: as above.
-            unsafe { self.count_lists(frame, tile) };
+        // The block lists of the superblock, while its records are at hand; with `pipe_lists` those of
+        // the superblock row at its end, by another thread. They have a timer of their own, so they are
+        // not inside the timed call.
+        // SAFETY: as above.
+        unsafe {
+            if let Some(state) = self.tile(frame, tile).as_ref() {
+                if self.frame(frame).pipe_lists {
+                    if superblock.x4 + state.sb_size >= state.col_end && !state.failed {
+                        self.publish_row(frame, state);
+                    }
+                } else if !self.options.late_lists {
+                    self.count_lists(frame, &*state.lists, ready_of(&state.pieces));
+                }
+            }
         }
         // SAFETY: as above.
         if unsafe { self.frame(frame) }.panics {
@@ -1005,40 +1225,95 @@ impl<H: SinkHost> ParseSink for Sink<H> {
     fn tile_end(&self, frame: usize, tile: usize) {
         // SAFETY: a call of the tile's thread between the frame's begin and end.
         unsafe {
-            {
-                let state = self.tile(frame, tile).as_mut().expect("the tile has begun");
-                // The records of the tile's last piece; the pieces before it are full.
-                let td = state.memory.tile_data;
-                (*td).mi_count = state.pieces.last().map_or(0, |records| records.count);
+            let pipe_lists = self.frame(frame).pipe_lists;
+            let state = self.tile(frame, tile).as_mut().expect("the tile has begun");
+            // The records of the tile's last piece; the pieces before it are full.
+            let td = state.memory.tile_data;
+            (*td).mi_count = state.pieces.last().map_or(0, |records| records.count);
+            state.ended = true;
+            if pipe_lists {
+                // The rest of the lists, the timers and the host's end of the tile come with
+                // `tile_finish`, behind the save of the frame's CDFs.
+                return;
             }
             // The block lists that are not counted yet: all of the tile's with
             // `SinkOptions::late_lists`, and otherwise none (the tile's last superblock counted them).
-            self.count_lists(frame, tile);
-            // The timers of the tile, for a host with a clock.
-            let state = self.tile(frame, tile).as_mut().expect("the tile has begun");
-            if state.begin_ticks != 0 {
-                let stamps = time_stamp().wrapping_sub(state.begin_stamp);
-                let ticks = self.host.ticks() - state.begin_ticks;
-                if stamps != 0 {
-                    let ticks_a_stamp = ticks as f64 / stamps as f64;
-                    if self.options.time_calls {
-                        self.host.add_time(frame, SinkTimer::Calls, (state.call_stamps as f64 * ticks_a_stamp) as i64);
-                        self.host.add_time(frame, SinkTimer::Grid, (state.grid_stamps as f64 * ticks_a_stamp) as i64);
-                        self.host.add_time(
-                            frame,
-                            SinkTimer::ListsIntra,
-                            (state.intra_stamps as f64 * ticks_a_stamp) as i64,
-                        );
-                    }
-                    self.host.add_time(frame, SinkTimer::Lists, (state.list_stamps as f64 * ticks_a_stamp) as i64);
-                }
-            }
+            self.count_lists(frame, &*state.lists, ready_of(&state.pieces));
+            self.tile_timers(frame, tile);
         }
         self.host.tile_end(frame, tile);
     }
 
+    fn tile_finish(&self, frame: usize, tile: usize) {
+        // SAFETY: the thread of the tile's last superblock row, inside the frame (the contract of
+        // `ParseSink::tile_finish`); the frame's place holds the tile's lists until its `frame_end`.
+        unsafe {
+            if !self.frame(frame).pipe_lists {
+                return;
+            }
+            let Some(state) = self.tile(frame, tile).as_mut() else {
+                // The tile did not begin: no lists.
+                return;
+            };
+            if std::mem::replace(&mut state.finished, true) {
+                return;
+            }
+            let lists = &*state.lists;
+            // The thread that counts a row of the tile now is through with it in a row's time at most.
+            let mut spins = 0u32;
+            while !lists.try_claim() {
+                spins += 1;
+                if spins < 64 {
+                    std::hint::spin_loop();
+                } else {
+                    std::thread::yield_now();
+                }
+            }
+            if lists.queued.swap(false, Ordering::SeqCst) {
+                self.queued_tiles.fetch_sub(1, Ordering::SeqCst);
+            }
+            let ended = state.ended && !state.failed;
+            if ended {
+                self.count_lists(frame, lists, ready_of(&state.pieces));
+            }
+            // Held from here on: no thread counts the tile's lists any more in this frame.
+            if ended {
+                self.tile_timers(frame, tile);
+                self.host.tile_end(frame, tile);
+            }
+        }
+    }
+
+    fn idle_work_pending(&self) -> bool {
+        self.queued_tiles.load(Ordering::Relaxed) != 0
+    }
+
+    fn idle_work(&self) -> bool {
+        if self.queued_tiles.load(Ordering::Relaxed) == 0 {
+            return false;
+        }
+        for (number, place) in self.frames.iter().enumerate() {
+            // A frame that begins or ends has the lock: its tiles have no lists to count then.
+            let Ok(lists) = place.lists.try_read() else {
+                continue;
+            };
+            for tile in lists.iter() {
+                // SAFETY: a tile with records to count is one of a frame in parse (it leaves the queue at
+                // its `tile_finish`, before the frame ends), and the read lock keeps its frame's place.
+                if tile.queued.load(Ordering::Relaxed) && unsafe { self.count_claimed(number, tile) } {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn frame_end(&self, frame: usize, ok: bool) -> bool {
         let place = &self.frames[frame];
+        // No thread counts lists of the frame any more (each tile's `tile_finish` took its claim for
+        // good); one that looks for lists may still read the vector. The lock waits for it, and the place
+        // is then the frame's alone to give back.
+        drop(place.lists.write().unwrap_or_else(PoisonError::into_inner));
         // SAFETY: no tile of the frame is in parse any more, and the place is the frame's until it is
         // given back below.
         let failed = unsafe {

@@ -41,6 +41,7 @@
 use std::cell::UnsafeCell;
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 
 use rav1g_parse::options::ParseOptions;
@@ -67,6 +68,15 @@ use super::rav1d_frames::{Descriptions, Entry, Failure, Frames, zeroed_box};
 use super::thread::spawn_thread;
 use super::types::{Av1Core, av1_frame_thread_data};
 use crate::sys;
+
+static LEGACY_LISTS: AtomicBool = AtomicBool::new(false);
+
+/// Internal test switch from `dx/av1_perf.h` (`SinkOptions::pipe_lists` off). The parser reads it when
+/// first created.
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_parse_lists_legacy(enable: c_int) {
+    LEGACY_LISTS.store(enable != 0, Ordering::Relaxed);
+}
 use crate::sys::{
     AV1_COMMON, AV1Decoder, INVALID_IDX, REF_NO_SCALE, RESTORE_NONE, RESTORE_SGRPROJ, RESTORE_SWITCHABLE,
     RESTORE_WIENER, RefCntBuffer, TileInfo, WarpedMotionParams, aom_film_grain_t, aom_hdr_metadata_t,
@@ -1403,7 +1413,9 @@ impl Rav1dHost {
         // SAFETY: the decoder; set before a thread of the parser exists.
         unsafe { (*dec).frames_in_parse = frames as c_int };
         let host = SlotHost { dec, state: UnsafeCell::new(state), frames: queue };
-        let sink = Arc::new(Sink::with_frames(host, options.sink(), frames));
+        let mut sink_options = options.sink();
+        sink_options.pipe_lists = !LEGACY_LISTS.load(Ordering::Relaxed);
+        let sink = Arc::new(Sink::with_frames(host, sink_options, frames));
         let mut settings = ParseSettings {
             threads: threads as u16,
             frames: frames as u16,

@@ -384,6 +384,15 @@ pub struct av1_frame_thread_data {
     /// parse; each tile's thread writes the element of its tile, through `tile_pieces`.
     pub pieces: Vec<TilePieces>,
     pub tile_pieces: *mut TilePieces,
+    /// The block index list of each tile (`av1_tile_data::gen_indexes` points into it): what the blocks
+    /// of the tile have in the lists of the stages, written by the thread that counts the tile's lists
+    /// up to `av1_tile_data::gen_index_ptr` entries (its length is not kept current). It grows with the
+    /// tile and keeps its memory for the next frame; the lists of the tiles go into the slot's buffer one
+    /// behind the other when the frame is recorded. Not in `TilePieces`: the lists of a tile may be
+    /// counted on another thread than the one that takes its pieces (`rav1g_parse::sink`). Sized like
+    /// `pieces`.
+    pub index_lists: Vec<Vec<u32>>,
+    pub tile_index_lists: *mut Vec<u32>,
     /// The contiguous backing of each pool for the recorded stages of this frame.
     pub parse_buffers: [*mut GpuBufferObject; KINDS],
     pub dump_active: c_int,
@@ -424,12 +433,6 @@ pub struct TilePieces {
     /// is writing began (for the statistics of `mem_stats.rs`).
     pub coef_values: i64,
     pub coef_run: c_int,
-    /// The tile's block index list (`av1_tile_data::gen_indexes` points into it): what the blocks of
-    /// the tile have in the lists of the stages, written by the tile's thread up to
-    /// `av1_tile_data::gen_index_ptr` entries (its length is not kept current). It grows with the tile
-    /// and keeps its memory for the next frame; the lists of the tiles go into the slot's buffer one
-    /// behind the other when the frame is recorded.
-    pub indexes: Vec<u32>,
 }
 
 /// The memory of the edges of the intra wavefront of the frames of a slot (`blocks::WaveEdges`). It grows
@@ -461,17 +464,18 @@ impl av1_frame_thread_data {
     /// grows here, and `av1_tile_data::gen_indexes` follows it.
     ///
     /// # Safety
-    /// The thread that parses the tile, which is one of the tiles of the frame on this slot.
+    /// The thread that counts the tile's block lists (the tile's thread, or the one that holds the claim
+    /// of its lists, `rav1g_parse::sink`), the tile being one of the tiles of the frame on this slot.
     pub(crate) unsafe fn index_list_room(&self, tile: &mut crate::sys::av1_tile_data, room: usize) {
-        // SAFETY: the caller's contract: the element of the tile is its thread's.
+        // SAFETY: the caller's contract: the index list of the tile is that thread's.
         unsafe {
-            let pieces =
-                &mut *self.tile_pieces.offset(std::ptr::from_mut(tile).cast_const().offset_from(self.tile_data));
+            let indexes =
+                &mut *self.tile_index_lists.offset(std::ptr::from_mut(tile).cast_const().offset_from(self.tile_data));
             let written = tile.gen_index_ptr.max(0) as usize;
-            if written + room > pieces.indexes.capacity() {
-                pieces.indexes.set_len(written);
-                pieces.indexes.reserve(room);
-                tile.gen_indexes = pieces.indexes.as_mut_ptr();
+            if written + room > indexes.capacity() {
+                indexes.set_len(written);
+                indexes.reserve(room);
+                tile.gen_indexes = indexes.as_mut_ptr();
             }
         }
     }
@@ -679,6 +683,7 @@ impl Av1Core {
                 (&raw mut (*dec).frame_thread_data[slot].perf_inter_tiles).write(Vec::new());
                 (&raw mut (*dec).frame_thread_data[slot].step_time).write(Default::default());
                 (&raw mut (*dec).frame_thread_data[slot].pieces).write(Vec::new());
+                (&raw mut (*dec).frame_thread_data[slot].index_lists).write(Vec::new());
             }
             for context in 0..OutputThreadDataCount as usize {
                 (&raw mut (*dec).output_thread_data[context].perf.detail).write(None);
@@ -686,6 +691,7 @@ impl Av1Core {
                 (&raw mut (*dec).output_thread_data[context].perf_inter_tiles).write(Vec::new());
                 (&raw mut (*dec).output_thread_data[context].step_time).write(Default::default());
                 (&raw mut (*dec).output_thread_data[context].pieces).write(Vec::new());
+                (&raw mut (*dec).output_thread_data[context].index_lists).write(Vec::new());
             }
             Some(Box::from_raw(dec))
         }

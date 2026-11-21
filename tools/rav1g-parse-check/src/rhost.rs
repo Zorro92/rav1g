@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use rav1g_parse::options::ParseOptions;
 use rav1g_parse::rav1d::include::dav1d::headers::Rav1dPixelLayout;
 use rav1g_parse::rav1d::parse::{ParseFrame, ParsePalette, ParseSettings, ParseSuperblock, ParseTile, Parser};
-use rav1g_parse::sink::{FrameMemory, ModeInfoPiece, Sink, SinkHost, SinkTimer, TileMemory};
+use rav1g_parse::sink::{FrameMemory, ModeInfoPiece, Sink, SinkHost, SinkOptions, SinkTimer, TileMemory};
 
 use crate::plain::{Arena, FrameSize, LrUnit, Palette, TileBounds};
 use crate::sys::{RESTORE_NONE, RESTORE_SGRPROJ, RESTORE_WIENER, av1_tile_data};
@@ -256,6 +256,10 @@ pub struct Legacy {
     /// The loops of `av1_mi_push_block` for the transform blocks of intra prediction as they were before
     /// `intra_txbs_edges` (`av1_frame_thread_data::intra_lists_legacy`).
     pub intra_lists: bool,
+    /// The block lists of a tile counted on its thread superblock by superblock, not a superblock row
+    /// behind it by threads without a task (`SinkOptions::pipe_lists` off; the decoder's
+    /// -parselistslegacy).
+    pub lists: bool,
 }
 
 pub struct RustParser {
@@ -295,7 +299,7 @@ impl RustParser {
                 grid_nanos: AtomicU64::new(0),
                 intra_nanos: AtomicU64::new(0),
             },
-            options.sink(),
+            SinkOptions { pipe_lists: !legacy.lists, ..options.sink() },
             usize::from(frames),
         ));
         let mut settings = ParseSettings { threads, frames, ..Default::default() };

@@ -3510,3 +3510,71 @@ runs: the lists of a tile need only the records, in order, so they could be coun
 parse thread a superblock row behind the entropy decoder, off the path of a one-tile frame (and of
 the next frame's wait for its CDFs). On one-tile 4K streams with two frames in parse two of the
 four workers are free. Not done here.
+
+### The block lists behind the entropy decoder (2026-11-21)
+
+The lists of a tile need its records, in order, and nothing the entropy decoder reads back. So with
+more than one parse thread they are counted a superblock row behind it, by a thread that has no task
+(`-parselistslegacy`, `av1_set_parse_lists_legacy`, for the previous way: the tile's thread counts them
+superblock by superblock). Sized for the console's CPU (no thread more than the four parse threads; on
+one-tile 4K with two frames in parse two of them often have nothing to do, and the frame behind a key
+frame waits for the key frame's whole parse for its CDFs).
+
+- **Threads.** No new thread and no new task of the scheduler. A worker of rav1d that finds no task asks
+  the sink for work before it waits (`ParseSink::idle_work_pending`, `idle_work`), and takes one tile's
+  published rows at a time, so that it looks for tasks again behind them. The thread of a tile that has
+  parsed a row wakes a waiting worker when there is such work, under the lock the worker waits with;
+  the worker says first that it waits (`cond_signaled`), so no wake-up is lost.
+- **Per tile** (`rav1g_parse::sink::TileLists`): a claim (one thread counts a tile's lists at a time), a
+  mark that it has rows nobody took up, how far the entropy decoder is (one 64-bit word: the piece of
+  records and the records of it), and the list of the pieces of records, under a mutex the entropy
+  decoder takes once a piece (256 records). 48 bytes a tile and 16 bytes a piece in each of two lists
+  (8 KB a tile for a heavy 4K key frame); the block context and the edges the lists read were the
+  tile's already. The index list of a tile moves out of the host's `TilePieces` into a list of its own
+  (`av1_frame_thread_data::index_lists`): the thread that counts writes it while the entropy decoder
+  takes pieces of the pools.
+- **The entropy decoder** publishes a row at the end of its last superblock (a store and a swap). When
+  the row before is still unclaimed (no thread took it up a row long), it counts both itself, so the
+  lists lag a row at most and their records are still in the caches.
+- **The end of a tile.** `tile_end` only marks it. The thread of the tile's last row saves the frame's
+  CDFs (AV1 7.20), wakes a thread for what waited for them (the next frame's `InitCdf`), and then,
+  without the scheduler's lock, finishes the tile (`ParseSink::tile_finish`): it waits for the claim,
+  counts what is left and calls the host's `tile_end`. The frame's task count goes down behind it, so
+  `frame_end` and the GPU submission come after every tile's lists. A tile that failed or did not begin
+  is finished too (nothing is counted); a frame that fails ends as before.
+- **One thread** (no workers): unchanged, the lists are counted on the thread superblock by superblock.
+
+Measured with `rav1g-parse-check -time -frametimes` on a laptop CPU with 4 cores and 8 threads (as the
+console), loaded by other work; per-frame numbers are medians of three runs, 4 workers, 2 frames in
+parse, `-listslegacy` against the default of the same build:
+
+| | j4k40 (4K60, 40 Mbps) | jf4k100m (4K60, 100 Mbps) | d2 (300 frames) |
+| --- | --- | --- | --- |
+| Mean wall of a frame | 32.81 → 30.41 ms | 47.11 → 44.07 ms | 28.81 → 28.02 ms |
+| Mean tile work | 24.24 → 22.65 ms | 38.76 → 36.65 ms | 21.79 → 21.01 ms |
+| Mean CDF wait | 3.48 → 2.60 ms | 3.15 → 2.25 ms | 1.87 → 1.72 ms |
+| With the sink, ms a frame | 16.59 → 15.38 | 23.56 → 22.25 | 17.94 → 17.57 |
+
+| d2 frame | Before: wall / tile / CDF wait | After |
+| --- | --- | --- |
+| 0 (key) | 213.6 / 184.2 / 0 | 199.4 / 165.3 / 0 |
+| 1 (loads its CDFs) | 304.9 / 120.2 / 154.7 | 284.9 / 119.0 / 140.9 |
+| 100 (key) | 174.9 / 170.3 / 0 | 170.6 / 165.7 / 0 |
+| 101 | 269.5 / 105.4 / 162.5 | 265.2 / 104.3 / 157.4 |
+| 200 (key) | 185.9 / 181.5 / 0 | 172.8 / 167.1 / 0 |
+| 201 | 299.3 / 121.5 / 177.2 | 286.3 / 118.9 / 162.6 |
+| 165 (heavy hidden) | 143.3 / 138.6 / 0 | 168.8 / 163.9 / 0 |
+| 166 | 58.3 / 53.6 / 0 | 61.9 / 57.3 / 0 |
+| 181 (heavy hidden) | 144.3 / 139.0 / 0 | 152.8 / 147.6 / 0 |
+| 182 | 48.5 / 42.4 / 0 | 57.3 / 50.5 / 0 |
+
+- The key frames lose most of their lists (5 to 19 ms of tile work), and the frames behind them wait
+  that much less for their CDFs.
+- The heavy hidden frames of d2 got slower: two heavy frames are in parse at once there, and the
+  threads that count their lists run next to the two entropy decoders on the same cores (SMT). Whether
+  that holds on the console, where the system places the threads, is for the A/B to say.
+- The lists take more CPU time in all (j4k40 2.5 → 2.9 ms a frame of all threads): their records come
+  from another core's cache. With one worker nothing changes (d2: 18.71 and 18.69 ms a frame).
+- Checked: `rav1g-parse-check` holds the default (4 threads, 1 and 2 frames in parse) against the
+  reference with one thread, whose lists are counted superblock by superblock: equal on the 244 public
+  streams and on five local 4K and 1080p clips.

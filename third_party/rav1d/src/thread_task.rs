@@ -912,6 +912,19 @@ fn worker_task(c: &Rav1dContext, task_thread: Arc<Rav1dTaskContextTaskThread>) {
             if merge_pending(c) != 0 {
                 continue 'outer;
             }
+            // rav1g: a worker without a task does the sink's work for it before it waits
+            // (`ParseSink::idle_work`: block lists a superblock row behind the entropy decoder). The
+            // flag says first that it waits, so that work the sink is given behind the question
+            // wakes it (the tile's thread asks for the flag and takes the lock to wake it).
+            ttd.cond_signaled.store(0, Ordering::SeqCst);
+            if c.sink.idle_work_pending() {
+                drop(task_thread_lock.take());
+                let worked = c.sink.idle_work();
+                task_thread_lock = Some(ttd.lock.lock());
+                if worked {
+                    continue 'outer;
+                }
+            }
             park(c, &mut tc, ttd, task_thread_lock.as_mut().unwrap());
             continue 'outer;
         };
@@ -1081,6 +1094,15 @@ fn worker_task(c: &Rav1dContext, task_thread: Arc<Rav1dTaskContextTaskThread>) {
                             };
                             fc.task_thread.stats.tile_end(stats_start);
                             c.sink.tile_time(f.sink_frame, start);
+                            // rav1g: work the sink has now for a worker without a task (the block
+                            // lists of the row): one that waits is woken, under the lock it waits
+                            // with, so the wake-up comes after it asked for work.
+                            if c.sink.idle_work_pending()
+                                && ttd.cond_signaled.fetch_or(1, Ordering::SeqCst) == 0
+                            {
+                                let _lock = ttd.lock.lock();
+                                ttd.cond.notify_one();
+                            }
                         }
                         let progress = if error_0 != 0 { TILE_ERROR } else { 1 + sby };
 
@@ -1156,6 +1178,19 @@ fn worker_task(c: &Rav1dContext, task_thread: Arc<Rav1dTaskContextTaskThread>) {
                                         Ordering::SeqCst,
                                     );
                                 }
+                            }
+                            // rav1g: the CDFs are out, and a thread may start what waited for them
+                            // (the next frame's `InitCdf`). The sink finishes the tile
+                            // (`ParseSink::tile_finish`: the rest of its block lists) without the lock,
+                            // in the pass that parses it (with two passes the second one parses
+                            // nothing); the frame ends behind it.
+                            if tc.frame_thread.pass <= 1 {
+                                if ttd.cond_signaled.fetch_or(1, Ordering::SeqCst) == 0 {
+                                    ttd.cond.notify_one();
+                                }
+                                drop(task_thread_lock.take());
+                                c.sink.tile_finish(f.sink_frame, tile_idx);
+                                task_thread_lock = Some(ttd.lock.lock());
                             }
                             if fc.task_thread.task_counter.fetch_sub(1, Ordering::SeqCst) - 1 == 0
                                 && fc.task_thread.done[0].load(Ordering::SeqCst) != 0
