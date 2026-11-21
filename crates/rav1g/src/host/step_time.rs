@@ -102,6 +102,11 @@ pub(crate) struct SlotSteps {
     /// The counts of the tiles of the slot's frame, one vector per tile; each tile thread writes the
     /// vector of its tile (`tile.perf_steps`), the recording thread reads them when the tiles are done.
     pub tiles: Vec<TileSteps>,
+    /// The first of `tiles` and how many there are, set by `setup_frame` for the tiles' setup
+    /// (`tile_counts`), which may run while other tiles' block lists are counted and so must not borrow
+    /// the slot to reach the vector.
+    first: Option<std::ptr::NonNull<TileSteps>>,
+    count: usize,
     queries: Option<TimestampQueries>,
     readback: Option<Readback>,
     capacity: u32,
@@ -122,6 +127,8 @@ pub(crate) struct SlotSteps {
 pub(crate) fn setup_frame(td: &mut av1_frame_thread_data) -> bool {
     let steps = &mut td.step_time;
     steps.timed = false;
+    steps.first = None;
+    steps.count = 0;
     if !on() {
         steps.tiles.clear();
         return false;
@@ -132,12 +139,27 @@ pub(crate) fn setup_frame(td: &mut av1_frame_thread_data) -> bool {
         tile.clear();
     }
     steps.tiles.resize_with(tiles, Vec::new);
+    steps.first = std::ptr::NonNull::new(steps.tiles.as_mut_ptr());
+    steps.count = tiles;
     true
 }
 
 /// The counts of the tile `tile_id`, for `av1_tile_data::perf_steps`; null while the tiles do not count.
-pub(crate) fn tile_counts(td: &mut av1_frame_thread_data, tile_id: usize) -> *mut c_void {
-    td.step_time.tiles.get_mut(tile_id).map_or(std::ptr::null_mut(), |tile| std::ptr::from_mut(tile).cast())
+///
+/// # Safety
+/// `td` is the slot of a frame whose tiles are in parse, set up by `setup_frame`. Nothing of the slot is
+/// borrowed: another tile's thread may hold the slot (`av1_mi_push_block`) while this one sets its tile
+/// up.
+pub(crate) unsafe fn tile_counts(td: *const av1_frame_thread_data, tile_id: usize) -> *mut c_void {
+    // SAFETY: the caller's contract: two fields of the slot read in place, and an element of the vector,
+    // which is the tile's.
+    unsafe {
+        let steps = &raw const (*td).step_time;
+        match (*steps).first {
+            Some(first) if tile_id < (*steps).count => first.as_ptr().add(tile_id).cast(),
+            _ => std::ptr::null_mut(),
+        }
+    }
 }
 
 /// The kind of a transform block of the wavefront (`AV1_INTRA_KIND_*`): `mode` as the tile has it (the

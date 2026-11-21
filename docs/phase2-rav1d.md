@@ -3533,6 +3533,22 @@ frame waits for the key frame's whole parse for its CDFs).
   tile's already. The index list of a tile moves out of the host's `TilePieces` into a list of its own
   (`av1_frame_thread_data::index_lists`): the thread that counts writes it while the entropy decoder
   takes pieces of the pools.
+- **Nothing is shared by reference.** The two threads must not both hold a reference to one struct
+  while either writes it, even to different fields. The tile's `av1_tile_data` is written by both (the
+  entropy decoder's cursors into the pools; the lists' index list, iterations and schedule), so the
+  lists have a copy of their own (`ListState::tile`, 296 bytes a tile), taken when the tile begins,
+  before its first row is published, and their fields go back to the host's record
+  (`sink::lists_back`) when the lists are through, under the claim, before the host's `tile_end`
+  reads them. Without the pipeline (one thread, `-parselistslegacy`) the tile's thread counts on the
+  host's record as before, so `rav1g-parse-check`'s reference with one thread holds the copy and its
+  way back against independent code (a way back without `gen_intra_iter_uv` is reported). `index_list_room` finds the tile's index list by the tile's index (in the block
+  context's `tile.tile_col`), not by the record's address. The intra step timing's per-tile counts are
+  reached at a tile's setup through a pointer the frame's setup takes (`step_time::tile_counts`), not
+  through a mutable borrow of the slot, which other tiles' lists hold shared. What else the threads
+  reach is the slot (read by both; the entropy side writes only heap elements of its own tile, through
+  `*const`), the records (the lists read finished rows and write their `index_base`; the entropy
+  decoder writes the row in parse), and memory of the tile's own (block map, edges, index list, the
+  block context), which only the lists touch.
 - **The entropy decoder** publishes a row at the end of its last superblock (a store and a swap). When
   the row before is still unclaimed (no thread took it up a row long), it counts both itself, so the
   lists lag a row at most and their records are still in the caches.

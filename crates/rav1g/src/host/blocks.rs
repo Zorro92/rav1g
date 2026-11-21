@@ -848,7 +848,11 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
         // blocks of luma and of chroma (fewer than two a 4x4 unit) or for its prediction blocks, those of
         // overlapped prediction and reconstruction included.
         if !GPU_PRED_LISTS || !is_inter || is_inter_intra {
-            td.index_list_room(tile, 2 * (bw * bh) as usize + if GPU_PRED_LISTS { 0 } else { 64 });
+            td.index_list_room(
+                tile,
+                xd.tile.tile_col as usize,
+                2 * (bw * bh) as usize + if GPU_PRED_LISTS { 0 } else { 64 },
+            );
         }
         let index_arr = tile.gen_indexes;
 

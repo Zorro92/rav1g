@@ -1247,7 +1247,7 @@ pub(crate) unsafe fn setup_tile(
         let tile_id = tile.tile_col + tile.tile_row * cm.tile_cols;
         // The tile's counts of the intra step timing; the vector of vectors is not touched while the tiles
         // of the frame run.
-        let perf_steps = super::step_time::tile_counts(&mut *td, tile_id as usize);
+        let perf_steps = super::step_time::tile_counts(td, tile_id as usize);
         let td = &*td;
         let t_ptr = td.tile_data.add(tile_id as usize);
         let mut perf_t = super::perf::av1_perf_ticks();

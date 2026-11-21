@@ -60,5 +60,5 @@ impl av1_frame_thread_data {
     ///
     /// # Safety
     /// None here; the host's function has a contract.
-    pub unsafe fn index_list_room(&self, _tile: &mut crate::sys::av1_tile_data, _room: usize) {}
+    pub unsafe fn index_list_room(&self, _tile: &mut crate::sys::av1_tile_data, _index: usize, _room: usize) {}
 }
