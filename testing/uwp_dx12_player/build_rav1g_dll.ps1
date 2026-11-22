@@ -35,7 +35,9 @@ if (-not (Test-Path (Join-Path $store 'vcruntime.lib'))) { throw "no app runtime
 # windows crates. CARGO_ENCODED_RUSTFLAGS, not RUSTFLAGS: the flags of the configuration file would
 # come behind those and win.
 $separator = [char]0x1f
-$env:CARGO_ENCODED_RUSTFLAGS = "-Ctarget-feature=-crt-static${separator}--cfg${separator}windows_slim_errors"
+# x86-64-v3 (AVX2, BMI1/2, LZCNT, MOVBE, FMA): the console's CPU (Zen 2) has all of it. The serial entropy
+# decode of a tile runs on one core (AGENTS.md, CPU), so its codegen is what sets the speed of 1-tile 4K.
+$env:CARGO_ENCODED_RUSTFLAGS = "-Ctarget-feature=-crt-static${separator}--cfg${separator}windows_slim_errors${separator}-Ctarget-cpu=x86-64-v3"
 $env:RAV1G_SHADER_DIR = $Shaders
 $env:CC_x86_64_pc_windows_msvc = Join-Path $llvm 'clang-cl.exe'
 $env:AR_x86_64_pc_windows_msvc = Join-Path $llvm 'llvm-lib.exe'
