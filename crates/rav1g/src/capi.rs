@@ -615,7 +615,7 @@ pub struct Rav1gSettings {
     /// 8 for a decoder with 8-bit frame buffers (an 8-bit stream), 10 otherwise.
     pub bit_depth: u32,
     /// The threads that parse: the tiles of a frame and, with more than one frame in parse, the frames;
-    /// at most 8. 0 is the default, by the frame size the decoder is created for: 1 up to 2560x1440, 2
+    /// at most 8. 0 is the default, by the frame size the decoder is created for: 1 up to 2560x1440, 4
     /// above.
     pub threads: u32,
     /// Pipeline slots: frames that can be between the start of their CPU decode and the end of their GPU
@@ -647,9 +647,9 @@ pub struct Rav1gSettings {
     /// by default; 0 for none.
     pub parser_options: u32,
     /// Frames whose parse may run at the same time: 1 to
-    /// `RAV1G_FRAMES_IN_PARSE_MAX`, and never more than the threads. 0 is the default: 2 for a decoder
-    /// that is created for frames above 2560x1440 with at least 2 threads and 3 or more pipeline slots,
-    /// else 1.
+    /// `RAV1G_FRAMES_IN_PARSE_MAX`, and never more than the threads. 0 is the default: as many as the
+    /// threads, at most `RAV1G_FRAMES_IN_PARSE_MAX`, for a decoder that is created for frames above
+    /// 2560x1440 with at least 2 threads and 3 or more pipeline slots, else 1.
     ///
     /// With 1, `rav1g_decoder_decode` returns when the frames of its data are parsed, recorded and
     /// submitted. With more it returns when their parse has begun; the frames are parsed on the

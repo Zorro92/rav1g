@@ -108,9 +108,17 @@ output fence. Nothing has to be reset between streams.
 `rav1g_peek_stream_info` on the first temporal unit with a sequence header: its largest frame size,
 `max_frame_width` and `max_frame_height`, not the size of the first frame), the output callbacks,
 `output_kind = RAV1G_OUTPUT_SEMI_PLANAR` and `shared_fence = true`. Leave `low_memory`,
-`frames_in_parse`, `frame_slots` and `threads` at their defaults. At 3840x2160 10-bit the decoder uses 487.8
-MiB of device buffers, with two frames in parse, four slots and two threads. The GPU builds the
+`frames_in_parse`, `frame_slots` and `threads` at their defaults. At 3840x2160 10-bit the decoder uses 488.4
+MiB of device buffers, with four frames in parse, four slots and four threads. The GPU builds the
 mode info grid by default.
+
+Four frames in parse on four threads is what makes high-bitrate 4K real time: these streams have one
+tile, whose entropy decode is serial, so the frames in parse are what use the cores. On the console in
+the idle state (test player, 4 threads), 2 against 4 frames in parse: a 100 Mbps 4K60 stream 53.4 against
+63.6 fps, 46 Mbps 4K50 63.0 against 68.7, 40 Mbps 4K60 75.2 against 80.4; the device buffers are the same.
+The parse threads are busy while there is parsing to do: on the 100 Mbps stream at 60 fps their CPU time
+adds up to about 4.5 logical CPUs. An application that must leave more CPU free sets `threads` (and with
+it at most as many frames in parse) lower.
 
 ## Loading the library at run time: the interface version
 

@@ -757,7 +757,7 @@ typedef struct Rav1gSettings {
   uint32_t bit_depth;
   /*
    The threads that parse: the tiles of a frame and, with more than one frame in parse, the frames;
-   at most 8. 0 is the default, by the frame size the decoder is created for: 1 up to 2560x1440, 2
+   at most 8. 0 is the default, by the frame size the decoder is created for: 1 up to 2560x1440, 4
    above.
    */
   uint32_t threads;
@@ -809,9 +809,9 @@ typedef struct Rav1gSettings {
   uint32_t parser_options;
   /*
    Frames whose parse may run at the same time: 1 to
-   `RAV1G_FRAMES_IN_PARSE_MAX`, and never more than the threads. 0 is the default: 2 for a decoder
-   that is created for frames above 2560x1440 with at least 2 threads and 3 or more pipeline slots,
-   else 1.
+   `RAV1G_FRAMES_IN_PARSE_MAX`, and never more than the threads. 0 is the default: as many as the
+   threads, at most `RAV1G_FRAMES_IN_PARSE_MAX`, for a decoder that is created for frames above
+   2560x1440 with at least 2 threads and 3 or more pipeline slots, else 1.
 
    With 1, `rav1g_decoder_decode` returns when the frames of its data are parsed, recorded and
    submitted. With more it returns when their parse has begun; the frames are parsed on the

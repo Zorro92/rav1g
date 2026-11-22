@@ -198,16 +198,27 @@ impl ParsePlan {
     /// What the configuration asks for, before the budget guard has a say.
     fn from_cfg(cfg: &aom_codec_dec_cfg_t) -> ParsePlan {
         let large = u64::from(cfg.width) * u64::from(cfg.height) > SMALL_FRAME_SAMPLES;
+        // Above 2560x1440: 4 threads, the most a decoder uses (AGENTS.md, CPU: no gain beyond 4 threads;
+        // on the console 6 threads parse no faster than 4).
         let threads = match cfg.threads {
-            0 if large => 2,
+            0 if large => 4,
             0 => 1,
             threads => threads.min(super::types::EntropyThreadCount as u32) as i32,
         };
         let frames = if cfg.frames_in_parse <= 0 {
-            // The default: a second frame in parse where the parse of one frame is what a 4K stream
-            // waits for, when there are threads for two and the slots are not fixed at two (with two
-            // slots a third frame begins only when the first one is through on the GPU).
-            if large && threads >= 2 && (cfg.frame_slots == 0 || cfg.frame_slots >= 3) { 2 } else { 1 }
+            // The default above 2560x1440: as many frames in parse as threads, at most
+            // FRAMES_IN_PARSE_MAX, when the slots are not fixed at two (with two slots a third frame
+            // begins only when the first one is through on the GPU). The parse of one tile is serial
+            // (AV1 7.20: one tile's entropy decoder), and 4K streams are mostly one tile, so frames in
+            // parse are what spread it over the cores; most frames take their CDFs from a frame 3 or 4
+            // back, not the one before. Console, idle state, 4 threads, 2 -> 4 frames in parse: a 100
+            // Mbps 4K60 stream 53.4 -> 63.6 fps, 46 Mbps 4K50 63.0 -> 68.7, 40 Mbps 4K60 75.2 -> 80.4;
+            // the device buffers stay 488.4 MiB (the pools and slots do not grow with it).
+            if large && threads >= 2 && (cfg.frame_slots == 0 || cfg.frame_slots >= 3) {
+                threads.min(FRAMES_IN_PARSE_MAX)
+            } else {
+                1
+            }
         } else {
             cfg.frames_in_parse.min(FRAMES_IN_PARSE_MAX).min(threads)
         };
@@ -1844,9 +1855,9 @@ mod tests {
         assert_eq!(ParsePlan::from_cfg(&cfg), ParsePlan { threads: 1, frames: 1, slots: 2 });
         cfg.width += 1;
         let large = ParsePlan::from_cfg(&cfg);
-        assert_eq!(large, ParsePlan { threads: 2, frames: 2, slots: 4 });
-        assert_eq!(large.smaller().unwrap(), ParsePlan { slots: 3, ..large });
-        assert_eq!(large.smaller().unwrap().smaller().unwrap(), ParsePlan { threads: 2, frames: 1, slots: 2 });
+        assert_eq!(large, ParsePlan { threads: 4, frames: 4, slots: 4 });
+        assert_eq!(large.smaller().unwrap(), ParsePlan { threads: 4, frames: 2, slots: 3 });
+        assert_eq!(large.smaller().unwrap().smaller().unwrap(), ParsePlan { threads: 4, frames: 1, slots: 2 });
         (cfg.width, cfg.height) = (0, 0);
         assert_eq!(frame_slots_from_cfg(&cfg), 2);
         for (asked, slots) in [(1, 2), (3, 3), (4, 4), (9, 4), (-1, 2)] {
