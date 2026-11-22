@@ -213,9 +213,11 @@ impl ParsePlan {
             // parse are what spread it over the cores; most frames take their CDFs from a frame 3 or 4
             // back, not the one before. Console, idle state, 4 threads, 2 -> 4 frames in parse: a 100
             // Mbps 4K60 stream 53.4 -> 63.6 fps, 46 Mbps 4K50 63.0 -> 68.7, 40 Mbps 4K60 75.2 -> 80.4;
-            // the device buffers stay 488.4 MiB (the pools and slots do not grow with it).
+            // the device buffers stay 488.4 MiB (the pools and slots do not grow with it). A frame in
+            // parse holds a slot: never more of them than slots (four by default above 2560x1440).
             if large && threads >= 2 && (cfg.frame_slots == 0 || cfg.frame_slots >= 3) {
-                threads.min(FRAMES_IN_PARSE_MAX)
+                let slots = if cfg.frame_slots == 0 { FrameThreadDataCount } else { frame_slots_from_cfg(cfg) };
+                threads.min(FRAMES_IN_PARSE_MAX).min(slots)
             } else {
                 1
             }
@@ -1858,6 +1860,11 @@ mod tests {
         assert_eq!(large, ParsePlan { threads: 4, frames: 4, slots: 4 });
         assert_eq!(large.smaller().unwrap(), ParsePlan { threads: 4, frames: 2, slots: 3 });
         assert_eq!(large.smaller().unwrap().smaller().unwrap(), ParsePlan { threads: 4, frames: 1, slots: 2 });
+        cfg.frame_slots = 3;
+        assert_eq!(ParsePlan::from_cfg(&cfg), ParsePlan { threads: 4, frames: 3, slots: 3 });
+        cfg.threads = 2;
+        assert_eq!(ParsePlan::from_cfg(&cfg), ParsePlan { threads: 2, frames: 2, slots: 3 });
+        (cfg.frame_slots, cfg.threads) = (0, 0);
         (cfg.width, cfg.height) = (0, 0);
         assert_eq!(frame_slots_from_cfg(&cfg), 2);
         for (asked, slots) in [(1, 2), (3, 3), (4, 4), (9, 4), (-1, 2)] {

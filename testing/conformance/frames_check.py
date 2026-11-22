@@ -8,15 +8,15 @@ and what the parse of two frames at a time takes.
                                              [--dense <name>[:<temporal units>]] [--tool-args "<args>"] [--no-timing]
 
 <dir> of --streams is what testing/conformance/prepare_streams.sh wrote. --large is a stream above
-2560x1440 (where the library's defaults are two threads and two frames in parse), --small one at or below.
+2560x1440 (where the library's defaults are four threads and four frames in parse), --small one at or below.
 Every run decodes its stream with the reference check.
 
 What is checked:
 
   - **What is created.** The CONFIGURATION line of the program (rav1g_decoder_configuration) against what
     the flags ask for: -parseframes 1 to 4 on as many threads, more frames than threads (as many frames as
-    threads), four slots, and the library's defaults (no flag, and -t 0 -parseframes 0 -slots 0): two
-    threads, two frames in parse and four slots for the large stream, one, one and two for the small one.
+    threads), four slots, and the library's defaults (no flag, and -t 0 -parseframes 0 -slots 0): four
+    threads, four frames in parse and four slots for the large stream, one, one and two for the small one.
     With two fixed slots the default is one frame in parse.
   - **The budget guard.** With a budget (-budget) that holds the decoder of two frames in parse and the
     headroom the guard wants behind a decoder (128 MiB), the default tries four slots, then three
@@ -60,8 +60,8 @@ CREATED = (
     ('three', '-parseframes 3 -t 3', (3, 3, 4), (3, 3, 4)),
     ('four', '-parseframes 4 -t 8', (8, 4, 4), (8, 4, 4)),
     ('more frames than threads', '-parseframes 4 -t 2', (2, 2, 4), (2, 2, 3)),
-    ('no flag', '', (2, 2, 4), (1, 1, 2)),
-    ('the defaults of the library', '-parseframes 0 -t 0 -slots 0', (2, 2, 4), (1, 1, 2)),
+    ('no flag', '', (4, 4, 4), (1, 1, 2)),
+    ('the defaults of the library', '-parseframes 0 -t 0 -slots 0', (4, 4, 4), (1, 1, 2)),
     ('one, two slots', '-parseframes 1 -t 2 -slots 2', (2, 1, 2), (2, 1, 2)),
     ('the default frames in parse with two slots', '-parseframes 0 -t 4 -slots 2', (4, 1, 2), (4, 1, 2)),
 )
@@ -166,20 +166,21 @@ def main():
         smaller = 'created in place of'
         smallest = 'there is no smaller decoder'
         for budget, flags, expected, words in (
-                (fits_four, '-parseframes 0 -t 0 -slots 0', (2, 2, 4), as_asked),
-                (fits_two, '-parseframes 0 -t 0 -slots 0', (2, 2, 3), smaller),
+                (fits_four, '-parseframes 0 -t 0 -slots 0', (4, 4, 4), as_asked),
+                (fits_two, '-parseframes 0 -t 0 -slots 0', (4, 2, 3), smaller),
                 (fits_two, '-parseframes 2 -t 2 -slots 3', (2, 2, 3), as_asked),
-                (fits_two - 2, '-parseframes 0 -t 0 -slots 0', (2, 1, 2), smaller),
+                (fits_two - 2, '-parseframes 0 -t 0 -slots 0', (4, 1, 2), smaller),
                 (fits_two - 2, '-parseframes 2 -t 2', (2, 1, 2), smaller),
                 # Explicit requests use the same fallback.
-                (fits_two, '-slots 4', (2, 2, 3), smaller),
+                (fits_two, '-slots 4', (4, 2, 3), smaller),
                 (fits_two, '-parseframes 4 -t 8', (8, 2, 3), smaller),
-                (fits_four, '-slots 4', (2, 2, 4), as_asked),
+                (fits_four, '-slots 4', (4, 4, 4), as_asked),
                 # The smallest decoder does not leave the headroom: it is created all the same, because
                 # the margin holds. And with the margin as the headroom, the guard of the builds before.
-                (fits_one - 2, '-parseframes 0 -t 0 -slots 0', (2, 1, 2), smallest),
-                (int(two) + 1 + MARGIN, '-slots 3 -headroom %d' % MARGIN, (2, 2, 3), as_asked),
-                (int(four) + 1 + MARGIN, '-slots 4 -headroom 1', (2, 2, 4), as_asked)):
+                (fits_one - 2, '-parseframes 0 -t 0 -slots 0', (4, 1, 2), smallest),
+                # Three fixed slots: as many frames in parse as slots.
+                (int(two) + 1 + MARGIN, '-slots 3 -headroom %d' % MARGIN, (4, 3, 3), as_asked),
+                (int(four) + 1 + MARGIN, '-slots 4 -headroom 1', (4, 4, 4), as_asked)):
             flags = '%s -budget %d' % (flags, budget)
             text, status, created = run(large, large_limit, flags + ' -v', 'budget guard')
             where = '%s, %s' % (large, flags)

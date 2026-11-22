@@ -810,8 +810,8 @@ typedef struct Rav1gSettings {
   /*
    Frames whose parse may run at the same time: 1 to
    `RAV1G_FRAMES_IN_PARSE_MAX`, and never more than the threads. 0 is the default: as many as the
-   threads, at most `RAV1G_FRAMES_IN_PARSE_MAX`, for a decoder that is created for frames above
-   2560x1440 with at least 2 threads and 3 or more pipeline slots, else 1.
+   threads, at most `RAV1G_FRAMES_IN_PARSE_MAX` and at most the pipeline slots, for a decoder that is
+   created for frames above 2560x1440 with at least 2 threads and 3 or more pipeline slots, else 1.
 
    With 1, `rav1g_decoder_decode` returns when the frames of its data are parsed, recorded and
    submitted. With more it returns when their parse has begun; the frames are parsed on the
