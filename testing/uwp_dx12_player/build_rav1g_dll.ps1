@@ -39,6 +39,10 @@ $separator = [char]0x1f
 # decode of a tile runs on one core (AGENTS.md, CPU), so its codegen is what sets the speed of 1-tile 4K.
 $env:CARGO_ENCODED_RUSTFLAGS = "-Ctarget-feature=-crt-static${separator}--cfg${separator}windows_slim_errors${separator}-Ctarget-cpu=x86-64-v3"
 $env:RAV1G_SHADER_DIR = $Shaders
+# One unit and whole-program LTO for the DLL of the package only: inlining across rav1d, the sink and the host
+# on the serial parse path (AGENTS.md, CPU). The other release builds keep the default profile.
+$env:CARGO_PROFILE_RELEASE_LTO = 'fat'
+$env:CARGO_PROFILE_RELEASE_CODEGEN_UNITS = '1'
 $env:CC_x86_64_pc_windows_msvc = Join-Path $llvm 'clang-cl.exe'
 $env:AR_x86_64_pc_windows_msvc = Join-Path $llvm 'llvm-lib.exe'
 $env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER = Join-Path $llvm 'lld-link.exe'
