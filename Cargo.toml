@@ -16,7 +16,7 @@ members = [
 default-members = ["crates/rav1g-sys", "crates/rav1g", "tools/rav1g-dec"]
 
 [workspace.package]
-version = "0.5.0-alpha.2"
+version = "0.6.0-alpha.1"
 edition = "2024"
 rust-version = "1.99"
 license = "BSD-2-Clause"
