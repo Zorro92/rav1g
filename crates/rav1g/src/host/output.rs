@@ -257,6 +257,20 @@ pub(crate) unsafe fn output_image(
     }
 }
 
+/// Whether nothing after this frame's own command list reads its frame buffer: a frame with
+/// refresh_frame_flags == 0 goes into no slot of the reference map (AV1 7.20), and show_existing_frame
+/// shows only frames of the map (7.21), so no later frame predicts from it or shows it. showable_frame
+/// does not decide it: a shown inter frame has showable_frame 1 (5.9.2) whether a slot takes it or not,
+/// and the frames of the top layer of a hierarchical prediction structure are usually taken by none.
+/// Never with -dumpstages, whose dumps read the frame buffer.
+///
+/// # Safety
+/// `dec` is the decoder while it records a frame; `cm` is the frame's.
+pub(crate) unsafe fn frame_unreferenced(dec: *mut Av1Core, cm: *const AV1_COMMON) -> bool {
+    // SAFETY: the caller's contract.
+    unsafe { (*cm).current_frame.refresh_frame_flags == 0 && !stage_dump_active(dec) }
+}
+
 /// Checks whether the direct semi-planar (NV12/P010) output write can be fused into the frame's last
 /// postfilter stage (CDEF v3, superres, or loop restoration). When it can, transitions the texture
 /// `Common -> ReadWrite`, writes its plane UAV descriptors, and records the fused state on `td` so
@@ -312,11 +326,9 @@ pub(crate) unsafe fn prepare_fused_output(
             return None;
         }
 
-        // Frames with refresh_frame_flags == 0 and showable_frame == 0 cannot be read by any later
-        // frame or show_existing_frame (AV1 7.20/7.21). Skip frame-buffer writes except where film
-        // grain or stage dumps still read dst_frame_buffer.
-        let no_ref =
-            (*cm).current_frame.refresh_frame_flags == 0 && (*cm).showable_frame == 0 && !stage_dump_active(dec);
+        // A frame no later frame and no show_existing_frame can read gets no frame buffer writes, except
+        // where film grain reads them in this command list.
+        let no_ref = frame_unreferenced(dec, cm);
         let write_fb_y = !no_ref || do_filmgrain;
         let write_fb_uv = !no_ref || film_grain_chroma;
 

@@ -23,12 +23,12 @@ use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12Device};
 
 use super::blocks::{WAVE_COLUMN_RESET, WaveColumn, WaveEdges};
 use super::completion::start_completion_thread;
-use super::core::{buffer, commands, pipeline, stage_dump_active};
+use super::core::{buffer, commands, pipeline};
 use super::create::to_mib;
 use super::log::log;
 use super::loopfilter::loopfilter_gpu;
 use super::memory::poison_constants;
-use super::output::{copy_output, output_copy_legacy, output_image, prepare_fused_output};
+use super::output::{copy_output, frame_unreferenced, output_copy_legacy, output_image, prepare_fused_output};
 use super::perf::{
     inter_fast_mode, perf_add, perf_add_memset, perf_begin_command_buffer, perf_detail_mode, perf_gpu_mark, perf_lap,
     perf_now, perf_resolve,
@@ -1785,10 +1785,9 @@ pub(crate) unsafe fn decode_frame_record(
 
         cdef_looprestoration(dec, cm, (&raw mut (*pbi).lr_ctxt).cast(), fused);
         perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_CDEF_LR as usize, perf_t);
-        // Skip border extension on frames that no future frame or show_existing_frame can read (AV1 7.20/7.21).
-        let no_ref =
-            (*cm).current_frame.refresh_frame_flags == 0 && (*cm).showable_frame == 0 && !stage_dump_active(dec);
-        if !no_ref || output_copy_legacy() {
+        // The borders are for inter prediction of later frames: none reads those of a frame that no slot of
+        // the reference map takes (AV1 7.20).
+        if !frame_unreferenced(dec, cm) || output_copy_legacy() {
             inter_ext_borders(dec, cm);
         }
         perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_BORDERS as usize, perf_t);
