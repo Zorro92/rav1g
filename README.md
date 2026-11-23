@@ -264,6 +264,9 @@ memory as possible left to the application.
   description of the sequence header, the HDR metadata: mastering display and content light level),
   in `rav1g.h` and in the Rust interface, and what an application that shows the frames does with
   each value.
+- [docs/stage-fusion.md](docs/stage-fusion.md): a design study: Bale's display stage (downscale and
+  tone map to the display) done by a pass of rav1g instead of a D3D11 pass on rav1g's 4K output, what
+  it would save per 4K60 frame and what it would take.
 - [docs/phase2-rav1d.md](docs/phase2-rav1d.md): the design of phase 2, rav1d's parser in place of the
   C parser, and its progress.
 - [third_party/rav1d/PATCHES.md](third_party/rav1d/PATCHES.md): the copy of rav1d, what was changed
