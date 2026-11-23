@@ -5,11 +5,12 @@
   python testing/display_pass/check.py --tool rav1g-dec.exe --streams <conformance-streams> \\
       [--stream svt/syn-hdr10-10b-1080p.ivf ...] [--frames 4] [--out dir]
 
-For every stream: rav1g-dec decodes the first frames twice, once as they are (-o, planar) and once with
--output p010 -displaypass at half the size (-o: the display images), and model.py computes the display
-images from the first run's frames with the sequence's colour description (the COLOUR line of the log)
-and counts the codes that differ. Exit code 1 when a code differs by more than one (fp32 on two
-compilers), or when a run fails.
+For every stream: rav1g-dec decodes the first frames once as they are (-o, planar) and then with
+-output p010 -displaypass at half the size (the shader's 2:1 quad path) and at two thirds of it (its area
+path) (-o: the display images), and model.py computes the display images from the first run's frames
+with the sequence's colour description (the COLOUR line of the log) and counts the codes that differ.
+Exit code 1 when a code differs by more than one (fp32 on two compilers, the tone map's tables), or when
+a run fails.
 """
 
 import argparse
@@ -44,7 +45,6 @@ def main():
         name = os.path.basename(stream)
         path = os.path.join(a.streams, stream)
         frames = os.path.join(a.out, name + '.frames.yuv')
-        display = os.path.join(a.out, name + '.display.yuv')
         code, log = run([a.tool, '-i', path, '-limit', str(a.frames), '-o', frames], os.path.join(a.out, name + '.frames.log'))
         size = re.search(r'RESULT .*? size=(\d+)x(\d+) bitdepth=(\d+)', log)
         colour = COLOUR.search(log)
@@ -56,27 +56,28 @@ def main():
         if depth != 10:
             print(f'{name}: {depth}-bit: the prototype takes 10-bit frames only; skipped')
             continue
-        out = f'{w // 2 & ~1}x{h // 2 & ~1}'
-        code, log2 = run([a.tool, '-i', path, '-limit', str(a.frames), '-output', 'p010', '-displaypass', out, '-o', display],
-                         os.path.join(a.out, name + '.display.log'))
-        if code != 0 or 'DISPLAY ' in log2:
-            print(f'{name}: the display pass run failed (exit {code})')
-            for line in log2.splitlines():
-                if 'DISPLAY' in line or 'RESULT' in line or 'OUTPUT' in line:
-                    print('  ' + line)
-            failed = True
-            continue
         primaries, transfer, matrix, rng, csp = colour.groups()
-        args = [sys.executable, os.path.join(HERE, 'model.py'), frames, display, '--size', f'{w}x{h}', '--out', out,
-                '--transfer', transfer, '--matrix', matrix, '--count', str(a.frames)]
-        if rng == 'full':
-            args.append('--full')
-        if csp == '2':
-            args.append('--colocated')
-        print(f'{name}: {w}x{h} to {out}, primaries {primaries} transfer {transfer} matrix {matrix} range {rng} '
-              f'chroma pos {csp}', flush=True)
-        if subprocess.run(args, check=False).returncode != 0:
-            failed = True
+        for out in (f'{w // 2 & ~1}x{h // 2 & ~1}', f'{w * 2 // 3 & ~1}x{h * 2 // 3 & ~1}'):
+            display = os.path.join(a.out, f'{name}.{out}.display.yuv')
+            code, log2 = run([a.tool, '-i', path, '-limit', str(a.frames), '-output', 'p010', '-displaypass', out, '-o', display],
+                             os.path.join(a.out, f'{name}.{out}.display.log'))
+            if code != 0 or 'DISPLAY ' in log2:
+                print(f'{name}: the display pass run to {out} failed (exit {code})')
+                for line in log2.splitlines():
+                    if 'DISPLAY' in line or 'RESULT' in line or 'OUTPUT' in line:
+                        print('  ' + line)
+                failed = True
+                continue
+            args = [sys.executable, os.path.join(HERE, 'model.py'), frames, display, '--size', f'{w}x{h}', '--out', out,
+                    '--transfer', transfer, '--matrix', matrix, '--count', str(a.frames)]
+            if rng == 'full':
+                args.append('--full')
+            if csp == '2':
+                args.append('--colocated')
+            print(f'{name}: {w}x{h} to {out}, primaries {primaries} transfer {transfer} matrix {matrix} range {rng} '
+                  f'chroma pos {csp}', flush=True)
+            if subprocess.run(args, check=False).returncode != 0:
+                failed = True
     sys.exit(1 if failed else 0)
 
 

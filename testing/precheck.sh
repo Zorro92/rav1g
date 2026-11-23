@@ -45,6 +45,7 @@ superres|sh testing/superres_check/run.sh --mutate|testing/superres_check/* ${SH
 loopfilter|sh testing/loopfilter_check/run.sh --mutate|testing/loopfilter_check/* ${SHADERS}loopfilter_* ${SHADERS}gen_lf_blocks* $SHADER_COMMON
 idct|sh testing/idct_check/run.sh --mutate|testing/idct_check/* ${SHADERS}idct* libav1/av1/common/scan.c $SHADER_COMMON
 film_grain|sh testing/film_grain_check/run.sh --mutate|testing/film_grain_check/* ${SHADERS}film_grain* ${SHADERS}copy_plane_sp* $SHADER_COMMON
+display_pass|sh testing/display_pass/run.sh --mutate|testing/display_pass/* ${SHADERS}display_pass* ${SHADERS}output_sp.h $SHADER_COMMON
 shader_regs|precheck_shader_regs|testing/shader_regs/* testing/shader_cache/shaders.py crates/rav1g-sys/shaders.txt ${SHADERS}*
 restoration|sh testing/restoration_check/run.sh --mutate|testing/restoration_check/* ${SHADERS}loop_restoration* ${SHADERS}restoration* libav1/av1/common/restoration.c $SHADER_COMMON
 copy|sh testing/copy_check/run.sh --mutate|testing/copy_check/* ${SHADERS}copy_plane_sp* $SHADER_COMMON
@@ -58,7 +59,7 @@ mapping|sh testing/precheck.sh --check-mapping|@
 "
 # Files no check reads (CI's other jobs, docs, git's files). A changed file that matches no check and
 # is not here starts every check.
-NO_CHECK='*.md docs/* .github/* .gitignore .gitattributes LICENSE.txt av1xbox.sln testing/README.md testing/precheck.sh testing/argon/* testing/conformance/* testing/console/* testing/display_pass/* testing/language_bar/* testing/md5ref/* testing/rav1d_md5/* testing/uwp_* libav1/LICENSE libav1/PATENTS'
+NO_CHECK='*.md docs/* .github/* .gitignore .gitattributes LICENSE.txt av1xbox.sln testing/README.md testing/precheck.sh testing/argon/* testing/conformance/* testing/console/* testing/language_bar/* testing/md5ref/* testing/rav1d_md5/* testing/uwp_* libav1/LICENSE libav1/PATENTS'
 
 usage() {
   sed -n '2,18p' "$here/precheck.sh" | sed 's/^# \{0,1\}//' >&2

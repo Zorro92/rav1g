@@ -43,8 +43,7 @@ done
 
 # shader:family. Families (shader_tu.cpp): 1 inverse transforms, 2 lossless transform, 3 inter
 # prediction, 7 film grain, 8 prediction list counts, 9 prediction list scan. The intra, CDEF,
-# deblocking and restoration checks watch their own group memory with real inputs, the display pass
-# prototype is held against its model in CI (rust-output).
+# deblocking, restoration and display pass checks watch their own group memory with real inputs.
 list=""
 for f in "$shaders"/*.hlsl; do
   name=$(basename "$f" .hlsl)
@@ -59,7 +58,7 @@ for f in "$shaders"/*.hlsl; do
     pred_list_scan) family=9 ;;
     gen_pred_blocks) continue ;; # group memory only in the pred_list_count build
     intra_* | cdef_* | loopfilter_* | loop_restoration*) continue ;;
-    display_pass) continue ;; # the prototype's group memory: its images are held against a model (testing/display_pass)
+    display_pass) continue ;; # watched by its own check, testing/display_pass/run.sh
     *) echo "sync_check: $name.hlsl has group memory and no family here" >&2; exit 1 ;;
   esac
   list="$list $name:$family"

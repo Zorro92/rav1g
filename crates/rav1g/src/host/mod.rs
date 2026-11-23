@@ -31,6 +31,7 @@ pub(crate) use completion::frame_fence;
 mod compute;
 mod core;
 mod create;
+mod display_pass;
 pub(crate) use completion::av1_drain_gpu_decoder;
 pub(crate) use create::{
     av1_create_gpu_decoder, av1_destroy_gpu_decoder, av1_query_memory_requirements, decoder_own_bytes,

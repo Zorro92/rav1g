@@ -3848,6 +3848,13 @@ jobs:
       - name: Compare direct-texture film grain with a scalar reference
         run: sh testing/film_grain_check/run.sh --mutate
 
+      # display_pass.hlsl (-displaypass, docs/stage-fusion.md) as C++ on test frames under the same thread
+      # schedule, its display images against the float32 model (testing/display_pass/model.py).
+      - name: The display pass prototype, as C++, against its model
+        run: |
+          sudo apt-get install -y --no-install-recommends python3-numpy > /dev/null
+          sh testing/display_pass/run.sh --mutate
+
   # The CDEF shaders, compiled as C++, must write byte-identical frames and
   # lists (random and edge-case input, 8-bit and high bit depth).
   cdef-check:

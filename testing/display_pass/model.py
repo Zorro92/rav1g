@@ -114,23 +114,29 @@ def source_linear(yp, up, vp, mode, wide, full, colocated):
     return pixel_linear(yp.astype(F), cuv, mode, wide, full)
 
 
+def weights_1d(src, out):
+    """The overlap of every source unit interval with every output pixel's footprint: (out, src)."""
+    w = np.zeros((out, src), F)
+    scale = F(src) / F(out)
+    for o in range(out):
+        lo = F(o) * scale
+        hi = lo + scale
+        first, last = int(np.floor(lo)), min(int(np.ceil(hi)) - 1, src - 1)
+        for i in range(first, last + 1):
+            w[o, i] = min(F(i + 1), hi) - max(F(i), lo)
+    return w
+
+
 def area(lin, ow, oh):
+    # Each output pixel: its source pixels weighted by the overlap of their unit squares with its
+    # footprint (wy * wx, separable), over the sum of the weights. Summed by rows, then columns: the
+    # shader sums in another order, a few ulp apart.
     sh, sw, _ = lin.shape
-    out = np.zeros((oh, ow, 3), F)
-    sx, sy = F(sw) / F(ow), F(sh) / F(oh)
-    for oy in range(oh):
-        lo_y = F(oy) * sy
-        hi_y = lo_y + sy
-        y0, y1 = int(np.floor(lo_y)), min(int(np.ceil(hi_y)) - 1, sh - 1)
-        wy = np.array([min(F(r + 1), hi_y) - max(F(r), lo_y) for r in range(y0, y1 + 1)], F)
-        for ox in range(ow):
-            lo_x = F(ox) * sx
-            hi_x = lo_x + sx
-            x0, x1 = int(np.floor(lo_x)), min(int(np.ceil(hi_x)) - 1, sw - 1)
-            wx = np.array([min(F(c + 1), hi_x) - max(F(c), lo_x) for c in range(x0, x1 + 1)], F)
-            wgt = wy[:, None] * wx[None, :]
-            out[oy, ox] = (lin[y0:y1 + 1, x0:x1 + 1] * wgt[..., None]).sum((0, 1)) / max(wgt.sum(), F(1e-6))
-    return out
+    wy, wx = weights_1d(sh, oh), weights_1d(sw, ow)
+    rows = np.einsum('ys,sxc->yxc', wy, lin).astype(F)
+    out = np.einsum('xs,ysc->yxc', wx, rows).astype(F)
+    total = (wy.sum(1)[:, None] * wx.sum(1)[None, :]).astype(F)
+    return (out / np.maximum(total, F(1e-6))[..., None]).astype(F)
 
 
 def area_2to1(lin):

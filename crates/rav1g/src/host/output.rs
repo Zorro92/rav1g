@@ -46,8 +46,10 @@ use std::ffi::c_int;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 use super::core::{
-    buffer, commands, perf_add, perf_gpu_mark, perf_ticks, pipeline, stage_dump_active, stage_dump_output,
+    alloc_constant_bytes, buffer, commands, perf_add, perf_gpu_mark, perf_ticks, pipeline, stage_dump_active,
+    stage_dump_output,
 };
+use super::display_pass;
 use super::film_grain::{GrainTarget, SKIP_FILM_GRAIN, filmgrain_run};
 use super::log::log;
 use super::postfilter::{FusedTarget, cdef_v3_enabled};
@@ -98,35 +100,6 @@ pub(crate) unsafe fn display_pass_size(dec: *const Av1Core, cm: *const AV1_COMMO
     Some(((size >> 16) as c_int, (size & 0xffff) as c_int))
 }
 
-/// The inline constants of `display_pass.hlsl` for the frame `src` and the sequence's colour description:
-/// sizes, planes, the source's transfer (PQ, HLG, else SDR), BT.2020 matrix, range, chroma siting, and the
-/// tone map's source peak (1000 nits) and SDR white (100 nits), as the stage it stands in for has them.
-fn display_pass_constants(src: &HwFrameBuffer, out: (c_int, c_int), seq: &crate::sys::SequenceHeader) -> [u32; 12] {
-    let mode = match seq.transfer_characteristics as u32 {
-        16 => 0,
-        18 => 2,
-        _ => 1,
-    };
-    let flags = mode
-        | (u32::from(seq.matrix_coefficients as u32 == 9) << 2)
-        | (u32::from(seq.color_range != 0) << 3)
-        // AV1 chroma_sample_position: 2 (colocated) sits on the luma row, the others between two rows.
-        | (u32::from(seq.chroma_sample_position as u32 != 2) << 4);
-    [
-        src.y_crop_width as u32,
-        src.y_crop_height as u32,
-        out.0 as u32,
-        out.1 as u32,
-        src.planes[0].offset as u32,
-        src.planes[1].offset as u32,
-        src.planes[2].offset as u32,
-        src.planes[0].stride as u32,
-        src.planes[1].stride as u32,
-        flags,
-        1000.0f32.to_bits(),
-        100.0f32.to_bits(),
-    ]
-}
 use crate::gpu::d3d12::{com_ref, wrapped_ref};
 use crate::gpu::{
     BufferRef, BufferState, Commands, Device, PlaneViews, SemiPlanar, TextureFormat, TextureRef, TextureSource,
@@ -666,13 +639,18 @@ unsafe fn copy_semi_planar(
             if do_filmgrain && !DISPLAY_PASS_NOTE.swap(true, Ordering::Relaxed) {
                 log(true, "DISPLAY the display pass prototype does not apply film grain");
             }
+            // The tables of the tone map, in the frame's constant memory (display_pass.rs).
+            let tables = alloc_constant_bytes(&mut td.command_buffer, display_pass::LUT_WORDS * 4);
+            let constants = display_pass::constants(src, out, &cm.seq_params, tables.data.cast());
             let shader = pipeline(&raw const (*lib).shader_display_pass);
             commands.set_layout(shader.layout());
             commands.set_pipeline(shader);
-            commands.bind_write(0, frame_buffers.location());
-            commands.bind_write_planes(2, device, views, pair);
-            commands.set_inline_constants(1, &display_pass_constants(src, out, &cm.seq_params), 0);
-            commands.dispatch((out.0 as u32).div_ceil(32), (out.1 as u32).div_ceil(8), 1);
+            commands.bind_read(0, tables.location);
+            commands.bind_write(1, frame_buffers.location());
+            commands.set_inline_constants(2, &constants, 0);
+            commands.bind_write_planes(3, device, views, pair);
+            // A group of 256 threads takes 64x64 output pixels.
+            commands.dispatch((out.0 as u32).div_ceil(64), (out.1 as u32).div_ceil(64), 1);
             perf_gpu_mark(dec, AV1_PERF_GPU_COPY_PLANE);
             commands.transition_texture(texture, TextureState::ReadWrite, TextureState::Common);
             perf_gpu_mark(dec, AV1_PERF_GPU_OUTPUT_COPY);
