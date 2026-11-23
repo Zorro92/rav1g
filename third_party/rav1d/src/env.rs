@@ -37,7 +37,6 @@ pub struct BlockContext {
     pub tx_lpf_y: DisjointMut<Align8<[u8; 32]>>,
     pub tx_lpf_uv: DisjointMut<Align8<[u8; 32]>>,
     pub partition: DisjointMut<Align8<[u8; 16]>>,
-    pub uvmode: DisjointMut<Align8<[u8; 32]>>,
     pub pal_sz: DisjointMut<Align8<[u8; 32]>>,
 }
 

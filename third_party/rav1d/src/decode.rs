@@ -1590,16 +1590,9 @@ fn decode_b(
         if pal_sz[0] != 0 {
             (bd_fn.copy_pal_block_y)(t, f, bx4 as usize, by4 as usize, bw4 as usize, bh4 as usize);
         }
+        // rav1g: upstream keeps the chroma mode of the edges (`uvmode`) for its reconstruction; the
+        // parse does not read it, so it is not kept.
         if has_chroma {
-            CaseSet::<32, false>::many(
-                [&t.l, ta],
-                [cbh4 as usize, cbw4 as usize],
-                [cby4 as usize, cbx4 as usize],
-                #[inline(always)]
-                |case, dir| {
-                    case.set_disjoint(&dir.uvmode, uv_mode);
-                },
-            );
             if pal_sz[1] != 0 {
                 (bd_fn.copy_pal_block_uv)(
                     t,
@@ -1779,17 +1772,6 @@ fn decode_b(
                 case.set_disjoint(&dir.skip, b.skip);
             },
         );
-        if has_chroma {
-            CaseSet::<32, false>::many(
-                [&t.l, ta],
-                [cbh4 as usize, cbw4 as usize],
-                [cby4 as usize, cbx4 as usize],
-                #[inline(always)]
-                |case, dir| {
-                    case.set_disjoint(&dir.uvmode, DC_PRED);
-                },
-            );
-        }
     } else {
         // inter-specific mode/mv coding
         let mv_prec = || frame_hdr.hp as i32 - frame_hdr.force_integer_mv as i32;
@@ -2721,23 +2703,12 @@ fn decode_b(
                 case.set_disjoint(&dir.comp_type, comp_type);
                 case.set_disjoint(&dir.filter[0], filter[0]);
                 case.set_disjoint(&dir.filter[1], filter[1]);
-                case.set_disjoint(&dir.mode, inter_mode);
+                // rav1g: no `mode`: only the luma modes of key and intra-only frames are read back
+                // (the context of `y_mode`), and an inter block is in neither. No `uvmode` (above).
                 case.set_disjoint(&dir.r#ref[0], r#ref[0]);
                 case.set_disjoint(&dir.r#ref[1], r#ref[1]);
             },
         );
-
-        if has_chroma {
-            CaseSet::<32, false>::many(
-                [&t.l, ta],
-                [cbh4 as usize, cbw4 as usize],
-                [cby4 as usize, cbx4 as usize],
-                #[inline(always)]
-                |case, dir| {
-                    case.set_disjoint(&dir.uvmode, DC_PRED);
-                },
-            );
-        }
     }
 
     // update contexts
@@ -2755,7 +2726,9 @@ fn decode_b(
             }
         });
     }
-    if b.skip == 0 {
+    // rav1g: upstream's mask of the blocks with coefficients is for its CDEF; the parse does not read
+    // it, so it is kept with the other masks of the loop filter only (`ParseSettings::lf_masks`).
+    if c.parse_lf_masks && b.skip == 0 {
         let mask = !0u32 >> 32 - bw4 << (bx4 & 15);
         let bx_idx = (bx4 & 16) >> 4;
         for noskip_mask in &f.lf.mask[t.lf_mask.unwrap()].noskip_mask[by4 as usize >> 1..]
@@ -3247,7 +3220,6 @@ fn decode_sb(
 
 fn reset_context(ctx: &mut BlockContext, keyframe: bool, pass: c_int) {
     ctx.intra.get_mut().0.fill(keyframe.into());
-    ctx.uvmode.get_mut().0.fill(DC_PRED);
     if keyframe {
         ctx.mode.get_mut().0.fill(DC_PRED);
     }
