@@ -132,6 +132,9 @@ pub struct compute_shader_lib {
     // The semi-planar output (`output.rs`): into the staging area, and into the planes of a texture.
     pub shader_copy_plane_sp: ComputeShader,
     pub shader_copy_plane_sp_tex_v2: ComputeShader,
+    // The display pass prototype (`output.rs`, docs/stage-fusion.md): the frame into a display-size P010
+    // texture, downscaled and tone-mapped.
+    pub shader_display_pass: ComputeShader,
     pub shader_filmgrain_filter_sp: ComputeShader,
     pub shader_filmgrain_filter_sp_tex_v2: ComputeShader,
     // The lists of CDEF from the mode info (`postfilter.rs`, `Av1Core::gpu_cdef_lists`).

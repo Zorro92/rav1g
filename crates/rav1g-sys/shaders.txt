@@ -109,6 +109,7 @@ inter_scale_obmc_above_hbd
 inter_scale_obmc_left_hbd
 copy_plane_sp
 copy_plane_sp_tex_v2
+display_pass
 film_grain_filter_sp
 film_grain_filter_sp_tex_v2
 cdef_lists

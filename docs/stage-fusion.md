@@ -1,8 +1,9 @@
 # Doing Bale's display stage in rav1g's last pass
 
 A design study (2026-11-23): can rav1g's last pass write the display-size, tone-mapped image that
-Bale's D3D11 stage makes today from rav1g's 4K output, and what would that save? No code of this
-page is in the decoder yet.
+Bale's D3D11 stage makes today from rav1g's 4K output, and what would that save? A prototype of the
+pass is in the decoder behind an internal switch (`-displaypass WxH`, below); the interface Bale would
+use is not.
 
 - [Conclusion](#conclusion)
 - [What Bale's stage computes today](#what-bales-stage-computes-today)
@@ -12,10 +13,17 @@ page is in the decoder yet.
 - [Interface](#interface)
 - [What Bale and the fork would change](#what-bale-and-the-fork-would-change)
 - [Risks](#risks)
-- [Prototype: not built in this round](#prototype-not-built-in-this-round)
+- [The prototype (`-displaypass`)](#the-prototype--displaypass)
+- [The ABI it needs](#the-abi-it-needs)
 
 ## Conclusion
 
+- **What the console says (Bale's per-frame logs, 60 Mbps 4K60, 2026-11-23).** HDR10 is bound by the
+  GPU and the stage, SDR by the parse. HDR10 at 60 Mbps: 53 fps; rav1g waits 13.7 ms a frame (p95 26)
+  for an output image, because Bale's D3D11 tone-map and downscale stage holds the images (stage
+  submit to GPU done: 165 ms, against 68 ms in SDR); rav1g's own GPU time is 9.2 ms a frame, and 692 of
+  1797 frames (38%) have no postfilter stage and take the full copy pass. So the stage is the lever
+  for HDR, and the copy matters there too.
 - **The saving is large, and it is bytes.** Today a 4K60 frame on a 1080p display moves about
   **156 MB** through the GPU between rav1g's last postfilter stage and the display-size image: rav1g
   writes the 4K P010 image (24.9 MB), Bale's area pass reads it and writes a 1080p fp32 intermediate
@@ -30,10 +38,17 @@ page is in the decoder yet.
   intermediate saves about 66-100 MB a frame (option A below). It needs no interface between the two
   projects and keeps Bale's stage for HEVC as well.
 - **The rest needs an ABI change of rav1g** (the display size, the tone-map parameters and the
-  meaning of the output image are new settings), and **the tone-map math would have to be licensed
-  into rav1g** (Bale is AGPL-3.0, rav1g BSD-2-Clause): both are the owner's decisions. So this round
-  stops at the design, as the brief asks when an ABI change is needed. A prototype behind an internal
-  switch is sketched at the end, for a round the owner approves.
+  meaning of the output image are new settings; [the ABI it needs](#the-abi-it-needs)). Measuring it
+  needs none: **the prototype** (option B) runs in the test player and rav1g-dec behind an internal
+  switch (`av1_set_display_pass`, `-displaypass 1920x1080`), so the console can say what the pass costs
+  on rav1g's queue before anything is decided. Its math is written in rav1g from the standards, in
+  the order of Bale's stage, not copied (Bale is AGPL-3.0, rav1g BSD-2-Clause); where the one
+  implementation should live is the owner's decision.
+- **It also removes the copy pass and the image hold.** A frame without a postfilter (38% of the HDR
+  clip) today takes rav1g's 4K copy (read and write, ~1.1 ms) and then Bale's stage; with the display
+  pass it takes neither: the pass reads the frame buffer and writes the 1080p image. And rav1g's images
+  become 1080p images that the fork copies (6 MB) into its own pool and gives back at once, instead of
+  4K images held until Bale's stage is through, which is the 13.7 ms rav1g waits for an image today.
 - **Not into the postfilter stage itself.** The last postfilter stage works in 64x32 (CDEF) or 64-row
   (loop restoration) groups; the area downscale with linear-light chroma needs the *final* values of a
   one-sample chroma ring and one output column around each group, which other groups compute. Taking
@@ -163,26 +178,12 @@ frame buffer once and writes the output: ~25-50 MB.
 
 ## Interface
 
-An outline for an ABI change (`RAV1G_ABI_VERSION` 2; `abi.txt`, `docs/integration.md`):
-
-- **Settings** (`Rav1gSettings`, appended): `display_width`, `display_height` (0: no display pass, the
-  decoder's output as today); `display_transform`: `NONE` (scale only, BT.709 SDR), `TONE_MAP` (PQ,
-  HLG and BT.2020 SDR to BT.709 SDR); `tone_curve` (BT.2390, Hable), `source_peak_nits`,
-  `target_white_nits`, `desaturation`; `display_depth` (10: P010; 8: NV12 with the Bayer dither);
-  `display_flags` (legacy math for A/B). The colour the application wants assumed where the stream
-  says "unspecified" (the fork merges container tags, `MergeStreamColor`): `assumed_transfer`,
-  `assumed_primaries`, `assumed_matrix`, `assumed_range`, `assumed_chroma_position`.
-- **Images**: with a display size, `Rav1gImageRequest` asks for `display_width x display_height` (even)
-  in the output format, whatever the stream's size and depth; a texture with
-  `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS` (the direct path only: a staged copy would give back
-  what B saves). `Rav1gFrame::width`/`height` become the display size, `Rav1gFrame::color` the output's
-  description (BT.709, limited range, left-sited), with the stream's own description in new fields
-  (`source_color`, `source_width`, `source_height`) and a flag that the frame was processed (what the
-  fork's `ToneMappedOutputMark` says to the player).
-- **Per frame**: nothing from the application; rav1g has the frame's colour description and HDR10
-  metadata (metadata OBUs) itself. A setter to change the target (display mode change) between
-  frames would need a decoder flush; recreating the decoder is the simple first form.
-- Internal A/B switches stay out of the ABI (`av1_*` in `av1_perf.h`).
+In short (the exact form is under [The ABI it needs](#the-abi-it-needs)): the application gives the
+display size and the stage's parameters once, in the decoder's settings; rav1g asks for display-size
+P010 (or NV12) images and writes them; the frame it hands back says that it was processed and what the
+source was. Per frame nothing comes from the application: rav1g has the frame's colour description
+and HDR10 metadata itself. A change of the target (display mode change) recreates the decoder, as a new
+sequence does. Internal A/B switches stay out of the ABI (`av1_*` in `av1_perf.h`).
 
 ## What Bale and the fork would change
 
@@ -228,20 +229,88 @@ An outline for an ABI change (`RAV1G_ABI_VERSION` 2; `abi.txt`, `docs/integratio
 - **Debug paths.** Bale's `gammachroma` and `nostaged` switches and its stage timing would need
   equivalents in rav1g (an `av1_*` switch and a GPU mark).
 
-## Prototype: not built in this round
+## The prototype (`-displaypass`)
 
-The brief asks for a prototype only when the design shows a clear saving and needs no ABI change. The
-saving is clear, but the feature needs an ABI change (display size, tone-map parameters, the meaning of
-the output image) and the math would have to come from an AGPL-3.0 file into a BSD-2-Clause library:
-both are for the owner to decide. What a prototype for one round would be, once approved:
+Option B behind an internal switch: `av1_set_display_pass(width, height)` (`libav1/dx/av1_perf.h`),
+`-displaypass WxH` in the test player and in rav1g-dec. No ABI change: with the switch off nothing
+changes, and with it on a decoder with the semi-planar output kind asks for P010 images of WxH for its
+10-bit frames.
 
-1. `av1_set_display_pass(width, height, flags)` (internal, `av1_perf.h`), the test player's and
-   rav1g-dec's `-displaypass WxH`; the output image is requested at that size, P010, direct path only.
-2. `display_pass.hlsl`: option B's pass with the area downscale and the BT.709 SDR scale-only and PQ
-   BT.2390 paths, 32x16 output tiles with the one-pixel ring in group shared memory.
-3. rav1g-dec holds the image against a CPU model of the same math (a port of the needed functions of
-   `cpu.rs`) within Bale's tolerances, on WARP in CI; the per-frame md5 stays on the frame buffer.
-4. Console: `-gputime` with and without `-displaypass 1920x1080` on the 40 and 60 Mbps clips, and
-   Bale's "Stage GPU" on the same clips for the other side of the sum.
+- **The pass** (`libav1/dx/shaders/display_pass.hlsl`, called from `copy_semi_planar` in `output.rs`):
+  one dispatch at the end of the frame's command list in place of the output copy, a 64-lane group per
+  32x8 output pixels. The output pixels' linear values go into group memory (33 columns: one more on
+  the left, which the first chroma sample's footprint reaches), then each lane writes four luma samples
+  and one chroma pair. Every operation of [What Bale's stage computes](#what-bales-stage-computes-today)
+  in the same fp32 order: area weights, bilinear chroma by siting, sign-keeping decode, BT.2390 EETF
+  (source peak 1000 nits, white 100), HLG OOTF, BT.2020 to BT.709, one late clip, inverse BT.1886, the
+  left-sited linear chroma mix, 10-bit limited-range quantization. The source's transfer, matrix,
+  range and chroma position are those of the sequence header (PQ: tone map; HLG: OOTF and tone map;
+  BT.2020 SDR: gamut; else BT.709 scale only).
+- **What changes around it**: the last postfilter stage does not write the output image (the fusion is
+  off for such frames, `out=copy-switch` in the timing run) and writes the frame buffer of every frame,
+  unreferenced ones too, since the pass reads it. The decoded frames and the reference frames are the
+  same bytes; only the output image differs.
+- **Not in the prototype**: 8-bit and monochrome frames (they keep the normal output), NV12 output and
+  its dither, film grain (not applied, logged once), the staged path (a texture shaders may not write:
+  logged, no frame written), the container's colour tags, the Hable curve and desaturation, Bale's
+  `gammachroma` math. `Rav1gFrame::color` still describes the stream.
+- **Cost on rav1g's queue**: one dependent step (~18 us), a read of the frame buffer (24.9 MB at 4K
+  10-bit) and a 6.2 MB write at 1080p, and the arithmetic of 8.3 M source-pixel evaluations, against
+  the fused output stores (frames with CDEF) or the 49.8 MB copy (frames without a postfilter) of
+  today. Registers (`shader_regs`, gfx1030 wave64): 58 VGPRs, 4.6 KB of group memory, 7 waves a SIMD.
+- **Checked**: CI job `rust-output` (WARP) decodes the PQ stream `syn-hdr10-10b-1080p` and the SDR
+  stream `syn-tiles-10b-1080p` of the conformance set once as they are and once with `-output p010
+  -displaypass 960x540`, and `testing/display_pass/check.py` holds every code of the display images
+  against a float32 model of the pass (`testing/display_pass/model.py`, numpy), at most one code apart
+  (fp32 on two compilers). The model follows the same description; holding both against Bale's own
+  CPU reference (`cpu.rs`) is a step for Bale's side.
+- **On the console**: the test player's timing run with `-output p010 -displaypass 1920x1080` (or
+  `-interop -displaypass 1920x1080`) against the same task without it, on the 40 and 60 Mbps clips and
+  the HDR10 one: `copy_plane` in the stage table is the display pass on every frame, `gpu busy` the
+  sum. Bale's "Stage GPU" for the same clips is the other side of the sum.
 
-Before that, option A is the cheaper first step and is Bale's alone.
+## The ABI it needs
+
+For Bale to use it (`RAV1G_ABI_VERSION` 1 to 2, `tools/rav1g-header/abi.txt`, `docs/integration.md`):
+
+```c
+/* rav1g.h, new. */
+#define RAV1G_DISPLAY_SCALE 1     /* BT.709 SDR: downscale only */
+#define RAV1G_DISPLAY_TONE_MAP 2  /* PQ, HLG, BT.2020 SDR to BT.709 SDR; BT.709 SDR downscaled */
+#define RAV1G_TONE_CURVE_BT2390 1
+#define RAV1G_TONE_CURVE_HABLE 2
+
+typedef struct Rav1gDisplay {
+  uint32_t width, height;          /* the image size, even, at most 4:1 per axis; 0, 0: no display pass */
+  uint32_t transform;              /* RAV1G_DISPLAY_* */
+  uint32_t tone_curve;             /* RAV1G_TONE_CURVE_* */
+  float source_peak_nits;          /* 1000: Bale's server default */
+  float target_white_nits;         /* 100: the 203-nit endpoint of the EETF */
+  float desaturation;              /* 0 */
+  uint32_t depth;                  /* 10: P010; 8: NV12 with the 8x8 Bayer dither (an 8-bit display) */
+  uint8_t assumed_transfer;        /* H.273 code points used where the sequence header says   */
+  uint8_t assumed_primaries;       /* "unspecified" (2), as the fork merges the container's tags; */
+  uint8_t assumed_matrix;          /* 0: none                                                  */
+  uint8_t assumed_chroma_position; /* AV1 chroma_sample_position */
+  uint32_t reserved[4];            /* zero */
+} Rav1gDisplay;
+
+/* Rav1gSettings, appended behind `output`: */
+  struct Rav1gDisplay display;     /* rav1g_settings_default: all zero */
+
+/* Rav1gFrame, appended behind `format`: */
+  bool display_processed;          /* the image is the display pass's; `color` is its BT.709 SDR */
+  uint32_t source_width, source_height;
+  struct Rav1gColorInfo source_color;
+```
+
+- **Images**: with a display size, `Rav1gImageRequest::width`/`height` are the display size and
+  `format` is P010 (depth 10) or NV12 (depth 8) whatever the stream's depth; the image must be a
+  texture with `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS` (no staged path: a copy would give back
+  what the pass saves); anything else fails the temporal unit with an `OUTPUT` line, as today.
+- **Frames**: `width`/`height`/`format`/`bit_depth` describe the image; `color` is BT.709, limited
+  range, left-sited; the HDR10 metadata stays the stream's (for the stats), `source_*` say what was
+  decoded.
+- `rav1g_settings_default` leaves `display` zeroed, so an application built against ABI 2 that does not
+  set it gets today's output. Bale's loader compares the ABI version; the fork fills `display` from the
+  `BaleToneMapConfig` it builds today and skips `BaleToneMap::Process` for such decoders.

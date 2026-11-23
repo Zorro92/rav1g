@@ -58,7 +58,7 @@ mapping|sh testing/precheck.sh --check-mapping|@
 "
 # Files no check reads (CI's other jobs, docs, git's files). A changed file that matches no check and
 # is not here starts every check.
-NO_CHECK='*.md docs/* .github/* .gitignore .gitattributes LICENSE.txt av1xbox.sln testing/README.md testing/precheck.sh testing/argon/* testing/conformance/* testing/console/* testing/language_bar/* testing/md5ref/* testing/rav1d_md5/* testing/uwp_* libav1/LICENSE libav1/PATENTS'
+NO_CHECK='*.md docs/* .github/* .gitignore .gitattributes LICENSE.txt av1xbox.sln testing/README.md testing/precheck.sh testing/argon/* testing/conformance/* testing/console/* testing/display_pass/* testing/language_bar/* testing/md5ref/* testing/rav1d_md5/* testing/uwp_* libav1/LICENSE libav1/PATENTS'
 
 usage() {
   sed -n '2,18p' "$here/precheck.sh" | sed 's/^# \{0,1\}//' >&2

@@ -987,6 +987,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         cdef_v3_legacy: task.cdefv3legacy,
         output_copy_legacy: task.outputcopylegacy,
         front_merge_legacy: task.frontmergelegacy,
+        display_pass: task.displaypass,
         intra_v2: task.intrav2,
         intra_opt: task.intraopt,
         intra_filter_legacy: task.intrafilterlegacy,
@@ -997,6 +998,9 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         intra_edge_fix: task.intraedgefix,
         inter_fast: task.interfast,
     });
+    if task.displaypass.0 > 0 {
+        say!("Display pass: {}x{} P010 (prototype, -displaypass)", task.displaypass.0, task.displaypass.1);
+    }
     say!(
         "Front of the frame: {}",
         if task.frontmergelegacy { "five steps (-frontmergelegacy)" } else { "two steps (default)" }

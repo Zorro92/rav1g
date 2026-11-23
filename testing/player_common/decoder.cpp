@@ -765,6 +765,18 @@ int AV1Decoder::DecodeOne() {
   av1_set_cdef_v3_legacy(params_.cdefv3legacy_);
   av1_set_output_copy_legacy(params_.outputcopylegacy_);
   av1_set_front_merge_legacy(params_.frontmergelegacy_);
+  {
+    int display_w = 0, display_h = 0;
+    const size_t x = params_.displaypass_.find('x');
+    if (x != std::string::npos) {
+      display_w = atoi(params_.displaypass_.substr(0, x).c_str());
+      display_h = atoi(params_.displaypass_.substr(x + 1).c_str());
+    }
+    av1_set_display_pass(display_w, display_h);
+    if (display_w > 0 && display_h > 0)
+      XB_LOGI << "Display pass: " << display_w << "x" << display_h
+              << " P010 (prototype, -displaypass; 10-bit frames with -output p010 or -interop)";
+  }
   XB_LOGI << "Front of the frame: "
           << (params_.frontmergelegacy_ ? "five steps (-frontmergelegacy)" : "two steps (default)");
   XB_LOGI << "CDEF shader: "

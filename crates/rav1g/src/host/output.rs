@@ -43,7 +43,7 @@
 //! `longjmp`, and that must not pass a Rust function.
 
 use std::ffi::c_int;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 use super::core::{
     buffer, commands, perf_add, perf_gpu_mark, perf_ticks, pipeline, stage_dump_active, stage_dump_output,
@@ -63,6 +63,69 @@ pub extern "C" fn av1_set_output_copy_legacy(enable: c_int) {
 
 pub(crate) fn output_copy_legacy() -> bool {
     OUTPUT_COPY_LEGACY.load(Ordering::Relaxed) != 0
+}
+
+// The display pass, a prototype (docs/stage-fusion.md, option B; -displaypass WxH): the display size, the
+// width in the high 16 bits and the height in the low ones, 0 for none.
+static DISPLAY_PASS: AtomicU32 = AtomicU32::new(0);
+static DISPLAY_PASS_NOTE: AtomicBool = AtomicBool::new(false);
+
+/// `av1_set_display_pass` (`dx/av1_perf.h`): with a size, every 10-bit frame a decoder with the
+/// semi-planar output kind outputs goes through `display_pass.hlsl` into a P010 image of that size
+/// (rounded up to even), downscaled and tone-mapped to BT.709 SDR, instead of the frame itself. 0, 0: off.
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_display_pass(width: c_int, height: c_int) {
+    let even = |v: c_int| (((v + 1) & !1) as u32).min(0xfffe);
+    let size = if width > 0 && height > 0 { (even(width) << 16) | even(height) } else { 0 };
+    DISPLAY_PASS.store(size, Ordering::Relaxed);
+}
+
+/// The display size when the frame of the current command list takes the display pass: the switch is
+/// set, the decoder has the semi-planar output kind, the frame has more than 8 bits (the prototype writes
+/// P010 only) and chroma.
+///
+/// # Safety
+/// `dec` is the decoder while it records a frame or a show_existing_frame; `cm` is the frame's.
+pub(crate) unsafe fn display_pass_size(dec: *const Av1Core, cm: *const AV1_COMMON) -> Option<(c_int, c_int)> {
+    let size = DISPLAY_PASS.load(Ordering::Relaxed);
+    // SAFETY: the caller's contract.
+    unsafe {
+        let td = (*dec).curr_frame_data.as_ref()?;
+        if size == 0 || (*dec).output_kind == 0 || td.is_hbd == 0 || (*(*cm).cur_frame).buf.monochrome != 0 {
+            return None;
+        }
+    }
+    Some(((size >> 16) as c_int, (size & 0xffff) as c_int))
+}
+
+/// The inline constants of `display_pass.hlsl` for the frame `src` and the sequence's colour description:
+/// sizes, planes, the source's transfer (PQ, HLG, else SDR), BT.2020 matrix, range, chroma siting, and the
+/// tone map's source peak (1000 nits) and SDR white (100 nits), as the stage it stands in for has them.
+fn display_pass_constants(src: &HwFrameBuffer, out: (c_int, c_int), seq: &crate::sys::SequenceHeader) -> [u32; 12] {
+    let mode = match seq.transfer_characteristics as u32 {
+        16 => 0,
+        18 => 2,
+        _ => 1,
+    };
+    let flags = mode
+        | (u32::from(seq.matrix_coefficients as u32 == 9) << 2)
+        | (u32::from(seq.color_range != 0) << 3)
+        // AV1 chroma_sample_position: 2 (colocated) sits on the luma row, the others between two rows.
+        | (u32::from(seq.chroma_sample_position as u32 != 2) << 4);
+    [
+        src.y_crop_width as u32,
+        src.y_crop_height as u32,
+        out.0 as u32,
+        out.1 as u32,
+        src.planes[0].offset as u32,
+        src.planes[1].offset as u32,
+        src.planes[2].offset as u32,
+        src.planes[0].stride as u32,
+        src.planes[1].stride as u32,
+        flags,
+        1000.0f32.to_bits(),
+        100.0f32.to_bits(),
+    ]
 }
 use crate::gpu::d3d12::{com_ref, wrapped_ref};
 use crate::gpu::{
@@ -172,6 +235,9 @@ pub(super) fn staging_size(width: c_int, height: c_int, hbd: bool, semi_planar: 
 unsafe fn frame_layout(dec: *mut Av1Core, cm: *const AV1_COMMON) -> (bool, bool, c_int, c_int, OutputLayout) {
     // SAFETY: the caller's contract.
     unsafe {
+        if let Some((width, height)) = display_pass_size(dec, cm) {
+            return (false, false, width, height, semi_planar_layout(width, height, true));
+        }
         let td = &*(*dec).curr_frame_data;
         let src = &*td.dst_frame_buffer;
         let width = if td.do_superres != 0 { (*cm).superres_upscaled_width } else { src.y_crop_width };
@@ -294,6 +360,11 @@ pub(crate) unsafe fn prepare_fused_output(
         if (*dec).output_kind == 0 {
             return None;
         }
+        if display_pass_size(dec, cm).is_some() {
+            // The display pass reads the whole frame from its frame buffer behind the postfilter.
+            td.output_copy_reason = AV1_PERF_OUTPUT_COPY_SWITCH;
+            return None;
+        }
         let has_postfilter = td.do_cdef != 0 || td.do_superres != 0 || td.do_loop_rest != 0;
         if !has_postfilter {
             // Nothing writes every sample of the frame after the loop filter: the copy pass stays.
@@ -382,6 +453,13 @@ pub(crate) unsafe fn copy_output(dec: *mut Av1Core, cm: *mut AV1_COMMON, fb: *co
         img.y_crop_height = src.y_crop_height;
         img.uv_crop_width = src.uv_crop_width;
         img.uv_crop_height = src.uv_crop_height;
+        if let Some((width, height)) = display_pass_size(dec, cm) {
+            // The prototype's display pass: the image is the display-size frame.
+            img.y_crop_width = width;
+            img.y_crop_height = height;
+            img.uv_crop_width = width / 2;
+            img.uv_crop_height = height / 2;
+        }
         img.frame_number = src.frame_number;
         img.hbd = td.is_hbd;
         img.monochrome = c_int::from(is_monochrome);
@@ -576,6 +654,29 @@ unsafe fn copy_semi_planar(
             && !already_fused
         {
             commands.transition_texture(texture, TextureState::Common, TextureState::ReadWrite);
+        }
+        if let Some(out) = display_pass_size(dec, cm) {
+            td.perf.output_path = td.output_copy_reason;
+            let Some((texture, views, device, pair)) = direct else {
+                if !DISPLAY_PASS_NOTE.swap(true, Ordering::Relaxed) {
+                    log(true, "DISPLAY the display pass needs a texture shaders may write: no frame is written");
+                }
+                return;
+            };
+            if do_filmgrain && !DISPLAY_PASS_NOTE.swap(true, Ordering::Relaxed) {
+                log(true, "DISPLAY the display pass prototype does not apply film grain");
+            }
+            let shader = pipeline(&raw const (*lib).shader_display_pass);
+            commands.set_layout(shader.layout());
+            commands.set_pipeline(shader);
+            commands.bind_write(0, frame_buffers.location());
+            commands.bind_write_planes(2, device, views, pair);
+            commands.set_inline_constants(1, &display_pass_constants(src, out, &cm.seq_params), 0);
+            commands.dispatch((out.0 as u32).div_ceil(32), (out.1 as u32).div_ceil(8), 1);
+            perf_gpu_mark(dec, AV1_PERF_GPU_COPY_PLANE);
+            commands.transition_texture(texture, TextureState::ReadWrite, TextureState::Common);
+            perf_gpu_mark(dec, AV1_PERF_GPU_OUTPUT_COPY);
+            return;
         }
         if do_filmgrain {
             let target = match direct {

@@ -87,6 +87,8 @@ pub struct Task {
     pub cdefv3legacy: bool,
     pub outputcopylegacy: bool,
     pub frontmergelegacy: bool,
+    /// -displaypass WxH: the display pass prototype; (0, 0) off.
+    pub displaypass: (i32, i32),
     pub nofitsize: bool,
     pub fitsize: bool,
     pub lowmem: bool,
@@ -172,6 +174,7 @@ impl Default for Task {
             cdefv3legacy: false,
             outputcopylegacy: false,
             frontmergelegacy: false,
+            displaypass: (0, 0),
             nofitsize: false,
             fitsize: false,
             lowmem: false,
@@ -297,6 +300,10 @@ pub fn usage() {
     say!(
         "  -frontmergelegacy    the front of a frame (grid, gen_pred_blocks, residual clear, edge and CDEF lists) in \
          five steps, not two"
+    );
+    say!(
+        "  -displaypass WxH      prototype: 10-bit frames into P010 images of WxH, downscaled and tone-mapped to \
+         BT.709 SDR (with -output p010; the md5 references do not apply)"
     );
     say!("  -intraod             use the baseline DXC -Od intra_main kernels (-intraopt restores the default)");
     say!("  -intrafilterlegacy   use the previous 8-bit filter intra shader");
@@ -484,6 +491,11 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-cdefv3legacy" => task.cdefv3legacy = true,
             "-outputcopylegacy" => task.outputcopylegacy = true,
             "-frontmergelegacy" => task.frontmergelegacy = true,
+            "-displaypass" => {
+                let text = value()?;
+                let size = text.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)));
+                task.displaypass = size.ok_or_else(|| format!("-displaypass {text}: WxH"))?;
+            }
             "-nofitsize" => task.nofitsize = true,
             "-fitsize" => task.fitsize = true,
             "-intrav2" => task.intrav2 = true,

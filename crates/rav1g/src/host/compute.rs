@@ -124,9 +124,9 @@ const LAYOUTS: usize =
 const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
-    // 20 transform pipelines, 38 shared shaders and 27 per bit depth: one slot per pipeline of
+    // 20 transform pipelines, 39 shared shaders and 27 per bit depth: one slot per pipeline of
     // `create_tasks` (the test `every_pipeline_names_its_shader_once`).
-    assert!(SHADERS == 20 + 38 + 2 * 27);
+    assert!(SHADERS == 20 + 39 + 2 * 27);
     assert!(LAYOUTS == 27);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
@@ -220,6 +220,7 @@ struct Layouts {
     upscale_sp_tex: Layout,
     copy_plane_sp: Layout,
     copy_plane_sp_tex: Layout,
+    display_pass: Layout,
     film_grain_tex: Layout,
     cdef_lists: Layout,
     mi_grid_build: Layout,
@@ -270,6 +271,7 @@ unsafe fn create_layouts(device: Device<'_>, lib: *mut compute_shader_lib) -> Re
         // The copy layouts bind u0 and the inline constants. The direct layout also binds both texture planes.
         copy_plane_sp: layout(0, 1, 0, 11)?,
         copy_plane_sp_tex: layout_planes(0, 1, 0, 11, 2)?,
+        display_pass: layout_planes(0, 1, 0, 12, 2)?,
         // film_grain_filter_sp_tex_v2.hlsl: the layout of film grain with the two planes in place of u0.
         film_grain_tex: layout_planes(3, 0, 1, 0, 2)?,
         // cdef_lists.hlsl / cdef_lists_v2.hlsl: the mode info pool and grid, the two lists, 6 inline constants.
@@ -449,6 +451,7 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("inter_scale_obmc_left_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_scale_obmc_left),
             ("copy_plane_sp", &layouts.copy_plane_sp, &raw mut (*lib).shader_copy_plane_sp),
             ("copy_plane_sp_tex_v2", &layouts.copy_plane_sp_tex, &raw mut (*lib).shader_copy_plane_sp_tex_v2),
+            ("display_pass", &layouts.display_pass, &raw mut (*lib).shader_display_pass),
             ("film_grain_filter_sp", &layouts.film_grain, &raw mut (*lib).shader_filmgrain_filter_sp),
             ("film_grain_filter_sp_tex_v2", &layouts.film_grain_tex, &raw mut (*lib).shader_filmgrain_filter_sp_tex_v2),
             ("cdef_lists", &layouts.cdef_lists, &raw mut (*lib).shader_cdef_lists),
