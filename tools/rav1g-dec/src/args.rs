@@ -87,8 +87,14 @@ pub struct Task {
     pub cdefv3legacy: bool,
     pub outputcopylegacy: bool,
     pub frontmergelegacy: bool,
-    /// -displaypass WxH: the display pass prototype; (0, 0) off.
+    /// -displaypass WxH: the display pass (`Settings::display`); (0, 0) off. -displaypeak, -displaywhite
+    /// (nits, 0 the default), -displaydepth (8, 10, 0 the decoder's), -displaytransform (0 by the
+    /// frame's colour, 1 scale, 2 gamut, 3 PQ, 4 HLG).
     pub displaypass: (i32, i32),
+    pub displaypeak: f32,
+    pub displaywhite: f32,
+    pub displaydepth: u32,
+    pub displaytransform: u32,
     pub nofitsize: bool,
     pub fitsize: bool,
     pub lowmem: bool,
@@ -175,6 +181,10 @@ impl Default for Task {
             outputcopylegacy: false,
             frontmergelegacy: false,
             displaypass: (0, 0),
+            displaypeak: 0.0,
+            displaywhite: 0.0,
+            displaydepth: 0,
+            displaytransform: 0,
             nofitsize: false,
             fitsize: false,
             lowmem: false,
@@ -302,8 +312,12 @@ pub fn usage() {
          five steps, not two"
     );
     say!(
-        "  -displaypass WxH      prototype: frames into P010 (10-bit) or NV12 (8-bit) images of WxH, downscaled and \
-         tone-mapped to BT.709 SDR (with -output p010; the md5 references do not apply)"
+        "  -displaypass WxH      the display pass (Rav1gSettings::display): images of WxH, the frames downscaled and \
+         tone-mapped to BT.709 SDR, P010 or NV12 (with -output p010; the md5 references do not apply)"
+    );
+    say!(
+        "  -displaypeak N -displaywhite N -displaydepth 8|10 -displaytransform 0-4   its source peak and SDR white \
+         (nits), image depth, transform (0 by the frame's colour, 1 scale, 2 gamut, 3 PQ, 4 HLG)"
     );
     say!("  -intraod             use the baseline DXC -Od intra_main kernels (-intraopt restores the default)");
     say!("  -intrafilterlegacy   use the previous 8-bit filter intra shader");
@@ -496,6 +510,13 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
                 let size = text.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)));
                 task.displaypass = size.ok_or_else(|| format!("-displaypass {text}: WxH"))?;
             }
+            "-displaypeak" | "-displaywhite" => {
+                let text = value()?;
+                let nits: f32 = text.parse().map_err(|_| format!("{a} {text}: nits"))?;
+                if a == "-displaypeak" { task.displaypeak = nits } else { task.displaywhite = nits }
+            }
+            "-displaydepth" => task.displaydepth = number()? as u32,
+            "-displaytransform" => task.displaytransform = number()? as u32,
             "-nofitsize" => task.nofitsize = true,
             "-fitsize" => task.fitsize = true,
             "-intrav2" => task.intrav2 = true,

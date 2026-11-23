@@ -4,13 +4,16 @@
 against what the decoder wrote.
 
   uv run --with numpy python3 testing/display_pass/model.py <frames.yuv> <display.yuv> \\
-      --size WxH --out WxH [--transfer 16] [--matrix 9] [--full] [--colocated] [--depth 8] [--count N]
+      --size WxH --out WxH [--transfer 16] [--matrix 9] [--primaries 9] [--full] [--colocated] [--depth 8]
+      [--out-depth 8] [--peak 1000] [--white 100] [--count N]
 
 <frames.yuv>: the decoded frames as rav1g-dec -o writes them (planar 4:2:0, 16-bit little-endian
 samples, the visible size; a byte a sample with --depth 8). <display.yuv>: the frames of a run with
--displaypass WxH -output p010 -o, the same layout at the output size: 10-bit codes (P010), or 8-bit
-codes (NV12) for an 8-bit stream. --transfer/--matrix/--full/--colocated: the
-sequence's colour description (H.273 code points; AV1 chroma_sample_position 2 is --colocated).
+-display WxH -output p010 -o, the same layout at the output size: 10-bit codes (P010), or 8-bit codes
+(NV12) with --out-depth 8 (default: as --depth). --transfer/--matrix/--primaries/--full/--colocated:
+the colour description the pass used (H.273 code points; --primaries defaults to 9 with --matrix 9, else
+1; AV1 chroma_sample_position 2 is --colocated). --peak/--white: the tone map's source peak and SDR
+white (Rav1gDisplay::source_peak_nits, target_white_nits).
 
 Prints per frame and plane how many codes differ and the largest difference, and exits 1 when any
 code differs by more than --tolerance (default 1: fp32 on two compilers).
@@ -34,7 +37,7 @@ def nits_to_pq(n):
     return np.power((F(0.8359375) + F(18.8515625) * p) / (F(1) + F(18.6875) * p), F(78.84375))
 
 
-def eetf(nits, peak=F(1000), white=F(100)):
+def eetf(nits, peak, white):
     nits = np.minimum(np.maximum(nits, F(0)), peak)
     target = min(white * F(2.03), F(10000))
     if peak <= target:
@@ -60,8 +63,13 @@ def to_709(rgb):
     return np.einsum('ij,...j->...i', M709, rgb).astype(F)
 
 
-def weights(wide):
-    return np.array([0.2627, 0.6780, 0.0593] if wide else [0.2126, 0.7152, 0.0722], F)
+def weights(matrix):
+    """The luma weights of an H.273 matrix: BT.2020 (9), BT.601 (5, 6), else BT.709."""
+    if matrix == 9:
+        return np.array([0.2627, 0.6780, 0.0593], F)
+    if matrix in (5, 6):
+        return np.array([0.299, 0.587, 0.114], F)
+    return np.array([0.2126, 0.7152, 0.0722], F)
 
 
 def hlg_scene(e):
@@ -73,8 +81,9 @@ def hlg_scene(e):
 CODES = {10: (64, 876, 512, 896, 1023), 8: (16, 219, 128, 224, 255)}
 
 
-def pixel_linear(y, uv, mode, wide, full, depth=10):
-    w = weights(wide)
+def pixel_linear(y, uv, mode, matrix, wide, full, depth, peak, white):
+    # wide: BT.2020 primaries, converted to BT.709.
+    w = weights(matrix)
     black, yr, mid, cr, top = map(F, CODES[depth])
     y = y / top if full else (y - black) / yr
     uv = (uv - mid) / (top if full else cr)
@@ -93,13 +102,13 @@ def pixel_linear(y, uv, mode, wide, full, depth=10):
         rgb = scene * (F(1000) * np.power(ys, F(0.2)))[..., None]
     else:
         rgb = s * pq_to_nits(m)
-    peak = np.max(rgb, -1)
+    top = np.max(rgb, -1)
     if wide:
         rgb = to_709(rgb)
-    return rgb * (eetf(peak) / np.maximum(peak, F(1e-6)))[..., None]
+    return rgb * (eetf(top, F(peak), F(white)) / np.maximum(top, F(1e-6)))[..., None]
 
 
-def source_linear(yp, up, vp, mode, wide, full, colocated, depth=10):
+def source_linear(yp, up, vp, mode, matrix, wide, full, colocated, depth, peak, white):
     h, w = yp.shape
     py, px = np.mgrid[0:h, 0:w]
     cx = px.astype(F) * F(0.5)
@@ -117,7 +126,7 @@ def source_linear(yp, up, vp, mode, wide, full, colocated, depth=10):
     c = (at(bx, by) + (at(bx + 1, by) - at(bx, by)) * fx)
     d = (at(bx, by + 1) + (at(bx + 1, by + 1) - at(bx, by + 1)) * fx)
     cuv = c + (d - c) * fy
-    return pixel_linear(yp.astype(F), cuv, mode, wide, full, depth)
+    return pixel_linear(yp.astype(F), cuv, mode, matrix, wide, full, depth, peak, white)
 
 
 def weights_1d(src, out):
@@ -157,15 +166,15 @@ def encode(c, mode, wide):
     if not (mode == 1 and not wide):
         c = np.clip(c, F(0), F(1))
     e = np.sign(c).astype(F) * np.power(np.minimum(np.abs(c), F(3)), F(1 / 2.4))
-    y = e @ weights(False)
+    y = e @ weights(1)
     return y, (e[..., 2] - y) / F(2 * (1 - 0.0722)), (e[..., 0] - y) / F(2 * (1 - 0.2126))
 
 
-def display(yp, up, vp, ow, oh, mode, wide, full, colocated, depth=10):
-    lin = source_linear(yp, up, vp, mode, wide, full, colocated, depth)
+def display(yp, up, vp, ow, oh, mode, matrix, wide, full, colocated, depth=10, out_depth=10, peak=1000, white=100):
+    lin = source_linear(yp, up, vp, mode, matrix, wide, full, colocated, depth, peak, white)
     sh, sw = yp.shape
     vals = area_2to1(lin) if (sw == 2 * ow and sh == 2 * oh) else area(lin, ow, oh)
-    black, yr, mid, cr, _ = CODES[depth]
+    black, yr, mid, cr, _ = CODES[out_depth]
     y, _, _ = encode(vals, mode, wide)
     yq = np.clip(np.floor(F(black) + F(yr) * y + F(0.5)), black, black + yr)
     left = np.concatenate([vals[:, :1], vals[:, :-1]], 1)  # column 2i-1, the edge repeated
@@ -198,6 +207,10 @@ def main():
     ap.add_argument('--out', required=True)
     ap.add_argument('--transfer', type=int, default=1)
     ap.add_argument('--matrix', type=int, default=1)
+    ap.add_argument('--primaries', type=int, default=0)
+    ap.add_argument('--out-depth', type=int, default=0, choices=(0, 8, 10))
+    ap.add_argument('--peak', type=float, default=1000)
+    ap.add_argument('--white', type=float, default=100)
     ap.add_argument('--full', action='store_true')
     ap.add_argument('--colocated', action='store_true')
     ap.add_argument('--depth', type=int, default=10, choices=(8, 10))
@@ -207,12 +220,15 @@ def main():
     sw, sh = map(int, a.size.split('x'))
     ow, oh = map(int, a.out.split('x'))
     mode = {16: 0, 18: 2}.get(a.transfer, 1)
-    wide = a.matrix == 9
+    primaries = a.primaries or (9 if a.matrix == 9 else 1)
+    wide = primaries == 9
+    out_depth = a.out_depth or a.depth
     worst = 0
-    for n, (src, got) in enumerate(zip(frames(a.frames_file, sw, sh, a.depth), frames(a.display_file, ow, oh, a.depth))):
+    for n, (src, got) in enumerate(zip(frames(a.frames_file, sw, sh, a.depth), frames(a.display_file, ow, oh, out_depth))):
         if n >= a.count:
             break
-        want = display(*[p.astype(F) for p in src], ow, oh, mode, wide, a.full, a.colocated, a.depth)
+        want = display(*[p.astype(F) for p in src], ow, oh, mode, a.matrix, wide, a.full, a.colocated, a.depth, out_depth,
+                       a.peak, a.white)
         line = []
         far = []
         for name, w_, g in zip('YUV', want, got):

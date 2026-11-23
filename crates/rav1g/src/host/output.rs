@@ -43,7 +43,7 @@
 //! `longjmp`, and that must not pass a Rust function.
 
 use std::ffi::c_int;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use super::core::{
     alloc_constant_bytes, buffer, commands, perf_add, perf_gpu_mark, perf_ticks, pipeline, stage_dump_active,
@@ -67,40 +67,29 @@ pub(crate) fn output_copy_legacy() -> bool {
     OUTPUT_COPY_LEGACY.load(Ordering::Relaxed) != 0
 }
 
-// The display pass, a prototype (docs/stage-fusion.md, option B; -displaypass WxH): the display size, the
-// width in the high 16 bits and the height in the low ones, 0 for none.
-static DISPLAY_PASS: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_PASS_NOTE: AtomicBool = AtomicBool::new(false);
 
-/// `av1_set_display_pass` (`dx/av1_perf.h`): with a size, every frame with chroma a decoder with the
-/// semi-planar output kind outputs goes through `display_pass.hlsl` into an image of that size (rounded up
-/// to even; P010 for a 10-bit frame, NV12 for an 8-bit one), downscaled and tone-mapped to BT.709 SDR,
-/// instead of the frame itself. 0, 0: off.
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_display_pass(width: c_int, height: c_int) {
-    let even = |v: c_int| (((v + 1) & !1) as u32).min(0xfffe);
-    let size = if width > 0 && height > 0 { (even(width) << 16) | even(height) } else { 0 };
-    DISPLAY_PASS.store(size, Ordering::Relaxed);
-}
-
-/// The display size when the frame of the current command list takes the display pass: the switch is
-/// set, the decoder has the semi-planar output kind, and the frame has chroma.
+/// The display size when the frame of the current command list takes the display pass: the decoder was
+/// created with one (`Rav1gSettings::display`, which needs the semi-planar output kind). Every frame then
+/// takes it, monochrome ones too (their chroma is the middle value), so that the images of a decoder
+/// have one size.
 ///
 /// # Safety
-/// `dec` is the decoder while it records a frame or a show_existing_frame; `cm` is the frame's.
-pub(crate) unsafe fn display_pass_size(dec: *const Av1Core, cm: *const AV1_COMMON) -> Option<(c_int, c_int)> {
-    let size = DISPLAY_PASS.load(Ordering::Relaxed);
+/// `dec` is the decoder while it records a frame or a show_existing_frame.
+pub(crate) unsafe fn display_pass_size(dec: *const Av1Core) -> Option<(c_int, c_int)> {
     // SAFETY: the caller's contract.
     unsafe {
-        if (*dec).curr_frame_data.is_null()
-            || size == 0
-            || (*dec).output_kind == 0
-            || (*(*cm).cur_frame).buf.monochrome != 0
-        {
+        let display = &(*dec).display;
+        if (*dec).curr_frame_data.is_null() || display.width == 0 || (*dec).output_kind == 0 {
             return None;
         }
+        Some((display.width as c_int, display.height as c_int))
     }
-    Some(((size >> 16) as c_int, (size & 0xffff) as c_int))
+}
+
+/// The format of the display pass's images: P010 for 10-bit codes, NV12 for 8-bit ones.
+fn display_format(display: &crate::sys::av1_display_cfg) -> SemiPlanar {
+    if display.depth > 8 { SemiPlanar::P010 } else { SemiPlanar::Nv12 }
 }
 
 use crate::gpu::d3d12::{com_ref, wrapped_ref};
@@ -211,8 +200,9 @@ pub(super) fn staging_size(width: c_int, height: c_int, hbd: bool, semi_planar: 
 unsafe fn frame_layout(dec: *mut Av1Core, cm: *const AV1_COMMON) -> (bool, bool, c_int, c_int, OutputLayout) {
     // SAFETY: the caller's contract.
     unsafe {
-        if let Some((width, height)) = display_pass_size(dec, cm) {
-            let hbd = (*(*dec).curr_frame_data).is_hbd != 0;
+        if let Some((width, height)) = display_pass_size(dec) {
+            // The display pass's image: its own size and depth.
+            let hbd = (*dec).display.depth > 8;
             return (false, false, width, height, semi_planar_layout(width, height, hbd));
         }
         let td = &*(*dec).curr_frame_data;
@@ -250,7 +240,9 @@ pub(crate) unsafe fn output_image(
 
         let mut err = 1;
         let semi_planar = (*dec).output_kind != 0;
-        let fb_type = match (semi_planar, td.is_hbd != 0) {
+        let display = display_pass_size(dec).is_some();
+        let hbd = if display { (*dec).display.depth > 8 } else { td.is_hbd != 0 };
+        let fb_type = match (semi_planar, hbd) {
             (true, true) => fbtP010,
             (true, false) => fbtNV12,
             (false, true) if is_10x3 => fbt10x3,
@@ -274,7 +266,7 @@ pub(crate) unsafe fn output_image(
         }
         if semi_planar && let Some(texture) = TextureRef::from_raw(&(*fb).dx12_texture[0]) {
             // The texture has to be what the request named: the copy and the views are made for it.
-            let format = if td.is_hbd != 0 { SemiPlanar::P010 } else { SemiPlanar::Nv12 };
+            let format = if hbd { SemiPlanar::P010 } else { SemiPlanar::Nv12 };
             let info = texture.info();
             let (width, height) = (layout.y_texture_width as u32, ((crop_height + 1) & !1) as u32);
             if info.semi_planar != Some(format) || info.width != width || info.height != height {
@@ -297,6 +289,23 @@ pub(crate) unsafe fn output_image(
                 }
                 return 2;
             }
+            if display && (!(*fb).dx12_buffer.is_null() || !info.shader_writes) {
+                log(
+                    true,
+                    "DISPLAY the image of the display pass has to be a texture alone, created with \
+                     D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS: the pass writes it, no copy does",
+                );
+                if let Some(release) = (*dec).cb_release_image {
+                    release((*dec).image_alloc_priv, (*fb).priv_);
+                }
+                return 2;
+            }
+        } else if display {
+            log(true, "DISPLAY the image of the display pass has to be a texture, not a buffer");
+            if let Some(release) = (*dec).cb_release_image {
+                release((*dec).image_alloc_priv, (*fb).priv_);
+            }
+            return 2;
         }
         1
     }
@@ -337,7 +346,7 @@ pub(crate) unsafe fn prepare_fused_output(
         if (*dec).output_kind == 0 {
             return None;
         }
-        if display_pass_size(dec, cm).is_some() {
+        if display_pass_size(dec).is_some() {
             // The display pass reads the whole frame from its frame buffer behind the postfilter.
             td.output_copy_reason = AV1_PERF_OUTPUT_COPY_SWITCH;
             return None;
@@ -430,16 +439,22 @@ pub(crate) unsafe fn copy_output(dec: *mut Av1Core, cm: *mut AV1_COMMON, fb: *co
         img.y_crop_height = src.y_crop_height;
         img.uv_crop_width = src.uv_crop_width;
         img.uv_crop_height = src.uv_crop_height;
-        if let Some((width, height)) = display_pass_size(dec, cm) {
-            // The prototype's display pass: the image is the display-size frame.
+        img.frame_number = src.frame_number;
+        img.hbd = td.is_hbd;
+        img.monochrome = c_int::from(is_monochrome);
+        img.display_transform = 0;
+        img.source_width = src.y_crop_width;
+        img.source_height = src.y_crop_height;
+        if let Some((width, height)) = display_pass_size(dec) {
+            // The display pass: the image is the display-size frame, of the display's depth, with chroma.
             img.y_crop_width = width;
             img.y_crop_height = height;
             img.uv_crop_width = width / 2;
             img.uv_crop_height = height / 2;
+            img.hbd = c_int::from((*dec).display.depth > 8);
+            img.monochrome = 0;
+            img.display_transform = display_pass::choose(&(*cm).seq_params, &(*dec).display).transform as c_int;
         }
-        img.frame_number = src.frame_number;
-        img.hbd = td.is_hbd;
-        img.monochrome = c_int::from(is_monochrome);
         let semi_planar = (*dec).output_kind != 0;
         img.semi_planar = c_int::from(semi_planar);
         // What the application is told about the colour of the frame: the description of the sequence
@@ -472,8 +487,10 @@ pub(crate) unsafe fn copy_output(dec: *mut Av1Core, cm: *mut AV1_COMMON, fb: *co
 
         let grain = &(*cm).film_grain_params;
         let do_filmgrain = td.do_filmgrain != 0 && !SKIP_FILM_GRAIN.load(Ordering::Relaxed);
+        // The frame's own monochrome (the display pass's image has chroma, the frame may have none).
+        let frame_monochrome = (*(*cm).cur_frame).buf.monochrome != 0;
         let film_grain_chroma =
-            do_filmgrain && !is_monochrome && (grain.num_cb_points != 0 || grain.chroma_scaling_from_luma != 0);
+            do_filmgrain && !frame_monochrome && (grain.num_cb_points != 0 || grain.chroma_scaling_from_luma != 0);
 
         // The image is put together at the start of the back buffer.
         let dst = &mut (*dec).back_buffer1;
@@ -573,9 +590,16 @@ unsafe fn copy_semi_planar(
         let td = &mut *(*dec).curr_frame_data;
         let src = &*td.dst_frame_buffer;
         let img: &HwOutputImage = &*(*cm.cur_frame).buf.hw_show_image;
-        let is_monochrome = img.monochrome != 0;
+        let display = display_pass_size(dec);
+        let is_monochrome = (*cm.cur_frame).buf.monochrome != 0;
+        let format = if display.is_some() {
+            display_format(&(*dec).display)
+        } else if src.hbd != 0 {
+            SemiPlanar::P010
+        } else {
+            SemiPlanar::Nv12
+        };
         let hbd = src.hbd != 0;
-        let format = if hbd { SemiPlanar::P010 } else { SemiPlanar::Nv12 };
         let dst_base_offset = (*dec).back_buffer1.base_offset;
         let dst_planes = (*dec).back_buffer1.planes;
         let commands = commands(dec);
@@ -599,7 +623,7 @@ unsafe fn copy_semi_planar(
             (Some(texture), Some(views), Some(device))
                 if fb.dx12_buffer.is_null()
                     && texture.info().shader_writes
-                    && (*dec).semi_planar_support[usize::from(hbd)].shader_writes =>
+                    && (*dec).semi_planar_support[usize::from(format == SemiPlanar::P010)].shader_writes =>
             {
                 let pair = (*dec).plane_view_next;
                 (*dec).plane_view_next = (pair + 1) % PlaneViews::PAIRS;
@@ -632,14 +656,18 @@ unsafe fn copy_semi_planar(
         {
             commands.transition_texture(texture, TextureState::Common, TextureState::ReadWrite);
         }
-        if let Some(out) = display_pass_size(dec, cm) {
+        if display.is_some() && direct.is_none() {
+            // output_image takes only textures shaders may write, and the creation only devices that let
+            // them: not reached.
+            if !DISPLAY_PASS_NOTE.swap(true, Ordering::Relaxed) {
+                log(true, "DISPLAY the display pass needs a texture shaders may write: no frame is written");
+            }
+            return;
+        }
+        if let Some(out) = display
+            && let Some((texture, views, device, pair)) = direct
+        {
             td.perf.output_path = td.output_copy_reason;
-            let Some((texture, views, device, pair)) = direct else {
-                if !DISPLAY_PASS_NOTE.swap(true, Ordering::Relaxed) {
-                    log(true, "DISPLAY the display pass needs a texture shaders may write: no frame is written");
-                }
-                return;
-            };
             // Film grain (AV1 7.18.3) is applied before the downscale: the film grain pass writes the grained
             // planes into the back buffer, in the layout of the frame buffer (the pool has room for a frame
             // there, and nothing else uses it once the frame's postfilter is recorded), and the display
@@ -666,10 +694,20 @@ unsafe fn copy_semi_planar(
                     }
                 }
             }
-            // The tables of the tone map, in the frame's constant memory (display_pass.rs).
+            // The tables of the tone map, in the frame's constant memory (display_pass.rs), and the pipeline
+            // of the frame's transfer mode.
+            let choice = display_pass::choose(&cm.seq_params, &(*dec).display);
             let tables = alloc_constant_bytes(&mut td.command_buffer, display_pass::LUT_WORDS * 4);
-            let constants = display_pass::constants(&source, out, &cm.seq_params, tables.data.cast());
-            let shader = pipeline(&raw const (*lib).shader_display_pass);
+            let constants = display_pass::constants(
+                &source,
+                out,
+                choice,
+                cm.seq_params.color_range != 0,
+                is_monochrome,
+                &(*dec).display,
+                tables.data.cast(),
+            );
+            let shader = pipeline(&raw const (*lib).shader_display_pass[choice.mode as usize]);
             commands.set_layout(shader.layout());
             commands.set_pipeline(shader);
             commands.bind_read(0, tables.location);

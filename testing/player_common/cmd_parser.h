@@ -141,7 +141,7 @@ class CParameters {
     bool cdefv3legacy_;
     bool outputcopylegacy_;
     bool frontmergelegacy_;
-    // -displaypass WxH (docs/stage-fusion.md): the display pass prototype; empty: off.
+    // -displaypass WxH (docs/stage-fusion.md, Rav1gSettings::display): the display pass; empty: off.
     std::string displaypass_;
     bool intrav2_;
     bool intraopt_;

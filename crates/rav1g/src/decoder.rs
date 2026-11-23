@@ -15,11 +15,14 @@ use std::sync::Arc;
 use windows::Win32::Graphics::Direct3D12::ID3D12Fence;
 use windows::core::Interface;
 
+use crate::color::{
+    ChromaSamplePosition, ColorInfo, ColorPrimaries, ColorRange, MatrixCoefficients, TransferCharacteristics,
+};
 use crate::color::{color_of_image, hdr_of_image};
 use crate::device::Device;
 use crate::error::{Error, ErrorCode, text};
 use crate::host::{self, decoder_own_bytes, frame_fence};
-use crate::output::{Frame, ImageFormat, ImageRequest, Output, OutputImage, OutputKind};
+use crate::output::{Display, DisplayTransform, Frame, ImageFormat, ImageRequest, Output, OutputImage, OutputKind};
 use crate::sys;
 
 /// The memory reductions of a decoder, as a set ([`Settings::low_memory`]).
@@ -161,6 +164,9 @@ pub struct Settings {
     /// time down to 2, the first that leaves the headroom, or the smallest ("MEMORY headroom" log lines).
     /// [`Decoder::configuration`] says what was created.
     pub memory_headroom: u64,
+    /// The display pass: every output image the frame downscaled and tone-mapped to BT.709 SDR at a
+    /// display size, written in place of the frame ([`Display`]). The default is none.
+    pub display: Display,
 }
 
 impl Default for Settings {
@@ -186,6 +192,7 @@ impl Default for Settings {
             parser_options: ParserOptions::default(),
             memory_available: None,
             memory_headroom: 0,
+            display: Display::default(),
         }
     }
 }
@@ -239,6 +246,8 @@ impl Settings {
         cfg.inter_fast = c_int::from(self.inter_fast);
         cfg.low_memory = self.low_memory.to_raw();
         cfg.parser_options = self.parser_options.bits() as c_int;
+        // Settings with an error are refused by `Decoder::new` before it gets here.
+        cfg.display = self.display.resolve(self.bit_depth).unwrap_or_default();
         cfg
     }
 
@@ -341,6 +350,17 @@ unsafe extern "C" fn frame_ready(context: *mut c_void, image: *mut c_void) -> c_
         if img.planes[plane].is_null() { 0 } else { (img.planes[plane] as usize).wrapping_sub(memory) }
     };
     let (mastering_display, content_light) = hdr_of_image(img);
+    let display_transform = DisplayTransform::from_raw(img.display_transform as u32);
+    let source_color = color_of_image(img);
+    // The display pass's image is BT.709 SDR, limited range, chroma left and between rows.
+    let display_color = ColorInfo {
+        description_present: true,
+        primaries: ColorPrimaries(1),
+        transfer_characteristics: TransferCharacteristics(1),
+        matrix_coefficients: MatrixCoefficients(1),
+        range: ColorRange::Limited,
+        chroma_sample_position: ChromaSamplePosition::Vertical,
+    };
     let frame = Frame {
         width: img.d_w,
         height: img.d_h,
@@ -355,7 +375,11 @@ unsafe extern "C" fn frame_ready(context: *mut c_void, image: *mut c_void) -> c_
             (false, false) => ImageFormat::Bits8,
         },
         user_data: img.user_priv as usize as u64,
-        color: color_of_image(img),
+        color: if display_transform.is_some() { display_color } else { source_color },
+        display_transform,
+        source_width: img.source_w,
+        source_height: img.source_h,
+        source_color,
         mastering_display,
         content_light,
         offsets: [offset(0), offset(1), offset(2)],
@@ -424,6 +448,13 @@ fn failed(code: sys::aom_codec_err_t, detail: *const std::ffi::c_char) -> Error 
 impl Decoder {
     /// Creates a decoder. Waits for the pipeline states of the device when they are still being created.
     pub fn new(device: &Device, settings: &Settings, output: Arc<dyn Output>) -> Result<Decoder, Error> {
+        settings.display.resolve(settings.bit_depth)?;
+        if settings.display.is_on() && settings.output_kind != OutputKind::SemiPlanar {
+            return Err(Error::new(
+                ErrorCode::InvalidParam,
+                "display: the display pass writes semi-planar images (output_kind RAV1G_OUTPUT_SEMI_PLANAR)",
+            ));
+        }
         let mut cfg = settings.to_raw();
         // SAFETY: as in memory_requirements.
         unsafe { host::av1_query_memory_requirements((&raw mut cfg).cast()) };
@@ -459,11 +490,13 @@ impl Decoder {
         // `Device`, the host memory and the context of the callbacks by the decoder.
         if unsafe { host::av1_create_gpu_decoder(&mut core, (&raw mut cfg).cast()) } != 0 {
             // The creation has released everything it built. The line that names what failed is the
-            // detail.
+            // detail; a device that cannot have the display pass is incapable, not out of memory.
+            let detail = text(host::log::av1_last_create_error());
+            let code = if detail.contains("DISPLAY") { sys::AOM_CODEC_INCAPABLE } else { sys::AOM_CODEC_MEM_ERROR };
             return Err(Error {
-                code: ErrorCode::Memory,
-                message: format!("decoder creation failed: {}", kind_text(sys::AOM_CODEC_MEM_ERROR)),
-                detail: text(host::log::av1_last_create_error()),
+                code: ErrorCode::from_raw(code),
+                message: format!("decoder creation failed: {}", kind_text(code)),
+                detail,
             });
         }
         Ok(Decoder {

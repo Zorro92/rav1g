@@ -24,7 +24,7 @@ python3 "$sync/to_cpp.py" "$shaders/output_sp.h" "$work/output_sp.gen.h"
 python3 "$sync/to_cpp.py" "$shaders/display_pass.hlsl" "$work/display_pass.gen.h" "$work/display_pass.entry.h"
 
 build() {
-  "${CXX:-c++}" -std=c++17 -O2 -fwrapv -ffp-contract=off -Wall -Wno-unused-function -Wno-unused-variable \
+  "${CXX:-c++}" -std=c++17 -O2 -fwrapv -DDISPLAY_MODE_FROM_FLAGS -ffp-contract=off -Wall -Wno-unused-function -Wno-unused-variable \
     -I "$here" -I "$sync" -I "$work" "$here/display_check.cpp" -o "$work/check"
 }
 
@@ -68,12 +68,16 @@ expect_rejected() {
 }
 
 if [ "${1:-}" = "--mutate" ]; then
-  expect_rejected 'chroma siting of the quad path' 's/(between_rows() ? 0.5f : 0.0f)) \* 0.5f;/(between_rows() ? 0.0f : 0.5f)) * 0.5f;/'
+  expect_rejected 'chroma siting of the quad path' 's/between ? 0.75f : 0.0f, m, eight/between ? 0.25f : 0.0f, m, eight/'
+  expect_rejected 'chroma siting of the area path' 's/float2(0.0f, between_rows() ? 0.5f : 0.0f)) \* 0.5f;/float2(0.0f, between_rows() ? 0.0f : 0.5f)) * 0.5f;/'
+  expect_rejected 'the chroma rows of the second step' 's/const int r = (between ? o.y - 1 : o.y) + (int)p;/const int r = (between ? o.y - 1 : o.y);/'
   expect_rejected 'the third chroma column' 's/(u1 + u2) \* 0.5f/(u1 + u1) * 0.5f/'
-  expect_rejected 'the left chroma neighbour' 's/ex\[(q \& 1u) \* THREADS + lane - 1u\]/ex[(q \& 1u) * THREADS + lane]/'
-  expect_rejected 'the edge column' 's/area_linear(int2(x0 - 1, oy))/area_linear(int2(x0, oy))/'
+  expect_rejected 'the left chroma neighbour' 's/ex\[((uint)q \& 1u) \* THREADS + lane - 1u\]/ex[((uint)q \& 1u) * THREADS + lane]/'
+  expect_rejected 'the edge column' 's/edge\[2u \* lane\] = x0 > 0 ? v.v10 : v.v00;/edge[2u * lane] = v.v00;/'
+  expect_rejected 'the right chroma edge' 's/return float3(run_sample(r, 0u, eight), s1, edge ? s1 : run_sample(r, 2u, eight));/return float3(run_sample(r, 0u, eight), s1, run_sample(r, 2u, eight));/'
   expect_rejected 'the interpolation of the tables' 's/return mad(t, mad(t, mad(t, c.w, c.z), c.y), c.x);/return c.x;/'
   expect_rejected 'the exact peak below 1e-6 nits' 's/peak = pq_to_nits(emax);/peak = peak;/'
-  expect_rejected 'the 8-bit chroma pair' 's/pool.Load(at \& ~3u) >> ((at \& 2u) \* 8u)/pool.Load(at \& ~3u)/'
+  expect_rejected 'the 8-bit chroma pair' 's/const uint pos = (r.first + k) \* 8u;/const uint pos = k * 8u;/'
+  expect_rejected 'the output depth' 's/if (nv12_out()) return/if (eight_bit()) return/'
   expect_rejected 'the NV12 chroma codes' 's/floor(128.0f + 224.0f \* cr + 0.5f)/floor(128.0f + 224.0f * cb + 0.5f)/'
 fi

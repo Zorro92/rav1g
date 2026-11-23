@@ -40,7 +40,9 @@ namespace shader {
 // The tables of crates/rav1g/src/host/display_pass.rs: the same float64 functions, nodes and cubics.
 namespace tables {
 const int kEotfN = 256, kEotfFine = 64, kGainN = 96, kGainLow = 64, kWords = 4 * (kEotfN + 1 + kGainN + 1);
-const double kSplit = 1.0 / 32.0, kPeak = 1000.0, kWhite = 100.0;
+const double kSplit = 1.0 / 32.0;
+// The tone map's source peak and SDR white (Rav1gDisplay), set by each case.
+double kPeak = 1000.0, kWhite = 100.0;
 const double M1 = 2610.0 / 16384.0, M2 = 2523.0 / 32.0, C1 = 3424.0 / 4096.0, C2 = 2413.0 / 128.0, C3 = 2392.0 / 128.0;
 
 double pq_to_nits(double e) {
@@ -85,25 +87,32 @@ std::vector<uint> make(uint mode, float constants[7]) {
   std::vector<uint> words(kWords, 0);
   const double a = kEotfFine / kSplit, b = (kEotfN - kEotfFine) / (1.0 - kSplit), c = kEotfFine - kSplit * b;
   const double pk = nits_to_pq(kPeak);
-  const double knee = kPeak <= target() ? nits_to_pq(target()) : (2.0 * (nits_to_pq(target()) / pk) - 1.0) * pk;
+  // As display_pass.rs: a curve without a knee (a peak at or below the target) is constant up to its clip.
+  const double knee = kPeak <= target() ? nits_to_pq(fmin(kPeak, target())) : (2.0 * (nits_to_pq(target()) / pk) - 1.0) * pk;
   const double peak = kPeak <= target() ? knee : pk;
   uint *gain_words = words.data() + 4 * (kEotfN + 1);
   double lines[4];
   if (mode == 2) {
-    const double u0 = log2(pq_to_nits(knee)), step = (log2(kPeak) - u0) / (kGainN - 1);
+    const double u0 = log2(pq_to_nits(knee)), step = fmax(log2(fmax(kPeak, 1000.0)) - u0, 1e-3) / (kGainN - 1);
     fill(gain_words, kGainN, [&](int j) { return u0 + j * step; }, [](double u) { return gain(exp2(u)); });
     lines[0] = lines[2] = 1.0 / step;
     lines[1] = lines[3] = -u0 / step;
   } else {
-    const double s1 = kGainLow / (peak - knee), s2 = (kGainN - kGainLow) / (1.0 - peak);
-    fill(gain_words, kGainN, [&](int j) { return j < kGainLow ? knee + j / s1 : peak + (j - kGainLow) / s2; },
+    const int low = peak > knee ? kGainLow : 0;
+    const double s1 = low ? low / (peak - knee) : 1.0, s2 = (kGainN - low) / fmax(1.0 - peak, 1e-6);
+    fill(gain_words, kGainN, [&](int j) { return j < low ? knee + j / s1 : peak + (j - low) / s2; },
          [](double e) { return gain(pq_to_nits(e)); });
     fill(words.data(), kEotfN, [&](int k) { return k < kEotfFine ? k / a : (k - c) / b; },
          [](double e) { return pq_to_nits(e); });
-    lines[0] = s1;
-    lines[1] = -knee * s1;
-    lines[2] = s2;
-    lines[3] = kGainLow - peak * s2;
+    if (low) {
+      lines[0] = s1;
+      lines[1] = -knee * s1;
+      lines[2] = s2;
+      lines[3] = kGainLow - peak * s2;
+    } else {
+      lines[0] = lines[2] = s2;
+      lines[1] = lines[3] = -peak * s2;
+    }
   }
   constants[0] = (float)a;
   constants[1] = (float)b;
@@ -119,7 +128,10 @@ struct Case {
   uint transfer, matrix;  // H.273
   bool full, colocated, no_quad;
   int content;            // 0 natural-ish, 1 every code at random, 2 out of gamut just above black
-  int depth = 10;         // 8: a byte a sample, NV12 codes
+  int depth = 10;         // 8: a byte a sample
+  int out_depth = 0;      // the output's codes: 10 (P010) or 8 (NV12); 0: as depth
+  uint primaries = 0;     // H.273; 0: BT.2020 (9) with the BT.2020 matrix, else BT.709 (1)
+  double peak = 1000.0, white = 100.0;  // the tone map's (Rav1gDisplay::source_peak_nits, target_white_nits)
 };
 
 static uint ceil_div(uint n, uint d) { return (n + d - 1) / d; }
@@ -133,12 +145,13 @@ static void thread_body(int thread, void *context) {
 static int run_case(const Case &c, const std::string &dir, std::mt19937 &rng) {
   using namespace shader;
   // The frame pool: a base, three planes of 16-bit samples with padded rows, V last and the pool ending
-  // with the dword of its last visible sample, so that a read past it is seen.
+  // 16 samples behind its last visible one (the right border of the decoder's frame buffers, frame.rs
+  // `h_border`, which the quad path's 8-byte chroma reads reach into), so that a read past it is seen.
   const uint cw = ceil_div(c.sw, 2), ch = ceil_div(c.sh, 2);
   const uint bpp = c.depth == 8 ? 1 : 2, top = c.depth == 8 ? 255 : 1023;
   const uint y_stride = (ceil_div(c.sw, 64) * 64 + 32) * bpp, uv_stride = (ceil_div(cw, 64) * 64 + 32) * bpp;
   const uint y_off = 256, u_off = y_off + c.sh * y_stride + 64, v_off = u_off + ch * uv_stride + 128;
-  std::vector<uint8_t> bytes((v_off + (ch - 1) * uv_stride + cw * bpp + 3) & ~3u, 0);
+  std::vector<uint8_t> bytes((v_off + (ch - 1) * uv_stride + (cw + 16) * bpp + 3) & ~3u, 0);
   std::vector<uint16_t> planes[3] = { std::vector<uint16_t>(c.sw * c.sh), std::vector<uint16_t>(cw * ch),
                                       std::vector<uint16_t>(cw * ch) };
   std::uniform_int_distribution<int> noise(-24, 24);
@@ -192,6 +205,8 @@ static int run_case(const Case &c, const std::string &dir, std::mt19937 &rng) {
     }
   }
   const uint mode = c.transfer == 16 ? 0u : c.transfer == 18 ? 2u : 1u;
+  tables::kPeak = c.peak;
+  tables::kWhite = c.white;
   float k[7];
   std::vector<uint> lut = tables::make(mode, k);
   pool = { bytes.data(), bytes.size() };
@@ -206,8 +221,10 @@ static int run_case(const Case &c, const std::string &dir, std::mt19937 &rng) {
   cb_y_stride = y_stride;
   cb_uv_stride = uv_stride;
   const bool quad = !c.no_quad && c.sw == 2 * c.ow && c.sh == 2 * c.oh;
-  cb_flags = mode | (c.matrix == 9 ? 4u : 0u) | (c.full ? 8u : 0u) | (c.colocated ? 0u : 16u) | (quad ? 32u : 0u) |
-             (c.depth == 8 ? 64u : 0u);
+  const uint primaries = c.primaries ? c.primaries : c.matrix == 9 ? 9u : 1u;
+  const int out_depth = c.out_depth ? c.out_depth : c.depth;
+  cb_flags = mode | (primaries == 9 ? 4u : 0u) | (c.full ? 8u : 0u) | (c.colocated ? 0u : 16u) | (quad ? 32u : 0u) |
+             (c.depth == 8 ? 64u : 0u) | (out_depth == 8 ? 128u : 0u);
   cb_eotf_a = k[0];
   cb_eotf_b = k[1];
   cb_eotf_c = k[2];
@@ -216,8 +233,10 @@ static int run_case(const Case &c, const std::string &dir, std::mt19937 &rng) {
   cb_gain_s2 = k[5];
   cb_gain_o2 = k[6];
   cb_exact_below = 4e-4f;
-  const bool wide = c.matrix == 9;
-  const float wr = wide ? 0.2627f : 0.2126f, wb = wide ? 0.0593f : 0.0722f, wg = wide ? 0.6780f : 0.7152f;
+  // The matrix's weights (H.273): BT.2020 (9), BT.601 (5, 6), else BT.709.
+  const bool wide = c.matrix == 9, bt601 = c.matrix == 5 || c.matrix == 6;
+  const float wr = wide ? 0.2627f : bt601 ? 0.299f : 0.2126f, wb = wide ? 0.0593f : bt601 ? 0.114f : 0.0722f;
+  const float wg = 1.0f - wr - wb;
   const float black = c.depth == 8 ? 16.0f : 64.0f, yr = c.depth == 8 ? 219.0f : 876.0f;
   const float mid = c.depth == 8 ? 128.0f : 512.0f, cr = c.depth == 8 ? 224.0f : 896.0f, full = (float)top;
   cb_ys = 1.0f / (c.full ? full : yr);
@@ -276,8 +295,8 @@ static int run_case(const Case &c, const std::string &dir, std::mt19937 &rng) {
   const std::string frames = dir + "/" + c.name + ".frames.yuv", display = dir + "/" + c.name + ".display.yuv";
   FILE *f = std::fopen(frames.c_str(), "wb");
   // As rav1g-dec -o: 16-bit little-endian samples, a byte at 8 bits; P010's codes from their high bits.
-  auto put = [&](FILE *to, uint v) {
-    if (bpp == 2) {
+  auto put = [&](FILE *to, uint v, uint bytes_a_sample) {
+    if (bytes_a_sample == 2) {
       const uint16_t s16 = (uint16_t)v;
       std::fwrite(&s16, 2, 1, to);
     } else {
@@ -286,17 +305,18 @@ static int run_case(const Case &c, const std::string &dir, std::mt19937 &rng) {
     }
   };
   for (int p = 0; p < 3; p++)
-    for (uint16_t v : planes[p]) put(f, v);
+    for (uint16_t v : planes[p]) put(f, v, bpp);
   std::fclose(f);
   f = std::fopen(display.c_str(), "wb");
-  const uint shift = c.depth == 8 ? 0 : 6;
-  for (size_t i = 0; i < luma.size(); i++) put(f, luma[i] >> shift);
+  const uint shift = out_depth == 8 ? 0 : 6, out_bytes = out_depth == 8 ? 1 : 2;
+  for (size_t i = 0; i < luma.size(); i++) put(f, luma[i] >> shift, out_bytes);
   for (int comp = 0; comp < 2; comp++)
-    for (size_t i = 0; i < chroma.size(); i++) put(f, chroma[i][comp] >> shift);
+    for (size_t i = 0; i < chroma.size(); i++) put(f, chroma[i][comp] >> shift, out_bytes);
   std::fclose(f);
-  std::printf("%s %s %s --size %ux%u --out %ux%u --transfer %u --matrix %u --depth %d%s%s\n", c.name, frames.c_str(),
-              display.c_str(), c.sw, c.sh, c.ow, c.oh, c.transfer, c.matrix, c.depth, c.full ? " --full" : "",
-              c.colocated ? " --colocated" : "");
+  std::printf("%s %s %s --size %ux%u --out %ux%u --transfer %u --matrix %u --primaries %u --depth %d --out-depth %d "
+              "--peak %g --white %g%s%s\n",
+              c.name, frames.c_str(), display.c_str(), c.sw, c.sh, c.ow, c.oh, c.transfer, c.matrix, primaries, c.depth,
+              out_depth, c.peak, c.white, c.full ? " --full" : "", c.colocated ? " --colocated" : "");
   return 0;
 }
 
@@ -327,6 +347,19 @@ int main(int argc, char **argv) {
     { "sdr709-8bit-codes-2to1", 128, 128, 64, 64, 1, 1, false, false, false, 1, 8 },
     { "pq-8bit-full-2to1", 128, 64, 64, 32, 16, 9, true, true, false, 0, 8 },
     { "sdr709-8bit-3to2", 210, 120, 140, 80, 1, 1, false, false, false, 0, 8 },
+    // The output depth apart from the frame's (Rav1gDisplay::depth): 8-bit frames into P010, 10-bit ones
+    // into NV12; the BT.601 matrix; PQ with BT.709 primaries (no gamut step); colocated SDR at 2:1.
+    { "sdr709-8bit-to-p010-2to1", 264, 136, 132, 68, 1, 1, false, false, false, 0, 8, 10 },
+    { "pq-to-nv12-2to1", 256, 128, 128, 64, 16, 9, false, false, false, 0, 10, 8 },
+    { "sdr601-2to1", 256, 128, 128, 64, 6, 6, false, false, false, 0, 10, 0, 1 },
+    { "pq709-2to1", 256, 128, 128, 64, 16, 1, false, false, false, 0, 10, 0, 1 },
+    { "sdr709-colocated-2to1", 256, 192, 128, 96, 1, 1, false, true, false, 0 },
+    { "hlg-colocated-8bit-2to1", 264, 136, 132, 68, 18, 9, false, true, false, 0, 8 },
+    // The tone map's parameters: a lower peak and a higher white, a peak below the target (no knee), HLG
+    // with a peak below its 1000-nit display, at 2:1 and on the area path.
+    { "pq-peak600-white203-2to1", 256, 128, 128, 64, 16, 9, false, false, false, 0, 10, 0, 0, 600.0, 203.0 },
+    { "pq-peak150-2to1", 256, 128, 128, 64, 16, 9, false, false, false, 1, 10, 0, 0, 150.0, 100.0 },
+    { "hlg-peak400-3to2", 240, 132, 160, 88, 18, 9, false, false, false, 0, 10, 0, 0, 400.0, 100.0 },
   };
   std::mt19937 rng(0x5eed);
   int failed = 0;

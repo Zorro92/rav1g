@@ -106,7 +106,9 @@ inter_scale_obmc_above_hbd	64	64	50	26	5120	0	6	lds
 inter_scale_obmc_left_hbd	64	64	52	26	5120	0	6	lds
 copy_plane_sp	64	64	27	24	0	0	16	waves
 copy_plane_sp_tex_v2	64	64	26	30	0	0	16	waves
-display_pass	256	64	60	74	15360	0	8	vgprs
+display_pass	256	64	112	82	15360	0	4	vgprs
+display_pass_sdr	256	64	63	74	9216	0	8	vgprs
+display_pass_hlg	256	64	65	78	15360	0	6	vgprs
 film_grain_filter_sp	768	64	39	50	30720	0	12	waves
 film_grain_filter_sp_tex_v2	256	64	26	46	0	0	16	waves
 cdef_lists	64	64	11	28	0	0	16	waves

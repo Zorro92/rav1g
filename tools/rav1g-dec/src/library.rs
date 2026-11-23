@@ -37,7 +37,6 @@ unsafe extern "C" {
     fn av1_set_cdef_v3_legacy(enable: c_int);
     fn av1_set_output_copy_legacy(enable: c_int);
     fn av1_set_front_merge_legacy(enable: c_int);
-    fn av1_set_display_pass(width: c_int, height: c_int);
 }
 
 /// What a frame says about its colour: the description of its sequence header and its HDR metadata.
@@ -168,6 +167,8 @@ pub struct Spec {
     pub semi_planar: bool,
     /// -sharedfence.
     pub shared_fence: bool,
+    /// -displaypass and its flags: the display pass.
+    pub display: rav1g::Display,
 }
 
 /// The decoder experiments of a task.
@@ -178,7 +179,6 @@ pub struct Choices {
     pub cdef_v3_legacy: bool,
     pub output_copy_legacy: bool,
     pub front_merge_legacy: bool,
-    pub display_pass: (i32, i32),
     pub intra_v2: bool,
     pub intra_opt: bool,
     pub intra_filter_legacy: bool,
@@ -433,6 +433,7 @@ impl Library {
             parser_options: spec.parser_options,
             memory_available: spec.budget.map(|bytes| -> MemoryAvailable { Arc::new(move || Some(bytes)) }),
             memory_headroom: spec.headroom,
+            display: spec.display,
         }
     }
 
@@ -463,6 +464,16 @@ impl Library {
             settings.output_kind = capi::RAV1G_OUTPUT_SEMI_PLANAR;
         }
         settings.shared_fence = spec.shared_fence;
+        let display = &spec.display;
+        settings.display = capi::Rav1gDisplay {
+            width: display.width,
+            height: display.height,
+            transform: display.transform.map_or(capi::RAV1G_DISPLAY_TRANSFORM_AUTO, |t| t as u32),
+            source_peak_nits: display.source_peak_nits,
+            target_white_nits: display.target_white_nits,
+            depth: display.depth,
+            ..Default::default()
+        };
         if let Some(sink) = sink {
             settings.output = capi::Rav1gOutput {
                 context: Arc::as_ptr(sink).cast_mut().cast(),
@@ -520,7 +531,6 @@ impl Library {
             av1_set_cdef_v3_legacy(c_int::from(choices.cdef_v3_legacy));
             av1_set_output_copy_legacy(c_int::from(choices.output_copy_legacy));
             av1_set_front_merge_legacy(c_int::from(choices.front_merge_legacy));
-            av1_set_display_pass(choices.display_pass.0, choices.display_pass.1);
         }
         if self.is_c() {
             capi::rav1g_set_cdef_v2(choices.cdef_v2);

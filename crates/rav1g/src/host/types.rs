@@ -132,9 +132,10 @@ pub struct compute_shader_lib {
     // The semi-planar output (`output.rs`): into the staging area, and into the planes of a texture.
     pub shader_copy_plane_sp: ComputeShader,
     pub shader_copy_plane_sp_tex_v2: ComputeShader,
-    // The display pass prototype (`output.rs`, docs/stage-fusion.md): the frame into a display-size P010
-    // texture, downscaled and tone-mapped.
-    pub shader_display_pass: ComputeShader,
+    // The display pass (`output.rs`, `display_pass.rs`, docs/stage-fusion.md): the frame into a display-size
+    // P010 or NV12 texture, downscaled and tone-mapped; one pipeline a transfer mode (PQ, SDR, HLG), so
+    // that each has the registers of its own path.
+    pub shader_display_pass: [ComputeShader; 3],
     pub shader_filmgrain_filter_sp: ComputeShader,
     pub shader_filmgrain_filter_sp_tex_v2: ComputeShader,
     // The lists of CDEF from the mode info (`postfilter.rs`, `Av1Core::gpu_cdef_lists`).
@@ -583,6 +584,9 @@ pub struct Av1Core {
     pub tryhdr10x3: c_int,
     /// `aom_codec_dec_cfg_t::output_kind`: 1 for the semi-planar output (`output.rs`).
     pub output_kind: c_int,
+    /// `aom_codec_dec_cfg_t::display`: the display pass of every output image (`output.rs`,
+    /// `display_pass.rs`); width 0 for none.
+    pub display: crate::sys::av1_display_cfg,
     /// What the device does with NV12 and with P010 textures (semi-planar output only).
     pub semi_planar_support: [crate::gpu::SemiPlanarSupport; 2],
     /// The views of the planes of the application's textures, and the pair the next frame takes.

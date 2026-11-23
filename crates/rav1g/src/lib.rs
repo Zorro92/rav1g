@@ -95,7 +95,9 @@ pub use color::{
 pub use decoder::{Configuration, Decoder, LowMemory, MemoryAvailable, MemoryRequirements, ParserOptions, Settings};
 pub use device::Device;
 pub use error::{Error, ErrorCode};
-pub use output::{Frame, ImageFormat, ImageRequest, Output, OutputImage, OutputKind, Plane};
+pub use output::{
+    Display, DisplayTransform, Frame, ImageFormat, ImageRequest, Output, OutputImage, OutputKind, Plane, ToneCurve,
+};
 
 const _: () = assert!(sys::AOM_CODEC_NEEDS_RECONFIGURE == ErrorCode::NeedsReconfigure as sys::aom_codec_err_t);
 

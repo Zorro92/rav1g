@@ -50,6 +50,155 @@ pub enum OutputKind {
     SemiPlanar = 1,
 }
 
+/// What the display pass does to a frame ([`Display::transform`], [`Frame::display_transform`]). The image
+/// is BT.709 SDR in every case: BT.709 primaries, BT.1886 transfer, the BT.709 matrix, limited range,
+/// chroma sited left and between rows (AV1 `CSP_VERTICAL`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u32)]
+pub enum DisplayTransform {
+    /// SDR with BT.709 primaries (or any but BT.2020): downscaled in display-linear light (BT.1886), no
+    /// tone map, no gamut step, no clip before the encode.
+    Scale = 1,
+    /// SDR with BT.2020 primaries: downscaled in display-linear light, converted to BT.709 (BT.2087),
+    /// clipped.
+    Gamut = 2,
+    /// PQ (SMPTE ST 2084): the BT.2390 EETF from [`Display::source_peak_nits`] to 2.03 times
+    /// [`Display::target_white_nits`] on the largest channel, BT.2020 to BT.709, clipped.
+    Pq = 3,
+    /// HLG (ARIB STD-B67): the inverse OETF and the OOTF of a 1000-nit display (BT.2100), then as PQ.
+    Hlg = 4,
+}
+
+impl DisplayTransform {
+    /// The transform of a number (`RAV1G_DISPLAY_TRANSFORM_*`): 1 to 4, `None` for any other.
+    pub fn from_number(value: u32) -> Option<DisplayTransform> {
+        DisplayTransform::from_raw(value)
+    }
+
+    pub(crate) fn from_raw(value: u32) -> Option<DisplayTransform> {
+        match value {
+            1 => Some(DisplayTransform::Scale),
+            2 => Some(DisplayTransform::Gamut),
+            3 => Some(DisplayTransform::Pq),
+            4 => Some(DisplayTransform::Hlg),
+            _ => None,
+        }
+    }
+}
+
+/// The tone curve of the display pass ([`Display::tone_curve`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[repr(u32)]
+pub enum ToneCurve {
+    /// ITU-R BT.2390's EETF (the default).
+    #[default]
+    Bt2390 = 1,
+    /// Hable's filmic curve: not in this version; a decoder with it is not created
+    /// ([`crate::ErrorCode::Incapable`]), and an application keeps its own stage.
+    Hable = 2,
+}
+
+/// The display pass (docs/stage-fusion.md, docs/integration.md): every output image is the frame
+/// downscaled to the display size (area weights in display-linear light), tone-mapped or gamut-converted
+/// to BT.709 SDR, written by one pass at the end of the frame's command list into an NV12 or P010
+/// texture of that size, in place of the frame itself. The decoded frames and the reference frames are the
+/// same bytes with and without it. Width and height 0 (the default) mean no display pass: the images are
+/// the frames, as without this field.
+///
+/// Needs [`OutputKind::SemiPlanar`] and images that are textures created with
+/// `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS` (no buffer); the device must let shaders write the format.
+/// Zero in any other field is its default.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct Display {
+    /// The size of every image, both rounded up to even; at most 16384. Any ratio to the frame works
+    /// (smaller or larger); exactly half the frame in both is the fast path the pass is sized for (4K to
+    /// 1080p).
+    pub width: u32,
+    pub height: u32,
+    /// `None`: by the colour of each frame ([`DisplayTransform`]); `Some`: that transform for every frame,
+    /// whatever its colour description says.
+    pub transform: Option<DisplayTransform>,
+    pub tone_curve: ToneCurve,
+    /// The PQ and HLG light the EETF maps to the SDR range: 0 is 1000 nits. At most 10000.
+    pub source_peak_nits: f32,
+    /// The SDR white: the EETF maps to 2.03 times it (203 nits for 100). 0 is 100 nits.
+    pub target_white_nits: f32,
+    /// Not in this version: 0. Another value is [`crate::ErrorCode::Incapable`].
+    pub desaturation: f32,
+    /// The image's codes: 10 (P010), 8 (NV12, rounded, not dithered), or 0: those of the decoder's bit
+    /// depth ([`crate::Settings::bit_depth`]), for every frame whatever its sequence's depth.
+    pub depth: u32,
+    /// The colour code points (H.273) the pass takes where the sequence header says "unspecified" (2),
+    /// as an application merges what its container says: 0 for none (unspecified is BT.709 SDR then).
+    pub assumed_primaries: u8,
+    pub assumed_transfer_characteristics: u8,
+    pub assumed_matrix_coefficients: u8,
+    /// The AV1 `chroma_sample_position` taken where the header says 0 (unknown): 0 for none (unknown is
+    /// between rows, as 1).
+    pub assumed_chroma_sample_position: u8,
+}
+
+impl Display {
+    /// Whether the settings ask for a display pass.
+    pub fn is_on(&self) -> bool {
+        self.width != 0 || self.height != 0
+    }
+
+    /// The settings with their defaults filled in, as the decoder takes them, for a decoder of
+    /// `bit_depth`; an error for settings no decoder takes.
+    pub(crate) fn resolve(&self, bit_depth: u32) -> Result<rav1g_sys::av1_display_cfg, crate::Error> {
+        use crate::{Error, ErrorCode};
+        if !self.is_on() {
+            return Ok(rav1g_sys::av1_display_cfg::default());
+        }
+        let invalid = |what: &str| Err(Error::new(ErrorCode::InvalidParam, format!("display: {what}")));
+        let incapable = |what: &str| Err(Error::new(ErrorCode::Incapable, format!("display: {what}")));
+        if self.width == 0 || self.height == 0 || self.width > 16384 || self.height > 16384 {
+            return invalid(&format!("a size of {}x{}: both 1 to 16384, or both 0", self.width, self.height));
+        }
+        let nits = |value: f32, default: f32, top: f32| {
+            if value == 0.0 {
+                Some(default)
+            } else {
+                (value.is_finite() && value > 0.0 && value <= top).then_some(value)
+            }
+        };
+        let Some(peak) = nits(self.source_peak_nits, 1000.0, 10000.0) else {
+            return invalid(&format!("a source peak of {} nits: 0 or 1 to 10000", self.source_peak_nits));
+        };
+        let Some(white) = nits(self.target_white_nits, 100.0, 10000.0 / 2.03) else {
+            return invalid(&format!("a white of {} nits: 0 or up to 4926", self.target_white_nits));
+        };
+        if self.tone_curve == ToneCurve::Hable {
+            return incapable("the Hable curve is not in this version");
+        }
+        if !self.desaturation.is_finite() || self.desaturation < 0.0 {
+            return invalid(&format!("a desaturation of {}", self.desaturation));
+        }
+        if self.desaturation != 0.0 {
+            return incapable("desaturation is not in this version");
+        }
+        let depth = match self.depth {
+            0 if bit_depth > 8 => 10,
+            0 => 8,
+            8 | 10 => self.depth,
+            other => return invalid(&format!("a depth of {other}: 0, 8 or 10")),
+        };
+        Ok(rav1g_sys::av1_display_cfg {
+            width: (self.width + 1) & !1,
+            height: (self.height + 1) & !1,
+            transform: self.transform.map_or(rav1g_sys::AV1_DISPLAY_TRANSFORM_AUTO, |t| t as u32),
+            source_peak_nits: peak,
+            target_white_nits: white,
+            depth,
+            assumed_primaries: self.assumed_primaries,
+            assumed_transfer: self.assumed_transfer_characteristics,
+            assumed_matrix: self.assumed_matrix_coefficients,
+            assumed_chroma_sample_position: self.assumed_chroma_sample_position,
+        })
+    }
+}
+
 /// What the decoder needs an output image for: a frame that is going to be output.
 #[derive(Clone, Copy, Debug)]
 pub struct ImageRequest {
@@ -181,6 +330,17 @@ pub struct Frame {
     pub mastering_display: Option<MasteringDisplay>,
     /// The content light level that goes with the frame, by the same rule.
     pub content_light: Option<ContentLightLevel>,
+    /// What the display pass did ([`crate::Settings::display`]): `None` when the image is the frame
+    /// itself. With a transform, `width`, `height`, `bit_depth` and `format` describe the image (the
+    /// display size and depth), `color` is BT.709 SDR as [`DisplayTransform`] says, and what was decoded
+    /// is in `source_width`, `source_height` and `source_color`; the HDR metadata stays the stream's.
+    pub display_transform: Option<DisplayTransform>,
+    /// The frame that was decoded (after super-resolution): its luma samples of a row and rows, and its
+    /// sequence header's colour description. Without the display pass the same as `width`, `height`
+    /// and `color`.
+    pub source_width: u32,
+    pub source_height: u32,
+    pub source_color: ColorInfo,
     pub(crate) offsets: [usize; 3],
     pub(crate) strides: [usize; 3],
     pub(crate) fence: Option<(ID3D12Fence, u64)>,

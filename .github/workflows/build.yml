@@ -1434,9 +1434,11 @@ jobs:
             --out out/output-p010-buffer --threads 4 "--tool-args=-output p010-buffer" "--title=rav1g-dec -output p010-buffer"
           if ($LASTEXITCODE -ne 0) { throw "conformance run with -output p010-buffer: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
 
-      # The display pass prototype (-displaypass, docs/stage-fusion.md): the display-size P010 images of a
-      # PQ stream and an SDR stream against the float32 model of the pass, from the frames of a plain run.
-      - name: The display pass prototype against its model (-displaypass)
+      # The display pass (Rav1gSettings::display, -displaypass, docs/stage-fusion.md): the display-size
+      # images of a PQ stream, an SDR stream and two film grain streams against the float32 model of the
+      # pass, from the frames of a plain run; through the Rust interface and through rav1g.h (-capi) with a
+      # lower peak and white, a forced transform and NV12 from 10 bits.
+      - name: The display pass against its model (-displaypass)
         if: ${{ !cancelled() && matrix.case == 'direct' }}
         shell: pwsh
         run: |
@@ -3850,7 +3852,7 @@ jobs:
 
       # display_pass.hlsl (-displaypass, docs/stage-fusion.md) as C++ on test frames under the same thread
       # schedule, its display images against the float32 model (testing/display_pass/model.py).
-      - name: The display pass prototype, as C++, against its model
+      - name: The display pass, as C++, against its model
         run: |
           sudo apt-get install -y --no-install-recommends python3-numpy > /dev/null
           sh testing/display_pass/run.sh --mutate

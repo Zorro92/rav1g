@@ -320,17 +320,6 @@ void av1_set_output_copy_legacy(int enable);
  * the same. Change only while no frame is in flight. */
 void av1_set_front_merge_legacy(int enable);
 
-/* Process-wide. A prototype (docs/stage-fusion.md, option B; -displaypass
- * WxH): with a size, a decoder with the semi-planar output kind asks for
- * images of that size (rounded up to even; P010 for 10-bit frames, NV12 for
- * 8-bit ones) for its frames with chroma, and its output pass writes them with
- * display_pass.hlsl: the frame (with its film grain) downscaled by area in
- * display-linear light and tone-mapped to BT.709 SDR (PQ, HLG and BT.2020
- * SDR; BT.709 SDR scaled only), not the frame itself. The decoded frames and
- * the reference frames are unchanged.
- * 0, 0 (the default) turns it off. Change only while no frame is in flight. */
-void av1_set_display_pass(int width, int height);
-
 /* Process-wide. Set while no frame is in flight. Non-zero skips film grain synthesis. */
 void av1_set_skip_film_grain(int enable);
 

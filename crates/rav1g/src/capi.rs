@@ -24,7 +24,7 @@ use windows::core::Interface;
 use crate::sys::{av1_perf_frame, av1_stage_dump};
 use crate::{ColorInfo, ColorPrimaries, ContentLightLevel, MasteringDisplay, MatrixCoefficients};
 use crate::{Decoder, Device, Error, ErrorCode, Frame, ImageFormat, ImageRequest, LowMemory, Output, OutputImage};
-use crate::{OutputKind, Settings, TransferCharacteristics, switches};
+use crate::{Display, DisplayTransform, OutputKind, Settings, ToneCurve, TransferCharacteristics, switches};
 
 /// The shared back buffer: one back buffer for all pipeline slots and a pool of 10 frame buffers.
 pub const RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER: u32 = 1;
@@ -198,6 +198,28 @@ pub const RAV1G_OUTPUT_PLANES: u32 = 0;
 /// `DXGI_FORMAT_NV12` (8-bit frames) or `DXGI_FORMAT_P010` (10-bit frames), which the output pass of the
 /// decoder writes (docs/output.md).
 pub const RAV1G_OUTPUT_SEMI_PLANAR: u32 = 1;
+
+/// `Rav1gDisplay::transform`, the default: each frame by its colour description (with the assumed code
+/// points): PQ `RAV1G_DISPLAY_TRANSFORM_PQ`, HLG `RAV1G_DISPLAY_TRANSFORM_HLG`, other transfers with
+/// BT.2020 primaries `RAV1G_DISPLAY_TRANSFORM_GAMUT`, the rest `RAV1G_DISPLAY_TRANSFORM_SCALE`.
+pub const RAV1G_DISPLAY_TRANSFORM_AUTO: u32 = 0;
+/// `Rav1gFrame::display_transform`: no display pass, the image is the frame itself.
+pub const RAV1G_DISPLAY_TRANSFORM_NONE: u32 = 0;
+/// SDR with BT.709 primaries (or any but BT.2020): downscaled in display-linear light (BT.1886), no tone
+/// map, no gamut step, no clip before the encode.
+pub const RAV1G_DISPLAY_TRANSFORM_SCALE: u32 = 1;
+/// SDR with BT.2020 primaries: downscaled in display-linear light, BT.2020 to BT.709 (BT.2087), clipped.
+pub const RAV1G_DISPLAY_TRANSFORM_GAMUT: u32 = 2;
+/// PQ (SMPTE ST 2084): the BT.2390 EETF from the source peak to 2.03 times the SDR white on the largest
+/// channel, BT.2020 to BT.709 when the primaries are BT.2020, clipped.
+pub const RAV1G_DISPLAY_TRANSFORM_PQ: u32 = 3;
+/// HLG (ARIB STD-B67): the inverse OETF and the OOTF of a 1000-nit display (BT.2100), then as PQ.
+pub const RAV1G_DISPLAY_TRANSFORM_HLG: u32 = 4;
+/// `Rav1gDisplay::tone_curve`: ITU-R BT.2390's EETF, the default (0 is the same).
+pub const RAV1G_TONE_CURVE_BT2390: u32 = 1;
+/// `Rav1gDisplay::tone_curve`: Hable's filmic curve. Not in this version: `rav1g_decoder_create` returns
+/// `RAV1G_STATUS_INCAPABLE` (the application keeps its own stage).
+pub const RAV1G_TONE_CURVE_HABLE: u32 = 2;
 
 const _: () = {
     assert!(RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER == LowMemory::SHARED_BACK_BUFFER.0);
@@ -513,6 +535,101 @@ pub struct Rav1gFrame {
     pub content_light: Rav1gContentLightLevel,
     /// The samples of the image, as the request for it said. New in 0.2.160, behind the other fields.
     pub format: Rav1gImageFormat,
+    /// What the display pass did (`Rav1gSettings::display`): a `RAV1G_DISPLAY_TRANSFORM_*`, or
+    /// `RAV1G_DISPLAY_TRANSFORM_NONE` (0) when the image is the frame itself. With a transform, `width`,
+    /// `height`, `bit_depth` and `format` describe the image (the display size and depth), `monochrome`
+    /// is false, `color` is BT.709 SDR (primaries, transfer and matrix 1, limited range, chroma sample
+    /// position 1), and what was decoded is in `source_width`, `source_height` and `source_color`; the HDR
+    /// metadata stays the stream's.
+    ///
+    /// New in interface version 2, with the three fields behind it.
+    pub display_transform: u32,
+    /// The frame that was decoded (after super-resolution): luma samples of a row, and rows. Without the
+    /// display pass `width` and `height`.
+    pub source_width: u32,
+    pub source_height: u32,
+    /// The colour description of the frame's sequence header, as the stream has it (not the assumed code
+    /// points). Without the display pass `color`.
+    pub source_color: Rav1gColorInfo,
+}
+
+/// The display pass (docs/integration.md, "The display pass"): every output image is the frame
+/// downscaled to the display size (area weights in display-linear light) and tone-mapped or
+/// gamut-converted to BT.709 SDR, written by one compute pass at the end of the frame's command list into
+/// an NV12 or P010 texture of that size, in place of the frame itself. The decoded frames and the
+/// reference frames are the same with and without it. `width` and `height` 0 (what
+/// `rav1g_settings_default` sets) mean no display pass: the images are the frames, as in interface
+/// version 1.
+///
+/// It needs `Rav1gSettings::output_kind` `RAV1G_OUTPUT_SEMI_PLANAR`, and images that are a texture alone
+/// created with `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS` (no buffer: the pass writes the texture, no
+/// copy does); another image fails the temporal unit with a "DISPLAY" log line. A device that lets no
+/// shader write the format gets no decoder (`RAV1G_STATUS_INCAPABLE`). Zero in any field is its default.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Rav1gDisplay {
+    /// The size of every image (`Rav1gImageRequest::width`, `height`), both rounded up to even, at most
+    /// 16384. Any ratio to the frame works; half the frame in both (4K to 1080p) is the fast path.
+    pub width: u32,
+    pub height: u32,
+    /// `RAV1G_DISPLAY_TRANSFORM_AUTO` (0), or a `RAV1G_DISPLAY_TRANSFORM_*` every frame takes whatever its
+    /// colour description says.
+    pub transform: u32,
+    /// `RAV1G_TONE_CURVE_BT2390` (0 is the same) or `RAV1G_TONE_CURVE_HABLE` (not in this version).
+    pub tone_curve: u32,
+    /// The PQ and HLG light the EETF maps to the SDR range: 0 is 1000 nits; at most 10000.
+    pub source_peak_nits: f32,
+    /// The SDR white: the EETF maps to 2.03 times it (203 nits for 100). 0 is 100 nits.
+    pub target_white_nits: f32,
+    /// Not in this version: 0 (another value is `RAV1G_STATUS_INCAPABLE`).
+    pub desaturation: f32,
+    /// The images' codes: 10 (`RAV1G_IMAGE_FORMAT_P010`), 8 (`RAV1G_IMAGE_FORMAT_NV12`, rounded, not
+    /// dithered), or 0: by `Rav1gSettings::bit_depth`, for every frame whatever its sequence's depth.
+    pub depth: u32,
+    /// The H.273 code points taken where the sequence header says "unspecified" (2), as an application
+    /// merges what its container says: 0 for none (unspecified is BT.709 SDR then).
+    pub assumed_primaries: u8,
+    pub assumed_transfer_characteristics: u8,
+    pub assumed_matrix_coefficients: u8,
+    /// The AV1 `chroma_sample_position` taken where the header says 0 (unknown): 0 for none (unknown is
+    /// between rows, as 1).
+    pub assumed_chroma_sample_position: u8,
+    /// Zero.
+    pub reserved: [u32; 4],
+}
+
+impl From<&Rav1gDisplay> for Display {
+    fn from(display: &Rav1gDisplay) -> Display {
+        Display {
+            width: display.width,
+            height: display.height,
+            transform: DisplayTransform::from_raw(display.transform),
+            tone_curve: if display.tone_curve == RAV1G_TONE_CURVE_HABLE { ToneCurve::Hable } else { ToneCurve::Bt2390 },
+            source_peak_nits: display.source_peak_nits,
+            target_white_nits: display.target_white_nits,
+            desaturation: display.desaturation,
+            depth: display.depth,
+            assumed_primaries: display.assumed_primaries,
+            assumed_transfer_characteristics: display.assumed_transfer_characteristics,
+            assumed_matrix_coefficients: display.assumed_matrix_coefficients,
+            assumed_chroma_sample_position: display.assumed_chroma_sample_position,
+        }
+    }
+}
+
+/// What a `Rav1gDisplay` has that the decoder does not take, beyond what `Display` checks: a transform or
+/// a tone curve it does not know, reserved fields that are not zero.
+fn display_invalid(display: &Rav1gDisplay) -> Option<String> {
+    if display.width == 0 && display.height == 0 {
+        return None;
+    }
+    if display.transform > RAV1G_DISPLAY_TRANSFORM_HLG {
+        return Some(format!("display: a transform of {}", display.transform));
+    }
+    if display.tone_curve > RAV1G_TONE_CURVE_HABLE {
+        return Some(format!("display: a tone curve of {}", display.tone_curve));
+    }
+    (display.reserved != [0; 4]).then(|| String::from("display: reserved fields that are not zero"))
 }
 
 impl From<&ColorInfo> for Rav1gColorInfo {
@@ -704,6 +821,9 @@ pub struct Rav1gSettings {
     pub shared_fence: bool,
     /// The output of the decoder.
     pub output: Rav1gOutput,
+    /// The display pass: the images at the display size, tone-mapped to BT.709 SDR. Zero (what
+    /// `rav1g_settings_default` sets) is none. New in interface version 2, behind `output`.
+    pub display: Rav1gDisplay,
 }
 
 /// What a decoder was created with, where its settings left the choice to it
@@ -782,7 +902,7 @@ pub extern "C" fn rav1g_last_error() -> *const c_char {
 /// struct, an enum, a function), and not for a constant, a comment or a change inside the library.
 /// `rav1g_abi_version` returns the value the library was built with; an application that loads the
 /// library at run time compares the two and refuses a library with another value.
-pub const RAV1G_ABI_VERSION: u32 = 1;
+pub const RAV1G_ABI_VERSION: u32 = 2;
 
 /// `RAV1G_ABI_VERSION` of the `rav1g.h` the library was built with. A loader compares it with the
 /// constant of the header it was compiled with before it uses anything else of the library.
@@ -1018,6 +1138,7 @@ pub unsafe extern "C" fn rav1g_settings_default(settings: *mut Rav1gSettings) {
                 unused: None,
                 end_of_frames: None,
             },
+            display: Rav1gDisplay::default(),
         };
     }
 }
@@ -1052,6 +1173,7 @@ fn settings_of(settings: &Rav1gSettings) -> Settings {
             })
         }),
         memory_headroom: settings.memory_headroom,
+        display: (&settings.display).into(),
     }
 }
 
@@ -1175,6 +1297,10 @@ impl Output for CallbackOutput {
                 ImageFormat::Nv12 => Rav1gImageFormat::Nv12,
                 ImageFormat::P010 => Rav1gImageFormat::P010,
             },
+            display_transform: frame.display_transform.map_or(RAV1G_DISPLAY_TRANSFORM_NONE, |t| t as u32),
+            source_width: frame.source_width,
+            source_height: frame.source_height,
+            source_color: (&frame.source_color).into(),
         };
         // SAFETY: the application's callback, called as the interface says; the frame and what it points
         // to are alive during the call.
@@ -1218,6 +1344,9 @@ pub unsafe extern "C" fn rav1g_decoder_create(
     let (Some(device), Some(settings)) = (unsafe { device.as_ref() }, unsafe { settings.as_ref() }) else {
         return Rav1gStatus::InvalidParam;
     };
+    if let Some(what) = display_invalid(&settings.display) {
+        return set_last_error(&Error::new(ErrorCode::InvalidParam, what));
+    }
     if settings.output.get_image.is_none() || settings.output.frame.is_none() {
         return set_last_error(&Error::new(
             ErrorCode::InvalidParam,

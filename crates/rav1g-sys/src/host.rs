@@ -77,6 +77,11 @@ pub struct HwOutputImage {
     pub user_priv: *mut c_void,
     pub alloc_priv: *mut c_void,
     pub is_valid: c_int,
+    /// `AV1_DISPLAY_TRANSFORM_*` of the display pass that wrote the image (0: none), and the size of the
+    /// frame it read.
+    pub display_transform: c_int,
+    pub source_width: c_int,
+    pub source_height: c_int,
 }
 #[repr(C)]
 #[derive(Copy, Clone)]

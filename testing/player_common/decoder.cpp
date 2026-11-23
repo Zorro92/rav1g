@@ -309,6 +309,19 @@ void AV1Decoder::SettleAppMemory() {
 // the console reported 100.5 MiB. The readback buffers of an md5 or file run are not counted: with them the
 // runs that were measured added up to more than the app's limit and still ran, so counting them would refuse
 // runs that work.
+// -displaypass WxH: the size of the display pass's images (Rav1gSettings::display), 0 x 0 for none.
+static void DisplaySize(const CParameters::Parameters& params, unsigned int* width, unsigned int* height) {
+  *width = *height = 0;
+  const size_t x = params.displaypass_.find('x');
+  if (x == std::string::npos) return;
+  const int w = atoi(params.displaypass_.substr(0, x).c_str());
+  const int h = atoi(params.displaypass_.substr(x + 1).c_str());
+  if (w > 0 && h > 0) {
+    *width = (unsigned int)w;
+    *height = (unsigned int)h;
+  }
+}
+
 static uint64_t OutputPoolEstimate(const CParameters::Parameters& params, unsigned int width, unsigned int height,
                                    unsigned int bit_depth) {
   if (params.needReadBack_ && params.noninterop_) return 0;  // readback buffers only
@@ -538,6 +551,9 @@ int AV1Decoder::DecodeOne() {
       // one a D3D11 device can open.
       if (params_.semi_planar_) cfg.output_kind = RAV1G_OUTPUT_SEMI_PLANAR;
       cfg.shared_fence = params_.interop_;
+      // -displaypass WxH: the display pass writes images of that size, downscaled and tone-mapped to BT.709
+      // SDR, with the defaults of its other settings (1000-nit peak, 100-nit white, the decoder's depth).
+      DisplaySize(params_, &cfg.display.width, &cfg.display.height);
       // -slots: each slot has host memory and buffers of its own. 0 with -parseframes and no -slots: the
       // library chooses the slot count.
       cfg.frame_slots = params_.slots_;
@@ -570,8 +586,9 @@ int AV1Decoder::DecodeOne() {
       // Budget guard: the decoder refuses a creation, and later a palette buffer, that does not fit what
       // the app has left. The output pool takes its textures on the first frame; until then they are held
       // back from what the decoder may take (MemoryAvailable).
-      const unsigned int out_width = si.width ? si.width : dec_width;
-      const unsigned int out_height = si.height ? si.height : dec_height;
+      // The images are the display pass's when there is one.
+      const unsigned int out_width = cfg.display.width ? cfg.display.width : si.width ? si.width : dec_width;
+      const unsigned int out_height = cfg.display.height ? cfg.display.height : si.height ? si.height : dec_height;
       const unsigned int out_bitdepth = si.bit_depth ? si.bit_depth : dec_bitdepth;
       const uint64_t output_pool = OutputPoolEstimate(params_, out_width, out_height, out_bitdepth);
       // A pool that stays (new_sequence) gets its images of the new size as the frames arrive, in place of
@@ -766,16 +783,12 @@ int AV1Decoder::DecodeOne() {
   av1_set_output_copy_legacy(params_.outputcopylegacy_);
   av1_set_front_merge_legacy(params_.frontmergelegacy_);
   {
-    int display_w = 0, display_h = 0;
-    const size_t x = params_.displaypass_.find('x');
-    if (x != std::string::npos) {
-      display_w = atoi(params_.displaypass_.substr(0, x).c_str());
-      display_h = atoi(params_.displaypass_.substr(x + 1).c_str());
-    }
-    av1_set_display_pass(display_w, display_h);
+    unsigned int display_w = 0, display_h = 0;
+    DisplaySize(params_, &display_w, &display_h);
     if (display_w > 0 && display_h > 0)
       XB_LOGI << "Display pass: " << display_w << "x" << display_h
-              << " (prototype, -displaypass: P010 for 10-bit frames, NV12 for 8-bit, with -output p010 or -interop)";
+              << " (Rav1gSettings::display: P010 for a 10-bit decoder, NV12 for an 8-bit one, with -output p010 or "
+                 "-interop)";
   }
   XB_LOGI << "Front of the frame: "
           << (params_.frontmergelegacy_ ? "five steps (-frontmergelegacy)" : "two steps (default)");

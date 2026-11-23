@@ -1304,6 +1304,7 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
         // the planes the output pass writes. A device that lets no shader write such a texture gets
         // its frames through the back buffer (`output.rs`); the log says which it is.
         (*dec).output_kind = c_int::from(cfg.output_kind == 1);
+        (*dec).display = if (*dec).output_kind != 0 { cfg.display } else { Default::default() };
         if (*dec).output_kind != 0 {
             let gpu = Device::new(&device);
             let support = [gpu.semi_planar_support(SemiPlanar::Nv12), gpu.semi_planar_support(SemiPlanar::P010)];
@@ -1320,6 +1321,35 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
                     yes(support[1].shader_writes)
                 ),
             );
+            let display = &(*dec).display;
+            if display.width != 0 {
+                // The display pass writes its images with a shader: a device that lets no shader write
+                // the format cannot have it (the application keeps its own stage).
+                let p010 = display.depth > 8;
+                if !support[usize::from(p010)].shader_writes {
+                    log_create_error(&format!(
+                        "DISPLAY the device lets no shader write {} textures: no display pass",
+                        if p010 { "P010" } else { "NV12" }
+                    ));
+                    return create_failed(dec, &rcfg, Some(&vm_before), "display pass", 0);
+                }
+                log(
+                    false,
+                    &format!(
+                        "DISPLAY {}x{} {}, transform {}, peak {} nits, white {} nits, assumed colour {}/{}/{}/{}",
+                        display.width,
+                        display.height,
+                        if p010 { "P010" } else { "NV12" },
+                        display.transform,
+                        display.source_peak_nits,
+                        display.target_white_nits,
+                        display.assumed_primaries,
+                        display.assumed_transfer,
+                        display.assumed_matrix,
+                        display.assumed_chroma_sample_position
+                    ),
+                );
+            }
             match gpu.create_plane_views() {
                 Ok(views) => com_store(&raw mut (*dec).plane_views, views.into_raw()),
                 Err(error) => {

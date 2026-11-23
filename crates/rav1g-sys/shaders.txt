@@ -110,6 +110,8 @@ inter_scale_obmc_left_hbd
 copy_plane_sp
 copy_plane_sp_tex_v2
 display_pass
+display_pass_sdr
+display_pass_hlg
 film_grain_filter_sp
 film_grain_filter_sp_tex_v2
 cdef_lists

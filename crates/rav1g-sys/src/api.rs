@@ -80,6 +80,11 @@ pub struct aom_image {
     pub semi_planar: c_int,
     pub color_description_present: c_int,
     pub hdr: aom_hdr_metadata_t,
+    /// The display pass wrote the image (`av1_display_cfg`): `AV1_DISPLAY_TRANSFORM_*` (0: it did not), and
+    /// the size of the frame it read. `cp` .. `csp` stay those of the stream.
+    pub display_transform: c_int,
+    pub source_w: c_uint,
+    pub source_h: c_uint,
 }
 impl Default for aom_image {
     fn default() -> Self {
@@ -159,6 +164,31 @@ impl Default for av1_out_buffers_cb {
 }
 pub type av1_out_buffers_cb_t = av1_out_buffers_cb;
 pub type av1_memory_available_cb_fn_t = Option<unsafe extern "C" fn(priv_: *mut c_void) -> i64>;
+/// The display pass of a decoder (`Rav1gSettings::display`, docs/stage-fusion.md), as `decoder.rs` resolves
+/// it: width 0 for none. Every value is resolved (no zero defaults left), except the assumed colour code
+/// points, where 0 is "none".
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone, PartialEq)]
+pub struct av1_display_cfg {
+    pub width: c_uint,
+    pub height: c_uint,
+    /// `AV1_DISPLAY_TRANSFORM_AUTO` or the one every frame takes.
+    pub transform: c_uint,
+    pub source_peak_nits: f32,
+    pub target_white_nits: f32,
+    /// 8 (NV12) or 10 (P010).
+    pub depth: c_uint,
+    pub assumed_primaries: u8,
+    pub assumed_transfer: u8,
+    pub assumed_matrix: u8,
+    pub assumed_chroma_sample_position: u8,
+}
+/// `av1_display_cfg::transform` and `aom_image::display_transform`: what the display pass does to a frame.
+pub const AV1_DISPLAY_TRANSFORM_AUTO: c_uint = 0;
+pub const AV1_DISPLAY_TRANSFORM_SCALE: c_uint = 1;
+pub const AV1_DISPLAY_TRANSFORM_GAMUT: c_uint = 2;
+pub const AV1_DISPLAY_TRANSFORM_PQ: c_uint = 3;
+pub const AV1_DISPLAY_TRANSFORM_HLG: c_uint = 4;
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct aom_codec_dec_cfg {
@@ -188,6 +218,7 @@ pub struct aom_codec_dec_cfg {
     pub memory_headroom: usize,
     pub device_size: usize,
     pub device_size_deferred: usize,
+    pub display: av1_display_cfg,
 }
 impl Default for aom_codec_dec_cfg {
     fn default() -> Self {

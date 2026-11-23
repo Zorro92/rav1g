@@ -724,6 +724,15 @@ fn create_decoder(
         headroom: (task.headroom_mib.max(0) << 20) as u64,
         semi_planar: task.output.is_semi_planar(),
         shared_fence: task.shared_fence,
+        display: rav1g::Display {
+            width: task.displaypass.0.max(0) as u32,
+            height: task.displaypass.1.max(0) as u32,
+            transform: rav1g::DisplayTransform::from_number(task.displaytransform),
+            source_peak_nits: task.displaypeak,
+            target_white_nits: task.displaywhite,
+            depth: task.displaydepth,
+            ..Default::default()
+        },
     };
     // The colour description of the sequence header the decoder is created for, and the first frame of
     // the decoder says what it carries.
@@ -987,7 +996,6 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         cdef_v3_legacy: task.cdefv3legacy,
         output_copy_legacy: task.outputcopylegacy,
         front_merge_legacy: task.frontmergelegacy,
-        display_pass: task.displaypass,
         intra_v2: task.intrav2,
         intra_opt: task.intraopt,
         intra_filter_legacy: task.intrafilterlegacy,
@@ -999,7 +1007,16 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         inter_fast: task.interfast,
     });
     if task.displaypass.0 > 0 {
-        say!("Display pass: {}x{}, P010 or NV12 (prototype, -displaypass)", task.displaypass.0, task.displaypass.1);
+        say!(
+            "Display pass: {}x{} (Rav1gSettings::display{}), peak {} white {} depth {} transform {}",
+            task.displaypass.0,
+            task.displaypass.1,
+            if library.is_c() { "" } else { ", Rust: Settings::display" },
+            task.displaypeak,
+            task.displaywhite,
+            task.displaydepth,
+            task.displaytransform
+        );
     }
     say!(
         "Front of the frame: {}",

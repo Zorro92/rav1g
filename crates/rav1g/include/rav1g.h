@@ -368,12 +368,57 @@ typedef struct av1_stage_dump av1_stage_dump;
 #define RAV1G_OUTPUT_SEMI_PLANAR 1
 
 /*
+ `Rav1gDisplay::transform`, the default: each frame by its colour description (with the assumed code
+ points): PQ `RAV1G_DISPLAY_TRANSFORM_PQ`, HLG `RAV1G_DISPLAY_TRANSFORM_HLG`, other transfers with
+ BT.2020 primaries `RAV1G_DISPLAY_TRANSFORM_GAMUT`, the rest `RAV1G_DISPLAY_TRANSFORM_SCALE`.
+ */
+#define RAV1G_DISPLAY_TRANSFORM_AUTO 0
+
+/*
+ `Rav1gFrame::display_transform`: no display pass, the image is the frame itself.
+ */
+#define RAV1G_DISPLAY_TRANSFORM_NONE 0
+
+/*
+ SDR with BT.709 primaries (or any but BT.2020): downscaled in display-linear light (BT.1886), no tone
+ map, no gamut step, no clip before the encode.
+ */
+#define RAV1G_DISPLAY_TRANSFORM_SCALE 1
+
+/*
+ SDR with BT.2020 primaries: downscaled in display-linear light, BT.2020 to BT.709 (BT.2087), clipped.
+ */
+#define RAV1G_DISPLAY_TRANSFORM_GAMUT 2
+
+/*
+ PQ (SMPTE ST 2084): the BT.2390 EETF from the source peak to 2.03 times the SDR white on the largest
+ channel, BT.2020 to BT.709 when the primaries are BT.2020, clipped.
+ */
+#define RAV1G_DISPLAY_TRANSFORM_PQ 3
+
+/*
+ HLG (ARIB STD-B67): the inverse OETF and the OOTF of a 1000-nit display (BT.2100), then as PQ.
+ */
+#define RAV1G_DISPLAY_TRANSFORM_HLG 4
+
+/*
+ `Rav1gDisplay::tone_curve`: ITU-R BT.2390's EETF, the default (0 is the same).
+ */
+#define RAV1G_TONE_CURVE_BT2390 1
+
+/*
+ `Rav1gDisplay::tone_curve`: Hable's filmic curve. Not in this version: `rav1g_decoder_create` returns
+ `RAV1G_STATUS_INCAPABLE` (the application keeps its own stage).
+ */
+#define RAV1G_TONE_CURVE_HABLE 2
+
+/*
  The version of the interface of this header: raised whenever a declaration of `rav1g.h` changes (a
  struct, an enum, a function), and not for a constant, a comment or a change inside the library.
  `rav1g_abi_version` returns the value the library was built with; an application that loads the
  library at run time compares the two and refuses a library with another value.
  */
-#define RAV1G_ABI_VERSION 1
+#define RAV1G_ABI_VERSION 2
 
 /*
  How a call ended.
@@ -708,6 +753,28 @@ typedef struct Rav1gFrame {
    The samples of the image, as the request for it said. New in 0.2.160, behind the other fields.
    */
   enum Rav1gImageFormat format;
+  /*
+   What the display pass did (`Rav1gSettings::display`): a `RAV1G_DISPLAY_TRANSFORM_*`, or
+   `RAV1G_DISPLAY_TRANSFORM_NONE` (0) when the image is the frame itself. With a transform, `width`,
+   `height`, `bit_depth` and `format` describe the image (the display size and depth), `monochrome`
+   is false, `color` is BT.709 SDR (primaries, transfer and matrix 1, limited range, chroma sample
+   position 1), and what was decoded is in `source_width`, `source_height` and `source_color`; the HDR
+   metadata stays the stream's.
+
+   New in interface version 2, with the three fields behind it.
+   */
+  uint32_t display_transform;
+  /*
+   The frame that was decoded (after super-resolution): luma samples of a row, and rows. Without the
+   display pass `width` and `height`.
+   */
+  uint32_t source_width;
+  uint32_t source_height;
+  /*
+   The colour description of the frame's sequence header, as the stream has it (not the assumed code
+   points). Without the display pass `color`.
+   */
+  struct Rav1gColorInfo source_color;
 } Rav1gFrame;
 
 /*
@@ -740,6 +807,71 @@ typedef struct Rav1gOutput {
    */
   void (*end_of_frames)(void *context);
 } Rav1gOutput;
+
+/*
+ The display pass (docs/integration.md, "The display pass"): every output image is the frame
+ downscaled to the display size (area weights in display-linear light) and tone-mapped or
+ gamut-converted to BT.709 SDR, written by one compute pass at the end of the frame's command list into
+ an NV12 or P010 texture of that size, in place of the frame itself. The decoded frames and the
+ reference frames are the same with and without it. `width` and `height` 0 (what
+ `rav1g_settings_default` sets) mean no display pass: the images are the frames, as in interface
+ version 1.
+
+ It needs `Rav1gSettings::output_kind` `RAV1G_OUTPUT_SEMI_PLANAR`, and images that are a texture alone
+ created with `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS` (no buffer: the pass writes the texture, no
+ copy does); another image fails the temporal unit with a "DISPLAY" log line. A device that lets no
+ shader write the format gets no decoder (`RAV1G_STATUS_INCAPABLE`). Zero in any field is its default.
+ */
+typedef struct Rav1gDisplay {
+  /*
+   The size of every image (`Rav1gImageRequest::width`, `height`), both rounded up to even, at most
+   16384. Any ratio to the frame works; half the frame in both (4K to 1080p) is the fast path.
+   */
+  uint32_t width;
+  uint32_t height;
+  /*
+   `RAV1G_DISPLAY_TRANSFORM_AUTO` (0), or a `RAV1G_DISPLAY_TRANSFORM_*` every frame takes whatever its
+   colour description says.
+   */
+  uint32_t transform;
+  /*
+   `RAV1G_TONE_CURVE_BT2390` (0 is the same) or `RAV1G_TONE_CURVE_HABLE` (not in this version).
+   */
+  uint32_t tone_curve;
+  /*
+   The PQ and HLG light the EETF maps to the SDR range: 0 is 1000 nits; at most 10000.
+   */
+  float source_peak_nits;
+  /*
+   The SDR white: the EETF maps to 2.03 times it (203 nits for 100). 0 is 100 nits.
+   */
+  float target_white_nits;
+  /*
+   Not in this version: 0 (another value is `RAV1G_STATUS_INCAPABLE`).
+   */
+  float desaturation;
+  /*
+   The images' codes: 10 (`RAV1G_IMAGE_FORMAT_P010`), 8 (`RAV1G_IMAGE_FORMAT_NV12`, rounded, not
+   dithered), or 0: by `Rav1gSettings::bit_depth`, for every frame whatever its sequence's depth.
+   */
+  uint32_t depth;
+  /*
+   The H.273 code points taken where the sequence header says "unspecified" (2), as an application
+   merges what its container says: 0 for none (unspecified is BT.709 SDR then).
+   */
+  uint8_t assumed_primaries;
+  uint8_t assumed_transfer_characteristics;
+  uint8_t assumed_matrix_coefficients;
+  /*
+   The AV1 `chroma_sample_position` taken where the header says 0 (unknown): 0 for none (unknown is
+   between rows, as 1).
+   */
+  uint8_t assumed_chroma_sample_position;
+  /*
+   Zero.
+   */
+  uint32_t reserved[4];
+} Rav1gDisplay;
 
 /*
  What a decoder is created with. `rav1g_settings_default` fills the defaults.
@@ -877,6 +1009,11 @@ typedef struct Rav1gSettings {
    The output of the decoder.
    */
   struct Rav1gOutput output;
+  /*
+   The display pass: the images at the display size, tone-mapped to BT.709 SDR. Zero (what
+   `rav1g_settings_default` sets) is none. New in interface version 2, behind `output`.
+   */
+  struct Rav1gDisplay display;
 } Rav1gSettings;
 
 /*
