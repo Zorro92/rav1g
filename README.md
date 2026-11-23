@@ -87,6 +87,9 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
   For one-edge angles, both bit depths wait for the opposite edge only when it supplies a missing
   primary edge. Frames without those angles use the original prefetch kernel. Use
   `-intrasingleedgelegacy` to select the original prefetch kernels and wavefront for an A/B.
+  A thread group sorts its blocks by prediction kind before it predicts them, so that a wave
+  runs one path (on the console a step took about 3.3 us longer for every kind it mixed);
+  `-intrasortlegacy` runs the shaders without the sort.
   The C++ stage-dump comparison compares prediction-record contents across wavefront orders,
   and still compares every frame MD5.
 - **Entropy parsing** packs AC coefficient tokens in scan order and waits only for the

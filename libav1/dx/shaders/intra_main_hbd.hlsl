@@ -22,16 +22,31 @@ cbuffer IntraDataCommon : register(b0) {
   int4 cb_sm_weight_arrays[128];
 };
 
+#ifdef INTRA_RUN
+// intra_run*.hlsl: one thread group runs the wavefront iterations [0, cb_run_iters) of its lists, which start
+// at the word cb_run_lists of the block map (prediction.rs). It reads the starts of each iteration's lists
+// from the block map instead of the constants of one iteration.
+cbuffer IntraRunSRT : register(b1) {
+  uint cb_run_lists;
+  uint cb_run_iters;
+  uint cb_run_reserved0;
+  uint cb_run_reserved1;
+};
+#else
 cbuffer PSSLIntraSRT : register(b1) {
   int4 cb_counts0;
   int4 cb_counts1;
   uint cb_wi_count;
   int cb_pass_offset;
 };
+#endif
 
 ByteAddressBuffer pred_blocks : register(t0);
 ByteAddressBuffer residuals : register(t1);
 ByteAddressBuffer wedge_mask : register(t2);
+#ifdef INTRA_RUN
+ByteAddressBuffer block_map : register(t3);
+#endif
 RWByteAddressBuffer dst_frame : register(u0);
 
 #define Dir1 1
@@ -61,6 +76,13 @@ RWByteAddressBuffer dst_frame : register(u0);
 #define OutputSub ((1 << (OffsetBits - OutputShift)) + (1 << (OffsetBits - OutputShift - 1)))
 
 #define WG_SIZE 256
+// The threads of a group: WG_SIZE, or with INTRA_RUN that many WG_SIZE slots. A block of 256 lanes and
+// more is predicted in pieces of WG_SIZE lanes, each piece with its own edges, whichever group runs it.
+#ifdef INTRA_RUN
+#define GROUP_THREADS (WG_SIZE * INTRA_RUN_SLOTS)
+#else
+#define GROUP_THREADS WG_SIZE
+#endif
 #define EDGE_ABOVE 0
 #define EDGE_LEFT 1
 
@@ -87,7 +109,7 @@ static const uint low_bits[11] = {0, 1, 3, 7, 15, 31, 63, 127, 255, 511, 1023};
 // Each transform owns 20 words per four lanes on each edge, including room for the corner and
 // upsampling. DC and CFL blocks use the same space for their partial sums.
 #ifdef INTRA_PREFETCH
-groupshared int edges[WG_SIZE * 10];
+groupshared int edges[GROUP_THREADS * 10];
 #define EDGE(side, index) edges[index]
 #else
 groupshared int edges[2][(WG_SIZE / 4) * 20];
@@ -263,6 +285,38 @@ int intra_mode_flags(int mode, int mode_angle) {
 }
 #endif
 
+#ifdef INTRA_KIND_SORT
+// INTRA_KIND_SORT (intra_main_sorted*.hlsl, with INTRA_PREFETCH and INTRA_SINGLE_EDGE): a thread group first
+// sorts its blocks by the path they take through this shader, so that a wave runs one path. A wavefront
+// step's lists hold the blocks of every prediction kind in decode order, a 4x4 block is four lanes, and a
+// wave of small blocks mixes DC, CFL, smooth and directional blocks and runs all of their branches one after
+// the other: on the console a step took about 3.3 us more for every kind it had (21 us with one kind, 43 us
+// with seven; docs/test-player.md, "Intra step timing"). The blocks keep their lanes together, each a
+// contiguous range in the order of the keys; which block a thread predicts changes, what it predicts does
+// not.
+#define SORT_KEYS 16
+groupshared uint sort_counts[SORT_KEYS + 1];
+groupshared uint sort_leads[GROUP_THREADS];
+groupshared uint4 sort_items[GROUP_THREADS];
+
+// The path of a block: DC, CFL, smooth, Paeth, zone 1 or 3, zone 2, exact vertical or horizontal, intra block
+// copy, with 8 more for the inter-intra blend. Kinds that share code are next to each other.
+uint intra_sort_key(uint3 block) {
+  const int mode = (block.y >> 6) & 15;
+  const int mode_angle = (block.y >> 28) & 7;
+  const int info = intra_mode_flags(mode, mode_angle) & 15;
+  uint key = 2;
+  if (mode == MODE_CFL && ((block.y >> 22) & 63) != 16) key = 1;
+  else if (mode >= MODE_DC) key = 0;
+  else if (mode == MODE_INTRA_BC) key = 7;
+  else if (mode < 2 && mode_angle == 3) key = 6;
+  else if (info == Dir2) key = 5;
+  else if (info == Dir1 || info == Dir3) key = 4;
+  else if (mode == MODE_PAETH) key = 3;
+  return key | ((block.y >> 28) & 8);
+}
+#endif
+
 #if defined(INTRA_PREFETCH) && defined(INTRA_8BIT)
 // The four samples at (x, y) of an intra block copy block: the motion vector in block.z.
 uint2 predict_intra_bc(uint3 block, int4 plane_cb, int stride, int x, int y) {
@@ -408,48 +462,51 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
 }
 #endif
 
-[numthreads(WG_SIZE, 1, 1)] void main(uint3 thread
-                                      : SV_DispatchThreadID) {
-  int4 counts0 = cb_counts0;
-  int4 counts1 = cb_counts1;
+// One wavefront iteration's work for the thread `thread_x` of the dispatch (of the iteration, in the run),
+// at `local` in its group: the records of the nine lists by block size that start at `pass_offset`, with
+// `counts0`, `counts1` the records of the first eight and `total` lanes in all (the last list takes the rest).
+void intra_main_body(uint thread_x, int local, int4 counts0, int4 counts1, uint total, int pass_offset) {
+  const uint3 thread = uint3(thread_x, 0, 0);
   int bsize_log = 10;
-  int offset = cb_pass_offset;
+  int offset = pass_offset;
   int threadx = thread.x;
   uint3 block = uint3(0, 0, 0);
   int block_lane = 0;
   int wi_count = 0;
   int wi = 1024;
-  if (thread.x < cb_wi_count) {
+  // The thread has a block, and its place in the group.
+  bool active = thread.x < total;
+  if (active) {
     if (threadx >= (counts0.x << 10)) {
-      offset += cb_counts0.x;
+      offset += counts0.x;
       threadx -= counts0.x << 10;
       bsize_log = 9;
       if (threadx >= (counts0.y << 9)) {
-        offset += cb_counts0.y;
+        offset += counts0.y;
         threadx -= counts0.y << 9;
         bsize_log = 8;
         if (threadx >= (counts0.z << 8)) {
-          offset += cb_counts0.z;
+          offset += counts0.z;
           threadx -= counts0.z << 8;
           bsize_log = 7;
           if (threadx >= (counts0.w << 7)) {
-            offset += cb_counts0.w;
+            offset += counts0.w;
             threadx -= counts0.w << 7;
             bsize_log = 6;
             if (threadx >= (counts1.x << 6)) {
-              offset += cb_counts1.x;
+              offset += counts1.x;
               threadx -= counts1.x << 6;
               bsize_log = 5;
               if (threadx >= (counts1.y << 5)) {
-                offset += cb_counts1.y;
+                offset += counts1.y;
                 threadx -= counts1.y << 5;
                 bsize_log = 4;
                 if (threadx >= (counts1.z << 4)) {
-                  offset += cb_counts1.z;
+                  offset += counts1.z;
                   threadx -= counts1.z << 4;
                   bsize_log = 3;
                   if (threadx >= (counts1.w << 3)) {
-                    offset += cb_counts1.w;
+                    offset += counts1.w;
                     threadx -= counts1.w << 3;
                     bsize_log = 2;
                   }
@@ -467,6 +524,47 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
     wi_count = min(WG_SIZE, 1 << bsize_log);
     wi = block_lane & (WG_SIZE - 1);
   }
+#ifdef INTRA_KIND_SORT
+  // A counting sort of the group's blocks by key. The first lane of a block (wi 0: a block of 256 lanes
+  // or more is a group of its own) takes the block's lanes in its key's range; every lane of the block
+  // then puts what it predicts at its place there, and every thread takes what is at its own place.
+  // Threads without a block go behind the last block.
+  const uint sort_key = active ? intra_sort_key(block) : SORT_KEYS;
+  if (local <= SORT_KEYS) sort_counts[local] = 0;
+  GroupMemoryBarrierWithGroupSync();
+  if (active && wi == 0) {
+    uint first;
+    InterlockedAdd(sort_counts[sort_key], (uint)wi_count, first);
+    sort_leads[local] = first;
+  }
+  GroupMemoryBarrierWithGroupSync();
+  uint sorted = 0;
+  uint sort_counts_before = 0;
+  [loop] for (uint key = 0; key < SORT_KEYS; ++key) {
+    const uint count = sort_counts[key];
+    if (key < sort_key) sort_counts_before += count;
+    sorted += count;
+  }
+  if (active) {
+    sort_items[sort_counts_before + sort_leads[local - wi] + wi] =
+        uint4(block.x, block.y, block.z, (uint)block_lane | ((uint)bsize_log << 16));
+  }
+  GroupMemoryBarrierWithGroupSync();
+  active = (uint)local < sorted;
+  block = uint3(0, 0, 0);
+  block_lane = 0;
+  bsize_log = 10;
+  wi_count = 0;
+  wi = 1024;
+  if (active) {
+    const uint4 item = sort_items[local];
+    block = item.xyz;
+    block_lane = (int)(item.w & 0xffff);
+    bsize_log = (int)(item.w >> 16);
+    wi_count = min(WG_SIZE, 1 << bsize_log);
+    wi = block_lane & (WG_SIZE - 1);
+  }
+#endif
   const int bw_log = block.y & 7;  // 0..4
   const int bw = 4 << bw_log;
   const int bh = 1 << (bsize_log - bw_log);
@@ -495,7 +593,7 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
   // shift of a smooth one) is only read behind the syncs. A lane loads its edges without waiting for
   // a second load behind the record.
   const int mode_flags = intra_mode_flags(mode, mode_angle);
-  const bool straight = mode < 2 && mode_angle == 3 && thread.x < cb_wi_count;
+  const bool straight = mode < 2 && mode_angle == 3 && active;
 #else
 #define mode_flags params.z
   const bool straight = false;
@@ -539,9 +637,9 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
 #endif
 
 #ifdef INTRA_PREFETCH
-  const int local_start = (thread.x & (WG_SIZE - 1)) - wi;
+  const int local_start = local - wi;
 #else
-  const int loc_base = (((thread.x & (WG_SIZE - 1)) - wi) >> 2) * 20 + 2;
+  const int loc_base = ((local - wi) >> 2) * 20 + 2;
 #endif
   const int need_above = (mode_flags >> NeedAboveShift) & 1;
   const int need_right = (mode_flags >> NeedRightShift) & 1;
@@ -653,7 +751,7 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
       luma = cfl_luma_row(block.z, bx, by, x0, y);
       EDGE(EDGE_LEFT, raw_left + wi) = luma.x + luma.y + luma.z + luma.w;
     }
-  } else if (mode < MODE_INTRA_BC && !straight && thread.x < cb_wi_count) {
+  } else if (mode < MODE_INTRA_BC && !straight && active) {
     int first_above = 0;
     int first_left = 0;
 #ifdef INTRA_SINGLE_EDGE
@@ -764,7 +862,7 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
 #endif
 
   GroupMemoryBarrierWithGroupSync();
-  if (thread.x >= cb_wi_count) return;
+  if (!active) return;
 
   uint2 pixels = uint2(0, 0);
 #ifdef INTRA_PREFETCH
@@ -946,3 +1044,41 @@ int4 cfl_luma_row(uint limits, int bx, int by, int x0, int y) {
   dst_frame.Store2(addr, pixels);
 #endif
 }
+
+#ifndef INTRA_RUN
+[numthreads(WG_SIZE, 1, 1)] void main(uint3 thread : SV_DispatchThreadID) {
+  intra_main_body(thread.x, thread.x & (WG_SIZE - 1), cb_counts0, cb_counts1, cb_wi_count, cb_pass_offset);
+}
+#else
+// AV1 7.11.2: a block is predicted from the samples of the blocks above and to the left of it, which are
+// in earlier iterations of the wavefront. The run is one thread group for iterations so narrow that the
+// dispatch and barrier of a step of their own (about 18 us on the console) cost more than the group takes
+// for them: the group runs them one after the other, an iteration's lanes in chunks of GROUP_THREADS,
+// with a device memory barrier between iterations, so that an iteration reads what the group wrote in the
+// ones before. No group waits for another: the run is one group. An iteration of the run has no filter
+// intra blocks (the host ends a run in front of one).
+[numthreads(GROUP_THREADS, 1, 1)] void main(uint3 group_thread : SV_GroupThreadID) {
+  const int local = (int)group_thread.x;
+  for (uint it = 0; it < cb_run_iters; ++it) {
+    // The starts of the iteration's ten lists and of the next iteration's (IntraTypeCount 10), the same for
+    // every thread of the group.
+    const uint at = (cb_run_lists + it * 10) * 4;
+    const uint4 starts0 = block_map.Load4(at);
+    const uint4 starts1 = block_map.Load4(at + 16);
+    const uint start8 = block_map.Load(at + 32);
+    const uint start9 = block_map.Load(at + 36);
+    const int4 counts0 = int4((int)(starts0.y - starts0.x), (int)(starts0.z - starts0.y), (int)(starts0.w - starts0.z),
+                              (int)(starts1.x - starts0.w));
+    const int4 counts1 = int4((int)(starts1.y - starts1.x), (int)(starts1.z - starts1.y), (int)(starts1.w - starts1.z),
+                              (int)(start8 - starts1.w));
+    // Lanes of four samples of a row: 1024 in a 64x64 block down to 4 in a 4x4 (prediction.rs).
+    const uint total = ((uint)counts0.x << 10) + ((uint)counts0.y << 9) + ((uint)counts0.z << 8) +
+                       ((uint)counts0.w << 7) + ((uint)counts1.x << 6) + ((uint)counts1.y << 5) +
+                       ((uint)counts1.z << 4) + ((uint)counts1.w << 3) + ((start9 - start8) << 2);
+    [loop] for (uint first = 0; first < total; first += GROUP_THREADS) {
+      intra_main_body(first + local, local, counts0, counts1, total, (int)starts0.x);
+    }
+    DeviceMemoryBarrierWithGroupSync();
+  }
+}
+#endif

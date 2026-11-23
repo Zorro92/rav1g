@@ -510,6 +510,15 @@ static INTRA_OPT: AtomicI32 = AtomicI32::new(1);
 
 static INTRA_SINGLE_EDGE_LEGACY: AtomicI32 = AtomicI32::new(0);
 
+// -intrasortlegacy: the main intra shader without the sort of a group's blocks by kind (intra_main_sorted*.hlsl).
+static INTRA_SORT_LEGACY: AtomicI32 = AtomicI32::new(0);
+
+/// `av1_set_intra_sort_legacy` (`dx/av1_perf.h`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_intra_sort_legacy(enable: c_int) {
+    INTRA_SORT_LEGACY.store(enable, Ordering::Relaxed);
+}
+
 /// `av1_set_intra_single_edge_legacy` (`dx/av1_perf.h`).
 #[unsafe(no_mangle)]
 pub extern "C" fn av1_set_intra_single_edge_legacy(enable: c_int) {
@@ -1148,6 +1157,17 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
             let constants = alloc_constants::<IntraData>(&mut td.command_buffer);
             let data = constants.data;
             let intra_main: *const ComputeShader = match td.intra_main {
+                IntraMain::SingleEdge if INTRA_SORT_LEGACY.load(Ordering::Relaxed) == 0 => {
+                    // AV1 7.11.2: the blocks of a wavefront step are independent of each other, so the order
+                    // in which a thread group takes them changes no sample. The sorted shader is the
+                    // single-edge one with the group's blocks sorted by prediction kind first (one path per
+                    // wave); it reads a subset of what the prefetch shader reads, so it serves every frame.
+                    if td.is_hbd != 0 {
+                        &raw const (*lib).shader_intra_main_sorted_hbd
+                    } else {
+                        &raw const (*lib).shader_intra_main_sorted
+                    }
+                }
                 IntraMain::SingleEdge => {
                     // Frames without one-edge angles keep the original prefetch shader verbatim.
                     let single_edge = std::slice::from_raw_parts(tiles, tile_count as usize)

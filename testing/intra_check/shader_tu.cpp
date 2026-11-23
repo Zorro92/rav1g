@@ -76,6 +76,11 @@ static void garbage(void *p, size_t size, uint64_t *state) {
 static void scramble(uint64_t *state) {
 #if SHADER_KIND == 0 && defined(SHADER_HBD)
   garbage(edges.bytes(), edges.byte_size(), state);
+#ifdef SHADER_SORTED
+  garbage(sort_counts.bytes(), sort_counts.byte_size(), state);
+  garbage(sort_leads.bytes(), sort_leads.byte_size(), state);
+  garbage(sort_items.bytes(), sort_items.byte_size(), state);
+#endif
 #elif SHADER_KIND == 0
   garbage(above.bytes(), above.byte_size(), state);
   garbage(left.bytes(), left.byte_size(), state);

@@ -97,6 +97,7 @@ pub struct Task {
     pub intraopt: bool,
     pub intrafilterlegacy: bool,
     pub intrasingleedgelegacy: bool,
+    pub intrasortlegacy: bool,
     pub intralistslegacy: bool,
     pub parselistslegacy: bool,
     /// What a frame does about the clears of its slot's grids: nothing to clear without a flag;
@@ -176,6 +177,7 @@ impl Default for Task {
             intraopt: true,
             intrafilterlegacy: false,
             intrasingleedgelegacy: false,
+            intrasortlegacy: false,
             intralistslegacy: false,
             parselistslegacy: false,
             clears: Clears::NotNeeded,
@@ -287,6 +289,7 @@ pub fn usage() {
     say!("  -intraod             use the baseline DXC -Od intra_main kernels (-intraopt restores the default)");
     say!("  -intrafilterlegacy   use the previous 8-bit filter intra shader");
     say!("  -intrasingleedgelegacy use the previous directional wavefront with prefetching");
+    say!("  -intrasortlegacy       intra main shader without the sort of a group's blocks by kind");
     say!("  -intralistslegacy    count the intra block lists with the previous loops and wavefront edges");
     say!("  -parselistslegacy    count the block lists on the tile's thread, superblock by superblock");
     say!("                        as in the test player (docs/test-player.md); -cdefv2 and -fitsize (the defaults)");
@@ -474,6 +477,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-intraod" => task.intraopt = false,
             "-intrafilterlegacy" => task.intrafilterlegacy = true,
             "-intrasingleedgelegacy" => task.intrasingleedgelegacy = true,
+            "-intrasortlegacy" => task.intrasortlegacy = true,
             "-intralistslegacy" => task.intralistslegacy = true,
             "-parselistslegacy" => task.parselistslegacy = true,
             "-gpuclear" => task.clears = Clears::Gpu,

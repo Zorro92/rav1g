@@ -803,9 +803,11 @@ int AV1Decoder::DecodeOne() {
   XB_LOGI << "Intra main shader: "
           << (params_.intraod_ ? "intra_main_legacy (-intraod)"
                                : params_.intrasingleedgelegacy_ ? "prefetching (-intrasingleedgelegacy)"
-                                                          : "prefetching with single-edge dependencies");
+                               : params_.intrasortlegacy_ ? "prefetching with single-edge dependencies (-intrasortlegacy)"
+                                                          : "prefetching with single-edge dependencies, blocks sorted by kind");
   av1_set_intra_filter_legacy(params_.intrafilterlegacy_);
   av1_set_intra_single_edge_legacy(params_.intrasingleedgelegacy_);
+  av1_set_intra_sort_legacy(params_.intrasortlegacy_);
   XB_LOGI << "8-bit filter intra shader: "
           << (params_.intrafilterlegacy_ ? "intra_filter_legacy (-intrafilterlegacy)" : "intra_filter_prefetch (default)");
   XB_LOGI << "Loop restoration shader: loop_restoration / loop_restoration_wiener (default)";

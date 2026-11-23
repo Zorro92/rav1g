@@ -117,6 +117,10 @@ pub struct compute_shader_lib {
     pub shader_intra_main_prefetch_hbd: ComputeShader,
     pub shader_intra_main_single_edge: ComputeShader,
     pub shader_intra_main_single_edge_hbd: ComputeShader,
+    // -intrasortlegacy off (the default): the prefetching single-edge shaders with the blocks of a group
+    // sorted by kind (intra_main_sorted*.hlsl).
+    pub shader_intra_main_sorted: ComputeShader,
+    pub shader_intra_main_sorted_hbd: ComputeShader,
     pub shader_intra_main_prefetch: ComputeShader,
     pub shader_intra_filter_prefetch: ComputeShader,
     pub shader_intra_filter_prefetch_hbd: ComputeShader,

@@ -43,6 +43,7 @@ struct uint4 {
   uint x, y, z, w;
   uint4() : x(0), y(0), z(0), w(0) {}
   uint4(uint a, uint b, uint c, uint d) : x(a), y(b), z(c), w(d) {}
+  uint3 xyz() const { return uint3(x, y, z); }
 };
 struct int4 {
   int x, y, z, w;
@@ -163,6 +164,21 @@ struct RWByteAddressBuffer {
 static inline void GroupMemoryBarrier() { gs_state.plain_barriers++; }
 static inline void GroupMemoryBarrierWithGroupSync() { gs_group_sync(); }
 static inline void AllMemoryBarrierWithGroupSync() { gs_group_sync(); }
+
+/*
+ * An atomic add to group memory (intra_main_sorted*.hlsl): the threads of a group may make it in any order
+ * between two group syncs, so it is no race with another atomic, and it is not watched as one. A plain
+ * read or write of the element by another thread in the same interval still is one: the atomic counts as
+ * a write of the thread that makes it.
+ */
+template <class T>
+static inline void InterlockedAdd(const GsScalarRef<T> &target, T value, T &original) {
+  original = *target.p;
+  *target.p = original + value;
+  target.tag->w_epoch = gs_state.epoch;
+  target.tag->w_thread = gs_state.thread;
+  target.tag->w_line = target.line;
+}
 
 uint WaveGetLaneCount();
 bool WaveActiveAllEqual(int value);

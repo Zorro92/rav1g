@@ -124,9 +124,9 @@ const LAYOUTS: usize =
 const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
-    // 20 transform pipelines, 32 shared shaders and 27 per bit depth: one slot per pipeline of
+    // 20 transform pipelines, 34 shared shaders and 27 per bit depth: one slot per pipeline of
     // `create_tasks` (the test `every_pipeline_names_its_shader_once`).
-    assert!(SHADERS == 20 + 32 + 2 * 27);
+    assert!(SHADERS == 20 + 34 + 2 * 27);
     assert!(LAYOUTS == 24);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
@@ -386,6 +386,8 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("intra_main_prefetch", &layouts.intra_pred, &raw mut (*lib).shader_intra_main_prefetch),
             ("intra_main_single_edge", &layouts.intra_pred, &raw mut (*lib).shader_intra_main_single_edge),
             ("intra_main_single_edge_hbd", &layouts.intra_pred, &raw mut (*lib).shader_intra_main_single_edge_hbd),
+            ("intra_main_sorted", &layouts.intra_pred, &raw mut (*lib).shader_intra_main_sorted),
+            ("intra_main_sorted_hbd", &layouts.intra_pred, &raw mut (*lib).shader_intra_main_sorted_hbd),
             ("intra_filter_prefetch", &layouts.intra_pred, &raw mut (*lib).shader_intra_filter_prefetch),
             ("intra_filter_prefetch_hbd", &layouts.intra_pred, &raw mut (*lib).shader_intra_filter_prefetch_hbd),
             ("intra_main_hbd_legacy", &layouts.intra_pred, &raw mut (*lib).shaders_hbd.intra_main_legacy),

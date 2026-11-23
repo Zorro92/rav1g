@@ -298,6 +298,13 @@ void av1_set_intra_opt(int enable);
 /* Use the prefetch shaders with the previous angle-specific wavefront. */
 void av1_set_intra_single_edge_legacy(int enable);
 
+/* Process-wide. Nonzero runs the main intra shaders without the sort of a thread
+ * group's blocks by prediction kind (-intrasortlegacy): the prefetching shaders,
+ * single-edge where the frame has such angles. Zero (the default) runs
+ * intra_main_sorted(_hbd). The output is the same. Change it only while no frame is
+ * in flight. */
+void av1_set_intra_sort_legacy(int enable);
+
 /* Process-wide. Nonzero counts the intra block lists with the previous loops of
  * av1_mi_push_block and the previous edges of the wavefront, four arrays with the
  * frame's stamp (-intralistslegacy); zero uses intra_block_edges and the packed edges.

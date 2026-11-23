@@ -982,6 +982,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         intra_opt: task.intraopt,
         intra_filter_legacy: task.intrafilterlegacy,
         intra_single_edge_legacy: task.intrasingleedgelegacy,
+        intra_sort_legacy: task.intrasortlegacy,
         intra_lists_legacy: task.intralistslegacy,
         parse_lists_legacy: task.parselistslegacy,
         lf_h_split: task.lfhsplit as u32,
@@ -1008,8 +1009,10 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
                 "conservative"
             } else if task.intrasingleedgelegacy {
                 "angle-specific with prefetching (-intrasingleedgelegacy)"
+            } else if task.intrasortlegacy {
+                "angle-specific with prefetching and single-edge dependencies (-intrasortlegacy)"
             } else {
-                "angle-specific with prefetching and single-edge dependencies"
+                "angle-specific with prefetching and single-edge dependencies, blocks sorted by kind"
             }
         );
     }

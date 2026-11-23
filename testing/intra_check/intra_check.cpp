@@ -139,6 +139,8 @@ static void run_group(const ShaderApi *api, uint32_t group, int threads, uint64_
                     : api == &intra_main_prefetch_double_api ? "intra_main_prefetch.hlsl (twice the edge count)"
                     : api == &intra_main_single_edge_api ? "intra_main_single_edge.hlsl"
                     : api == &intra_main_single_edge_hbd_api ? "intra_main_single_edge_hbd.hlsl"
+                    : api == &intra_main_sorted_api ? "intra_main_sorted.hlsl"
+                    : api == &intra_main_sorted_hbd_api ? "intra_main_sorted_hbd.hlsl"
                     : api == &intra_main_legacy_api ? "intra_main_legacy.hlsl"
                     : api == &intra_main_hbd_legacy_api ? "intra_main_hbd_legacy.hlsl"
                     : api == &intra_filter_legacy_api ? "intra_filter_legacy.hlsl"
@@ -149,7 +151,8 @@ static void run_group(const ShaderApi *api, uint32_t group, int threads, uint64_
   const bool use_waves = api == &intra_main_api || api == &intra_main_hbd_api ||
                          api == &intra_main_prefetch_hbd_api || api == &intra_main_prefetch_api ||
                          api == &intra_main_prefetch_double_hbd_api || api == &intra_main_prefetch_double_api ||
-                         api == &intra_main_single_edge_hbd_api || api == &intra_main_single_edge_api;
+                         api == &intra_main_single_edge_hbd_api || api == &intra_main_single_edge_api ||
+                         api == &intra_main_sorted_hbd_api || api == &intra_main_sorted_api;
   gs_state.track_unwritten = use_waves || api == &intra_filter_prefetch_api;
   g_tracker.require_unique_stores = api == &intra_filter_prefetch_api;
   GroupContext context = { api, group };
@@ -992,6 +995,7 @@ static bool check_single_edge(uint64_t seed, int hbd) {
   const Geometry g = make_geometry(&rng, hbd, 48);
   const ShaderApi *legacy = hbd ? &intra_main_prefetch_hbd_api : &intra_main_prefetch_api;
   const ShaderApi *single_edge = hbd ? &intra_main_single_edge_hbd_api : &intra_main_single_edge_api;
+  const ShaderApi *sorted_api = hbd ? &intra_main_sorted_hbd_api : &intra_main_sorted_api;
   for (bool from_above : {false, true}) {
     for (bool have_primary : {false, true}) {
       // Raw, upsampled and filtered primary edges. The first group writes
@@ -1024,6 +1028,14 @@ static bool check_single_edge(uint64_t seed, int hbd) {
                  hbd ? 10 : 8, from_above, have_primary, prep[test], r.races_group);
           return false;
         }
+        auto sorted = f.pixels;
+        const RunResult rs = run_main(g, f, &sorted, rng.u32(), sorted_api, nullptr);
+        if (sorted != expected || rs.races_group || rs.memory_races || rs.sync_errors || rs.out_of_bounds) {
+          printf("intra_check: MISMATCH in the sorted single-edge %d-bit shader, "
+                 "from above %d, primary available %d, prep %u, group races %ld\n",
+                 hbd ? 10 : 8, from_above, have_primary, prep[test], rs.races_group);
+          return false;
+        }
       }
     }
   }
@@ -1035,6 +1047,7 @@ static bool check_wave_reductions(uint64_t seed, int hbd) {
   const Geometry g = make_geometry(&rng, hbd, 48);
   const ShaderApi *legacy_api = hbd ? &intra_main_hbd_legacy_api : &intra_main_legacy_api;
   const ShaderApi *main_api = hbd ? &intra_main_hbd_api : &intra_main_api;
+  const ShaderApi *sorted_api = hbd ? &intra_main_sorted_hbd_api : &intra_main_sorted_api;
   const struct {
     const char *name;
     uint32_t log_w, log_h, blocks;
@@ -1073,6 +1086,17 @@ static bool check_wave_reductions(uint64_t seed, int hbd) {
       if (actual != legacy || r.memory_races || r.out_of_bounds || r.races_group || r.sync_errors) {
         printf("intra_check: MISMATCH in wave reduction for %d-bit %s, %d lanes%s, races in group memory %ld\n",
                8 + 2 * hbd, c.name, layout.lanes, layout.interleaved ? ", interleaved" : "", r.memory_races);
+        return false;
+      }
+      // The sorted shader (its blocks keep their lanes together, at another place in the group).
+      const long sums_before = wave_sums;
+      std::vector<uint8_t> sorted = f.pixels;
+      const RunResult rs = run_main(g, f, &sorted, rng.u32(), sorted_api, nullptr);
+      wave_sums = sums_before;
+      if (sorted != legacy || rs.memory_races || rs.out_of_bounds || rs.races_group || rs.sync_errors) {
+        printf("intra_check: MISMATCH in wave reduction of the sorted %d-bit shader for %s, %d lanes%s, races in "
+               "group memory %ld\n",
+               8 + 2 * hbd, c.name, layout.lanes, layout.interleaved ? ", interleaved" : "", rs.memory_races);
         return false;
       }
       const bool expect_waves = layout.lanes >= 32 && !layout.interleaved && (c.cfl || c.above || c.left);
@@ -1281,6 +1305,10 @@ int main(int argc, char **argv) {
         auto prefetch = f.pixels;
         const RunResult rp = run_main(g, f, &prefetch, rng.state,
                                       hbd ? &intra_main_single_edge_hbd_api : &intra_main_single_edge_api, nullptr);
+        // The default since the sort by kind: the same, with each group's blocks sorted by prediction kind.
+        auto sorted = f.pixels;
+        const RunResult rs = run_main(g, f, &sorted, rng.state + 1,
+                                      hbd ? &intra_main_sorted_hbd_api : &intra_main_sorted_api, nullptr);
         // The prefetching shader with twice the specification's count of edge samples of the row above
         // (run.sh), which the layouts have to tell from it, inside the frame too.
         auto other_count = f.pixels;
@@ -1319,6 +1347,11 @@ int main(int argc, char **argv) {
           at = first_difference(legacy, prefetch);
         } else if (rp.memory_races || rp.sync_errors || rp.out_of_bounds || rp.plain_barriers) {
           problem = "invalid group memory access or sync in the prefetching shaders";
+        } else if (legacy != sorted) {
+          problem = hbd ? "MISMATCH in the sorted 10-bit shader" : "MISMATCH in the sorted 8-bit shader";
+          at = first_difference(legacy, sorted);
+        } else if (rs.memory_races || rs.sync_errors || rs.out_of_bounds || rs.plain_barriers) {
+          problem = "invalid group memory access or sync in the sorted shaders";
         } else if (rc.memory_races || rc.sync_errors || rc.out_of_bounds || rc.plain_barriers) {
           problem = "invalid group memory access or sync in the shader with twice the edge sample count";
         }
@@ -1377,6 +1410,6 @@ int main(int argc, char **argv) {
     printf("intra_check: FAILED\n");
     return 1;
   }
-  printf("intra_check: the conservative, prefetching and intra_v2 outputs are identical on every frame\n");
+  printf("intra_check: the conservative, prefetching, sorted and intra_v2 outputs are identical on every frame\n");
   return 0;
 }

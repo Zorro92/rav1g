@@ -374,7 +374,7 @@ The log lines at the start of each task show which defaults and opt-out flags ar
 | Pipeline slots | 2 | `Frame slots: 2` | `-slots 3`, `-slots 4` |
 | Parser | the parse pass of rav1d, with its switches `nolfmask`, `tilethread` and (since package 0.2.197) `gpucdef` on | `Parser: the parse pass of rav1d`, `Parser switches (-parseopt): nolfmask tilethread gpucdef` | none since package 0.2.159: the entropy decoder of libaom (`-parser c`) left the decoder; up to 0.2.157 `Parser: the entropy decoder of libaom (-parser c)`; `-parseopt` for the switches; see [Parser](#parser--parser) |
 | Clears of a slot | none: the wavefront of intra prediction is kept at the edges of the tiles (since package 0.2.146.0) | `Clears: none needed (default: intra wavefront at the edges of the tiles; -gpuclear, -cpuclear and -syncclear keep it in the slot's grid and clear that)` | `-gpuclear`, `-cpuclear`, `-syncclear`: the wavefront in the slot's grid, cleared for every frame by the GPU, the completion thread (the default of 0.2.140 to 0.2.144; `-asyncclear` is the same) or the decode thread; see [Clears](#clears) |
-| Intra prediction | frame-wide wavefront with prefetching and single-edge dependencies | `Intra main shader: prefetching with single-edge dependencies` | `-intrav2`, `-intraod`, `-intrasingleedgelegacy` |
+| Intra prediction | frame-wide wavefront with prefetching and single-edge dependencies, each thread group's blocks sorted by prediction kind ([Blocks sorted by kind](#blocks-sorted-by-kind--intrasortlegacy)) | `Intra main shader: prefetching with single-edge dependencies, blocks sorted by kind` | `-intrav2`, `-intraod`, `-intrasingleedgelegacy`, `-intrasortlegacy` |
 | Unscaled single-reference and average/distance compound prediction on size lists | `inter_main_v2` and `inter_compound_v2`, with HBD variants | `Inter shaders: inter_main_v2, inter_compound_v2 (default)` | `-interfast` selects [motion-class lists and shaders](#inter-fast-path--interfast). |
 
 
@@ -1264,6 +1264,43 @@ parse threads, no longer by the GPU. A second shader with the same three syncs b
 front of the first and twice the group memory (21 KiB, behind `-parseopt intralean` on a branch
 that was not merged) was slower than the default on the same console: `j4k40` intra 12.39 ms,
 51.4 fps.
+
+## Blocks sorted by kind (`-intrasortlegacy`)
+
+A wavefront step of intra prediction (AV1 7.11.2) costs about 18 us of dispatch and barrier plus the
+latency of its slowest thread group (AGENTS.md, "Dependent dispatches"), and that latency follows the
+number of prediction kinds in the step, not its size. The console's step timing (`-intrasteptime`,
+`-intrastepmin`; 34,900 steps of the batch of 2026-11-21, main 160ecfa, one dispatch and at most 16 groups,
+mean us by the number of kinds in the step and by the number of block sizes in its lists):
+
+| Kinds | 1 size | 2 sizes | 3 sizes | 4 sizes | 5 sizes |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 18.2 | 21.3 | 22.8 | 23.6 | 25.5 |
+| 3 | 27.2 | 27.1 | 28.2 | 30.1 | 31.6 |
+| 5 | 34.4 | 34.5 | 35.0 | 34.6 | 33.7 |
+| 7 | - | 39.9 | 43.2 | 42.8 | 41.4 |
+
+About 3.3 us per kind at the same sizes. Steps without blocks under 16x16 (where a wave holds one block)
+grow from 21.4 to 27.0 us with six kinds; steps with them from 20.2 to 37.7 us: a wave of small blocks (a
+4x4 is four lanes, so sixteen of them share a wave, in decode order) mixes DC, CFL, smooth and directional
+blocks and runs the branches of each one after the other.
+
+`intra_main_sorted.hlsl` and `intra_main_sorted_hbd.hlsl` (the default since this change) are the
+prefetching single-edge shaders with a counting sort in front: the first lane of every block takes the
+block's lanes in the range of its kind (DC, CFL, smooth, Paeth, zone 1 or 3, zone 2, exact V or H, intra
+block copy, each also with the inter-intra blend), all lanes put what they predict at their new place in
+group memory, and every thread takes what is at its own place. A block keeps its lanes together; which
+thread predicts it changes, what it predicts does not, so the output is the same (the blocks of a step are
+independent of each other). It costs three group syncs and 5 KiB of group memory more per group before the
+edges are loaded. The single-edge shader serves every frame (it reads a subset of what the prefetch shader
+reads), so the sorted shader replaces both.
+
+`-intrasortlegacy` (player and rav1g-dec, `av1_set_intra_sort_legacy` of `dx/av1_perf.h`) runs the
+previous shaders: `intra_main_single_edge*` on frames with one-edge angles, `intra_main_prefetch*` on the
+others. For the console A/B: `-gputime` with and without it on the heavy 4K clips (the `gpu intra` mean
+and p95), and `-intrastepmin 0` on both to see the step latency by kind; the step counts do not change.
+`testing/intra_check` checks the sorted shaders against the conservative ones on random layouts, with
+the group scheduler's race checks, and with three mutants of the sort.
 
 ## Deblocking checks
 
