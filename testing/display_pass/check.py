@@ -6,7 +6,7 @@
       [--stream svt/syn-hdr10-10b-1080p.ivf ...] [--frames 4] [--out dir]
 
 For every stream: rav1g-dec decodes the first frames once as they are (-o, planar) and then with
--output p010 -displaypass at half the size (the shader's 2:1 quad path) and at two thirds of it (its area
+-output p010 -displaypass (P010 for a 10-bit stream, NV12 for an 8-bit one) at half the size (the shader's 2:1 quad path) and at two thirds of it (its area
 path) (-o: the display images), and model.py computes the display images from the first run's frames
 with the sequence's colour description (the COLOUR line of the log) and counts the codes that differ.
 Exit code 1 when a code differs by more than one (fp32 on two compilers, the tone map's tables), or when
@@ -38,7 +38,10 @@ def main():
     ap.add_argument('--frames', type=int, default=4)
     ap.add_argument('--out', default='out/display-pass')
     a = ap.parse_args()
-    streams = a.stream or ['svt/syn-hdr10-10b-1080p.ivf', 'svt/syn-tiles-10b-1080p.ivf']
+    # PQ and SDR at 10 bits; film grain at 10 and 8 bits (grain is applied before the downscale, so the
+    # plain run's frames, which have it, are the model's input).
+    streams = a.stream or ['svt/syn-hdr10-10b-1080p.ivf', 'svt/syn-tiles-10b-1080p.ivf', 'aom/av1-1-b10-23-film_grain-50.ivf',
+                           'aom/av1-1-b8-23-film_grain-50.ivf']
     os.makedirs(a.out, exist_ok=True)
     failed = False
     for stream in streams:
@@ -53,9 +56,6 @@ def main():
             failed = True
             continue
         w, h, depth = map(int, size.groups())
-        if depth != 10:
-            print(f'{name}: {depth}-bit: the prototype takes 10-bit frames only; skipped')
-            continue
         primaries, transfer, matrix, rng, csp = colour.groups()
         for out in (f'{w // 2 & ~1}x{h // 2 & ~1}', f'{w * 2 // 3 & ~1}x{h * 2 // 3 & ~1}'):
             display = os.path.join(a.out, f'{name}.{out}.display.yuv')
@@ -69,7 +69,7 @@ def main():
                 failed = True
                 continue
             args = [sys.executable, os.path.join(HERE, 'model.py'), frames, display, '--size', f'{w}x{h}', '--out', out,
-                    '--transfer', transfer, '--matrix', matrix, '--count', str(a.frames)]
+                    '--transfer', transfer, '--matrix', matrix, '--depth', str(depth), '--count', str(a.frames)]
             if rng == 'full':
                 args.append('--full')
             if csp == '2':

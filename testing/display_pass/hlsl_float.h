@@ -84,6 +84,7 @@ static inline float asfloat(uint u) {
   memcpy(&v, &u, 4);
   return v;
 }
+static inline float4 asfloat(const uint4 &u) { return float4(asfloat(u.x), asfloat(u.y), asfloat(u.z), asfloat(u.w)); }
 
 // Group memory of float3: watched as a whole, all three components compared.
 struct GsFloat3Ref {

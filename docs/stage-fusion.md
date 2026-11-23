@@ -14,6 +14,7 @@ use is not.
 - [What Bale and the fork would change](#what-bale-and-the-fork-would-change)
 - [Risks](#risks)
 - [The prototype (`-displaypass`)](#the-prototype--displaypass)
+- [The display pass, fast](#the-display-pass-fast)
 - [The ABI it needs](#the-abi-it-needs)
 
 ## Conclusion
@@ -233,41 +234,105 @@ sequence does. Internal A/B switches stay out of the ABI (`av1_*` in `av1_perf.h
 
 Option B behind an internal switch: `av1_set_display_pass(width, height)` (`libav1/dx/av1_perf.h`),
 `-displaypass WxH` in the test player and in rav1g-dec. No ABI change: with the switch off nothing
-changes, and with it on a decoder with the semi-planar output kind asks for P010 images of WxH for its
-10-bit frames.
+changes, and with it on a decoder with the semi-planar output kind asks for images of WxH for its
+frames with chroma: P010 for 10-bit frames, NV12 for 8-bit ones. How the pass was made fast after the
+first console measurement: [The display pass, fast](#the-display-pass-fast).
 
 - **The pass** (`libav1/dx/shaders/display_pass.hlsl`, called from `copy_semi_planar` in `output.rs`):
-  one dispatch at the end of the frame's command list in place of the output copy, a 64-lane group per
-  32x8 output pixels. The output pixels' linear values go into group memory (33 columns: one more on
-  the left, which the first chroma sample's footprint reaches), then each lane writes four luma samples
-  and one chroma pair. Every operation of [What Bale's stage computes](#what-bales-stage-computes-today)
+  one dispatch at the end of the frame's command list in place of the output copy, a 256-thread group
+  per 64x64 output pixels ([below](#the-display-pass-fast)). Every operation of [What Bale's stage computes](#what-bales-stage-computes-today)
   in the same fp32 order: area weights, bilinear chroma by siting, sign-keeping decode, BT.2390 EETF
   (source peak 1000 nits, white 100), HLG OOTF, BT.2020 to BT.709, one late clip, inverse BT.1886, the
-  left-sited linear chroma mix, 10-bit limited-range quantization. The source's transfer, matrix,
+  left-sited linear chroma mix, limited-range quantization (10-bit for P010, 8-bit for NV12, rounded,
+  no dither). The source's transfer, matrix,
   range and chroma position are those of the sequence header (PQ: tone map; HLG: OOTF and tone map;
   BT.2020 SDR: gamut; else BT.709 scale only).
 - **What changes around it**: the last postfilter stage does not write the output image (the fusion is
   off for such frames, `out=copy-switch` in the timing run) and writes the frame buffer of every frame,
   unreferenced ones too, since the pass reads it. The decoded frames and the reference frames are the
   same bytes; only the output image differs.
-- **Not in the prototype**: 8-bit and monochrome frames (they keep the normal output), NV12 output and
-  its dither, film grain (not applied, logged once), the staged path (a texture shaders may not write:
+- **Film grain** (AV1 7.18.3) is applied before the downscale: the film grain pass writes the grained
+  planes into the back buffer in the frame buffer's layout, and the display pass reads them there (25 MB
+  more written and read at 4K 10-bit, grain frames only).
+- **Not in the prototype**: monochrome frames (they keep the normal output), the NV12 dither of Bale's
+  stage (8-bit output is rounded), film grain with `-tryhdr10x3` (not applied, logged once), the staged
+  path (a texture shaders may not write:
   logged, no frame written), the container's colour tags, the Hable curve and desaturation, Bale's
   `gammachroma` math. `Rav1gFrame::color` still describes the stream.
 - **Cost on rav1g's queue**: one dependent step (~18 us), a read of the frame buffer (24.9 MB at 4K
   10-bit) and a 6.2 MB write at 1080p, and the arithmetic of 8.3 M source-pixel evaluations, against
   the fused output stores (frames with CDEF) or the 49.8 MB copy (frames without a postfilter) of
-  today. Registers (`shader_regs`, gfx1030 wave64): 58 VGPRs, 4.6 KB of group memory, 7 waves a SIMD.
-- **Checked**: CI job `rust-output` (WARP) decodes the PQ stream `syn-hdr10-10b-1080p` and the SDR
-  stream `syn-tiles-10b-1080p` of the conformance set once as they are and once with `-output p010
-  -displaypass 960x540`, and `testing/display_pass/check.py` holds every code of the display images
-  against a float32 model of the pass (`testing/display_pass/model.py`, numpy), at most one code apart
-  (fp32 on two compilers). The model follows the same description; holding both against Bale's own
+  today. Registers (`shader_regs`, gfx1030 wave64): 60 VGPRs, 15 KB of group memory, 8 waves a SIMD
+  (the first prototype: 58, 4.6 KB, 7).
+- **Checked**: CI job `rust-output` (WARP) decodes the PQ stream `syn-hdr10-10b-1080p`, the SDR
+  stream `syn-tiles-10b-1080p` and the film grain streams `av1-1-b10-23-film_grain-50` and
+  `av1-1-b8-23-film_grain-50` of the conformance set once as they are and then with `-output p010
+  -displaypass` at half their size (the quad path) and at two thirds (the area path), and
+  `testing/display_pass/check.py` holds every code of the display images against a float32 model of the
+  pass (`testing/display_pass/model.py`, numpy) computed from the first run's frames (with their grain),
+  at most one code apart (fp32 on two compilers); a code further off is printed with its place and its
+  source pixels. `testing/display_pass/run.sh` (CI job `sync-check`, and precheck) runs the shader
+  compiled as C++ on 17 test cases under the adversarial thread schedule of `testing/common/group_sched.h`
+  and holds them against the same model, with eight mutations that must be rejected. The model follows the same description; holding both against Bale's own
   CPU reference (`cpu.rs`) is a step for Bale's side.
 - **On the console**: the test player's timing run with `-output p010 -displaypass 1920x1080` (or
   `-interop -displaypass 1920x1080`) against the same task without it, on the 40 and 60 Mbps clips and
   the HDR10 one: `copy_plane` in the stage table is the display pass on every frame, `gpu busy` the
   sum. Bale's "Stage GPU" for the same clips is the other side of the sum.
+
+## The display pass, fast
+
+The prototype as first measured (console, idle state, 2026-11-23, `-output p010 -displaypass
+1920x1080`): 3.48 ms a 4K frame in the `copy_plane` slot (5.49 on the frames of a 4K50 stream), against
+1.10 ms for the plain copy it replaces. It reads 24.9 MB and writes 6.2 MB, ~0.8 ms at the idle state's
+~40 GB/s, so it was bound by arithmetic (AGENTS.md: 1.86 TFLOP/s for the app, compute not slowed in the
+idle state): per source pixel the PQ EOTF of three channels and the EETF of the largest, seven `pow`
+pairs with their divisions, about 35 transcendental operations (quarter rate on RDNA2), for 8.3 M source
+pixels; and its 64-thread groups computed 264 values with 64 lanes (a fifth pass for 8 lanes).
+
+What the pass does now:
+
+- **Tables for PQ.** The EOTF of a signal, and the tone-map gain `eetf(peak) / max(peak, 1e-6)`, which
+  is a function of the largest R'G'B' signal alone (the EOTF is monotonic), are tables the host makes
+  once a process (`crates/rav1g/src/host/display_pass.rs`) and copies into the frame's constant memory
+  (5.5 KB a frame, bound as `t0`); every group reads them into group memory (510 groups at 1080p: 3 MB
+  of cache reads). An interval holds a cubic (Hermite, from the function's float64 values and one-sided
+  derivatives at its ends): one 16-byte read and three FMAs a value, within 1e-6 of the function
+  wherever the light is above 1e-5 of SDR white. The EOTF has 64 intervals up to a signal of 1/32 and
+  192 above; the gain 64 from the EETF's knee (below it the gain is 1 / the 203-nit target) to the
+  source peak's signal, where the curve meets its clip, and 32 above. That accuracy is needed, not only
+  nice: a first version with linear interpolation (1024 + 512 entries, 1e-4 relative, within 0.08 of a
+  code for any grey) differed from the model by 2 codes on WARP, on out-of-gamut pixels whose BT.709
+  channels cancel to almost nothing before the 1/2.4 power, which turns 1e-5 of light into a few codes.
+  Below a largest signal of 4e-4 (~1e-6 nits) the gain is proportional to the peak (the 1e-6), and the
+  peak's nits are computed there: a branch near-black out-of-gamut pixels take. HLG takes the gain table
+  on log2 nits (one line, 1000 nits on a node); SDR's power 2.4 stays a `pow` (no table is cheaper at the
+  same accuracy) and loads no table.
+- **BT.2020 to BT.709 once per output pixel.** The conversion is linear and so is the area average; the
+  gain is folded into the sum, the Y'CbCr constants come as inline constants (scalar registers).
+- **The 2:1 quad path** (exactly 2:1 with 4-byte aligned planes: 3840x2160 to 1920x1080): a thread takes
+  2x2 output pixels, reads each of its four source rows with one 8-byte load (4 bytes at 8 bits; a wave
+  reads 256 contiguous bytes a row) and U and V of the row's two chroma rows at three columns; the sited
+  chroma positions have constant weights (source columns at chroma columns c, c + 1/2, c + 1, c + 3/2),
+  exact in float32 like the model's. Other ratios take the model's area loop with the same tables.
+- **Groups of 256 threads, 64x64 output pixels.** Four quads a thread; each output chroma sample's left
+  neighbour column comes from the thread on the left through group memory (two buffers, one group sync a
+  quad row), the column left of the tile from the first 64 threads (one pixel each, 1.6% more pixels).
+
+**Expected on the console** (not measured here; the parent runs the A/B): the PQ quad path is about 62
+VALU operations a source pixel (RGA's listing: 47 in the PQ block with the near-black branch, which is
+skipped, plus the decode and the sum), about 250 an output pixel, and the encode (three `pow` for luma, a
+quarter of three for chroma: 7.5 transcendental operations), the BT.709 conversion, the chroma mix and
+the stores about 45-90 cycles more: ~340 lane cycles an output pixel, 0.7 G for 2.07 M output pixels:
+**0.76 ms with the slice's ALUs fully busy** (1.86 TFLOP/s is 0.93 T lane operations a second). With 8
+waves a SIMD the 31 MB of traffic (0.7-0.8 ms at 40-45 GB/s, the copy pass's rate) overlaps it: about
+**0.9-1.1 ms a 4K frame** for 1080p, against 3.48 ms, and below the 1.10 ms of the copy it replaces. The
+4K50 stream's frames should take the same per frame (the work is per output pixel and no longer
+depends on the content: the old EETF branch was divergent on bright pixels). The pass runs once per
+output image: in the frame's command list for a shown frame, in an output context's for a
+`show_existing_frame`, never for a hidden frame (`copy_output` only for `image_state != 0`); the
+show-existing copies have their own line in the timing run (`GPUTIME show-existing copies`), so their
+pass is not in the per-frame `copy_plane` mean.
 
 ## The ABI it needs
 

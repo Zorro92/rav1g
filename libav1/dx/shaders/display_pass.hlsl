@@ -9,8 +9,10 @@
  */
 
 // Display pass, a prototype (docs/stage-fusion.md, option B; -displaypass): the decoded frame, read from
-// its frame buffer, goes straight into a display-size P010 texture as BT.709 SDR, instead of the 4K
-// output image an application's own stage downscales and tone-maps.
+// its frame buffer (or, for a film grain frame, from the grained copy the film grain pass wrote into the
+// back buffer), goes straight into a display-size texture as BT.709 SDR (P010 for a 10-bit frame, NV12
+// for an 8-bit one), instead of the full-size output image an application's own stage downscales and
+// tone-maps.
 //
 // The operations are those of the display stage of the application this is measured for (area
 // downscale in display-linear light, exact overlap weights; PQ through the BT.2390 EETF to a 203-nit
@@ -24,23 +26,21 @@
 // not by its 31 MB of traffic, and most of the arithmetic was the transfer functions of every source
 // pixel. So:
 //   - PQ: the EOTF (ST 2084) and the tone-map gain (the EETF of the largest channel over that channel,
-//     a function of the largest R'G'B' signal alone) are tables the host computes once with the model's
-//     float32 functions (output.rs, display_pass_lut), read into group memory, linearly interpolated.
-//     The EOTF table has two pieces, 256 intervals up to a signal of 1/32 and 768 above, so that an
-//     interpolation error stays below 0.1 code of the output for any grey (the model's check says by how
-//     much a pixel may differ, from the condition of its arithmetic: model.py). HLG takes the gain
-//     table on log2 nits; SDR computes its power 2.4 directly (no cheaper table is as exact) and loads no
-//     table.
+//     a function of the largest R'G'B' signal alone) are tables the host makes once
+//     (crates/rav1g/src/host/display_pass.rs): a cubic an interval (16 bytes), within 1e-6 of the
+//     function, the float32 level of the model's own arithmetic; one 16-byte group memory read and three
+//     FMAs a value. HLG takes the gain table on log2 nits; SDR computes its power 2.4 directly (no table
+//     is cheaper at the same accuracy) and loads no table.
 //   - BT.2020 to BT.709 is linear and so is the area average: it is applied once to the average of an
-//     output pixel, not to every source pixel.
+//     output pixel, not to every source pixel, and the gain is folded into the sum.
 //   - At 2:1 (3840x2160 to 1920x1080, the case the pass is sized for) a thread takes 2x2 output pixels
-//     from four rows of its source read with 8-byte loads (a wave reads 256 contiguous bytes a row) and
-//     the chroma rows it shares with the quad below it kept in registers; the chroma is interpolated at
-//     the four sited positions with constant weights. Other ratios take the area loop of the model.
+//     from four rows of its source read with 8-byte loads (a wave reads 256 contiguous bytes a row); the
+//     chroma is interpolated at the sited positions with constant weights. Other ratios take the area
+//     loop of the model.
 //   - A group is 256 threads and 64x64 output pixels; the output chroma's left neighbour column comes
 //     through group memory from the thread to the left, and one column more on the left of the tile
 //     (64 rows) is computed by the first 64 threads, 1.6% more pixels.
-// Group memory 12.7 KB (the two tables 6 KB, the column exchange 6.5 KB).
+// Group memory 12.5 KB (the tables 5.5 KB, the column exchange 6 KB, the edge column 0.75 KB).
 
 ByteAddressBuffer lut_src : register(t0);
 RWByteAddressBuffer pool : register(u0);
@@ -55,18 +55,21 @@ cbuffer cb_display : register(b0) {
   uint cb_src_h;
   uint cb_out_w;      // output size, even
   uint cb_out_h;
-  uint cb_y_offset;   // the planes of the frame buffer, 16-bit samples
+  uint cb_y_offset;   // the planes of the frame buffer: 16-bit samples, 8-bit with bit 6 of the flags
   uint cb_u_offset;
   uint cb_v_offset;
   uint cb_y_stride;
   uint cb_uv_stride;
   uint cb_flags;      // bits 0-1: 0 PQ, 1 SDR, 2 HLG; bit 2: BT.2020; bit 3: full range; bit 4: chroma between
-                      // rows; bit 5: exactly 2:1 with planes at multiples of 4 bytes (the quad path)
+                      // rows; bit 5: exactly 2:1 with planes at multiples of 4 bytes (the quad path);
+                      // bit 6: 8-bit samples and codes, NV12 output (else 10-bit, P010)
   float cb_eotf_a;    // the EOTF table's position of a signal m: min(m * a, m * b + c), at most EOTF_N
   float cb_eotf_b;
   float cb_eotf_c;
-  float cb_gain_scale;   // the gain table's position of x (PQ: the largest signal; HLG: log2 nits): x * scale + offset
-  float cb_gain_offset;
+  float cb_gain_s1;      // the gain table's position of x (PQ: the largest signal; HLG: log2 nits):
+  float cb_gain_o1;      // min(x * s1 + o1, x * s2 + o2), 0 to GAIN_N
+  float cb_gain_s2;
+  float cb_gain_o2;
   float cb_exact_below;  // PQ: below this largest signal the peak's nits are computed, not interpolated
   // Y'CbCr codes to R'G'B', the sequence's matrix and range (uniform: scalar registers): Y' = Y * ys + yo,
   // Cb = U * cs + co (and Cr of V), R' = Y' + kr Cr, B' = Y' + kb Cb, G' = Y' + kgu Cb + kgv Cr.
@@ -80,14 +83,14 @@ cbuffer cb_display : register(b0) {
   float cb_kgv;
 };
 
-#define EOTF_N 1024u
-#define GAIN_N 512u
-#define GAIN_BASE 1025u
-#define LUT_WORDS 1540u
+#define EOTF_N 256u
+#define GAIN_N 96u
+#define GAIN_BASE 257u
+#define LUT_ENTRIES 354u
 #define TILE 64
 #define THREADS 256u
 
-groupshared float lut[LUT_WORDS];
+groupshared float4 lut[LUT_ENTRIES];  // a cubic an interval, a + t (b + t (c + t d)): the EOTF's, the gain's
 groupshared float3 ex[2 * THREADS];  // [quad parity][thread]: 1/8 of the right column of the thread's quad
 groupshared float3 edge[TILE];       // the column left of the tile, a row a thread of the first 64
 
@@ -96,6 +99,7 @@ bool bt2020() { return (cb_flags & 4u) != 0; }
 bool full_range() { return (cb_flags & 8u) != 0; }
 bool between_rows() { return (cb_flags & 16u) != 0; }
 bool quad_path() { return (cb_flags & 32u) != 0; }
+bool eight_bit() { return (cb_flags & 64u) != 0; }
 
 float3 mad3(float a, float3 b, float3 c) { return float3(mad(a, b.x, c.x), mad(a, b.y, c.y), mad(a, b.z, c.z)); }
 
@@ -105,8 +109,12 @@ float with_sign(float v, float e) { return asfloat(asuint(v) | (asuint(e) & 0x80
 float lo16(uint w) { return (float)(w & 0xffffu); }
 float hi16(uint w) { return (float)(w >> 16); }
 
-// The 10-bit code of a sample of the frame buffer: 16 bits a sample, the value in the low 10.
+// The code of a sample of the frame buffer: 16 bits a sample with the value in the low 10, or a byte.
 float sample_at(uint offset, uint stride, int2 p) {
+  if (eight_bit()) {
+    const uint at = offset + (uint)p.y * stride + (uint)p.x;
+    return (float)((pool.Load(at & ~3u) >> ((at & 3u) * 8u)) & 255u);
+  }
   const uint addr = offset + (uint)p.y * stride + (uint)p.x * 2u;
   const uint word = pool.Load(addr & ~3u);
   return (addr & 2u) ? hi16(word) : lo16(word);
@@ -118,26 +126,23 @@ float pq_to_nits(float e) {
   return pow(max(p - 0.8359375f, 0.0f) / (18.8515625f - 18.6875f * p), 1.0f / 0.1593017578125f) * 10000.0f;
 }
 
-// The PQ EOTF of a signal m (not negative), from the table: nits.
+float cubic(uint i, float t) {
+  const float4 c = lut[i];
+  return mad(t, mad(t, mad(t, c.w, c.z), c.y), c.x);
+}
+
+// The PQ EOTF of a signal m (not negative), from the table: nits. At the end (EOTF_N, a signal of 1 or
+// more) the entry behind the last interval holds the value at 1.
 float pq_table(float m) {
-  // At the end (t = EOTF_N) f is 0 and the word behind the table does not count.
   const float t = min(min(m * cb_eotf_a, mad(m, cb_eotf_b, cb_eotf_c)), (float)EOTF_N);
-  const uint i = (uint)t;
-  const float f = frac(t);
-  const float a = lut[i];
-  const float b = lut[i + 1u];
-  return mad(f, b - a, a);
+  return cubic((uint)t, frac(t));
 }
 
 // The tone-map gain at x (PQ: the largest R'G'B' signal; HLG: log2 of the largest channel's nits): the
 // EETF of the peak over the peak, 1/nits. Constant below the table's start (below the EETF's knee).
 float gain_table(float x) {
-  const float t = clamp(mad(x, cb_gain_scale, cb_gain_offset), 0.0f, (float)GAIN_N);
-  const uint i = (uint)t;
-  const float f = frac(t);
-  const float a = lut[GAIN_BASE + i];
-  const float b = lut[GAIN_BASE + i + 1u];
-  return mad(f, b - a, a);
+  const float t = clamp(min(mad(x, cb_gain_s1, cb_gain_o1), mad(x, cb_gain_s2, cb_gain_o2)), 0.0f, (float)GAIN_N);
+  return cubic(GAIN_BASE + (uint)t, frac(t));
 }
 
 // BT.2100 HLG: inverse OETF of one channel.
@@ -250,23 +255,30 @@ struct Quad {
   float3 v00, v10, v01, v11;  // v<column><row>, display-linear BT.709
 };
 
-// U (x) and V (y) of a chroma row at the columns c (even) and c + 1, one dword a plane.
-uint2 chroma_pair(int row, uint c) {
-  const uint at = (uint)row * cb_uv_stride + c * 2u;
-  return uint2(pool.Load(cb_u_offset + at), pool.Load(cb_v_offset + at));
+// The samples of a plane's row at the columns c (even) and c + 1, from one dword.
+float2 pair_at(uint offset, int row, uint c) {
+  if (eight_bit()) {
+    const uint at = offset + (uint)row * cb_uv_stride + c;
+    const uint w = pool.Load(at & ~3u) >> ((at & 2u) * 8u);
+    return float2((float)(w & 255u), (float)((w >> 8) & 255u));
+  }
+  const uint w = pool.Load(offset + (uint)row * cb_uv_stride + c * 2u);
+  return float2(lo16(w), hi16(w));
 }
 
-// U and V of a chroma row at the column c2 (clamped to the plane, either half of a dword).
-float2 chroma_third(int row, uint c2) {
-  const uint at = (uint)row * cb_uv_stride + (c2 & ~1u) * 2u;
-  const uint u = pool.Load(cb_u_offset + at);
-  const uint v = pool.Load(cb_v_offset + at);
-  return (c2 & 1u) ? float2(hi16(u), hi16(v)) : float2(lo16(u), lo16(v));
+// Four luma samples of a row from the column x (a multiple of 4), one or two dwords.
+float4 luma4(int row, uint x) {
+  if (eight_bit()) {
+    const uint w = pool.Load(cb_y_offset + (uint)row * cb_y_stride + x);
+    return float4((float)(w & 255u), (float)((w >> 8) & 255u), (float)((w >> 16) & 255u), (float)(w >> 24));
+  }
+  const uint2 l = pool.Load2(cb_y_offset + (uint)row * cb_y_stride + x * 2u);
+  return float4(lo16(l.x), hi16(l.x), lo16(l.y), hi16(l.y));
 }
 
 // The quad of output pixels at o (even) at exactly 2:1: source rows 2 o.y .. 2 o.y + 3, columns 2 o.x ..
 // 2 o.x + 3, which sit at the chroma columns o.x, o.x + 1/2, o.x + 1, o.x + 3/2: a row reads four luma
-// samples (8 bytes), and U and V of its two chroma rows at three columns. Every interpolated chroma
+// samples (8 bytes, 4 at 8 bits), and U and V of its two chroma rows at three columns. Every interpolated chroma
 // value is a multiple of 1/8 below 1024, exact in float32 in any order, as the model's.
 Quad quad_2to1(int2 o) {
   const uint c = (uint)o.x;
@@ -280,21 +292,25 @@ Quad quad_2to1(int2 o) {
     const float f = cy - (float)base;
     const int ra = clamp(base, 0, last_row);
     const int rb = clamp(base + 1, 0, last_row);
-    const uint2 pa = chroma_pair(ra, c);
-    const uint2 pb = chroma_pair(rb, c);
-    const float2 ta = chroma_third(ra, c2);
-    const float2 tb = chroma_third(rb, c2);
-    const float u0 = mad(lo16(pb.x) - lo16(pa.x), f, lo16(pa.x));
-    const float u1 = mad(hi16(pb.x) - hi16(pa.x), f, hi16(pa.x));
-    const float u2 = mad(tb.x - ta.x, f, ta.x);
-    const float v0 = mad(lo16(pb.y) - lo16(pa.y), f, lo16(pa.y));
-    const float v1 = mad(hi16(pb.y) - hi16(pa.y), f, hi16(pa.y));
-    const float v2 = mad(tb.y - ta.y, f, ta.y);
-    const uint2 l = pool.Load2(cb_y_offset + (uint)y * cb_y_stride + c * 4u);
-    const float4 p0 = decode_pixel(lo16(l.x), u0, v0);
-    const float4 p1 = decode_pixel(hi16(l.x), (u0 + u1) * 0.5f, (v0 + v1) * 0.5f);
-    const float4 p2 = decode_pixel(lo16(l.y), u1, v1);
-    const float4 p3 = decode_pixel(hi16(l.y), (u1 + u2) * 0.5f, (v1 + v2) * 0.5f);
+    const float2 ua = pair_at(cb_u_offset, ra, c);
+    const float2 ub = pair_at(cb_u_offset, rb, c);
+    const float2 va = pair_at(cb_v_offset, ra, c);
+    const float2 vb = pair_at(cb_v_offset, rb, c);
+    const float u2a = sample_at(cb_u_offset, cb_uv_stride, int2((int)c2, ra));
+    const float u2b = sample_at(cb_u_offset, cb_uv_stride, int2((int)c2, rb));
+    const float v2a = sample_at(cb_v_offset, cb_uv_stride, int2((int)c2, ra));
+    const float v2b = sample_at(cb_v_offset, cb_uv_stride, int2((int)c2, rb));
+    const float u0 = mad(ub.x - ua.x, f, ua.x);
+    const float u1 = mad(ub.y - ua.y, f, ua.y);
+    const float u2 = mad(u2b - u2a, f, u2a);
+    const float v0 = mad(vb.x - va.x, f, va.x);
+    const float v1 = mad(vb.y - va.y, f, va.y);
+    const float v2 = mad(v2b - v2a, f, v2a);
+    const float4 l = luma4(y, 2u * c);
+    const float4 p0 = decode_pixel(l.x, u0, v0);
+    const float4 p1 = decode_pixel(l.y, (u0 + u1) * 0.5f, (v0 + v1) * 0.5f);
+    const float4 p2 = decode_pixel(l.z, u1, v1);
+    const float4 p3 = decode_pixel(l.w, (u1 + u2) * 0.5f, (v1 + v2) * 0.5f);
     if (k < 2u) {
       acc[0] = add_light(add_light(acc[0], p0, 1.0f), p1, 1.0f);
       acc[1] = add_light(add_light(acc[1], p2, 1.0f), p3, 1.0f);
@@ -327,30 +343,29 @@ float3 encode_rgb(float3 c) {
                 with_sign(pow(min(abs(c.z), 3.0f), 1.0f / 2.4f), c.z));
 }
 
+// BT.709 Y'CbCr, limited range: 10-bit codes in the high bits of P010's 16, or NV12's 8-bit codes.
 uint luma_code(float3 c) {
   const float y = dot(float3(0.2126f, 0.7152f, 0.0722f), encode_rgb(c));
+  if (eight_bit()) return (uint)clamp(floor(16.0f + 219.0f * y + 0.5f), 16.0f, 235.0f);
   return (uint)clamp(floor(64.0f + 876.0f * y + 0.5f), 64.0f, 940.0f) << 6;
 }
 
-// BT.709 Y'CbCr, 10-bit limited range.
 uint2 chroma_code(float3 c) {
   const float3 e = encode_rgb(c);
   const float y = dot(float3(0.2126f, 0.7152f, 0.0722f), e);
   const float cb = (e.z - y) / (2.0f * (1.0f - 0.0722f));
   const float cr = (e.x - y) / (2.0f * (1.0f - 0.2126f));
+  if (eight_bit()) {
+    return uint2((uint)clamp(floor(128.0f + 224.0f * cb + 0.5f), 16.0f, 240.0f),
+                 (uint)clamp(floor(128.0f + 224.0f * cr + 0.5f), 16.0f, 240.0f));
+  }
   return uint2((uint)clamp(floor(512.0f + 896.0f * cb + 0.5f), 64.0f, 960.0f) << 6,
                (uint)clamp(floor(512.0f + 896.0f * cr + 0.5f), 64.0f, 960.0f) << 6);
 }
 
 [numthreads(256, 1, 1)] void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
   if (mode() != 1u) {
-    [loop] for (uint i = lane; i < LUT_WORDS / 4u; i += THREADS) {
-      const uint4 w = lut_src.Load4(i * 16u);
-      lut[4u * i] = asfloat(w.x);
-      lut[4u * i + 1u] = asfloat(w.y);
-      lut[4u * i + 2u] = asfloat(w.z);
-      lut[4u * i + 3u] = asfloat(w.w);
-    }
+    [loop] for (uint i = lane; i < LUT_ENTRIES; i += THREADS) lut[i] = asfloat(lut_src.Load4(i * 16u));
   }
   GroupMemoryBarrierWithGroupSync();
 

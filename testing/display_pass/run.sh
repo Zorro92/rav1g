@@ -72,6 +72,8 @@ if [ "${1:-}" = "--mutate" ]; then
   expect_rejected 'the third chroma column' 's/(u1 + u2) \* 0.5f/(u1 + u1) * 0.5f/'
   expect_rejected 'the left chroma neighbour' 's/ex\[(q \& 1u) \* THREADS + lane - 1u\]/ex[(q \& 1u) * THREADS + lane]/'
   expect_rejected 'the edge column' 's/area_linear(int2(x0 - 1, oy))/area_linear(int2(x0, oy))/'
-  expect_rejected 'the EOTF table' 's/return mad(f, b - a, a);/return a;/'
+  expect_rejected 'the interpolation of the tables' 's/return mad(t, mad(t, mad(t, c.w, c.z), c.y), c.x);/return c.x;/'
   expect_rejected 'the exact peak below 1e-6 nits' 's/peak = pq_to_nits(emax);/peak = peak;/'
+  expect_rejected 'the 8-bit chroma pair' 's/pool.Load(at \& ~3u) >> ((at \& 2u) \* 8u)/pool.Load(at \& ~3u)/'
+  expect_rejected 'the NV12 chroma codes' 's/floor(128.0f + 224.0f \* cr + 0.5f)/floor(128.0f + 224.0f * cb + 0.5f)/'
 fi

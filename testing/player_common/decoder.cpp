@@ -775,7 +775,7 @@ int AV1Decoder::DecodeOne() {
     av1_set_display_pass(display_w, display_h);
     if (display_w > 0 && display_h > 0)
       XB_LOGI << "Display pass: " << display_w << "x" << display_h
-              << " P010 (prototype, -displaypass; 10-bit frames with -output p010 or -interop)";
+              << " (prototype, -displaypass: P010 for 10-bit frames, NV12 for 8-bit, with -output p010 or -interop)";
   }
   XB_LOGI << "Front of the frame: "
           << (params_.frontmergelegacy_ ? "five steps (-frontmergelegacy)" : "two steps (default)");

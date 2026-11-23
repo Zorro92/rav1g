@@ -37,64 +37,78 @@ namespace shader {
 #include "display_pass.entry.h"
 }  // namespace shader
 
-// The tables of crates/rav1g/src/host/display_pass.rs, the same float32 functions.
+// The tables of crates/rav1g/src/host/display_pass.rs: the same float64 functions, nodes and cubics.
 namespace tables {
-const int kEotfN = 1024, kEotfFine = 256, kGainN = 512, kWords = 1540;
-const float kSplit = 1.0f / 32.0f, kPeak = 1000.0f, kWhite = 100.0f;
+const int kEotfN = 256, kEotfFine = 64, kGainN = 96, kGainLow = 64, kWords = 4 * (kEotfN + 1 + kGainN + 1);
+const double kSplit = 1.0 / 32.0, kPeak = 1000.0, kWhite = 100.0;
+const double M1 = 2610.0 / 16384.0, M2 = 2523.0 / 32.0, C1 = 3424.0 / 4096.0, C2 = 2413.0 / 128.0, C3 = 2392.0 / 128.0;
 
-float pq_to_nits(float e) {
-  const float p = powf(fminf(fmaxf(e, 0.0f), 1.0f), 1.0f / 78.84375f);
-  return powf(fmaxf(p - 0.8359375f, 0.0f) / (18.8515625f - 18.6875f * p), 1.0f / 0.1593017578125f) * 10000.0f;
+double pq_to_nits(double e) {
+  const double p = pow(fmin(fmax(e, 0.0), 1.0), 1.0 / M2);
+  return pow(fmax(p - C1, 0.0) / (C2 - C3 * p), 1.0 / M1) * 10000.0;
 }
-float nits_to_pq(float n) {
-  const float p = powf(fminf(fmaxf(n, 0.0f), 10000.0f) / 10000.0f, 0.1593017578125f);
-  return powf((0.8359375f + 18.8515625f * p) / (1.0f + 18.6875f * p), 78.84375f);
+double nits_to_pq(double n) {
+  const double p = pow(fmin(fmax(n, 0.0), 10000.0) / 10000.0, M1);
+  return pow((C1 + C2 * p) / (1.0 + C3 * p), M2);
 }
-float eetf(float nits) {
-  nits = fminf(fmaxf(nits, 0.0f), kPeak);
-  const float target = fminf(kWhite * 2.03f, 10000.0f);
-  if (kPeak <= target) return fminf(nits / target, 1.0f);
-  const float peak = nits_to_pq(kPeak);
-  const float s = nits_to_pq(nits) / peak;
-  const float top = nits_to_pq(target) / peak;
-  const float knee = 2.0f * top - 1.0f;
-  float mapped = s;
+double target() { return fmin(kWhite * 2.03, 10000.0); }
+double eetf(double nits) {
+  nits = fmin(fmax(nits, 0.0), kPeak);
+  if (kPeak <= target()) return fmin(nits / target(), 1.0);
+  const double peak = nits_to_pq(kPeak), s = nits_to_pq(nits) / peak, top = nits_to_pq(target()) / peak;
+  const double knee = 2.0 * top - 1.0;
+  double mapped = s;
   if (s >= knee) {
-    const float t = (s - knee) / (1.0f - knee), t2 = t * t, t3 = t2 * t;
-    mapped = (2.0f * t3 - 3.0f * t2 + 1.0f) * knee + (t3 - 2.0f * t2 + t) * (1.0f - knee) + (-2.0f * t3 + 3.0f * t2) * top;
+    const double t = (s - knee) / (1.0 - knee), t2 = t * t, t3 = t2 * t;
+    mapped = (2.0 * t3 - 3.0 * t2 + 1.0) * knee + (t3 - 2.0 * t2 + t) * (1.0 - knee) + (-2.0 * t3 + 3.0 * t2) * top;
   }
-  return fminf(fmaxf(pq_to_nits(mapped * peak) / target, 0.0f), 1.0f);
+  return fmin(fmax(pq_to_nits(mapped * peak) / target(), 0.0), 1.0);
 }
-float gain(float nits) { return eetf(nits) / fmaxf(nits, 1e-6f); }
+double gain(double nits) { return eetf(nits) / fmax(nits, 1e-6); }
 
-// The words, and the constants eotf a, b, c, gain scale, offset.
-std::vector<uint> make(uint mode, float constants[5]) {
-  std::vector<uint> words(kWords, 0);
-  const float a = kEotfFine / kSplit, b = (kEotfN - kEotfFine) / (1.0f - kSplit), c = kEotfFine - kSplit * b;
-  const float target = fminf(kWhite * 2.03f, 10000.0f);
-  const float pk = nits_to_pq(kPeak);
-  const float start_e = kPeak <= target ? nits_to_pq(target) : (2.0f * (nits_to_pq(target) / pk) - 1.0f) * pk;
-  const float start_nits = kPeak <= target ? target : pq_to_nits(start_e);
-  float scale, offset;
-  if (mode == 2) {
-    const float u0 = log2f(start_nits);
-    scale = kGainN / (10.0f - u0);
-    for (int j = 0; j <= kGainN; j++) words[kEotfN + 1 + j] = asuint(gain(exp2f(u0 + j / scale)));
-    offset = -u0 * scale;
-  } else {
-    scale = kGainN / (1.0f - start_e);
-    for (int j = 0; j <= kGainN; j++) words[kEotfN + 1 + j] = asuint(gain(pq_to_nits(start_e + j / scale)));
-    for (int k = 0; k <= kEotfN; k++) {
-      const float e = k < kEotfFine ? k / a : (k - c) / b;
-      words[k] = asuint(pq_to_nits(fminf(e, 1.0f)));
-    }
-    offset = -start_e * scale;
+template <class X, class Fn>
+void fill(uint *words, int n, X x, Fn f) {
+  for (int k = 0; k < n; k++) {
+    const double x0 = x(k), x1 = x(k + 1), h = x1 - x0, e = h * 1e-4, v0 = f(x0), v1 = f(x1);
+    const double d0 = (-3.0 * v0 + 4.0 * f(x0 + e) - f(x0 + 2.0 * e)) / (2.0 * e) * h;
+    const double d1 = (3.0 * v1 - 4.0 * f(x1 - e) + f(x1 - 2.0 * e)) / (2.0 * e) * h;
+    words[4 * k] = asuint((float)v0);
+    words[4 * k + 1] = asuint((float)d0);
+    words[4 * k + 2] = asuint((float)(3.0 * (v1 - v0) - 2.0 * d0 - d1));
+    words[4 * k + 3] = asuint((float)(2.0 * (v0 - v1) + d0 + d1));
   }
-  constants[0] = a;
-  constants[1] = b;
-  constants[2] = c;
-  constants[3] = scale;
-  constants[4] = offset;
+  words[4 * n] = asuint((float)f(x(n)));
+}
+
+// The words, and the constants eotf a, b, c and the gain's s1, o1, s2, o2.
+std::vector<uint> make(uint mode, float constants[7]) {
+  std::vector<uint> words(kWords, 0);
+  const double a = kEotfFine / kSplit, b = (kEotfN - kEotfFine) / (1.0 - kSplit), c = kEotfFine - kSplit * b;
+  const double pk = nits_to_pq(kPeak);
+  const double knee = kPeak <= target() ? nits_to_pq(target()) : (2.0 * (nits_to_pq(target()) / pk) - 1.0) * pk;
+  const double peak = kPeak <= target() ? knee : pk;
+  uint *gain_words = words.data() + 4 * (kEotfN + 1);
+  double lines[4];
+  if (mode == 2) {
+    const double u0 = log2(pq_to_nits(knee)), step = (log2(kPeak) - u0) / (kGainN - 1);
+    fill(gain_words, kGainN, [&](int j) { return u0 + j * step; }, [](double u) { return gain(exp2(u)); });
+    lines[0] = lines[2] = 1.0 / step;
+    lines[1] = lines[3] = -u0 / step;
+  } else {
+    const double s1 = kGainLow / (peak - knee), s2 = (kGainN - kGainLow) / (1.0 - peak);
+    fill(gain_words, kGainN, [&](int j) { return j < kGainLow ? knee + j / s1 : peak + (j - kGainLow) / s2; },
+         [](double e) { return gain(pq_to_nits(e)); });
+    fill(words.data(), kEotfN, [&](int k) { return k < kEotfFine ? k / a : (k - c) / b; },
+         [](double e) { return pq_to_nits(e); });
+    lines[0] = s1;
+    lines[1] = -knee * s1;
+    lines[2] = s2;
+    lines[3] = kGainLow - peak * s2;
+  }
+  constants[0] = (float)a;
+  constants[1] = (float)b;
+  constants[2] = (float)c;
+  for (int i = 0; i < 4; i++) constants[3 + i] = (float)lines[i];
   return words;
 }
 }  // namespace tables
@@ -105,6 +119,7 @@ struct Case {
   uint transfer, matrix;  // H.273
   bool full, colocated, no_quad;
   int content;            // 0 natural-ish, 1 every code at random, 2 out of gamut just above black
+  int depth = 10;         // 8: a byte a sample, NV12 codes
 };
 
 static uint ceil_div(uint n, uint d) { return (n + d - 1) / d; }
@@ -120,9 +135,10 @@ static int run_case(const Case &c, const std::string &dir, std::mt19937 &rng) {
   // The frame pool: a base, three planes of 16-bit samples with padded rows, V last and the pool ending
   // with the dword of its last visible sample, so that a read past it is seen.
   const uint cw = ceil_div(c.sw, 2), ch = ceil_div(c.sh, 2);
-  const uint y_stride = (ceil_div(c.sw, 64) * 64 + 32) * 2, uv_stride = (ceil_div(cw, 64) * 64 + 32) * 2;
+  const uint bpp = c.depth == 8 ? 1 : 2, top = c.depth == 8 ? 255 : 1023;
+  const uint y_stride = (ceil_div(c.sw, 64) * 64 + 32) * bpp, uv_stride = (ceil_div(cw, 64) * 64 + 32) * bpp;
   const uint y_off = 256, u_off = y_off + c.sh * y_stride + 64, v_off = u_off + ch * uv_stride + 128;
-  std::vector<uint8_t> bytes((v_off + (ch - 1) * uv_stride + cw * 2 + 3) & ~3u, 0);
+  std::vector<uint8_t> bytes((v_off + (ch - 1) * uv_stride + cw * bpp + 3) & ~3u, 0);
   std::vector<uint16_t> planes[3] = { std::vector<uint16_t>(c.sw * c.sh), std::vector<uint16_t>(cw * ch),
                                       std::vector<uint16_t>(cw * ch) };
   std::uniform_int_distribution<int> noise(-24, 24);
@@ -156,7 +172,7 @@ static int run_case(const Case &c, const std::string &dir, std::mt19937 &rng) {
       for (uint x = 0; x < w; x++) {
         int v;
         if (c.content == 1) {
-          v = (int)(rng() & 1023);
+          v = (int)(rng() & top);
         } else if (c.content == 2) {
           const uint bx = p ? x / 4 : x / 8, by = p ? y / 4 : y / 8;
           v = crafted[3 * (by * bw + bx) + p];
@@ -166,16 +182,17 @@ static int run_case(const Case &c, const std::string &dir, std::mt19937 &rng) {
           const int base = p == 0 ? (int)(64 + (x * 7 + y * 3) % 900) : (int)(512 + ((int)(x * 5) - (int)(y * 4)) % 400);
           v = block == 0 ? (p ? 512 : 64) : block == 1 ? (p ? 512 + 300 * (p == 1 ? 1 : -1) : 940) : base + noise(rng);
           if (rng() % 97 == 0) v = (int)(rng() & 1023);
+          if (c.depth == 8) v >>= 2;
         }
-        v = v < 0 ? 0 : v > 1023 ? 1023 : v;
+        v = v < 0 ? 0 : v > (int)top ? (int)top : v;
         planes[p][y * w + x] = (uint16_t)v;
-        bytes[off + y * stride + x * 2] = (uint8_t)(v & 255);
-        bytes[off + y * stride + x * 2 + 1] = (uint8_t)(v >> 8);
+        bytes[off + y * stride + x * bpp] = (uint8_t)(v & 255);
+        if (bpp == 2) bytes[off + y * stride + x * 2 + 1] = (uint8_t)(v >> 8);
       }
     }
   }
   const uint mode = c.transfer == 16 ? 0u : c.transfer == 18 ? 2u : 1u;
-  float k[5];
+  float k[7];
   std::vector<uint> lut = tables::make(mode, k);
   pool = { bytes.data(), bytes.size() };
   lut_src = { reinterpret_cast<const uint8_t *>(lut.data()), lut.size() * 4 };
@@ -189,19 +206,24 @@ static int run_case(const Case &c, const std::string &dir, std::mt19937 &rng) {
   cb_y_stride = y_stride;
   cb_uv_stride = uv_stride;
   const bool quad = !c.no_quad && c.sw == 2 * c.ow && c.sh == 2 * c.oh;
-  cb_flags = mode | (c.matrix == 9 ? 4u : 0u) | (c.full ? 8u : 0u) | (c.colocated ? 0u : 16u) | (quad ? 32u : 0u);
+  cb_flags = mode | (c.matrix == 9 ? 4u : 0u) | (c.full ? 8u : 0u) | (c.colocated ? 0u : 16u) | (quad ? 32u : 0u) |
+             (c.depth == 8 ? 64u : 0u);
   cb_eotf_a = k[0];
   cb_eotf_b = k[1];
   cb_eotf_c = k[2];
-  cb_gain_scale = k[3];
-  cb_gain_offset = k[4];
+  cb_gain_s1 = k[3];
+  cb_gain_o1 = k[4];
+  cb_gain_s2 = k[5];
+  cb_gain_o2 = k[6];
   cb_exact_below = 4e-4f;
   const bool wide = c.matrix == 9;
   const float wr = wide ? 0.2627f : 0.2126f, wb = wide ? 0.0593f : 0.0722f, wg = wide ? 0.6780f : 0.7152f;
-  cb_ys = c.full ? 1.0f / 1023.0f : 1.0f / 876.0f;
-  cb_yo = c.full ? 0.0f : -64.0f / 876.0f;
-  cb_cs = c.full ? 1.0f / 1023.0f : 1.0f / 896.0f;
-  cb_co = -512.0f * cb_cs;
+  const float black = c.depth == 8 ? 16.0f : 64.0f, yr = c.depth == 8 ? 219.0f : 876.0f;
+  const float mid = c.depth == 8 ? 128.0f : 512.0f, cr = c.depth == 8 ? 224.0f : 896.0f, full = (float)top;
+  cb_ys = 1.0f / (c.full ? full : yr);
+  cb_yo = c.full ? 0.0f : -black / yr;
+  cb_cs = 1.0f / (c.full ? full : cr);
+  cb_co = -mid * cb_cs;
   cb_kr = 2.0f * (1.0f - wr);
   cb_kb = 2.0f * (1.0f - wb);
   cb_kgu = -wb * cb_kb / wg;
@@ -253,20 +275,27 @@ static int run_case(const Case &c, const std::string &dir, std::mt19937 &rng) {
 
   const std::string frames = dir + "/" + c.name + ".frames.yuv", display = dir + "/" + c.name + ".display.yuv";
   FILE *f = std::fopen(frames.c_str(), "wb");
-  for (int p = 0; p < 3; p++) std::fwrite(planes[p].data(), 2, planes[p].size(), f);
+  // As rav1g-dec -o: 16-bit little-endian samples, a byte at 8 bits; P010's codes from their high bits.
+  auto put = [&](FILE *to, uint v) {
+    if (bpp == 2) {
+      const uint16_t s16 = (uint16_t)v;
+      std::fwrite(&s16, 2, 1, to);
+    } else {
+      const uint8_t s8 = (uint8_t)v;
+      std::fwrite(&s8, 1, 1, to);
+    }
+  };
+  for (int p = 0; p < 3; p++)
+    for (uint16_t v : planes[p]) put(f, v);
   std::fclose(f);
   f = std::fopen(display.c_str(), "wb");
-  std::vector<uint16_t> out(luma.size());
-  for (size_t i = 0; i < luma.size(); i++) out[i] = (uint16_t)(luma[i] >> 6);
-  std::fwrite(out.data(), 2, out.size(), f);
-  for (int comp = 0; comp < 2; comp++) {
-    std::vector<uint16_t> plane(chroma.size());
-    for (size_t i = 0; i < chroma.size(); i++) plane[i] = (uint16_t)(chroma[i][comp] >> 6);
-    std::fwrite(plane.data(), 2, plane.size(), f);
-  }
+  const uint shift = c.depth == 8 ? 0 : 6;
+  for (size_t i = 0; i < luma.size(); i++) put(f, luma[i] >> shift);
+  for (int comp = 0; comp < 2; comp++)
+    for (size_t i = 0; i < chroma.size(); i++) put(f, chroma[i][comp] >> shift);
   std::fclose(f);
-  std::printf("%s %s %s --size %ux%u --out %ux%u --transfer %u --matrix %u%s%s\n", c.name, frames.c_str(),
-              display.c_str(), c.sw, c.sh, c.ow, c.oh, c.transfer, c.matrix, c.full ? " --full" : "",
+  std::printf("%s %s %s --size %ux%u --out %ux%u --transfer %u --matrix %u --depth %d%s%s\n", c.name, frames.c_str(),
+              display.c_str(), c.sw, c.sh, c.ow, c.oh, c.transfer, c.matrix, c.depth, c.full ? " --full" : "",
               c.colocated ? " --colocated" : "");
   return 0;
 }
@@ -293,6 +322,11 @@ int main(int argc, char **argv) {
     { "sdr709-1to1", 130, 70, 130, 70, 1, 1, false, false, false, 0 },
     { "hlg-up", 96, 54, 160, 90, 18, 9, false, true, false, 0 },
     { "pq-odd", 201, 99, 120, 60, 16, 9, false, false, false, 1 },
+    // 8-bit frames, NV12 codes: the quad path (aligned 2:1, a partial tile), full range, the area path.
+    { "sdr709-8bit-2to1", 264, 136, 132, 68, 1, 1, false, false, false, 0, 8 },
+    { "sdr709-8bit-codes-2to1", 128, 128, 64, 64, 1, 1, false, false, false, 1, 8 },
+    { "pq-8bit-full-2to1", 128, 64, 64, 32, 16, 9, true, true, false, 0, 8 },
+    { "sdr709-8bit-3to2", 210, 120, 140, 80, 1, 1, false, false, false, 0, 8 },
   };
   std::mt19937 rng(0x5eed);
   int failed = 0;

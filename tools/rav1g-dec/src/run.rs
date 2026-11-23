@@ -999,7 +999,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         inter_fast: task.interfast,
     });
     if task.displaypass.0 > 0 {
-        say!("Display pass: {}x{} P010 (prototype, -displaypass)", task.displaypass.0, task.displaypass.1);
+        say!("Display pass: {}x{}, P010 or NV12 (prototype, -displaypass)", task.displaypass.0, task.displaypass.1);
     }
     say!(
         "Front of the frame: {}",

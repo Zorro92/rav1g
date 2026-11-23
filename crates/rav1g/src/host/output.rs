@@ -72,9 +72,10 @@ pub(crate) fn output_copy_legacy() -> bool {
 static DISPLAY_PASS: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_PASS_NOTE: AtomicBool = AtomicBool::new(false);
 
-/// `av1_set_display_pass` (`dx/av1_perf.h`): with a size, every 10-bit frame a decoder with the
-/// semi-planar output kind outputs goes through `display_pass.hlsl` into a P010 image of that size
-/// (rounded up to even), downscaled and tone-mapped to BT.709 SDR, instead of the frame itself. 0, 0: off.
+/// `av1_set_display_pass` (`dx/av1_perf.h`): with a size, every frame with chroma a decoder with the
+/// semi-planar output kind outputs goes through `display_pass.hlsl` into an image of that size (rounded up
+/// to even; P010 for a 10-bit frame, NV12 for an 8-bit one), downscaled and tone-mapped to BT.709 SDR,
+/// instead of the frame itself. 0, 0: off.
 #[unsafe(no_mangle)]
 pub extern "C" fn av1_set_display_pass(width: c_int, height: c_int) {
     let even = |v: c_int| (((v + 1) & !1) as u32).min(0xfffe);
@@ -83,8 +84,7 @@ pub extern "C" fn av1_set_display_pass(width: c_int, height: c_int) {
 }
 
 /// The display size when the frame of the current command list takes the display pass: the switch is
-/// set, the decoder has the semi-planar output kind, the frame has more than 8 bits (the prototype writes
-/// P010 only) and chroma.
+/// set, the decoder has the semi-planar output kind, and the frame has chroma.
 ///
 /// # Safety
 /// `dec` is the decoder while it records a frame or a show_existing_frame; `cm` is the frame's.
@@ -92,8 +92,11 @@ pub(crate) unsafe fn display_pass_size(dec: *const Av1Core, cm: *const AV1_COMMO
     let size = DISPLAY_PASS.load(Ordering::Relaxed);
     // SAFETY: the caller's contract.
     unsafe {
-        let td = (*dec).curr_frame_data.as_ref()?;
-        if size == 0 || (*dec).output_kind == 0 || td.is_hbd == 0 || (*(*cm).cur_frame).buf.monochrome != 0 {
+        if (*dec).curr_frame_data.is_null()
+            || size == 0
+            || (*dec).output_kind == 0
+            || (*(*cm).cur_frame).buf.monochrome != 0
+        {
             return None;
         }
     }
@@ -209,7 +212,8 @@ unsafe fn frame_layout(dec: *mut Av1Core, cm: *const AV1_COMMON) -> (bool, bool,
     // SAFETY: the caller's contract.
     unsafe {
         if let Some((width, height)) = display_pass_size(dec, cm) {
-            return (false, false, width, height, semi_planar_layout(width, height, true));
+            let hbd = (*(*dec).curr_frame_data).is_hbd != 0;
+            return (false, false, width, height, semi_planar_layout(width, height, hbd));
         }
         let td = &*(*dec).curr_frame_data;
         let src = &*td.dst_frame_buffer;
@@ -636,12 +640,35 @@ unsafe fn copy_semi_planar(
                 }
                 return;
             };
-            if do_filmgrain && !DISPLAY_PASS_NOTE.swap(true, Ordering::Relaxed) {
-                log(true, "DISPLAY the display pass prototype does not apply film grain");
+            // Film grain (AV1 7.18.3) is applied before the downscale: the film grain pass writes the grained
+            // planes into the back buffer, in the layout of the frame buffer (the pool has room for a frame
+            // there, and nothing else uses it once the frame's postfilter is recorded), and the display
+            // pass reads them from there: 25 MB more written and read at 4K 10-bit, on grain frames only.
+            let mut source = *src;
+            if do_filmgrain {
+                if (*dec).tryhdr10x3 != 0 {
+                    if !DISPLAY_PASS_NOTE.swap(true, Ordering::Relaxed) {
+                        log(true, "DISPLAY the display pass takes no film grain with -tryhdr10x3: not applied");
+                    }
+                } else {
+                    let back = &mut (*dec).back_buffer1;
+                    let moved = (back.base_offset as c_int).wrapping_sub(src.base_offset as c_int);
+                    back.planes = src.planes;
+                    for plane in &mut back.planes {
+                        plane.offset = plane.offset.wrapping_add(moved);
+                    }
+                    let grained = back.planes;
+                    filmgrain_run(dec, cm, c_int::from(film_grain_chroma), GrainTarget::Planes);
+                    source.planes[0] = grained[0];
+                    if film_grain_chroma {
+                        source.planes[1] = grained[1];
+                        source.planes[2] = grained[2];
+                    }
+                }
             }
             // The tables of the tone map, in the frame's constant memory (display_pass.rs).
             let tables = alloc_constant_bytes(&mut td.command_buffer, display_pass::LUT_WORDS * 4);
-            let constants = display_pass::constants(src, out, &cm.seq_params, tables.data.cast());
+            let constants = display_pass::constants(&source, out, &cm.seq_params, tables.data.cast());
             let shader = pipeline(&raw const (*lib).shader_display_pass);
             commands.set_layout(shader.layout());
             commands.set_pipeline(shader);

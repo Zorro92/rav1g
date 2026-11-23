@@ -302,8 +302,8 @@ pub fn usage() {
          five steps, not two"
     );
     say!(
-        "  -displaypass WxH      prototype: 10-bit frames into P010 images of WxH, downscaled and tone-mapped to \
-         BT.709 SDR (with -output p010; the md5 references do not apply)"
+        "  -displaypass WxH      prototype: frames into P010 (10-bit) or NV12 (8-bit) images of WxH, downscaled and \
+         tone-mapped to BT.709 SDR (with -output p010; the md5 references do not apply)"
     );
     say!("  -intraod             use the baseline DXC -Od intra_main kernels (-intraopt restores the default)");
     say!("  -intrafilterlegacy   use the previous 8-bit filter intra shader");

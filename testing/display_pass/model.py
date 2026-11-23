@@ -4,11 +4,12 @@
 against what the decoder wrote.
 
   uv run --with numpy python3 testing/display_pass/model.py <frames.yuv> <display.yuv> \\
-      --size WxH --out WxH [--transfer 16] [--matrix 9] [--full] [--colocated] [--count N]
+      --size WxH --out WxH [--transfer 16] [--matrix 9] [--full] [--colocated] [--depth 8] [--count N]
 
 <frames.yuv>: the decoded frames as rav1g-dec -o writes them (planar 4:2:0, 16-bit little-endian
-samples, the visible size). <display.yuv>: the frames of a run with -displaypass WxH -output p010 -o,
-the same layout at the output size, 10-bit codes. --transfer/--matrix/--full/--colocated: the
+samples, the visible size; a byte a sample with --depth 8). <display.yuv>: the frames of a run with
+-displaypass WxH -output p010 -o, the same layout at the output size: 10-bit codes (P010), or 8-bit
+codes (NV12) for an 8-bit stream. --transfer/--matrix/--full/--colocated: the
 sequence's colour description (H.273 code points; AV1 chroma_sample_position 2 is --colocated).
 
 Prints per frame and plane how many codes differ and the largest difference, and exits 1 when any
@@ -68,10 +69,15 @@ def hlg_scene(e):
     return np.where(e <= F(0.5), e * e / F(3), (np.exp((e - F(0.55991073)) / F(0.17883277)) + F(0.28466892)) / F(12))
 
 
-def pixel_linear(y, uv, mode, wide, full):
+# The codes of a depth: black, the range of Y', the middle and the range of chroma, and full range.
+CODES = {10: (64, 876, 512, 896, 1023), 8: (16, 219, 128, 224, 255)}
+
+
+def pixel_linear(y, uv, mode, wide, full, depth=10):
     w = weights(wide)
-    y = y / F(1023) if full else (y - F(64)) / F(876)
-    uv = (uv - F(512)) / (F(1023) if full else F(896))
+    black, yr, mid, cr, top = map(F, CODES[depth])
+    y = y / top if full else (y - black) / yr
+    uv = (uv - mid) / (top if full else cr)
     r = y + F(2) * (F(1) - w[0]) * uv[..., 1]
     b = y + F(2) * (F(1) - w[2]) * uv[..., 0]
     g = (y - w[0] * r - w[2] * b) / w[1]
@@ -93,7 +99,7 @@ def pixel_linear(y, uv, mode, wide, full):
     return rgb * (eetf(peak) / np.maximum(peak, F(1e-6)))[..., None]
 
 
-def source_linear(yp, up, vp, mode, wide, full, colocated):
+def source_linear(yp, up, vp, mode, wide, full, colocated, depth=10):
     h, w = yp.shape
     py, px = np.mgrid[0:h, 0:w]
     cx = px.astype(F) * F(0.5)
@@ -111,7 +117,7 @@ def source_linear(yp, up, vp, mode, wide, full, colocated):
     c = (at(bx, by) + (at(bx + 1, by) - at(bx, by)) * fx)
     d = (at(bx, by + 1) + (at(bx + 1, by + 1) - at(bx, by + 1)) * fx)
     cuv = c + (d - c) * fy
-    return pixel_linear(yp.astype(F), cuv, mode, wide, full)
+    return pixel_linear(yp.astype(F), cuv, mode, wide, full, depth)
 
 
 def weights_1d(src, out):
@@ -155,12 +161,13 @@ def encode(c, mode, wide):
     return y, (e[..., 2] - y) / F(2 * (1 - 0.0722)), (e[..., 0] - y) / F(2 * (1 - 0.2126))
 
 
-def display(yp, up, vp, ow, oh, mode, wide, full, colocated):
-    lin = source_linear(yp, up, vp, mode, wide, full, colocated)
+def display(yp, up, vp, ow, oh, mode, wide, full, colocated, depth=10):
+    lin = source_linear(yp, up, vp, mode, wide, full, colocated, depth)
     sh, sw = yp.shape
     vals = area_2to1(lin) if (sw == 2 * ow and sh == 2 * oh) else area(lin, ow, oh)
+    black, yr, mid, cr, _ = CODES[depth]
     y, _, _ = encode(vals, mode, wide)
-    yq = np.clip(np.floor(F(64) + F(876) * y + F(0.5)), 64, 940)
+    yq = np.clip(np.floor(F(black) + F(yr) * y + F(0.5)), black, black + yr)
     left = np.concatenate([vals[:, :1], vals[:, :-1]], 1)  # column 2i-1, the edge repeated
     acc = np.zeros((oh // 2, ow // 2, 3), F)
     for dy in range(2):
@@ -168,18 +175,18 @@ def display(yp, up, vp, ow, oh, mode, wide, full, colocated):
         acc = acc + F(0.125) * left[rows, 0::2]
         acc = acc + F(0.25) * vals[rows, 0::2]
         acc = acc + F(0.125) * vals[rows, 1::2]
-    _, cb, cr = encode(acc, mode, wide)
-    uq = np.clip(np.floor(F(512) + F(896) * cb + F(0.5)), 64, 960)
-    vq = np.clip(np.floor(F(512) + F(896) * cr + F(0.5)), 64, 960)
+    _, cb, cr_ = encode(acc, mode, wide)
+    uq = np.clip(np.floor(F(mid) + F(cr) * cb + F(0.5)), black, 2 * mid - black)
+    vq = np.clip(np.floor(F(mid) + F(cr) * cr_ + F(0.5)), black, 2 * mid - black)
     return yq, uq, vq
 
 
-def frames(path, w, h):
+def frames(path, w, h, depth=10):
     cw, ch = (w + 1) // 2, (h + 1) // 2
-    size = (w * h + 2 * cw * ch) * 2
-    data = np.fromfile(path, '<u2')
-    for i in range(len(data) * 2 // size):
-        f = data[i * size // 2:(i + 1) * size // 2]
+    samples = w * h + 2 * cw * ch
+    data = np.fromfile(path, '<u2' if depth > 8 else 'u1')
+    for i in range(len(data) // samples):
+        f = data[i * samples:(i + 1) * samples]
         yield (f[:w * h].reshape(h, w), f[w * h:w * h + cw * ch].reshape(ch, cw), f[w * h + cw * ch:].reshape(ch, cw))
 
 
@@ -193,6 +200,7 @@ def main():
     ap.add_argument('--matrix', type=int, default=1)
     ap.add_argument('--full', action='store_true')
     ap.add_argument('--colocated', action='store_true')
+    ap.add_argument('--depth', type=int, default=10, choices=(8, 10))
     ap.add_argument('--count', type=int, default=1 << 30)
     ap.add_argument('--tolerance', type=int, default=1)
     a = ap.parse_args()
@@ -201,16 +209,27 @@ def main():
     mode = {16: 0, 18: 2}.get(a.transfer, 1)
     wide = a.matrix == 9
     worst = 0
-    for n, (src, got) in enumerate(zip(frames(a.frames_file, sw, sh), frames(a.display_file, ow, oh))):
+    for n, (src, got) in enumerate(zip(frames(a.frames_file, sw, sh, a.depth), frames(a.display_file, ow, oh, a.depth))):
         if n >= a.count:
             break
-        want = display(*[p.astype(F) for p in src], ow, oh, mode, wide, a.full, a.colocated)
+        want = display(*[p.astype(F) for p in src], ow, oh, mode, wide, a.full, a.colocated, a.depth)
         line = []
+        far = []
         for name, w_, g in zip('YUV', want, got):
             d = np.abs(w_.astype(np.int64) - g.astype(np.int64))
             worst = max(worst, int(d.max()))
             line.append(f'{name} {int((d > 0).sum())} differ, max {int(d.max())}')
+            for y, x in np.argwhere(d > a.tolerance)[:4]:
+                far.append(f'  {name} at ({x}, {y}): model {int(w_[y, x])}, pass {int(g[y, x])}')
         print(f'frame {n}: ' + '; '.join(line))
+        if far:
+            # The codes too far apart, and the source pixels of the first one's footprint (a 2:1 guess).
+            print('\n'.join(far))
+            name, at = far[0].split()[0], far[0].split('(')[1].split(')')[0]
+            x, y = map(int, at.split(', '))
+            sx, sy = (x, y) if name == 'Y' else (2 * x, 2 * y)
+            print(f'  source Y around ({2 * sx}, {2 * sy}): {src[0][2 * sy:2 * sy + 2, 2 * sx:2 * sx + 2].tolist()}, '
+                  f'U {src[1][sy:sy + 2, sx:sx + 2].tolist()}, V {src[2][sy:sy + 2, sx:sx + 2].tolist()}')
     print(f'largest difference {worst} (tolerance {a.tolerance})')
     sys.exit(1 if worst > a.tolerance else 0)
 
