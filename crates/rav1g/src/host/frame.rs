@@ -1758,6 +1758,8 @@ pub(crate) unsafe fn decode_frame_record(
         (*td).fused_sp_active = 0;
         (*td).fused_sp_luma_done = 0;
         (*td).fused_sp_chroma_done = 0;
+        (*td).output_copy_reason = sys::AV1_PERF_OUTPUT_COPY_OTHER;
+        (*td).perf.output_path = sys::AV1_PERF_OUTPUT_NONE;
         (*cm).mi = (*(*td).parse_buffers[Kind::ModeInfo as usize]).host_ptr.cast();
         let mut perf_t = super::perf::av1_perf_ticks();
         prepare_command_buffer(dec);

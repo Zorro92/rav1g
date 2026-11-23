@@ -36,6 +36,13 @@ pub const AV1_PARSER_OPTION_GPU_GRID_CHECK: u32 = 1024;
 pub const AV1_PARSER_OPTION_GPU_GRID: u32 = 2048;
 pub const AV1_PARSER_OPTION_GPU_PRED_LISTS: u32 = 4096;
 pub const AV1_FRAMES_IN_PARSE_MAX: u32 = 4;
+pub const AV1_PERF_OUTPUT_NONE: c_int = 0;
+pub const AV1_PERF_OUTPUT_FUSED: c_int = 1;
+pub const AV1_PERF_OUTPUT_GRAIN: c_int = 2;
+pub const AV1_PERF_OUTPUT_COPY_UNFILTERED: c_int = 3;
+pub const AV1_PERF_OUTPUT_COPY_SWITCH: c_int = 4;
+pub const AV1_PERF_OUTPUT_COPY_OTHER: c_int = 5;
+pub const AV1_PERF_OUTPUT_COUNT: c_int = 6;
 pub const AV1_PERF_GPU_GEN_BLOCKS: c_int = 0;
 pub const AV1_PERF_GPU_RESIDUAL_CLEAR: c_int = 1;
 pub const AV1_PERF_GPU_IDCT_SORT: c_int = 2;
@@ -108,6 +115,7 @@ pub struct av1_perf_frame {
     pub tile_count: c_int,
     pub gpu_valid: c_int,
     pub gpu_marks: c_int,
+    pub output_path: c_int,
     pub gpu_stage_ms: [f64; AV1_PERF_GPU_STAGE_COUNT as usize],
     pub gpu_stage_hits: [c_int; AV1_PERF_GPU_STAGE_COUNT as usize],
     pub gpu_span_ms: f64,
@@ -138,6 +146,7 @@ const _: () = {
     assert!(offset_of!(av1_perf_frame, tile_count) == 48);
     assert!(offset_of!(av1_perf_frame, gpu_valid) == 52);
     assert!(offset_of!(av1_perf_frame, gpu_marks) == 56);
+    assert!(offset_of!(av1_perf_frame, output_path) == 60);
     assert!(offset_of!(av1_perf_frame, gpu_stage_ms) == 64);
     assert!(offset_of!(av1_perf_frame, gpu_stage_hits) == 232);
     assert!(offset_of!(av1_perf_frame, gpu_span_ms) == 320);

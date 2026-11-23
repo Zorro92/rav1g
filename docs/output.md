@@ -89,6 +89,20 @@ textures. With the semi-planar kind there are two paths, chosen for every image:
   kind costs, with two copies in place of three. Taken for every other texture, so for any NV12 or
   P010 texture a device can create, and for an image with a buffer.
 
+**Fused into the last postfilter stage** (the default on the direct path; `-outputcopylegacy` turns
+it off). A frame with CDEF, superres or loop restoration has a last stage that reads and writes every
+sample of the frame anyway: that stage also stores the planes film grain does not write into the
+texture (`cdef_filter_v3_sp_tex`, `upscaling_sp_tex`, `loop_restoration_sp_tex`,
+`loop_restoration_wiener_sp_tex`, with the stores of `output_sp.h`), and the copy pass of the output
+is left out: a full read of the frame less (24.9 MB at 4K 10-bit), sized for the GPU copy bandwidth
+of the idle state. A frame that no slot of the reference map takes (`refresh_frame_flags` 0, AV1
+7.20; show_existing_frame shows only frames of the map, 7.21) also leaves out its frame buffer
+writes where film grain does not read them, and its border extension. A frame without any of the
+three stages (all CDEF strengths zero and no loop restoration, common at high bitrates) and a
+show-existing frame still take the copy pass; the timing run counts which frames take which path
+(`output images` line, [test-player.md](test-player.md)). The output image is asked for before the
+postfilter, in the upscaled size with superres.
+
 Which one a decoder takes is in its log: `OUTPUT semi-planar: NV12 textures yes, written by shaders
 yes; P010 textures ...` at its creation (what the device says), and `OUTPUT P010 direct: ...` or
 `OUTPUT P010 staged: ...` with the first frame and whenever the path changes.

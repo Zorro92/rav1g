@@ -71,7 +71,9 @@ use crate::gpu::{
 };
 use crate::sys::{
     AV1_COMMON, AV1_PERF_CPU_WAIT_IMAGE, AV1_PERF_CPU_WAIT_OUTPUT, AV1_PERF_GPU_COPY_PLANE, AV1_PERF_GPU_OUTPUT_COPY,
-    HwFrameBuffer, HwOutputImage, av1_decoded_frame_buffer_t, fbt8bit, fbt10bit, fbt10x3, fbtNV12, fbtP010,
+    AV1_PERF_OUTPUT_COPY_OTHER, AV1_PERF_OUTPUT_COPY_SWITCH, AV1_PERF_OUTPUT_COPY_UNFILTERED, AV1_PERF_OUTPUT_FUSED,
+    AV1_PERF_OUTPUT_GRAIN, HwFrameBuffer, HwOutputImage, av1_decoded_frame_buffer_t, fbt8bit, fbt10bit, fbt10x3,
+    fbtNV12, fbtP010,
 };
 use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 
@@ -274,7 +276,8 @@ pub(crate) unsafe fn frame_unreferenced(dec: *mut Av1Core, cm: *const AV1_COMMON
 /// Checks whether the direct semi-planar (NV12/P010) output write can be fused into the frame's last
 /// postfilter stage (CDEF v3, superres, or loop restoration). When it can, transitions the texture
 /// `Common -> ReadWrite`, writes its plane UAV descriptors, and records the fused state on `td` so
-/// [`copy_output`] skips the redundant full-frame copy pass.
+/// [`copy_output`] skips the redundant full-frame copy pass. When it cannot, records why on `td` for
+/// the timing run (`AV1_PERF_OUTPUT_COPY_*`).
 ///
 /// # Safety
 /// `dec` is the decoder while it records a frame whose [`output_image`] returned 1 with `fb`; `cm` is
@@ -284,21 +287,22 @@ pub(crate) unsafe fn prepare_fused_output(
     cm: *const AV1_COMMON,
     fb: *const av1_decoded_frame_buffer_t,
 ) -> Option<FusedTarget> {
-    if output_copy_legacy() {
-        return None;
-    }
     // SAFETY: the caller's contract.
     unsafe {
+        let td = &mut *(*dec).curr_frame_data;
+        td.output_copy_reason = AV1_PERF_OUTPUT_COPY_OTHER;
         if (*dec).output_kind == 0 {
             return None;
         }
-        let td = &mut *(*dec).curr_frame_data;
         let has_postfilter = td.do_cdef != 0 || td.do_superres != 0 || td.do_loop_rest != 0;
         if !has_postfilter {
+            // Nothing writes every sample of the frame after the loop filter: the copy pass stays.
+            td.output_copy_reason = AV1_PERF_OUTPUT_COPY_UNFILTERED;
             return None;
         }
         // When CDEF is the last postfilter, fused output requires CDEF v3.
-        if td.do_loop_rest == 0 && td.do_superres == 0 && !cdef_v3_enabled() {
+        if output_copy_legacy() || (td.do_loop_rest == 0 && td.do_superres == 0 && !cdef_v3_enabled()) {
+            td.output_copy_reason = AV1_PERF_OUTPUT_COPY_SWITCH;
             return None;
         }
         let fb = &*fb;
@@ -435,7 +439,9 @@ pub(crate) unsafe fn copy_output(dec: *mut Av1Core, cm: *mut AV1_COMMON, fb: *co
 
         let commands = commands(dec);
         let frame_buffers = buffer((*dec).frame_buffer_pool);
-        if !do_filmgrain || !film_grain_chroma {
+        let copied = !do_filmgrain || !film_grain_chroma;
+        (*(*dec).curr_frame_data).perf.output_path = if copied { td.output_copy_reason } else { AV1_PERF_OUTPUT_GRAIN };
+        if copied {
             // The planes film grain did not write: all without grain, chroma with grain on luma only.
             let lib = (*dec).shader_lib;
             let shader = pipeline(if is_10x3 {
@@ -582,6 +588,13 @@ unsafe fn copy_semi_planar(
         // The planes neither film grain nor the fused postfilter stage wrote.
         let copy_luma = !do_filmgrain && !fused_luma_done;
         let copy_chroma = (is_monochrome || !do_filmgrain || !film_grain_chroma) && !fused_chroma_done;
+        td.perf.output_path = if copy_luma || copy_chroma {
+            td.output_copy_reason
+        } else if already_fused {
+            AV1_PERF_OUTPUT_FUSED
+        } else {
+            AV1_PERF_OUTPUT_GRAIN
+        };
         if copy_luma || copy_chroma {
             let shader = pipeline(if direct.is_some() {
                 &raw const (*lib).shader_copy_plane_sp_tex_v2

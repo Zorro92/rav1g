@@ -48,6 +48,24 @@ enum {
   AV1_PERF_GPU_BEGIN = 255     /* first timestamp of a command list */
 };
 
+/* How the frame's command list put the frame into its output image
+ * (av1_perf_frame::output_path). The GPU stage copy_plane runs only for the
+ * AV1_PERF_OUTPUT_COPY_* paths, so its mean is over those frames alone: read
+ * it together with the count of frames that ran it. */
+enum {
+  AV1_PERF_OUTPUT_NONE = 0,        /* no output image in this command list (hidden frame, lower layer) */
+  AV1_PERF_OUTPUT_FUSED,           /* the last postfilter stage (CDEF, superres or loop restoration) wrote
+                                      the texture planes film grain did not; no copy pass */
+  AV1_PERF_OUTPUT_GRAIN,           /* film grain wrote every plane; no copy pass */
+  AV1_PERF_OUTPUT_COPY_UNFILTERED, /* copy pass: the frame has no CDEF, superres or loop restoration to
+                                      write the texture from (all strengths zero, or all off) */
+  AV1_PERF_OUTPUT_COPY_SWITCH,     /* copy pass: fusion off (-outputcopylegacy; or CDEF is the last stage
+                                      and runs without cdef_filter_v3: -cdefv3legacy, -cdefv1) */
+  AV1_PERF_OUTPUT_COPY_OTHER,      /* copy pass: no direct texture (planes, buffer or staged output), or a
+                                      show-existing frame */
+  AV1_PERF_OUTPUT_COUNT
+};
+
 /* CPU timers. All values are milliseconds in the record. */
 enum {
   /* decode thread, blocked */
@@ -116,6 +134,7 @@ typedef struct av1_perf_frame {
 
   int gpu_valid;      /* GPU timestamps were read back for this frame */
   int gpu_marks;      /* number of timestamps in the command list */
+  int output_path;    /* AV1_PERF_OUTPUT_*: how the output image was written */
   double gpu_stage_ms[AV1_PERF_GPU_STAGE_COUNT];
   int gpu_stage_hits[AV1_PERF_GPU_STAGE_COUNT];
   double gpu_span_ms; /* first to last timestamp */

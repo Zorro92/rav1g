@@ -27,6 +27,16 @@ static const char* const kGpuStageNames[] = {
 static_assert(sizeof(kGpuStageNames) / sizeof(kGpuStageNames[0]) == AV1_PERF_GPU_STAGE_COUNT,
               "GPU stage names out of step with av1_perf.h");
 
+// av1_perf_frame::output_path, as the per-frame lines write it (out=...).
+static const char* const kOutputPathNames[] = {"none", "fused", "grain", "copy-unfiltered", "copy-switch",
+                                               "copy-other"};
+static_assert(sizeof(kOutputPathNames) / sizeof(kOutputPathNames[0]) == AV1_PERF_OUTPUT_COUNT,
+              "output path names out of step with av1_perf.h");
+
+static const char* OutputPathName(int path) {
+  return path >= 0 && path < AV1_PERF_OUTPUT_COUNT ? kOutputPathNames[path] : "?";
+}
+
 static const char* const kCpuNames[] = {
     "wait_slot",     "wait_sec_slot", "wait_fb",        "wait_output",    "wait_image",  "wait_item",
     "setup",         "memset",        "memset_tile",    "entropy_wall",   "entropy_sum", "record",
@@ -270,8 +280,10 @@ class PerfStats {
     Series gpu_stage[AV1_PERF_GPU_STAGE_COUNT];
     Series cpu[AV1_PERF_CPU_COUNT];
     double stage_total[AV1_PERF_GPU_STAGE_COUNT] = {0.0};
+    size_t output_paths[AV1_PERF_OUTPUT_COUNT] = {0};
     for (size_t i = w; i < n; ++i) {
       const av1_perf_frame& f = frames_[i];
+      if (f.output_path >= 0 && f.output_path < AV1_PERF_OUTPUT_COUNT) ++output_paths[f.output_path];
       if (f.is_sef) {
         ++sef;
         if (f.gpu_valid) sef_busy.Add(f.gpu_span_ms);
@@ -426,6 +438,20 @@ class PerfStats {
       }
       out.push_back(b);
     }
+    {
+      // How the measured frames put themselves into their output images. copy_plane runs only on the
+      // copy paths: its mean above is that of those frames, its avg spreads it over all.
+      const size_t copies = output_paths[AV1_PERF_OUTPUT_COPY_UNFILTERED] + output_paths[AV1_PERF_OUTPUT_COPY_SWITCH] +
+                            output_paths[AV1_PERF_OUTPUT_COPY_OTHER];
+      snprintf(b, sizeof(b),
+               "output images %u: fused into the last postfilter stage %u, film grain alone %u; copy_plane %u "
+               "(no cdef/superres/loop_rest %u, fusion off %u, no direct texture or show-existing %u)",
+               (unsigned)(n - w - output_paths[AV1_PERF_OUTPUT_NONE]), (unsigned)output_paths[AV1_PERF_OUTPUT_FUSED],
+               (unsigned)output_paths[AV1_PERF_OUTPUT_GRAIN], (unsigned)copies,
+               (unsigned)output_paths[AV1_PERF_OUTPUT_COPY_UNFILTERED],
+               (unsigned)output_paths[AV1_PERF_OUTPUT_COPY_SWITCH], (unsigned)output_paths[AV1_PERF_OUTPUT_COPY_OTHER]);
+      out.push_back(b);
+    }
 
     out.push_back("-- cpu timers, ms per frame --                n     mean      p50      p95      max");
     for (int c = 0; c < AV1_PERF_CPU_COUNT; ++c) {
@@ -466,10 +492,10 @@ class PerfStats {
       const av1_perf_frame& f = frames_[i];
       int len = snprintf(b, sizeof(b),
                          "frame %u no=%d show=%d sef=%d intra=%d iters=%d iv2=%d idisp=%d ibarr=%d igroups=%d "
-                         "ipasses=%d tiles=%d sec=%d wall=%.2f busy=%.2f gap=%.2f |",
+                         "ipasses=%d tiles=%d sec=%d out=%s wall=%.2f busy=%.2f gap=%.2f |",
                          (unsigned)i, f.frame_number, f.show_frame, f.is_sef, f.intra_frame, f.intra_iters,
                          f.intra_v2, f.intra_dispatches, f.intra_barriers, f.intra_groups, f.intra_passes,
-                         f.tile_count, f.used_sec_slot, i > 0 ? f.complete_ms - frames_[i - 1].complete_ms : 0.0,
+                         f.tile_count, f.used_sec_slot, OutputPathName(f.output_path), i > 0 ? f.complete_ms - frames_[i - 1].complete_ms : 0.0,
                          f.gpu_span_ms, f.gpu_gap_ms);
       for (int s = 0; s < AV1_PERF_GPU_STAGE_COUNT; ++s) {
         if (f.gpu_stage_hits[s] > 0) Append(b, sizeof(b), &len, " %s=%.2f", kGpuStageNames[s], f.gpu_stage_ms[s]);

@@ -445,6 +445,7 @@ pub(crate) unsafe fn perf_collect(
         rec.intra_groups = p.acc.intra_stats[2];
         rec.intra_passes = p.acc.intra_stats[3];
         rec.tile_count = p.acc.tile_count;
+        rec.output_path = p.output_path;
         for i in 0..CPU_COUNT {
             rec.cpu_ms[i] = p.acc.ticks[i] as f64 * to_ms;
         }

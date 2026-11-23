@@ -302,7 +302,11 @@ int main() {
     PerfStats st;
     for (int i = 0; i < 100; ++i) {
       const int show = (i % 5) != 4;
-      st.AddFrame(MakeFrame(i, 1000.0 + 50.0 * i, show));
+      av1_perf_frame decoded = MakeFrame(i, 1000.0 + 50.0 * i, show);
+      // The shown frames alternate between the fused output and the copy pass of a frame without postfilter.
+      decoded.output_path =
+          show ? (i % 2 == 0 ? AV1_PERF_OUTPUT_FUSED : AV1_PERF_OUTPUT_COPY_UNFILTERED) : AV1_PERF_OUTPUT_NONE;
+      st.AddFrame(decoded);
       if (show) {
         st.AddOutput(1000.0 + 50.0 * i);
       } else {
@@ -312,6 +316,7 @@ int main() {
         sef.is_sef = 1;
         sef.show_frame = 1;
         sef.intra_iters = -1;
+        sef.output_path = AV1_PERF_OUTPUT_COPY_OTHER;
         sef.gpu_valid = 1;
         sef.gpu_marks = 3;
         sef.gpu_stage_ms[AV1_PERF_GPU_OUTPUT_COPY] = 2.0;
@@ -332,6 +337,11 @@ int main() {
     // The first ten records are nine decoded frames and one copy.
     CHECK(Has(lines, "100 frames decoded, 100 output; warm-up 9 skipped, 91 measured"));
     CHECK(Has(lines, "72 shown, 19 hidden, 19 show-existing copies"));
+    CHECK(Has(lines, "output images 91: fused into the last postfilter stage 36, film grain alone 0; copy_plane 55 "
+                     "(no cdef/superres/loop_rest 36, fusion off 0, no direct texture or show-existing 19)"));
+    CHECK(Has(st.FrameLines(), " sec=0 out=fused wall="));
+    CHECK(Has(st.FrameLines(), " sec=0 out=copy-unfiltered wall="));
+    CHECK(Has(st.FrameLines(), " sec=0 out=copy-other wall="));
     CHECK(Has(lines, "show-existing copies: 20 (19 measured): gpu busy mean 2.000 ms, cpu decode thread mean "
                      "1.000 ms, blocked mean 0.500 ms"));
     CHECK(Has(lines, "20.0 fps decoded"));  // 50 ms between decoded frames, the copies in between left out

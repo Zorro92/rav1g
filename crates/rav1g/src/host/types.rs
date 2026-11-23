@@ -232,6 +232,8 @@ pub struct av1_perf_td {
     pub detail: Option<Box<av1_perf_inter_detail>>,
     pub detail_mode: c_int,
     pub detail_filled: c_int,
+    /// How the frame's command list wrote its output image (`AV1_PERF_OUTPUT_*`), set by `copy_output`.
+    pub output_path: c_int,
 }
 
 #[repr(C)]
@@ -307,6 +309,9 @@ pub struct av1_frame_thread_data {
     pub fused_sp_pair: u32,
     pub fused_sp_luma_done: c_int,
     pub fused_sp_chroma_done: c_int,
+    /// Why the frame's output takes the copy pass if it does (`AV1_PERF_OUTPUT_COPY_*`, for the timing
+    /// run), set by `prepare_fused_output`.
+    pub output_copy_reason: c_int,
     pub slot_index: c_int,
     pub iter_grid_stride: c_int,
     pub iter_grid_stride_uv: c_int,

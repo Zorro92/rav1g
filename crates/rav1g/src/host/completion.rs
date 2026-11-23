@@ -394,6 +394,12 @@ pub(crate) unsafe fn decode_sef_begin(
         td.do_superres = 0;
         td.do_filmgrain = (*cm).film_grain_params.apply_grain;
         td.output_frame = 1;
+        // A show_existing_frame copies the frame decoded earlier: there is no postfilter to fuse into.
+        td.fused_sp_active = 0;
+        td.fused_sp_luma_done = 0;
+        td.fused_sp_chroma_done = 0;
+        td.output_copy_reason = sys::AV1_PERF_OUTPUT_COPY_OTHER;
+        td.perf.output_path = sys::AV1_PERF_OUTPUT_NONE;
         (*dec).fb_pool.acquire(td.dst_frame_buffer);
         // From here on the next setup can take the context back if the output image cannot be had.
         (*dec).curr_frame_data = td_ptr;

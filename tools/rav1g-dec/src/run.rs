@@ -1040,7 +1040,14 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         say!("PARSER {}: block lists on the tile's thread (-parselistslegacy)", task.name);
     }
     if task.parser_options.gpu_cdef_lists || task.parser_options.gpu_grid {
-        say!("CDEF lists shader: cdef_lists (default)");
+        say!(
+            "CDEF lists shader: {}",
+            if task.cdefv3legacy || task.cdefv1 {
+                "cdef_lists (-cdefv3legacy or -cdefv1)"
+            } else {
+                "cdef_lists_v2 (default)"
+            }
+        );
     }
     if task.interfast & switches::INTER_FAST_ON != 0 {
         say!(

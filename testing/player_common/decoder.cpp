@@ -800,7 +800,8 @@ int AV1Decoder::DecodeOne() {
           << (params_.parser_options_ & PLAYER_PARSEOPT_GPU_GRID ? "gpugrid " : "")
           << (params_.parser_options_ & PLAYER_PARSEOPT_GPU_PRED_LISTS ? "gpublists " : "");
   if (params_.parser_options_ & (PLAYER_PARSEOPT_GPU_CDEF_LISTS | PLAYER_PARSEOPT_GPU_GRID)) {
-    XB_LOGI << "CDEF lists shader: cdef_lists (default)";
+    XB_LOGI << "CDEF lists shader: "
+            << (params_.cdefv3legacy_ || params_.cdefv1_ ? "cdef_lists (-cdefv3legacy or -cdefv1)" : "cdef_lists_v2 (default)");
   }
   rav1g_set_intra_opt(!params_.intraod_);
   XB_LOGI << "Intra main shader: "

@@ -366,8 +366,9 @@ The log lines at the start of each task show which defaults and opt-out flags ar
 
 | Setting | Default | Its log line | Other values |
 | --- | --- | --- | --- |
-| CDEF shader | `cdef_filter_v2.hlsl`, 64×32 luma regions | `CDEF shader: cdef_filter_v2 (default)` | `-cdefv1`: upstream's `cdef_filter.hlsl`. |
-| CDEF lists | `cdef_lists.hlsl`, reuses mode info within an 8×8 block | `CDEF lists shader: cdef_lists (default)` | `-parseopt none` uses the CPU list builder. |
+| CDEF shader | `cdef_filter_v3.hlsl`, 64×32 luma regions, one skip mask word a region | `CDEF shader: cdef_filter_v3 (default)` | `-cdefv3legacy`: `cdef_filter_v2.hlsl` with the lists of `cdef_lists.hlsl`; `-cdefv1`: upstream's `cdef_filter.hlsl`. |
+| CDEF lists | `cdef_lists_v2.hlsl` (indexes and the skip masks of `cdef_filter_v3`), reuses mode info within an 8×8 block | `CDEF lists shader: cdef_lists_v2 (default)` | `-cdefv3legacy`: `cdef_lists.hlsl`; `-parseopt none` uses the CPU list builder. |
+| Direct NV12/P010 output | written by the last postfilter stage of the frame (`cdef_filter_v3_sp_tex`, `upscaling_sp_tex` or `loop_restoration*_sp_tex`) for the planes film grain does not write; `copy_plane_sp_tex_v2` only for a frame without CDEF, superres and loop restoration, and for a show-existing frame | `Direct NV12/P010 output: fused into last postfilter stage (default)` | `-outputcopylegacy`: the separate copy pass for every frame, and the frame buffer and border writes of unreferenced frames, as before. |
 | Loop restoration | `loop_restoration.hlsl` on planes with SGR units, `loop_restoration_wiener.hlsl` on Wiener and copy-only planes | `Loop restoration shader: loop_restoration / loop_restoration_wiener (default)` | |
 | Decoder size | the stream's largest frame size, rounded up to 128, and 8-bit buffers for an 8-bit stream; see [Decoder size](#decoder-size--nofitsize) | `Decoder size: 3840x2176 10-bit (fit to the stream, default)` | `-nofitsize`: 4096x2176 10-bit for every stream, `Decoder size: 4096x2176 10-bit (fixed, -nofitsize)` |
 | Memory reductions | the library's default for the decoder's size: part 1, one back buffer shared by all frames (frame buffer pool 12 → 10), and since package 0.2.186 for a decoder above 1920x1088 part 2, the mode info pool at half (55.8 MiB less at 4K; [memory.md](memory.md#the-wait-of-the-second-frame-in-parse-in-a-pool-at-half-candidate-2)), since 0.2.191 part 32, the frame buffer bound at the recording (24.2 MiB), and since 0.2.193 part 4, the coefficient pool at four fifths (12.0 MiB); no measurable time cost; see [Smaller decoder](#smaller-decoder--lowmem) | `Low memory parts: default (the library's: 1 shared back buffer, and above 1920x1088 also 2 mode info pool at half, 4 smaller coefficient pool, 32 frame buffer bound at the recording)`; the decoder's `MEMORY decoder created options` line says which pool it is | `-lowmemparts 1`: the mode info pool of the worst case, the default up to package 0.2.185; `-lowmemparts 0`: none, every frame takes its back buffer from the pool (`Low memory parts: 0 (none, -lowmemparts 0)`); `-lowmemparts N`: exactly the parts in `N`; `-lowmem`: all three (`-lowmemparts 7`) |
@@ -379,8 +380,11 @@ The log lines at the start of each task show which defaults and opt-out flags ar
 
 
 On a device that logs `OUTPUT P010 direct` or `OUTPUT NV12 direct`, film grain uses
-`film_grain_filter_sp_tex_v2`. The planes that do not get grain use
-`copy_plane_sp_tex_v2`.
+`film_grain_filter_sp_tex_v2`. The planes that do not get grain are written by the last
+postfilter stage; `copy_plane_sp_tex_v2` writes them only where the frame has no
+postfilter stage (or with `-outputcopylegacy`). A frame that no slot of the reference map
+takes (`refresh_frame_flags` 0, AV1 7.20) then also skips its frame buffer writes, where
+film grain does not read them, and its border extension.
 
 - **`-cdefv2` and `-fitsize` are still accepted** and change nothing: old task lines keep
   working. `-lowmem` is still all three parts. Parts 2 and 4 stay opt-in because they can
@@ -475,7 +479,7 @@ span exactly**, and any gap between two stages is counted in the later one.
 | `cdef`, `superres`, `loop_rest` | CDEF, super-resolution, loop restoration |
 | `ext_borders` | reference border extension |
 | `film_grain` | applies the grain templates to the frame (`film_grain_filter*`) |
-| `copy_plane`, `output_copy` | copy shader into the staging area, then the copy into the output buffer or textures |
+| `copy_plane`, `output_copy` | copy shader into the staging area, then the copy into the output buffer or textures. On the direct semi-planar path with the fusion (the default) only frames without CDEF, superres and loop restoration run `copy_plane`: its `mean` is theirs, the time of the fused stores is in `cdef`, `superres` or `loop_rest`; read its `frames` and `avg` columns, and the `output images` line below the table |
 | `slot_clear` | with `-gpuclear`: the grids of the frame's slot cleared at the end of the command list |
 | `cdef_lists` | the two lists CDEF reads (the default; not with `-parseopt nolfmask,tilethread` or `none`), written from the mode info in front of `cdef` (it is the last line of the table, not where it runs) |
 
@@ -551,6 +555,7 @@ GPUTIME blocked, decode thread, all waits         ...                           
 GPUTIME per OUTPUT frame (1.00 decoded frames each): wall .. ms, gpu busy .. ms, cpu decode thread .. ms, ...
 GPUTIME stage                    frames     mean      p50      p95      max      avg   share
 GPUTIME gpu intra                   290    ...
+GPUTIME output images 232: fused into the last postfilter stage 180, film grain alone 0; copy_plane 52 (no cdef/superres/loop_rest 52, fusion off 0, no direct texture or show-existing 0)
 GPUTIME cpu wait_output             290    ...
 GPUTIME output-buffer waits: 3, total 120.0 ms, longest 60.0 ms (whole run, warm-up included)
 GPUTIME ==== end of summary ====
@@ -560,18 +565,28 @@ In the stage table, `mean`/`p50`/`p95`/`max` are over the frames that ran the st
 `avg` spreads the stage over all measured frames (the `avg` column adds up to the
 "gpu busy" mean), and `share` is the stage's part of all GPU time.
 
+The `output images` line counts how the measured records put their frame into the output
+image (`av1_perf_frame::output_path`): written by the last postfilter stage (fused), by film
+grain alone, or by the `copy_plane` pass, and why that pass ran: the frame has no CDEF,
+superres or loop restoration to fuse into (all strengths zero, common at high bitrates), the
+fusion is switched off (`-outputcopylegacy`, or CDEF last without `cdef_filter_v3`), or the
+image is not a direct texture (planes, buffer, staged) or the record is a show-existing copy.
+The `copy_plane` row of the stage table has the frames of the last three alone.
+
 With `-progress` as well, one line per decoded frame follows the summary. They are
 kept in memory during the run and written at the end, so they add no log I/O to the
 decode loop:
 
 ```text
-GPUTIME frame 57 no=57 show=1 sef=0 intra=0 iters=62 iv2=0 idisp=71 ibarr=63 igroups=412 ipasses=412 tiles=4 sec=0 wall=61.20 busy=38.10 gap=22.40 | gen_blocks=0.31 ... | entropy_wall=18.20 ...
+GPUTIME frame 57 no=57 show=1 sef=0 intra=0 iters=62 iv2=0 idisp=71 ibarr=63 igroups=412 ipasses=412 tiles=4 sec=0 out=fused wall=61.20 busy=38.10 gap=22.40 | gen_blocks=0.31 ... | entropy_wall=18.20 ...
 ```
 
 `wall` is the time since the previous frame completed, `busy` the first-to-last GPU
 span, `gap` the time the decoder's queue sat idle before this frame, `iters` the last
 intra wavefront iteration (so the frame ran `iters + 1` of them; -1 without intra),
-`sec` whether the frame also took a second pipeline slot. `iv2`, `idisp`, `ibarr`,
+`sec` whether the frame also took a second pipeline slot, `out` how it wrote its output
+image (`none`, `fused`, `grain`, `copy-unfiltered`, `copy-switch`, `copy-other`; see the
+`output images` line). `iv2`, `idisp`, `ibarr`,
 `igroups` and `ipasses` describe the intra stage, see
 [Intra timing fields](#intra-timing-fields). Timers at zero are left out.
 
