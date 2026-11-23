@@ -26,6 +26,7 @@
 //! rav1g-parse-check [-threads <n>] [-frames <n>] [-parseopt <list>] [-wave <way>] [-details <n>] [-root <dir>] [-manifest <task list>] [<stream>...]
 //! rav1g-parse-check -time [-frametimes] [-runs <n>] [-threads <n>] [-frames <n>] [-parseopt <list>] [-wave <way>] <stream>
 //! rav1g-parse-check -digest [-threads <n>] [-root <dir>] [-manifest <task list>] [<stream>...]
+//! rav1g-parse-check -bufdigest [-threads <n>] [-frames <n>] [-parseopt <list>] [<stream>...]
 //! rav1g-parse-check -lrmix [<stream>...]
 //! rav1g-parse-check -tiles [<stream>...]
 //! ```
@@ -39,6 +40,13 @@
 //!
 //! `-runs`, with `-time`: how many runs of each kind (the parse alone, the parse with the sink) the best is
 //! taken of, 3 without it.
+//!
+//! `-timekind`, with `-time`: `parse` makes only the runs of the parse alone, `sink` only those with the
+//! sink, `both` (the default) both; one kind alone is what `perf stat` counts the instructions of.
+//!
+//! `-bufdigest` prints for every stream a fold of every buffer of every frame the sink writes (what the
+//! check holds against the reference, `compare::fold`): `BUFDIGEST <name> frames <n> hash <hex>`. The
+//! sink's code is the reference's too, so a change to it is held against the build before it this way.
 //!
 //! `-frametimes`, with `-time`: one line per frame of every run with the sink, `FRAMETIME run=<r> no=<n>`
 //! and the frame's times in milliseconds (rav1d's `parse_stats`): `admit` its wait for a frame context,
@@ -115,6 +123,10 @@ struct Options {
     runs: usize,
     /// -tiles: the tile layouts of the streams.
     tiles: bool,
+    /// -bufdigest: a fold of every buffer the sink writes, per stream.
+    buf_digest: bool,
+    /// -timekind (with -time): which of the two kinds of run to make.
+    time_kind: timing::Kind,
     streams: Vec<(String, PathBuf)>,
 }
 
@@ -131,7 +143,8 @@ fn usage() -> ! {
          -time)\n-wave: where the wavefront of intra prediction is kept: edges (default), grid, check (the grid for \
          the reference, the edges for the run that is checked)\n-intralistslegacy: the previous loops of the intra \
          block lists\n-listslegacy: the block lists on the tile's thread, superblock by superblock\n-frametimes: with -time, a FRAMETIME line per frame of every run\n-runs: with -time, the runs of each kind the \
-         best is taken of (default 3)"
+         best is taken of (default 3)\n-timekind: with -time, parse (the parse alone), sink (the parse with the sink) or both \
+         (default)\n-bufdigest: one line per stream with a fold of every buffer the sink writes"
     );
     std::process::exit(2);
 }
@@ -168,6 +181,8 @@ fn options() -> Options {
         frame_times: false,
         runs: 3,
         tiles: false,
+        buf_digest: false,
+        time_kind: timing::Kind::Both,
         streams: Vec::new(),
     };
     let mut root = PathBuf::from(".");
@@ -189,6 +204,15 @@ fn options() -> Options {
             "-listslegacy" => options.legacy.lists = true,
             "-parseopt" => options.parse = ParseOptions::from_words(&value()).unwrap_or_else(|| usage()),
             "-digest" => options.digest = true,
+            "-bufdigest" => options.buf_digest = true,
+            "-timekind" => {
+                options.time_kind = match value().as_str() {
+                    "parse" => timing::Kind::Parse,
+                    "sink" => timing::Kind::Sink,
+                    "both" => timing::Kind::Both,
+                    _ => usage(),
+                }
+            }
             "-lrmix" => options.lr_mix = true,
             "-wave" => {
                 options.wave_edges = match value().as_str() {
@@ -325,6 +349,51 @@ fn digest(options: &Options) -> ExitCode {
     code
 }
 
+/// `-bufdigest`: for every stream one line with a fold of every buffer of every frame the sink writes
+/// (`compare::fold`), with `-threads`, `-frames` and `-parseopt` as given: two builds of the sink are
+/// held against each other byte for byte by their lines.
+fn buf_digest(options: &Options) -> ExitCode {
+    let mut code = ExitCode::SUCCESS;
+    for (name, path) in &options.streams {
+        let result = (|| -> Result<(u64, u64), String> {
+            let data = std::fs::read(path).map_err(|error| format!("cannot read the file: {error}"))?;
+            let units = container::read(&data)?;
+            let mut parser = rhost::RustParser::with_clock(
+                options.threads,
+                options.frames,
+                options.parse,
+                false,
+                options.wave_edges.1,
+                options.legacy,
+            )?;
+            let mut hash = 0x5EED_u64;
+            let mut frames = 0;
+            for data in units {
+                let _ = parser.send(data);
+                for frame in parser.take_frames() {
+                    if options.parse.gpu_grid {
+                        compare::build_grid(&frame);
+                    }
+                    compare::fold(&mut hash, &frame);
+                    frames += 1;
+                }
+            }
+            if parser.broken() {
+                return Err(String::from("a thread of rav1d ended with a panic"));
+            }
+            Ok((frames, hash))
+        })();
+        match result {
+            Ok((frames, hash)) => println!("BUFDIGEST {name} frames {frames} hash {hash:016x}"),
+            Err(error) => {
+                println!("ERROR {name}: {error}");
+                code = ExitCode::FAILURE;
+            }
+        }
+    }
+    code
+}
+
 fn main() -> ExitCode {
     let options = options();
     if options.lr_mix {
@@ -357,10 +426,14 @@ fn main() -> ExitCode {
             options.legacy,
             options.frame_times,
             options.runs,
+            options.time_kind,
         );
     }
     if options.digest {
         return digest(&options);
+    }
+    if options.buf_digest {
+        return buf_digest(&options);
     }
     let mut total = Report::new(0);
     let mut equal = 0;
