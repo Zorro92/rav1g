@@ -281,6 +281,7 @@ fn read_tx_tree(
             [(&t.l, txh), (&f.a[t.a], txw)],
             [t_dim.h as usize, t_dim.w as usize],
             [by4 as usize, bx4 as usize],
+            #[inline(always)]
             |case, (dir, val)| {
                 let tx = if is_split {
                     TxfmSize::S4x4
@@ -716,6 +717,7 @@ fn read_vartx_tree(
                 [&t.l, &f.a[t.a]],
                 [bh4 as usize, bw4 as usize],
                 [by4 as usize, bx4 as usize],
+                #[inline(always)]
                 |case, dir| {
                     case.set_disjoint(&dir.tx, TxfmSize::S4x4);
                 },
@@ -727,6 +729,7 @@ fn read_vartx_tree(
                 [(&t.l, 1), (&f.a[t.a], 0)],
                 [bh4 as usize, bw4 as usize],
                 [by4 as usize, bx4 as usize],
+                #[inline(always)]
                 |case, (dir, dir_index)| {
                     // TODO check unwrap is optimized out
                     let tx = TxfmSize::from_repr(b_dim[2 + dir_index] as _).unwrap();
@@ -1559,6 +1562,7 @@ fn decode_b(
             [(&t.l, t_dim.lh, 1), (ta, t_dim.lw, 0)],
             [bh4 as usize, bw4 as usize],
             [by4 as usize, bx4 as usize],
+            #[inline(always)]
             |case, (dir, lw_lh, dir_index)| {
                 case.set_disjoint(&dir.tx_intra, lw_lh as i8);
                 // TODO check unwrap is optimized out
@@ -1591,6 +1595,7 @@ fn decode_b(
                 [&t.l, ta],
                 [cbh4 as usize, cbw4 as usize],
                 [cby4 as usize, cbx4 as usize],
+                #[inline(always)]
                 |case, dir| {
                     case.set_disjoint(&dir.uvmode, uv_mode);
                 },
@@ -1761,6 +1766,7 @@ fn decode_b(
             [(&t.l, 1), (ta, 0)],
             [bh4 as usize, bw4 as usize],
             [by4 as usize, bx4 as usize],
+            #[inline(always)]
             |case, (dir, dir_index)| {
                 case.set_disjoint(&dir.tx_intra, b_dim[2 + dir_index] as i8);
                 case.set_disjoint(&dir.mode, DC_PRED);
@@ -1778,6 +1784,7 @@ fn decode_b(
                 [&t.l, ta],
                 [cbh4 as usize, cbw4 as usize],
                 [cby4 as usize, cbx4 as usize],
+                #[inline(always)]
                 |case, dir| {
                     case.set_disjoint(&dir.uvmode, DC_PRED);
                 },
@@ -2701,6 +2708,7 @@ fn decode_b(
             [(&t.l, 1), (ta, 0)],
             [bh4 as usize, bw4 as usize],
             [by4 as usize, bx4 as usize],
+            #[inline(always)]
             |case, (dir, dir_index)| {
                 case.set_disjoint(&dir.seg_pred, seg_pred.into());
                 case.set_disjoint(&dir.skip_mode, b.skip_mode);
@@ -2724,6 +2732,7 @@ fn decode_b(
                 [&t.l, ta],
                 [cbh4 as usize, cbw4 as usize],
                 [cby4 as usize, cbx4 as usize],
+                #[inline(always)]
                 |case, dir| {
                     case.set_disjoint(&dir.uvmode, DC_PRED);
                 },
@@ -2739,7 +2748,7 @@ fn decode_b(
         let b4_stride = usize::try_from(f.b4_stride).unwrap();
         let cur_segmap = &f.cur_segmap.as_ref().unwrap().inner;
         let offset = by * b4_stride + bx;
-        CaseSet::<32, false>::one((), bw4, 0, |case, ()| {
+        CaseSet::<32, false>::one((), bw4, 0, #[inline(always)] |case, ()| {
             for i in 0..bh4 {
                 let i = offset + i * b4_stride;
                 case.set(&mut cur_segmap.index_mut((i.., ..bw4)), b.seg_id);
@@ -3230,6 +3239,7 @@ fn decode_sb(
             [(&f.a[t.a], 0), (&t.l, 1)],
             [hsz as usize; 2],
             [bx8 as usize, by8 as usize],
+            #[inline(always)]
             |case, (dir, dir_index)| {
                 case.set_disjoint(
                     &dir.partition,
