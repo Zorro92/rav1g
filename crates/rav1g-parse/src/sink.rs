@@ -294,6 +294,11 @@ struct FrameState {
 
 /// What the sink keeps of a tile in parse. One thread at a time works on a tile.
 struct TileState {
+    /// The tile's index in its frame, and the frame's state; set at the tile's begin. The calls of the
+    /// tile's blocks come with the address of this state ([`ParseSink::tile_begin`]), so that they
+    /// find the tile and its frame without looking them up.
+    index: usize,
+    frame: *const FrameState,
     /// The tile's block lists, in its frame's place; set at the tile's begin.
     lists: *const TileLists,
     memory: TileMemory,
@@ -596,18 +601,30 @@ impl<H: SinkHost> Sink<H> {
         if self.options.time_calls { time_stamp() } else { 0 }
     }
 
-    /// The end of the call that began at `begin`.
+    /// The end of the call of the tile `key` that began at `begin`.
     ///
     /// # Safety
-    /// As [`Self::tile`].
+    /// As [`Self::tile_of`].
     #[inline]
-    unsafe fn call_end(&self, frame: usize, tile: usize, begin: u64) {
+    unsafe fn call_end(&self, key: usize, begin: u64) {
         if begin != 0 {
             // SAFETY: the caller's contract.
-            if let Some(state) = unsafe { self.tile(frame, tile) } {
-                state.call_stamps += time_stamp().wrapping_sub(begin);
-            }
+            unsafe { Self::tile_of(key) }.call_stamps += time_stamp().wrapping_sub(begin);
         }
+    }
+
+    /// The state of a tile from the number its calls come with: what its `tile_begin` returned, the
+    /// address of the state.
+    ///
+    /// # Safety
+    /// A call of the tile's thread between its `tile_begin` and the end of its frame, with what that
+    /// `tile_begin` returned: the state is in the frame's place, whose vector of tiles is not written
+    /// while tiles of the frame are in parse, and it is this thread's.
+    #[expect(clippy::mut_from_ref, reason = "a tile's state is its thread's, by the contract of ParseSink")]
+    #[inline(always)]
+    unsafe fn tile_of<'a>(key: usize) -> &'a mut TileState {
+        // SAFETY: the caller's contract.
+        unsafe { &mut *(key as *mut TileState) }
     }
 
     pub fn host(&self) -> &H {
@@ -839,38 +856,61 @@ impl<H: SinkHost> Sink<H> {
         }
     }
 
-    fn block_call(&self, frame_number: usize, tile: usize, block: &ParseBlock<'_>) {
+    /// The tile's piece of mode info records is full, or it has none: the next one from the host, or
+    /// `None` when there is none (the tile fails).
+    #[cold]
+    #[inline(never)]
+    fn next_mode_info_piece<'a>(
+        &self,
+        frame_number: usize,
+        tile: usize,
+        state: &'a mut TileState,
+    ) -> Option<&'a mut Records> {
+        let td = state.memory.tile_data;
+        // SAFETY: the tile's data, which the host gave for the tile; a call of the tile's thread.
+        unsafe { (*td).mi_count = state.pieces.last().map_or(0, |records| records.count) };
+        match self.host.more_mode_info(frame_number, tile, td) {
+            Some(piece) if piece.count > 0 => {
+                state.pieces.push(Records { pool: piece.mi_pool, count: 0, max: piece.count });
+                // SAFETY: the tile's lists, in its frame's place, set at the tile's begin.
+                unsafe { &*state.lists }
+                    .pieces
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push((piece.mi_pool, piece.count));
+                state.pieces.last_mut()
+            }
+            _ => {
+                state.failed = true;
+                None
+            }
+        }
+    }
+
+    /// # Safety
+    /// As [`Self::tile_of`].
+    unsafe fn block_call(&self, frame_number: usize, key: usize, block: &ParseBlock<'_>) {
         // SAFETY: a call of the tile's thread between the frame's begin and end; the record is the next
         // one of the tile's part of the pool, and the grid is written inside the tile.
         unsafe {
-            let frame = self.frame(frame_number);
-            let state = self.tile(frame_number, tile).as_mut().expect("the tile has begun");
+            let state = Self::tile_of(key);
+            let frame = &*state.frame;
+            let tile = state.index;
             if state.failed {
                 return;
             }
             // The tile's piece of the pool, and when it is full the next one (`decode_mbmi_block`,
             // `set_offsets`).
-            if state.pieces.last().is_none_or(|records| records.count >= records.max) {
-                let td = state.memory.tile_data;
-                (*td).mi_count = state.pieces.last().map_or(0, |records| records.count);
-                match self.host.more_mode_info(frame_number, tile, td) {
-                    Some(piece) if piece.count > 0 => {
-                        state.pieces.push(Records { pool: piece.mi_pool, count: 0, max: piece.count });
-                        (*state.lists)
-                            .pieces
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .push((piece.mi_pool, piece.count));
-                    }
-                    _ => {
-                        state.failed = true;
-                        return;
-                    }
-                }
-            }
-            let records = state.pieces.last_mut().expect("the tile has a piece");
+            let records = match state.pieces.last_mut() {
+                Some(records) if records.count < records.max => records,
+                _ => match self.next_mode_info_piece(frame_number, tile, state) {
+                    Some(records) => records,
+                    None => return,
+                },
+            };
             let mi = records.pool.add(records.count as usize);
             records.count += 1;
+            let count = records.count;
             let lossless = frame.hdr.segmentation.lossless[block.b.seg_id.get()];
             state.lossless = lossless;
             let record_frame = RecordFrame {
@@ -910,7 +950,7 @@ impl<H: SinkHost> Sink<H> {
             let y_mis = (1 << MI_SIZE_HIGH_LOG2[bsize]).min(frame.mi_rows - block.y4) as usize;
             let first = frame.mi_grid.add((block.y4 * frame.mi_stride + block.x4) as usize);
             let first_record = (*state.memory.tile_data).mi_offset as usize;
-            let entry = mi_grid_entry(first_record + records.count as usize - 1);
+            let entry = mi_grid_entry(first_record + count as usize - 1);
             let grid_begin = if self.options.time_calls { time_stamp() } else { 0 };
             for y in 0..y_mis {
                 let row = first.add(y * frame.mi_stride as usize);
@@ -924,11 +964,14 @@ impl<H: SinkHost> Sink<H> {
         }
     }
 
-    fn txb_call(&self, frame_number: usize, tile: usize, txb: &ParseTxb) -> *mut i32 {
+    /// # Safety
+    /// As [`Self::tile_of`].
+    unsafe fn txb_call(&self, frame_number: usize, key: usize, txb: &ParseTxb) -> *mut i32 {
         // SAFETY: a call of the tile's thread between the frame's begin and end; the record and the
         // coefficients are inside the tile's parts of their buffers (checked against their ends).
         unsafe {
-            let state = self.tile(frame_number, tile).as_mut().expect("the tile has begun");
+            let state = Self::tile_of(key);
+            let tile = state.index;
             if state.failed {
                 return std::ptr::null_mut();
             }
@@ -978,14 +1021,17 @@ impl<H: SinkHost> Sink<H> {
         }
     }
 
-    fn superblock_call(&self, frame_number: usize, tile: usize, superblock: &ParseSuperblock<'_>) {
+    /// # Safety
+    /// As [`Self::tile_of`].
+    unsafe fn superblock_call(&self, frame_number: usize, key: usize, superblock: &ParseSuperblock<'_>) {
         // SAFETY: a call of the tile's thread between the frame's begin and end; the grid is read inside
         // the tile, whose blocks have their records.
-        unsafe {
-            let frame = self.frame(frame_number);
+        let tile = unsafe {
+            let state = Self::tile_of(key);
+            let frame = &*state.frame;
             if frame.cdef_coded && self.options.gpu_grid {
                 // The same without the grid: the block calls of the superblock kept the records.
-                if let Some(state) = self.tile(frame_number, tile).as_mut() {
+                {
                     let areas = if frame.sb128 { 0..4 } else { 0..1 };
                     for area in areas {
                         let (x4, y4, index) = if frame.sb128 {
@@ -1004,7 +1050,7 @@ impl<H: SinkHost> Sink<H> {
                     }
                     state.cdef_records = [std::ptr::null_mut(); 4];
                 }
-            } else if frame.cdef_coded && self.tile(frame_number, tile).as_ref().is_some_and(|state| !state.failed) {
+            } else if frame.cdef_coded && !state.failed {
                 // libaom keeps the CDEF index of a 64x64 area in the record its top left 4x4 unit points
                 // to (`read_cdef` of `av1/decoder/decodemv.c`); -1 when all its blocks are skipped.
                 let quadrants = if frame.sb128 { 0..4 } else { 0..1 };
@@ -1027,7 +1073,8 @@ impl<H: SinkHost> Sink<H> {
                     }
                 }
             }
-        }
+            state.index
+        };
         self.host.superblock(frame_number, tile, superblock);
     }
 }
@@ -1111,13 +1158,15 @@ impl<H: SinkHost> ParseSink for Sink<H> {
         Ok(number)
     }
 
-    fn tile_begin(&self, frame_number: usize, tile: &ParseTile) {
+    fn tile_begin(&self, frame_number: usize, tile: &ParseTile) -> usize {
         let memory = self.host.tile_begin(frame_number, tile);
         // SAFETY: a call of the tile's thread between the frame's begin and end.
         unsafe {
             let frame = self.frame(frame_number);
             let slot = self.tile(frame_number, tile.index);
             let state = slot.get_or_insert_with(|| TileState {
+                index: tile.index,
+                frame: std::ptr::null(),
                 lists: std::ptr::null(),
                 memory: TileMemory {
                     tile_data: std::ptr::null_mut(),
@@ -1217,53 +1266,68 @@ impl<H: SinkHost> ParseSink for Sink<H> {
                 plane.subsampling_y = frame.ss_y;
             }
             state.memory = memory;
+            state.index = tile.index;
+            state.frame = frame;
+            std::ptr::from_mut(state) as usize
         }
     }
 
-    fn block(&self, frame: usize, tile: usize, block: &ParseBlock<'_>) {
+    // The calls of a tile's blocks come with what its `tile_begin` returned (`key`), the address of
+    // its state (`Self::tile_of`), on the tile's thread between that call and the end of the frame
+    // (the contract of `ParseSink`).
+    fn block(&self, frame: usize, key: usize, block: &ParseBlock<'_>) {
         let begin = self.call_begin();
-        self.block_call(frame, tile, block);
-        // SAFETY: a call of the tile's thread between the frame's begin and end.
-        unsafe { self.call_end(frame, tile, begin) };
+        // SAFETY: see above.
+        unsafe {
+            self.block_call(frame, key, block);
+            self.call_end(key, begin);
+        }
     }
 
-    fn txb(&self, frame: usize, tile: usize, txb: &ParseTxb) -> *mut i32 {
+    fn txb(&self, frame: usize, key: usize, txb: &ParseTxb) -> *mut i32 {
         let begin = self.call_begin();
-        let coefs = self.txb_call(frame, tile, txb);
         // SAFETY: as above.
-        unsafe { self.call_end(frame, tile, begin) };
-        coefs
+        unsafe {
+            let coefs = self.txb_call(frame, key, txb);
+            self.call_end(key, begin);
+            coefs
+        }
     }
 
-    fn palette(&self, frame: usize, tile: usize, palette: &ParsePalette<'_>) {
+    fn palette(&self, frame: usize, key: usize, palette: &ParsePalette<'_>) {
         let begin = self.call_begin();
-        self.host.palette(frame, tile, palette);
         // SAFETY: as above.
-        unsafe { self.call_end(frame, tile, begin) };
+        unsafe {
+            self.host.palette(frame, Self::tile_of(key).index, palette);
+            self.call_end(key, begin);
+        }
     }
 
-    fn superblock(&self, frame: usize, tile: usize, superblock: &ParseSuperblock<'_>) {
+    fn superblock(&self, frame: usize, key: usize, superblock: &ParseSuperblock<'_>) {
         let begin = self.call_begin();
-        self.superblock_call(frame, tile, superblock);
         // SAFETY: as above.
-        unsafe { self.call_end(frame, tile, begin) };
+        unsafe {
+            self.superblock_call(frame, key, superblock);
+            self.call_end(key, begin);
+        }
         // The block lists of the superblock, while its records are at hand; with `pipe_lists` those of
         // the superblock row at its end, by another thread. They have a timer of their own, so they are
         // not inside the timed call.
         // SAFETY: as above.
+        let state = unsafe { Self::tile_of(key) };
+        // SAFETY: as above; the frame's state is the frame's from its begin to its end.
+        let frame_state = unsafe { &*state.frame };
+        // SAFETY: as above.
         unsafe {
-            if let Some(state) = self.tile(frame, tile).as_ref() {
-                if self.frame(frame).pipe_lists {
-                    if superblock.x4 + state.sb_size >= state.col_end && !state.failed {
-                        self.publish_row(frame, state);
-                    }
-                } else if !self.options.late_lists {
-                    self.count_lists(frame, &*state.lists, ready_of(&state.pieces));
+            if frame_state.pipe_lists {
+                if superblock.x4 + state.sb_size >= state.col_end && !state.failed {
+                    self.publish_row(frame, state);
                 }
+            } else if !self.options.late_lists {
+                self.count_lists(frame, &*state.lists, ready_of(&state.pieces));
             }
         }
-        // SAFETY: as above.
-        if unsafe { self.frame(frame) }.panics {
+        if frame_state.panics {
             panic!("the test of a panic in the parse of a frame (SinkOptions::test_panic)");
         }
     }

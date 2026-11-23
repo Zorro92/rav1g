@@ -92,7 +92,9 @@ impl ParseSink for NullSink {
         Ok(number)
     }
 
-    fn tile_begin(&self, _frame: usize, _tile: &ParseTile) {}
+    fn tile_begin(&self, _frame: usize, tile: &ParseTile) -> usize {
+        tile.index
+    }
 
     fn block(&self, _frame: usize, _tile: usize, _block: &ParseBlock<'_>) {}
 

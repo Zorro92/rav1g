@@ -2,6 +2,7 @@
 
 use std::ffi::{c_int, c_uint};
 use std::ops::BitOr;
+use std::sync::atomic::Ordering;
 use std::cmp;
 
 use assert_matches::debug_assert_matches;
@@ -735,7 +736,7 @@ fn decode_coefs<BD: BitDepth>(
     // rav1g: the transform block goes to the sink, which says where its coefficients go.
     let dst = c.sink.txb(
         f.sink_frame,
-        ts_idx,
+        ts.sink_tile.load(Ordering::Relaxed),
         &ParseTxb {
             plane: plane as u8,
             tx,

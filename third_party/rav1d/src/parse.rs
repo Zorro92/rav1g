@@ -127,10 +127,9 @@ pub struct ParseBlock<'a> {
     pub delta_lf: [i8; 4],
     /// The quantiser index at the block.
     pub qidx: u8,
-    /// The palette colours of the block when it has palettes (`pal_sz` of the intra block).
-    pub pal: &'a [[u16; 8]; 3],
-    /// The index of the reference motion vector (`drl_idx`), the number of warp samples and the other
-    /// values nothing downstream reads are not passed.
+    /// The index of the reference motion vector (`drl_idx`), the number of warp samples, the palette
+    /// colours (they come with [`ParsePalette`]) and the other values nothing downstream reads of a
+    /// block are not passed.
     pub seg_pred: bool,
 }
 
@@ -239,21 +238,26 @@ pub trait ParseSink: Send + Sync {
     /// number returned comes back with every call of the frame. `Err` fails the frame.
     fn frame_begin(&self, frame: &ParseFrame<'_>) -> Result<usize, ()>;
 
-    /// The parse of a tile starts.
-    fn tile_begin(&self, frame: usize, tile: &ParseTile);
+    /// The parse of a tile starts. Returns the number the tile's `block`, `txb`, `palette` and
+    /// `superblock` calls come with in place of its index (`tile` there): the index itself
+    /// ([`ParseTile::index`]), or what the sink finds the tile's state by without looking it up (the
+    /// calls of a block are on the entropy decoder's path). The calls of the tile's end
+    /// (`tile_end`, `tile_finish`) come with its index.
+    fn tile_begin(&self, frame: usize, tile: &ParseTile) -> usize;
 
-    /// A block. Its coded transform blocks follow.
+    /// A block. Its coded transform blocks follow. `tile`: what the tile's `tile_begin` returned.
     fn block(&self, frame: usize, tile: usize, block: &ParseBlock<'_>);
 
     /// A coded transform block of the last block of the tile. Returns where its coefficients go:
     /// `eob + 1` dequantised coefficients in scan order, 32 bits each (only the non-zero ones are
-    /// written). Null fails the frame.
+    /// written). Null fails the frame. `tile`: what the tile's `tile_begin` returned.
     fn txb(&self, frame: usize, tile: usize, txb: &ParseTxb) -> *mut i32;
 
-    /// The colour index map of a palette block, before its `block` call.
+    /// The colour index map of a palette block, before its `block` call. `tile`: what the tile's
+    /// `tile_begin` returned.
     fn palette(&self, frame: usize, tile: usize, palette: &ParsePalette<'_>);
 
-    /// A superblock is parsed.
+    /// A superblock is parsed. `tile`: what the tile's `tile_begin` returned.
     fn superblock(&self, frame: usize, tile: usize, sb: &ParseSuperblock<'_>);
 
     /// The last superblock row of a tile is parsed.

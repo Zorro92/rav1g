@@ -2796,15 +2796,9 @@ fn parse_block(
     seg_pred: bool,
 ) {
     let ts = &f.ts[t.ts];
-    let has_pal = matches!(&b.ii, Av1BlockIntraInter::Intra(intra) if intra.pal_sz != [0, 0]);
-    let pal = if has_pal {
-        task_palette(f, t)
-    } else {
-        Default::default()
-    };
     c.sink.block(
         f.sink_frame,
-        t.ts,
+        ts.sink_tile.load(Ordering::Relaxed),
         &ParseBlock {
             x4: t.b.x,
             y4: t.b.y,
@@ -2814,7 +2808,6 @@ fn parse_block(
             warpmv: &t.warpmv,
             delta_lf: ts.last_delta_lf.get(),
             qidx: ts.last_qidx.get(),
-            pal: &pal,
             seg_pred,
         },
     );
@@ -2838,7 +2831,7 @@ fn parse_palette(
     let [w4, h4, bw4, bh4] = [w4, h4, bw4, bh4].map(|n| n as usize);
     c.sink.palette(
         f.sink_frame,
-        t.ts,
+        f.ts[t.ts].sink_tile.load(Ordering::Relaxed),
         &ParsePalette {
             x4: t.b.x,
             y4: t.b.y,
@@ -2894,7 +2887,7 @@ fn parse_superblock(
     };
     c.sink.superblock(
         f.sink_frame,
-        t.ts,
+        f.ts[t.ts].sink_tile.load(Ordering::Relaxed),
         &ParseSuperblock {
             x4: t.b.x,
             y4: t.b.y,
@@ -3575,7 +3568,7 @@ pub(crate) fn rav1d_decode_tile_sbrow(
         return Ok(());
     }
     if t.b.y == ts.tiling.row_start {
-        c.sink.tile_begin(
+        let sink_tile = c.sink.tile_begin(
             f.sink_frame,
             &ParseTile {
                 index: t.ts,
@@ -3585,6 +3578,7 @@ pub(crate) fn rav1d_decode_tile_sbrow(
                 row_end: ts.tiling.row_end,
             },
         );
+        ts.sink_tile.store(sink_tile, Ordering::Relaxed);
     }
 
     if c.tc.len() > 1 && frame_hdr.use_ref_frame_mvs != 0 {
