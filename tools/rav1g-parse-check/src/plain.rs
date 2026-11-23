@@ -288,19 +288,21 @@ impl Arena {
         }
     }
 
-    /// The arena as `new` leaves it, for another frame of the same size: the timing run uses one arena
-    /// for all frames, so that the parser writes memory the process already has.
+    /// The arena for another frame of the same size, cleared as the D3D12 host clears its slot for a
+    /// frame (`crates/rav1g/src/host/frame.rs`, without a switch for the clears): the data of the tiles
+    /// and, with the wavefront in the grids, the grids. The host keeps the mode info grid of a frame of
+    /// the same size, does not clear the records, the transform block records and the coefficients
+    /// (the transform stage clears what it read), and clears the start of a tile's block maps in
+    /// `setup_tile`. The timing run uses one arena for all frames, so that the parser writes memory the
+    /// process already has; clearing only this keeps the profiles of that run on the parser.
     pub fn reset(&mut self, gm_warp: [c_int; 8]) {
         // SAFETY: the buffers of the arena, which nothing else works on.
         unsafe {
-            self.mi_pool.ptr().write_bytes(0, self.mi_pool.len());
-            self.mi_grid.ptr().write_bytes(0, self.mi_grid.len());
-            self.tx_blocks.ptr().write_bytes(0, self.tx_blocks.len());
-            self.gen_indexes.ptr().write_bytes(0, self.gen_indexes.len());
-            self.block_map.ptr().write_bytes(0, self.block_map.len());
             self.tiles.ptr().write_bytes(0, self.tiles.len());
+            if !self.wave_edges {
+                self.iter_grid.ptr().cast::<u8>().write_bytes(0xFF, self.iter_grid.len() * size_of::<c_int>());
+            }
         }
-        self.fill();
         // The edges stay as the frame before left them, as in the host.
         self.wave_stamp += 1;
         for palettes in &self.palettes {
@@ -388,6 +390,11 @@ impl Arena {
             t.gen_iter_clear_offset = (t.gen_intra_iter_set + 16) * 10 + 256;
             t.gen_iter_clear_size =
                 (size_of::<c_int>() as c_int).wrapping_mul(256 + t.gen_intra_max_iter * 10 - t.gen_iter_clear_offset);
+            // The start of the tile's block maps, as the host clears it for every tile (`reset` does not
+            // clear the maps; a new arena has them zero).
+            let clear_ints = (32 + 16 + t.gen_iter_clear_offset) as usize;
+            assert!(t.gen_block_warp_offset as usize + clear_ints <= self.block_map.len());
+            t.gen_block_map_wrp.write_bytes(0, clear_ints);
             // The frame of the tile, for `av1_mi_push_block`: read by the tiles, written by none.
             t.frame_data = std::ptr::from_ref::<av1_frame_thread_data>(&self.frame_data).cast_mut().cast();
             if self.wave_edges {

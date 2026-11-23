@@ -24,7 +24,7 @@
 //!
 //! ```text
 //! rav1g-parse-check [-threads <n>] [-frames <n>] [-parseopt <list>] [-wave <way>] [-details <n>] [-root <dir>] [-manifest <task list>] [<stream>...]
-//! rav1g-parse-check -time [-frametimes] [-threads <n>] [-frames <n>] [-parseopt <list>] [-wave <way>] <stream>
+//! rav1g-parse-check -time [-frametimes] [-runs <n>] [-threads <n>] [-frames <n>] [-parseopt <list>] [-wave <way>] <stream>
 //! rav1g-parse-check -digest [-threads <n>] [-root <dir>] [-manifest <task list>] [<stream>...]
 //! rav1g-parse-check -lrmix [<stream>...]
 //! rav1g-parse-check -tiles [<stream>...]
@@ -36,6 +36,9 @@
 //! (the decoder's -parselistslegacy; the reference, with one thread, counts them on its thread).
 //! `-intralistslegacy` gives the run that is checked or timed the previous loops for the intra transform
 //! block lists. The reference uses those loops to check the default.
+//!
+//! `-runs`, with `-time`: how many runs of each kind (the parse alone, the parse with the sink) the best is
+//! taken of, 3 without it.
 //!
 //! `-frametimes`, with `-time`: one line per frame of every run with the sink, `FRAMETIME run=<r> no=<n>`
 //! and the frame's times in milliseconds (rav1d's `parse_stats`): `admit` its wait for a frame context,
@@ -108,6 +111,8 @@ struct Options {
     legacy: rhost::Legacy,
     /// -frametimes (with -time): a line with the times of every frame of every run with the sink.
     frame_times: bool,
+    /// -runs (with -time): the runs of each kind the best is taken of.
+    runs: usize,
     /// -tiles: the tile layouts of the streams.
     tiles: bool,
     streams: Vec<(String, PathBuf)>,
@@ -118,14 +123,15 @@ fn usage() -> ! {
     eprintln!("usage: rav1g-parse-check -tiles [<stream>...]  (the tile layouts of the frames, AV1 5.9.15)");
     eprintln!(
         "usage: rav1g-parse-check [-threads <n>] [-frames <n>] [-parseopt <list>] [-wave <way>] [-details <n>] \
-         [-root <dir>] [-manifest <task list>] [<stream>...]\n       rav1g-parse-check -time [-frametimes] [-threads <n>] \
+         [-root <dir>] [-manifest <task list>] [<stream>...]\n       rav1g-parse-check -time [-frametimes] [-runs <n>] [-threads <n>] \
          [-frames <n>] [-parseopt <list>] [-wave <way>] <stream>\nThe parse with -threads, -frames and -parseopt is \
          held against the parse with one thread, one frame in parse and the default switches.\n-frames: the frames \
          rav1d may have in parse at once (default 1; at most the threads)\n-parseopt: the switches of the parser, \
          separated by commas: nolfmask, tilethread (both on by default); none; default; latelists; time (with \
          -time)\n-wave: where the wavefront of intra prediction is kept: edges (default), grid, check (the grid for \
          the reference, the edges for the run that is checked)\n-intralistslegacy: the previous loops of the intra \
-         block lists\n-listslegacy: the block lists on the tile's thread, superblock by superblock\n-frametimes: with -time, a FRAMETIME line per frame of every run"
+         block lists\n-listslegacy: the block lists on the tile's thread, superblock by superblock\n-frametimes: with -time, a FRAMETIME line per frame of every run\n-runs: with -time, the runs of each kind the \
+         best is taken of (default 3)"
     );
     std::process::exit(2);
 }
@@ -160,6 +166,7 @@ fn options() -> Options {
         wave_edges: (true, true),
         legacy: rhost::Legacy::default(),
         frame_times: false,
+        runs: 3,
         tiles: false,
         streams: Vec::new(),
     };
@@ -176,6 +183,7 @@ fn options() -> Options {
             "-manifest" => manifests.push(PathBuf::from(value())),
             "-time" => options.time = true,
             "-frametimes" => options.frame_times = true,
+            "-runs" => options.runs = value().parse().ok().filter(|&runs| runs > 0).unwrap_or_else(|| usage()),
             "-tiles" => options.tiles = true,
             "-intralistslegacy" => options.legacy.intra_lists = true,
             "-listslegacy" => options.legacy.lists = true,
@@ -348,6 +356,7 @@ fn main() -> ExitCode {
             options.wave_edges.1,
             options.legacy,
             options.frame_times,
+            options.runs,
         );
     }
     if options.digest {

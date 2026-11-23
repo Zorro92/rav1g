@@ -120,7 +120,7 @@ fn milliseconds(duration: Duration, frames: u64) -> f64 {
 
 /// `wave_edges`: the wavefront in the edges of the tiles (the default of the decoder), not in the grids.
 /// `legacy`: the previous intra block lists. `frame_times`: a `FRAMETIME` line per frame of every run with
-/// the sink (rav1d's `parse_stats`).
+/// the sink (rav1d's `parse_stats`). `runs`: the runs of each kind the best is taken of.
 pub fn run(
     path: &Path,
     threads: u16,
@@ -129,6 +129,7 @@ pub fn run(
     wave_edges: bool,
     legacy: Legacy,
     frame_times: bool,
+    runs: usize,
 ) -> ExitCode {
     // What rav1d makes of the two numbers: at most as many frames as threads.
     let frames_in_parse = frames_in_parse.clamp(1, threads.max(1));
@@ -146,13 +147,12 @@ pub fn run(
             return ExitCode::FAILURE;
         }
     };
-    const RUNS: usize = 3;
 
     // The parse alone: the best of the runs.
     let mut parse = Duration::MAX;
     let mut frames = 0;
     let (mut width, mut height) = (0, 0);
-    for _ in 0..RUNS {
+    for _ in 0..runs {
         let sink = Arc::new(NullSink {
             places: (0..frames_in_parse).map(|_| (AtomicBool::new(false), UnsafeCell::new(Vec::new()))).collect(),
             frames: AtomicU64::new(0),
@@ -184,7 +184,7 @@ pub fn run(
     let mut sink_calls = Duration::ZERO;
     let mut sink_grid = Duration::ZERO;
     let mut lists_intra = Duration::ZERO;
-    for run in 0..RUNS {
+    for run in 0..runs {
         let mut parser = match RustParser::with_clock(threads, frames_in_parse, options, true, wave_edges, legacy) {
             Ok(parser) => parser,
             Err(error) => {
@@ -238,7 +238,7 @@ pub fn run(
 
     let sink = with_sink.saturating_sub(parse);
     println!(
-        "PARSE TIME {}: {frames} frames {width}x{height}, {threads} thread(s), {frames_in_parse} frame(s) in parse, switches {}, best of {RUNS}: parse {:.3} ms/frame, with \
+        "PARSE TIME {}: {frames} frames {width}x{height}, {threads} thread(s), {frames_in_parse} frame(s) in parse, switches {}, best of {runs}: parse {:.3} ms/frame, with \
          the sink {:.3} ms/frame, the sink {:.3} ms/frame, of which the block lists {:.3} ms/frame{} (CPU time of all \
          threads for the block lists)",
         path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned()),
