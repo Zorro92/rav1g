@@ -82,10 +82,15 @@ To test a decoder switch in the same build, dispatch with:
 gh workflow run build.yml --ref <branch> -f argon=true -f argon_switches=-newswitch
 ```
 
-`argon_switches` accepts comma-separated flags without arguments, such as
-`-newswitch,-intralistslegacy`. Each distinct flag gets its own pass with
-`-parseframes 2`. Shard artifacts contain `results.tsv` and `summary.md` in
-`default/` and in a directory named for each requested flag.
+`argon_switches` accepts comma-separated passes, such as
+`-newswitch,-intralistslegacy`. A pass is one flag or several, each with an
+optional plain value, separated by spaces: `-output p010` decodes into NV12
+and P010 textures the output pass writes (the hash is that of the planes, so
+the reference md5 holds), which is the only way Argon reaches the direct
+semi-planar output and its fusion into the last postfilter stage. Each
+distinct pass runs with `-parseframes 2`. Shard artifacts contain
+`results.tsv` and `summary.md` in `default/` and in a directory named for
+each pass (spaces become `_`).
 
 No Argon job runs on pushes, tags, or the weekly schedule. The cache is
 approximately 1.5 GB. Plan on roughly 15–35 minutes for the default Windows

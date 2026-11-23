@@ -2420,19 +2420,23 @@ jobs:
         env:
           ARGON_SWITCHES: ${{ inputs.argon_switches }}
         run: |
+          # A pass is one entry: a flag, or flags with plain values separated by spaces (for example
+          # "-output p010 -cdefv3legacy").
           $switches = $env:ARGON_SWITCHES -split ',' | ForEach-Object { $_.Trim() } | Select-Object -Unique
           foreach ($decoderSwitch in $switches) {
-            if ($decoderSwitch -cnotmatch '\A-[a-z][a-z0-9_-]*\z') {
-              throw 'argon_switches needs comma-separated decoder flags without arguments (for example -intralistslegacy)'
+            if ($decoderSwitch -cnotmatch '\A-[a-z][a-z0-9_-]*( [a-z0-9_-]+)*\z') {
+              throw 'argon_switches needs comma-separated passes of decoder flags, each flag with an optional plain value (for example -intralistslegacy,-output p010)'
             }
           }
           $PSNativeCommandUseErrorActionPreference = $false
           $failed = $false
           foreach ($decoderSwitch in $switches) {
             Write-Host "Argon on WARP with $decoderSwitch"
+            $passArgs = @($decoderSwitch -split ' ' | ForEach-Object { "--decoder-arg=$_" })
+            $passDir = $decoderSwitch -replace ' ', '_'
             python testing/argon/run.py --tool out/rav1g-dec/rav1g-dec.exe `
-              --streams argon-streams --out "out/argon/$decoderSwitch" --shards 8 --shard ${{ matrix.shard }} --timeout 450 `
-              --decoder-arg=-parseframes --decoder-arg=2 "--decoder-arg=$decoderSwitch"
+              --streams argon-streams --out "out/argon/$passDir" --shards 8 --shard ${{ matrix.shard }} --timeout 450 `
+              --decoder-arg=-parseframes --decoder-arg=2 @passArgs
             if ($LASTEXITCODE -ne 0) { $failed = $true }
           }
           if ($failed) { exit 1 }
