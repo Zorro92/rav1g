@@ -302,11 +302,20 @@ pub(crate) unsafe fn begin(dec: *mut Av1Core, step_count: c_int, show_frame: c_i
 }
 
 /// Behind the barrier of step `it`: its timestamp, and what the step dispatched (the records of its ten
-/// lists, its thread groups and dispatches).
+/// lists, its thread groups and dispatches, and the wavefront iterations its dispatch ran: 1, or for the last
+/// iteration of a run of the intra_run shader the iterations of the run; the iterations in front of the last
+/// one of a run are steps of 0 groups, 0 dispatches and 0 iterations, timed in front of the run).
 ///
 /// # Safety
 /// As for [`begin`].
-pub(crate) unsafe fn step(dec: *mut Av1Core, it: c_int, lists: &[c_int; LISTS], groups: c_int, dispatches: c_int) {
+pub(crate) unsafe fn step(
+    dec: *mut Av1Core,
+    it: c_int,
+    lists: &[c_int; LISTS],
+    groups: c_int,
+    dispatches: c_int,
+    iterations: c_int,
+) {
     // SAFETY: the caller's contract.
     unsafe {
         let steps = &mut (*(*dec).curr_frame_data).step_time;
@@ -321,6 +330,7 @@ pub(crate) unsafe fn step(dec: *mut Av1Core, it: c_int, lists: &[c_int; LISTS], 
         record.lists = *lists;
         record.groups = groups;
         record.dispatches = dispatches;
+        record.iterations = iterations;
     }
 }
 

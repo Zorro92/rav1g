@@ -510,6 +510,19 @@ static INTRA_OPT: AtomicI32 = AtomicI32::new(1);
 
 static INTRA_SINGLE_EDGE_LEGACY: AtomicI32 = AtomicI32::new(0);
 
+// Runs of narrow wavefront iterations in one thread group (intra_run*.hlsl): the most lanes (one per four
+// samples of a row) an iteration may have to go into a run; 0 for none (-intrarunlegacy). The default, 2048
+// lanes, is four chunks of the run's 512-thread group: an iteration in a run costs the group about one
+// pass of its body per chunk instead of a step of its own, about 18 us of dispatch and barrier plus the
+// latency of a group on the console (AGENTS.md, "Dependent dispatches").
+static INTRA_RUN_LANES: AtomicI32 = AtomicI32::new(2048);
+
+/// `av1_set_intra_run` (`dx/av1_perf.h`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_intra_run(max_lanes: c_int) {
+    INTRA_RUN_LANES.store(max_lanes.max(0), Ordering::Relaxed);
+}
+
 // -intrasortlegacy: the main intra shader without the sort of a group's blocks by kind (intra_main_sorted*.hlsl).
 static INTRA_SORT_LEGACY: AtomicI32 = AtomicI32::new(0);
 
@@ -1343,19 +1356,101 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                     (*cm).show_frame,
                     c_int::from(frame_type == 0 || frame_type == 2), // frame_is_intra_only()
                 );
-                for it in 0..=td.intra_iters {
+                // The work of an iteration: the records of its lists (counts0[8], wi_count, pass_offset), and
+                // its filter intra blocks.
+                let iteration = |it: c_int| {
                     let base = (it * IntraTypeCount) as usize;
-                    let offset = *offsets.add(base);
-                    // counts0[8], wi_count, pass_offset
                     let mut srt = [0; 10];
                     for size in 0..8 {
                         srt[size] = *offsets.add(base + size + 1) - *offsets.add(base + size);
                     }
                     let counts8 = *offsets.add(base + 9) - *offsets.add(base + 8);
                     // Threads of 4x4 samples: 1024 of them in a 64x64 block down to 8 in a 4x8, 4 in a 4x4.
-                    let wi_count = (0..8).map(|size| srt[size] << (10 - size)).sum::<c_int>() + (counts8 << 2);
-                    srt[8] = wi_count;
-                    srt[9] = offset;
+                    srt[8] = (0..8).map(|size| srt[size] << (10 - size)).sum::<c_int>() + (counts8 << 2);
+                    srt[9] = *offsets.add(base);
+                    let filter = list_range(offsets, base + IntraSizes as usize);
+                    (srt, counts8, filter)
+                };
+                // Runs (intra_run*.hlsl, av1_set_intra_run): an iteration with at most `run_lanes` lanes and
+                // no filter intra block goes into a run of such iterations, which one thread group runs in one
+                // dispatch, behind one barrier. Only with the lists of the CPU, whose starts the run reads from
+                // the block map, and with the single-edge wavefront, whose shader the run's is.
+                let run_lanes = if pass.gpu.is_none() && matches!(td.intra_main, IntraMain::SingleEdge) {
+                    INTRA_RUN_LANES.load(Ordering::Relaxed)
+                } else {
+                    0
+                };
+                let last_iter = td.intra_iters;
+                let in_run = |it: c_int| {
+                    it <= last_iter && {
+                        let (srt, _, (_, filters)) = iteration(it);
+                        filters == 0 && srt[8] != 0 && srt[8] <= run_lanes
+                    }
+                };
+                let run_shader = if td.is_hbd != 0 {
+                    &raw const (*lib).shader_intra_run_hbd
+                } else {
+                    &raw const (*lib).shader_intra_run
+                };
+                // The bindings of intra_main for its layout (the run has another).
+                let bind_main = || {
+                    commands.set_layout(pipeline(intra_main).layout());
+                    commands.bind_read(0, blocks.location());
+                    commands.bind_read(1, residuals.location());
+                    commands.bind_read(2, mask_lut.location());
+                    commands.bind_write(3, frame_buffers.location());
+                    commands.bind_constants(4, constants.location);
+                };
+                let mut run_layout = false;
+                let mut it = 0;
+                while it <= td.intra_iters {
+                    // A run of at least two iterations.
+                    if run_lanes > 0 && in_run(it) && in_run(it + 1) {
+                        let mut last = it + 1;
+                        while in_run(last + 1) {
+                            last += 1;
+                        }
+                        if !run_layout {
+                            let run = pipeline(run_shader);
+                            commands.set_layout(run.layout());
+                            commands.set_pipeline(run);
+                            commands.bind_read(0, blocks.location());
+                            commands.bind_read(1, residuals.location());
+                            commands.bind_read(2, mask_lut.location());
+                            commands.bind_read(3, buffer(td.gen_block_map).location());
+                            commands.bind_write(4, frame_buffers.location());
+                            commands.bind_constants(5, constants.location);
+                            run_layout = true;
+                            shader = run_shader;
+                        }
+                        // The iterations in front of the last one are steps of no time for the step timing.
+                        for at in it..last {
+                            let (srt, counts8, _) = iteration(at);
+                            let lists = [srt[0], srt[1], srt[2], srt[3], srt[4], srt[5], srt[6], srt[7], counts8, 0];
+                            super::step_time::step(dec, at, &lists, 0, 0, 0);
+                        }
+                        let lists_word = (*tiles).gen_block_map_offset + InterCountsAll + ReconstructBlockSizes;
+                        let run = [(lists_word + it * IntraTypeCount) as c_int, last - it + 1, 0, 0];
+                        commands.set_inline_constants(6, &run, 0);
+                        commands.dispatch(1, 1, 1);
+                        commands.write_barrier(frame_buffers);
+                        td.intra_stats[0] += 1;
+                        td.intra_stats[1] += 1;
+                        td.intra_stats[2] += 1;
+                        td.intra_stats[3] += last - it + 1; // one pass per iteration of the run
+                        let (srt, counts8, _) = iteration(last);
+                        let lists = [srt[0], srt[1], srt[2], srt[3], srt[4], srt[5], srt[6], srt[7], counts8, 0];
+                        super::step_time::step(dec, last, &lists, 1, 1, last - it + 1);
+                        it = last + 1;
+                        continue;
+                    }
+                    if run_layout {
+                        bind_main();
+                        run_layout = false;
+                        shader = std::ptr::null();
+                    }
+                    let (srt, counts8, (offset, count)) = iteration(it);
+                    let wi_count = srt[8];
                     if wi_count != 0 {
                         if shader != intra_main {
                             shader = intra_main;
@@ -1376,9 +1471,9 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                         }
                         td.intra_stats[0] += 1;
                         td.intra_stats[2] += (wi_count + 255) >> 8;
+                        td.intra_stats[3] += (wi_count + 255) >> 8;
                     }
 
-                    let (offset, count) = list_range(offsets, base + IntraSizes as usize);
                     if count != 0 {
                         if shader != intra_filter {
                             shader = intra_filter;
@@ -1397,6 +1492,7 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                         }
                         td.intra_stats[0] += 1;
                         td.intra_stats[2] += count;
+                        td.intra_stats[3] += count;
                     }
 
                     assert!(count != 0 || wi_count != 0, "a wavefront iteration has blocks");
@@ -1406,10 +1502,10 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                     let lists = [srt[0], srt[1], srt[2], srt[3], srt[4], srt[5], srt[6], srt[7], counts8, count];
                     let groups = ((wi_count + 255) >> 8) + count;
                     let dispatches = c_int::from(wi_count != 0) + c_int::from(count != 0);
-                    super::step_time::step(dec, it, &lists, groups, dispatches);
+                    super::step_time::step(dec, it, &lists, groups, dispatches, 1);
+                    it += 1;
                 }
                 super::step_time::end(dec);
-                td.intra_stats[3] = td.intra_stats[2]; // one pass per thread group
                 perf_gpu_mark(dec, AV1_PERF_GPU_INTRA);
                 stage_dump_fb(dec, c"intra", td.frame_buffer, std::ptr::null());
             }

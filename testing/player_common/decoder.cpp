@@ -808,6 +808,12 @@ int AV1Decoder::DecodeOne() {
   av1_set_intra_filter_legacy(params_.intrafilterlegacy_);
   av1_set_intra_single_edge_legacy(params_.intrasingleedgelegacy_);
   av1_set_intra_sort_legacy(params_.intrasortlegacy_);
+  av1_set_intra_run(params_.intrarunlegacy_ ? 0 : params_.intrarunmax_);
+  XB_LOGI << "Intra runs: "
+          << (params_.intrarunlegacy_ ? std::string("none, every iteration a step of its own (-intrarunlegacy)")
+                                      : "iterations of at most " + std::to_string(params_.intrarunmax_) +
+                                            " lanes without filter intra in one thread group" +
+                                            (params_.intrarunmax_ == 2048 ? " (default)" : " (-intrarunmax)"));
   XB_LOGI << "8-bit filter intra shader: "
           << (params_.intrafilterlegacy_ ? "intra_filter_legacy (-intrafilterlegacy)" : "intra_filter_prefetch (default)");
   XB_LOGI << "Loop restoration shader: loop_restoration / loop_restoration_wiener (default)";
@@ -1118,7 +1124,7 @@ void AV1Decoder::IntraSteps(void* priv, const av1_intra_steps* frame) {
       for (int k = 0; k < AV1_INTRA_KIND_COUNT && len < (int)sizeof(b); ++k)
         len += snprintf(b + len, sizeof(b) - len, k ? ",%d" : (plane ? " c=%d" : " y=%d"), s.blocks[plane][k]);
     }
-    if (len < (int)sizeof(b)) snprintf(b + len, sizeof(b) - len, " fdiag=%d", s.filter_diagonals);
+    if (len < (int)sizeof(b)) snprintf(b + len, sizeof(b) - len, " fdiag=%d iters=%d", s.filter_diagonals, s.iterations);
     lines.push_back(b);
   }
   std::lock_guard<std::mutex> lock(This->steps_cs_);

@@ -305,6 +305,15 @@ void av1_set_intra_single_edge_legacy(int enable);
  * in flight. */
 void av1_set_intra_sort_legacy(int enable);
 
+/* Process-wide. Wavefront iterations with at most max_lanes lanes (one lane per four
+ * samples of a row of a block: 1024 in a 64x64 block, 4 in a 4x4) and no filter intra
+ * block run in one thread group (intra_run*.hlsl), two or more in a row in one dispatch
+ * with one barrier, instead of a dispatch and a barrier each. 0 runs every iteration on
+ * its own (-intrarunlegacy). The default is 2048. Applies to frames with the CPU's block
+ * lists and the single-edge wavefront. The output is the same. Change it only while no
+ * frame is in flight. */
+void av1_set_intra_run(int max_lanes);
+
 /* Process-wide. Nonzero counts the intra block lists with the previous loops of
  * av1_mi_push_block and the previous edges of the wavefront, four arrays with the
  * frame's stamp (-intralistslegacy); zero uses intra_block_edges and the packed edges.
@@ -363,6 +372,9 @@ typedef struct av1_intra_step {
   int blocks[2][AV1_INTRA_KIND_COUNT]; /* transform blocks by plane (luma, chroma: U and V are one) and kind */
   int filter_diagonals; /* the longest serial chain of filter intra in the step: columns + rows - 1 of its
                            largest block in 4x2 units (23 for a 32x32 block), 0 without filter intra */
+  int iterations;       /* wavefront iterations the step's dispatch ran: 1; in a run of the intra_run
+                           shader (av1_set_intra_run) the run's iterations for its last one, and 0 for the
+                           others, which are timed in front of the run */
 } av1_intra_step;
 
 typedef struct av1_intra_steps {

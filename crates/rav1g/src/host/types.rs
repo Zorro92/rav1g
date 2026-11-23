@@ -121,6 +121,9 @@ pub struct compute_shader_lib {
     // sorted by kind (intra_main_sorted*.hlsl).
     pub shader_intra_main_sorted: ComputeShader,
     pub shader_intra_main_sorted_hbd: ComputeShader,
+    // The run of narrow wavefront iterations in one thread group (intra_run*.hlsl, layout sig_intra_run).
+    pub shader_intra_run: ComputeShader,
+    pub shader_intra_run_hbd: ComputeShader,
     pub shader_intra_main_prefetch: ComputeShader,
     pub shader_intra_filter_prefetch: ComputeShader,
     pub shader_intra_filter_prefetch_hbd: ComputeShader,
@@ -159,6 +162,7 @@ pub struct compute_shader_lib {
     pub sig_pred_blocks_fast: Option<ID3D12RootSignature>,
     pub sig_intra_pred: Option<ID3D12RootSignature>,
     pub sig_intra_v2: Option<ID3D12RootSignature>,
+    pub sig_intra_run: Option<ID3D12RootSignature>,
     pub sig_inter_pred: Option<ID3D12RootSignature>,
     pub sig_lf: Option<ID3D12RootSignature>,
     pub sig_lf_gen: Option<ID3D12RootSignature>,

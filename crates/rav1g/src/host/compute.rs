@@ -124,10 +124,10 @@ const LAYOUTS: usize =
 const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
-    // 20 transform pipelines, 34 shared shaders and 27 per bit depth: one slot per pipeline of
+    // 20 transform pipelines, 36 shared shaders and 27 per bit depth: one slot per pipeline of
     // `create_tasks` (the test `every_pipeline_names_its_shader_once`).
-    assert!(SHADERS == 20 + 34 + 2 * 27);
-    assert!(LAYOUTS == 24);
+    assert!(SHADERS == 20 + 36 + 2 * 27);
+    assert!(LAYOUTS == 25);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
 
@@ -208,6 +208,7 @@ struct Layouts {
     pred_list_scan: Layout,
     intra_pred: Layout,
     intra_v2: Layout,
+    intra_run: Layout,
     inter_pred: Layout,
     loop_rest: Layout,
     cdef_filter: Layout,
@@ -254,6 +255,8 @@ unsafe fn create_layouts(device: Device<'_>, lib: *mut compute_shader_lib) -> Re
         intra_pred: layout(3, 1, 1, 10)?,
         // intra_v2.hlsl: t0..t4, u0, b0 and 8 inline constants in b1.
         intra_v2: layout(5, 1, 1, 8)?,
+        // intra_run*.hlsl: t0..t2 as the main shader, the block map in t3, u0, b0 and 4 inline constants in b1.
+        intra_run: layout(4, 1, 1, 4)?,
         inter_pred: layout(5, 1, 1, 4)?,
         loop_rest: layout(3, 1, 2, 2)?,
         cdef_filter: layout(2, 1, 1, 0)?,
@@ -283,6 +286,7 @@ unsafe fn create_layouts(device: Device<'_>, lib: *mut compute_shader_lib) -> Re
         com_store(&raw mut (*lib).sig_pred_blocks_fast, layouts.pred_blocks_fast.clone().into_raw());
         com_store(&raw mut (*lib).sig_intra_pred, layouts.intra_pred.clone().into_raw());
         com_store(&raw mut (*lib).sig_intra_v2, layouts.intra_v2.clone().into_raw());
+        com_store(&raw mut (*lib).sig_intra_run, layouts.intra_run.clone().into_raw());
         com_store(&raw mut (*lib).sig_inter_pred, layouts.inter_pred.clone().into_raw());
         com_store(&raw mut (*lib).sig_loop_rest, layouts.loop_rest.clone().into_raw());
         com_store(&raw mut (*lib).sig_cdef_filter, layouts.cdef_filter.clone().into_raw());
@@ -388,6 +392,8 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("intra_main_single_edge_hbd", &layouts.intra_pred, &raw mut (*lib).shader_intra_main_single_edge_hbd),
             ("intra_main_sorted", &layouts.intra_pred, &raw mut (*lib).shader_intra_main_sorted),
             ("intra_main_sorted_hbd", &layouts.intra_pred, &raw mut (*lib).shader_intra_main_sorted_hbd),
+            ("intra_run", &layouts.intra_run, &raw mut (*lib).shader_intra_run),
+            ("intra_run_hbd", &layouts.intra_run, &raw mut (*lib).shader_intra_run_hbd),
             ("intra_filter_prefetch", &layouts.intra_pred, &raw mut (*lib).shader_intra_filter_prefetch),
             ("intra_filter_prefetch_hbd", &layouts.intra_pred, &raw mut (*lib).shader_intra_filter_prefetch_hbd),
             ("intra_main_hbd_legacy", &layouts.intra_pred, &raw mut (*lib).shaders_hbd.intra_main_legacy),

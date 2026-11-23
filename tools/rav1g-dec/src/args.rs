@@ -98,6 +98,8 @@ pub struct Task {
     pub intrafilterlegacy: bool,
     pub intrasingleedgelegacy: bool,
     pub intrasortlegacy: bool,
+    pub intrarunlegacy: bool,
+    pub intrarunmax: i32,
     pub intralistslegacy: bool,
     pub parselistslegacy: bool,
     /// What a frame does about the clears of its slot's grids: nothing to clear without a flag;
@@ -178,6 +180,8 @@ impl Default for Task {
             intrafilterlegacy: false,
             intrasingleedgelegacy: false,
             intrasortlegacy: false,
+            intrarunlegacy: false,
+            intrarunmax: 2048,
             intralistslegacy: false,
             parselistslegacy: false,
             clears: Clears::NotNeeded,
@@ -290,6 +294,8 @@ pub fn usage() {
     say!("  -intrafilterlegacy   use the previous 8-bit filter intra shader");
     say!("  -intrasingleedgelegacy use the previous directional wavefront with prefetching");
     say!("  -intrasortlegacy       intra main shader without the sort of a group's blocks by kind");
+    say!("  -intrarunlegacy        every intra wavefront iteration a dispatch of its own (no runs)");
+    say!("  -intrarunmax <n>       intra iterations of at most n lanes go into runs (default 2048)");
     say!("  -intralistslegacy    count the intra block lists with the previous loops and wavefront edges");
     say!("  -parselistslegacy    count the block lists on the tile's thread, superblock by superblock");
     say!("                        as in the test player (docs/test-player.md); -cdefv2 and -fitsize (the defaults)");
@@ -478,6 +484,8 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-intrafilterlegacy" => task.intrafilterlegacy = true,
             "-intrasingleedgelegacy" => task.intrasingleedgelegacy = true,
             "-intrasortlegacy" => task.intrasortlegacy = true,
+            "-intrarunlegacy" => task.intrarunlegacy = true,
+            "-intrarunmax" => task.intrarunmax = number()?,
             "-intralistslegacy" => task.intralistslegacy = true,
             "-parselistslegacy" => task.parselistslegacy = true,
             "-gpuclear" => task.clears = Clears::Gpu,

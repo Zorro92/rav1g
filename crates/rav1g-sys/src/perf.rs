@@ -337,9 +337,13 @@ pub struct av1_intra_step {
     pub lists: [c_int; AV1_INTRA_STEP_LISTS as usize],
     pub blocks: [[c_int; AV1_INTRA_KIND_COUNT as usize]; 2],
     pub filter_diagonals: c_int,
+    /// Wavefront iterations the step's dispatch ran: 1; for the last iteration of a run (intra_run) its
+    /// iterations, and 0 for the others of the run.
+    pub iterations: c_int,
 }
 const _: () = {
     assert!(size_of::<av1_intra_step>() == 152);
+    assert!(offset_of!(av1_intra_step, iterations) == 148);
     assert!(offset_of!(av1_intra_step, groups) == 8);
     assert!(offset_of!(av1_intra_step, dispatches) == 12);
     assert!(offset_of!(av1_intra_step, lists) == 16);

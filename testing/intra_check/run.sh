@@ -55,6 +55,8 @@ to_cpp "$shaders/intra_main_single_edge.hlsl" > "$work/intra_main_single_edge.ge
 to_cpp "$shaders/intra_main_single_edge_hbd.hlsl" > "$work/intra_main_single_edge_hbd.gen.h"
 to_cpp "$shaders/intra_main_sorted.hlsl" > "$work/intra_main_sorted.gen.h"
 to_cpp "$shaders/intra_main_sorted_hbd.hlsl" > "$work/intra_main_sorted_hbd.gen.h"
+to_cpp "$shaders/intra_run.hlsl" > "$work/intra_run.gen.h"
+to_cpp "$shaders/intra_run_hbd.hlsl" > "$work/intra_run_hbd.gen.h"
 
 # The count of edge samples the intra edge filter takes from the row above (AV1 7.11.2.4, numPx =
 # Min(w, maxX - x + 1) + ...): the samples of the row above that are in the frame. The 10-bit shaders took
@@ -130,16 +132,16 @@ build() {
   for shader in intra_main:0 intra_main_hbd:0 intra_main_legacy:0 intra_main_hbd_legacy:0 \
     intra_filter_legacy:1 intra_main_prefetch_hbd:0 intra_main_prefetch:0 \
     intra_main_prefetch_double_hbd:0 intra_main_prefetch_double:0 intra_main_single_edge:0 intra_main_single_edge_hbd:0 \
-    intra_main_sorted:0 intra_main_sorted_hbd:0 \
+    intra_main_sorted:0 intra_main_sorted_hbd:0 intra_run:3 intra_run_hbd:3 \
     intra_filter_prefetch:1 intra_filter_prefetch_hbd:1 intra_v2:2 intra_v2_hbd:2; do
     name=${shader%:*}
     hbd=
     case $name in
       # (SHADER_HBD names the group memory to scramble: the 8-bit prefetching shader has the 10-bit one's.)
-      *_hbd | *_hbd_legacy | intra_main_prefetch | intra_main_prefetch_double | intra_main_single_edge | intra_main_sorted) hbd=-DSHADER_HBD ;;
+      *_hbd | *_hbd_legacy | intra_main_prefetch | intra_main_prefetch_double | intra_main_single_edge | intra_main_sorted | intra_run) hbd=-DSHADER_HBD ;;
     esac
     case $name in
-      intra_main_sorted*) hbd="$hbd -DSHADER_SORTED" ;;
+      intra_main_sorted* | intra_run*) hbd="$hbd -DSHADER_SORTED" ;;
     esac
     filter_layout=
     case $name in
@@ -212,6 +214,8 @@ intra_v2.gen.h@0,/GroupMemoryBarrierWithGroupSync();/s//GroupMemoryBarrier();/@g
 intra_main_hbd.gen.h@s/angle < 90 ? 305/angle < 87 ? 305/@zone of an angle by arithmetic (prefetch)@MISMATCH in the prefetching
 intra_main_hbd.gen.h@s/sort_items\[sort_counts_before + sort_leads\[local - wi\] + wi\]/sort_items[sort_counts_before + sort_leads[local - wi]]/@all lanes of a sorted block at its first place (garbage block records: may crash the check)@
 intra_main_hbd.gen.h@/sort_items\[sort_counts_before/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/@group sync between the scatter and the gather of the sort as a plain barrier (garbage block records: may crash the check)@
+intra_main_hbd.gen.h@s/^    DeviceMemoryBarrierWithGroupSync();/    GroupMemoryBarrierWithGroupSync();/@device memory barrier between the iterations of a run as a group sync@without a device memory barrier
+intra_main_hbd.gen.h@s/const uint at = (cb_run_lists + it \* 10) \* 4;/const uint at = (cb_run_lists + it * 9) * 4;/@lists of the iterations of a run at the wrong place@MISMATCH in the .*runs
 intra_main_hbd.gen.h@s/if (key < sort_key) sort_counts_before += count;/if (key <= sort_key) sort_counts_before += count;/@ranges of the sort keys one key late (garbage block records: may crash the check)@
 intra_main_hbd.gen.h@s/0x43CB9D71u/0x43B39D71u/@nominal angle of D203 (prefetch)@MISMATCH in the prefetching
 intra_main_hbd.gen.h@s/mode_info != Dir3 || left_available == 0/true/@opposite edge read in the same step@MISMATCH in the prefetching single-edge

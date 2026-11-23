@@ -82,8 +82,15 @@ struct AccessTracker {
   uint32_t *w_group = nullptr;
   uint32_t *w_phase = nullptr;
   uint32_t *w_thread = nullptr;
+  uint32_t *w_device = nullptr;
   uint32_t unit = 1, group = 0;  // the phase and the thread are gs_state.epoch and gs_state.thread
   int track_phase = 0;
+  // The run of intra_run*.hlsl: a word read by one thread that another thread of the group wrote in the
+  // same dispatch since the last device memory barrier with group sync ("device epoch"). Group syncs do
+  // not order device memory.
+  int track_device = 0;
+  uint32_t device_epoch = 1;
+  long races_device = 0;
   bool require_unique_stores = false;
   long duplicate_stores = 0;
   long races_group = 0, races_thread = 0;
@@ -125,6 +132,9 @@ struct RWByteAddressBuffer {
       else if (g_tracker.track_phase && g_tracker.w_phase[word] == gs_state.epoch &&
                g_tracker.w_thread[word] != gs_state.thread)
         g_tracker.races_thread++;
+      else if (g_tracker.track_device && g_tracker.w_unit[word] == g_tracker.unit &&
+               g_tracker.w_device[word] == g_tracker.device_epoch && g_tracker.w_thread[word] != gs_state.thread)
+        g_tracker.races_device++;
     }
     memcpy(&v, ptr + address, 4);
     return v;
@@ -147,6 +157,7 @@ struct RWByteAddressBuffer {
       g_tracker.w_group[word] = g_tracker.group;
       g_tracker.w_phase[word] = gs_state.epoch;
       g_tracker.w_thread[word] = gs_state.thread;
+      if (g_tracker.w_device) g_tracker.w_device[word] = g_tracker.device_epoch;
     }
     memcpy(ptr + address, &v, 4);
   }
@@ -164,6 +175,15 @@ struct RWByteAddressBuffer {
 static inline void GroupMemoryBarrier() { gs_state.plain_barriers++; }
 static inline void GroupMemoryBarrierWithGroupSync() { gs_group_sync(); }
 static inline void AllMemoryBarrierWithGroupSync() { gs_group_sync(); }
+// A group sync that also orders the group's device memory: the first thread past it starts a device epoch.
+static inline void DeviceMemoryBarrierWithGroupSync() {
+  static uint32_t synced_at = 0;
+  gs_group_sync();
+  if (synced_at != gs_state.epoch) {
+    synced_at = gs_state.epoch;
+    g_tracker.device_epoch++;
+  }
+}
 
 /*
  * An atomic add to group memory (intra_main_sorted*.hlsl): the threads of a group may make it in any order

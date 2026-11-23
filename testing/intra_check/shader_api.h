@@ -26,7 +26,7 @@ struct ShaderBuffers {
   size_t wedge_size;
   const uint8_t *sched; /* intra_v2 only */
   size_t sched_size;
-  const uint8_t *block_map; /* intra_v2 only */
+  const uint8_t *block_map; /* intra_v2, and the starts of the lists for intra_run */
   size_t block_map_size;
   uint8_t *frame;
   size_t frame_size;
@@ -51,6 +51,8 @@ extern const ShaderApi intra_main_single_edge_api;
 extern const ShaderApi intra_main_single_edge_hbd_api;
 extern const ShaderApi intra_main_sorted_api;
 extern const ShaderApi intra_main_sorted_hbd_api;
+extern const ShaderApi intra_run_api;
+extern const ShaderApi intra_run_hbd_api;
 extern const ShaderApi intra_main_legacy_api;
 extern const ShaderApi intra_main_hbd_legacy_api;
 extern const ShaderApi intra_filter_legacy_api;

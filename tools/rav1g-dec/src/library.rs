@@ -33,6 +33,7 @@ unsafe extern "C" {
     /// The A/B switch in libav1/dx/av1_perf.h.
     fn av1_set_intra_single_edge_legacy(enable: c_int);
     fn av1_set_intra_sort_legacy(enable: c_int);
+    fn av1_set_intra_run(max_lanes: c_int);
     fn av1_set_intra_lists_legacy(enable: c_int);
     fn av1_set_parse_lists_legacy(enable: c_int);
 }
@@ -177,6 +178,8 @@ pub struct Choices {
     pub intra_filter_legacy: bool,
     pub intra_single_edge_legacy: bool,
     pub intra_sort_legacy: bool,
+    /// Lanes an intra iteration may have to go into a run; 0 for no runs.
+    pub intra_run_lanes: c_int,
     pub intra_lists_legacy: bool,
     pub parse_lists_legacy: bool,
     pub lf_h_split: u32,
@@ -510,6 +513,7 @@ impl Library {
         unsafe {
             av1_set_intra_single_edge_legacy(c_int::from(choices.intra_single_edge_legacy));
             av1_set_intra_sort_legacy(c_int::from(choices.intra_sort_legacy));
+            av1_set_intra_run(choices.intra_run_lanes);
             av1_set_intra_lists_legacy(c_int::from(choices.intra_lists_legacy));
             av1_set_parse_lists_legacy(c_int::from(choices.parse_lists_legacy));
         }

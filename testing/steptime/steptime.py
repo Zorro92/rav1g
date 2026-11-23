@@ -6,8 +6,11 @@ of the test player (-intrasteptime, -intrastepmin; docs/test-player.md, "Intra s
         fits the cost of a step on the console from the timed steps: a fixed cost per step, plus terms for
         what the step holds (thread groups, the longest filter intra chain, and a cost for each kind of
         block the step has at all, since a step lasts as long as its slowest group), and a frame model
-        from the counts the proxy tools give (steps, thread groups, dispatches). Prints the fit and, with
-        --save, writes both models.
+        from the counts the proxy tools give (steps, thread groups, dispatches). Runs of the intra_run
+        shader (several iterations in one thread group, `iters=` of the step lines) are left out of the
+        step fit and fitted apart: us = fixed + per iteration + per chunk of 512 lanes, with the largest
+        iteration that is cheaper in a run than in a step of its own (for -intrarunmax). Prints the fits
+        and, with --save, writes the models.
     steptime.py report LOG... [--model MODEL.json] [--frames N] [--slowest N]
         where the time of the heaviest timed frames goes: per frame its steps, the share of the fixed
         cost, the time of the steps by what dominates them, and the slowest steps.
@@ -81,6 +84,9 @@ def parse(lines):
                 'i': int(f['i']), 'us': float(f['us']), 'groups': int(f['groups']), 'disp': int(f['disp']),
                 'lists': ints(f.get('lists', '')), 'y': ints(f.get('y', '')), 'c': ints(f.get('c', '')),
                 'fdiag': int(f.get('fdiag', 0)),
+                # Wavefront iterations of the step's dispatch: 1; a run of the intra_run shader is its last
+                # iteration with the run's count, behind steps of 0 for the others (lines without it: 1).
+                'iters': int(f.get('iters', 1)),
             })
     return frames
 
@@ -202,6 +208,9 @@ def fit_steps(frames, min_steps=0, skip_first=True):
             # drained), so it is left out of the fit.
             if skip_first and s['i'] == 0:
                 continue
+            # Runs (several iterations in one dispatch) are fitted apart (fit_runs).
+            if s['iters'] != 1:
+                continue
             rows.append(step_row(s, f['bd']))
             ys.append(s['us'])
     if not rows:
@@ -225,6 +234,47 @@ def fit_steps(frames, min_steps=0, skip_first=True):
         'steps': len(ys), 'r2': float(r2), 'mean_abs_us': sum(abs(e) for e in residual) / len(ys),
         'mean_us': mean,
     }
+
+
+RUN_GROUP_LANES = 512  # threads of the intra_run group: an iteration takes one pass of the body per 512 lanes
+
+
+def lanes(step):
+    """The main shader's lanes of a step's iteration: one per four samples of a row (prediction.rs)."""
+    lists = step['lists']
+    return sum(lists[k] << (10 - k) for k in range(min(8, len(lists)))) + (lists[8] << 2 if len(lists) > 8 else 0)
+
+
+def runs_of(frames):
+    """The runs of the frames: per run its time, iterations and chunks (passes of the group's body)."""
+    out = []
+    for f in frames:
+        steps = f['steps']
+        for at, s in enumerate(steps):
+            n = s['iters']
+            if n < 2 or at + 1 < n:
+                continue
+            its = steps[at + 1 - n:at + 1]
+            chunks = sum(-(-lanes(t) // RUN_GROUP_LANES) for t in its)
+            # The steps in front of the last one were timed in front of the run: their time is the run's too.
+            out.append({'us': sum(t['us'] for t in its), 'iters': n, 'chunks': chunks})
+    return out
+
+
+def fit_runs(frames):
+    """The run model: us = fixed + per_iteration * iterations + per_chunk * chunks, or None without runs."""
+    runs = runs_of(frames)
+    if len(runs) < 3:
+        return None
+    rows = [[1.0, float(r['iters']), float(r['chunks'])] for r in runs]
+    ys = [r['us'] for r in runs]
+    x = nnls(rows, ys)
+    mean = sum(ys) / len(ys)
+    residual = [v - sum(a * b for a, b in zip(row, x)) for row, v in zip(rows, ys)]
+    total = sum((v - mean) ** 2 for v in ys)
+    return {'terms': {'fixed': x[0], 'per_iteration': x[1], 'per_chunk': x[2]}, 'runs': len(runs),
+            'iterations': sum(r['iters'] for r in runs), 'mean_us': mean,
+            'r2': 1.0 - sum(e * e for e in residual) / total if total > 0 else 1.0}
 
 
 def fit_frames(frames, step_model):
@@ -300,6 +350,25 @@ def print_fit(step_model, frame_model):
     f = frame_model['terms']
     print('frame model (GPUTIME counts): ms = %.4f * steps + %.6f * groups + %.5f * dispatches (%d frames)' %
           (f['per_step'], f['per_group'], f['per_dispatch'], frame_model['frames']))
+
+
+def print_runs(run_model, step_model):
+    if not run_model:
+        print('runs: none in the timed frames (-intrarunlegacy, or no iteration narrow enough)')
+        return
+    t = run_model['terms']
+    print('run model: %d runs of %d iterations, mean %.1f us a run, R^2 %.3f' %
+          (run_model['runs'], run_model['iterations'], run_model['mean_us'], run_model['r2']))
+    print('  us = %.2f + %.2f per iteration + %.2f per chunk of %d lanes' %
+          (t['fixed'], t['per_iteration'], t['per_chunk'], RUN_GROUP_LANES))
+    if step_model:
+        # An iteration of k chunks in a run against a step of its own with one kind (the fixed cost): the
+        # largest k for which the run is cheaper, for -intrarunmax (k * 512 lanes).
+        own = step_model['terms']['fixed']
+        if t['per_chunk'] > 0:
+            k = int((own - t['per_iteration']) / t['per_chunk'])
+            print('  an iteration is cheaper in a run up to about %d chunks (-intrarunmax %d) against the %.1f us a step '
+                  'of its own has at least' % (k, k * RUN_GROUP_LANES, own))
 
 
 def report(frames, model, top, slowest):
@@ -399,6 +468,23 @@ def selftest():
         assert abs(got - value) < 0.25 + 0.02 * value, 'fit of %s: %.3f, made with %.3f' % (name, got, value)
     assert model['r2'] > 0.99, 'R^2 %.3f' % model['r2']
     frame_model = fit_frames(frames, model)
+    # Runs: a run's time follows its iterations and chunks, and runs stay out of the step fit.
+    run_lines = ['STEPTIME frame name=r.ivf no=50 show=1 intra=0 bd=10 tiles=1 steps=40 gpu_ms=0']
+    for i in range(40):
+        n = 4 if i % 4 == 3 else 0
+        lists = [0, 0, 0, 0, 0, 0, 40 * ((i * 7) % 5), 0, 8 + i, 0]
+        chunks_here = 0
+        if n:
+            for k in range(i - 3, i + 1):
+                chunks_here += -(-(40 * ((k * 7) % 5) * 16 + (8 + k) * 4) // RUN_GROUP_LANES)
+        us = 20.0 + 3.0 * n + 2.0 * chunks_here if n else 0.0
+        run_lines.append('STEPTIME step no=50 i=%d us=%.1f groups=%d disp=%d lists=%s y=1,0,0,0,0,0,0,0,0,0,0 '
+                         'c=0,0,0,0,0,0,0,0,0,0,0 fdiag=0 iters=%d' % (i, us, 1 if n else 0, 1 if n else 0,
+                                                                     ','.join(map(str, lists)), n))
+    runs = fit_runs(parse(run_lines))
+    assert runs and runs['runs'] == 10, runs
+    assert abs(runs['terms']['fixed'] + 4 * runs['terms']['per_iteration'] - 32.0) < 1.0, runs
+    assert abs(runs['terms']['per_chunk'] - 2.0) < 0.1 and runs['r2'] > 0.99, runs
     # The frame model is close to the step model on the frames it was fitted to.
     for f in frames:
         groups = sum(s['groups'] for s in f['steps'])
@@ -409,7 +495,7 @@ def selftest():
     rows = parse_gputime(['GPUTIME frame 3 no=2 show=1 sef=0 intra=1 iters=896 iv2=0 idisp=897 ibarr=897 '
                           'igroups=12664 ipasses=12664 tiles=1 | intra=27.10 cdef=3.0'])
     assert rows == [{'no': 2, 'show': 1, 'steps': 897, 'disp': 897, 'groups': 12664, 'intra_ms': 27.1}], rows
-    print('steptime.py selftest: parse, step fit (R^2 %.4f) and frame model OK' % model['r2'])
+    print('steptime.py selftest: parse, step fit (R^2 %.4f), run fit and frame model OK' % model['r2'])
 
 
 def main():
@@ -438,9 +524,11 @@ def main():
         step_model = fit_steps(frames, args.min_steps)
         frame_model = fit_frames(frames, step_model)
         print_fit(step_model, frame_model)
+        run_model = fit_runs(frames)
+        print_runs(run_model, step_model)
         if args.save:
             with open(args.save, 'w', encoding='utf-8') as out:
-                json.dump({'step': step_model, 'frame': frame_model}, out, indent=1)
+                json.dump({'step': step_model, 'frame': frame_model, 'run': run_model}, out, indent=1)
             print('model written to %s' % args.save)
         return
     if args.command == 'report':

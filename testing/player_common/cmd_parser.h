@@ -144,6 +144,8 @@ class CParameters {
     bool intrafilterlegacy_;
     bool intrasingleedgelegacy_;
     bool intrasortlegacy_;
+    bool intrarunlegacy_;
+    int intrarunmax_;
     bool intralistslegacy_;
     bool parselistslegacy_;
     // -slots: the pipeline slots the task asks for. 0 when the task has no -slots: the library then gives

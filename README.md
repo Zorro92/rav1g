@@ -89,7 +89,10 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
   `-intrasingleedgelegacy` to select the original prefetch kernels and wavefront for an A/B.
   A thread group sorts its blocks by prediction kind before it predicts them, so that a wave
   runs one path (on the console a step took about 3.3 us longer for every kind it mixed);
-  `-intrasortlegacy` runs the shaders without the sort.
+  `-intrasortlegacy` runs the shaders without the sort. Narrow wavefront iterations (at most
+  2048 lanes, no filter intra) run two or more in a row in one thread group, one dispatch and one
+  barrier for the run (`-intrarunlegacy`, `-intrarunmax <lanes>`): 145 -> 113 dispatch steps a frame
+  on a 40 Mbps 4K clip, 1305 -> 724 on its heaviest frame.
   The C++ stage-dump comparison compares prediction-record contents across wavefront orders,
   and still compares every frame MD5.
 - **Entropy parsing** packs AC coefficient tokens in scan order and waits only for the

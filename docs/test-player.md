@@ -374,7 +374,7 @@ The log lines at the start of each task show which defaults and opt-out flags ar
 | Pipeline slots | 2 | `Frame slots: 2` | `-slots 3`, `-slots 4` |
 | Parser | the parse pass of rav1d, with its switches `nolfmask`, `tilethread` and (since package 0.2.197) `gpucdef` on | `Parser: the parse pass of rav1d`, `Parser switches (-parseopt): nolfmask tilethread gpucdef` | none since package 0.2.159: the entropy decoder of libaom (`-parser c`) left the decoder; up to 0.2.157 `Parser: the entropy decoder of libaom (-parser c)`; `-parseopt` for the switches; see [Parser](#parser--parser) |
 | Clears of a slot | none: the wavefront of intra prediction is kept at the edges of the tiles (since package 0.2.146.0) | `Clears: none needed (default: intra wavefront at the edges of the tiles; -gpuclear, -cpuclear and -syncclear keep it in the slot's grid and clear that)` | `-gpuclear`, `-cpuclear`, `-syncclear`: the wavefront in the slot's grid, cleared for every frame by the GPU, the completion thread (the default of 0.2.140 to 0.2.144; `-asyncclear` is the same) or the decode thread; see [Clears](#clears) |
-| Intra prediction | frame-wide wavefront with prefetching and single-edge dependencies, each thread group's blocks sorted by prediction kind ([Blocks sorted by kind](#blocks-sorted-by-kind--intrasortlegacy)) | `Intra main shader: prefetching with single-edge dependencies, blocks sorted by kind` | `-intrav2`, `-intraod`, `-intrasingleedgelegacy`, `-intrasortlegacy` |
+| Intra prediction | frame-wide wavefront with prefetching and single-edge dependencies, each thread group's blocks sorted by prediction kind ([Blocks sorted by kind](#blocks-sorted-by-kind--intrasortlegacy)), narrow iterations in runs of one thread group ([Runs](#runs-of-narrow-iterations--intrarunlegacy--intrarunmax)) | `Intra main shader: prefetching with single-edge dependencies, blocks sorted by kind`, `Intra runs: iterations of at most 2048 lanes without filter intra in one thread group (default)` | `-intrav2`, `-intraod`, `-intrasingleedgelegacy`, `-intrasortlegacy`, `-intrarunlegacy`, `-intrarunmax <lanes>` |
 | Unscaled single-reference and average/distance compound prediction on size lists | `inter_main_v2` and `inter_compound_v2`, with HBD variants | `Inter shaders: inter_main_v2, inter_compound_v2 (default)` | `-interfast` selects [motion-class lists and shaders](#inter-fast-path--interfast). |
 
 
@@ -830,7 +830,7 @@ apart.
 
 ```text
 STEPTIME frame name=film_a.ivf no=481 show=0 intra=0 bd=10 tiles=1 steps=531 gpu_ms=<ms>
-STEPTIME step no=481 i=0 us=<us> groups=6 disp=1 lists=1,0,2,0,0,0,0,0,0,0 y=1,0,0,0,0,0,0,0,0,0,0 c=1,0,0,0,0,0,0,0,0,0,0 fdiag=0
+STEPTIME step no=481 i=0 us=<us> groups=6 disp=1 lists=1,0,2,0,0,0,0,0,0,0 y=1,0,0,0,0,0,0,0,0,0,0 c=1,0,0,0,0,0,0,0,0,0,0 fdiag=0 iters=1
 ...
 STEPTIME 30 frames timed, 8309 steps
 ```
@@ -844,6 +844,7 @@ STEPTIME 30 frames timed, 8309 steps
 | `lists` | records of the main shader's lists by block area (64x64, 32x64/64x32, 32x32, 16x32/32x16, 16x16, 8x16/16x8, 8x8, 4x8/8x4, 4x4), then of filter intra; a chroma block is two records (U, V) |
 | `y`, `c` | transform blocks of luma and chroma by kind: DC, V/H (angle 90 or 180), zone 1 (< 90 degrees), zone 2 (90 to 180), zone 3 (> 180), smooth (all three), Paeth, CfL, filter intra, intra block copy, inter-intra (`AV1_INTRA_KIND_*`) |
 | `fdiag` | the longest serial chain of filter intra in the step: columns + rows - 1 of its largest block in 4x2 units (23 for 32x32), 0 without |
+| `iters` | wavefront iterations of the step's dispatch: 1; a run of the intra_run shader (`-intrarunmax`) is timed as its last iteration with the run's count, the iterations in front of it are lines with `iters=0`, timed in front of the run (about 0 us) |
 
 Frames of `-intrav2` are not timed.
 
@@ -1301,6 +1302,50 @@ others. For the console A/B: `-gputime` with and without it on the heavy 4K clip
 and p95), and `-intrastepmin 0` on both to see the step latency by kind; the step counts do not change.
 `testing/intra_check` checks the sorted shaders against the conservative ones on random layouts, with
 the group scheduler's race checks, and with three mutants of the sort.
+
+## Runs of narrow iterations (`-intrarunlegacy`, `-intrarunmax`)
+
+A wavefront iteration is a dispatch and a UAV barrier of its own, about 18 us on the console before its
+slowest group has done anything (AGENTS.md, "Dependent dispatches"). Many iterations are narrow: the
+wavefront starts and ends in a corner of the frame, and on inter frames the intra blocks are few. Of
+the 260,034 iterations of `jf4k40m` (1797 frames, `rav1g-parse-check -steps`) 16,857 have one thread group
+of 256 lanes, 27,599 two at most, 42,807 four at most and 68,646 eight at most.
+
+`intra_run.hlsl` and `intra_run_hbd.hlsl` run such iterations in one thread group of 512 threads (two
+slots of the sorted main shader's 256), one after the other: per iteration the group reads the starts of
+its lists from the block map (the host's prefix sum leaves them there), runs the body of
+`intra_main_sorted` over its lanes in chunks of 512, and ends with `DeviceMemoryBarrierWithGroupSync`, so
+that the next iteration reads what the group wrote (AV1 7.11.2: a block reads only blocks of earlier
+iterations). The run is one group: no group waits for another, so nothing depends on which groups the GPU
+keeps resident. The host (`prediction.rs`) puts two or more iterations in a row with at most
+`-intrarunmax` lanes (one lane per four samples of a row of a block, 2048 by default: four chunks) and no
+filter intra block into one run, one dispatch behind one barrier; the other iterations stay steps of their
+own. Frames with the GPU's block lists (`-parseopt gpublists`) and without the single-edge wavefront have
+no runs. The group takes 30 KiB of group memory; nothing else is allocated.
+
+Steps (dispatch and barrier pairs) per frame without and with runs, from `rav1g-parse-check -steps` (the
+counts are those of the decoder):
+
+| Clip | none | 2048 lanes (default) | 4096 lanes | heaviest frames, none -> 2048 -> 4096 |
+| --- | --- | --- | --- | --- |
+| `jf4k40m` (1797 frames) | 144.7 | 113.2 | 90.7 | 1305 -> 724 -> 359 |
+| `jf4k60m` | 159.7 | 124.1 | 98.3 | 1329 -> 701 -> 366 |
+| `jf4k100m` | 184.4 | 142.6 | 111.4 | 1336 -> 690 -> 348 |
+| `d2_300` | 34.0 | 19.1 | 7.5 | 1329 -> 819 -> 80 |
+| `a1_8b4k_300` (8-bit) | 20.3 | 13.7 | 4.8 | 1227 -> 854 -> 212 |
+
+What an iteration costs inside a run (a pass of the body per chunk, and the barrier) is the console's to
+measure: `-intrastepmin 0` times a run as its last iteration (`iters=` the run's iterations, the ones in
+front of it `iters=0` with no time) and `testing/steptime/steptime.py fit` fits `us = fixed + per
+iteration + per chunk` from the runs apart from the steps, and prints the largest iteration that is
+cheaper in a run than in a step of its own. Then `-intrarunmax` with that many lanes (4096, 8192: the
+heavy key frames are mostly iterations of 2048 to 4096 lanes) against the default and against
+`-intrarunlegacy`, `-gputime` on the heavy 4K clips.
+
+`testing/intra_check` runs the runs on its random layouts with four limits (16, 512 and 2048 lanes, every
+iteration) against the conservative shaders, with a check that a run reads no frame word another thread
+wrote since the last device memory barrier, and rejects a run with a group sync in place of that barrier
+and one that reads its lists at the wrong place.
 
 ## Deblocking checks
 

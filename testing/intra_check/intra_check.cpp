@@ -63,7 +63,7 @@ struct WaveCall {
   int value;
   int result;
 };
-static WaveCall wave_calls[256];
+static WaveCall wave_calls[512];
 static long wave_sums = 0;
 
 static int wave_call(WaveOperation operation, int value) {
@@ -141,6 +141,8 @@ static void run_group(const ShaderApi *api, uint32_t group, int threads, uint64_
                     : api == &intra_main_single_edge_hbd_api ? "intra_main_single_edge_hbd.hlsl"
                     : api == &intra_main_sorted_api ? "intra_main_sorted.hlsl"
                     : api == &intra_main_sorted_hbd_api ? "intra_main_sorted_hbd.hlsl"
+                    : api == &intra_run_api ? "intra_run.hlsl"
+                    : api == &intra_run_hbd_api ? "intra_run_hbd.hlsl"
                     : api == &intra_main_legacy_api ? "intra_main_legacy.hlsl"
                     : api == &intra_main_hbd_legacy_api ? "intra_main_hbd_legacy.hlsl"
                     : api == &intra_filter_legacy_api ? "intra_filter_legacy.hlsl"
@@ -152,7 +154,8 @@ static void run_group(const ShaderApi *api, uint32_t group, int threads, uint64_
                          api == &intra_main_prefetch_hbd_api || api == &intra_main_prefetch_api ||
                          api == &intra_main_prefetch_double_hbd_api || api == &intra_main_prefetch_double_api ||
                          api == &intra_main_single_edge_hbd_api || api == &intra_main_single_edge_api ||
-                         api == &intra_main_sorted_hbd_api || api == &intra_main_sorted_api;
+                         api == &intra_main_sorted_hbd_api || api == &intra_main_sorted_api ||
+                         api == &intra_run_hbd_api || api == &intra_run_api;
   gs_state.track_unwritten = use_waves || api == &intra_filter_prefetch_api;
   g_tracker.require_unique_stores = api == &intra_filter_prefetch_api;
   GroupContext context = { api, group };
@@ -212,6 +215,7 @@ struct Coverage {
   long inter_intra, top_right, bottom_left, upsample, edge_filter, corner_filter, residual, clipped, multi_tile;
   long v1_iterations, v1_dispatches, v1_groups;
   long v2_steps, v2_dispatches, v2_groups, v2_group_passes, v2_max_passes;
+  long run_dispatches, run_iterations, run_steps;  // the runs of intra_run, and all steps with them
   // Transform blocks of a directional mode between 90 and 180 degrees whose row above is only partly in
   // the frame (it crosses maxX of AV1 7.11.2), filtered with strength 3: where an edge filter that takes
   // more samples of the row above than the specification's numPx (7.11.2.4) gives other edge samples.
@@ -829,9 +833,10 @@ static long g_total_group_syncs = 0;
 
 struct RunResult {
   long out_of_bounds, races_group, races_thread, sync_errors, memory_races, plain_barriers, duplicate_stores;
+  long races_device;
 };
 
-static std::vector<uint32_t> g_tags[4];
+static std::vector<uint32_t> g_tags[5];
 
 static void begin_run(const Geometry &g, int track_phase) {
   for (std::vector<uint32_t> &tags : g_tags) tags.assign(g.pool_size / 4 + 1, 0);
@@ -840,6 +845,7 @@ static void begin_run(const Geometry &g, int track_phase) {
   g_tracker.w_group = g_tags[1].data();
   g_tracker.w_phase = g_tags[2].data();
   g_tracker.w_thread = g_tags[3].data();
+  g_tracker.w_device = g_tags[4].data();
   g_tracker.track_phase = track_phase;
   g_out_of_bounds = 0;
   gs_reset_report();
@@ -855,6 +861,7 @@ static RunResult end_run() {
   r.memory_races = gs_state.races;
   r.plain_barriers = gs_state.plain_barriers;
   r.duplicate_stores = g_tracker.duplicate_stores;
+  r.races_device = g_tracker.races_device;
   if (r.memory_races) gs_print_races("    ");
   g_tracker.w_unit = nullptr;
   return r;
@@ -916,6 +923,87 @@ static RunResult run_main(const Geometry &g, const Frame &f, std::vector<uint8_t
     g_tracker.unit++;  // the UAV barrier
   }
   if (cov) cov->v1_iterations += f.iterations;
+  return end_run();
+}
+
+// The intra loop of av1_prediction_run_all() with runs (intra_run*.hlsl): an iteration with at most `lanes`
+// lanes and no filter intra block goes into a run of two or more such iterations, which one thread group of
+// the run shader takes in one dispatch; the others are steps of the sorted main shader and filter intra.
+// The run reads the starts of the iterations' lists from the block map, here an array of the starts of
+// every list of the frame, iteration by iteration, as the host's prefix sum leaves the block map.
+static RunResult run_runs(const Geometry &g, const Frame &f, std::vector<uint8_t> *pool, uint64_t garbage,
+                          uint32_t lanes, Coverage *cov) {
+  const ShaderApi *main_api = g.hbd ? &intra_main_sorted_hbd_api : &intra_main_sorted_api;
+  const ShaderApi *run_api = g.hbd ? &intra_run_hbd_api : &intra_run_api;
+  const ShaderApi *filter_api = g.hbd ? &intra_filter_prefetch_hbd_api : &intra_filter_prefetch_api;
+  std::vector<uint32_t> starts((size_t)f.iterations * IntraTypeCount + 1, 0);
+  uint32_t at = 0;
+  for (size_t k = 0; k + 1 < starts.size(); ++k) {
+    starts[k] = at;
+    at += f.counts1[k];
+  }
+  starts.back() = at;
+  ShaderBuffers buffers = {};
+  buffers.pred_blocks = (const uint8_t *)f.records1.data();
+  buffers.pred_blocks_size = f.records1.size() * 4;
+  buffers.residuals = f.residuals.data();
+  buffers.residuals_size = f.residuals.size();
+  buffers.wedge = f.wedge.data();
+  buffers.wedge_size = f.wedge.size();
+  buffers.block_map = (const uint8_t *)starts.data();
+  buffers.block_map_size = starts.size() * 4;
+  buffers.frame = pool->data();
+  buffers.frame_size = pool->size();
+  for (const ShaderApi *api : {main_api, run_api, filter_api}) {
+    api->bind(&buffers);
+    api->set_common(&f.consts);
+  }
+  auto lanes_of = [&](int it) {
+    const uint32_t *counts = &f.counts1[(size_t)it * IntraTypeCount];
+    uint32_t wi_count = counts[8] << 2;
+    for (int k = 0; k < 8; ++k) wi_count += counts[k] << (10 - k);
+    return wi_count;
+  };
+  auto in_run = [&](int it) {
+    return it < f.iterations && f.counts1[(size_t)it * IntraTypeCount + 9] == 0 && lanes_of(it) != 0 &&
+           lanes_of(it) <= lanes;
+  };
+  begin_run(g, 0);
+  g_tracker.track_device = 1;
+  for (int it = 0; it < f.iterations;) {
+    if (in_run(it) && in_run(it + 1)) {
+      int last = it + 1;
+      while (in_run(last + 1)) ++last;
+      const uint32_t srt[4] = { (uint32_t)(it * IntraTypeCount), (uint32_t)(last - it + 1), 0, 0 };
+      run_api->set_srt(srt);
+      run_group(run_api, 0, 512, &garbage);
+      g_tracker.unit++;  // the UAV barrier
+      if (cov) {
+        cov->run_dispatches++;
+        cov->run_iterations += last - it + 1;
+        cov->run_steps++;
+      }
+      it = last + 1;
+      continue;
+    }
+    const uint32_t *counts = &f.counts1[(size_t)it * IntraTypeCount];
+    uint32_t srt[10];
+    for (int k = 0; k < 8; ++k) srt[k] = counts[k];
+    srt[8] = lanes_of(it);
+    srt[9] = starts[(size_t)it * IntraTypeCount];
+    if (srt[8]) {
+      main_api->set_srt(srt);
+      for (uint32_t group = 0; group < (srt[8] + 255) >> 8; ++group) run_group(main_api, group, 256, &garbage);
+    }
+    if (counts[9]) {
+      const uint32_t filter_srt[2] = { counts[9] << 3, starts[(size_t)it * IntraTypeCount + 9] };
+      filter_api->set_srt(filter_srt);
+      for (uint32_t group = 0; group < counts[9]; ++group) run_group(filter_api, group, filter_api->threads, &garbage);
+    }
+    g_tracker.unit++;  // the UAV barrier
+    if (cov) cov->run_steps++;
+    ++it;
+  }
   return end_run();
 }
 
@@ -1309,6 +1397,11 @@ int main(int argc, char **argv) {
         auto sorted = f.pixels;
         const RunResult rs = run_main(g, f, &sorted, rng.state + 1,
                                       hbd ? &intra_main_sorted_hbd_api : &intra_main_sorted_api, nullptr);
+        // And with runs of narrow iterations in one group, for the lanes an iteration of a run may have: the
+        // smallest blocks only, a few blocks, the default, every iteration without filter intra.
+        static const uint32_t run_lanes[4] = { 16, 512, 2048, 1u << 30 };
+        auto runs = f.pixels;
+        const RunResult rr = run_runs(g, f, &runs, rng.state + 2, run_lanes[(layout + n) % 4], &cov);
         // The prefetching shader with twice the specification's count of edge samples of the row above
         // (run.sh), which the layouts have to tell from it, inside the frame too.
         auto other_count = f.pixels;
@@ -1352,6 +1445,13 @@ int main(int argc, char **argv) {
           at = first_difference(legacy, sorted);
         } else if (rs.memory_races || rs.sync_errors || rs.out_of_bounds || rs.plain_barriers) {
           problem = "invalid group memory access or sync in the sorted shaders";
+        } else if (legacy != runs) {
+          problem = hbd ? "MISMATCH in the 10-bit runs" : "MISMATCH in the 8-bit runs";
+          at = first_difference(legacy, runs);
+        } else if (rr.memory_races || rr.sync_errors || rr.out_of_bounds || rr.plain_barriers || rr.races_group) {
+          problem = "invalid group memory access or sync in the runs";
+        } else if (rr.races_device) {
+          problem = "a run reads frame memory another thread wrote without a device memory barrier between";
         } else if (rc.memory_races || rc.sync_errors || rc.out_of_bounds || rc.plain_barriers) {
           problem = "invalid group memory access or sync in the shader with twice the edge sample count";
         }
@@ -1402,6 +1502,12 @@ int main(int argc, char **argv) {
     printf("  intra_v2: %ld steps (UAV barriers), %ld dispatches, %ld thread groups, %.1f passes per group, at most %ld\n",
            cov.v2_steps, cov.v2_dispatches, cov.v2_groups,
            cov.v2_groups ? (double)cov.v2_group_passes / (double)cov.v2_groups : 0.0, cov.v2_max_passes);
+    printf("  runs: %ld steps (UAV barriers), %ld of them runs of %ld iterations\n", cov.run_steps, cov.run_dispatches,
+           cov.run_iterations);
+    if (!cov.run_dispatches) {
+      printf("  no layout made a run\n");
+      ++failures;
+    }
   }
   if (original_races) printf("note: %ld order-dependent reads between thread groups in the original path\n", original_races);
   printf("group memory: %ld group syncs%s\n", g_total_group_syncs,
@@ -1410,6 +1516,6 @@ int main(int argc, char **argv) {
     printf("intra_check: FAILED\n");
     return 1;
   }
-  printf("intra_check: the conservative, prefetching, sorted and intra_v2 outputs are identical on every frame\n");
+  printf("intra_check: the conservative, prefetching, sorted, run and intra_v2 outputs are identical on every frame\n");
   return 0;
 }

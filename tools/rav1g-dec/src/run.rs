@@ -52,7 +52,7 @@ pub fn step_lines(name: &str, frame: &switches::IntraSteps, steps: &[switches::I
     ));
     for (i, step) in steps.iter().enumerate() {
         lines.push(format!(
-            "STEPTIME step no={} i={} us={:.1} groups={} disp={} lists={} y={} c={} fdiag={}",
+            "STEPTIME step no={} i={} us={:.1} groups={} disp={} lists={} y={} c={} fdiag={} iters={}",
             frame.frame_number,
             i,
             step.gpu_ms * 1000.0,
@@ -61,7 +61,8 @@ pub fn step_lines(name: &str, frame: &switches::IntraSteps, steps: &[switches::I
             join(&step.lists),
             join(&step.blocks[0]),
             join(&step.blocks[1]),
-            step.filter_diagonals
+            step.filter_diagonals,
+            step.iterations
         ));
     }
     lines
@@ -983,6 +984,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         intra_filter_legacy: task.intrafilterlegacy,
         intra_single_edge_legacy: task.intrasingleedgelegacy,
         intra_sort_legacy: task.intrasortlegacy,
+        intra_run_lanes: if task.intrarunlegacy { 0 } else { task.intrarunmax.max(0) },
         intra_lists_legacy: task.intralistslegacy,
         parse_lists_legacy: task.parselistslegacy,
         lf_h_split: task.lfhsplit as u32,
@@ -1015,6 +1017,15 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
                 "angle-specific with prefetching and single-edge dependencies, blocks sorted by kind"
             }
         );
+        if task.intrarunlegacy || task.intrarunmax <= 0 {
+            say!("Intra runs: none, every iteration a step of its own (-intrarunlegacy)");
+        } else {
+            say!(
+                "Intra runs: iterations of at most {} lanes without filter intra in one thread group{}",
+                task.intrarunmax,
+                if task.intrarunmax == 2048 { " (default)" } else { " (-intrarunmax)" }
+            );
+        }
     }
     say!(
         "PARSER {}: the parse pass of rav1d reads the bitstream, switches {} (-parseopt)",

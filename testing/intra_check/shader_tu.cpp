@@ -3,7 +3,7 @@
  *   SHADER_FILE  the generated C++ of the shader
  *   SHADER_NS    namespace for its globals
  *   SHADER_API   name of the exported ShaderApi
- *   SHADER_KIND  0 = intra_main, 1 = intra_filter, 2 = intra_v2
+ *   SHADER_KIND  0 = intra_main, 1 = intra_filter, 2 = intra_v2, 3 = intra_run
  */
 #include "hlsl_shim.h"
 #include "shader_api.h"
@@ -24,6 +24,8 @@ static void bind(const ShaderBuffers *b) {
 #if SHADER_KIND == 2
   sched.ptr = b->sched;
   sched.size = b->sched_size;
+#endif
+#if SHADER_KIND == 2 || SHADER_KIND == 3
   block_map.ptr = b->block_map;
   block_map.size = b->block_map_size;
 #endif
@@ -52,6 +54,12 @@ static void set_srt(const uint32_t *w) {
 #elif SHADER_KIND == 1
   cb_wi_count = w[0];
   cb_pass_offset = (int)w[1];
+#elif SHADER_KIND == 3
+  /* IntraRunSRT of prediction.rs: the word of the run's first lists in the block map, its iterations. */
+  cb_run_lists = w[0];
+  cb_run_iters = w[1];
+  cb_run_reserved0 = 0;
+  cb_run_reserved1 = 0;
 #else
   cb_list_offset = w[0];
   cb_step = w[1];
@@ -74,7 +82,7 @@ static void garbage(void *p, size_t size, uint64_t *state) {
 }
 
 static void scramble(uint64_t *state) {
-#if SHADER_KIND == 0 && defined(SHADER_HBD)
+#if (SHADER_KIND == 0 || SHADER_KIND == 3) && defined(SHADER_HBD)
   garbage(edges.bytes(), edges.byte_size(), state);
 #ifdef SHADER_SORTED
   garbage(sort_counts.bytes(), sort_counts.byte_size(), state);
@@ -105,7 +113,9 @@ static void scramble(uint64_t *state) {
 }
 
 static void run(uint32_t group, uint32_t thread) {
-#if SHADER_KIND == 0
+#if SHADER_KIND == 3
+  shader_main(uint3(thread, 0, 0)); /* numthreads(512, 1, 1), SV_GroupThreadID: one group */
+#elif SHADER_KIND == 0
   shader_main(uint3(group * 256 + thread, 0, 0)); /* numthreads(256, 1, 1), SV_DispatchThreadID */
 #elif defined(SHADER_FILTER_LEGACY)
   /* numthreads(8, 8, 1): SV_DispatchThreadID, SV_GroupID */
@@ -120,7 +130,9 @@ static void run(uint32_t group, uint32_t thread) {
 
 }  // namespace SHADER_NS
 
-#if SHADER_KIND == 0
+#if SHADER_KIND == 3
+#define SHADER_THREADS 512
+#elif SHADER_KIND == 0
 #define SHADER_THREADS 256
 #elif defined(SHADER_FILTER_LEGACY)
 #define SHADER_THREADS 64
