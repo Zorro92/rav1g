@@ -28,6 +28,7 @@
 //! rav1g-parse-check -digest [-threads <n>] [-root <dir>] [-manifest <task list>] [<stream>...]
 //! rav1g-parse-check -lrmix [<stream>...]
 //! rav1g-parse-check -tiles [<stream>...]
+//! rav1g-parse-check -steps [<stream>...]
 //! ```
 //!
 //! `-threads`, `-frames` and `-parseopt` are those of the run that is checked; the reference always has
@@ -61,6 +62,12 @@
 //! `-tiles` prints the tile layouts of every stream (AV1 5.9.15, tile_info): one `TILES` line per layout,
 //! with the frames that have it.
 //!
+//! `-steps` prints the intra wavefront of every frame (AV1 7.11.2), one line per frame: the iterations
+//! (the decoder's dispatch steps), the threads of the main shader and the filter intra blocks of each,
+//! and what schedules by region would make of the same transform blocks (`sched`): `<label>=<steps>/
+//! <chunks>/<groups>/<passes>` for the decoder (`now`) and for regions of 32 to 128 samples with and
+//! without a limit of passes per step. A cost model of the steps (testing/steptime) works from these.
+//!
 //! `-digest` prints for every stream the line `rav1g-dec -parsedigest` prints on Windows: what rav1d's
 //! parse pass reads from it, folded into one number (`rav1g_parse::digest`).
 //!
@@ -78,6 +85,7 @@ mod container;
 mod host;
 mod plain;
 mod rhost;
+mod sched;
 mod timing;
 
 /// The types of the decoder's structs under the name the host's files know them by.
@@ -85,6 +93,7 @@ mod sys {
     pub use rav1g_sys::*;
 }
 
+use std::ffi::c_int;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -102,6 +111,8 @@ struct Options {
     time: bool,
     digest: bool,
     lr_mix: bool,
+    /// -steps: the intra wavefront of every frame, iteration by iteration.
+    steps: bool,
     /// -wave: the wavefront in the edges of the tiles, for the reference and for the run that is checked.
     wave_edges: (bool, bool),
     /// The previous intra block lists for the run that is checked (`-intralistslegacy`).
@@ -116,6 +127,7 @@ struct Options {
 fn usage() -> ! {
     eprintln!("usage: rav1g-parse-check -lrmix [<stream>...]  (count coded restoration units per frame and plane)");
     eprintln!("usage: rav1g-parse-check -tiles [<stream>...]  (the tile layouts of the frames, AV1 5.9.15)");
+    eprintln!("usage: rav1g-parse-check -steps [<stream>...]  (the intra wavefront of every frame, AV1 7.11.2)");
     eprintln!(
         "usage: rav1g-parse-check [-threads <n>] [-frames <n>] [-parseopt <list>] [-wave <way>] [-details <n>] \
          [-root <dir>] [-manifest <task list>] [<stream>...]\n       rav1g-parse-check -time [-frametimes] [-threads <n>] \
@@ -157,6 +169,7 @@ fn options() -> Options {
         time: false,
         digest: false,
         lr_mix: false,
+        steps: false,
         wave_edges: (true, true),
         legacy: rhost::Legacy::default(),
         frame_times: false,
@@ -182,6 +195,7 @@ fn options() -> Options {
             "-parseopt" => options.parse = ParseOptions::from_words(&value()).unwrap_or_else(|| usage()),
             "-digest" => options.digest = true,
             "-lrmix" => options.lr_mix = true,
+            "-steps" => options.steps = true,
             "-wave" => {
                 options.wave_edges = match value().as_str() {
                     "edges" => (true, true),
@@ -330,6 +344,16 @@ fn main() -> ExitCode {
         }
         return code;
     }
+    if options.steps {
+        let mut code = ExitCode::SUCCESS;
+        for (name, path) in &options.streams {
+            if let Err(error) = steps(name, path) {
+                eprintln!("STEPS {name}: {error}");
+                code = ExitCode::FAILURE;
+            }
+        }
+        return code;
+    }
     if options.tiles {
         let mut code = ExitCode::SUCCESS;
         for (_, path) in &options.streams {
@@ -394,6 +418,84 @@ fn main() -> ExitCode {
     let kinds: Vec<String> = total.coverage.iter().map(|(kind, count)| format!("{kind} {count}")).collect();
     println!("PARSE COVERAGE (blocks of each kind among the records compared): {}", kinds.join("; "));
     if equal == options.streams.len() { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+}
+
+/// `-steps`: the intra wavefront of every frame as the host's lists have it (`prediction_gen_blocks`):
+/// one line per frame, `STEPS <name> no=<n> iters=<k> its=<threads>:<filter blocks>,...`, with per
+/// iteration the threads of the main shader (one per four samples of a row, all tiles) and the filter
+/// intra blocks. The step model of the intra stage (testing/steptime) works from these counts.
+fn steps(name: &str, path: &Path) -> Result<(), String> {
+    use host::types::{InterCountsAll, IntraSizes, IntraTypeCount, ReconstructBlockSizes};
+    let data = std::fs::read(path).map_err(|error| format!("cannot read the file: {error}"))?;
+    let mut parser = rhost::RustParser::new(1, 1, ParseOptions::default(), true)?;
+    host::step_time::RECORD.store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut number = 0;
+    for (tu, data) in container::read(&data)?.into_iter().enumerate() {
+        parser.send(data).map_err(|error| format!("temporal unit {tu}: {error}"))?;
+        let frames = parser.take_frames();
+        // The blocks of each frame, behind the mark of its start.
+        let placed = std::mem::take(&mut *host::step_time::PLACED.lock().expect("no thread panics with it"));
+        let mut per_frame: Vec<Vec<host::step_time::Placed>> = Vec::new();
+        for b in placed {
+            if b.iter == c_int::MIN {
+                per_frame.push(Vec::new());
+            } else if let Some(last) = per_frame.last_mut() {
+                last.push(b);
+            }
+        }
+        per_frame.retain(|f| !f.is_empty());
+        let mut per_frame = per_frame.into_iter();
+        for frame in frames {
+            // SAFETY: the tiles of the parsed frame and their block maps, which nothing else uses now.
+            let tiles = unsafe { std::slice::from_raw_parts(frame.tiles.ptr(), frame.tiles.len()) };
+            let iters = tiles.iter().map(|t| t.gen_intra_iter_y.max(t.gen_intra_iter_uv)).max().unwrap_or(-1) + 1;
+            let mut its = Vec::with_capacity(iters as usize);
+            for it in 0..iters {
+                let (mut threads, mut filters) = (0i64, 0i64);
+                for tile in tiles {
+                    if it > tile.gen_intra_iter_y.max(tile.gen_intra_iter_uv) {
+                        continue;
+                    }
+                    let base = InterCountsAll + ReconstructBlockSizes + it * IntraTypeCount;
+                    // SAFETY: the tile's lists of an iteration it reached lie in the arena's block map.
+                    let count = |i: c_int| unsafe { i64::from(*tile.gen_block_map.offset((base + i) as isize)) };
+                    for size in 0..IntraSizes {
+                        threads += count(size) << (10 - size);
+                    }
+                    filters += count(IntraSizes);
+                }
+                its.push(format!("{threads}:{filters}"));
+            }
+            let placed = if iters > 0 { per_frame.next().unwrap_or_default() } else { Vec::new() };
+            let (mi_cols, mi_rows) = (frame.size.mi_cols, frame.size.mi_rows);
+            let mut models = Vec::new();
+            for (label, region, cap) in [
+                ("now", None, i32::MAX),
+                ("r64", Some((4, 4)), i32::MAX),
+                ("r64c2", Some((4, 4)), 2),
+                ("r64c4", Some((4, 4)), 4),
+                ("r64c8", Some((4, 4)), 8),
+                ("r64c16", Some((4, 4)), 16),
+                ("r128", Some((5, 5)), i32::MAX),
+                ("r128c4", Some((5, 5)), 4),
+                ("r128c8", Some((5, 5)), 8),
+                ("r32c4", Some((3, 3)), 4),
+            ] {
+                let (cost, wrong) = sched::model(&placed, mi_cols, mi_rows, region, cap);
+                models.push(format!(
+                    "{label}={}/{}/{}/{}{}",
+                    cost.steps,
+                    cost.chunks,
+                    cost.groups,
+                    cost.passes,
+                    if wrong != 0 { format!("/wrong{wrong}") } else { String::new() }
+                ));
+            }
+            println!("STEPS {name} no={number} iters={iters} {} its={}", models.join(" "), its.join(","));
+            number += 1;
+        }
+    }
+    Ok(())
 }
 
 /// Count the coded units of planes with restoration. Copy-only planes and show-existing frames have no units.

@@ -96,6 +96,25 @@ fn wanted(frame_number: c_int, steps: c_int) -> bool {
     })
 }
 
+/// A transform block of the intra wavefront, where `intra_plane_edges` (`blocks.rs`) gives it its
+/// iteration: for the schedules `rav1g-parse-check -steps` models from the blocks and what each reads. The
+/// decoder does nothing with it.
+#[expect(clippy::too_many_arguments, reason = "what the block lists know of the transform block")]
+#[inline(always)]
+pub(crate) fn place(
+    _chroma: bool,
+    _col: c_int,
+    _row: c_int,
+    _txw: c_int,
+    _txh: c_int,
+    _reads: [c_int; 3],
+    _cfl: bool,
+    _filter: bool,
+    _intrabc: bool,
+    _iter: c_int,
+) {
+}
+
 /// The step timing of a slot.
 #[derive(Default)]
 pub(crate) struct SlotSteps {

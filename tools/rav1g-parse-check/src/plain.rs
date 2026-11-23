@@ -279,6 +279,8 @@ impl Arena {
 
     /// What the coefficients and the wavefront grids hold before a parser writes them.
     fn fill(&self) {
+        // -steps: a frame starts.
+        crate::host::step_time::frame_start();
         // SAFETY: the two buffers, which nothing else works on.
         unsafe {
             for i in 0..self.coefs.len() {

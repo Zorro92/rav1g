@@ -2149,6 +2149,19 @@ unsafe fn intra_plane_edges<const CHROMA: bool>(
                         );
                         iter_high = iter_high.max(iter);
                         highest = highest.max(iter);
+                        // What rav1g-parse-check -steps models schedules of (nothing in the decoder).
+                        step_time::place(
+                            CHROMA,
+                            plane_col + col_off,
+                            plane_row + row_off,
+                            txw,
+                            txh,
+                            [above_left, above_available, left_available],
+                            other != NO_ITERATION,
+                            use_filter,
+                            b.is_intrabc,
+                            iter,
+                        );
                         // The one entry of the grid that gen_pred_blocks.hlsl reads.
                         *plane.iter_grid.offset((subblk_w * x + subblk_h * y * stride + stride + subblk_w) as isize) =
                             iter;
