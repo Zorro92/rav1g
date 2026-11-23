@@ -150,6 +150,10 @@ typedef struct av1_perf_frame {
   /* The inter prediction breakdown of the frame (av1_set_perf_detail), valid during the callback only;
    * NULL without it and for a show-existing copy. */
   const struct av1_perf_inter_detail *inter;
+  /* The user data of the temporal unit the frame came from (rav1g_decoder_decode's user_data, an
+   * application's presentation time): the key to join this record with the application's own per-frame
+   * log. The frames of one temporal unit (hidden and shown) share it. */
+  uint64_t user_data;
 } av1_perf_frame;
 
 /* ---------------------------------------------------------------------------

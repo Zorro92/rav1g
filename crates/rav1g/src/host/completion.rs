@@ -441,6 +441,8 @@ pub(crate) unsafe extern "C" fn rav1g_decode_sef_submit(
         let item: *mut GpuWorkItem = (*dec).gpu_item_pool.get();
         perf_add(dec, sys::AV1_PERF_CPU_WAIT_ITEM as usize, perf_t);
         (*item).data = (*dec).curr_frame_data;
+        // The perf record's key to the application's own log (av1_perf_frame::user_data).
+        (*(*dec).curr_frame_data).perf.acc.user_data = (*pbi).user_priv as usize as u64;
         (*item).image = buf.hw_show_image;
         buf.hw_show_image = std::ptr::null_mut();
         (*dec).curr_frame_data = std::ptr::null_mut();
