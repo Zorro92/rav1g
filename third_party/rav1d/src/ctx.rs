@@ -36,6 +36,11 @@
 //! * employs the same small powers of 2 optimization the `case_set*` implementation did
 //! * is far simpler than the `case_set*` implementation, consisting of a `match` and array writes
 //!
+//! rav1g: [`CaseSet::one`] matches the length once, as the `case_set*` macros switch on it once, and
+//! calls the closure in each arm with that length as a constant: with the closure and the setters
+//! inlined, every array the closure writes is one store of the length's size, without a match of its
+//! own (upstream matches the length again for every array).
+//!
 //! [`BlockContext`]: crate::env::BlockContext
 use std::iter::zip;
 
@@ -51,11 +56,12 @@ use crate::disjoint_mut::{AsMutPtr, DisjointMut};
 ///
 /// This optimizes for the common cases where `buf.len()` is a small power of 2,
 /// where the array write is optimized as few and large stores as possible.
-#[inline]
+#[inline(always)]
 pub fn small_memset<T: Clone + Copy, const UP_TO: usize, const WITH_DEFAULT: bool>(
     buf: &mut [T],
     val: T,
 ) {
+    #[inline(always)]
     fn as_array<T: Clone + Copy, const N: usize>(buf: &mut [T]) -> &mut [T; N] {
         buf.try_into().unwrap()
     }
@@ -80,7 +86,7 @@ pub struct CaseSetter<const UP_TO: usize, const WITH_DEFAULT: bool> {
 }
 
 impl<const UP_TO: usize, const WITH_DEFAULT: bool> CaseSetter<UP_TO, WITH_DEFAULT> {
-    #[inline]
+    #[inline(always)]
     pub fn set<T: Clone + Copy>(&self, buf: &mut [T], val: T) {
         small_memset::<T, UP_TO, WITH_DEFAULT>(&mut buf[self.offset..][..self.len], val);
     }
@@ -89,7 +95,7 @@ impl<const UP_TO: usize, const WITH_DEFAULT: bool> CaseSetter<UP_TO, WITH_DEFAUL
     ///
     /// Caller must ensure that no elements of the written range are concurrently
     /// borrowed (immutably or mutably) at all during the call to `set_disjoint`.
-    #[inline]
+    #[inline(always)]
     pub fn set_disjoint<T, V>(&self, buf: &DisjointMut<T>, val: V)
     where
         T: AsMutPtr<Target = V>,
@@ -115,12 +121,32 @@ impl<const UP_TO: usize, const WITH_DEFAULT: bool> CaseSet<UP_TO, WITH_DEFAULT> 
     ///
     /// The `len` and `offset` are supplied here and
     /// applied to each `buf` passed to [`CaseSetter::set`] in `set_ctx`.
-    #[inline]
+    #[inline(always)]
     pub fn one<T, F>(ctx: T, len: usize, offset: usize, mut set_ctx: F)
     where
         F: FnMut(&CaseSetter<UP_TO, WITH_DEFAULT>, T),
     {
-        set_ctx(&CaseSetter { offset, len }, ctx);
+        Self::dispatch(ctx, len, offset, &mut set_ctx);
+    }
+
+    /// rav1g: one match of the length for all the arrays the closure writes (see the top). The closure
+    /// is called through `&mut F` here, not as an `F` that is itself `&mut F'`: that would go through
+    /// the forwarding `call_mut` of `&mut F'`, which the compiler may keep out of line with the closure
+    /// inlined into it, and the constant length would not reach the closure's body.
+    #[inline(always)]
+    fn dispatch<T, F>(ctx: T, len: usize, offset: usize, set_ctx: &mut F)
+    where
+        F: FnMut(&CaseSetter<UP_TO, WITH_DEFAULT>, T),
+    {
+        match len {
+            01 if UP_TO >= 01 => set_ctx(&CaseSetter { offset, len: 01 }, ctx),
+            02 if UP_TO >= 02 => set_ctx(&CaseSetter { offset, len: 02 }, ctx),
+            04 if UP_TO >= 04 => set_ctx(&CaseSetter { offset, len: 04 }, ctx),
+            08 if UP_TO >= 08 => set_ctx(&CaseSetter { offset, len: 08 }, ctx),
+            16 if UP_TO >= 16 => set_ctx(&CaseSetter { offset, len: 16 }, ctx),
+            32 if UP_TO >= 32 => set_ctx(&CaseSetter { offset, len: 32 }, ctx),
+            _ => set_ctx(&CaseSetter { offset, len }, ctx),
+        }
     }
 
     /// Perform many case sets in one call.
@@ -130,7 +156,7 @@ impl<const UP_TO: usize, const WITH_DEFAULT: bool> CaseSet<UP_TO, WITH_DEFAULT> 
     ///
     /// The `lens`, `offsets`, and `dirs` are zipped and passed to [`CaseSet::one`],
     /// where `dirs` can be an array of any type and whose elements are passed back to the `set_ctx` closure.
-    #[inline]
+    #[inline(always)]
     pub fn many<T, F, const N: usize>(
         dirs: [T; N],
         lens: [usize; N],
@@ -140,7 +166,7 @@ impl<const UP_TO: usize, const WITH_DEFAULT: bool> CaseSet<UP_TO, WITH_DEFAULT> 
         F: FnMut(&CaseSetter<UP_TO, WITH_DEFAULT>, T),
     {
         for (dir, (len, offset)) in zip(dirs, zip(lens, offsets)) {
-            Self::one(dir, len, offset, &mut set_ctx);
+            Self::dispatch(dir, len, offset, &mut set_ctx);
         }
     }
 }
