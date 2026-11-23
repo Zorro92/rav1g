@@ -271,8 +271,8 @@ unsafe fn create_layouts(device: Device<'_>, lib: *mut compute_shader_lib) -> Re
         // The copy layouts bind u0 and the inline constants. The direct layout also binds both texture planes.
         copy_plane_sp: layout(0, 1, 0, 11)?,
         copy_plane_sp_tex: layout_planes(0, 1, 0, 11, 2)?,
-        // display_pass.hlsl: t0 the tone map's tables, u0 the frame pool, 24 inline constants, the two planes.
-        display_pass: layout_planes(1, 1, 0, 24, 2)?,
+        // display_pass.hlsl: t0 the tone map's tables, u0 the frame pool, its inline constants, the two planes.
+        display_pass: layout_planes(1, 1, 0, super::display_pass::CONSTANTS as u32, 2)?,
         // film_grain_filter_sp_tex_v2.hlsl: the layout of film grain with the two planes in place of u0.
         film_grain_tex: layout_planes(3, 0, 1, 0, 2)?,
         // cdef_lists.hlsl / cdef_lists_v2.hlsl: the mode info pool and grid, the two lists, 6 inline constants.

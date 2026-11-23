@@ -32,6 +32,10 @@ const GAIN_LOW: usize = 64;
 /// Words of the tables: four an interval (the polynomial's coefficients), the EOTF's then the gain's.
 pub(crate) const LUT_WORDS: usize = 4 * (EOTF_N + 1 + GAIN_N + 1);
 
+/// The inline constants of `display_pass.hlsl` (`cb_display`): the pipeline layout's count
+/// (`compute.rs`) is this, so that the shader never reads a constant the layout does not set.
+pub(crate) const CONSTANTS: usize = 26;
+
 /// Below this largest PQ signal the shader computes the peak's nits instead of interpolating them: the
 /// gain is `eetf(peak) / max(peak, 1e-6)`, so below 1e-6 nits (a signal of 1.2e-4) it is proportional to
 /// the peak, and pixels there with a large negative channel (out of gamut) show it.
@@ -178,7 +182,12 @@ fn mode_of(seq: &SequenceHeader) -> u32 {
 ///
 /// # Safety
 /// `dst` is writable for `LUT_WORDS` words.
-pub(crate) unsafe fn constants(src: &HwFrameBuffer, out: (i32, i32), seq: &SequenceHeader, dst: *mut u32) -> [u32; 26] {
+pub(crate) unsafe fn constants(
+    src: &HwFrameBuffer,
+    out: (i32, i32),
+    seq: &SequenceHeader,
+    dst: *mut u32,
+) -> [u32; CONSTANTS] {
     let mode = mode_of(seq);
     let (eotf, gain) = if mode == 1 {
         ([0.0; 3], [0.0; 4])
@@ -258,6 +267,19 @@ mod tests {
         let f = (pos - i as f64) as f32;
         let w = |k: usize| f32::from_bits(t.words[4 * (base + i) + k]);
         f64::from(w(0) + f * (w(1) + f * (w(2) + f * w(3))))
+    }
+
+    /// The shader's constant block has as many 32-bit fields as the layout sets (`CONSTANTS`).
+    #[test]
+    fn constants_are_those_of_the_shader() {
+        let shader = include_str!("../../../../libav1/dx/shaders/display_pass.hlsl");
+        let block = shader.split("cbuffer cb_display").nth(1).and_then(|s| s.split("};").next()).expect("cb_display");
+        let fields = block
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| line.starts_with("uint cb_") || line.starts_with("float cb_"))
+            .count();
+        assert_eq!(fields, CONSTANTS);
     }
 
     /// The tables against the functions they hold, positioned as the shader positions them: the EOTF
