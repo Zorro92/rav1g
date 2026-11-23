@@ -729,6 +729,11 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
         );
         request!(
             assign,
+            td.cdef_masks,
+            mem.buffer_for(size_of::<u32>() * 2 * cdef_blocks as usize, cdef_kind, c"cdef_masks", i, cdef_writable)
+        );
+        request!(
+            assign,
             td.loop_rest_types,
             mem.buffer(size_of::<[c_int; 4]>() * max_rst_units, DeviceUpload, c"loop_rest_types", i)
         );

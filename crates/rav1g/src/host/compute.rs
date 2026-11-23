@@ -124,10 +124,10 @@ const LAYOUTS: usize =
 const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
-    // 20 transform pipelines, 32 shared shaders and 27 per bit depth: one slot per pipeline of
+    // 20 transform pipelines, 39 shared shaders and 27 per bit depth: one slot per pipeline of
     // `create_tasks` (the test `every_pipeline_names_its_shader_once`).
-    assert!(SHADERS == 20 + 32 + 2 * 27);
-    assert!(LAYOUTS == 24);
+    assert!(SHADERS == 20 + 39 + 2 * 27);
+    assert!(LAYOUTS == 28);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
 
@@ -210,16 +210,20 @@ struct Layouts {
     intra_v2: Layout,
     inter_pred: Layout,
     loop_rest: Layout,
+    loop_rest_sp_tex: Layout,
     cdef_filter: Layout,
+    cdef_filter_sp_tex: Layout,
     film_grain: Layout,
     lf: Layout,
     lf_gen: Layout,
     upscale: Layout,
+    upscale_sp_tex: Layout,
     copy_plane_sp: Layout,
     copy_plane_sp_tex: Layout,
     film_grain_tex: Layout,
     cdef_lists: Layout,
     mi_grid_build: Layout,
+    residual_clear_blocks: Layout,
 }
 
 /// Creates the layouts in the order of the C++ and puts each into its field of the library.
@@ -256,21 +260,26 @@ unsafe fn create_layouts(device: Device<'_>, lib: *mut compute_shader_lib) -> Re
         intra_v2: layout(5, 1, 1, 8)?,
         inter_pred: layout(5, 1, 1, 4)?,
         loop_rest: layout(3, 1, 2, 2)?,
+        loop_rest_sp_tex: layout_planes(3, 1, 2, 3, 2)?,
         cdef_filter: layout(2, 1, 1, 0)?,
+        cdef_filter_sp_tex: layout_planes(2, 1, 1, 0, 2)?,
         film_grain: layout(3, 1, 1, 0)?,
         lf: layout(1, 1, 1, 5)?,
         lf_gen: layout(2, 1, 1, 6)?,
         upscale: layout(0, 1, 1, 3)?,
+        upscale_sp_tex: layout_planes(0, 1, 1, 5, 2)?,
         // The copy layouts bind u0 and the inline constants. The direct layout also binds both texture planes.
         copy_plane_sp: layout(0, 1, 0, 11)?,
         copy_plane_sp_tex: layout_planes(0, 1, 0, 11, 2)?,
         // film_grain_filter_sp_tex_v2.hlsl: the layout of film grain with the two planes in place of u0.
         film_grain_tex: layout_planes(3, 0, 1, 0, 2)?,
-        // cdef_lists.hlsl: the mode info pool and grid, the two lists, 6 inline constants.
+        // cdef_lists.hlsl / cdef_lists_v2.hlsl: the mode info pool and grid, the two lists, 6 inline constants.
         cdef_lists: layout(2, 2, 0, 6)?,
         // mi_grid_build.hlsl: the mode info pool and the runs of the frame's records, the grid, 7 inline
         // constants.
         mi_grid_build: layout(2, 1, 0, 7)?,
+        // residual_clear_blocks.hlsl: sorted transform blocks (t0), residuals (u0), IdctFrameData (b0), 4 inline constants.
+        residual_clear_blocks: layout(1, 1, 1, 4)?,
     };
     // SAFETY: the fields are null COM pointers of root signatures (the caller's contract).
     unsafe {
@@ -285,16 +294,20 @@ unsafe fn create_layouts(device: Device<'_>, lib: *mut compute_shader_lib) -> Re
         com_store(&raw mut (*lib).sig_intra_v2, layouts.intra_v2.clone().into_raw());
         com_store(&raw mut (*lib).sig_inter_pred, layouts.inter_pred.clone().into_raw());
         com_store(&raw mut (*lib).sig_loop_rest, layouts.loop_rest.clone().into_raw());
+        com_store(&raw mut (*lib).sig_loop_rest_sp_tex, layouts.loop_rest_sp_tex.clone().into_raw());
         com_store(&raw mut (*lib).sig_cdef_filter, layouts.cdef_filter.clone().into_raw());
+        com_store(&raw mut (*lib).sig_cdef_filter_sp_tex, layouts.cdef_filter_sp_tex.clone().into_raw());
         com_store(&raw mut (*lib).sig_film_grain, layouts.film_grain.clone().into_raw());
         com_store(&raw mut (*lib).sig_lf, layouts.lf.clone().into_raw());
         com_store(&raw mut (*lib).sig_lf_gen, layouts.lf_gen.clone().into_raw());
         com_store(&raw mut (*lib).sig_upscale, layouts.upscale.clone().into_raw());
+        com_store(&raw mut (*lib).sig_upscale_sp_tex, layouts.upscale_sp_tex.clone().into_raw());
         com_store(&raw mut (*lib).sig_copy_plane_sp, layouts.copy_plane_sp.clone().into_raw());
         com_store(&raw mut (*lib).sig_copy_plane_sp_tex, layouts.copy_plane_sp_tex.clone().into_raw());
         com_store(&raw mut (*lib).sig_film_grain_tex, layouts.film_grain_tex.clone().into_raw());
         com_store(&raw mut (*lib).sig_cdef_lists, layouts.cdef_lists.clone().into_raw());
         com_store(&raw mut (*lib).sig_mi_grid_build, layouts.mi_grid_build.clone().into_raw());
+        com_store(&raw mut (*lib).sig_residual_clear_blocks, layouts.residual_clear_blocks.clone().into_raw());
         com_store(&raw mut (*lib).sig_pred_blocks_gpu, layouts.pred_blocks_gpu.clone().into_raw());
         com_store(&raw mut (*lib).sig_pred_list_count, layouts.pred_list_count.clone().into_raw());
         com_store(&raw mut (*lib).sig_pred_list_scan, layouts.pred_list_scan.clone().into_raw());
@@ -336,9 +349,17 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("fill_buffer", &layouts.common0102, &raw mut (*lib).shader_fill_buffer),
             ("loop_restoration", &layouts.loop_rest, &raw mut (*lib).shader_loop_rest),
             ("loop_restoration_wiener", &layouts.loop_rest, &raw mut (*lib).shader_loop_rest_wiener),
+            ("loop_restoration_sp_tex", &layouts.loop_rest_sp_tex, &raw mut (*lib).shader_loop_rest_sp_tex),
+            (
+                "loop_restoration_wiener_sp_tex",
+                &layouts.loop_rest_sp_tex,
+                &raw mut (*lib).shader_loop_rest_wiener_sp_tex,
+            ),
             ("film_grain_filter", &layouts.film_grain, &raw mut (*lib).shader_filmgrain_filter),
             ("cdef_filter", &layouts.cdef_filter, &raw mut (*lib).shader_cdef_filter),
             ("cdef_filter_v2", &layouts.cdef_filter, &raw mut (*lib).shader_cdef_filter_v2),
+            ("cdef_filter_v3", &layouts.cdef_filter, &raw mut (*lib).shader_cdef_filter_v3),
+            ("cdef_filter_v3_sp_tex", &layouts.cdef_filter_sp_tex, &raw mut (*lib).shader_cdef_filter_v3_sp_tex),
             ("intra_v2", &layouts.intra_v2, &raw mut (*lib).shader_intra_v2),
             ("intra_v2_hbd", &layouts.intra_v2, &raw mut (*lib).shader_intra_v2_hbd),
             ("gen_pred_blocks", &layouts.pred_blocks, &raw mut (*lib).shader_gen_pred_blocks),
@@ -352,6 +373,7 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("copy_plane", &layouts.copy_plane, &raw mut (*lib).shader_copy_plane),
             ("copy_plane_10bit10x3", &layouts.copy_plane, &raw mut (*lib).shader_copy_plane_10bit10x3),
             ("upscaling", &layouts.upscale, &raw mut (*lib).shader_upscale),
+            ("upscaling_sp_tex", &layouts.upscale_sp_tex, &raw mut (*lib).shader_upscale_sp_tex),
             ("inter_2x2chroma", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_2x2),
             ("inter_compound_v2", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_comp),
             ("inter_compound_2x2", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_comp_2x2),
@@ -434,7 +456,9 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("film_grain_filter_sp", &layouts.film_grain, &raw mut (*lib).shader_filmgrain_filter_sp),
             ("film_grain_filter_sp_tex_v2", &layouts.film_grain_tex, &raw mut (*lib).shader_filmgrain_filter_sp_tex_v2),
             ("cdef_lists", &layouts.cdef_lists, &raw mut (*lib).shader_cdef_lists),
+            ("cdef_lists_v2", &layouts.cdef_lists, &raw mut (*lib).shader_cdef_lists_v2),
             ("mi_grid_build", &layouts.mi_grid_build, &raw mut (*lib).shader_mi_grid_build),
+            ("residual_clear_blocks", &layouts.residual_clear_blocks, &raw mut (*lib).shader_residual_clear_blocks),
             ("pred_list_count", &layouts.pred_list_count, &raw mut (*lib).shader_pred_list_count),
             ("pred_list_scan", &layouts.pred_list_scan, &raw mut (*lib).shader_pred_list_scan),
             ("gen_pred_blocks_gpu", &layouts.pred_blocks_gpu, &raw mut (*lib).shader_gen_pred_blocks_gpu),

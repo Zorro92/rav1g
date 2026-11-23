@@ -11,6 +11,7 @@ trap 'rm -rf "$work"' EXIT
 trap 'exit 130' INT TERM HUP
 
 python3 "$sync/to_cpp.py" "$shaders/restoration.h" "$work/restoration.gen.h"
+python3 "$sync/to_cpp.py" "$shaders/output_sp.h" "$work/output_sp.gen.h"
 python3 "$sync/to_cpp.py" "$shaders/loop_restoration.hlsl" "$work/optimized.gen.h" "$work/optimized.entry.h"
 
 # The parameter sets the Rust host puts in the constant buffer.
@@ -19,7 +20,7 @@ sed -n '/^const int32_t x_by_xplus1\[/,/^};/p' "$repo/libav1/av1/common/restorat
 
 build() {
   g++ -std=c++17 -O2 -fwrapv -Wall -Wextra -Wno-unknown-pragmas -Wno-sign-compare -Wno-unused-function \
-    -I "$work" -I "$sync" -o "$work/restoration_check" "$here/restoration_check.cpp"
+    -Wno-unused-parameter -I "$work" -I "$sync" -o "$work/restoration_check" "$here/restoration_check.cpp"
 }
 build
 timeout -k 10 120 "$work/restoration_check"

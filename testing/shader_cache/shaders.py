@@ -48,16 +48,18 @@ UNOPTIMIZED = [name + '_legacy' for name in INTRA_MAIN]
 
 # Verify the alternate kernels selected at runtime in the built binary.
 REQUIRED_BYTECODE = [
-    'cdef_filter', 'cdef_filter_v2', *INTRA_MAIN, *UNOPTIMIZED,
+    'cdef_filter', 'cdef_filter_v2', 'cdef_filter_v3', 'cdef_filter_v3_sp_tex', *INTRA_MAIN, *UNOPTIMIZED,
     'intra_main_prefetch_hbd', 'intra_main_prefetch',
     'intra_main_single_edge', 'intra_main_single_edge_hbd',
     'intra_filter_prefetch', 'intra_filter_prefetch_hbd',
-    'cdef_lists',
+    'cdef_lists', 'cdef_lists_v2',
     'intra_filter_legacy', 'intra_v2', 'intra_v2_hbd',
     'gen_lf_blocks_vert', 'gen_lf_blocks_hor',
     'loopfilter_vert', 'loopfilter_hor',
     'loopfilter_vert_hbd', 'loopfilter_hor_hbd',
     'loop_restoration', 'loop_restoration_wiener',
+    'loop_restoration_sp_tex', 'loop_restoration_wiener_sp_tex',
+    'upscaling_sp_tex', 'residual_clear_blocks',
     'film_grain_filter_sp_tex_v2',
     'copy_plane_sp_tex_v2',
     'idct4x4_v2', 'idct4x8_v2', 'idct8x4_v2', 'idct8x8_v2',

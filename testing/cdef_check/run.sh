@@ -24,10 +24,11 @@ to_cpp() {
     -e 's/\[(unroll|loop|branch)\]//g' \
     -e 's/\binout int4 /int4 \&/g' \
     -e 's/: *SV_[A-Za-z]+//g' \
-    -e 's/: *register\([a-z0-9]+\)//g' \
+    -e 's/: *register\([A-Za-z0-9_]+\)//g' \
     -e 's/^cbuffer +[A-Za-z_]+ *\{(.*)\}/\1/' \
     -e 's/^cbuffer +[A-Za-z_]+ *\{$/namespace {/' \
     -e 's/void main\(/void shader_main(/' \
+    -e 's/#include "output_sp.h"/#include "output_sp.gen.h"/' \
     "$1" | sed -E -f "$here/../common/gs_groupshared.sed"
 }
 
@@ -35,9 +36,12 @@ build() {
   g++ -std=c++20 -O2 -fwrapv -Wno-unknown-pragmas -I "$1" -I "$here" -I "$shaders" -o "$1/$2" "$here/$2.cpp"
 }
 
+to_cpp "$shaders/output_sp.h" > "$work/output_sp.gen.h"
 to_cpp "$shaders/cdef_filter.hlsl" > "$work/cdef_filter.gen.h"
 to_cpp "$shaders/cdef_filter_v2.hlsl" > "$work/cdef_filter_v2.gen.h"
+to_cpp "$shaders/cdef_filter_v3.hlsl" > "$work/cdef_filter_v3.gen.h"
 to_cpp "$shaders/cdef_lists.hlsl" > "$work/cdef_lists.gen.h"
+to_cpp "$shaders/cdef_lists_v2.hlsl" > "$work/cdef_lists_v2.gen.h"
 build "$work" cdef_check
 timeout -k 10 "$check_timeout" "$work/cdef_check"
 build "$work" cdef_lists_check
@@ -85,4 +89,30 @@ if [ "${1:-}" = "--mutate" ]; then
     '^MISMATCH optimized lists' cdef_lists_check
   expect_rejected cdef_lists 's/min(thread.y, cb_skip_rows - 1)/thread.y/' "unclamped MI row" \
     'out-of-bounds buffer accesses [1-9]' cdef_lists_check
+  expect_rejected cdef_filter_v3 's/f.pri_tap0 = 4 - p_t;/f.pri_tap0 = 3 - p_t;/' "v3 wrong primary tap weight" '^MISMATCH '
+  expect_rejected cdef_filter_v3 's/if (cost\[i\] > best_cost)/if (cost[i] >= best_cost)/' "v3 last-direction tie break" '^MISMATCH direction'
+  expect_rejected cdef_filter_v3 's/uint2(CDEF_VERY_LARGE_X2, CDEF_VERY_LARGE_X2)/uint2(0u, 0u)/' "v3 missing border sentinel" '^MISMATCH '
+  v3_syncs=$(grep -c 'GroupMemoryBarrierWithGroupSync();' "$work/cdef_filter_v3.gen.h")
+  for idx in $(seq "$v3_syncs"); do
+    cp "$work"/*.gen.h "$work/mutant/"
+    awk -v wanted="$idx" '
+      /GroupMemoryBarrierWithGroupSync\(\);/ && ++found == wanted {
+        sub(/GroupMemoryBarrierWithGroupSync\(\);/, "GroupMemoryBarrier();")
+      }
+      { print }
+    ' "$work/cdef_filter_v3.gen.h" > "$work/mutant/cdef_filter_v3.gen.h"
+    build "$work/mutant" cdef_check
+    status=0
+    timeout -k 10 "$mutant_timeout" "$work/mutant/cdef_check" --fail-fast > "$work/mutant/log" 2>&1 || status=$?
+    if [ "$status" != 1 ] || ! grep -q 'races in group memory: [1-9]' "$work/mutant/log"; then
+      cat "$work/mutant/log" >&2
+      echo "cdef_check: v3 sync $idx weakened did not yield a race (exit $status)" >&2
+      exit 1
+    fi
+    echo "cdef_check: rejected v3 sync $idx weakened to a barrier"
+  done
+  expect_rejected cdef_lists_v2 's/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/' \
+    "cdef_lists_v2 sync weakened to a barrier" 'races in group memory: [1-9]' cdef_lists_check
+  expect_rejected cdef_lists_v2 's/mask |= active_bit\[base + i\];/mask |= active_bit[base];/' \
+    "cdef_lists_v2 broken mask reduction" '^MISMATCH cdef_lists_v2' cdef_lists_check
 fi

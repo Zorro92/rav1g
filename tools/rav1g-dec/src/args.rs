@@ -84,6 +84,9 @@ pub struct Task {
     pub slots_given: bool,
     pub cdefv1: bool,
     pub cdefv2: bool,
+    pub cdefv3legacy: bool,
+    pub outputcopylegacy: bool,
+    pub residualclearlegacy: bool,
     pub nofitsize: bool,
     pub fitsize: bool,
     pub lowmem: bool,
@@ -166,6 +169,9 @@ impl Default for Task {
             parse_frames: 0,
             cdefv1: false,
             cdefv2: false,
+            cdefv3legacy: false,
+            outputcopylegacy: false,
+            residualclearlegacy: false,
             nofitsize: false,
             fitsize: false,
             lowmem: false,
@@ -284,6 +290,11 @@ pub fn usage() {
     say!("  -queue_size <n>       output images in the pool, 1..{} (default {})", QUEUE_SIZE_MAX, QUEUE_SIZE_DEFAULT);
     say!("  -timeout <seconds>    give up on a task after this time (exit code {})", EXIT_TIMEOUT);
     say!("  -cdefv1 -nofitsize -lowmemparts <n> -lowmem -slots <n> -intrav2");
+    say!("  -cdefv3legacy        use legacy cdef_filter_v2 + cdef_lists instead of cdef_filter_v3 + cdef_lists_v2");
+    say!(
+        "  -outputcopylegacy    disable fused semi-planar output in the last postfilter stage (run separate copy_plane)"
+    );
+    say!("  -residualclearlegacy restore full per-frame residual clear before idct instead of sparse post-pred clear");
     say!("  -intraod             use the baseline DXC -Od intra_main kernels (-intraopt restores the default)");
     say!("  -intrafilterlegacy   use the previous 8-bit filter intra shader");
     say!("  -intrasingleedgelegacy use the previous directional wavefront with prefetching");
@@ -467,6 +478,9 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-headroom" => task.headroom_mib = i64::from(number()?),
             "-cdefv1" => task.cdefv1 = true,
             "-cdefv2" => task.cdefv2 = true,
+            "-cdefv3legacy" => task.cdefv3legacy = true,
+            "-outputcopylegacy" => task.outputcopylegacy = true,
+            "-residualclearlegacy" => task.residualclearlegacy = true,
             "-nofitsize" => task.nofitsize = true,
             "-fitsize" => task.fitsize = true,
             "-intrav2" => task.intrav2 = true,

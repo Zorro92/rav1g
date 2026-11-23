@@ -14,6 +14,19 @@ namespace shader {
 #include "cdef_lists.gen.h"
 }
 
+namespace shader_v2 {
+#include "cdef_lists_v2.gen.h"
+}
+
+static uint64_t g_v2_order = 0x9e3779b97f4a7c15ull;
+static uint3 g_v2_group;
+
+static void run_v2_thread(int t, void *) {
+  const uint3 local = {static_cast<uint>(t & 7), static_cast<uint>(t >> 3), 0};
+  const uint3 dtid = {g_v2_group.x * 8u + local.x, g_v2_group.y * 8u + local.y, 0};
+  shader_v2::shader_main(g_v2_group, dtid, local, static_cast<uint>(t));
+}
+
 struct Shape {
   uint cols, rows;  // 8x8 blocks in the frame
   uint mi_stride;   // 4x4 units in a grid row, including padding
@@ -108,9 +121,58 @@ static bool check_case(uint cols, uint rows, std::mt19937 &rng, bool sweep) {
       }
     }
   }
-  if (run(s, pool, grid) == expected) return true;
-  printf("MISMATCH optimized lists on a %ux%u grid of 8x8 blocks\n", cols, rows);
-  return false;
+  if (!(run(s, pool, grid) == expected)) {
+    printf("MISMATCH optimized lists on a %ux%u grid of 8x8 blocks\n", cols, rows);
+    return false;
+  }
+
+  // Also verify cdef_lists_v2.hlsl (packed 32-bit active masks per 64x32 group) under adversarial scheduling.
+  const uint poison = 0xa5a5a5a5u;
+  std::vector<uint> v2_indices(s.index_stride * s.index_rows + 1, poison);
+  std::vector<uint> v2_masks(s.index_stride * s.index_rows * 2 + 1, poison);
+  shader_v2::mi_pool = {reinterpret_cast<const uint8_t *>(pool.data()), pool.size() * 4};
+  shader_v2::mi_grid = {reinterpret_cast<const uint8_t *>(grid.data()), grid.size() * 4};
+  shader_v2::cdef_index = {reinterpret_cast<uint8_t *>(v2_indices.data()), v2_indices.size() * 4};
+  shader_v2::cdef_masks = {reinterpret_cast<uint8_t *>(v2_masks.data()), v2_masks.size() * 4};
+  shader_v2::cb_mi_stride = s.mi_stride;
+  shader_v2::cb_mi_addr_base = ModeInfoSize;
+  shader_v2::cb_index_stride = s.index_stride;
+  shader_v2::cb_skips_stride = s.index_stride * 16;
+  shader_v2::cb_skip_cols = s.cols;
+  shader_v2::cb_skip_rows = s.rows;
+  gs_state.shader = "cdef_lists_v2.hlsl";
+  gs_state.track_unwritten = true;
+  for (uint gy = 0; gy < s.index_rows; gy++) {
+    for (uint gx = 0; gx < s.index_stride; gx++) {
+      g_v2_group = uint3{gx, gy, 0};
+      uint32_t *p = reinterpret_cast<uint32_t *>(shader_v2::active_bit.bytes());
+      for (size_t i = 0; i < shader_v2::active_bit.byte_size() / 4; i++) p[i] = rng();
+      gs_run_group(64, run_v2_thread, nullptr, &g_v2_order);
+    }
+  }
+  gs_state.track_unwritten = false;
+
+  std::vector<uint> exp_masks(s.index_stride * s.index_rows * 2 + 1, poison);
+  for (uint gy = 0; gy < s.index_rows * 2; gy++) {
+    for (uint gx = 0; gx < s.index_stride; gx++) {
+      uint mask = 0u;
+      for (uint ly = 0; ly < 4; ly++) {
+        for (uint bx = 0; bx < 8; bx++) {
+          const uint col = gx * 8 + bx;
+          const uint row = gy * 4 + ly;
+          if (col < cols && row < rows && expected.skips[row * s.index_stride * 16 + col] == 0) {
+            mask |= 1u << (ly * 8 + bx);
+          }
+        }
+      }
+      exp_masks[gy * s.index_stride + gx] = mask;
+    }
+  }
+  if (v2_indices != expected.indices || v2_masks != exp_masks) {
+    printf("MISMATCH cdef_lists_v2 on a %ux%u grid of 8x8 blocks\n", cols, rows);
+    return false;
+  }
+  return true;
 }
 
 int main() {
@@ -118,13 +180,18 @@ int main() {
   constexpr int count = 128;
   // 16x16 blocks cover every equality pattern and skip mask in one dispatch.
   bool ok = check_case(16, 16, rng, true);
-  for (int i = 0; i < count && ok && g_out_of_bounds == 0; i++) {
+  for (int i = 0; i < count && ok && g_out_of_bounds == 0 && gs_state.races == 0; i++) {
     const uint cols = 1 + rng() % 37;
     const uint rows = 1 + rng() % 35;
     ok = check_case(cols, rows, rng, false);
   }
-  printf("cdef_lists_check: out-of-bounds buffer accesses %ld\n", g_out_of_bounds);
-  if (!ok || g_out_of_bounds != 0) return 1;
-  printf("cdef_lists_check: %d grids, strength and skip buffers match the CPU rules\n", count + 1);
+  printf("cdef_lists_check: out-of-bounds buffer accesses %ld, races in group memory: %ld\n", g_out_of_bounds,
+         gs_state.races);
+  if (!ok || g_out_of_bounds != 0 || gs_state.races != 0 || gs_state.sync_errors != 0 ||
+      gs_state.plain_barriers != 0 || gs_state.out_of_bounds != 0 || gs_state.runaway_groups != 0) {
+    gs_print_races("  ");
+    return 1;
+  }
+  printf("cdef_lists_check: %d grids, strength, skip and packed mask buffers match the CPU rules\n", count + 1);
   return 0;
 }

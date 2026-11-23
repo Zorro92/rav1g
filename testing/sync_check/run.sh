@@ -57,7 +57,7 @@ for f in "$shaders"/*.hlsl; do
     pred_list_count) family=8 ;;
     pred_list_scan) family=9 ;;
     gen_pred_blocks) continue ;; # group memory only in the pred_list_count build
-    intra_* | cdef_* | loopfilter_* | loop_restoration) continue ;;
+    intra_* | cdef_* | loopfilter_* | loop_restoration*) continue ;;
     *) echo "sync_check: $name.hlsl has group memory and no family here" >&2; exit 1 ;;
   esac
   list="$list $name:$family"

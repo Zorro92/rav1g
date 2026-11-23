@@ -35,7 +35,7 @@ use super::blocks::{IntraMain, WaveColumn, WaveEdges};
 use super::memory::Allocator;
 use super::pool::{KINDS, Pools};
 use super::thread::{FramePool, Queue};
-use crate::gpu::{CommandAllocator, CommandList, Fence, PlaneViews, Readback, TimestampQueries};
+use crate::gpu::{BufferLocation, CommandAllocator, CommandList, Fence, PlaneViews, Readback, TimestampQueries};
 use crate::sys::{
     HwFrameBuffer, HwOutputImage, aom_notify_frame_ready_cb_fn_t, av1_get_decoded_buffer_cb_fn_t,
     av1_perf_inter_blocks, av1_perf_inter_detail, av1_perf_inter_work, av1_release_decoded_buffer_cb_fn_t,
@@ -111,8 +111,12 @@ pub struct compute_shader_lib {
     pub shader_idct_sort: ComputeShader,
     pub shader_loop_rest: ComputeShader,
     pub shader_loop_rest_wiener: ComputeShader,
+    pub shader_loop_rest_sp_tex: ComputeShader,
+    pub shader_loop_rest_wiener_sp_tex: ComputeShader,
     pub shader_cdef_filter: ComputeShader,
     pub shader_cdef_filter_v2: ComputeShader,
+    pub shader_cdef_filter_v3: ComputeShader,
+    pub shader_cdef_filter_v3_sp_tex: ComputeShader,
     pub shader_intra_filter_legacy: ComputeShader,
     pub shader_intra_main_prefetch_hbd: ComputeShader,
     pub shader_intra_main_single_edge: ComputeShader,
@@ -132,10 +136,12 @@ pub struct compute_shader_lib {
     pub shader_filmgrain_filter_sp_tex_v2: ComputeShader,
     // The lists of CDEF from the mode info (`postfilter.rs`, `Av1Core::gpu_cdef_lists`).
     pub shader_cdef_lists: ComputeShader,
+    pub shader_cdef_lists_v2: ComputeShader,
     // The mode info grid from the records (`grid_check.rs`): the grid of the slot in a decoder whose
     // parse writes none (`Av1Core::gpu_grid`), or a second grid for the check of the pass.
     pub shader_mi_grid_build: ComputeShader,
     pub shader_fill_buffer: ComputeShader,
+    pub shader_residual_clear_blocks: ComputeShader,
     pub shader_gen_pred_blocks: ComputeShader,
     pub shader_gen_pred_blocks_fast: ComputeShader,
     pub shader_gen_pred_blocks_gpu: ComputeShader,
@@ -144,6 +150,7 @@ pub struct compute_shader_lib {
     pub shader_gen_lf_vert: ComputeShader,
     pub shader_gen_lf_hor: ComputeShader,
     pub shader_upscale: ComputeShader,
+    pub shader_upscale_sp_tex: ComputeShader,
     pub shaders_8bit: bitdepth_dependent_shaders,
     pub shaders_hbd: bitdepth_dependent_shaders,
     pub sig_idct: Option<ID3D12RootSignature>,
@@ -159,14 +166,18 @@ pub struct compute_shader_lib {
     pub sig_lf: Option<ID3D12RootSignature>,
     pub sig_lf_gen: Option<ID3D12RootSignature>,
     pub sig_loop_rest: Option<ID3D12RootSignature>,
+    pub sig_loop_rest_sp_tex: Option<ID3D12RootSignature>,
     pub sig_cdef_filter: Option<ID3D12RootSignature>,
+    pub sig_cdef_filter_sp_tex: Option<ID3D12RootSignature>,
     pub sig_film_grain: Option<ID3D12RootSignature>,
     pub sig_upscale: Option<ID3D12RootSignature>,
+    pub sig_upscale_sp_tex: Option<ID3D12RootSignature>,
     pub sig_copy_plane_sp: Option<ID3D12RootSignature>,
     pub sig_copy_plane_sp_tex: Option<ID3D12RootSignature>,
     pub sig_film_grain_tex: Option<ID3D12RootSignature>,
     pub sig_cdef_lists: Option<ID3D12RootSignature>,
     pub sig_mi_grid_build: Option<ID3D12RootSignature>,
+    pub sig_residual_clear_blocks: Option<ID3D12RootSignature>,
     pub sig_pred_blocks_gpu: Option<ID3D12RootSignature>,
     pub sig_pred_list_count: Option<ID3D12RootSignature>,
     pub sig_pred_list_scan: Option<ID3D12RootSignature>,
@@ -254,6 +265,8 @@ pub struct av1_frame_thread_data {
     pub loop_rest_wiener: *mut GpuBufferObject,
     pub cdef_indexes: *mut GpuBufferObject,
     pub cdef_skips: *mut GpuBufferObject,
+    /// Packed 32-bit active masks per 64x32 CDEF v3 group (`cdef_lists_v2.hlsl`, `cdef_filter_v3.hlsl`).
+    pub cdef_masks: *mut GpuBufferObject,
     /// With the check of the grid (`Av1Core::gpu_grid_check`): the grid the GPU builds (`grid_check.rs`);
     /// null otherwise.
     pub mode_info_grid_gpu: *mut GpuBufferObject,
@@ -291,6 +304,16 @@ pub struct av1_frame_thread_data {
     pub do_superres: c_int,
     pub is_hbd: c_int,
     pub output_frame: c_int,
+    /// Direct semi-planar output fused into the last postfilter stage for the frame being recorded.
+    pub fused_sp_active: c_int,
+    pub fused_sp_pair: u32,
+    pub fused_sp_luma_done: c_int,
+    pub fused_sp_chroma_done: c_int,
+    /// Sparse post-prediction residual clearing state recorded by `idct_run` and finished at submit.
+    pub idct_tx_starts: [c_int; 21],
+    pub idct_frame_cb_location: BufferLocation,
+    pub residual_clear_pending: c_int,
+    pub residual_init_clear: c_int,
     pub slot_index: c_int,
     pub iter_grid_stride: c_int,
     pub iter_grid_stride_uv: c_int,
@@ -480,6 +503,8 @@ pub struct Av1Core {
     pub restoration_info_alloc: [*mut c_void; 3],
     pub idct_blocks: *mut GpuBufferObject,
     pub idct_residuals: *mut GpuBufferObject,
+    /// Non-zero once `idct_residuals` has been zeroed in full and kept zeroed after every frame's prediction.
+    pub residuals_initialized: c_int,
     pub frame_buffer_pool: *mut GpuBufferObject,
     pub inter_mask_lut: *mut GpuBufferObject,
     pub inter_warp_filter: *mut GpuBufferObject,

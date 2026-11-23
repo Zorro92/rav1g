@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <vector>
+
 typedef unsigned int uint;
 
 struct int2 {
@@ -33,15 +35,50 @@ union int4 {
     int2 xy;
     int2 zw;
   };
+  int4() : x(0), y(0), z(0), w(0) {}
+  int4(int a, int b, int c, int d) : x(a), y(b), z(c), w(d) {}
   int &operator[](int i) { return i < 2 ? (i == 0 ? x : y) : (i == 2 ? z : w); }
   const int &operator[](int i) const { return i < 2 ? (i == 0 ? x : y) : (i == 2 ? z : w); }
 };
+struct uint4 {
+  uint x, y, z, w;
+  uint4() : x(0), y(0), z(0), w(0) {}
+  uint4(uint a, uint b, uint c, uint d) : x(a), y(b), z(c), w(d) {}
+  explicit uint4(const int4 &v) : x((uint)v.x), y((uint)v.y), z((uint)v.z), w((uint)v.w) {}
+};
+static inline uint4 operator<<(const uint4 &a, int s) {
+  return uint4(a.x << s, a.y << s, a.z << s, a.w << s);
+}
 
 static inline int min(int a, int b) { return a < b ? a : b; }
 static inline int max(int a, int b) { return a > b ? a : b; }
+static inline uint min(uint a, uint b) { return a < b ? a : b; }
+static inline uint max(uint a, uint b) { return a > b ? a : b; }
 static inline int sign(int a) { return (a > 0) - (a < 0); }
 static inline int clamp(int v, int lo, int hi) { return min(max(v, lo), hi); }
 static inline int firstbithigh(uint v) { return v ? 31 - __builtin_clz(v) : -1; }
+
+template <class T>
+struct Texture {
+  uint width = 0, height = 0;
+  std::vector<T> samples;
+  std::vector<uint> writes;
+  T discarded{};
+  Texture() = default;
+  Texture(uint w, uint h) : width(w), height(h), samples(w * h), writes(w * h) {}
+  T &store(int2 pos) {
+    if (pos.x < 0 || pos.y < 0 || (uint)pos.x >= width || (uint)pos.y >= height) return discarded;
+    const uint i = (uint)pos.y * width + (uint)pos.x;
+    ++writes[i];
+    return samples[i];
+  }
+};
+
+template <class T>
+struct RWTexture2D {
+  Texture<T> *texture = nullptr;
+  T &operator[](int2 pos) const { return texture->store(pos); }
+};
 
 /* Counts accesses outside the bound buffer; any is a failure of the check. */
 extern long g_out_of_bounds;

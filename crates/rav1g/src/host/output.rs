@@ -43,12 +43,27 @@
 //! `longjmp`, and that must not pass a Rust function.
 
 use std::ffi::c_int;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicI32, Ordering};
 
-use super::core::{buffer, commands, perf_add, perf_gpu_mark, perf_ticks, pipeline, stage_dump_output};
+use super::core::{
+    buffer, commands, perf_add, perf_gpu_mark, perf_ticks, pipeline, stage_dump_active, stage_dump_output,
+};
 use super::film_grain::{GrainTarget, SKIP_FILM_GRAIN, filmgrain_run};
 use super::log::log;
+use super::postfilter::{FusedTarget, cdef_v3_enabled};
 use super::types::Av1Core;
+
+// av1_set_output_copy_legacy(1) disables fused postfilter->output texture writes (-outputcopylegacy).
+static OUTPUT_COPY_LEGACY: AtomicI32 = AtomicI32::new(0);
+/// `av1_set_output_copy_legacy` (`dx/av1_perf.h`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_output_copy_legacy(enable: c_int) {
+    OUTPUT_COPY_LEGACY.store(enable, Ordering::Relaxed);
+}
+
+pub(crate) fn output_copy_legacy() -> bool {
+    OUTPUT_COPY_LEGACY.load(Ordering::Relaxed) != 0
+}
 use crate::gpu::d3d12::{com_ref, wrapped_ref};
 use crate::gpu::{
     BufferRef, BufferState, Commands, Device, PlaneViews, SemiPlanar, TextureFormat, TextureRef, TextureSource,
@@ -152,16 +167,18 @@ pub(super) fn staging_size(width: c_int, height: c_int, hbd: bool, semi_planar: 
 ///
 /// # Safety
 /// `dec` is the decoder while it records a frame; `cm` is the frame's.
-unsafe fn frame_layout(dec: *mut Av1Core, cm: *const AV1_COMMON) -> (bool, bool, OutputLayout) {
+unsafe fn frame_layout(dec: *mut Av1Core, cm: *const AV1_COMMON) -> (bool, bool, c_int, c_int, OutputLayout) {
     // SAFETY: the caller's contract.
     unsafe {
-        let src = &*(*(*dec).curr_frame_data).dst_frame_buffer;
+        let td = &*(*dec).curr_frame_data;
+        let src = &*td.dst_frame_buffer;
+        let width = if td.do_superres != 0 { (*cm).superres_upscaled_width } else { src.y_crop_width };
+        let height = src.y_crop_height;
         let is_monochrome = (*(*cm).cur_frame).buf.monochrome != 0;
         let semi_planar = (*dec).output_kind != 0;
         let is_10x3 = !semi_planar && (*dec).tryhdr10x3 != 0 && src.hbd != 0;
-        let layout =
-            output_layout(src.y_crop_width, src.y_crop_height, src.hbd != 0, is_monochrome, is_10x3, semi_planar);
-        (is_monochrome, is_10x3, layout)
+        let layout = output_layout(width, height, src.hbd != 0, is_monochrome, is_10x3, semi_planar);
+        (is_monochrome, is_10x3, width, height, layout)
     }
 }
 
@@ -184,8 +201,7 @@ pub(crate) unsafe fn output_image(
         if td.output_frame == 0 {
             return 0;
         }
-        let src = &*td.dst_frame_buffer;
-        let (_, is_10x3, layout) = frame_layout(dec, cm);
+        let (_, is_10x3, crop_width, crop_height, layout) = frame_layout(dec, cm);
 
         let mut err = 1;
         let semi_planar = (*dec).output_kind != 0;
@@ -201,8 +217,8 @@ pub(crate) unsafe fn output_image(
             err = get_output_image(
                 (*dec).image_alloc_priv,
                 layout.size as usize,
-                src.y_crop_width as u16,
-                src.y_crop_height as u16,
+                crop_width as u16,
+                crop_height as u16,
                 fb_type,
                 fb,
             );
@@ -215,15 +231,15 @@ pub(crate) unsafe fn output_image(
             // The texture has to be what the request named: the copy and the views are made for it.
             let format = if td.is_hbd != 0 { SemiPlanar::P010 } else { SemiPlanar::Nv12 };
             let info = texture.info();
-            let (width, height) = (layout.y_texture_width as u32, ((src.y_crop_height + 1) & !1) as u32);
+            let (width, height) = (layout.y_texture_width as u32, ((crop_height + 1) & !1) as u32);
             if info.semi_planar != Some(format) || info.width != width || info.height != height {
                 log(
                     true,
                     &format!(
                         "OUTPUT the image of a {}x{} frame has to be a {} texture of {width}x{height}; the \
                          application gave {} of {}x{}",
-                        src.y_crop_width,
-                        src.y_crop_height,
+                        crop_width,
+                        crop_height,
                         format.name(),
                         info.semi_planar.map_or("another format", SemiPlanar::name),
                         info.width,
@@ -241,6 +257,88 @@ pub(crate) unsafe fn output_image(
     }
 }
 
+/// Checks whether the direct semi-planar (NV12/P010) output write can be fused into the frame's last
+/// postfilter stage (CDEF v3, superres, or loop restoration). When it can, transitions the texture
+/// `Common -> ReadWrite`, writes its plane UAV descriptors, and records the fused state on `td` so
+/// [`copy_output`] skips the redundant full-frame copy pass.
+///
+/// # Safety
+/// `dec` is the decoder while it records a frame whose [`output_image`] returned 1 with `fb`; `cm` is
+/// the frame's.
+pub(crate) unsafe fn prepare_fused_output(
+    dec: *mut Av1Core,
+    cm: *const AV1_COMMON,
+    fb: *const av1_decoded_frame_buffer_t,
+) -> Option<FusedTarget> {
+    if output_copy_legacy() {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    unsafe {
+        if (*dec).output_kind == 0 {
+            return None;
+        }
+        let td = &mut *(*dec).curr_frame_data;
+        let has_postfilter = td.do_cdef != 0 || td.do_superres != 0 || td.do_loop_rest != 0;
+        if !has_postfilter {
+            return None;
+        }
+        // When CDEF is the last postfilter, fused output requires CDEF v3.
+        if td.do_loop_rest == 0 && td.do_superres == 0 && !cdef_v3_enabled() {
+            return None;
+        }
+        let fb = &*fb;
+        let hbd = td.is_hbd != 0;
+        let format = if hbd { SemiPlanar::P010 } else { SemiPlanar::Nv12 };
+        let texture = TextureRef::from_raw(&fb.dx12_texture[0])?;
+        if !fb.dx12_buffer.is_null()
+            || !texture.info().shader_writes
+            || !(*dec).semi_planar_support[usize::from(hbd)].shader_writes
+        {
+            return None;
+        }
+        let views = wrapped_ref::<_, PlaneViews>(&(*dec).plane_views)?;
+        let device = Device::new(com_ref::<_, ID3D12Device>(&(*dec).compute.device)?);
+
+        let is_monochrome = (*(*cm).cur_frame).buf.monochrome != 0;
+        let grain = &(*cm).film_grain_params;
+        let do_filmgrain = td.do_filmgrain != 0 && !SKIP_FILM_GRAIN.load(Ordering::Relaxed);
+        let film_grain_chroma =
+            do_filmgrain && !is_monochrome && (grain.num_cb_points != 0 || grain.chroma_scaling_from_luma != 0);
+        let out_luma = !do_filmgrain;
+        let out_chroma = is_monochrome || !do_filmgrain || !film_grain_chroma;
+        if !out_luma && !out_chroma {
+            // Both planes receive film grain in `copy_output`, so there is no plain copy to fuse.
+            return None;
+        }
+
+        // Frames with refresh_frame_flags == 0 and showable_frame == 0 cannot be read by any later
+        // frame or show_existing_frame (AV1 7.20/7.21). Skip frame-buffer writes except where film
+        // grain or stage dumps still read dst_frame_buffer.
+        let no_ref =
+            (*cm).current_frame.refresh_frame_flags == 0 && (*cm).showable_frame == 0 && !stage_dump_active(dec);
+        let write_fb_y = !no_ref || do_filmgrain;
+        let write_fb_uv = !no_ref || film_grain_chroma;
+
+        let pair = (*dec).plane_view_next;
+        (*dec).plane_view_next = (pair + 1) % PlaneViews::PAIRS;
+        device.write_plane_views(views, pair, texture, format);
+        if (*dec).semi_planar_path != 1 {
+            (*dec).semi_planar_path = 1;
+            log(false, &format!("OUTPUT {} direct: the output pass writes the planes of the texture", format.name()));
+        }
+        let commands = commands(dec);
+        commands.transition_texture(texture, TextureState::Common, TextureState::ReadWrite);
+
+        td.fused_sp_active = 1;
+        td.fused_sp_pair = pair;
+        td.fused_sp_luma_done = c_int::from(out_luma);
+        td.fused_sp_chroma_done = c_int::from(out_chroma);
+
+        Some(FusedTarget { pair, write_fb_y, write_fb_uv, out_luma, out_chroma, is_monochrome })
+    }
+}
+
 /// The second half of `av1_postprocess_copy_output`: takes an image descriptor, puts the frame together
 /// in the layout of the image at the start of the decoder's back buffer (film grain, or a plain copy of
 /// the planes that get none), and records the copy into the buffer or the textures of the application.
@@ -255,7 +353,7 @@ pub(crate) unsafe fn copy_output(dec: *mut Av1Core, cm: *mut AV1_COMMON, fb: *co
         let td = &*(*dec).curr_frame_data;
         let fb = &*fb;
         let src = &*td.dst_frame_buffer;
-        let (is_monochrome, is_10x3, layout) = frame_layout(dec, cm);
+        let (is_monochrome, is_10x3, _, _, layout) = frame_layout(dec, cm);
         let OutputLayout { bpp, num_planes, y_stride, uv_stride, y_size, uv_size, size, .. } = layout;
 
         let perf_t = perf_ticks();
@@ -399,7 +497,7 @@ unsafe fn copy_semi_planar(
 ) {
     // SAFETY: the caller's contract.
     unsafe {
-        let td = &*(*dec).curr_frame_data;
+        let td = &mut *(*dec).curr_frame_data;
         let src = &*td.dst_frame_buffer;
         let img: &HwOutputImage = &*(*cm.cur_frame).buf.hw_show_image;
         let is_monochrome = img.monochrome != 0;
@@ -411,11 +509,20 @@ unsafe fn copy_semi_planar(
         let frame_buffers = buffer((*dec).frame_buffer_pool);
         let lib = (*dec).shader_lib;
 
+        let already_fused = td.fused_sp_active != 0;
+        let fused_luma_done = already_fused && td.fused_sp_luma_done != 0;
+        let fused_chroma_done = already_fused && td.fused_sp_chroma_done != 0;
+        let fused_pair = td.fused_sp_pair;
+        td.fused_sp_active = 0;
+        td.fused_sp_luma_done = 0;
+        td.fused_sp_chroma_done = 0;
+
         // Direct: a texture alone, which shaders may write on this device.
         let texture = TextureRef::from_raw(&fb.dx12_texture[0]);
         let views = wrapped_ref::<_, PlaneViews>(&(*dec).plane_views);
         let device = com_ref::<_, ID3D12Device>(&(*dec).compute.device).map(Device::new);
         let direct = match (texture, views, device) {
+            (Some(texture), Some(views), Some(device)) if already_fused => Some((texture, views, device, fused_pair)),
             (Some(texture), Some(views), Some(device))
                 if fb.dx12_buffer.is_null()
                     && texture.info().shader_writes
@@ -447,7 +554,9 @@ unsafe fn copy_semi_planar(
             );
         }
 
-        if let Some((texture, ..)) = direct {
+        if let Some((texture, ..)) = direct
+            && !already_fused
+        {
             commands.transition_texture(texture, TextureState::Common, TextureState::ReadWrite);
         }
         if do_filmgrain {
@@ -458,10 +567,9 @@ unsafe fn copy_semi_planar(
             filmgrain_run(dec, cm, c_int::from(film_grain_chroma), target);
         }
 
-        // The planes film grain did not write: luma without grain; chroma without grain on it, and the
-        // chroma plane of a frame that has none.
-        let copy_luma = !do_filmgrain;
-        let copy_chroma = is_monochrome || !do_filmgrain || !film_grain_chroma;
+        // The planes neither film grain nor the fused postfilter stage wrote.
+        let copy_luma = !do_filmgrain && !fused_luma_done;
+        let copy_chroma = (is_monochrome || !do_filmgrain || !film_grain_chroma) && !fused_chroma_done;
         if copy_luma || copy_chroma {
             let shader = pipeline(if direct.is_some() {
                 &raw const (*lib).shader_copy_plane_sp_tex_v2
