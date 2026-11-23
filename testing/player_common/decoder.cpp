@@ -807,11 +807,16 @@ int AV1Decoder::DecodeOne() {
   XB_LOGI << "Intra main shader: "
           << (params_.intraod_ ? "intra_main_legacy (-intraod)"
                                : params_.intrasingleedgelegacy_ ? "prefetching (-intrasingleedgelegacy)"
-                                                          : "prefetching with single-edge dependencies");
+                               : params_.intrawave64legacy_ ? "prefetching with single-edge dependencies (-intrawave64legacy)"
+                                                            : "wave64 with fast simple-step path and exact directional reach");
   av1_set_intra_filter_legacy(params_.intrafilterlegacy_);
   av1_set_intra_single_edge_legacy(params_.intrasingleedgelegacy_);
-  XB_LOGI << "8-bit filter intra shader: "
-          << (params_.intrafilterlegacy_ ? "intra_filter_legacy (-intrafilterlegacy)" : "intra_filter_prefetch (default)");
+  av1_set_intra_wave64_legacy(params_.intrawave64legacy_);
+  XB_LOGI << "Filter intra shader: "
+          << (params_.intrafilterlegacy_ ? "intra_filter_legacy (-intrafilterlegacy)"
+                                         : params_.intrawave64legacy_ || params_.intrasingleedgelegacy_
+                                               ? "intra_filter_prefetch"
+                                               : "intra_filter_wave (default)");
   XB_LOGI << "Loop restoration shader: loop_restoration / loop_restoration_wiener (default)";
   XB_LOGI << "Direct NV12/P010 film grain shader: film_grain_filter_sp_tex_v2 (default)";
   XB_LOGI << "Film grain templates: CPU, uploaded with the random offsets";

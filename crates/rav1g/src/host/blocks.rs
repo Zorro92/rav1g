@@ -33,7 +33,8 @@
 //! Both give every transform block the same iteration.
 
 use std::cell::Cell;
-use std::ffi::c_int;
+use std::ffi::{c_int, c_void};
+use std::ptr::NonNull;
 
 thread_local! {
     /// `-parseopt time`: whether the wavefront and intra part of [`av1_mi_push_block`] is timed on this
@@ -673,10 +674,104 @@ impl WaveEdges {
 #[repr(u8)]
 #[allow(dead_code, reason = "the parser-only tools build this file and use the default schedule")]
 pub enum IntraMain {
+    Wave64,
     Tight,
     SingleEdge,
     Legacy,
     Unoptimized,
+}
+
+/// Per-tile bitsets recording which wavefront steps need the full `intra_main_wave64` shader
+/// rather than the lightweight `intra_simple` shader (DC + straight V/H + Smooth only).
+///
+/// Sized for the console: one `Vec<u64>` per tile (a few hundred bytes for a 4K frame), reused
+/// across frames on the slot with zero allocations after warm-up. Each tile thread writes only
+/// its own element through `av1_tile_data::intra_step_complex`; the recording thread reads all
+/// tiles after parsing finishes.
+#[derive(Default)]
+#[allow(dead_code, reason = "the parser-only tools build this file without the GPU host")]
+pub struct StepComplexStore {
+    tiles: Vec<Vec<u64>>,
+    first: Option<NonNull<Vec<u64>>>,
+    count: usize,
+}
+
+#[allow(dead_code, reason = "the parser-only tools build this file without the GPU host")]
+impl StepComplexStore {
+    /// Reset per-tile bitsets for a frame with `tile_count` tiles (or disable when `enable == false`).
+    pub fn setup_frame(&mut self, tile_count: usize, enable: bool) {
+        self.first = None;
+        self.count = 0;
+        if !enable {
+            return;
+        }
+        self.tiles.truncate(tile_count);
+        for bits in &mut self.tiles {
+            bits.clear();
+        }
+        self.tiles.resize_with(tile_count, Vec::new);
+        self.first = NonNull::new(self.tiles.as_mut_ptr());
+        self.count = tile_count;
+    }
+
+    /// Raw pointer to tile `tile_id`'s bitset, for `av1_tile_data::intra_step_complex`.
+    ///
+    /// # Safety
+    /// Called during `setup_tile` after `setup_frame`; does not borrow `self` as `&mut`.
+    pub unsafe fn tile_ptr(store: *const Self, tile_id: usize) -> *mut c_void {
+        // SAFETY: `first` and `count` are immutable after `setup_frame` for the frame's parse.
+        unsafe {
+            match (*store).first {
+                Some(first) if tile_id < (*store).count => first.as_ptr().add(tile_id).cast(),
+                _ => std::ptr::null_mut(),
+            }
+        }
+    }
+
+    /// Returns true if any tile placed a complex main-shader block in wavefront step `iter`.
+    #[inline]
+    pub fn is_complex(&self, iter: c_int) -> bool {
+        let Ok(at) = usize::try_from(iter) else {
+            return true;
+        };
+        let word = at >> 6;
+        let mask = 1u64 << (at & 63);
+        for bits in &self.tiles[..self.count] {
+            if bits.get(word).is_some_and(|w| (w & mask) != 0) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Whether a non-filter main-shader block requires `intra_main_wave64` rather than `intra_simple`.
+/// `intra_simple` handles only DC (0), straight V/H (1/2 with delta 0), and Smooth/SmoothV/SmoothH (9..=11),
+/// without IntraBC or InterIntra. Filter-intra blocks run on a separate dispatch so they do not mark
+/// the main dispatch complex.
+#[inline(always)]
+fn block_is_complex(mode: u32, delta: i8, filter: bool, is_intrabc: bool, is_inter_intra: bool) -> bool {
+    !filter && (is_intrabc || is_inter_intra || !matches!((mode, delta), (0, _) | (1 | 2, 0) | (9..=11, _)))
+}
+
+/// Mark wavefront step `iter` complex in the tile's bitset.
+///
+/// # Safety
+/// `complex` is null or the tile's own `Vec<u64>` from [`StepComplexStore::tile_ptr`].
+#[inline]
+unsafe fn mark_step_complex(complex: *mut c_void, iter: c_int) {
+    // SAFETY: the caller's contract.
+    let Some(bits) = (unsafe { complex.cast::<Vec<u64>>().as_mut() }) else {
+        return;
+    };
+    let Ok(at) = usize::try_from(iter) else {
+        return;
+    };
+    let word = at >> 6;
+    if word >= bits.len() {
+        bits.resize(word + 1, 0);
+    }
+    bits[word] |= 1u64 << (at & 63);
 }
 
 /// What the intra part needs to know of a plane of the block.
@@ -699,10 +794,17 @@ impl IntraPlane {
     /// Bounds on the edges read from the frame, in 4x4 units. Availability in the block record
     /// still describes the decoded neighbours. The bounds only affect when the block can run.
     #[inline]
-    fn edge_limits(&self, main: IntraMain, delta: i8, filter: bool, single_edge: &mut c_int) -> IntraEdgeLimits {
+    fn edge_limits(
+        &self,
+        main: IntraMain,
+        delta: i8,
+        filter: bool,
+        enable_edge_filter: bool,
+        single_edge: &mut c_int,
+    ) -> IntraEdgeLimits {
         let corner = self.need(NEED_ABOVE_LEFT_LUT) && !self.is_intrabc;
         let mut limits = IntraEdgeLimits { above: c_int::MAX, left: c_int::MAX, corner, clipped_corner: corner };
-        if !matches!(main, IntraMain::Tight | IntraMain::SingleEdge) || self.is_intrabc || filter {
+        if !matches!(main, IntraMain::Wave64 | IntraMain::Tight | IntraMain::SingleEdge) || self.is_intrabc || filter {
             return limits;
         }
         if self.mode == 0 {
@@ -717,6 +819,50 @@ impl IntraPlane {
                 limits.above = if vertical { w } else { 0 };
                 limits.left = if vertical { 0 } else { h };
                 limits.corner = false;
+            } else if main == IntraMain::Wave64 {
+                // Exact directional reach and Zone 1/3 corner pruning (AV1 7.11.2.4), matching
+                // intra_main_wave64(_hbd).hlsl. Conservative over filt_type in {0, 1} so no
+                // neighbour mode lookup is needed during wavefront scheduling.
+                const NOMINAL: [c_int; 9] = [0, 90, 180, 45, 135, 113, 157, 203, 67];
+                let base = ((self.mode as usize - 1) * 7 + (delta + 3) as usize) * 4;
+                let dx = INTRA_MODE_SHADER_PARAMS[base];
+                let dy = INTRA_MODE_SHADER_PARAMS[base + 1];
+                let flags = INTRA_MODE_SHADER_PARAMS[base + 2];
+                let mode_info = flags & 15;
+                let (bw, bh) = (w << 2, h << 2);
+                let blk_wh = bw + bh;
+                let angle = NOMINAL[self.mode as usize] + 3 * c_int::from(delta);
+                if mode_info == 1 {
+                    let d = (angle - 90).abs();
+                    let can_pad = enable_edge_filter && d != 0 && (!(blk_wh == 20 || blk_wh == 24) || d >= 4);
+                    let max_pred = (bw - 1) + ((bh * dx) >> 6) + 1;
+                    let pad = if can_pad { 2 } else { 0 };
+                    let load_px = (bw + bh).min((max_pred + pad + 2) & !1);
+                    limits.above = (load_px + 3) >> 2;
+                    limits.left = 0;
+                    limits.corner = can_pad;
+                    *single_edge = 1;
+                } else if mode_info == 3 {
+                    let d = (angle - 180).abs();
+                    let can_pad = enable_edge_filter && d != 0 && (!(blk_wh == 20 || blk_wh == 24) || d >= 4);
+                    let max_pred = (bh - 1) + ((bw * dy) >> 6) + 1;
+                    let pad = if can_pad { 2 } else { 0 };
+                    let load_px = (bh + bw).min(max_pred + pad + 1);
+                    limits.above = 0;
+                    limits.left = (load_px + 3) >> 2;
+                    limits.corner = can_pad;
+                    *single_edge = 1;
+                } else {
+                    let corner_filt = blk_wh >= 24 && enable_edge_filter;
+                    let any_above = ((bw - 1) << 6) + dx >= -64;
+                    let any_left = bh * dx < -64;
+                    limits.above = if any_above || corner_filt { w } else { 0 };
+                    limits.left = if any_left || corner_filt { h } else { 0 };
+                    limits.corner = true;
+                    if limits.above == 0 || limits.left == 0 {
+                        *single_edge = 1;
+                    }
+                }
             } else {
                 // gen_pred_blocks keeps the availability for the mode family. The main shaders
                 // load the lengths for this angle. Only the single-edge shader can omit the
@@ -1302,8 +1448,16 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
                     let need_right = plane.need(NEED_RIGHT_LUT);
                     let need_bot = plane.need(NEED_BOT_LUT);
                     let use_filter = mi.flags & MB_MODE_INFO::USE_FILTER_INTRA != 0;
-                    let edges =
-                        plane.edge_limits(td.intra_main, mi.angle_delta[0], use_filter, &mut tile.intra_single_edge);
+                    let enable_edge_filter = (*cm).seq_params.enable_intra_edge_filter != 0;
+                    let edges = plane.edge_limits(
+                        td.intra_main,
+                        mi.angle_delta[0],
+                        use_filter,
+                        enable_edge_filter,
+                        &mut tile.intra_single_edge,
+                    );
+                    let is_complex =
+                        block_is_complex(plane.mode, mi.angle_delta[0], use_filter, is_intrabc, is_inter_intra);
 
                     let type_size = txw + txh;
                     let type_idx_base = if use_filter { IntraBlockOffset } else { IntraBlockOffset - 1 - type_size };
@@ -1443,6 +1597,9 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
                                     }
 
                                     // Intra step timing (step_time.rs): the block's kind into its step.
+                                    if is_complex {
+                                        mark_step_complex(tile.intra_step_complex, iter);
+                                    }
                                     if !tile.perf_steps.is_null() {
                                         let kind = step_time::kind(
                                             plane.mode,
@@ -1502,7 +1659,15 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
                     let need_left = plane.need(NEED_LEFT_LUT) && !is_intrabc;
                     let need_right = plane.need(NEED_RIGHT_LUT);
                     let need_bot = plane.need(NEED_BOT_LUT);
-                    let edges = plane.edge_limits(td.intra_main, mi.angle_delta[1], false, &mut tile.intra_single_edge);
+                    let enable_edge_filter = (*cm).seq_params.enable_intra_edge_filter != 0;
+                    let edges = plane.edge_limits(
+                        td.intra_main,
+                        mi.angle_delta[1],
+                        false,
+                        enable_edge_filter,
+                        &mut tile.intra_single_edge,
+                    );
+                    let is_complex = block_is_complex(plane.mode, mi.angle_delta[1], false, is_intrabc, is_inter_intra);
                     let is_cfl = plane.mode == UV_CFL_PRED as u32;
 
                     let cnt_y = 1 << (bh_log_uv - txh - unit_y_log);
@@ -1653,6 +1818,9 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
                                     }
 
                                     // Intra step timing (step_time.rs): the block's kind into its step.
+                                    if is_complex {
+                                        mark_step_complex(tile.intra_step_complex, iter);
+                                    }
                                     if !tile.perf_steps.is_null() {
                                         let kind = step_time::kind(
                                             plane.mode,
@@ -2037,12 +2205,11 @@ unsafe fn intra_plane_edges<const CHROMA: bool>(
         let need_right = plane.need(NEED_RIGHT_LUT);
         let need_bot = plane.need(NEED_BOT_LUT);
         let use_filter = !CHROMA && mi.flags & MB_MODE_INFO::USE_FILTER_INTRA != 0;
-        let limits = plane.edge_limits(
-            td.intra_main,
-            mi.angle_delta[usize::from(CHROMA)],
-            use_filter,
-            &mut tile.intra_single_edge,
-        );
+        let delta = mi.angle_delta[usize::from(CHROMA)];
+        let enable_edge_filter = (*cm).seq_params.enable_intra_edge_filter != 0;
+        let limits =
+            plane.edge_limits(td.intra_main, delta, use_filter, enable_edge_filter, &mut tile.intra_single_edge);
+        let is_complex = block_is_complex(plane.mode, delta, use_filter, b.is_intrabc, b.is_inter_intra);
         let type_base = if use_filter { IntraBlockOffset } else { IntraBlockOffset - 1 - (txw + txh) };
         // A CFL block also reads the luma under it.
         let other = if CHROMA && plane.mode == UV_CFL_PRED as u32 { luma_under } else { NO_ITERATION };
@@ -2149,6 +2316,9 @@ unsafe fn intra_plane_edges<const CHROMA: bool>(
                         );
                         iter_high = iter_high.max(iter);
                         highest = highest.max(iter);
+                        if is_complex {
+                            mark_step_complex(tile.intra_step_complex, iter);
+                        }
                         // The one entry of the grid that gen_pred_blocks.hlsl reads.
                         *plane.iter_grid.offset((subblk_w * x + subblk_h * y * stride + stride + subblk_w) as isize) =
                             iter;

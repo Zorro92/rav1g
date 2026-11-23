@@ -31,7 +31,7 @@ use crate::sys::{AV1_COMMON, HwFrameBuffer, HwOutputImage, MB_MODE_INFO};
 impl IntraMain {
     pub(super) fn dump_order(self) -> &'static str {
         match self {
-            Self::Tight | Self::SingleEdge => " order=angle_wavefront",
+            Self::Wave64 | Self::Tight | Self::SingleEdge => " order=angle_wavefront",
             _ => "",
         }
     }

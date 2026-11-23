@@ -476,6 +476,9 @@ typedef struct
     // of the decoder, so that the tiles of several frames can be parsed side by side
     // (docs/phase2-rav1d.md, step 4).
     void * frame_data;
+    int intra_single_edge;
+    void * perf_steps;
+    void * intra_step_complex;
 } av1_tile_data;
 
 typedef struct tx_block_info {

@@ -990,6 +990,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         intra_opt: task.intraopt,
         intra_filter_legacy: task.intrafilterlegacy,
         intra_single_edge_legacy: task.intrasingleedgelegacy,
+        intra_wave64_legacy: task.intrawave64legacy,
         intra_lists_legacy: task.intralistslegacy,
         parse_lists_legacy: task.parselistslegacy,
         lf_h_split: task.lfhsplit as u32,
@@ -1009,11 +1010,13 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     }
     say!("Film grain templates: CPU, uploaded with the random offsets");
     say!(
-        "8-bit filter intra shader: {}",
+        "Filter intra shader: {}",
         if task.intrafilterlegacy {
             "intra_filter_legacy (-intrafilterlegacy)"
+        } else if task.intrawave64legacy || task.intrasingleedgelegacy {
+            "intra_filter_prefetch"
         } else {
-            "intra_filter_prefetch (default)"
+            "intra_filter_wave (default)"
         }
     );
     if !task.intrav2 {
@@ -1023,8 +1026,10 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
                 "conservative"
             } else if task.intrasingleedgelegacy {
                 "angle-specific with prefetching (-intrasingleedgelegacy)"
+            } else if task.intrawave64legacy {
+                "angle-specific with prefetching and single-edge dependencies (-intrawave64legacy)"
             } else {
-                "angle-specific with prefetching and single-edge dependencies"
+                "wave64 with fast simple-step path and exact directional reach"
             }
         );
     }

@@ -924,6 +924,10 @@ pub(crate) unsafe fn setup_frame_begin(
         td.intra_stats = [0; 4];
         td.intra_v2 = intra_v2_setup_frame(dec, cm, td);
         td.intra_main = super::prediction::intra_main_for_frame(td.intra_v2 != 0);
+        td.intra_step_complex.setup_frame(
+            usize::try_from(td.tile_count).unwrap_or(0),
+            td.intra_main == super::blocks::IntraMain::Wave64,
+        );
         td.intra_lists_legacy = super::blocks::intra_lists_legacy();
         // With -intrav2 nothing scans the iteration grid; av1_mi_push_block() writes the one entry per
         // block that gen_pred_blocks.hlsl reads. The same without a switch for the clears: the tiles keep
@@ -1248,6 +1252,8 @@ pub(crate) unsafe fn setup_tile(
         // The tile's counts of the intra step timing; the vector of vectors is not touched while the tiles
         // of the frame run.
         let perf_steps = super::step_time::tile_counts(td, tile_id as usize);
+        let intra_step_complex =
+            super::blocks::StepComplexStore::tile_ptr(&raw const (*td).intra_step_complex, tile_id as usize);
         let td = &*td;
         let t_ptr = td.tile_data.add(tile_id as usize);
         let mut perf_t = super::perf::av1_perf_ticks();
@@ -1259,6 +1265,7 @@ pub(crate) unsafe fn setup_tile(
             t.perf_inter = td.perf_inter_tiles.as_ptr().add(tile_id as usize).cast_mut().cast();
         }
         t.perf_steps = perf_steps;
+        t.intra_step_complex = intra_step_complex;
         let tile_rows = (tile.mi_row_end - tile.mi_row_start + 15) & !15;
         let tile_cols = (tile.mi_col_end - tile.mi_col_start + 15) & !15;
         let mi_offset = tile.mi_row_start * ((cm.mi_cols + 15) & !15) + tile.mi_col_start * tile_rows;

@@ -82,8 +82,14 @@ intra_main_prefetch_hbd	256	64	63	54	10240	0	8	vgprs
 intra_main_prefetch	256	64	63	54	10240	0	8	vgprs
 intra_main_single_edge	256	64	63	54	10240	0	8	vgprs
 intra_main_single_edge_hbd	256	64	63	54	10240	0	8	vgprs
+intra_simple	64	64	40	54	512	0	12	vgprs
+intra_simple_hbd	64	64	38	54	512	0	12	vgprs
+intra_main_wave64	64	64	57	60	2560	0	8	vgprs
+intra_main_wave64_hbd	64	64	57	60	2560	0	8	vgprs
 intra_filter_prefetch	32	32	41	40	512	0	10	vgprs
 intra_filter_prefetch_hbd	32	32	43	39	512	0	10	vgprs
+intra_filter_wave	32	32	22	41	2560	0	12.5	lds
+intra_filter_wave_hbd	32	32	24	40	2560	0	12.5	lds
 inter_ext_borders_hbd	64	64	13	16	0	0	16	waves
 reconstruct_block_hbd	64	64	17	27	0	0	16	waves
 loopfilter_vert_hbd	64	64	38	30	1536	0	12	vgprs

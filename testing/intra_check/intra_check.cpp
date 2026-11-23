@@ -139,19 +139,28 @@ static void run_group(const ShaderApi *api, uint32_t group, int threads, uint64_
                     : api == &intra_main_prefetch_double_api ? "intra_main_prefetch.hlsl (twice the edge count)"
                     : api == &intra_main_single_edge_api ? "intra_main_single_edge.hlsl"
                     : api == &intra_main_single_edge_hbd_api ? "intra_main_single_edge_hbd.hlsl"
+                    : api == &intra_simple_api ? "intra_simple.hlsl"
+                    : api == &intra_simple_hbd_api ? "intra_simple_hbd.hlsl"
+                    : api == &intra_main_wave64_api ? "intra_main_wave64.hlsl"
+                    : api == &intra_main_wave64_hbd_api ? "intra_main_wave64_hbd.hlsl"
                     : api == &intra_main_legacy_api ? "intra_main_legacy.hlsl"
                     : api == &intra_main_hbd_legacy_api ? "intra_main_hbd_legacy.hlsl"
                     : api == &intra_filter_legacy_api ? "intra_filter_legacy.hlsl"
                     : api == &intra_filter_prefetch_api ? "intra_filter_prefetch.hlsl"
                     : api == &intra_filter_prefetch_hbd_api ? "intra_filter_prefetch_hbd.hlsl"
+                    : api == &intra_filter_wave_api ? "intra_filter_wave.hlsl"
+                    : api == &intra_filter_wave_hbd_api ? "intra_filter_wave_hbd.hlsl"
                     : api == &intra_v2_hbd_api     ? "intra_v2.hlsl (10-bit)"
                                                    : "intra_v2.hlsl";
   const bool use_waves = api == &intra_main_api || api == &intra_main_hbd_api ||
                          api == &intra_main_prefetch_hbd_api || api == &intra_main_prefetch_api ||
                          api == &intra_main_prefetch_double_hbd_api || api == &intra_main_prefetch_double_api ||
-                         api == &intra_main_single_edge_hbd_api || api == &intra_main_single_edge_api;
-  gs_state.track_unwritten = use_waves || api == &intra_filter_prefetch_api;
-  g_tracker.require_unique_stores = api == &intra_filter_prefetch_api;
+                         api == &intra_main_single_edge_hbd_api || api == &intra_main_single_edge_api ||
+                         api == &intra_simple_api || api == &intra_simple_hbd_api ||
+                         api == &intra_main_wave64_api || api == &intra_main_wave64_hbd_api;
+  gs_state.track_unwritten = use_waves || api == &intra_filter_prefetch_api ||
+                             api == &intra_filter_wave_api || api == &intra_filter_wave_hbd_api;
+  g_tracker.require_unique_stores = api == &intra_filter_prefetch_api || api == &intra_filter_wave_api;
   GroupContext context = { api, group };
   gs_run_group(threads, thread_body, &context, garbage, use_waves ? complete_waves : nullptr);
 }
@@ -916,6 +925,71 @@ static RunResult run_main(const Geometry &g, const Frame &f, std::vector<uint8_t
   return end_run();
 }
 
+// Mirrors prediction_run_all() for IntraMain::Wave64: 64-thread wave64 groups, multi-row large blocks,
+// per-step selection between intra_simple(_hbd) and intra_main_wave64(_hbd), and intra_filter_wave(_hbd).
+static bool block_is_simple_wave64(const Block &b) {
+  if (b.bucket == 9) return true;  // filter intra uses its own dispatch
+  if (b.y & 0x80000000u) return false;
+  const uint32_t m = (b.y >> 6) & 15;
+  const uint32_t ang = (b.y >> 28) & 7;
+  return m == 14 || (m < 2 && ang == 3) || (m >= 8 && m <= 10);
+}
+
+static RunResult run_wave64(const Geometry &g, const Frame &f, std::vector<uint8_t> *pool, uint64_t garbage,
+                            bool force_full = false) {
+  const ShaderApi *simple_api = g.hbd ? &intra_simple_hbd_api : &intra_simple_api;
+  const ShaderApi *full_api = g.hbd ? &intra_main_wave64_hbd_api : &intra_main_wave64_api;
+  const ShaderApi *filter_api = g.hbd ? &intra_filter_wave_hbd_api : &intra_filter_wave_api;
+  std::vector<uint8_t> step_complex((size_t)f.iterations, force_full ? 1 : 0);
+  if (!force_full) {
+    for (const Block &b : f.blocks) {
+      if (!block_is_simple_wave64(b)) step_complex[(size_t)b.iter] = 1;
+    }
+  }
+  ShaderBuffers buffers = {};
+  buffers.pred_blocks = (const uint8_t *)f.records1.data();
+  buffers.pred_blocks_size = f.records1.size() * 4;
+  buffers.residuals = f.residuals.data();
+  buffers.residuals_size = f.residuals.size();
+  buffers.wedge = f.wedge.data();
+  buffers.wedge_size = f.wedge.size();
+  buffers.frame = pool->data();
+  buffers.frame_size = pool->size();
+  simple_api->bind(&buffers);
+  simple_api->set_common(&f.consts);
+  full_api->bind(&buffers);
+  full_api->set_common(&f.consts);
+  filter_api->bind(&buffers);
+  filter_api->set_common(&f.consts);
+
+  begin_run(g, 0);
+  uint32_t offset = 0;
+  for (int it = 0; it < f.iterations; ++it) {
+    const uint32_t *counts = &f.counts1[(size_t)it * IntraTypeCount];
+    uint32_t srt[10];
+    for (int k = 0; k < 8; ++k) srt[k] = counts[k];
+    const uint32_t wi_count = (counts[0] << 8) + (counts[1] << 7) + ((counts[2] + counts[3] + counts[4]) << 6) +
+                              (counts[5] << 5) + (counts[6] << 4) + (counts[7] << 3) + (counts[8] << 2);
+    srt[8] = wi_count;
+    srt[9] = offset;
+    if (wi_count) {
+      const ShaderApi *step_api = step_complex[(size_t)it] ? full_api : simple_api;
+      step_api->set_srt(srt);
+      const uint32_t groups = (wi_count + 63) >> 6;
+      for (uint32_t group = 0; group < groups; ++group) run_group(step_api, group, 64, &garbage);
+    }
+    for (int k = 0; k < 9; ++k) offset += counts[k];
+    if (counts[9]) {
+      const uint32_t filter_srt[2] = { counts[9] << 3, offset };
+      filter_api->set_srt(filter_srt);
+      for (uint32_t group = 0; group < counts[9]; ++group) run_group(filter_api, group, filter_api->threads, &garbage);
+    }
+    offset += counts[9];
+    g_tracker.unit++;
+  }
+  return end_run();
+}
+
 static bool check_filter_intra_8bit(uint64_t seed) {
   Rng rng = {seed};
   const Geometry g = make_geometry(&rng, 0, 8);
@@ -935,13 +1009,16 @@ static bool check_filter_intra_8bit(uint64_t seed) {
       order_records(g, &f);
       std::vector<uint8_t> legacy = f.pixels;
       std::vector<uint8_t> actual = f.pixels;
+      std::vector<uint8_t> wave = f.pixels;
       run_main(g, f, &legacy, rng.u32(), &intra_main_legacy_api, nullptr, &intra_filter_legacy_api);
       const RunResult r = run_main(g, f, &actual, rng.u32(), &intra_main_api, nullptr);
-      if (actual != legacy || r.memory_races || r.out_of_bounds || r.races_group || r.sync_errors ||
-          r.plain_barriers || r.duplicate_stores) {
+      const RunResult rw = run_wave64(g, f, &wave, rng.u32());
+      if (actual != legacy || wave != legacy || r.memory_races || r.out_of_bounds || r.races_group || r.sync_errors ||
+          r.plain_barriers || r.duplicate_stores || rw.memory_races || rw.out_of_bounds || rw.races_group ||
+          rw.sync_errors || rw.plain_barriers || rw.duplicate_stores) {
         printf("intra_check: MISMATCH in 8-bit filter intra, tap mode %u, edge mask %u, "
-               "races in group memory %ld, duplicate frame word stores %ld\n",
-               mode, mask, r.memory_races, r.duplicate_stores);
+               "races in group memory %ld/%ld, duplicate frame word stores %ld/%ld\n",
+               mode, mask, r.memory_races, rw.memory_races, r.duplicate_stores, rw.duplicate_stores);
         return false;
       }
     }
@@ -1094,6 +1171,104 @@ static bool check_wave_reductions(uint64_t seed, int hbd) {
   return true;
 }
 
+static bool check_wave64_simple(uint64_t seed, int hbd) {
+  Rng rng = {seed + (uint64_t)hbd * 31337};
+  const Geometry g = make_geometry(&rng, hbd, 80);
+  const ShaderApi *legacy_api = hbd ? &intra_main_hbd_legacy_api : &intra_main_legacy_api;
+  // Cover all six intra_simple modes (DC, straight V/H, Smooth, SmoothV, SmoothH), all block sizes
+  // (4x4..64x64, rectangular 3:1/4:1 ratios for fast_dc_div odd=3,5), edge availability, and residuals.
+  const uint32_t modes[] = {14, 0, 1, 8, 9, 10};
+  const struct { uint32_t lw, lh; } sizes[] = {
+      {0, 0}, {1, 0}, {0, 1}, {2, 0}, {0, 2}, {1, 1}, {2, 1}, {1, 2},
+      {2, 2}, {3, 1}, {1, 3}, {3, 2}, {2, 3}, {3, 3}, {4, 2}, {2, 4},
+      {4, 3}, {3, 4}, {4, 4},
+  };
+  long plain_barriers = 0;
+  for (uint32_t m : modes) {
+    for (const auto &sz : sizes) {
+      for (int avail = 3; avail >= 0; --avail) {
+        Frame f;
+        make_frame_data(g, &rng, &f);
+        const uint32_t w = 1u << sz.lw;
+        const uint32_t h = 1u << sz.lh;
+        // Also test clipped above_available < w (e.g. w/2 when w > 1) on half the cases.
+        const uint32_t above = (avail & 1) ? ((avail == 3 && w > 1) ? (w >> 1) : w) : 0;
+        const uint32_t left = (avail & 2) ? h : 0;
+        const uint32_t non_skip = (uint32_t)rng.below(2) << 5;
+        const uint32_t flags = sz.lw | non_skip | (m << 6) | (above << 10) | (left << 16) | (3u << 28);
+        const int bucket = 8 - (int)(sz.lw + sz.lh);
+        const uint32_t pos = 4u | (4u << 16);
+        f.blocks.push_back({pos, flags, 0, 0, 0, bucket, 0, 0});
+        order_records(g, &f);
+
+        std::vector<uint8_t> legacy = f.pixels;
+        run_main(g, f, &legacy, rng.u32(), legacy_api, nullptr);
+        for (WaveLayout layout : {wave_layouts[0], wave_layouts[2]}) {
+          wave_layout = layout;
+          std::vector<uint8_t> actual = f.pixels;
+          const RunResult r = run_wave64(g, f, &actual, rng.u32(), false);
+          plain_barriers += r.plain_barriers;
+          if (actual != legacy || r.memory_races || r.out_of_bounds || r.races_group || r.sync_errors) {
+            printf("intra_check: MISMATCH in wave64 intra_simple %d-bit mode %u (%ux%u, avail %d, lanes %d), "
+                   "races in group memory %ld\n",
+                   8 + 2 * hbd, m, 4u << sz.lw, 4u << sz.lh, avail, layout.lanes, r.memory_races);
+            return false;
+          }
+        }
+      }
+    }
+  }
+  if (plain_barriers) {
+    printf("intra_check: MISMATCH in wave64 intra_simple %d-bit: %ld plain group memory barriers\n",
+           8 + 2 * hbd, plain_barriers);
+    return false;
+  }
+  wave_layout = wave_layouts[0];
+  printf("intra_check: %d-bit wave64 intra_simple matches legacy across all modes, sizes (4x4..64x64), and edges\n",
+         8 + 2 * hbd);
+  return true;
+}
+
+static bool check_wave64_exact_dir(uint64_t seed, int hbd) {
+  Rng rng = {seed + (uint64_t)hbd * 54321};
+  const Geometry g = make_geometry(&rng, hbd, 48);
+  const ShaderApi *legacy = hbd ? &intra_main_prefetch_hbd_api : &intra_main_prefetch_api;
+  for (bool from_above : {false, true}) {
+    for (bool have_primary : {false, true}) {
+      const uint32_t prep[] = {
+          0, 1u << (from_above ? 22 : 23), 2u << (from_above ? 24 : 26),
+      };
+      const int cases = have_primary ? 3 : 2;
+      for (int test = 0; test < cases; ++test) {
+        Frame f;
+        make_frame_data(g, &rng, &f);
+        const uint32_t other = from_above ? 8u << 16 : 8;
+        const uint32_t pos = 8 | (8u << 16);
+        const uint32_t mode = from_above ? 7 : 6;  // D67, D203
+        const uint32_t above = from_above ? (have_primary ? 2 : 0) : 1;
+        const uint32_t left = from_above ? 1 : (have_primary ? 2 : 0);
+        const uint32_t flags = (mode << 6) | (above << 10) | (left << 16) | prep[test] | (3u << 28);
+        f.blocks = {{other, 3 | (14u << 6), 0, 0, 0, 2, 0, 0}, {pos, flags, 0, 0, 0, 8, 0, 1}};
+        order_records(g, &f);
+        auto expected = f.pixels;
+        run_main(g, f, &expected, rng.u32(), legacy, nullptr);
+
+        f.blocks.back().iter = have_primary ? 0 : 1;
+        order_records(g, &f);
+        auto actual = f.pixels;
+        const RunResult r = run_wave64(g, f, &actual, rng.u32(), true);
+        if (actual != expected || r.races_group || r.memory_races || r.sync_errors || r.out_of_bounds) {
+          printf("intra_check: MISMATCH in wave64 exact dir %d-bit shader, "
+                 "from above %d, primary available %d, prep %u, group races %ld, races in group memory %ld\n",
+                 hbd ? 10 : 8, from_above, have_primary, prep[test], r.races_group, r.memory_races);
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
 struct Schedule {
   std::vector<uint32_t> gpu;  // cell map, then region list
   std::vector<uint32_t> regions;
@@ -1235,6 +1410,8 @@ int main(int argc, char **argv) {
 
   if (!check_filter_intra_8bit(seed) || !check_intrabc_10bit(seed) ||
       !check_single_edge(seed, 0) || !check_single_edge(seed, 1) ||
+      !check_wave64_simple(seed, 0) || !check_wave64_simple(seed, 1) ||
+      !check_wave64_exact_dir(seed, 0) || !check_wave64_exact_dir(seed, 1) ||
       !check_wave_reductions(seed, 0) || !check_wave_reductions(seed, 1)) return 1;
 
   int failures = 0;
@@ -1281,6 +1458,8 @@ int main(int argc, char **argv) {
         auto prefetch = f.pixels;
         const RunResult rp = run_main(g, f, &prefetch, rng.state,
                                       hbd ? &intra_main_single_edge_hbd_api : &intra_main_single_edge_api, nullptr);
+        auto wave64 = f.pixels;
+        const RunResult rw = run_wave64(g, f, &wave64, rng.state);
         // The prefetching shader with twice the specification's count of edge samples of the row above
         // (run.sh), which the layouts have to tell from it, inside the frame too.
         auto other_count = f.pixels;
@@ -1319,6 +1498,11 @@ int main(int argc, char **argv) {
           at = first_difference(legacy, prefetch);
         } else if (rp.memory_races || rp.sync_errors || rp.out_of_bounds || rp.plain_barriers) {
           problem = "invalid group memory access or sync in the prefetching shaders";
+        } else if (legacy != wave64) {
+          problem = hbd ? "MISMATCH in the wave64 10-bit shaders" : "MISMATCH in the wave64 8-bit shaders";
+          at = first_difference(legacy, wave64);
+        } else if (rw.memory_races || rw.sync_errors || rw.out_of_bounds || rw.plain_barriers || rw.duplicate_stores) {
+          problem = "invalid group memory access, sync, or duplicate store in the wave64 shaders";
         } else if (rc.memory_races || rc.sync_errors || rc.out_of_bounds || rc.plain_barriers) {
           problem = "invalid group memory access or sync in the shader with twice the edge sample count";
         }

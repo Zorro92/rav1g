@@ -31,7 +31,7 @@ use windows::Win32::Graphics::Direct3D12::{
     ID3D12CommandQueue, ID3D12Device, ID3D12PipelineState, ID3D12RootSignature,
 };
 
-use super::blocks::{IntraMain, WaveColumn, WaveEdges};
+use super::blocks::{IntraMain, StepComplexStore, WaveColumn, WaveEdges};
 use super::memory::Allocator;
 use super::pool::{KINDS, Pools};
 use super::thread::{FramePool, Queue};
@@ -121,9 +121,15 @@ pub struct compute_shader_lib {
     pub shader_intra_main_prefetch_hbd: ComputeShader,
     pub shader_intra_main_single_edge: ComputeShader,
     pub shader_intra_main_single_edge_hbd: ComputeShader,
+    pub shader_intra_simple: ComputeShader,
+    pub shader_intra_simple_hbd: ComputeShader,
+    pub shader_intra_main_wave64: ComputeShader,
+    pub shader_intra_main_wave64_hbd: ComputeShader,
     pub shader_intra_main_prefetch: ComputeShader,
     pub shader_intra_filter_prefetch: ComputeShader,
     pub shader_intra_filter_prefetch_hbd: ComputeShader,
+    pub shader_intra_filter_wave: ComputeShader,
+    pub shader_intra_filter_wave_hbd: ComputeShader,
     pub shader_intra_v2: ComputeShader,
     pub shader_intra_v2_hbd: ComputeShader,
     pub shader_filmgrain_filter: ComputeShader,
@@ -380,6 +386,9 @@ pub struct av1_frame_thread_data {
     /// Intra step timing (`av1_set_intra_step_timing`): the tiles' counts by step, the slot's timestamps
     /// and the steps of its frame when the frame is timed.
     pub step_time: super::step_time::SlotSteps,
+    /// Per-tile complexity bitsets for `IntraMain::Wave64` (bit `it` = step `it` needs the full
+    /// wave64 shader rather than `intra_simple`).
+    pub intra_step_complex: StepComplexStore,
     /// A decoder with pools (`Av1Core::pools`): what each tile of the slot's frame has taken of them.
     /// The vector is sized at the frame's setup and not touched while the tiles of the frame are in
     /// parse; each tile's thread writes the element of its tile, through `tile_pieces`.
@@ -683,6 +692,7 @@ impl Av1Core {
                 (&raw mut (*dec).frame_thread_data[slot].wave).write(no_edges());
                 (&raw mut (*dec).frame_thread_data[slot].perf_inter_tiles).write(Vec::new());
                 (&raw mut (*dec).frame_thread_data[slot].step_time).write(Default::default());
+                (&raw mut (*dec).frame_thread_data[slot].intra_step_complex).write(Default::default());
                 (&raw mut (*dec).frame_thread_data[slot].pieces).write(Vec::new());
                 (&raw mut (*dec).frame_thread_data[slot].index_lists).write(Vec::new());
             }
@@ -691,6 +701,7 @@ impl Av1Core {
                 (&raw mut (*dec).output_thread_data[context].wave).write(no_edges());
                 (&raw mut (*dec).output_thread_data[context].perf_inter_tiles).write(Vec::new());
                 (&raw mut (*dec).output_thread_data[context].step_time).write(Default::default());
+                (&raw mut (*dec).output_thread_data[context].intra_step_complex).write(Default::default());
                 (&raw mut (*dec).output_thread_data[context].pieces).write(Vec::new());
                 (&raw mut (*dec).output_thread_data[context].index_lists).write(Vec::new());
             }

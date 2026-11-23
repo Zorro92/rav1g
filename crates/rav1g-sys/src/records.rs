@@ -226,9 +226,13 @@ pub struct av1_tile_data {
     /// Intra step timing (`av1_set_intra_step_timing`): the tile's counts by step (the host's
     /// `step_time::TileSteps`); null while the switch is off.
     pub perf_steps: *mut c_void,
+    /// Per-step complexity bitset (`blocks::StepComplexStore`, `Vec<u64>`) for `IntraMain::Wave64`:
+    /// bit `it` is set when any main-shader block in step `it` needs the full shader rather than
+    /// `intra_simple`. Null when not using `IntraMain::Wave64`.
+    pub intra_step_complex: *mut c_void,
 }
 const _: () = {
-    assert!(size_of::<av1_tile_data>() == 296);
+    assert!(size_of::<av1_tile_data>() == 304);
     assert!(align_of::<av1_tile_data>() == 8);
     assert!(offset_of!(av1_tile_data, idct_blocks_host) == 0);
     assert!(offset_of!(av1_tile_data, dq_buffer_base) == 8);
@@ -272,6 +276,7 @@ const _: () = {
     assert!(offset_of!(av1_tile_data, frame_data) == 272);
     assert!(offset_of!(av1_tile_data, intra_single_edge) == 280);
     assert!(offset_of!(av1_tile_data, perf_steps) == 288);
+    assert!(offset_of!(av1_tile_data, intra_step_complex) == 296);
 };
 impl Default for av1_tile_data {
     fn default() -> Self {

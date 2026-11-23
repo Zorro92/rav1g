@@ -516,16 +516,26 @@ pub extern "C" fn av1_set_intra_single_edge_legacy(enable: c_int) {
     INTRA_SINGLE_EDGE_LEGACY.store(enable, Ordering::Relaxed);
 }
 
+static INTRA_WAVE64_LEGACY: AtomicI32 = AtomicI32::new(0);
+
+/// `av1_set_intra_wave64_legacy` (`dx/av1_perf.h`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_intra_wave64_legacy(enable: c_int) {
+    INTRA_WAVE64_LEGACY.store(enable, Ordering::Relaxed);
+}
+
 // The parse and the main shader must agree on the edges read by each coded angle.
 pub(super) fn intra_main_for_frame(intra_v2: bool) -> IntraMain {
     if INTRA_OPT.load(Ordering::Relaxed) == 0 {
         IntraMain::Unoptimized
     } else if intra_v2 {
         IntraMain::Legacy
-    } else if INTRA_SINGLE_EDGE_LEGACY.load(Ordering::Relaxed) == 0 {
+    } else if INTRA_SINGLE_EDGE_LEGACY.load(Ordering::Relaxed) != 0 {
+        IntraMain::Tight
+    } else if INTRA_WAVE64_LEGACY.load(Ordering::Relaxed) != 0 {
         IntraMain::SingleEdge
     } else {
-        IntraMain::Tight
+        IntraMain::Wave64
     }
 }
 
@@ -1148,6 +1158,13 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
             let constants = alloc_constants::<IntraData>(&mut td.command_buffer);
             let data = constants.data;
             let intra_main: *const ComputeShader = match td.intra_main {
+                IntraMain::Wave64 => {
+                    if td.is_hbd != 0 {
+                        &raw const (*lib).shader_intra_main_wave64_hbd
+                    } else {
+                        &raw const (*lib).shader_intra_main_wave64
+                    }
+                }
                 IntraMain::SingleEdge => {
                     // Frames without one-edge angles keep the original prefetch shader verbatim.
                     let single_edge = std::slice::from_raw_parts(tiles, tile_count as usize)
@@ -1307,8 +1324,20 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                 // The lists of the wavefront: per iteration nine lists by block size (64x64 down to 4x4 by
                 // area), then the filter intra blocks.
                 let offsets = block_map.add((InterCountsAll + ReconstructBlockSizes) as usize);
+                let wave64 = td.intra_main == IntraMain::Wave64;
+                let wave64_simple: *const ComputeShader = if td.is_hbd != 0 {
+                    &raw const (*lib).shader_intra_simple_hbd
+                } else {
+                    &raw const (*lib).shader_intra_simple
+                };
                 let intra_filter = if td.is_hbd == 0 && INTRA_FILTER_LEGACY.load(Ordering::Relaxed) != 0 {
                     &raw const (*lib).shader_intra_filter_legacy
+                } else if wave64 {
+                    if td.is_hbd != 0 {
+                        &raw const (*lib).shader_intra_filter_wave_hbd
+                    } else {
+                        &raw const (*lib).shader_intra_filter_wave
+                    }
                 } else if td.is_hbd != 0 {
                     &raw const (*lib).shader_intra_filter_prefetch_hbd
                 } else {
@@ -1332,16 +1361,30 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                         srt[size] = *offsets.add(base + size + 1) - *offsets.add(base + size);
                     }
                     let counts8 = *offsets.add(base + 9) - *offsets.add(base + 8);
-                    // Threads of 4x4 samples: 1024 of them in a 64x64 block down to 8 in a 4x8, 4 in a 4x4.
-                    let wi_count = (0..8).map(|size| srt[size] << (10 - size)).sum::<c_int>() + (counts8 << 2);
+                    // Wave64 packs 2 or 4 rows per lane on >16x16 blocks (shifts 8,7,6,6,6,5,4,3,2);
+                    // legacy shaders assign 1 thread per 4x1 row (shifts 10..2).
+                    let wi_count = if wave64 {
+                        (srt[0] << 8)
+                            + (srt[1] << 7)
+                            + ((srt[2] + srt[3] + srt[4]) << 6)
+                            + (srt[5] << 5)
+                            + (srt[6] << 4)
+                            + (srt[7] << 3)
+                            + (counts8 << 2)
+                    } else {
+                        (0..8).map(|size| srt[size] << (10 - size)).sum::<c_int>() + (counts8 << 2)
+                    };
+                    let main_groups = if wave64 { (wi_count + 63) >> 6 } else { (wi_count + 255) >> 8 };
                     srt[8] = wi_count;
                     srt[9] = offset;
                     if wi_count != 0 {
-                        if shader != intra_main {
-                            shader = intra_main;
+                        let step_shader =
+                            if wave64 && !td.intra_step_complex.is_complex(it) { wave64_simple } else { intra_main };
+                        if shader != step_shader {
+                            shader = step_shader;
                             commands.set_pipeline(pipeline(shader));
                         }
-                        let groups = ((wi_count + 255) >> 8) as u32;
+                        let groups = main_groups as u32;
                         if let Some(gpu) = &mut pass.gpu {
                             commands.set_inline_constants(5, &srt[..6], 0);
                             gpu.batch(
@@ -1355,7 +1398,7 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                             commands.dispatch(groups, 1, 1);
                         }
                         td.intra_stats[0] += 1;
-                        td.intra_stats[2] += (wi_count + 255) >> 8;
+                        td.intra_stats[2] += main_groups;
                     }
 
                     let (offset, count) = list_range(offsets, base + IntraSizes as usize);
@@ -1384,7 +1427,7 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON, 
                     td.intra_stats[1] += 1;
                     // Behind the step's barrier: its timestamp, and what it dispatched.
                     let lists = [srt[0], srt[1], srt[2], srt[3], srt[4], srt[5], srt[6], srt[7], counts8, count];
-                    let groups = ((wi_count + 255) >> 8) + count;
+                    let groups = main_groups + count;
                     let dispatches = c_int::from(wi_count != 0) + c_int::from(count != 0);
                     super::step_time::step(dec, it, &lists, groups, dispatches);
                 }

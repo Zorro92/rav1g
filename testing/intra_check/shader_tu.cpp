@@ -43,7 +43,7 @@ static void set_common(const IntraConsts *c) {
 }
 
 static void set_srt(const uint32_t *w) {
-#if SHADER_KIND == 0
+#if SHADER_KIND == 0 || SHADER_KIND == 3
   /* PSSLIntraSRT of prediction.cpp: counts0[8], wi_count, pass_offset. */
   memcpy((void *)&cb_counts0, w, 16);
   memcpy((void *)&cb_counts1, w + 4, 16);
@@ -74,7 +74,9 @@ static void garbage(void *p, size_t size, uint64_t *state) {
 }
 
 static void scramble(uint64_t *state) {
-#if SHADER_KIND == 0 && defined(SHADER_HBD)
+#if SHADER_KIND == 3 && defined(SHADER_SIMPLE)
+  garbage(dc_scratch.bytes(), dc_scratch.byte_size(), state);
+#elif (SHADER_KIND == 0 || SHADER_KIND == 3) && defined(SHADER_HBD)
   garbage(edges.bytes(), edges.byte_size(), state);
 #elif SHADER_KIND == 0
   garbage(above.bytes(), above.byte_size(), state);
@@ -82,6 +84,9 @@ static void scramble(uint64_t *state) {
 #elif SHADER_KIND == 1 && defined(SHADER_HBD)
   garbage(unit_edges.bytes(), unit_edges.byte_size(), state);
   garbage(left_edges.bytes(), left_edges.byte_size(), state);
+#ifdef SHADER_FILTER_WAVE
+  garbage(res_table.bytes(), res_table.byte_size(), state);
+#endif
 #elif defined(SHADER_FILTER_LEGACY)
   garbage(mem.bytes(), mem.byte_size(), state);
   garbage(loc_above.bytes(), loc_above.byte_size(), state);
@@ -90,6 +95,9 @@ static void scramble(uint64_t *state) {
 #elif SHADER_KIND == 1
   garbage(unit_pairs.bytes(), unit_pairs.byte_size(), state);
   garbage(left_edges.bytes(), left_edges.byte_size(), state);
+#ifdef SHADER_FILTER_WAVE
+  garbage(res_table.bytes(), res_table.byte_size(), state);
+#endif
 #else
   garbage(gs_sum_above.bytes(), gs_sum_above.byte_size(), state);
   garbage(gs_sum_left.bytes(), gs_sum_left.byte_size(), state);
@@ -102,6 +110,8 @@ static void scramble(uint64_t *state) {
 static void run(uint32_t group, uint32_t thread) {
 #if SHADER_KIND == 0
   shader_main(uint3(group * 256 + thread, 0, 0)); /* numthreads(256, 1, 1), SV_DispatchThreadID */
+#elif SHADER_KIND == 3
+  shader_main(uint3(group * 64 + thread, 0, 0)); /* numthreads(64, 1, 1), SV_DispatchThreadID */
 #elif defined(SHADER_FILTER_LEGACY)
   /* numthreads(8, 8, 1): SV_DispatchThreadID, SV_GroupID */
   shader_main(uint3(group * 8 + (thread & 7), thread >> 3, 0), uint3(group, 0, 0));
@@ -117,7 +127,7 @@ static void run(uint32_t group, uint32_t thread) {
 
 #if SHADER_KIND == 0
 #define SHADER_THREADS 256
-#elif defined(SHADER_FILTER_LEGACY)
+#elif SHADER_KIND == 3 || defined(SHADER_FILTER_LEGACY)
 #define SHADER_THREADS 64
 #elif SHADER_KIND == 1
 #define SHADER_THREADS 32

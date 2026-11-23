@@ -49,11 +49,17 @@ extern const ShaderApi intra_main_prefetch_double_hbd_api;
 extern const ShaderApi intra_main_prefetch_double_api;
 extern const ShaderApi intra_main_single_edge_api;
 extern const ShaderApi intra_main_single_edge_hbd_api;
+extern const ShaderApi intra_simple_api;
+extern const ShaderApi intra_simple_hbd_api;
+extern const ShaderApi intra_main_wave64_api;
+extern const ShaderApi intra_main_wave64_hbd_api;
 extern const ShaderApi intra_main_legacy_api;
 extern const ShaderApi intra_main_hbd_legacy_api;
 extern const ShaderApi intra_filter_legacy_api;
 extern const ShaderApi intra_filter_prefetch_api;
 extern const ShaderApi intra_filter_prefetch_hbd_api;
+extern const ShaderApi intra_filter_wave_api;
+extern const ShaderApi intra_filter_wave_hbd_api;
 extern const ShaderApi intra_v2_api;
 extern const ShaderApi intra_v2_hbd_api;
 

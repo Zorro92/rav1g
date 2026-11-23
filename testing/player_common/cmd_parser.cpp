@@ -94,6 +94,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"intraod", atSingle, anOptional, "baseline DXC -Od intra_main shaders", "intra-main", &params_.intraod_},
       {"intrafilterlegacy", atSingle, anOptional, "previous 8-bit filter intra shader", "", &params_.intrafilterlegacy_},
       {"intrasingleedgelegacy", atSingle, anOptional, "use the previous directional wavefront with prefetching", "", &params_.intrasingleedgelegacy_},
+      {"intrawave64legacy", atSingle, anOptional, "use the previous 256-thread single-edge intra shaders", "", &params_.intrawave64legacy_},
       {"intralistslegacy", atSingle, anOptional, "count the intra block lists with the previous loops and wavefront edges", "", &params_.intralistslegacy_},
       {"parselistslegacy", atSingle, anOptional, "count the block lists on the tile's parse thread, superblock by superblock", "", &params_.parselistslegacy_},
       {"slots", atInt, anOptional,
@@ -469,6 +470,7 @@ void CParameters::Reset() {
   params_.intraod_ = false;
   params_.intrafilterlegacy_ = false;
   params_.intrasingleedgelegacy_ = false;
+  params_.intrawave64legacy_ = false;
   params_.intralistslegacy_ = false;
   params_.parselistslegacy_ = false;
   // 0: the task has no -slots (Parse() makes the default of it).

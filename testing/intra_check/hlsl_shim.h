@@ -49,6 +49,7 @@ struct int4 {
   int4() : x(0), y(0), z(0), w(0) {}
   int4(int v) : x(v), y(v), z(v), w(v) {}
   int4(int a, int b, int c, int d) : x(a), y(b), z(c), w(d) {}
+  int2 xy() const { return int2(x, y); }
   int3 xyz() const { return int3(x, y, z); }
   int &operator[](int i) { return i == 0 ? x : i == 1 ? y : i == 2 ? z : w; }
   int4 &operator<<=(int s) {
@@ -63,6 +64,7 @@ struct int4 {
 static inline int min(int a, int b) { return a < b ? a : b; }
 static inline int max(int a, int b) { return a > b ? a : b; }
 static inline int clamp(int v, int lo, int hi) { return min(max(v, lo), hi); }
+static inline uint firstbitlow(uint v) { return v ? (uint)__builtin_ctz(v) : 0xffffffffu; }
 
 /* Counts accesses outside the bound buffer. */
 extern long g_out_of_bounds;

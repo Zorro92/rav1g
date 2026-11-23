@@ -329,6 +329,10 @@ void av1_set_intra_opt(int enable);
 /* Use the prefetch shaders with the previous angle-specific wavefront. */
 void av1_set_intra_single_edge_legacy(int enable);
 
+/* Use the previous 256-thread single-edge intra main and register-queue filter intra shaders
+ * instead of the wave64 intra shaders and exact directional reach (-intrawave64legacy). */
+void av1_set_intra_wave64_legacy(int enable);
+
 /* Process-wide. Nonzero counts the intra block lists with the previous loops of
  * av1_mi_push_block and the previous edges of the wavefront, four arrays with the
  * frame's stamp (-intralistslegacy); zero uses intra_block_edges and the packed edges.

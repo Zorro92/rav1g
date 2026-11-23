@@ -1509,7 +1509,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        case: [poisoned, interfast, syncclear, gridcheck, intrasingleedgelegacy, intralistslegacy, parselistslegacy, steptime]
+        case: [poisoned, interfast, syncclear, gridcheck, intrawave64legacy, intrasingleedgelegacy, intralistslegacy, parselistslegacy, steptime]
     steps:
       - name: Disable newline conversion
         run: git config --global core.autocrlf false
