@@ -620,7 +620,6 @@ impl<H: SinkHost> Sink<H> {
     /// A call of the tile's thread between its `tile_begin` and the end of its frame, with what that
     /// `tile_begin` returned: the state is in the frame's place, whose vector of tiles is not written
     /// while tiles of the frame are in parse, and it is this thread's.
-    #[expect(clippy::mut_from_ref, reason = "a tile's state is its thread's, by the contract of ParseSink")]
     #[inline(always)]
     unsafe fn tile_of<'a>(key: usize) -> &'a mut TileState {
         // SAFETY: the caller's contract.

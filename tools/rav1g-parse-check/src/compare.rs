@@ -575,13 +575,13 @@ pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
 /// each other byte for byte without both in one process.
 pub fn fold(hash: &mut u64, arena: &Arena) {
     fn words(hash: &mut u64, bytes: &[u8]) {
-        let mut chunks = bytes.chunks_exact(8);
+        let (chunks, remainder) = bytes.as_chunks::<8>();
         let mut h = *hash ^ bytes.len() as u64;
-        for chunk in &mut chunks {
-            let word = u64::from_le_bytes(chunk.try_into().expect("8 bytes"));
+        for chunk in chunks {
+            let word = u64::from_le_bytes(*chunk);
             h = (h ^ word).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29);
         }
-        for &byte in chunks.remainder() {
+        for &byte in remainder {
             h = (h ^ u64::from(byte)).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29);
         }
         *hash = h;
