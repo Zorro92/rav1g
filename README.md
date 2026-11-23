@@ -267,6 +267,8 @@ memory as possible left to the application.
 - [docs/stage-fusion.md](docs/stage-fusion.md): a design study: Bale's display stage (downscale and
   tone map to the display) done by a pass of rav1g instead of a D3D11 pass on rav1g's 4K output, what
   it would save per 4K60 frame and what it would take.
+- [docs/bale-display-pass.md](docs/bale-display-pass.md): what Bale and its fork would change to use
+  that pass through `Rav1gSettings::display` (interface version 2, a draft), and what it saves.
 - [docs/phase2-rav1d.md](docs/phase2-rav1d.md): the design of phase 2, rav1d's parser in place of the
   C parser, and its progress.
 - [third_party/rav1d/PATCHES.md](third_party/rav1d/PATCHES.md): the copy of rav1d, what was changed

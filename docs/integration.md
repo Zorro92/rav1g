@@ -120,6 +120,103 @@ The parse threads are busy while there is parsing to do: on the 100 Mbps stream 
 adds up to about 4.5 logical CPUs. An application that must leave more CPU free sets `threads` (and with
 it at most as many frames in parse) lower.
 
+## The display pass (interface version 2)
+
+A draft on branch `exp/display-abi2-opus` (2026-11-23), not released. With `Rav1gSettings::display`
+the decoder writes every output image at a display size, downscaled and tone-mapped to BT.709 SDR, the
+work an application's own stage does after the decoder today (Bale's D3D11 stage for 4K AV1 on a 1080p
+display; the design, the costs and what it saves: [stage-fusion.md](stage-fusion.md), what Bale and its
+fork would change: [bale-display-pass.md](bale-display-pass.md)). One compute pass at the end of the
+frame's command list reads the decoded frame from its frame buffer and writes the image; the 4K output
+image is not written at all, and frames without a postfilter stage lose their copy pass. The decoded
+frames and the reference frames are the same bytes with and without it: the per-frame md5 and the Argon
+results are taken from the frames, not from the display image.
+
+**Zero is interface version 1's output.** `rav1g_settings_default` zeroes `display`; with `width` and
+`height` 0 nothing changes. Every other field's 0 is its default too, so an application sets the size and
+leaves the rest:
+
+```c
+Rav1gSettings settings;
+rav1g_settings_default(&settings);
+/* ... size, bit depth, output callbacks ... */
+settings.output_kind = RAV1G_OUTPUT_SEMI_PLANAR;   /* needed */
+settings.display.width = 1920;                     /* the image size */
+settings.display.height = 1080;
+/* optional: settings.display.source_peak_nits = 1000; target_white_nits = 100; depth = 10;
+   assumed_* = the container's code points where the sequence header says "unspecified" */
+```
+
+| Field | Meaning | 0 |
+| --- | --- | --- |
+| `width`, `height` | the size of every image, rounded up to even, at most 16384; any ratio to the frame (exactly half in both is the fast path) | no display pass |
+| `transform` | `RAV1G_DISPLAY_TRANSFORM_AUTO`, or one of the transforms below for every frame whatever its colour says | by each frame's colour |
+| `tone_curve` | `RAV1G_TONE_CURVE_BT2390`; `RAV1G_TONE_CURVE_HABLE` is not in this version (`RAV1G_STATUS_INCAPABLE`) | BT.2390 |
+| `source_peak_nits` | the PQ and HLG light the EETF maps to the SDR range, up to 10000 | 1000 |
+| `target_white_nits` | the SDR white; the EETF ends at 2.03 times it (203 nits for 100) | 100 |
+| `desaturation` | not in this version: 0 (another value is `RAV1G_STATUS_INCAPABLE`) | none |
+| `depth` | 10: P010; 8: NV12 (rounded, not dithered) | by `Rav1gSettings::bit_depth` |
+| `assumed_primaries`, `assumed_transfer_characteristics`, `assumed_matrix_coefficients` | H.273 code points taken where the sequence header says unspecified (2) | none: unspecified is BT.709 SDR |
+| `assumed_chroma_sample_position` | the AV1 `chroma_sample_position` taken where the header says 0 (unknown) | none: unknown is between rows |
+| `reserved` | zero | |
+
+**The transforms** (`RAV1G_DISPLAY_TRANSFORM_*`; the same numbers are `Rav1gFrame::display_transform`):
+
+| Transform | Frames (by their transfer and primaries) | What the pass does |
+| --- | --- | --- |
+| `SCALE` (1) | SDR with BT.709 primaries (or any but BT.2020) | BT.1886 decode (power 2.4), area average, encode; no clip before the encode |
+| `GAMUT` (2) | SDR with BT.2020 primaries | as `SCALE`, BT.2020 to BT.709 (BT.2087), one clip |
+| `PQ` (3) | PQ (transfer 16) | ST 2084 EOTF, the BT.2390 EETF on the largest channel from the source peak to 2.03 x white, BT.2020 to BT.709 when the primaries are BT.2020, one clip |
+| `HLG` (4) | HLG (transfer 18) | inverse OETF and the OOTF of a 1000-nit display (BT.2100), then as `PQ` |
+
+In every case: the chroma at each source pixel by bilinear interpolation at its siting
+(`chroma_sample_position`: colocated, or between rows for vertical and unknown), the matrix of the
+stream (BT.2020, BT.601, else BT.709 weights) and its range; each output pixel the average of the source
+pixels its footprint covers, weighted by their overlap, in display-linear light; the output chroma mixed
+in linear light over three output columns and two rows (left-sited); BT.709 limited-range codes. Film
+grain (AV1 7.18.3) is applied to the frame before it is downscaled. A monochrome frame takes the pass
+too, with neutral chroma, so that every image of a decoder has one size.
+
+**The images.** `Rav1gImageRequest::width` and `height` are the display size, `format` is
+`RAV1G_IMAGE_FORMAT_P010` for depth 10 and `RAV1G_IMAGE_FORMAT_NV12` for depth 8, for every frame.
+The image has to be the texture alone, created with `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS`
+(`D3D11_BIND_UNORDERED_ACCESS` for a shared D3D11 texture): the pass writes it, no copy does. Another
+image (a buffer, a texture shaders may not write) fails the temporal unit with a "DISPLAY" log line,
+as a texture of the wrong size or format does. A device that lets no shader write the format gets no
+decoder: `rav1g_decoder_create` returns `RAV1G_STATUS_INCAPABLE` ("DISPLAY ..." in
+`rav1g_last_error`), and the application keeps its own stage.
+
+**The frames.** With a display pass, `Rav1gFrame::display_transform` says which transform the frame
+took; `width`, `height`, `bit_depth` and `format` describe the image; `monochrome` is false; `color` is
+the image's BT.709 SDR (primaries, transfer and matrix 1, limited range, chroma sample position 1). What
+was decoded is in `source_width`, `source_height` (after super-resolution) and `source_color` (the
+sequence header's code points as the stream has them, not the assumed ones). The HDR metadata stays the
+stream's. Without a display pass `display_transform` is `RAV1G_DISPLAY_TRANSFORM_NONE` (0) and the
+`source_*` fields repeat `width`, `height` and `color`.
+
+**A sequence change** keeps the display size and depth of the decoder: the images keep their size and
+format. A new sequence with another colour description (SDR to PQ, say) changes the transform from its
+first frame on; one with another frame size changes `source_width` and `source_height`; one that needs
+`RAV1G_STATUS_NEEDS_RECONFIGURE` is a new decoder, created with the same `display`. A display mode
+change (another size or depth) is a new decoder too. A frame shown again (`show_existing_frame`) takes the
+pass again into its own image.
+
+**The cost** is on the decoder's queue: one dependent step and the pass a shown frame, 31 MB moved at
+3840x2160 10-bit to 1920x1080 (the frame buffer read, the image written) against ~156 MB of the 4K image
+and a three-draw stage. On the console before this branch the pass took 1.98 ms a 4K SDR frame; this
+branch expects ~0.7-0.9 ms for SDR and ~1.1-1.3 ms for PQ (not measured yet; the basis is in
+[stage-fusion.md](stage-fusion.md#the-display-pass-faster-reads-one-pipeline-a-mode)). The timing run's
+`copy_plane` mark is the pass.
+
+**Exactness.** The image is not bit-exact against an application's own stage, nor across GPUs: float32
+in a compute shader. `testing/display_pass` holds every code against a float32 model of the pass
+(`model.py`) within one code: the shader compiled as C++ on test frames (precheck, CI `sync-check`) and
+the decoder on WARP (CI `rust-output`).
+
+**Not in this version**: the Hable curve, desaturation, the NV12 dither, HDR (PQ) targets, the AV1
+render size (the pass takes the upscaled frame), other primaries than BT.709 and BT.2020 (taken as
+BT.709), and the BT.2020 constant-luminance matrix (taken as NCL).
+
 ## Loading the library at run time: the interface version
 
 `rav1g_abi_version()` returns `RAV1G_ABI_VERSION` of the `rav1g.h` the library was built with. A loader
@@ -130,6 +227,12 @@ library: `rav1g-header --check` (CI) fails when the declarations of the header h
 number has not (`tools/rav1g-header/abi.txt` has the fingerprint of the declarations of each version).
 Version 1 is the interface since package 0.2.202; a library older than that has no `rav1g_abi_version`,
 and a loader that finds no such export refuses it too. `rav1g_version()` is the text for a log.
+Version 2 (the draft of branch `exp/display-abi2-opus`, fingerprint `d754ced4ce571264`) adds the display
+pass: `Rav1gDisplay`, `Rav1gSettings::display` behind `output`, `Rav1gFrame::display_transform`,
+`source_width`, `source_height` and `source_color` behind `format`, the `RAV1G_DISPLAY_TRANSFORM_*` and
+`RAV1G_TONE_CURVE_*` constants ([The display pass](#the-display-pass-interface-version-2)). An application
+of version 1 recompiled against it and filling the settings with `rav1g_settings_default` gets the
+output of version 1.
 
 ## Releases
 

@@ -1,9 +1,11 @@
 # Doing Bale's display stage in rav1g's last pass
 
 A design study (2026-11-23): can rav1g's last pass write the display-size, tone-mapped image that
-Bale's D3D11 stage makes today from rav1g's 4K output, and what would that save? A prototype of the
-pass is in the decoder behind an internal switch (`-displaypass WxH`, below); the interface Bale would
-use is not.
+Bale's D3D11 stage makes today from rav1g's 4K output, and what would that save? The pass is in the
+decoder; branch `exp/display-abi2-opus` gives it its interface (interface version 2,
+`Rav1gSettings::display`, [integration.md](integration.md#the-display-pass-interface-version-2)) in place
+of the prototype's internal switch, and [bale-display-pass.md](bale-display-pass.md) lists what Bale and
+its fork would change.
 
 - [Conclusion](#conclusion)
 - [What Bale's stage computes today](#what-bales-stage-computes-today)
@@ -15,6 +17,7 @@ use is not.
 - [Risks](#risks)
 - [The prototype (`-displaypass`)](#the-prototype--displaypass)
 - [The display pass, fast](#the-display-pass-fast)
+- [The display pass, faster: reads, one pipeline a mode](#the-display-pass-faster-reads-one-pipeline-a-mode)
 - [The ABI it needs](#the-abi-it-needs)
 
 ## Conclusion
@@ -40,9 +43,10 @@ use is not.
   projects and keeps Bale's stage for HEVC as well.
 - **The rest needs an ABI change of rav1g** (the display size, the tone-map parameters and the
   meaning of the output image are new settings; [the ABI it needs](#the-abi-it-needs)). Measuring it
-  needs none: **the prototype** (option B) runs in the test player and rav1g-dec behind an internal
-  switch (`av1_set_display_pass`, `-displaypass 1920x1080`), so the console can say what the pass costs
-  on rav1g's queue before anything is decided. Its math is written in rav1g from the standards, in
+  needed none: **the prototype** (option B) ran in the test player and rav1g-dec behind an internal
+  switch (`av1_set_display_pass`, `-displaypass 1920x1080`), so the console could say what the pass
+  costs on rav1g's queue before anything is decided. Branch `exp/display-abi2-opus` has the change: interface
+  version 2, `Rav1gSettings::display`, which `-displaypass` now fills. Its math is written in rav1g from the standards, in
   the order of Bale's stage, not copied (Bale is AGPL-3.0, rav1g BSD-2-Clause); where the one
   implementation should live is the owner's decision.
 - **It also removes the copy pass and the image hold.** A frame without a postfilter (38% of the HDR
@@ -232,11 +236,13 @@ sequence does. Internal A/B switches stay out of the ABI (`av1_*` in `av1_perf.h
 
 ## The prototype (`-displaypass`)
 
-Option B behind an internal switch: `av1_set_display_pass(width, height)` (`libav1/dx/av1_perf.h`),
-`-displaypass WxH` in the test player and in rav1g-dec. No ABI change: with the switch off nothing
-changes, and with it on a decoder with the semi-planar output kind asks for images of WxH for its
-frames with chroma: P010 for 10-bit frames, NV12 for 8-bit ones. How the pass was made fast after the
-first console measurement: [The display pass, fast](#the-display-pass-fast).
+Option B, first behind an internal switch (`av1_set_display_pass`, removed on `exp/display-abi2-opus`):
+now `Rav1gSettings::display` (interface version 2), which `-displaypass WxH` of the test player and of
+rav1g-dec fills. A decoder with it asks for images of WxH for every frame, P010 or NV12 by its depth
+setting. How the pass was made fast after the first console measurement: [The display pass,
+fast](#the-display-pass-fast) and [faster](#the-display-pass-faster-reads-one-pipeline-a-mode). What
+this section says of the prototype's limits is partly superseded there: monochrome frames take the pass,
+the colour tags assumed for "unspecified" are settings, and `Rav1gFrame::color` describes the image.
 
 - **The pass** (`libav1/dx/shaders/display_pass.hlsl`, called from `copy_semi_planar` in `output.rs`):
   one dispatch at the end of the frame's command list in place of the output copy, a 256-thread group
@@ -334,7 +340,73 @@ output image: in the frame's command list for a shown frame, in an output contex
 show-existing copies have their own line in the timing run (`GPUTIME show-existing copies`), so their
 pass is not in the per-frame `copy_plane` mean.
 
+## The display pass, faster: reads, one pipeline a mode
+
+Console, idle state, SDR 10-bit 4K60, `-output p010 -displaypass 1920x1080` (the parent's run of
+5c12ba1): 1.98 ms a 4K frame for the pass (3.48 before the tables, 1.10 for the plain copy it replaces);
+rav1g's GPU busy 8.88 to 10.67 ms a frame at 40 Mbps, 9.09 to 10.65 at 60 Mbps; show-existing copies
+1.12 to 2.19 ms. The estimate of 0.9-1.1 ms above counted arithmetic; SDR has less of it than PQ (a
+`pow` pair a channel, no tables), so the time went elsewhere.
+
+**Why: the reads waited one by one.** The RDNA2 listing of 5c12ba1 (`testing/shader_regs`' tools: DXC
+to SPIR-V, LLPC for gfx1030 in wave64, the nearest public compiler to the console's) has every read of
+the quad path as `buffer_load_dword` followed at once by `s_waitcnt vmcnt(0)`, each in a basic block of
+its own: `sample_at` and `pair_at` branched on the frame's sample size (`eight_bit()`) around every
+load, and a quad read 36 values (four rows of luma, and for each row two chroma rows of U and V at
+three columns, the same rows again and again). So a quad waited for 36 memory round trips in a row,
+which 8 waves a SIMD do not hide: with ~600-1000 cycles a round trip on a shared GPU that is far more
+than the quad's ~2400 cycles of arithmetic a wave.
+
+**What changed** (`display_pass.hlsl`):
+
+- **No branch around a read.** The sample size is a shift and a mask (`load_run`, `run_sample`): an 8-byte
+  read at the dword below the sample and a field of it, the same code at 8 and 16 bits.
+- **A quad reads 16 times 8 bytes, a step 8, issued together.** A quad is two steps of two source rows.
+  A step reads its two luma rows (8 bytes: four samples at 16 bits) and three chroma rows of U and of V
+  (8 bytes each: the three columns c, c + 1, c + 2, the third reaching at most two samples into the 16
+  samples of right border every frame buffer row has), then computes. The chroma rows of a step are
+  those its two rows interpolate between, from o.y - 1 + p (between rows) or o.y + p (colocated): the
+  same values as before, exact in float32. LLPC issues a step's reads in one group (two waits a step).
+- **The edge column** (the output column left of the 64x64 tile) is 32 quads of the first 32 threads
+  through the same code (their right column), not 64 area evaluations through the general loop; one call
+  site for both (a loop from step -1).
+- **One pipeline a transfer mode** (`display_pass.hlsl` PQ, `display_pass_sdr.hlsl`,
+  `display_pass_hlg.hlsl`: a define and an include): a shader's registers are those of its most
+  demanding path, and with the mode a constant the quad's code has no branch either. RDNA2/LLPC, VGPRs
+  and waves a SIMD: SDR 63 (8 waves, LDS 9 KB: no tables), HLG 65 (6), PQ 112 (4; the 2:1 path alone 96,
+  the PQ table reads of a step are hoisted together). All three in one shader: 114 (4 waves for every
+  mode). The C++ check compiles the file with `DISPLAY_MODE_FROM_FLAGS`, every mode in one.
+- **The output depth is its own flag** (bit 7): NV12 or P010 whatever the frame's depth
+  (`Rav1gDisplay::depth`); the gamut flag (bit 2) follows the primaries, not the matrix (a PQ stream with
+  BT.709 primaries takes no gamut step); BT.601 matrices have their weights.
+
+**Expected on the console** (not measured here; the parent runs the A/B). From the RDNA2 listing of
+`display_pass_sdr`: a 16-bit step is 311 VALU instructions (48 of them `v_log`/`v_exp`), so a quad 622,
+and the encode of its four luma values and its chroma sample, the stores and the loop about 200 more:
+~820 a quad, 111 transcendental. At one cycle a lane for an instruction and four for a transcendental,
+~1150 lane cycles a quad; 518400 quads at 1920x1080 and 3% for the edge column: 0.62 G lane cycles, **0.66
+ms** with the slice's ALUs busy (1.86 TFLOP/s is 0.93 T lane operations a second). The traffic, 24.9 MB
+read and 6.2 MB written, takes **~0.69 ms** at the plain copy's measured rate (49.8 MB in 1.10 ms, 45
+GB/s). With 8 waves a SIMD and two waits a step the two overlap: **~0.7-0.9 ms a 4K SDR frame** (from
+1.98), so rav1g's GPU busy ~9.6 ms a frame at 40 Mbps (from 10.67; 8.88 without the pass), and the
+show-existing copies ~1.0 ms (from 2.19; the pass runs for each). PQ: a step 669 VALU (40
+transcendental, 32 table reads in group memory), ~1.05 ms of arithmetic at 4 waves a SIMD: **~1.1-1.3
+ms**; HLG a step 621 (48), ~1.1-1.3 ms at 6 waves. The console's compiler is not LLPC: the numbers are the basis,
+the console's A/B is the measurement.
+
+**Checked**: `testing/display_pass/run.sh --mutate`: 23 cases (17 before, and an 8-bit frame into P010, a
+10-bit one into NV12, BT.601, PQ with BT.709 primaries, colocated SDR, colocated 8-bit HLG) within one
+code of the model (most within zero), and 12 mutations rejected (among them the chroma rows of the second
+step, the right chroma edge, the edge column, the 8-bit chroma pair and the output depth).
+
 ## The ABI it needs
+
+What follows is the first sketch; the draft of `exp/display-abi2-opus` is in `rav1g.h` (interface version 2,
+fingerprint `d754ced4ce571264`) and [integration.md](integration.md#the-display-pass-interface-version-2).
+It differs from the sketch in: `transform` is `RAV1G_DISPLAY_TRANSFORM_AUTO` or a transform forced for
+every frame; `Rav1gFrame::display_transform` says which one a frame took (in place of a boolean); the
+tone curve's 0 is BT.2390 and Hable is refused; `depth` 0 follows the decoder's bit depth; NV12 is
+rounded, not dithered.
 
 For Bale to use it (`RAV1G_ABI_VERSION` 1 to 2, `tools/rav1g-header/abi.txt`, `docs/integration.md`):
 
