@@ -302,13 +302,15 @@ impl OutputPool {
     fn reader(&self) -> Result<Reader, String> {
         // SAFETY: plain creations on a live device; every result is checked.
         unsafe {
+            // The lists run on the decoder's queue: of its type (direct, or compute with -computequeue).
+            let kind = self.queue.GetDesc().Type;
             let allocator: ID3D12CommandAllocator = self
                 .device
-                .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
+                .CreateCommandAllocator(kind)
                 .map_err(|error| failed("command allocator of the readback", &error))?;
             let list: ID3D12GraphicsCommandList = self
                 .device
-                .CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocator, None)
+                .CreateCommandList(0, kind, &allocator, None)
                 .map_err(|error| failed("command list of the readback", &error))?;
             list.Close().map_err(|error| failed("command list of the readback", &error))?;
             let fence: ID3D12Fence = self

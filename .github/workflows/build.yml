@@ -1509,7 +1509,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        case: [poisoned, interfast, syncclear, gridcheck, intrasingleedgelegacy, intralistslegacy, parselistslegacy, steptime]
+        case: [poisoned, interfast, syncclear, gridcheck, intrasingleedgelegacy, intralistslegacy, parselistslegacy, computequeue, steptime]
     steps:
       - name: Disable newline conversion
         run: git config --global core.autocrlf false
@@ -1619,8 +1619,10 @@ jobs:
           if ($lines.Count -lt 200 -or $frames -lt 500) { $failed += "only $($lines.Count) GRIDCHECK lines and $frames frames checked" }
           if ($failed.Count) { throw "the grid built by the GPU: $($failed -join '; ')" }
 
+      # computequeue: the decoder's queue is a compute queue (rav1g-dec makes it; av1_set_compute_queue in an
+      # application that gives no queue): the same frames, and the lists and barriers valid on that queue type.
       - name: Conformance with a legacy intra or parser switch
-        if: ${{ !cancelled() && (startsWith(matrix.case, 'intra') || matrix.case == 'parselistslegacy') }}
+        if: ${{ !cancelled() && (startsWith(matrix.case, 'intra') || matrix.case == 'parselistslegacy' || matrix.case == 'computequeue') }}
         shell: pwsh
         env:
           INTRA_SWITCH: ${{ matrix.case }}

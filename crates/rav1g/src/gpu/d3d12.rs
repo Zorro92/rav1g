@@ -162,9 +162,10 @@ impl<'a> Device<'a> {
             MemoryKind::DeviceUpload => {
                 (D3D12_HEAP_TYPE_UPLOAD, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_CPU_PAGE_PROPERTY_UNKNOWN)
             }
-            MemoryKind::HostRw => {
-                (D3D12_HEAP_TYPE_CUSTOM, D3D12_RESOURCE_STATE_GENERIC_READ, D3D12_CPU_PAGE_PROPERTY_WRITE_BACK)
-            }
+            // The read state of BufferState::Read (READ_STATE), which a compute list may transition from:
+            // a custom heap allows any initial state. Upload heap buffers stay GENERIC_READ, the one state
+            // they may have, and are never transitioned.
+            MemoryKind::HostRw => (D3D12_HEAP_TYPE_CUSTOM, READ_STATE, D3D12_CPU_PAGE_PROPERTY_WRITE_BACK),
             MemoryKind::ReadBack => {
                 (D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_CPU_PAGE_PROPERTY_UNKNOWN)
             }
@@ -397,27 +398,21 @@ impl<'a> Device<'a> {
         // SAFETY: plain calls on live interfaces; the barriers borrow the destination buffers, which
         // outlive the call, without taking a reference.
         unsafe {
+            let kind = list_type_of(queue.queue);
             let allocator = self
                 .device
-                .CreateCommandAllocator::<ID3D12CommandAllocator>(D3D12_COMMAND_LIST_TYPE_DIRECT)
+                .CreateCommandAllocator::<ID3D12CommandAllocator>(kind)
                 .map_err(failed("CreateCommandAllocator"))?;
             let list = self
                 .device
-                .CreateCommandList::<_, _, ID3D12GraphicsCommandList>(
-                    0,
-                    D3D12_COMMAND_LIST_TYPE_DIRECT,
-                    &allocator,
-                    None,
-                )
+                .CreateCommandList::<_, _, ID3D12GraphicsCommandList>(0, kind, &allocator, None)
                 .map_err(failed("CreateCommandList"))?;
             for (upload, resource) in uploads.iter().zip(&staging) {
                 list.CopyResource(upload.dst.resource, resource);
             }
             let barriers: Vec<D3D12_RESOURCE_BARRIER> = uploads
                 .iter()
-                .map(|upload| {
-                    transition(upload.dst.resource, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_GENERIC_READ)
-                })
+                .map(|upload| transition(upload.dst.resource, D3D12_RESOURCE_STATE_COPY_DEST, READ_STATE))
                 .collect();
             list.ResourceBarrier(&barriers);
             let _ = list.Close();
@@ -516,7 +511,20 @@ impl OwnedDevice {
     }
 }
 
-/// The queue the blocking copies of [`Device::upload`] run on: the direct queue of the decoder.
+/// Whether a decoder that is given no queue makes a compute queue instead of a direct one (`av1_set_compute_queue`,
+/// `-computequeue`; read when the queue is created). A compute queue runs on the console's asynchronous compute
+/// engines, next to the graphics work of the application (tone map, scaling, present) instead of behind it on
+/// the one direct queue: the decoder records only compute dispatches, copies and barriers between the states
+/// compute lists may use.
+pub static COMPUTE_QUEUE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The type of the command lists that run on `queue`.
+pub fn list_type_of(queue: &ID3D12CommandQueue) -> D3D12_COMMAND_LIST_TYPE {
+    // SAFETY: a plain call on a live queue.
+    unsafe { queue.GetDesc().Type }
+}
+
+/// The queue the blocking copies of [`Device::upload`] run on: the queue of the decoder.
 #[derive(Clone, Copy)]
 pub struct Queue<'a> {
     queue: &'a ID3D12CommandQueue,
@@ -789,11 +797,21 @@ unsafe fn write_barrier(buffer: BufferRef<'_>) -> D3D12_RESOURCE_BARRIER {
     }
 }
 
+/// The read state of a buffer the shaders read: constant buffer, shader resource of a compute shader, indirect
+/// argument and copy source. `GENERIC_READ` adds the pixel shader and index buffer states, which a compute
+/// list may not transition to; this set is valid on a direct and on a compute queue.
+const READ_STATE: D3D12_RESOURCE_STATES = D3D12_RESOURCE_STATES(
+    D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER.0
+        | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE.0
+        | D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT.0
+        | D3D12_RESOURCE_STATE_COPY_SOURCE.0,
+);
+
 fn resource_state(state: super::BufferState) -> D3D12_RESOURCE_STATES {
     match state {
         super::BufferState::ReadWrite => D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
         super::BufferState::CopySource => D3D12_RESOURCE_STATE_COPY_SOURCE,
-        super::BufferState::Read => D3D12_RESOURCE_STATE_GENERIC_READ,
+        super::BufferState::Read => READ_STATE,
     }
 }
 
@@ -1075,10 +1093,15 @@ impl OwnedDevice {
 }
 
 impl Device<'_> {
-    /// A direct queue: the queue of a decoder that is given none.
+    /// The queue of a decoder that is given none: a direct queue, or a compute queue with
+    /// [`COMPUTE_QUEUE`] (`av1_set_compute_queue`, `-computequeue`).
     pub fn create_queue(&self) -> Result<CommandQueue, Error> {
         let desc = D3D12_COMMAND_QUEUE_DESC {
-            Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
+            Type: if COMPUTE_QUEUE.load(std::sync::atomic::Ordering::Relaxed) {
+                D3D12_COMMAND_LIST_TYPE_COMPUTE
+            } else {
+                D3D12_COMMAND_LIST_TYPE_DIRECT
+            },
             Flags: D3D12_COMMAND_QUEUE_FLAG_NONE,
             ..Default::default()
         };
@@ -1087,11 +1110,11 @@ impl Device<'_> {
         Ok(CommandQueue { queue: queue.map_err(failed("CreateCommandQueue"))? })
     }
 
-    /// The memory of the commands of one frame in flight.
-    pub fn create_command_allocator(&self) -> Result<CommandAllocator, Error> {
+    /// The memory of the commands of one frame in flight, for lists of `kind` (that of the queue they run
+    /// on, [`list_type_of`]).
+    pub fn create_command_allocator(&self, kind: D3D12_COMMAND_LIST_TYPE) -> Result<CommandAllocator, Error> {
         // SAFETY: a plain call on a live device.
-        let allocator =
-            unsafe { self.device.CreateCommandAllocator::<ID3D12CommandAllocator>(D3D12_COMMAND_LIST_TYPE_DIRECT) };
+        let allocator = unsafe { self.device.CreateCommandAllocator::<ID3D12CommandAllocator>(kind) };
         Ok(CommandAllocator { allocator: allocator.map_err(failed("CreateCommandAllocator"))? })
     }
 
@@ -1103,16 +1126,15 @@ impl Device<'_> {
         Ok(Fence { fence: fence.map_err(failed("CreateFence"))? })
     }
 
-    /// The command list of the decoder, open on `allocator`.
-    pub fn create_command_list(&self, allocator: &CommandAllocator) -> Result<CommandList, Error> {
+    /// The command list of the decoder, open on `allocator`, of `kind` (that of the allocator).
+    pub fn create_command_list(
+        &self,
+        allocator: &CommandAllocator,
+        kind: D3D12_COMMAND_LIST_TYPE,
+    ) -> Result<CommandList, Error> {
         // SAFETY: a plain call on a live device with a live allocator.
         let list = unsafe {
-            self.device.CreateCommandList::<_, _, ID3D12GraphicsCommandList>(
-                0,
-                D3D12_COMMAND_LIST_TYPE_DIRECT,
-                &allocator.allocator,
-                None,
-            )
+            self.device.CreateCommandList::<_, _, ID3D12GraphicsCommandList>(0, kind, &allocator.allocator, None)
         };
         Ok(CommandList { list: list.map_err(failed("CreateCommandList"))? })
     }

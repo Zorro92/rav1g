@@ -188,8 +188,10 @@ pub fn create(globals: &Globals) -> Option<Device> {
                 "not reported"
             }
         );
+        // -computequeue: the decoder's work on a compute queue (av1_set_compute_queue does the same for a
+        // device that rav1g_device_create gives no queue).
         let queue_desc = D3D12_COMMAND_QUEUE_DESC {
-            Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
+            Type: if globals.compute_queue { D3D12_COMMAND_LIST_TYPE_COMPUTE } else { D3D12_COMMAND_LIST_TYPE_DIRECT },
             Flags: D3D12_COMMAND_QUEUE_FLAG_NONE,
             ..Default::default()
         };

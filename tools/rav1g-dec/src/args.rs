@@ -214,6 +214,8 @@ pub struct Globals {
     pub gpu_validation: bool,
     /// -sm6test
     pub sm6test: bool,
+    /// -computequeue
+    pub compute_queue: bool,
     /// -capi
     pub capi: bool,
     /// -keep_going
@@ -371,6 +373,7 @@ pub fn usage() {
     say!("                        a number that is the same on every platform; -t sets its threads. Needs no device");
     say!("  -capi                 use the decoder through its interface for C, the functions of rav1g.h, instead of");
     say!("                        the Rust interface: what an application that is not Rust links (same output)");
+    say!("  -computequeue         the decoder's queue is a compute queue instead of a direct one");
     say!(
         "  -sm6test              run the Shader Model 6 test shaders on the device before the tasks, one 'SM6TEST ...'"
     );
@@ -530,6 +533,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
                         globals.gpu_validation = true;
                     }
                     "-sm6test" => globals.sm6test = true,
+                    "-computequeue" => globals.compute_queue = true,
                     "-capi" => globals.capi = true,
                     "-keep_going" => globals.keep_going = true,
                     "-memstate" => globals.memstate = true,
