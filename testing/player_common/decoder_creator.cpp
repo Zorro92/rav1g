@@ -181,10 +181,16 @@ int Decoders::DecodeLoop() {
   bool has_tasks = false;
   bool has_shader_pick = false;
   std::string shader_pick;
+  // -computequeue: the same kind of flag (the device and its queue are made once, below): the decoder's
+  // queue is a compute queue instead of a direct one (docs/test-player.md, "Compute queue").
+  bool compute_queue = false;
   for (std::vector<one_task>::iterator task = arg_lists.begin(); task != arg_lists.end(); task++) {
     for (std::vector<std::string>::iterator arg = task->begin(); arg != task->end();) {
       if (*arg == "-sm6test") {
         sm6test = true;
+        arg = task->erase(arg);
+      } else if (*arg == "-computequeue") {
+        compute_queue = true;
         arg = task->erase(arg);
       } else if (*arg == "-shaderpick") {
         arg = task->erase(arg);
@@ -229,6 +235,8 @@ int Decoders::DecodeLoop() {
   AV1Decoder::LogMemory(dx_resources_.dx12_device.Get(), "before the pipeline states");
   // The decoder's device: the player's D3D12 device with the pipeline states of the decoder. The player
   // has no queue for it (PlayerWindow::Run): the decoder makes its own.
+  av1_set_compute_queue(compute_queue ? 1 : 0);
+  XB_LOGI << "Queue of the decoder: " << (compute_queue ? "compute (-computequeue)" : "direct (the default)");
   dx_resources_.decoder_device = rav1g_device_create(dx_resources_.dx12_device.Get(),
                                                      dx_resources_.dx12_command_queue.Get(), CREATE_SHADERS_THREAD_CNT);
   if (!dx_resources_.decoder_device) {

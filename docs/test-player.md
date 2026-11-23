@@ -3329,6 +3329,24 @@ the last column of the last mode info unit, which is where the specification cla
 the visible width. The check covers the shader, which was right; the bug was in the host
 code that the conformance run covers. It runs as the `superres-check` job of the workflow.
 
+## Compute queue (`-computequeue`)
+
+`-computequeue` makes the decoder's D3D12 queue a compute queue (`D3D12_COMMAND_LIST_TYPE_COMPUTE`)
+instead of a direct one. Like `-sm6test` and `-shaderpick` it holds for the whole launch, whatever task
+line it stands on: the device and its queue are created once, before the first task (`av1_set_compute_queue`
+in `libav1/dx/av1_perf.h`; the log says "Queue of the decoder: compute (-computequeue)"). rav1g-dec takes the
+same flag and makes its own queue a compute queue. The frames are the same (CI case `computequeue`).
+
+Why: in an application the decoder's work and the application's graphics work (Bale's tone map, scaling
+and present on D3D11) otherwise share the one graphics queue, and on the console only GPU engine 0 is busy.
+On a compute queue the decoder's dispatches can run on the asynchronous compute engines next to that work.
+Whether the console overlaps them within an app's GPU slice is measured, not assumed: the A/B is a paced
+4K60 run with and without the flag here, and in Bale the rate, missed frames and image release waits.
+
+The decoder records only compute dispatches, copies and barriers; the read state of its buffers is the
+constant buffer, compute shader resource, indirect argument and copy source states, which both queue types
+take (`GENERIC_READ` adds pixel shader and index buffer states, which a compute list may not use).
+
 ## Semi-planar output and D3D11 interop (`-output`, `-interop`)
 
 The decoder can write a frame into one NV12 or P010 texture in place of a buffer and three plane

@@ -345,6 +345,12 @@ void av1_set_intra_lists_legacy(int enable);
  * Set before the decoder's first decode call. A running parser keeps its selection. */
 void av1_set_parse_lists_legacy(int enable);
 
+/* Process-wide. Nonzero: a device or decoder that is given no D3D12 queue makes a compute
+ * queue (D3D12_COMMAND_LIST_TYPE_COMPUTE) instead of a direct one (-computequeue), so that
+ * the decoder's work can run on the asynchronous compute engines next to the application's
+ * graphics work. The frames are the same. Set before rav1g_device_create. */
+void av1_set_compute_queue(int enable);
+
 /* ---------------------------------------------------------------------------
  * Intra step timing (test flags -intrasteptime and -intrastepmin; docs/test-player.md, "Intra step
  * timing"). Nothing here changes what is decoded.

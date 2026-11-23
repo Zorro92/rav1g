@@ -22,7 +22,7 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use windows::Win32::Foundation::E_POINTER;
-use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12Device};
+use windows::Win32::Graphics::Direct3D12::{D3D12_COMMAND_LIST_TYPE, ID3D12CommandQueue, ID3D12Device};
 use windows::core::Interface;
 
 use super::completion::av1_drain_gpu_decoder;
@@ -1196,17 +1196,25 @@ unsafe fn create_device(dec: &mut Av1Core) -> Result<(), gpu::Error> {
     Ok(())
 }
 
+/// `-computequeue` (`dx/av1_perf.h`): a decoder that is given no queue makes a compute queue, and so does a
+/// device that `rav1g_device_create` gives no queue; set before the device is created.
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_compute_queue(enable: c_int) {
+    gpu::d3d12::COMPUTE_QUEUE.store(enable != 0, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// The command allocator, the fence and the event of a slot or of an output context.
 ///
 /// # Safety
 /// `td` is a slot of the decoder that is being created; its fields are empty.
 unsafe fn create_command_buffer(
     device: Device<'_>,
+    kind: D3D12_COMMAND_LIST_TYPE,
     td: &mut av1_frame_thread_data,
     what: [&'static str; 3],
 ) -> Result<(), (&'static str, i32)> {
     let cb = &mut td.command_buffer;
-    let allocator = device.create_command_allocator().map_err(|error| (what[0], error.code))?;
+    let allocator = device.create_command_allocator(kind).map_err(|error| (what[0], error.code))?;
     // SAFETY: an empty field (the caller's contract).
     unsafe { com_store(&raw mut cb.allocator, allocator.into_raw()) };
     cb.fence_value = 0;
@@ -1520,10 +1528,14 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
 
         (*dec).tryhdr10x3 = cfg.tryHDR10x3;
 
+        // The lists are of the type of the decoder's queue (direct, or compute with -computequeue).
+        let list_kind = gpu::d3d12::list_type_of(
+            com_ref::<_, ID3D12CommandQueue>(&(*dec).compute.queue).expect("the decoder has its queue"),
+        );
         for i in 0..frame_slots {
             let td = &mut (*dec).frame_thread_data[i];
             let what = ["command allocator of a slot", "fence of a slot", "event of a slot"];
-            if let Err((step, hr)) = create_command_buffer(Device::new(&device), td, what) {
+            if let Err((step, hr)) = create_command_buffer(Device::new(&device), list_kind, td, what) {
                 return create_failed(dec, &rcfg, Some(&vm_before), step, hr);
             }
             (*dec).frame_data_pool.push(std::ptr::from_mut(td));
@@ -1532,7 +1544,7 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
             let td = &mut (*dec).output_thread_data[i];
             let what =
                 ["command allocator of an output context", "fence of an output context", "event of an output context"];
-            if let Err((step, hr)) = create_command_buffer(Device::new(&device), td, what) {
+            if let Err((step, hr)) = create_command_buffer(Device::new(&device), list_kind, td, what) {
                 return create_failed(dec, &rcfg, Some(&vm_before), step, hr);
             }
             (*dec).output_data_pool.push(std::ptr::from_mut(td));
@@ -1542,7 +1554,7 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
         // frame is recorded.
         let allocator = wrapped_ref::<_, CommandAllocator>(&(*dec).frame_thread_data[0].command_buffer.allocator);
         let allocator = allocator.expect("the first slot has its allocator");
-        let list = match Device::new(&device).create_command_list(allocator) {
+        let list = match Device::new(&device).create_command_list(allocator, list_kind) {
             Ok(list) => list,
             Err(error) => return create_failed(dec, &rcfg, Some(&vm_before), "command list", error.code),
         };
