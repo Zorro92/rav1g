@@ -3592,3 +3592,51 @@ parse, `-listslegacy` against the default of the same build:
 - Checked: `rav1g-parse-check` holds the default (4 threads, 1 and 2 frames in parse) against the
   reference with one thread, whose lists are counted superblock by superblock: equal on the 244 public
   streams and on five local 4K and 1080p clips.
+
+### rav1d's parse against dav1d's, instruction by instruction (2026-11-23)
+
+The one-tile 4K streams of the 40 Mbps bar are bound by the serial entropy decode of a frame (7.20),
+so CPU time per frame on that thread is frame rate in the player. Measured on a laptop CPU shared with
+other jobs (wall times and cycles moved by 10 to 20 % between identical runs), so the gate here is the
+instruction count, which is the same from run to run, and cycles only as the minimum of several runs.
+The console has to confirm the time.
+
+**Where rav1d differs from dav1d.** `perf record -e instructions:u` of `rav1g-parse-check -time -runs 1`
+and of dav1d 1.5.1 (`--threads 1 --framedelay 1`) on jf4k40m, the samples of each function divided by
+those of the msac assembly (the same code in both, so the same instructions for the same stream):
+outside the assembly rav1d's parse ran about 1.4 times dav1d's instructions. `decode_coefs` itself is
+close (1.07); the excess is in `decode_b` (1.5: context updates), the loops that call `decode_coefs`
+(`rav1d_read_coef_blocks`, `read_coef_tree`), `decode_sb` and refmvs (1.14). The msac assembly is
+about a third of the parse and is not touched.
+
+**Changes** (none changes what is read; the parse digest is identical before and after on 335 local
+IVF and MKV streams, 53,617 frames):
+
+- `CaseSet` (`ctx.rs`) matched the length of a context update again for each of the 13 to 15 arrays
+  of a block side; it matches once now and the closures are inlined with the length as a constant,
+  as dav1d's `case_set` does. A side is one shared bounds check and one store per array.
+- `get_skip_ctx` is inlined into `decode_coefs` (it was a call per transform block); the checks that
+  a dequantised coefficient is below `cf_max` are debug asserts as in dav1d (the largest dequantiser
+  of each bit depth times 14 is below it); dav1d's bubble sort of the motion vector candidates
+  instead of a call of the standard library's sort (both stable, same order).
+- In the loop of the 2D tokens the lo context offset and the hi context come from one table entry
+  per scan position (`LO_CTX_BY_RC`, 19 KB) instead of two shifts, a mask and a 2D lookup: fewer
+  values live across the calls of the assembly in a loop that spills about ten of them.
+- `rav1g-parse-check -time` clears only what the D3D12 host clears for a frame (the arena's full
+  clear was 8 % of a profile of the run, outside the time measured) and takes `-runs <n>`.
+
+**Result**, `rav1g-parse-check -time -runs 1 -threads 1 -frames 1`, the parse alone plus the parse
+with the sink, before (the tool's change only) and after:
+
+| Stream | Instructions | Cycles, minimum of the runs (before 5-6, after 3) | Parse alone, best ms/frame | Sink, ms/frame |
+| --- | --- | --- | --- | --- |
+| jf4k40m | 464.8 G → 453.8 G (-2.4 %) | 227.2 G → 222.4 G (-2.1 %) | 20.0 → 19.8 (with the first commits) | 2.3 to 5.5 in either build |
+| jf4k60m | 573.2 G → 560.2 G (-2.3 %) | 282.8 G → 283.3 G | 25.1 → 26.5 | 1.5 to 7.0 in either build |
+
+The sink's code did not change; its time (the run with the sink less the run without) moved by
+more than a millisecond between identical runs and is not resolved here. On this machine the cycles
+follow the instructions on jf4k40m and show nothing on jf4k60m: the gain is at most about 2 % of the
+parse here, and the console (slower memory in the idle state, the same code) has to measure it.
+
+What is left: the token loops spill about ten values across each call of the assembly (callee-saved
+registers are six), and the context and record updates of a block are still about twice dav1d's.
