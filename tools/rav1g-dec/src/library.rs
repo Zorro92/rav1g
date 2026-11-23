@@ -36,6 +36,9 @@ unsafe extern "C" {
     fn av1_set_intra_run(max_lanes: c_int);
     fn av1_set_intra_lists_legacy(enable: c_int);
     fn av1_set_parse_lists_legacy(enable: c_int);
+    fn av1_set_cdef_v3_legacy(enable: c_int);
+    fn av1_set_output_copy_legacy(enable: c_int);
+    fn av1_set_residual_clear_legacy(enable: c_int);
 }
 
 /// What a frame says about its colour: the description of its sequence header and its HDR metadata.
@@ -173,6 +176,9 @@ pub struct Spec {
 pub struct Choices {
     pub skip_film_grain: bool,
     pub cdef_v2: bool,
+    pub cdef_v3_legacy: bool,
+    pub output_copy_legacy: bool,
+    pub residual_clear_legacy: bool,
     pub intra_v2: bool,
     pub intra_opt: bool,
     pub intra_filter_legacy: bool,
@@ -516,6 +522,9 @@ impl Library {
             av1_set_intra_run(choices.intra_run_lanes);
             av1_set_intra_lists_legacy(c_int::from(choices.intra_lists_legacy));
             av1_set_parse_lists_legacy(c_int::from(choices.parse_lists_legacy));
+            av1_set_cdef_v3_legacy(c_int::from(choices.cdef_v3_legacy));
+            av1_set_output_copy_legacy(c_int::from(choices.output_copy_legacy));
+            av1_set_residual_clear_legacy(c_int::from(choices.residual_clear_legacy));
         }
         if self.is_c() {
             capi::rav1g_set_cdef_v2(choices.cdef_v2);

@@ -26,9 +26,13 @@ idct_sort_blocks
 fill_buffer
 loop_restoration
 loop_restoration_wiener
+loop_restoration_sp_tex
+loop_restoration_wiener_sp_tex
 film_grain_filter
 cdef_filter
 cdef_filter_v2
+cdef_filter_v3
+cdef_filter_v3_sp_tex
 intra_v2
 intra_v2_hbd
 gen_pred_blocks
@@ -45,6 +49,7 @@ gen_lf_blocks_hor
 copy_plane
 copy_plane_10bit10x3
 upscaling
+upscaling_sp_tex
 inter_2x2chroma
 inter_compound_v2
 inter_compound_2x2
@@ -111,4 +116,6 @@ copy_plane_sp_tex_v2
 film_grain_filter_sp
 film_grain_filter_sp_tex_v2
 cdef_lists
+cdef_lists_v2
 mi_grid_build
+residual_clear_blocks

@@ -23,9 +23,13 @@ idct_sort_blocks	64	64	6	16	0	0	16	waves
 fill_buffer	64	64	5	10	0	0	16	waves
 loop_restoration	64	64	24	57	3072	0	10.5	lds
 loop_restoration_wiener	64	64	21	49	2048	0	16	waves
+loop_restoration_sp_tex	64	64	26	76	3072	0	10.5	lds
+loop_restoration_wiener_sp_tex	64	64	22	68	2048	0	16	waves
 film_grain_filter	768	64	41	51	30720	0	6	vgprs
 cdef_filter	128	64	106	48	12288	0	4	vgprs
 cdef_filter_v2	64	64	92	53	9728	0	3	lds
+cdef_filter_v3	64	64	71	59	5120	0	6	lds
+cdef_filter_v3_sp_tex	64	64	71	80	5120	0	6	lds
 intra_v2	384	64	168	70	16896	0	3	vgprs
 intra_v2_hbd	384	64	168	70	16896	0	3	vgprs
 gen_pred_blocks	64	64	55	96	0	0	9	vgprs
@@ -41,7 +45,8 @@ gen_lf_blocks_vert	64	64	29	64	0	0	16	waves
 gen_lf_blocks_hor	64	64	29	62	0	0	16	waves
 copy_plane	64	64	6	13	0	0	16	waves
 copy_plane_10bit10x3	64	64	26	14	0	0	16	waves
-upscaling	64	64	90	25	0	0	5	vgprs
+upscaling	64	64	43	26	0	0	10	vgprs
+upscaling_sp_tex	64	64	53	51	0	0	9	vgprs
 inter_2x2chroma	64	64	48	26	512	0	10	vgprs
 inter_compound_v2	64	64	111	24	0	0	4	vgprs
 inter_compound_2x2	64	64	56	26	512	0	9	vgprs
@@ -75,6 +80,8 @@ intra_main_hbd	256	64	53	49	10240	0	8	vgprs
 intra_main_hbd_legacy	256	64	51	49	10240	48	8	vgprs
 intra_main_prefetch_hbd	256	64	63	54	10240	0	8	vgprs
 intra_main_prefetch	256	64	63	54	10240	0	8	vgprs
+intra_main_single_edge	256	64	63	54	10240	0	8	vgprs
+intra_main_single_edge_hbd	256	64	63	54	10240	0	8	vgprs
 intra_filter_prefetch	32	32	41	40	512	0	10	vgprs
 intra_filter_prefetch_hbd	32	32	43	39	512	0	10	vgprs
 inter_ext_borders_hbd	64	64	13	16	0	0	16	waves
@@ -102,4 +109,6 @@ copy_plane_sp_tex_v2	64	64	26	30	0	0	16	waves
 film_grain_filter_sp	768	64	39	50	30720	0	12	waves
 film_grain_filter_sp_tex_v2	256	64	26	46	0	0	16	waves
 cdef_lists	64	64	11	28	0	0	16	waves
-mi_grid_build	64	64	8	22	0	0	16	waves
+cdef_lists_v2	64	64	13	32	512	0	16	waves
+mi_grid_build	64	64	11	22	0	0	16	waves
+residual_clear_blocks	64	64	13	18	0	0	16	waves

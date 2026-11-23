@@ -64,9 +64,18 @@ static const uint kHighLog2[22] = {0, 1, 0, 1, 2, 1, 2, 3, 2, 3, 4, 3, 4, 5, 4, 
   const uint x_mis = min(1u << kWideLog2[bsize], cb_mi_cols - col);
   const uint y_mis = min(1u << kHighLog2[bsize], cb_mi_rows - row);
   const uint entry = base + cb_mi_addr_base;
+  const uint4 entry4 = uint4(entry, entry, entry, entry);
   for (uint y = 0; y < y_mis; ++y) {
     const uint at = ((row + y) * cb_mi_stride + col) * 4;
-    for (uint x = 0; x < x_mis; ++x) {
+    uint x = 0;
+    for (; x + 4 <= x_mis; x += 4) {
+      grid.Store4(at + x * 4, entry4);
+    }
+    if (x + 2 <= x_mis) {
+      grid.Store2(at + x * 4, entry4.xy);
+      x += 2;
+    }
+    if (x < x_mis) {
       grid.Store(at + x * 4, entry);
     }
   }

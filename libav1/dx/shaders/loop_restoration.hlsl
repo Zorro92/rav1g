@@ -31,6 +31,19 @@ ByteAddressBuffer LrTypeSgr : register(t1);  // SRV
 ByteAddressBuffer LrWiener : register(t2);   // SRV
 RWByteAddressBuffer dst : register(u0);      // UAV
 
+#ifdef LR_OUTPUT_SP_TEX
+#define SP_TEXTURE
+#define SP_LUMA_REGISTER u1
+#define SP_CHROMA_REGISTER u2
+#include "output_sp.h"
+
+#define LR_FLAG_WRITE_FB 1
+#define LR_FLAG_OUT_LUMA 2
+#define LR_FLAG_OUT_CHROMA 4
+#define LR_FLAG_MONOCHROME 8
+#define LR_FLAG_COMBINED_CHROMA 16
+#endif
+
 cbuffer PlaneRestorationData : register(b0) {
   struct {
     int4 Sgr_Params[16];
@@ -70,6 +83,9 @@ cbuffer PlaneRestorationConstBuffer : register(b1) { PlaneRestorationData pl[3];
 cbuffer cb_loop_rest_data : register(b2) {
   int do_restoration;
   int plane_id;
+#ifdef LR_OUTPUT_SP_TEX
+  int out_flags;
+#endif
 }
 
 #define WG_WIDTH 16
@@ -312,6 +328,151 @@ int sgr_filter(uint lx, uint ly, uint id, int4 rType, int bit_depth) {
 }
 #endif
 
+#ifdef LR_OUTPUT_SP_TEX
+int4 unpack_src4(uint2 w_hbd, uint w_8, bool hbd) {
+  if (hbd) {
+    return int4((int)(w_hbd.x & 0xffffu), (int)(w_hbd.x >> 16), (int)(w_hbd.y & 0xffffu), (int)(w_hbd.y >> 16));
+  }
+  return int4((int)(w_8 & 255u), (int)((w_8 >> 8) & 255u), (int)((w_8 >> 16) & 255u), (int)(w_8 >> 24));
+}
+
+// Loads the 24x10 input halo for plane `pid` into `work[0..INPUT_WORDS)` and, for SGR, populates
+// the a2 lookup table at `work[A2_BASE..A2_BASE+63]`. Must be followed by a group sync.
+void load_plane_input(int pid, int gx, int gy, int lx, int ly, int rtype_x) {
+  const int subsampling = pl[pid].subsampling;
+  const bool hbd = pl[pid].hbd != 0;
+  const PlaneInfo plane = pl[pid].plane;
+  const int stripe_id = uint((gy << subsampling) + 8) / STRIPE_SIZE;
+  const int StripeStartY = ((stripe_id * STRIPE_SIZE) - 8) >> subsampling;
+  const int StripeEndY = StripeStartY + (STRIPE_SIZE >> subsampling) - 1;
+  const int pp_offset = pl[pid].pp_offset;
+
+  if (lx < WG_WIDTH / 4 + 2) {
+    const int nc_x = (lx << 2) + gx - 4;
+    const int c_x = clamp(nc_x, 0, plane.width - 1) & ~3;
+    const int last_sample = nc_x < 0 ? 0 : plane.width - c_x - 1;
+    const int first_sample = nc_x - c_x >= 4 ? last_sample : 0;
+    for (int y = ly; y < INPUT_HEIGHT; y += WG_HEIGHT) {
+      const int at = y * INPUT_WIDTH + 4 * lx;
+      int c_y = clamp(y + gy - 3, StripeStartY - 2, StripeEndY + 2);
+      c_y = clamp(c_y, 0, plane.height - 1);
+      int offset = (c_y < StripeStartY || c_y > StripeEndY) ? pp_offset : plane.offset;
+      offset += c_y * plane.stride;
+
+      if (hbd) {
+        int shift_max = last_sample * 16;
+        int shift_min = first_sample * 16;
+        uint2 input_char = src.Load2(offset + (c_x << 1));
+        uint4 shift = uint4(clamp(0, shift_min, shift_max), clamp(16, shift_min, shift_max),
+                            clamp(32, shift_min, shift_max), clamp(48, shift_min, shift_max));
+        work[at + 0] = (shift.x > 16 ? (input_char.y >> (shift.x - 32)) : (input_char.x >> shift.x)) & 0xffff;
+        work[at + 1] = (shift.y > 16 ? (input_char.y >> (shift.y - 32)) : (input_char.x >> shift.y)) & 0xffff;
+        work[at + 2] = (shift.z > 16 ? (input_char.y >> (shift.z - 32)) : (input_char.x >> shift.z)) & 0xffff;
+        work[at + 3] = (shift.w > 16 ? (input_char.y >> (shift.w - 32)) : (input_char.x >> shift.w)) & 0xffff;
+      } else {
+        int shift_max = last_sample * 8;
+        int shift_min = first_sample * 8;
+        uint input_char = src.Load(offset + c_x);
+        work[at + 0] = (input_char >> clamp(0, shift_min, shift_max)) & 255;
+        work[at + 1] = (input_char >> clamp(8, shift_min, shift_max)) & 255;
+        work[at + 2] = (input_char >> clamp(16, shift_min, shift_max)) & 255;
+        work[at + 3] = (input_char >> clamp(24, shift_min, shift_max)) & 255;
+      }
+    }
+  }
+
+#ifndef LR_WIENER_ONLY
+  if (rtype_x == RESTORE_SGRPROJ && ly == 0) {
+    const uint4 packed = data.Sgr_A2Packed[lx];
+    work[A2_BASE + 4 * lx] = packed.x;
+    work[A2_BASE + 4 * lx + 1] = packed.y;
+    work[A2_BASE + 4 * lx + 2] = packed.z;
+    work[A2_BASE + 4 * lx + 3] = packed.w;
+  }
+#endif
+}
+
+int restore_chroma_plane(int pid, bool do_rst, int gx, int gy, int lx, int ly, uint id, bool write_fb, bool pre_sync,
+                         out bool used_work) {
+  const int subsampling = pl[pid].subsampling;
+  const bool hbd = pl[pid].hbd != 0;
+  const PlaneInfo plane = pl[pid].plane;
+  const int dst_offset = pl[pid].dst_offset;
+
+  int unitId = 0;
+  int4 rType = int4(RESTORE_NONE, 0, 0, 0);
+  [branch] if (do_rst) {
+    UnitsInfo units = pl[pid].units;
+    int shift = pl[pid].unit_shift;
+    int unitCol = min(units.Cols - 1, uint(gx + 1) >> shift);
+    int unitRow = min(units.Rows - 1, uint(gy + 1 + (8 >> subsampling)) >> shift);
+    unitId = unitRow * units.Stride + unitCol + pl[pid].Lr_buffer_offset;
+#ifdef LR_WIENER_ONLY
+    rType.x = LrTypeSgr.Load(unitId * 16);
+#else
+    rType = LrTypeSgr.Load4(unitId * 16);
+#endif
+  }
+
+  if (rType.x == RESTORE_NONE) {
+    used_work = false;
+    const int px4 = (gx + lx) & ~3;
+    const int lane4 = lx & 3;
+    const int row_offset = (gy + ly) * plane.stride;
+    if (hbd) {
+      const int at = row_offset + (px4 << 1);
+      const uint2 w = src.Load2(plane.offset + at);
+      if (write_fb && lane4 == 0) dst.Store2(dst_offset + at, w);
+      return (int)((lane4 >= 2 ? (w.y >> ((lane4 - 2) * 16)) : (w.x >> (lane4 * 16))) & 0xffffu);
+    } else {
+      const int at = row_offset + px4;
+      const uint w = src.Load(plane.offset + at);
+      if (write_fb && lane4 == 0) dst.Store(dst_offset + at, w);
+      return (int)((w >> (lane4 * 8)) & 255u);
+    }
+  }
+
+  used_work = true;
+  if (pre_sync) {
+    // Ensure all threads finish reading work[] for U before V loads its halo into work[].
+    GroupMemoryBarrierWithGroupSync();
+  }
+  load_plane_input(pid, gx, gy, lx, ly, rType.x);
+  GroupMemoryBarrierWithGroupSync();
+
+  const int bit_depth = pl[pid].bit_depth;
+  const int sample_max = (1 << bit_depth) - 1;
+#ifdef LR_WIENER_ONLY
+  (void)id;
+  const int filtered = wiener_filter(lx, ly, unitId, bit_depth);
+#else
+  int filtered = 0;
+  [branch] if (rType.x == RESTORE_WIENER) {
+    filtered = wiener_filter(lx, ly, unitId, bit_depth);
+  } else if (rType.x == RESTORE_SGRPROJ) {
+    filtered = sgr_filter(lx, ly, id, rType, bit_depth);
+  }
+#endif
+  const int val = clamp(filtered, 0, sample_max);
+  if (write_fb) {
+    output[ly][lx] = val;
+    GroupMemoryBarrierWithGroupSync();
+    if (lx < WG_WIDTH / 4) {
+      if (hbd) {
+        dst.Store2(dst_offset + (gy + ly) * plane.stride + (gx + lx * 4) * 2,
+                   uint2((output[ly][lx * 4 + 0] << 0) | (output[ly][lx * 4 + 1] << 16),
+                         (output[ly][lx * 4 + 2] << 0) | (output[ly][lx * 4 + 3] << 16)));
+      } else {
+        dst.Store(dst_offset + (gy + ly) * plane.stride + gx + lx * 4,
+                  (output[ly][lx * 4 + 0] << 0) | (output[ly][lx * 4 + 1] << 8) | (output[ly][lx * 4 + 2] << 16) |
+                      (output[ly][lx * 4 + 3] << 24));
+      }
+    }
+  }
+  return val;
+}
+#endif
+
 // One thread group restores 16x4 samples, one thread each. The work goes in passes, and a pass reads from
 // the group memory what all threads of the group wrote in the pass before: the samples around the group,
 // then the rows of the Wiener filter or the box sums of the self guided filter, then the restored samples,
@@ -327,6 +488,44 @@ void main(uint3 local : SV_GroupThreadID, uint3 group : SV_GroupID, uint id : SV
   const int gy = group.y * WG_HEIGHT;
   const int lx = local.x;
   const int ly = local.y;
+
+#ifdef LR_OUTPUT_SP_TEX
+  const bool write_fb = (out_flags & LR_FLAG_WRITE_FB) != 0;
+  const bool out_luma = (out_flags & LR_FLAG_OUT_LUMA) != 0;
+  const bool out_chroma = (out_flags & LR_FLAG_OUT_CHROMA) != 0;
+  const bool is_monochrome = (out_flags & LR_FLAG_MONOCHROME) != 0;
+  const bool combined_chroma = (out_flags & LR_FLAG_COMBINED_CHROMA) != 0;
+
+  if (combined_chroma) {
+    const bool hbd = pl[1].hbd != 0;
+    const PlaneInfo plane_u = pl[1].plane;
+    if (is_monochrome && !write_fb) {
+      const int cx = gx + lx;
+      const int cy = gy + ly;
+      if (out_chroma && cx < plane_u.width && cy < plane_u.height) {
+        const uint neu = (uint)(hbd ? 512 : 128) << (hbd ? 6u : 0u);
+        sp_chroma[int2(cx, cy)] = uint2(neu, neu);
+      }
+      return;
+    }
+    bool used_work_u = false;
+    const int u_val =
+        restore_chroma_plane(1, (do_restoration & 1) != 0, gx, gy, lx, ly, id, write_fb, false, used_work_u);
+    bool used_work_v = false;
+    const int v_val = restore_chroma_plane(2, (do_restoration & 2) != 0, gx, gy, lx, ly, id, write_fb,
+                                           used_work_u && !write_fb, used_work_v);
+    if (out_chroma) {
+      const int cx = gx + lx;
+      const int cy = gy + ly;
+      if (cx < plane_u.width && cy < plane_u.height) {
+        const uint shift = hbd ? 6u : 0u;
+        const uint neu = (uint)(hbd ? 512 : 128) << shift;
+        sp_chroma[int2(cx, cy)] = is_monochrome ? uint2(neu, neu) : uint2((uint)u_val << shift, (uint)v_val << shift);
+      }
+    }
+    return;
+  }
+#endif
 
   const int subsampling = pl[plane_id].subsampling;
   const bool hbd = pl[plane_id].hbd != 0;
@@ -354,10 +553,22 @@ void main(uint3 local : SV_GroupThreadID, uint3 group : SV_GroupID, uint id : SV
       const int row_offset = (gy + ly) * plane.stride;
       if (hbd) {
         int at = row_offset + ((gx + lx) << 1);
-        dst.Store2(dst_offset + at, src.Load2(plane.offset + at));
+        uint2 v = src.Load2(plane.offset + at);
+#ifdef LR_OUTPUT_SP_TEX
+        if (write_fb) dst.Store2(dst_offset + at, v);
+        if (out_luma) sp_store_luma(gx + lx, gy + ly, unpack_src4(v, 0u, true), plane.width, plane.height, 1, int2(0, 0));
+#else
+        dst.Store2(dst_offset + at, v);
+#endif
       } else {
         int at = row_offset + gx + lx;
-        dst.Store(dst_offset + at, src.Load(plane.offset + at));
+        uint v = src.Load(plane.offset + at);
+#ifdef LR_OUTPUT_SP_TEX
+        if (write_fb) dst.Store(dst_offset + at, v);
+        if (out_luma) sp_store_luma(gx + lx, gy + ly, unpack_src4(uint2(0u, 0u), v, false), plane.width, plane.height, 0, int2(0, 0));
+#else
+        dst.Store(dst_offset + at, v);
+#endif
       }
     }
     return;
@@ -430,7 +641,26 @@ void main(uint3 local : SV_GroupThreadID, uint3 group : SV_GroupID, uint id : SV
     return;
   }
 #endif
-  output[ly][lx] = clamp(filtered, 0, sample_max);
+  const int val = clamp(filtered, 0, sample_max);
+
+#ifdef LR_OUTPUT_SP_TEX
+  if (out_luma) {
+    const int px = gx + lx;
+    const int py = gy + ly;
+    if (px < plane.width && py < plane.height) {
+      const uint s = (uint)val << (hbd ? 6u : 0u);
+      sp_luma[int2(px, py)] = s;
+      const bool rep_x = ((plane.width & 1) != 0) && (px == plane.width - 1);
+      const bool rep_y = ((plane.height & 1) != 0) && (py == plane.height - 1);
+      if (rep_x) sp_luma[int2(px + 1, py)] = s;
+      if (rep_y) sp_luma[int2(px, py + 1)] = s;
+      if (rep_x && rep_y) sp_luma[int2(px + 1, py + 1)] = s;
+    }
+  }
+  if (!write_fb) return;
+#endif
+
+  output[ly][lx] = val;
   GroupMemoryBarrierWithGroupSync();
 
   if (lx < WG_WIDTH / 4) {

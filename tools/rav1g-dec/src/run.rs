@@ -751,7 +751,13 @@ fn create_decoder(
         } else {
             task.lowmem_parts.to_string()
         },
-        if task.cdefv1 { "cdef_filter (-cdefv1)" } else { "cdef_filter_v2" },
+        if task.cdefv1 {
+            "cdef_filter (-cdefv1)"
+        } else if task.cdefv3legacy {
+            "cdef_filter_v2 (-cdefv3legacy)"
+        } else {
+            "cdef_filter_v3"
+        },
         if task.intrav2 { "intra_v2" } else { "frame-wide wavefront" },
         if task.intraopt { " (optimized main)" } else { " (legacy main, -intraod)" },
         "loop_restoration / loop_restoration_wiener",
@@ -979,6 +985,9 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     library.set_choices(&Choices {
         skip_film_grain: task.skip_film_grain,
         cdef_v2: !task.cdefv1,
+        cdef_v3_legacy: task.cdefv3legacy,
+        output_copy_legacy: task.outputcopylegacy,
+        residual_clear_legacy: task.residualclearlegacy,
         intra_v2: task.intrav2,
         intra_opt: task.intraopt,
         intra_filter_legacy: task.intrafilterlegacy,
@@ -992,8 +1001,18 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         inter_fast: task.interfast,
     });
     if task.output == ImageMode::Texture {
-        say!("Direct NV12/P010 copy shader: copy_plane_sp_tex_v2 (default)");
+        say!(
+            "Direct NV12/P010 output: {}",
+            if task.outputcopylegacy {
+                "copy_plane_sp_tex_v2 (-outputcopylegacy)"
+            } else {
+                "fused into last postfilter stage (default)"
+            }
+        );
         say!("Direct NV12/P010 film grain shader: film_grain_filter_sp_tex_v2 (default)");
+    }
+    if task.residualclearlegacy {
+        say!("Residual clear: full per-frame fill before idct (-residualclearlegacy)");
     }
     say!("Film grain templates: CPU, uploaded with the random offsets");
     say!(
