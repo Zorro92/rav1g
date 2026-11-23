@@ -32,6 +32,39 @@ namespace v1 {
 namespace v2 {
 #include "cdef_filter_v2.gen.h"
 }
+#undef LUMA_STRIDE
+#undef LUMA_ROWS
+#undef CHROMA_STRIDE
+#undef CHROMA_ROWS
+#undef LUMA_WORDS
+#undef CHROMA_WORDS
+
+namespace v3 {
+#include "cdef_filter_v3.gen.h"
+}
+#undef LUMA_STRIDE
+#undef LUMA_W_STRIDE
+#undef LUMA_ROWS
+#undef CHROMA_STRIDE
+#undef CHROMA_W_STRIDE
+#undef CHROMA_ROWS
+#undef CHROMA_WORDS
+#undef DIR_VAR_BASE
+#undef CHROMA_EXCH_BASE
+
+namespace v3_sp {
+#define CDEF_OUTPUT_SP_TEX
+#include "cdef_filter_v3.gen.h"
+#undef CDEF_OUTPUT_SP_TEX
+#undef SP_TEXTURE
+#undef SP_LUMA_REGISTER
+#undef SP_CHROMA_REGISTER
+#undef CDEF_FLAG_WRITE_FB_Y
+#undef CDEF_FLAG_WRITE_FB_UV
+#undef CDEF_FLAG_OUT_LUMA
+#undef CDEF_FLAG_OUT_CHROMA
+#undef CDEF_FLAG_MONOCHROME
+}
 
 // ---------------------------------------------------------------------------
 // Thread groups: testing/common/group_sched.h. Between two group syncs every thread runs alone, in an
@@ -73,6 +106,8 @@ struct HostCDefData {  // CDefData of libav1/dx/loopfilters.cpp
 };
 static_assert(sizeof(HostCDefData) == sizeof(v1::CDefData), "constant buffer layout");
 static_assert(sizeof(HostCDefData) == sizeof(v2::CDefData), "constant buffer layout");
+static_assert(sizeof(HostCDefData) == sizeof(v3::CDefData), "constant buffer layout");
+static_assert(sizeof(HostCDefData) == sizeof(v3_sp::CDefData), "constant buffer layout");
 
 struct Case {
   int w, h;        // what the host passes as plane[2], plane[3]
@@ -90,6 +125,7 @@ struct Frame {
   std::vector<uint8_t> pool;
   std::vector<int> indexes;
   std::vector<int> skips;
+  std::vector<uint> masks;
   HostCDefData cb;
 };
 
@@ -186,6 +222,26 @@ static void make_frame(const Case &c, Frame &f) {
     }
   }
 
+  // Build packed 32-bit active masks per 64x32 group matching cdef_lists_v2.hlsl.
+  const int skip_cols = c.w / 8;
+  const int skip_rows = c.h / 8;
+  f.masks.assign(static_cast<size_t>(nhfb) * static_cast<size_t>(nvfb * 2), 0u);
+  for (int gy = 0; gy < nvfb * 2; gy++) {
+    for (int gx = 0; gx < nhfb; gx++) {
+      uint mask = 0u;
+      for (int ly = 0; ly < 4; ly++) {
+        for (int bx = 0; bx < 8; bx++) {
+          const int col = gx * 8 + bx;
+          const int row = gy * 4 + ly;
+          if (col < skip_cols && row < skip_rows && f.skips[row * nhfb * 16 + col] == 0) {
+            mask |= 1u << (ly * 8 + bx);
+          }
+        }
+      }
+      f.masks[gy * nhfb + gx] = mask;
+    }
+  }
+
   HostCDefData &cb = f.cb;
   for (size_t i = 0; i < sizeof(cb) / sizeof(int); i++) reinterpret_cast<int *>(&cb)[i] = static_cast<int>(g_rng());
   const int cdef_directions_new[8][4] = {{-1, +1, -2, +2}, {0, +1, -1, +2}, {0, +1, 0, +2}, {0, +1, 1, +2},
@@ -262,6 +318,16 @@ static void v2_thread(int t) {
   v2::shader_main(g_group, gtid, static_cast<uint>(t));
 }
 
+static void v3_thread(int t) {
+  const uint3 gtid = {static_cast<uint>(t & 15), static_cast<uint>(t >> 4), 0};
+  v3::shader_main(g_group, gtid, static_cast<uint>(t));
+}
+
+static void v3_sp_thread(int t) {
+  const uint3 gtid = {static_cast<uint>(t & 15), static_cast<uint>(t >> 4), 0};
+  v3_sp::shader_main(g_group, gtid, static_cast<uint>(t));
+}
+
 static void bind_frame(Frame &f, ByteAddressBuffer &indexes, ByteAddressBuffer &skips, RWByteAddressBuffer &dst) {
   indexes = {reinterpret_cast<const uint8_t *>(f.indexes.data()), f.indexes.size() * sizeof(int)};
   skips = {reinterpret_cast<const uint8_t *>(f.skips.data()), f.skips.size() * sizeof(int)};
@@ -297,6 +363,46 @@ static void run_v2(Frame &f) {
       scramble(v2::window);
       scramble(v2::costs);
       run_group(64, v2_thread);
+    }
+  }
+  gs_state.track_unwritten = false;
+}
+
+static void run_v3(Frame &f) {
+  gs_state.shader = "cdef_filter_v3.hlsl";
+  gs_state.track_unwritten = true;
+  v3::cdef_index = {reinterpret_cast<const uint8_t *>(f.indexes.data()), f.indexes.size() * sizeof(int)};
+  v3::cdef_masks = {reinterpret_cast<const uint8_t *>(f.masks.data()), f.masks.size() * sizeof(uint)};
+  v3::dst = {f.pool.data(), f.pool.size()};
+  memcpy(&v3::data, &f.cb, sizeof(f.cb));
+  for (uint gy = 0; gy < static_cast<uint>((f.cb.plane[3] + 31) >> 5); gy++) {
+    for (uint gx = 0; gx < static_cast<uint>((f.cb.plane[2] + 63) >> 6); gx++) {
+      g_group = uint3{gx, gy, 0};
+      scramble(v3::lds);
+      run_group(64, v3_thread);
+    }
+  }
+  gs_state.track_unwritten = false;
+}
+
+static void run_v3_sp(Frame &f, int crop_w, int crop_h, int flags, Texture<uint> &tex_y, Texture<uint2> &tex_uv) {
+  gs_state.shader = "cdef_filter_v3_sp_tex.hlsl";
+  gs_state.track_unwritten = true;
+  v3_sp::cdef_index = {reinterpret_cast<const uint8_t *>(f.indexes.data()), f.indexes.size() * sizeof(int)};
+  v3_sp::cdef_masks = {reinterpret_cast<const uint8_t *>(f.masks.data()), f.masks.size() * sizeof(uint)};
+  v3_sp::dst = {f.pool.data(), f.pool.size()};
+  v3_sp::sp_luma = {&tex_y};
+  v3_sp::sp_chroma = {&tex_uv};
+  HostCDefData cb = f.cb;
+  cb._dummie[0] = crop_w;
+  cb._dummie[1] = crop_h;
+  cb._dummie[2] = flags;
+  memcpy(&v3_sp::data, &cb, sizeof(cb));
+  for (uint gy = 0; gy < static_cast<uint>((f.cb.plane[3] + 31) >> 5); gy++) {
+    for (uint gx = 0; gx < static_cast<uint>((f.cb.plane[2] + 63) >> 6); gx++) {
+      g_group = uint3{gx, gy, 0};
+      scramble(v3_sp::lds);
+      run_group(64, v3_sp_thread);
     }
   }
   gs_state.track_unwritten = false;
@@ -438,16 +544,20 @@ static bool check_directions(int coeff_shift) {
           pair |= static_cast<uint>(pixels[y][x]) << (k * 16);
         }
         v2::window[y * (72 / 2) + n] = pair;
+        v3::lds[y * 34 + n] = pair;
       }
     }
     const int expected_dir = pattern < 8 ? pattern : (pattern == 8 ? 1 : 0);
     const int2 expected = reference_direction(pixels, coeff_shift);
     const int2 actual = v2::choose_direction(v2::direction_costs(0, coeff_shift, 0),
                                               v2::direction_costs(0, coeff_shift, 1));
+    const int2 actual_v3 = v3::choose_direction(v3::direction_costs(0, coeff_shift, 0),
+                                                v3::direction_costs(0, coeff_shift, 1));
     if (expected.x != expected_dir || (pattern == 8 && expected.y == 0) ||
-        actual.x != expected.x || actual.y != expected.y) {
-      printf("MISMATCH direction pattern %d depth=%d: expected %d (variance %d), got %d (variance %d)\n",
-             pattern, 8 + coeff_shift, expected_dir, expected.y, actual.x, actual.y);
+        actual.x != expected.x || actual.y != expected.y ||
+        actual_v3.x != expected.x || actual_v3.y != expected.y) {
+      printf("MISMATCH direction pattern %d depth=%d: expected %d (variance %d), v2 %d (%d), v3 %d (%d)\n",
+             pattern, 8 + coeff_shift, expected_dir, expected.y, actual.x, actual.y, actual_v3.x, actual_v3.y);
       ok = false;
     }
   }
@@ -474,6 +584,74 @@ int main(int argc, char **argv) {
   if (!check_directions(2)) failed++;
   if (fail_fast && failed) return 1;
 
+  const auto check_v3_sp_case = [&](const Frame &input, const Frame &ref_fb, const Case &c, int crop_w, int crop_h,
+                                    int flags) -> bool {
+    const uint tex_w = static_cast<uint>((crop_w + 1) & ~1);
+    const uint tex_h = static_cast<uint>((crop_h + 1) & ~1);
+    Texture<uint> tex_y(tex_w, tex_h);
+    Texture<uint2> tex_uv(tex_w / 2, tex_h / 2);
+    Frame sp = input;
+    run_v3_sp(sp, crop_w, crop_h, flags, tex_y, tex_uv);
+    const bool write_fb_y = (flags & 1) != 0;
+    const bool write_fb_uv = (flags & 2) != 0;
+    const bool out_luma = (flags & 4) != 0;
+    const bool out_chroma = (flags & 8) != 0;
+    const bool mono = (flags & 16) != 0;
+    const uint shift = c.hbd ? 6u : 0u;
+    const int bpp = c.hbd ? 2 : 1;
+    // Check frame buffer bytes inside coded frame [0..w, 0..h).
+    for (int y = 0; y < c.h; y++) {
+      for (int x = 0; x < c.w; x++) {
+        const int off = input.cb.dst_offset[0] + y * input.cb.plane[0] + x * bpp;
+        const Frame &exp = write_fb_y ? ref_fb : input;
+        if (sp.pool[off] != exp.pool[off] || (bpp == 2 && sp.pool[off + 1] != exp.pool[off + 1])) {
+          printf("MISMATCH v3_sp fb Y (%d,%d) flags=%d\n", x, y, flags);
+          return false;
+        }
+      }
+    }
+    for (int p = 1; p < 3; p++) {
+      for (int y = 0; y < (c.h >> 1); y++) {
+        for (int x = 0; x < (c.w >> 1); x++) {
+          const int off = input.cb.dst_offset[p] + y * input.cb.uv_stride + x * bpp;
+          const Frame &exp = write_fb_uv ? ref_fb : input;
+          if (sp.pool[off] != exp.pool[off] || (bpp == 2 && sp.pool[off + 1] != exp.pool[off + 1])) {
+            printf("MISMATCH v3_sp fb UV plane=%d (%d,%d) flags=%d\n", p, x, y, flags);
+            return false;
+          }
+        }
+      }
+    }
+    // Check semi-planar texture pixels (including odd-width/odd-height edge replication and monochrome).
+    for (uint y = 0; y < tex_h; y++) {
+      for (uint x = 0; x < tex_w; x++) {
+        const uint i = y * tex_w + x;
+        const int sx = min((int)x, crop_w - 1);
+        const int sy = min((int)y, crop_h - 1);
+        const uint expected = out_luma ? (static_cast<uint>(sample_at(ref_fb, ref_fb.cb.dst_offset[0], ref_fb.cb.plane[0], sx, sy)) << shift) : 0u;
+        if (tex_y.writes[i] != uint(out_luma) || tex_y.samples[i] != expected) {
+          printf("MISMATCH v3_sp tex Y (%u,%u) crop=%dx%d flags=%d: got %u (writes %u), exp %u\n",
+                 x, y, crop_w, crop_h, flags, tex_y.samples[i], tex_y.writes[i], expected);
+          return false;
+        }
+      }
+    }
+    const uint neutral = (c.hbd ? 512u : 128u) << shift;
+    for (uint y = 0; y < tex_h / 2; y++) {
+      for (uint x = 0; x < tex_w / 2; x++) {
+        const uint i = y * (tex_w / 2) + x;
+        const uint eu = out_chroma ? (mono ? neutral : (static_cast<uint>(sample_at(ref_fb, ref_fb.cb.dst_offset[1], ref_fb.cb.uv_stride, (int)x, (int)y)) << shift)) : 0u;
+        const uint ev = out_chroma ? (mono ? neutral : (static_cast<uint>(sample_at(ref_fb, ref_fb.cb.dst_offset[2], ref_fb.cb.uv_stride, (int)x, (int)y)) << shift)) : 0u;
+        if (tex_uv.writes[i] != uint(out_chroma) || tex_uv.samples[i].x != eu || tex_uv.samples[i].y != ev) {
+          printf("MISMATCH v3_sp tex UV (%u,%u) crop=%dx%d flags=%d: got (%u,%u) writes %u, exp (%u,%u)\n",
+                 x, y, crop_w, crop_h, flags, tex_uv.samples[i].x, tex_uv.samples[i].y, tex_uv.writes[i], eu, ev);
+          return false;
+        }
+      }
+    }
+    return true;
+  };
+
   long cases = 0, bytes = 0, changed = 0;
   const auto check_frame = [&](const Case &c) {
     Frame input;
@@ -487,6 +665,28 @@ int main(int argc, char **argv) {
     for (size_t i = 0; i < input.pool.size(); i++) changed += optimized.pool[i] != input.pool[i];
     if (!compare_pool(upstream, optimized, c, "optimized vs upstream", failed < 20) ||
         (failed < 20 && !check_filtered_samples(input, optimized))) failed++;
+    // v3 uses packed 32-bit active masks for coded 8x8 blocks (multiples of 8).
+    if (((c.w | c.h) & 7) == 0) {
+      Frame v3_out = input;
+      run_v3(v3_out);
+      if (failed < 20 && !check_filtered_samples(input, v3_out)) {
+        printf("MISMATCH v3 vs scalar reference %dx%d hbd=%d depth=%d\n", c.w, c.h, c.hbd, c.bit_depth);
+        failed++;
+      }
+      // Exercise fused semi-planar output on even and odd crop sizes, write_fb=0/1, mono=0/1, luma-only grain.
+      if (failed < 20 && (c.bit_depth == 8 || c.bit_depth == 10)) {
+        const int crop_w = max(1, c.w - (cases % 7));
+        const int crop_h = max(1, c.h - ((cases / 7) % 7));
+        static const int flag_sets[] = {
+            1 | 2 | 4 | 8,       // ref frame, both planes to tex + fb
+            4 | 8,               // non-ref frame, output-only (write_fb = 0)
+            1 | 8,               // non-ref frame with luma-only film grain (write_fb_y + out_chroma)
+            1 | 2 | 4 | 8 | 16,  // ref monochrome
+            4 | 8 | 16,          // non-ref monochrome output-only
+        };
+        if (!check_v3_sp_case(input, v3_out, c, crop_w, crop_h, flag_sets[cases % 5])) failed++;
+      }
+    }
     return fail_fast && (failed || gs_state.races || gs_state.sync_errors ||
                          gs_state.runaway_groups || gs_state.out_of_bounds || g_out_of_bounds);
   };

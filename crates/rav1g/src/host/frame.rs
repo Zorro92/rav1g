@@ -23,12 +23,12 @@ use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12Device};
 
 use super::blocks::{WAVE_COLUMN_RESET, WaveColumn, WaveEdges};
 use super::completion::start_completion_thread;
-use super::core::{buffer, commands, pipeline};
+use super::core::{buffer, commands, pipeline, stage_dump_active};
 use super::create::to_mib;
 use super::log::log;
 use super::loopfilter::loopfilter_gpu;
 use super::memory::poison_constants;
-use super::output::{copy_output, output_image};
+use super::output::{copy_output, output_copy_legacy, output_image, prepare_fused_output};
 use super::perf::{
     inter_fast_mode, perf_add, perf_add_memset, perf_begin_command_buffer, perf_detail_mode, perf_gpu_mark, perf_lap,
     perf_now, perf_resolve,
@@ -1755,6 +1755,9 @@ pub(crate) unsafe fn decode_frame_record(
         let dec = (*pbi).gpu_decoder.cast::<Av1Core>();
         let cm = &raw mut (*pbi).common;
         let td = (*dec).curr_frame_data;
+        (*td).fused_sp_active = 0;
+        (*td).fused_sp_luma_done = 0;
+        (*td).fused_sp_chroma_done = 0;
         (*cm).mi = (*(*td).parse_buffers[Kind::ModeInfo as usize]).host_ptr.cast();
         let mut perf_t = super::perf::av1_perf_ticks();
         prepare_command_buffer(dec);
@@ -1771,15 +1774,26 @@ pub(crate) unsafe fn decode_frame_record(
         perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_PRED as usize, perf_t);
         loopfilter_gpu(dec, cm, &raw mut (*pbi).mb);
         perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_LOOPFILTER as usize, perf_t);
-        cdef_looprestoration(dec, cm, (&raw mut (*pbi).lr_ctxt).cast());
-        perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_CDEF_LR as usize, perf_t);
-        inter_ext_borders(dec, cm);
-        perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_BORDERS as usize, perf_t);
-        *perf_lap_start = perf_t;
-        // A shown frame is output, unless it is a lower spatial layer of its temporal unit.
+
+        // Request the output image before postfiltering so direct NV12/P010 output can be fused into
+        // the last postfilter stage (CDEF v3, superres, or loop restoration).
         let is_output = (*cm).show_frame != 0 && output.unwrap_or_else(|| super::obu::frame_is_output(pbi));
         (*(*dec).curr_frame_data).output_frame = c_int::from(is_output);
-        output_image(dec, cm, fb)
+        let image_state = output_image(dec, cm, fb);
+        let fused = if image_state == 1 { prepare_fused_output(dec, cm, fb) } else { None };
+        perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_COPY as usize, perf_t);
+
+        cdef_looprestoration(dec, cm, (&raw mut (*pbi).lr_ctxt).cast(), fused);
+        perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_CDEF_LR as usize, perf_t);
+        // Skip border extension on frames that no future frame or show_existing_frame can read (AV1 7.20/7.21).
+        let no_ref =
+            (*cm).current_frame.refresh_frame_flags == 0 && (*cm).showable_frame == 0 && !stage_dump_active(dec);
+        if !no_ref || output_copy_legacy() {
+            inter_ext_borders(dec, cm);
+        }
+        perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_BORDERS as usize, perf_t);
+        *perf_lap_start = perf_t;
+        image_state
     }
 }
 

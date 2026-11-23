@@ -10,6 +10,33 @@
 
 long g_out_of_bounds;
 
+template <int N>
+vec<uint, N> operator<<(const vec<uint, N> &v, int shift) {
+  return v << uint(shift);
+}
+
+template <class T>
+struct Texture {
+  uint width = 0, height = 0;
+  std::vector<T> samples;
+  std::vector<uint> writes;
+  T discarded{};
+  Texture() = default;
+  Texture(uint w, uint h) : width(w), height(h), samples(w * h), writes(w * h) {}
+  T &store(int2 pos) {
+    if (pos.x < 0 || pos.y < 0 || uint(pos.x) >= width || uint(pos.y) >= height) return discarded;
+    const uint i = uint(pos.y) * width + uint(pos.x);
+    ++writes[i];
+    return samples[i];
+  }
+};
+
+template <class T>
+struct RWTexture2D {
+  Texture<T> *texture = nullptr;
+  T &operator[](int2 pos) const { return texture->store(pos); }
+};
+
 static void scramble_bytes(void *buffer, size_t size, uint64_t *state) {
   auto *bytes = static_cast<uint8_t *>(buffer);
   for (size_t i = 0; i < size; ++i) {
@@ -56,6 +83,104 @@ namespace wiener {
 #include "optimized.entry.h"
 #include "shader_adapter.h"
 #undef LR_WIENER_ONLY
+}
+
+namespace sp_tex {
+#define LR_OUTPUT_SP_TEX
+#include "optimized.gen.h"
+#include "optimized.entry.h"
+#undef LR_OUTPUT_SP_TEX
+#undef SP_TEXTURE
+#undef SP_LUMA_REGISTER
+#undef SP_CHROMA_REGISTER
+#undef LR_FLAG_WRITE_FB
+#undef LR_FLAG_OUT_LUMA
+#undef LR_FLAG_OUT_CHROMA
+#undef LR_FLAG_MONOCHROME
+#undef LR_FLAG_COMBINED_CHROMA
+
+static void run_thread(int thread, void *context) {
+  const auto &group = *static_cast<uint3 *>(context);
+  shader_entry(group, uint3(thread % kThreadsX, thread / kThreadsX, 0));
+}
+
+static void init_sgr() {
+  for (int i = 0; i < SGRPROJ_PARAMS; ++i) {
+    const auto &param = sgr_params[i];
+    data.Sgr_Params[i] = int4(param.radius[0], param.radius[1], param.strength[0], param.strength[1]);
+    for (int j = 0; j < 4; ++j) {
+      uint word = 0;
+      for (int byte = 0; byte < 4; ++byte) {
+        word |= static_cast<uint>(x_by_xplus1[i * 16 + j * 4 + byte] - 1) << (8 * byte);
+      }
+      data.Sgr_A2Packed[i][j] = word;
+    }
+  }
+}
+
+static void dispatch_luma(const Case &c, std::vector<uint8_t> &result, Texture<uint> &tex_y, int flags, uint64_t order) {
+  init_sgr();
+  plane_id = 0;
+  do_restoration = c.use_units;
+  out_flags = flags;
+  pl[0].plane = {c.stride, c.src_offset, c.plane.width, c.plane.height};
+  pl[0].units = {c.rows, c.cols, c.unit_size, c.cols};
+  pl[0].pp_offset = c.pre_offset;
+  pl[0].dst_offset = c.dst_offset;
+  pl[0].Lr_buffer_offset = c.first_unit;
+  pl[0].subsampling = 0;
+  pl[0].hbd = c.bit_depth > 8;
+  pl[0].bit_depth = c.bit_depth;
+  pl[0].unit_shift = __builtin_ctz(c.unit_size);
+  src = {result.data(), result.size()};
+  dst = {result.data(), result.size()};
+  LrTypeSgr = {reinterpret_cast<const uint8_t *>(c.types.data()), c.types.size() * sizeof(c.types[0])};
+  LrWiener = {reinterpret_cast<const uint8_t *>(c.taps.data()), c.taps.size() * sizeof(c.taps[0])};
+  sp_luma = {&tex_y};
+  shader_scramble(&order);
+  for (int y = 0; y < c.dispatch_height; y += kThreadsY) {
+    for (int x = 0; x < c.dispatch_width; x += kThreadsX) {
+      uint3 group(x / kThreadsX, y / kThreadsY, 0);
+      gs_run_group(kThreadsX * kThreadsY, run_thread, &group, &order);
+    }
+  }
+}
+
+static void dispatch_chroma(const Case &cu, const Case &cv, std::vector<uint8_t> &pool,
+                            const std::vector<std::array<int, 4>> &types,
+                            const std::vector<std::array<int, 16>> &taps,
+                            int u_first, int v_first, int u_base, int v_base,
+                            Texture<uint2> &tex_uv, int flags, uint64_t order) {
+  init_sgr();
+  plane_id = 1;
+  do_restoration = (cu.use_units ? 1 : 0) | (cv.use_units ? 2 : 0);
+  out_flags = flags;
+  auto setup = [&](int pid, const Case &c, int first, int base) {
+    pl[pid].plane = {c.stride, base + c.src_offset, c.plane.width, c.plane.height};
+    pl[pid].units = {c.rows, c.cols, c.unit_size, c.cols};
+    pl[pid].pp_offset = base + c.pre_offset;
+    pl[pid].dst_offset = base + c.dst_offset;
+    pl[pid].Lr_buffer_offset = first;
+    pl[pid].subsampling = 1;
+    pl[pid].hbd = c.bit_depth > 8;
+    pl[pid].bit_depth = c.bit_depth;
+    pl[pid].unit_shift = __builtin_ctz(c.unit_size);
+  };
+  setup(1, cu, u_first, u_base);
+  setup(2, cv, v_first, v_base);
+  src = {pool.data(), pool.size()};
+  dst = {pool.data(), pool.size()};
+  LrTypeSgr = {reinterpret_cast<const uint8_t *>(types.data()), types.size() * sizeof(types[0])};
+  LrWiener = {reinterpret_cast<const uint8_t *>(taps.data()), taps.size() * sizeof(taps[0])};
+  sp_chroma = {&tex_uv};
+  shader_scramble(&order);
+  for (int y = 0; y < cu.dispatch_height; y += kThreadsY) {
+    for (int x = 0; x < cu.dispatch_width; x += kThreadsX) {
+      uint3 group(x / kThreadsX, y / kThreadsY, 0);
+      gs_run_group(kThreadsX * kThreadsY, run_thread, &group, &order);
+    }
+  }
+}
 }
 
 static constexpr int kSwitchable = 3, kWienerOrNone = 4;
@@ -301,4 +426,132 @@ int main() {
     }
   }
   printf("restoration_check: %d planes match the scalar AV1 reference at 8 and 10 bits\n", cases);
+
+  // Verify LR_OUTPUT_SP_TEX: luma (with odd-dimension edge replication, write_fb=0/1) and combined
+  // chroma (mixed U/V restoration types, monochrome, write_fb=0/1) under adversarial scheduling.
+  int sp_cases = 0;
+  for (int depth : {8, 10}) {
+    const bool hbd = depth > 8;
+    const uint shift = hbd ? 6u : 0u;
+    const uint neutral = (hbd ? 512u : 128u) << shift;
+    for (Size sz : {Size{33, 25}, Size{64, 64}, Size{71, 61}, Size{19, 17}}) {
+      for (int kind : {-1, RESTORE_NONE, RESTORE_WIENER, RESTORE_SGRPROJ, kSwitchable}) {
+        const Case c = make_case(sz, 0, depth, 64, kind, sp_cases % SGRPROJ_PARAMS, sp_cases % 4, random);
+        const auto ref = reference_plane(c);
+        for (int write_fb : {0, 1}) {
+          const uint tw = uint((sz.width + 1) & ~1);
+          const uint th = uint((sz.height + 1) & ~1);
+          Texture<uint> tex_y(tw, th);
+          auto buf = c.pixels;
+          gs_reset_report();
+          gs_state.shader = "loop_restoration_sp_tex (luma)";
+          gs_state.track_unwritten = true;
+          g_out_of_bounds = 0;
+          sp_tex::dispatch_luma(c, buf, tex_y, (write_fb ? 1 : 0) | 2, random());
+          if (g_out_of_bounds || gs_state.out_of_bounds || gs_state.races || gs_state.sync_errors ||
+              gs_state.plain_barriers || gs_state.runaway_groups) {
+            fprintf(stderr, "sp_tex luma: sync/bounds error (races %ld, sync %ld, OOB %ld)\n",
+                    gs_state.races, gs_state.sync_errors, g_out_of_bounds);
+            gs_print_races("  ");
+            return 1;
+          }
+          const auto &exp_buf = write_fb ? ref : c.pixels;
+          if (buf != exp_buf) {
+            fprintf(stderr, "sp_tex luma fb mismatch (%dx%d depth %d kind %d write_fb %d)\n",
+                    sz.width, sz.height, depth, kind, write_fb);
+            return 1;
+          }
+          for (uint y = 0; y < th; ++y) {
+            for (uint x = 0; x < tw; ++x) {
+              const int sx = std::min(int(x), sz.width - 1);
+              const int sy = std::min(int(y), sz.height - 1);
+              const int at = c.dst_offset + sy * c.stride + sx * (hbd ? 2 : 1);
+              const uint exp = uint(hbd ? (ref[at] | (ref[at + 1] << 8)) : ref[at]) << shift;
+              const uint i = y * tw + x;
+              if (tex_y.writes[i] != 1u || tex_y.samples[i] != exp) {
+                fprintf(stderr, "sp_tex luma tex mismatch at (%u,%u) (%dx%d depth %d kind %d)\n",
+                        x, y, sz.width, sz.height, depth, kind);
+                return 1;
+              }
+            }
+          }
+          ++sp_cases;
+        }
+      }
+    }
+
+    // Combined chroma U+V dispatch across mixed restoration combinations.
+    const std::pair<int, int> chroma_kinds[] = {
+        {-1, -1},
+        {RESTORE_WIENER, RESTORE_NONE},
+        {RESTORE_NONE, RESTORE_SGRPROJ},
+        {RESTORE_SGRPROJ, RESTORE_WIENER},
+        {RESTORE_WIENER, RESTORE_SGRPROJ},
+        {kSwitchable, kSwitchable},
+    };
+    for (auto [ku, kv] : chroma_kinds) {
+      const Size csz{35, 29};
+      const Case cu = make_case(csz, 1, depth, 32, ku, sp_cases % SGRPROJ_PARAMS, 1, random);
+      const Case cv = make_case(csz, 1, depth, 32, kv, (sp_cases + 5) % SGRPROJ_PARAMS, 2, random);
+      const auto ref_u = reference_plane(cu);
+      const auto ref_v = reference_plane(cv);
+      std::vector<std::array<int, 4>> types = cu.types;
+      std::vector<std::array<int, 16>> taps = cu.taps;
+      const int v_offset = int(types.size());
+      types.insert(types.end(), cv.types.begin(), cv.types.end());
+      taps.insert(taps.end(), cv.taps.begin(), cv.taps.end());
+      if (types.empty()) {
+        types.push_back({RESTORE_NONE, 0, 0, 0});
+        taps.push_back({});
+      }
+      for (int write_fb : {0, 1}) {
+        for (int mono : {0, 1}) {
+          std::vector<uint8_t> pool = cu.pixels;
+          const int v_base = int(pool.size());
+          pool.insert(pool.end(), cv.pixels.begin(), cv.pixels.end());
+          const auto orig_pool = pool;
+          Texture<uint2> tex_uv(uint(csz.width), uint(csz.height));
+          gs_reset_report();
+          gs_state.shader = "loop_restoration_sp_tex (chroma)";
+          gs_state.track_unwritten = true;
+          g_out_of_bounds = 0;
+          const int flags = (write_fb ? 1 : 0) | 4 | (mono ? 8 : 0) | 16;
+          sp_tex::dispatch_chroma(cu, cv, pool, types, taps, cu.first_unit, v_offset + cv.first_unit, 0, v_base,
+                                  tex_uv, flags, random());
+          if (g_out_of_bounds || gs_state.out_of_bounds || gs_state.races || gs_state.sync_errors ||
+              gs_state.plain_barriers || gs_state.runaway_groups) {
+            fprintf(stderr, "sp_tex chroma: sync/bounds error (races %ld, sync %ld, OOB %ld)\n",
+                    gs_state.races, gs_state.sync_errors, g_out_of_bounds);
+            gs_print_races("  ");
+            return 1;
+          }
+          if (write_fb) {
+            if (!std::equal(ref_u.begin(), ref_u.end(), pool.begin()) ||
+                !std::equal(ref_v.begin(), ref_v.end(), pool.begin() + v_base)) {
+              fprintf(stderr, "sp_tex chroma fb mismatch (depth %d ku %d kv %d mono %d)\n", depth, ku, kv, mono);
+              return 1;
+            }
+          } else if (pool != orig_pool) {
+            fprintf(stderr, "sp_tex chroma wrote fb when write_fb=0\n");
+            return 1;
+          }
+          for (int y = 0; y < csz.height; ++y) {
+            for (int x = 0; x < csz.width; ++x) {
+              const int at = cu.dst_offset + y * cu.stride + x * (hbd ? 2 : 1);
+              const uint eu = mono ? neutral : (uint(hbd ? (ref_u[at] | (ref_u[at + 1] << 8)) : ref_u[at]) << shift);
+              const uint ev = mono ? neutral : (uint(hbd ? (ref_v[at] | (ref_v[at + 1] << 8)) : ref_v[at]) << shift);
+              const uint i = uint(y * csz.width + x);
+              if (tex_uv.writes[i] != 1u || tex_uv.samples[i].x != eu || tex_uv.samples[i].y != ev) {
+                fprintf(stderr, "sp_tex chroma tex mismatch at (%d,%d) depth %d ku %d kv %d mono %d\n",
+                        x, y, depth, ku, kv, mono);
+                return 1;
+              }
+            }
+          }
+          ++sp_cases;
+        }
+      }
+    }
+  }
+  printf("restoration_check: %d fused semi-planar cases matched the scalar AV1 reference\n", sp_cases);
 }

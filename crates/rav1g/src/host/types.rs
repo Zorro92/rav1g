@@ -111,8 +111,12 @@ pub struct compute_shader_lib {
     pub shader_idct_sort: ComputeShader,
     pub shader_loop_rest: ComputeShader,
     pub shader_loop_rest_wiener: ComputeShader,
+    pub shader_loop_rest_sp_tex: ComputeShader,
+    pub shader_loop_rest_wiener_sp_tex: ComputeShader,
     pub shader_cdef_filter: ComputeShader,
     pub shader_cdef_filter_v2: ComputeShader,
+    pub shader_cdef_filter_v3: ComputeShader,
+    pub shader_cdef_filter_v3_sp_tex: ComputeShader,
     pub shader_intra_filter_legacy: ComputeShader,
     pub shader_intra_main_prefetch_hbd: ComputeShader,
     pub shader_intra_main_single_edge: ComputeShader,
@@ -132,6 +136,7 @@ pub struct compute_shader_lib {
     pub shader_filmgrain_filter_sp_tex_v2: ComputeShader,
     // The lists of CDEF from the mode info (`postfilter.rs`, `Av1Core::gpu_cdef_lists`).
     pub shader_cdef_lists: ComputeShader,
+    pub shader_cdef_lists_v2: ComputeShader,
     // The mode info grid from the records (`grid_check.rs`): the grid of the slot in a decoder whose
     // parse writes none (`Av1Core::gpu_grid`), or a second grid for the check of the pass.
     pub shader_mi_grid_build: ComputeShader,
@@ -144,6 +149,7 @@ pub struct compute_shader_lib {
     pub shader_gen_lf_vert: ComputeShader,
     pub shader_gen_lf_hor: ComputeShader,
     pub shader_upscale: ComputeShader,
+    pub shader_upscale_sp_tex: ComputeShader,
     pub shaders_8bit: bitdepth_dependent_shaders,
     pub shaders_hbd: bitdepth_dependent_shaders,
     pub sig_idct: Option<ID3D12RootSignature>,
@@ -159,9 +165,12 @@ pub struct compute_shader_lib {
     pub sig_lf: Option<ID3D12RootSignature>,
     pub sig_lf_gen: Option<ID3D12RootSignature>,
     pub sig_loop_rest: Option<ID3D12RootSignature>,
+    pub sig_loop_rest_sp_tex: Option<ID3D12RootSignature>,
     pub sig_cdef_filter: Option<ID3D12RootSignature>,
+    pub sig_cdef_filter_sp_tex: Option<ID3D12RootSignature>,
     pub sig_film_grain: Option<ID3D12RootSignature>,
     pub sig_upscale: Option<ID3D12RootSignature>,
+    pub sig_upscale_sp_tex: Option<ID3D12RootSignature>,
     pub sig_copy_plane_sp: Option<ID3D12RootSignature>,
     pub sig_copy_plane_sp_tex: Option<ID3D12RootSignature>,
     pub sig_film_grain_tex: Option<ID3D12RootSignature>,
@@ -254,6 +263,8 @@ pub struct av1_frame_thread_data {
     pub loop_rest_wiener: *mut GpuBufferObject,
     pub cdef_indexes: *mut GpuBufferObject,
     pub cdef_skips: *mut GpuBufferObject,
+    /// Packed 32-bit active masks per 64x32 CDEF v3 group (`cdef_lists_v2.hlsl`, `cdef_filter_v3.hlsl`).
+    pub cdef_masks: *mut GpuBufferObject,
     /// With the check of the grid (`Av1Core::gpu_grid_check`): the grid the GPU builds (`grid_check.rs`);
     /// null otherwise.
     pub mode_info_grid_gpu: *mut GpuBufferObject,
@@ -291,6 +302,11 @@ pub struct av1_frame_thread_data {
     pub do_superres: c_int,
     pub is_hbd: c_int,
     pub output_frame: c_int,
+    /// Direct semi-planar output fused into the last postfilter stage for the frame being recorded.
+    pub fused_sp_active: c_int,
+    pub fused_sp_pair: u32,
+    pub fused_sp_luma_done: c_int,
+    pub fused_sp_chroma_done: c_int,
     pub slot_index: c_int,
     pub iter_grid_stride: c_int,
     pub iter_grid_stride_uv: c_int,

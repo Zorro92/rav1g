@@ -17,14 +17,43 @@ use super::core::{
     alloc_constants, buffer, commands, perf_gpu_mark, pipeline, stage_dump_active, stage_dump_data, stage_dump_fb,
 };
 use super::types::{Av1Core, av1_stage_dump_region};
-use crate::gpu::BufferState;
+use crate::gpu::d3d12::{com_ref, wrapped_ref};
+use crate::gpu::{BufferState, Device, PlaneViews};
 use crate::sys::{
     AV1_COMMON, AV1_PERF_GPU_CDEF, AV1_PERF_GPU_CDEF_LISTS, AV1_PERF_GPU_LOOP_REST, AV1_PERF_GPU_SUPERRES, AV1LrStruct,
     HwFrameBuffer, MI_SIZE_64X64, RESTORE_NONE, RESTORE_WIENER,
 };
+use windows::Win32::Graphics::Direct3D12::ID3D12Device;
+
+/// Direct semi-planar (NV12/P010) texture target fused into the last postfilter stage (CDEF, superres,
+/// or loop restoration), avoiding a separate full-frame `copy_plane_sp_tex_v2` pass.
+#[derive(Clone, Copy)]
+pub(crate) struct FusedTarget {
+    pub pair: u32,
+    pub write_fb_y: bool,
+    pub write_fb_uv: bool,
+    pub out_luma: bool,
+    pub out_chroma: bool,
+    pub is_monochrome: bool,
+}
 
 fn plane_words(buffer: &HwFrameBuffer) -> [[c_int; 4]; 3] {
     buffer.planes.map(|plane| [plane.stride, plane.offset, plane.res_stride, plane.res_offset])
+}
+
+/// Binds the plane UAV descriptor table for a fused semi-planar output pass.
+///
+/// # Safety
+/// `dec` is the decoder with its device and `plane_views`; `pair` is a valid pair written for this frame.
+unsafe fn bind_fused_planes(dec: *mut Av1Core, root: u32, pair: u32) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let commands = commands(dec);
+        let views = wrapped_ref::<_, PlaneViews>(&(*dec).plane_views).expect("direct semi-planar has plane views");
+        let device =
+            Device::new(com_ref::<_, ID3D12Device>(&(*dec).compute.device).expect("decoder has a D3D12 device"));
+        commands.bind_write_planes(root, device, views, pair);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -43,7 +72,13 @@ struct UpscaleData {
 ///
 /// # Safety
 /// `dec` is the decoder while it records a frame; `src` and `dst` are frame buffers of it.
-unsafe fn superres(dec: *mut Av1Core, src: *const HwFrameBuffer, dst: *const HwFrameBuffer, iter: c_int) {
+unsafe fn superres(
+    dec: *mut Av1Core,
+    src: *const HwFrameBuffer,
+    dst: *const HwFrameBuffer,
+    iter: c_int,
+    fused: Option<FusedTarget>,
+) {
     // SAFETY: the caller's contract.
     unsafe {
         let td = &mut *(*dec).curr_frame_data;
@@ -65,21 +100,53 @@ unsafe fn superres(dec: *mut Av1Core, src: *const HwFrameBuffer, dst: *const HwF
         (*data).src_planes[1][3] = (src.width + 1) >> 1;
         (*data).src_planes[2][3] = (src.width + 1) >> 1;
 
-        let shader = pipeline(&raw const (*(*dec).shader_lib).shader_upscale);
-        commands.set_pipeline(shader);
-        commands.set_layout(shader.layout());
-        commands.bind_write(0, frame_buffers.location());
-        commands.bind_constants(1, constants.location);
-        for plane in 0..3 {
-            let w = if plane != 0 { dst_buffer.uv_crop_width } else { dst_buffer.y_crop_width };
-            let h = if plane != 0 { dst_buffer.uv_crop_height } else { dst_buffer.y_crop_height };
-            let wi_count = h * ((w + 3) >> 2);
-            // plane, wi_count, hbd
-            commands.set_inline_constants(2, &[plane, wi_count, dst_buffer.hbd], 0);
-            commands.dispatch(((wi_count + 63) >> 6) as u32, 1, 1);
+        if let Some(target) = fused {
+            let shader = pipeline(&raw const (*(*dec).shader_lib).shader_upscale_sp_tex);
+            commands.set_pipeline(shader);
+            commands.set_layout(shader.layout());
+            commands.bind_write(0, frame_buffers.location());
+            commands.bind_constants(1, constants.location);
+            bind_fused_planes(dec, 3, target.pair);
+
+            if target.write_fb_y || target.out_luma {
+                let w = dst_buffer.y_crop_width;
+                let h = dst_buffer.y_crop_height;
+                let wi_count = h * ((w + 3) >> 2);
+                let flags = c_int::from(target.write_fb_y) | (c_int::from(target.out_luma) << 1);
+                // plane, wi_count, hbd, height, out_flags
+                commands.set_inline_constants(2, &[0, wi_count, dst_buffer.hbd, h, flags], 0);
+                commands.dispatch(((wi_count + 63) >> 6) as u32, 1, 1);
+            }
+            if target.write_fb_uv || target.out_chroma {
+                let w = dst_buffer.uv_crop_width;
+                let h = dst_buffer.uv_crop_height;
+                let wi_count = h * ((w + 3) >> 2);
+                let flags = c_int::from(target.write_fb_uv)
+                    | (c_int::from(target.out_chroma) << 1)
+                    | (c_int::from(target.is_monochrome) << 2);
+                commands.set_inline_constants(2, &[1, wi_count, dst_buffer.hbd, h, flags], 0);
+                commands.dispatch(((wi_count + 63) >> 6) as u32, 1, 1);
+            }
+            if target.write_fb_y || target.write_fb_uv || stage_dump_active(dec) {
+                commands.write_barrier(frame_buffers);
+            }
+        } else {
+            let shader = pipeline(&raw const (*(*dec).shader_lib).shader_upscale);
+            commands.set_pipeline(shader);
+            commands.set_layout(shader.layout());
+            commands.bind_write(0, frame_buffers.location());
+            commands.bind_constants(1, constants.location);
+            for plane in 0..3 {
+                let w = if plane != 0 { dst_buffer.uv_crop_width } else { dst_buffer.y_crop_width };
+                let h = if plane != 0 { dst_buffer.uv_crop_height } else { dst_buffer.y_crop_height };
+                let wi_count = h * ((w + 3) >> 2);
+                // plane, wi_count, hbd
+                commands.set_inline_constants(2, &[plane, wi_count, dst_buffer.hbd], 0);
+                commands.dispatch(((wi_count + 63) >> 6) as u32, 1, 1);
+            }
+            commands.write_barrier(frame_buffers);
         }
 
-        commands.write_barrier(frame_buffers);
         perf_gpu_mark(dec, AV1_PERF_GPU_SUPERRES);
         stage_dump_fb(dec, if iter == 2 { c"superres_lr" } else { c"superres" }, dst, std::ptr::null());
     }
@@ -106,7 +173,9 @@ struct CdefData {
     hbd: c_int,
 
     bit_depth: c_int,
-    _dummie: [c_int; 3],
+    out_crop_w: c_int,
+    out_crop_h: c_int,
+    out_flags: c_int,
 
     cdef_directions: [[[c_int; 4]; 2]; 16],
     cdef_strength: [[c_int; 4]; 16],
@@ -119,6 +188,18 @@ static CDEF_V2: AtomicI32 = AtomicI32::new(1);
 #[unsafe(no_mangle)]
 pub extern "C" fn av1_set_cdef_v2(enable: c_int) {
     CDEF_V2.store(enable, Ordering::Relaxed);
+}
+
+// av1_set_cdef_v3_legacy(1) selects cdef_filter_v2 + cdef_lists (-cdefv3legacy).
+static CDEF_V3_LEGACY: AtomicI32 = AtomicI32::new(0);
+/// `av1_set_cdef_v3_legacy` (`dx/av1_perf.h`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_cdef_v3_legacy(enable: c_int) {
+    CDEF_V3_LEGACY.store(enable, Ordering::Relaxed);
+}
+
+pub(crate) fn cdef_v3_enabled() -> bool {
+    CDEF_V2.load(Ordering::Relaxed) != 0 && CDEF_V3_LEGACY.load(Ordering::Relaxed) == 0
 }
 
 // The two bytes of TX_INFO_WORD that cdef_lists.hlsl reads.
@@ -142,30 +223,50 @@ const _: () = {
 /// # Safety
 /// `dec` is the decoder while it records a frame whose slot has the lists as buffers the GPU may write;
 /// `cm` is the frame's. `sizes`: `nhfb`, `nvfb`, `skip_cols`, `skip_rows` of the frame.
-unsafe fn record_cdef_lists(dec: *mut Av1Core, cm: &AV1_COMMON, sizes: [c_int; 4]) {
+unsafe fn record_cdef_lists(dec: *mut Av1Core, cm: &AV1_COMMON, sizes: [c_int; 4], use_v3: bool) {
     let [nhfb, nvfb, skip_cols, skip_rows] = sizes;
     // SAFETY: the caller's contract.
     unsafe {
         let td = &mut *(*dec).curr_frame_data;
         let commands = commands(dec);
         let lib = (*dec).shader_lib;
-        let shader = pipeline(&raw const (*lib).shader_cdef_lists);
-        let (indexes, skips) = (buffer(td.cdef_indexes), buffer(td.cdef_skips));
-        commands.transition(indexes, BufferState::Read, BufferState::ReadWrite);
-        commands.transition(skips, BufferState::Read, BufferState::ReadWrite);
-        commands.set_layout(shader.layout());
-        commands.set_pipeline(shader);
-        commands.bind_read(0, buffer(td.parse_buffers[super::pool::Kind::ModeInfo as usize]).location());
-        commands.bind_read(1, buffer(td.mode_info_grid).location());
-        commands.bind_write(2, indexes.location());
-        commands.bind_write(3, skips.location());
-        // mi_stride, mi_addr_base, index_stride, skips_stride, skip_cols, skip_rows
+        let indexes = buffer(td.cdef_indexes);
         let inline = [cm.mi_stride, crate::sys::MI_GRID_BASE as c_int, nhfb, nhfb * 16, skip_cols, skip_rows];
-        commands.set_inline_constants(4, &inline, 0);
-        // A group a 64x64 block, a thread an 8x8 block.
-        commands.dispatch(nhfb as u32, nvfb as u32, 1);
+        let mi_pool = buffer(td.parse_buffers[super::pool::Kind::ModeInfo as usize]).location();
+        let mi_grid = buffer(td.mode_info_grid).location();
+
+        // Always build the full skips table when legacy CDEF runs or when -dumpstages dumps cdef_info.
+        let need_skips = !use_v3 || stage_dump_active(dec);
+        commands.transition(indexes, BufferState::Read, BufferState::ReadWrite);
+        if use_v3 {
+            let masks = buffer(td.cdef_masks);
+            let shader = pipeline(&raw const (*lib).shader_cdef_lists_v2);
+            commands.transition(masks, BufferState::Read, BufferState::ReadWrite);
+            commands.set_layout(shader.layout());
+            commands.set_pipeline(shader);
+            commands.bind_read(0, mi_pool);
+            commands.bind_read(1, mi_grid);
+            commands.bind_write(2, indexes.location());
+            commands.bind_write(3, masks.location());
+            commands.set_inline_constants(4, &inline, 0);
+            commands.dispatch(nhfb as u32, nvfb as u32, 1);
+            commands.transition(masks, BufferState::ReadWrite, BufferState::Read);
+        }
+        if need_skips {
+            let skips = buffer(td.cdef_skips);
+            let shader = pipeline(&raw const (*lib).shader_cdef_lists);
+            commands.transition(skips, BufferState::Read, BufferState::ReadWrite);
+            commands.set_layout(shader.layout());
+            commands.set_pipeline(shader);
+            commands.bind_read(0, mi_pool);
+            commands.bind_read(1, mi_grid);
+            commands.bind_write(2, indexes.location());
+            commands.bind_write(3, skips.location());
+            commands.set_inline_constants(4, &inline, 0);
+            commands.dispatch(nhfb as u32, nvfb as u32, 1);
+            commands.transition(skips, BufferState::ReadWrite, BufferState::Read);
+        }
         commands.transition(indexes, BufferState::ReadWrite, BufferState::Read);
-        commands.transition(skips, BufferState::ReadWrite, BufferState::Read);
         perf_gpu_mark(dec, AV1_PERF_GPU_CDEF_LISTS);
     }
 }
@@ -174,14 +275,21 @@ unsafe fn record_cdef_lists(dec: *mut Av1Core, cm: &AV1_COMMON, sizes: [c_int; 4
 ///
 /// # Safety
 /// `dec` is the decoder while it records a frame; `cm` is the frame's; `src` and `dst` are frame buffers.
-unsafe fn cdef_filter_run(dec: *mut Av1Core, cm: &AV1_COMMON, src: *const HwFrameBuffer, dst: *const HwFrameBuffer) {
-    // SAFETY: the caller's contract; the two lists are mapped buffers of the slot, sized for the largest
+unsafe fn cdef_filter_run(
+    dec: *mut Av1Core,
+    cm: &AV1_COMMON,
+    src: *const HwFrameBuffer,
+    dst: *const HwFrameBuffer,
+    fused: Option<FusedTarget>,
+) {
+    // SAFETY: the caller's contract; the lists are mapped buffers of the slot, sized for the largest
     // frame of the decoder, and the mode info grid covers the frame.
     unsafe {
         let td = &mut *(*dec).curr_frame_data;
         if td.do_cdef == 0 {
             return;
         }
+        let use_v3 = cdef_v3_enabled();
         let cdef_info = &cm.cdef_info;
         let mi_size_64 = MI_SIZE_64X64 as c_int;
 
@@ -189,13 +297,11 @@ unsafe fn cdef_filter_run(dec: *mut Av1Core, cm: &AV1_COMMON, src: *const HwFram
         let nhfb = (cm.mi_cols + mi_size_64 - 1) / mi_size_64;
         let skip_rows = (nvfb * 16).min(cm.mi_rows / 2);
         let skip_cols = (nhfb * 16).min(cm.mi_cols / 2);
-        // The two lists: the strength index of every 64x64 block, and for every 8x8 block whether all of
-        // it is skipped. Written here, from the frame's mode info, or by a pass of the command list in
-        // a decoder for that (`record_cdef_lists`, below the constants).
         let gpu_lists = (*dec).gpu_cdef_lists != 0;
         if !gpu_lists {
             let cdef_indexes = (*td.cdef_indexes).host_ptr.cast::<c_int>();
             let cdef_skips = (*td.cdef_skips).host_ptr.cast::<c_int>();
+            let cdef_masks = (*td.cdef_masks).host_ptr.cast::<u32>();
             let mode_info = |row: c_int, col: c_int| {
                 &*crate::sys::mi_grid_record(cm.mi, *cm.mi_grid_visible.offset((row * cm.mi_stride + col) as isize))
             };
@@ -205,13 +311,25 @@ unsafe fn cdef_filter_run(dec: *mut Av1Core, cm: &AV1_COMMON, src: *const HwFram
                         c_int::from(mode_info(mi_size_64 * fbr, mi_size_64 * fbc).cdef_strength);
                 }
             }
+            if use_v3 {
+                std::ptr::write_bytes(cdef_masks, 0, (2 * nvfb * nhfb) as usize);
+            }
+            let write_skips = !use_v3 || stage_dump_active(dec);
             for r in 0..skip_rows {
                 for c in 0..skip_cols {
                     let skipped = mode_info(r * 2, c * 2).skip != 0
                         && mode_info(r * 2, c * 2 + 1).skip != 0
                         && mode_info(r * 2 + 1, c * 2).skip != 0
                         && mode_info(r * 2 + 1, c * 2 + 1).skip != 0;
-                    *cdef_skips.offset((r * nhfb * 16 + c) as isize) = c_int::from(skipped);
+                    if write_skips {
+                        *cdef_skips.offset((r * nhfb * 16 + c) as isize) = c_int::from(skipped);
+                    }
+                    if use_v3 && !skipped {
+                        let gy = r >> 2;
+                        let gx = c >> 3;
+                        let bit = ((r & 3) << 3) | (c & 7);
+                        *cdef_masks.offset((gy * nhfb + gx) as isize) |= 1u32 << bit;
+                    }
                 }
             }
         }
@@ -265,15 +383,23 @@ unsafe fn cdef_filter_run(dec: *mut Av1Core, cm: &AV1_COMMON, src: *const HwFram
         (*data).dst_offset[1] = target.planes[1].offset;
         (*data).dst_offset[2] = target.planes[2].offset;
 
+        (*data).out_crop_w = source.y_crop_width;
+        (*data).out_crop_h = source.y_crop_height;
+        (*data).out_flags = match fused {
+            Some(f) => {
+                c_int::from(f.write_fb_y)
+                    | (c_int::from(f.write_fb_uv) << 1)
+                    | (c_int::from(f.out_luma) << 2)
+                    | (c_int::from(f.out_chroma) << 3)
+                    | (c_int::from(f.is_monochrome) << 4)
+            }
+            None => 0,
+        };
+
         if gpu_lists {
-            record_cdef_lists(dec, cm, [nhfb, nvfb, skip_cols, skip_rows]);
+            record_cdef_lists(dec, cm, [nhfb, nvfb, skip_cols, skip_rows], use_v3);
         }
 
-        // -dumpstages: the two lists CDEF reads besides the frame. The strength index of every 64x64 block,
-        // rows of nhfb; behind them the skip flags of the 8x8 blocks, rows of skips_stride, of which the loops
-        // above write skip_cols by skip_rows for this frame. The copy is a command of the list, behind the
-        // pass that writes the lists in a decoder that has them written there: it has what CDEF reads
-        // either way.
         if stage_dump_active(dec) {
             let indexes = &*td.cdef_indexes;
             let skips = &*td.cdef_skips;
@@ -307,24 +433,38 @@ unsafe fn cdef_filter_run(dec: *mut Av1Core, cm: &AV1_COMMON, src: *const HwFram
         let commands = commands(dec);
         let frame_buffers = buffer((*dec).frame_buffer_pool);
         let lib = (*dec).shader_lib;
-        let (shader, x_shift, y_shift) = if CDEF_V2.load(Ordering::Relaxed) == 0 {
-            (&raw const (*lib).shader_cdef_filter, 5, 5)
+        let (shader, x_shift, y_shift, second_srv) = if use_v3 {
+            let shader = if fused.is_some() {
+                &raw const (*lib).shader_cdef_filter_v3_sp_tex
+            } else {
+                &raw const (*lib).shader_cdef_filter_v3
+            };
+            (shader, 6, 5, td.cdef_masks)
+        } else if CDEF_V2.load(Ordering::Relaxed) == 0 {
+            (&raw const (*lib).shader_cdef_filter, 5, 5, td.cdef_skips)
         } else {
-            (&raw const (*lib).shader_cdef_filter_v2, 6, 5)
+            (&raw const (*lib).shader_cdef_filter_v2, 6, 5, td.cdef_skips)
         };
         let shader = pipeline(shader);
         commands.set_pipeline(shader);
         commands.set_layout(shader.layout());
         commands.bind_read(0, buffer(td.cdef_indexes).location());
-        commands.bind_read(1, buffer(td.cdef_skips).location());
+        commands.bind_read(1, buffer(second_srv).location());
         commands.bind_write(2, frame_buffers.location());
         commands.bind_constants(3, constants.location);
+        if let Some(f) = fused {
+            debug_assert!(use_v3);
+            bind_fused_planes(dec, 4, f.pair);
+        }
         commands.dispatch(
             ((w + (1 << x_shift) - 1) >> x_shift) as u32,
             ((h + (1 << y_shift) - 1) >> y_shift) as u32,
             1,
         );
-        commands.write_barrier(frame_buffers);
+        let wrote_fb = fused.is_none_or(|f| f.write_fb_y || f.write_fb_uv) || stage_dump_active(dec);
+        if wrote_fb {
+            commands.write_barrier(frame_buffers);
+        }
         perf_gpu_mark(dec, AV1_PERF_GPU_CDEF);
         stage_dump_fb(dec, c"cdef", dst, src);
     }
@@ -378,7 +518,12 @@ struct RestorationData {
 /// # Safety
 /// `dec` is the decoder while it records a frame; `cm` is the frame's and `lr_ctxt` the decoder's
 /// restoration context.
-unsafe fn looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON, lr_ctxt: *mut AV1LrStruct) {
+unsafe fn looprestoration(
+    dec: *mut Av1Core,
+    cm: *mut AV1_COMMON,
+    lr_ctxt: *mut AV1LrStruct,
+    fused: Option<FusedTarget>,
+) {
     // SAFETY: the caller's contract; the two unit lists are mapped buffers of the slot, sized for the
     // units of the largest frame of the decoder.
     unsafe {
@@ -496,32 +641,82 @@ unsafe fn looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON, lr_ctxt: *mut 
         let commands = commands(dec);
         let frame_buffers = buffer((*dec).frame_buffer_pool);
         let lib = (*dec).shader_lib;
-        // Keep one dispatch per plane and use the same root bindings for both pipelines.
-        let shaders = needs_general.map(|needs_general| {
-            if needs_general { &raw const (*lib).shader_loop_rest } else { &raw const (*lib).shader_loop_rest_wiener }
-        });
-        let mut bound = shaders[0];
-        let shader = pipeline(bound);
-        commands.set_pipeline(shader);
-        commands.set_layout(shader.layout());
-        commands.bind_read(0, frame_buffers.location());
-        commands.bind_read(1, buffer(td.loop_rest_types).location());
-        commands.bind_read(2, buffer(td.loop_rest_wiener).location());
-        commands.bind_write(3, frame_buffers.location());
-        commands.bind_constants(4, sgr_constants.location);
-        commands.bind_constants(5, plane_constants.location);
+        if let Some(target) = fused {
+            let luma_shader = if needs_general[0] {
+                &raw const (*lib).shader_loop_rest_sp_tex
+            } else {
+                &raw const (*lib).shader_loop_rest_wiener_sp_tex
+            };
+            let chroma_shader = if needs_general[1] || needs_general[2] {
+                &raw const (*lib).shader_loop_rest_sp_tex
+            } else {
+                &raw const (*lib).shader_loop_rest_wiener_sp_tex
+            };
+            let mut bound = luma_shader;
+            let shader = pipeline(bound);
+            commands.set_pipeline(shader);
+            commands.set_layout(shader.layout());
+            commands.bind_read(0, frame_buffers.location());
+            commands.bind_read(1, buffer(td.loop_rest_types).location());
+            commands.bind_read(2, buffer(td.loop_rest_wiener).location());
+            commands.bind_write(3, frame_buffers.location());
+            commands.bind_constants(4, sgr_constants.location);
+            commands.bind_constants(5, plane_constants.location);
+            bind_fused_planes(dec, 7, target.pair);
 
-        for (p, shader) in shaders.into_iter().enumerate() {
-            if shader != bound {
-                bound = shader;
-                commands.set_pipeline(pipeline(bound));
+            if target.write_fb_y || target.out_luma {
+                let flags = c_int::from(target.write_fb_y) | (c_int::from(target.out_luma) << 1);
+                commands.set_inline_constants(6, &[c_int::from(restored[0]), 0, flags], 0);
+                commands.dispatch(((pl_width[0] + 15) >> 4) as u32, ((pl_height[0] + 3) >> 2) as u32, 1);
             }
-            // do_restoration, plane
-            commands.set_inline_constants(6, &[c_int::from(restored[p]), p as c_int], 0);
-            commands.dispatch(((pl_width[p] + 15) >> 4) as u32, ((pl_height[p] + 3) >> 2) as u32, 1);
-        }
+            if target.write_fb_uv || target.out_chroma {
+                if chroma_shader != bound {
+                    bound = chroma_shader;
+                    commands.set_pipeline(pipeline(bound));
+                }
+                let do_rest = c_int::from(restored[1]) | (c_int::from(restored[2]) << 1);
+                let flags = c_int::from(target.write_fb_uv)
+                    | (c_int::from(target.out_chroma) << 2)
+                    | (c_int::from(target.is_monochrome) << 3)
+                    | 16;
+                commands.set_inline_constants(6, &[do_rest, 1, flags], 0);
+                commands.dispatch(((pl_width[1] + 15) >> 4) as u32, ((pl_height[1] + 3) >> 2) as u32, 1);
+            }
+            if target.write_fb_y || target.write_fb_uv || stage_dump_active(dec) {
+                commands.write_barrier(frame_buffers);
+            }
+        } else {
+            // Keep one dispatch per plane and use the same root bindings for both pipelines.
+            let shaders = needs_general.map(|needs_general| {
+                if needs_general {
+                    &raw const (*lib).shader_loop_rest
+                } else {
+                    &raw const (*lib).shader_loop_rest_wiener
+                }
+            });
+            let mut bound = shaders[0];
+            let shader = pipeline(bound);
+            commands.set_pipeline(shader);
+            commands.set_layout(shader.layout());
+            commands.bind_read(0, frame_buffers.location());
+            commands.bind_read(1, buffer(td.loop_rest_types).location());
+            commands.bind_read(2, buffer(td.loop_rest_wiener).location());
+            commands.bind_write(3, frame_buffers.location());
+            commands.bind_constants(4, sgr_constants.location);
+            commands.bind_constants(5, plane_constants.location);
 
-        commands.write_barrier(frame_buffers);
+            for (p, shader) in shaders.into_iter().enumerate() {
+                if shader != bound {
+                    bound = shader;
+                    commands.set_pipeline(pipeline(bound));
+                }
+                // do_restoration, plane
+                commands.set_inline_constants(6, &[c_int::from(restored[p]), p as c_int], 0);
+                commands.dispatch(((pl_width[p] + 15) >> 4) as u32, ((pl_height[p] + 3) >> 2) as u32, 1);
+            }
+
+            commands.write_barrier(frame_buffers);
+        }
         perf_gpu_mark(dec, AV1_PERF_GPU_LOOP_REST);
         stage_dump_fb(dec, c"loop_rest", td.dst_frame_buffer, std::ptr::null());
     }
@@ -574,7 +769,12 @@ struct SuperresLayout {
 /// # Safety
 /// `dec` is the decoder while it records a frame; `cm` is the frame's and `lr_ctxt` the decoder's
 /// restoration context (`AV1LrStruct`).
-pub(crate) unsafe fn cdef_looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON, lr_ctxt: *mut c_void) {
+pub(crate) unsafe fn cdef_looprestoration(
+    dec: *mut Av1Core,
+    cm: *mut AV1_COMMON,
+    lr_ctxt: *mut c_void,
+    fused: Option<FusedTarget>,
+) {
     // SAFETY: the caller's contract; the frame buffers are those of the slot and the decoder's back
     // buffer, which only this thread touches while it records.
     unsafe {
@@ -583,7 +783,11 @@ pub(crate) unsafe fn cdef_looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON
         let cdef_dst = if td.do_loop_rest == td.do_superres { td.dst_frame_buffer } else { back_buffer1 };
         let dst_fb = td.dst_frame_buffer;
 
-        cdef_filter_run(dec, &*cm, td.frame_buffer, cdef_dst);
+        let cdef_fused = if td.do_superres == 0 && td.do_loop_rest == 0 { fused } else { None };
+        let superres_fused = if td.do_superres != 0 && td.do_loop_rest == 0 { fused } else { None };
+        let lr_fused = if td.do_loop_rest != 0 { fused } else { None };
+
+        cdef_filter_run(dec, &*cm, td.frame_buffer, cdef_dst, cdef_fused);
 
         if td.do_superres != 0 {
             let h_border = 16;
@@ -608,7 +812,7 @@ pub(crate) unsafe fn cdef_looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON
             if td.do_loop_rest != 0 {
                 // The frame before CDEF (the slot's frame buffer), upscaled into the back buffer.
                 set_superres_layout(back_buffer1, &layout);
-                superres(dec, td.frame_buffer, back_buffer1, 2);
+                superres(dec, td.frame_buffer, back_buffer1, 2, None);
             }
 
             if td.do_cdef != 0 || td.do_loop_rest == 0 {
@@ -617,7 +821,7 @@ pub(crate) unsafe fn cdef_looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON
                 let src = if td.do_cdef != 0 { cdef_dst } else { td.frame_buffer };
                 let dst = if td.do_loop_rest != 0 { td.frame_buffer } else { dst_fb };
                 set_superres_layout(dst, &layout);
-                superres(dec, src, dst, 3);
+                superres(dec, src, dst, 3, superres_fused);
             }
 
             // The frame's buffer has the upscaled layout from here on, if it did not get it above.
@@ -638,6 +842,6 @@ pub(crate) unsafe fn cdef_looprestoration(dec: *mut Av1Core, cm: *mut AV1_COMMON
             buf.widths[1] = dst_fb.width >> 1;
         }
 
-        looprestoration(dec, cm, lr_ctxt.cast());
+        looprestoration(dec, cm, lr_ctxt.cast(), lr_fused);
     }
 }

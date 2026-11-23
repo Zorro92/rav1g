@@ -277,9 +277,21 @@ void av1_set_perf_callback(av1_perf_frame_cb_fn_t cb, void *priv);
 
 /* Process-wide. Non-zero runs CDEF through cdef_filter_v2.hlsl, zero through
  * the original cdef_filter.hlsl; the decoded output is the same. On by
- * default: an application that never calls this gets cdef_filter_v2. Change
- * it only while no frame is in flight, like the callback above. */
+ * default: an application that never calls this gets cdef_filter_v3 (unless
+ * av1_set_cdef_v3_legacy is set). Change it only while no frame is in flight,
+ * like the callback above. */
 void av1_set_cdef_v2(int enable);
+
+/* Process-wide. Non-zero selects the legacy cdef_filter_v2 + cdef_lists path
+ * instead of cdef_filter_v3 + cdef_lists_v2 (-cdefv3legacy); the decoded
+ * output is the same. Change only while no frame is in flight. */
+void av1_set_cdef_v3_legacy(int enable);
+
+/* Process-wide. Non-zero disables fusing semi-planar output writes into the
+ * last postfilter stage and restores the separate copy_plane pass
+ * (-outputcopylegacy); the decoded output is the same. Change only while no
+ * frame is in flight. */
+void av1_set_output_copy_legacy(int enable);
 
 /* Process-wide. Set while no frame is in flight. Non-zero skips film grain synthesis. */
 void av1_set_skip_film_grain(int enable);

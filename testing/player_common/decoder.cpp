@@ -762,8 +762,11 @@ int AV1Decoder::DecodeOne() {
     XB_LOGI << "GPUTIME -nopresent: decoded frames go straight back to the pool, nothing is presented";
   // Select the CDEF shader while no frame is in flight.
   rav1g_set_cdef_v2(params_.cdefv2_ != 0);
+  av1_set_cdef_v3_legacy(params_.cdefv3legacy_);
+  av1_set_output_copy_legacy(params_.outputcopylegacy_);
   XB_LOGI << "CDEF shader: "
-          << (params_.cdefv1_ ? "cdef_filter (original, -cdefv1)" : "cdef_filter_v2 (default)");
+          << (params_.cdefv1_ ? "cdef_filter (original, -cdefv1)"
+                              : params_.cdefv3legacy_ ? "cdef_filter_v2 (-cdefv3legacy)" : "cdef_filter_v3 (default)");
   // -intrav2: the same rules, independent of the CDEF shader.
   rav1g_set_intra_v2(params_.intrav2_ != 0);
   XB_LOGI << "Intra shaders: "
@@ -811,7 +814,9 @@ int AV1Decoder::DecodeOne() {
   XB_LOGI << "Loop restoration shader: loop_restoration / loop_restoration_wiener (default)";
   XB_LOGI << "Direct NV12/P010 film grain shader: film_grain_filter_sp_tex_v2 (default)";
   XB_LOGI << "Film grain templates: CPU, uploaded with the random offsets";
-  XB_LOGI << "Direct NV12/P010 copy shader: copy_plane_sp_tex_v2 (default)";
+  XB_LOGI << "Direct NV12/P010 output: "
+          << (params_.outputcopylegacy_ ? "copy_plane_sp_tex_v2 (-outputcopylegacy)"
+                                        : "fused into last postfilter stage (default)");
 
   // -slots, -parseframes, -t: fixed when the decoder was created; Start() asks for a new decoder when a
   // value changes. What the decoder has is what the library made of them.

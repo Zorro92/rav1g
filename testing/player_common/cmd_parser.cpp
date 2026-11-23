@@ -80,10 +80,14 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        "the semi-planar output in textures a D3D11 device creates and D3D12 opens, with a wait on the decoder's "
        "shared fence in D3D11 for every frame",
        "", &params_.interop_},
-      {"cdefv2", atSingle, anOptional, "CDEF through cdef_filter_v2.hlsl (the default; same output)", "cdef",
+      {"cdefv2", atSingle, anOptional, "CDEF through cdef_filter_v2/v3.hlsl (the default; same output)", "cdef",
        &params_.cdefv2_},
       {"cdefv1", atSingle, anOptional, "CDEF through the original cdef_filter.hlsl (same output)", "cdef",
        &params_.cdefv1_},
+      {"cdefv3legacy", atSingle, anOptional, "legacy cdef_filter_v2 + cdef_lists instead of cdef_filter_v3 + cdef_lists_v2", "",
+       &params_.cdefv3legacy_},
+      {"outputcopylegacy", atSingle, anOptional, "disable fused semi-planar output in the last postfilter stage", "",
+       &params_.outputcopylegacy_},
       {"intrav2", atSingle, anOptional, "intra prediction through intra_v2.hlsl (same output)", "",
        &params_.intrav2_},
       {"intraopt", atSingle, anOptional, "optimized intra_main shaders (default)", "intra-main", &params_.intraopt_},
@@ -458,6 +462,8 @@ void CParameters::Reset() {
   params_.semi_planar_ = 0;
   params_.cdefv2_ = true;
   params_.cdefv1_ = false;
+  params_.cdefv3legacy_ = false;
+  params_.outputcopylegacy_ = false;
   params_.intrav2_ = false;
   params_.intraopt_ = false;
   params_.intraod_ = false;
