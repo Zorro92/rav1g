@@ -312,6 +312,14 @@ void av1_set_cdef_v3_legacy(int enable);
  * frame is in flight. */
 void av1_set_output_copy_legacy(int enable);
 
+/* Process-wide. Non-zero records the front of a frame's command list as
+ * before the merge (-frontmergelegacy): the mode info grid build,
+ * gen_pred_blocks, the residual clear with the transform sort, the loop
+ * filter's edge lists and the CDEF lists each in a dependent step of their
+ * own. Zero (the default) records them in two steps. The decoded output is
+ * the same. Change only while no frame is in flight. */
+void av1_set_front_merge_legacy(int enable);
+
 /* Process-wide. Set while no frame is in flight. Non-zero skips film grain synthesis. */
 void av1_set_skip_film_grain(int enable);
 

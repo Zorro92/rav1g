@@ -986,6 +986,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         cdef_v2: !task.cdefv1,
         cdef_v3_legacy: task.cdefv3legacy,
         output_copy_legacy: task.outputcopylegacy,
+        front_merge_legacy: task.frontmergelegacy,
         intra_v2: task.intrav2,
         intra_opt: task.intraopt,
         intra_filter_legacy: task.intrafilterlegacy,
@@ -996,6 +997,10 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         intra_edge_fix: task.intraedgefix,
         inter_fast: task.interfast,
     });
+    say!(
+        "Front of the frame: {}",
+        if task.frontmergelegacy { "five steps (-frontmergelegacy)" } else { "two steps (default)" }
+    );
     if task.output == ImageMode::Texture {
         say!(
             "Direct NV12/P010 output: {}",

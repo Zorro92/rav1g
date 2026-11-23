@@ -43,11 +43,16 @@ struct IdctFrameData {
 
 const _: () = assert!(TX_TYPES == 20);
 
-/// `av1_idct_run` of the C++: records the stage for the frame of the current command list.
+/// The front of `av1_idct_run` of the C++: the residual buffer is cleared and the transform blocks of
+/// the tiles are sorted by type. Neither reads anything another stage of the frame writes, so with the
+/// merged front (`frame::record_front`) both run in the step of gen_pred_blocks and the list passes, and
+/// [`idct_front_barrier`] goes with that step's barrier. `barrier`: the order of `-frontmergelegacy`: the
+/// clear has its mark, and the barrier and the mark of the sort follow here.
 ///
 /// # Safety
-/// `dec` is the decoder while it records a frame whose tiles are decoded.
-pub(crate) unsafe fn idct_run(dec: *mut Av1Core) {
+/// `dec` is the decoder while it records a frame whose tiles are decoded; once per frame, before
+/// [`idct_run`].
+pub(crate) unsafe fn idct_front(dec: *mut Av1Core, barrier: bool) {
     // SAFETY: the caller's contract: the frame data, its tiles, its frame buffer and the buffers and
     // pipelines of the decoder are live, and only this thread records.
     unsafe {
@@ -87,7 +92,9 @@ pub(crate) unsafe fn idct_run(dec: *mut Av1Core) {
         let value = [words, 0];
         commands.set_inline_constants(1, &value, 0);
         commands.dispatch(((value[0] + 63) / 64) as u32, 1, 1);
-        perf_gpu_mark(dec, AV1_PERF_GPU_RESIDUAL_CLEAR);
+        if barrier {
+            perf_gpu_mark(dec, AV1_PERF_GPU_RESIDUAL_CLEAR);
+        }
 
         let shader = pipeline(&raw const (*lib).shader_idct_sort);
         commands.set_layout(shader.layout());
@@ -110,8 +117,37 @@ pub(crate) unsafe fn idct_run(dec: *mut Av1Core) {
                 }
             }
         }
-        commands.write_barrier2(blocks, residuals);
-        perf_gpu_mark(dec, AV1_PERF_GPU_IDCT_SORT);
+        if barrier {
+            idct_front_barrier(dec);
+            perf_gpu_mark(dec, AV1_PERF_GPU_IDCT_SORT);
+        }
+    }
+}
+
+/// The barrier behind [`idct_front`]: the sorted list and the cleared residuals, for the transforms.
+///
+/// # Safety
+/// `dec` is the decoder while it records a frame.
+pub(crate) unsafe fn idct_front_barrier(dec: *mut Av1Core) {
+    // SAFETY: the caller's contract.
+    unsafe { commands(dec).write_barrier2(buffer((*dec).idct_blocks), buffer((*dec).idct_residuals)) };
+}
+
+/// `av1_idct_run` of the C++, behind [`idct_front`] and its barrier: one dispatch per transform type.
+///
+/// # Safety
+/// `dec` is the decoder while it records a frame whose tiles are decoded, after [`idct_front`].
+pub(crate) unsafe fn idct_run(dec: *mut Av1Core) {
+    // SAFETY: the caller's contract: the frame data, its tiles, its frame buffer and the buffers and
+    // pipelines of the decoder are live, and only this thread records.
+    unsafe {
+        let td = &mut *(*dec).curr_frame_data;
+        let tiles = std::slice::from_raw_parts_mut(td.tile_data, td.tile_count as usize);
+        let lib = (*dec).shader_lib;
+        let commands = commands(dec);
+        let residuals = buffer((*dec).idct_residuals);
+        let blocks = buffer((*dec).idct_blocks);
+        let frame_buffer = &*td.frame_buffer;
 
         let frame = alloc_constants::<IdctFrameData>(&mut td.command_buffer);
         for plane in 0..3 {
@@ -125,8 +161,12 @@ pub(crate) unsafe fn idct_run(dec: *mut Av1Core) {
         commands.bind_write(1, residuals.location());
         commands.bind_write(2, buffer(td.parse_buffers[super::pool::Kind::Coefs as usize]).location());
         commands.bind_constants(4, frame.location);
-        // The first tile has the start of each type in the list of the frame.
-        let starts = tiles[0].idct_blocks_sizes;
+        // The start of each type in the list of the frame: where the first tile of `idct_front`'s order
+        // starts it, which is the smallest start of the type over the tiles. Not `tiles[0]`: gen_pred_blocks
+        // moves the tile with the most intra iterations to the front, and with the merged front it does so
+        // after the sort's starts were set.
+        let starts: [c_int; TX_TYPES + 1] =
+            std::array::from_fn(|t| tiles.iter().map(|tile| tile.idct_blocks_sizes[t]).min().unwrap_or(0));
         for tx_type in 0..TX_TYPES {
             let offset = starts[tx_type];
             let count = starts[tx_type + 1] - offset;

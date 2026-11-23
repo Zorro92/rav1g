@@ -224,6 +224,30 @@ const _: () = {
 /// `dec` is the decoder while it records a frame whose slot has the lists as buffers the GPU may write;
 /// `cm` is the frame's. `sizes`: `nhfb`, `nvfb`, `skip_cols`, `skip_rows` of the frame.
 unsafe fn record_cdef_lists(dec: *mut Av1Core, cm: &AV1_COMMON, sizes: [c_int; 4], use_v3: bool) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        record_cdef_lists_begin(dec, cm, sizes, use_v3);
+        record_cdef_lists_end(dec, use_v3);
+        perf_gpu_mark(dec, AV1_PERF_GPU_CDEF_LISTS);
+    }
+}
+
+/// Whether the frame's CDEF reads the full skip table (`cdef_lists.hlsl`): the legacy CDEF, or a stage
+/// dump of `cdef_info`.
+///
+/// # Safety
+/// `dec` is the decoder while it records a frame.
+unsafe fn cdef_needs_skips(dec: *mut Av1Core, use_v3: bool) -> bool {
+    // SAFETY: the caller's contract.
+    !use_v3 || unsafe { stage_dump_active(dec) }
+}
+
+/// [`record_cdef_lists`] up to the barrier: the lists move to the state for writing and the shaders
+/// are dispatched.
+///
+/// # Safety
+/// As for [`record_cdef_lists`].
+unsafe fn record_cdef_lists_begin(dec: *mut Av1Core, cm: &AV1_COMMON, sizes: [c_int; 4], use_v3: bool) {
     let [nhfb, nvfb, skip_cols, skip_rows] = sizes;
     // SAFETY: the caller's contract.
     unsafe {
@@ -236,12 +260,19 @@ unsafe fn record_cdef_lists(dec: *mut Av1Core, cm: &AV1_COMMON, sizes: [c_int; 4
         let mi_grid = buffer(td.mode_info_grid).location();
 
         // Always build the full skips table when legacy CDEF runs or when -dumpstages dumps cdef_info.
-        let need_skips = !use_v3 || stage_dump_active(dec);
+        let need_skips = cdef_needs_skips(dec, use_v3);
+        // The transitions first, one barrier, then the dispatches: nothing between two dispatches of the
+        // step.
         commands.transition(indexes, BufferState::Read, BufferState::ReadWrite);
+        if use_v3 {
+            commands.transition(buffer(td.cdef_masks), BufferState::Read, BufferState::ReadWrite);
+        }
+        if need_skips {
+            commands.transition(buffer(td.cdef_skips), BufferState::Read, BufferState::ReadWrite);
+        }
         if use_v3 {
             let masks = buffer(td.cdef_masks);
             let shader = pipeline(&raw const (*lib).shader_cdef_lists_v2);
-            commands.transition(masks, BufferState::Read, BufferState::ReadWrite);
             commands.set_layout(shader.layout());
             commands.set_pipeline(shader);
             commands.bind_read(0, mi_pool);
@@ -250,12 +281,14 @@ unsafe fn record_cdef_lists(dec: *mut Av1Core, cm: &AV1_COMMON, sizes: [c_int; 4
             commands.bind_write(3, masks.location());
             commands.set_inline_constants(4, &inline, 0);
             commands.dispatch(nhfb as u32, nvfb as u32, 1);
-            commands.transition(masks, BufferState::ReadWrite, BufferState::Read);
         }
         if need_skips {
+            if use_v3 {
+                // Both shaders write the indexes (the same words).
+                commands.write_barrier(indexes);
+            }
             let skips = buffer(td.cdef_skips);
             let shader = pipeline(&raw const (*lib).shader_cdef_lists);
-            commands.transition(skips, BufferState::Read, BufferState::ReadWrite);
             commands.set_layout(shader.layout());
             commands.set_pipeline(shader);
             commands.bind_read(0, mi_pool);
@@ -264,11 +297,68 @@ unsafe fn record_cdef_lists(dec: *mut Av1Core, cm: &AV1_COMMON, sizes: [c_int; 4
             commands.bind_write(3, skips.location());
             commands.set_inline_constants(4, &inline, 0);
             commands.dispatch(nhfb as u32, nvfb as u32, 1);
-            commands.transition(skips, BufferState::ReadWrite, BufferState::Read);
         }
-        commands.transition(indexes, BufferState::ReadWrite, BufferState::Read);
-        perf_gpu_mark(dec, AV1_PERF_GPU_CDEF_LISTS);
     }
+}
+
+/// The barrier behind [`record_cdef_lists_begin`]: the lists back to the state CDEF reads them in.
+///
+/// # Safety
+/// As for [`record_cdef_lists`], behind [`record_cdef_lists_begin`] with the same `use_v3`.
+unsafe fn record_cdef_lists_end(dec: *mut Av1Core, use_v3: bool) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let td = &*(*dec).curr_frame_data;
+        let commands = commands(dec);
+        if use_v3 {
+            commands.transition(buffer(td.cdef_masks), BufferState::ReadWrite, BufferState::Read);
+        }
+        if cdef_needs_skips(dec, use_v3) {
+            commands.transition(buffer(td.cdef_skips), BufferState::ReadWrite, BufferState::Read);
+        }
+        commands.transition(buffer(td.cdef_indexes), BufferState::ReadWrite, BufferState::Read);
+    }
+}
+
+/// The sizes [`record_cdef_lists`] takes: `nhfb`, `nvfb`, `skip_cols`, `skip_rows` of the frame.
+fn cdef_list_sizes(cm: &AV1_COMMON) -> [c_int; 4] {
+    let mi_size_64 = MI_SIZE_64X64 as c_int;
+    let nvfb = (cm.mi_rows + mi_size_64 - 1) / mi_size_64;
+    let nhfb = (cm.mi_cols + mi_size_64 - 1) / mi_size_64;
+    let skip_rows = (nvfb * 16).min(cm.mi_rows / 2);
+    let skip_cols = (nhfb * 16).min(cm.mi_cols / 2);
+    [nhfb, nvfb, skip_cols, skip_rows]
+}
+
+/// The merged front of the frame (`frame::record_front`): the CDEF lists by the GPU depend on the mode
+/// info alone, so they are written in the step of gen_pred_blocks instead of a step of their own in
+/// front of CDEF (AV1 7.15: `cdef_idx` and `skip` of the blocks). Their transitions come first, so the
+/// caller records this in front of the step's other dispatches. Returns whether it recorded them; the
+/// caller then records [`cdef_lists_front_end`] with that step's barrier.
+///
+/// # Safety
+/// `dec` is the decoder while it records a frame; `cm` is the frame's; behind the grid build.
+pub(crate) unsafe fn cdef_lists_front(dec: *mut Av1Core, cm: &AV1_COMMON) -> bool {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let td = &mut *(*dec).curr_frame_data;
+        td.cdef_lists_front = 0;
+        if td.do_cdef == 0 || (*dec).gpu_cdef_lists == 0 {
+            return false;
+        }
+        record_cdef_lists_begin(dec, cm, cdef_list_sizes(cm), cdef_v3_enabled());
+        td.cdef_lists_front = 1;
+        true
+    }
+}
+
+/// The barrier behind [`cdef_lists_front`].
+///
+/// # Safety
+/// As for [`cdef_lists_front`], which returned true, with the switches unchanged.
+pub(crate) unsafe fn cdef_lists_front_end(dec: *mut Av1Core) {
+    // SAFETY: the caller's contract.
+    unsafe { record_cdef_lists_end(dec, cdef_v3_enabled()) };
 }
 
 /// `av1_cdef_filter_run` of the C++: CDEF from `src` into `dst`, when the frame has it.
@@ -292,11 +382,7 @@ unsafe fn cdef_filter_run(
         let use_v3 = cdef_v3_enabled();
         let cdef_info = &cm.cdef_info;
         let mi_size_64 = MI_SIZE_64X64 as c_int;
-
-        let nvfb = (cm.mi_rows + mi_size_64 - 1) / mi_size_64;
-        let nhfb = (cm.mi_cols + mi_size_64 - 1) / mi_size_64;
-        let skip_rows = (nvfb * 16).min(cm.mi_rows / 2);
-        let skip_cols = (nhfb * 16).min(cm.mi_cols / 2);
+        let [nhfb, nvfb, skip_cols, skip_rows] = cdef_list_sizes(cm);
         let gpu_lists = (*dec).gpu_cdef_lists != 0;
         if !gpu_lists {
             let cdef_indexes = (*td.cdef_indexes).host_ptr.cast::<c_int>();
@@ -396,7 +482,7 @@ unsafe fn cdef_filter_run(
             None => 0,
         };
 
-        if gpu_lists {
+        if gpu_lists && td.cdef_lists_front == 0 {
             record_cdef_lists(dec, cm, [nhfb, nvfb, skip_cols, skip_rows], use_v3);
         }
 

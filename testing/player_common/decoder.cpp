@@ -764,6 +764,9 @@ int AV1Decoder::DecodeOne() {
   rav1g_set_cdef_v2(params_.cdefv2_ != 0);
   av1_set_cdef_v3_legacy(params_.cdefv3legacy_);
   av1_set_output_copy_legacy(params_.outputcopylegacy_);
+  av1_set_front_merge_legacy(params_.frontmergelegacy_);
+  XB_LOGI << "Front of the frame: "
+          << (params_.frontmergelegacy_ ? "five steps (-frontmergelegacy)" : "two steps (default)");
   XB_LOGI << "CDEF shader: "
           << (params_.cdefv1_ ? "cdef_filter (original, -cdefv1)"
                               : params_.cdefv3legacy_ ? "cdef_filter_v2 (-cdefv3legacy)" : "cdef_filter_v3 (default)");

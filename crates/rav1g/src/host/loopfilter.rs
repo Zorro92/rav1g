@@ -14,7 +14,7 @@ use std::ffi::c_int;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use super::core::{
-    alloc_constants, buffer, commands, perf_gpu_mark, pipeline, stage_dump_active, stage_dump_constants,
+    Constants, alloc_constants, buffer, commands, perf_gpu_mark, pipeline, stage_dump_active, stage_dump_constants,
     stage_dump_data, stage_dump_fb,
 };
 use super::types::{Av1Core, av1_stage_dump_region};
@@ -66,41 +66,29 @@ pub extern "C" fn av1_set_lf_h_split(mode: c_int) {
     LF_H_SPLIT.store(mode, Ordering::Relaxed);
 }
 
-/// `av1_loopfilter_gpu` of the C++: records the stage for the frame of the current command list.
-///
-/// # Safety
-/// `dec` is the decoder while it records a frame; `cm` and `xd` are those of the frame.
-pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: *mut MACROBLOCKD) {
-    // SAFETY: the caller's contract: the frame data, the frame buffers, the buffers and pipelines of the
-    // decoder and the frame header are live, and only this thread records.
-    unsafe {
-        if (*cm).lf.filter_level[0] == 0 && (*cm).lf.filter_level[1] == 0 {
-            return;
-        }
-        // The filter levels of the frame by segment, reference and mode.
-        super::libaom::loop_filter_frame_init(&mut *cm);
-        let cm = &*cm;
+/// The sizes of the frame's edge lists: six lists of blocks, vertical edges of Y, U, V (a block is 64
+/// columns by 4 rows), then horizontal edges of Y, U, V (4 columns by 64 rows).
+struct LfLayout {
+    mi_cols: [c_int; 3],
+    mi_rows: [c_int; 3],
+    blk_cols: [c_int; 6],
+    blk_count: [c_int; 6],
+    blk_offsets: [c_int; 6],
+    /// Whether a plane is filtered: a plane whose level is 0 is not.
+    filtered: [bool; 3],
+}
+
+impl LfLayout {
+    /// # Safety
+    /// `td` is the slot of a frame with its frame buffer.
+    unsafe fn new(cm: &AV1_COMMON, td: &crate::host::types::av1_frame_thread_data) -> Self {
+        // SAFETY: the caller's contract.
+        let dst = unsafe { &*td.dst_frame_buffer };
         let lf = &cm.lf;
-
-        let td = &mut *(*dec).curr_frame_data;
-        let dst = &*td.dst_frame_buffer;
-        let lib = (*dec).shader_lib;
-        let commands = commands(dec);
-        let lf_blocks = buffer((*dec).loopfilter_blocks);
-        let frame_buffers = buffer((*dec).frame_buffer_pool);
-
         let mi_cols_y = cm.mi_cols.min((dst.y_crop_width + 3) >> 2);
         let mi_rows_y = cm.mi_rows.min((dst.y_crop_height + 3) >> 2);
         let mi_cols_uv = ((cm.mi_cols + 1) >> 1).min((dst.uv_crop_width + 3) >> 2);
         let mi_rows_uv = ((cm.mi_rows + 1) >> 1).min((dst.uv_crop_height + 3) >> 2);
-        let mi_cols = |plane: usize| if plane != 0 { mi_cols_uv } else { mi_cols_y };
-        let mi_rows = |plane: usize| if plane != 0 { mi_rows_uv } else { mi_rows_y };
-        // A plane whose level is 0 is not filtered.
-        let filtered =
-            |plane: usize| !((plane == 1 && lf.filter_level_u == 0) || (plane == 2 && lf.filter_level_v == 0));
-
-        // Six lists of blocks: vertical edges of Y, U, V (a block is 64 columns by 4 rows), then horizontal
-        // edges of Y, U, V (4 columns by 64 rows).
         let blk_cols =
             [(mi_cols_y + 15) >> 4, (mi_cols_uv + 15) >> 4, (mi_cols_uv + 15) >> 4, mi_cols_y, mi_cols_uv, mi_cols_uv];
         let blk_count = [
@@ -115,6 +103,53 @@ pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: 
         for i in 1..6 {
             blk_offsets[i] = blk_offsets[i - 1] + blk_count[i - 1];
         }
+        Self {
+            mi_cols: [mi_cols_y, mi_cols_uv, mi_cols_uv],
+            mi_rows: [mi_rows_y, mi_rows_uv, mi_rows_uv],
+            blk_cols,
+            blk_count,
+            blk_offsets,
+            filtered: [true, lf.filter_level_u != 0, lf.filter_level_v != 0],
+        }
+    }
+}
+
+/// The edge lists of a frame, written by [`loopfilter_lists`] and filtered by [`loopfilter_gpu`]: the
+/// constants of the list shaders, which the stage dump takes.
+pub(crate) struct LfLists {
+    gen_constants: Constants<GenLfData>,
+}
+
+/// Whether the frame has a loop filter (AV1 7.14.1: nothing is filtered when both luma levels are 0).
+pub(crate) fn loopfilter_on(cm: &AV1_COMMON) -> bool {
+    cm.lf.filter_level[0] != 0 || cm.lf.filter_level[1] != 0
+}
+
+/// The first part of `av1_loopfilter_gpu` of the C++: the filter levels of the frame, and the two
+/// shaders that list its edges from the mode info, without a barrier behind them. The lists depend on
+/// the mode info alone, so with the merged front (`frame::record_front`) they are written in the step of
+/// gen_pred_blocks, and [`loopfilter_lists_barrier`] goes with that step's barrier. None for a frame
+/// without the filter.
+///
+/// # Safety
+/// `dec` is the decoder while it records a frame; `cm` and `xd` are those of the frame; once per frame.
+pub(crate) unsafe fn loopfilter_lists(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: *mut MACROBLOCKD) -> Option<LfLists> {
+    // SAFETY: the caller's contract: the frame data, the frame buffers, the buffers and pipelines of the
+    // decoder and the frame header are live, and only this thread records.
+    unsafe {
+        if !loopfilter_on(&*cm) {
+            return None;
+        }
+        // The filter levels of the frame by segment, reference and mode.
+        super::libaom::loop_filter_frame_init(&mut *cm);
+        let cm = &*cm;
+        let lf = &cm.lf;
+
+        let td = &mut *(*dec).curr_frame_data;
+        let lib = (*dec).shader_lib;
+        let commands = commands(dec);
+        let lf_blocks = buffer((*dec).loopfilter_blocks);
+        let LfLayout { mi_cols, mi_rows, blk_cols, blk_offsets, filtered, .. } = LfLayout::new(cm, td);
 
         let gen_constants = alloc_constants::<GenLfData>(&mut td.command_buffer);
         let gen_data = gen_constants.data;
@@ -162,8 +197,8 @@ pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: 
         commands.bind_constants(3, gen_constants.location);
 
         commands.set_pipeline(shader);
-        for plane in (0..3).filter(|&plane| filtered(plane)) {
-            let (mi_cols, mi_rows) = (mi_cols(plane), mi_rows(plane));
+        for plane in (0..3).filter(|&plane| filtered[plane]) {
+            let (mi_cols, mi_rows) = (mi_cols[plane], mi_rows[plane]);
             let wicount = mi_rows * ((mi_cols + 15) >> 4);
             // wicount, mi_cols, mi_rows, plane, dst_offset, dst_stride
             let inline = [wicount, mi_cols, mi_rows, plane as c_int, blk_offsets[plane] * 32, blk_cols[plane] * 32];
@@ -171,16 +206,63 @@ pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, xd: 
             commands.dispatch(((wicount + 63) >> 6) as u32, 1, 1);
         }
         commands.set_pipeline(pipeline(&raw const (*lib).shader_gen_lf_hor));
-        for plane in (0..3).filter(|&plane| filtered(plane)) {
-            let (mi_cols, mi_rows) = (mi_cols(plane), mi_rows(plane));
+        for plane in (0..3).filter(|&plane| filtered[plane]) {
+            let (mi_cols, mi_rows) = (mi_cols[plane], mi_rows[plane]);
             let wicount = mi_cols * ((mi_rows + 15) >> 4);
             let inline =
                 [wicount, mi_cols, mi_rows, plane as c_int, blk_offsets[plane + 3] * 32, blk_cols[plane + 3] * 2];
             commands.set_inline_constants(4, &inline, 0);
             commands.dispatch(((wicount + 63) >> 6) as u32, 1, 1);
         }
-        commands.write_barrier(lf_blocks);
-        perf_gpu_mark(dec, AV1_PERF_GPU_LF_GEN);
+        Some(LfLists { gen_constants })
+    }
+}
+
+/// The barrier behind [`loopfilter_lists`].
+///
+/// # Safety
+/// `dec` is the decoder while it records a frame.
+pub(crate) unsafe fn loopfilter_lists_barrier(dec: *mut Av1Core) {
+    // SAFETY: the caller's contract.
+    unsafe { commands(dec).write_barrier(buffer((*dec).loopfilter_blocks)) };
+}
+
+/// `av1_loopfilter_gpu` of the C++: records the stage for the frame of the current command list.
+/// `lists`: the edge lists [`loopfilter_lists`] has written in front of this, behind their barrier;
+/// None writes them here, as a step of their own.
+///
+/// # Safety
+/// `dec` is the decoder while it records a frame; `cm` and `xd` are those of the frame.
+pub(crate) unsafe fn loopfilter_gpu(
+    dec: *mut Av1Core,
+    cm: *mut AV1_COMMON,
+    xd: *mut MACROBLOCKD,
+    lists: Option<LfLists>,
+) {
+    // SAFETY: the caller's contract: the frame data, the frame buffers, the buffers and pipelines of the
+    // decoder and the frame header are live, and only this thread records.
+    unsafe {
+        let lists = match lists {
+            Some(lists) => lists,
+            None => {
+                let Some(lists) = loopfilter_lists(dec, cm, xd) else { return };
+                loopfilter_lists_barrier(dec);
+                perf_gpu_mark(dec, AV1_PERF_GPU_LF_GEN);
+                lists
+            }
+        };
+        let gen_constants = lists.gen_constants;
+        let cm = &*cm;
+
+        let td = &mut *(*dec).curr_frame_data;
+        let commands = commands(dec);
+        let lf_blocks = buffer((*dec).loopfilter_blocks);
+        let frame_buffers = buffer((*dec).frame_buffer_pool);
+        let lf_layout = LfLayout::new(cm, td);
+        let LfLayout { blk_cols, blk_count, blk_offsets, .. } = lf_layout;
+        let mi_cols = |plane: usize| lf_layout.mi_cols[plane];
+        let mi_rows = |plane: usize| lf_layout.mi_rows[plane];
+        let filtered = |plane: usize| lf_layout.filtered[plane];
 
         let constants = alloc_constants::<LoopfilterData>(&mut td.command_buffer);
         let data = constants.data;

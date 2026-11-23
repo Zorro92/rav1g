@@ -86,6 +86,7 @@ pub struct Task {
     pub cdefv2: bool,
     pub cdefv3legacy: bool,
     pub outputcopylegacy: bool,
+    pub frontmergelegacy: bool,
     pub nofitsize: bool,
     pub fitsize: bool,
     pub lowmem: bool,
@@ -170,6 +171,7 @@ impl Default for Task {
             cdefv2: false,
             cdefv3legacy: false,
             outputcopylegacy: false,
+            frontmergelegacy: false,
             nofitsize: false,
             fitsize: false,
             lowmem: false,
@@ -291,6 +293,10 @@ pub fn usage() {
     say!("  -cdefv3legacy        use legacy cdef_filter_v2 + cdef_lists instead of cdef_filter_v3 + cdef_lists_v2");
     say!(
         "  -outputcopylegacy    disable fused semi-planar output in the last postfilter stage (run separate copy_plane)"
+    );
+    say!(
+        "  -frontmergelegacy    the front of a frame (grid, gen_pred_blocks, residual clear, edge and CDEF lists) in \
+         five steps, not two"
     );
     say!("  -intraod             use the baseline DXC -Od intra_main kernels (-intraopt restores the default)");
     say!("  -intrafilterlegacy   use the previous 8-bit filter intra shader");
@@ -477,6 +483,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-cdefv2" => task.cdefv2 = true,
             "-cdefv3legacy" => task.cdefv3legacy = true,
             "-outputcopylegacy" => task.outputcopylegacy = true,
+            "-frontmergelegacy" => task.frontmergelegacy = true,
             "-nofitsize" => task.nofitsize = true,
             "-fitsize" => task.fitsize = true,
             "-intrav2" => task.intrav2 = true,

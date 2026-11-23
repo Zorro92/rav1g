@@ -140,6 +140,7 @@ class CParameters {
     bool cdefv1_;
     bool cdefv3legacy_;
     bool outputcopylegacy_;
+    bool frontmergelegacy_;
     bool intrav2_;
     bool intraopt_;
     bool intraod_;

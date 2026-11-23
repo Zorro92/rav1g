@@ -312,6 +312,9 @@ pub struct av1_frame_thread_data {
     /// Why the frame's output takes the copy pass if it does (`AV1_PERF_OUTPUT_COPY_*`, for the timing
     /// run), set by `prepare_fused_output`.
     pub output_copy_reason: c_int,
+    /// The CDEF lists of the frame were written in the merged front of its command list
+    /// (`frame::record_front`), behind their barrier: `cdef_filter_run` does not write them again.
+    pub cdef_lists_front: c_int,
     pub slot_index: c_int,
     pub iter_grid_stride: c_int,
     pub iter_grid_stride_uv: c_int,

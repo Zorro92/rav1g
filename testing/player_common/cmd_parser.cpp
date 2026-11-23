@@ -88,6 +88,9 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        &params_.cdefv3legacy_},
       {"outputcopylegacy", atSingle, anOptional, "disable fused semi-planar output in the last postfilter stage", "",
        &params_.outputcopylegacy_},
+      {"frontmergelegacy", atSingle, anOptional,
+       "the front of a frame (grid, gen_pred_blocks, residual clear and sort, edge and CDEF lists) in five steps, not two",
+       "", &params_.frontmergelegacy_},
       {"intrav2", atSingle, anOptional, "intra prediction through intra_v2.hlsl (same output)", "",
        &params_.intrav2_},
       {"intraopt", atSingle, anOptional, "optimized intra_main shaders (default)", "intra-main", &params_.intraopt_},
@@ -464,6 +467,7 @@ void CParameters::Reset() {
   params_.cdefv1_ = false;
   params_.cdefv3legacy_ = false;
   params_.outputcopylegacy_ = false;
+  params_.frontmergelegacy_ = false;
   params_.intrav2_ = false;
   params_.intraopt_ = false;
   params_.intraod_ = false;
