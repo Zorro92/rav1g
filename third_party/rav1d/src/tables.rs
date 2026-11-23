@@ -476,6 +476,31 @@ const fn extend_array<T: DefaultValue + Copy, const M: usize, const N: usize>(a:
 
 pub type LoCtxOffset = InRange<u8, 0, 21>;
 
+/// rav1g: the 5x5 cores of [`DAV1D_LO_CTX_OFFSETS`], also read by [`LO_CTX_BY_RC`].
+const LO_CTX_OFFSETS_5X5: [[[u8; 5]; 5]; 3] = [
+    [
+        [0, 1, 6, 6, 21],
+        [1, 6, 6, 21, 21],
+        [6, 6, 21, 21, 21],
+        [6, 21, 21, 21, 21],
+        [21, 21, 21, 21, 21],
+    ],
+    [
+        [0, 16, 6, 6, 21],
+        [16, 16, 6, 21, 21],
+        [16, 16, 21, 21, 21],
+        [16, 16, 21, 21, 21],
+        [16, 16, 21, 21, 21],
+    ],
+    [
+        [0, 11, 11, 11, 11],
+        [11, 11, 11, 11, 11],
+        [6, 6, 21, 21, 21],
+        [6, 21, 21, 21, 21],
+        [21, 21, 21, 21, 21],
+    ],
+];
+
 /// The core of each of these 3 tables is a 5x5 table of offsets.
 /// However, to use that 5x5 table in [`get_lo_ctx`],
 /// we first have to clamp the `x` and `y` values from `[0, 32)` to `[0, 5)`.
@@ -497,28 +522,48 @@ pub static DAV1D_LO_CTX_OFFSETS: [[[LoCtxOffset; 32]; 32]; 3] = {
     }
 
     [
-        extend_offsets([
-            [0, 1, 6, 6, 21],
-            [1, 6, 6, 21, 21],
-            [6, 6, 21, 21, 21],
-            [6, 21, 21, 21, 21],
-            [21, 21, 21, 21, 21],
-        ]),
-        extend_offsets([
-            [0, 16, 6, 6, 21],
-            [16, 16, 6, 21, 21],
-            [16, 16, 21, 21, 21],
-            [16, 16, 21, 21, 21],
-            [16, 16, 21, 21, 21],
-        ]),
-        extend_offsets([
-            [0, 11, 11, 11, 11],
-            [11, 11, 11, 11, 11],
-            [6, 6, 21, 21, 21],
-            [6, 21, 21, 21, 21],
-            [21, 21, 21, 21, 21],
-        ]),
+        extend_offsets(LO_CTX_OFFSETS_5X5[0]),
+        extend_offsets(LO_CTX_OFFSETS_5X5[1]),
+        extend_offsets(LO_CTX_OFFSETS_5X5[2]),
     ]
+};
+
+/// rav1g: for each transform size, the lo context offset and the hi context of every position of
+/// the 2D scan, indexed by the position as `decode_coefs` keeps it (`rc = x * (4 << slh) + y`, `slw`
+/// and `slh` the log2 of the width and height in 4x4 units, at most 3): bits 0-4 the offset of
+/// [`DAV1D_LO_CTX_OFFSETS`] at `[y][x]` (the table of the size's shape), bit 7 whether `(x | y) > 1`
+/// (the hi token's context 14, else 7). One load in the loop of every coefficient for the two
+/// shifts, the mask and the two-dimensional lookup, and fewer values live in that loop. 19 KB.
+pub static LO_CTX_BY_RC: [[u8; 1024]; 19] = {
+    // `lw` and `lh` of `DAV1D_TXFM_DIMENSIONS`, in the order of `TxfmSize`.
+    const LOG2: [(usize, usize); 19] = [
+        (0, 0), (1, 1), (2, 2), (3, 3), (4, 4),
+        (0, 1), (1, 0), (1, 2), (2, 1), (2, 3), (3, 2), (3, 4), (4, 3),
+        (0, 2), (2, 0), (1, 3), (3, 1), (2, 4), (4, 2),
+    ];
+    let mut table = [[0u8; 1024]; 19];
+    let mut tx = 0;
+    while tx < 19 {
+        let (lw, lh) = LOG2[tx];
+        let slw = if lw < 3 { lw } else { 3 };
+        let slh = if lh < 3 { lh } else { 3 };
+        // `is_rect + (tx & is_rect)` of `decode_coefs`.
+        let shape = if tx >= 5 { 1 + (tx & 1) } else { 0 };
+        let mut x = 0;
+        while x < 4 << slw {
+            let mut y = 0;
+            while y < 4 << slh {
+                // `DAV1D_LO_CTX_OFFSETS[shape][y][x]`: the 5x5 core with `x` and `y` clamped to 4.
+                let offset = LO_CTX_OFFSETS_5X5[shape][if y < 4 { y } else { 4 }][if x < 4 { x } else { 4 }];
+                let far = if (x | y) > 1 { 0x80 } else { 0 };
+                table[tx][x * (4 << slh) + y] = offset | far;
+                y += 1;
+            }
+            x += 1;
+        }
+        tx += 1;
+    }
+    table
 };
 
 pub static DAV1D_SKIP_CTX: [[u8; 5]; 5] = [

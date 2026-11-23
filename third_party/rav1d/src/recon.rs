@@ -41,7 +41,7 @@ use crate::parse::ParseTxb;
 use crate::scan::DAV1D_SCANS;
 use crate::strided::Strided as _;
 use crate::tables::{
-    LoCtxOffset, TxfmInfo, DAV1D_FILTER_2D, DAV1D_FILTER_MODE_TO_Y_MODE, DAV1D_LO_CTX_OFFSETS,
+    TxfmInfo, DAV1D_FILTER_2D, DAV1D_FILTER_MODE_TO_Y_MODE, LO_CTX_BY_RC,
     DAV1D_SKIP_CTX, DAV1D_TXFM_DIMENSIONS, DAV1D_TXTP_FROM_UVMODE, DAV1D_TX_TYPES_PER_SET,
     DAV1D_TX_TYPE_CLASS,
 };
@@ -414,8 +414,7 @@ fn get_lo_ctx(
     levels: &[u8],
     tx_class: TxClass,
     hi_mag: &mut u32,
-    ctx_offsets: Option<&[[LoCtxOffset; 32]; 32]>,
-    x: u8,
+    two_d_offset: Option<u8>,
     y: u8,
     stride: u8,
 ) -> LoCdfIndex {
@@ -436,15 +435,16 @@ fn get_lo_ctx(
 
     let mut mag = level(0, 1) + level(1, 0);
     let offset;
-    match ctx_offsets {
-        Some(ctx_offsets) => {
+    match two_d_offset {
+        Some(two_d_offset) => {
             debug_assert_matches!(tx_class, TxClass::TwoD);
             mag += level(1, 1);
             *hi_mag = mag;
             mag += level(0, 2) + level(2, 0);
-            offset = ctx_offsets[y as usize][x as usize].get();
-            // The type for `ctx_offsets` guarantees bounds.
-            assert!(offset <= 21); // Elided
+            // rav1g: the offset of `DAV1D_LO_CTX_OFFSETS` at the position, from `LO_CTX_BY_RC`
+            // (bits 0-4, at most 21).
+            offset = two_d_offset & 0x1f;
+            debug_assert!(offset <= 21);
         }
         None => {
             debug_assert_matches!(tx_class, TxClass::H | TxClass::V);
@@ -797,8 +797,7 @@ fn decode_coefs<BD: BitDepth>(
         let stride;
         match tx_class {
             TxClass::TwoD => {
-                let is_rect = tx.is_rect() as usize;
-                lo_ctx_offsets = Some(&DAV1D_LO_CTX_OFFSETS[is_rect + (tx as usize & is_rect)]);
+                lo_ctx_offsets = Some(&LO_CTX_BY_RC[tx as usize]);
                 scan = DAV1D_SCANS[tx as usize];
                 stride = 4 << slh;
             }
@@ -944,11 +943,15 @@ fn decode_coefs<BD: BitDepth>(
         for i in (1..eob).rev() {
             // ac
             let rc_i;
+            // rav1g: in 2D the position's lo context offset and hi context come from one entry of
+            // `LO_CTX_BY_RC`, without `x` and `y` (they are read for nothing else in the loop).
+            let mut rc_ctx = 0;
             match tx_class {
                 TxClass::TwoD => {
                     rc_i = scan[i as usize].get();
-                    x = (rc_i >> shift) as u8;
-                    y = rc_i as u8 & mask;
+                    if let Some(by_rc) = lo_ctx_offsets {
+                        rc_ctx = by_rc[rc_i as usize & 1023];
+                    }
                 }
                 TxClass::H => {
                     x = i as u8 & mask;
@@ -983,10 +986,14 @@ fn decode_coefs<BD: BitDepth>(
             // At this point, we know that `get_lo_ctx` can elide the bounds check on `level`
             // because it is statically known that `level` has at least 65 elements.
             let level = &mut levels[level_off..];
-            let lo_ctx = get_lo_ctx(level, tx_class, &mut mag, lo_ctx_offsets, x, y, stride);
-            if tx_class == TxClass::TwoD {
-                y |= x;
-            }
+            let lo_ctx = get_lo_ctx(
+                level,
+                tx_class,
+                &mut mag,
+                (tx_class == TxClass::TwoD).then_some(rc_ctx),
+                y,
+                stride,
+            );
             tok = rav1d_msac_decode_symbol_adapt4(&mut ts_c.msac, &mut lo_cdf[lo_ctx.get()], 3);
             if dbg {
                 println!(
@@ -996,7 +1003,11 @@ fn decode_coefs<BD: BitDepth>(
             }
             if tok == 3 {
                 let mag = mag as u8 & 63;
-                ctx = if y > (tx_class == TxClass::TwoD) as u8 {
+                let far = match tx_class {
+                    TxClass::TwoD => rc_ctx & 0x80 != 0,
+                    TxClass::H | TxClass::V => y > 0,
+                };
+                ctx = if far {
                     14
                 } else {
                     7
@@ -1028,7 +1039,7 @@ fn decode_coefs<BD: BitDepth>(
             // 65 elements in level in the `TwoD` case, and 33 elements for `H | V`.
             // The size of `levels` is 32 * 34, and we are not offsetting into it,
             // so this is trivially true.
-            get_lo_ctx(levels, tx_class, &mut mag, lo_ctx_offsets, 0, 0, stride).get()
+            get_lo_ctx(levels, tx_class, &mut mag, None, 0, stride).get()
         };
         let mut dc_tok =
             rav1d_msac_decode_symbol_adapt4(&mut ts_c.msac, &mut lo_cdf[lo_ctx], 3) as c_uint;
