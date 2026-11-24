@@ -554,6 +554,8 @@ int AV1Decoder::DecodeOne() {
       // -displaypass WxH: the display pass writes images of that size, downscaled and tone-mapped to BT.709
       // SDR, with the defaults of its other settings (1000-nit peak, 100-nit white, the decoder's depth).
       DisplaySize(params_, &cfg.display.width, &cfg.display.height);
+      cfg.display.depth = (unsigned int)params_.displaydepth_;
+      cfg.display.dither = (unsigned int)params_.displaydither_;
       // -slots: each slot has host memory and buffers of its own. 0 with -parseframes and no -slots: the
       // library chooses the slot count.
       cfg.frame_slots = params_.slots_;
@@ -786,9 +788,10 @@ int AV1Decoder::DecodeOne() {
     unsigned int display_w = 0, display_h = 0;
     DisplaySize(params_, &display_w, &display_h);
     if (display_w > 0 && display_h > 0)
-      XB_LOGI << "Display pass: " << display_w << "x" << display_h
-              << " (Rav1gSettings::display: P010 for a 10-bit decoder, NV12 for an 8-bit one, with -output p010 or "
-                 "-interop)";
+      XB_LOGI << "Display pass: " << display_w << "x" << display_h << " depth " << params_.displaydepth_
+              << " dither " << params_.displaydither_
+              << " (Rav1gSettings::display: depth 0 is P010 for a 10-bit decoder, NV12 for an 8-bit one; dither 0 "
+                 "dithers NV12; with -output p010 or -interop)";
   }
   XB_LOGI << "Front of the frame: "
           << (params_.frontmergelegacy_ ? "five steps (-frontmergelegacy)" : "two steps (default)");

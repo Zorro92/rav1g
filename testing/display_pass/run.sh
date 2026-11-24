@@ -28,17 +28,20 @@ build() {
     -I "$here" -I "$sync" -I "$work" "$here/display_check.cpp" -o "$work/check"
 }
 
-# Runs the shader and the model on every case; exit 1 when a case fails either.
+# Runs the shader and the model on every case; exit 1 when a case fails either (with "first", at the first
+# that fails: a mutant needs one). At most 2% of a plane's codes may differ (most cases: none, a few tenths
+# of a percent at most), which a dither that is not there (half of the codes one off) does not pass.
 check() {
   mkdir -p "$work/out"
   timeout 600 "$work/check" "$work/out" > "$work/cases.txt" || return 1
   status=0
   while read -r name frames display args; do
     # shellcheck disable=SC2086
-    if ! py "$here/model.py" "$frames" "$display" $args > "$work/model.log" 2>&1; then
+    if ! py "$here/model.py" "$frames" "$display" $args --max-differ 0.02 > "$work/model.log" 2>&1; then
       echo "MISMATCH $name"
       tail -n 3 "$work/model.log"
       status=1
+      [ "${1:-}" = first ] && break
     else
       echo "$name: $(sed -n "s/^frame 0: //p" "$work/model.log"); $(tail -n 1 "$work/model.log")"
     fi
@@ -58,7 +61,7 @@ expect_rejected() {
     exit 1
   fi
   build
-  if check > "$work/mutant.log" 2>&1; then
+  if check first > "$work/mutant.log" 2>&1; then
     cat "$work/mutant.log" >&2
     echo "display_pass check: expected a mismatch for $1" >&2
     exit 1
@@ -79,5 +82,17 @@ if [ "${1:-}" = "--mutate" ]; then
   expect_rejected 'the exact peak below 1e-6 nits' 's/peak = pq_to_nits(emax);/peak = peak;/'
   expect_rejected 'the 8-bit chroma pair' 's/const uint pos = (r.first + k) \* 8u;/const uint pos = k * 8u;/'
   expect_rejected 'the output depth' 's/if (nv12_out()) return/if (eight_bit()) return/'
-  expect_rejected 'the NV12 chroma codes' 's/floor(128.0f + 224.0f \* cr + 0.5f)/floor(128.0f + 224.0f * cb + 0.5f)/'
+  expect_rejected 'the NV12 chroma codes' 's/floor(128.0f + 224.0f \* cr + tr)/floor(128.0f + 224.0f * cb + tr)/'
+  expect_rejected 'the chroma rows of the block path' 's/const bool down = n == 2u ? between \&\& i == 1u : ((between ? (y - 1) >> 1 : y >> 1) - r0) != 0;/const bool down = false;/'
+  expect_rejected 'the chroma rows above the frame' 's/const int r0 = between ? (sy - 1) >> 1 : sy >> 1;/const int r0 = sy >> 1;/'
+  expect_rejected 'the chroma columns of 3:2' 's/const bool next = n == 2u ? false : (x >> 1) != c0;/const bool next = false;/'
+  expect_rejected 'the chroma columns of 1:1' 's/const float fx = (n == 2u ? j == 1u : (x \& 1u) != 0) ? 0.5f : 0.0f;/const float fx = (x \& 1u) != 0 ? 0.0f : 0.5f;/'
+  expect_rejected 'the first sample of a run of the block path' 's/  r.first = x \& (eight_bit() ? 3u : 1u);/  r.first = 0u;/'
+  expect_rejected 'the right chroma edge of the block path' 's/const uint k1 = min(1u, cmax), k2 = n == 2u ? k1 : min(2u, cmax);/const uint k1 = 1u, k2 = 2u;/'
+  expect_rejected 'the column weights of 3:2' 's/left = add_light(left, p, j == 0u ? 1.0f : 0.5f);/left = add_light(left, p, 1.0f);/'
+  expect_rejected 'the row weights of 3:2' 's/const float w = i == 0u ? 1.0f : 0.5f;/const float w = 1.0f;/'
+  expect_rejected 'the third luma row of 3:2' 's/if (n == 3u) l2 = load_aligned(cb_y_offset, cb_y_stride, sy + 2, (uint)sx);/if (n == 3u) l2 = l1;/'
+  expect_rejected 'the odd chroma edge' 's/const int2 last = int2((int)((cb_src_w + 1u) \/ 2u) - 1,/const int2 last = int2((int)(cb_src_w \/ 2u) - 1,/'
+  expect_rejected 'the dither threshold' 's/if (!dithered()) return 0.5f;/return 0.5f;/'
+  expect_rejected 'the transposed dither of Cr' 's/const float tr = threshold(uint2(p.y, p.x));/const float tr = threshold(p);/'
 fi

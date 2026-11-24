@@ -182,6 +182,8 @@ pub struct av1_display_cfg {
     pub assumed_transfer: u8,
     pub assumed_matrix: u8,
     pub assumed_chroma_sample_position: u8,
+    /// 1: the ordered dither at the quantisation (`display_pass.hlsl` `threshold`); 0: rounded.
+    pub dither: u8,
 }
 /// `av1_display_cfg::transform` and `aom_image::display_transform`: what the display pass does to a frame.
 pub const AV1_DISPLAY_TRANSFORM_AUTO: c_uint = 0;

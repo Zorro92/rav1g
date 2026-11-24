@@ -1,4 +1,4 @@
 # The interface versions of rav1g.h (RAV1G_ABI_VERSION) and the fingerprint of the declarations of each
 # (rav1g-header: the header without comments and preprocessor lines, white space folded, FNV-1a 64).
 1 1b80e1995f0ee64d
-2 d754ced4ce571264
+2 4c4ff3bb6491dd86

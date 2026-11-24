@@ -143,6 +143,9 @@ class CParameters {
     bool frontmergelegacy_;
     // -displaypass WxH (docs/stage-fusion.md, Rav1gSettings::display): the display pass; empty: off.
     std::string displaypass_;
+    // -displaydepth 8|10, -displaydither 0-2 (Rav1gDisplay::depth, dither): 0 the defaults.
+    int displaydepth_;
+    int displaydither_;
     bool intrav2_;
     bool intraopt_;
     bool intraod_;

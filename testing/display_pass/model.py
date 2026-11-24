@@ -5,7 +5,7 @@ against what the decoder wrote.
 
   uv run --with numpy python3 testing/display_pass/model.py <frames.yuv> <display.yuv> \\
       --size WxH --out WxH [--transfer 16] [--matrix 9] [--primaries 9] [--full] [--colocated] [--depth 8]
-      [--out-depth 8] [--peak 1000] [--white 100] [--count N]
+      [--out-depth 8] [--peak 1000] [--white 100] [--dither] [--count N]
 
 <frames.yuv>: the decoded frames as rav1g-dec -o writes them (planar 4:2:0, 16-bit little-endian
 samples, the visible size; a byte a sample with --depth 8). <display.yuv>: the frames of a run with
@@ -13,7 +13,10 @@ samples, the visible size; a byte a sample with --depth 8). <display.yuv>: the f
 (NV12) with --out-depth 8 (default: as --depth). --transfer/--matrix/--primaries/--full/--colocated:
 the colour description the pass used (H.273 code points; --primaries defaults to 9 with --matrix 9, else
 1; AV1 chroma_sample_position 2 is --colocated). --peak/--white: the tone map's source peak and SDR
-white (Rav1gDisplay::source_peak_nits, target_white_nits).
+white (Rav1gDisplay::source_peak_nits, target_white_nits). --dither: the ordered dither at the last
+quantisation (what Rav1gDisplay::dither gives NV12 by default).
+The model's arithmetic does not depend on the shader's path (2:1, 1:1, 3:2, the area loop): every ratio is
+the area weights of `area`, exactly 2:1 its row order.
 
 Prints per frame and plane how many codes differ and the largest difference, and exits 1 when any
 code differs by more than --tolerance (default 1: fp32 on two compilers).
@@ -117,7 +120,7 @@ def source_linear(yp, up, vp, mode, matrix, wide, full, colocated, depth, peak, 
     by = np.floor(cy).astype(np.int64)
     fx = (cx - bx).astype(F)[..., None]
     fy = (cy - by).astype(F)[..., None]
-    lw, lh = w // 2 - 1, h // 2 - 1
+    lw, lh = (w + 1) // 2 - 1, (h + 1) // 2 - 1  # the last chroma sample: (w + 1) / 2 of them
     uv = np.stack([up, vp], -1).astype(F)
 
     def at(x, y):
@@ -170,13 +173,28 @@ def encode(c, mode, wide):
     return y, (e[..., 2] - y) / F(2 * (1 - 0.0722)), (e[..., 0] - y) / F(2 * (1 - 0.2126))
 
 
-def display(yp, up, vp, ow, oh, mode, matrix, wide, full, colocated, depth=10, out_depth=10, peak=1000, white=100):
+# The ordered dither of the last quantisation (display_pass.hlsl `threshold`): the R2 sequence's lattice
+# frac(x / g + y / g^2) of the plastic number g, in 32-bit fixed point, its top 8 bits: (t + 1/2) / 256.
+R2_X, R2_Y = 0xc13fa9a9, 0x91e10da6
+
+
+def threshold(h, w, transposed=False):
+    y, x = np.mgrid[0:h, 0:w].astype(np.uint64)
+    if transposed:
+        x, y = y, x
+    t = ((x * R2_X + y * R2_Y) & 0xffffffff) >> 24
+    return (t.astype(F) * F(1 / 256) + F(0.5 / 256)).astype(F)
+
+
+def display(yp, up, vp, ow, oh, mode, matrix, wide, full, colocated, depth=10, out_depth=10, peak=1000, white=100,
+            dither=False):
     lin = source_linear(yp, up, vp, mode, matrix, wide, full, colocated, depth, peak, white)
     sh, sw = yp.shape
     vals = area_2to1(lin) if (sw == 2 * ow and sh == 2 * oh) else area(lin, ow, oh)
     black, yr, mid, cr, _ = CODES[out_depth]
     y, _, _ = encode(vals, mode, wide)
-    yq = np.clip(np.floor(F(black) + F(yr) * y + F(0.5)), black, black + yr)
+    half = F(0.5)
+    yq = np.clip(np.floor(F(black) + F(yr) * y + (threshold(oh, ow) if dither else half)), black, black + yr)
     left = np.concatenate([vals[:, :1], vals[:, :-1]], 1)  # column 2i-1, the edge repeated
     acc = np.zeros((oh // 2, ow // 2, 3), F)
     for dy in range(2):
@@ -185,8 +203,10 @@ def display(yp, up, vp, ow, oh, mode, matrix, wide, full, colocated, depth=10, o
         acc = acc + F(0.25) * vals[rows, 0::2]
         acc = acc + F(0.125) * vals[rows, 1::2]
     _, cb, cr_ = encode(acc, mode, wide)
-    uq = np.clip(np.floor(F(mid) + F(cr) * cb + F(0.5)), black, 2 * mid - black)
-    vq = np.clip(np.floor(F(mid) + F(cr) * cr_ + F(0.5)), black, 2 * mid - black)
+    tb = threshold(oh // 2, ow // 2) if dither else half
+    tr = threshold(oh // 2, ow // 2, True) if dither else half
+    uq = np.clip(np.floor(F(mid) + F(cr) * cb + tb), black, 2 * mid - black)
+    vq = np.clip(np.floor(F(mid) + F(cr) * cr_ + tr), black, 2 * mid - black)
     return yq, uq, vq
 
 
@@ -213,9 +233,13 @@ def main():
     ap.add_argument('--white', type=float, default=100)
     ap.add_argument('--full', action='store_true')
     ap.add_argument('--colocated', action='store_true')
+    ap.add_argument('--dither', action='store_true', help='the ordered dither of the quantisation (Rav1gDisplay::dither)')
     ap.add_argument('--depth', type=int, default=10, choices=(8, 10))
     ap.add_argument('--count', type=int, default=1 << 30)
     ap.add_argument('--tolerance', type=int, default=1)
+    ap.add_argument('--max-differ', type=float, default=1.0,
+                    help='the largest share of the codes of a plane that may differ at all (a dither that is not '
+                    'there moves codes by one only, within the tolerance, but about half of them)')
     a = ap.parse_args()
     sw, sh = map(int, a.size.split('x'))
     ow, oh = map(int, a.out.split('x'))
@@ -224,16 +248,18 @@ def main():
     wide = primaries == 9
     out_depth = a.out_depth or a.depth
     worst = 0
+    share = 0.0
     for n, (src, got) in enumerate(zip(frames(a.frames_file, sw, sh, a.depth), frames(a.display_file, ow, oh, out_depth))):
         if n >= a.count:
             break
         want = display(*[p.astype(F) for p in src], ow, oh, mode, a.matrix, wide, a.full, a.colocated, a.depth, out_depth,
-                       a.peak, a.white)
+                       a.peak, a.white, a.dither)
         line = []
         far = []
         for name, w_, g in zip('YUV', want, got):
             d = np.abs(w_.astype(np.int64) - g.astype(np.int64))
             worst = max(worst, int(d.max()))
+            share = max(share, float((d > 0).mean()))
             line.append(f'{name} {int((d > 0).sum())} differ, max {int(d.max())}')
             for y, x in np.argwhere(d > a.tolerance)[:4]:
                 far.append(f'  {name} at ({x}, {y}): model {int(w_[y, x])}, pass {int(g[y, x])}')
@@ -246,8 +272,9 @@ def main():
             sx, sy = (x, y) if name == 'Y' else (2 * x, 2 * y)
             print(f'  source Y around ({2 * sx}, {2 * sy}): {src[0][2 * sy:2 * sy + 2, 2 * sx:2 * sx + 2].tolist()}, '
                   f'U {src[1][sy:sy + 2, sx:sx + 2].tolist()}, V {src[2][sy:sy + 2, sx:sx + 2].tolist()}')
-    print(f'largest difference {worst} (tolerance {a.tolerance})')
-    sys.exit(1 if worst > a.tolerance else 0)
+    print(f'largest difference {worst} (tolerance {a.tolerance}); at most {100 * share:.2f}% of a plane\'s codes differ '
+          f'(at most {100 * a.max_differ:g}%)')
+    sys.exit(1 if worst > a.tolerance or share > a.max_differ else 0)
 
 
 if __name__ == '__main__':

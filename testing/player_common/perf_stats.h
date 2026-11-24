@@ -23,13 +23,13 @@ static const char* const kGpuStageNames[] = {
     "gen_blocks",   "residual_clear", "idct_sort",  "idct",        "inter",      "recon",
     "intra",        "lf_gen",         "lf_vert",    "lf_horz",     "cdef",       "superres",
     "loop_rest",    "ext_borders",    "film_grain", "copy_plane",  "output_copy", "slot_clear",
-    "cdef_lists", "pred_count", "pred_scan"};
+    "cdef_lists", "pred_count", "pred_scan", "display"};
 static_assert(sizeof(kGpuStageNames) / sizeof(kGpuStageNames[0]) == AV1_PERF_GPU_STAGE_COUNT,
               "GPU stage names out of step with av1_perf.h");
 
 // av1_perf_frame::output_path, as the per-frame lines write it (out=...).
 static const char* const kOutputPathNames[] = {"none", "fused", "grain", "copy-unfiltered", "copy-switch",
-                                               "copy-other"};
+                                               "copy-other", "display"};
 static_assert(sizeof(kOutputPathNames) / sizeof(kOutputPathNames[0]) == AV1_PERF_OUTPUT_COUNT,
               "output path names out of step with av1_perf.h");
 
@@ -445,11 +445,12 @@ class PerfStats {
                             output_paths[AV1_PERF_OUTPUT_COPY_OTHER];
       snprintf(b, sizeof(b),
                "output images %u: fused into the last postfilter stage %u, film grain alone %u; copy_plane %u "
-               "(no cdef/superres/loop_rest %u, fusion off %u, no direct texture or show-existing %u)",
+               "(no cdef/superres/loop_rest %u, fusion off %u, no direct texture or show-existing %u); display pass %u",
                (unsigned)(n - w - output_paths[AV1_PERF_OUTPUT_NONE]), (unsigned)output_paths[AV1_PERF_OUTPUT_FUSED],
                (unsigned)output_paths[AV1_PERF_OUTPUT_GRAIN], (unsigned)copies,
                (unsigned)output_paths[AV1_PERF_OUTPUT_COPY_UNFILTERED],
-               (unsigned)output_paths[AV1_PERF_OUTPUT_COPY_SWITCH], (unsigned)output_paths[AV1_PERF_OUTPUT_COPY_OTHER]);
+               (unsigned)output_paths[AV1_PERF_OUTPUT_COPY_SWITCH], (unsigned)output_paths[AV1_PERF_OUTPUT_COPY_OTHER],
+               (unsigned)output_paths[AV1_PERF_OUTPUT_DISPLAY]);
       out.push_back(b);
     }
 

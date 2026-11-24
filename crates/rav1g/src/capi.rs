@@ -220,6 +220,13 @@ pub const RAV1G_TONE_CURVE_BT2390: u32 = 1;
 /// `Rav1gDisplay::tone_curve`: Hable's filmic curve. Not in this version: `rav1g_decoder_create` returns
 /// `RAV1G_STATUS_INCAPABLE` (the application keeps its own stage).
 pub const RAV1G_TONE_CURVE_HABLE: u32 = 2;
+/// `Rav1gDisplay::dither`, the default: the ordered dither for 8-bit codes (NV12), rounded 10-bit codes
+/// (P010).
+pub const RAV1G_DISPLAY_DITHER_AUTO: u32 = 0;
+/// `Rav1gDisplay::dither`: rounded at either depth.
+pub const RAV1G_DISPLAY_DITHER_OFF: u32 = 1;
+/// `Rav1gDisplay::dither`: the ordered dither at either depth.
+pub const RAV1G_DISPLAY_DITHER_ORDERED: u32 = 2;
 
 const _: () = {
     assert!(RAV1G_LOW_MEMORY_SHARED_BACK_BUFFER == LowMemory::SHARED_BACK_BUFFER.0);
@@ -569,7 +576,8 @@ pub struct Rav1gFrame {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Rav1gDisplay {
     /// The size of every image (`Rav1gImageRequest::width`, `height`), both rounded up to even, at most
-    /// 16384. Any ratio to the frame works; half the frame in both (4K to 1080p) is the fast path.
+    /// 16384. Any ratio to the frame works; exactly half (4K to 1080p), the same size (4K to 4K) and two
+    /// thirds (4K to 1440p) of the frame in both are the fast paths.
     pub width: u32,
     pub height: u32,
     /// `RAV1G_DISPLAY_TRANSFORM_AUTO` (0), or a `RAV1G_DISPLAY_TRANSFORM_*` every frame takes whatever its
@@ -583,8 +591,8 @@ pub struct Rav1gDisplay {
     pub target_white_nits: f32,
     /// Not in this version: 0 (another value is `RAV1G_STATUS_INCAPABLE`).
     pub desaturation: f32,
-    /// The images' codes: 10 (`RAV1G_IMAGE_FORMAT_P010`), 8 (`RAV1G_IMAGE_FORMAT_NV12`, rounded, not
-    /// dithered), or 0: by `Rav1gSettings::bit_depth`, for every frame whatever its sequence's depth.
+    /// The images' codes: 10 (`RAV1G_IMAGE_FORMAT_P010`), 8 (`RAV1G_IMAGE_FORMAT_NV12`), or 0: by
+    /// `Rav1gSettings::bit_depth`, for every frame whatever its sequence's depth.
     pub depth: u32,
     /// The H.273 code points taken where the sequence header says "unspecified" (2), as an application
     /// merges what its container says: 0 for none (unspecified is BT.709 SDR then).
@@ -594,8 +602,13 @@ pub struct Rav1gDisplay {
     /// The AV1 `chroma_sample_position` taken where the header says 0 (unknown): 0 for none (unknown is
     /// between rows, as 1).
     pub assumed_chroma_sample_position: u8,
+    /// The last quantisation: `RAV1G_DISPLAY_DITHER_AUTO` (0: an ordered dither for NV12, rounded P010),
+    /// `RAV1G_DISPLAY_DITHER_OFF` (rounded) or `RAV1G_DISPLAY_DITHER_ORDERED` (dithered at either depth).
+    /// The dither is a threshold at each output sample from the R2 lattice, the same for every frame
+    /// (docs/integration.md, "The dither").
+    pub dither: u32,
     /// Zero.
-    pub reserved: [u32; 4],
+    pub reserved: [u32; 3],
 }
 
 impl From<&Rav1gDisplay> for Display {
@@ -613,6 +626,11 @@ impl From<&Rav1gDisplay> for Display {
             assumed_transfer_characteristics: display.assumed_transfer_characteristics,
             assumed_matrix_coefficients: display.assumed_matrix_coefficients,
             assumed_chroma_sample_position: display.assumed_chroma_sample_position,
+            dither: match display.dither {
+                RAV1G_DISPLAY_DITHER_OFF => crate::Dither::Off,
+                RAV1G_DISPLAY_DITHER_ORDERED => crate::Dither::Ordered,
+                _ => crate::Dither::Auto,
+            },
         }
     }
 }
@@ -629,7 +647,10 @@ fn display_invalid(display: &Rav1gDisplay) -> Option<String> {
     if display.tone_curve > RAV1G_TONE_CURVE_HABLE {
         return Some(format!("display: a tone curve of {}", display.tone_curve));
     }
-    (display.reserved != [0; 4]).then(|| String::from("display: reserved fields that are not zero"))
+    if display.dither > RAV1G_DISPLAY_DITHER_ORDERED {
+        return Some(format!("display: a dither of {}", display.dither));
+    }
+    (display.reserved != [0; 3]).then(|| String::from("display: reserved fields that are not zero"))
 }
 
 impl From<&ColorInfo> for Rav1gColorInfo {

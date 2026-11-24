@@ -94,6 +94,11 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"displaypass", atString, anOptional,
        "WxH: the display pass (Rav1gSettings::display) writes P010 images of that size, downscaled and tone-mapped (no md5)",
        "", &params_.displaypass_},
+      {"displaydepth", atInt, anOptional, "the display pass's codes: 10 P010, 8 NV12, 0 the decoder's depth", "",
+       &params_.displaydepth_},
+      {"displaydither", atInt, anOptional,
+       "the display pass's last quantisation: 0 dithered for NV12 (default), 1 rounded, 2 dithered for P010 too", "",
+       &params_.displaydither_},
       {"intrav2", atSingle, anOptional, "intra prediction through intra_v2.hlsl (same output)", "",
        &params_.intrav2_},
       {"intraopt", atSingle, anOptional, "optimized intra_main shaders (default)", "intra-main", &params_.intraopt_},
@@ -472,6 +477,8 @@ void CParameters::Reset() {
   params_.outputcopylegacy_ = false;
   params_.frontmergelegacy_ = false;
   params_.displaypass_.clear();
+  params_.displaydepth_ = 0;
+  params_.displaydither_ = 0;
   params_.intrav2_ = false;
   params_.intraopt_ = false;
   params_.intraod_ = false;

@@ -98,6 +98,19 @@ pub enum ToneCurve {
     Hable = 2,
 }
 
+/// The last quantisation of the display pass ([`Display::dither`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[repr(u32)]
+pub enum Dither {
+    /// The ordered dither for 8-bit codes (NV12), rounded 10-bit codes (P010).
+    #[default]
+    Auto = 0,
+    /// Rounded at either depth.
+    Off = 1,
+    /// The ordered dither at either depth.
+    Ordered = 2,
+}
+
 /// The display pass (docs/stage-fusion.md, docs/integration.md): every output image is the frame
 /// downscaled to the display size (area weights in display-linear light), tone-mapped or gamut-converted
 /// to BT.709 SDR, written by one pass at the end of the frame's command list into an NV12 or P010
@@ -111,8 +124,8 @@ pub enum ToneCurve {
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct Display {
     /// The size of every image, both rounded up to even; at most 16384. Any ratio to the frame works
-    /// (smaller or larger); exactly half the frame in both is the fast path the pass is sized for (4K to
-    /// 1080p).
+    /// (smaller or larger); exactly half (4K to 1080p), the same size (4K to 4K) and two thirds (4K to
+    /// 1440p) of the frame in both are the fast paths.
     pub width: u32,
     pub height: u32,
     /// `None`: by the colour of each frame ([`DisplayTransform`]); `Some`: that transform for every frame,
@@ -125,9 +138,12 @@ pub struct Display {
     pub target_white_nits: f32,
     /// Not in this version: 0. Another value is [`crate::ErrorCode::Incapable`].
     pub desaturation: f32,
-    /// The image's codes: 10 (P010), 8 (NV12, rounded, not dithered), or 0: those of the decoder's bit
-    /// depth ([`crate::Settings::bit_depth`]), for every frame whatever its sequence's depth.
+    /// The image's codes: 10 (P010), 8 (NV12), or 0: those of the decoder's bit depth
+    /// ([`crate::Settings::bit_depth`]), for every frame whatever its sequence's depth.
     pub depth: u32,
+    /// The last quantisation: an ordered dither (a threshold at each output sample from the R2 lattice,
+    /// docs/integration.md "The dither") or rounding. [`Dither::Auto`]: dithered at 8 bits, rounded at 10.
+    pub dither: Dither,
     /// The colour code points (H.273) the pass takes where the sequence header says "unspecified" (2),
     /// as an application merges what its container says: 0 for none (unspecified is BT.709 SDR then).
     pub assumed_primaries: u8,
@@ -195,6 +211,11 @@ impl Display {
             assumed_transfer: self.assumed_transfer_characteristics,
             assumed_matrix: self.assumed_matrix_coefficients,
             assumed_chroma_sample_position: self.assumed_chroma_sample_position,
+            dither: u8::from(match self.dither {
+                Dither::Auto => depth == 8,
+                Dither::Off => false,
+                Dither::Ordered => true,
+            }),
         })
     }
 }

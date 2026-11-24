@@ -98,10 +98,10 @@ use crate::gpu::{
     TextureState,
 };
 use crate::sys::{
-    AV1_COMMON, AV1_PERF_CPU_WAIT_IMAGE, AV1_PERF_CPU_WAIT_OUTPUT, AV1_PERF_GPU_COPY_PLANE, AV1_PERF_GPU_OUTPUT_COPY,
-    AV1_PERF_OUTPUT_COPY_OTHER, AV1_PERF_OUTPUT_COPY_SWITCH, AV1_PERF_OUTPUT_COPY_UNFILTERED, AV1_PERF_OUTPUT_FUSED,
-    AV1_PERF_OUTPUT_GRAIN, HwFrameBuffer, HwOutputImage, av1_decoded_frame_buffer_t, fbt8bit, fbt10bit, fbt10x3,
-    fbtNV12, fbtP010,
+    AV1_COMMON, AV1_PERF_CPU_WAIT_IMAGE, AV1_PERF_CPU_WAIT_OUTPUT, AV1_PERF_GPU_COPY_PLANE, AV1_PERF_GPU_DISPLAY,
+    AV1_PERF_GPU_OUTPUT_COPY, AV1_PERF_OUTPUT_COPY_OTHER, AV1_PERF_OUTPUT_COPY_SWITCH, AV1_PERF_OUTPUT_COPY_UNFILTERED,
+    AV1_PERF_OUTPUT_DISPLAY, AV1_PERF_OUTPUT_FUSED, AV1_PERF_OUTPUT_GRAIN, HwFrameBuffer, HwOutputImage,
+    av1_decoded_frame_buffer_t, fbt8bit, fbt10bit, fbt10x3, fbtNV12, fbtP010,
 };
 use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 
@@ -667,7 +667,7 @@ unsafe fn copy_semi_planar(
         if let Some(out) = display
             && let Some((texture, views, device, pair)) = direct
         {
-            td.perf.output_path = td.output_copy_reason;
+            td.perf.output_path = AV1_PERF_OUTPUT_DISPLAY;
             // Film grain (AV1 7.18.3) is applied before the downscale: the film grain pass writes the grained
             // planes into the back buffer, in the layout of the frame buffer (the pool has room for a frame
             // there, and nothing else uses it once the frame's postfilter is recorded), and the display
@@ -716,7 +716,8 @@ unsafe fn copy_semi_planar(
             commands.bind_write_planes(3, device, views, pair);
             // A group of 256 threads takes 64x64 output pixels.
             commands.dispatch((out.0 as u32).div_ceil(64), (out.1 as u32).div_ceil(64), 1);
-            perf_gpu_mark(dec, AV1_PERF_GPU_COPY_PLANE);
+            // Its own stage (not copy_plane): an application shows it as its display stage.
+            perf_gpu_mark(dec, AV1_PERF_GPU_DISPLAY);
             commands.transition_texture(texture, TextureState::ReadWrite, TextureState::Common);
             perf_gpu_mark(dec, AV1_PERF_GPU_OUTPUT_COPY);
             return;

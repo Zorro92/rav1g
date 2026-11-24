@@ -472,6 +472,7 @@ impl Library {
             source_peak_nits: display.source_peak_nits,
             target_white_nits: display.target_white_nits,
             depth: display.depth,
+            dither: display.dither as u32,
             ..Default::default()
         };
         if let Some(sink) = sink {

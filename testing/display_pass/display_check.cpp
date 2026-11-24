@@ -132,6 +132,7 @@ struct Case {
   int out_depth = 0;      // the output's codes: 10 (P010) or 8 (NV12); 0: as depth
   uint primaries = 0;     // H.273; 0: BT.2020 (9) with the BT.2020 matrix, else BT.709 (1)
   double peak = 1000.0, white = 100.0;  // the tone map's (Rav1gDisplay::source_peak_nits, target_white_nits)
+  bool dither = false;                  // the ordered dither at the quantisation (Rav1gDisplay::dither)
 };
 
 static uint ceil_div(uint n, uint d) { return (n + d - 1) / d; }
@@ -220,11 +221,16 @@ static int run_case(const Case &c, const std::string &dir, std::mt19937 &rng) {
   cb_v_offset = v_off;
   cb_y_stride = y_stride;
   cb_uv_stride = uv_stride;
+  // The fast paths of display_pass.rs (the planes here are at multiples of 4 bytes): 2:1, 1:1 and 3:2;
+  // no_quad keeps the area loop.
   const bool quad = !c.no_quad && c.sw == 2 * c.ow && c.sh == 2 * c.oh;
+  const bool one = !c.no_quad && c.sw == c.ow && c.sh == c.oh;
+  const bool three = !c.no_quad && 2 * c.sw == 3 * c.ow && 2 * c.sh == 3 * c.oh;
   const uint primaries = c.primaries ? c.primaries : c.matrix == 9 ? 9u : 1u;
   const int out_depth = c.out_depth ? c.out_depth : c.depth;
   cb_flags = mode | (primaries == 9 ? 4u : 0u) | (c.full ? 8u : 0u) | (c.colocated ? 0u : 16u) | (quad ? 32u : 0u) |
-             (c.depth == 8 ? 64u : 0u) | (out_depth == 8 ? 128u : 0u);
+             (c.depth == 8 ? 64u : 0u) | (out_depth == 8 ? 128u : 0u) | (one ? 256u : 0u) | (three ? 512u : 0u) |
+             (c.dither ? 1024u : 0u);
   cb_eotf_a = k[0];
   cb_eotf_b = k[1];
   cb_eotf_c = k[2];
@@ -314,9 +320,10 @@ static int run_case(const Case &c, const std::string &dir, std::mt19937 &rng) {
     for (size_t i = 0; i < chroma.size(); i++) put(f, chroma[i][comp] >> shift, out_bytes);
   std::fclose(f);
   std::printf("%s %s %s --size %ux%u --out %ux%u --transfer %u --matrix %u --primaries %u --depth %d --out-depth %d "
-              "--peak %g --white %g%s%s\n",
+              "--peak %g --white %g%s%s%s\n",
               c.name, frames.c_str(), display.c_str(), c.sw, c.sh, c.ow, c.oh, c.transfer, c.matrix, primaries, c.depth,
-              out_depth, c.peak, c.white, c.full ? " --full" : "", c.colocated ? " --colocated" : "");
+              out_depth, c.peak, c.white, c.full ? " --full" : "", c.colocated ? " --colocated" : "",
+              c.dither ? " --dither" : "");
   return 0;
 }
 
@@ -360,6 +367,33 @@ int main(int argc, char **argv) {
     { "pq-peak600-white203-2to1", 256, 128, 128, 64, 16, 9, false, false, false, 0, 10, 0, 0, 600.0, 203.0 },
     { "pq-peak150-2to1", 256, 128, 128, 64, 16, 9, false, false, false, 1, 10, 0, 0, 150.0, 100.0 },
     { "hlg-peak400-3to2", 240, 132, 160, 88, 18, 9, false, false, false, 0, 10, 0, 0, 400.0, 100.0 },
+    // The 1:1 block path (a 4K frame on a 4K display): PQ, HLG, BT.2020 SDR, BT.709 SDR at every code, near
+    // black out of gamut, colocated full range, 8-bit frames, a partial tile, an odd chroma column count.
+    { "pq-1to1", 256, 192, 256, 192, 16, 9, false, false, false, 0 },
+    { "hlg-1to1", 200, 136, 200, 136, 18, 9, false, false, false, 0 },
+    { "sdr2020-1to1", 136, 72, 136, 72, 14, 9, false, false, false, 0 },
+    { "sdr709-codes-1to1", 128, 128, 128, 128, 1, 1, false, false, false, 1 },
+    { "pq-black-1to1", 128, 64, 128, 64, 16, 9, false, false, false, 2 },
+    { "pq-codes-1to1", 128, 64, 128, 64, 16, 9, false, false, false, 1 },
+    { "pq-full-colocated-1to1", 132, 130, 132, 130, 16, 9, true, true, false, 0 },
+    { "pq-8bit-1to1", 136, 68, 136, 68, 16, 9, false, false, false, 0, 8 },
+    { "hlg-colocated-8bit-1to1", 130, 66, 130, 66, 18, 9, false, true, false, 0, 8, 10 },
+    { "sdr709-1to1-area", 130, 70, 130, 70, 1, 1, false, false, true, 0 },
+    // The 3:2 block path (3840x2160 to 2560x1440): every mode, both sitings, 8-bit frames, a partial tile
+    // (the quads' source blocks at odd and even columns and rows alternate).
+    { "pq-3to2-codes", 192, 192, 128, 128, 16, 9, false, false, false, 1 },
+    { "sdr709-3to2", 264, 198, 176, 132, 1, 1, false, false, false, 0 },
+    { "sdr2020-colocated-3to2", 198, 102, 132, 68, 14, 9, false, true, false, 0 },
+    { "hlg-3to2-8bit", 222, 132, 148, 88, 18, 9, false, false, false, 0, 8 },
+    { "pq-black-3to2", 192, 96, 128, 64, 16, 9, false, false, false, 2 },
+    { "pq-full-colocated-8bit-3to2", 120, 216, 80, 144, 16, 9, true, true, false, 0, 8, 10 },
+    { "pq-3to2-area", 240, 132, 160, 88, 16, 9, false, false, true, 0 },
+    // The ordered dither: NV12 from 10-bit frames on each path, NV12 from 8-bit frames, and P010 dithered.
+    { "pq-to-nv12-dither-2to1", 256, 128, 128, 64, 16, 9, false, false, false, 0, 10, 8, 0, 1000.0, 100.0, true },
+    { "pq-to-nv12-dither-1to1", 160, 96, 160, 96, 16, 9, false, false, false, 0, 10, 8, 0, 1000.0, 100.0, true },
+    { "sdr709-to-nv12-dither-3to2", 240, 132, 160, 88, 1, 1, false, false, false, 0, 10, 8, 0, 1000.0, 100.0, true },
+    { "sdr709-8bit-dither-area", 210, 120, 140, 80, 1, 1, false, false, false, 1, 8, 8, 0, 1000.0, 100.0, true },
+    { "pq-p010-dither-2to1", 256, 128, 128, 64, 16, 9, false, false, false, 0, 10, 10, 0, 1000.0, 100.0, true },
   };
   std::mt19937 rng(0x5eed);
   int failed = 0;

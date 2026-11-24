@@ -731,6 +731,11 @@ fn create_decoder(
             source_peak_nits: task.displaypeak,
             target_white_nits: task.displaywhite,
             depth: task.displaydepth,
+            dither: match task.displaydither {
+                1 => rav1g::Dither::Off,
+                2 => rav1g::Dither::Ordered,
+                _ => rav1g::Dither::Auto,
+            },
             ..Default::default()
         },
     };
@@ -1008,14 +1013,15 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     });
     if task.displaypass.0 > 0 {
         say!(
-            "Display pass: {}x{} (Rav1gSettings::display{}), peak {} white {} depth {} transform {}",
+            "Display pass: {}x{} (Rav1gSettings::display{}), peak {} white {} depth {} transform {} dither {}",
             task.displaypass.0,
             task.displaypass.1,
             if library.is_c() { "" } else { ", Rust: Settings::display" },
             task.displaypeak,
             task.displaywhite,
             task.displaydepth,
-            task.displaytransform
+            task.displaytransform,
+            task.displaydither
         );
     }
     say!(

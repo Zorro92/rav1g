@@ -413,6 +413,22 @@ typedef struct av1_stage_dump av1_stage_dump;
 #define RAV1G_TONE_CURVE_HABLE 2
 
 /*
+ `Rav1gDisplay::dither`, the default: the ordered dither for 8-bit codes (NV12), rounded 10-bit codes
+ (P010).
+ */
+#define RAV1G_DISPLAY_DITHER_AUTO 0
+
+/*
+ `Rav1gDisplay::dither`: rounded at either depth.
+ */
+#define RAV1G_DISPLAY_DITHER_OFF 1
+
+/*
+ `Rav1gDisplay::dither`: the ordered dither at either depth.
+ */
+#define RAV1G_DISPLAY_DITHER_ORDERED 2
+
+/*
  The version of the interface of this header: raised whenever a declaration of `rav1g.h` changes (a
  struct, an enum, a function), and not for a constant, a comment or a change inside the library.
  `rav1g_abi_version` returns the value the library was built with; an application that loads the
@@ -825,7 +841,8 @@ typedef struct Rav1gOutput {
 typedef struct Rav1gDisplay {
   /*
    The size of every image (`Rav1gImageRequest::width`, `height`), both rounded up to even, at most
-   16384. Any ratio to the frame works; half the frame in both (4K to 1080p) is the fast path.
+   16384. Any ratio to the frame works; exactly half (4K to 1080p), the same size (4K to 4K) and two
+   thirds (4K to 1440p) of the frame in both are the fast paths.
    */
   uint32_t width;
   uint32_t height;
@@ -851,8 +868,8 @@ typedef struct Rav1gDisplay {
    */
   float desaturation;
   /*
-   The images' codes: 10 (`RAV1G_IMAGE_FORMAT_P010`), 8 (`RAV1G_IMAGE_FORMAT_NV12`, rounded, not
-   dithered), or 0: by `Rav1gSettings::bit_depth`, for every frame whatever its sequence's depth.
+   The images' codes: 10 (`RAV1G_IMAGE_FORMAT_P010`), 8 (`RAV1G_IMAGE_FORMAT_NV12`), or 0: by
+   `Rav1gSettings::bit_depth`, for every frame whatever its sequence's depth.
    */
   uint32_t depth;
   /*
@@ -868,9 +885,16 @@ typedef struct Rav1gDisplay {
    */
   uint8_t assumed_chroma_sample_position;
   /*
+   The last quantisation: `RAV1G_DISPLAY_DITHER_AUTO` (0: an ordered dither for NV12, rounded P010),
+   `RAV1G_DISPLAY_DITHER_OFF` (rounded) or `RAV1G_DISPLAY_DITHER_ORDERED` (dithered at either depth).
+   The dither is a threshold at each output sample from the R2 lattice, the same for every frame
+   (docs/integration.md, "The dither").
+   */
+  uint32_t dither;
+  /*
    Zero.
    */
-  uint32_t reserved[4];
+  uint32_t reserved[3];
 } Rav1gDisplay;
 
 /*

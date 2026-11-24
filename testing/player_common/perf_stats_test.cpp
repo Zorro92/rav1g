@@ -549,6 +549,26 @@ int main() {
     printf("%d check(s) failed\n", g_failed);
     return 1;
   }
+  // The display pass (Rav1gSettings::display): its own GPU stage and output path, not copy_plane's.
+  {
+    PerfStats st;
+    for (int i = 0; i < 40; ++i) {
+      av1_perf_frame f = MakeFrame(i, 1000.0 + 20.0 * i, 1);
+      f.output_path = AV1_PERF_OUTPUT_DISPLAY;
+      f.gpu_stage_ms[AV1_PERF_GPU_DISPLAY] = 1.25;
+      f.gpu_stage_hits[AV1_PERF_GPU_DISPLAY] = 1;
+      f.gpu_sum_ms += 1.25;
+      st.AddFrame(f);
+      st.AddOutput(1000.0 + 20.0 * i);
+    }
+    std::vector<std::string> lines = st.Summary(no_waits);
+    CHECK(Has(lines, "copy_plane 0 (no cdef/superres/loop_rest 0, fusion off 0, no direct texture or show-existing 0); "
+                     "display pass 30"));
+    CHECK(Has(lines, "gpu display                  30    1.250    1.250    1.250    1.250"));
+    CHECK(Has(lines, "gpu copy_plane                0  (not dispatched)"));
+    CHECK(Has(st.FrameLines(), " out=display wall="));
+  }
+
   printf("perf_stats: all checks passed\n");
   return 0;
 }

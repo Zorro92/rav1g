@@ -39,7 +39,14 @@
 //   - At 2:1 (3840x2160 to 1920x1080, the case the pass is sized for) a thread takes 2x2 output pixels
 //     from four rows of its source read with 8-byte loads (a wave reads 256 contiguous bytes a row) and
 //     four chroma rows of three columns, one 8-byte load each a plane; the chroma is interpolated at the
-//     sited positions with constant weights. Other ratios take the area loop of the model.
+//     sited positions with constant weights.
+//   - At 1:1 (a 4K frame on a 4K display: tone map, gamut and quantisation, no downscale) and at 3:2
+//     (3840x2160 to 2560x1440) a thread takes 2x2 output pixels from a block of 2x2 or 3x3 source pixels
+//     (quad_block): n luma rows and a window of three chroma rows of three columns of U and V, one 8-byte
+//     read each, all issued together; every source pixel decoded once and weighted by its exact overlap
+//     (1:1: 1; 3:2: 1 and 1/2 a side). Other ratios take the area loop of the model.
+//   - The encode after the late clip is a plain power (the values are 0..1); the optional ordered dither
+//     of the last quantisation (`threshold`) is integer arithmetic at the output sample, no table.
 //   - A group is 256 threads and 64x64 output pixels; the output chroma's left neighbour column comes
 //     through group memory from the thread to the left, and one column more on the left of the tile
 //     (64 rows) is computed by the first 32 threads, a quad each (1.6% more pixels).
@@ -71,7 +78,9 @@ cbuffer cb_display : register(b0) {
   uint cb_flags;      // bits 0-1: 0 PQ, 1 SDR, 2 HLG; bit 2: BT.2020 primaries (to BT.709); bit 3: full
                       // range; bit 4: chroma between rows; bit 5: exactly 2:1 with planes at multiples of
                       // 4 bytes (the quad path); bit 6: 8-bit samples (else 16-bit); bit 7: 8-bit codes,
-                      // NV12 (else 10-bit, P010)
+                      // NV12 (else 10-bit, P010); bit 8: exactly 1:1 (the block path, n 2); bit 9:
+                      // exactly 3:2 (the block path, n 3), both with planes at multiples of 4 bytes; bit
+                      // 10: the ordered dither at the quantisation (else rounded)
   float cb_eotf_a;    // the EOTF table's position of a signal m: min(m * a, m * b + c), at most EOTF_N
   float cb_eotf_b;
   float cb_eotf_c;
@@ -122,6 +131,9 @@ bool between_rows() { return (cb_flags & 16u) != 0; }
 bool quad_path() { return (cb_flags & 32u) != 0; }
 bool eight_bit() { return (cb_flags & 64u) != 0; }
 bool nv12_out() { return (cb_flags & 128u) != 0; }
+bool one_to_one() { return (cb_flags & 256u) != 0; }
+bool three_to_two() { return (cb_flags & 512u) != 0; }
+bool dithered() { return (cb_flags & 1024u) != 0; }
 
 // The frame buffer's samples: log2 of their bytes, their mask (uniform).
 uint sample_shift() { return eight_bit() ? 0u : 1u; }
@@ -169,6 +181,13 @@ float run_sample(Run r, uint k, bool eight) {
 float luma_sample(Run r, uint k, bool eight) {
   if (eight) return (float)((r.w.x >> (8u * k)) & 255u);
   return run_sample(r, k, false);
+}
+
+// Sample k of a run whose sample x is anywhere in its first dword (the block paths: k + first below 8 at 8
+// bits, below 4 at 16).
+float run_at(Run r, uint k) {
+  const uint pos = (r.first + k) << (3u + sample_shift());
+  return (float)(((pos >= 32u ? r.w.y : r.w.x) >> (pos & 31u)) & sample_mask());
 }
 
 // ST 2084: a PQ signal (0..1) to nits, as the model has it (the exact peak of near-black pixels).
@@ -259,7 +278,8 @@ float4 sample_linear(int2 p) {
   const float2 c = (float2(p) - float2(0.0f, between_rows() ? 0.5f : 0.0f)) * 0.5f;
   const int2 base = int2(floor(c));
   const float2 f = c - float2(base);
-  const int2 last = int2((int)(cb_src_w / 2u) - 1, (int)(cb_src_h / 2u) - 1);
+  // The last chroma sample of a row and of a column: (w + 1) / 2 of them for an odd width.
+  const int2 last = int2((int)((cb_src_w + 1u) / 2u) - 1, (int)((cb_src_h + 1u) / 2u) - 1);
   const int2 p00 = clamp(base, int2(0, 0), last);
   const int2 p10 = clamp(base + int2(1, 0), int2(0, 0), last);
   const int2 p01 = clamp(base + int2(0, 1), int2(0, 0), last);
@@ -386,6 +406,128 @@ Quad quad_2to1(int2 o, uint m, bool eight) {
   return q;
 }
 
+// The block paths: the quad of output pixels at o (even) from the n x n source pixels at n o / 2, at
+// exactly n:2 in both axes (n 2: 1:1, a 4K frame on a 4K display; n 3: 3:2, 3840x2160 to 2560x1440). Each
+// source pixel is decoded once and weighted by the overlap of its unit square with the output pixels'
+// footprints, as the model's area weights have it: 1 (n 2), or along an axis 1, 1/2, 0 for the first
+// output pixel and 0, 1/2, 1 for the second (n 3), the four sums over 2.25. The reads come first, all
+// together and with no branch between them: n luma rows of 8 bytes, three chroma rows of U and of V of 8
+// bytes (three columns from the chroma column of the block's first source column; the third may reach two
+// samples into the frame buffer row's right border, and is then not used). A source pixel's chroma is
+// sample_linear's: the bilinear mix of the window's rows k, k + 1 at f (between rows: a source row 2t sits
+// at the chroma row t - 1/4, 2t + 1 at t + 1/4; colocated 2t at t, 2t + 1 at t + 1/2) and of its columns
+// (column 2t at the chroma column t, 2t + 1 at t + 1/2), exact in float32 in any order. `n` and the mode
+// `m` are constants of the caller; the sample size is not (a shift and a mask, as everywhere).
+// A run of the block paths, whose planes are at multiples of 4 bytes: its first sample is x's place in its
+// dword, known from x alone (0 for an even x at 16 bits).
+Run load_aligned(uint offset, uint stride, int row, uint x) {
+  Run r;
+  r.w = pool.Load2((offset + (uint)row * stride + (x << sample_shift())) & ~3u);
+  r.first = x & (eight_bit() ? 3u : 1u);
+  return r;
+}
+
+Quad quad_block(int2 o, uint n, uint m) {
+  // o is even: the block starts at an even source column and row for n 2.
+  const int sx = (o.x >> 1) * (int)n;
+  const int sy = (o.y >> 1) * (int)n;
+  const bool between = between_rows();
+  const int last_row = (int)((cb_src_h + 1u) / 2u) - 1;
+  const uint c0 = (uint)sx >> 1;
+  const uint cmax = (cb_src_w + 1u) / 2u - 1u - c0;  // the last chroma column, from c0
+  const int r0 = between ? (sy - 1) >> 1 : sy >> 1;  // the window's first chroma row (-1 above the frame)
+  Run l0 = load_aligned(cb_y_offset, cb_y_stride, sy, (uint)sx);
+  Run l1 = load_aligned(cb_y_offset, cb_y_stride, sy + 1, (uint)sx);
+  Run l2 = l1;
+  if (n == 3u) l2 = load_aligned(cb_y_offset, cb_y_stride, sy + 2, (uint)sx);
+  const int ra = clamp(r0, 0, last_row);
+  const int rb = clamp(r0 + 1, 0, last_row);
+  const int rc = clamp(r0 + 2, 0, last_row);
+  const Run ua = load_aligned(cb_u_offset, cb_uv_stride, ra, c0);
+  const Run ub = load_aligned(cb_u_offset, cb_uv_stride, rb, c0);
+  const Run uc = load_aligned(cb_u_offset, cb_uv_stride, rc, c0);
+  const Run va = load_aligned(cb_v_offset, cb_uv_stride, ra, c0);
+  const Run vb = load_aligned(cb_v_offset, cb_uv_stride, rb, c0);
+  const Run vc = load_aligned(cb_v_offset, cb_uv_stride, rc, c0);
+  // The window, its columns clamped to the frame's last.
+  const uint k1 = min(1u, cmax), k2 = n == 2u ? k1 : min(2u, cmax);
+  const float3 u0 = float3(run_at(ua, 0u), run_at(ua, k1), run_at(ua, k2));
+  const float3 u1 = float3(run_at(ub, 0u), run_at(ub, k1), run_at(ub, k2));
+  const float3 u2 = float3(run_at(uc, 0u), run_at(uc, k1), run_at(uc, k2));
+  const float3 v0 = float3(run_at(va, 0u), run_at(va, k1), run_at(va, k2));
+  const float3 v1 = float3(run_at(vb, 0u), run_at(vb, k1), run_at(vb, k2));
+  const float3 v2 = float3(run_at(vc, 0u), run_at(vc, k1), run_at(vc, k2));
+  float3 a00 = float3(0.0f, 0.0f, 0.0f), a10 = a00, a01 = a00, a11 = a00;
+  [unroll] for (uint i = 0; i < 3u; i++) {
+    if (i < n) {
+      const int y = sy + (int)i;
+      Run l = l2;
+      if (i == 0u) l = l0;
+      else if (i == 1u) l = l1;
+      // The row's chroma rows in the window (k, k + 1) and its place between them.
+      const bool odd_row = n == 2u ? i == 1u : (y & 1) != 0;
+      const bool down = n == 2u ? between && i == 1u : ((between ? (y - 1) >> 1 : y >> 1) - r0) != 0;
+      const float fy = between ? (odd_row ? 0.25f : 0.75f) : (odd_row ? 0.5f : 0.0f);
+      const float3 ut = down ? u1 : u0, ubot = down ? u2 : u1;
+      const float3 vt = down ? v1 : v0, vbot = down ? v2 : v1;
+      const float3 ur = float3(mad(ubot.x - ut.x, fy, ut.x), mad(ubot.y - ut.y, fy, ut.y), mad(ubot.z - ut.z, fy, ut.z));
+      const float3 vr = float3(mad(vbot.x - vt.x, fy, vt.x), mad(vbot.y - vt.y, fy, vt.y), mad(vbot.z - vt.z, fy, vt.z));
+      float3 left = float3(0.0f, 0.0f, 0.0f), right = left;
+      [unroll] for (uint j = 0; j < 3u; j++) {
+        if (j < n) {
+          const uint x = (uint)sx + j;
+          const bool next = n == 2u ? false : (x >> 1) != c0;  // the window's columns 1, 2 (else 0, 1)
+          const float fx = (n == 2u ? j == 1u : (x & 1u) != 0) ? 0.5f : 0.0f;
+          const float ul = next ? ur.y : ur.x, urt = next ? ur.z : ur.y;
+          const float vl = next ? vr.y : vr.x, vrt = next ? vr.z : vr.y;
+          const float4 p = decode_pixel(run_at(l, j), mad(urt - ul, fx, ul), mad(vrt - vl, fx, vl), m);
+          if (n == 2u) {
+            if (j == 0u) left = add_light(left, p, 1.0f);
+            else right = add_light(right, p, 1.0f);
+          } else {
+            // Columns 0, 1, 2: the left output pixel 1, 1/2, 0; the right 0, 1/2, 1.
+            if (j < 2u) left = add_light(left, p, j == 0u ? 1.0f : 0.5f);
+            if (j > 0u) right = add_light(right, p, j == 2u ? 1.0f : 0.5f);
+          }
+        }
+      }
+      if (n == 2u) {
+        if (i == 0u) {
+          a00 = left;
+          a10 = right;
+        } else {
+          a01 = left;
+          a11 = right;
+        }
+      } else {
+        // Rows 0, 1, 2: the top output pixels 1, 1/2, 0; the bottom 0, 1/2, 1.
+        if (i < 2u) {
+          const float w = i == 0u ? 1.0f : 0.5f;
+          a00 = mad3(w, left, a00);
+          a10 = mad3(w, right, a10);
+        }
+        if (i > 0u) {
+          const float w = i == 2u ? 1.0f : 0.5f;
+          a01 = mad3(w, left, a01);
+          a11 = mad3(w, right, a11);
+        }
+      }
+    }
+  }
+  if (n == 3u) {
+    a00 = a00 / 2.25f;
+    a10 = a10 / 2.25f;
+    a01 = a01 / 2.25f;
+    a11 = a11 / 2.25f;
+  }
+  Quad q;
+  q.v00 = to_display(a00);
+  q.v10 = to_display(a10);
+  q.v01 = to_display(a01);
+  q.v11 = to_display(a11);
+  return q;
+}
+
 Quad quad_area(int2 o) {
   Quad q;
   q.v00 = area_linear(o);
@@ -395,12 +537,16 @@ Quad quad_area(int2 o) {
   return q;
 }
 
-// The quad of output pixels at o: the 2:1 path, with its mode a constant (three copies of its code, each
-// without a branch between its loads and its arithmetic), or the area loop.
+// The quad of output pixels at o: the block paths (1:1, 3:2), the 2:1 path with its mode a constant (three
+// copies of its code, each without a branch between its loads and its arithmetic), or the area loop.
 Quad quad_at(int2 o) {
   Quad v;
   const uint m = mode();
-  [branch] if (!quad_path()) {
+  [branch] if (one_to_one()) {
+    v = quad_block(o, 2u, m);
+  } else if (three_to_two()) {
+    v = quad_block(o, 3u, m);
+  } else if (!quad_path()) {
     v = quad_area(o);
   } else if (eight_bit()) {
     if (m == 1u) {
@@ -420,31 +566,54 @@ Quad quad_at(int2 o) {
   return v;
 }
 
-// The late clip (not for BT.709 SDR, which is scaled only), inverse BT.1886 with the sign kept.
+// The late clip (not for BT.709 SDR, which is scaled only), inverse BT.1886 with the sign kept. After the
+// clip the values are 0..1: the power alone (the same values; pow(0, 1/2.4) is 0).
 float3 encode_rgb(float3 c) {
-  if (!(mode() == 1u && !bt2020())) c = saturate(c);
+  if (!(mode() == 1u && !bt2020())) {
+    c = saturate(c);
+    return float3(pow(c.x, 1.0f / 2.4f), pow(c.y, 1.0f / 2.4f), pow(c.z, 1.0f / 2.4f));
+  }
   return float3(with_sign(pow(min(abs(c.x), 3.0f), 1.0f / 2.4f), c.x), with_sign(pow(min(abs(c.y), 3.0f), 1.0f / 2.4f), c.y),
                 with_sign(pow(min(abs(c.z), 3.0f), 1.0f / 2.4f), c.z));
 }
 
-// BT.709 Y'CbCr, limited range: 10-bit codes in the high bits of P010's 16, or NV12's 8-bit codes.
-uint luma_code(float3 c) {
-  const float y = dot(float3(0.2126f, 0.7152f, 0.0722f), encode_rgb(c));
-  if (nv12_out()) return (uint)clamp(floor(16.0f + 219.0f * y + 0.5f), 16.0f, 235.0f);
-  return (uint)clamp(floor(64.0f + 876.0f * y + 0.5f), 64.0f, 940.0f) << 6;
+// The threshold of the last quantisation at the output sample p: 0.5 (rounding), or with the dither (bit
+// 10, docs/integration.md "The dither") an ordered dither on the R2 sequence (M. Roberts, "The unreasonable
+// effectiveness of quasirandom sequences", 2018: the additive recurrence of the plastic number g = 1.3247...,
+// frac(x / g + y / g^2)), in 32-bit fixed point: its top 8 bits, (t + 1/2) / 256. A code is floor(v + t),
+// so a flat area keeps its mean level, every code is within one of the exact value, and a slow ramp becomes
+// a fine pattern without bands. No table, no period of 8 (the cross-hatch of a Bayer matrix), unbiased row
+// and column means; tied to the output sample alone, so a still picture stays still. Cr takes the
+// transposed lattice (x and y swapped), so that Cb and Cr do not step together.
+#define R2_X 0xc13fa9a9u  // 2^32 / g
+#define R2_Y 0x91e10da6u  // 2^32 / g^2
+float threshold(uint2 p) {
+  if (!dithered()) return 0.5f;
+  return mad((float)((p.x * R2_X + p.y * R2_Y) >> 24), 1.0f / 256.0f, 0.5f / 256.0f);
 }
 
-uint2 chroma_code(float3 c) {
+// BT.709 Y'CbCr, limited range: 10-bit codes in the high bits of P010's 16, or NV12's 8-bit codes; p is the
+// output sample (luma: its pixel; chroma: its chroma sample).
+uint luma_code(float3 c, uint2 p) {
+  const float y = dot(float3(0.2126f, 0.7152f, 0.0722f), encode_rgb(c));
+  const float t = threshold(p);
+  if (nv12_out()) return (uint)clamp(floor(16.0f + 219.0f * y + t), 16.0f, 235.0f);
+  return (uint)clamp(floor(64.0f + 876.0f * y + t), 64.0f, 940.0f) << 6;
+}
+
+uint2 chroma_code(float3 c, uint2 p) {
   const float3 e = encode_rgb(c);
   const float y = dot(float3(0.2126f, 0.7152f, 0.0722f), e);
   const float cb = (e.z - y) / (2.0f * (1.0f - 0.0722f));
   const float cr = (e.x - y) / (2.0f * (1.0f - 0.2126f));
+  const float tb = threshold(p);
+  const float tr = threshold(uint2(p.y, p.x));
   if (nv12_out()) {
-    return uint2((uint)clamp(floor(128.0f + 224.0f * cb + 0.5f), 16.0f, 240.0f),
-                 (uint)clamp(floor(128.0f + 224.0f * cr + 0.5f), 16.0f, 240.0f));
+    return uint2((uint)clamp(floor(128.0f + 224.0f * cb + tb), 16.0f, 240.0f),
+                 (uint)clamp(floor(128.0f + 224.0f * cr + tr), 16.0f, 240.0f));
   }
-  return uint2((uint)clamp(floor(512.0f + 896.0f * cb + 0.5f), 64.0f, 960.0f) << 6,
-               (uint)clamp(floor(512.0f + 896.0f * cr + 0.5f), 64.0f, 960.0f) << 6);
+  return uint2((uint)clamp(floor(512.0f + 896.0f * cb + tb), 64.0f, 960.0f) << 6,
+               (uint)clamp(floor(512.0f + 896.0f * cr + tr), 64.0f, 960.0f) << 6);
 }
 
 [numthreads(256, 1, 1)] void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
@@ -485,10 +654,11 @@ uint2 chroma_code(float3 c) {
     float3 own = float3(0.0f, 0.0f, 0.0f);
     float3 right = float3(0.0f, 0.0f, 0.0f);
     if (inside) {
-      sp_luma[int2(ox, oy)] = luma_code(v.v00);
-      sp_luma[int2(ox + 1, oy)] = luma_code(v.v10);
-      sp_luma[int2(ox, oy + 1)] = luma_code(v.v01);
-      sp_luma[int2(ox + 1, oy + 1)] = luma_code(v.v11);
+      const uint2 at = uint2((uint)ox, (uint)oy);
+      sp_luma[int2(ox, oy)] = luma_code(v.v00, at);
+      sp_luma[int2(ox + 1, oy)] = luma_code(v.v10, at + uint2(1u, 0u));
+      sp_luma[int2(ox, oy + 1)] = luma_code(v.v01, at + uint2(0u, 1u));
+      sp_luma[int2(ox + 1, oy + 1)] = luma_code(v.v11, at + uint2(1u, 1u));
       // The output chroma sample at (ox / 2, oy / 2), left-sited: columns ox - 1, ox, ox + 1 mixed 1/4,
       // 1/2, 1/4, rows oy and oy + 1 1/2 each; this quad has the last two columns.
       own = 0.25f * (v.v00 + v.v01) + 0.125f * (v.v10 + v.v11);
@@ -504,6 +674,6 @@ uint2 chroma_code(float3 c) {
     } else {
       left = ex[((uint)q & 1u) * THREADS + lane - 1u];
     }
-    if (inside) sp_chroma[int2(ox / 2, oy / 2)] = chroma_code(own + left);
+    if (inside) sp_chroma[int2(ox / 2, oy / 2)] = chroma_code(own + left, uint2((uint)ox / 2u, (uint)oy / 2u));
   }
 }

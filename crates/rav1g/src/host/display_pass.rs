@@ -231,6 +231,27 @@ pub(crate) fn choose(seq: &SequenceHeader, display: &av1_display_cfg) -> Choice 
     Choice { mode, bt2020, transform, matrix, chroma_sample_position }
 }
 
+/// The flag of the shader's fast path for a frame of `src` pixels into an image of `out` (bit 5, 8 or 9 of
+/// its flags), or 0 for the area loop. The fast paths need planes at multiples of 4 bytes (`aligned`):
+/// exactly 2:1 (the quad path: 3840x2160 to 1920x1080, 3840x1600 to 1920x800), exactly 1:1 (a block path:
+/// a 4K frame on a 4K display, a 1080p frame on a 1080p display) and exactly 3:2 (a block path: 3840x2160
+/// to 2560x1440). The display sizes they are for are those of an HDMI mode with the frame fitted into it;
+/// a ratio that is not exact in both axes (3840x1600 to 2560x1066) takes the area loop.
+fn path_flags(src: (u32, u32), out: (u32, u32), aligned: bool) -> u32 {
+    let ((w, h), (ow, oh)) = (src, out);
+    if !aligned {
+        0
+    } else if w == 2 * ow && h == 2 * oh {
+        1 << 5
+    } else if w == ow && h == oh {
+        1 << 8
+    } else if 2 * w == 3 * ow && 2 * h == 3 * oh {
+        1 << 9
+    } else {
+        0
+    }
+}
+
 /// Writes the tables of the frame's mode to `dst` (`LUT_WORDS` words of the frame's constant memory;
 /// nothing for SDR, whose shader does not read them) and returns the inline constants of
 /// `display_pass.hlsl` for the frame `src` (read as the `choice` says; `monochrome`: its chroma is taken
@@ -266,8 +287,7 @@ pub(crate) unsafe fn constants(
         [src.planes[0].offset, src.planes[1].offset, src.planes[2].offset, src.planes[0].stride, src.planes[1].stride]
             .iter()
             .all(|v| v % 4 == 0);
-    // Exactly 2:1 with 4-byte aligned planes: the shader's quad path (3840x2160 to 1920x1080).
-    let quad = aligned && w == 2 * out.0 as u32 && h == 2 * out.1 as u32;
+    let path = path_flags((w, h), (out.0 as u32, out.1 as u32), aligned);
     // Y'CbCr to R'G'B' by the matrix (H.273: BT.2020 9, BT.601 5 and 6, else BT.709 weights), the
     // model's arithmetic folded into eight constants.
     let (wr, wb) = match choice.matrix {
@@ -291,9 +311,10 @@ pub(crate) unsafe fn constants(
         | (u32::from(full) << 3)
         // AV1 chroma_sample_position: 2 (colocated) sits on the luma row, the others between two rows.
         | (u32::from(choice.chroma_sample_position != 2) << 4)
-        | (u32::from(quad) << 5)
+        | path
         | (u32::from(eight) << 6)
-        | (u32::from(display.depth == 8) << 7);
+        | (u32::from(display.depth == 8) << 7)
+        | (u32::from(display.dither != 0) << 10);
     [
         w,
         h,
@@ -346,6 +367,21 @@ mod tests {
             .filter(|line| line.starts_with("uint cb_") || line.starts_with("float cb_"))
             .count();
         assert_eq!(fields, CONSTANTS);
+    }
+
+    /// The fast path a size takes: 2:1, 1:1 and 3:2 exactly, aligned planes; the rest the area loop.
+    #[test]
+    fn sizes_take_their_paths() {
+        let path = |w, h, ow, oh| path_flags((w, h), (ow, oh), true);
+        assert_eq!(path(3840, 2160, 1920, 1080), 1 << 5);
+        assert_eq!(path(3840, 1600, 1920, 800), 1 << 5);
+        assert_eq!(path(3840, 2160, 3840, 2160), 1 << 8);
+        assert_eq!(path(1920, 1080, 1920, 1080), 1 << 8);
+        assert_eq!(path(3840, 2160, 2560, 1440), 1 << 9);
+        assert_eq!(path(1920, 1080, 1280, 720), 1 << 9);
+        assert_eq!(path(3840, 1600, 2560, 1066), 0);
+        assert_eq!(path(3840, 2160, 1280, 720), 0);
+        assert_eq!(path_flags((3840, 2160), (1920, 1080), false), 0);
     }
 
     const DEFAULT: ToneMap = ToneMap { peak: 1000.0, white: 100.0 };

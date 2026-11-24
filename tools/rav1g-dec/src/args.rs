@@ -89,12 +89,14 @@ pub struct Task {
     pub frontmergelegacy: bool,
     /// -displaypass WxH: the display pass (`Settings::display`); (0, 0) off. -displaypeak, -displaywhite
     /// (nits, 0 the default), -displaydepth (8, 10, 0 the decoder's), -displaytransform (0 by the
-    /// frame's colour, 1 scale, 2 gamut, 3 PQ, 4 HLG).
+    /// frame's colour, 1 scale, 2 gamut, 3 PQ, 4 HLG), -displaydither (0 auto: NV12 dithered, 1 off, 2
+    /// ordered at either depth).
     pub displaypass: (i32, i32),
     pub displaypeak: f32,
     pub displaywhite: f32,
     pub displaydepth: u32,
     pub displaytransform: u32,
+    pub displaydither: u32,
     pub nofitsize: bool,
     pub fitsize: bool,
     pub lowmem: bool,
@@ -185,6 +187,7 @@ impl Default for Task {
             displaywhite: 0.0,
             displaydepth: 0,
             displaytransform: 0,
+            displaydither: 0,
             nofitsize: false,
             fitsize: false,
             lowmem: false,
@@ -318,6 +321,10 @@ pub fn usage() {
     say!(
         "  -displaypeak N -displaywhite N -displaydepth 8|10 -displaytransform 0-4   its source peak and SDR white \
          (nits), image depth, transform (0 by the frame's colour, 1 scale, 2 gamut, 3 PQ, 4 HLG)"
+    );
+    say!(
+        "  -displaydither 0-2   the display pass's last quantisation: 0 the ordered dither for NV12 (default), \
+         1 rounded, 2 the ordered dither for P010 too"
     );
     say!("  -intraod             use the baseline DXC -Od intra_main kernels (-intraopt restores the default)");
     say!("  -intrafilterlegacy   use the previous 8-bit filter intra shader");
@@ -517,6 +524,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             }
             "-displaydepth" => task.displaydepth = number()? as u32,
             "-displaytransform" => task.displaytransform = number()? as u32,
+            "-displaydither" => task.displaydither = number()? as u32,
             "-nofitsize" => task.nofitsize = true,
             "-fitsize" => task.fitsize = true,
             "-intrav2" => task.intrav2 = true,

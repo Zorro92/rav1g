@@ -1436,8 +1436,9 @@ jobs:
 
       # The display pass (Rav1gSettings::display, -displaypass, docs/stage-fusion.md): the display-size
       # images of a PQ stream, an SDR stream and two film grain streams against the float32 model of the
-      # pass, from the frames of a plain run; through the Rust interface and through rav1g.h (-capi) with a
-      # lower peak and white, a forced transform and NV12 from 10 bits.
+      # pass, from the frames of a plain run, on each of its paths (2:1, 1:1, 3:2, the area loop); through
+      # the Rust interface and through rav1g.h (-capi) with a lower peak and white, a forced transform, NV12
+      # from 10 bits dithered and rounded, and P010 dithered.
       - name: The display pass against its model (-displaypass)
         if: ${{ !cancelled() && matrix.case == 'direct' }}
         shell: pwsh
