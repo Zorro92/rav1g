@@ -44,7 +44,6 @@ upscaling	64	64	43	26	0	0	10	vgprs
 upscaling_sp_tex	64	64	53	51	0	0	9	vgprs
 inter_2x2chroma	64	64	48	26	512	0	10	vgprs
 inter_compound_v2	64	64	111	24	0	0	4	vgprs
-inter_compound_2x2	64	64	56	26	512	0	9	vgprs
 inter_compound_diff_chroma	64	64	165	24	0	0	3	vgprs
 inter_compound_diff_luma	64	64	171	30	512	0	2	vgprs
 inter_compound_masked	64	64	164	34	0	0	3	vgprs
@@ -59,7 +58,6 @@ inter_ext_borders	64	64	10	16	0	0	16	waves
 reconstruct_block	64	64	14	27	0	0	16	waves
 loopfilter_vert	64	64	36	26	1536	0	12	vgprs
 loopfilter_hor	64	64	79	32	4608	0	6	vgprs
-inter_compound_2x2_hbd	64	64	53	22	0	0	9	vgprs
 inter_2x2chroma_hbd	64	64	45	22	0	0	10	vgprs
 inter_compound_diff_chroma_hbd	64	64	141	24	0	0	3	vgprs
 inter_compound_diff_luma_hbd	64	64	137	26	512	0	3	vgprs

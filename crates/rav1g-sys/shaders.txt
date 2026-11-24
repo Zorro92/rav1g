@@ -47,7 +47,6 @@ upscaling
 upscaling_sp_tex
 inter_2x2chroma
 inter_compound_v2
-inter_compound_2x2
 inter_compound_diff_chroma
 inter_compound_diff_luma
 inter_compound_masked
@@ -62,7 +61,6 @@ inter_ext_borders
 reconstruct_block
 loopfilter_vert
 loopfilter_hor
-inter_compound_2x2_hbd
 inter_2x2chroma_hbd
 inter_compound_diff_chroma_hbd
 inter_compound_diff_luma_hbd

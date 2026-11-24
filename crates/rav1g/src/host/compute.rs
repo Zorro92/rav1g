@@ -124,9 +124,9 @@ const LAYOUTS: usize =
 const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
-    // 20 transform pipelines, 36 shared shaders and 26 per bit depth: one slot per pipeline of
+    // 20 transform pipelines, 36 shared shaders and 25 per bit depth: one slot per pipeline of
     // `create_tasks` (the test `every_pipeline_names_its_shader_once`).
-    assert!(SHADERS == 20 + 36 + 2 * 26);
+    assert!(SHADERS == 20 + 36 + 2 * 25);
     assert!(LAYOUTS == 24);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
@@ -364,7 +364,6 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("upscaling_sp_tex", &layouts.upscale_sp_tex, &raw mut (*lib).shader_upscale_sp_tex),
             ("inter_2x2chroma", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_2x2),
             ("inter_compound_v2", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_comp),
-            ("inter_compound_2x2", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_comp_2x2),
             ("inter_compound_diff_chroma", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_comp_diff_uv),
             ("inter_compound_diff_luma", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_comp_diff_y),
             ("inter_compound_masked", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_comp_masked),
@@ -379,7 +378,6 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("reconstruct_block", &layouts.intra_pred, &raw mut (*lib).shaders_8bit.reconstruct_block),
             ("loopfilter_vert", &layouts.lf, &raw mut (*lib).shaders_8bit.loopfilter_v),
             ("loopfilter_hor", &layouts.lf, &raw mut (*lib).shaders_8bit.loopfilter_h),
-            ("inter_compound_2x2_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_comp_2x2),
             ("inter_2x2chroma_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_2x2),
             ("inter_compound_diff_chroma_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_comp_diff_uv),
             ("inter_compound_diff_luma_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_comp_diff_y),
