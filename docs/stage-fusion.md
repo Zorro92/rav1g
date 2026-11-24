@@ -604,10 +604,13 @@ area loop 96 / 96 / 96, 1:1 16-bit 80 / 49 / 57, 1:1 8-bit 72 / 56 / 64, 3:2 16-
 window is 24 of its registers. The console's +0.64 ms at SDR 3:2 in version 3 was its instruction count at
 PQ's rate (both at 4 waves), so the instructions are the lever taken here.
 
-**Expected** (not measured; the console's added cost of version 3's first code scaled by the
-instructions the chroma now adds over version 2, which also takes the 4 waves into account): PQ 1:1 +0.23
-ms (2.60 to ~2.0 ms a 4K frame), PQ 3:2 +0.23 (2.13 to ~1.75), SDR 3:2 +0.24 (1.76 to ~1.35), SDR 1:1
-+0.23 (2.42 to ~1.75; not a case Bale runs); 2:1 and the area loop as before (1.23 / 1.49 ms at 1080p).
+**Expected** (the console's added cost of version 3's first code scaled by the instructions the chroma
+now adds over version 2, which also takes the 4 waves into account): PQ 1:1 +0.23 ms (2.60 to ~2.0 ms a 4K
+frame), PQ 3:2 +0.23 (2.13 to ~1.75), SDR 3:2 +0.24 (1.76 to ~1.35), SDR 1:1 +0.23 (2.42 to ~1.75; not a
+case Bale runs); 2:1 and the area loop as before (1.23 / 1.49 ms at 1080p). **Measured** (console, idle
+state, 4K60 60 Mbps clip, 600 frames, two rounds within 0.01 ms): PQ 1:1 2.01 ms, PQ 3:2 1.75, SDR 3:2 1.31,
+SDR 1:1 1.61, as expected; SDR 2:1 1.20, but PQ 2:1 1.59 (+0.10 against 1.49: the 2:1 loop's code is
+unchanged, the cause in the PQ pipeline not yet known; 0.6% of a 60 fps frame).
 Sized for the GPU slice (1.86 TFLOP/s, never preempted: the pass costs its instructions), wave64, no
 16-bit arithmetic, no group memory, no CPU work, no change to the interface.
 

@@ -224,20 +224,21 @@ pass again into its own image.
 
 **The cost** is on the decoder's queue: one dependent step and the pass a shown frame, bound by its
 arithmetic (the console's slice of the GPU, 1.86 TFLOP/s), not by its bytes. Per 4K 10-bit frame, P010
-(measured on the console, idle state, interface version 3 with the Catmull-Rom input chroma; in brackets
-version 2's bilinear chroma; HLG expected from the RDNA2 listing, basis in
+(measured on the console, idle state, with the Catmull-Rom input chroma of interface version 3 and the
+block paths' chroma window; in brackets version 2's bilinear chroma; HLG expected from the RDNA2 listing, basis in
 [stage-fusion.md](stage-fusion.md#11-32-and-the-dither)):
 
 | Image | Path | Bytes (read + written) | SDR | PQ (HDR10) | HLG |
 | --- | --- | ---: | ---: | ---: | ---: |
-| 1920x1080 | 2:1 | 24.9 + 6.2 MB | 1.23 ms (1.01) | 1.49 ms (1.17) | ~1.8 |
-| 2560x1440 | 3:2 | 24.9 + 11.1 MB | 1.76 ms (1.12) | 2.13 ms (1.51) | ~2.5 |
-| 3840x2160 | 1:1 | 24.9 + 24.9 MB | 2.42 ms (1.51) | 2.60 ms (1.80) | ~3.0 |
+| 1920x1080 | 2:1 | 24.9 + 6.2 MB | 1.20 ms (1.01) | 1.59 ms (1.17) | ~1.9 |
+| 2560x1440 | 3:2 | 24.9 + 11.1 MB | 1.31 ms (1.12) | 1.75 ms (1.51) | ~2.1 |
+| 3840x2160 | 1:1 | 24.9 + 24.9 MB | 1.61 ms (1.51) | 2.01 ms (1.80) | ~2.4 |
 | other | area loop | | slower (36 reads a quad, one after the other) | | |
 
-The Catmull-Rom chroma costs 0.2-0.3 ms at 2:1 and 0.6-0.9 ms at 3:2 and 1:1 (two rounds each, 600 frames
-of a 4K60 60 Mbps clip, SDR and HDR10; the same with `av1_set_display_bilinear_chroma`, which only changes
-the weights). With it a 4K HDR10 frame at 1:1 keeps the GPU busy 11.3 ms (10.5 before), within the 14 ms
+The Catmull-Rom chroma costs 0.2-0.4 ms at every path (two rounds each, 600 frames of a 4K60 60 Mbps
+clip, SDR and HDR10; the same with `av1_set_display_bilinear_chroma`, which only changes the weights;
+`v0.8.0-alpha.1`, before the block paths' window, took 1.76 / 2.13 ms at 3:2 and 2.42 / 2.60 at 1:1, and PQ
+1.49 at 2:1). With it a 4K HDR10 frame at 1:1 keeps the GPU busy 10.7 ms (10.5 with the bilinear chroma), within the 14 ms
 of the 60 fps envelope.
 
 NV12 with the dither adds ~0.03 ms at 1080p and ~0.1 ms at 4K and writes a quarter less. The timing
@@ -304,8 +305,9 @@ constant weights, then across: +0.2 / +0.3 ms a 4K frame (SDR / PQ) on the conso
 block paths (1:1 and 3:2) took their rows the same way, measured at +0.6 to +0.9 ms; they now filter a
 window of five chroma rows across once a row and down once a source pixel, and carry it from a thread's
 quad to the next one below, reading only its new rows ([stage-fusion.md](stage-fusion.md#the-block-paths-chroma-window-11-and-32);
-the same codes, byte for byte): expected ~+0.23 ms at 1:1 and 3:2 (PQ 1:1 2.60 to ~2.0 ms, PQ 3:2 2.13 to
-~1.75, SDR 3:2 1.76 to ~1.35; to be measured). The area loop (1080p to 4K) ~+0.3-0.5 ms. Bale measured its
+the same codes, byte for byte): measured on the console PQ 1:1 2.60 to 2.01 ms, PQ 3:2 2.13 to 1.75, SDR 3:2
+1.76 to 1.31, SDR 1:1 2.42 to 1.61; PQ 2:1 1.49 to 1.59 and SDR 2:1 1.23 to 1.20 (the 2:1 loop itself is
+unchanged; the PQ pipeline's cause is not yet known). The area loop (1080p to 4K) ~+0.3-0.5 ms. Bale measured its
 own cubic chroma at ~1.1 ms a 4K frame. The SDR and HLG pipelines run 4 waves a SIMD (96 VGPRs; 8 and 6
 with the bilinear chroma of version 2), PQ 4 as before (112). Sized for the GPU slice: no new memory,
 nothing on the CPU.
