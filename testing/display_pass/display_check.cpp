@@ -7,9 +7,10 @@
 // rav1g-dec -o writes them) and the display image (the same layout at the output size, 10-bit codes) to
 // the output directory and a line of model.py arguments to stdout; run.sh holds them against the model.
 // It fails itself on a race, a sync error, a read outside the frame pool, or an output sample not
-// written exactly once.
+// written exactly once. With --matrix it takes the cases of the identity matrix instead (identity_cases
+// below), which run.sh runs on this shader and on the pinned reference shader and compares byte for byte.
 //
-//   display_check <out dir>
+//   display_check <out dir> [--matrix]
 
 #define GROUP_SCHED_IMPLEMENTATION
 #include "hlsl_float.h"
@@ -360,9 +361,53 @@ static int run_case(const Case &c, const std::string &dir, std::mt19937 &rng) {
   return 0;
 }
 
+// The identity matrix: every fast path and the area loop, each with 8- and 10-bit frames, NV12 and P010
+// codes, the dither off and on, and the Catmull-Rom and the bilinear input chroma (av1_set_display_bilinear_
+// chroma); the mode (PQ, BT.709 SDR, BT.2020 SDR, HLG), the siting, the range and the content go round
+// through them. Partial tiles, groups with a tile on the left (the edge column) and the frame's edges in
+// every case. run.sh compares this shader's codes with the reference's on these (and on the cases above).
+static std::vector<Case> identity_cases() {
+  static std::vector<std::string> names;
+  struct Path {
+    const char *name;
+    uint sw, sh, ow, oh;
+    bool no_quad;
+  };
+  const Path paths[] = { { "2to1", 264, 140, 132, 70, false }, { "1to1", 136, 70, 136, 70, false },
+                         { "3to2", 198, 102, 132, 68, false }, { "area", 201, 99, 120, 60, false } };
+  const uint transfers[4] = { 16, 1, 14, 18 }, matrices[4] = { 9, 1, 9, 9 };
+  const char *modes[4] = { "pq", "sdr709", "sdr2020", "hlg" };
+  std::vector<Case> cases;
+  int i = 0;
+  for (const Path &p : paths) {
+    for (int depth = 8; depth <= 10; depth += 2) {
+      for (int out_depth = 8; out_depth <= 10; out_depth += 2) {
+        for (int dither = 0; dither < 2; dither++) {
+          for (int bilinear = 0; bilinear < 2; bilinear++, i++) {
+            const int mode = i % 4;
+            const bool colocated = (i / 4) % 2 != 0, full = (i / 8) % 2 != 0;
+            const int content = i % 3 == 2 ? 3 : i % 3;
+            names.push_back(std::string("id-") + p.name + "-" + modes[mode] + "-" + std::to_string(depth) + "bit-to-" +
+                            (out_depth == 8 ? "nv12" : "p010") + (dither ? "-dither" : "") + (bilinear ? "-bilinear" : "") +
+                            (colocated ? "-colocated" : "") + (full ? "-full" : "") + "-c" + std::to_string(content));
+            Case c = { nullptr, p.sw, p.sh, p.ow, p.oh, transfers[mode], matrices[mode], full, colocated, p.no_quad, content };
+            c.depth = depth;
+            c.out_depth = out_depth;
+            c.dither = dither != 0;
+            c.bilinear = bilinear != 0;
+            cases.push_back(c);
+          }
+        }
+      }
+    }
+  }
+  for (size_t k = 0; k < cases.size(); k++) cases[k].name = names[k].c_str();
+  return cases;
+}
+
 int main(int argc, char **argv) {
-  if (argc != 2) {
-    std::fprintf(stderr, "usage: display_check <out dir>\n");
+  if (argc < 2 || argc > 3 || (argc == 3 && std::string(argv[2]) != "--matrix")) {
+    std::fprintf(stderr, "usage: display_check <out dir> [--matrix]\n");
     return 2;
   }
   const Case cases[] = {
@@ -464,6 +509,10 @@ int main(int argc, char **argv) {
   };
   std::mt19937 rng(0x5eed);
   int failed = 0;
-  for (const Case &c : cases) failed |= run_case(c, argv[1], rng);
+  if (argc == 3) {
+    for (const Case &c : identity_cases()) failed |= run_case(c, argv[1], rng);
+  } else {
+    for (const Case &c : cases) failed |= run_case(c, argv[1], rng);
+  }
   return failed;
 }

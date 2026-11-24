@@ -3580,10 +3580,13 @@ jobs:
         run: sh testing/film_grain_check/run.sh --mutate
 
       # display_pass.hlsl (-displaypass, docs/stage-fusion.md) as C++ on test frames under the same thread
-      # schedule, its display images against the float32 model (testing/display_pass/model.py).
-      - name: The display pass, as C++, against its model
+      # schedule, its display images against the float32 model (testing/display_pass/model.py), and byte
+      # for byte against the shader of the release run.sh pins (REFERENCE: the shallow checkout fetches it).
+      - name: The display pass, as C++, against its model and its reference
         run: |
           sudo apt-get install -y --no-install-recommends python3-numpy > /dev/null
+          reference=$(sed -n 's/^REFERENCE=//p' testing/display_pass/run.sh)
+          git fetch --quiet --no-tags --depth 1 origin "+refs/tags/$reference:refs/tags/$reference"
           sh testing/display_pass/run.sh --mutate
 
   # The CDEF shaders, compiled as C++, must write byte-identical frames and

@@ -1,8 +1,18 @@
 #!/bin/sh
 # display_pass.hlsl as C++ on test frames (display_check.cpp), each display image held against the
 # float32 model of the pass (model.py, numpy). Runs on a Linux host: a C++17 compiler, python3 with numpy
-# (or uv, which fetches it). Pass --mutate to check that deliberate errors are rejected.
+# (or uv, which fetches it), git. Pass --mutate to check that deliberate errors are rejected.
+#
+# The identity check: the same program built on the shader of REFERENCE (below, read from git) runs the
+# cases and the identity matrix (display_check --matrix), and every display image of this shader has to be
+# the reference's byte for byte. A change that only makes the pass faster keeps the pin; a change that means
+# to alter the image moves it to the commit that makes it (and says why there). A shallow clone fetches the
+# tag first (git fetch --depth 1 origin tag <REFERENCE>).
 set -eu
+
+# The release whose display images the pass keeps: v0.8.0-alpha.1 (interface version 3, the Catmull-Rom
+# input chroma).
+REFERENCE=v0.8.0-alpha.1
 
 here=$(cd "$(dirname "$0")" && pwd)
 shaders="$here/../../libav1/dx/shaders"
@@ -23,9 +33,10 @@ fi
 python3 "$sync/to_cpp.py" "$shaders/output_sp.h" "$work/output_sp.gen.h"
 python3 "$sync/to_cpp.py" "$shaders/display_pass.hlsl" "$work/display_pass.gen.h" "$work/display_pass.entry.h"
 
+# build [<dir of the generated headers> <program>]: this shader by default.
 build() {
   "${CXX:-c++}" -std=c++17 -O2 -fwrapv -DDISPLAY_MODE_FROM_FLAGS -ffp-contract=off -Wall -Wno-unused-function -Wno-unused-variable \
-    -I "$here" -I "$sync" -I "$work" "$here/display_check.cpp" -o "$work/check"
+    -I "$here" -I "$sync" -I "${1:-$work}" "$here/display_check.cpp" -o "${2:-$work/check}"
 }
 
 # Runs the shader and the model on every case; exit 1 when a case fails either (with "first", at the first
@@ -53,6 +64,38 @@ check() {
 py "$here/model.py" --self-test
 build
 check
+
+# The identity check against the reference shader (above): the cases and the identity matrix.
+repo=$(cd "$here/../.." && pwd)
+mkdir -p "$work/ref"
+for f in display_pass.hlsl output_sp.h; do
+  if ! git -C "$repo" show "$REFERENCE:libav1/dx/shaders/$f" > "$work/ref/$f" 2> /dev/null; then
+    echo "display_pass check: the reference $REFERENCE is not in this clone (git fetch --depth 1 origin tag $REFERENCE)" >&2
+    exit 1
+  fi
+done
+python3 "$sync/to_cpp.py" "$work/ref/output_sp.h" "$work/ref/output_sp.gen.h"
+python3 "$sync/to_cpp.py" "$work/ref/display_pass.hlsl" "$work/ref/display_pass.gen.h" "$work/ref/display_pass.entry.h"
+build "$work/ref" "$work/check_ref"
+for side in new ref; do
+  program="$work/check"
+  [ "$side" = ref ] && program="$work/check_ref"
+  mkdir -p "$work/id-$side"
+  timeout 600 "$program" "$work/id-$side" > "$work/id-$side/cases.txt"
+  timeout 600 "$program" "$work/id-$side" --matrix >> "$work/id-$side/cases.txt"
+done
+compared=0
+while read -r name frames display args; do
+  for f in "$frames" "$display"; do
+    if ! cmp -s "$f" "$work/id-ref/${f#"$work/id-new/"}"; then
+      echo "display_pass check: $name: $(basename "$f") differs from the shader of $REFERENCE" >&2
+      exit 1
+    fi
+  done
+  compared=$((compared + 1))
+done < "$work/id-new/cases.txt"
+[ "$(wc -l < "$work/id-ref/cases.txt")" -eq "$compared" ] || { echo "display_pass check: the case lists differ" >&2; exit 1; }
+echo "display_pass check: $compared cases, every display image identical to the shader of $REFERENCE"
 
 expect_rejected() {
   shader="$work/display_pass.gen.h"
