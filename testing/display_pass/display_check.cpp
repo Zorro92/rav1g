@@ -37,6 +37,25 @@ namespace shader {
 #include "display_pass.entry.h"
 }  // namespace shader
 
+// The source peak of a frame, as crates/rav1g/src/host/display_pass.rs `source_peak` has it (and model.py,
+// from the same metadata): for PQ (mode 0) MaxCLL, else the mastering display's largest luminance, the
+// smaller of the two when both are there, clamped to 400..10000 nits; the configured peak without either,
+// for HLG and SDR, and with the fixed peak (av1_set_display_fixed_peak).
+static double source_peak(uint mode, double configured, double max_cll, double mastering_max, bool fixed) {
+  if (mode != 0 || fixed) return configured;
+  double peak;
+  if (max_cll > 0.0 && mastering_max > 0.0) {
+    peak = fmin(max_cll, mastering_max);
+  } else if (max_cll > 0.0) {
+    peak = max_cll;
+  } else if (mastering_max > 0.0) {
+    peak = mastering_max;
+  } else {
+    return configured;
+  }
+  return fmin(fmax(peak, 400.0), 10000.0);
+}
+
 // The tables of crates/rav1g/src/host/display_pass.rs: the same float64 functions, nodes and cubics.
 namespace tables {
 const int kEotfN = 256, kEotfFine = 64, kGainN = 96, kGainLow = 64, kWords = 4 * (kEotfN + 1 + kGainN + 1);
@@ -127,12 +146,16 @@ struct Case {
   uint sw, sh, ow, oh;
   uint transfer, matrix;  // H.273
   bool full, colocated, no_quad;
-  int content;            // 0 natural-ish, 1 every code at random, 2 out of gamut just above black
+  int content;            // 0 natural-ish, 1 every code at random, 2 out of gamut just above black, 3 sharp
+                          // chroma edges (blocks of the extreme codes: the cubic's overshoot clamped)
   int depth = 10;         // 8: a byte a sample
   int out_depth = 0;      // the output's codes: 10 (P010) or 8 (NV12); 0: as depth
   uint primaries = 0;     // H.273; 0: BT.2020 (9) with the BT.2020 matrix, else BT.709 (1)
   double peak = 1000.0, white = 100.0;  // the tone map's (Rav1gDisplay::source_peak_nits, target_white_nits)
   bool dither = false;                  // the ordered dither at the quantisation (Rav1gDisplay::dither)
+  double max_cll = 0.0, mastering_max = 0.0;  // the HDR metadata the pass takes, nits (0: none)
+  bool fixed_peak = false;                    // av1_set_display_fixed_peak
+  bool bilinear = false;                      // av1_set_display_bilinear_chroma
 };
 
 static uint ceil_div(uint n, uint d) { return (n + d - 1) / d; }
@@ -153,6 +176,8 @@ static int run_case(const Case &c, const std::string &dir, std::mt19937 &rng) {
   const uint y_stride = (ceil_div(c.sw, 64) * 64 + 32) * bpp, uv_stride = (ceil_div(cw, 64) * 64 + 32) * bpp;
   const uint y_off = 256, u_off = y_off + c.sh * y_stride + 64, v_off = u_off + ch * uv_stride + 128;
   std::vector<uint8_t> bytes((v_off + (ch - 1) * uv_stride + (cw + 16) * bpp + 3) & ~3u, 0);
+  // Garbage around the planes and in the borders of their rows, which the reads reach and must not use.
+  for (uint8_t &b : bytes) b = (uint8_t)(rng() & 255);
   std::vector<uint16_t> planes[3] = { std::vector<uint16_t>(c.sw * c.sh), std::vector<uint16_t>(cw * ch),
                                       std::vector<uint16_t>(cw * ch) };
   std::uniform_int_distribution<int> noise(-24, 24);
@@ -190,6 +215,13 @@ static int run_case(const Case &c, const std::string &dir, std::mt19937 &rng) {
         } else if (c.content == 2) {
           const uint bx = p ? x / 4 : x / 8, by = p ? y / 4 : y / 8;
           v = crafted[3 * (by * bw + bx) + p];
+        } else if (c.content == 3) {
+          // Luma a gradient; chroma blocks of 3x2 samples at the extremes of the code range and the middle,
+          // with single samples and lines between: every edge a cubic overshoots.
+          const int lo = c.full ? 0 : 64, hi = c.full ? 1023 : 960;
+          const int kind = (int)((x / 3 + (y / 2) * 2 + p) % 4);
+          v = p == 0 ? (int)(64 + (x * 13 + y * 7) % 876) : kind == 0 ? lo : kind == 1 ? hi : kind == 2 ? 512 : (x + y) % 2 ? lo : hi;
+          if (c.depth == 8) v >>= 2;
         } else {
           // Gradients, blocks of flat colour and noise, with some samples out of the nominal range.
           const int block = (int)((x / 8 + y / 8 + p * 3) % 5);
@@ -206,7 +238,7 @@ static int run_case(const Case &c, const std::string &dir, std::mt19937 &rng) {
     }
   }
   const uint mode = c.transfer == 16 ? 0u : c.transfer == 18 ? 2u : 1u;
-  tables::kPeak = c.peak;
+  tables::kPeak = source_peak(mode, c.peak, c.max_cll, c.mastering_max, c.fixed_peak);
   tables::kWhite = c.white;
   float k[7];
   std::vector<uint> lut = tables::make(mode, k);
@@ -230,7 +262,7 @@ static int run_case(const Case &c, const std::string &dir, std::mt19937 &rng) {
   const int out_depth = c.out_depth ? c.out_depth : c.depth;
   cb_flags = mode | (primaries == 9 ? 4u : 0u) | (c.full ? 8u : 0u) | (c.colocated ? 0u : 16u) | (quad ? 32u : 0u) |
              (c.depth == 8 ? 64u : 0u) | (out_depth == 8 ? 128u : 0u) | (one ? 256u : 0u) | (three ? 512u : 0u) |
-             (c.dither ? 1024u : 0u);
+             (c.dither ? 1024u : 0u) | (c.bilinear ? 2048u : 0u);
   cb_eotf_a = k[0];
   cb_eotf_b = k[1];
   cb_eotf_c = k[2];
@@ -320,10 +352,11 @@ static int run_case(const Case &c, const std::string &dir, std::mt19937 &rng) {
     for (size_t i = 0; i < chroma.size(); i++) put(f, chroma[i][comp] >> shift, out_bytes);
   std::fclose(f);
   std::printf("%s %s %s --size %ux%u --out %ux%u --transfer %u --matrix %u --primaries %u --depth %d --out-depth %d "
-              "--peak %g --white %g%s%s%s\n",
+              "--peak %g --white %g --max-cll %g --mastering-max %g%s%s%s%s%s\n",
               c.name, frames.c_str(), display.c_str(), c.sw, c.sh, c.ow, c.oh, c.transfer, c.matrix, primaries, c.depth,
-              out_depth, c.peak, c.white, c.full ? " --full" : "", c.colocated ? " --colocated" : "",
-              c.dither ? " --dither" : "");
+              out_depth, c.peak, c.white, c.max_cll, c.mastering_max, c.full ? " --full" : "",
+              c.colocated ? " --colocated" : "", c.dither ? " --dither" : "", c.fixed_peak ? " --fixed-peak" : "",
+              c.bilinear ? " --bilinear-chroma" : "");
   return 0;
 }
 
@@ -394,6 +427,40 @@ int main(int argc, char **argv) {
     { "sdr709-to-nv12-dither-3to2", 240, 132, 160, 88, 1, 1, false, false, false, 0, 10, 8, 0, 1000.0, 100.0, true },
     { "sdr709-8bit-dither-area", 210, 120, 140, 80, 1, 1, false, false, false, 1, 8, 8, 0, 1000.0, 100.0, true },
     { "pq-p010-dither-2to1", 256, 128, 128, 64, 16, 9, false, false, false, 0, 10, 10, 0, 1000.0, 100.0, true },
+    // The source peak from the HDR metadata (display_pass.rs `source_peak`): MaxCLL above the mastering
+    // display's (that one: 1000), MaxCLL below it (1184), MaxCLL alone, the mastering display alone, both
+    // clamps, the fixed peak, and HLG, which keeps the configured peak.
+    { "pq-cll4057-mdcv1000-2to1", 256, 128, 128, 64, 16, 9, false, false, false, 0, 10, 0, 0, 1000.0, 100.0, false, 4057.0, 1000.0 },
+    { "pq-cll1184-mdcv4000-1to1", 128, 64, 128, 64, 16, 9, false, false, false, 1, 10, 0, 0, 1000.0, 100.0, false, 1184.0, 4000.0 },
+    { "pq-cll1500-3to2", 192, 96, 128, 64, 16, 9, false, false, false, 0, 10, 0, 0, 1000.0, 100.0, false, 1500.0, 0.0 },
+    { "pq-mdcv4000-area", 200, 100, 120, 60, 16, 9, false, false, false, 1, 10, 0, 0, 1000.0, 100.0, false, 0.0, 4000.0 },
+    { "pq-cll250-2to1", 256, 128, 128, 64, 16, 9, false, false, false, 1, 10, 0, 0, 1000.0, 100.0, false, 250.0, 0.0 },
+    { "pq-mdcv50000-2to1", 256, 128, 128, 64, 16, 9, false, false, false, 1, 10, 0, 0, 1000.0, 100.0, false, 0.0, 50000.0 },
+    { "pq-cll9500-1to1", 128, 64, 128, 64, 16, 9, false, false, false, 1, 10, 0, 0, 1000.0, 100.0, false, 9500.0, 0.0 },
+    { "pq-fixed-peak-2to1", 256, 128, 128, 64, 16, 9, false, false, false, 0, 10, 0, 0, 1000.0, 100.0, false, 4000.0, 4000.0, true },
+    { "hlg-cll4000-2to1", 256, 128, 128, 64, 18, 9, false, false, false, 0, 10, 0, 0, 1000.0, 100.0, false, 4000.0, 4000.0 },
+    { "pq-white400-cll600-2to1", 256, 128, 128, 64, 16, 9, false, false, false, 1, 10, 0, 0, 1000.0, 400.0, false, 600.0, 0.0 },
+    { "pq-white80-1to1", 128, 64, 128, 64, 16, 9, false, false, false, 1, 10, 0, 0, 1000.0, 80.0 },
+    // Sharp chroma edges, where the cubic overshoots and is clamped to the code range: each path, both
+    // sitings (between rows: AV1 chroma_sample_position 0 and 1; colocated: 2), limited and full range, 8
+    // and 10 bits.
+    { "sdr709-edges-2to1", 256, 128, 128, 64, 1, 1, false, false, false, 3 },
+    { "sdr709-edges-colocated-2to1", 256, 128, 128, 64, 1, 1, false, true, false, 3 },
+    { "pq-edges-full-2to1", 256, 128, 128, 64, 16, 9, true, false, false, 3 },
+    { "pq-edges-full-colocated-8bit-2to1", 256, 128, 128, 64, 16, 9, true, true, false, 3, 8 },
+    { "sdr709-edges-1to1", 130, 66, 130, 66, 1, 1, false, false, false, 3 },
+    { "pq-edges-colocated-1to1", 128, 64, 128, 64, 16, 9, false, true, false, 3 },
+    { "sdr709-edges-8bit-1to1", 132, 64, 132, 64, 1, 1, false, false, false, 3, 8 },
+    { "hlg-edges-3to2", 198, 102, 132, 68, 18, 9, false, false, false, 3 },
+    { "sdr709-edges-colocated-8bit-3to2", 222, 132, 148, 88, 1, 1, false, true, false, 3, 8 },
+    { "pq-edges-area", 201, 99, 120, 60, 16, 9, false, false, false, 3 },
+    { "sdr709-edges-colocated-up", 96, 54, 160, 90, 1, 1, false, true, false, 3 },
+    // The bilinear input chroma of the previous version (av1_set_display_bilinear_chroma): each path.
+    { "pq-bilinear-2to1", 256, 128, 128, 64, 16, 9, false, false, false, 3, 10, 0, 0, 1000.0, 100.0, false, 0.0, 0.0, false, true },
+    { "sdr709-bilinear-colocated-8bit-2to1", 264, 136, 132, 68, 1, 1, false, true, false, 3, 8, 0, 0, 1000.0, 100.0, false, 0.0, 0.0, false, true },
+    { "pq-bilinear-1to1", 128, 64, 128, 64, 16, 9, false, false, false, 3, 10, 0, 0, 1000.0, 100.0, false, 0.0, 0.0, false, true },
+    { "sdr709-bilinear-3to2", 198, 102, 132, 68, 1, 1, false, false, false, 3, 10, 0, 0, 1000.0, 100.0, false, 0.0, 0.0, false, true },
+    { "pq-bilinear-area", 201, 99, 120, 60, 16, 9, false, true, false, 3, 10, 0, 0, 1000.0, 100.0, false, 0.0, 0.0, false, true },
   };
   std::mt19937 rng(0x5eed);
   int failed = 0;

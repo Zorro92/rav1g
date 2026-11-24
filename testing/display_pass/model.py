@@ -5,16 +5,20 @@ against what the decoder wrote.
 
   uv run --with numpy python3 testing/display_pass/model.py <frames.yuv> <display.yuv> \\
       --size WxH --out WxH [--transfer 16] [--matrix 9] [--primaries 9] [--full] [--colocated] [--depth 8]
-      [--out-depth 8] [--peak 1000] [--white 100] [--dither] [--count N]
+      [--out-depth 8] [--peak 1000] [--white 100] [--max-cll N] [--mastering-max N] [--fixed-peak]
+      [--bilinear-chroma] [--dither] [--count N]
+  uv run --with numpy python3 testing/display_pass/model.py --self-test
 
 <frames.yuv>: the decoded frames as rav1g-dec -o writes them (planar 4:2:0, 16-bit little-endian
 samples, the visible size; a byte a sample with --depth 8). <display.yuv>: the frames of a run with
 -display WxH -output p010 -o, the same layout at the output size: 10-bit codes (P010), or 8-bit codes
 (NV12) with --out-depth 8 (default: as --depth). --transfer/--matrix/--primaries/--full/--colocated:
 the colour description the pass used (H.273 code points; --primaries defaults to 9 with --matrix 9, else
-1; AV1 chroma_sample_position 2 is --colocated). --peak/--white: the tone map's source peak and SDR
-white (Rav1gDisplay::source_peak_nits, target_white_nits). --dither: the ordered dither at the last
-quantisation (what Rav1gDisplay::dither gives NV12 by default).
+1; AV1 chroma_sample_position 2 is --colocated). --peak/--white: the tone map's configured source peak and
+SDR white (Rav1gDisplay::source_peak_nits, target_white_nits); --max-cll/--mastering-max: the HDR metadata
+the pass takes (source_peak: a PQ frame's peak follows them). --dither: the ordered dither at the last
+quantisation (what Rav1gDisplay::dither gives NV12 by default). The input chroma is the Catmull-Rom cubic at
+the siting, clamped to the code range (--bilinear-chroma: the bilinear one of the previous version).
 The model's arithmetic does not depend on the shader's path (2:1, 1:1, 3:2, the area loop): every ratio is
 the area weights of `area`, exactly 2:1 its row order.
 
@@ -31,8 +35,11 @@ F = np.float32
 
 
 def pq_to_nits(e):
-    p = np.power(np.clip(e, F(0), F(1)), F(1.0 / 78.84375))
-    return np.power(np.maximum(p - F(0.8359375), F(0)) / (F(18.8515625) - F(18.6875) * p), F(1.0 / 0.1593017578125)) * F(10000)
+    # In float64, then float32: near a signal of 1 the denominator c2 - c3 p cancels to 0.16 and float32 loses
+    # about 7 bits there (10^-4 of 10000 nits, two codes of a saturated chroma sample), where the pass
+    # interpolates a table of the float64 function (display_pass.rs, within 10^-6).
+    p = np.power(np.clip(np.asarray(e, np.float64), 0.0, 1.0), 1.0 / 78.84375)
+    return (np.power(np.maximum(p - 0.8359375, 0.0) / (18.8515625 - 18.6875 * p), 1.0 / 0.1593017578125) * 10000).astype(F)
 
 
 def nits_to_pq(n):
@@ -111,25 +118,105 @@ def pixel_linear(y, uv, mode, matrix, wide, full, depth, peak, white):
     return rgb * (eetf(top, F(peak), F(white)) / np.maximum(top, F(1e-6)))[..., None]
 
 
-def source_linear(yp, up, vp, mode, matrix, wide, full, colocated, depth, peak, white):
-    h, w = yp.shape
+def chroma_taps(f, bilinear):
+    """The weights of the chroma samples base - 1 .. base + 2 at the fraction f (0, 1/4, 1/2 or 3/4) past
+    base: the Catmull-Rom cubic (Keys, a = -1/2), or bilinear. float64; every value a multiple of 1/128."""
+    f = f.astype(np.float64)
+    if bilinear:
+        return np.stack([np.zeros_like(f), 1 - f, f, np.zeros_like(f)], -1)
+    f2, f3 = f * f, f * f * f
+    return np.stack([0.5 * (-f3 + 2 * f2 - f), 0.5 * (3 * f3 - 5 * f2 + 2), 0.5 * (-3 * f3 + 4 * f2 + f), 0.5 * (f3 - f2)],
+                    -1)
+
+
+def chroma_range(depth, full, bilinear):
+    """The code range the upsampled chroma is clamped to: limited 16..240 (8 bits, times 4 at 10), full all
+    codes; bilinear needs none (it mixes, it does not overshoot)."""
+    top = (1 << depth) - 1
+    if bilinear or full:
+        return 0, top
+    unit = 1 << (depth - 8)
+    return 16 * unit, 240 * unit
+
+
+def upsample_chroma(plane, h, w, colocated, depth, full, bilinear):
+    """The chroma plane at every luma pixel: chroma sample (i, j) sits at luma (2i, 2j + 1/2) between rows
+    (AV1 chroma_sample_position 1, and 0), at (2i, 2j) colocated (2); a separable 4x4 filter of the coded
+    samples with the coordinates clamped to the plane, then clamped to the code range. In float64, which is
+    exact here (multiples of 1/2048 below 2^24 of them), and so the shader's float32 value whatever its order."""
     py, px = np.mgrid[0:h, 0:w]
-    cx = px.astype(F) * F(0.5)
-    cy = (py.astype(F) - (F(0) if colocated else F(0.5))) * F(0.5)
-    bx = np.floor(cx).astype(np.int64)
-    by = np.floor(cy).astype(np.int64)
-    fx = (cx - bx).astype(F)[..., None]
-    fy = (cy - by).astype(F)[..., None]
+    cx = px * 0.5
+    cy = (py - (0.0 if colocated else 0.5)) * 0.5
+    bx, by = np.floor(cx).astype(np.int64), np.floor(cy).astype(np.int64)
+    wx, wy = chroma_taps(cx - bx, bilinear), chroma_taps(cy - by, bilinear)
     lw, lh = (w + 1) // 2 - 1, (h + 1) // 2 - 1  # the last chroma sample: (w + 1) / 2 of them
-    uv = np.stack([up, vp], -1).astype(F)
+    src = plane.astype(np.float64)
+    acc = np.zeros((h, w), np.float64)
+    for i in range(4):
+        row = np.clip(by - 1 + i, 0, lh)
+        for j in range(4):
+            acc += wy[..., i] * wx[..., j] * src[row, np.clip(bx - 1 + j, 0, lw)]
+    lo, hi = chroma_range(depth, full, bilinear)
+    return np.clip(acc, lo, hi).astype(F)
 
-    def at(x, y):
-        return uv[np.clip(y, 0, lh), np.clip(x, 0, lw)]
 
-    c = (at(bx, by) + (at(bx + 1, by) - at(bx, by)) * fx)
-    d = (at(bx, by + 1) + (at(bx + 1, by + 1) - at(bx, by + 1)) * fx)
-    cuv = c + (d - c) * fy
+def source_linear(yp, up, vp, mode, matrix, wide, full, colocated, depth, peak, white, bilinear=False):
+    h, w = yp.shape
+    cuv = np.stack([upsample_chroma(up, h, w, colocated, depth, full, bilinear),
+                    upsample_chroma(vp, h, w, colocated, depth, full, bilinear)], -1)
     return pixel_linear(yp.astype(F), cuv, mode, matrix, wide, full, depth, peak, white)
+
+
+def source_peak(mode, configured, max_cll=0.0, mastering_max=0.0, fixed=False):
+    """The source peak of the EETF for a frame (display_pass.rs `source_peak`, docs/integration.md "The
+    source peak"): for PQ (mode 0) MaxCLL when above 0, else the mastering display's largest luminance when
+    above 0, the smaller of the two when both are (a MaxCLL above the mastering display's is broken
+    metadata), clamped to 400..10000 nits; the configured peak when neither is, for HLG and SDR, and with
+    `fixed` (av1_set_display_fixed_peak). The values are what the stream says, or where it says nothing
+    (or 0) what the application does."""
+    if mode != 0 or fixed:
+        return configured
+    if max_cll > 0 and mastering_max > 0:
+        peak = min(max_cll, mastering_max)
+    elif max_cll > 0:
+        peak = max_cll
+    elif mastering_max > 0:
+        peak = mastering_max
+    else:
+        return configured
+    return min(max(peak, 400.0), 10000.0)
+
+
+def self_test():
+    """The rule of source_peak on the cases of docs/integration.md (Bale's console checks among them)."""
+    cases = [
+        ((0, 1000, 4057, 1000), 1000),  # MaxCLL above the mastering display's: the mastering display's
+        ((0, 1000, 1184, 4000), 1184),  # MaxCLL
+        ((0, 1000, 0, 0), 1000),  # none: the configured peak
+        ((0, 600, 0, 0), 600),  # the configured peak is not clamped
+        ((0, 1000, 1500, 0), 1500),  # MaxCLL only
+        ((0, 1000, 0, 4000), 4000),  # the mastering display only
+        ((0, 1000, 250, 0), 400),  # clamped below
+        ((0, 1000, 0, 100), 400),
+        ((0, 1000, 12000, 0), 10000),  # clamped above
+        ((0, 1000, 0, 50000), 10000),
+        ((2, 1000, 4000, 4000), 1000),  # HLG: configured
+        ((1, 1000, 4000, 4000), 1000),  # SDR: configured (no tone map)
+    ]
+    for (mode, configured, cll, mastering), want in cases:
+        got = source_peak(mode, configured, cll, mastering)
+        assert got == want, f'source_peak{(mode, configured, cll, mastering)} = {got}, not {want}'
+    assert source_peak(0, 1000, 4000, 4000, fixed=True) == 1000
+    # The chroma filter: the weights at the quarter phases are multiples of 1/128 that sum to 1, and the
+    # cubic passes through the samples, reproduces a line and a parabola.
+    w = chroma_taps(np.array([0.0, 0.25, 0.5, 0.75]), False)
+    assert (w * 128 == np.round(w * 128)).all() and (w.sum(-1) == 1).all()
+    assert (w[0] == [0, 1, 0, 0]).all() and (w[2] * 16 == [-1, 9, 9, -1]).all()
+    assert (w[1] * 128 == [-9, 111, 29, -3]).all() and (w[3] * 128 == [-3, 29, 111, -9]).all()
+    x = np.arange(-1, 3, dtype=np.float64)
+    for f, row in zip([0.0, 0.25, 0.5, 0.75], w):
+        assert row @ (3 * x + 5) == 3 * f + 5 and row @ (x * x) == f * f
+    print('model.py: self test passed')
 
 
 def weights_1d(src, out):
@@ -187,8 +274,8 @@ def threshold(h, w, transposed=False):
 
 
 def display(yp, up, vp, ow, oh, mode, matrix, wide, full, colocated, depth=10, out_depth=10, peak=1000, white=100,
-            dither=False):
-    lin = source_linear(yp, up, vp, mode, matrix, wide, full, colocated, depth, peak, white)
+            dither=False, bilinear=False):
+    lin = source_linear(yp, up, vp, mode, matrix, wide, full, colocated, depth, peak, white, bilinear)
     sh, sw = yp.shape
     vals = area_2to1(lin) if (sw == 2 * ow and sh == 2 * oh) else area(lin, ow, oh)
     black, yr, mid, cr, _ = CODES[out_depth]
@@ -221,15 +308,21 @@ def frames(path, w, h, depth=10):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('frames_file', metavar='frames.yuv')
-    ap.add_argument('display_file', metavar='display.yuv')
-    ap.add_argument('--size', required=True)
-    ap.add_argument('--out', required=True)
+    ap.add_argument('frames_file', metavar='frames.yuv', nargs='?')
+    ap.add_argument('display_file', metavar='display.yuv', nargs='?')
+    ap.add_argument('--size')
+    ap.add_argument('--out')
     ap.add_argument('--transfer', type=int, default=1)
     ap.add_argument('--matrix', type=int, default=1)
     ap.add_argument('--primaries', type=int, default=0)
     ap.add_argument('--out-depth', type=int, default=0, choices=(0, 8, 10))
-    ap.add_argument('--peak', type=float, default=1000)
+    ap.add_argument('--peak', type=float, default=1000, help='the configured source peak (Rav1gDisplay::source_peak_nits)')
+    ap.add_argument('--max-cll', type=float, default=0, help='the MaxCLL the pass takes (the stream\'s, else the application\'s), 0 none')
+    ap.add_argument('--mastering-max', type=float, default=0,
+                    help='the mastering display\'s largest luminance the pass takes, nits, 0 none')
+    ap.add_argument('--fixed-peak', action='store_true', help='the configured peak whatever the metadata (av1_set_display_fixed_peak)')
+    ap.add_argument('--bilinear-chroma', action='store_true', help='bilinear input chroma (av1_set_display_bilinear_chroma)')
+    ap.add_argument('--self-test', action='store_true', help='check the peak rule and the chroma weights, then exit')
     ap.add_argument('--white', type=float, default=100)
     ap.add_argument('--full', action='store_true')
     ap.add_argument('--colocated', action='store_true')
@@ -241,19 +334,26 @@ def main():
                     help='the largest share of the codes of a plane that may differ at all (a dither that is not '
                     'there moves codes by one only, within the tolerance, but about half of them)')
     a = ap.parse_args()
+    if a.self_test:
+        self_test()
+        return
+    if not (a.frames_file and a.display_file and a.size and a.out):
+        ap.error('frames.yuv, display.yuv, --size and --out are needed')
     sw, sh = map(int, a.size.split('x'))
     ow, oh = map(int, a.out.split('x'))
     mode = {16: 0, 18: 2}.get(a.transfer, 1)
     primaries = a.primaries or (9 if a.matrix == 9 else 1)
     wide = primaries == 9
     out_depth = a.out_depth or a.depth
+    peak = source_peak(mode, a.peak, a.max_cll, a.mastering_max, a.fixed_peak)
+    print(f'source peak {peak:g} nits')
     worst = 0
     share = 0.0
     for n, (src, got) in enumerate(zip(frames(a.frames_file, sw, sh, a.depth), frames(a.display_file, ow, oh, out_depth))):
         if n >= a.count:
             break
         want = display(*[p.astype(F) for p in src], ow, oh, mode, a.matrix, wide, a.full, a.colocated, a.depth, out_depth,
-                       a.peak, a.white, a.dither)
+                       peak, a.white, a.dither, a.bilinear_chroma)
         line = []
         far = []
         for name, w_, g in zip('YUV', want, got):

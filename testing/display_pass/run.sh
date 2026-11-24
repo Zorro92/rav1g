@@ -49,6 +49,8 @@ check() {
   return "$status"
 }
 
+# The model's own rules first: the source peak from the HDR metadata, the chroma filter's weights.
+py "$here/model.py" --self-test
 build
 check
 
@@ -71,28 +73,39 @@ expect_rejected() {
 }
 
 if [ "${1:-}" = "--mutate" ]; then
-  expect_rejected 'chroma siting of the quad path' 's/between ? 0.75f : 0.0f, m, eight/between ? 0.25f : 0.0f, m, eight/'
-  expect_rejected 'chroma siting of the area path' 's/float2(0.0f, between_rows() ? 0.5f : 0.0f)) \* 0.5f;/float2(0.0f, between_rows() ? 0.0f : 0.5f)) * 0.5f;/'
-  expect_rejected 'the chroma rows of the second step' 's/const int r = (between ? o.y - 1 : o.y) + (int)p;/const int r = (between ? o.y - 1 : o.y);/'
-  expect_rejected 'the third chroma column' 's/(u1 + u2) \* 0.5f/(u1 + u1) * 0.5f/'
+  expect_rejected 'chroma siting of the quad path' 's/const float4 w = (k \& 1u) != 0 ? f.odd : f.even;/const float4 w = (k \& 1u) != 0 ? f.even : f.odd;/'
+  expect_rejected 'chroma siting of the area path' 's/const float4 w = (p.y \& 1) != 0 ? f.odd : f.even;/const float4 w = f.odd;/'
+  expect_rejected 'chroma siting of the block paths' 's/const float4 w = (y \& 1) != 0 ? f.odd : f.even;/const float4 w = f.even;/'
+  expect_rejected 'the taps of a row' 's/const int r = ((y + 1) >> 1) - 2;  \/\/ the row/const int r = (y >> 1) - 2;  \/\/ the row/'
+  expect_rejected 'the taps of a row of the block paths' 's/const int r0 = ((y + 1) >> 1) - 2;  \/\/ the row/const int r0 = (y >> 1) - 2;  \/\/ the row/'
+  expect_rejected 'the taps of a row of the area path' 's/const int r0 = ((p.y + 1) >> 1) - 2;/const int r0 = (p.y >> 1) - 1;/'
+  expect_rejected 'the fifth chroma column' 's/dot4(f.h, float4(r.s.y, r.s.z, r.s.w, r.t))/dot4(f.h, float4(r.s.y, r.s.z, r.s.w, r.s.w))/'
+  expect_rejected 'the Catmull-Rom weights across' 's/float4(-0.0625f, 0.5625f, 0.5625f, -0.0625f)/float4(0.0f, 0.5f, 0.5f, 0.0f)/'
+  expect_rejected 'the Catmull-Rom weights down' 's/float4(-0.0234375f, 0.2265625f, 0.8671875f, -0.0703125f)/float4(0.0f, 0.25f, 0.75f, 0.0f)/'
+  expect_rejected 'the colocated rows' 's/f.even = float4(0.0f, 0.0f, 1.0f, 0.0f);/f.even = float4(0.0f, 1.0f, 0.0f, 0.0f);/'
+  expect_rejected 'the clamp of the cubic' 's/const float hi = bl || full_range() ? top : 240.0f \* unit;/const float hi = top;/'
+  expect_rejected 'the clamp of the cubic in full range' 's/const float lo = bl || full_range() ? 0.0f : 16.0f \* unit;/const float lo = -1024.0f;/'
+  expect_rejected 'the bilinear switch' 's/bool bilinear_chroma() { return (cb_flags \& 2048u) != 0; }/bool bilinear_chroma() { return false; }/'
+  expect_rejected 'the left chroma edge' 's/  if (c == 0) r.s.x = r.s.y;/  if (false) r.s.x = r.s.y;/'
+  expect_rejected 'the right chroma edge' 's/  if (c + 2 > last) r.s.w = r.s.z;/  if (false) r.s.w = r.s.z;/'
+  expect_rejected 'the odd chroma edge' 's/  if (c + 1 > last) r.s.z = r.s.y;/  if (false) r.s.z = r.s.y;/'
+  expect_rejected 'the last chroma column' 's/const int last = (int)((cb_src_w + 1u) \/ 2u) - 1;  \/\/ (w + 1) \/ 2/const int last = (int)(cb_src_w \/ 2u) - 1;  \/\/ (w + 1) \/ 2/'
+  expect_rejected 'the chroma rows below the frame' 's/const int row = clamp(r + j, 0, last_row);/const int row = clamp(r + j, 0, last_row + 1);/'
+  expect_rejected 'the 8-bit chroma window' 's/  const uint sh = (at \& 3u) \* 8u;/  const uint sh = 0u;/'
+  expect_rejected 'the 16-bit chroma window of the quad path' 's/r.s = float4((float)(w.x >> 16), (float)(w.y \& 0xffffu)/r.s = float4((float)(w.x \& 0xffffu), (float)(w.y \& 0xffffu)/'
   expect_rejected 'the left chroma neighbour' 's/ex\[((uint)q \& 1u) \* THREADS + lane - 1u\]/ex[((uint)q \& 1u) * THREADS + lane]/'
   expect_rejected 'the edge column' 's/edge\[2u \* lane\] = x0 > 0 ? v.v10 : v.v00;/edge[2u * lane] = v.v00;/'
-  expect_rejected 'the right chroma edge' 's/return float3(run_sample(r, 0u, eight), s1, edge ? s1 : run_sample(r, 2u, eight));/return float3(run_sample(r, 0u, eight), s1, run_sample(r, 2u, eight));/'
+  expect_rejected 'the line of the gain table above 1200 nits' 's/const float t = clamp(cb_gain_s1 >= cb_gain_s2 ? min(a, b) : max(a, b),/const float t = clamp(min(a, b),/'
   expect_rejected 'the interpolation of the tables' 's/return mad(t, mad(t, mad(t, c.w, c.z), c.y), c.x);/return c.x;/'
   expect_rejected 'the exact peak below 1e-6 nits' 's/peak = pq_to_nits(emax);/peak = peak;/'
-  expect_rejected 'the 8-bit chroma pair' 's/const uint pos = (r.first + k) \* 8u;/const uint pos = k * 8u;/'
   expect_rejected 'the output depth' 's/if (nv12_out()) return/if (eight_bit()) return/'
   expect_rejected 'the NV12 chroma codes' 's/floor(128.0f + 224.0f \* cr + tr)/floor(128.0f + 224.0f * cb + tr)/'
-  expect_rejected 'the chroma rows of the block path' 's/const bool down = n == 2u ? between \&\& i == 1u : ((between ? (y - 1) >> 1 : y >> 1) - r0) != 0;/const bool down = false;/'
-  expect_rejected 'the chroma rows above the frame' 's/const int r0 = between ? (sy - 1) >> 1 : sy >> 1;/const int r0 = sy >> 1;/'
-  expect_rejected 'the chroma columns of 3:2' 's/const bool next = n == 2u ? false : (x >> 1) != c0;/const bool next = false;/'
-  expect_rejected 'the chroma columns of 1:1' 's/const float fx = (n == 2u ? j == 1u : (x \& 1u) != 0) ? 0.5f : 0.0f;/const float fx = (x \& 1u) != 0 ? 0.0f : 0.5f;/'
+  expect_rejected 'the chroma columns of 3:2' 's/const bool next = n == 3u \&\& (sx \& 1) != 0;/const bool next = false;/'
+  expect_rejected 'the chroma columns of 1:1' 's/const float u = k == 0u ? (next ? cu.y : cu.x) : k == 1u ? (next ? cu.z : cu.y)/const float u = k == 0u ? (next ? cu.y : cu.x) : k == 1u ? (next ? cu.z : cu.z)/'
   expect_rejected 'the first sample of a run of the block path' 's/  r.first = x \& (eight_bit() ? 3u : 1u);/  r.first = 0u;/'
-  expect_rejected 'the right chroma edge of the block path' 's/const uint k1 = min(1u, cmax), k2 = n == 2u ? k1 : min(2u, cmax);/const uint k1 = 1u, k2 = 2u;/'
-  expect_rejected 'the column weights of 3:2' 's/left = add_light(left, p, j == 0u ? 1.0f : 0.5f);/left = add_light(left, p, 1.0f);/'
-  expect_rejected 'the row weights of 3:2' 's/const float w = i == 0u ? 1.0f : 0.5f;/const float w = 1.0f;/'
-  expect_rejected 'the third luma row of 3:2' 's/if (n == 3u) l2 = load_aligned(cb_y_offset, cb_y_stride, sy + 2, (uint)sx);/if (n == 3u) l2 = l1;/'
-  expect_rejected 'the odd chroma edge' 's/const int2 last = int2((int)((cb_src_w + 1u) \/ 2u) - 1,/const int2 last = int2((int)(cb_src_w \/ 2u) - 1,/'
+  expect_rejected 'the column weights of 3:2' 's/left = add_light(left, p, k == 0u ? 1.0f : 0.5f);/left = add_light(left, p, 1.0f);/'
+  expect_rejected 'the row weights of 3:2' 's/(i == 0u ? 1.0f : i == 1u ? 0.5f : 0.0f);/(i == 0u ? 1.0f : i == 1u ? 1.0f : 0.0f);/'
+  expect_rejected 'the rows of the quad path' 's/const bool top = k < 2u;/const bool top = k < 1u;/'
   expect_rejected 'the dither threshold' 's/if (!dithered()) return 0.5f;/return 0.5f;/'
   expect_rejected 'the transposed dither of Cr' 's/const float tr = threshold(uint2(p.y, p.x));/const float tr = threshold(p);/'
 fi

@@ -16,7 +16,8 @@
 // The operations are those of the display stage of the application this is made for (area downscale in
 // display-linear light, exact overlap weights; PQ through the BT.2390 EETF to the SDR white's 2.03
 // times, HLG through its inverse OETF and OOTF, BT.2020 SDR by gamut only, BT.709 SDR scaled only; one
-// late clip; left-sited output chroma mixed in linear light), written here from ST 2084, ITU-R BT.2100,
+// late clip; the input chroma upsampled with a Catmull-Rom cubic at the stream's siting; left-sited output
+// chroma mixed in linear light), written here from ST 2084, ITU-R BT.2100,
 // BT.2390, BT.2087 and BT.709/BT.1886. testing/display_pass/model.py is the float32 statement of them
 // that the pass is held to. Not a decoding stage: the frame buffer is only read, and every frame the
 // decoder outputs or references is unchanged.
@@ -37,14 +38,22 @@
 //   - BT.2020 to BT.709 is linear and so is the area average: it is applied once to the average of an
 //     output pixel, not to every source pixel, and the gain is folded into the sum.
 //   - At 2:1 (3840x2160 to 1920x1080, the case the pass is sized for) a thread takes 2x2 output pixels
-//     from four rows of its source read with 8-byte loads (a wave reads 256 contiguous bytes a row) and
-//     four chroma rows of three columns, one 8-byte load each a plane; the chroma is interpolated at the
-//     sited positions with constant weights.
+//     from four rows of its source read with 8-byte loads (a wave reads 256 contiguous bytes a row), one
+//     source row a step: its luma (8 bytes) and the four chroma rows its Catmull-Rom taps need, of U and V,
+//     five columns each (one 8- or 12-byte read), 9 reads issued together. The taps of the row's four
+//     source pixels come from those 4x5 samples a plane: filtered down once a column (5 dot products of
+//     four, the weights constants of the row's parity and the siting), then across (2 more) and clamped:
+//     with the extraction of the 40 samples about 23 instructions a source pixel more than bilinear
+//     (~0.2 ms a 4K frame at the console's 1.86 TFLOP/s, an estimate).
+//     No group memory and no more syncs; the overlapping rows of the steps are read again from the cache
+//     (36 reads a quad against 16 of the bilinear version), which keeps one row's reads in registers:
+//     PQ 110 VGPRs (4 waves a SIMD, as before), SDR and HLG 96 (4 waves, from 8 and 6).
 //   - At 1:1 (a 4K frame on a 4K display: tone map, gamut and quantisation, no downscale) and at 3:2
 //     (3840x2160 to 2560x1440) a thread takes 2x2 output pixels from a block of 2x2 or 3x3 source pixels
-//     (quad_block): n luma rows and a window of three chroma rows of three columns of U and V, one 8-byte
-//     read each, all issued together; every source pixel decoded once and weighted by its exact overlap
-//     (1:1: 1; 3:2: 1 and 1/2 a side). Other ratios take the area loop of the model.
+//     (quad_block), one source row a step as at 2:1 (its luma, and the four chroma rows of its taps, five
+//     columns a plane); every source pixel decoded once and weighted by its exact overlap (1:1: 1; 3:2: 1 and
+//     1/2 a side). Other ratios take the area loop of the model (a source pixel: its four tap rows of four
+//     columns a plane, a row a step).
 //   - The encode after the late clip is a plain power (the values are 0..1); the optional ordered dither
 //     of the last quantisation (`threshold`) is integer arithmetic at the output sample, no table.
 //   - A group is 256 threads and 64x64 output pixels; the output chroma's left neighbour column comes
@@ -53,9 +62,9 @@
 // Group memory 12.5 KB (the tables 5.5 KB, the column exchange 6 KB, the edge column 0.75 KB); SDR reads
 // no tables (9 KB in the RDNA2 listing).
 //
-// The 8-byte reads of the quad path reach up to two chroma samples past the last visible one of a row:
-// inside the 16-sample border every frame buffer row has (frame.rs, `h_border`), and the values are not
-// used.
+// The chroma reads reach up to two samples left of the first visible one of a row and four past the last:
+// inside the 16-sample border every frame buffer row has on both sides (frame.rs, `h_border`), and the
+// values are not used (the columns are clamped to the plane after the read).
 
 ByteAddressBuffer lut_src : register(t0);
 RWByteAddressBuffer pool : register(u0);
@@ -80,7 +89,8 @@ cbuffer cb_display : register(b0) {
                       // 4 bytes (the quad path); bit 6: 8-bit samples (else 16-bit); bit 7: 8-bit codes,
                       // NV12 (else 10-bit, P010); bit 8: exactly 1:1 (the block path, n 2); bit 9:
                       // exactly 3:2 (the block path, n 3), both with planes at multiples of 4 bytes; bit
-                      // 10: the ordered dither at the quantisation (else rounded)
+                      // 10: the ordered dither at the quantisation (else rounded); bit 11: bilinear input
+                      // chroma (else Catmull-Rom; av1_set_display_bilinear_chroma)
   float cb_eotf_a;    // the EOTF table's position of a signal m: min(m * a, m * b + c), at most EOTF_N
   float cb_eotf_b;
   float cb_eotf_c;
@@ -114,8 +124,9 @@ groupshared float3 edge[TILE];       // the column left of the tile, two rows a 
 
 // The transfer mode a pipeline is made for: display_pass_sdr.hlsl (1) and display_pass_hlg.hlsl (2)
 // define it, this file alone is PQ (0). One pipeline a mode, because a shader's registers are those of its
-// most demanding path (RDNA2, LLPC, testing/shader_regs: PQ 112, HLG 65, SDR 63 VGPRs, 4, 6 and 8 waves a
-// SIMD; all three in one shader 114, 4 waves for every mode).
+// most demanding path (RDNA2, LLPC, testing/shader_regs, with the bilinear chroma of interface version 2:
+// PQ 112, HLG 65, SDR 63 VGPRs, 4, 6 and 8 waves a SIMD; all three in one shader 114, 4 waves for every
+// mode; with the Catmull-Rom chroma PQ 110, HLG and SDR 96, 4 waves each).
 // DISPLAY_MODE_FROM_FLAGS (the C++ check, testing/display_pass): bits 0-1 of the flags, every mode in one.
 #if defined(DISPLAY_MODE_FROM_FLAGS)
 uint mode() { return cb_flags & 3u; }
@@ -134,6 +145,7 @@ bool nv12_out() { return (cb_flags & 128u) != 0; }
 bool one_to_one() { return (cb_flags & 256u) != 0; }
 bool three_to_two() { return (cb_flags & 512u) != 0; }
 bool dithered() { return (cb_flags & 1024u) != 0; }
+bool bilinear_chroma() { return (cb_flags & 2048u) != 0; }
 
 // The frame buffer's samples: log2 of their bytes, their mask (uniform).
 uint sample_shift() { return eight_bit() ? 0u : 1u; }
@@ -166,21 +178,11 @@ Run load_run(uint offset, uint stride, int row, uint x) {
   return r;
 }
 
-// Sample x + k of a run (k + first below 8 at 8 bits, below 4 at 16). `eight` and `k` are constants of
-// the caller: at 16 bits (where x is at a multiple of 4 bytes, first 0) a half of a dword.
-float run_sample(Run r, uint k, bool eight) {
-  if (eight) {
-    const uint pos = (r.first + k) * 8u;
-    return (float)(((pos >= 32u ? r.w.y : r.w.x) >> (pos & 31u)) & 255u);
-  }
-  const uint word = k >= 2u ? r.w.y : r.w.x;
-  return (float)((k & 1u) != 0 ? word >> 16 : word & 0xffffu);
-}
-
-// Luma sample x + k of a run at a multiple of 4 bytes (k below 4).
+// Luma sample x + k of a run at a multiple of 4 bytes (k below 4, a constant of the caller, as `eight`).
 float luma_sample(Run r, uint k, bool eight) {
   if (eight) return (float)((r.w.x >> (8u * k)) & 255u);
-  return run_sample(r, k, false);
+  const uint word = k >= 2u ? r.w.y : r.w.x;
+  return (float)((k & 1u) != 0 ? word >> 16 : word & 0xffffu);
 }
 
 // Sample k of a run whose sample x is anywhere in its first dword (the block paths: k + first below 8 at 8
@@ -209,9 +211,15 @@ float pq_table(float m) {
 }
 
 // The tone-map gain at x (PQ: the largest R'G'B' signal; HLG: log2 of the largest channel's nits): the
-// EETF of the peak over the peak, 1/nits. Constant below the table's start (below the EETF's knee).
+// EETF of the peak over the peak, 1/nits. Constant below the table's start (below the EETF's knee). The
+// position is on two lines that meet at the source peak's signal (display_pass.rs): the smaller of them
+// when the intervals below it are the denser (peaks up to about 1200 nits), the larger when those above it
+// are (higher peaks, which the HDR metadata gives; interface version 2 took the smaller always, and read
+// the wrong intervals of the table there). A uniform choice: the constants decide.
 float gain_table(float x) {
-  const float t = clamp(min(mad(x, cb_gain_s1, cb_gain_o1), mad(x, cb_gain_s2, cb_gain_o2)), 0.0f, (float)GAIN_N);
+  const float a = mad(x, cb_gain_s1, cb_gain_o1);
+  const float b = mad(x, cb_gain_s2, cb_gain_o2);
+  const float t = clamp(cb_gain_s1 >= cb_gain_s2 ? min(a, b) : max(a, b), 0.0f, (float)GAIN_N);
   return cubic(GAIN_BASE + (uint)t, frac(t));
 }
 
@@ -270,39 +278,145 @@ float3 to_709(float3 c) {
 // The average of an output pixel's footprint, in the source's primaries, to display-linear BT.709.
 float3 to_display(float3 c) { return bt2020() ? to_709(c) : c; }
 
-// One pixel of the frame: its luma and its chroma, bilinear between the four nearest chroma samples at
-// the pixel's place (chroma sample (i, j) sits at luma (2i, 2j + 0.5) when bit 4 of the flags is set,
-// at (2i, 2j) when not).
-float4 sample_linear(int2 p) {
+// The input chroma at a luma pixel (docs/integration.md, "Input chroma"): the separable 4x4 Catmull-Rom
+// cubic (B 0, C 1/2; Keys' a = -1/2) of the coded chroma samples at the pixel's place, before any transfer
+// or matrix, clamped to the code range of the frame's depth and range (limited 16..240 at 8 bits, 64..960
+// at 10; full 0..255, 0..1023). The siting is the sequence's (AV1 6.4.2, chroma_sample_position, with the
+// assumed one): chroma sample (i, j) sits at luma (2i, 2j + 1/2) between rows (bit 4 of the flags), at
+// (2i, 2j) colocated. So a luma column 2t is chroma column t itself, 2t + 1 halfway between t and t + 1
+// (taps t - 1 .. t + 2, -1 9 9 -1 over 16); a luma row 2t between rows is at chroma row t - 1/4 (taps t - 2
+// .. t + 1, -3 29 111 -9 over 128) and 2t + 1 at t + 1/4 (taps t - 1 .. t + 2, -9 111 29 -3 over 128);
+// colocated 2t is chroma row t (taps t - 2 .. t + 1 at 0 0 1 0) and 2t + 1 halfway (taps t - 1 .. t + 2).
+// The taps of luma row y start at chroma row ((y + 1) >> 1) - 2 at either siting, with the weights of y's
+// parity; sample coordinates outside the plane are clamped to it. Every weight is a multiple of 1/128 and
+// every code an integer below 1024, so every product and partial sum is a multiple of 1/2048 below 2^24 of
+// them: exact in float32, the same value in any order of the arithmetic (the model's, model.py). With bit
+// 11 of the flags (av1_set_display_bilinear_chroma) the weights are the bilinear ones of the previous
+// version, (0, 1 - f, f, 0), unclamped: the same chroma as it, exactly.
+struct ChromaFilter {
+  float4 h;       // a luma column 2t + 1: chroma columns t - 1 .. t + 2
+  float4 even;    // a luma row 2t: chroma rows t - 2 .. t + 1
+  float4 odd;     // a luma row 2t + 1: chroma rows t - 1 .. t + 2
+  float4 lo, hi;  // the code range of the result
+};
+
+ChromaFilter chroma_filter() {
+  ChromaFilter f;
+  const bool bl = bilinear_chroma();
+  const float top = eight_bit() ? 255.0f : 1023.0f;
+  const float unit = eight_bit() ? 1.0f : 4.0f;
+  f.h = bl ? float4(0.0f, 0.5f, 0.5f, 0.0f) : float4(-0.0625f, 0.5625f, 0.5625f, -0.0625f);
+  if (between_rows()) {
+    f.even = bl ? float4(0.0f, 0.25f, 0.75f, 0.0f) : float4(-0.0234375f, 0.2265625f, 0.8671875f, -0.0703125f);
+    f.odd = bl ? float4(0.0f, 0.75f, 0.25f, 0.0f) : float4(-0.0703125f, 0.8671875f, 0.2265625f, -0.0234375f);
+  } else {
+    f.even = float4(0.0f, 0.0f, 1.0f, 0.0f);
+    f.odd = f.h;
+  }
+  const float lo = bl || full_range() ? 0.0f : 16.0f * unit;
+  const float hi = bl || full_range() ? top : 240.0f * unit;
+  f.lo = float4(lo, lo, lo, lo);
+  f.hi = float4(hi, hi, hi, hi);
+  return f;
+}
+
+// Five chroma samples of a row, columns c - 1 .. c + 3 (s, then t).
+struct Row5 {
+  float4 s;  // c - 1 .. c + 2
+  float t;   // c + 3
+};
+
+// Three dwords from the byte `at & 3` of the first on: a funnel shift, with no shift by 32.
+uint3 from_byte(uint3 w, uint at) {
+  const uint sh = (at & 3u) * 8u;
+  return uint3((w.x >> sh) | ((w.y << 1u) << (31u - sh)), (w.y >> sh) | ((w.z << 1u) << (31u - sh)), w.z >> sh);
+}
+
+// The samples of a row whose column c - 1 is at the byte `at` (any place in the first dword of w).
+// `eight`: 8-bit samples (a constant of the caller, or the uniform eight_bit()).
+Row5 row5(uint3 w, uint at, bool eight) {
+  const uint3 b = from_byte(w, at);
+  Row5 r;
+  if (eight) {
+    r.s = float4((float)(b.x & 255u), (float)((b.x >> 8) & 255u), (float)((b.x >> 16) & 255u), (float)(b.x >> 24));
+    r.t = (float)(b.y & 255u);
+  } else {
+    r.s = float4((float)(b.x & 0xffffu), (float)(b.x >> 16), (float)(b.y & 0xffffu), (float)(b.y >> 16));
+    r.t = (float)(b.z & 0xffffu);
+  }
+  return r;
+}
+
+// The columns outside the plane (c from 0 to the last column, `last`) clamped to it.
+Row5 clamp_row5(Row5 r, int c, int last) {
+  if (c == 0) r.s.x = r.s.y;
+  if (c + 1 > last) r.s.z = r.s.y;
+  if (c + 2 > last) r.s.w = r.s.z;
+  if (c + 3 > last) r.t = r.s.w;
+  return r;
+}
+
+float dot4(float4 a, float4 b) { return mad(a.w, b.w, mad(a.z, b.z, mad(a.y, b.y, a.x * b.x))); }
+
+// The five columns of a luma row's four tap rows a, b, c, d (window rows), filtered down with its
+// weights w. Down first, then across: ten values a plane and step in flight instead of twenty, and the
+// columns outside the plane clamped once, on the result (clamping a column commutes with filtering down).
+Row5 chroma_down(Row5 a, Row5 b, Row5 c, Row5 d, float4 w) {
+  Row5 r;
+  r.s = float4(dot4(w, float4(a.s.x, b.s.x, c.s.x, d.s.x)), dot4(w, float4(a.s.y, b.s.y, c.s.y, d.s.y)),
+               dot4(w, float4(a.s.z, b.s.z, c.s.z, d.s.z)), dot4(w, float4(a.s.w, b.s.w, c.s.w, d.s.w)));
+  r.t = dot4(w, float4(a.t, b.t, c.t, d.t));
+  return r;
+}
+
+// A row filtered down, across at the luma columns 2c, 2c + 1, 2c + 2, 2c + 3 (chroma columns c, c + 1/2,
+// c + 1, c + 3/2), clamped to the code range.
+float4 chroma_across(Row5 r, ChromaFilter f) {
+  return clamp(float4(r.s.y, dot4(f.h, r.s), r.s.z, dot4(f.h, float4(r.s.y, r.s.z, r.s.w, r.t))), f.lo, f.hi);
+}
+
+// The dwords of a chroma row from its column c - 1 on, rounded down to 4 bytes, and that column's byte.
+uint3 load_chroma(uint offset, int row, int c, bool eight, out uint at) {
+  at = offset + (uint)row * cb_uv_stride + ((uint)(c - 1) << (eight ? 0u : 1u));
+  if (eight) {
+    const uint2 w = pool.Load2(at & ~3u);
+    return uint3(w.x, w.y, 0u);
+  }
+  return pool.Load3(at & ~3u);
+}
+
+// One pixel of the frame: its luma and its chroma (above). The area loop's, the slow path of the sizes
+// that are not exactly 2:1, 1:1 or 3:2: the four tap rows one after the other, two 12-byte reads each (the
+// bilinear version waited for nine reads one by one), so that the loop's registers stay those of one row.
+float4 sample_linear(int2 p, bool eight) {
   p = clamp(p, int2(0, 0), int2((int)cb_src_w - 1, (int)cb_src_h - 1));
-  const float2 c = (float2(p) - float2(0.0f, between_rows() ? 0.5f : 0.0f)) * 0.5f;
-  const int2 base = int2(floor(c));
-  const float2 f = c - float2(base);
-  // The last chroma sample of a row and of a column: (w + 1) / 2 of them for an odd width.
-  const int2 last = int2((int)((cb_src_w + 1u) / 2u) - 1, (int)((cb_src_h + 1u) / 2u) - 1);
-  const int2 p00 = clamp(base, int2(0, 0), last);
-  const int2 p10 = clamp(base + int2(1, 0), int2(0, 0), last);
-  const int2 p01 = clamp(base + int2(0, 1), int2(0, 0), last);
-  const int2 p11 = clamp(base + int2(1, 1), int2(0, 0), last);
-  const float u00 = sample_at(cb_u_offset, cb_uv_stride, p00);
-  const float u10 = sample_at(cb_u_offset, cb_uv_stride, p10);
-  const float u01 = sample_at(cb_u_offset, cb_uv_stride, p01);
-  const float u11 = sample_at(cb_u_offset, cb_uv_stride, p11);
-  const float v00 = sample_at(cb_v_offset, cb_uv_stride, p00);
-  const float v10 = sample_at(cb_v_offset, cb_uv_stride, p10);
-  const float v01 = sample_at(cb_v_offset, cb_uv_stride, p01);
-  const float v11 = sample_at(cb_v_offset, cb_uv_stride, p11);
-  const float ut = mad(u10 - u00, f.x, u00);
-  const float ub = mad(u11 - u01, f.x, u01);
-  const float vt = mad(v10 - v00, f.x, v00);
-  const float vb = mad(v11 - v01, f.x, v01);
-  return decode_pixel(sample_at(cb_y_offset, cb_y_stride, p), mad(ub - ut, f.y, ut), mad(vb - vt, f.y, vt), mode());
+  const ChromaFilter f = chroma_filter();
+  const int c = p.x >> 1;
+  const int last = (int)((cb_src_w + 1u) / 2u) - 1;  // (w + 1) / 2 chroma samples for an odd width
+  const int last_row = (int)((cb_src_h + 1u) / 2u) - 1;
+  const int r0 = ((p.y + 1) >> 1) - 2;
+  const float4 w = (p.y & 1) != 0 ? f.odd : f.even;
+  const bool half = (p.x & 1) != 0;  // column 2c is chroma column c, 2c + 1 halfway to c + 1
+  const float y_code = sample_at(cb_y_offset, cb_y_stride, p);
+  float u = 0.0f, v = 0.0f;
+  [loop] for (int j = 0; j < 4; j++) {
+    const int row = clamp(r0 + j, 0, last_row);
+    uint au, av;
+    const uint3 wu = load_chroma(cb_u_offset, row, c, eight, au);
+    const uint3 wv = load_chroma(cb_v_offset, row, c, eight, av);
+    const Row5 ru = clamp_row5(row5(wu, au, eight), c, last);
+    const Row5 rv = clamp_row5(row5(wv, av, eight), c, last);
+    const float wj = j == 0 ? w.x : j == 1 ? w.y : j == 2 ? w.z : w.w;
+    u = mad(wj, half ? dot4(f.h, ru.s) : ru.s.y, u);
+    v = mad(wj, half ? dot4(f.h, rv.s) : rv.s.y, v);
+  }
+  return decode_pixel(y_code, clamp(u, f.lo.x, f.hi.x), clamp(v, f.lo.x, f.hi.x), mode());
 }
 
 // One output pixel (clamped to the output: the column left of the image repeats its first): the
 // average of its footprint, each source pixel weighted by the overlap of its unit square with the
 // footprint, display-linear BT.709.
-float3 area_linear(int2 o) {
+float3 area_linear(int2 o, bool eight) {
   o = clamp(o, int2(0, 0), int2((int)cb_out_w - 1, (int)cb_out_h - 1));
   const float2 scale = float2((float)cb_src_w, (float)cb_src_h) / float2((float)cb_out_w, (float)cb_out_h);
   const float2 lo = float2(o) * scale;
@@ -315,7 +429,7 @@ float3 area_linear(int2 o) {
     const float wy = min((float)(sy + 1), hi.y) - max((float)sy, lo.y);
     [loop] for (int sx = first.x; sx <= last.x; sx++) {
       const float w = wy * (min((float)(sx + 1), hi.x) - max((float)sx, lo.x));
-      sum = add_light(sum, sample_linear(int2(sx, sy)), w);
+      sum = add_light(sum, sample_linear(int2(sx, sy), eight), w);
       total += w;
     }
   }
@@ -326,71 +440,77 @@ struct Quad {
   float3 v00, v10, v01, v11;  // v<column><row>, display-linear BT.709
 };
 
-// Three chroma samples (columns c, c + 1, c + 2) of a row: the third repeats the second at the right
-// edge, where c + 1 is the last column.
-float3 chroma3(Run r, bool edge, bool eight) {
-  const float s1 = run_sample(r, 1u, eight);
-  return float3(run_sample(r, 0u, eight), s1, edge ? s1 : run_sample(r, 2u, eight));
-}
-
-// One source row of a quad: four luma samples (l) at the chroma columns c, c + 1/2, c + 1, c + 3/2, the
-// chroma between the chroma rows a and b at f (U ua..ub, V va..vb). Adds the left two pixels' light to
-// left, the right two's to right.
-void add_row(inout float3 left, inout float3 right, Run l, float3 ua, float3 ub, float3 va, float3 vb, float f, uint m,
-             bool eight) {
-  const float u0 = mad(ub.x - ua.x, f, ua.x);
-  const float u1 = mad(ub.y - ua.y, f, ua.y);
-  const float u2 = mad(ub.z - ua.z, f, ua.z);
-  const float v0 = mad(vb.x - va.x, f, va.x);
-  const float v1 = mad(vb.y - va.y, f, va.y);
-  const float v2 = mad(vb.z - va.z, f, va.z);
-  const float4 p0 = decode_pixel(luma_sample(l, 0u, eight), u0, v0, m);
-  const float4 p1 = decode_pixel(luma_sample(l, 1u, eight), (u0 + u1) * 0.5f, (v0 + v1) * 0.5f, m);
-  const float4 p2 = decode_pixel(luma_sample(l, 2u, eight), u1, v1, m);
-  const float4 p3 = decode_pixel(luma_sample(l, 3u, eight), (u1 + u2) * 0.5f, (v1 + v2) * 0.5f, m);
+// One source row of a quad: four luma samples (l) and their chroma (u, v; at the chroma columns c, c + 1/2,
+// c + 1, c + 3/2). Adds the left two pixels' light to left, the right two's to right.
+void add_row(inout float3 left, inout float3 right, Run l, float4 u, float4 v, uint m, bool eight) {
+  const float4 p0 = decode_pixel(luma_sample(l, 0u, eight), u.x, v.x, m);
+  const float4 p1 = decode_pixel(luma_sample(l, 1u, eight), u.y, v.y, m);
+  const float4 p2 = decode_pixel(luma_sample(l, 2u, eight), u.z, v.z, m);
+  const float4 p3 = decode_pixel(luma_sample(l, 3u, eight), u.w, v.w, m);
   left = add_light(add_light(left, p0, 1.0f), p1, 1.0f);
   right = add_light(add_light(right, p2, 1.0f), p3, 1.0f);
 }
 
+// A row of the chroma window of the 2:1 path, columns c - 1 .. c + 3 for an even c (planes at multiples of
+// 4 bytes): at 16 bits the three dwords from column c - 2 (c - 1 the high half of the first), at 8 bits the
+// two from c - 1 rounded down to 4 bytes (c - 1 at byte 1 or 3). The reads reach two samples left of column
+// 0 and three right of the last: inside the 16-sample border of every frame buffer row, and not used.
+uint3 load_window_2to1(uint offset, int row, uint c, bool eight) {
+  const uint base = offset + (uint)row * cb_uv_stride;
+  if (eight) {
+    const uint2 w = pool.Load2((base + c - 1u) & ~3u);
+    return uint3(w.x, w.y, 0u);
+  }
+  return pool.Load3(base + 2u * c - 4u);
+}
+
+Row5 row5_2to1(uint3 w, uint c, bool eight) {
+  if (eight) return row5(w, c - 1u, true);
+  Row5 r;
+  r.s = float4((float)(w.x >> 16), (float)(w.y & 0xffffu), (float)(w.y >> 16), (float)(w.z & 0xffffu));
+  r.t = (float)(w.z >> 16);
+  return r;
+}
+
 // The quad of output pixels at o (even) at exactly 2:1: source rows 2 o.y .. 2 o.y + 3, columns 2 o.x ..
-// 2 o.x + 3, which sit at the chroma columns o.x, o.x + 1/2, o.x + 1, o.x + 3/2, in two steps of two
-// rows. Source row 2 o.y + k sits at the chroma row o.y + (k - 1/2) / 2 when chroma is between rows
-// (o.y - 1/4, + 1/4, + 3/4, + 5/4), at o.y + k / 2 when colocated: a step reads its two rows' luma (an
-// 8-byte read each) and three chroma rows from r (o.y - 1 + p between rows, o.y + p colocated, p the
-// step) of U and V, three columns each (an 8-byte read), all before any arithmetic and with no branch
-// between. Two rows a step keep the registers of the tone map's table reads (PQ: 16 a row) at those of
-// two rows. Every interpolated chroma value is a multiple of 1/8 below 1024, exact in float32 in any
-// order, as the model's. `m` (the mode) and `eight` (8-bit samples) are constants.
+// 2 o.x + 3 (chroma columns o.x, o.x + 1/2, o.x + 1, o.x + 3/2), one row a step. A step reads the row's
+// luma (8 bytes) and the four chroma rows of its taps of U and V, columns o.x - 1 .. o.x + 3 (one 8- or
+// 12-byte read each), all before any arithmetic and with no branch between: 9 reads a step. The five
+// columns are filtered down with the weights of the row's parity, then across (chroma_down, chroma_across).
+// One row a step keeps the registers at one row's reads and one row's tone map (two rows a step with a
+// shared window of five chroma rows: PQ 128, SDR 96 VGPRs on this path alone). `m` (the mode) and `eight`
+// (8-bit samples) are constants.
 Quad quad_2to1(int2 o, uint m, bool eight) {
   const uint c = (uint)o.x;
-  const bool edge = c + 2u > cb_src_w / 2u - 1u;
+  const int last = (int)(cb_src_w / 2u) - 1;
   const int last_row = (int)(cb_src_h / 2u) - 1;
-  const bool between = between_rows();
+  const ChromaFilter f = chroma_filter();
   float3 a00 = float3(0.0f, 0.0f, 0.0f), a10 = a00, a01 = a00, a11 = a00;
-  [loop] for (uint p = 0; p < 2u; p++) {
-    const int y = 2 * o.y + 2 * (int)p;
-    const int r = (between ? o.y - 1 : o.y) + (int)p;
-    const Run l0 = load_run(cb_y_offset, cb_y_stride, y, 2u * c);
-    const Run l1 = load_run(cb_y_offset, cb_y_stride, y + 1, 2u * c);
-    const int r0 = clamp(r, 0, last_row);
-    const int r1 = clamp(r + 1, 0, last_row);
-    const int r2 = clamp(r + 2, 0, last_row);
-    const Run ur0 = load_run(cb_u_offset, cb_uv_stride, r0, c);
-    const Run ur1 = load_run(cb_u_offset, cb_uv_stride, r1, c);
-    const Run ur2 = load_run(cb_u_offset, cb_uv_stride, r2, c);
-    const Run vr0 = load_run(cb_v_offset, cb_uv_stride, r0, c);
-    const Run vr1 = load_run(cb_v_offset, cb_uv_stride, r1, c);
-    const Run vr2 = load_run(cb_v_offset, cb_uv_stride, r2, c);
-    const float3 u0 = chroma3(ur0, edge, eight), u1 = chroma3(ur1, edge, eight), u2 = chroma3(ur2, edge, eight);
-    const float3 v0 = chroma3(vr0, edge, eight), v1 = chroma3(vr1, edge, eight), v2 = chroma3(vr2, edge, eight);
-    float3 left = float3(0.0f, 0.0f, 0.0f);
-    float3 right = left;
-    // The first row between chroma rows r and r + 1 at 3/4 (between) or on r (colocated); the second
-    // between r + 1 and r + 2 at 1/4, or halfway between r and r + 1. Summed in row order.
-    add_row(left, right, l0, u0, u1, v0, v1, between ? 0.75f : 0.0f, m, eight);
-    add_row(left, right, l1, between ? u1 : u0, between ? u2 : u1, between ? v1 : v0, between ? v2 : v1,
-            between ? 0.25f : 0.5f, m, eight);
-    if (p == 0u) {
+  [loop] for (uint k = 0; k < 4u; k++) {
+    const int y = 2 * o.y + (int)k;
+    const int r = ((y + 1) >> 1) - 2;  // the row's taps: chroma rows r .. r + 3
+    const Run l = load_run(cb_y_offset, cb_y_stride, y, 2u * c);
+    uint3 wu[4], wv[4];
+    [unroll] for (int j = 0; j < 4; j++) {
+      const int row = clamp(r + j, 0, last_row);
+      wu[j] = load_window_2to1(cb_u_offset, row, c, eight);
+      wv[j] = load_window_2to1(cb_v_offset, row, c, eight);
+    }
+    const float4 w = (k & 1u) != 0 ? f.odd : f.even;
+    const int ci = (int)c;
+    const float4 u = chroma_across(clamp_row5(chroma_down(row5_2to1(wu[0], c, eight), row5_2to1(wu[1], c, eight),
+                                                          row5_2to1(wu[2], c, eight), row5_2to1(wu[3], c, eight), w),
+                                              ci, last), f);
+    const float4 v = chroma_across(clamp_row5(chroma_down(row5_2to1(wv[0], c, eight), row5_2to1(wv[1], c, eight),
+                                                          row5_2to1(wv[2], c, eight), row5_2to1(wv[3], c, eight), w),
+                                              ci, last), f);
+    // Rows 0, 1 are the top output pixels', 2, 3 the bottom's: added pixel by pixel in row order, the
+    // model's order (k is uniform: the selects are of scalars).
+    const bool top = k < 2u;
+    float3 left = top ? a00 : a01;
+    float3 right = top ? a10 : a11;
+    add_row(left, right, l, u, v, m, eight);
+    if (top) {
       a00 = left;
       a10 = right;
     } else {
@@ -410,14 +530,13 @@ Quad quad_2to1(int2 o, uint m, bool eight) {
 // exactly n:2 in both axes (n 2: 1:1, a 4K frame on a 4K display; n 3: 3:2, 3840x2160 to 2560x1440). Each
 // source pixel is decoded once and weighted by the overlap of its unit square with the output pixels'
 // footprints, as the model's area weights have it: 1 (n 2), or along an axis 1, 1/2, 0 for the first
-// output pixel and 0, 1/2, 1 for the second (n 3), the four sums over 2.25. The reads come first, all
-// together and with no branch between them: n luma rows of 8 bytes, three chroma rows of U and of V of 8
-// bytes (three columns from the chroma column of the block's first source column; the third may reach two
-// samples into the frame buffer row's right border, and is then not used). A source pixel's chroma is
-// sample_linear's: the bilinear mix of the window's rows k, k + 1 at f (between rows: a source row 2t sits
-// at the chroma row t - 1/4, 2t + 1 at t + 1/4; colocated 2t at t, 2t + 1 at t + 1/2) and of its columns
-// (column 2t at the chroma column t, 2t + 1 at t + 1/2), exact in float32 in any order. `n` and the mode
-// `m` are constants of the caller; the sample size is not (a shift and a mask, as everywhere).
+// output pixel and 0, 1/2, 1 for the second (n 3), the four sums over 2.25. One source row a step, its
+// reads first, all together and with no branch between them: its luma (8 bytes) and the four chroma rows of
+// its taps, of U and of V, columns c0 - 1 .. c0 + 3 from the block's first chroma column c0 (8 or 12 bytes
+// each; they reach into the 16-sample border of the rows, whose samples are not used); filtered down with
+// the weights of its parity, then across; source column 2 c0 + k takes component k of that. A step a row
+// keeps the registers of one row (the window of the whole block in registers: PQ 167 VGPRs at 3:2). `n`,
+// the mode `m` and `eight` (8-bit samples) are constants of the caller.
 // A run of the block paths, whose planes are at multiples of 4 bytes: its first sample is x's place in its
 // dword, known from x alone (0 for an even x at 16 bits).
 Run load_aligned(uint offset, uint stride, int row, uint x) {
@@ -427,92 +546,58 @@ Run load_aligned(uint offset, uint stride, int row, uint x) {
   return r;
 }
 
-Quad quad_block(int2 o, uint n, uint m) {
+Quad quad_block(int2 o, uint n, uint m, bool eight) {
   // o is even: the block starts at an even source column and row for n 2.
   const int sx = (o.x >> 1) * (int)n;
   const int sy = (o.y >> 1) * (int)n;
-  const bool between = between_rows();
+  const ChromaFilter f = chroma_filter();
+  const int last = (int)((cb_src_w + 1u) / 2u) - 1;
   const int last_row = (int)((cb_src_h + 1u) / 2u) - 1;
-  const uint c0 = (uint)sx >> 1;
-  const uint cmax = (cb_src_w + 1u) / 2u - 1u - c0;  // the last chroma column, from c0
-  const int r0 = between ? (sy - 1) >> 1 : sy >> 1;  // the window's first chroma row (-1 above the frame)
-  Run l0 = load_aligned(cb_y_offset, cb_y_stride, sy, (uint)sx);
-  Run l1 = load_aligned(cb_y_offset, cb_y_stride, sy + 1, (uint)sx);
-  Run l2 = l1;
-  if (n == 3u) l2 = load_aligned(cb_y_offset, cb_y_stride, sy + 2, (uint)sx);
-  const int ra = clamp(r0, 0, last_row);
-  const int rb = clamp(r0 + 1, 0, last_row);
-  const int rc = clamp(r0 + 2, 0, last_row);
-  const Run ua = load_aligned(cb_u_offset, cb_uv_stride, ra, c0);
-  const Run ub = load_aligned(cb_u_offset, cb_uv_stride, rb, c0);
-  const Run uc = load_aligned(cb_u_offset, cb_uv_stride, rc, c0);
-  const Run va = load_aligned(cb_v_offset, cb_uv_stride, ra, c0);
-  const Run vb = load_aligned(cb_v_offset, cb_uv_stride, rb, c0);
-  const Run vc = load_aligned(cb_v_offset, cb_uv_stride, rc, c0);
-  // The window, its columns clamped to the frame's last.
-  const uint k1 = min(1u, cmax), k2 = n == 2u ? k1 : min(2u, cmax);
-  const float3 u0 = float3(run_at(ua, 0u), run_at(ua, k1), run_at(ua, k2));
-  const float3 u1 = float3(run_at(ub, 0u), run_at(ub, k1), run_at(ub, k2));
-  const float3 u2 = float3(run_at(uc, 0u), run_at(uc, k1), run_at(uc, k2));
-  const float3 v0 = float3(run_at(va, 0u), run_at(va, k1), run_at(va, k2));
-  const float3 v1 = float3(run_at(vb, 0u), run_at(vb, k1), run_at(vb, k2));
-  const float3 v2 = float3(run_at(vc, 0u), run_at(vc, k1), run_at(vc, k2));
+  const int c0 = sx >> 1;
+  const bool next = n == 3u && (sx & 1) != 0;  // n 3: the block's first column at chroma column c0 + 1/2
   float3 a00 = float3(0.0f, 0.0f, 0.0f), a10 = a00, a01 = a00, a11 = a00;
-  [unroll] for (uint i = 0; i < 3u; i++) {
-    if (i < n) {
-      const int y = sy + (int)i;
-      Run l = l2;
-      if (i == 0u) l = l0;
-      else if (i == 1u) l = l1;
-      // The row's chroma rows in the window (k, k + 1) and its place between them.
-      const bool odd_row = n == 2u ? i == 1u : (y & 1) != 0;
-      const bool down = n == 2u ? between && i == 1u : ((between ? (y - 1) >> 1 : y >> 1) - r0) != 0;
-      const float fy = between ? (odd_row ? 0.25f : 0.75f) : (odd_row ? 0.5f : 0.0f);
-      const float3 ut = down ? u1 : u0, ubot = down ? u2 : u1;
-      const float3 vt = down ? v1 : v0, vbot = down ? v2 : v1;
-      const float3 ur = float3(mad(ubot.x - ut.x, fy, ut.x), mad(ubot.y - ut.y, fy, ut.y), mad(ubot.z - ut.z, fy, ut.z));
-      const float3 vr = float3(mad(vbot.x - vt.x, fy, vt.x), mad(vbot.y - vt.y, fy, vt.y), mad(vbot.z - vt.z, fy, vt.z));
-      float3 left = float3(0.0f, 0.0f, 0.0f), right = left;
-      [unroll] for (uint j = 0; j < 3u; j++) {
-        if (j < n) {
-          const uint x = (uint)sx + j;
-          const bool next = n == 2u ? false : (x >> 1) != c0;  // the window's columns 1, 2 (else 0, 1)
-          const float fx = (n == 2u ? j == 1u : (x & 1u) != 0) ? 0.5f : 0.0f;
-          const float ul = next ? ur.y : ur.x, urt = next ? ur.z : ur.y;
-          const float vl = next ? vr.y : vr.x, vrt = next ? vr.z : vr.y;
-          const float4 p = decode_pixel(run_at(l, j), mad(urt - ul, fx, ul), mad(vrt - vl, fx, vl), m);
-          if (n == 2u) {
-            if (j == 0u) left = add_light(left, p, 1.0f);
-            else right = add_light(right, p, 1.0f);
-          } else {
-            // Columns 0, 1, 2: the left output pixel 1, 1/2, 0; the right 0, 1/2, 1.
-            if (j < 2u) left = add_light(left, p, j == 0u ? 1.0f : 0.5f);
-            if (j > 0u) right = add_light(right, p, j == 2u ? 1.0f : 0.5f);
-          }
-        }
-      }
-      if (n == 2u) {
-        if (i == 0u) {
-          a00 = left;
-          a10 = right;
+  [loop] for (uint i = 0; i < n; i++) {
+    const int y = sy + (int)i;
+    const int r0 = ((y + 1) >> 1) - 2;  // the row's taps: chroma rows r0 .. r0 + 3
+    const Run l = load_aligned(cb_y_offset, cb_y_stride, y, (uint)sx);
+    uint3 wu[4], wv[4];
+    uint au[4], av[4];
+    [unroll] for (int j = 0; j < 4; j++) {
+      const int row = clamp(r0 + j, 0, last_row);
+      wu[j] = load_chroma(cb_u_offset, row, c0, eight, au[j]);
+      wv[j] = load_chroma(cb_v_offset, row, c0, eight, av[j]);
+    }
+    const float4 w = (y & 1) != 0 ? f.odd : f.even;
+    const float4 cu = chroma_across(clamp_row5(chroma_down(row5(wu[0], au[0], eight), row5(wu[1], au[1], eight),
+                                                           row5(wu[2], au[2], eight), row5(wu[3], au[3], eight), w),
+                                               c0, last), f);
+    const float4 cv = chroma_across(clamp_row5(chroma_down(row5(wv[0], av[0], eight), row5(wv[1], av[1], eight),
+                                                           row5(wv[2], av[2], eight), row5(wv[3], av[3], eight), w),
+                                               c0, last), f);
+    float3 left = float3(0.0f, 0.0f, 0.0f), right = left;
+    [unroll] for (uint k = 0; k < 3u; k++) {
+      if (k < n) {
+        // Source column sx + k is chroma column c0 + (k + (sx & 1)) / 2: component k + (sx & 1).
+        const float u = k == 0u ? (next ? cu.y : cu.x) : k == 1u ? (next ? cu.z : cu.y) : (next ? cu.w : cu.z);
+        const float v = k == 0u ? (next ? cv.y : cv.x) : k == 1u ? (next ? cv.z : cv.y) : (next ? cv.w : cv.z);
+        const float4 p = decode_pixel(run_at(l, k), u, v, m);
+        if (n == 2u) {
+          if (k == 0u) left = add_light(left, p, 1.0f);
+          else right = add_light(right, p, 1.0f);
         } else {
-          a01 = left;
-          a11 = right;
-        }
-      } else {
-        // Rows 0, 1, 2: the top output pixels 1, 1/2, 0; the bottom 0, 1/2, 1.
-        if (i < 2u) {
-          const float w = i == 0u ? 1.0f : 0.5f;
-          a00 = mad3(w, left, a00);
-          a10 = mad3(w, right, a10);
-        }
-        if (i > 0u) {
-          const float w = i == 2u ? 1.0f : 0.5f;
-          a01 = mad3(w, left, a01);
-          a11 = mad3(w, right, a11);
+          // Columns 0, 1, 2: the left output pixel 1, 1/2, 0; the right 0, 1/2, 1.
+          if (k < 2u) left = add_light(left, p, k == 0u ? 1.0f : 0.5f);
+          if (k > 0u) right = add_light(right, p, k == 2u ? 1.0f : 0.5f);
         }
       }
     }
+    // Rows: n 2 the top output pixels row 0, the bottom row 1; n 3 the top 1, 1/2, 0, the bottom 0, 1/2, 1.
+    const float top = n == 2u ? (i == 0u ? 1.0f : 0.0f) : (i == 0u ? 1.0f : i == 1u ? 0.5f : 0.0f);
+    const float bottom = n == 2u ? (i == 1u ? 1.0f : 0.0f) : (i == 0u ? 0.0f : i == 1u ? 0.5f : 1.0f);
+    a00 = mad3(top, left, a00);
+    a10 = mad3(top, right, a10);
+    a01 = mad3(bottom, left, a01);
+    a11 = mad3(bottom, right, a11);
   }
   if (n == 3u) {
     a00 = a00 / 2.25f;
@@ -528,26 +613,39 @@ Quad quad_block(int2 o, uint n, uint m) {
   return q;
 }
 
-Quad quad_area(int2 o) {
+Quad quad_area(int2 o, bool eight) {
   Quad q;
-  q.v00 = area_linear(o);
-  q.v10 = area_linear(o + int2(1, 0));
-  q.v01 = area_linear(o + int2(0, 1));
-  q.v11 = area_linear(o + int2(1, 1));
+  q.v00 = area_linear(o, eight);
+  q.v10 = area_linear(o + int2(1, 0), eight);
+  q.v01 = area_linear(o + int2(0, 1), eight);
+  q.v11 = area_linear(o + int2(1, 1), eight);
   return q;
 }
 
-// The quad of output pixels at o: the block paths (1:1, 3:2), the 2:1 path with its mode a constant (three
-// copies of its code, each without a branch between its loads and its arithmetic), or the area loop.
+// The quad of output pixels at o: the block paths (1:1, 3:2) and the 2:1 path with the sample size a
+// constant (and the 2:1 path its mode: in the pipelines of display_pass_sdr.hlsl and display_pass_hlg.hlsl it
+// is one anyway), each without a branch between its loads and its arithmetic, or the area loop.
 Quad quad_at(int2 o) {
   Quad v;
   const uint m = mode();
   [branch] if (one_to_one()) {
-    v = quad_block(o, 2u, m);
+    if (eight_bit()) {
+      v = quad_block(o, 2u, m, true);
+    } else {
+      v = quad_block(o, 2u, m, false);
+    }
   } else if (three_to_two()) {
-    v = quad_block(o, 3u, m);
+    if (eight_bit()) {
+      v = quad_block(o, 3u, m, true);
+    } else {
+      v = quad_block(o, 3u, m, false);
+    }
   } else if (!quad_path()) {
-    v = quad_area(o);
+    if (eight_bit()) {
+      v = quad_area(o, true);
+    } else {
+      v = quad_area(o, false);
+    }
   } else if (eight_bit()) {
     if (m == 1u) {
       v = quad_2to1(o, 1u, true);
