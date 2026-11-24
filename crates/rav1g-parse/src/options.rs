@@ -27,9 +27,6 @@ pub struct ParseOptions {
     pub tile_keeps_thread: bool,
     /// [`SinkOptions::time_calls`]: the calls of the sink are timed. Off by default.
     pub time_calls: bool,
-    /// [`SinkOptions::late_lists`]: the block lists of a tile are counted when the tile is parsed, as
-    /// they were before they were counted superblock by superblock. Off by default.
-    pub late_lists: bool,
     /// The host clears the mode info grid of a pipeline slot for every frame, as it did before it kept
     /// the grid between frames of one size. Not a switch of the parse: the D3D12 host reads it
     /// (`rav1g_setup_frame_begin`). Off by default.
@@ -76,11 +73,11 @@ impl Default for ParseOptions {
 impl ParseOptions {
     /// The switches as bits (`RAV1G_PARSER_OPTION_*` of `rav1g.h`, `AV1_PARSER_OPTION_*` of the C). The
     /// values 1 and 256 were switches that are gone (`stage`; `recordonce`, a mode info record written
-    /// to its pool once, which was the slower way) and mean nothing.
+    /// to its pool once, which was the slower way) and mean nothing. [`Self::RETIRED`] are the bits of
+    /// the switches retired with interface version 3, which `rav1g.h` refuses.
     pub const NO_LF_MASKS: u32 = 2;
     pub const TILE_KEEPS_THREAD: u32 = 4;
     pub const TIME_CALLS: u32 = 8;
-    pub const LATE_LISTS: u32 = 16;
     pub const CLEAR_GRID: u32 = 32;
     pub const TEST_PANIC: u32 = 64;
     pub const TEST_POOL_WAIT: u32 = 128;
@@ -88,6 +85,9 @@ impl ParseOptions {
     pub const GPU_GRID_CHECK: u32 = 1024;
     pub const GPU_GRID: u32 = 2048;
     pub const GPU_PRED_LISTS: u32 = 4096;
+    /// The bits of the switches retired with interface version 3: 16 `latelists` (the block lists of a
+    /// tile counted at its end).
+    pub const RETIRED: u32 = 16;
     /// The bits of [`ParseOptions::default`].
     pub const DEFAULT: u32 = Self::NO_LF_MASKS | Self::TILE_KEEPS_THREAD | Self::GPU_CDEF_LISTS | Self::GPU_GRID;
     /// The switches that are on by default, which a list of words names to replace that default.
@@ -98,7 +98,6 @@ impl ParseOptions {
         no_lf_masks: false,
         tile_keeps_thread: false,
         time_calls: false,
-        late_lists: false,
         clear_grid: false,
         test_panic: false,
         test_pool_wait: false,
@@ -109,11 +108,10 @@ impl ParseOptions {
     };
 
     /// The words of the tools (`-parseopt <word>[,<word>...]`).
-    pub const WORDS: [(&'static str, u32); 11] = [
+    pub const WORDS: [(&'static str, u32); 10] = [
         ("nolfmask", Self::NO_LF_MASKS),
         ("tilethread", Self::TILE_KEEPS_THREAD),
         ("time", Self::TIME_CALLS),
-        ("latelists", Self::LATE_LISTS),
         ("cleargrid", Self::CLEAR_GRID),
         ("testpanic", Self::TEST_PANIC),
         ("poolwait", Self::TEST_POOL_WAIT),
@@ -128,7 +126,6 @@ impl ParseOptions {
             no_lf_masks: bits & Self::NO_LF_MASKS != 0,
             tile_keeps_thread: bits & Self::TILE_KEEPS_THREAD != 0,
             time_calls: bits & Self::TIME_CALLS != 0,
-            late_lists: bits & Self::LATE_LISTS != 0,
             clear_grid: bits & Self::CLEAR_GRID != 0,
             test_panic: bits & Self::TEST_PANIC != 0,
             test_pool_wait: bits & Self::TEST_POOL_WAIT != 0,
@@ -143,7 +140,6 @@ impl ParseOptions {
         (u32::from(self.no_lf_masks) * Self::NO_LF_MASKS)
             | (u32::from(self.tile_keeps_thread) * Self::TILE_KEEPS_THREAD)
             | (u32::from(self.time_calls) * Self::TIME_CALLS)
-            | (u32::from(self.late_lists) * Self::LATE_LISTS)
             | (u32::from(self.clear_grid) * Self::CLEAR_GRID)
             | (u32::from(self.test_panic) * Self::TEST_PANIC)
             | (u32::from(self.test_pool_wait) * Self::TEST_POOL_WAIT)
@@ -191,12 +187,11 @@ impl ParseOptions {
     pub fn sink(self) -> SinkOptions {
         SinkOptions {
             time_calls: self.time_calls,
-            late_lists: self.late_lists,
             test_panic: self.test_panic,
             gpu_grid: self.gpu_grid,
             gpu_pred_lists: self.gpu_pred_lists,
-            // Not a switch of these (they are bits of `rav1g.h`): the hosts turn it off for
-            // -parselistslegacy (`av1_set_parse_lists_legacy`).
+            // Not a switch of these (they are bits of `rav1g.h`): rav1g-parse-check turns it off for its
+            // -listslegacy.
             pipe_lists: true,
         }
     }
@@ -244,17 +239,6 @@ mod tests {
         assert_eq!(only_lists, ParseOptions { gpu_cdef_lists: true, time_calls: true, ..ParseOptions::NONE });
         assert_eq!(only_lists.bits(), 520);
         assert_eq!(only_lists.words(), "time,gpucdef");
-        // The other switch that is off by default: it adds to the defaults, like the timing.
-        let late = ParseOptions::from_words("latelists").unwrap();
-        assert_eq!(late, ParseOptions { late_lists: true, ..default });
-        assert_eq!(late.bits(), 2582);
-        assert_eq!(late.words(), "nolfmask,tilethread,latelists,gpucdef,gpugrid");
-        let none_late = ParseOptions::from_words("none,latelists,time").unwrap();
-        assert_eq!(none_late, ParseOptions { late_lists: true, time_calls: true, ..ParseOptions::NONE });
-        assert_eq!(none_late.words(), "none,time,latelists");
-        let old = ParseOptions::from_words("latelists,cleargrid").unwrap();
-        assert_eq!(old, ParseOptions { late_lists: true, clear_grid: true, ..default });
-        assert_eq!(old.bits(), 2614);
         let some = ParseOptions::from_words("tilethread,time").unwrap();
         assert!(some.tile_keeps_thread && some.time_calls && !some.no_lf_masks);
         let none_timed = ParseOptions::from_words("none,time").unwrap();
@@ -278,9 +262,6 @@ mod tests {
             only_lists,
             some,
             none_timed,
-            late,
-            none_late,
-            old,
             gpu_grid,
             grid_check,
         ] {
@@ -290,6 +271,7 @@ mod tests {
         // The switches that are gone, and words that never were.
         assert_eq!(ParseOptions::from_words("stage"), None);
         assert_eq!(ParseOptions::from_words("recordonce"), None);
+        assert_eq!(ParseOptions::from_words("latelists"), None);
         assert_eq!(ParseOptions::from_words("all"), None);
         assert_eq!(ParseOptions::from_words("tilethread,other"), None);
         assert_eq!(ParseOptions::from_bits(1), ParseOptions::NONE);

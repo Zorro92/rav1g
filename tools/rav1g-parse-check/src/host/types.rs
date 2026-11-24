@@ -45,9 +45,11 @@ pub struct av1_frame_thread_data {
     pub iter_grid_stride_uv: c_int,
     pub intra_v2: c_int,
     pub intra_main: IntraMain,
-    /// `-intralistslegacy` (`av1_set_intra_lists_legacy`): the loops of `av1_mi_push_block` for the
-    /// transform blocks of intra prediction as they were before `intra_txbs_edges`.
-    pub intra_lists_legacy: c_int,
+    /// Not 0: the transform blocks of intra prediction go through the loops of `av1_mi_push_block` and
+    /// `WaveEdges::legacy`, as for the intra step timing, instead of `intra_block_edges`; the lists are the
+    /// same. The decoder leaves it 0 (its switch, `-intralistslegacy`, is retired); rav1g-parse-check sets it
+    /// for its reference, which so holds the default against the loops.
+    pub intra_push_loops: c_int,
     pub intra_v2_sched: IntraV2Sched,
     pub scale_factors: [ScaleFactor; 8],
     pub scale_enable: c_int,

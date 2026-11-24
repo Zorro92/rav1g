@@ -43,7 +43,7 @@
 //! `longjmp`, and that must not pass a Rust function.
 
 use std::ffi::c_int;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::core::{
     alloc_constant_bytes, buffer, commands, perf_add, perf_gpu_mark, perf_ticks, pipeline, stage_dump_active,
@@ -52,20 +52,8 @@ use super::core::{
 use super::display_pass;
 use super::film_grain::{GrainTarget, SKIP_FILM_GRAIN, filmgrain_run};
 use super::log::log;
-use super::postfilter::{FusedTarget, cdef_v3_enabled};
+use super::postfilter::FusedTarget;
 use super::types::Av1Core;
-
-// av1_set_output_copy_legacy(1) disables fused postfilter->output texture writes (-outputcopylegacy).
-static OUTPUT_COPY_LEGACY: AtomicI32 = AtomicI32::new(0);
-/// `av1_set_output_copy_legacy` (`dx/av1_perf.h`).
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_output_copy_legacy(enable: c_int) {
-    OUTPUT_COPY_LEGACY.store(enable, Ordering::Relaxed);
-}
-
-pub(crate) fn output_copy_legacy() -> bool {
-    OUTPUT_COPY_LEGACY.load(Ordering::Relaxed) != 0
-}
 
 static DISPLAY_PASS_NOTE: AtomicBool = AtomicBool::new(false);
 
@@ -355,11 +343,6 @@ pub(crate) unsafe fn prepare_fused_output(
         if !has_postfilter {
             // Nothing writes every sample of the frame after the loop filter: the copy pass stays.
             td.output_copy_reason = AV1_PERF_OUTPUT_COPY_UNFILTERED;
-            return None;
-        }
-        // When CDEF is the last postfilter, fused output requires CDEF v3.
-        if output_copy_legacy() || (td.do_loop_rest == 0 && td.do_superres == 0 && !cdef_v3_enabled()) {
-            td.output_copy_reason = AV1_PERF_OUTPUT_COPY_SWITCH;
             return None;
         }
         let fb = &*fb;

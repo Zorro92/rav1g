@@ -1523,7 +1523,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        case: [poisoned, interfast, syncclear, gridcheck, intrasingleedgelegacy, intralistslegacy, parselistslegacy, steptime]
+        case: [poisoned, interfast, syncclear, gridcheck, intrasingleedgelegacy, steptime]
     steps:
       - name: Disable newline conversion
         run: git config --global core.autocrlf false
@@ -1633,8 +1633,8 @@ jobs:
           if ($lines.Count -lt 200 -or $frames -lt 500) { $failed += "only $($lines.Count) GRIDCHECK lines and $frames frames checked" }
           if ($failed.Count) { throw "the grid built by the GPU: $($failed -join '; ')" }
 
-      - name: Conformance with a legacy intra or parser switch
-        if: ${{ !cancelled() && (startsWith(matrix.case, 'intra') || matrix.case == 'parselistslegacy') }}
+      - name: Conformance with a legacy intra switch
+        if: ${{ !cancelled() && startsWith(matrix.case, 'intra') }}
         shell: pwsh
         env:
           INTRA_SWITCH: ${{ matrix.case }}
@@ -1723,25 +1723,24 @@ jobs:
           fail-on-cache-miss: true
 
       # The switches of rav1d's parse (-parseopt, docs/phase2-rav1d.md "Where the time goes"): ways of doing
-      # the same parse. Here the other side of each: the two that are on by default off, which is rav1d's
-      # parse as upstream schedules it, the block lists of a tile counted at its end and not superblock by
-      # superblock (latelists), and the calls of the sink timed. Of the three that are on by default the
-      # third is gpucdef, the two lists CDEF reads written by a pass of the GPU (cdef_lists.hlsl): with
-      # it off the thread that records writes them, as before. The whole set against its references and
+      # the same parse. Here the other side of each: the ones that are on by default off, which is rav1d's
+      # parse as upstream schedules it, and the calls of the sink timed. Of those on by default gpucdef
+      # is the lists CDEF reads written by a pass of the GPU (cdef_lists_v2.hlsl): with it off the thread
+      # that records writes them, as before. The whole set against its references and
       # expected.txt, the stage dumps, the decoder code of the test player with its -parseopt flag, and the
       # decode errors in cut streams (a tile that is handed from thread to thread ends as one that keeps
       # its thread). The rust-dumps-equal job holds the stage dumps against those of the default switches
       # byte for byte.
-      - name: The other side of every switch of the parser (-parseopt none,latelists)
+      - name: The other side of every switch of the parser (-parseopt none,time)
         if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           $failed = @()
-          $switches = '-parseopt none,latelists,time'
+          $switches = '-parseopt none,time'
           python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
             --out out/conformance-switches-rav1d --threads 4 "--tool-args=$switches" "--title=rav1g-dec (cargo, MSVC) with $switches"
           if ($LASTEXITCODE -ne 0) { $failed += "conformance with ${switches}: exit code $LASTEXITCODE" }
-          if (-not (Select-String -Path out/conformance-switches-rav1d/lists/run001.log -Pattern '^PARSER .*switches none,time,latelists \(' -Quiet)) {
+          if (-not (Select-String -Path out/conformance-switches-rav1d/lists/run001.log -Pattern '^PARSER .*switches none,time \(' -Quiet)) {
             $failed += 'the decoder of the run does not report the switches of the parser'
           }
           python testing/stage_dump/ci_dumps.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
@@ -1750,9 +1749,9 @@ jobs:
           python testing/conformance/player_smoke.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
             --out out/player-smoke-switches-rav1d "--player-args=$switches" "--title=the Rust library (cargo, MSVC), the player with $switches"
           if ($LASTEXITCODE -ne 0) { $failed += "the player's decoder code with ${switches}: exit code $LASTEXITCODE" }
-          python testing/conformance/cut_tile_check.py --tool out/rav1g-dec/rav1g-dec.exe "--tool-args=-parseopt none,latelists" `
+          python testing/conformance/cut_tile_check.py --tool out/rav1g-dec/rav1g-dec.exe "--tool-args=-parseopt none" `
             --streams conformance-streams --out out/cut-tile
-          if ($LASTEXITCODE -ne 0) { $failed += "decode error check with -parseopt none,latelists: exit code $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { $failed += "decode error check with -parseopt none: exit code $LASTEXITCODE" }
           if ($failed.Count) { throw "the switches of the parser: $($failed -join '; ')" }
 
       - name: Preserve the results and stage dumps of the parser switches
@@ -2435,11 +2434,11 @@ jobs:
           ARGON_SWITCHES: ${{ inputs.argon_switches }}
         run: |
           # A pass is one entry: a flag, or flags with plain values separated by spaces (for example
-          # "-output p010 -cdefv3legacy").
+          # "-output p010 -intrafilterlegacy").
           $switches = $env:ARGON_SWITCHES -split ',' | ForEach-Object { $_.Trim() } | Select-Object -Unique
           foreach ($decoderSwitch in $switches) {
             if ($decoderSwitch -cnotmatch '\A-[a-z][a-z0-9_-]*( [a-z0-9_-]+)*\z') {
-              throw 'argon_switches needs comma-separated passes of decoder flags, each flag with an optional plain value (for example -intralistslegacy,-output p010)'
+              throw 'argon_switches needs comma-separated passes of decoder flags, each flag with an optional plain value (for example -intrafilterlegacy,-output p010)'
             }
           }
           $PSNativeCommandUseErrorActionPreference = $false
@@ -2536,7 +2535,7 @@ jobs:
         run: |
           set -euo pipefail
           status=0
-          switches='-parseopt none,latelists,time'
+          switches='-parseopt none,time'
           dumped=0
           for dir in default-dumps/*/; do
             name=$(basename "$dir")
@@ -2872,13 +2871,13 @@ jobs:
         if: ${{ !cancelled() && matrix.case == 'mixed' }}
         shell: pwsh
         run: |
-          $pick = 'od=cdef_filter_v2,loopfilter_vert_hbd'
+          $pick = 'od=cdef_filter_v3,loopfilter_vert_hbd'
           python testing/conformance/player_smoke.py --tool out/rav1g-dec-dxc/rav1g-dec.exe --streams conformance-streams `
             --out out/player-smoke-dxc-pick "--player-args=-shaderpick $pick" "--title=the player's shader-pick build"
           if ($LASTEXITCODE -ne 0) { throw "the player's decoder code with a shader pick: exit code $LASTEXITCODE" }
           $count = @(Select-String -Path crates/rav1g-sys/shaders.txt -Pattern '^[a-z0-9_]+$').Count
           if (-not (Get-ChildItem out/player-smoke-dxc-pick -Recurse -File | Select-String -SimpleMatch `
-              "SHADERPICK ${pick}: dxc $($count - 2) (all others); od 2 (cdef_filter_v2 loopfilter_vert_hbd)" -Quiet)) {
+              "SHADERPICK ${pick}: dxc $($count - 2) (all others); od 2 (cdef_filter_v3 loopfilter_vert_hbd)" -Quiet)) {
             throw "The player's log does not have the SHADERPICK line of the pick of its task lines"
           }
 
@@ -3328,11 +3327,11 @@ jobs:
         shell: pwsh
         run: |
           $failed = @()
-          $switches = '-parseopt none,latelists,time'
+          $switches = '-parseopt none,time'
           python testing/conformance/run.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
             --out out/conformance-switches-rav1d --threads 4 "--tool-args=$switches" "--title=rav1g-dec built on Linux with $switches"
           if ($LASTEXITCODE -ne 0) { $failed += "conformance with ${switches}: exit code $LASTEXITCODE" }
-          if (-not (Select-String -Path out/conformance-switches-rav1d/lists/run001.log -Pattern '^PARSER .*switches none,time,latelists \(' -Quiet)) {
+          if (-not (Select-String -Path out/conformance-switches-rav1d/lists/run001.log -Pattern '^PARSER .*switches none,time \(' -Quiet)) {
             $failed += 'the decoder of the run does not report the switches of the parser'
           }
           python testing/conformance/player_smoke.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
@@ -3520,21 +3519,20 @@ jobs:
           exit "$status"
 
       # The switches of the parser (-parseopt, docs/phase2-rav1d.md "Where the time goes"): the two runs
-      # above have the two that are on by default (nolfmask, tilethread) and the block lists counted
-      # superblock by superblock; the buffers are the same with the two off and the lists counted at the
-      # end of a tile, with one thread and with four.
+      # above have the two that are on by default (nolfmask, tilethread); the buffers are the same with the
+      # two off, with one thread and with four.
       - name: The other side of every switch of the parser against the default switches
         if: ${{ !cancelled() && needs.conformance-streams.outputs.parser_switches == 'true' }}
         run: |
           set -euo pipefail
           status=0
           {
-            echo '## Parse check with the other side of every switch of the parser (-parseopt none,latelists)'
+            echo '## Parse check with the other side of every switch of the parser (-parseopt none)'
             echo
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           for threads in 1 4; do
-            target/release/rav1g-parse-check -threads "$threads" -parseopt none,latelists -root conformance-streams \
+            target/release/rav1g-parse-check -threads "$threads" -parseopt none -root conformance-streams \
               -manifest conformance-streams/manifest.txt > "out/parse-check/check-switches-threads$threads.txt" \
               || status=$?
             {
@@ -3546,7 +3544,7 @@ jobs:
           exit "$status"
 
       # Compare the default GPU grid (rebuilt from the records by parse-check) and the sink-written
-      # grid, including edge readers with late lists, multiple threads and two frames in parse.
+      # grid, including edge readers with multiple threads and two frames in parse.
       - name: Check the parser with each grid path
         if: ${{ !cancelled() }}
         run: |
@@ -3559,7 +3557,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           run=0
           for arguments in '-threads 1' '-threads 4 -parseopt nolfmask,tilethread,gpucdef' \
-              '-threads 4 -parseopt none,latelists,gpugrid' '-threads 4 -frames 2'; do
+              '-threads 4 -parseopt none,gpugrid' '-threads 4 -frames 2'; do
             run=$((run + 1))
             # shellcheck disable=SC2086
             target/release/rav1g-parse-check $arguments -root conformance-streams \
@@ -3668,7 +3666,7 @@ jobs:
       # What the sink costs on the CPU of this runner, and what the switches of the parser change: the two
       # 4K streams and a 1080p stream of the set, with one thread and with four (one tile each, so the
       # three further threads have nothing to parse). "time" is the default with the calls of the sink
-      # timed, "latelists,time" the same with the block lists at the end of a tile. Behind them the
+      # timed. Behind them the
       # default switches with the wavefront of intra prediction in its grid (-wave grid) and at the edges
       # of the tiles (the default), for the block lists of the two. A measurement for
       # docs/phase2-rav1d.md, not a gate.
@@ -3682,7 +3680,7 @@ jobs:
             echo '```'
             for stream in cut/nf-dvbdash-d2-10b-2160p.ivf cut/nf-dvbdash-a1-8b-2160p.ivf cut/nf-chimera-10b-1080p.ivf; do
               for threads in 1 4; do
-                for switches in none nolfmask tilethread time latelists,time time latelists,time; do
+                for switches in none nolfmask tilethread time time; do
                   target/release/rav1g-parse-check -time -threads "$threads" -parseopt "$switches" \
                     "conformance-streams/$stream" || true
                 done

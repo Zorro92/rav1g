@@ -34,9 +34,11 @@
 //! `-threads`, `-frames` and `-parseopt` are those of the run that is checked; the reference always has
 //! one thread, one frame in parse and the sink-written grid. `-listslegacy` counts the block lists of a
 //! tile on its thread superblock by superblock, not a superblock row behind it on threads without a task
-//! (the decoder's -parselistslegacy; the reference, with one thread, counts them on its thread).
-//! `-intralistslegacy` gives the run that is checked or timed the previous loops for the intra transform
-//! block lists. The reference uses those loops to check the default.
+//! (what the decoder's retired -parselistslegacy did, and what it does with one parse thread; the
+//! reference, with one thread, counts them on its thread).
+//! `-intralistslegacy` gives the run that is checked or timed the loops of `av1_mi_push_block` for the intra
+//! transform block lists (what the decoder's intra step timing takes; its switch -intralistslegacy is
+//! retired). The reference uses those loops to check the default.
 //!
 //! `-runs`, with `-time`: how many runs of each kind (the parse alone, the parse with the sink) the best is
 //! taken of, 3 without it.
@@ -56,7 +58,7 @@
 //! without a tile running. With one frame in parse a frame has `admit` and `wall` only.
 //!
 //! `-parseopt` takes the switches of the parser of phase 2 (`rav1g_parse::options`: `nolfmask` and
-//! `tilethread`, which are on without it, `none`, `default`, `latelists`), separated by commas: the
+//! `tilethread`, which are on without it, `none`, `default`), separated by commas: the
 //! buffers have to be the same with each of them. With `-time`, `time` adds the time of the sink's calls.
 //! With `gpugrid` the sink of the run that is checked writes no grid and gives the block lists the
 //! records at the edges of the tiles; its grid is then built here from its records, as the pass of the
@@ -139,7 +141,7 @@ fn usage() -> ! {
          [-frames <n>] [-parseopt <list>] [-wave <way>] <stream>\nThe parse with -threads, -frames and -parseopt is \
          held against the parse with one thread, one frame in parse and the default switches.\n-frames: the frames \
          rav1d may have in parse at once (default 1; at most the threads)\n-parseopt: the switches of the parser, \
-         separated by commas: nolfmask, tilethread (both on by default); none; default; latelists; time (with \
+         separated by commas: nolfmask, tilethread (both on by default); none; default; time (with \
          -time)\n-wave: where the wavefront of intra prediction is kept: edges (default), grid, check (the grid for \
          the reference, the edges for the run that is checked)\n-intralistslegacy: the previous loops of the intra \
          block lists\n-listslegacy: the block lists on the tile's thread, superblock by superblock\n-frametimes: with -time, a FRAMETIME line per frame of every run\n-runs: with -time, the runs of each kind the \

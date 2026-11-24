@@ -60,10 +60,6 @@ pub const RAV1G_PARSER_OPTION_NO_LF_MASKS: u32 = 2;
 pub const RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD: u32 = 4;
 /// The calls of the sink are timed, for a timing run (`rav1g_set_perf_callback`).
 pub const RAV1G_PARSER_OPTION_TIME_CALLS: u32 = 8;
-/// The block lists of a tile are counted when the tile is parsed, in one pass over its mode info, and
-/// not superblock by superblock while the mode info is in the cache. The way of before, for a timing of
-/// the two against each other.
-pub const RAV1G_PARSER_OPTION_LATE_LISTS: u32 = 16;
 /// The mode info grid of a pipeline slot is cleared for every frame, and not only for a frame of
 /// another size than the frames before it on the slot. The way of before, for a timing of the two
 /// against each other.
@@ -238,7 +234,6 @@ const _: () = {
     assert!(RAV1G_PARSER_OPTION_NO_LF_MASKS == crate::ParserOptions::NO_LF_MASKS);
     assert!(RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD == crate::ParserOptions::TILE_KEEPS_THREAD);
     assert!(RAV1G_PARSER_OPTION_TIME_CALLS == crate::ParserOptions::TIME_CALLS);
-    assert!(RAV1G_PARSER_OPTION_LATE_LISTS == crate::ParserOptions::LATE_LISTS);
     assert!(RAV1G_PARSER_OPTION_CLEAR_GRID == crate::ParserOptions::CLEAR_GRID);
     assert!(RAV1G_PARSER_OPTION_CLEAR_GRID == crate::sys::AV1_PARSER_OPTION_CLEAR_GRID);
     assert!(RAV1G_PARSER_OPTION_TEST_PANIC == crate::ParserOptions::TEST_PANIC);
@@ -1562,12 +1557,6 @@ pub unsafe extern "C" fn rav1g_decoder_destroy(decoder: *mut Rav1gDecoder) {
 
 // The process-wide switches: they hold for every decoder of the process and are changed while no frame
 // is in flight in any of them (before the first temporal unit, or after a drain).
-
-/// CDEF through `cdef_filter_v2.hlsl` (true, the default) or `cdef_filter.hlsl`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rav1g_set_cdef_v2(enable: bool) {
-    switches::set_cdef_v2(enable);
-}
 
 /// Intra prediction through `intra_v2.hlsl`; only in a decoder created with `Rav1gSettings::intra_v2`.
 #[unsafe(no_mangle)]

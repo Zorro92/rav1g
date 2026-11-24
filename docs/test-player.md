@@ -37,11 +37,10 @@ one commit each:
   `-gputimeisolate` also adds UAV barriers between the dispatches. No shader and no decoded
   output changes; without the flags the command list is what it was.
 - **CDEF v2**: a second CDEF compute shader, `libav1/dx/shaders/cdef_filter_v2.hlsl`, and
-  see [CDEF v2 run](#cdef-v2-run--cdefv2). It is the default since package 0.2.8.0; the
-  player flag `-cdefv1` selects the upstream shader `cdef_filter.hlsl`, which is not
-  modified. The new shader produces the same bytes as the upstream one, including where
-  upstream differs from the AV1 specification. A host-side comparison of the two shaders
-  lives in `testing/cdef_check`, which is not part of the player build.
+  see [CDEF v2 run](#cdef-v2-run--cdefv2). It was the default from package 0.2.8.0; v2
+  and the upstream shader `cdef_filter.hlsl` (`-cdefv1`) are retired now, and
+  `cdef_filter_v3.hlsl` is the only CDEF. A host-side check of it against a scalar
+  AV1 7.15 reference lives in `testing/cdef_check`, which is not part of the player build.
 - **Intra v2**: a second intra prediction path: the shader `libav1/dx/shaders/intra_v2.hlsl`
   (with `intra_v2_hbd.hlsl` for high bit depth), its scheduler `libav1/dx/intra_v2_sched.h`,
   and the player flag `-intrav2` that selects it; see [Intra v2 run](#intra-v2-run--intrav2).
@@ -366,10 +365,10 @@ The log lines at the start of each task show which defaults and opt-out flags ar
 
 | Setting | Default | Its log line | Other values |
 | --- | --- | --- | --- |
-| CDEF shader | `cdef_filter_v3.hlsl`, 64×32 luma regions, one skip mask word a region | `CDEF shader: cdef_filter_v3 (default)` | `-cdefv3legacy`: `cdef_filter_v2.hlsl` with the lists of `cdef_lists.hlsl`; `-cdefv1`: upstream's `cdef_filter.hlsl`. |
-| CDEF lists | `cdef_lists_v2.hlsl` (indexes and the skip masks of `cdef_filter_v3`), reuses mode info within an 8×8 block | `CDEF lists shader: cdef_lists_v2 (default)` | `-cdefv3legacy`: `cdef_lists.hlsl`; `-parseopt none` uses the CPU list builder. |
-| Direct NV12/P010 output | written by the last postfilter stage of the frame (`cdef_filter_v3_sp_tex`, `upscaling_sp_tex` or `loop_restoration*_sp_tex`) for the planes film grain does not write; `copy_plane_sp_tex_v2` only for a frame without CDEF, superres and loop restoration, and for a show-existing frame | `Direct NV12/P010 output: fused into last postfilter stage (default)` | `-outputcopylegacy`: the separate copy pass for every frame, and the frame buffer and border writes of unreferenced frames, as before. |
-| Front of the frame | two dependent steps in front of the transforms: the mode info grid build, then the residual clear, the transform sort, the CDEF lists, the loop filter's edge lists and gen_pred_blocks together (`frame::record_front`) | `Front of the frame: two steps (default)` | `-frontmergelegacy`: five steps, as before (grid; gen_pred_blocks; clear and sort; the edge lists in front of the loop filter; the CDEF lists in front of CDEF). Same output. |
+| CDEF shader | `cdef_filter_v3.hlsl`, 64×32 luma regions, one skip mask word a region | `CDEF shader: cdef_filter_v3 (default)` | none: `-cdefv3legacy` and `-cdefv1` are retired ([Retired switches](#retired-switches)). |
+| CDEF lists | `cdef_lists_v2.hlsl` (indexes and the skip masks of `cdef_filter_v3`), reuses mode info within an 8×8 block | `CDEF lists shader: cdef_lists_v2 (default)` | `-parseopt none` uses the CPU list builder; `cdef_lists.hlsl` runs only for a stage dump of `cdef_info` (the skip flag of every 8x8 block). |
+| Direct NV12/P010 output | written by the last postfilter stage of the frame (`cdef_filter_v3_sp_tex`, `upscaling_sp_tex` or `loop_restoration*_sp_tex`) for the planes film grain does not write; `copy_plane_sp_tex_v2` only for a frame without CDEF, superres and loop restoration, and for a show-existing frame | `Direct NV12/P010 output: fused into last postfilter stage (default)` | none: `-outputcopylegacy` is retired. |
+| Front of the frame | two dependent steps in front of the transforms: the mode info grid build, then the residual clear, the transform sort, the CDEF lists, the loop filter's edge lists and gen_pred_blocks together (`frame::record_front`) | `Front of the frame: two steps (default)` | none: `-frontmergelegacy` (five steps) is retired. |
 | Loop restoration | `loop_restoration.hlsl` on planes with SGR units, `loop_restoration_wiener.hlsl` on Wiener and copy-only planes | `Loop restoration shader: loop_restoration / loop_restoration_wiener (default)` | |
 | Decoder size | the stream's largest frame size, rounded up to 128, and 8-bit buffers for an 8-bit stream; see [Decoder size](#decoder-size--nofitsize) | `Decoder size: 3840x2176 10-bit (fit to the stream, default)` | `-nofitsize`: 4096x2176 10-bit for every stream, `Decoder size: 4096x2176 10-bit (fixed, -nofitsize)` |
 | Memory reductions | the library's default for the decoder's size: part 1, one back buffer shared by all frames (frame buffer pool 12 → 10), and since package 0.2.186 for a decoder above 1920x1088 part 2, the mode info pool at half (55.8 MiB less at 4K; [memory.md](memory.md#the-wait-of-the-second-frame-in-parse-in-a-pool-at-half-candidate-2)), since 0.2.191 part 32, the frame buffer bound at the recording (24.2 MiB), and since 0.2.193 part 4, the coefficient pool at four fifths (12.0 MiB); no measurable time cost; see [Smaller decoder](#smaller-decoder--lowmem) | `Low memory parts: default (the library's: 1 shared back buffer, and above 1920x1088 also 2 mode info pool at half, 4 smaller coefficient pool, 32 frame buffer bound at the recording)`; the decoder's `MEMORY decoder created options` line says which pool it is | `-lowmemparts 1`: the mode info pool of the worst case, the default up to package 0.2.185; `-lowmemparts 0`: none, every frame takes its back buffer from the pool (`Low memory parts: 0 (none, -lowmemparts 0)`); `-lowmemparts N`: exactly the parts in `N`; `-lowmem`: all three (`-lowmemparts 7`) |
@@ -383,7 +382,7 @@ The log lines at the start of each task show which defaults and opt-out flags ar
 On a device that logs `OUTPUT P010 direct` or `OUTPUT NV12 direct`, film grain uses
 `film_grain_filter_sp_tex_v2`. The planes that do not get grain are written by the last
 postfilter stage; `copy_plane_sp_tex_v2` writes them only where the frame has no
-postfilter stage (or with `-outputcopylegacy`). A frame that no slot of the reference map
+postfilter stage. A frame that no slot of the reference map
 takes (`refresh_frame_flags` 0, AV1 7.20) then also skips its frame buffer writes, where
 film grain does not read them, and its border extension.
 
@@ -392,11 +391,10 @@ film grain does not read them, and its border extension.
   turn a pathological stream into a decode error (see the table under
   [Smaller decoder](#smaller-decoder--lowmem)); part 1 covers every stream.
 - A flag together with its opposite is refused and the task is skipped: `Invalid arguments
-  string. You can't use following args together: "cdefv2" "cdefv1"` (the same for
-  `-fitsize` with `-nofitsize`).
+  string. You can't use following args together: "fitsize" "nofitsize"`.
 - **The behaviour before package 0.2.8.0** (upstream's CDEF shader, the fixed size, a back
-  buffer per frame from a pool of 12) is `-cdefv1 -nofitsize -lowmemparts 0`. Use it for
-  A/B runs and to rule the defaults out when a stream decodes wrongly.
+  buffer per frame from a pool of 12) was `-cdefv1 -nofitsize -lowmemparts 0`; `-cdefv1` is
+  retired, `-nofitsize -lowmemparts 0` is the rest of it.
 - The three settings are decoder creation parameters or process-wide switches that the
   player sets at the start of every task, so tasks with different values can follow each
   other in one args file; the player creates a new decoder where it has to.
@@ -407,8 +405,7 @@ size, bit depth, host memory, device, pipeline cache, output callbacks) gives tw
 slots (`frame_slots` 0), the shared back buffer (`low_memory` 0 is
 `AV1_LOW_MEMORY_DEFAULT`; `AV1_LOW_MEMORY_NONE` is how to ask for none, any other value is
 taken as the sum of the parts), no intra v2 buffers and no budget guard. CDEF runs through
-`cdef_filter_v2.hlsl` unless the application calls `av1_set_cdef_v2(0)`, intra prediction
-through upstream's shaders (`libav1/dx/av1_perf.h`). The library has no size of its own:
+`cdef_filter_v3.hlsl`, the only CDEF shader. The library has no size of its own:
 it is created for the `width`, `height` and `bitdepth` of the configuration, and
 `aom_codec_peek_stream_info` gives those of a stream, which is what the player now passes.
 
@@ -431,6 +428,24 @@ the player's default `-queue_size 16` the output pool of a 4K 10-bit stream is e
 at 403.4 MiB, which leaves about 460 MiB for the decoder, so a 4K task without
 `-queue_size` is refused, as it was before. 4K task lines need `-queue_size 4` (or
 another small value).
+
+## Retired switches
+
+These flags were A/B switches of a default that the console has confirmed, or experiments that
+lost; they are gone with their code paths (and, where `rav1g.h` had them, with interface
+version 3, [integration.md](integration.md)). A task line with one of them is an error of the
+task in the player and in `rav1g-dec`. The output of the defaults is the same as before (the
+per-frame md5 of the conformance set and Argon).
+
+| Flag | What it did | Why it went |
+| --- | --- | --- |
+| `-cdefv3legacy` (`av1_set_cdef_v3_legacy`) | CDEF through `cdef_filter_v2.hlsl` with the lists of `cdef_lists.hlsl` | `cdef_filter_v3` + `cdef_lists_v2`: 92 → 71 VGPRs, 9728 → 5120 B LDS, 3 → 6 waves a SIMD; neutral alone, and needed for the fused output when CDEF is the last stage; console A/B done |
+| `-cdefv1` (`rav1g_set_cdef_v2(false)`) | CDEF through upstream's `cdef_filter.hlsl` | about 52 ms against 5.5 to 7.2 ms (v2) a 4K 10-bit frame on the console ([CDEF v2 run](#cdef-v2-run--cdefv2)) |
+| `-outputcopylegacy` (`av1_set_output_copy_legacy`) | the separate `copy_plane_sp_tex_v2` pass for every frame with a direct NV12/P010 image, and the frame buffer and border writes of unreferenced frames | the fused output: 0.4 to 0.9 ms less GPU a 4K60 frame on the console (2026-11-23), one 24.9 MB pass and a barrier less |
+| `-frontmergelegacy` (`av1_set_front_merge_legacy`) | the front of a frame in five dependent steps (grid; gen_pred_blocks; residual clear and sort; the edge lists in front of the loop filter; the CDEF lists in front of CDEF), with marks of their own | the merged front: three dependent steps fewer (about 54 us fixed) and the latency-bound list passes overlapped with the clear; console A/B done |
+| `-intralistslegacy` (`av1_set_intra_lists_legacy`) | the intra block lists with the previous loops of `av1_mi_push_block` and four stamped edge arrays | `intra_block_edges`: 90 to 93 % of the cycles of the intra lists (about 1.5 ms of a 4K key frame); console A/B done. The loops stay for the intra step timing and as the reference of `rav1g-parse-check` |
+| `-parselistslegacy` (`av1_set_parse_lists_legacy`) | the block lists of a tile counted on its parse thread, superblock by superblock | the lists a superblock row behind the entropy decoder: 32.8 → 30.4 ms mean frame wall on `j4k40` (laptop, 4 workers, 2 frames in parse); console A/B done. One parse thread still counts superblock by superblock |
+| `-parseopt latelists` (`RAV1G_PARSER_OPTION_LATE_LISTS`) | the block lists of a tile counted in one pass at its end | the lists superblock by superblock since package 0.2.141: 4.7 ms less of a heavy 4K frame on the console |
 
 ## Timing run (`-gputime` and `-nopresent`)
 
@@ -474,7 +489,7 @@ span exactly**, and any gap between two stages is counted in the later one.
 | `gen_blocks` | prediction block generation; with `-parseopt gpugrid` (and `gridcheck`) also the pass in front of it that builds the mode info grid from the records (`mi_grid_build`), which has no mark of its own. With the merged front (the default) it is the whole front of the frame: the grid build, then in one step the residual clear, the transform sort, the CDEF lists, the loop filter's edge lists and gen_pred_blocks; `residual_clear`, `idct_sort`, `lf_gen` and `cdef_lists` have no mark |
 | `pred_count`, `pred_scan` | With `-parseopt gpublists`, count and number each group's prediction records, then scan the group counts and write the indirect dispatch arguments. |
 | `display` | With `-displaypass WxH` (`Rav1gSettings::display`): the display pass, the frame into the display-size image (downscaled, tone-mapped, quantised), at the end of the frame's command list in place of the output copy; behind `film_grain` on a grain frame. The stage an application shows as its display stage (`AV1_PERF_GPU_DISPLAY`). |
-| `residual_clear` | residual buffer fill (the whole buffer, every frame). With the merged front (the default; `-frontmergelegacy` restores the old steps and marks) it has no mark: its time is in `gen_blocks` |
+| `residual_clear` | residual buffer fill (the whole buffer, every frame). With the merged front it has no mark: its time is in `gen_blocks` (as are `idct_sort`, `lf_gen` and `cdef_lists`; their marks went with `-frontmergelegacy`) |
 | `idct_sort`, `idct` | transform block sort, inverse transform (all types) |
 | `inter`, `recon` | inter prediction (all passes); `recon` adds the residuals of the blocks whose prediction is not final when their inter shader ends (overlapped prediction) and of palette blocks. The other inter blocks get their residuals in the inter shader. |
 | `intra` | intra prediction, the whole wavefront loop |
@@ -572,7 +587,7 @@ The `output images` line counts how the measured records put their frame into th
 image (`av1_perf_frame::output_path`): written by the last postfilter stage (fused), by film
 grain alone, or by the `copy_plane` pass, and why that pass ran: the frame has no CDEF,
 superres or loop restoration to fuse into (all strengths zero, common at high bitrates), the
-fusion is switched off (`-outputcopylegacy`, or CDEF last without `cdef_filter_v3`), or the
+fusion is switched off (no switch does that any more since `-outputcopylegacy`, `-cdefv3legacy` and `-cdefv1` were retired; the count stays), or the
 image is not a direct texture (planes, buffer, staged) or the record is a show-existing copy.
 The `copy_plane` row of the stage table has the frames of the last three alone.
 
@@ -912,20 +927,17 @@ on made-up steps with known costs.
 In the first timing run, upstream's CDEF shader was the largest GPU stage on 4K
 10-bit streams. The 64×64 CDEF v2 shader took 5.5 to 7.2 ms per 4K 10-bit frame
 on the console, down from about 52 ms, with identical frame MD5s. The current
-default uses 64×32 groups and two lanes per 8×8 block.
+default, `cdef_filter_v3.hlsl`, uses 64×32 groups and two lanes per 8×8 block.
 
-| Flag | Effect |
-| --- | --- |
-| none | CDEF runs through `cdef_filter_v2.hlsl`. **The default since package 0.2.8.0.** |
-| `-cdefv1` | CDEF runs through upstream's `cdef_filter.hlsl`: the same pipeline state and the same dispatch as upstream. For A/B runs. |
-| `-cdefv2` | Alias for the default (it was the opt-in flag up to package 0.2.7.0). Use at most one CDEF flag per task. |
-
-The task's log says which shader is in use:
+Upstream's `cdef_filter.hlsl` (`-cdefv1`) and `cdef_filter_v2.hlsl` (`-cdefv3legacy`) are
+retired, with their flags ([Retired switches](#retired-switches)); `-cdefv2` is still
+accepted and changes nothing. The task's log says:
 
 ```text
-CDEF shader: cdef_filter_v2 (default)
-CDEF shader: cdef_filter (original, -cdefv1)
+CDEF shader: cdef_filter_v3 (default)
 ```
+
+The rest of this section is the record of the v1/v2 A/B, with the task lines of then.
 
 ### What changed in the shader
 
@@ -1374,7 +1386,6 @@ them. Four are on by default; why each exists and what it changed where it was m
 | `tilethread` | on | A tile stays on the thread it is on between its superblock rows. Without it rav1d puts the tile back into its task queue after every superblock row and wakes a waiting thread, and the next row runs on whichever of the `-t` threads takes it. |
 | `gpucdef` | on | The two lists CDEF reads (the strength index of every 64x64 block, the skip flag of every 8x8 block) are written by a pass of the frame's command list in front of CDEF (`cdef_lists.hlsl`, the GPU stage `cdef_lists` of `-gputime`) and not by the thread that records the frame (`cpu rec_cdef_lr`): 3.0 ms a frame of `j4k40` off that thread for 0.24 ms of the GPU on the console, 2.2 % more frames a second ([phase2-rav1d.md](phase2-rav1d.md#records-written-once-and-the-lists-of-cdef-on-the-gpu-2026-11-16)). The same lists. Read when the decoder is created: the two buffers of a slot are then of the type `HostRW`. |
 | `time` | off | With `-gputime`: the calls of the sink are timed (`sink_calls`, below). Two readings of the processor's time stamp counter per block and per transform block. |
-| `latelists` | off | The block lists of a tile are counted in one pass at the end of the tile, as up to package 0.2.140, and not superblock by superblock while the superblock's mode info is in the cache. |
 | `cleargrid` | off | The mode info grid of a pipeline slot is cleared for every frame (4.2 MB at 4K), as up to package 0.2.140, and not only for a frame of another size than the frames before it on the slot. |
 | `gpugrid` | on | The mode info grid of a frame (for every 4x4 unit the record of its block, 1.98 MiB a 4K frame) is built by a pass of the frame's command list from the frame's mode info records (`mi_grid_build.hlsl`, in front of every stage that reads the grid; its GPU time is in the stage `gen_blocks` of `-gputime`) and not written by the parse threads: `sink_grid` is then 0 and `sink_calls` smaller by it (1.18 ms a frame of `d2_300` and 1.11 of `j4k40` on the console before the switch). What the parse threads read through the grid they get from the edges of the tile. The same grid, records and lists. Read when the decoder is created: the grid of a slot is then a buffer a command list may write, and the decoder has the lists of CDEF by the GPU as with `gpucdef`, whatever the list says (`-parseopt none,gpugrid` too), because no thread of the CPU may read the grid ([phase2-rav1d.md](phase2-rav1d.md#the-grid-built-by-the-gpu-the-switch-2026-11-18)). |
 | `gridcheck` | off | `rav1g-dec` only (the test player does not take the word). A check, not a way of doing the parse: a pass in front of the frame's stages (`mi_grid_build.hlsl`) builds the mode info grid from the frame's records into a second grid of the slot, and the decoder holds it against the grid the parse wrote when the frame is done; at its release a `GRIDCHECK` line says how many frames and units were held and how many differed (an error line when any did). The first step of the grid built by the GPU ([phase2-rav1d.md](phase2-rav1d.md#the-grid-built-by-the-gpu-the-check-2026-11-18)). Every slot has the second grid and a list of the frame's runs of records. Use `-parseopt nolfmask,tilethread,gpucdef,gridcheck` to keep the sink-written grid for the comparison. |
@@ -1385,9 +1396,10 @@ them. Four are on by default; why each exists and what it changed where it was m
 - Naming `nolfmask`, `tilethread`, `gpucdef`, `gpugrid`, `none` or `default` selects the default
   switches explicitly. `-parseopt none` clears all four. `-parseopt nolfmask,tilethread,gpucdef`
   keeps the sink-written grid. `-parseopt default` selects all four.
-- `time`, `latelists`, `cleargrid` and `gpublists` add to the selection. `-parseopt time` times the defaults and
+- `time`, `cleargrid` and `gpublists` add to the selection. `-parseopt time` times the defaults and
   `-parseopt none,time` times the parse with all four default switches off.
-- Another word is an error of the task (`stage` and `all` were words until package 0.2.138; the
+- Another word is an error of the task (`latelists`, the block lists of a tile counted at its end,
+  was a word until interface version 3; `stage` and `all` were words until package 0.2.138; the
   switch `stage` is gone, and so is `recordonce`, a word of package 0.2.196 alone: a mode info
   record written to its pool once, the slower way,
   [phase2-rav1d.md](phase2-rav1d.md#records-written-once-and-the-lists-of-cdef-on-the-gpu-2026-11-16)).
@@ -1401,7 +1413,6 @@ them. Four are on by default; why each exists and what it changed where it was m
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt tilethread
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt nolfmask
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt time
--i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt latelists
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt cleargrid
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt nolfmask,tilethread
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt time
@@ -1416,21 +1427,15 @@ dequantized coefficients to the GPU records in scan order. In frame-parallel par
 an entropy row waits for the reference motion fields and the previous segmentation map
 it reads. Each named reference is still checked for errors.
 
-For a parse scheduling A/B, add `-parselistslegacy` to count the block lists of a
-tile on its parse thread superblock by superblock. The default counts them a
-superblock row behind the entropy decoder on parse threads that have no task, and the
-rest when the tile is through, behind the save of the frame's CDFs
-([phase2-rav1d.md](phase2-rav1d.md#the-block-lists-behind-the-entropy-decoder-2026-11-21)).
-The lists are the same. The player creates a fresh parser when the flag changes
-between tasks; the flag also works in `rav1g-dec`.
-
-For a block list A/B, add `-intralistslegacy` to count the intra block lists with the
-previous loops of `av1_mi_push_block` and the previous edges of the wavefront (four
-arrays with the frame's stamp). The default counts them in `intra_block_edges` over
-packed edges ([phase2-rav1d.md](phase2-rav1d.md#the-block-lists-on-the-cpu-2026-11-21)).
-The lists are the same, so the output and the GPU work are too; only the parse threads'
-CPU time differs. A frame takes the flag at its setup, so it needs no fresh decoder. The
-flag also works in `rav1g-dec`.
+With more than one parse thread the block lists of a tile are counted a superblock row
+behind the entropy decoder on parse threads that have no task, and the rest when the tile
+is through, behind the save of the frame's CDFs
+([phase2-rav1d.md](phase2-rav1d.md#the-block-lists-behind-the-entropy-decoder-2026-11-21));
+the intra block lists in `intra_block_edges` over packed edges
+([phase2-rav1d.md](phase2-rav1d.md#the-block-lists-on-the-cpu-2026-11-21)). Their A/B flags,
+`-parselistslegacy` and `-intralistslegacy`, are retired
+([Retired switches](#retired-switches)); `rav1g-parse-check` keeps `-listslegacy` and
+`-intralistslegacy` for its own checks.
 
 With rav1d's parse the `-gputime` summary splits the tile decode further. All three lines are parts
 of `cpu entropy/tile decode, thread sum`, summed over the tile threads, and zero with `-parser c`
@@ -1438,7 +1443,7 @@ of `cpu entropy/tile decode, thread sum`, summed over the tile threads, and zero
 
 | Line (timer) | Meaning |
 | --- | --- |
-| `cpu parse: block lists` (`sink_lists`) | the block lists of the prediction stages, counted from the mode info records superblock by superblock (with `latelists`: at the end of each tile, where the C parser counts them) |
+| `cpu parse: block lists` (`sink_lists`) | the block lists of the prediction stages, counted from the mode info records superblock by superblock (or a superblock row behind, see above) |
 | `cpu parse: sink calls (-parseopt time)` (`sink_calls`) | with `time`: the calls of the sink, which write the mode info record and the grid of a block, the record of a transform block, the palette, and the per-superblock values |
 | `cpu parse: of the calls, grid (-parseopt time)` (`sink_grid`), `cpu parse: of the lists, intra (-parseopt time)` (`sink_intra`) | with `time`: the parts of the two lines above that moving the grid and the intra lists to the GPU would take off the parse threads ([phase2-rav1d.md](phase2-rav1d.md), the design of the block lists on the GPU). Two more readings of the time stamp counter per block, one per block in the block lists. Not taken off the thread sum: they are inside the two above. |
 | `cpu parse: thread sum less the above` | the thread sum less the block lists and less the sink calls. With `time` this is rav1d by itself, with the coefficients it writes straight into their buffer |

@@ -11,7 +11,7 @@
 // CDEF filter v3 (AV1 7.15): one 64-thread group per 64x32 luma region (32x16 chroma), two lanes per
 // 8x8 luma block. All decisions are independent of wave size and lane order.
 //
-// Improvements over cdef_filter_v2.hlsl:
+// Improvements over cdef_filter_v2.hlsl (since retired):
 //   1. LDS cut from 9728 B (3 waves/SIMD on RDNA2) to 5120 B (6 waves/SIMD) by using a 2-sample
 //      horizontal halo (stride 68 luma / 36 chroma), overlapping direction-cost exchange with the
 //      unloaded top/bottom halo rows, and reusing the luma LDS for chroma sequentially.

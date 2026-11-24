@@ -498,7 +498,6 @@ int AV1Decoder::DecodeOne() {
                        created_intrav2_ != params_.intrav2_ ||
                        created_interfast_ != (params_.interfast_ || params_.interfastlists_) ||
                        created_parser_options_ != params_.parser_options_ ||
-                       created_parselistslegacy_ != params_.parselistslegacy_ ||
                        created_lowmem_ != params_.lowmem_parts_ || created_packed_10x3_ != params_.hdr10x3_ ||
                        created_semi_planar_ != (params_.semi_planar_ | (params_.interop_ ? 16 : 0)) ||
                        created_noguard_ != params_.noguard_ || created_headroom_ != params_.headroom_mib_ ||
@@ -576,7 +575,6 @@ int AV1Decoder::DecodeOne() {
       static_assert(PLAYER_PARSEOPT_NO_LF_MASKS == RAV1G_PARSER_OPTION_NO_LF_MASKS &&
                         PLAYER_PARSEOPT_TILE_KEEPS_THREAD == RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD &&
                         PLAYER_PARSEOPT_TIME_CALLS == RAV1G_PARSER_OPTION_TIME_CALLS &&
-                        PLAYER_PARSEOPT_LATE_LISTS == RAV1G_PARSER_OPTION_LATE_LISTS &&
                         PLAYER_PARSEOPT_CLEAR_GRID == RAV1G_PARSER_OPTION_CLEAR_GRID &&
                         PLAYER_PARSEOPT_GPU_CDEF_LISTS == RAV1G_PARSER_OPTION_GPU_CDEF_LISTS &&
                         PLAYER_PARSEOPT_GPU_GRID == RAV1G_PARSER_OPTION_GPU_GRID &&
@@ -697,7 +695,6 @@ int AV1Decoder::DecodeOne() {
       created_intrav2_ = params_.intrav2_;
       created_interfast_ = params_.interfast_ || params_.interfastlists_;
       created_parser_options_ = params_.parser_options_;
-      created_parselistslegacy_ = params_.parselistslegacy_;
       created_lowmem_ = params_.lowmem_parts_;
       created_packed_10x3_ = params_.hdr10x3_;
       created_semi_planar_ = params_.semi_planar_ | (params_.interop_ ? 16 : 0);
@@ -779,11 +776,6 @@ int AV1Decoder::DecodeOne() {
                     : "a timestamp behind every section of the inter stage, work counters (-gputimedetail)");
   if (params_.nopresent_)
     XB_LOGI << "GPUTIME -nopresent: decoded frames go straight back to the pool, nothing is presented";
-  // Select the CDEF shader while no frame is in flight.
-  rav1g_set_cdef_v2(params_.cdefv2_ != 0);
-  av1_set_cdef_v3_legacy(params_.cdefv3legacy_);
-  av1_set_output_copy_legacy(params_.outputcopylegacy_);
-  av1_set_front_merge_legacy(params_.frontmergelegacy_);
   {
     unsigned int display_w = 0, display_h = 0;
     DisplaySize(params_, &display_w, &display_h);
@@ -793,11 +785,8 @@ int AV1Decoder::DecodeOne() {
               << " (Rav1gSettings::display: depth 0 is P010 for a 10-bit decoder, NV12 for an 8-bit one; dither 0 "
                  "dithers NV12; with -output p010 or -interop)";
   }
-  XB_LOGI << "Front of the frame: "
-          << (params_.frontmergelegacy_ ? "five steps (-frontmergelegacy)" : "two steps (default)");
-  XB_LOGI << "CDEF shader: "
-          << (params_.cdefv1_ ? "cdef_filter (original, -cdefv1)"
-                              : params_.cdefv3legacy_ ? "cdef_filter_v2 (-cdefv3legacy)" : "cdef_filter_v3 (default)");
+  XB_LOGI << "Front of the frame: two steps (default)";
+  XB_LOGI << "CDEF shader: cdef_filter_v3 (default)";
   // -intrav2: the same rules, independent of the CDEF shader.
   rav1g_set_intra_v2(params_.intrav2_ != 0);
   XB_LOGI << "Intra shaders: "
@@ -815,24 +804,18 @@ int AV1Decoder::DecodeOne() {
                                          "frames with a scaled reference keep the original shaders)"
                                        : "inter_main_v2, inter_compound_v2 (default)");
   XB_LOGI << "Parser: the parse pass of rav1d";
-  av1_set_intra_lists_legacy(params_.intralistslegacy_);
-  if (params_.intralistslegacy_) XB_LOGI << "Block lists: the previous intra loops and wavefront edges (-intralistslegacy)";
-  av1_set_parse_lists_legacy(params_.parselistslegacy_);
-  if (params_.parselistslegacy_) XB_LOGI << "Parser: block lists on the tile's thread (-parselistslegacy)";
   // -parseopt: fixed when the decoder was created. The default is nolfmask tilethread gpucdef gpugrid.
   XB_LOGI << "Parser switches (-parseopt): "
           << (params_.parser_options_ & PLAYER_PARSEOPT_DEFAULT ? "" : "none ")
           << (params_.parser_options_ & PLAYER_PARSEOPT_NO_LF_MASKS ? "nolfmask " : "")
           << (params_.parser_options_ & PLAYER_PARSEOPT_TILE_KEEPS_THREAD ? "tilethread " : "")
           << (params_.parser_options_ & PLAYER_PARSEOPT_TIME_CALLS ? "time " : "")
-          << (params_.parser_options_ & PLAYER_PARSEOPT_LATE_LISTS ? "latelists " : "")
           << (params_.parser_options_ & PLAYER_PARSEOPT_CLEAR_GRID ? "cleargrid " : "")
           << (params_.parser_options_ & PLAYER_PARSEOPT_GPU_CDEF_LISTS ? "gpucdef " : "")
           << (params_.parser_options_ & PLAYER_PARSEOPT_GPU_GRID ? "gpugrid " : "")
           << (params_.parser_options_ & PLAYER_PARSEOPT_GPU_PRED_LISTS ? "gpublists " : "");
   if (params_.parser_options_ & (PLAYER_PARSEOPT_GPU_CDEF_LISTS | PLAYER_PARSEOPT_GPU_GRID)) {
-    XB_LOGI << "CDEF lists shader: "
-            << (params_.cdefv3legacy_ || params_.cdefv1_ ? "cdef_lists (-cdefv3legacy or -cdefv1)" : "cdef_lists_v2 (default)");
+    XB_LOGI << "CDEF lists shader: cdef_lists_v2 (default)";
   }
   rav1g_set_intra_opt(!params_.intraod_);
   XB_LOGI << "Intra main shader: "
@@ -846,9 +829,7 @@ int AV1Decoder::DecodeOne() {
   XB_LOGI << "Loop restoration shader: loop_restoration / loop_restoration_wiener (default)";
   XB_LOGI << "Direct NV12/P010 film grain shader: film_grain_filter_sp_tex_v2 (default)";
   XB_LOGI << "Film grain templates: CPU, uploaded with the random offsets";
-  XB_LOGI << "Direct NV12/P010 output: "
-          << (params_.outputcopylegacy_ ? "copy_plane_sp_tex_v2 (-outputcopylegacy)"
-                                        : "fused into last postfilter stage (default)");
+  XB_LOGI << "Direct NV12/P010 output: fused into last postfilter stage (default)";
 
   // -slots, -parseframes, -t: fixed when the decoder was created; Start() asks for a new decoder when a
   // value changes. What the decoder has is what the library made of them.

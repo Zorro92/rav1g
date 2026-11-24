@@ -174,7 +174,7 @@ pub struct Arena {
     /// of tiles the columns of luma, then those of chroma.
     pub wave_tiles: Buffer<WaveEdges>,
     pub wave_columns: Buffer<WaveColumn>,
-    /// The same for `-intralistslegacy` (`WaveEdges::legacy`), and the number of the frame in this arena,
+    /// The same for the loops of `av1_mi_push_block` (`WaveEdges::legacy`, `intra_push_loops`), and the number of the frame in this arena,
     /// as the host counts the frames of a slot: the edges of an earlier frame do not count as decoded
     /// units of this one.
     pub wave_above: Buffer<c_int>,
@@ -242,7 +242,7 @@ impl Arena {
                 iter_grid_stride_uv: grid_w >> 1,
                 intra_v2: 0,
                 intra_main: IntraMain::SingleEdge,
-                intra_lists_legacy: 0,
+                intra_push_loops: 0,
                 intra_v2_sched: Default::default(),
                 scale_factors: Default::default(),
                 scale_enable: 0,
@@ -319,10 +319,10 @@ impl Arena {
         self.frame_data.gm_warp = gm_warp;
     }
 
-    /// The loops of `av1_mi_push_block` for the transform blocks of intra prediction as they were before
-    /// `intra_txbs_edges` (`-intralistslegacy`), for the frame's tiles.
-    pub fn set_intra_lists_legacy(&mut self, legacy: bool) {
-        self.frame_data.intra_lists_legacy = c_int::from(legacy);
+    /// The loops of `av1_mi_push_block` for the transform blocks of intra prediction instead of
+    /// `intra_block_edges` (`av1_frame_thread_data::intra_push_loops`), for the frame's tiles.
+    pub fn set_intra_push_loops(&mut self, loops: bool) {
+        self.frame_data.intra_push_loops = c_int::from(loops);
     }
 
     /// A tile's cursors into the buffers, as `av1_setup_macroblockd` of the host sets them. Returns the

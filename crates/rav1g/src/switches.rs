@@ -73,11 +73,6 @@ pub enum Clears {
     DecodeThread = 3,
 }
 
-/// CDEF through `cdef_filter_v2.hlsl` (true, the default) or `cdef_filter.hlsl`.
-pub fn set_cdef_v2(enable: bool) {
-    crate::host::av1_set_cdef_v2(c_int::from(enable))
-}
-
 /// Skip film grain synthesis. Set while no frame is in flight.
 pub fn set_skip_film_grain(enable: bool) {
     crate::host::av1_set_skip_film_grain(c_int::from(enable))

@@ -48,7 +48,7 @@ is kept at the edges of the tiles). Each was md5-exact on the console, except th
 which is new in package 0.2.148.0 and md5-exact in CI; `-cpuclear` is the default before it.
 The upstream behaviour was `-cdefv1 -nofitsize -lowmemparts 0
 -parser c -syncclear` in the test player; `-parser c`, upstream's entropy decoder, is no longer in
-the decoder (package 0.2.159). Everything else that was tried (`-slots 3`,
+the decoder (package 0.2.159), and `-cdefv1` and `-syncclear` are retired as well. Everything else that was tried (`-slots 3`,
 `-lowmem`, `-intrav2`) stays behind its flag. The columns below name the flags the runs were made
 with; `-cdefv2`, `-fitsize` and the shared back buffer of `-lowmem` are the defaults now.
 
@@ -67,8 +67,9 @@ gives, with today's decoder, 18.5 ms of GPU time per frame on the test clip of t
 and 12.1 ms on the SVT-AV1 low-delay clip (`t40x1ld`): the decode thread, not the GPU, is what limits
 both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
 
-- **CDEF v2** is 7–9x faster than upstream and bit-exact. It is the default (`-cdefv1`
-  selects upstream's shader).
+- **CDEF v2** is 7–9x faster than upstream and bit-exact. Its successor `cdef_filter_v3` is
+  the only CDEF now; upstream's shader and v2 are retired with their flags (`-cdefv1`,
+  `-cdefv3legacy`).
 - **Intra v2** (`-intrav2`) is bit-exact but 2.3–2.4x slower. It is a negative result, off by
   default and kept for reference.
 - **Intra prediction** uses angle-specific wavefront dependencies and direct prediction for

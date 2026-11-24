@@ -21,14 +21,16 @@ extern "C" {
  * list. A stage's time is the GPU timestamp taken after it minus the
  * timestamp taken before it. */
 enum {
-  AV1_PERF_GPU_GEN_BLOCKS = 0, /* prediction block generation */
-  AV1_PERF_GPU_RESIDUAL_CLEAR, /* residual buffer fill */
-  AV1_PERF_GPU_IDCT_SORT,      /* transform block sort */
+  AV1_PERF_GPU_GEN_BLOCKS = 0, /* the front of the frame: the mode info grid, prediction block generation,
+                                  the residual clear, the transform block sort, the loop filter's and
+                                  CDEF's lists (in two dependent steps) */
+  AV1_PERF_GPU_RESIDUAL_CLEAR, /* no mark of its own any more: in AV1_PERF_GPU_GEN_BLOCKS */
+  AV1_PERF_GPU_IDCT_SORT,      /* no mark of its own any more: in AV1_PERF_GPU_GEN_BLOCKS */
   AV1_PERF_GPU_IDCT,           /* inverse transform, all types */
   AV1_PERF_GPU_INTER,          /* inter prediction, all passes */
   AV1_PERF_GPU_RECON,          /* inter residual reconstruction */
   AV1_PERF_GPU_INTRA,          /* intra prediction, whole wavefront */
-  AV1_PERF_GPU_LF_GEN,         /* loop filter block generation */
+  AV1_PERF_GPU_LF_GEN,         /* no mark of its own any more: in AV1_PERF_GPU_GEN_BLOCKS */
   AV1_PERF_GPU_LF_VERT,        /* loop filter, vertical edges (two passes) */
   AV1_PERF_GPU_LF_HORZ,        /* loop filter, horizontal edges */
   AV1_PERF_GPU_CDEF,
@@ -39,9 +41,7 @@ enum {
   AV1_PERF_GPU_COPY_PLANE,     /* copy_plane shader into the staging area */
   AV1_PERF_GPU_OUTPUT_COPY,    /* CopyBufferRegion / CopyTextureRegion */
   AV1_PERF_GPU_SLOT_CLEAR,     /* the grids of the frame's slot cleared for the next frame (AV1_CLEARS_GPU) */
-  AV1_PERF_GPU_CDEF_LISTS,     /* the two lists CDEF reads, written by cdef_lists.hlsl in front of CDEF
-                                  (AV1_PARSER_OPTION_GPU_CDEF_LISTS); behind the others here, in front of
-                                  AV1_PERF_GPU_CDEF in the command list */
+  AV1_PERF_GPU_CDEF_LISTS,     /* no mark of its own any more: in AV1_PERF_GPU_GEN_BLOCKS */
   AV1_PERF_GPU_PRED_COUNT,    /* group counts and record ranks for -parseopt gpublists */
   AV1_PERF_GPU_PRED_SCAN,     /* scan the group counts and write indirect arguments */
   AV1_PERF_GPU_DISPLAY,       /* the display pass (Rav1gSettings::display): the frame into the display-size
@@ -63,8 +63,9 @@ enum {
   AV1_PERF_OUTPUT_GRAIN,           /* film grain wrote every plane; no copy pass */
   AV1_PERF_OUTPUT_COPY_UNFILTERED, /* copy pass: the frame has no CDEF, superres or loop restoration to
                                       write the texture from (all strengths zero, or all off) */
-  AV1_PERF_OUTPUT_COPY_SWITCH,     /* copy pass: fusion off (-outputcopylegacy; or CDEF is the last stage
-                                      and runs without cdef_filter_v3: -cdefv3legacy, -cdefv1) */
+  AV1_PERF_OUTPUT_COPY_SWITCH,     /* copy pass: fusion off by a switch. No switch turns it off any more
+                                      (-outputcopylegacy, -cdefv3legacy and -cdefv1 are retired); the value
+                                      stays so that the others keep theirs */
   AV1_PERF_OUTPUT_COPY_OTHER,      /* copy pass: no direct texture (planes, buffer or staged output), or a
                                       show-existing frame */
   AV1_PERF_OUTPUT_DISPLAY,         /* the display pass wrote the image (AV1_PERF_GPU_DISPLAY); no copy pass */
@@ -107,8 +108,8 @@ enum {
                                  grids with AV1_CLEARS_COMPLETION_THREAD (-cpuclear) */
   /* the parser of phase 2 (AV1_PARSER_RAV1D), summed across the tile threads; parts of ENTROPY_SUM */
   AV1_PERF_CPU_SINK_LISTS,    /* the block lists, counted superblock by superblock (the entropy decoder of
-                                 libaom counts them at the end of a tile, inside ENTROPY_SUM, without a timer
-                                 of their own; AV1_PARSER_OPTION_LATE_LISTS does the same) */
+                                 libaom counted them at the end of a tile, inside ENTROPY_SUM, without a timer
+                                 of their own) */
   AV1_PERF_CPU_SINK_CALLS,    /* AV1_PARSER_OPTION_TIME_CALLS: the calls of the sink (mode info record and
                                  grid, transform block record, palette, superblock) */
   AV1_PERF_CPU_SINK_GRID,     /* AV1_PARSER_OPTION_TIME_CALLS: of SINK_CALLS, the entries of the mode info
@@ -303,32 +304,6 @@ typedef void (*av1_perf_frame_cb_fn_t)(void *priv, const av1_perf_frame *frame);
  * is in flight (before the first decode call or after a drain). */
 void av1_set_perf_callback(av1_perf_frame_cb_fn_t cb, void *priv);
 
-/* Process-wide. Non-zero runs CDEF through cdef_filter_v2.hlsl, zero through
- * the original cdef_filter.hlsl; the decoded output is the same. On by
- * default: an application that never calls this gets cdef_filter_v3 (unless
- * av1_set_cdef_v3_legacy is set). Change it only while no frame is in flight,
- * like the callback above. */
-void av1_set_cdef_v2(int enable);
-
-/* Process-wide. Non-zero selects the legacy cdef_filter_v2 + cdef_lists path
- * instead of cdef_filter_v3 + cdef_lists_v2 (-cdefv3legacy); the decoded
- * output is the same. Change only while no frame is in flight. */
-void av1_set_cdef_v3_legacy(int enable);
-
-/* Process-wide. Non-zero disables fusing semi-planar output writes into the
- * last postfilter stage and restores the separate copy_plane pass
- * (-outputcopylegacy); the decoded output is the same. Change only while no
- * frame is in flight. */
-void av1_set_output_copy_legacy(int enable);
-
-/* Process-wide. Non-zero records the front of a frame's command list as
- * before the merge (-frontmergelegacy): the mode info grid build,
- * gen_pred_blocks, the residual clear with the transform sort, the loop
- * filter's edge lists and the CDEF lists each in a dependent step of their
- * own. Zero (the default) records them in two steps. The decoded output is
- * the same. Change only while no frame is in flight. */
-void av1_set_front_merge_legacy(int enable);
-
 /* Process-wide. Set while no frame is in flight. Non-zero skips film grain synthesis. */
 void av1_set_skip_film_grain(int enable);
 
@@ -345,19 +320,6 @@ void av1_set_intra_opt(int enable);
 
 /* Use the prefetch shaders with the previous angle-specific wavefront. */
 void av1_set_intra_single_edge_legacy(int enable);
-
-/* Process-wide. Nonzero counts the intra block lists with the previous loops of
- * av1_mi_push_block and the previous edges of the wavefront, four arrays with the
- * frame's stamp (-intralistslegacy); zero uses intra_block_edges and the packed edges.
- * The lists are the same. A frame takes it at its setup. */
-void av1_set_intra_lists_legacy(int enable);
-
-/* Process-wide. Nonzero counts the block lists of a tile on its parse thread,
- * superblock by superblock (-parselistslegacy); zero counts them a superblock row
- * behind the entropy decoder on parse threads that have no task, and the rest when
- * the tile is through, behind the save of the frame's CDFs. The lists are the same.
- * Set before the decoder's first decode call. A running parser keeps its selection. */
-void av1_set_parse_lists_legacy(int enable);
 
 /* ---------------------------------------------------------------------------
  * Intra step timing (test flags -intrasteptime and -intrastepmin; docs/test-player.md, "Intra step

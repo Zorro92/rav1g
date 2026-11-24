@@ -8,8 +8,9 @@
  * www.aomedia.org/license/patent.
  */
 
-// The two lists CDEF reads besides the frame (cdef_filter.hlsl, cdef_filter_v2.hlsl), from the mode info
-// of the frame: the strength index of every 64x64 luma block, which the parser keeps in the record of the
+// The two lists the CDEF of before read besides the frame (cdef_filter.hlsl, cdef_filter_v2.hlsl, both
+// retired), which the stage dump of cdef_info still takes (cdef_filter_v3 reads the masks of
+// cdef_lists_v2.hlsl), from the mode info of the frame: the strength index of every 64x64 luma block, which the parser keeps in the record of the
 // block's top left 4x4 unit, and for every 8x8 luma block whether all four of its 4x4 units are skipped.
 // The host writes the same two lists on the thread that records the frame (cdef_filter_run of
 // crates/rav1g/src/host/postfilter.rs), one word an entry; this pass writes the same words at the same

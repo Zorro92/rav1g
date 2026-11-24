@@ -1,10 +1,14 @@
 /*
- * Bit-exactness check of the optimized CDEF filter against the upstream shader.
- * Direction costs and filtering inside the frame are also checked against AV1 7.15.
+ * Bit-exactness check of the CDEF filter, cdef_filter_v3.hlsl and its fused
+ * semi-planar build (cdef_filter_v3_sp_tex.hlsl), against a scalar
+ * implementation of AV1 7.15: the direction search (7.15.2) and the filter of
+ * every sample inside the frame (7.15.3), on frames of the sizes the decoder
+ * passes (multiples of 8).
  *
  * The shaders are compiled as C++ (see run.sh and hlsl_shim.h) and run over
- * the same frames, one dispatch each. The whole frame pool, padding
- * included, must be byte-identical afterwards.
+ * the test frames, one dispatch each. (Until the upstream cdef_filter.hlsl and
+ * cdef_filter_v2.hlsl were retired, the check also held them against each
+ * other, the whole frame pool byte for byte.)
  *
  * The threads of a group run under an adversarial schedule and the group
  * memory is watched for races (testing/common/group_sched.h): a race, a group
@@ -22,22 +26,6 @@
 #include "hlsl_shim.h"
 
 long g_out_of_bounds = 0;
-
-namespace v1 {
-#include "cdef_filter.gen.h"
-}
-#undef LUMA_ROWS
-#undef CHROMA_ROWS
-
-namespace v2 {
-#include "cdef_filter_v2.gen.h"
-}
-#undef LUMA_STRIDE
-#undef LUMA_ROWS
-#undef CHROMA_STRIDE
-#undef CHROMA_ROWS
-#undef LUMA_WORDS
-#undef CHROMA_WORDS
 
 namespace v3 {
 #include "cdef_filter_v3.gen.h"
@@ -104,8 +92,6 @@ struct HostCDefData {  // CDefData of libav1/dx/loopfilters.cpp
   int cdef_strength[16][4];
   int cdef_uv_strength[16][4];
 };
-static_assert(sizeof(HostCDefData) == sizeof(v1::CDefData), "constant buffer layout");
-static_assert(sizeof(HostCDefData) == sizeof(v2::CDefData), "constant buffer layout");
 static_assert(sizeof(HostCDefData) == sizeof(v3::CDefData), "constant buffer layout");
 static_assert(sizeof(HostCDefData) == sizeof(v3_sp::CDefData), "constant buffer layout");
 
@@ -307,17 +293,6 @@ static void scramble(T &shared) {
   for (size_t i = 0; i < shared.byte_size() / 4; i++) p[i] = g_rng();
 }
 
-static void v1_thread(int t) {
-  const uint3 gtid = {static_cast<uint>(t & 3), static_cast<uint>((t >> 2) & 3), static_cast<uint>(t >> 4)};
-  const uint3 dtid = {g_group.x * 4 + gtid.x, g_group.y * 4 + gtid.y, gtid.z};
-  v1::shader_main(g_group, dtid, gtid, static_cast<uint>(t));
-}
-
-static void v2_thread(int t) {
-  const uint3 gtid = {static_cast<uint>(t & 15), static_cast<uint>(t >> 4), 0};
-  v2::shader_main(g_group, gtid, static_cast<uint>(t));
-}
-
 static void v3_thread(int t) {
   const uint3 gtid = {static_cast<uint>(t & 15), static_cast<uint>(t >> 4), 0};
   v3::shader_main(g_group, gtid, static_cast<uint>(t));
@@ -326,46 +301,6 @@ static void v3_thread(int t) {
 static void v3_sp_thread(int t) {
   const uint3 gtid = {static_cast<uint>(t & 15), static_cast<uint>(t >> 4), 0};
   v3_sp::shader_main(g_group, gtid, static_cast<uint>(t));
-}
-
-static void bind_frame(Frame &f, ByteAddressBuffer &indexes, ByteAddressBuffer &skips, RWByteAddressBuffer &dst) {
-  indexes = {reinterpret_cast<const uint8_t *>(f.indexes.data()), f.indexes.size() * sizeof(int)};
-  skips = {reinterpret_cast<const uint8_t *>(f.skips.data()), f.skips.size() * sizeof(int)};
-  dst = {f.pool.data(), f.pool.size()};
-}
-
-static void run_v1(Frame &f) {
-  gs_state.shader = "cdef_filter.hlsl";
-  bind_frame(f, v1::cdef_index, v1::skips, v1::dst);
-  memcpy(&v1::data, &f.cb, sizeof(f.cb));
-  // Dispatch((w + 31) >> 5, (h + 31) >> 5, 1), numthreads(4, 4, 8)
-  for (uint gy = 0; gy < static_cast<uint>((f.cb.plane[3] + 31) >> 5); gy++) {
-    for (uint gx = 0; gx < static_cast<uint>((f.cb.plane[2] + 31) >> 5); gx++) {
-      g_group = uint3{gx, gy, 0};
-      scramble(v1::input);
-      scramble(v1::output);
-      scramble(v1::costs);
-      scramble(v1::temp);
-      run_group(128, v1_thread);
-    }
-  }
-}
-
-static void run_v2(Frame &f) {
-  gs_state.shader = "cdef_filter_v2.hlsl";
-  gs_state.track_unwritten = true;
-  bind_frame(f, v2::cdef_index, v2::skips, v2::dst);
-  memcpy(&v2::data, &f.cb, sizeof(f.cb));
-  // Dispatch((w + 63) >> 6, (h + 31) >> 5, 1), numthreads(16, 4, 1)
-  for (uint gy = 0; gy < static_cast<uint>((f.cb.plane[3] + 31) >> 5); gy++) {
-    for (uint gx = 0; gx < static_cast<uint>((f.cb.plane[2] + 63) >> 6); gx++) {
-      g_group = uint3{gx, gy, 0};
-      scramble(v2::window);
-      scramble(v2::costs);
-      run_group(64, v2_thread);
-    }
-  }
-  gs_state.track_unwritten = false;
 }
 
 static void run_v3(Frame &f) {
@@ -475,8 +410,7 @@ static int filter_sample(const Frame &f, int plane, int x, int y, int dir, int p
 static bool check_filtered_samples(const Frame &input, const Frame &output) {
   const auto &cb = input.cb;
   const int coeff_shift = cb.bit_depth - 8;
-  // The host passes whole 8x8 blocks. The separate v1 comparison also covers
-  // synthetic partial blocks and the byte patterns written into the padding.
+  // The host passes whole 8x8 blocks.
   if ((cb.plane[2] | cb.plane[3]) & 7) return true;
   for (int y = 0; y < cb.plane[3]; y += 8) {
     for (int x = 0; x < cb.plane[2]; x += 8) {
@@ -543,38 +477,21 @@ static bool check_directions(int coeff_shift) {
           pixels[y][x] = sample << coeff_shift;
           pair |= static_cast<uint>(pixels[y][x]) << (k * 16);
         }
-        v2::window[y * (72 / 2) + n] = pair;
         v3::lds[y * 34 + n] = pair;
       }
     }
     const int expected_dir = pattern < 8 ? pattern : (pattern == 8 ? 1 : 0);
     const int2 expected = reference_direction(pixels, coeff_shift);
-    const int2 actual = v2::choose_direction(v2::direction_costs(0, coeff_shift, 0),
-                                              v2::direction_costs(0, coeff_shift, 1));
     const int2 actual_v3 = v3::choose_direction(v3::direction_costs(0, coeff_shift, 0),
                                                 v3::direction_costs(0, coeff_shift, 1));
     if (expected.x != expected_dir || (pattern == 8 && expected.y == 0) ||
-        actual.x != expected.x || actual.y != expected.y ||
         actual_v3.x != expected.x || actual_v3.y != expected.y) {
-      printf("MISMATCH direction pattern %d depth=%d: expected %d (variance %d), v2 %d (%d), v3 %d (%d)\n",
-             pattern, 8 + coeff_shift, expected_dir, expected.y, actual.x, actual.y, actual_v3.x, actual_v3.y);
+      printf("MISMATCH direction pattern %d depth=%d: expected %d (variance %d), v3 %d (%d)\n",
+             pattern, 8 + coeff_shift, expected_dir, expected.y, actual_v3.x, actual_v3.y);
       ok = false;
     }
   }
   return ok;
-}
-
-static bool compare_pool(const Frame &expected, const Frame &actual, const Case &c, const char *pass, bool log) {
-  if (expected.pool == actual.pool) return true;
-  if (log) {
-    size_t first = 0;
-    while (expected.pool[first] == actual.pool[first]) first++;
-    printf("MISMATCH %s %dx%d hbd=%d depth=%d content=%d strengths=%d skips=%d indexes=%d damping=%d "
-           "strength_base=%d: first differing byte at %zu (dst luma starts at %d)\n",
-           pass, c.w, c.h, c.hbd, c.bit_depth, c.content, c.strengths, c.skip_mode, c.index_mode, c.damping,
-           c.strength_base, first, expected.cb.dst_offset[0]);
-  }
-  return false;
 }
 
 int main(int argc, char **argv) {
@@ -656,19 +573,13 @@ int main(int argc, char **argv) {
   const auto check_frame = [&](const Case &c) {
     Frame input;
     make_frame(c, input);
-    Frame upstream = input;
-    Frame optimized = input;
-    run_v1(upstream);
-    run_v2(optimized);
     cases++;
     bytes += static_cast<long>(input.pool.size());
-    for (size_t i = 0; i < input.pool.size(); i++) changed += optimized.pool[i] != input.pool[i];
-    if (!compare_pool(upstream, optimized, c, "optimized vs upstream", failed < 20) ||
-        (failed < 20 && !check_filtered_samples(input, optimized))) failed++;
     // v3 uses packed 32-bit active masks for coded 8x8 blocks (multiples of 8).
     if (((c.w | c.h) & 7) == 0) {
       Frame v3_out = input;
       run_v3(v3_out);
+      for (size_t i = 0; i < input.pool.size(); i++) changed += v3_out.pool[i] != input.pool[i];
       if (failed < 20 && !check_filtered_samples(input, v3_out)) {
         printf("MISMATCH v3 vs scalar reference %dx%d hbd=%d depth=%d\n", c.w, c.h, c.hbd, c.bit_depth);
         failed++;
@@ -691,11 +602,10 @@ int main(int argc, char **argv) {
                          gs_state.runaway_groups || gs_state.out_of_bounds || g_out_of_bounds);
   };
 
-  // Width and height as the decoder passes them (multiples of 8), then a few
-  // sizes it never produces, which both shaders must still treat alike.
+  // Width and height as the decoder passes them (multiples of 8).
   static const int sizes[][2] = {{8, 8},    {16, 8},   {8, 24},    {32, 32},  {40, 32},  {32, 40},   {64, 64},
                                  {72, 64},  {64, 72},  {96, 96},   {104, 56}, {56, 104}, {128, 128}, {136, 72},
-                                 {160, 96}, {200, 88}, {88, 200},  {192, 136}, {30, 20}, {67, 45},   {100, 70}};
+                                 {160, 96}, {200, 88}, {88, 200},  {192, 136}};
   static const int depths[][2] = {{0, 8}, {1, 10}, {1, 8}, {1, 12}};  // hbd, bit depth
   bool stop = false;
   for (const auto &size : sizes) {
@@ -739,6 +649,6 @@ int main(int argc, char **argv) {
     printf("cdef_check: FAILED\n");
     return 1;
   }
-  printf("cdef_check: OK, cdef_filter_v2.hlsl matches the scalar AV1 reference and cdef_filter.hlsl\n");
+  printf("cdef_check: OK, cdef_filter_v3.hlsl and its semi-planar build match the scalar AV1 reference (7.15)\n");
   return 0;
 }

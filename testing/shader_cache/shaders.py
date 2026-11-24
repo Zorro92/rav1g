@@ -48,7 +48,7 @@ UNOPTIMIZED = [name + '_legacy' for name in INTRA_MAIN]
 
 # Verify the alternate kernels selected at runtime in the built binary.
 REQUIRED_BYTECODE = [
-    'cdef_filter', 'cdef_filter_v2', 'cdef_filter_v3', 'cdef_filter_v3_sp_tex', *INTRA_MAIN, *UNOPTIMIZED,
+    'cdef_filter_v3', 'cdef_filter_v3_sp_tex', *INTRA_MAIN, *UNOPTIMIZED,
     'intra_main_prefetch_hbd', 'intra_main_prefetch',
     'intra_main_single_edge', 'intra_main_single_edge_hbd',
     'intra_filter_prefetch', 'intra_filter_prefetch_hbd',

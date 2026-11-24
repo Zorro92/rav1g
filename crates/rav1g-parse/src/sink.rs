@@ -18,7 +18,8 @@
 //!   `av1_mi_push_block`, the host's function, called with the block context the entropy decoder calls
 //!   it with (`decode_tile2`). The entropy decoder counts the lists of a tile when the tile is parsed;
 //!   the sink counts those of a superblock when the superblock is parsed, while its records and its
-//!   part of the grid are in the cache ([`SinkOptions::late_lists`] for the other way). The function
+//!   part of the grid are in the cache (or, with [`SinkOptions::pipe_lists`], a superblock row behind it).
+//!   The function
 //!   reads the block's record and, through the grid, records of blocks above it and to its left, which
 //!   are read before it; the calls come in the same order, so the lists are the same.
 //!
@@ -105,11 +106,6 @@ const TX_TYPE_SCAN: [u32; 16] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 1, 2, 1, 2]
 /// How the sink works. All off is the sink as it writes by default.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SinkOptions {
-    /// The block lists of a tile are counted when the tile is parsed, in one pass over its records, as
-    /// the entropy decoder of libaom counts them, and not superblock by superblock. The lists are the
-    /// same; a tile's records are then mostly out of the cache when they are read again (4.7 ms of a
-    /// heavy 4K frame on the console, docs/phase2-rav1d.md).
-    pub late_lists: bool,
     /// The time inside the calls of a tile (block, transform block, palette, superblock) is measured
     /// and given to the host ([`SinkTimer::Calls`]), when the host has a clock. Two readings of the
     /// processor's time stamp counter a call.
@@ -128,7 +124,7 @@ pub struct SinkOptions {
     /// thread that has no task of the parser (`ParseSink::idle_work`), or by the tile's thread itself
     /// when a row has waited for one a row long, and the rest of them when the tile is through
     /// (`ParseSink::tile_finish`), behind the save of the frame's CDFs. For frames whose tiles are
-    /// parsed by the worker threads (`ParseFrame::tile_tasks`), and not with [`Self::late_lists`] or
+    /// parsed by the worker threads (`ParseFrame::tile_tasks`), and not with
     /// [`Self::gpu_pred_lists`]; otherwise, and off, the tile's thread counts them superblock by
     /// superblock. The lists are the same.
     pub pipe_lists: bool,
@@ -142,7 +138,7 @@ pub enum SinkTimer {
     /// are the coefficients the parse writes itself.
     Calls,
     /// The block lists: `av1_mi_push_block` for every record, superblock by superblock or, with
-    /// [`SinkOptions::late_lists`], at the end of a tile.
+    /// [`SinkOptions::pipe_lists`], a superblock row behind.
     Lists,
     /// Of [`SinkTimer::Calls`]: the entries of the grid a block call writes. Only with
     /// [`SinkOptions::time_calls`].
@@ -1126,10 +1122,7 @@ impl<H: SinkHost> ParseSink for Sink<H> {
                 sb128: header.seq_hdr.sb128 != 0,
                 cdef_coded: !(header.frame_hdr.all_lossless || header.frame_hdr.allow_intrabc),
                 panics: self.options.test_panic && self.begun.fetch_add(1, Ordering::Relaxed) + 1 == TEST_PANIC_FRAME,
-                pipe_lists: self.options.pipe_lists
-                    && header.tile_tasks
-                    && !self.options.late_lists
-                    && !self.options.gpu_pred_lists,
+                pipe_lists: self.options.pipe_lists && header.tile_tasks && !self.options.gpu_pred_lists,
             });
             let states = &mut *place.tiles.get();
             for state in states.iter_mut() {
@@ -1322,7 +1315,7 @@ impl<H: SinkHost> ParseSink for Sink<H> {
                 if superblock.x4 + state.sb_size >= state.col_end && !state.failed {
                     self.publish_row(frame, state);
                 }
-            } else if !self.options.late_lists {
+            } else {
                 self.count_lists(frame, &*state.lists, ready_of(&state.pieces));
             }
         }
@@ -1345,8 +1338,8 @@ impl<H: SinkHost> ParseSink for Sink<H> {
                 // `tile_finish`, behind the save of the frame's CDFs.
                 return;
             }
-            // The block lists that are not counted yet: all of the tile's with
-            // `SinkOptions::late_lists`, and otherwise none (the tile's last superblock counted them).
+            // The block lists that are not counted yet: none (the tile's last superblock counted them), and
+            // the call is cheap then.
             self.count_lists(frame, &*state.lists, ready_of(&state.pieces));
             self.tile_timers(frame, tile);
         }

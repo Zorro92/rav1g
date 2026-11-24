@@ -49,7 +49,6 @@ pub(crate) use frame::{av1_set_clears, av1_set_intra_v2, av1_shader_variant};
 pub(crate) use loopfilter::av1_set_lf_h_split;
 pub(crate) use memory::{av1_log_video_memory_now, av1_set_poison_buffers};
 pub(crate) use perf::{av1_set_inter_fast, av1_set_perf_callback, av1_set_perf_detail};
-pub(crate) use postfilter::av1_set_cdef_v2;
 pub(crate) use prediction::{av1_set_intra_edge_fix, av1_set_intra_filter_legacy, av1_set_intra_opt};
 pub(crate) use stage_dump::av1_set_stage_dump;
 pub(crate) use step_time::av1_set_intra_step_timing;

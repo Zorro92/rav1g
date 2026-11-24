@@ -248,7 +248,7 @@ def main():
     parser.add_argument('--alone-timeout', type=int, default=1200,
                         help='a task whose own -timeout is at least this many seconds gets a decoder process of '
                              'its own (the large streams); 0: all tasks in one process')
-    parser.add_argument('--tool-args', default='', help='further arguments for every task, e.g. "-cdefv1 -hw"')
+    parser.add_argument('--tool-args', default='', help='further arguments for every task, e.g. "-intrav2 -hw"')
     parser.add_argument('--title', default='', help='what this run is, for the heading of the summary')
     args = parser.parse_args()
     args.tool = os.path.abspath(args.tool)

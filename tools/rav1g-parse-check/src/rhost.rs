@@ -133,7 +133,7 @@ impl SinkHost for PlainHost {
             }
         };
         let mut arena = arena;
-        arena.set_intra_lists_legacy(self.intra_lists_legacy);
+        arena.set_intra_push_loops(self.intra_lists_legacy);
         let memory =
             FrameMemory { mi_grid: arena.mi_grid.ptr(), mi_stride: size.mi_stride(), mi_chunks: arena.mi_chunks.ptr() };
         // SAFETY: the place is this frame's and none of its tiles is in parse (the contract of
@@ -250,15 +250,16 @@ impl SinkHost for PlainHost {
     }
 }
 
-/// Select the previous path of the intra block lists (`-intralistslegacy`).
+/// Select the other paths of the block lists (`-intralistslegacy`, `-listslegacy`).
 #[derive(Clone, Copy, Default)]
 pub struct Legacy {
-    /// The loops of `av1_mi_push_block` for the transform blocks of intra prediction as they were before
-    /// `intra_txbs_edges` (`av1_frame_thread_data::intra_lists_legacy`).
+    /// The loops of `av1_mi_push_block` for the transform blocks of intra prediction instead of
+    /// `intra_block_edges` (`av1_frame_thread_data::intra_push_loops`), as the decoder's intra step timing
+    /// takes them.
     pub intra_lists: bool,
     /// The block lists of a tile counted on its thread superblock by superblock, not a superblock row
     /// behind it by threads without a task (`SinkOptions::pipe_lists` off; the decoder's
-    /// -parselistslegacy).
+    /// retired -parselistslegacy).
     pub lists: bool,
 }
 

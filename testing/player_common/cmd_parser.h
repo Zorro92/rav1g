@@ -54,7 +54,6 @@
 #define PLAYER_PARSEOPT_NO_LF_MASKS 2
 #define PLAYER_PARSEOPT_TILE_KEEPS_THREAD 4
 #define PLAYER_PARSEOPT_TIME_CALLS 8
-#define PLAYER_PARSEOPT_LATE_LISTS 16
 #define PLAYER_PARSEOPT_CLEAR_GRID 32
 #define PLAYER_PARSEOPT_GPU_CDEF_LISTS 512
 // gpugrid: the mode info grid of a frame is built by a pass of the GPU from the frame's records and not by the
@@ -135,12 +134,8 @@ class CParameters {
     std::string output_;
     bool interop_;
     int semi_planar_;
-    // The effective choice after Parse(): true unless -cdefv1 was given.
+    // -cdefv2: accepted, changes nothing (cdef_filter_v3 is the only CDEF).
     bool cdefv2_;
-    bool cdefv1_;
-    bool cdefv3legacy_;
-    bool outputcopylegacy_;
-    bool frontmergelegacy_;
     // -displaypass WxH (docs/stage-fusion.md, Rav1gSettings::display): the display pass; empty: off.
     std::string displaypass_;
     // -displaydepth 8|10, -displaydither 0-2 (Rav1gDisplay::depth, dither): 0 the defaults.
@@ -151,8 +146,6 @@ class CParameters {
     bool intraod_;
     bool intrafilterlegacy_;
     bool intrasingleedgelegacy_;
-    bool intralistslegacy_;
-    bool parselistslegacy_;
     // -slots: the pipeline slots the task asks for. 0 when the task has no -slots: the library then gives
     // the decoder the slots of its frames in parse.
     int slots_;

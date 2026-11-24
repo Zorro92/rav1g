@@ -32,11 +32,6 @@ use crate::shim::Dumps;
 unsafe extern "C" {
     /// The A/B switch in libav1/dx/av1_perf.h.
     fn av1_set_intra_single_edge_legacy(enable: c_int);
-    fn av1_set_intra_lists_legacy(enable: c_int);
-    fn av1_set_parse_lists_legacy(enable: c_int);
-    fn av1_set_cdef_v3_legacy(enable: c_int);
-    fn av1_set_output_copy_legacy(enable: c_int);
-    fn av1_set_front_merge_legacy(enable: c_int);
 }
 
 /// What a frame says about its colour: the description of its sequence header and its HDR metadata.
@@ -175,16 +170,10 @@ pub struct Spec {
 #[derive(Clone, Copy)]
 pub struct Choices {
     pub skip_film_grain: bool,
-    pub cdef_v2: bool,
-    pub cdef_v3_legacy: bool,
-    pub output_copy_legacy: bool,
-    pub front_merge_legacy: bool,
     pub intra_v2: bool,
     pub intra_opt: bool,
     pub intra_filter_legacy: bool,
     pub intra_single_edge_legacy: bool,
-    pub intra_lists_legacy: bool,
-    pub parse_lists_legacy: bool,
     pub lf_h_split: u32,
     pub intra_edge_fix: bool,
     pub inter_fast: u32,
@@ -527,21 +516,14 @@ impl Library {
         // SAFETY: the setter takes an integer and only changes the test flag, with no frames in flight.
         unsafe {
             av1_set_intra_single_edge_legacy(c_int::from(choices.intra_single_edge_legacy));
-            av1_set_intra_lists_legacy(c_int::from(choices.intra_lists_legacy));
-            av1_set_parse_lists_legacy(c_int::from(choices.parse_lists_legacy));
-            av1_set_cdef_v3_legacy(c_int::from(choices.cdef_v3_legacy));
-            av1_set_output_copy_legacy(c_int::from(choices.output_copy_legacy));
-            av1_set_front_merge_legacy(c_int::from(choices.front_merge_legacy));
         }
         if self.is_c() {
-            capi::rav1g_set_cdef_v2(choices.cdef_v2);
             capi::rav1g_set_intra_v2(choices.intra_v2);
             capi::rav1g_set_intra_opt(choices.intra_opt);
             capi::rav1g_set_lf_h_split(choices.lf_h_split);
             capi::rav1g_set_intra_edge_fix(choices.intra_edge_fix);
             capi::rav1g_set_inter_fast(choices.inter_fast);
         } else {
-            switches::set_cdef_v2(choices.cdef_v2);
             switches::set_intra_v2(choices.intra_v2);
             switches::set_intra_opt(choices.intra_opt);
             switches::set_lf_h_split(choices.lf_h_split);

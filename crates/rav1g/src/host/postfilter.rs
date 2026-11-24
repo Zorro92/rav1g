@@ -11,7 +11,6 @@
 //! the functions it calls in `libav1/dx/loopfilters.cpp`.
 
 use std::ffi::{c_int, c_void};
-use std::sync::atomic::{AtomicI32, Ordering};
 
 use super::core::{
     alloc_constants, buffer, commands, perf_gpu_mark, pipeline, stage_dump_active, stage_dump_data, stage_dump_fb,
@@ -20,8 +19,8 @@ use super::types::{Av1Core, av1_stage_dump_region};
 use crate::gpu::d3d12::{com_ref, wrapped_ref};
 use crate::gpu::{BufferState, Device, PlaneViews};
 use crate::sys::{
-    AV1_COMMON, AV1_PERF_GPU_CDEF, AV1_PERF_GPU_CDEF_LISTS, AV1_PERF_GPU_LOOP_REST, AV1_PERF_GPU_SUPERRES, AV1LrStruct,
-    HwFrameBuffer, MI_SIZE_64X64, RESTORE_NONE, RESTORE_WIENER,
+    AV1_COMMON, AV1_PERF_GPU_CDEF, AV1_PERF_GPU_LOOP_REST, AV1_PERF_GPU_SUPERRES, AV1LrStruct, HwFrameBuffer,
+    MI_SIZE_64X64, RESTORE_NONE, RESTORE_WIENER,
 };
 use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 
@@ -182,26 +181,6 @@ struct CdefData {
     cdef_uv_strength: [[c_int; 4]; 16],
 }
 
-// av1_set_cdef_v2(0) selects the upstream shader (-cdefv1).
-static CDEF_V2: AtomicI32 = AtomicI32::new(1);
-/// `av1_set_cdef_v2` (`dx/av1_perf.h`).
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_cdef_v2(enable: c_int) {
-    CDEF_V2.store(enable, Ordering::Relaxed);
-}
-
-// av1_set_cdef_v3_legacy(1) selects cdef_filter_v2 + cdef_lists (-cdefv3legacy).
-static CDEF_V3_LEGACY: AtomicI32 = AtomicI32::new(0);
-/// `av1_set_cdef_v3_legacy` (`dx/av1_perf.h`).
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_cdef_v3_legacy(enable: c_int) {
-    CDEF_V3_LEGACY.store(enable, Ordering::Relaxed);
-}
-
-pub(crate) fn cdef_v3_enabled() -> bool {
-    CDEF_V2.load(Ordering::Relaxed) != 0 && CDEF_V3_LEGACY.load(Ordering::Relaxed) == 0
-}
-
 // The two bytes of TX_INFO_WORD that cdef_lists.hlsl reads.
 const _: () = {
     assert!(std::mem::offset_of!(crate::sys::MB_MODE_INFO, skip) == 60 + 1);
@@ -209,45 +188,36 @@ const _: () = {
     assert!(size_of::<crate::sys::MiGridEntry>() == 4);
 };
 
+/// Whether the frame needs the full skip table (`cdef_lists.hlsl`): only a stage dump of `cdef_info`
+/// reads it; CDEF reads the masks.
+///
+/// # Safety
+/// `dec` is the decoder while it records a frame.
+unsafe fn cdef_needs_skips(dec: *mut Av1Core) -> bool {
+    // SAFETY: the caller's contract.
+    unsafe { stage_dump_active(dec) }
+}
+
 /// The lists of CDEF by the GPU (`Av1Core::gpu_cdef_lists`, `AV1_PARSER_OPTION_GPU_CDEF_LISTS`):
-/// `cdef_lists.hlsl` writes what the loops of [`cdef_filter_run`] write, the same words at the same
-/// places and no other: the index of each of the `nhfb` by `nvfb` 64x64 blocks, and the skip flag of
-/// each of the `skip_cols` by `skip_rows` 8x8 blocks, in rows of `nhfb * 16`. It reads the mode info as
-/// the loop filter's list shaders do, from the grid of the slot and the pool, which hold the frame's
+/// `cdef_lists_v2.hlsl` writes what the loops of [`cdef_filter_run`] write, the same words at the same
+/// places and no other: the index of each of the `nhfb` by `nvfb` 64x64 blocks, and the mask of the 8x8
+/// blocks CDEF filters per 64x32 group. For a stage dump of `cdef_info`, `cdef_lists.hlsl` also writes
+/// the skip flag of each of the `skip_cols` by `skip_rows` 8x8 blocks, in rows of `nhfb * 16`. It reads the
+/// mode info as the loop filter's list shaders do, from the grid of the slot and the pool, which hold the frame's
 /// records until the frame's fence; the thread that records then reads none of it.
 ///
 /// The two lists are buffers the CPU could write (a custom heap, in the state the shaders read them in)
 /// that a command list may write as well: in the state for it around this pass only, so CDEF and the
 /// stage dump find them as they find the lists the CPU wrote.
 ///
+/// The lists move to the state for writing and the shaders are dispatched; [`record_cdef_lists_end`]
+/// is the barrier behind them. With the merged front of the frame ([`cdef_lists_front`]) they are in the
+/// step of gen_pred_blocks.
+///
 /// # Safety
 /// `dec` is the decoder while it records a frame whose slot has the lists as buffers the GPU may write;
 /// `cm` is the frame's. `sizes`: `nhfb`, `nvfb`, `skip_cols`, `skip_rows` of the frame.
-unsafe fn record_cdef_lists(dec: *mut Av1Core, cm: &AV1_COMMON, sizes: [c_int; 4], use_v3: bool) {
-    // SAFETY: the caller's contract.
-    unsafe {
-        record_cdef_lists_begin(dec, cm, sizes, use_v3);
-        record_cdef_lists_end(dec, use_v3);
-        perf_gpu_mark(dec, AV1_PERF_GPU_CDEF_LISTS);
-    }
-}
-
-/// Whether the frame's CDEF reads the full skip table (`cdef_lists.hlsl`): the legacy CDEF, or a stage
-/// dump of `cdef_info`.
-///
-/// # Safety
-/// `dec` is the decoder while it records a frame.
-unsafe fn cdef_needs_skips(dec: *mut Av1Core, use_v3: bool) -> bool {
-    // SAFETY: the caller's contract.
-    !use_v3 || unsafe { stage_dump_active(dec) }
-}
-
-/// [`record_cdef_lists`] up to the barrier: the lists move to the state for writing and the shaders
-/// are dispatched.
-///
-/// # Safety
-/// As for [`record_cdef_lists`].
-unsafe fn record_cdef_lists_begin(dec: *mut Av1Core, cm: &AV1_COMMON, sizes: [c_int; 4], use_v3: bool) {
+unsafe fn record_cdef_lists_begin(dec: *mut Av1Core, cm: &AV1_COMMON, sizes: [c_int; 4]) {
     let [nhfb, nvfb, skip_cols, skip_rows] = sizes;
     // SAFETY: the caller's contract.
     unsafe {
@@ -259,34 +229,28 @@ unsafe fn record_cdef_lists_begin(dec: *mut Av1Core, cm: &AV1_COMMON, sizes: [c_
         let mi_pool = buffer(td.parse_buffers[super::pool::Kind::ModeInfo as usize]).location();
         let mi_grid = buffer(td.mode_info_grid).location();
 
-        // Always build the full skips table when legacy CDEF runs or when -dumpstages dumps cdef_info.
-        let need_skips = cdef_needs_skips(dec, use_v3);
+        // The full skip table only when -dumpstages dumps cdef_info.
+        let need_skips = cdef_needs_skips(dec);
         // The transitions first, one barrier, then the dispatches: nothing between two dispatches of the
         // step.
         commands.transition(indexes, BufferState::Read, BufferState::ReadWrite);
-        if use_v3 {
-            commands.transition(buffer(td.cdef_masks), BufferState::Read, BufferState::ReadWrite);
-        }
+        commands.transition(buffer(td.cdef_masks), BufferState::Read, BufferState::ReadWrite);
         if need_skips {
             commands.transition(buffer(td.cdef_skips), BufferState::Read, BufferState::ReadWrite);
         }
-        if use_v3 {
-            let masks = buffer(td.cdef_masks);
-            let shader = pipeline(&raw const (*lib).shader_cdef_lists_v2);
-            commands.set_layout(shader.layout());
-            commands.set_pipeline(shader);
-            commands.bind_read(0, mi_pool);
-            commands.bind_read(1, mi_grid);
-            commands.bind_write(2, indexes.location());
-            commands.bind_write(3, masks.location());
-            commands.set_inline_constants(4, &inline, 0);
-            commands.dispatch(nhfb as u32, nvfb as u32, 1);
-        }
+        let masks = buffer(td.cdef_masks);
+        let shader = pipeline(&raw const (*lib).shader_cdef_lists_v2);
+        commands.set_layout(shader.layout());
+        commands.set_pipeline(shader);
+        commands.bind_read(0, mi_pool);
+        commands.bind_read(1, mi_grid);
+        commands.bind_write(2, indexes.location());
+        commands.bind_write(3, masks.location());
+        commands.set_inline_constants(4, &inline, 0);
+        commands.dispatch(nhfb as u32, nvfb as u32, 1);
         if need_skips {
-            if use_v3 {
-                // Both shaders write the indexes (the same words).
-                commands.write_barrier(indexes);
-            }
+            // Both shaders write the indexes (the same words).
+            commands.write_barrier(indexes);
             let skips = buffer(td.cdef_skips);
             let shader = pipeline(&raw const (*lib).shader_cdef_lists);
             commands.set_layout(shader.layout());
@@ -304,23 +268,21 @@ unsafe fn record_cdef_lists_begin(dec: *mut Av1Core, cm: &AV1_COMMON, sizes: [c_
 /// The barrier behind [`record_cdef_lists_begin`]: the lists back to the state CDEF reads them in.
 ///
 /// # Safety
-/// As for [`record_cdef_lists`], behind [`record_cdef_lists_begin`] with the same `use_v3`.
-unsafe fn record_cdef_lists_end(dec: *mut Av1Core, use_v3: bool) {
+/// As for [`record_cdef_lists_begin`], behind it.
+unsafe fn record_cdef_lists_end(dec: *mut Av1Core) {
     // SAFETY: the caller's contract.
     unsafe {
         let td = &*(*dec).curr_frame_data;
         let commands = commands(dec);
-        if use_v3 {
-            commands.transition(buffer(td.cdef_masks), BufferState::ReadWrite, BufferState::Read);
-        }
-        if cdef_needs_skips(dec, use_v3) {
+        commands.transition(buffer(td.cdef_masks), BufferState::ReadWrite, BufferState::Read);
+        if cdef_needs_skips(dec) {
             commands.transition(buffer(td.cdef_skips), BufferState::ReadWrite, BufferState::Read);
         }
         commands.transition(buffer(td.cdef_indexes), BufferState::ReadWrite, BufferState::Read);
     }
 }
 
-/// The sizes [`record_cdef_lists`] takes: `nhfb`, `nvfb`, `skip_cols`, `skip_rows` of the frame.
+/// The sizes [`record_cdef_lists_begin`] takes: `nhfb`, `nvfb`, `skip_cols`, `skip_rows` of the frame.
 fn cdef_list_sizes(cm: &AV1_COMMON) -> [c_int; 4] {
     let mi_size_64 = MI_SIZE_64X64 as c_int;
     let nvfb = (cm.mi_rows + mi_size_64 - 1) / mi_size_64;
@@ -346,7 +308,7 @@ pub(crate) unsafe fn cdef_lists_front(dec: *mut Av1Core, cm: &AV1_COMMON) -> boo
         if td.do_cdef == 0 || (*dec).gpu_cdef_lists == 0 {
             return false;
         }
-        record_cdef_lists_begin(dec, cm, cdef_list_sizes(cm), cdef_v3_enabled());
+        record_cdef_lists_begin(dec, cm, cdef_list_sizes(cm));
         td.cdef_lists_front = 1;
         true
     }
@@ -355,10 +317,10 @@ pub(crate) unsafe fn cdef_lists_front(dec: *mut Av1Core, cm: &AV1_COMMON) -> boo
 /// The barrier behind [`cdef_lists_front`].
 ///
 /// # Safety
-/// As for [`cdef_lists_front`], which returned true, with the switches unchanged.
+/// As for [`cdef_lists_front`], which returned true, with the stage dump unchanged.
 pub(crate) unsafe fn cdef_lists_front_end(dec: *mut Av1Core) {
     // SAFETY: the caller's contract.
-    unsafe { record_cdef_lists_end(dec, cdef_v3_enabled()) };
+    unsafe { record_cdef_lists_end(dec) };
 }
 
 /// `av1_cdef_filter_run` of the C++: CDEF from `src` into `dst`, when the frame has it.
@@ -379,7 +341,6 @@ unsafe fn cdef_filter_run(
         if td.do_cdef == 0 {
             return;
         }
-        let use_v3 = cdef_v3_enabled();
         let cdef_info = &cm.cdef_info;
         let mi_size_64 = MI_SIZE_64X64 as c_int;
         let [nhfb, nvfb, skip_cols, skip_rows] = cdef_list_sizes(cm);
@@ -397,10 +358,8 @@ unsafe fn cdef_filter_run(
                         c_int::from(mode_info(mi_size_64 * fbr, mi_size_64 * fbc).cdef_strength);
                 }
             }
-            if use_v3 {
-                std::ptr::write_bytes(cdef_masks, 0, (2 * nvfb * nhfb) as usize);
-            }
-            let write_skips = !use_v3 || stage_dump_active(dec);
+            std::ptr::write_bytes(cdef_masks, 0, (2 * nvfb * nhfb) as usize);
+            let write_skips = stage_dump_active(dec);
             for r in 0..skip_rows {
                 for c in 0..skip_cols {
                     let skipped = mode_info(r * 2, c * 2).skip != 0
@@ -410,7 +369,7 @@ unsafe fn cdef_filter_run(
                     if write_skips {
                         *cdef_skips.offset((r * nhfb * 16 + c) as isize) = c_int::from(skipped);
                     }
-                    if use_v3 && !skipped {
+                    if !skipped {
                         let gy = r >> 2;
                         let gx = c >> 3;
                         let bit = ((r & 3) << 3) | (c & 7);
@@ -482,9 +441,8 @@ unsafe fn cdef_filter_run(
             None => 0,
         };
 
-        if gpu_lists && td.cdef_lists_front == 0 {
-            record_cdef_lists(dec, cm, [nhfb, nvfb, skip_cols, skip_rows], use_v3);
-        }
+        // The lists by the GPU are in the merged front of the frame (`cdef_lists_front`).
+        debug_assert!(!gpu_lists || td.cdef_lists_front != 0);
 
         if stage_dump_active(dec) {
             let indexes = &*td.cdef_indexes;
@@ -519,27 +477,20 @@ unsafe fn cdef_filter_run(
         let commands = commands(dec);
         let frame_buffers = buffer((*dec).frame_buffer_pool);
         let lib = (*dec).shader_lib;
-        let (shader, x_shift, y_shift, second_srv) = if use_v3 {
-            let shader = if fused.is_some() {
-                &raw const (*lib).shader_cdef_filter_v3_sp_tex
-            } else {
-                &raw const (*lib).shader_cdef_filter_v3
-            };
-            (shader, 6, 5, td.cdef_masks)
-        } else if CDEF_V2.load(Ordering::Relaxed) == 0 {
-            (&raw const (*lib).shader_cdef_filter, 5, 5, td.cdef_skips)
+        // cdef_filter_v3: a group of 64 threads per 64x32 luma samples.
+        let (x_shift, y_shift) = (6, 5);
+        let shader = pipeline(if fused.is_some() {
+            &raw const (*lib).shader_cdef_filter_v3_sp_tex
         } else {
-            (&raw const (*lib).shader_cdef_filter_v2, 6, 5, td.cdef_skips)
-        };
-        let shader = pipeline(shader);
+            &raw const (*lib).shader_cdef_filter_v3
+        });
         commands.set_pipeline(shader);
         commands.set_layout(shader.layout());
         commands.bind_read(0, buffer(td.cdef_indexes).location());
-        commands.bind_read(1, buffer(second_srv).location());
+        commands.bind_read(1, buffer(td.cdef_masks).location());
         commands.bind_write(2, frame_buffers.location());
         commands.bind_constants(3, constants.location);
         if let Some(f) = fused {
-            debug_assert!(use_v3);
             bind_fused_planes(dec, 4, f.pair);
         }
         commands.dispatch(

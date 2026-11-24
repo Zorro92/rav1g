@@ -29,8 +29,6 @@ loop_restoration_wiener
 loop_restoration_sp_tex
 loop_restoration_wiener_sp_tex
 film_grain_filter
-cdef_filter
-cdef_filter_v2
 cdef_filter_v3
 cdef_filter_v3_sp_tex
 intra_v2

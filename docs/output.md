@@ -89,8 +89,8 @@ textures. With the semi-planar kind there are two paths, chosen for every image:
   kind costs, with two copies in place of three. Taken for every other texture, so for any NV12 or
   P010 texture a device can create, and for an image with a buffer.
 
-**Fused into the last postfilter stage** (the default on the direct path; `-outputcopylegacy` turns
-it off). A frame with CDEF, superres or loop restoration has a last stage that reads and writes every
+**Fused into the last postfilter stage** (the default on the direct path; its switch
+`-outputcopylegacy` is retired). A frame with CDEF, superres or loop restoration has a last stage that reads and writes every
 sample of the frame anyway: that stage also stores the planes film grain does not write into the
 texture (`cdef_filter_v3_sp_tex`, `upscaling_sp_tex`, `loop_restoration_sp_tex`,
 `loop_restoration_wiener_sp_tex`, with the stores of `output_sp.h`), and the copy pass of the output

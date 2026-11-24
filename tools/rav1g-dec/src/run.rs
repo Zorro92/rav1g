@@ -764,13 +764,7 @@ fn create_decoder(
         } else {
             task.lowmem_parts.to_string()
         },
-        if task.cdefv1 {
-            "cdef_filter (-cdefv1)"
-        } else if task.cdefv3legacy {
-            "cdef_filter_v2 (-cdefv3legacy)"
-        } else {
-            "cdef_filter_v3"
-        },
+        "cdef_filter_v3",
         if task.intrav2 { "intra_v2" } else { "frame-wide wavefront" },
         if task.intraopt { " (optimized main)" } else { " (legacy main, -intraod)" },
         "loop_restoration / loop_restoration_wiener",
@@ -997,16 +991,10 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     }
     library.set_choices(&Choices {
         skip_film_grain: task.skip_film_grain,
-        cdef_v2: !task.cdefv1,
-        cdef_v3_legacy: task.cdefv3legacy,
-        output_copy_legacy: task.outputcopylegacy,
-        front_merge_legacy: task.frontmergelegacy,
         intra_v2: task.intrav2,
         intra_opt: task.intraopt,
         intra_filter_legacy: task.intrafilterlegacy,
         intra_single_edge_legacy: task.intrasingleedgelegacy,
-        intra_lists_legacy: task.intralistslegacy,
-        parse_lists_legacy: task.parselistslegacy,
         lf_h_split: task.lfhsplit as u32,
         intra_edge_fix: task.intraedgefix,
         inter_fast: task.interfast,
@@ -1024,19 +1012,9 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
             task.displaydither
         );
     }
-    say!(
-        "Front of the frame: {}",
-        if task.frontmergelegacy { "five steps (-frontmergelegacy)" } else { "two steps (default)" }
-    );
+    say!("Front of the frame: two steps (default)");
     if task.output == ImageMode::Texture {
-        say!(
-            "Direct NV12/P010 output: {}",
-            if task.outputcopylegacy {
-                "copy_plane_sp_tex_v2 (-outputcopylegacy)"
-            } else {
-                "fused into last postfilter stage (default)"
-            }
-        );
+        say!("Direct NV12/P010 output: fused into last postfilter stage (default)");
         say!("Direct NV12/P010 film grain shader: film_grain_filter_sp_tex_v2 (default)");
     }
     say!("Film grain templates: CPU, uploaded with the random offsets");
@@ -1065,21 +1043,8 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         task.name,
         task.parser_options.words()
     );
-    if task.intralistslegacy {
-        say!("PARSER {}: the previous intra list loops and wavefront edges (-intralistslegacy)", task.name);
-    }
-    if task.parselistslegacy {
-        say!("PARSER {}: block lists on the tile's thread (-parselistslegacy)", task.name);
-    }
     if task.parser_options.gpu_cdef_lists || task.parser_options.gpu_grid {
-        say!(
-            "CDEF lists shader: {}",
-            if task.cdefv3legacy || task.cdefv1 {
-                "cdef_lists (-cdefv3legacy or -cdefv1)"
-            } else {
-                "cdef_lists_v2 (default)"
-            }
-        );
+        say!("CDEF lists shader: cdef_lists_v2 (default)");
     }
     if task.interfast & switches::INTER_FAST_ON != 0 {
         say!(

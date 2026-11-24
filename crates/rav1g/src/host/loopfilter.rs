@@ -18,7 +18,7 @@ use super::core::{
     stage_dump_data, stage_dump_fb,
 };
 use super::types::{Av1Core, av1_stage_dump_region};
-use crate::sys::{AV1_COMMON, AV1_PERF_GPU_LF_GEN, AV1_PERF_GPU_LF_HORZ, AV1_PERF_GPU_LF_VERT, MACROBLOCKD};
+use crate::sys::{AV1_COMMON, AV1_PERF_GPU_LF_HORZ, AV1_PERF_GPU_LF_VERT, MACROBLOCKD};
 
 /// The constants of the filter shaders.
 #[repr(C)]
@@ -228,28 +228,18 @@ pub(crate) unsafe fn loopfilter_lists_barrier(dec: *mut Av1Core) {
 }
 
 /// `av1_loopfilter_gpu` of the C++: records the stage for the frame of the current command list.
-/// `lists`: the edge lists [`loopfilter_lists`] has written in front of this, behind their barrier;
-/// None writes them here, as a step of their own.
+/// `lists`: the edge lists [`loopfilter_lists`] has written in front of this, behind their barrier (the
+/// merged front, `frame::record_front`); None for a frame without the filter.
 ///
 /// # Safety
-/// `dec` is the decoder while it records a frame; `cm` and `xd` are those of the frame.
-pub(crate) unsafe fn loopfilter_gpu(
-    dec: *mut Av1Core,
-    cm: *mut AV1_COMMON,
-    xd: *mut MACROBLOCKD,
-    lists: Option<LfLists>,
-) {
+/// `dec` is the decoder while it records a frame; `cm` is the frame's.
+pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, lists: Option<LfLists>) {
     // SAFETY: the caller's contract: the frame data, the frame buffers, the buffers and pipelines of the
     // decoder and the frame header are live, and only this thread records.
     unsafe {
-        let lists = match lists {
-            Some(lists) => lists,
-            None => {
-                let Some(lists) = loopfilter_lists(dec, cm, xd) else { return };
-                loopfilter_lists_barrier(dec);
-                perf_gpu_mark(dec, AV1_PERF_GPU_LF_GEN);
-                lists
-            }
+        let Some(lists) = lists else {
+            debug_assert!(!loopfilter_on(&*cm));
+            return;
         };
         let gen_constants = lists.gen_constants;
         let cm = &*cm;

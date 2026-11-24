@@ -461,8 +461,8 @@ impl WavePlane {
     }
 }
 
-/// `-intralistslegacy` ([`av1_set_intra_lists_legacy`]): the edges of a tile's intra wavefront in one plane as
-/// they were before [`WavePlane`], four arrays, with the ends stamped with the frame: what the wavefront grid holds at the units a
+/// The paths that take the loops of [`av1_mi_push_block`] (the intra step timing, `intra_push_loops`): the edges
+/// of a tile's intra wavefront in one plane as they were before [`WavePlane`], four arrays, with the ends stamped with the frame: what the wavefront grid holds at the units a
 /// transform block can still read, which are the ones along the border of what the tile has decoded.
 ///
 /// With `G(c, r)` for the iteration of the transform block at the unit in column `c` and row `r` of the
@@ -588,8 +588,8 @@ impl LegacyWavePlane {
 #[repr(C)]
 pub struct WaveEdges {
     pub planes: [WavePlane; 2],
-    /// `-intralistslegacy` (and the paths that take the loops of [`push_block`]: the intra step timing):
-    /// the edges as they were before [`WavePlane`].
+    /// The paths that take the loops of [`push_block`] (the intra step timing, `intra_push_loops`): the
+    /// edges as they were before [`WavePlane`].
     pub legacy: [LegacyWavePlane; 2],
     /// Not 0: the edges are not kept (see above); what they hold is not read.
     pub idle: c_int,
@@ -804,9 +804,9 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
         let wave = tile.wave_edges.cast::<WaveEdges>();
         // The transform blocks of intra prediction go through [`intra_block_edges`] and the edges are
         // [`WaveEdges::planes`], unless the frame has -intrav2 (no edges), the tile the intra step timing,
-        // or -intralistslegacy (for an A/B): then the loops below and [`WaveEdges::legacy`]. The same for
-        // all blocks of a tile.
-        let fast_txbs = td.intra_v2 == 0 && tile.perf_steps.is_null() && td.intra_lists_legacy == 0;
+        // or the frame `intra_push_loops` (the reference of rav1g-parse-check): then the loops below and
+        // [`WaveEdges::legacy`]. The same for all blocks of a tile.
+        let fast_txbs = td.intra_v2 == 0 && tile.perf_steps.is_null() && td.intra_push_loops == 0;
 
         // The grid has the entries of the records (`mi_grid_record_in_chunks`). A parse without a grid (the GPU
         // builds it, `-parseopt gpugrid`) gives the block's record by itself.
@@ -1879,24 +1879,6 @@ unsafe fn wavefront_iteration_edges(
     }
 }
 
-/// `-intralistslegacy` (`av1_set_intra_lists_legacy`): the transform blocks of intra prediction go
-/// through the loops of [`av1_mi_push_block`] as they did before [`intra_block_edges`]. The lists are the
-/// same either way.
-static INTRA_LISTS_LEGACY: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
-
-/// `av1_set_intra_lists_legacy` (`dx/av1_perf.h`); a frame takes it at its setup
-/// (`av1_frame_thread_data::intra_lists_legacy`).
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_intra_lists_legacy(enable: c_int) {
-    INTRA_LISTS_LEGACY.store(enable, std::sync::atomic::Ordering::Relaxed);
-}
-
-/// What [`av1_set_intra_lists_legacy`] was last given.
-#[allow(dead_code, reason = "the parser-only tools set the frame's field themselves")]
-pub(crate) fn intra_lists_legacy() -> c_int {
-    INTRA_LISTS_LEGACY.load(std::sync::atomic::Ordering::Relaxed)
-}
-
 /// What [`av1_mi_push_block`] has worked out of an intra block (or the intra part of an inter-intra
 /// block) for [`intra_block_edges`].
 struct IntraBlock {
@@ -2175,7 +2157,7 @@ unsafe fn intra_plane_edges<const CHROMA: bool>(
     }
 }
 
-/// `-intralistslegacy`: [`wavefront_iteration_edges`] on [`LegacyWavePlane`]. [`wavefront_iteration`] with the
+/// The loops of [`av1_mi_push_block`]: [`wavefront_iteration_edges`] on [`LegacyWavePlane`]. [`wavefront_iteration`] with the
 /// iterations of the neighbours at the edges of the tile instead of in
 /// the wavefront grid: the transform block of `plane` at `col`, `row` of the plane takes its iteration
 /// from the units the grid version reads (the row above from the unit above and to the left, if

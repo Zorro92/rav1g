@@ -26,8 +26,6 @@ loop_restoration_wiener	64	64	21	49	2048	0	16	waves
 loop_restoration_sp_tex	64	64	26	76	3072	0	10.5	lds
 loop_restoration_wiener_sp_tex	64	64	22	68	2048	0	16	waves
 film_grain_filter	768	64	41	51	30720	0	6	vgprs
-cdef_filter	128	64	106	48	12288	0	4	vgprs
-cdef_filter_v2	64	64	92	53	9728	0	3	lds
 cdef_filter_v3	64	64	71	59	5120	0	6	lds
 cdef_filter_v3_sp_tex	64	64	71	80	5120	0	6	lds
 intra_v2	384	64	168	70	16896	0	3	vgprs

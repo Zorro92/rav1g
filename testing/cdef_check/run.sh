@@ -37,8 +37,6 @@ build() {
 }
 
 to_cpp "$shaders/output_sp.h" > "$work/output_sp.gen.h"
-to_cpp "$shaders/cdef_filter.hlsl" > "$work/cdef_filter.gen.h"
-to_cpp "$shaders/cdef_filter_v2.hlsl" > "$work/cdef_filter_v2.gen.h"
 to_cpp "$shaders/cdef_filter_v3.hlsl" > "$work/cdef_filter_v3.gen.h"
 to_cpp "$shaders/cdef_lists.hlsl" > "$work/cdef_lists.gen.h"
 to_cpp "$shaders/cdef_lists_v2.hlsl" > "$work/cdef_lists_v2.gen.h"
@@ -72,17 +70,6 @@ expect_rejected() {
 
 if [ "${1:-}" = "--mutate" ]; then
   mkdir "$work/mutant"
-  expect_rejected cdef_filter_v2 's/f.pri_tap0 = 4 - p_t;/f.pri_tap0 = 3 - p_t;/' "wrong primary tap weight" '^MISMATCH optimized'
-  expect_rejected cdef_filter_v2 's/if (cost\[i\] > best_cost)/if (cost[i] >= best_cost)/' "last-direction tie break" '^MISMATCH direction'
-  expect_rejected cdef_filter_v2 's/(best_cost - opposite_cost) >> 10/(best_cost - opposite_cost) >> 9/' "wrong variance shift" '^MISMATCH direction'
-  expect_rejected cdef_filter_v2 's/uint2(CDEF_VERY_LARGE_X2, CDEF_VERY_LARGE_X2)/uint2(0u, 0u)/' "missing border sentinel" '^MISMATCH optimized'
-  for f in cdef_filter cdef_filter_v2; do
-    expect_rejected "$f" \
-      '/void shader_main(/,/GroupMemoryBarrierWithGroupSync();/s/GroupMemoryBarrierWithGroupSync();/GroupMemoryBarrier();/' \
-      "$f halo sync weakened to a barrier" 'races in group memory: [1-9]'
-  done
-  expect_rejected cdef_filter_v2 's/^    GroupMemoryBarrierWithGroupSync();/    GroupMemoryBarrier();/' \
-    "direction-cost sync weakened to a barrier" 'races in group memory: [1-9]'
   expect_rejected cdef_lists 's/ || top.x != bottom.y)/)/' "missing bottom-right record in the reuse test" \
     '^MISMATCH optimized lists' cdef_lists_check
   expect_rejected cdef_lists 's/((int)(word << 8)) >> 24/(int)((word >> 16) \& 255)/' "unsigned strength index" \
@@ -92,6 +79,7 @@ if [ "${1:-}" = "--mutate" ]; then
   expect_rejected cdef_filter_v3 's/f.pri_tap0 = 4 - p_t;/f.pri_tap0 = 3 - p_t;/' "v3 wrong primary tap weight" '^MISMATCH '
   expect_rejected cdef_filter_v3 's/if (cost\[i\] > best_cost)/if (cost[i] >= best_cost)/' "v3 last-direction tie break" '^MISMATCH direction'
   expect_rejected cdef_filter_v3 's/uint2(CDEF_VERY_LARGE_X2, CDEF_VERY_LARGE_X2)/uint2(0u, 0u)/' "v3 missing border sentinel" '^MISMATCH '
+  expect_rejected cdef_filter_v3 's/(best_cost - opposite_cost) >> 10/(best_cost - opposite_cost) >> 9/' "v3 wrong variance shift" '^MISMATCH direction'
   v3_syncs=$(grep -c 'GroupMemoryBarrierWithGroupSync();' "$work/cdef_filter_v3.gen.h")
   for idx in $(seq "$v3_syncs"); do
     cp "$work"/*.gen.h "$work/mutant/"

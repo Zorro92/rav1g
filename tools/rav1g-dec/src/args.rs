@@ -82,11 +82,6 @@ pub struct Task {
     pub slots: i32,
     /// The task has -slots.
     pub slots_given: bool,
-    pub cdefv1: bool,
-    pub cdefv2: bool,
-    pub cdefv3legacy: bool,
-    pub outputcopylegacy: bool,
-    pub frontmergelegacy: bool,
     /// -displaypass WxH: the display pass (`Settings::display`); (0, 0) off. -displaypeak, -displaywhite
     /// (nits, 0 the default), -displaydepth (8, 10, 0 the decoder's), -displaytransform (0 by the
     /// frame's colour, 1 scale, 2 gamut, 3 PQ, 4 HLG), -displaydither (0 auto: NV12 dithered, 1 off, 2
@@ -110,8 +105,6 @@ pub struct Task {
     pub intraopt: bool,
     pub intrafilterlegacy: bool,
     pub intrasingleedgelegacy: bool,
-    pub intralistslegacy: bool,
-    pub parselistslegacy: bool,
     /// What a frame does about the clears of its slot's grids: nothing to clear without a flag;
     /// -gpuclear, -cpuclear (and -asyncclear, its older name), -syncclear.
     pub clears: Clears,
@@ -177,11 +170,6 @@ impl Default for Task {
             slots: 0,
             slots_given: false,
             parse_frames: 0,
-            cdefv1: false,
-            cdefv2: false,
-            cdefv3legacy: false,
-            outputcopylegacy: false,
-            frontmergelegacy: false,
             displaypass: (0, 0),
             displaypeak: 0.0,
             displaywhite: 0.0,
@@ -198,8 +186,6 @@ impl Default for Task {
             intraopt: true,
             intrafilterlegacy: false,
             intrasingleedgelegacy: false,
-            intralistslegacy: false,
-            parselistslegacy: false,
             clears: Clears::NotNeeded,
             lfhsplit: 0,
             intraedgefix: false,
@@ -305,15 +291,7 @@ pub fn usage() {
     say!("                        its budget guard leaves it");
     say!("  -queue_size <n>       output images in the pool, 1..{} (default {})", QUEUE_SIZE_MAX, QUEUE_SIZE_DEFAULT);
     say!("  -timeout <seconds>    give up on a task after this time (exit code {})", EXIT_TIMEOUT);
-    say!("  -cdefv1 -nofitsize -lowmemparts <n> -lowmem -slots <n> -intrav2");
-    say!("  -cdefv3legacy        use legacy cdef_filter_v2 + cdef_lists instead of cdef_filter_v3 + cdef_lists_v2");
-    say!(
-        "  -outputcopylegacy    disable fused semi-planar output in the last postfilter stage (run separate copy_plane)"
-    );
-    say!(
-        "  -frontmergelegacy    the front of a frame (grid, gen_pred_blocks, residual clear, edge and CDEF lists) in \
-         five steps, not two"
-    );
+    say!("  -nofitsize -lowmemparts <n> -lowmem -slots <n> -intrav2");
     say!(
         "  -displaypass WxH      the display pass (Rav1gSettings::display): images of WxH, the frames downscaled and \
          tone-mapped to BT.709 SDR, P010 or NV12 (with -output p010; the md5 references do not apply)"
@@ -329,8 +307,6 @@ pub fn usage() {
     say!("  -intraod             use the baseline DXC -Od intra_main kernels (-intraopt restores the default)");
     say!("  -intrafilterlegacy   use the previous 8-bit filter intra shader");
     say!("  -intrasingleedgelegacy use the previous directional wavefront with prefetching");
-    say!("  -intralistslegacy    count the intra block lists with the previous loops and wavefront edges");
-    say!("  -parselistslegacy    count the block lists on the tile's thread, superblock by superblock");
     say!("                        as in the test player (docs/test-player.md); -cdefv2 and -fitsize (the defaults)");
     say!("                        are accepted");
     say!("  -gpuclear -cpuclear -syncclear");
@@ -358,9 +334,8 @@ pub fn usage() {
     say!("                        by a pass of the GPU (cdef_lists) and not by the thread that records the frame.");
     say!("                        gpugrid: the GPU builds the mode info grid and writes the CDEF lists. These four");
     say!("                        are on by default. Naming any of them, none or default selects them explicitly.");
-    say!("                        time: with -gputime, the calls of the sink are timed; latelists: the block lists");
-    say!("                        of a tile are counted at its end and not superblock by superblock; cleargrid: the");
-    say!("                        mode info grid of a slot is cleared for every frame. These three change nothing");
+    say!("                        time: with -gputime, the calls of the sink are timed; cleargrid: the mode info");
+    say!("                        grid of a slot is cleared for every frame. These two change nothing");
     say!("                        else (time alone: the default, timed). gridcheck: a pass of the GPU builds the mode");
     say!("                        info grid from the records (mi_grid_build) into a second grid, held against the");
     say!("                        parse's when each frame is done (a GRIDCHECK line at the release; same output).");
@@ -507,11 +482,8 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-lowmem" => task.lowmem = true,
             "-budget" => task.budget_mib = i64::from(number()?),
             "-headroom" => task.headroom_mib = i64::from(number()?),
-            "-cdefv1" => task.cdefv1 = true,
-            "-cdefv2" => task.cdefv2 = true,
-            "-cdefv3legacy" => task.cdefv3legacy = true,
-            "-outputcopylegacy" => task.outputcopylegacy = true,
-            "-frontmergelegacy" => task.frontmergelegacy = true,
+            // The default since the A/B flags of CDEF are retired; accepted, changes nothing.
+            "-cdefv2" => {}
             "-displaypass" => {
                 let text = value()?;
                 let size = text.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)));
@@ -532,8 +504,6 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-intraod" => task.intraopt = false,
             "-intrafilterlegacy" => task.intrafilterlegacy = true,
             "-intrasingleedgelegacy" => task.intrasingleedgelegacy = true,
-            "-intralistslegacy" => task.intralistslegacy = true,
-            "-parselistslegacy" => task.parselistslegacy = true,
             "-gpuclear" => task.clears = Clears::Gpu,
             "-cpuclear" | "-asyncclear" => task.clears = Clears::CompletionThread,
             "-syncclear" => task.clears = Clears::DecodeThread,
@@ -570,7 +540,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
                 let list = value()?;
                 task.parser_options = rav1g::ParserOptions::from_words(&list).ok_or_else(|| {
                     format!(
-                        "-parseopt {list}: nolfmask, tilethread, gpucdef, time, latelists, cleargrid, gridcheck, gpugrid, gpublists, \
+                        "-parseopt {list}: nolfmask, tilethread, gpucdef, time, cleargrid, gridcheck, gpugrid, gpublists, \
                          default or none"
                     )
                 })?;
@@ -608,9 +578,6 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
 pub fn check_task(task: &mut Task) -> Result<(), String> {
     if task.input.is_empty() {
         return Err("no stream (-i)".to_string());
-    }
-    if task.cdefv1 && task.cdefv2 {
-        return Err("-cdefv1 and -cdefv2 cannot be used together".to_string());
     }
     if task.nofitsize && task.fitsize {
         return Err("-nofitsize and -fitsize cannot be used together".to_string());

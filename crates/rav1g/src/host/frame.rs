@@ -28,7 +28,7 @@ use super::create::to_mib;
 use super::log::log;
 use super::loopfilter::loopfilter_gpu;
 use super::memory::poison_constants;
-use super::output::{copy_output, frame_unreferenced, output_copy_legacy, output_image, prepare_fused_output};
+use super::output::{copy_output, frame_unreferenced, output_image, prepare_fused_output};
 use super::perf::{
     inter_fast_mode, perf_add, perf_add_memset, perf_begin_command_buffer, perf_detail_mode, perf_gpu_mark, perf_lap,
     perf_now, perf_resolve,
@@ -103,22 +103,6 @@ pub extern "C" fn av1_shader_variant() -> *const std::ffi::c_char {
     }
 }
 
-// av1_set_front_merge_legacy(1) restores the front of the frame's command list as it was
-// (-frontmergelegacy): the grid build, gen_pred_blocks, the residual clear with the transform sort, the
-// loop filter's edge lists and the CDEF lists each a step of their own.
-static FRONT_MERGE_LEGACY: AtomicI32 = AtomicI32::new(0);
-
-/// `av1_set_front_merge_legacy` (`dx/av1_perf.h`).
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_front_merge_legacy(enable: c_int) {
-    FRONT_MERGE_LEGACY.store(enable, Ordering::Relaxed);
-}
-
-/// Whether the front of a frame's command list is recorded as before the merge (`-frontmergelegacy`).
-pub(crate) fn front_merge_legacy() -> bool {
-    FRONT_MERGE_LEGACY.load(Ordering::Relaxed) != 0
-}
-
 /// The merged front of a frame's command list: the work in front of the transforms, by what it reads,
 /// in two dependent steps instead of five. Nothing of it reads what the frame's reconstruction writes:
 ///
@@ -129,16 +113,15 @@ pub(crate) fn front_merge_legacy() -> bool {
 ///    (`gen_lf_blocks_*`, AV1 7.14.2: levels and transform edges from the mode info) and
 ///    gen_pred_blocks.
 ///
-/// Before (`-frontmergelegacy`) these were five steps: the grid; gen_pred_blocks; the clear with the
-/// sort; and later the edge lists in front of the loop filter and the CDEF lists in front of CDEF. Each
-/// dependent step costs about 18 us fixed plus the latency of its slowest group on the console
-/// (AGENTS.md, "Dependent dispatches"). gen_pred_blocks and the list passes are latency-bound walks of
-/// the mode info that leave the GPU mostly idle; the clear (25 MB at 4K 10-bit) is bound by memory
-/// bandwidth: in one step they overlap. The clear goes with the longer of the two steps (the lists and
-/// gen_pred_blocks, ~0.25 ms on a 4K frame, ~0.6 ms with the loop filter's lists) rather than with the
-/// grid build. Sized for the GPU slice Bale's D3D11 stage shares, at no cost in memory or bytes moved:
-/// the same dispatches and buffers, fewer barriers. The decoded frames are the same: only the order of
-/// independent work changes.
+/// Before (`-frontmergelegacy`, retired after its console A/B) these were five steps: the grid; gen_pred_blocks;
+/// the clear with the sort; and later the edge lists in front of the loop filter and the CDEF lists in front of
+/// CDEF. Each dependent step costs about 18 us fixed plus the latency of its slowest group on the console
+/// (AGENTS.md, "Dependent dispatches"). gen_pred_blocks and the list passes are latency-bound walks of the mode
+/// info that leave the GPU mostly idle; the clear (25 MB at 4K 10-bit) is bound by memory bandwidth: in one step
+/// they overlap. The clear goes with the longer of the two steps (the lists and gen_pred_blocks, ~0.25 ms on a 4K
+/// frame, ~0.6 ms with the loop filter's lists) rather than with the grid build. Sized for the GPU slice Bale's
+/// D3D11 stage shares, at no cost in memory or bytes moved: the same dispatches and buffers, fewer barriers. The
+/// decoded frames are the same: only the order of independent work changes.
 ///
 /// gen_pred_blocks moves the tile with the most intra iterations to the front of the frame's tiles
 /// (and its pool pieces with it), after the sort has numbered the transform blocks in the tiles' earlier
@@ -163,7 +146,7 @@ unsafe fn record_front<'a>(
         // Step 2. The CDEF lists first: their transitions are barriers, so they go in front of every
         // dispatch of the step.
         let cdef_lists = super::postfilter::cdef_lists_front(dec, &*cm);
-        idct_front(dec, false);
+        idct_front(dec);
         let lf_lists = super::loopfilter::loopfilter_lists(dec, cm, &raw mut (*pbi).mb);
         // Its barrier and mark close the step, with the barriers of the others right behind.
         let gpu_lists = prediction_gen_blocks(pbi, dec);
@@ -999,7 +982,7 @@ pub(crate) unsafe fn setup_frame_begin(
         td.intra_stats = [0; 4];
         td.intra_v2 = intra_v2_setup_frame(dec, cm, td);
         td.intra_main = super::prediction::intra_main_for_frame(td.intra_v2 != 0);
-        td.intra_lists_legacy = super::blocks::intra_lists_legacy();
+        td.intra_push_loops = 0;
         // With -intrav2 nothing scans the iteration grid; av1_mi_push_block() writes the one entry per
         // block that gen_pred_blocks.hlsl reads. The same without a switch for the clears: the tiles keep
         // the wavefront in their edges, the grid gets that one entry per block, and nothing of it is
@@ -1840,25 +1823,13 @@ pub(crate) unsafe fn decode_frame_record(
         let mut perf_t = super::perf::av1_perf_ticks();
         prepare_command_buffer(dec);
         stage_dump_frame_info(dec, cm);
-        let (gpu_lists, lf_lists) = if front_merge_legacy() {
-            // -parseopt gpugrid: the mode info grid of the frame, built by the GPU from the records in front
-            // of every stage that reads it (and of the stage dump of the mode info); -parseopt gridcheck: a
-            // second grid, for the check (`grid_check.rs`).
-            super::grid_check::record(dec, cm);
-            let gpu_lists = prediction_gen_blocks(pbi, dec);
-            perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_GEN_BLOCKS as usize, perf_t);
-            idct_front(dec, true);
-            (gpu_lists, None)
-        } else {
-            let (gpu_lists, lf_lists) = record_front(pbi, dec);
-            perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_GEN_BLOCKS as usize, perf_t);
-            (gpu_lists, lf_lists)
-        };
+        let (gpu_lists, lf_lists) = record_front(pbi, dec);
+        perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_GEN_BLOCKS as usize, perf_t);
         idct_run(dec);
         perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_IDCT as usize, perf_t);
         prediction_run_all(dec, cm, gpu_lists);
         perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_PRED as usize, perf_t);
-        loopfilter_gpu(dec, cm, &raw mut (*pbi).mb, lf_lists);
+        loopfilter_gpu(dec, cm, lf_lists);
         perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_LOOPFILTER as usize, perf_t);
 
         // Request the output image before postfiltering so direct NV12/P010 output can be fused into
@@ -1873,7 +1844,7 @@ pub(crate) unsafe fn decode_frame_record(
         perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_CDEF_LR as usize, perf_t);
         // The borders are for inter prediction of later frames: none reads those of a frame that no slot of
         // the reference map takes (AV1 7.20).
-        if !frame_unreferenced(dec, cm) || output_copy_legacy() {
+        if !frame_unreferenced(dec, cm) {
             inter_ext_borders(dec, cm);
         }
         perf_t = perf_lap(dec, sys::AV1_PERF_CPU_REC_BORDERS as usize, perf_t);

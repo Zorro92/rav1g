@@ -17,10 +17,7 @@ use super::core::{
 use super::frame::joined_runs;
 use super::tables::{TX_SIZE_HIGH, TX_SIZE_WIDE};
 use super::types::Av1Core;
-use crate::sys::{
-    AV1_PERF_GPU_IDCT, AV1_PERF_GPU_IDCT_SORT, AV1_PERF_GPU_RESIDUAL_CLEAR, TX_4X4, TX_4X8, TX_8X4, TX_8X8,
-    TX_SIZES_ALL,
-};
+use crate::sys::{AV1_PERF_GPU_IDCT, TX_4X4, TX_4X8, TX_8X4, TX_8X8, TX_SIZES_ALL};
 
 /// Transform types of the sort: the transform sizes and the lossless transform.
 const TX_TYPES: usize = TX_SIZES_ALL as usize + 1;
@@ -46,13 +43,12 @@ const _: () = assert!(TX_TYPES == 20);
 /// The front of `av1_idct_run` of the C++: the residual buffer is cleared and the transform blocks of
 /// the tiles are sorted by type. Neither reads anything another stage of the frame writes, so with the
 /// merged front (`frame::record_front`) both run in the step of gen_pred_blocks and the list passes, and
-/// [`idct_front_barrier`] goes with that step's barrier. `barrier`: the order of `-frontmergelegacy`: the
-/// clear has its mark, and the barrier and the mark of the sort follow here.
+/// [`idct_front_barrier`] goes with that step's barrier.
 ///
 /// # Safety
 /// `dec` is the decoder while it records a frame whose tiles are decoded; once per frame, before
 /// [`idct_run`].
-pub(crate) unsafe fn idct_front(dec: *mut Av1Core, barrier: bool) {
+pub(crate) unsafe fn idct_front(dec: *mut Av1Core) {
     // SAFETY: the caller's contract: the frame data, its tiles, its frame buffer and the buffers and
     // pipelines of the decoder are live, and only this thread records.
     unsafe {
@@ -92,9 +88,6 @@ pub(crate) unsafe fn idct_front(dec: *mut Av1Core, barrier: bool) {
         let value = [words, 0];
         commands.set_inline_constants(1, &value, 0);
         commands.dispatch(((value[0] + 63) / 64) as u32, 1, 1);
-        if barrier {
-            perf_gpu_mark(dec, AV1_PERF_GPU_RESIDUAL_CLEAR);
-        }
 
         let shader = pipeline(&raw const (*lib).shader_idct_sort);
         commands.set_layout(shader.layout());
@@ -116,10 +109,6 @@ pub(crate) unsafe fn idct_front(dec: *mut Av1Core, barrier: bool) {
                     commands.dispatch(((run.count + 63) / 64) as u32, 1, 1);
                 }
             }
-        }
-        if barrier {
-            idct_front_barrier(dec);
-            perf_gpu_mark(dec, AV1_PERF_GPU_IDCT_SORT);
         }
     }
 }

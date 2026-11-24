@@ -80,17 +80,8 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        "the semi-planar output in textures a D3D11 device creates and D3D12 opens, with a wait on the decoder's "
        "shared fence in D3D11 for every frame",
        "", &params_.interop_},
-      {"cdefv2", atSingle, anOptional, "CDEF through cdef_filter_v2/v3.hlsl (the default; same output)", "cdef",
-       &params_.cdefv2_},
-      {"cdefv1", atSingle, anOptional, "CDEF through the original cdef_filter.hlsl (same output)", "cdef",
-       &params_.cdefv1_},
-      {"cdefv3legacy", atSingle, anOptional, "legacy cdef_filter_v2 + cdef_lists instead of cdef_filter_v3 + cdef_lists_v2", "",
-       &params_.cdefv3legacy_},
-      {"outputcopylegacy", atSingle, anOptional, "disable fused semi-planar output in the last postfilter stage", "",
-       &params_.outputcopylegacy_},
-      {"frontmergelegacy", atSingle, anOptional,
-       "the front of a frame (grid, gen_pred_blocks, residual clear and sort, edge and CDEF lists) in five steps, not two",
-       "", &params_.frontmergelegacy_},
+      {"cdefv2", atSingle, anOptional, "CDEF through cdef_filter_v3.hlsl, the only CDEF (accepted, changes nothing)",
+       "", &params_.cdefv2_},
       {"displaypass", atString, anOptional,
        "WxH: the display pass (Rav1gSettings::display) writes P010 images of that size, downscaled and tone-mapped (no md5)",
        "", &params_.displaypass_},
@@ -105,8 +96,6 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"intraod", atSingle, anOptional, "baseline DXC -Od intra_main shaders", "intra-main", &params_.intraod_},
       {"intrafilterlegacy", atSingle, anOptional, "previous 8-bit filter intra shader", "", &params_.intrafilterlegacy_},
       {"intrasingleedgelegacy", atSingle, anOptional, "use the previous directional wavefront with prefetching", "", &params_.intrasingleedgelegacy_},
-      {"intralistslegacy", atSingle, anOptional, "count the intra block lists with the previous loops and wavefront edges", "", &params_.intralistslegacy_},
-      {"parselistslegacy", atSingle, anOptional, "count the block lists on the tile's parse thread, superblock by superblock", "", &params_.parselistslegacy_},
       {"slots", atInt, anOptional,
        "decoder pipeline slots (frames in flight), 2..4. Default: four above 2560x1440, otherwise one "
        "more than frames in parse",
@@ -178,8 +167,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        "the GPU writes the CDEF lists; gpugrid, the GPU builds the mode info grid and also writes the CDEF lists. "
        "These four are on by default. Naming any of them, none or default selects them explicitly. "
        "Use nolfmask,tilethread,gpucdef for the sink-written grid. time, with -gputime the calls of the sink are "
-       "timed, and latelists, the block lists of a tile are counted at its end and not superblock by "
-       "superblock, and cleargrid, the mode info grid is cleared for every frame, add to the selection. "
+       "timed, and cleargrid, the mode info grid is cleared for every frame, add to the selection. "
        "gpublists builds the inter, warp and reconstruction lists on the GPU (off by default).",
        "", &params_.parseopt_},
       {"continue_on_error", atSingle, anOptional,
@@ -278,7 +266,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
 
   // -parseopt: words separated by commas; a word that is none of them is an error of the task. A word
   // that names a default switch, none or default selects the default switches explicitly;
-  // time, latelists and cleargrid add to the selection
+  // time and cleargrid add to the selection
   // (rav1g::ParserOptions::from_words reads the list the same way).
   params_.parser_options_ = 0;
   bool ways_named = false;
@@ -288,8 +276,6 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     const std::string word = params_.parseopt_.substr(at, end - at);
     if (word == "time") {
       params_.parser_options_ |= PLAYER_PARSEOPT_TIME_CALLS;
-    } else if (word == "latelists") {
-      params_.parser_options_ |= PLAYER_PARSEOPT_LATE_LISTS;
     } else if (word == "cleargrid") {
       params_.parser_options_ |= PLAYER_PARSEOPT_CLEAR_GRID;
     } else if (word == "gpublists") {
@@ -312,7 +298,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     } else if (word == "none") {
       ways_named = true;
     } else {
-      Err += "-parseopt takes nolfmask, tilethread, gpucdef, time, latelists, cleargrid, gpugrid, gpublists, default or none, "
+      Err += "-parseopt takes nolfmask, tilethread, gpucdef, time, cleargrid, gpugrid, gpublists, default or none, "
              "separated by commas, not \"";
       Err += word;
       Err += "\"";
@@ -401,9 +387,8 @@ int CParameters::Parse(one_task& args, std::string& Err) {
   params_.dumpdir_ = write_root_path_ + params_.dumpdir_;
   // -lowmem is all parts; -lowmemparts alone says exactly which ones (0: none); neither: the library's default for the decoder's size.
   if (params_.lowmem_) params_.lowmem_parts_ = PLAYER_LOWMEM_ALL;
-  // The defaults that have an opt-out flag. -cdefv2 and -fitsize are still accepted and change nothing;
-  // giving a flag together with its opposite was refused above.
-  params_.cdefv2_ = !params_.cdefv1_;
+  // The defaults that have an opt-out flag. -fitsize is still accepted and changes nothing; giving a
+  // flag together with its opposite was refused above. -cdefv2 is accepted and changes nothing.
   params_.fitsize_ = !params_.nofitsize_;
 
   params_.isDirectory_ = (params_.source_file_.empty() && !params_.source_dir_.empty());
@@ -471,11 +456,7 @@ void CParameters::Reset() {
   params_.output_.clear();
   params_.interop_ = false;
   params_.semi_planar_ = 0;
-  params_.cdefv2_ = true;
-  params_.cdefv1_ = false;
-  params_.cdefv3legacy_ = false;
-  params_.outputcopylegacy_ = false;
-  params_.frontmergelegacy_ = false;
+  params_.cdefv2_ = false;
   params_.displaypass_.clear();
   params_.displaydepth_ = 0;
   params_.displaydither_ = 0;
@@ -484,8 +465,6 @@ void CParameters::Reset() {
   params_.intraod_ = false;
   params_.intrafilterlegacy_ = false;
   params_.intrasingleedgelegacy_ = false;
-  params_.intralistslegacy_ = false;
-  params_.parselistslegacy_ = false;
   // 0: the task has no -slots (Parse() makes the default of it).
   params_.slots_ = 0;
   params_.slots_given_ = false;
