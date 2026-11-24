@@ -93,8 +93,11 @@ typedef struct av1_stage_dump av1_stage_dump;
 /*
  `Rav1gSettings::parser_options`, values to add up: ways of doing the parse (rav1d's parse pass)
  that give the same frames (docs/phase2-rav1d.md, "Where the time goes"). The values 1 and 256 were
- switches that are gone and mean nothing. This one: rav1d leaves out the masks and levels of its own loop
- filter, which nothing here reads. Part of `RAV1G_PARSER_OPTIONS_DEFAULT`.
+ switches that are gone and mean nothing. The values 16, 32, 1024 and 4096 were switches retired with
+ interface version 3 (`LATE_LISTS`, `CLEAR_GRID`, `GPU_GRID_CHECK`, `GPU_PRED_LISTS`):
+ `rav1g_decoder_create` refuses settings that have one of them (`RAV1G_STATUS_INVALID_PARAM`). This
+ one: rav1d leaves out the masks and levels of its own loop filter, which nothing here reads. Part of
+ `RAV1G_PARSER_OPTIONS_DEFAULT`.
  */
 #define RAV1G_PARSER_OPTION_NO_LF_MASKS 2
 
@@ -108,20 +111,6 @@ typedef struct av1_stage_dump av1_stage_dump;
  The calls of the sink are timed, for a timing run (`rav1g_set_perf_callback`).
  */
 #define RAV1G_PARSER_OPTION_TIME_CALLS 8
-
-/*
- The block lists of a tile are counted when the tile is parsed, in one pass over its mode info, and
- not superblock by superblock while the mode info is in the cache. The way of before, for a timing of
- the two against each other.
- */
-#define RAV1G_PARSER_OPTION_LATE_LISTS 16
-
-/*
- The mode info grid of a pipeline slot is cleared for every frame, and not only for a frame of
- another size than the frames before it on the slot. The way of before, for a timing of the two
- against each other.
- */
-#define RAV1G_PARSER_OPTION_CLEAR_GRID 32
 
 /*
  For a test of the decoder, never for an application: the parse of the third frame panics, on the
@@ -150,14 +139,6 @@ typedef struct av1_stage_dump av1_stage_dump;
 #define RAV1G_PARSER_OPTION_GPU_CDEF_LISTS 512
 
 /*
- A check of the decoder, not a way of doing the parse: a pass of every frame's command list builds the
- frame's mode info grid from its records into a second grid of the pipeline slot, and the decoder holds
- it against the grid the parse wrote when the frame is done (`GRIDCHECK` in the log of its release).
- Clear `RAV1G_PARSER_OPTION_GPU_GRID` to use the check. Every slot then has the second grid.
- */
-#define RAV1G_PARSER_OPTION_GPU_GRID_CHECK 1024
-
-/*
  The mode info grid of a frame (for every 4x4 unit the record of its block) is built by a pass of the
  frame's command list from the frame's mode info records, in front of every stage that reads it, and
  not written by the threads that parse (1.98 MiB a 4K frame, 1.1 to 1.2 ms a frame of those threads on
@@ -166,12 +147,6 @@ typedef struct av1_stage_dump av1_stage_dump;
  `RAV1G_PARSER_OPTION_GPU_CDEF_LISTS`, set or not. Part of `RAV1G_PARSER_OPTIONS_DEFAULT`.
  */
 #define RAV1G_PARSER_OPTION_GPU_GRID 2048
-
-/*
- Build the inter, warp and reconstruction prediction lists on the GPU. The parser keeps the
- intra wavefront and its lists. Off by default.
- */
-#define RAV1G_PARSER_OPTION_GPU_PRED_LISTS 4096
 
 /*
  The most frames a decoder parses at the same time (`Rav1gSettings::frames_in_parse`).
@@ -206,33 +181,6 @@ typedef struct av1_stage_dump av1_stage_dump;
  The lists of the fast inter path with the size-list shaders on all of them.
  */
 #define RAV1G_INTER_FAST_LISTS_ONLY 7
-
-/*
- `rav1g_set_clears`, the default: the wavefront of intra prediction is kept in a few KB at the edges of
- the tiles, and its grid in the pipeline slot (3.5 MB of a 4K frame) is not cleared at all. A grid
- that still needs a clear for every frame (the mode info grid with `RAV1G_PARSER_OPTION_CLEAR_GRID`) is cleared by
- the completion thread.
- */
-#define RAV1G_CLEARS_NOT_NEEDED 0
-
-/*
- `rav1g_set_clears`: the wavefront in its grid; the command list of a frame ends with the clear of the
- slot's grids, so no thread of the CPU clears them. Only in a decoder created while this mode was set;
- in any other decoder it is `RAV1G_CLEARS_COMPLETION_THREAD`.
- */
-#define RAV1G_CLEARS_GPU 1
-
-/*
- `rav1g_set_clears`: the wavefront in its grid; the completion thread clears the grids after the fence
- of the frame that used the slot (the default up to package 0.2.144).
- */
-#define RAV1G_CLEARS_COMPLETION_THREAD 2
-
-/*
- `rav1g_set_clears`: the wavefront in its grid; the decode thread clears the grids when it takes the
- slot for a frame.
- */
-#define RAV1G_CLEARS_DECODE_THREAD 3
 
 /*
  `rav1g_set_poison_buffers`: the mode info pool.
@@ -434,7 +382,7 @@ typedef struct av1_stage_dump av1_stage_dump;
  `rav1g_abi_version` returns the value the library was built with; an application that loads the
  library at run time compares the two and refuses a library with another value.
  */
-#define RAV1G_ABI_VERSION 2
+#define RAV1G_ABI_VERSION 3
 
 /*
  How a call ended.
@@ -1371,50 +1319,15 @@ enum Rav1gStatus rav1g_decoder_set_operating_point(struct Rav1gDecoder *decoder,
 void rav1g_decoder_destroy(struct Rav1gDecoder *decoder);
 
 /*
- CDEF through `cdef_filter_v2.hlsl` (true, the default) or `cdef_filter.hlsl`.
- */
-void rav1g_set_cdef_v2(bool enable);
-
-/*
  Intra prediction through `intra_v2.hlsl`; only in a decoder created with `Rav1gSettings::intra_v2`.
  */
 void rav1g_set_intra_v2(bool enable);
-
-/*
- The optimized intra main shaders (true, default) or the legacy kernels (false).
- */
-void rav1g_set_intra_opt(bool enable);
-
-/*
- What a frame does about the two grids of its pipeline slot that used to be cleared for every frame
- (`RAV1G_CLEARS_*`; a value that is none of them is the default, `RAV1G_CLEARS_NOT_NEEDED`): whether
- the wavefront grid of intra prediction has to be cleared at all, and who clears what has to be. The
- output is the same in every mode. Like the other switches it is set while no frame is in flight;
- `RAV1G_CLEARS_GPU` has to be set before the decoder is created.
- */
-void rav1g_set_clears(uint32_t mode);
-
-/*
- The older form of `rav1g_set_clears`: `true` is `RAV1G_CLEARS_NOT_NEEDED`, the default; `false` is
- `RAV1G_CLEARS_DECODE_THREAD`.
- */
-void rav1g_set_async_clear(bool enable);
 
 /*
  The fast inter path: 0, or `RAV1G_INTER_FAST_ON` with the `RAV1G_INTER_FAST_*` bits; only in a decoder
  created with `Rav1gSettings::inter_fast`.
  */
 void rav1g_set_inter_fast(uint32_t mode);
-
-/*
- Experiment: how the horizontal loop filter is dispatched, 0 (one dispatch per plane), 1 or 2.
- */
-void rav1g_set_lf_h_split(uint32_t mode);
-
-/*
- Experiment: the 8-bit above edge filter bound of the intra shader.
- */
-void rav1g_set_intra_edge_fix(bool enable);
 
 /*
  Experiment (a library whose `rav1g_shader_variant` is "shader-pick"): which bytecode the pipeline

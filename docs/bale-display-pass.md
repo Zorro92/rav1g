@@ -125,7 +125,9 @@ and the FFmpeg/D3D11VA AV1 paths keep the stage as it is.
 branch), and its copies of `rav1g.h` and `av1_perf.h`:
 
 1. **Interface version.** The new `rav1g.h`, `static_assert(RAV1G_ABI_VERSION == 2, ...)` and the
-   run-time check of `rav1g_abi_version()` against 2. Bale's loader refuses a version-1 DLL, or the fork
+   run-time check of `rav1g_abi_version()` against 2 (3 with the retired switches of
+   [integration.md](integration.md#interface-version-3-the-retired-switches), which the fork does not
+   call: only the number and the header change). Bale's loader refuses a version-1 DLL, or the fork
    keeps a version-1 path (no display pass, the stage as today) for one.
 2. **`av1_perf.h`**, copied verbatim as today: `av1_perf_frame` has one GPU stage more
    (`AV1_PERF_GPU_DISPLAY`, so `gpu_stage_ms` and `gpu_stage_hits` have 22 entries) and the output path

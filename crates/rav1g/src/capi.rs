@@ -52,8 +52,11 @@ pub const RAV1G_LOW_MEMORY_DEFAULT: u32 = 16;
 
 /// `Rav1gSettings::parser_options`, values to add up: ways of doing the parse (rav1d's parse pass)
 /// that give the same frames (docs/phase2-rav1d.md, "Where the time goes"). The values 1 and 256 were
-/// switches that are gone and mean nothing. This one: rav1d leaves out the masks and levels of its own loop
-/// filter, which nothing here reads. Part of `RAV1G_PARSER_OPTIONS_DEFAULT`.
+/// switches that are gone and mean nothing. The values 16, 32, 1024 and 4096 were switches retired with
+/// interface version 3 (`LATE_LISTS`, `CLEAR_GRID`, `GPU_GRID_CHECK`, `GPU_PRED_LISTS`):
+/// `rav1g_decoder_create` refuses settings that have one of them (`RAV1G_STATUS_INVALID_PARAM`). This
+/// one: rav1d leaves out the masks and levels of its own loop filter, which nothing here reads. Part of
+/// `RAV1G_PARSER_OPTIONS_DEFAULT`.
 pub const RAV1G_PARSER_OPTION_NO_LF_MASKS: u32 = 2;
 /// A tile stays on the thread it is on between its superblock rows. Part of
 /// `RAV1G_PARSER_OPTIONS_DEFAULT`.
@@ -876,7 +879,7 @@ pub extern "C" fn rav1g_last_error() -> *const c_char {
 /// struct, an enum, a function), and not for a constant, a comment or a change inside the library.
 /// `rav1g_abi_version` returns the value the library was built with; an application that loads the
 /// library at run time compares the two and refuses a library with another value.
-pub const RAV1G_ABI_VERSION: u32 = 2;
+pub const RAV1G_ABI_VERSION: u32 = 3;
 
 /// `RAV1G_ABI_VERSION` of the `rav1g.h` the library was built with. A loader compares it with the
 /// constant of the header it was compiled with before it uses anything else of the library.
@@ -1296,6 +1299,18 @@ impl Output for CallbackOutput {
     }
 }
 
+/// Why `parser_options` is refused: a bit of a switch retired with interface version 3 (16, 32, 1024,
+/// 4096), which would otherwise be ignored without a word. None when it is taken.
+fn parser_options_invalid(bits: u32) -> Option<String> {
+    let retired = bits & crate::ParserOptions::RETIRED;
+    (retired != 0).then(|| {
+        format!(
+            "parser_options has the bits {retired:#x} of switches retired with interface version 3 \
+             (16 late lists, 32 clear grid, 1024 GPU grid check, 4096 GPU prediction lists)"
+        )
+    })
+}
+
 /// Creates a decoder on a device; waits for the pipeline states of the device when they are still being
 /// created. `*decoder` is the decoder, or null with the reason as the result and in `rav1g_last_error`.
 /// The context of the output callbacks and of the budget callback must stay valid until
@@ -1320,6 +1335,9 @@ pub unsafe extern "C" fn rav1g_decoder_create(
     };
     if let Some(what) = display_invalid(&settings.display) {
         return set_last_error(&Error::new(ErrorCode::InvalidParam, what));
+    }
+    if let Some(what) = parser_options_invalid(settings.parser_options) {
+        return set_last_error(&Error::new(ErrorCode::InvalidParam, &what));
     }
     if settings.output.get_image.is_none() || settings.output.frame.is_none() {
         return set_last_error(&Error::new(
@@ -1737,4 +1755,22 @@ pub unsafe extern "C" fn rav1g_set_log_callback(callback: Rav1gLogCallback, cont
             unsafe { callback(context.0, is_error, line.as_ptr()) }
         })
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_bits_of_retired_parser_switches_are_refused() {
+        assert!(parser_options_invalid(RAV1G_PARSER_OPTIONS_DEFAULT).is_none());
+        assert!(parser_options_invalid(RAV1G_PARSER_OPTIONS_DEFAULT | RAV1G_PARSER_OPTION_TIME_CALLS).is_none());
+        assert!(parser_options_invalid(0).is_none());
+        // 1 and 256 were retired before and mean nothing, as they did.
+        assert!(parser_options_invalid(1 | 256).is_none());
+        for bit in [16, 32, 1024, 4096] {
+            let what = parser_options_invalid(RAV1G_PARSER_OPTIONS_DEFAULT | bit).expect("refused");
+            assert!(what.contains(&format!("{bit:#x}")), "{what}");
+        }
+    }
 }

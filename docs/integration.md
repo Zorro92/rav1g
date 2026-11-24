@@ -245,6 +245,29 @@ apart ([bale-display-pass.md](bale-display-pass.md#how-close-to-bales-stage)).
 takes the upscaled frame), other primaries than BT.709 and BT.2020 (taken as BT.709), and the BT.2020
 constant-luminance matrix (taken as NCL).
 
+## Interface version 3: the retired switches
+
+A draft on branch `exp/cleanup-opus` (fingerprint `267a0692fc675929`), not released. It changes no
+struct, no output and no default; it takes out of `rav1g.h` what only test runs used, A/B switches whose
+new path is the default and experiments that lost ([test-player.md](test-player.md#retired-switches)):
+
+- the functions `rav1g_set_cdef_v2`, `rav1g_set_intra_opt`, `rav1g_set_clears`, `rav1g_set_async_clear`,
+  `rav1g_set_lf_h_split` and `rav1g_set_intra_edge_fix`, and the constants `RAV1G_CLEARS_*`. Their
+  defaults are what the decoder does: CDEF through `cdef_filter_v3`, the optimized intra kernels, no
+  clears of a slot (the wavefront of intra prediction at the edges of the tiles), the horizontal loop
+  filter in one dispatch per plane.
+- the parser option bits `RAV1G_PARSER_OPTION_LATE_LISTS` (16), `_CLEAR_GRID` (32), `_GPU_GRID_CHECK`
+  (1024) and `_GPU_PRED_LISTS` (4096). The other bits keep their values, and
+  `RAV1G_PARSER_OPTIONS_DEFAULT` is 2566 as before. `rav1g_decoder_create` refuses settings with one of
+  the four retired bits (`RAV1G_STATUS_INVALID_PARAM`, the bits in `rav1g_last_error`) rather than
+  ignoring them; 1 and 256, retired earlier, still mean nothing.
+
+An application that uses none of them (`rav1g_settings_default`, the perf callback) only takes the new
+header and checks for version 3. `av1_perf.h`, which an application may copy for the timing record,
+loses the declarations of the internal `av1_*` setters of the same switches; `av1_perf_frame` keeps its
+layout (640 bytes on x64, 22 GPU stages: `slot_clear`, `pred_count` and `pred_scan` keep their places and
+have no time any more).
+
 ## Loading the library at run time: the interface version
 
 `rav1g_abi_version()` returns `RAV1G_ABI_VERSION` of the `rav1g.h` the library was built with. A loader
@@ -261,7 +284,8 @@ reserved words) adds the display pass: `Rav1gDisplay`, `Rav1gSettings::display` 
 `Rav1gFrame::display_transform`, `source_width`, `source_height` and `source_color` behind `format`, the
 `RAV1G_DISPLAY_TRANSFORM_*`, `RAV1G_TONE_CURVE_*` and `RAV1G_DISPLAY_DITHER_*` constants ([The display pass](#the-display-pass-interface-version-2)). An application
 of version 1 recompiled against it and filling the settings with `rav1g_settings_default` gets the
-output of version 1.
+output of version 1. Version 3 (a draft, not released: branch `exp/cleanup-opus`, fingerprint
+`267a0692fc675929`) takes the retired switches out ([Interface version 3](#interface-version-3-the-retired-switches)).
 
 ## Releases
 
