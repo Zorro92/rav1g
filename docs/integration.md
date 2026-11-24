@@ -122,8 +122,8 @@ it at most as many frames in parse) lower.
 
 ## The display pass (interface version 2)
 
-A draft on branch `exp/display-abi2-opus` (2026-11-23), not released. With `Rav1gSettings::display`
-the decoder writes every output image at a display size, downscaled and tone-mapped to BT.709 SDR, the
+A draft on branch `exp/display-abi2-opus` (2026-11-23), with the 1:1 and 3:2 paths and the dither of
+`exp/display-v2-opus`; not released. With `Rav1gSettings::display` the decoder writes every output image at a display size, downscaled and tone-mapped to BT.709 SDR, the
 work an application's own stage does after the decoder today (Bale's D3D11 stage for 4K AV1 on a 1080p
 display; the design, the costs and what it saves: [stage-fusion.md](stage-fusion.md), what Bale and its
 fork would change: [bale-display-pass.md](bale-display-pass.md)). One compute pass at the end of the
@@ -144,21 +144,23 @@ settings.output_kind = RAV1G_OUTPUT_SEMI_PLANAR;   /* needed */
 settings.display.width = 1920;                     /* the image size */
 settings.display.height = 1080;
 /* optional: settings.display.source_peak_nits = 1000; target_white_nits = 100; depth = 10;
+   dither = RAV1G_DISPLAY_DITHER_AUTO;
    assumed_* = the container's code points where the sequence header says "unspecified" */
 ```
 
 | Field | Meaning | 0 |
 | --- | --- | --- |
-| `width`, `height` | the size of every image, rounded up to even, at most 16384; any ratio to the frame (exactly half in both is the fast path) | no display pass |
+| `width`, `height` | the size of every image, rounded up to even, at most 16384; any ratio to the frame (exactly half, the same size and two thirds in both are the fast paths: 4K to 1080p, 4K to 4K, 4K to 1440p) | no display pass |
 | `transform` | `RAV1G_DISPLAY_TRANSFORM_AUTO`, or one of the transforms below for every frame whatever its colour says | by each frame's colour |
 | `tone_curve` | `RAV1G_TONE_CURVE_BT2390`; `RAV1G_TONE_CURVE_HABLE` is not in this version (`RAV1G_STATUS_INCAPABLE`) | BT.2390 |
 | `source_peak_nits` | the PQ and HLG light the EETF maps to the SDR range, up to 10000 | 1000 |
 | `target_white_nits` | the SDR white; the EETF ends at 2.03 times it (203 nits for 100) | 100 |
 | `desaturation` | not in this version: 0 (another value is `RAV1G_STATUS_INCAPABLE`) | none |
-| `depth` | 10: P010; 8: NV12 (rounded, not dithered) | by `Rav1gSettings::bit_depth` |
+| `depth` | 10: P010; 8: NV12 | by `Rav1gSettings::bit_depth` |
+| `dither` | `RAV1G_DISPLAY_DITHER_AUTO` (an ordered dither for NV12, rounded P010), `_OFF` (rounded), `_ORDERED` (dithered at either depth) | auto |
 | `assumed_primaries`, `assumed_transfer_characteristics`, `assumed_matrix_coefficients` | H.273 code points taken where the sequence header says unspecified (2) | none: unspecified is BT.709 SDR |
 | `assumed_chroma_sample_position` | the AV1 `chroma_sample_position` taken where the header says 0 (unknown) | none: unknown is between rows |
-| `reserved` | zero | |
+| `reserved` (3) | zero | |
 
 **The transforms** (`RAV1G_DISPLAY_TRANSFORM_*`; the same numbers are `Rav1gFrame::display_transform`):
 
@@ -176,6 +178,20 @@ pixels its footprint covers, weighted by their overlap, in display-linear light;
 in linear light over three output columns and two rows (left-sited); BT.709 limited-range codes. Film
 grain (AV1 7.18.3) is applied to the frame before it is downscaled. A monochrome frame takes the pass
 too, with neutral chroma, so that every image of a decoder has one size.
+
+**The dither.** The last quantisation is `floor(v + t)`: `t` is 1/2 (rounding), or with the dither a
+threshold at the output sample from the R2 sequence (M. Roberts, "The unreasonable effectiveness of
+quasirandom sequences", 2018): `frac(x / g + y / g^2)` for the plastic number g = 1.3247..., in 32-bit
+fixed point (`x * 0xc13fa9a9 + y * 0x91e10da6`), its top 8 bits, `(t8 + 1/2) / 256`. Luma takes it at its
+pixel, Cb at its chroma sample, Cr at the transposed sample (x and y swapped), so that Cb and Cr do not
+step together. Why this one: its 256 levels have mean 1/2, so a flat area keeps its level and every code
+is within one of the exact value; it has no period (an 8x8 Bayer matrix's cross-hatch is a period of 8)
+and its rows and columns are unbiased: on a slow 8-bit ramp the column means stay within 0.01 of a code of
+the exact value, where Bayer's are up to 0.32 off; filtered like the eye at a few pixels (a Gaussian of
+1.5-2.5 pixels) its noise is the same as Bayer's (0.018 against 0.015 of a code rms); it needs no table
+(integer arithmetic, about 6 instructions a sample); and it is the same for every frame, so a still picture
+stays still. `testing/display_pass` holds it bit for bit against the model, and fails a run in which more
+than 2% of the codes of a plane differ (a dither missing or not the model's moves about half of them).
 
 **The images.** `Rav1gImageRequest::width` and `height` are the display size, `format` is
 `RAV1G_IMAGE_FORMAT_P010` for depth 10 and `RAV1G_IMAGE_FORMAT_NV12` for depth 8, for every frame.
@@ -201,21 +217,33 @@ first frame on; one with another frame size changes `source_width` and `source_h
 change (another size or depth) is a new decoder too. A frame shown again (`show_existing_frame`) takes the
 pass again into its own image.
 
-**The cost** is on the decoder's queue: one dependent step and the pass a shown frame, 31 MB moved at
-3840x2160 10-bit to 1920x1080 (the frame buffer read, the image written) against ~156 MB of the 4K image
-and a three-draw stage. On the console before this branch the pass took 1.98 ms a 4K SDR frame; this
-branch expects ~0.7-0.9 ms for SDR and ~1.1-1.3 ms for PQ (not measured yet; the basis is in
-[stage-fusion.md](stage-fusion.md#the-display-pass-faster-reads-one-pipeline-a-mode)). The timing run's
-`copy_plane` mark is the pass.
+**The cost** is on the decoder's queue: one dependent step and the pass a shown frame, bound by its
+arithmetic (the console's slice of the GPU, 1.86 TFLOP/s), not by its bytes. Per 4K 10-bit frame, P010
+(measured on the console for 2:1, idle state; the rest expected from the RDNA2 listing scaled by what
+2:1 measured, basis in [stage-fusion.md](stage-fusion.md#11-32-and-the-dither)):
+
+| Image | Path | Bytes (read + written) | SDR | PQ (HDR10) | HLG |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 1920x1080 | 2:1 | 24.9 + 6.2 MB | 1.01 ms measured | 1.19 measured, ~1.16 now | ~1.45 |
+| 2560x1440 | 3:2 | 24.9 + 11.1 MB | ~1.6 | ~1.8 | ~2.0 |
+| 3840x2160 | 1:1 | 24.9 + 24.9 MB | ~2.3 | ~2.45 | ~2.7 |
+| other | area loop | | slower (36 reads a quad, one after the other) | | |
+
+NV12 with the dither adds ~0.03 ms at 1080p and ~0.1 ms at 4K and writes a quarter less. The timing
+run's stage `display` (`AV1_PERF_GPU_DISPLAY` of `av1_perf_frame`, with `output_path`
+`AV1_PERF_OUTPUT_DISPLAY`) is the pass; `copy_plane` is not dispatched.
 
 **Exactness.** The image is not bit-exact against an application's own stage, nor across GPUs: float32
 in a compute shader. `testing/display_pass` holds every code against a float32 model of the pass
 (`model.py`) within one code: the shader compiled as C++ on test frames (precheck, CI `sync-check`) and
-the decoder on WARP (CI `rust-output`).
+the decoder on WARP (CI `rust-output`). Against Bale's own CPU reference of its stage (its default
+settings, P010, on the C++ check's frames: 2:1, 1:1, 3:2 and the area loop; PQ, HLG, BT.2020 and BT.709
+SDR; both sitings, full range) the pass is within one code as well, at most 0.5% of a plane's codes one
+apart ([bale-display-pass.md](bale-display-pass.md#how-close-to-bales-stage)).
 
-**Not in this version**: the Hable curve, desaturation, the NV12 dither, HDR (PQ) targets, the AV1
-render size (the pass takes the upscaled frame), other primaries than BT.709 and BT.2020 (taken as
-BT.709), and the BT.2020 constant-luminance matrix (taken as NCL).
+**Not in this version**: the Hable curve, desaturation, HDR (PQ) targets, the AV1 render size (the pass
+takes the upscaled frame), other primaries than BT.709 and BT.2020 (taken as BT.709), and the BT.2020
+constant-luminance matrix (taken as NCL).
 
 ## Loading the library at run time: the interface version
 
@@ -227,10 +255,11 @@ library: `rav1g-header --check` (CI) fails when the declarations of the header h
 number has not (`tools/rav1g-header/abi.txt` has the fingerprint of the declarations of each version).
 Version 1 is the interface since package 0.2.202; a library older than that has no `rav1g_abi_version`,
 and a loader that finds no such export refuses it too. `rav1g_version()` is the text for a log.
-Version 2 (the draft of branch `exp/display-abi2-opus`, fingerprint `d754ced4ce571264`) adds the display
-pass: `Rav1gDisplay`, `Rav1gSettings::display` behind `output`, `Rav1gFrame::display_transform`,
-`source_width`, `source_height` and `source_color` behind `format`, the `RAV1G_DISPLAY_TRANSFORM_*` and
-`RAV1G_TONE_CURVE_*` constants ([The display pass](#the-display-pass-interface-version-2)). An application
+Version 2 (a draft, not released: branch `exp/display-abi2-opus` had fingerprint `d754ced4ce571264`,
+`exp/display-v2-opus` has `4c4ff3bb6491dd86`, with `Rav1gDisplay::dither` in the first of its four
+reserved words) adds the display pass: `Rav1gDisplay`, `Rav1gSettings::display` behind `output`,
+`Rav1gFrame::display_transform`, `source_width`, `source_height` and `source_color` behind `format`, the
+`RAV1G_DISPLAY_TRANSFORM_*`, `RAV1G_TONE_CURVE_*` and `RAV1G_DISPLAY_DITHER_*` constants ([The display pass](#the-display-pass-interface-version-2)). An application
 of version 1 recompiled against it and filling the settings with `rav1g_settings_default` gets the
 output of version 1.
 

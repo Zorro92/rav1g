@@ -18,6 +18,7 @@ its fork would change.
 - [The prototype (`-displaypass`)](#the-prototype--displaypass)
 - [The display pass, fast](#the-display-pass-fast)
 - [The display pass, faster: reads, one pipeline a mode](#the-display-pass-faster-reads-one-pipeline-a-mode)
+- [1:1, 3:2 and the dither](#11-32-and-the-dither)
 - [The ABI it needs](#the-abi-it-needs)
 
 ## Conclusion
@@ -398,6 +399,85 @@ the console's A/B is the measurement.
 10-bit one into NV12, BT.601, PQ with BT.709 primaries, colocated SDR, colocated 8-bit HLG) within one
 code of the model (most within zero), and 12 mutations rejected (among them the chroma rows of the second
 step, the right chroma edge, the edge column, the 8-bit chroma pair and the output depth).
+
+## 1:1, 3:2 and the dither
+
+Branch `exp/display-v2-opus` (2026-11-23). Bale's stage runs for an HDR source on an SDR display at any
+size, 1:1 included (a 4K SDR TV showing HDR10), and for an SDR source larger than the display; the display
+is the console's HDMI mode, 1920x1080 or 3840x2160 in practice, 2560x1440 possible, with the source fitted
+into it. So 1:1 and 2:1 are the sizes that matter, 3:2 the next. Before this branch only 2:1 had a fast
+path; 1:1 and 3:2 took the area loop: per output pixel a loop over its source pixels, each with nine
+separate 4-byte reads (luma and the four chroma neighbours of U and V) the compiler waits for one by one,
+and each source pixel decoded again by every output pixel that overlaps it.
+
+**The block paths** (`quad_block`, `display_pass.hlsl`). At exactly n:2 in both axes a thread's 2x2 output
+pixels come from an n x n block of source pixels: n 2 at 1:1, n 3 at 3:2. A quad reads, all together, n
+luma rows of 8 bytes and a window of three chroma rows of three columns of U and V (8 bytes each); each
+source pixel is decoded once, its chroma interpolated at its siting from the window (the weights 0, 1/4,
+1/2, 3/4: exact in float32 like the model's), and weighted by its exact overlap with the output pixels:
+1 at 1:1; at 3:2, along an axis, 1, 1/2, 0 for the first output pixel and 0, 1/2, 1 for the second, the
+sums over 2.25 (the area weights of 3840 to 2560). The output chroma, the edge column of a tile and the
+stores are the 2:1 path's. The sizes: 3840x2160 to 3840x2160 and 1920x1080 to 1920x1080 (1:1), 3840x2160
+to 2560x1440 and 1920x1080 to 1280x720 (3:2); a ratio that is not exact in both axes (3840x1600 fitted
+into 2560x1440 is 2560x1066) keeps the area loop.
+
+**Cheaper encode.** After the late clip (every transform but BT.709 SDR's scale) the values are 0..1, so
+the inverse BT.1886 is the power alone, without the sign and the cap of the unclipped path: 4 instructions
+a channel less, 60 a quad, the same values.
+
+**Registers** (RDNA2, LLPC, `testing/shader_regs`; the pipelines hold every path): PQ 114 VGPRs (from
+112), SDR 64 (63), HLG 68 (65): the same 4, 8 and 6 waves a SIMD. The paths alone (a variant of the shader
+with one path, not built): PQ 2:1 67, 1:1 62, 3:2 64; SDR 68, 35, 56.
+
+**Expected on the console.** Counted from the RDNA2 listing of variants with one path each (the 2:1
+step loop unrolled and the rare near-black branch of PQ taken out, so that the count is what a quad
+executes): VALU instructions a quad, of them transcendental (quarter rate, four cycles), and lane cycles
+(one an instruction, four a transcendental). Quads: the output pixels / 4, plus 6% for the edge column
+(one of a group's four waves computes it, half full). The slice's ALUs do 0.93 T lane cycles a second.
+2:1 measured 1.01 ms (SDR) and 1.19 ms (PQ) on the console where this count gives 0.78 and 0.88 ms: the
+pass runs at ~1.3 times its ALU time (SDR 1.30, PQ 1.35), and that factor scales the others.
+
+| Path, mode | VALU a quad (transc.) | Lane cycles a quad | Lane cycles an output pixel | Quads | ALU time | Expected | Traffic (read + written) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 2:1 SDR (1080p) | 933 (126) | 1311 | 328 | 0.55 M | 0.78 ms | 1.01 ms measured | 31 MB, 0.69 ms |
+| 2:1 PQ | 1368 (30) | 1458 | 365 | 0.55 M | 0.86 ms | 1.16 ms (1.19 measured before the encode change) | 31 MB |
+| 2:1 HLG | 1512 (126) | 1890 | 473 | 0.55 M | 1.12 ms | ~1.45 ms | 31 MB |
+| 3:2 SDR (1440p) | ~913 (84) | ~1165 | 291 | 0.98 M | 1.22 ms | ~1.6 ms | 36 MB, 0.80 ms |
+| 3:2 PQ | 1154 (30) | 1244 | 311 | 0.98 M | 1.31 ms | ~1.8 ms | 36 MB |
+| 3:2 HLG | 1238 (84) | 1490 | 373 | 0.98 M | 1.57 ms | ~2.0 ms | 36 MB |
+| 1:1 SDR (4K) | ~578 (54) | ~740 | 185 | 2.20 M | 1.75 ms | ~2.3 ms | 50 MB, 1.10 ms |
+| 1:1 PQ | 677 (30) | 767 | 192 | 2.20 M | 1.81 ms | ~2.45 ms | 50 MB |
+| 1:1 HLG | 713 (54) | 875 | 219 | 2.20 M | 2.07 ms | ~2.7 ms | 50 MB |
+
+(SDR: BT.709 scale only; its pipeline also holds the clipped BT.2020 encode, which the static count
+includes and the dynamic one, here, does not. The PQ near-black branch: pixels whose largest signal is
+below 4e-4, rare.) A source pixel costs about the same on every path (PQ ~100 instructions: three EOTF
+table reads, the gain table, the decode and the chroma interpolation); what grows towards 1:1 is the
+encode, which is per output pixel (three powers for luma, a quarter of three for chroma: ~80 of PQ 1:1's
+192 lane cycles a pixel). At 1:1 the traffic is the copy pass's (1.10 ms) and stays under the arithmetic.
+
+Against what the stage costs today: at 1:1 Bale's stage evaluates each source pixel once for luma and
+six times a chroma sample (its 1:1 path has no intermediate), 20.7 M evaluations a 4K frame, which at 2:1
+cost ~10 ms on the console before Bale's restructuring; the fork also keeps copying the image into its
+pool (a 4K P010 `CopyResource`, ~1.2 ms at the idle state's copy rate), which a later step can remove
+([bale-display-pass.md](bale-display-pass.md)).
+
+**The dither** (`threshold`, [integration.md](integration.md#the-display-pass-interface-version-2)):
+about 6 instructions a sample (two multiplications, an addition, a shift, a conversion and an FMA), 36 a
+quad, only with the flag: +0.03 ms at 1080p, +0.1 ms at 4K (NV12; P010 with `RAV1G_DISPLAY_DITHER_ORDERED`
+the same).
+
+**Checked**: `testing/display_pass/run.sh --mutate`: 48 cases (26 before; the new ones 1:1 and 3:2 in
+every mode, both sitings, 8-bit frames, full range, near-black out of gamut, every code at random, and the
+dither on each path and depth), all within one code of the model and at most 0.5% of a plane's codes one
+apart; 24 mutations rejected, 12 of them new (the block paths' chroma rows, columns, window edge, first
+sample, weights and third row; the odd chroma edge; the dither threshold and its transposed Cr). CI
+`rust-output` runs the decoder on WARP at 1:1 too, at 0.6 of the size (the area loop), NV12 dithered and
+rounded, and P010 dithered.
+
+**Also fixed**: the area loop and the model took the last chroma column of an odd width as `w / 2 - 1`;
+an odd frame has `(w + 1) / 2` chroma columns (`(w + ss_x) >> ss_x`), so its last luma column took its
+chroma from one column too far left. Only the area loop sees odd sizes.
 
 ## The ABI it needs
 

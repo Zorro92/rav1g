@@ -1,107 +1,214 @@
 # Adopting rav1g's display pass in Bale and the fork
 
-A draft (2026-11-23, branch `exp/display-abi2-opus`, not released): what Bale and its FFmpegInteropX fork
-would change to let rav1g write the display-size, tone-mapped image that Bale's D3D11 stage writes today
-for AV1. The interface is `Rav1gSettings::display` of interface version 2
-([integration.md](integration.md#the-display-pass-interface-version-2)); the design and the measurements
-are in [stage-fusion.md](stage-fusion.md). Nothing here is decided: the owner decides on the interface.
+A draft (2026-11-23, branch `exp/display-v2-opus` on `exp/display-abi2-opus`, not released): what Bale and
+its FFmpegInteropX fork change to let rav1g write the display-size, tone-mapped image that Bale's D3D11
+stage writes today for AV1, and what they keep. The interface is `Rav1gSettings::display` of interface
+version 2 ([integration.md](integration.md#the-display-pass-interface-version-2)); the design and the
+measurements are in [stage-fusion.md](stage-fusion.md). Nothing here is decided: the owner decides on the
+interface and its release.
+
+The interface is not Bale's: a display size, a tone map with its two luminances, an output depth and
+dither, and the colour code points an application merges from its container. Another application (or a
+later backend of rav1g) sets them or leaves `display` zero, and then gets the plain decoder of interface
+version 1.
+
+- [When the stage runs, and the sizes](#when-the-stage-runs-and-the-sizes)
+- [Bale's default configuration, and what rav1g takes](#bales-default-configuration-and-what-rav1g-takes)
+- [How close to Bale's stage](#how-close-to-bales-stage)
+- [What goes away for AV1](#what-goes-away-for-av1)
+- [What the fork changes](#what-the-fork-changes)
+- [What Bale changes](#what-bale-changes)
+- [What Bale and the fork keep](#what-bale-and-the-fork-keep)
+- [Costs and savings](#costs-and-savings)
+
+## When the stage runs, and the sizes
+
+Bale's stage runs for (a) an HDR source on an SDR display, tone-mapped at any size, 1:1 included (a 4K SDR
+TV showing HDR10), and (b) an SDR source larger than the display, downscaled only. On an HDR display the
+video passes through, with no stage. The display is the console's HDMI mode: 1920x1080 or 3840x2160 in
+practice, 2560x1440 possible; the size is the source fitted into it, aspect kept, even
+(`VideoFrameProcessor::SelectOutputSize`; a source that fits keeps its size).
+
+| Source | Display | Image | rav1g's path | Expected, PQ (SDR) |
+| --- | --- | --- | --- | --- |
+| 3840x2160 | 1920x1080 | 1920x1080 | 2:1 | 1.19 ms measured, ~1.16 now (1.01 measured) |
+| 3840x2160 | 3840x2160 | 3840x2160 | 1:1 | ~2.45 ms (BT.709 SDR: no stage) |
+| 3840x2160 | 2560x1440 | 2560x1440 | 3:2 | ~1.8 ms (~1.6) |
+| 1920x1080 | 3840x2160 or 1920x1080 | 1920x1080 | 1:1 | ~0.6 ms (no stage for SDR) |
+| 3840x1600 (2.4:1) | 1920x1080 | 1920x800 | 2:1 | ~0.86 ms |
+| 3840x1600 | 2560x1440 | 2560x1066 | area loop (not exactly 3:2 vertically) | slower |
+
+Expected times are a 4K 10-bit frame on the console in the idle state (1080p and 1440p at the measured
+2:1 rate scaled by the instructions a quad of each path, [stage-fusion.md](stage-fusion.md#11-32-and-the-dither));
+HLG is about 15-25% above PQ.
+
+## Bale's default configuration, and what rav1g takes
+
+From the fork's `BaleToneMap` (`BaleToneMap.h`: `Create`, `Initialize`, `Process`) and `bale_tonemap.h`:
+
+| Bale's stage | Bale's default | `Rav1gDisplay` | |
+| --- | --- | --- | --- |
+| curve 1, BT.2390 EETF (knee offset 1, the largest original R'G'B' signal, a scalar gain) | yes | `tone_curve` 0 or `RAV1G_TONE_CURVE_BT2390` | the same |
+| curve 2, Hable | debug switch only | `RAV1G_TONE_CURVE_HABLE` | refused, `RAV1G_STATUS_INCAPABLE`: the fork keeps its stage |
+| `source_peak_nits` | 1000 (HLG too) | `source_peak_nits` 0 or 1000 | the same; HLG's OOTF at a 1000-nit display, as Bale |
+| `target_white_nits` | 100: the EETF ends at 2.03 x 100 = 203 nits, normalized to SDR 1 | `target_white_nits` 0 or 100 | the same (not 203: 203 would end the curve at 412 nits) |
+| `desat` | 0 (off) | `desaturation` 0 | the same; any other value is refused (`INCAPABLE`) |
+| downscale (`reserved[0..1]`, at most 4:1) | the source fitted into the display | `width`, `height` | any ratio; 2:1, 1:1 and 3:2 fast |
+| output P010 (`BALE_TONEMAP_OUTPUT_P010`) | P010 for AV1 (the owner's exception) | `depth` 10 (or 0 for a 10-bit decoder) | the same codes: `64 + 876 Y'`, `512 + 896 C`, rounded, `<< 6` |
+| output NV12 dithered (`BALE_TONEMAP_OUTPUT_NV12_DITHERED`) | 8-bit SDR displays, not AV1 | `depth` 8, `dither` 0 | dithered, but with rav1g's own R2 threshold, not Bale's 8x8 Bayer: codes one apart where the two thresholds fall on either side |
+| BT.709 SDR scale only (`BALE_TONEMAP_SDR709`) | SDR larger than the display | transform auto | the same: BT.1886 decode, area, encode, no clip |
+| BT.2020 SDR, gamut only | yes | transform auto | the same |
+| 8-bit input (`BALE_TONEMAP_INPUT_NV12`, read as code << 2) | yes | 8-bit sequences | limited range the same (8-bit codes by their 8-bit range equal `code << 2` in the 10-bit one); full range by 255 (H.273), where `code << 2` over 1023 is 0.3% lower at the top |
+| frame transfer, primaries, matrix, range | the stream's, unspecified merged from the container | the sequence header's; `assumed_*` where it says unspecified (2) | the same, fill only the unspecified values |
+| input chroma siting (`chroma_location`, AVChromaLocation) | the stream's: left and unspecified as left, topleft co-sited, center/top/bottom honoured | the sequence header's `chroma_sample_position`, `assumed_chroma_sample_position` where it is 0 | the same for what AV1 can say: vertical (left) and colocated (topleft); unknown as left. Center, top and bottom have no AV1 code point |
+| mastering display, content light | passed, not used by the curve | not used | the same (the frame's metadata stays the stream's) |
+| gamut step | `matrix == 9` | `primaries == 9` | the same for every stream Bale's stage takes (it declines mixed BT.2020/BT.709 tags) |
+| `gammachroma`, `nostaged` (debug) | off | none | Bale's old math and its other pass layout: no equivalent |
+
+So Bale's default configuration needs, of what it can hand to rav1g: BT.2390 with 1000 and 100 nits, no
+desaturation, P010 (NV12 dithered if the AV1 exception is ever lifted), the scale-only and gamut-only SDR
+transforms, 8-bit sources, the container's code points for unspecified ones, the stream's chroma siting.
+All of it is in this version; Hable and desaturation are refused so that the fork falls back.
+
+The method, point by point as Bale's stage does it since 2026-11-22: linear-light area downscale with
+exact overlap weights, each output pixel computed once; input chroma upsampled bilinearly at the stream's
+siting; per source pixel the sign-keeping decode, the tone curve on the largest original channel and
+BT.2020 to BT.709, unclipped; one clip at the end, per output pixel and per chroma footprint; output
+chroma left-sited, mixed in linear light over [1 2 1]/4 x [1 1]/2 (output columns 2i-1..2i+1, rows 2j,
+2j+1), clipped and encoded once; inverse BT.1886 (power 1/2.4). rav1g's pass does each of these, written
+from the standards (ST 2084, BT.2100, BT.2390, BT.2087, BT.709/BT.1886) and held to its own float32 model
+(`testing/display_pass/model.py`); no code of Bale's stage is in rav1g.
+
+## How close to Bale's stage
+
+Bale's CPU reference of its stage (`cpu::reference_p010` of `native/bale-gpu`, Bale's default
+configuration) and rav1g's pass (the shader compiled as C++, `testing/display_pass`), on the test frames of
+the C++ check (gradients, flat blocks, noise, samples out of the nominal range, every code at random,
+near-black out-of-gamut blocks), P010 (run locally on 2026-11-23, not part of CI; Bale's crate is
+AGPL-3.0 and is only run, not copied):
+
+| Cases | Codes that differ (largest share of a plane) | Largest difference |
+| --- | --- | --- |
+| 2:1, PQ, HLG, BT.2020 SDR, BT.709 SDR, full range, colocated, random codes, near black | 0.22% | 1 |
+| 1:1, the same | 0.29% | 1 |
+| 3:2 (block path and area loop), the same | 0.50% | 1 |
+| BT.709 SDR and BT.2020 SDR on every path | 0.04% | 1 (mostly 0) |
+
+The codes that differ are the same ones that differ between the pass and rav1g's model: Bale's reference
+and rav1g's model agree with each other, and the pass is one float32 rounding away from both. Bale holds
+its own GPU stage to its reference within 12 P010 codes (3 NV12). Not comparable: odd sizes, upscaling
+and BT.601 (Bale's reference declines them, rav1g takes them), and dithered NV12 (two different
+thresholds by design).
 
 ## What goes away for AV1
 
 On the rav1g path (`GpuDecoderSampleProvider` with a `BaleRav1gDecoder`) and only there; HEVC, H.264, VP9
 and the FFmpeg/D3D11VA AV1 paths keep the stage as it is.
 
-- **The stage's three draws a frame** (`BaleToneMap::Process`: the area pass into the 1920x1080 fp32
-  intermediate, the luma pass, the chroma pass) and the cross-API wait in front of them for each frame.
-- **The intermediate** (`R32G32B32A32_FLOAT` at the output size, 31.6 MiB at 1080p) and the stage's
-  own resources for rav1g streams (`bale_tonemap_create` is not called for them).
-- **rav1g's 4K images**: the image pool of a rav1g decoder holds display-size images (4 x 5.9 MiB P010 at
-  1080p instead of 4 x 23.7 MiB at 3840x2160): about -71 MiB, plus the intermediate's 31.6 MiB.
-- **The image hold**: the fork copies a 1080p image (6.2 MB at P010) into a texture of its pool and gives
-  the image back at once, where today the 4K image is held until the stage's three draws have read it
-  (the 13.7 ms a frame rav1g waits for an image in HDR10 at 60 Mbps).
+- **The stage's draws** (`BaleToneMap::Process`: at a downscale the area pass into the fp32 intermediate,
+  the luma pass and the chroma pass; at 1:1 the luma and the chroma pass) and the cross-API wait in front
+  of them for each frame.
+- **The intermediate** (`R32G32B32A32_FLOAT` at the output size, 31.6 MiB at 1080p) and the stage's own
+  resources for rav1g streams (`bale_tonemap_create` is not called for them).
+- **rav1g's 4K images** on a smaller display: the image pool of a rav1g decoder holds display-size images
+  (4 x 5.9 MiB P010 at 1080p, 4 x 10.5 MiB at 1440p, instead of 4 x 23.7 MiB at 3840x2160). At 1:1 the
+  images stay 4K.
+- **The image hold**: the fork copies the image into a texture of its pool and gives it back at once,
+  where today the image is held until the stage's draws have read it (the 13.7 ms a frame rav1g waits for
+  an image in HDR10 at 60 Mbps).
 - **rav1g's own copy pass** of frames without a postfilter stage (38% of the frames of the 60 Mbps HDR10
   clip): the display pass reads the frame buffer and writes the image, nothing else is written.
 
 ## What the fork changes
 
-`BaleRav1g.h`, `GpuDecoderSampleProvider.h`, `FFmpegMediaSource.cpp` (the rav1g branch):
+`BaleRav1g.h`, `GpuDecoderSampleProvider.h`, `GpuDecoderImagePool.h`, `FFmpegMediaSource.cpp` (the rav1g
+branch), and its copies of `rav1g.h` and `av1_perf.h`:
 
-1. **Interface version.** `static_assert(RAV1G_ABI_VERSION == 2, ...)` and the run-time check of
-   `rav1g_abi_version()` against 2, with the new `rav1g.h`. Bale's loader refuses a version-1 DLL, or the
-   fork keeps a version-1 path (no display pass, the stage as today) for one.
-2. **Settings** (`BaleRav1g.h`, where it fills `Rav1gSettings` today): when the stage would run for the
-   stream (the condition of `FFmpegMediaSource.cpp` around `BaleToneMap::Create`: HDR, or SDR larger
-   than the target), fill `settings.display` instead of creating a `BaleToneMap`:
-   - `width`, `height`: what `VideoFrameProcessor::SelectOutputSize` gives today (the source fitted into
-     the target, aspect kept, even, at most 4:1 per axis); rav1g takes any size and ratio.
-   - `tone_curve`: `RAV1G_TONE_CURVE_BT2390` for Bale's curve 1. Hable (2) and a non-zero desaturation are
-     not in this version: `rav1g_decoder_create` returns `RAV1G_STATUS_INCAPABLE`, and the fork creates
-     the decoder again without `display` and keeps the stage.
-   - `source_peak_nits`, `target_white_nits`: the `BaleToneMapConfig` values (1000 and 100 by default;
-     0 is the same).
-   - `depth`: 10 for P010 (Bale's rule for AV1), 8 for NV12. NV12 from rav1g is rounded, not dithered
-     (see "What Bale and the fork still do").
+1. **Interface version.** The new `rav1g.h`, `static_assert(RAV1G_ABI_VERSION == 2, ...)` and the
+   run-time check of `rav1g_abi_version()` against 2. Bale's loader refuses a version-1 DLL, or the fork
+   keeps a version-1 path (no display pass, the stage as today) for one.
+2. **`av1_perf.h`**, copied verbatim as today: `av1_perf_frame` has one GPU stage more
+   (`AV1_PERF_GPU_DISPLAY`, so `gpu_stage_ms` and `gpu_stage_hits` have 22 entries) and the output path
+   `AV1_PERF_OUTPUT_DISPLAY`; the record is 640 bytes on x64 (the fork's `static_assert` of its size
+   changes with it). `user_data` stays.
+3. **Settings** (`BaleRav1gDecoder`, where it fills `Rav1gSettings` today): when the stage would run for
+   the stream (the condition of `FFmpegMediaSource.cpp` around `BaleToneMap::Create`: HDR on an SDR
+   display, or SDR larger than the target), fill `settings.display` instead of creating a `BaleToneMap`:
+   - `width`, `height`: what `SelectOutputSize` gives (at 1:1 the source size);
+   - `tone_curve`: `RAV1G_TONE_CURVE_BT2390` for Bale's curve 1; curve 2 (Hable) or a non-zero
+     desaturation: `rav1g_decoder_create` returns `RAV1G_STATUS_INCAPABLE`, and the fork creates the
+     decoder again without `display` and keeps the stage;
+   - `source_peak_nits` 1000, `target_white_nits` 100 (the `BaleToneMapConfig` values; 0 is the same);
+   - `depth`: 10 for P010 (Bale's rule for AV1), 8 for NV12; `dither` 0 (NV12 dithered, P010 rounded);
    - `assumed_primaries`, `assumed_transfer_characteristics`, `assumed_matrix_coefficients`: the
-     container's code points (`streamColor` of `MergeStreamColor`, AVCOL_* are H.273 numbers), used only
-     where the sequence header says unspecified (2), as `MergeStreamColor` merges today.
-     `assumed_chroma_sample_position`: from the container's `AVChromaLocation`, `AVCHROMA_LOC_LEFT` (1)
-     to 1 and `AVCHROMA_LOC_TOPLEFT` (3) to 2; 0 for the others (an AV1 sequence header can only say
-     these two, or unknown).
-   - `transform`: `RAV1G_DISPLAY_TRANSFORM_AUTO` (0). Each frame is tone-mapped by its own colour
-     description (PQ, HLG, BT.2020 SDR gamut, BT.709 SDR scaled only), so a new sequence with another
-     transfer needs nothing from the fork.
-3. **The image pool** (`GpuDecoderImagePool.h`): images of `request->width` x `request->height` as
-   today, which are now the display size; P010 (or NV12) by `request->format`; with
-   `D3D11_BIND_UNORDERED_ACCESS`, which the pool asks for already. A pool that falls back to textures
-   without unordered access cannot have the display pass (rav1g fails the temporal unit with a "DISPLAY"
-   log line): create the decoder without `display` then.
-4. **`OutputFrame`** (`GpuDecoderSampleProvider.h`):
+     container's code points (`streamColor` of `MergeStreamColor`; AVCOL_* are H.273 numbers), used only
+     where the sequence header says unspecified (2), as `MergeStreamColor` merges today. The fork's rule
+     that unspecified tags count as BT.709 only for video of 720p and larger stays the fork's: it decides
+     whether to set `display` at all;
+   - `assumed_chroma_sample_position`: from the container's `AVChromaLocation`, `AVCHROMA_LOC_LEFT` (1) to
+     1 and `AVCHROMA_LOC_TOPLEFT` (3) to 2; 0 for the others;
+   - `transform`: `RAV1G_DISPLAY_TRANSFORM_AUTO` (0): each frame by its colour description, so a new
+     sequence with another transfer needs nothing from the fork.
+4. **The image pool** (`GpuDecoderImagePool.h`): images of `request->width` x `request->height` as today,
+   which are now the display size; P010 (or NV12) by `request->format`; with `D3D11_BIND_UNORDERED_ACCESS`,
+   which the pool asks for already. A pool that falls back to textures without unordered access cannot
+   have the display pass (rav1g fails the temporal unit with a "DISPLAY" log line): create the decoder
+   without `display` then.
+5. **`OutputFrame`** (`GpuDecoderSampleProvider.h`):
    - the check of the frame's size against the stream's takes `frame.source_width` and
      `frame.source_height` (`width`/`height` are the image's: the display size);
    - `MergeStreamColor` takes `frame.source_color` for what the stream said (the stats, the sample's
-     attributes); the sample's colour is `frame.color`, BT.709 SDR limited range, chroma left
-     (`AVCHROMA_LOC_LEFT`), as the stage's output is today;
+     attributes); the sample's colour is `frame.color`, BT.709 SDR limited range, chroma left, as the
+     stage's output is today;
    - when `frame.display_transform` is not `RAV1G_DISPLAY_TRANSFORM_NONE`: `CopyResource` of the image
-     into a texture of `processedTexturePool` (the same texture size and format the stage's output has
-     today) in place of `frameProcessor->Process`. The copy stays, because the player keeps samples and
-     must never hold decoder images (the deadlock the comment there describes). A later step can let
-     rav1g write the player's textures directly when the pool sizes allow it;
+     into a texture of `processedTexturePool` (the stage's output size and format) in place of
+     `frameProcessor->Process`. The copy stays because the player keeps samples and must never hold
+     decoder images (the deadlock the comment there describes). It is cheap at 1080p (6.2 MB) and costs
+     ~1.2 ms at 1:1 4K (24.9 MB read and written at the idle state's copy rate); a later step can let
+     rav1g write the player's textures directly;
    - `ToneMappedOutputMark`, the media type at the display size and the fallback to `BaleToneMap` stay.
-5. **The stats pane**: "Stage GPU" for an AV1 stream is rav1g's display pass, the `copy_plane` mark of
-   `av1_perf_frame` (the GPU marks of the timing run); "Stage submit to GPU done" goes away for it.
+6. **The stats** (`BaleRav1gPerf::OnFrame`): the window sums `gpu_stage_ms[AV1_PERF_GPU_DISPLAY]` of the
+   frames that have it (`gpu_stage_hits`) as the display stage's GPU time, and the per-frame line can
+   print it next to `gpu`; `output_path` is `AV1_PERF_OUTPUT_DISPLAY` (6) for such frames.
+7. **A switch for the A/B** (an FFmpeg option next to `bale_tonemap`): create the rav1g decoder without
+   `display` and keep Bale's stage, so the same stream can be played both ways.
 
-## What Bale and the fork still do
+## What Bale changes
 
-- **The stage** for every other codec, for AV1 through FFmpeg/D3D11VA, for Hable and desaturation, and
-  for a rav1g DLL of interface version 1.
-- **Dither of NV12 on an 8-bit display** (`BALE_TONEMAP_OUTPUT_NV12_DITHERED`): rav1g rounds NV12. Bale
-  uses P010 for AV1, so this matters only if an 8-bit output is ever chosen for it; then the fork keeps
-  the stage, or rav1g gets the dither (an 8x8 ordered dither at the output pixel is a few instructions in
-  the pass's quantization).
-- **The colour attributes of the sample**, from `Rav1gFrame::color` (BT.709 SDR) and the HDR metadata
-  (`mastering_display`, `content_light`, which stay the stream's for the stats).
+- **The stats pane**: "Stage GPU" for an AV1 stream on the rav1g path is the display stage of the perf
+  record (item 6 above), not the stage's own timestamps (`bale_tonemap_debug_timing_read`, which has no
+  stage to measure then); "Stage submit to GPU done" goes away for it.
+- **The debug switch** that forces Bale's stage (item 7) for the A/B, in the same debug surface as the
+  stage's other switches.
+- Nothing in the playback policy: when to tone map, the display mode, the output depth rule and the
+  route are Bale's as today; rav1g only takes the result of those decisions.
+
+## What Bale and the fork keep
+
+- **The stage** for every other codec, for AV1 through FFmpeg/D3D11VA, for Hable and desaturation, and for
+  a rav1g DLL of interface version 1.
 - **The choice of the display size and the target**, which rav1g takes as given. A display mode change
   recreates the decoder (as a new sequence that needs `RAV1G_STATUS_NEEDS_RECONFIGURE` does).
-- **One math in two places**: rav1g's pass is written from the standards in the order of Bale's stage
-  and held to its own float32 model (`testing/display_pass/model.py`) at one code; holding both against
-  Bale's CPU reference (`src/tonemap/cpu.rs`, 3 NV12 / 12 P010 codes) is a step for Bale's side.
+- **The colour attributes of the sample**, from `Rav1gFrame::color` (BT.709 SDR) and the HDR metadata
+  (`mastering_display`, `content_light`, which stay the stream's for the stats).
+- **The copy into the fork's pool** (above), and the processed-output mark.
+- **One math in two places**: rav1g's pass and Bale's stage are written separately from the same
+  standards and agree within one P010 code (above); a change of the method (another curve, a per-frame
+  peak from the metadata) has to be made in both, or Bale keeps its stage for it.
 
-## Savings
+## Costs and savings
 
-Per 4K60 frame on a 1080p display ([stage-fusion.md](stage-fusion.md#what-each-saves) for the bytes):
+Per 4K60 HDR10 frame, rav1g's queue and Bale's on the console's one GPU
+([stage-fusion.md](stage-fusion.md#what-each-saves) for the bytes):
 
-| | Today (rav1g 4K image + Bale's stage) | rav1g display pass |
+| Display | Today: rav1g 4K image + Bale's stage | rav1g display pass + the fork's copy |
 | --- | --- | --- |
-| Bytes moved for the output | ~156 MB (3 draws, 1 cross-API wait) | ~31 MB (1 dispatch) |
-| Bale's stage on the console's shared GPU | up to ~5.6 ms SDR, ~9 ms HDR10 (Bale's logs) | none for AV1 |
-| rav1g's output pass | fused into the last stage (~0.2 ms), or the 1.10 ms copy (frames without a postfilter) | the display pass: 1.98 ms measured for SDR before this branch; expected ~0.7-0.9 ms SDR, ~1.1-1.3 ms PQ (below) |
-| Images | 4 x 23.7 MiB (4K P010) + 31.6 MiB intermediate | 4 x 5.9 MiB (1080p P010) |
+| 1920x1080 | output fused into the last stage (~0.2 ms) or the 1.10 ms copy; the stage up to ~5.6 ms SDR, ~9 ms HDR10 with the renderer (Bale's logs); ~156 MB moved, 3 draws, a cross-API wait | 1.19 ms measured (PQ; 1.01 SDR); the copy of 6.2 MB; ~31 MB moved |
+| 2560x1440 | the same as 1080p with a 2560x1440 intermediate | ~1.8 ms (PQ), the copy of 11 MB |
+| 3840x2160 (SDR TV) | the 4K output, and the stage's two draws: each source pixel evaluated once for luma and six times a chroma sample (20.7 M evaluations, what took ~10 ms at 2:1 before Bale's restructuring) | ~2.45 ms (PQ), the copy of 24.9 MB (~1.2 ms) |
 
-Measured on the console before this branch (test player, idle state, SDR 10-bit 4K60, `-output p010
--displaypass 1920x1080`): the pass 1.98 ms a frame, rav1g's GPU busy 8.88 to 10.67 ms a frame at 40 Mbps
-and 9.09 to 10.65 at 60 Mbps; Bale's SDR stage is up to ~5.6 ms, so the sum falls by ~3.8 ms even at
-1.98 ms. Expected with this branch (not measured on the console; basis in
-[stage-fusion.md](stage-fusion.md#the-display-pass-faster-reads-one-pipeline-a-mode)): SDR ~0.7-0.9 ms,
-so rav1g's GPU a frame ~9.6 ms instead of 8.9 + Bale's 5.6, and HDR10 ~1.1-1.3 ms against Bale's ~9 ms,
-which is what holds HDR10 at 60 Mbps at ~53 fps today.
+Memory: at 1080p 4 x 5.9 MiB of images instead of 4 x 23.7 MiB and the 31.6 MiB intermediate; at 1:1
+the images stay 4K, and Bale's stage has no intermediate there either. Measured on the console before this
+branch (test player, idle state): 4K60 HDR10 at 60 Mbps plays at ~53 fps in Bale with the stage; the pass
+at 1080p was 1.01 ms (SDR), 1.19 ms (PQ), 1.29 ms on a 4K50 stream, rav1g's GPU busy +0.55..0.8 ms against
+its plain 4K output.
