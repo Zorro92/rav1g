@@ -91,6 +91,7 @@ unsafe fn copy_to_img(dec: *const Av1Core, hw_img: &mut HwOutputImage, dst: &mut
     dst.display_transform = hw_img.display_transform;
     dst.source_w = hw_img.source_width as u32;
     dst.source_h = hw_img.source_height as u32;
+    dst.display_source_peak = hw_img.display_source_peak;
     // SAFETY: the caller's contract.
     dst.is_hdr10x3 = unsafe { (*dec).tryhdr10x3 };
     hw_img.fb_ptr = std::ptr::null_mut();

@@ -66,6 +66,18 @@ pub fn set_intra_filter_legacy(enable: bool) {
     crate::host::av1_set_intra_filter_legacy(c_int::from(enable))
 }
 
+/// The display pass: the configured source peak (`Display::source_peak_nits`) for every PQ frame, its HDR
+/// metadata ignored, as before interface version 3 (a picture A/B; `-displayfixedpeak`).
+pub fn set_display_fixed_peak(enable: bool) {
+    crate::host::av1_set_display_fixed_peak(c_int::from(enable))
+}
+
+/// The display pass: the bilinear input chroma of the version before interface 3 instead of the
+/// Catmull-Rom cubic (a picture A/B; `-displaybilinearchroma`).
+pub fn set_display_bilinear_chroma(enable: bool) {
+    crate::host::av1_set_display_bilinear_chroma(c_int::from(enable))
+}
+
 /// The fast inter path: 0, or [`INTER_FAST_ON`] with the `INTER_FAST_*` bits; only in a decoder that was
 /// created with [`crate::Settings::inter_fast`].
 pub fn set_inter_fast(mode: u32) {

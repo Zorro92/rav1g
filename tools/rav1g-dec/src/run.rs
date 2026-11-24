@@ -87,6 +87,8 @@ struct State {
     size_changes: i32,
     /// The colour of the last output frame; `None` in front of the first frame of a decoder.
     colour: Option<Colour>,
+    /// The source peak of the display pass of the last output frame, by the same rule.
+    display_peak: Option<f32>,
     pool_error: String,
     /// The value of the output fence of the last frame.
     fence_value: u64,
@@ -471,6 +473,12 @@ impl Sink for Run {
                 state.colour = Some(frame.colour);
                 say!("COLOUR {} frame {}: {}", task.name, n, frame.colour.text());
             }
+            // The display pass's source peak (Frame::display_source_peak_nits), when there is a tone map: by
+            // the same rule.
+            if frame.display_peak > 0.0 && state.display_peak != Some(frame.display_peak) {
+                state.display_peak = Some(frame.display_peak);
+                say!("DISPLAY {} frame {}: source peak {} nits", task.name, n, frame.display_peak);
+            }
             let mut wrong = false;
             if state.have_ref
                 && let Some(md5) = &md5
@@ -730,6 +738,8 @@ fn create_decoder(
             transform: rav1g::DisplayTransform::from_number(task.displaytransform),
             source_peak_nits: task.displaypeak,
             target_white_nits: task.displaywhite,
+            max_cll_nits: task.displaymaxcll,
+            mastering_max_nits: task.displaymasteringmax,
             depth: task.displaydepth,
             dither: match task.displaydither {
                 1 => rav1g::Dither::Off,
@@ -743,6 +753,7 @@ fn create_decoder(
     // the decoder says what it carries.
     say!("COLOUR {} sequence: {}", task.name, Colour::of_sequence(&info.color, library.is_c()).description());
     run.state().colour = None;
+    run.state().display_peak = None;
     // A decoder has an output fence of its own, whose values start again.
     run.state().fence_value = 0;
     *run.shared_fence.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
@@ -817,6 +828,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
             bit_depth: 0,
             size_changes: 0,
             colour: None,
+            display_peak: None,
             pool_error: String::new(),
             fence_value: 0,
             user_data: 0,
@@ -987,18 +999,25 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         intra_filter_legacy: task.intrafilterlegacy,
         intra_single_edge_legacy: task.intrasingleedgelegacy,
         inter_fast: task.interfast,
+        display_fixed_peak: task.displayfixedpeak,
+        display_bilinear_chroma: task.displaybilinearchroma,
     });
     if task.displaypass.0 > 0 {
         say!(
-            "Display pass: {}x{} (Rav1gSettings::display{}), peak {} white {} depth {} transform {} dither {}",
+            "Display pass: {}x{} (Rav1gSettings::display{}), peak {} white {} MaxCLL {} mastering {} depth {} \
+             transform {} dither {}; source peak {}, input chroma {}",
             task.displaypass.0,
             task.displaypass.1,
             if library.is_c() { "" } else { ", Rust: Settings::display" },
             task.displaypeak,
             task.displaywhite,
+            task.displaymaxcll,
+            task.displaymasteringmax,
             task.displaydepth,
             task.displaytransform,
-            task.displaydither
+            task.displaydither,
+            if task.displayfixedpeak { "configured (-displayfixedpeak)" } else { "from the HDR metadata (default)" },
+            if task.displaybilinearchroma { "bilinear (-displaybilinearchroma)" } else { "Catmull-Rom (default)" }
         );
     }
     say!("Front of the frame: two steps (default)");

@@ -306,6 +306,16 @@ void av1_set_perf_callback(av1_perf_frame_cb_fn_t cb, void *priv);
 /* Process-wide. Set while no frame is in flight. Non-zero skips film grain synthesis. */
 void av1_set_skip_film_grain(int enable);
 
+/* The display pass (Rav1gSettings::display), A/B switches of the picture, process-wide, off by default;
+ * set while no frame is in flight. Nothing that is decoded changes, only the display image.
+ * av1_set_display_fixed_peak: non-zero tone-maps every PQ frame from the configured source peak
+ * (Rav1gDisplay::source_peak_nits), its HDR metadata ignored, as before interface version 3 (test flag
+ * -displayfixedpeak; Bale's tonemap-debug fixedpeak). av1_set_display_bilinear_chroma: non-zero reads the
+ * input chroma bilinearly, as before interface version 3, instead of the Catmull-Rom cubic (test flag
+ * -displaybilinearchroma; Bale's tonemap-debug bilinearchroma). docs/integration.md, "The display pass". */
+void av1_set_display_fixed_peak(int enable);
+void av1_set_display_bilinear_chroma(int enable);
+
 /* Process-wide. Non-zero runs intra prediction through intra_v2.hlsl instead
  * of the frame-wide wavefront kernels; the decoded output is the same.
  * Frames that allow intra block copy keep the original shaders. Off by

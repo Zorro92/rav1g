@@ -90,6 +90,12 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"displaydither", atInt, anOptional,
        "the display pass's last quantisation: 0 dithered for NV12 (default), 1 rounded, 2 dithered for P010 too", "",
        &params_.displaydither_},
+      {"displayfixedpeak", atSingle, anOptional,
+       "A/B: the display pass tone-maps PQ from the configured peak (1000 nits), its HDR metadata ignored", "",
+       &params_.displayfixedpeak_},
+      {"displaybilinearchroma", atSingle, anOptional,
+       "A/B: the display pass reads the input chroma bilinearly (before interface 3), not with the Catmull-Rom cubic",
+       "", &params_.displaybilinearchroma_},
       {"intrav2", atSingle, anOptional, "intra prediction through intra_v2.hlsl (same output)", "",
        &params_.intrav2_},
       {"intraopt", atSingle, anOptional, "optimized intra_main shaders, the only ones (accepted, changes nothing)", "",
@@ -419,6 +425,8 @@ void CParameters::Reset() {
   params_.displaypass_.clear();
   params_.displaydepth_ = 0;
   params_.displaydither_ = 0;
+  params_.displayfixedpeak_ = false;
+  params_.displaybilinearchroma_ = false;
   params_.intrav2_ = false;
   params_.intraopt_ = false;
   params_.intrafilterlegacy_ = false;

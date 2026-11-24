@@ -62,8 +62,9 @@ pub enum DisplayTransform {
     /// SDR with BT.2020 primaries: downscaled in display-linear light, converted to BT.709 (BT.2087),
     /// clipped.
     Gamut = 2,
-    /// PQ (SMPTE ST 2084): the BT.2390 EETF from [`Display::source_peak_nits`] to 2.03 times
-    /// [`Display::target_white_nits`] on the largest channel, BT.2020 to BT.709, clipped.
+    /// PQ (SMPTE ST 2084): the BT.2390 EETF from the source peak ([`Frame::display_source_peak_nits`]: the
+    /// HDR metadata's, else [`Display::source_peak_nits`]) to 2.03 times [`Display::target_white_nits`] on
+    /// the largest channel, BT.2020 to BT.709, clipped.
     Pq = 3,
     /// HLG (ARIB STD-B67): the inverse OETF and the OOTF of a 1000-nit display (BT.2100), then as PQ.
     Hlg = 4,
@@ -132,10 +133,19 @@ pub struct Display {
     /// whatever its colour description says.
     pub transform: Option<DisplayTransform>,
     pub tone_curve: ToneCurve,
-    /// The PQ and HLG light the EETF maps to the SDR range: 0 is 1000 nits. At most 10000.
+    /// The PQ and HLG light the EETF maps to the SDR range: 0 is 1000 nits. At most 10000. A PQ frame takes
+    /// the peak of its HDR metadata instead when it has one (docs/integration.md, "The source peak"): this
+    /// is the peak of HLG, and of PQ without metadata.
     pub source_peak_nits: f32,
-    /// The SDR white: the EETF maps to 2.03 times it (203 nits for 100). 0 is 100 nits.
+    /// The SDR white: the EETF maps to 2.03 times it (203 nits for 100). 0 is 100 nits; up to 4926 (the
+    /// application this is made for sets 80 to 400).
     pub target_white_nits: f32,
+    /// The HDR metadata the application has for the stream (for example from its container: Matroska's
+    /// MaxCLL and the mastering display's largest luminance), nits; 0 for none. The source peak of a PQ
+    /// frame takes each where the stream's own metadata OBUs say nothing (or 0): the stream's values win,
+    /// as for the assumed colour code points.
+    pub max_cll_nits: f32,
+    pub mastering_max_nits: f32,
     /// Not in this version: 0. Another value is [`crate::ErrorCode::Incapable`].
     pub desaturation: f32,
     /// The image's codes: 10 (P010), 8 (NV12), or 0: those of the decoder's bit depth
@@ -185,6 +195,11 @@ impl Display {
         let Some(white) = nits(self.target_white_nits, 100.0, 10000.0 / 2.03) else {
             return invalid(&format!("a white of {} nits: 0 or up to 4926", self.target_white_nits));
         };
+        for (name, value) in [("MaxCLL", self.max_cll_nits), ("mastering display maximum", self.mastering_max_nits)] {
+            if !value.is_finite() || value < 0.0 {
+                return invalid(&format!("a {name} of {value} nits: 0 (none) or above"));
+            }
+        }
         if self.tone_curve == ToneCurve::Hable {
             return incapable("the Hable curve is not in this version");
         }
@@ -216,6 +231,8 @@ impl Display {
                 Dither::Off => false,
                 Dither::Ordered => true,
             }),
+            max_cll_nits: self.max_cll_nits,
+            mastering_max_nits: self.mastering_max_nits,
         })
     }
 }
@@ -362,6 +379,10 @@ pub struct Frame {
     pub source_width: u32,
     pub source_height: u32,
     pub source_color: ColorInfo,
+    /// The source peak the display pass's tone map took for the frame, nits ([`Display::source_peak_nits`],
+    /// docs/integration.md "The source peak"): PQ the HDR metadata's or the configured one, HLG the
+    /// configured one; 0 without a tone map (no display pass, SDR).
+    pub display_source_peak_nits: f32,
     pub(crate) offsets: [usize; 3],
     pub(crate) strides: [usize; 3],
     pub(crate) fence: Option<(ID3D12Fence, u64)>,

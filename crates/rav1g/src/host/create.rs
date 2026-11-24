@@ -1268,13 +1268,16 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
                 log(
                     false,
                     &format!(
-                        "DISPLAY {}x{} {}, transform {}, peak {} nits, white {} nits, assumed colour {}/{}/{}/{}",
+                        "DISPLAY {}x{} {}, transform {}, peak {} nits, white {} nits, MaxCLL {} nits, mastering \
+                         maximum {} nits, assumed colour {}/{}/{}/{}",
                         display.width,
                         display.height,
                         if p010 { "P010" } else { "NV12" },
                         display.transform,
                         display.source_peak_nits,
                         display.target_white_nits,
+                        display.max_cll_nits,
+                        display.mastering_max_nits,
                         display.assumed_primaries,
                         display.assumed_transfer,
                         display.assumed_matrix,

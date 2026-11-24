@@ -82,6 +82,8 @@ pub struct HwOutputImage {
     pub display_transform: c_int,
     pub source_width: c_int,
     pub source_height: c_int,
+    /// The source peak of the display pass's tone map (`aom_image::display_source_peak`).
+    pub display_source_peak: f32,
 }
 #[repr(C)]
 #[derive(Copy, Clone)]

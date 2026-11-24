@@ -216,6 +216,9 @@ class BufferLocker {
   Rav1gColorInfo colour_ = {};
   Rav1gMasteringDisplay mastering_display_ = {};
   Rav1gContentLightLevel content_light_ = {};
+  // The source peak of the display pass of the last frame (Rav1gFrame::display_source_peak_nits), for the
+  // DISPLAY line of a frame with another one.
+  float display_peak_ = 0.0f;
   // -nopresent: frames handed straight back to the pool
   int released_ = 0;
   std::chrono::steady_clock::time_point released_first_;

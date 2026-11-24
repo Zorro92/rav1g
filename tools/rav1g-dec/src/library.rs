@@ -96,6 +96,8 @@ pub struct Picture<'a> {
     /// What came with the temporal unit of the frame (`Frame::user_data`, `Rav1gFrame::user_data`): the
     /// program passes the number of the unit, from 1.
     pub user_data: u64,
+    /// The source peak of the display pass's tone map (`Frame::display_source_peak_nits`), 0 without one.
+    pub display_peak: f32,
 }
 
 /// The two planes of a semi-planar frame in the mapping of a buffer of the pool.
@@ -174,6 +176,9 @@ pub struct Choices {
     pub intra_filter_legacy: bool,
     pub intra_single_edge_legacy: bool,
     pub inter_fast: u32,
+    /// The display pass's A/B switches (`av1_set_display_fixed_peak`, `av1_set_display_bilinear_chroma`).
+    pub display_fixed_peak: bool,
+    pub display_bilinear_chroma: bool,
 }
 
 /// A decode call that failed.
@@ -215,6 +220,7 @@ fn picture_of(frame: &Frame) -> Picture<'_> {
             capi: false,
         },
         planes: [frame.plane(0), frame.plane(1), frame.plane(2)],
+        display_peak: frame.display_source_peak_nits,
     }
 }
 
@@ -331,6 +337,7 @@ unsafe extern "C" fn c_frame<S: Sink>(context: *mut c_void, frame: *const capi::
         semi_planar,
         fence: fence.map(|fence| (fence, frame.fence_value)),
         user_data: frame.user_data,
+        display_peak: frame.display_source_peak_nits,
     });
     sink.give_back(frame.image.token as usize);
 }
@@ -459,6 +466,8 @@ impl Library {
             target_white_nits: display.target_white_nits,
             depth: display.depth,
             dither: display.dither as u32,
+            max_cll_nits: display.max_cll_nits,
+            mastering_max_nits: display.mastering_max_nits,
             ..Default::default()
         };
         if let Some(sink) = sink {
@@ -509,6 +518,8 @@ impl Library {
     /// The shader choices, set while no frame is in flight.
     pub fn set_choices(&self, choices: &Choices) {
         switches::set_skip_film_grain(choices.skip_film_grain);
+        switches::set_display_fixed_peak(choices.display_fixed_peak);
+        switches::set_display_bilinear_chroma(choices.display_bilinear_chroma);
         switches::set_intra_filter_legacy(choices.intra_filter_legacy);
         // SAFETY: the setter takes an integer and only changes the test flag, with no frames in flight.
         unsafe {

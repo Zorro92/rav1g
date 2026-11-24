@@ -44,6 +44,7 @@ pub(crate) use compute::{
     av1_create_pipeline_cache_handle, av1_destroy_pipeline_cache_handle, av1_wait_pipeline_cache_handle,
     set_shader_pick, shader_pick_lines,
 };
+pub(crate) use display_pass::{av1_set_display_bilinear_chroma, av1_set_display_fixed_peak};
 pub(crate) use film_grain::av1_set_skip_film_grain;
 pub(crate) use frame::{av1_set_intra_v2, av1_shader_variant};
 pub(crate) use memory::{av1_log_video_memory_now, av1_set_poison_buffers};

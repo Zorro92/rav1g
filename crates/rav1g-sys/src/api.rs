@@ -85,6 +85,9 @@ pub struct aom_image {
     pub display_transform: c_int,
     pub source_w: c_uint,
     pub source_h: c_uint,
+    /// The source peak the display pass's tone map took for the frame (`display_pass::source_peak`), nits;
+    /// 0 without a tone map.
+    pub display_source_peak: f32,
 }
 impl Default for aom_image {
     fn default() -> Self {
@@ -184,6 +187,10 @@ pub struct av1_display_cfg {
     pub assumed_chroma_sample_position: u8,
     /// 1: the ordered dither at the quantisation (`display_pass.hlsl` `threshold`); 0: rounded.
     pub dither: u8,
+    /// The HDR metadata the application has for the stream (its container's), nits: the PQ source peak
+    /// takes them where the stream's metadata OBUs say nothing (`display_pass::source_peak`); 0 for none.
+    pub max_cll_nits: f32,
+    pub mastering_max_nits: f32,
 }
 /// `av1_display_cfg::transform` and `aom_image::display_transform`: what the display pass does to a frame.
 pub const AV1_DISPLAY_TRANSFORM_AUTO: c_uint = 0;

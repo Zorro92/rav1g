@@ -514,6 +514,13 @@ pub struct Rav1gFrame {
     /// The colour description of the frame's sequence header, as the stream has it (not the assumed code
     /// points). Without the display pass `color`.
     pub source_color: Rav1gColorInfo,
+    /// The source peak the display pass's tone map took for the frame, nits (`Rav1gDisplay`, "The source
+    /// peak" in docs/integration.md): for PQ the HDR metadata's (MaxCLL, else the mastering display's
+    /// largest luminance, the smaller of both, clamped to 400..10000) or the configured
+    /// `source_peak_nits`; for HLG the configured one; 0 without a tone map (no display pass, SDR).
+    ///
+    /// New in interface version 3.
+    pub display_source_peak_nits: f32,
 }
 
 /// The display pass (docs/integration.md, "The display pass"): every output image is the frame
@@ -541,9 +548,11 @@ pub struct Rav1gDisplay {
     pub transform: u32,
     /// `RAV1G_TONE_CURVE_BT2390` (0 is the same) or `RAV1G_TONE_CURVE_HABLE` (not in this version).
     pub tone_curve: u32,
-    /// The PQ and HLG light the EETF maps to the SDR range: 0 is 1000 nits; at most 10000.
+    /// The PQ and HLG light the EETF maps to the SDR range: 0 is 1000 nits; at most 10000. A PQ frame
+    /// takes the peak of its HDR metadata instead when there is one (`max_cll_nits`; docs/integration.md,
+    /// "The source peak"): this is the peak of HLG, and of PQ without metadata.
     pub source_peak_nits: f32,
-    /// The SDR white: the EETF maps to 2.03 times it (203 nits for 100). 0 is 100 nits.
+    /// The SDR white: the EETF maps to 2.03 times it (203 nits for 100). 0 is 100 nits; up to 4926.
     pub target_white_nits: f32,
     /// Not in this version: 0 (another value is `RAV1G_STATUS_INCAPABLE`).
     pub desaturation: f32,
@@ -563,8 +572,18 @@ pub struct Rav1gDisplay {
     /// The dither is a threshold at each output sample from the R2 lattice, the same for every frame
     /// (docs/integration.md, "The dither").
     pub dither: u32,
+    /// The HDR metadata the application has for the stream (from its container, for example Matroska's
+    /// MaxCLL and the mastering display's largest luminance), nits; 0 for none. The source peak of a PQ
+    /// frame is MaxCLL, else the mastering display's largest luminance, the smaller of both when MaxCLL is
+    /// above it, clamped to 400..10000 nits, else `source_peak_nits`; each value is the stream's (its
+    /// metadata OBUs), and this one where the stream says nothing or 0: the stream wins, as for the
+    /// assumed code points. `Rav1gFrame::display_source_peak_nits` says what a frame took.
+    ///
+    /// New in interface version 3, in place of two reserved fields.
+    pub max_cll_nits: f32,
+    pub mastering_max_nits: f32,
     /// Zero.
-    pub reserved: [u32; 3],
+    pub reserved: [u32; 1],
 }
 
 impl From<&Rav1gDisplay> for Display {
@@ -587,6 +606,8 @@ impl From<&Rav1gDisplay> for Display {
                 RAV1G_DISPLAY_DITHER_ORDERED => crate::Dither::Ordered,
                 _ => crate::Dither::Auto,
             },
+            max_cll_nits: display.max_cll_nits,
+            mastering_max_nits: display.mastering_max_nits,
         }
     }
 }
@@ -606,7 +627,7 @@ fn display_invalid(display: &Rav1gDisplay) -> Option<String> {
     if display.dither > RAV1G_DISPLAY_DITHER_ORDERED {
         return Some(format!("display: a dither of {}", display.dither));
     }
-    (display.reserved != [0; 3]).then(|| String::from("display: reserved fields that are not zero"))
+    (display.reserved != [0; 1]).then(|| String::from("display: reserved fields that are not zero"))
 }
 
 impl From<&ColorInfo> for Rav1gColorInfo {
@@ -1278,6 +1299,7 @@ impl Output for CallbackOutput {
             source_width: frame.source_width,
             source_height: frame.source_height,
             source_color: (&frame.source_color).into(),
+            display_source_peak_nits: frame.display_source_peak_nits,
         };
         // SAFETY: the application's callback, called as the interface says; the frame and what it points
         // to are alive during the call.

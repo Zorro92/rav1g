@@ -426,6 +426,7 @@ pub(crate) unsafe fn copy_output(dec: *mut Av1Core, cm: *mut AV1_COMMON, fb: *co
         img.hbd = td.is_hbd;
         img.monochrome = c_int::from(is_monochrome);
         img.display_transform = 0;
+        img.display_source_peak = 0.0;
         img.source_width = src.y_crop_width;
         img.source_height = src.y_crop_height;
         if let Some((width, height)) = display_pass_size(dec) {
@@ -436,7 +437,10 @@ pub(crate) unsafe fn copy_output(dec: *mut Av1Core, cm: *mut AV1_COMMON, fb: *co
             img.uv_crop_height = height / 2;
             img.hbd = c_int::from((*dec).display.depth > 8);
             img.monochrome = 0;
-            img.display_transform = display_pass::choose(&(*cm).seq_params, &(*dec).display).transform as c_int;
+            let choice = display_pass::choose(&(*cm).seq_params, &(*dec).display);
+            img.display_transform = choice.transform as c_int;
+            // The peak the pass takes below, from the same metadata (that of the frame, `hdr` here).
+            img.display_source_peak = display_pass::source_peak(choice, &(*cm).hdr_metadata, &(*dec).display);
         }
         let semi_planar = (*dec).output_kind != 0;
         img.semi_planar = c_int::from(semi_planar);
@@ -688,6 +692,7 @@ unsafe fn copy_semi_planar(
                 cm.seq_params.color_range != 0,
                 is_monochrome,
                 &(*dec).display,
+                display_pass::source_peak(choice, &cm.hdr_metadata, &(*dec).display),
                 tables.data.cast(),
             );
             let shader = pipeline(&raw const (*lib).shader_display_pass[choice.mode as usize]);

@@ -133,6 +133,11 @@ class CParameters {
     // -displaydepth 8|10, -displaydither 0-2 (Rav1gDisplay::depth, dither): 0 the defaults.
     int displaydepth_;
     int displaydither_;
+    // -displayfixedpeak, -displaybilinearchroma: the display pass's A/B switches (av1_perf.h
+    // av1_set_display_fixed_peak, av1_set_display_bilinear_chroma), as Bale's tonemap-debug fixedpeak and
+    // bilinearchroma.
+    bool displayfixedpeak_;
+    bool displaybilinearchroma_;
     bool intrav2_;
     // -intraopt: accepted, changes nothing (-intraod is retired).
     bool intraopt_;

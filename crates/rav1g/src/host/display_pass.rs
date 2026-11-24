@@ -15,12 +15,62 @@
 //! under a millisecond) and copied into the frame's constant memory (5.5 KB a frame, the CPU's only work
 //! for the pass).
 
+use std::ffi::c_int;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::sys::{
     AV1_DISPLAY_TRANSFORM_AUTO, AV1_DISPLAY_TRANSFORM_GAMUT, AV1_DISPLAY_TRANSFORM_HLG, AV1_DISPLAY_TRANSFORM_PQ,
-    AV1_DISPLAY_TRANSFORM_SCALE, HwFrameBuffer, SequenceHeader, av1_display_cfg,
+    AV1_DISPLAY_TRANSFORM_SCALE, HwFrameBuffer, SequenceHeader, aom_hdr_metadata_t, av1_display_cfg,
 };
+
+/// `av1_set_display_fixed_peak` (`dx/av1_perf.h`): the configured source peak for every PQ frame, the HDR
+/// metadata ignored (the version before interface 3), for a picture A/B.
+static FIXED_PEAK: AtomicBool = AtomicBool::new(false);
+/// `av1_set_display_bilinear_chroma`: the bilinear input chroma of the version before interface 3.
+static BILINEAR_CHROMA: AtomicBool = AtomicBool::new(false);
+
+/// `av1_set_display_fixed_peak` (`dx/av1_perf.h`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_display_fixed_peak(enable: c_int) {
+    FIXED_PEAK.store(enable != 0, Ordering::Relaxed);
+}
+
+/// `av1_set_display_bilinear_chroma` (`dx/av1_perf.h`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_display_bilinear_chroma(enable: c_int) {
+    BILINEAR_CHROMA.store(enable != 0, Ordering::Relaxed);
+}
+
+/// The source peak the EETF maps from for a frame (docs/integration.md, "The source peak"), nits. For PQ
+/// (ST 2084, mode 0) the HDR metadata says it: MaxCLL when above 0, else the mastering display's largest
+/// luminance when above 0, and the smaller of the two when both are (a MaxCLL above the display the
+/// content was graded on is broken metadata), clamped to 400..10000 nits (below is broken metadata, 10000
+/// is the end of PQ); without either the configured peak (`Rav1gDisplay::source_peak_nits`, 1000 by
+/// default) as configured. Each value is the stream's (the CLL and MDCV metadata OBUs, AV1 5.8.3/5.8.4,
+/// 6.7.3/6.7.4: max_cll in cd/m2, luminance_max in 24.8 fixed point, the ones that hold for the frame) or,
+/// where the stream says nothing or 0, the application's (`max_cll_nits`, `mastering_max_nits`), as
+/// for the assumed colour code points. HLG keeps the configured peak (its OOTF renders for a 1000-nit
+/// display already), and so does every frame under `av1_set_display_fixed_peak`. 0 for SDR: no tone map.
+pub(crate) fn source_peak(choice: Choice, hdr: &aom_hdr_metadata_t, display: &av1_display_cfg) -> f32 {
+    match choice.mode {
+        1 => return 0.0,
+        2 => return display.source_peak_nits,
+        _ if FIXED_PEAK.load(Ordering::Relaxed) => return display.source_peak_nits,
+        _ => {}
+    }
+    let stream_cll = if hdr.has_cll != 0 { f32::from(hdr.max_cll) } else { 0.0 };
+    let stream_mastering = if hdr.has_mdcv != 0 { (f64::from(hdr.mdcv_luminance_max) / 256.0) as f32 } else { 0.0 };
+    let cll = if stream_cll > 0.0 { stream_cll } else { display.max_cll_nits };
+    let mastering = if stream_mastering > 0.0 { stream_mastering } else { display.mastering_max_nits };
+    let peak = match (cll > 0.0, mastering > 0.0) {
+        (true, true) => cll.min(mastering),
+        (true, false) => cll,
+        (false, true) => mastering,
+        (false, false) => return display.source_peak_nits,
+    };
+    peak.clamp(400.0, 10000.0)
+}
 
 /// Intervals of the EOTF table: `EOTF_FINE` up to the signal `EOTF_SPLIT`, the rest above, and one more
 /// that holds the value at 1 (the shader's position of a signal of 1 or more).
@@ -45,9 +95,9 @@ pub(crate) const CONSTANTS: usize = 26;
 /// the peak, and pixels there with a large negative channel (out of gamut) show it.
 const PQ_EXACT_BELOW: f32 = 4e-4;
 
-/// The tone map's parameters (`Rav1gDisplay::source_peak_nits`, `target_white_nits`): the source peak the
-/// BT.2390 EETF maps to the SDR range, and the SDR white whose 2.03 times is the EETF's endpoint (203 nits
-/// for a white of 100). The defaults are those of the stage the pass stands in for: 1000 and 100.
+/// The tone map's parameters: the source peak the BT.2390 EETF maps to the SDR range (`source_peak`), and
+/// the SDR white whose 2.03 times is the EETF's endpoint (`Rav1gDisplay::target_white_nits`: 203 nits for
+/// a white of 100). The defaults are those of the stage the pass stands in for: 1000 and 100.
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct ToneMap {
     peak: f64,
@@ -171,7 +221,9 @@ fn tables(mode: u32, tone: ToneMap) -> Tables {
         [s, -u0 * s, s, -u0 * s]
     } else {
         // PQ: GAIN_LOW intervals from the knee to the peak's signal, the rest to 1; a curve without a knee
-        // (a peak at or below the target) has all of them from its clip to 1.
+        // (a peak at or below the target) has all of them from its clip to 1. The shader takes the smaller
+        // of the two lines when the knee's intervals are the denser (s1 >= s2: peaks up to about 1200
+        // nits), the larger when those above the peak are (higher peaks, as HDR metadata gives them).
         let low = if peak > knee { GAIN_LOW } else { 0 };
         let s1 = if low > 0 { low as f64 / (peak - knee) } else { 1.0 };
         let s2 = (GAIN_N - low) as f64 / (1.0 - peak).max(1e-6);
@@ -185,7 +237,9 @@ fn tables(mode: u32, tone: ToneMap) -> Tables {
 }
 
 /// The tables of the last mode and parameters asked for: made once, a change (a new sequence, another
-/// decoder's parameters) makes them again.
+/// decoder's parameters, a stream whose HDR metadata gives another peak) makes them again (about 2000
+/// float64 evaluations, well under a millisecond of one CPU; the metadata of a stream is constant in
+/// practice).
 static TABLES: Mutex<Option<(u32, ToneMap, Tables)>> = Mutex::new(None);
 
 /// What the display pass does to a frame: the colour it takes the frame to have (the sequence header's,
@@ -255,7 +309,8 @@ fn path_flags(src: (u32, u32), out: (u32, u32), aligned: bool) -> u32 {
 /// Writes the tables of the frame's mode to `dst` (`LUT_WORDS` words of the frame's constant memory;
 /// nothing for SDR, whose shader does not read them) and returns the inline constants of
 /// `display_pass.hlsl` for the frame `src` (read as the `choice` says; `monochrome`: its chroma is taken
-/// as the middle value) into an image of the size `out` of the settings `display`.
+/// as the middle value) into an image of the size `out` of the settings `display`, tone-mapped from
+/// `peak` (`source_peak`).
 ///
 /// # Safety
 /// `dst` is writable for `LUT_WORDS` words.
@@ -266,10 +321,11 @@ pub(crate) unsafe fn constants(
     full: bool,
     monochrome: bool,
     display: &av1_display_cfg,
+    peak: f32,
     dst: *mut u32,
 ) -> [u32; CONSTANTS] {
     let mode = choice.mode;
-    let tone = ToneMap { peak: f64::from(display.source_peak_nits), white: f64::from(display.target_white_nits) };
+    let tone = ToneMap { peak: f64::from(peak), white: f64::from(display.target_white_nits) };
     let (eotf, gain) = if mode == 1 {
         ([0.0; 3], [0.0; 4])
     } else {
@@ -314,7 +370,8 @@ pub(crate) unsafe fn constants(
         | path
         | (u32::from(eight) << 6)
         | (u32::from(display.depth == 8) << 7)
-        | (u32::from(display.dither != 0) << 10);
+        | (u32::from(display.dither != 0) << 10)
+        | (u32::from(BILINEAR_CHROMA.load(Ordering::Relaxed)) << 11);
     [
         w,
         h,
@@ -356,6 +413,14 @@ mod tests {
         f64::from(w(0) + f * (w(1) + f * (w(2) + f * w(3))))
     }
 
+    /// The gain table's position of x as `gain_table` of the shader has it: the smaller of the two lines
+    /// when the first is the steeper (or as steep), else the larger; 0 to GAIN_N.
+    fn gain_position(t: &Tables, x: f64) -> f64 {
+        let [s1, o1, s2, o2] = t.gain.map(f64::from);
+        let (a, b) = (x * s1 + o1, x * s2 + o2);
+        (if s1 >= s2 { a.min(b) } else { a.max(b) }).clamp(0.0, GAIN_N as f64)
+    }
+
     /// The shader's constant block has as many 32-bit fields as the layout sets (`CONSTANTS`).
     #[test]
     fn constants_are_those_of_the_shader() {
@@ -391,10 +456,22 @@ mod tests {
     /// parameters, a lower peak and white, and a peak below the target (no knee).
     #[test]
     fn tables_hold_their_functions() {
-        for tone in [DEFAULT, ToneMap { peak: 600.0, white: 203.0 }, ToneMap { peak: 150.0, white: 100.0 }] {
+        let tones = [
+            DEFAULT,
+            ToneMap { peak: 600.0, white: 203.0 },
+            ToneMap { peak: 150.0, white: 100.0 },
+            // Peaks from the HDR metadata (source_peak): the knee's intervals denser from about 1200 nits on.
+            ToneMap { peak: 1184.0, white: 100.0 },
+            ToneMap { peak: 1500.0, white: 100.0 },
+            ToneMap { peak: 4000.0, white: 100.0 },
+            ToneMap { peak: 9500.0, white: 100.0 },
+            ToneMap { peak: 10000.0, white: 100.0 },
+            ToneMap { peak: 400.0, white: 400.0 },
+            ToneMap { peak: 4000.0, white: 80.0 },
+        ];
+        for tone in tones {
             let t = tables(0, tone);
             let [a, b, c] = t.eotf.map(f64::from);
-            let [s1, o1, s2, o2] = t.gain.map(f64::from);
             let (knee, _) = tone.gain_range();
             for n in 1..=100_000 {
                 let m = n as f64 / 100_000.0;
@@ -405,7 +482,7 @@ mod tests {
                 }
                 let x = knee + (1.0 - knee) * m;
                 let want = tone.gain(pq_to_nits(x));
-                let got = eval(&t, EOTF_N + 1, (x * s1 + o1).min(x * s2 + o2).clamp(0.0, GAIN_N as f64));
+                let got = eval(&t, EOTF_N + 1, gain_position(&t, x));
                 assert!((got - want).abs() <= 2e-6 * want, "{tone:?}: gain at {x}: {got} for {want}");
             }
             // Below the knee the gain is that of the line: 1 / the target, or 1 / the clip's nits.
@@ -427,6 +504,62 @@ mod tests {
                 assert!((got - want).abs() <= 2e-6 * want, "{tone:?}: gain at {nits} nits: {got} for {want}");
             }
         }
+    }
+
+    /// The source peak of a frame (`source_peak`): Bale's console checks of its stage (MaxCLL 4057 with a
+    /// mastering display of 1000: 1000; 1184 with 4000: 1184; none: the configured 1000), MaxCLL alone,
+    /// the mastering display alone, both clamps, the configured peak unclamped, the application's values
+    /// where the stream says nothing (or 0) and the stream's where it does, HLG and SDR, the fixed peak.
+    #[test]
+    fn the_source_peak_follows_the_hdr_metadata() {
+        let pq =
+            Choice { mode: 0, bt2020: true, transform: AV1_DISPLAY_TRANSFORM_PQ, matrix: 9, chroma_sample_position: 0 };
+        let hlg = Choice { mode: 2, transform: AV1_DISPLAY_TRANSFORM_HLG, ..pq };
+        let sdr = Choice { mode: 1, transform: AV1_DISPLAY_TRANSFORM_GAMUT, ..pq };
+        // The stream's metadata: MaxCLL in cd/m2, the mastering display's largest luminance in 24.8.
+        let stream = |cll: Option<u16>, mastering: Option<f64>| aom_hdr_metadata_t {
+            has_cll: u8::from(cll.is_some()),
+            max_cll: cll.unwrap_or(0),
+            has_mdcv: u8::from(mastering.is_some()),
+            mdcv_luminance_max: mastering.map_or(0, |nits| (nits * 256.0) as u32),
+            ..Default::default()
+        };
+        let app = |peak: f32, cll: f32, mastering: f32| av1_display_cfg {
+            source_peak_nits: peak,
+            target_white_nits: 100.0,
+            max_cll_nits: cll,
+            mastering_max_nits: mastering,
+            ..Default::default()
+        };
+        let none = stream(None, None);
+        let config = app(1000.0, 0.0, 0.0);
+        let cases: [(Choice, aom_hdr_metadata_t, av1_display_cfg, f32); 17] = [
+            (pq, stream(Some(4057), Some(1000.0)), config, 1000.0),
+            (pq, stream(Some(1184), Some(4000.0)), config, 1184.0),
+            (pq, none, config, 1000.0),
+            (pq, none, app(600.0, 0.0, 0.0), 600.0),
+            (pq, stream(Some(1500), None), config, 1500.0),
+            (pq, stream(None, Some(4000.0)), config, 4000.0),
+            (pq, stream(None, Some(1000.5)), config, 1000.5),
+            (pq, stream(Some(250), None), config, 400.0),
+            (pq, stream(None, Some(100.0)), config, 400.0),
+            (pq, stream(Some(12000), None), config, 10000.0),
+            (pq, stream(None, Some(50000.0)), config, 10000.0),
+            // The application's values fill what the stream does not say, value by value.
+            (pq, none, app(1000.0, 4057.0, 1000.0), 1000.0),
+            (pq, stream(Some(1184), None), app(1000.0, 600.0, 4000.0), 1184.0),
+            (pq, stream(Some(0), Some(4000.0)), app(1000.0, 2000.0, 0.0), 2000.0),
+            (pq, stream(None, Some(1000.0)), app(1000.0, 4057.0, 600.0), 1000.0),
+            (hlg, stream(Some(4000), Some(4000.0)), config, 1000.0),
+            (sdr, stream(Some(4000), Some(4000.0)), config, 0.0),
+        ];
+        for (n, (choice, hdr, display, want)) in cases.iter().enumerate() {
+            assert_eq!(source_peak(*choice, hdr, display), *want, "case {n}");
+        }
+        av1_set_display_fixed_peak(1);
+        let fixed = source_peak(pq, &stream(Some(4000), Some(4000.0)), &config);
+        av1_set_display_fixed_peak(0);
+        assert_eq!(fixed, 1000.0);
     }
 
     /// The transform of a frame: by its transfer and primaries, the assumed code points where the

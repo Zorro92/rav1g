@@ -85,13 +85,18 @@ pub struct Task {
     /// -displaypass WxH: the display pass (`Settings::display`); (0, 0) off. -displaypeak, -displaywhite
     /// (nits, 0 the default), -displaydepth (8, 10, 0 the decoder's), -displaytransform (0 by the
     /// frame's colour, 1 scale, 2 gamut, 3 PQ, 4 HLG), -displaydither (0 auto: NV12 dithered, 1 off, 2
-    /// ordered at either depth).
+    /// ordered at either depth), -displaymaxcll and -displaymasteringmax (the application's HDR metadata,
+    /// nits, 0 none), -displayfixedpeak and -displaybilinearchroma (the A/B switches of av1_perf.h).
     pub displaypass: (i32, i32),
     pub displaypeak: f32,
     pub displaywhite: f32,
     pub displaydepth: u32,
     pub displaytransform: u32,
     pub displaydither: u32,
+    pub displaymaxcll: f32,
+    pub displaymasteringmax: f32,
+    pub displayfixedpeak: bool,
+    pub displaybilinearchroma: bool,
     pub nofitsize: bool,
     pub fitsize: bool,
     pub lowmem: bool,
@@ -169,6 +174,10 @@ impl Default for Task {
             displaydepth: 0,
             displaytransform: 0,
             displaydither: 0,
+            displaymaxcll: 0.0,
+            displaymasteringmax: 0.0,
+            displayfixedpeak: false,
+            displaybilinearchroma: false,
             nofitsize: false,
             fitsize: false,
             lowmem: false,
@@ -292,6 +301,14 @@ pub fn usage() {
     say!(
         "  -displaydither 0-2   the display pass's last quantisation: 0 the ordered dither for NV12 (default), \
          1 rounded, 2 the ordered dither for P010 too"
+    );
+    say!(
+        "  -displaymaxcll N -displaymasteringmax N   the application's HDR metadata (nits, 0 none): the PQ \
+         source peak takes them where the stream's metadata says nothing"
+    );
+    say!(
+        "  -displayfixedpeak -displaybilinearchroma   A/B: the configured peak whatever the metadata; the \
+         bilinear input chroma (before interface 3)"
     );
     say!("  -intrafilterlegacy   use the previous 8-bit filter intra shader");
     say!("  -intrasingleedgelegacy use the previous directional wavefront with prefetching");
@@ -461,11 +478,18 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
                 let size = text.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)));
                 task.displaypass = size.ok_or_else(|| format!("-displaypass {text}: WxH"))?;
             }
-            "-displaypeak" | "-displaywhite" => {
+            "-displaypeak" | "-displaywhite" | "-displaymaxcll" | "-displaymasteringmax" => {
                 let text = value()?;
                 let nits: f32 = text.parse().map_err(|_| format!("{a} {text}: nits"))?;
-                if a == "-displaypeak" { task.displaypeak = nits } else { task.displaywhite = nits }
+                match a {
+                    "-displaypeak" => task.displaypeak = nits,
+                    "-displaywhite" => task.displaywhite = nits,
+                    "-displaymaxcll" => task.displaymaxcll = nits,
+                    _ => task.displaymasteringmax = nits,
+                }
             }
+            "-displayfixedpeak" => task.displayfixedpeak = true,
+            "-displaybilinearchroma" => task.displaybilinearchroma = true,
             "-displaydepth" => task.displaydepth = number()? as u32,
             "-displaytransform" => task.displaytransform = number()? as u32,
             "-displaydither" => task.displaydither = number()? as u32,

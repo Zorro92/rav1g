@@ -380,6 +380,7 @@ unsafe extern "C" fn frame_ready(context: *mut c_void, image: *mut c_void) -> c_
         source_width: img.source_w,
         source_height: img.source_h,
         source_color,
+        display_source_peak_nits: if display_transform.is_some() { img.display_source_peak } else { 0.0 },
         mastering_display,
         content_light,
         offsets: [offset(0), offset(1), offset(2)],

@@ -12,11 +12,16 @@ path where that is exact, 1920x1080 to 1280x720; else the area loop) (-o: the di
 the Rust interface; and through the interface for C (-capi) with other settings of the pass: the PQ stream
 with a 600-nit peak and a 203-nit white, with the transform forced to scale only, at 0.6 of its size (the
 area loop) and into P010 with the ordered dither; the SDR stream into NV12 (dithered), into NV12 rounded,
-and at 0.6 of its size. model.py computes the display images from the first run's frames with the
-sequence's colour description (the COLOUR line of the log) and the same settings, and counts the codes
-that differ. Exit code 1 when a code differs by more than one (fp32 on two compilers, the tone map's
-tables), when more than 5% of a dithered plane's codes differ (a dither that is not there or not the
-model's moves about half of them by one), or when a run fails.
+and at 0.6 of its size; the PQ stream also with the application's HDR metadata (-displaymaxcll,
+-displaymasteringmax), with the configured peak whatever the metadata (-displayfixedpeak) and with the
+bilinear input chroma (-displaybilinearchroma). model.py computes the display images from the first run's
+frames with the sequence's colour description (the COLOUR line of the log), the HDR metadata of its first
+frame (the COLOUR frame line: MDCV, CLL) and the same settings, and counts the codes that differ; the
+source peak the decoder reports for the frame (its DISPLAY frame line, Rav1gFrame::display_source_peak_nits)
+must be the model's (source_peak). Exit code 1 when a code differs by more than one (fp32 on two compilers,
+the tone map's tables), when more than 5% of a dithered plane's codes differ (a dither that is not there or
+not the model's moves about half of them by one), when the reported peak is not the model's, or when a run
+fails.
 """
 
 import argparse
@@ -25,8 +30,27 @@ import re
 import subprocess
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import model  # noqa: E402  (source_peak, the rule the decoder's reported peak is held to)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 COLOUR = re.compile(r'COLOUR \S+ sequence: primaries (\d+) .*?transfer (\d+) .*?matrix (\d+) .*?range (\w+) chroma pos (\d+)')
+# The HDR metadata of a frame (rav1g::color_text): the numbers of the MDCV OBU in brackets, the largest
+# luminance (24.8 fixed point) the second to last; CLL max/fall.
+FRAME_COLOUR = re.compile(r'COLOUR \S+ frame \d+: [^\n]*')
+MDCV = re.compile(r'MDCV [^\[]*\[([^\]]*)\]')
+CLL = re.compile(r'CLL (\d+)/(\d+)')
+PEAK = re.compile(r'DISPLAY \S+ frame 0: source peak (\S+) nits')
+
+
+def metadata(log):
+    """MaxCLL and the mastering display's largest luminance (nits) of the first frame of a log, 0 for none."""
+    line = FRAME_COLOUR.search(log)
+    if not line:
+        return 0.0, 0.0
+    mdcv, cll = MDCV.search(line.group(0)), CLL.search(line.group(0))
+    mastering = int(mdcv.group(1).split()[-2]) / 256.0 if mdcv else 0.0
+    return (float(cll.group(1)) if cll else 0.0), mastering
 
 
 def run(cmd, log):
@@ -56,6 +80,10 @@ def main():
             ('scale', 'half', ['-displaytransform', '1'], ['--transfer', '1', '--primaries', '1']),
             ('area', 'area', [], []),
             ('p010-dither', 'half', ['-displaydither', '2'], []),
+            # The application's metadata: it fills what the stream does not say (source_peak).
+            ('app-metadata', 'half', ['-displaymaxcll', '4057', '-displaymasteringmax', '1000'], []),
+            ('fixed-peak', 'half', ['-displayfixedpeak', '-displaymaxcll', '4000'], ['--fixed-peak']),
+            ('bilinear-chroma', 'full', ['-displaybilinearchroma'], ['--bilinear-chroma']),
         ],
         'syn-tiles-10b-1080p.ivf': [
             ('nv12', 'half', ['-displaydepth', '8'], []),
@@ -81,7 +109,7 @@ def main():
         half, two_thirds = f'{w // 2 & ~1}x{h // 2 & ~1}', f'{w * 2 // 3 & ~1}x{h * 2 // 3 & ~1}'
         full, area = f'{w + 1 & ~1}x{h + 1 & ~1}', f'{w * 3 // 5 & ~1}x{h * 3 // 5 & ~1}'
         runs = [(half, 'rust', [], []), (full, 'rust', [], []), (two_thirds, 'rust', [], [])]
-        runs += [(half if size == 'half' else area, label, ['-capi'] + flags, model_flags)
+        runs += [({'half': half, 'full': full}.get(size, area), label, ['-capi'] + flags, model_flags)
                  for label, size, flags, model_flags in extra.get(name, [])]
         for out, label, flags, model_flags in runs:
             display = os.path.join(a.out, f'{name}.{out}.{label}.display.yuv')
@@ -100,13 +128,28 @@ def main():
             # The image's depth and dither as the decoder resolves them (Rav1gDisplay::depth, dither): depth 0
             # is the stream's, dither 0 dithers 8-bit codes only.
             def flag(name, default):
-                return int(flags[flags.index(name) + 1]) if name in flags else default
-            out_depth = flag('-displaydepth', 0) or (10 if depth > 8 else 8)
-            dither = flag('-displaydither', 0)
+                return float(flags[flags.index(name) + 1]) if name in flags else default
+            out_depth = int(flag('-displaydepth', 0)) or (10 if depth > 8 else 8)
+            dither = int(flag('-displaydither', 0))
             dithered = dither == 2 or (dither == 0 and out_depth == 8)
+            # The HDR metadata the pass takes: the stream's, the application's where the stream has none.
+            stream_cll, stream_mastering = metadata(log2)
+            max_cll = stream_cll or flag('-displaymaxcll', 0.0)
+            mastering_max = stream_mastering or flag('-displaymasteringmax', 0.0)
+            model_transfer = model_flags[model_flags.index('--transfer') + 1] if '--transfer' in model_flags else transfer
+            mode = {'16': 0, '18': 2}.get(model_transfer, 1)
+            want_peak = model.source_peak(mode, flag('-displaypeak', 1000.0), max_cll, mastering_max,
+                                          '-displayfixedpeak' in flags)
+            got_peak = PEAK.search(log2)
+            if mode != 1 and (not got_peak or float(got_peak.group(1)) != want_peak):
+                print(f'{name}: the display pass run to {out} ({label}) reports the source peak '
+                      f'{got_peak.group(1) if got_peak else "(none)"}, the model {want_peak:g} '
+                      f'(MaxCLL {max_cll:g}, mastering {mastering_max:g})')
+                failed = True
             args = [sys.executable, os.path.join(HERE, 'model.py'), frames, display, '--size', f'{w}x{h}', '--out', out,
                     '--transfer', transfer, '--matrix', matrix, '--primaries', primaries, '--depth', str(depth),
-                    '--out-depth', str(out_depth), '--count', str(a.frames)] + model_flags
+                    '--out-depth', str(out_depth), '--count', str(a.frames), '--max-cll', str(max_cll),
+                    '--mastering-max', str(mastering_max)] + model_flags
             if dithered:
                 args += ['--dither', '--max-differ', '0.05']
             if rng == 'full':

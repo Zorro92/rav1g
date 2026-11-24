@@ -739,6 +739,15 @@ typedef struct Rav1gFrame {
    points). Without the display pass `color`.
    */
   struct Rav1gColorInfo source_color;
+  /*
+   The source peak the display pass's tone map took for the frame, nits (`Rav1gDisplay`, "The source
+   peak" in docs/integration.md): for PQ the HDR metadata's (MaxCLL, else the mastering display's
+   largest luminance, the smaller of both, clamped to 400..10000) or the configured
+   `source_peak_nits`; for HLG the configured one; 0 without a tone map (no display pass, SDR).
+
+   New in interface version 3.
+   */
+  float display_source_peak_nits;
 } Rav1gFrame;
 
 /*
@@ -804,11 +813,13 @@ typedef struct Rav1gDisplay {
    */
   uint32_t tone_curve;
   /*
-   The PQ and HLG light the EETF maps to the SDR range: 0 is 1000 nits; at most 10000.
+   The PQ and HLG light the EETF maps to the SDR range: 0 is 1000 nits; at most 10000. A PQ frame
+   takes the peak of its HDR metadata instead when there is one (`max_cll_nits`; docs/integration.md,
+   "The source peak"): this is the peak of HLG, and of PQ without metadata.
    */
   float source_peak_nits;
   /*
-   The SDR white: the EETF maps to 2.03 times it (203 nits for 100). 0 is 100 nits.
+   The SDR white: the EETF maps to 2.03 times it (203 nits for 100). 0 is 100 nits; up to 4926.
    */
   float target_white_nits;
   /*
@@ -840,9 +851,21 @@ typedef struct Rav1gDisplay {
    */
   uint32_t dither;
   /*
+   The HDR metadata the application has for the stream (from its container, for example Matroska's
+   MaxCLL and the mastering display's largest luminance), nits; 0 for none. The source peak of a PQ
+   frame is MaxCLL, else the mastering display's largest luminance, the smaller of both when MaxCLL is
+   above it, clamped to 400..10000 nits, else `source_peak_nits`; each value is the stream's (its
+   metadata OBUs), and this one where the stream says nothing or 0: the stream wins, as for the
+   assumed code points. `Rav1gFrame::display_source_peak_nits` says what a frame took.
+
+   New in interface version 3, in place of two reserved fields.
+   */
+  float max_cll_nits;
+  float mastering_max_nits;
+  /*
    Zero.
    */
-  uint32_t reserved[3];
+  uint32_t reserved[1];
 } Rav1gDisplay;
 
 /*

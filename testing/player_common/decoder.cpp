@@ -771,8 +771,13 @@ int AV1Decoder::DecodeOne() {
       XB_LOGI << "Display pass: " << display_w << "x" << display_h << " depth " << params_.displaydepth_
               << " dither " << params_.displaydither_
               << " (Rav1gSettings::display: depth 0 is P010 for a 10-bit decoder, NV12 for an 8-bit one; dither 0 "
-                 "dithers NV12; with -output p010 or -interop)";
+                 "dithers NV12; with -output p010 or -interop); source peak "
+              << (params_.displayfixedpeak_ ? "configured (-displayfixedpeak)" : "from the HDR metadata (default)")
+              << ", input chroma "
+              << (params_.displaybilinearchroma_ ? "bilinear (-displaybilinearchroma)" : "Catmull-Rom (default)");
   }
+  av1_set_display_fixed_peak(params_.displayfixedpeak_);
+  av1_set_display_bilinear_chroma(params_.displaybilinearchroma_);
   XB_LOGI << "Front of the frame: two steps (default)";
   XB_LOGI << "CDEF shader: cdef_filter_v3 (default)";
   // -intrav2: the same rules, independent of the CDEF shader.
@@ -1197,6 +1202,11 @@ int BufferLocker::Push(const Rav1gFrame* img) {
     rav1g_color_text(&img->color, img->has_mastering_display ? &img->mastering_display : NULL,
                      img->has_content_light ? &img->content_light : NULL, colour, sizeof(colour));
     XB_LOGI << "COLOUR frame " << (pushed_.load() - 1) << ": " << colour;
+  }
+  // The source peak the display pass's tone map took (from the HDR metadata, or the configured one).
+  if (img && img->display_source_peak_nits > 0.0f && img->display_source_peak_nits != display_peak_) {
+    display_peak_ = img->display_source_peak_nits;
+    XB_LOGI << "DISPLAY frame " << (pushed_.load() - 1) << ": source peak " << display_peak_ << " nits";
   }
   // The semi-planar output (-output p010, -interop): with -interop the D3D11 context waits for the frame
   // on the decoder's fence; a run that reads the frames gets them back from their texture as the three
