@@ -145,7 +145,8 @@ settings.display.width = 1920;                     /* the image size */
 settings.display.height = 1080;
 /* optional: settings.display.source_peak_nits = 1000; target_white_nits = 100; depth = 10;
    dither = RAV1G_DISPLAY_DITHER_AUTO;
-   assumed_* = the container's code points where the sequence header says "unspecified" */
+   assumed_* = the container's code points where the sequence header says "unspecified";
+   max_cll_nits, mastering_max_nits = the container's HDR metadata (version 3) */
 ```
 
 | Field | Meaning | 0 |
@@ -153,14 +154,15 @@ settings.display.height = 1080;
 | `width`, `height` | the size of every image, rounded up to even, at most 16384; any ratio to the frame (exactly half, the same size and two thirds in both are the fast paths: 4K to 1080p, 4K to 4K, 4K to 1440p) | no display pass |
 | `transform` | `RAV1G_DISPLAY_TRANSFORM_AUTO`, or one of the transforms below for every frame whatever its colour says | by each frame's colour |
 | `tone_curve` | `RAV1G_TONE_CURVE_BT2390`; `RAV1G_TONE_CURVE_HABLE` is not in this version (`RAV1G_STATUS_INCAPABLE`) | BT.2390 |
-| `source_peak_nits` | the PQ and HLG light the EETF maps to the SDR range, up to 10000 | 1000 |
-| `target_white_nits` | the SDR white; the EETF ends at 2.03 times it (203 nits for 100) | 100 |
+| `source_peak_nits` | the light the EETF maps to the SDR range for HLG, and for PQ without HDR metadata ([the source peak](#the-source-peak-and-the-input-chroma-interface-version-3)), up to 10000 | 1000 |
+| `target_white_nits` | the SDR white; the EETF ends at 2.03 times it (203 nits for 100); up to 4926 (Bale's fork passes 80 to 400) | 100 |
 | `desaturation` | not in this version: 0 (another value is `RAV1G_STATUS_INCAPABLE`) | none |
 | `depth` | 10: P010; 8: NV12 | by `Rav1gSettings::bit_depth` |
 | `dither` | `RAV1G_DISPLAY_DITHER_AUTO` (an ordered dither for NV12, rounded P010), `_OFF` (rounded), `_ORDERED` (dithered at either depth) | auto |
 | `assumed_primaries`, `assumed_transfer_characteristics`, `assumed_matrix_coefficients` | H.273 code points taken where the sequence header says unspecified (2) | none: unspecified is BT.709 SDR |
 | `assumed_chroma_sample_position` | the AV1 `chroma_sample_position` taken where the header says 0 (unknown) | none: unknown is between rows |
-| `reserved` (3) | zero | |
+| `max_cll_nits`, `mastering_max_nits` | version 3: the application's HDR metadata (its container's MaxCLL and mastering display maximum), nits; each fills what the stream's metadata OBUs do not say | none |
+| `reserved` (1; 3 in version 2) | zero | |
 
 **The transforms** (`RAV1G_DISPLAY_TRANSFORM_*`; the same numbers are `Rav1gFrame::display_transform`):
 
@@ -171,8 +173,9 @@ settings.display.height = 1080;
 | `PQ` (3) | PQ (transfer 16) | ST 2084 EOTF, the BT.2390 EETF on the largest channel from the source peak to 2.03 x white, BT.2020 to BT.709 when the primaries are BT.2020, one clip |
 | `HLG` (4) | HLG (transfer 18) | inverse OETF and the OOTF of a 1000-nit display (BT.2100), then as `PQ` |
 
-In every case: the chroma at each source pixel by bilinear interpolation at its siting
-(`chroma_sample_position`: colocated, or between rows for vertical and unknown), the matrix of the
+In every case: the chroma at each source pixel by a 4x4 Catmull-Rom cubic at its siting
+(`chroma_sample_position`: colocated, or between rows for vertical and unknown; version 2: bilinear),
+clamped to the code range, the matrix of the
 stream (BT.2020, BT.601, else BT.709 weights) and its range; each output pixel the average of the source
 pixels its footprint covers, weighted by their overlap, in display-linear light; the output chroma mixed
 in linear light over three output columns and two rows (left-sited); BT.709 limited-range codes. Film
@@ -208,7 +211,9 @@ the image's BT.709 SDR (primaries, transfer and matrix 1, limited range, chroma 
 was decoded is in `source_width`, `source_height` (after super-resolution) and `source_color` (the
 sequence header's code points as the stream has them, not the assumed ones). The HDR metadata stays the
 stream's. Without a display pass `display_transform` is `RAV1G_DISPLAY_TRANSFORM_NONE` (0) and the
-`source_*` fields repeat `width`, `height` and `color`.
+`source_*` fields repeat `width`, `height` and `color`. `display_source_peak_nits` (version 3) is the
+source peak the frame's tone map took ([below](#the-source-peak-and-the-input-chroma-interface-version-3)),
+0 without a tone map (SDR, no display pass).
 
 **A sequence change** keeps the display size and depth of the decoder: the images keep their size and
 format. A new sequence with another colour description (SDR to PQ, say) changes the transform from its
@@ -245,11 +250,74 @@ apart ([bale-display-pass.md](bale-display-pass.md#how-close-to-bales-stage)).
 takes the upscaled frame), other primaries than BT.709 and BT.2020 (taken as BT.709), and the BT.2020
 constant-luminance matrix (taken as NCL).
 
-## Interface version 3: the retired switches
+### The source peak and the input chroma (interface version 3)
 
-A draft on branch `exp/cleanup-opus` (fingerprint `267a0692fc675929`), not released. It changes no
-struct, no output and no default; it takes out of `rav1g.h` what only test runs used, A/B switches whose
-new path is the default and experiments that lost ([test-player.md](test-player.md#retired-switches)):
+Two changes that follow Bale's D3D11 stage (its docs/gpu-tone-map.md, "Source peak from the stream's HDR
+metadata" and "Cubic input chroma", 2026-11-24), so that the two look the same.
+
+**The source peak.** A PQ (ST 2084) frame is tone-mapped (the BT.2390 EETF) from the peak of its HDR
+metadata, not from a fixed one:
+
+1. MaxCLL, when it is above 0; else
+2. the mastering display's largest luminance, when it is above 0; else
+3. `source_peak_nits` (0 is 1000), as configured.
+
+When both are there and MaxCLL is above the mastering display's (no pixel is brighter than the display it
+was graded on: broken metadata), the mastering display's is taken. A peak from the metadata is clamped to
+400..10000 nits (lower is broken metadata, 10000 is the end of PQ); the configured one is taken as it is.
+HLG keeps the configured peak (its OOTF renders for a 1000-nit display already), SDR has no tone map.
+Bale's checks of its stage: MaxCLL 4057 with a mastering display of 1000 gives 1000; MaxCLL 1184 with 4000
+gives 1184; no metadata gives the configured 1000.
+
+Each value is the stream's: its metadata OBUs `METADATA_TYPE_HDR_CLL` (`max_cll`, cd/m2) and
+`METADATA_TYPE_HDR_MDCV` (`luminance_max`, 24.8 fixed point) (AV1 5.8.3, 5.8.4, 6.7.3, 6.7.4), the ones that
+hold for the frame by rav1d's rule (from the OBU on until one of its kind replaces it; the same values as
+`Rav1gFrame::content_light` and `mastering_display`). Where the stream says nothing, or 0, the
+application's `max_cll_nits` and `mastering_max_nits` (for example Matroska's MaxCLL and mastering
+metadata) fill it: the stream wins, as for the assumed colour code points, value by value.
+`Rav1gFrame::display_source_peak_nits` says what each frame took, for a log. The peak changes only with
+the metadata (in practice once a stream); the tables of the tone map are made again then on the CPU (well
+under a millisecond).
+
+**The input chroma.** Where the pass needs the chroma at a source pixel, it takes the separable 4x4
+Catmull-Rom cubic (B 0, C 1/2; Keys' a = -1/2) of the coded chroma samples at the pixel's place, at the
+stream's siting (`chroma_sample_position`, AV1 6.4.2, with the assumed one; unknown is between rows),
+before any transfer or matrix, with the sample coordinates clamped to the plane, and the result clamped to
+the code range (limited range 16..240 at 8 bits, 64..960 at 10; full range every code). The rest of the
+pass is as before: the area downscale in linear light, the output chroma averaged in linear light, one
+clip at the end. A luma pixel sits at a quarter phase of the chroma grid (0, 1/4, 1/2, 3/4), where every
+weight is a multiple of 1/128: with integer codes every product and sum is exact in float32, so the pass
+and its model have the same chroma bit for bit. The cubic passes through the samples and reproduces a line
+and a parabola, so fine colour detail and colour edges stay sharper than with bilinear; its negative
+lobes overshoot a sharp edge by about 7% of the step a side, which the clamp keeps in the code range.
+
+Cost (expected; to be measured on the console; [stage-fusion.md](stage-fusion.md#catmull-rom-chroma-the-source-peak-from-the-metadata-interface-version-3)):
+one source row a step on every fast path, its luma and its four tap rows of U and V (five columns each)
+issued together before the arithmetic, no group memory and no more syncs; the five columns filtered down
+with constant weights, then across. About 23 instructions a source pixel more than bilinear: at the
+console's 1.86 TFLOP/s ~+0.2 ms a 4K frame at 2:1, ~+0.25-0.3 ms at 1:1 and 3:2, ~+0.3-0.5 ms for the
+area loop (1080p to 4K); Bale measured its own cubic chroma at ~1.1 ms a 4K frame. The SDR and HLG
+pipelines go from 8 and 6 waves a SIMD to 4 (96 VGPRs; PQ stays at 4 with 110): the first thing to check
+on the console. Sized for the GPU slice: no new memory, nothing on the CPU.
+
+**A/B switches** (internal, `libav1/dx/av1_perf.h`, not in `rav1g.h`): `av1_set_display_fixed_peak(1)`
+takes `source_peak_nits` for every PQ frame whatever its metadata, `av1_set_display_bilinear_chroma(1)`
+the bilinear chroma of version 2 (test flags `-displayfixedpeak`, `-displaybilinearchroma`; Bale's
+`tonemap-debug fixedpeak`, `bilinearchroma`). Off by default.
+
+## Interface version 3: the retired switches, the source peak and the input chroma
+
+A draft, not released: branch `exp/cleanup-opus` (fingerprint `267a0692fc675929`) took out the retired
+switches; branch `exp/display-parity-opus` (fingerprint `f4f314d6ea9678c2`) adds to the same version the
+display pass's source peak from the HDR metadata and the Catmull-Rom input chroma
+([above](#the-source-peak-and-the-input-chroma-interface-version-3)): `Rav1gDisplay::max_cll_nits` and
+`mastering_max_nits` in two of its three reserved words (the struct keeps its size; `reserved` is one
+word), `Rav1gFrame::display_source_peak_nits` behind `source_color`. A display pass of version 2 with
+these at 0 differs only in its image: PQ streams with metadata take its peak, every stream the cubic
+chroma (the two `av1_*` switches give version 2's image back).
+
+The retired switches: `rav1g.h` loses what only test runs used, A/B switches whose new path is the default
+and experiments that lost ([test-player.md](test-player.md#retired-switches)):
 
 - the functions `rav1g_set_cdef_v2`, `rav1g_set_intra_opt`, `rav1g_set_clears`, `rav1g_set_async_clear`,
   `rav1g_set_lf_h_split` and `rav1g_set_intra_edge_fix`, and the constants `RAV1G_CLEARS_*`. Their
@@ -284,8 +352,9 @@ reserved words) adds the display pass: `Rav1gDisplay`, `Rav1gSettings::display` 
 `Rav1gFrame::display_transform`, `source_width`, `source_height` and `source_color` behind `format`, the
 `RAV1G_DISPLAY_TRANSFORM_*`, `RAV1G_TONE_CURVE_*` and `RAV1G_DISPLAY_DITHER_*` constants ([The display pass](#the-display-pass-interface-version-2)). An application
 of version 1 recompiled against it and filling the settings with `rav1g_settings_default` gets the
-output of version 1. Version 3 (a draft, not released: branch `exp/cleanup-opus`, fingerprint
-`267a0692fc675929`) takes the retired switches out ([Interface version 3](#interface-version-3-the-retired-switches)).
+output of version 1. Version 3 (a draft, not released: branch `exp/display-parity-opus`, fingerprint `f4f314d6ea9678c2`;
+`exp/cleanup-opus` had `267a0692fc675929`) takes the retired switches out and adds the display pass's
+source peak and input chroma ([Interface version 3](#interface-version-3-the-retired-switches-the-source-peak-and-the-input-chroma)).
 
 ## Releases
 

@@ -50,8 +50,9 @@ From the fork's `BaleToneMap` (`BaleToneMap.h`: `Create`, `Initialize`, `Process
 | --- | --- | --- | --- |
 | curve 1, BT.2390 EETF (knee offset 1, the largest original R'G'B' signal, a scalar gain) | yes | `tone_curve` 0 or `RAV1G_TONE_CURVE_BT2390` | the same |
 | curve 2, Hable | debug switch only | `RAV1G_TONE_CURVE_HABLE` | refused, `RAV1G_STATUS_INCAPABLE`: the fork keeps its stage |
-| `source_peak_nits` | 1000 (HLG too) | `source_peak_nits` 0 or 1000 | the same; HLG's OOTF at a 1000-nit display, as Bale |
-| `target_white_nits` | 100: the EETF ends at 2.03 x 100 = 203 nits, normalized to SDR 1 | `target_white_nits` 0 or 100 | the same (not 203: 203 would end the curve at 412 nits) |
+| `source_peak_nits` | 1000 (HLG too): the PQ peak without metadata | `source_peak_nits` 0 or 1000 | the same; HLG's OOTF at a 1000-nit display, as Bale |
+| PQ source peak from the HDR metadata (`cpu::source_peak`, since 2026-11-24) | MaxCLL, else the mastering maximum, the smaller when MaxCLL is above it, clamped to 400..10000; else the config peak | the stream's CLL/MDCV OBUs, `max_cll_nits` and `mastering_max_nits` where the stream has none | the same rule (interface version 3); `Rav1gFrame::display_source_peak_nits` reports it; `fixedpeak`: `av1_set_display_fixed_peak` |
+| `target_white_nits` | 100: the EETF ends at 2.03 x 100 = 203 nits, normalized to SDR 1; the fork will pass 80 to 400 | `target_white_nits` 0 or 80..400 | the same (not 203: 203 would end the curve at 412 nits) |
 | `desat` | 0 (off) | `desaturation` 0 | the same; any other value is refused (`INCAPABLE`) |
 | downscale (`reserved[0..1]`, at most 4:1) | the source fitted into the display | `width`, `height` | any ratio; 2:1, 1:1 and 3:2 fast |
 | output P010 (`BALE_TONEMAP_OUTPUT_P010`) | P010 for AV1 (the owner's exception) | `depth` 10 (or 0 for a 10-bit decoder) | the same codes: `64 + 876 Y'`, `512 + 896 C`, rounded, `<< 6` |
@@ -61,7 +62,8 @@ From the fork's `BaleToneMap` (`BaleToneMap.h`: `Create`, `Initialize`, `Process
 | 8-bit input (`BALE_TONEMAP_INPUT_NV12`, read as code << 2) | yes | 8-bit sequences | limited range the same (8-bit codes by their 8-bit range equal `code << 2` in the 10-bit one); full range by 255 (H.273), where `code << 2` over 1023 is 0.3% lower at the top |
 | frame transfer, primaries, matrix, range | the stream's, unspecified merged from the container | the sequence header's; `assumed_*` where it says unspecified (2) | the same, fill only the unspecified values |
 | input chroma siting (`chroma_location`, AVChromaLocation) | the stream's: left and unspecified as left, topleft co-sited, center/top/bottom honoured | the sequence header's `chroma_sample_position`, `assumed_chroma_sample_position` where it is 0 | the same for what AV1 can say: vertical (left) and colocated (topleft); unknown as left. Center, top and bottom have no AV1 code point |
-| mastering display, content light | passed, not used by the curve | not used | the same (the frame's metadata stays the stream's) |
+| input chroma filter (since 2026-11-24) | 4x4 Catmull-Rom, clamped to 64..960 limited (0..1023 full); `bilinearchroma`: bilinear | the same cubic and clamp (interface version 3); `av1_set_display_bilinear_chroma`: bilinear | the same chroma values: both exact at the quarter phases |
+| mastering display, content light | the PQ source peak (above) | the PQ source peak (above) | the same (the frame's metadata stays the stream's) |
 | gamut step | `matrix == 9` | `primaries == 9` | the same for every stream Bale's stage takes (it declines mixed BT.2020/BT.709 tags) |
 | `gammachroma`, `nostaged` (debug) | off | none | Bale's old math and its other pass layout: no equivalent |
 
@@ -70,9 +72,10 @@ desaturation, P010 (NV12 dithered if the AV1 exception is ever lifted), the scal
 transforms, 8-bit sources, the container's code points for unspecified ones, the stream's chroma siting.
 All of it is in this version; Hable and desaturation are refused so that the fork falls back.
 
-The method, point by point as Bale's stage does it since 2026-11-22: linear-light area downscale with
-exact overlap weights, each output pixel computed once; input chroma upsampled bilinearly at the stream's
-siting; per source pixel the sign-keeping decode, the tone curve on the largest original channel and
+The method, point by point as Bale's stage does it since 2026-11-24: linear-light area downscale with
+exact overlap weights, each output pixel computed once; input chroma upsampled with a 4x4 Catmull-Rom
+cubic at the stream's siting, clamped to the code range; the PQ source peak from the HDR metadata; per
+source pixel the sign-keeping decode, the tone curve on the largest original channel and
 BT.2020 to BT.709, unclipped; one clip at the end, per output pixel and per chroma footprint; output
 chroma left-sited, mixed in linear light over [1 2 1]/4 x [1 1]/2 (output columns 2i-1..2i+1, rows 2j,
 2j+1), clipped and encoded once; inverse BT.1886 (power 1/2.4). rav1g's pass does each of these, written
@@ -85,7 +88,11 @@ Bale's CPU reference of its stage (`cpu::reference_p010` of `native/bale-gpu`, B
 configuration) and rav1g's pass (the shader compiled as C++, `testing/display_pass`), on the test frames of
 the C++ check (gradients, flat blocks, noise, samples out of the nominal range, every code at random,
 near-black out-of-gamut blocks), P010 (run locally on 2026-11-23, not part of CI; Bale's crate is
-AGPL-3.0 and is only run, not copied):
+AGPL-3.0 and is only run, not copied). These numbers are of interface version 2 against Bale's stage of
+that day (bilinear chroma, the fixed peak); the comparison has not been run again for version 3 and Bale's
+stage of 2026-11-24. Both now take the same cubic chroma, exact at its quarter phases on both sides, and
+the same peak rule, so the same agreement is expected; with `av1_set_display_bilinear_chroma` and
+`av1_set_display_fixed_peak` the pass is version 2's:
 
 | Cases | Codes that differ (largest share of a plane) | Largest difference |
 | --- | --- | --- |
@@ -124,11 +131,12 @@ and the FFmpeg/D3D11VA AV1 paths keep the stage as it is.
 `BaleRav1g.h`, `GpuDecoderSampleProvider.h`, `GpuDecoderImagePool.h`, `FFmpegMediaSource.cpp` (the rav1g
 branch), and its copies of `rav1g.h` and `av1_perf.h`:
 
-1. **Interface version.** The new `rav1g.h`, `static_assert(RAV1G_ABI_VERSION == 2, ...)` and the
-   run-time check of `rav1g_abi_version()` against 2 (3 with the retired switches of
-   [integration.md](integration.md#interface-version-3-the-retired-switches), which the fork does not
-   call: only the number and the header change). Bale's loader refuses a version-1 DLL, or the fork
-   keeps a version-1 path (no display pass, the stage as today) for one.
+1. **Interface version.** The new `rav1g.h`, `static_assert(RAV1G_ABI_VERSION == 3, ...)` and the
+   run-time check of `rav1g_abi_version()` against 3 ([integration.md](integration.md#interface-version-3-the-retired-switches-the-source-peak-and-the-input-chroma):
+   the retired switches, which the fork does not call; `Rav1gDisplay::max_cll_nits` and
+   `mastering_max_nits` in two of its reserved words, `Rav1gFrame::display_source_peak_nits` at its end).
+   Bale's loader refuses a version-1 DLL, or the fork keeps a version-1 path (no display pass, the stage
+   as today) for one.
 2. **`av1_perf.h`**, copied verbatim as today: `av1_perf_frame` has one GPU stage more
    (`AV1_PERF_GPU_DISPLAY`, so `gpu_stage_ms` and `gpu_stage_hits` have 22 entries) and the output path
    `AV1_PERF_OUTPUT_DISPLAY`; the record is 640 bytes on x64 (the fork's `static_assert` of its size
@@ -140,7 +148,13 @@ branch), and its copies of `rav1g.h` and `av1_perf.h`:
    - `tone_curve`: `RAV1G_TONE_CURVE_BT2390` for Bale's curve 1; curve 2 (Hable) or a non-zero
      desaturation: `rav1g_decoder_create` returns `RAV1G_STATUS_INCAPABLE`, and the fork creates the
      decoder again without `display` and keeps the stage;
-   - `source_peak_nits` 1000, `target_white_nits` 100 (the `BaleToneMapConfig` values; 0 is the same);
+   - `source_peak_nits` 1000, `target_white_nits` 100, or the fork's 80 to 400 (the `BaleToneMapConfig`
+     values; 0 is 1000 and 100);
+   - `max_cll_nits`, `mastering_max_nits`: the container's MaxCLL and mastering display maximum (what the
+     fork fills `BaleToneMapFrameInfo` with: `has_content_light`/`max_cll`, `has_mastering`/
+     `mastering_max_nits`), 0 where it has none. rav1g takes the stream's metadata OBUs first and these
+     where the stream says nothing, then Bale's rule; the fork can log `frame.display_source_peak_nits`
+     as Bale's `bale_tonemap_peak_read` reports its stage's;
    - `depth`: 10 for P010 (Bale's rule for AV1), 8 for NV12; `dither` 0 (NV12 dithered, P010 rounded);
    - `assumed_primaries`, `assumed_transfer_characteristics`, `assumed_matrix_coefficients`: the
      container's code points (`streamColor` of `MergeStreamColor`; AVCOL_* are H.273 numbers), used only
@@ -173,7 +187,10 @@ branch), and its copies of `rav1g.h` and `av1_perf.h`:
    frames that have it (`gpu_stage_hits`) as the display stage's GPU time, and the per-frame line can
    print it next to `gpu`; `output_path` is `AV1_PERF_OUTPUT_DISPLAY` (6) for such frames.
 7. **A switch for the A/B** (an FFmpeg option next to `bale_tonemap`): create the rav1g decoder without
-   `display` and keep Bale's stage, so the same stream can be played both ways.
+   `display` and keep Bale's stage, so the same stream can be played both ways. `tonemap-debug
+   fixedpeak` and `bilinearchroma` map to `av1_set_display_fixed_peak(1)` and
+   `av1_set_display_bilinear_chroma(1)` of `av1_perf.h` (process-wide, set before the first temporal
+   unit), so that both paths A/B the same way.
 
 ## What Bale changes
 
@@ -195,8 +212,9 @@ branch), and its copies of `rav1g.h` and `av1_perf.h`:
   (`mastering_display`, `content_light`, which stay the stream's for the stats).
 - **The copy into the fork's pool** (above), and the processed-output mark.
 - **One math in two places**: rav1g's pass and Bale's stage are written separately from the same
-  standards and agree within one P010 code (above); a change of the method (another curve, a per-frame
-  peak from the metadata) has to be made in both, or Bale keeps its stage for it.
+  standards and agree within one P010 code (above); a change of the method (another curve; the source
+  peak from the metadata and the cubic chroma were made in both, 2026-11-24) has to be made in both, or
+  Bale keeps its stage for it.
 
 ## Costs and savings
 

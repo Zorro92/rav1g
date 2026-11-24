@@ -479,6 +479,64 @@ rounded, and P010 dithered.
 an odd frame has `(w + 1) / 2` chroma columns (`(w + ss_x) >> ss_x`), so its last luma column took its
 chroma from one column too far left. Only the area loop sees odd sizes.
 
+## Catmull-Rom chroma, the source peak from the metadata (interface version 3)
+
+Branch `exp/display-parity-opus` (2026-11-24), following Bale's stage of the same day so that the two look
+the same (the rule and the filter: [integration.md](integration.md#the-source-peak-and-the-input-chroma-interface-version-3)).
+
+**The source peak** costs no GPU work: it is the tables' parameter (`display_pass.rs` `source_peak`, per
+frame from the metadata `cm.hdr_metadata` carries), and the tables are made again on the CPU only when it
+changes (once a stream in practice, about 2000 float64 evaluations). It exposed a fault of the tables of
+version 2: the shader positions the PQ gain table by the smaller of two lines (the knee to the peak's
+signal, the peak to 1), which is right only while the knee's 64 intervals are at least as dense as the 32
+above the peak; from a peak of about 1200 nits on (4000-nit grades: all the time) they are not, and
+the pass read the wrong intervals (codes up to 700 apart in the C++ check at a configured peak of 10000).
+The shader now takes the larger of the two lines when the upper one is the steeper (a uniform choice from
+the two slopes it has as constants); the table keeps its nodes at the knee, the peak and 1, and the Rust
+test holds it to 2e-6 from 150 to 10000 nits and whites of 80 to 400 (an even spacing from the knee to 1
+instead would put the peak's change of curvature inside an interval: 1.5e-5).
+
+**The chroma.** A source pixel's chroma takes a 4x4 Catmull-Rom filter of the coded samples (the bilinear
+version: 2x2). How the reads are organised (`display_pass.hlsl`, the comment of `sample_linear` and of the
+paths):
+
+- *Per source row, not per window.* At 2:1, 1:1 and 3:2 a thread takes one source row of its quad a step:
+  the row's luma (8 bytes) and its four tap rows of U and V, five chroma columns from the column left of
+  the quad's first (12 bytes at 16 bits from the dword boundary, 8 at 8 bits), 9 reads issued together.
+  The five columns are filtered down with the weights of the row's parity and the siting (constants: the
+  phases are 1/4 and 3/4 between rows, 0 and 1/2 colocated), then across at the row's four (or two, three)
+  source columns (phase 0 or 1/2), then clamped. Neighbouring steps and threads read overlapping rows: 36
+  reads a 2:1 quad (16 bilinear), from the cache (the chroma of a 64x64-pixel group is 16 KB at 2:1 and
+  10-bit, read by its 256 threads together). A window of five rows shared by two steps, or the block's whole window,
+  reads less but holds it in registers: 2:1 PQ 128 VGPRs, 3:2 PQ 167 (2 waves a SIMD), against 91 and 107
+  a row a step.
+- *No group memory.* A group-shared chroma tile would read each sample once, but the tile of a 2:1 group
+  (68 rows of 69 samples, U and V) is 18.8 KB on top of the 12.5 KB the pass has: 31 KB a group, two
+  groups a compute unit, and the same 4 waves a SIMD the registers give; and it needs a sync and a second
+  layout for the tile's edge column. The cache reads cost less than that.
+- *Exact.* Each weight is a multiple of 1/128; with integer codes every product and partial sum is a
+  multiple of 1/2048 below 2^24 of them, so float32 gives the exact value in any order (down then across
+  here, across then down in Bale's): the pass, its model and Bale's stage have the same chroma. The C++
+  check (`testing/display_pass`) has cases at both sitings, sharp chroma edges where the cubic overshoots
+  and is clamped (limited and full range, 8 and 10 bits, every path), and the bilinear switch on every
+  path.
+
+**Registers** (RDNA2, LLPC, `testing/shader_regs`): PQ 110 VGPRs (114 before), 4 waves a SIMD as before;
+SDR 96 and HLG 96, 4 waves (8 and 6 before). The SDR and HLG pipelines lose occupancy: the path that binds
+is the 2:1 one at 16-bit samples (the four tap rows' 24 dwords and their 40 samples beside the tone map);
+3:2 and the area loop are as large. Every read of a step is issued together and each step has ~400
+instructions of arithmetic a wave behind it, so 4 waves are expected to hide the latency, but this is the
+first thing to check on the console.
+
+**Expected cost** (not measured; instructions counted from the code, at 0.93 T lane instructions a second):
+about 23 instructions a source pixel more than bilinear at 2:1 (the filter down and across, the extraction
+of 40 samples a row, the clamps): ~+0.2 ms a 4K frame (SDR 1.0 to ~1.2 ms, PQ 1.2 to ~1.4); at 1:1 and
+3:2 ~+0.25-0.3 ms; the area loop (1080p to 4K, other ratios) ~+0.3-0.5 ms, its four tap rows one after
+the other. Bale measured its own cubic chroma at ~1.1 ms a 4K frame in its D3D11 stage. Sized for the
+GPU slice (1.86 TFLOP/s, never preempted): no memory, no CPU work, no more dispatches or syncs. The A/B
+switches (`av1_set_display_bilinear_chroma`, `-displaybilinearchroma`) give version 2's image for the
+picture, not its occupancy (one pipeline serves both).
+
 ## The ABI it needs
 
 What follows is the first sketch; the draft of `exp/display-abi2-opus` is in `rav1g.h` (interface version 2,
