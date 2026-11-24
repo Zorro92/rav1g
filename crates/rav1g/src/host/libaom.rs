@@ -540,7 +540,9 @@ mod tests {
 
     #[test]
     fn the_levels_of_the_loop_filter() {
-        // SAFETY: all zero is a frame header.
+        // SAFETY: all zero is a frame header. `zeroed_box` is safe in the decoder and unsafe in the host
+        // of rav1g-parse-check, which compiles this file too.
+        #[allow(unused_unsafe, reason = "zeroed_box is unsafe in the host of rav1g-parse-check")]
         let mut cm: Box<AV1_COMMON> = unsafe { super::super::rav1d_frames::zeroed_box() };
         loop_filter_init(&mut cm);
         assert_eq!(cm.lf.combine_vert_horz_lf, 1);
@@ -579,7 +581,9 @@ mod tests {
 
     #[test]
     fn the_units_of_the_loop_restoration() {
-        // SAFETY: all zero is a frame header.
+        // SAFETY: all zero is a frame header. `zeroed_box` is safe in the decoder and unsafe in the host
+        // of rav1g-parse-check, which compiles this file too.
+        #[allow(unused_unsafe, reason = "zeroed_box is unsafe in the host of rav1g-parse-check")]
         let mut cm: Box<AV1_COMMON> = unsafe { super::super::rav1d_frames::zeroed_box() };
         cm.superres_upscaled_width = 3840;
         cm.height = 2160;

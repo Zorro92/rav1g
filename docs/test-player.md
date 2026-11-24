@@ -3160,7 +3160,8 @@ warp_check: mutant rejected as expected: size of reference 0, not of the referen
 ```
 
 `inter_warp_compound(_hbd).hlsl` had the same clamp and got the same change; no pipeline
-state uses those two (`GLOBAL_GLOBALMV` blocks go through `inter_scale_warp_compound`).
+state used those two (`GLOBAL_GLOBALMV` blocks go through `inter_scale_warp_compound`), and
+they have since been removed.
 
 **No warp from a scaled reference.** libaom's `av1_allow_warp()` refuses the warp of a
 scaled reference before it looks at the model, and so does the specification (`useWarp` in

@@ -432,12 +432,12 @@ Lines are those of the upstream sources (rav1g 7ff22d5):
 | `idct_lossless` | `:50, 74, 92`, return at `:28` | the same, for the 4x4 Walsh-Hadamard transform |
 | `inter_scale`, `_obmc_above`, `_obmc_left`, `inter_scale_2x2chroma_hbd`, and their `_hbd` builds | one plain barrier each (`inter_scale.hlsl:92`) | The horizontally filtered lines of a column go from the thread that made them to the threads that filter vertically. |
 | `inter_scale_compound`, `_masked`, `_diff_chroma`, `_2x2_hbd`, and `_hbd` builds | three plain barriers each (`inter_scale_compound.hlsl:106, 128, 170`) | the same for two references, which reuse the same memory |
-| `inter_scale_2x2chroma`, `inter_scale_compound_2x2` | `:121, 123` and `:201, 203`, inside `if (block.y & DualWriteBlock)` | Two 2x2 blocks that share a word of the frame exchange their halves; the barriers were in a branch only some threads take. |
+| `inter_scale_2x2chroma`, `inter_scale_compound_2x2` (the second removed since: no pipeline state used it) | `:121, 123` and `:201, 203`, inside `if (block.y & DualWriteBlock)` | Two 2x2 blocks that share a word of the frame exchange their halves; the barriers were in a branch only some threads take. |
 | `inter_2x2chroma`, `inter_compound_2x2` | `:115`, `:173`, in the same branch | the same pair write, in the shaders for references of the frame's own size |
 | `inter_compound_diff_luma`, `_hbd` | `:252`, `:215` | The mask sums of a 4x2 go to the neighbouring thread, which stores both as the chroma mask. |
 | `inter_scale_compound_diff_luma`, `_hbd` | `:114, 136, 178, 223, 229` | two references and the mask sums |
 | `inter_scale_warp_compound`, `_hbd` (compound blocks with global motion) | `:119, 167, 188, 247, 295`, inside the branches for a warped and a plain reference; no barrier at `:382`–`:392` | two passes per reference; the mask sums of a difference weighted block were written to and read from the group memory with nothing between |
-| `inter_warp_compound`, `_hbd` (not used by the decoder) | `:94`–`:134` and three more places, `:345`–`:351` | the same, without any barrier |
+| `inter_warp_compound`, `_hbd` (not used by the decoder; removed since) | `:94`–`:134` and three more places, `:345`–`:351` | the same, without any barrier |
 | `loopfilter_hor`, `_hbd` | `:154` in `filter_horizontal_edge`, called from a loop over the edges of the thread's own block (`:218`–`:231`); `:211` | The four threads of a block filter their columns, then put the lines together from all four. Every block has its own number of edges, so the loop had a trip count per thread, and an edge reads from the frame what the edge above it stored. |
 | `loopfilter_vert`, `_hbd` | `:182`, `:184` | the edge list of a block, loaded by its four threads |
 | `loop_restoration` | `:276`, and no barrier at `:297`–`:314` (Wiener rows to columns to stored words), in `box_filter0` and `box_filter1` (`:91`–`:200`: box sums of the self guided filter, read by their neighbours), at `:349`–`:350` | six passes, one plain barrier |
@@ -534,7 +534,7 @@ console:
 |---|---|---|---|
 | `intra_filter` (8-bit only; `intra_filter_hbd` masks with `(bw << 1) - 1`) | `4 * (idx & (bw - 1))`, `8 * (idx & (bw - 1))`: the word of a block the residual is added to | `bfi` width `bw_log2`, offsets 2 and 3 | the filter intra block is 4 samples wide. Filter intra is luma only |
 | all `inter_scale_*`, 8-bit and 10-bit | `(thread.x >> 2) & ((1 << (w_log + h_log)) - 1)`, `4 * (subblock & ((1 << w_log) - 1))` | `ubfe` width `w_log + h_log` offset 2, `bfi` width `w_log` offset 2 | the block is 4x4, or 4 samples wide |
-| `inter_compound_masked(_hbd)`, `inter_warp_compound(_hbd)` | the same expressions | the same | chroma of an 8x16 or 8x32 wedge block (masked); never (warp: 8x8 and larger) |
+| `inter_compound_masked(_hbd)`, `inter_warp_compound(_hbd)` (removed since) | the same expressions | the same | chroma of an 8x16 or 8x32 wedge block (masked); never (warp: 8x8 and larger) |
 | `inter_ext_borders(_hbd)` | `(1 << shft) - 1` as the mask of the samples that stay in the last word of a row | `bfi` width `shft`, offset 0 | the plane's width is 4n + 1 (8-bit) or odd (10-bit): a chroma plane of the scaled-reference stream is 591 wide |
 
 The inter shaders of frames whose references have the frame's size use the same idiom at offset

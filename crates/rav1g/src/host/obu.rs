@@ -525,7 +525,7 @@ mod tests {
     impl Writer {
         fn put(&mut self, value: u32, count: u32) -> &mut Self {
             for bit in (0..count).rev() {
-                if self.count % 8 == 0 {
+                if self.count.is_multiple_of(8) {
                     self.bytes.push(0);
                 }
                 let last = self.bytes.len() - 1;
