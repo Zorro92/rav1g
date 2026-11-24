@@ -243,6 +243,8 @@ memory as possible left to the application.
 
 ## Documentation
 
+- [docs/backlog.md](docs/backlog.md): what is known to be worth doing next, in order of what it would do
+  for playback (first: the CPU parse of high-bitrate one-tile 4K).
 - [docs/test-player.md](docs/test-player.md): building, installing and running the test
   player, its defaults and flags, log lines, md5 checks (references can be made with dav1d:
   `testing/md5ref/make_md5_ref.sh`) and the host-side shader checks.
