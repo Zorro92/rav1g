@@ -611,6 +611,16 @@ case Bale runs); 2:1 and the area loop as before (1.23 / 1.49 ms at 1080p). **Me
 state, 4K60 60 Mbps clip, 600 frames, two rounds within 0.01 ms): PQ 1:1 2.01 ms, PQ 3:2 1.75, SDR 3:2 1.31,
 SDR 1:1 1.61, as expected; SDR 2:1 1.20, but PQ 2:1 1.59 (+0.10 against 1.49: the 2:1 loop's code is
 unchanged, the cause in the PQ pipeline not yet known; 0.6% of a 60 fps frame).
+
+**Tried: two pipelines a mode** (branch `exp/display-split-opus`, not merged). In RDNA2/LLPC's listing the
+2:1 loop is the same 566 instructions a quad as in v0.8; what changed around it is the pipeline (PQ's
+machine code 36.5 to 50.4 KB, five quad loops instead of one, SGPRs at RDNA2's ceiling of 106 for PQ
+alone). So the 2:1 path and the area loop got pipelines of their own (`display_pass*`, PQ back to 23.6 KB
+and 98 SGPRs) and the block paths theirs (`display_pass_block*`), the image byte for byte the same. The
+console (same clip and runs, two rounds; main against the branch): PQ 2:1 1.59 / 1.57 against 1.59 / 1.56
+ms, no gain; SDR 2:1 1.20 / 1.16 against 1.41 / 1.32, worse; 3:2 and 1:1 the same. So the PQ 2:1 cost is
+not the size or the registers of the pipeline around the loop, and the console's own compiler, whose
+code there is no way to see, is where the 0.10 ms is; left as it is (0.6% of a 60 fps frame).
 Sized for the GPU slice (1.86 TFLOP/s, never preempted: the pass costs its instructions), wave64, no
 16-bit arithmetic, no group memory, no CPU work, no change to the interface.
 
