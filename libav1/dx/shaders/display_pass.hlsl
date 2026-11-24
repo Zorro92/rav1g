@@ -60,7 +60,9 @@
 //     plane, a row a step).
 //   - One loop over a thread's quads a path (tile(): the 2:1 path and the area loop in one, each block path
 //     and sample size its own), so that the window the block loops carry from quad to quad costs the other
-//     paths no registers. PQ 112 VGPRs, SDR and HLG 96 (RDNA2, LLPC): 4 waves a SIMD each.
+//     paths no registers; and two pipelines a mode (DISPLAY_PATHS), one with the 2:1 path and the area
+//     loop, one with the block paths, so that neither has the other's registers or code. 2:1 PQ, SDR and
+//     HLG 96 VGPRs, block PQ 112, SDR 96, HLG 93 (RDNA2, LLPC): 4 waves a SIMD each.
 //   - The encode after the late clip is a plain power (the values are 0..1); the optional ordered dither
 //     of the last quantisation (`threshold`) is integer arithmetic at the output sample, no table.
 //   - A group is 256 threads and 64x64 output pixels; the output chroma's left neighbour column comes
@@ -143,6 +145,25 @@ uint mode() { return cb_flags & 3u; }
 #define DISPLAY_MODE 0
 #endif
 uint mode() { return DISPLAY_MODE; }
+#endif
+// The paths a pipeline is made for (DISPLAY_PATHS): 1 the 2:1 path and the area loop (this file,
+// display_pass_sdr.hlsl and display_pass_hlg.hlsl), 2 the block paths, 1:1 and 3:2
+// (display_pass_block*.hlsl); the host picks the pipeline by the path flags (bits 8 and 9, which it set;
+// display_pass::block_path), and the C++ check (DISPLAY_MODE_FROM_FLAGS) by the same rule. Two pipelines a
+// mode, because a shader's registers are those of its most demanding path, and the block
+// paths' took the PQ pipeline to the RDNA2 ceiling of 106 SGPRs and 38% more code (36.5 to 50.4 KB) around
+// a 2:1 loop of the same instructions, which the console measured 0.10 ms a 4K frame slower (1.49 to 1.59
+// ms; SDR, below the ceiling, 1.23 to 1.20). Alone (RDNA2, LLPC; PQ / SDR / HLG): the 2:1 path and the area
+// loop 96 / 96 / 96 VGPRs, 98 / 87 / 95 SGPRs, 23.6 / 18.0 / 22.1 KB, the 2:1 loop the same instructions as
+// in v0.8.0-alpha.1; the block paths 112 / 96 / 93 VGPRs, 75 / 62 / 70 SGPRs, 27.0 / 24.1 / 25.5 KB. 4 waves
+// a SIMD each (a group of 256 threads, 2 a compute unit).
+#if defined(DISPLAY_MODE_FROM_FLAGS)
+uint paths() { return (cb_flags & 768u) != 0 ? 2u : 1u; }
+#else
+#ifndef DISPLAY_PATHS
+#define DISPLAY_PATHS 1
+#endif
+uint paths() { return DISPLAY_PATHS; }
 #endif
 bool bt2020() { return (cb_flags & 4u) != 0; }
 bool full_range() { return (cb_flags & 8u) != 0; }
@@ -974,14 +995,15 @@ void tile(uint3 group, uint lane, uint kind) {
   GroupMemoryBarrierWithGroupSync();
   // A loop a block path and sample size, one for the rest: the registers of each are its own (the block
   // paths' window would cost the 2:1 path 16 to 24 VGPRs, and the 8- and 16-bit block paths in one loop
-  // take PQ to 154). The flags are uniform: one branch a dispatch.
-  [branch] if (one_to_one()) {
+  // take PQ to 154). The flags are uniform: one branch a dispatch. A pipeline has the 2:1 path and the area
+  // loop (paths() 1) or the block paths (2): the constant folds the branches of the other's paths away.
+  [branch] if (paths() == 2u && one_to_one()) {
     if (eight_bit()) {
       tile(group, lane, 2u);
     } else {
       tile(group, lane, 1u);
     }
-  } else if (three_to_two()) {
+  } else if (paths() == 2u) {
     if (eight_bit()) {
       tile(group, lane, 4u);
     } else {

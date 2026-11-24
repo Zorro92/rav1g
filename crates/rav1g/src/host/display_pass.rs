@@ -306,6 +306,19 @@ fn path_flags(src: (u32, u32), out: (u32, u32), aligned: bool) -> u32 {
     }
 }
 
+/// The inline constant that holds the flags (`cb_flags`).
+const FLAGS: usize = 9;
+
+/// Whether the constants of a frame (`constants`) take a block path (1:1 or 3:2: bit 8 or 9 of the flags),
+/// whose pipelines are `shader_display_pass_block`; else the 2:1 path or the area loop, of
+/// `shader_display_pass` (`DISPLAY_PATHS` of `display_pass.hlsl`). Two pipelines a mode so that the 2:1
+/// path, the case Bale runs most (HDR10 on a 1080p display), has neither the block paths' registers nor
+/// their code: in one pipeline they took PQ to the RDNA2 ceiling of 106 SGPRs and 38% more code around the
+/// same 2:1 loop, which the console measured 0.10 ms a 4K frame slower (1.49 to 1.59 ms).
+pub(crate) fn block_path(constants: &[u32; CONSTANTS]) -> bool {
+    constants[FLAGS] & ((1 << 8) | (1 << 9)) != 0
+}
+
 /// Writes the tables of the frame's mode to `dst` (`LUT_WORDS` words of the frame's constant memory;
 /// nothing for SDR, whose shader does not read them) and returns the inline constants of
 /// `display_pass.hlsl` for the frame `src` (read as the `choice` says; `monochrome`: its chroma is taken
@@ -448,6 +461,31 @@ mod tests {
         assert_eq!(path(3840, 1600, 2560, 1066), 0);
         assert_eq!(path(3840, 2160, 1280, 720), 0);
         assert_eq!(path_flags((3840, 2160), (1920, 1080), false), 0);
+    }
+
+    /// The pipeline a frame takes follows its path flags: the block pipelines for 1:1 and 3:2 alone, and
+    /// the flags are the constant `FLAGS` (the field `cb_flags` of the shader).
+    #[test]
+    fn block_paths_take_their_pipelines() {
+        let shader = include_str!("../../../../libav1/dx/shaders/display_pass.hlsl");
+        let block = shader.split("cbuffer cb_display").nth(1).and_then(|s| s.split("};").next()).expect("cb_display");
+        let names: Vec<&str> = block
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| line.starts_with("uint cb_") || line.starts_with("float cb_"))
+            .collect();
+        assert!(names[FLAGS].starts_with("uint cb_flags;"));
+        let with = |path: u32| {
+            let mut c = [0u32; CONSTANTS];
+            // Every other flag set: the mode bits, the primaries, range, siting, sample size, output depth,
+            // dither and chroma switch.
+            c[FLAGS] = path | 3 | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 10) | (1 << 11);
+            block_path(&c)
+        };
+        assert!(with(1 << 8));
+        assert!(with(1 << 9));
+        assert!(!with(1 << 5));
+        assert!(!with(0));
     }
 
     const DEFAULT: ToneMap = ToneMap { peak: 1000.0, white: 100.0 };

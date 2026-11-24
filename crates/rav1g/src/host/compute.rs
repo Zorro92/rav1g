@@ -124,9 +124,9 @@ const LAYOUTS: usize =
 const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
-    // 20 transform pipelines, 36 shared shaders and 25 per bit depth: one slot per pipeline of
+    // 20 transform pipelines, 39 shared shaders and 25 per bit depth: one slot per pipeline of
     // `create_tasks` (the test `every_pipeline_names_its_shader_once`).
-    assert!(SHADERS == 20 + 36 + 2 * 25);
+    assert!(SHADERS == 20 + 39 + 2 * 25);
     assert!(LAYOUTS == 24);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
@@ -440,6 +440,9 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("display_pass", &layouts.display_pass, &raw mut (*lib).shader_display_pass[0]),
             ("display_pass_sdr", &layouts.display_pass, &raw mut (*lib).shader_display_pass[1]),
             ("display_pass_hlg", &layouts.display_pass, &raw mut (*lib).shader_display_pass[2]),
+            ("display_pass_block", &layouts.display_pass, &raw mut (*lib).shader_display_pass_block[0]),
+            ("display_pass_block_sdr", &layouts.display_pass, &raw mut (*lib).shader_display_pass_block[1]),
+            ("display_pass_block_hlg", &layouts.display_pass, &raw mut (*lib).shader_display_pass_block[2]),
             ("film_grain_filter_sp", &layouts.film_grain, &raw mut (*lib).shader_filmgrain_filter_sp),
             ("film_grain_filter_sp_tex_v2", &layouts.film_grain_tex, &raw mut (*lib).shader_filmgrain_filter_sp_tex_v2),
             ("cdef_lists", &layouts.cdef_lists, &raw mut (*lib).shader_cdef_lists),

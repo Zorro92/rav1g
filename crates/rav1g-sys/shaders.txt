@@ -103,6 +103,9 @@ copy_plane_sp_tex_v2
 display_pass
 display_pass_sdr
 display_pass_hlg
+display_pass_block
+display_pass_block_sdr
+display_pass_block_hlg
 film_grain_filter_sp
 film_grain_filter_sp_tex_v2
 cdef_lists

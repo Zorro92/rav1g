@@ -129,9 +129,11 @@ pub struct compute_shader_lib {
     pub shader_copy_plane_sp: ComputeShader,
     pub shader_copy_plane_sp_tex_v2: ComputeShader,
     // The display pass (`output.rs`, `display_pass.rs`, docs/stage-fusion.md): the frame into a display-size
-    // P010 or NV12 texture, downscaled and tone-mapped; one pipeline a transfer mode (PQ, SDR, HLG), so
-    // that each has the registers of its own path.
+    // P010 or NV12 texture, downscaled and tone-mapped; one pipeline a transfer mode (PQ, SDR, HLG) and
+    // two a mode, the 2:1 path with the area loop and the block paths (1:1, 3:2;
+    // `display_pass::block_path`), so that each has the registers and the code of its own path.
     pub shader_display_pass: [ComputeShader; 3],
+    pub shader_display_pass_block: [ComputeShader; 3],
     pub shader_filmgrain_filter_sp: ComputeShader,
     pub shader_filmgrain_filter_sp_tex_v2: ComputeShader,
     // The lists of CDEF from the mode info (`postfilter.rs`, `Av1Core::gpu_cdef_lists`).

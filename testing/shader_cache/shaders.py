@@ -64,6 +64,7 @@ REQUIRED_BYTECODE = [
     'film_grain_filter_sp_tex_v2',
     'copy_plane_sp_tex_v2',
     'display_pass', 'display_pass_sdr', 'display_pass_hlg',
+    'display_pass_block', 'display_pass_block_sdr', 'display_pass_block_hlg',
     'idct4x4_v2', 'idct4x8_v2', 'idct8x4_v2', 'idct8x8_v2',
     'inter_main_v2', 'inter_main_v2_hbd',
     'inter_compound_v2', 'inter_compound_v2_hbd',

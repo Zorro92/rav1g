@@ -682,7 +682,7 @@ unsafe fn copy_semi_planar(
                 }
             }
             // The tables of the tone map, in the frame's constant memory (display_pass.rs), and the pipeline
-            // of the frame's transfer mode.
+            // of the frame's transfer mode and path.
             let choice = display_pass::choose(&cm.seq_params, &(*dec).display);
             let tables = alloc_constant_bytes(&mut td.command_buffer, display_pass::LUT_WORDS * 4);
             let constants = display_pass::constants(
@@ -695,7 +695,13 @@ unsafe fn copy_semi_planar(
                 display_pass::source_peak(choice, &cm.hdr_metadata, &(*dec).display),
                 tables.data.cast(),
             );
-            let shader = pipeline(&raw const (*lib).shader_display_pass[choice.mode as usize]);
+            // The pipelines of the block paths (1:1, 3:2) or of the 2:1 path and the area loop.
+            let pipelines = if display_pass::block_path(&constants) {
+                &raw const (*lib).shader_display_pass_block
+            } else {
+                &raw const (*lib).shader_display_pass
+            };
+            let shader = pipeline(&raw const (*pipelines)[choice.mode as usize]);
             commands.set_layout(shader.layout());
             commands.set_pipeline(shader);
             commands.bind_read(0, tables.location);
