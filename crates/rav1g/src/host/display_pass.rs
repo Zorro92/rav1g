@@ -314,6 +314,7 @@ fn path_flags(src: (u32, u32), out: (u32, u32), aligned: bool) -> u32 {
 ///
 /// # Safety
 /// `dst` is writable for `LUT_WORDS` words.
+#[expect(clippy::too_many_arguments, reason = "what the frame, its settings and its source peak give the pass")]
 pub(crate) unsafe fn constants(
     src: &HwFrameBuffer,
     out: (i32, i32),
