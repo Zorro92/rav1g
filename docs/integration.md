@@ -297,14 +297,18 @@ and its model have the same chroma bit for bit. The cubic passes through the sam
 and a parabola, so fine colour detail and colour edges stay sharper than with bilinear; its negative
 lobes overshoot a sharp edge by about 7% of the step a side, which the clamp keeps in the code range.
 
-Cost (expected; to be measured on the console; [stage-fusion.md](stage-fusion.md#catmull-rom-chroma-the-source-peak-from-the-metadata-interface-version-3)):
-one source row a step on every fast path, its luma and its four tap rows of U and V (five columns each)
-issued together before the arithmetic, no group memory and no more syncs; the five columns filtered down
-with constant weights, then across. About 23 instructions a source pixel more than bilinear: at the
-console's 1.86 TFLOP/s ~+0.2 ms a 4K frame at 2:1, ~+0.25-0.3 ms at 1:1 and 3:2, ~+0.3-0.5 ms for the
-area loop (1080p to 4K); Bale measured its own cubic chroma at ~1.1 ms a 4K frame. The SDR and HLG
-pipelines go from 8 and 6 waves a SIMD to 4 (96 VGPRs; PQ stays at 4 with 110): the first thing to check
-on the console. Sized for the GPU slice: no new memory, nothing on the CPU.
+Cost ([stage-fusion.md](stage-fusion.md#catmull-rom-chroma-the-source-peak-from-the-metadata-interface-version-3)):
+at 2:1 one source row a step, its luma and its four tap rows of U and V (five columns each) issued
+together before the arithmetic, no group memory and no more syncs; the five columns filtered down with
+constant weights, then across: +0.2 / +0.3 ms a 4K frame (SDR / PQ) on the console, as expected. The
+block paths (1:1 and 3:2) took their rows the same way, measured at +0.6 to +0.9 ms; they now filter a
+window of five chroma rows across once a row and down once a source pixel, and carry it from a thread's
+quad to the next one below, reading only its new rows ([stage-fusion.md](stage-fusion.md#the-block-paths-chroma-window-11-and-32);
+the same codes, byte for byte): expected ~+0.23 ms at 1:1 and 3:2 (PQ 1:1 2.60 to ~2.0 ms, PQ 3:2 2.13 to
+~1.75, SDR 3:2 1.76 to ~1.35; to be measured). The area loop (1080p to 4K) ~+0.3-0.5 ms. Bale measured its
+own cubic chroma at ~1.1 ms a 4K frame. The SDR and HLG pipelines run 4 waves a SIMD (96 VGPRs; 8 and 6
+with the bilinear chroma of version 2), PQ 4 as before (112). Sized for the GPU slice: no new memory,
+nothing on the CPU.
 
 **A/B switches** (internal, `libav1/dx/av1_perf.h`, not in `rav1g.h`): `av1_set_display_fixed_peak(1)`
 takes `source_peak_nits` for every PQ frame whatever its metadata, `av1_set_display_bilinear_chroma(1)`

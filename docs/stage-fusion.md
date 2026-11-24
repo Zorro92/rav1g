@@ -537,6 +537,80 @@ GPU slice (1.86 TFLOP/s, never preempted): no memory, no CPU work, no more dispa
 switches (`av1_set_display_bilinear_chroma`, `-displaybilinearchroma`) give version 2's image for the
 picture, not its occupancy (one pipeline serves both).
 
+## The block paths' chroma window (1:1 and 3:2)
+
+Branch `exp/display-speed-opus` (2026-11-24). The console measured the Catmull-Rom chroma above at +0.2 /
++0.3 ms a 4K frame at 2:1 (SDR / PQ), as estimated, but +0.64 / +0.62 at 3:2 and +0.91 / +0.80 at 1:1,
+the same with the bilinear weights: the cost was the structure. The RDNA2 listing (`testing/shader_regs`'
+tools, one path compiled at a time) shows why: a block quad took its source rows one a step with the
+four tap rows of each, 16 chroma reads a 1:1 quad and 24 a 3:2 one, the window rows re-read and re-extracted
+for every source row, the five columns filtered down for every source row, and the compiler split each
+step's reads into two or three rounds; 1054 instructions a 1:1 PQ quad a wave against 682 with version 2's
+bilinear chroma (1775 against 1292 at 3:2). The image is unchanged (below).
+
+**How it reads now** (`quad_block`, `display_pass.hlsl`):
+
+- *One window a block.* The taps of a block's source rows (two at 1:1, three at 3:2) all lie in five
+  chroma rows. Each row of the window is filtered across once, at the block's chroma columns (1:1: the
+  block's column and the half-way one; 3:2: three of c0, c0 + 1/2, c0 + 1, c0 + 3/2 by the block's column
+  parity), with the columns outside the plane folded into the weights; then the window is filtered down
+  once a source pixel with the weights of its row's parity, and clamped. Across first: 2 or 3 values a
+  window row instead of 5 columns filtered down for every source row.
+- *A window rolls down the thread's quads.* A thread's four quads are blocks one below the other, and
+  each window is the one above moved down by one row (1:1) or by two and one in turn (3:2: blocks of three
+  rows). The loop over the quads carries the across values of the four rows the next window keeps (16
+  floats at 1:1, 24 at 3:2), and a quad reads only its new rows: 1:1 one row of U and V, 3:2 two (after a
+  move by one, one of them again). Per thread 8 window rows a plane for four 1:1 quads and 11 for four 3:2
+  quads (32 and 48 before); the first quad and the edge step read all five. A quad's reads (its luma rows
+  and its new chroma rows) are issued together, one round of latency.
+- *A loop a path.* The flags are uniform, so `main` picks the path once and runs a loop over the quads
+  for it (`tile`): one for each block path and sample size, one for 2:1 and the area loop. The window then
+  costs the 2:1 path no registers, and the 8- and 16-bit block paths do not share one register allocation
+  (in one loop PQ took 154 VGPRs). The 2:1 path compiles to the same instructions as before.
+- *Registers, not group memory.* A group's chroma tile would read each sample once, but at 3:2 it is 21 KB
+  (52 rows of 50 samples, U and V, 16 bits for each of the across values) on top of the 12.5 KB the pass
+  has: two groups a compute unit, 2 waves a SIMD. The rolling window keeps 4 waves with no group memory and
+  no sync. The decode of a 3:2 block is a loop over its three rows (unrolled: PQ 118 VGPRs); 1:1 is
+  unrolled.
+
+**Exact.** Every weight is a multiple of 1/128 and every code an integer below 1024, so every product and
+partial sum is exact in float32 and any order gives the same chroma (across then down here, down then
+across in interface version 3's first code); the light sums after the decode are in the same order as
+before. `testing/display_pass/run.sh` proves it: besides holding the pass to its model, it builds the same
+C++ check on the shader of `v0.8.0-alpha.1` (from git: `REFERENCE` in `run.sh`; CI's shallow checkout
+fetches the tag) and requires every display image to be byte-identical on its 75 cases and on an identity
+matrix of 64 more (`display_check --matrix`: each of 2:1, 1:1, 3:2 and the area loop with 8- and 10-bit
+frames, NV12 and P010, the dither off and on, and both chroma switches; modes, sitings, ranges and content
+going round): 139 cases identical. 45 mutations are rejected, 10 of them new (the window's rows, moves,
+first quad and bottom edge, the folded edge columns, the siting of a 3:2 block's rows).
+
+**Instructions a quad a wave** (RDNA2/LLPC listing of one path at a time, 16-bit samples; a thread's four
+quads and its quarter of the edge step; in brackets interface version 3's first code, then version 2's
+bilinear chroma):
+
+| Path | PQ | SDR | HLG |
+| --- | ---: | ---: | ---: |
+| 1:1 | 789 (1054; 682) | 520 (741; 446) | 683 (896; 601) |
+| 3:2 | 1474 (1775; 1292) | 970 (1272; 792) | 1343 (1611; 1149) |
+
+A 1:1 quad that rolls takes 744 (PQ), a first one 896. The chroma's cost over version 2 falls from 372 to
+107 instructions a 1:1 PQ quad and from 483 to 182 a 3:2 one.
+
+**Registers** (`testing/shader_regs`): PQ 112 VGPRs (110 before), SDR 96, HLG 96: 4 waves a SIMD each, as
+before. Each loop on its own (the pipeline with the other loops taken out; PQ / SDR / HLG): 2:1 and the
+area loop 96 / 96 / 96, 1:1 16-bit 80 / 49 / 57, 1:1 8-bit 72 / 56 / 64, 3:2 16-bit 111 / 95 / 90, 3:2
+8-bit 112 / 96 / 92. SDR and HLG would need both the 2:1 loop and the 3:2 loop under 80 for 6 waves; the
+2:1 path is left as it is (it must not get slower), and pipelines a path would not help the 3:2 loop, whose
+window is 24 of its registers. The console's +0.64 ms at SDR 3:2 in version 3 was its instruction count at
+PQ's rate (both at 4 waves), so the instructions are the lever taken here.
+
+**Expected** (not measured; the console's added cost of version 3's first code scaled by the
+instructions the chroma now adds over version 2, which also takes the 4 waves into account): PQ 1:1 +0.23
+ms (2.60 to ~2.0 ms a 4K frame), PQ 3:2 +0.23 (2.13 to ~1.75), SDR 3:2 +0.24 (1.76 to ~1.35), SDR 1:1
++0.23 (2.42 to ~1.75; not a case Bale runs); 2:1 and the area loop as before (1.23 / 1.49 ms at 1080p).
+Sized for the GPU slice (1.86 TFLOP/s, never preempted: the pass costs its instructions), wave64, no
+16-bit arithmetic, no group memory, no CPU work, no change to the interface.
+
 ## The ABI it needs
 
 What follows is the first sketch; the draft of `exp/display-abi2-opus` is in `rav1g.h` (interface version 2,
