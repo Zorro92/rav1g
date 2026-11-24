@@ -46,14 +46,21 @@
 //     with the extraction of the 40 samples about 23 instructions a source pixel more than bilinear
 //     (~0.2 ms a 4K frame at the console's 1.86 TFLOP/s, an estimate).
 //     No group memory and no more syncs; the overlapping rows of the steps are read again from the cache
-//     (36 reads a quad against 16 of the bilinear version), which keeps one row's reads in registers:
-//     PQ 110 VGPRs (4 waves a SIMD, as before), SDR and HLG 96 (4 waves, from 8 and 6).
+//     (36 reads a quad against 16 of the bilinear version), which keeps one row's reads in registers.
 //   - At 1:1 (a 4K frame on a 4K display: tone map, gamut and quantisation, no downscale) and at 3:2
 //     (3840x2160 to 2560x1440) a thread takes 2x2 output pixels from a block of 2x2 or 3x3 source pixels
-//     (quad_block), one source row a step as at 2:1 (its luma, and the four chroma rows of its taps, five
-//     columns a plane); every source pixel decoded once and weighted by its exact overlap (1:1: 1; 3:2: 1 and
-//     1/2 a side). Other ratios take the area loop of the model (a source pixel: its four tap rows of four
-//     columns a plane, a row a step).
+//     (quad_block); every source pixel decoded once and weighted by its exact overlap (1:1: 1; 3:2: 1 and
+//     1/2 a side). The chroma of a block is a window of five chroma rows, filtered across once a chroma row
+//     and down once a source pixel; the thread's quads lie one below the other and share four of the five
+//     rows, so a quad reads only the rows its window has that the one above did not (1:1 one row of U and
+//     V, 3:2 two) and takes the others, filtered across, from it (the Window). Per 1:1 quad about 790
+//     instructions a wave (RDNA2 listing, PQ, 16-bit samples; the edge step's share included), 1054 with
+//     the four tap rows a source row of interface version 3 and 682 with the bilinear chroma of version 2.
+//     Other ratios take the area loop of the model (a source pixel: its four tap rows of four columns a
+//     plane, a row a step).
+//   - One loop over a thread's quads a path (tile(): the 2:1 path and the area loop in one, each block path
+//     and sample size its own), so that the window the block loops carry from quad to quad costs the other
+//     paths no registers. PQ 112 VGPRs, SDR and HLG 96 (RDNA2, LLPC): 4 waves a SIMD each.
 //   - The encode after the late clip is a plain power (the values are 0..1); the optional ordered dither
 //     of the last quantisation (`threshold`) is integer arithmetic at the output sample, no table.
 //   - A group is 256 threads and 64x64 output pixels; the output chroma's left neighbour column comes
@@ -126,7 +133,8 @@ groupshared float3 edge[TILE];       // the column left of the tile, two rows a 
 // define it, this file alone is PQ (0). One pipeline a mode, because a shader's registers are those of its
 // most demanding path (RDNA2, LLPC, testing/shader_regs, with the bilinear chroma of interface version 2:
 // PQ 112, HLG 65, SDR 63 VGPRs, 4, 6 and 8 waves a SIMD; all three in one shader 114, 4 waves for every
-// mode; with the Catmull-Rom chroma PQ 110, HLG and SDR 96, 4 waves each).
+// mode; with the Catmull-Rom chroma PQ 110, HLG and SDR 96, 4 waves each; with the block paths' window PQ
+// 112, HLG and SDR 96, 4 waves each: the loop of 2:1 and the area loop and the 3:2 loops bind SDR and HLG).
 // DISPLAY_MODE_FROM_FLAGS (the C++ check, testing/display_pass): bits 0-1 of the flags, every mode in one.
 #if defined(DISPLAY_MODE_FROM_FLAGS)
 uint mode() { return cb_flags & 3u; }
@@ -530,13 +538,35 @@ Quad quad_2to1(int2 o, uint m, bool eight) {
 // exactly n:2 in both axes (n 2: 1:1, a 4K frame on a 4K display; n 3: 3:2, 3840x2160 to 2560x1440). Each
 // source pixel is decoded once and weighted by the overlap of its unit square with the output pixels'
 // footprints, as the model's area weights have it: 1 (n 2), or along an axis 1, 1/2, 0 for the first
-// output pixel and 0, 1/2, 1 for the second (n 3), the four sums over 2.25. One source row a step, its
-// reads first, all together and with no branch between them: its luma (8 bytes) and the four chroma rows of
-// its taps, of U and of V, columns c0 - 1 .. c0 + 3 from the block's first chroma column c0 (8 or 12 bytes
-// each; they reach into the 16-sample border of the rows, whose samples are not used); filtered down with
-// the weights of its parity, then across; source column 2 c0 + k takes component k of that. A step a row
-// keeps the registers of one row (the window of the whole block in registers: PQ 167 VGPRs at 3:2). `n`,
-// the mode `m` and `eight` (8-bit samples) are constants of the caller.
+// output pixel and 0, 1/2, 1 for the second (n 3), the four sums over 2.25.
+//
+// The chroma of a block (AV1 6.4.2, the filter of chroma_filter) comes from a window of five chroma rows,
+// r0 .. r0 + 4 with r0 = ((sy + 1) >> 1) - 2: the four taps of each of the block's source rows (sy, sy + 1
+// and for n 3 sy + 2) are r0 .. r0 + 3 or r0 + 1 .. r0 + 4. A row of the window is one read of U and one of
+// V, from the block's first chroma column c0 less one on (8 bytes at 8 bits, 12 at 16; they reach into the
+// 16-sample border of the rows, whose samples are not used). It is filtered across once: its values at the
+// chroma columns of the block's source columns (n 2: c0, c0 + 1/2; n 3: c0, c0 + 1/2, c0 + 1, or for an odd
+// first column c0 + 1/2, c0 + 1, c0 + 3/2), the columns outside the plane folded into the weights
+// (fold_h); then the window is filtered down, once a source pixel, with the weights of its row's parity,
+// and clamped. Every product and sum is exact (chroma_filter): the same values as the model's order, and
+// as interface version 3's first code, which took one source row a step with its four tap rows of five
+// columns, filtered down, then across.
+//
+// The quads of a thread are blocks one below the other (tile()), and the window of the next is this one's
+// moved down by one row (n 2) or by two and one in turn (n 3: blocks of three rows): the Window carries the
+// across values of rows 1 .. 4 to it, and a quad reads only its last row (n 2) or its last two (n 3; after a
+// move by one the first of them again), with its n luma rows, all issued together; a thread's first quad
+// and the edge step (`full`) read all five. Per thread 8 window rows of each plane for four 1:1 quads, 11
+// for four 3:2 quads, against 32 and 48 for interface version 3's first code. Instructions a quad a wave
+// (RDNA2 listing, 16-bit samples; a thread's four quads and its share of the edge step; version 3's first
+// code; version 2's bilinear chroma): 1:1 PQ 789 (1054; 682), SDR 520 (741; 446), HLG 683 (896; 601); 3:2
+// PQ 1474 (1775; 1292), SDR 970 (1272; 792), HLG 1343 (1611; 1149). Sized for the GPU slice (1.86 TFLOP/s,
+// never preempted: the cost of the pass is its instructions) within the registers of 4 waves a SIMD: the
+// window costs 16 VGPRs at 1:1 and 24 at 3:2, the decode of a 3:2 block is a loop over its rows (all nine
+// pixels at once: PQ 118 VGPRs), and no group memory (a group's 3:2 chroma tile would be 21 KB on top of
+// 12.5: two groups a compute unit). `n`, the mode `m` and `eight` (8-bit samples) are constants of the
+// caller.
+//
 // A run of the block paths, whose planes are at multiples of 4 bytes: its first sample is x's place in its
 // dword, known from x alone (0 for an even x at 16 bits).
 Run load_aligned(uint offset, uint stride, int row, uint x) {
@@ -546,7 +576,88 @@ Run load_aligned(uint offset, uint stride, int row, uint x) {
   return r;
 }
 
-Quad quad_block(int2 o, uint n, uint m, bool eight) {
+// The weights across of the value at chroma column c + 1/2 (columns c - 1 .. c + 2, f.h) with the columns
+// outside the plane (0 .. last) folded into the nearest one inside it: the value of the clamped columns (a
+// clamp of a column commutes with the filter, and the sums are exact).
+float4 fold_h(float4 h, int c, int last) {
+  float4 w = h;
+  if (c == 0) {
+    w.y += w.x;
+    w.x = 0.0f;
+  }
+  if (c + 1 > last) {
+    w.y += w.z + w.w;
+    w.z = 0.0f;
+    w.w = 0.0f;
+  } else if (c + 2 > last) {
+    w.z += w.w;
+    w.w = 0.0f;
+  }
+  return w;
+}
+
+// The window row of a plane from its byte `base` (a row of the plane, a multiple of 4) and the byte `col`
+// of column c0 - 1 in it: the dwords from that byte rounded down to 4.
+uint3 load_window(uint base, uint col, bool eight) {
+  if (eight) {
+    const uint2 w = pool.Load2(base + (col & ~3u));
+    return uint3(w.x, w.y, 0u);
+  }
+  return pool.Load3(base + (col & ~3u));
+}
+
+// A row of the window (columns c0 - 1 .. c0 + 3) across, at the block's source columns 0, 1 and 2: n 2
+// c0, c0 + 1/2; n 3 c0, c0 + 1/2, c0 + 1, or for an odd first column (`odd`) c0 + 1/2, c0 + 1, c0 + 3/2.
+// `a` and `b` are the folded weights of c0 + 1/2 and c0 + 3/2. Column c0 + 1 is inside the plane at n 3: the
+// blocks of an exact 3:2 end at the frame's last column, so c0 + 1 <= ((w - 3) >> 1) + 1 <= last.
+float3 across_block(Row5 r, uint n, bool odd, float4 a, float4 b) {
+  const float da = dot4(a, r.s);
+  if (n == 2u) return float3(r.s.y, da, 0.0f);
+  const float db = dot4(b, float4(r.s.y, r.s.z, r.s.w, r.t));
+  return odd ? float3(da, r.s.z, db) : float3(r.s.y, da, r.s.z);
+}
+
+// Source row i of a block: its n pixels decoded (luma from the run of dwords w at its first sample `first`;
+// chroma cu, cv at the block's columns in x, y, z) and weighted into the quad's sums.
+void block_row(uint i, uint n, uint m, float3 cu, float3 cv, uint2 w, uint first, inout float3 a00, inout float3 a10,
+               inout float3 a01, inout float3 a11) {
+  Run luma;
+  luma.w = w;
+  luma.first = first;
+  float3 left = float3(0.0f, 0.0f, 0.0f), right = left;
+  [unroll] for (uint k = 0; k < 3u; k++) {
+    if (k < n) {
+      const float u = k == 0u ? cu.x : k == 1u ? cu.y : cu.z;
+      const float v = k == 0u ? cv.x : k == 1u ? cv.y : cv.z;
+      const float4 p = decode_pixel(run_at(luma, k), u, v, m);
+      if (n == 2u) {
+        if (k == 0u) left = add_light(left, p, 1.0f);
+        else right = add_light(right, p, 1.0f);
+      } else {
+        // Columns 0, 1, 2: the left output pixel 1, 1/2, 0; the right 0, 1/2, 1.
+        if (k < 2u) left = add_light(left, p, k == 0u ? 1.0f : 0.5f);
+        if (k > 0u) right = add_light(right, p, k == 2u ? 1.0f : 0.5f);
+      }
+    }
+  }
+  // Rows: n 2 the top output pixels row 0, the bottom row 1; n 3 the top 1, 1/2, 0, the bottom 0, 1/2, 1.
+  const float top = n == 2u ? (i == 0u ? 1.0f : 0.0f) : (i == 0u ? 1.0f : i == 1u ? 0.5f : 0.0f);
+  const float bottom = n == 2u ? (i == 1u ? 1.0f : 0.0f) : (i == 0u ? 0.0f : i == 1u ? 0.5f : 1.0f);
+  a00 = mad3(top, left, a00);
+  a10 = mad3(top, right, a10);
+  a01 = mad3(bottom, left, a01);
+  a11 = mad3(bottom, right, a11);
+}
+
+// The across values of the rows of a block's chroma window that the thread's next quad (the block below)
+// has again: rows 1 .. 4, of U and V, and the window's first row.
+struct Window {
+  float3 u1, u2, u3, u4;
+  float3 v1, v2, v3, v4;
+  int r0;
+};
+
+Quad quad_block(int2 o, uint n, uint m, bool eight, bool full, inout Window win) {
   // o is even: the block starts at an even source column and row for n 2.
   const int sx = (o.x >> 1) * (int)n;
   const int sy = (o.y >> 1) * (int)n;
@@ -554,50 +665,131 @@ Quad quad_block(int2 o, uint n, uint m, bool eight) {
   const int last = (int)((cb_src_w + 1u) / 2u) - 1;
   const int last_row = (int)((cb_src_h + 1u) / 2u) - 1;
   const int c0 = sx >> 1;
-  const bool next = n == 3u && (sx & 1) != 0;  // n 3: the block's first column at chroma column c0 + 1/2
-  float3 a00 = float3(0.0f, 0.0f, 0.0f), a10 = a00, a01 = a00, a11 = a00;
-  [loop] for (uint i = 0; i < n; i++) {
-    const int y = sy + (int)i;
-    const int r0 = ((y + 1) >> 1) - 2;  // the row's taps: chroma rows r0 .. r0 + 3
-    const Run l = load_aligned(cb_y_offset, cb_y_stride, y, (uint)sx);
-    uint3 wu[4], wv[4];
-    uint au[4], av[4];
-    [unroll] for (int j = 0; j < 4; j++) {
-      const int row = clamp(r0 + j, 0, last_row);
-      wu[j] = load_chroma(cb_u_offset, row, c0, eight, au[j]);
-      wv[j] = load_chroma(cb_v_offset, row, c0, eight, av[j]);
+  const bool odd = n == 3u && (sx & 1) != 0;      // n 3: the block's first column at chroma column c0 + 1/2
+  const bool odd_row = n == 3u && (sy & 1) != 0;  // n 3: the block's first row odd (n 2: even)
+  const float4 a = fold_h(f.h, c0, last);
+  const float4 b = fold_h(f.h, c0 + 1, last);
+  // Rows sy and sy + 2 (the same parity) take their weights at window rows 0 .. 3 and 1 .. 4; row sy + 1
+  // the other parity's, at 1 .. 4 after an even sy, at 0 .. 3 after an odd one.
+  const float4 w0 = odd_row ? f.odd : f.even;
+  const float4 w1 = odd_row ? f.even : f.odd;
+  const int r0 = ((sy + 1) >> 1) - 2;  // the window: chroma rows r0 .. r0 + 4
+  // The reads: the block's luma rows and the window's rows of U and V that the previous quad's window did
+  // not have (rows clamped to the plane: the clamp of the row times the stride, which is positive). A
+  // first quad (`full`) reads all five. Else the window has moved down by one row (n 2) or by two or one (n
+  // 3, as the block's first row is even or odd): the last row is new (n 2), the last two (n 3; after a move
+  // by one, row 3 is read again).
+  Run l[3];
+  [unroll] for (uint t = 0; t < 3u; t++) {
+    l[t] = load_aligned(cb_y_offset, cb_y_stride, sy + (int)min(t, n - 1u), (uint)sx);
+  }
+  const uint col = (uint)(c0 - 1) << (eight ? 0u : 1u);
+  const int stride = (int)cb_uv_stride;
+  const int top = r0 * stride;
+  const int bottom = last_row * stride;
+  const int fresh = n == 2u ? 4 : 3;  // the first row every quad reads
+  uint3 nu[2], nv[2];
+  [unroll] for (int rn = 0; rn < 2; rn++) {
+    if (fresh + rn < 5) {
+      const uint row = (uint)clamp(top + (fresh + rn) * stride, 0, bottom);
+      nu[rn] = load_window(cb_u_offset + row, col, eight);
+      nv[rn] = load_window(cb_v_offset + row, col, eight);
     }
-    const float4 w = (y & 1) != 0 ? f.odd : f.even;
-    const float4 cu = chroma_across(clamp_row5(chroma_down(row5(wu[0], au[0], eight), row5(wu[1], au[1], eight),
-                                                           row5(wu[2], au[2], eight), row5(wu[3], au[3], eight), w),
-                                               c0, last), f);
-    const float4 cv = chroma_across(clamp_row5(chroma_down(row5(wv[0], av[0], eight), row5(wv[1], av[1], eight),
-                                                           row5(wv[2], av[2], eight), row5(wv[3], av[3], eight), w),
-                                               c0, last), f);
-    float3 left = float3(0.0f, 0.0f, 0.0f), right = left;
-    [unroll] for (uint k = 0; k < 3u; k++) {
-      if (k < n) {
-        // Source column sx + k is chroma column c0 + (k + (sx & 1)) / 2: component k + (sx & 1).
-        const float u = k == 0u ? (next ? cu.y : cu.x) : k == 1u ? (next ? cu.z : cu.y) : (next ? cu.w : cu.z);
-        const float v = k == 0u ? (next ? cv.y : cv.x) : k == 1u ? (next ? cv.z : cv.y) : (next ? cv.w : cv.z);
-        const float4 p = decode_pixel(run_at(l, k), u, v, m);
-        if (n == 2u) {
-          if (k == 0u) left = add_light(left, p, 1.0f);
-          else right = add_light(right, p, 1.0f);
-        } else {
-          // Columns 0, 1, 2: the left output pixel 1, 1/2, 0; the right 0, 1/2, 1.
-          if (k < 2u) left = add_light(left, p, k == 0u ? 1.0f : 0.5f);
-          if (k > 0u) right = add_light(right, p, k == 2u ? 1.0f : 0.5f);
-        }
+  }
+  // Across: the rows read, and the others from the previous quad's window.
+  float3 hu[5], hv[5];
+  if (full) {
+    uint3 fu[4], fv[4];
+    [unroll] for (int rl = 0; rl < 4; rl++) {
+      if (rl < fresh) {
+        const uint row = (uint)clamp(top + rl * stride, 0, bottom);
+        fu[rl] = load_window(cb_u_offset + row, col, eight);
+        fv[rl] = load_window(cb_v_offset + row, col, eight);
       }
     }
-    // Rows: n 2 the top output pixels row 0, the bottom row 1; n 3 the top 1, 1/2, 0, the bottom 0, 1/2, 1.
-    const float top = n == 2u ? (i == 0u ? 1.0f : 0.0f) : (i == 0u ? 1.0f : i == 1u ? 0.5f : 0.0f);
-    const float bottom = n == 2u ? (i == 1u ? 1.0f : 0.0f) : (i == 0u ? 0.0f : i == 1u ? 0.5f : 1.0f);
-    a00 = mad3(top, left, a00);
-    a10 = mad3(top, right, a10);
-    a01 = mad3(bottom, left, a01);
-    a11 = mad3(bottom, right, a11);
+    [unroll] for (int rh = 0; rh < 4; rh++) {
+      if (rh < fresh) {
+        hu[rh] = across_block(row5(fu[rh], col, eight), n, odd, a, b);
+        hv[rh] = across_block(row5(fv[rh], col, eight), n, odd, a, b);
+      }
+    }
+  } else if (n == 2u) {
+    hu[0] = win.u1;
+    hu[1] = win.u2;
+    hu[2] = win.u3;
+    hu[3] = win.u4;
+    hv[0] = win.v1;
+    hv[1] = win.v2;
+    hv[2] = win.v3;
+    hv[3] = win.v4;
+  } else {
+    const bool two = r0 - win.r0 == 2;
+    hu[0] = two ? win.u2 : win.u1;
+    hu[1] = two ? win.u3 : win.u2;
+    hu[2] = two ? win.u4 : win.u3;
+    hv[0] = two ? win.v2 : win.v1;
+    hv[1] = two ? win.v3 : win.v2;
+    hv[2] = two ? win.v4 : win.v3;
+  }
+  [unroll] for (int rk = 0; rk < 2; rk++) {
+    if (fresh + rk < 5) {
+      hu[fresh + rk] = across_block(row5(nu[rk], col, eight), n, odd, a, b);
+      hv[fresh + rk] = across_block(row5(nv[rk], col, eight), n, odd, a, b);
+    }
+  }
+  win.u1 = hu[1];
+  win.u2 = hu[2];
+  win.u3 = hu[3];
+  win.u4 = hu[4];
+  win.v1 = hv[1];
+  win.v2 = hv[2];
+  win.v3 = hv[3];
+  win.v4 = hv[4];
+  win.r0 = r0;
+  // Down into the block's source rows 0, 1, 2 (u<row>, v<row>: the block's columns in x, y, z).
+  float3 u0 = float3(0.0f, 0.0f, 0.0f), u1 = u0, u2 = u0, v0 = u0, v1 = u0, v2 = u0;
+  [unroll] for (int j = 0; j < 5; j++) {
+    const float3 hu_j = hu[j];
+    const float3 hv_j = hv[j];
+    if (j < 4) {
+      u0 = mad3(w0[j], hu_j, u0);
+      v0 = mad3(w0[j], hv_j, v0);
+    }
+    if (n == 2u) {
+      if (j > 0) {
+        u1 = mad3(w1[j - 1], hu_j, u1);
+        v1 = mad3(w1[j - 1], hv_j, v1);
+      }
+    } else {
+      const float t = odd_row ? (j < 4 ? w1[min(j, 3)] : 0.0f) : (j > 0 ? w1[max(j - 1, 0)] : 0.0f);
+      u1 = mad3(t, hu_j, u1);
+      v1 = mad3(t, hv_j, v1);
+      if (j > 0) {
+        u2 = mad3(w0[j - 1], hu_j, u2);
+        v2 = mad3(w0[j - 1], hv_j, v2);
+      }
+    }
+  }
+  const float3 lo = float3(f.lo.x, f.lo.x, f.lo.x);
+  const float3 hi = float3(f.hi.x, f.hi.x, f.hi.x);
+  u0 = clamp(u0, lo, hi);
+  u1 = clamp(u1, lo, hi);
+  u2 = clamp(u2, lo, hi);
+  v0 = clamp(v0, lo, hi);
+  v1 = clamp(v1, lo, hi);
+  v2 = clamp(v2, lo, hi);
+  // The source pixels, row by row: n 2 unrolled (its registers allow it), n 3 a loop (all nine pixels in
+  // flight would take PQ to 118 VGPRs).
+  float3 a00 = float3(0.0f, 0.0f, 0.0f), a10 = a00, a01 = a00, a11 = a00;
+  if (n == 2u) {
+    [unroll] for (uint i2 = 0; i2 < 2u; i2++) {
+      block_row(i2, n, m, i2 == 0u ? u0 : u1, i2 == 0u ? v0 : v1, i2 == 0u ? l[0].w : l[1].w, l[0].first, a00, a10, a01, a11);
+    }
+  } else {
+    [loop] for (uint i3 = 0; i3 < 3u; i3++) {
+      block_row(i3, n, m, i3 == 0u ? u0 : i3 == 1u ? u1 : u2, i3 == 0u ? v0 : i3 == 1u ? v1 : v2,
+                i3 == 0u ? l[0].w : i3 == 1u ? l[1].w : l[2].w, l[0].first, a00, a10, a01, a11);
+    }
   }
   if (n == 3u) {
     a00 = a00 / 2.25f;
@@ -622,24 +814,15 @@ Quad quad_area(int2 o, bool eight) {
   return q;
 }
 
-// The quad of output pixels at o: the block paths (1:1, 3:2) and the 2:1 path with the sample size a
-// constant (and the 2:1 path its mode: in the pipelines of display_pass_sdr.hlsl and display_pass_hlg.hlsl it
-// is one anyway), each without a branch between its loads and its arithmetic, or the area loop.
-Quad quad_at(int2 o) {
+// The quad of output pixels at o: a block path (`kind` 1 to 4: 1:1 and 3:2, 16- and 8-bit samples; `full`
+// and `win`: its window, quad_block), or the 2:1 path with the sample size a constant (and its mode: in the
+// pipelines of display_pass_sdr.hlsl and display_pass_hlg.hlsl it is one anyway), each without a branch
+// between its loads and its arithmetic, or the area loop (`kind` 0).
+Quad quad_at(int2 o, uint kind, bool full, inout Window win) {
   Quad v;
   const uint m = mode();
-  [branch] if (one_to_one()) {
-    if (eight_bit()) {
-      v = quad_block(o, 2u, m, true);
-    } else {
-      v = quad_block(o, 2u, m, false);
-    }
-  } else if (three_to_two()) {
-    if (eight_bit()) {
-      v = quad_block(o, 3u, m, true);
-    } else {
-      v = quad_block(o, 3u, m, false);
-    }
+  if (kind != 0u) {
+    v = quad_block(o, kind <= 2u ? 2u : 3u, m, (kind & 1u) == 0u, full, win);
   } else if (!quad_path()) {
     if (eight_bit()) {
       v = quad_area(o, true);
@@ -714,12 +897,8 @@ uint2 chroma_code(float3 c, uint2 p) {
                (uint)clamp(floor(512.0f + 896.0f * cr + tr), 64.0f, 960.0f) << 6);
 }
 
-[numthreads(256, 1, 1)] void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
-  if (mode() != 1u) {
-    [loop] for (uint i = lane; i < LUT_ENTRIES; i += THREADS) lut[i] = asfloat(lut_src.Load4(i * 16u));
-  }
-  GroupMemoryBarrierWithGroupSync();
-
+// The tile of a group: a thread's quads with the path `kind` (quad_at; a constant of each call).
+void tile(uint3 group, uint lane, uint kind) {
   const uint tx = lane % 32u;
   const uint ty = lane / 32u;
   const int x0 = (int)group.x * TILE;
@@ -730,7 +909,19 @@ uint2 chroma_code(float3 c, uint2 p) {
 
   // Step -1: the output column left of the tile, what the first chroma column mixes in: two rows a thread
   // of the first 32, from the quad on the left (its right column; at the image's left edge the first
-  // column, which the clamped column -1 repeats). Steps 0-3: the thread's quads. One call site for all.
+  // column, which the clamped column -1 repeats). Steps 0-3: the thread's quads, one below the other: a
+  // block path carries its chroma window from one to the next (win; steps -1 and 0 read theirs whole). One
+  // call site for all.
+  Window win;
+  win.u1 = float3(0.0f, 0.0f, 0.0f);
+  win.u2 = win.u1;
+  win.u3 = win.u1;
+  win.u4 = win.u1;
+  win.v1 = win.u1;
+  win.v2 = win.u1;
+  win.v3 = win.u1;
+  win.v4 = win.u1;
+  win.r0 = 0;
   [loop] for (int q = -1; q < 4; q++) {
     const bool edge_step = q < 0;
     const int oy = edge_step ? y0 + 2 * (int)lane : y0 + 8 * (int)ty + 2 * q;
@@ -741,7 +932,7 @@ uint2 chroma_code(float3 c, uint2 p) {
     v.v10 = v.v00;
     v.v01 = v.v00;
     v.v11 = v.v00;
-    [branch] if (inside) v = quad_at(int2(qx, oy));
+    [branch] if (inside) v = quad_at(int2(qx, oy), kind, q <= 0, win);
     if (edge_step) {
       if (lane < (uint)TILE / 2u) {
         edge[2u * lane] = x0 > 0 ? v.v10 : v.v00;
@@ -773,5 +964,30 @@ uint2 chroma_code(float3 c, uint2 p) {
       left = ex[((uint)q & 1u) * THREADS + lane - 1u];
     }
     if (inside) sp_chroma[int2(ox / 2, oy / 2)] = chroma_code(own + left, uint2((uint)ox / 2u, (uint)oy / 2u));
+  }
+}
+
+[numthreads(256, 1, 1)] void main(uint3 group : SV_GroupID, uint lane : SV_GroupIndex) {
+  if (mode() != 1u) {
+    [loop] for (uint i = lane; i < LUT_ENTRIES; i += THREADS) lut[i] = asfloat(lut_src.Load4(i * 16u));
+  }
+  GroupMemoryBarrierWithGroupSync();
+  // A loop a block path and sample size, one for the rest: the registers of each are its own (the block
+  // paths' window would cost the 2:1 path 16 to 24 VGPRs, and the 8- and 16-bit block paths in one loop
+  // take PQ to 154). The flags are uniform: one branch a dispatch.
+  [branch] if (one_to_one()) {
+    if (eight_bit()) {
+      tile(group, lane, 2u);
+    } else {
+      tile(group, lane, 1u);
+    }
+  } else if (three_to_two()) {
+    if (eight_bit()) {
+      tile(group, lane, 4u);
+    } else {
+      tile(group, lane, 3u);
+    }
+  } else {
+    tile(group, lane, 0u);
   }
 }
