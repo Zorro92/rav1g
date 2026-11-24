@@ -31,16 +31,17 @@ practice, 2560x1440 possible; the size is the source fitted into it, aspect kept
 
 | Source | Display | Image | rav1g's path | Expected, PQ (SDR) |
 | --- | --- | --- | --- | --- |
-| 3840x2160 | 1920x1080 | 1920x1080 | 2:1 | 1.19 ms measured, ~1.16 now (1.01 measured) |
-| 3840x2160 | 3840x2160 | 3840x2160 | 1:1 | ~2.45 ms (BT.709 SDR: no stage) |
-| 3840x2160 | 2560x1440 | 2560x1440 | 3:2 | ~1.8 ms (~1.6) |
+| 3840x2160 | 1920x1080 | 1920x1080 | 2:1 | 1.49 ms (1.23) measured |
+| 3840x2160 | 3840x2160 | 3840x2160 | 1:1 | 2.60 ms measured (BT.709 SDR: no stage) |
+| 3840x2160 | 2560x1440 | 2560x1440 | 3:2 | 2.13 ms (1.76) measured |
 | 1920x1080 | 3840x2160 or 1920x1080 | 1920x1080 | 1:1 | ~0.6 ms (no stage for SDR) |
 | 3840x1600 (2.4:1) | 1920x1080 | 1920x800 | 2:1 | ~0.86 ms |
 | 3840x1600 | 2560x1440 | 2560x1066 | area loop (not exactly 3:2 vertically) | slower |
 
-Expected times are a 4K 10-bit frame on the console in the idle state (1080p and 1440p at the measured
-2:1 rate scaled by the instructions a quad of each path, [stage-fusion.md](stage-fusion.md#11-32-and-the-dither));
-HLG is about 15-25% above PQ.
+Times are a 4K 10-bit frame on the console in the idle state, interface version 3 (Catmull-Rom input
+chroma; the measured rows on a 4K60 60 Mbps clip, two rounds; the others expected from the instructions a
+quad of each path, [stage-fusion.md](stage-fusion.md#11-32-and-the-dither)); HLG is about 15-25% above PQ.
+Version 2's bilinear chroma took 1.17 (1.01), 1.80 and 1.51 (1.12) ms in the three measured rows.
 
 ## Bale's default configuration, and what rav1g takes
 

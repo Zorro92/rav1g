@@ -224,15 +224,21 @@ pass again into its own image.
 
 **The cost** is on the decoder's queue: one dependent step and the pass a shown frame, bound by its
 arithmetic (the console's slice of the GPU, 1.86 TFLOP/s), not by its bytes. Per 4K 10-bit frame, P010
-(measured on the console for 2:1, idle state; the rest expected from the RDNA2 listing scaled by what
-2:1 measured, basis in [stage-fusion.md](stage-fusion.md#11-32-and-the-dither)):
+(measured on the console, idle state, interface version 3 with the Catmull-Rom input chroma; in brackets
+version 2's bilinear chroma; HLG expected from the RDNA2 listing, basis in
+[stage-fusion.md](stage-fusion.md#11-32-and-the-dither)):
 
 | Image | Path | Bytes (read + written) | SDR | PQ (HDR10) | HLG |
 | --- | --- | ---: | ---: | ---: | ---: |
-| 1920x1080 | 2:1 | 24.9 + 6.2 MB | 1.01 ms measured | 1.19 measured, ~1.16 now | ~1.45 |
-| 2560x1440 | 3:2 | 24.9 + 11.1 MB | ~1.6 | ~1.8 | ~2.0 |
-| 3840x2160 | 1:1 | 24.9 + 24.9 MB | ~2.3 | ~2.45 | ~2.7 |
+| 1920x1080 | 2:1 | 24.9 + 6.2 MB | 1.23 ms (1.01) | 1.49 ms (1.17) | ~1.8 |
+| 2560x1440 | 3:2 | 24.9 + 11.1 MB | 1.76 ms (1.12) | 2.13 ms (1.51) | ~2.5 |
+| 3840x2160 | 1:1 | 24.9 + 24.9 MB | 2.42 ms (1.51) | 2.60 ms (1.80) | ~3.0 |
 | other | area loop | | slower (36 reads a quad, one after the other) | | |
+
+The Catmull-Rom chroma costs 0.2-0.3 ms at 2:1 and 0.6-0.9 ms at 3:2 and 1:1 (two rounds each, 600 frames
+of a 4K60 60 Mbps clip, SDR and HDR10; the same with `av1_set_display_bilinear_chroma`, which only changes
+the weights). With it a 4K HDR10 frame at 1:1 keeps the GPU busy 11.3 ms (10.5 before), within the 14 ms
+of the 60 fps envelope.
 
 NV12 with the dither adds ~0.03 ms at 1080p and ~0.1 ms at 4K and writes a quarter less. The timing
 run's stage `display` (`AV1_PERF_GPU_DISPLAY` of `av1_perf_frame`, with `output_path`
