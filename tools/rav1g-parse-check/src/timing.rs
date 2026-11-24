@@ -92,7 +92,9 @@ impl ParseSink for NullSink {
         Ok(number)
     }
 
-    fn tile_begin(&self, _frame: usize, _tile: &ParseTile) {}
+    fn tile_begin(&self, _frame: usize, tile: &ParseTile) -> usize {
+        tile.index
+    }
 
     fn block(&self, _frame: usize, _tile: usize, _block: &ParseBlock<'_>) {}
 
@@ -114,13 +116,21 @@ impl ParseSink for NullSink {
     }
 }
 
+/// `-timekind`: which runs `-time` makes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Parse,
+    Sink,
+    Both,
+}
+
 fn milliseconds(duration: Duration, frames: u64) -> f64 {
     duration.as_secs_f64() * 1000.0 / frames.max(1) as f64
 }
 
 /// `wave_edges`: the wavefront in the edges of the tiles (the default of the decoder), not in the grids.
 /// `legacy`: the previous intra block lists. `frame_times`: a `FRAMETIME` line per frame of every run with
-/// the sink (rav1d's `parse_stats`).
+/// the sink (rav1d's `parse_stats`). `runs`: the runs of each kind the best is taken of.
 pub fn run(
     path: &Path,
     threads: u16,
@@ -129,6 +139,8 @@ pub fn run(
     wave_edges: bool,
     legacy: Legacy,
     frame_times: bool,
+    runs: usize,
+    kind: Kind,
 ) -> ExitCode {
     // What rav1d makes of the two numbers: at most as many frames as threads.
     let frames_in_parse = frames_in_parse.clamp(1, threads.max(1));
@@ -146,13 +158,12 @@ pub fn run(
             return ExitCode::FAILURE;
         }
     };
-    const RUNS: usize = 3;
 
     // The parse alone: the best of the runs.
     let mut parse = Duration::MAX;
     let mut frames = 0;
     let (mut width, mut height) = (0, 0);
-    for _ in 0..RUNS {
+    for _ in 0..if kind == Kind::Sink { 0 } else { runs } {
         let sink = Arc::new(NullSink {
             places: (0..frames_in_parse).map(|_| (AtomicBool::new(false), UnsafeCell::new(Vec::new()))).collect(),
             frames: AtomicU64::new(0),
@@ -184,7 +195,7 @@ pub fn run(
     let mut sink_calls = Duration::ZERO;
     let mut sink_grid = Duration::ZERO;
     let mut lists_intra = Duration::ZERO;
-    for run in 0..RUNS {
+    for run in 0..if kind == Kind::Parse { 0 } else { runs } {
         let mut parser = match RustParser::with_clock(threads, frames_in_parse, options, true, wave_edges, legacy) {
             Ok(parser) => parser,
             Err(error) => {
@@ -230,15 +241,20 @@ pub fn run(
             sink_grid = Duration::from_nanos(parser.sink_grid_nanos());
             lists_intra = Duration::from_nanos(parser.block_list_intra_nanos());
         }
+        if kind == Kind::Sink {
+            frames = parser.recycled() as u64;
+        }
         if parser.recycled() as u64 != frames {
             eprintln!("rav1g-parse-check: {} frames with the sink, {frames} without", parser.recycled());
             return ExitCode::FAILURE;
         }
     }
 
-    let sink = with_sink.saturating_sub(parse);
+    // A kind that did not run (`-timekind`) is 0.
+    let [parse, with_sink] = [parse, with_sink].map(|time| if time == Duration::MAX { Duration::ZERO } else { time });
+    let sink = if kind == Kind::Both { with_sink.saturating_sub(parse) } else { Duration::ZERO };
     println!(
-        "PARSE TIME {}: {frames} frames {width}x{height}, {threads} thread(s), {frames_in_parse} frame(s) in parse, switches {}, best of {RUNS}: parse {:.3} ms/frame, with \
+        "PARSE TIME {}: {frames} frames {width}x{height}, {threads} thread(s), {frames_in_parse} frame(s) in parse, switches {}, best of {runs}: parse {:.3} ms/frame, with \
          the sink {:.3} ms/frame, the sink {:.3} ms/frame, of which the block lists {:.3} ms/frame{} (CPU time of all \
          threads for the block lists)",
         path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned()),

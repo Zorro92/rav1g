@@ -2,6 +2,7 @@
 
 use std::ffi::{c_int, c_uint};
 use std::ops::BitOr;
+use std::sync::atomic::Ordering;
 use std::cmp;
 
 use assert_matches::debug_assert_matches;
@@ -41,7 +42,7 @@ use crate::parse::ParseTxb;
 use crate::scan::DAV1D_SCANS;
 use crate::strided::Strided as _;
 use crate::tables::{
-    LoCtxOffset, TxfmInfo, DAV1D_FILTER_2D, DAV1D_FILTER_MODE_TO_Y_MODE, DAV1D_LO_CTX_OFFSETS,
+    TxfmInfo, DAV1D_FILTER_2D, DAV1D_FILTER_MODE_TO_Y_MODE, LO_CTX_BY_RC,
     DAV1D_SKIP_CTX, DAV1D_TXFM_DIMENSIONS, DAV1D_TXTP_FROM_UVMODE, DAV1D_TX_TYPES_PER_SET,
     DAV1D_TX_TYPE_CLASS,
 };
@@ -141,6 +142,7 @@ trait ReadInt {
 macro_rules! impl_ReadInt {
     ($U:ty) => {
         impl ReadInt for $U {
+            #[inline(always)]
             fn read_ne(bytes: &[u8]) -> Self {
                 let n = std::mem::size_of::<Self>();
                 Self::from_ne_bytes(bytes[..n].try_into().unwrap())
@@ -188,7 +190,8 @@ impl_MergeInt!(u32, u16);
 impl_MergeInt!(u64, u32);
 impl_MergeInt!(u128, u64);
 
-#[inline]
+// rav1g: always inlined into `decode_coefs` (out of line with `#[inline]`, a call per transform block).
+#[inline(always)]
 fn get_skip_ctx(
     t_dim: &TxfmInfo,
     bs: BlockSize,
@@ -203,10 +206,12 @@ fn get_skip_ctx(
         let ss_hor = layout != Rav1dPixelLayout::I444;
         let not_one_blk = b_dim[2] - (b_dim[2] != 0 && ss_hor) as u8 > t_dim.lw
             || b_dim[3] - (b_dim[3] != 0 && ss_ver) as u8 > t_dim.lh;
+        #[inline(always)]
         fn merge_ctx<const N: usize>(dir: &[u8]) -> bool {
             dir[..N] != [0x40; N]
         }
 
+        #[inline(always)]
         fn cdir(dir: &[u8]) -> u8 {
             let cdir = match dir.len() {
                 1 => merge_ctx::<1>(dir),
@@ -226,6 +231,7 @@ fn get_skip_ctx(
         0
     } else {
         /// Read and xor all the bytes.
+        #[inline(always)]
         fn merge_ctx(dir: &[u8]) -> u8 {
             let n = dir.len();
             if n == 1 {
@@ -256,6 +262,7 @@ fn get_skip_ctx(
             }
         }
 
+        #[inline(always)]
         fn ldir(dir: &[u8]) -> usize {
             let ldir = merge_ctx(dir);
             cmp::min(ldir & 0x3f, 4) as usize
@@ -408,8 +415,7 @@ fn get_lo_ctx(
     levels: &[u8],
     tx_class: TxClass,
     hi_mag: &mut u32,
-    ctx_offsets: Option<&[[LoCtxOffset; 32]; 32]>,
-    x: u8,
+    two_d_offset: Option<u8>,
     y: u8,
     stride: u8,
 ) -> LoCdfIndex {
@@ -430,15 +436,16 @@ fn get_lo_ctx(
 
     let mut mag = level(0, 1) + level(1, 0);
     let offset;
-    match ctx_offsets {
-        Some(ctx_offsets) => {
+    match two_d_offset {
+        Some(two_d_offset) => {
             debug_assert_matches!(tx_class, TxClass::TwoD);
             mag += level(1, 1);
             *hi_mag = mag;
             mag += level(0, 2) + level(2, 0);
-            offset = ctx_offsets[y as usize][x as usize].get();
-            // The type for `ctx_offsets` guarantees bounds.
-            assert!(offset <= 21); // Elided
+            // rav1g: the offset of `DAV1D_LO_CTX_OFFSETS` at the position, from `LO_CTX_BY_RC`
+            // (bits 0-4, at most 21).
+            offset = two_d_offset & 0x1f;
+            debug_assert!(offset <= 21);
         }
         None => {
             debug_assert_matches!(tx_class, TxClass::H | TxClass::V);
@@ -729,7 +736,7 @@ fn decode_coefs<BD: BitDepth>(
     // rav1g: the transform block goes to the sink, which says where its coefficients go.
     let dst = c.sink.txb(
         f.sink_frame,
-        ts_idx,
+        ts.sink_tile.load(Ordering::Relaxed),
         &ParseTxb {
             plane: plane as u8,
             tx,
@@ -791,8 +798,7 @@ fn decode_coefs<BD: BitDepth>(
         let stride;
         match tx_class {
             TxClass::TwoD => {
-                let is_rect = tx.is_rect() as usize;
-                lo_ctx_offsets = Some(&DAV1D_LO_CTX_OFFSETS[is_rect + (tx as usize & is_rect)]);
+                lo_ctx_offsets = Some(&LO_CTX_BY_RC[tx as usize]);
                 scan = DAV1D_SCANS[tx as usize];
                 stride = 4 << slh;
             }
@@ -938,11 +944,15 @@ fn decode_coefs<BD: BitDepth>(
         for i in (1..eob).rev() {
             // ac
             let rc_i;
+            // rav1g: in 2D the position's lo context offset and hi context come from one entry of
+            // `LO_CTX_BY_RC`, without `x` and `y` (they are read for nothing else in the loop).
+            let mut rc_ctx = 0;
             match tx_class {
                 TxClass::TwoD => {
                     rc_i = scan[i as usize].get();
-                    x = (rc_i >> shift) as u8;
-                    y = rc_i as u8 & mask;
+                    if let Some(by_rc) = lo_ctx_offsets {
+                        rc_ctx = by_rc[rc_i as usize & 1023];
+                    }
                 }
                 TxClass::H => {
                     x = i as u8 & mask;
@@ -977,10 +987,14 @@ fn decode_coefs<BD: BitDepth>(
             // At this point, we know that `get_lo_ctx` can elide the bounds check on `level`
             // because it is statically known that `level` has at least 65 elements.
             let level = &mut levels[level_off..];
-            let lo_ctx = get_lo_ctx(level, tx_class, &mut mag, lo_ctx_offsets, x, y, stride);
-            if tx_class == TxClass::TwoD {
-                y |= x;
-            }
+            let lo_ctx = get_lo_ctx(
+                level,
+                tx_class,
+                &mut mag,
+                (tx_class == TxClass::TwoD).then_some(rc_ctx),
+                y,
+                stride,
+            );
             tok = rav1d_msac_decode_symbol_adapt4(&mut ts_c.msac, &mut lo_cdf[lo_ctx.get()], 3);
             if dbg {
                 println!(
@@ -990,7 +1004,11 @@ fn decode_coefs<BD: BitDepth>(
             }
             if tok == 3 {
                 let mag = mag as u8 & 63;
-                ctx = if y > (tx_class == TxClass::TwoD) as u8 {
+                let far = match tx_class {
+                    TxClass::TwoD => rc_ctx & 0x80 != 0,
+                    TxClass::H | TxClass::V => y > 0,
+                };
+                ctx = if far {
                     14
                 } else {
                     7
@@ -1022,7 +1040,7 @@ fn decode_coefs<BD: BitDepth>(
             // 65 elements in level in the `TwoD` case, and 33 elements for `H | V`.
             // The size of `levels` is 32 * 34, and we are not offsetting into it,
             // so this is trivially true.
-            get_lo_ctx(levels, tx_class, &mut mag, lo_ctx_offsets, 0, 0, stride).get()
+            get_lo_ctx(levels, tx_class, &mut mag, None, 0, stride).get()
         };
         let mut dc_tok =
             rav1d_msac_decode_symbol_adapt4(&mut ts_c.msac, &mut lo_cdf[lo_ctx], 3) as c_uint;
@@ -1160,7 +1178,7 @@ fn decode_coefs<BD: BitDepth>(
                 dc_dq = ((dc_dq as c_uint).wrapping_mul(dc_tok as c_uint) & 0xffffff) as c_int;
             } else {
                 dc_dq = (dc_dq as c_uint).wrapping_mul(dc_tok as c_uint) as c_int;
-                assert!(dc_dq <= 0xffffff);
+                debug_assert!(dc_dq <= 0xffffff); // rav1g: as in dav1d (see the AC tokens).
             }
             cul_level = dc_tok;
             dc_dq >>= dq_shift;
@@ -1186,7 +1204,7 @@ fn decode_coefs<BD: BitDepth>(
                     >> dq_shift) as c_int;
             } else {
                 dc_dq = ((dc_dq as c_uint).wrapping_mul(dc_tok as c_uint) >> dq_shift) as c_int;
-                assert!(dc_dq <= cf_max);
+                debug_assert!(dc_dq <= cf_max); // rav1g: as in dav1d (see the AC tokens).
             }
             cul_level = dc_tok;
             put(0, if dc_sign != 0 { -dc_dq } else { dc_dq });
@@ -1227,7 +1245,8 @@ fn decode_coefs<BD: BitDepth>(
                 } else {
                     tok = base;
                     dq = dq.wrapping_mul(tok);
-                    assert!(dq <= 0xffffff); // Optimized out.
+                    // rav1g: a debug assert, as in dav1d: 29247 * 255 / 32 * 14 is below it.
+                    debug_assert!(dq <= 0xffffff);
                 }
                 cul_level = cul_level.wrapping_add(tok);
                 dq >>= dq_shift;
@@ -1267,7 +1286,10 @@ fn decode_coefs<BD: BitDepth>(
                     // cannot exceed `cf_max`, so we can avoid the clipping
                     tok = base;
                     dq = (ac_dq.wrapping_mul(tok) >> dq_shift) as c_int;
-                    assert!(dq <= cf_max);
+                    // rav1g: a debug assert, as in dav1d: a token below 15 times the largest dequantiser
+                    // of the bit depth stays below `cf_max` (8 bits 1828 * 14, 10 bits 7312 * 14, 12 bits
+                    // 29247 * 14), and the check stayed in the loop of every coefficient.
+                    debug_assert!(dq <= cf_max);
                 }
                 cul_level = cul_level.wrapping_add(tok);
                 put(rc, if sign != 0 { -dq } else { dq });
@@ -1410,13 +1432,14 @@ fn read_coef_tree<BD: BitDepth>(
                 cmp::min(txw as c_int, f.bw - t.b.x) as usize,
             ],
             [by4, bx4],
+            #[inline(always)]
             |case, dir| {
                 case.set_disjoint(dir, cf_ctx);
             },
         );
         let txtp_map =
             &mut t.scratch.inter_intra_mut().ac_txtp_map.txtp_map_mut()[by4 * 32 + bx4..];
-        CaseSet::<16, false>::one((), txw as usize, 0, |case, ()| {
+        CaseSet::<16, false>::one((), txw as usize, 0, #[inline(always)] |case, ()| {
             for txtp_map in txtp_map.chunks_mut(32).take(txh as usize) {
                 case.set(txtp_map, txtp);
             }
@@ -1453,6 +1476,7 @@ pub(crate) fn rav1d_read_coef_blocks<BD: BitDepth>(
             [&t.l, &f.a[t.a]],
             [bh4 as usize, bw4 as usize],
             [by4, bx4],
+            #[inline(always)]
             |case, dir| {
                 case.set_disjoint(&dir.lcoef, 0x40);
             },
@@ -1462,6 +1486,7 @@ pub(crate) fn rav1d_read_coef_blocks<BD: BitDepth>(
                 [&t.l, &f.a[t.a]],
                 [cbh4 as usize, cbw4 as usize],
                 [cby4, cbx4],
+                #[inline(always)]
                 |case, dir| {
                     for ccoef in &dir.ccoef {
                         case.set_disjoint(ccoef, 0x40)
@@ -1552,6 +1577,7 @@ pub(crate) fn rav1d_read_coef_blocks<BD: BitDepth>(
                                     cmp::min(t_dim.w as i32, f.bw - t.b.x) as usize,
                                 ],
                                 [by4 + y as usize, bx4 + x as usize],
+                                #[inline(always)]
                                 |case, dir| {
                                     case.set_disjoint(dir, cf_ctx);
                                 },
@@ -1636,6 +1662,7 @@ pub(crate) fn rav1d_read_coef_blocks<BD: BitDepth>(
                                 ) as usize,
                             ],
                             [cby4 + y as usize, cbx4 as usize + x as usize],
+                            #[inline(always)]
                             |case, dir| {
                                 case.set_disjoint(dir, cf_ctx);
                             },

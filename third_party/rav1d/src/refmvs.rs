@@ -1164,10 +1164,25 @@ pub(crate) fn rav1d_refmvs_find(
     };
 
     // sorting (nearest, then "secondary")
-    // Previously used bubble sort; now we use Rust's stable sort,
-    // which for small slices is insertion sort.
-    mvstack[..nearest_cnt].sort_by_key(|cand| -cand.weight);
-    mvstack[nearest_cnt..*cnt].sort_by_key(|cand| -cand.weight);
+    // rav1g: upstream's bubble sort again (dav1d's `refmvs.c`), in place, instead of the call of the
+    // standard library's stable sort upstream moved to. Both are stable and sort by falling weight, so
+    // the order is the same; at most 8 candidates.
+    #[inline(always)]
+    fn sort_by_weight(cands: &mut [RefMvsCandidate]) {
+        let mut len = cands.len();
+        while len != 0 {
+            let mut last = 0;
+            for n in 1..len {
+                if cands[n - 1].weight < cands[n].weight {
+                    cands.swap(n - 1, n);
+                    last = n;
+                }
+            }
+            len = last;
+        }
+    }
+    sort_by_weight(&mut mvstack[..nearest_cnt]);
+    sort_by_weight(&mut mvstack[nearest_cnt..*cnt]);
 
     if r#ref.r#ref[1] > 0 {
         if *cnt < 2 {

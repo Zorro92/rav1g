@@ -453,6 +453,7 @@ pub(crate) unsafe fn perf_collect(
         rec.cpu_ms[sys::AV1_PERF_CPU_GPU_LATENCY as usize] = (now - p.t_submit) as f64 * to_ms;
         rec.memset_bytes = p.acc.memset_bytes;
         rec.complete_ms = now as f64 * to_ms;
+        rec.user_data = p.acc.user_data;
         rec.gpu_gap_ms = -1.0;
 
         // The inter breakdown goes to the callback as a copy this thread owns: the slot goes back to the

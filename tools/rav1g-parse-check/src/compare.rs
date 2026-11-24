@@ -568,3 +568,65 @@ pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
         }
     }
 }
+
+/// `-bufdigest`: a 64-bit fold of every buffer of a frame that [`frame`] compares (the tiles' cursors
+/// without their addresses, mode info records, grid, transform block records, coefficients, block lists,
+/// wavefront grid, palettes, loop restoration units), so that two builds of the sink can be held against
+/// each other byte for byte without both in one process.
+pub fn fold(hash: &mut u64, arena: &Arena) {
+    fn words(hash: &mut u64, bytes: &[u8]) {
+        let (chunks, remainder) = bytes.as_chunks::<8>();
+        let mut h = *hash ^ bytes.len() as u64;
+        for chunk in chunks {
+            let word = u64::from_le_bytes(*chunk);
+            h = (h ^ word).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29);
+        }
+        for &byte in remainder {
+            h = (h ^ u64::from(byte)).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29);
+        }
+        *hash = h;
+    }
+    // SAFETY: the parser has finished the frame; nothing writes its buffers.
+    unsafe {
+        for index in 0..arena.tiles.len() {
+            let mut tile = *arena.tiles.ptr().add(index);
+            tile.idct_blocks_host = std::ptr::null_mut();
+            tile.dq_buffer_base = std::ptr::null_mut();
+            tile.gen_indexes = std::ptr::null_mut();
+            tile.gen_block_map = std::ptr::null_mut();
+            tile.gen_block_map_wrp = std::ptr::null_mut();
+            tile.gen_block_map_fast = std::ptr::null_mut();
+            tile.wave_edges = std::ptr::null_mut();
+            tile.frame_data = std::ptr::null_mut();
+            tile.perf_inter = std::ptr::null_mut();
+            words(hash, std::slice::from_raw_parts((&raw const tile).cast::<u8>(), size_of::<av1_tile_data>()));
+        }
+        words(hash, arena.mi_pool.bytes());
+        words(hash, arena.mi_grid.bytes());
+        words(hash, arena.tx_blocks.bytes());
+        words(hash, arena.coefs.bytes());
+        words(hash, arena.gen_indexes.bytes());
+        words(hash, arena.block_map.bytes());
+        words(hash, arena.iter_grid.bytes());
+    }
+    for palettes in &arena.palettes {
+        for p in palettes.lock().expect("no thread panics with it").iter() {
+            words(hash, &[p.mi_row.to_le_bytes(), p.mi_col.to_le_bytes()].concat());
+            words(hash, &[p.plane]);
+            words(hash, &p.colors.iter().flat_map(|c| c.to_le_bytes()).collect::<Vec<_>>());
+            words(hash, &[p.width as u64, p.height as u64].map(u64::to_le_bytes).concat());
+            words(hash, &p.map);
+        }
+    }
+    let mut lr = arena.lr_units.lock().expect("no thread panics with it").clone();
+    lr.sort();
+    for unit in lr {
+        words(
+            hash,
+            &[u32::from(unit.plane), u32::from(unit.unit_x), u32::from(unit.unit_y), u32::from(unit.r#type)]
+                .map(u32::to_le_bytes)
+                .concat(),
+        );
+        words(hash, &unit.values.map(i32::to_le_bytes).concat());
+    }
+}

@@ -129,9 +129,10 @@ pub struct av1_perf_frame {
     pub gpu_clear_bytes: i64,
     pub complete_ms: f64,
     pub inter: *const av1_perf_inter_detail,
+    pub user_data: u64,
 }
 const _: () = {
-    assert!(size_of::<av1_perf_frame>() == 632);
+    assert!(size_of::<av1_perf_frame>() == 640);
     assert!(align_of::<av1_perf_frame>() == 8);
     assert!(offset_of!(av1_perf_frame, frame_number) == 0);
     assert!(offset_of!(av1_perf_frame, show_frame) == 4);
@@ -160,6 +161,7 @@ const _: () = {
     assert!(offset_of!(av1_perf_frame, gpu_clear_bytes) == 608);
     assert!(offset_of!(av1_perf_frame, complete_ms) == 616);
     assert!(offset_of!(av1_perf_frame, inter) == 624);
+    assert!(offset_of!(av1_perf_frame, user_data) == 632);
 };
 impl Default for av1_perf_frame {
     fn default() -> Self {

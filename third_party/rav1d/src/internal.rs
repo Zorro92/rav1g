@@ -1,7 +1,7 @@
 use std::ffi::{c_int, c_uint};
 use std::mem;
 use std::ops::{Deref, Range};
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 
@@ -703,6 +703,10 @@ pub struct Rav1dTileState {
     pub lflvl: RelaxedAtomic<TileStateRef>,
 
     pub lr_ref: RwLock<[Av1RestorationUnit; 3]>,
+
+    /// rav1g: the number the sink's calls of this tile's blocks, transform blocks, palettes and
+    /// superblocks come with, as its `tile_begin` returned it (`ParseSink::tile_begin`).
+    pub sink_tile: AtomicUsize,
 }
 
 #[derive(Clone, Copy, Default, FromRepr)]

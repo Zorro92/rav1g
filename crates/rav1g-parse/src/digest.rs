@@ -168,12 +168,13 @@ impl ParseSink for DigestSink {
         Ok(0)
     }
 
-    fn tile_begin(&self, _frame: usize, tile: &ParseTile) {
+    fn tile_begin(&self, _frame: usize, tile: &ParseTile) -> usize {
         // SAFETY: a call of the tile's thread inside the frame.
         let state = unsafe { self.tile(tile.index) };
         for value in [tile.col_start, tile.col_end, tile.row_start, tile.row_end] {
             state.hash.word(value as u64);
         }
+        tile.index
     }
 
     fn block(&self, _frame: usize, tile: usize, block: &ParseBlock<'_>) {

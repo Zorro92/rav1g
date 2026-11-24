@@ -217,6 +217,8 @@ pub struct av1_perf_accum {
     pub intra_iters: c_int,
     pub intra_v2: c_int,
     pub intra_stats: [c_int; 4],
+    /// The user data of the frame's temporal unit (`av1_perf_frame::user_data`), set at submit.
+    pub user_data: u64,
     pub tile_count: c_int,
 }
 

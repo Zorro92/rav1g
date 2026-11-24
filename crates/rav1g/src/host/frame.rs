@@ -1923,6 +1923,8 @@ pub(crate) unsafe extern "C" fn rav1g_decode_frame_submit(
         perf_add(dec, sys::AV1_PERF_CPU_WAIT_ITEM as usize, perf_t);
         (*item).data = (*dec).curr_frame_data;
         (*item).image = std::ptr::null_mut();
+        // The perf record's key to the application's own log (av1_perf_frame::user_data).
+        (*(*dec).curr_frame_data).perf.acc.user_data = (*pbi).user_priv as usize as u64;
         (*dec).curr_frame_data = std::ptr::null_mut();
         let buf = &mut (*(*cm).cur_frame).buf;
         let image: *mut HwOutputImage = buf.hw_show_image;

@@ -51,6 +51,11 @@ const COMPOUND_WEDGE: u8 = 2;
 const COMPOUND_DIFFWTD: u8 = 3;
 /// `BILINEAR` of `InterpFilter`, for both directions.
 const INTERP_BILINEAR_BOTH: [u8; 2] = [3, 3];
+/// `interp_filters` (vertical, then horizontal; `InterpFilter`: regular, smooth, sharp, bilinear) by
+/// `Filter2d` of rav1d, whose names are the horizontal filter, then the vertical one
+/// (`Filter2d::hv`, as a table: the match of the two was 8 % of the instructions of a block call).
+const INTERP_FILTERS_OF: [[u8; 2]; 10] =
+    [[0, 0], [1, 0], [2, 0], [0, 2], [1, 2], [2, 2], [0, 1], [1, 1], [2, 1], INTERP_BILINEAR_BOTH];
 
 /// What the record of a block needs of its frame.
 pub struct RecordFrame<'a> {
@@ -258,8 +263,7 @@ fn inter(mi: &mut MB_MODE_INFO, block: &ParseBlock<'_>, inter: &Av1BlockInter) {
             mi.mv[1].as_mv.col = one_d.mv[1].x;
         }
     }
-    let (h, v) = inter.filter2d.hv();
-    mi.interp_filters = [v as u8, h as u8];
+    mi.interp_filters = INTERP_FILTERS_OF[inter.filter2d as usize];
 
     let (compound_type, wedge_index, mut flags) = match inter.comp_type {
         None | Some(CompInterType::Avg) => (COMPOUND_AVERAGE, 0, 0),
@@ -330,6 +334,20 @@ pub fn fill(mi: &mut MB_MODE_INFO, frame: &RecordFrame<'_>, block: &ParseBlock<'
         Av1BlockIntraInter::Inter(inter_block) => {
             inter(mi, block, inter_block);
             inter_tx(mi, frame, bsize, b.skip != 0, lossless, inter_block);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rav1d::levels::Filter2d;
+
+    #[test]
+    fn interp_filters_of_is_hv() {
+        for index in 0..10 {
+            let filter = Filter2d::from_repr(index).expect("a Filter2d");
+            let (h, v) = filter.hv();
+            assert_eq!(super::INTERP_FILTERS_OF[index], [v as u8, h as u8]);
         }
     }
 }

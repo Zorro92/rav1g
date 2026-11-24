@@ -3592,3 +3592,120 @@ parse, `-listslegacy` against the default of the same build:
 - Checked: `rav1g-parse-check` holds the default (4 threads, 1 and 2 frames in parse) against the
   reference with one thread, whose lists are counted superblock by superblock: equal on the 244 public
   streams and on five local 4K and 1080p clips.
+
+### rav1d's parse against dav1d's, instruction by instruction (2026-11-23)
+
+The one-tile 4K streams of the 40 Mbps bar are bound by the serial entropy decode of a frame (7.20),
+so CPU time per frame on that thread is frame rate in the player. Measured on a laptop CPU shared with
+other jobs (wall times and cycles moved by 10 to 20 % between identical runs), so the gate here is the
+instruction count, which is the same from run to run, and cycles only as the minimum of several runs.
+The console has to confirm the time.
+
+**Where rav1d differs from dav1d.** `perf record -e instructions:u` of `rav1g-parse-check -time -runs 1`
+and of dav1d 1.5.1 (`--threads 1 --framedelay 1`) on jf4k40m, the samples of each function divided by
+those of the msac assembly (the same code in both, so the same instructions for the same stream):
+outside the assembly rav1d's parse ran about 1.4 times dav1d's instructions. `decode_coefs` itself is
+close (1.07); the excess is in `decode_b` (1.5: context updates), the loops that call `decode_coefs`
+(`rav1d_read_coef_blocks`, `read_coef_tree`), `decode_sb` and refmvs (1.14). The msac assembly is
+about a third of the parse and is not touched.
+
+**Changes** (none changes what is read; the parse digest is identical before and after on 335 local
+IVF and MKV streams, 53,617 frames):
+
+- `CaseSet` (`ctx.rs`) matched the length of a context update again for each of the 13 to 15 arrays
+  of a block side; it matches once now and the closures are inlined with the length as a constant,
+  as dav1d's `case_set` does. A side is one shared bounds check and one store per array.
+- `get_skip_ctx` is inlined into `decode_coefs` (it was a call per transform block); the checks that
+  a dequantised coefficient is below `cf_max` are debug asserts as in dav1d (the largest dequantiser
+  of each bit depth times 14 is below it); dav1d's bubble sort of the motion vector candidates
+  instead of a call of the standard library's sort (both stable, same order).
+- In the loop of the 2D tokens the lo context offset and the hi context come from one table entry
+  per scan position (`LO_CTX_BY_RC`, 19 KB) instead of two shifts, a mask and a 2D lookup: fewer
+  values live across the calls of the assembly in a loop that spills about ten of them.
+- `rav1g-parse-check -time` clears only what the D3D12 host clears for a frame (the arena's full
+  clear was 8 % of a profile of the run, outside the time measured) and takes `-runs <n>`.
+
+**Result**, `rav1g-parse-check -time -runs 1 -threads 1 -frames 1`, the parse alone plus the parse
+with the sink, before (the tool's change only) and after:
+
+| Stream | Instructions | Cycles, minimum of the runs (before 5-6, after 3) | Parse alone, best ms/frame | Sink, ms/frame |
+| --- | --- | --- | --- | --- |
+| jf4k40m | 464.8 G → 453.8 G (-2.4 %) | 227.2 G → 222.4 G (-2.1 %) | 20.0 → 19.8 (with the first commits) | 2.3 to 5.5 in either build |
+| jf4k60m | 573.2 G → 560.2 G (-2.3 %) | 282.8 G → 283.3 G | 25.1 → 26.5 | 1.5 to 7.0 in either build |
+
+The sink's code did not change; its time (the run with the sink less the run without) moved by
+more than a millisecond between identical runs and is not resolved here. On this machine the cycles
+follow the instructions on jf4k40m and show nothing on jf4k60m: the gain is at most about 2 % of the
+parse here, and the console (slower memory in the idle state, the same code) has to measure it.
+
+What is left: the token loops spill about ten values across each call of the assembly (callee-saved
+registers are six), and the context and record updates of a block are still about twice dav1d's.
+
+### The sink on the entropy decoder's thread, and writes nobody reads (2026-11-23)
+
+What the sink costs the thread that entropy-decodes a tile, and three writes of rav1d's that only
+upstream's reconstruction read. Measured on a laptop CPU shared with other jobs (load 7 to 11 on 8
+threads), so instructions are the gate and times are a hint; the console has to measure the time.
+
+**What is on that thread.** With more than one parse thread the block lists are counted behind the
+entropy decoder ("The block lists behind the entropy decoder"); `rav1g-parse-check -time -threads 1`
+counts them on the one thread, so its "sink" is mostly the lists. `perf record -e instructions:u` of
+the run with the sink (first 300 frames of jf4k40m, one thread), the sink's functions as a share of
+all instructions of the run:
+
+| | Lists (`av1_mi_push_block`, `intra_block_edges`, `count_lists`) | On the entropy decoder's thread (`block_call`, `txb_call`, `parse_block`, superblock, wrappers) |
+| --- | --- | --- |
+| Before | 11.2 % | 3.8 % (5.1 M instructions a frame) |
+| After | 11.6 % | 2.6 % (3.3 M instructions a frame) |
+
+So on the console's path (four parse threads, one-tile 4K) the sink was about 4.5 % of the
+instructions of the parse on the entropy thread and is about 2.9 % now. In cycles the calls were bound
+by the dependent loads that found the tile's state (`frames[frame].tiles[tile]`, its `Option`, then the
+tile's data), which rav1d's own work between two calls had moved out of the L1 cache; the record's
+fill is a small part of a block call.
+
+**Changes** (no switch: the buffers are the same bytes, and what rav1d reads is the same):
+
+- `ParseSink::tile_begin` returns the number the tile's block, transform block, palette and superblock
+  calls come with in place of the tile's index. The sink returns the address of the tile's state,
+  which names the frame's state as well; rav1d keeps it in its tile state (`Rav1dTileState::sink_tile`).
+  The digest and timing sinks return the index; `tile_end` and `tile_finish` keep the index.
+- `ParseBlock` has no palette colours: `parse_block` copied them for a palette block, and zeroed 48
+  bytes for every other block, and no sink read them (they come with `ParsePalette`).
+- In the record the interpolation filters come from a table by `Filter2d` (the two matches of
+  `Filter2d::hv` were 8 % of a block call's instructions; a unit test holds the table against `hv`);
+  a full piece of mode info records is a cold call.
+- rav1d's `decode_b` no longer writes the chroma mode of the edges (`BlockContext::uvmode`, gone from
+  the struct, so a reader would not compile), the luma mode of an inter block in the mode context
+  (read only for `y_mode` of key and intra-only frames, AV1 8.3.2, which have no inter blocks; intra
+  block copy keeps its write), and, unless `ParseSettings::lf_masks` is on, the mask of the blocks with
+  coefficients for upstream's CDEF (`noskip_mask`).
+
+Not done: moving the record's fill to the thread that counts the lists. It is under a fifth of a block
+call (the record is 96 bytes, cleared and filled; the block call's cost is its lookups), about 0.3 % of
+the entropy thread, which would not pay for a switch and a second layout of the block. The 16-argument
+call of `decode_coefs` is about 30 of the 250 instructions of a call; `codegen-units = 1` with fat LTO
+cut 1.5 % of the instructions and nothing measurable in cycles.
+
+**Result**, `rav1g-parse-check -time -threads 1 -frames 1 -runs 5 -timekind parse|sink` under
+`perf stat -e instructions:u,cycles:u` (instructions and cycles of one run: the five runs' total over
+five; ms/frame the best of five), base `main` at 3551f99 with the tool's `-timekind`:
+
+| Stream | Parse alone, instructions | With the sink, instructions | Parse alone, cycles | With the sink, cycles | Parse alone, best ms/frame | With the sink, best ms/frame |
+| --- | --- | --- | --- | --- | --- | --- |
+| jf4k40m (1797 frames) | 210.16 G → 207.44 G (-1.3 %) | 243.61 G → 239.62 G (-1.6 %) | 142.2 G → 138.1 G | 163.9 G → 160.3 G | 41.28 → 39.38 | 44.94 → 43.54 |
+| jf4k60m (1797 frames) | 261.17 G → 258.07 G (-1.2 %) | 298.97 G → 294.40 G (-1.5 %) | 164.1 G → 156.2 G | 188.4 G → 183.2 G | 44.32 → 42.13 | 52.08 → 49.47 |
+
+The times are of a machine at load 7 to 11 (the previous section measured 19.8 ms/frame for the parse
+of jf4k40m on the same machine when it was quieter); only the instructions are comparable across
+sections.
+
+**Checks.** `rav1g-parse-check -digest` equal before and after on 299 local IVF and MKV streams
+(31,622 frames); `-bufdigest` (new: a fold of every buffer the check compares, so that two builds of
+the sink, which the check's reference shares, are held against each other) equal on 297 of them
+(25,034 frames; the four largest 4K clips by their first 300 frames) and with 4 threads and 2 frames
+in parse and with the grid written by the sink. CI run 45263245812 on the branch: every job but `rav1d` (which failed on `src/env.rs`, changed and not yet listed in `PATCHES.md`; fixed behind it) passed, among them `parse-check`, `parse-digest` and `rust-equal`; the Argon default pass 879 streams, none failed (212 excluded).
+
+What is left on the entropy thread: rav1d's own loops, flat in the profiles (`decode_b` 10 % of the
+parse's instructions with no line above 0.3 % of them, `rav1d_read_coef_blocks` 5.5 %, refmvs 6 %),
+and the msac assembly, about a third.

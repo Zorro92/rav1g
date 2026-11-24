@@ -281,6 +281,7 @@ fn read_tx_tree(
             [(&t.l, txh), (&f.a[t.a], txw)],
             [t_dim.h as usize, t_dim.w as usize],
             [by4 as usize, bx4 as usize],
+            #[inline(always)]
             |case, (dir, val)| {
                 let tx = if is_split {
                     TxfmSize::S4x4
@@ -716,6 +717,7 @@ fn read_vartx_tree(
                 [&t.l, &f.a[t.a]],
                 [bh4 as usize, bw4 as usize],
                 [by4 as usize, bx4 as usize],
+                #[inline(always)]
                 |case, dir| {
                     case.set_disjoint(&dir.tx, TxfmSize::S4x4);
                 },
@@ -727,6 +729,7 @@ fn read_vartx_tree(
                 [(&t.l, 1), (&f.a[t.a], 0)],
                 [bh4 as usize, bw4 as usize],
                 [by4 as usize, bx4 as usize],
+                #[inline(always)]
                 |case, (dir, dir_index)| {
                     // TODO check unwrap is optimized out
                     let tx = TxfmSize::from_repr(b_dim[2 + dir_index] as _).unwrap();
@@ -1559,6 +1562,7 @@ fn decode_b(
             [(&t.l, t_dim.lh, 1), (ta, t_dim.lw, 0)],
             [bh4 as usize, bw4 as usize],
             [by4 as usize, bx4 as usize],
+            #[inline(always)]
             |case, (dir, lw_lh, dir_index)| {
                 case.set_disjoint(&dir.tx_intra, lw_lh as i8);
                 // TODO check unwrap is optimized out
@@ -1586,15 +1590,9 @@ fn decode_b(
         if pal_sz[0] != 0 {
             (bd_fn.copy_pal_block_y)(t, f, bx4 as usize, by4 as usize, bw4 as usize, bh4 as usize);
         }
+        // rav1g: upstream keeps the chroma mode of the edges (`uvmode`) for its reconstruction; the
+        // parse does not read it, so it is not kept.
         if has_chroma {
-            CaseSet::<32, false>::many(
-                [&t.l, ta],
-                [cbh4 as usize, cbw4 as usize],
-                [cby4 as usize, cbx4 as usize],
-                |case, dir| {
-                    case.set_disjoint(&dir.uvmode, uv_mode);
-                },
-            );
             if pal_sz[1] != 0 {
                 (bd_fn.copy_pal_block_uv)(
                     t,
@@ -1761,6 +1759,7 @@ fn decode_b(
             [(&t.l, 1), (ta, 0)],
             [bh4 as usize, bw4 as usize],
             [by4 as usize, bx4 as usize],
+            #[inline(always)]
             |case, (dir, dir_index)| {
                 case.set_disjoint(&dir.tx_intra, b_dim[2 + dir_index] as i8);
                 case.set_disjoint(&dir.mode, DC_PRED);
@@ -1773,16 +1772,6 @@ fn decode_b(
                 case.set_disjoint(&dir.skip, b.skip);
             },
         );
-        if has_chroma {
-            CaseSet::<32, false>::many(
-                [&t.l, ta],
-                [cbh4 as usize, cbw4 as usize],
-                [cby4 as usize, cbx4 as usize],
-                |case, dir| {
-                    case.set_disjoint(&dir.uvmode, DC_PRED);
-                },
-            );
-        }
     } else {
         // inter-specific mode/mv coding
         let mv_prec = || frame_hdr.hp as i32 - frame_hdr.force_integer_mv as i32;
@@ -2701,6 +2690,7 @@ fn decode_b(
             [(&t.l, 1), (ta, 0)],
             [bh4 as usize, bw4 as usize],
             [by4 as usize, bx4 as usize],
+            #[inline(always)]
             |case, (dir, dir_index)| {
                 case.set_disjoint(&dir.seg_pred, seg_pred.into());
                 case.set_disjoint(&dir.skip_mode, b.skip_mode);
@@ -2713,22 +2703,12 @@ fn decode_b(
                 case.set_disjoint(&dir.comp_type, comp_type);
                 case.set_disjoint(&dir.filter[0], filter[0]);
                 case.set_disjoint(&dir.filter[1], filter[1]);
-                case.set_disjoint(&dir.mode, inter_mode);
+                // rav1g: no `mode`: only the luma modes of key and intra-only frames are read back
+                // (the context of `y_mode`), and an inter block is in neither. No `uvmode` (above).
                 case.set_disjoint(&dir.r#ref[0], r#ref[0]);
                 case.set_disjoint(&dir.r#ref[1], r#ref[1]);
             },
         );
-
-        if has_chroma {
-            CaseSet::<32, false>::many(
-                [&t.l, ta],
-                [cbh4 as usize, cbw4 as usize],
-                [cby4 as usize, cbx4 as usize],
-                |case, dir| {
-                    case.set_disjoint(&dir.uvmode, DC_PRED);
-                },
-            );
-        }
     }
 
     // update contexts
@@ -2739,14 +2719,16 @@ fn decode_b(
         let b4_stride = usize::try_from(f.b4_stride).unwrap();
         let cur_segmap = &f.cur_segmap.as_ref().unwrap().inner;
         let offset = by * b4_stride + bx;
-        CaseSet::<32, false>::one((), bw4, 0, |case, ()| {
+        CaseSet::<32, false>::one((), bw4, 0, #[inline(always)] |case, ()| {
             for i in 0..bh4 {
                 let i = offset + i * b4_stride;
                 case.set(&mut cur_segmap.index_mut((i.., ..bw4)), b.seg_id);
             }
         });
     }
-    if b.skip == 0 {
+    // rav1g: upstream's mask of the blocks with coefficients is for its CDEF; the parse does not read
+    // it, so it is kept with the other masks of the loop filter only (`ParseSettings::lf_masks`).
+    if c.parse_lf_masks && b.skip == 0 {
         let mask = !0u32 >> 32 - bw4 << (bx4 & 15);
         let bx_idx = (bx4 & 16) >> 4;
         for noskip_mask in &f.lf.mask[t.lf_mask.unwrap()].noskip_mask[by4 as usize >> 1..]
@@ -2787,15 +2769,9 @@ fn parse_block(
     seg_pred: bool,
 ) {
     let ts = &f.ts[t.ts];
-    let has_pal = matches!(&b.ii, Av1BlockIntraInter::Intra(intra) if intra.pal_sz != [0, 0]);
-    let pal = if has_pal {
-        task_palette(f, t)
-    } else {
-        Default::default()
-    };
     c.sink.block(
         f.sink_frame,
-        t.ts,
+        ts.sink_tile.load(Ordering::Relaxed),
         &ParseBlock {
             x4: t.b.x,
             y4: t.b.y,
@@ -2805,7 +2781,6 @@ fn parse_block(
             warpmv: &t.warpmv,
             delta_lf: ts.last_delta_lf.get(),
             qidx: ts.last_qidx.get(),
-            pal: &pal,
             seg_pred,
         },
     );
@@ -2829,7 +2804,7 @@ fn parse_palette(
     let [w4, h4, bw4, bh4] = [w4, h4, bw4, bh4].map(|n| n as usize);
     c.sink.palette(
         f.sink_frame,
-        t.ts,
+        f.ts[t.ts].sink_tile.load(Ordering::Relaxed),
         &ParsePalette {
             x4: t.b.x,
             y4: t.b.y,
@@ -2885,7 +2860,7 @@ fn parse_superblock(
     };
     c.sink.superblock(
         f.sink_frame,
-        t.ts,
+        f.ts[t.ts].sink_tile.load(Ordering::Relaxed),
         &ParseSuperblock {
             x4: t.b.x,
             y4: t.b.y,
@@ -3230,6 +3205,7 @@ fn decode_sb(
             [(&f.a[t.a], 0), (&t.l, 1)],
             [hsz as usize; 2],
             [bx8 as usize, by8 as usize],
+            #[inline(always)]
             |case, (dir, dir_index)| {
                 case.set_disjoint(
                     &dir.partition,
@@ -3244,7 +3220,6 @@ fn decode_sb(
 
 fn reset_context(ctx: &mut BlockContext, keyframe: bool, pass: c_int) {
     ctx.intra.get_mut().0.fill(keyframe.into());
-    ctx.uvmode.get_mut().0.fill(DC_PRED);
     if keyframe {
         ctx.mode.get_mut().0.fill(DC_PRED);
     }
@@ -3565,7 +3540,7 @@ pub(crate) fn rav1d_decode_tile_sbrow(
         return Ok(());
     }
     if t.b.y == ts.tiling.row_start {
-        c.sink.tile_begin(
+        let sink_tile = c.sink.tile_begin(
             f.sink_frame,
             &ParseTile {
                 index: t.ts,
@@ -3575,6 +3550,7 @@ pub(crate) fn rav1d_decode_tile_sbrow(
                 row_end: ts.tiling.row_end,
             },
         );
+        ts.sink_tile.store(sink_tile, Ordering::Relaxed);
     }
 
     if c.tc.len() > 1 && frame_hdr.use_ref_frame_mvs != 0 {
