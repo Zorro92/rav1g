@@ -43,12 +43,13 @@ VARIANTS = {
 }
 
 INTRA_MAIN = ['intra_main', 'intra_main_hbd']
-# The -intraod comparison kernels are built without optimization in the default set.
-UNOPTIMIZED = [name + '_legacy' for name in INTRA_MAIN]
+# The shaders the default set builds without optimization (-Od): none since the -intraod kernels
+# (intra_main_legacy, intra_main_hbd_legacy) were retired. testing/shader_regs reads the list.
+UNOPTIMIZED = []
 
 # Verify the alternate kernels selected at runtime in the built binary.
 REQUIRED_BYTECODE = [
-    'cdef_filter_v3', 'cdef_filter_v3_sp_tex', *INTRA_MAIN, *UNOPTIMIZED,
+    'cdef_filter_v3', 'cdef_filter_v3_sp_tex', *INTRA_MAIN,
     'intra_main_prefetch_hbd', 'intra_main_prefetch',
     'intra_main_single_edge', 'intra_main_single_edge_hbd',
     'intra_filter_prefetch', 'intra_filter_prefetch_hbd',
@@ -80,7 +81,7 @@ REQUIRED_BYTECODE = [
 #               the one warning the sources give (560 times): "1 << n" with a literal on the left, whose
 #               type DXC could take as 64 bits. The default build refuses a listing with a 64-bit
 #               value in it, so the shifts are 32-bit ones.
-#   no -O       DXC's default, -O3. The shaders in UNOPTIMIZED use -Od.
+#   no -O       DXC's default, -O3 (the shaders in UNOPTIMIZED would use -Od; there are none).
 #   no -Gis     the shaders have no floating point arithmetic (the listings have none), so IEEE
 #               strictness has nothing to decide.
 #   nothing that strips: the container keeps its reflection part.
@@ -105,7 +106,7 @@ def project_shaders(shaders_dir=SHADERS):
     names = sorted(name[:-5] for name in os.listdir(shaders_dir) if name.endswith('.hlsl'))
     if len(names) < 80:
         fail('only %d shaders found in %s' % (len(names), shaders_dir))
-    for name in INTRA_MAIN + UNOPTIMIZED:
+    for name in INTRA_MAIN:
         if name not in names:
             fail('%s is not a shader of %s' % (name, shaders_dir))
     return [(name, name in UNOPTIMIZED) for name in names]
@@ -391,7 +392,9 @@ def build_od_set(args, shaders, dxc_keys, identity, jobs, shader_set, report):
                         'compiled': name in results, 'seconds': meta['seconds'],
                         'bytecode_sha256': digest})
 
-    dxc_line = 'dxc: %s: dxc %s; -Od for %s' % (shader_set, report['arguments'], unoptimized)
+    dxc_line = 'dxc: %s: dxc %s' % (shader_set, report['arguments'])
+    if unoptimized:
+        dxc_line += '; -Od for %s' % unoptimized
     od_line = 'od: %s: dxc %s; -D INTRA_MAIN_LEGACY for %s' % (
         shader_set, report['arguments_unoptimized'], ', '.join(INTRA_MAIN))
     if wide:
@@ -428,7 +431,8 @@ def command_build(args):
               'arguments_unoptimized': ' '.join(dxc_arguments(True, args.variant)),
               'shader_set': shader_set, 'jobs': jobs,
               'compiled': missing, 'from_cache': len(shaders) - missing, 'shaders': []}
-    print('shaders.py: %s: %s; dxc %s; -Od for %s' % (shader_set, version, report['arguments'], ', '.join(UNOPTIMIZED)))
+    print('shaders.py: %s: %s; dxc %s%s' % (shader_set, version, report['arguments'],
+                                            '; -Od for ' + ', '.join(UNOPTIMIZED) if UNOPTIMIZED else ''))
     if args.variant == 'shader-pick':
         build_od_set(args, shaders, keys, identity, jobs, shader_set, report)
     for name, od in shaders:

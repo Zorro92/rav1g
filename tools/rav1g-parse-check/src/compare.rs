@@ -337,15 +337,12 @@ pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
             report.difference("tile data", || {
                 format!(
                     "frame {number} tile {index}: reference records {} transform blocks {} coefficients to {} index list {} \
-                     blocks {} warp {} iterations {}/{} (max {}/{}) inter {} sizes {:?}; checked records {} transform \
-                     blocks {} coefficients to {} index list {} blocks {} warp {} iterations {}/{} (max {}/{}) inter {} \
-                     sizes {:?}",
+                     iterations {}/{} (max {}/{}) inter {} sizes {:?}; checked records {} transform blocks {} \
+                     coefficients to {} index list {} iterations {}/{} (max {}/{}) inter {} sizes {:?}",
                     tc.mi_count,
                     tc.idct_blocks_ptr,
                     tc.dq_buffer_ptr,
                     tc.gen_index_ptr,
-                    tc.pred_block_bound,
-                    tc.pred_warp_bound,
                     tc.gen_intra_iter_y,
                     tc.gen_intra_iter_uv,
                     tc.intra_iter_max,
@@ -356,8 +353,6 @@ pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
                     tr.idct_blocks_ptr,
                     tr.dq_buffer_ptr,
                     tr.gen_index_ptr,
-                    tr.pred_block_bound,
-                    tr.pred_warp_bound,
                     tr.gen_intra_iter_y,
                     tr.gen_intra_iter_uv,
                     tr.intra_iter_max,

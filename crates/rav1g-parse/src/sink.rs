@@ -68,9 +68,8 @@ use rav1d::parse::{
     ParseTxb,
 };
 use rav1g_sys::{
-    AV1_COMMON, AV1Decoder, BLOCK_4X16, BLOCK_16X4, BLOCK_16X8, GLOBALMV, MACROBLOCKD, MB_MODE_INFO, MI_LEFT_EDGE,
-    MiGridEntry, OBMC_CAUSAL, TileInfo, WARPED_CAUSAL, av1_tile_data, mi_grid_entry, mi_grid_record_in_chunks,
-    tx_block_info_gpu,
+    AV1_COMMON, AV1Decoder, MACROBLOCKD, MB_MODE_INFO, MI_LEFT_EDGE, MiGridEntry, TileInfo, av1_tile_data,
+    mi_grid_entry, mi_grid_record_in_chunks, tx_block_info_gpu,
 };
 
 /// `SinkOptions::test_panic`: the frame (counted from 1) whose first superblock panics.
@@ -118,15 +117,12 @@ pub struct SinkOptions {
     /// record a 64x64 area keeps its CDEF index in, come from what the sink keeps of a tile. The records
     /// and the lists are the same.
     pub gpu_grid: bool,
-    /// The sink bounds the number of GPU prediction records and counts only the intra lists.
-    pub gpu_pred_lists: bool,
     /// The block lists of a tile are counted a superblock row behind its entropy decoder, by a parse
     /// thread that has no task of the parser (`ParseSink::idle_work`), or by the tile's thread itself
     /// when a row has waited for one a row long, and the rest of them when the tile is through
     /// (`ParseSink::tile_finish`), behind the save of the frame's CDFs. For frames whose tiles are
-    /// parsed by the worker threads (`ParseFrame::tile_tasks`), and not with
-    /// [`Self::gpu_pred_lists`]; otherwise, and off, the tile's thread counts them superblock by
-    /// superblock. The lists are the same.
+    /// parsed by the worker threads (`ParseFrame::tile_tasks`); otherwise, and off, the tile's thread
+    /// counts them superblock by superblock. The lists are the same.
     pub pipe_lists: bool,
 }
 
@@ -429,9 +425,8 @@ fn ready_of(pieces: &[Records]) -> u64 {
 
 /// The fields of a tile's `av1_tile_data` that the lists write (`av1_mi_push_block` and what it calls:
 /// the index list, the wavefront's iterations and the clears of their lists, intra block copy's
-/// superblock, the single-edge schedule), from the lists' copy ([`ListState::tile`]) into the host's
-/// record. `have_inter` is written by both sides (the entropy decoder with
-/// [`SinkOptions::gpu_pred_lists`]), so it is the one that either set.
+/// superblock, the single-edge schedule, whether the tile has inter blocks), from the lists' copy
+/// ([`ListState::tile`]) into the host's record.
 ///
 /// # Safety
 /// `host` is the tile's record, which no other thread uses; the lists are through.
@@ -458,53 +453,6 @@ struct Records {
     /// The records that are written, and those there is room for.
     count: c_int,
     max: c_int,
-}
-
-/// Reserve records, without reading the grid, choosing a list or numbering a block. For sub-8x8
-/// chroma reserve the 2x2 pieces even if an intra neighbour will turn them into two ordinary
-/// records. OBMC can use at most four neighbours per edge, with up to three planes per neighbour.
-#[inline]
-fn gpu_prediction_bounds(tile: &mut av1_tile_data, mi: &MB_MODE_INFO, xd: &MACROBLOCKD) {
-    let bsize = mi.sb_type as usize;
-    let w = i32::from(MI_SIZE_WIDE_LOG2[bsize]);
-    let h = i32::from(MI_SIZE_HIGH_LOG2[bsize]);
-    let chroma = (w != 0 || mi.mi_col & 1 != 0) && (h != 0 || mi.mi_row & 1 != 0);
-    let mut normal = 0;
-    let mut warp = 0;
-    let mut overlapped = false;
-    if mi.ref_frame[0] > 0 {
-        tile.have_inter = 1;
-        let can_warp = xd.cur_frame_force_integer_mv == 0 && w > 0 && h > 0 && mi.ref_frame[1] <= 0;
-        let local = can_warp && mi.motion_mode == WARPED_CAUSAL as u8 && mi.flags & MB_MODE_INFO::WARP_INVALID == 0;
-        let global = can_warp && mi.mode == GLOBALMV as u8;
-        warp += i32::from(local || global);
-        normal += i32::from(!local);
-        if chroma {
-            let chroma_warp = w >= 2 && h >= 2;
-            warp += 2 * i32::from(chroma_warp && (local || global));
-            if !(local && chroma_warp) {
-                normal += if w == 0 || h == 0 { 8 << (u32::from(w == 2) + u32::from(h == 2)) } else { 2 };
-            }
-        }
-        if mi.motion_mode == OBMC_CAUSAL as u8 {
-            let above = i32::from(mi.mi_row) > xd.tile.mi_row_start;
-            let left = i32::from(mi.mi_col) > xd.tile.mi_col_start;
-            overlapped = above || left;
-            if above {
-                let uv = bsize > BLOCK_16X8 as usize && bsize != BLOCK_4X16 as usize && bsize != BLOCK_16X4 as usize;
-                normal += w.min(4) * (1 + 2 * i32::from(uv));
-            }
-            if left {
-                normal += h.min(4) * 3;
-            }
-        }
-    }
-    let residual = overlapped && mi.skip == 0;
-    let recon =
-        i32::from(mi.palette_size[0] != 0 || residual) + 2 * i32::from(chroma && (mi.palette_size[1] != 0 || residual));
-    tile.have_recon |= i32::from(recon != 0);
-    tile.pred_block_bound += normal + recon;
-    tile.pred_warp_bound += warp;
 }
 
 /// A cleared struct of the entropy decoder on the heap.
@@ -665,12 +613,10 @@ impl<H: SinkHost> Sink<H> {
         // The loop twice, so that the one with the grid is the code it was before there was another way.
         // SAFETY: the caller's contract.
         unsafe {
-            if self.options.gpu_pred_lists {
-                self.count_lists_way::<true, true>(frame_number, lists, ready);
-            } else if self.options.gpu_grid {
-                self.count_lists_way::<true, false>(frame_number, lists, ready);
+            if self.options.gpu_grid {
+                self.count_lists_way::<true>(frame_number, lists, ready);
             } else {
-                self.count_lists_way::<false, false>(frame_number, lists, ready);
+                self.count_lists_way::<false>(frame_number, lists, ready);
             }
         }
     }
@@ -679,12 +625,7 @@ impl<H: SinkHost> Sink<H> {
     ///
     /// # Safety
     /// As for [`Self::count_lists`].
-    unsafe fn count_lists_way<const GPU_GRID: bool, const GPU_PRED_LISTS: bool>(
-        &self,
-        frame_number: usize,
-        lists: &TileLists,
-        ready: u64,
-    ) {
+    unsafe fn count_lists_way<const GPU_GRID: bool>(&self, frame_number: usize, lists: &TileLists, ready: u64) {
         // SAFETY: the caller's contract; the records are those the tile has written into its parts of
         // the pool, and each is in the grid.
         unsafe {
@@ -733,11 +674,9 @@ impl<H: SinkHost> Sink<H> {
                 if GPU_GRID {
                     (*xd).mi = std::ptr::null_mut();
                     (*xd).mi_record = record;
-                    if !GPU_PRED_LISTS {
-                        (*xd).mi_above = state.above.as_ptr().add((mi_col - col_start) as usize);
-                        (*xd).mi_left = state.left.as_ptr();
-                        (*xd).mi_above_left = state.above_left;
-                    }
+                    (*xd).mi_above = state.above.as_ptr().add((mi_col - col_start) as usize);
+                    (*xd).mi_left = state.left.as_ptr();
+                    (*xd).mi_above_left = state.above_left;
                 } else {
                     (*xd).mi = frame.mi_grid.add((mi_row * frame.mi_stride + mi_col) as usize);
                     (*xd).mi_chunks = frame.mi_chunks;
@@ -753,7 +692,7 @@ impl<H: SinkHost> Sink<H> {
                 (*xd).chroma_left_available =
                     if frame.ss_x != 0 && bw < 2 { (mi_col - 1 > col_start).into() } else { left.into() };
                 av1_mi_push_block(pbi, cm, xd);
-                if GPU_GRID && !GPU_PRED_LISTS {
+                if GPU_GRID {
                     // The block is now the lowest of its columns and the rightmost of its rows. Plain
                     // stores, a block's width and height of them (with the checks and the division of
                     // slices they were twice the time): the columns are inside `above`, which has a
@@ -922,10 +861,6 @@ impl<H: SinkHost> Sink<H> {
             record::fill(&mut *mi, &record_frame, block, lossless);
 
             let bsize = BLOCK_SIZE_OF[block.bs as usize] as usize;
-            if self.options.gpu_pred_lists {
-                // The block context is the tile's thread's: no frame with these lists has `pipe_lists`.
-                gpu_prediction_bounds(&mut *state.memory.tile_data, &*mi, &(*(*state.lists).state.get()).xd);
-            }
             if self.options.gpu_grid {
                 // No grid. The 64x64 areas whose top left unit is the block's: the block's first unit and,
                 // of a block wider or higher than 64, every 64th from it. (A block lies at a multiple of
@@ -1122,7 +1057,7 @@ impl<H: SinkHost> ParseSink for Sink<H> {
                 sb128: header.seq_hdr.sb128 != 0,
                 cdef_coded: !(header.frame_hdr.all_lossless || header.frame_hdr.allow_intrabc),
                 panics: self.options.test_panic && self.begun.fetch_add(1, Ordering::Relaxed) + 1 == TEST_PANIC_FRAME,
-                pipe_lists: self.options.pipe_lists && header.tile_tasks && !self.options.gpu_pred_lists,
+                pipe_lists: self.options.pipe_lists && header.tile_tasks,
             });
             let states = &mut *place.tiles.get();
             for state in states.iter_mut() {
@@ -1214,12 +1149,7 @@ impl<H: SinkHost> ParseSink for Sink<H> {
             state.finished = false;
             state.col_end = tile.col_end;
             state.sb_size = if frame.sb128 { 32 } else { 16 };
-            let tile_data = &mut *memory.tile_data;
-            tile_data.gpu_pred_lists = self.options.gpu_pred_lists.into();
-            tile_data.pred_block_bound = 0;
-            tile_data.pred_warp_bound = 0;
-            tile_data.have_recon = 0;
-            if self.options.gpu_grid && !self.options.gpu_pred_lists {
+            if self.options.gpu_grid {
                 // The edges of the tile: nothing is read of them before a block of this tile has written
                 // it (a block reads above and to the left only inside the tile).
                 let columns = (tile.col_end - tile.col_start).max(0) as usize + MI_LEFT_EDGE + 1;

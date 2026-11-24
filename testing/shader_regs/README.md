@@ -17,7 +17,7 @@ For each shader of `crates/rav1g-sys/shaders.txt` (`shader_regs.py measure`):
 
 1. DXC compiles the HLSL to SPIR-V (`-spirv -fspv-target-env=vulkan1.1`) with the arguments of the real
    build, taken from `testing/shader_cache/shaders.py`: `-T cs_6_0 -E main -HV 2018 -WX
-   -Wno-ambig-lit-shift`, and `-Od` for `intra_main_legacy` and `intra_main_hbd_legacy`. Register
+   -Wno-ambig-lit-shift`, and `-Od` for the shaders of `UNOPTIMIZED` (none since `-intraod` is retired). Register
    classes get separate binding ranges (`-fvk-{t,u,b,s}-shift`): DXC would put `t0`, `u0` and `b0` on the
    same binding.
 2. LLPC (`utils/amdllpc` of RGA) compiles the SPIR-V for gfx1030 with its automatic descriptor layout,
@@ -58,8 +58,9 @@ to memory, which costs far more than a lost wave).
 
 `shader threads wave vgprs sgprs lds_bytes scratch_bytes waves_per_simd limit`
 
-`scratch_bytes` is the scratch memory per lane LLPC reserves (spills or a stack). Today one shader has
-scratch: `intra_main_hbd_legacy`, 48 bytes, the `-Od` comparison kernel of `-intraod`.
+`scratch_bytes` is the scratch memory per lane LLPC reserves (spills or a stack). Today no shader has
+scratch (the one that had, `intra_main_hbd_legacy`, 48 bytes, the `-Od` comparison kernel of `-intraod`,
+is retired).
 
 ## The baseline
 

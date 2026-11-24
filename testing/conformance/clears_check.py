@@ -1,37 +1,22 @@
 #!/usr/bin/env python3
-"""Who clears the grids of a pipeline slot, and how much: the ways of docs/test-player.md, "Pipeline slots
-and clears", held to what they say.
+"""Who clears the grids of a pipeline slot, and how much: the default of docs/test-player.md, "Pipeline
+slots and clears", held to what it says. (The other ways, -gpuclear, -cpuclear, -syncclear and -parseopt
+cleargrid, are retired with interface version 3.)
 
   python testing/conformance/clears_check.py --tool <rav1g-dec.exe> --streams <dir> --out <dir>
                                              --stream <name>[:<temporal units>] [--stream ...]
                                              [--threads N] [--tool-args "<args>"]
 
 <dir> of --streams is what testing/conformance/prepare_streams.sh wrote. Each stream is decoded with its
-reference check and with -gputime, once in each of these ways:
-
-  default            no flag: the wavefront of intra prediction at the edges of the tiles
-  gpu                -gpuclear: the wavefront in the slot's grid, cleared by the frame's command list
-  cpu                -cpuclear: the same grid, cleared by the completion thread
-  sync               -syncclear: the same grid, cleared by the decode thread
-  default-cleargrid  -parseopt cleargrid: the mode info grid cleared for every frame too (not kept)
-  gpu-cleargrid      -gpuclear -parseopt cleargrid
+reference check and with -gputime, the wavefront of intra prediction at the edges of the tiles.
 
 What is checked, from the lines of the timing run for every frame (the bytes cleared for the frame by the
 decode and tile threads, by the completion thread behind it, and by its command list). The first frames of
 a run are left out where a slot's first frame counts: it clears on the decode thread, whatever the way.
 
   - every run decodes the stream as its reference says, and its task line names the way;
-  - default: the completion thread and the GPU clear nothing, in no frame, and the decode and tile threads
-    less than 64 KiB a tile (the counters of the tile's block lists);
-  - gpu: the command list of every frame clears, with the stage slot_clear in it; the completion thread
-    clears nothing; the decode and tile threads no more than in the default way;
-  - cpu: the completion thread clears behind every frame what the command list of that frame clears in
-    the gpu way, to the byte; the GPU nothing;
-  - sync: the decode thread clears at least that much for every frame; the completion thread and the GPU
-    nothing;
-  - the cleargrid ways have the mode info grid on top: the default way on the
-    completion thread, and the gpu way on the GPU, where every frame clears what the two grids are
-    together.
+  - the completion thread and the GPU clear nothing, in no frame, and the decode and tile threads less
+    than 64 KiB a tile (the counters of the tile's block lists).
 
 Written to --out: <stream>.<way>.log and summary.md (also appended to $GITHUB_STEP_SUMMARY when that is set).
 Exit code 1 when a check fails, 2 when a run could not be done.
@@ -42,12 +27,7 @@ import re
 import subprocess
 import sys
 
-WAYS = (('default', '', 'none needed'),
-        ('gpu', '-gpuclear', 'GPU (-gpuclear)'),
-        ('cpu', '-cpuclear', 'completion thread (-cpuclear)'),
-        ('sync', '-syncclear', 'decode thread (-syncclear)'),
-        ('default-cleargrid', '-parseopt cleargrid', 'none needed'),
-        ('gpu-cleargrid', '-gpuclear -parseopt cleargrid', 'GPU (-gpuclear)'))
+WAYS = (('default', '', 'none needed'),)
 # What the decode and tile threads may clear of a frame without a flag, per tile: the tile's descriptor and
 # the counters of its block lists.
 TILE_BYTES = 64 * 1024
@@ -130,9 +110,6 @@ def main():
                 name, '`%s`' % flags if flags else 'no flag', mean[0], mean[1], mean[2], staged, len(frames)))
         if len(got) != len(WAYS):
             continue
-        if len(set(len(frames) for frames in got.values())) != 1:
-            problems.append('%s: the ways do not have the same number of frames' % name)
-            continue
 
         def check(way, what, holds):
             """`holds`: for every frame of the way, with its index, whether the frame is as it should be."""
@@ -143,29 +120,10 @@ def main():
                                 '%d, GPU %d bytes, slot_clear %s' % (name, way, what, len(failed), len(got[way]), failed[0],
                                                                      frame[0], frame[1], frame[2], frame[3]))
 
-        grid = [frame[2] for frame in got['gpu']]
         idle = lambda index, frame: frame[1:4] == (0, 0, False)
         check('default', 'the completion thread or the GPU clears something', idle)
         check('default', 'the decode and tile threads clear more than %d bytes a tile' % TILE_BYTES,
               lambda index, frame: index < FIRST or frame[0] <= TILE_BYTES * frame[4])
-        check('gpu', 'the command list does not clear', lambda index, frame: frame[2] > 0 and frame[3])
-        check('gpu', 'the completion thread clears', lambda index, frame: frame[1] == 0)
-        check('gpu', 'the decode and tile threads clear more than %d bytes a tile' % TILE_BYTES,
-              lambda index, frame: index < FIRST or frame[0] <= TILE_BYTES * frame[4])
-        check('cpu', 'the completion thread does not clear what the command list clears with -gpuclear',
-              lambda index, frame: frame[1] == grid[index])
-        check('cpu', 'the GPU clears', lambda index, frame: frame[2:4] == (0, False))
-        check('sync', 'the decode thread clears less than the command list clears with -gpuclear',
-              lambda index, frame: index < FIRST or frame[0] >= grid[index])
-        check('sync', 'the completion thread or the GPU clears something', idle)
-        for kind in ('cleargrid',):
-            default, gpu = got['default-' + kind], 'gpu-' + kind
-            check('default-' + kind, 'the completion thread does not clear the mode info grid',
-                  lambda index, frame: frame[1] > 0)
-            check('default-' + kind, 'the GPU clears', lambda index, frame: frame[2:4] == (0, False))
-            check(gpu, 'the command list does not clear the wavefront grid and the mode info grid',
-                  lambda index, frame: frame[3] and frame[2] == grid[index] + default[index][1])
-            check(gpu, 'the completion thread clears', lambda index, frame: frame[1] == 0)
 
     summary += ['', 'Checks: ' + ('all passed.' if not problems else '%d failed.' % len(problems)), '']
     summary += ['- ' + problem for problem in problems]

@@ -14,15 +14,8 @@
  * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
  */
 
-#define PredListMain 0
-#define PredListWarpBlock 255
-#define PredListFast 279
-#define PredMaxLists (PredListFast + 480)
-#define PredGroupSize 64
-#define PredMaxEvents 20
-#define PredRankBytes (PredMaxEvents * 2)
-
-// At the end of the group rows and ranks: lengths of the two output buffers,
-// the start of the intra lists, then the list starts (one word per list).
-#define PredHeaderBytes 16
-#define PredIntraBase 8
+// The original kernel (the INTRA_MAIN_LEGACY parts of libav1/dx/shaders/intra_main_hbd.hlsl), the reference of
+// intra_check. Not a shader of the decoder any more: its runtime switch, -intraod, is retired, and the
+// shader build does not see this file. The od set of the shader-pick experiment builds the same code.
+#define INTRA_MAIN_LEGACY
+#include "intra_main_hbd.hlsl"

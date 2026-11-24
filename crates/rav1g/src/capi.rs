@@ -60,10 +60,6 @@ pub const RAV1G_PARSER_OPTION_NO_LF_MASKS: u32 = 2;
 pub const RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD: u32 = 4;
 /// The calls of the sink are timed, for a timing run (`rav1g_set_perf_callback`).
 pub const RAV1G_PARSER_OPTION_TIME_CALLS: u32 = 8;
-/// The mode info grid of a pipeline slot is cleared for every frame, and not only for a frame of
-/// another size than the frames before it on the slot. The way of before, for a timing of the two
-/// against each other.
-pub const RAV1G_PARSER_OPTION_CLEAR_GRID: u32 = 32;
 /// For a test of the decoder, never for an application: the parse of the third frame panics, on the
 /// thread that parses it, which is what a bug of the parser does. The decode call that finds it returns
 /// `Rav1gStatus::Error` and the decoder decodes nothing more.
@@ -81,11 +77,6 @@ pub const RAV1G_PARSER_OPTION_TEST_POOL_WAIT: u32 = 128;
 /// buffers of every pipeline slot are then buffers the GPU may write. Part of
 /// `RAV1G_PARSER_OPTIONS_DEFAULT`.
 pub const RAV1G_PARSER_OPTION_GPU_CDEF_LISTS: u32 = 512;
-/// A check of the decoder, not a way of doing the parse: a pass of every frame's command list builds the
-/// frame's mode info grid from its records into a second grid of the pipeline slot, and the decoder holds
-/// it against the grid the parse wrote when the frame is done (`GRIDCHECK` in the log of its release).
-/// Clear `RAV1G_PARSER_OPTION_GPU_GRID` to use the check. Every slot then has the second grid.
-pub const RAV1G_PARSER_OPTION_GPU_GRID_CHECK: u32 = 1024;
 /// The mode info grid of a frame (for every 4x4 unit the record of its block) is built by a pass of the
 /// frame's command list from the frame's mode info records, in front of every stage that reads it, and
 /// not written by the threads that parse (1.98 MiB a 4K frame, 1.1 to 1.2 ms a frame of those threads on
@@ -93,9 +84,6 @@ pub const RAV1G_PARSER_OPTION_GPU_GRID_CHECK: u32 = 1024;
 /// is then a buffer the GPU may write, and the decoder works as with
 /// `RAV1G_PARSER_OPTION_GPU_CDEF_LISTS`, set or not. Part of `RAV1G_PARSER_OPTIONS_DEFAULT`.
 pub const RAV1G_PARSER_OPTION_GPU_GRID: u32 = 2048;
-/// Build the inter, warp and reconstruction prediction lists on the GPU. The parser keeps the
-/// intra wavefront and its lists. Off by default.
-pub const RAV1G_PARSER_OPTION_GPU_PRED_LISTS: u32 = 4096;
 /// The most frames a decoder parses at the same time (`Rav1gSettings::frames_in_parse`).
 pub const RAV1G_FRAMES_IN_PARSE_MAX: u32 = 4;
 /// The `Rav1gSettings::parser_options` of `rav1g_settings_default`: `RAV1G_PARSER_OPTION_NO_LF_MASKS`,
@@ -113,22 +101,6 @@ pub const RAV1G_INTER_FAST_SINGLE_ORIGINAL: u32 = 2;
 pub const RAV1G_INTER_FAST_COMPOUND_ORIGINAL: u32 = 4;
 /// The lists of the fast inter path with the size-list shaders on all of them.
 pub const RAV1G_INTER_FAST_LISTS_ONLY: u32 = 7;
-
-/// `rav1g_set_clears`, the default: the wavefront of intra prediction is kept in a few KB at the edges of
-/// the tiles, and its grid in the pipeline slot (3.5 MB of a 4K frame) is not cleared at all. A grid
-/// that still needs a clear for every frame (the mode info grid with `RAV1G_PARSER_OPTION_CLEAR_GRID`) is cleared by
-/// the completion thread.
-pub const RAV1G_CLEARS_NOT_NEEDED: u32 = 0;
-/// `rav1g_set_clears`: the wavefront in its grid; the command list of a frame ends with the clear of the
-/// slot's grids, so no thread of the CPU clears them. Only in a decoder created while this mode was set;
-/// in any other decoder it is `RAV1G_CLEARS_COMPLETION_THREAD`.
-pub const RAV1G_CLEARS_GPU: u32 = 1;
-/// `rav1g_set_clears`: the wavefront in its grid; the completion thread clears the grids after the fence
-/// of the frame that used the slot (the default up to package 0.2.144).
-pub const RAV1G_CLEARS_COMPLETION_THREAD: u32 = 2;
-/// `rav1g_set_clears`: the wavefront in its grid; the decode thread clears the grids when it takes the
-/// slot for a frame.
-pub const RAV1G_CLEARS_DECODE_THREAD: u32 = 3;
 
 /// `rav1g_set_poison_buffers`: the mode info pool.
 pub const RAV1G_POISON_MODE_INFO: u32 = 1;
@@ -234,34 +206,20 @@ const _: () = {
     assert!(RAV1G_PARSER_OPTION_NO_LF_MASKS == crate::ParserOptions::NO_LF_MASKS);
     assert!(RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD == crate::ParserOptions::TILE_KEEPS_THREAD);
     assert!(RAV1G_PARSER_OPTION_TIME_CALLS == crate::ParserOptions::TIME_CALLS);
-    assert!(RAV1G_PARSER_OPTION_CLEAR_GRID == crate::ParserOptions::CLEAR_GRID);
-    assert!(RAV1G_PARSER_OPTION_CLEAR_GRID == crate::sys::AV1_PARSER_OPTION_CLEAR_GRID);
     assert!(RAV1G_PARSER_OPTION_TEST_PANIC == crate::ParserOptions::TEST_PANIC);
     assert!(RAV1G_PARSER_OPTION_TEST_PANIC == crate::sys::AV1_PARSER_OPTION_TEST_PANIC);
     assert!(RAV1G_PARSER_OPTION_TEST_POOL_WAIT == crate::ParserOptions::TEST_POOL_WAIT);
     assert!(RAV1G_PARSER_OPTION_TEST_POOL_WAIT == crate::sys::AV1_PARSER_OPTION_TEST_POOL_WAIT);
     assert!(RAV1G_PARSER_OPTION_GPU_CDEF_LISTS == crate::ParserOptions::GPU_CDEF_LISTS);
     assert!(RAV1G_PARSER_OPTION_GPU_CDEF_LISTS == crate::sys::AV1_PARSER_OPTION_GPU_CDEF_LISTS);
-    assert!(RAV1G_PARSER_OPTION_GPU_GRID_CHECK == crate::ParserOptions::GPU_GRID_CHECK);
-    assert!(RAV1G_PARSER_OPTION_GPU_GRID_CHECK == crate::sys::AV1_PARSER_OPTION_GPU_GRID_CHECK);
     assert!(RAV1G_PARSER_OPTION_GPU_GRID == crate::ParserOptions::GPU_GRID);
     assert!(RAV1G_PARSER_OPTION_GPU_GRID == crate::sys::AV1_PARSER_OPTION_GPU_GRID);
-    assert!(RAV1G_PARSER_OPTION_GPU_PRED_LISTS == crate::ParserOptions::GPU_PRED_LISTS);
-    assert!(RAV1G_PARSER_OPTION_GPU_PRED_LISTS == crate::sys::AV1_PARSER_OPTION_GPU_PRED_LISTS);
     assert!(RAV1G_FRAMES_IN_PARSE_MAX == crate::sys::AV1_FRAMES_IN_PARSE_MAX);
     assert!(RAV1G_PARSER_OPTIONS_DEFAULT == crate::ParserOptions::DEFAULT);
     assert!(RAV1G_INTER_FAST_ON == switches::INTER_FAST_ON);
     assert!(RAV1G_INTER_FAST_SINGLE_ORIGINAL == switches::INTER_FAST_SINGLE_ORIGINAL);
     assert!(RAV1G_INTER_FAST_COMPOUND_ORIGINAL == switches::INTER_FAST_COMPOUND_ORIGINAL);
     assert!(RAV1G_INTER_FAST_LISTS_ONLY == switches::INTER_FAST_LISTS_ONLY);
-    assert!(RAV1G_CLEARS_NOT_NEEDED == switches::Clears::NotNeeded as u32);
-    assert!(RAV1G_CLEARS_NOT_NEEDED == crate::sys::AV1_CLEARS_NOT_NEEDED as u32);
-    assert!(RAV1G_CLEARS_GPU == switches::Clears::Gpu as u32);
-    assert!(RAV1G_CLEARS_GPU == crate::sys::AV1_CLEARS_GPU as u32);
-    assert!(RAV1G_CLEARS_COMPLETION_THREAD == switches::Clears::CompletionThread as u32);
-    assert!(RAV1G_CLEARS_COMPLETION_THREAD == crate::sys::AV1_CLEARS_COMPLETION_THREAD as u32);
-    assert!(RAV1G_CLEARS_DECODE_THREAD == switches::Clears::DecodeThread as u32);
-    assert!(RAV1G_CLEARS_DECODE_THREAD == crate::sys::AV1_CLEARS_DECODE_THREAD as u32);
     assert!(RAV1G_POISON_MODE_INFO == switches::Poison::ModeInfo as u32);
     assert!(RAV1G_POISON_BUFFERS == switches::Poison::Buffers as u32);
     assert!(RAV1G_MEMORY_GUARD_MARGIN == 48 << 20);
@@ -1564,51 +1522,11 @@ pub extern "C" fn rav1g_set_intra_v2(enable: bool) {
     switches::set_intra_v2(enable);
 }
 
-/// The optimized intra main shaders (true, default) or the legacy kernels (false).
-#[unsafe(no_mangle)]
-pub extern "C" fn rav1g_set_intra_opt(enable: bool) {
-    switches::set_intra_opt(enable);
-}
-
-/// What a frame does about the two grids of its pipeline slot that used to be cleared for every frame
-/// (`RAV1G_CLEARS_*`; a value that is none of them is the default, `RAV1G_CLEARS_NOT_NEEDED`): whether
-/// the wavefront grid of intra prediction has to be cleared at all, and who clears what has to be. The
-/// output is the same in every mode. Like the other switches it is set while no frame is in flight;
-/// `RAV1G_CLEARS_GPU` has to be set before the decoder is created.
-#[unsafe(no_mangle)]
-pub extern "C" fn rav1g_set_clears(mode: u32) {
-    switches::set_clears(match mode {
-        RAV1G_CLEARS_GPU => switches::Clears::Gpu,
-        RAV1G_CLEARS_COMPLETION_THREAD => switches::Clears::CompletionThread,
-        RAV1G_CLEARS_DECODE_THREAD => switches::Clears::DecodeThread,
-        _ => switches::Clears::NotNeeded,
-    });
-}
-
-/// The older form of `rav1g_set_clears`: `true` is `RAV1G_CLEARS_NOT_NEEDED`, the default; `false` is
-/// `RAV1G_CLEARS_DECODE_THREAD`.
-#[unsafe(no_mangle)]
-pub extern "C" fn rav1g_set_async_clear(enable: bool) {
-    switches::set_async_clear(enable);
-}
-
 /// The fast inter path: 0, or `RAV1G_INTER_FAST_ON` with the `RAV1G_INTER_FAST_*` bits; only in a decoder
 /// created with `Rav1gSettings::inter_fast`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rav1g_set_inter_fast(mode: u32) {
     switches::set_inter_fast(mode);
-}
-
-/// Experiment: how the horizontal loop filter is dispatched, 0 (one dispatch per plane), 1 or 2.
-#[unsafe(no_mangle)]
-pub extern "C" fn rav1g_set_lf_h_split(mode: u32) {
-    switches::set_lf_h_split(mode);
-}
-
-/// Experiment: the 8-bit above edge filter bound of the intra shader.
-#[unsafe(no_mangle)]
-pub extern "C" fn rav1g_set_intra_edge_fix(enable: bool) {
-    switches::set_intra_edge_fix(enable);
 }
 
 /// Experiment (a library whose `rav1g_shader_variant` is "shader-pick"): which bytecode the pipeline

@@ -190,12 +190,9 @@ pub struct av1_tile_data {
     pub blocks_offset: c_int,
     pub idct_blocks_ptr: c_int,
     pub idct_blocks_sizes: [c_int; 21],
-    pub pred_block_bound: c_int,
-    pub pred_warp_bound: c_int,
     pub intra_iter_max: c_int,
     pub intra_iter_max_uv: c_int,
     pub have_inter: c_int,
-    pub gpu_pred_lists: c_int,
     pub gen_indexes: *mut c_uint,
     pub gen_index_ptr: c_int,
     pub gen_index_base: c_int,
@@ -210,7 +207,6 @@ pub struct av1_tile_data {
     pub gen_iter_clear_size: c_int,
     pub gen_block_map_offset: c_int,
     pub gen_block_warp_offset: c_int,
-    pub have_recon: c_int,
     pub gen_block_map_fast: *mut c_int,
     pub gen_block_fast_offset: c_int,
     pub mi_offset: c_int,
@@ -228,7 +224,7 @@ pub struct av1_tile_data {
     pub perf_steps: *mut c_void,
 }
 const _: () = {
-    assert!(size_of::<av1_tile_data>() == 296);
+    assert!(size_of::<av1_tile_data>() == 288);
     assert!(align_of::<av1_tile_data>() == 8);
     assert!(offset_of!(av1_tile_data, idct_blocks_host) == 0);
     assert!(offset_of!(av1_tile_data, dq_buffer_base) == 8);
@@ -240,38 +236,34 @@ const _: () = {
     assert!(offset_of!(av1_tile_data, blocks_offset) == 36);
     assert!(offset_of!(av1_tile_data, idct_blocks_ptr) == 40);
     assert!(offset_of!(av1_tile_data, idct_blocks_sizes) == 44);
-    assert!(offset_of!(av1_tile_data, pred_block_bound) == 128);
-    assert!(offset_of!(av1_tile_data, pred_warp_bound) == 132);
-    assert!(offset_of!(av1_tile_data, intra_iter_max) == 136);
-    assert!(offset_of!(av1_tile_data, intra_iter_max_uv) == 140);
-    assert!(offset_of!(av1_tile_data, have_inter) == 144);
-    assert!(offset_of!(av1_tile_data, gpu_pred_lists) == 148);
-    assert!(offset_of!(av1_tile_data, gen_indexes) == 152);
-    assert!(offset_of!(av1_tile_data, gen_index_ptr) == 160);
-    assert!(offset_of!(av1_tile_data, gen_index_base) == 164);
-    assert!(offset_of!(av1_tile_data, gen_block_map) == 168);
-    assert!(offset_of!(av1_tile_data, gen_block_map_wrp) == 176);
-    assert!(offset_of!(av1_tile_data, gen_intra_iter_y) == 184);
-    assert!(offset_of!(av1_tile_data, gen_pred_map_max) == 188);
-    assert!(offset_of!(av1_tile_data, gen_intra_iter_uv) == 192);
-    assert!(offset_of!(av1_tile_data, gen_intra_max_iter) == 196);
-    assert!(offset_of!(av1_tile_data, gen_intra_iter_set) == 200);
-    assert!(offset_of!(av1_tile_data, gen_iter_clear_offset) == 204);
-    assert!(offset_of!(av1_tile_data, gen_iter_clear_size) == 208);
-    assert!(offset_of!(av1_tile_data, gen_block_map_offset) == 212);
-    assert!(offset_of!(av1_tile_data, gen_block_warp_offset) == 216);
-    assert!(offset_of!(av1_tile_data, have_recon) == 220);
-    assert!(offset_of!(av1_tile_data, gen_block_map_fast) == 224);
-    assert!(offset_of!(av1_tile_data, gen_block_fast_offset) == 232);
-    assert!(offset_of!(av1_tile_data, mi_offset) == 236);
-    assert!(offset_of!(av1_tile_data, mi_count) == 240);
-    assert!(offset_of!(av1_tile_data, mi_col_start) == 244);
-    assert!(offset_of!(av1_tile_data, mi_row_start) == 248);
-    assert!(offset_of!(av1_tile_data, perf_inter) == 256);
-    assert!(offset_of!(av1_tile_data, wave_edges) == 264);
-    assert!(offset_of!(av1_tile_data, frame_data) == 272);
-    assert!(offset_of!(av1_tile_data, intra_single_edge) == 280);
-    assert!(offset_of!(av1_tile_data, perf_steps) == 288);
+    assert!(offset_of!(av1_tile_data, intra_iter_max) == 128);
+    assert!(offset_of!(av1_tile_data, intra_iter_max_uv) == 132);
+    assert!(offset_of!(av1_tile_data, have_inter) == 136);
+    assert!(offset_of!(av1_tile_data, gen_indexes) == 144);
+    assert!(offset_of!(av1_tile_data, gen_index_ptr) == 152);
+    assert!(offset_of!(av1_tile_data, gen_index_base) == 156);
+    assert!(offset_of!(av1_tile_data, gen_block_map) == 160);
+    assert!(offset_of!(av1_tile_data, gen_block_map_wrp) == 168);
+    assert!(offset_of!(av1_tile_data, gen_intra_iter_y) == 176);
+    assert!(offset_of!(av1_tile_data, gen_pred_map_max) == 180);
+    assert!(offset_of!(av1_tile_data, gen_intra_iter_uv) == 184);
+    assert!(offset_of!(av1_tile_data, gen_intra_max_iter) == 188);
+    assert!(offset_of!(av1_tile_data, gen_intra_iter_set) == 192);
+    assert!(offset_of!(av1_tile_data, gen_iter_clear_offset) == 196);
+    assert!(offset_of!(av1_tile_data, gen_iter_clear_size) == 200);
+    assert!(offset_of!(av1_tile_data, gen_block_map_offset) == 204);
+    assert!(offset_of!(av1_tile_data, gen_block_warp_offset) == 208);
+    assert!(offset_of!(av1_tile_data, gen_block_map_fast) == 216);
+    assert!(offset_of!(av1_tile_data, gen_block_fast_offset) == 224);
+    assert!(offset_of!(av1_tile_data, mi_offset) == 228);
+    assert!(offset_of!(av1_tile_data, mi_count) == 232);
+    assert!(offset_of!(av1_tile_data, mi_col_start) == 236);
+    assert!(offset_of!(av1_tile_data, mi_row_start) == 240);
+    assert!(offset_of!(av1_tile_data, perf_inter) == 248);
+    assert!(offset_of!(av1_tile_data, wave_edges) == 256);
+    assert!(offset_of!(av1_tile_data, frame_data) == 264);
+    assert!(offset_of!(av1_tile_data, intra_single_edge) == 272);
+    assert!(offset_of!(av1_tile_data, perf_steps) == 280);
 };
 impl Default for av1_tile_data {
     fn default() -> Self {

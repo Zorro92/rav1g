@@ -45,18 +45,16 @@ pub(crate) use compute::{
     set_shader_pick, shader_pick_lines,
 };
 pub(crate) use film_grain::av1_set_skip_film_grain;
-pub(crate) use frame::{av1_set_clears, av1_set_intra_v2, av1_shader_variant};
-pub(crate) use loopfilter::av1_set_lf_h_split;
+pub(crate) use frame::{av1_set_intra_v2, av1_shader_variant};
 pub(crate) use memory::{av1_log_video_memory_now, av1_set_poison_buffers};
 pub(crate) use perf::{av1_set_inter_fast, av1_set_perf_callback, av1_set_perf_detail};
-pub(crate) use prediction::{av1_set_intra_edge_fix, av1_set_intra_filter_legacy, av1_set_intra_opt};
+pub(crate) use prediction::av1_set_intra_filter_legacy;
 pub(crate) use stage_dump::av1_set_stage_dump;
 pub(crate) use step_time::av1_set_intra_step_timing;
 mod film_grain;
 mod frame;
-mod gpu_pred_lists;
+mod gpu_grid;
 mod grain_template;
-mod grid_check;
 mod intra_v2;
 mod libaom;
 pub(crate) mod log;

@@ -32,23 +32,20 @@ import sys
 
 # The tasks, as lines of the player's task file: a small 8-bit vector, 10-bit with four threads and three
 # frame slots, a stream whose frames change their size (Matroska, the reduced back buffer, -r), spatial
-# layers with the timing run, and the HDR10 stream. The first and the last keep the wavefront of intra
-# prediction at the edges of the tiles and clear nothing (the default); the three between them keep it in
-# the grid of the slot, cleared by the GPU, by the completion thread and by the decode thread. The player
-# creates a decoder of its own for the task with -gpuclear, and another for the task behind it. The last
-# task has two frames in parse (-parseframes 2: the frames are parsed side by side and submitted in decode
+# layers with the timing run, and the HDR10 stream. All keep the wavefront of intra prediction at the edges
+# of the tiles and clear nothing (the only way since the switches of the clears, -gpuclear, -cpuclear and
+# -syncclear, are retired). The last task has two frames in parse (-parseframes 2: the frames are parsed side by side and submitted in decode
 # order by a thread of the decoder; the player gives the decoder its images on that thread).
 TASKS = [
     '-i /aom/av1-1-b8-01-size-66x66.ivf -md5_frame_check -nopresent -frate -1',
-    '-i /aom/av1-1-b10-00-quantizer-00.ivf -md5_frame_check -nopresent -frate -1 -t 4 -slots 3 -gpuclear',
-    '-i /aom/av1-1-b8-03-sizeup.mkv -md5_frame_check -nopresent -frate -1 -t 4 -r -lowmem -cpuclear',
-    '-i /aom/av1-1-b8-22-svc-L2T1.ivf -md5_frame_check -nopresent -frate -1 -gputime -syncclear',
+    '-i /aom/av1-1-b10-00-quantizer-00.ivf -md5_frame_check -nopresent -frate -1 -t 4 -slots 3',
+    '-i /aom/av1-1-b8-03-sizeup.mkv -md5_frame_check -nopresent -frate -1 -t 4 -r -lowmem',
+    '-i /aom/av1-1-b8-22-svc-L2T1.ivf -md5_frame_check -nopresent -frate -1 -gputime',
     '-i /svt/syn-hdr10-10b-1080p.ivf -md5_frame_check -nopresent -frate -1',
     '-i /svt/syn-tiles-10b-1080p.ivf -md5_frame_check -nopresent -frate -1 -t 4 -parseframes 2',
 ]
 # What the player says about the clears of each task, in the order of the tasks.
-CLEARS = ['Clears: none needed', 'Clears: GPU,', 'Clears: completion thread;', 'Clears: decode thread;',
-          'Clears: none needed', 'Clears: none needed']
+CLEARS = ['Clears: none needed'] * 6
 # What the player says about the frames in parse of each task.
 FRAMES = ['Frames in parse: 1 on 1 parser', 'Frames in parse: 1 on 4 parser', 'Frames in parse: 1 on 4 parser',
           'Frames in parse: 1 on 1 parser', 'Frames in parse: 1 on 1 parser', 'Frames in parse: 2 on 4 parser']
@@ -152,17 +149,15 @@ def main():
         switches = 'nolfmask tilethread gpucdef'
         if '-parseopt nolfmask,tilethread,gpucdef' not in args.player_args:
             switches += ' gpugrid'
-        if '-parseopt gpublists' in args.player_args:
-            switches += ' gpublists'
     if 'Parser switches (-parseopt): ' + switches not in text:
         problems.append('the log does not say that the switches of the parser are: ' + switches)
-    # Who clears the grids of a slot, task by task; the task with -gpuclear clears with its command lists
-    # (the timing run of the task with -syncclear has no such stage).
+    # What the player says about the clears of a slot, task by task, and no clears by the GPU in the
+    # timing run.
     clears = [line[line.index('Clears: '):] for line in text.split('\n') if 'Clears: ' in line]
     if len(clears) != len(CLEARS) or not all(line.startswith(start) for line, start in zip(clears, CLEARS)):
         problems.append('the Clears lines of the player are not those of the tasks: %s' % ' | '.join(clears))
     if re.search(r'GPUTIME gpu slot_clear +[1-9]', text):
-        problems.append('the task with -syncclear has the clears of the GPU in its timing run')
+        problems.append('the timing run has clears of the GPU')
     # The frames in parse of each task: one, and two for the task that asks for them.
     frames = [line[line.index('Frames in parse: '):] for line in text.split('\n') if 'Frames in parse: ' in line]
     expected = FRAMES

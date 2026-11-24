@@ -500,17 +500,8 @@ int AV1Decoder::DecodeOne() {
                        created_parser_options_ != params_.parser_options_ ||
                        created_lowmem_ != params_.lowmem_parts_ || created_packed_10x3_ != params_.hdr10x3_ ||
                        created_semi_planar_ != (params_.semi_planar_ | (params_.interop_ ? 16 : 0)) ||
-                       created_noguard_ != params_.noguard_ || created_headroom_ != params_.headroom_mib_ ||
-                       created_gpuclear_ != (params_.clears_ == PLAYER_CLEARS_GPU));
+                       created_noguard_ != params_.noguard_ || created_headroom_ != params_.headroom_mib_);
   if (initialized_ && (need_reinit_ || other_decoder)) DestroyDecoder();
-  // -gpuclear, -cpuclear, -syncclear: set here, where no frame is in flight (the task before has drained)
-  // and before the decoder of this task is created: a decoder whose grids the GPU clears is created with
-  // grids the GPU may write, so a task with -gpuclear does not take over the decoder of a task without.
-  static_assert(PLAYER_CLEARS_NOT_NEEDED == RAV1G_CLEARS_NOT_NEEDED && PLAYER_CLEARS_GPU == RAV1G_CLEARS_GPU &&
-                    PLAYER_CLEARS_COMPLETION_THREAD == RAV1G_CLEARS_COMPLETION_THREAD &&
-                    PLAYER_CLEARS_DECODE_THREAD == RAV1G_CLEARS_DECODE_THREAD,
-                "the clears of the player out of step with rav1g.h");
-  rav1g_set_clears((uint32_t)params_.clears_);
   // Creates the decoder for dec_width x dec_height, dec_bitdepth and the stream info in si. |new_sequence|:
   // the decoder replaces the one of this task in the middle of the stream (a new sequence that did not fit
   // it, in the decode loop below); the output queue and the output pool of the task stay, with the frames
@@ -575,10 +566,8 @@ int AV1Decoder::DecodeOne() {
       static_assert(PLAYER_PARSEOPT_NO_LF_MASKS == RAV1G_PARSER_OPTION_NO_LF_MASKS &&
                         PLAYER_PARSEOPT_TILE_KEEPS_THREAD == RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD &&
                         PLAYER_PARSEOPT_TIME_CALLS == RAV1G_PARSER_OPTION_TIME_CALLS &&
-                        PLAYER_PARSEOPT_CLEAR_GRID == RAV1G_PARSER_OPTION_CLEAR_GRID &&
                         PLAYER_PARSEOPT_GPU_CDEF_LISTS == RAV1G_PARSER_OPTION_GPU_CDEF_LISTS &&
                         PLAYER_PARSEOPT_GPU_GRID == RAV1G_PARSER_OPTION_GPU_GRID &&
-                        PLAYER_PARSEOPT_GPU_PRED_LISTS == RAV1G_PARSER_OPTION_GPU_PRED_LISTS &&
                         PLAYER_PARSEOPT_DEFAULT == RAV1G_PARSER_OPTIONS_DEFAULT,
                     "the bits of -parseopt out of step with rav1g.h");
       cfg.parser_options = params_.parser_options_;
@@ -700,7 +689,6 @@ int AV1Decoder::DecodeOne() {
       created_semi_planar_ = params_.semi_planar_ | (params_.interop_ ? 16 : 0);
       created_noguard_ = params_.noguard_;
       created_headroom_ = params_.headroom_mib_;
-      created_gpuclear_ = params_.clears_ == PLAYER_CLEARS_GPU;
     } catch (int error) {
       XB_LOGE << "Unable to create decoder. Error " << error;
       return -1;
@@ -810,18 +798,14 @@ int AV1Decoder::DecodeOne() {
           << (params_.parser_options_ & PLAYER_PARSEOPT_NO_LF_MASKS ? "nolfmask " : "")
           << (params_.parser_options_ & PLAYER_PARSEOPT_TILE_KEEPS_THREAD ? "tilethread " : "")
           << (params_.parser_options_ & PLAYER_PARSEOPT_TIME_CALLS ? "time " : "")
-          << (params_.parser_options_ & PLAYER_PARSEOPT_CLEAR_GRID ? "cleargrid " : "")
           << (params_.parser_options_ & PLAYER_PARSEOPT_GPU_CDEF_LISTS ? "gpucdef " : "")
-          << (params_.parser_options_ & PLAYER_PARSEOPT_GPU_GRID ? "gpugrid " : "")
-          << (params_.parser_options_ & PLAYER_PARSEOPT_GPU_PRED_LISTS ? "gpublists " : "");
+          << (params_.parser_options_ & PLAYER_PARSEOPT_GPU_GRID ? "gpugrid " : "");
   if (params_.parser_options_ & (PLAYER_PARSEOPT_GPU_CDEF_LISTS | PLAYER_PARSEOPT_GPU_GRID)) {
     XB_LOGI << "CDEF lists shader: cdef_lists_v2 (default)";
   }
-  rav1g_set_intra_opt(!params_.intraod_);
   XB_LOGI << "Intra main shader: "
-          << (params_.intraod_ ? "intra_main_legacy (-intraod)"
-                               : params_.intrasingleedgelegacy_ ? "prefetching (-intrasingleedgelegacy)"
-                                                          : "prefetching with single-edge dependencies");
+          << (params_.intrasingleedgelegacy_ ? "prefetching (-intrasingleedgelegacy)"
+                                             : "prefetching with single-edge dependencies");
   av1_set_intra_filter_legacy(params_.intrafilterlegacy_);
   av1_set_intra_single_edge_legacy(params_.intrasingleedgelegacy_);
   XB_LOGI << "8-bit filter intra shader: "
@@ -853,26 +837,10 @@ int AV1Decoder::DecodeOne() {
                   : created_lowmem_ ? " (1 shared back buffer, 2 mode info pool at half, 4 smaller coefficient pool, "
                                       "32 frame buffer bound at the recording)"
                                     : " (none, -lowmemparts 0)");
-  // -gpuclear, -cpuclear, -syncclear: the switch was set before the decoder was created (above).
-  XB_LOGI << "Clears: "
-          << (params_.clears_ == PLAYER_CLEARS_GPU
-                  ? "GPU, at the end of the frame's command list; intra wavefront in the slot's grid (-gpuclear)"
-                  : params_.clears_ == PLAYER_CLEARS_COMPLETION_THREAD
-                        ? "completion thread; intra wavefront in the slot's grid (-cpuclear)"
-                        : params_.clears_ == PLAYER_CLEARS_DECODE_THREAD
-                              ? "decode thread; intra wavefront in the slot's grid (-syncclear)"
-                              : "none needed (default: intra wavefront at the edges of the tiles; -gpuclear, "
-                                "-cpuclear and -syncclear keep it in the slot's grid and clear that)");
+  XB_LOGI << "Clears: none needed (intra wavefront at the edges of the tiles)";
 
   // The experiments: set like the switches above. The shader build is fixed when the package is built.
-  rav1g_set_lf_h_split(params_.lfhsplit_);
-  rav1g_set_intra_edge_fix(params_.intraedgefix_ != 0);
-  XB_LOGI << "Experiments: shaders " << (rav1g_shader_variant()[0] ? rav1g_shader_variant() : "normal build")
-          << "; horizontal loop filter "
-          << (params_.lfhsplit_ == 1 ? "even rows of blocks, then odd (-lfhsplit 1)"
-                                     : params_.lfhsplit_ == 2 ? "row of blocks by row (-lfhsplit 2)"
-                                                              : "one dispatch per plane (default)")
-          << "; 8-bit above edge filter bound " << (params_.intraedgefix_ ? "filter_count (-intraedgefix)" : "above_count (default)");
+  XB_LOGI << "Experiments: shaders " << (rav1g_shader_variant()[0] ? rav1g_shader_variant() : "normal build");
   // -intrasteptime, -intrastepmin: like the switches above, set while no frame is in flight.
   {
     std::lock_guard<std::mutex> lock(steps_cs_);

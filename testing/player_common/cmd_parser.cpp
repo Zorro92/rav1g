@@ -92,8 +92,8 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        &params_.displaydither_},
       {"intrav2", atSingle, anOptional, "intra prediction through intra_v2.hlsl (same output)", "",
        &params_.intrav2_},
-      {"intraopt", atSingle, anOptional, "optimized intra_main shaders (default)", "intra-main", &params_.intraopt_},
-      {"intraod", atSingle, anOptional, "baseline DXC -Od intra_main shaders", "intra-main", &params_.intraod_},
+      {"intraopt", atSingle, anOptional, "optimized intra_main shaders, the only ones (accepted, changes nothing)", "",
+       &params_.intraopt_},
       {"intrafilterlegacy", atSingle, anOptional, "previous 8-bit filter intra shader", "", &params_.intrafilterlegacy_},
       {"intrasingleedgelegacy", atSingle, anOptional, "use the previous directional wavefront with prefetching", "", &params_.intrasingleedgelegacy_},
       {"slots", atInt, anOptional,
@@ -104,16 +104,6 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        "frames whose parse may run at the same time, 1..4 and at most the threads (-t); 0 or no flag: the library's "
        "default for the frame size, 1 up to 2560x1440 and 2 above (same output)",
        "", &params_.parse_frames_},
-      {"gpuclear", atSingle, anOptional,
-       "intra wavefront in the slot's grid, cleared by the GPU at the end of the frame's command list (same output)",
-       "", &params_.gpuclear_},
-      {"cpuclear", atSingle, anOptional,
-       "intra wavefront in the slot's grid, cleared by the GPU completion thread (the default up to 0.2.144)", "",
-       &params_.cpuclear_},
-      {"asyncclear", atSingle, anOptional, "the older name of -cpuclear", "", &params_.asyncclear_flag_},
-      {"syncclear", atSingle, anOptional,
-       "intra wavefront in the slot's grid, cleared by the decode thread (the default up to 0.2.139)", "",
-       &params_.syncclear_},
       {"fitsize", atSingle, anOptional,
        "create the decoder for the stream's size and bit depth (the default)", "fitsize", &params_.fitsize_},
       {"nofitsize", atSingle, anOptional, "create the decoder for 4096x2176 10-bit whatever the stream's size is",
@@ -126,13 +116,6 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        "+ 32 frame buffer bound at the recording (with 1: one frame buffer less with three slots; not in -lowmem). "
        "Default: 1, and 3 for a decoder above 1920x1088; 1 for the mode info pool of the worst case, 0 for none",
        "", &params_.lowmem_parts_},
-      {"lfhsplit", atInt, anOptional,
-       "horizontal loop filter: 1 even rows of blocks, UAV barrier, odd rows; 2 every row of blocks on its "
-       "own. Default 0, one dispatch per plane (same output)",
-       "", &params_.lfhsplit_},
-      {"intraedgefix", atSingle, anOptional,
-       "8-bit intra: the above edge filter stops where the 10-bit one does (same output)", "",
-       &params_.intraedgefix_},
       {"interfast", atSingle, anOptional,
        "inter prediction by the fraction of the motion vector: a copy, one filter pass, or both (same output)", "",
        &params_.interfast_},
@@ -167,8 +150,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        "the GPU writes the CDEF lists; gpugrid, the GPU builds the mode info grid and also writes the CDEF lists. "
        "These four are on by default. Naming any of them, none or default selects them explicitly. "
        "Use nolfmask,tilethread,gpucdef for the sink-written grid. time, with -gputime the calls of the sink are "
-       "timed, and cleargrid, the mode info grid is cleared for every frame, add to the selection. "
-       "gpublists builds the inter, warp and reconstruction lists on the GPU (off by default).",
+       "timed, adds to the selection.",
        "", &params_.parseopt_},
       {"continue_on_error", atSingle, anOptional,
        "after a decode call that fails, go on with the next temporal unit in the same decoder instead of "
@@ -251,22 +233,9 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     return -1;
   }
 
-  // -gpuclear, -cpuclear (-asyncclear), -syncclear: who clears the grids of a slot, with the wavefront in
-  // its grid. Without one of them nothing has to be cleared. Two of them on one line is an error of the
-  // task.
-  const bool cpuclear = params_.cpuclear_ || params_.asyncclear_flag_;
-  if ((params_.gpuclear_ ? 1 : 0) + (cpuclear ? 1 : 0) + (params_.syncclear_ ? 1 : 0) > 1) {
-    Err += "-gpuclear, -cpuclear (-asyncclear) and -syncclear are the choices of one switch";
-    return -1;
-  }
-  params_.clears_ = params_.gpuclear_ ? PLAYER_CLEARS_GPU
-                                      : cpuclear ? PLAYER_CLEARS_COMPLETION_THREAD
-                                                 : params_.syncclear_ ? PLAYER_CLEARS_DECODE_THREAD
-                                                                      : PLAYER_CLEARS_NOT_NEEDED;
-
   // -parseopt: words separated by commas; a word that is none of them is an error of the task. A word
   // that names a default switch, none or default selects the default switches explicitly;
-  // time and cleargrid add to the selection
+  // time adds to the selection
   // (rav1g::ParserOptions::from_words reads the list the same way).
   params_.parser_options_ = 0;
   bool ways_named = false;
@@ -276,10 +245,6 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     const std::string word = params_.parseopt_.substr(at, end - at);
     if (word == "time") {
       params_.parser_options_ |= PLAYER_PARSEOPT_TIME_CALLS;
-    } else if (word == "cleargrid") {
-      params_.parser_options_ |= PLAYER_PARSEOPT_CLEAR_GRID;
-    } else if (word == "gpublists") {
-      params_.parser_options_ |= PLAYER_PARSEOPT_GPU_PRED_LISTS;
     } else if (word == "gpugrid") {
       params_.parser_options_ |= PLAYER_PARSEOPT_GPU_GRID;
       ways_named = true;
@@ -298,7 +263,7 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     } else if (word == "none") {
       ways_named = true;
     } else {
-      Err += "-parseopt takes nolfmask, tilethread, gpucdef, time, cleargrid, gpugrid, gpublists, default or none, "
+      Err += "-parseopt takes nolfmask, tilethread, gpucdef, time, gpugrid, default or none, "
              "separated by commas, not \"";
       Err += word;
       Err += "\"";
@@ -362,12 +327,6 @@ int CParameters::Parse(one_task& args, std::string& Err) {
     char ss[112];
     sprintf(ss, "-lowmemparts %d is not allowed: the sum of 1, 2, 4 and 32, at most %d.", params_.lowmem_parts_,
             PLAYER_LOWMEM_PARTS);
-    Err += ss;
-    return -1;
-  }
-  if (params_.lfhsplit_ < 0 || params_.lfhsplit_ > 2) {
-    char ss[96];
-    sprintf(ss, "-lfhsplit %d is not allowed: 0, 1 or 2.", params_.lfhsplit_);
     Err += ss;
     return -1;
   }
@@ -462,18 +421,12 @@ void CParameters::Reset() {
   params_.displaydither_ = 0;
   params_.intrav2_ = false;
   params_.intraopt_ = false;
-  params_.intraod_ = false;
   params_.intrafilterlegacy_ = false;
   params_.intrasingleedgelegacy_ = false;
   // 0: the task has no -slots (Parse() makes the default of it).
   params_.slots_ = 0;
   params_.slots_given_ = false;
   params_.parse_frames_ = PLAYER_PARSE_FRAMES_DEFAULT;
-  params_.clears_ = PLAYER_CLEARS_NOT_NEEDED;
-  params_.gpuclear_ = false;
-  params_.cpuclear_ = false;
-  params_.asyncclear_flag_ = false;
-  params_.syncclear_ = false;
   params_.fitsize_ = true;
   params_.nofitsize_ = false;
   params_.lowmem_ = false;
@@ -485,8 +438,6 @@ void CParameters::Reset() {
   params_.continue_on_error_ = false;
   params_.parseopt_.clear();
   params_.parser_options_ = PLAYER_PARSEOPT_DEFAULT;
-  params_.lfhsplit_ = 0;
-  params_.intraedgefix_ = false;
   params_.interfast_ = false;
   params_.interfastlists_ = false;
   params_.all_layers_ = false;

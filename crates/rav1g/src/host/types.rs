@@ -88,7 +88,6 @@ pub struct bitdepth_dependent_shaders {
     pub inter_obmc_left: ComputeShader,
     pub inter_warp_comp: ComputeShader,
     pub intra_main: ComputeShader,
-    pub intra_main_legacy: ComputeShader,
     pub reconstruct_block: ComputeShader,
     pub inter_ext_borders: ComputeShader,
     pub loopfilter_v: ComputeShader,
@@ -139,15 +138,12 @@ pub struct compute_shader_lib {
     // The lists of CDEF from the mode info (`postfilter.rs`, `Av1Core::gpu_cdef_lists`).
     pub shader_cdef_lists: ComputeShader,
     pub shader_cdef_lists_v2: ComputeShader,
-    // The mode info grid from the records (`grid_check.rs`): the grid of the slot in a decoder whose
-    // parse writes none (`Av1Core::gpu_grid`), or a second grid for the check of the pass.
+    // The mode info grid from the records (`gpu_grid.rs`): the grid of the slot in a decoder whose
+    // parse writes none (`Av1Core::gpu_grid`).
     pub shader_mi_grid_build: ComputeShader,
     pub shader_fill_buffer: ComputeShader,
     pub shader_gen_pred_blocks: ComputeShader,
     pub shader_gen_pred_blocks_fast: ComputeShader,
-    pub shader_gen_pred_blocks_gpu: ComputeShader,
-    pub shader_pred_list_count: ComputeShader,
-    pub shader_pred_list_scan: ComputeShader,
     pub shader_gen_lf_vert: ComputeShader,
     pub shader_gen_lf_hor: ComputeShader,
     pub shader_upscale: ComputeShader,
@@ -178,9 +174,6 @@ pub struct compute_shader_lib {
     pub sig_film_grain_tex: Option<ID3D12RootSignature>,
     pub sig_cdef_lists: Option<ID3D12RootSignature>,
     pub sig_mi_grid_build: Option<ID3D12RootSignature>,
-    pub sig_pred_blocks_gpu: Option<ID3D12RootSignature>,
-    pub sig_pred_list_count: Option<ID3D12RootSignature>,
-    pub sig_pred_list_scan: Option<ID3D12RootSignature>,
     pub compliled_: c_int,
     pub threads: c_int,
     pub create_shader_errors: c_int,
@@ -256,7 +249,6 @@ pub struct av1_stage_dump_entry {
     pub bytes_per_sample: c_int,
     pub bit_depth: c_int,
     pub size: usize,
-    pub gpu_record_size: usize,
     pub planes: [av1_stage_dump_plane; 3],
 }
 
@@ -271,18 +263,11 @@ pub struct av1_frame_thread_data {
     pub cdef_skips: *mut GpuBufferObject,
     /// Packed 32-bit active masks per 64x32 CDEF v3 group (`cdef_lists_v2.hlsl`, `cdef_filter_v3.hlsl`).
     pub cdef_masks: *mut GpuBufferObject,
-    /// With the check of the grid (`Av1Core::gpu_grid_check`): the grid the GPU builds (`grid_check.rs`);
+    /// The runs of the frame's records the pass that builds the grid reads (with `Av1Core::gpu_grid`);
     /// null otherwise.
-    pub mode_info_grid_gpu: *mut GpuBufferObject,
-    /// The runs of the frame's records the pass that builds a grid reads (with the check, or with
-    /// `Av1Core::gpu_grid`); null otherwise.
     pub mi_runs: *mut GpuBufferObject,
-    /// The frame whose grids are held against each other when it is done: 1 when the pass is recorded,
-    /// and the frame's mi_stride, mi_cols and mi_rows.
-    pub grid_check_frame: [c_int; 4],
     pub filmgrain_rand_offset: *mut GpuBufferObject,
     pub gen_mi_block_indexes: *mut GpuBufferObject,
-    pub gpu_pred_templates: *mut GpuBufferObject,
     pub gen_intra_inter_grid: *mut GpuBufferObject,
     pub gen_block_map: *mut GpuBufferObject,
     pub palette_buffer: *mut GpuBufferObject,
@@ -341,25 +326,18 @@ pub struct av1_frame_thread_data {
     /// the palette blocks of its tiles are written by.
     pub layout: HwFrameBuffer,
     pub output_only: c_int,
-    /// What the frame on the slot does about the clears of the slot's grids (`AV1_CLEARS_*` of
-    /// `dx/av1_perf.h`): the switch as the frame's setup found it.
-    pub clears: c_int,
-    /// With `AV1_CLEARS_GPU`: the frame's command list ends with the clears (`clear_mi_bytes`,
-    /// `clear_iter_bytes`).
-    pub gpu_cleared: c_int,
+    /// The completion thread clears the wavefront grid behind the frame on the slot (`clear_iter_bytes`
+    /// of it, from the start), for a frame that kept its wavefront in the grid; `clean_iter_bytes` is
+    /// what such a clear left clean for the next frame of the slot.
     pub clear_pending: c_int,
-    pub clear_mi_bytes: usize,
     pub clear_iter_bytes: usize,
-    pub clean_mi_bytes: usize,
     pub clean_iter_bytes: usize,
     /// The frames whose parse has written the mode info grid of the slot since its last clear: their
     /// width, height and row length in 4x4 units, and the bytes that clear covered. Every unit outside
-    /// such a frame is still null. All 0: not known, the next frame clears the grid. Only kept for a
-    /// decoder that keeps the grid (`Av1Core::keep_mi_grid`).
+    /// such a frame is still null. All 0: not known, the next frame clears the grid.
     pub kept_grid: [c_int; 3],
     pub kept_grid_bytes: usize,
-    /// The frame keeps its intra wavefront in the edges of its tiles and not in the wavefront grid
-    /// (`AV1_CLEARS_NOT_NEEDED`): the edges, for the tile threads, which each write those of their tile
+    /// The frame keeps its intra wavefront in the edges of its tiles and not in the wavefront grid: the edges, for the tile threads, which each write those of their tile
     /// and the columns of their tile in the rows above (`setup_tile`). The memory is `wave`'s.
     pub wave_edges: c_int,
     pub wave_tiles: *mut WaveEdges,
@@ -530,8 +508,6 @@ pub struct Av1Core {
     pub mi_chunks: Vec<std::cell::Cell<*mut crate::sys::MB_MODE_INFO>>,
     pub prediction_blocks: *mut GpuBufferObject,
     pub prediction_blocks_warp: *mut GpuBufferObject,
-    pub gpu_pred_scratch: *mut GpuBufferObject,
-    pub(super) gpu_pred_signatures: Option<super::gpu_pred_lists::Signatures>,
     pub loopfilter_blocks: *mut GpuBufferObject,
     pub pred_map_size: c_int,
     pub inter_fast_tiles: c_int,
@@ -619,28 +595,15 @@ pub struct Av1Core {
     pub device_bytes: usize,
     /// The switches of that parser (`aom_codec_dec_cfg_t::parser_options`).
     pub parser_options: c_int,
-    /// The mode info grid of a slot is not cleared for a frame of the size of the frames before it on
-    /// the slot (`rav1g_setup_frame_begin`): a decoder whose parser is rav1d's, unless its switches say
-    /// otherwise (`AV1_PARSER_OPTION_CLEAR_GRID`).
-    pub keep_mi_grid: c_int,
-    /// The mode info grid and the wavefront grid of every slot are buffers a command list may write:
-    /// the decoder was created while the clears were the GPU's (`AV1_CLEARS_GPU`). Only then does a
-    /// frame end its command list with them.
-    pub gpu_clear_grids: c_int,
     /// The two lists CDEF reads (`cdef_indexes` and `cdef_skips` of every slot) are written by a pass of
     /// the frame's command list (`cdef_lists.hlsl`) and not by the thread that records it
     /// (`AV1_PARSER_OPTION_GPU_CDEF_LISTS`): the two are then buffers a command list may write.
     pub gpu_cdef_lists: c_int,
-    /// The check of the mode info grid (`AV1_PARSER_OPTION_GPU_GRID_CHECK`, `grid_check.rs`): every slot
-    /// has a second grid that a pass of the frame's command list builds from the records, held against
-    /// the grid of the parse when the frame is done.
-    pub gpu_grid_check: c_int,
-    pub grid_check: super::grid_check::GridCheck,
     /// The mode info grid of every slot is built by a pass of the frame's command list from the frame's
-    /// records, in front of the stages (`AV1_PARSER_OPTION_GPU_GRID`, `grid_check::record`), and the
+    /// records, in front of the stages (`AV1_PARSER_OPTION_GPU_GRID`, `gpu_grid::record`), and the
     /// parse writes none: the grid is then a buffer a command list may write. Such a decoder has the
-    /// lists of CDEF by the GPU (`gpu_cdef_lists`) and no check of the grid, whatever its switches say:
-    /// no thread of the CPU reads the grid.
+    /// lists of CDEF by the GPU (`gpu_cdef_lists`), whatever its switches say: no thread of the CPU
+    /// reads the grid.
     pub gpu_grid: c_int,
     /// The statistics of `-memstats` (`mem_stats.rs`).
     pub mem_stats: super::mem_stats::MemStats,

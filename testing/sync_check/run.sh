@@ -42,21 +42,17 @@ while [ $# -gt 0 ]; do
 done
 
 # shader:family. Families (shader_tu.cpp): 1 inverse transforms, 2 lossless transform, 3 inter
-# prediction, 7 film grain, 8 prediction list counts, 9 prediction list scan. The intra, CDEF,
+# prediction, 7 film grain (8 and 9, the lists of the retired -parseopt gpublists, are gone). The intra, CDEF,
 # deblocking, restoration and display pass checks watch their own group memory with real inputs.
 list=""
 for f in "$shaders"/*.hlsl; do
   name=$(basename "$f" .hlsl)
-  # pred_list_count includes the shared prediction generator containing its group memory.
-  [ "$name" = pred_list_count ] || grep -q '^groupshared' "$f" || continue
+  grep -q '^groupshared' "$f" || continue
   case "$name" in
     idct_lossless) family=2 ;;
     idct*) family=1 ;;
     inter_*) family=3 ;;
     film_grain_filter) family=7 ;;
-    pred_list_count) family=8 ;;
-    pred_list_scan) family=9 ;;
-    gen_pred_blocks) continue ;; # group memory only in the pred_list_count build
     intra_* | cdef_* | loopfilter_* | loop_restoration*) continue ;;
     display_pass) continue ;; # watched by its own check, testing/display_pass/run.sh
     *) echo "sync_check: $name.hlsl has group memory and no family here" >&2; exit 1 ;;
@@ -75,11 +71,6 @@ convert() {
   for item in $list; do
     name=${item%:*}
     source="$shaders/$name.hlsl"
-    if [ "$name" = pred_list_count ]; then
-      # Select the count entry point from the shared source, including its group arrays.
-      source="$1/$name.hlsl"
-      g++ -E -P -x c++ "$shaders/$name.hlsl" > "$source"
-    fi
     python3 "$here/to_cpp.py" "$source" "$1/$name.gen.h" "$1/$name.entry.h"
   done
 }

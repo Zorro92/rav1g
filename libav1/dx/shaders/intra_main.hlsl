@@ -278,9 +278,8 @@ uint predict_straight(bool vertical, int corner, int stride, int x, int y, int a
     const int base = loc_base - need_aboveleft;
     // The last entry a tap may reach. The 10-bit shader and the left edge below stop at filter_count, the
     // last entry the filter writes; this one stops at above_count. The entries between the two are loaded
-    // and all hold the last available sample, so the two bounds give the same sums. cb_flags.y (test flag
-    // -intraedgefix) selects filter_count here as well, for a device on which they would not.
-    const int last = cb_flags.y ? filter_count : above_count;
+    // and all hold the last available sample, so the two bounds give the same sums.
+    const int last = above_count;
     //{ 0, 4, 8, 4, 0 }, { 0, 5, 6, 5, 0 }, { 2, 4, 4, 4, 2 }
     sum0 += above[base + max(wi - 1, 0)] * ((0x2000 >> edge_filter) & 15);
     sum0 += above[base + (wi + 0)] * ((0x4540 >> edge_filter) & 15);

@@ -32,9 +32,6 @@ intra_v2	384	64	168	70	16896	0	3	vgprs
 intra_v2_hbd	384	64	168	70	16896	0	3	vgprs
 gen_pred_blocks	64	64	55	96	0	0	9	vgprs
 gen_pred_blocks_fast_packed	64	64	55	96	0	0	9	vgprs
-gen_pred_blocks_gpu	64	64	55	102	0	0	9	vgprs
-pred_list_count	64	64	28	60	29696	0	1	lds
-pred_list_scan	128	64	19	34	6656	0	9	lds
 inter_fast	64	64	70	24	0	0	7	vgprs
 inter_compound_fast	64	64	101	24	0	0	4	vgprs
 inter_fast_hbd	64	64	69	24	0	0	7	vgprs
@@ -58,7 +55,6 @@ inter_warp	64	64	76	28	11264	0	2.5	lds
 inter_scale_warp_compound	64	64	71	44	5120	0	6	lds
 intra_filter_legacy	64	64	27	41	1024	0	16	waves
 intra_main	256	64	58	66	10240	0	8	vgprs
-intra_main_legacy	256	64	55	66	10240	0	8	vgprs
 inter_ext_borders	64	64	10	16	0	0	16	waves
 reconstruct_block	64	64	14	27	0	0	16	waves
 loopfilter_vert	64	64	36	26	1536	0	12	vgprs
@@ -75,7 +71,6 @@ inter_obmc_left_hbd	64	64	140	20	0	0	3	vgprs
 inter_scale_warp_compound_hbd	64	64	71	44	5120	0	6	lds
 inter_warp_hbd	64	64	76	28	11264	0	2.5	lds
 intra_main_hbd	256	64	53	49	10240	0	8	vgprs
-intra_main_hbd_legacy	256	64	51	49	10240	48	8	vgprs
 intra_main_prefetch_hbd	256	64	63	54	10240	0	8	vgprs
 intra_main_prefetch	256	64	63	54	10240	0	8	vgprs
 intra_main_single_edge	256	64	63	54	10240	0	8	vgprs

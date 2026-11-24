@@ -10,7 +10,7 @@
 
 use crate::say;
 use crate::shim;
-use rav1g::switches::{self, Clears, Poison};
+use rav1g::switches::{self, Poison};
 
 // The player's values (testing/player_common/cmd_parser.h, decoder_creator.h).
 pub const SLOTS_MIN: i32 = 2;
@@ -102,15 +102,8 @@ pub struct Task {
     /// library's default.
     pub headroom_mib: i64,
     pub intrav2: bool,
-    pub intraopt: bool,
     pub intrafilterlegacy: bool,
     pub intrasingleedgelegacy: bool,
-    /// What a frame does about the clears of its slot's grids: nothing to clear without a flag;
-    /// -gpuclear, -cpuclear (and -asyncclear, its older name), -syncclear.
-    pub clears: Clears,
-    /// -lfhsplit <0|1|2>
-    pub lfhsplit: i32,
-    pub intraedgefix: bool,
     /// -poisonmi, -poisonbuf: `switches::set_poison_buffers`.
     pub poison: Poison,
     /// -interfast (1), -interfastlists (7), -interfastmode <n>: `switches::set_inter_fast`.
@@ -183,12 +176,8 @@ impl Default for Task {
             budget_mib: -1,
             headroom_mib: 0,
             intrav2: false,
-            intraopt: true,
             intrafilterlegacy: false,
             intrasingleedgelegacy: false,
-            clears: Clears::NotNeeded,
-            lfhsplit: 0,
-            intraedgefix: false,
             poison: Poison::Off,
             interfast: 0,
             continue_on_error: false,
@@ -304,25 +293,15 @@ pub fn usage() {
         "  -displaydither 0-2   the display pass's last quantisation: 0 the ordered dither for NV12 (default), \
          1 rounded, 2 the ordered dither for P010 too"
     );
-    say!("  -intraod             use the baseline DXC -Od intra_main kernels (-intraopt restores the default)");
     say!("  -intrafilterlegacy   use the previous 8-bit filter intra shader");
     say!("  -intrasingleedgelegacy use the previous directional wavefront with prefetching");
-    say!("                        as in the test player (docs/test-player.md); -cdefv2 and -fitsize (the defaults)");
-    say!("                        are accepted");
-    say!("  -gpuclear -cpuclear -syncclear");
-    say!("                        the wavefront of intra prediction in the grid of the slot, which is then cleared");
-    say!("                        for every frame: by the GPU at the end of the frame's command list, by the");
-    say!("                        completion thread (-asyncclear is the same), or by the decode thread. Without");
-    say!("                        one of them the wavefront is kept at the edges of the tiles and nothing is");
-    say!("                        cleared (docs/test-player.md, \"Pipeline slots and clears\")");
+    say!("                        as in the test player (docs/test-player.md); -cdefv2, -intraopt and -fitsize");
+    say!("                        (the defaults) are accepted");
     say!("  -budget <MiB>         the decoder is told the application has this much memory left for it: the budget");
     say!("                        guard of the creation (MEMORY budget and MEMORY REFUSED lines, with -v)");
     say!("  -headroom <MiB>       with -budget: what the guard should leave of it behind the decoder; a decoder");
     say!("                        that would leave less is created with fewer slots and frames in parse (MEMORY");
     say!("                        headroom lines). Default 0: the library's 128; 48 or less is the guard's margin");
-    say!("  -lfhsplit <n>         horizontal loop filter: 1 even rows of blocks, a UAV barrier, odd rows; 2 every");
-    say!("                        row of blocks on its own (default 0: one dispatch per plane; same output)");
-    say!("  -intraedgefix         8-bit intra: the above edge filter stops where the 10-bit one does (same output)");
     say!("  -poisonmi             debugging: the mode info pool starts filled with the byte 0xA5 instead of with what");
     say!("                        the memory held, so a shader that reads bytes the decoder never wrote shows in");
     say!("                        the output of any stream (same output)");
@@ -334,15 +313,8 @@ pub fn usage() {
     say!("                        by a pass of the GPU (cdef_lists) and not by the thread that records the frame.");
     say!("                        gpugrid: the GPU builds the mode info grid and writes the CDEF lists. These four");
     say!("                        are on by default. Naming any of them, none or default selects them explicitly.");
-    say!("                        time: with -gputime, the calls of the sink are timed; cleargrid: the mode info");
-    say!("                        grid of a slot is cleared for every frame. These two change nothing");
-    say!("                        else (time alone: the default, timed). gridcheck: a pass of the GPU builds the mode");
-    say!("                        info grid from the records (mi_grid_build) into a second grid, held against the");
-    say!("                        parse's when each frame is done (a GRIDCHECK line at the release; same output).");
-    say!(
-        "                        Use -parseopt nolfmask,tilethread,gpucdef,gridcheck for the sink-written grid check."
-    );
-    say!("                        gpublists: the GPU builds inter, warp and reconstruction lists (off by default).");
+    say!("                        time: with -gputime, the calls of the sink are timed (time alone: the default,");
+    say!("                        timed). -parseopt nolfmask,tilethread,gpucdef keeps the sink-written grid.");
     say!("  -interfast            inter prediction by the fraction of the motion vector: a copy, one filter pass, or");
     say!("                        both (inter_fast, inter_compound_fast; same output)");
     say!("  -interfastlists       the block lists of -interfast with the size-list shaders on them (same output)");
@@ -500,15 +472,10 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-nofitsize" => task.nofitsize = true,
             "-fitsize" => task.fitsize = true,
             "-intrav2" => task.intrav2 = true,
-            "-intraopt" => task.intraopt = true,
-            "-intraod" => task.intraopt = false,
+            // The default since -intraod is retired; accepted, changes nothing.
+            "-intraopt" => {}
             "-intrafilterlegacy" => task.intrafilterlegacy = true,
             "-intrasingleedgelegacy" => task.intrasingleedgelegacy = true,
-            "-gpuclear" => task.clears = Clears::Gpu,
-            "-cpuclear" | "-asyncclear" => task.clears = Clears::CompletionThread,
-            "-syncclear" => task.clears = Clears::DecodeThread,
-            "-lfhsplit" => task.lfhsplit = number()?,
-            "-intraedgefix" => task.intraedgefix = true,
             "-continue_on_error" => task.continue_on_error = true,
             "-poisonmi" => task.poison = Poison::ModeInfo,
             "-poisonbuf" => task.poison = Poison::Buffers,
@@ -540,7 +507,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
                 let list = value()?;
                 task.parser_options = rav1g::ParserOptions::from_words(&list).ok_or_else(|| {
                     format!(
-                        "-parseopt {list}: nolfmask, tilethread, gpucdef, time, cleargrid, gridcheck, gpugrid, gpublists, \
+                        "-parseopt {list}: nolfmask, tilethread, gpucdef, time, gpugrid, \
                          default or none"
                     )
                 })?;
@@ -606,9 +573,6 @@ pub fn check_task(task: &mut Task) -> Result<(), String> {
     }
     if task.lowmem {
         task.lowmem_parts = LOWMEM_ALL;
-    }
-    if task.lfhsplit < 0 || task.lfhsplit > 2 {
-        return Err(format!("-lfhsplit {} is not allowed: 0, 1 or 2", task.lfhsplit));
     }
     if task.queue_size < 1 || task.queue_size > QUEUE_SIZE_MAX {
         return Err(format!("-queue_size {} is not allowed: 1 to {}", task.queue_size, QUEUE_SIZE_MAX));
@@ -735,16 +699,12 @@ mod tests {
         assert_eq!(task.poison, Poison::ModeInfo);
         parse_args(&strings(&["-poisonbuf"]), &mut task, None).unwrap();
         assert_eq!(task.poison, Poison::Buffers);
-        // The clears of a slot: nothing to clear without a flag.
-        assert_eq!(task.clears, Clears::NotNeeded);
-        for (flag, clears) in [
-            ("-gpuclear", Clears::Gpu),
-            ("-cpuclear", Clears::CompletionThread),
-            ("-syncclear", Clears::DecodeThread),
-            ("-asyncclear", Clears::CompletionThread),
-        ] {
+        // The retired switches are unknown flags now; the flags of a default are accepted.
+        for flag in ["-gpuclear", "-cpuclear", "-syncclear", "-asyncclear", "-intraod", "-intraedgefix", "-cdefv1"] {
+            assert!(parse_args(&strings(&[flag]), &mut task, None).is_err(), "{flag}");
+        }
+        for flag in ["-cdefv2", "-intraopt", "-fitsize"] {
             parse_args(&strings(&[flag]), &mut task, None).unwrap();
-            assert_eq!(task.clears, clears, "{flag}");
         }
         // A program flag is not a task flag of a list line.
         assert!(parse_args(&strings(&["-hw"]), &mut task, None).is_err());

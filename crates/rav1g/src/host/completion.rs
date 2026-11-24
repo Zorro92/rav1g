@@ -29,40 +29,25 @@ use crate::sys;
 use crate::sys::{AV1Decoder, HwOutputImage, aom_image_t, av1_decoded_frame_buffer_t};
 
 /// The frame that used `td` has completed on the GPU, so nothing reads the slot's grids any more, and
-/// the slot is not in the pool, so the decode thread cannot have it. What the frame cleared at its setup
-/// is clean again behind it, so that the next frame of the same size starts on a slot that is: cleared
-/// here, by the completion thread, or already cleared by the frame's own command list (`AV1_CLEARS_GPU`,
-/// `record_slot_clears`); not with the clears on the decode thread (`AV1_CLEARS_DECODE_THREAD`). Without
-/// a switch a frame of a decoder with the parser of phase 2 has cleared nothing, and nothing is cleared
-/// here. Returns the bytes cleared here, and the bytes the command list cleared.
+/// the slot is not in the pool, so the decode thread cannot have it. What the frame cleared of the
+/// wavefront grid at its setup is clean again behind it, so that the next frame of the same size starts
+/// on a slot that is. A frame that keeps its wavefront in the edges of its tiles (all but a few) has
+/// cleared nothing, and nothing is cleared here. Returns the bytes cleared here.
 ///
 /// # Safety
 /// `td` is the slot of a frame that has completed and is not back in its pool.
-unsafe fn clear_slot(td: &mut av1_frame_thread_data) -> (usize, usize) {
-    let bytes = td.clear_mi_bytes + td.clear_iter_bytes;
-    let mut cleared = (0, 0);
-    if td.clear_pending != 0 && td.clears != sys::AV1_CLEARS_DECODE_THREAD as c_int {
-        if td.clears != sys::AV1_CLEARS_GPU as c_int {
-            // SAFETY: the two grids of the slot, of at least the sizes the frame's setup cleared.
-            unsafe {
-                (*td.mode_info_grid).host_ptr.cast::<u8>().write_bytes(0, td.clear_mi_bytes);
-                // The luma grid and the chroma grid behind it, as one range (the two clears of the frame
-                // setup).
-                if td.clear_iter_bytes != 0 {
-                    (*td.gen_intra_inter_grid).host_ptr.cast::<u8>().write_bytes(0xFF, td.clear_iter_bytes);
-                }
-            }
-            cleared.0 = bytes;
-        } else if td.gpu_cleared != 0 {
-            cleared.1 = bytes;
+unsafe fn clear_slot(td: &mut av1_frame_thread_data) -> usize {
+    let mut cleared = 0;
+    if td.clear_pending != 0 {
+        // The luma grid and the chroma grid behind it, as one range (the two clears of the frame setup).
+        if td.clear_iter_bytes != 0 {
+            // SAFETY: the wavefront grid of the slot, of at least the size the frame's setup cleared.
+            unsafe { (*td.gen_intra_inter_grid).host_ptr.cast::<u8>().write_bytes(0xFF, td.clear_iter_bytes) };
         }
-        if td.clears != sys::AV1_CLEARS_GPU as c_int || td.gpu_cleared != 0 {
-            td.clean_mi_bytes = td.clear_mi_bytes;
-            td.clean_iter_bytes = td.clear_iter_bytes;
-        }
+        cleared = td.clear_iter_bytes;
+        td.clean_iter_bytes = td.clear_iter_bytes;
     }
     td.clear_pending = 0;
-    td.gpu_cleared = 0;
     cleared
 }
 
@@ -206,20 +191,14 @@ unsafe fn completion_thread(dec: *mut Av1Core) {
                     super::pool_buffers::release(dec, td, true);
                 }
                 super::mem_stats::frame_released(dec, td);
-                // -parseopt gridcheck: the grid the GPU built against the parse's, before anything
-                // clears the slot's grid.
-                super::grid_check::compare(dec, td);
                 // What the frame cleared of the slot's grids is clean again before the slot goes back
                 // (`clear_slot`).
                 let perf_clear_start = if perf_have_rec { perf_now() } else { 0 };
-                let (cleared, gpu_cleared) = clear_slot(td);
+                let cleared = clear_slot(td);
                 if perf_clear_start != 0 && cleared != 0 {
                     perf_rec.cpu_ms[sys::AV1_PERF_CPU_ASYNC_CLEAR as usize] =
                         (perf_now() - perf_clear_start) as f64 * ticks_to_ms();
                     perf_rec.async_clear_bytes = cleared as i64;
-                }
-                if perf_have_rec {
-                    perf_rec.gpu_clear_bytes = gpu_cleared as i64;
                 }
                 // A pipeline slot, or the output context of a show_existing_frame copy.
                 let pool = if td.output_only != 0 { &(*dec).output_data_pool } else { &(*dec).frame_data_pool };

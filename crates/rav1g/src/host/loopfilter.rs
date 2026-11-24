@@ -11,7 +11,6 @@
 //! `av1_loopfilter_gpu` of `libav1/dx/loopfilters.cpp`.
 
 use std::ffi::c_int;
-use std::sync::atomic::{AtomicI32, Ordering};
 
 use super::core::{
     Constants, alloc_constants, buffer, commands, perf_gpu_mark, pipeline, stage_dump_active, stage_dump_constants,
@@ -51,19 +50,6 @@ struct GenLfData {
     seg_features: [[c_int; 4]; 8],
     seg_data: [[[c_int; 4]; 8]; 8],
     lfi_n_lvl: [[[[[c_int; 4]; 2]; 8]; 8]; 3],
-}
-
-// Test flag -lfhsplit: how the horizontal loop filter is dispatched. loopfilter_hor works on blocks of 4
-// columns by 64 rows; the first edge of a block reads and writes the last rows of the block above it, which
-// another thread group of the same dispatch filters. 0: one dispatch per plane, as upstream. 1: the even
-// rows of blocks, a barrier, the odd rows. 2: every row of blocks on its own, top to bottom, a barrier
-// behind each. Off unless av1_set_lf_h_split() was called.
-static LF_H_SPLIT: AtomicI32 = AtomicI32::new(0);
-
-/// `av1_set_lf_h_split` (`dx/av1_perf.h`).
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_lf_h_split(mode: c_int) {
-    LF_H_SPLIT.store(mode, Ordering::Relaxed);
 }
 
 /// The sizes of the frame's edge lists: six lists of blocks, vertical edges of Y, U, V (a block is 64
@@ -339,39 +325,15 @@ pub(crate) unsafe fn loopfilter_gpu(dec: *mut Av1Core, cm: *mut AV1_COMMON, list
         commands.set_pipeline(pipeline(&raw const (*td.shaders).loopfilter_h));
         // One thread per packed word, four samples at 8 bits or two at high bit depth.
         let threads_per_strip = if td.bitdepth > 8 { 2 } else { 1 };
-        let lf_h_split = LF_H_SPLIT.load(Ordering::Relaxed);
-        if lf_h_split == 0 {
-            for p in (0..3).filter(|&p| filtered(p)) {
-                let list = p + 3;
-                let wicount = blk_count[list] * threads_per_strip;
-                commands.set_inline_constants(3, &[wicount, p as c_int, blk_offsets[list], blk_cols[list], 0], 0);
-                commands.dispatch(((wicount + 63) >> 6) as u32, 1, 1);
-            }
-            commands.write_barrier(frame_buffers);
-        } else {
-            // -lfhsplit: one dispatch per row of blocks (64 rows of the plane). Mode 1 takes the even rows of
-            // all planes, then the odd ones; mode 2 takes the rows in order. The planes do not touch each
-            // other.
-            let block_rows = (0..3).map(|p| blk_count[p + 3] / blk_cols[p + 3].max(1)).fold(0, c_int::max);
-            let passes = if lf_h_split == 1 { 2 } else { block_rows };
-            // Mode 1: every second row from the pass's. Mode 2: the one row of the pass.
-            let step = if lf_h_split == 1 { 2 } else { block_rows };
-            for pass in 0..passes {
-                for p in (0..3).filter(|&p| filtered(p)) {
-                    let list = p + 3;
-                    let rows = if blk_cols[list] != 0 { blk_count[list] / blk_cols[list] } else { 0 };
-                    let wicount = blk_cols[list] * threads_per_strip;
-                    let mut row = pass;
-                    while row < rows {
-                        let inline = [wicount, p as c_int, blk_offsets[list], blk_cols[list], row * blk_cols[list]];
-                        commands.set_inline_constants(3, &inline, 0);
-                        commands.dispatch(((wicount + 63) >> 6) as u32, 1, 1);
-                        row += step;
-                    }
-                }
-                commands.write_barrier(frame_buffers);
-            }
+        // One dispatch per plane, as upstream (the last inline constant, the first row of blocks, is 0:
+        // the -lfhsplit experiment that dispatched rows of blocks on their own is retired).
+        for p in (0..3).filter(|&p| filtered(p)) {
+            let list = p + 3;
+            let wicount = blk_count[list] * threads_per_strip;
+            commands.set_inline_constants(3, &[wicount, p as c_int, blk_offsets[list], blk_cols[list], 0], 0);
+            commands.dispatch(((wicount + 63) >> 6) as u32, 1, 1);
         }
+        commands.write_barrier(frame_buffers);
         perf_gpu_mark(dec, AV1_PERF_GPU_LF_HORZ);
         stage_dump_fb(dec, c"lf_horz", td.frame_buffer, std::ptr::null());
     }

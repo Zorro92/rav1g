@@ -26,12 +26,6 @@
 #define PLAYER_QUEUE_SIZE 16
 // -slots: the decoder's pipeline slots (aom_codec_dec_cfg_t::frame_slots).
 // (A task without -slots uses the library default.)
-// The clears of a pipeline slot (-gpuclear, -cpuclear, -syncclear): the values of RAV1G_CLEARS_* of
-// rav1g.h (decoder.cpp holds them against it).
-#define PLAYER_CLEARS_NOT_NEEDED 0
-#define PLAYER_CLEARS_GPU 1
-#define PLAYER_CLEARS_COMPLETION_THREAD 2
-#define PLAYER_CLEARS_DECODE_THREAD 3
 #define PLAYER_SLOTS_MIN 2
 #define PLAYER_SLOTS_MAX 4
 // -parseframes: the frames whose parse may run at the same time (Rav1gSettings::frames_in_parse), 1 to
@@ -54,12 +48,10 @@
 #define PLAYER_PARSEOPT_NO_LF_MASKS 2
 #define PLAYER_PARSEOPT_TILE_KEEPS_THREAD 4
 #define PLAYER_PARSEOPT_TIME_CALLS 8
-#define PLAYER_PARSEOPT_CLEAR_GRID 32
 #define PLAYER_PARSEOPT_GPU_CDEF_LISTS 512
 // gpugrid: the mode info grid of a frame is built by a pass of the GPU from the frame's records and not by the
 // parse threads (off by default; such a decoder has gpucdef on whatever the list says).
 #define PLAYER_PARSEOPT_GPU_GRID 2048
-#define PLAYER_PARSEOPT_GPU_PRED_LISTS 4096
 #define PLAYER_PARSEOPT_DEFAULT \
   (PLAYER_PARSEOPT_NO_LF_MASKS | PLAYER_PARSEOPT_TILE_KEEPS_THREAD | PLAYER_PARSEOPT_GPU_CDEF_LISTS | PLAYER_PARSEOPT_GPU_GRID)
 // The size the decoder is created for with -nofitsize, and for a stream that is larger than this.
@@ -142,8 +134,8 @@ class CParameters {
     int displaydepth_;
     int displaydither_;
     bool intrav2_;
+    // -intraopt: accepted, changes nothing (-intraod is retired).
     bool intraopt_;
-    bool intraod_;
     bool intrafilterlegacy_;
     bool intrasingleedgelegacy_;
     // -slots: the pipeline slots the task asks for. 0 when the task has no -slots: the library then gives
@@ -153,14 +145,6 @@ class CParameters {
     bool slots_given_;
     // -parseframes: the frames in parse the task asks for; 0 is the library's default.
     int parse_frames_;
-    // The effective choice after Parse(): what a frame does about the clears of its slot's grids, one of
-    // PLAYER_CLEARS_*. Without a flag nothing has to be cleared; -gpuclear, -cpuclear (-asyncclear is its
-    // older name) and -syncclear keep the wavefront in the slot's grid and say who clears it.
-    int clears_;
-    bool gpuclear_;
-    bool cpuclear_;
-    bool asyncclear_flag_;
-    bool syncclear_;
     // The effective choice after Parse(): true unless -nofitsize was given.
     bool fitsize_;
     bool nofitsize_;
@@ -175,15 +159,12 @@ class CParameters {
     int budget_mib_;
     int retain_mib_;
     // Names of the parser switches. Naming a default switch, none or default selects the defaults
-    // explicitly. The other switches, including gpublists, add to that selection.
+    // explicitly. The other switches add to that selection.
     std::string parseopt_;
     unsigned parser_options_;
     // -continue_on_error: a decode call that fails does not end the task; the next temporal units go to
     // the same decoder.
     bool continue_on_error_;
-    // Experiments (docs/test-player.md): -lfhsplit 0|1|2, -intraedgefix.
-    int lfhsplit_;
-    bool intraedgefix_;
     // -interfast: inter blocks by the fraction of their motion vectors (docs/test-player.md);
     // -interfastlists: the same lists with the original shaders on them.
     bool interfast_;

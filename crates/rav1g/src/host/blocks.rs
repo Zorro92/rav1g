@@ -676,7 +676,6 @@ pub enum IntraMain {
     Tight,
     SingleEdge,
     Legacy,
-    Unoptimized,
 }
 
 /// What the intra part needs to know of a plane of the block.
@@ -773,12 +772,10 @@ pub unsafe extern "C" fn av1_mi_push_block(_pbi: *mut AV1Decoder, cm: *mut AV1_C
     // neighbour).
     // SAFETY: the caller's contract.
     unsafe {
-        if (*(*xd).tile_data).gpu_pred_lists != 0 {
-            push_block::<false, true>(cm, xd);
-        } else if (*xd).mi.is_null() {
-            push_block::<false, false>(cm, xd);
+        if (*xd).mi.is_null() {
+            push_block::<false>(cm, xd);
         } else {
-            push_block::<true, false>(cm, xd);
+            push_block::<true>(cm, xd);
         }
     }
 }
@@ -788,7 +785,7 @@ pub unsafe extern "C" fn av1_mi_push_block(_pbi: *mut AV1Decoder, cm: *mut AV1_C
 ///
 /// # Safety
 /// As for [`av1_mi_push_block`].
-unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBLOCKD) {
+unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBLOCKD) {
     // SAFETY: the caller's contract. The frame data is shared by the tile threads and only read here; the
     // tile data, the block's mode info and the parts of the wavefront grids the tile covers belong to
     // this thread. The mode info of the neighbours is read while the pointer to the block's own is not
@@ -847,13 +844,7 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
         // The tile's index list has room for what a block can add: an entry for each of its transform
         // blocks of luma and of chroma (fewer than two a 4x4 unit) or for its prediction blocks, those of
         // overlapped prediction and reconstruction included.
-        if !GPU_PRED_LISTS || !is_inter || is_inter_intra {
-            td.index_list_room(
-                tile,
-                xd.tile.tile_col as usize,
-                2 * (bw * bh) as usize + if GPU_PRED_LISTS { 0 } else { 64 },
-            );
-        }
+        td.index_list_room(tile, xd.tile.tile_col as usize, 2 * (bw * bh) as usize + 64);
         let index_arr = tile.gen_indexes;
 
         // The block has no chroma of its own: the block to its right or below carries it.
@@ -871,7 +862,7 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
             *index_arr.offset(tile.gen_index_ptr as isize) = value as u32;
             tile.gen_index_ptr += 1;
         };
-        if is_inter && !GPU_PRED_LISTS {
+        if is_inter {
             tile.have_inter = 1;
             let mut is_global_warp = [false; 2];
             if xd.cur_frame_force_integer_mv == 0
@@ -1710,18 +1701,16 @@ unsafe fn push_block<const HAS_GRID: bool, const GPU_PRED_LISTS: bool>(cm: *mut 
 
         // Palette prediction is copied even when the block has no residual. OBMC needs this pass
         // only to add a residual after blending. Match the records in gen_pred_blocks.hlsl.
-        if !GPU_PRED_LISTS {
-            let obmc_residual = is_obmc && mi.skip == 0;
-            if y_use_palette || obmc_residual {
-                let type_index = ReconBlockOffset + bw_log + 6 * bh_log;
-                *index_arr.offset(tile.gen_index_ptr as isize) = take(map.offset(type_index as isize), 1) as u32;
-                tile.gen_index_ptr += 1;
-            }
-            if (uv_use_palette || obmc_residual) && !is_chroma_ref {
-                let type_index = ReconBlockOffset + bw_log_uv + 6 * bh_log_uv;
-                *index_arr.offset(tile.gen_index_ptr as isize) = take(map.offset(type_index as isize), 2) as u32;
-                tile.gen_index_ptr += 1;
-            }
+        let obmc_residual = is_obmc && mi.skip == 0;
+        if y_use_palette || obmc_residual {
+            let type_index = ReconBlockOffset + bw_log + 6 * bh_log;
+            *index_arr.offset(tile.gen_index_ptr as isize) = take(map.offset(type_index as isize), 1) as u32;
+            tile.gen_index_ptr += 1;
+        }
+        if (uv_use_palette || obmc_residual) && !is_chroma_ref {
+            let type_index = ReconBlockOffset + bw_log_uv + 6 * bh_log_uv;
+            *index_arr.offset(tile.gen_index_ptr as isize) = take(map.offset(type_index as isize), 2) as u32;
+            tile.gen_index_ptr += 1;
         }
     }
 }

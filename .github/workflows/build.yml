@@ -738,7 +738,7 @@ jobs:
             crates/rav1g/src/host/rav1d_host.rs crates/rav1g/src/host/rav1d_frames.rs \
             crates/rav1g/src/host/blocks.rs crates/rav1g/src/host/completion.rs \
             crates/rav1g/src/host/create.rs crates/rav1g/src/host/frame.rs crates/rav1g/src/host/types.rs \
-            crates/rav1g/src/host/pool.rs crates/rav1g/src/host/grid_check.rs crates/rav1g/src/host/gpu_pred_lists.rs)
+            crates/rav1g/src/host/pool.rs crates/rav1g/src/host/gpu_grid.rs)
           {
             echo "shader_pick=$shader_pick"
             echo "parser_switches=$parser_switches"
@@ -1170,7 +1170,7 @@ jobs:
       # default (docs/phase2-rav1d.md): this run and every check below that names no parser are checks of
       # that parser, and the run has to say so. It also has to say that the clears of a pipeline slot are
       # nowhere, the default: the wavefront of intra prediction is kept at the edges of the tiles (the
-      # rust-clears job has the runs with -gpuclear, -cpuclear and -syncclear).
+      # rust-clears job holds that to the bytes of the timing run).
       - name: Decode every stream on WARP with rav1g-dec and compare with expected.txt
         if: ${{ !cancelled() && matrix.suite == 'conformance' }}
         shell: pwsh
@@ -1513,8 +1513,8 @@ jobs:
           if-no-files-found: warn
 
   # The other side of the decoder's switches, each with the parser and the other switches of the default:
-  # the poisoned mode info pool and the poisoned buffers (a part of the set), the fast inter path and the
-  # clears of a pipeline slot on the decode thread, and the GPU/CPU grid comparison.
+  # the poisoned mode info pool and the poisoned buffers (a part of the set), the fast inter path, a legacy
+  # intra switch and the intra step timing.
   # Parser option flips run separately when selected by the coverage check.
   rust-switches:
     needs: [conformance-streams, rust]
@@ -1523,7 +1523,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        case: [poisoned, interfast, syncclear, gridcheck, intrasingleedgelegacy, steptime]
+        case: [poisoned, interfast, intrasingleedgelegacy, steptime]
     steps:
       - name: Disable newline conversion
         run: git config --global core.autocrlf false
@@ -1592,46 +1592,6 @@ jobs:
           python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
             --out out/conformance-interfast --threads 4 "--tool-args=-interfast" "--title=rav1g-dec with -interfast"
           if ($LASTEXITCODE -ne 0) { throw "conformance with -interfast: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
-
-      # The clears of a pipeline slot on the decode thread (-syncclear), the path of the first packages:
-      # the whole set once more. The other ways of the clears are in the rust-clears job, which also
-      # holds this one to what it clears on two streams.
-      - name: Conformance with the clears on the decode thread (-syncclear)
-        if: ${{ !cancelled() && matrix.case == 'syncclear' }}
-        shell: pwsh
-        run: |
-          $failed = @()
-          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/conformance-syncclear --threads 4 "--tool-args=-syncclear" "--title=rav1g-dec with -syncclear"
-          if ($LASTEXITCODE -ne 0) { $failed += "conformance with -syncclear: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
-          if (-not (Select-String -Path out/conformance-syncclear/lists/run001.log -Pattern 'clears decode thread \(-syncclear\)' -Quiet)) {
-            $failed += 'the decoder of the run with -syncclear does not report the clears on the decode thread'
-          }
-          if ($failed.Count) { throw "with -syncclear: $($failed -join '; ')" }
-
-      # -parseopt gridcheck (grid_check.rs, mi_grid_build.hlsl): a pass of the GPU builds the mode info grid
-      # of every frame from its records into a second grid, which the decoder holds against the grid the
-      # parse wrote, unit by unit, when the frame is done; the first step of the grid built by the GPU
-      # (docs/phase2-rav1d.md, "The block lists on the GPU: a design", step C). The whole set with the
-      # check: its frames against the references, and in the log of every stream the decoder's GRIDCHECK
-      # line with no unit that differs.
-      - name: The mode info grid built by the GPU against the parse's (-parseopt gridcheck)
-        if: ${{ !cancelled() && matrix.case == 'gridcheck' }}
-        shell: pwsh
-        run: |
-          $failed = @()
-          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/conformance-gridcheck --threads 4 "--tool-args=-parseopt nolfmask,tilethread,gpucdef,gridcheck" "--title=rav1g-dec (cargo, MSVC) with -parseopt gridcheck"
-          if ($LASTEXITCODE -ne 0) { $failed += "conformance with -parseopt gridcheck: exit code $LASTEXITCODE" }
-          $lines = @(Get-ChildItem out/conformance-gridcheck/logs -Filter *.log | Select-String -Pattern '^GRIDCHECK ')
-          $differ = @($lines | Where-Object { $_.Line -notmatch ' 0 differ$' })
-          $frames = 0
-          foreach ($line in $lines) { if ($line.Line -match ': (\d+) frames,') { $frames += [int]$Matches[1] } }
-          Write-Output "GRIDCHECK: $($lines.Count) lines, $frames frames checked, $($differ.Count) with units that differ"
-          foreach ($line in $differ) { Write-Output "::error::$($line.Filename): $($line.Line)" }
-          if ($differ.Count) { $failed += "$($differ.Count) streams have units whose entries differ" }
-          if ($lines.Count -lt 200 -or $frames -lt 500) { $failed += "only $($lines.Count) GRIDCHECK lines and $frames frames checked" }
-          if ($failed.Count) { throw "the grid built by the GPU: $($failed -join '; ')" }
 
       - name: Conformance with a legacy intra switch
         if: ${{ !cancelled() && startsWith(matrix.case, 'intra') }}
@@ -1816,14 +1776,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { $failed += "decode error check with ${switches}: exit code $LASTEXITCODE" }
           if ($failed.Count) { throw "the sink-written grid: $($failed -join '; ')" }
 
-      # Clear the grid on poisoned buffers by command list, and by the decode thread at setup.
-      - name: The sink-written grid cleared for every frame
+      # The sink-written grid on poisoned buffers, three slots and four threads: an entry of the grid
+      # that the parse has not written shows in the output. (Until interface version 3 these runs also
+      # cleared the grid for every frame, by the GPU and by the decode thread: -gpuclear, -syncclear and
+      # -parseopt cleargrid are retired.)
+      - name: The sink-written grid with poisoned buffers
         if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           $part = '--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)'
-          $runs = @(@{ name = 'sinkgrid-gpuclear-poisonbuf'; args = '-gpuclear -poisonbuf -parseopt nolfmask,tilethread,gpucdef,cleargrid -slots 3 -t 4' },
-            @{ name = 'sinkgrid-syncclear'; args = '-syncclear -parseopt nolfmask,tilethread,gpucdef,cleargrid' })
+          $runs = @(@{ name = 'sinkgrid-poisonbuf'; args = '-poisonbuf -parseopt nolfmask,tilethread,gpucdef -slots 3 -t 4' })
           $failed = @()
           foreach ($run in $runs) {
             python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
@@ -1831,7 +1793,7 @@ jobs:
               "--title=rav1g-dec, part of the set with $($run.args)" $part
             if ($LASTEXITCODE -ne 0) { $failed += "$($run.args): exit code $LASTEXITCODE" }
           }
-          if ($failed.Count) { throw "the sink-written grid, cleared: $($failed -join '; ')" }
+          if ($failed.Count) { throw "the sink-written grid, poisoned: $($failed -join '; ')" }
 
       - name: Preserve the results, the per-stream logs, the md5 files and the stage dumps
         if: always()
@@ -1845,124 +1807,15 @@ jobs:
             out/cut-tile/
           if-no-files-found: warn
 
-  # GPU prediction lists. Compare frame hashes across the whole set and dump the stage buffers.
-  rust-gpublists:
-    needs: [conformance-streams, rust]
-    runs-on: windows-latest
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        mode: [standard, fast]
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: rav1g-dec-x64-${{ github.run_id }}
-          path: out/rav1g-dec
-
-      - uses: actions/cache/restore@v6
-        with:
-          path: conformance-streams
-          key: ${{ needs.conformance-streams.outputs.key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-
-      - name: GPU lists with the ${{ matrix.mode }} inter path
-        shell: pwsh
-        env:
-          INTER_MODE: ${{ matrix.mode }}
-        run: |
-          $tool = 'out/rav1g-dec/rav1g-dec.exe'
-          $extra = if ($env:INTER_MODE -eq 'fast') { ' -interfast' } else { '' }
-          $switches = "-parseopt gpublists$extra"
-          python testing/conformance/run.py --tool $tool --streams conformance-streams `
-            --out "out/conformance-gpublists-$env:INTER_MODE" --threads 4 "--tool-args=$switches" "--title=rav1g-dec with $switches"
-          if ($LASTEXITCODE -ne 0) { throw "conformance with $switches" }
-          if (-not (Select-String -Path "out/conformance-gpublists-$env:INTER_MODE/lists/run001.log" -Pattern '^PARSER .*switches .*gpublists \(' -Quiet)) {
-            throw "the decoder did not report gpublists"
-          }
-          python testing/stage_dump/ci_dumps.py --tool $tool --streams conformance-streams `
-            --tasks testing/conformance/dump_tasks.txt --out "out/dumps-gpublists-$env:INTER_MODE" --threads 4 "--tool-args=$switches"
-          if ($LASTEXITCODE -ne 0) { throw "stage dumps with $switches" }
-
-      - name: Stage dumps with CPU fast inter lists
-        if: ${{ !cancelled() && matrix.mode == 'fast' }}
-        shell: pwsh
-        run: |
-          $tool = 'out/rav1g-dec/rav1g-dec.exe'
-          python testing/stage_dump/ci_dumps.py --tool $tool --streams conformance-streams `
-            --tasks testing/conformance/dump_tasks.txt --out out/dumps-cpulists-fast --threads 4 "--tool-args=-interfast"
-          if ($LASTEXITCODE -ne 0) { throw 'stage dumps of the CPU fast lists' }
-
-      - name: GPU lists in the player and with intra V2
-        if: ${{ !cancelled() && matrix.mode == 'standard' }}
-        shell: pwsh
-        run: |
-          $tool = 'out/rav1g-dec/rav1g-dec.exe'
-          python testing/conformance/player_smoke.py --tool $tool --streams conformance-streams `
-            --out out/player-smoke-gpublists "--player-args=-parseopt gpublists" "--title=the player with gpublists"
-          if ($LASTEXITCODE -ne 0) { throw 'the player with gpublists' }
-          python testing/conformance/run.py --tool $tool --streams conformance-streams `
-            --out out/conformance-gpublists-intrav2 --threads 4 "--only=^(syn-resize|av1-1-b8-01-size-66x66)" `
-            "--tool-args=-intrav2 -parseopt nolfmask,tilethread,gpucdef,gpublists" `
-            "--title=rav1g-dec with GPU prediction lists, intra V2 and the sink-written grid"
-          if ($LASTEXITCODE -ne 0) { throw 'gpublists with intra V2 and the sink-written grid' }
-
-      - name: Compare 4K memory use and stage timings on WARP
-        if: ${{ !cancelled() && matrix.mode == 'standard' }}
-        shell: pwsh
-        run: |
-          $tool = (Resolve-Path out/rav1g-dec/rav1g-dec.exe).Path
-          $logDir = New-Item -Force -ItemType Directory out/gpublists-time
-          Push-Location conformance-streams
-          try {
-            $task = Select-String -Path manifest.txt -Pattern '-name nf-dvbdash-d2-10b-2160p\.ivf ' | Select-Object -First 1
-            if (-not $task) { throw 'missing 4K task' }
-            $inputPath = [regex]::Match($task.Line, '(?:^|\s)-i\s+(\S+)').Groups[1].Value
-            if (-not $inputPath) { throw 'missing 4K input' }
-            foreach ($mode in @('time', 'time,gpublists')) {
-              & $tool -i $inputPath -limit 16 -t 2 -v -memstats -gputime -parseopt $mode | Tee-Object -FilePath (Join-Path $logDir.FullName "$mode.log")
-              if ($LASTEXITCODE -ne 0) { throw "timing run with $mode" }
-            }
-            foreach ($stage in @('pred_count', 'pred_scan')) {
-              if (-not (Select-String -Path (Join-Path $logDir.FullName 'time,gpublists.log') -Pattern "^GPUTIME gpu $stage +[1-9]" -Quiet)) {
-                throw "no GPU timestamps for $stage"
-              }
-            }
-          } finally {
-            Pop-Location
-          }
-
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: rav1g-dec-gpublists-${{ matrix.mode }}-${{ github.run_id }}
-          path: |
-            out/conformance-gpublists-*/
-            out/dumps-*/
-            out/gpublists-time/
-            out/player-smoke-gpublists/
-          if-no-files-found: error
-
   # The clears of a pipeline slot (docs/test-player.md, "Pipeline slots and clears"; docs/phase2-rav1d.md,
-  # "No clears by the CPU"). Without a flag, which is every other run of the workflow, a frame keeps the
-  # wavefront of intra prediction at the edges of its tiles and no thread clears a grid of the slot for
-  # it. Here the ways that keep the wavefront in the slot's grid and clear it for every frame, which stay
-  # as switches: by the GPU at the end of the frame's command list (-gpuclear), by the completion thread
-  # (-cpuclear, the default up to package 0.2.144), by the decode thread (-syncclear, the default up to
-  # 0.2.139; its run of the whole set is in rust-switches). The output has to be the same with each.
+  # "No clears by the CPU"). A frame keeps the wavefront of intra prediction at the edges of its tiles and
+  # no thread clears a grid of the slot for it. (The switches that kept the wavefront in the slot's grid
+  # and cleared it for every frame, -gpuclear, -cpuclear and -syncclear, are retired with interface
+  # version 3.)
   rust-clears:
     needs: [conformance-streams, rust]
     runs-on: windows-latest
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        case: [gpuclear, cpuclear]
     steps:
       - name: Disable newline conversion
         run: git config --global core.autocrlf false
@@ -1986,88 +1839,23 @@ jobs:
           fail-on-cache-miss: true
 
       # Who clears what, from the timing run (testing/conformance/clears_check.py): the 2160p stream and
-      # the stream with eight tiles, each decoded in every way, also with the mode info grid cleared for
-      # every frame (-parseopt cleargrid). Without a flag the completion thread and the GPU
-      # clear nothing and the decode and tile threads the counters of the tiles' block lists; with
-      # -gpuclear the command list of every frame clears, and no thread; with -cpuclear the completion
-      # thread clears the same bytes; with -syncclear the decode thread.
+      # the stream with eight tiles. The completion thread and the GPU clear nothing and the decode and
+      # tile threads the counters of the tiles' block lists.
       - name: Who clears the grids of a slot, and how much
-        if: ${{ !cancelled() && matrix.case == 'cpuclear' }}
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           python testing/conformance/clears_check.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
             --out out/clears-check --threads 4 --stream nf-dvbdash-d2-10b-2160p.ivf --stream syn-tiles-10b-1080p.ivf:24
           if ($LASTEXITCODE -ne 0) { throw "the clears of a slot: exit code $LASTEXITCODE (1: a check failed, 2: a run could not be done)" }
 
-      # The clears by the GPU: the whole set has to give the results of expected.txt, and the memory check
-      # has to hold (the grids of such a decoder are buffers the GPU may write; they are released like the
-      # others).
-      - name: Conformance and memory check with the clears of the GPU (-gpuclear)
-        if: ${{ !cancelled() && matrix.case == 'gpuclear' }}
-        shell: pwsh
-        run: |
-          $failed = @()
-          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/conformance-gpuclear --threads 4 "--tool-args=-gpuclear" "--title=rav1g-dec with -gpuclear"
-          if ($LASTEXITCODE -ne 0) { $failed += "conformance with -gpuclear: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
-          if (-not (Select-String -Path out/conformance-gpuclear/lists/run001.log -Pattern 'clears GPU \(-gpuclear\)' -Quiet)) {
-            $failed += 'the decoder of the run with -gpuclear does not report the clears of the GPU'
-          }
-          python testing/conformance/memory_check.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/memory-check-gpuclear "--tool-args=-gpuclear" "--title=rav1g-dec (cargo, MSVC) with -gpuclear"
-          if ($LASTEXITCODE -ne 0) { $failed += "memory check with -gpuclear: exit code $LASTEXITCODE" }
-          if ($failed.Count) { throw "with -gpuclear: $($failed -join '; ')" }
-
-      # The clears on the completion thread, with the wavefront in the grid: the default of the packages
-      # up to 0.2.144. The whole set, and the stage dumps, which the rust-dumps-equal job holds against
-      # those of the default byte for byte: the block lists of the two ways of keeping the wavefront
-      # have to be the same lists.
-      - name: Conformance and stage dumps with the clears on the completion thread (-cpuclear)
-        if: ${{ !cancelled() && matrix.case == 'cpuclear' }}
-        shell: pwsh
-        run: |
-          $failed = @()
-          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/conformance-cpuclear --threads 4 "--tool-args=-cpuclear" "--title=rav1g-dec with -cpuclear"
-          if ($LASTEXITCODE -ne 0) { $failed += "conformance with -cpuclear: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
-          if (-not (Select-String -Path out/conformance-cpuclear/lists/run001.log -Pattern 'clears completion thread \(-cpuclear\)' -Quiet)) {
-            $failed += 'the decoder of the run with -cpuclear does not report the clears on the completion thread'
-          }
-          python testing/stage_dump/ci_dumps.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --tasks testing/conformance/dump_tasks.txt --out out/stage-dumps-cpuclear --threads 4 "--tool-args=-cpuclear"
-          if ($LASTEXITCODE -ne 0) { $failed += "stage dumps with -cpuclear: exit code $LASTEXITCODE" }
-          if ($failed.Count) { throw "with -cpuclear: $($failed -join '; ')" }
-
-      # The clears of the GPU where both grids are cleared: with the parse made to clear the mode info
-      # grid for every frame (-parseopt cleargrid) on poisoned buffers, three slots and four threads.
-      # With -poisonbuf the grids start as
-      # 0xA5 bytes, so an entry that neither the CPU nor the clear of the GPU has written shows in the
-      # output. The part of the set of the poisoned runs.
-      - name: The clears of the GPU of both grids, with poisoned buffers
-        if: ${{ !cancelled() && matrix.case == 'gpuclear' }}
-        shell: pwsh
-        run: |
-          $part = '--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)'
-          $runs = @(@{ name = 'gpuclear-poisonbuf'; args = '-gpuclear -poisonbuf -parseopt cleargrid -slots 3 -t 4' })
-          $failed = @()
-          foreach ($run in $runs) {
-            python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-              --out "out/conformance-$($run.name)" --threads 4 "--tool-args=$($run.args)" `
-              "--title=rav1g-dec, part of the set with $($run.args)" $part
-            if ($LASTEXITCODE -ne 0) { $failed += "$($run.args): exit code $LASTEXITCODE" }
-          }
-          if ($failed.Count) { throw "the clears of the GPU: $($failed -join '; ')" }
-
-      - name: Preserve the results, the per-stream logs, the md5 files and the stage dumps of the clears
+      - name: Preserve the logs of the clears
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: rav1g-dec-clears-${{ matrix.case }}-${{ github.run_id }}
+          name: rav1g-dec-clears-${{ github.run_id }}
           path: |
             out/clears-check/
-            out/conformance-*/
-            out/memory-check-gpuclear/
-            out/stage-dumps-cpuclear/
           if-no-files-found: warn
 
   # Frames in parallel (docs/phase2-rav1d.md, step 4): a decoder with more than one frame in parse
@@ -2467,7 +2255,7 @@ jobs:
   # What the jobs above wrote, held against each other; no decoder runs here. It runs also when one of
   # them failed, on what that job wrote before it did.
   rust-dumps-equal:
-    needs: [rust, rust-conformance, rust-parser-switches, rust-sinkgrid, rust-clears, rust-frames]
+    needs: [rust, rust-conformance, rust-parser-switches, rust-sinkgrid, rust-frames]
     if: ${{ !cancelled() && needs.rust.result == 'success' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 15
@@ -2480,11 +2268,6 @@ jobs:
         with:
           name: rav1g-dec-stage-dumps-${{ github.run_id }}
           path: default-dumps
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: rav1g-dec-clears-cpuclear-${{ github.run_id }}
-          path: clears
 
       - uses: actions/download-artifact@v8
         with:
@@ -2555,34 +2338,6 @@ jobs:
           fi
           exit "$status"
 
-      # The two ways of keeping the wavefront of intra prediction (the run of the rust-clears job): the
-      # stage dumps of the wavefront in the slot's grid (-cpuclear) against those of the wavefront at the
-      # edges of the tiles (the default) byte for byte. The lists of the prediction blocks are in them:
-      # they are equal only if every transform block has the same iteration either way.
-      - name: The wavefront in the grid and at the edges of the tiles give the same stage dumps
-        if: ${{ !cancelled() }}
-        run: |
-          set -euo pipefail
-          status=0
-          dumped=0
-          for dir in default-dumps/*/; do
-            name=$(basename "$dir")
-            [ "$name" != streams ] || continue
-            dumped=$((dumped + 1))
-            code=0
-            python3 testing/stage_dump/stage_dump.py compare "$dir" "clears/stage-dumps-cpuclear/$name" > compare.txt 2>&1 || code=$?
-            tail -n 3 compare.txt
-            if [ "$code" -ne 0 ]; then
-              echo "::error::stage dumps of $name: the default and -cpuclear differ"
-              status=1
-            fi
-          done
-          if [ "$dumped" -eq 0 ]; then
-            echo '::error::no stage dumps of the default to hold these against'
-            status=1
-          fi
-          exit "$status"
-
       # Frames in parallel (the run of the rust-frames job): the stage dumps of a decoder with two frames
       # in parse against those of the default, one frame in parse, byte for byte: the frames are set up
       # while others are in parse and recorded by another thread, from a copy of their header, and every
@@ -2646,15 +2401,14 @@ jobs:
           name: rav1g-dec-uavsync-x64-${{ github.run_id }}
           path: out/rav1g-dec-uavsync
 
-      # The experiments (docs/test-player.md, "Experiments"): on a device that follows D3D each of them
-      # leaves the output as it is, so the whole set is decoded again with each flag and has to give the
-      # results of expected.txt, and once more with a decoder whose shaders are those of the uavsync
-      # package. The experiments input exercises these paths.
-      - name: Conformance with each experiment flag
+      # The experiments (docs/test-player.md, "Experiments"): the whole set decoded with a decoder whose
+      # shaders are those of the uavsync package (below). (-lfhsplit and -intraedgefix, the experiments
+      # for a device whose output differed, are retired with interface version 3.) The experiments input
+      # exercises these paths.
+      - name: Conformance with each debugging flag
         shell: pwsh
         run: |
-          $runs = @(@{ name = 'lfhsplit1'; args = '-lfhsplit 1' }, @{ name = 'lfhsplit2'; args = '-lfhsplit 2' },
-            @{ name = 'intraedgefix'; args = '-intraedgefix' },
+          $runs = @(
             # Not experiments for a device: the whole set with the mode info pool poisoned, and with every
             # buffer and the constants poisoned, also on the fast inter path and with the second intra
             # scheduler (the rust-switches job decodes a part of the set with -poisonmi and -poisonbuf on every push).
@@ -2668,7 +2422,7 @@ jobs:
               --out "out/conformance-$($run.name)" --threads 4 "--tool-args=$($run.args)" "--title=rav1g-dec with $($run.args)"
             if ($LASTEXITCODE -ne 0) { $failed += "$($run.args): exit code $LASTEXITCODE" }
           }
-          if ($failed.Count) { throw "conformance with an experiment flag: $($failed -join '; ')" }
+          if ($failed.Count) { throw "conformance with a debugging flag: $($failed -join '; ')" }
 
       - name: Conformance with the uavsync shaders
         if: ${{ !cancelled() }}
@@ -2903,7 +2657,7 @@ jobs:
   # in the last step. The stage dump comparison also checks the output lists and intra prediction
   # from the shaders that differ between the two builds.
   rust-equal:
-    needs: [cpp-reference, rust-conformance, rust-gpublists]
+    needs: [cpp-reference, rust-conformance]
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
@@ -2936,12 +2690,6 @@ jobs:
           name: rav1g-conformance-md5-${{ github.run_id }}
           path: conformance-md5
 
-      - uses: actions/download-artifact@v8
-        with:
-          pattern: rav1g-dec-gpublists-*-${{ github.run_id }}
-          merge-multiple: true
-          path: gpublists
-
       - name: md5 per frame and stage dumps, rav1g-dec against the C++ decoder
         run: |
           set -euo pipefail
@@ -2949,22 +2697,6 @@ jobs:
           python3 testing/conformance/compare_md5.py --reference cpp-reference/conformance --candidate rav1g-dec/conformance \
             --manifest conformance-md5/manifest.txt --reference-dumps cpp-reference-dumps --candidate-dumps rav1g-dec-dumps \
             --reference-name 'warp_decoder (cpp, the entropy decoder of libaom)' --candidate-name 'rav1g-dec (rav1d)' --two-parsers
-
-      - name: GPU prediction lists against the C++ decoder and the CPU lists
-        run: |
-          set -euo pipefail
-          python3 testing/conformance/compare_md5.py --reference cpp-reference/conformance \
-            --candidate gpublists/conformance-gpublists-standard --manifest conformance-md5/manifest.txt \
-            --reference-dumps cpp-reference-dumps --candidate-dumps gpublists/dumps-gpublists-standard \
-            --reference-name 'warp_decoder (cpp)' --candidate-name 'rav1g-dec (gpublists)' --two-parsers
-          python3 testing/conformance/compare_md5.py --reference rav1g-dec/conformance \
-            --candidate gpublists/conformance-gpublists-standard --manifest conformance-md5/manifest.txt \
-            --reference-dumps rav1g-dec-dumps --candidate-dumps gpublists/dumps-gpublists-standard \
-            --reference-name 'rav1g-dec (CPU lists)' --candidate-name 'rav1g-dec (gpublists)' --strict-data
-          python3 testing/conformance/compare_md5.py --reference rav1g-dec/conformance \
-            --candidate gpublists/conformance-gpublists-fast --manifest conformance-md5/manifest.txt \
-            --reference-dumps gpublists/dumps-cpulists-fast --candidate-dumps gpublists/dumps-gpublists-fast \
-            --reference-name 'rav1g-dec (CPU fast lists)' --candidate-name 'rav1g-dec (GPU fast lists)' --strict-data
 
       # The decoder creation and the buffer plan (memory_lines.py pools): the same decoder size and frame
       # buffers as the C++ decoder, pools of a chunk for every 64x64 area of the decoder size, and with
@@ -3236,9 +2968,7 @@ jobs:
 
       # The other checks of the rust-conformance and rust-switches jobs with this program (the comments are there): decode errors in cut
       # streams through the Rust interface and with the player's decoder code, the order check, the memory
-      # check, the part of the set with -poisonmi and with -poisonbuf, and the whole set with -interfast
-      # and with -gpuclear (the clears of a slot by the GPU, with the wavefront in the slot's grid; the
-      # rust-clears job has the other ways).
+      # check, the part of the set with -poisonmi and with -poisonbuf, and the whole set with -interfast.
       - name: Decode error in a cut stream, the rav1g-dec of the Linux build
         if: ${{ !cancelled() && matrix.suite == 'conformance' }}
         shell: pwsh
@@ -3263,13 +2993,13 @@ jobs:
             --out out/memory-check "--title=rav1g-dec built on Linux (cargo xwin, clang-cl)"
           if ($LASTEXITCODE -ne 0) { throw "memory check with the rav1g-dec of the Linux build: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
 
-      - name: Conformance with -poisonmi, with -poisonbuf, with -interfast and with -gpuclear, the rav1g-dec of the Linux build
+      - name: Conformance with -poisonmi, with -poisonbuf and with -interfast, the rav1g-dec of the Linux build
         if: ${{ !cancelled() && matrix.suite == 'decoder-switches' }}
         shell: pwsh
         run: |
           $part = '--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)'
           $runs = @(@{ name = 'poisonmi'; args = '-poisonmi'; only = $part }, @{ name = 'poisonbuf'; args = '-poisonbuf'; only = $part },
-            @{ name = 'interfast'; args = '-interfast'; only = '--only=' }, @{ name = 'gpuclear'; args = '-gpuclear'; only = '--only=' })
+            @{ name = 'interfast'; args = '-interfast'; only = '--only=' })
           $failed = @()
           foreach ($run in $runs) {
             python testing/conformance/run.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
@@ -3578,8 +3308,8 @@ jobs:
       # same iteration either way, and every entry of the grid that the edges' side writes (the ones the
       # shader reads) has to be the grid's. The edges start as a pattern no iteration has, so an entry
       # that is read without having been written in its frame shows in the lists. With one thread and
-      # with four, and once with the wavefront in the grid on both sides (the way of -gpuclear, -cpuclear
-      # and -syncclear).
+      # with four, and once with the wavefront in the grid on both sides (the way of a frame without memory
+      # for the edges).
       - name: The wavefront in the grid and at the edges of the tiles gives the same block lists
         if: ${{ !cancelled() }}
         run: |
@@ -4117,7 +3847,7 @@ jobs:
     # Tags bypass the path filters. Each dependency below runs on a tag.
     if: ${{ startsWith(github.ref, 'refs/tags/v') }}
     needs: [player, conformance-streams, cpp-reference, rust, rust-conformance, rust-output, rust-switches,
-      rust-parser-switches, rust-sinkgrid, rust-gpublists, rust-clears, rust-frames, rust-frames-threads,
+      rust-parser-switches, rust-sinkgrid, rust-clears, rust-frames, rust-frames-threads,
       rust-dumps-equal, shader-pick-decoder, rust-dxc, rust-equal, shader-bytecode,
       rust-cross, rust-cross-run, rust-cross-run-switches, rav1d, parse-check, parse-digest, colour, sync-check,
       cdef-check, warp-check, inter-check, superres-check, tables-check, intra-check, shader-regs,

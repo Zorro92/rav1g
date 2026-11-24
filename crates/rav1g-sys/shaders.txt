@@ -35,9 +35,6 @@ intra_v2
 intra_v2_hbd
 gen_pred_blocks
 gen_pred_blocks_fast_packed
-gen_pred_blocks_gpu
-pred_list_count
-pred_list_scan
 inter_fast
 inter_compound_fast
 inter_fast_hbd
@@ -61,7 +58,6 @@ inter_warp
 inter_scale_warp_compound
 intra_filter_legacy
 intra_main
-intra_main_legacy
 inter_ext_borders
 reconstruct_block
 loopfilter_vert
@@ -78,7 +74,6 @@ inter_obmc_left_hbd
 inter_scale_warp_compound_hbd
 inter_warp_hbd
 intra_main_hbd
-intra_main_hbd_legacy
 intra_main_prefetch_hbd
 intra_main_prefetch
 intra_main_single_edge

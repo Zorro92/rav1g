@@ -14,6 +14,8 @@
  * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
  */
 
-// The original kernel, compiled with optimizations disabled for -intraod.
+// The original kernel (the INTRA_MAIN_LEGACY parts of libav1/dx/shaders/intra_main.hlsl), the reference of
+// intra_check. Not a shader of the decoder any more: its runtime switch, -intraod, is retired, and the
+// shader build does not see this file. The od set of the shader-pick experiment builds the same code.
 #define INTRA_MAIN_LEGACY
-#include "intra_main_hbd.hlsl"
+#include "intra_main.hlsl"

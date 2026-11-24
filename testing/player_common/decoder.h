@@ -390,8 +390,6 @@ class AV1Decoder {
   bool created_packed_10x3_ = false;
   bool created_noguard_ = false;
   int created_headroom_ = 0;
-  // The decoder was created for -gpuclear: with grids of its slots the GPU may write.
-  bool created_gpuclear_ = false;
   // The device buffers of the decoder that exists, for the app memory model of -budget.
   uint64_t created_device_size_ = 0;
   perfstats::PerfStats perf_stats_;

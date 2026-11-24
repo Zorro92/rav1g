@@ -27,10 +27,6 @@ pub struct ParseOptions {
     pub tile_keeps_thread: bool,
     /// [`SinkOptions::time_calls`]: the calls of the sink are timed. Off by default.
     pub time_calls: bool,
-    /// The host clears the mode info grid of a pipeline slot for every frame, as it did before it kept
-    /// the grid between frames of one size. Not a switch of the parse: the D3D12 host reads it
-    /// (`rav1g_setup_frame_begin`). Off by default.
-    pub clear_grid: bool,
     /// [`SinkOptions::test_panic`]: the parse of the third frame panics, for the test of what a bug in
     /// the parser does to a decode call. Off, and no way of doing a parse.
     pub test_panic: bool,
@@ -45,22 +41,14 @@ pub struct ParseOptions {
     /// thread that records the frame. Not a switch of the parse: the D3D12 host reads it when the decoder
     /// is created (the two buffers are then buffers a shader may write). On by default.
     pub gpu_cdef_lists: bool,
-    /// A check, not a way of doing the parse: a pass of the GPU builds the mode info grid of every frame
-    /// from the frame's records (`mi_grid_build.hlsl`) into a second grid of the slot, which the D3D12
-    /// host holds against the grid the sink wrote when the frame is done, and reports at the decoder's
-    /// release (`GRIDCHECK`). Nothing reads the second grid otherwise. Off by default.
-    pub gpu_grid_check: bool,
     /// [`SinkOptions::gpu_grid`]: the sink does not write the mode info grid; a pass of the GPU builds it
     /// from the frame's records, in front of every stage that reads it (`mi_grid_build.hlsl`), and what
     /// the parse threads read through the grid (the records above and to the left of a block for the
     /// block lists, the record a 64x64 area keeps its CDEF index in) the sink keeps at the edges of the
     /// tile. The D3D12 host reads it when the decoder is created: the grid of every slot is then a buffer
     /// a shader may write, the lists of CDEF are the GPU's whatever [`Self::gpu_cdef_lists`] says (the
-    /// thread that records would read the grid for them), and [`Self::gpu_grid_check`] has nothing to
-    /// hold the grid against. On by default.
+    /// thread that records would read the grid for them). On by default.
     pub gpu_grid: bool,
-    /// Build inter, warp and reconstruction lists on the GPU. Off by default.
-    pub gpu_pred_lists: bool,
 }
 
 impl Default for ParseOptions {
@@ -78,16 +66,15 @@ impl ParseOptions {
     pub const NO_LF_MASKS: u32 = 2;
     pub const TILE_KEEPS_THREAD: u32 = 4;
     pub const TIME_CALLS: u32 = 8;
-    pub const CLEAR_GRID: u32 = 32;
     pub const TEST_PANIC: u32 = 64;
     pub const TEST_POOL_WAIT: u32 = 128;
     pub const GPU_CDEF_LISTS: u32 = 512;
-    pub const GPU_GRID_CHECK: u32 = 1024;
     pub const GPU_GRID: u32 = 2048;
-    pub const GPU_PRED_LISTS: u32 = 4096;
     /// The bits of the switches retired with interface version 3: 16 `latelists` (the block lists of a
-    /// tile counted at its end).
-    pub const RETIRED: u32 = 16;
+    /// tile counted at its end), 32 `cleargrid` (the mode info grid cleared for every frame), 1024
+    /// `gridcheck` (a second grid by the GPU, held against the sink's) and 4096 `gpublists` (the inter,
+    /// warp and reconstruction lists counted by the GPU).
+    pub const RETIRED: u32 = 16 | 32 | 1024 | 4096;
     /// The bits of [`ParseOptions::default`].
     pub const DEFAULT: u32 = Self::NO_LF_MASKS | Self::TILE_KEEPS_THREAD | Self::GPU_CDEF_LISTS | Self::GPU_GRID;
     /// The switches that are on by default, which a list of words names to replace that default.
@@ -98,27 +85,21 @@ impl ParseOptions {
         no_lf_masks: false,
         tile_keeps_thread: false,
         time_calls: false,
-        clear_grid: false,
         test_panic: false,
         test_pool_wait: false,
         gpu_cdef_lists: false,
-        gpu_grid_check: false,
         gpu_grid: false,
-        gpu_pred_lists: false,
     };
 
     /// The words of the tools (`-parseopt <word>[,<word>...]`).
-    pub const WORDS: [(&'static str, u32); 10] = [
+    pub const WORDS: [(&'static str, u32); 7] = [
         ("nolfmask", Self::NO_LF_MASKS),
         ("tilethread", Self::TILE_KEEPS_THREAD),
         ("time", Self::TIME_CALLS),
-        ("cleargrid", Self::CLEAR_GRID),
         ("testpanic", Self::TEST_PANIC),
         ("poolwait", Self::TEST_POOL_WAIT),
         ("gpucdef", Self::GPU_CDEF_LISTS),
-        ("gridcheck", Self::GPU_GRID_CHECK),
         ("gpugrid", Self::GPU_GRID),
-        ("gpublists", Self::GPU_PRED_LISTS),
     ];
 
     pub const fn from_bits(bits: u32) -> Self {
@@ -126,13 +107,10 @@ impl ParseOptions {
             no_lf_masks: bits & Self::NO_LF_MASKS != 0,
             tile_keeps_thread: bits & Self::TILE_KEEPS_THREAD != 0,
             time_calls: bits & Self::TIME_CALLS != 0,
-            clear_grid: bits & Self::CLEAR_GRID != 0,
             test_panic: bits & Self::TEST_PANIC != 0,
             test_pool_wait: bits & Self::TEST_POOL_WAIT != 0,
             gpu_cdef_lists: bits & Self::GPU_CDEF_LISTS != 0,
-            gpu_grid_check: bits & Self::GPU_GRID_CHECK != 0,
             gpu_grid: bits & Self::GPU_GRID != 0,
-            gpu_pred_lists: bits & Self::GPU_PRED_LISTS != 0,
         }
     }
 
@@ -140,19 +118,16 @@ impl ParseOptions {
         (u32::from(self.no_lf_masks) * Self::NO_LF_MASKS)
             | (u32::from(self.tile_keeps_thread) * Self::TILE_KEEPS_THREAD)
             | (u32::from(self.time_calls) * Self::TIME_CALLS)
-            | (u32::from(self.clear_grid) * Self::CLEAR_GRID)
             | (u32::from(self.test_panic) * Self::TEST_PANIC)
             | (u32::from(self.test_pool_wait) * Self::TEST_POOL_WAIT)
             | (u32::from(self.gpu_cdef_lists) * Self::GPU_CDEF_LISTS)
-            | (u32::from(self.gpu_grid_check) * Self::GPU_GRID_CHECK)
             | (u32::from(self.gpu_grid) * Self::GPU_GRID)
-            | (u32::from(self.gpu_pred_lists) * Self::GPU_PRED_LISTS)
     }
 
     /// A list of words, separated by commas. Naming any default switch (`nolfmask`, `tilethread`,
     /// `gpucdef`, `gpugrid`), `none` or `default` selects the default switches explicitly.
     /// The other words add to the selection. For example, `time` times the default and
-    /// `nolfmask,tilethread,gpucdef,gridcheck` checks the sink-written grid against the GPU's.
+    /// `nolfmask,tilethread,gpucdef` keeps the sink-written grid.
     /// Returns `None` for an unknown word.
     pub fn from_words(list: &str) -> Option<Self> {
         let mut bits = 0;
@@ -189,7 +164,6 @@ impl ParseOptions {
             time_calls: self.time_calls,
             test_panic: self.test_panic,
             gpu_grid: self.gpu_grid,
-            gpu_pred_lists: self.gpu_pred_lists,
             // Not a switch of these (they are bits of `rav1g.h`): rav1g-parse-check turns it off for its
             // -listslegacy.
             pipe_lists: true,
@@ -246,32 +220,20 @@ mod tests {
         assert_eq!(none_timed.words(), "none,time");
         let gpu_grid = ParseOptions::from_words("gpugrid").unwrap();
         assert_eq!(gpu_grid, ParseOptions { gpu_grid: true, ..ParseOptions::NONE });
-        let grid_check = ParseOptions::from_words("nolfmask,tilethread,gpucdef,gridcheck").unwrap();
-        assert_eq!(grid_check, ParseOptions { gpu_grid: false, gpu_grid_check: true, ..default });
-        assert!(default.sink().gpu_grid && !grid_check.sink().gpu_grid);
-        let gpu_lists = ParseOptions::from_words("gpublists").unwrap();
-        assert_eq!(gpu_lists, ParseOptions { gpu_pred_lists: true, ..default });
-        assert_eq!(gpu_lists.bits(), 6662);
-        for options in [
-            gpu_lists,
-            default,
-            ParseOptions::NONE,
-            one,
-            timed,
-            cpu_lists,
-            only_lists,
-            some,
-            none_timed,
-            gpu_grid,
-            grid_check,
-        ] {
+        assert!(default.sink().gpu_grid && !cpu_lists.sink().gpu_grid);
+        for options in [default, ParseOptions::NONE, one, timed, cpu_lists, only_lists, some, none_timed, gpu_grid] {
             assert_eq!(ParseOptions::from_bits(options.bits()), options);
             assert_eq!(ParseOptions::from_words(&options.words()), Some(options));
         }
         // The switches that are gone, and words that never were.
         assert_eq!(ParseOptions::from_words("stage"), None);
         assert_eq!(ParseOptions::from_words("recordonce"), None);
-        assert_eq!(ParseOptions::from_words("latelists"), None);
+        for word in ["latelists", "cleargrid", "gridcheck", "gpublists"] {
+            assert_eq!(ParseOptions::from_words(word), None);
+        }
+        // The bits of those retired with interface version 3 mean nothing here; rav1g.h refuses them.
+        assert_eq!(ParseOptions::from_bits(ParseOptions::RETIRED), ParseOptions::NONE);
+        assert_eq!(ParseOptions::RETIRED & (ParseOptions::DEFAULT | ParseOptions::TIME_CALLS), 0);
         assert_eq!(ParseOptions::from_words("all"), None);
         assert_eq!(ParseOptions::from_words("tilethread,other"), None);
         assert_eq!(ParseOptions::from_bits(1), ParseOptions::NONE);

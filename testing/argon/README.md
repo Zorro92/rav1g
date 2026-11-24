@@ -41,7 +41,7 @@ the full ZIP, pass `--zip <archive>` to verify its published MD5 before extracti
   folder so an input-format probe cannot stand in for error testing.
 - The Windows executable defaults to WARP. `--hw --launcher wine` can
   use Wine's D3D12 implementation when configured locally. Extra
-  diagnostic flags such as `--decoder-arg=-intraod` can be passed one
+  diagnostic flags such as `--decoder-arg=-poisonbuf` can be passed one
   argument at a time.
 
 Each test gets its own process and watchdog (`--timeout`). For valid

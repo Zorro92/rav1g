@@ -252,7 +252,7 @@ def main():
     parser.add_argument("--timeout", type=int, default=180, help="decoder watchdog seconds per stream")
     parser.add_argument("--launcher", action="append", default=[], help="prefix command, e.g. --launcher wine")
     parser.add_argument("--hw", action="store_true", help="use a hardware adapter instead of WARP")
-    parser.add_argument("--decoder-arg", action="append", default=[], help="additional argument, e.g. --decoder-arg=-intraod")
+    parser.add_argument("--decoder-arg", action="append", default=[], help="additional argument, e.g. --decoder-arg=-poisonbuf")
     args = parser.parse_args()
     if not 0 <= args.shard < args.shards or min(args.jobs, args.threads, args.timeout) < 1:
         parser.error("require 0 <= shard < shards and positive jobs, threads and timeout")

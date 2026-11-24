@@ -206,11 +206,6 @@ cbuffer GenBlockData : register(b0) {
   } cb_wm_params[8];
 };
 
-#if defined(COUNT_PRED_LISTS) || defined(GPU_PRED_LISTS)
-#include "pred_list_common.h"
-#define GPU_LIST_PATH
-#endif
-
 cbuffer GenBlockSRT : register(b1) {
   uint cb_wi_count;
   uint cb_mi_offset;
@@ -219,18 +214,12 @@ cbuffer GenBlockSRT : register(b1) {
   uint cb_row_srart;
   uint cb_index_offset;
   uint cb_index_offset_warp;
-#ifdef GPU_LIST_PATH
-  uint cb_fast_lists;
-  uint cb_group_base;
-  uint cb_list_count;
-  uint cb_rank_offset;
-  uint cb_starts_offset;
-#elif defined(INTER_FAST)
+#if defined(INTER_FAST)
   uint cb_index_offset_fast;
 #endif
 };
 
-#if defined(INTER_FAST) || defined(GPU_LIST_PATH)
+#if defined(INTER_FAST)
 // Test flag -interfast (gen_pred_blocks_fast_packed.hlsl; docs/gpu-av1-decoder.md, "Inter prediction: breakdown and
 // fast paths"). The blocks with one reference that are not warped, and the compound blocks that are
 // averaged or distance weighted, are listed by the fraction of their motion vectors instead of by their
@@ -289,44 +278,8 @@ uint get_mi_index(ByteAddressBuffer grid, int index, uint base) {
   return addr / ModeInfoSize;
 }
 
-#ifdef COUNT_PRED_LISTS
-RWByteAddressBuffer list_scratch : register(u0);
-
-// Two entries per OBMC neighbour (at most four per edge), two for ordinary
-// prediction and two for reconstruction. Sub-8x8 chroma uses at most eight
-// entries and cannot use OBMC. An entry carries up to eight records.
-groupshared uint events[PredGroupSize * PredMaxEvents];
-groupshared uint event_counts[PredGroupSize];
-#define BucketSize 8
-#define Buckets (PredGroupSize / BucketSize)
-groupshared uint histograms[PredMaxLists * Buckets];
-
-int next_gpu_block(int list, uint count, inout uint event, uint lane, uint group) {
-  events[event * PredGroupSize + lane] = list | (count << 10);
-  ++event;
-  return 0;
-}
-#define STORE_PRED(buffer, method, address, value)
-#elif defined(GPU_PRED_LISTS)
-ByteAddressBuffer list_scratch : register(t5);
-
-int next_gpu_block(int list, uint count, inout uint event, uint lane, uint group) {
-  uint rank_address = cb_rank_offset + (group * PredGroupSize + lane) * PredRankBytes + (event >> 1) * 4;
-  uint local_rank = (list_scratch.Load(rank_address) >> ((event & 1) * 16)) & 0xffff;
-  ++event;
-  return local_rank + list_scratch.Load((group * cb_list_count + list) * 4) +
-         list_scratch.Load(cb_starts_offset + PredHeaderBytes + list * 4);
-}
-#endif
-
-#ifndef COUNT_PRED_LISTS
 #define STORE_PRED(buffer, method, address, value) buffer.method(address, value)
-#endif
 
-#ifdef GPU_LIST_PATH
-#define NEXT_PRED(kind, list, count) next_gpu_block(PredList##kind + (list), count, event, lane, group)
-#define FAST_LISTS cb_fast_lists
-#else
 int next_cpu_block(int list, inout int index_addr) {
   int number = blocks_indexes.Load(index_addr);
   index_addr += 4;
@@ -337,7 +290,6 @@ int next_cpu_block(int list, inout int index_addr) {
 #define CpuListWarpBlock cb_index_offset_warp
 #define CpuListFast cb_index_offset_fast
 #define FAST_LISTS 1
-#endif
 
 void generate_blocks(uint record, uint lane, uint group, inout uint event) {
   const int InterBlockSizeIndexLUT[6][6] = {
@@ -423,7 +375,7 @@ void generate_blocks(uint record, uint lane, uint group, inout uint event) {
       int pass_type_index = (pass_type - 1) * InterSizesAllCommon + block_size_id_y;
 
       int dst_ptr;
-#if defined(INTER_FAST) || defined(GPU_LIST_PATH)
+#if defined(INTER_FAST)
       if (FAST_LISTS && pass_type == CompoundAvrg) {
         int fast_list = InterFastCompound + (inter_fast_class(block.z) | (inter_fast_class(block.w) << 2)) * InterSizesAllCommon + block_size_id_y;
         dst_ptr = NEXT_PRED(Fast, fast_list, 1);
@@ -465,7 +417,7 @@ void generate_blocks(uint record, uint lane, uint group, inout uint event) {
         block.w = 0;
 
         int dst_ptr;
-#if defined(INTER_FAST) || defined(GPU_LIST_PATH)
+#if defined(INTER_FAST)
         if (FAST_LISTS) {
           int fast_list = inter_fast_class(block.z) * InterSizesAllCommon + block_size_id_y;
           dst_ptr = NEXT_PRED(Fast, fast_list, 1);
@@ -615,7 +567,7 @@ void generate_blocks(uint record, uint lane, uint group, inout uint event) {
               is_warp_compound ? (comp_type == COMPOUND_DIFFWTD ? 7 : 5) : ((0x6422 >> (comp_type * 4)) & 15);
           int pass_type_index = (pass_type - 1) * InterSizesAllCommon + block_size_id_uv;
           int dst_ptr;
-#if defined(INTER_FAST) || defined(GPU_LIST_PATH)
+#if defined(INTER_FAST)
           if (FAST_LISTS && pass_type == CompoundAvrg) {
             int fast_list = InterFastCompound + (inter_fast_class(block.z) | (inter_fast_class(block.w) << 2)) * InterSizesAllCommon + block_size_id_uv;
             dst_ptr = NEXT_PRED(Fast, fast_list, 2);
@@ -666,7 +618,7 @@ void generate_blocks(uint record, uint lane, uint group, inout uint event) {
             block.w = 0;
 
             int dst_ptr;
-#if defined(INTER_FAST) || defined(GPU_LIST_PATH)
+#if defined(INTER_FAST)
             if (FAST_LISTS) {
               int fast_list = inter_fast_class(block.z) * InterSizesAllCommon + block_size_id_uv;
               dst_ptr = NEXT_PRED(Fast, fast_list, 2);
@@ -798,13 +750,8 @@ void generate_blocks(uint record, uint lane, uint group, inout uint event) {
   const int y_use_palette = MI_Y_PALETTE(mi) != 0;
   const int uv_use_palette = MI_UV_PALETTE(mi) != 0;
 
-#ifndef COUNT_PRED_LISTS
   if (ref0 <= 0 || is_inter_intra) {
-#ifdef GPU_PRED_LISTS
-    const uint intra_base = list_scratch.Load(cb_starts_offset + PredIntraBase);
-#else
     const uint intra_base = 0;
-#endif
     const int tx_size_wide_log2[] = {0, 1, 2, 3, 4, 0, 1, 1, 2, 2, 3, 3, 4, 0, 2, 1, 3, 2, 4};
     const int tx_size_high_log2[] = {0, 1, 2, 3, 4, 1, 0, 2, 1, 3, 2, 4, 3, 2, 0, 3, 1, 4, 2};
     const int mode_to_angle_map[] = {
@@ -1108,8 +1055,6 @@ void generate_blocks(uint record, uint lane, uint group, inout uint event) {
     }
   }
 
-#endif
-
   const int do_recon = (mi.tx_info & 0xff00) == 0;
   const int inter_recon = do_recon && (is_obmc_above || is_obmc_left);
   if (y_use_palette || inter_recon) {
@@ -1141,63 +1086,9 @@ void generate_blocks(uint record, uint lane, uint group, inout uint event) {
   }
 }
 
-
-#ifdef COUNT_PRED_LISTS
-[numthreads(PredGroupSize, 1, 1)]
-void main(uint3 thread : SV_DispatchThreadID, uint lane : SV_GroupIndex, uint3 gid : SV_GroupID) {
-  const uint group = cb_group_base + gid.x;
-  uint n = 0;
-  if (thread.x < cb_wi_count) generate_blocks(thread.x, lane, group, n);
-  event_counts[lane] = n;
-  for (uint i = lane; i < cb_list_count * Buckets; i += PredGroupSize) histograms[i] = 0;
-  GroupMemoryBarrierWithGroupSync();
-
-  // Each worker owns a disjoint range of lanes and a private histogram.
-  // Visit lanes and entries in order, then join the eight histograms.
-  if (lane < Buckets) {
-    for (uint j = 0; j < BucketSize; ++j) {
-      uint record = lane * BucketSize + j;
-      for (uint e = 0; e < event_counts[record]; ++e) {
-        uint address = e * PredGroupSize + record;
-        uint value = events[address];
-        uint slot = (value & 1023) * Buckets + lane;
-        uint before = histograms[slot];
-        histograms[slot] = before + (value >> 10);
-        events[address] = (value & 1023) | (before << 16);
-      }
-    }
-  }
-  GroupMemoryBarrierWithGroupSync();
-
-  for (uint list = lane; list < cb_list_count; list += PredGroupSize) {
-    uint sum = 0;
-    [unroll] for (uint bucket = 0; bucket < Buckets; ++bucket)
-      sum += histograms[list * Buckets + bucket];
-    list_scratch.Store((group * cb_list_count + list) * 4, sum);
-  }
-
-  uint packed = 0;
-  for (uint e = 0; e < n; ++e) {
-    uint value = events[e * PredGroupSize + lane];
-    uint rank = value >> 16;
-    for (uint bucket = 0; bucket < lane / BucketSize; ++bucket)
-      rank += histograms[(value & 1023) * Buckets + bucket];
-    packed |= rank << ((e & 1) * 16);
-    if ((e & 1) || e + 1 == n) {
-      list_scratch.Store(cb_rank_offset + (group * PredGroupSize + lane) * PredRankBytes + (e >> 1) * 4, packed);
-      packed = 0;
-    }
-  }
-}
-#else
 [numthreads(64, 1, 1)]
 void main(uint3 thread : SV_DispatchThreadID, uint lane : SV_GroupIndex, uint3 gid : SV_GroupID) {
   if (thread.x >= cb_wi_count) return;
   uint event = 0;
-#ifdef GPU_PRED_LISTS
-  generate_blocks(thread.x, lane, cb_group_base + gid.x, event);
-#else
   generate_blocks(thread.x, lane, 0, event);
-#endif
 }
-#endif

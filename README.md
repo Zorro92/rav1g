@@ -73,8 +73,8 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
 - **Intra v2** (`-intrav2`) is bit-exact but 2.3–2.4x slower. It is a negative result, off by
   default and kept for reference.
 - **Intra prediction** uses angle-specific wavefront dependencies and direct prediction for
-  exact vertical and horizontal angles. `-intraod` selects the conservative wavefront with the
-  DXC `-Od` kernels.
+  exact vertical and horizontal angles. (`-intraod`, the conservative wavefront with the DXC `-Od`
+  kernels, is retired.)
   The optimized high-bit-depth kernels use wave sums for large DC and CFL reductions.
   The default 10-bit shader prepares filtered and upsampled samples in separate ranges of
   group memory, cutting one group sync. A chroma-from-luma plane with zero alpha uses

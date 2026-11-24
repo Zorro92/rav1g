@@ -152,7 +152,6 @@ unsafe fn new_entry<'a>(dec: *mut Av1Core, stage: &'static CStr, size: usize) ->
         e.bytes_per_sample = if td.is_hbd != 0 { 2 } else { 1 };
         e.bit_depth = td.bitdepth;
         e.size = size;
-        e.gpu_record_size = 0;
         td.dump_count += 1;
         Some(e)
     }
@@ -243,33 +242,6 @@ pub(crate) unsafe fn stage_dump_data(
     }
 }
 
-/// A list with a GPU-written length. Copy the length first, then enough bytes
-/// for the sink's bound. The completion thread delivers only the used records.
-///
-/// # Safety
-/// `dec` is recording the frame and both buffers belong to it. `counts` is
-/// already a copy source. `records` is a UAV.
-pub(crate) unsafe fn stage_dump_gpu_records(
-    dec: *mut Av1Core,
-    stage: &'static CStr,
-    counts: av1_stage_dump_region,
-    records: av1_stage_dump_region,
-    stride: usize,
-) {
-    if records.size == 0 {
-        return;
-    }
-    // SAFETY: the caller's contract.
-    unsafe {
-        let Some(e) = new_entry(dec, stage, size_of::<u32>() + records.size) else { return };
-        e.kind = 2;
-        e.bytes_per_sample = 0;
-        e.gpu_record_size = stride;
-        copy_region(dec, e, 0, counts.src, counts.offset, size_of::<u32>(), false);
-        copy_region(dec, e, size_of::<u32>(), records.src, records.offset, records.size, true);
-    }
-}
-
 /// `av1_stage_dump_mode_info` of the C++: the mode info the stages of the frame read: the grid (one
 /// entry per 4x4 unit, rows of mi_stride; `pool_base` is what an entry has above the place of its record
 /// in the pool, where the C++ host's entries are addresses and its base that of the pool) and the records it points to. Of the pool only the records of
@@ -293,7 +265,7 @@ pub(crate) unsafe fn stage_dump_mode_info(dec: *mut Av1Core, cm: *const AV1_COMM
         let record = size_of::<MB_MODE_INFO>();
         let entry = size_of::<crate::sys::MiGridEntry>();
         let grid_bytes = (entry * cm.mi_stride as usize * cm.mi_rows as usize).min(grid_object.size);
-        let index_base = if super::gpu_pred_lists::enabled((*dec).parser_options) { "intra" } else { "all" };
+        let index_base = "all";
         let text = format!(
             "buffer=mi_grid entry={entry} mi_stride={} mi_cols={} mi_rows={} pool_base={} record={record} index_base={index_base}\n",
             cm.mi_stride,
@@ -489,12 +461,10 @@ pub(crate) unsafe fn stage_dump_frame_info(dec: *mut Av1Core, cm: *const AV1_COM
 /// # Safety
 /// `td` is the slot of a frame that has completed on the GPU and is not back in its pool.
 pub(crate) unsafe fn stage_dump_deliver(td: &mut av1_frame_thread_data) {
-    let order = td.intra_main.dump_order();
     let (callback, context) = {
         let wanted = WANTED.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         wanted.as_ref().map_or((None, 0), |wanted| (Some(wanted.callback), wanted.context))
     };
-    let mut empty = 0;
     for i in 0..usize::try_from(td.dump_count).unwrap_or(0) {
         let info = td.dump_info.as_ptr();
         let (frame_number, is_sef) = (td.frame_number, td.dump_is_sef);
@@ -507,7 +477,7 @@ pub(crate) unsafe fn stage_dump_deliver(td: &mut av1_frame_thread_data) {
                     readback.read(e.size, |data| {
                         let mut dump: sys::av1_stage_dump = std::mem::zeroed();
                         dump.frame_number = frame_number;
-                        dump.index = (i - empty) as c_int;
+                        dump.index = i as c_int;
                         dump.stage = e.stage;
                         dump.kind = e.kind;
                         dump.bytes_per_sample = e.bytes_per_sample;
@@ -525,34 +495,6 @@ pub(crate) unsafe fn stage_dump_deliver(td: &mut av1_frame_thread_data) {
                         dump.data = data.as_ptr();
                         dump.size = e.size;
                         dump.layout = e.layout;
-                        let layout;
-                        if e.gpu_record_size != 0 {
-                            let (count, rest) = data.split_at(4);
-                            let count = u32::from_le_bytes(count.try_into().unwrap()) as usize;
-                            let stage = CStr::from_ptr(e.stage).to_string_lossy();
-                            let Some(size) = count.checked_mul(e.gpu_record_size).filter(|&size| size <= rest.len())
-                            else {
-                                log(
-                                    true,
-                                    &format!(
-                                        "DUMPSTAGES frame {frame_number}: {stage} exceeds the prediction record bound"
-                                    ),
-                                );
-                                return;
-                            };
-                            if count == 0 {
-                                empty += 1;
-                                return;
-                            }
-                            layout = CString::new(format!(
-                                "buffer={stage} record={} count={count}{order}\n",
-                                e.gpu_record_size
-                            ))
-                            .expect("a stage dump layout");
-                            dump.data = rest.as_ptr();
-                            dump.size = size;
-                            dump.layout = layout.as_ptr();
-                        }
                         callback(context as *mut c_void, &dump);
                     })
                 })

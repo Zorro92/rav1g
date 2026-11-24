@@ -48,8 +48,8 @@ one commit each:
   Intra v2 also adds intra dispatch counters to the `-gputime` output and a
   host-side comparison of the two paths (`testing/intra_check`), which is not part of the
   player build. It is bit-exact but slower than the original path.
-- **Intra optimisation A/B** uses DXC-optimized `intra_main` and `intra_main_hbd` by default.
-  `-intraod` selects the previous DXC `-Od` kernels. See
+- **Intra optimisation A/B** uses DXC-optimized `intra_main` and `intra_main_hbd`. `-intraod`,
+  which selected the previous DXC `-Od` kernels, is retired. See
   [Intra optimisation A/B](#intra-optimisation-ab--intraod).
 - **High-bit-depth intra**: `intra_main_hbd.hlsl` prepares both edges together and shares the
   DC and CFL reductions across a block's threads in the group. It uses three group syncs. See
@@ -61,9 +61,9 @@ one commit each:
   away altogether; see
   [Pipeline slots and clears](#pipeline-slots-and-clears--slots--gpuclear--cpuclear--syncclear).
   The changes are in the host and the test player. No shader changes. Without the flags the
-  decoder has two slots and clears no grid of a slot for a frame (`-syncclear` clears on the
-  decode thread, as upstream does; `-cpuclear` on the completion thread; `-gpuclear` on the
-  GPU). The same section covers
+  decoder has two slots and clears no grid of a slot for a frame (the switches that cleared on
+  the decode thread, as upstream does, on the completion thread or on the GPU, `-syncclear`,
+  `-cpuclear` and `-gpuclear`, are retired). The same section covers
   the `MEMORY` log lines of a decoder creation (what was allocated, and which allocation
   failed) and the decoder's size, which the player takes from the stream (`-nofitsize`
   for the fixed 4096x2176 10-bit).
@@ -122,8 +122,8 @@ one commit each:
   `gen_pred_blocks_fast_packed.hlsl`). See [Inter fast path](#inter-fast-path--interfast). Off by
   default; the output does not change, and without the flag the lists and dispatches are the
   ones that always ran.
-- **Experiments**: `-lfhsplit`, `-intraedgefix` and a second package whose shaders sync all
-  memory at every group sync, for the bugs that show on the console only. See
+- **Experiments**: a second package whose shaders sync all memory at every group sync, for the
+  bugs that show on the console only (`-lfhsplit` and `-intraedgefix` are retired). See
   [Experiments](#experiments). Off by default; the output does not change.
 - **Shader pick**: in the revision 4 package, `-shaderpick od=<list>,dxc=<list>` selects
   default or `-Od` DXIL per shader for compiler diagnostics.
@@ -374,8 +374,8 @@ The log lines at the start of each task show which defaults and opt-out flags ar
 | Memory reductions | the library's default for the decoder's size: part 1, one back buffer shared by all frames (frame buffer pool 12 → 10), and since package 0.2.186 for a decoder above 1920x1088 part 2, the mode info pool at half (55.8 MiB less at 4K; [memory.md](memory.md#the-wait-of-the-second-frame-in-parse-in-a-pool-at-half-candidate-2)), since 0.2.191 part 32, the frame buffer bound at the recording (24.2 MiB), and since 0.2.193 part 4, the coefficient pool at four fifths (12.0 MiB); no measurable time cost; see [Smaller decoder](#smaller-decoder--lowmem) | `Low memory parts: default (the library's: 1 shared back buffer, and above 1920x1088 also 2 mode info pool at half, 4 smaller coefficient pool, 32 frame buffer bound at the recording)`; the decoder's `MEMORY decoder created options` line says which pool it is | `-lowmemparts 1`: the mode info pool of the worst case, the default up to package 0.2.185; `-lowmemparts 0`: none, every frame takes its back buffer from the pool (`Low memory parts: 0 (none, -lowmemparts 0)`); `-lowmemparts N`: exactly the parts in `N`; `-lowmem`: all three (`-lowmemparts 7`) |
 | Pipeline slots | 2 | `Frame slots: 2` | `-slots 3`, `-slots 4` |
 | Parser | the parse pass of rav1d, with its switches `nolfmask`, `tilethread` and (since package 0.2.197) `gpucdef` on | `Parser: the parse pass of rav1d`, `Parser switches (-parseopt): nolfmask tilethread gpucdef` | none since package 0.2.159: the entropy decoder of libaom (`-parser c`) left the decoder; up to 0.2.157 `Parser: the entropy decoder of libaom (-parser c)`; `-parseopt` for the switches; see [Parser](#parser--parser) |
-| Clears of a slot | none: the wavefront of intra prediction is kept at the edges of the tiles (since package 0.2.146.0) | `Clears: none needed (default: intra wavefront at the edges of the tiles; -gpuclear, -cpuclear and -syncclear keep it in the slot's grid and clear that)` | `-gpuclear`, `-cpuclear`, `-syncclear`: the wavefront in the slot's grid, cleared for every frame by the GPU, the completion thread (the default of 0.2.140 to 0.2.144; `-asyncclear` is the same) or the decode thread; see [Clears](#clears) |
-| Intra prediction | frame-wide wavefront with prefetching and single-edge dependencies | `Intra main shader: prefetching with single-edge dependencies` | `-intrav2`, `-intraod`, `-intrasingleedgelegacy` |
+| Clears of a slot | none: the wavefront of intra prediction is kept at the edges of the tiles (since package 0.2.146.0) | `Clears: none needed (intra wavefront at the edges of the tiles)` | none: `-gpuclear`, `-cpuclear` and `-syncclear` are retired; see [Clears](#clears) |
+| Intra prediction | frame-wide wavefront with prefetching and single-edge dependencies | `Intra main shader: prefetching with single-edge dependencies` | `-intrav2`, `-intrasingleedgelegacy` |
 | Unscaled single-reference and average/distance compound prediction on size lists | `inter_main_v2` and `inter_compound_v2`, with HBD variants | `Inter shaders: inter_main_v2, inter_compound_v2 (default)` | `-interfast` selects [motion-class lists and shaders](#inter-fast-path--interfast). |
 
 
@@ -446,6 +446,12 @@ per-frame md5 of the conformance set and Argon).
 | `-intralistslegacy` (`av1_set_intra_lists_legacy`) | the intra block lists with the previous loops of `av1_mi_push_block` and four stamped edge arrays | `intra_block_edges`: 90 to 93 % of the cycles of the intra lists (about 1.5 ms of a 4K key frame); console A/B done. The loops stay for the intra step timing and as the reference of `rav1g-parse-check` |
 | `-parselistslegacy` (`av1_set_parse_lists_legacy`) | the block lists of a tile counted on its parse thread, superblock by superblock | the lists a superblock row behind the entropy decoder: 32.8 → 30.4 ms mean frame wall on `j4k40` (laptop, 4 workers, 2 frames in parse); console A/B done. One parse thread still counts superblock by superblock |
 | `-parseopt latelists` (`RAV1G_PARSER_OPTION_LATE_LISTS`) | the block lists of a tile counted in one pass at its end | the lists superblock by superblock since package 0.2.141: 4.7 ms less of a heavy 4K frame on the console |
+| `-intraod` (`rav1g_set_intra_opt(false)`) | the conservative intra kernels, `intra_main_legacy(_hbd)`, built with DXC `-Od` | the optimized kernels are faster; the conservative code stays as the reference of `testing/intra_check` (its wrappers moved there) and in the od set of the shader-pick package |
+| `-parseopt gpublists` (`RAV1G_PARSER_OPTION_GPU_PRED_LISTS`) | the inter, warp and reconstruction lists counted by the GPU (`pred_list_count`, `pred_list_scan`, `gen_pred_blocks_gpu`, indirect dispatches) | 4 % slower on the console |
+| `-parseopt cleargrid` (`RAV1G_PARSER_OPTION_CLEAR_GRID`) | the mode info grid of a slot cleared for every frame | the grid kept between frames of one size: 4.2 MB a 4K frame the CPU does not write |
+| `-parseopt gridcheck` (`RAV1G_PARSER_OPTION_GPU_GRID_CHECK`) | a second grid by the GPU, held against the sink's (`GRIDCHECK`) | the step before the default `gpugrid`, which has no sink grid to hold against; the stage dump `mi_grid` holds the GPU's grid against a decoder whose sink writes it |
+| `-lfhsplit 1|2` (`rav1g_set_lf_h_split`), `-intraedgefix` (`rav1g_set_intra_edge_fix`) | the horizontal loop filter in rows of blocks; the 8-bit above edge filter bound of `intra_main.hlsl` | tools of an old console-bug hunt ([Experiments](#experiments)): none changed the console's output |
+| `-gpuclear`, `-cpuclear` (`-asyncclear`), `-syncclear` (`rav1g_set_clears`, `rav1g_set_async_clear`) | the wavefront of intra prediction in the slot's grid, cleared for every frame by the GPU, the completion thread or the decode thread | the wavefront at the edges of the tiles since package 0.2.146.0: no clears, 3.5 MB a 4K frame the CPU does not write ([Clears](#clears)) |
 
 ## Timing run (`-gputime` and `-nopresent`)
 
@@ -486,8 +492,8 @@ span exactly**, and any gap between two stages is counted in the later one.
 
 | GPU stage | What it covers |
 | --- | --- |
-| `gen_blocks` | prediction block generation; with `-parseopt gpugrid` (and `gridcheck`) also the pass in front of it that builds the mode info grid from the records (`mi_grid_build`), which has no mark of its own. With the merged front (the default) it is the whole front of the frame: the grid build, then in one step the residual clear, the transform sort, the CDEF lists, the loop filter's edge lists and gen_pred_blocks; `residual_clear`, `idct_sort`, `lf_gen` and `cdef_lists` have no mark |
-| `pred_count`, `pred_scan` | With `-parseopt gpublists`, count and number each group's prediction records, then scan the group counts and write the indirect dispatch arguments. |
+| `gen_blocks` | prediction block generation; with `-parseopt gpugrid` also the pass in front of it that builds the mode info grid from the records (`mi_grid_build`), which has no mark of its own. With the merged front (the default) it is the whole front of the frame: the grid build, then in one step the residual clear, the transform sort, the CDEF lists, the loop filter's edge lists and gen_pred_blocks; `residual_clear`, `idct_sort`, `lf_gen` and `cdef_lists` have no mark |
+| `pred_count`, `pred_scan` | no time any more: the GPU lists of `-parseopt gpublists`, retired with interface version 3 |
 | `display` | With `-displaypass WxH` (`Rav1gSettings::display`): the display pass, the frame into the display-size image (downscaled, tone-mapped, quantised), at the end of the frame's command list in place of the output copy; behind `film_grain` on a grain frame. The stage an application shows as its display stage (`AV1_PERF_GPU_DISPLAY`). |
 | `residual_clear` | residual buffer fill (the whole buffer, every frame). With the merged front it has no mark: its time is in `gen_blocks` (as are `idct_sort`, `lf_gen` and `cdef_lists`; their marks went with `-frontmergelegacy`) |
 | `idct_sort`, `idct` | transform block sort, inverse transform (all types) |
@@ -498,7 +504,7 @@ span exactly**, and any gap between two stages is counted in the later one.
 | `ext_borders` | reference border extension |
 | `film_grain` | applies the grain templates to the frame (`film_grain_filter*`) |
 | `copy_plane`, `output_copy` | copy shader into the staging area, then the copy into the output buffer or textures. On the direct semi-planar path with the fusion (the default) only frames without CDEF, superres and loop restoration run `copy_plane`: its `mean` is theirs, the time of the fused stores is in `cdef`, `superres` or `loop_rest`; read its `frames` and `avg` columns, and the `output images` line below the table |
-| `slot_clear` | with `-gpuclear`: the grids of the frame's slot cleared at the end of the command list |
+| `slot_clear` | no time any more: the clears of `-gpuclear`, retired with interface version 3 |
 | `cdef_lists` | the two lists CDEF reads (the default; not with `-parseopt nolfmask,tilethread` or `none`), written from the mode info in front of `cdef` (it is the last line of the table, not where it runs) |
 
 A timestamp records when the GPU reaches that point of the list. Stages that end in a
@@ -523,7 +529,7 @@ CPU timers (QueryPerformanceCounter, all in ms per frame):
 | `fence_wait`, `gpu_latency` | completion thread: time blocked on the frame's fence, and submit-to-fence time |
 | `grain_template` | time to generate the grain templates and write them into the frame's upload buffer (part of `rec_copy`, on the thread that records the frame) |
 | `notify` | time inside the frame-ready callback. With `-progress` this includes its two log writes per frame. |
-| `async_clear` | completion thread: the slot's clears after the frame's fence. With `-cpuclear`; without a flag only what a frame still has to clear (nothing with rav1d's parse, the mode info grid with `-parser c`). Zero with `-syncclear` and `-gpuclear`. |
+| `async_clear` | completion thread: the slot's clear after the frame's fence: the wavefront grid of a frame that kept its wavefront in it (no memory for the edges of its tiles, an intra block copy frame of `-intrav2`); nothing for every other frame. |
 
 ### Log lines
 
@@ -1279,7 +1285,7 @@ strides and combine them with an integer wave sum. The first thread combines the
 serially for small reductions and when the wave membership check fails.
 
 The wavefront schedule, bindings and video buffers are those of the existing frame-wide path.
-DXC optimizes the default kernel. `-intraod` selects the previous kernel built with `-Od`.
+DXC optimizes the default kernel. (`-intraod`, which selected the previous kernel built with `-Od`, is retired.)
 
 On the console (2026-11-18, package 0.2.218 against 0.2.220's default path, the same session after a
 restart, three runs of 300 frames each, the mean; the md5 set of 15 streams is unchanged):
@@ -1305,6 +1311,12 @@ the edge lists and the filter stages. The check covers both bit depths, vertical
 and odd passes, and all three horizontal schedules.
 
 ## Intra optimisation A/B (`-intraod`)
+
+`-intraod` is retired ([Retired switches](#retired-switches)): the optimized kernels are the only
+ones, and `-intraopt` is accepted and changes nothing. The conservative kernels it selected (the
+`INTRA_MAIN_LEGACY` parts of `intra_main.hlsl` and `intra_main_hbd.hlsl`) stay as the reference of
+`testing/intra_check`, and the od set of the shader-pick package builds them. The rest of this
+section is the record of the A/B.
 
 Use the same build and task settings on both sides of the comparison.
 
@@ -1386,20 +1398,17 @@ them. Four are on by default; why each exists and what it changed where it was m
 | `tilethread` | on | A tile stays on the thread it is on between its superblock rows. Without it rav1d puts the tile back into its task queue after every superblock row and wakes a waiting thread, and the next row runs on whichever of the `-t` threads takes it. |
 | `gpucdef` | on | The two lists CDEF reads (the strength index of every 64x64 block, the skip flag of every 8x8 block) are written by a pass of the frame's command list in front of CDEF (`cdef_lists.hlsl`, the GPU stage `cdef_lists` of `-gputime`) and not by the thread that records the frame (`cpu rec_cdef_lr`): 3.0 ms a frame of `j4k40` off that thread for 0.24 ms of the GPU on the console, 2.2 % more frames a second ([phase2-rav1d.md](phase2-rav1d.md#records-written-once-and-the-lists-of-cdef-on-the-gpu-2026-11-16)). The same lists. Read when the decoder is created: the two buffers of a slot are then of the type `HostRW`. |
 | `time` | off | With `-gputime`: the calls of the sink are timed (`sink_calls`, below). Two readings of the processor's time stamp counter per block and per transform block. |
-| `cleargrid` | off | The mode info grid of a pipeline slot is cleared for every frame (4.2 MB at 4K), as up to package 0.2.140, and not only for a frame of another size than the frames before it on the slot. |
 | `gpugrid` | on | The mode info grid of a frame (for every 4x4 unit the record of its block, 1.98 MiB a 4K frame) is built by a pass of the frame's command list from the frame's mode info records (`mi_grid_build.hlsl`, in front of every stage that reads the grid; its GPU time is in the stage `gen_blocks` of `-gputime`) and not written by the parse threads: `sink_grid` is then 0 and `sink_calls` smaller by it (1.18 ms a frame of `d2_300` and 1.11 of `j4k40` on the console before the switch). What the parse threads read through the grid they get from the edges of the tile. The same grid, records and lists. Read when the decoder is created: the grid of a slot is then a buffer a command list may write, and the decoder has the lists of CDEF by the GPU as with `gpucdef`, whatever the list says (`-parseopt none,gpugrid` too), because no thread of the CPU may read the grid ([phase2-rav1d.md](phase2-rav1d.md#the-grid-built-by-the-gpu-the-switch-2026-11-18)). |
-| `gridcheck` | off | `rav1g-dec` only (the test player does not take the word). A check, not a way of doing the parse: a pass in front of the frame's stages (`mi_grid_build.hlsl`) builds the mode info grid from the frame's records into a second grid of the slot, and the decoder holds it against the grid the parse wrote when the frame is done; at its release a `GRIDCHECK` line says how many frames and units were held and how many differed (an error line when any did). The first step of the grid built by the GPU ([phase2-rav1d.md](phase2-rav1d.md#the-grid-built-by-the-gpu-the-check-2026-11-18)). Every slot has the second grid and a list of the frame's runs of records. Use `-parseopt nolfmask,tilethread,gpucdef,gridcheck` to keep the sink-written grid for the comparison. |
-| `gpublists` | off | The GPU counts the inter, warp and reconstruction lists. The parser still writes the intra lists and wavefront. Compare `-parseopt time` with `-parseopt time,gpublists` under `-gputime`. Per-dispatch inter counters are available on the CPU list path. |
 
 `-parseopt <word>[,<word>...]` says which are on:
 
 - Naming `nolfmask`, `tilethread`, `gpucdef`, `gpugrid`, `none` or `default` selects the default
   switches explicitly. `-parseopt none` clears all four. `-parseopt nolfmask,tilethread,gpucdef`
   keeps the sink-written grid. `-parseopt default` selects all four.
-- `time`, `cleargrid` and `gpublists` add to the selection. `-parseopt time` times the defaults and
+- `time` adds to the selection. `-parseopt time` times the defaults and
   `-parseopt none,time` times the parse with all four default switches off.
-- Another word is an error of the task (`latelists`, the block lists of a tile counted at its end,
-  was a word until interface version 3; `stage` and `all` were words until package 0.2.138; the
+- Another word is an error of the task (`latelists`, `cleargrid`, `gridcheck` and `gpublists` were
+  words until interface version 3, [Retired switches](#retired-switches); `stage` and `all` were words until package 0.2.138; the
   switch `stage` is gone, and so is `recordonce`, a word of package 0.2.196 alone: a mode info
   record written to its pool once, the slower way,
   [phase2-rav1d.md](phase2-rav1d.md#records-written-once-and-the-lists-of-cdef-on-the-gpu-2026-11-16)).
@@ -1413,7 +1422,6 @@ them. Four are on by default; why each exists and what it changed where it was m
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt tilethread
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt nolfmask
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt time
--i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt cleargrid
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt nolfmask,tilethread
 -i /streams/<clip> -t 6 -frate -1 -nopresent -gputime -parseopt time
 ```
@@ -1641,9 +1649,7 @@ happens to those clears. None of them changes the decoded output.
 | --- | --- |
 | `-slots N` | The decoder is created with `N` pipeline slots, `N` = 2, 3 or 4. Default 2; a task with [`-parseframes`](#frames-in-parse--parseframes) and no `-slots` gets the slots of its frames in parse. Any other value is refused: the task is skipped with `Invalid arguments string. -slots N is not allowed: the decoder takes 2 to 4 slots.` |
 | (no flag) | **No grid of a slot is cleared for a frame** (since package 0.2.146.0): the wavefront of intra prediction is kept in a few KB at the edges of the tiles, and the mode info grid is kept from frame to frame (rav1d's parse). See [Clears](#clears). |
-| `-gpuclear` | The wavefront in the slot's grid, as up to package 0.2.144, and **the GPU clears the grid**: the frame's command list ends with the clear, so the slot is clean when the frame's fence signals. No thread of the CPU clears. The decoder of such a task is created with grids the GPU may write, so the player creates a decoder of its own for it. |
-| `-cpuclear` | The wavefront in the slot's grid, cleared by the GPU completion thread after the fence of the frame that used the slot, before the slot goes back to the pool: the default of packages 0.2.140 to 0.2.144. `-asyncclear` is its older name and still accepted. |
-| `-syncclear` | The wavefront in the slot's grid, cleared by the decode thread when it takes the slot for a frame: the default up to package 0.2.139, and what upstream does. |
+| `-gpuclear`, `-cpuclear` (`-asyncclear`), `-syncclear` | Retired with interface version 3 ([Retired switches](#retired-switches)): they kept the wavefront in the slot's grid and had it cleared for every frame by the GPU, the completion thread (the default of packages 0.2.140 to 0.2.144) or the decode thread (the default up to package 0.2.139, and what upstream does). |
 | `-nofitsize` | The decoder is created for 4096x2176 10-bit whatever the stream is, as it was up to package 0.2.7.0. Without it (the default) the decoder is created for the stream's largest frame size and bit depth, which makes every buffer smaller; see [Decoder size](#decoder-size--nofitsize). `-fitsize` is still accepted and changes nothing. |
 | `-lowmem` | All three memory reductions: one back buffer shared by all frames and the mode info pool at half (the two of the default), and the smaller coefficient pool; see [Smaller decoder](#smaller-decoder--lowmem). |
 | `-lowmemparts N` | Exactly the reductions in `N`, the sum of 1 (shared back buffer), 2 (the mode info pool at half: a frame that needs more than the pool is a decode error), 4 (a coefficient pool of four fifths, 12.0 MiB less at 3840x2176: a frame with more than 24 values a 4x4 unit on average is a decode error, [memory.md](memory.md#the-coefficient-pool-at-four-fifths-candidate-6)) and 32 (the frame buffer bound at the recording: with more than one frame in parse a frame takes its frame buffer when it is recorded, and the pool has 10 frame buffers where three slots have 11; only together with part 1, in the default above 1920x1088 since package 0.2.191 and not in `-lowmem`, [memory.md](memory.md#the-frame-buffer-bound-at-the-recording-candidate-5)). Without the flag the library chooses by the decoder's size: 1 up to 1920x1088, 39 above (35 above in packages 0.2.191 and 0.2.192, 3 in packages 0.2.186 to 0.2.190, 1 at every size up to package 0.2.185). A value that is given is taken as it is at every size: `-lowmemparts 1` is the mode info pool of the worst case, `-lowmemparts 0` none of them, `-lowmem` is `-lowmemparts 7`, `-lowmemparts 35` is the default of a 4K decoder with the frame buffer bound at the recording, and `-lowmemparts 39` that default with the coefficient pool at four fifths (to compare with the default on the console). |
@@ -1654,10 +1660,8 @@ happens to those clears. None of them changes the decoded output.
 
 Without any of them the decoder has two slots, clears no grid of a slot, is sized for the
 stream and shares one back buffer (see
-[Defaults and opt-out flags](#defaults-and-opt-out-flags)). `-gpuclear`, `-cpuclear` and
-`-syncclear` are the choices of one switch: two of them on one task line are an error of the
-task. Otherwise the flags are independent of each other and of `-cdefv1`, `-intrav2`,
-`-intraod`, `-gputime`, `-nopresent` and the md5 flags.
+[Defaults and opt-out flags](#defaults-and-opt-out-flags)). The flags are independent of each
+other and of `-intrav2`, `-gputime`, `-nopresent` and the md5 flags.
 
 **Console results so far (2026-11-11, package 0.2.5.0, app mode, both 4K 10-bit clips):**
 
@@ -1697,17 +1701,7 @@ Every task's log says what is in effect:
 
 ```text
 Frame slots: 2
-Clears: none needed (default: intra wavefront at the edges of the tiles; -gpuclear, -cpuclear and -syncclear keep it in the slot's grid and clear that)
-```
-
-```text
-Frame slots: 3
-Clears: GPU, at the end of the frame's command list; intra wavefront in the slot's grid (-gpuclear)
-```
-
-```text
-Clears: completion thread; intra wavefront in the slot's grid (-cpuclear)
-Clears: decode thread; intra wavefront in the slot's grid (-syncclear)
+Clears: none needed (intra wavefront at the edges of the tiles)
 ```
 
 ### Slots
@@ -2690,9 +2684,12 @@ the mode info grid (one pointer per 4x4 block, set to zero; 4.0 MiB for a 3840x2
 and the intra iteration grid, the wavefront grid (set to -1; 3.5 MiB). On the console the
 processor has a fraction of its memory bandwidth for most of a playback
 ([the slow state](phase2-rav1d.md#console-after-step-3-rav1d-is-the-default)), so these
-7.5 MB a frame were first moved off the decode thread and then removed. What happens to
-each now, and with which flag ([phase2-rav1d.md](phase2-rav1d.md#no-clears-by-the-cpu) has
-the reasons and the measurements):
+7.5 MB a frame were first moved off the decode thread and then removed. The flags of the
+table below other than "no flag" are retired with interface version 3; the table and the
+timings behind it are the record of the A/B ([phase2-rav1d.md](phase2-rav1d.md#no-clears-by-the-cpu)
+has the reasons and the measurements). A frame that still keeps its wavefront in the grid (no
+memory for the edges of its tiles, or an intra block copy frame of `-intrav2`) has it cleared by
+the completion thread behind it:
 
 | | no flag | `-gpuclear` | `-cpuclear` | `-syncclear` |
 | --- | --- | --- | --- | --- |
@@ -3442,19 +3439,17 @@ that says so. Not run on the console yet; `warp_decoder` decodes the vector righ
 
 For the two bugs that show on the console only (8-bit streams, references of another size;
 [gpu-av1-decoder.md](gpu-av1-decoder.md#bit-fields-of-width-0-2026-11-12-candidate-fix-not-yet-run-on-the-console)).
-Each is off by default, and on a device that follows D3D each leaves the output as it is: the
-conformance run decodes the whole set on WARP once more with each of them and gets the same
-results. The task's log has an `Experiments:` line that says what is in effect.
+Off by default, and on a device that follows D3D it leaves the output as it is. The task's log has
+an `Experiments:` line that says what is in effect. The flags `-lfhsplit 1|2` and `-intraedgefix`
+of this hunt are retired with interface version 3 ([Retired switches](#retired-switches)): none of
+them changed the console's output, and the bugs were found elsewhere.
 
 The vertical loop filter's overlapping register write caused the 8-bit mismatch. A reference-file
 error caused the scaled-reference mismatch. Enable the `experiments` input on a manual dispatch
-to build the uavsync package and exercise these flags. The input defaults to false.
+to build the uavsync package and decode the set with it. The input defaults to false.
 
 | | What it changes | Why |
 | --- | --- | --- |
-| `-lfhsplit 1` | The horizontal loop filter of a plane is no longer one dispatch: first the even rows of blocks (a block is 4 columns by 64 rows), a UAV barrier, then the odd rows. | The first edge of a block reads and writes the last rows of the block above it, which another thread group of the same dispatch filters; the vertical filter is two dispatches for the same reason. By the rules of the loop filter the rows two neighbouring edges write never overlap, and what one reads of the other's it does not use, so the single dispatch should be right; the flag tests that on the device. |
-| `-lfhsplit 2` | Every row of blocks is a dispatch of its own, top to bottom, with a UAV barrier behind each: the order WARP comes closest to. Slower (34 dispatches and barriers per plane at 2160 rows). | The same, with nothing left in parallel between rows of blocks. |
-| `-intraedgefix` | `intra_main.hlsl` (8-bit) stops the taps of the above edge filter at the last entry the filter writes, as `intra_main_hbd.hlsl` and the left edge do, instead of at the last entry that was loaded. | The two shaders differ there. The entries between the two bounds are loaded and all hold the last available sample, so the sums are the same; `testing/intra_check` passes with either bound. The flag tests that on the device. |
 | the **uavsync package** (artifact `rav1g-testplayer-uavsync-x64-<run id>`) | Every group sync of every shader is compiled as `AllMemoryBarrierWithGroupSync()` instead of `GroupMemoryBarrierWithGroupSync()` (a DXC define; the library of the package is built from those headers with the `uavsync` feature of the crates). | A group sync of the group memory orders the group memory. Several shaders also store frame buffer words in one step and have another thread of the group load them in a later step (the horizontal loop filter from edge to edge, filter intra before its residuals are added); D3D asks for a sync of all memory for that. |
 
 The uavsync package is the default package (`rav1g.dll`, the C of clang) with these shaders. It

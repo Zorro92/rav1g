@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use rav1g::StreamInfo;
-use rav1g::switches::{self, Clears, PerfFrame, Poison};
+use rav1g::switches::{self, PerfFrame, Poison};
 use windows::Win32::Graphics::Direct3D12::ID3D12Fence;
 
 use crate::args::{self, EXIT_ERROR, EXIT_MISMATCH, EXIT_PASS, Task};
@@ -766,14 +766,9 @@ fn create_decoder(
         },
         "cdef_filter_v3",
         if task.intrav2 { "intra_v2" } else { "frame-wide wavefront" },
-        if task.intraopt { " (optimized main)" } else { " (legacy main, -intraod)" },
+        " (optimized main)",
         "loop_restoration / loop_restoration_wiener",
-        match task.clears {
-            Clears::NotNeeded => "none needed",
-            Clears::Gpu => "GPU (-gpuclear)",
-            Clears::CompletionThread => "completion thread (-cpuclear)",
-            Clears::DecodeThread => "decode thread (-syncclear)",
-        },
+        "none needed",
         task.threads,
         task.queue_size,
         device_size as f64 / (1024.0 * 1024.0),
@@ -931,9 +926,6 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     library.set_poison(task.poison);
     // -memstats: set while no frame is in flight; the decoder writes its lines when it has drained.
     library.set_memory_stats(if task.memstats { 1 + u32::from(task.progress) } else { 0 });
-    // -gpuclear, -cpuclear, -syncclear: also before the decoder exists. A decoder whose grids the GPU
-    // clears is created with grids the GPU may write.
-    library.set_clears(task.clears);
     if task.poison == Poison::ModeInfo {
         say!("POISON {}: the mode info pool (-poisonmi) filled with 0xA5 when the decoder creates it", task.name);
     } else if task.poison != Poison::Off {
@@ -992,11 +984,8 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     library.set_choices(&Choices {
         skip_film_grain: task.skip_film_grain,
         intra_v2: task.intrav2,
-        intra_opt: task.intraopt,
         intra_filter_legacy: task.intrafilterlegacy,
         intra_single_edge_legacy: task.intrasingleedgelegacy,
-        lf_h_split: task.lfhsplit as u32,
-        intra_edge_fix: task.intraedgefix,
         inter_fast: task.interfast,
     });
     if task.displaypass.0 > 0 {
@@ -1029,9 +1018,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     if !task.intrav2 {
         say!(
             "Intra wavefront: {}",
-            if !task.intraopt {
-                "conservative"
-            } else if task.intrasingleedgelegacy {
+            if task.intrasingleedgelegacy {
                 "angle-specific with prefetching (-intrasingleedgelegacy)"
             } else {
                 "angle-specific with prefetching and single-edge dependencies"
@@ -1065,18 +1052,6 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         );
     } else {
         say!("Inter shaders: inter_main_v2, inter_compound_v2 (default)");
-    }
-    if task.lfhsplit != 0 || task.intraedgefix {
-        say!(
-            "EXPERIMENTS {}:{}{}",
-            task.name,
-            match task.lfhsplit {
-                1 => " -lfhsplit 1 (horizontal loop filter: even rows of blocks, then odd)",
-                2 => " -lfhsplit 2 (horizontal loop filter: row of blocks by row)",
-                _ => "",
-            },
-            if task.intraedgefix { " -intraedgefix (8-bit above edge filter bound)" } else { "" }
-        );
     }
     if !task.dump_frames.is_empty() {
         stage_dumps.start(&task.dumpdir, &task.name);

@@ -27,14 +27,10 @@ use windows::core::Interface;
 
 use super::completion::av1_drain_gpu_decoder;
 use super::compute::{upload_luts, wait_shader_create_complete};
-use super::gpu_pred_lists::{self, FrameLayout};
 use super::log::{clear_create_error, log, log_create_error};
 use super::memory::{Allocator, Plan, log_video_memory, memory_type_name};
 use super::pool::{COEF_CHUNK, KINDS, Kind, MODE_INFO_CHUNK, Pools, TXB_CHUNK};
-use super::stage_buffers::{
-    GPU_PRED_SCRATCH, GPU_PRED_TEMPLATES, GRID_RUNS, IDCT_BLOCKS, INDEX_LIST, PRED_BLOCKS, PRED_BLOCKS_WARP, RECORD,
-    gpu_list_initial_bytes, initial_bytes,
-};
+use super::stage_buffers::{GRID_RUNS, IDCT_BLOCKS, INDEX_LIST, PRED_BLOCKS, PRED_BLOCKS_WARP, RECORD, initial_bytes};
 use super::types::{
     Av1Core, DeviceOnly, DeviceOnlyConst, DeviceUpload, FrameThreadDataCount, FrameThreadDataDefault, GpuBufferObject,
     HostRW, ImagePoolSize, InterFastMapSize, MemoryType, OutputCbSize, OutputThreadDataCount, ReadBack,
@@ -371,8 +367,8 @@ impl Requests {
         self.buffer_for(size, kind, name, slot, false)
     }
 
-    /// [`Requests::buffer`] for a grid of a slot, which with `gpu_writable` a command list may write too
-    /// (`Av1Core::gpu_clear_grids`), and for the lists of CDEF (`Av1Core::gpu_cdef_lists`). The plan counts
+    /// [`Requests::buffer`] for the grid of a slot, which with `gpu_writable` a command list may write too
+    /// (`Av1Core::gpu_grid`), and for the lists of CDEF (`Av1Core::gpu_cdef_lists`). The plan counts
     /// the same either way.
     fn buffer_for(
         &mut self,
@@ -440,10 +436,7 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
     let max_tile_cols = target_width >> 6;
     let max_tile_rows = target_height >> 6;
     dec.block_count4x4 = block_count_4x4;
-    // The two grids of a slot as buffers a command list may write (the creation has set it).
-    let gpu_clear_grids = dec.gpu_clear_grids != 0;
     let gpu_cdef_lists = dec.gpu_cdef_lists != 0;
-    let gpu_grid_check = dec.gpu_grid_check != 0;
     let gpu_grid = dec.gpu_grid != 0;
     dec.max_width = target_width;
     dec.max_height = target_height;
@@ -472,8 +465,6 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
         (block_count_4x4 * 16 * 2) as usize,
         ((block_count_4x4 >> 2) * 48) as usize,
         size_of::<i32>() * block_count_4x4 as usize * 2,
-        0,
-        0,
         0,
     ];
     request!(
@@ -535,19 +526,8 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
         + (target_height / 128) * (target_width / 8) * 2; // horizontal edges, chroma
 
     let max_tiles = max_tile_cols * max_tile_rows;
-    if gpu_grid || gpu_grid_check {
+    if gpu_grid {
         stage_worst[GRID_RUNS] = RECORD[GRID_RUNS] * (max_tiles as usize + 1);
-    }
-    let gpu_pred = gpu_pred_lists::enabled(dec.parser_options);
-    if gpu_pred {
-        let capacity = FrameLayout::worst(mi_size as u32, max_tiles as u32, cfg.inter_fast, cfg.intra_v2);
-        stage_worst[GPU_PRED_SCRATCH] = capacity.scratch_bytes();
-        stage_worst[GPU_PRED_TEMPLATES] = capacity.template_bytes();
-        request!(
-            assign,
-            dec.gpu_pred_scratch,
-            mem.buffer(gpu_list_initial_bytes(stage_worst[GPU_PRED_SCRATCH]), DeviceOnly, c"gpu_pred_scratch", -1)
-        );
     }
     dec.stage_worst = stage_worst;
 
@@ -611,28 +591,15 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
         td.slot_index = i;
         request!(assign, td.command_buffer.cb_alloc, mem.buffer(1024 * 1024, DeviceUpload, c"cb_alloc", i));
         request!(assign, td.tile_data, mem.host(size_of::<av1_tile_data>() * max_tiles as usize));
-        let index_bytes = if gpu_pred { gpu_list_initial_bytes } else { initial_bytes };
         request!(
             assign,
             td.gen_mi_block_indexes,
-            mem.buffer(index_bytes(stage_worst[INDEX_LIST]), HostRW, c"gen_mi_block_indexes", i)
+            mem.buffer(initial_bytes(stage_worst[INDEX_LIST]), HostRW, c"gen_mi_block_indexes", i)
         );
-        if gpu_pred {
-            request!(
-                assign,
-                td.gpu_pred_templates,
-                mem.buffer(
-                    gpu_list_initial_bytes(stage_worst[GPU_PRED_TEMPLATES]),
-                    DeviceUpload,
-                    c"gpu_pred_templates",
-                    i
-                )
-            );
-        }
         request!(
             assign,
             td.gen_intra_inter_grid,
-            mem.buffer_for((grid_w * grid_h * 6) as usize, HostRW, c"gen_intra_inter_grid", i, gpu_clear_grids)
+            mem.buffer((grid_w * grid_h * 6) as usize, HostRW, c"gen_intra_inter_grid", i)
         );
         request!(
             assign,
@@ -662,13 +629,9 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
         td.intra_v2_sched.stamp = 0;
         td.intra_v2_cols = 0;
         td.intra_v2_rows = 0;
-        td.clears = 0;
-        td.gpu_cleared = 0;
         td.wave_edges = 0;
         td.clear_pending = 0;
-        td.clear_mi_bytes = 0;
         td.clear_iter_bytes = 0;
-        td.clean_mi_bytes = 0;
         td.clean_iter_bytes = 0;
         td.kept_grid = [0; 3];
         td.kept_grid_bytes = 0;
@@ -680,27 +643,13 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
                 HostRW,
                 c"mode_info_grid",
                 i,
-                gpu_clear_grids || gpu_grid
+                gpu_grid
             )
         );
-        // The check of the grid (`Av1Core::gpu_grid_check`): the second grid, which a pass of the command
-        // list writes and the completion thread reads. With it, and in a decoder whose grid that pass
-        // builds (`Av1Core::gpu_grid`), the runs of the frame's records, which the thread that records
-        // writes and the pass reads: at most one a chunk of the mode info pool.
-        if gpu_grid_check {
-            request!(
-                assign,
-                td.mode_info_grid_gpu,
-                mem.buffer_for(
-                    size_of::<crate::sys::MiGridEntry>() * mi_size as usize,
-                    HostRW,
-                    c"mode_info_grid_gpu",
-                    i,
-                    true
-                )
-            );
-        }
-        if gpu_grid_check || gpu_grid {
+        // In a decoder whose grid a pass of the command list builds (`Av1Core::gpu_grid`), the runs of
+        // the frame's records, which the thread that records writes and the pass reads: at most one a
+        // chunk of the mode info pool.
+        if gpu_grid {
             request!(
                 assign,
                 td.mi_runs,
@@ -829,12 +778,9 @@ fn deferred_device_bytes(dec: &Av1Core, rcfg: &ResourceConfig) -> usize {
 fn configure_parser_buffers(dec: &mut Av1Core, bits: c_int) {
     let options = crate::ParserOptions::from_bits(bits as u32);
     dec.parser_options = bits;
-    dec.keep_mi_grid = c_int::from(!options.clear_grid);
     dec.gpu_grid = c_int::from(options.gpu_grid);
-    // A GPU grid is only available to the GPU. CDEF takes its lists there, and
-    // the grid check needs the sink-written grid.
+    // A GPU grid is only available to the GPU. CDEF takes its lists there.
     dec.gpu_cdef_lists = c_int::from(options.gpu_cdef_lists || options.gpu_grid);
-    dec.gpu_grid_check = c_int::from(options.gpu_grid_check && !options.gpu_grid);
 }
 
 /// What the buffers of the stages that grow with the frames can add to what they are created with: the
@@ -843,17 +789,13 @@ fn stage_growth_bytes(dec: &Av1Core, slots: usize) -> usize {
     let aligned = |bytes: usize| (bytes + 255) & !255;
     let growth = |index: usize| {
         let worst = dec.stage_worst[index];
-        let small = index >= GPU_PRED_SCRATCH || (index == INDEX_LIST && gpu_pred_lists::enabled(dec.parser_options));
-        let initial = if small { gpu_list_initial_bytes(worst) } else { initial_bytes(worst) };
-        aligned(worst) - aligned(initial)
+        aligned(worst) - aligned(initial_bytes(worst))
     };
     growth(IDCT_BLOCKS)
         + growth(PRED_BLOCKS)
         + growth(PRED_BLOCKS_WARP)
-        + growth(GPU_PRED_SCRATCH)
         + slots
             * (growth(INDEX_LIST)
-                + growth(GPU_PRED_TEMPLATES)
                 + aligned(dec.stage_worst[GRID_RUNS])
                     .saturating_sub(aligned(RECORD[GRID_RUNS] * (dec.pool_total[Kind::ModeInfo as usize] + 1))))
 }
@@ -1251,10 +1193,6 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
         let mut plan = ParsePlan::from_cfg(cfg);
         let mut rcfg = ResourceConfig::with_slots(cfg, plan.slots);
         configure_parser_buffers(&mut *dec, cfg.parser_options);
-        // The clears of the slots' grids by the GPU: fixed here, because the grids of such a decoder are
-        // created as buffers a command list may write. A decoder that was created with another mode has
-        // them as buffers the GPU only reads, which every package so far has had.
-        (*dec).gpu_clear_grids = c_int::from(super::frame::clears_mode() == crate::sys::AV1_CLEARS_GPU as c_int);
         (*dec).frame_slots = rcfg.gpu_pipeline_depth;
 
         // The decoder takes a reference of the device and of the queue the application gave.
@@ -1284,12 +1222,6 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
         let shader_errors = wait_shader_create_complete((*dec).shader_lib);
         if shader_errors != 0 {
             return create_failed(dec, &rcfg, Some(&vm_before), "compute pipeline states (shaders)", shader_errors);
-        }
-        if gpu_pred_lists::enabled(cfg.parser_options) {
-            match gpu_pred_lists::Signatures::new(Device::new(&device), &*(*dec).shader_lib) {
-                Ok(signatures) => (*dec).gpu_pred_signatures = Some(signatures),
-                Err(error) => return create_failed(dec, &rcfg, Some(&vm_before), error.step, error.code),
-            }
         }
 
         // The output fence: one for the decoder, signalled behind every command list.
@@ -1718,8 +1650,6 @@ unsafe fn destroy(dec: *mut Av1Core, log_steps: bool) {
         drop((*dec).rav1d.take());
         // -memstats: what no drain has written.
         super::mem_stats::summary(dec);
-        // -parseopt gridcheck: the grids the GPU built against those of the parse.
-        super::grid_check::summary(dec);
         // What the pools were used for, when the decoder was in use.
         if let (true, Some(pools)) = (log_steps, (*dec).pools.as_deref()) {
             let stats = pools.stats();

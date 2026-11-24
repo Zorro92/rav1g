@@ -124,10 +124,10 @@ const LAYOUTS: usize =
 const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
-    // 20 transform pipelines, 39 shared shaders and 27 per bit depth: one slot per pipeline of
+    // 20 transform pipelines, 36 shared shaders and 26 per bit depth: one slot per pipeline of
     // `create_tasks` (the test `every_pipeline_names_its_shader_once`).
-    assert!(SHADERS == 20 + 39 + 2 * 27);
-    assert!(LAYOUTS == 27);
+    assert!(SHADERS == 20 + 36 + 2 * 26);
+    assert!(LAYOUTS == 24);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
 
@@ -203,9 +203,6 @@ struct Layouts {
     copy_plane: Layout,
     pred_blocks: Layout,
     pred_blocks_fast: Layout,
-    pred_blocks_gpu: Layout,
-    pred_list_count: Layout,
-    pred_list_scan: Layout,
     intra_pred: Layout,
     intra_v2: Layout,
     inter_pred: Layout,
@@ -252,9 +249,6 @@ unsafe fn create_layouts(device: Device<'_>, lib: *mut compute_shader_lib) -> Re
         pred_blocks: layout(5, 2, 1, 7)?,
         // gen_pred_blocks_fast_packed.hlsl (-interfast) takes one more inline constant.
         pred_blocks_fast: layout(5, 2, 1, 8)?,
-        pred_blocks_gpu: layout(6, 2, 1, 12)?,
-        pred_list_count: layout(4, 1, 1, 12)?,
-        pred_list_scan: layout(1, 1, 0, 7)?,
         intra_pred: layout(3, 1, 1, 10)?,
         // intra_v2.hlsl: t0..t4, u0, b0 and 8 inline constants in b1.
         intra_v2: layout(5, 1, 1, 8)?,
@@ -307,9 +301,6 @@ unsafe fn create_layouts(device: Device<'_>, lib: *mut compute_shader_lib) -> Re
         com_store(&raw mut (*lib).sig_film_grain_tex, layouts.film_grain_tex.clone().into_raw());
         com_store(&raw mut (*lib).sig_cdef_lists, layouts.cdef_lists.clone().into_raw());
         com_store(&raw mut (*lib).sig_mi_grid_build, layouts.mi_grid_build.clone().into_raw());
-        com_store(&raw mut (*lib).sig_pred_blocks_gpu, layouts.pred_blocks_gpu.clone().into_raw());
-        com_store(&raw mut (*lib).sig_pred_list_count, layouts.pred_list_count.clone().into_raw());
-        com_store(&raw mut (*lib).sig_pred_list_scan, layouts.pred_list_scan.clone().into_raw());
     }
     Ok(layouts)
 }
@@ -384,7 +375,6 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("inter_scale_warp_compound", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_warp_comp),
             ("intra_filter_legacy", &layouts.intra_pred, &raw mut (*lib).shader_intra_filter_legacy),
             ("intra_main", &layouts.intra_pred, &raw mut (*lib).shaders_8bit.intra_main),
-            ("intra_main_legacy", &layouts.intra_pred, &raw mut (*lib).shaders_8bit.intra_main_legacy),
             ("inter_ext_borders", &layouts.common0110, &raw mut (*lib).shaders_8bit.inter_ext_borders),
             ("reconstruct_block", &layouts.intra_pred, &raw mut (*lib).shaders_8bit.reconstruct_block),
             ("loopfilter_vert", &layouts.lf, &raw mut (*lib).shaders_8bit.loopfilter_v),
@@ -407,7 +397,6 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("intra_main_single_edge_hbd", &layouts.intra_pred, &raw mut (*lib).shader_intra_main_single_edge_hbd),
             ("intra_filter_prefetch", &layouts.intra_pred, &raw mut (*lib).shader_intra_filter_prefetch),
             ("intra_filter_prefetch_hbd", &layouts.intra_pred, &raw mut (*lib).shader_intra_filter_prefetch_hbd),
-            ("intra_main_hbd_legacy", &layouts.intra_pred, &raw mut (*lib).shaders_hbd.intra_main_legacy),
             ("inter_ext_borders_hbd", &layouts.common0110, &raw mut (*lib).shaders_hbd.inter_ext_borders),
             ("reconstruct_block_hbd", &layouts.intra_pred, &raw mut (*lib).shaders_hbd.reconstruct_block),
             ("loopfilter_vert_hbd", &layouts.lf, &raw mut (*lib).shaders_hbd.loopfilter_v),
@@ -458,9 +447,6 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("cdef_lists", &layouts.cdef_lists, &raw mut (*lib).shader_cdef_lists),
             ("cdef_lists_v2", &layouts.cdef_lists, &raw mut (*lib).shader_cdef_lists_v2),
             ("mi_grid_build", &layouts.mi_grid_build, &raw mut (*lib).shader_mi_grid_build),
-            ("pred_list_count", &layouts.pred_list_count, &raw mut (*lib).shader_pred_list_count),
-            ("pred_list_scan", &layouts.pred_list_scan, &raw mut (*lib).shader_pred_list_scan),
-            ("gen_pred_blocks_gpu", &layouts.pred_blocks_gpu, &raw mut (*lib).shader_gen_pred_blocks_gpu),
         ]
     };
     // Resolve the bytecode set per shader. In the normal build every shader uses the DXC set.

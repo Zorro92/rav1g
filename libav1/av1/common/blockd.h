@@ -468,8 +468,8 @@ typedef struct
     // The edges of the tile's intra wavefront (the host's WaveEdges): the iterations along the row above
     // and the column to the left of what the tile has decoded, from which av1_mi_push_block takes the
     // iteration of a transform block. NULL: it keeps them in the slot's wavefront grid instead, which
-    // then has to be cleared for every frame (AV1_CLEARS_GPU, _COMPLETION_THREAD, _DECODE_THREAD of
-    // dx/av1_perf.h; a frame of -intrav2 has no wavefront).
+    // then has to be cleared (by the completion thread behind the frame; a frame of -intrav2 has no
+    // wavefront).
     void * wave_edges;
     // The pipeline slot of the tile's frame (the host's av1_frame_thread_data), set when the tile is set
     // up: av1_mi_push_block finds the frame of a block through its tile, not through a "current frame"

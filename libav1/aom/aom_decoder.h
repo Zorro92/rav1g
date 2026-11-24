@@ -214,17 +214,14 @@ typedef int64_t (*av1_memory_available_cb_fn_t)(void *priv);
 /* aom_codec_dec_cfg_t::parser_options, values to add up: ways of doing the
  * parse (rav1d's parse pass) that give the same frames (docs/phase2-rav1d.md,
  * "Where the time goes"). The library's settings have the first two and the
- * last on (rav1g::ParserOptions::default(), 518); the values 1 and 256 were
- * switches that are gone. */
+ * last on (rav1g::ParserOptions::default(), 518); the values 1, 16, 32, 256,
+ * 1024 and 4096 were switches that are gone. */
 #define AV1_PARSER_OPTION_NO_LF_MASKS 2       /* rav1d leaves out the masks of its own loop filter */
 #define AV1_PARSER_OPTION_TILE_KEEPS_THREAD 4 /* a tile stays on its thread between its superblock rows */
 #define AV1_PARSER_OPTION_TIME_CALLS 8        /* the calls of the sink are timed (AV1_PERF_CPU_SINK_CALLS) */
-#define AV1_PARSER_OPTION_CLEAR_GRID 32       /* the mode info grid of a slot is cleared for every frame */
 #define AV1_PARSER_OPTION_TEST_PANIC 64       /* test only: the parse of the third frame panics */
 #define AV1_PARSER_OPTION_TEST_POOL_WAIT 128  /* test only: a frame finds the pools empty while an older frame holds a piece */
 #define AV1_PARSER_OPTION_GPU_CDEF_LISTS 512  /* the lists CDEF reads are written by a pass of the GPU, not by the thread that records */
-#define AV1_PARSER_OPTION_GPU_GRID_CHECK 1024 /* a check: the GPU builds the mode info grid into a second grid, held against the sink's */
-#define AV1_PARSER_OPTION_GPU_PRED_LISTS 4096 /* the GPU builds the inter, warp and reconstruction prediction lists */
 #define AV1_PARSER_OPTION_GPU_GRID 2048       /* the mode info grid is built by a pass of the GPU from the records, not written by the sink */
 
 /* aom_codec_dec_cfg_t::frames_in_parse: the most the decoder takes. */
@@ -284,7 +281,7 @@ typedef struct aom_codec_dec_cfg {
    * application has to fill (width, height, bitdepth, host memory, device,
    * pipeline cache, output buffer callbacks): two pipeline slots, the shared
    * back buffer (10 frame buffers in the pool), no intra v2 buffers, no
-   * budget guard; CDEF runs through cdef_filter_v2.hlsl and intra prediction
+   * budget guard; CDEF runs through cdef_filter_v3.hlsl and intra prediction
    * through the original shaders (process-wide switches in dx/av1_perf.h).
    * The decoder is created for the width, height and bit depth given here;
    * aom_codec_peek_stream_info gives those of a stream. */

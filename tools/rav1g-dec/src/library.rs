@@ -15,7 +15,7 @@ use std::ffi::{CStr, c_char, c_int, c_void};
 use std::sync::Arc;
 
 use rav1g::capi::{self, Rav1gStatus};
-use rav1g::switches::{self, Clears, PerfFrame, Poison};
+use rav1g::switches::{self, PerfFrame, Poison};
 use rav1g::{ColorInfo, ContentLightLevel, MasteringDisplay};
 use rav1g::{
     Decoder, ErrorCode, Frame, ImageFormat, ImageRequest, LowMemory, MemoryAvailable, Output, OutputImage, OutputKind,
@@ -171,11 +171,8 @@ pub struct Spec {
 pub struct Choices {
     pub skip_film_grain: bool,
     pub intra_v2: bool,
-    pub intra_opt: bool,
     pub intra_filter_legacy: bool,
     pub intra_single_edge_legacy: bool,
-    pub lf_h_split: u32,
-    pub intra_edge_fix: bool,
     pub inter_fast: u32,
 }
 
@@ -519,26 +516,10 @@ impl Library {
         }
         if self.is_c() {
             capi::rav1g_set_intra_v2(choices.intra_v2);
-            capi::rav1g_set_intra_opt(choices.intra_opt);
-            capi::rav1g_set_lf_h_split(choices.lf_h_split);
-            capi::rav1g_set_intra_edge_fix(choices.intra_edge_fix);
             capi::rav1g_set_inter_fast(choices.inter_fast);
         } else {
             switches::set_intra_v2(choices.intra_v2);
-            switches::set_intra_opt(choices.intra_opt);
-            switches::set_lf_h_split(choices.lf_h_split);
-            switches::set_intra_edge_fix(choices.intra_edge_fix);
             switches::set_inter_fast(choices.inter_fast);
-        }
-    }
-
-    /// -gpuclear, -cpuclear, -syncclear: what a frame does about the clears of its slot's grids. Set
-    /// before the decoder of the task is created, while no frame is in flight.
-    pub fn set_clears(&self, mode: Clears) {
-        if self.is_c() {
-            capi::rav1g_set_clears(mode as u32);
-        } else {
-            switches::set_clears(mode);
         }
     }
 

@@ -50,29 +50,6 @@ pub enum Poison {
     Buffers = 2,
 }
 
-/// What a frame does about the two grids of its pipeline slot that used to be cleared for every frame
-/// ([`set_clears`]): the mode info grid, which a decoder with the default parser keeps from frame to frame
-/// in every mode, and the wavefront grid of intra prediction (3.5 MB of a 4K frame). The output is the
-/// same in every mode.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-#[repr(i32)]
-pub enum Clears {
-    /// The wavefront is kept in a few KB at the edges of the tiles and its grid is not cleared at all. A
-    /// grid that still needs a clear (the mode info grid with [`crate::ParserOptions::CLEAR_GRID`]) is cleared by
-    /// the completion thread.
-    #[default]
-    NotNeeded = 0,
-    /// The wavefront in its grid; the command list of a frame ends with the clear of the grids, so no
-    /// thread of the CPU clears them. Only in a decoder created while this mode was set (its grids are
-    /// then buffers the GPU may write); in any other decoder it is [`Clears::CompletionThread`].
-    Gpu = 1,
-    /// The wavefront in its grid; the completion thread clears the grids after the fence of the frame
-    /// that used the slot.
-    CompletionThread = 2,
-    /// The wavefront in its grid; the decode thread clears the grids when it takes the slot for a frame.
-    DecodeThread = 3,
-}
-
 /// Skip film grain synthesis. Set while no frame is in flight.
 pub fn set_skip_film_grain(enable: bool) {
     crate::host::av1_set_skip_film_grain(c_int::from(enable))
@@ -84,43 +61,15 @@ pub fn set_intra_v2(enable: bool) {
     crate::host::av1_set_intra_v2(c_int::from(enable))
 }
 
-/// The optimized intra main shaders (true, default) or the legacy kernels (false).
-pub fn set_intra_opt(enable: bool) {
-    crate::host::av1_set_intra_opt(c_int::from(enable))
-}
-
 /// Use the previous 8-bit filter intra shader on frames that run the main intra path.
 pub fn set_intra_filter_legacy(enable: bool) {
     crate::host::av1_set_intra_filter_legacy(c_int::from(enable))
-}
-
-/// Who clears the grids of a pipeline slot for the next frame, and whether the wavefront grid has to be
-/// cleared at all ([`Clears`]; without a call it does not). [`Clears::Gpu`] has to be set before the
-/// decoder is created.
-pub fn set_clears(mode: Clears) {
-    crate::host::av1_set_clears(mode as c_int)
-}
-
-/// The older form of [`set_clears`]: `true` is [`Clears::NotNeeded`], the default; `false` is
-/// [`Clears::DecodeThread`].
-pub fn set_async_clear(enable: bool) {
-    set_clears(if enable { Clears::NotNeeded } else { Clears::DecodeThread });
 }
 
 /// The fast inter path: 0, or [`INTER_FAST_ON`] with the `INTER_FAST_*` bits; only in a decoder that was
 /// created with [`crate::Settings::inter_fast`].
 pub fn set_inter_fast(mode: u32) {
     crate::host::av1_set_inter_fast(mode as c_int)
-}
-
-/// Experiment: how the horizontal loop filter is dispatched, 0 (one dispatch per plane), 1 or 2.
-pub fn set_lf_h_split(mode: u32) {
-    crate::host::av1_set_lf_h_split(mode as c_int)
-}
-
-/// Experiment: the 8-bit above edge filter bound of the intra shader.
-pub fn set_intra_edge_fix(enable: bool) {
-    crate::host::av1_set_intra_edge_fix(c_int::from(enable))
 }
 
 /// Debugging: the decoders created after the call fill the mode info pool, or every buffer the CPU writes

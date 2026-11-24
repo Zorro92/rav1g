@@ -73,8 +73,10 @@ sed -e 's/intra_main_hbd\.gen\.h/intra_main_hbd_double.gen.h/' "$work/intra_main
   > "$work/intra_main_prefetch_double.gen.h"
 to_cpp "$shaders/intra_filter_prefetch.hlsl" > "$work/intra_filter_prefetch.gen.h"
 to_cpp "$shaders/intra_filter_prefetch_hbd.hlsl" > "$work/intra_filter_prefetch_hbd.gen.h"
-to_cpp "$shaders/intra_main_legacy.hlsl" > "$work/intra_main_legacy.gen.h"
-to_cpp "$shaders/intra_main_hbd_legacy.hlsl" > "$work/intra_main_hbd_legacy.gen.h"
+# The reference kernels: the INTRA_MAIN_LEGACY parts of the main shaders (the wrappers are here, not
+# among the decoder's shaders).
+to_cpp "$here/intra_main_legacy.hlsl" > "$work/intra_main_legacy.gen.h"
+to_cpp "$here/intra_main_hbd_legacy.hlsl" > "$work/intra_main_hbd_legacy.gen.h"
 to_cpp "$shaders/intra_filter.h" > "$work/intra_filter.gen.h"
 to_cpp "$shaders/intra_filter_legacy.hlsl" > "$work/intra_filter_legacy.gen.h"
 to_cpp "$shaders/intra_filter_hbd.h" > "$work/intra_filter_hbd.gen.h"

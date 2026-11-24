@@ -202,7 +202,8 @@ Image compare_vertical(const Image &initial, const EdgeLists &edges, int sharpne
   return candidate;
 }
 
-// The modes of -lfhsplit: whole plane, even rows then odd rows, and rows in order.
+// The dispatch schedules of the retired -lfhsplit: whole plane (the decoder's), even rows then odd rows, and
+// rows in order. The shader still takes the first row of blocks of a dispatch.
 void run_horizontal(const FilterKernel &kernel, Image &image, const EdgeLists &edges, int sharpness,
                     uint plane, int mode, uint threads_per_strip) {
   auto d = make_dispatch(image, edges, sharpness, plane);
