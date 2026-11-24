@@ -607,12 +607,84 @@ PQ's rate (both at 4 waves), so the instructions are the lever taken here.
 **Expected** (the console's added cost of version 3's first code scaled by the instructions the chroma
 now adds over version 2, which also takes the 4 waves into account): PQ 1:1 +0.23 ms (2.60 to ~2.0 ms a 4K
 frame), PQ 3:2 +0.23 (2.13 to ~1.75), SDR 3:2 +0.24 (1.76 to ~1.35), SDR 1:1 +0.23 (2.42 to ~1.75; not a
-case Bale runs); 2:1 and the area loop as before (1.23 / 1.49 ms at 1080p). **Measured** (console, idle
-state, 4K60 60 Mbps clip, 600 frames, two rounds within 0.01 ms): PQ 1:1 2.01 ms, PQ 3:2 1.75, SDR 3:2 1.31,
-SDR 1:1 1.61, as expected; SDR 2:1 1.20, but PQ 2:1 1.59 (+0.10 against 1.49: the 2:1 loop's code is
-unchanged, the cause in the PQ pipeline not yet known; 0.6% of a 60 fps frame).
+case Bale runs); 2:1 and the area loop as before (1.23 / 1.49 ms at 1080p).
 Sized for the GPU slice (1.86 TFLOP/s, never preempted: the pass costs its instructions), wave64, no
 16-bit arithmetic, no group memory, no CPU work, no change to the interface.
+
+**Measured** (console, idle state, the 4K60 60 Mbps clip, 600 frames, two rounds within 0.01 ms; v0.8 =
+`91a4091`, the window = `2aaa9e7`), ms a 4K frame:
+
+| Output | Path | SDR | PQ (HDR10) |
+| --- | --- | --- | --- |
+| 1920x1080 | 2:1 | 1.23 to 1.20 | 1.49 to **1.59** |
+| 2560x1440 | 3:2 | 1.76 to 1.31 | 2.13 to 1.75 |
+| 3840x2160 | 1:1 | 2.42 to 1.61 | 2.60 to 2.01 |
+
+The block paths as expected; PQ at 2:1, the case Bale runs most (HDR10 on a 1080p display), 0.10 ms slower
+(next section).
+
+## Two pipelines a mode: the 2:1 path on its own
+
+Branch `exp/display-speed-opus`, after the window above. **What the listings show** (RDNA2/LLPC, the whole
+PQ pipeline of v0.8 and of the window, 16-bit samples, the case of the clip):
+
+- The 2:1 loop did not change. Its four steps a quad are the same 566 instructions in both, instruction
+  for instruction with the registers renamed: the same 9 reads a step (one luma read, 8 chroma), the same
+  table reads in group memory, the same waits and the same exact-peak branches. The DXIL of its blocks is
+  the same too (144 instructions, 10 reads, 12 group memory reads each).
+- Around it a quad costs fewer instructions in the window's pipeline, not more: 178 against 192 outside the
+  row loop (v0.8 tested the 1:1, 3:2 and quad flags in every step; `tile` tests them once a dispatch), and
+  the 24 of the stores the same; the table load at the start (10) is the same, the prologue once a thread
+  54 against 34.
+- What did change is the pipeline around the loop: its machine code from 36.5 to 50.4 KB (+38%), its DXIL
+  from 10298 to 13730 instructions, five loops over the quads (one a path) with 7 barriers instead of one
+  loop with 3, VGPRs 110 to 112, and **SGPRs 98 to 106, the ceiling of RDNA2** (`AVAILABLE_SGPRs` in RGA's
+  analysis). PQ is the only mode that reached it (SDR 95, HLG 103), and the only one that got slower at 2:1.
+  No spills, no scratch, 4 waves a SIMD in both.
+
+So the cause is not in the 2:1 path's code as LLPC compiles it: LLPC gives the window's PQ pipeline the
+same 2:1 loop and a shorter quad. The console compiles the DXIL with its own compiler, whose listing there
+is no way to see; what the listings do show is what that compiler was given: the same 2:1 code inside a
+pipeline that is 38% larger and sits at the scalar register ceiling for PQ alone. The change most likely
+to give the 2:1 path its cost of v0.8 back whatever that compiler does with it is to take the block paths
+out of its pipeline.
+
+**The change.** Two pipelines a mode (`DISPLAY_PATHS`, `display_pass.hlsl`): `display_pass`,
+`display_pass_sdr`, `display_pass_hlg` have the 2:1 path and the area loop (`tile(0)`), and
+`display_pass_block`, `display_pass_block_sdr`, `display_pass_block_hlg` (a define and an include each) the
+block paths (`tile(1..4)`). The host takes the block pipeline of the frame's mode for a frame whose flags
+have bit 8 or 9 (`display_pass::block_path`, the flags it set itself), the other for the rest: an internal
+change, no change to `rav1g.h`. The C++ check picks the paths by the same rule (`paths()`), so the identity
+check runs each pipeline's own `main`. RDNA2/LLPC (`testing/shader_regs`):
+
+| Pipeline | VGPRs | SGPRs | Code | Waves a SIMD |
+| --- | ---: | ---: | ---: | ---: |
+| `display_pass` (PQ, 2:1 and area) | 96 (112) | 98 (106) | 23.6 KB (50.4) | 4 |
+| `display_pass_sdr` | 96 (96) | 87 (95) | 18.0 KB (42.0) | 4 |
+| `display_pass_hlg` | 96 (96) | 95 (103) | 22.1 KB (47.4) | 4 |
+| `display_pass_block` (PQ, 1:1 and 3:2) | 112 | 75 | 27.0 KB | 4 |
+| `display_pass_block_sdr` | 96 | 62 | 24.1 KB | 4 |
+| `display_pass_block_hlg` | 93 | 70 | 25.5 KB | 4 |
+
+In brackets the one pipeline a mode of the window. The PQ 2:1 pipeline is v0.8's in what runs: the same 566
+instructions a quad's row loop, 182 around it (192 in v0.8), the prologue of v0.8 (34), SGPRs 98 as in v0.8,
+and 14 fewer VGPRs (96, 110 in v0.8; 4 waves a SIMD either way for a group of 256 threads in CU mode, 5
+in WGP mode). The block pipelines keep the window's loops (123 of their 130 blocks the same instructions; a
+3:2 16-bit quad 5 scalar instructions more). 96 VGPRs is the edge of 5 waves a SIMD (in WGP mode): the
+2:1 loop alone takes 91, the area loop 96.
+
+**What it costs.** Three pipelines more (109 against 106, made on the creation threads at the start like
+the others). The machine code is the same in total (140.3 KB for the six against 139.8 KB for the three:
+each path's code is in one pipeline either way), so the pipeline-state memory grows by the fixed part of
+three pipeline objects, a few KB each; the embedded DXIL by 16.6 KB (295 against 278 KB). One pipeline
+switch a frame as before (the pass is one dispatch). Sized for the GPU slice (1.86 TFLOP/s, never
+preempted) and the per-frame budget at 60 fps: the 2:1 path is the case Bale runs for HDR10 on a 1080p
+display, where every 0.1 ms is 0.7% of the 14 ms rav1g has a frame; memory: nothing against the 1.6 GB
+envelope.
+
+**Expected** (to be measured on the console): PQ 2:1 back to v0.8's 1.49 ms or below (from 1.59), SDR 2:1
+1.20 or below; PQ 3:2 1.75 and 1:1 2.01, SDR 3:2 1.31 and 1:1 1.61 as measured with the window. The image is
+unchanged: `testing/display_pass/run.sh` finds all 139 cases byte-identical to `v0.8.0-alpha.1`.
 
 ## The ABI it needs
 

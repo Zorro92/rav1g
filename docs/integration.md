@@ -306,11 +306,12 @@ block paths (1:1 and 3:2) took their rows the same way, measured at +0.6 to +0.9
 window of five chroma rows across once a row and down once a source pixel, and carry it from a thread's
 quad to the next one below, reading only its new rows ([stage-fusion.md](stage-fusion.md#the-block-paths-chroma-window-11-and-32);
 the same codes, byte for byte): measured on the console PQ 1:1 2.60 to 2.01 ms, PQ 3:2 2.13 to 1.75, SDR 3:2
-1.76 to 1.31, SDR 1:1 2.42 to 1.61; PQ 2:1 1.49 to 1.59 and SDR 2:1 1.23 to 1.20 (the 2:1 loop itself is
-unchanged; the PQ pipeline's cause is not yet known). The area loop (1080p to 4K) ~+0.3-0.5 ms. Bale measured its
-own cubic chroma at ~1.1 ms a 4K frame. The SDR and HLG pipelines run 4 waves a SIMD (96 VGPRs; 8 and 6
-with the bilinear chroma of version 2), PQ 4 as before (112). Sized for the GPU slice: no new memory,
-nothing on the CPU.
+1.76 to 1.31, SDR 1:1 2.42 to 1.61; SDR 2:1 1.23 to 1.20. The area loop (1080p to 4K) ~+0.3-0.5 ms. Bale
+measured its own cubic chroma at ~1.1 ms a 4K frame. Each mode has two pipelines, one for the 2:1 path and
+the area loop and one for the block paths, so that the 2:1 path (PQ 1.49 ms, measured 1.59 while it shared
+a pipeline with the window's block paths: [stage-fusion.md](stage-fusion.md#two-pipelines-a-mode-the-21-path-on-its-own))
+has neither their registers nor their code; 4 waves a SIMD each (96 VGPRs, the PQ block paths 112). Sized
+for the GPU slice: no new memory, nothing on the CPU.
 
 **A/B switches** (internal, `libav1/dx/av1_perf.h`, not in `rav1g.h`): `av1_set_display_fixed_peak(1)`
 takes `source_peak_nits` for every PQ frame whatever its metadata, `av1_set_display_bilinear_chroma(1)`
