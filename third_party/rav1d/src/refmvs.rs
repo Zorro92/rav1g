@@ -707,6 +707,7 @@ fn add_temporal_candidate(
     r#ref: RefMvsRefPair,
     globalmv: Option<(&mut i32, &[Mv; 2])>,
     frame_hdr: &Rav1dFrameHeader,
+    weight: i32,
 ) {
     let rb_mv = rb.mv.into_aligned();
     if rb_mv.is_invalid() {
@@ -728,14 +729,14 @@ fn add_temporal_candidate(
 
         for cand in &mut mvstack[..last] {
             if cand.mv.mv[0] == mv {
-                cand.weight += 2;
+                cand.weight += weight;
                 return;
             }
         }
         if last < 8 {
             let cand = &mut mvstack[last];
             cand.mv.mv[0] = mv;
-            cand.weight = 2;
+            cand.weight = weight;
             *cnt = last + 1;
         }
     } else {
@@ -753,14 +754,14 @@ fn add_temporal_candidate(
 
         for cand in &mut mvstack[..last] {
             if cand.mv == mvp {
-                cand.weight += 2;
+                cand.weight += weight;
                 return;
             }
         }
         if last < 8 {
             let cand = &mut mvstack[last];
             cand.mv = mvp;
-            cand.weight = 2;
+            cand.weight = weight;
             *cnt = last + 1;
         }
     };
@@ -1056,23 +1057,64 @@ pub(crate) fn rav1d_refmvs_find(
         let step_v = if bh4 >= 16 { 2 } else { 1 };
         let w8 = cmp::min(w4 + 1 >> 1, 8) as usize;
         let h8 = cmp::min(h4 + 1 >> 1, 8) as usize;
+        // rav1g: dav1d 028ea64c. save_tmvs writes one record per 8x8 cell of a coded block, so the scan
+        // walks runs of identical records. add_temporal_candidate is a function of (rb.mv, rb.ref) and
+        // of values that are the same for the whole scan; on a repeat its only effect is a weight of 2
+        // more on the stack entry the first call of the run inserted or merged into: a repeat finds
+        // that entry first again (it compares from entry 0, and a repeat never inserts, so the stack
+        // does not shift), and a full stack is left alone n times as once. A run of n identical records
+        // is exactly one call with a weight of 2n. Two records with an invalid mv are the same run
+        // whatever their ref holds: add_temporal_candidate returns before it reads ref (load_tmvs marks
+        // a cell it projects nothing into by its mv alone, and leaves ref as it was), so the test is
+        // written to look at ref only for a valid mv. globalmv_ctx is written by the call at (0, 0)
+        // only, and the first run begins there. The weights are only summed and the order of the
+        // distinct records is kept, so the stack, its count and every context are the same (AV1
+        // 7.10.2.5 temporal scan, 7.10.2.6 temporal sample, which adds the weights).
+        let mut run = *rf.rp_proj.index(rbi);
+        let mut run_len = 1;
+        let mut run_globalmv = true;
         for y in (0..h8).step_by(step_v) {
-            for x in (0..w8).step_by(step_h) {
+            let row = rbi + y * stride;
+            for x in (if y == 0 { step_h } else { 0 }..w8).step_by(step_h) {
+                let rb = *rf.rp_proj.index(row + x);
+                let mv = rb.mv.into_aligned();
+                if mv == run.mv.into_aligned() && (mv.is_invalid() || rb.r#ref == run.r#ref) {
+                    run_len += 1;
+                    continue;
+                }
                 add_temporal_candidate(
                     rf,
                     mvstack,
                     cnt,
-                    *rf.rp_proj.index(rbi + y * stride + x),
+                    run,
                     r#ref,
-                    if x | y == 0 {
+                    if run_globalmv {
                         Some((&mut globalmv_ctx, &tgmv))
                     } else {
                         None
                     },
                     frame_hdr,
+                    2 * run_len,
                 );
+                run_globalmv = false;
+                run = rb;
+                run_len = 1;
             }
         }
+        add_temporal_candidate(
+            rf,
+            mvstack,
+            cnt,
+            run,
+            r#ref,
+            if run_globalmv {
+                Some((&mut globalmv_ctx, &tgmv))
+            } else {
+                None
+            },
+            frame_hdr,
+            2 * run_len,
+        );
         if cmp::min(bw4, bh4) >= 2 && cmp::max(bw4, bh4) < 16 {
             let bh8 = bh4 >> 1;
             let bw8 = bw4 >> 1;
@@ -1080,16 +1122,16 @@ pub(crate) fn rav1d_refmvs_find(
             let has_bottom = by8 + bh8 < cmp::min(rt.tile_row.end >> 1, (by8 & !7) + 8);
             if has_bottom && bx8 - 1 >= cmp::max(rt.tile_col.start >> 1, bx8 & !7) {
                 let rb = *rf.rp_proj.index(rbi - 1);
-                add_temporal_candidate(rf, mvstack, cnt, rb, r#ref, None, frame_hdr);
+                add_temporal_candidate(rf, mvstack, cnt, rb, r#ref, None, frame_hdr, 2);
             }
             if bx8 + bw8 < cmp::min(rt.tile_col.end >> 1, (bx8 & !7) + 8) {
                 if has_bottom {
                     let rb = *rf.rp_proj.index(rbi + bw8 as usize);
-                    add_temporal_candidate(rf, mvstack, cnt, rb, r#ref, None, frame_hdr);
+                    add_temporal_candidate(rf, mvstack, cnt, rb, r#ref, None, frame_hdr, 2);
                 }
                 if (by8 + bh8 - 1) < cmp::min(rt.tile_row.end >> 1, (by8 & !7) + 8) {
                     let rb = *rf.rp_proj.index(rbi + bw8 as usize - stride);
-                    add_temporal_candidate(rf, mvstack, cnt, rb, r#ref, None, frame_hdr);
+                    add_temporal_candidate(rf, mvstack, cnt, rb, r#ref, None, frame_hdr, 2);
                 }
             }
         }

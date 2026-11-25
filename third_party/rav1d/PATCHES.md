@@ -36,9 +36,9 @@ parse instead of leaving the sender waiting (`thread_task.rs`); the operating po
 `upstream_diff.sh <checkout of rav1d at the commit>` holds the directory against upstream: every file
 is upstream's byte for byte, or one of the fifteen changed files below, or one of the five files of
 rav1g (`PATCHES.md`, `UPSTREAM`, `upstream_diff.sh`, `src/parse.rs`, `src/parse_stats.rs`). It writes the diff of the changed
-files (+1098 −5129 lines at this commit) for a review. CI runs it (job `rav1d`).
+files (+1167 −5139 lines at this commit) for a review. CI runs it (job `rav1d`).
 
-Size: 67 files, 1.4 MB, 39,300 lines here; upstream has 1,364 files (296 under `src`, 329,000 lines
+Size: 68 files, 1.5 MB, 40,000 lines here; upstream has 1,364 files (296 under `src`, 329,000 lines
 there).
 
 ## Not copied
@@ -85,6 +85,7 @@ changes.
 | --- | --- | --- |
 | `2a0775ca` (master) | `src/thread_task.rs` | `rav1d_task_frame_init` clears the scan position of the frame context's task queue (`tasks.cur_prev`). A frame aborted in its `InitCdf` task (its CDFs come from a frame that failed) after a scan passed over that task keeps one; when its frame context is taken again, `reset_task_cur` takes a frame after `cur` to have none, and the scans of the new frame start behind its tasks: every worker asleep, the sender waiting. Only after a decoding error, with more than one frame in parse. |
 | `f8ab763d` (master) | `src/obu.rs` | A frame wider or higher than the sequence header's `max_frame_width_minus_1 + 1` or `max_frame_height_minus_1 + 1` is an error of its frame header, both for a coded size (`frame_size_override_flag`, AV1 5.9.5) and for a size taken from a reference (`found_ref`, 5.9.7): a requirement of conformance (6.8.4). |
+| `028ea64c` (1.5.5) | `src/refmvs.rs` | The temporal candidates of `rav1d_refmvs_find` (AV1 7.10.2.5, 7.10.2.6): a run of identical records of the projected motion field is one call of `add_temporal_candidate` with the weight of the run (2 per record) instead of one call per record. The stack, its order, its count and the contexts are the same; the comment at the loop has the argument. |
 
 ## Added
 
