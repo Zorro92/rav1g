@@ -84,6 +84,7 @@ changes.
 | dav1d commit | File | What |
 | --- | --- | --- |
 | `2a0775ca` (master) | `src/thread_task.rs` | `rav1d_task_frame_init` clears the scan position of the frame context's task queue (`tasks.cur_prev`). A frame aborted in its `InitCdf` task (its CDFs come from a frame that failed) after a scan passed over that task keeps one; when its frame context is taken again, `reset_task_cur` takes a frame after `cur` to have none, and the scans of the new frame start behind its tasks: every worker asleep, the sender waiting. Only after a decoding error, with more than one frame in parse. |
+| `f8ab763d` (master) | `src/obu.rs` | A frame wider or higher than the sequence header's `max_frame_width_minus_1 + 1` or `max_frame_height_minus_1 + 1` is an error of its frame header, both for a coded size (`frame_size_override_flag`, AV1 5.9.5) and for a size taken from a reference (`found_ref`, 5.9.7): a requirement of conformance (6.8.4). |
 
 ## Added
 

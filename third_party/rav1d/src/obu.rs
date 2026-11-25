@@ -592,6 +592,12 @@ fn parse_frame_size(
                     .size;
                 let width1 = ref_size.width[1];
                 let height = ref_size.height;
+                // rav1g: dav1d f8ab763d. A size taken from a reference is held to this sequence
+                // header's maximum like a coded one (AV1 6.8.4, 6.8.6): the reference may be of an
+                // earlier sequence header with a larger one.
+                if width1 > seqhdr.max_width || height > seqhdr.max_height {
+                    return Err(Rav1dError::InvalidArgument);
+                }
                 let render_width = ref_size.render_width;
                 let render_height = ref_size.render_height;
                 let enabled = seqhdr.super_res != 0 && gb.get_bit();
@@ -626,6 +632,12 @@ fn parse_frame_size(
     if frame_size_override {
         width1 = gb.get_bits(seqhdr.width_n_bits.into()) as c_int + 1;
         height = gb.get_bits(seqhdr.height_n_bits.into()) as c_int + 1;
+        // rav1g: dav1d f8ab763d. It is a requirement of bitstream conformance that frame_width_minus_1
+        // and frame_height_minus_1 are at most max_frame_width_minus_1 and max_frame_height_minus_1
+        // (AV1 5.9.5, 6.8.4); a frame above them is an error of the stream.
+        if width1 > seqhdr.max_width || height > seqhdr.max_height {
+            return Err(Rav1dError::InvalidArgument);
+        }
     } else {
         width1 = seqhdr.max_width;
         height = seqhdr.max_height;
