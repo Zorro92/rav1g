@@ -33,6 +33,14 @@ comparison (context updates, coefficient contexts, the motion vector sort: AV1 5
 `archive/exp/parse-speed-opus` (`docs/phase2-rav1d.md`, "rav1d's parse against dav1d's, instruction by
 instruction").
 
+**dav1d's newer releases do not close the gap.** Its parse-side changes from 1.5.1 to 1.5.5 and master
+were ported or measured on 2026-11-25 (`third_party/rav1d/PATCHES.md`, "From dav1d"): the temporal motion
+vector runs gave 0.10-0.16 % fewer instructions on the 4K streams; the msac assembly change, the load_tmvs
+assembly and the branchless negations did not lower the instruction count (the msac change ran 0.4-0.6 %
+more instructions and 3.3 % more cycles on an Intel laptop; only a console A/B could still show a gain from
+its store-forwarding fix); the decode_b changes are in dav1d's reconstruction pass, which rav1g does not
+have. The gap is in rav1d's own Rust code.
+
 **Where to start.**
 
 1. Fewer instructions on the parse thread: the block context and record updates of `decode_b` towards
