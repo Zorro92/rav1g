@@ -536,6 +536,11 @@ pub(crate) fn rav1d_task_create_tile_sbrow(
 
 pub(crate) fn rav1d_task_frame_init(c: &Rav1dContext, fc: &Rav1dFrameContext) {
     fc.task_thread.init_done.store(0, Ordering::SeqCst);
+    // rav1g: dav1d 2a0775ca. The scan position of the frame context's queue is cleared for the new
+    // frame: a frame aborted in its `InitCdf` task after a scan passed over that task keeps it, and
+    // `reset_task_cur` assumes that a frame after `cur` has none, so the scans of the next frame in this
+    // context would start behind its tasks and skip them (all workers asleep, the sender waiting).
+    fc.task_thread.tasks.cur_prev.set(Rav1dTaskIndex::NONE);
     let init_task = Rav1dTask::init(fc.index as c_uint);
     fc.task_thread.insert_task(c, init_task, 1);
 }

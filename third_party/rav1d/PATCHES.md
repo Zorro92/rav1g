@@ -13,8 +13,11 @@ Group); `doc/PATENTS` is the patent licence of the Alliance for Open Media that 
 
 ## The rule
 
-Changes only take away, or route what the parse pass reads to the application. Nothing here changes how
-a syntax element is read. Two changes are switches of `ParseSettings` that are off unless the application
+Changes only take away, or route what the parse pass reads to the application, or are upstream's own
+fixes and optimisations: those of dav1d's later versions (rav1d follows dav1d 1.5.1) that read every
+stream the specification allows exactly as before, each with the dav1d commit it follows (the section
+"From dav1d" below). Nothing here changes how a syntax element is read; a fix may refuse a stream the
+specification does not allow. Two changes are switches of `ParseSettings` that are off unless the application
 sets them, and the parse is upstream's without them: the loop filter masks left out, and a tile kept on
 its thread (the rows of `decode.rs` and `thread_task.rs` below). rav1g sets both unless it is told not to
 (`rav1g_parse::options::ParseOptions`, `-parseopt none` in its tools). An update to a newer upstream is then: copy the files again, apply the list
@@ -71,6 +74,16 @@ there).
 | `src/recon.rs` | Reading of the coefficients and of the palette colours only. `decode_coefs` asks the sink where the coefficients of a transform block go and writes them there dequantised, 32 bits each, in scan order. Each nonzero AC token packs its magnitude and scan index in the existing task scratch, so the sign pass reads it sequentially and writes directly to the sink. The values and contexts are computed as upstream computes them. `get_skip_ctx` and its helpers are always inlined; the checks that a dequantised coefficient stays below `cf_max` (or 24 bits with a quantiser matrix) are debug asserts, as in dav1d. In the loop of the 2D tokens the context offset and the hi context come from one entry of `LO_CTX_BY_RC` at the position, not from `x` and `y` (the values are the same). |
 | `src/thread_task.rs` | Without the film grain tasks; the filter tasks do nothing. The reconstruction task of a tile returns at once. Entropy row readiness follows the motion fields selected for projection and the primary reference's previous segmentation map when present. Named reference slots are still checked for errors, and the CDF and progress signals are as upstream uses them. The same timer around the parse of a superblock row as in `decode.rs`. With `ParseSettings::tile_keeps_thread`, a tile whose next superblock row waits for nothing goes on with it on its thread. Upstream has that path and never takes it: it asks `check_tile` before it stores the progress of the row that has just ended, so the answer is "not yet", the tile goes back to the queue after every row, a waiting thread is woken, and the next row runs on whichever thread takes it. With the switch the progress is stored first; with one frame in parse no thread is woken for the row either (the filter tasks of a row do nothing here and run when the tile is through), with more than one the signal is upstream's. A panic of a worker thread is caught (`rav1d_worker_task` around upstream's function, now `worker_task`): upstream lets the thread end, and the thread that waits for the frame it worked on waits for ever. Here the context is marked broken, the waiting thread is woken and returns an error, the other workers take no more tasks, and the thread counts as parked for `rav1d_flush`, so that the context can be closed. A panic is a bug, of the parser or of the sink; a damaged stream is an error as before. **Work of the sink for an idle worker** (rav1g's block lists a superblock row behind the entropy decoder): a worker that finds no task asks the sink for work (`ParseSink::idle_work_pending`, `idle_work`) before it waits, and says first that it waits (`cond_signaled`), so that the thread of a tile that has parsed a row and finds work at the sink wakes it under the lock it waits with; the thread of a tile's last row, behind the save of the frame's CDFs and the wake-up of a thread for what waited for them, tells the sink that the tile is through (`ParseSink::tile_finish`) without the lock, in the pass that parses (not the reconstruction pass, which parses nothing), before the frame's task count goes down. A sink without that work (the defaults of the three methods) leaves the scheduling upstream's. |
 | `src/picture.rs` | A picture has no samples: each plane is the smallest piece of memory a plane can be. Pictures remain the handles of the reference bookkeeping. |
+
+## From dav1d
+
+Fixes and optimisations of dav1d after 1.5.1 (the version rav1d's assembly and logic follow), ported to
+the Rust of this copy. They are listed here and not in the rows of the files above, which are rav1g's own
+changes.
+
+| dav1d commit | File | What |
+| --- | --- | --- |
+| `2a0775ca` (master) | `src/thread_task.rs` | `rav1d_task_frame_init` clears the scan position of the frame context's task queue (`tasks.cur_prev`). A frame aborted in its `InitCdf` task (its CDFs come from a frame that failed) after a scan passed over that task keeps one; when its frame context is taken again, `reset_task_cur` takes a frame after `cur` to have none, and the scans of the new frame start behind its tasks: every worker asleep, the sender waiting. Only after a decoding error, with more than one frame in parse. |
 
 ## Added
 
