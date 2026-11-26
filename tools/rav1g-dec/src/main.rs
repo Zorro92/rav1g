@@ -60,8 +60,9 @@ const PLAYER_SMOKE_TIMEOUT_S: i32 = 1500;
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 
 fn decoder_log_line(is_error: bool, line: &str) {
-    if line.starts_with("MEMSTATS ") {
-        // -memstats: the lines of the decoder as they are.
+    if line.starts_with("MEMSTATS ") || line.starts_with("SKIPPED ") {
+        // -memstats, and the frames skipped at a start in the middle of a stream: the lines of the
+        // decoder as they are.
         say!("{line}");
     } else if is_error || VERBOSE.load(Ordering::Relaxed) {
         say!("{}{}", if is_error { "DECODER ERROR: " } else { "decoder: " }, line);

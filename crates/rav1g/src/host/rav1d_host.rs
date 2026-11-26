@@ -37,6 +37,16 @@
 //! frame was to refresh empty, and the host does the same; a later frame that names an empty slot fails
 //! before anything of it is set up, and the decode call for it returns an error as well. Decoding is right
 //! again from the first frame whose references are all whole, at the latest the next key frame.
+//!
+//! A start in the middle of a stream (AV1 7.6, random access): a frame header that names a reference slot
+//! no frame has been decoded into since the decoder was created, or since a new sequence emptied the
+//! slots (RefValid of AV1 6.8.2), is skipped by rav1d and comes here as [`SinkHost::skip`]: the slots it
+//! would have refreshed are let go of, nothing is set up, shown or failed, and the decode call returns
+//! OK for it. Frames whose references were all decoded are decoded as ever, so the output starts with
+//! the first such frame (a key frame, an intra-only frame, the key frame of a delayed random access
+//! point at its recovery point) and is right from there on. The skipped frames are counted in one log
+//! line (`SKIPPED ...`) when the next frame is decoded or shown, at a drain, and when the decoder is
+//! released ([`State::report_skipped`]).
 
 use std::cell::UnsafeCell;
 use std::ffi::{CString, c_char, c_int, c_void};
@@ -49,8 +59,8 @@ use rav1g_parse::rav1d::include::dav1d::headers::{
     Rav1dRestorationType, Rav1dSequenceHeader,
 };
 use rav1g_parse::rav1d::parse::{
-    ParseColorCodes, ParseFrame, ParseHdrMetadata, ParsePalette, ParseSettings, ParseShowExisting, ParseSuperblock,
-    ParseTile, Parser,
+    ParseColorCodes, ParseFrame, ParseHdrMetadata, ParsePalette, ParseSettings, ParseShowExisting, ParseSkip,
+    ParseSuperblock, ParseTile, Parser,
 };
 use rav1g_parse::sink::{FrameMemory, ModeInfoPiece, Sink, SinkHost, SinkTimer, TileMemory};
 
@@ -113,6 +123,12 @@ struct State {
     /// With more than one frame in parse: a frame takes its frame buffer when it is recorded
     /// (`Av1Core::late_frame_buffer`), so the frame of a reference slot may have none yet.
     late_frame_buffer: bool,
+    /// The frame headers skipped since the last report (`skip`: they name a reference slot no frame has
+    /// been decoded into), those of them that would have been shown, and all since the decoder was
+    /// created.
+    skipped: u64,
+    skipped_shown: u64,
+    skipped_total: u64,
 }
 
 impl State {
@@ -135,7 +151,30 @@ impl State {
             failure: None,
             // SAFETY: the decoder the host is made for.
             late_frame_buffer: unsafe { (*dec).late_frame_buffer != 0 },
+            skipped: 0,
+            skipped_shown: 0,
+            skipped_total: 0,
         }
+    }
+
+    /// The log line of the frames skipped since the last one, if any were: one line a run of skipped
+    /// frames, not one a frame. An application that wants the count reads it from its log callback
+    /// (`rav1g_set_log_callback`, a line that is not an error), so that no declaration of `rav1g.h`
+    /// changes for it.
+    fn report_skipped(&mut self) {
+        if self.skipped == 0 {
+            return;
+        }
+        log(
+            false,
+            &format!(
+                "SKIPPED {} frames ({} of them shown) that name a reference slot no frame has been decoded into, or \
+                 come before the first sequence header (random access, AV1 7.6); {} since the decoder was created",
+                self.skipped, self.skipped_shown, self.skipped_total
+            ),
+        );
+        self.skipped = 0;
+        self.skipped_shown = 0;
     }
 
     /// Keeps what failed, if nothing has failed before in this decode call.
@@ -793,6 +832,7 @@ impl SlotHost {
         // decoder calls them, with the header filled in, for a frame that is a value.
         unsafe {
             let state = self.state();
+            state.report_skipped();
             let hdr = frame.frame_hdr;
             let dec = self.dec;
             let inter = matches!(hdr.frame_type, Rav1dFrameType::Inter | Rav1dFrameType::Switch);
@@ -923,6 +963,7 @@ impl SlotHost {
         // SAFETY: the caller's contract.
         unsafe {
             let state = self.state();
+            state.report_skipped();
             let dec = self.dec;
             let slot = usize::from(show.frame_hdr.existing_frame_idx) & 7;
             if !state.slot_is_whole(slot) {
@@ -1034,6 +1075,7 @@ impl SinkHost for SlotHost {
         // decoder calls them behind the header of a show_existing_frame.
         unsafe {
             let state = self.state();
+            state.report_skipped();
             let slot = usize::from(show.frame_hdr.existing_frame_idx) & 7;
             let shown = state.map[slot];
             if shown.is_null() || (*shown).buf.hw_buffer.is_null() {
@@ -1074,6 +1116,23 @@ impl SinkHost for SlotHost {
             }
         }
         Ok(())
+    }
+
+    fn skip(&self, skip: &ParseSkip) {
+        // SAFETY: the thread of the decode call, in decode order with the frames' `frame_begin` (with
+        // more than one frame in parse, the frames that began before hold the references they took).
+        unsafe {
+            let state = self.state();
+            // The slots the frame would have refreshed are empty, as they are in rav1d: no frame
+            // buffer, description or output image stays behind for the frame.
+            for slot in (0..8).filter(|slot| skip.refresh_frame_flags & (1 << slot) != 0) {
+                let frame = std::mem::replace(&mut state.map[slot], std::ptr::null_mut());
+                state.unref(self.dec, frame);
+            }
+            state.skipped += 1;
+            state.skipped_shown += u64::from(skip.show_frame);
+            state.skipped_total += 1;
+        }
     }
 
     fn ticks(&self) -> i64 {
@@ -1117,6 +1176,7 @@ impl SinkHost for SlotHost {
         // setup are called as the entropy decoder calls them, with the header filled in.
         unsafe {
             let state = self.state();
+            state.report_skipped();
             let hdr = frame.frame_hdr;
             let dec = self.dec;
             if matches!(hdr.frame_type, Rav1dFrameType::Inter | Rav1dFrameType::Switch) {
@@ -1477,6 +1537,8 @@ impl Drop for Rav1dHost {
         // The submission thread first: the parser's threads end behind it (the fields are dropped in
         // their order), and what they still say about the frames in parse goes nowhere.
         self.stop();
+        // SAFETY: no call of the sink comes any more.
+        unsafe { self.sink.host().state() }.report_skipped();
     }
 }
 
@@ -1548,6 +1610,7 @@ pub(crate) unsafe extern "C" fn rav1g_rav1d_drain(
         let Some(host) = (*dec).rav1d.as_mut() else {
             return sys::AOM_CODEC_OK;
         };
+        host.sink.host().state().report_skipped();
         let failure = host.sink.host().frames.as_ref().and_then(|frames| frames.take_failure());
         match failure {
             None => {
@@ -1636,7 +1699,7 @@ pub(crate) unsafe extern "C" fn rav1g_rav1d_decode(
                         code: sys::AOM_CODEC_CORRUPT_FRAME,
                         detail: format!(
                             "The temporal unit could not be parsed ({error:?}): a header that cannot be read, or a \
-                             frame whose references are missing"
+                             frame whose references failed"
                         ),
                     })
                 });

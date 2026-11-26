@@ -28,7 +28,9 @@ pub enum ErrorCode {
     UnsupportedBitstream = 5,
     /// The stream uses something the decoder does not have.
     UnsupportedFeature = 6,
-    /// The data of a frame is damaged or cut.
+    /// The data of a frame is damaged or cut, or a frame names a reference whose own decode failed. Not
+    /// a frame whose references were never decoded (a start in the middle of a stream): that frame is
+    /// skipped without an error ([`crate::Decoder::decode`]).
     CorruptFrame = 7,
     InvalidParam = 8,
     /// A new sequence whose frames are larger, or have more bits a sample, than the decoder was created

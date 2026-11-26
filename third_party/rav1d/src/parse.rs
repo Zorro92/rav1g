@@ -101,6 +101,27 @@ pub struct ParseShowExisting<'a> {
     pub hdr: ParseHdrMetadata<'a>,
 }
 
+/// A frame header whose frame is skipped: it names a reference slot that no frame has been decoded
+/// into (RefValid of AV1 6.8.2 is 0: the decoder started at a random access point, AV1 7.6, or at a
+/// frame that is none), or it comes before the first sequence header. Nothing of it is parsed further
+/// or decoded, nothing is shown, and it is no error.
+pub struct ParseSkip {
+    /// The header comes before the first sequence header and cannot be read: nothing of it is known
+    /// (the other fields are 0).
+    pub no_sequence_header: bool,
+    /// A `show_existing_frame` of such a slot (`existing_frame_idx`); otherwise a frame that names one
+    /// among its references (`ref_frame_idx`, or all eight slots with `frame_refs_short_signaling`).
+    pub show_existing_frame: bool,
+    pub existing_frame_idx: u8,
+    /// The frame would have been shown (`show_frame`; always for a `show_existing_frame`).
+    pub show_frame: bool,
+    /// The slots the frame would have refreshed: they hold no frame from here on, so that the frames
+    /// that name them are skipped as well.
+    pub refresh_frame_flags: u8,
+    pub temporal_id: u8,
+    pub spatial_id: u8,
+}
+
 /// A tile whose parse starts, on the thread that parses its first superblock row.
 pub struct ParseTile {
     /// Index of the tile in the frame, row by row.
@@ -224,6 +245,12 @@ pub trait ParseSink: Send + Sync {
     fn show_existing(&self, _show: &ParseShowExisting<'_>) -> Result<(), ()> {
         Ok(())
     }
+
+    /// A frame header names a reference slot no frame has been decoded into and its frame is skipped
+    /// ([`ParseSkip`]; the thread that sends the data, in decode order with the `frame_begin` of the
+    /// frames and the `show_existing` calls). The slots it would have refreshed are empty in the parser
+    /// from here on. No frame context is taken and nothing waits for it.
+    fn skip(&self, _skip: &ParseSkip) {}
 
     /// The clock of [`Self::tile_time`], or 0 when nothing is timed.
     fn ticks(&self) -> i64 {
@@ -356,7 +383,8 @@ impl Parser {
     /// Parses the frames in `data` (a temporal unit, or any run of whole OBUs). Returns when they are
     /// parsed when one frame is parsed at a time; with more, frames may still be in parse
     /// ([`Self::wait`]), and the error returned is one of the data: a header that cannot be read, a
-    /// frame the sink did not take, a frame whose references are missing.
+    /// frame the sink did not take, a frame whose references failed. A frame that names a reference
+    /// slot no frame has been decoded into is no error: it is skipped ([`ParseSink::skip`]).
     ///
     /// After an error nothing of the data is left with the parser: the rest of it is dropped, with a
     /// frame whose tiles were being collected, as the decoder of upstream's tools drops it. The next
@@ -381,6 +409,7 @@ impl Parser {
             state.frame_hdr = None;
             state.tiles.clear();
             state.n_tiles = 0;
+            state.skipping = false;
         }
         result
     }

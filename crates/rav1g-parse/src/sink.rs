@@ -64,8 +64,8 @@ use std::sync::{Mutex, PoisonError, RwLock};
 use rav1d::include::dav1d::headers::Rav1dSequenceHeader;
 use rav1d::include::dav1d::headers::{Rav1dFrameHeader, Rav1dPixelLayout};
 use rav1d::parse::{
-    ParseBlock, ParseColorCodes, ParseFrame, ParsePalette, ParseShowExisting, ParseSink, ParseSuperblock, ParseTile,
-    ParseTxb,
+    ParseBlock, ParseColorCodes, ParseFrame, ParsePalette, ParseShowExisting, ParseSink, ParseSkip, ParseSuperblock,
+    ParseTile, ParseTxb,
 };
 use rav1g_sys::{
     AV1_COMMON, AV1Decoder, MACROBLOCKD, MB_MODE_INFO, MI_LEFT_EDGE, MiGridEntry, TileInfo, av1_tile_data,
@@ -211,6 +211,10 @@ pub trait SinkHost: Send + Sync {
     fn show_existing(&self, _show: &ParseShowExisting<'_>) -> Result<(), ()> {
         Ok(())
     }
+
+    /// A frame header whose frame is skipped because it names a reference slot no frame has been
+    /// decoded into (`ParseSink::skip`): the host lets go of the slots it would have refreshed.
+    fn skip(&self, _skip: &ParseSkip) {}
 
     /// The clock of [`Self::tile_time`], or 0 when nothing is timed.
     fn ticks(&self) -> i64 {
@@ -1369,6 +1373,10 @@ impl<H: SinkHost> ParseSink for Sink<H> {
 
     fn show_existing(&self, show: &ParseShowExisting<'_>) -> Result<(), ()> {
         self.host.show_existing(show)
+    }
+
+    fn skip(&self, skip: &ParseSkip) {
+        self.host.skip(skip);
     }
 
     fn ticks(&self) -> i64 {

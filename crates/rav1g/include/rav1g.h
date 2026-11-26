@@ -408,7 +408,9 @@ typedef enum Rav1gStatus {
    */
   RAV1G_STATUS_UNSUPPORTED_FEATURE = 6,
   /*
-   The data of a frame is damaged or cut.
+   The data of a frame is damaged or cut, or a frame names a reference whose own decode failed. Not
+   a frame whose references were never decoded (a start in the middle of a stream): that frame is
+   skipped without an error (`rav1g_decoder_decode`).
    */
   RAV1G_STATUS_CORRUPT_FRAME = 7,
   RAV1G_STATUS_INVALID_PARAM = 8,
@@ -1247,8 +1249,18 @@ enum Rav1gStatus rav1g_decoder_create(const struct Rav1gDevice *device,
 
  With more than one frame in parse (`Rav1gSettings::frames_in_parse`) the call returns when the parse
  of the unit's frames has begun, and it waits when as many frames are in parse as may be. An error is
- then that of this unit (a header that cannot be read, a frame whose references are missing) or that of
+ then that of this unit (a header that cannot be read, a frame whose references failed) or that of
  a frame of an earlier call whose parse or submission failed since (when this unit has no error of its own): one error a call, the oldest first.
+
+ A start in the middle of a stream (AV1 7.6, random access): give the decoder the sequence header first
+ (the codec data of the container, Matroska's av1C configOBUs, in front of the first temporal unit, or
+ in it). A frame that names a reference slot no frame has been decoded into since the decoder was
+ created (or since a new sequence), a `show_existing_frame` of such a slot, and a frame before the
+ first sequence header are skipped: not decoded, not output, and no error (the call returns
+ `Rav1gStatus::Ok` for them). The output starts with the first frame whose references were all
+ decoded, and is right from there on. The skipped frames are counted in a log line that is not an
+ error (`rav1g_set_log_callback`), "SKIPPED <n> frames ...", when the next frame is decoded or shown,
+ at a drain and when the decoder is destroyed (docs/integration.md).
 
  # Safety
  `decoder` is a decoder of `rav1g_decoder_create`, used by one thread at a time; `data` is valid for

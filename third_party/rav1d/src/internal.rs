@@ -203,6 +203,15 @@ pub struct Rav1dState {
     pub(crate) refs: [Rav1dContextRefs; 8],
     pub(crate) cdf: [CdfThreadContext; 8], // Previously pooled
 
+    /// rav1g: RefValid of AV1 6.8.2 and 7.20, a bit a reference slot: a frame has been decoded into the
+    /// slot since the context was created or flushed, or since a sequence header that differs from the
+    /// one before emptied the slots (a frame whose decode fails counts: that is corruption, not a slot
+    /// that was never filled). A frame that names a slot without it is skipped (`obu.rs`, random access).
+    pub(crate) ref_valid: u8,
+    /// rav1g: the frame of the last frame header is skipped: its tile groups and redundant frame headers
+    /// are dropped until the next frame header, temporal delimiter or sequence header.
+    pub(crate) skipping: bool,
+
     /// rav1g: the bytes of the data that was sent from the start of the OBU in parse to the end, for
     /// the sink (`ParseFrame::data_left`).
     pub(crate) data_left: usize,

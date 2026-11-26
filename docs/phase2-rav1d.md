@@ -862,7 +862,11 @@ entropy decoder reads other layouts and the stages then decode them wrongly.
   and the host's map does the same). A later frame that names an empty slot fails before anything of it
   is set up: the decode call returns `Corrupt frame`, "The temporal unit could not be parsed
   (InvalidArgument): ...", and that frame's own slots stay as they were. A frame whose references are
-  all whole is decoded.
+  all whole is decoded. (A slot that no frame was ever decoded into, as at a start in the middle of a
+  stream, is another case since 2026-11-26: the frame that names it is skipped without an error,
+  [integration.md](integration.md), "Starting in the middle of a stream"; rav1d keeps the spec's
+  RefValid apart from the slot's picture for that, so a slot that is empty because its frame failed
+  still fails the frames that name it.)
 - With both, decoding is right again from the first frame whose references are whole, at the latest
   the next key frame, and the frames before the damage are right.
 
@@ -2043,7 +2047,7 @@ more:
 - The frames of a temporal unit behind a frame whose parse fails are parsed too (the failure is not
   known when they begin); with one frame in parse the rest of the unit is dropped.
 - **Where the error comes back.** A decode call returns its own error (a header that cannot be read,
-  a frame whose references are missing, a sequence that needs another decoder), or else the oldest
+  a frame whose references failed, a sequence that needs another decoder), or else the oldest
   error of a frame of an earlier call, one a call; the drain returns what is left, one a call
   (`Decoder::drain` returns a result now, `rav1g_decoder_drain` a status). Frames behind the damaged
   one that do not depend on it may be out before the error is told.

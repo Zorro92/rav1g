@@ -30,10 +30,61 @@ are the device's and are not created again. So a recreate is about 0.15 s and a 
 allocation of the device buffers; draining is cheaper and has no moment at which the memory is
 counted twice.
 
-A temporal unit after the seek that is not a key frame decodes with missing references: its frames
-fail (`RAV1G_STATUS_CORRUPT_FRAME`, or the error of a frame whose references are missing) until the
-next key frame. That is the seek landing in the wrong place, not a broken decoder: drop the frames,
-keep the decoder.
+A seek that lands on a temporal unit that is not a key frame: the decoder still has the reference
+slots of before the seek, and they are valid to it (AV1 6.8.2: a frame was decoded into them). The
+frames up to the next key frame are decoded from those old pictures, without an error, and look wrong.
+For an exact start at a point that is not a key frame (an intra-only refresh point, a delayed random
+access point) the decoder has to forget its slots, and only a new decoder does that today (destroy and
+create, about 0.15 s, see above): it then starts as in the next section.
+
+## Starting in the middle of a stream (AV1 7.6, random access)
+
+A decoder that is created and then given the temporal units from a point in the middle of a stream
+(the start of playback at a time other than 0, a new decoder after a seek):
+
+1. Pass the sequence header first: the codec data of the container (Matroska's `av1C` configOBUs,
+   MP4's `av1C`) in front of the first temporal unit, or in it. The temporal units from the first key
+   frame on carry their own in most streams; a frame header before the first sequence header cannot be
+   read.
+2. Pass the temporal units from the start point on, as they are. They need not start with a key frame.
+
+What comes out: a frame that names a reference slot no frame has been decoded into since the decoder
+was created (the spec's RefValid is 0), a `show_existing_frame` of such a slot, and a frame before the
+first sequence header are skipped: not decoded, not output, no frame of the output pool taken, no GPU
+work, and `rav1g_decoder_decode` returns `RAV1G_STATUS_OK` for them (also with more than one frame in
+parse: a skipped frame takes no frame context and nothing waits for it). The slots a skipped frame would
+have refreshed hold nothing from then on, so the frames that name them are skipped too. Every other frame
+is decoded as ever: the output starts with the first frame whose references were all decoded and is
+right, the same frames as a decode of the whole stream, from there on:
+
+- a key frame random access point (a shown key frame): from that frame on;
+- a delayed random access point (a key frame that is not shown, 7.6.2): from its key frame dependent
+  recovery point (the `show_existing_frame` of it, which makes it the reference in every slot) on; a
+  frame between the two that names only slots the key frame refreshed is shown too, the others are
+  skipped;
+- the hidden intra-only refresh point of an open GOP (SVT-AV1 with `irefresh-type=1`): the intra-only
+  frame itself when it is shown, and the frames that name only slots decoded since. Such a GOP's frames
+  name, among their seven references, slots of the GOP before the refresh point (SVT-AV1 does), so
+  those frames are skipped up to the next key frame, as libaom (which fails them, "Inter frame requests
+  nonexistent reference") and dav1d (which fails them) do. The specification defines no output for a
+  start there (it is no random access point of 7.6.2).
+
+The decoder counts what it skipped in one log line a run of skipped frames, not an error
+(`rav1g_set_log_callback`, `is_error` false): `SKIPPED <n> frames (<m> of them shown) that name a
+reference slot no frame has been decoded into, or come before the first sequence header (random access,
+AV1 7.6); <total> since the decoder was created` (a frame before the first sequence header counts as not
+shown: nothing of it can be read), when the next frame is decoded or shown, at `rav1g_decoder_drain` and when the decoder is
+destroyed. An application that wants the number parses that line; nothing in `rav1g.h` changed for it.
+
+What is still an error: a frame that names a slot whose frame failed (damaged data, the error of that
+frame is `RAV1G_STATUS_CORRUPT_FRAME`), a header that cannot be read. A stream that starts at its first
+frame (a shown key frame, 7.5) skips nothing: every slot is valid from that frame on.
+
+The check: `testing/conformance/random_access_check.py` cuts streams of the conformance set at an
+intra-only refresh point, a `show_existing_frame`, an inter frame and a key frame, with and without the
+sequence header in front, and holds what the decoder puts out, frame by frame, against the frames of
+the whole stream that its own reading of the headers says must come out (CI: `rust-conformance`, one and
+four frames in parse, through `rav1g.h` too).
 
 ## The image pool: `get_image` waits, it does not fail
 

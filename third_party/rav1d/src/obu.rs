@@ -33,7 +33,7 @@ use crate::include::dav1d::headers::{
 use crate::internal::{Rav1dContext, Rav1dState, Rav1dTileGroup, Rav1dTileGroupHeader};
 use crate::levels::ObuMetaType;
 use crate::log::Rav1dLog as _;
-use crate::parse::{ParseColorCodes, ParseHdrMetadata, ParseShowExisting};
+use crate::parse::{ParseColorCodes, ParseHdrMetadata, ParseShowExisting, ParseSkip};
 use crate::picture::{rav1d_picture_copy_props, PictureFlags};
 use crate::thread_task::FRAME_ERROR;
 
@@ -813,6 +813,11 @@ fn parse_refidx(
             let delta_ref_frame_id = gb.get_bits(seqhdr.delta_frame_id_n_bits.into()) as u32 + 1;
             let ref_frame_id = frame_id + (1 << seqhdr.frame_id_n_bits) - delta_ref_frame_id
                 & (1 << seqhdr.frame_id_n_bits) - 1;
+            // rav1g: a slot that is not valid has no frame id to hold this one against; the frame
+            // is skipped (`parse_frame_hdr`).
+            if state.ref_valid & 1 << refidx[i as usize] == 0 {
+                continue;
+            }
             state.refs[refidx[i as usize] as usize]
                 .p
                 .p
@@ -1762,7 +1767,7 @@ fn parse_frame_hdr(
     temporal_id: u8,
     spatial_id: u8,
     gb: &mut GetBits,
-) -> Rav1dResult<Rav1dFrameHeader> {
+) -> Rav1dResult<FrameHdr> {
     let debug = Debug::new(false, "HDR", gb);
 
     debug.post(gb, "show_existing_frame");
@@ -1778,6 +1783,18 @@ fn parse_frame_hdr(
             // Default initialization.
             frame_presentation_delay = Default::default();
         }
+        // rav1g: a slot no frame has been decoded into shows nothing (random access, AV1 7.6).
+        if state.ref_valid & 1 << existing_frame_idx == 0 {
+            return Ok(FrameHdr::Skip(ParseSkip {
+                no_sequence_header: false,
+                show_existing_frame: true,
+                existing_frame_idx,
+                show_frame: true,
+                refresh_frame_flags: 0,
+                temporal_id,
+                spatial_id,
+            }));
+        }
         let frame_id;
         if seqhdr.frame_id_numbers_present != 0 {
             frame_id = gb.get_bits(seqhdr.frame_id_n_bits.into()) as u32;
@@ -1792,7 +1809,7 @@ fn parse_frame_hdr(
             // Default initialization.
             frame_id = Default::default();
         }
-        return Ok(Rav1dFrameHeader {
+        return Ok(FrameHdr::Read(Rav1dFrameHeader {
             spatial_id,
             temporal_id,
             show_existing_frame,
@@ -1802,7 +1819,7 @@ fn parse_frame_hdr(
             // TODO(kkysen) I think an [`Option`] somewhere could avoid having to `#[derive(Default)]` everything.
             // There are also `enum`s that don't have a clear default other than being 0.
             ..Default::default()
-        });
+        }));
     } else {
         // Default initialization.
         existing_frame_idx = Default::default();
@@ -1950,6 +1967,24 @@ fn parse_frame_hdr(
             }
         }
         frame_ref_short_signaling = (seqhdr.order_hint != 0 && gb.get_bit()) as u8;
+        // rav1g: random access (AV1 7.6). A frame that names a reference slot no frame has been
+        // decoded into (RefValid of 6.8.2 is 0) is skipped: the rest of its header depends on the
+        // frames of its slots (their sizes, order hints, global motion), so it is not read further.
+        // With frame_refs_short_signaling the references follow from the order hints of all eight
+        // slots (7.8), and every one has to be valid. In a stream decoded from its first frame, which
+        // is a shown key frame, every slot is valid from that frame on, so this never skips a frame.
+        let skip = ParseSkip {
+            no_sequence_header: false,
+            show_existing_frame: false,
+            existing_frame_idx: 0,
+            show_frame: show_frame != 0,
+            refresh_frame_flags,
+            temporal_id,
+            spatial_id,
+        };
+        if frame_ref_short_signaling != 0 && state.ref_valid != 0xff {
+            return Ok(FrameHdr::Skip(skip));
+        }
         refidx = parse_refidx(
             state,
             seqhdr,
@@ -1958,6 +1993,9 @@ fn parse_frame_hdr(
             frame_id,
             gb,
         )?;
+        if refidx.iter().any(|&slot| state.ref_valid & 1 << slot == 0) {
+            return Ok(FrameHdr::Skip(skip));
+        }
         let use_ref = error_resilient_mode == 0 && frame_size_override;
         size = parse_frame_size(
             state,
@@ -2063,7 +2101,7 @@ fn parse_frame_hdr(
         gb,
     )?;
 
-    Ok(Rav1dFrameHeader {
+    Ok(FrameHdr::Read(Rav1dFrameHeader {
         size,
         film_grain,
         frame_type,
@@ -2107,7 +2145,14 @@ fn parse_frame_hdr(
         warp_motion,
         reduced_txtp_set,
         gmv,
-    })
+    }))
+}
+
+/// rav1g: what [`parse_frame_hdr`] read: a frame header, or the start of one whose frame is skipped
+/// because it names a reference slot no frame has been decoded into.
+enum FrameHdr {
+    Read(Rav1dFrameHeader),
+    Skip(ParseSkip),
 }
 
 fn parse_tile_hdr(tiling: &Rav1dFrameHeaderTiling, gb: &mut GetBits) -> Rav1dTileGroupHeader {
@@ -2129,6 +2174,27 @@ fn parse_tile_hdr(tiling: &Rav1dFrameHeaderTiling, gb: &mut GetBits) -> Rav1dTil
             end: n_tiles - 1,
         }
     }
+}
+
+/// rav1g: random access (AV1 7.6). The frame of a frame header that names a reference slot no frame
+/// has been decoded into is skipped: not decoded, not shown, no error. The slots it would have
+/// refreshed are emptied and are not valid, so that the frames that name them are skipped as well (the
+/// decoder shows the frames whose references it has, 7.6.3), and the rest of its OBUs is dropped. It
+/// takes no frame context and no frame waits for it.
+fn skip_unreferenced(c: &Rav1dContext, state: &mut Rav1dState, skip: &ParseSkip) {
+    for i in 0..8 {
+        if skip.refresh_frame_flags & (1 << i) != 0 {
+            let _ = mem::take(&mut state.refs[i].p);
+            let _ = mem::take(&mut state.refs[i].segmap);
+            let _ = mem::take(&mut state.refs[i].refmvs);
+            let _ = mem::take(&mut state.cdf[i]);
+        }
+    }
+    state.ref_valid &= !skip.refresh_frame_flags;
+    state.tiles.clear();
+    state.n_tiles = 0;
+    state.skipping = true;
+    c.sink.skip(skip);
 }
 
 fn parse_obus(
@@ -2247,6 +2313,7 @@ fn parse_obus(
 
     match r#type {
         Some(Rav1dObuType::SeqHdr) => {
+            state.skipping = false;
             let mut color_codes = ParseColorCodes::default();
             let seq_hdr = parse_seq_hdr(gb, c.strict_std_compliance, &mut color_codes)
                 .inspect_err(|_| {
@@ -2292,6 +2359,8 @@ fn parse_obus(
                     // See 7.5, `operating_parameter_info` is allowed to change in
                     // sequence headers of a single sequence.
                     state.frame_hdr = None;
+                    // rav1g: no slot holds a frame of the new sequence.
+                    state.ref_valid = 0;
                     let _ = mem::take(&mut state.content_light);
                     let _ = mem::take(&mut state.mastering_display);
                     for i in 0..8 {
@@ -2314,21 +2383,41 @@ fn parse_obus(
             }
             state.seq_hdr = Some(Arc::new(DRav1d::from_rav1d(seq_hdr))); // TODO(kkysen) fallible allocation
         }
-        Some(Rav1dObuType::RedundantFrameHdr) if state.frame_hdr.is_some() => {}
+        // rav1g: the redundant copies of a skipped frame's header are dropped with its tile groups.
+        Some(Rav1dObuType::RedundantFrameHdr) if state.frame_hdr.is_some() || state.skipping => {}
         Some(Rav1dObuType::RedundantFrameHdr | Rav1dObuType::Frame | Rav1dObuType::FrameHdr) => {
             state.frame_hdr = None;
+            state.skipping = false;
             // TODO(kkysen) C originally re-used this allocation,
             // but it was also pooling, which we've dropped for now.
 
-            let frame_hdr = parse_frame_hdr(
-                c,
-                state,
-                state.seq_hdr.as_ref().ok_or(Rav1dError::InvalidArgument)?,
-                temporal_id,
-                spatial_id,
-                gb,
-            )
-            .inspect_err(|_| writeln!(c.logger, "Error parsing frame header"))?;
+            // rav1g: a frame header before the first sequence header cannot be read: decoding starts
+            // at a temporal unit with a sequence header (AV1 7.5, 7.6), and its frame is skipped.
+            let Some(seq_hdr) = state.seq_hdr.as_ref() else {
+                skip_unreferenced(
+                    c,
+                    state,
+                    &ParseSkip {
+                        no_sequence_header: true,
+                        show_existing_frame: false,
+                        existing_frame_idx: 0,
+                        show_frame: false,
+                        refresh_frame_flags: 0,
+                        temporal_id,
+                        spatial_id,
+                    },
+                );
+                return Ok(());
+            };
+            let frame_hdr = match parse_frame_hdr(c, state, seq_hdr, temporal_id, spatial_id, gb)
+                .inspect_err(|_| writeln!(c.logger, "Error parsing frame header"))?
+            {
+                FrameHdr::Read(frame_hdr) => frame_hdr,
+                FrameHdr::Skip(skip) => {
+                    skip_unreferenced(c, state, &skip);
+                    return Ok(());
+                }
+            };
 
             state.tiles.clear();
             state.n_tiles = 0;
@@ -2367,6 +2456,8 @@ fn parse_obus(
                 parse_tile_grp(state, r#in, props, gb)?;
             }
         }
+        // rav1g: the tile groups of a skipped frame.
+        Some(Rav1dObuType::TileGrp) if state.skipping => {}
         Some(Rav1dObuType::TileGrp) => {
             parse_tile_grp(state, r#in, props, gb)?;
         }
@@ -2464,7 +2555,10 @@ fn parse_obus(
                 }
             }
         }
-        Some(Rav1dObuType::Td) => state.frame_flags |= PictureFlags::NEW_TEMPORAL_UNIT,
+        Some(Rav1dObuType::Td) => {
+            state.frame_flags |= PictureFlags::NEW_TEMPORAL_UNIT;
+            state.skipping = false;
+        }
         Some(Rav1dObuType::Padding) => {} // Ignore OBUs we don't care about.
         None => {
             // Print a warning, but don't fail for unknown types.
@@ -2556,6 +2650,8 @@ fn parse_obus(
             {
                 let r = frame_hdr.existing_frame_idx;
                 state.refs[r as usize].p.showable = false;
+                // rav1g: the key frame is in every slot (7.21, 7.20).
+                state.ref_valid = 0xff;
                 for i in 0..8 {
                     if i == r {
                         continue;
@@ -2594,6 +2690,9 @@ fn parse_obus(
             if state.tiles.is_empty() {
                 return Err(Rav1dError::InvalidArgument);
             }
+            // rav1g: the slots the frame refreshes are valid from here on (7.20), also when its
+            // decode fails: a frame that names one of them then fails as it does now.
+            state.ref_valid |= frame_hdr.refresh_frame_flags;
             rav1d_submit_frame(c, state)?;
             assert!(state.tiles.is_empty());
             state.frame_hdr = None;
