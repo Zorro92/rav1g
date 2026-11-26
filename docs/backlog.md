@@ -67,3 +67,12 @@ second; the heaviest one-tile 4K streams first (the 40 Mbps bar, the 60 Mbps cli
 - **`-intrafilterlegacy` and `-intrasingleedgelegacy`**: their console A/B is pending; retire them after
   it ([test-player.md](test-player.md)).
 - **`intrav2` / `interfast`** (public settings): keep or retire with the next interface change.
+- **The pipeline states a stream needs, first.** `rav1g_device_create` compiles all ~100 pipeline states
+  (about 6.5 s and 77 MiB on the console; a disk cache removes the device there, integration.md). A 10-bit
+  stream without film grain, super-resolution, scaled references or the display pass uses about half:
+  compiling those first and letting `rav1g_decoder_create` wait only for them would roughly halve the
+  first-open wait; leaving the rest uncompiled until a stream needs them would also save about 30-40 MiB,
+  at the cost of a compile (0.1-0.5 s) on first use mid-stream. Needs readiness per pipeline at every
+  dispatch site and a test mode that catches a missing one. Bale prewarms the device when an AV1 title's
+  Detail page opens, which hides the 6.5 s today; retiring `intrav2` / `interfast` and the two pending A/B
+  switches drops about 10 of them.
