@@ -88,6 +88,9 @@ gets a new decoder. The program uses the decoder through the Rust interface of t
 - `-capi`: the decoder is used through its interface for C, the functions of `rav1g.h`, instead of
   the Rust interface (docs/rust-port.md, step 5); the output is the same, and the program says so in
   an `INTERFACE` line. CI decodes the whole set once more with it.
+- `-anystart`: the task starts with the first temporal unit of the stream, not with the first one with
+  a key frame: the decoder is created for the first sequence header and is given every temporal unit,
+  those in front of it too (a start in the middle of a stream; `random_access_check.py`).
 - `-continue_on_error` (also a flag of the test player): a decode call that fails does not end the
   task. The error is counted and the next temporal units go to the same decoder, which is what an
   application does with a damaged stream; one `CONTINUE <stream>: decode error <n> at temporal unit
@@ -610,6 +613,20 @@ frames before the damage and from the next key frame on are those of the referen
 with eight tiles the key frame 11 temporal units behind the damage; for the vector, which has one
 key frame, the whole stream appended); no device is lost, and the process ends. No damaged stream is
 in the repository or in an artifact.
+
+### A start in the middle of a stream
+
+`testing/conformance/random_access_check.py` cuts two streams of the set (the one with a key frame
+every 16 frames and the open GOP of hidden intra-only refresh points) at an intra-only frame, a
+`show_existing_frame`, an inter frame and a key frame, puts the sequence header in front (and also
+leaves it out where a later temporal unit has one), and decodes each cut with `rav1g-dec -anystart`
+(every temporal unit goes to the decoder, not only those from the first key frame on). The frames out
+must be those its own reading of the headers says (the spec's RefValid of the eight slots, AV1 6.8.2,
+7.20, 7.21; `--model <ivf> [--start N]` prints it for a stream), each with the md5 of its temporal unit
+in the reference of the whole stream; no decode error; the `SKIPPED` lines of the decoder add up to the
+frame headers the check says are skipped. In the `rust-conformance` job with one frame in parse
+(through the Rust interface and through `rav1g.h`) and with four ([integration.md](integration.md),
+"Starting in the middle of a stream").
 
 ### Memory check
 

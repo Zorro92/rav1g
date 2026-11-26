@@ -900,8 +900,10 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     };
 
     // The first key frame is looked for before the decoder exists: its sequence header says how large the
-    // frames of the stream are and how many bits a sample has.
+    // frames of the stream are and how many bits a sample has. With -anystart the first sequence header,
+    // and the temporal units in front of it are kept for the decoder.
     let mut skipped = 0;
+    let mut early: Vec<Vec<u8>> = Vec::new();
     let si = loop {
         match reader.next() {
             Ok(true) => {}
@@ -909,8 +911,10 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
             Err(error) => return fail(&error.to_string(), error.is_bitstream(), decode_ms, create_ms),
         }
         match library.peek(reader.data()) {
-            Some(si) if si.is_key_frame => break si,
+            Some(si) if si.is_key_frame || (task.any_start && si.bit_depth != 0) => break si,
+            Some(_) if task.any_start => early.push(reader.data().to_vec()),
             Some(_) => skipped += 1,
+            None if task.any_start => early.push(reader.data().to_vec()),
             None => {
                 return fail(
                     &format!("no sequence header could be read from temporal unit {skipped}"),
@@ -1094,6 +1098,25 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     // The number of the temporal unit, from 1, as the user data of the decode call: the frames have to
     // bring it back, in order (`picture`).
     let mut unit_number: u64 = 0;
+    // -anystart: the temporal units in front of the first sequence header; the decoder has nothing to
+    // decode them with and skips their frames.
+    for unit in &early {
+        unit_number += 1;
+        units += 1;
+        if let (Some(current), true) = (decoder.as_mut(), decode_error.is_empty())
+            && let Err(error) = current.decode(unit, unit_number)
+        {
+            bitstream_error = true;
+            decode_error = format!(
+                "decode error at temporal unit {} (before the first sequence header): {}",
+                unit_number - 1,
+                error.detail
+            );
+        }
+    }
+    if !decode_error.is_empty() {
+        limit = 0;
+    }
     while limit != 0 {
         limit = limit.wrapping_sub(1);
         unit_number += 1;

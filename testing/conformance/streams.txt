@@ -38,6 +38,11 @@ svt syn-superres-10b-1080p.ivf 64 superres-mode=2
 # and one key frame. Also the stream that testing/conformance/cut_tile_check.py damages for the decode
 # error of a tile whose size does not fit, and decodes on from its next key frame.
 svt syn-tiles-10b-1080p.ivf 40 tile-columns=2:tile-rows=1:keyint=16
+# Open GOP: the refresh points after the first key frame are hidden intra-only frames (irefresh-type=1),
+# with no key frame after the first. The stream that testing/conformance/random_access_check.py cuts at
+# one of them, at a show_existing_frame and at an inter frame, for a start in the middle of a stream
+# (AV1 7.6).
+svt syn-opengop-10b-1080p.ivf 48 irefresh-type=1:keyint=16
 # HDR10: BT.2020 primaries, the PQ transfer, a mastering display colour volume and a content light
 # level (metadata OBUs), two key frames. No other stream of the set has HDR metadata, and of the others
 # only the two DVB-DASH cuts have a colour description (BT.709; BT.2020 with HLG). What the decoder

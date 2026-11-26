@@ -734,7 +734,7 @@ jobs:
             crates/rav1g/src/host/{compute,frame,shader_pick}.rs testing/shader_cache)
           parser_switches=$(changed "${shared[@]}" crates/rav1g-parse third_party/rav1d \
             tools/rav1g-parse-check tools/rav1g-dec/src/run.rs testing/stage_dump \
-            testing/conformance/{cut_tile_check.py,dump_tasks.txt} crates/rav1g/src/decoder.rs \
+            testing/conformance/{cut_tile_check.py,random_access_check.py,dump_tasks.txt} crates/rav1g/src/decoder.rs \
             crates/rav1g/src/host/rav1d_host.rs crates/rav1g/src/host/rav1d_frames.rs \
             crates/rav1g/src/host/blocks.rs crates/rav1g/src/host/completion.rs \
             crates/rav1g/src/host/create.rs crates/rav1g/src/host/frame.rs crates/rav1g/src/host/types.rs \
@@ -1251,6 +1251,24 @@ jobs:
           python testing/conformance/cut_tile_check.py --player-smoke out/rav1g-dec/rav1g-dec.exe `
             --streams conformance-streams --out out/cut-tile
           if ($LASTEXITCODE -ne 0) { throw "decode error check with the player's decoder code: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
+
+      # A start in the middle of a stream (AV1 7.6; testing/conformance/random_access_check.py,
+      # docs/integration.md): two streams of the set cut at an intra-only refresh point, a
+      # show_existing_frame, an inter frame and a key frame, with and without the sequence header put in
+      # front. The frames that name a reference slot no frame was decoded into are skipped without an error
+      # (and counted in the SKIPPED log line), and the frames out are exactly those the check's own reading
+      # of the headers says, each with the md5 of its temporal unit in the whole stream. Through the Rust
+      # interface and through rav1g.h, one frame in parse.
+      - name: Start in the middle of a stream, rav1g-dec
+        if: ${{ !cancelled() && matrix.suite == 'lifecycle' }}
+        shell: pwsh
+        run: |
+          python testing/conformance/random_access_check.py --tool out/rav1g-dec/rav1g-dec.exe `
+            --streams conformance-streams --out out/random-access
+          if ($LASTEXITCODE -ne 0) { throw "random access check with rav1g-dec: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
+          python testing/conformance/random_access_check.py --tool out/rav1g-dec/rav1g-dec.exe "--tool-args=-capi" `
+            --streams conformance-streams --out out/random-access
+          if ($LASTEXITCODE -ne 0) { throw "random access check with rav1g-dec -capi: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
 
       # Order check (testing/conformance/order_check.py; docs/gpu-av1-decoder.md, "Padding of the mode info
       # record"): what a decoder writes must not depend on what the process decoded before. The sequences that
@@ -1946,6 +1964,17 @@ jobs:
             --streams conformance-streams --out out/cut-tile-frames
           if ($LASTEXITCODE -ne 0) { $failed += "two frames in parse through rav1g.h: exit code $LASTEXITCODE" }
           if ($failed.Count) { throw "decode error check with frames in parse: $($failed -join '; ') (1: a check failed, 2: the check could not be done)" }
+
+      # A start in the middle of a stream with four frames in parse (testing/conformance/random_access_check.py
+      # --frames-in-parse 4, the default above 2560x1440): a skipped frame takes no frame context, nothing
+      # waits for it, and the frames out are the same.
+      - name: Start in the middle of a stream with frames in parse
+        if: ${{ !cancelled() && matrix.case == 'conformance' }}
+        shell: pwsh
+        run: |
+          python testing/conformance/random_access_check.py --tool out/rav1g-dec/rav1g-dec.exe --frames-in-parse 4 `
+            --streams conformance-streams --out out/random-access-frames
+          if ($LASTEXITCODE -ne 0) { throw "random access check with four frames in parse: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
 
       # The frame buffer bound at the recording (docs/memory.md, candidate 5; -lowmemparts with 32): a
       # frame in parse has no frame buffer, takes it when it is recorded and counts its references then,

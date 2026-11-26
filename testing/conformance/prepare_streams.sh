@@ -113,7 +113,13 @@ awk '$1 == "svt"' "$list" | while read -r kind name frames params rest; do
       echo "svt $name: $tiles frame headers with several tile columns, $keys key frames"
       [ "$tiles" -gt 0 ] || { echo "$0: $name has no frames with several tiles" >&2; exit 1; } ;;
   esac
+  # An open GOP (irefresh-type=1) has hidden intra-only refresh points and one key frame; a closed one
+  # with keyint more than one key frame.
+  intra_only=$(echo "$headers" | grep -c -E ' frame_type +10 = 2$' || true)
   case "$params" in
+    *irefresh-type=1*)
+      echo "svt $name: $intra_only intra-only frames, $keys key frames"
+      [ "$intra_only" -gt 0 ] || { echo "$0: $name has no intra-only frames" >&2; exit 1; } ;;
     *keyint*) [ "$keys" -gt 1 ] || { echo "$0: $name has one key frame" >&2; exit 1; } ;;
   esac
   echo "-name $name -i svt/$name -check svt/$name.md5 -timeout $big_timeout" >> "$manifest"

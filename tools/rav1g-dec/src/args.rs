@@ -116,6 +116,10 @@ pub struct Task {
     /// -continue_on_error: a decode call that fails does not end the task; the next temporal units go to
     /// the same decoder.
     pub continue_on_error: bool,
+    /// -anystart: the task starts with the first temporal unit of the stream, not with the first one that
+    /// has a key frame, as an application does that starts in the middle of a stream (AV1 7.6): the
+    /// decoder is created for the first sequence header, and the temporal units before it are passed too.
+    pub any_start: bool,
     /// -alllayers: every shown frame of a temporal unit with spatial layers.
     pub all_layers: bool,
     /// -oppoint <n>: the operating point of a stream with layers.
@@ -190,6 +194,7 @@ impl Default for Task {
             poison: Poison::Off,
             interfast: 0,
             continue_on_error: false,
+            any_start: false,
             all_layers: false,
             parser_options: rav1g::ParserOptions::default(),
             oppoint: 0,
@@ -367,6 +372,9 @@ pub fn usage() {
     say!("  -continue_on_error    a decode call that fails does not end the task: the error is counted and the next");
     say!("                        temporal units go to the same decoder, as an application does with a damaged");
     say!("                        stream (one 'CONTINUE ...' line per error and one behind the task)");
+    say!("  -anystart             the task starts with the first temporal unit, not the first key frame: the decoder");
+    say!("                        is created for the first sequence header and given every temporal unit (a start");
+    say!("                        in the middle of a stream, AV1 7.6; frames without decoded references are skipped)");
     say!("  -keep_going           a task that ends with a decode error does not end the run: the tasks behind it");
     say!("                        are run in the same process");
     say!("  -memstate             'MEMSTATE ...' lines with the memory of the process and the video memory the");
@@ -501,6 +509,7 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-intrafilterlegacy" => task.intrafilterlegacy = true,
             "-intrasingleedgelegacy" => task.intrasingleedgelegacy = true,
             "-continue_on_error" => task.continue_on_error = true,
+            "-anystart" => task.any_start = true,
             "-poisonmi" => task.poison = Poison::ModeInfo,
             "-poisonbuf" => task.poison = Poison::Buffers,
             "-interfast" => task.interfast = switches::INTER_FAST_ON,
