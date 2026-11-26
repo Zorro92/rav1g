@@ -58,7 +58,7 @@ From the fork's `BaleToneMap` (`BaleToneMap.h`: `Create`, `Initialize`, `Process
 | `desat` | 0 (off) | `desaturation` 0 | the same; any other value is refused (`INCAPABLE`) |
 | downscale (`reserved[0..1]`, at most 4:1) | the source fitted into the display | `width`, `height` | any ratio; 2:1, 1:1 and 3:2 fast |
 | output P010 (`BALE_TONEMAP_OUTPUT_P010`) | P010 for AV1 (the owner's exception) | `depth` 10 (or 0 for a 10-bit decoder) | the same codes: `64 + 876 Y'`, `512 + 896 C`, rounded, `<< 6` |
-| output NV12 dithered (`BALE_TONEMAP_OUTPUT_NV12_DITHERED`) | 8-bit SDR displays, not AV1 | `depth` 8, `dither` 0 | dithered, but with rav1g's own R2 threshold, not Bale's 8x8 Bayer: codes one apart where the two thresholds fall on either side |
+| output NV12 dithered (`BALE_TONEMAP_OUTPUT_NV12_DITHERED`) | 8-bit SDR displays, AV1 included since Bale lifted its P010 exception (2026-11-26) | `depth` 8, `dither` 0 | dithered with the same R2 threshold: Bale's stage took rav1g's (2026-11-26, no cost against its 8x8 Bayer on the console) |
 | BT.709 SDR scale only (`BALE_TONEMAP_SDR709`) | SDR larger than the display | transform auto | the same: BT.1886 decode, area, encode, no clip |
 | BT.2020 SDR, gamut only | yes | transform auto | the same |
 | 8-bit input (`BALE_TONEMAP_INPUT_NV12`, read as code << 2) | yes | 8-bit sequences | limited range the same (8-bit codes by their 8-bit range equal `code << 2` in the 10-bit one); full range by 255 (H.273), where `code << 2` over 1023 is 0.3% lower at the top |
@@ -106,8 +106,8 @@ the same peak rule, so the same agreement is expected; with `av1_set_display_bil
 The codes that differ are the same ones that differ between the pass and rav1g's model: Bale's reference
 and rav1g's model agree with each other, and the pass is one float32 rounding away from both. Bale holds
 its own GPU stage to its reference within 12 P010 codes (3 NV12). Not comparable: odd sizes, upscaling
-and BT.601 (Bale's reference declines them, rav1g takes them), and dithered NV12 (two different
-thresholds by design).
+and BT.601 (Bale's reference declines them, rav1g takes them), and dithered NV12 before
+2026-11-26 (Bale's stage had an 8x8 Bayer threshold; it has rav1g's R2 threshold since).
 
 ## What goes away for AV1
 
