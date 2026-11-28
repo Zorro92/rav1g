@@ -113,7 +113,6 @@ pub struct compute_shader_lib {
     pub shader_loop_rest_wiener_sp_tex: ComputeShader,
     pub shader_cdef_filter_v3: ComputeShader,
     pub shader_cdef_filter_v3_sp_tex: ComputeShader,
-    pub shader_intra_filter_legacy: ComputeShader,
     pub shader_intra_main_prefetch_hbd: ComputeShader,
     pub shader_intra_main_single_edge: ComputeShader,
     pub shader_intra_main_single_edge_hbd: ComputeShader,

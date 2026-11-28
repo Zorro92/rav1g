@@ -100,7 +100,6 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        &params_.intrav2_},
       {"intraopt", atSingle, anOptional, "optimized intra_main shaders, the only ones (accepted, changes nothing)", "",
        &params_.intraopt_},
-      {"intrafilterlegacy", atSingle, anOptional, "previous 8-bit filter intra shader", "", &params_.intrafilterlegacy_},
       {"intrasingleedgelegacy", atSingle, anOptional, "use the previous directional wavefront with prefetching", "", &params_.intrasingleedgelegacy_},
       {"slots", atInt, anOptional,
        "decoder pipeline slots (frames in flight), 2..4. Default: four above 2560x1440, otherwise one "
@@ -429,7 +428,6 @@ void CParameters::Reset() {
   params_.displaybilinearchroma_ = false;
   params_.intrav2_ = false;
   params_.intraopt_ = false;
-  params_.intrafilterlegacy_ = false;
   params_.intrasingleedgelegacy_ = false;
   // 0: the task has no -slots (Parse() makes the default of it).
   params_.slots_ = 0;

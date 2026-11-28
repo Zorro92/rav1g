@@ -392,11 +392,6 @@ typedef void (*av1_intra_steps_cb_fn_t)(void *priv, const av1_intra_steps *frame
  * is in flight, like the perf callback. */
 void av1_set_intra_step_timing(av1_intra_steps_cb_fn_t cb, void *priv, int min_steps, const int *frames, int count);
 
-/* Process-wide. Non-zero selects the previous 8-bit filter intra shader.
- * Applies to frames that run the main intra path. Off by default. Change it
- * only while no frame is in flight. */
-void av1_set_intra_filter_legacy(int enable);
-
 /* Process-wide. Non-zero predicts the inter blocks with one reference and the
  * averaged compound blocks by the fraction of their motion vectors
  * (inter_fast.hlsl, inter_compound_fast.hlsl: a copy, one filter pass, or

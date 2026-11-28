@@ -61,11 +61,6 @@ pub fn set_intra_v2(enable: bool) {
     crate::host::av1_set_intra_v2(c_int::from(enable))
 }
 
-/// Use the previous 8-bit filter intra shader on frames that run the main intra path.
-pub fn set_intra_filter_legacy(enable: bool) {
-    crate::host::av1_set_intra_filter_legacy(c_int::from(enable))
-}
-
 /// The display pass: the configured source peak (`Display::source_peak_nits`) for every PQ frame, its HDR
 /// metadata ignored, as before interface version 3 (a picture A/B; `-displayfixedpeak`).
 pub fn set_display_fixed_peak(enable: bool) {

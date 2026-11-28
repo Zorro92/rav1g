@@ -1000,7 +1000,6 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     library.set_choices(&Choices {
         skip_film_grain: task.skip_film_grain,
         intra_v2: task.intrav2,
-        intra_filter_legacy: task.intrafilterlegacy,
         intra_single_edge_legacy: task.intrasingleedgelegacy,
         inter_fast: task.interfast,
         display_fixed_peak: task.displayfixedpeak,
@@ -1030,14 +1029,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         say!("Direct NV12/P010 film grain shader: film_grain_filter_sp_tex_v2 (default)");
     }
     say!("Film grain templates: CPU, uploaded with the random offsets");
-    say!(
-        "8-bit filter intra shader: {}",
-        if task.intrafilterlegacy {
-            "intra_filter_legacy (-intrafilterlegacy)"
-        } else {
-            "intra_filter_prefetch (default)"
-        }
-    );
+    say!("8-bit filter intra shader: intra_filter_prefetch (default)");
     if !task.intrav2 {
         say!(
             "Intra wavefront: {}",

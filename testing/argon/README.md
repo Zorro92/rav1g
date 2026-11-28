@@ -83,7 +83,7 @@ gh workflow run build.yml --ref <branch> -f argon=true -f argon_switches=-newswi
 ```
 
 `argon_switches` accepts comma-separated passes, such as
-`-newswitch,-intrafilterlegacy`. A pass is one flag or several, each with an
+`-newswitch,-poisonbuf`. A pass is one flag or several, each with an
 optional plain value, separated by spaces: `-output p010` decodes into NV12
 and P010 textures the output pass writes (the hash is that of the planes, so
 the reference md5 holds), which is the only way Argon reaches the direct

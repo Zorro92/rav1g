@@ -124,9 +124,9 @@ const LAYOUTS: usize =
 const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
-    // 20 transform pipelines, 36 shared shaders and 25 per bit depth: one slot per pipeline of
+    // 20 transform pipelines, 35 shared shaders and 25 per bit depth: one slot per pipeline of
     // `create_tasks` (the test `every_pipeline_names_its_shader_once`).
-    assert!(SHADERS == 20 + 36 + 2 * 25);
+    assert!(SHADERS == 20 + 35 + 2 * 25);
     assert!(LAYOUTS == 24);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
@@ -372,7 +372,6 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("inter_obmc_left", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_obmc_left),
             ("inter_warp", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_warp),
             ("inter_scale_warp_compound", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_warp_comp),
-            ("intra_filter_legacy", &layouts.intra_pred, &raw mut (*lib).shader_intra_filter_legacy),
             ("intra_main", &layouts.intra_pred, &raw mut (*lib).shaders_8bit.intra_main),
             ("inter_ext_borders", &layouts.common0110, &raw mut (*lib).shaders_8bit.inter_ext_borders),
             ("reconstruct_block", &layouts.intra_pred, &raw mut (*lib).shaders_8bit.reconstruct_block),

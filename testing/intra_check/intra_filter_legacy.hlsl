@@ -14,6 +14,11 @@
  * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
  */
 
+// The previous 8-bit filter intra kernel (AV1 7.11.2.3), the filter intra reference of intra_check's
+// legacy run. Not a shader of the decoder any more: its runtime switch, -intrafilterlegacy, is retired
+// (the default is intra_filter_prefetch.hlsl with intra_filter.h), and the shader build does not see
+// this file.
+
 cbuffer IntraDataCommon : register(b0) {
   int4 cb_planes[3];
   int4 cb_flags;

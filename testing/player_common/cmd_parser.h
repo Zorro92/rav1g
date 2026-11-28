@@ -141,7 +141,6 @@ class CParameters {
     bool intrav2_;
     // -intraopt: accepted, changes nothing (-intraod is retired).
     bool intraopt_;
-    bool intrafilterlegacy_;
     bool intrasingleedgelegacy_;
     // -slots: the pipeline slots the task asks for. 0 when the task has no -slots: the library then gives
     // the decoder the slots of its frames in parse.

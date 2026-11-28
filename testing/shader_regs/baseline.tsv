@@ -52,7 +52,6 @@ inter_obmc_above	64	64	126	13	0	0	4	vgprs
 inter_obmc_left	64	64	111	13	0	0	4	vgprs
 inter_warp	64	64	76	28	11264	0	2.5	lds
 inter_scale_warp_compound	64	64	71	44	5120	0	6	lds
-intra_filter_legacy	64	64	27	41	1024	0	16	waves
 intra_main	256	64	58	66	10240	0	8	vgprs
 inter_ext_borders	64	64	10	16	0	0	16	waves
 reconstruct_block	64	64	14	27	0	0	16	waves

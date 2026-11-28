@@ -54,7 +54,7 @@ REQUIRED_BYTECODE = [
     'intra_main_single_edge', 'intra_main_single_edge_hbd',
     'intra_filter_prefetch', 'intra_filter_prefetch_hbd',
     'cdef_lists', 'cdef_lists_v2',
-    'intra_filter_legacy', 'intra_v2', 'intra_v2_hbd',
+    'intra_v2', 'intra_v2_hbd',
     'gen_lf_blocks_vert', 'gen_lf_blocks_hor',
     'loopfilter_vert', 'loopfilter_hor',
     'loopfilter_vert_hbd', 'loopfilter_hor_hbd',

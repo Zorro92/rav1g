@@ -49,7 +49,6 @@ pub(crate) use film_grain::av1_set_skip_film_grain;
 pub(crate) use frame::{av1_set_intra_v2, av1_shader_variant};
 pub(crate) use memory::{av1_log_video_memory_now, av1_set_poison_buffers};
 pub(crate) use perf::{av1_set_inter_fast, av1_set_perf_callback, av1_set_perf_detail};
-pub(crate) use prediction::av1_set_intra_filter_legacy;
 pub(crate) use stage_dump::av1_set_stage_dump;
 pub(crate) use step_time::av1_set_intra_step_timing;
 mod film_grain;

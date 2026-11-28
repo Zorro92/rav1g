@@ -173,7 +173,6 @@ pub struct Spec {
 pub struct Choices {
     pub skip_film_grain: bool,
     pub intra_v2: bool,
-    pub intra_filter_legacy: bool,
     pub intra_single_edge_legacy: bool,
     pub inter_fast: u32,
     /// The display pass's A/B switches (`av1_set_display_fixed_peak`, `av1_set_display_bilinear_chroma`).
@@ -520,7 +519,6 @@ impl Library {
         switches::set_skip_film_grain(choices.skip_film_grain);
         switches::set_display_fixed_peak(choices.display_fixed_peak);
         switches::set_display_bilinear_chroma(choices.display_bilinear_chroma);
-        switches::set_intra_filter_legacy(choices.intra_filter_legacy);
         // SAFETY: the setter takes an integer and only changes the test flag, with no frames in flight.
         unsafe {
             av1_set_intra_single_edge_legacy(c_int::from(choices.intra_single_edge_legacy));

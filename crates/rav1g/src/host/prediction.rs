@@ -454,14 +454,6 @@ pub(super) fn intra_main_for_frame(intra_v2: bool) -> IntraMain {
     }
 }
 
-static INTRA_FILTER_LEGACY: AtomicI32 = AtomicI32::new(0);
-
-/// `av1_set_intra_filter_legacy` (`dx/av1_perf.h`).
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_intra_filter_legacy(enable: c_int) {
-    INTRA_FILTER_LEGACY.store(enable, Ordering::Relaxed);
-}
-
 /// Inter breakdown of the timing run (-gputimedetail, dx/av1_perf.h): what the recording notes about the
 /// dispatches of the inter stage and of the reconstruction. Without a record (`d` null) every call returns
 /// at once and the command list is the one it always was.
@@ -1136,9 +1128,7 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON) 
                 // The lists of the wavefront: per iteration nine lists by block size (64x64 down to 4x4 by
                 // area), then the filter intra blocks.
                 let offsets = block_map.add((InterCountsAll + ReconstructBlockSizes) as usize);
-                let intra_filter = if td.is_hbd == 0 && INTRA_FILTER_LEGACY.load(Ordering::Relaxed) != 0 {
-                    &raw const (*lib).shader_intra_filter_legacy
-                } else if td.is_hbd != 0 {
+                let intra_filter = if td.is_hbd != 0 {
                     &raw const (*lib).shader_intra_filter_prefetch_hbd
                 } else {
                     &raw const (*lib).shader_intra_filter_prefetch

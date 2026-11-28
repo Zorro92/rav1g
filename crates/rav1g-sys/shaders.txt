@@ -55,7 +55,6 @@ inter_obmc_above
 inter_obmc_left
 inter_warp
 inter_scale_warp_compound
-intra_filter_legacy
 intra_main
 inter_ext_borders
 reconstruct_block

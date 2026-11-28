@@ -451,6 +451,7 @@ per-frame md5 of the conformance set and Argon).
 | `-parseopt cleargrid` (`RAV1G_PARSER_OPTION_CLEAR_GRID`) | the mode info grid of a slot cleared for every frame | the grid kept between frames of one size: 4.2 MB a 4K frame the CPU does not write |
 | `-parseopt gridcheck` (`RAV1G_PARSER_OPTION_GPU_GRID_CHECK`) | a second grid by the GPU, held against the sink's (`GRIDCHECK`) | the step before the default `gpugrid`, which has no sink grid to hold against; the stage dump `mi_grid` holds the GPU's grid against a decoder whose sink writes it |
 | `-lfhsplit 1|2` (`rav1g_set_lf_h_split`), `-intraedgefix` (`rav1g_set_intra_edge_fix`) | the horizontal loop filter in rows of blocks; the 8-bit above edge filter bound of `intra_main.hlsl` | tools of an old console-bug hunt ([Experiments](#experiments)): none changed the console's output |
+| `-intrafilterlegacy` (`av1_set_intra_filter_legacy`) | the previous 8-bit filter intra kernel, `intra_filter_legacy.hlsl` (two group syncs, the residual in a separate pass; AV1 7.11.2.3) | retired by the owner's decision (2026-11-27) without a console A/B, for one pipeline state less at `rav1g_device_create`; the packed-pair kernel `intra_filter_prefetch` was already the default. The old kernel stays in `testing/intra_check` as the filter intra reference of its legacy run |
 | `-gpuclear`, `-cpuclear` (`-asyncclear`), `-syncclear` (`rav1g_set_clears`, `rav1g_set_async_clear`) | the wavefront of intra prediction in the slot's grid, cleared for every frame by the GPU, the completion thread or the decode thread | the wavefront at the edges of the tiles since package 0.2.146.0: no clears, 3.5 MB a 4K frame the CPU does not write ([Clears](#clears)) |
 
 ## Timing run (`-gputime` and `-nopresent`)
@@ -1331,9 +1332,9 @@ The shader-pick build also supports `-shaderpick od=intra_main,intra_main_hbd`
 to select the unoptimized bytecode for the conservative kernels used by
 `-intrav2` on frames with intra block copy.
 
-`-intrafilterlegacy` selects the previous 8-bit filter intra shader in both the
-player and `rav1g-dec`. It controls filter intra independently of `-intraod` and
-applies when the frame uses the main wavefront path.
+`-intrafilterlegacy`, the previous 8-bit filter intra shader, is retired too
+([Retired switches](#retired-switches)); `intra_filter_prefetch.hlsl` is the only 8-bit
+filter intra shader of the library.
 
 For timing, append `-progress -gputime -nopresent` to both tasks and compare intra time,
 GPU busy time, and recording time. For validation, use `-md5_frame_check` in separate
