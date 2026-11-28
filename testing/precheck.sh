@@ -34,7 +34,7 @@ SHADER_COMMON="${SHADERS}*.h testing/common/group_sched.h testing/common/gs_grou
 LIBAOM='libav1/aom/* libav1/aom_dsp/* libav1/aom_mem/* libav1/aom_ports/* libav1/aom_scale/* libav1/aom_util/* libav1/av1/* libav1/build/*'
 RUST='*.rs Cargo.toml Cargo.lock .cargo/* rustfmt.toml crates/* tools/* third_party/*'
 MAPPING="
-intra|sh testing/intra_check/run.sh --mutate --layouts 400|testing/intra_check/* ${SHADERS}intra_* ${SHADERS}gen_pred_blocks* libav1/dx/intra_v2_sched.h crates/rav1g/src/host/tables.rs libav1/av1/common/reconintra.c libav1/aom_dsp/intrapred_common.h $SHADER_COMMON
+intra|sh testing/intra_check/run.sh --mutate --layouts 400|testing/intra_check/* ${SHADERS}intra_* ${SHADERS}gen_pred_blocks* crates/rav1g/src/host/tables.rs libav1/av1/common/reconintra.c libav1/aom_dsp/intrapred_common.h $SHADER_COMMON
 sync|sh testing/sync_check/run.sh --mutate|testing/sync_check/* testing/common/* ${SHADERS}*
 inter|sh testing/inter_check/run.sh --mutate|testing/inter_check/* testing/warp_check/* ${SHADERS}inter_* ${SHADERS}gen_pred_blocks* $SHADER_COMMON $LIBAOM
 warp|sh testing/warp_check/run.sh --mutate|testing/warp_check/* ${SHADERS}inter_* $SHADER_COMMON $LIBAOM

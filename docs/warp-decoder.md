@@ -64,7 +64,7 @@ output to the MSVC build. [The jobs of a push](#the-jobs-of-a-push)
   `aom_codec_peek_stream_info`, the decoder is created for the stream's largest frame size
   rounded up to 128 and its bit depth, with two pipeline slots and the shared back buffer,
   CDEF runs through `cdef_filter_v3.hlsl`. The player's flags switch the same things:
-  `-nofitsize`, `-lowmemparts <n>`, `-lowmem`, `-slots <n>`, `-intrav2`,
+  `-nofitsize`, `-lowmemparts <n>`, `-lowmem`, `-slots <n>`, `-intrav2` (retired in rav1g since),
   `-parser c`, `-parseopt <list>`,
   `-t <threads>`, `-parseframes <n>` (frames in parse; the `CONFIGURATION` line of a task says what
   the decoder was created with), `-limit <n>`.
@@ -199,7 +199,7 @@ rav1g-dec -sm6test
 | `-queue_size <n>` | output images in the pool (default 4) |
 | `-timeout <seconds>` | give up on a task after this time |
 | `-name <text>` | what the `BEGIN` and `RESULT` lines call the stream (default: its file name) |
-| `-nofitsize`, `-lowmemparts <n>`, `-lowmem`, `-slots <n>`, `-intrav2` (and `-cdefv2`, `-intraopt`, `-fitsize`, accepted and changing nothing) | as in the [test player](test-player.md#defaults-and-opt-out-flags); the task line of a run says `clears none needed`. The [retired switches](test-player.md#retired-switches) are unknown flags |
+| `-nofitsize`, `-lowmemparts <n>`, `-lowmem`, `-slots <n>` (and `-cdefv2`, `-intraopt`, `-fitsize`, accepted and changing nothing) | as in the [test player](test-player.md#defaults-and-opt-out-flags); the task line of a run says `clears none needed`. The [retired switches](test-player.md#retired-switches) are unknown flags |
 | `-poisonmi`, `-poisonbuf` | debugging, off by default: the decoder fills the mode info pool (`-poisonmi`) or every buffer the CPU writes for the shaders (`-poisonbuf`) with the byte 0xA5 when it creates it, instead of leaving what the memory held. With `-poisonbuf` it also fills the constants of every stage again in every frame, right before the stage writes them (their memory is reused from frame to frame). What the decoder clears or initialises after the creation is as in a normal run. The output must be the same; a shader that reads bytes the CPU never wrote gives another one, or loses the device. The decoder passes both. See [Order check and poisoned buffers](#order-check-and-poisoned-buffers) |
 | `-interfast`, `-interfastlists` | the [inter fast path](test-player.md#inter-fast-path--interfast) of the test player: inter blocks listed by the fraction of their motion vectors (`inter_fast`, `inter_compound_fast`; with `-interfastlists` the original shaders on those lists), same output; the `rust` job decodes the whole set once more with `-interfast` on every push |
 | `-interfastmode <n>` | `av1_set_inter_fast(n)` for diagnosis: 1 is `-interfast`, +2 keeps `inter_main` on the lists of one reference, +4 `inter_compound` on those of two (7 is `-interfastlists`); 8 only makes room for the lists in the block maps and leaves the path off |
@@ -885,7 +885,7 @@ python testing\conformance\run.py --tool target\release\rav1g-dec.exe ^
   --streams conformance-streams --out conformance-out
 ```
 
-`--only <regular expression>` runs the streams whose name matches, `--tool-args "-intrav2"`
+`--only <regular expression>` runs the streams whose name matches, `--tool-args "-poisonbuf"`
 adds flags to every task (`-hw` for a hardware adapter), `--no-repeat` skips the repeat of
 failing streams. One stream by hand: take its line from `conformance-streams\manifest.txt`,
 run `rav1g-dec` with those arguments from inside `conformance-streams`, and add `-o` or

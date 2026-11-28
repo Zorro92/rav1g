@@ -41,13 +41,11 @@ one commit each:
   and the upstream shader `cdef_filter.hlsl` (`-cdefv1`) are retired now, and
   `cdef_filter_v3.hlsl` is the only CDEF. A host-side check of it against a scalar
   AV1 7.15 reference lives in `testing/cdef_check`, which is not part of the player build.
-- **Intra v2**: a second intra prediction path: the shader `libav1/dx/shaders/intra_v2.hlsl`
-  (with `intra_v2_hbd.hlsl` for high bit depth), its scheduler `libav1/dx/intra_v2_sched.h`,
-  and the player flag `-intrav2` that selects it; see [Intra v2 run](#intra-v2-run--intrav2).
-  The frame-wide wavefront with prefetching stays the default.
-  Intra v2 also adds intra dispatch counters to the `-gputime` output and a
-  host-side comparison of the two paths (`testing/intra_check`), which is not part of the
-  player build. It is bit-exact but slower than the original path.
+- **Intra v2**: a second intra prediction path (`intra_v2.hlsl` with its scheduler), bit-exact
+  but slower than the frame-wide wavefront, retired in 0.8.0-alpha.3 with its flag `-intrav2`;
+  see [Intra v2](#intra-v2-retired--intrav2). Its shaders and scheduler stay in
+  `testing/intra_check` as the reference of the host-side comparison of the intra kernels, and the
+  intra dispatch counters it added to the `-gputime` output stay.
 - **Intra optimisation A/B** uses DXC-optimized `intra_main` and `intra_main_hbd`. `-intraod`,
   which selected the previous DXC `-Od` kernels, is retired. See
   [Intra optimisation A/B](#intra-optimisation-ab--intraod).
@@ -69,8 +67,8 @@ one commit each:
   for the fixed 4096x2176 10-bit).
 - **Decoder memory**: the decoder took 754.7 MiB of D3D12 buffers at 4096x2176 10-bit,
   most of a console app's 1 GiB. Two buffers per slot are now only created when they are
-  needed (the palette buffer on the first frame that allows screen content tools, the
-  intra v2 buffer for a decoder created for `-intrav2`), there are three more reductions
+  needed (the palette buffer on the first frame that allows screen content tools, and the
+  intra v2 buffer of the retired `-intrav2`), there are three more reductions
   (the shared back buffer, on by default, and two that the player flag `-lowmem` adds),
   the sequence header peek behind the decoder's size and `aom_codec_peek_stream_info`
   reads the header correctly (and the bit depth), and a decoder creation that does not
@@ -375,7 +373,7 @@ The log lines at the start of each task show which defaults and opt-out flags ar
 | Pipeline slots | 2 | `Frame slots: 2` | `-slots 3`, `-slots 4` |
 | Parser | the parse pass of rav1d, with its switches `nolfmask`, `tilethread` and (since package 0.2.197) `gpucdef` on | `Parser: the parse pass of rav1d`, `Parser switches (-parseopt): nolfmask tilethread gpucdef` | none since package 0.2.159: the entropy decoder of libaom (`-parser c`) left the decoder; up to 0.2.157 `Parser: the entropy decoder of libaom (-parser c)`; `-parseopt` for the switches; see [Parser](#parser--parser) |
 | Clears of a slot | none: the wavefront of intra prediction is kept at the edges of the tiles (since package 0.2.146.0) | `Clears: none needed (intra wavefront at the edges of the tiles)` | none: `-gpuclear`, `-cpuclear` and `-syncclear` are retired; see [Clears](#clears) |
-| Intra prediction | frame-wide wavefront with prefetching and single-edge dependencies | `Intra main shader: prefetching with single-edge dependencies` | `-intrav2`; `-intrasingleedgelegacy` is retired |
+| Intra prediction | frame-wide wavefront with prefetching and single-edge dependencies | `Intra main shader: prefetching with single-edge dependencies` | none: `-intrav2` and `-intrasingleedgelegacy` are retired |
 | Unscaled single-reference and average/distance compound prediction on size lists | `inter_main_v2` and `inter_compound_v2`, with HBD variants | `Inter shaders: inter_main_v2, inter_compound_v2 (default)` | `-interfast` selects [motion-class lists and shaders](#inter-fast-path--interfast). |
 
 
@@ -453,6 +451,7 @@ per-frame md5 of the conformance set and Argon).
 | `-lfhsplit 1|2` (`rav1g_set_lf_h_split`), `-intraedgefix` (`rav1g_set_intra_edge_fix`) | the horizontal loop filter in rows of blocks; the 8-bit above edge filter bound of `intra_main.hlsl` | tools of an old console-bug hunt ([Experiments](#experiments)): none changed the console's output |
 | `-intrafilterlegacy` (`av1_set_intra_filter_legacy`) | the previous 8-bit filter intra kernel, `intra_filter_legacy.hlsl` (two group syncs, the residual in a separate pass; AV1 7.11.2.3) | retired by the owner's decision (2026-11-27) without a console A/B, for one pipeline state less at `rav1g_device_create`; the packed-pair kernel `intra_filter_prefetch` was already the default. The old kernel stays in `testing/intra_check` as the filter intra reference of its legacy run |
 | `-intrasingleedgelegacy` (`av1_set_intra_single_edge_legacy`) | the angle-specific intra wavefront of `893f8b0` (the wait for both edges of every directional angle) with the prefetch kernels `intra_main_prefetch(_hbd)` for every frame | retired by the owner's decision (2026-11-27) without a console A/B. The single-edge dependencies (AV1 7.11.2.4) shorten the critical path: the D2 peak 1475 → 1329 steps and the 8-bit 2160p sample's 1304 → 1227 in a parse replay. The prefetch kernels stay: the default takes them for a frame without one-edge angles. The switch had no pipeline of its own |
+| `-intrav2` (`rav1g_set_intra_v2`, `Rav1gSettings::intra_v2`) | intra prediction through `intra_v2.hlsl` (`intra_v2_hbd.hlsl`, and `intra_main(_hbd)` for its frames with intra block copy), one 384-thread group per 64x64 region with its own schedule and buffers (AV1 7.11.2) | bit-exact but 2.3 to 2.4 times slower on the console ([Intra v2](#intra-v2-retired--intrav2)); retired in 0.8.0-alpha.3, four pipeline states fewer. `rav1g.h` keeps the declarations until the next interface version: the function does nothing, the field set to true is refused ([integration.md](integration.md#interface-version-3-the-retired-switches-the-source-peak-and-the-input-chroma)). The shaders and the scheduler stay in `testing/intra_check` as its independent reference (the only one of the 10-bit filter intra path) |
 | `-gpuclear`, `-cpuclear` (`-asyncclear`), `-syncclear` (`rav1g_set_clears`, `rav1g_set_async_clear`) | the wavefront of intra prediction in the slot's grid, cleared for every frame by the GPU, the completion thread or the decode thread | the wavefront at the edges of the tiles since package 0.2.146.0: no clears, 3.5 MB a 4K frame the CPU does not write ([Clears](#clears)) |
 
 ## Timing run (`-gputime` and `-nopresent`)
@@ -531,7 +530,7 @@ CPU timers (QueryPerformanceCounter, all in ms per frame):
 | `fence_wait`, `gpu_latency` | completion thread: time blocked on the frame's fence, and submit-to-fence time |
 | `grain_template` | time to generate the grain templates and write them into the frame's upload buffer (part of `rec_copy`, on the thread that records the frame) |
 | `notify` | time inside the frame-ready callback. With `-progress` this includes its two log writes per frame. |
-| `async_clear` | completion thread: the slot's clear after the frame's fence: the wavefront grid of a frame that kept its wavefront in it (no memory for the edges of its tiles, an intra block copy frame of `-intrav2`); nothing for every other frame. |
+| `async_clear` | completion thread: the slot's clear after the frame's fence: the wavefront grid of a frame that kept its wavefront in it (no memory for the edges of its tiles); nothing for every other frame. |
 
 ### Log lines
 
@@ -886,8 +885,6 @@ STEPTIME 30 frames timed, 8309 steps
 | `y`, `c` | transform blocks of luma and chroma by kind: DC, V/H (angle 90 or 180), zone 1 (< 90 degrees), zone 2 (90 to 180), zone 3 (> 180), smooth (all three), Paeth, CfL, filter intra, intra block copy, inter-intra (`AV1_INTRA_KIND_*`) |
 | `fdiag` | the longest serial chain of filter intra in the step: columns + rows - 1 of its largest block in 4x2 units (23 for 32x32), 0 without |
 
-Frames of `-intrav2` are not timed.
-
 **Console runs.** The task lines of the A/B batches, with the timing added; each is a launch of its own
 (the test player's log keeps the lines of every task):
 
@@ -1101,28 +1098,20 @@ unrolled; what a thread executes is shorter. In the upstream listing the directi
 search loop reads and writes the indexable temp 16 times per sample with a computed
 index, 64 samples per block.
 
-## Intra v2 run (`-intrav2`)
+## Intra v2 (retired, `-intrav2`)
 
 In the timing runs with `-cdefv2`, intra prediction took 14 to 21 ms per frame on average
 on 4K 10-bit streams and 59 ms on a key frame, while the per-frame lines showed 80 to
-190 wavefront iterations on inter frames and 863 on the key frame. Intra v2 is a
-replacement to measure against it.
+190 wavefront iterations on inter frames and 863 on the key frame. Intra v2 was a
+replacement measured against it: bit-exact on the console, but 2.3 to 2.4 times slower
+(intra 13.1 → 31.7 ms and 21.2 → 49.7 ms a frame on two 4K 10-bit 40 Mbps clips;
+[gpu-av1-decoder.md](gpu-av1-decoder.md#step-1b-intra-v2-2026-11-11-negative)). The flag, its
+pipelines (`intra_v2`, `intra_v2_hbd`, and `intra_main` / `intra_main_hbd`, which only its frames
+with intra block copy still took), its buffers and `Rav1gSettings::intra_v2` were retired in
+0.8.0-alpha.3 ([Retired switches](#retired-switches)); the shaders and the scheduler stay as the
+reference of `testing/intra_check`.
 
-| Flag | Effect |
-| --- | --- |
-| `-intrav2` | Intra prediction runs through `intra_v2.hlsl` (`intra_v2_hbd.hlsl` for high bit depth) instead of the default wavefront kernels. Decoded output is meant to be identical. |
-
-The flag is off by default. It is independent of `-cdefv2`. A
-frame that allows intra block copy (screen content) keeps the upstream shaders even
-with the flag; `iv2` in the per-frame line says which path a frame took. The task's log
-says which path is selected:
-
-```text
-Intra shaders: frame-wide wavefront
-Intra shaders: intra_v2 (-intrav2; frames with intra block copy use the frame-wide wavefront)
-```
-
-### What changed
+### What it was
 
 Upstream gives every intra transform block a wavefront iteration of the **whole frame**
 (one more than the highest iteration among the neighbours it reads) and runs, per
@@ -1140,13 +1129,12 @@ next one may start.
 | Edge pixels | loaded, corner-filtered, edge-filtered and upsampled in stages through group memory, a sync after each stage | each pixel evaluates the edge samples it needs as a function of the frame buffer |
 | DC and CFL sums | every thread sums the whole edge; CFL average by a tree reduction that relies on the threads of a wave running in lockstep | one partial sum per cell in group memory, added up after a sync |
 | Filter intra | separate shader, relies on 64 threads running in lockstep | cells of the same group, one anti-diagonal of cells per pass |
-| DXC optimization | `-Od` for `intra_main` and `intra_main_hbd` | default optimization |
 | Host, per frame | clears the iteration grid (5 bytes per 4x4 of the frame) and scans it for every block | scans a cell map for the same neighbours; the map is not cleared per frame (entries carry a frame stamp); one sort of the region list |
 
 The block records are the ones `gen_pred_blocks.hlsl` writes; that shader is unchanged
-(with `-intrav2` every block is "iteration 0" for it). The new path binds two more
-buffers: the cell map with the region list, and the block map. The scheduler is a
-header (`libav1/dx/intra_v2_sched.h`) shared by the decoder and the host check.
+(with `-intrav2` every block was "iteration 0" for it). The path bound two more
+buffers: the cell map with the region list, and the block map. The scheduler was a
+header (`intra_v2_sched.h`, now in `testing/intra_check`) with a port in the host.
 
 Group syncs inside a loop are only legal when the loop count is the same for all
 threads, so all groups of a dispatch run the pass count of the busiest region; regions
@@ -1154,74 +1142,32 @@ with far fewer passes are dispatched separately within the step.
 
 ### Intra timing fields
 
-`-gputime` reports what drives the cost of the intra stage, for both paths. In the
-per-frame lines (with `-progress`):
+`-gputime` reports what drives the cost of the intra stage. In the per-frame lines (with
+`-progress`):
 
 | Field | Meaning |
 | --- | --- |
-| `iters` | last wavefront iteration (upstream) or last step (`-intrav2`); the count is `iters + 1`, -1 means no intra block |
-| `iv2` | 1 if the frame went through `intra_v2` |
+| `iters` | last wavefront iteration; the count is `iters + 1`, -1 means no intra block |
 | `idisp` | `Dispatch` calls of the intra stage |
 | `ibarr` | UAV barriers of the intra stage (one per iteration or step) |
 | `igroups` | thread groups dispatched |
-| `ipasses` | thread groups times the passes they run. `ipasses / igroups` is the average pass count; a pass costs two group syncs. For the upstream path it equals `igroups` |
+| `ipasses` | thread groups times the passes they run; equal to `igroups` since the wavefront kernels run one pass (`-intrav2`, whose groups ran several passes of two group syncs each, is retired) |
 
 and one line in the summary, over the measured frames that have intra blocks:
 
 ```text
-GPUTIME intra stage per frame with intra: dispatches mean 14.2 max 131, UAV barriers mean 12.8 max 127, thread groups mean 310 max 6120, passes per group 9.4 (intra_v2 on 288 of 288 frames)
+GPUTIME intra stage per frame with intra: dispatches mean 14.2 max 131, UAV barriers mean 12.8 max 127, thread groups mean 310 max 6120, passes per group 1.0
 ```
 
 The counters are plain integers kept by the host; without `-gputime` nothing is reported.
 
-### Timing: old against new
+### Host-side comparison of the intra kernels
 
-All tasks in one `args_av1.txt`, same clip and settings, only the shader flags differ:
-
-```text
--i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -gputime -nopresent
--i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -gputime -nopresent -intrav2
--i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -gputime -nopresent -cdefv2
--i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -gputime -nopresent -cdefv2 -intrav2
-```
-
-Compare the `gpu intra` row of the stage tables, the "intra stage per frame" line, then
-`gpu busy` and the "per OUTPUT frame" line. The first two tasks isolate the intra change,
-the last two show it on top of the CDEF change. Check `cpu setup`, `cpu entropy_wall` and
-`cpu memsets` too: the new path moves a little work on the decode threads (it writes
-8 bytes per 4x4 cell of every intra block, and no longer clears the iteration grid).
-
-### Same output: md5 of every frame
-
-As for [CDEF](#same-output-md5-of-every-frame): the original shaders write the
-reference, the new path is checked against it, **in separate launches**.
-
-First launch, reference from the upstream shaders (no `-intrav2`, no `-cdefv2`):
-
-```text
--i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -save_md5 /streams/<clip>.ivf.md5
-```
-
-Let the app exit, then a second launch with only check tasks (they only read the file,
-so both can be in the same `args_av1.txt`):
-
-```text
--i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -intrav2 -md5_frame_check
--i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -cdefv2 -intrav2 -md5_frame_check
-```
-
-The rules of the CDEF section apply unchanged (same `-limit`, the `.md5` file next to
-the stream, no `-gputime`, no `-try10x3`). A reference file saved for the CDEF check of
-the same clip and `-limit` can be reused. Each task ends with `MD5 is OK` or a list of
-bad frames. Run it on at least one 8-bit and one 10-bit clip, and include a clip with a
-key frame of small blocks. Every later frame is predicted from earlier ones, so one
-wrong intra block shows up as errors from that frame on.
-
-### Host-side comparison of the two paths
-
-`testing/intra_check` compiles the four upstream intra shaders and the two `intra_v2`
-builds as C++ (attributes, semantics and register bindings stripped by `sed`) and runs
-both paths on generated frames:
+`testing/intra_check` compiles the decoder's intra shaders, the upstream and legacy kernels and the two
+`intra_v2` builds (test-only files of that directory since `-intrav2` was retired) as C++ (attributes,
+semantics and register bindings stripped by `sed`) and runs them on generated frames. `intra_v2` is the
+independent reference there: the 10-bit legacy run takes the default 10-bit filter intra kernel, so
+`intra_v2_hbd` is the only other implementation the 10-bit filter intra path is held against:
 
 - frames are built from random AV1 partition trees (64 and 128 superblocks, all
   partition types the generator knows: none, split, horizontal, vertical and the two
@@ -1232,8 +1178,8 @@ both paths on generated frames:
   palette blocks (which are skipped), with and without residual, edge filter strengths,
   edge upsampling, top-right and bottom-left availability, transform splits;
 - the records are a port of the intra part of `gen_pred_blocks.hlsl`; the iterations of
-  the original path come from a port of the grid code in `av1_mi_push_block`; the new
-  path uses the decoder's own `intra_v2_sched.h`; the lookup tables are pulled from the
+  the original path come from a port of the grid code in `av1_mi_push_block`; `intra_v2`
+  uses `intra_v2_sched.h`, the scheduler the decoder had; the lookup tables are pulled from the
   decoder sources by the script;
 - a thread group is emulated with one fiber per thread. Group syncs block until all
   threads arrive. A plain `GroupMemoryBarrier()`, which the upstream shaders use where
@@ -1269,10 +1215,6 @@ Not covered by this check: the compiled shaders and the real GPU (that is the md
 includes every case of the tables); intra block copy (those frames keep the upstream
 shaders); frames larger than about 380 pixels a side.
 
-### Shader listings in the artifact
-
-The default package includes the DXIL listings of both intra paths under `shader-survey/asm/`.
-CI checks that their bytecode is in the packaged library.
 
 ## High-bit-depth intra shader
 
@@ -1317,8 +1259,7 @@ and odd passes, and all three horizontal schedules.
 `-intraod` is retired ([Retired switches](#retired-switches)): the optimized kernels are the only
 ones, and `-intraopt` is accepted and changes nothing. The conservative kernels it selected (the
 `INTRA_MAIN_LEGACY` parts of `intra_main.hlsl` and `intra_main_hbd.hlsl`) stay as the reference of
-`testing/intra_check`, and the od set of the shader-pick package builds them. The rest of this
-section is the record of the A/B.
+`testing/intra_check`. The rest of this section is the record of the A/B.
 
 Use the same build and task settings on both sides of the comparison.
 
@@ -1327,11 +1268,7 @@ Use the same build and task settings on both sides of the comparison.
 | Default or `-intraopt` | DXC `-O3` with guarded DC/CFL wave reductions, prefetching and single-edge dependencies |
 | `-intraod` | Conservative wavefront with DXC `-Od` for `intra_main_legacy` and `intra_main_hbd_legacy` |
 
-The player logs the selected kernel, and `rav1g-dec` accepts the same flags. With
-`-intrav2`, the choice applies to frames that still use the main intra path.
-The shader-pick build also supports `-shaderpick od=intra_main,intra_main_hbd`
-to select the unoptimized bytecode for the conservative kernels used by
-`-intrav2` on frames with intra block copy.
+The player logged the selected kernel, and `rav1g-dec` accepted the same flags.
 
 `-intrafilterlegacy`, the previous 8-bit filter intra shader, is retired too
 ([Retired switches](#retired-switches)); `intra_filter_prefetch.hlsl` is the only 8-bit
@@ -1663,7 +1600,7 @@ happens to those clears. None of them changes the decoded output.
 Without any of them the decoder has two slots, clears no grid of a slot, is sized for the
 stream and shares one back buffer (see
 [Defaults and opt-out flags](#defaults-and-opt-out-flags)). The flags are independent of each
-other and of `-intrav2`, `-gputime`, `-nopresent` and the md5 flags.
+other and of `-gputime`, `-nopresent` and the md5 flags.
 
 **Console results so far (2026-11-11, package 0.2.5.0, app mode, both 4K 10-bit clips):**
 
@@ -1771,7 +1708,7 @@ console that is the same memory as the host's); the host-heap part of a slot is 
 | one more frame buffer (with its motion vectors and segment map) | 27.4 | 25.7 |
 | **each slot above two** | **162** | **152** |
 | palette buffer, from the slot's first frame that allows screen content tools | +25.8 | +24.2 |
-| intra v2 schedule buffer, only in a decoder created for `-intrav2` | +10.6 | +10.0 |
+| intra v2 schedule buffer, only in a decoder created for `-intrav2` (retired in 0.8.0-alpha.3) | +10.6 | +10.0 |
 
 A slot used to be 171.0 MiB (198 MiB with its frame buffer): the palette buffer and the
 intra v2 buffer were created with every decoder. With [`-lowmem`](#smaller-decoder--lowmem)
@@ -1813,7 +1750,7 @@ pool (23.2 MiB at 4096x2176 with two slots) and the player's output pool come on
 | `-lowmemparts 0`, 1920x1080 8-bit stream | 131.3 | 169.1 | 206.8 |
 | `-nofitsize`, 4096x2176 10-bit | 656.3 | 816.6 | 977.0 |
 | `-nofitsize -lowmemparts 0` (the default of package 0.2.6.0 and 0.2.7.0) | 682.0 | 842.4 | 1002.7 |
-| `-nofitsize -lowmemparts 0 -intrav2` | 703.3 | 874.3 | 1045.2 |
+| `-nofitsize -lowmemparts 0 -intrav2` (retired) | 703.3 | 874.3 | 1045.2 |
 | `-nofitsize -lowmem` | 575.5 | 695.5 | 815.5 |
 
 The parts of `-lowmem` alone, two slots at 4096x2176: `-lowmemparts 1` 656.3,
@@ -1848,11 +1785,9 @@ What changed against package 0.2.5.0 without any flag (72.8 MiB with two slots):
   A stream without screen content never creates them. If the buffer cannot be created
   (the budget guard refuses it, or the allocation fails) the frame is a decode error, not
   a lost device.
-- **Intra v2 buffer, 10.6 MiB per slot**: only the `-intrav2` path reads or writes it.
-  It is created when the decoder is created for that path
-  (`aom_codec_dec_cfg_t::intra_v2`; the player sets it for a task with `-intrav2` and
-  creates a new decoder when the flag differs from the task before). In a decoder without
-  it, `av1_set_intra_v2(1)` keeps the original intra shaders.
+- **Intra v2 buffer, 10.6 MiB per slot**: only the `-intrav2` path read or wrote it, and only
+  a decoder created for that path had it (`aom_codec_dec_cfg_t::intra_v2`). Retired with the path
+  in 0.8.0-alpha.3; the default decoder never had it.
 
 What was looked at and left as it is:
 
@@ -1977,7 +1912,7 @@ A refusal allocates nothing and leaves the device as it was, so the next task of
 launch runs:
 
 ```text
-MEMORY decoder size: 4096x2176 10-bit (-nofitsize, the stream's largest frame is 3840x2160 10-bit), slots 3, intra_v2 buffers no, low memory parts 0; device buffers 842.2 MiB and up to 77.3 MiB for palette buffers on first use, host memory N.N MiB
+MEMORY decoder size: 4096x2176 10-bit (-nofitsize, the stream's largest frame is 3840x2160 10-bit), slots 3, low memory parts 0; device buffers 842.2 MiB and up to 77.3 MiB for palette buffers on first use, host memory N.N MiB
 MEMORY output pool estimate: textures of 4 images of 3840x2160 10-bit, 100.9 MiB; held back from what the decoder may take until the pool has them. The decoder's budget guard keeps a margin of 48.0 MiB at its creation
 MEMORY app before the decoder: usage N.N MiB of limit 1024.0 MiB, N.N MiB left
 MEMORY budget: 890.2 MiB needed and N.N MiB left for the decoder, waited 300 ms for memory the system may still be returning: N.N MiB left now (no longer growing)
@@ -2036,7 +1971,7 @@ Console, package 0.2.6.0, limit 1024.0 MiB, 4 output images of a 3840x2160 10-bi
 | `-lowmem`, 3840x2160 10-bit stream | 540.0 accepted | 652.6 accepted | 765.2 refused |
 | `-lowmemparts 0`, 3840x2160 10-bit stream | 639.9 accepted | 790.3 refused | 940.7 refused |
 | `-nofitsize -lowmemparts 0` (the default when this was measured, 681.9 then) | 682.0 accepted, 32.3 to spare | 842.4 refused | 1002.7 refused |
-| `-nofitsize -lowmemparts 0 -intrav2` | 703.3 accepted | 874.3 refused | refused |
+| `-nofitsize -lowmemparts 0 -intrav2` (retired) | 703.3 accepted | 874.3 refused | refused |
 | `-nofitsize -lowmem` | 575.5 accepted | 695.5 accepted | 815.5 refused |
 
   The 762.3 MiB were measured with the host pool of a 4096x2176 decoder in the app's
@@ -2162,7 +2097,7 @@ at the end of this block.
 Before the decoder is created (player, then the decoder's budget line):
 
 ```text
-MEMORY decoder size: 4096x2176 10-bit (-nofitsize, the stream's largest frame is 3840x2160 10-bit), slots 2, intra_v2 buffers no, low memory parts 0; device buffers 681.9 MiB and up to 51.5 MiB for palette buffers on first use, host memory N.N MiB
+MEMORY decoder size: 4096x2176 10-bit (-nofitsize, the stream's largest frame is 3840x2160 10-bit), slots 2, low memory parts 0; device buffers 681.9 MiB and up to 51.5 MiB for palette buffers on first use, host memory N.N MiB
 MEMORY output pool estimate: textures of 4 images of 3840x2160 10-bit, 100.9 MiB; held back from what the decoder may take until the pool has them. The decoder's budget guard keeps a margin of 48.0 MiB at its creation
 MEMORY app before the decoder: usage N.N MiB of limit N.N MiB, N.N MiB left
 MEMORY budget: device buffers 681.9 MiB + margin 48.0 MiB = 729.9 MiB, the application has N.N MiB left for the decoder: accepted; palette buffers on first use would add up to 51.5 MiB
@@ -2171,10 +2106,10 @@ MEMORY budget: device buffers 681.9 MiB + margin 48.0 MiB = 729.9 MiB, the appli
 The default decoder, the same stream:
 
 ```text
-MEMORY decoder size: 3840x2176 10-bit (fit to the stream, the stream's largest frame is 3840x2160 10-bit), slots 2, intra_v2 buffers no, low memory parts 1; device buffers 615.7 MiB and up to 48.3 MiB for palette buffers on first use, host memory N.N MiB
+MEMORY decoder size: 3840x2176 10-bit (fit to the stream, the stream's largest frame is 3840x2160 10-bit), slots 2, low memory parts 1; device buffers 615.7 MiB and up to 48.3 MiB for palette buffers on first use, host memory N.N MiB
 MEMORY budget: device buffers 615.7 MiB + margin 48.0 MiB = 663.7 MiB, the application has N.N MiB left for the decoder: accepted; palette buffers on first use would add up to 48.3 MiB
 MEMORY decoder created: 3840x2176 10-bit, slots 2, frame buffers 10 + 2 back buffers of 25346048 bytes (24.2 MiB) each; 40 device buffers, 645612288 bytes (615.7 MiB); host pool N of N bytes (N.N MiB) in use
-MEMORY decoder created options: intra_v2 buffers no (the decoder was not created for -intrav2); low memory 1 (shared back buffer yes, mode info share 1/2 of the worst case, coefficient share 17/24); palette buffers 0 of 2 created, 24.2 MiB each, a slot's on its first frame with screen content tools
+MEMORY decoder created options: low memory 1 (shared back buffer yes, mode info share 1/2 of the worst case, coefficient share 17/24); palette buffers 0 of 2 created, 24.2 MiB each, a slot's on its first frame with screen content tools
 ```
 
 `app` is `Windows::System::MemoryManager`: the memory of the whole app and the limit the
@@ -2192,7 +2127,7 @@ After a creation that worked (decoder, then player):
 
 ```text
 MEMORY decoder created: 4096x2176 10-bit, slots 2, frame buffers 12 + 1 back buffer of 27017216 bytes (25.8 MiB) each; 36 device buffers, 715036928 bytes (681.9 MiB); host pool N of N bytes (N.N MiB) in use
-MEMORY decoder created options: intra_v2 buffers no (the decoder was not created for -intrav2); low memory 0 (shared back buffer no, mode info share 1/2 of the worst case, coefficient share 17/24); palette buffers 0 of 2 created, 25.8 MiB each, a slot's on its first frame with screen content tools
+MEMORY decoder created options: low memory 0 (shared back buffer no, mode info share 1/2 of the worst case, coefficient share 17/24); palette buffers 0 of 2 created, 25.8 MiB each, a slot's on its first frame with screen content tools
 MEMORY decoder created host memory: host pool N bytes (N.N MiB) for the entropy decoder, N of them in use; the decoder itself 69248 bytes (0.1 MiB) on the heap, not in the pool; both allocated before the budget is asked
 MEMORY decoder created by type: DeviceOnly 7 buffers 412.0 MiB; DeviceUpload 14 buffers 32.3 MiB; HostRW 9 buffers 164.6 MiB; ReadBack 0 buffers 0.0 MiB; DeviceOnlyConst 5 buffers 0.8 MiB; UploadUAV 1 buffers 72.2 MiB; textures 0
 MEMORY decoder created per slot: 141107968 bytes (134.6 MiB) = 11 own buffers 38.9 MiB + mode_info_pool share 59.5 MiB + idct_coefs share 36.1 MiB; a slot above 2 also adds one frame buffer, 25.8 MiB
@@ -2612,7 +2547,7 @@ before, it was the flag `-fitsize`, which is still accepted and changes nothing.
 upstream's player does.
 
 ```text
-MEMORY decoder size: 3840x2176 10-bit (fit to the stream, the stream's largest frame is 3840x2160 10-bit), slots 3, intra_v2 buffers no, low memory parts 1; device buffers 766.1 MiB and up to 72.5 MiB for palette buffers on first use, host pool N.N MiB
+MEMORY decoder size: 3840x2176 10-bit (fit to the stream, the stream's largest frame is 3840x2160 10-bit), slots 3, low memory parts 1; device buffers 766.1 MiB and up to 72.5 MiB for palette buffers on first use, host pool N.N MiB
 Decoder size: 3840x2176 10-bit (fit to the stream, default)
 ```
 
@@ -2690,8 +2625,7 @@ processor has a fraction of its memory bandwidth for most of a playback
 table below other than "no flag" are retired with interface version 3; the table and the
 timings behind it are the record of the A/B ([phase2-rav1d.md](phase2-rav1d.md#no-clears-by-the-cpu)
 has the reasons and the measurements). A frame that still keeps its wavefront in the grid (no
-memory for the edges of its tiles, or an intra block copy frame of `-intrav2`) has it cleared by
-the completion thread behind it:
+memory for the edges of its tiles) has it cleared by the completion thread behind it:
 
 | | no flag | `-gpuclear` | `-cpuclear` | `-syncclear` |
 | --- | --- | --- | --- | --- |
@@ -2739,10 +2673,8 @@ Not cleared by anybody else, because they are small or depend on the next frame:
   block lists, 12,368 bytes per tile, and 40 KiB more for every 1,024 wavefront iterations a
   tile reaches past its first 272. The tile thread reads and counts them right away. This is
   what the CPU still clears for a frame without a flag;
-- with `-intrav2`: the intra iteration grid is not cleared at all by frames on the new
-  path, and the schedule's cell map is cleared once every 255 frames of a slot. The few
-  frames that keep the original path (intra block copy) keep the wavefront at the edges of
-  the tiles like any frame, or in the grid with one of the three flags;
+- with `-intrav2` (retired since): the intra iteration grid was not cleared at all by frames
+  on its path, and the schedule's cell map was cleared once every 255 frames of a slot;
 - the coefficient buffer: there is no per-frame clear to move. The entropy decoder
   writes only non-zero coefficients, and every IDCT shader stores zeros back over the
   coefficients it has read, so a slot's share is clean again when its frame completes.
@@ -3472,7 +3404,7 @@ DXIL as the default package. [DXC experiment](gpu-av1-decoder.md#dxc-experiment-
 | Set | What it is |
 | --- | --- |
 | `dxc` | The default DXC `cs_6_0` build. DXC uses `-O3` by default and `-Od` for the two legacy main intra kernels. |
-| `od` | DXC `cs_6_0` with `-Od` for every shader. It defines `INTRA_MAIN_LEGACY` for `intra_main` and `intra_main_hbd`. |
+| `od` | DXC `cs_6_0` with `-Od` for every shader. (Until 0.8.0-alpha.3 it defined `INTRA_MAIN_LEGACY` for `intra_main` and `intra_main_hbd`, pipelines that went with `-intrav2`.) |
 
 Both sets require Shader Model 6.0. The old `fxc=` selector is rejected. The frozen
 FXC decoder and its listing tools are on branch `fxc-sm5`.
@@ -3513,7 +3445,7 @@ shaders of every set and the names of all but the largest set:
 
 ```text
 SHADERSET dxc: DXC 1.9.2602.17 cs_6_0: dxc -nologo -T cs_6_0 -E main -HV 2018 -WX -Wno-ambig-lit-shift; -Od for intra_main_hbd_legacy, intra_main_legacy
-SHADERSET od: DXC 1.9.2602.17 cs_6_0: dxc -nologo -T cs_6_0 -E main -HV 2018 -WX -Wno-ambig-lit-shift -Od; -D INTRA_MAIN_LEGACY for intra_main, intra_main_hbd; default DXIL for intra_v2, intra_v2_hbd (64-bit values at -Od)
+SHADERSET od: DXC 1.9.2602.17 cs_6_0: dxc -nologo -T cs_6_0 -E main -HV 2018 -WX -Wno-ambig-lit-shift -Od
 SHADERPICK od=cdef_filter_v2,loopfilter_vert_hbd: dxc 100 (all others); od 2 (cdef_filter_v2 loopfilter_vert_hbd)
 ```
 
@@ -3521,11 +3453,10 @@ Without the flag the last line is `SHADERPICK none: dxc 102 (all); od 0`. A pick
 goes on in lines that start with `SHADERPICK +`. The player also logs `Shader pick (-shaderpick):
 <pick>` when a task file has the flag. The `LIBRARY` line and `Experiments: shaders shader-pick` identify the build.
 
-- **`intra_v2` and `intra_v2_hbd` in the set `od`** are the bytecode of the set `dxc`. At `-Od` DXC
-  leaves the literals of one `?:` of that source as 64-bit values (its optimisation narrows them), and
-  such DXIL needs 64-bit integer shader operations of the device. The build says so in the `SHADERSET
-  od` line, and the listings of `-Od` are in the artifact all the same. (The shaders run with
-  `-intrav2` only.)
+- **A shader whose `-Od` DXIL has 64-bit values** in its code takes the bytecode of the set `dxc` in
+  the set `od`, and the `SHADERSET od` line names it (`default DXIL for ...`): DXC can leave the
+  literals of a `?:` as 64-bit values at `-Od`, which needs 64-bit integer shader operations of the
+  device. Until 0.8.0-alpha.3 that was `intra_v2` and `intra_v2_hbd`, retired with `-intrav2`.
 - **A pipeline state the device refuses** is named: `MEMORY FAILED compute pipeline state <n> (<shader>,
   the bytecode of the set <set>, <bytes> bytes of bytecode): hr 0x...`, and the launch runs no task.
   (wine's vkd3d refuses the `-Od` DXIL of `gen_pred_blocks` and `gen_pred_blocks_fast`, "invalid value

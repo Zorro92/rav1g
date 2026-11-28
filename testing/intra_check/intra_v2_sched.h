@@ -14,8 +14,9 @@
  * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
  */
 
-// Scheduling for intra_v2.hlsl (test player flag -intrav2). Shared by the
-// decoder (prediction.cpp) and the host check (testing/intra_check).
+// Scheduling for intra_v2.hlsl, the test-only reference of the host check
+// (testing/intra_check). The decoder's path (-intrav2) was retired in
+// 0.8.0-alpha.3.
 //
 // The original path gives every intra block a wavefront iteration of the
 // whole frame and runs one dispatch pair per iteration. Here the frame is cut

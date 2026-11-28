@@ -7,8 +7,8 @@
 // www.aomedia.org/license/patent.
 
 //! The structs of the host: the decoder (`Av1Core`), a pipeline slot (`av1_frame_thread_data`), the shader
-//! library, and the numbers of the block lists (`dx/types.h`, `dx/av1_compute.h`, `dx/av1_thread.h`,
-//! `dx/intra_v2_sched.h` of the C++ host, whose names they keep).
+//! library, and the numbers of the block lists (`dx/types.h`, `dx/av1_compute.h`, `dx/av1_thread.h` of the
+//! C++ host, whose names they keep).
 //!
 //! They are Rust's own: nothing outside this crate reads them. The entropy decoder holds the decoder as a
 //! pointer it never looks behind (`struct Av1Core *` of `dx/av1_core.h`), so the decoder is an allocation
@@ -24,14 +24,14 @@
 
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
 
-use std::ffi::{c_char, c_int, c_long, c_uint, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::thread::JoinHandle;
 
 use windows::Win32::Graphics::Direct3D12::{
     ID3D12CommandQueue, ID3D12Device, ID3D12PipelineState, ID3D12RootSignature,
 };
 
-use super::blocks::{IntraMain, WaveColumn, WaveEdges};
+use super::blocks::{WaveColumn, WaveEdges};
 use super::memory::Allocator;
 use super::pool::{KINDS, Pools};
 use super::thread::{FramePool, Queue};
@@ -86,7 +86,6 @@ pub struct bitdepth_dependent_shaders {
     pub inter_obmc_above: ComputeShader,
     pub inter_obmc_left: ComputeShader,
     pub inter_warp_comp: ComputeShader,
-    pub intra_main: ComputeShader,
     pub reconstruct_block: ComputeShader,
     pub inter_ext_borders: ComputeShader,
     pub loopfilter_v: ComputeShader,
@@ -119,8 +118,6 @@ pub struct compute_shader_lib {
     pub shader_intra_main_prefetch: ComputeShader,
     pub shader_intra_filter_prefetch: ComputeShader,
     pub shader_intra_filter_prefetch_hbd: ComputeShader,
-    pub shader_intra_v2: ComputeShader,
-    pub shader_intra_v2_hbd: ComputeShader,
     pub shader_filmgrain_filter: ComputeShader,
     pub shader_copy_plane: ComputeShader,
     pub shader_copy_plane_10bit10x3: ComputeShader,
@@ -156,7 +153,6 @@ pub struct compute_shader_lib {
     pub sig_pred_blocks: Option<ID3D12RootSignature>,
     pub sig_pred_blocks_fast: Option<ID3D12RootSignature>,
     pub sig_intra_pred: Option<ID3D12RootSignature>,
-    pub sig_intra_v2: Option<ID3D12RootSignature>,
     pub sig_inter_pred: Option<ID3D12RootSignature>,
     pub sig_lf: Option<ID3D12RootSignature>,
     pub sig_lf_gen: Option<ID3D12RootSignature>,
@@ -204,7 +200,6 @@ pub struct av1_perf_accum {
     pub intra_frame: c_int,
     pub used_sec_slot: c_int,
     pub intra_iters: c_int,
-    pub intra_v2: c_int,
     pub intra_stats: [c_int; 4],
     /// The user data of the frame's temporal unit (`av1_perf_frame::user_data`), set at submit.
     pub user_data: u64,
@@ -269,20 +264,11 @@ pub struct av1_frame_thread_data {
     pub gen_intra_inter_grid: *mut GpuBufferObject,
     pub gen_block_map: *mut GpuBufferObject,
     pub palette_buffer: *mut GpuBufferObject,
-    pub intra_v2_buffer: *mut GpuBufferObject,
-    pub intra_v2_regions: *mut c_uint,
-    pub intra_v2_sched: IntraV2Sched,
-    pub intra_v2_list_count: c_long,
-    pub intra_v2: c_int,
-    pub intra_main: IntraMain,
     /// Not 0: the transform blocks of intra prediction go through the loops of `av1_mi_push_block` and
     /// `WaveEdges::legacy`, as for the intra step timing, instead of `intra_block_edges`; the lists are the
     /// same. The decoder leaves it 0 (its switch, `-intralistslegacy`, is retired); rav1g-parse-check sets it
     /// for its reference, which so holds the default against the loops.
     pub intra_push_loops: c_int,
-    pub intra_v2_cells: c_int,
-    pub intra_v2_cols: c_int,
-    pub intra_v2_rows: c_int,
     pub intra_stats: [c_int; 4],
     pub gen_intra_iter_y: *mut c_int,
     pub gen_intra_iter_uv: *mut c_int,
@@ -697,29 +683,6 @@ pub struct av1_stage_dump_region {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct IntraV2Sched {
-    pub cells: *mut u32,
-    pub regions: *mut u32,
-    pub list: *mut u64,
-    pub list_count: *mut c_long,
-    pub map_stride: c_int,
-    pub map_uv_offset: c_int,
-    pub regions_stride: c_int,
-    pub stamp: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct IntraV2Dispatch {
-    pub first: c_int,
-    pub count: c_int,
-    pub step: u32,
-    pub passes: u32,
-    pub last_of_step: c_int,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
 pub struct ScaleFactor {
     pub x_scale: c_int,
     pub x_step: c_int,
@@ -756,7 +719,6 @@ pub const InterSizesAllCommon: c_int = 24;
 pub const IntraBlockOffset: c_int = 264;
 pub const IntraSizes: c_int = 9;
 pub const IntraTypeCount: c_int = 10;
-pub const IntraV2MaxRegions: c_int = 256;
 pub const MemoryTypeCount: c_int = 6;
 pub const ObmcAbove: c_int = 8;
 pub const ObmcLeft: c_int = 9;

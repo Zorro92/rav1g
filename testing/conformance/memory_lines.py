@@ -6,7 +6,7 @@
   python memory_lines.py pools --shares <dir> --pools <dir>
 
 run: decodes the first temporal units of a few streams of the conformance set with -v, in several decoder
-configurations (slots, low memory parts, the buffers of -intrav2 and -interfast), and writes the lines of
+configurations (slots, low memory parts, threads), and writes the lines of
 the decoder that start with "MEMORY" to <out>/<case>.txt: the budget line, what the created decoder holds
 (by type, per slot, the largest buffers), and the steps of its release. Left out or made equal is what
 differs from run to run on one machine: the "MEMORY dxgi" lines (the video memory the adapter reports) and
@@ -52,7 +52,6 @@ CASES = [
     ('1080p-10bit-slots4', 'nf-chimera-10b-1080p.ivf', 2, ['-slots', '4']),
     ('1080p-10bit-slots3-lowmem', 'nf-chimera-10b-1080p.ivf', 2, ['-slots', '3', '-lowmem']),
     ('1080p-10bit-nolowmem', 'nf-chimera-10b-1080p.ivf', 2, ['-lowmemparts', '0']),
-    ('1080p-10bit-intrav2-interfast', 'nf-chimera-10b-1080p.ivf', 2, ['-intrav2', '-interfast']),
     ('720p-8bit-threads4', 'nf-chimera-8b-720p.ivf', 2, ['-t', '4']),
     ('16x16', 'av1-1-b8-01-size-16x16.ivf', 0, []),
     ('svc-two-layers', 'av1-1-b8-22-svc-L2T1.ivf', 0, []),
@@ -156,7 +155,8 @@ CREATED = re.compile(r'^MEMORY decoder created: (\d+)x(\d+) (\d+)-bit, slots (\d
                      r'buffers? of (\d+) bytes .*?; (\d+) device buffers, (\d+) bytes')
 POOLS = re.compile(r'^MEMORY decoder created pools: mode info (\d+) chunks of 256 records, [0-9.]+ MiB; coefficients '
                    r'(\d+) chunks of 7680, [0-9.]+ MiB; transform block records (\d+) chunks of 384, ')
-LOW_MEMORY = re.compile(r'^MEMORY decoder created options: .*; low memory (\d+) ')
+# The C++ decoder's line starts with its intra_v2 buffers; rav1g's since 0.8.0-alpha.3 with the low memory parts.
+LOW_MEMORY = re.compile(r'^MEMORY decoder created options: (?:.*; )?low memory (\d+) ')
 
 
 def pools(args):

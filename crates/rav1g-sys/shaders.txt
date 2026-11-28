@@ -31,8 +31,6 @@ loop_restoration_wiener_sp_tex
 film_grain_filter
 cdef_filter_v3
 cdef_filter_v3_sp_tex
-intra_v2
-intra_v2_hbd
 gen_pred_blocks
 gen_pred_blocks_fast_packed
 inter_fast
@@ -55,7 +53,6 @@ inter_obmc_above
 inter_obmc_left
 inter_warp
 inter_scale_warp_compound
-intra_main
 inter_ext_borders
 reconstruct_block
 loopfilter_vert
@@ -70,7 +67,6 @@ inter_obmc_above_hbd
 inter_obmc_left_hbd
 inter_scale_warp_compound_hbd
 inter_warp_hbd
-intra_main_hbd
 intra_main_prefetch_hbd
 intra_main_prefetch
 intra_main_single_edge

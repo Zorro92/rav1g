@@ -66,7 +66,6 @@ pub extern "C" fn rav1g_intra_list_stamps(count: bool) -> u64 {
     INTRA_STAMPS.with(|stamps| stamps.replace((count, 0)).1)
 }
 
-use super::intra_v2;
 use super::libaom::{has_bottom_left, has_top_right};
 use super::step_time;
 use super::tables::{
@@ -75,8 +74,8 @@ use super::tables::{
 };
 use super::types::{
     CompoundAvrg, CompoundDiff, CompoundDiffUv, CompoundDiffUvGlobalWarp, CompoundGlobalWarp, CompoundMasked,
-    Inter2x2ArrOffset, InterFastCompound, InterSizesAllCommon, IntraBlockOffset, IntraSizes, IntraTypeCount, ObmcAbove,
-    ObmcLeft, ReconBlockOffset, av1_frame_thread_data, av1_perf_inter_tile,
+    Inter2x2ArrOffset, InterFastCompound, InterSizesAllCommon, IntraBlockOffset, IntraTypeCount, ObmcAbove, ObmcLeft,
+    ReconBlockOffset, av1_frame_thread_data, av1_perf_inter_tile,
 };
 use crate::sys::{
     AV1_COMMON, AV1_PERF_INTER_CHROMA_2X2, AV1_PERF_INTER_COMP_AVG, AV1_PERF_INTER_COMP_AVG_FAST,
@@ -668,15 +667,6 @@ impl WaveEdges {
     }
 }
 
-/// Which main predictor reads the edges the scheduler is counting.
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-#[allow(dead_code, reason = "the parser-only tools build this file and use the default schedule")]
-pub enum IntraMain {
-    SingleEdge,
-    Legacy,
-}
-
 /// What the intra part needs to know of a plane of the block.
 struct IntraPlane {
     /// The wavefront grid of the plane at the block, and the distance of its rows.
@@ -697,10 +687,10 @@ impl IntraPlane {
     /// Bounds on the edges read from the frame, in 4x4 units. Availability in the block record
     /// still describes the decoded neighbours. The bounds only affect when the block can run.
     #[inline]
-    fn edge_limits(&self, main: IntraMain, delta: i8, filter: bool, single_edge: &mut c_int) -> IntraEdgeLimits {
+    fn edge_limits(&self, delta: i8, filter: bool, single_edge: &mut c_int) -> IntraEdgeLimits {
         let corner = self.need(NEED_ABOVE_LEFT_LUT) && !self.is_intrabc;
         let mut limits = IntraEdgeLimits { above: c_int::MAX, left: c_int::MAX, corner, clipped_corner: corner };
-        if main != IntraMain::SingleEdge || self.is_intrabc || filter {
+        if self.is_intrabc || filter {
             return limits;
         }
         if self.mode == 0 {
@@ -796,10 +786,10 @@ unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBL
         // The edges of the tile's wavefront; null when the frame keeps the wavefront in the slot's grid.
         let wave = tile.wave_edges.cast::<WaveEdges>();
         // The transform blocks of intra prediction go through [`intra_block_edges`] and the edges are
-        // [`WaveEdges::planes`], unless the frame has -intrav2 (no edges), the tile the intra step timing,
-        // or the frame `intra_push_loops` (the reference of rav1g-parse-check): then the loops below and
-        // [`WaveEdges::legacy`]. The same for all blocks of a tile.
-        let fast_txbs = td.intra_v2 == 0 && tile.perf_steps.is_null() && td.intra_push_loops == 0;
+        // [`WaveEdges::planes`], unless the tile has the intra step timing or the frame `intra_push_loops`
+        // (the reference of rav1g-parse-check): then the loops below and [`WaveEdges::legacy`]. The same for
+        // all blocks of a tile.
+        let fast_txbs = tile.perf_steps.is_null() && td.intra_push_loops == 0;
 
         // The grid has the entries of the records (`mi_grid_record_in_chunks`). A parse without a grid (the GPU
         // builds it, `-parseopt gpugrid`) gives the block's record by itself.
@@ -1289,8 +1279,7 @@ unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBL
                     let need_right = plane.need(NEED_RIGHT_LUT);
                     let need_bot = plane.need(NEED_BOT_LUT);
                     let use_filter = mi.flags & MB_MODE_INFO::USE_FILTER_INTRA != 0;
-                    let edges =
-                        plane.edge_limits(td.intra_main, mi.angle_delta[0], use_filter, &mut tile.intra_single_edge);
+                    let edges = plane.edge_limits(mi.angle_delta[0], use_filter, &mut tile.intra_single_edge);
 
                     let type_size = txw + txh;
                     let type_idx_base = if use_filter { IntraBlockOffset } else { IntraBlockOffset - 1 - type_size };
@@ -1376,29 +1365,7 @@ unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBL
                                     let (above_left, above_available, left_available) =
                                         edges.dependencies(have_top, have_left, above_available, left_available);
                                     let iter;
-                                    if td.intra_v2 != 0 {
-                                        // -intrav2: no wavefront iteration. The block gets a step and a pass from the
-                                        // same neighbours and counts as iteration 0; gen_pred_blocks.hlsl reads that
-                                        // from this entry.
-                                        intra_v2::place(
-                                            &td.intra_v2_sched,
-                                            (tile.gen_block_map_offset + IntraBlockOffset - IntraSizes) as u32,
-                                            false,
-                                            mi_col + col_off,
-                                            mi_row + row_off,
-                                            txw,
-                                            txh,
-                                            above_left,
-                                            above_available,
-                                            left_available,
-                                            false,
-                                            (type_idx_base - (IntraBlockOffset - IntraSizes)) as u32,
-                                            *map.offset(type_idx_base as isize) as u32,
-                                        );
-                                        iter = 0;
-                                        tile.gen_intra_iter_y = iter.max(tile.gen_intra_iter_y);
-                                        *iter_grid_blk.offset((iter_grid_stride + subblk_w) as isize) = iter;
-                                    } else if let Some(edges) = wave.as_mut() {
+                                    if let Some(edges) = wave.as_mut() {
                                         iter = wavefront_iteration_edges_legacy(
                                             &plane,
                                             &mut edges.legacy[0],
@@ -1489,7 +1456,7 @@ unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBL
                     let need_left = plane.need(NEED_LEFT_LUT) && !is_intrabc;
                     let need_right = plane.need(NEED_RIGHT_LUT);
                     let need_bot = plane.need(NEED_BOT_LUT);
-                    let edges = plane.edge_limits(td.intra_main, mi.angle_delta[1], false, &mut tile.intra_single_edge);
+                    let edges = plane.edge_limits(mi.angle_delta[1], false, &mut tile.intra_single_edge);
                     let is_cfl = plane.mode == UV_CFL_PRED as u32;
 
                     let cnt_y = 1 << (bh_log_uv - txh - unit_y_log);
@@ -1571,28 +1538,7 @@ unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBL
                                     let (above_left, above_available, left_available) =
                                         edges.dependencies(have_top, have_left, above_available, left_available);
                                     let iter;
-                                    if td.intra_v2 != 0 {
-                                        // -intrav2, as for luma. U and V share the place; CFL also waits for the luma
-                                        // under the block.
-                                        intra_v2::place(
-                                            &td.intra_v2_sched,
-                                            (tile.gen_block_map_offset + IntraBlockOffset - IntraSizes) as u32,
-                                            true,
-                                            mi_col_uv + col_off,
-                                            mi_row_uv + row_off,
-                                            txw,
-                                            txh,
-                                            above_left,
-                                            above_available,
-                                            left_available,
-                                            is_cfl,
-                                            (IntraSizes - 1 - type_size) as u32,
-                                            *map.offset((IntraBlockOffset - 1 - type_size) as isize) as u32,
-                                        );
-                                        iter = 0;
-                                        tile.gen_intra_iter_uv = iter.max(tile.gen_intra_iter_uv);
-                                        *iter_grid_blk.offset((iter_grid_stride_uv + subblk_w) as isize) = iter;
-                                    } else if let Some(edges) = wave.as_mut() {
+                                    if let Some(edges) = wave.as_mut() {
                                         iter = wavefront_iteration_edges_legacy(
                                             &plane,
                                             &mut edges.legacy[1],
@@ -2004,12 +1950,7 @@ unsafe fn intra_plane_edges<const CHROMA: bool>(
         let need_right = plane.need(NEED_RIGHT_LUT);
         let need_bot = plane.need(NEED_BOT_LUT);
         let use_filter = !CHROMA && mi.flags & MB_MODE_INFO::USE_FILTER_INTRA != 0;
-        let limits = plane.edge_limits(
-            td.intra_main,
-            mi.angle_delta[usize::from(CHROMA)],
-            use_filter,
-            &mut tile.intra_single_edge,
-        );
+        let limits = plane.edge_limits(mi.angle_delta[usize::from(CHROMA)], use_filter, &mut tile.intra_single_edge);
         let type_base = if use_filter { IntraBlockOffset } else { IntraBlockOffset - 1 - (txw + txh) };
         // A CFL block also reads the luma under it.
         let other = if CHROMA && plane.mode == UV_CFL_PRED as u32 { luma_under } else { NO_ITERATION };

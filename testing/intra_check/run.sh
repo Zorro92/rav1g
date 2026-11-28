@@ -1,6 +1,7 @@
 #!/bin/sh
 # Builds and runs the intra prediction bit-exactness check on a Linux host
-# (g++, no GPU): the optimized and legacy intra kernels against intra_v2 (-intrav2).
+# (g++, no GPU): the optimized and legacy intra kernels against intra_v2, a test-only shader of this
+# directory with its scheduler (intra_v2_sched.h) since the decoder's -intrav2 path was retired.
 #
 #   sh testing/intra_check/run.sh            the check; exit code 0 = identical
 #   sh testing/intra_check/run.sh --mutate   also proves the check can fail:
@@ -47,7 +48,7 @@ to_cpp() {
     "$1" | sed -E -f "$here/../common/gs_groupshared.sed"
 }
 
-to_cpp "$shaders/intra_main.hlsl" > "$work/intra_main.gen.h"
+to_cpp "$here/intra_main.hlsl" > "$work/intra_main.gen.h"
 to_cpp "$shaders/intra_main_hbd.hlsl" > "$work/intra_main_hbd.gen.h"
 to_cpp "$shaders/intra_main_prefetch_hbd.hlsl" > "$work/intra_main_prefetch_hbd.gen.h"
 to_cpp "$shaders/intra_main_prefetch.hlsl" > "$work/intra_main_prefetch.gen.h"
@@ -73,15 +74,16 @@ sed -e 's/intra_main_hbd\.gen\.h/intra_main_hbd_double.gen.h/' "$work/intra_main
   > "$work/intra_main_prefetch_double.gen.h"
 to_cpp "$shaders/intra_filter_prefetch.hlsl" > "$work/intra_filter_prefetch.gen.h"
 to_cpp "$shaders/intra_filter_prefetch_hbd.hlsl" > "$work/intra_filter_prefetch_hbd.gen.h"
-# The reference kernels: the INTRA_MAIN_LEGACY parts of the main shaders and the previous 8-bit filter
-# intra kernel (the wrappers and intra_filter_legacy.hlsl are here, not among the decoder's shaders).
+# The reference kernels: the INTRA_MAIN_LEGACY parts of the main shaders, the previous 8-bit filter intra
+# kernel and intra_v2 (the wrappers, intra_main.hlsl, intra_filter_legacy.hlsl and intra_v2 are here, not
+# among the decoder's shaders).
 to_cpp "$here/intra_main_legacy.hlsl" > "$work/intra_main_legacy.gen.h"
 to_cpp "$here/intra_main_hbd_legacy.hlsl" > "$work/intra_main_hbd_legacy.gen.h"
 to_cpp "$shaders/intra_filter.h" > "$work/intra_filter.gen.h"
 to_cpp "$here/intra_filter_legacy.hlsl" > "$work/intra_filter_legacy.gen.h"
 to_cpp "$shaders/intra_filter_hbd.h" > "$work/intra_filter_hbd.gen.h"
-to_cpp "$shaders/intra_v2.hlsl" > "$work/intra_v2.gen.h"
-to_cpp "$shaders/intra_v2_hbd.hlsl" > "$work/intra_v2_hbd.gen.h"
+to_cpp "$here/intra_v2.hlsl" > "$work/intra_v2.gen.h"
+to_cpp "$here/intra_v2_hbd.hlsl" > "$work/intra_v2_hbd.gen.h"
 # All group memory has to be the kind that is watched (testing/common/group_sched.h).
 if grep -q '^groupshared' "$work"/*.gen.h; then
   echo "intra_check: a group memory declaration was not converted" >&2
@@ -125,7 +127,7 @@ done
 # $2: more compiler flags.
 build() {
   flags="-std=c++17 -O2 -fwrapv -Wall -Wno-unknown-pragmas -Wno-unused -Wno-parentheses -Wno-sign-compare"
-  flags="$flags -I $1 -I $here -I $src/libav1/dx ${2:-}"
+  flags="$flags -I $1 -I $here ${2:-}"
   rm -f "$1"/*.o
   for shader in intra_main:0 intra_main_hbd:0 intra_main_legacy:0 intra_main_hbd_legacy:0 \
     intra_filter_legacy:1 intra_main_prefetch_hbd:0 intra_main_prefetch:0 \
@@ -145,8 +147,11 @@ build() {
     g++ $flags $hbd $filter_layout -DSHADER_FILE="\"$name.gen.h\"" -DSHADER_NS="ns_$name" -DSHADER_API="${name}_api" \
       -DSHADER_KIND="${shader#*:}" -c -o "$1/$name.o" "$here/shader_tu.cpp" &
   done
+  # Compiled from a copy in $1: a quoted include is looked for next to the including file first, and the
+  # scheduler intra_v2_sched.h lies next to intra_check.cpp here, so a mutant of it in $1 would not be seen.
+  cp "$here/intra_check.cpp" "$1/intra_check.cpp"
   # shellcheck disable=SC2086
-  g++ $flags -c -o "$1/intra_check.o" "$here/intra_check.cpp" &
+  g++ $flags -c -o "$1/intra_check.o" "$1/intra_check.cpp" &
   wait
   g++ -o "$1/intra_check" "$1"/*.o
 }
@@ -219,8 +224,8 @@ intra_filter.gen.h@s/queue\[q\] = queue\[q + 1\];/queue[q] = queue[q];/@8-bit fi
     cp "$work"/*.gen.h "$work/mutant/"
     rm -f "$work/mutant/intra_v2_sched.h"
     if [ "$file" = intra_v2_sched.h ]; then
-      sed -e "$expr" "$src/libav1/dx/intra_v2_sched.h" > "$work/mutant/intra_v2_sched.h"
-      original="$src/libav1/dx/intra_v2_sched.h"
+      sed -e "$expr" "$here/intra_v2_sched.h" > "$work/mutant/intra_v2_sched.h"
+      original="$here/intra_v2_sched.h"
     else
       sed -e "$expr" "$work/$file" > "$work/mutant/$file"
       original="$work/$file"

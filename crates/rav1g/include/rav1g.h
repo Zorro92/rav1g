@@ -903,7 +903,10 @@ typedef struct Rav1gSettings {
    */
   uint32_t low_memory;
   /*
-   Buffers for the second intra path (`rav1g_set_intra_v2`).
+   Retired in 0.8.0-alpha.3 with the second intra path (`intra_v2.hlsl`, the test flag `-intrav2`): false,
+   as `rav1g_settings_default` sets it. `rav1g_decoder_create` refuses true with
+   `RAV1G_STATUS_INVALID_PARAM` and the reason in `rav1g_last_error`. The field keeps its place and is
+   removed with the next interface version.
    */
   bool intra_v2;
   /*
@@ -1354,7 +1357,9 @@ enum Rav1gStatus rav1g_decoder_set_operating_point(struct Rav1gDecoder *decoder,
 void rav1g_decoder_destroy(struct Rav1gDecoder *decoder);
 
 /*
- Intra prediction through `intra_v2.hlsl`; only in a decoder created with `Rav1gSettings::intra_v2`.
+ Retired in 0.8.0-alpha.3 with the second intra path (`intra_v2.hlsl`, the test flag `-intrav2`): does
+ nothing, and every decoder takes the default intra path. A call with `true` writes a log line that is
+ not an error (`rav1g_set_log_callback`) saying so. Removed with the next interface version.
  */
 void rav1g_set_intra_v2(bool enable);
 

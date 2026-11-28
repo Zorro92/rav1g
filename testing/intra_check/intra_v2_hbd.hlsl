@@ -1,4 +1,9 @@
 /*
+ * Copyright 2020 Google LLC
+ *
+ */
+
+/*
  * Copyright (c) 2020, Alliance for Open Media. All rights reserved
  *
  * This source code is subject to the terms of the BSD 2 Clause License and
@@ -9,7 +14,6 @@
  * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
  */
 
-// Test flag -interfast: inter_compound_fast.hlsl for frame buffers of 16-bit samples
-// (inter_compound_v2_hbd.hlsl's blocks).
-#define INTER_FAST_HBD 1
-#include "inter_compound_fast.hlsl"
+// High bit depth build of intra_v2.hlsl, the 10-bit reference of intra_check (a test-only shader).
+#define HBD 1
+#include "intra_v2.hlsl"

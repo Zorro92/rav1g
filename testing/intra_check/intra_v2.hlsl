@@ -14,8 +14,12 @@
  * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
  */
 
-// Intra prediction, second version (test player flag -intrav2). Same output
-// as intra_main.hlsl + intra_filter.hlsl, different schedule.
+// Intra prediction, second version (AV1 7.11.2), with its own schedule (intra_v2_sched.h). Same output
+// as intra_main.hlsl + intra_filter.hlsl. Not a shader of the decoder any more: its runtime switch,
+// -intrav2, was retired in 0.8.0-alpha.3 (slower on the console than the wavefront kernels), and the
+// shader build does not see this file. It stays here as the independent reference of intra_check: the
+// only one its 10-bit run has for filter intra (the 10-bit legacy run takes the default
+// intra_filter_prefetch_hbd.hlsl).
 //
 // The originals run one dispatch pair and one UAV barrier per wavefront
 // iteration of the whole frame. Here one thread group owns one 64x64 luma
@@ -25,7 +29,7 @@
 // syncs, so the host only needs a new dispatch (and a UAV barrier) when a
 // block depends on another region. Groups never wait for other groups.
 //
-// The host (libav1/dx/intra_v2_sched.h) gives every block a step (dispatch)
+// The host (intra_v2_sched.h) gives every block a step (dispatch)
 // and a pass, and stores them per 4x4 cell in `sched`. Blocks are still the
 // records written by gen_pred_blocks.hlsl.
 //

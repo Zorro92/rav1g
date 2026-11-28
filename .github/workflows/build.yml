@@ -1588,7 +1588,7 @@ jobs:
       # and loaded from it, which could remove the device (docs/gpu-av1-decoder.md, "Unwritten fields of a
       # constant record"). The same part of the set as with -poisonmi has to give the results of
       # expected.txt. With the experiments input rust-experiments also tests the whole set with -poisonbuf
-      # alone and alongside -interfast or -intrav2.
+      # alone and alongside -interfast.
       - name: Conformance of the vectors with poisoned buffers and constants (-poisonbuf)
         if: ${{ !cancelled() && matrix.case == 'poisoned' }}
         shell: pwsh
@@ -2428,12 +2428,11 @@ jobs:
         run: |
           $runs = @(
             # Not experiments for a device: the whole set with the mode info pool poisoned, and with every
-            # buffer and the constants poisoned, also on the fast inter path and with the second intra
-            # scheduler (the rust-switches job decodes a part of the set with -poisonmi and -poisonbuf on every push).
+            # buffer and the constants poisoned, also on the fast inter path (the rust-switches job decodes a
+            # part of the set with -poisonmi and -poisonbuf on every push).
             @{ name = 'poisonmi-all'; args = '-poisonmi' },
             @{ name = 'poisonbuf-all'; args = '-poisonbuf' },
-            @{ name = 'poisonbuf-interfast'; args = '-poisonbuf -interfast' },
-            @{ name = 'poisonbuf-intrav2'; args = '-poisonbuf -intrav2' })
+            @{ name = 'poisonbuf-interfast'; args = '-poisonbuf -interfast' })
           $failed = @()
           foreach ($run in $runs) {
             python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
@@ -3705,8 +3704,9 @@ jobs:
           sh testing/tables_check/run.sh --mutate | tee tables-check.log
           { echo '## Tables and inline functions of libaom'; echo '```'; cat tables-check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
-  # The conservative and prefetching wavefront kernels and intra_v2 with its scheduler
-  # must write byte-identical frames on generated 8-bit and 10-bit block layouts.
+  # The conservative and prefetching wavefront kernels and intra_v2 with its scheduler (test-only
+  # references in testing/intra_check since -intrav2 was retired) must write byte-identical frames on
+  # generated 8-bit and 10-bit block layouts.
   intra-check:
     runs-on: ubuntu-26.04
     timeout-minutes: 30

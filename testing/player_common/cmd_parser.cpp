@@ -96,8 +96,6 @@ int CParameters::Parse(one_task& args, std::string& Err) {
       {"displaybilinearchroma", atSingle, anOptional,
        "A/B: the display pass reads the input chroma bilinearly (before interface 3), not with the Catmull-Rom cubic",
        "", &params_.displaybilinearchroma_},
-      {"intrav2", atSingle, anOptional, "intra prediction through intra_v2.hlsl (same output)", "",
-       &params_.intrav2_},
       {"intraopt", atSingle, anOptional, "optimized intra_main shaders, the only ones (accepted, changes nothing)", "",
        &params_.intraopt_},
       {"slots", atInt, anOptional,
@@ -425,7 +423,6 @@ void CParameters::Reset() {
   params_.displaydither_ = 0;
   params_.displayfixedpeak_ = false;
   params_.displaybilinearchroma_ = false;
-  params_.intrav2_ = false;
   params_.intraopt_ = false;
   // 0: the task has no -slots (Parse() makes the default of it).
   params_.slots_ = 0;

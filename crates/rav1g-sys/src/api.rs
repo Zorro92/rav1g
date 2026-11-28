@@ -215,7 +215,6 @@ pub struct aom_codec_dec_cfg {
     pub dxPsos: *mut c_void,
     pub tryHDR10x3: c_int,
     pub frame_slots: c_int,
-    pub intra_v2: c_int,
     pub inter_fast: c_int,
     pub low_memory: c_int,
     pub parser_options: c_int,

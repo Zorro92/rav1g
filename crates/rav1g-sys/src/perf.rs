@@ -106,6 +106,7 @@ pub struct av1_perf_frame {
     pub intra_frame: c_int,
     pub used_sec_slot: c_int,
     pub intra_iters: c_int,
+    /// Always 0: the path that set it (`-intrav2`) was retired in 0.8.0-alpha.3. The field keeps its place.
     pub intra_v2: c_int,
     pub intra_dispatches: c_int,
     pub intra_barriers: c_int,

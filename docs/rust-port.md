@@ -72,7 +72,7 @@ At the end no C++ remains in the decoder: the C parser, the HLSL and Rust.
 | `tools/rav1g-dec` | command-line decoder for conformance, md5 and stage dumps |
 | `tools/rav1g-header` | writes `rav1g.h` from `crates/rav1g/src/capi.rs` with `cbindgen`, or checks it |
 | `tools/rav1g-tables` | prints the host's copies of tables and inline functions of libaom's headers, for `testing/tables_check` (Linux; [Own types, no libaom headers](#own-types-no-libaom-headers)) |
-| `libav1/` | the shaders (`dx/shaders`), `dx/av1_perf.h` (the records of the timing run and of the stage dumps, for the test player) and `dx/intra_v2_sched.h` (for the intra check), and what is left of libaom: the 17 C files and 75 headers that the shader checks of `testing/` compile as the reference, the readers of the test player include, or `crates/rav1g/build.rs` and the tests read as text. Nothing of it is compiled into the decoder |
+| `libav1/` | the shaders (`dx/shaders`), `dx/av1_perf.h` (the records of the timing run and of the stage dumps, for the test player) and, until 0.8.0-alpha.3, `dx/intra_v2_sched.h` (for the intra check; now in `testing/intra_check`), and what is left of libaom: the 17 C files and 75 headers that the shader checks of `testing/` compile as the reference, the readers of the test player include, or `crates/rav1g/build.rs` and the tests read as text. Nothing of it is compiled into the decoder |
 | `testing/` | the test player (C++, on `rav1g.h`), the conformance scripts, the host checks of the shaders |
 
 Dependencies: `windows` (D3D12/DXGI bindings), `cc` (for the C++ of `rav1g-dec` and for rav1d's assembly; the library compiles no C), `cbindgen` (`bindgen` until 2026-11-14). Edition 2024, stable Rust.

@@ -720,7 +720,6 @@ fn create_decoder(
         parse_frames: task.parse_frames as u32,
         slots: task.slots as u32,
         low_memory: task.lowmem_parts as u32,
-        intra_v2: task.intrav2,
         inter_fast: task.interfast != 0,
         // The layers of a stream that has them: one frame per temporal unit unless -alllayers, operating
         // point 0 unless -oppoint.
@@ -776,7 +775,7 @@ fn create_decoder(
             task.lowmem_parts.to_string()
         },
         "cdef_filter_v3",
-        if task.intrav2 { "intra_v2" } else { "frame-wide wavefront" },
+        "frame-wide wavefront",
         " (optimized main)",
         "loop_restoration / loop_restoration_wiener",
         "none needed",
@@ -999,7 +998,6 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     }
     library.set_choices(&Choices {
         skip_film_grain: task.skip_film_grain,
-        intra_v2: task.intrav2,
         inter_fast: task.interfast,
         display_fixed_peak: task.displayfixedpeak,
         display_bilinear_chroma: task.displaybilinearchroma,
@@ -1029,9 +1027,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     }
     say!("Film grain templates: CPU, uploaded with the random offsets");
     say!("8-bit filter intra shader: intra_filter_prefetch (default)");
-    if !task.intrav2 {
-        say!("Intra wavefront: angle-specific with prefetching and single-edge dependencies");
-    }
+    say!("Intra wavefront: angle-specific with prefetching and single-edge dependencies");
     say!(
         "PARSER {}: the parse pass of rav1d reads the bitstream, switches {} (-parseopt)",
         task.name,

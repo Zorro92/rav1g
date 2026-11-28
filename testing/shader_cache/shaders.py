@@ -42,19 +42,17 @@ VARIANTS = {
     'shader-pick': [],
 }
 
-INTRA_MAIN = ['intra_main', 'intra_main_hbd']
 # The shaders the default set builds without optimization (-Od): none since the -intraod kernels
 # (intra_main_legacy, intra_main_hbd_legacy) were retired. testing/shader_regs reads the list.
 UNOPTIMIZED = []
 
 # Verify the alternate kernels selected at runtime in the built binary.
 REQUIRED_BYTECODE = [
-    'cdef_filter_v3', 'cdef_filter_v3_sp_tex', *INTRA_MAIN,
+    'cdef_filter_v3', 'cdef_filter_v3_sp_tex',
     'intra_main_prefetch_hbd', 'intra_main_prefetch',
     'intra_main_single_edge', 'intra_main_single_edge_hbd',
     'intra_filter_prefetch', 'intra_filter_prefetch_hbd',
     'cdef_lists', 'cdef_lists_v2',
-    'intra_v2', 'intra_v2_hbd',
     'gen_lf_blocks_vert', 'gen_lf_blocks_hor',
     'loopfilter_vert', 'loopfilter_hor',
     'loopfilter_vert_hbd', 'loopfilter_hor_hbd',
@@ -106,9 +104,6 @@ def project_shaders(shaders_dir=SHADERS):
     names = sorted(name[:-5] for name in os.listdir(shaders_dir) if name.endswith('.hlsl'))
     if len(names) < 80:
         fail('only %d shaders found in %s' % (len(names), shaders_dir))
-    for name in INTRA_MAIN:
-        if name not in names:
-            fail('%s is not a shader of %s' % (name, shaders_dir))
     return [(name, name in UNOPTIMIZED) for name in names]
 
 
@@ -175,8 +170,6 @@ def dxc_arguments(od, variant, name=None):
     args = ['-nologo', '-T', DXC_PROFILE, '-E', 'main'] + DXC_ARGUMENTS
     if od:
         args.append('-Od')
-        if name in INTRA_MAIN:
-            args += ['-D', 'INTRA_MAIN_LEGACY']
     for define in VARIANTS[variant]:
         args += ['-D', define]
     return args
@@ -395,8 +388,7 @@ def build_od_set(args, shaders, dxc_keys, identity, jobs, shader_set, report):
     dxc_line = 'dxc: %s: dxc %s' % (shader_set, report['arguments'])
     if unoptimized:
         dxc_line += '; -Od for %s' % unoptimized
-    od_line = 'od: %s: dxc %s; -D INTRA_MAIN_LEGACY for %s' % (
-        shader_set, report['arguments_unoptimized'], ', '.join(INTRA_MAIN))
+    od_line = 'od: %s: dxc %s' % (shader_set, report['arguments_unoptimized'])
     if wide:
         od_line += '; default DXIL for %s (64-bit values at -Od)' % ', '.join(wide)
     lines = [dxc_line, od_line]

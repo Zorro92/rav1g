@@ -17,7 +17,6 @@ use std::sync::RwLock;
 
 use windows::Win32::Graphics::Direct3D12::ID3D12Device;
 
-use super::blocks::IntraMain;
 use super::core::commands;
 use super::log::log;
 use super::types::{
@@ -28,14 +27,9 @@ use crate::gpu::{BufferRef, BufferState, Device, Readback};
 use crate::sys;
 use crate::sys::{AV1_COMMON, HwFrameBuffer, HwOutputImage, MB_MODE_INFO};
 
-impl IntraMain {
-    pub(super) fn dump_order(self) -> &'static str {
-        match self {
-            Self::SingleEdge => " order=angle_wavefront",
-            _ => "",
-        }
-    }
-}
+/// The order tag of the dumps of the block records: the intra lists are in the wavefront of the
+/// single-edge dependencies (`blocks.rs`), the only one there is.
+pub(super) const INTRA_ORDER: &str = " order=angle_wavefront";
 
 /// Frames a dump can be asked for (`StageDumpFramesMax`).
 const FRAMES_MAX: usize = 256;

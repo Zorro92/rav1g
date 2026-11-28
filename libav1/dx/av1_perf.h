@@ -129,8 +129,8 @@ typedef struct av1_perf_frame {
   int is_sef;         /* show-existing-frame that needed an output copy */
   int intra_frame;    /* key or intra-only frame */
   int used_sec_slot;  /* frame also took a second pipeline slot */
-  int intra_iters;    /* last intra wavefront iteration dispatched (-1: none); with -intrav2 the last step */
-  int intra_v2;       /* intra went through intra_v2.hlsl (-intrav2) */
+  int intra_iters;    /* last intra wavefront iteration dispatched (-1: none) */
+  int intra_v2;       /* always 0: the path that set it (-intrav2) was retired in 0.8.0-alpha.3 */
   int intra_dispatches; /* Dispatch calls of the intra stage */
   int intra_barriers;   /* UAV barriers of the intra stage */
   int intra_groups;     /* thread groups of the intra stage */
@@ -316,12 +316,6 @@ void av1_set_skip_film_grain(int enable);
 void av1_set_display_fixed_peak(int enable);
 void av1_set_display_bilinear_chroma(int enable);
 
-/* Process-wide. Non-zero runs intra prediction through intra_v2.hlsl instead
- * of the frame-wide wavefront kernels; the decoded output is the same.
- * Frames that allow intra block copy keep the original shaders. Off by
- * default. Change it only while no frame is in flight. */
-void av1_set_intra_v2(int enable);
-
 /* ---------------------------------------------------------------------------
  * Intra step timing (test flags -intrasteptime and -intrastepmin; docs/test-player.md, "Intra step
  * timing"). Nothing here changes what is decoded.
@@ -385,8 +379,7 @@ typedef void (*av1_intra_steps_cb_fn_t)(void *priv, const av1_intra_steps *frame
 
 /* Process-wide. A frame is timed when its number is one of the count numbers of frames (copied by the
  * call), or when min_steps >= 0 and the frame has more than min_steps steps. NULL for cb switches the
- * timing off. Frames of -intrav2 are not timed. Change it only while no frame
- * is in flight, like the perf callback. */
+ * timing off. Change it only while no frame is in flight, like the perf callback. */
 void av1_set_intra_step_timing(av1_intra_steps_cb_fn_t cb, void *priv, int min_steps, const int *frames, int count);
 
 /* Process-wide. Non-zero predicts the inter blocks with one reference and the

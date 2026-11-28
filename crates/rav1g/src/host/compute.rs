@@ -124,10 +124,10 @@ const LAYOUTS: usize =
 const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
-    // 20 transform pipelines, 35 shared shaders and 25 per bit depth: one slot per pipeline of
+    // 20 transform pipelines, 33 shared shaders and 24 per bit depth: one slot per pipeline of
     // `create_tasks` (the test `every_pipeline_names_its_shader_once`).
-    assert!(SHADERS == 20 + 35 + 2 * 25);
-    assert!(LAYOUTS == 24);
+    assert!(SHADERS == 20 + 33 + 2 * 24);
+    assert!(LAYOUTS == 23);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
 
@@ -204,7 +204,6 @@ struct Layouts {
     pred_blocks: Layout,
     pred_blocks_fast: Layout,
     intra_pred: Layout,
-    intra_v2: Layout,
     inter_pred: Layout,
     loop_rest: Layout,
     loop_rest_sp_tex: Layout,
@@ -250,8 +249,6 @@ unsafe fn create_layouts(device: Device<'_>, lib: *mut compute_shader_lib) -> Re
         // gen_pred_blocks_fast_packed.hlsl (-interfast) takes one more inline constant.
         pred_blocks_fast: layout(5, 2, 1, 8)?,
         intra_pred: layout(3, 1, 1, 10)?,
-        // intra_v2.hlsl: t0..t4, u0, b0 and 8 inline constants in b1.
-        intra_v2: layout(5, 1, 1, 8)?,
         inter_pred: layout(5, 1, 1, 4)?,
         loop_rest: layout(3, 1, 2, 2)?,
         loop_rest_sp_tex: layout_planes(3, 1, 2, 3, 2)?,
@@ -285,7 +282,6 @@ unsafe fn create_layouts(device: Device<'_>, lib: *mut compute_shader_lib) -> Re
         com_store(&raw mut (*lib).sig_pred_blocks, layouts.pred_blocks.clone().into_raw());
         com_store(&raw mut (*lib).sig_pred_blocks_fast, layouts.pred_blocks_fast.clone().into_raw());
         com_store(&raw mut (*lib).sig_intra_pred, layouts.intra_pred.clone().into_raw());
-        com_store(&raw mut (*lib).sig_intra_v2, layouts.intra_v2.clone().into_raw());
         com_store(&raw mut (*lib).sig_inter_pred, layouts.inter_pred.clone().into_raw());
         com_store(&raw mut (*lib).sig_loop_rest, layouts.loop_rest.clone().into_raw());
         com_store(&raw mut (*lib).sig_loop_rest_sp_tex, layouts.loop_rest_sp_tex.clone().into_raw());
@@ -348,8 +344,6 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("film_grain_filter", &layouts.film_grain, &raw mut (*lib).shader_filmgrain_filter),
             ("cdef_filter_v3", &layouts.cdef_filter, &raw mut (*lib).shader_cdef_filter_v3),
             ("cdef_filter_v3_sp_tex", &layouts.cdef_filter_sp_tex, &raw mut (*lib).shader_cdef_filter_v3_sp_tex),
-            ("intra_v2", &layouts.intra_v2, &raw mut (*lib).shader_intra_v2),
-            ("intra_v2_hbd", &layouts.intra_v2, &raw mut (*lib).shader_intra_v2_hbd),
             ("gen_pred_blocks", &layouts.pred_blocks, &raw mut (*lib).shader_gen_pred_blocks),
             ("gen_pred_blocks_fast", &layouts.pred_blocks_fast, &raw mut (*lib).shader_gen_pred_blocks_fast),
             ("inter_fast", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_fast),
@@ -372,7 +366,6 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("inter_obmc_left", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_obmc_left),
             ("inter_warp", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_warp),
             ("inter_scale_warp_compound", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_warp_comp),
-            ("intra_main", &layouts.intra_pred, &raw mut (*lib).shaders_8bit.intra_main),
             ("inter_ext_borders", &layouts.common0110, &raw mut (*lib).shaders_8bit.inter_ext_borders),
             ("reconstruct_block", &layouts.intra_pred, &raw mut (*lib).shaders_8bit.reconstruct_block),
             ("loopfilter_vert", &layouts.lf, &raw mut (*lib).shaders_8bit.loopfilter_v),
@@ -387,7 +380,6 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("inter_obmc_left_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_obmc_left),
             ("inter_scale_warp_compound_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_warp_comp),
             ("inter_warp_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_warp),
-            ("intra_main_hbd", &layouts.intra_pred, &raw mut (*lib).shaders_hbd.intra_main),
             ("intra_main_prefetch_hbd", &layouts.intra_pred, &raw mut (*lib).shader_intra_main_prefetch_hbd),
             ("intra_main_prefetch", &layouts.intra_pred, &raw mut (*lib).shader_intra_main_prefetch),
             ("intra_main_single_edge", &layouts.intra_pred, &raw mut (*lib).shader_intra_main_single_edge),

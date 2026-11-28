@@ -17,7 +17,6 @@
 //! raises the error between them, so that the jump never passes a Rust function.
 
 use std::ffi::{c_int, c_void};
-use std::sync::atomic::{AtomicI32, Ordering};
 
 use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12Device};
 
@@ -39,8 +38,8 @@ use super::stage_buffers::MEMORY_GUARD_MARGIN_BUFFER;
 use super::stage_dump::{stage_dump_begin, stage_dump_frame_info};
 use super::transform::{idct_front, idct_run};
 use super::types::{
-    Av1Core, DeviceUpload, EntropyThreadCount, GpuBufferObject, GpuWorkItem, InterFastMapSize, IntraV2MaxRegions, Run,
-    TilePieces, av1_frame_thread_data,
+    Av1Core, DeviceUpload, EntropyThreadCount, GpuBufferObject, GpuWorkItem, InterFastMapSize, Run, TilePieces,
+    av1_frame_thread_data,
 };
 use crate::gpu::d3d12::{com_ref, wrapped_ref};
 use crate::gpu::{CommandAllocator, CommandList, Event, Fence, Queue};
@@ -124,17 +123,6 @@ unsafe fn record_front(pbi: *mut AV1Decoder, dec: *mut Av1Core) -> Option<super:
         }
         lf_lists
     }
-}
-
-/// Test player switch (-intrav2): intra prediction through intra_v2.hlsl, which writes the same bytes
-/// with one thread group per 64x64 region and far fewer dispatches. Off unless `av1_set_intra_v2(1)` was
-/// called.
-static INTRA_V2: AtomicI32 = AtomicI32::new(0);
-
-/// `av1_set_intra_v2` (`dx/av1_perf.h`).
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_intra_v2(enable: c_int) {
-    INTRA_V2.store(enable, Ordering::Relaxed);
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -452,71 +440,6 @@ pub(crate) unsafe extern "C" fn av1_release_fb_callback(private: *mut c_void, yb
 // The setup of a frame.
 // ---------------------------------------------------------------------------------------------------------
 
-/// `intra_v2_next_stamp` of `dx/intra_v2_sched.h`: moves on to the stamp of the next frame. Returns true
-/// when the cell map and the regions have to be cleared first: for the first frame of a buffer (stamp 0)
-/// and whenever the 8-bit stamp starts over.
-fn intra_v2_next_stamp(stamp: &mut u32) -> bool {
-    *stamp = (*stamp % 255) + 1;
-    *stamp == 1
-}
-
-/// Decides whether the frame takes the -intrav2 path and gets its schedule ready. Returns 0 when the
-/// frame stays on the original shaders: flag off, intra block copy (not ported), or a frame the buffers
-/// were not sized for.
-///
-/// # Safety
-/// `dec` is the decoder, `cm` the frame's header and `td` its slot.
-unsafe fn intra_v2_setup_frame(dec: *mut Av1Core, cm: &AV1_COMMON, td: &mut av1_frame_thread_data) -> c_int {
-    // No buffers: the decoder was not created for this path (aom_codec_dec_cfg_t::intra_v2).
-    if INTRA_V2.load(Ordering::Relaxed) == 0
-        || cm.allow_intrabc != 0
-        || td.intra_v2_buffer.is_null()
-        || td.intra_v2_regions.is_null()
-    {
-        return 0;
-    }
-    let cols = (cm.mi_cols + 31) & !31; // 4x4 cells, padded to 128 pixels: blocks may reach that far
-    let rows = (cm.mi_rows + 31) & !31;
-    let cells = cols * rows;
-    if cells + (cells >> 2) > td.intra_v2_cells
-        || (cols >> 4) > IntraV2MaxRegions as c_int
-        || (rows >> 4) > IntraV2MaxRegions as c_int
-    {
-        return 0;
-    }
-    let all_cells = (cells + (cells >> 2)) as usize;
-    // SAFETY: the buffer and the regions of the slot, sized for at least `all_cells` cells (checked above).
-    unsafe {
-        let s = &mut td.intra_v2_sched;
-        s.cells = (*td.intra_v2_buffer).host_ptr.cast();
-        s.regions = td.intra_v2_regions;
-        s.list = s.cells.add(2 * all_cells).cast();
-        s.list_count = &raw mut td.intra_v2_list_count;
-        s.map_stride = cols;
-        s.map_uv_offset = cells;
-        s.regions_stride = cols >> 4;
-        // Entries of earlier frames stay in the cell map and are told apart by the stamp, so the map is only
-        // cleared when the 8-bit stamp starts over (every 255 frames of this slot) or the layout changes.
-        let mut clear = intra_v2_next_stamp(&mut s.stamp);
-        if cols != td.intra_v2_cols || rows != td.intra_v2_rows {
-            td.intra_v2_cols = cols;
-            td.intra_v2_rows = rows;
-            s.stamp = 1;
-            clear = true;
-        }
-        if clear {
-            let perf_t = super::perf::av1_perf_ticks();
-            let bytes = all_cells * 8;
-            let region_bytes = size_of::<c_int>() * 2 * (cells >> 8) as usize;
-            s.cells.cast::<u8>().write_bytes(0, bytes);
-            s.regions.cast::<u8>().write_bytes(0, region_bytes);
-            perf_add_memset(dec, sys::AV1_PERF_CPU_MEMSET as usize, perf_t, bytes + region_bytes);
-        }
-    }
-    td.intra_v2_list_count = 0;
-    1
-}
-
 /// The slot's palette buffer: the pixels of the frame's palette blocks, written by the entropy decoder in
 /// the layout of a frame buffer and copied into the frame by reconstruct_block.hlsl. A block can use a
 /// palette only in a frame that allows screen content tools (`av1_allow_palette`), so the buffer is
@@ -793,8 +716,7 @@ pub(crate) unsafe fn setup_frame_begin(
         // The two grids of the slot (this grid and the wavefront grid below; docs/phase2-rav1d.md, "No
         // clears by the CPU"). A frame keeps its intra wavefront in the edges of its tiles (below), so the
         // wavefront grid is not cleared by anybody. Only a frame that keeps it in the grid (no memory for
-        // the edges, or an intra block copy frame of -intrav2) clears it, sized from the frame; behind such
-        // a frame the completion thread clears exactly those bytes again after the frame's fence and
+        // the edges) clears it, sized from the frame; behind such a frame the completion thread clears exactly those bytes again after the frame's fence and
         // records the size in the slot (`clean_iter_bytes`), and the next frame skips its clear when that
         // size is exactly the size it would clear itself. (Until interface version 3 switches moved these
         // clears to the decode thread, the completion thread for every frame, or the frame's command list:
@@ -876,15 +798,12 @@ pub(crate) unsafe fn setup_frame_begin(
         td.iter_grid_offset_uv = grid_w * grid_h;
         td.gen_intra_iter_uv = td.gen_intra_iter_y.add(td.iter_grid_offset_uv as usize);
         td.intra_stats = [0; 4];
-        td.intra_v2 = intra_v2_setup_frame(dec, cm, td);
-        td.intra_main = super::prediction::intra_main_for_frame(td.intra_v2 != 0);
         td.intra_push_loops = 0;
-        // With -intrav2 nothing scans the iteration grid; av1_mi_push_block() writes the one entry per
-        // block that gen_pred_blocks.hlsl reads. The same for the other frames: the tiles keep the
-        // wavefront in their edges, the grid gets that one entry per block, and nothing of it is cleared,
-        // here or behind the frame.
-        td.wave_edges = c_int::from(td.intra_v2 == 0 && wave_edges_for_frame(cm, td));
-        if td.intra_v2 == 0 && td.wave_edges == 0 {
+        // The tiles keep the wavefront in their edges; av1_mi_push_block() writes the one entry per block
+        // of the grid that gen_pred_blocks.hlsl reads, and nothing of it is cleared, here or behind the
+        // frame.
+        td.wave_edges = c_int::from(wave_edges_for_frame(cm, td));
+        if td.wave_edges == 0 {
             // The wavefront in the grid, which av1_mi_push_block() reads back: every entry no block of
             // the frame writes has to be "no iteration".
             // The luma grid (4 bytes per entry) and the chroma grid right behind it: one range from the
@@ -896,12 +815,7 @@ pub(crate) unsafe fn setup_frame_begin(
                 td.gen_intra_iter_uv.cast::<u8>().write_bytes(0xFF, td.iter_grid_offset_uv as usize);
                 perf_add_memset(dec, sys::AV1_PERF_CPU_MEMSET as usize, perf_t, iter_grid_bytes);
             }
-            // With -intrav2 on, the frames that still come here (intra block copy) are the exception and
-            // the next frame on the slot most likely does not clear this grid, so it is not cleared ahead
-            // for it.
-            if INTRA_V2.load(Ordering::Relaxed) == 0 {
-                td.clear_iter_bytes = iter_grid_bytes;
-            }
+            td.clear_iter_bytes = iter_grid_bytes;
         }
 
         td.is_hbd = c_int::from(buf.bit_depth > 8);
@@ -1778,7 +1692,6 @@ pub(crate) unsafe extern "C" fn rav1g_decode_frame_submit(
             let frame_type = (*cm).current_frame.frame_type as c_int;
             acc.intra_frame = c_int::from(frame_type == 0 || frame_type == 2); // frame_is_intra_only()
             acc.intra_iters = td.intra_iters;
-            acc.intra_v2 = td.intra_v2;
             acc.intra_stats = td.intra_stats;
             acc.tile_count = td.tile_count;
         }
@@ -1806,19 +1719,6 @@ pub(crate) unsafe extern "C" fn rav1g_decode_frame_submit(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_stamp_of_the_intra_schedule() {
-        let mut stamp = 0;
-        assert!(intra_v2_next_stamp(&mut stamp));
-        assert_eq!(stamp, 1);
-        for expected in 2..=255 {
-            assert!(!intra_v2_next_stamp(&mut stamp));
-            assert_eq!(stamp, expected);
-        }
-        assert!(intra_v2_next_stamp(&mut stamp));
-        assert_eq!(stamp, 1);
-    }
 
     #[test]
     fn the_layout_of_a_frame_moves_with_its_buffer() {

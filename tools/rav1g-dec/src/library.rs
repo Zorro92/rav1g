@@ -145,7 +145,6 @@ pub struct Spec {
     pub slots: u32,
     /// The parts of -lowmemparts; 0 is none.
     pub low_memory: u32,
-    pub intra_v2: bool,
     pub inter_fast: bool,
     pub operating_point: u32,
     pub all_layers: bool,
@@ -167,7 +166,6 @@ pub struct Spec {
 #[derive(Clone, Copy)]
 pub struct Choices {
     pub skip_film_grain: bool,
-    pub intra_v2: bool,
     pub inter_fast: u32,
     /// The display pass's A/B switches (`av1_set_display_fixed_peak`, `av1_set_display_bilinear_chroma`).
     pub display_fixed_peak: bool,
@@ -409,7 +407,6 @@ impl Library {
             frame_slots: spec.slots,
             // The program always says which parts it wants: no part is "none", not the library's default.
             low_memory: LowMemory(spec.low_memory),
-            intra_v2: spec.intra_v2,
             inter_fast: spec.inter_fast,
             packed_10x3: false,
             output_kind: if spec.semi_planar { OutputKind::SemiPlanar } else { OutputKind::Planes },
@@ -435,7 +432,6 @@ impl Library {
         settings.frames_in_parse = spec.parse_frames;
         settings.frame_slots = spec.slots;
         settings.low_memory = spec.low_memory;
-        settings.intra_v2 = spec.intra_v2;
         settings.inter_fast = spec.inter_fast;
         settings.operating_point = spec.operating_point;
         settings.output_all_layers = spec.all_layers;
@@ -514,10 +510,8 @@ impl Library {
         switches::set_display_fixed_peak(choices.display_fixed_peak);
         switches::set_display_bilinear_chroma(choices.display_bilinear_chroma);
         if self.is_c() {
-            capi::rav1g_set_intra_v2(choices.intra_v2);
             capi::rav1g_set_inter_fast(choices.inter_fast);
         } else {
-            switches::set_intra_v2(choices.intra_v2);
             switches::set_inter_fast(choices.inter_fast);
         }
     }

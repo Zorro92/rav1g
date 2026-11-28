@@ -106,7 +106,6 @@ pub struct Task {
     /// -headroom: what the budget guard should leave of the budget behind the decoder, in MiB; 0: the
     /// library's default.
     pub headroom_mib: i64,
-    pub intrav2: bool,
     /// -poisonmi, -poisonbuf: `switches::set_poison_buffers`.
     pub poison: Poison,
     /// -interfast (1), -interfastlists (7), -interfastmode <n>: `switches::set_inter_fast`.
@@ -186,7 +185,6 @@ impl Default for Task {
             lowmem_parts: LOWMEM_DEFAULT,
             budget_mib: -1,
             headroom_mib: 0,
-            intrav2: false,
             poison: Poison::Off,
             interfast: 0,
             continue_on_error: false,
@@ -290,7 +288,7 @@ pub fn usage() {
     say!("                        its budget guard leaves it");
     say!("  -queue_size <n>       output images in the pool, 1..{} (default {})", QUEUE_SIZE_MAX, QUEUE_SIZE_DEFAULT);
     say!("  -timeout <seconds>    give up on a task after this time (exit code {})", EXIT_TIMEOUT);
-    say!("  -nofitsize -lowmemparts <n> -lowmem -slots <n> -intrav2");
+    say!("  -nofitsize -lowmemparts <n> -lowmem -slots <n>");
     say!(
         "  -displaypass WxH      the display pass (Rav1gSettings::display): images of WxH, the frames downscaled and \
          tone-mapped to BT.709 SDR, P010 or NV12 (with -output p010; the md5 references do not apply)"
@@ -497,7 +495,6 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-displaydither" => task.displaydither = number()? as u32,
             "-nofitsize" => task.nofitsize = true,
             "-fitsize" => task.fitsize = true,
-            "-intrav2" => task.intrav2 = true,
             // The default since -intraod is retired; accepted, changes nothing.
             "-intraopt" => {}
             "-continue_on_error" => task.continue_on_error = true,
@@ -725,7 +722,9 @@ mod tests {
         parse_args(&strings(&["-poisonbuf"]), &mut task, None).unwrap();
         assert_eq!(task.poison, Poison::Buffers);
         // The retired switches are unknown flags now; the flags of a default are accepted.
-        for flag in ["-gpuclear", "-cpuclear", "-syncclear", "-asyncclear", "-intraod", "-intraedgefix", "-cdefv1"] {
+        for flag in
+            ["-gpuclear", "-cpuclear", "-syncclear", "-asyncclear", "-intraod", "-intraedgefix", "-cdefv1", "-intrav2"]
+        {
             assert!(parse_args(&strings(&[flag]), &mut task, None).is_err(), "{flag}");
         }
         for flag in ["-cdefv2", "-intraopt", "-fitsize"] {

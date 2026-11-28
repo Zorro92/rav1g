@@ -743,7 +743,10 @@ pub struct Rav1gSettings {
     /// The memory reductions: `RAV1G_LOW_MEMORY_DEFAULT`, which `rav1g_settings_default` sets, or the
     /// parts wanted added up, 0 for none.
     pub low_memory: u32,
-    /// Buffers for the second intra path (`rav1g_set_intra_v2`).
+    /// Retired in 0.8.0-alpha.3 with the second intra path (`intra_v2.hlsl`, the test flag `-intrav2`): false,
+    /// as `rav1g_settings_default` sets it. `rav1g_decoder_create` refuses true with
+    /// `RAV1G_STATUS_INVALID_PARAM` and the reason in `rav1g_last_error`. The field keeps its place and is
+    /// removed with the next interface version.
     pub intra_v2: bool,
     /// Room in the block maps for the lists of the fast inter path (`rav1g_set_inter_fast`).
     pub inter_fast: bool,
@@ -1118,7 +1121,7 @@ pub unsafe extern "C" fn rav1g_settings_default(settings: *mut Rav1gSettings) {
             threads: defaults.threads,
             frame_slots: defaults.frame_slots,
             low_memory: defaults.low_memory.0,
-            intra_v2: defaults.intra_v2,
+            intra_v2: false,
             inter_fast: defaults.inter_fast,
             packed_10x3: defaults.packed_10x3,
             output_all_layers: defaults.output_all_layers,
@@ -1153,7 +1156,6 @@ fn settings_of(settings: &Rav1gSettings) -> Settings {
         frames_in_parse: settings.frames_in_parse,
         frame_slots: settings.frame_slots,
         low_memory: LowMemory(settings.low_memory),
-        intra_v2: settings.intra_v2,
         inter_fast: settings.inter_fast,
         packed_10x3: settings.packed_10x3,
         output_kind: if settings.output_kind == RAV1G_OUTPUT_SEMI_PLANAR {
@@ -1335,6 +1337,19 @@ fn parser_options_invalid(bits: u32) -> Option<String> {
     })
 }
 
+/// Why a field of a path retired in 0.8.0-alpha.3 is refused: set, it asks for buffers and a path the
+/// library no longer has, which would otherwise be ignored without a word. None when the fields are
+/// those of `rav1g_settings_default`.
+fn retired_settings_invalid(settings: &Rav1gSettings) -> Option<&'static str> {
+    if settings.intra_v2 {
+        return Some(
+            "Rav1gSettings::intra_v2 is set: the second intra path (intra_v2.hlsl) was retired in 0.8.0-alpha.3; \
+             leave the field false",
+        );
+    }
+    None
+}
+
 /// Creates a decoder on a device; waits for the pipeline states of the device when they are still being
 /// created. `*decoder` is the decoder, or null with the reason as the result and in `rav1g_last_error`.
 /// The context of the output callbacks and of the budget callback must stay valid until
@@ -1362,6 +1377,9 @@ pub unsafe extern "C" fn rav1g_decoder_create(
     }
     if let Some(what) = parser_options_invalid(settings.parser_options) {
         return set_last_error(&Error::new(ErrorCode::InvalidParam, &what));
+    }
+    if let Some(what) = retired_settings_invalid(settings) {
+        return set_last_error(&Error::new(ErrorCode::InvalidParam, what));
     }
     if settings.output.get_image.is_none() || settings.output.frame.is_none() {
         return set_last_error(&Error::new(
@@ -1568,10 +1586,17 @@ pub unsafe extern "C" fn rav1g_decoder_destroy(decoder: *mut Rav1gDecoder) {
 // The process-wide switches: they hold for every decoder of the process and are changed while no frame
 // is in flight in any of them (before the first temporal unit, or after a drain).
 
-/// Intra prediction through `intra_v2.hlsl`; only in a decoder created with `Rav1gSettings::intra_v2`.
+/// Retired in 0.8.0-alpha.3 with the second intra path (`intra_v2.hlsl`, the test flag `-intrav2`): does
+/// nothing, and every decoder takes the default intra path. A call with `true` writes a log line that is
+/// not an error (`rav1g_set_log_callback`) saying so. Removed with the next interface version.
 #[unsafe(no_mangle)]
 pub extern "C" fn rav1g_set_intra_v2(enable: bool) {
-    switches::set_intra_v2(enable);
+    if enable {
+        crate::host::log::log(
+            false,
+            "rav1g_set_intra_v2: retired in 0.8.0-alpha.3, does nothing: intra prediction takes the default path",
+        );
+    }
 }
 
 /// The fast inter path: 0, or `RAV1G_INTER_FAST_ON` with the `RAV1G_INTER_FAST_*` bits; only in a decoder
@@ -1806,5 +1831,17 @@ mod tests {
             let what = parser_options_invalid(RAV1G_PARSER_OPTIONS_DEFAULT | bit).expect("refused");
             assert!(what.contains(&format!("{bit:#x}")), "{what}");
         }
+    }
+
+    #[test]
+    fn the_fields_of_retired_paths_are_refused() {
+        let mut settings = std::mem::MaybeUninit::<Rav1gSettings>::zeroed();
+        // SAFETY: valid for writing.
+        unsafe { rav1g_settings_default(settings.as_mut_ptr()) };
+        // SAFETY: written by rav1g_settings_default.
+        let mut settings = unsafe { settings.assume_init() };
+        assert!(retired_settings_invalid(&settings).is_none());
+        settings.intra_v2 = true;
+        assert!(retired_settings_invalid(&settings).expect("refused").contains("intra_v2"));
     }
 }

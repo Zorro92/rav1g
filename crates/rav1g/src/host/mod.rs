@@ -46,7 +46,7 @@ pub(crate) use compute::{
 };
 pub(crate) use display_pass::{av1_set_display_bilinear_chroma, av1_set_display_fixed_peak};
 pub(crate) use film_grain::av1_set_skip_film_grain;
-pub(crate) use frame::{av1_set_intra_v2, av1_shader_variant};
+pub(crate) use frame::av1_shader_variant;
 pub(crate) use memory::{av1_log_video_memory_now, av1_set_poison_buffers};
 pub(crate) use perf::{av1_set_inter_fast, av1_set_perf_callback, av1_set_perf_detail};
 pub(crate) use stage_dump::av1_set_stage_dump;
@@ -55,7 +55,6 @@ mod film_grain;
 mod frame;
 mod gpu_grid;
 mod grain_template;
-mod intra_v2;
 mod libaom;
 pub(crate) mod log;
 mod loopfilter;

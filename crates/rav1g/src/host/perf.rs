@@ -439,7 +439,7 @@ pub(crate) unsafe fn perf_collect(
         rec.intra_frame = p.acc.intra_frame;
         rec.used_sec_slot = p.acc.used_sec_slot;
         rec.intra_iters = p.acc.intra_iters;
-        rec.intra_v2 = p.acc.intra_v2;
+        // rec.intra_v2 stays 0: the path that set it (-intrav2) is retired.
         rec.intra_dispatches = p.acc.intra_stats[0];
         rec.intra_barriers = p.acc.intra_stats[1];
         rec.intra_groups = p.acc.intra_stats[2];

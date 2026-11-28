@@ -100,8 +100,6 @@ struct ResourceConfig {
     gpu_pipeline_depth: i32,
     enable_superres: i32,
     semi_planar: bool,
-    /// Create the buffers of the -intrav2 path.
-    intra_v2: bool,
     /// Room in the block maps for the lists of the -interfast path.
     inter_fast: bool,
     /// `AV1_LOW_MEMORY_*`.
@@ -332,7 +330,6 @@ impl ResourceConfig {
             gpu_pipeline_depth,
             enable_superres: 1,
             semi_planar: cfg.output_kind == 1,
-            intra_v2: cfg.intra_v2 != 0,
             inter_fast: cfg.inter_fast != 0,
             low_memory,
             low_memory_default: cfg.low_memory == 0,
@@ -611,24 +608,6 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
                 i
             )
         );
-        // Test player flag -intrav2 (intra_v2_sched.h): 8 bytes per 4x4 cell of luma and chroma, then the
-        // region list, which cannot have more entries than there are cells; two words per 64x64 region on
-        // the host. Only for a decoder that was created for that path (aom_codec_dec_cfg_t::intra_v2):
-        // nothing else reads or writes them, and the frame setup keeps the original shaders when they are
-        // not there.
-        td.intra_v2_cells = 0;
-        if cfg.intra_v2 {
-            td.intra_v2_cells = mi_size + (mi_size >> 2);
-            request!(
-                assign,
-                td.intra_v2_buffer,
-                mem.buffer(td.intra_v2_cells as usize * 16, HostRW, c"intra_v2_buffer", i)
-            );
-            request!(assign, td.intra_v2_regions, mem.host(size_of::<i32>() * 2 * (mi_size >> 8) as usize));
-        }
-        td.intra_v2_sched.stamp = 0;
-        td.intra_v2_cols = 0;
-        td.intra_v2_rows = 0;
         td.wave_edges = 0;
         td.clear_pending = 0;
         td.clear_iter_bytes = 0;
@@ -918,10 +897,9 @@ unsafe fn log_memory_summary(is_error: bool, label: &str, dec: &Av1Core, rcfg: &
     log(
         is_error,
         &format!(
-            "MEMORY {label} options: intra_v2 buffers {}; low memory {} (shared back buffer {}, {shares}{late}); palette \
+            "MEMORY {label} options: low memory {} (shared back buffer {}, {shares}{late}); palette \
              buffers {palette_buffers} of {} created, {:.1} MiB each, a slot's on its first frame with screen content \
              tools",
-            if rcfg.intra_v2 { "yes" } else { "no (the decoder was not created for -intrav2)" },
             rcfg.low_memory,
             if shared { "yes" } else { "no" },
             rcfg.gpu_pipeline_depth,

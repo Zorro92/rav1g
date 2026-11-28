@@ -21,7 +21,6 @@ use std::cell::Cell;
 use std::ffi::c_int;
 use std::sync::Mutex;
 
-use crate::host::blocks::IntraMain;
 use crate::host::blocks::{WaveColumn, WaveEdges, WaveRow};
 use crate::host::types::av1_frame_thread_data;
 use crate::sys::{MB_MODE_INFO, MI_POOL_CHUNK_RECORDS, MiGridEntry, av1_tile_data, tx_block_info_gpu};
@@ -240,10 +239,7 @@ impl Arena {
                 gen_intra_iter_uv: std::ptr::null_mut(),
                 iter_grid_stride: grid_w,
                 iter_grid_stride_uv: grid_w >> 1,
-                intra_v2: 0,
-                intra_main: IntraMain::SingleEdge,
                 intra_push_loops: 0,
-                intra_v2_sched: Default::default(),
                 scale_factors: Default::default(),
                 scale_enable: 0,
             }),

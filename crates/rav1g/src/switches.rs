@@ -55,12 +55,6 @@ pub fn set_skip_film_grain(enable: bool) {
     crate::host::av1_set_skip_film_grain(c_int::from(enable))
 }
 
-/// Intra prediction through `intra_v2.hlsl`; only in a decoder that was created with
-/// [`crate::Settings::intra_v2`].
-pub fn set_intra_v2(enable: bool) {
-    crate::host::av1_set_intra_v2(c_int::from(enable))
-}
-
 /// The display pass: the configured source peak (`Display::source_peak_nits`) for every PQ frame, its HDR
 /// metadata ignored, as before interface version 3 (a picture A/B; `-displayfixedpeak`).
 pub fn set_display_fixed_peak(enable: bool) {

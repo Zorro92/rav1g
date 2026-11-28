@@ -226,6 +226,11 @@ by the host check, since there is no 8-bit 4K clip on the console yet.
   clip's entropy was 18 ms, so typical film bitrates are less CPU-bound than these 40 Mbps tests.
 
 ## Step 1b: intra v2 (2026-11-11, negative)
+
+Retired in 0.8.0-alpha.3 with its flag, pipelines and buffers (`Rav1gSettings::intra_v2` is refused,
+`rav1g_set_intra_v2` does nothing until the next interface version); `intra_v2.hlsl` and its scheduler
+stay in `testing/intra_check` as the independent reference of the intra kernels.
+
 Patch 0004 (Bale build run 43003822357, package 0.1.9.0) adds `-intrav2`. It is a
 new scheduler plus one 384-thread shader that runs several wavefront passes inside each thread
 group, so there are fewer dispatches and UAV barriers. The first two CI runs failed: FXC treats
@@ -422,7 +427,7 @@ and the hand-over is a race. Of the 92 shaders, 58 have group memory; 53 of them
 (`testing/sync_check` on the shaders of the commit before the fix reports them all). The other
 five use the memory as private scratch of a thread (`inter_warp`, `inter_warp_hbd`), not at all
 (`inter_2x2chroma_hbd`, `inter_compound_2x2_hbd`), or already had group syncs
-(`film_grain_filter`), as `cdef_filter`, `cdef_filter_v2` and `intra_v2` do.
+(`film_grain_filter`), as `cdef_filter`, `cdef_filter_v2` and `intra_v2` (retired since) do.
 
 Lines are those of the upstream sources (rav1g 7ff22d5):
 
@@ -475,7 +480,7 @@ between two group syncs every thread runs alone, in an order drawn anew every ti
 barrier does nothing, and the group memory records who read and wrote each element since the
 last group sync, so that every race is reported with its source line, whatever order was drawn.
 `cdef_check`, `intra_check` and `warp_check` run their shaders this way (the warp compound shader
-still equals libaom, the fixed intra shaders still equal `intra_v2`), and `testing/sync_check`
+still equals libaom, the fixed intra shaders still equal `intra_v2`, kept there as a test-only reference), and `testing/sync_check`
 runs all 58 shaders with group memory on generated input: no race, every group sync reached by
 all threads, no plain barrier, output independent of the thread order. As a proof that the checks
 can fail, each of the 113 group syncs is turned into a plain barrier in a copy of its shader: 111

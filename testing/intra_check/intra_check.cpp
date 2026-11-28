@@ -1,11 +1,12 @@
 /*
  * Runs the default and legacy intra main kernels (one dispatch pair per
- * wavefront iteration) and intra_v2 (scheduled by
- * libav1/dx/intra_v2_sched.h) as C++ on generated frames and compares the
- * whole frame buffer byte for byte. 8-bit and 10-bit.
+ * wavefront iteration) and intra_v2 (scheduled by intra_v2_sched.h; both
+ * test-only files of this directory since the decoder's -intrav2 path was
+ * retired) as C++ on generated frames and compares the whole frame buffer
+ * byte for byte. 8-bit and 10-bit.
  *
  * What is real: the shader code (converted by run.sh), the scheduler header
- * the decoder uses, the lookup tables (pulled from the decoder sources by
+ * the decoder used, the lookup tables (pulled from the decoder sources by
  * run.sh). What is modelled here: the block records (a port of the intra
  * part of gen_pred_blocks.hlsl), the iteration grid of av1_mi_push_block,
  * the dispatch loops of av1_prediction_run_all, and the GPU itself.

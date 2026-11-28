@@ -138,7 +138,6 @@ class CParameters {
     // bilinearchroma.
     bool displayfixedpeak_;
     bool displaybilinearchroma_;
-    bool intrav2_;
     // -intraopt: accepted, changes nothing (-intraod is retired).
     bool intraopt_;
     // -slots: the pipeline slots the task asks for. 0 when the task has no -slots: the library then gives

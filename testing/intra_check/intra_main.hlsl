@@ -14,6 +14,12 @@
  * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
  */
 
+// The 8-bit frame-wide wavefront kernel of upstream (AV1 7.11.2), optimized, and with INTRA_MAIN_LEGACY
+// (intra_main_legacy.hlsl) the original. Not a shader of the decoder any more: only the frames of the
+// retired -intrav2 path still took it (0.8.0-alpha.3), the 8-bit default is intra_main_prefetch.hlsl
+// (intra_main_hbd.hlsl with INTRA_8BIT), and the shader build does not see this file. It stays here as
+// a reference of intra_check.
+
 cbuffer IntraDataCommon : register(b0) {
   int4 cb_planes[3];
   int4 cb_flags;

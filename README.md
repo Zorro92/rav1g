@@ -49,7 +49,7 @@ which is new in package 0.2.148.0 and md5-exact in CI; `-cpuclear` is the defaul
 The upstream behaviour was `-cdefv1 -nofitsize -lowmemparts 0
 -parser c -syncclear` in the test player; `-parser c`, upstream's entropy decoder, is no longer in
 the decoder (package 0.2.159), and `-cdefv1` and `-syncclear` are retired as well. Everything else that was tried (`-slots 3`,
-`-lowmem`, `-intrav2`) stays behind its flag. The columns below name the flags the runs were made
+`-lowmem`) stays behind its flag; `-intrav2` is retired. The columns below name the flags the runs were made
 with; `-cdefv2`, `-fitsize` and the shared back buffer of `-lowmem` are the defaults now.
 
 4K 10-bit, 1 tile, 40 Mbps, 300 frames, on the console, no presentation (ranges are over
@@ -70,8 +70,8 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
 - **CDEF v2** is 7–9x faster than upstream and bit-exact. Its successor `cdef_filter_v3` is
   the only CDEF now; upstream's shader and v2 are retired with their flags (`-cdefv1`,
   `-cdefv3legacy`).
-- **Intra v2** (`-intrav2`) is bit-exact but 2.3–2.4x slower. It is a negative result, off by
-  default and kept for reference.
+- **Intra v2** (`-intrav2`) was bit-exact but 2.3–2.4x slower: a negative result, retired in
+  0.8.0-alpha.3. Its shaders stay as the reference of the host check `testing/intra_check`.
 - **Intra prediction** uses angle-specific wavefront dependencies and direct prediction for
   exact vertical and horizontal angles. (`-intraod`, the conservative wavefront with the DXC `-Od`
   kernels, is retired.)

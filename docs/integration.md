@@ -398,6 +398,16 @@ loses the declarations of the internal `av1_*` setters of the same switches; `av
 layout (640 bytes on x64, 22 GPU stages: `slot_clear`, `pred_count` and `pred_scan` keep their places and
 have no time any more).
 
+**Retired in 0.8.0-alpha.3, interface version 3 as before.** The declarations below stay exactly as they
+are (the fingerprint is `f4f314d6ea9678c2`), only their comments change, and they go with the next
+interface version:
+
+- the second intra path (`intra_v2.hlsl`, slower on the console): `rav1g_set_intra_v2` does nothing (a
+  call with `true` writes a log line that is not an error, `rav1g_set_log_callback`, saying so), and
+  `rav1g_decoder_create` refuses `Rav1gSettings::intra_v2` set to true (`RAV1G_STATUS_INVALID_PARAM`,
+  the reason in `rav1g_last_error`), as it refuses the retired parser bits. `rav1g_settings_default`
+  leaves it false, as it did. `av1_perf_frame::intra_v2` keeps its place and is always 0.
+
 ## Loading the library at run time: the interface version
 
 `rav1g_abi_version()` returns `RAV1G_ABI_VERSION` of the `rav1g.h` the library was built with. A loader

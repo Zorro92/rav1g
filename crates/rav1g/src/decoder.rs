@@ -130,8 +130,6 @@ pub struct Settings {
     pub frame_slots: u32,
     /// The memory reductions.
     pub low_memory: LowMemory,
-    /// Buffers for the second intra path ([`crate::switches::set_intra_v2`]).
-    pub intra_v2: bool,
     /// Room in the block maps for the lists of the fast inter path ([`crate::switches::set_inter_fast`]).
     pub inter_fast: bool,
     /// 10-bit frames are put out with three samples packed into 32 bits ([`ImageFormat::Packed10x3`]).
@@ -182,7 +180,6 @@ impl Default for Settings {
             frames_in_parse: 0,
             frame_slots: 0,
             low_memory: LowMemory::default(),
-            intra_v2: false,
             inter_fast: false,
             packed_10x3: false,
             output_kind: OutputKind::Planes,
@@ -242,7 +239,6 @@ impl Settings {
         cfg.shared_fence = c_int::from(self.shared_fence);
         cfg.frame_slots = self.frame_slots as c_int;
         cfg.frames_in_parse = self.frames_in_parse as c_int;
-        cfg.intra_v2 = c_int::from(self.intra_v2);
         cfg.inter_fast = c_int::from(self.inter_fast);
         cfg.low_memory = self.low_memory.to_raw();
         cfg.parser_options = self.parser_options.bits() as c_int;

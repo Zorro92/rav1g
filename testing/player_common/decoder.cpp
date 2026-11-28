@@ -495,7 +495,6 @@ int AV1Decoder::DecodeOne() {
                        created_slots_ != params_.slots_ || created_parse_frames_ != params_.parse_frames_ ||
                        created_width_ != dec_width ||
                        created_height_ != dec_height || created_bitdepth_ != dec_bitdepth ||
-                       created_intrav2_ != params_.intrav2_ ||
                        created_interfast_ != (params_.interfast_ || params_.interfastlists_) ||
                        created_parser_options_ != params_.parser_options_ ||
                        created_lowmem_ != params_.lowmem_parts_ || created_packed_10x3_ != params_.hdr10x3_ ||
@@ -553,13 +552,12 @@ int AV1Decoder::DecodeOne() {
       // when the slots of more do not fit what the app has left (its "MEMORY frames in parse" line).
       static_assert(PLAYER_PARSE_FRAMES_MAX == RAV1G_FRAMES_IN_PARSE_MAX, "-parseframes out of step with rav1g.h");
       cfg.frames_in_parse = params_.parse_frames_;
-      // The same for what else decides which buffers exist: -intrav2 needs buffers of its own, -lowmem and
-      // -lowmemparts leave some out or make them smaller. The player always says which parts it wants; 0 is
+      // The same for what else decides which buffers exist: -lowmem and -lowmemparts leave some out or make
+      // them smaller. The player always says which parts it wants; 0 is
       // none.
       static_assert(PLAYER_LOWMEM_DEFAULT == RAV1G_LOW_MEMORY_DEFAULT && PLAYER_LOWMEM_ALL == RAV1G_LOW_MEMORY_ALL &&
                         PLAYER_LOWMEM_PARTS == (RAV1G_LOW_MEMORY_ALL | RAV1G_LOW_MEMORY_LATE_FRAME_BUFFER),
                     "-lowmemparts out of step with rav1g.h");
-      cfg.intra_v2 = params_.intrav2_ != 0;
       // -interfast: room in the block maps for the lists by motion vector class.
       cfg.inter_fast = params_.interfast_ || params_.interfastlists_;
       // -parseopt: the switches of rav1d's parse.
@@ -604,8 +602,7 @@ int AV1Decoder::DecodeOne() {
               << si.width << "x" << si.height << " " << si.bit_depth << "-bit), slots " << params_.slots_
               << (params_.slots_ ? "" : " (the library's default)") << ", frames in parse "
               << params_.parse_frames_ << (params_.parse_frames_ ? "" : " (the library's default)")
-              << ", intra_v2 buffers "
-              << (params_.intrav2_ ? "yes (-intrav2)" : "no") << ", low memory parts "
+              << ", low memory parts "
               << (params_.lowmem_parts_ == PLAYER_LOWMEM_DEFAULT ? std::string("default")
                                                                  : std::to_string(params_.lowmem_parts_))
               << "; device buffers " << MibString(memory.device_size) << " and up to "
@@ -681,7 +678,6 @@ int AV1Decoder::DecodeOne() {
       created_width_ = dec_width;
       created_height_ = dec_height;
       created_bitdepth_ = dec_bitdepth;
-      created_intrav2_ = params_.intrav2_;
       created_interfast_ = params_.interfast_ || params_.interfastlists_;
       created_parser_options_ = params_.parser_options_;
       created_lowmem_ = params_.lowmem_parts_;
@@ -780,11 +776,7 @@ int AV1Decoder::DecodeOne() {
   av1_set_display_bilinear_chroma(params_.displaybilinearchroma_);
   XB_LOGI << "Front of the frame: two steps (default)";
   XB_LOGI << "CDEF shader: cdef_filter_v3 (default)";
-  // -intrav2: the same rules, independent of the CDEF shader.
-  rav1g_set_intra_v2(params_.intrav2_ != 0);
-  XB_LOGI << "Intra shaders: "
-          << (params_.intrav2_ ? "intra_v2 (-intrav2; frames with intra block copy use the frame-wide wavefront)"
-                               : "frame-wide wavefront");
+  XB_LOGI << "Intra shaders: frame-wide wavefront";
   // -interfast: the same rules. The decoder was created with room for the lists (cfg.inter_fast above).
   // -interfastlists: the same lists, the size-list shaders on every one of them (what the lists alone cost).
   rav1g_set_inter_fast(params_.interfastlists_ ? RAV1G_INTER_FAST_LISTS_ONLY

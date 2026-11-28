@@ -8,14 +8,9 @@
 
 use std::ffi::c_int;
 
-use super::blocks::IntraMain;
 pub use crate::sys::{av1_perf_inter_blocks, av1_perf_inter_work};
 
 include!(concat!(env!("OUT_DIR"), "/host_constants.rs"));
-
-/// `IntraV2Sched` of the host: not used here.
-#[derive(Default)]
-pub struct IntraV2Sched;
 
 /// `ScaleFactor` of the host: a reference's scale, for the counters of the timing run.
 #[derive(Clone, Copy, Default)]
@@ -43,14 +38,11 @@ pub struct av1_frame_thread_data {
     pub gen_intra_iter_uv: *mut c_int,
     pub iter_grid_stride: c_int,
     pub iter_grid_stride_uv: c_int,
-    pub intra_v2: c_int,
-    pub intra_main: IntraMain,
     /// Not 0: the transform blocks of intra prediction go through the loops of `av1_mi_push_block` and
     /// `WaveEdges::legacy`, as for the intra step timing, instead of `intra_block_edges`; the lists are the
     /// same. The decoder leaves it 0 (its switch, `-intralistslegacy`, is retired); rav1g-parse-check sets it
     /// for its reference, which so holds the default against the loops.
     pub intra_push_loops: c_int,
-    pub intra_v2_sched: IntraV2Sched,
     pub scale_factors: [ScaleFactor; 8],
     pub scale_enable: c_int,
 }

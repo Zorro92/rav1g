@@ -14,13 +14,11 @@
 
 use std::ffi::c_int;
 
-use super::blocks::IntraMain;
 use super::core::{
     alloc_constants, buffer, commands, perf_gpu_mark, perf_inter_begin, perf_inter_mark, pipeline, stage_dump_active,
     stage_dump_data, stage_dump_fb, stage_dump_mode_info,
 };
 use super::frame::joined_runs;
-use super::intra_v2;
 use super::tables::{
     BILINEAR_FILTERS, INTER_BLOCK_HEIGHT_LUT, INTER_BLOCK_WIDTH_LUT, INTRA_MODE_SHADER_PARAMS, OBMC_MASK,
     QUANT_DIST_LOOKUP_TABLE, QUANT_DIST_WEIGHT, SM_WEIGHT_ARRAYS, SUB_PEL_FILTERS_4, SUB_PEL_FILTERS_4SMOOTH,
@@ -369,7 +367,7 @@ pub(super) unsafe fn prediction_gen_blocks(pbi: *mut AV1Decoder, dec: *mut Av1Co
         // -dumpstages: the block records gen_pred_blocks has just written, as the prediction stages read
         // them.
         if stage_dump_active(dec) {
-            let order = td.intra_main.dump_order();
+            let order = super::stage_dump::INTRA_ORDER;
             for (stage, object, stride, count) in [
                 (c"pred_blocks", (*dec).prediction_blocks, 16, pred_block_total),
                 (c"pred_blocks_warp", (*dec).prediction_blocks_warp, 48, pred_warp_count),
@@ -432,11 +430,6 @@ struct IntraData {
     filter: [[[c_int; 8]; 8]; 5],
     mode_params_lut: [[[c_int; 4]; 7]; 16],
     sm_weight_arrays: [[c_int; 4]; 128],
-}
-
-// The parse and the main shader must agree on the edges read by each coded angle.
-pub(super) fn intra_main_for_frame(intra_v2: bool) -> IntraMain {
-    if intra_v2 { IntraMain::Legacy } else { IntraMain::SingleEdge }
 }
 
 /// Inter breakdown of the timing run (-gputimedetail, dx/av1_perf.h): what the recording notes about the
@@ -972,20 +965,15 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON) 
         if td.intra_iters >= 0 || have_recon {
             let constants = alloc_constants::<IntraData>(&mut td.command_buffer);
             let data = constants.data;
-            let intra_main: *const ComputeShader = match td.intra_main {
-                IntraMain::SingleEdge => {
-                    // Frames without one-edge angles keep the original prefetch shader verbatim.
-                    let single_edge = std::slice::from_raw_parts(tiles, tile_count as usize)
-                        .iter()
-                        .any(|tile| tile.intra_single_edge != 0);
-                    match (td.is_hbd != 0, single_edge) {
-                        (false, false) => &raw const (*lib).shader_intra_main_prefetch,
-                        (true, false) => &raw const (*lib).shader_intra_main_prefetch_hbd,
-                        (false, true) => &raw const (*lib).shader_intra_main_single_edge,
-                        (true, true) => &raw const (*lib).shader_intra_main_single_edge_hbd,
-                    }
-                }
-                IntraMain::Legacy => &raw const (*shaders).intra_main,
+            // The parse and the main shader agree on the edges read by each coded angle. Frames without
+            // one-edge angles keep the original prefetch shader verbatim.
+            let single_edge =
+                std::slice::from_raw_parts(tiles, tile_count as usize).iter().any(|tile| tile.intra_single_edge != 0);
+            let intra_main: *const ComputeShader = match (td.is_hbd != 0, single_edge) {
+                (false, false) => &raw const (*lib).shader_intra_main_prefetch,
+                (true, false) => &raw const (*lib).shader_intra_main_prefetch_hbd,
+                (false, true) => &raw const (*lib).shader_intra_main_single_edge,
+                (true, true) => &raw const (*lib).shader_intra_main_single_edge_hbd,
             };
 
             (*data).flags[0] = c_int::from((*cm).seq_params.enable_intra_edge_filter);
@@ -1050,58 +1038,7 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON) 
                 stage_dump_fb(dec, c"recon", td.frame_buffer, std::ptr::null());
             }
 
-            if td.intra_iters >= 0 && td.intra_v2 != 0 {
-                // -intrav2: one thread group per region entry (a 64x64 region in one step), the wavefront inside
-                // a region runs in the group. A barrier is only needed between steps: groups of one step never
-                // read each other's pixels.
-                let sched = &td.intra_v2_sched;
-                let entries = td.intra_v2_list_count as usize;
-                let list = std::slice::from_raw_parts_mut(sched.list, entries);
-                intra_v2::sort(list);
-                let v2_shader = pipeline(if td.is_hbd != 0 {
-                    &raw const (*lib).shader_intra_v2_hbd
-                } else {
-                    &raw const (*lib).shader_intra_v2
-                });
-                commands.set_pipeline(v2_shader);
-                commands.set_layout(v2_shader.layout());
-                commands.bind_read(0, blocks.location());
-                commands.bind_read(1, residuals.location());
-                commands.bind_read(2, mask_lut.location());
-                commands.bind_read(3, buffer(td.intra_v2_buffer).location());
-                commands.bind_read(4, buffer(td.gen_block_map).location());
-                commands.bind_write(5, frame_buffers.location());
-                commands.bind_constants(6, constants.location);
-                // The list lies behind the cell map in the same buffer.
-                let list_offset = sched.list.cast::<u8>().offset_from(sched.cells.cast::<u8>()) as u32;
-                let mut steps = 0;
-                let mut first = 0;
-                while let Some(d) = intra_v2::next_dispatch(list, first) {
-                    let mut v2_srt =
-                        [0, d.step, d.passes, sched.stamp, sched.map_stride as u32, sched.map_uv_offset as u32, 0, 0];
-                    // A dispatch takes at most 65535 groups per dimension.
-                    let mut done = 0;
-                    while done < d.count {
-                        let groups = (d.count - done).min(65535);
-                        v2_srt[0] = list_offset + 8 * (d.first + done) as u32;
-                        commands.set_inline_constants(7, &v2_srt, 0);
-                        commands.dispatch(groups as u32, 1, 1);
-                        td.intra_stats[0] += 1;
-                        done += 65535;
-                    }
-                    td.intra_stats[2] += d.count;
-                    td.intra_stats[3] += d.count * d.passes as c_int;
-                    if d.last_of_step != 0 {
-                        commands.write_barrier(frame_buffers);
-                        td.intra_stats[1] += 1;
-                        steps += 1;
-                    }
-                    first += d.count as usize;
-                }
-                td.intra_iters = steps - 1; // for the timing record: the last step, like the last iteration
-                perf_gpu_mark(dec, AV1_PERF_GPU_INTRA);
-                stage_dump_fb(dec, c"intra", td.frame_buffer, std::ptr::null());
-            } else if td.intra_iters >= 0 {
+            if td.intra_iters >= 0 {
                 commands.bind_read(2, mask_lut.location());
                 // The lists of the wavefront: per iteration nine lists by block size (64x64 down to 4x4 by
                 // area), then the filter intra blocks.

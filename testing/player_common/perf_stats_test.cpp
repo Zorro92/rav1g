@@ -36,7 +36,6 @@ static av1_perf_frame MakeFrame(int n, double complete_ms, int show) {
   f.frame_number = n;
   f.show_frame = show;
   f.intra_iters = 40;
-  f.intra_v2 = 1;
   f.intra_dispatches = 12;
   f.intra_barriers = 9;
   f.intra_groups = 300;
@@ -267,7 +266,7 @@ int main() {
     CHECK(Has(lines, "output-buffer waits: 3, total 120.0 ms, longest 60.0 ms"));
     CHECK(Has(lines, "1.25 decoded frames each"));
     CHECK(Has(lines, "dispatches mean 12.0 max 12, UAV barriers mean 9.0 max 9, thread groups mean 300 max 300, "
-                     "passes per group 8.0 (intra_v2 on 90 of 90 frames)"));
+                     "passes per group 8.0"));
     // The decode thread's memsets and the clears moved to the completion thread (-asyncclear), side by side.
     CHECK(Has(lines, "cpu memsets (frame + tile)                 90    1.250    1.250    1.250    1.250   "
                      "8.0 MB cleared per frame"));
@@ -285,7 +284,7 @@ int main() {
     CHECK(Has(st.FrameLines(), " slot_clear=0.50 |"));
     CHECK(Has(st.FrameLines(), " | cleared memset=8388608 completion=6291456 gpu=4194304"));
     CHECK(st.FrameLines().size() == 100);
-    CHECK(Has(st.FrameLines(), "iters=40 iv2=1 idisp=12 ibarr=9 igroups=300 ipasses=2400 tiles=4"));
+    CHECK(Has(st.FrameLines(), "iters=40 idisp=12 ibarr=9 igroups=300 ipasses=2400 tiles=4"));
     for (size_t i = 0; i < lines.size(); ++i) {
       CHECK(lines[i].find("nan") == std::string::npos);
       CHECK(lines[i].find("inf") == std::string::npos);
@@ -349,7 +348,7 @@ int main() {
     CHECK(Has(lines, "40.0 % of wall"));
     CHECK(Has(lines, "cpu memsets (frame + tile)                 91    1.250    1.250    1.250    1.250"));
     CHECK(Has(lines, "cpu wait_slot                              91    2.000"));
-    CHECK(Has(lines, "(intra_v2 on 91 of 91 frames)"));
+    CHECK(Has(lines, "(91 frames with intra)"));
     // One decoded frame and a fifth of a copy per output: 20 + 0.2 * 2, 25 + 0.2 * 1, 5 + 0.2 * 0.5.
     CHECK(Has(lines, "1.00 decoded frames each"));
     CHECK(Has(lines, "gpu busy 20.40 ms, cpu decode thread 25.20 ms"));
