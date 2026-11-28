@@ -815,6 +815,7 @@ mod tests {
             lib: unsafe { std::mem::zeroed() },
             workers: Mutex::new(vec![worker]),
             errors: Arc::new(AtomicI32::new(0)),
+            times: Mutex::new(None),
         }));
         let wait = |returned: Arc<AtomicBool>| {
             let handle = Handle(lib);
