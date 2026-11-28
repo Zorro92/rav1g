@@ -1,0 +1,1 @@
+Written by the workflow of main (.github/workflows/build.yml, job language-bar): what rav1g.dll is built from, by language, for commit 25f8a043a56d94d72588b243778797c63a1331a0. One commit, replaced by every push to main.

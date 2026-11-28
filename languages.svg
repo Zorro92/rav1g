@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="42" viewBox="0 0 800 42" role="img" aria-label="rav1g.dll is built from: Rust 74.2%, HLSL 22.9%, Assembly 2.9%">
+<title>rav1g.dll is built from: Rust 74.2%, HLSL 22.9%, Assembly 2.9% (bytes of source, commit 25f8a04, 2026-11-28)</title>
+<clipPath id="bar"><rect width="800" height="10" rx="5"/></clipPath>
+<g clip-path="url(#bar)">
+<rect x="0.0" width="593.9" height="10" fill="#dea584"/>
+<rect x="593.9" width="183.1" height="10" fill="#aace60"/>
+<rect x="777.0" width="23.0" height="10" fill="#6E4C13"/>
+</g>
+<rect x="593.4" width="1" height="10" fill="#6e7781" opacity="0.6"/>
+<rect x="776.5" width="1" height="10" fill="#6e7781" opacity="0.6"/>
+<g font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans',Helvetica,Arial,sans-serif" font-size="13" fill="#6e7781">
+<circle cx="5.0" cy="30" r="4.5" fill="#dea584" stroke="#6e7781" stroke-opacity="0.6"/>
+<text x="16.0" y="34.5"><tspan font-weight="600">Rust</tspan> 74.2%</text>
+<circle cx="115.0" cy="30" r="4.5" fill="#aace60" stroke="#6e7781" stroke-opacity="0.6"/>
+<text x="126.0" y="34.5"><tspan font-weight="600">HLSL</tspan> 22.9%</text>
+<circle cx="225.0" cy="30" r="4.5" fill="#6E4C13" stroke="#6e7781" stroke-opacity="0.6"/>
+<text x="236.0" y="34.5"><tspan font-weight="600">Assembly</tspan> 2.9%</text>
+</g>
+</svg>
