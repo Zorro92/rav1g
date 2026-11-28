@@ -17,9 +17,10 @@
 
 use std::ffi::{c_int, c_void};
 use std::mem::offset_of;
-use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use windows::Win32::Foundation::{E_FAIL, E_POINTER};
 use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12Device};
@@ -106,6 +107,42 @@ struct ShaderLib {
     workers: Mutex<Vec<JoinHandle<()>>>,
     /// The codes of the pipelines that could not be created, or'ed.
     errors: Arc<AtomicI32>,
+    /// What the creation took, for the `PIPELINE` line of the join (`log_creation_times`): the time of
+    /// each pipeline in microseconds by task, their names, the start and the threads.
+    times: Mutex<Option<CreationTimes>>,
+}
+
+/// The times of a library's pipeline creation on threads.
+struct CreationTimes {
+    names: Vec<&'static str>,
+    micros: Arc<Vec<AtomicU64>>,
+    /// Microseconds from the start to the end of the last pipeline (not to the join, which waits for the
+    /// first decoder).
+    last_end: Arc<AtomicU64>,
+    threads: c_int,
+}
+
+/// One line when the threads are joined: the pipelines, the wall time on how many threads, the sum of
+/// their times and the slowest ten. The pipeline states are compiled by the device's driver (about 6.5 s on
+/// the console, docs/integration.md): this says where that time goes.
+fn log_creation_times(times: &CreationTimes) {
+    let wall = times.last_end.load(Ordering::Relaxed) as f64 / 1000.0;
+    let mut each: Vec<(u64, &str)> =
+        times.micros.iter().map(|m| m.load(Ordering::Relaxed)).zip(times.names.iter().copied()).collect();
+    let sum: u64 = each.iter().map(|(us, _)| us).sum();
+    each.sort_by_key(|&(us, _)| std::cmp::Reverse(us));
+    let slowest: Vec<String> =
+        each.iter().take(10).map(|(us, name)| format!("{name} {:.0}", *us as f64 / 1000.0)).collect();
+    log(
+        false,
+        &format!(
+            "PIPELINE states: {} created in {wall:.0} ms on {} threads, {:.0} ms in all; slowest (ms): {}",
+            each.len(),
+            times.threads,
+            sum as f64 / 1000.0,
+            slowest.join(", ")
+        ),
+    );
 }
 
 // The pipelines and their layouts are the first fields of the C++ struct: `SHADERS` pipelines, then
@@ -169,14 +206,26 @@ fn log_failed_pipeline(index: usize, task: &Task, error: gpu::Error) {
 }
 
 /// A thread that creates pipelines: takes the next task until there is none or one has failed.
-fn create_shader_thread(device: OwnedDevice, tasks: Arc<Vec<Task>>, next: Arc<AtomicUsize>, errors: Arc<AtomicI32>) {
+fn create_shader_thread(
+    device: OwnedDevice,
+    tasks: Arc<Vec<Task>>,
+    next: Arc<AtomicUsize>,
+    errors: Arc<AtomicI32>,
+    micros: Arc<Vec<AtomicU64>>,
+    begin: Instant,
+    last_end: Arc<AtomicU64>,
+) {
     // As the threads of the C++ (pthread_create of aom_thread.h).
     // SAFETY: the pseudo handle of this thread.
     let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL) };
     loop {
         let index = next.fetch_add(1, Ordering::Relaxed);
         let Some(task) = tasks.get(index) else { break };
-        if let Err(error) = create_shader(device.device(), task) {
+        let start = Instant::now();
+        let created = create_shader(device.device(), task);
+        micros[index].store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
+        last_end.fetch_max(begin.elapsed().as_micros() as u64, Ordering::Relaxed);
+        if let Err(error) = created {
             log_failed_pipeline(index, task, error);
             errors.fetch_or(error.code, Ordering::Relaxed);
         }
@@ -472,10 +521,16 @@ pub(crate) unsafe fn wait_shader_create_complete(lib: *mut compute_shader_lib) -
         // mistake an emptied handle list for completed pipeline creation.
         let mut workers = (*shader_lib).workers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let errors = &(*shader_lib).errors;
+        let joined = !workers.is_empty();
         for worker in workers.drain(..) {
             if worker.join().is_err() {
                 errors.fetch_or(E_FAIL.0, Ordering::Relaxed);
             }
+        }
+        if joined
+            && let Some(times) = (*shader_lib).times.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
+        {
+            log_creation_times(&times);
         }
         (*lib).threads = 0;
         (*lib).create_shader_errors = errors.load(Ordering::Relaxed);
@@ -523,6 +578,7 @@ pub unsafe extern "C" fn av1_create_pipeline_cache_handle(d3d12device: *mut c_vo
         lib: unsafe { std::mem::zeroed() },
         workers: Mutex::new(Vec::new()),
         errors: Arc::new(AtomicI32::new(0)),
+        times: Mutex::new(None),
     }));
     let handle = shader_lib.cast::<c_void>();
     let lib = shader_lib.cast::<compute_shader_lib>();
@@ -557,16 +613,22 @@ pub unsafe extern "C" fn av1_create_pipeline_cache_handle(d3d12device: *mut c_vo
             return std::ptr::null_mut();
         }
     } else {
+        let micros: Arc<Vec<AtomicU64>> = Arc::new(tasks.iter().map(|_| AtomicU64::new(0)).collect());
+        let last_end = Arc::new(AtomicU64::new(0));
+        let begin = Instant::now();
+        let names = tasks.iter().map(|task| task.name).collect();
         let tasks = Arc::new(tasks);
         let next = Arc::new(AtomicUsize::new(0));
         // SAFETY: the new library; nothing else has the handle yet.
         unsafe {
             (*lib).threads = threads;
+            *(*shader_lib).times.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some(CreationTimes { names, micros: micros.clone(), last_end: last_end.clone(), threads });
             let mut workers = (*shader_lib).workers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             for _ in 0..threads {
-                let (device, tasks, next) = (device.owned(), tasks.clone(), next.clone());
-                let errors = (*shader_lib).errors.clone();
-                match spawn_thread(move || create_shader_thread(device, tasks, next, errors)) {
+                let (device, tasks, next, micros) = (device.owned(), tasks.clone(), next.clone(), micros.clone());
+                let (errors, last_end) = ((*shader_lib).errors.clone(), last_end.clone());
+                match spawn_thread(move || create_shader_thread(device, tasks, next, errors, micros, begin, last_end)) {
                     Ok(worker) => workers.push(worker),
                     Err(error) => {
                         log(true, &format!("MEMORY FAILED pipeline worker thread: {error}"));
