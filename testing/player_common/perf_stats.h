@@ -47,8 +47,9 @@ static_assert(sizeof(kCpuNames) / sizeof(kCpuNames[0]) == AV1_PERF_CPU_COUNT,
               "CPU timer names out of step with av1_perf.h");
 
 // The sections of the inter breakdown (-gputimedetail), in the order of the command list.
-// -interfast: single.<class> and comp_avg.<class of reference 0><class of reference 1>, the classes by the
-// fraction of the motion vector: copy / c none, h in x only, v in y only, 2d / 2 both.
+// single.<class> and comp_avg.<class of reference 0><class of reference 1> (the classes by the fraction of
+// the motion vector: copy / c none, h in x only, v in y only, 2d / 2 both) were the sections of -interfast,
+// retired in 0.8.0-alpha.3: they keep their places and have no dispatches.
 static const char* const kInterSectionNames[] = {
     "warp",        "single",      "single.copy",  "single.h",          "single.v",    "single.2d",   "comp_avg",
     "comp_avg.cc", "comp_avg.hc", "comp_avg.vc",  "comp_avg.2c",       "comp_avg.ch", "comp_avg.hh", "comp_avg.vh",

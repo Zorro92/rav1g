@@ -403,7 +403,8 @@ info grid` of `-memstats`), a slot's grid is 2.0 MiB where it was 4.0, and the d
   plus 224 (`rav1g_sys::MiGridEntry`, `mi_grid_entry`, `mi_grid_record`), with 224 as the base the
   shaders take off. A unit without a block is 0, which no record has. The arithmetic of the shaders is
   what it was, and nothing depends on where the pool is mapped.
-- *The shaders.* `gen_pred_blocks.hlsl` (and `gen_pred_blocks_fast.hlsl`, which includes it) and
+- *The shaders.* `gen_pred_blocks.hlsl` (and `gen_pred_blocks_fast.hlsl`, which included it until
+  `-interfast` was retired) and
   `gen_lf_blocks_hor/vert.hlsl` read the size of an entry from a constant that was reserved
   (`cb_mi_grid_entry`: 4, or the 8 of an address). Nothing
   in them is beyond `cs_5_0`; FXC and DXC compile them.

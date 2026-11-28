@@ -1,6 +1,6 @@
 /*
  * The HLSL of testing/warp_check/hlsl_shim.h plus the vector arithmetic the inter prediction shaders
- * without a warp use (inter_main, inter_compound, inter_fast, inter_compound_fast): rows of four samples
+ * without a warp use (inter_main, inter_compound): rows of four samples
  * times a tap, and sums of them. run.sh hands this file to every translation unit of inter_check.
  */
 #ifndef INTER_CHECK_INTER_OPS_H_

@@ -79,25 +79,6 @@ pub(crate) fn perf_detail_mode() -> c_int {
     if perf_enabled() { PERF_DETAIL.load(Ordering::Relaxed) } else { 0 }
 }
 
-/// Test flag -interfast (`dx/av1_perf.h`, `av1_set_inter_fast`; `dx/types.h`, `InterFastLists`): inter
-/// blocks listed and predicted by the fraction of their motion vectors. A frame takes the path while this
-/// is set, in a decoder that was created with room for the lists by class in its block maps
-/// (`aom_codec_dec_cfg_t::inter_fast`), unless it has a scaled reference (the frame setup).
-static INTER_FAST: AtomicI32 = AtomicI32::new(0);
-
-/// `av1_set_inter_fast` (`dx/av1_perf.h`). `mode`: 0 off, or `AV1_INTER_FAST_ON` with the bits that keep
-/// the size-list shader on the lists by class.
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_inter_fast(mode: c_int) {
-    let on = mode & sys::AV1_INTER_FAST_ON as c_int != 0;
-    INTER_FAST.store(if on { mode & 7 } else { 0 }, Ordering::Relaxed);
-}
-
-/// The mode of -interfast.
-pub(crate) fn inter_fast_mode() -> c_int {
-    INTER_FAST.load(Ordering::Relaxed)
-}
-
 /// The clock of the timers: `QueryPerformanceCounter`.
 pub(crate) fn perf_now() -> i64 {
     let mut ticks = 0i64;
@@ -558,15 +539,6 @@ mod tests {
         av1_set_perf_detail(1);
         assert_eq!(perf_detail_mode(), 0);
         av1_set_perf_detail(0);
-
-        av1_set_inter_fast(6);
-        assert_eq!(inter_fast_mode(), 0);
-        av1_set_inter_fast(7);
-        assert_eq!(inter_fast_mode(), 7);
-        av1_set_inter_fast(9);
-        assert_eq!(inter_fast_mode(), 1);
-        av1_set_inter_fast(0);
-        assert_eq!(inter_fast_mode(), 0);
     }
 
     #[test]

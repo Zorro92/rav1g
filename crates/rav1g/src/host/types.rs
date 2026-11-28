@@ -98,8 +98,6 @@ pub struct bitdepth_dependent_shaders {
     pub inter_scale_comp_masked: ComputeShader,
     pub inter_scale_obmc_above: ComputeShader,
     pub inter_scale_obmc_left: ComputeShader,
-    pub inter_fast: ComputeShader,
-    pub inter_comp_fast: ComputeShader,
 }
 
 #[repr(C)]
@@ -138,7 +136,6 @@ pub struct compute_shader_lib {
     pub shader_mi_grid_build: ComputeShader,
     pub shader_fill_buffer: ComputeShader,
     pub shader_gen_pred_blocks: ComputeShader,
-    pub shader_gen_pred_blocks_fast: ComputeShader,
     pub shader_gen_lf_vert: ComputeShader,
     pub shader_gen_lf_hor: ComputeShader,
     pub shader_upscale: ComputeShader,
@@ -151,7 +148,6 @@ pub struct compute_shader_lib {
     pub sig_common0102: Option<ID3D12RootSignature>,
     pub sig_common0110: Option<ID3D12RootSignature>,
     pub sig_pred_blocks: Option<ID3D12RootSignature>,
-    pub sig_pred_blocks_fast: Option<ID3D12RootSignature>,
     pub sig_intra_pred: Option<ID3D12RootSignature>,
     pub sig_inter_pred: Option<ID3D12RootSignature>,
     pub sig_lf: Option<ID3D12RootSignature>,
@@ -337,7 +333,6 @@ pub struct av1_frame_thread_data {
     pub wave_stamp: i64,
     pub wave: WaveStore,
     pub scale_enable: c_int,
-    pub inter_fast: c_int,
     pub scale_factors: [ScaleFactor; 8],
     pub gm_warp: [c_int; 8],
     pub perf_markers: [i64; 16],
@@ -494,7 +489,6 @@ pub struct Av1Core {
     pub prediction_blocks_warp: *mut GpuBufferObject,
     pub loopfilter_blocks: *mut GpuBufferObject,
     pub pred_map_size: c_int,
-    pub inter_fast_tiles: c_int,
     pub block_count4x4: c_int,
     pub shared_back_buffer: c_int,
     pub low_memory: c_int,
@@ -710,11 +704,6 @@ pub const HostRW: c_int = 2;
 pub const ImagePoolSize: c_int = 16;
 pub const Inter2x2ArrOffset: c_int = 216;
 pub const InterCountsAll: c_int = 219;
-pub const InterFast2D: c_int = 3;
-pub const InterFastClasses: c_int = 4;
-pub const InterFastCompound: c_int = 96;
-pub const InterFastLists: c_int = 480;
-pub const InterFastMapSize: c_int = 496;
 pub const InterSizesAllCommon: c_int = 24;
 pub const IntraBlockOffset: c_int = 264;
 pub const IntraSizes: c_int = 9;

@@ -28,8 +28,7 @@ use super::loopfilter::loopfilter_gpu;
 use super::memory::poison_constants;
 use super::output::{copy_output, frame_unreferenced, output_image, prepare_fused_output};
 use super::perf::{
-    inter_fast_mode, perf_add, perf_add_memset, perf_begin_command_buffer, perf_detail_mode, perf_lap, perf_now,
-    perf_resolve,
+    perf_add, perf_add_memset, perf_begin_command_buffer, perf_detail_mode, perf_lap, perf_now, perf_resolve,
 };
 use super::pool::{CHUNK_ITEMS, COEF_CHUNK, Kind, Take};
 use super::postfilter::cdef_looprestoration;
@@ -38,8 +37,7 @@ use super::stage_buffers::MEMORY_GUARD_MARGIN_BUFFER;
 use super::stage_dump::{stage_dump_begin, stage_dump_frame_info};
 use super::transform::{idct_front, idct_run};
 use super::types::{
-    Av1Core, DeviceUpload, EntropyThreadCount, GpuBufferObject, GpuWorkItem, InterFastMapSize, Run, TilePieces,
-    av1_frame_thread_data,
+    Av1Core, DeviceUpload, EntropyThreadCount, GpuBufferObject, GpuWorkItem, Run, TilePieces, av1_frame_thread_data,
 };
 use crate::gpu::d3d12::{com_ref, wrapped_ref};
 use crate::gpu::{CommandAllocator, CommandList, Event, Fence, Queue};
@@ -1082,9 +1080,6 @@ pub(crate) unsafe fn setup_frame_end(
             td.gm_warp[i] =
                 c_int::from(gm.wmtype as c_int > TRANSLATION && gm.invalid == 0 && !sf.is_some_and(is_scaled));
         }
-        // -interfast: not for a frame with a scaled reference, whose blocks all go through the inter_scale
-        // shaders.
-        td.inter_fast = if (*dec).inter_fast_tiles > 0 && td.scale_enable == 0 { inter_fast_mode() } else { 0 };
         perf_add(dec, sys::AV1_PERF_CPU_SETUP as usize, perf_start);
     }
     0
@@ -1164,12 +1159,6 @@ pub(crate) unsafe fn setup_tile(
         let block_map = (*td.gen_block_map).host_ptr.cast::<c_int>();
         t.gen_block_map = block_map.offset(t.gen_block_map_offset as isize);
         t.gen_block_map_wrp = block_map.offset(t.gen_block_warp_offset as isize);
-        // -interfast: the tile's lists by motion vector class, behind the block maps of all tiles.
-        if td.inter_fast != 0 && tile_id < (*dec).inter_fast_tiles {
-            t.gen_block_fast_offset = (*dec).pred_map_size + tile_id * InterFastMapSize;
-            t.gen_block_map_fast = block_map.offset(t.gen_block_fast_offset as isize);
-            t.gen_block_map_fast.write_bytes(0, InterFastMapSize as usize);
-        }
         t.intra_single_edge = 0;
         t.gen_intra_iter_y = -1;
         t.gen_intra_iter_uv = -1;

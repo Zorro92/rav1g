@@ -495,7 +495,6 @@ int AV1Decoder::DecodeOne() {
                        created_slots_ != params_.slots_ || created_parse_frames_ != params_.parse_frames_ ||
                        created_width_ != dec_width ||
                        created_height_ != dec_height || created_bitdepth_ != dec_bitdepth ||
-                       created_interfast_ != (params_.interfast_ || params_.interfastlists_) ||
                        created_parser_options_ != params_.parser_options_ ||
                        created_lowmem_ != params_.lowmem_parts_ || created_packed_10x3_ != params_.hdr10x3_ ||
                        created_semi_planar_ != (params_.semi_planar_ | (params_.interop_ ? 16 : 0)) ||
@@ -558,8 +557,6 @@ int AV1Decoder::DecodeOne() {
       static_assert(PLAYER_LOWMEM_DEFAULT == RAV1G_LOW_MEMORY_DEFAULT && PLAYER_LOWMEM_ALL == RAV1G_LOW_MEMORY_ALL &&
                         PLAYER_LOWMEM_PARTS == (RAV1G_LOW_MEMORY_ALL | RAV1G_LOW_MEMORY_LATE_FRAME_BUFFER),
                     "-lowmemparts out of step with rav1g.h");
-      // -interfast: room in the block maps for the lists by motion vector class.
-      cfg.inter_fast = params_.interfast_ || params_.interfastlists_;
       // -parseopt: the switches of rav1d's parse.
       static_assert(PLAYER_PARSEOPT_NO_LF_MASKS == RAV1G_PARSER_OPTION_NO_LF_MASKS &&
                         PLAYER_PARSEOPT_TILE_KEEPS_THREAD == RAV1G_PARSER_OPTION_TILE_KEEPS_THREAD &&
@@ -678,7 +675,6 @@ int AV1Decoder::DecodeOne() {
       created_width_ = dec_width;
       created_height_ = dec_height;
       created_bitdepth_ = dec_bitdepth;
-      created_interfast_ = params_.interfast_ || params_.interfastlists_;
       created_parser_options_ = params_.parser_options_;
       created_lowmem_ = params_.lowmem_parts_;
       created_packed_10x3_ = params_.hdr10x3_;
@@ -777,17 +773,7 @@ int AV1Decoder::DecodeOne() {
   XB_LOGI << "Front of the frame: two steps (default)";
   XB_LOGI << "CDEF shader: cdef_filter_v3 (default)";
   XB_LOGI << "Intra shaders: frame-wide wavefront";
-  // -interfast: the same rules. The decoder was created with room for the lists (cfg.inter_fast above).
-  // -interfastlists: the same lists, the size-list shaders on every one of them (what the lists alone cost).
-  rav1g_set_inter_fast(params_.interfastlists_ ? RAV1G_INTER_FAST_LISTS_ONLY
-                                                : params_.interfast_ ? RAV1G_INTER_FAST_ON : 0);
-  XB_LOGI << "Inter shaders: "
-          << (params_.interfastlists_
-                  ? "lists by motion vector class, inter_main_v2 and inter_compound_v2 on them (-interfastlists; "
-                    "frames with a scaled reference keep the original lists)"
-                  : params_.interfast_ ? "by motion vector class: inter_fast, inter_compound_fast (-interfast; "
-                                         "frames with a scaled reference keep the original shaders)"
-                                       : "inter_main_v2, inter_compound_v2 (default)");
+  XB_LOGI << "Inter shaders: inter_main_v2, inter_compound_v2 (default)";
   XB_LOGI << "Parser: the parse pass of rav1d";
   // -parseopt: fixed when the decoder was created. The default is nolfmask tilethread gpucdef gpugrid.
   XB_LOGI << "Parser switches (-parseopt): "

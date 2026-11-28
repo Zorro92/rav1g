@@ -29,15 +29,6 @@ pub type IntraSteps = sys::av1_intra_steps;
 /// A step of [`IntraSteps`].
 pub type IntraStep = sys::av1_intra_step;
 
-/// The fast inter path is on ([`set_inter_fast`]).
-pub const INTER_FAST_ON: u32 = sys::AV1_INTER_FAST_ON as u32;
-/// With [`INTER_FAST_ON`]: the blocks with one reference are listed and predicted by the size-list shader.
-pub const INTER_FAST_SINGLE_ORIGINAL: u32 = sys::AV1_INTER_FAST_SINGLE_ORIGINAL as u32;
-/// With [`INTER_FAST_ON`]: the same for the averaged compound blocks.
-pub const INTER_FAST_COMPOUND_ORIGINAL: u32 = sys::AV1_INTER_FAST_COMPOUND_ORIGINAL as u32;
-/// The lists of the fast inter path with the size-list shaders on all of them.
-pub const INTER_FAST_LISTS_ONLY: u32 = sys::AV1_INTER_FAST_LISTS_ONLY as u32;
-
 /// What [`set_poison_buffers`] fills.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[repr(i32)]
@@ -65,12 +56,6 @@ pub fn set_display_fixed_peak(enable: bool) {
 /// Catmull-Rom cubic (a picture A/B; `-displaybilinearchroma`).
 pub fn set_display_bilinear_chroma(enable: bool) {
     crate::host::av1_set_display_bilinear_chroma(c_int::from(enable))
-}
-
-/// The fast inter path: 0, or [`INTER_FAST_ON`] with the `INTER_FAST_*` bits; only in a decoder that was
-/// created with [`crate::Settings::inter_fast`].
-pub fn set_inter_fast(mode: u32) {
-    crate::host::av1_set_inter_fast(mode as c_int)
 }
 
 /// Debugging: the decoders created after the call fill the mode info pool, or every buffer the CPU writes

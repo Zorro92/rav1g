@@ -162,23 +162,25 @@ typedef struct av1_stage_dump av1_stage_dump;
 #define RAV1G_PARSER_OPTIONS_DEFAULT 2566
 
 /*
- `rav1g_set_inter_fast`: the fast inter path is on.
+ Retired in 0.8.0-alpha.3 with the fast inter path (`rav1g_set_inter_fast`, which does nothing): the path
+ was on. The `RAV1G_INTER_FAST_*` values stay defined until the next interface version.
  */
 #define RAV1G_INTER_FAST_ON 1
 
 /*
- With `RAV1G_INTER_FAST_ON`: the blocks with one reference are listed and predicted by the size-list
- shader.
+ Retired in 0.8.0-alpha.3, as `RAV1G_INTER_FAST_ON`: the blocks with one reference were listed by class and
+ predicted by the size-list shader.
  */
 #define RAV1G_INTER_FAST_SINGLE_ORIGINAL 2
 
 /*
- With `RAV1G_INTER_FAST_ON`: the same for the averaged compound blocks.
+ Retired in 0.8.0-alpha.3, as `RAV1G_INTER_FAST_ON`: the same for the averaged compound blocks.
  */
 #define RAV1G_INTER_FAST_COMPOUND_ORIGINAL 4
 
 /*
- The lists of the fast inter path with the size-list shaders on all of them.
+ Retired in 0.8.0-alpha.3, as `RAV1G_INTER_FAST_ON`: the lists of the fast inter path with the size-list
+ shaders on all of them.
  */
 #define RAV1G_INTER_FAST_LISTS_ONLY 7
 
@@ -910,7 +912,10 @@ typedef struct Rav1gSettings {
    */
   bool intra_v2;
   /*
-   Room in the block maps for the lists of the fast inter path (`rav1g_set_inter_fast`).
+   Retired in 0.8.0-alpha.3 with the fast inter path (`inter_fast.hlsl`, the test flag `-interfast`): false,
+   as `rav1g_settings_default` sets it. `rav1g_decoder_create` refuses true with
+   `RAV1G_STATUS_INVALID_PARAM` and the reason in `rav1g_last_error`. The field keeps its place and is
+   removed with the next interface version.
    */
   bool inter_fast;
   /*
@@ -1364,8 +1369,10 @@ void rav1g_decoder_destroy(struct Rav1gDecoder *decoder);
 void rav1g_set_intra_v2(bool enable);
 
 /*
- The fast inter path: 0, or `RAV1G_INTER_FAST_ON` with the `RAV1G_INTER_FAST_*` bits; only in a decoder
- created with `Rav1gSettings::inter_fast`.
+ Retired in 0.8.0-alpha.3 with the fast inter path (`inter_fast.hlsl`, the test flag `-interfast`): does
+ nothing, whatever `mode` is, and every decoder takes the default inter path. A call with a mode that is not
+ 0 writes a log line that is not an error (`rav1g_set_log_callback`) saying so. Removed, with the
+ `RAV1G_INTER_FAST_*` values, with the next interface version.
  */
 void rav1g_set_inter_fast(uint32_t mode);
 

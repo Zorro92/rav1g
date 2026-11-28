@@ -74,18 +74,18 @@ use super::tables::{
 };
 use super::types::{
     CompoundAvrg, CompoundDiff, CompoundDiffUv, CompoundDiffUvGlobalWarp, CompoundGlobalWarp, CompoundMasked,
-    Inter2x2ArrOffset, InterFastCompound, InterSizesAllCommon, IntraBlockOffset, IntraTypeCount, ObmcAbove, ObmcLeft,
-    ReconBlockOffset, av1_frame_thread_data, av1_perf_inter_tile,
+    Inter2x2ArrOffset, InterSizesAllCommon, IntraBlockOffset, IntraTypeCount, ObmcAbove, ObmcLeft, ReconBlockOffset,
+    av1_frame_thread_data, av1_perf_inter_tile,
 };
 use crate::sys::{
-    AV1_COMMON, AV1_PERF_INTER_CHROMA_2X2, AV1_PERF_INTER_COMP_AVG, AV1_PERF_INTER_COMP_AVG_FAST,
-    AV1_PERF_INTER_COMP_DIFF_UV, AV1_PERF_INTER_COMP_DIFF_Y, AV1_PERF_INTER_COMP_MASKED, AV1_PERF_INTER_COMP_WARP,
-    AV1_PERF_INTER_COMP_WARP_DIFF_UV, AV1_PERF_INTER_OBMC_ABOVE, AV1_PERF_INTER_OBMC_LEFT, AV1_PERF_INTER_SINGLE,
-    AV1_PERF_INTER_SINGLE_COPY, AV1_PERF_INTER_WARP, AV1Decoder, BILINEAR, BLOCK_4X4, BLOCK_4X8, BLOCK_4X16, BLOCK_8X4,
-    BLOCK_8X8, BLOCK_8X16, BLOCK_16X4, BLOCK_16X8, BLOCK_32X32, COMPOUND_DIFFWTD, COMPOUND_WEDGE, GLOBAL_GLOBALMV,
-    GLOBALMV, INTRA_FRAME, MACROBLOCKD, MB_MODE_INFO, MI_LEFT_EDGE, OBMC_CAUSAL, REF_NO_SCALE, SCALE_SUBPEL_BITS,
-    SINGLE_INTER_MODE_END, SINGLE_INTER_MODE_START, TX_4X4, TX_16X32, TX_16X64, TX_32X16, TX_32X32, TX_32X64, TX_64X16,
-    TX_64X32, TX_64X64, UV_CFL_PRED, WARPED_CAUSAL, av1_tile_data, int_mv, mi_grid_record_in_chunks,
+    AV1_COMMON, AV1_PERF_INTER_CHROMA_2X2, AV1_PERF_INTER_COMP_AVG, AV1_PERF_INTER_COMP_DIFF_UV,
+    AV1_PERF_INTER_COMP_DIFF_Y, AV1_PERF_INTER_COMP_MASKED, AV1_PERF_INTER_COMP_WARP, AV1_PERF_INTER_COMP_WARP_DIFF_UV,
+    AV1_PERF_INTER_OBMC_ABOVE, AV1_PERF_INTER_OBMC_LEFT, AV1_PERF_INTER_SINGLE, AV1_PERF_INTER_WARP, AV1Decoder,
+    BILINEAR, BLOCK_4X4, BLOCK_4X8, BLOCK_4X16, BLOCK_8X4, BLOCK_8X8, BLOCK_8X16, BLOCK_16X4, BLOCK_16X8, BLOCK_32X32,
+    COMPOUND_DIFFWTD, COMPOUND_WEDGE, GLOBAL_GLOBALMV, GLOBALMV, INTRA_FRAME, MACROBLOCKD, MB_MODE_INFO, MI_LEFT_EDGE,
+    OBMC_CAUSAL, REF_NO_SCALE, SCALE_SUBPEL_BITS, SINGLE_INTER_MODE_END, SINGLE_INTER_MODE_START, TX_4X4, TX_16X32,
+    TX_16X64, TX_32X16, TX_32X32, TX_32X64, TX_64X16, TX_64X32, TX_64X64, UV_CFL_PRED, WARPED_CAUSAL, av1_tile_data,
+    mi_grid_record_in_chunks,
 };
 
 // What an intra mode reads of its neighbours, one bit per mode. testing/intra_check reads these five lines
@@ -280,16 +280,6 @@ fn perf_inter_count_block(
     if scaled {
         b.area_scaled += area;
     }
-}
-
-/// -interfast: the class of a motion vector by its fraction (`InterFastCopy..InterFast2D` of
-/// `dx/types.h`), as gen_pred_blocks_fast_packed.hlsl takes it from the block record. `frac_mask`: 7 for luma,
-/// whose vector is in 1/8 sample, 15 for chroma (1/16 chroma sample).
-#[inline]
-fn inter_fast_class(mv: &int_mv, frac_mask: i16) -> c_int {
-    // SAFETY: a motion vector is two 16-bit numbers in either form of the union.
-    let mv = unsafe { mv.as_mv };
-    c_int::from(mv.col & frac_mask != 0) | (c_int::from(mv.row & frac_mask != 0) << 1)
 }
 
 /// The value of a list counter, which then counts `by` more: the index of the next block of the list.
@@ -842,8 +832,6 @@ unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBL
             && (xd.up_available != 0 || xd.left_available != 0);
         // Inter breakdown of the timing run (-gputimedetail): the tile's counters, null without it.
         let mut pc = tile.perf_inter.cast::<av1_perf_inter_tile>().as_mut();
-        // -interfast: the tile's lists by motion vector class, null on a frame that keeps the lists by type.
-        let fast_map = tile.gen_block_map_fast;
         let mut push = |value: c_int| {
             *index_arr.offset(tile.gen_index_ptr as isize) = value as u32;
             tile.gen_index_ptr += 1;
@@ -872,7 +860,7 @@ unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBL
             let block_size_id_y = INTER_BLOCK_SIZE_INDEX_LUT[(bw_log * 6 + bh_log) as usize];
             if is_compound {
                 let is_warp_compound = is_global_warp[0] || is_global_warp[1];
-                let (list_type, mut section) = if is_warp_compound {
+                let (list_type, section) = if is_warp_compound {
                     (CompoundGlobalWarp, AV1_PERF_INTER_COMP_WARP)
                 } else if comp_type == COMPOUND_WEDGE {
                     (CompoundMasked, AV1_PERF_INTER_COMP_MASKED)
@@ -882,24 +870,14 @@ unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBL
                     (CompoundAvrg, AV1_PERF_INTER_COMP_AVG)
                 };
                 let type_index = (list_type - 1) * SIZES + block_size_id_y;
-                if !fast_map.is_null() && list_type == CompoundAvrg {
-                    let cls = inter_fast_class(&mi.mv[0], 7) | (inter_fast_class(&mi.mv[1], 7) << 2);
-                    push(take(fast_map.offset((InterFastCompound + cls * SIZES + block_size_id_y) as isize), 1));
-                    section = AV1_PERF_INTER_COMP_AVG_FAST + cls;
-                } else {
-                    push(take(map.offset(type_index as isize), 1));
-                }
+                push(take(map.offset(type_index as isize), 1));
                 if let Some(pc) = pc.as_deref_mut() {
                     perf_inter_count(pc, td, section, false, 4 << bw_log, 4 << bh_log, 2, mi, is_warp_compound);
                 }
             } else {
-                let mut section = if is_luma_warp { AV1_PERF_INTER_WARP } else { AV1_PERF_INTER_SINGLE };
+                let section = if is_luma_warp { AV1_PERF_INTER_WARP } else { AV1_PERF_INTER_SINGLE };
                 if is_luma_warp {
                     push(take(tile.gen_block_map_wrp.offset(block_size_id_y as isize), 1));
-                } else if !fast_map.is_null() {
-                    let cls = inter_fast_class(&mi.mv[0], 7);
-                    push(take(fast_map.offset((cls * SIZES + block_size_id_y) as isize), 1));
-                    section = AV1_PERF_INTER_SINGLE_COPY + cls;
                 } else {
                     push(take(map.offset(block_size_id_y as isize), 1));
                 }
@@ -975,7 +953,7 @@ unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBL
                     }
                 } else if is_compound {
                     let is_warp_compound = (is_global_warp[0] || is_global_warp[1]) && bw_log >= 2 && bh_log >= 2;
-                    let (list_type, mut section) = if is_warp_compound {
+                    let (list_type, section) = if is_warp_compound {
                         if comp_type == COMPOUND_DIFFWTD {
                             (CompoundDiffUvGlobalWarp, AV1_PERF_INTER_COMP_WARP_DIFF_UV)
                         } else {
@@ -989,24 +967,14 @@ unsafe fn push_block<const HAS_GRID: bool>(cm: *mut AV1_COMMON, xd: *mut MACROBL
                         (CompoundAvrg, AV1_PERF_INTER_COMP_AVG)
                     };
                     let type_index = (list_type - 1) * SIZES + block_size_id_uv;
-                    if !fast_map.is_null() && list_type == CompoundAvrg {
-                        let cls = inter_fast_class(&mi.mv[0], 15) | (inter_fast_class(&mi.mv[1], 15) << 2);
-                        push(take(fast_map.offset((InterFastCompound + cls * SIZES + block_size_id_uv) as isize), 2));
-                        section = AV1_PERF_INTER_COMP_AVG_FAST + cls;
-                    } else {
-                        push(take(map.offset(type_index as isize), 2));
-                    }
+                    push(take(map.offset(type_index as isize), 2));
                     if let Some(pc) = pc.as_deref_mut() {
                         perf_inter_count(pc, td, section, true, 4 << plane_bw, 4 << plane_bh, 2, mi, is_warp_compound);
                     }
                 } else {
-                    let mut section = if is_chroma_warp { AV1_PERF_INTER_WARP } else { AV1_PERF_INTER_SINGLE };
+                    let section = if is_chroma_warp { AV1_PERF_INTER_WARP } else { AV1_PERF_INTER_SINGLE };
                     if is_chroma_warp {
                         push(take(tile.gen_block_map_wrp.offset(block_size_id_uv as isize), 2));
-                    } else if !fast_map.is_null() {
-                        let cls = inter_fast_class(&mi.mv[0], 15);
-                        push(take(fast_map.offset((cls * SIZES + block_size_id_uv) as isize), 2));
-                        section = AV1_PERF_INTER_SINGLE_COPY + cls;
                     } else {
                         push(take(map.offset(block_size_id_uv as isize), 2));
                     }

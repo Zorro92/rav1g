@@ -53,17 +53,9 @@ fn shader_table(set: Set) -> &'static [Shader] {
     crate::sys::shaders::SHADERS
 }
 
-/// The pipeline name used by `-shaderpick`. The fast pipeline reads packed records.
-fn shader_name(entry: &'static Shader) -> &'static str {
-    match entry.name {
-        "gen_pred_blocks_fast_packed" => "gen_pred_blocks_fast",
-        name => name,
-    }
-}
-
 /// The bytecode of a shader by its pipeline name, of one of the sets of the build.
 fn bytecode_of(name: &str, set: Set) -> Option<&'static [u8]> {
-    shader_table(set).iter().find(|entry| shader_name(entry) == name).map(|entry| entry.code)
+    shader_table(set).iter().find(|entry| entry.name == name).map(|entry| entry.code)
 }
 
 /// The bytecode a pipeline state has without a pick.
@@ -74,7 +66,7 @@ fn bytecode(name: &str) -> Option<&'static [u8]> {
 
 /// The names of the shaders the build has bytecode of, in the order of the table.
 fn shader_names() -> Vec<&'static str> {
-    shader_table(Set::Dxc).iter().map(shader_name).collect()
+    shader_table(Set::Dxc).iter().map(|entry| entry.name).collect()
 }
 
 /// The shader-pick experiment (`shader_pick.rs`): which of the two bytecodes of the build
@@ -124,10 +116,10 @@ const LAYOUTS: usize =
 const _: () = {
     assert!(offset_of!(compute_shader_lib, shader_idct) == 0);
     assert!(SHADERS * size_of::<ComputeShader>() == offset_of!(compute_shader_lib, sig_idct));
-    // 20 transform pipelines, 33 shared shaders and 24 per bit depth: one slot per pipeline of
+    // 20 transform pipelines, 32 shared shaders and 22 per bit depth: one slot per pipeline of
     // `create_tasks` (the test `every_pipeline_names_its_shader_once`).
-    assert!(SHADERS == 20 + 33 + 2 * 24);
-    assert!(LAYOUTS == 23);
+    assert!(SHADERS == 20 + 32 + 2 * 22);
+    assert!(LAYOUTS == 22);
     assert!(offset_of!(ShaderLib, lib) == 0);
 };
 
@@ -202,7 +194,6 @@ struct Layouts {
     common0110: Layout,
     copy_plane: Layout,
     pred_blocks: Layout,
-    pred_blocks_fast: Layout,
     intra_pred: Layout,
     inter_pred: Layout,
     loop_rest: Layout,
@@ -246,8 +237,6 @@ unsafe fn create_layouts(device: Device<'_>, lib: *mut compute_shader_lib) -> Re
         common0110: layout(0, 1, 1, 0)?,
         copy_plane: layout(0, 1, 0, 6)?,
         pred_blocks: layout(5, 2, 1, 7)?,
-        // gen_pred_blocks_fast_packed.hlsl (-interfast) takes one more inline constant.
-        pred_blocks_fast: layout(5, 2, 1, 8)?,
         intra_pred: layout(3, 1, 1, 10)?,
         inter_pred: layout(5, 1, 1, 4)?,
         loop_rest: layout(3, 1, 2, 2)?,
@@ -280,7 +269,6 @@ unsafe fn create_layouts(device: Device<'_>, lib: *mut compute_shader_lib) -> Re
         com_store(&raw mut (*lib).sig_common0110, layouts.common0110.clone().into_raw());
         com_store(&raw mut (*lib).sig_copy_plane, layouts.copy_plane.clone().into_raw());
         com_store(&raw mut (*lib).sig_pred_blocks, layouts.pred_blocks.clone().into_raw());
-        com_store(&raw mut (*lib).sig_pred_blocks_fast, layouts.pred_blocks_fast.clone().into_raw());
         com_store(&raw mut (*lib).sig_intra_pred, layouts.intra_pred.clone().into_raw());
         com_store(&raw mut (*lib).sig_inter_pred, layouts.inter_pred.clone().into_raw());
         com_store(&raw mut (*lib).sig_loop_rest, layouts.loop_rest.clone().into_raw());
@@ -345,11 +333,6 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             ("cdef_filter_v3", &layouts.cdef_filter, &raw mut (*lib).shader_cdef_filter_v3),
             ("cdef_filter_v3_sp_tex", &layouts.cdef_filter_sp_tex, &raw mut (*lib).shader_cdef_filter_v3_sp_tex),
             ("gen_pred_blocks", &layouts.pred_blocks, &raw mut (*lib).shader_gen_pred_blocks),
-            ("gen_pred_blocks_fast", &layouts.pred_blocks_fast, &raw mut (*lib).shader_gen_pred_blocks_fast),
-            ("inter_fast", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_fast),
-            ("inter_compound_fast", &layouts.inter_pred, &raw mut (*lib).shaders_8bit.inter_comp_fast),
-            ("inter_fast_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_fast),
-            ("inter_compound_fast_hbd", &layouts.inter_pred, &raw mut (*lib).shaders_hbd.inter_comp_fast),
             ("gen_lf_blocks_vert", &layouts.lf_gen, &raw mut (*lib).shader_gen_lf_vert),
             ("gen_lf_blocks_hor", &layouts.lf_gen, &raw mut (*lib).shader_gen_lf_hor),
             ("copy_plane", &layouts.copy_plane, &raw mut (*lib).shader_copy_plane),
@@ -815,6 +798,5 @@ mod tests {
         for name in names {
             assert!(bytecode(name).is_some(), "the table has the bytecode of {name}");
         }
-        assert!(shader_pick::resolve("od=gen_pred_blocks_fast", &embedded).is_ok());
     }
 }

@@ -114,12 +114,10 @@ one commit each:
 - **Stage dumps**: `-dumpstages` writes the buffer behind every GPU stage of a frame, in the
   player and in `warp_decoder`, and `testing/stage_dump/stage_dump.py` compares two runs. See
   [Stage dumps](#stage-dumps--dumpstages). The decoded output does not change.
-- **Inter fast path**: `-interfast` lists the inter blocks with one reference and the averaged
-  compound blocks by the fraction of their motion vectors and predicts them with a copy or one
-  filter pass where the vector needs no more (`inter_fast.hlsl`, `inter_compound_fast.hlsl`,
-  `gen_pred_blocks_fast_packed.hlsl`). See [Inter fast path](#inter-fast-path--interfast). Off by
-  default; the output does not change, and without the flag the lists and dispatches are the
-  ones that always ran.
+- **Inter fast path**: `-interfast` listed the inter blocks with one reference and the averaged
+  compound blocks by the fraction of their motion vectors and predicted them with a copy or one
+  filter pass where the vector needed no more. Not faster on the console; retired in
+  0.8.0-alpha.3, see [Inter fast path](#inter-fast-path-retired--interfast).
 - **Experiments**: a second package whose shaders sync all memory at every group sync, for the
   bugs that show on the console only (`-lfhsplit` and `-intraedgefix` are retired). See
   [Experiments](#experiments). Off by default; the output does not change.
@@ -374,7 +372,7 @@ The log lines at the start of each task show which defaults and opt-out flags ar
 | Parser | the parse pass of rav1d, with its switches `nolfmask`, `tilethread` and (since package 0.2.197) `gpucdef` on | `Parser: the parse pass of rav1d`, `Parser switches (-parseopt): nolfmask tilethread gpucdef` | none since package 0.2.159: the entropy decoder of libaom (`-parser c`) left the decoder; up to 0.2.157 `Parser: the entropy decoder of libaom (-parser c)`; `-parseopt` for the switches; see [Parser](#parser--parser) |
 | Clears of a slot | none: the wavefront of intra prediction is kept at the edges of the tiles (since package 0.2.146.0) | `Clears: none needed (intra wavefront at the edges of the tiles)` | none: `-gpuclear`, `-cpuclear` and `-syncclear` are retired; see [Clears](#clears) |
 | Intra prediction | frame-wide wavefront with prefetching and single-edge dependencies | `Intra main shader: prefetching with single-edge dependencies` | none: `-intrav2` and `-intrasingleedgelegacy` are retired |
-| Unscaled single-reference and average/distance compound prediction on size lists | `inter_main_v2` and `inter_compound_v2`, with HBD variants | `Inter shaders: inter_main_v2, inter_compound_v2 (default)` | `-interfast` selects [motion-class lists and shaders](#inter-fast-path--interfast). |
+| Unscaled single-reference and average/distance compound prediction on size lists | `inter_main_v2` and `inter_compound_v2`, with HBD variants | `Inter shaders: inter_main_v2, inter_compound_v2 (default)` | none: `-interfast` and `-interfastlists` ([motion-class lists and shaders](#inter-fast-path-retired--interfast)) are retired |
 
 
 On a device that logs `OUTPUT P010 direct` or `OUTPUT NV12 direct`, film grain uses
@@ -452,6 +450,7 @@ per-frame md5 of the conformance set and Argon).
 | `-intrafilterlegacy` (`av1_set_intra_filter_legacy`) | the previous 8-bit filter intra kernel, `intra_filter_legacy.hlsl` (two group syncs, the residual in a separate pass; AV1 7.11.2.3) | retired by the owner's decision (2026-11-27) without a console A/B, for one pipeline state less at `rav1g_device_create`; the packed-pair kernel `intra_filter_prefetch` was already the default. The old kernel stays in `testing/intra_check` as the filter intra reference of its legacy run |
 | `-intrasingleedgelegacy` (`av1_set_intra_single_edge_legacy`) | the angle-specific intra wavefront of `893f8b0` (the wait for both edges of every directional angle) with the prefetch kernels `intra_main_prefetch(_hbd)` for every frame | retired by the owner's decision (2026-11-27) without a console A/B. The single-edge dependencies (AV1 7.11.2.4) shorten the critical path: the D2 peak 1475 → 1329 steps and the 8-bit 2160p sample's 1304 → 1227 in a parse replay. The prefetch kernels stay: the default takes them for a frame without one-edge angles. The switch had no pipeline of its own |
 | `-intrav2` (`rav1g_set_intra_v2`, `Rav1gSettings::intra_v2`) | intra prediction through `intra_v2.hlsl` (`intra_v2_hbd.hlsl`, and `intra_main(_hbd)` for its frames with intra block copy), one 384-thread group per 64x64 region with its own schedule and buffers (AV1 7.11.2) | bit-exact but 2.3 to 2.4 times slower on the console ([Intra v2](#intra-v2-retired--intrav2)); retired in 0.8.0-alpha.3, four pipeline states fewer. `rav1g.h` keeps the declarations until the next interface version: the function does nothing, the field set to true is refused ([integration.md](integration.md#interface-version-3-the-retired-switches-the-source-peak-and-the-input-chroma)). The shaders and the scheduler stay in `testing/intra_check` as its independent reference (the only one of the 10-bit filter intra path) |
+| `-interfast`, `-interfastlists`, `-interfastmode <n>` (`rav1g_set_inter_fast`, `RAV1G_INTER_FAST_*`, `Rav1gSettings::inter_fast`) | the inter blocks with one reference and the averaged compound blocks listed by the fraction of their motion vectors and predicted by `inter_fast` / `inter_compound_fast` (a copy, one filter pass or two; AV1 7.11.3.4), with room for the lists in the block maps | not faster on the console (the inter stage 7.2 → 9.5 and 11.0 → 12.4 ms on two 4K clips, 10 % less only on a compound-heavy one; [Inter fast path](#inter-fast-path-retired--interfast)); retired in 0.8.0-alpha.3, five pipeline states fewer. `rav1g.h` keeps the declarations until the next interface version: the function does nothing, the field set to true is refused, the constants stay defined ([integration.md](integration.md#interface-version-3-the-retired-switches-the-source-peak-and-the-input-chroma)) |
 | `-gpuclear`, `-cpuclear` (`-asyncclear`), `-syncclear` (`rav1g_set_clears`, `rav1g_set_async_clear`) | the wavefront of intra prediction in the slot's grid, cleared for every frame by the GPU, the completion thread or the decode thread | the wavefront at the edges of the tiles since package 0.2.146.0: no clears, 3.5 MB a 4K frame the CPU does not write ([Clears](#clears)) |
 
 ## Timing run (`-gputime` and `-nopresent`)
@@ -660,8 +659,9 @@ of another size runs every section but `warp` and `comp_warp*` through the shade
 scaled references (`inter_scale_*`); the summary lists those as `<section>/scaled`. The
 breakdown of `single` and `comp_avg` is in
 [gpu-av1-decoder.md](gpu-av1-decoder.md#inter-prediction-breakdown-and-fast-paths-2026-11-12).
-With `-interfast` those two sections are listed by motion vector class, see
-[Inter fast path](#inter-fast-path--interfast).
+The sections by motion vector class (`single.copy` ... `comp_avg.22`) were those of the retired
+[inter fast path](#inter-fast-path-retired--interfast); they keep their places in the record and have
+no dispatches.
 
 **What a time means.** A timestamp says when the GPU reaches that point of the list. The
 dispatches of a pass have no barrier between them, so the GPU may run them side by side,
@@ -732,7 +732,7 @@ inter stage and has no share; it is also timed in intra frames that have palette
 | `blocksY`, `blocksUV` | prediction blocks of the section, counted by the tile threads where they push them; a chroma block is counted once |
 | `kpxY`, `kpxUV` | thousand samples predicted: luma, chroma of both planes |
 | `refblk` | reference blocks fetched: one per prediction block, plane and reference |
-| `loadMB` | estimated reference bytes, from the thread count and bytes read per thread. The unscaled size lists assume both 8-tap passes, giving an upper bound for the default kernels. The `-interfast` lists use the class-specific load sizes. The scaled estimate uses the largest reference scale step. |
+| `loadMB` | estimated reference bytes, from the thread count and bytes read per thread. The unscaled size lists assume both 8-tap passes, giving an upper bound for the default kernels. The scaled estimate uses the largest reference scale step. |
 | `footMB` | the references' areas those fetches cover with 8 taps both ways: `(w + 7) x (h + 7)` samples per reference block. What a shader would load that read each reference sample of a block once |
 | `mvMB` | the same with the 7 extra only in a direction in which the motion vector has a fraction: what a shader that looked at the vector would have to read |
 | `ns/px` | the section's time per sample predicted |
@@ -805,8 +805,8 @@ the counters are those of the stream. The conformance job decodes three streams 
 motion, and the stream with scaled references) and checks that the plain run has no line
 of the breakdown, that the breakdown is there, that the two sides of the counters agree on
 every frame, that the numbers are plausible, and that the counters of the two modes are the
-same. A fourth run per stream, `-gputimedetail -interfast`, checks the sections by class of
-the [inter fast path](#inter-fast-path--interfast). The breakdowns go into the job summary
+same, and that no section by motion vector class (those of the retired inter fast path) is listed.
+The breakdowns go into the job summary
 and the logs into the conformance artifact (`gputime-smoke/`).
 
 **Console results:** pending.
@@ -1519,60 +1519,25 @@ parse; now 646.5 MiB fit), `MEMORY budget`, `MEMORY decoder created` (device buf
 the `MEMORY app` lines after the creation and at the first frame (the app's memory, of 1024 MiB), and
 `MEMORY pools` at the release (how full the pools were, and whether a tile waited).
 
-## Inter fast path (`-interfast`)
+## Inter fast path (retired, `-interfast`)
 
-With this flag, the blocks with one reference and the averaged or distance-weighted compound
-blocks are listed by the fraction of their motion vectors. The class-specific kernels
-`inter_fast.hlsl` and `inter_compound_fast.hlsl` use that class to select the filtering work.
-The default size-list shaders choose the required passes from the vector in each record.
-The decoded output is the same. Design, formulas and the console numbers behind it:
-[gpu-av1-decoder.md](gpu-av1-decoder.md#inter-prediction-breakdown-and-fast-paths-2026-11-12).
+With `-interfast` the blocks with one reference and the averaged or distance-weighted compound blocks
+were listed by the fraction of their motion vectors (AV1 7.11.3.4: a copy, one filter pass or two),
+and the class-specific kernels `inter_fast.hlsl` and `inter_compound_fast.hlsl` did only the filter
+passes a class needs; `-interfastlists` put the size-list shaders on the same lists, and
+`-interfastmode <n>` combined the two. Bit-exact, but not the lever it was meant to be: on the console
+(package 0.2.45.0, 4K, 300 frames) the inter stage took 7.2 → 9.5 and 11.0 → 12.4 ms on the two SVT-AV1
+clips, 19.2 → 19.5 ms on a third and 54.0 → 48.4 ms only on the compound-heavy film grain clip
+([gpu-av1-decoder.md](gpu-av1-decoder.md#console-results)); it stayed off by default. The default
+size-list shaders (`inter_main_v2`, `inter_compound_v2`) choose the passes a vector needs from the
+record themselves.
 
-| Flag | Effect |
-| --- | --- |
-| *(none)* | lists by type and block size, with phase selection inside `inter_main_v2` and `inter_compound_v2` |
-| `-interfast` | lists by motion vector class and block size; `inter_fast` for the classes copy, h and v, `inter_compound_fast` for the pairs of classes of two references, the size-list shaders for the class with a fraction both ways. Scaled references use the scaled shaders. |
-| `-interfastlists` | the same lists and dispatches, but `inter_main_v2` and `inter_compound_v2` on every one of them: what the lists alone cost or gain (more and smaller dispatches, blocks of a class side by side), without the new kernels. |
-
-- Log line of the task: `Inter shaders: by motion vector class: inter_fast, inter_compound_fast
-  (-interfast; frames with a scaled reference keep the original shaders)`. `rav1g-dec` prints
-  `INTERFAST <task>: ...` with the flag.
-- `-interfastlists` logs `Inter shaders: lists by motion vector class, inter_main_v2 and
-  inter_compound_v2 on them (-interfastlists; ...)`.
-- A decoder that was created without either flag is replaced when a task asks for one (the
-  lists by class need room in the block maps: 1984 bytes per tile the decoder size can have, one
-  per 64x64, and pipeline slot; 1.0 MiB per slot at 1080p, 3.9 MiB at 4K).
-- **In the breakdown** (`-gputimedetail`, `-gputimeisolate`) the sections `single` and
-  `comp_avg` are replaced by one section per class: `single.copy`, `single.h`, `single.v`,
-  `single.2d`, and `comp_avg.<r0><r1>` with a letter per reference (`c` copy, `h`, `v`, `2`
-  both), `comp_avg.cc` to `comp_avg.22`. They appear in the per-frame line, in the two
-  tables and in the `list` lines like any section; frames with scaled references still list
-  `single/scaled` and `comp_avg/scaled`. `loadMB` of these sections is what their class
-  loads, so it is below `footMB` for the classes copy and h.
-
-**Task lines** (per clip: the timing pair in one launch, the md5 check in a launch of its
-own, against a reference that is already next to the stream):
-
-```text
--i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputimedetail
--i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -gputimedetail -interfast
-```
-
-Add a third run with `-interfastlists` in place of `-interfast` to isolate the cost of the extra lists.
-
-```text
--i /streams/<clip>.ivf -t 6 -frate -1 -limit 300 -queue_size 4 -progress -nopresent -interfast -md5_frame_check
-```
-
-Compare `gpu inter` and `gpu busy` of the pair, and per class the `ns/px` of `single.*`
-and `comp_avg.*` with the `single` and `comp_avg` rows of the default run.
-
-**Host checks:** `sh testing/inter_check/run.sh --mutate` compares default, `-interfast`
-and `-interfastlists` output with libaom. The conformance job decodes
-the whole set on WARP once more with `-interfast` (251 of 251
-streams) and three streams with `-gputimedetail -interfast` and `-gputimedetail -interfastlists`.
-
-**Console results:** pending.
+Retired in 0.8.0-alpha.3 ([Retired switches](#retired-switches)): the flags, the lists by class, the
+pipelines `inter_fast`, `inter_compound_fast` (each with its 10-bit build) and `gen_pred_blocks_fast`,
+and the room in the block maps a decoder created for the path had (1984 bytes per tile the decoder size
+can have and pipeline slot, 3.9 MiB a slot at 4K; the default decoder never had it). The sections of
+the breakdown by class keep their places and have no dispatches. `testing/inter_check` holds the
+default kernels against libaom for every block size and every class of fraction, as before.
 
 ## Pipeline slots and clears (`-slots`, `-gpuclear`, `-cpuclear`, `-syncclear`)
 
@@ -3446,10 +3411,10 @@ shaders of every set and the names of all but the largest set:
 ```text
 SHADERSET dxc: DXC 1.9.2602.17 cs_6_0: dxc -nologo -T cs_6_0 -E main -HV 2018 -WX -Wno-ambig-lit-shift; -Od for intra_main_hbd_legacy, intra_main_legacy
 SHADERSET od: DXC 1.9.2602.17 cs_6_0: dxc -nologo -T cs_6_0 -E main -HV 2018 -WX -Wno-ambig-lit-shift -Od
-SHADERPICK od=cdef_filter_v2,loopfilter_vert_hbd: dxc 100 (all others); od 2 (cdef_filter_v2 loopfilter_vert_hbd)
+SHADERPICK od=cdef_filter_v3,loopfilter_vert_hbd: dxc 94 (all others); od 2 (cdef_filter_v3 loopfilter_vert_hbd)
 ```
 
-Without the flag the last line is `SHADERPICK none: dxc 102 (all); od 0`. A pick with many names
+Without the flag the last line is `SHADERPICK none: dxc 96 (all); od 0` (96 shaders since 0.8.0-alpha.3). A pick with many names
 goes on in lines that start with `SHADERPICK +`. The player also logs `Shader pick (-shaderpick):
 <pick>` when a task file has the flag. The `LIBRARY` line and `Experiments: shaders shader-pick` identify the build.
 
@@ -3459,7 +3424,7 @@ goes on in lines that start with `SHADERPICK +`. The player also logs `Shader pi
   device. Until 0.8.0-alpha.3 that was `intra_v2` and `intra_v2_hbd`, retired with `-intrav2`.
 - **A pipeline state the device refuses** is named: `MEMORY FAILED compute pipeline state <n> (<shader>,
   the bytecode of the set <set>, <bytes> bytes of bytecode): hr 0x...`, and the launch runs no task.
-  (wine's vkd3d refuses the `-Od` DXIL of `gen_pred_blocks` and `gen_pred_blocks_fast`, "invalid value
+  (wine's vkd3d refuses the `-Od` DXIL of `gen_pred_blocks`, "invalid value
   self-reference" in its DXIL parser; WARP takes all of them.)
 - **Size.** Revision 4 embeds two arrays per shader. The default package, the uavsync
   package and the release DLL embed one DXC array per shader.

@@ -26,18 +26,17 @@ use super::tables::{
 };
 use super::types::{
     Av1Core, CasualInter, CompoundDiffUv, CompoundDiffUvGlobalWarp, CompoundGlobalWarp, CompoundMasked, ComputeShader,
-    Inter2x2ArrOffset, InterCountsAll, InterFast2D, InterFastClasses, InterFastLists, InterSizesAllCommon, IntraSizes,
-    IntraTypeCount, ObmcAbove, ObmcLeft, ReconBlockOffset, ReconstructBlockSizes, ScaleFactor, Warp,
-    av1_frame_thread_data, av1_perf_inter_tile, av1_stage_dump_region,
+    Inter2x2ArrOffset, InterCountsAll, InterSizesAllCommon, IntraSizes, IntraTypeCount, ObmcAbove, ObmcLeft,
+    ReconBlockOffset, ReconstructBlockSizes, ScaleFactor, Warp, av1_frame_thread_data, av1_perf_inter_tile,
+    av1_stage_dump_region,
 };
 use crate::gpu::{BufferRef, Commands};
 use crate::sys::{
-    ALTREF_FRAME, AV1_COMMON, AV1_INTER_FAST_COMPOUND_ORIGINAL, AV1_INTER_FAST_SINGLE_ORIGINAL,
-    AV1_PERF_GPU_EXT_BORDERS, AV1_PERF_GPU_GEN_BLOCKS, AV1_PERF_GPU_INTER, AV1_PERF_GPU_INTRA, AV1_PERF_GPU_RECON,
-    AV1_PERF_INTER_CHROMA_2X2, AV1_PERF_INTER_COMP_AVG, AV1_PERF_INTER_COMP_AVG_FAST, AV1_PERF_INTER_COMP_DIFF_UV,
-    AV1_PERF_INTER_COMP_DIFF_Y, AV1_PERF_INTER_COMP_MASKED, AV1_PERF_INTER_COMP_WARP, AV1_PERF_INTER_COMP_WARP_DIFF_UV,
-    AV1_PERF_INTER_LISTS, AV1_PERF_INTER_OBMC_ABOVE, AV1_PERF_INTER_OBMC_LEFT, AV1_PERF_INTER_RECON,
-    AV1_PERF_INTER_SECTION_COUNT, AV1_PERF_INTER_SINGLE, AV1_PERF_INTER_SINGLE_COPY, AV1_PERF_INTER_SYNC0,
+    ALTREF_FRAME, AV1_COMMON, AV1_PERF_GPU_EXT_BORDERS, AV1_PERF_GPU_GEN_BLOCKS, AV1_PERF_GPU_INTER,
+    AV1_PERF_GPU_INTRA, AV1_PERF_GPU_RECON, AV1_PERF_INTER_CHROMA_2X2, AV1_PERF_INTER_COMP_AVG,
+    AV1_PERF_INTER_COMP_DIFF_UV, AV1_PERF_INTER_COMP_DIFF_Y, AV1_PERF_INTER_COMP_MASKED, AV1_PERF_INTER_COMP_WARP,
+    AV1_PERF_INTER_COMP_WARP_DIFF_UV, AV1_PERF_INTER_LISTS, AV1_PERF_INTER_OBMC_ABOVE, AV1_PERF_INTER_OBMC_LEFT,
+    AV1_PERF_INTER_RECON, AV1_PERF_INTER_SECTION_COUNT, AV1_PERF_INTER_SINGLE, AV1_PERF_INTER_SYNC0,
     AV1_PERF_INTER_SYNC1, AV1_PERF_INTER_WARP, AV1Decoder, EXTREF_FRAME, HwFrameBuffer, INVALID_IDX, LAST_FRAME,
     MAX_FRAME_DISTANCE, OrderHintInfo, RefCntBuffer, SCALE_SUBPEL_BITS, WarpedMotionParams, av1_perf_inter_blocks,
     av1_perf_inter_detail, av1_perf_inter_work, av1_tile_data,
@@ -134,14 +133,13 @@ struct GenBlockData {
     wm_params: [WarpParams; 8],
 }
 
-/// The records `gen_pred_blocks` writes for a frame into `prediction_blocks` (with the lists by motion
-/// vector class of -interfast) and into `prediction_blocks_warp`: the counts of the lists of its tiles,
-/// which [`prediction_gen_blocks`] turns into offsets. For the buffers, before the frame is recorded
-/// (`stage_buffers.rs`).
+/// The records `gen_pred_blocks` writes for a frame into `prediction_blocks` and into
+/// `prediction_blocks_warp`: the counts of the lists of its tiles, which [`prediction_gen_blocks`] turns
+/// into offsets. For the buffers, before the frame is recorded (`stage_buffers.rs`).
 ///
 /// # Safety
-/// `tiles` are the tiles of the frame on `td`, parsed, with their block maps as the parse left them.
-pub(crate) unsafe fn pred_block_counts(td: &av1_frame_thread_data, tiles: &[av1_tile_data]) -> (c_int, c_int) {
+/// `tiles` are the tiles of a frame, parsed, with their block maps as the parse left them.
+pub(crate) unsafe fn pred_block_counts(tiles: &[av1_tile_data]) -> (c_int, c_int) {
     // SAFETY: the caller's contract: the lists of a tile are in the block map of its slot.
     unsafe {
         let iters = |tile: &av1_tile_data| (-1).max(tile.gen_intra_iter_y).max(tile.gen_intra_iter_uv);
@@ -157,11 +155,6 @@ pub(crate) unsafe fn pred_block_counts(td: &av1_frame_thread_data, tiles: &[av1_
             }
             for it in 0..=SIZES {
                 warp += *tile.gen_block_map_wrp.add(it);
-            }
-            if td.inter_fast != 0 && !tile.gen_block_map_fast.is_null() {
-                for it in 0..=InterFastLists as usize {
-                    blocks += *tile.gen_block_map_fast.add(it);
-                }
             }
         }
         (blocks, warp)
@@ -273,7 +266,6 @@ pub(super) unsafe fn prediction_gen_blocks(pbi: *mut AV1Decoder, dec: *mut Av1Co
         }
 
         td.intra_iters = intra_iters;
-        let inter_fast = td.inter_fast != 0 && tiles.first().is_some_and(|tile| !tile.gen_block_map_fast.is_null());
         let pred_block_types = InterCountsAll + ReconstructBlockSizes + (intra_iters + 1) * IntraTypeCount;
         let mut offset = 0;
         for it in 0..=pred_block_types {
@@ -286,7 +278,7 @@ pub(super) unsafe fn prediction_gen_blocks(pbi: *mut AV1Decoder, dec: *mut Av1Co
                 }
             }
         }
-        let mut pred_block_total = offset;
+        let pred_block_total = offset;
         let mut pred_warp_count = 0;
         for it in 0..=SIZES {
             for tile in tiles.iter() {
@@ -294,20 +286,6 @@ pub(super) unsafe fn prediction_gen_blocks(pbi: *mut AV1Decoder, dec: *mut Av1Co
                 let cnt = *list;
                 *list = pred_warp_count;
                 pred_warp_count += cnt;
-            }
-        }
-        // -interfast: these lists follow the intra records in the ordinary prediction buffer.
-        if inter_fast {
-            for it in 0..=InterFastLists as usize {
-                for tile in tiles.iter() {
-                    if tile.gen_block_map_fast.is_null() {
-                        continue;
-                    }
-                    let list = tile.gen_block_map_fast.add(it);
-                    let cnt = *list;
-                    *list = pred_block_total;
-                    pred_block_total += cnt;
-                }
             }
         }
         super::mem_stats::pred_blocks(dec, pred_block_total, pred_warp_count);
@@ -322,7 +300,7 @@ pub(super) unsafe fn prediction_gen_blocks(pbi: *mut AV1Decoder, dec: *mut Av1Co
         let warp_blocks = buffer((*dec).prediction_blocks_warp);
 
         // A tile's contiguous runs, in parse order.
-        let dispatch_runs = |srt_slot: u32, srt_words: usize| {
+        let dispatch_runs = |srt_slot: u32| {
             for (tile, run) in tiles
                 .iter()
                 .zip(&td.pieces)
@@ -336,20 +314,15 @@ pub(super) unsafe fn prediction_gen_blocks(pbi: *mut AV1Decoder, dec: *mut Av1Co
                     tile.mi_row_start,
                     tile.gen_block_map_offset,
                     tile.gen_block_warp_offset,
-                    tile.gen_block_fast_offset,
                 ];
-                commands.set_inline_constants(srt_slot, &inline[..srt_words], 0);
+                commands.set_inline_constants(srt_slot, &inline, 0);
                 // A thread a record, in groups of 64.
                 commands.dispatch((run.count as u32).div_ceil(64), 1, 1);
             }
         };
         // -dumpstages: the mode info, where the first stage that reads it starts.
         stage_dump_mode_info(dec, cm);
-        let (shader, srt_words) = if inter_fast {
-            (pipeline(&raw const (*lib).shader_gen_pred_blocks_fast), 8)
-        } else {
-            (pipeline(&raw const (*lib).shader_gen_pred_blocks), 7)
-        };
+        let shader = pipeline(&raw const (*lib).shader_gen_pred_blocks);
         commands.set_layout(shader.layout());
         commands.set_pipeline(shader);
         commands.bind_read(0, mode_info);
@@ -361,7 +334,7 @@ pub(super) unsafe fn prediction_gen_blocks(pbi: *mut AV1Decoder, dec: *mut Av1Co
         commands.bind_write(root, blocks.location());
         commands.bind_write(root + 1, warp_blocks.location());
         commands.bind_constants(root + 2, constants.location);
-        dispatch_runs(root + 3, srt_words);
+        dispatch_runs(root + 3);
         commands.write_barrier2(blocks, warp_blocks);
         perf_gpu_mark(dec, AV1_PERF_GPU_GEN_BLOCKS);
         // -dumpstages: the block records gen_pred_blocks has just written, as the prediction stages read
@@ -472,28 +445,6 @@ impl InterDetailRec<'_> {
             set(AV1_PERF_INTER_CHROMA_2X2, 9 * if hbd { 20 } else { 12 }); // a 2x2: 9 rows of two samples
             set(AV1_PERF_INTER_OBMC_ABOVE, 11 * row);
             set(AV1_PERF_INTER_OBMC_LEFT, 11 * row);
-            // -interfast (inter_fast.hlsl, inter_compound_fast.hlsl): rows by the class of the reference, of
-            // four samples (inter_fast_row: one Load2, two for 16-bit samples) where the class has no
-            // horizontal pass.
-            let row4 = if hbd { 16 } else { 8 };
-            let rows4x4 = [4 * row4, 4 * row, 11 * row4, 11 * row];
-            let rows4x2 = [2 * row4, 2 * row, 9 * row4, 9 * row];
-            // For the size-list shaders, keep the same two-pass upper bound as for the default lists.
-            let single_original = (td.inter_fast & AV1_INTER_FAST_SINGLE_ORIGINAL) != 0;
-            let compound_original = (td.inter_fast & AV1_INTER_FAST_COMPOUND_ORIGINAL) != 0;
-            for c in 0..InterFastClasses {
-                set(AV1_PERF_INTER_SINGLE_COPY + c, rows4x4[if single_original { InterFast2D } else { c } as usize]);
-            }
-            for c in 0..InterFastClasses * InterFastClasses {
-                set(
-                    AV1_PERF_INTER_COMP_AVG_FAST + c,
-                    if compound_original {
-                        2 * rows4x2[InterFast2D as usize]
-                    } else {
-                        rows4x2[(c & 3) as usize] + rows4x2[(c >> 2) as usize]
-                    },
-                );
-            }
         } else {
             let mut step = 1 << SCALE_SUBPEL_BITS;
             for i in LAST_FRAME..=ALTREF_FRAME {
@@ -719,7 +670,6 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON) 
         // The starts of the lists of the frame: those of its first tile.
         let block_map = (*tiles).gen_block_map.cast_const();
         let block_map_wrp = (*tiles).gen_block_map_wrp.cast_const();
-        let block_map_fast = (*tiles).gen_block_map_fast.cast_const();
 
         // 1 Prepare command buffer and common data
         let shaders = td.shaders;
@@ -851,11 +801,7 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON) 
                 AV1_PERF_INTER_COMP_DIFF_Y,
                 AV1_PERF_INTER_COMP_MASKED,
             ];
-            let inter_fast = td.inter_fast != 0 && !block_map_fast.is_null();
             for t in Warp..=CompoundMasked {
-                if inter_fast && (t == CasualInter || t == super::types::CompoundAvrg) {
-                    continue;
-                }
                 let threads = if t == Warp { 1 } else { wi_per_block };
                 let offsets = if t == Warp { block_map_wrp } else { lists_of(t) };
                 // A thread of an unscaled compound shader writes 4x2 samples.
@@ -863,41 +809,6 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON) 
                 pass.lists(shader_of(t), offsets, INTER_BLOCK_WIDTH_LUT.len(), SECTION_OF_TYPE[t as usize], |i| {
                     ListWork::inter_size(i, extra_y, threads)
                 });
-            }
-
-            // -interfast: the lists by motion vector class, which have the blocks of the types CasualInter and
-            // CompoundAvrg on such a frame (their lists by type are empty). One dispatch per class and block
-            // size. The class goes to the fast shaders in the bits 8 and up of width_log2; the lists of class 3
-            // (both references of class 3 for a compound block) run the size-list shaders, which do the same
-            // for any class.
-            if inter_fast {
-                for list in 0..InterFastLists / InterSizesAllCommon {
-                    let compound = list >= InterFastClasses;
-                    let cls = if compound { list - InterFastClasses } else { list };
-                    // The last class always uses the size-list shader. All classes use it when the mode asks for
-                    // it (av1_set_inter_fast: the lists without the kernels).
-                    let use_size_list_shader = cls
-                        == (if compound { InterFastClasses * InterFastClasses - 1 } else { InterFast2D })
-                        || (td.inter_fast
-                            & if compound { AV1_INTER_FAST_COMPOUND_ORIGINAL } else { AV1_INTER_FAST_SINGLE_ORIGINAL })
-                            != 0;
-                    let list_shader = match (compound, use_size_list_shader) {
-                        (true, true) => &raw const (*shaders).inter_comp,
-                        (true, false) => &raw const (*shaders).inter_comp_fast,
-                        (false, true) => &raw const (*shaders).inter_base,
-                        (false, false) => &raw const (*shaders).inter_fast,
-                    };
-                    let section =
-                        (if compound { AV1_PERF_INTER_COMP_AVG_FAST } else { AV1_PERF_INTER_SINGLE_COPY }) + cls;
-                    let first = list as usize * SIZES;
-                    pass.lists(list_shader, block_map_fast.add(first), INTER_BLOCK_WIDTH_LUT.len(), section, |i| {
-                        let mut work = ListWork::inter_size(i, u32::from(compound), 1);
-                        if !use_size_list_shader {
-                            work.width_log2 |= (cls as u32) << 8;
-                        }
-                        work
-                    });
-                }
             }
 
             // Compound blocks with a warped reference, luma and chroma: a thread per column of a 4x4.

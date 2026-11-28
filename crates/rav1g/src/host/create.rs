@@ -33,8 +33,8 @@ use super::pool::{COEF_CHUNK, KINDS, Kind, MODE_INFO_CHUNK, Pools, TXB_CHUNK};
 use super::stage_buffers::{GRID_RUNS, IDCT_BLOCKS, INDEX_LIST, PRED_BLOCKS, PRED_BLOCKS_WARP, RECORD, initial_bytes};
 use super::types::{
     Av1Core, DeviceOnly, DeviceOnlyConst, DeviceUpload, FrameThreadDataCount, FrameThreadDataDefault, GpuBufferObject,
-    HostRW, ImagePoolSize, InterFastMapSize, MemoryType, OutputCbSize, OutputThreadDataCount, ReadBack,
-    RefFrameBufferCount, RefFrameBufferCountSharedBack, UploadUAV, av1_frame_thread_data,
+    HostRW, ImagePoolSize, MemoryType, OutputCbSize, OutputThreadDataCount, ReadBack, RefFrameBufferCount,
+    RefFrameBufferCountSharedBack, UploadUAV, av1_frame_thread_data,
 };
 use crate::gpu::d3d12::{com_ref, com_release, com_store, wrapped_ref};
 use crate::gpu::{self, CommandAllocator, Device, Event, SemiPlanar, VideoMemory, create_hardware_device};
@@ -100,8 +100,6 @@ struct ResourceConfig {
     gpu_pipeline_depth: i32,
     enable_superres: i32,
     semi_planar: bool,
-    /// Room in the block maps for the lists of the -interfast path.
-    inter_fast: bool,
     /// `AV1_LOW_MEMORY_*`.
     low_memory: i32,
     /// The parts are the default of the decoder's size ([`default_low_memory`]), not an application's.
@@ -330,7 +328,6 @@ impl ResourceConfig {
             gpu_pipeline_depth,
             enable_superres: 1,
             semi_planar: cfg.output_kind == 1,
-            inter_fast: cfg.inter_fast != 0,
             low_memory,
             low_memory_default: cfg.low_memory == 0,
             pool_test_wait: cfg.parser_options & crate::sys::AV1_PARSER_OPTION_TEST_POOL_WAIT as i32 != 0,
@@ -529,8 +526,6 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
     dec.stage_worst = stage_worst;
 
     dec.pred_map_size = (256 + 32) * max_tiles + (mi_size >> 2) * 10;
-    // -interfast: the lists by motion vector class of every tile, behind the block maps as they always were.
-    dec.inter_fast_tiles = if cfg.inter_fast { max_tiles } else { 0 };
     request!(
         assign,
         dec.prediction_blocks,
@@ -601,12 +596,7 @@ unsafe fn allocate_buffers(dec: *mut Av1Core, mem: &mut Requests, cfg: &Resource
         request!(
             assign,
             td.gen_block_map,
-            mem.buffer(
-                (dec.pred_map_size + dec.inter_fast_tiles * InterFastMapSize) as usize * size_of::<i32>(),
-                HostRW,
-                c"gen_block_map",
-                i
-            )
+            mem.buffer(dec.pred_map_size as usize * size_of::<i32>(), HostRW, c"gen_block_map", i)
         );
         td.wave_edges = 0;
         td.clear_pending = 0;

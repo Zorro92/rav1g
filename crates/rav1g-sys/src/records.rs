@@ -207,8 +207,6 @@ pub struct av1_tile_data {
     pub gen_iter_clear_size: c_int,
     pub gen_block_map_offset: c_int,
     pub gen_block_warp_offset: c_int,
-    pub gen_block_map_fast: *mut c_int,
-    pub gen_block_fast_offset: c_int,
     pub mi_offset: c_int,
     pub mi_count: c_int,
     pub mi_col_start: c_int,
@@ -224,7 +222,7 @@ pub struct av1_tile_data {
     pub perf_steps: *mut c_void,
 }
 const _: () = {
-    assert!(size_of::<av1_tile_data>() == 288);
+    assert!(size_of::<av1_tile_data>() == 272);
     assert!(align_of::<av1_tile_data>() == 8);
     assert!(offset_of!(av1_tile_data, idct_blocks_host) == 0);
     assert!(offset_of!(av1_tile_data, dq_buffer_base) == 8);
@@ -253,17 +251,15 @@ const _: () = {
     assert!(offset_of!(av1_tile_data, gen_iter_clear_size) == 200);
     assert!(offset_of!(av1_tile_data, gen_block_map_offset) == 204);
     assert!(offset_of!(av1_tile_data, gen_block_warp_offset) == 208);
-    assert!(offset_of!(av1_tile_data, gen_block_map_fast) == 216);
-    assert!(offset_of!(av1_tile_data, gen_block_fast_offset) == 224);
-    assert!(offset_of!(av1_tile_data, mi_offset) == 228);
-    assert!(offset_of!(av1_tile_data, mi_count) == 232);
-    assert!(offset_of!(av1_tile_data, mi_col_start) == 236);
-    assert!(offset_of!(av1_tile_data, mi_row_start) == 240);
-    assert!(offset_of!(av1_tile_data, perf_inter) == 248);
-    assert!(offset_of!(av1_tile_data, wave_edges) == 256);
-    assert!(offset_of!(av1_tile_data, frame_data) == 264);
-    assert!(offset_of!(av1_tile_data, intra_single_edge) == 272);
-    assert!(offset_of!(av1_tile_data, perf_steps) == 280);
+    assert!(offset_of!(av1_tile_data, mi_offset) == 212);
+    assert!(offset_of!(av1_tile_data, mi_count) == 216);
+    assert!(offset_of!(av1_tile_data, mi_col_start) == 220);
+    assert!(offset_of!(av1_tile_data, mi_row_start) == 224);
+    assert!(offset_of!(av1_tile_data, perf_inter) == 232);
+    assert!(offset_of!(av1_tile_data, wave_edges) == 240);
+    assert!(offset_of!(av1_tile_data, frame_data) == 248);
+    assert!(offset_of!(av1_tile_data, intra_single_edge) == 256);
+    assert!(offset_of!(av1_tile_data, perf_steps) == 264);
 };
 impl Default for av1_tile_data {
     fn default() -> Self {

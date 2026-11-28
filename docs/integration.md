@@ -407,6 +407,16 @@ interface version:
   `rav1g_decoder_create` refuses `Rav1gSettings::intra_v2` set to true (`RAV1G_STATUS_INVALID_PARAM`,
   the reason in `rav1g_last_error`), as it refuses the retired parser bits. `rav1g_settings_default`
   leaves it false, as it did. `av1_perf_frame::intra_v2` keeps its place and is always 0.
+- the fast inter path (`inter_fast.hlsl`, not faster on the console): `rav1g_set_inter_fast` does nothing
+  (a call with a mode that is not 0 writes such a log line), `rav1g_decoder_create` refuses
+  `Rav1gSettings::inter_fast` set to true in the same way, and `RAV1G_INTER_FAST_*` stay defined, with the
+  same values, until the next interface version. The sections of the inter breakdown by motion vector
+  class (`AV1_PERF_INTER_SINGLE_COPY` ... `AV1_PERF_INTER_COMP_AVG_FAST_LAST` of `av1_perf.h`) keep their
+  numbers and have no time.
+
+An application that sets neither field and calls neither function (Bale) changes nothing: the default
+path is the one it ran, and the library compiles 96 pipeline states at `rav1g_device_create` instead of
+the 106 of `v0.8.0-alpha.2` (`-intrafilterlegacy` took one, these two nine).
 
 ## Loading the library at run time: the interface version
 

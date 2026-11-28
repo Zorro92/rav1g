@@ -720,7 +720,6 @@ fn create_decoder(
         parse_frames: task.parse_frames as u32,
         slots: task.slots as u32,
         low_memory: task.lowmem_parts as u32,
-        inter_fast: task.interfast != 0,
         // The layers of a stream that has them: one frame per temporal unit unless -alllayers, operating
         // point 0 unless -oppoint.
         operating_point: task.oppoint as u32,
@@ -998,7 +997,6 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     }
     library.set_choices(&Choices {
         skip_film_grain: task.skip_film_grain,
-        inter_fast: task.interfast,
         display_fixed_peak: task.displayfixedpeak,
         display_bilinear_chroma: task.displaybilinearchroma,
     });
@@ -1036,26 +1034,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     if task.parser_options.gpu_cdef_lists || task.parser_options.gpu_grid {
         say!("CDEF lists shader: cdef_lists_v2 (default)");
     }
-    if task.interfast & switches::INTER_FAST_ON != 0 {
-        say!(
-            "INTERFAST {}: inter blocks by motion vector class, mode {} (one reference: {}; two: {}); frames with a \
-             scaled reference keep the original lists and shaders",
-            task.name,
-            task.interfast & 7,
-            if task.interfast & switches::INTER_FAST_SINGLE_ORIGINAL != 0 {
-                "inter_main_v2 on every list"
-            } else {
-                "inter_fast"
-            },
-            if task.interfast & switches::INTER_FAST_COMPOUND_ORIGINAL != 0 {
-                "inter_compound_v2 on every list"
-            } else {
-                "inter_compound_fast"
-            }
-        );
-    } else {
-        say!("Inter shaders: inter_main_v2, inter_compound_v2 (default)");
-    }
+    say!("Inter shaders: inter_main_v2, inter_compound_v2 (default)");
     if !task.dump_frames.is_empty() {
         stage_dumps.start(&task.dumpdir, &task.name);
         // SAFETY: the writer lives to the end of this function, and the dumps are switched off below,

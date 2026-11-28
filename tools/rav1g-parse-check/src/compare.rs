@@ -316,7 +316,6 @@ pub fn frame(report: &mut Report, number: u64, c: &Arena, r: &Arena) {
         tile.gen_indexes = std::ptr::null_mut();
         tile.gen_block_map = std::ptr::null_mut();
         tile.gen_block_map_wrp = std::ptr::null_mut();
-        tile.gen_block_map_fast = std::ptr::null_mut();
         tile.wave_edges = std::ptr::null_mut();
         tile.frame_data = std::ptr::null_mut();
         tile.perf_inter = std::ptr::null_mut();
@@ -590,7 +589,6 @@ pub fn fold(hash: &mut u64, arena: &Arena) {
             tile.gen_indexes = std::ptr::null_mut();
             tile.gen_block_map = std::ptr::null_mut();
             tile.gen_block_map_wrp = std::ptr::null_mut();
-            tile.gen_block_map_fast = std::ptr::null_mut();
             tile.wave_edges = std::ptr::null_mut();
             tile.frame_data = std::ptr::null_mut();
             tile.perf_inter = std::ptr::null_mut();

@@ -1192,7 +1192,13 @@ the fetches of three of the clips are of that kind.
 
 ### The fast path (`-interfast`)
 
-Off by default. `av1_set_inter_fast()` and `aom_codec_dec_cfg_t::inter_fast` in the library, `-interfast`
+Retired in 0.8.0-alpha.3 with its flags, lists, pipelines (`inter_fast`, `inter_compound_fast`, each with
+its 10-bit build, and `gen_pred_blocks_fast`) and the room for its lists in the block maps, on the
+console results below (`rav1g_set_inter_fast` does nothing and `Rav1gSettings::inter_fast` is refused
+until the next interface version). `testing/inter_check` now holds the default kernels alone against
+libaom, with the same cases. The rest of this section is the record.
+
+It was off by default. `av1_set_inter_fast()` and `aom_codec_dec_cfg_t::inter_fast` in the library, `-interfast`
 in the test player and in `warp_decoder`; `-interfastlists` keeps the original shaders on the new lists, to
 tell what the lists do from what the kernels do. Without the flag the block lists, the dispatches and the
 pipeline states that run are the ones that always ran (five more pipeline states are created at
@@ -1371,7 +1377,7 @@ block very little. The inter stage is not bound by filtering or reference loads 
 block or per dispatch (thread-to-pixel mapping, small groups and occupancy, latency per dispatch, the
 prediction and residual writes). Splitting each block size into classes makes the dispatches smaller and
 more numerous, which is why the two SVT clips got slower; only the compound-heavy Chimera gains (10 %).
-`-interfast` stays off by default. The next step for the inter stage is a profile of what a block costs
+`-interfast` stayed off by default (retired in 0.8.0-alpha.3). The next step for the inter stage is a profile of what a block costs
 (a timestamp around a dispatch of a fixed size with copy-only blocks, the effect of more pixels per
 thread and of merging block sizes into fewer dispatches) rather than more filter specialisation.
 
@@ -1448,7 +1454,7 @@ the same read: its signature comes back with poisoned padding and is gone with t
 ### Fix
 
 `const int use_filter = (mi.filter_intra_mode_info >> 8) & 255;` (commit dda14c7 on `cpp`, merged
-into `main`). `gen_pred_blocks_fast.hlsl` includes the same source. In the listings of both, one
+into `main`). `gen_pred_blocks_fast.hlsl` (retired since with `-interfast`) included the same source. In the listings of both, one
 instruction changes, `ushr r11.w, r2.w, l(8)` to `ubfe r11.w, l(8), l(8), r2.w`; the listings scan
 finds no pair in them and its allow list is unchanged. The output is the same on all 251 streams
 (the bits that are dropped were 0 whenever a stream was right).

@@ -14,27 +14,6 @@
  * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
  */
 
-// gen_pred_blocks_fast.hlsl builds the legacy layout for the C++ equality check.
-#ifdef LEGACY_MODE_INFO
-#include "mode_info_legacy.h"
-#define MI_ROW(mi) mi.mi_row
-#define MI_COL(mi) mi.mi_col
-#define MI_LOCAL_WARP(mi) mi.wm_params
-#define MI_WARP_IS_VALID(mi) ((mi.wm_params.type & 0x10000) == 0)
-#define MI_COMPOUND_TYPE(mi) mi.interinter_comp.type
-#define MI_WEDGE_CODE(mi) (mi.interinter_comp.wedge_sign + mi.interinter_comp.wedge_index * 2)
-#define MI_DIFF_MASK(mi) mi.interinter_comp.mask_type
-#define MI_INTERP_FILTERS(mi) mi.interp_filters
-#define MI_FILTER_H(word) ((word >> 16) & 15)
-#define MI_FILTER_V(word) (word & 15)
-#define MI_Y_PALETTE(mi) (mi.palette_mode_info.sizes & 0xffff)
-#define MI_UV_PALETTE(mi) (mi.palette_mode_info.sizes & 0xffff0000)
-#define MI_FILTER_INTRA_ON(mi) ((mi.filter_intra_mode_info >> 8) & 255)
-#define MI_FILTER_INTRA_MODE(mi) (mi.filter_intra_mode_info & 255)
-#define MI_INTERINTRA_WEDGE_CODE(mi) (mi.interintra_wedge_sign + mi.interintra_wedge_index * 2)
-#define MI_CFL_ALPHA_IDX(mi) mi.cfl_alpha_idx
-#define MI_CFL_ALPHA_SIGNS(mi) mi.cfl_alpha_signs
-#else
 #include "mode_info.h"
 #define MI_FLAGS(mi) (mi.palette_filter_flags >> 24)
 #define MI_ROW(mi) (mi.mi_position & 0xffff)
@@ -63,7 +42,6 @@ WarpedMotionParams local_warp_params(int4 mat0, int2 mat1, int2 angles) {
   params.type = 0;
   return params;
 }
-#endif
 
 #define Warp 0
 #define CasualInter 1
@@ -214,23 +192,8 @@ cbuffer GenBlockSRT : register(b1) {
   uint cb_row_srart;
   uint cb_index_offset;
   uint cb_index_offset_warp;
-#if defined(INTER_FAST)
-  uint cb_index_offset_fast;
-#endif
 };
 
-#if defined(INTER_FAST)
-// Test flag -interfast (gen_pred_blocks_fast_packed.hlsl; docs/gpu-av1-decoder.md, "Inter prediction: breakdown and
-// fast paths"). The blocks with one reference that are not warped, and the compound blocks that are
-// averaged or distance weighted, are listed by the fraction of their motion vectors instead of by their
-// type: InterFastLists lists at cb_index_offset_fast of the block map, laid out as av1_mi_push_block()
-// counts them (dx/types.h):
-//   class * InterSizesAllCommon + size                                         one reference, class 0..3
-//   InterFastCompound + (class0 | class1 << 2) * InterSizesAllCommon + size    two references
-// The class of a vector as the block record has it (1/16 sample): 1 a fraction in x, 2 a fraction in y.
-#define InterFastCompound 96
-int inter_fast_class(uint mv) { return (((mv >> 16) & 15) != 0 ? 1 : 0) | ((mv & 15) != 0 ? 2 : 0); }
-#endif
 
 int intra_edge_filter_strength(int blk_wh, int d, int type) {
   int strength = 0;
@@ -288,8 +251,6 @@ int next_cpu_block(int list, inout int index_addr) {
 #define NEXT_PRED(kind, list, count) next_cpu_block(CpuList##kind + (list), index_addr)
 #define CpuListMain cb_index_offset
 #define CpuListWarpBlock cb_index_offset_warp
-#define CpuListFast cb_index_offset_fast
-#define FAST_LISTS 1
 
 void generate_blocks(uint record, uint lane, uint group, inout uint event) {
   const int InterBlockSizeIndexLUT[6][6] = {
@@ -374,16 +335,7 @@ void generate_blocks(uint record, uint lane, uint group, inout uint event) {
       const int pass_type = is_warp_compound ? 5 : ((0x3422 >> (comp_type * 4)) & 15);
       int pass_type_index = (pass_type - 1) * InterSizesAllCommon + block_size_id_y;
 
-      int dst_ptr;
-#if defined(INTER_FAST)
-      if (FAST_LISTS && pass_type == CompoundAvrg) {
-        int fast_list = InterFastCompound + (inter_fast_class(block.z) | (inter_fast_class(block.w) << 2)) * InterSizesAllCommon + block_size_id_y;
-        dst_ptr = NEXT_PRED(Fast, fast_list, 1);
-      } else
-#endif
-      {
-        dst_ptr = NEXT_PRED(Main, pass_type_index, 1);
-      }
+      int dst_ptr = NEXT_PRED(Main, pass_type_index, 1);
       STORE_PRED(pred_blocks, Store4, dst_ptr * 16, block);
     } else {
       if (is_luma_warp) {
@@ -416,16 +368,7 @@ void generate_blocks(uint record, uint lane, uint group, inout uint event) {
         block.z = (mi.mv[0] << 1) & 0xfffeffff;
         block.w = 0;
 
-        int dst_ptr;
-#if defined(INTER_FAST)
-        if (FAST_LISTS) {
-          int fast_list = inter_fast_class(block.z) * InterSizesAllCommon + block_size_id_y;
-          dst_ptr = NEXT_PRED(Fast, fast_list, 1);
-        } else
-#endif
-        {
-          dst_ptr = NEXT_PRED(Main, block_size_id_y, 1);
-        }
+        int dst_ptr = NEXT_PRED(Main, block_size_id_y, 1);
         STORE_PRED(pred_blocks, Store4, dst_ptr * 16, block);
       }
     }
@@ -566,16 +509,7 @@ void generate_blocks(uint record, uint lane, uint group, inout uint event) {
           const int pass_type =
               is_warp_compound ? (comp_type == COMPOUND_DIFFWTD ? 7 : 5) : ((0x6422 >> (comp_type * 4)) & 15);
           int pass_type_index = (pass_type - 1) * InterSizesAllCommon + block_size_id_uv;
-          int dst_ptr;
-#if defined(INTER_FAST)
-          if (FAST_LISTS && pass_type == CompoundAvrg) {
-            int fast_list = InterFastCompound + (inter_fast_class(block.z) | (inter_fast_class(block.w) << 2)) * InterSizesAllCommon + block_size_id_uv;
-            dst_ptr = NEXT_PRED(Fast, fast_list, 2);
-          } else
-#endif
-          {
-            dst_ptr = NEXT_PRED(Main, pass_type_index, 2);
-          }
+          int dst_ptr = NEXT_PRED(Main, pass_type_index, 2);
           dst_ptr *= 16;
           STORE_PRED(pred_blocks, Store4, dst_ptr, block);
           block.y ^= 3;
@@ -617,16 +551,7 @@ void generate_blocks(uint record, uint lane, uint group, inout uint event) {
             block.z = mi.mv[0];
             block.w = 0;
 
-            int dst_ptr;
-#if defined(INTER_FAST)
-            if (FAST_LISTS) {
-              int fast_list = inter_fast_class(block.z) * InterSizesAllCommon + block_size_id_uv;
-              dst_ptr = NEXT_PRED(Fast, fast_list, 2);
-            } else
-#endif
-            {
-              dst_ptr = NEXT_PRED(Main, block_size_id_uv, 2);
-            }
+            int dst_ptr = NEXT_PRED(Main, block_size_id_uv, 2);
             dst_ptr *= 16;
             STORE_PRED(pred_blocks, Store4, dst_ptr, block);
             dst_ptr += 16;

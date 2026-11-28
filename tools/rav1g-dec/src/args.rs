@@ -10,7 +10,7 @@
 
 use crate::say;
 use crate::shim;
-use rav1g::switches::{self, Poison};
+use rav1g::switches::Poison;
 
 // The player's values (testing/player_common/cmd_parser.h, decoder_creator.h).
 pub const SLOTS_MIN: i32 = 2;
@@ -108,8 +108,6 @@ pub struct Task {
     pub headroom_mib: i64,
     /// -poisonmi, -poisonbuf: `switches::set_poison_buffers`.
     pub poison: Poison,
-    /// -interfast (1), -interfastlists (7), -interfastmode <n>: `switches::set_inter_fast`.
-    pub interfast: u32,
     /// -continue_on_error: a decode call that fails does not end the task; the next temporal units go to
     /// the same decoder.
     pub continue_on_error: bool,
@@ -186,7 +184,6 @@ impl Default for Task {
             budget_mib: -1,
             headroom_mib: 0,
             poison: Poison::Off,
-            interfast: 0,
             continue_on_error: false,
             any_start: false,
             all_layers: false,
@@ -329,13 +326,6 @@ pub fn usage() {
     say!("                        are on by default. Naming any of them, none or default selects them explicitly.");
     say!("                        time: with -gputime, the calls of the sink are timed (time alone: the default,");
     say!("                        timed). -parseopt nolfmask,tilethread,gpucdef keeps the sink-written grid.");
-    say!("  -interfast            inter prediction by the fraction of the motion vector: a copy, one filter pass, or");
-    say!("                        both (inter_fast, inter_compound_fast; same output)");
-    say!("  -interfastlists       the block lists of -interfast with the size-list shaders on them (same output)");
-    say!(
-        "  -interfastmode <n>    av1_set_inter_fast(n): 1 -interfast, +2 size-list shader for one reference, +4 for two;"
-    );
-    say!("                        8: only the room for the lists in the block maps, the path stays off (diagnostic)");
     say!("  -gputime              the timing run of the test player: GPU timestamps per stage and CPU timers, the");
     say!(
         "                        summary as 'GPUTIME ...' lines after the task (docs/test-player.md, \"Timing run\");"
@@ -501,9 +491,6 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-anystart" => task.any_start = true,
             "-poisonmi" => task.poison = Poison::ModeInfo,
             "-poisonbuf" => task.poison = Poison::Buffers,
-            "-interfast" => task.interfast = switches::INTER_FAST_ON,
-            "-interfastlists" => task.interfast = switches::INTER_FAST_LISTS_ONLY,
-            "-interfastmode" => task.interfast = number()? as u32,
             "-gputime" => task.gputime = true,
             "-gputimedetail" => {
                 task.gputime = true;
@@ -711,10 +698,10 @@ mod tests {
         let line = "-name av1-1-b8-01-size-16x16.ivf -i aom/av1-1-b8-01-size-16x16.ivf -check \
                     aom/av1-1-b8-01-size-16x16.ivf.md5 -aom_md5 -timeout 300 -save_md5 \"out dir/x.md5\"";
         parse_args(&split_line(line), &mut task, None).unwrap();
-        parse_args(&strings(&["-list", "tasks.list", "-t", "4", "-interfast"]), &mut task, Some(&mut globals)).unwrap();
+        parse_args(&strings(&["-list", "tasks.list", "-t", "4", "-nofitsize"]), &mut task, Some(&mut globals)).unwrap();
         assert_eq!(task.name, "av1-1-b8-01-size-16x16.ivf");
         assert_eq!(task.save_md5, "out dir/x.md5");
-        assert_eq!((task.threads, task.timeout_s, task.interfast, task.aom_md5), (4, 300, 1, true));
+        assert_eq!((task.threads, task.timeout_s, task.nofitsize, task.aom_md5), (4, 300, true, true));
         assert_eq!(globals.list, "tasks.list");
         assert_eq!(task.poison, Poison::Off);
         parse_args(&strings(&["-poisonmi"]), &mut task, None).unwrap();
@@ -722,9 +709,19 @@ mod tests {
         parse_args(&strings(&["-poisonbuf"]), &mut task, None).unwrap();
         assert_eq!(task.poison, Poison::Buffers);
         // The retired switches are unknown flags now; the flags of a default are accepted.
-        for flag in
-            ["-gpuclear", "-cpuclear", "-syncclear", "-asyncclear", "-intraod", "-intraedgefix", "-cdefv1", "-intrav2"]
-        {
+        for flag in [
+            "-gpuclear",
+            "-cpuclear",
+            "-syncclear",
+            "-asyncclear",
+            "-intraod",
+            "-intraedgefix",
+            "-cdefv1",
+            "-intrav2",
+            "-interfast",
+            "-interfastlists",
+            "-interfastmode",
+        ] {
             assert!(parse_args(&strings(&[flag]), &mut task, None).is_err(), "{flag}");
         }
         for flag in ["-cdefv2", "-intraopt", "-fitsize"] {

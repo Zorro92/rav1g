@@ -1531,8 +1531,7 @@ jobs:
           if-no-files-found: warn
 
   # The other side of the decoder's switches, each with the parser and the other switches of the default:
-  # the poisoned mode info pool and the poisoned buffers (a part of the set), the fast inter path and the
-  # intra step timing.
+  # the poisoned mode info pool and the poisoned buffers (a part of the set) and the intra step timing.
   # Parser option flips run separately when selected by the coverage check.
   rust-switches:
     needs: [conformance-streams, rust]
@@ -1541,7 +1540,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        case: [poisoned, interfast, steptime]
+        case: [poisoned, steptime]
     steps:
       - name: Disable newline conversion
         run: git config --global core.autocrlf false
@@ -1587,8 +1586,7 @@ jobs:
       # restoration, whose shader computed an address from the unit fields of a plane without restoration
       # and loaded from it, which could remove the device (docs/gpu-av1-decoder.md, "Unwritten fields of a
       # constant record"). The same part of the set as with -poisonmi has to give the results of
-      # expected.txt. With the experiments input rust-experiments also tests the whole set with -poisonbuf
-      # alone and alongside -interfast.
+      # expected.txt. With the experiments input rust-experiments also tests the whole set with -poisonbuf.
       - name: Conformance of the vectors with poisoned buffers and constants (-poisonbuf)
         if: ${{ !cancelled() && matrix.case == 'poisoned' }}
         shell: pwsh
@@ -1597,19 +1595,6 @@ jobs:
             --out out/conformance-poisonbuf --threads 4 "--tool-args=-poisonbuf" "--title=rav1g-dec, part of the set with -poisonbuf" `
             "--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)"
           if ($LASTEXITCODE -ne 0) { throw "conformance with -poisonbuf with rav1g-dec: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
-
-      # The fast inter path (-interfast; docs/gpu-av1-decoder.md, "Inter prediction: breakdown and fast
-      # paths"): the blocks with one reference and the averaged compound blocks are listed by the fraction
-      # of their motion vectors and predicted by inter_fast.hlsl and inter_compound_fast.hlsl. The output
-      # has to be the same, so the whole set is decoded once more with the flag and has to give the
-      # results of expected.txt. This pass is the gate of the feature and runs on every push.
-      - name: Conformance with -interfast
-        if: ${{ !cancelled() && matrix.case == 'interfast' }}
-        shell: pwsh
-        run: |
-          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out out/conformance-interfast --threads 4 "--tool-args=-interfast" "--title=rav1g-dec with -interfast"
-          if ($LASTEXITCODE -ne 0) { throw "conformance with -interfast: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
 
       # -intrastepmin 0 (step_time.rs, docs/test-player.md "Intra step timing"): a timestamp behind every intra
       # wavefront step of every frame with intra. The whole set with it: the frames against the references
@@ -2428,11 +2413,10 @@ jobs:
         run: |
           $runs = @(
             # Not experiments for a device: the whole set with the mode info pool poisoned, and with every
-            # buffer and the constants poisoned, also on the fast inter path (the rust-switches job decodes a
-            # part of the set with -poisonmi and -poisonbuf on every push).
+            # buffer and the constants poisoned (the rust-switches job decodes a part of the set with -poisonmi
+            # and -poisonbuf on every push).
             @{ name = 'poisonmi-all'; args = '-poisonmi' },
-            @{ name = 'poisonbuf-all'; args = '-poisonbuf' },
-            @{ name = 'poisonbuf-interfast'; args = '-poisonbuf -interfast' })
+            @{ name = 'poisonbuf-all'; args = '-poisonbuf' })
           $failed = @()
           foreach ($run in $runs) {
             python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
@@ -2985,7 +2969,7 @@ jobs:
 
       # The other checks of the rust-conformance and rust-switches jobs with this program (the comments are there): decode errors in cut
       # streams through the Rust interface and with the player's decoder code, the order check, the memory
-      # check, the part of the set with -poisonmi and with -poisonbuf, and the whole set with -interfast.
+      # check, and the part of the set with -poisonmi and with -poisonbuf.
       - name: Decode error in a cut stream, the rav1g-dec of the Linux build
         if: ${{ !cancelled() && matrix.suite == 'conformance' }}
         shell: pwsh
@@ -3010,13 +2994,12 @@ jobs:
             --out out/memory-check "--title=rav1g-dec built on Linux (cargo xwin, clang-cl)"
           if ($LASTEXITCODE -ne 0) { throw "memory check with the rav1g-dec of the Linux build: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
 
-      - name: Conformance with -poisonmi, with -poisonbuf and with -interfast, the rav1g-dec of the Linux build
+      - name: Conformance with -poisonmi and with -poisonbuf, the rav1g-dec of the Linux build
         if: ${{ !cancelled() && matrix.suite == 'decoder-switches' }}
         shell: pwsh
         run: |
           $part = '--only=^(av1-1-b(8|10)-(00-quantizer-0[0-9]|0[1-6]-|16-|2[2-4]-)|nf-chimera-8b-270p)'
-          $runs = @(@{ name = 'poisonmi'; args = '-poisonmi'; only = $part }, @{ name = 'poisonbuf'; args = '-poisonbuf'; only = $part },
-            @{ name = 'interfast'; args = '-interfast'; only = '--only=' })
+          $runs = @(@{ name = 'poisonmi'; args = '-poisonmi'; only = $part }, @{ name = 'poisonbuf'; args = '-poisonbuf'; only = $part })
           $failed = @()
           foreach ($run in $runs) {
             python testing/conformance/run.py --tool rav1g-dec-xwin/rav1g-dec.exe --streams conformance-streams `
@@ -3641,7 +3624,7 @@ jobs:
           sh testing/warp_check/run.sh --mutate | tee warp-check.log
           { echo '## Warp check'; echo '```'; tail -n 15 warp-check.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
-  # Host check of the default and -interfast kernels against libaom. The shaders run as C++ with generated 8-bit and 10-bit block records covering sizes,
+  # Host check of the default unscaled inter kernels against libaom. The shaders run as C++ with generated 8-bit and 10-bit block records covering sizes,
   # phases, filters, compound weights and frame edges. Deliberate kernel mutations must fail.
   inter-check:
     runs-on: ubuntu-26.04

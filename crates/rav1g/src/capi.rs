@@ -95,14 +95,16 @@ pub const RAV1G_FRAMES_IN_PARSE_MAX: u32 = 4;
 /// `RAV1G_PARSER_OPTION_TIME_CALLS` to it; 0 is rav1d's parse without any of them.
 pub const RAV1G_PARSER_OPTIONS_DEFAULT: u32 = 2566;
 
-/// `rav1g_set_inter_fast`: the fast inter path is on.
+/// Retired in 0.8.0-alpha.3 with the fast inter path (`rav1g_set_inter_fast`, which does nothing): the path
+/// was on. The `RAV1G_INTER_FAST_*` values stay defined until the next interface version.
 pub const RAV1G_INTER_FAST_ON: u32 = 1;
-/// With `RAV1G_INTER_FAST_ON`: the blocks with one reference are listed and predicted by the size-list
-/// shader.
+/// Retired in 0.8.0-alpha.3, as `RAV1G_INTER_FAST_ON`: the blocks with one reference were listed by class and
+/// predicted by the size-list shader.
 pub const RAV1G_INTER_FAST_SINGLE_ORIGINAL: u32 = 2;
-/// With `RAV1G_INTER_FAST_ON`: the same for the averaged compound blocks.
+/// Retired in 0.8.0-alpha.3, as `RAV1G_INTER_FAST_ON`: the same for the averaged compound blocks.
 pub const RAV1G_INTER_FAST_COMPOUND_ORIGINAL: u32 = 4;
-/// The lists of the fast inter path with the size-list shaders on all of them.
+/// Retired in 0.8.0-alpha.3, as `RAV1G_INTER_FAST_ON`: the lists of the fast inter path with the size-list
+/// shaders on all of them.
 pub const RAV1G_INTER_FAST_LISTS_ONLY: u32 = 7;
 
 /// `rav1g_set_poison_buffers`: the mode info pool.
@@ -219,10 +221,6 @@ const _: () = {
     assert!(RAV1G_PARSER_OPTION_GPU_GRID == crate::sys::AV1_PARSER_OPTION_GPU_GRID);
     assert!(RAV1G_FRAMES_IN_PARSE_MAX == crate::sys::AV1_FRAMES_IN_PARSE_MAX);
     assert!(RAV1G_PARSER_OPTIONS_DEFAULT == crate::ParserOptions::DEFAULT);
-    assert!(RAV1G_INTER_FAST_ON == switches::INTER_FAST_ON);
-    assert!(RAV1G_INTER_FAST_SINGLE_ORIGINAL == switches::INTER_FAST_SINGLE_ORIGINAL);
-    assert!(RAV1G_INTER_FAST_COMPOUND_ORIGINAL == switches::INTER_FAST_COMPOUND_ORIGINAL);
-    assert!(RAV1G_INTER_FAST_LISTS_ONLY == switches::INTER_FAST_LISTS_ONLY);
     assert!(RAV1G_POISON_MODE_INFO == switches::Poison::ModeInfo as u32);
     assert!(RAV1G_POISON_BUFFERS == switches::Poison::Buffers as u32);
     assert!(RAV1G_MEMORY_GUARD_MARGIN == 48 << 20);
@@ -748,7 +746,10 @@ pub struct Rav1gSettings {
     /// `RAV1G_STATUS_INVALID_PARAM` and the reason in `rav1g_last_error`. The field keeps its place and is
     /// removed with the next interface version.
     pub intra_v2: bool,
-    /// Room in the block maps for the lists of the fast inter path (`rav1g_set_inter_fast`).
+    /// Retired in 0.8.0-alpha.3 with the fast inter path (`inter_fast.hlsl`, the test flag `-interfast`): false,
+    /// as `rav1g_settings_default` sets it. `rav1g_decoder_create` refuses true with
+    /// `RAV1G_STATUS_INVALID_PARAM` and the reason in `rav1g_last_error`. The field keeps its place and is
+    /// removed with the next interface version.
     pub inter_fast: bool,
     /// 10-bit frames are put out with three samples packed into 32 bits.
     pub packed_10x3: bool,
@@ -1122,7 +1123,7 @@ pub unsafe extern "C" fn rav1g_settings_default(settings: *mut Rav1gSettings) {
             frame_slots: defaults.frame_slots,
             low_memory: defaults.low_memory.0,
             intra_v2: false,
-            inter_fast: defaults.inter_fast,
+            inter_fast: false,
             packed_10x3: defaults.packed_10x3,
             output_all_layers: defaults.output_all_layers,
             operating_point: defaults.operating_point,
@@ -1156,7 +1157,6 @@ fn settings_of(settings: &Rav1gSettings) -> Settings {
         frames_in_parse: settings.frames_in_parse,
         frame_slots: settings.frame_slots,
         low_memory: LowMemory(settings.low_memory),
-        inter_fast: settings.inter_fast,
         packed_10x3: settings.packed_10x3,
         output_kind: if settings.output_kind == RAV1G_OUTPUT_SEMI_PLANAR {
             OutputKind::SemiPlanar
@@ -1344,6 +1344,12 @@ fn retired_settings_invalid(settings: &Rav1gSettings) -> Option<&'static str> {
     if settings.intra_v2 {
         return Some(
             "Rav1gSettings::intra_v2 is set: the second intra path (intra_v2.hlsl) was retired in 0.8.0-alpha.3; \
+             leave the field false",
+        );
+    }
+    if settings.inter_fast {
+        return Some(
+            "Rav1gSettings::inter_fast is set: the fast inter path (inter_fast.hlsl) was retired in 0.8.0-alpha.3; \
              leave the field false",
         );
     }
@@ -1599,11 +1605,21 @@ pub extern "C" fn rav1g_set_intra_v2(enable: bool) {
     }
 }
 
-/// The fast inter path: 0, or `RAV1G_INTER_FAST_ON` with the `RAV1G_INTER_FAST_*` bits; only in a decoder
-/// created with `Rav1gSettings::inter_fast`.
+/// Retired in 0.8.0-alpha.3 with the fast inter path (`inter_fast.hlsl`, the test flag `-interfast`): does
+/// nothing, whatever `mode` is, and every decoder takes the default inter path. A call with a mode that is not
+/// 0 writes a log line that is not an error (`rav1g_set_log_callback`) saying so. Removed, with the
+/// `RAV1G_INTER_FAST_*` values, with the next interface version.
 #[unsafe(no_mangle)]
 pub extern "C" fn rav1g_set_inter_fast(mode: u32) {
-    switches::set_inter_fast(mode);
+    if mode != 0 {
+        crate::host::log::log(
+            false,
+            &format!(
+                "rav1g_set_inter_fast({mode}): retired in 0.8.0-alpha.3, does nothing: inter prediction takes the \
+                 default path"
+            ),
+        );
+    }
 }
 
 /// Experiment (a library whose `rav1g_shader_variant` is "shader-pick"): which bytecode the pipeline
@@ -1843,5 +1859,8 @@ mod tests {
         assert!(retired_settings_invalid(&settings).is_none());
         settings.intra_v2 = true;
         assert!(retired_settings_invalid(&settings).expect("refused").contains("intra_v2"));
+        settings.intra_v2 = false;
+        settings.inter_fast = true;
+        assert!(retired_settings_invalid(&settings).expect("refused").contains("inter_fast"));
     }
 }

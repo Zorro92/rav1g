@@ -171,8 +171,6 @@ typedef struct av1_perf_frame {
  * before wrote:
  *   pass 1  warp, single, comp_avg, comp_diff_y, comp_masked, comp_warp,
  *           chroma_2x2                                      then sync0
- *           (av1_set_inter_fast: single and comp_avg by motion vector class,
- *           dispatched behind comp_masked)
  *   pass 2  comp_diff_uv, comp_warp_diff_uv, obmc_above     then sync1
  *   pass 3  obmc_left                                       then sync2
  * recon (the residuals of the blocks whose prediction is not final when their
@@ -192,17 +190,15 @@ typedef struct av1_perf_frame {
 enum {
   AV1_PERF_INTER_WARP = 0,          /* one reference, warped (local or global): inter_warp */
   AV1_PERF_INTER_SINGLE,            /* one reference: inter_main, inter_scale */
-  /* av1_set_inter_fast: one reference, by the fraction of the motion vector. A frame on that path has these
-   * four in place of AV1_PERF_INTER_SINGLE. */
-  AV1_PERF_INTER_SINGLE_COPY,       /* no fraction: inter_fast, a copy */
-  AV1_PERF_INTER_SINGLE_H,          /* a fraction in x only: inter_fast, one horizontal pass */
-  AV1_PERF_INTER_SINGLE_V,          /* a fraction in y only: inter_fast, one vertical pass */
-  AV1_PERF_INTER_SINGLE_2D,         /* both: inter_main */
+  /* Always 0: the sections of the fast inter path (av1_set_inter_fast, -interfast), retired in
+   * 0.8.0-alpha.3, one reference by the fraction of the motion vector. They keep their numbers. */
+  AV1_PERF_INTER_SINGLE_COPY,       /* no fraction */
+  AV1_PERF_INTER_SINGLE_H,          /* a fraction in x only */
+  AV1_PERF_INTER_SINGLE_V,          /* a fraction in y only */
+  AV1_PERF_INTER_SINGLE_2D,         /* both */
   AV1_PERF_INTER_COMP_AVG,          /* two references, averaged or distance weighted: inter_compound */
-  /* av1_set_inter_fast: the same by the classes of the two references, AV1_PERF_INTER_COMP_AVG_FAST +
-   * (class of reference 0 | class of reference 1 << 2), class 0 copy, 1 x only, 2 y only, 3 both:
-   * inter_compound_fast, and inter_compound for the last one (both references of class 3). A frame on that
-   * path has these sixteen in place of AV1_PERF_INTER_COMP_AVG. */
+  /* Always 0, as the four above: the same by the classes of the two references, AV1_PERF_INTER_COMP_AVG_FAST +
+   * (class of reference 0 | class of reference 1 << 2), class 0 copy, 1 x only, 2 y only, 3 both. */
   AV1_PERF_INTER_COMP_AVG_FAST,
   AV1_PERF_INTER_COMP_AVG_FAST_LAST = AV1_PERF_INTER_COMP_AVG_FAST + 15,
   AV1_PERF_INTER_COMP_DIFF_Y,       /* two references, difference weighted, luma: writes the mask the chroma reads */
@@ -381,26 +377,6 @@ typedef void (*av1_intra_steps_cb_fn_t)(void *priv, const av1_intra_steps *frame
  * call), or when min_steps >= 0 and the frame has more than min_steps steps. NULL for cb switches the
  * timing off. Change it only while no frame is in flight, like the perf callback. */
 void av1_set_intra_step_timing(av1_intra_steps_cb_fn_t cb, void *priv, int min_steps, const int *frames, int count);
-
-/* Process-wide. Non-zero predicts the inter blocks with one reference and the
- * averaged compound blocks by the fraction of their motion vectors
- * (inter_fast.hlsl, inter_compound_fast.hlsl: a copy, one filter pass, or
- * the two passes of the original shaders); the decoded output is the same.
- * Frames with a scaled reference keep the original path. Only in a decoder
- * created with aom_codec_dec_cfg_t::inter_fast. Off by default. Change it
- * only while no frame is in flight.
- * |mode| is 0 or AV1_INTER_FAST_ON, plus, to tell the cost of the lists from
- * that of the kernels, AV1_INTER_FAST_SINGLE_ORIGINAL and/or
- * AV1_INTER_FAST_COMPOUND_ORIGINAL: the blocks are still listed and
- * dispatched by class, but those with one reference, or with two, are
- * predicted by the size-list shader whatever their class. */
-enum {
-  AV1_INTER_FAST_ON = 1,
-  AV1_INTER_FAST_SINGLE_ORIGINAL = 2,
-  AV1_INTER_FAST_COMPOUND_ORIGINAL = 4,
-  AV1_INTER_FAST_LISTS_ONLY = 7
-};
-void av1_set_inter_fast(int mode);
 
 /* What the shaders of this build were compiled as: "" for the normal build,
  * "uavsync" for the build in which every group sync is a sync of all memory

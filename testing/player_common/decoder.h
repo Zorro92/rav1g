@@ -386,7 +386,6 @@ class AV1Decoder {
   // launch; 0 once that creation is done.
   uint64_t reusable_after_release_ = 0;
   uint64_t largest_device_size_ = 0;
-  bool created_interfast_ = false;
   unsigned created_parser_options_ = 0;
   int created_lowmem_ = 0;
   bool created_packed_10x3_ = false;

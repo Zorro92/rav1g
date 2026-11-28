@@ -90,7 +90,7 @@ unsafe fn frame_records(td: &av1_frame_thread_data) -> [usize; STAGE_BUFFERS] {
     unsafe {
         let tiles = std::slice::from_raw_parts(td.tile_data, td.tile_count.max(0) as usize);
         let transform: c_int = tiles.iter().map(|tile| tile.idct_blocks_sizes.iter().sum::<c_int>()).sum();
-        let (blocks, warp) = pred_block_counts(td, tiles);
+        let (blocks, warp) = pred_block_counts(tiles);
         let indexes: c_int = tiles.iter().map(|tile| tile.gen_index_ptr.max(0)).sum();
         let mut records = [0; STAGE_BUFFERS];
         records[..4].copy_from_slice(&[transform, blocks, warp, indexes].map(|count| count.max(0) as usize));

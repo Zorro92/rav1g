@@ -169,8 +169,11 @@ impl Default for av1_perf_frame {
 }
 pub const AV1_PERF_INTER_WARP: c_int = 0;
 pub const AV1_PERF_INTER_SINGLE: c_int = 1;
+/// Always 0: the first of the sections of the retired fast inter path (`-interfast`), by motion vector
+/// class; they keep their numbers (2..=5, and 7..=22 for [`AV1_PERF_INTER_COMP_AVG_FAST`]).
 pub const AV1_PERF_INTER_SINGLE_COPY: c_int = 2;
 pub const AV1_PERF_INTER_COMP_AVG: c_int = 6;
+/// Always 0, as [`AV1_PERF_INTER_SINGLE_COPY`].
 pub const AV1_PERF_INTER_COMP_AVG_FAST: c_int = 7;
 pub const AV1_PERF_INTER_COMP_DIFF_Y: c_int = 23;
 pub const AV1_PERF_INTER_COMP_MASKED: c_int = 24;
@@ -377,10 +380,6 @@ const _: () = {
     assert!(offset_of!(av1_intra_steps, steps) == 32);
 };
 pub type av1_intra_steps_cb_fn_t = Option<unsafe extern "C" fn(priv_: *mut c_void, frame: *const av1_intra_steps)>;
-pub const AV1_INTER_FAST_ON: c_int = 1;
-pub const AV1_INTER_FAST_SINGLE_ORIGINAL: c_int = 2;
-pub const AV1_INTER_FAST_COMPOUND_ORIGINAL: c_int = 4;
-pub const AV1_INTER_FAST_LISTS_ONLY: c_int = 7;
 pub const AV1_POISON_OFF: c_int = 0;
 pub const AV1_POISON_MODE_INFO: c_int = 1;
 pub const AV1_POISON_BUFFERS: c_int = 2;

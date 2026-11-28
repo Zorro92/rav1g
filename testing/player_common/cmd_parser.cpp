@@ -118,12 +118,6 @@ int CParameters::Parse(one_task& args, std::string& Err) {
        "+ 32 frame buffer bound at the recording (with 1: one frame buffer less with three slots; not in -lowmem). "
        "Default: 1, and 3 for a decoder above 1920x1088; 1 for the mode info pool of the worst case, 0 for none",
        "", &params_.lowmem_parts_},
-      {"interfast", atSingle, anOptional,
-       "inter prediction by the fraction of the motion vector: a copy, one filter pass, or both (same output)", "",
-       &params_.interfast_},
-      {"interfastlists", atSingle, anOptional,
-       "the block lists of -interfast with the size-list shaders on them (same output)", "",
-       &params_.interfastlists_},
       {"alllayers", atSingle, anOptional,
        "a stream with spatial layers: output the frame of every layer of a temporal unit (default: one frame "
        "per temporal unit, the highest layer it has)",
@@ -439,8 +433,6 @@ void CParameters::Reset() {
   params_.continue_on_error_ = false;
   params_.parseopt_.clear();
   params_.parser_options_ = PLAYER_PARSEOPT_DEFAULT;
-  params_.interfast_ = false;
-  params_.interfastlists_ = false;
   params_.all_layers_ = false;
   params_.oppoint_ = 0;
 }

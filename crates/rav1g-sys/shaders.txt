@@ -32,11 +32,6 @@ film_grain_filter
 cdef_filter_v3
 cdef_filter_v3_sp_tex
 gen_pred_blocks
-gen_pred_blocks_fast_packed
-inter_fast
-inter_compound_fast
-inter_fast_hbd
-inter_compound_fast_hbd
 gen_lf_blocks_vert
 gen_lf_blocks_hor
 copy_plane

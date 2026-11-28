@@ -257,14 +257,6 @@ typedef struct aom_codec_dec_cfg {
    * the value must be the same for av1_codec_query_memory_requirements and
    * aom_codec_dec_init. */
   int frame_slots;
-  /* Non-zero makes room in the block maps for the lists of the optional
-   * inter path (av1_set_inter_fast: blocks listed by the fraction of their
-   * motion vectors), 1984 bytes per tile the size can have (one per 64x64)
-   * and pipeline slot: 1.0 MiB per slot at 1080p. Without it the
-   * decoder keeps the original inter path whatever av1_set_inter_fast is set
-   * to. Must be the same for av1_codec_query_memory_requirements and
-   * aom_codec_dec_init. */
-  int inter_fast;
   /* Memory reductions: a combination of the AV1_LOW_MEMORY_* values above.
    * 0 selects the default (the shared back buffer, and for a decoder above
    * 1920x1088 the mode info pool at half, the coefficient pool at four fifths
