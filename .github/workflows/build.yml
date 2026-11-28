@@ -2545,7 +2545,7 @@ jobs:
           - case: od
             pick: od=all
           - case: mixed
-            pick: od=loopfilter_*,idct*,*_fast,inter_*,cdef_*,intra_*,dxc=inter_main_v2,reconstruct_block*
+            pick: od=loopfilter_*,idct*,inter_*,cdef_*,intra_*,dxc=inter_main_v2,reconstruct_block*
     steps:
       - name: Disable newline conversion
         run: git config --global core.autocrlf false
