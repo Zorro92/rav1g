@@ -124,6 +124,10 @@ one commit each:
 - **Shader pick**: in the revision 4 package, `-shaderpick od=<list>,dxc=<list>` selects
   default or `-Od` DXIL per shader for compiler diagnostics.
   [Shader pick](#shader-pick--shaderpick-the-dxc-package)
+- **Preparing the pipeline states**: `-prepare <list>` compiles only the named kinds of pipeline
+  states at the launch (`8,10,sdr,pq,hlg,grain,superres,scaled,core`, or `all`), the rest when a
+  decoder needs them; `-preparetest 1|2` is the test of that path.
+  [Preparing the pipeline states](#preparing-the-pipeline-states--prepare--preparetest)
 - **Layers, new sequences, references of different sizes**: of a temporal unit with spatial
   layers the frame of the highest layer is output (`-alllayers` for every layer's frame,
   `-oppoint <n>` for another operating point), a sequence that does not fit the decoder is
@@ -449,8 +453,8 @@ per-frame md5 of the conformance set and Argon).
 | `-lfhsplit 1|2` (`rav1g_set_lf_h_split`), `-intraedgefix` (`rav1g_set_intra_edge_fix`) | the horizontal loop filter in rows of blocks; the 8-bit above edge filter bound of `intra_main.hlsl` | tools of an old console-bug hunt ([Experiments](#experiments)): none changed the console's output |
 | `-intrafilterlegacy` (`av1_set_intra_filter_legacy`) | the previous 8-bit filter intra kernel, `intra_filter_legacy.hlsl` (two group syncs, the residual in a separate pass; AV1 7.11.2.3) | retired by the owner's decision (2026-11-27) without a console A/B, for one pipeline state less at `rav1g_device_create`; the packed-pair kernel `intra_filter_prefetch` was already the default. The old kernel stays in `testing/intra_check` as the filter intra reference of its legacy run |
 | `-intrasingleedgelegacy` (`av1_set_intra_single_edge_legacy`) | the angle-specific intra wavefront of `893f8b0` (the wait for both edges of every directional angle) with the prefetch kernels `intra_main_prefetch(_hbd)` for every frame | retired by the owner's decision (2026-11-27) without a console A/B. The single-edge dependencies (AV1 7.11.2.4) shorten the critical path: the D2 peak 1475 → 1329 steps and the 8-bit 2160p sample's 1304 → 1227 in a parse replay. The prefetch kernels stay: the default takes them for a frame without one-edge angles. The switch had no pipeline of its own |
-| `-intrav2` (`rav1g_set_intra_v2`, `Rav1gSettings::intra_v2`) | intra prediction through `intra_v2.hlsl` (`intra_v2_hbd.hlsl`, and `intra_main(_hbd)` for its frames with intra block copy), one 384-thread group per 64x64 region with its own schedule and buffers (AV1 7.11.2) | bit-exact but 2.3 to 2.4 times slower on the console ([Intra v2](#intra-v2-retired--intrav2)); retired in 0.8.0-alpha.3, four pipeline states fewer. `rav1g.h` kept the declarations until interface version 4 removed them ([integration.md](integration.md#interface-version-4-rav1g_decoder_flush-the-retired-declarations-out)). The shaders and the scheduler stay in `testing/intra_check` as its independent reference (the only one of the 10-bit filter intra path) |
-| `-interfast`, `-interfastlists`, `-interfastmode <n>` (`rav1g_set_inter_fast`, `RAV1G_INTER_FAST_*`, `Rav1gSettings::inter_fast`) | the inter blocks with one reference and the averaged compound blocks listed by the fraction of their motion vectors and predicted by `inter_fast` / `inter_compound_fast` (a copy, one filter pass or two; AV1 7.11.3.4), with room for the lists in the block maps | not faster on the console (the inter stage 7.2 → 9.5 and 11.0 → 12.4 ms on two 4K clips, 10 % less only on a compound-heavy one; [Inter fast path](#inter-fast-path-retired--interfast)); retired in 0.8.0-alpha.3, five pipeline states fewer. `rav1g.h` kept the declarations until interface version 4 removed them ([integration.md](integration.md#interface-version-4-rav1g_decoder_flush-the-retired-declarations-out)) |
+| `-intrav2` (`rav1g_set_intra_v2`, `Rav1gSettings::intra_v2`) | intra prediction through `intra_v2.hlsl` (`intra_v2_hbd.hlsl`, and `intra_main(_hbd)` for its frames with intra block copy), one 384-thread group per 64x64 region with its own schedule and buffers (AV1 7.11.2) | bit-exact but 2.3 to 2.4 times slower on the console ([Intra v2](#intra-v2-retired--intrav2)); retired in 0.8.0-alpha.3, four pipeline states fewer. `rav1g.h` kept the declarations until interface version 4 removed them ([integration.md](integration.md#interface-version-4-rav1g_decoder_flush-the-pipeline-states-on-demand-the-retired-declarations-out)). The shaders and the scheduler stay in `testing/intra_check` as its independent reference (the only one of the 10-bit filter intra path) |
+| `-interfast`, `-interfastlists`, `-interfastmode <n>` (`rav1g_set_inter_fast`, `RAV1G_INTER_FAST_*`, `Rav1gSettings::inter_fast`) | the inter blocks with one reference and the averaged compound blocks listed by the fraction of their motion vectors and predicted by `inter_fast` / `inter_compound_fast` (a copy, one filter pass or two; AV1 7.11.3.4), with room for the lists in the block maps | not faster on the console (the inter stage 7.2 → 9.5 and 11.0 → 12.4 ms on two 4K clips, 10 % less only on a compound-heavy one; [Inter fast path](#inter-fast-path-retired--interfast)); retired in 0.8.0-alpha.3, five pipeline states fewer. `rav1g.h` kept the declarations until interface version 4 removed them ([integration.md](integration.md#interface-version-4-rav1g_decoder_flush-the-pipeline-states-on-demand-the-retired-declarations-out)) |
 | `-gpuclear`, `-cpuclear` (`-asyncclear`), `-syncclear` (`rav1g_set_clears`, `rav1g_set_async_clear`) | the wavefront of intra prediction in the slot's grid, cleared for every frame by the GPU, the completion thread or the decode thread | the wavefront at the edges of the tiles since package 0.2.146.0: no clears, 3.5 MB a 4K frame the CPU does not write ([Clears](#clears)) |
 
 ## Timing run (`-gputime` and `-nopresent`)
@@ -3358,6 +3362,35 @@ LocalState (streams, references), and the normal package of any later run instal
 Going back to the normal package of the same run needs an uninstall, which removes LocalState;
 so run the normal package first. Its log says `Experiments: shaders uavsync`. The flags work in
 it as well.
+
+### Preparing the pipeline states (`-prepare`, `-preparetest`)
+
+The player's device compiles all 96 pipeline states at the launch unless the task file says which kinds
+to prepare ([integration.md](integration.md#preparing-the-pipeline-states-interface-version-4)):
+
+```text
+-prepare 10,pq
+-i <stream> -t 4 -frate -1 -queue_size 4 -nopresent -md5_frame_check -output p010 -displaypass 1920x1080
+```
+
+- `<list>`: words separated by commas, `RAV1G_PREPARE_ONLY` with their bits: `8`, `10` (the states of
+  a bit depth), `sdr`, `pq`, `hlg` (one display pass each), `grain`, `superres`, `scaled` (the
+  scaled-reference states of the depths named), `core` (none of these: only the 38 states every stream
+  needs). `all` is every state, as without the flag. An unknown word ends the launch before any task.
+- A decoder creation compiles what its stream needs that is not prepared, and waits for it; the player
+  passes the stream's sequence header (`Rav1gSettings::stream`). The log has `PIPELINE prepare: ...` at
+  the launch, `PIPELINE states: ...` when the prepared states are complete (its wall time, threads, the
+  sum and the slowest ten), and per decoder `PIPELINE decoder creation: needs N states (...), M were not
+  ready; waited X ms`, with a `PIPELINE on demand ...` line for what it compiled and `PIPELINE in the
+  background ...` for the scaled-reference states compiled behind it.
+- `-preparetest 1`: the device prepares nothing, whatever `-prepare` says (every state through a decoder
+  creation, a frame setup or the background); `-preparetest 2`: nothing is prepared anywhere (every state
+  at its first dispatch, a `PIPELINE at the first dispatch of <name>` line each). The frames must be the
+  same; CI runs the conformance set with both (`rust-switches`).
+
+Both hold for the whole launch, like `-shaderpick`: the player takes them off the task lines, and the
+last one of the file counts. In `rav1g-dec` they are program flags (`--tool-args` of
+`testing/conformance/run.py`).
 
 ### Shader pick (`-shaderpick`, the DXC package)
 

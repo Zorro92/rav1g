@@ -53,9 +53,14 @@ def metadata(log):
     return (float(cll.group(1)) if cll else 0.0), mastering
 
 
+# --tool-args: flags every run of the tool gets (-preparetest 2: the display passes compiled at their
+# first dispatch).
+TOOL_ARGS = []
+
+
 def run(cmd, log):
     with open(log, 'w', encoding='utf-8') as f:
-        code = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, check=False).returncode
+        code = subprocess.run(cmd + TOOL_ARGS, stdout=f, stderr=subprocess.STDOUT, check=False).returncode
     with open(log, encoding='utf-8', errors='replace') as f:
         return code, f.read()
 
@@ -67,7 +72,9 @@ def main():
     ap.add_argument('--stream', action='append')
     ap.add_argument('--frames', type=int, default=4)
     ap.add_argument('--out', default='out/display-pass')
+    ap.add_argument('--tool-args', default='', help='flags for every run of the tool, e.g. "-preparetest 2"')
     a = ap.parse_args()
+    TOOL_ARGS[:] = a.tool_args.split()
     # PQ and SDR at 10 bits; film grain at 10 and 8 bits (grain is applied before the downscale, so the
     # plain run's frames, which have it, are the model's input).
     streams = a.stream or ['svt/syn-hdr10-10b-1080p.ivf', 'svt/syn-tiles-10b-1080p.ivf', 'aom/av1-1-b10-23-film_grain-50.ivf',

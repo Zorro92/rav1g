@@ -184,6 +184,8 @@ output fence. Nothing has to be reset between streams.
 - **Create it early, once.** `rav1g_device_create` compiles the pipeline states (on threads, while the
   call returns); `rav1g_decoder_create` waits for them. Creating the device when the first AV1 stream
   is opened puts that wait in front of the first frame; at the start of the app it is gone by then.
+  `rav1g_device_create_with_settings` compiles only the states of the streams the application is
+  going to play, and the rest when a decoder needs them ([Preparing the pipeline states](#preparing-the-pipeline-states-interface-version-4)).
 - **Shader Model 6.0 is required.** `rav1g_device_create` asks the D3D12 device for
   `D3D12_FEATURE_SHADER_MODEL` before setting up the queue or compute pipelines. If the device
   reports a lower model or the query fails, the call returns null. Read `rav1g_last_error()` on the
@@ -207,6 +209,92 @@ output fence. Nothing has to be reset between streams.
   (`IDXGIDevice::GetAdapter`), as the draft does.
 - **Release.** `rav1g_device_destroy` releases the application's handle; the device lives on until
   its last decoder is destroyed.
+
+## Preparing the pipeline states (interface version 4)
+
+The decoder has 96 compute pipeline states. The driver compiles each one when it is created: on the
+console all of them take 8.5 s on 4 threads (31 s of CPU, 2026-11-28) and about 80 MiB of app memory,
+the slowest being the three display passes (2.1, 1.7 and 1.4 s) and the 64-point transforms (about 1.1 s
+each). A pipeline cache on disk would avoid that but removes the device on the console
+([below](#a-pipeline-cache-on-disk-tried-and-taken-out-2026-11-18)). A stream needs far fewer than 96:
+one bit depth's states, at most one of the three display passes, film grain and super-resolution only
+when its sequence header has them, the scaled-reference inter states only when a reference has another
+size than the frame.
+
+So an application can say at the device creation what to prepare, and the rest is compiled when a
+decoder needs it:
+
+```c
+Rav1gDeviceSettings device_settings = {0};
+device_settings.pipeline_threads = 4;
+/* An HDR10 title on an SDR display: the 10-bit states and the PQ display pass. */
+device_settings.prepare = RAV1G_PREPARE_ONLY | RAV1G_PREPARE_BIT_DEPTH_10 | RAV1G_PREPARE_DISPLAY_PQ;
+Rav1gDevice *device = rav1g_device_create_with_settings(d3d12_device, d3d12_queue, &device_settings);
+rav1g_device_wait_pipelines(device); /* the prepared states only */
+
+Rav1gSettings settings;
+rav1g_settings_default(&settings);
+/* ... */
+rav1g_peek_stream_info(unit, unit_size, &settings.stream); /* the unit with the key frame */
+rav1g_decoder_create(device, &settings, &decoder);
+```
+
+- **The states and their kinds.** `RAV1G_PREPARE_ONLY` with the bits of the streams: the 38 states every
+  stream needs (transforms, CDEF, loop restoration, the copies and block lists) are always prepared;
+  `RAV1G_PREPARE_BIT_DEPTH_8` and `_BIT_DEPTH_10` add the 17 states of a bit depth (prediction,
+  reconstruction, loop filter), `RAV1G_PREPARE_DISPLAY_SDR`, `_PQ` and `_HLG` one display pass each
+  (`Rav1gSettings::display`: SDR is `RAV1G_DISPLAY_TRANSFORM_SCALE` and `_GAMUT`), `RAV1G_PREPARE_FILM_GRAIN`
+  3 states, `RAV1G_PREPARE_SUPERRES` 2, `RAV1G_PREPARE_SCALED_REFERENCES` the 8 scaled-reference inter
+  states of each bit depth named. `RAV1G_PREPARE_ALL` (0, and what `rav1g_device_create` does) prepares all
+  96 as before. A 10-bit PQ prepare is 56 states: on the console about a third less time and memory than
+  96 (the owner measures it). On an HDR display (no display pass, passthrough) no display bit is needed.
+- **The decoder creation compiles what its stream needs and the device has not prepared**, and waits
+  for those states only: the core and the stream's bit depth, the display pass of its transfer (when
+  `Rav1gSettings::display` is on; a forced `transform` names it), film grain when
+  `film_grain_params_present`, super-resolution when `enable_superres` (both new in `Rav1gStreamInfo`).
+  The stream is `Rav1gSettings::stream`, what `rav1g_peek_stream_info` says of the temporal unit with
+  the key frame the decoder starts with. With `stream.bit_depth` 0 (`rav1g_settings_default`) the stream
+  is not known, and the creation waits for every state the other settings allow: both bit depths when
+  `bit_depth` is above 8, all three display passes, film grain, super-resolution. A decoder whose stream
+  matches what the device prepared waits for nothing more ("PIPELINE decoder creation: needs 56 states
+  (...), 0 were not ready; waited 0 ms").
+- **Later states.** The scaled-reference inter states of the stream's depth (a frame size can change at
+  any inter frame, AV1 7.11.3.3, with nothing to announce it) are compiled in the background behind the
+  decoder creation: one thread at the lowest priority, which takes only what the decoder's threads leave
+  of the cores (the console's 4 are shared with the system and the parse). Everything else a later
+  sequence may need (another bit depth, a colour that selects another display pass, film grain or
+  super-resolution switched on) is compiled when the first frame that needs it is set up, before its
+  tiles are parsed: that frame waits for it once (about 1-2 s for a display pass on the console). The
+  frames are the same either way.
+- **Never before it exists.** Every dispatch takes its pipeline through one accessor, which waits for a
+  state that is not ready (and compiles it when no thread has begun it): no state is used before it
+  exists, which would remove the device. The frame setup has the states of its frame prepared, so the
+  accessor waits only for a state the setup did not foresee; a "PIPELINE at the first dispatch of ..."
+  line says so.
+- **Threads.** The device's `pipeline_threads` (6 at most; the console's 4 cores give no gain beyond 4)
+  compile the prepared states while the creation returns, as before. A decoder creation or a frame that
+  waits compiles the states it needs itself, with up to `pipeline_threads - 1` helper threads next to it;
+  with 0 it compiles them alone. The background is one thread. Every one of these threads exits when it
+  has nothing left: no thread stays idle while decoders run. The decode thread compiles a state only
+  when its frame needs it right then.
+- **Errors.** A state that cannot be created stays failed: the device creation with 0 threads, or
+  `rav1g_device_wait_pipelines`, fails for a prepared one; a decoder creation that needs one fails; a
+  frame that needs one fails with a decode error ("A compute pipeline state of the frame could not be
+  created"). The log names it ("MEMORY FAILED compute pipeline state ...").
+- **Memory.** A state takes about 0.8 MiB of the app's memory once it exists. The states a decoder
+  creation compiles exist before its buffers, so the budget guard sees them; the background states (8)
+  add about 7 MiB behind it.
+- **Log lines.** `PIPELINE prepare: 56 of 96 states (...)` at the creation of a device that does not
+  prepare all; `PIPELINE states: N created in X ms on T threads, Y ms in all; slowest (ms): ...` when the
+  prepared states are complete; one line of the same form for each batch compiled on demand ("PIPELINE
+  on demand for the decoder creation (display PQ): ...", "PIPELINE on demand for frame 120 (film
+  grain): ...", "PIPELINE in the background (scaled references 10-bit): ..."), and "PIPELINE decoder
+  creation: needs N states (...), M were not ready; waited X ms".
+- **The test mode** (`av1_set_pipeline_prepare_test` of `dx/av1_perf.h`, `rav1g-dec -preparetest`, not in
+  `rav1g.h`): 1 prepares nothing at the device creation, so every state goes through a decoder creation, a
+  frame setup or the background; 2 prepares nothing anywhere, so every state is compiled at the first
+  dispatch that takes it. CI decodes the conformance set (and the random-access and flush checks) with
+  both and holds every frame to its md5.
 
 ## What the settings need
 
@@ -455,7 +543,7 @@ have no time any more).
 
 **Retired in 0.8.0-alpha.3, interface version 3 as before.** The declarations below stayed exactly as they
 were (the fingerprint is `f4f314d6ea9678c2`), only their comments changed, and they went with interface
-version 4 ([below](#interface-version-4-rav1g_decoder_flush-the-retired-declarations-out)):
+version 4 ([below](#interface-version-4-rav1g_decoder_flush-the-pipeline-states-on-demand-the-retired-declarations-out)):
 
 - the second intra path (`intra_v2.hlsl`, slower on the console): `rav1g_set_intra_v2` does nothing (a
   call with `true` writes a log line that is not an error, `rav1g_set_log_callback`, saying so), and
@@ -473,12 +561,24 @@ An application that sets neither field and calls neither function (Bale) changes
 path is the one it ran, and the library compiles 96 pipeline states at `rav1g_device_create` instead of
 the 106 of `v0.8.0-alpha.2` (`-intrafilterlegacy` took one, these two nine).
 
-## Interface version 4: `rav1g_decoder_flush`, the retired declarations out
+## Interface version 4: `rav1g_decoder_flush`, the pipeline states on demand, the retired declarations out
 
-Fingerprint `f24269ad5a9dad3f` (`tools/rav1g-header/abi.txt`). What changed in `rav1g.h`:
+Fingerprint `c17bb089cbe25bb3` (`tools/rav1g-header/abi.txt`; `f24269ad5a9dad3f` before the pipeline
+states on demand, never released). What changed in `rav1g.h`:
 
 - **New:** `enum Rav1gStatus rav1g_decoder_flush(struct Rav1gDecoder *decoder)`, the seek
   ([Seeking](#seeking-flush-and-go-on-with-the-same-decoder)); `Decoder::flush` in the Rust interface.
+- **New:** the pipeline states on demand ([Preparing the pipeline states](#preparing-the-pipeline-states-interface-version-4)):
+  `struct Rav1gDeviceSettings` (`pipeline_threads`, `prepare`, six reserved words that must be 0) and
+  `rav1g_device_create_with_settings`, the `RAV1G_PREPARE_*` constants, `Rav1gStreamInfo::film_grain_params_present`
+  and `enable_superres` behind `color` (**the layout of `Rav1gStreamInfo` changed**: two `bool`s at its
+  end), and `Rav1gSettings::stream` (a `Rav1gStreamInfo`) behind `display`. `rav1g_device_create` keeps its
+  signature and prepares every state, as before: an application that says nothing behaves as now. The
+  Rust interface has `DeviceSettings`, `Prepare`, `Device::with_d3d12_settings`, `Device::new_with`,
+  `Device::from_raw_settings`, `Settings::stream` and the two `StreamInfo` fields. A second creation
+  function, not another parameter of `rav1g_device_create`: an application that does not prepare keeps
+  its call unchanged, and the struct's reserved words take later device settings without another
+  function.
 - **Removed** (retired in 0.8.0-alpha.3, doing nothing since): `rav1g_set_intra_v2`,
   `rav1g_set_inter_fast`, the constants `RAV1G_INTER_FAST_ON`, `_SINGLE_ORIGINAL`, `_COMPOUND_ORIGINAL`,
   `_LISTS_ONLY`, and the two fields `Rav1gSettings::intra_v2` and `Rav1gSettings::inter_fast`. **The
@@ -510,6 +610,14 @@ What an application (Bale's fork) adjusts:
    thread).
 5. After the flush, the packets from the new place go in as they are; the container's configOBUs need
    not be passed again (the sequence header is kept), and passing them does no harm.
+6. Recompile for the two `bool`s at the end of `Rav1gStreamInfo` and the new `Rav1gSettings::stream`
+   (`rav1g_settings_default` zeroes it: nothing else to do for the behaviour of before).
+7. To shorten the prewarm: create the device with `rav1g_device_create_with_settings` and the
+   `RAV1G_PREPARE_*` bits of the title (its bit depth; the display pass of its transfer when the pass is
+   used, none on an HDR display; film grain and super-resolution when its sequence header has them, which
+   `rav1g_peek_stream_info` now says), and put the `Rav1gStreamInfo` of the stream's key frame unit into
+   `Rav1gSettings::stream` at every decoder creation. A decoder of a stream the device did not prepare for
+   compiles its states at its creation ("PIPELINE decoder creation ... waited X ms"); it decodes the same.
 
 ## Loading the library at run time: the interface version
 
@@ -528,9 +636,10 @@ the first of its four reserved words) adds the display pass: `Rav1gDisplay`, `Ra
 of version 1 recompiled against it and filling the settings with `rav1g_settings_default` gets the
 output of version 1. Version 3 (released in `v0.8.0-alpha.1`, fingerprint `f4f314d6ea9678c2`) takes the retired switches out and adds the display pass's
 source peak and input chroma ([Interface version 3](#interface-version-3-the-retired-switches-the-source-peak-and-the-input-chroma)).
-Version 4 (fingerprint `f24269ad5a9dad3f`, not released yet) adds `rav1g_decoder_flush` and removes the
-declarations retired in 0.8.0-alpha.3, with another layout of `Rav1gSettings`
-([Interface version 4](#interface-version-4-rav1g_decoder_flush-the-retired-declarations-out)).
+Version 4 (fingerprint `c17bb089cbe25bb3`, not released yet) adds `rav1g_decoder_flush` and the
+pipeline states on demand (`rav1g_device_create_with_settings`, `Rav1gSettings::stream`) and removes the
+declarations retired in 0.8.0-alpha.3, with other layouts of `Rav1gSettings` and `Rav1gStreamInfo`
+([Interface version 4](#interface-version-4-rav1g_decoder_flush-the-pipeline-states-on-demand-the-retired-declarations-out)).
 
 ## Releases
 

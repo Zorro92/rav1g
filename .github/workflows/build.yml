@@ -1558,7 +1558,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        case: [poisoned, steptime]
+        case: [poisoned, steptime, prepare-demand, prepare-first-use]
     steps:
       - name: Disable newline conversion
         run: git config --global core.autocrlf false
@@ -1655,6 +1655,63 @@ jobs:
             Pop-Location
           }
           if ($failed.Count) { throw "with -intrastepmin 0: $($failed -join '; ')" }
+
+      # The pipeline states on demand (docs/integration.md, "Preparing the pipeline states"): with
+      # -preparetest 1 the device prepares nothing, so every state the set needs is compiled by a decoder
+      # creation (from the stream's sequence header), at the setup of the frame that needs it, or in the
+      # background behind the creation; the whole set has to give the results of expected.txt, and so do
+      # the random-access and flush checks (decoders created at cut points, flushed with frames in flight,
+      # the background states racing with the frames), through rav1g.h with its Rav1gSettings::stream. A
+      # state used before it exists would remove the device. The logs must have the on-demand lines.
+      - name: Conformance, random access and flush with the pipeline states on demand (-preparetest 1)
+        if: ${{ !cancelled() && matrix.case == 'prepare-demand' }}
+        shell: pwsh
+        run: |
+          $failed = @()
+          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/conformance-preparetest1 --threads 4 "--tool-args=-preparetest 1" "--title=rav1g-dec with -preparetest 1"
+          if ($LASTEXITCODE -ne 0) { $failed += "conformance with -preparetest 1: exit code $LASTEXITCODE" }
+          $logs = @(Get-ChildItem out/conformance-preparetest1/lists -Filter *.log | ForEach-Object { $_.FullName })
+          $creations = @(Select-String -Path $logs -Pattern '^PIPELINE on demand for the decoder creation ').Count
+          $frames = @(Select-String -Path $logs -Pattern '^PIPELINE on demand for frame ').Count
+          $background = @(Select-String -Path $logs -Pattern '^PIPELINE in the background ').Count
+          Write-Output "PIPELINE on demand: $creations decoder creations, $frames frames, $background background batches"
+          if ($creations -lt 1) { $failed += "no state was compiled on demand for a decoder creation" }
+          python testing/conformance/random_access_check.py --tool out/rav1g-dec/rav1g-dec.exe "--tool-args=-capi -preparetest 1" `
+            --streams conformance-streams --out out/conformance-preparetest1-random-access
+          if ($LASTEXITCODE -ne 0) { $failed += "random access check with -capi -preparetest 1: exit code $LASTEXITCODE" }
+          python testing/conformance/flush_check.py --tool out/rav1g-dec/rav1g-dec.exe "--tool-args=-capi -preparetest 1" `
+            --streams conformance-streams --out out/conformance-preparetest1-flush
+          if ($LASTEXITCODE -ne 0) { $failed += "flush check with -capi -preparetest 1: exit code $LASTEXITCODE" }
+          if ($failed.Count) { throw "with -preparetest 1: $($failed -join '; ')" }
+
+      # -preparetest 2: nothing is prepared anywhere, so every state is compiled at the first dispatch that
+      # takes it (core::pipeline, the one accessor every dispatch goes through, waits for it). The whole
+      # set has to give the results of expected.txt: a dispatch site that took a state without the
+      # accessor would find none and remove the device.
+      - name: Conformance with every pipeline state compiled at its first dispatch (-preparetest 2)
+        if: ${{ !cancelled() && matrix.case == 'prepare-first-use' }}
+        shell: pwsh
+        run: |
+          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/conformance-preparetest2 --threads 4 "--tool-args=-preparetest 2" "--title=rav1g-dec with -preparetest 2"
+          $code = $LASTEXITCODE
+          $logs = @(Get-ChildItem out/conformance-preparetest2/lists -Filter *.log | ForEach-Object { $_.FullName })
+          $first = @(Select-String -Path $logs -Pattern '^PIPELINE at the first dispatch of ').Count
+          Write-Output "PIPELINE at the first dispatch: $first states"
+          if ($code -ne 0) { throw "conformance with -preparetest 2: exit code $code (1: not as expected.txt says, 2: the run could not be done)" }
+          if ($first -lt 50) { throw "only $first states were compiled at their first dispatch" }
+
+      # The display passes (PQ, SDR, film grain at both depths) compiled at their first dispatch: the
+      # display pass check against its model with -preparetest 2, through both interfaces.
+      - name: The display pass against its model with -preparetest 2
+        if: ${{ !cancelled() && matrix.case == 'prepare-first-use' }}
+        shell: pwsh
+        run: |
+          python -m pip install --quiet --disable-pip-version-check numpy
+          python testing/display_pass/check.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
+            --out out/conformance-preparetest2-display "--tool-args=-preparetest 2"
+          if ($LASTEXITCODE -ne 0) { throw "display pass check with -preparetest 2: exit code $LASTEXITCODE" }
 
       - name: Preserve the results, per-stream logs and md5 files of the switch
         if: always()
