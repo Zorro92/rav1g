@@ -273,13 +273,13 @@ def first_frame(obus, seq):
     return None
 
 
-def model(units):
+def model(units, seq_bytes=None):
     """For every temporal unit: whether the decoder puts a frame out for it, and the frame headers it
-    skips there. RefValid of the eight slots (6.8.2, 7.20), none valid at the start."""
+    skips there. RefValid of the eight slots (6.8.2, 7.20), none valid at the start. seq_bytes: the
+    payload of the sequence header the decoder has at the start (one a flush kept), or None."""
     valid = 0
     key_in = 0  # the slots that hold a key frame
-    seq = None
-    seq_bytes = None
+    seq = None if seq_bytes is None else sequence_header(seq_bytes)
     out = []
     for _, obus in units:
         shown = False

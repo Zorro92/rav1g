@@ -91,6 +91,15 @@ gets a new decoder. The program uses the decoder through the Rust interface of t
 - `-anystart`: the task starts with the first temporal unit of the stream, not with the first one with
   a key frame: the decoder is created for the first sequence header and is given every temporal unit,
   those in front of it too (a start in the middle of a stream; `random_access_check.py`).
+- `-flush <list>`, `-flushdrain`, `-flushrefuse`: the decoder is flushed (`rav1g_decoder_flush`, a seek)
+  before it gets these temporal units (from 0; a number twice flushes twice in a row; one at or past the
+  end flushes behind the last unit), behind a drain with `-flushdrain`, with every image refused from
+  the start of the flush (its drain) until it returns with `-flushrefuse`. A `FLUSH` line says how many
+  frames came out before each flush and what the call took; a frame given before a flush that comes out
+  behind it is a fault, and so is an output image that does not come back by the end of the task
+  (`flush_check.py`).
+- `-refuse <list>`: every image is refused in the decode calls of these temporal units: their frames are
+  decoded and not output (with `-continue_on_error` the task goes on behind the error).
 - `-continue_on_error` (also a flag of the test player): a decode call that fails does not end the
   task. The error is counted and the next temporal units go to the same decoder, which is what an
   application does with a damaged stream; one `CONTINUE <stream>: decode error <n> at temporal unit
@@ -627,6 +636,20 @@ in the reference of the whole stream; no decode error; the `SKIPPED` lines of th
 frame headers the check says are skipped. In the `rust-conformance` job with one frame in parse
 (through the Rust interface and through `rav1g.h`) and with four ([integration.md](integration.md),
 "Starting in the middle of a stream").
+
+### A seek: the flush
+
+`testing/conformance/flush_check.py` writes streams of the same two that jump: the first units of a
+stream, then the units from such a cut point on (forward, and back), and decodes each with
+`rav1g-dec -flush N` at the jump: with frames in flight, with the sequence header put in front again,
+behind a drain with every image refused (`-flushdrain -flushrefuse`, Bale's fork), with images refused
+during the flush only, twice in a row; and the whole stream with flushes right after the creation,
+twice, and behind the last unit. The frames out before a flush must be the first frames of the stream;
+those after it exactly the frames the model says a decoder started at the cut point puts out, with the
+md5 of their temporal units and the `SKIPPED` count of the model; a new decoder on the cut stream
+(`-anystart`) must put out the same. With one frame in parse also images refused for three units
+without a flush (`-refuse`): those frames are not out, every other frame is right. Same job, same three
+runs ([integration.md](integration.md), "Seeking").
 
 ### Memory check
 

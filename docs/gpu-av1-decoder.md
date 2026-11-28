@@ -228,7 +228,7 @@ by the host check, since there is no 8-bit 4K clip on the console yet.
 ## Step 1b: intra v2 (2026-11-11, negative)
 
 Retired in 0.8.0-alpha.3 with its flag, pipelines and buffers (`Rav1gSettings::intra_v2` is refused,
-`rav1g_set_intra_v2` does nothing until the next interface version); `intra_v2.hlsl` and its scheduler
+`rav1g_set_intra_v2` did nothing until interface version 4 removed it); `intra_v2.hlsl` and its scheduler
 stay in `testing/intra_check` as the independent reference of the intra kernels.
 
 Patch 0004 (Bale build run 43003822357, package 0.1.9.0) adds `-intrav2`. It is a
@@ -1194,8 +1194,8 @@ the fetches of three of the clips are of that kind.
 
 Retired in 0.8.0-alpha.3 with its flags, lists, pipelines (`inter_fast`, `inter_compound_fast`, each with
 its 10-bit build, and `gen_pred_blocks_fast`) and the room for its lists in the block maps, on the
-console results below (`rav1g_set_inter_fast` does nothing and `Rav1gSettings::inter_fast` is refused
-until the next interface version). `testing/inter_check` now holds the default kernels alone against
+console results below (`rav1g_set_inter_fast` did nothing and `Rav1gSettings::inter_fast` was refused
+until interface version 4 removed both). `testing/inter_check` now holds the default kernels alone against
 libaom, with the same cases. The rest of this section is the record.
 
 It was off by default. `av1_set_inter_fast()` and `aom_codec_dec_cfg_t::inter_fast` in the library, `-interfast`

@@ -115,6 +115,19 @@ pub struct Task {
     /// has a key frame, as an application does that starts in the middle of a stream (AV1 7.6): the
     /// decoder is created for the first sequence header, and the temporal units before it are passed too.
     pub any_start: bool,
+    /// -flush <list>: the decoder is flushed (`Decoder::flush`, `rav1g_decoder_flush`) before it gets
+    /// each of these temporal units (counted from 0, the first the decoder gets; a number twice flushes
+    /// twice in a row; one at or past the end flushes behind the last unit, before the drain).
+    pub flush: Vec<i32>,
+    /// -flushdrain: a drain before each flush, whose errors count as part of the seek.
+    pub flush_drain: bool,
+    /// -flushrefuse: from the start of each flush (its drain, with -flushdrain) until it has returned,
+    /// the output refuses every image (`get_image` returns non-zero), as an application that seeks does.
+    pub flush_refuse: bool,
+    /// -refuse <list>: the output refuses every image during the decode calls of these temporal units
+    /// (counted as for -flush): the frame is decoded and not output (with -continue_on_error the task
+    /// goes on behind the error the call returns).
+    pub refuse: Vec<i32>,
     /// -alllayers: every shown frame of a temporal unit with spatial layers.
     pub all_layers: bool,
     /// -oppoint <n>: the operating point of a stream with layers.
@@ -186,6 +199,10 @@ impl Default for Task {
             poison: Poison::Off,
             continue_on_error: false,
             any_start: false,
+            flush: Vec::new(),
+            flush_drain: false,
+            flush_refuse: false,
+            refuse: Vec::new(),
             all_layers: false,
             parser_options: rav1g::ParserOptions::default(),
             oppoint: 0,
@@ -357,6 +374,17 @@ pub fn usage() {
     say!("  -anystart             the task starts with the first temporal unit, not the first key frame: the decoder");
     say!("                        is created for the first sequence header and given every temporal unit (a start");
     say!("                        in the middle of a stream, AV1 7.6; frames without decoded references are skipped)");
+    say!("  -flush <list>         flush the decoder (rav1g_decoder_flush, a seek) before it gets these temporal units");
+    say!("                        (from 0, the first it gets; twice in a row with a number twice; at or past the end");
+    say!("                        behind the last one): a 'FLUSH' line says how many frames came out before it, and a");
+    say!("                        frame of before the flush that comes out after it is a fault. The stream goes on");
+    say!("                        with the unit behind (testing/conformance/flush_check.py writes streams that jump)");
+    say!("  -flushdrain           a drain before each flush (its errors are part of the seek), as an application that");
+    say!("                        drains first does");
+    say!("  -flushrefuse          every image is refused from the start of each flush (its drain) until it returns,");
+    say!("                        as an application that seeks does (Rav1gOutput::get_image returns non-zero)");
+    say!("  -refuse <list>        every image is refused in the decode calls of these temporal units (from 0): their");
+    say!("                        frames are decoded and not output (with -continue_on_error the task goes on)");
     say!("  -keep_going           a task that ends with a decode error does not end the run: the tasks behind it");
     say!("                        are run in the same process");
     say!("  -memstate             'MEMSTATE ...' lines with the memory of the process and the video memory the");
@@ -489,6 +517,16 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-intraopt" => {}
             "-continue_on_error" => task.continue_on_error = true,
             "-anystart" => task.any_start = true,
+            "-flush" | "-refuse" => {
+                let text = value()?;
+                let list: Option<Vec<i32>> =
+                    text.split(',').map(|unit| unit.trim().parse().ok().filter(|&unit: &i32| unit >= 0)).collect();
+                let mut list = list.ok_or_else(|| format!("{a} {text}: temporal unit numbers like 0,0,12"))?;
+                list.sort_unstable();
+                if a == "-flush" { task.flush = list } else { task.refuse = list }
+            }
+            "-flushdrain" => task.flush_drain = true,
+            "-flushrefuse" => task.flush_refuse = true,
             "-poisonmi" => task.poison = Poison::ModeInfo,
             "-poisonbuf" => task.poison = Poison::Buffers,
             "-gputime" => task.gputime = true,

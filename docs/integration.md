@@ -3,23 +3,63 @@
 Answers to the questions of an application that plays streams with the decoder through `rav1g.h`,
 first asked for Bale's provider (2026-11-18). The contract is the header; this is how to use it.
 
-## Seeking: drain, and go on with the same decoder
+## Seeking: flush, and go on with the same decoder
 
-The decoder has no flush, and needs none: `rav1g_decoder_drain` waits for every frame in flight,
-hands each to the output, calls `end_of_frames`, and leaves the decoder ready for the next temporal
-unit. So a seek is:
+A seek is `rav1g_decoder_flush` (`Decoder::flush`; interface version 4, AV1 7.5 and 7.6): the decoder
+forgets the stream and starts again at the next random access point, as `dav1d_flush` does for dav1d,
+with the same decoder:
 
-1. Mark the frames that come out from now on as old (a generation number in `user_data`, which
-   `Rav1gFrame::user_data` carries back), and stop sending samples.
-2. `rav1g_decoder_drain`. The old frames arrive through `frame` and go straight back to the pool.
-   With more than one frame in parse it returns the error of a frame of before the seek, one a call:
-   call it until it returns `RAV1G_STATUS_OK`, and treat those errors as part of the seek, not as a
-   failure of the stream.
-3. Send the temporal units from the new place, starting with a key frame (a random access point). A
-   key frame refreshes every reference, so nothing of before the seek is used.
+1. Let a `get_image` that waits return non-zero (the decoder may be waiting in it for an image the
+   renderer holds), and stop sending samples.
+2. `rav1g_decoder_flush`, between two calls of the decoder. Every frame in parse is dropped where it is
+   (the parse threads stop at their next superblock), every frame that waits for its submission is not
+   recorded (no image is asked for), and every frame on the GPU is not handed over: its image comes back
+   through `unused` when the GPU is through with it, on the decoder's completion thread. Once the call
+   has returned, no frame given to the decoder before it reaches `frame`. `end_of_frames` is not called
+   (nothing was handed over; the return is the end). The result is `RAV1G_STATUS_OK`: the errors of the
+   dropped frames are not returned, a flush is not a failure (an error only for a decoder that stopped
+   with a panic earlier and decodes nothing any more).
+3. Send the temporal units from the new place, from a key frame or another random access point. The
+   reference slots are empty: no frame has been decoded into any of them (RefValid 0, 7.20), so the
+   frames that name a slot no frame was decoded into since are skipped, as at a start in the middle of
+   a stream ([next section](#starting-in-the-middle-of-a-stream-av1-76-random-access)): exactly the
+   frames a new decoder started there puts out. The sequence header and the HDR metadata that goes with
+   it are kept, so a stream whose sequence header is only in the container's codec data (Matroska's
+   `av1C` configOBUs) decodes without it; passing it again in front of the first unit does no harm (the
+   same sequence header is no new sequence).
 
-This costs the frames in flight, at most one a pipeline slot (2 to 4; at 4K 3 slots, about 20 ms of
-GPU each), and keeps the decoder's 0.5 GiB of device buffers where they are.
+Kept besides: the device buffers (0.5 GiB at 4K), the pipeline states, the threads, the settings, the
+count of skipped frames. A `SKIPPED` line for the frames skipped before the flush is written at the flush.
+
+What it costs (sized for the CPU limit: the call runs on the application's decode thread). Nothing is
+allocated, no buffer or pipeline is touched, no GPU work is waited for: the GPU frames in flight (at most
+one a pipeline slot and two `show_existing_frame` copies) finish behind the call and only their images
+come back. The call waits for three things, and a log line that is not an error has each
+(`FLUSH <n>: the parse <ms>, the queue of the submission thread <ms>, the output <ms>`):
+
+- the parse: the parse threads stop at their next superblock and park, the dropped frames end. Measured
+  on a desktop CPU under wine (1080p, `flush_check.py`): 0.07 to 0.5 ms, 2.6 ms once, with four frames
+  in parse.
+- the queue (more than one frame in parse): the frames of the queue are dropped in microseconds, but the
+  frame the submission thread has taken when the flush begins is recorded and submitted to its end, and
+  that may wait for a frame buffer or an image that a frame on the GPU holds, and for its `get_image`
+  (which the application answers at once in a seek: step 1). Under wine on lavapipe, a CPU rasteriser,
+  0 to 90 ms; on the console it is bounded by a frame's recording and one frame's GPU time, to be
+  measured there with the line.
+- the output: a `frame` call in progress when the flush begins (only that one: one that begins behind
+  the flush finds the new generation and hands nothing over). As long as the application's callback
+  takes: rav1g-dec's reads the image back and hashes it, 25 to 50 ms on lavapipe; a callback that
+  queues the frame takes microseconds.
+
+So with nothing in flight (after a drain) the call is about 0.1 ms; with frames in flight its own work
+stays under 1 ms and the rest is the waits above. The CPU work is well under the 1 to 2 ms of a frame's
+budget the decode thread can spare.
+
+Drain first, or not: a `rav1g_decoder_drain` before the flush hands over the frames in flight instead
+of dropping them, and waits for the GPU. An application that drops the old frames anyway (a generation
+number in `user_data`, which `Rav1gFrame::user_data` carries back) does not need it. With more than one
+frame in parse it returns the errors of frames of before the seek, one a call: call it until it returns
+`RAV1G_STATUS_OK`, and treat them as part of the seek.
 
 Destroying and creating a decoder works too, and is what a new sequence needs
 (`RAV1G_STATUS_NEEDS_RECONFIGURE`: larger frames or more bits a sample than the decoder was created
@@ -27,20 +67,21 @@ for). On the console (package 0.2.198, 3840x2176 10-bit): `rav1g_decoder_create`
 `rav1g_decoder_destroy` about 0.04 s, and the memory is back at once (the "MEMORY destroy" lines of
 a decoder with a budget callback show the usage fall buffer kind by buffer kind). The pipeline states
 are the device's and are not created again. So a recreate is about 0.15 s and a release and an
-allocation of the device buffers; draining is cheaper and has no moment at which the memory is
-counted twice.
+allocation of the device buffers; a flush is cheaper and has no moment at which the memory is counted
+twice.
 
-A seek that lands on a temporal unit that is not a key frame: the decoder still has the reference
-slots of before the seek, and they are valid to it (AV1 6.8.2: a frame was decoded into them). The
-frames up to the next key frame are decoded from those old pictures, without an error, and look wrong.
-For an exact start at a point that is not a key frame (an intra-only refresh point, a delayed random
-access point) the decoder has to forget its slots, and only a new decoder does that today (destroy and
-create, about 0.15 s, see above): it then starts as in the next section.
+Before interface version 4 the decoder had no flush: a seek was a drain, and the reference slots of
+before the seek stayed. A seek to a point that is not a full key frame (an open GOP's intra-only
+refresh point, a hidden key frame) then decoded the frames behind it from pictures of before the seek
+(wrong output, no error), or failed them with `RAV1G_STATUS_CORRUPT_FRAME` where a slot's frame had
+failed.
 
 ## Starting in the middle of a stream (AV1 7.6, random access)
 
 A decoder that is created and then given the temporal units from a point in the middle of a stream
-(the start of playback at a time other than 0, a new decoder after a seek):
+(the start of playback at a time other than 0, a new decoder after a seek), or a decoder after
+`rav1g_decoder_flush` ([Seeking](#seeking-flush-and-go-on-with-the-same-decoder): the same state, but
+the sequence header is kept):
 
 1. Pass the sequence header first: the codec data of the container (Matroska's `av1C` configOBUs,
    MP4's `av1C`) in front of the first temporal unit, or in it. The temporal units from the first key
@@ -49,7 +90,7 @@ A decoder that is created and then given the temporal units from a point in the 
 2. Pass the temporal units from the start point on, as they are. They need not start with a key frame.
 
 What comes out: a frame that names a reference slot no frame has been decoded into since the decoder
-was created (the spec's RefValid is 0), a `show_existing_frame` of such a slot, and a frame before the
+was created or flushed (the spec's RefValid is 0), a `show_existing_frame` of such a slot, and a frame before the
 first sequence header are skipped: not decoded, not output, no frame of the output pool taken, no GPU
 work, and `rav1g_decoder_decode` returns `RAV1G_STATUS_OK` for them (also with more than one frame in
 parse: a skipped frame takes no frame context and nothing waits for it). The slots a skipped frame would
@@ -73,8 +114,8 @@ The decoder counts what it skipped in one log line a run of skipped frames, not 
 (`rav1g_set_log_callback`, `is_error` false): `SKIPPED <n> frames (<m> of them shown) that name a
 reference slot no frame has been decoded into, or come before the first sequence header (random access,
 AV1 7.6); <total> since the decoder was created` (a frame before the first sequence header counts as not
-shown: nothing of it can be read), when the next frame is decoded or shown, at `rav1g_decoder_drain` and when the decoder is
-destroyed. An application that wants the number parses that line; nothing in `rav1g.h` changed for it.
+shown: nothing of it can be read), when the next frame is decoded or shown, at `rav1g_decoder_drain`, at
+`rav1g_decoder_flush` and when the decoder is destroyed. An application that wants the number parses that line; nothing in `rav1g.h` changed for it.
 
 What is still an error: a frame that names a slot whose frame failed (damaged data, the error of that
 frame is `RAV1G_STATUS_CORRUPT_FRAME`), a header that cannot be read. A stream that starts at its first
@@ -84,19 +125,32 @@ The check: `testing/conformance/random_access_check.py` cuts streams of the conf
 intra-only refresh point, a `show_existing_frame`, an inter frame and a key frame, with and without the
 sequence header in front, and holds what the decoder puts out, frame by frame, against the frames of
 the whole stream that its own reading of the headers says must come out (CI: `rust-conformance`, one and
-four frames in parse, through `rav1g.h` too).
+four frames in parse, through `rav1g.h` too). `testing/conformance/flush_check.py` does the same for a
+flush: streams that jump from a few units of their start to such a cut point (forward and back), a
+flush in between, with frames in flight, after a drain with the images refused, twice in a row.
 
 ## The image pool: `get_image` waits, it does not fail
 
-`Rav1gOutput::get_image` either fills the image and returns 0, or returns another value, and that
-**fails the temporal unit**: its frames are not decoded, and the frames that refer to them fail too,
-until the next key frame. The decoder does not retry. What the header says instead: "The call may wait
+`Rav1gOutput::get_image` either fills the image and returns 0, or returns another value, and then
+**that frame is not output**. It is decoded all the same: its reference slots hold it, and the frames
+that refer to it decode as ever (a refused image costs the output of one frame, not its references; up
+to interface version 3 the header said the temporal unit failed, which a frame did not, but a
+`show_existing_frame` with one frame in parse did: it dropped the rest of its temporal unit and the
+slot refresh of a shown key frame, 7.21). `rav1g_decoder_decode` (with more than one frame in parse a
+later call or `rav1g_decoder_drain`) returns `RAV1G_STATUS_MEMORY` with the detail "Failed to allocate
+output frame." for it. The decoder does not retry. What the header says instead: "The call may wait
 until the application has an image free; the decoder then waits with it." So with a fixed pool,
 `get_image` blocks until an image is back.
 
+Why decoded and not "never decoded": the frame's data was there and is decoded right; marking its slots
+failed would fail every frame behind it with `RAV1G_STATUS_CORRUPT_FRAME`, and marking them as never
+decoded (RefValid 0) would skip frames that decode right. A seek forgets the slots anyway, with the
+flush.
+
 - **Where it is called.** On the thread that calls `rav1g_decoder_decode`, or, with more than one
-  frame in parse (the default above 2560x1440), on a thread of the decoder. The pool has to be safe
-  between that thread, the completion thread (`frame`, `unused`) and whoever returns images.
+  frame in parse (the default above 2560x1440), on a thread of the decoder. `unused` comes on the
+  thread that took the image, or on the completion thread for the image of a frame a flush dropped. The
+  pool has to be safe between those threads, the completion thread (`frame`) and whoever returns images.
 - **How many the decoder holds.** An image is the decoder's from `get_image` until `frame` (or
   `unused`) has returned; then it is the application's. The decoder holds at most one image a
   pipeline slot (`rav1g_decoder_configuration().frame_slots`, at most 4) and one for each of the two
@@ -107,8 +161,9 @@ until the application has an image free; the decoder then waits with it." So wit
 - **A wait that has to end.** On a pause the renderer keeps its samples and gives nothing back, so the
   decoder may wait in `get_image` for as long as the pause lasts. A stop or a seek has to be able to
   end that wait: let `get_image` return a non-zero value when the stream is stopping or seeking. That
-  temporal unit fails, which does not matter for a stream that is stopped (the decoder is destroyed),
-  or for one that seeks (the next unit is a key frame). Treat that failure as the cancel it is.
+  frame is not output (the error of the call says so), which does not matter for a stream that is
+  stopped (the decoder is destroyed), or for one that seeks (`rav1g_decoder_flush` drops what is in
+  flight, and does not return such errors). Treat that error as the cancel it is.
 - **One size.** The texture of an image has the width and the height of the request (rounded up to
   even). Film keeps one frame size, but a stream with frame size changes inside a sequence (resize
   mode, spatial layers) asks for other sizes. A pool of one size can return non-zero for a request of
@@ -398,9 +453,9 @@ loses the declarations of the internal `av1_*` setters of the same switches; `av
 layout (640 bytes on x64, 22 GPU stages: `slot_clear`, `pred_count` and `pred_scan` keep their places and
 have no time any more).
 
-**Retired in 0.8.0-alpha.3, interface version 3 as before.** The declarations below stay exactly as they
-are (the fingerprint is `f4f314d6ea9678c2`), only their comments change, and they go with the next
-interface version:
+**Retired in 0.8.0-alpha.3, interface version 3 as before.** The declarations below stayed exactly as they
+were (the fingerprint is `f4f314d6ea9678c2`), only their comments changed, and they went with interface
+version 4 ([below](#interface-version-4-rav1g_decoder_flush-the-retired-declarations-out)):
 
 - the second intra path (`intra_v2.hlsl`, slower on the console): `rav1g_set_intra_v2` does nothing (a
   call with `true` writes a log line that is not an error, `rav1g_set_log_callback`, saying so), and
@@ -417,6 +472,44 @@ interface version:
 An application that sets neither field and calls neither function (Bale) changes nothing: the default
 path is the one it ran, and the library compiles 96 pipeline states at `rav1g_device_create` instead of
 the 106 of `v0.8.0-alpha.2` (`-intrafilterlegacy` took one, these two nine).
+
+## Interface version 4: `rav1g_decoder_flush`, the retired declarations out
+
+Fingerprint `f24269ad5a9dad3f` (`tools/rav1g-header/abi.txt`). What changed in `rav1g.h`:
+
+- **New:** `enum Rav1gStatus rav1g_decoder_flush(struct Rav1gDecoder *decoder)`, the seek
+  ([Seeking](#seeking-flush-and-go-on-with-the-same-decoder)); `Decoder::flush` in the Rust interface.
+- **Removed** (retired in 0.8.0-alpha.3, doing nothing since): `rav1g_set_intra_v2`,
+  `rav1g_set_inter_fast`, the constants `RAV1G_INTER_FAST_ON`, `_SINGLE_ORIGINAL`, `_COMPOUND_ORIGINAL`,
+  `_LISTS_ONLY`, and the two fields `Rav1gSettings::intra_v2` and `Rav1gSettings::inter_fast`. **The
+  layout of `Rav1gSettings` changed**: the two `bool`s were between `low_memory` and `packed_10x3`, and
+  every field behind them moves. An application recompiles against the new header and fills the settings
+  with `rav1g_settings_default` as before; one that set the two fields to false drops those lines.
+- **Comments that say more** (no declaration): `Rav1gOutput::get_image` returning non-zero costs that
+  frame's output only (it was said to fail the temporal unit; [The image pool](#the-image-pool-get_image-waits-it-does-not-fail));
+  `unused` also comes on the completion thread, for the images of frames a flush dropped; a flush calls
+  no `end_of_frames`.
+
+The library changed with it in one place an application of version 3 sees without a flush: with one frame
+in parse, a `show_existing_frame` whose image `get_image` refused no longer drops the rest of its temporal
+unit and the refresh of a shown key frame (7.21); it is not shown, and the decode call returns
+`RAV1G_STATUS_MEMORY`, as with more than one frame in parse.
+
+What an application (Bale's fork) adjusts:
+
+1. Take the new `rav1g.h`, check for `RAV1G_ABI_VERSION` 4 at load time, and resolve
+   `rav1g_decoder_flush`.
+2. Recompile: `Rav1gSettings` has another layout. Remove any use of the four removed declarations.
+3. On a seek, after the drain it does now (or instead of it: the drain is no longer needed), call
+   `rav1g_decoder_flush` once, before the first packet from the new place. Its `get_image` that
+   returns non-zero while it seeks stays as it is; the flush drops those frames and does not return
+   their errors. The frames that come out after the flush are all of the new place: the generation
+   check of `user_data` keeps working and finds nothing of before.
+4. Images of frames a flush dropped while the GPU wrote them come back through `unused` on the
+   decoder's completion thread (the pool is shared between threads already: `frame` comes on that
+   thread).
+5. After the flush, the packets from the new place go in as they are; the container's configOBUs need
+   not be passed again (the sequence header is kept), and passing them does no harm.
 
 ## Loading the library at run time: the interface version
 
@@ -435,6 +528,9 @@ the first of its four reserved words) adds the display pass: `Rav1gDisplay`, `Ra
 of version 1 recompiled against it and filling the settings with `rav1g_settings_default` gets the
 output of version 1. Version 3 (released in `v0.8.0-alpha.1`, fingerprint `f4f314d6ea9678c2`) takes the retired switches out and adds the display pass's
 source peak and input chroma ([Interface version 3](#interface-version-3-the-retired-switches-the-source-peak-and-the-input-chroma)).
+Version 4 (fingerprint `f24269ad5a9dad3f`, not released yet) adds `rav1g_decoder_flush` and removes the
+declarations retired in 0.8.0-alpha.3, with another layout of `Rav1gSettings`
+([Interface version 4](#interface-version-4-rav1g_decoder_flush-the-retired-declarations-out)).
 
 ## Releases
 

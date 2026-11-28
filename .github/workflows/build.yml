@@ -734,7 +734,7 @@ jobs:
             crates/rav1g/src/host/{compute,frame,shader_pick}.rs testing/shader_cache)
           parser_switches=$(changed "${shared[@]}" crates/rav1g-parse third_party/rav1d \
             tools/rav1g-parse-check tools/rav1g-dec/src/run.rs testing/stage_dump \
-            testing/conformance/{cut_tile_check.py,random_access_check.py,dump_tasks.txt} crates/rav1g/src/decoder.rs \
+            testing/conformance/{cut_tile_check.py,random_access_check.py,flush_check.py,dump_tasks.txt} crates/rav1g/src/decoder.rs \
             crates/rav1g/src/host/rav1d_host.rs crates/rav1g/src/host/rav1d_frames.rs \
             crates/rav1g/src/host/blocks.rs crates/rav1g/src/host/completion.rs \
             crates/rav1g/src/host/create.rs crates/rav1g/src/host/frame.rs crates/rav1g/src/host/types.rs \
@@ -1269,6 +1269,24 @@ jobs:
           python testing/conformance/random_access_check.py --tool out/rav1g-dec/rav1g-dec.exe "--tool-args=-capi" `
             --streams conformance-streams --out out/random-access
           if ($LASTEXITCODE -ne 0) { throw "random access check with rav1g-dec -capi: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
+
+      # A seek inside one decoder (rav1g_decoder_flush, interface version 4; AV1 7.5, 7.6, 7.20;
+      # testing/conformance/flush_check.py, docs/integration.md "Seeking"): streams of the two above that
+      # jump to such a cut point (forward and back), flushed at the jump with frames in flight, behind a
+      # drain with the images refused (Bale's fork), twice in a row, right after the creation and behind
+      # the last unit. The frames out after a flush are exactly those of a new decoder at the cut point,
+      # nothing of before comes out behind it, and every image comes back. Through the Rust interface and
+      # through rav1g.h, one frame in parse.
+      - name: Seek with a flush
+        if: ${{ !cancelled() && matrix.suite == 'lifecycle' }}
+        shell: pwsh
+        run: |
+          python testing/conformance/flush_check.py --tool out/rav1g-dec/rav1g-dec.exe `
+            --streams conformance-streams --out out/flush
+          if ($LASTEXITCODE -ne 0) { throw "flush check with rav1g-dec: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
+          python testing/conformance/flush_check.py --tool out/rav1g-dec/rav1g-dec.exe "--tool-args=-capi" `
+            --streams conformance-streams --out out/flush
+          if ($LASTEXITCODE -ne 0) { throw "flush check with rav1g-dec -capi: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
 
       # Order check (testing/conformance/order_check.py; docs/gpu-av1-decoder.md, "Padding of the mode info
       # record"): what a decoder writes must not depend on what the process decoded before. The sequences that
@@ -1949,6 +1967,11 @@ jobs:
           python testing/conformance/random_access_check.py --tool out/rav1g-dec/rav1g-dec.exe --frames-in-parse 4 `
             --streams conformance-streams --out out/random-access-frames
           if ($LASTEXITCODE -ne 0) { throw "random access check with four frames in parse: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
+          # The flush with four frames in parse: the parse threads stop on the dropped frames, nothing waits
+          # for one, and the submission thread drops the frames of its queue.
+          python testing/conformance/flush_check.py --tool out/rav1g-dec/rav1g-dec.exe --frames-in-parse 4 `
+            --streams conformance-streams --out out/flush-frames
+          if ($LASTEXITCODE -ne 0) { throw "flush check with four frames in parse: exit code $LASTEXITCODE (1: a check failed, 2: the check could not be done)" }
 
       # The frame buffer bound at the recording (docs/memory.md, candidate 5; -lowmemparts with 32): a
       # frame in parse has no frame buffer, takes it when it is recorded and counts its references then,

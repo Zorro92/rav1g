@@ -11,7 +11,7 @@
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -115,6 +115,12 @@ pub struct Run {
     perf_start: Mutex<Instant>,
     /// -sharedfence: the output fence of the task's decoder as opened through its shared handle.
     shared_fence: Mutex<Option<ID3D12Fence>>,
+    /// -flushrefuse, -refuse: the output refuses every image while this is set, and counts them.
+    refuse: AtomicBool,
+    refused: AtomicU32,
+    /// -flush: the user data of the last temporal unit the decoder got before the last flush. A frame
+    /// that comes out behind the flush with this or a smaller one was dropped by it: a fault.
+    flush_mark: AtomicU64,
 }
 
 impl Run {
@@ -348,6 +354,10 @@ impl Sink for Run {
     }
 
     fn rent(&self, request: &Request) -> Option<Rented> {
+        if self.refuse.load(Ordering::Acquire) {
+            self.refused.fetch_add(1, Ordering::Relaxed);
+            return None;
+        }
         match self.pool.rent(request) {
             Ok(buffer) => Some(buffer),
             Err(why) => {
@@ -451,6 +461,13 @@ impl Sink for Run {
                 ));
             }
             state.user_data = frame.user_data;
+            let mark = run.flush_mark.load(Ordering::Acquire);
+            if fault.is_none() && frame.user_data <= mark {
+                fault = Some(format!(
+                    "the frame of temporal unit {} came out behind a flush, which dropped the units up to {mark}",
+                    frame.user_data
+                ));
+            }
             if let Some(fault) = fault
                 && state.io_error.is_empty()
             {
@@ -702,6 +719,69 @@ impl DecoderSize {
     }
 }
 
+/// -flush: the flushes due before the decoder gets the temporal unit `unit` (from 0, the first it gets;
+/// `past_end`: the stream has ended, and every flush left is due), each behind a drain with -flushdrain
+/// and with the images refused from its start to its return with -flushrefuse. `user_data`: that of the
+/// last unit the decoder got. A 'FLUSH' line for each. Err: what failed.
+fn flushes_due(
+    run: &Run,
+    decoder: &mut TaskDecoder<Run>,
+    next: &mut usize,
+    unit: usize,
+    past_end: bool,
+    user_data: u64,
+) -> Result<(), String> {
+    let task = &run.task;
+    while let Some(&at) = task.flush.get(*next) {
+        if !past_end && at as usize != unit {
+            break;
+        }
+        *next += 1;
+        let refused_before = run.refused.load(Ordering::Relaxed);
+        if task.flush_refuse {
+            run.refuse.store(true, Ordering::Release);
+        }
+        // With -flushdrain: the frames in flight come out first, as an application that drains before
+        // it flushes has them; their errors (images refused, frames of before) are part of the seek.
+        let mut drain_errors = 0;
+        if task.flush_drain {
+            while let Err(error) = decoder.drain() {
+                drain_errors += 1;
+                if drain_errors > 64 {
+                    return Err(format!(
+                        "the drain before the flush at temporal unit {unit} does not end: {}",
+                        error.text
+                    ));
+                }
+            }
+        }
+        let out_before = run.frames.load(Ordering::Relaxed);
+        let start = Instant::now();
+        let flushed = decoder.flush();
+        let flush_ms = ms_since(start);
+        run.refuse.store(false, Ordering::Release);
+        // Nothing of before reaches the output any more: a frame of a unit up to this one is a fault.
+        run.flush_mark.store(user_data, Ordering::Release);
+        flushed.map_err(|error| format!("the flush before temporal unit {unit} failed: {error}"))?;
+        let out = run.frames.load(Ordering::Relaxed);
+        say!(
+            "FLUSH stream={} before temporal unit {}: {} frames out before it ({} of them during the flush), {:.3} ms{}{}",
+            task.name,
+            unit,
+            out,
+            out - out_before,
+            flush_ms,
+            if task.flush_drain { format!(", behind a drain with {drain_errors} errors") } else { String::new() },
+            if task.flush_refuse {
+                format!(", {} images refused", run.refused.load(Ordering::Relaxed) - refused_before)
+            } else {
+                String::new()
+            }
+        );
+    }
+    Ok(())
+}
+
 /// Creates the decoder for `size`; `info` is the sequence it is for. The error says what failed.
 fn create_decoder(
     run: &Arc<Run>,
@@ -842,6 +922,9 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
         bit_depth: AtomicU32::new(0),
         perf: shim::Perf::new(),
         perf_start: Mutex::new(Instant::now()),
+        refuse: AtomicBool::new(false),
+        refused: AtomicU32::new(0),
+        flush_mark: AtomicU64::new(0),
     });
     *CURRENT.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
         Some(Current { name: task.name.clone(), run: run.clone(), start: Instant::now(), timeout_s: task.timeout_s });
@@ -1057,13 +1140,27 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     // The number of the temporal unit, from 1, as the user data of the decode call: the frames have to
     // bring it back, in order (`picture`).
     let mut unit_number: u64 = 0;
+    // -flush: the next flush of the list.
+    let mut next_flush = 0;
+    // -refuse: the images of these units' decode calls are refused.
+    let refuse_unit = |unit: usize| task.refuse.binary_search(&(unit as i32)).is_ok();
     // -anystart: the temporal units in front of the first sequence header; the decoder has nothing to
     // decode them with and skips their frames.
     for unit in &early {
+        if let (Some(current), true) = (decoder.as_mut(), decode_error.is_empty())
+            && let Err(error) = flushes_due(&run, current, &mut next_flush, units as usize, false, unit_number)
+        {
+            decode_error = error;
+        }
         unit_number += 1;
         units += 1;
         if let (Some(current), true) = (decoder.as_mut(), decode_error.is_empty())
-            && let Err(error) = current.decode(unit, unit_number)
+            && let Err(error) = {
+                run.refuse.store(refuse_unit(units as usize - 1), Ordering::Release);
+                let decoded = current.decode(unit, unit_number);
+                run.refuse.store(false, Ordering::Release);
+                decoded
+            }
         {
             bitstream_error = true;
             decode_error = format!(
@@ -1078,12 +1175,18 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     }
     while limit != 0 {
         limit = limit.wrapping_sub(1);
-        unit_number += 1;
         let Some(current) = decoder.as_mut() else {
             break;
         };
+        if let Err(error) = flushes_due(&run, current, &mut next_flush, units as usize, false, unit_number) {
+            decode_error = error;
+            break;
+        }
+        unit_number += 1;
         let call_start = Instant::now();
+        run.refuse.store(refuse_unit(units as usize), Ordering::Release);
         let mut result = current.decode(reader.data(), unit_number);
+        run.refuse.store(false, Ordering::Release);
         if task.gputime {
             run.perf.add_decode_call(ms_since(call_start));
         }
@@ -1209,6 +1312,12 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
             }
         }
     }
+    // -flush: the flushes behind the last unit.
+    if let (Some(current), true) = (decoder.as_mut(), decode_error.is_empty())
+        && let Err(error) = flushes_due(&run, current, &mut next_flush, units as usize, true, unit_number)
+    {
+        decode_error = error;
+    }
     // Drain: joins the decoder's GPU completion thread, so every frame that was submitted has been handed
     // over.
     if let Some(decoder) = decoder.as_mut() {
@@ -1301,6 +1410,12 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     }
     if !dump_error.is_empty() && state.io_error.is_empty() {
         state.io_error = dump_error;
+    }
+    // -flush, -refuse: every image the decoder took came back (a frame, or unused), also those of the
+    // frames a flush dropped on the GPU.
+    let rented = run.pool.rented();
+    if (!task.flush.is_empty() || !task.refuse.is_empty()) && rented != 0 && state.io_error.is_empty() {
+        state.io_error = format!("{rented} output images did not come back from the decoder");
     }
     if !state.pool_error.is_empty() && !decode_error.is_empty() {
         decode_error = format!("{decode_error} ({})", state.pool_error);

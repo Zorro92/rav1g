@@ -716,6 +716,30 @@ impl<S: Sink> TaskDecoder<S> {
         }
     }
 
+    /// The decoder forgets the stream (a seek): the frames in flight are dropped, the reference slots
+    /// emptied (`Decoder::flush`, `rav1g_decoder_flush`).
+    pub fn flush(&mut self) -> Result<(), String> {
+        match self {
+            TaskDecoder::Rust(decoder) => decoder.flush().map_err(|error| error.to_string()),
+            TaskDecoder::C(decoder, _) => {
+                // SAFETY: a decoder of rav1g_decoder_create, used by this thread.
+                let status = unsafe { capi::rav1g_decoder_flush(*decoder) };
+                if status == Rav1gStatus::Ok {
+                    return Ok(());
+                }
+                // SAFETY: the decoder is valid.
+                Err(unsafe {
+                    format!(
+                        "{:?}: {} {}",
+                        status,
+                        c_text(capi::rav1g_decoder_error(*decoder)),
+                        c_text(capi::rav1g_decoder_error_detail(*decoder))
+                    )
+                })
+            }
+        }
+    }
+
     /// What the decoder was created with: threads, frames in parse, pipeline slots, and the bytes of its
     /// device buffers.
     pub fn configuration(&mut self) -> (u32, u32, u32, usize) {
