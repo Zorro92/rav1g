@@ -17,7 +17,7 @@ use std::ffi::{c_int, c_void};
 use windows::Win32::Graphics::Direct3D12::ID3D12Fence;
 use windows::core::Interface;
 
-use super::frame::{commit_command_buffer, prepare_command_buffer, release_unsubmitted_frame};
+use super::frame::{commit_command_buffer, give_back_unused_image, prepare_command_buffer, release_unsubmitted_frame};
 use super::log::log;
 use super::output::{copy_output, output_image};
 use super::perf::{av1_perf_ticks, perf_add, perf_callback, perf_collect, perf_now, ticks_to_ms};
@@ -207,7 +207,14 @@ unsafe fn completion_thread(dec: *mut Av1Core) {
             }
 
             if let Some(hw_img) = (*item).image.as_mut() {
-                if let Some(notify) = notify {
+                // The frame's image goes to the application only in the generation it was queued in: a
+                // flush raises it and then takes this lock, so that nothing it dropped is handed over once
+                // it has returned. The GPU is through with the image here, and the application gets it
+                // back unused.
+                let _output = (*dec).output_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if (*item).generation != (*dec).output_generation.load(std::sync::atomic::Ordering::Acquire) {
+                    give_back_unused_image(dec, hw_img);
+                } else if let Some(notify) = notify {
                     let mut img: aom_image_t = std::mem::zeroed();
                     copy_to_img(dec, hw_img, &mut img);
                     (*dec).image_pool.push(std::ptr::from_mut(hw_img));
@@ -432,6 +439,8 @@ pub(crate) unsafe extern "C" fn rav1g_decode_sef_submit(
         if let Some(image) = (*item).image.as_mut() {
             image.user_priv = (*pbi).user_priv;
         }
+        // The generation of the flushes: a frame queued before a flush is not handed over after it.
+        (*item).generation = (*dec).output_generation.load(std::sync::atomic::Ordering::Acquire);
         (*dec).gpu_waiting_queue.push(item);
     }
 }

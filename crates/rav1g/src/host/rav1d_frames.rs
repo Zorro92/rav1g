@@ -287,6 +287,9 @@ struct Shared {
     stop: bool,
     /// The submission thread ended with a panic.
     broken: bool,
+    /// A flush (`rav1g_decoder_flush`) drops the frames of the queue: an entry the submission thread
+    /// takes while this is set is not recorded or shown, and gives back what it holds.
+    dropping: bool,
 }
 
 /// The frames in parse of a decoder and the queue of their submission.
@@ -342,6 +345,7 @@ impl Frames {
                 failures: VecDeque::new(),
                 stop: false,
                 broken: false,
+                dropping: false,
             }),
             changed: Condvar::new(),
             by_sink: (0..sink_frames).map(|_| AtomicUsize::new(0)).collect(),
@@ -438,6 +442,18 @@ impl Frames {
         self.shared().failures.pop_front()
     }
 
+    /// A flush begins or has ended: while it is on, the entries the submission thread takes are
+    /// dropped ([`Self::finish`]).
+    pub(super) fn set_dropping(&self, dropping: bool) {
+        self.shared().dropping = dropping;
+        self.changed.notify_all();
+    }
+
+    /// The failures no decode call has returned yet are forgotten: those of frames a flush dropped.
+    pub(super) fn clear_failures(&self) {
+        self.shared().failures.clear();
+    }
+
     /// The submission thread ended with a panic.
     pub(super) fn broken(&self) -> bool {
         self.shared().broken
@@ -466,7 +482,7 @@ impl Frames {
     /// The decoder outlives the thread, and no other thread records frames of it.
     pub(super) unsafe fn run(&self) {
         loop {
-            let (index, ok) = {
+            let (index, ok, dropped) = {
                 let mut shared = self.shared();
                 loop {
                     if shared.stop {
@@ -474,13 +490,15 @@ impl Frames {
                     }
                     let head = shared.order.front().copied();
                     if let Some((index, ok)) = head.and_then(|index| Some((index, shared.parsed[index]?))) {
-                        break (index, ok);
+                        break (index, ok, shared.dropping);
                     }
                     shared = self.wait(shared);
                 }
             };
             // SAFETY: the entry at the head of the queue, whose parse has ended: it is this thread's.
-            let finished = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { self.finish(index, ok) }));
+            let finished = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+                if dropped { self.drop_entry(index) } else { self.finish(index, ok) }
+            }));
             let mut shared = self.shared();
             if finished.is_err() {
                 // A bug. The frame is in a state nothing is known about; the decoder decodes nothing
@@ -524,6 +542,31 @@ impl Frames {
             (*rec).mb.global_motion = (*rec).common.global_motion.as_mut_ptr();
             (*rec).user_priv = entry.user_priv;
             rec
+        }
+    }
+
+    /// The entry at the head of the queue, taken while a flush drops the frames of the queue: its frame is
+    /// not recorded and a shown frame gets no copy; no image is asked for and nothing fails. The entry
+    /// gives back its slot with the frame buffers and pieces of the pools its frame counted, and its
+    /// references on the frame descriptions (a description whose last reference goes returns its frame
+    /// buffer to the pool, AV1 7.20: the flush empties the reference slots).
+    ///
+    /// # Safety
+    /// The submission thread, with the entry at the head of the queue, whose parse has ended.
+    unsafe fn drop_entry(&self, index: usize) {
+        // SAFETY: the caller's contract: the entry is this thread's, and no thread parses into its slot.
+        unsafe {
+            let dec = self.dec;
+            let entry = &mut *self.entry(index);
+            let descriptions = &*self.descriptions;
+            if !entry.shown {
+                release_frame(dec, entry.td);
+            }
+            entry.td = std::ptr::null_mut();
+            for reference in std::mem::replace(&mut entry.refs, [std::ptr::null_mut(); 7]) {
+                descriptions.unref(dec, reference);
+            }
+            descriptions.unref(dec, std::mem::replace(&mut entry.cur, std::ptr::null_mut()));
         }
     }
 

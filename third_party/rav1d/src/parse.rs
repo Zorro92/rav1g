@@ -294,7 +294,8 @@ pub trait ParseSink: Send + Sync {
     /// tile, after its `tile_end` (if the tile got that far) and after the frame's CDFs were saved from
     /// it (AV1 7.20) and made available to the frames that load them. Comes for every tile of the frame
     /// before the frame's `frame_end`, also for a tile whose parse failed or did not begin, without the
-    /// lock of the scheduler.
+    /// lock of the scheduler. Not for the tiles of a frame that [`Parser::flush`] drops before they are
+    /// through: that frame's `frame_end` comes without it.
     fn tile_finish(&self, _frame: usize, _tile: usize) {}
 
     /// Whether the sink has work for a worker thread that has no task of the parser
@@ -312,7 +313,9 @@ pub trait ParseSink: Send + Sync {
 
     /// The parse of the frame has ended, with or without an error. Returns whether the frame stands:
     /// `false` fails a frame whose parse was good (the sink could not take it), and the parser then
-    /// treats it as it treats a frame with damaged data.
+    /// treats it as it treats a frame with damaged data. A frame that [`Parser::flush`] drops ends here
+    /// with `ok` false, on the thread of the flush, while every worker thread is parked, and maybe
+    /// without the `tile_finish` of some of its tiles.
     fn frame_end(&self, frame: usize, ok: bool) -> bool;
 }
 
@@ -493,20 +496,33 @@ impl Parser {
         self.c.broken.load(Ordering::SeqCst)
     }
 
-    /// Waits for the frames in parse and forgets the state of the stream (a seek, the end of a stream).
+    /// Forgets the state of the stream for a seek or any other break in the data (AV1 7.5, 7.6: the
+    /// decode goes on at a random access point). Between two calls of [`Self::send`].
+    ///
+    /// The frames in parse are dropped where they are, as upstream's `rav1d_flush` drops them: the worker
+    /// threads stop at their next superblock or task and park, and every frame that has begun ends at the
+    /// sink with `frame_end(.., false)`, on this thread, without the `tile_finish` of the tiles it had not
+    /// parsed through ([`ParseSink::frame_end`]). Nothing waits for the parse of a dropped frame; a sink
+    /// call of a worker that waits for room the frames in parse hold has to return when the sink is told
+    /// of the flush (rav1g's host stops its pools for it). The eight reference slots are empty and not
+    /// valid (RefValid 0, 7.20), and the data the parser kept is dropped.
+    ///
+    /// Kept, where upstream forgets it: the sequence header and the HDR metadata that goes with it
+    /// ([`ParseHdrMetadata`]), so that a stream whose sequence header is only in the codec data of its
+    /// container decodes again from the next random access point. A sequence header that comes again
+    /// and is the same is not a new sequence; one that differs is, as ever.
     pub fn flush(&self) {
-        if self.c.fc.len() > 1 {
-            self.wait();
-        } else {
-            loop {
-                let mut picture = Rav1dPicture::default();
-                match rav1d_get_picture(&self.c, &mut picture) {
-                    Ok(()) => {}
-                    Err(_) => break,
-                }
-            }
-        }
+        let kept = {
+            let state = self.c.state.try_lock().unwrap();
+            (
+                state.seq_hdr.clone(),
+                state.content_light.clone(),
+                state.mastering_display.clone(),
+            )
+        };
         rav1d_flush(&self.c);
+        let state = &mut *self.c.state.try_lock().unwrap();
+        (state.seq_hdr, state.content_light, state.mastering_display) = kept;
     }
 }
 

@@ -69,6 +69,20 @@ end. A skipped frame takes no frame context and nothing waits for it. In a strea
 start, which is a shown key frame (7.5), every slot is valid from the first frame on and nothing is
 skipped: the frames that are decoded, and how, are upstream's.
 
+**The flush** (`Parser::flush`, rav1g's `rav1g_decoder_flush` for a seek; AV1 7.5, 7.6). Upstream's
+`rav1d_flush` as it is (`lib.rs` unchanged): the frames in parse are dropped where they are (the worker
+threads stop at their next superblock and park), every slot is empty and RefValid 0, the data that was
+kept is dropped. `Parser::flush` (`parse.rs`, a file of rav1g) keeps across it what upstream forgets
+(`dav1d_flush` too): the sequence header and the HDR metadata that goes with it (content light level,
+mastering display), so that a stream whose sequence header is only in the codec data of its container
+decodes again from the next random access point; a sequence header that comes again and is the same is
+no new sequence. Until interface version 4 `Parser::flush` waited for the frames in parse instead, and
+nothing called it. A frame the flush drops ends at the sink with `frame_end(.., false)` on the thread of
+the flush, maybe without the `tile_finish` of the tiles it had not parsed through (`ParseSink`): rav1g's
+sink takes those tiles' block lists out of its queue there (`crates/rav1g-parse/src/sink.rs`), and its
+host lets a tile that waits for room in its pools go (`Pools::set_flushing`), so that every worker
+parks.
+
 ## Not copied
 
 - Everything outside `src` except `Cargo.toml`, `build.rs`, `rustfmt.toml` and the notices: the tests

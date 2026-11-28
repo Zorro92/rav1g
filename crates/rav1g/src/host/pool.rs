@@ -108,7 +108,8 @@ pub(crate) enum Take {
     Full,
     /// The replacement buffer did not fit the memory budget or could not be allocated.
     Refused,
-    /// The pools are closed: the decoder is being released, or it stopped with a panic.
+    /// The pools are closed: the decoder is being released, or it stopped with a panic; or a flush drops
+    /// the frames in parse ([`Pools::set_flushing`]).
     Stopped,
 }
 
@@ -240,6 +241,10 @@ struct State {
     /// The frames that have begun.
     begun: u64,
     stop: bool,
+    /// A flush drops the frames in parse (`rav1g_decoder_flush`): until it is through, a take gives
+    /// [`Take::Stopped`] and nothing waits, so that a tile that waits for room a frame in front holds
+    /// returns and its thread parks, as the flush needs.
+    flushing: bool,
     /// The test switch: see the module.
     test_wait: bool,
     grown: u8,
@@ -304,6 +309,7 @@ impl Pools {
                 frames: [frame(), frame(), frame(), frame()],
                 begun: 0,
                 stop: false,
+                flushing: false,
                 test_wait,
                 grown: 0,
                 retiring: 0,
@@ -395,7 +401,7 @@ impl Pools {
         let mut state = self.state();
         let mut waited = [false; 2];
         let taken = loop {
-            if state.stop {
+            if state.stop || state.flushing {
                 break Take::Stopped;
             }
             if state.frames[slot].refused & bit != 0 {
@@ -575,6 +581,14 @@ impl Pools {
         self.changed.notify_all();
     }
 
+    /// While a flush drops the frames in parse: a take gives [`Take::Stopped`] (the tile's frame fails,
+    /// and it is dropped anyway) and the takes that wait return. Off again when the parser's threads
+    /// have parked and the frames have ended.
+    pub(crate) fn set_flushing(&self, flushing: bool) {
+        self.state().flushing = flushing;
+        self.changed.notify_all();
+    }
+
     pub(crate) fn stats(&self) -> Stats {
         let state = self.state();
         Stats {
@@ -703,6 +717,28 @@ mod tests {
         let stats = pools.stats();
         assert_eq!((stats.waits_for_gpu, stats.waits_for_frame), (0, 2));
         assert_eq!(stats.peak[0], 20);
+    }
+
+    #[test]
+    fn a_flush_ends_the_wait_of_a_frame_behind_and_the_pools_go_on() {
+        // A flush (rav1g_decoder_flush) parks the parser's threads: a tile of the frame behind that waits
+        // for the frame in front would wait for ever, so the take returns while the flush is on.
+        let pools = Arc::new(Pools::new([20, 20, 20], [20, 20, 20]));
+        pools.begin(0, 20);
+        pools.begin(1, 20);
+        let (handle, done) = take_on_thread(&pools, 1, 16);
+        assert!(!done.load(Ordering::Acquire));
+        pools.set_flushing(true);
+        assert_eq!(handle.join().unwrap(), Take::Stopped);
+        assert_eq!(pools.take(0, Kind::ModeInfo, 1), Take::Stopped);
+        // The dropped frames end and give back what they hold; the pools serve the next frame as ever.
+        for slot in 0..2 {
+            pools.finish_parse(slot, false, |_, _, _| unreachable!("a dropped frame copies nothing"));
+            pools.release(slot, |_, _, _| {});
+        }
+        pools.set_flushing(false);
+        pools.begin(2, 20);
+        assert_eq!(piece(pools.take(2, Kind::ModeInfo, 4)), (0, 4));
     }
 
     #[test]

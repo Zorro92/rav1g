@@ -423,6 +423,9 @@ pub struct WaveStore {
 pub struct GpuWorkItem {
     pub data: *mut av1_frame_thread_data,
     pub image: *mut HwOutputImage,
+    /// `Av1Core::output_generation` when the item was queued: an image of an item of an earlier
+    /// generation (a frame that was on the GPU when a flush ran) goes back unused.
+    pub generation: u64,
 }
 
 impl av1_frame_thread_data {
@@ -537,6 +540,14 @@ pub struct Av1Core {
     pub gpu_waiting_queue: Queue<*mut GpuWorkItem>,
     /// The completion thread, while it runs.
     pub gpu_thread: Option<JoinHandle<()>>,
+    /// Raised by each flush (`rav1g_decoder_flush`): the completion thread hands over the images of
+    /// the work items of the current generation only (`GpuWorkItem::generation`), so that no frame
+    /// submitted before a flush reaches the application after it.
+    pub output_generation: std::sync::atomic::AtomicU64,
+    /// Held by the completion thread from its look at the generation of an item to the end of the
+    /// hand-over of its image; a flush takes it behind the rise of the generation, to wait for a
+    /// hand-over in progress.
+    pub output_lock: std::sync::Mutex<()>,
     pub tryhdr10x3: c_int,
     /// `aom_codec_dec_cfg_t::output_kind`: 1 for the semi-planar output (`output.rs`).
     pub output_kind: c_int,
@@ -624,6 +635,7 @@ impl Av1Core {
             (&raw mut (*dec).mi_chunks).write(Vec::new());
             (&raw mut (*dec).mem_stats).write(super::mem_stats::MemStats::new());
             (&raw mut (*dec).memory_lock).write(std::sync::Mutex::new(()));
+            (&raw mut (*dec).output_lock).write(std::sync::Mutex::new(()));
             let no_edges = || WaveStore {
                 tiles: Vec::new(),
                 columns: Vec::new(),

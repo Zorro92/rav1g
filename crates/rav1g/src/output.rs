@@ -441,18 +441,24 @@ impl Frame {
 /// thread.
 pub trait Output: Send + Sync {
     /// An image for a frame that is going to be output. The call may wait until the application has one
-    /// free: the decoder then waits with it, which is how an application holds the decoder back. `None`
-    /// fails the temporal unit.
+    /// free: the decoder then waits with it, which is how an application holds the decoder back. `None`:
+    /// the frame is not output. It is decoded all the same (a reference of the frames behind it), and
+    /// the decode call, or with more than one frame in parse a later call or the drain, returns
+    /// [`crate::ErrorCode::Memory`] ("Failed to allocate output frame.") for it. Called on the thread of
+    /// the decode calls, or with more than one frame in parse on a thread of the decoder.
     fn image(&self, request: &ImageRequest) -> Option<OutputImage>;
 
-    /// A frame is ready: the GPU has written it into its image. Frames arrive in output order.
+    /// A frame is ready: the GPU has written it into its image. Frames arrive in output order. On the
+    /// decoder's completion thread.
     fn frame(&self, frame: Frame);
 
-    /// An image the decoder took and did not write a frame into (a decode error behind the request).
+    /// An image the decoder took and did not write a frame into (a decode error behind the request), on
+    /// the thread that asked for it; or one of a frame that a flush dropped ([`crate::Decoder::flush`]),
+    /// on the completion thread, when the GPU is through with it.
     fn unused(&self, image: OutputImage) {
         drop(image);
     }
 
-    /// Every frame that was submitted before a drain has been handed over.
+    /// Every frame that was submitted before a drain has been handed over. Not called by a flush.
     fn end_of_frames(&self) {}
 }

@@ -1096,12 +1096,14 @@ impl SinkHost for SlotHost {
             let mut fb: av1_decoded_frame_buffer_t = std::mem::zeroed();
             let image_state = rav1g_decode_sef_begin(pbi, &mut fb);
             if image_state == 2 {
+                // The application has no image for the frame (or no completion thread could be had): it
+                // is not shown, and the decode call says so. The header is taken all the same, as a frame
+                // whose image is refused is still decoded: a key frame that is shown is the reference in
+                // every slot from here on (AV1 7.21), as with more than one frame in parse, and the rest
+                // of the temporal unit is decoded.
                 release_unsubmitted_frame(self.dec);
-                (*cm).cur_frame = std::ptr::null_mut();
                 state.fail(sys::AOM_CODEC_MEM_ERROR, "Failed to allocate output frame.");
-                return Err(());
-            }
-            if image_state >= 0 {
+            } else if image_state >= 0 {
                 rav1g_decode_sef_submit(pbi, image_state, &fb);
             }
             (*cm).cur_frame = std::ptr::null_mut();
@@ -1532,6 +1534,63 @@ impl Rav1dHost {
     }
 }
 
+impl Rav1dHost {
+    /// `rav1g_decoder_flush` for the parse and the frames that wait for their submission (AV1 7.5, 7.6:
+    /// the decode goes on at a random access point): the frames in parse are dropped where they are,
+    /// those in the queue of the submission thread are not recorded, every reference slot is empty, and
+    /// what failed is forgotten. A frame the submission thread is recording when the flush begins is
+    /// recorded and submitted (its image goes back unused, `rav1g_rav1d_flush`). The sequence header
+    /// stays (`Parser::flush`). The thread of the decode calls, between two of them.
+    ///
+    /// What it waits for: the parser's threads, for each the rest of a superblock or of a call of the
+    /// sink (nothing waits for the parse of a dropped frame: the pools let a tile that waits for room
+    /// go, `Pools::set_flushing`), and the submission thread, for the frame it records, if any (and the
+    /// `get_image` of that frame, which the application answers).
+    /// Returns the time of the parser's part and of the submission thread's part.
+    fn flush(&mut self) -> (std::time::Duration, std::time::Duration) {
+        let start = std::time::Instant::now();
+        let host = self.sink.host();
+        let dec = host.dec;
+        // SAFETY: the thread of the decode calls, between two of them: the state is this thread's.
+        unsafe { host.state() }.report_skipped();
+        let frames = host.frames.clone();
+        if let Some(frames) = &frames {
+            frames.set_dropping(true);
+        }
+        // SAFETY: the decoder of this parser, which lives longer.
+        let pools = unsafe { (*dec).pools.as_deref() };
+        if let Some(pools) = pools {
+            pools.set_flushing(true);
+        }
+        // Every frame that had begun has ended at the sink when this returns (`frame_end` with `false`,
+        // here or on a worker), and the parser's state is that of its creation but for the sequence.
+        self.parser.flush();
+        if let Some(pools) = pools {
+            pools.set_flushing(false);
+        }
+        let parsed = start.elapsed();
+        if let Some(frames) = &frames {
+            // The submission thread drops the entries of the queue, whose parse has ended.
+            frames.drain();
+            frames.set_dropping(false);
+            frames.clear_failures();
+        }
+        // SAFETY: as above; the frames that held references to the slots' descriptions have given them
+        // back or keep them until their GPU work is done (the frame buffers return to the pool then).
+        unsafe {
+            let state = host.state();
+            state.clear_map(dec);
+            state.failure = None;
+            if frames.is_none() {
+                // A frame of the last call that failed between its setup and its submission still has
+                // its slot: back to the pool now, as the next frame would give it back.
+                release_unsubmitted_frame(dec);
+            }
+        }
+        (parsed, start.elapsed() - parsed)
+    }
+}
+
 impl Drop for Rav1dHost {
     fn drop(&mut self) {
         // The submission thread first: the parser's threads end behind it (the fields are dropped in
@@ -1594,6 +1653,64 @@ pub(crate) unsafe extern "C" fn av1_decoder_configuration(
             *out = (*dec).device_bytes;
         }
     }
+}
+
+/// `rav1g_decoder_flush`: the decoder forgets the stream for a seek (AV1 7.5, 7.6) and is in the state of
+/// its creation but for the sequence header (and the HDR metadata that goes with it), its device buffers,
+/// pipeline states and threads, and its count of skipped frames.
+///
+/// Dropped, and never handed to the application: every frame in parse, every frame that waits for its
+/// submission, and every frame on the GPU, whose image goes back through the output's release callback
+/// when the GPU is through with it (on the completion thread, behind the frames before it). The output
+/// generation rises, and the flush then takes the lock the completion thread holds while it looks at the
+/// generation and hands an image over, so no frame of before reaches the application once this has
+/// returned. The reference slots are empty and not valid
+/// (RefValid 0: the frames that name them are skipped, as at a start in the middle of a stream), their
+/// frame buffers return to the pool (a buffer a frame on the GPU still reads, when that frame is through).
+/// The errors of the dropped frames are not returned. Nothing is allocated, and nothing is waited for but
+/// the parser's threads (the rest of a superblock each), the submission thread's frame in record, and a
+/// frame-ready callback in progress.
+///
+/// Returns `AOM_CODEC_OK`, or `AOM_CODEC_ERROR` for a decoder whose parser stopped with a panic (it
+/// decodes nothing any more).
+///
+/// # Safety
+/// `dec` is a decoder; `detail` is valid for writing; the thread the decoder is used from, between two
+/// of its calls.
+pub(crate) unsafe extern "C" fn rav1g_rav1d_flush(
+    dec: *mut Av1Core,
+    detail: *mut *const c_char,
+) -> sys::aom_codec_err_t {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let mut parts = Default::default();
+        if let Some(host) = (*dec).rav1d.as_mut() {
+            if host.broken || host.parser.broken() {
+                *detail = c"The parser stopped with a panic in an earlier call".as_ptr();
+                return sys::AOM_CODEC_ERROR;
+            }
+            parts = host.flush();
+        }
+        // The frames on the GPU: queued in the generation that ends here. The completion thread looks at
+        // the generation under the lock, so from the rise on it hands nothing of before over; the lock
+        // then waits for the one hand-over that began before the rise, if one did (not for a run of them:
+        // a hand-over that takes the lock behind it finds the new generation).
+        let start = std::time::Instant::now();
+        let generation = (*dec).output_generation.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+        drop((*dec).output_lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        let ms = |time: std::time::Duration| time.as_secs_f64() * 1000.0;
+        log(
+            false,
+            &format!(
+                "FLUSH {generation}: the parse {:.3} ms, the queue of the submission thread {:.3} ms, the output \
+                 {:.3} ms (rav1g_decoder_flush)",
+                ms(parts.0),
+                ms(parts.1),
+                ms(start.elapsed())
+            ),
+        );
+    }
+    sys::AOM_CODEC_OK
 }
 
 /// `rav1g_rav1d_drain` (`dx/av1_core.h`): behind the drain of a decoder, the error of a frame that was
@@ -1751,6 +1868,27 @@ mod tests {
         assert_eq!(obu_size(&[0x30, 1, 2]), None);
         assert_eq!(obu_size(&[]), None);
         assert_eq!(obu_size(&[0x32, 0x80]), None);
+    }
+
+    /// `rav1g_decoder_flush` right after the creation (before the parser exists, which the first decode
+    /// call makes) and twice in a row on a parser with four frames in parse, whose threads are idle and
+    /// park: OK each time, and each raises the output generation.
+    #[test]
+    fn a_flush_right_after_creation_and_twice_in_a_row() {
+        let mut dec = Av1Core::new().expect("memory for a decoder");
+        let dec = &raw mut *dec;
+        // SAFETY: an empty decoder; the parser is released before it.
+        unsafe {
+            let mut detail = std::ptr::null();
+            assert_eq!(rav1g_rav1d_flush(dec, &mut detail), sys::AOM_CODEC_OK);
+            (*dec).rav1d = Rav1dHost::new(dec, 4, 4, ParseOptions::from_bits(0), 0);
+            assert!((*dec).rav1d.as_ref().is_some_and(|host| host.sink.host().frames.is_some()));
+            for _ in 0..2 {
+                assert_eq!(rav1g_rav1d_flush(dec, &mut detail), sys::AOM_CODEC_OK);
+            }
+            assert_eq!((*dec).output_generation.load(std::sync::atomic::Ordering::Acquire), 3);
+            (*dec).rav1d = None;
+        }
     }
 
     #[test]

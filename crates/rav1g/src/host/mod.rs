@@ -36,7 +36,7 @@ pub(crate) use completion::av1_drain_gpu_decoder;
 pub(crate) use create::{
     av1_create_gpu_decoder, av1_destroy_gpu_decoder, av1_query_memory_requirements, decoder_own_bytes,
 };
-pub(crate) use rav1d_host::{av1_decoder_configuration, rav1g_rav1d_decode, rav1g_rav1d_drain};
+pub(crate) use rav1d_host::{av1_decoder_configuration, rav1g_rav1d_decode, rav1g_rav1d_drain, rav1g_rav1d_flush};
 pub(crate) use types::Av1Core;
 // The test switches, the timing run, the stage dumps and the pipeline cache: `switches.rs`, `device.rs` and
 // `capi.rs` call them.

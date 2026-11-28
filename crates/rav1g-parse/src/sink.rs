@@ -1352,7 +1352,17 @@ impl<H: SinkHost> ParseSink for Sink<H> {
         // No thread counts lists of the frame any more (each tile's `tile_finish` took its claim for
         // good); one that looks for lists may still read the vector. The lock waits for it, and the place
         // is then the frame's alone to give back.
-        drop(place.lists.write().unwrap_or_else(PoisonError::into_inner));
+        let lists = place.lists.write().unwrap_or_else(PoisonError::into_inner);
+        // A frame that a flush dropped (`Parser::flush`) ends without the `tile_finish` of the tiles it
+        // had not parsed through: their records leave the queue here, so that no thread looks for them
+        // once the place is free. No thread counts them now: the flush has parked every thread of the
+        // parser. For any other frame every tile has left the queue at its `tile_finish`.
+        for tile in lists.iter() {
+            if tile.queued.swap(false, Ordering::SeqCst) {
+                self.queued_tiles.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        drop(lists);
         // SAFETY: no tile of the frame is in parse any more, and the place is the frame's until it is
         // given back below.
         let failed = unsafe {

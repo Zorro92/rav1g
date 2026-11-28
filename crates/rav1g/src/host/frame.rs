@@ -422,15 +422,28 @@ pub(crate) unsafe extern "C" fn av1_release_fb_callback(private: *mut c_void, yb
         let img = ybf.hw_show_image;
         ybf.hw_show_image = std::ptr::null_mut();
         if let Some(img) = img.as_mut() {
-            if let Some(release_image) = (*dec).cb_release_image {
-                release_image((*dec).image_alloc_priv, img.alloc_priv);
-            }
-            img.fb_ptr = std::ptr::null_mut();
-            img.size = 0;
-            img.alloc_priv = std::ptr::null_mut();
-            img.is_valid = 0;
-            (*dec).image_pool.push(std::ptr::from_mut(img));
+            give_back_unused_image(dec, img);
         }
+    }
+}
+
+/// An output image the decoder took and wrote no frame into, or one a flush dropped, goes back to the
+/// application (`Rav1gOutput::unused`), and its entry to the decoder's pool of output images.
+///
+/// # Safety
+/// `dec` is the decoder and `img` an output image of it that holds an image of the application, which no
+/// GPU work in flight writes any more.
+pub(crate) unsafe fn give_back_unused_image(dec: *mut Av1Core, img: &mut HwOutputImage) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        if let Some(release_image) = (*dec).cb_release_image {
+            release_image((*dec).image_alloc_priv, img.alloc_priv);
+        }
+        img.fb_ptr = std::ptr::null_mut();
+        img.size = 0;
+        img.alloc_priv = std::ptr::null_mut();
+        img.is_valid = 0;
+        (*dec).image_pool.push(std::ptr::from_mut(img));
     }
 }
 
@@ -1701,6 +1714,8 @@ pub(crate) unsafe extern "C" fn rav1g_decode_frame_submit(
             (*image).user_priv = (*pbi).user_priv;
             buf.hw_show_image = std::ptr::null_mut();
         }
+        // The generation of the flushes: a frame queued before a flush is not handed over after it.
+        (*item).generation = (*dec).output_generation.load(std::sync::atomic::Ordering::Acquire);
         (*dec).gpu_waiting_queue.push(item);
     }
 }

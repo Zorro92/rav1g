@@ -522,12 +522,12 @@ impl Decoder {
     /// A start in the middle of a stream (AV1 7.6, random access): give the decoder the sequence header first
     /// (the codec data of the container, Matroska's av1C configOBUs, in front of the first temporal unit, or
     /// in it). A frame that names a reference slot no frame has been decoded into since the decoder was
-    /// created (or since a new sequence), a `show_existing_frame` of such a slot, and a frame before the
-    /// first sequence header are skipped: not decoded, not output, and no error (the call returns
-    /// `Ok` for them). The output starts with the first frame whose references were all
-    /// decoded, and is right from there on. The skipped frames are counted in a log line that is not an
-    /// error ([`crate::set_log_callback`]), "SKIPPED <n> frames ...", when the next frame is decoded or shown,
-    /// at a drain and when the decoder is destroyed (docs/integration.md).
+    /// created (or since a new sequence, or a [`Self::flush`]), a `show_existing_frame` of such a slot,
+    /// and a frame before the first sequence header are skipped: not decoded, not output, and no error
+    /// (the call returns `Ok` for them). The output starts with the first frame whose references were
+    /// all decoded, and is right from there on. The skipped frames are counted in a log line that is
+    /// not an error ([`crate::set_log_callback`]), "SKIPPED <n> frames ...", when the next frame is
+    /// decoded or shown, at a drain or a flush and when the decoder is destroyed (docs/integration.md).
     pub fn decode(&mut self, data: &[u8], user_data: u64) -> Result<(), Error> {
         if data.is_empty() {
             return Err(failed(sys::AOM_CODEC_INVALID_PARAM, std::ptr::null()));
@@ -565,6 +565,40 @@ impl Decoder {
             // returned may have failed: the drain says so, one error a call.
             host::rav1g_rav1d_drain(self.core, &mut detail)
         };
+        if code == sys::AOM_CODEC_OK { Ok(()) } else { Err(failed(code, detail)) }
+    }
+
+    /// Forgets the stream, for a seek or any other break in the input (AV1 7.5, 7.6: the decode goes on
+    /// at a random access point). Between two calls of the decoder: right after it was created, after a
+    /// drain, with frames in flight, twice in a row.
+    ///
+    /// - **Dropped, never handed over:** every frame in parse (the parse threads stop at their next
+    ///   superblock), every frame that waits for its submission (not recorded, no image asked for), and
+    ///   every frame on the GPU: its image comes back through [`Output::unused`] when the GPU is
+    ///   through with it, on the decoder's completion thread. Once this has returned no frame that was
+    ///   given to the decoder before it reaches [`Output::frame`]. [`Output::end_of_frames`] is not
+    ///   called: the return is the end, and nothing was handed over.
+    /// - **Emptied:** the eight reference slots: no frame has been decoded into any of them (RefValid 0),
+    ///   and their frame buffers go back to the pool (that of a frame on the GPU when it is through). The
+    ///   frames up to the next random access point are skipped as at a start in the middle of a stream
+    ///   ([`Self::decode`]).
+    /// - **Kept:** the sequence header and the HDR metadata that goes with it, so after a flush the
+    ///   application passes the temporal units from the new place on, from a key frame or another random
+    ///   access point, with or without the sequence header in front; the device buffers, the pipeline
+    ///   states, the threads, the settings.
+    ///
+    /// The errors of the dropped frames are not returned: the result is `Ok`, or an error only for a
+    /// decoder that stopped with a panic (it decodes nothing any more). Nothing is allocated. It waits
+    /// for the parse threads (the rest of a superblock each), for the frame the decoder's submission
+    /// thread records when it begins (with more than one frame in parse: its recording, which may wait
+    /// for a frame buffer a frame on the GPU holds, and its [`Output::image`] call, which the application
+    /// answers), and for a [`Output::frame`] call in progress; not for the GPU work of the frames in
+    /// flight. A log line that is not an error ("FLUSH <n>: ...") has the time of each part.
+    pub fn flush(&mut self) -> Result<(), Error> {
+        let mut detail = std::ptr::null();
+        // SAFETY: the decoder, between two of its calls; the detail lives until the next call of the
+        // decoder.
+        let code = unsafe { host::rav1g_rav1d_flush(self.core, &mut detail) };
         if code == sys::AOM_CODEC_OK { Ok(()) } else { Err(failed(code, detail)) }
     }
 
