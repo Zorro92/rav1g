@@ -95,18 +95,6 @@ pub const RAV1G_FRAMES_IN_PARSE_MAX: u32 = 4;
 /// `RAV1G_PARSER_OPTION_TIME_CALLS` to it; 0 is rav1d's parse without any of them.
 pub const RAV1G_PARSER_OPTIONS_DEFAULT: u32 = 2566;
 
-/// Retired in 0.8.0-alpha.3 with the fast inter path (`rav1g_set_inter_fast`, which does nothing): the path
-/// was on. The `RAV1G_INTER_FAST_*` values stay defined until the next interface version.
-pub const RAV1G_INTER_FAST_ON: u32 = 1;
-/// Retired in 0.8.0-alpha.3, as `RAV1G_INTER_FAST_ON`: the blocks with one reference were listed by class and
-/// predicted by the size-list shader.
-pub const RAV1G_INTER_FAST_SINGLE_ORIGINAL: u32 = 2;
-/// Retired in 0.8.0-alpha.3, as `RAV1G_INTER_FAST_ON`: the same for the averaged compound blocks.
-pub const RAV1G_INTER_FAST_COMPOUND_ORIGINAL: u32 = 4;
-/// Retired in 0.8.0-alpha.3, as `RAV1G_INTER_FAST_ON`: the lists of the fast inter path with the size-list
-/// shaders on all of them.
-pub const RAV1G_INTER_FAST_LISTS_ONLY: u32 = 7;
-
 /// `rav1g_set_poison_buffers`: the mode info pool.
 pub const RAV1G_POISON_MODE_INFO: u32 = 1;
 /// `rav1g_set_poison_buffers`: every buffer the CPU writes for the shaders, and the constants of every
@@ -696,26 +684,33 @@ impl From<&Rav1gContentLightLevel> for ContentLightLevel {
     }
 }
 
-/// The output of a decoder: where it gets its images and puts its frames. `get_image` and `unused` are
-/// called on the thread that calls `rav1g_decoder_decode` (or destroys the decoder), `frame` and
-/// `end_of_frames` on the decoder's completion thread. `get_image` and `frame` are needed.
+/// The output of a decoder: where it gets its images and puts its frames. `get_image` is called on the
+/// thread that calls `rav1g_decoder_decode` or, with more than one frame in parse, on a thread of the
+/// decoder; `unused` on the thread that asked for the image, or on the decoder's completion thread for the
+/// image of a frame a flush dropped (`rav1g_decoder_flush`); `frame` and `end_of_frames` on the completion
+/// thread. `get_image` and `frame` are needed.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Rav1gOutput {
     /// Passed to every callback.
     pub context: *mut c_void,
     /// An image for a frame that is going to be output: fills `image` and returns 0, or returns another
-    /// value, which fails the temporal unit. The call may wait until the application has an image free;
-    /// the decoder then waits with it.
+    /// value: the frame is then not output. It is decoded all the same (a reference of the frames behind
+    /// it, which decode as ever), and `rav1g_decoder_decode` (with more than one frame in parse a later
+    /// call or `rav1g_decoder_drain`) returns `RAV1G_STATUS_MEMORY` ("Failed to allocate output frame.")
+    /// for it. The call may wait until the application has an image free; the decoder then waits with
+    /// it. An application that seeks lets a waiting call return non-zero, then calls
+    /// `rav1g_decoder_flush` (docs/integration.md).
     pub get_image: Option<
         unsafe extern "C" fn(context: *mut c_void, request: *const Rav1gImageRequest, image: *mut Rav1gImage) -> i32,
     >,
     /// A frame is ready: the GPU has written it into its image. Frames arrive in output order. The image
     /// is the application's again when the call returns.
     pub frame: Option<unsafe extern "C" fn(context: *mut c_void, frame: *const Rav1gFrame)>,
-    /// An image the decoder took and did not write a frame into; `token` is `Rav1gImage::token`.
+    /// An image the decoder took and did not write a frame into, or the image of a frame a flush dropped
+    /// (when the GPU is through with it); `token` is `Rav1gImage::token`.
     pub unused: Option<unsafe extern "C" fn(context: *mut c_void, token: *mut c_void)>,
-    /// Every frame that was submitted before a drain has been handed over.
+    /// Every frame that was submitted before a drain has been handed over. A flush does not call it.
     pub end_of_frames: Option<unsafe extern "C" fn(context: *mut c_void)>,
 }
 
@@ -741,16 +736,6 @@ pub struct Rav1gSettings {
     /// The memory reductions: `RAV1G_LOW_MEMORY_DEFAULT`, which `rav1g_settings_default` sets, or the
     /// parts wanted added up, 0 for none.
     pub low_memory: u32,
-    /// Retired in 0.8.0-alpha.3 with the second intra path (`intra_v2.hlsl`, the test flag `-intrav2`): false,
-    /// as `rav1g_settings_default` sets it. `rav1g_decoder_create` refuses true with
-    /// `RAV1G_STATUS_INVALID_PARAM` and the reason in `rav1g_last_error`. The field keeps its place and is
-    /// removed with the next interface version.
-    pub intra_v2: bool,
-    /// Retired in 0.8.0-alpha.3 with the fast inter path (`inter_fast.hlsl`, the test flag `-interfast`): false,
-    /// as `rav1g_settings_default` sets it. `rav1g_decoder_create` refuses true with
-    /// `RAV1G_STATUS_INVALID_PARAM` and the reason in `rav1g_last_error`. The field keeps its place and is
-    /// removed with the next interface version.
-    pub inter_fast: bool,
     /// 10-bit frames are put out with three samples packed into 32 bits.
     pub packed_10x3: bool,
     /// The frame of every spatial layer of a temporal unit is output, instead of the highest one.
@@ -906,7 +891,7 @@ pub extern "C" fn rav1g_last_error() -> *const c_char {
 /// struct, an enum, a function), and not for a constant, a comment or a change inside the library.
 /// `rav1g_abi_version` returns the value the library was built with; an application that loads the
 /// library at run time compares the two and refuses a library with another value.
-pub const RAV1G_ABI_VERSION: u32 = 3;
+pub const RAV1G_ABI_VERSION: u32 = 4;
 
 /// `RAV1G_ABI_VERSION` of the `rav1g.h` the library was built with. A loader compares it with the
 /// constant of the header it was compiled with before it uses anything else of the library.
@@ -1122,8 +1107,6 @@ pub unsafe extern "C" fn rav1g_settings_default(settings: *mut Rav1gSettings) {
             threads: defaults.threads,
             frame_slots: defaults.frame_slots,
             low_memory: defaults.low_memory.0,
-            intra_v2: false,
-            inter_fast: false,
             packed_10x3: defaults.packed_10x3,
             output_all_layers: defaults.output_all_layers,
             operating_point: defaults.operating_point,
@@ -1337,25 +1320,6 @@ fn parser_options_invalid(bits: u32) -> Option<String> {
     })
 }
 
-/// Why a field of a path retired in 0.8.0-alpha.3 is refused: set, it asks for buffers and a path the
-/// library no longer has, which would otherwise be ignored without a word. None when the fields are
-/// those of `rav1g_settings_default`.
-fn retired_settings_invalid(settings: &Rav1gSettings) -> Option<&'static str> {
-    if settings.intra_v2 {
-        return Some(
-            "Rav1gSettings::intra_v2 is set: the second intra path (intra_v2.hlsl) was retired in 0.8.0-alpha.3; \
-             leave the field false",
-        );
-    }
-    if settings.inter_fast {
-        return Some(
-            "Rav1gSettings::inter_fast is set: the fast inter path (inter_fast.hlsl) was retired in 0.8.0-alpha.3; \
-             leave the field false",
-        );
-    }
-    None
-}
-
 /// Creates a decoder on a device; waits for the pipeline states of the device when they are still being
 /// created. `*decoder` is the decoder, or null with the reason as the result and in `rav1g_last_error`.
 /// The context of the output callbacks and of the budget callback must stay valid until
@@ -1383,9 +1347,6 @@ pub unsafe extern "C" fn rav1g_decoder_create(
     }
     if let Some(what) = parser_options_invalid(settings.parser_options) {
         return set_last_error(&Error::new(ErrorCode::InvalidParam, &what));
-    }
-    if let Some(what) = retired_settings_invalid(settings) {
-        return set_last_error(&Error::new(ErrorCode::InvalidParam, what));
     }
     if settings.output.get_image.is_none() || settings.output.frame.is_none() {
         return set_last_error(&Error::new(
@@ -1428,12 +1389,12 @@ fn keep(decoder: &mut Rav1gDecoder, result: Result<(), Error>) -> Rav1gStatus {
 /// A start in the middle of a stream (AV1 7.6, random access): give the decoder the sequence header first
 /// (the codec data of the container, Matroska's av1C configOBUs, in front of the first temporal unit, or
 /// in it). A frame that names a reference slot no frame has been decoded into since the decoder was
-/// created (or since a new sequence), a `show_existing_frame` of such a slot, and a frame before the
-/// first sequence header are skipped: not decoded, not output, and no error (the call returns
-/// `Rav1gStatus::Ok` for them). The output starts with the first frame whose references were all
+/// created (or since a new sequence, or a `rav1g_decoder_flush`), a `show_existing_frame` of such a
+/// slot, and a frame before the first sequence header are skipped: not decoded, not output, and no
+/// error (the call returns `Rav1gStatus::Ok` for them). The output starts with the first frame whose references were all
 /// decoded, and is right from there on. The skipped frames are counted in a log line that is not an
 /// error (`rav1g_set_log_callback`), "SKIPPED <n> frames ...", when the next frame is decoded or shown,
-/// at a drain and when the decoder is destroyed (docs/integration.md).
+/// at a drain or a flush and when the decoder is destroyed (docs/integration.md).
 ///
 /// # Safety
 /// `decoder` is a decoder of `rav1g_decoder_create`, used by one thread at a time; `data` is valid for
@@ -1497,6 +1458,46 @@ pub unsafe extern "C" fn rav1g_decoder_drain(decoder: *mut Rav1gDecoder) -> Rav1
         return Rav1gStatus::InvalidParam;
     };
     let result = decoder.decoder.drain();
+    keep(decoder, result)
+}
+
+/// Forgets the stream, for a seek or any other break in the input (AV1 7.5, 7.6: the decode goes on at a
+/// random access point). Called between two calls of the decoder: right after it was created, after a
+/// drain, with frames in flight, twice in a row. New in interface version 4.
+///
+/// Dropped, and never handed over: every frame in parse (the parse threads stop at their next
+/// superblock), every frame that waits for its submission (not recorded, no image asked for), and every
+/// frame on the GPU, whose image comes back through `Rav1gOutput::unused` when the GPU is through with
+/// it, on the decoder's completion thread. Once the call has returned, no frame that was given to the
+/// decoder before it reaches `Rav1gOutput::frame`. `Rav1gOutput::end_of_frames` is not called: the
+/// return is the end, and nothing was handed over.
+///
+/// Emptied: the eight reference slots. No frame has been decoded into any of them (the spec's
+/// RefValid), and their frame buffers go back to the pool (that of a frame on the GPU when it is
+/// through). The frames up to the next random access point are skipped as at a start in the middle of a
+/// stream (`rav1g_decoder_decode`). Kept: the sequence header and the HDR metadata that goes with it,
+/// the device buffers, the pipeline states, the threads and the settings. So after a flush the
+/// application passes the temporal units from the new place on, from a key frame or another random
+/// access point; the sequence header in front (the container's configOBUs) is not needed, and does no
+/// harm (docs/integration.md).
+///
+/// The result is `Rav1gStatus::Ok`: the errors of the dropped frames are not returned. An error only for
+/// a decoder that stopped with a panic in an earlier call (it decodes nothing any more). Nothing is
+/// allocated. The call waits for the parse threads (the rest of a superblock each), for the frame the
+/// decoder's submission thread records when it begins (with more than one frame in parse: its recording,
+/// which may wait for a frame buffer a frame on the GPU holds, and its `get_image`, which the application
+/// answers), and for a `Rav1gOutput::frame` call in progress; not for the GPU work of the frames in
+/// flight. A log line that is not an error ("FLUSH <n>: ...") has the time of each part.
+///
+/// # Safety
+/// `decoder` is a decoder of `rav1g_decoder_create`, used by one thread at a time.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rav1g_decoder_flush(decoder: *mut Rav1gDecoder) -> Rav1gStatus {
+    // SAFETY: the caller's contract.
+    let Some(decoder) = (unsafe { decoder.as_mut() }) else {
+        return Rav1gStatus::InvalidParam;
+    };
+    let result = decoder.decoder.flush();
     keep(decoder, result)
 }
 
@@ -1591,36 +1592,6 @@ pub unsafe extern "C" fn rav1g_decoder_destroy(decoder: *mut Rav1gDecoder) {
 
 // The process-wide switches: they hold for every decoder of the process and are changed while no frame
 // is in flight in any of them (before the first temporal unit, or after a drain).
-
-/// Retired in 0.8.0-alpha.3 with the second intra path (`intra_v2.hlsl`, the test flag `-intrav2`): does
-/// nothing, and every decoder takes the default intra path. A call with `true` writes a log line that is
-/// not an error (`rav1g_set_log_callback`) saying so. Removed with the next interface version.
-#[unsafe(no_mangle)]
-pub extern "C" fn rav1g_set_intra_v2(enable: bool) {
-    if enable {
-        crate::host::log::log(
-            false,
-            "rav1g_set_intra_v2: retired in 0.8.0-alpha.3, does nothing: intra prediction takes the default path",
-        );
-    }
-}
-
-/// Retired in 0.8.0-alpha.3 with the fast inter path (`inter_fast.hlsl`, the test flag `-interfast`): does
-/// nothing, whatever `mode` is, and every decoder takes the default inter path. A call with a mode that is not
-/// 0 writes a log line that is not an error (`rav1g_set_log_callback`) saying so. Removed, with the
-/// `RAV1G_INTER_FAST_*` values, with the next interface version.
-#[unsafe(no_mangle)]
-pub extern "C" fn rav1g_set_inter_fast(mode: u32) {
-    if mode != 0 {
-        crate::host::log::log(
-            false,
-            &format!(
-                "rav1g_set_inter_fast({mode}): retired in 0.8.0-alpha.3, does nothing: inter prediction takes the \
-                 default path"
-            ),
-        );
-    }
-}
 
 /// Experiment (a library whose `rav1g_shader_variant` is "shader-pick"): which bytecode the pipeline
 /// state of a shader is made of, in the devices created after the call. The build has two sets.
@@ -1847,20 +1818,5 @@ mod tests {
             let what = parser_options_invalid(RAV1G_PARSER_OPTIONS_DEFAULT | bit).expect("refused");
             assert!(what.contains(&format!("{bit:#x}")), "{what}");
         }
-    }
-
-    #[test]
-    fn the_fields_of_retired_paths_are_refused() {
-        let mut settings = std::mem::MaybeUninit::<Rav1gSettings>::zeroed();
-        // SAFETY: valid for writing.
-        unsafe { rav1g_settings_default(settings.as_mut_ptr()) };
-        // SAFETY: written by rav1g_settings_default.
-        let mut settings = unsafe { settings.assume_init() };
-        assert!(retired_settings_invalid(&settings).is_none());
-        settings.intra_v2 = true;
-        assert!(retired_settings_invalid(&settings).expect("refused").contains("intra_v2"));
-        settings.intra_v2 = false;
-        settings.inter_fast = true;
-        assert!(retired_settings_invalid(&settings).expect("refused").contains("inter_fast"));
     }
 }

@@ -47,6 +47,7 @@ const HEADER: &str = "\
  *   4. rav1g_decoder_decode per temporal unit. The decoder takes an image from the output for every frame
  *      that will be shown (get_image) and hands the frame over when the GPU has written it (frame).
  *      RAV1G_STATUS_NEEDS_RECONFIGURE: the stream went on with a sequence the decoder does not fit.
+ *      A seek: rav1g_decoder_flush, then the temporal units from the new place (docs/integration.md).
  *   5. rav1g_decoder_drain, rav1g_decoder_destroy, rav1g_device_destroy.
  *
  * Colour: the decoder puts out the samples of the stream and converts nothing. What they mean is in

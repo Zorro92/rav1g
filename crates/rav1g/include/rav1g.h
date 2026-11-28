@@ -21,6 +21,7 @@
  *   4. rav1g_decoder_decode per temporal unit. The decoder takes an image from the output for every frame
  *      that will be shown (get_image) and hands the frame over when the GPU has written it (frame).
  *      RAV1G_STATUS_NEEDS_RECONFIGURE: the stream went on with a sequence the decoder does not fit.
+ *      A seek: rav1g_decoder_flush, then the temporal units from the new place (docs/integration.md).
  *   5. rav1g_decoder_drain, rav1g_decoder_destroy, rav1g_device_destroy.
  *
  * Colour: the decoder puts out the samples of the stream and converts nothing. What they mean is in
@@ -160,29 +161,6 @@ typedef struct av1_stage_dump av1_stage_dump;
  `RAV1G_PARSER_OPTION_TIME_CALLS` to it; 0 is rav1d's parse without any of them.
  */
 #define RAV1G_PARSER_OPTIONS_DEFAULT 2566
-
-/*
- Retired in 0.8.0-alpha.3 with the fast inter path (`rav1g_set_inter_fast`, which does nothing): the path
- was on. The `RAV1G_INTER_FAST_*` values stay defined until the next interface version.
- */
-#define RAV1G_INTER_FAST_ON 1
-
-/*
- Retired in 0.8.0-alpha.3, as `RAV1G_INTER_FAST_ON`: the blocks with one reference were listed by class and
- predicted by the size-list shader.
- */
-#define RAV1G_INTER_FAST_SINGLE_ORIGINAL 2
-
-/*
- Retired in 0.8.0-alpha.3, as `RAV1G_INTER_FAST_ON`: the same for the averaged compound blocks.
- */
-#define RAV1G_INTER_FAST_COMPOUND_ORIGINAL 4
-
-/*
- Retired in 0.8.0-alpha.3, as `RAV1G_INTER_FAST_ON`: the lists of the fast inter path with the size-list
- shaders on all of them.
- */
-#define RAV1G_INTER_FAST_LISTS_ONLY 7
 
 /*
  `rav1g_set_poison_buffers`: the mode info pool.
@@ -384,7 +362,7 @@ typedef struct av1_stage_dump av1_stage_dump;
  `rav1g_abi_version` returns the value the library was built with; an application that loads the
  library at run time compares the two and refuses a library with another value.
  */
-#define RAV1G_ABI_VERSION 3
+#define RAV1G_ABI_VERSION 4
 
 /*
  How a call ended.
@@ -755,9 +733,11 @@ typedef struct Rav1gFrame {
 } Rav1gFrame;
 
 /*
- The output of a decoder: where it gets its images and puts its frames. `get_image` and `unused` are
- called on the thread that calls `rav1g_decoder_decode` (or destroys the decoder), `frame` and
- `end_of_frames` on the decoder's completion thread. `get_image` and `frame` are needed.
+ The output of a decoder: where it gets its images and puts its frames. `get_image` is called on the
+ thread that calls `rav1g_decoder_decode` or, with more than one frame in parse, on a thread of the
+ decoder; `unused` on the thread that asked for the image, or on the decoder's completion thread for the
+ image of a frame a flush dropped (`rav1g_decoder_flush`); `frame` and `end_of_frames` on the completion
+ thread. `get_image` and `frame` are needed.
  */
 typedef struct Rav1gOutput {
   /*
@@ -766,8 +746,12 @@ typedef struct Rav1gOutput {
   void *context;
   /*
    An image for a frame that is going to be output: fills `image` and returns 0, or returns another
-   value, which fails the temporal unit. The call may wait until the application has an image free;
-   the decoder then waits with it.
+   value: the frame is then not output. It is decoded all the same (a reference of the frames behind
+   it, which decode as ever), and `rav1g_decoder_decode` (with more than one frame in parse a later
+   call or `rav1g_decoder_drain`) returns `RAV1G_STATUS_MEMORY` ("Failed to allocate output frame.")
+   for it. The call may wait until the application has an image free; the decoder then waits with
+   it. An application that seeks lets a waiting call return non-zero, then calls
+   `rav1g_decoder_flush` (docs/integration.md).
    */
   int32_t (*get_image)(void *context, const struct Rav1gImageRequest *request, struct Rav1gImage *image);
   /*
@@ -776,11 +760,12 @@ typedef struct Rav1gOutput {
    */
   void (*frame)(void *context, const struct Rav1gFrame *frame);
   /*
-   An image the decoder took and did not write a frame into; `token` is `Rav1gImage::token`.
+   An image the decoder took and did not write a frame into, or the image of a frame a flush dropped
+   (when the GPU is through with it); `token` is `Rav1gImage::token`.
    */
   void (*unused)(void *context, void *token);
   /*
-   Every frame that was submitted before a drain has been handed over.
+   Every frame that was submitted before a drain has been handed over. A flush does not call it.
    */
   void (*end_of_frames)(void *context);
 } Rav1gOutput;
@@ -904,20 +889,6 @@ typedef struct Rav1gSettings {
    parts wanted added up, 0 for none.
    */
   uint32_t low_memory;
-  /*
-   Retired in 0.8.0-alpha.3 with the second intra path (`intra_v2.hlsl`, the test flag `-intrav2`): false,
-   as `rav1g_settings_default` sets it. `rav1g_decoder_create` refuses true with
-   `RAV1G_STATUS_INVALID_PARAM` and the reason in `rav1g_last_error`. The field keeps its place and is
-   removed with the next interface version.
-   */
-  bool intra_v2;
-  /*
-   Retired in 0.8.0-alpha.3 with the fast inter path (`inter_fast.hlsl`, the test flag `-interfast`): false,
-   as `rav1g_settings_default` sets it. `rav1g_decoder_create` refuses true with
-   `RAV1G_STATUS_INVALID_PARAM` and the reason in `rav1g_last_error`. The field keeps its place and is
-   removed with the next interface version.
-   */
-  bool inter_fast;
   /*
    10-bit frames are put out with three samples packed into 32 bits.
    */
@@ -1263,12 +1234,12 @@ enum Rav1gStatus rav1g_decoder_create(const struct Rav1gDevice *device,
  A start in the middle of a stream (AV1 7.6, random access): give the decoder the sequence header first
  (the codec data of the container, Matroska's av1C configOBUs, in front of the first temporal unit, or
  in it). A frame that names a reference slot no frame has been decoded into since the decoder was
- created (or since a new sequence), a `show_existing_frame` of such a slot, and a frame before the
- first sequence header are skipped: not decoded, not output, and no error (the call returns
- `Rav1gStatus::Ok` for them). The output starts with the first frame whose references were all
+ created (or since a new sequence, or a `rav1g_decoder_flush`), a `show_existing_frame` of such a
+ slot, and a frame before the first sequence header are skipped: not decoded, not output, and no
+ error (the call returns `Rav1gStatus::Ok` for them). The output starts with the first frame whose references were all
  decoded, and is right from there on. The skipped frames are counted in a log line that is not an
  error (`rav1g_set_log_callback`), "SKIPPED <n> frames ...", when the next frame is decoded or shown,
- at a drain and when the decoder is destroyed (docs/integration.md).
+ at a drain or a flush and when the decoder is destroyed (docs/integration.md).
 
  # Safety
  `decoder` is a decoder of `rav1g_decoder_create`, used by one thread at a time; `data` is valid for
@@ -1311,6 +1282,40 @@ const char *rav1g_decoder_error_detail(const struct Rav1gDecoder *decoder);
  `decoder` is a decoder of `rav1g_decoder_create`, used by one thread at a time.
  */
 enum Rav1gStatus rav1g_decoder_drain(struct Rav1gDecoder *decoder);
+
+/*
+ Forgets the stream, for a seek or any other break in the input (AV1 7.5, 7.6: the decode goes on at a
+ random access point). Called between two calls of the decoder: right after it was created, after a
+ drain, with frames in flight, twice in a row. New in interface version 4.
+
+ Dropped, and never handed over: every frame in parse (the parse threads stop at their next
+ superblock), every frame that waits for its submission (not recorded, no image asked for), and every
+ frame on the GPU, whose image comes back through `Rav1gOutput::unused` when the GPU is through with
+ it, on the decoder's completion thread. Once the call has returned, no frame that was given to the
+ decoder before it reaches `Rav1gOutput::frame`. `Rav1gOutput::end_of_frames` is not called: the
+ return is the end, and nothing was handed over.
+
+ Emptied: the eight reference slots. No frame has been decoded into any of them (the spec's
+ RefValid), and their frame buffers go back to the pool (that of a frame on the GPU when it is
+ through). The frames up to the next random access point are skipped as at a start in the middle of a
+ stream (`rav1g_decoder_decode`). Kept: the sequence header and the HDR metadata that goes with it,
+ the device buffers, the pipeline states, the threads and the settings. So after a flush the
+ application passes the temporal units from the new place on, from a key frame or another random
+ access point; the sequence header in front (the container's configOBUs) is not needed, and does no
+ harm (docs/integration.md).
+
+ The result is `Rav1gStatus::Ok`: the errors of the dropped frames are not returned. An error only for
+ a decoder that stopped with a panic in an earlier call (it decodes nothing any more). Nothing is
+ allocated. The call waits for the parse threads (the rest of a superblock each), for the frame the
+ decoder's submission thread records when it begins (with more than one frame in parse: its recording,
+ which may wait for a frame buffer a frame on the GPU holds, and its `get_image`, which the application
+ answers), and for a `Rav1gOutput::frame` call in progress; not for the GPU work of the frames in
+ flight. A log line that is not an error ("FLUSH <n>: ...") has the time of each part.
+
+ # Safety
+ `decoder` is a decoder of `rav1g_decoder_create`, used by one thread at a time.
+ */
+enum Rav1gStatus rav1g_decoder_flush(struct Rav1gDecoder *decoder);
 
 /*
  What the decoder was created with: the threads, the frames in parse and the pipeline slots, with the
@@ -1360,21 +1365,6 @@ enum Rav1gStatus rav1g_decoder_set_operating_point(struct Rav1gDecoder *decoder,
  `decoder` is null or a decoder of `rav1g_decoder_create`, which is not used afterwards.
  */
 void rav1g_decoder_destroy(struct Rav1gDecoder *decoder);
-
-/*
- Retired in 0.8.0-alpha.3 with the second intra path (`intra_v2.hlsl`, the test flag `-intrav2`): does
- nothing, and every decoder takes the default intra path. A call with `true` writes a log line that is
- not an error (`rav1g_set_log_callback`) saying so. Removed with the next interface version.
- */
-void rav1g_set_intra_v2(bool enable);
-
-/*
- Retired in 0.8.0-alpha.3 with the fast inter path (`inter_fast.hlsl`, the test flag `-interfast`): does
- nothing, whatever `mode` is, and every decoder takes the default inter path. A call with a mode that is not
- 0 writes a log line that is not an error (`rav1g_set_log_callback`) saying so. Removed, with the
- `RAV1G_INTER_FAST_*` values, with the next interface version.
- */
-void rav1g_set_inter_fast(uint32_t mode);
 
 /*
  Experiment (a library whose `rav1g_shader_variant` is "shader-pick"): which bytecode the pipeline
