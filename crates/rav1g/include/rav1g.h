@@ -174,6 +174,61 @@ typedef struct av1_stage_dump av1_stage_dump;
 #define RAV1G_POISON_BUFFERS 2
 
 /*
+ `Rav1gDeviceSettings::prepare`, the default: every pipeline state (96) is compiled at the device
+ creation, as before interface version 4.
+ */
+#define RAV1G_PREPARE_ALL 0
+
+/*
+ `Rav1gDeviceSettings::prepare` with `RAV1G_PREPARE_ONLY`: the states of 8-bit streams (prediction,
+ reconstruction, loop filter; 17 states).
+ */
+#define RAV1G_PREPARE_BIT_DEPTH_8 1
+
+/*
+ The states of streams of more than 8 bits (17).
+ */
+#define RAV1G_PREPARE_BIT_DEPTH_10 2
+
+/*
+ The display pass (`Rav1gSettings::display`) of SDR frames (`RAV1G_DISPLAY_TRANSFORM_SCALE` and
+ `_GAMUT`): one state.
+ */
+#define RAV1G_PREPARE_DISPLAY_SDR 4
+
+/*
+ The display pass of PQ frames: one state.
+ */
+#define RAV1G_PREPARE_DISPLAY_PQ 8
+
+/*
+ The display pass of HLG frames: one state.
+ */
+#define RAV1G_PREPARE_DISPLAY_HLG 16
+
+/*
+ Film grain synthesis (3 states).
+ */
+#define RAV1G_PREPARE_FILM_GRAIN 32
+
+/*
+ The super-resolution upscale (2 states).
+ */
+#define RAV1G_PREPARE_SUPERRES 64
+
+/*
+ Inter prediction from references of another frame size, of the bit depths named (8 states a depth).
+ */
+#define RAV1G_PREPARE_SCALED_REFERENCES 128
+
+/*
+ Only the states of the `RAV1G_PREPARE_*` bits next to it, and those every stream needs (the
+ transforms, CDEF, loop restoration, the copies and block lists: 38 states). Without it the value is
+ `RAV1G_PREPARE_ALL`, whatever else it has.
+ */
+#define RAV1G_PREPARE_ONLY 1073741824
+
+/*
  `Rav1gColorInfo::primaries`, the values an application meets (AV1 specification 6.4.2, ITU-T H.273):
  BT.709, which is also sRGB.
  */
@@ -516,6 +571,12 @@ typedef struct Rav1gStreamInfo {
    sequence; HDR metadata is not in a sequence header and comes with the frames.
    */
   struct Rav1gColorInfo color;
+  /*
+   `film_grain_params_present` and `enable_superres` of the sequence header: its frames can have
+   film grain, super-resolution. New in interface version 4 (`Rav1gSettings::stream`).
+   */
+  bool film_grain_params_present;
+  bool enable_superres;
 } Rav1gStreamInfo;
 
 /*
@@ -557,6 +618,33 @@ typedef struct Rav1gContentLightLevel {
    */
   uint16_t max_frame_average_light_level;
 } Rav1gContentLightLevel;
+
+/*
+ What a device is created with (`rav1g_device_create_with_settings`). Zero in every field but
+ `pipeline_threads` is the device of `rav1g_device_create`. New in interface version 4.
+ */
+typedef struct Rav1gDeviceSettings {
+  /*
+   The threads that compile the pipeline states, 6 at most (the console's 4 cores give no gain
+   beyond 4): the prepared states while the creation returns (`rav1g_device_wait_pipelines` waits
+   for them), and the states a decoder creation needs that are not prepared, next to the creating
+   thread. With 0 the creation compiles the prepared states itself, and a decoder creation its own.
+   */
+  uint32_t pipeline_threads;
+  /*
+   Which states are compiled at the creation: `RAV1G_PREPARE_ALL` (0), or `RAV1G_PREPARE_ONLY` with
+   the `RAV1G_PREPARE_*` bits of the streams the application is going to play, for a shorter
+   creation that takes less memory. A decoder creation compiles what its stream needs that is not
+   prepared and waits only for that (`Rav1gSettings::stream`); a state a later frame needs is
+   compiled then, the frame waiting for it. No state is ever used before it exists, and the frames
+   are the same either way (docs/integration.md, "Preparing the pipeline states").
+   */
+  uint32_t prepare;
+  /*
+   Zero.
+   */
+  uint32_t reserved[6];
+} Rav1gDeviceSettings;
 
 /*
  What the decoder needs an output image for: a frame that is going to be output.
@@ -990,6 +1078,17 @@ typedef struct Rav1gSettings {
    `rav1g_settings_default` sets) is none. New in interface version 2, behind `output`.
    */
   struct Rav1gDisplay display;
+  /*
+   What `rav1g_peek_stream_info` says of the temporal unit with the key frame the decoder starts
+   with. Its bit depth, colour, film grain and super-resolution say which pipeline states the
+   creation compiles when the device has not prepared them (`Rav1gDeviceSettings::prepare`;
+   docs/integration.md, "Preparing the pipeline states"); the scaled-reference states of its depth
+   are compiled in the background behind it. A `bit_depth` of 0 (what `rav1g_settings_default` sets)
+   is not known: the creation then waits for every state the other settings allow (both bit depths
+   when `bit_depth` is above 8, the three display modes, film grain, super-resolution). The frames
+   are the same either way. New in interface version 4, behind `display`.
+   */
+  struct Rav1gStreamInfo stream;
 } Rav1gSettings;
 
 /*
@@ -1134,10 +1233,11 @@ size_t rav1g_color_text(const struct Rav1gColorInfo *color,
 /*
  A device for decoders. `d3d12_device` is the application's `ID3D12Device *`, or null for a device of
  the decoder's own on the first hardware adapter; `d3d12_queue` is the direct `ID3D12CommandQueue *` the
- decoders submit to, or null for a queue of the decoder's own. The decoder's compute pipeline states
- are created on `pipeline_threads` threads (6 at most) while the call returns
- (`rav1g_device_wait_pipelines`), or by this call with 0. Null when the device, the queue or a pipeline
- layout could not be created, or the device does not support Shader Model 6.0 (`rav1g_last_error`).
+ decoders submit to, or null for a queue of the decoder's own. Every compute pipeline state of the
+ decoder is created, on `pipeline_threads` threads (6 at most) while the call returns
+ (`rav1g_device_wait_pipelines`), or by this call with 0: `rav1g_device_create_with_settings` with
+ `RAV1G_PREPARE_ALL`. Null when the device, the queue or a pipeline layout could not be created, or the
+ device does not support Shader Model 6.0 (`rav1g_last_error`).
 
  # Safety
  The pointers are null or valid interfaces of the kinds named.
@@ -1145,8 +1245,22 @@ size_t rav1g_color_text(const struct Rav1gColorInfo *color,
 struct Rav1gDevice *rav1g_device_create(void *d3d12_device, void *d3d12_queue, uint32_t pipeline_threads);
 
 /*
- Waits until every pipeline state of the device exists; the first decoder creation does the same. An
- error when one could not be created; the log names it.
+ `rav1g_device_create` with the pipeline states of `settings` prepared. Null as there, and for a
+ `prepare` with a bit that is not a `RAV1G_PREPARE_*` or a nonzero reserved field
+ (`rav1g_last_error`).
+
+ # Safety
+ The pointers are null or valid interfaces of the kinds named; `settings` is valid.
+ */
+struct Rav1gDevice *rav1g_device_create_with_settings(void *d3d12_device,
+                                                      void *d3d12_queue,
+                                                      const struct Rav1gDeviceSettings *settings);
+
+/*
+ Waits until every pipeline state the device prepared exists (`Rav1gDeviceSettings::prepare`; all of
+ them for a device of `rav1g_device_create`); the calling thread compiles those no thread has begun.
+ The first decoder creation waits for the states its stream needs. An error when one could not be
+ created; the log names it.
 
  # Safety
  `device` is a device of `rav1g_device_create`.

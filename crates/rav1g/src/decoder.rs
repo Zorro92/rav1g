@@ -163,6 +163,15 @@ pub struct Settings {
     /// The display pass: every output image the frame downscaled and tone-mapped to BT.709 SDR at a
     /// display size, written in place of the frame ([`Display`]). The default is none.
     pub display: Display,
+    /// What [`crate::peek_stream_info`] says of the stream's sequence header (the temporal unit with the
+    /// key frame the decoder starts with): its bit depth, colour, film grain and super-resolution say
+    /// which pipeline states the creation compiles when the device has not prepared them
+    /// (docs/integration.md, "Preparing the pipeline states"). `None`, or a bit depth of 0, is not
+    /// known: the creation then waits for every state its settings allow (both bit depths for a
+    /// decoder of more than 8 bits, the three display modes, film grain, super-resolution). The
+    /// decoder decodes the same either way; a later sequence that needs other states has them compiled
+    /// when its first frame is set up.
+    pub stream: Option<crate::StreamInfo>,
 }
 
 impl Default for Settings {
@@ -187,6 +196,7 @@ impl Default for Settings {
             memory_available: None,
             memory_headroom: 0,
             display: Display::default(),
+            stream: None,
         }
     }
 }
@@ -240,7 +250,49 @@ impl Settings {
         cfg.parser_options = self.parser_options.bits() as c_int;
         // Settings with an error are refused by `Decoder::new` before it gets here.
         cfg.display = self.display.resolve(self.bit_depth).unwrap_or_default();
+        (cfg.pipelines_needed, cfg.pipelines_later) = self.pipeline_classes(&cfg.display);
         cfg
+    }
+
+    /// The classes of pipeline states the creation of a decoder of these settings waits for, and those
+    /// its stream may need later, which are compiled in the background (`host::class`): the core and
+    /// the stream's bit depth (both for a decoder of more than 8 bits whose stream is not known), the
+    /// display pass of its transfer, film grain and super-resolution when its sequence header has them;
+    /// later the scaled-reference inter states of its depths, which any inter frame can need after a
+    /// change of the frame size (AV1 7.11.3.3).
+    fn pipeline_classes(&self, display: &sys::av1_display_cfg) -> (u32, u32) {
+        use host::class;
+        let stream = self.stream.filter(|stream| stream.bit_depth != 0);
+        let depths = match stream {
+            Some(stream) => class::depth(stream.bit_depth > 8),
+            None if self.bit_depth > 8 => class::DEPTH_8 | class::DEPTH_10,
+            None => class::DEPTH_8,
+        };
+        let mut needed = class::CORE | depths;
+        if stream.is_none_or(|stream| stream.film_grain_params_present) {
+            needed |= class::FILM_GRAIN;
+        }
+        if stream.is_none_or(|stream| stream.enable_superres) {
+            needed |= class::SUPERRES;
+        }
+        if self.display.is_on() {
+            needed |= match stream {
+                Some(stream) => class::display(host::mode_of_stream(
+                    stream.color.primaries.0,
+                    stream.color.transfer_characteristics.0,
+                    display,
+                )),
+                None => class::DISPLAY,
+            };
+        }
+        let mut later = 0;
+        if depths & class::DEPTH_8 != 0 {
+            later |= class::SCALED_8;
+        }
+        if depths & class::DEPTH_10 != 0 {
+            later |= class::SCALED_10;
+        }
+        (needed, later)
     }
 
     /// The memory a decoder of these settings takes.

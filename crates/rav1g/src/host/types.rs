@@ -66,12 +66,21 @@ pub struct dx_compute_context {
     pub command_list: Option<CommandList>,
 }
 
+/// A pipeline of the shader library (`compute.rs`). The layout, the bytecode and where the slot is in its
+/// library are set when the library is made; the pipeline state when it is compiled, which can be later
+/// (docs/integration.md, "Preparing the pipeline states"): `ready` says it exists, and `core::pipeline`
+/// waits for it when it does not yet.
 #[repr(C)]
 pub struct ComputeShader {
     pub pso: Option<ID3D12PipelineState>,
     pub signaturePtr: Option<ID3D12RootSignature>,
     pub bytecode: *const u8,
     pub size: usize,
+    /// Set (release) behind `pso`; read (acquire) before it.
+    pub ready: std::sync::atomic::AtomicBool,
+    /// The place of the pipeline in its library, and the library.
+    pub index: u32,
+    pub library: *const c_void,
 }
 
 #[repr(C)]

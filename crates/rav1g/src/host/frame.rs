@@ -1094,8 +1094,47 @@ pub(crate) unsafe fn setup_frame_end(
                 c_int::from(gm.wmtype as c_int > TRANSLATION && gm.invalid == 0 && !sf.is_some_and(is_scaled));
         }
         perf_add(dec, sys::AV1_PERF_CPU_SETUP as usize, perf_start);
+        // The pipeline states the frame needs (docs/integration.md, "Preparing the pipeline states"):
+        // nothing to do when their classes are ready, which is every frame of a stream whose decoder
+        // creation prepared them; else they are compiled now, before the frame's tiles are parsed and
+        // long before it is recorded, and a state that cannot be created fails the frame here.
+        let classes = frame_pipeline_classes(dec, cm, td);
+        if super::compute::prepare_for_frame((*dec).shader_lib, classes, td.frame_number) != 0 {
+            return SETUP_NO_PIPELINE;
+        }
     }
     0
+}
+
+/// [`setup_frame_end`]: a pipeline state the frame needs could not be created.
+pub(crate) const SETUP_NO_PIPELINE: c_int = -2;
+
+/// The classes of the pipeline states a frame's command list may take (`compute::class`): the core and
+/// the frame's bit depth, the scaled-reference inter states when a reference has another size, film
+/// grain, the upscale of superres, and the display pass of the frame's transfer.
+///
+/// # Safety
+/// `dec` is the decoder; `td` the slot of the frame of `cm`, set up as far as its scale factors.
+unsafe fn frame_pipeline_classes(dec: *const Av1Core, cm: &AV1_COMMON, td: &av1_frame_thread_data) -> u32 {
+    use super::compute::class;
+    let hbd = td.is_hbd != 0;
+    let mut classes = class::CORE | class::depth(hbd);
+    if td.scale_enable != 0 {
+        classes |= class::scaled(hbd);
+    }
+    if td.do_filmgrain != 0 {
+        classes |= class::FILM_GRAIN;
+    }
+    if td.do_superres != 0 {
+        classes |= class::SUPERRES;
+    }
+    // SAFETY: the caller's contract.
+    let display = unsafe { &(*dec).display };
+    // SAFETY: the same.
+    if display.width != 0 && unsafe { (*dec).output_kind } != 0 {
+        classes |= class::display(super::display_pass::choose(&cm.seq_params, display).mode);
+    }
+    classes
 }
 
 /// What a tile thread starts a tile with ([`setup_tile`]).

@@ -60,9 +60,10 @@ const PLAYER_SMOKE_TIMEOUT_S: i32 = 1500;
 static VERBOSE: AtomicBool = AtomicBool::new(false);
 
 fn decoder_log_line(is_error: bool, line: &str) {
-    if line.starts_with("MEMSTATS ") || line.starts_with("SKIPPED ") || line.starts_with("FLUSH ") {
-        // -memstats, the frames skipped at a start in the middle of a stream, and the parts of a flush's
-        // time: the lines of the decoder as they are.
+    if ["MEMSTATS ", "SKIPPED ", "FLUSH ", "PIPELINE "].iter().any(|kind| line.starts_with(kind)) {
+        // -memstats, the frames skipped at a start in the middle of a stream, the parts of a flush's
+        // time, and what the pipeline states took and when they were compiled (-prepare, -preparetest):
+        // the lines of the decoder as they are.
         say!("{line}");
     } else if is_error || VERBOSE.load(Ordering::Relaxed) {
         say!("{}{}", if is_error { "DECODER ERROR: " } else { "decoder: " }, line);
@@ -192,9 +193,15 @@ fn real_main() -> i32 {
             return if sm6_broken { EXIT_ERROR } else { EXIT_PASS };
         }
     }
+    // -preparetest: before the device, whose creation reads it.
+    if globals.prepare_test != 0 {
+        rav1g::switches::set_pipeline_prepare_test(globals.prepare_test);
+        say!("PREPARETEST {}: the pipeline states are compiled on demand (docs/integration.md)", globals.prepare_test);
+    }
     let pso_start = Instant::now();
     // The decoder's device: the program's D3D12 device and queue, and the pipeline states on it.
-    let library = match Library::open(&dev, globals.capi, args::PSO_THREADS as u32) {
+    let prepare = globals.prepare.unwrap_or(rav1g::Prepare::ALL);
+    let library = match Library::open(&dev, globals.capi, args::PSO_THREADS as u32, prepare) {
         Ok(library) => library,
         Err(reason) => {
             say!("ERROR decoder device creation: {reason}");

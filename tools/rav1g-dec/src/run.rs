@@ -826,6 +826,7 @@ fn create_decoder(
             },
             ..Default::default()
         },
+        stream: Some(*info),
     };
     // The colour description of the sequence header the decoder is created for, and the first frame of
     // the decoder says what it carries.

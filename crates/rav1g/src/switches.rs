@@ -66,6 +66,17 @@ pub fn set_poison_buffers(level: Poison) {
     crate::host::av1_set_poison_buffers(level as c_int)
 }
 
+/// The test mode of the pipeline states compiled on demand (docs/integration.md, "Preparing the
+/// pipeline states"; `-preparetest`), for the devices created after the call: 0 off; 1: a device prepares
+/// no state at its creation, whatever its settings say, so that every state is compiled when a decoder
+/// creation or a frame's setup needs it, or in the background; 2: nothing is prepared anywhere, neither
+/// by the device nor by a decoder creation nor at a frame's setup, so that every state is compiled at
+/// the first dispatch that takes it. The output must be the same: a state used before it exists would
+/// remove the device.
+pub fn set_pipeline_prepare_test(mode: u32) {
+    crate::host::av1_set_pipeline_prepare_test(mode.min(2) as c_int)
+}
+
 /// The memory statistics of the test programs (docs/memory.md): 0 off, 1 the decoders log a block of
 /// `MEMSTATS ` lines when they have drained, 2 also a line for every frame. The output is the same.
 pub fn set_memory_stats(level: u32) {

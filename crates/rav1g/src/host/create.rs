@@ -26,7 +26,7 @@ use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12Device};
 use windows::core::Interface;
 
 use super::completion::av1_drain_gpu_decoder;
-use super::compute::{upload_luts, wait_shader_create_complete};
+use super::compute::{prepare_for_decoder, upload_luts};
 use super::log::{clear_create_error, log, log_create_error};
 use super::memory::{Allocator, Plan, log_video_memory, memory_type_name};
 use super::pool::{COEF_CHUNK, KINDS, Kind, MODE_INFO_CHUNK, Pools, TXB_CHUNK};
@@ -1187,7 +1187,10 @@ pub(crate) unsafe extern "C" fn av1_create_gpu_decoder(
         if (*dec).shader_lib.is_null() {
             return create_failed(dec, &rcfg, Some(&vm_before), "no pipeline cache (dxPsos) given", E_POINTER.0);
         }
-        let shader_errors = wait_shader_create_complete((*dec).shader_lib);
+        // The states the stream needs that the device has not prepared (docs/integration.md, "Preparing
+        // the pipeline states"), compiled now, before the buffers: what they take of the memory is then in
+        // what the budget guard sees. Those it may need later go to the background.
+        let shader_errors = prepare_for_decoder((*dec).shader_lib, cfg.pipelines_needed, cfg.pipelines_later);
         if shader_errors != 0 {
             return create_failed(dec, &rcfg, Some(&vm_before), "compute pipeline states (shaders)", shader_errors);
         }

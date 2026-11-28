@@ -13,6 +13,7 @@
 //! the types of the GPU backend boundary (`crate::gpu`).
 
 use std::ffi::{CStr, c_int};
+use std::sync::atomic::Ordering;
 
 use windows::Win32::Graphics::Direct3D12::ID3D12GraphicsCommandList;
 
@@ -42,13 +43,35 @@ pub(crate) unsafe fn buffer<'a>(object: *const GpuBufferObject) -> BufferRef<'a>
     unsafe { BufferRef::from_raw(&(*object).dev) }.expect("the buffer was created")
 }
 
-/// A pipeline of the shader library.
+/// A pipeline of the shader library: every dispatch takes its pipeline here. A state that is not ready
+/// yet (docs/integration.md, "Preparing the pipeline states") is waited for, and compiled by this thread
+/// when no thread has begun it, so no state is ever used before it exists. The frame's setup has
+/// prepared the states of its classes (`compute::prepare_for_frame`): this waits only with
+/// `-preparetest 2`, or for a state the setup did not foresee (a "PIPELINE at the first dispatch" line).
 ///
 /// # Safety
 /// `shader` is a field of the library of a decoder; the library outlives the result.
 pub(crate) unsafe fn pipeline<'a>(shader: *const ComputeShader) -> PipelineRef<'a> {
-    // SAFETY: the COM pointers of a created pipeline (the caller's contract).
-    unsafe { PipelineRef::from_com(&(*shader).pso, &(*shader).signaturePtr) }.expect("the pipeline was created")
+    // SAFETY: the caller's contract; the pipeline state is read only behind its `ready` flag (acquire).
+    unsafe {
+        if !(*shader).ready.load(Ordering::Acquire) {
+            // A state that could not be created ends here as before (its MEMORY FAILED line is in the
+            // log); the frame setup fails the frame before, for the states of its classes.
+            assert!(super::compute::wait_for_pipeline(shader), "the pipeline was created");
+        }
+        PipelineRef::from_com(&(*shader).pso, &(*shader).signaturePtr)
+    }
+    .expect("the pipeline was created")
+}
+
+/// The layout of a pipeline of the shader library, which exists with the library: a stage that binds
+/// the layout before it knows its pipeline does not wait for the pipeline state.
+///
+/// # Safety
+/// `shader` is a field of the library of a decoder; the library outlives the result.
+pub(crate) unsafe fn pipeline_layout<'a>(shader: *const ComputeShader) -> LayoutRef<'a> {
+    // SAFETY: the COM pointer of the layout, set when the library was made (the caller's contract).
+    unsafe { layout(&raw const (*shader).signaturePtr) }
 }
 
 /// A layout of the shader library.

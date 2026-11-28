@@ -93,7 +93,7 @@ pub use color::{
     MatrixCoefficients, TransferCharacteristics, color_text,
 };
 pub use decoder::{Configuration, Decoder, LowMemory, MemoryAvailable, MemoryRequirements, ParserOptions, Settings};
-pub use device::Device;
+pub use device::{Device, DeviceSettings, Prepare};
 pub use error::{Error, ErrorCode};
 pub use output::{
     Display, DisplayTransform, Dither, Frame, ImageFormat, ImageRequest, Output, OutputImage, OutputKind, Plane,
@@ -119,6 +119,12 @@ pub struct StreamInfo {
     /// shows them (docs/color.md). Every [`Frame`] has the description of its own sequence; HDR
     /// metadata is not part of a sequence header and comes with the frames.
     pub color: ColorInfo,
+    /// `film_grain_params_present` and `enable_superres` of the sequence header: whether its frames can
+    /// have film grain and super-resolution, so that a decoder created with this info
+    /// ([`Settings::stream`]) prepares their pipeline states (docs/integration.md, "Preparing the
+    /// pipeline states").
+    pub film_grain_params_present: bool,
+    pub enable_superres: bool,
 }
 
 /// Reads the sequence header of a temporal unit, without a decoder.
@@ -140,5 +146,7 @@ pub fn peek_stream_info(data: &[u8]) -> Result<StreamInfo, Error> {
             range: if info.color_range != 0 { ColorRange::Full } else { ColorRange::Limited },
             chroma_sample_position: ChromaSamplePosition::from_raw(info.chroma_sample_position as u8),
         },
+        film_grain_params_present: info.film_grain_params_present,
+        enable_superres: info.enable_superres,
     })
 }

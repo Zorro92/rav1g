@@ -408,6 +408,19 @@ const char *av1_shader_variant(void);
 enum { AV1_POISON_OFF = 0, AV1_POISON_MODE_INFO = 1, AV1_POISON_BUFFERS = 2 };
 void av1_set_poison_buffers(int level);
 
+/* The test mode of the pipeline states compiled on demand (-preparetest;
+ * docs/integration.md, "Preparing the pipeline states"), for the devices
+ * created after the call:
+ *   0  off
+ *   1  a device prepares no state at its creation, whatever its settings
+ *      say: every state is compiled when a decoder creation or the setup of
+ *      a frame needs it, or in the background
+ *   2  nothing is prepared anywhere (device, decoder creation, frame setup):
+ *      every state is compiled at the first dispatch that takes it
+ * The decoded output must be the same: a state used before it exists would
+ * remove the device. */
+void av1_set_pipeline_prepare_test(int mode);
+
 /* Stage dumps: a debugging aid of the test programs (-dumpstages). For the
  * frames it is asked for, the decoder copies the buffer a stage of the frame's
  * command list has just written into a readback buffer, right behind the

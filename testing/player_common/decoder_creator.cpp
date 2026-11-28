@@ -16,6 +16,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <vector>
 #include <list>
 #include <string>
@@ -62,6 +63,36 @@ static std::string pstos(Platform::String ^ ps) {
 static void Sm6LogLine(void* priv, const char* line) {
   (void)priv;
   XB_LOGI << line;
+}
+
+// -prepare <list>: 'all' (RAV1G_PREPARE_ALL), or words separated by commas, RAV1G_PREPARE_ONLY with
+// their bits: 8, 10, sdr, pq, hlg, grain, superres, scaled, core (none of these). False for a word that
+// is none of them.
+static bool ParsePrepare(const std::string& list, uint32_t* prepare) {
+  if (list == "all") {
+    *prepare = RAV1G_PREPARE_ALL;
+    return true;
+  }
+  uint32_t bits = RAV1G_PREPARE_ONLY;
+  size_t start = 0;
+  while (true) {
+    size_t end = list.find(',', start);
+    if (end == std::string::npos) end = list.size();
+    const std::string word = list.substr(start, end - start);
+    if (word == "8") bits |= RAV1G_PREPARE_BIT_DEPTH_8;
+    else if (word == "10") bits |= RAV1G_PREPARE_BIT_DEPTH_10;
+    else if (word == "sdr") bits |= RAV1G_PREPARE_DISPLAY_SDR;
+    else if (word == "pq") bits |= RAV1G_PREPARE_DISPLAY_PQ;
+    else if (word == "hlg") bits |= RAV1G_PREPARE_DISPLAY_HLG;
+    else if (word == "grain") bits |= RAV1G_PREPARE_FILM_GRAIN;
+    else if (word == "superres") bits |= RAV1G_PREPARE_SUPERRES;
+    else if (word == "scaled") bits |= RAV1G_PREPARE_SCALED_REFERENCES;
+    else if (word != "core") return false;
+    if (end == list.size()) break;
+    start = end + 1;
+  }
+  *prepare = bits;
+  return true;
 }
 
 static void parse_file(const std::string& str, std::vector<one_task>& list) {
@@ -181,6 +212,12 @@ int Decoders::DecodeLoop() {
   bool has_tasks = false;
   bool has_shader_pick = false;
   std::string shader_pick;
+  // -prepare <list> and -preparetest <mode>: the same kind of flag, for the pipeline states the device
+  // compiles at its creation (docs/test-player.md, "Preparing the pipeline states"): 'all' (the default),
+  // or words separated by commas, RAV1G_PREPARE_ONLY with their bits; the last one counts.
+  bool has_prepare = false;
+  std::string prepare_list;
+  int prepare_test = 0;
   for (std::vector<one_task>::iterator task = arg_lists.begin(); task != arg_lists.end(); task++) {
     for (std::vector<std::string>::iterator arg = task->begin(); arg != task->end();) {
       if (*arg == "-sm6test") {
@@ -193,6 +230,20 @@ int Decoders::DecodeLoop() {
         if (arg != task->end()) {
           shader_pick = *arg;
           arg = task->erase(arg);
+        }
+      } else if (*arg == "-prepare" || *arg == "-preparetest") {
+        const bool test = *arg == "-preparetest";
+        arg = task->erase(arg);
+        std::string value;
+        if (arg != task->end()) {
+          value = *arg;
+          arg = task->erase(arg);
+        }
+        if (test) {
+          prepare_test = value == "1" ? 1 : value == "2" ? 2 : 0;
+        } else {
+          has_prepare = true;
+          prepare_list = value;
         }
       } else {
         arg++;
@@ -227,10 +278,26 @@ int Decoders::DecodeLoop() {
   // The decoder's own log lines (MEMORY ...) go to the player's log, from the pipeline states on.
   rav1g_set_log_callback(AV1Decoder::LogLine, NULL);
   AV1Decoder::LogMemory(dx_resources_.dx12_device.Get(), "before the pipeline states");
+  // -preparetest: before the device, whose creation reads it.
+  if (prepare_test) {
+    XB_LOGI << "PREPARETEST " << prepare_test << ": the pipeline states are compiled on demand";
+    av1_set_pipeline_prepare_test(prepare_test);
+  }
   // The decoder's device: the player's D3D12 device with the pipeline states of the decoder. The player
-  // has no queue for it (PlayerWindow::Run): the decoder makes its own.
-  dx_resources_.decoder_device = rav1g_device_create(dx_resources_.dx12_device.Get(),
-                                                     dx_resources_.dx12_command_queue.Get(), CREATE_SHADERS_THREAD_CNT);
+  // has no queue for it (PlayerWindow::Run): the decoder makes its own. With -prepare only the states it
+  // names are compiled here; a decoder creation compiles what its stream needs of the others.
+  Rav1gDeviceSettings device_settings;
+  memset(&device_settings, 0, sizeof(device_settings));
+  device_settings.pipeline_threads = CREATE_SHADERS_THREAD_CNT;
+  if (has_prepare && !ParsePrepare(prepare_list, &device_settings.prepare)) {
+    XB_LOGE << "-prepare " << prepare_list << ": all, or a list of 8, 10, sdr, pq, hlg, grain, superres, scaled, core";
+    XB_LOGE << "No task was run. Bye";
+    if (display_) display_->AllJobDoneNotify();
+    return -1;
+  }
+  if (has_prepare) XB_LOGI << "Pipeline states prepared (-prepare): " << prepare_list;
+  dx_resources_.decoder_device = rav1g_device_create_with_settings(
+      dx_resources_.dx12_device.Get(), dx_resources_.dx12_command_queue.Get(), &device_settings);
   if (!dx_resources_.decoder_device) {
     XB_LOGE << "Unable to create compute shaders: " << rav1g_last_error();
     // Nothing can be decoded in this launch: it ends here, as it does behind the last task.

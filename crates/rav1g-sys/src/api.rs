@@ -226,6 +226,11 @@ pub struct aom_codec_dec_cfg {
     pub device_size: usize,
     pub device_size_deferred: usize,
     pub display: av1_display_cfg,
+    /// The classes of pipeline states (`compute::class` of the host) the creation waits for, and those
+    /// the decoder may need later, compiled in the background (docs/integration.md, "Preparing the
+    /// pipeline states").
+    pub pipelines_needed: c_uint,
+    pub pipelines_later: c_uint,
 }
 impl Default for aom_codec_dec_cfg {
     fn default() -> Self {

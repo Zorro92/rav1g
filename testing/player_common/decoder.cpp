@@ -528,6 +528,10 @@ int AV1Decoder::DecodeOne() {
       cfg.width = dec_width;
       cfg.height = dec_height;
       cfg.bit_depth = dec_bitdepth;
+      // The sequence header of the key frame the decoder starts with: which pipeline states its creation
+      // compiles when the device did not prepare them (-prepare; docs/integration.md, "Preparing the
+      // pipeline states").
+      cfg.stream = si;
       cfg.threads = params_.threads_;
       cfg.output.context = this;
       cfg.output.get_image = GetBuffer;

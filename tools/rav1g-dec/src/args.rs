@@ -247,6 +247,41 @@ pub struct Globals {
     pub player_smoke: String,
     /// -shaderpick <pick>
     pub shader_pick: String,
+    /// -prepare <list>: the pipeline states the device prepares; `None` is all of them.
+    pub prepare: Option<rav1g::Prepare>,
+    /// -preparetest <mode>: `rav1g::switches::set_pipeline_prepare_test`.
+    pub prepare_test: u32,
+}
+
+/// -prepare <list>: words separated by commas, `RAV1G_PREPARE_ONLY` with their bits: 8, 10 (the bit
+/// depths), sdr, pq, hlg (the display pass), grain, superres, scaled; `core` for none of them (the states
+/// every stream needs only); `all` for every state.
+pub fn parse_prepare(list: &str) -> Result<rav1g::Prepare, String> {
+    use rav1g::Prepare;
+    if list == "all" {
+        return Ok(Prepare::ALL);
+    }
+    let mut prepare = Prepare::ONLY;
+    for word in list.split(',') {
+        prepare = prepare
+            | match word {
+                "8" => Prepare::BIT_DEPTH_8,
+                "10" => Prepare::BIT_DEPTH_10,
+                "sdr" => Prepare::DISPLAY_SDR,
+                "pq" => Prepare::DISPLAY_PQ,
+                "hlg" => Prepare::DISPLAY_HLG,
+                "grain" => Prepare::FILM_GRAIN,
+                "superres" => Prepare::SUPERRES,
+                "scaled" => Prepare::SCALED_REFERENCES,
+                "core" => Prepare::ONLY,
+                _ => {
+                    return Err(format!(
+                        "-prepare {list}: all, or a list of 8, 10, sdr, pq, hlg, grain, superres, scaled, core"
+                    ));
+                }
+            };
+    }
+    Ok(prepare)
 }
 
 pub fn usage() {
@@ -406,6 +441,14 @@ pub fn usage() {
     say!("                        shader names separated by commas, 'all', or names with '*'; a later part overrides");
     say!("                        an earlier one (od=all,dxc=loopfilter_vert_hbd). 'SHADERSET ...' and 'SHADERPICK");
     say!("                        ...' lines say what was taken (docs/test-player.md, \"Shader pick\")");
+    say!("  -prepare <list>       the pipeline states the device compiles at its creation (Rav1gDeviceSettings::");
+    say!("                        prepare): 'all' (the default), or words separated by commas: 8, 10 (bit depths),");
+    say!("                        sdr, pq, hlg (display pass), grain, superres, scaled, core (none of these). The");
+    say!("                        others are compiled when a decoder needs them ('PIPELINE ...' lines; docs/");
+    say!("                        integration.md, \"Preparing the pipeline states\"). The output is the same");
+    say!("  -preparetest <mode>   the test of the on-demand states: 1 the device prepares nothing (a decoder creation");
+    say!("                        or a frame compiles what it needs), 2 nothing is prepared anywhere (every state at");
+    say!("                        its first dispatch). The output is the same");
     say!("  -playersmoke <dir>    run the decoder code of the test player (testing/player_common) through rav1g.h on");
     say!("                        the device, with the tasks of <dir>/args/args_av1.txt as the player reads them from");
     say!("                        its LocalState (streams relative to <dir>); the player's log goes to stdout. Exit");
@@ -579,6 +622,14 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
                     "-list" => globals.list = value()?,
                     "-playersmoke" => globals.player_smoke = value()?,
                     "-shaderpick" => globals.shader_pick = value()?,
+                    "-prepare" => globals.prepare = Some(parse_prepare(&value()?)?),
+                    "-preparetest" => {
+                        let mode = value()?;
+                        globals.prepare_test = match mode.as_str() {
+                            "0" | "1" | "2" => mode.parse().unwrap_or(0),
+                            _ => return Err(format!("-preparetest {mode}: 0, 1 or 2")),
+                        };
+                    }
                     _ => return Err(format!("unknown argument '{a}'")),
                 }
             }
@@ -789,6 +840,27 @@ mod tests {
         // -lowmem is the three parts it always was.
         assert_eq!(parts("32", true), Ok(LOWMEM_ALL));
         assert_eq!(LOWMEM_PARTS as u32, (rav1g::LowMemory::ALL | rav1g::LowMemory::LATE_FRAME_BUFFER).0);
+    }
+
+    #[test]
+    fn the_prepare_lists() {
+        use rav1g::Prepare;
+        assert_eq!(parse_prepare("all"), Ok(Prepare::ALL));
+        assert_eq!(parse_prepare("core"), Ok(Prepare::ONLY));
+        assert_eq!(parse_prepare("10,pq"), Ok(Prepare::ONLY | Prepare::BIT_DEPTH_10 | Prepare::DISPLAY_PQ));
+        assert_eq!(
+            parse_prepare("8,10,sdr,hlg,grain,superres,scaled"),
+            Ok(Prepare::ONLY
+                | Prepare::BIT_DEPTH_8
+                | Prepare::BIT_DEPTH_10
+                | Prepare::DISPLAY_SDR
+                | Prepare::DISPLAY_HLG
+                | Prepare::FILM_GRAIN
+                | Prepare::SUPERRES
+                | Prepare::SCALED_REFERENCES)
+        );
+        assert!(parse_prepare("10,hdr").is_err());
+        assert!(parse_prepare("").is_err());
     }
 
     #[test]

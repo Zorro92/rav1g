@@ -10,39 +10,136 @@
 //! the constant tables the shaders read (film grain, warp filter, wedge and inter-intra masks). From
 //! `libav1/dx/av1_compute.cpp`.
 //!
-//! The library is the C++ struct `compute_shader_lib`, whose pipeline states and root signatures the
-//! frame pipeline reads; it is created here, zeroed as its C++ constructor leaves it, inside a Rust
-//! value that also holds the threads that create the pipelines. The bytecode of the shaders is the
-//! table of `crates/rav1g-sys/src/shaders.rs`: the files of the DXC build, embedded as they are.
+//! The library is the struct `compute_shader_lib`, whose pipeline states and root signatures the frame
+//! pipeline reads; it is created here, zeroed, inside a Rust value that also holds the schedule of its
+//! pipelines (`pipeline_schedule.rs`). The bytecode of the shaders is the table of
+//! `crates/rav1g-sys/src/shaders.rs`: the files of the DXC build, embedded as they are.
+//!
+//! The layouts are created with the library. The pipeline states are compiled by the device's driver,
+//! about 31 s of CPU for all 96 on the console (8.5 s on 4 threads): the library compiles the kinds of
+//! states the application asked to prepare (`class`, `Rav1gDeviceSettings::prepare`) right away, and
+//! every other state when a decoder creation or a frame needs it, or in the background for a decoder
+//! that may need it later (docs/integration.md, "Preparing the pipeline states"). Every dispatch takes
+//! its pipeline through `core::pipeline`, which waits for a state that is not ready: no state is used
+//! before it exists.
 
 use std::ffi::{c_int, c_void};
 use std::mem::offset_of;
-use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use std::time::Instant;
 
-use windows::Win32::Foundation::{E_FAIL, E_POINTER};
+use windows::Win32::Foundation::E_POINTER;
 use windows::Win32::Graphics::Direct3D12::{ID3D12CommandQueue, ID3D12Device};
-use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL};
 use windows::core::Interface;
 
 use super::libaom::{II_SIZE_SCALES, II_WEIGHTS1D, WARPED_FILTER, WedgeMasks};
 use super::log::log;
+use super::pipeline_schedule::{Priority, Report, Scheduler};
 use super::shader_pick::{self, Set};
 use super::tables::{BLOCK_SIZE_HIGH, BLOCK_SIZE_WIDE, SS_SIZE_420};
-use super::thread::spawn_thread;
 use super::types::{Av1Core, ComputeShader, GpuBufferObject, compute_shader_lib};
 use crate::gpu::d3d12::{com_ref, com_release, com_store};
-use crate::gpu::{self, BufferRef, Device, Layout, LayoutDesc, OwnedDevice, Queue, Upload};
+use crate::gpu::{self, BufferRef, Device, Layout, LayoutDesc, Queue, Upload};
 use crate::sys::shaders::Shader;
 use crate::sys::{
     BLOCK_SIZES_ALL, TX_4X4, TX_4X8, TX_4X16, TX_8X4, TX_8X8, TX_8X16, TX_8X32, TX_16X4, TX_16X8, TX_16X16, TX_16X32,
     TX_16X64, TX_32X8, TX_32X16, TX_32X32, TX_32X64, TX_64X16, TX_64X32, TX_64X64, TX_SIZES_ALL,
 };
 
-/// Threads that create pipelines at most (`MAX_CREATE_SHADER_THREADS` of the C++).
+/// Threads that create pipelines at most (`MAX_CREATE_SHADER_THREADS` of the C++). The console's 4
+/// cores give no gain beyond 4; an application may give up to 6.
 const MAX_CREATE_THREADS: c_int = 6;
+
+/// The kinds of pipeline states, as bits: what a device prepares at its creation, what a decoder needs
+/// at its creation and a frame at its setup. Every state is of one kind (`class_of`).
+pub(crate) mod class {
+    /// What every stream needs: the transforms, CDEF and loop restoration, the copies, the block lists.
+    pub const CORE: u32 = 1;
+    /// Prediction, reconstruction, loop filter and borders of 8-bit frames, and of frames of more bits.
+    pub const DEPTH_8: u32 = 1 << 1;
+    pub const DEPTH_10: u32 = 1 << 2;
+    /// Inter prediction from references of another size than the frame (AV1 7.11.3.3), by bit depth.
+    pub const SCALED_8: u32 = 1 << 3;
+    pub const SCALED_10: u32 = 1 << 4;
+    /// Film grain synthesis (AV1 7.18.3).
+    pub const FILM_GRAIN: u32 = 1 << 5;
+    /// The super-resolution upscale (AV1 7.16).
+    pub const SUPERRES: u32 = 1 << 6;
+    /// The display pass by its mode (`display_pass::Choice::mode` 0 PQ, 1 SDR, 2 HLG).
+    pub const DISPLAY_PQ: u32 = 1 << 7;
+    pub const DISPLAY_SDR: u32 = 1 << 8;
+    pub const DISPLAY_HLG: u32 = 1 << 9;
+    pub const DISPLAY: u32 = DISPLAY_PQ | DISPLAY_SDR | DISPLAY_HLG;
+    pub const ALL: u32 = (1 << 10) - 1;
+
+    pub fn depth(hbd: bool) -> u32 {
+        if hbd { DEPTH_10 } else { DEPTH_8 }
+    }
+
+    pub fn scaled(hbd: bool) -> u32 {
+        if hbd { SCALED_10 } else { SCALED_8 }
+    }
+
+    /// The class of the display pass of `mode`.
+    pub fn display(mode: u32) -> u32 {
+        match mode {
+            0 => DISPLAY_PQ,
+            2 => DISPLAY_HLG,
+            _ => DISPLAY_SDR,
+        }
+    }
+
+    /// The classes for a log line: "core, 10-bit, display PQ".
+    pub fn names(classes: u32) -> String {
+        const NAMES: [&str; 10] = [
+            "core",
+            "8-bit",
+            "10-bit",
+            "scaled references 8-bit",
+            "scaled references 10-bit",
+            "film grain",
+            "superres",
+            "display PQ",
+            "display SDR",
+            "display HLG",
+        ];
+        let names: Vec<&str> =
+            NAMES.iter().enumerate().filter(|(bit, _)| classes & (1 << bit) != 0).map(|(_, name)| *name).collect();
+        if names.is_empty() { "none".to_string() } else { names.join(", ") }
+    }
+}
+
+/// The class of the state of a shader, by its name (the test `every_class_has_its_states` holds the
+/// names to the slots of the library).
+fn class_of(name: &str) -> u32 {
+    let hbd = name.ends_with("_hbd");
+    match name {
+        "display_pass" => class::DISPLAY_PQ,
+        "display_pass_sdr" => class::DISPLAY_SDR,
+        "display_pass_hlg" => class::DISPLAY_HLG,
+        _ if name.starts_with("film_grain") => class::FILM_GRAIN,
+        _ if name.starts_with("upscaling") => class::SUPERRES,
+        // inter_scale_warp_compound is the warp of compound prediction, which every inter frame can have.
+        _ if name.starts_with("inter_scale") && !name.starts_with("inter_scale_warp") => class::scaled(hbd),
+        _ if ["inter_", "intra_", "reconstruct_block", "loopfilter_"].iter().any(|kind| name.starts_with(kind)) => {
+            class::depth(hbd)
+        }
+        _ => class::CORE,
+    }
+}
+
+/// The test mode of the on-demand path (`av1_set_pipeline_prepare_test`, `-preparetest`), for the devices
+/// created after the call: 0 off; 1: the device prepares nothing, so every state is compiled when a
+/// decoder creation or a frame needs it (or in the background); 2: neither the device nor a decoder
+/// creation nor a frame prepares anything, so every state is compiled at its first dispatch.
+static PREPARE_TEST: AtomicI32 = AtomicI32::new(0);
+
+/// `av1_set_pipeline_prepare_test` (`dx/av1_perf.h`).
+#[unsafe(no_mangle)]
+pub extern "C" fn av1_set_pipeline_prepare_test(mode: c_int) {
+    PREPARE_TEST.store(mode.clamp(0, 2), Ordering::Relaxed);
+}
 
 /// The bytecode table for this set. Only shader-pick builds have alternate sets.
 fn shader_table(set: Set) -> &'static [Shader] {
@@ -101,44 +198,54 @@ pub(crate) fn shader_pick_lines() -> Vec<String> {
 /// The library as the pipeline cache handle points to it.
 #[repr(C)]
 struct ShaderLib {
-    /// What the C++ frame pipeline reads. First: the handle is also a `compute_shader_lib *`.
+    /// What the frame pipeline reads. First: the handle is also a `compute_shader_lib *`.
     lib: compute_shader_lib,
-    /// The threads that create the pipelines, until they are joined.
-    workers: Mutex<Vec<JoinHandle<()>>>,
-    /// The codes of the pipelines that could not be created, or'ed.
-    errors: Arc<AtomicI32>,
-    /// What the creation took, for the `PIPELINE` line of the join (`log_creation_times`): the time of
-    /// each pipeline in microseconds by task, their names, the start and the threads.
-    times: Mutex<Option<CreationTimes>>,
+    /// The pipelines, in the order of `create_tasks`: the slot of a pipeline in the schedule.
+    tasks: Vec<Task>,
+    /// Set once the tasks are made.
+    scheduler: Option<Arc<Scheduler>>,
+    /// The classes all of whose states are ready.
+    ready_classes: AtomicU32,
+    /// The states the device prepared at its creation (`rav1g_device_wait_pipelines` waits for them).
+    batch: Vec<usize>,
+    /// `PREPARE_TEST` when the device was created.
+    test: c_int,
 }
 
-/// The times of a library's pipeline creation on threads.
-struct CreationTimes {
-    names: Vec<&'static str>,
-    micros: Arc<Vec<AtomicU64>>,
-    /// Microseconds from the start to the end of the last pipeline (not to the join, which waits for the
-    /// first decoder).
-    last_end: Arc<AtomicU64>,
-    threads: c_int,
-}
+// SAFETY: the library is shared by the decoders of a device and the threads of its schedule. What they
+// write of it: a slot's pipeline state, by the one thread that compiles it before its `ready` flag is set
+// (release); the other fields are atomics or are written only while the library is made or released.
+unsafe impl Send for ShaderLib {}
+unsafe impl Sync for ShaderLib {}
 
-/// One line when the threads are joined: the pipelines, the wall time on how many threads, the sum of
-/// their times and the slowest ten. The pipeline states are compiled by the device's driver (about 6.5 s on
-/// the console, docs/integration.md): this says where that time goes.
-fn log_creation_times(times: &CreationTimes) {
-    let wall = times.last_end.load(Ordering::Relaxed) as f64 / 1000.0;
+/// The library for the compile function of its schedule.
+#[derive(Clone, Copy)]
+struct LibPtr(*const ShaderLib);
+// SAFETY: as for ShaderLib; the schedule is closed (its threads joined) before the library is released.
+unsafe impl Send for LibPtr {}
+unsafe impl Sync for LibPtr {}
+
+/// The line of a complete request of the schedule: the batch of the device creation ("PIPELINE states:
+/// ..."), an on-demand batch of a decoder creation, a frame or a dispatch, or the background states. The
+/// states compiled, the wall time from the request, the sum of their times and the slowest ten. The
+/// pipeline states are compiled by the device's driver (31 s of CPU for 96 states on the console,
+/// docs/integration.md): this says where that time goes.
+fn log_report(names: &[&'static str], report: &Report) {
+    let wall = report.wall_micros as f64 / 1000.0;
     let mut each: Vec<(u64, &str)> =
-        times.micros.iter().map(|m| m.load(Ordering::Relaxed)).zip(times.names.iter().copied()).collect();
+        report.micros.iter().copied().zip(report.slots.iter().map(|&slot| names[slot])).collect();
     let sum: u64 = each.iter().map(|(us, _)| us).sum();
     each.sort_by_key(|&(us, _)| std::cmp::Reverse(us));
     let slowest: Vec<String> =
         each.iter().take(10).map(|(us, name)| format!("{name} {:.0}", *us as f64 / 1000.0)).collect();
+    let failed = if report.failed != 0 { format!("; FAILED hr 0x{:08X}", report.failed as u32) } else { String::new() };
     log(
-        false,
+        report.failed != 0,
         &format!(
-            "PIPELINE states: {} created in {wall:.0} ms on {} threads, {:.0} ms in all; slowest (ms): {}",
+            "PIPELINE {}: {} created in {wall:.0} ms on {} threads, {:.0} ms in all; slowest (ms): {}{failed}",
+            report.label,
             each.len(),
-            times.threads,
+            report.threads.max(1),
             sum as f64 / 1000.0,
             slowest.join(", ")
         ),
@@ -168,22 +275,21 @@ struct Task {
     bytecode: &'static [u8],
     layout: Layout,
     dst: *mut ComputeShader,
+    /// Its kind (`class_of`).
+    class: u32,
 }
-// SAFETY: `dst` is a field of the library that only this task writes, and the library outlives the
-// threads (they are joined before it is released).
-unsafe impl Send for Task {}
-// SAFETY: the same; a task is taken by one thread.
-unsafe impl Sync for Task {}
 
-/// `create_shader` of the C++: the pipeline of a task into its field of the library.
-fn create_shader(device: Device<'_>, task: &Task) -> Result<(), gpu::Error> {
-    // SAFETY: the field belongs to this task (see Task) and its COM pointers are still null.
+/// The pipeline of a task into its field of the library, whose layout and bytecode are there already;
+/// then its `ready` flag.
+///
+/// # Safety
+/// The field belongs to the task, and only the thread that compiles the task writes its pipeline state.
+unsafe fn create_shader(device: Device<'_>, task: &Task) -> Result<(), gpu::Error> {
+    let pipeline = device.create_pipeline(&task.layout, task.bytecode)?;
+    // SAFETY: the caller's contract; the state is null until here, and nothing reads it before `ready`.
     unsafe {
-        (*task.dst).bytecode = task.bytecode.as_ptr();
-        (*task.dst).size = task.bytecode.len();
-        com_store(&raw mut (*task.dst).signaturePtr, task.layout.clone().into_raw());
-        let pipeline = device.create_pipeline(&task.layout, task.bytecode)?;
         com_store(&raw mut (*task.dst).pso, pipeline.into_raw());
+        (*task.dst).ready.store(true, Ordering::Release);
     }
     Ok(())
 }
@@ -205,34 +311,41 @@ fn log_failed_pipeline(index: usize, task: &Task, error: gpu::Error) {
     );
 }
 
-/// A thread that creates pipelines: takes the next task until there is none or one has failed.
-fn create_shader_thread(
-    device: OwnedDevice,
-    tasks: Arc<Vec<Task>>,
-    next: Arc<AtomicUsize>,
-    errors: Arc<AtomicI32>,
-    micros: Arc<Vec<AtomicU64>>,
-    begin: Instant,
-    last_end: Arc<AtomicU64>,
-) {
-    // As the threads of the C++ (pthread_create of aom_thread.h).
-    // SAFETY: the pseudo handle of this thread.
-    let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL) };
-    loop {
-        let index = next.fetch_add(1, Ordering::Relaxed);
-        let Some(task) = tasks.get(index) else { break };
-        let start = Instant::now();
-        let created = create_shader(device.device(), task);
-        micros[index].store(start.elapsed().as_micros() as u64, Ordering::Relaxed);
-        last_end.fetch_max(begin.elapsed().as_micros() as u64, Ordering::Relaxed);
-        if let Err(error) = created {
-            log_failed_pipeline(index, task, error);
-            errors.fetch_or(error.code, Ordering::Relaxed);
+/// The compile function of the schedule of a library: the pipeline of a slot; when it was the last of
+/// its class that was not ready, the class is ready.
+///
+/// # Safety
+/// `lib` is the library, alive while its schedule runs; the schedule gives a slot to one thread.
+unsafe fn compile_slot(lib: LibPtr, device: Device<'_>, slot: usize) -> Result<(), i32> {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let lib = &*lib.0;
+        let task = &lib.tasks[slot];
+        if let Err(error) = create_shader(device, task) {
+            log_failed_pipeline(slot, task, error);
+            return Err(error.code);
         }
-        if errors.load(Ordering::Relaxed) != 0 {
-            break;
+        let class_ready = lib
+            .tasks
+            .iter()
+            .filter(|other| other.class == task.class)
+            .all(|other| (*other.dst).ready.load(Ordering::Acquire));
+        if class_ready {
+            lib.ready_classes.fetch_or(task.class, Ordering::Release);
         }
+        Ok(())
     }
+}
+
+/// The slots of the states of `classes`.
+fn slots_of(lib: &ShaderLib, classes: u32) -> Vec<usize> {
+    lib.tasks.iter().enumerate().filter(|(_, task)| task.class & classes != 0).map(|(slot, _)| slot).collect()
+}
+
+/// The slots of `slots` whose states are not ready.
+fn not_ready(lib: &ShaderLib, slots: &[usize]) -> usize {
+    // SAFETY: the fields of the library's tasks.
+    slots.iter().filter(|&&slot| !unsafe { (*lib.tasks[slot].dst).ready.load(Ordering::Acquire) }).count()
 }
 
 /// The layouts of the library, by the name of their field (`sig_<name>`).
@@ -478,9 +591,123 @@ unsafe fn create_tasks(lib: *mut compute_shader_lib, layouts: &Layouts) -> Resul
             let set = names.iter().position(|other| *other == name).map_or(Set::Dxc, |index| sets[index]);
             let bytecode =
                 bytecode_of(name, set).ok_or_else(|| format!("the build has no bytecode of the shader {name}"))?;
-            Ok(Task { name, set, bytecode, layout: layout.clone(), dst })
+            Ok(Task { name, set, bytecode, layout: layout.clone(), dst, class: class_of(name) })
         })
         .collect()
+}
+
+/// The schedule of a library.
+fn scheduler(lib: &ShaderLib) -> &Arc<Scheduler> {
+    lib.scheduler.as_ref().expect("the library has its schedule")
+}
+
+/// `wait_shader_create_complete` of the C++: waits for the states the device prepared at its creation
+/// (the calling thread compiles those no thread has begun). Returns 0 when all were created, -1 without
+/// a library, else the codes of the failures or'ed. A state that could not be created stays failed: every
+/// later wait for it fails too.
+///
+/// # Safety
+/// `lib` is null or a library of [`create_pipeline_library`].
+unsafe fn wait_shader_create_complete(lib: *mut compute_shader_lib) -> c_int {
+    // SAFETY: the library is the first field of a ShaderLib (the caller's contract).
+    let Some(shader_lib) = (unsafe { lib.cast::<ShaderLib>().as_ref() }) else {
+        return -1;
+    };
+    scheduler(shader_lib).wait(&shader_lib.batch, None)
+}
+
+/// What a decoder needs of the states of its device (`aom_codec_dec_cfg::pipelines_needed`,
+/// `pipelines_later`): the classes its creation waits for, and those it may need later, which are
+/// compiled in the background. The creation also waits for the states the device prepared, as every
+/// creation did before interface version 4: none of them is still being compiled, on the device's
+/// threads above normal priority, while the decoder's first frames are parsed. One line says what the
+/// creation needed and waited for, one per batch what was compiled for it, and one what goes to the
+/// background. Returns 0, or the codes of the states that could not be created or'ed.
+///
+/// # Safety
+/// `lib` is a library of [`create_pipeline_library`].
+pub(crate) unsafe fn prepare_for_decoder(lib: *mut compute_shader_lib, needed: u32, later: u32) -> c_int {
+    // SAFETY: the caller's contract.
+    let lib = unsafe { &*lib.cast::<ShaderLib>() };
+    if lib.test == 2 {
+        log(
+            false,
+            "PIPELINE decoder creation: nothing prepared (-preparetest 2): every state is compiled at its first \
+             dispatch",
+        );
+        return 0;
+    }
+    let start = Instant::now();
+    let needed_slots = slots_of(lib, needed);
+    let missing = not_ready(lib, &needed_slots);
+    // The states of the stream first (at the priority of a waiter, with the device's threads), then
+    // every one of them and of the prepared states: this thread helps with what is left of both.
+    let label = format!("on demand for the decoder creation ({})", class::names(needed & !lib.ready_classes()));
+    scheduler(lib).queue(&needed_slots, Priority::Needed, Some(&label));
+    let mut slots = lib.batch.clone();
+    slots.extend(needed_slots.iter().filter(|slot| !lib.batch.contains(slot)));
+    let prepared_missing = not_ready(lib, &lib.batch);
+    let code = scheduler(lib).wait(&slots, None);
+    log(
+        false,
+        &format!(
+            "PIPELINE decoder creation: needs {} states ({}), {missing} were not ready ({prepared_missing} of the \
+             {} prepared ones); waited {:.0} ms",
+            needed_slots.len(),
+            class::names(needed),
+            lib.batch.len(),
+            start.elapsed().as_secs_f64() * 1000.0
+        ),
+    );
+    let later = later & !needed & !lib.ready_classes();
+    if later != 0 {
+        let background: Vec<usize> = slots_of(lib, later);
+        let label = format!("in the background ({})", class::names(later));
+        let queued = scheduler(lib).queue(&background, Priority::Background, Some(&label));
+        if !queued.is_empty() {
+            log(false, &format!("PIPELINE background: {} states ({}) queued", queued.len(), class::names(later)));
+        }
+    }
+    code
+}
+
+/// The states of `classes` for a frame at its setup: nothing when they are ready, else waits for them
+/// (the calling thread and the device's threads compile them) with a line about the batch. 0 or the
+/// codes of the states that could not be created, or'ed.
+///
+/// # Safety
+/// `lib` is the library of a decoder.
+pub(crate) unsafe fn prepare_for_frame(lib: *mut compute_shader_lib, classes: u32, frame_number: c_int) -> c_int {
+    // SAFETY: the caller's contract.
+    let lib = unsafe { &*lib.cast::<ShaderLib>() };
+    let missing = classes & !lib.ready_classes();
+    if missing == 0 || lib.test == 2 {
+        return 0;
+    }
+    let label = format!("on demand for frame {frame_number} ({})", class::names(missing));
+    scheduler(lib).wait(&slots_of(lib, missing), Some(&label))
+}
+
+/// A dispatch takes a pipeline that is not ready (`core::pipeline`): waits for it, the calling thread
+/// compiling it when no thread has begun. A line names it: with the frame's classes prepared at the
+/// frame's setup this happens only with `-preparetest 2`. Returns whether the pipeline exists.
+///
+/// # Safety
+/// `shader` is a slot of a library of [`create_pipeline_library`].
+pub(crate) unsafe fn wait_for_pipeline(shader: *const ComputeShader) -> bool {
+    // SAFETY: the caller's contract: the slot knows its library.
+    unsafe {
+        let lib = &*(*shader).library.cast::<ShaderLib>();
+        let slot = (*shader).index as usize;
+        let label = format!("at the first dispatch of {}", lib.tasks[slot].name);
+        scheduler(lib).wait(&[slot], Some(&label)) == 0 && (*shader).ready.load(Ordering::Acquire)
+    }
+}
+
+impl ShaderLib {
+    fn ready_classes(&self) -> u32 {
+        self.ready_classes.load(Ordering::Acquire)
+    }
 }
 
 /// Releases the pipelines and layouts of the library.
@@ -503,50 +730,25 @@ unsafe fn release(lib: *mut compute_shader_lib) {
     }
 }
 
-/// `wait_shader_create_complete` of the C++: waits for the pipelines. Returns 0 when all were created,
-/// -1 without a library. Joined before: the result of the creation stays what it was; a pipeline that
-/// could not be created must fail every decoder creation, not only the first one.
-///
-/// # Safety
-/// `lib` is null or a library of [`av1_create_pipeline_cache_handle`].
-pub(crate) unsafe fn wait_shader_create_complete(lib: *mut compute_shader_lib) -> c_int {
-    let shader_lib = lib.cast::<ShaderLib>();
-    if shader_lib.is_null() {
-        return -1;
-    }
-    // SAFETY: the library is the first field of a ShaderLib (the caller's contract); the other fields are
-    // made for shared use, and the C++ fields are written through the pointer.
-    unsafe {
-        // Keep the lock until joining and publishing the result are complete. Another waiter must not
-        // mistake an emptied handle list for completed pipeline creation.
-        let mut workers = (*shader_lib).workers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let errors = &(*shader_lib).errors;
-        let joined = !workers.is_empty();
-        for worker in workers.drain(..) {
-            if worker.join().is_err() {
-                errors.fetch_or(E_FAIL.0, Ordering::Relaxed);
-            }
-        }
-        if joined
-            && let Some(times) = (*shader_lib).times.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
-        {
-            log_creation_times(&times);
-        }
-        (*lib).threads = 0;
-        (*lib).create_shader_errors = errors.load(Ordering::Relaxed);
-        (*lib).create_shader_errors
-    }
-}
-
 /// `av1_create_pipeline_cache_handle` (`aom/aom_decoder.h`): the layouts and pipelines of the decoder on
-/// a device. With `threads` the pipelines are created on that many threads (6 at most) while the call
-/// returns; [`av1_wait_pipeline_cache_handle`] waits for them. Returns null when a layout, or without
-/// threads a pipeline, could not be created.
+/// a device, every state prepared. See [`create_pipeline_library`].
 ///
 /// # Safety
 /// `d3d12device` is null or an `ID3D12Device *` that lives until the handle is destroyed.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn av1_create_pipeline_cache_handle(d3d12device: *mut c_void, threads: c_int) -> *mut c_void {
+    // SAFETY: the caller's contract.
+    unsafe { create_pipeline_library(d3d12device, threads, class::ALL) }
+}
+
+/// The layouts of the decoder on a device, and its pipelines: the states of the classes `prepare` are
+/// compiled on `threads` threads (6 at most) while the call returns, or by the call with 0
+/// ([`av1_wait_pipeline_cache_handle`] waits for them); every other state when a decoder needs it.
+/// Returns null when a layout, or without threads a prepared pipeline, could not be created.
+///
+/// # Safety
+/// `d3d12device` is null or an `ID3D12Device *` that lives until the handle is destroyed.
+pub(crate) unsafe fn create_pipeline_library(d3d12device: *mut c_void, threads: c_int, prepare: u32) -> *mut c_void {
     // SAFETY: the caller's contract.
     let Some(device) = (unsafe { ID3D12Device::from_raw_borrowed(&d3d12device) }) else {
         return std::ptr::null_mut();
@@ -573,12 +775,15 @@ pub unsafe extern "C" fn av1_create_pipeline_cache_handle(d3d12device: *mut c_vo
         log(false, &line);
     }
 
+    let test = PREPARE_TEST.load(Ordering::Relaxed);
     let shader_lib = Box::into_raw(Box::new(ShaderLib {
-        // SAFETY: the library is interfaces (none), pointers and numbers; all zero is the empty one.
+        // SAFETY: the library is interfaces (none), pointers, numbers and flags; all zero is the empty one.
         lib: unsafe { std::mem::zeroed() },
-        workers: Mutex::new(Vec::new()),
-        errors: Arc::new(AtomicI32::new(0)),
-        times: Mutex::new(None),
+        tasks: Vec::new(),
+        scheduler: None,
+        ready_classes: AtomicU32::new(0),
+        batch: Vec::new(),
+        test,
     }));
     let handle = shader_lib.cast::<c_void>();
     let lib = shader_lib.cast::<compute_shader_lib>();
@@ -592,58 +797,68 @@ pub unsafe extern "C" fn av1_create_pipeline_cache_handle(d3d12device: *mut c_vo
         Ok(tasks) => tasks,
         Err(reason) => {
             log(true, &format!("MEMORY FAILED {reason}"));
-            // SAFETY: the handle of this call, with no threads.
+            // SAFETY: the handle of this call, without a schedule.
             unsafe { av1_destroy_pipeline_cache_handle(handle) };
             return std::ptr::null_mut();
         }
     };
 
     let threads = threads.clamp(0, MAX_CREATE_THREADS);
-    if threads == 0 {
-        let mut failed = false;
+    let prepare = if test != 0 { 0 } else { prepare & class::ALL };
+    // SAFETY: the new library; nothing else has the handle yet. The slots get their layout, bytecode and
+    // place now, so a dispatch can find a state that is compiled later.
+    unsafe {
         for (index, task) in tasks.iter().enumerate() {
-            if let Err(error) = create_shader(device, task) {
-                log_failed_pipeline(index, task, error);
-                failed = true;
-            }
+            (*task.dst).bytecode = task.bytecode.as_ptr();
+            (*task.dst).size = task.bytecode.len();
+            com_store(&raw mut (*task.dst).signaturePtr, task.layout.clone().into_raw());
+            (*task.dst).index = index as u32;
+            (*task.dst).library = handle;
         }
-        if failed {
-            // SAFETY: the handle of this call, with no threads.
-            unsafe { av1_destroy_pipeline_cache_handle(handle) };
-            return std::ptr::null_mut();
-        }
-    } else {
-        let micros: Arc<Vec<AtomicU64>> = Arc::new(tasks.iter().map(|_| AtomicU64::new(0)).collect());
-        let last_end = Arc::new(AtomicU64::new(0));
-        let begin = Instant::now();
-        let names = tasks.iter().map(|task| task.name).collect();
-        let tasks = Arc::new(tasks);
-        let next = Arc::new(AtomicUsize::new(0));
-        // SAFETY: the new library; nothing else has the handle yet.
-        unsafe {
-            (*lib).threads = threads;
-            *(*shader_lib).times.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                Some(CreationTimes { names, micros: micros.clone(), last_end: last_end.clone(), threads });
-            let mut workers = (*shader_lib).workers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            for _ in 0..threads {
-                let (device, tasks, next, micros) = (device.owned(), tasks.clone(), next.clone(), micros.clone());
-                let (errors, last_end) = ((*shader_lib).errors.clone(), last_end.clone());
-                match spawn_thread(move || create_shader_thread(device, tasks, next, errors, micros, begin, last_end)) {
-                    Ok(worker) => workers.push(worker),
-                    Err(error) => {
-                        log(true, &format!("MEMORY FAILED pipeline worker thread: {error}"));
-                        (*shader_lib).errors.fetch_or(E_FAIL.0, Ordering::Relaxed);
-                        break;
+        let names: Vec<&'static str> = tasks.iter().map(|task| task.name).collect();
+        let count = tasks.len();
+        (*shader_lib).tasks = tasks;
+        (*shader_lib).batch = slots_of(&*shader_lib, prepare);
+        // The device for the threads of the schedule.
+        let (target, owned): (LibPtr, gpu::OwnedDevice) = (LibPtr(shader_lib), device.owned());
+        // SAFETY (of the call in the closure): the library outlives its schedule, which is closed before
+        // it is released, and the schedule gives a slot to one thread.
+        let compile = Box::new(move |slot: usize| compile_slot(target, owned.device(), slot));
+        let report = Box::new(move |report: &Report| log_report(&names, report));
+        (*shader_lib).scheduler = Some(Scheduler::new(count, threads as usize, compile, report));
+        if prepare != class::ALL {
+            log(
+                false,
+                &format!(
+                    "PIPELINE prepare: {} of {count} states ({}){}; the others when a decoder needs them",
+                    (*shader_lib).batch.len(),
+                    class::names(prepare),
+                    match test {
+                        0 => "",
+                        1 => ", nothing (-preparetest 1)",
+                        _ => ", nothing (-preparetest 2: every state at its first dispatch)",
                     }
-                }
+                ),
+            );
+        }
+        let shader_lib = &*shader_lib;
+        if shader_lib.batch.is_empty() {
+            return handle;
+        }
+        if threads == 0 {
+            if scheduler(shader_lib).wait(&shader_lib.batch, Some("states")) != 0 {
+                av1_destroy_pipeline_cache_handle(handle);
+                return std::ptr::null_mut();
             }
+        } else {
+            scheduler(shader_lib).queue(&shader_lib.batch, Priority::Batch, Some("states"));
         }
     }
     handle
 }
 
-/// `av1_wait_pipeline_cache_handle` (`aom/aom_decoder.h`): waits for the pipelines; 0 when all were
-/// created.
+/// `av1_wait_pipeline_cache_handle` (`aom/aom_decoder.h`): waits for the states the device prepared; 0
+/// when all were created.
 ///
 /// # Safety
 /// `handle` is null or a handle of [`av1_create_pipeline_cache_handle`].
@@ -653,7 +868,8 @@ pub unsafe extern "C" fn av1_wait_pipeline_cache_handle(handle: *mut c_void) -> 
     unsafe { wait_shader_create_complete(handle.cast()) }
 }
 
-/// `av1_destroy_pipeline_cache_handle` (`aom/aom_decoder.h`).
+/// `av1_destroy_pipeline_cache_handle` (`aom/aom_decoder.h`): the schedule stops (a state that is being
+/// compiled is finished, nothing queued is begun), then the states and layouts are released.
 ///
 /// # Safety
 /// `handle` is null or a handle of [`av1_create_pipeline_cache_handle`] that no decoder uses; it is not
@@ -665,7 +881,9 @@ pub unsafe extern "C" fn av1_destroy_pipeline_cache_handle(handle: *mut c_void) 
     }
     // SAFETY: the caller's contract: the handle is a ShaderLib from Box::into_raw.
     unsafe {
-        wait_shader_create_complete(handle.cast());
+        if let Some(scheduler) = &(*handle.cast::<ShaderLib>()).scheduler {
+            scheduler.close();
+        }
         release(handle.cast());
         drop(Box::from_raw(handle.cast::<ShaderLib>()));
     }
@@ -793,64 +1011,56 @@ pub(crate) unsafe fn upload_luts(dec: *mut Av1Core) -> i32 {
 mod tests {
     use super::*;
 
-    /// Two threads wait for the pipelines of one library (two decoders created at once on one device):
-    /// the second must not return while a pipeline worker still runs. It did when the first had taken the
-    /// workers out of the library and was joining them without the lock.
+    /// The names of the pipelines of `create_tasks`, in its order.
+    fn listed_names() -> Vec<&'static str> {
+        let source = include_str!("compute.rs");
+        let list = &source[source.find("let idct = |tx: c_int|").unwrap()..source.find("list.into_iter()").unwrap()];
+        list.lines()
+            .filter_map(|line| line.trim().trim_start_matches('(').strip_prefix('"'))
+            .map(|rest| &rest[..rest.find('"').unwrap()])
+            .collect()
+    }
+
+    /// The classes of the states: every state is of one, a bit depth's states have their twin of the
+    /// other depth, and the counts are those docs/integration.md gives ("Preparing the pipeline states").
     #[test]
-    fn a_second_waiter_waits_for_the_pipeline_workers() {
-        use std::sync::atomic::AtomicBool;
-        use std::sync::mpsc;
-        use std::time::Duration;
-
-        struct Handle(*mut ShaderLib);
-        // SAFETY: the library is made for shared use; the test frees it after both waiters are joined.
-        unsafe impl Send for Handle {}
-
-        let (release, blocked) = mpsc::channel::<()>();
-        let worker = std::thread::spawn(move || {
-            let _ = blocked.recv();
-        });
-        // SAFETY: a library without pipelines is all zero (every pipeline and layout is none).
-        let lib = Box::into_raw(Box::new(ShaderLib {
-            lib: unsafe { std::mem::zeroed() },
-            workers: Mutex::new(vec![worker]),
-            errors: Arc::new(AtomicI32::new(0)),
-            times: Mutex::new(None),
-        }));
-        let wait = |returned: Arc<AtomicBool>| {
-            let handle = Handle(lib);
-            std::thread::spawn(move || {
-                let handle = handle;
-                // SAFETY: a library of this module, alive until the end of the test.
-                let errors = unsafe { wait_shader_create_complete(handle.0.cast()) };
-                returned.store(true, Ordering::SeqCst);
-                errors
-            })
-        };
-        let (first_returned, second_returned) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
-        let first = wait(first_returned.clone());
-        // The first waiter is at the join of the worker by now.
-        std::thread::sleep(Duration::from_millis(100));
-        let second = wait(second_returned.clone());
-        std::thread::sleep(Duration::from_millis(200));
-        assert!(!first_returned.load(Ordering::SeqCst), "the first waiter returned while the worker ran");
-        assert!(!second_returned.load(Ordering::SeqCst), "the second waiter returned while the worker ran");
-        release.send(()).unwrap();
-        assert_eq!(first.join().unwrap(), 0);
-        assert_eq!(second.join().unwrap(), 0);
-        // SAFETY: the box of this test; no thread uses it any more.
-        drop(unsafe { Box::from_raw(lib) });
+    fn every_class_has_its_states() {
+        let names = listed_names();
+        let count = |class: u32| names.iter().filter(|name| class_of(name) == class).count();
+        assert_eq!(count(class::CORE), 38);
+        assert_eq!((count(class::DEPTH_8), count(class::DEPTH_10)), (17, 17));
+        assert_eq!((count(class::SCALED_8), count(class::SCALED_10)), (8, 8));
+        assert_eq!((count(class::FILM_GRAIN), count(class::SUPERRES)), (3, 2));
+        assert_eq!((count(class::DISPLAY_PQ), count(class::DISPLAY_SDR), count(class::DISPLAY_HLG)), (1, 1, 1));
+        let classes = [
+            class::CORE,
+            class::DEPTH_8,
+            class::DEPTH_10,
+            class::SCALED_8,
+            class::SCALED_10,
+            class::FILM_GRAIN,
+            class::SUPERRES,
+            class::DISPLAY_PQ,
+            class::DISPLAY_SDR,
+            class::DISPLAY_HLG,
+        ];
+        assert_eq!(classes.iter().map(|&class| count(class)).sum::<usize>(), names.len());
+        assert_eq!(classes.iter().fold(0, |all, class| all | class), class::ALL);
+        for name in &names {
+            let class = class_of(name);
+            if class == class::DEPTH_8 || class == class::SCALED_8 {
+                let twin = format!("{name}_hbd");
+                assert!(names.contains(&twin.as_str()), "{name} has its twin {twin}");
+                assert_eq!(class_of(&twin), class << 1, "{twin} is of the other depth");
+            }
+        }
+        assert_eq!(class::names(class::DEPTH_10 | class::DISPLAY_PQ), "10-bit, display PQ");
+        assert_eq!(class::names(0), "none");
     }
 
     #[test]
     fn every_pipeline_names_its_shader_once() {
-        let source = include_str!("compute.rs");
-        let list = &source[source.find("let idct = |tx: c_int|").unwrap()..source.find("list.into_iter()").unwrap()];
-        let names: Vec<&str> = list
-            .lines()
-            .filter_map(|line| line.trim().trim_start_matches('(').strip_prefix('"'))
-            .map(|rest| &rest[..rest.find('"').unwrap()])
-            .collect();
+        let names = listed_names();
         let embedded = shader_names();
         assert_eq!(names.len(), embedded.len());
         assert_eq!(names.len(), SHADERS, "one pipeline per slot of the library");

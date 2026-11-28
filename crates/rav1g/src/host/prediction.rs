@@ -15,8 +15,8 @@
 use std::ffi::c_int;
 
 use super::core::{
-    alloc_constants, buffer, commands, perf_gpu_mark, perf_inter_begin, perf_inter_mark, pipeline, stage_dump_active,
-    stage_dump_data, stage_dump_fb, stage_dump_mode_info,
+    alloc_constants, buffer, commands, perf_gpu_mark, perf_inter_begin, perf_inter_mark, pipeline, pipeline_layout,
+    stage_dump_active, stage_dump_data, stage_dump_fb, stage_dump_mode_info,
 };
 use super::frame::joined_runs;
 use super::tables::{
@@ -785,7 +785,7 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON) 
             // The lists of a type in the block map.
             let lists_of = |list_type: c_int| block_map.add((list_type as usize - 1) * SIZES);
 
-            commands.set_layout(pipeline(&raw const (*shaders).inter_base).layout());
+            commands.set_layout(pipeline_layout(&raw const (*shaders).inter_base));
             commands.bind_read(0, blocks.location());
             commands.bind_read(1, residuals.location());
             commands.bind_read(2, mask_lut.location());
@@ -905,7 +905,7 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON) 
                 (*data).sm_weight_arrays[i][0] = c_int::from(SM_WEIGHT_ARRAYS[i]);
             }
 
-            commands.set_layout(pipeline(intra_main).layout());
+            commands.set_layout(pipeline_layout(intra_main));
             commands.bind_read(0, blocks.location());
             commands.bind_read(1, residuals.location());
             commands.bind_write(3, frame_buffers.location());

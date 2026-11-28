@@ -285,6 +285,17 @@ pub(crate) fn choose(seq: &SequenceHeader, display: &av1_display_cfg) -> Choice 
     Choice { mode, bt2020, transform, matrix, chroma_sample_position }
 }
 
+/// The mode of the display pass (`Choice::mode`: 0 PQ, 1 SDR, 2 HLG) of the frames of a stream whose
+/// sequence header has these code points, under `display`: which pipeline state its decoder needs.
+pub(crate) fn mode_of_stream(primaries: u8, transfer: u8, display: &av1_display_cfg) -> u32 {
+    // SAFETY: all zero is a sequence header.
+    let mut seq: SequenceHeader = unsafe { std::mem::zeroed() };
+    seq.color_primaries = primaries.into();
+    seq.transfer_characteristics = transfer.into();
+    seq.matrix_coefficients = UNSPECIFIED.into();
+    choose(&seq, display).mode
+}
+
 /// The flag of the shader's fast path for a frame of `src` pixels into an image of `out` (bit 5, 8 or 9 of
 /// its flags), or 0 for the area loop. The fast paths need planes at multiples of 4 bytes (`aligned`):
 /// exactly 2:1 (the quad path: 3840x2160 to 1920x1080, 3840x1600 to 1920x800), exactly 1:1 (a block path:

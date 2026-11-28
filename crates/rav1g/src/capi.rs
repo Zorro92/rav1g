@@ -24,6 +24,7 @@ use windows::core::Interface;
 use crate::sys::{av1_perf_frame, av1_stage_dump};
 use crate::{ColorInfo, ColorPrimaries, ContentLightLevel, MasteringDisplay, MatrixCoefficients};
 use crate::{Decoder, Device, Error, ErrorCode, Frame, ImageFormat, ImageRequest, LowMemory, Output, OutputImage};
+use crate::{DeviceSettings, Prepare, StreamInfo};
 use crate::{Display, DisplayTransform, OutputKind, Settings, ToneCurve, TransferCharacteristics, switches};
 
 /// The shared back buffer: one back buffer for all pipeline slots and a pool of 10 frame buffers.
@@ -100,6 +101,42 @@ pub const RAV1G_POISON_MODE_INFO: u32 = 1;
 /// `rav1g_set_poison_buffers`: every buffer the CPU writes for the shaders, and the constants of every
 /// stage in every frame.
 pub const RAV1G_POISON_BUFFERS: u32 = 2;
+
+/// `Rav1gDeviceSettings::prepare`, the default: every pipeline state (96) is compiled at the device
+/// creation, as before interface version 4.
+pub const RAV1G_PREPARE_ALL: u32 = 0;
+/// `Rav1gDeviceSettings::prepare` with `RAV1G_PREPARE_ONLY`: the states of 8-bit streams (prediction,
+/// reconstruction, loop filter; 17 states).
+pub const RAV1G_PREPARE_BIT_DEPTH_8: u32 = 1;
+/// The states of streams of more than 8 bits (17).
+pub const RAV1G_PREPARE_BIT_DEPTH_10: u32 = 2;
+/// The display pass (`Rav1gSettings::display`) of SDR frames (`RAV1G_DISPLAY_TRANSFORM_SCALE` and
+/// `_GAMUT`): one state.
+pub const RAV1G_PREPARE_DISPLAY_SDR: u32 = 4;
+/// The display pass of PQ frames: one state.
+pub const RAV1G_PREPARE_DISPLAY_PQ: u32 = 8;
+/// The display pass of HLG frames: one state.
+pub const RAV1G_PREPARE_DISPLAY_HLG: u32 = 16;
+/// Film grain synthesis (3 states).
+pub const RAV1G_PREPARE_FILM_GRAIN: u32 = 32;
+/// The super-resolution upscale (2 states).
+pub const RAV1G_PREPARE_SUPERRES: u32 = 64;
+/// Inter prediction from references of another frame size, of the bit depths named (8 states a depth).
+pub const RAV1G_PREPARE_SCALED_REFERENCES: u32 = 128;
+/// Only the states of the `RAV1G_PREPARE_*` bits next to it, and those every stream needs (the
+/// transforms, CDEF, loop restoration, the copies and block lists: 38 states). Without it the value is
+/// `RAV1G_PREPARE_ALL`, whatever else it has.
+pub const RAV1G_PREPARE_ONLY: u32 = 0x4000_0000;
+const _: () = {
+    assert!(Prepare::ALL.0 == RAV1G_PREPARE_ALL && Prepare::ONLY.0 == RAV1G_PREPARE_ONLY);
+    assert!(
+        Prepare::BIT_DEPTH_8.0 == RAV1G_PREPARE_BIT_DEPTH_8 && Prepare::BIT_DEPTH_10.0 == RAV1G_PREPARE_BIT_DEPTH_10
+    );
+    assert!(Prepare::DISPLAY_SDR.0 == RAV1G_PREPARE_DISPLAY_SDR && Prepare::DISPLAY_PQ.0 == RAV1G_PREPARE_DISPLAY_PQ);
+    assert!(Prepare::DISPLAY_HLG.0 == RAV1G_PREPARE_DISPLAY_HLG && Prepare::FILM_GRAIN.0 == RAV1G_PREPARE_FILM_GRAIN);
+    assert!(Prepare::SUPERRES.0 == RAV1G_PREPARE_SUPERRES);
+    assert!(Prepare::SCALED_REFERENCES.0 == RAV1G_PREPARE_SCALED_REFERENCES);
+};
 
 /// `Rav1gColorInfo::primaries`, the values an application meets (AV1 specification 6.4.2, ITU-T H.273):
 /// BT.709, which is also sRGB.
@@ -364,6 +401,40 @@ pub struct Rav1gStreamInfo {
     /// The colour description of the sequence header. Every `Rav1gFrame` has the one of its own
     /// sequence; HDR metadata is not in a sequence header and comes with the frames.
     pub color: Rav1gColorInfo,
+    /// `film_grain_params_present` and `enable_superres` of the sequence header: its frames can have
+    /// film grain, super-resolution. New in interface version 4 (`Rav1gSettings::stream`).
+    pub film_grain_params_present: bool,
+    pub enable_superres: bool,
+}
+
+impl From<&StreamInfo> for Rav1gStreamInfo {
+    fn from(info: &StreamInfo) -> Rav1gStreamInfo {
+        Rav1gStreamInfo {
+            width: info.width,
+            height: info.height,
+            bit_depth: info.bit_depth,
+            is_key_frame: info.is_key_frame,
+            monochrome: info.monochrome,
+            color: (&info.color).into(),
+            film_grain_params_present: info.film_grain_params_present,
+            enable_superres: info.enable_superres,
+        }
+    }
+}
+
+impl From<&Rav1gStreamInfo> for StreamInfo {
+    fn from(info: &Rav1gStreamInfo) -> StreamInfo {
+        StreamInfo {
+            width: info.width,
+            height: info.height,
+            bit_depth: info.bit_depth,
+            is_key_frame: info.is_key_frame,
+            monochrome: info.monochrome,
+            color: (&info.color).into(),
+            film_grain_params_present: info.film_grain_params_present,
+            enable_superres: info.enable_superres,
+        }
+    }
 }
 
 /// The samples of an output image.
@@ -813,6 +884,15 @@ pub struct Rav1gSettings {
     /// The display pass: the images at the display size, tone-mapped to BT.709 SDR. Zero (what
     /// `rav1g_settings_default` sets) is none. New in interface version 2, behind `output`.
     pub display: Rav1gDisplay,
+    /// What `rav1g_peek_stream_info` says of the temporal unit with the key frame the decoder starts
+    /// with. Its bit depth, colour, film grain and super-resolution say which pipeline states the
+    /// creation compiles when the device has not prepared them (`Rav1gDeviceSettings::prepare`;
+    /// docs/integration.md, "Preparing the pipeline states"); the scaled-reference states of its depth
+    /// are compiled in the background behind it. A `bit_depth` of 0 (what `rav1g_settings_default` sets)
+    /// is not known: the creation then waits for every state the other settings allow (both bit depths
+    /// when `bit_depth` is above 8, the three display modes, film grain, super-resolution). The frames
+    /// are the same either way. New in interface version 4, behind `display`.
+    pub stream: Rav1gStreamInfo,
 }
 
 /// What a decoder was created with, where its settings left the choice to it
@@ -934,14 +1014,7 @@ pub unsafe extern "C" fn rav1g_peek_stream_info(
         Ok(si) => {
             // SAFETY: the caller's contract.
             unsafe {
-                *info = Rav1gStreamInfo {
-                    width: si.width,
-                    height: si.height,
-                    bit_depth: si.bit_depth,
-                    is_key_frame: si.is_key_frame,
-                    monochrome: si.monochrome,
-                    color: (&si.color).into(),
-                };
+                *info = (&si).into();
             }
             Rav1gStatus::Ok
         }
@@ -996,10 +1069,11 @@ pub unsafe extern "C" fn rav1g_color_text(
 
 /// A device for decoders. `d3d12_device` is the application's `ID3D12Device *`, or null for a device of
 /// the decoder's own on the first hardware adapter; `d3d12_queue` is the direct `ID3D12CommandQueue *` the
-/// decoders submit to, or null for a queue of the decoder's own. The decoder's compute pipeline states
-/// are created on `pipeline_threads` threads (6 at most) while the call returns
-/// (`rav1g_device_wait_pipelines`), or by this call with 0. Null when the device, the queue or a pipeline
-/// layout could not be created, or the device does not support Shader Model 6.0 (`rav1g_last_error`).
+/// decoders submit to, or null for a queue of the decoder's own. Every compute pipeline state of the
+/// decoder is created, on `pipeline_threads` threads (6 at most) while the call returns
+/// (`rav1g_device_wait_pipelines`), or by this call with 0: `rav1g_device_create_with_settings` with
+/// `RAV1G_PREPARE_ALL`. Null when the device, the queue or a pipeline layout could not be created, or the
+/// device does not support Shader Model 6.0 (`rav1g_last_error`).
 ///
 /// # Safety
 /// The pointers are null or valid interfaces of the kinds named.
@@ -1009,11 +1083,59 @@ pub unsafe extern "C" fn rav1g_device_create(
     d3d12_queue: *mut c_void,
     pipeline_threads: u32,
 ) -> *mut Rav1gDevice {
+    let settings = Rav1gDeviceSettings { pipeline_threads, prepare: RAV1G_PREPARE_ALL, reserved: [0; 6] };
+    // SAFETY: the caller's contract.
+    unsafe { rav1g_device_create_with_settings(d3d12_device, d3d12_queue, &settings) }
+}
+
+/// What a device is created with (`rav1g_device_create_with_settings`). Zero in every field but
+/// `pipeline_threads` is the device of `rav1g_device_create`. New in interface version 4.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rav1gDeviceSettings {
+    /// The threads that compile the pipeline states, 6 at most (the console's 4 cores give no gain
+    /// beyond 4): the prepared states while the creation returns (`rav1g_device_wait_pipelines` waits
+    /// for them), and the states a decoder creation needs that are not prepared, next to the creating
+    /// thread. With 0 the creation compiles the prepared states itself, and a decoder creation its own.
+    pub pipeline_threads: u32,
+    /// Which states are compiled at the creation: `RAV1G_PREPARE_ALL` (0), or `RAV1G_PREPARE_ONLY` with
+    /// the `RAV1G_PREPARE_*` bits of the streams the application is going to play, for a shorter
+    /// creation that takes less memory. A decoder creation compiles what its stream needs that is not
+    /// prepared and waits only for that (`Rav1gSettings::stream`); a state a later frame needs is
+    /// compiled then, the frame waiting for it. No state is ever used before it exists, and the frames
+    /// are the same either way (docs/integration.md, "Preparing the pipeline states").
+    pub prepare: u32,
+    /// Zero.
+    pub reserved: [u32; 6],
+}
+
+/// `rav1g_device_create` with the pipeline states of `settings` prepared. Null as there, and for a
+/// `prepare` with a bit that is not a `RAV1G_PREPARE_*` or a nonzero reserved field
+/// (`rav1g_last_error`).
+///
+/// # Safety
+/// The pointers are null or valid interfaces of the kinds named; `settings` is valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rav1g_device_create_with_settings(
+    d3d12_device: *mut c_void,
+    d3d12_queue: *mut c_void,
+    settings: *const Rav1gDeviceSettings,
+) -> *mut Rav1gDevice {
+    // SAFETY: the caller's contract.
+    let Some(settings) = (unsafe { settings.as_ref() }) else {
+        set_last_error(&Error::new(ErrorCode::InvalidParam, "no device settings"));
+        return std::ptr::null_mut();
+    };
+    if settings.reserved.iter().any(|&word| word != 0) {
+        set_last_error(&Error::new(ErrorCode::InvalidParam, "Rav1gDeviceSettings::reserved is not zero"));
+        return std::ptr::null_mut();
+    }
+    let settings = DeviceSettings { pipeline_threads: settings.pipeline_threads, prepare: Prepare(settings.prepare) };
     let device = if d3d12_device.is_null() {
-        Device::new(pipeline_threads)
+        Device::new_with(&settings)
     } else {
         // SAFETY: the caller's contract.
-        unsafe { Device::from_raw(d3d12_device, d3d12_queue, pipeline_threads) }
+        unsafe { Device::from_raw_settings(d3d12_device, d3d12_queue, &settings) }
     };
     match device {
         Ok(device) => Box::into_raw(Box::new(Rav1gDevice { device })),
@@ -1024,8 +1146,10 @@ pub unsafe extern "C" fn rav1g_device_create(
     }
 }
 
-/// Waits until every pipeline state of the device exists; the first decoder creation does the same. An
-/// error when one could not be created; the log names it.
+/// Waits until every pipeline state the device prepared exists (`Rav1gDeviceSettings::prepare`; all of
+/// them for a device of `rav1g_device_create`); the calling thread compiles those no thread has begun.
+/// The first decoder creation waits for the states its stream needs. An error when one could not be
+/// created; the log names it.
 ///
 /// # Safety
 /// `device` is a device of `rav1g_device_create`.
@@ -1126,6 +1250,7 @@ pub unsafe extern "C" fn rav1g_settings_default(settings: *mut Rav1gSettings) {
                 end_of_frames: None,
             },
             display: Rav1gDisplay::default(),
+            stream: Rav1gStreamInfo::default(),
         };
     }
 }
@@ -1159,6 +1284,7 @@ fn settings_of(settings: &Rav1gSettings) -> Settings {
         }),
         memory_headroom: settings.memory_headroom,
         display: (&settings.display).into(),
+        stream: (settings.stream.bit_depth != 0).then(|| (&settings.stream).into()),
     }
 }
 

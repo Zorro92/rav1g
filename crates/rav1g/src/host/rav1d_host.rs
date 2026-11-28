@@ -66,10 +66,11 @@ use rav1g_parse::sink::{FrameMemory, ModeInfoPiece, Sink, SinkHost, SinkTimer, T
 
 use super::completion::{rav1g_decode_sef_begin, rav1g_decode_sef_submit, start_completion_thread};
 use super::frame::{
-    PaletteMap, av1_reallocate_frame_buffer, av1_sequence_fits_decoder, describe_frame_without_buffer, more_coefs,
-    more_mode_info, more_transform_blocks, rav1g_decode_frame_record, rav1g_decode_frame_submit,
-    rav1g_setup_frame_begin, rav1g_setup_frame_end, release_frame, release_unsubmitted_frame, setup_frame_begin,
-    setup_frame_end, setup_tile, superblock_parsed, tile_parsed, write_palette,
+    PaletteMap, SETUP_NO_PIPELINE, av1_reallocate_frame_buffer, av1_sequence_fits_decoder,
+    describe_frame_without_buffer, more_coefs, more_mode_info, more_transform_blocks, rav1g_decode_frame_record,
+    rav1g_decode_frame_submit, rav1g_setup_frame_begin, rav1g_setup_frame_end, release_frame,
+    release_unsubmitted_frame, setup_frame_begin, setup_frame_end, setup_tile, superblock_parsed, tile_parsed,
+    write_palette,
 };
 use super::log::log;
 use super::perf::{av1_perf_ticks, frame_timers, perf_add, perf_add_ticks};
@@ -450,6 +451,15 @@ unsafe fn film_grain(
     pars.bit_depth = 8 + 2 * u32::from(seq.hbd);
     cur.film_grain_params = *pars;
     cur.film_grain_params_present = seq.film_grain_present;
+}
+
+/// The error of a frame whose setup's second part (`setup_frame_end`) returned `code`, or none.
+fn setup_failure(code: c_int) -> Option<&'static str> {
+    match code {
+        0 => None,
+        SETUP_NO_PIPELINE => Some("A compute pipeline state of the frame could not be created"),
+        _ => Some("Failed to start GPU completion thread."),
+    }
 }
 
 /// The header of the frame in the structs of the entropy decoder: what `read_uncompressed_header` of
@@ -891,10 +901,8 @@ impl SlotHost {
             let (td, no_palette) = setup_frame_begin(pbi, cm, &mut perf_start, false);
             let failed = if no_palette != 0 {
                 Some("No palette buffer for a frame that allows screen content tools")
-            } else if setup_frame_end(dec, td, cm, perf_start) != 0 {
-                Some("Failed to start GPU completion thread.")
             } else {
-                None
+                setup_failure(setup_frame_end(dec, td, cm, perf_start))
             };
             if let Some(what) = failed {
                 release_frame(dec, td);
@@ -1216,10 +1224,8 @@ impl SinkHost for SlotHost {
             let mut perf_start = 0;
             let failed = if rav1g_setup_frame_begin(pbi, cm, &mut perf_start) != 0 {
                 Some("No palette buffer for a frame that allows screen content tools")
-            } else if rav1g_setup_frame_end(pbi, cm, perf_start) != 0 {
-                Some("Failed to start GPU completion thread.")
             } else {
-                None
+                setup_failure(rav1g_setup_frame_end(pbi, cm, perf_start))
             };
             if let Some(what) = failed {
                 release_unsubmitted_frame(dec);

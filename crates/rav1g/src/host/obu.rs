@@ -218,9 +218,12 @@ struct SequencePeek {
     matrix_coefficients: u32,
     color_range: u32,
     chroma_sample_position: u32,
+    enable_superres: bool,
+    film_grain_params_present: bool,
 }
 
-/// `av1_peek_sequence_header`: the fields of a sequence header up to the end of its colour description.
+/// `av1_peek_sequence_header`: the fields of a sequence header up to `film_grain_params_present`, the
+/// last of it (AV1 5.5.1).
 /// The fields in front of the frame size (timing info, decoder model info, operating points) have a
 /// variable length and are walked as the parser walks them. The error is that of the peek: a
 /// `reduced_still_picture_header` without `still_picture` is not supported, a header that ends inside
@@ -319,7 +322,7 @@ fn peek_sequence_header(data: &[u8]) -> Result<SequencePeek, sys::aom_codec_err_
             rb.read(3); // order_hint_bits_minus_1
         }
     }
-    rb.read(1); // enable_superres
+    out.enable_superres = rb.flag();
     rb.read(1); // enable_cdef
     rb.read(1); // enable_restoration
 
@@ -369,6 +372,13 @@ fn peek_sequence_header(data: &[u8]) -> Result<SequencePeek, sys::aom_codec_err_
     if rb.failed {
         return Err(sys::AOM_CODEC_CORRUPT_FRAME);
     }
+    // The end of color_config() and film_grain_params_present (AV1 5.5.1, 5.5.2). A header that ends
+    // before them was read up to its colour description as before; its film grain is then taken to be
+    // present, which prepares more pipeline states, never fewer.
+    if !out.monochrome {
+        rb.read(1); // separate_uv_delta_q
+    }
+    out.film_grain_params_present = rb.flag() || rb.failed;
     Ok(out)
 }
 
@@ -388,6 +398,10 @@ pub(crate) struct StreamPeek {
     pub matrix_coefficients: u32,
     pub color_range: u32,
     pub chroma_sample_position: u32,
+    /// `enable_superres` and `film_grain_params_present` of the sequence header: which pipeline states a
+    /// decoder of the stream needs (docs/integration.md, "Preparing the pipeline states").
+    pub enable_superres: bool,
+    pub film_grain_params_present: bool,
 }
 
 /// `aom_codec_peek_stream_info` of the decoder (`decoder_peek_si_internal`): reads the OBUs of `data` up
@@ -432,6 +446,8 @@ pub(crate) fn peek_stream_info(data: &[u8]) -> Result<StreamPeek, sys::aom_codec
             info.matrix_coefficients = sequence.matrix_coefficients;
             info.color_range = sequence.color_range;
             info.chroma_sample_position = sequence.chroma_sample_position;
+            info.enable_superres = sequence.enable_superres;
+            info.film_grain_params_present = sequence.film_grain_params_present;
             got_sequence_header = true;
         } else if header.kind == OBU_FRAME_HEADER || header.kind == OBU_FRAME {
             if got_sequence_header && reduced_still_picture_header {
@@ -536,8 +552,14 @@ mod tests {
         }
     }
 
-    /// A sequence header of profile 0 for 3840x2160, 10 bits, BT.2020 with PQ, one operating point.
+    /// A sequence header of profile 0 for 3840x2160, 10 bits, BT.2020 with PQ, one operating point,
+    /// superres, film grain.
     fn sequence_header() -> Vec<u8> {
+        sequence_header_with(Some(true))
+    }
+
+    /// The same with film grain or not, or ending behind its colour description (`None`).
+    fn sequence_header_with(film_grain: Option<bool>) -> Vec<u8> {
         let mut w = Writer::default();
         w.put(0, 3).put(0, 1).put(0, 1); // profile, still_picture, reduced_still_picture_header
         w.put(0, 1).put(0, 1).put(0, 5); // timing info, initial display delay, operating points - 1
@@ -556,6 +578,9 @@ mod tests {
         w.put(1, 1).put(9, 8).put(16, 8).put(9, 8); // the colour description
         w.put(0, 1); // range
         w.put(2, 2); // chroma sample position
+        if let Some(film_grain) = film_grain {
+            w.put(0, 1).put(u32::from(film_grain), 1); // separate_uv_delta_q, film_grain_params_present
+        }
         w.bytes.clone()
     }
 
@@ -571,6 +596,14 @@ mod tests {
         assert!(info.is_key_frame && info.color_description_present && !info.monochrome);
         assert_eq!((info.color_primaries, info.transfer_characteristics, info.matrix_coefficients), (9, 16, 9));
         assert_eq!((info.color_range, info.chroma_sample_position), (0, 2));
+        assert!(info.enable_superres && info.film_grain_params_present);
+        // Without film grain; a header that ends behind its colour description, read as before, with
+        // film grain taken to be present (bits behind the data read as 0 and fail the read).
+        let peek = peek_sequence_header(&sequence_header_with(Some(false))).expect("the header can be read");
+        assert!(!peek.film_grain_params_present && peek.enable_superres);
+        let peek = peek_sequence_header(&sequence_header_with(None)).expect("the header can be read");
+        assert!(peek.film_grain_params_present);
+        assert_eq!((peek.color_primaries, peek.chroma_sample_position), (9, 2));
 
         // An inter frame (frame_type 1) is no key frame; a unit without a sequence header neither.
         let last = unit.len() - 1;

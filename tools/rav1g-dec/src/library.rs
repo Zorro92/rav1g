@@ -159,6 +159,8 @@ pub struct Spec {
     pub shared_fence: bool,
     /// -displaypass and its flags: the display pass.
     pub display: rav1g::Display,
+    /// The sequence header the decoder is created for (`Settings::stream`, `Rav1gSettings::stream`).
+    pub stream: Option<StreamInfo>,
 }
 
 /// The decoder experiments of a task.
@@ -349,11 +351,21 @@ pub enum Library {
 }
 
 impl Library {
-    /// Creates the decoder's device and waits for its pipeline states.
-    pub fn open(dev: &Device, capi: bool, threads: u32) -> Result<Library, String> {
+    /// Creates the decoder's device with the pipeline states of `prepare` and waits for them.
+    pub fn open(dev: &Device, capi: bool, threads: u32, prepare: rav1g::Prepare) -> Result<Library, String> {
         if capi {
+            // The device of rav1g_device_create when every state is prepared, as an application that
+            // says nothing has it.
             // SAFETY: the program's device and queue, which outlive the library's device.
-            let device = unsafe { capi::rav1g_device_create(dev.device_ptr(), dev.queue_ptr(), threads) };
+            let device = unsafe {
+                if prepare == rav1g::Prepare::ALL {
+                    capi::rav1g_device_create(dev.device_ptr(), dev.queue_ptr(), threads)
+                } else {
+                    let settings =
+                        capi::Rav1gDeviceSettings { pipeline_threads: threads, prepare: prepare.0, reserved: [0; 6] };
+                    capi::rav1g_device_create_with_settings(dev.device_ptr(), dev.queue_ptr(), &settings)
+                }
+            };
             if device.is_null() {
                 return Err(c_text(capi::rav1g_last_error()));
             }
@@ -364,8 +376,9 @@ impl Library {
             }
             Ok(library)
         } else {
-            let device =
-                rav1g::Device::with_d3d12(&dev.device, Some(&dev.queue), threads).map_err(|e| e.to_string())?;
+            let settings = rav1g::DeviceSettings { pipeline_threads: threads, prepare };
+            let device = rav1g::Device::with_d3d12_settings(&dev.device, Some(&dev.queue), &settings)
+                .map_err(|e| e.to_string())?;
             device.wait_pipelines().map_err(|e| e.to_string())?;
             Ok(Library::Rust(device))
         }
@@ -383,16 +396,8 @@ impl Library {
         }
         let mut info = capi::Rav1gStreamInfo::default();
         // SAFETY: a valid buffer and a valid result.
-        (unsafe { capi::rav1g_peek_stream_info(data.as_ptr(), data.len(), &mut info) } == Rav1gStatus::Ok).then_some(
-            StreamInfo {
-                width: info.width,
-                height: info.height,
-                is_key_frame: info.is_key_frame,
-                bit_depth: info.bit_depth,
-                monochrome: info.monochrome,
-                color: (&info.color).into(),
-            },
-        )
+        (unsafe { capi::rav1g_peek_stream_info(data.as_ptr(), data.len(), &mut info) } == Rav1gStatus::Ok)
+            .then(|| StreamInfo::from(&info))
     }
 
     fn settings(spec: &Spec) -> Settings {
@@ -414,6 +419,7 @@ impl Library {
             memory_available: spec.budget.map(|bytes| -> MemoryAvailable { Arc::new(move || Some(bytes)) }),
             memory_headroom: spec.headroom,
             display: spec.display,
+            stream: spec.stream,
         }
     }
 
@@ -455,6 +461,9 @@ impl Library {
             mastering_max_nits: display.mastering_max_nits,
             ..Default::default()
         };
+        if let Some(stream) = &spec.stream {
+            settings.stream = stream.into();
+        }
         if let Some(sink) = sink {
             settings.output = capi::Rav1gOutput {
                 context: Arc::as_ptr(sink).cast_mut().cast(),
