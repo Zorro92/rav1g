@@ -1531,8 +1531,8 @@ jobs:
           if-no-files-found: warn
 
   # The other side of the decoder's switches, each with the parser and the other switches of the default:
-  # the poisoned mode info pool and the poisoned buffers (a part of the set), the fast inter path, a legacy
-  # intra switch and the intra step timing.
+  # the poisoned mode info pool and the poisoned buffers (a part of the set), the fast inter path and the
+  # intra step timing.
   # Parser option flips run separately when selected by the coverage check.
   rust-switches:
     needs: [conformance-streams, rust]
@@ -1541,7 +1541,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        case: [poisoned, interfast, intrasingleedgelegacy, steptime]
+        case: [poisoned, interfast, steptime]
     steps:
       - name: Disable newline conversion
         run: git config --global core.autocrlf false
@@ -1610,17 +1610,6 @@ jobs:
           python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
             --out out/conformance-interfast --threads 4 "--tool-args=-interfast" "--title=rav1g-dec with -interfast"
           if ($LASTEXITCODE -ne 0) { throw "conformance with -interfast: exit code $LASTEXITCODE (1: not as expected.txt says, 2: the run could not be done)" }
-
-      - name: Conformance with a legacy intra switch
-        if: ${{ !cancelled() && startsWith(matrix.case, 'intra') }}
-        shell: pwsh
-        env:
-          INTRA_SWITCH: ${{ matrix.case }}
-        run: |
-          python testing/conformance/run.py --tool out/rav1g-dec/rav1g-dec.exe --streams conformance-streams `
-            --out "out/conformance-${env:INTRA_SWITCH}" --threads 4 "--tool-args=-${env:INTRA_SWITCH}" `
-            "--title=rav1g-dec with -${env:INTRA_SWITCH}"
-          if ($LASTEXITCODE -ne 0) { throw "conformance with -${env:INTRA_SWITCH}: exit code $LASTEXITCODE" }
 
       # -intrastepmin 0 (step_time.rs, docs/test-player.md "Intra step timing"): a timestamp behind every intra
       # wavefront step of every frame with intra. The whole set with it: the frames against the references

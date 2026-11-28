@@ -322,9 +322,6 @@ void av1_set_display_bilinear_chroma(int enable);
  * default. Change it only while no frame is in flight. */
 void av1_set_intra_v2(int enable);
 
-/* Use the prefetch shaders with the previous angle-specific wavefront. */
-void av1_set_intra_single_edge_legacy(int enable);
-
 /* ---------------------------------------------------------------------------
  * Intra step timing (test flags -intrasteptime and -intrastepmin; docs/test-player.md, "Intra step
  * timing"). Nothing here changes what is decoded.

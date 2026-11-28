@@ -107,7 +107,6 @@ pub struct Task {
     /// library's default.
     pub headroom_mib: i64,
     pub intrav2: bool,
-    pub intrasingleedgelegacy: bool,
     /// -poisonmi, -poisonbuf: `switches::set_poison_buffers`.
     pub poison: Poison,
     /// -interfast (1), -interfastlists (7), -interfastmode <n>: `switches::set_inter_fast`.
@@ -188,7 +187,6 @@ impl Default for Task {
             budget_mib: -1,
             headroom_mib: 0,
             intrav2: false,
-            intrasingleedgelegacy: false,
             poison: Poison::Off,
             interfast: 0,
             continue_on_error: false,
@@ -313,7 +311,6 @@ pub fn usage() {
         "  -displayfixedpeak -displaybilinearchroma   A/B: the configured peak whatever the metadata; the \
          bilinear input chroma (before interface 3)"
     );
-    say!("  -intrasingleedgelegacy use the previous directional wavefront with prefetching");
     say!("                        as in the test player (docs/test-player.md); -cdefv2, -intraopt and -fitsize");
     say!("                        (the defaults) are accepted");
     say!("  -budget <MiB>         the decoder is told the application has this much memory left for it: the budget");
@@ -503,7 +500,6 @@ pub fn parse_args(args: &[String], task: &mut Task, mut globals: Option<&mut Glo
             "-intrav2" => task.intrav2 = true,
             // The default since -intraod is retired; accepted, changes nothing.
             "-intraopt" => {}
-            "-intrasingleedgelegacy" => task.intrasingleedgelegacy = true,
             "-continue_on_error" => task.continue_on_error = true,
             "-anystart" => task.any_start = true,
             "-poisonmi" => task.poison = Poison::ModeInfo,

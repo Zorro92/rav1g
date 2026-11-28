@@ -673,7 +673,6 @@ impl WaveEdges {
 #[repr(u8)]
 #[allow(dead_code, reason = "the parser-only tools build this file and use the default schedule")]
 pub enum IntraMain {
-    Tight,
     SingleEdge,
     Legacy,
 }
@@ -701,7 +700,7 @@ impl IntraPlane {
     fn edge_limits(&self, main: IntraMain, delta: i8, filter: bool, single_edge: &mut c_int) -> IntraEdgeLimits {
         let corner = self.need(NEED_ABOVE_LEFT_LUT) && !self.is_intrabc;
         let mut limits = IntraEdgeLimits { above: c_int::MAX, left: c_int::MAX, corner, clipped_corner: corner };
-        if !matches!(main, IntraMain::Tight | IntraMain::SingleEdge) || self.is_intrabc || filter {
+        if main != IntraMain::SingleEdge || self.is_intrabc || filter {
             return limits;
         }
         if self.mode == 0 {
@@ -723,10 +722,7 @@ impl IntraPlane {
                 let flags = INTRA_MODE_SHADER_PARAMS[((self.mode as usize - 1) * 7 + (delta + 3) as usize) * 4 + 2];
                 limits.above = ((flags >> 4) & 1) * w + ((flags >> 5) & 1) * h;
                 limits.left = ((flags >> 6) & 1) * h + ((flags >> 7) & 1) * w;
-                if main == IntraMain::Tight {
-                    limits.above = limits.above.max(1);
-                    limits.left = limits.left.max(1);
-                } else if limits.above == 0 || limits.left == 0 {
+                if limits.above == 0 || limits.left == 0 {
                     *single_edge = 1;
                 }
             }

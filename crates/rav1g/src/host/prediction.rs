@@ -13,7 +13,6 @@
 //! `libav1/dx/prediction.cpp`.
 
 use std::ffi::c_int;
-use std::sync::atomic::{AtomicI32, Ordering};
 
 use super::blocks::IntraMain;
 use super::core::{
@@ -435,23 +434,9 @@ struct IntraData {
     sm_weight_arrays: [[c_int; 4]; 128],
 }
 
-static INTRA_SINGLE_EDGE_LEGACY: AtomicI32 = AtomicI32::new(0);
-
-/// `av1_set_intra_single_edge_legacy` (`dx/av1_perf.h`).
-#[unsafe(no_mangle)]
-pub extern "C" fn av1_set_intra_single_edge_legacy(enable: c_int) {
-    INTRA_SINGLE_EDGE_LEGACY.store(enable, Ordering::Relaxed);
-}
-
 // The parse and the main shader must agree on the edges read by each coded angle.
 pub(super) fn intra_main_for_frame(intra_v2: bool) -> IntraMain {
-    if intra_v2 {
-        IntraMain::Legacy
-    } else if INTRA_SINGLE_EDGE_LEGACY.load(Ordering::Relaxed) == 0 {
-        IntraMain::SingleEdge
-    } else {
-        IntraMain::Tight
-    }
+    if intra_v2 { IntraMain::Legacy } else { IntraMain::SingleEdge }
 }
 
 /// Inter breakdown of the timing run (-gputimedetail, dx/av1_perf.h): what the recording notes about the
@@ -998,13 +983,6 @@ pub(super) unsafe fn prediction_run_all(dec: *mut Av1Core, cm: *mut AV1_COMMON) 
                         (true, false) => &raw const (*lib).shader_intra_main_prefetch_hbd,
                         (false, true) => &raw const (*lib).shader_intra_main_single_edge,
                         (true, true) => &raw const (*lib).shader_intra_main_single_edge_hbd,
-                    }
-                }
-                IntraMain::Tight => {
-                    if td.is_hbd != 0 {
-                        &raw const (*lib).shader_intra_main_prefetch_hbd
-                    } else {
-                        &raw const (*lib).shader_intra_main_prefetch
                     }
                 }
                 IntraMain::Legacy => &raw const (*shaders).intra_main,

@@ -11,7 +11,7 @@
 //! application links, the UWP test player among them. The program is the same behind both, so a
 //! conformance run with `-capi` holds the C interface to the references.
 
-use std::ffi::{CStr, c_char, c_int, c_void};
+use std::ffi::{CStr, c_char, c_void};
 use std::sync::Arc;
 
 use rav1g::capi::{self, Rav1gStatus};
@@ -28,11 +28,6 @@ use windows::core::Interface;
 use crate::device::Device;
 use crate::pool::{Rented, Request};
 use crate::shim::Dumps;
-
-unsafe extern "C" {
-    /// The A/B switch in libav1/dx/av1_perf.h.
-    fn av1_set_intra_single_edge_legacy(enable: c_int);
-}
 
 /// What a frame says about its colour: the description of its sequence header and its HDR metadata.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -173,7 +168,6 @@ pub struct Spec {
 pub struct Choices {
     pub skip_film_grain: bool,
     pub intra_v2: bool,
-    pub intra_single_edge_legacy: bool,
     pub inter_fast: u32,
     /// The display pass's A/B switches (`av1_set_display_fixed_peak`, `av1_set_display_bilinear_chroma`).
     pub display_fixed_peak: bool,
@@ -519,10 +513,6 @@ impl Library {
         switches::set_skip_film_grain(choices.skip_film_grain);
         switches::set_display_fixed_peak(choices.display_fixed_peak);
         switches::set_display_bilinear_chroma(choices.display_bilinear_chroma);
-        // SAFETY: the setter takes an integer and only changes the test flag, with no frames in flight.
-        unsafe {
-            av1_set_intra_single_edge_legacy(c_int::from(choices.intra_single_edge_legacy));
-        }
         if self.is_c() {
             capi::rav1g_set_intra_v2(choices.intra_v2);
             capi::rav1g_set_inter_fast(choices.inter_fast);

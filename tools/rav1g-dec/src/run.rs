@@ -1000,7 +1000,6 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     library.set_choices(&Choices {
         skip_film_grain: task.skip_film_grain,
         intra_v2: task.intrav2,
-        intra_single_edge_legacy: task.intrasingleedgelegacy,
         inter_fast: task.interfast,
         display_fixed_peak: task.displayfixedpeak,
         display_bilinear_chroma: task.displaybilinearchroma,
@@ -1031,14 +1030,7 @@ pub fn run_task(task: &Task, dev: &Device, library: &Library, memstate: bool) ->
     say!("Film grain templates: CPU, uploaded with the random offsets");
     say!("8-bit filter intra shader: intra_filter_prefetch (default)");
     if !task.intrav2 {
-        say!(
-            "Intra wavefront: {}",
-            if task.intrasingleedgelegacy {
-                "angle-specific with prefetching (-intrasingleedgelegacy)"
-            } else {
-                "angle-specific with prefetching and single-edge dependencies"
-            }
-        );
+        say!("Intra wavefront: angle-specific with prefetching and single-edge dependencies");
     }
     say!(
         "PARSER {}: the parse pass of rav1d reads the bitstream, switches {} (-parseopt)",

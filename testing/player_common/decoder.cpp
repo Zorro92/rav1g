@@ -808,10 +808,7 @@ int AV1Decoder::DecodeOne() {
   if (params_.parser_options_ & (PLAYER_PARSEOPT_GPU_CDEF_LISTS | PLAYER_PARSEOPT_GPU_GRID)) {
     XB_LOGI << "CDEF lists shader: cdef_lists_v2 (default)";
   }
-  XB_LOGI << "Intra main shader: "
-          << (params_.intrasingleedgelegacy_ ? "prefetching (-intrasingleedgelegacy)"
-                                             : "prefetching with single-edge dependencies");
-  av1_set_intra_single_edge_legacy(params_.intrasingleedgelegacy_);
+  XB_LOGI << "Intra main shader: prefetching with single-edge dependencies";
   XB_LOGI << "8-bit filter intra shader: intra_filter_prefetch (default)";
   XB_LOGI << "Loop restoration shader: loop_restoration / loop_restoration_wiener (default)";
   XB_LOGI << "Direct NV12/P010 film grain shader: film_grain_filter_sp_tex_v2 (default)";

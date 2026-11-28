@@ -86,8 +86,7 @@ both ([docs/rust-port.md](docs/rust-port.md), "Console results of step 5").
   intra (both bit depths) loads all residuals of a lane at the start instead of one diagonal
   ahead.
   For one-edge angles, both bit depths wait for the opposite edge only when it supplies a missing
-  primary edge. Frames without those angles use the original prefetch kernel. Use
-  `-intrasingleedgelegacy` to select the original prefetch kernels and wavefront for an A/B.
+  primary edge. Frames without those angles use the original prefetch kernel.
   The C++ stage-dump comparison compares prediction-record contents across wavefront orders,
   and still compares every frame MD5.
 - **Entropy parsing** packs AC coefficient tokens in scan order and waits only for the
